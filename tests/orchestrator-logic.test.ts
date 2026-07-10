@@ -15,6 +15,7 @@ import { shouldCompact, partitionHistory, buildCompactionRequest, sanitizeCompac
 import { runAgentLoop } from "../src/lib/agent/loop/orchestrator";
 import type { LoopDeps } from "../src/lib/agent/loop/types";
 import type { HistoryItem, AgentAction, ActionResult, LogEvent, AgentOutput } from "../src/lib/agent/types";
+import { AgentOutputSchema } from "../src/lib/agent/tools/schema";
 import { makeHistoryItem, makeState } from "./helpers";
 
 // ─── LoopDetector ───────────────────────────────────────────────────────────
@@ -352,46 +353,40 @@ describe("runAgentLoop — executeActions branch loop-detector integration", () 
     expect(counts).toContain(8);
   });
 
-  test("F-18: done paired with a sibling (input) executes the sibling first — not dropped", async () => {
-    // Bug: `actions.find(a => a.type === "done")` short-circuited to
-    // handleNavigatorDone, discarding the preceding `input`. With the fix,
-    // the sibling(s) are dispatched through the normal path BEFORE the
-    // `done` finalization runs, so the input is applied.
+  test("F-18: done paired with a sibling is rejected at parse time (never reaches a dropped step)", async () => {
+    // The fix enforces `done`-exclusivity at PARSE time: a step pairing `done`
+    // with a sibling action (e.g. a final `input`) is rejected by
+    // AgentOutputSchema, so it can never reach the orchestrator as a silently
+    // dropped step. A single `done` (the valid case) still finalizes the run.
+    const bad = AgentOutputSchema.safeParse({
+      thinking: "x",
+      evaluation_previous_goal: "y",
+      memory: "z",
+      next_goal: "w",
+      action: [
+        { type: "input", index: 1, text: "hello" } as AgentAction,
+        { type: "done", text: "finished", success: false } as AgentAction,
+      ],
+    });
+    expect(bad.success).toBe(false);
+
+    // A single `done` step still drives the orchestrator to finalize normally.
     const events: LogEvent[] = [];
-    const executedBatches: string[][] = [];
     const deps = makeDeps({
       navigatorOutput: {
         thinking: "x",
         evaluation_previous_goal: "y",
         memory: "z",
         next_goal: "w",
-        action: [
-          { type: "input", index: 1, text: "hello" } as AgentAction,
-          { type: "done", text: "finished", success: false } as AgentAction,
-        ],
+        action: [{ type: "done", text: "finished", success: false } as AgentAction],
       },
-      executeActionsResult: (actions) => {
-        executedBatches.push(actions.map((a) => a.type));
-        return actions.map((action) => ({ action, success: true, message: "ok" } as ActionResult));
-      },
+      executeActionsResult: (actions) =>
+        actions.map((action) => ({ action, success: true, message: "ok" } as ActionResult)),
       events,
     });
 
     await runAgentLoop(deps);
 
-    // The bug would mean `executeActions` is NEVER called for this step
-    // (the done short-circuit fires before the dispatch block). The fix
-    // dispatches the `input` sibling first, so it must have been called.
-    expect(deps.executeActions).toHaveBeenCalled();
-    // Every dispatched batch must contain the `input` sibling and must NOT
-    // contain the `done` action (done is handled separately by the planner
-    // verification, never executed as a normal action).
-    for (const batch of executedBatches) {
-      expect(batch).toContain("input");
-      expect(batch).not.toContain("done");
-    }
-    // The run must have reached its `done` finalization (max steps here),
-    // proving the done path ran after the sibling.
     const doneEvents = events.filter((e) => e.type === "done");
     expect(doneEvents.length).toBeGreaterThan(0);
   });

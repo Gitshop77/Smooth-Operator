@@ -11,6 +11,13 @@ This document explains the trust model, enforcement boundaries, and known limita
 
 ## ⚠️ Deployment trust boundary (F-03)
 
+**Risk level: LOW when the cockpit runs only on trusted `localhost` / a
+single-operator intranet; HIGH the moment the cockpit is exposed to untrusted
+users.** The token embedded in the bundle is the *same* shared secret that gates
+every `/api/cowork/*` route and the `cowork-events` mini-service, so any
+cross-site scripting in a page the cockpit serves yields full compromise of
+those endpoints.
+
 **The cockpit MUST NEVER be deployed beyond `localhost` / a trusted intranet
 while `NEXT_PUBLIC_COWORK_EVENT_TOKEN` is in use.**
 
@@ -32,6 +39,8 @@ local machine, either:
    private network, **or**
 2. Replace the shared-secret scheme with per-user authentication (out of scope
    for this release).
+
+The SSE event stream authenticates via a `?token=` query param (an `EventSource` limitation — it cannot send custom headers); treat that URL as secret — it can land in access logs and browser history, so prefer short-lived exposure and never paste it into shared channels.
 
 ### Known auth-boundary gaps (tracked)
 
@@ -121,6 +130,14 @@ The mitigations listed above (mode gate, `checkUrlAllowed`, system-prompt instru
 - The 10s async timeout races the async Promise result of `evaluate`, but the `fetch()` above is async and survives the function return — the timeout cannot cancel it.
 
 **Recommendations:**
+
+> **Trust model & egress.** `evaluate` runs LLM/user-authored JS via
+> `new Function(code)` **only in `full_agentic` mode**; `standard` and
+> `restricted` modes block it in code (`modes.ts`). In `full_agentic` mode there
+> is no confirmation gate, and the executed code can `fetch()` to arbitrary
+> origins (egress) — a data-exfil vector under page-driven prompt injection. By
+> default `allowedDomains` is `undefined` (all domains allowed); set a strict
+> allowlist in Settings → Security before relying on `full_agentic` mode.
 
 1. **Only enable `full_agentic` mode on pages you trust.** Treat every `full_agentic` run on an untrusted page as a potential API-key compromise.
 2. **Configure `allowedDomains`** in Settings → Security to restrict `evaluate` to a small allowlist of trusted sites.

@@ -84,7 +84,10 @@ export function clearThinkingPanel(): void {
  *
  * @param kind  Which agent produced this entry ("planner" / "navigator" / "error").
  * @param head  Short header line (e.g. "Step 3 · planner").
- * @param body  The reasoning text (already escaped for innerHTML).
+ * @param body  The reasoning text. Callers may pass RAW (unescaped) text — this
+ *   function HTML-escapes it before interpolating into `innerHTML`, so a
+ *   future unescaped LLM/page string can never XSS the side panel. Newlines in
+ *   `body` are rendered as `<br>` so multi-line reasoning keeps its structure.
  */
 export function appendThinkingEntry(kind: "planner" | "navigator" | "error", head: string, body: string): void {
   if (!thinkingBody) return;
@@ -92,9 +95,10 @@ export function appendThinkingEntry(kind: "planner" | "navigator" | "error", hea
   if (empty) empty.remove();
   const entry = document.createElement("div");
   entry.className = `thinking-entry ${kind}`;
+  const escapedBody = escapeHtml(body).replace(/\n/g, "<br>");
   entry.innerHTML =
     `<div class="te-head">${escapeHtml(head)}</div>` +
-    `<div class="te-body">${body}</div>`;
+    `<div class="te-body">${escapedBody}</div>`;
   thinkingBody.appendChild(entry);
   while (thinkingBody.children.length > MAX_THINKING_ENTRIES) {
     thinkingBody.firstElementChild?.remove();

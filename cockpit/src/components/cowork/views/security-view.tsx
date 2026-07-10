@@ -70,7 +70,7 @@ export function SecurityView() {
         icon={<ShieldCheck className="size-5" />}
         actions={
           <Select value={typeFilter} onValueChange={setTypeFilter}>
-            <SelectTrigger className="h-8 w-44 text-sm" size="sm">
+            <SelectTrigger className="h-8 w-44 text-sm" size="sm" aria-label="Filter by type">
               <Filter className="size-3 mr-1" />
               <SelectValue />
             </SelectTrigger>
@@ -115,7 +115,7 @@ export function SecurityView() {
         </Card>
       ) : (
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.2 }}>
-          <DataTable columns={["Severity", "Type", "Description", "Domain", "Action", "When"]}>
+          <DataTable caption="Security events" columns={["Severity", "Type", "Description", "Domain", "Action", "When"]}>
             {rows.map((e) => (
               <tr
                 key={e.id}

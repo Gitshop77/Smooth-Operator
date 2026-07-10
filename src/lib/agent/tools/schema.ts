@@ -371,7 +371,26 @@ export const AgentOutputSchema = z.object({
   evaluation_previous_goal: z.string().default("").describe("One sentence: did your last action succeed, fail, or is uncertain? End with 'Verdict: Success' or 'Verdict: Failure'."),
   memory: z.string().default("").describe("1-3 sentences tracking progress (what's done, what's next, counts)."),
   next_goal: z.string().default("").describe("One clear sentence stating the immediate goal of this step."),
-  action: z.array(ActionSchema).min(1).max(50).describe("1-50 actions to execute sequentially. Page-changing actions (navigate, switch_tab, go_back) must be LAST."),
+  action: z
+    .array(ActionSchema)
+    .min(1)
+    .max(50)
+    // F-18: `done` is an exclusive action (see ACTION_METADATA.done.exclusive).
+    // If a `done` action is present it MUST be the only action in the step —
+    // any sibling actions would otherwise be silently dropped by the
+    // orchestrator's short-circuit-to-done path. Enforce this at parse time so
+    // invalid multi-action steps (e.g. [{type:"done"},{type:"input"}]) are
+    // rejected before they reach execution. A single `done` (the valid case)
+    // is unaffected.
+    .superRefine((actions, ctx) => {
+      if (actions.some((a) => a.type === "done") && actions.length > 1) {
+        ctx.addIssue({
+          code: "custom",
+          message: "When 'done' is present it must be the only action in the step.",
+        });
+      }
+    })
+    .describe("1-50 actions to execute sequentially. Page-changing actions (navigate, switch_tab, go_back) must be LAST."),
 });
 
 /** Schema for the planner's per-step structured output. */

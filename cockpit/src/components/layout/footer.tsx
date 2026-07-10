@@ -20,7 +20,7 @@ export function Footer() {
         <div className="flex items-center gap-2">
           <span className="font-medium text-foreground/80">Cowork Cockpit</span>
           <span
-            className="cowork-mono text-[10px] text-muted-foreground/70"
+            className="cowork-mono text-[10px] text-muted-foreground"
             aria-label="Version"
           >
             v{COCKPIT_VERSION}

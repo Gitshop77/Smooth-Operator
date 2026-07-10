@@ -22,7 +22,7 @@ const EXTRACTED_CONTENT_INLINE_LIMIT = 2000;
 
 /** Format a single tab as a one-line summary for the LLM. */
 function formatTab(t: TabInfo): string {
-  return `Tab ${t.label}: ${t.url} - ${t.title.slice(0, 40)}`;
+  return `Tab ${t.id} (${t.label}): ${t.url} - ${t.title.slice(0, 40)}`;
 }
 
 /** Render the plan as a checklist with `[>]` for the current item. */

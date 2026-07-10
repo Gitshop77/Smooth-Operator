@@ -60,10 +60,16 @@ describe("action execution behavior", () => {
   beforeEach(() => {
     originalPrompt = window.prompt;
     originalConfirm = window.confirm;
+    // F-15: `evaluate` fails closed without an explicit domain allowlist.
+    // The jsdom env runs at http://localhost, so allowlist "localhost".
+    (globalThis as Record<string, unknown>).__openCoworkDomainConfig = {
+      allowedDomains: ["localhost"],
+    };
   });
   afterEach(() => {
     window.prompt = originalPrompt;
     window.confirm = originalConfirm;
+    delete (globalThis as Record<string, unknown>).__openCoworkDomainConfig;
   });
 
   test("takeover: returns success with the reason in extractedContent", async () => {

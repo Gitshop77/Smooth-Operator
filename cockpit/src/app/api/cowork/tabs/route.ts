@@ -44,6 +44,12 @@ export async function POST(req: NextRequest): Promise<Response> {
     // Validate URL scheme (prevents javascript:/data: stored-XSS via <a href>).
     const urlError = validateHttpUrl(url);
     if (urlError) return urlError;
+    // F16: a bogus workspaceId would otherwise surface as a Prisma "not found"
+    // 404 with a raw message. Validate the FK exists first and return 400.
+    if (workspaceId) {
+      const ws = await db.workspace.findUnique({ where: { id: workspaceId } });
+      if (!ws) return badRequest('unknown workspaceId');
+    }
     const tab = await db.tab.create({
       data: {
         url,

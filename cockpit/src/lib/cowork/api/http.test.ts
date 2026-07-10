@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { withRouteError, bodyJson, isSsrfSafeUrl } from '@/lib/cowork/api/http';
+import { withRouteError, bodyJson, bodyJsonOptional, isSsrfSafeUrl } from '@/lib/cowork/api/http';
 
 // Minimal fake of the bits of NextRequest that bodyJson touches.
 function fakeReq(body: unknown, text: string): any {
@@ -24,6 +24,24 @@ describe('bodyJson (F-04b)', () => {
 
   it('THROWS on malformed (non-empty) JSON instead of returning {}', async () => {
     await expect(bodyJson(fakeReq({}, '{bad json'))).rejects.toThrow();
+  });
+});
+
+describe('bodyJsonOptional (F-04b tolerant variant)', () => {
+  it('returns {} for an absent body', async () => {
+    expect(await bodyJsonOptional(fakeReq(null, ''))).toEqual({});
+  });
+
+  it('returns {} for an empty body', async () => {
+    expect(await bodyJsonOptional(fakeReq({}, ''))).toEqual({});
+  });
+
+  it('parses valid JSON', async () => {
+    expect(await bodyJsonOptional(fakeReq({}, '{"x":1}'))).toEqual({ x: 1 });
+  });
+
+  it('NEVER throws — returns {} on malformed JSON (unlike bodyJson)', async () => {
+    await expect(bodyJsonOptional(fakeReq({}, '{bad json'))).resolves.toEqual({});
   });
 });
 

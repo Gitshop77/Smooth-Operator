@@ -87,6 +87,19 @@ describe("shouldAskForConfirmation is a single source of truth", () => {
 // through the mode check so the confirmation path is actually exercised).
 
 describe("confirmation gate in executeActionQueue", () => {
+  // F-15: `evaluate` fails closed without an explicit domain allowlist. The
+  // "allows the action to proceed" test actually executes the evaluate, so the
+  // jsdom origin (localhost) must be allowlisted; the decline test never
+  // reaches execution but the config is harmless there.
+  beforeEach(() => {
+    (globalThis as Record<string, unknown>).__openCoworkDomainConfig = {
+      allowedDomains: ["localhost"],
+    };
+  });
+  afterEach(() => {
+    delete (globalThis as Record<string, unknown>).__openCoworkDomainConfig;
+  });
+
   test("requestConfirmation is called for confirm-required actions and blocks on decline", async () => {
     const { executeActionQueue } = await import("../src/lib/agent/loop/helpers/action-queue");
     const { LoopDetector } = await import("../src/lib/agent/loop/loop-detector");

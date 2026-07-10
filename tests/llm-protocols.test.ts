@@ -11,6 +11,7 @@ import * as OpenAIChat from "../src/lib/agent/llm/protocols/openai-chat";
 import * as OpenAICompatibleChat from "../src/lib/agent/llm/protocols/openai-compatible-chat";
 import * as AnthropicMessages from "../src/lib/agent/llm/protocols/anthropic-messages";
 import * as Gemini from "../src/lib/agent/llm/protocols/gemini";
+import { encodeModelIdForUrl } from "../src/lib/agent/llm/modelId";
 import type { LLMRequest } from "../src/lib/agent/llm/route/client";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -471,6 +472,38 @@ describe("Gemini.protocol — body construction", () => {
 
   test("geminiPath embeds the model id in the URL path", async () => {
     expect(Gemini.geminiPath("gemini-2.0-flash")).toBe("/gemini-2.0-flash:streamGenerateContent");
+  });
+
+  test("geminiPath throws on a structurally-invalid model id (F-23 — injection guard)", () => {
+    // Model ids containing path separators / query metacharacters are rejected
+    // so they can't rewrite the request URL. encodeURIComponent would also
+    // neutralize them, but we fail fast on malformed ids.
+    expect(() => Gemini.geminiPath("weird/model id?x=1")).toThrow(/Invalid model id/);
+    expect(() => Gemini.geminiPath("bad\tid")).toThrow(/Invalid model id/);
+    expect(() => Gemini.geminiPath("")).toThrow(/Invalid model id/);
+  });
+});
+
+// ─── Model-id URL encoding/validation (F-23) ─────────────────────────────────
+
+describe("encodeModelIdForUrl — safe URL encoding + validation", () => {
+  test("leaves normal model ids untouched", () => {
+    expect(encodeModelIdForUrl("gemini-2.5-pro")).toBe("gemini-2.5-pro");
+    expect(encodeModelIdForUrl("gpt-4.1-mini")).toBe("gpt-4.1-mini");
+    expect(encodeModelIdForUrl("claude-3-7-sonnet-20250219")).toBe("claude-3-7-sonnet-20250219");
+  });
+
+  test("percent-encodes characters encodeURIComponent touches (e.g. ':')", () => {
+    // `:` is a valid model-id char per the allow-list but is percent-encoded
+    // by encodeURIComponent, so it can't be misinterpreted in the URL path.
+    expect(encodeModelIdForUrl("ns:model")).toBe("ns%3Amodel");
+  });
+
+  test("throws on structurally-invalid model ids", () => {
+    expect(() => encodeModelIdForUrl("has space")).toThrow(/Invalid model id/);
+    expect(() => encodeModelIdForUrl("slash/in/id")).toThrow(/Invalid model id/);
+    expect(() => encodeModelIdForUrl("tab\tchar")).toThrow(/Invalid model id/);
+    expect(() => encodeModelIdForUrl("")).toThrow(/Invalid model id/);
   });
 });
 

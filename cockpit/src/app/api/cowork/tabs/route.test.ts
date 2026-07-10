@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 
-const create = vi.fn();
+const { create } = vi.hoisted(() => ({ create: vi.fn() }));
 
 vi.mock('@/lib/db', () => ({
   db: {

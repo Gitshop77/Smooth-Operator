@@ -8,6 +8,7 @@
  */
 
 import { Protocol, type LLMRequest } from "../route/client";
+import { encodeModelIdForUrl } from "../modelId";
 
 const ADAPTER = "gemini";
 export const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -144,10 +145,11 @@ export const protocol: Protocol<GeminiBody, string, { type: string; content?: st
 
 /** Build the Gemini endpoint path for a specific model (uses dynamic path). */
 export function geminiPath(model: string): string {
-  // `encodeURIComponent` keeps normal ids identical (alphanumerics, ".", "-"
+  // `encodeModelIdForUrl` keeps normal ids identical (alphanumerics, ".", "-"
   // are left untouched) but prevents a malicious/garbage model id from
-  // injecting path separators or query characters into the request URL.
-  return `/${encodeURIComponent(model)}${PATH}`;
+  // injecting path separators or query characters into the request URL, and
+  // throws on structurally-invalid ids (F-23).
+  return `/${encodeModelIdForUrl(model)}${PATH}`;
 }
 
 export * as Gemini from "./gemini";

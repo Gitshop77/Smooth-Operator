@@ -19,6 +19,7 @@
 import { runAgentLoop } from "@/lib/agent/loop/orchestrator";
 import type { LogEvent } from "@/lib/agent/types";
 import type { AgentMode } from "@/lib/agent/modes";
+import { MODE_CONFIGS } from "@/lib/agent/modes";
 import { RunBuilder } from "@/lib/agent/run-history";
 import {
   saveRunState,
@@ -153,6 +154,20 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     sendEvent({ type: "error", step: 0, message: `Settings load failed: ${e instanceof Error ? e.message : String(e)}`, recoverable: false });
     releaseRunGuard();
     return;
+  }
+  // F-15: when the resolved mode allows JavaScript execution (full_agentic)
+  // but no explicit domain allowlist is configured, `evaluate` will FAIL
+  // CLOSED — it cannot run on any origin until `allowedDomains` is set. Emit
+  // a prominent startup warning so the user knows why execution is refused
+  // (and what to configure). We do NOT throw: the run can still proceed for
+  // non-JS actions; only the unsandboxed RCE path is gated.
+  if (MODE_CONFIGS[mode].canExecuteJs) {
+    const configuredAllowlist = (stored.allowedDomains as string[] | undefined) ?? [];
+    if (configuredAllowlist.length === 0) {
+      console.warn(
+        "[security] evaluate JS execution enabled with NO domain allowlist — failing closed; configure allowedDomains to permit execution.",
+      );
+    }
   }
   // Populate the domain config global so the executor's getDomainConfig()
   // and handleTabAction's checkUrlAllowed() can read it.

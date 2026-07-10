@@ -7,7 +7,7 @@
  *
  * Prices are per 1M tokens (USD). Rates are BEST-EFFORT and may be stale —
  * the live models.dev catalog override (see {@link refreshPricingFromCatalog})
- * is the source of truth. Date-stamped: 2026-07 (best-effort snapshot; not
+ * is the source of truth. Rates as of 2026-07 (best-effort snapshot; not
  * guaranteed to match current provider pricing). Models with reasoning-token
  * pricing include a `reasoning` field; reasoning tokens are billed at that
  * rate (falling back to `out`).
@@ -18,6 +18,8 @@
  *   o3-mini before o3, o1-mini/o1-pro before o1
  *   gemini-2.0-flash-thinking-exp before gemini-2.0-flash
  */
+
+import type { Catalog } from "./catalog";
 
 export interface ModelPricing {
   /** Input (prompt) tokens — per 1M tokens, USD. */
@@ -99,12 +101,18 @@ export const PRICING_PER_MTOK: Record<string, ModelPricing> = {
  * unknown models to a clearly-expensive rate (in: $10 / out: $30 per 1M tokens,
  * roughly GPT-4-class pricing) and flag them `uncatalogued: true` so callers
  * that want to be stricter can block instead of bill.
+ *
+ * This is the canonical name (F-02a). `CONSERVATIVE_DEFAULT_PRICING` is kept
+ * as a backwards-compatible alias so existing importers keep working.
  */
-export const CONSERVATIVE_DEFAULT_PRICING: ModelPricing = {
+export const DEFAULT_UNKNOWN_MODEL_PRICE: ModelPricing = {
   in: 10,
   out: 30,
   uncatalogued: true,
 };
+
+/** Backwards-compatible alias for {@link DEFAULT_UNKNOWN_MODEL_PRICE}. */
+export const CONSERVATIVE_DEFAULT_PRICING = DEFAULT_UNKNOWN_MODEL_PRICE;
 
 /**
  * Live catalog override table (populated by {@link refreshPricingFromCatalog}),
@@ -112,6 +120,21 @@ export const CONSERVATIVE_DEFAULT_PRICING: ModelPricing = {
  * when present, so fresher models.dev catalog rates win over the static table.
  */
 let pricingOverride: Record<string, ModelPricing> = {};
+
+/**
+ * Memo of {@link getPricingForModel} results, keyed by the requested model id.
+ * Avoids the repeated O(N) substring scan over the pricing tables on the
+ * hot cost path (estimateCost runs on every LLM call). Cleared whenever the
+ * live catalog override is refreshed so updated rates win.
+ */
+const pricingCache = new Map<string, ModelPricing>();
+
+/**
+ * Models already warned about as uncatalogued. Keeps the fallback warning
+ * quiet — emitted at most once per distinct model id (F-06) so a long run
+ * against an unpriced model doesn't spam the console on every token estimate.
+ */
+const warnedUncataloguedModels = new Set<string>();
 
 /** Substring (case-insensitive) lookup over a pricing table. */
 function lookupPricing(table: Record<string, ModelPricing>, model: string): ModelPricing | undefined {
@@ -123,32 +146,83 @@ function lookupPricing(table: Record<string, ModelPricing>, model: string): Mode
 }
 
 /**
- * Hydrate {@link pricingOverride} from the live models.dev catalog
- * (`fetchCatalog`). Best-effort: network/storage failures are swallowed and
- * the existing override (if any) is kept. Call this at app startup to wire the
- * documented live-catalog override into cost accounting.
+ * Convert a models.dev-shaped catalog into a lowercased pricing table.
+ * Only models that declare a `cost` block contribute a rate.
+ */
+function convertCatalog(catalog: Catalog): Record<string, ModelPricing> {
+  const table: Record<string, ModelPricing> = {};
+  for (const provider of Object.values(catalog)) {
+    for (const model of Object.values(provider.models)) {
+      if (!model.cost) continue;
+      table[model.id.toLowerCase()] = {
+        in: model.cost.input,
+        out: model.cost.output,
+        cacheRead: model.cost.cache_read,
+        cacheWrite: model.cost.cache_write,
+      };
+    }
+  }
+  return table;
+}
+
+/**
+ * Hydrate {@link pricingOverride} from a live catalog (F-02b).
+ *
+ * Resolution (best-effort — any failure is swallowed so offline still works
+ * and the static table remains the offline fallback):
+ *   - If `COWORK_MODEL_CATALOG_URL` is set, fetch + parse THAT url directly
+ *     (a models.dev-compatible catalog JSON).
+ *   - Otherwise, fall back to {@link fetchCatalog} (the models.dev catalog,
+ *     which itself has caching + offline fallback).
+ *
+ * The fetched table is MERGED onto the existing override (so a previously
+ * loaded override is preserved) and takes precedence over the static table.
+ * Call this EXPLICITLY at app startup to wire the documented live-catalog
+ * override into cost accounting. NOTE: this is no longer invoked automatically
+ * at module load (the import-time fetch was removed so importing this module
+ * has no network side effect) — the app startup path is responsible for calling
+ * it once. The in-memory pricing memo (see {@link getPricingForModel}) is
+ * cleared on every successful refresh so catalog rates take effect immediately.
  */
 export async function refreshPricingFromCatalog(): Promise<void> {
   try {
-    const { fetchCatalog } = await import("./catalog");
-    const catalog = await fetchCatalog();
-    const table: Record<string, ModelPricing> = {};
-    for (const provider of Object.values(catalog)) {
-      for (const model of Object.values(provider.models)) {
-        if (!model.cost) continue;
-        table[model.id.toLowerCase()] = {
-          in: model.cost.input,
-          out: model.cost.output,
-          cacheRead: model.cost.cache_read,
-          cacheWrite: model.cost.cache_write,
-        };
-      }
+    const url = typeof process !== "undefined" ? process.env?.COWORK_MODEL_CATALOG_URL : undefined;
+    let table: Record<string, ModelPricing> = {};
+    if (url) {
+      // Custom catalog URL override (e.g. a self-hosted models.dev mirror).
+      const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+      if (!res.ok) throw new Error(`catalog ${res.status}`);
+      const catalog = (await res.json()) as Catalog;
+      table = convertCatalog(catalog);
+    } else {
+      // Default: the live models.dev catalog (with its own cache + offline fallback).
+      const { fetchCatalog } = await import("./catalog");
+      const catalog = await fetchCatalog();
+      table = convertCatalog(catalog);
     }
-    pricingOverride = table;
+    // Merge so a prior override (e.g. from a previous explicit call) survives.
+    pricingOverride = { ...pricingOverride, ...table };
+    // Invalidate the pricing lookup memo so the freshly-fetched catalog rates
+    // take effect immediately for subsequent cost estimates.
+    pricingCache.clear();
   } catch {
     // Keep the current override (or empty) if the catalog is unreachable.
   }
 }
+
+/**
+ * Wire the live catalog override at module load (offline-safe, F-02b).
+ *
+ * When `COWORK_MODEL_CATALOG_URL` is set, fetch that URL; otherwise attempt the
+ * models.dev catalog if reachable. The result (merged into {@link pricingOverride})
+ * lets fresher catalog rates win over the static table without a code change.
+ *
+ * NOTE: importing this module intentionally performs NO network call. The
+ * live-catalog override must be wired explicitly by calling
+ * {@link refreshPricingFromCatalog} at app startup — the previous import-time
+ * `autoLoadCatalogAtStartup()` invocation was removed to keep module import
+ * side-effect free.
+ */
 
 /**
  * Look up the pricing for a model by substring match (case-insensitive).
@@ -162,14 +236,39 @@ export async function refreshPricingFromCatalog(): Promise<void> {
  * rates win.
  */
 export function getPricingForModel(model: string): ModelPricing {
+  // Return a memoized result when available (hot cost path — estimateCost runs
+  // on every LLM call). The memo is invalidated on every catalog refresh.
+  const cached = pricingCache.get(model);
+  if (cached) return cached;
+
   const override = lookupPricing(pricingOverride, model);
-  if (override) return override;
+  if (override) {
+    pricingCache.set(model, override);
+    return override;
+  }
   const staticRate = lookupPricing(PRICING_PER_MTOK, model);
-  if (staticRate) return staticRate;
+  if (staticRate) {
+    pricingCache.set(model, staticRate);
+    return staticRate;
+  }
   // Uncatalogued model — never free. Return the conservative default so the
-  // cost cap still trips. (The live catalog may be hydrated at startup via
-  // refreshPricingFromCatalog to supply a more accurate rate later.)
-  return { ...CONSERVATIVE_DEFAULT_PRICING };
+  // cost cap still trips. Warn (once per distinct model id, F-06) so operators
+  // can spot unpriced models and add them to the static table (or the live
+  // catalog override) for accurate accounting. (The live catalog may be
+  // hydrated at startup via refreshPricingFromCatalog to supply a more accurate
+  // rate later.)
+  const result = { ...DEFAULT_UNKNOWN_MODEL_PRICE };
+  if (!warnedUncataloguedModels.has(model)) {
+    warnedUncataloguedModels.add(model);
+    console.warn(
+      `[pricing] No catalogued price for model "${model}". Falling back to ` +
+        `DEFAULT_UNKNOWN_MODEL_PRICE ($${DEFAULT_UNKNOWN_MODEL_PRICE.in}/` +
+        `$${DEFAULT_UNKNOWN_MODEL_PRICE.out} per 1M tokens, flagged uncatalogued). ` +
+        `The cost cap still applies, but consider adding this model to the table.`
+    );
+  }
+  pricingCache.set(model, result);
+  return result;
 }
 
 /**

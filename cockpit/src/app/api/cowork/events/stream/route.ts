@@ -12,7 +12,7 @@
 // proxies.
 
 import type { NextRequest } from 'next/server';
-import { COWORK_EVENTS_BASE, COWORK_EVENTS_TOKEN } from '@/lib/cowork/events/client';
+import { COWORK_EVENTS_BASE, getCoworkEventsToken } from '@/lib/cowork/events/client';
 
 interface BufferedEvent {
   id: number;
@@ -103,7 +103,7 @@ export async function GET(req: NextRequest): Promise<Response> {
             `${COWORK_EVENTS_BASE}/events?since_id=${sinceId}`,
             {
               cache: 'no-store',
-              headers: { 'X-Cowork-Token': COWORK_EVENTS_TOKEN },
+              headers: { 'X-Cowork-Token': getCoworkEventsToken() },
             },
           );
           if (res.ok) {

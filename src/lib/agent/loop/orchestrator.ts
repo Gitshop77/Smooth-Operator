@@ -448,77 +448,23 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       onEvent({ type: "error", step: state.step, message: truncMsg, recoverable: true });
       if (dispatcher) await dispatcher.error(makeCtx(state), truncMsg, true);
     }
-    const actions = output.action.slice(0, config.maxActionsPerStep);
+    // F2: preserve a sole `done` action even when the navigator emitted more
+    // actions than maxActionsPerStep. The `done` action always means "stop and
+    // finalize" (F-18 enforces it is the sole action at parse time), so if it
+    // is present we run ONLY it and discard the rest rather than truncating `done`
+    // off the end of the queue.
+    const soleDoneAction = output.action.find((a) => a.type === "done");
+    const actions = soleDoneAction ? [soleDoneAction] : output.action.slice(0, config.maxActionsPerStep);
 
     const doneAction = actions.find((a) => a.type === "done");
 
     if (doneAction && doneAction.type === "done") {
-      // F-18: when `done` is paired with sibling actions (e.g. a final
-      // `input`), the siblings MUST be executed FIRST — otherwise the
-      // preceding actions are silently dropped (the original
-      // `find(done)` short-circuit routed straight to handleNavigatorDone,
-      // skipping the dispatch below). We run every non-`done` action
-      // through the SAME override/queue path used for a normal step, then
-      // finalize with handleNavigatorDone. The `done`-only case (length 1)
-      // skips this block and behaves exactly as before (no history/settle for
-      // a pure-done step, then `continue`).
-      if (actions.length > 1) {
-        const siblingActions = actions.filter((a) => a.type !== "done");
-        const agentMode = deps.mode ?? "standard";
-        if (deps.executeActions) {
-          try {
-            if (config.enableLoopDetection) {
-              for (const action of siblingActions) {
-                state.loopDetector.record(action, state.step);
-                const warnCount = state.loopDetector.shouldWarn();
-                if (warnCount > 0) {
-                  onEvent({ type: "loop-warning", step: state.step, count: warnCount });
-                  if (dispatcher) await dispatcher.loopWarning(makeCtx(state), warnCount);
-                }
-              }
-            }
-            const siblingResults = await deps.executeActions(siblingActions, browserState);
-            if (config.enableLoopDetection && siblingResults.some((r) => r.pageChanged)) {
-              state.loopDetector.reset();
-            }
-            if (dispatcher) await dispatcher.stepEnd(makeCtx(state), siblingResults);
-          } catch (e) {
-            const errMsg = `executeActions override failed: ${e instanceof Error ? e.message : String(e)}`;
-            onEvent({ type: "error", step: state.step, message: errMsg, recoverable: true });
-            if (dispatcher) await dispatcher.error(makeCtx(state), errMsg, true);
-            state.consecutiveFailures++;
-            if (state.consecutiveFailures >= config.maxFailures) {
-              const doneText = `Agent aborted after ${config.maxFailures} consecutive failures (executeActions).`;
-              onEvent({ type: "done", step: state.step, success: false, text: doneText });
-              if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, doneText));
-              return;
-            }
-            state.step++;
-            continue;
-          }
-        } else {
-          try {
-            const queueResult = await executeActionQueue(
-              deps, siblingActions, browserState, state.step, agentMode,
-              state.loopDetector, config, dispatcher, makeCtx(state)
-            );
-            if (dispatcher) await dispatcher.stepEnd(makeCtx(state), queueResult.results);
-          } catch (e) {
-            const errMsg = `executeActionQueue failed: ${e instanceof Error ? e.message : String(e)}`;
-            onEvent({ type: "error", step: state.step, message: errMsg, recoverable: true });
-            if (dispatcher) await dispatcher.error(makeCtx(state), errMsg, true);
-            state.consecutiveFailures++;
-            if (state.consecutiveFailures >= config.maxFailures) {
-              const doneText = `Agent aborted after ${config.maxFailures} consecutive failures (executeActionQueue).`;
-              onEvent({ type: "done", step: state.step, success: false, text: doneText });
-              if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, doneText));
-              return;
-            }
-            state.step++;
-            continue;
-          }
-        }
-      }
+      // F-18 is enforced at PARSE TIME (the AgentOutputSchema.action
+      // superRefine): a step that pairs `done` with a sibling action is
+      // rejected before it reaches the orchestrator, so `doneAction` is
+      // ALWAYS the sole action in the step. The previous sibling-
+      // execution branch is therefore dead code and has been removed —
+      // we finalize immediately (preserving the single-`done` behavior).
       const result = await handleNavigatorDone(state, doneAction, output, browserState, tabs);
       if (result.finalized) {
         if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, ""));

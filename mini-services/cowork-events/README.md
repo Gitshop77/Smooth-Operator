@@ -83,7 +83,7 @@ Caddy gateway (`?XTransformPort=3003`), never via direct LAN access.
 | `COWORK_EVENT_TOKEN`    | **yes in prod**   | `dev-token`              | Shared secret used for `X-Cowork-Token` HTTP header + socket.io `auth.token`. **The service refuses to start if this is unset or set to the well-known `dev-token` — unless `COWORK_ALLOW_DEV_TOKEN=1` is explicitly set (dev-loopback only). `NODE_ENV` is NOT a safety net.** |
 | `COWORK_ALLOW_DEV_TOKEN`| no (dev only)     | unset (off)              | Explicit opt-in to run with the `dev-token` default. Set to `1` ONLY for a trusted local loopback dev session. Must NEVER be set in production.                              |
 | `COWORK_CORS_ORIGIN`    | no                | `http://localhost:3000`  | Allowlisted origin for CORS (`Access-Control-Allow-Origin` is mirrored only when the request's `Origin` header matches this value).                                        |
-| `NODE_ENV`              | no                | —                        | Setting it to `production` is recommended in prod, but the dev-token refusal does NOT depend on it — a real `COWORK_EVENT_TOKEN` is required regardless of `NODE_ENV`.     |
+| `NODE_ENV`              | **yes for any non-localhost deploy** | —            | **MANDATORY = `production` for any deployment reachable from another host** (i.e. anything that is not bound to `127.0.0.1`/localhost). The dev-token refusal does NOT depend on `NODE_ENV` — a real `COWORK_EVENT_TOKEN` is required regardless — but `NODE_ENV=production` is the production signal other operators rely on and must be set outside loopback. |
 
 > **Note on `ZAI_API_TOKEN`:** an earlier version of this README listed a
 > `ZAI_API_TOKEN` environment variable here. That was incorrect — the
@@ -96,6 +96,29 @@ Generate a real secret with:
 ```bash
 openssl rand -hex 32
 ```
+
+### ⚠️ Production hardening — READ BEFORE DEPLOYING
+
+These rules are enforced by `security.ts → shouldRefuseStart` (F-05) and the
+socket.io connection handler. They are easy to get wrong, so they are called out
+explicitly:
+
+- **Set a REAL `COWORK_EVENT_TOKEN`** for every deployment that is not a
+  trusted local loopback dev session. **Never use `dev-token` in production** —
+  it is a publicly documented default that anyone on the LAN could use.
+- **`NODE_ENV=production` is MANDATORY** for any deployment that is NOT bound to
+  `127.0.0.1` / localhost (anything reachable from another host). Without it the
+  process still refuses the `dev-token`, but you lose the production signal that
+  other operators and tooling rely on.
+- **The `dev-token` is REFUSED by default.** The service refuses to start when
+  `COWORK_EVENT_TOKEN` is unset **or** equals the well-known `dev-token`,
+  **UNLESS** `COWORK_ALLOW_DEV_TOKEN=1` is explicitly set. This is a hard
+  default that does **NOT** depend on `NODE_ENV`. A misconfigured deploy that
+  runs `npx tsx index.ts` with no `NODE_ENV` (or any non-production value) will
+  **NOT** silently accept the public default — it must be explicitly opted in.
+- **Never set `COWORK_ALLOW_DEV_TOKEN=1` in production.** It exists only for a
+  trusted local loopback dev session where you have consciously chosen to run
+  unauthenticated. See `.env.example` for the full template.
 
 ### Z-AI SDK configuration (`.z-ai-config`)
 
@@ -355,14 +378,31 @@ doesn't hang if `httpServer.close()` stalls.
 ## Test coverage
 
 The pure security primitives (`tokenMatches`, `applyCorsHeaders`,
-`shouldRefuseStart`) live in [`./security.ts`](./security.ts) and are unit-
-tested by `tests/cowork-events.test.ts` at the repo root. The same test file
-also spins up the full HTTP server on a random port and exercises the REST
-routes (`/health`, `/events`, `/`, `/emit`) end-to-end with real `fetch()`
-calls — verifying the 401-vs-200 auth gating and the CORS allowlist behavior.
+`shouldRefuseStart`, `evaluateChatJoin`) live in
+[`./security.ts`](./security.ts) and are unit-tested by
+`tests/cowork-events.test.ts` at the repo root. The same test file also spins up
+the full HTTP server + socket.io on a random port and exercises the REST routes
+(`/health`, `/events`, `/`, `/emit`, `/chat`, `/image`) end-to-end with real
+`fetch()` calls, plus the socket.io surface with `socket.io-client`:
+
+- **REST:** 401-vs-200 auth gating, CORS allowlist, body-size (413) and
+  per-IP rate-limit (429) rails, `system:status` exclusion from the replay
+  buffer.
+- **socket.io:** `system:status` + `events:replay` on a successful handshake;
+  `/chat` streaming tokens delivered to the `sessionId` room (via `chat:message`
+  / `chat:done`); `/image` success (z-ai SDK stubbed, no real network call);
+  and two **negative** tests — an unauthenticated (wrong-token) socket is
+  disconnected and receives nothing, and a hostile socket that authenticated
+  with a *scoped* `sessionId` **cannot** join another session's room and so
+  **cannot** read that session's streamed `chat:message` (F-04 room-scoping).
+
+The z-ai SDK (`z-ai-web-dev-sdk`) is mocked in the test file so `/chat` and
+`/image` run with no real upstream call.
 
 Run them with:
 
 ```bash
 npm run test -- cowork-events
+# or, directly:
+npx vitest run tests/cowork-events.test.ts
 ```

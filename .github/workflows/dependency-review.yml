@@ -1,0 +1,31 @@
+# Dependency Review — fails PRs that introduce vulnerable dependency changes.
+#
+# Complements Dependabot (`.github/dependabot.yml`): Dependabot proposes updates,
+# this workflow blocks PRs that add a dependency with a high/critical advisory or
+# a license the org disallows. Runs on every PR that touches a lockfile.
+
+name: Dependency Review
+
+on:
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        # PIN TO A VERIFIED SHA: replace with the verified full commit SHA for actions/checkout@v4.
+        uses: actions/checkout@002191b3668e769a76cadbdb5cc75d0e1fba2a17
+
+      - name: Dependency Review
+        # PIN TO A VERIFIED SHA: replace with the verified full commit SHA for actions/dependency-review-action@v4.
+        uses: actions/dependency-review-action@a4985d3c1b8d0833692d3486907ddeb0e402ad8c
+        with:
+          # Block PRs that introduce MODERATE or higher severity advisories.
+          fail-on-severity: moderate
+          # All three npm workspaces share the root + their own lockfiles.
+          fail-on-scopes: development, runtime

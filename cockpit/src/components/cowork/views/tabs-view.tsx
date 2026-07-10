@@ -109,6 +109,7 @@ export function TabsView() {
           transition={{ duration: 0.2 }}
         >
           <DataTable
+            caption="Open tabs"
             columns={[
               "Tab",
               "Workspace",

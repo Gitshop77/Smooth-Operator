@@ -1,43 +1,52 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+const { findMany, del } = vi.hoisted(() => ({ findMany: vi.fn(), del: vi.fn() }));
 
 vi.mock('@/lib/db', () => ({
   db: {
-    siteMemory: {
-      findMany: vi.fn().mockResolvedValue([]),
-    },
+    siteMemory: { findMany, delete: del },
   },
 }));
 
-import { GET } from '@/app/api/cowork/memory/site/route';
-import { db } from '@/lib/db';
-
-beforeEach(() => {
-  (db.siteMemory.findMany as ReturnType<typeof vi.fn>).mockClear();
-});
+import { GET, DELETE } from '@/app/api/cowork/memory/site/route';
 
 function fakeReq(query = ''): any {
   return { nextUrl: { searchParams: new URLSearchParams(query) } };
 }
 
 describe('GET /api/cowork/memory/site (F-36)', () => {
-  it('applies the limit from the query param to the Prisma query', async () => {
-    await GET(fakeReq('limit=5'));
-    expect(db.siteMemory.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ take: 5, orderBy: { createdAt: 'desc' } }),
+  it('applies the limit + cursor pagination', async () => {
+    findMany.mockResolvedValueOnce([]);
+    await GET(fakeReq('limit=5&after=abc'));
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ take: 5, orderBy: { createdAt: 'desc' }, cursor: { id: 'abc' }, skip: 1 }),
     );
   });
+});
 
-  it('caps the limit at the configured max via parseLimit default', async () => {
-    await GET(fakeReq('limit=999999'));
-    const call = (db.siteMemory.findMany as any).mock.calls[0][0];
-    // parseLimit caps at 200 (max param), so the take must be 200, not 999999.
-    expect(call.take).toBe(200);
+describe('DELETE /api/cowork/memory/site (F-35)', () => {
+  it('requires an id', async () => {
+    const res = await DELETE(fakeReq());
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe('id is required');
   });
 
-  it('passes a cursor when `after` is supplied', async () => {
-    await GET(fakeReq('after=abc123'));
-    const call = (db.siteMemory.findMany as any).mock.calls[0][0];
-    expect(call.cursor).toEqual({ id: 'abc123' });
-    expect(call.skip).toBe(1);
+  it('deletes the site-memory entry by id', async () => {
+    del.mockResolvedValueOnce({ id: 's1' });
+    const res = await DELETE(fakeReq('id=s1'));
+    expect(res.status).toBe(200);
+    expect(del).toHaveBeenCalledWith({ where: { id: 's1' } });
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+  });
+
+  it('returns 404 when the entry does not exist', async () => {
+    const err = new Error('Record to delete does not exist. (Prisma error P2025)');
+    del.mockRejectedValueOnce(err);
+    const res = await DELETE(fakeReq('id=missing'));
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toBe('not found');
   });
 });

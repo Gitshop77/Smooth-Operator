@@ -1,6 +1,6 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
-import { json, withRouteError, bodyJson, validateHttpUrl } from '@/lib/cowork/api/http';
+import { json, withRouteError, bodyJson, validateHttpUrl, badRequest } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
 // Prisma's `include: { children: true }` only fetches ONE level of
@@ -58,6 +58,13 @@ export async function POST(req: NextRequest): Promise<Response> {
     const body = await bodyJson(req);
     const name = String(body.name || 'Untitled');
     const parentId = body.parentId ? String(body.parentId) : null;
+    // F16: validate the referenced parent bookmark exists (the analog of a
+    // relation-connect). A dangling parentId is rejected with 400 rather than
+    // stored as an orphan reference.
+    if (parentId) {
+      const parent = await db.bookmark.findUnique({ where: { id: parentId } });
+      if (!parent) return badRequest('unknown parentId');
+    }
     // Allow creating `type: 'folder'` bookmarks (folders have no
     // URL — they group child bookmarks in the tree). Previously the route
     // always required an http/https URL and always set `type: 'url'`, so

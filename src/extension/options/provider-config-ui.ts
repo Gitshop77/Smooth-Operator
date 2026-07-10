@@ -15,7 +15,7 @@ import { $, escapeHtml } from "@/extension/shared";
  * key (e.g. `401: Invalid API key: sk-ant-api03-...`), which must not be
  * surfaced verbatim. Non-key error text is returned unchanged.
  */
-function redactKeyLeak(s: string): string {
+export function redactKeyLeak(s: string): string {
   const KEY_RE = /(sk-ant-[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+|AIza[A-Za-z0-9_-]+|gsk_[A-Za-z0-9_-]+|xoxb-[A-Za-z0-9_-]+|xoxp-[A-Za-z0-9_-]+|eyJ[A-Za-z0-9_-]+)/g;
   return s.replace(KEY_RE, (m) => {
     const dash = m.indexOf("-");

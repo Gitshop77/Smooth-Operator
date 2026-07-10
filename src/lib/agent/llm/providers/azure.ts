@@ -24,6 +24,7 @@ import { make } from "../route/client";
 import * as OpenAIChat from "../protocols/openai-chat";
 import type { LLMProvider } from "../provider";
 import { toLLMProvider as toLLMProviderBridge } from "../provider-bridge";
+import { encodeModelIdForUrl } from "../modelId";
 
 export const id = "azure";
 
@@ -52,14 +53,14 @@ export function configure(input: Config = {}) {
     id,
     model: (modelID: string) => {
       // Azure URL: /openai/deployments/{deployment}/chat/completions?api-version={version}
-      // `encodeURIComponent(modelID)` keeps normal deployment names identical
+      // `encodeModelIdForUrl(modelID)` keeps normal deployment names identical
       // but prevents a malicious/garbage id from injecting path separators into
-      // the request URL.
+      // the request URL, and throws on structurally-invalid ids (F-23).
       const route = make({
         id: "azure-openai",
         provider: id,
         protocol: OpenAIChat.protocol,
-        endpoint: Endpoint.path(`/openai/deployments/${encodeURIComponent(modelID)}/chat/completions`, {
+        endpoint: Endpoint.path(`/openai/deployments/${encodeModelIdForUrl(modelID)}/chat/completions`, {
           baseURL,
           query: { "api-version": apiVersion },
         }),

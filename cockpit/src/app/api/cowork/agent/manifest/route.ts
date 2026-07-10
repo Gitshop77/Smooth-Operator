@@ -1,8 +1,9 @@
 //
 // Machine-readable manifest of every endpoint that actually exists under
-// /api/cowork/*. The web cockpit is a read-mostly dashboard backed by Prisma;
-// it does not drive a live browser, so only the implemented routes are
-// advertised here. Agents that consume this manifest will never hit a 404.
+// /api/cowork/*. The web cockpit is a dashboard backed by Prisma that supports
+// reads, POST creates, and DELETE removals; it does not drive a live browser.
+// Only the implemented routes are advertised here. Agents that consume this
+// manifest will never hit a 404.
 import { json, withRouteError } from '@/lib/cowork/api/http';
 import {
   AGENT_OPERATING_RULES,
@@ -25,7 +26,7 @@ export async function GET(): Promise<Response> {
       name: 'cowork-cockpit',
       version,
       baseUrl,
-      role: 'read-mostly web dashboard for persisted cowork data',
+      role: 'web dashboard for persisted cowork data (read, create via POST, delete via DELETE)',
       transports: HTTP_TRANSPORT,
       // This manifest endpoint is itself one of the 5 public discovery routes,
       // so `authMethods: []` here means "this route requires no auth to
@@ -35,7 +36,7 @@ export async function GET(): Promise<Response> {
       ...DISCOVERY_ROUTE_AUTH,
       pairingSupported: false,
       startupSequence: withBaseUrl(baseUrl, AGENT_STARTUP_SEQUENCE),
-      primaryInteractionModel: 'read persisted data via REST; create via POST where available',
+      primaryInteractionModel: 'read persisted data via REST; create via POST and remove via DELETE where available',
       operatingRules: AGENT_OPERATING_RULES,
       toolSelectionHints: AGENT_TOOL_SELECTION_HINTS,
       capabilityFamilies: CAPABILITY_FAMILIES,
@@ -69,12 +70,15 @@ export async function GET(): Promise<Response> {
         },
         memory: {
           site: { method: 'GET', path: `${P}/memory/site`, description: 'Read per-site structured memory' },
+          deleteSite: { method: 'DELETE', path: `${P}/memory/site`, description: 'Erase one per-site memory entry (?id=<id>)' },
           form: { method: 'GET', path: `${P}/memory/form`, description: 'Read per-site form memory' },
+          deleteForm: { method: 'DELETE', path: `${P}/memory/form`, description: 'Erase one form-memory entry (?id=<id>)' },
         },
         collections: {
           bookmarks: { method: 'GET', path: `${P}/bookmarks`, description: 'Read the bookmark tree' },
           addBookmark: { method: 'POST', path: `${P}/bookmarks`, description: 'Add a bookmark or folder (body: `{ name, url?, parentId?, type?: "url" | "folder" }`)' },
           history: { method: 'GET', path: `${P}/history`, description: 'Read browsing history' },
+          deleteHistory: { method: 'DELETE', path: `${P}/history`, description: 'Erase history: ?id=<id> for one entry, or ?all=1 to wipe ALL history (requires user confirmation)' },
           pinboards: { method: 'GET', path: `${P}/pinboards`, description: 'List pinboards' },
           addPinboard: { method: 'POST', path: `${P}/pinboards`, description: 'Create a pinboard (body: `{ name, color? }`)' },
         },
@@ -86,10 +90,11 @@ export async function GET(): Promise<Response> {
           events: { method: 'GET', path: `${P}/security/events`, description: 'Read the security event feed' },
         },
         mcp: {
-          tools: { method: 'GET', path: `${P}/mcp/tools`, description: 'Browse the MCP tool catalog (optional `q`, `category`)' },
+          tools: { method: 'GET', path: `${P}/mcp/tools`, description: 'Browse the MCP tool catalog — ASPIRATIONAL, NOT served by the cockpit (optional `q`, `category`)' },
         },
         ai: {
           chat: { method: 'POST', path: `${P}/ai/chat`, description: 'Send a chat completion (body: `{ messages, sessionId }`)' },
+          deleteChat: { method: 'DELETE', path: `${P}/ai/chat`, description: 'Erase chat messages: ?messageId=<id>, ?sessionId=<id>, or ?all=1 to wipe ALL (requires user confirmation)' },
           image: { method: 'POST', path: `${P}/ai/image`, description: 'Generate an image (body: `{ prompt, size? }`)' },
         },
         events: {

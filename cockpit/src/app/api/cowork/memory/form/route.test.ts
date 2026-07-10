@@ -1,7 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 
-const findMany = vi.fn();
-const del = vi.fn();
+const { findMany, del } = vi.hoisted(() => ({ findMany: vi.fn(), del: vi.fn() }));
 
 vi.mock('@/lib/db', () => ({
   db: {
@@ -34,6 +33,7 @@ describe('GET /api/cowork/memory/form (F-36)', () => {
           entries: [
             { name: 'password', value: 'hunter2' },
             { name: 'email', value: 'a@b.com' },
+            { name: 'username', value: 'bob' },
           ],
         }),
       },
@@ -43,7 +43,10 @@ describe('GET /api/cowork/memory/form (F-36)', () => {
     const parsed = JSON.parse(body.memories[0].formDataJson);
     expect(parsed.entries[0].name).toBe('password');
     expect(parsed.entries[0].value).toBe('[redacted]');
-    expect(parsed.entries[1].value).toBe('a@b.com'); // non-sensitive kept
+    expect(parsed.entries[1].name).toBe('email');
+    expect(parsed.entries[1].value).toBe('[redacted]'); // email now redacted (F18)
+    expect(parsed.entries[2].name).toBe('username');
+    expect(parsed.entries[2].value).toBe('bob'); // non-sensitive kept
   });
 });
 

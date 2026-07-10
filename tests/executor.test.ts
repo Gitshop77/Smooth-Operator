@@ -78,9 +78,17 @@ function installMinimalDomStubs(): void {
     configurable: true,
     writable: true,
   });
+  // F-15: `evaluate` now fails closed unless the current origin is on an
+  // explicit domain allowlist. Configure one for the stub host so the
+  // evaluate behavioral tests exercise real JS execution. The blocked
+  // (no-allowlist) path is covered by a dedicated test below.
+  (globalThis as Record<string, unknown>).__openCoworkDomainConfig = {
+    allowedDomains: ["example.test"],
+  };
 }
 
 function clearMinimalDomStubs(): void {
+  delete (globalThis as Record<string, unknown>).__openCoworkDomainConfig;
   // Restore the real jsdom-provided globals so the next describe (which may
   // use real DOM APIs like `document.createElement`) sees a live document.
   // The originals were captured at module load before any stub was installed.
@@ -232,6 +240,21 @@ describe("executeAction — evaluate", () => {
     // The Promise-coercion bug would have surfaced as a SyntaxError-flavored
     // message; assert the literal coercion artifact never appears.
     expect(result.message).not.toContain("[object Promise]");
+  });
+
+  test("F-15: evaluate fails closed (BLOCKED) when no domain allowlist is configured", async () => {
+    // Remove the allowlist installed by installMinimalDomStubs so the origin
+    // is unconfigured. `evaluate` must refuse to execute rather than run
+    // arbitrary JS on an unconstrained origin.
+    delete (globalThis as Record<string, unknown>).__openCoworkDomainConfig;
+    const result = await executeAction(
+      { type: "evaluate", code: "return 1 + 2" },
+      emptyState(),
+    );
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("BLOCKED evaluate");
+    // The JS must NOT have run (no result surfaced).
+    expect(result.extractedContent).toBeUndefined();
   });
 });
 

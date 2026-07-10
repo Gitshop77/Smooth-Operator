@@ -7,11 +7,32 @@
 // Per project rules:
 //   • Server-to-server fetches may use `http://localhost:3003` directly (the
 //     mini-service is internal and not exposed through Caddy).
-//   • The X-Cowork-Token header must match `process.env.COWORK_EVENT_TOKEN`
-//     (default `dev-token`).
+//   • The X-Cowork-Token header must match `process.env.COWORK_EVENT_TOKEN`.
 
 const COWORK_EVENTS_BASE = process.env.COWORK_EVENTS_BASE_URL || 'http://localhost:3003';
-const COWORK_EVENTS_TOKEN = process.env.COWORK_EVENT_TOKEN || 'dev-token';
+
+// F-14: fail closed. The cockpit must NOT silently authenticate to the
+// cowork-events mini-service with the well-known `dev-token` when the operator
+// forgot to set a real secret. If COWORK_EVENT_TOKEN is unset/empty we refuse to
+// relay instead of sending `dev-token`. The `dev-token` fallback is removed
+// entirely.
+//
+// The check is deferred to CALL time (not module load) so that importing a
+// route that references this module — during `next build`, prerender, or a
+// unit test — does not crash the whole module graph. The throw fires only when
+// a relay is actually attempted, where it is caught by the route's error
+// wrapper and surfaced as a 500. This is equally fail-closed, without the
+// import-time fragility of an IIFE.
+function getCoworkEventsToken(): string {
+  const token = process.env.COWORK_EVENT_TOKEN;
+  if (!token || token.length === 0) {
+    throw new Error(
+      'COWORK_EVENT_TOKEN is not set — refusing to broadcast/relay events to the ' +
+        'cowork-events mini-service (fail-closed). Set a real secret.',
+    );
+  }
+  return token;
+}
 
 export interface BroadcastResult {
   ok: boolean;
@@ -37,7 +58,7 @@ export async function broadcastEvent(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Cowork-Token': COWORK_EVENTS_TOKEN,
+        'X-Cowork-Token': getCoworkEventsToken(),
       },
       body: JSON.stringify({ channel, payload }),
     });
@@ -57,4 +78,4 @@ export async function broadcastEvent(
   }
 }
 
-export { COWORK_EVENTS_BASE, COWORK_EVENTS_TOKEN };
+export { COWORK_EVENTS_BASE, getCoworkEventsToken };

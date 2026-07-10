@@ -9,7 +9,12 @@ import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import { LIMITS } from "../constants";
 import type { ActionContext } from "./types";
-import { domFingerprint, checkUrlAllowedWithDomainConfig } from "../helpers";
+import { domFingerprint } from "../helpers";
+import { checkUrlAllowed } from "../../security";
+import {
+  getDomainConfig,
+  isDomainConfigMissingButEnforced,
+} from "../helpers/domain-config";
 
 export async function handleEvaluate(
   ctx: ActionContext,
@@ -23,10 +28,22 @@ export async function handleEvaluate(
     // prompt-injection payload from executing arbitrary JS on an
     // attacker-controlled domain even when a domain allowlist is configured.
     //
-    // `checkUrlAllowedWithDomainConfig` (F-07) fails CLOSED when a domain
-    // policy was configured but the config payload is missing, so the
-    // allow/block list can't be silently bypassed via a fail-open `{}`.
-    const urlCheck = checkUrlAllowedWithDomainConfig(location.href);
+    // F-15: `evaluate` is an unsandboxed `new Function()` RCE primitive, so
+    // the domain check FAILS CLOSED when no explicit allowlist is configured
+    // (`requireAllowlist: true`). A non-evaluate path (navigate/search) still
+    // defaults to allow-all; only JS execution is hardened here.
+    //
+    // The `isDomainConfigMissingButEnforced()` check reproduces the F-07
+    // fail-closed behavior (a domain policy was configured but the config
+    // payload is missing) before delegating the allowlist match to
+    // `checkUrlAllowed` with `requireAllowlist: true`.
+    const urlCheck =
+      isDomainConfigMissingButEnforced()
+        ? {
+            allowed: false as const,
+            reason: "Domain policy is enforced but the config is unavailable — blocking to fail closed.",
+          }
+        : checkUrlAllowed(location.href, getDomainConfig(), true);
     if (!urlCheck.allowed) {
       return {
         action,

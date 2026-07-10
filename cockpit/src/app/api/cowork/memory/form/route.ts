@@ -8,7 +8,7 @@ import { db } from '@/lib/db';
 // redact by field-name heuristic. Field *names* are preserved; only values
 // are masked.
 const SENSITIVE_FIELD_RE =
-  /^(password|passwd|pwd|secret|token|ssn|socialsecurity|card(?:number|no|num)?|ccv|cvv|cvc|creditcard)$/i;
+  /^(password|passwd|pwd|secret|token|ssn|socialsecurity|card(?:number|no|num)?|ccv|cvv|cvc|creditcard|email|phone|mobile|address|zip|postal|dob|birth|name|firstname|lastname)$/i;
 
 function redactValue(value: unknown): unknown {
   return typeof value === 'string' && value.length > 0 ? '[redacted]' : value;

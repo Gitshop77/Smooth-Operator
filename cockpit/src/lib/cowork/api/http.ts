@@ -19,6 +19,20 @@ export async function bodyJson(req: NextRequest): Promise<Record<string, unknown
   }
 }
 
+/** Tolerant variant of `bodyJson` for routes whose body is OPTIONAL.
+ *
+ * Never throws: returns `{}` for an absent / empty / malformed body so callers
+ * that merely enrich an optional payload keep working (F-04b). Routes that
+ * REQUIRE a body must use `bodyJson`, which throws on malformed JSON so the
+ * caller returns a 400 instead of silently creating a row with defaults. */
+export async function bodyJsonOptional(req: NextRequest): Promise<Record<string, unknown>> {
+  try {
+    return await bodyJson(req);
+  } catch {
+    return {};
+  }
+}
+
 /** JSON Response helper. */
 export function json(data: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data), {
@@ -125,6 +139,46 @@ function newCorrelationId(): string {
 }
 
 /**
+ * Redact obvious secret shapes from a loggable string so server-side error
+ * logging (F-12) does not capture credentials. Covers:
+ *   • credentials embedded in URLs (http(s)://user:pass@host)
+ *   • secret-bearing key=value pairs (password / token / secret / api_key / …)
+ *   • `Bearer` tokens
+ *   • the configured COWORK_EVENT_TOKEN itself (if set and non-dev)
+ */
+function redactSecrets(text: string): string {
+  let out = text;
+  // Credentials in URLs: http(s)://user:pass@host -> http(s)://***@host
+  out = out.replace(/https?:\/\/[^@\s/]+@/gi, (m) =>
+    m.replace(/\/\/[^@\s/]+@/, "//***@"),
+  );
+  // Secret-bearing key=value pairs in URLs / bodies / headers.
+  out = out.replace(
+    /(password|passwd|token|secret|api[_-]?key|access[_-]?token|authorization|authorisation)=[^&\s"'<>]+/gi,
+    "$1=***",
+  );
+  // Bearer tokens.
+  out = out.replace(/Bearer\s+[A-Za-z0-9._-]+/g, "Bearer ***");
+  // The configured token value itself (avoid echoing the real secret).
+  const configured = process.env.COWORK_EVENT_TOKEN;
+  if (configured && configured.length > 0 && configured !== "dev-token") {
+    out = out.split(configured).join("***");
+  }
+  return out;
+}
+
+/** Map an error message to a stable, secret-free code for server logs (F-12). */
+function stableErrorCode(message: string): string {
+  const lower = message.toLowerCase();
+  if (lower.includes("not found")) return "NOT_FOUND";
+  if (lower.includes("not implemented")) return "NOT_IMPLEMENTED";
+  if (lower.includes("unauthorized") || lower.includes("forbidden")) return "FORBIDDEN";
+  if (lower.includes("invalid") || lower.includes("required") || lower.includes("must be"))
+    return "BAD_REQUEST";
+  return "INTERNAL";
+}
+
+/**
  * Markers indicating a client-facing validation/business error produced by our
  * own code (vs. an internal failure like a DB/FS error that may leak table or
  * column names, constraint details, or absolute filesystem paths). Only these
@@ -139,15 +193,30 @@ const SAFE_MESSAGE_MARKERS = [
   'must be',
 ];
 
-/** Wrap an async route handler with try/catch that produces a JSON error. */
-export async function withRouteError(fn: () => Promise<Response>): Promise<Response> {
+/** Wrap an async route handler with try/catch that produces a JSON error.
+ *
+ * @param fn         The route handler.
+ * @param requestId  Optional request id propagated from middleware (F-17). When
+ *                   provided it is reused as the `correlationId` so server error
+ *                   logs and the client-facing error share one traceable id. */
+export async function withRouteError(
+  fn: () => Promise<Response>,
+  requestId?: string,
+): Promise<Response> {
   try {
     return await fn();
   } catch (e) {
-    const correlationId = newCorrelationId();
-    // Always log the FULL error server-side (incl. stack) for diagnostics.
-    console.error('[cowork route error]', correlationId, e instanceof Error ? (e.stack || e.message) : String(e));
+    const correlationId = requestId || newCorrelationId();
     const message = e instanceof Error ? e.message : 'Internal server error';
+    // F-12: prefer a stable error code + correlation id over dumping the raw
+    // stack/message (which may leak filesystem paths, table names, or tokens).
+    // What we do log is redacted of known secret shapes.
+    console.error(
+      '[cowork route error]',
+      correlationId,
+      stableErrorCode(message),
+      redactSecrets(message),
+    );
     const lower = message.toLowerCase();
 
     // Map known message markers to the correct HTTP status (unchanged behavior).

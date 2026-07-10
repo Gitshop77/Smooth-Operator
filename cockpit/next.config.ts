@@ -12,11 +12,43 @@ import { dirname } from "node:path";
  */
 const projectRoot = dirname(fileURLToPath(import.meta.url));
 
+/**
+ * Baseline security response headers, applied to every response via the
+ * Next.js `headers()` API (F-11). These are defense-in-depth: the cockpit is a
+ * single-purpose internal app, but setting them costs nothing and hardens it
+ * against clickjacking / MIME sniffing / downgrade attacks.
+ *   • Content-Security-Policy: `frame-ancestors 'none'` blocks embedding.
+ *   • X-Frame-Options: DENY — legacy clickjacking guard.
+ *   • X-Content-Type-Options: nosniff — stops MIME sniffing.
+ *   • Strict-Transport-Security — enforces TLS (only meaningful over HTTPS, but
+ *     safe to set).
+ */
+const securityHeaders = [
+  {
+    key: "Content-Security-Policy",
+    value: "default-src 'self'; frame-ancestors 'none';",
+  },
+  { key: "X-Frame-Options", value: "DENY" },
+  { key: "X-Content-Type-Options", value: "nosniff" },
+  {
+    key: "Strict-Transport-Security",
+    value: "max-age=63072000; includeSubDomains",
+  },
+];
+
 const nextConfig: NextConfig = {
   output: "standalone",
   reactStrictMode: false,
   turbopack: {
     root: projectRoot,
+  },
+  async headers() {
+    return [
+      {
+        source: "/(.*)",
+        headers: securityHeaders,
+      },
+    ];
   },
 };
 

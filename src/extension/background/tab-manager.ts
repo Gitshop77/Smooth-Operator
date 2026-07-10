@@ -255,7 +255,7 @@ export async function handleTabAction(
   const tabs = await listTabs();
   switch (action.type) {
     case "switch_tab": {
-      const tab = tabs.find((t) => t.label === String(action.tab_id));
+      const tab = tabs.find((t) => t.id === action.tab_id);
       if (!tab) return { handled: false, pageChanged: false, success: false, message: `tab ${action.tab_id} not found` };
       await chrome.tabs.update(tab.id, { active: true });
       await waitForTabLoad(tab.id, 3000);
@@ -264,7 +264,7 @@ export async function handleTabAction(
       return { handled: true, pageChanged: true, success: true, message: `Switched to tab ${action.tab_id}` };
     }
     case "close_tab": {
-      const tab = tabs.find((t) => t.label === String(action.tab_id));
+      const tab = tabs.find((t) => t.id === action.tab_id);
       if (!tab) return { handled: false, pageChanged: false, success: false, message: `tab ${action.tab_id} not found` };
       await chrome.tabs.remove(tab.id);
       if (tab.id === runState.currentTabId) {

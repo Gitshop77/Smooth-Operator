@@ -1,6 +1,6 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
-import { json, withRouteError, parseLimit } from '@/lib/cowork/api/http';
+import { json, badRequest, withRouteError, parseLimit } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
 export async function GET(req: NextRequest): Promise<Response> {
@@ -23,5 +23,37 @@ export async function GET(req: NextRequest): Promise<Response> {
       visitedAt: h.lastVisitedAt,
     }));
     return json({ history: projected });
+  });
+}
+
+// DELETE /api/cowork/history?id=<historyEntryId>  — erase a single history
+// entry. DELETE /api/cowork/history?all=1         — erase all browsing history.
+// Gated by the same X-Cowork-Token check as every other /api/cowork/* data
+// route (enforced in middleware.ts). Representative PII-erasure endpoint
+// (F-35, GDPR-style "right to erasure" for stored browsing history).
+// NOTE (F38): history erasure uses Prisma directly (the cockpit owns this
+// table), whereas ai/chat proxies to cowork-events. Both ultimately return the
+// same `{ ok }` envelope shape; the divergence is intentional.
+export async function DELETE(req: NextRequest): Promise<Response> {
+  return withRouteError(async () => {
+    const all = req.nextUrl.searchParams.get('all') === '1';
+    if (all) {
+      const { count } = await db.historyEntry.deleteMany({});
+      return json({ ok: true, deleted: count });
+    }
+    const id = req.nextUrl.searchParams.get('id');
+    if (!id) return badRequest('id is required (or ?all=1 to clear all)');
+    try {
+      await db.historyEntry.delete({ where: { id } });
+    } catch (e) {
+      // Prisma throws P2025 (RecordNotFound) when the id doesn't exist.
+      const msg = e instanceof Error ? e.message : '';
+      const lower = msg.toLowerCase();
+      if (lower.includes('not found') || lower.includes('p2025')) {
+        return json({ error: 'not found' }, 404);
+      }
+      throw e;
+    }
+    return json({ ok: true });
   });
 }

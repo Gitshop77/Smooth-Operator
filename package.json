@@ -8,13 +8,13 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "build:extension": "tsx esbuild.config.ts",
-    "build:cockpit": "cd cockpit && npm run db:generate && npx next build",
+    "build:cockpit": "cd cockpit && npm run db:generate && npm run db:apply && npx next build",
     "dev:ext": "tsx esbuild.config.ts --watch",
     "dev:cockpit": "cd cockpit && npm run db:generate && npx next dev -H 127.0.0.1",
     "dev:events": "cd mini-services/cowork-events && npx tsx watch index.ts",
     "dev": "concurrently --names \"ext,cockpit,events\" --prefix-colors \"blue,green,magenta\" \"npm:dev:ext\" \"npm:dev:cockpit\" \"npm:dev:events\"",
     "build:all": "npm run build:extension && npm run build:cockpit",
-    "postinstall": "npm --prefix cockpit install && npm --prefix mini-services/cowork-events install"
+    "postinstall": "npm ci --prefix cockpit && npm ci --prefix mini-services/cowork-events"
   },
   "dependencies": {
     "@huggingface/transformers": "3.8.1",
@@ -31,6 +31,7 @@
     "esbuild": "^0.28.1",
     "eslint": "^10.6.0",
     "jsdom": "^25.0.1",
+    "socket.io-client": "^4.8.3",
     "tsx": "^4.23.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10"

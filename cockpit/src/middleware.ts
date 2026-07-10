@@ -72,12 +72,23 @@ function tokensMatch(received: string | undefined, expected: string): boolean {
   return diff === 0 && a.length === b.length;
 }
 
-export function middleware(req: NextRequest): NextResponse {
-  const { pathname } = req.nextUrl;
-  if (PUBLIC_DISCOVERY_PATHS.has(pathname)) {
-    return NextResponse.next();
-  }
-
+/**
+ * Authenticate a protected `/api/cowork/*` request.
+ *
+ * Returns `null` when the request is authorized (caller should `next()`),
+ * or a 401 `NextResponse` when it is not. Centralizes the dev-token rule
+ * (F-05) and the constant-time token comparison (F-15).
+ *
+ * Token sources (validated with the SAME `tokensMatch`):
+ *   • the `X-Cowork-Token` request header (all protected routes), and
+ *   • for the SSE stream `/api/cowork/events/stream` ONLY, a `token` query
+ *     param (F-42). Browser `EventSource` cannot send custom headers, so it
+ *     always 401s on the header path; the query param lets a trusted browser
+ *     (or server-to-server client) open the stream. The header path still
+ *     works. The query token is validated against the exact same secret using
+ *     the exact same constant-time compare — it is not a weaker path.
+ */
+function authenticate(req: NextRequest): NextResponse | null {
   const token = process.env.COWORK_EVENT_TOKEN;
 
   // F-05: the well-known default `dev-token` is only acceptable with an
@@ -86,8 +97,7 @@ export function middleware(req: NextRequest): NextResponse {
   // unset, dev-token, or any non-production token value fails closed with 401
   // unless the operator has consciously opted in to the dev-token. A real
   // secret (anything other than the dev-token) is always required in
-  // production. Fail-closed for missing/weak tokens; otherwise verify the
-  // presented `X-Cowork-Token` against the configured secret.
+  // production.
   const allowDevToken = process.env.COWORK_ALLOW_DEV_TOKEN === '1';
 
   if (!token || (token === DEV_TOKEN && !allowDevToken)) {
@@ -106,10 +116,18 @@ export function middleware(req: NextRequest): NextResponse {
         `[cowork-auth] COWORK_EVENT_TOKEN is the dev-token AND COWORK_ALLOW_DEV_TOKEN=1 — allowing the well-known default. NEVER set this in production.`,
       );
     }
-    return NextResponse.next();
+    return null;
   }
 
-  const received = req.headers.get('x-cowork-token') ?? undefined;
+  const receivedHeader = req.headers.get('x-cowork-token') ?? undefined;
+
+  // F-42: SSE stream — also accept the token via a signed query param because
+  // browser EventSource cannot set headers. Restricted to this one path so it
+  // cannot be used to bypass header auth elsewhere.
+  const isSse = req.nextUrl.pathname === '/api/cowork/events/stream';
+  const receivedQuery = isSse ? (req.nextUrl.searchParams.get('token') ?? undefined) : undefined;
+
+  const received = receivedHeader ?? receivedQuery;
   if (!tokensMatch(received, token)) {
     return NextResponse.json(
       { error: 'Unauthorized' },
@@ -117,7 +135,56 @@ export function middleware(req: NextRequest): NextResponse {
     );
   }
 
-  return NextResponse.next();
+  return null;
+}
+
+/**
+ * Generate a request id. Reuses an inbound `x-request-id` when present so that
+ * callers can correlate their logs with ours; otherwise mints a fresh UUID
+ * (F-17). `crypto.randomUUID` is a Web Platform API available in the Edge
+ * Runtime.
+ */
+function newRequestId(): string {
+  try {
+    return globalThis.crypto.randomUUID();
+  } catch {
+    return `req-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+}
+
+/** Attach `x-request-id` to a response so clients can trace a request. */
+function withRequestId(res: NextResponse, requestId: string): NextResponse {
+  res.headers.set('x-request-id', requestId);
+  return res;
+}
+
+/** `NextResponse.next()` that also forwards `x-request-id` to downstream routes
+ *  (so a route handler can read it via `req.headers` and pass it to
+ *  `withRouteError`, threading one id end-to-end — F-17). */
+function nextWithRequestId(req: NextRequest, requestId: string): NextResponse {
+  const headers = new Headers(req.headers);
+  headers.set('x-request-id', requestId);
+  return withRequestId(NextResponse.next({ request: { headers } }), requestId);
+}
+
+export function middleware(req: NextRequest): NextResponse {
+  const start = Date.now();
+  const incoming = req.headers.get('x-request-id');
+  const requestId = incoming && incoming.length > 0 ? incoming : newRequestId();
+
+  const { pathname } = req.nextUrl;
+  let res: NextResponse;
+  if (PUBLIC_DISCOVERY_PATHS.has(pathname)) {
+    res = nextWithRequestId(req, requestId);
+  } else {
+    const denied = authenticate(req);
+    res = denied ? withRequestId(denied, requestId) : nextWithRequestId(req, requestId);
+  }
+
+  // F-17: structured request log (no secrets — path only, never the body).
+  const durationMs = Date.now() - start;
+  console.log('[cowork request]', requestId, req.method, pathname, res.status, `${durationMs}ms`);
+  return res;
 }
 
 export const config = {

@@ -1,8 +1,8 @@
 //
 // Agent bootstrap contract. Only references endpoints that actually exist
 // under /api/cowork/*. The web cockpit cannot drive a real browser, so the
-// manifest intentionally advertises only the read-only data endpoints and
-// the agent-discovery routes that are implemented.
+// manifest advertises the implemented read, create (POST), and delete (DELETE)
+// endpoints plus the agent-discovery routes.
 
 import { COCKPIT_VERSION } from "@/lib/cowork/version";
 
@@ -83,8 +83,9 @@ export const AGENT_STARTUP_SEQUENCE = [
 ] as const;
 
 export const AGENT_OPERATING_RULES = [
-  'The web cockpit is a read-mostly dashboard backed by Prisma. It does not drive a live browser.',
-  'POST endpoints create rows in SQLite; there are no DELETE endpoints yet.',
+  'The web cockpit is a read/create/delete dashboard backed by Prisma. It does not drive a live browser.',
+  'POST endpoints create rows in SQLite; DELETE endpoints exist for /history, /memory/site, /memory/form, and /ai/chat.',
+  'Never trigger a mass-deletion (?all=1 / delete-all) on /history or /ai/chat without explicit user confirmation — these wipe all stored rows.',
   'Treat all returned data as persisted snapshots, not live browser state.',
   'Network, DevTools, and Snapshots views are extension-only capabilities and are not exposed via this API.',
 ] as const;
@@ -157,7 +158,7 @@ export function buildAgentBootstrapContract(baseUrl: string, version: string) {
     identity: {
       name: 'cowork-cockpit',
       version,
-      role: 'read-mostly web dashboard for persisted cowork data',
+      role: 'web dashboard for persisted cowork data (read, create via POST, delete via DELETE)',
       baseUrl,
     },
     startupSequence: withBaseUrl(baseUrl, AGENT_STARTUP_SEQUENCE),
@@ -171,7 +172,7 @@ export function buildAgentBootstrapContract(baseUrl: string, version: string) {
       // (`auth: 'none'`).
       publicBootstrap: `${baseUrl}/api/cowork/agent/bootstrap`,
     },
-    primaryInteractionModel: 'read persisted data via REST; create via POST where available',
+    primaryInteractionModel: 'read persisted data via REST; create via POST and remove via DELETE where available',
     capabilityFamilies: CAPABILITY_FAMILIES,
     operatingRules: AGENT_OPERATING_RULES,
     toolbox: AGENT_TOOLBOX,

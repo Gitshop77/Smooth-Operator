@@ -9,7 +9,7 @@
 
 import type { NextRequest } from 'next/server';
 import { json, badRequest, serverError, withRouteError } from '@/lib/cowork/api/http';
-import { COWORK_EVENTS_BASE, COWORK_EVENTS_TOKEN } from '@/lib/cowork/events/client';
+import { COWORK_EVENTS_BASE, getCoworkEventsToken } from '@/lib/cowork/events/client';
 
 type ImageSize =
   | '1024x1024'
@@ -60,7 +60,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     try {
       upstream = await fetch(`${COWORK_EVENTS_BASE}/image`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Cowork-Token': COWORK_EVENTS_TOKEN },
+        headers: { 'Content-Type': 'application/json', 'X-Cowork-Token': getCoworkEventsToken() },
         body: JSON.stringify({ prompt: body.prompt, size: body.size }),
       });
     } catch (err) {

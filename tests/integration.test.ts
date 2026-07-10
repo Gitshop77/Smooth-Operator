@@ -42,15 +42,14 @@ describe("parseAgentOutput with realistic LLM response samples", () => {
     const raw = `Here is my plan:
 \`\`\`json
 {
-  "thinking": "I will click the login button, then type my email, scroll down to find the submit button, and finish.",
+  "thinking": "I will click the login button, then type my email, scroll down to find the submit button.",
   "evaluation_previous_goal": "Verdict: Success",
   "memory": "On the login page. Need to enter credentials.",
   "next_goal": "Click the login button to open the form.",
   "action": [
     { "type": "click", "index": 5 },
     { "type": "input", "index": 8, "text": "user@example.com" },
-    { "type": "scroll", "down": true, "pages": 1 },
-    { "type": "done", "text": "Submitted the login form.", "success": true }
+    { "type": "scroll", "down": true, "pages": 1 }
   ]
 }
 \`\`\`
@@ -62,12 +61,11 @@ Let me know if you need anything else.`;
     const out = result.output as AgentOutput;
     expect(out.thinking).toContain("click the login button");
     expect(out.next_goal).toContain("login button");
-    expect(out.action).toHaveLength(4);
+    expect(out.action).toHaveLength(3);
     expect(out.action[0]).toEqual({ type: "click", index: 5 });
     // The input action's `clear` field defaults to true via the schema.
     expect(out.action[1]).toEqual({ type: "input", index: 8, text: "user@example.com", clear: true });
     expect(out.action[2]).toEqual({ type: "scroll", down: true, pages: 1 });
-    expect(out.action[3]).toEqual({ type: "done", text: "Submitted the login form.", success: true });
   });
 
   test("parses a response where a string value contains a `}` character (balanced-brace extractor)", async () => {

@@ -133,32 +133,41 @@ const INJECTION_PATTERNS: readonly RegExp[] = INJECTION_PATTERN_SOURCES.map(
 );
 
 /**
- * NFKC-normalize + strip zero-width + invisible characters.
+ * NFKC-normalize + strip ALL invisible / format / Default-Ignorable characters.
  *
- * Defeats attacks like `ig\u200Bnore previous instructions` where a zero-width
- * space is inserted to bypass regex matching. NFKC also normalizes full-width
- * lookalikes (`ｉｇｎｏｒｅ` → `ignore`) so the injection regexes still hit.
- *
- * Stripped characters (exhaustive Unicode zero-width / invisible set):
- *  - U+200B..U+200D   zero-width space, ZWNJ, ZWJ
- *  - U+200E, U+200F   LRM / RLM (bidirectional marks — invisible)
- *  - U+2060           word joiner (WJ)
- *  - U+2061..U+2064   function-application / invisible-operator group
- *  - U+FEFF           BOM / zero-width no-break space
- *  - U+00AD           soft hyphen
- *  - U+180E           mongolian vowel separator (historically invisible)
+ * Defeats attacks like `ig\u200Bnore previous instructions` where an invisible
+ * char is inserted to bypass regex matching. NFKC also normalizes full-width
+ * lookalikes (`ｉｇｎｏｒｅ` → `ignore`) so the injection regexes still hit. After
+ * NFKC, survivors such as U+3164 (→ U+1160) and U+061C collapse into members of
+ * the Default_Ignorable set, so the single regex in INVISIBLE_CHARS_SOURCE strips
+ * them all. The full set (superset of `\p{Cf}`) plus the line/paragraph
+ * separators U+2028/U+2029 are covered — strictly broader than the old fixed set.
  */
+
+/**
+ * Shared source pattern for ALL invisible / format / Default-Ignorable code
+ * points. Used by both {@link normalize} (which STRIPS them) and
+ * {@link ZERO_WIDTH_CHARS} (which DETECTS them in raw text) so the two can
+ * never drift apart. The `\p{Default_Ignorable_Code_Point}` branch is the full
+ * set (superset of `\p{Cf}`); U+2028/U+2029 are appended because they are
+ * invisible line/paragraph separators NOT covered by either property (a page
+ * can smuggle a keyword through them, e.g. `ig\u2028nore`).
+ *
+ * `\p{...}` Unicode property escapes are a RUNTIME RegExp feature (supported in
+ * all modern browsers + the build target), not a compile-time syntax feature —
+ * `tsc` accepts them regardless of the ES2017 target.
+ */
+const INVISIBLE_CHARS_SOURCE = "\\p{Default_Ignorable_Code_Point}|\u2028|\u2029";
+
 function normalize(text: string): string {
-  // Strip the FULL `\p{Cf}` (Default_Ignorable_Code_Point) set plus the line/
-  // paragraph separators (U+2028/U+2029) and Hangul filler (U+3164) \u2014 not just
-  // the previously-hardcoded subset. A malicious page can smuggle an injection
-  // keyword through ANY of these invisible characters (e.g. `ig\u3164nore`),
-  // so we strip every invisible/formatting code point before the redaction
-  // patterns run. TS target is ES2017, so we enumerate the code points
-  // explicitly rather than rely on the `\p{Cf}` unicode property escape.
+  // Strip the FULL set of invisible / format / Default-Ignorable code points
+  // (see INVISIBLE_CHARS_SOURCE) plus the line/paragraph separators U+2028/U+2029.
+  // A malicious page can smuggle an injection keyword through ANY of these
+  // invisible characters (e.g. `ig\u3164nore`); we strip them before the
+  // redaction patterns run so the keyword reassembles and gets redacted.
   return text
     .normalize("NFKC")
-    .replace(/[\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\u115F\u1160\u3164\uFEFF]/g, "");
+    .replace(new RegExp(INVISIBLE_CHARS_SOURCE, "gu"), "");
 }
 
 /**
@@ -277,8 +286,11 @@ const COMPILED_DETECTORS: readonly CompiledDetector[] = INJECTION_DETECTORS.map(
  * {@link sanitizeUntrusted} strips these BEFORE the redaction patterns run,
  * but {@link scanForInjection} runs on the RAW text — so we have to detect
  * them here too. Their mere presence in untrusted text is suspicious.
+ *
+ * Uses the SAME source pattern as {@link normalize} (no `g` flag, so `.test()`
+ * is stateless) so detection stays in lock-step with stripping.
  */
-const ZERO_WIDTH_CHARS = /[\u00AD\u061C\u180E\u200B\u200C\u200D\u2028\u2029\u2060\u3164\uFEFF]/;
+const ZERO_WIDTH_CHARS = new RegExp(INVISIBLE_CHARS_SOURCE, "u");
 
 /**
  * Excessive-repetition threshold for social-engineering detection. Counts
@@ -380,13 +392,29 @@ function hostnameMatches(hostname: string, domain: string): boolean {
 /**
  * Check if a URL is allowed based on the domain allowlist.
  *
- * - If `allowedDomains` is undefined or empty, ALL domains are allowed
- *   (backward-compatible default).
+ * - If `allowedDomains` is undefined or empty AND `requireAllowlist` is
+ *   `false` (the default), ALL domains are allowed (backward-compatible
+ *   default used by navigate/search).
+ * - If `allowedDomains` is undefined or empty AND `requireAllowlist` is
+ *   `true` (the evaluate/JS-execution path), the function FAILS CLOSED and
+ *   returns `false` — JS execution must not run on an unconfigured origin.
  * - Otherwise the URL's hostname must equal an entry or be a subdomain of one.
  * - Invalid URLs always return `false`.
+ *
+ * F-15: only the evaluate/JS-execution path opts into fail-closed via
+ * `requireAllowlist`. Non-evaluate paths keep allow-all-by-default so we
+ * don't change their behavior.
  */
-export function isUrlAllowed(url: string, allowedDomains: string[] | undefined): boolean {
-  if (!allowedDomains || allowedDomains.length === 0) return true;
+export function isUrlAllowed(
+  url: string,
+  allowedDomains: string[] | undefined,
+  requireAllowlist = false,
+): boolean {
+  if (!allowedDomains || allowedDomains.length === 0) {
+    // Fail closed only when the caller explicitly requires an allowlist
+    // (evaluate/JS execution). Otherwise allow-all is the historical default.
+    return !requireAllowlist;
+  }
   try {
     const parsed = new URL(url);
     return allowedDomains.some((domain) => hostnameMatches(parsed.hostname, domain));
@@ -430,7 +458,11 @@ export interface UrlPolicyResult {
  * Combined URL policy check: blocked list takes precedence over allowlist.
  * Returns `{allowed: true}` if the URL passes both checks.
  */
-export function checkUrlAllowed(url: string, config: UrlPolicyConfig): UrlPolicyResult {
+export function checkUrlAllowed(
+  url: string,
+  config: UrlPolicyConfig,
+  requireAllowlist = false,
+): UrlPolicyResult {
   // Scheme floor: reject non-hierarchical schemes (javascript:, file:, data:,
   // blob:) regardless of allow/blocklist config. These schemes can execute
   // code or access local files, and hostname-based checks can't gate them
@@ -447,8 +479,13 @@ export function checkUrlAllowed(url: string, config: UrlPolicyConfig): UrlPolicy
   if (isUrlBlocked(url, config.blockedDomains)) {
     return { allowed: false, reason: "URL domain is blocked" };
   }
-  if (!isUrlAllowed(url, config.allowedDomains)) {
-    return { allowed: false, reason: "URL domain not in allowlist" };
+  if (!isUrlAllowed(url, config.allowedDomains, requireAllowlist)) {
+    return {
+      allowed: false,
+      reason: requireAllowlist
+        ? "JavaScript execution requires a configured domain allowlist; none is set"
+        : "URL domain not in allowlist",
+    };
   }
   return { allowed: true };
 }

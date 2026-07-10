@@ -13,10 +13,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@002191b3668e769a76cadbdb5cc75d0e1fba2a17 # PIN TO A VERIFIED SHA (was actions/checkout@v4)
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@c13dbc3e37918285d1c41b4de90473766006c1e6 # PIN TO A VERIFIED SHA (was actions/setup-node@v4)
         with:
           node-version: '20'
           cache: 'npm'
@@ -30,14 +30,27 @@ jobs:
       - name: Type-check root TypeScript
         run: npx tsc --noEmit
 
-      - name: Run tests
-        run: npm test
+      - name: Run tests with coverage gate
+        # F-31: run the suite under v8 coverage and enforce the thresholds
+        # declared in vitest.config.ts. A PR that drops coverage below the
+        # baseline fails CI.
+        run: npx vitest run --coverage
 
       - name: Build extension
         run: npm run build:extension
 
       - name: verify extension build is in sync (tracked static files only)
         run: |
+          # ------------------------------------------------------------------
+          # ARTIFACT PROVENANCE
+          # chrome-extension/*.js and chrome-extension/chunks/ are gitignored
+          # (esbuild ESM code-split output). They are NOT committed to the repo.
+          # Published releases MUST therefore be rebuilt from the verified
+          # commit via `npm run build:extension` — never ship hand-edited or
+          # stale bundles. The checks below assert (a) the build succeeded and
+          # (b) the committed static files (manifest/html/css) are unchanged so
+          # the tracked inputs still match src/extension/.
+          # ------------------------------------------------------------------
           # Always regenerate the bundles from src/extension/ so the comparison
           # below reflects the current source, not a stale checkout.
           npm run build:extension
@@ -66,12 +79,10 @@ jobs:
             exit 1
           fi
 
-      - name: Audit root dependencies (warn only)
-        continue-on-error: true
+      - name: Audit root dependencies
         run: npm audit --audit-level=high
 
-      - name: Audit mini-services/cowork-events dependencies (warn only)
-        continue-on-error: true
+      - name: Audit mini-services/cowork-events dependencies
         working-directory: mini-services/cowork-events
         run: npm ci && npm audit --audit-level=high
 
@@ -81,10 +92,10 @@ jobs:
       run:
         working-directory: cockpit
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@002191b3668e769a76cadbdb5cc75d0e1fba2a17 # PIN TO A VERIFIED SHA (was actions/checkout@v4)
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@c13dbc3e37918285d1c41b4de90473766006c1e6 # PIN TO A VERIFIED SHA (was actions/setup-node@v4)
         with:
           node-version: '20'
           cache: 'npm'
@@ -93,12 +104,19 @@ jobs:
       - name: Install cockpit dependencies
         run: npm ci
 
-      - name: Audit cockpit dependencies (warn only)
-        continue-on-error: true
+      - name: Audit cockpit dependencies
         run: npm audit --audit-level=high
 
       - name: Generate Prisma client
         run: npm run db:generate
+
+      - name: Apply database schema (verify it applies)
+        # F-26: apply the Prisma schema to a throwaway local SQLite DB so a
+        # schema that fails to apply is caught in CI. cockpit uses sqlite
+        # (DATABASE_URL=file:./db/cowork.db); no external DB service required.
+        env:
+          DATABASE_URL: file:./db/cowork.db
+        run: npm run db:apply
 
       - name: Type-check cockpit
         run: npx tsc --noEmit
@@ -109,21 +127,19 @@ jobs:
       - name: Build cockpit
         run: npm run build
 
-  # SAST placeholder (F-31b). Uncomment to enable GitHub CodeQL scanning.
-  # A full CodeQL setup is heavy; `npm audit` above already covers
-  # dependency/security surface. Enable when a deeper static scan is desired.
-  #
-  # codeql:
-  #   runs-on: ubuntu-latest
-  #   permissions:
-  #     security-events: write
-  #     actions: read
-  #     contents: read
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Initialize CodeQL
-  #       uses: github/codeql-action/init@v3
-  #       with:
-  #         languages: javascript-typescript
-  #     - name: Perform CodeQL Analysis
-  #       uses: github/codeql-action/analyze@v3
+  # SAST: GitHub CodeQL security-and-quality scan for javascript-typescript.
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@002191b3668e769a76cadbdb5cc75d0e1fba2a17 # PIN TO A VERIFIED SHA (was actions/checkout@v4)
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@fd84e0819c822b3348b822010ce00d53708561ea # PIN TO A VERIFIED SHA (was github/codeql-action/init@v3)
+        with:
+          languages: javascript-typescript
+          queries: security-and-quality
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@810c20f4dab23b8316562c4279dc92d4c968dfaf # PIN TO A VERIFIED SHA (was github/codeql-action/analyze@v3)

@@ -1,6 +1,6 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
-import { json, withRouteError, parseLimit } from '@/lib/cowork/api/http';
+import { json, badRequest, withRouteError, parseLimit } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
 export async function GET(req: NextRequest): Promise<Response> {
@@ -20,5 +20,27 @@ export async function GET(req: NextRequest): Promise<Response> {
     }
     const memories = await db.siteMemory.findMany(args);
     return json({ memories });
+  });
+}
+
+// DELETE /api/cowork/memory/site?id=<siteMemoryId>
+// Removes a single per-site memory entry. Gated by the same X-Cowork-Token
+// check as every other /api/cowork/* data route (enforced in middleware.ts).
+// PII-erasure endpoint (F-35) — pairs with the FormMemory DELETE handler.
+export async function DELETE(req: NextRequest): Promise<Response> {
+  return withRouteError(async () => {
+    const id = req.nextUrl.searchParams.get('id');
+    if (!id) return badRequest('id is required');
+    try {
+      await db.siteMemory.delete({ where: { id } });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '';
+      const lower = msg.toLowerCase();
+      if (lower.includes('not found') || lower.includes('p2025')) {
+        return json({ error: 'not found' }, 404);
+      }
+      throw e;
+    }
+    return json({ ok: true });
   });
 }

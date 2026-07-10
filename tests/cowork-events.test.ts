@@ -27,8 +27,9 @@
  * does NOT start the production server.
  */
 
-import { describe, test, expect, beforeAll, afterAll, afterEach } from "vitest";
+import { describe, test, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import type { AddressInfo } from "net";
+import { io as ioClient, type Socket } from "socket.io-client";
 import {
   tokenMatches,
   applyCorsHeaders,
@@ -36,6 +37,78 @@ import {
   evaluateChatJoin,
   DEV_TOKEN,
 } from "../mini-services/cowork-events/security";
+
+// ─── z-ai SDK mock (F-33) ───────────────────────────────────────────────────
+//
+// The real mini-service calls `ZAI.create()` then
+// `zai.chat.completions.create(...)` / `zai.images.generations.create(...)`.
+// Those reach the real upstream API (and read a `.z-ai-config` file). To test
+// the `/chat` streaming success path and the `/image` success path without any
+// network call, we stub the entire `z-ai-web-dev-sdk` module. The stub reads
+// its canned output from a `vi.hoisted` store so each test can configure the
+// streamed chat tokens / returned image base64 independently.
+
+const zaiStore = vi.hoisted(() => ({
+  // Tokens the fake `/chat` SSE stream will emit (concatenated into the
+  // final `content`). When empty, the stream yields only `[DONE]`.
+  chatChunks: [] as string[],
+  // Non-stream `/chat` (body.stream === false) returns this as the message.
+  chatText: "non-streamed reply",
+  // Fake generated image (base64) for `/image`.
+  imageBase64: "BASE64FAKEIMAGE==",
+  // Force the SDK to throw (exercises the route's 500 path if needed).
+  failChat: false,
+  failImage: false,
+}));
+
+// NOTE: the specifier must point at the copy `index.ts` actually imports — the
+// SDK lives in the mini-service's NESTED node_modules, not the repo root, so a
+// bare `vi.mock("z-ai-web-dev-sdk")` (resolved from this test file's location)
+// would never match and the real SDK (which reads a `.z-ai-config` file) would
+// run instead. Mocking the resolved nested path guarantees interception.
+vi.mock("../mini-services/cowork-events/node_modules/z-ai-web-dev-sdk", () => {
+  const encoder = new TextEncoder();
+
+  // Build an SSE ReadableStream from a list of content chunks, terminated by
+  // `data: [DONE]`. Each chunk is one `choices[0].delta.content` token — the
+  // exact shape the server's SSE parser expects.
+  function streamFrom(chunks: string[]): ReadableStream<Uint8Array> {
+    let sse = "";
+    for (const c of chunks) {
+      sse += `data: ${JSON.stringify({ choices: [{ delta: { content: c } }] })}\n\n`;
+    }
+    sse += "data: [DONE]\n\n";
+    const bytes = encoder.encode(sse);
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes);
+        controller.close();
+      },
+    });
+  }
+
+  const instance = {
+    chat: {
+      completions: {
+        create: vi.fn(async (opts: { stream?: boolean } | undefined) => {
+          if (zaiStore.failChat) throw new Error("mock z-ai chat failure");
+          if (opts && opts.stream) return streamFrom(zaiStore.chatChunks);
+          return { choices: [{ message: { content: zaiStore.chatText } }] };
+        }),
+      },
+    },
+    images: {
+      generations: {
+        create: vi.fn(async () => {
+          if (zaiStore.failImage) throw new Error("mock z-ai image failure");
+          return { data: [{ base64: zaiStore.imageBase64 }] };
+        }),
+      },
+    },
+  };
+
+  return { default: { create: vi.fn().mockResolvedValue(instance) } };
+});
 
 // ─── Pure function tests: tokenMatches ─────────────────────────────────────
 
@@ -680,5 +753,333 @@ describe("cowork-events HTTP server (integration)", () => {
     const allBody = await allRes.json();
     const allEvents = allBody.events as Array<{ channel: string }>;
     expect(allEvents.every((e) => e.channel !== "system:status")).toBe(true);
+  });
+});
+
+// ─── Socket.io integration tests (F-33) ─────────────────────────────────────
+//
+// Spins up a SECOND, independent httpServer + socket.io server from a FRESH
+// module instance (via `vi.resetModules()` + a dynamic re-import). This gives us
+// a clean per-IP rate-limit map (the first integration describe above exhausts
+// the 10/min budget with its 429 test) and a clean event buffer, so the
+// streaming / image / replay tests below don't trip the safety rails.
+//
+// The z-ai SDK is fully mocked (see the `vi.mock("z-ai-web-dev-sdk")` block
+// above), so `/chat` and `/image` run with no real upstream call. The
+// `socket.io-client` package is a devDependency of the repo root, so it resolves
+// from the test file.
+//
+// These tests exercise exactly the gaps called out in F-33: `/chat` success
+// streaming, `/image` success, `events:replay` on connect, and the negative
+// case where a hostile (but authenticated-with-a-scoped-sessionId) socket CANNOT
+// read another session's `chat:message` (the F-04 room-scoping that the
+// orchestrator wired into `chat:join` + `evaluateChatJoin`).
+
+describe("cowork-events socket.io (integration)", () => {
+  let server: import("http").Server;
+  let io: { close: (cb?: () => void) => void };
+  let port: number;
+  let token: string;
+  let mod: typeof import("../mini-services/cowork-events/index");
+  let savedWebSocket: unknown;
+
+  const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+  // Connect a socket.io-client to the test server. `auth` is forwarded to the
+  // handshake so we can present either just the shared token, or a token plus a
+  // scoped `sessionId` (to exercise the F-04 room-scoping path).
+  function connect(auth: Record<string, unknown>): Promise<Socket> {
+    return new Promise((resolve, reject) => {
+      const c = ioClient(`http://127.0.0.1:${port}`, {
+        path: "/",
+        auth,
+        transports: ["websocket"],
+        reconnection: false,
+        timeout: 5000,
+      });
+      c.on("connect", () => resolve(c));
+      c.on("connect_error", (err) => reject(err));
+    });
+  }
+
+  beforeAll(async () => {
+    token = "socket-integration-secret-xyz-789";
+    process.env.COWORK_EVENT_TOKEN = token;
+    // Allow any origin for socket.io handshakes in tests. The node
+    // socket.io-client may or may not send an `Origin` header; `*` guarantees
+    // the CORS layer doesn't reject the test connection regardless. This only
+    // affects THIS test server instance (imported fresh below).
+    process.env.COWORK_CORS_ORIGIN = "*";
+    // Ensure the service would start even if NODE_ENV were production — our
+    // token is a real secret, not the dev-token, so refusal is off regardless.
+    process.env.NODE_ENV = "test";
+
+    // Get a FRESH module instance with reset rate-limit + event buffers.
+    vi.resetModules();
+    mod = await import("../mini-services/cowork-events/index");
+    server = mod.httpServer;
+    io = mod.io;
+
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+    const addr = server.address();
+    if (!addr || typeof addr === "string") {
+      throw new Error(`Expected AddressInfo, got: ${JSON.stringify(addr)}`);
+    }
+    port = (addr as AddressInfo).port;
+
+    // jsdom provides a (non-functional) global `WebSocket`. engine.io-client in
+    // Node normally uses the `ws` package; guard against it picking up jsdom's
+    // stub by hiding the global for the duration of these tests, then restore.
+    savedWebSocket = (globalThis as { WebSocket?: unknown }).WebSocket;
+    (globalThis as { WebSocket?: unknown }).WebSocket = undefined;
+  });
+
+  afterAll(async () => {
+    // Restore the global WebSocket we hid in beforeAll.
+    (globalThis as { WebSocket?: unknown }).WebSocket = savedWebSocket;
+    await new Promise<void>((resolve) => {
+      io.close(() => resolve());
+      setTimeout(resolve, 2000).unref();
+    });
+    if (server.listening) {
+      const anyServer = server as unknown as { closeAllConnections?: () => void };
+      if (typeof anyServer.closeAllConnections === "function") {
+        anyServer.closeAllConnections();
+      }
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        setTimeout(resolve, 2000).unref();
+      });
+    }
+  });
+
+  // ── events:replay + system:status on a successful handshake ───────────────
+
+  test("socket.io handshake receives system:status and events:replay", async () => {
+    // Seed a marker event so the replay buffer is non-empty and identifiable.
+    const markerPayload = { probe: "replay-marker", ts: Date.now() };
+    const emitRes = await fetch(`http://127.0.0.1:${port}/emit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Cowork-Token": token },
+      body: JSON.stringify({ channel: "replay:probe", payload: markerPayload }),
+    });
+    expect(emitRes.status).toBe(200);
+
+    const c = ioClient(`http://127.0.0.1:${port}`, {
+      path: "/",
+      auth: { token },
+      transports: ["websocket"],
+      reconnection: false,
+      timeout: 5000,
+    });
+
+    const result = await new Promise<{ status: unknown; replay: unknown[] }>((resolve) => {
+      const data: { status: unknown; replay: unknown[] } = { status: null, replay: [] };
+      c.on("system:status", (s) => {
+        data.status = s;
+      });
+      c.on("events:replay", (e) => {
+        data.replay = e as unknown[];
+        resolve(data);
+      });
+      // Fallback: resolve whatever we have even if events:replay never fires.
+      setTimeout(() => resolve(data), 3000);
+    });
+    c.close();
+
+    // The server emits a `system:status` hello packet on every successful
+    // handshake.
+    expect(result.status).not.toBeNull();
+    expect((result.status as { hello?: boolean }).hello).toBe(true);
+    // And replays the buffered events (including our marker) to the new client.
+    expect(Array.isArray(result.replay)).toBe(true);
+    const found = (result.replay as Array<{ channel: string; payload: unknown }>).find(
+      (e) => e.channel === "replay:probe",
+    );
+    expect(found).toBeDefined();
+    expect(found?.payload).toEqual(markerPayload);
+  });
+
+  // ── /chat success: streaming tokens delivered to the sessionId room ────────
+
+  test("POST /chat streams tokens to the sessionId room over socket.io", async () => {
+    zaiStore.chatChunks = ["Hello", " ", "world"];
+
+    const sessionId = "test-sess-stream";
+    const c = await connect({ token });
+    c.emit("chat:join", sessionId);
+
+    // Collect streamed tokens via socket.io BEFORE issuing the HTTP request,
+    // because the server emits chat:done (and thus finishes the HTTP response)
+    // before the fetch promise resolves.
+    const tokens: string[] = [];
+    let done = false;
+    const donePromise = new Promise<string[]>((resolve) => {
+      c.on("chat:message", (m: { token?: string }) => {
+        if (m?.token) tokens.push(m.token);
+      });
+      c.on("chat:done", () => {
+        done = true;
+        resolve(tokens);
+      });
+      c.on("chat:error", () => resolve(tokens));
+    });
+
+    await delay(150); // let the server process the chat:join
+    const res = await fetch(`http://127.0.0.1:${port}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Cowork-Token": token },
+      body: JSON.stringify({
+        messages: [{ role: "user", content: "hi" }],
+        sessionId,
+        stream: true,
+      }),
+    });
+    expect(res.status).toBe(200);
+    const httpBody = await res.json();
+    expect(httpBody.ok).toBe(true);
+    expect(httpBody.content).toBe("Hello world");
+
+    const got = await Promise.race([donePromise, delay(4000).then(() => tokens)]);
+    expect(done).toBe(true);
+    expect(got.join("")).toBe("Hello world");
+    c.close();
+  });
+
+  // ── /image success: returns base64 and records snapshot:captured ───────────
+
+  test("POST /image returns the generated image and records snapshot:captured", async () => {
+    zaiStore.imageBase64 = "BASE64FAKEIMAGE==";
+    const prompt = "a tiny cat glowing on a phosphor terminal";
+
+    const res = await fetch(`http://127.0.0.1:${port}/image`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Cowork-Token": token },
+      body: JSON.stringify({ prompt, size: "1024x1024" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.base64).toBe("BASE64FAKEIMAGE==");
+    expect(body.prompt).toBe(prompt);
+    expect(body.size).toBe("1024x1024");
+
+    // The generated image is recorded so reconnecting clients see it in
+    // `events:replay`. Verify it landed in the buffer (no live broadcast).
+    const evRes = await fetch(`http://127.0.0.1:${port}/events?since_id=0`, {
+      headers: { "X-Cowork-Token": token },
+    });
+    const evBody = await evRes.json();
+    const snap = (evBody.events as Array<{ channel: string; payload: { prompt?: string } }>).find(
+      (e) => e.channel === "snapshot:captured" && e.payload?.prompt === prompt,
+    );
+    expect(snap).toBeDefined();
+  });
+
+  // ── NEGATIVE: unauthenticated (wrong-token) socket is dropped ─────────────
+
+  test("unauthenticated (wrong-token) socket is dropped and receives nothing", async () => {
+    const c = ioClient(`http://127.0.0.1:${port}`, {
+      path: "/",
+      auth: { token: "completely-wrong-token-aaa" },
+      transports: ["websocket"],
+      reconnection: false,
+      timeout: 5000,
+    });
+
+    let gotReplay = false;
+    let gotStatus = false;
+    let endReason: "disconnect" | "connect_error" | null = null;
+    c.on("events:replay", () => {
+      gotReplay = true;
+    });
+    c.on("system:status", () => {
+      gotStatus = true;
+    });
+    c.on("disconnect", () => {
+      endReason = "disconnect";
+    });
+    c.on("connect_error", () => {
+      endReason = "connect_error";
+    });
+
+    await delay(2500); // long enough for any handshake to be rejected
+    c.close();
+
+    // The connection must NOT stay open and must receive NO data — otherwise an
+    // unauthenticated site could silently read every cockpit event.
+    expect(endReason).not.toBeNull();
+    expect(gotReplay).toBe(false);
+    expect(gotStatus).toBe(false);
+  });
+
+  // ── NEGATIVE: cross-session hostile socket CANNOT read another session ─────
+  //
+  // The hostile client authenticates with a REAL token but a SCOPED sessionId
+  // ("attacker") and then tries to join the victim's room. Because it presented
+  // a scoped sessionId, `chat:join` enforces ownership and rejects the
+  // cross-session join — so when `/chat` streams into the victim room, the
+  // attacker's socket receives nothing.
+
+  test("cross-session: scoped socket CANNOT read another session's chat:message", async () => {
+    zaiStore.chatChunks = ["secret", "-token"];
+
+    const victim = "victim-session-x";
+    const attacker = "attacker-session-y";
+
+    const victimSocket = await connect({ token, sessionId: victim });
+    victimSocket.emit("chat:join", victim); // own room → allowed
+
+    const attackerSocket = await connect({ token, sessionId: attacker });
+    attackerSocket.emit("chat:join", victim); // victim's room → REJECTED
+
+    // Attach listeners BEFORE the request so we don't miss the streamed events.
+    const victimTokens: string[] = [];
+    let victimDone = false;
+    const victimDonePromise = new Promise<string[]>((resolve) => {
+      victimSocket.on("chat:message", (m: { token?: string }) => {
+        if (m?.token) victimTokens.push(m.token);
+      });
+      victimSocket.on("chat:done", () => {
+        victimDone = true;
+        resolve(victimTokens);
+      });
+      victimSocket.on("chat:error", () => resolve(victimTokens));
+    });
+
+    const attackerTokens: string[] = [];
+    attackerSocket.on("chat:message", (m: { token?: string }) => {
+      if (m?.token) attackerTokens.push(m.token);
+    });
+
+    await delay(150); // let both joins be processed
+    const res = await fetch(`http://127.0.0.1:${port}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Cowork-Token": token },
+      body: JSON.stringify({
+        messages: [{ role: "user", content: "hi" }],
+        sessionId: victim, // stream into the VICTIM's room
+        stream: true,
+      }),
+    });
+    expect(res.status).toBe(200);
+
+    // Victim legitimately receives the streamed tokens.
+    const got = await Promise.race([victimDonePromise, delay(4000).then(() => victimTokens)]);
+    expect(victimDone).toBe(true);
+    expect(got.join("")).toBe("secret-token");
+
+    // Attacker (rejected from the victim room) must receive NOTHING.
+    await delay(400); // allow any stray message to arrive (it shouldn't)
+    expect(attackerTokens.length).toBe(0);
+
+    victimSocket.close();
+    attackerSocket.close();
   });
 });

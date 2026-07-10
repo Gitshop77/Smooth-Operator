@@ -149,9 +149,9 @@ export function addLogRow(event: LogEvent, time: string): void {
       appendThinkingEntry(
         "planner",
         `Step ${event.step} · planner`,
-        `decision: ${escapeHtml(event.decision)}` +
-        (event.goal ? `<br>goal: ${escapeHtml(event.goal)}` : "") +
-        (event.plan?.length ? `<br>plan: ${escapeHtml(event.plan.join(" → "))}` : ""),
+        `decision: ${event.decision}` +
+        (event.goal ? `\ngoal: ${event.goal}` : "") +
+        (event.plan?.length ? `\nplan: ${event.plan.join(" → ")}` : ""),
       );
       break;
     case "navigator-step-start":
@@ -170,10 +170,10 @@ export function addLogRow(event: LogEvent, time: string): void {
       appendThinkingEntry(
         "navigator",
         `Step ${event.step} · navigator`,
-        `goal: ${escapeHtml(event.nextGoal)}` +
-        (event.evaluation ? `<br>eval: ${escapeHtml(event.evaluation)}` : "") +
-        (event.memory ? `<br>memory: ${escapeHtml(event.memory)}` : "") +
-        (event.text ? `<br>thinking: ${escapeHtml(event.text)}` : ""),
+        `goal: ${event.nextGoal}` +
+        (event.evaluation ? `\neval: ${event.evaluation}` : "") +
+        (event.memory ? `\nmemory: ${event.memory}` : "") +
+        (event.text ? `\nthinking: ${event.text}` : ""),
       );
       break;
     case "action":
@@ -212,7 +212,7 @@ export function addLogRow(event: LogEvent, time: string): void {
         setRunning(false);
         setLifecycle("error");
         setTaskStatus("failed");
-        appendThinkingEntry("error", `Step ${event.step} · error`, escapeHtml(event.message));
+        appendThinkingEntry("error", `Step ${event.step} · error`, event.message);
       } else {
         setLifecycle("error");
       }
@@ -348,6 +348,13 @@ export function restoreTotalsFromStorage(): void {
       tokenLabel.textContent = `${totalTokens} tokens`;
     }
     if (Array.isArray(s[STORAGE_KEYS.log])) {
+      // Clear any rows already in the DOM + in-memory mirror BEFORE replaying,
+      // so the persisted log is rendered exactly once. Without this, every
+      // STATUS check (fired on each panel open) would append a duplicate copy
+      // on top of the existing log. The persisted cost/token counters above are
+      // already restored, so clearing here does not lose them.
+      logEl.innerHTML = "";
+      logHistory.length = 0;
       // Set the restore guard so addLogRow's persistRunTotals() and cost
       // accumulation are both suppressed during this loop. The stored totals
       // set above are already correct — rebuilding from the log would

@@ -149,9 +149,9 @@ src/extension/              Chrome extension (bundled via esbuild)
     constants.ts            Model URLs (MODEL_REPO_URL + MODEL_BASE_URL), token IDs, architecture
     types.ts                Vision types
 
-tests/                      Vitest test suite (589 test() calls across 23 files)
+tests/                      Vitest test suite (640 test() calls across 29 files)
 
-cockpit/                    Next.js 16 dashboard (read-mostly view over Prisma/SQLite)
+cockpit/                    Next.js 16 dashboard (read + create + delete over Prisma/SQLite — includes POST create and DELETE erase endpoints for history, form memory, site memory, and chat)
   prisma/schema.prisma      SQLite schema (22 models: Tab, Workspace, Session, Task, AgentTrust, SecurityEvent, …)
   src/
     middleware.ts           Auth middleware — X-Cowork-Token on /api/cowork/* (except 5 public discovery routes), constant-time token comparison, fail-closed in production with dev-token
@@ -203,7 +203,7 @@ All scripts use npm. A single `npm install && npm run dev` bootstraps and starts
 - `npm run dev:cockpit` — Next.js cockpit dev server on port 3000 (bound to `127.0.0.1`)
 - `npm run dev:events` — cowork-events mini-service on port 3003 (`tsx watch`)
 - `npm run lint` — ESLint (root)
-- `npm run test` — Vitest suite (589 test() calls across 23 files)
+- `npm run test` — Vitest suite (640 test() calls across 29 files)
 - `npm run test:watch` — Vitest watch mode
 - `npm run test:coverage` — Vitest with coverage
 - `npm run build:extension` — esbuild → `chrome-extension/`
@@ -250,7 +250,7 @@ The `postinstall` hook auto-installs `cockpit/` and `mini-services/cowork-events
 
 ## Testing
 
-Run `npm run test` to execute the Vitest test suite (589 test() calls across 23 files):
+Run `npm run test` to execute the Vitest test suite (640 test() calls across 29 files):
 
 - `tests/unit.test.ts` — Output parser, loop detector, pricing, compaction, secrets, schema coercion
 - `tests/security.test.ts` — Sanitization, injection classifier, domain allowlist, error taxonomy, mode enforcement, secret-leak prevention

@@ -89,7 +89,7 @@ export async function handleFindElements(
         // hidden token) — a page could be probed for secret-laden attributes,
         // and `isSensitive` mirrors the DOM extractor's sensitivity check.
         if (a === "value" && isSensitive(el as HTMLElement)) {
-          v = "[redacted]";
+          v = "[value redacted]";
         } else if (v) {
           // Route attribute values through the same secret redactor used
           // elsewhere, so a stored secret that happens to appear in an

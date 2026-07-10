@@ -37,13 +37,11 @@ export const RUN_STATE_KEY = "open_cowork_run_state";
 export async function saveRunState(state: Partial<RunState>): Promise<void> {
   const cur = (await getRunState()) ?? ({} as RunState);
   // Don't let a normal-flow patch clobber a concurrent STOP request.
-  // If `cur.abortRequested` is true and the patch doesn't set it, preserve true.
-  const preserveAbort = cur.abortRequested === true && state.abortRequested === undefined;
-  const next: RunState = {
-    ...cur,
-    ...state,
-    ...(preserveAbort ? { abortRequested: true } : {}),
-  };
+  // `abortRequested` is monotonic: once true, it stays true. A STOP arriving
+  // between getRunState and set (or a normal-flow patch writing
+  // `abortRequested: false`) must not clear a user's abort.
+  const next: RunState = { ...cur, ...state };
+  if (cur.abortRequested === true) next.abortRequested = true;
   await chrome.storage.session.set({ [RUN_STATE_KEY]: next });
 }
 

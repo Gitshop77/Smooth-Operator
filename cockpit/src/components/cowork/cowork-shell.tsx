@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, MotionConfig, motion } from "framer-motion";
 
 import { useCoworkStore } from "@/hooks/use-cowork-store";
 import { useCoworkWebSocket } from "@/hooks/use-websocket";
@@ -61,33 +61,35 @@ export function CoworkShell() {
   const View = VIEWS[currentView] ?? TabsView;
 
   return (
-    <div className="min-h-screen flex flex-col bg-background">
-      <div className="flex flex-1 min-h-screen">
-        {/* Desktop sidebar — 224px */}
-        <aside className="hidden md:flex w-56 shrink-0 sticky top-0 h-screen border-r border-border">
-          <Sidebar className="border-r-0" />
-        </aside>
+    <MotionConfig reducedMotion="user">
+      <div className="min-h-screen flex flex-col bg-background">
+        <div className="flex flex-1 min-h-screen">
+          {/* Desktop sidebar — 224px */}
+          <aside className="hidden md:flex w-56 shrink-0 sticky top-0 h-screen border-r border-border">
+            <Sidebar className="border-r-0" />
+          </aside>
 
-        {/* Main column */}
-        <div className="flex-1 flex flex-col min-w-0">
-          <Header />
-          <main className="flex-1 p-4 sm:p-6 cowork-scroll">
-            <AnimatePresence mode="wait">
-              <motion.div
-                key={currentView}
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -4 }}
-                transition={{ duration: 0.18, ease: "easeOut" }}
-                className="mx-auto max-w-7xl"
-              >
-                <View />
-              </motion.div>
-            </AnimatePresence>
-          </main>
-          <Footer />
+          {/* Main column */}
+          <div className="flex-1 flex flex-col min-w-0">
+            <Header />
+            <main className="flex-1 p-4 sm:p-6 cowork-scroll">
+              <AnimatePresence mode="wait">
+                <motion.div
+                  key={currentView}
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.18, ease: "easeOut" }}
+                  className="mx-auto max-w-7xl"
+                >
+                  <View />
+                </motion.div>
+              </AnimatePresence>
+            </main>
+            <Footer />
+          </div>
         </div>
       </div>
-    </div>
+    </MotionConfig>
   );
 }

@@ -253,7 +253,7 @@ export function ChatView() {
                 >
                   <p className="whitespace-pre-wrap leading-relaxed">{m.text}</p>
                   {m.id !== "m0" && (
-                    <p className={`text-[10px] mt-1.5 ${m.role === "user" ? "text-primary-foreground/70" : "text-muted-foreground"}`}>
+                    <p className={`text-[10px] mt-1.5 ${m.role === "user" ? "text-primary-foreground" : "text-muted-foreground"}`}>
                       {new Date(m.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                     </p>
                   )}
