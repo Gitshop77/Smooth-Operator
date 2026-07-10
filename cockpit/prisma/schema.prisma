@@ -1,0 +1,507 @@
+// Cowork Web Cockpit — Prisma Schema
+// ============================================================================
+// Mirrors the Cowork Browser's data models so the ported modules in
+// src/lib/cowork/* can swap their in-memory `Map` storage for a real
+// persistence layer. Targets SQLite via `prisma db push`.
+//
+// Conventions:
+//   - IDs are cuid() strings.
+//   - createdAt defaults to now(); updatedAt uses @updatedAt where applicable.
+//   - SQLite has no native enum / JSON type — enums are stored as `String`
+//     (documented inline) and complex/nested values are stored as JSON-encoded
+//     `String` columns (suffix `Json` for clarity, e.g. `treeJson`).
+//   - Foreign keys use Prisma relations; onDelete defaults to NO ACTION to
+//     avoid losing data on parent deletion. Cascade only for children that
+//     cannot exist without the parent (e.g. PinboardItem → Pinboard).
+//   - Indexes on hot lookup paths: url, domain, tabId, sessionId, createdAt.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Auth ───────────────────────────────────────────────────────────────────
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  chatMessages ChatMessage[] @relation("UserChatMessages")
+}
+
+// ─── Tabs & Workspaces ──────────────────────────────────────────────────────
+
+model Workspace {
+  id        String   @id @default(cuid())
+  name      String
+  emoji     String   @default("📁")
+  color     String   @default("#4285f4")
+  order     Int      @default(0)
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tabs      Tab[]
+
+  @@index([order])
+}
+
+model Tab {
+  id             String   @id @default(cuid())
+  url            String
+  title          String   @default("")
+  favicon        String?
+  // status: 'loading' | 'loaded' | 'crashed' | 'idle' (string-typed enum on SQLite)
+  status         String   @default("idle")
+  webContentsId  Int?
+  workspaceId    String?
+  parentId       String?
+  groupId        String?
+  active         Boolean  @default(false)
+  isPinned       Boolean  @default(false)
+  isMuted        Boolean  @default(false)
+  emoji          String?
+  emojiFlash     Boolean  @default(false)
+  partition      String?
+  // JSON-encoded loader flags / source descriptor (TabSource is a free-form string in the ported code).
+  loaderFlags    String?
+  source         String?
+  activeAt       DateTime?
+  lastAccessedAt DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  workspace      Workspace? @relation(fields: [workspaceId], references: [id])
+
+  snapshots        Snapshot[]
+  networkRequests  NetworkRequest[]
+  devtoolsLogs     DevToolsLog[]
+  activityEvents   ActivityEvent[]
+  tasks            Task[]
+  watchJobs        WatchJob[]
+
+  @@index([url])
+  @@index([workspaceId])
+  @@index([groupId])
+  @@index([active])
+  @@index([lastAccessedAt])
+}
+
+// ─── Bookmarks (self-referential tree) ─────────────────────────────────────
+
+model Bookmark {
+  id        String    @id @default(cuid())
+  name      String
+  url       String?
+  // type: 'folder' | 'url' (string-typed enum on SQLite)
+  type      String    @default("url")
+  favicon   String?
+  parentId  String?
+  dateAdded DateTime  @default(now())
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  parent   Bookmark?  @relation("BookmarkTree", fields: [parentId], references: [id])
+  children Bookmark[] @relation("BookmarkTree")
+
+  @@index([url])
+  @@index([parentId])
+}
+
+// ─── History ────────────────────────────────────────────────────────────────
+
+model HistoryEntry {
+  id            String   @id @default(cuid())
+  url           String   @unique
+  title         String   @default("")
+  visitCount    Int      @default(1)
+  firstVisitedAt DateTime @default(now())
+  lastVisitedAt DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([lastVisitedAt])
+}
+
+// ─── Password Vault ────────────────────────────────────────────────────────
+// NOTE: The password vault feature has been removed. It previously stored
+// plaintext passwords into a column named `passwordEncrypted` because the
+// referenced `src/lib/cowork/db/crypto.ts` module never existed. Rather than
+// ship a plaintext-password security vulnerability, the entire feature
+// (route, Prisma model, and UI view) has been deleted. Do not re-add it
+// without first implementing a real AES-256-GCM encryption layer.
+
+// ─── Sessions (browser partitions) ─────────────────────────────────────────
+
+model Session {
+  id            String   @id @default(cuid())
+  name          String   @unique
+  partition     String
+  cookieStoreId String?
+  isIncognito   Boolean  @default(false)
+  isDefault     Boolean  @default(false)
+  userAgent     String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  chatMessages ChatMessage[]
+
+  @@index([partition])
+}
+
+// ─── Extensions ────────────────────────────────────────────────────────────
+
+model Extension {
+  id            String   @id @default(cuid())
+  name          String
+  version       String
+  description   String?
+  // Full manifest serialized as JSON.
+  manifestJson  String?
+  isInstalled   Boolean  @default(true)
+  isEnabled     Boolean  @default(true)
+  // source: 'chrome-import' | 'gallery' | 'local' (string-typed enum on SQLite)
+  source        String   @default("local")
+  trustLevel    String   @default("unknown")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([name])
+  @@index([source])
+}
+
+// ─── Snapshots (tab DOM trees) ─────────────────────────────────────────────
+
+model Snapshot {
+  id          String   @id @default(cuid())
+  tabId       String
+  // JSON-encoded accessibility/DOM tree (AccessibilityNode[]).
+  treeJson    String
+  capturedAt  DateTime @default(now())
+
+  tab         Tab      @relation(fields: [tabId], references: [id], onDelete: Cascade)
+
+  @@index([tabId])
+  @@index([capturedAt])
+}
+
+// ─── Security Events ───────────────────────────────────────────────────────
+
+model SecurityEvent {
+  id         String   @id @default(cuid())
+  // type: 'prompt-injection' | 'script-injection' | 'network-block' | 'secret-leak' | 'behavior-critical' | 'anomaly' | 'zero-day' | 'exfiltration-attempt' | 'blocked' | 'warned' (string-typed enum on SQLite)
+  type       String
+  // severity: 'info' | 'low' | 'medium' | 'high' | 'critical'
+  severity   String   @default("info")
+  // category: 'network' | 'script' | 'form' | 'outbound' | 'behavior' | 'content'
+  category   String?
+  // action: 'auto_block' | 'agent_block' | 'user_allowed' | 'logged' | 'flagged'
+  action     String?
+  sourceUrl  String?
+  domain     String?
+  tabId      String?
+  // JSON-encoded full event payload (SecurityEvent.details).
+  details    String?
+  blocked    Boolean  @default(false)
+  confidence Int?
+  falsePositive Boolean?
+  createdAt  DateTime @default(now())
+
+  @@index([type])
+  @@index([severity])
+  @@index([createdAt])
+  @@index([domain])
+}
+
+// ─── Agent Trust ───────────────────────────────────────────────────────────
+// Persistent per-agent trust grants (T3 trusted domains, etc.).
+
+model AgentTrust {
+  id          String    @id @default(cuid())
+  agentId     String
+  name        String?
+  // trustLevel: 'T1' (modal) | 'T2' (per-domain window) | 'T3' (persistent) | 'T4' (global window)
+  trustLevel  String    @default("T1")
+  // JSON-encoded scope, e.g. { domains: ["example.com"], minutes: 30 }
+  scope       String?
+  grantedAt   DateTime  @default(now())
+  lastUsedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([agentId])
+  @@index([trustLevel])
+}
+
+// ─── Tasks (AI agent workflows) ────────────────────────────────────────────
+
+model Task {
+  id          String   @id @default(cuid())
+  agentId     String?
+  tabId       String?
+  title       String
+  description String?
+  // status: 'pending' | 'running' | 'paused' | 'waiting-approval' | 'ready-to-resume' | 'done' | 'failed' | 'cancelled'
+  status      String   @default("pending")
+  // JSON-encoded TaskStep[].
+  stepsJson   String   @default("[]")
+  currentStep Int      @default(0)
+  // JSON-encoded results array.
+  resultsJson String   @default("[]")
+  assignedTo  String?
+  createdBy   String?
+  completedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tab         Tab?     @relation(fields: [tabId], references: [id])
+
+  @@index([agentId])
+  @@index([status])
+  @@index([tabId])
+  @@index([createdAt])
+}
+
+// ─── Workflows (recurring scheduled step sequences) ────────────────────────
+
+model Workflow {
+  id            String    @id @default(cuid())
+  name          String
+  description   String?
+  // JSON-encoded WorkflowStep[].
+  stepsJson     String    @default("[]")
+  // JSON-encoded WorkflowVariables.
+  variablesJson String?
+  isRecurring   Boolean   @default(false)
+  scheduleCron  String?
+  lastRunAt     DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([name])
+  @@index([isRecurring])
+}
+
+// ─── Pinboards ─────────────────────────────────────────────────────────────
+
+model Pinboard {
+  id        String   @id @default(cuid())
+  name      String
+  emoji     String   @default("📌")
+  color     String   @default("#4285f4")
+  // layout: 'default' | 'spacious' | 'dense'
+  layout    String   @default("default")
+  // background: 'dark' | 'light'
+  background String  @default("dark")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items     PinboardItem[]
+
+  @@index([name])
+}
+
+model PinboardItem {
+  id          String   @id @default(cuid())
+  pinboardId  String
+  tabId       String?
+  url         String?
+  title       String?
+  description String?
+  content     String?
+  thumbnail   String?
+  note        String?
+  sourceUrl   String?
+  // type: 'link' | 'image' | 'text' | 'quote'
+  type        String   @default("link")
+  position    Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  pinboard    Pinboard @relation(fields: [pinboardId], references: [id], onDelete: Cascade)
+
+  @@index([pinboardId])
+  @@index([url])
+}
+
+// ─── Site Memory (per-domain visit history & diffs) ────────────────────────
+
+model SiteMemory {
+  id         String   @id @default(cuid())
+  domain     String
+  // JSON-encoded SiteData (visits[], diffs[], stats).
+  dataJson   String
+  version    Int      @default(1)
+  capturedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([domain])
+  @@index([domain])
+  @@index([capturedAt])
+}
+
+// ─── Form Memory (autofill data) ───────────────────────────────────────────
+
+model FormMemory {
+  id            String   @id @default(cuid())
+  domain        String
+  // JSON-encoded DomainFormData (entries[]).
+  formDataJson  String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([domain])
+  @@index([domain])
+}
+
+// ─── Network Capture ───────────────────────────────────────────────────────
+
+model NetworkRequest {
+  id           String   @id @default(cuid())
+  tabId        String
+  method       String
+  url          String
+  status       Int?
+  mimeType     String?
+  resourceType String?
+  // Truncated to a sane limit by the capture layer.
+  requestBody  String?
+  responseBody String?
+  durationMs   Int?
+  failed       Boolean  @default(false)
+  errorText    String?
+  timestamp    DateTime @default(now())
+
+  tab          Tab      @relation(fields: [tabId], references: [id], onDelete: Cascade)
+
+  @@index([tabId])
+  @@index([url])
+  @@index([timestamp])
+}
+
+// ─── DevTools Console Capture ──────────────────────────────────────────────
+
+model DevToolsLog {
+  id        String   @id @default(cuid())
+  tabId     String
+  // level: 'log' | 'info' | 'warn' | 'error' | 'debug' | 'verbose'
+  level     String   @default("log")
+  message   String
+  // JSON-encoded string[] of arg previews.
+  argsJson  String?
+  source    String?
+  line      Int?
+  column    Int?
+  stackTrace String?
+  timestamp DateTime @default(now())
+
+  tab       Tab      @relation(fields: [tabId], references: [id], onDelete: Cascade)
+
+  @@index([tabId])
+  @@index([level])
+  @@index([timestamp])
+}
+
+// ─── MCP Tool Calls (audit log of every MCP tool invocation) ───────────────
+
+model MCPToolCall {
+  id         String   @id @default(cuid())
+  toolName   String
+  // JSON-encoded tool args (Zod-validated input).
+  argsJson   String?
+  // JSON-encoded tool result.
+  resultJson String?
+  agentId    String?
+  sessionId  String?
+  // status: 'success' | 'error' | 'pending'
+  status     String   @default("success")
+  durationMs Int?
+  errorMessage String?
+  createdAt  DateTime @default(now())
+
+  @@index([toolName])
+  @@index([agentId])
+  @@index([sessionId])
+  @@index([createdAt])
+}
+
+// ─── Activity Events (cross-cutting audit log) ─────────────────────────────
+
+model ActivityEvent {
+  id           String   @id @default(cuid())
+  type         String
+  tabId        String?
+  agentId      String?
+  summary      String
+  // JSON-encoded event-specific metadata.
+  metadataJson String?
+  createdAt    DateTime @default(now())
+
+  tab          Tab?     @relation(fields: [tabId], references: [id], onDelete: Cascade)
+
+  @@index([type])
+  @@index([tabId])
+  @@index([agentId])
+  @@index([createdAt])
+}
+
+// ─── Watch Jobs (scheduled background page watchers) ───────────────────────
+
+model WatchJob {
+  id              String    @id @default(cuid())
+  url             String
+  selector        String?
+  // diffMode: 'content' | 'title' | 'title-or-content' | 'text-length'
+  diffMode        String    @default("content")
+  intervalSec     Int       @default(3600)
+  enabled         Boolean   @default(true)
+  lastFingerprint String?
+  lastHash        String?
+  lastTitle       String?
+  lastError       String?
+  changeCount     Int       @default(0)
+  lastChangeAt    DateTime?
+  lastCheckedAt   DateTime?
+  tabId           String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  tab             Tab?      @relation(fields: [tabId], references: [id])
+
+  @@index([url])
+  @@index([enabled])
+}
+
+// ─── Chat Messages (LLM conversation history) ──────────────────────────────
+
+model ChatMessage {
+  id         String   @id @default(cuid())
+  // role: 'user' | 'assistant' | 'system' | 'tool'
+  role       String
+  content    String
+  sessionId  String?
+  agentId    String?
+  tokensUsed Int?
+  model      String?
+  // JSON-encoded tool calls / function calls.
+  toolCallsJson String?
+  userId     String?
+  createdAt  DateTime @default(now())
+
+  user       User?    @relation("UserChatMessages", fields: [userId], references: [id])
+  session    Session? @relation(fields: [sessionId], references: [id])
+
+  @@index([sessionId])
+  @@index([agentId])
+  @@index([userId])
+  @@index([createdAt])
+}

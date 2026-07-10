@@ -1,0 +1,22 @@
+/** `dropdown_options` action handler — list the options of a native `<select>`. */
+
+import type { ActionResult } from "../../types";
+import type { Action } from "../schema";
+import { resolveElement } from "../helpers";
+import type { ActionContext } from "./types";
+
+export async function handleDropdownOptions(
+  ctx: ActionContext,
+  action: Extract<Action, { type: "dropdown_options" }>,
+): Promise<ActionResult> {
+  const { state } = ctx;
+  const el = resolveElement(state, action.index);
+  if (!(el instanceof HTMLSelectElement)) throw new Error(`element [${action.index}] is not a <select>`);
+  const options = Array.from(el.options).map((o, i) => `${i}: ${o.textContent?.trim() || o.value}`);
+  return {
+    action,
+    success: true,
+    message: `Found ${options.length} options`,
+    extractedContent: `Dropdown options for [${action.index}]:\n${options.join("\n")}`,
+  };
+}

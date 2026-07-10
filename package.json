@@ -1,0 +1,45 @@
+{
+  "name": "open-cowork-chrome-extension",
+  "version": "0.3.1",
+  "private": true,
+  "scripts": {
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "build:extension": "tsx esbuild.config.ts",
+    "build:cockpit": "cd cockpit && npm run db:generate && npx next build",
+    "dev:ext": "tsx esbuild.config.ts --watch",
+    "dev:cockpit": "cd cockpit && npm run db:generate && npx next dev -H 127.0.0.1",
+    "dev:events": "cd mini-services/cowork-events && npx tsx watch index.ts",
+    "dev": "concurrently --names \"ext,cockpit,events\" --prefix-colors \"blue,green,magenta\" \"npm:dev:ext\" \"npm:dev:cockpit\" \"npm:dev:events\"",
+    "build:all": "npm run build:extension && npm run build:cockpit",
+    "postinstall": "npm --prefix cockpit install && npm --prefix mini-services/cowork-events install"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "3.8.1",
+    "onnxruntime-web": "1.23.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.287",
+    "@types/node": "^22.20.0",
+    "@typescript-eslint/eslint-plugin": "^8.63.0",
+    "@typescript-eslint/parser": "^8.63.0",
+    "@vitest/coverage-v8": "^4.1.10",
+    "concurrently": "^9.2.3",
+    "esbuild": "^0.28.1",
+    "eslint": "^10.6.0",
+    "jsdom": "^25.0.1",
+    "tsx": "^4.23.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  },
+  "description": "Open-source agentic browser control Chrome extension",
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "overrides": {
+    "flatted": "^3.4.2"
+  }
+}

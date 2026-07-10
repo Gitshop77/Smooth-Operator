@@ -1,0 +1,89 @@
+# Dependabot configuration — keeps dependencies up-to-date.
+#
+# The project uses npm as the default package manager. All scripts work with
+# `npm run`. Dependabot updates package.json + package-lock.json (npm lockfile).
+# CI uses `npm ci` (frozen lockfile) — if Dependabot updates package.json but
+# not package-lock.json, CI will fail. Dependabot updates both automatically.
+
+version: 2
+
+updates:
+  # Root package — the agent library + Chrome extension
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    groups:
+      dev-deps:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+      prod-deps:
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # Cockpit package — the Next.js dashboard
+  - package-ecosystem: "npm"
+    directory: "/cockpit"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(cockpit)"
+      include: "scope"
+    groups:
+      cockpit-dev-deps:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+      cockpit-prod-deps:
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # Mini-service package — the cowork-events WebSocket service
+  - package-ecosystem: "npm"
+    directory: "/mini-services/cowork-events"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "deps(events)"
+      include: "scope"
+    groups:
+      events-deps:
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # GitHub Actions — keep action versions current
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "ci"
+      include: "scope"

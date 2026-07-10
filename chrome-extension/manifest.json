@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Open Cowork — Agentic Browser Control",
+  "version": "0.3.1",
+  "description": "Open-source agentic Chrome extension. Give it a prompt and it autonomously reads, reasons, clicks and types across any of your open tabs. Planner + Navigator multi-agent architecture.",
+  "minimum_chrome_version": "116",
+  "permissions": ["sidePanel", "scripting", "tabs", "activeTab", "storage", "alarms", "debugger", "notifications", "downloads", "unlimitedStorage", "power"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "action": { "default_title": "Open Open Cowork" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "background": { "service_worker": "background.js", "type": "module" },
+  "options_ui": { "page": "options.html", "open_in_tab": true },
+  "icons": {
+    "16": "icons/icon.png",
+    "32": "icons/icon.png",
+    "48": "icons/icon.png",
+    "128": "icons/icon.png"
+  },
+  "commands": {
+    "toggle-side-panel": {
+      "suggested_key": {
+        "default": "Ctrl+E",
+        "mac": "Command+E"
+      },
+      "description": "Toggle Open Cowork side panel"
+    },
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+O",
+        "mac": "Command+Shift+O"
+      }
+    }
+  }
+}

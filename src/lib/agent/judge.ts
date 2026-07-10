@@ -1,0 +1,239 @@
+/**
+ * Judge — a post-hoc LLM evaluation of whether the task actually succeeded.
+ *
+ * The agent self-reports success, but agents sometimes hallucinate. The judge
+ * reads the full trajectory + the task + the agent's final result, then
+ * independently evaluates whether the task was actually completed.
+ *
+ * The judge's verdict does NOT override the agent's self-report — both values
+ * are returned and the caller decides how to reconcile them.
+ */
+
+import type { HistoryItem } from "./types";
+import { wrapUntrusted } from "./security";
+// use the shared balanced-brace JSON extractor from output-parser
+// instead of a duplicate implementation.
+import { extractJson } from "./output-parser";
+
+/** Maximum characters of `extractedContent` to include per history entry. */
+const MAX_EXTRACT_SNIPPET = 200;
+
+/** Maximum number of characters to include from the agent's final summary. */
+const MAX_SUMMARY_SNIPPET = 4000;
+
+/** Result returned by the judge LLM. */
+export interface JudgementResult {
+  /** The judge's step-by-step reasoning, or null if the LLM omitted it. */
+  reasoning: string | null;
+  /** True = task succeeded. */
+  verdict: boolean;
+  /** ≤ 5 sentences explaining why the task failed (null if verdict=true). */
+  failureReason: string | null;
+  /** True if the task was impossible (vague instructions, broken site, etc.). */
+  impossibleTask: boolean;
+  /** True if the agent hit a CAPTCHA during execution. */
+  reachedCaptcha: boolean;
+}
+
+/** Inputs to {@link judgeTask}. */
+export interface JudgeTaskArgs {
+  /** Original user task. */
+  task: string;
+  /** Full action history. */
+  history: HistoryItem[];
+  /** The agent's self-reported final result. */
+  agentResult: { success: boolean; text: string };
+  /** Low-level LLM call function (systemPrompt, userMessage) → raw response. */
+  llmCall: (systemPrompt: string, userMessage: string) => Promise<string>;
+  /** Optional cost callback fired once per judge LLM call. Lets the agent
+   *  loop accrue judge cost into the same budget tracker used for the
+   *  navigator + planner.
+   *
+   *  the callback MAY be async. `judgeTask` AWAITS it OUTSIDE its
+   *  own try/catches so a cost callback
+   *  propagates up to `maybeJudgeAndFinalize`'s catch — which finalizes the
+   *  run as FAILURE (not "judge agreement"). A throw here MUST propagate so
+   *  the run is aborted rather than silently finalized as judge-agreement. */
+  onCost?: (usage: {
+    tokensIn: number;
+    tokensOut: number;
+    model: string;
+    costUsd: number;
+    /** Surfaced so the caller can recompute cost with the cacheRead discount. */
+    reasoningTokens?: number;
+    cachedInputTokens?: number;
+  }) => void | Promise<void>;
+  /**
+   * Optional model name for cost estimation. The judge's `llmCall` wrapper
+   * doesn't return the model name, so the judge can't look up pricing on its
+   * own. When provided, `onCost` reports the real cost; when omitted, cost
+   * is reported as 0 (safe but under-reported).
+   */
+  modelForCost?: string;
+}
+
+/**
+ * System prompt for the judge. Instructs it to evaluate evidence (not the
+ * agent's claims) and to flag impossible tasks + CAPTCHAs separately from
+ * the success verdict.
+ */
+export const JUDGE_PROMPT = `You are a judge evaluating whether an autonomous browser agent successfully completed a task.
+
+You will see:
+1. The original task (what the user asked for)
+2. The agent's action history (what it did, step by step)
+3. The agent's final result (its self-reported success + summary)
+
+Your job is to INDEPENDENTLY evaluate whether the task was actually completed. Be initially doubtful of the agent's self-reported success — agents sometimes claim success when they didn't actually finish.
+
+Evaluate based on EVIDENCE in the action history, not the agent's claims. For example:
+- If the task was "fill the form and submit", verify that a submit action was taken AND no error was seen afterward.
+- If the task was "find the price", verify that the price was actually extracted and reported.
+- If the task was "answer all 8 questions", verify that 8 distinct answers were given.
+
+Return JSON:
+{
+  "reasoning": "Your step-by-step evaluation of the evidence",
+  "verdict": true/false,
+  "failureReason": "If verdict=false, explain why (max 5 sentences). If verdict=true, null.",
+  "impossibleTask": true/false,
+  "reachedCaptcha": true/false
+}
+
+Rules:
+- verdict=true ONLY if you have positive evidence the task was completed.
+- If the agent called done(success=true) but you can't find evidence of completion, set verdict=false.
+- If the task was impossible (broken site, login wall, CAPTCHA), set impossibleTask=true and verdict=false.
+- If the agent hit a CAPTCHA during execution, set reachedCaptcha=true (regardless of verdict).`;
+
+/**
+ * Render a single history item as text for the judge.
+ * Truncates extracted content to keep the prompt bounded. Wraps each snippet
+ * in `<untrusted>` so the judge LLM can't be prompt-injected by a malicious
+ * page (extracted content is page-derived and therefore untrusted).
+ */
+function renderHistoryItem(h: HistoryItem): string {
+  let s = `Step ${h.step} (${h.agent}):\n`;
+  if (h.evaluation) s += `  Evaluation: ${h.evaluation}\n`;
+  if (h.memory) s += `  Memory: ${h.memory}\n`;
+  if (h.goal) s += `  Goal: ${h.goal}\n`;
+  // Null-guard `h.results` — older history items (or hand-built test fixtures)
+  // may have `results: undefined`. Without this, `h.results.length` throws.
+  if (h.results?.length) {
+    s += `  Actions:\n`;
+    for (const r of h.results) {
+      s += `    - ${r.action.type}: ${r.message}${r.success ? "" : " (FAILED)"}\n`;
+      if (r.extractedContent) {
+        // Truncate AND add an ellipsis when truncated so the judge can tell
+        // the snippet was cut short (otherwise it might infer the task
+        // failed because the data "ended abruptly").
+        const full = r.extractedContent;
+        const snippet = full.slice(0, MAX_EXTRACT_SNIPPET);
+        const ellipsis = full.length > MAX_EXTRACT_SNIPPET ? "…" : "";
+        s += `      Extracted: ${wrapUntrusted(snippet + ellipsis)}\n`;
+      }
+    }
+  }
+  return s;
+}
+
+/** Truthy values we accept as a `true` boolean from the judge LLM. */
+// Handle all case variants of "true" (True/TRUE) + "yes" (Yes/YES). Without
+// this, a judge LLM emitting `"verdict": "True"` (capitalized) would be
+// treated as false → false-negative verdict. Matches flexibleBoolean's case
+// coverage in schema.ts.
+const TRUTHY_BOOLEANS = new Set<unknown>([
+  true, 1, "1", "true", "True", "TRUE", "yes", "Yes", "YES",
+]);
+
+/** Coerce a parsed JSON value to a JudgementResult with lenient booleans. */
+function coerceJudgement(parsed: Record<string, unknown>): JudgementResult {
+  return {
+    reasoning: typeof parsed.reasoning === "string" ? parsed.reasoning : null,
+    // Loosen boolean coercion — LLMs sometimes emit "true" (string) or 1
+    // (number) instead of a JSON `true`. Accept all the common variants.
+    verdict: TRUTHY_BOOLEANS.has(parsed.verdict),
+    failureReason: typeof parsed.failureReason === "string" ? parsed.failureReason : null,
+    impossibleTask: TRUTHY_BOOLEANS.has(parsed.impossibleTask),
+    reachedCaptcha: TRUTHY_BOOLEANS.has(parsed.reachedCaptcha),
+  };
+}
+
+/**
+ * Run the judge on a completed task.
+ *
+ * @returns The judge's verdict, or `null` if the judge LLM call failed or
+ *          returned an unparseable response. Returning `null` (rather than
+ *          throwing) ensures a judge failure can't crash the run — a null
+ *          verdict is treated as judge agreement.
+ */
+export async function judgeTask(args: JudgeTaskArgs): Promise<JudgementResult | null> {
+  const { task, history, agentResult, llmCall, onCost, modelForCost } = args;
+
+  const historyText = history.map(renderHistoryItem).join("\n");
+
+  const truncatedSummary = agentResult.text.slice(0, MAX_SUMMARY_SNIPPET);
+  const userMessage = `Task: ${task}
+
+Agent's final result:
+- Self-reported success: ${agentResult.success}
+- Summary: ${truncatedSummary}
+
+Action history:
+${historyText}
+
+Evaluate whether the task was actually completed.`;
+
+// split the LLM-call try/catch from the onCost call so a
+  // budget-exceeded throw from `onCost` (raised by the cost callback)
+  // propagates UP to `maybeJudgeAndFinalize`'s catch — which finalizes the
+  // run as FAILURE.
+  let raw: string;
+  try {
+    raw = await llmCall(JUDGE_PROMPT, userMessage);
+  } catch {
+    // Judge LLM failure — don't crash the run. Return null (treated as
+    // judge agreement so the run isn't blocked by a broken judge).
+    return null;
+  }
+
+  // Best-effort cost tracking — the judge's `llmCall` doesn't return usage,
+  // so we estimate from the prompt + completion lengths. The model name is
+  // passed via `args.modelForCost` (the orchestrator knows which model the
+  // planner/navigator used). Without it, estimateCost returns 0 for unknown
+  // models — safe but under-reports the judge's cost.
+  //
+  // AWAIT `onCost` OUTSIDE any try/catch so a budget-exceeded
+  // throw propagates to `maybeJudgeAndFinalize`'s catch (which finalizes
+  // the run as FAILURE when the budget is exceeded).
+  if (onCost) {
+    let tokensIn = 0;
+    let tokensOut = 0;
+    let costUsd = 0;
+    try {
+      tokensIn = Math.ceil((JUDGE_PROMPT.length + userMessage.length) / 4);
+      tokensOut = Math.ceil(raw.length / 4);
+      const { estimateCost } = await import("./llm/pricing");
+      costUsd = modelForCost
+        ? estimateCost(modelForCost, tokensIn, tokensOut)
+        : 0;
+    } catch {
+      // Pricing import / estimateCost failed — report zero cost (safe
+      // default; onCost still fires so the dispatcher sees the call).
+    }
+    // Propagates budget-exceeded throws to the caller.
+    await onCost({ tokensIn, tokensOut, model: "judge", costUsd });
+  }
+
+  // use the shared extractJson from output-parser (handles markdown
+  // fences + balanced-brace extraction). If the extracted text isn't valid
+  // JSON, return null (judge failure → treat as agreement, never block).
+  try {
+    const jsonText = extractJson(raw);
+    const parsed = JSON.parse(jsonText) as Record<string, unknown>;
+    return coerceJudgement(parsed);
+  } catch {
+    // LLM produced unparseable JSON — treat as judge agreement.
+    return null;
+  }
+}

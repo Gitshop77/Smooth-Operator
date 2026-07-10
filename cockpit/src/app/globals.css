@@ -1,0 +1,204 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* ─── Light palette (warm cream + terracotta accent) ──────────────────────── */
+:root {
+  --radius: 0.625rem; /* 10px — inputs/buttons; panels use 16px via radius-xl */
+  --background: oklch(0.965 0.006 81);   /* #F5F4EE warm cream */
+  --foreground: oklch(0.27 0.003 75);    /* #262624 warm charcoal */
+  --card: oklch(1 0 0);                  /* #FFFFFF */
+  --card-foreground: oklch(0.27 0.003 75);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.27 0.003 75);
+  --primary: oklch(0.647 0.146 41);      /* #D97757 terracotta/clay */
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.98 0.005 80);     /* #FAF9F5 */
+  --secondary-foreground: oklch(0.27 0.003 75);
+  --muted: oklch(0.965 0.006 81);        /* matches bg, subtle */
+  --muted-foreground: oklch(0.49 0.004 80); /* #6B6A66 */
+  --accent: oklch(0.94 0.006 80);        /* subtle warm hover */
+  --accent-foreground: oklch(0.27 0.003 75);
+  --destructive: oklch(0.535 0.142 28);  /* #C0574B muted warm red */
+  --border: oklch(0.905 0.006 80);       /* #E5E3DB */
+  --input: oklch(0.905 0.006 80);
+  --ring: oklch(0.647 0.146 41);         /* terracotta focus */
+  --chart-1: oklch(0.647 0.146 41);      /* terracotta */
+  --chart-2: oklch(0.62 0.07 135);       /* muted sage green */
+  --chart-3: oklch(0.7 0.07 75);         /* warm ochre */
+  --chart-4: oklch(0.55 0.06 50);        /* warm taupe */
+  --chart-5: oklch(0.535 0.142 28);      /* warm red */
+  --sidebar: oklch(0.98 0.005 80);       /* #FAF9F5 — slightly lighter than bg */
+  --sidebar-foreground: oklch(0.27 0.003 75);
+  --sidebar-primary: oklch(0.647 0.146 41);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.94 0.006 80);
+  --sidebar-accent-foreground: oklch(0.27 0.003 75);
+  --sidebar-border: oklch(0.905 0.006 80);
+  --sidebar-ring: oklch(0.647 0.146 41);
+}
+
+/* ─── Dark palette (warm dark charcoal + terracotta accent) ───────────────── */
+.dark {
+  --background: oklch(0.27 0.003 75);    /* #262624 */
+  --foreground: oklch(0.94 0.004 75);    /* #ECEBE6 */
+  --card: oklch(0.32 0.003 75);          /* #30302E */
+  --card-foreground: oklch(0.94 0.004 75);
+  --popover: oklch(0.32 0.003 75);
+  --popover-foreground: oklch(0.94 0.004 75);
+  --primary: oklch(0.647 0.146 41);      /* #D97757 terracotta */
+  --primary-foreground: oklch(0.98 0.005 80); /* warm cream on terracotta */
+  --secondary: oklch(0.36 0.003 75);     /* subtle warm raised surface */
+  --secondary-foreground: oklch(0.94 0.004 75);
+  --muted: oklch(0.32 0.003 75);         /* matches card */
+  --muted-foreground: oklch(0.71 0.004 75); /* #A8A6A0 */
+  --accent: oklch(0.36 0.003 75);        /* subtle warm hover */
+  --accent-foreground: oklch(0.94 0.004 75);
+  --destructive: oklch(0.535 0.142 28);  /* #C0574B */
+  --border: oklch(0.40 0.004 75);        /* #3D3B38 */
+  --input: oklch(0.40 0.004 75);
+  --ring: oklch(0.647 0.146 41);
+  --chart-1: oklch(0.647 0.146 41);      /* terracotta */
+  --chart-2: oklch(0.65 0.08 135);       /* muted sage green */
+  --chart-3: oklch(0.72 0.08 75);        /* warm ochre */
+  --chart-4: oklch(0.6 0.06 50);         /* warm taupe */
+  --chart-5: oklch(0.535 0.142 28);      /* warm red */
+  --sidebar: oklch(0.27 0.003 75);       /* matches bg */
+  --sidebar-foreground: oklch(0.94 0.004 75);
+  --sidebar-primary: oklch(0.647 0.146 41);
+  --sidebar-primary-foreground: oklch(0.98 0.005 80);
+  --sidebar-accent: oklch(0.32 0.003 75);
+  --sidebar-accent-foreground: oklch(0.94 0.004 75);
+  --sidebar-border: oklch(0.40 0.004 75);
+  --sidebar-ring: oklch(0.647 0.146 41);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "cv11", "ss01";
+    font-variation-settings: "opsz" 32;
+  }
+}
+
+/* ─── Cowork Cockpit custom scrollbar ─────────────────────────────────────── */
+.cowork-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--muted-foreground) 30%, transparent) transparent;
+}
+.cowork-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.cowork-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.cowork-scroll::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--muted-foreground) 20%, transparent);
+  border-radius: 9999px;
+  border: 1px solid transparent;
+  background-clip: content-box;
+}
+.cowork-scroll::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--muted-foreground) 40%, transparent);
+}
+
+/* Tabular numerals for tables / data */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* Subtle pulsing dot for live indicators */
+@keyframes cowork-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.8); }
+}
+.cowork-pulse {
+  animation: cowork-pulse 1.8s ease-in-out infinite;
+}
+
+/* ─── Cowork design system utilities ──────────────────────────────────────── */
+
+/* Monospace for actual code / data values (version strings, URLs, timestamps).
+   Not for labels — labels use the sans stack and sentence case. */
+.cowork-mono {
+  font-family: var(--font-jetbrains-mono), var(--font-geist-mono), ui-monospace, monospace;
+}
+
+/* Eyebrow label for section headers — sentence case, sans-serif, subtle. */
+.cowork-eyebrow {
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted-foreground);
+}
+
+/* Severity left-border indicators (warm palette) */
+.cowork-severity-critical { border-left: 2px solid var(--destructive); }
+.cowork-severity-high { border-left: 2px solid var(--chart-5); }
+.cowork-severity-medium { border-left: 2px solid var(--primary); }
+.cowork-severity-low { border-left: 2px solid var(--muted-foreground); }
+
+/* Wire-grid background for "instruments standing by" panels (e.g. the network
+   view's extension-only standby state). Draws a faint grid of muted lines so
+   the panel reads as a live instrument surface rather than a plain box. */
+.cowork-grid-bg {
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--muted-foreground) 8%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--muted-foreground) 8%, transparent) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+/* ─── Reduced motion ──────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .cowork-pulse {
+    animation: none;
+  }
+}

@@ -1,0 +1,142 @@
+/**
+ * Visual overlay — transient highlights + status banners drawn on top of the
+ * page so the user can see what the agent is interacting with.
+ *
+ * All overlay DOM is appended to `document.body` with a very high z-index and
+ * `pointer-events: none` so it never interferes with the page itself.
+ *
+ * Extracted from the historical `dom/overlay.ts`. The legacy
+ * `@/lib/agent/dom/overlay` import path stays working via a re-export shim
+ * in `dom/overlay.ts`.
+ */
+
+/** Color used for highlight outlines + badge backgrounds. */
+const HIGHLIGHT_COLOR = "#f97316";
+/** Background tint applied to a highlighted element. */
+const HIGHLIGHT_BG = "rgba(249,115,22,0.12)";
+/** How long a highlight stays on screen before auto-removing. */
+const HIGHLIGHT_DURATION_MS = 1200;
+/** Default status-banner duration. */
+const DEFAULT_BANNER_DURATION_MS = 2000;
+/** Maximum z-index (used for highlight badges). */
+const MAX_Z_INDEX = "2147483647";
+/** Second-to-max z-index (used for banners so badges can sit on top). */
+const BANNER_Z_INDEX = "2147483646";
+/** Vertical offset of the badge above the element (px). */
+const BADGE_VERTICAL_OFFSET = 22;
+/** Minimum left/top coordinate for the badge (px). */
+const BADGE_MIN_COORD = 4;
+
+/** Handle returned by {@link highlightElement}; call `remove()` to clear early. */
+export interface OverlayHandle {
+  /** Remove the highlight + listeners (idempotent). */
+  remove: () => void;
+}
+
+/** C19: when true, highlights persist until explicitly removed (debug mode). */
+let persistentHighlightMode = false;
+
+/** C19: enable/disable persistent highlight mode. */
+export function setPersistentHighlight(enabled: boolean): void {
+  persistentHighlightMode = enabled;
+}
+
+/**
+ * Highlight an element with an orange outline + a floating label badge.
+ * The highlight auto-removes after {@link HIGHLIGHT_DURATION_MS} milliseconds,
+ * unless C19 persistent mode is enabled (then it stays until the next action).
+ *
+ * @param el    The element to highlight.
+ * @param label Text shown in the floating badge (typically the action summary).
+ * @returns A handle whose `remove()` clears the highlight immediately.
+ */
+export function highlightElement(el: HTMLElement, label: string): OverlayHandle {
+  // Save previous inline styles so we can restore them on cleanup.
+  const prevOutline = el.style.outline;
+  const prevOffset = el.style.outlineOffset;
+  const prevBg = el.style.backgroundColor;
+
+  el.style.outline = `3px solid ${HIGHLIGHT_COLOR}`;
+  el.style.outlineOffset = "1px";
+  el.style.backgroundColor = HIGHLIGHT_BG;
+
+  const badge = document.createElement("div");
+  badge.textContent = label;
+  badge.style.cssText = [
+    "position:fixed",
+    `z-index:${MAX_Z_INDEX}`,
+    `background:${HIGHLIGHT_COLOR}`,
+    "color:#fff",
+    "font:600 12px/1.2 ui-sans-serif,system-ui",
+    "padding:3px 7px",
+    "border-radius:6px",
+    "box-shadow:0 2px 8px rgba(0,0,0,.35)",
+    "pointer-events:none",
+    "white-space:nowrap",
+  ].join(";");
+
+  /** Reposition the badge relative to the element's current rect. */
+  const position = (): void => {
+    const rect = el.getBoundingClientRect();
+    badge.style.left = `${Math.max(BADGE_MIN_COORD, rect.left)}px`;
+    badge.style.top = `${Math.max(BADGE_MIN_COORD, rect.top - BADGE_VERTICAL_OFFSET)}px`;
+  };
+  position();
+  document.body.appendChild(badge);
+
+  // Reposition on scroll/resize while visible.
+  window.addEventListener("scroll", position, { passive: true });
+  window.addEventListener("resize", position);
+
+  let removed = false;
+  const remove = (): void => {
+    if (removed) return;
+    removed = true;
+    el.style.outline = prevOutline;
+    el.style.outlineOffset = prevOffset;
+    el.style.backgroundColor = prevBg;
+    badge.remove();
+    window.removeEventListener("scroll", position);
+    window.removeEventListener("resize", position);
+  };
+
+  // in persistent mode, highlights stay until explicitly removed
+  // (the executor calls remove() on the previous highlight before adding a
+  // new one). In normal mode, they auto-remove after HIGHLIGHT_DURATION_MS.
+  if (!persistentHighlightMode) {
+    setTimeout(remove, HIGHLIGHT_DURATION_MS);
+  }
+  return { remove };
+}
+
+/**
+ * Show a transient status banner (e.g. "Agent step 3") in the bottom-right
+ * corner. Fades out and removes itself after `durationMs`.
+ *
+ * @param text       Banner text.
+ * @param durationMs How long to show the banner before fading out.
+ */
+export function showStatusBanner(text: string, durationMs: number = DEFAULT_BANNER_DURATION_MS): void {
+  const banner = document.createElement("div");
+  banner.textContent = text;
+  banner.style.cssText = [
+    "position:fixed",
+    "bottom:12px",
+    "right:12px",
+    `z-index:${BANNER_Z_INDEX}`,
+    "background:#1e293b",
+    "color:#fff",
+    "font:600 11px/1 ui-sans-serif,system-ui",
+    "padding:6px 10px",
+    "border-radius:999px",
+    "box-shadow:0 4px 14px rgba(0,0,0,.3)",
+    "opacity:0.95",
+    "transition:opacity .3s",
+    "pointer-events:none",
+  ].join(";");
+  document.body.appendChild(banner);
+  setTimeout(() => {
+    banner.style.opacity = "0";
+    setTimeout(() => banner.remove(), 400);
+  }, durationMs);
+}

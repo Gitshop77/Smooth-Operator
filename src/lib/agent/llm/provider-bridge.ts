@@ -1,0 +1,92 @@
+/**
+ * Shared `toLLMProvider` bridge — eliminates the ~25-line duplication across
+ * all 7 provider facades.
+ *
+ * Each facade calls this with its configured `configure()` output + provider
+ * metadata (id prefix, display name, vision support). The bridge returns a
+ * standard `LLMProvider` instance that runs `generate()` per chat call and
+ * re-computes usage/cost from the canonical pricing table.
+ *
+ * NOTE: this module lives at `src/lib/agent/llm/provider-bridge.ts` (a sibling
+ * of `provider.ts` / `pricing.ts` / the `route/` directory) — NOT inside
+ * `providers/` — so its relative imports use `./provider`, `./pricing`, and
+ * `./route/client`. The 7 facades import it as `../provider-bridge`.
+ */
+import { estimateCost } from "./pricing";
+import type { LLMProvider, LLMRequest, LLMResponse } from "./provider";
+
+export interface ProviderBridgeConfig {
+  /** Provider id prefix (e.g. "openai", "anthropic"). Combined with model name for the LLMProvider id. */
+  providerId: string;
+  /** Human-readable provider name (e.g. "OpenAI", "Anthropic"). */
+  providerDisplayName: string;
+  /** Model name to send in the request body. */
+  model: string;
+  /** Whether this provider supports image inputs (vision). */
+  supportsVision: boolean;
+  /**
+   * Whether this provider supports JSON-schema structured output natively.
+   *
+   * Per-provider (not hardcoded `true`), so the in-prompt schema fallback at
+   * `llm-direct.ts:176-178,238-250` actually fires. Local providers (Ollama,
+   * LiteLLM) and some OpenAI-compatible endpoints don't reliably honor
+   * `response_format: { type: "json_schema", … }` — for those, the fallback
+   * inlines the canonical JSON schema into the system prompt so the model
+   * has a concrete contract to emit. Cloud providers (OpenAI, Anthropic,
+   * Gemini, Groq, Together, …) set this `true`.
+   */
+  supportsStructuredOutput: boolean;
+  /** The configured provider's `configure()` output — must have a `.model(id)` method. */
+  configureResult: {
+    model: (modelID: string) => unknown;
+  };
+}
+
+/**
+ * Build an `LLMProvider` from a configured provider facade.
+ *
+ * Returns an `LLMProvider` whose `chat()` method:
+ *   - Builds a model handle via `configureResult.model(model)`.
+ *   - Dynamically imports `generate` from `./route/client` (preserves the
+ *     existing lazy-import pattern).
+ *   - Re-computes `usage.costUsd` from the canonical pricing table (the
+ *     protocol returns `costUsd: 0`; we override it here).
+ */
+export function toLLMProvider(config: ProviderBridgeConfig): LLMProvider {
+  return {
+    id: `${config.providerId}:${config.model}`,
+    displayName: `${config.providerDisplayName} ${config.model}`,
+    supportsStructuredOutput: config.supportsStructuredOutput,
+    supportsVision: config.supportsVision,
+    async chat(req: LLMRequest): Promise<LLMResponse> {
+      const model = config.configureResult.model(config.model);
+      const { generate } = await import("./route/client");
+      const response = await generate({
+        model: model as Parameters<typeof generate>[0]["model"],
+        messages: req.messages,
+        generation: {
+          ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+          ...(req.maxTokens !== undefined ? { maxTokens: req.maxTokens } : {}),
+        },
+        schema: req.schema,
+      });
+      const tokensIn = response.usage?.tokensIn ?? 0;
+      const tokensOut = response.usage?.tokensOut ?? 0;
+      const reasoningTokens = response.usage?.reasoningTokens ?? 0;
+      const cachedInputTokens = response.usage?.cachedInputTokens ?? 0;
+      return {
+        content: response.content,
+        usage: response.usage
+          ? {
+              tokensIn,
+              tokensOut,
+              reasoningTokens: reasoningTokens > 0 ? reasoningTokens : undefined,
+              cachedInputTokens: cachedInputTokens > 0 ? cachedInputTokens : undefined,
+              model: config.model,
+              costUsd: estimateCost(config.model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens),
+            }
+          : undefined,
+      };
+    },
+  };
+}

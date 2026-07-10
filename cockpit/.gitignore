@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+
+# Next.js build
+.next/
+out/
+
+# Production
+build/
+
+# Misc
+.DS_Store
+*.pem
+
+# Debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Env files (can opt-in for committing if needed)
+.env*
+!.env.example
+
+# Vercel
+.vercel
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# Logs
+*.log
+dev.log
+dev.out.log
+server.log
+
+# Local
+local-*
+.claude
+.z-ai-config
+prompt
+test
+
+# Prisma generated client (lives in node_modules/.prisma)
+prisma/migrations/dev.db*
+prisma/db/

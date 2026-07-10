@@ -1,0 +1,129 @@
+# CI workflow — runs lint, tests, extension build, and cockpit type-check on every PR.
+#
+# Uses npm as the default package manager. All scripts work with `npm run`.
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run lint
+        run: npm run lint
+
+      - name: Type-check root TypeScript
+        run: npx tsc --noEmit
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build extension
+        run: npm run build:extension
+
+      - name: verify extension build is in sync (tracked static files only)
+        run: |
+          # Always regenerate the bundles from src/extension/ so the comparison
+          # below reflects the current source, not a stale checkout.
+          npm run build:extension
+
+          # The generated .js entry bundles and chunks/ are gitignored (esbuild
+          # ESM code-split output). We cannot diff them, but we DO assert they
+          # were produced so the build didn't silently no-op.
+          if [ -z "$(ls chrome-extension/*.js 2>/dev/null)" ]; then
+            echo "ERROR: build:extension produced no chrome-extension/*.js bundles."
+            exit 1
+          fi
+          if [ ! -d chrome-extension/chunks ]; then
+            echo "ERROR: build:extension produced no chrome-extension/chunks/ directory."
+            exit 1
+          fi
+
+          # Diff ONLY the tracked static files (manifest.json, *.html, *.css).
+          # The generated .js bundles and chunks/ are intentionally excluded —
+          # they are gitignored/untracked, so source/artifact drift there is
+          # invisible to `git diff` by design.
+          if ! git diff --exit-code -- \
+              chrome-extension/manifest.json \
+              $(git ls-files 'chrome-extension/*.html' 'chrome-extension/*.css'); then
+            echo "ERROR: chrome-extension/ static files are out of sync with src/extension/."
+            echo "Run 'npm run build:extension' and commit the result."
+            exit 1
+          fi
+
+      - name: Audit root dependencies (warn only)
+        continue-on-error: true
+        run: npm audit --audit-level=high
+
+      - name: Audit mini-services/cowork-events dependencies (warn only)
+        continue-on-error: true
+        working-directory: mini-services/cowork-events
+        run: npm ci && npm audit --audit-level=high
+
+  cockpit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cockpit
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: cockpit/package-lock.json
+
+      - name: Install cockpit dependencies
+        run: npm ci
+
+      - name: Audit cockpit dependencies (warn only)
+        continue-on-error: true
+        run: npm audit --audit-level=high
+
+      - name: Generate Prisma client
+        run: npm run db:generate
+
+      - name: Type-check cockpit
+        run: npx tsc --noEmit
+
+      - name: Lint cockpit
+        run: npm run lint
+
+      - name: Build cockpit
+        run: npm run build
+
+  # SAST placeholder (F-31b). Uncomment to enable GitHub CodeQL scanning.
+  # A full CodeQL setup is heavy; `npm audit` above already covers
+  # dependency/security surface. Enable when a deeper static scan is desired.
+  #
+  # codeql:
+  #   runs-on: ubuntu-latest
+  #   permissions:
+  #     security-events: write
+  #     actions: read
+  #     contents: read
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Initialize CodeQL
+  #       uses: github/codeql-action/init@v3
+  #       with:
+  #         languages: javascript-typescript
+  #     - name: Perform CodeQL Analysis
+  #       uses: github/codeql-action/analyze@v3

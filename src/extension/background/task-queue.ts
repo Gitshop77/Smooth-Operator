@@ -1,0 +1,152 @@
+/**
+ * background/task-queue.ts — scheduled-task alarm handling + run-completion
+ * notifications.
+ *
+ * `handleScheduledTaskFire` is invoked by the alarm listener in `index.ts`
+ * when a scheduled-task alarm fires; it looks up the stored task and starts a
+ * run with its prompt. `fireNotifications` is invoked at the end of every run
+ * (`agent-bridge.ts`'s `finally` block) to fire a Chrome notification + POST
+ * to a webhook (both opt-in via Settings).
+ */
+
+import { getScheduledTask } from "@/lib/agent/scheduled-tasks";
+import { getRunState, requestKeepAwake } from "./state-store";
+import { isRunStarting, setRunStarting } from "./agent-bridge";
+
+/**
+ * Handle a scheduled-task alarm fire. Looks up the stored task and
+ * starts a run with its prompt. Skips if the task was deleted or disabled,
+ * or if a run is already active.
+ */
+export async function handleScheduledTaskFire(taskId: string): Promise<void> {
+  try {
+    const task = await getScheduledTask(taskId);
+    if (!task || !task.enabled) return; // deleted or disabled — skip
+    // Don't start if a run is already active.
+    const existing = await getRunState();
+    if (existing?.active) {
+      console.warn("[scheduled-tasks] skipping fire — a run is already active");
+      return;
+    }
+    // acquire the synchronous `runStarting` guard BEFORE calling
+    // `startRun`. Without this, a scheduled-task alarm fire racing a manual
+    // RUN click within ~50ms could both pass the `existing?.active` check
+    // (the storage read is async) and both call `startRun`, starting two
+    // concurrent loops. The RUN handler in message-routing.ts uses this
+    // same flag — so whichever caller sets it first wins, the other bails.
+    if (isRunStarting()) {
+      console.warn(
+        "[scheduled-tasks] skipping fire — runStarting guard already set (a manual RUN may be starting)",
+      );
+      return;
+    }
+    setRunStarting(true);
+    // re-acquire the system keep-awake lock right before starting the
+    // run. The lock was acquired when the alarm was armed, but the OS may
+    // have suspended Chrome between arming and firing (especially for long
+    // daily/weekly schedules). Re-requesting here is idempotent and ensures
+    // the system stays awake for the duration of the run. `requestKeepAwake`
+    // internally checks that at least one enabled task exists (this one) —
+    // so it's a no-op if all tasks were disabled between arming + firing.
+    await requestKeepAwake();
+    // Update lastRunAt + persist.
+    const { listScheduledTasks, saveScheduledTask } = await import("@/lib/agent/scheduled-tasks");
+    const allTasks = await listScheduledTasks();
+    const idx = allTasks.findIndex((t) => t.id === taskId);
+    if (idx >= 0) {
+      allTasks[idx].lastRunAt = Date.now();
+      await saveScheduledTask(allTasks[idx]);
+    }
+    // Open the side panel + start the run. chrome.sidePanel.open requires a
+    // user gesture, which alarm callbacks don't have — so it will throw. Fall
+    // back to a notification + badge so the user knows a scheduled task fired;
+    // the panel opens on the next action-click (which IS a user gesture).
+    try {
+      await chrome.sidePanel.open({ windowId: chrome.windows.WINDOW_ID_CURRENT });
+    } catch {
+      chrome.action.setBadgeText({ text: "▶" });
+      chrome.action.setBadgeBackgroundColor({ color: "#22c55e" });
+      chrome.notifications.create({
+        type: "basic",
+        iconUrl: "icons/icon.png",
+        title: "Open Cowork — Scheduled Task",
+        message: `Starting: ${task.task.slice(0, 80)}\nClick the extension icon to view.`,
+        priority: 2,
+      }, () => { /* notifications API may not be available */ });
+    }
+    // Dynamic import breaks the circular dep with agent-bridge.ts (which calls
+    // fireNotifications from its `finally` block).
+    const { startRun } = await import("./agent-bridge");
+    await startRun({ task: task.task, maxSteps: 100, mode: "standard", isScheduledTaskRun: true });
+  } catch (e) {
+    console.error("[scheduled-tasks] failed to handle alarm fire:", e);
+    // release the synchronous RUN-guard flag on failure. The flag
+    // was set at line 43 above (`setRunStarting(true)`) BEFORE `startRun`
+    // was invoked. If anything between there and the orchestrator's own
+    // `finally` throws (e.g. `requestKeepAwake` rejects, `chrome.sidePanel.open`
+    // throws, or `startRun` itself throws before reaching its own try/finally),
+    // the flag sticks `true` and every subsequent RUN message — manual OR
+    // scheduled — is rejected with "already starting" until the SW restarts.
+    // Same anti-pattern as (which fixed the manual-RUN path).
+    setRunStarting(false);
+  }
+}
+
+// Notification + Webhook on run completion
+
+/**
+ * C18: Fire a Chrome notification and/or webhook when a run finishes.
+ * Reads the user's notification settings from chrome.storage.local.
+ */
+export async function fireNotifications(task: string, success?: boolean): Promise<void> {
+  try {
+    const res = await chrome.storage.local.get(["notifyOnCompletion", "webhookUrl"]);
+    const notify = res.notifyOnCompletion as boolean;
+    const webhookUrl = res.webhookUrl as string;
+
+    if (notify) {
+      chrome.notifications.create({
+        type: "basic",
+        iconUrl: "icons/icon.png",
+        title: success ? "Open Cowork — Run Succeeded" : "Open Cowork — Run Finished",
+        message: `Task: ${task.slice(0, 80)}`,
+        priority: 2,
+      }, () => { /* non-fatal */ });
+    }
+
+    if (webhookUrl) {
+      // F-12: only POST to an absolute http(s) URL. `new URL` rejects
+      // relative/malformed values; we additionally require an `http:` or
+      // `https:` scheme so task text is never exfiltrated to `javascript:`/
+      // `data:`/`file:`/arbitrary schemes. Invalid or non-http(s) URLs are
+      // logged + skipped (non-fatal), preserving the existing rejection of
+      // `javascript:`/`data:` URLs.
+      let safeUrl: string | null = null;
+      try {
+        const parsed = new URL(webhookUrl);
+        if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+          safeUrl = parsed.toString();
+        }
+      } catch {
+        safeUrl = null;
+      }
+      if (!safeUrl) {
+        console.warn(`[task-queue] skipping webhook — URL must be absolute http(s): ${webhookUrl}`);
+      } else {
+        const payload = {
+          success: success ?? false,
+          text: success ? "Run succeeded." : "Run finished.",
+          task,
+          timestamp: Date.now(),
+        };
+        fetch(safeUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }).catch(() => { /* non-fatal */ });
+      }
+    }
+  } catch {
+    // Notification settings not available — non-fatal.
+  }
+}

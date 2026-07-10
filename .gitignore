@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+.next/
+# esbuild output — entry bundles + content-hashed chunks (ESM code-splitting).
+# Static assets (manifest.json, *.html, *.css, icons/) ARE tracked; CI verifies
+# they stay in sync with src/extension/.
+chrome-extension/*.js
+chrome-extension/chunks/
+
+# Dev files
+dev.log
+*.log
+
+# Environment — ignore all env files except the example template
+.env*
+!.env.example
+
+# Z-AI SDK credentials — `z-ai-web-dev-sdk` reads from a `.z-ai-config`
+# JSON file containing `baseUrl` + `apiKey`. Never commit a real key.
+.z-ai-config
+
+# Database
+db/
+
+# Build artifacts
+*.tsbuildinfo
+coverage/
+.turbo/
+.cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

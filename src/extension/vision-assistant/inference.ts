@@ -1,0 +1,333 @@
+/**
+ * Vision Assistant — main inference engine.
+ *
+ * Loads the ONNX model, runs detection on screenshots, returns bounding boxes.
+ * Ported from Reza2kn/LocateAnything-3B-WebGPU app.js.
+ */
+
+import * as ort from "onnxruntime-web";
+import { ModelLoader } from "./model-loader";
+import { preprocessScreenshot } from "./preprocessor";
+import { gatherEmbed, f16to32, type EmbeddingMeta } from "./embedding-gather";
+import { parseBoxes, toPixelCoords } from "./box-parser";
+import type { PixelDetection, DownloadProgress, StatusCallback, VisionStatus } from "./types";
+import {
+  VISION_GRAPH_URL,
+  VISION_DATA_URL,
+  LANGUAGE_GRAPH_URL,
+  LANGUAGE_DATA_URL,
+  EMBED_PACKED_URL,
+  EMBED_SCALES_URL,
+  EMBED_META_URL,
+  VISION_DATA_NAME,
+  LANGUAGE_DATA_NAME,
+  IMG_CONTEXT_TOKEN,
+  IM_END_TOKEN,
+  N_LAYERS,
+  KV_HEADS,
+  HEAD_DIM,
+  PATCH_SIZE,
+  MERGE_FACTOR,
+  DETECTION_PROMPT,
+  MAX_NEW_TOKENS,
+  MODEL_REPO,
+} from "./constants";
+
+// Lazy-load transformers.js only when needed (keeps the extension bundle small).
+// Reset the cached promise on rejection so a transient fetch failure (network
+// drop, HuggingFace outage, auth issue) doesn't permanently disable Local
+// Vision until SW restart — the next call retries from scratch.
+let tokenizerLoadPromise: Promise<unknown> | null = null;
+async function getTokenizer(): Promise<unknown> {
+  if (!tokenizerLoadPromise) {
+    tokenizerLoadPromise = import("@huggingface/transformers").then((mod) => {
+      return mod.AutoTokenizer.from_pretrained(MODEL_REPO);
+    }).catch((e) => {
+      tokenizerLoadPromise = null; // allow retry on next call
+      throw e;
+    });
+  }
+  return tokenizerLoadPromise;
+}
+
+export class VisionAssistant {
+  private visionSession: ort.InferenceSession | null = null;
+  private languageSession: ort.InferenceSession | null = null;
+  private tokenizer: unknown = null;
+  private embPacked: Uint8Array | null = null;
+  private embScales: Float32Array | null = null;
+  private embMeta: EmbeddingMeta | null = null;
+  private loader: ModelLoader = new ModelLoader();
+  private _status: VisionStatus = "uninitialized";
+  private statusCallback: StatusCallback | null = null;
+
+  get status(): VisionStatus {
+    return this._status;
+  }
+
+  get isReady(): boolean {
+    return this._status === "ready" && this.visionSession !== null && this.languageSession !== null;
+  }
+
+  setStatus(status: VisionStatus, message?: string): void {
+    this._status = status;
+    this.statusCallback?.(status, message);
+  }
+
+  onStatus(callback: StatusCallback): void {
+    this.statusCallback = callback;
+  }
+
+  /** Check if WebGPU is available in this browser. */
+  static isWebGPUAvailable(): boolean {
+    return typeof navigator !== "undefined" && "gpu" in navigator;
+  }
+
+  /** Initialize: download model (if needed) + create ONNX sessions. */
+  async init(onProgress?: (p: DownloadProgress) => void): Promise<void> {
+    if (this.isReady) return;
+
+    if (!VisionAssistant.isWebGPUAvailable()) {
+      this.setStatus("error", "WebGPU is not available. Use Chrome/Edge 121+.");
+      throw new Error("WebGPU not available");
+    }
+
+    try {
+      // 1. Download / verify cache
+      this.setStatus("checking");
+      await this.loader.init();
+      const cached = await this.loader.isCached();
+      if (!cached) {
+        this.setStatus("downloading");
+        await this.loader.downloadAll(onProgress);
+      }
+
+      // 2. Create ONNX sessions
+      this.setStatus("compiling");
+      // `executionProviders` accepts strings per the
+      // onnxruntime-common type definition (`ExecutionProviderConfig` includes
+      // `string` in its union), so we can drop the previous `as any` cast.
+      const sessOpts: ort.InferenceSession.SessionOptions = {
+        executionProviders: ["webgpu", "wasm"],
+        graphOptimizationLevel: "all",
+      };
+
+      // Vision session
+      const visGraph = await this.loader.getBuffer(VISION_GRAPH_URL);
+      const visData = await this.loader.getBuffer(VISION_DATA_URL);
+      this.visionSession = await ort.InferenceSession.create(visGraph, {
+        ...sessOpts,
+        externalData: [{ path: VISION_DATA_NAME, data: visData }],
+      });
+
+      // Language session
+      const langGraph = await this.loader.getBuffer(LANGUAGE_GRAPH_URL);
+      const langData = await this.loader.getBuffer(LANGUAGE_DATA_URL);
+      this.languageSession = await ort.InferenceSession.create(langGraph, {
+        ...sessOpts,
+        externalData: [{ path: LANGUAGE_DATA_NAME, data: langData }],
+      });
+
+      // 3. Load tokenizer + embedding table
+      this.tokenizer = await getTokenizer();
+      this.embMeta = (await this.loader.getJSON(EMBED_META_URL)) as EmbeddingMeta;
+      this.embPacked = await this.loader.getBuffer(EMBED_PACKED_URL);
+      const scalesBytes = await this.loader.getBuffer(EMBED_SCALES_URL);
+      const sv = new DataView(scalesBytes.buffer);
+      this.embScales = new Float32Array(scalesBytes.length / 2);
+      for (let i = 0; i < this.embScales.length; i++) {
+        this.embScales[i] = f16to32(sv.getUint16(i * 2, true));
+      }
+
+      this.setStatus("ready");
+    } catch (e) {
+    // if init() threw partway through (e.g. vision session created
+      // successfully but language session failed, or tokenizer/embedding
+      // fetch failed after both sessions were up), the partially-created
+      // ONNX sessions + embedding buffers would be leaked — ONNX WebGPU
+      // sessions hold GPU memory that JS GC cannot free without an explicit
+      // `session.release()` (see `cleanup()` below). Call cleanup() before
+      // re-throwing so VRAM is reclaimed and the next init() attempt starts
+      // from a clean slate. cleanup() is idempotent (re-entrant guard via
+      // field-nulling) so this is safe even if it has already been called.
+      await this.cleanup();
+      this.setStatus("error", e instanceof Error ? e.message : String(e));
+      throw e;
+    }
+  }
+
+  /** Run detection on a screenshot. Returns pixel-coordinate detections. */
+  async detect(screenshotDataUrl: string): Promise<PixelDetection[]> {
+    if (!this.isReady || !this.visionSession || !this.languageSession || !this.embMeta || !this.embPacked || !this.embScales) {
+      throw new Error("Vision assistant not ready");
+    }
+
+    const H = this.embMeta.hidden;
+
+    // 1. Preprocess screenshot
+    const { pixelValues, gridHeight, gridWidth, nPatches, originalWidth, originalHeight, targetWidth, targetHeight, rescaledWidth, rescaledHeight } =
+      await preprocessScreenshot(screenshotDataUrl);
+
+    // 2. Vision session: pixel_values → visual_features
+    const pvTensor = new ort.Tensor("float32", pixelValues, [nPatches, 3, PATCH_SIZE, PATCH_SIZE]);
+    const ghTensor = new ort.Tensor(
+      "int64",
+      BigInt64Array.from([BigInt(gridHeight), BigInt(gridWidth)]),
+      [1, 2],
+    );
+    const vOut = await this.visionSession.run({
+      pixel_values: pvTensor,
+      image_grid_hws: ghTensor,
+    });
+    const visual = vOut[this.visionSession.outputNames[0]]; // [N, 2048] float32
+
+    // 3. Build prompt + tokenize
+    const N = Math.floor((gridHeight * gridWidth) / (MERGE_FACTOR * MERGE_FACTOR));
+    const promptStr =
+      `<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>\n<|im_start|>user\n<image 1><img>` +
+      "<IMG_CONTEXT>".repeat(N) +
+      `</img>${DETECTION_PROMPT}<|im_end|>\n<|im_start|>assistant\n`;
+
+    const tokenizer = this.tokenizer as { __call__: (str: string, opts: unknown) => Promise<{ input_ids: { data: BigInt64Array | number[] } }> };
+    const enc = await tokenizer.__call__(promptStr, { add_special_tokens: false });
+    const ids = Array.from(enc.input_ids.data, (x: unknown) => Number(x));
+
+    // 4. Build inputs_embeds: INT4 gather + visual splice at IMG_CONTEXT positions
+    const L = ids.length;
+    const embeds = new Float32Array(L * H);
+    let visIdx = 0;
+    const vdata = visual.data as Float32Array;
+    for (let i = 0; i < L; i++) {
+      if (ids[i] === IMG_CONTEXT_TOKEN) {
+        embeds.set(vdata.subarray(visIdx * H, (visIdx + 1) * H), i * H);
+        visIdx++;
+      } else {
+        gatherEmbed(ids[i], embeds, i * H, this.embPacked, this.embScales, this.embMeta);
+      }
+    }
+
+    // 5. KV-cache prefill
+    const idsBig = BigInt64Array.from(ids.map((x: number) => BigInt(x)));
+    const mkEmptyPast = (): Record<string, ort.Tensor> => {
+      const f: Record<string, ort.Tensor> = {};
+      for (let i = 0; i < N_LAYERS; i++) {
+        f[`past_key_${i}`] = new ort.Tensor("float32", new Float32Array(0), [1, KV_HEADS, 0, HEAD_DIM]);
+        f[`past_value_${i}`] = new ort.Tensor("float32", new Float32Array(0), [1, KV_HEADS, 0, HEAD_DIM]);
+      }
+      return f;
+    };
+
+    const feeds: Record<string, ort.Tensor> = {
+      input_ids: new ort.Tensor("int64", idsBig, [1, L]),
+      inputs_embeds: new ort.Tensor("float32", embeds, [1, L, H]),
+      attention_mask: new ort.Tensor("int64", BigInt64Array.from(new Array(L).fill(BigInt(1))), [1, L]),
+      position_ids: new ort.Tensor("int64", BigInt64Array.from(ids.map((_: number, i: number) => BigInt(i))), [1, L]),
+      ...mkEmptyPast(),
+    };
+
+    let res = await this.languageSession.run(feeds);
+    let present = res as Record<string, ort.Tensor>;
+    const logits = res["logits"] as ort.Tensor;
+    const V = logits.dims[2];
+    let next = argmaxLast(logits.data as Float32Array, V);
+    const gen: number[] = [next];
+
+    // 6. Decode loop with KV cache
+    let pastLen = L;
+    for (let step = 0; step < MAX_NEW_TOKENS - 1; step++) {
+      if (next === IM_END_TOKEN) break;
+      const emb1 = new Float32Array(H);
+      gatherEmbed(next, emb1, 0, this.embPacked, this.embScales, this.embMeta);
+      const f: Record<string, ort.Tensor> = {
+        input_ids: new ort.Tensor("int64", BigInt64Array.from([BigInt(next)]), [1, 1]),
+        inputs_embeds: new ort.Tensor("float32", emb1, [1, 1, H]),
+        attention_mask: new ort.Tensor("int64", BigInt64Array.from(new Array(pastLen + 1).fill(BigInt(1))), [1, pastLen + 1]),
+        position_ids: new ort.Tensor("int64", BigInt64Array.from([BigInt(pastLen)]), [1, 1]),
+      };
+      for (let i = 0; i < N_LAYERS; i++) {
+        f[`past_key_${i}`] = present[`present_key_${i}`];
+        f[`past_value_${i}`] = present[`present_value_${i}`];
+      }
+      res = await this.languageSession.run(f);
+      present = res as Record<string, ort.Tensor>;
+      next = argmaxLast((res["logits"] as ort.Tensor).data as Float32Array, V);
+      gen.push(next);
+      pastLen += 1;
+    }
+
+    // 7. Decode + parse
+    const decodeTokenizer = this.tokenizer as { decode: (ids: number[], opts: unknown) => string };
+    const text = decodeTokenizer.decode(gen, { skip_special_tokens: false });
+    const detections = parseBoxes(text);
+
+    // Convert normalized 0-1000 coordinates to pixel coordinates in the
+    // ORIGINAL screenshot's pixel space. The model normalizes over the
+    // PADDED canvas (targetWidth × targetHeight), so we must account for
+    // both the rescale (original → rescaled) and the padding (rescaled →
+    // target) when mapping back to original device pixels.
+    // Formula: X_original = (X_model / 1000) * targetWidth * (originalWidth / rescaledWidth)
+    const effectiveWidth = targetWidth * (originalWidth / rescaledWidth);
+    const effectiveHeight = targetHeight * (originalHeight / rescaledHeight);
+    // Clamp to the ORIGINAL screenshot bounds (originalWidth ×
+    // originalHeight), not the padded canvas bounds (effectiveWidth ×
+    // effectiveHeight). effectiveWidth ≥ originalWidth due to padding; clamping
+    // to effectiveWidth-1 would allow coords 3-6 CSS px beyond the viewport.
+    return toPixelCoords(detections, effectiveWidth, effectiveHeight, originalWidth, originalHeight);
+  }
+
+  /** Release ONNX sessions and free VRAM. */
+  async cleanup(): Promise<void> {
+    // ONNX WebGPU InferenceSessions hold GPU memory that JavaScript GC
+    // cannot free — only an explicit `await session.release()` reclaims it.
+    // Capture the sessions into locals BEFORE nulling the fields so we can
+    // release them even if `cleanup()` is re-entered concurrently (the field
+    // reads happen first; the second call sees nulls and skips the release).
+    // Wrap each release in try/catch because `release()` can throw if the
+    // session is already released/disposed (e.g. user toggled off twice or
+    // the WebGPU device was lost).
+    const vision = this.visionSession;
+    const language = this.languageSession;
+    this.visionSession = null;
+    this.languageSession = null;
+    this.tokenizer = null;
+    this.embPacked = null;
+    this.embScales = null;
+    this.embMeta = null;
+    this.setStatus("uninitialized");
+    if (vision) {
+      try {
+        await vision.release();
+      } catch {
+        // Already released or device lost — safe to ignore.
+      }
+    }
+    if (language) {
+      try {
+        await language.release();
+      } catch {
+        // Already released or device lost — safe to ignore.
+      }
+    }
+  }
+
+  /** Delete cached model files. */
+  async clearCache(): Promise<void> {
+    await this.loader.clearCache();
+    await this.cleanup();
+  }
+}
+
+/** Argmax over the last row of logits [1, T, V]. */
+function argmaxLast(arr: Float32Array, V: number): number {
+  const base = arr.length - V;
+  let best = 0;
+  let bv = -Infinity;
+  for (let i = 0; i < V; i++) {
+    const v = arr[base + i];
+    if (v > bv) {
+      bv = v;
+      best = i;
+    }
+  }
+  return best;
+}
