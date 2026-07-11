@@ -7,8 +7,13 @@
  * or removed elements don't leak the page-level element map. A reverse
  * `WeakMap<HTMLElement, string>` dedupes refs across calls.
  *
- * The module-level `__openCoworkElementMap` lives on `window` so the action
- * executor (running in the same content-script context) can resolve refs.
+ * SECURITY: the element-ref map, reverse map, and ref counter are kept in
+ * module-scoped variables (NOT on `window`). Content scripts share the same
+ * `window` object as the page (only the JS execution context differs), so any
+ * page could read or overwrite a `window.__openCoworkElementMap` entry and
+ * hijack the element an action resolves to. Because the action executor and
+ * this extractor share the same module instance in the isolated world, no
+ * `window` handle is needed for cross-module access.
  *
  * Shared DOM classification helpers (`isInteractive`, `isVisible`,
  * `directText`, `SKIP_TAGS`) live in {@link ../utils} (extracted from the
@@ -26,13 +31,17 @@ import {
   isSensitive,
 } from "../utils";
 
-declare global {
-  interface Window {
-    __openCoworkElementMap?: Record<string, WeakRef<HTMLElement>>;
-    __openCoworkElementReverseMap?: WeakMap<HTMLElement, string>;
-    __openCoworkRefCounter?: number;
-  }
-}
+/**
+ * Module-scoped element-ref registry.
+ *
+ * Kept off `window` (see SECURITY note at the top of this file) so a hostile
+ * page cannot read or overwrite an entry to hijack an action's target element.
+ * The action executor and this extractor share the same module instance in the
+ * content-script isolated world, which is sufficient for cross-module access.
+ */
+let elementMap: Record<string, WeakRef<HTMLElement>> | null = null;
+let elementReverseMap: WeakMap<HTMLElement, string> | null = null;
+let refCounter = 0;
 
 /** Result of {@link generateAccessibilityTree}. */
 export interface AXTreeResult {
@@ -45,14 +54,14 @@ export interface AXTreeResult {
 }
 
 /**
- * Initialize the global element map. Safe to call multiple times — only
+ * Initialize the element-ref registry. Safe to call multiple times — only
  * initializes once per page load.
  */
 export function initElementMap(): void {
-  if (!window.__openCoworkElementMap) {
-    window.__openCoworkElementMap = {};
-    window.__openCoworkElementReverseMap = new WeakMap();
-    window.__openCoworkRefCounter = 0;
+  if (!elementMap) {
+    elementMap = {};
+    elementReverseMap = new WeakMap();
+    refCounter = 0;
   }
 }
 
@@ -61,7 +70,7 @@ export function initElementMap(): void {
  * `null` if the element was GC'd or removed (the dead ref is cleaned up).
  */
 export function resolveRef(refId: string): HTMLElement | null {
-  const map = window.__openCoworkElementMap;
+  const map = elementMap;
   if (!map) return null;
   const ref = map[refId];
   if (!ref) return null;
@@ -300,16 +309,16 @@ function buildTree(
     const indent = " ".repeat(depth);
 
     // Get or assign ref ID (with WeakRef + reverse WeakMap for dedup).
-    let ref = window.__openCoworkElementReverseMap!.get(el) || null;
+    let ref = elementReverseMap!.get(el) || null;
     if (ref) {
       // Verify the ref still points to this element.
-      const existing = window.__openCoworkElementMap![ref];
+      const existing = elementMap![ref];
       if (!existing || existing.deref() !== el) ref = null;
     }
     if (!ref) {
-      ref = "ref_" + ++window.__openCoworkRefCounter!;
-      window.__openCoworkElementMap![ref] = new WeakRef(el);
-      window.__openCoworkElementReverseMap!.set(el, ref);
+      ref = "ref_" + ++refCounter;
+      elementMap![ref] = new WeakRef(el);
+      elementReverseMap!.set(el, ref);
     }
     counter.count++;
 
@@ -372,9 +381,24 @@ export function generateAccessibilityTree(
 ): AXTreeResult {
   initElementMap();
 
+  // Validate `filter` against the allowed set so a mistyped value produces a
+  // clear error instead of silently degraded (hybrid) output.
+  if (filter !== "all" && filter !== "interactive") {
+    throw new TypeError(
+      `Invalid filter: ${JSON.stringify(filter)}. Expected "all" or "interactive".`
+    );
+  }
+
+  // Validate / clamp `depth` to a sane positive integer. Rejects NaN, negative,
+  // and non-integer values that would otherwise yield empty or runaway output.
+  const rawDepth = depth ?? DEFAULT_MAX_DEPTH;
+  const maxDepth =
+    Number.isFinite(rawDepth) && rawDepth >= 1
+      ? Math.floor(rawDepth)
+      : DEFAULT_MAX_DEPTH;
+
   try {
     const lines: string[] = [];
-    const maxDepth = depth ?? DEFAULT_MAX_DEPTH;
     const counter = { count: 0 };
 
     // pre-build a Map of all <label for="..."> elements ONCE per
@@ -394,7 +418,7 @@ export function generateAccessibilityTree(
 
     if (refId) {
       // Extract only the subtree for the given ref.
-      const ref = window.__openCoworkElementMap![refId];
+      const ref = elementMap![refId];
       if (!ref) {
         return {
           error: `Element with ref_id '${refId}' not found. It may have been removed from the page. Use read_page without ref_id to get the current page state.`,
@@ -416,9 +440,9 @@ export function generateAccessibilityTree(
     }
 
     // Cleanup dead WeakRefs to avoid unbounded map growth.
-    for (const key in window.__openCoworkElementMap) {
-      if (!window.__openCoworkElementMap[key].deref()) {
-        delete window.__openCoworkElementMap[key];
+    for (const key in elementMap!) {
+      if (!elementMap![key].deref()) {
+        delete elementMap![key];
       }
     }
 
@@ -445,6 +469,43 @@ export function generateAccessibilityTree(
       viewport: { width: window.innerWidth, height: window.innerHeight },
     };
   } catch (e) {
-    throw new Error(`Error generating accessibility tree: ${e instanceof Error ? e.message : "Unknown error"}`);
+    // Preserve the original error's type and stack; only prefix the message so
+    // field debugging can still distinguish TypeError/RangeError etc.
+    const err = e instanceof Error ? e : new Error(String(e));
+    err.message = `Error generating accessibility tree: ${err.message}`;
+    throw err;
   }
+}
+
+// ─── Test-only accessors ─────────────────────────────────────────────────────
+//
+// The element-ref registry is intentionally module-scoped (off `window`) for
+// security. These accessors exist SOLELY so the unit tests can observe /
+// populate the registry without reaching into a `window` global that no longer
+// exists. They are not part of the public runtime API.
+/** @internal Test-only: snapshot of the registry state. */
+export function __test_registry(): {
+  initialized: boolean;
+  size: number;
+  counter: number;
+} {
+  return {
+    initialized: elementMap !== null,
+    size: elementMap ? Object.keys(elementMap).length : 0,
+    counter: refCounter,
+  };
+}
+
+/** @internal Test-only: register an element under a ref (mirrors buildTree). */
+export function __test_registerElement(refId: string, el: HTMLElement): void {
+  initElementMap();
+  elementMap![refId] = new WeakRef(el);
+  elementReverseMap!.set(el, refId);
+}
+
+/** @internal Test-only: reset the registry (so ref_N assignments are deterministic across tests). */
+export function __test_resetRegistry(): void {
+  elementMap = null;
+  elementReverseMap = null;
+  refCounter = 0;
 }

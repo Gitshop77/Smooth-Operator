@@ -11,7 +11,7 @@
 // helper from `@/lib/cowork/events/client` to avoid the extra HTTP hop.
 
 import type { NextRequest } from 'next/server';
-import { json, badRequest, serverError, withRouteError } from '@/lib/cowork/api/http';
+import { json, badRequest, serverError, withRouteError, bodyJson } from '@/lib/cowork/api/http';
 import { broadcastEvent } from '@/lib/cowork/events/client';
 
 interface EmitBody {
@@ -21,12 +21,10 @@ interface EmitBody {
 
 export async function POST(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
-    let body: EmitBody;
-    try {
-      body = (await req.json()) as EmitBody;
-    } catch {
-      return badRequest('Invalid JSON body');
-    }
+    // `bodyJson` caps the raw body at MAX_BODY_BYTES (256KB) and rejects
+    // oversize bodies with 413 *before* buffering — `req.json()` would read
+    // the entire body into memory unbounded (memory-exhaustion DoS).
+    const body = (await bodyJson(req)) as EmitBody;
     if (!body.channel || typeof body.channel !== 'string') {
       return badRequest('channel required (string)');
     }
@@ -43,7 +41,11 @@ export async function POST(req: NextRequest): Promise<Response> {
     }
     const result = await broadcastEvent(body.channel, body.payload);
     if (!result.ok) {
-      return serverError(result.error || 'broadcast failed');
+      // `result.error` originates from the separate mini-service and may contain
+      // internal detail; log it server-side and return a generic message rather
+      // than echoing it to the client (consistent with withRouteError policy).
+      console.error('[cowork] emit broadcast failed', { error: result.error });
+      return serverError('event broadcast failed');
     }
     return json(result);
   });

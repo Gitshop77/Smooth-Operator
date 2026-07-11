@@ -2,17 +2,21 @@
  * options/custom-tools.ts — user-defined JavaScript snippets the agent can
  * invoke via the existing `evaluate` action.
  *
- * Stored under the `__opencowork_custom_tools` key in chrome.storage.local —
- * same shape as the `CustomTool` type in `src/lib/agent/tools/registry.ts`.
- * The agent runtime (registry.ts) loads them at extension startup and exposes
- * them to the navigator prompt as a `<custom_tools>` block.
+ * Stored under `__opencowork_custom_tools` in chrome.storage.local (same shape
+ * as `CustomTool` in `src/lib/agent/tools/registry.ts`). The agent runtime
+ * loads them at extension startup.
+ *
+ * P3: delete confirmation + validation errors use the styled modal; the Tools
+ * tab also renders the extension's manifest permission set as badges.
  */
 
-import { $ } from "@/extension/shared";
+import { $, escapeHtml } from "@/extension/shared";
 import { CUSTOM_TOOL_NAME_REGEX } from "@/lib/agent/tools/registry";
 import { STORAGE_KEYS } from "./settings-sync";
+import { showSaved } from "./settings-sync";
+import { confirmModal, alertModal } from "./modal";
 
-/** A user-defined custom tool — see `src/lib/agent/tools/registry.ts` for the canonical type. */
+/** A user-defined custom tool. */
 interface CustomToolEntry {
   name: string;
   description: string;
@@ -20,13 +24,88 @@ interface CustomToolEntry {
   createdAt?: number;
 }
 
+// ─── Field constraints ───────────────────────────────────────────────────────
+// `name` is bounded by CUSTOM_TOOL_NAME_REGEX (max 64). These cap the other
+// fields so a single tool cannot blow the ~5 MB chrome.storage.local quota.
+const DESC_MAX = 500;
+const CODE_MAX = 50_000;
+
+// ─── Mutation serialization ──────────────────────────────────────────────────
+// The add/delete handlers do a read-modify-write against storage. Two rapid
+// clicks can interleave the reads so the second write clobbers the first.
+// Serialize every storage mutation behind a single promise chain.
+let mutationQueue: Promise<unknown> = Promise.resolve();
+function serialize<T>(task: () => Promise<T>): Promise<T> {
+  const run = mutationQueue.then(task, task);
+  // Swallow rejections so one failed mutation doesn't poison the queue.
+  mutationQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+// ─── Defensive storage parsing ───────────────────────────────────────────────
+// Malformed / legacy storage must degrade gracefully (warn + drop bad entries)
+// instead of throwing while the Tools tab renders.
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function validateCustomTools(raw: unknown): CustomToolEntry[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) {
+    console.warn("[custom-tools] stored value is not an array; ignoring.", raw);
+    return [];
+  }
+  const out: CustomToolEntry[] = [];
+  raw.forEach((entry, i) => {
+    if (
+      !isRecord(entry) ||
+      typeof entry.name !== "string" ||
+      typeof entry.description !== "string" ||
+      typeof entry.code !== "string"
+    ) {
+      console.warn(`[custom-tools] dropping malformed entry at index ${i}.`, entry);
+      return;
+    }
+    const createdAt = typeof entry.createdAt === "number" ? entry.createdAt : undefined;
+    out.push({ name: entry.name, description: entry.description, code: entry.code, createdAt });
+  });
+  return out;
+}
+
 async function readCustomTools(): Promise<CustomToolEntry[]> {
   const res = await chrome.storage.local.get(STORAGE_KEYS.customTools);
-  return (res[STORAGE_KEYS.customTools] as CustomToolEntry[]) || [];
+  return validateCustomTools(res[STORAGE_KEYS.customTools]);
 }
 
 async function writeCustomTools(tools: CustomToolEntry[]): Promise<void> {
   await chrome.storage.local.set({ [STORAGE_KEYS.customTools]: tools });
+}
+
+/** Render the manifest permission set as badges (read-only, informational). */
+async function renderToolPermissions(): Promise<void> {
+  const host = $("toolPermissions") as HTMLDivElement | null;
+  if (!host) return;
+  let permissions: string[] = [];
+  try {
+    const manifest = chrome.runtime.getManifest();
+    permissions = [
+      ...((manifest.permissions as string[]) || []),
+      ...((manifest.host_permissions as string[]) || []),
+    ];
+  } catch {
+    permissions = [];
+  }
+  if (permissions.length === 0) {
+    host.innerHTML = '<p class="empty-hint">No manifest permissions declared.</p>';
+    return;
+  }
+  // Use the project-standard sanitizer rather than the ad-hoc `<`-only replace.
+  host.innerHTML = permissions
+    .map((p) => `<span class="perm-badge">${escapeHtml(p)}</span>`)
+    .join("");
 }
 
 /** Render the custom tools list. Call after every mutation. */
@@ -35,11 +114,10 @@ export async function renderTools(): Promise<void> {
   const list = $("toolsList") as HTMLDivElement;
   list.innerHTML = "";
   if (tools.length === 0) {
-    list.innerHTML =
-      '<p class="empty-hint">No custom tools defined. Add one above.</p>';
+    list.innerHTML = '<p class="empty-hint">No custom tools defined. Add one above.</p>';
     return;
   }
-  for (const t of tools) {
+  tools.forEach((t, index) => {
     const item = document.createElement("div");
     item.className = "tool-item";
     const header = document.createElement("div");
@@ -52,12 +130,25 @@ export async function renderTools(): Promise<void> {
     descSpan.textContent = t.description;
     const delBtn = document.createElement("button");
     delBtn.type = "button";
+    delBtn.className = "tool-delete";
     delBtn.textContent = "Delete";
-    delBtn.addEventListener("click", async () => {
-      if (!confirm(`Delete custom tool "${t.name}"?`)) return;
-      const filtered = tools.filter((x) => x.name !== t.name);
-      await writeCustomTools(filtered);
-      await renderTools();
+    delBtn.addEventListener("click", () => {
+      void serialize(async () => {
+        const ok = await confirmModal({
+          title: "Delete custom tool",
+          message: `Delete custom tool "${t.name}"?`,
+          confirmLabel: "Delete",
+          danger: true,
+        });
+        if (!ok) return;
+        // Delete by index, not by name, so a pre-existing duplicate name
+        // cannot mass-delete sibling entries.
+        const current = await readCustomTools();
+        current.splice(index, 1);
+        await writeCustomTools(current);
+        await renderTools();
+        showSaved();
+      });
     });
     header.appendChild(nameSpan);
     header.appendChild(descSpan);
@@ -67,46 +158,67 @@ export async function renderTools(): Promise<void> {
     item.appendChild(header);
     item.appendChild(code);
     list.appendChild(item);
-  }
+  });
+  await renderToolPermissions();
 }
 
-$("addTool").addEventListener("click", async () => {
-  const name = ($("toolName") as HTMLInputElement).value.trim();
-  const description = ($("toolDesc") as HTMLInputElement).value.trim();
-  const code = ($("toolCode") as HTMLTextAreaElement).value;
-  if (!name) {
-    ($("toolName") as HTMLInputElement).focus();
-    return;
-  }
-  if (!description) {
-    ($("toolDesc") as HTMLInputElement).focus();
-    return;
-  }
-  if (!code.trim()) {
-    ($("toolCode") as HTMLTextAreaElement).focus();
-    return;
-  }
-  // Name validation — uses the canonical regex from registry.ts so the
-  // options page and the runtime always agree on what's a valid tool name.
-  if (!CUSTOM_TOOL_NAME_REGEX.test(name)) {
-    alert(
-      "Invalid tool name. Must start with a lowercase letter, contain only lowercase letters / digits / underscores, and be at most 64 characters.",
-    );
-    return;
-  }
-  const tools = await readCustomTools();
-  const idx = tools.findIndex((t) => t.name === name);
-  const entry: CustomToolEntry = { name, description, code, createdAt: Date.now() };
-  if (idx >= 0) {
-    // Preserve original createdAt on update (same tool, new version).
-    entry.createdAt = tools[idx].createdAt;
-    tools[idx] = entry;
-  } else {
-    tools.push(entry);
-  }
-  await writeCustomTools(tools);
-  ($("toolName") as HTMLInputElement).value = "";
-  ($("toolDesc") as HTMLInputElement).value = "";
-  ($("toolCode") as HTMLTextAreaElement).value = "";
-  await renderTools();
+$("addTool").addEventListener("click", () => {
+  void serialize(async () => {
+    const name = ($("toolName") as HTMLInputElement).value.trim();
+    const description = ($("toolDesc") as HTMLInputElement).value.trim();
+    const code = ($("toolCode") as HTMLTextAreaElement).value;
+    if (!name) {
+      ($("toolName") as HTMLInputElement).focus();
+      return;
+    }
+    if (!description) {
+      ($("toolDesc") as HTMLInputElement).focus();
+      return;
+    }
+    if (!code.trim()) {
+      ($("toolCode") as HTMLTextAreaElement).focus();
+      return;
+    }
+    if (!CUSTOM_TOOL_NAME_REGEX.test(name)) {
+      await alertModal({
+        title: "Invalid tool name",
+        message:
+          "Invalid tool name. Must start with a lowercase letter, contain only lowercase letters / digits / underscores, and be at most 64 characters.",
+      });
+      return;
+    }
+    if (description.length > DESC_MAX) {
+      await alertModal({
+        title: "Description too long",
+        message: `Tool description must be at most ${DESC_MAX} characters.`,
+      });
+      return;
+    }
+    if (code.length > CODE_MAX) {
+      await alertModal({
+        title: "Code too long",
+        message: `Tool code must be at most ${CODE_MAX} characters.`,
+      });
+      return;
+    }
+    const tools = await readCustomTools();
+    // Enforce name uniqueness: overwrite the existing entry instead of adding a
+    // second one, so delete-by-name (and delete-by-index) stays safe.
+    const idx = tools.findIndex((t) => t.name === name);
+    const entry: CustomToolEntry = { name, description, code, createdAt: Date.now() };
+    if (idx >= 0) {
+      entry.createdAt = tools[idx].createdAt;
+      tools[idx] = entry;
+    } else {
+      tools.push(entry);
+    }
+    await writeCustomTools(tools);
+    ($("toolName") as HTMLInputElement).value = "";
+    ($("toolDesc") as HTMLInputElement).value = "";
+    ($("toolCode") as HTMLTextAreaElement).value = "";
+    await renderTools();
+    showSaved();
+  });
 });
+
+void renderToolPermissions();

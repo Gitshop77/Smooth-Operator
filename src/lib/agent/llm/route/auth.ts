@@ -57,8 +57,10 @@ const fromCredential = (source: Credential, render: (secret: string) => HeaderMa
     return { ...input.headers, ...render(secret) };
   });
 
-const secretValue = (secret: string | undefined, source: string): string => {
-  if (secret === undefined || secret === "") throw new MissingCredentialError(source);
+const secretValue = (secret: string | null | undefined, source: string): string => {
+  // Treat `null` like `undefined`/`""` so a planted/empty entry is indistinguishable
+  // from "no credential here" and falls through the surrounding `orElse()` chain.
+  if (secret == null || secret === "") throw new MissingCredentialError(source);
   return secret;
 };
 
@@ -70,8 +72,55 @@ const value = (secret: string, source = "value"): Credential => makeCredential((
 
 export const optional = (secret: string | undefined, source = "optional value"): Credential =>
   secret === undefined ? makeCredential(() => { throw new MissingCredentialError(source); }) : makeCredential(() => secretValue(secret, source));
+/**
+ * Resolve a secret from an environment variable (Node / CLI / tests), or — in a
+ * browser / extension context where `process.env` does not exist — from an
+ * injected synchronous source. The extension's service worker can hydrate a
+ * cache from `chrome.storage.session` and expose it on
+ * `globalThis.__openCoworkEnv` (mirroring the repo's existing `globalThis`
+ * bridge convention), so env-style secrets become resolvable in-browser.
+ *
+ * Without an injected source `config()` cannot resolve in-browser and simply
+ * throws `MissingCredentialError`, which a surrounding `orElse()` chain treats
+ * as "no credential here" and falls through to the next source. The previous
+ * implementation unconditionally threw in the extension (because `process` is
+ * `undefined` there), making the env-var fallback dead code on the only browser
+ * deployment target — callers believed env vars would work in-browser when they
+ * never could.
+ */
+/**
+ * Immutable snapshot of the extension's injected-env bridge.
+ *
+ * `globalThis.__openCoworkEnv` is a synchronous secrets bridge the service
+ * worker can hydrate from `chrome.storage.session` and expose for in-browser
+ * credential resolution. It is a *mutable* global, however, so rather than
+ * reading it live on every `config()` call (where a script sharing the isolated
+ * extension context could mutate a value after credentials were already
+ * resolved), we take a single frozen snapshot on first access. The bridge is
+ * isolated to this extension's contexts (content scripts and other extensions
+ * run in their own worlds), but freezing still removes the live-read fragility
+ * for the lifetime of the session.
+ */
+let injectedEnvSnapshot: Readonly<Record<string, string>> | null = null;
+const getInjectedEnv = (): Readonly<Record<string, string>> => {
+  if (injectedEnvSnapshot === null) {
+    const source = (globalThis as { __openCoworkEnv?: Record<string, string> }).__openCoworkEnv;
+    injectedEnvSnapshot = Object.freeze({ ...(source ?? {}) });
+  }
+  return injectedEnvSnapshot;
+};
+
 export const config = (name: string): Credential =>
-  makeCredential(() => secretValue(typeof process !== "undefined" ? process.env?.[name] : undefined, name));
+  makeCredential(() => {
+    if (typeof process !== "undefined" && process.env?.[name] !== undefined) {
+      return secretValue(process.env[name], name);
+    }
+    const injected = getInjectedEnv()[name];
+    // `injected` is `string | undefined`; a `null` entry in the source map would
+    // be coerced to `undefined` by the index access, and `secretValue` already
+    // treats both `null` and `undefined` as "missing".
+    return secretValue(injected, name);
+  });
 
 export const none = makeAuth((input: AuthInput): HeaderMap => input.headers);
 

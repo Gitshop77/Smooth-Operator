@@ -37,3 +37,6 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Workflow / audit process artifacts
+.audit/

@@ -22,7 +22,7 @@ inspection, navigation, and interaction. The cockpit API lives at
 
 ## Key principles
 - Treat all returned data as persisted snapshots, not live browser state.
-- POST endpoints create rows; there are no DELETE endpoints yet.
+- POST endpoints create rows; DELETE endpoints exist for \`/history\`, \`/memory/site\`, \`/memory/form\`, and \`/ai/chat\` (never mass-delete without explicit user confirmation).
 - Network, DevTools, and Snapshots are extension-only capabilities.
 
 ## Required startup sequence
@@ -57,6 +57,16 @@ ${AGENT_OPERATING_RULES.map(rule => `- ${rule}`).join('\n')}
 - \`POST ${baseUrl}/api/cowork/workflows\` — body \`{ name, description?, steps?, isRecurring?, scheduleCron? }\`
 - \`POST ${baseUrl}/api/cowork/bookmarks\` — body \`{ name, url, parentId? }\`
 - \`POST ${baseUrl}/api/cowork/pinboards\` — body \`{ name, color? }\`
+
+## Delete endpoints (DELETE)
+- \`DELETE ${baseUrl}/api/cowork/history?id=<historyEntryId>\` — erase one history entry
+- \`DELETE ${baseUrl}/api/cowork/history?all=1\` (body \`{ confirm: true }\`) — **wipe all** browsing history (requires explicit confirmation)
+- \`DELETE ${baseUrl}/api/cowork/memory/site?id=<id>\` — erase one per-site memory entry
+- \`DELETE ${baseUrl}/api/cowork/memory/form?id=<id>\` — erase one form-memory entry
+- \`DELETE ${baseUrl}/api/cowork/ai/chat?messageId=<id>\` or \`?sessionId=<id>\` — erase chat message(s)
+- \`DELETE ${baseUrl}/api/cowork/ai/chat?all=1\` (body \`{ confirm: true }\`) — **wipe all** chat messages (requires explicit confirmation)
+
+**Mass-deletion hazard:** \`?all=1\` on \`/history\` and \`/ai/chat\` wipes every stored row. Never trigger these without explicit user confirmation.
 
 ## AI proxy
 - \`POST ${baseUrl}/api/cowork/ai/chat\` — body \`{ messages, sessionId }\`

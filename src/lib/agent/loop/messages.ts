@@ -34,7 +34,7 @@ function renderPlan(plan: string[] | undefined, currentPlanItem: number | undefi
       : i < (currentPlanItem ?? 0)
         ? "[x]"
         : "[ ]";
-    return `${marker} ${i}: ${item}`;
+    return `${marker} ${i}: ${wrapUntrusted(item)}`;
   }).join("\n");
 }
 
@@ -140,11 +140,22 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
   // `redactSecrets`). Redact here so a substituted secret can't round-trip back
   // to the provider. This is the REDACT layer; the injection FLAG layer above is
   // left untouched.
-  const redactedElementsText = await redactSecrets(browserState.elementsText);
+  let redactedElementsText = await redactSecrets(browserState.elementsText);
+  // HARD CAP (independent of the summarizer flag): never ship an unbounded DOM
+  // to the model. Even with the summarizer disabled, a content-heavy page must
+  // not inflate the per-step token cost without limit — truncate and mark the
+  // cut so the model knows the listing is incomplete.
+  const MAX_ELEMENTS_TEXT_CHARS = 60_000;
+  if (redactedElementsText.length > MAX_ELEMENTS_TEXT_CHARS) {
+    redactedElementsText =
+      redactedElementsText.slice(0, MAX_ELEMENTS_TEXT_CHARS) +
+      `\n…[truncated ${redactedElementsText.length - MAX_ELEMENTS_TEXT_CHARS} chars of interactive elements]`;
+  }
   const redactedTitle = await redactSecrets(browserState.title);
   const redactedUrl = await redactSecrets(browserState.url);
   const redactedTabsBlock = await redactSecrets(tabsBlock);
   const redactedAxTree = browserState.axTree ? await redactSecrets(browserState.axTree) : undefined;
+  const redactedPageInfo = await redactSecrets(browserState.pageInfo);
 
   // Redact secret values from any history-extracted content the agent captured
   // in a previous step (e.g. via the `extract` action) before it is wrapped and
@@ -193,7 +204,7 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
   // compaction LLM call was paid for but its output was discarded, and the
   // navigator lost all pre-compaction context.
   const compactedMemoryBlock = args.compactedMemory
-    ? `\n<compacted_memory>\n${args.compactedMemory}\n</compacted_memory>`
+    ? `\n<compacted_memory>\n${wrapUntrusted(args.compactedMemory)}\n</compacted_memory>`
     : "";
 
   return `<user_request>
@@ -201,7 +212,7 @@ ${task}
 </user_request>
 
 <current_goal>
-${currentGoal}
+${wrapUntrusted(currentGoal)}
 </current_goal>
 
 <plan>
@@ -218,7 +229,7 @@ Page title: ${wrapUntrusted(redactedTitle)}
 Open tabs:
 ${wrapUntrusted(redactedTabsBlock)}
 
-Scroll position: ${wrapUntrusted(browserState.pageInfo)}
+Scroll position: ${wrapUntrusted(redactedPageInfo)}
 ${browserState.newElementCount > 0 ? `${browserState.newElementCount} new elements appeared since last step (marked with *).\n` : ""}
 Interactive elements:
 ${wrapUntrusted(redactedElementsText)}

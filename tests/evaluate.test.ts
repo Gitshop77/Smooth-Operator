@@ -1,4 +1,4 @@
-// @vitest-environment-options {"url":"http://localhost:3000"}
+// @vitest-environment-options {"url":"http://127.0.0.1:3000/"}
 
 /**
  * `evaluate` must only report `pageChanged: true` when the page actually
@@ -16,9 +16,12 @@ describe("evaluate pageChanged", () => {
   beforeEach(() => {
     document.body.innerHTML = "";
     // `evaluate` fails closed without an explicit domain allowlist.
-    // The jsdom env runs at http://localhost:3000, so allowlist "localhost".
+    // The jsdom env runs at http://127.0.0.1:3000, so allowlist "127.0.0.1"
+    // (an IP literal — the hardened hostname matcher rejects single-label
+    // hosts like "localhost" to block TLD-wide matches, so we use a dotted/IP
+    // host that it accepts).
     (globalThis as Record<string, unknown>).__openCoworkDomainConfig = {
-      allowedDomains: ["localhost"],
+      allowedDomains: ["127.0.0.1"],
     };
   });
   afterEach(() => {
@@ -56,7 +59,7 @@ describe("evaluate pageChanged", () => {
     // captured in `ctx.beforeUrl`. A genuine navigation between capture + run
     // makes them differ → pageChanged true (even with a read-only script).
     const c = ctx();
-    c.beforeUrl = "http://localhost:9999/now-different";
+    c.beforeUrl = "http://127.0.0.2/now-different";
     const res = await handleEvaluate(c, { type: "evaluate", code: "1 + 1" });
     expect(res.success).toBe(true);
     expect(res.pageChanged).toBe(true);

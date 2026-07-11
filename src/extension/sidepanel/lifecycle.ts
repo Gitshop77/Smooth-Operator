@@ -10,6 +10,7 @@
  */
 
 import { escapeHtml } from "@/extension/shared";
+import { glyph, type GlyphName } from "./glyphs";
 import {
   statusIcon,
   statusLabel,
@@ -34,14 +35,14 @@ export type AgentLifecycleState =
 /** Max entries kept in the collapsible thinking panel. */
 const MAX_THINKING_ENTRIES = 50;
 
-/** Lifecycle icon characters (one per state). */
-export const LIFECYCLE_ICONS: Record<AgentLifecycleState, string> = {
-  idle: "⏸",
-  thinking: "🧠",
-  acting: "🖱",
-  waiting: "✋",
-  done: "✓",
-  error: "⚠",
+/** Lifecycle icon glyph (one per state) — inline-SVG, inherits currentColor. */
+export const LIFECYCLE_GLYPHS: Record<AgentLifecycleState, GlyphName> = {
+  idle: "circle",
+  thinking: "loader",
+  acting: "mouse-pointer",
+  waiting: "hand",
+  done: "check-circle",
+  error: "alert-triangle",
 };
 
 /** Human-readable label (lowercase) for each lifecycle state. */
@@ -57,7 +58,7 @@ export const LIFECYCLE_LABELS: Record<AgentLifecycleState, string> = {
 /** Update the lifecycle icon + label in the status row. */
 export function setLifecycle(state: AgentLifecycleState): void {
   if (statusIcon) {
-    statusIcon.textContent = LIFECYCLE_ICONS[state];
+    statusIcon.innerHTML = glyph(LIFECYCLE_GLYPHS[state], 16);
     statusIcon.classList.toggle("spin", state === "thinking" || state === "acting");
   }
   if (statusLabel) statusLabel.textContent = LIFECYCLE_LABELS[state];

@@ -47,27 +47,42 @@ export class By {
   static css(selector: string): By {
     return new By("css selector", selector);
   }
-  /** Alias for {@link By.css} (matches the W3C `By.cssSelector` naming). */
-  static cssSelector(selector: string): By {
-    return By.css(selector);
-  }
   /** `By.id("submit")` — locate by `id` attribute (escaped into a CSS selector). */
   static id(id: string): By {
     return By.css(`*[id="${escapeCss(id)}"]`);
   }
-  /** `By.name("q")` — locate by `name` attribute (escaped into a CSS selector). */
-  // @ts-expect-error — TS2699: static `name` conflicts with Function.name; we
-  // deliberately shadow it because the W3C locator taxonomy calls this strategy
-  // `name` (matching `By.id`, `By.className`, etc.). The shadow only affects
-  // static-member access (`By.name(...)`); `Function.name` is still accessible
-  // via `Object.getPrototypeOf(By).name` if a caller ever needs it.
+  /**
+   * `By.name("q")` — locate by `name` attribute (escaped into a CSS selector).
+   *
+   * NOTE: declaring `static name` shadows the class's own `Function.name`
+   * identifier. After this declaration, `By.name` is the static method (not the
+   * string `"By"`), and the class name is NOT recoverable from the class object —
+   * `Object.getPrototypeOf(By).name` resolves to `Function.prototype.name` (`""`),
+   * not `"By"`. The earlier claim that the class name remained reachable there was
+   * incorrect. Any code needing the class identifier must use a separate mechanism.
+   *
+   * The `@ts-expect-error` below is required: TypeScript flags the static `name`
+   * as conflicting with the inherited `Function.name`. Renaming this method would
+   * be cleaner, but is intentionally avoided because external callers (the
+   * `find_elements` handler and its tests) rely on `By.name`.
+   */
+  // @ts-expect-error — TS2699: static `name` conflicts with the inherited
+  // `Function.name`. See the note above; renaming is blocked by callers.
   static name(name: string): By {
     return By.css(`*[name="${escapeCss(name)}"]`);
   }
   /** `By.className("btn-primary")` — locate by `class` attribute. */
   static className(name: string): By {
-    // class names are whitespace-separated — split and escape each, joined by "."
-    const parts = name.trim().split(/\s+/).map((p) => `.${escapeCss(p)}`);
+    // A class attribute is whitespace-separated; split, escape each token, and
+    // join with ".". Guard the empty input: `("").split(/\s+/)` → `[""]` and
+    // `("  ").split(/\s+/)` → `["", ""]`, both of which produce the invalid
+    // selectors `.` / `..` (which `querySelectorAll` rejects). Return a valid
+    // no-match selector instead of a degenerate one.
+    const trimmed = name.trim();
+    if (trimmed === "") {
+      return By.css(":not(*)");
+    }
+    const parts = trimmed.split(/\s+/).map((p) => `.${escapeCss(p)}`);
     return By.css(parts.join(""));
   }
   /** `By.tagName("button")` — locate by tag name. */
@@ -91,11 +106,6 @@ export class By {
   toString(): string {
     return `By(${this.using}, ${this.value})`;
   }
-
-  /** Serialize to a plain `{ using, value }` object (W3C wire shape). */
-  toObject(): { using: LocatorUsing; value: string } {
-    return { using: this.using, value: this.value };
-  }
 }
 
 /**
@@ -107,6 +117,12 @@ export class By {
  * Falls back to the platform `CSS.escape` when available (all modern
  * browsers + jsdom) — the hand-rolled loop covers the rare environments
  * where `CSS.escape` is missing.
+ *
+ * This utility never throws on input content (including NUL bytes): NUL is
+ * replaced with U+FFFD, matching `CSS.escape`. This keeps the factories and
+ * the {@link findByLocator} resolver consistent — the same input produces the
+ * same (non-throwing) result whether `escapeCss` runs at construction time or
+ * inside the resolver's try/catch.
  */
 export function escapeCss(css: string): string {
   if (typeof css !== "string") {
@@ -120,7 +136,12 @@ export function escapeCss(css: string): string {
   const n = css.length;
   for (let i = 0; i < n; i++) {
     const c = css.charCodeAt(i);
-    if (c === 0x0) throw new Error("escapeCss: input contains a NUL byte");
+    // NUL is not representable in CSS; `CSS.escape` substitutes U+FFFD, so we do
+    // the same here to keep both code paths equivalent (and never throw).
+    if (c === 0x0) {
+      ret += "�";
+      continue;
+    }
     if (
       (c >= 0x0001 && c <= 0x001f) ||
       c === 0x007f ||
@@ -162,7 +183,8 @@ export function escapeCss(css: string): string {
  *   - `name` / `id` → resolved at factory time to a CSS selector (delegates to CSS path)
  *
  * Returns an empty array on any error (e.g. invalid XPath) so callers can
- * branch on `.length` without try/catch.
+ * branch on `.length` without try/catch. Unexpected errors are surfaced to the
+ * console in non-production builds so genuine bugs aren't masked as "no match".
  */
 export function findByLocator(by: By): Element[] {
   try {
@@ -210,8 +232,13 @@ export function findByLocator(by: By): Element[] {
       default:
         return [];
     }
-  } catch {
-    // Invalid XPath / bad selector → empty (don't propagate — caller branches on length).
+  } catch (err) {
+    // Invalid XPath / bad selector → empty (don't propagate — caller branches on
+    // length). Surface the error in non-production builds so a malformed selector
+    // from an internal code path isn't indistinguishable from "no matches".
+    if (typeof process !== "undefined" && process.env?.NODE_ENV !== "production") {
+      console.warn("[findByLocator] error resolving", by, err);
+    }
     return [];
   }
 }

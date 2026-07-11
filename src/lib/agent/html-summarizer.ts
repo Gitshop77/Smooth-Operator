@@ -248,13 +248,22 @@ export function summarizeDom(input: SummarizeDomInput): SummarizeDomOutput {
 export function renderElementsText(keptElements: ExtractedElement[]): string {
   const lines: string[] = [];
   for (const el of keptElements) {
+    const stripNewlines = (s: string) => s.replace(/[\r\n]+/g, " ");
+    const escapeAttr = (s: string) =>
+      s
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
     const attrs = el.attributes
       ? Object.entries(el.attributes)
-          .map(([k, v]) => `${k}="${v.replace(/"/g, "&quot;")}"`)
+          .map(([k, v]) => `${k}="${escapeAttr(stripNewlines(v))}"`)
           .join(" ")
       : "";
     const attrStr = attrs ? ` ${attrs}` : "";
-    const textStr = el.text ? ` ${el.text.slice(0, 80)}` : "";
+    const textStr = el.text
+      ? ` ${escapeAttr(stripNewlines(el.text)).slice(0, 80)}`
+      : "";
     lines.push(`[${el.index}]<${el.tag}${attrStr} />${textStr}`);
   }
   return lines.join("\n");

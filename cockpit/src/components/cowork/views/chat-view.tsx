@@ -323,6 +323,7 @@ export function ChatView() {
               }
             }}
             placeholder="Message Wingman…"
+            aria-label="Message Wingman"
             className="h-10"
             disabled={streaming !== null}
           />

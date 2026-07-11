@@ -13,6 +13,7 @@
 
 import type { LogEvent } from "@/lib/agent/types";
 import { escapeHtml } from "@/extension/shared";
+import { glyph } from "./glyphs";
 import {
   logEl,
   costLabel,
@@ -55,10 +56,34 @@ const logHistory: Array<{ event: LogEvent; time: string }> = [];
  */
 let isRestoring = false;
 
+/**
+ * Tracks whether the static ".empty" placeholder has been removed, so we don't
+ * re-query the DOM on every event (finding: per-event DOM scan + forced reflow).
+ */
+let emptyPlaceholderCleared = false;
+
+/**
+ * Cached `clientHeight` of the log container, refreshed by a ResizeObserver so
+ * the auto-scroll check doesn't force a synchronous reflow read of `clientHeight`
+ * on every event (finding: per-event DOM scan + forced reflow).
+ */
+let cachedClientHeight = 0;
+if (typeof ResizeObserver !== "undefined" && typeof logEl !== "undefined") {
+  cachedClientHeight = logEl.clientHeight;
+  const ro = new ResizeObserver(() => { cachedClientHeight = logEl.clientHeight; });
+  ro.observe(logEl);
+}
+
 interface AgentEventEnvelope {
   type: "AGENT_EVENT";
   event: LogEvent;
   time: string;
+}
+
+/** Format a token count with correct English pluralization (finding: log renderer
+ * does not handle pluralization — avoids the ungrammatical "1 tokens"). */
+function formatTokens(n: number): string {
+  return `${n} ${n === 1 ? "token" : "tokens"}`;
 }
 
 // ─── Persistence ───────────────────────────────────────────────────────────
@@ -69,16 +94,28 @@ interface AgentEventEnvelope {
  * mid-run. Called from {@link addLogRow} (which fires on every AGENT_EVENT).
  * Best-effort — storage failures are non-fatal.
  */
+/**
+ * Coalesces per-event persistence into a single write ~500 ms after the last
+ * event, so a high-frequency AGENT_EVENT stream doesn't serialize + write the
+ * full (≤500-row) `logHistory` array to `chrome.storage.local` on every event
+ * (finding: cost/token/log snapshot writes the full array per event). Still
+ * best-effort — storage failures are non-fatal.
+ */
+let persistTimer: ReturnType<typeof setTimeout> | undefined;
 function persistRunTotals(): void {
   if (isRestoring) return; // skip during restore — see isRestoring docstring
   if (typeof chrome === "undefined" || !chrome.storage?.local) return;
-  chrome.storage.local.set({
-    [STORAGE_KEYS.costUsd]: totalCost,
-    [STORAGE_KEYS.tokens]: totalTokens,
-    [STORAGE_KEYS.log]: logHistory,
-  }).catch(() => {
-    /* best-effort persistence — storage may be unavailable */
-  });
+  if (persistTimer !== undefined) return; // a write is already scheduled
+  persistTimer = setTimeout(() => {
+    persistTimer = undefined;
+    chrome.storage.local.set({
+      [STORAGE_KEYS.costUsd]: totalCost,
+      [STORAGE_KEYS.tokens]: totalTokens,
+      [STORAGE_KEYS.log]: logHistory,
+    }).catch(() => {
+      /* best-effort persistence — storage may be unavailable */
+    });
+  }, 500);
 }
 
 /**
@@ -86,11 +123,15 @@ function persistRunTotals(): void {
  * new run so counters don't carry over from a previous run.
  */
 export function clearRunTotals(): void {
+  if (persistTimer !== undefined) {
+    clearTimeout(persistTimer);
+    persistTimer = undefined;
+  }
   totalCost = 0;
   totalTokens = 0;
   logHistory.length = 0;
   costLabel.textContent = "$0.0000";
-  tokenLabel.textContent = "0 tokens";
+  tokenLabel.textContent = formatTokens(0);
   if (typeof chrome === "undefined" || !chrome.storage?.local) return;
   chrome.storage.local.set({
     [STORAGE_KEYS.costUsd]: 0,
@@ -127,23 +168,27 @@ const MAX_LOG_ROWS = 500;
  */
 export function addLogRow(event: LogEvent, time: string): void {
   // Don't clobber the whole log when the first row arrives — just remove the
-  // empty-state placeholder.
-  const empty = logEl.querySelector(".empty");
-  if (empty) empty.remove();
+  // empty-state placeholder (once). Use a flag instead of re-querying the DOM
+  // on every event (finding: per-event DOM scan + forced reflow).
+  if (!emptyPlaceholderCleared) {
+    const empty = logEl.querySelector(".empty");
+    if (empty) empty.remove();
+    emptyPlaceholderCleared = true;
+  }
 
   let cls = "info";
   let label = "info";
-  let icon = "·";
+  let icon = glyph("info");
   let body = "";
 
   switch (event.type) {
     case "run-start":
-      cls = "info"; label = "start"; icon = "▸"; body = event.task;
+      cls = "info"; label = "start"; icon = glyph("play"); body = event.task;
       setTaskStatus("running");
       setLifecycle("thinking");
       break;
     case "planner-step":
-      cls = "planner"; label = "planner"; icon = "🧠";
+      cls = "planner"; label = "planner"; icon = glyph("compass");
       body = event.decision + (event.goal ? " → " + event.goal : "");
       setLifecycle("thinking");
       appendThinkingEntry(
@@ -155,16 +200,16 @@ export function addLogRow(event: LogEvent, time: string): void {
       );
       break;
     case "navigator-step-start":
-      cls = "step"; label = "step"; icon = "▸"; body = `Step ${event.step}`;
+      cls = "step"; label = "step"; icon = glyph("chevron-right"); body = `Step ${event.step}`;
       setLifecycle("thinking");
       break;
     case "state":
-      cls = "observe"; label = "observe"; icon = "👁";
+      cls = "observe"; label = "observe"; icon = glyph("eye");
       body = `${event.elementCount} el · ${event.newElementCount} new · ${event.pageInfo}`;
       setLifecycle("thinking");
       break;
     case "thinking":
-      cls = "reason"; label = "reason"; icon = "🧠";
+      cls = "reason"; label = "reason"; icon = glyph("sparkles");
       body = event.nextGoal || event.text;
       setLifecycle("thinking");
       appendThinkingEntry(
@@ -177,39 +222,42 @@ export function addLogRow(event: LogEvent, time: string): void {
       );
       break;
     case "action":
-      cls = "act"; label = `act ${event.index}/${event.total}`; icon = "🖱";
+      cls = "act"; label = `act ${event.index}/${event.total}`; icon = glyph("mouse-pointer");
       body = event.description;
       setLifecycle("acting");
       break;
     case "action-result":
       cls = event.success ? "ok" : "err"; label = event.name;
-      icon = event.success ? "✓" : "✗"; body = event.message;
+      icon = event.success ? glyph("check") : glyph("x"); body = event.message;
       setLifecycle(event.success ? "acting" : "error");
       break;
     case "budget-warning":
-      cls = "err"; label = "budget"; icon = "⚠"; body = `${event.pct}% of steps used`;
+      cls = "err"; label = "budget"; icon = glyph("alert-triangle"); body = `${event.pct}% of steps used`;
       break;
     case "loop-warning":
-      cls = "err"; label = "loop"; icon = "⚠"; body = `repeated ${event.count}x`;
+      cls = "err"; label = "loop"; icon = glyph("alert-triangle"); body = `repeated ${event.count}x`;
       break;
     case "done":
       cls = event.success ? "ok" : "err"; label = "done";
-      icon = event.success ? "✓" : "✗"; body = event.text;
+      icon = event.success ? glyph("check-circle") : glyph("x"); body = event.text;
       // setRunning(false) MUST run BEFORE setTaskStatus — otherwise
       // setRunning's internal `setTaskStatus("pending")` overwrites the
       // "completed"/"failed" status the very next line sets, and the badge
       // never reflects completion. Order: disable buttons (setRunning) →
       // set badge (setTaskStatus) → set lifecycle icon (setLifecycle).
-      setRunning(false);
+      // During restore replay (#10) suppress this so re-opening the panel
+      // mid-run doesn't re-disable the controls / rewrite the final state.
+      if (!isRestoring) setRunning(false);
       setTaskStatus(event.success ? "completed" : "failed");
       setLifecycle(event.success ? "done" : "error");
       break;
     case "error":
-      cls = "err"; label = "error"; icon = "✗"; body = event.message;
+      cls = "err"; label = "error"; icon = glyph("x"); body = event.message;
       if (!event.recoverable) {
         // Call setRunning(false) BEFORE setLifecycle("error") so the
         // running→idle transition doesn't clobber the error lifecycle.
-        setRunning(false);
+        // Suppressed during restore replay (see done case above).
+        if (!isRestoring) setRunning(false);
         setLifecycle("error");
         setTaskStatus("failed");
         appendThinkingEntry("error", `Step ${event.step} · error`, event.message);
@@ -218,7 +266,7 @@ export function addLogRow(event: LogEvent, time: string): void {
       }
       break;
     case "cost": {
-      cls = "cost"; label = "cost"; icon = "$";
+      cls = "cost"; label = "cost"; icon = glyph("dollar-sign");
       body = `${event.tokensIn}+${event.tokensOut} tok · $${event.costUsd.toFixed(4)}`;
       // Skip accumulation during restore — the stored totals are already correct
       // and the log may be truncated (capped at 500 rows), so rebuilding from
@@ -227,34 +275,39 @@ export function addLogRow(event: LogEvent, time: string): void {
         totalCost += event.costUsd;
         totalTokens += event.tokensIn + event.tokensOut;
         costLabel.textContent = `$${totalCost.toFixed(4)}`;
-        tokenLabel.textContent = `${totalTokens} tokens`;
+        tokenLabel.textContent = formatTokens(totalTokens);
         updateCostProjection();
       }
       break;
     }
     case "info":
-      cls = "info"; label = "info"; icon = "·"; body = event.message;
+      cls = "info"; label = "info"; icon = glyph("info"); body = event.message;
       if (event.message === "Run finished.") setRunning(false);
       break;
+    case "warn":
+      cls = "warn"; label = "warn"; icon = glyph("alert-triangle"); body = event.message;
+      break;
     case "compaction":
-      cls = "info"; label = "compact"; icon = "↺";
+      cls = "info"; label = "compact"; icon = glyph("refresh-cw");
       body = `compacted ${event.compactedCount} steps`;
       break;
     case "challenge_detected":
-      cls = "err"; label = "challenge"; icon = "⚠";
+      cls = "err"; label = "challenge"; icon = glyph("alert-triangle");
       body = `${event.kind}: ${event.message}`;
       setLifecycle("waiting");
       // Show the takeover banner so the user can solve the challenge +
-      // click Resume — same UX as the takeover action.
-      showTakeoverBanner(`Anti-bot challenge (${event.kind}): ${event.message}`);
+      // click Resume — same UX as the takeover action. Suppressed during
+      // restore replay (#10) so the banner doesn't re-pop for an already-
+      // cleared challenge.
+      if (!isRestoring) showTakeoverBanner(`Anti-bot challenge (${event.kind}): ${event.message}`);
       break;
     case "paused":
-      cls = "info"; label = "paused"; icon = "⏸";
+      cls = "info"; label = "paused"; icon = glyph("pause");
       body = "Agent paused by user";
       setLifecycle("waiting");
       break;
     case "resumed":
-      cls = "info"; label = "resumed"; icon = "▶";
+      cls = "info"; label = "resumed"; icon = glyph("play");
       body = "Agent resumed";
       setLifecycle("thinking");
       // Hide the takeover banner when the agent resumes — covers two cases:
@@ -263,14 +316,17 @@ export function addLogRow(event: LogEvent, time: string): void {
       //   2. User clicked Resume on the takeover banner (banner already
       //      hidden by the click handler — this is a no-op).
       // `hideTakeoverBanner` is a no-op if the banner is already hidden.
-      hideTakeoverBanner();
+      // Suppressed during restore replay (#10).
+      if (!isRestoring) hideTakeoverBanner();
       break;
     case "takeover":
       // Show the takeover banner — the agent is paused waiting for the user.
-      cls = "err"; label = "takeover"; icon = "⚠";
+      cls = "err"; label = "takeover"; icon = glyph("alert-triangle");
       body = `Paused: ${event.reason}`;
       setLifecycle("waiting");
-      showTakeoverBanner(event.reason);
+      // Suppressed during restore replay (#10) so the banner doesn't re-pop
+      // for an already-handled takeover.
+      if (!isRestoring) showTakeoverBanner(event.reason);
       break;
     default:
       body = JSON.stringify(event).slice(0, 100);
@@ -302,8 +358,11 @@ export function addLogRow(event: LogEvent, time: string): void {
   persistRunTotals();
 
   // Only auto-scroll if the user is already near the bottom (don't yank the
-  // scroll position if they're scrolled up reading history).
-  const nearBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 80;
+  // scroll position if they're scrolled up reading history). Use the cached
+  // `clientHeight` (refreshed by a ResizeObserver) so we only force a reflow
+  // read of scrollHeight/scrollTop here, not of clientHeight too (finding:
+  // per-event DOM scan + forced reflow).
+  const nearBottom = logEl.scrollHeight - logEl.scrollTop - cachedClientHeight < 80;
   if (nearBottom) logEl.scrollTop = logEl.scrollHeight;
 
   if (event.type === "navigator-step-start") {
@@ -322,8 +381,22 @@ chrome.runtime.onMessage.addListener((msg: unknown, sender, _sendResponse) => {
   // Trust boundary — only accept messages from this extension (matches
   // the guard in human-interact.ts, content.ts, and background/message-routing.ts).
   if (sender.id !== chrome.runtime.id) return false;
-  if ((msg as AgentEventEnvelope)?.type === "AGENT_EVENT") {
-    addLogRow((msg as AgentEventEnvelope).event, (msg as AgentEventEnvelope).time);
+  const payload = msg as Partial<AgentEventEnvelope>;
+  if (payload?.type === "AGENT_EVENT") {
+    const ev = payload.event;
+    // Validate the envelope before dereferencing it (finding: AGENT_EVENT
+    // envelope is not validated before `addLogRow` dereferences it). A
+    // malformed envelope (no `event`, or `event.type` not a string) would
+    // throw inside `addLogRow` and crash the listener. Ignore it instead.
+    if (
+      typeof ev === "object" && ev !== null &&
+      typeof (ev as { type?: unknown }).type === "string" &&
+      typeof payload.time === "string"
+    ) {
+      addLogRow(ev as LogEvent, payload.time);
+    } else {
+      console.warn("[log-renderer] dropped malformed AGENT_EVENT envelope (missing/invalid event or time)");
+    }
   }
   return false;
 });
@@ -345,7 +418,7 @@ export function restoreTotalsFromStorage(): void {
     }
     if (typeof s[STORAGE_KEYS.tokens] === "number") {
       totalTokens = s[STORAGE_KEYS.tokens] as number;
-      tokenLabel.textContent = `${totalTokens} tokens`;
+      tokenLabel.textContent = formatTokens(totalTokens);
     }
     if (Array.isArray(s[STORAGE_KEYS.log])) {
       // Clear any rows already in the DOM + in-memory mirror BEFORE replaying,

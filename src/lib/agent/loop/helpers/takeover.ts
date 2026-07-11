@@ -74,6 +74,19 @@ export async function waitForTakeoverResume(
       // the closure kept `finish` + `timer` + the Promise alive on the
       // signal's listener list for the lifetime of the AbortSignal (often the
       // whole run). Removing it explicitly breaks that reference chain.
+
+      // Only trust a RESUME that originates from our own extension and that is
+      // NOT carried on a content-script `tab` — i.e. a message from one of our
+      // own extension pages (the sidepanel/options), never from a content
+      // script injected into a web page or from another extension. Without this
+      // check any sender could un-pause the agent loop.
+      const isTrustedResumeSender = (
+        sender?: chrome.runtime.MessageSender
+      ): boolean =>
+        !!sender &&
+        sender.id === chrome.runtime.id &&
+        !sender.tab;
+
       let abortListener: (() => void) | null = null;
       const finish = (result: "resumed" | "timeout"): void => {
         if (done) return;
@@ -88,8 +101,14 @@ export async function waitForTakeoverResume(
         clearTimeout(timer);
         resolve(result);
       };
-      const listener = (msg: unknown): void => {
-        if ((msg as { type?: string } | null)?.type === "RESUME") {
+      const listener = (
+        msg: unknown,
+        sender?: chrome.runtime.MessageSender
+      ): void => {
+        if (
+          (msg as { type?: string } | null)?.type === "RESUME" &&
+          isTrustedResumeSender(sender)
+        ) {
           finish("resumed");
         }
       };

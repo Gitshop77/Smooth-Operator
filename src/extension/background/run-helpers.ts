@@ -234,7 +234,7 @@ export function trackAdaptiveVisionStep(step: number): void {
     globalVisionAssistant = null;
     visionInitPromise = null;
     visionInitFailed = false;
-    void va.cleanup().catch(() => {});
+    void va.cleanup().catch((e) => console.warn("[vision] cleanup failed (VRAM may leak):", e));
   }
 }
 
@@ -273,7 +273,7 @@ export async function handleDetectVisualRequest(query: string): Promise<{
       return { ok: false, error: "no active run — cannot determine agent tab for screenshot" };
     }
     const screenshotDataUrl = await captureTabScreenshot(tabId);
-    const visionDetections = await globalVisionAssistant.detect(screenshotDataUrl).catch(() => []);
+    const visionDetections = await globalVisionAssistant.detect(screenshotDataUrl).catch((e: unknown) => { console.warn("[vision] detect failed (falling back to no detections):", e); return []; });
     // Cache vision elements for the next step's extractStateForRun
     visionElementsCache.clear();
     visionCacheUrl = ""; // reset before re-population (in case tab get fails below)
@@ -360,7 +360,7 @@ export async function extractStateForRun(
       DEFAULT_MODELS[providerId as string] ||
       "";
     mainModelVision = await modelSupportsVision(resolvedModel, catId as string);
-  } catch { /* catalog failed */ }
+  } catch (e) { console.warn("[vision] catalog/model load failed (vision disabled for this step):", e); }
 
   const includeScreenshot = mainModelVision && (storedEnableScreenshots ?? true);
 
@@ -456,11 +456,14 @@ export async function extractStateForRun(
     const { mergeDetections, renderMergedElementsText } =
       await import("../vision-assistant");
 
-    // Capture screenshot for vision (even though main model can't use it)
-    const screenshotDataUrl = await chrome.tabs.captureVisibleTab(
-      chrome.windows.WINDOW_ID_CURRENT,
-      { format: "jpeg", quality: 80 }, // quality 80 is sufficient for the vision model — it downscales anyway
-    );
+    // Capture the AGENT'S tab (runState.currentTabId), not the user's visible
+    // tab. `chrome.tabs.captureVisibleTab(WINDOW_ID_CURRENT)` would capture
+    // whichever tab the user is currently viewing — if they'd switched tabs
+    // mid-run, vision detections + cached pixelRects would be for the WRONG
+    // page, and the CDP_CLICK handler would then click coordinates in the
+    // agent's tab → silent misclicks (the delete/payment-button hazard). Use
+    // the dedicated per-tab helper, exactly like handleDetectVisualRequest.
+    const screenshotDataUrl = await captureTabScreenshot(tabId);
 
     // Run DOM extraction + vision detection in parallel. The vision `.detect()`
     // call is wrapped in `.catch(() => [])` so a model inference failure (OOM,
@@ -468,7 +471,7 @@ export async function extractStateForRun(
     // the whole extract — the merger then returns the DOM-only state unchanged.
     const [domState, visionDetections] = await Promise.all([
       extractStateFromTab(tabId, tabs, false),
-      globalVisionAssistant.detect(screenshotDataUrl).catch(() => []),
+      globalVisionAssistant.detect(screenshotDataUrl).catch((e: unknown) => { console.warn("[vision] detect failed (falling back to no detections):", e); return []; }),
     ]);
 
     // The content script stashes the tab's `devicePixelRatio` on the

@@ -1,5 +1,6 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
+import { Prisma } from '@prisma/client';
 import { json, badRequest, withRouteError, parseLimit } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
@@ -34,9 +35,9 @@ export async function DELETE(req: NextRequest): Promise<Response> {
     try {
       await db.siteMemory.delete({ where: { id } });
     } catch (e) {
-      const msg = e instanceof Error ? e.message : '';
-      const lower = msg.toLowerCase();
-      if (lower.includes('not found') || lower.includes('p2025')) {
+      // Prisma throws P2025 (RecordNotFound) when the id doesn't exist. The
+      // code lives in `e.code`, not the message, so test that directly.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
         return json({ error: 'not found' }, 404);
       }
       throw e;

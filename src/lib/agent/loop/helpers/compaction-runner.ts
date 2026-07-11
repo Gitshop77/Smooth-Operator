@@ -58,9 +58,14 @@ export async function runCompaction(
       // `runPlanner` / `callNavigatorWithRetry`.
       if (onCost && res.usage) {
         const { tokensIn, tokensOut, model, reasoningTokens, cachedInputTokens, costUsd: precomputedCost } = res.usage;
+        // Read cache-write (creation) tokens when threaded through (billed at
+        // the higher cache-write rate; omitted, it under-reports Anthropic
+        // cache-creation cost). Cast until TokenUsage (types.ts) propagates it.
+        const cachedWriteInputTokens = (res.usage as { cachedWriteInputTokens?: number }).cachedWriteInputTokens ?? 0;
         if (tokensIn !== undefined && tokensOut !== undefined && model) {
-          // Prefer pre-computed costUsd; fall back to estimateCost with cachedInputTokens.
-          const cost = precomputedCost ?? estimateCost(model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens);
+          // Prefer pre-computed costUsd; fall back to estimateCost with
+          // cachedInputTokens AND cachedWriteInputTokens passed through.
+          const cost = precomputedCost ?? estimateCost(model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens);
           onCost(cost, tokensIn, tokensOut);
           deps.onEvent({ type: "cost", step, tokensIn, tokensOut, costUsd: cost, model });
           // Also report to the dispatcher so AgentMetricsCallback attributes
@@ -97,8 +102,13 @@ export async function runCompaction(
       }
       // Surface the planner-fallback cost + tokens to the caller.
       if (onCost && res.tokensIn !== undefined && res.tokensOut !== undefined && res.model) {
-        // Prefer pre-computed costUsd; fall back to estimateCost with cachedInputTokens.
-        const cost = res.costUsd ?? estimateCost(res.model, res.tokensIn, res.tokensOut, res.reasoningTokens, res.cachedInputTokens);
+        // Read cache-write (creation) tokens when threaded through (billed at
+        // the higher cache-write rate). Cast until the PlannerLLMCall result
+        // type (loop/types.ts) and loop-deps wiring propagate it.
+        const cachedWriteInputTokens = (res as { cachedWriteInputTokens?: number }).cachedWriteInputTokens ?? 0;
+        // Prefer pre-computed costUsd; fall back to estimateCost with
+        // cachedInputTokens AND cachedWriteInputTokens passed through.
+        const cost = res.costUsd ?? estimateCost(res.model, res.tokensIn, res.tokensOut, res.reasoningTokens, res.cachedInputTokens, cachedWriteInputTokens);
         onCost(cost, res.tokensIn, res.tokensOut);
         deps.onEvent({ type: "cost", step, tokensIn: res.tokensIn, tokensOut: res.tokensOut, costUsd: cost, model: res.model });
         // same dispatcher reporting as the summarize path above.

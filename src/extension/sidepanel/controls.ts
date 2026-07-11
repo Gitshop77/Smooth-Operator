@@ -42,7 +42,9 @@ export function setRunning(v: boolean): void {
   stopBtn.disabled = !v;
   // Pause button is enabled only while running.
   if (pauseBtn) pauseBtn.disabled = !v;
-  runBtn.textContent = v ? "Running…" : "▶ Run";
+  runBtn.textContent = v
+    ? (chrome.i18n?.getMessage("running") || "Running…")
+    : (chrome.i18n?.getMessage("run") || "Run");
   liveDot.classList.toggle("live", v);
   // enable the model switch input only while running
   if (modelSwitchInput) modelSwitchInput.disabled = !v;
@@ -55,7 +57,10 @@ export function setRunning(v: boolean): void {
   // a fresh run would toggle the stale `true` → `false` (no-op write) and the
   // agent wouldn't actually pause — the user had to click twice.
   if (pauseBtn) {
-    pauseBtn.textContent = "⏸ Pause";
+    pauseBtn.textContent = chrome.i18n?.getMessage("pause") || "Pause";
+    // Keep the accessible name in lockstep with the visible label (finding:
+    // pause button's accessible name never updates with its state).
+    pauseBtn.setAttribute("aria-label", "Pause agent");
     pauseBtn.classList.remove("paused");
   }
   isPaused = false;
@@ -164,7 +169,13 @@ stopBtn.addEventListener("click", () => {
 pauseBtn?.addEventListener("click", () => {
   isPaused = !isPaused;
   if (pauseBtn) {
-    pauseBtn.textContent = isPaused ? "▶ Resume" : "⏸ Pause";
+    pauseBtn.textContent = isPaused
+      ? (chrome.i18n?.getMessage("resume") || "Resume")
+      : (chrome.i18n?.getMessage("pause") || "Pause");
+    // Update the accessible name in lockstep with the visible label (finding:
+    // pause button's accessible name never updates with its state). This also
+    // overrides the static aria-label declared in sidepanel.html at runtime.
+    pauseBtn.setAttribute("aria-label", isPaused ? "Resume agent" : "Pause agent");
     pauseBtn.classList.toggle("paused", isPaused);
   }
   chrome.storage.session.set({ open_cowork_paused: isPaused }, () => {
@@ -206,7 +217,9 @@ chrome.runtime.sendMessage({ type: "STATUS" }, (res: StatusResponse) => {
     if (chrome.runtime.lastError) return;
     if (s?.open_cowork_paused === true && res?.running) {
       if (pauseBtn) {
-        pauseBtn.textContent = "▶ Resume";
+        pauseBtn.textContent = chrome.i18n?.getMessage("resume") || "Resume";
+        // Sync the accessible name when restoring a paused run on panel reopen.
+        pauseBtn.setAttribute("aria-label", "Resume agent");
         pauseBtn.classList.add("paused");
       }
       isPaused = true;

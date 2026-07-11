@@ -8,7 +8,7 @@
 //          { ok: false, error } on failure.
 
 import type { NextRequest } from 'next/server';
-import { json, badRequest, serverError, withRouteError } from '@/lib/cowork/api/http';
+import { json, badRequest, serverError, withRouteError, bodyJson } from '@/lib/cowork/api/http';
 import { COWORK_EVENTS_BASE, getCoworkEventsToken } from '@/lib/cowork/events/client';
 
 type ImageSize =
@@ -37,12 +37,10 @@ const SUPPORTED_SIZES: ImageSize[] = [
 
 export async function POST(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
-    let body: ImageProxyBody;
-    try {
-      body = (await req.json()) as ImageProxyBody;
-    } catch {
-      return badRequest('Invalid JSON body');
-    }
+    // `bodyJson` caps the raw body at MAX_BODY_BYTES (256KB) and rejects
+    // oversize bodies with 413 *before* buffering — `req.json()` would read
+    // the entire body into memory unbounded (memory-exhaustion DoS).
+    const body = (await bodyJson(req)) as ImageProxyBody;
 
     if (!body.prompt || typeof body.prompt !== 'string' || !body.prompt.trim()) {
       return badRequest('prompt required (non-empty string)');
@@ -60,7 +58,14 @@ export async function POST(req: NextRequest): Promise<Response> {
     try {
       upstream = await fetch(`${COWORK_EVENTS_BASE}/image`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Cowork-Token': getCoworkEventsToken() },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Cowork-Token': getCoworkEventsToken(),
+          // Forward the cockpit request id for correlation with the mini-service.
+          ...(req.headers.get('x-request-id')
+            ? { 'x-request-id': req.headers.get('x-request-id') as string }
+            : {}),
+        },
         body: JSON.stringify({ prompt: body.prompt, size: body.size }),
       });
     } catch (err) {
@@ -70,7 +75,10 @@ export async function POST(req: NextRequest): Promise<Response> {
 
     if (!upstream.ok) {
       const text = await upstream.text().catch(() => '');
-      return serverError(`cowork-events /image ${upstream.status}: ${text.slice(0, 200)}`);
+      // Do not forward raw upstream error text to the client — log server-side
+      // and return a generic message.
+      console.error('[cowork] /image upstream failed', { status: upstream.status, body: text.slice(0, 200) });
+      return serverError(`cowork-events /image request failed (status ${upstream.status})`);
     }
 
     const data = await upstream.json();
@@ -87,6 +95,9 @@ export async function GET(): Promise<Response> {
       size: `one of: ${SUPPORTED_SIZES.join(', ')} (default 1024x1024)`,
     },
     response: '{ ok, base64, prompt, size, bytes }',
-    upstream: `${COWORK_EVENTS_BASE}/image`,
+    // Intentionally do NOT disclose the internal mini-service base URL
+    // (COWORK_EVENTS_BASE) — it reveals internal infrastructure topology that
+    // clients do not need and that could aid network mapping.
+    upstream: '(internal cowork-events endpoint)',
   });
 }

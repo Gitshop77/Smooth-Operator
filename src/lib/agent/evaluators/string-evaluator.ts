@@ -5,13 +5,15 @@
  * Three matching modes (mirroring the canonical benchmark pattern):
  *   - `exact_match(ref, pred)` — case-insensitive, strips surrounding quotes.
  *   - `must_include(ref, pred)` — substring check; supports ` |OR| `
- *     alternatives. Each alternative must appear in the prediction for the
- *     overall score to be 1.0.
+ *     alternatives (the prediction must contain ANY one of the alternatives).
  *   - `regex_match(ref, pred)` — `ref` treated as a regular expression.
  *
  * Scores multiply across all entries in `referenceAnswers`: 1.0 only if every
  * entry passes. The evaluator is fully deterministic (no LLM call) — it is
  * the cheapest of the three evaluators and the easiest to reason about.
+ *
+ * NOTE: HTML content is compared RAW (case-sensitive, quotes preserved) via
+ * {@link htmlExactMatch}/{@link htmlMustInclude} — see `html-content-evaluator`.
  */
 
 /** Tag used by {@link StringEvaluator} when surfacing which check failed. */
@@ -71,70 +73,108 @@ export function exactMatch(ref: string, pred: string): number {
 }
 
 /**
+ * Split a `must_include` reference into ` |OR| ` alternatives. Returns the
+ * trimmed, non-empty parts. Empty after filtering (e.g. an empty entry) → [].
+ */
+export function splitOrAlternatives(ref: string): string[] {
+  return ref
+    .split(/\s\|OR\|\s/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
  * Must-include check — does `pred` contain `ref` (after cleaning)?
  *
- * When `tokenize` is true AND `ref` is a single word, uses whole-word
- * matching so `ref="0"` does NOT match `pred="10"`. Otherwise falls back
- * to a plain substring check.
+ * `ref` may use ` |OR| ` to list alternatives; the prediction must contain
+ * ANY one of them (matches the HTML evaluator's semantics). When `tokenize`
+ * is true AND every alternative is a single word, uses whole-word matching so
+ * `ref="0"` does NOT match `pred="10"`. Otherwise falls back to a plain
+ * substring check. An empty reference (no alternatives) is a no-op → 1.
  */
 export function mustInclude(ref: string, pred: string, tokenize = false): number {
-  const cr = cleanAnswer(ref);
   const cp = cleanAnswer(pred);
-  if (tokenize && /^\S+$/.test(cr)) {
+  const alternatives = splitOrAlternatives(ref).map(cleanAnswer);
+  if (alternatives.length === 0) return 1;
+  if (tokenize && alternatives.every((a) => /^\S+$/.test(a))) {
     const tokens = cp.split(/\s+/);
-    return tokens.includes(cr) ? 1 : 0;
+    return alternatives.every((a) => tokens.includes(a)) ? 1 : 0;
   }
-  return cp.includes(cr) ? 1 : 0;
+  return alternatives.every((a) => cp.includes(a)) ? 1 : 0;
 }
 
-/** Regex check — does `pred` match the regex `ref` (anywhere)? */
-export function regexMatch(ref: string, pred: string): number {
-  try {
-    const re = new RegExp(ref, "i");
-    return re.test(pred) ? 1 : 0;
-  } catch {
-    // Invalid regex pattern — treat as no match (don't crash the evaluator).
-    return 0;
-  }
+/**
+ * HTML exact-match — RAW string equality (case-sensitive, quotes preserved).
+ *
+ * Unlike {@link exactMatch}, this does NOT lower-case or strip quotes, because
+ * HTML element text and attribute values are case-sensitive. Whitespace at the
+ * very start/end of either side is trimmed so config authoring artifacts don't
+ * cause spurious failures.
+ */
+export function htmlExactMatch(ref: string, html: string): number {
+  return html.trim() === ref.trim() ? 1 : 0;
 }
 
-/** Evaluate the prediction against every reference answer; multiply scores. */
-export function evaluateString(input: StringEvaluatorInput): StringEvaluatorResult {
-  let score = 1.0;
-  const reasons: string[] = [];
-  for (const ref of input.referenceAnswers) {
-    let cur: number;
-    switch (ref.type) {
-      case "exact_match":
-        cur = exactMatch(ref.ref, input.prediction);
-        break;
-      case "must_include":
-        cur = mustInclude(ref.ref, input.prediction, input.tokenize);
-        break;
-      case "regex":
-        cur = regexMatch(ref.ref, input.prediction);
-        break;
-      default:
-        cur = 0;
-        reasons.push(`unknown match type`);
-        break;
-    }
-    score *= cur;
-    if (cur === 0) {
-      reasons.push(`${ref.type}("${ref.ref.slice(0, 60)}") failed`);
-    }
-  }
-  return {
-    score,
-    tag: STRING_EVALUATOR_TAG,
-    reason: reasons.join("; "),
-  };
+/**
+ * HTML must-include — RAW substring check (case-sensitive, quotes preserved).
+ *
+ * Splits the reference on ` |OR| ` so an entry like `"Login |OR| Sign in"`
+ * passes if the HTML contains EITHER alternative. Empty entries are no-ops.
+ */
+export function htmlMustInclude(ref: string, html: string): number {
+  const alternatives = splitOrAlternatives(ref);
+  if (alternatives.length === 0) return 1;
+  return alternatives.some((alt) => html.includes(alt)) ? 1 : 0;
 }
 
-/** OOP wrapper kept for parity with the other evaluators. */
+/**
+ * Deterministic evaluator — checks the agent's final answer against a list of
+ * reference answers (three matching modes) and returns a 0/1 score that is the
+ * product of all entries.
+ *
+ * `exactMatch` / `mustInclude` are applied per-entry; regex matching is inlined
+ * in the `regex` case below. See {@link StringReferenceAnswer} for the
+ * supported `type` discriminators.
+ */
 export class StringEvaluator {
   readonly tag = STRING_EVALUATOR_TAG;
+
   evaluate(input: StringEvaluatorInput): StringEvaluatorResult {
-    return evaluateString(input);
+    let score = 1.0;
+    const reasons: string[] = [];
+    for (const ref of input.referenceAnswers) {
+      let cur: number;
+      switch (ref.type) {
+        case "exact_match":
+          cur = exactMatch(ref.ref, input.prediction);
+          break;
+        case "must_include":
+          cur = mustInclude(ref.ref, input.prediction, input.tokenize);
+          break;
+        case "regex": {
+          // Invalid regex pattern — treat as no match (don't crash).
+          try {
+            const re = new RegExp(ref.ref, "i");
+            cur = re.test(input.prediction) ? 1 : 0;
+          } catch {
+            cur = 0;
+          }
+          break;
+        }
+        default:
+          cur = 0;
+          reasons.push(`unknown match type`);
+          break;
+      }
+      score *= cur;
+      if (cur === 0) {
+        reasons.push(`${ref.type}("${ref.ref.slice(0, 60)}") failed`);
+      }
+    }
+    return {
+      score,
+      tag: STRING_EVALUATOR_TAG,
+      reason: reasons.join("; "),
+    };
   }
 }

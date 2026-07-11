@@ -295,13 +295,21 @@ describe("buildNavigatorUserMessage", () => {
     expect(msg).toContain("<current_goal>");
 
     // Plan (rendered as a checklist with the current item marked [>]).
+    // NOTE: each plan item's TEXT is wrapped in <untrusted_page_data> markers,
+    // so "[marker] i: <text>" is NOT a contiguous substring. Assert on the
+    // stable marker prefix and on the item text separately — both survive the
+    // wrapper and won't rot when the wrapping format changes.
     expect(msg).toContain("<plan>");
     expect(msg).toContain("Open the site");
     expect(msg).toContain("Log in");
     expect(msg).toContain("Download the report");
-    expect(msg).toContain("[>] 1: Log in"); // currentPlanItem=1
-    expect(msg).toContain("[x] 0: Open the site"); // already done
-    expect(msg).toContain("[ ] 2: Download the report"); // pending
+    expect(msg).toContain("[>] 1:"); // current item (currentPlanItem=1)
+    expect(msg).toContain("[x] 0:"); // already done
+    expect(msg).toContain("[ ] 2:"); // pending
+    // Confirm the plan items are wrapped as untrusted data (not emitted raw).
+    const planBlock = msg.slice(msg.indexOf("<plan>"), msg.indexOf("</plan>"));
+    expect(planBlock).toContain("<untrusted_page_data>");
+    expect(planBlock).toContain("</untrusted_page_data>");
 
     // Browser state — URL, title, elementsText.
     expect(msg).toContain("https://example.com/login");
@@ -351,12 +359,17 @@ describe("buildNavigatorUserMessage", () => {
     });
 
     // url, title, tabsBlock, pageInfo, AND elementsText are all wrapped.
-    // The injected </untrusted_page_data> must be redacted so only legitimate wrappers remain.
-    const opens = msg.match(/<untrusted_page_data>/g) ?? [];
-    const closes = msg.match(/<\/untrusted_page_data>/g) ?? [];
-    // 5 wrappers: url, title, tabsBlock, pageInfo, elementsText
-    expect(opens).toHaveLength(5);
-    expect(closes).toHaveLength(5);
+    // The injected </untrusted_page_data> must be redacted so only legitimate
+    // wrappers remain. Count wrappers scoped to <browser_state> so the assertion
+    // stays stable as unrelated wrappers (current_goal, plan items, history,
+    // etc.) are added elsewhere in the prompt — an exact GLOBAL count would rot
+    // on every formatting change. An un-redacted injected close tag would make
+    // the count unbalanced (closes > opens), so balance is the real invariant.
+    const bs = msg.slice(msg.indexOf("<browser_state>"), msg.indexOf("</browser_state>"));
+    const bsOpens = bs.match(/<untrusted_page_data>/g) ?? [];
+    const bsCloses = bs.match(/<\/untrusted_page_data>/g) ?? [];
+    expect(bsOpens.length).toBe(bsCloses.length);
+    expect(bsOpens.length).toBeGreaterThanOrEqual(5); // 5 page-derived fields
 
     // The injected <system>...</system> tag and injection phrases must be
     // redacted to [redacted] (sanitizeUntrusted runs BEFORE the wrapper is
@@ -386,12 +399,22 @@ describe("buildNavigatorUserMessage", () => {
       },
     });
 
-    // url, title, tabsBlock, pageInfo, elementsText, AND axTree are all wrapped.
-    // 6 wrappers total: 5 browser_state fields + axTree
-    const opens = msg.match(/<untrusted_page_data>/g) ?? [];
-    const closes = msg.match(/<\/untrusted_page_data>/g) ?? [];
-    expect(opens).toHaveLength(6);
-    expect(closes).toHaveLength(6);
+    // url, title, tabsBlock, pageInfo, elementsText (browser_state) AND axTree
+    // (accessibility_tree) are all wrapped. Count wrappers scoped to each block
+    // so the assertion stays stable as unrelated wrappers are added elsewhere in
+    // the prompt. Balance is the real invariant (an escaped injected wrapper would
+    // unbalance the counts); a minimum bound proves every field is wrapped.
+    const bs = msg.slice(msg.indexOf("<browser_state>"), msg.indexOf("</browser_state>"));
+    const bsOpens = bs.match(/<untrusted_page_data>/g) ?? [];
+    const bsCloses = bs.match(/<\/untrusted_page_data>/g) ?? [];
+    expect(bsOpens.length).toBe(bsCloses.length);
+    expect(bsOpens.length).toBeGreaterThanOrEqual(5); // 5 page-derived fields
+
+    const ax = msg.slice(msg.indexOf("<accessibility_tree>"), msg.indexOf("</accessibility_tree>"));
+    const axOpens = ax.match(/<untrusted_page_data>/g) ?? [];
+    const axCloses = ax.match(/<\/untrusted_page_data>/g) ?? [];
+    expect(axOpens.length).toBe(axCloses.length);
+    expect(axOpens.length).toBeGreaterThanOrEqual(1); // axTree is wrapped
 
     // The injected <system> tag is redacted everywhere.
     expect(msg).not.toContain("<system>");

@@ -18,6 +18,7 @@ import { make } from "../route/client";
 import * as Gemini from "../protocols/gemini";
 import type { LLMProvider } from "../provider";
 import { toLLMProvider as toLLMProviderBridge } from "../provider-bridge";
+import { assertSafeUserBaseURL } from "./openai-compatible-profile";
 
 export const id = "google";
 
@@ -33,6 +34,10 @@ const auth = (options: ProviderAuthOption<"optional">) => {
 };
 
 export function configure(input: Config = {}) {
+  // (SSRF guard): validate any user-supplied baseURL override before
+  // building the route/endpoint. The trusted default (Gemini.ENDPOINT) is
+  // exempt — only untrusted, user-controlled input is checked.
+  assertSafeUserBaseURL(input.baseURL);
   const baseURL = input.baseURL ?? Gemini.ENDPOINT;
   return {
     id,
@@ -56,8 +61,6 @@ export function configure(input: Config = {}) {
   };
 }
 
-export const provider = configure();
-
 /**
  * Bridge to the agent's `LLMProvider` interface. The protocol emits usage
  * with `model: ""` + `costUsd: 0`; we fill them in from the canonical
@@ -65,7 +68,9 @@ export const provider = configure();
  */
 export function toLLMProvider(config: Config & { model: string }): LLMProvider {
   return toLLMProviderBridge({
-    providerId: "gemini",
+    // Keep `providerId` consistent with this module's `id` ("google") and the
+    // route's `provider` field, so telemetry / cost / catalog keys line up.
+    providerId: "google",
     providerDisplayName: "Google",
     model: config.model,
     supportsVision: true,

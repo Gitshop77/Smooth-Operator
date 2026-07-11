@@ -12,14 +12,12 @@ export {
   checkUrlAllowedWithDomainConfig,
 } from "./domain-config";
 export {
-  cssEscape,
   generateCssSelector,
   isVisible,
   resolveElement,
   safeScrollIntoView,
 } from "./element-resolver";
 export {
-  KEY_MAP,
   type ParsedKeys,
   parseKeys,
 } from "./key-parser";

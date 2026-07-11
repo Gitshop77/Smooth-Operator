@@ -33,6 +33,25 @@ export interface OverlayHandle {
   remove: () => void;
 }
 
+/**
+ * Per-element ownership tracking so overlapping highlights restore correctly.
+ *
+ * The first highlight on an element captures + applies the highlight styles;
+ * subsequent highlights on the same element reuse the already-applied styles
+ * without re-capturing the "original" ones. The original styles are only
+ * restored when the *last* active highlight for that element is removed, which
+ * prevents a stale `outline`/`backgroundColor` from being left on the page
+ * when two highlights target the same element.
+ */
+interface ElementHighlightState {
+  prevOutline: string;
+  prevOffset: string;
+  prevBg: string;
+  count: number;
+}
+
+const elementHighlights = new WeakMap<HTMLElement, ElementHighlightState>();
+
 /** C19: when true, highlights persist until explicitly removed (debug mode). */
 let persistentHighlightMode = false;
 
@@ -51,14 +70,24 @@ export function setPersistentHighlight(enabled: boolean): void {
  * @returns A handle whose `remove()` clears the highlight immediately.
  */
 export function highlightElement(el: HTMLElement, label: string): OverlayHandle {
-  // Save previous inline styles so we can restore them on cleanup.
-  const prevOutline = el.style.outline;
-  const prevOffset = el.style.outlineOffset;
-  const prevBg = el.style.backgroundColor;
-
-  el.style.outline = `3px solid ${HIGHLIGHT_COLOR}`;
-  el.style.outlineOffset = "1px";
-  el.style.backgroundColor = HIGHLIGHT_BG;
+  // Track ownership per element so overlapping highlights don't corrupt style
+  // restoration. The first highlight captures + applies the styles; later
+  // highlights on the same element reuse the applied styles and only restore
+  // the originals once the last highlight for that element is removed.
+  let state = elementHighlights.get(el);
+  if (!state) {
+    state = {
+      prevOutline: el.style.outline,
+      prevOffset: el.style.outlineOffset,
+      prevBg: el.style.backgroundColor,
+      count: 0,
+    };
+    elementHighlights.set(el, state);
+    el.style.outline = `3px solid ${HIGHLIGHT_COLOR}`;
+    el.style.outlineOffset = "1px";
+    el.style.backgroundColor = HIGHLIGHT_BG;
+  }
+  state.count += 1;
 
   const badge = document.createElement("div");
   badge.textContent = label;
@@ -92,12 +121,18 @@ export function highlightElement(el: HTMLElement, label: string): OverlayHandle 
   const remove = (): void => {
     if (removed) return;
     removed = true;
-    el.style.outline = prevOutline;
-    el.style.outlineOffset = prevOffset;
-    el.style.backgroundColor = prevBg;
+    state.count -= 1;
     badge.remove();
     window.removeEventListener("scroll", position);
     window.removeEventListener("resize", position);
+    // Only restore the element's original styles when this was the last
+    // active highlight for it, preventing a stale highlight from lingering.
+    if (state.count === 0) {
+      el.style.outline = state.prevOutline;
+      el.style.outlineOffset = state.prevOffset;
+      el.style.backgroundColor = state.prevBg;
+      elementHighlights.delete(el);
+    }
   };
 
   // in persistent mode, highlights stay until explicitly removed

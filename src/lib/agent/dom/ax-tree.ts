@@ -8,11 +8,6 @@
  *   - `generateAccessibilityTree`, `initElementMap`, `resolveRef`,
  *     `AXTreeResult` (interface)
  *
- * The `declare global { interface Window { __openCoworkElementMap?, ... } }`
- * augmentation is also preserved — it lives in `./extraction/ax-tree-builder`
- * and is loaded when this shim is imported (the re-export triggers the
- * module evaluation, which applies the global augmentation).
- *
  * New code should import from `@/lib/agent/dom/extraction/ax-tree-builder`
  *
  */

@@ -58,7 +58,7 @@ export interface OpenAIChatChunk {
  * we extract it into a proper `image_url` content part, mirroring the logic
  * already implemented in `anthropic-messages.ts` / `gemini.ts`.
  */
-const SCREENSHOT_PATTERN = /<screenshot>(data:image\/(png|jpeg|webp);base64,[^<]+)<\/screenshot>/;
+const SCREENSHOT_PATTERN = /<screenshot>(data:image\/(png|jpeg|webp);base64,[^<]+)<\/screenshot>/g;
 
 /** Default max_tokens fallback when the caller doesn't set one. */
 const DEFAULT_MAX_TOKENS = 4096;
@@ -72,12 +72,17 @@ const DEFAULT_MAX_TOKENS = 4096;
 async function fromRequest(request: LLMRequest): Promise<OpenAIChatBody> {
   const messages = request.messages.map((m) => {
     if (m.role === "user") {
-      const match = m.content.match(SCREENSHOT_PATTERN);
-      if (match) {
+      // Extract EVERY screenshot marker (not just the first) into its own
+      // `image_url` content part — a multi-screenshot turn must forward all
+      // of them, matching the Anthropic protocol.
+      const matches = Array.from(m.content.matchAll(SCREENSHOT_PATTERN));
+      if (matches.length > 0) {
         const textContent = m.content.replace(/<screenshot>[^<]+<\/screenshot>/g, "").trim();
         const parts: OpenAIContentPart[] = [];
         if (textContent) parts.push({ type: "text", text: textContent });
-        parts.push({ type: "image_url", image_url: { url: match[1] } });
+        for (const match of matches) {
+          parts.push({ type: "image_url", image_url: { url: match[1] } });
+        }
         return { role: m.role, content: parts };
       }
     }
@@ -156,6 +161,16 @@ export const protocol: Protocol<OpenAIChatBody, string, { type: string; content?
       }
       try {
         const chunk: OpenAIChatChunk = JSON.parse(frame);
+        // Provider error payloads (`{"error": {...}}`) are valid JSON, so they
+        // parse without throwing — but `choices`/`usage` are undefined and
+        // would otherwise be silently swallowed as empty output. Surface them
+        // explicitly so auth/quota/permission failures aren't masked.
+        const chunkAny = chunk as unknown as { error?: { message?: string } | string };
+        if (chunkAny.error) {
+          const err = chunkAny.error;
+          const msg = typeof err === "string" ? err : (err.message ?? JSON.stringify(err));
+          throw new Error(`OpenAI API error: ${msg}`);
+        }
         const delta = chunk.choices?.[0]?.delta;
         if (delta?.content) {
           state.content += delta.content;

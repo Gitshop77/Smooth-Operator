@@ -68,13 +68,34 @@ const addToRemoveQueue = (toastId: string) => {
   toastTimeouts.set(toastId, timeout)
 }
 
+// Clear any pending removal timer for a toast that is leaving state, so its
+// timer handle is not orphaned (e.g. when evicted by the toast limit or
+// removed before its timer fires).
+const removeFromRemoveQueue = (toastId: string) => {
+  const timeout = toastTimeouts.get(toastId)
+  if (timeout !== undefined) {
+    clearTimeout(timeout)
+    toastTimeouts.delete(toastId)
+  }
+}
+
 export const reducer = (state: State, action: Action): State => {
   switch (action.type) {
-    case "ADD_TOAST":
+    case "ADD_TOAST": {
+      const newToasts = [action.toast, ...state.toasts].slice(0, TOAST_LIMIT)
+      // Toasts evicted by the limit may still have a pending removal timer;
+      // clear those so their timer handles are not left orphaned.
+      const keptIds = new Set(newToasts.map((t) => t.id))
+      state.toasts.forEach((t) => {
+        if (!keptIds.has(t.id)) {
+          removeFromRemoveQueue(t.id)
+        }
+      })
       return {
         ...state,
-        toasts: [action.toast, ...state.toasts].slice(0, TOAST_LIMIT),
+        toasts: newToasts,
       }
+    }
 
     case "UPDATE_TOAST":
       return {
@@ -111,11 +132,14 @@ export const reducer = (state: State, action: Action): State => {
     }
     case "REMOVE_TOAST":
       if (action.toastId === undefined) {
+        toastTimeouts.forEach((timeout) => clearTimeout(timeout))
+        toastTimeouts.clear()
         return {
           ...state,
           toasts: [],
         }
       }
+      removeFromRemoveQueue(action.toastId)
       return {
         ...state,
         toasts: state.toasts.filter((t) => t.id !== action.toastId),

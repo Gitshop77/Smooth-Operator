@@ -61,12 +61,16 @@ export function parseUrl(url: string): ParsedUrl {
     u.searchParams.forEach((value, key) => {
       (query[key] ??= []).push(value);
     });
-    return { basePath: u.host + u.pathname, query };
+    // Use `hostname` (port-stripped) for the base path so host matching is
+    // port-insensitive — a reference pinned with/without a port still matches
+    // the same origin (the port is not part of same-site semantics).
+    return { basePath: u.hostname + u.pathname, query };
   } catch {
     // Fallback regex parse — handles `host/path?query` without a protocol.
     const m = /^[a-z]+:\/\/([^/?]+)([^?]*)\??(.*)$/i.exec(url);
     if (!m) return { basePath: "", query: {} };
-    const basePath = m[1] + m[2];
+    const host = m[1].replace(/:\d+$/, "");
+    const basePath = host + m[2];
     const query: Record<string, string[]> = {};
     if (m[3]) {
       for (const pair of m[3].split("&")) {

@@ -114,7 +114,14 @@ export async function handlePlannerDecision(
       state.dispatcher,
       makeCtx(state)
     );
-    if (finalized) return { status: "finalized" };
+    if (finalized) {
+      // Record the real outcome so `buildRunResult` (which prefers
+      // `state.finalResult`) reports the genuine success/text instead of the
+      // hardcoded `false`/`""` the orchestrator passes at the finalized-done
+      // paths (finding: run result success/text lost on finalized-done paths).
+      state.finalResult = { success: !!plannerResult.success, text: plannerResult.text || opts.doneTextFallback || "" };
+      return { status: "finalized" };
+    }
     plannerResult = { ...plannerResult, decision: "continue" };
     onEvent({
       type: "info",
@@ -127,7 +134,16 @@ export async function handlePlannerDecision(
     return { status: "finalized" };
   }
   if (plannerResult.plan) state.plan = plannerResult.plan;
-  if (plannerResult.current_plan_item !== undefined) state.currentPlanItem = plannerResult.current_plan_item;
+  // Clamp `current_plan_item` to a valid plan index (finding: current_plan_item
+  // is accepted without bounds validation). Schema only checks `z.number().int()`,
+  // so a negative or out-of-range value must be coerced rather than trusted.
+  if (plannerResult.current_plan_item !== undefined) {
+    const planLen = plannerResult.plan?.length ?? 0;
+    const v = plannerResult.current_plan_item;
+    state.currentPlanItem = Number.isInteger(v) && v >= 0 && v < planLen
+      ? v
+      : (v < 0 ? 0 : Math.max(0, planLen - 1));
+  }
   state.currentGoal = plannerResult.next_goal || state.currentGoal;
   return { status: "continue", plannerResult };
 }
@@ -191,9 +207,15 @@ export async function handleNavigatorDone(
     goal: state.currentGoal, plan: state.plan,
   });
   if (state.dispatcher) {
-    await state.dispatcher.plannerStep(
-      makeCtx(state), decisionResult.plannerResult.decision, state.currentGoal, state.plan
-    );
+    // A throwing dispatcher/callback must not abort the whole run (finding:
+    // user-provided dispatcher/callback exceptions abort the whole run).
+    try {
+      await state.dispatcher.plannerStep(
+        makeCtx(state), decisionResult.plannerResult.decision, state.currentGoal, state.plan
+      );
+    } catch (e) {
+      console.error("[planner-phases] dispatcher.plannerStep threw (continuing run):", e);
+    }
   }
   state.navigatorStepsSincePlanner = 0;
   state.step++;
@@ -261,9 +283,15 @@ export async function runPeriodicPlannerCheck(
     goal: state.currentGoal, plan: state.plan,
   });
   if (state.dispatcher) {
-    await state.dispatcher.plannerStep(
-      makeCtx(state), decisionResult.plannerResult.decision, state.currentGoal, state.plan
-    );
+    // A throwing dispatcher/callback must not abort the whole run (finding:
+    // user-provided dispatcher/callback exceptions abort the whole run).
+    try {
+      await state.dispatcher.plannerStep(
+        makeCtx(state), decisionResult.plannerResult.decision, state.currentGoal, state.plan
+      );
+    } catch (e) {
+      console.error("[planner-phases] dispatcher.plannerStep threw (continuing run):", e);
+    }
   }
   return { finalized: false };
 }

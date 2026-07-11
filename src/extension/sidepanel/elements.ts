@@ -32,7 +32,7 @@ export const modeSelect = document.getElementById("modeSelect") as HTMLSelectEle
 export const statusIcon = document.getElementById("statusIcon") as HTMLSpanElement | null;
 export const statusLabel = document.getElementById("statusLabel") as HTMLSpanElement | null;
 export const taskBadge = document.getElementById("taskBadge") as HTMLSpanElement | null;
-export const thinkingPanel = document.getElementById("thinkingPanel") as HTMLDetailsElement | null;
+export const thinkingPanel = document.getElementById("reasoning") as HTMLDetailsElement | null;
 export const thinkingBody = document.getElementById("thinkingBody") as HTMLDivElement | null;
 export const thinkingHint = document.getElementById("thinkingHint") as HTMLSpanElement | null;
 
@@ -61,4 +61,6 @@ export const STORAGE_KEYS = {
   costUsd: "__oc_costUsd",
   tokens: "__oc_tokens",
   log: "__oc_log",
+  reasoningCollapse: "cw-reasoning",
+  activityCollapse: "cw-activity",
 } as const;

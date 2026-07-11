@@ -75,6 +75,33 @@ function alarmName(taskId: string): string {
 }
 
 /**
+ * Serialize scheduled-task storage mutations within a single JS context.
+ *
+ * `chrome.storage.local` has no transactions, so a read-modify-write of the
+ * scheduled-task list can interleave with another mutation in the *same*
+ * context and clobber it (lost-update race — see FULL-REVIEW finding 2). This
+ * mutex makes each mutation atomic *within* this context (e.g. two alarms
+ * firing concurrently both call `saveScheduledTask`; each re-reads the list
+ * under the lock so both `lastRunAt` updates survive).
+ *
+ * It cannot prevent a race with the Options page (a separate JS context) —
+ * fixing that requires per-task storage keys, which also needs the Options
+ * page (`src/extension/options/scheduled-tasks.ts`) to adopt the same scheme.
+ */
+let taskMutationLock: Promise<void> = Promise.resolve();
+async function withTaskMutation<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = taskMutationLock;
+  let release!: () => void;
+  taskMutationLock = new Promise<void>((r) => (release = r));
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+/**
  * Validate a schedule spec.
  *
  * Returns `null` if valid, or a human-readable error message describing the
@@ -122,6 +149,7 @@ export async function listScheduledTasks(): Promise<ScheduledTask[]> {
  */
 export async function saveScheduledTask(task: ScheduledTask): Promise<void> {
   if (!isExtensionWithAlarms()) return;
+  return withTaskMutation(async () => {
   // Validate the schedule up-front — don't persist a malformed task.
   const validationError = validateSchedule(task.schedule);
   if (validationError) {
@@ -161,6 +189,7 @@ export async function saveScheduledTask(task: ScheduledTask): Promise<void> {
       { cause: e }
     );
   }
+  });
 }
 
 /**

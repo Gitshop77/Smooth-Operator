@@ -13,6 +13,61 @@ import { TIMINGS, sleep } from "../constants";
 import { resolveElement, safeScrollIntoView, Select } from "../helpers";
 import type { ActionContext } from "./types";
 
+/**
+ * Collect `[role=option]` elements that are portaled outside the
+ * dropdown's own subtree (e.g. to document.body by MUI / React-Select /
+ * downshift).
+ *
+ * We scope the lookup to options that are *actually rendered/visible*
+ * so the enumeration order matches what the model saw in the page
+ * snapshot. Including every hidden portaled option on the page would
+ * (a) mix in unrelated closed dropdowns and (b) re-order the list,
+ * which would desync `option_index` resolution.
+ *
+ * `trigger` is the element the handler just clicked to open the panel;
+ * if a visible `[role=listbox]` is reachable from it we read that
+ * panel's options directly, otherwise we fall back to all visible
+ * `[role=option]` elements on the page.
+ */
+function collectVisiblePortalOptions(trigger: Element): HTMLElement[] {
+  // Prefer a visible listbox/popup that is associated with the trigger.
+  const triggerId = trigger.getAttribute("id");
+  if (triggerId) {
+    const labelled = document.querySelector<HTMLElement>(
+      `[role="listbox"][aria-labelledby~="${triggerId}"]`,
+    );
+    if (labelled && isVisible(labelled)) {
+      const opts = Array.from(
+        labelled.querySelectorAll('[role="option"]'),
+      ) as HTMLElement[];
+      if (opts.length > 0) return opts.filter(isVisible);
+    }
+  }
+  // Fallback: any visible [role=listbox] (the just-opened panel) and its
+  // options, or visible [role=option] elements elsewhere on the page.
+  const listboxes = Array.from(
+    document.querySelectorAll('[role="listbox"]'),
+  ) as HTMLElement[];
+  const openListbox = listboxes.find(isVisible);
+  if (openListbox) {
+    const opts = Array.from(
+      openListbox.querySelectorAll('[role="option"]'),
+    ) as HTMLElement[];
+    if (opts.length > 0) return opts.filter(isVisible);
+  }
+  return Array.from(
+    document.querySelectorAll('[role="option"]'),
+  ).filter(isVisible) as HTMLElement[];
+}
+
+/** True when an element is rendered (not display:none / visibility:hidden). */
+function isVisible(el: Element): boolean {
+  const style = getComputedStyle(el);
+  if (style.display === "none" || style.visibility === "hidden") return false;
+  const rect = el.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+
 export async function handleSelectDropdown(
   ctx: ActionContext,
   action: Extract<Action, { type: "select_dropdown" }>,
@@ -46,21 +101,37 @@ export async function handleSelectDropdown(
         // 1. Open the dropdown.
         (el as HTMLElement).click();
         await sleep(TIMINGS.clickAfterSettle);
-        // 2. Find the matching option (exact text first, then substring).
-        const optionEls = Array.from(
+        // 2. Collect the candidate options.
+        // `optionEls` is the canonical enumeration we both (a) read the
+        // option text from and (b) apply `option_index` against. To keep
+        // it consistent with what the model enumerated in the page
+        // snapshot, prefer the options inside the widget's own subtree.
+        let optionEls = Array.from(
           el.querySelectorAll('[role="option"]'),
         ) as HTMLElement[];
-        // Also consider options outside the dropdown's subtree (some
-        // widgets portal the options to document.body).
+        // Many widgets (MUI, React-Select, downshift) portal the option
+        // list to document.body. The model's `option_index` was chosen
+        // against the *visible* options it saw, so we must scope the
+        // portal lookup to the options that are actually rendered/visible
+        // — not every hidden portaled option on the page. Grabbing all
+        // `[role=option]` on document.body would mix in other (closed)
+        // dropdowns and re-order the list, desyncing `option_index`.
         if (optionEls.length === 0) {
-          optionEls.push(
-            ...Array.from(
-              document.querySelectorAll('[role="option"]'),
-            ) as HTMLElement[],
-          );
+          optionEls = collectVisiblePortalOptions(el);
         }
-        // Use option_index if text is empty — prevents matching the first
-        // option when the LLM provides only an index.
+        if (optionEls.length === 0) {
+          return {
+            action,
+            success: false,
+            message: "custom-dropdown has no options (opened but none found in subtree or portal)",
+          };
+        }
+        // Prefer text matching where possible: when the LLM provides
+        // `text` we never touch `option_index` (text is unambiguous).
+        // Only when `text` is empty do we fall back to `option_index`,
+        // resolving it against this same (consistent) `optionEls`
+        // enumeration and then re-matching by that option's exact text —
+        // which minimises the blast radius of any residual desync.
         const want = (action.text?.trim() || "")
           || (action.option_index != null
             ? (optionEls[action.option_index]?.textContent ?? "").trim()

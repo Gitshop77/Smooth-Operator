@@ -10,9 +10,25 @@
  * success with no underlying effect.
  */
 
+import { z } from "zod";
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import type { ActionContext } from "./types";
+
+/**
+ * Shape the background SW returns for a `TAB_ACTION` message. Validated rather
+ * than cast so a contract drift between the content script and the SW is
+ * caught explicitly instead of silently defaulting to "no response" /
+ * "failed".
+ */
+const tabActionResponseSchema = z.object({
+  ok: z.boolean(),
+  success: z.boolean().optional(),
+  message: z.string().optional(),
+  pageChanged: z.boolean().optional(),
+  error: z.string().optional(),
+});
+type TabActionResponse = z.infer<typeof tabActionResponseSchema>;
 
 /** Delegate a tab-level action to the SW's `handleTabAction` via TAB_ACTION. */
 async function delegateTabAction(
@@ -26,20 +42,23 @@ async function delegateTabAction(
     };
   }
   try {
-    const res = (await chrome.runtime.sendMessage({ type: "TAB_ACTION", action })) as {
-      ok: boolean;
-      success?: boolean;
-      message?: string;
-      pageChanged?: boolean;
-      error?: string;
-    };
-    if (!res?.ok) {
-      return { action, success: false, message: `${action.type} failed: ${res?.error || "no response"}` };
+    const raw = await chrome.runtime.sendMessage({ type: "TAB_ACTION", action });
+    const parsed = tabActionResponseSchema.safeParse(raw);
+    if (!parsed.success) {
+      return {
+        action,
+        success: false,
+        message: `${action.type} failed: invalid response from extension (${parsed.error.message})`,
+      };
+    }
+    const res = parsed.data;
+    if (!res.ok) {
+      return { action, success: false, message: `${action.type} failed: ${res.error ?? "no response"}` };
     }
     return {
       action,
       success: !!res.success,
-      message: res.message || `${action.type} ${res.success ? "ok" : "failed"}`,
+      message: res.message ?? `${action.type} ${res.success ? "ok" : "failed"}`,
       pageChanged: !!res.pageChanged,
     };
   } catch (e) {

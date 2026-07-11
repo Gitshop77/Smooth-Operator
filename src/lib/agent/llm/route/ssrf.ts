@@ -35,6 +35,18 @@
  * public hostname URLs (e.g. `api.openai.com`) are allowed. This means a
  * public hostname that DNS-resolves to an internal IP would NOT be caught here
  * — that is an accepted, documented limitation (out of scope for this guard).
+ *
+ * TRADE-OFF (injected-loopback SSRF): the `LOCAL_PROVIDER_BASE_URLS` exemption
+ * in {@link isAllowedLlmBaseUrl} is applied at the transport layer regardless of
+ * how the `baseUrl` originated. A `baseUrl` that arrived via an untrusted vector
+ * (prompt injection writing `chrome.storage.local`, a malicious settings-sync
+ * payload, or a crafted tool call) and happens to equal `http://localhost:11434`
+ * will be ALLOWED by the transport guard, reaching the user's local Ollama /
+ * LiteLLM server. This is the price of letting users run their own local LLM
+ * without a separate allow-list UI. A fully closed fix would require threading a
+ * provenance flag (user-configured-vs-injected) from the config UI through to
+ * the fetch and only exempting the user-configured path — out of scope for this
+ * guard, but tracked as a known risk.
  */
 
 export type SsrfCheckResult =
@@ -140,6 +152,23 @@ function isDangerousIpv6(host: string): boolean {
   if ((groups[0] & 0xfe00) === 0xfc00) return true;
   // Link-local fe80::/10 → group0 & 0xFFC0 === 0xFE80
   if ((groups[0] & 0xffc0) === 0xfe80) return true;
+  // NAT64 (RFC 6052) `64:ff9b::/96` — first 96 bits are the well-known
+  // prefix, the last 32 bits embed an IPv4 address that the NAT64 gateway
+  // translates. On NAT64-enabled networks `64:ff9b::169.254.169.254` reaches
+  // the cloud metadata service and `64:ff9b::127.0.0.1` reaches loopback.
+  if (groups[0] === 0x64ff && groups[1] === 0x9b &&
+      groups[2] === 0 && groups[3] === 0 && groups[4] === 0 && groups[5] === 0) {
+    const embedded = groupsToIpv4(groups[6], groups[7]);
+    if (embedded && isDangerousIpv4(embedded)) return true;
+  }
+  // Deprecated IPv4-compatible `::a.b.c.d` — all-zero prefix with the IPv4 in
+  // the last 32 bits. (Skip `::` / `::1`, which the unspecified/loopback
+  // checks above already returned true for.)
+  if (groups[0] === 0 && groups[1] === 0 && groups[2] === 0 &&
+      groups[3] === 0 && groups[4] === 0 && groups[5] === 0) {
+    const embedded = groupsToIpv4(groups[6], groups[7]);
+    if (embedded && isDangerousIpv4(embedded)) return true;
+  }
   return false;
 }
 
@@ -150,6 +179,16 @@ function isDangerousIpv6(host: string): boolean {
  * count). Embedded IPv4 (handled separately above) is expected to be absent
  * here, so any "." in the string makes it invalid for this pure-IPv6 path.
  */
+/**
+ * Render the last two 16-bit IPv6 groups as a dotted-quad IPv4 string
+ * (e.g. `0xa9fe`, `0xa9fe` → "169.254.169.254"), or return null if either
+ * group is out of the 16-bit range.
+ */
+function groupsToIpv4(g6: number, g7: number): string | null {
+  if (g6 < 0 || g6 > 0xffff || g7 < 0 || g7 > 0xffff) return null;
+  return `${(g6 >> 8) & 0xff}.${g6 & 0xff}.${(g7 >> 8) & 0xff}.${g7 & 0xff}`;
+}
+
 function expandIPv6(host: string): number[] | null {
   if (!/^[0-9a-fA-F:]+$/.test(host)) return null; // no dots/other chars allowed here
   const doubleColon = host.indexOf("::");
@@ -250,8 +289,23 @@ export function validateLlmBaseUrl(url: string): SsrfCheckResult {
 export function isAllowedLlmBaseUrl(url: string): boolean {
   const res = validateLlmBaseUrl(url);
   if (res.ok) return true;
-  if (LOCAL_PROVIDER_BASE_URLS.some((prefix) => url.startsWith(prefix))) {
-    return true;
+  // Match on the parsed *origin* (scheme://host:port) rather than a raw
+  // substring `startsWith`. A curated entry's host:port pair is the only thing
+  // we exempt, so comparing origins is boundary-aware: it rejects malformed
+  // over-matches like `http://localhost:11434.attacker.com:9999/` (which fails
+  // `new URL` parsing entirely) and never matches a curated origin as a prefix
+  // of an unrelated host.
+  try {
+    const targetOrigin = new URL(url).origin;
+    if (
+      LOCAL_PROVIDER_BASE_URLS.some(
+        (curated) => new URL(curated).origin === targetOrigin,
+      )
+    ) {
+      return true;
+    }
+  } catch {
+    // Invalid URL → not a curated local provider; leave it rejected.
   }
   return false;
 }

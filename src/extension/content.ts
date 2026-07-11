@@ -40,6 +40,13 @@ interface ExtractStateMessage {
 interface ExecuteActionsMessage {
   type: "EXECUTE_ACTIONS";
   actions?: AgentAction[];
+  /**
+   * Optional URL allow/blocklist policy shipped by the service worker. The
+   * handler reads this (see the EXECUTE_ACTIONS case) and installs it before
+   * executing actions. Declared explicitly here so the contract is type-checked
+   * on both ends instead of being read through an untyped cast.
+   */
+  domainConfig?: unknown;
 }
 interface SetDebugHighlightMessage {
   type: "SET_DEBUG_HIGHLIGHT";
@@ -59,8 +66,9 @@ type IncomingMessage =
 interface OkResponse<T = unknown> {
   ok: true;
   state?: T;
-  result?: T;
   results?: T;
+  /** Set by the EXTRACT_HTML handler (raw page HTML, capped). */
+  html?: string;
 }
 interface ErrorResponse {
   ok: false;
@@ -72,6 +80,13 @@ type Response<T = unknown> = OkResponse<T> | ErrorResponse;
 (() => {
   if ((window as unknown as { __openCoworkInjected?: boolean }).__openCoworkInjected) return;
   (window as unknown as { __openCoworkInjected?: boolean }).__openCoworkInjected = true;
+
+  // Last-known-good URL policy (allow/blocklist). Retained across messages so a
+  // single EXECUTE_ACTIONS that omits `domainConfig` cannot silently downgrade
+  // enforcement to "no restrictions" (which would let the autonomous agent be
+  // steered to attacker sites). Reset only when a new policy is explicitly
+  // provided.
+  let lastDomainConfig: unknown = undefined;
 
   // Initialize the AX-tree element map on injection. Wrap in try/catch so a
   // failure here doesn't block the rest of the content script (e.g. some
@@ -106,9 +121,18 @@ type Response<T = unknown> = OkResponse<T> | ErrorResponse;
             const tabs: TabInfo[] = msg.tabs || [];
             const state = extractBrowserState(tabs);
             // Accept depth / maxLength overrides from the message (defaults
-            // match the prior constants so the LLM gets the same view).
-            const depth = (msg as { depth?: number }).depth ?? 15;
-            const maxLength = (msg as { maxLength?: number }).maxLength ?? 50_000;
+            // match the prior constants so the LLM gets the same view). Clamp
+            // to sane bounds (finding: numeric message overrides in EXTRACT_STATE
+            // are not validated) — a malformed/buggy negative or absurd value
+            // could trigger a degenerate/expensive DOM walk.
+            const rawDepth = (msg as { depth?: number }).depth;
+            const depth = Number.isFinite(rawDepth)
+              ? Math.min(Math.max(1, Math.floor(rawDepth as number)), 50)
+              : 15;
+            const rawMaxLength = (msg as { maxLength?: number }).maxLength;
+            const maxLength = Number.isFinite(rawMaxLength)
+              ? Math.min(Math.max(1, Math.floor(rawMaxLength as number)), 1_000_000)
+              : 50_000;
             // AX tree generation walks the full DOM a second time. Make
             // it opt-in via the `includeAxTree` flag (default true for backward
             // compatibility). Set to false to halve DOM-walk cost on pages
@@ -160,11 +184,27 @@ type Response<T = unknown> = OkResponse<T> | ErrorResponse;
               // is invisible here). Install it before executing actions so
               // `getDomainConfig()` — called synchronously by the `navigate` /
               // `evaluate` / `search` handlers — enforces the user's URL
-              // policy. Falls back to "no restrictions" when absent (matches
-              // `getDomainConfig`'s default).
+              // policy.
+              //
+              // SECURITY: never silently downgrade the policy to "no
+              // restrictions". If this message omits `domainConfig`, KEEP the
+              // last-known-good policy rather than overwriting with `undefined`
+              // (which `getDomainConfig` would treat as `{}` → unrestricted).
+              // Only replace the policy when a real object is supplied, so a
+              // malformed/absent payload cannot disable enforcement.
+              const incomingDomainConfig = msg.domainConfig;
+              if (incomingDomainConfig !== undefined) {
+                if (
+                  incomingDomainConfig === null ||
+                  typeof incomingDomainConfig === "object"
+                ) {
+                  lastDomainConfig = incomingDomainConfig;
+                }
+                // A non-object, non-null payload is ignored (retains last good).
+              }
               (
                 globalThis as { __openCoworkDomainConfig?: unknown }
-              ).__openCoworkDomainConfig = (msg as { domainConfig?: unknown }).domainConfig;
+              ).__openCoworkDomainConfig = lastDomainConfig;
               // avoid a redundant full DOM walk just to rebuild the
               // selectorMap. `EXTRACT_STATE` already walked the DOM this step
               // (the orchestrator always calls EXTRACT_STATE before
@@ -216,7 +256,14 @@ type Response<T = unknown> = OkResponse<T> | ErrorResponse;
               }
               sendResponse({ ok: true, results });
             } catch (e) {
-              sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });
+              // The tab may have navigated away / port closed mid-execution;
+              // `sendResponse` can then throw. Guard it so we don't produce an
+              // unhandled rejection that hides the real failure.
+              try {
+                sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });
+              } catch {
+                /* channel already closed — nothing more to do */
+              }
             }
           })();
           return true; // async response — keep the channel open

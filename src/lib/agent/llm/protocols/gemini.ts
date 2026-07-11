@@ -14,7 +14,7 @@ const ADAPTER = "gemini";
 export const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
 export const PATH = ":streamGenerateContent";
 
-const SCREENSHOT_PATTERN = /<screenshot>(data:image\/(png|jpeg|webp);base64,[^<]+)<\/screenshot>/;
+const SCREENSHOT_PATTERN = /<screenshot>(data:image\/(png|jpeg|webp);base64,[^<]+)<\/screenshot>/g;
 
 export interface GeminiBody {
   contents: Array<{ role: string; parts: Array<Record<string, unknown>> }>;
@@ -36,15 +36,16 @@ async function fromRequest(request: LLMRequest): Promise<GeminiBody> {
   const contents = userMessages.map((m) => {
     const textContent = m.content.replace(/<screenshot>[^<]+<\/screenshot>/g, "").trim();
     if (m.role === "user") {
-      const match = m.content.match(SCREENSHOT_PATTERN);
-      if (match) {
-        return {
-          role: "user",
-          parts: [
-            { text: textContent },
-            { inline_data: { mime_type: `image/${match[2]}`, data: match[1].split(",")[1] } },
-          ],
-        };
+      // Extract EVERY screenshot marker (not just the first) into its own
+      // `inline_data` part — a multi-screenshot turn must forward all of them.
+      const matches = Array.from(m.content.matchAll(SCREENSHOT_PATTERN));
+      if (matches.length > 0) {
+        const parts: Record<string, unknown>[] = [];
+        if (textContent) parts.push({ text: textContent });
+        for (const match of matches) {
+          parts.push({ inline_data: { mime_type: `image/${match[2]}`, data: match[1].split(",")[1] } });
+        }
+        return { role: "user", parts };
       }
     }
     return { role: m.role === "assistant" ? "model" : "user", parts: [{ text: textContent }] };
@@ -87,6 +88,16 @@ export const protocol: Protocol<GeminiBody, string, { type: string; content?: st
       const events: Array<{ type: string; content?: string; usage?: StreamState["usage"] }> = [];
       try {
         const data = JSON.parse(frame);
+        // Gemini error payloads (`{"error": {...}}`) are valid JSON, so they
+        // parse without throwing — but `candidates`/`usageMetadata` are
+        // undefined and would otherwise be silently swallowed as empty output.
+        // Surface them explicitly so auth/quota/permission failures aren't masked.
+        const dataAny = data as { error?: { message?: string } | string };
+        if (dataAny.error) {
+          const err = dataAny.error;
+          const msg = typeof err === "string" ? err : (err.message ?? JSON.stringify(err));
+          throw new Error(`Gemini API error: ${msg}`);
+        }
         const parts = data.candidates?.[0]?.content?.parts;
         if (parts) {
           for (const p of parts) {

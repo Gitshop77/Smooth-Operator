@@ -4,6 +4,7 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
+  /* ─── shadcn semantic tokens → CSS vars (structure preserved; values now Signal Indigo) ─── */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
@@ -28,7 +29,10 @@
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
-  --color-muted: var(--muted);
+  /* NOTE: shadcn --muted is a *surface*; Signal Indigo --muted is *secondary text*.
+     To keep `bg-muted` a sensible surface while exposing --muted as text (#9AA0B0),
+     map the `muted` color to --raised. Secondary text lives on `text-muted-foreground`. */
+  --color-muted: var(--raised);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-secondary: var(--secondary);
   --color-primary-foreground: var(--primary-foreground);
@@ -41,77 +45,184 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+
+  /* ─── Signal Indigo base tokens → Tailwind colors (new) ─────────────────────────────────── */
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-overlay: var(--overlay);
+  --color-dim: var(--dim);
+  --color-border-hover: var(--border-hover);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-contrast: var(--accent-contrast);
+  --color-accent-subtle: var(--accent-subtle);
+  --color-accent-soft: var(--accent-soft);
+  --color-success: var(--success);
+  --color-danger: var(--danger);
+  --color-warn: var(--warn);
+  --color-info: var(--info);
+  --color-log-step: var(--log-step);
+  --color-log-observe: var(--log-observe);
+  --color-log-reason: var(--log-reason);
+  --color-log-act: var(--log-act);
+  --color-log-ok: var(--log-ok);
+  --color-log-err: var(--log-err);
+  --color-log-info: var(--log-info);
+  --color-log-cost: var(--log-cost);
+
+  /* Signal Indigo radii as utilities: rounded-r / rounded-r-sm / rounded-r-lg / rounded-r-xl */
+  --radius-r: var(--r);
+  --radius-r-sm: var(--r-sm);
+  --radius-r-lg: var(--r-lg);
+  --radius-r-xl: var(--r-xl);
 }
 
-/* ─── Light palette (warm cream + terracotta accent) ──────────────────────── */
+/* ─── Light palette (Signal Indigo) ───────────────────────────────────────── */
 :root {
-  --radius: 0.625rem; /* 10px — inputs/buttons; panels use 16px via radius-xl */
-  --background: oklch(0.965 0.006 81);   /* #F5F4EE warm cream */
-  --foreground: oklch(0.27 0.003 75);    /* #262624 warm charcoal */
-  --card: oklch(1 0 0);                  /* #FFFFFF */
-  --card-foreground: oklch(0.27 0.003 75);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.27 0.003 75);
-  --primary: oklch(0.647 0.146 41);      /* #D97757 terracotta/clay */
-  --primary-foreground: oklch(1 0 0);
-  --secondary: oklch(0.98 0.005 80);     /* #FAF9F5 */
-  --secondary-foreground: oklch(0.27 0.003 75);
-  --muted: oklch(0.965 0.006 81);        /* matches bg, subtle */
-  --muted-foreground: oklch(0.49 0.004 80); /* #6B6A66 */
-  --accent: oklch(0.94 0.006 80);        /* subtle warm hover */
-  --accent-foreground: oklch(0.27 0.003 75);
-  --destructive: oklch(0.535 0.142 28);  /* #C0574B muted warm red */
-  --border: oklch(0.905 0.006 80);       /* #E5E3DB */
-  --input: oklch(0.905 0.006 80);
-  --ring: oklch(0.647 0.146 41);         /* terracotta focus */
-  --chart-1: oklch(0.647 0.146 41);      /* terracotta */
-  --chart-2: oklch(0.62 0.07 135);       /* muted sage green */
-  --chart-3: oklch(0.7 0.07 75);         /* warm ochre */
-  --chart-4: oklch(0.55 0.06 50);        /* warm taupe */
-  --chart-5: oklch(0.535 0.142 28);      /* warm red */
-  --sidebar: oklch(0.98 0.005 80);       /* #FAF9F5 — slightly lighter than bg */
-  --sidebar-foreground: oklch(0.27 0.003 75);
-  --sidebar-primary: oklch(0.647 0.146 41);
-  --sidebar-primary-foreground: oklch(1 0 0);
-  --sidebar-accent: oklch(0.94 0.006 80);
-  --sidebar-accent-foreground: oklch(0.27 0.003 75);
-  --sidebar-border: oklch(0.905 0.006 80);
-  --sidebar-ring: oklch(0.647 0.146 41);
+  --radius: 0.625rem; /* 10px — drives radius-sm/md/lg/xl; --r (controls) is also 10px */
+
+  /* Signal Indigo base tokens (light) */
+  --bg: #F7F8FB;
+  --surface: #FFFFFF;
+  --raised: #EEF0F5;
+  --overlay: rgba(255, 255, 255, 0.6);   /* scrim (light) */
+  --border: #E2E5EC;
+  --border-hover: #D2D6E0;
+  --text: #1A1D26;
+  --muted: #5C6273;                       /* secondary text (Signal Indigo --muted) */
+  --dim: #8A90A0;                         /* tertiary / timestamps */
+  --accent: #6C5CE7;                      /* electric indigo */
+  --accent-hover: #5A49D6;
+  --accent-contrast: #FFFFFF;
+  --accent-subtle: rgba(108, 92, 231, 0.10);
+  --accent-soft: rgba(108, 92, 231, 0.05);
+  --success: #16A34A;
+  --danger: #DC2626;
+  --warn: #D97706;
+  --info: #2563EB;
+  --ring: rgba(108, 92, 231, 0.55);
+
+  /* shadcn semantic tokens (Signal Indigo values) */
+  --background: var(--bg);
+  --foreground: var(--text);
+  --card: var(--surface);
+  --card-foreground: var(--text);
+  --popover: var(--surface);
+  --popover-foreground: var(--text);
+  --primary: var(--accent);                /* bg-primary / text-primary → indigo */
+  --primary-foreground: var(--accent-contrast);
+  --secondary: var(--raised);
+  --secondary-foreground: var(--text);
+  --muted-foreground: var(--muted);        /* secondary text #5C6273 */
+  --accent: var(--accent);                 /* bg-accent / text-accent → indigo */
+  --accent-foreground: var(--accent-contrast);
+  --destructive: var(--danger);
+  --border: var(--border);
+  --input: var(--border);
+  --ring: var(--ring);
+  --chart-1: var(--accent);                /* in-progress / loading → indigo */
+  --chart-2: var(--success);
+  --chart-3: var(--warn);
+  --chart-4: var(--info);
+  --chart-5: var(--danger);                /* severity high */
+  --sidebar: var(--surface);
+  --sidebar-foreground: var(--text);
+  --sidebar-primary: var(--accent);
+  --sidebar-primary-foreground: var(--accent-contrast);
+  --sidebar-accent: var(--raised);
+  --sidebar-accent-foreground: var(--text);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--ring);
+
+  /* spacing rhythm */
+  --gap-label: 6px;
+  --gap-field: 18px;
+  --gap-section: 24px;
+  --pad-input: 10px 12px;
+  --pad-card: 16px 20px;
+
+  /* radii */
+  --r: 10px;
+  --r-sm: 6px;
+  --r-lg: 16px;
+  --r-xl: 20px;
+
+  /* elevation / motion */
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.12);
+  --glow: 0 0 0 1px rgba(108, 92, 231, 0.45), 0 8px 28px rgba(108, 92, 231, 0.22);
+  --glass: rgba(255, 255, 255, 0.72);
+  --ease: 160ms ease;
+
+  /* side-panel terminal log semantics (indigo-leaning) */
+  --log-step: #93C5FD;
+  --log-observe: #5EEAD4;
+  --log-reason: #C4B5FD;
+  --log-act: #8B7BF2;
+  --log-ok: #4ADE80;
+  --log-err: #F87171;
+  --log-info: #9AA0B0;
+  --log-cost: #646B7A;
 }
 
-/* ─── Dark palette (warm dark charcoal + terracotta accent) ───────────────── */
+/* ─── Dark palette (Signal Indigo — primary) ─────────────────────────────── */
 .dark {
-  --background: oklch(0.27 0.003 75);    /* #262624 */
-  --foreground: oklch(0.94 0.004 75);    /* #ECEBE6 */
-  --card: oklch(0.32 0.003 75);          /* #30302E */
-  --card-foreground: oklch(0.94 0.004 75);
-  --popover: oklch(0.32 0.003 75);
-  --popover-foreground: oklch(0.94 0.004 75);
-  --primary: oklch(0.647 0.146 41);      /* #D97757 terracotta */
-  --primary-foreground: oklch(0.98 0.005 80); /* warm cream on terracotta */
-  --secondary: oklch(0.36 0.003 75);     /* subtle warm raised surface */
-  --secondary-foreground: oklch(0.94 0.004 75);
-  --muted: oklch(0.32 0.003 75);         /* matches card */
-  --muted-foreground: oklch(0.71 0.004 75); /* #A8A6A0 */
-  --accent: oklch(0.36 0.003 75);        /* subtle warm hover */
-  --accent-foreground: oklch(0.94 0.004 75);
-  --destructive: oklch(0.535 0.142 28);  /* #C0574B */
-  --border: oklch(0.40 0.004 75);        /* #3D3B38 */
-  --input: oklch(0.40 0.004 75);
-  --ring: oklch(0.647 0.146 41);
-  --chart-1: oklch(0.647 0.146 41);      /* terracotta */
-  --chart-2: oklch(0.65 0.08 135);       /* muted sage green */
-  --chart-3: oklch(0.72 0.08 75);        /* warm ochre */
-  --chart-4: oklch(0.6 0.06 50);         /* warm taupe */
-  --chart-5: oklch(0.535 0.142 28);      /* warm red */
-  --sidebar: oklch(0.27 0.003 75);       /* matches bg */
-  --sidebar-foreground: oklch(0.94 0.004 75);
-  --sidebar-primary: oklch(0.647 0.146 41);
-  --sidebar-primary-foreground: oklch(0.98 0.005 80);
-  --sidebar-accent: oklch(0.32 0.003 75);
-  --sidebar-accent-foreground: oklch(0.94 0.004 75);
-  --sidebar-border: oklch(0.40 0.004 75);
-  --sidebar-ring: oklch(0.647 0.146 41);
+  /* Signal Indigo base tokens (dark) */
+  --bg: #14161C;
+  --surface: #1C1F27;
+  --raised: #232732;
+  --overlay: rgba(10, 12, 16, 0.62);
+  --border: #2A2E38;
+  --border-hover: #3A3F4D;
+  --text: #E7E9F0;
+  --muted: #9AA0B0;                        /* secondary text (Signal Indigo --muted) */
+  --dim: #646B7A;                          /* tertiary / timestamps */
+  --accent: #6C5CE7;                       /* electric indigo */
+  --accent-hover: #7D6EF0;
+  --accent-contrast: #FFFFFF;
+  --accent-subtle: rgba(108, 92, 231, 0.12);
+  --accent-soft: rgba(108, 92, 231, 0.06);
+  --success: #4ADE80;
+  --danger: #F87171;
+  --warn: #FBBF24;
+  --info: #60A5FA;
+  --ring: rgba(108, 92, 231, 0.55);
+
+  /* shadcn semantic tokens (Signal Indigo values) */
+  --background: var(--bg);
+  --foreground: var(--text);
+  --card: var(--surface);
+  --card-foreground: var(--text);
+  --popover: var(--surface);
+  --popover-foreground: var(--text);
+  --primary: var(--accent);                /* bg-primary / text-primary → indigo */
+  --primary-foreground: var(--accent-contrast);
+  --secondary: var(--raised);
+  --secondary-foreground: var(--text);
+  --muted-foreground: var(--muted);         /* secondary text #9AA0B0 */
+  --accent: var(--accent);                  /* bg-accent / text-accent → indigo */
+  --accent-foreground: var(--accent-contrast);
+  --destructive: var(--danger);
+  --border: var(--border);
+  --input: var(--border);
+  --ring: var(--ring);
+  --chart-1: var(--accent);                 /* in-progress / loading → indigo */
+  --chart-2: var(--success);
+  --chart-3: var(--warn);
+  --chart-4: var(--info);
+  --chart-5: var(--danger);                 /* severity high */
+  --sidebar: var(--surface);
+  --sidebar-foreground: var(--text);
+  --sidebar-primary: var(--accent);
+  --sidebar-primary-foreground: var(--accent-contrast);
+  --sidebar-accent: var(--raised);
+  --sidebar-accent-foreground: var(--text);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--ring);
+
+  /* elevation / motion (dark) */
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.38);
+  --glow: 0 0 0 1px rgba(108, 92, 231, 0.45), 0 8px 28px rgba(108, 92, 231, 0.22);
+  --glass: rgba(20, 22, 28, 0.72);
 }
 
 @layer base {
@@ -125,10 +236,10 @@
   }
 }
 
-/* ─── Cowork Cockpit custom scrollbar ─────────────────────────────────────── */
+/* ─── Cowork Cockpit custom scrollbar (WebKit + Firefox) ──────────────────── */
 .cowork-scroll {
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--muted-foreground) 30%, transparent) transparent;
+  scrollbar-color: var(--dim) transparent;
 }
 .cowork-scroll::-webkit-scrollbar {
   width: 6px;
@@ -162,6 +273,18 @@
   animation: cowork-pulse 1.8s ease-in-out infinite;
 }
 
+/* Indigo outer glow (brand CTA / live indicators / icon chips) */
+.cowork-glow {
+  box-shadow: var(--glow);
+}
+
+/* Glassy surface (panels / overlays) */
+.cowork-glass {
+  background: var(--glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
 /* ─── Cowork design system utilities ──────────────────────────────────────── */
 
 /* Monospace for actual code / data values (version strings, URLs, timestamps).
@@ -180,12 +303,6 @@
   color: var(--muted-foreground);
 }
 
-/* Severity left-border indicators (warm palette) */
-.cowork-severity-critical { border-left: 2px solid var(--destructive); }
-.cowork-severity-high { border-left: 2px solid var(--chart-5); }
-.cowork-severity-medium { border-left: 2px solid var(--primary); }
-.cowork-severity-low { border-left: 2px solid var(--muted-foreground); }
-
 /* Wire-grid background for "instruments standing by" panels (e.g. the network
    view's extension-only standby state). Draws a faint grid of muted lines so
    the panel reads as a live instrument surface rather than a plain box. */
@@ -200,5 +317,17 @@
 @media (prefers-reduced-motion: reduce) {
   .cowork-pulse {
     animation: none;
+  }
+  .cowork-glow {
+    animation: none;
+    box-shadow: none;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

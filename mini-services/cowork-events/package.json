@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "npx tsx watch index.ts",
-    "start": "npx tsx index.ts"
+    "start": "npx tsx index.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run"
   },
   "dependencies": {
     "socket.io": "^4.7.2",

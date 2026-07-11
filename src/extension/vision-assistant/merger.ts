@@ -151,13 +151,38 @@ export function mergeDetections(
   return merged;
 }
 
-/** Escape a string for safe interpolation inside an XML attribute value or
+/**
+ * Maximum length of element text/label emitted into the LLM prompt.
+ * Applied uniformly to both DOM element text and vision labels so the two
+ * element representations stay consistent and the prompt cannot be inflated
+ * by an unbounded label.
+ */
+const MAX_ELEMENT_TEXT_LEN = 80;
+
+/**
+ * Escape a string for safe interpolation inside an XML attribute value or
  * text node. Matches the page-state extractor's `attrString` escaping so the
  * merged elements tree stays parseable when attribute values contain `"`,
- * `<`, `>`, or `&` (common in `value`, `placeholder`, `aria-label`). */
+ * `<`, `>`, or `&` (common in `value`, `placeholder`, `aria-label`).
+ *
+ * SECURITY: This serialization is fed to the navigator LLM, NOT injected into
+ * the DOM. Attribute values are always wrapped in DOUBLE quotes, so the `'`
+ * escaping below is defense-in-depth only. This string MUST NEVER be assigned
+ * to `innerHTML` (or parsed as live markup). If that ever changes, also ensure
+ * values are sanitized; the escaping here keeps it parseable as XML, not safe
+ * to execute.
+ */
 function escapeXml(s: string): string {
-  return s.replace(/[&<>"]/g, (c) =>
-    c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : "&quot;",
+  return s.replace(/[&<>"']/g, (c) =>
+    c === "&"
+      ? "&amp;"
+      : c === "<"
+        ? "&lt;"
+        : c === ">"
+          ? "&gt;"
+          : c === '"'
+            ? "&quot;"
+            : "&apos;",
   );
 }
 
@@ -171,13 +196,17 @@ export function renderMergedElementsText(elements: MergedElement[]): string {
         .map(([k, v]) => `${k}="${escapeXml(String(v))}"`)
         .join(" ");
       const attrStr = attrs ? ` ${attrs}` : "";
-      const textStr = el.text ? ` ${escapeXml(el.text.slice(0, 80))}` : "";
+      const textStr = el.text
+        ? ` ${escapeXml(el.text.slice(0, MAX_ELEMENT_TEXT_LEN))}`
+        : "";
       lines.push(`${el.indexStr}<${el.tag}${attrStr} />${textStr}`);
     } else {
       // Render vision-only elements with pixel coordinates for CDP clicking
       const r = el.pixelRect!;
       lines.push(
-        `${el.indexStr}<vision_element label="${escapeXml(el.text)}" ` +
+        `${el.indexStr}<vision_element label="${escapeXml(
+          el.text.slice(0, MAX_ELEMENT_TEXT_LEN),
+        )}" ` +
           `x="${Math.round(r.x)}" y="${Math.round(r.y)}" ` +
           `w="${Math.round(r.width)}" h="${Math.round(r.height)}" />`,
       );

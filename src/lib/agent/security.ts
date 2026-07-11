@@ -62,6 +62,40 @@ export const PROMPT_TAGS = [
 const PROMPT_TAG_PATTERN = PROMPT_TAGS.join("|");
 
 /**
+ * Curated subset of {@link PROMPT_TAGS} used ONLY by the bare-tag redaction
+ * pattern (the single-half tag matcher below). These are tags that are so
+ * clearly agent-internal that a bare `<tag>` / `</tag>` occurring in untrusted
+ * page text is almost certainly a forgery — safe to redact even without a
+ * matching close tag.
+ *
+ * High-collision tokens that commonly appear as LITERAL text in legitimate
+ * pages or code samples are deliberately EXCLUDED: redacting them would silently
+ * wipe real page content the agent needs. Those tokens (`input`, `output`,
+ * `plan`, `sys`, `system`, `step_\d+`, `step_info`, `browser_state`,
+ * `action_set`, `available_skills`, `custom_tools`) are still covered by the
+ * paired open/close block-redaction pattern (which requires a matching close
+ * tag — a much stronger forgery signal) and by the non-destructive
+ * `scanForInjection` flagging layer.
+ */
+const BARE_TAG_REDACTION_TAGS = [
+  "user_request", "current_goal", "current_plan",
+  "agent_history", "agent_state", "navigator_history",
+  "action_categories",
+  "untrusted_page_data", "accessibility_tree", "injection_warnings",
+  "compacted_memory", "untrusted_injection_warning",
+  "site_memory",
+  "security_rules", "content_isolation", "instruction_detection",
+  "manipulation_resistance", "sensitive_data_handling",
+  "browser_summary", "screenshot",
+  "navigator_done_verification", "decision_types", "planning_guidelines",
+  "completion_rules", "reasoning_rules",
+  "parse_error",
+] as const;
+
+/** Build a regex alternation of the bare-tag redaction tags (escaped). */
+const BARE_TAG_PATTERN = BARE_TAG_REDACTION_TAGS.join("|");
+
+/**
  * Source strings + flags for each injection pattern.
  *
  * Compiled once at module load into {@link INJECTION_PATTERNS} (see below).
@@ -96,7 +130,7 @@ const INJECTION_PATTERN_SOURCES: readonly { source: string; flags: string }[] = 
   // half — e.g. `</untrusted_page_data>` to try to escape the wrapper, or
   // `<site_memory>` without a close to open a forged trusted block).
   // `[^>]*` matches attributes on opening tags (same rationale as above).
-  { source: `<\\/?(?:${PROMPT_TAG_PATTERN})[^>]*>`, flags: "gi" },
+  { source: `<\\/?(?:${BARE_TAG_PATTERN})[^>]*>`, flags: "gi" },
   { source: "ignore\\s+(all\\s+)?previous\\s+instructions", flags: "gi" },
   // Tightened: `you\s+are\s+now\s+(a|an)\s+` alone would match any text
   // starting with "you are now a " — including benign phrases like "you are
@@ -140,8 +174,9 @@ const INJECTION_PATTERNS: readonly RegExp[] = INJECTION_PATTERN_SOURCES.map(
  * lookalikes (`ｉｇｎｏｒｅ` → `ignore`) so the injection regexes still hit. After
  * NFKC, survivors such as U+3164 (→ U+1160) and U+061C collapse into members of
  * the Default_Ignorable set, so the single regex in INVISIBLE_CHARS_SOURCE strips
- * them all. The full set (superset of `\p{Cf}`) plus the line/paragraph
- * separators U+2028/U+2029 are covered — strictly broader than the old fixed set.
+ * them all. U+2028/U+2029 line/paragraph separators are NOT stripped globally
+ * (see {@link normalize} and INVISIBLE_CHARS_SOURCE) so legitimate page content
+ * is preserved.
  */
 
 /**
@@ -149,25 +184,36 @@ const INJECTION_PATTERNS: readonly RegExp[] = INJECTION_PATTERN_SOURCES.map(
  * points. Used by both {@link normalize} (which STRIPS them) and
  * {@link ZERO_WIDTH_CHARS} (which DETECTS them in raw text) so the two can
  * never drift apart. The `\p{Default_Ignorable_Code_Point}` branch is the full
- * set (superset of `\p{Cf}`); U+2028/U+2029 are appended because they are
- * invisible line/paragraph separators NOT covered by either property (a page
- * can smuggle a keyword through them, e.g. `ig\u2028nore`).
+ * set (superset of `\p{Cf}`) plus the explicit zero-width chars U+200B/U+200C/
+ * U+200D/U+FEFF. U+2028/U+2029 line/paragraph separators are deliberately
+ * EXCLUDED from the global strip (they are legitimate content separators); a
+ * mid-word U+2028/U+2029 used to smuggle a keyword is collapsed separately
+ * inside {@link normalize}.
  *
  * `\p{...}` Unicode property escapes are a RUNTIME RegExp feature (supported in
  * all modern browsers + the build target), not a compile-time syntax feature —
  * `tsc` accepts them regardless of the ES2017 target.
  */
-const INVISIBLE_CHARS_SOURCE = "\\p{Default_Ignorable_Code_Point}|\u2028|\u2029";
+// Zero-width / format / Default-Ignorable code points that are SAFE to strip
+// globally from untrusted text. U+2028 (line separator) / U+2029 (paragraph
+// separator) are intentionally EXCLUDED: they are valid content separators that
+// legitimately appear in page text (poetry, addresses, pasted JSON, multi-line
+// form values) and must not be silently mutated. A mid-word U+2028/U+2029 used
+// to smuggle an injection keyword is handled separately in {@link normalize}.
+const INVISIBLE_CHARS_SOURCE = "\\p{Default_Ignorable_Code_Point}|\u200b|\u200c|\u200d|\ufeff";
 
 function normalize(text: string): string {
-  // Strip the FULL set of invisible / format / Default-Ignorable code points
-  // (see INVISIBLE_CHARS_SOURCE) plus the line/paragraph separators U+2028/U+2029.
-  // A malicious page can smuggle an injection keyword through ANY of these
-  // invisible characters (e.g. `ig\u3164nore`); we strip them before the
-  // redaction patterns run so the keyword reassembles and gets redacted.
-  return text
+  // Strip the invisible / format / Default-Ignorable set (see
+  // INVISIBLE_CHARS_SOURCE). U+2028/U+2029 are NOT stripped here \u2014 they are
+  // legitimate content separators and must be preserved.
+  const stripped = text
     .normalize("NFKC")
     .replace(new RegExp(INVISIBLE_CHARS_SOURCE, "gu"), "");
+  // A malicious page can smuggle an injection keyword through a MID-WORD
+  // U+2028/U+2029 (e.g. `ig\u2028nore`). Collapse the separator only when it is
+  // wedged between two word characters (so `ig\u2028nore` \u2192 `ignore`), while
+  // leaving legitimate standalone separators (between words/lines) intact.
+  return stripped.replace(/(\w)[\u2028\u2029](\w)/gu, "$1$2");
 }
 
 /**
@@ -385,7 +431,25 @@ export function scanForInjection(text: string): InjectionScanResult {
 function hostnameMatches(hostname: string, domain: string): boolean {
   const normalizeHost = (h: string) => h.replace(/^\[|\]$/g, "").toLowerCase();
   const h = normalizeHost(hostname);
-  const d = normalizeHost(domain);
+  let d = normalizeHost(domain).trim();
+  // Reject malformed allow/block-list entries so a typo or careless copy can't
+  // silently widen or narrow the matched surface:
+  //   • empty — never a valid bare host;
+  //   • leading-dot (`.example.com`) — never a valid bare hostname;
+  //   • wildcard (`*`) — has no meaning in exact/subdomain matching;
+  //   • whitespace — almost certainly a copy/paste artifact.
+  // A trailing dot (FQDN form, e.g. `example.com.`) is normalized to the bare
+  // host so it still matches as intended.
+  if (!d || d.startsWith('.') || d.includes('*') || /\s/.test(d)) return false;
+  d = d.replace(/\.+$/, '');
+  if (!d) return false;
+  // Reject single-label entries (e.g. "com", "org") — `h.endsWith(".com")` would
+  // then match EVERY host under that TLD, silently over-broadening the
+  // allow/block list. A plausible copy/paste typo for `example.com` becomes a
+  // catastrophic widen. Bare IP literals ("127.0.0.1", "::1") legitimately have
+  // no dot and are explicitly allowed.
+  const looksLikeIp = /^[0-9.]+$/.test(d) || d.includes(':');
+  if (!d.includes('.') && !looksLikeIp) return false;
   return h === d || h.endsWith(`.${d}`);
 }
 
@@ -410,6 +474,19 @@ export function isUrlAllowed(
   allowedDomains: string[] | undefined,
   requireAllowlist = false,
 ): boolean {
+  // Scheme floor: never green-light non-hierarchical schemes (javascript:,
+  // data:, file:, blob:) even on the allow-all path. This function is a public
+  // export whose documented contract ("non-evaluate paths keep allow-all-by-
+  // default") invites direct reuse for navigate/search — without this guard a
+  // `javascript:` URL would pass. `checkUrlAllowed` also enforces this floor,
+  // so this is defense-in-depth that makes the exported API safe to call
+  // directly.
+  try {
+    const proto = new URL(url).protocol;
+    if (proto !== "http:" && proto !== "https:") return false;
+  } catch {
+    return false;
+  }
   if (!allowedDomains || allowedDomains.length === 0) {
     // Fail closed only when the caller explicitly requires an allowlist
     // (evaluate/JS execution). Otherwise allow-all is the historical default.
@@ -426,7 +503,11 @@ export function isUrlAllowed(
 /**
  * Check if a URL is in the blocked domains list.
  * Blocked domains take precedence over allowed domains.
- * Invalid URLs return `true` (fail-closed).
+ * Invalid URLs return `true` (fail-closed) — this branch is defensive: the
+ * public `checkUrlAllowed` API parses the URL and fails closed BEFORE it
+ * delegates to this helper, so the invalid-URL → `true` path here is not
+ * reachable through `checkUrlAllowed`. It is retained as a safety net in case
+ * `isUrlBlocked` is ever called directly with an unparsed URL.
  */
 export function isUrlBlocked(url: string, blockedDomains: string[] | undefined): boolean {
   if (!blockedDomains || blockedDomains.length === 0) return false;

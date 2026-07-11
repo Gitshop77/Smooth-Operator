@@ -11,8 +11,8 @@
  */
 
 import { build, context, type BuildOptions, type Plugin } from "esbuild";
-import { copyFile, mkdir, rm } from "fs/promises";
-import { existsSync } from "fs";
+import { copyFile, mkdir, rm, readFile, readdir, stat } from "fs/promises";
+import { existsSync, readFileSync } from "fs";
 import path from "path";
 
 const watch = process.argv.includes("--watch");
@@ -24,13 +24,19 @@ const SRC = path.resolve("src/extension");
  *
  * `node_modules/zod/v4/locales/index.js` is a barrel that re-exports ALL 50+
  * locale files (~616 KB). esbuild can't tree-shake the dynamic lookup pattern
- * zod uses, so every locale file ends up in every bundle. The MV3 service
- * worker only ever resolves errors against the `en` locale at runtime, so the
- * other 49+ locales are pure dead weight.
+ * zod uses, so every locale file ends up in every bundle. We only ever format
+ * validation errors against the `en` locale at runtime — enforced at build time
+ * by `assertOnlyEnZodLocales()` below — so the other 49+ locales are dead
+ * weight.
  *
  * This plugin intercepts any import of the locales barrel coming from inside
  * `node_modules/zod/` and redirects it to a one-line stub that exports ONLY
- * `en`. Saves ~600 KB on every bundle (background, content, options, sidepanel).
+ * `en`. Because zod is reachable from multiple entry points (background,
+ * content, sidepanel, options), the stub is registered on ALL entries via
+ * `sharedConfig` — not just the MV3 service worker. If a non-`en` locale is
+ * ever requested, the stub resolves to `undefined`; the build-time guard fails
+ * closed so the latent risk never reaches a shipped bundle. Saves ~600 KB on
+ * every bundle.
  */
 const zodLocalesStubPlugin: Plugin = {
   name: "zod-locales-stub",
@@ -38,9 +44,12 @@ const zodLocalesStubPlugin: Plugin = {
     b.onResolve({ filter: /locales\/index/ }, (args) => {
       // Only intercept imports originating from inside the zod package —
       // avoids clobbering an unrelated `locales/index.js` somewhere else.
+      // esbuild always reports `importer` in POSIX form (even on Windows), so
+      // match with "/" rather than path.sep, which would be "\" on Windows and
+      // silently no-op the guard there.
       if (
         args.importer &&
-        args.importer.includes(path.sep + "node_modules" + path.sep + "zod" + path.sep)
+        args.importer.includes("/node_modules/zod/")
       ) {
         return { path: path.resolve(SRC, "zod-locales-stub.js") };
       }
@@ -49,7 +58,60 @@ const zodLocalesStubPlugin: Plugin = {
   },
 };
 
+/**
+ * PROD-1: strip first-party `console.debug`/`console.log` calls from the
+ * production bundle. The bundle hard-pins `process.env.NODE_ENV="production"`
+ * and esbuild does not tree-shake these, so they would otherwise run
+ * unconditionally in the shipped extension and leak internal state into the
+ * devtools console. Only first-party source (`src/extension`, `src/lib`) is
+ * rewritten; `node_modules` is left untouched. `warn`/`error`/`info` are
+ * preserved intentionally so real failures stay visible.
+ *
+ * `console.debug(x)` / `console.log(x)` become `void (x)` — the argument
+ * expression still evaluates but its result is discarded, so call-site
+ * behavior (other than the dropped log) is unchanged.
+ *
+ * The match is anchored with a negative lookbehind `(?<![\w.$])` so a member
+ * expression like `window.console.log("x")` is NOT rewritten to
+ * `window.void ("x")` (which would throw a `TypeError` at runtime), and
+ * `myconsole.log(...)` is likewise left alone. This addresses the dangerous
+ * runtime-crash corruption vector; a full AST-aware transform would additionally
+ * skip occurrences inside string literals/comments, but those are data, not
+ * executed code, and do not crash the bundle.
+ *
+ * This plugin is only attached in production builds (see `sharedConfig`); dev
+ * (`--watch`) builds keep the logs.
+ */
+const stripConsoleDebugPlugin: Plugin = {
+  name: "strip-console-debug",
+  setup(b) {
+    b.onLoad({ filter: /\.(ts|tsx|js|jsx|mjs)$/ }, async (args) => {
+      const abs = path.resolve(args.path);
+      const inSource = abs.startsWith(SRC) || abs.startsWith(path.resolve("src/lib"));
+      if (!inSource) return undefined;
+      const original = await readFile(args.path, "utf8");
+      const contents = original
+        .replace(/(?<![\w.$])console\.debug\(/g, "void (")
+        .replace(/(?<![\w.$])console\.log\(/g, "void (");
+      const loader = args.path.endsWith(".tsx")
+        ? "tsx"
+        : args.path.endsWith(".ts")
+        ? "ts"
+        : args.path.endsWith(".jsx")
+        ? "jsx"
+        : "js";
+      return { contents, loader };
+    });
+  },
+};
+
 /** Shared esbuild options for all entry points. */
+// Production-only transforms (NODE_ENV pin + console-strip) are gated on
+// `!watch` so dev (`--watch`) builds keep `console.debug`/`console.log` and
+// any `process.env.NODE_ENV !== 'production'` dev branch intact — see PROD-1
+// and DEV-1. The zod-locales stub applies in both modes (it only affects
+// bundle size/correctness, never logging).
+const isProd = !watch;
 const sharedConfig: BuildOptions = {
   bundle: true,
   target: "chrome116",
@@ -57,10 +119,10 @@ const sharedConfig: BuildOptions = {
   sourcemap: false,
   legalComments: "none",
   logLevel: "info",
-  define: {
-    "process.env.NODE_ENV": '"production"',
-  },
-  plugins: [zodLocalesStubPlugin],
+  define: isProd ? { "process.env.NODE_ENV": '"production"' } : {},
+  plugins: isProd
+    ? [zodLocalesStubPlugin, stripConsoleDebugPlugin]
+    : [zodLocalesStubPlugin],
 };
 
 /**
@@ -125,10 +187,163 @@ const ENTRIES = [
 ] as const;
 
 /**
+ * PERF-1 guard: fail the build (fail-closed) if any first-party source
+ * requests a non-`en` zod locale. The stub plugin above redirects the zod
+ * locales barrel to an `en`-only stub, so a direct import like
+ * `zod/v4/locales/de.js` (or formatting an error in another locale) would
+ * resolve to `undefined` and throw at runtime in the shipped extension. This
+ * makes the "only en" assumption a checked invariant instead of a comment.
+ */
+async function assertOnlyEnZodLocales(): Promise<void> {
+  const roots = [SRC, path.resolve("src/lib")];
+  const bad: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    let entries: string[];
+    try {
+      entries = (await readdir(dir)).map((n) => path.join(dir, n));
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const st = await stat(e).catch(() => null);
+      if (!st) continue;
+      if (st.isDirectory()) {
+        if (path.basename(e) === "node_modules") continue;
+        await walk(e);
+      } else if (/\.(ts|tsx|js|jsx|mjs)$/.test(e)) {
+        const src = await readFile(e, "utf8");
+        // Match zod locale imports that are NOT the `en` locale nor the barrel.
+        const m = src.match(/zod\/v4\/locales\/(?!en\.js|index\.js)[a-zA-Z-]+\.js/g);
+        if (m) bad.push(`${e}: ${m.join(", ")}`);
+      }
+    }
+  };
+  for (const r of roots) await walk(r);
+  if (bad.length) {
+    throw new Error(
+      "Non-en zod locale import detected — the stub plugin only provides 'en', " +
+        "so this would resolve to undefined at runtime:\n" +
+        bad.join("\n")
+    );
+  }
+}
+
+/**
+ * SEC-1: surface high-risk manifest permissions during the build so silent
+ * permission creep is visible in CI. The build copies the manifest verbatim
+ * and performs no allowlist/review, and `debugger` + universal host access is
+ * a large attack surface.
+ *
+ * Behavior after remediation:
+ *   - A MISSING or MALFORMED manifest is a hard build error — the SEC-1 guard
+ *     is worthless exactly when the manifest can't be read/parsed, so we fail
+ *     closed (Apache-2.0/extension validity requires a real manifest).
+ *   - `permissions` / `host_permissions` are validated to be arrays of strings;
+ *     a bad merge (e.g. a nested object) no longer silently slips through.
+ *   - High-risk permissions are surfaced as a WARNING (the local fast-fail
+ *     signal). They are intentionally NOT a hard error here: the current
+ *     permissions below are reviewed and legitimate, and failing the build on
+ *     them would break every developer build. The recommended gate that FAILS
+ *     on *newly-added* high-risk permissions is a CI manifest-lint diff
+ *     (tracked outside this build file, in `.github/workflows/ci.yml`).
+ *
+ * Why these permissions are requested (documented in-repo per FULL-REVIEW):
+ *   - `debugger`: drives the CDP "take over this page" click/automation path
+ *     (attach to a tab, synthesize input, inspect the DOM).
+ *   - `scripting`: injects `executeScript` for automation without a persistent
+ *     content-script manifest entry.
+ *   - universal `host_permissions` (the `<all_urls>`-equivalent http/https
+ *     wildcards): the assistant
+ *     operates on whatever arbitrary web page the user points it at, so it
+ *     needs read access to any origin.
+ */
+function lintManifestPermissions(): void {
+  const manifestPath = path.join(SRC, "manifest.json");
+  if (!existsSync(manifestPath)) {
+    throw new Error(
+      `[manifest-lint] ${manifestPath} is missing — a manifest is required to build a valid extension.`,
+    );
+  }
+  let manifest: { permissions?: unknown; host_permissions?: unknown };
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  } catch (e) {
+    // Fail closed: a malformed manifest must NOT be silently swallowed.
+    throw new Error(
+      `[manifest-lint] failed to read/parse ${manifestPath}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  const perms = assertStringArray(manifest.permissions, "permissions");
+  const host = assertStringArray(manifest.host_permissions, "host_permissions");
+  const risky = perms.filter((p) => p === "debugger" || p === "scripting");
+  const wideHost = host.some(
+    (h) => h === "<all_urls>" || h === "http://*/*" || h === "https://*/*"
+  );
+  if (risky.length || wideHost) {
+    console.warn(
+      "[manifest-lint] HIGH-RISK permissions present: " +
+        [...risky, ...(wideHost ? ["universal host_permissions"] : [])].join(", ") +
+        " — confirm each is strictly necessary (see FULL-REVIEW)."
+    );
+  }
+}
+
+/**
+ * Validate a manifest field is an array of strings (or absent). A non-array or
+ * array containing non-string entries (e.g. a nested object from a bad merge)
+ * would be mis-filtered by the high-risk check, so we reject it loudly.
+ */
+function assertStringArray(value: unknown, field: string): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || !value.every((x) => typeof x === "string")) {
+    throw new Error(
+      `[manifest-lint] manifest.${field} must be an array of strings (got ${JSON.stringify(value)})`,
+    );
+  }
+  return value;
+}
+
+
+/**
+ * LIC-1: convey third-party license / attribution text WITH the distributed
+ * extension bundle. The Local Vision Assistant bundles `@huggingface/transformers`
+ * (Apache-2.0) and `onnxruntime-web` (MIT) into the shipped MV3 extension.
+ * Apache-2.0 (S)4(a)-(c) requires the Apache License text (and any upstream
+ * NOTICE) to travel with the redistribution; MIT requires reproduction of the
+ * copyright/permission notice.
+ *
+ * `THIRD_PARTY_LICENSES.md` (repo root) already enumerates every bundled
+ * dependency and its license, so we copy it into the package root, plus the
+ * full Apache-2.0 text shipped inside the transformers package. `onnxruntime-web`
+ * ships no `LICENSE` file in its package, but its MIT attribution is already
+ * recorded in `THIRD_PARTY_LICENSES.md` (which we copy), satisfying the
+ * attribution requirement.
+ *
+ * Note: referencing this file from the Options/About page and `manifest.json`
+ * is tracked separately, outside this build file.
+ */
+async function emitThirdPartyLicenses(): Promise<void> {
+  const targets: Array<[string, string]> = [
+    [path.resolve("THIRD_PARTY_LICENSES.md"), "THIRD_PARTY_LICENSES.md"],
+  ];
+  // Full Apache-2.0 text from the transformers package (best-effort).
+  const apache = path.resolve("node_modules/@huggingface/transformers/LICENSE");
+  if (existsSync(apache)) targets.push([apache, "LICENSE-APACHE"]);
+  for (const [src, out] of targets) {
+    if (existsSync(src)) {
+      await copyFile(src, path.join(OUT, out));
+    } else {
+      console.warn(`[licenses] skipping missing license file: ${src}`);
+    }
+  }
+}
+
+/**
  * Copy static assets (manifest, HTML, CSS, icons) from src to the output dir.
  * Skips files that don't exist (so removing an asset doesn't break the build).
  */
 async function copyStatic(): Promise<void> {
+  lintManifestPermissions();
   for (const f of STATIC_FILES) {
     const src = path.join(SRC, f);
     if (existsSync(src)) await copyFile(src, path.join(OUT, f));
@@ -136,6 +351,15 @@ async function copyStatic(): Promise<void> {
   await mkdir(path.join(OUT, "icons"), { recursive: true });
   const iconSrc = path.join(SRC, "icons", "icon.png");
   if (existsSync(iconSrc)) await copyFile(iconSrc, path.join(OUT, "icons", "icon.png"));
+  // Wire per-size icon PNGs referenced by both manifest files. The manifest
+  // uses distinct assets per size (icon-16/32/48/128.png); copy each so a
+  // build does not leave dangling icon references in the loaded extension.
+  for (const size of ["16", "32", "48", "128"]) {
+    const p = path.join(SRC, "icons", `icon-${size}.png`);
+    if (existsSync(p)) await copyFile(p, path.join(OUT, "icons", `icon-${size}.png`));
+  }
+  // Ship third-party license/attribution text alongside the bundle (LIC-1).
+  await emitThirdPartyLicenses();
 }
 
 /**
@@ -152,6 +376,7 @@ async function buildAll(): Promise<void> {
   if (existsSync(OUT)) await rm(OUT, { recursive: true, force: true });
   await mkdir(OUT, { recursive: true });
   await copyStatic();
+  await assertOnlyEnZodLocales();
   const builds = ENTRIES.map((e) => {
     const isEsm = e.config.format === "esm";
     return build({
@@ -176,6 +401,7 @@ async function buildAll(): Promise<void> {
  * both ESM and IIFE entries.
  */
 async function watchMode(): Promise<void> {
+  await assertOnlyEnZodLocales();
   const ctxs = await Promise.all(
     ENTRIES.map((e) => {
       const isEsm = e.config.format === "esm";
@@ -196,9 +422,14 @@ async function watchMode(): Promise<void> {
 // Wrap in an async IIFE so top-level await works with both Bun (native)
 // and Node/tsx (which doesn't support top-level await in CJS).
 void (async () => {
-  if (watch) {
-    await watchMode();
-  } else {
-    await buildAll();
+  try {
+    if (watch) {
+      await watchMode();
+    } else {
+      await buildAll();
+    }
+  } catch (err) {
+    console.error("Extension build failed:", err);
+    process.exit(1);
   }
 })();

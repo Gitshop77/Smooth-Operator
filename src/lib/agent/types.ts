@@ -201,6 +201,7 @@ export type LogEvent =
   | { type: "done"; step: number; success: boolean; text: string }
   | { type: "error"; step: number; message: string; recoverable: boolean }
   | { type: "info"; message: string }
+  | { type: "warn"; step?: number; message: string }
   | { type: "cost"; step: number; tokensIn: number; tokensOut: number; costUsd: number; model: string };
 
 // ─── API contracts ──────────────────────────────────────────────────────────
@@ -373,4 +374,8 @@ export const DEFAULT_CONFIG: AgentConfig = {
   compactionStepInterval: 20,
   compactionCharThreshold: 30_000,
   enableJudge: true,
+  // ON by default — the HTML summarizer is the single biggest per-action cost
+  // lever (the raw DOM is the largest part of the navigator request). See
+  // `enableHtmlSummarizer` in config/schema.ts.
+  enableHtmlSummarizer: true,
 };

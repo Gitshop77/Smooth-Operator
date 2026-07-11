@@ -16,6 +16,7 @@ import { make } from "../route/client";
 import * as AnthropicMessages from "../protocols/anthropic-messages";
 import type { LLMProvider } from "../provider";
 import { toLLMProvider as toLLMProviderBridge } from "../provider-bridge";
+import { assertSafeUserBaseURL } from "./openai-compatible-profile";
 
 export const id = "anthropic";
 
@@ -29,6 +30,9 @@ const auth = (options: ProviderAuthOption<"optional">) => {
 };
 
 export function configure(input: Config = {}) {
+  // (SSRF guard): validate any user-supplied baseURL override before
+  // building the route/endpoint. The trusted default is exempt.
+  assertSafeUserBaseURL(input.baseURL);
   const route = make({
     id: "anthropic-messages",
     provider: id,
@@ -51,7 +55,28 @@ export function configure(input: Config = {}) {
   };
 }
 
-export const provider = configure();
+/**
+ * Synchronous, coarse vision-capability gate for Anthropic model ids.
+ *
+ * The authoritative per-model check lives in the catalog
+ * (`modelSupportsVision`) and is applied at the provider-config layer
+ * (`buildProvider` patches `supportsVision` after default resolution). This
+ * gate only corrects the obvious legacy cases so the facade default is not
+ * blindly `true` for *every* model id — e.g. `claude-2` / `claude-instant`
+ * cannot accept image inputs and would otherwise be misreported as
+ * vision-capable, risking image blocks the model rejects.
+ *
+ * All current Claude 3+ families support vision; legacy `claude-1`,
+ * `claude-2`, and `claude-instant` do not.
+ */
+function anthropicModelSupportsVision(modelId: string): boolean {
+  const id = modelId.toLowerCase();
+  return !(
+    id.startsWith("claude-1") ||
+    id.startsWith("claude-2") ||
+    id.includes("claude-instant")
+  );
+}
 
 /**
  * Bridge to the agent's `LLMProvider` interface. The protocol emits usage
@@ -63,7 +88,7 @@ export function toLLMProvider(config: Config & { model: string }): LLMProvider {
     providerId: "anthropic",
     providerDisplayName: "Anthropic",
     model: config.model,
-    supportsVision: true,
+    supportsVision: anthropicModelSupportsVision(config.model),
     supportsStructuredOutput: true,
     configureResult: configure(config),
   });

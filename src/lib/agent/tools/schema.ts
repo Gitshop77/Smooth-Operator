@@ -90,7 +90,7 @@ export const SelectDropdownSchema = z
 /** Scroll the page up or down by whole viewport-heights. */
 export const ScrollSchema = z.object({
   type: z.literal("scroll").describe("Scroll the page up or down."),
-  down: z.boolean().optional().default(true).describe("true = scroll down (default), false = scroll up."),
+  down: flexibleBoolean.optional().default(true).describe("true = scroll down (default), false = scroll up."),
   pages: z.number().min(0).optional().default(1).describe("Number of viewport-heights to scroll (default 1)."),
 });
 
@@ -131,10 +131,13 @@ export const WaitSchema = z.object({
   // `null` and `""` coerce to 0 (not undefined), defeating `.default(3)`.
   // The preprocess converts null/"" → undefined BEFORE coercion so the
   // default kicks in.
+  // Bound the value to [0, 300]: a negative `seconds` would resolve to a
+  // near-instant `setTimeout(0)` (wrong behavior) and an unbounded value could
+  // hang the orchestrator, which awaits this handler with no per-step timeout.
   seconds: z.preprocess(
     (v) => (v === null || v === "" ? undefined : v),
-    z.coerce.number(),
-  ).optional().default(3).describe("Seconds to wait (default 3)."),
+    z.coerce.number().min(0).max(300),
+  ).optional().default(3).describe("Seconds to wait (default 3, clamped to 0–300)."),
 });
 
 /** Scroll the page until the given text becomes visible. */
@@ -375,18 +378,23 @@ export const AgentOutputSchema = z.object({
     .array(ActionSchema)
     .min(1)
     .max(50)
-    // `done` is an exclusive action (see ACTION_METADATA.done.exclusive).
-    // If a `done` action is present it MUST be the only action in the step —
-    // any sibling actions would otherwise be silently dropped by the
-    // orchestrator's short-circuit-to-done path. Enforce this at parse time so
-    // invalid multi-action steps (e.g. [{type:"done"},{type:"input"}]) are
-    // rejected before they reach execution. A single `done` (the valid case)
-    // is unaffected.
+    // Exclusive actions (see ACTION_METADATA[*].exclusive — e.g. `done`,
+    // `ask_human`, `takeover`, `detect_visual`) MUST be the only action in
+    // their step. Any sibling actions would otherwise be silently dropped by
+    // the orchestrator's short-circuit paths (e.g. short-circuit-to-done) or
+    // never reach execution. The prompt already tags these "[must be the only
+    // action]", and the metadata flag drives this check, so the parser and the
+    // prompt stay consistent and the flag is not dead data. Enforce at parse
+    // time so invalid multi-action steps (e.g. [{type:"done"},{type:"input"}])
+    // are rejected before they reach execution. A single exclusive action (the
+    // valid case) is unaffected.
     .superRefine((actions, ctx) => {
-      if (actions.some((a) => a.type === "done") && actions.length > 1) {
+      const exclusive = actions.filter((a) => ACTION_METADATA[a.type]?.exclusive);
+      if (exclusive.length > 0 && actions.length > 1) {
+        const names = exclusive.map((a) => a.type).join(", ");
         ctx.addIssue({
           code: "custom",
-          message: "When 'done' is present it must be the only action in the step.",
+          message: `Exclusive action(s) [${names}] must be the only action in the step.`,
         });
       }
     })
@@ -561,8 +569,10 @@ export function isEquivalentAction(a: Action, b: Action): boolean {
       const bb = b as Extract<Action, { type: "done" }>;
       return a.text === bb.text && a.success === bb.success;
     }
-    case "search":
-      return a.query === (b as Extract<Action, { type: "search" }>).query;
+    case "search": {
+      const bb = b as Extract<Action, { type: "search" }>;
+      return a.query === bb.query && (a.engine ?? "duckduckgo") === (bb.engine ?? "duckduckgo");
+    }
     case "upload_file":
       return (
         a.index === (b as Extract<Action, { type: "upload_file" }>).index &&

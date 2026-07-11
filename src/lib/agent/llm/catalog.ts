@@ -57,17 +57,78 @@ interface CachedCatalog {
 }
 
 /**
+ * Minimal structural validation of a parsed models.dev catalog. Rejects
+ * obviously-wrong shapes (non-object, missing provider entries, `models`
+ * not a record, non-numeric cost fields) so malformed/compromised data
+ * can't flow into the model picker. Returns a typed `Catalog` on success.
+ */
+function isValidCatalog(value: unknown): value is Catalog {
+  if (!value || typeof value !== "object") return false;
+  for (const entry of Object.values(value as Record<string, unknown>)) {
+    if (!entry || typeof entry !== "object") return false;
+    const provider = entry as Record<string, unknown>;
+    if (typeof provider.id !== "string" || typeof provider.name !== "string") return false;
+    if (!provider.models || typeof provider.models !== "object") return false;
+    for (const model of Object.values(provider.models as Record<string, unknown>)) {
+      if (!model || typeof model !== "object") return false;
+      const m = model as Record<string, unknown>;
+      // `release_date` is dereferenced via `.localeCompare` by callers; a
+      // non-string here would crash the picker, so reject it.
+      if (typeof m.id !== "string" || typeof m.release_date !== "string") return false;
+      if (m.cost !== undefined) {
+        const c = m.cost as Record<string, unknown>;
+        if (typeof c.input !== "number" || typeof c.output !== "number") return false;
+      }
+    }
+  }
+  return true;
+}
+
+/**
  * Fetch the models.dev catalog. Uses a 5-minute TTL cache stored in
  * `chrome.storage.local` (extension) or in-memory (demo/Node). Falls back
  * gracefully on network failure — returns the cached version if available,
  * or an empty catalog if not.
  */
 export async function fetchCatalog(force = false): Promise<Catalog> {
-  // Check in-memory cache first
+  // Reuse an in-flight fetch so concurrent callers share one network request.
+  // Without this, a service worker handling several overlapping model-picker
+  // requests would each issue a 10s fetch + a chrome.storage.local write.
+  if (!force && inflight) return inflight;
+
+  // Fast in-memory hit (synchronous — safe to short-circuit before memoizing).
   if (!force && memoryCache && Date.now() - memoryCacheTime < CACHE_TTL_MS) {
     return memoryCache;
   }
 
+  // Memoize synchronously so any caller entering during `loadCatalog`'s awaits
+  // reuses this single in-flight promise instead of starting its own fetch.
+  let resolveFn!: (value: Catalog) => void;
+  let rejectFn!: (reason: unknown) => void;
+  inflight = new Promise<Catalog>((resolve, reject) => {
+    resolveFn = resolve;
+    rejectFn = reject;
+  });
+
+  (async () => {
+    try {
+      resolveFn(await loadCatalog(force));
+    } catch (err) {
+      rejectFn(err);
+    } finally {
+      inflight = null;
+    }
+  })();
+
+  return inflight;
+}
+
+/**
+ * Perform the actual cache-lookup + network fetch for `fetchCatalog`.
+ * Never throws: on any network/validation failure it falls back to the stale
+ * persistent cache, and finally to an empty catalog.
+ */
+async function loadCatalog(force: boolean): Promise<Catalog> {
   // Check persistent cache (chrome.storage.local)
   if (!force && typeof chrome !== "undefined" && chrome.storage?.local) {
     try {
@@ -91,9 +152,15 @@ export async function fetchCatalog(force = false): Promise<Catalog> {
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) throw new Error(`models.dev API ${res.status}`);
-    const data = (await res.json()) as Catalog;
+    const raw = await res.json();
+    if (!isValidCatalog(raw)) {
+      // Trust-boundary guard: reject malformed/compromised data and fall back.
+      throw new Error("models.dev catalog failed shape validation");
+    }
+    const data = raw;
     memoryCache = data;
     memoryCacheTime = Date.now();
+    lastFetchError = null;
 
     // Persist to chrome.storage
     if (typeof chrome !== "undefined" && chrome.storage?.local) {
@@ -105,8 +172,17 @@ export async function fetchCatalog(force = false): Promise<Catalog> {
     }
 
     return data;
-  } catch {
-    // Network failure — try stale cache
+  } catch (err) {
+    // Record + surface the failure so the UI can show staleness/offline state.
+    lastFetchError = err instanceof Error ? err : new Error(String(err));
+    if (
+      typeof process !== "undefined" &&
+      process.env &&
+      process.env.NODE_ENV !== "production"
+    ) {
+      console.warn("[catalog] fetchCatalog failed:", lastFetchError.message);
+    }
+    // Network/validation failure — try stale cache
     if (typeof chrome !== "undefined" && chrome.storage?.local) {
       try {
         const cached = await chrome.storage.local.get(CACHE_KEY);
@@ -123,6 +199,17 @@ export async function fetchCatalog(force = false): Promise<Catalog> {
 let memoryCache: Catalog | null = null;
 let memoryCacheTime = 0;
 
+/** In-flight fetch promise, memoized to dedupe concurrent callers. */
+let inflight: Promise<Catalog> | null = null;
+
+/** Most recent fetch/validation error, surfaced to the UI for staleness state. */
+let lastFetchError: Error | null = null;
+
+/** Returns the most recent `fetchCatalog` error (or null if the last fetch succeeded). */
+export function getLastFetchError(): Error | null {
+  return lastFetchError;
+}
+
 /**
  * Get all models for a specific provider from the catalog.
  * Returns an array of { id, name, ... } sorted by release date (newest first).
@@ -130,7 +217,7 @@ let memoryCacheTime = 0;
 export async function getModelsForProvider(providerId: string): Promise<CatalogModel[]> {
   const catalog = await fetchCatalog();
   const provider = catalog[providerId];
-  if (!provider) return [];
+  if (!provider || !provider.models) return [];
   return Object.values(provider.models)
     .filter((m) => m.status !== "deprecated")
     .sort((a, b) => b.release_date.localeCompare(a.release_date));
@@ -156,7 +243,7 @@ export async function getDefaultModelForProvider(
   try {
     const catalog = await fetchCatalog();
     const provider = catalog[catalogProviderId];
-    if (!provider) return undefined;
+    if (!provider || !provider.models) return undefined;
     const models = Object.values(provider.models)
       .filter((m) => m.status !== "deprecated")
       .sort((a, b) => b.release_date.localeCompare(a.release_date));
@@ -182,6 +269,7 @@ export async function searchModels(query: string, limit = 50): Promise<Array<{
   const results: Array<{ providerId: string; providerName: string; model: CatalogModel; score: number }> = [];
 
   for (const [providerId, provider] of Object.entries(catalog)) {
+    if (!provider?.models) continue;
     for (const model of Object.values(provider.models)) {
       if (model.status === "deprecated") continue;
       const modelId = model.id.toLowerCase();

@@ -61,6 +61,15 @@ export class Select {
    */
   selectByVisibleText(text: string): void {
     const want = String(text).trim();
+    if (want === "") {
+      // An empty/whitespace-only argument is almost always a missing-field
+      // bug (e.g. an LLM tool call with an omitted field). Treat it as an
+      // invalid argument rather than silently matching every option via the
+      // substring fallback, where `"".includes("")` is true for all text.
+      throw new NoSuchElementException(
+        "selectByVisibleText requires a non-empty visible text argument",
+      );
+    }
     const opts = this.getOptions();
     let matched = opts.filter((o) => (o.textContent || "").trim() === want);
     if (matched.length === 0) {
@@ -79,7 +88,7 @@ export class Select {
       this.setSelected(matched[0]);
       return;
     }
-    for (const o of matched) this.setSelected(o);
+    this.selectMultiple(matched);
   }
 
   /**
@@ -102,7 +111,7 @@ export class Select {
       this.setSelected(matched[0]);
       return;
     }
-    for (const o of matched) this.setSelected(o);
+    this.selectMultiple(matched);
   }
 
   /**
@@ -163,6 +172,27 @@ export class Select {
     // only the first selected option. Setting it explicitly avoids surprises
     // when callers read `select.value` after a multi-select operation.
     if (!this.multiple) this.element.value = option.value;
+    this.element.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  /**
+   * Select several options at once (multi-select path). Every matched option
+   * is marked `selected` first, and a SINGLE `change` event is dispatched
+   * afterwards — mirroring the single-select batch behaviour and avoiding N
+   * redundant events (one per option) for what is logically one user action
+   * (React/Vue `onChange` listeners otherwise see intermediate states).
+   *
+   * @throws {ElementNotSelectableError} if any matched option is `disabled`.
+   */
+  private selectMultiple(options: HTMLOptionElement[]): void {
+    for (const o of options) {
+      if (o.disabled) {
+        throw new ElementNotSelectableError(
+          `cannot select a disabled option: "${(o.textContent || "").trim() || o.value}"`,
+        );
+      }
+      o.selected = true;
+    }
     this.element.dispatchEvent(new Event("change", { bubbles: true }));
   }
 }

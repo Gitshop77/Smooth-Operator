@@ -60,6 +60,14 @@ export class VisionAssistant {
   private loader: ModelLoader = new ModelLoader();
   private _status: VisionStatus = "uninitialized";
   private statusCallback: StatusCallback | null = null;
+  /**
+   * Re-entrancy guard for `init()`. Two concurrent `init()` callers would both
+   * pass the `isReady` check (neither is ready yet) and duplicate the ~2.1 GB
+   * download + leak a WebGPU session. We cache the in-flight promise and return
+   * it; the promise is cleared on settle (success or failure) so a failed init
+   * can be retried — mirroring the `tokenizerLoadPromise` pattern.
+   */
+  private initPromise: Promise<void> | null = null;
 
   get status(): VisionStatus {
     return this._status;
@@ -85,6 +93,22 @@ export class VisionAssistant {
 
   /** Initialize: download model (if needed) + create ONNX sessions. */
   async init(onProgress?: (p: DownloadProgress) => void): Promise<void> {
+    // Already fully initialized — cheap fast-path.
+    if (this.isReady) return;
+    // A concurrent init() is in flight — join it instead of double-downloading
+    // and leaking a second WebGPU session.
+    if (this.initPromise) return this.initPromise;
+
+    // Cache the in-flight promise; clear it on settle so a failed init can be
+    // retried and a subsequent call re-runs from scratch.
+    this.initPromise = this.doInit(onProgress).finally(() => {
+      this.initPromise = null;
+    });
+    return this.initPromise;
+  }
+
+  /** Core initialization. See `init()` for the re-entrancy wrapper. */
+  private async doInit(onProgress?: (p: DownloadProgress) => void): Promise<void> {
     if (this.isReady) return;
 
     if (!VisionAssistant.isWebGPUAvailable()) {
@@ -128,13 +152,27 @@ export class VisionAssistant {
         externalData: [{ path: LANGUAGE_DATA_NAME, data: langData }],
       });
 
+      // Assert the ONNX export names its KV-cache outputs as expected
+      // (`present_key_${i}` / `present_value_${i}`). The decode loop feeds
+      // these straight back as `past_key_*` / `past_value_*`; a differently
+      // named export would silently feed `undefined` and break every decode
+      // step. Fail loudly here rather than mid-detection.
+      this.assertKvCacheOutputs();
+
       // 3. Load tokenizer + embedding table
       this.tokenizer = await getTokenizer();
       this.embMeta = (await this.loader.getJSON(EMBED_META_URL)) as EmbeddingMeta;
       this.embPacked = await this.loader.getBuffer(EMBED_PACKED_URL);
       const scalesBytes = await this.loader.getBuffer(EMBED_SCALES_URL);
+
+      // Reject a corrupt/partial cache up-front: the meta JSON MUST agree with
+      // the binary layout, otherwise `gatherEmbed` reads misaligned bytes and
+      // emits silently-garbage embeddings. (Further per-call guards live in
+      // `gatherEmbed`.)
+      this.validateEmbeddingShapes(scalesBytes);
+
       const sv = new DataView(scalesBytes.buffer);
-      this.embScales = new Float32Array(scalesBytes.length / 2);
+      this.embScales = new Float32Array(scalesBytes.length >> 1);
       for (let i = 0; i < this.embScales.length; i++) {
         this.embScales[i] = f16to32(sv.getUint16(i * 2, true));
       }
@@ -153,6 +191,81 @@ export class VisionAssistant {
       await this.cleanup();
       this.setStatus("error", e instanceof Error ? e.message : String(e));
       throw e;
+    }
+  }
+
+  /**
+   * Reject a `meta.json` that disagrees with the binary embedding buffers.
+   * `packed` must hold exactly `vocab * hidden / 2` bytes (two 4-bit values per
+   * byte) and `scales` must hold exactly `vocab * n_groups` fp16 values. The
+   * group layout must also cover every hidden dimension (`n_groups * block_size
+   * === hidden`). Throws on any mismatch so a partial/version-skewed cache
+   * fails loudly instead of yielding garbage detections.
+   */
+  private validateEmbeddingShapes(scalesBytes: Uint8Array): void {
+    const meta = this.embMeta;
+    const packed = this.embPacked;
+    if (!meta || !packed) {
+      throw new Error("validateEmbeddingShapes: embedding meta/packed not loaded");
+    }
+    const { vocab, hidden, block_size, n_groups } = meta;
+    for (const [name, v] of Object.entries({ vocab, hidden, block_size, n_groups })) {
+      if (!Number.isInteger(v) || v <= 0) {
+        throw new Error(`Embedding meta.${name}=${v} must be a positive integer`);
+      }
+    }
+    if (hidden % 2 !== 0) {
+      throw new Error(`Embedding meta.hidden=${hidden} must be even (INT4 packs 2 values/byte)`);
+    }
+    if (n_groups * block_size !== hidden) {
+      throw new Error(
+        `Embedding meta mismatch: n_groups(${n_groups}) * block_size(${block_size}) !== hidden(${hidden})`,
+      );
+    }
+    const expectedPacked = vocab * (hidden / 2);
+    if (packed.length !== expectedPacked) {
+      throw new Error(
+        `Embedding packed buffer length ${packed.length} !== expected vocab*H/2 = ${expectedPacked} ` +
+          `(version skew or partial cache?)`,
+      );
+    }
+    if (scalesBytes.length % 2 !== 0) {
+      throw new Error(
+        `Embedding scales buffer length ${scalesBytes.length} is odd; fp16 scale stream is corrupt`,
+      );
+    }
+    const expectedScales = vocab * n_groups;
+    if (scalesBytes.length / 2 !== expectedScales) {
+      throw new Error(
+        `Embedding scales buffer length ${scalesBytes.length} !== expected 2*vocab*n_groups = ${expectedScales * 2} ` +
+          `(version skew or partial cache?)`,
+      );
+    }
+  }
+
+  /**
+   * Assert the language ONNX export exposes KV-cache outputs named
+   * `present_key_${i}` / `present_value_${i}` for every layer, deriving the
+   * expected count from `N_LAYERS`. If the export names them differently, the
+   * decode loop would feed `undefined` into `past_key_0` and fail silently, so
+   * we surface the real available names in the error.
+   */
+  private assertKvCacheOutputs(): void {
+    const session = this.languageSession;
+    if (!session) {
+      throw new Error("assertKvCacheOutputs: language session not created");
+    }
+    const names = new Set(session.outputNames);
+    const missing: string[] = [];
+    for (let i = 0; i < N_LAYERS; i++) {
+      if (!names.has(`present_key_${i}`)) missing.push(`present_key_${i}`);
+      if (!names.has(`present_value_${i}`)) missing.push(`present_value_${i}`);
+    }
+    if (missing.length) {
+      throw new Error(
+        `Language ONNX export missing expected KV-cache outputs: ${missing.join(", ")}. ` +
+          `Actual outputs: ${session.outputNames.join(", ")}`,
+      );
     }
   }
 
@@ -188,9 +301,32 @@ export class VisionAssistant {
       "<IMG_CONTEXT>".repeat(N) +
       `</img>${DETECTION_PROMPT}<|im_end|>\n<|im_start|>assistant\n`;
 
-    const tokenizer = this.tokenizer as { __call__: (str: string, opts: unknown) => Promise<{ input_ids: { data: BigInt64Array | number[] } }> };
-    const enc = await tokenizer.__call__(promptStr, { add_special_tokens: false });
+    // transformers.js `PreTrainedTokenizer` extends `Callable` — the tokenizer
+    // is invoked directly as a function (the `Callable` closure delegates to
+    // `_call`), there is no `__call__` method. The previous `.__call__(...)`
+    // cast compiled but threw `TypeError: tokenizer.__call__ is not a function`
+    // at runtime, silently killing Local Vision. Cast to the actual callable
+    // signature instead.
+    const tokenizer = this.tokenizer as (
+      str: string,
+      opts: { add_special_tokens: boolean },
+    ) => Promise<{ input_ids: { data: BigInt64Array | number[] } }>;
+    const enc = await tokenizer(promptStr, { add_special_tokens: false });
     const ids = Array.from(enc.input_ids.data, (x: unknown) => Number(x));
+
+    // The tokenizer must emit exactly N <IMG_CONTEXT> tokens to match the N
+    // placeholders injected into the prompt and the N rows of `visual_features`.
+    // If it emits a different count (e.g. it splits/merges the token for this
+    // model/input), splicing by occurrence would run `visIdx` past `vdata`
+    // (length N*H); `subarray` would then clamp to an empty slice that
+    // `embeds.set` silently writes as a zeroed embedding, degrading detection
+    // without raising an error. Detect and bail out rather than mis-embed.
+    const ctxCount = ids.reduce((acc: number, id: number) => acc + (id === IMG_CONTEXT_TOKEN ? 1 : 0), 0);
+    if (ctxCount !== N) {
+      const msg = `Vision detect(): tokenizer emitted ${ctxCount} <IMG_CONTEXT> tokens but ${N} were injected; aborting to avoid mis-embedding.`;
+      console.warn(msg);
+      throw new Error(msg);
+    }
 
     // 4. Build inputs_embeds: INT4 gather + visual splice at IMG_CONTEXT positions
     const L = ids.length;

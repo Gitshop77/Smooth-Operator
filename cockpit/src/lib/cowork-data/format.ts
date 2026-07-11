@@ -18,7 +18,7 @@ export function timeAgo(ts: number | string | Date | null | undefined): string {
 
 /** Format a number of bytes as a human-readable size. */
 export function formatBytes(n: number): string {
-  if (!n) return "0 B";
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
   const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
   return `${(n / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
@@ -54,7 +54,8 @@ export function safeHref(url: string | null | undefined): string {
 
 /** Truncate a long string in the middle. */
 export function truncateMiddle(s: string, max = 64): string {
+  if (max <= 1) return s.slice(0, Math.max(0, max));
   if (s.length <= max) return s;
-  const half = Math.floor((max - 1) / 2);
+  const half = Math.max(1, Math.floor((max - 1) / 2));
   return `${s.slice(0, half)}…${s.slice(-half)}`;
 }

@@ -16,7 +16,7 @@ interface ViewHeaderProps {
 
 /**
  * Reusable header at the top of every dashboard view.
- * Calm, minimal: small sentence-case eyebrow, terracotta-tinted icon chip,
+ * Calm, minimal: small sentence-case eyebrow, indigo-tinted icon chip,
  * generous whitespace.
  */
 export function ViewHeader({

@@ -54,6 +54,15 @@
  * - `Object.defineProperty` is used with `configurable: true, writable: true`
  *   so a page that detects the patch can still override it (the piercer is
  *   best-effort, not a security boundary).
+ * - The cross-world backdoor `window.__openCoworkPiercer__` is written to the
+ *   SHARED `window` (see "Worlds" above). Because it lives on the page's
+ *   `window`, the page's own MAIN-world scripts can also read it — including
+ *   any closed shadow roots the page author attached (the page only learns its
+ *   OWN closed roots, never another origin's). This is a deliberate,
+ *   low-impact trade-off: the backdoor exists so the isolated-world content
+ *   script can reach roots captured by the MAIN-world injection. It is NOT a
+ *   secret channel; treat it as read-only page introspection support, not a
+ *   security boundary.
  *
  * Extracted from the historical `dom/shadow-piercer.ts`. The legacy
  * `@/lib/agent/dom/shadow-piercer` import path stays working via a re-export
@@ -189,8 +198,16 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
           newState.openCount++;
         }
       }
-    } catch {
-      /* ignore — treeWalker may fail in exotic environments */
+    } catch (err) {
+      // treeWalker may fail in exotic environments; fail silently in prod but
+      // surface it in debug builds so the feature's failure is observable.
+      if (newState.debug) {
+        try {
+          console.warn("[open-cowork-piercer] tagExisting tree walk failed", err);
+        } catch {
+          /* ignore — console must never throw */
+        }
+      }
     }
   }
 
@@ -212,10 +229,26 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
 /** Expose the backdoor on `window` so other worlds/code can read closed roots. */
 function bindBackdoor(s: PiercerState): void {
   if (typeof window === "undefined") return;
+  // Merge with any pre-existing backdoor instead of clobbering it. The MAIN-
+  // world injection captures the page's closed shadow roots into ITS state and
+  // publishes a backdoor here; if the content script (or a re-injection)
+  // re-binds, an unconditional overwrite would discard those captured roots
+  // and break piercing in production. The combined accessor reads BOTH the
+  // local state and any backdoor that was already on `window`.
+  const existing = (window as unknown as { __openCoworkPiercer__?: ShadowPiercerBackdoor }).__openCoworkPiercer__;
   const backdoor: ShadowPiercerBackdoor = {
-    getShadowRoot: (host: Element): ShadowRoot | null => s.hostToRoot.get(host) ?? null,
-    hasShadowRoot: (host: Element): boolean => s.hostToRoot.has(host),
-    stats: () => ({ installed: true, open: s.openCount, closed: s.closedCount }),
+    getShadowRoot: (host: Element): ShadowRoot | null =>
+      s.hostToRoot.get(host) ?? existing?.getShadowRoot(host) ?? null,
+    hasShadowRoot: (host: Element): boolean =>
+      s.hostToRoot.has(host) || (existing?.hasShadowRoot(host) ?? false),
+    stats: () => {
+      const prev = existing?.stats();
+      return {
+        installed: true,
+        open: (prev?.open ?? 0) + s.openCount,
+        closed: (prev?.closed ?? 0) + s.closedCount,
+      };
+    },
   };
   try {
     (window as unknown as { __openCoworkPiercer__?: ShadowPiercerBackdoor }).__openCoworkPiercer__ = backdoor;
@@ -276,6 +309,13 @@ export function isShadowHost(el: Element): boolean {
 }
 
 /**
+ * @internal Test-only helper. NOT called by production code in `src/` — the
+ * production walker (`page-state.ts`) calls {@link getShadowRoot} per-element
+ * instead. It is exercised only by unit tests. Do not rely on it in shipped
+ * code; it is maintained as a test utility, deliberately NOT a second
+ * production walker, so the `visited`/cycle logic cannot drift from the
+ * production path.
+ *
  * Walk the subtree rooted at `root`, descending into BOTH open and closed
  * shadow roots. Returns a flat list of every `Element` encountered, in
  * depth-first source order. Shadow-host elements appear in the list at

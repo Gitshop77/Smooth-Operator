@@ -14,16 +14,31 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       reporter: ["text", "html"],
-      // Baseline thresholds. These act as a regression gate: a PR that
-      // drops coverage below the measured baseline fails CI. Keep them just
-      // under the current numbers so they catch real drops, not noise.
-      // Measured baseline: lines 52.75%, statements 51.07%, functions 52.54%,
-      // branches 42.94%.
+      // Regression gate. Thresholds are intentionally pinned ABOVE the measured
+      // baseline so the gate actually drives coverage upward and catches new
+      // untested code — NOT "just below baseline", which only guards against
+      // noise and lets ~half the codebase stay untested (see FULL-REVIEW #6/#7).
+      //
+      // These are a deliberate first increment toward the real targets
+      // (lines 70 / statements 70 / functions 70 / branches 60). Once the suite
+      // is green (FULL-REVIEW #2) and coverage climbs past these values, bump
+      // them toward those targets. Sitting above baseline means the gate yields
+      // a signal as soon as the suite goes green, instead of being masked by the
+      // currently-red run.
+      //
+      // Measured baseline (pre-fix): lines 52.75%, statements 51.07%,
+      // functions 52.54%, branches 42.94%.
+      //
+      // NOTE: per-directory floors for security-critical modules were also
+      // recommended, but the named modules (lib/agent/secrets, llm/providers,
+      // tools/handlers) do not exist in this repository. Add per-glob thresholds
+      // here for the actual secret/provider-handling modules once coverage for
+      // those paths is measurable.
       thresholds: {
-        lines: 50,
-        statements: 50,
-        functions: 50,
-        branches: 40,
+        lines: 60,
+        statements: 58,
+        functions: 60,
+        branches: 50,
       },
     },
   },

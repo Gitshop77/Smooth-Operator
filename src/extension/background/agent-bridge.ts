@@ -50,6 +50,18 @@ const DEFAULT_MAX_FAILURES = 5;
 const DEFAULT_COST_CAP = 0;
 export const DEFAULT_MODE: AgentMode = "standard";
 
+/**
+ * Coerce an unknown stored/override value into a finite integer clamped to
+ * [min, max] (finding: run-time numeric/string inputs are not validated). A
+ * corrupted/NaN/negative/string storage value is normalized instead of being
+ * passed straight into the loop config where it could cause degenerate behavior.
+ */
+function clampInt(v: unknown, def: number, min: number, max: number): number {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return def;
+  return Math.min(max, Math.max(min, Math.floor(n)));
+}
+
 // Synchronous in-memory guard flag set BEFORE the first `await` in the RUN
 // handler. Closes the TOCTOU window where two near-simultaneous RUN messages
 // both pass the `existing?.active` check before either writes `active: true`
@@ -94,6 +106,12 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
   // RunBuilder also captures `done` events internally as a belt-and-suspenders
   // path; this flag is the explicit, single source of truth passed to finish().
   let runSucceeded = false;
+  // Set true once cleanup has started so a transient `navigator-step-start`
+  // event emitted after `cleanupRun`/`clearRunState` can't re-create the
+  // persisted run-state object (finding: late saveRunState({step}) could
+  // resurrect run state after clearRunState). The step-persist in sendEvent
+  // below is gated on this flag.
+  let runFinished = false;
 
   /** Stream a {@link LogEvent} to the side panel + persist step count.
    * Declared at the top of the function so the early `tab.id` check below can
@@ -118,9 +136,17 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
       runSucceeded = true;
     }
     if (event.type === "navigator-step-start") {
-      saveRunState({ step: event.step }).catch(() => {
-        /* best-effort persistence */
-      });
+      // Keep the in-memory `runState.step` in sync with the persisted value
+      // (finding: runState.step is never updated in memory; only persisted via
+      // delta). Otherwise `handleTabAction`'s notify events report step 0.
+      // Gated on `runFinished` so a late step event after cleanup can't
+      // resurrect the persisted run-state (finding: late saveRunState).
+      if (!runFinished) {
+        runState.step = event.step;
+        saveRunState({ step: event.step }).catch(() => {
+          /* best-effort persistence */
+        });
+      }
     }
   };
 
@@ -161,12 +187,29 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
   // startup warning so the user knows why execution is refused (and what to
   // configure). We do NOT throw: the run can still proceed for non-JS actions;
   // only the unsandboxed RCE path is gated.
-  if (MODE_CONFIGS[mode].canExecuteJs) {
+  if (!MODE_CONFIGS[mode]) {
+    console.warn(`[agent-bridge] invalid mode "${String(mode)}" — falling back to "${DEFAULT_MODE}"`);
+    // Surface the fallback to the side panel so an invalid mode isn't a silent
+    // run with no explanation (finding: invalid mode crash swallowed with no
+    // user-visible error). The run proceeds in the default mode rather than
+    // crashing startRun.
+    sendEvent({ type: "info", message: `Invalid mode "${String(mode)}" — using "${DEFAULT_MODE}".` });
+  }
+  const effectiveMode: AgentMode = MODE_CONFIGS[mode] ? mode : DEFAULT_MODE;
+  if (MODE_CONFIGS[effectiveMode].canExecuteJs) {
     const configuredAllowlist = (stored.allowedDomains as string[] | undefined) ?? [];
     if (configuredAllowlist.length === 0) {
       console.warn(
         "[security] evaluate JS execution enabled with NO domain allowlist — failing closed; configure allowedDomains to permit execution.",
       );
+      // Surface the reason to the side panel so a user debugging "why do my JS
+      // actions silently do nothing?" gets an actionable explanation.
+      sendEvent({
+        type: "warn",
+        step: 0,
+        message:
+          "JavaScript execution (evaluate) is enabled with NO domain allowlist — failing closed. Configure allowedDomains to permit execution.",
+      });
     }
   }
   // Populate the domain config global so the executor's getDomainConfig()
@@ -178,20 +221,24 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     releaseRunGuard();
     return;
   }
-  const cfgMaxActions = (stored.maxActions as number) ?? DEFAULT_MAX_ACTIONS;
-  const cfgPlannerInterval = (stored.plannerInterval as number) ?? DEFAULT_PLANNER_INTERVAL;
-  const cfgMaxFailures = (stored.maxFailures as number) ?? DEFAULT_MAX_FAILURES;
-  const cfgCostCap = (stored.costCap as number) ?? DEFAULT_COST_CAP;
-  const cfgMaxSteps = (stored.maxSteps as number) ?? maxSteps;
+  // Validate / clamp run-time numeric overrides from storage (finding: run-time
+  // numeric/string inputs are not validated). A corrupted value (negative, NaN,
+  // non-numeric string) is coerced to a sane bound instead of reaching the loop.
+  const cfgMaxActions = clampInt(stored.maxActions, DEFAULT_MAX_ACTIONS, 1, 50);
+  const cfgPlannerInterval = clampInt(stored.plannerInterval, DEFAULT_PLANNER_INTERVAL, 1, 100);
+  const cfgMaxFailures = clampInt(stored.maxFailures, DEFAULT_MAX_FAILURES, 1, 100);
+  const cfgCostCap = (typeof stored.costCap === "number" && Number.isFinite(stored.costCap) && stored.costCap >= 0)
+    ? stored.costCap
+    : DEFAULT_COST_CAP;
+  const cfgMaxSteps = clampInt(stored.maxSteps, maxSteps, 1, 1000);
 
   const runState: RunState = {
     task,
     maxSteps: cfgMaxSteps,
-    mode,
+    mode: effectiveMode,
     startTabId: tab.id,
     currentTabId: tab.id,
     step: 0,
-    history: [],
     active: true,
     abortRequested: false,
   };
@@ -213,6 +260,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     // If saveRunState succeeded but startKeepalive threw inside initRunState,
     // state.active is persisted as true — clear it so future RUN messages
     // aren't rejected with "already running".
+    runFinished = true;
     try { await clearRunState(); } catch { /* best-effort */ }
     releaseRunGuard();
     return;
@@ -231,6 +279,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     if (afterWire?.abortRequested) {
       sendEvent({ type: "info", message: "Agent stopped by user." });
       sendEvent({ type: "done", step: 0, success: false, text: "Agent stopped by user." });
+      runFinished = true;
       await cleanupRun({
         runBuilder, task, isScheduledTaskRun, onStorageChanged,
         sendEvent, runSucceeded, releaseRunGuard, teardownScheduledVision,
@@ -274,7 +323,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
       sendEvent,
       controller,
       task,
-      mode,
+      mode: effectiveMode,
       callbacks: metricsCallback ? [metricsCallback] : undefined,
       config: {
         maxSteps: cfgMaxSteps,
@@ -292,6 +341,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
       recoverable: false,
     });
   } finally {
+    runFinished = true;
     await cleanupRun({
       runBuilder,
       task,

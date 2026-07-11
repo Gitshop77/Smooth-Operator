@@ -38,6 +38,48 @@ import "./takeover";
 import "./human-interact";
 import "./lifecycle";
 
+// ─── Collapse-state persistence (BOTH Reasoning + Activity) ─────────────────
+//
+// P2 fix: both the Reasoning and Activity <details> panels remember their
+// open/closed state across panel close/reopen via chrome.storage.local
+// (keys cw-reasoning / cw-activity). Restored on load, then a `toggle`
+// listener persists every change. This is the side-panel equivalent of the
+// localStorage demo in preview.html, but uses chrome.storage so it survives
+// the extension's isolated world.
+
+interface CollapseBinding {
+  id: string;
+  key: string;
+}
+
+const COLLAPSE_BINDINGS: CollapseBinding[] = [
+  { id: "reasoning", key: STORAGE_KEYS.reasoningCollapse },
+  { id: "activity", key: STORAGE_KEYS.activityCollapse },
+];
+
+function bindCollapsePersistence(): void {
+  const keys = COLLAPSE_BINDINGS.map((b) => b.key);
+  chrome.storage.local.get(keys, (res) => {
+    if (chrome.runtime.lastError) return;
+    for (const { id, key } of COLLAPSE_BINDINGS) {
+      const el = document.getElementById(id) as HTMLDetailsElement | null;
+      if (!el) continue;
+      const saved = res[key];
+      if (saved === "closed") el.open = false;
+      else if (saved === "open") el.open = true;
+      el.addEventListener("toggle", () => {
+        const value = el.open ? "open" : "closed";
+        chrome.storage.local.set({ [key]: value }, () => {
+          if (chrome.runtime.lastError) {
+            /* best-effort persistence — non-fatal */
+          }
+        });
+      });
+    }
+  });
+}
+bindCollapsePersistence();
+
 // Port-based service-worker keepalive — keeps the SW alive while the side
 // panel is open so long LLM streams aren't cut off mid-response.
 function connectKeepalivePort(): void {
@@ -115,6 +157,13 @@ openCockpitBtn?.addEventListener("click", async () => {
   // so we can show a helpful notification instead of a dead page.
   let isRunning = false;
   try {
+    // Best-effort connectivity probe. `mode: "no-cors"` makes the response
+    // opaque, so we CANNOT inspect HTTP status — any host that answers the
+    // TCP/TLS connection (captive portal, unrelated dev server, error page)
+    // resolves the promise and is treated as "running". This is a known
+    // limitation: we only confirm *something* is listening at the URL, not
+    // that it's the Cockpit server. A definitive check would need a CORS-
+    // enabled `/api/health` endpoint on the Cockpit server.
     await fetch(cockpitUrl, { mode: "no-cors", signal: AbortSignal.timeout(2000) });
     isRunning = true;
   } catch {
@@ -137,13 +186,40 @@ openCockpitBtn?.addEventListener("click", async () => {
   }
 });
 
-// Debug highlight toggle
+// Debug highlight overlay — a user opt-in debugging aid (default OFF in the
+// sidepanel UI). It asks the active tab's content script to paint a transient
+// highlight layer so an operator can verify which element the agent is about to
+// act on. It is intentionally exposed in production as a support/debugging tool
+// and is gated behind the manifest `debugger` permission; no code change is
+// required, only explicit user opt-in.
 debugModeCheckbox?.addEventListener("change", () => {
-  const enabled = debugModeCheckbox?.checked ?? false;
+  const cb = debugModeCheckbox;
+  if (!cb) return;
+  const enabled = cb.checked;
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    if (tabs[0]?.id) {
-      chrome.tabs.sendMessage(tabs[0].id, { type: "SET_DEBUG_HIGHLIGHT", enabled }).catch(() => {});
+    const tabId = tabs[0]?.id;
+    // No active tab (e.g. the caller is the target window without a focused
+    // tab). Surface it and revert so the checkbox doesn't lie.
+    if (!tabId) {
+      console.warn("[sidepanel] debug highlight: no active tab to message");
+      cb.checked = !enabled;
+      return;
     }
+    chrome.tabs
+      .sendMessage(tabId, { type: "SET_DEBUG_HIGHLIGHT", enabled })
+      .catch((err) => {
+        // Every failure mode (no content script injected, a chrome:// or
+        // other privileged page, the tab having been closed) lands here.
+        // Log it so the operator has a diagnostic path, and revert the
+        // checkbox so the UI reflects reality instead of showing "on" with
+        // no highlight applied. Setting .checked programmatically does not
+        // re-fire the change event, so this won't recurse.
+        console.warn(
+          `[sidepanel] debug highlight ${enabled ? "enable" : "disable"} failed — no content script or unsupported page:`,
+          err
+        );
+        cb.checked = !enabled;
+      });
   });
 });
 

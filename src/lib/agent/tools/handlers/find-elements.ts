@@ -11,6 +11,37 @@ import type { ActionContext } from "./types";
 import { isSensitive } from "../../dom/utils/classification";
 import { redactSecrets } from "../../secrets";
 
+/**
+ * Attempt `document.querySelectorAll` and return a structured result instead of
+ * letting an invalid selector throw. LLM- or prompt-supplied selectors are
+ * frequently malformed (e.g. an XPath given without the `xpath:` prefix, or a
+ * stray `>>>`), so every failure must surface as `{ success: false, message }`
+ * like the sibling handlers, not as a rejected promise.
+ */
+function tryQuerySelectorAll(
+  selector: string,
+): { ok: true; els: Element[] } | { ok: false; error: string } {
+  try {
+    return { ok: true, els: Array.from(document.querySelectorAll(selector)) };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * `link` is a real HTML element name, so `link:hover` parses as a valid CSS
+ * selector for hovered `<a>` elements. We therefore disambiguate a `link:`
+ * value that is actually a CSS pseudo-class from one that is ordinary link
+ * text by checking whether the *whole* `link:<value>` selector is valid CSS.
+ * A value that is not valid CSS — including ordinary single-word lowercase
+ * link text such as `home`, `login`, `next` — is resolved via `By.linkText`
+ * so legitimate one-word links are never silently misrouted to the CSS path.
+ * `partial:` never collides with an element name, so it is always a locator.
+ */
+function linkValueIsCssPseudoClass(value: string): boolean {
+  return tryQuerySelectorAll(`link:${value}`).ok;
+}
+
 export async function handleFindElements(
   _ctx: ActionContext,
   action: Extract<Action, { type: "find_elements" }>,
@@ -31,27 +62,19 @@ export async function handleFindElements(
   //   link:    → By.linkText(selector)
   //   partial: → By.partialLinkText(selector)
   const selector = action.selector;
-  let matchedEls: Element[] = [];
   const prefixMatch = /^(css|xpath|id|name|tag|class|link|partial):([\s\S]+)$/i.exec(selector);
-  // A CSS pseudo-class like `link:hover` would otherwise be parsed as
-  // `By.linkText("hover")` because `link:` is a valid locator prefix AND
-  // `link` is a real HTML element name (so `link:hover` is a valid CSS
-  // selector for styling `<a>` elements on hover). For the `link:` and
-  // `partial:` prefixes specifically — whose values are human-readable link
-  // text — require the value to NOT look like a CSS pseudo-class. A CSS
-  // pseudo-class name is always a lowercase identifier (optionally with
-  // hyphens or parens: `hover`, `first-child`, `nth-child(2)`). Link text
-  // like `Sign in`, `Home`, `Click here` either contains a space OR starts
-  // with a non-lowercase character. This filter lets `link:Sign in` resolve
-  // via By.linkText (existing test) while `link:hover` falls through to the
-  // CSS path (querySelectorAll(`link:hover`) → the page's hovered `<a>`s).
-  // Other prefixes (`tag:`, `id:`, `name:`, `class:`, `xpath:`, `css:`) are
-  // not affected because they don't collide with HTML element names.
   const kind = prefixMatch?.[1]?.toLowerCase();
   const value = prefixMatch?.[2] ?? "";
   const isLinkLocator = kind === "link" || kind === "partial";
-  const looksLikeCssPseudoClass = /^[a-z]/.test(value) && !/\s/.test(value);
+  // For `link:`/`partial:` the value is human-readable link text. Only divert
+  // `link:` to the CSS path when the value is genuinely a CSS pseudo-class
+  // (i.e. `link:<value>` is valid CSS); otherwise it is link text. This keeps
+  // `link:home`, `link:login`, `partial:next` resolving via the locator while
+  // `link:hover` still reaches the CSS path.
+  const looksLikeCssPseudoClass = kind === "link" && linkValueIsCssPseudoClass(value);
   const useLocator = prefixMatch !== null && !(isLinkLocator && looksLikeCssPseudoClass);
+
+  let matchedEls: Element[] = [];
   if (useLocator) {
     try {
       const { By, findByLocator } = await import("../../dom/dom-utils");
@@ -70,14 +93,31 @@ export async function handleFindElements(
         matchedEls = findByLocator(by);
       }
     } catch {
-      // Locator import / resolution failed — fall through to the CSS
-      // path with the original (un-prefixed) selector so the action
-      // still returns a useful result.
-      matchedEls = Array.from(document.querySelectorAll(selector));
+      // Locator import / resolution failed — fall through to the CSS path
+      // with the original (un-prefixed) selector so the action still returns
+      // a useful result. An invalid selector here is reported, not thrown.
+      const res = tryQuerySelectorAll(selector);
+      if (!res.ok) {
+        return {
+          action,
+          success: false,
+          message: `Invalid selector "${selector}": ${res.error}`,
+        };
+      }
+      matchedEls = res.els;
     }
   } else {
-    matchedEls = Array.from(document.querySelectorAll(selector));
+    const res = tryQuerySelectorAll(selector);
+    if (!res.ok) {
+      return {
+        action,
+        success: false,
+        message: `Invalid selector "${selector}": ${res.error}`,
+      };
+    }
+    matchedEls = res.els;
   }
+
   const els = matchedEls.slice(0, action.max_results ?? 50);
   const attrs = action.attributes;
   const results = await Promise.all(els.map(async (el, i) => {

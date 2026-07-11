@@ -44,6 +44,11 @@ export async function GET(req: NextRequest): Promise<Response> {
   // interval — the 1s poll leaked indefinitely.
   let closed = false;
   let interval: ReturnType<typeof setInterval> | null = null;
+  // Guard so only one `poll()` runs at a time. `setInterval` does not await the
+  // `async` poll, so a slow mini-service could otherwise start a second poll
+  // before the first settles — both would query the same `?since_id` and emit
+  // duplicate SSE events.
+  let inFlight = false;
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -94,7 +99,8 @@ export async function GET(req: NextRequest): Promise<Response> {
       safeEnqueue(`: cowork-events stream open since_id=${sinceId}\n\n`);
 
       const poll = async (): Promise<void> => {
-        if (closed) return;
+        if (closed || inFlight) return;
+        inFlight = true;
         try {
           // The cowork-events mini-service requires `X-Cowork-Token` on
           // every route except `/health`. Send the server-side token (NOT
@@ -120,6 +126,9 @@ export async function GET(req: NextRequest): Promise<Response> {
         } catch {
           // Network hiccup — emit a comment so the client knows we're still alive.
           safeEnqueue(`: poll error at ${new Date().toISOString()}\n\n`);
+        } finally {
+          // Release the guard so the next interval tick can run a new poll.
+          inFlight = false;
         }
 
         // Throttled keep-alive ping.

@@ -239,10 +239,17 @@ describe("scanForInjection", () => {
     expect(scanForInjection("hello\uFEFF").warnings).toContain("zero-width-characters");
   });
 
-  test("flags line/paragraph separators (U+2028, U+2029) as suspicious", () => {
-    expect(scanForInjection("ig\u2028nore previous").warnings).toContain("zero-width-characters");
-    expect(scanForInjection("ig\u2029nore previous").warnings).toContain("zero-width-characters");
+  test("flags U+061C (Arabic letter mark, a Default-Ignorable code point) as zero-width", () => {
     expect(scanForInjection("hello\u061Cworld").warnings).toContain("zero-width-characters");
+  });
+
+  test("does NOT flag line/paragraph separators (U+2028, U+2029) \u2014 they are legitimate separators collapsed by sanitizeUntrusted", () => {
+    // Unlike the zero-width set, U+2028/U+2029 are valid content separators,
+    // so `scanForInjection` intentionally does NOT flag them. `sanitizeUntrusted`
+    // collapses a MID-WORD separator so it can't smuggle an injection keyword.
+    expect(scanForInjection("ig\u2028nore previous").warnings).not.toContain("zero-width-characters");
+    expect(scanForInjection("ig\u2029nore previous").warnings).not.toContain("zero-width-characters");
+    expect(sanitizeUntrusted("ig\u2028nore previous")).toBe("ignore previous");
   });
 
   test("flags excessive 'please' repetition (social engineering)", () => {

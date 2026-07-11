@@ -54,13 +54,27 @@ const ID_SUFFIX_LENGTH = 6;
 export async function saveRun(run: RunRecord): Promise<void> {
   const runs = await loadRuns();
   // defense-in-depth — redact any secret values that may have
-  // leaked into action-result messages before persisting to disk. The
-  // executor's `input` action redacts at the source, but this catches any
-  // other path that might surface a secret value in a `message` field.
+  // leaked into persisted log events before writing to disk. redactRunSecrets
+  // scans EVERY string-valued field of every LogEvent (including page-derived
+  // `url`/`pageInfo`/`description` and planner text), not just `message`, so a
+  // secret that reaches storage via any path is caught here rather than left in
+  // chrome.storage.local / localStorage.
   // Also wraps the chrome.storage.local write in try/catch so a
   // quota/corruption error surfaces as a user-visible warning instead of an
   // unhandled rejection.
-  const safeRun = await redactRunSecrets(run);
+  // Redaction is defense-in-depth, not essential to persistence. If the
+  // secrets module fails to load (e.g. dynamic import rejects) or throws
+  // while scanning a field, don't let that abort the whole save — fall back
+  // to persisting the original run so the history entry survives and stays
+  // replayable. The failure is logged so the gap in secret-hygiene is at
+  // least visible, rather than silently dropping the run record.
+  let safeRun: RunRecord;
+  try {
+    safeRun = await redactRunSecrets(run);
+  } catch (e) {
+    console.warn("[run-history] redactRunSecrets failed; persisting unredacted run:", e);
+    safeRun = run;
+  }
   runs.unshift(safeRun);
   if (runs.length > MAX_RUNS) runs.length = MAX_RUNS;
   if (isExtensionWithLocal()) {
@@ -92,24 +106,50 @@ export async function saveRun(run: RunRecord): Promise<void> {
 }
 
 /**
- * Walk a RunRecord's steps and redact any secret values from ALL text-bearing
- * fields across every LogEvent variant. Also redacts the run's result text.
+ * Walk a RunRecord's steps and redact any secret values from EVERY text-bearing
+ * field across every LogEvent variant — not just a fixed allow-list. This is the
+ * defense-in-depth catch for secrets that reach storage: page-derived fields
+ * such as `state.url`, `state.pageInfo`, and `action.description`, plus planner
+ * text (`decision`/`goal`/`plan`) and challenge/takeover `kind`/`message`/`reason`,
+ * can all contain entered form values, visible PII, or access tokens in the URL
+ * query string. Iterating over every string-valued key (and string elements of
+ * any array-valued key, e.g. planner `plan`) guarantees we never miss a new field
+ * added to the LogEvent union. Also redacts the run's result text.
  * Returns a shallow-cloned run with sanitized steps. Called by saveRun before
  * persistence.
  */
 async function redactRunSecrets(run: RunRecord): Promise<RunRecord> {
   const { redactSecrets } = await import("./secrets");
-  const textFields = ["message", "text", "reason", "question", "expectation", "evaluation", "memory", "nextGoal"] as const;
+  // Redact a single value: strings are scanned for secrets; string arrays
+  // (e.g. planner `plan`) have each element scanned. Non-string/non-array
+  // values are returned untouched.
+  const redactValue = async (val: unknown): Promise<unknown> => {
+    if (typeof val === "string") {
+      return await redactSecrets(val);
+    }
+    if (Array.isArray(val)) {
+      let changed = false;
+      const out = await Promise.all(
+        val.map(async (v) => {
+          if (typeof v === "string") {
+            const r = await redactSecrets(v);
+            if (r !== v) changed = true;
+            return r;
+          }
+          return v;
+        }),
+      );
+      return changed ? out : val;
+    }
+    return val;
+  };
   const steps = await Promise.all(
     run.steps.map(async (event) => {
       let patched = event;
-      for (const key of textFields) {
-        const val = (event as Record<string, unknown>)[key];
-        if (typeof val === "string") {
-          const redacted = await redactSecrets(val);
-          if (redacted !== val) {
-            patched = { ...patched, [key]: redacted } as LogEvent;
-          }
+      for (const [key, val] of Object.entries(event)) {
+        const redacted = await redactValue(val);
+        if (redacted !== val) {
+          patched = { ...patched, [key]: redacted } as LogEvent;
         }
       }
       return patched;
@@ -128,10 +168,16 @@ async function redactRunSecrets(run: RunRecord): Promise<RunRecord> {
 export async function loadRuns(): Promise<RunRecord[]> {
   if (isExtensionWithLocal()) {
     const res = await chrome.storage.local.get(STORAGE_KEY);
-    return (res[STORAGE_KEY] as RunRecord[]) || [];
+    const arr = res[STORAGE_KEY];
+    // Guard against type-mismatched / corrupt storage (e.g. a non-array value
+    // written under the same key by another extension) so callers don't throw
+    // on `.unshift` / `.map` downstream.
+    return Array.isArray(arr) ? (arr as RunRecord[]) : [];
   }
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]") as RunRecord[];
+    const raw = localStorage.getItem(STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? (parsed as RunRecord[]) : [];
   } catch {
     return [];
   }

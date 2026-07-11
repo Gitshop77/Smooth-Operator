@@ -34,6 +34,13 @@ const CURSOR_ELEMENT_ID = "open-cowork-phantom-cursor";
 
 let cursorEl: HTMLDivElement | null = null;
 let isActive = false;
+/**
+ * The `finish` callback of the currently in-flight move, or `null` when no move
+ * is pending. Tracking a single active move lets a new `movePhantomCursor` cancel
+ * the prior one so stacked `transitionend` listeners can't accumulate across
+ * rapid moves.
+ */
+let activeMoveFinish: (() => void) | null = null;
 
 /**
  * Move the phantom cursor to a viewport-relative `(x, y)` position.
@@ -65,6 +72,15 @@ export function movePhantomCursor(x: number, y: number): Promise<void> {
 
   cursorEl.style.transform = `translate3d(${x}px, ${y}px, 0)`;
 
+  // Cancel any in-flight move before starting a new one. Without this, rapid
+  // sequential moves stack a `transitionend` listener per call, and an earlier
+  // move's promise would only resolve when a *later* transition ends (its own
+  // transform was overwritten before it could finish). Cancelling resolves the
+  // prior promise promptly and drops its listener.
+  if (activeMoveFinish) {
+    activeMoveFinish();
+  }
+
   // Wait for the transition to complete (with safety timeout).
   // `cursorEl` is non-null here (we just set its transform above), but TS
   // can't narrow across the Promise boundary, so capture a local reference.
@@ -76,12 +92,15 @@ export function movePhantomCursor(x: number, y: number): Promise<void> {
     }
     let done = false;
     const finish = (): void => {
-      if (!done) {
-        done = true;
-        target.removeEventListener("transitionend", finish);
-        resolve();
+      if (done) return;
+      done = true;
+      target.removeEventListener("transitionend", finish);
+      if (activeMoveFinish === finish) {
+        activeMoveFinish = null;
       }
+      resolve();
     };
+    activeMoveFinish = finish;
     target.addEventListener("transitionend", finish, { once: true });
     setTimeout(finish, CURSOR_MOVE_TIMEOUT_MS);
   });
@@ -108,6 +127,10 @@ export function startPhantomCursor(): void {
 /** Disable the phantom cursor and remove it from the DOM. */
 export function stopPhantomCursor(): void {
   isActive = false;
+  if (activeMoveFinish) {
+    activeMoveFinish();
+    activeMoveFinish = null;
+  }
   if (cursorEl) {
     cursorEl.remove();
     cursorEl = null;

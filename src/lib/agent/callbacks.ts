@@ -14,10 +14,10 @@
  *   onLoopWarning / onCompaction / onCost / onError
  *
  * ─── Cost tracking ───────────────────────────────────────────────────────────
- * The {@link Usage} type mirrors the per-call token accounting used by the
- * orchestrator: input_tokens + cached_input_tokens + output_tokens +
- * reasoning_output_tokens. {@link computeCostFromUsage} converts a `Usage`
- * record to USD using the live catalog-backed pricing module at `../llm/pricing`.
+ * Cost computation is centralized in `pricing.ts` (`estimateCost`) and is
+ * invoked from the protocol/provider-bridge layer, not from this module. This
+ * module only surfaces per-call usage through {@link LLMUsageInfo} and the
+ * run's aggregate totals through {@link AgentRunResult}.
  */
 
 import type { AgentAction, ActionResult, HistoryItem } from "./types";
@@ -31,8 +31,7 @@ import type { AgentAction, ActionResult, HistoryItem } from "./types";
  * providers charge differently for cached input vs. fresh input, and
  * reasoning models (o1/o3, deepseek-reasoner) bill reasoning tokens
  * separately from visible output.
- */
-/**
+ *
  * Cost accounting is centralized in `pricing.ts` (`estimateCost`) and the
  * `LLMUsageInfo` type below. `AgentRunResult` is the only aggregate type
  * still in use from this module.
@@ -69,14 +68,6 @@ export interface LLMUsageInfo {
    *  cacheRead discount instead of billing cached tokens at full input rate. */
   cachedInputTokens?: number;
 }
-
-/** Compute the USD cost of a single LLM call from its token usage.
- *
- * The canonical cost path is: protocol → provider-bridge → estimateCost
- * (in `pricing.ts`). Cost computation is centralized there rather than
- * duplicated in this module.
- */
-// (intentionally no implementation here — see `estimateCost` in pricing.ts)
 
 /** Ambient context handed to every hook. */
 export interface CallbackContext {

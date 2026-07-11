@@ -15,12 +15,12 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@002191b3668e769a76cadbdb5cc75d0e1fba2a17 # PIN TO A VERIFIED SHA (was actions/checkout@v4)
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # PIN TO A VERIFIED SHA (actions/checkout@v4 tag)
 
       - name: Setup Node.js
-        uses: actions/setup-node@c13dbc3e37918285d1c41b4de90473766006c1e6 # PIN TO A VERIFIED SHA (was actions/setup-node@v4)
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # PIN TO A VERIFIED SHA (actions/setup-node@v4 tag)
         with:
-          node-version: '20'
+          node-version: '20.18.0'
           cache: 'npm'
 
       - name: Install dependencies
@@ -36,9 +36,6 @@ jobs:
         # Run the suite under v8 coverage and enforce the thresholds declared
         # in vitest.config.ts; a PR that drops coverage below the baseline fails CI.
         run: npx vitest run --coverage
-
-      - name: Build extension
-        run: npm run build:extension
 
       - name: verify extension build is in sync (tracked static files only)
         run: |
@@ -81,11 +78,20 @@ jobs:
           fi
 
       - name: Audit root dependencies
-        run: npm audit --audit-level=high
+        run: npm audit --audit-level=moderate
 
       - name: Audit mini-services/cowork-events dependencies
         working-directory: mini-services/cowork-events
-        run: npm ci && npm audit --audit-level=high
+        run: npm ci && npm audit --audit-level=moderate
+
+      - name: Type-check mini-services/cowork-events
+        # The WebSocket mini-service ships to production paths but previously
+        # had no static analysis in CI. Type-check it from the repo root (where
+        # typescript is installed) against its own tsconfig so type errors are
+        # caught on every PR. NOTE: lint/test/build coverage for this service
+        # still requires scripts in mini-services/cowork-events/package.json
+        # (owned outside this batch).
+        run: npx tsc --noEmit -p mini-services/cowork-events/tsconfig.json
 
   cockpit:
     runs-on: ubuntu-latest
@@ -95,12 +101,12 @@ jobs:
       run:
         working-directory: cockpit
     steps:
-      - uses: actions/checkout@002191b3668e769a76cadbdb5cc75d0e1fba2a17 # PIN TO A VERIFIED SHA (was actions/checkout@v4)
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # PIN TO A VERIFIED SHA (actions/checkout@v4 tag)
 
       - name: Setup Node.js
-        uses: actions/setup-node@c13dbc3e37918285d1c41b4de90473766006c1e6 # PIN TO A VERIFIED SHA (was actions/setup-node@v4)
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # PIN TO A VERIFIED SHA (actions/setup-node@v4 tag)
         with:
-          node-version: '20'
+          node-version: '20.18.0'
           cache: 'npm'
           cache-dependency-path: cockpit/package-lock.json
 
@@ -108,7 +114,7 @@ jobs:
         run: npm ci
 
       - name: Audit cockpit dependencies
-        run: npm audit --audit-level=high
+        run: npm audit --audit-level=moderate
 
       - name: Generate Prisma client
         run: npm run db:generate
@@ -156,7 +162,7 @@ jobs:
         # build) fails on a committed real secret. `--redact` masks secret
         # values in any logs/artifacts. fail: true is gitleaks' default
         # behavior when a leak is found.
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # PIN TO A VERIFIED SHA (gitleaks/gitleaks-action@v2 tag)
         with:
           args: --redact
 
@@ -168,11 +174,11 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: actions/checkout@002191b3668e769a76cadbdb5cc75d0e1fba2a17 # PIN TO A VERIFIED SHA (was actions/checkout@v4)
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # PIN TO A VERIFIED SHA (actions/checkout@v4 tag)
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@fd84e0819c822b3348b822010ce00d53708561ea # PIN TO A VERIFIED SHA (was github/codeql-action/init@v3)
+        uses: github/codeql-action/init@641a925cfafe92d0fdf8b239ba4053e3f8d99d6d # PIN TO A VERIFIED SHA (github/codeql-action/init@v3 tag)
         with:
           languages: javascript-typescript
           queries: security-and-quality
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@810c20f4dab23b8316562c4279dc92d4c968dfaf # PIN TO A VERIFIED SHA (was github/codeql-action/analyze@v3)
+        uses: github/codeql-action/analyze@641a925cfafe92d0fdf8b239ba4053e3f8d99d6d # PIN TO A VERIFIED SHA (github/codeql-action/analyze@v3 tag)

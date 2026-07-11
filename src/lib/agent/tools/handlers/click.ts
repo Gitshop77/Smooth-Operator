@@ -79,9 +79,17 @@ export async function handleClick(
   //      Used as the fallback when CDP isn't available (tests, in-page
   //      demo) or when CDP fails (debugger rejected, tab closed).
   //   3. CSS-selector click — re-find the element via a generated CSS
-  //      selector and click the re-found element.
-  //   4. JS text search — walk `document.querySelectorAll('*')` to
-  //      find an element whose textContent matches, and click it.
+  //      selector, but ONLY when that selector resolves to exactly one
+  //      element in the document. The generated selector is explicitly NOT
+  //      guaranteed unique (e.g. a classless element yields the raw tag
+  //      "div"); clicking the first document-order match of a non-unique
+  //      selector would hit an unrelated element, so non-unique selectors
+  //      are skipped rather than risked.
+  //   4. JS text search — walk `document.querySelectorAll('*')` to find a
+  //      UNIQUE element whose (whitespace-normalized) textContent is an
+  //      EXACT match for the target's text, and click it. Substring hits
+  //      and ambiguous multi-matches are skipped to avoid wrong-element
+  //      clicks.
   //   5. Dispatched `MouseEvent` — `el.dispatchEvent(new MouseEvent(
   //      'click', { bubbles, cancelable, view }))`.
   //
@@ -91,7 +99,11 @@ export async function handleClick(
   // `press-and-hold.ts`.
   const errors: string[] = [];
   let clicked = false;
-  let strategyUsed = "native";
+  // Every path that sets `clicked = true` also assigns `strategyUsed`, so the
+  // only value that can reach the success message is one of those. Initialize
+  // to an empty sentinel to make that invariant explicit (the previous
+  // "native" default was dead — it could never be returned).
+  let strategyUsed = "";
 
   // Strategy 1: CDP coordinate click (extension context only).
   if (typeof chrome !== "undefined" && chrome.runtime?.id) {
@@ -123,19 +135,34 @@ export async function handleClick(
   }
 
   // Strategy 3: CSS-selector click — re-find via a generated selector.
+  //
+  // `generateCssSelector` is documented as NOT guaranteed unique (a classless
+  // element resolves to its raw tag, e.g. "div"). `document.querySelector`
+  // returns the first document-order match, so a non-unique selector could
+  // click an unrelated element. We therefore only proceed when the selector
+  // resolves to exactly ONE element in the document — that single match is
+  // guaranteed to be the intended target (whether it's the element we already
+  // hold or, in the stale-node case, the live element that replaced it).
   if (!clicked) {
     const css = generateCssSelector(el);
     if (css) {
       try {
-        const found = document.querySelector(css) as HTMLElement | null;
-        if (found && found !== el) {
-          found.click();
-          clicked = true;
-          strategyUsed = "css-selector";
-        } else if (found === el) {
-          // Selector matches the same element — calling .click() again
-          // would fire a second click on the same target. Skip and
-          // move to the next strategy.
+        const matches = document.querySelectorAll(css);
+        if (matches.length === 1) {
+          const found = matches[0] as HTMLElement;
+          if (found !== el) {
+            found.click();
+            clicked = true;
+            strategyUsed = "css-selector";
+          } else {
+            // Unique match is the same node we already hold — a re-click
+            // would fire a second click on the same target. Skip and move
+            // to the next strategy.
+          }
+        } else {
+          errors.push(
+            `CSS selector click skipped: selector "${css}" is not unique (${matches.length} matches)`,
+          );
         }
       } catch (e) {
         errors.push(`CSS selector click failed: ${(e as Error).message}`);
@@ -143,7 +170,18 @@ export async function handleClick(
     }
   }
 
-  // Strategy 4: JS text search — find element by text content, click.
+  // Strategy 4: JS text search — find element by EXACT text content, click.
+  //
+  // A substring match (the old `includes()`) against a short target like
+  // "OK", "Save", or "1" would match many unrelated elements of the same
+  // tag, and an element that only *contains* the target as a substring
+  // (e.g. a "Save changes" label for target "Save") would win the find and
+  // get clicked. We therefore require an EXACT, whitespace-normalized,
+  // full-text match, and we require that match to be UNIQUE. Multiple
+  // identical labels are ambiguous — skipping is safer than guessing the
+  // first document-order match. The unique match is clicked only when it is
+  // a different node (the stale-element replacement); if it's the element we
+  // already hold, a re-click would double-fire, so we skip.
   if (!clicked) {
     try {
       const inputEl = el as HTMLInputElement;
@@ -156,21 +194,31 @@ export async function handleClick(
       ).trim();
       const targetType = el.tagName.toLowerCase();
       if (targetText) {
+        const normalize = (s: string) => s.replace(/\s+/g, " ").trim();
+        const needle = normalize(targetText);
         const all = Array.from(document.querySelectorAll("*"));
-        const match = all.find((cand) => {
-          const candText = (cand.textContent || "").trim();
+        const exactMatches = all.filter((cand) => {
           const candTag = cand.tagName.toLowerCase();
           return (
-            candText.length > 0 &&
-            candText.includes(targetText) &&
             candTag === targetType &&
-            typeof (cand as HTMLElement).click === "function"
+            typeof (cand as HTMLElement).click === "function" &&
+            normalize(cand.textContent || "") === needle
           );
         });
-        if (match && match !== el) {
-          (match as HTMLElement).click();
-          clicked = true;
-          strategyUsed = "text-search";
+        if (exactMatches.length === 1) {
+          const match = exactMatches[0] as HTMLElement;
+          if (match !== el) {
+            match.click();
+            clicked = true;
+            strategyUsed = "text-search";
+          } else {
+            // Unique match is the same node we already hold — skip to avoid
+            // a double click.
+          }
+        } else if (exactMatches.length > 1) {
+          errors.push(
+            `JS text search skipped: "${targetText}" matches ${exactMatches.length} elements ambiguously`,
+          );
         }
       }
     } catch (e) {

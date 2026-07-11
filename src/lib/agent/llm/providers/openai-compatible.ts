@@ -2,12 +2,10 @@
  * Generic OpenAI-compatible provider facade — works with ANY provider that
  * speaks the OpenAI Chat Completions protocol at a different base URL.
  *
- * Generic factory + pre-configured profiles:
+ * Generic factory + profile table:
  *   - `configure(profile, input)` builds a Route for a specific profile.
  *   - `toLLMProvider(config)` bridges to the agent's `LLMProvider` interface,
  *     looking up the profile by `config.provider` (falls back to `config.baseURL`).
- *   - Pre-configured facades are exported per profile (deepseek, groq,
- *     together, cerebras, etc.) for direct imports.
  *
  * The `frequency_penalty = 0.3` is added by the openai-compatible-chat
  * protocol to prevent infinite generation.
@@ -25,7 +23,6 @@ import { PATH } from "../protocols/openai-compatible-chat";
 import type { LLMProvider } from "../provider";
 import { toLLMProvider as toLLMProviderBridge } from "../provider-bridge";
 import {
-  profiles,
   byProvider,
   type OpenAICompatibleProfile,
   assertSafeUserBaseURL,
@@ -77,11 +74,14 @@ export function configure(profile: OpenAICompatibleProfile, input: Config = {}) 
  * the provider isn't in the table (caller must supply baseURL).
  */
 export function resolveProfile(provider: string, baseURL?: string): OpenAICompatibleProfile {
+  // (SSRF guard): validate ANY caller-supplied baseURL here — for a known
+  // provider the baseURL override (if any) is still honored by `configure`, so
+  // it must be checked at resolution time too, not only for unknown providers.
+  // `configure` re-validates as the single source of truth before building a
+  // route, so the guard can never be silently dropped by a future refactor.
+  assertSafeUserBaseURL(baseURL);
   const direct = byProvider[provider];
   if (direct) return direct;
-  // (SSRF guard): the synthesized profile's baseURL is entirely
-  // caller-supplied (unknown provider), so validate it before it is used.
-  assertSafeUserBaseURL(baseURL);
   // Unknown provider — synthesize from the caller-supplied baseURL.
   if (!baseURL) {
     throw new Error(
@@ -118,22 +118,10 @@ export function toLLMProvider(
   });
 }
 
-// ─── Pre-configured facades per profile ──────────────────────────────────────
-// These let callers do `import { deepseek } from "./openai-compatible"` then
-// `deepseek.model("deepseek-chat")` without supplying a profile each time.
-
-export const baseten = configure(profiles.baseten);
-export const cerebras = configure(profiles.cerebras);
-export const deepinfra = configure(profiles.deepinfra);
-export const deepseek = configure(profiles.deepseek);
-export const fireworks = configure(profiles.fireworks);
-export const groq = configure(profiles.groq);
-// expose pre-configured facades for Qwen + Mistral so direct
-// imports work the same as the other OpenAI-compatible providers.
-export const qwen = configure(profiles.qwen);
-export const mistral = configure(profiles.mistral);
-export const openrouter = configure(profiles.openrouter);
-export const together = configure(profiles.together);
-export const ollama = configure(profiles.ollama);
-export const opencode = configure(profiles.opencode);
-export const litellm = configure(profiles.litellm);
+// ─── Pre-configured profiles ─────────────────────────────────────────────────
+// The curated profile table lives in `openai-compatible-profile.ts` and is
+// consumed via `toLLMProvider({ provider, model, apiKey? })` (see
+// `provider-config.ts`). No per-profile named exports are provided here: they
+// were dead API surface that also resolved to `Auth.none` (no way to inject a
+// key), and the `openrouter` export collided with the standalone `openrouter.ts`
+// module. Callers that need a specific provider go through `toLLMProvider`.

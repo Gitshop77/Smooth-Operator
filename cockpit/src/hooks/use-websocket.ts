@@ -8,15 +8,20 @@ import { useInvalidateView } from "@/hooks/use-cowork-query";
 
 // The mini-service requires the shared secret on every socket.io
 // connection. The cockpit dashboard is same-origin with the Next.js app, so
-// the operator can publish the token to the browser via the browser-facing
-// `NEXT_PUBLIC_COWORK_UI_TOKEN`, falling back to the legacy
-// `NEXT_PUBLIC_COWORK_EVENT_TOKEN` and then the dev-mode `dev-token`. On any
-// untrusted network the browser-visible value MUST differ from the
-// service-to-service `COWORK_EVENT_TOKEN` (which must never be NEXT_PUBLIC_).
-const WS_TOKEN =
-  process.env.NEXT_PUBLIC_COWORK_UI_TOKEN ??
-  process.env.NEXT_PUBLIC_COWORK_EVENT_TOKEN ??
-  "dev-token";
+// the operator MUST publish the token to the browser via the browser-facing
+// `NEXT_PUBLIC_COWORK_UI_TOKEN`. We intentionally accept NO fallback:
+//  - Dropping the legacy `NEXT_PUBLIC_COWORK_EVENT_TOKEN` fallback removes the
+//    S2S-leak path: that name shadows the service-to-service
+//    `COWORK_EVENT_TOKEN`, and mirroring its value would embed the secret in
+//    public JS.
+//  - Dropping the `dev-token` literal avoids shipping a hard-coded credential in
+//    the client bundle and avoids silently sending a token the server rejects in
+//    production (broken-but-not-obvious).
+// When `NEXT_PUBLIC_COWORK_UI_TOKEN` is unset the handshake sends no token and
+// the connection is rejected, so operators must configure it. On any untrusted
+// network this browser-visible value MUST differ from the service-to-service
+// `COWORK_EVENT_TOKEN` (which must never be NEXT_PUBLIC_).
+const WS_TOKEN = process.env.NEXT_PUBLIC_COWORK_UI_TOKEN;
 
 /**
  * useCoworkWebSocket — connects to the cowork-events mini-service on port
@@ -55,7 +60,14 @@ export function useCoworkWebSocket(): void {
           reconnectionDelay: 1500,
           timeout: 4000,
         });
-      } catch {
+      } catch (err) {
+        // Don't swallow the real cause of a failed socket construction — log it
+        // (non-production only) so a misconfiguration (e.g. missing
+        // NEXT_PUBLIC_COWORK_UI_TOKEN, bad gateway) is diagnosable instead of a
+        // silent "offline" footer.
+        if (process.env.NODE_ENV !== "production") {
+          console.error("[cowork-ws] socket connection failed:", err);
+        }
         setSocketConnected(false);
         return;
       }
@@ -89,11 +101,40 @@ export function useCoworkWebSocket(): void {
       // `["agents"]` would technically subsume `["agents","tasks"]`, but
       // we list both explicitly so the intent is self-documenting and
       // robust against future changes to TanStack's matching semantics.
+      // Coalesce rapid WS-driven invalidations so a burst of events in the
+      // same frame yields at most one refetch per query key, instead of one
+      // refetch per event. Pending keys are batched and flushed once on the
+      // next animation frame (or macrotask where rAF is unavailable).
+      const pendingKeys = new Set<string>();
+      let flushScheduled = false;
+      const scheduleInvalidate = (key: string[]) => {
+        pendingKeys.add(JSON.stringify(key));
+        if (flushScheduled) return;
+        flushScheduled = true;
+        const flush = () => {
+          flushScheduled = false;
+          const keys = Array.from(pendingKeys);
+          pendingKeys.clear();
+          for (const raw of keys) {
+            try {
+              invalidate(JSON.parse(raw) as string[]);
+            } catch {
+              /* ignore malformed key */
+            }
+          }
+        };
+        if (typeof requestAnimationFrame === "function") {
+          requestAnimationFrame(flush);
+        } else {
+          setTimeout(flush, 0);
+        }
+      };
+
       const on = (event: string, invalidateKeys: string[][], label: string) => {
         socket?.on(event, (payload: unknown) => {
           setLastEvent(label);
           for (const key of invalidateKeys) {
-            invalidate(key);
+            scheduleInvalidate(key);
           }
           // Surface payload shape in dev tools for debugging.
           if (process.env.NODE_ENV !== "production") {

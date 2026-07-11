@@ -1,5 +1,6 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
+import { Prisma } from '@prisma/client';
 import { json, withRouteError, bodyJson, badRequest } from '@/lib/cowork/api/http';
 import { boundedString, nonEmptyString, validateField, truncateTo } from '@/lib/cowork/api/validation';
 import { db } from '@/lib/db';
@@ -39,7 +40,16 @@ export async function POST(req: NextRequest): Promise<Response> {
       if (!uaResult.ok) return badRequest(uaResult.error);
       userAgent = uaResult.value;
     }
-    const session = await db.session.create({ data: { name, partition, isIncognito, userAgent } });
-    return json({ session }, 201);
+    try {
+      const session = await db.session.create({ data: { name, partition, isIncognito, userAgent } });
+      return json({ session }, 201);
+    } catch (e) {
+      // `Session.name` is `@unique`; a duplicate name throws P2002. Surface it
+      // as a 400 (actionable) rather than a generic 500.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        return badRequest('name already exists');
+      }
+      throw e;
+    }
   });
 }

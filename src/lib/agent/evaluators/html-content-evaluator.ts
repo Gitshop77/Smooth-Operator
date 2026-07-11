@@ -13,7 +13,7 @@
  * Scores multiply across all targets + all required contents.
  */
 
-import { exactMatch, mustInclude } from "./string-evaluator";
+import { htmlExactMatch, htmlMustInclude } from "./string-evaluator";
 
 /** Tag used by {@link HTMLContentEvaluator} when surfacing which check failed. */
 export const HTML_CONTENT_EVALUATOR_TAG = "program_html";
@@ -79,9 +79,10 @@ export interface HTMLContentEvaluatorResult {
  * Uses `DOMParser` when available (browser / jsdom). When the locator is
  * empty, returns the full page HTML. When the runtime doesn't expose
  * `DOMParser`, returns "" so the evaluator surfaces a clean "no match"
- * instead of throwing.
+ * instead of throwing. Kept private — only the {@link HTMLContentEvaluator}
+ * class uses it.
  */
-export function extractLocatorHtml(locator: string, pageHtml: string): string {
+function extractLocatorHtml(locator: string, pageHtml: string): string {
   if (!locator?.trim()) return pageHtml;
   // Only attempt the DOMParser path when the locator looks like a CSS
   // selector (the original benchmark also supported `document.…` JS snippets
@@ -102,66 +103,57 @@ export function extractLocatorHtml(locator: string, pageHtml: string): string {
   }
 }
 
-/** Evaluate every target; multiply per-target scores. */
-export async function evaluateHtmlContent(
-  input: HTMLContentEvaluatorInput,
-): Promise<HTMLContentEvaluatorResult> {
-  let score = 1.0;
-  const reasons: string[] = [];
-  for (let i = 0; i < input.targets.length; i++) {
-    const target = input.targets[i];
-    const selected =
-      input.resolveLocator !== undefined
-        ? await input.resolveLocator(target.locator ?? "", input.pageHtml)
-        : extractLocatorHtml(target.locator ?? "", input.pageHtml);
-    const rc = target.required_contents;
-    if (rc.exact_match !== undefined) {
-      const cur = exactMatch(rc.exact_match, selected);
-      score *= cur;
-      if (cur === 0) reasons.push(`target[${i}].exact_match failed`);
-    } else if (rc.must_include !== undefined) {
-      for (const content of rc.must_include) {
-        // ` |OR| ` alternatives — any match counts. Split on the ` |OR| `
-        // separator (with surrounding spaces) so plain `|` characters in the
-        // user's content survive intact (e.g. a requirement like
-        // `"Login |OR| Sign in"` produces `["Login", "Sign in"]`).
-        const alternatives = content
-          .split(/\s\|OR\|\s/)
-          .map((s) => s.trim())
-          .filter(Boolean);
-        // If all alternatives were empty strings (e.g. must_include: [""]),
-        // `alternatives` is empty after filter(Boolean). Evaluating
-        // `[].some(...)` = false would produce a spurious FAIL. An empty
-        // must_include entry is a no-op (no requirement), not a failure.
-        if (alternatives.length === 0) continue;
-        const cur = alternatives.some((alt) => mustInclude(alt, selected) === 1) ? 1 : 0;
-        score *= cur;
-        if (cur === 0) {
-          reasons.push(`target[${i}].must_include("${content.slice(0, 60)}") failed`);
-        }
-      }
-    } else {
-      // No required_contents specified — skip (don't multiply by 0).
-    }
-    // Defensive: ensure we never produce a negative score from float math.
-    if (score <= 0) break;
-  }
-  return {
-    score,
-    tag: HTML_CONTENT_EVALUATOR_TAG,
-    reason: reasons.join("; "),
-  };
-}
-
-/** OOP wrapper kept for parity with the other evaluators. */
+/**
+ * Deterministic evaluator — checks page DOM content against a list of required
+ * contents; returns a 0/1 score that is the product of every target's score.
+ */
 export class HTMLContentEvaluator {
   readonly tag = HTML_CONTENT_EVALUATOR_TAG;
+
   async evaluate(input: HTMLContentEvaluatorInput): Promise<HTMLContentEvaluatorResult> {
-    return evaluateHtmlContent(input);
+    let score = 1.0;
+    const reasons: string[] = [];
+    for (let i = 0; i < input.targets.length; i++) {
+      const target = input.targets[i];
+      const selected =
+        input.resolveLocator !== undefined
+          ? await input.resolveLocator(target.locator ?? "", input.pageHtml)
+          : extractLocatorHtml(target.locator ?? "", input.pageHtml);
+      const rc = target.required_contents;
+      if (rc.exact_match !== undefined) {
+        // RAW, case-sensitive equality (HTML text/attributes are case-sensitive;
+        // reusing the answer-cleaning `exactMatch` would wrongly pass
+        // `"<Div>"` against `<div>` and silently strip quotes).
+        const cur = htmlExactMatch(rc.exact_match, selected);
+        score *= cur;
+        if (cur === 0) reasons.push(`target[${i}].exact_match failed`);
+      } else if (rc.must_include !== undefined) {
+        for (const content of rc.must_include) {
+          // `htmlMustInclude` compares RAW (case-sensitive, quotes preserved)
+          // and honors ` |OR| ` alternatives as a pass-if-any. An empty entry
+          // is a no-op (no requirement), not a failure.
+          const cur = htmlMustInclude(content, selected);
+          score *= cur;
+          if (cur === 0) {
+            reasons.push(`target[${i}].must_include("${content.slice(0, 60)}") failed`);
+          }
+        }
+      } else {
+        // No required_contents specified — skip (don't multiply by 0).
+      }
+      // Defensive: ensure we never produce a negative score from float math.
+      if (score <= 0) break;
+    }
+    return {
+      score,
+      tag: HTML_CONTENT_EVALUATOR_TAG,
+      reason: reasons.join("; "),
+    };
   }
 }
 
-// Re-export the string helpers we use internally so callers have one place
-// to import everything HTML-content-related. (`cleanAnswer` is re-exported
-// for parity — it's not used here but is useful for callers who want to
-// normalize the page HTML before passing it in.)
+// This module exposes the {@link HTMLContentEvaluator} class. It imports the
+// `htmlExactMatch` / `htmlMustInclude` helpers from `./string-evaluator` (used
+// in the `evaluate` method above) to perform RAW, case-sensitive per-target
+// content checks — deliberately NOT the answer-cleaning string helpers, so HTML
+// matching honors case and surrounding quotes.

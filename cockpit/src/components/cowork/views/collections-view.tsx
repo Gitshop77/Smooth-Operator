@@ -2,11 +2,10 @@
 
 import * as React from "react";
 import { motion } from "framer-motion";
-import { Bookmark, History, Pin, Search, ExternalLink } from "lucide-react";
+import { Bookmark, History, Pin, ExternalLink, Folder } from "lucide-react";
 
 import { useBookmarks, useHistory, usePinboards } from "@/hooks/use-cowork-query";
 import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Accordion, AccordionContent, AccordionItem, AccordionTrigger,
@@ -14,6 +13,8 @@ import {
 import { ViewHeader } from "@/components/cowork/shared/view-header";
 import { LoadingSkeleton } from "@/components/cowork/shared/loading-skeleton";
 import { EmptyState } from "@/components/cowork/shared/empty-state";
+import { DataTable } from "@/components/cowork/shared/data-table";
+import { SearchInput } from "@/components/cowork/shared/search-input";
 import { timeAgo, hostnameOf, safeHref } from "@/lib/cowork-data/format";
 import type { SampleBookmark } from "@/lib/cowork-data/types";
 
@@ -26,7 +27,8 @@ function BookmarkNode({ node, depth }: { node: SampleBookmark; depth: number }) 
           <AccordionItem value={node.id} className="border-0">
             <AccordionTrigger className="py-1.5 hover:no-underline">
               <span className="flex items-center gap-2 text-sm font-medium">
-                📁 {node.name}
+                <Folder className="size-4 text-muted-foreground" />
+                {node.name}
               </span>
             </AccordionTrigger>
             <AccordionContent className="pb-1">
@@ -116,15 +118,13 @@ export function CollectionsView() {
 
         <TabsContent value="history" className="mt-4">
           <div className="flex justify-end mb-3">
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-              <Input
-                value={historyQuery}
-                onChange={(e) => setHistoryQuery(e.target.value)}
-                placeholder="Search history…"
-                className="pl-8 h-9 w-56"
-              />
-            </div>
+            <SearchInput
+              value={historyQuery}
+              onChange={setHistoryQuery}
+              ariaLabel="Search history"
+              placeholder="Search history…"
+              className="w-56"
+            />
           </div>
           {hLoading ? (
             <LoadingSkeleton rows={8} />
@@ -132,30 +132,34 @@ export function CollectionsView() {
             <EmptyState icon={<History className="size-6" />} title="No history" />
           ) : (
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-              <Card className="p-0 gap-0 overflow-hidden">
-                <div className="divide-y">
-                  {historyFiltered.map((h) => (
-                    <a
-                      key={h.id}
-                      href={safeHref(h.url)}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="flex items-center gap-3 px-4 py-2.5 hover:bg-accent/40"
-                    >
-                      <div className="size-6 rounded bg-muted text-muted-foreground grid place-items-center shrink-0 text-[10px] font-mono">
-                        {hostnameOf(h.url).slice(0, 1).toUpperCase()}
+              <DataTable caption="Browsing history" columns={["Page", "Visits"]}>
+                {historyFiltered.map((h) => (
+                  <tr key={h.id} className="hover:bg-accent/40 transition-colors align-top">
+                    <td className="px-4 py-2.5">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="size-6 rounded bg-muted text-muted-foreground grid place-items-center shrink-0 text-[10px] font-mono">
+                          {hostnameOf(h.url).slice(0, 1).toUpperCase()}
+                        </div>
+                        <div className="min-w-0">
+                          <a
+                            href={safeHref(h.url)}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-sm truncate hover:text-primary hover:underline block max-w-[420px]"
+                            title={h.url}
+                          >
+                            {h.title}
+                          </a>
+                          <p className="text-xs text-muted-foreground cowork-mono truncate">{h.url}</p>
+                        </div>
                       </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm truncate">{h.title}</p>
-                        <p className="text-xs text-muted-foreground truncate">{h.url}</p>
-                      </div>
-                      <span className="text-xs text-muted-foreground tnum shrink-0 hidden sm:inline">
-                        {h.visitCount}× · {timeAgo(h.visitedAt)} ago
-                      </span>
-                    </a>
-                  ))}
-                </div>
-              </Card>
+                    </td>
+                    <td className="px-4 py-2.5 text-xs text-muted-foreground tnum whitespace-nowrap">
+                      {h.visitCount}× · {timeAgo(h.visitedAt)} ago
+                    </td>
+                  </tr>
+                ))}
+              </DataTable>
             </motion.div>
           )}
         </TabsContent>
@@ -177,7 +181,9 @@ export function CollectionsView() {
             >
               {(pinboards ?? []).map((pb) => (
                 <Card key={pb.id} className="p-5 gap-2 hover:border-foreground/30 transition-colors">
-                  <div className="text-2xl">{pb.emoji}</div>
+                  <div className="size-10 rounded-lg bg-primary/10 text-primary grid place-items-center shrink-0">
+                    <Pin className="size-5" />
+                  </div>
                   <p className="font-semibold">{pb.name}</p>
                   <p className="text-xs text-muted-foreground">
                     <span className="tnum">{pb.itemCount}</span> items · updated {timeAgo(pb.updatedAt)} ago

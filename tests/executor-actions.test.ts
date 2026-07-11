@@ -1,3 +1,5 @@
+// @vitest-environment-options {"url":"http://127.0.0.1:3000/"}
+
 /**
  * Executor action tests — verify execution behavior (not just text formatting)
  * for the actions that were previously untested.
@@ -61,9 +63,11 @@ describe("action execution behavior", () => {
     originalPrompt = window.prompt;
     originalConfirm = window.confirm;
     // `evaluate` fails closed without an explicit domain allowlist.
-    // The jsdom env runs at http://localhost, so allowlist "localhost".
+    // The jsdom env runs at http://127.0.0.1:3000, so allowlist "127.0.0.1"
+    // (an IP literal — the hardened hostname matcher rejects single-label
+    // hosts like "localhost" to block TLD-wide matches).
     (globalThis as Record<string, unknown>).__openCoworkDomainConfig = {
-      allowedDomains: ["localhost"],
+      allowedDomains: ["127.0.0.1"],
     };
   });
   afterEach(() => {

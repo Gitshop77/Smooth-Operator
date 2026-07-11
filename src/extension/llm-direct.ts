@@ -93,18 +93,30 @@ async function getProvider(): Promise<LLMProvider> {
   // starting a second concurrent buildProvider() call.
   if (pendingProvider && key === pendingProviderKey) return pendingProvider;
   pendingProviderKey = key;
-  pendingProvider = buildProvider(config).then((provider) => {
+  // Capture the in-flight promise locally so its resolve/reject closures only
+  // clear the SHARED `pendingProvider`/`pendingProviderKey` when they still
+  // refer to THIS promise. Otherwise, if two calls with different cache keys
+  // overlap, call A's closure could null B's in-flight build (causing a
+  // redundant rebuild) or overwrite the cache with A's stale key/provider
+  // (finding: concurrent provider builds corrupt shared pendingProvider/
+  // cachedProvider state).
+  const p = buildProvider(config).then((provider) => {
     cachedProvider = provider;
     cachedConfigKey = key;
-    pendingProvider = null;
-    pendingProviderKey = null;
+    if (pendingProvider === p) {
+      pendingProvider = null;
+      pendingProviderKey = null;
+    }
     return provider;
   }).catch((e) => {
-    pendingProvider = null;
-    pendingProviderKey = null;
+    if (pendingProvider === p) {
+      pendingProvider = null;
+      pendingProviderKey = null;
+    }
     throw e;
   });
-  return pendingProvider;
+  pendingProvider = p;
+  return p;
 }
 
 /**

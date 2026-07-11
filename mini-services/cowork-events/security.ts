@@ -35,13 +35,15 @@ export const DEV_TOKEN = 'dev-token';
  *   - the byte-wise comparison fails
  *
  * Length handling: never throws on length mismatch (which would otherwise leak
- * the expected token's length via an exception). When the lengths differ, we
- * still run a full constant-time comparison over a buffer normalized to the
- * LONGER length (the shorter side is padded with a fixed zero byte).
- * `crypto.timingSafeEqual` therefore always executes the same number of
- * iterations for a given input length and never throws `RangeError`. The
- * `false` for a genuine length mismatch is computed AFTER the constant-time
- * loop, so it does not leak whether the lengths matched.
+ * the expected token's length via an exception). We compare over the EXPECTED
+ * secret's length only — never over the attacker-controlled input length — so
+ * the comparison cost cannot scale with the guessed token and cannot reveal the
+ * secret's byte length. A longer `received` is simply ignored beyond
+ * `expected.length` (it can never equal the secret). `crypto.timingSafeEqual`
+ * therefore always executes the same number of iterations regardless of the
+ * input and never throws `RangeError`. The `false` for a genuine length mismatch
+ * is computed AFTER the timing-safe compare, so it does not leak whether the
+ * lengths matched.
  *
  * @param received The token presented by the caller (e.g. from the
  *                 `X-Cowork-Token` HTTP header or `socket.handshake.auth.token`).
@@ -54,15 +56,17 @@ export function tokenMatches(
   if (typeof received !== 'string' || received.length === 0) return false;
   const a = Buffer.from(received, 'utf8');
   const b = Buffer.from(expected, 'utf8');
-  // Normalize both buffers to the longer length with zero padding so the
-  // constant-time compare always runs over an equal-length pair.
-  const len = Math.max(a.length, b.length);
+  // Compare over the EXPECTED secret's length only — never over the
+  // attacker-controlled input length — so the comparison cost cannot leak the
+  // secret's byte length. Pad `received` to `b.length`; if `received` is longer
+  // it is truncated (it can never equal `expected` anyway).
+  const len = b.length;
   const aPadded = Buffer.alloc(len); // zero-filled
   const bPadded = Buffer.alloc(len); // zero-filled
-  a.copy(aPadded);
+  a.copy(aPadded, 0, 0, Math.min(a.length, len));
   b.copy(bPadded);
   // Never throws (equal-length buffers). The length mismatch is folded into
-  // the final boolean AFTER the timing-safe loop, so it does not create a
+  // the final boolean AFTER the timing-safe compare, so it does not create a
   // timing side-channel.
   const equal = timingSafeEqual(aPadded, bPadded);
   return equal && a.length === b.length;
@@ -110,15 +114,16 @@ export function applyCorsHeaders(
  * Decide whether the mini-service should refuse to start.
  *
  * The well-known default `DEV_TOKEN` ("dev-token") is only acceptable with an
- * EXPLICIT opt-in (`COWORK_ALLOW_DEV_TOKEN=1`) — e.g. for a local loopback dev
- * session where the operator has consciously chosen to run unauthenticated.
+ * EXPLICIT opt-in (`COWORK_ALLOW_DEV_TOKEN=1`) — AND only when not running in
+ * production (`nodeEnv !== 'production'`). This adds a second, fail-closed
+ * layer: even if an operator mistakenly sets the opt-in in a production
+ * deployment, the publicly-documented dev-token still refuses to start, so the
+ * service can never run unauthenticated in production via this flag.
  *
- * `NODE_ENV` is intentionally NOT treated as a safety net: a
- * misconfigured deploy that runs `npx tsx index.ts` without `NODE_ENV` set
- * (or with any non-production value) must NOT silently accept the public
- * default and expose unauthenticated connections. The service therefore
- * refuses whenever the secret is the dev-token AND the opt-in is absent,
- * regardless of `NODE_ENV`.
+ * `nodeEnv` is now a meaningful input (defense-in-depth): the dev-token opt-in
+ * is ignored when `nodeEnv === 'production'`. The deployment is still expected
+ * to set a real secret (`COWORK_EVENT_TOKEN`) in production; this guard is an
+ * additional backstop, not a replacement for a real secret.
  *
  * This is split out as a pure function so the policy can be unit-tested
  * without spawning the service or manipulating `process.env` (the opt-in
@@ -130,8 +135,16 @@ export function shouldRefuseStart(
   sharedSecret: string,
   allowDevToken: boolean = process.env.COWORK_ALLOW_DEV_TOKEN === '1',
 ): boolean {
-  if (sharedSecret === DEV_TOKEN && !allowDevToken) return true;
-  return false;
+  if (sharedSecret !== DEV_TOKEN) return false;
+  // Honor the dev-token opt-in ONLY outside production. In production the
+  // well-known default must always fail closed, even if the opt-in is set.
+  // Make the production determination explicit/fail-closed: only the exact
+  // string `'production'` counts as production — but see the warning below
+  // about ambiguous NODE_ENV values. Anything else (unset, 'development',
+  // 'staging', …) is treated as non-production and may honor the opt-in.
+  const isProduction = nodeEnv === "production";
+  if (allowDevToken && !isProduction) return false;
+  return true;
 }
 
 // ---------------------------------------------------------------------------

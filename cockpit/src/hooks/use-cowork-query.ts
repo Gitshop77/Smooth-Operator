@@ -31,29 +31,75 @@ const TQ = {
 } as const;
 
 /**
- * The X-Cowork-Token sent on every cockpit REST fetch. Prefers the dedicated
- * browser-facing `NEXT_PUBLIC_COWORK_UI_TOKEN`, falling back to the
- * legacy `NEXT_PUBLIC_COWORK_EVENT_TOKEN` and then `dev-token`. This MUST
- * match the server-side `COWORK_UI_TOKEN` (preferred) / `COWORK_EVENT_TOKEN`
- * env var resolved by middleware.ts. The `NEXT_PUBLIC_` prefix exposes this to
- * the browser, so it must NEVER equal the service-to-service `COWORK_EVENT_TOKEN`
- * on any untrusted network.
+ * The X-Cowork-Token sent on every cockpit REST fetch. It is taken ONLY from
+ * the browser-facing `NEXT_PUBLIC_COWORK_UI_TOKEN`. We accept no fallback:
+ *  - Dropping the legacy `NEXT_PUBLIC_COWORK_EVENT_TOKEN` fallback removes the
+ *    S2S-leak path: that name shadows the service-to-service
+ *    `COWORK_EVENT_TOKEN`, and mirroring its value would embed the secret in
+ *    public JS.
+ *  - Dropping the `dev-token` literal avoids shipping a hard-coded credential in
+ *    the client bundle and avoids silently sending a token the server rejects in
+ *    production (broken-but-not-obvious).
+ * This MUST match the server-side `COWORK_UI_TOKEN` resolved by middleware.ts.
+ * The `NEXT_PUBLIC_` prefix exposes this to the browser, so it must NEVER equal
+ * the service-to-service `COWORK_EVENT_TOKEN` on any untrusted network.
  */
-const COWORK_TOKEN =
-  process.env.NEXT_PUBLIC_COWORK_UI_TOKEN ??
-  process.env.NEXT_PUBLIC_COWORK_EVENT_TOKEN ??
-  "dev-token";
+const COWORK_TOKEN = process.env.NEXT_PUBLIC_COWORK_UI_TOKEN;
 
-/** Headers every cockpit fetch must send (auth + accept). */
+// Fail loud on the single most common misconfiguration: a missing UI token
+// makes every fetch send an `undefined` header (which throws a raw
+// `TypeError` in the browser and a `"undefined"` string string in Node/SSR) —
+// surfacing as an opaque failure. Warn clearly at module load so the operator
+// knows to set `NEXT_PUBLIC_COWORK_UI_TOKEN`.
+if (typeof window !== "undefined" && !COWORK_TOKEN) {
+  console.error(
+    "[cowork] NEXT_PUBLIC_COWORK_UI_TOKEN is not set — cockpit API calls will be " +
+      "unauthorized. Set COWORK_UI_TOKEN (and its NEXT_PUBLIC_ mirror) in your environment.",
+  );
+}
+
+/**
+ * Headers every cockpit fetch must send (auth + accept).
+ *
+ * The `X-Cowork-Token` is only attached when it is actually defined. Sending an
+ * explicit `undefined` header value is not a valid `HeadersInit` and throws a
+ * `TypeError`, so we spread it conditionally. This preserves the auth mechanism
+ * (the token is still sent whenever `NEXT_PUBLIC_COWORK_UI_TOKEN` is set) while
+ * avoiding a broken-but-not-obvious `undefined` header when it is not.
+ */
 const JSON_HEADERS: HeadersInit = {
   accept: "application/json",
-  "X-Cowork-Token": COWORK_TOKEN,
+  ...(COWORK_TOKEN ? { "X-Cowork-Token": COWORK_TOKEN } : {}),
 };
 
 async function getJson<T>(url: string): Promise<T> {
   const r = await fetch(url, { headers: JSON_HEADERS });
-  if (!r.ok) throw new Error(`${r.status} on ${url}`);
-  return (await r.json()) as T;
+  // Read the body once so we can both validate it and surface a useful message.
+  const contentType = r.headers.get("content-type") ?? "";
+  const text = await r.text();
+  if (!r.ok) {
+    throw new Error(`${r.status} on ${url}${text ? `: ${text.slice(0, 200)}` : ""}`);
+  }
+  if (!contentType.includes("application/json")) {
+    throw new Error(`Unexpected content-type "${contentType || "none"}" from ${url}`);
+  }
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(`Invalid JSON body from ${url}`);
+  }
+  // A 200 response carrying an `{ error }` envelope is still a failure — do NOT
+  // coerce it into an empty list (which would mask an outage as "no data").
+  if (
+    data &&
+    typeof data === "object" &&
+    "error" in data &&
+    (data as { error?: unknown }).error
+  ) {
+    throw new Error(`Backend error from ${url}: ${(data as { error?: unknown }).error}`);
+  }
+  return data as T;
 }
 
 /**
@@ -127,7 +173,14 @@ export interface ChatMessage {
   timestamp: number;
 }
 
-/** Send a chat message to the wingman proxy on port 3003. */
+/**
+ * Send a chat message to the Wingman chat proxy.
+ *
+ * The client POSTs to the same-origin Next.js `/api/cowork/ai/chat` route
+ * (which internally forwards to the mini-service on port 3003) — it does NOT
+ * address port 3003 directly from the browser. A fresh `sessionId` is minted
+ * per request so each chat session gets its own socket.io room.
+ */
 export function useSendChat() {
   return useMutation({
     mutationFn: async (payload: { text: string; history?: Array<{ role: string; content: string }>; signal?: AbortSignal }) => {
@@ -137,7 +190,10 @@ export function useSendChat() {
       ];
       const r = await fetch("/api/cowork/ai/chat", {
         method: "POST",
-        headers: { "content-type": "application/json", "X-Cowork-Token": COWORK_TOKEN },
+        headers: {
+          "content-type": "application/json",
+          ...(COWORK_TOKEN ? { "X-Cowork-Token": COWORK_TOKEN } : {}),
+        },
         body: JSON.stringify({
           messages,
           // Generate a unique sessionId per request so each chat session

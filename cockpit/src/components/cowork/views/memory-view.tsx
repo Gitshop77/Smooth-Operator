@@ -2,15 +2,16 @@
 
 import * as React from "react";
 import { motion } from "framer-motion";
-import { Database, Search, FormInput } from "lucide-react";
+import { Database, FormInput } from "lucide-react";
 
 import { useSiteMemory, useFormMemory } from "@/hooks/use-cowork-query";
 import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ViewHeader } from "@/components/cowork/shared/view-header";
 import { LoadingSkeleton } from "@/components/cowork/shared/loading-skeleton";
 import { EmptyState } from "@/components/cowork/shared/empty-state";
+import { DataTable } from "@/components/cowork/shared/data-table";
+import { SearchInput } from "@/components/cowork/shared/search-input";
 import { timeAgo } from "@/lib/cowork-data/format";
 import type { SampleSiteMemoryEntry } from "@/lib/cowork-data/types";
 
@@ -160,15 +161,13 @@ export function MemoryView() {
         description="Per-domain structured memory the browser remembers"
         icon={<Database className="size-5" />}
         actions={
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-            <Input
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              placeholder="Filter…"
-              className="pl-8 h-9 w-44 sm:w-56"
-            />
-          </div>
+          <SearchInput
+            value={filter}
+            onChange={setFilter}
+            ariaLabel="Filter memory"
+            placeholder="Filter…"
+            className="w-44 sm:w-56"
+          />
         }
       />
 
@@ -224,18 +223,18 @@ export function MemoryView() {
             <EmptyState icon={<FormInput className="size-6" />} title="No form memory" description="Submit a form on any site to remember its values." />
           ) : (
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-              <Card className="p-0 gap-0 overflow-hidden">
-                <div className="divide-y">
-                  {formFlattened.map((e, i) => (
-                    <div key={i} className="grid grid-cols-1 sm:grid-cols-4 gap-2 px-4 py-2.5 text-sm hover:bg-accent/40">
-                      <span className="font-mono text-xs truncate">{e.domain}</span>
-                      <span className="font-mono text-xs text-muted-foreground truncate">{e.field}</span>
-                      <span className="font-mono text-xs truncate">{e.value}</span>
-                      <span className="text-xs text-muted-foreground tnum sm:text-right">{timeAgo(e.updatedAt)} ago</span>
-                    </div>
-                  ))}
-                </div>
-              </Card>
+              <DataTable caption="Form memory" columns={["Domain", "Field", "Value", "Updated"]}>
+                {formFlattened.map((e, i) => (
+                  <tr key={i} className="hover:bg-accent/40 transition-colors align-top">
+                    <td className="px-4 py-2.5 font-mono text-xs truncate">{e.domain}</td>
+                    <td className="px-4 py-2.5 font-mono text-xs text-muted-foreground truncate">{e.field}</td>
+                    <td className="px-4 py-2.5 font-mono text-xs truncate">{e.value}</td>
+                    <td className="px-4 py-2.5 text-xs text-muted-foreground tnum sm:text-right whitespace-nowrap">
+                      {timeAgo(e.updatedAt)} ago
+                    </td>
+                  </tr>
+                ))}
+              </DataTable>
             </motion.div>
           )}
         </TabsContent>

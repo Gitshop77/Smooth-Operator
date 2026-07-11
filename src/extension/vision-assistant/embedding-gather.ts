@@ -23,7 +23,16 @@ export interface EmbeddingMeta {
   zero_point: number;
 }
 
-/** Gather a single token's embedding from the INT4 packed table. */
+/**
+ * Gather a single token's embedding from the INT4 packed table.
+ *
+ * Defensive guards: a corrupt/partial cache (meta JSON disagrees with the
+ * `.bin` buffers) is rejected up-front in `VisionAssistant.init()`, but these
+ * checks here guarantee a single malformed `tokenId` cannot silently read
+ * misaligned bytes and produce garbage embeddings. Any violation throws so the
+ * caller (not the detector) sees a loud failure instead of confidently-wrong
+ * boxes.
+ */
 export function gatherEmbed(
   tokenId: number,
   dst: Float32Array,
@@ -36,8 +45,41 @@ export function gatherEmbed(
   const B = meta.block_size;
   const NG = meta.n_groups;
   const ZP = meta.zero_point;
+
+  // `H` MUST be even: each byte packs two 4-bit values, so each token consumes
+  // exactly `H / 2` packed bytes. A non-even `hidden` would misalign every row.
+  if (!Number.isInteger(H) || H <= 0 || H % 2 !== 0) {
+    throw new Error(`gatherEmbed: meta.hidden=${H} must be a positive even integer`);
+  }
+  if (!Number.isInteger(meta.vocab) || meta.vocab <= 0) {
+    throw new Error(`gatherEmbed: meta.vocab=${meta.vocab} must be a positive integer`);
+  }
+  if (!Number.isInteger(NG) || NG <= 0) {
+    throw new Error(`gatherEmbed: meta.n_groups=${NG} must be a positive integer`);
+  }
+  // Every group must map to an index in `[0, NG)`; the last element lands in
+  // group `(H - 1) / B`, which must stay below `NG`.
+  if (!Number.isInteger(B) || B <= 0 || Math.floor((H - 1) / B) >= NG) {
+    throw new Error(
+      `gatherEmbed: block_size=${B} / n_groups=${NG} disagree with hidden=${H}`,
+    );
+  }
+  if (!Number.isInteger(tokenId) || tokenId < 0 || tokenId >= meta.vocab) {
+    throw new Error(`gatherEmbed: token id ${tokenId} out of vocab range [0, ${meta.vocab})`);
+  }
+
   const packedRow = tokenId * (H / 2);
   const scaleRow = tokenId * NG;
+
+  // The cache-wide shape checks in `init()` already guarantee
+  // `packed.length === vocab * H/2` and `scales.length === vocab * NG`, so a
+  // valid `tokenId` (above) can never overflow. Re-assert cheaply for safety.
+  if (packedRow + H / 2 > packed.length) {
+    throw new Error(`gatherEmbed: packed buffer too small for token ${tokenId}`);
+  }
+  if (scaleRow + NG > scales.length) {
+    throw new Error(`gatherEmbed: scales buffer too small for token ${tokenId}`);
+  }
 
   for (let j = 0; j < H; j += 2) {
     const byte = packed[packedRow + (j >> 1)];

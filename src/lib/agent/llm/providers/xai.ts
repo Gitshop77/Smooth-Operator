@@ -13,7 +13,7 @@ import * as OpenAICompatibleChat from "../protocols/openai-compatible-chat";
 import { PATH } from "../protocols/openai-compatible-chat";
 import type { LLMProvider } from "../provider";
 import { toLLMProvider as toLLMProviderBridge } from "../provider-bridge";
-import { profiles } from "./openai-compatible-profile";
+import { profiles, assertSafeUserBaseURL } from "./openai-compatible-profile";
 
 export const id = "xai";
 
@@ -27,6 +27,9 @@ const auth = (options: ProviderAuthOption<"optional">) => {
 };
 
 export function configure(input: Config = {}) {
+  // (SSRF guard): validate any user-supplied baseURL override before
+  // building the route/endpoint. The trusted default is exempt.
+  assertSafeUserBaseURL(input.baseURL);
   const route = make({
     id: "openai-compatible-chat",
     provider: id,
@@ -43,8 +46,6 @@ export function configure(input: Config = {}) {
     configure,
   };
 }
-
-export const provider = configure();
 
 /**
  * Bridge to the agent's `LLMProvider` interface.

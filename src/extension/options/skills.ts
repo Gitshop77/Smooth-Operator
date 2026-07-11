@@ -1,18 +1,89 @@
 /**
- * options/skills.ts — A7 custom domain skills.
+ * options/skills.ts — custom domain skills.
  *
  * User-defined Markdown skills (per-domain instructions) stored under
- * `open_cowork_custom_skills` in chrome.storage.local. Rendered as a list
- * with delete buttons; new skills are added via the form on the Skills tab.
+ * `open_cowork_custom_skills` in chrome.storage.local. Rendered with their OWN
+ * `.skill-item` markup (no longer reusing `.secret-item`).
+ *
+ * NOTE: the persisted `frontmatter` field IS consumed by the agent runtime
+ * (`src/lib/agent/domain-skills.ts` -> `getSkillFrontmatter`, which surfaces it
+ * to the navigator as the skill's one-line description). It is not rendered
+ * here, but it must stay in the stored shape, so it is intentionally retained.
  */
 
 import { $, escapeHtml } from "@/extension/shared";
+import { showSaved } from "./settings-sync";
 
 const CUSTOM_SKILLS_KEY = "open_cowork_custom_skills";
 
-async function readCustomSkills(): Promise<Array<{ domains: string[]; name: string; frontmatter: string; instructions: string }>> {
+interface CustomSkill {
+  domains: string[];
+  name: string;
+  frontmatter: string;
+  instructions: string;
+}
+
+// ─── Field constraints ───────────────────────────────────────────────────────
+const NAME_MAX = 64;
+const DOMAIN_MAX = 100;
+const INSTRUCTIONS_MAX = 50_000;
+// Human-readable skill names (e.g. "GitHub") — keep them to a single line and
+// within a sane length rather than forcing the strict tool-name regex.
+const NAME_RE = /^[^\n\r\t]{1,64}$/;
+
+// ─── Mutation serialization ──────────────────────────────────────────────────
+let mutationQueue: Promise<unknown> = Promise.resolve();
+function serialize<T>(task: () => Promise<T>): Promise<T> {
+  const run = mutationQueue.then(task, task);
+  mutationQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+// ─── Defensive storage parsing ───────────────────────────────────────────────
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function validateCustomSkills(raw: unknown): CustomSkill[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) {
+    console.warn("[skills] stored custom-skills value is not an array; ignoring.", raw);
+    return [];
+  }
+  const out: CustomSkill[] = [];
+  raw.forEach((entry, i) => {
+    if (
+      !isRecord(entry) ||
+      typeof entry.name !== "string" ||
+      typeof entry.instructions !== "string" ||
+      !Array.isArray(entry.domains) ||
+      !entry.domains.every((d) => typeof d === "string")
+    ) {
+      console.warn(`[skills] dropping malformed custom skill at index ${i}.`, entry);
+      return;
+    }
+    // `frontmatter` is optional in storage (older entries may lack it); derive
+    // it when missing so the runtime keeps getting a one-line description.
+    const frontmatter =
+      typeof entry.frontmatter === "string"
+        ? entry.frontmatter
+        : entry.instructions.split("\n")[0].slice(0, 100);
+    out.push({
+      domains: entry.domains,
+      name: entry.name,
+      frontmatter,
+      instructions: entry.instructions,
+    });
+  });
+  return out;
+}
+
+async function readCustomSkills(): Promise<CustomSkill[]> {
   const res = await chrome.storage.local.get(CUSTOM_SKILLS_KEY);
-  return (res[CUSTOM_SKILLS_KEY] as Array<{ domains: string[]; name: string; frontmatter: string; instructions: string }>) || [];
+  return validateCustomSkills(res[CUSTOM_SKILLS_KEY]);
 }
 
 /** Render the custom skills list. Call after every mutation. */
@@ -24,31 +95,59 @@ export async function renderSkills(): Promise<void> {
     list.innerHTML = '<p class="empty-hint">No custom skills defined. Add one above.</p>';
     return;
   }
-  for (const s of skills) {
+  skills.forEach((s, index) => {
     const item = document.createElement("div");
-    item.className = "secret-item";
+    item.className = "skill-item";
     item.innerHTML =
-      `<span class="name">${escapeHtml(s.name)} (${escapeHtml(s.domains.join(", "))})</span>` +
-      `<button type="button">Delete</button>`;
-    item.querySelector("button")!.addEventListener("click", async () => {
-      const filtered = skills.filter((x) => x.name !== s.name);
-      await chrome.storage.local.set({ [CUSTOM_SKILLS_KEY]: filtered });
-      await renderSkills();
+      `<div class="skill-meta">` +
+        `<span class="skill-name">${escapeHtml(s.name)}</span>` +
+        `<span class="skill-domains">${escapeHtml(s.domains.join(", "))}</span>` +
+      `</div>` +
+      `<pre class="skill-instructions">${escapeHtml(s.instructions)}</pre>` +
+      `<button type="button" class="skill-delete">Delete</button>`;
+    item.querySelector("button")!.addEventListener("click", () => {
+      void serialize(async () => {
+        const filtered = skills.filter((_, i) => i !== index);
+        await chrome.storage.local.set({ [CUSTOM_SKILLS_KEY]: filtered });
+        await renderSkills();
+        showSaved();
+      });
     });
     list.appendChild(item);
-  }
+  });
 }
 
-$("addSkill")?.addEventListener("click", async () => {
-  const domain = ($("skillDomain") as HTMLInputElement).value.trim();
-  const name = ($("skillName") as HTMLInputElement).value.trim();
-  const instructions = ($("skillInstructions") as HTMLTextAreaElement).value.trim();
-  if (!domain || !name || !instructions) return;
-  const skills = await readCustomSkills();
-  skills.push({ domains: [domain], name, frontmatter: instructions.split("\n")[0].slice(0, 100), instructions });
-  await chrome.storage.local.set({ [CUSTOM_SKILLS_KEY]: skills });
-  ($("skillDomain") as HTMLInputElement).value = "";
-  ($("skillName") as HTMLInputElement).value = "";
-  ($("skillInstructions") as HTMLTextAreaElement).value = "";
-  await renderSkills();
+$("addSkill")?.addEventListener("click", () => {
+  void serialize(async () => {
+    const domain = ($("skillDomain") as HTMLInputElement).value.trim();
+    const name = ($("skillName") as HTMLInputElement).value.trim();
+    const instructions = ($("skillInstructions") as HTMLTextAreaElement).value.trim();
+    if (!domain || !name || !instructions) return;
+    if (!NAME_RE.test(name)) {
+      alert("Skill name must be a single line of at most 64 characters.");
+      return;
+    }
+    if (domain.length > DOMAIN_MAX) {
+      alert(`Skill domain must be at most ${DOMAIN_MAX} characters.`);
+      return;
+    }
+    if (instructions.length > INSTRUCTIONS_MAX) {
+      alert(`Skill instructions must be at most ${INSTRUCTIONS_MAX} characters.`);
+      return;
+    }
+    const skills = await readCustomSkills();
+    // Enforce name uniqueness: overwrite the existing entry instead of adding a
+    // second one, so delete-by-name (and delete-by-index) stays safe.
+    const idx = skills.findIndex((s) => s.name === name);
+    const frontmatter = instructions.split("\n")[0].slice(0, 100);
+    const entry: CustomSkill = { domains: [domain], name, frontmatter, instructions };
+    if (idx >= 0) skills[idx] = entry;
+    else skills.push(entry);
+    await chrome.storage.local.set({ [CUSTOM_SKILLS_KEY]: skills });
+    ($("skillDomain") as HTMLInputElement).value = "";
+    ($("skillName") as HTMLInputElement).value = "";
+    ($("skillInstructions") as HTMLTextAreaElement).value = "";
+    await renderSkills();
+    showSaved();
+  });
 });

@@ -6,12 +6,13 @@ import { cn } from "@/lib/utils";
 type Tone = "success" | "warning" | "error" | "info" | "neutral" | "running";
 
 const TONES: Record<Tone, string> = {
-  success: "bg-chart-2/10 text-chart-2 border-chart-2/20",
-  warning: "bg-chart-1/10 text-chart-1 border-chart-1/20",
+  success: "bg-success/10 text-success border-success/20",
+  warning: "bg-accent/10 text-accent border-accent/20",
   error: "bg-destructive/10 text-destructive border-destructive/20",
-  info: "bg-muted text-muted-foreground border-border",
+  // Distinct blue (#60A5FA dark / #2563EB light) — the spec's `--info`.
+  info: "bg-info/10 text-info border-info/20",
   neutral: "bg-muted text-muted-foreground border-border",
-  running: "bg-chart-1/10 text-chart-1 border-chart-1/20",
+  running: "bg-accent/10 text-accent border-accent/20",
 };
 
 interface StatusPillProps {

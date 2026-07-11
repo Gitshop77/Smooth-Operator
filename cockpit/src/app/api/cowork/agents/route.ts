@@ -1,14 +1,18 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
-import { json, withRouteError } from '@/lib/cowork/api/http';
+import { json, withRouteError, parseLimit } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
 export async function GET(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
+    // Cap `limit` to a hard max (parseLimit default 100, max 200) so a single
+    // authenticated GET can't pull the entire agent-trust table in one shot.
+    const limit = parseLimit(req);
     const agentId = req.nextUrl.searchParams.get('agentId') || undefined;
     const agents = await db.agentTrust.findMany({
       where: agentId ? { agentId } : undefined,
       orderBy: { grantedAt: 'desc' },
+      take: limit,
     });
     // Project the Prisma `AgentTrust` fields onto the legacy `SampleAgent`
     // shape the `agents-view` was written against. The Prisma model has no

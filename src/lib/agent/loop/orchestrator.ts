@@ -71,6 +71,12 @@ export async function runAgentLoop(deps: LoopDeps): Promise<void> {
     await runAgentLoopInner(deps);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
+    // Durable signal for operators: the outer catch only fires for truly
+    // uncaught errors (e.g. a thrown config-error bubble or an unexpected
+    // throw). Surface it to the SW console so a run failure isn't invisible
+    // once the side panel is closed (finding: agent run errors have no durable
+    // log or alerting). The SSE `error` event only reaches the side panel.
+    console.error("[orchestrator] runAgentLoop uncaught error:", e);
     try {
       deps.onEvent({
         type: "done",
@@ -88,14 +94,24 @@ export async function runAgentLoop(deps: LoopDeps): Promise<void> {
 async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
   // Merge user config over defaults, then validate via the Zod schema.
   // validateConfig fills in defaults + catches invalid values (negative maxSteps,
-  // etc.) at the boundary. If validation fails, fall back to the plain merge
-  // (backward-compatible — the orchestrator never throws on bad config).
+  // etc.) at the boundary. If validation fails it THROWS — the run aborts with a
+  // clear error rather than silently running on a broken config.
   let config: import("../types").AgentConfig;
   try {
     const { validateConfig } = await import("../config");
     config = validateConfig({ ...DEFAULT_CONFIG, ...deps.config });
-  } catch {
-    config = { ...DEFAULT_CONFIG, ...deps.config };
+  } catch (e) {
+    // `validateConfig` (Zod schema) enforces hard bounds (maxSteps 1–1000,
+    // maxActionsPerStep 1–50, maxFailures >= 1, compactionCharThreshold >= 1000).
+    // On failure it throws. Do NOT re-merge the SAME unvalidated input — that
+    // would silently let out-of-range/malformed values (negative maxSteps,
+    // maxActionsPerStep > 50, negative maxFailures) reach the loop logic, making
+    // the schema purely decorative (finding: Zod config validation silently
+    // discarded / validation failure silently bypassed). Surface the error so
+    // the caller/UI gets a clear signal and refuse to start with a broken config.
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[orchestrator] config validation failed:", msg);
+    throw new Error(`Invalid agent configuration: ${msg}`);
   }
   const settleDelay = deps.settleDelayMs ?? 500;
 
@@ -104,6 +120,23 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
     dispatcher = new CallbackDispatcher();
     for (const h of deps.callbacks) dispatcher.register(h);
   }
+
+  /**
+   * Safely invoke a user-supplied dispatcher/callback handler. Dispatcher
+   * handlers are an externally-supplied extension point; a throwing handler
+   * must NOT abort the whole agent loop (finding: user-provided dispatcher/
+   * callback exceptions abort the whole run). We log and continue. This also
+   * prevents a `runEnd` failure from throwing out of `runAgentLoopInner` and
+   * producing a duplicate `done` event via the outer catch.
+   */
+  const safeDispatch = async (label: string, fn: () => Promise<void>): Promise<void> => {
+    if (!dispatcher) return;
+    try {
+      await fn();
+    } catch (e) {
+      console.error(`[orchestrator] dispatcher handler "${label}" threw (continuing run):`, e);
+    }
+  };
 
   const state: LoopState = {
     deps,
@@ -135,7 +168,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
   const { task, onEvent, signal } = state;
 
   onEvent({ type: "run-start", task, maxSteps: config.maxSteps });
-  if (dispatcher) await dispatcher.runStart(makeCtx(state));
+  await safeDispatch("runStart", () => dispatcher!.runStart(makeCtx(state)));
 
   // ── Phase 1: initial planner call ──────────────────────────────────────
   let plannerResult: PlannerOutput;
@@ -182,19 +215,19 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
         onEvent({ type: "done", step: 0, success: false, text: doneText });
       }
     }
-    if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, doneText));
+    await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, doneText)));
     return;
   }
 
   if (costCapExceeded(state)) {
-    if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, `Cost cap of $${config.costCapUsd} reached.`));
+    await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, `Cost cap of $${config.costCapUsd} reached.`)));
     return;
   }
 
   if (plannerResult.decision === "web_task") {
     const text = plannerResult.text || "";
     onEvent({ type: "done", step: 0, success: true, text });
-    if (dispatcher) await dispatcher.runEnd(buildRunResult(state, true, text));
+    await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, true, text)));
     return;
   }
   if (plannerResult.decision === "done") {
@@ -216,19 +249,30 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       makeCtx(state)
     );
     if (finalized) {
-      if (dispatcher) await dispatcher.runEnd(buildRunResult(state, !!plannerResult.success, plannerResult.text || ""));
+      await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, !!plannerResult.success, plannerResult.text || "")));
       return;
     }
   }
   state.plan = plannerResult.plan;
-  state.currentPlanItem = plannerResult.current_plan_item ?? 0;
+  // Clamp `current_plan_item` to a valid plan index (finding: current_plan_item
+  // is accepted without bounds validation). The planner prompt asks for a
+  // 0-indexed value < plan.length, but the schema only validates `z.number().int()`,
+  // so a negative or out-of-range value must be coerced rather than trusted.
+  {
+    const cpiRaw = plannerResult.current_plan_item ?? 0;
+    const planLen = plannerResult.plan?.length ?? 0;
+    const cpi = Number.isInteger(cpiRaw) && cpiRaw >= 0 && cpiRaw < planLen
+      ? cpiRaw
+      : (cpiRaw < 0 ? 0 : Math.max(0, planLen - 1));
+    state.currentPlanItem = cpi;
+  }
   state.currentGoal = plannerResult.next_goal || (state.plan && state.plan[state.currentPlanItem]) || task;
   onEvent({
     type: "planner-step", step: state.step, decision: plannerResult.decision,
     goal: state.currentGoal, plan: state.plan,
   });
   if (dispatcher) {
-    await dispatcher.plannerStep(makeCtx(state), plannerResult.decision, state.currentGoal, state.plan);
+    await safeDispatch("plannerStep", () => dispatcher!.plannerStep(makeCtx(state), plannerResult.decision, state.currentGoal, state.plan));
   }
 
   // ── Phase 2: navigator loop ────────────────────────────────────────────
@@ -237,11 +281,11 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       onEvent({ type: "info", message: "Agent stopped by user." });
       const doneText = "Agent stopped by user.";
       onEvent({ type: "done", step: state.step, success: false, text: doneText });
-      if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, doneText));
+      await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, doneText)));
       return;
     }
     if (costCapExceeded(state)) {
-      if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, `Cost cap of $${config.costCapUsd} reached.`));
+      await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, `Cost cap of $${config.costCapUsd} reached.`)));
       return;
     }
 
@@ -269,7 +313,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
     }
 
     onEvent({ type: "navigator-step-start", step: state.step });
-    if (dispatcher) await dispatcher.stepStart(makeCtx(state));
+    await safeDispatch("stepStart", () => dispatcher!.stepStart(makeCtx(state)));
 
     const observed = await observeState(state);
     if (observed.status === "error") {
@@ -278,12 +322,12 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
         message: observed.message,
         recoverable: true,
       });
-      if (dispatcher) await dispatcher.error(makeCtx(state), observed.message, true);
+      await safeDispatch("error", () => dispatcher!.error(makeCtx(state), observed.message, true));
       state.consecutiveFailures++;
       if (state.consecutiveFailures >= config.maxFailures) {
         const doneText = `Agent aborted after ${config.maxFailures} consecutive failures (${observed.phase}).`;
         onEvent({ type: "done", step: state.step, success: false, text: doneText });
-        if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, doneText));
+        await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, doneText)));
         return;
       }
       state.step++;
@@ -319,7 +363,8 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       }
     }
     if (browserState.screenshot && dispatcher) {
-      await dispatcher.screenshot(makeCtx(state), browserState.screenshot);
+      const screenshot = browserState.screenshot;
+      await safeDispatch("screenshot", () => dispatcher!.screenshot(makeCtx(state), screenshot));
     }
 
     appendPostObserveNudges(state, browserState);
@@ -334,7 +379,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
         if (resumeResult === "timeout") {
           const doneText = `Timed out waiting for anti-bot challenge to resolve.`;
           onEvent({ type: "done", step: state.step, success: false, text: doneText });
-          if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, doneText));
+          await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, doneText)));
           return;
         }
       }
@@ -379,7 +424,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       const msg = e instanceof Error ? e.message : String(e);
       if (/^Budget exceeded:/i.test(msg)) {
         onEvent({ type: "done", step: state.step, success: false, text: msg });
-        if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, msg));
+        await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, msg)));
         return;
       }
       const classified = classifyError(e);
@@ -391,19 +436,19 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
         recoverable: !classified.fatal && !willExceed,
       });
       if (dispatcher) {
-        await dispatcher.error(makeCtx(state), friendlyErrorMessage(classified), !classified.fatal && !willExceed);
+        await safeDispatch("error", () => dispatcher!.error(makeCtx(state), friendlyErrorMessage(classified), !classified.fatal && !willExceed));
       }
       if (classified.fatal) {
         const doneText = `Fatal error (${classified.category}): ${classified.message}`;
         onEvent({ type: "done", step: state.step, success: false, text: doneText });
-        if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, doneText));
+        await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, doneText)));
         return;
       }
       if (classified.category === "cancelled") {
         onEvent({ type: "info", message: "Agent stopped by user." });
         const doneText = "Agent stopped by user.";
         onEvent({ type: "done", step: state.step, success: false, text: doneText });
-        if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, doneText));
+        await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, doneText)));
         return;
       }
       state.consecutiveFailures++;
@@ -413,7 +458,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       if (state.consecutiveFailures >= config.maxFailures) {
         const doneText = `Agent aborted after ${config.maxFailures} consecutive failures. Last error: ${classified.message}`;
         onEvent({ type: "done", step: state.step, success: false, text: doneText });
-        if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, doneText));
+        await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, doneText)));
         return;
       }
       if (config.enableEarlyStop) {
@@ -425,7 +470,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
         if (es.stop) {
           const doneText = `Early-stop: ${es.reason}`;
           onEvent({ type: "done", step: state.step, success: false, text: doneText });
-          if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, doneText));
+          await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, doneText)));
           return;
         }
       }
@@ -434,7 +479,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
     }
 
     if (costCapExceeded(state)) {
-      if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, `Cost cap of $${config.costCapUsd} reached.`));
+      await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, `Cost cap of $${config.costCapUsd} reached.`)));
       return;
     }
 
@@ -443,9 +488,9 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       evaluation: output.evaluation_previous_goal, memory: output.memory, nextGoal: output.next_goal,
     });
     if (dispatcher) {
-      await dispatcher.thinking(
+      await safeDispatch("thinking", () => dispatcher!.thinking(
         makeCtx(state), output.thinking, output.evaluation_previous_goal, output.memory, output.next_goal
-      );
+      ));
     }
 
     // Preserve a sole `done` action even when the navigator emitted more
@@ -463,7 +508,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
         ? `Navigator emitted ${output.action.length} actions (max ${config.maxActionsPerStep}); keeping only the done action.`
         : `Navigator emitted ${output.action.length} actions (max ${config.maxActionsPerStep}); truncating.`;
       onEvent({ type: "error", step: state.step, message: truncMsg, recoverable: true });
-      if (dispatcher) await dispatcher.error(makeCtx(state), truncMsg, true);
+      await safeDispatch("error", () => dispatcher!.error(makeCtx(state), truncMsg, true));
     }
 
     const doneAction = actions.find((a) => a.type === "done");
@@ -474,11 +519,11 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       // orchestrator, so `doneAction` is ALWAYS the sole action in the step.
       const result = await handleNavigatorDone(state, doneAction, output, browserState, tabs);
       if (result.finalized) {
-        if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, ""));
+        await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, "")));
         return;
       }
       // Fire stepEnd for the done step so metrics are accurate.
-      if (dispatcher) await dispatcher.stepEnd(makeCtx(state), [{ action: doneAction, success: doneAction.success ?? true, message: `Navigator requested completion: ${doneAction.text}`, isDone: true }]);
+      await safeDispatch("stepEnd", () => dispatcher!.stepEnd(makeCtx(state), [{ action: doneAction, success: doneAction.success ?? true, message: `Navigator requested completion: ${doneAction.text}`, isDone: true }]));
       continue;
     }
 
@@ -513,7 +558,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
             const warnCount = state.loopDetector.shouldWarn();
             if (warnCount > 0) {
               onEvent({ type: "loop-warning", step: state.step, count: warnCount });
-              if (dispatcher) await dispatcher.loopWarning(makeCtx(state), warnCount);
+              await safeDispatch("loopWarning", () => dispatcher!.loopWarning(makeCtx(state), warnCount));
             }
           }
         }
@@ -526,12 +571,12 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       } catch (e) {
         const errMsg = `executeActions override failed: ${e instanceof Error ? e.message : String(e)}`;
         onEvent({ type: "error", step: state.step, message: errMsg, recoverable: true });
-        if (dispatcher) await dispatcher.error(makeCtx(state), errMsg, true);
+        await safeDispatch("error", () => dispatcher!.error(makeCtx(state), errMsg, true));
         state.consecutiveFailures++;
         if (state.consecutiveFailures >= config.maxFailures) {
           const doneText = `Agent aborted after ${config.maxFailures} consecutive failures (executeActions).`;
           onEvent({ type: "done", step: state.step, success: false, text: doneText });
-          if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, doneText));
+          await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, doneText)));
           return;
         }
         state.step++;
@@ -547,12 +592,12 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       } catch (e) {
         const errMsg = `executeActionQueue failed: ${e instanceof Error ? e.message : String(e)}`;
         onEvent({ type: "error", step: state.step, message: errMsg, recoverable: true });
-        if (dispatcher) await dispatcher.error(makeCtx(state), errMsg, true);
+        await safeDispatch("error", () => dispatcher!.error(makeCtx(state), errMsg, true));
         state.consecutiveFailures++;
         if (state.consecutiveFailures >= config.maxFailures) {
           const doneText = `Agent aborted after ${config.maxFailures} consecutive failures (executeActionQueue).`;
           onEvent({ type: "done", step: state.step, success: false, text: doneText });
-          if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, doneText));
+          await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, doneText)));
           return;
         }
         state.step++;
@@ -560,7 +605,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       }
     }
 
-    if (dispatcher) await dispatcher.stepEnd(makeCtx(state), results);
+    await safeDispatch("stepEnd", () => dispatcher!.stepEnd(makeCtx(state), results));
 
     // loopWarningCount is emitted as a "loop-warning" event by
     // executeActionQueue; buildInjectionBlock at the next step's start
@@ -575,7 +620,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       if (resumeResult === "timeout") {
         const doneText = "Timed out waiting for user takeover.";
         onEvent({ type: "done", step: state.step, success: false, text: doneText });
-        if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, doneText));
+        await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, doneText)));
         return;
       }
     }
@@ -612,7 +657,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
         onEvent({ type: "loop-warning", step: state.step, count: warnCount });
         onEvent({ type: "done", step: state.step, success: false, text: doneText });
         state.finalResult = { success: false, text: doneText };
-        if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, doneText));
+        await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, doneText)));
         return;
       }
     }
@@ -623,7 +668,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
     } catch (e) {
       const errMsg = `waitForSettled failed: ${e instanceof Error ? e.message : String(e)}`;
       onEvent({ type: "error", step: state.step, message: errMsg, recoverable: true });
-      if (dispatcher) await dispatcher.error(makeCtx(state), errMsg, true);
+      await safeDispatch("error", () => dispatcher!.error(makeCtx(state), errMsg, true));
     }
     state.step++;
     state.navigatorStepsSincePlanner++;
@@ -665,7 +710,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
           const msg = e instanceof Error ? e.message : String(e);
           if (/^Budget exceeded:/i.test(msg)) {
             onEvent({ type: "done", step: state.step, success: false, text: msg });
-            if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, msg));
+            await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, msg)));
             state.finalResult = { success: false, text: msg };
             return;
           }
@@ -674,6 +719,12 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
           // would erroneously kill the whole run if `runCompaction` ever
           // changed to re-throw transient errors, so we log-and-continue
           // (deferring compaction to a later step).
+          //
+          // Back off: record this step as the last compaction attempt so the
+          // per-step retry doesn't fire compaction on EVERY subsequent step
+          // (which would amplify cost/error rate while the failure persists).
+          // The next attempt waits `compactionStepInterval` steps as normal.
+          state.lastCompactionStep = state.step;
           onEvent({ type: "info", message: `Compaction skipped due to error: ${msg}` });
         }
         if (compacted) {
@@ -682,7 +733,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
           state.compactedMemory = compacted.compactedMemory;
           state.lastCompactionStep = state.step;
           onEvent({ type: "compaction", step: state.step, compactedCount: compacted.compactedCount });
-          if (dispatcher) await dispatcher.compaction(makeCtx(state), compacted.compactedCount);
+          await safeDispatch("compaction", () => dispatcher!.compaction(makeCtx(state), compacted.compactedCount));
         }
       }
     }
@@ -691,7 +742,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
     if (state.navigatorStepsSincePlanner >= config.plannerInterval) {
       const result = await runPeriodicPlannerCheck(state, browserState);
       if (result.finalized) {
-        if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, ""));
+        await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, "")));
         return;
       }
     }
@@ -699,5 +750,5 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
 
   const doneText = `Reached max steps (${config.maxSteps}) without the planner calling done.`;
   onEvent({ type: "done", step: state.step, success: false, text: doneText });
-  if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, doneText));
+  await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, doneText)));
 }

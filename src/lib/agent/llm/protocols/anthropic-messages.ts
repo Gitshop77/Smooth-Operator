@@ -19,6 +19,23 @@ export const API_VERSION = "2023-06-01";
 
 /** Match a `<screenshot>data:image/...;base64,...</screenshot>` marker. */
 const SCREENSHOT_PATTERN = /<screenshot>(data:image\/(png|jpeg|webp);base64,[^<]+)<\/screenshot>/;
+/** Global variant used to iterate over every screenshot in a single message. */
+const SCREENSHOT_PATTERN_G = new RegExp(SCREENSHOT_PATTERN.source, "g");
+
+/** Heuristic: is this a Zod schema object (vs. an already-plain JSON Schema)? */
+function isZodSchema(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (("safeParse" in value && typeof (value as { safeParse?: unknown }).safeParse === "function") ||
+      "_def" in value)
+  );
+}
+
+/** Validate a base64 image payload before forwarding it to the API. */
+function isValidBase64(value: string): boolean {
+  return value.length > 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(value);
+}
 
 
 export interface AnthropicBody {
@@ -33,7 +50,7 @@ export interface AnthropicBody {
 }
 
 async function fromRequest(request: LLMRequest): Promise<AnthropicBody> {
-  const systemMsg = request.messages.find((m) => m.role === "system");
+  const systemMessages = request.messages.filter((m) => m.role === "system");
   const userMessages = request.messages.filter((m) => m.role !== "system");
 
   // Only attach the image to the user message that CONTAINS the <screenshot>
@@ -42,15 +59,22 @@ async function fromRequest(request: LLMRequest): Promise<AnthropicBody> {
   // across turns in a multi-turn conversation.
   const messages = userMessages.map((m) => {
     if (m.role === "user") {
-      const match = m.content.match(SCREENSHOT_PATTERN);
-      if (match) {
-        const textContent = m.content.replace(/<screenshot>[^<]+<\/screenshot>/g, "").trim();
+      const matches = Array.from(m.content.matchAll(SCREENSHOT_PATTERN_G));
+      if (matches.length) {
+        const textContent = m.content.replace(SCREENSHOT_PATTERN_G, "").trim();
+        const imageBlocks = matches.map((match) => {
+          const b64 = match[1].split(",")[1];
+          if (!isValidBase64(b64)) {
+            throw new Error("Invalid base64 payload inside <screenshot> marker (expected png/jpeg/webp base64).");
+          }
+          return {
+            type: "image",
+            source: { type: "base64", media_type: `image/${match[2]}`, data: b64 },
+          };
+        });
         return {
           role: "user",
-          content: [
-            { type: "text", text: textContent },
-            { type: "image", source: { type: "base64", media_type: `image/${match[2]}`, data: match[1].split(",")[1] } },
-          ],
+          content: [{ type: "text", text: textContent }, ...imageBlocks],
         };
       }
     }
@@ -65,21 +89,46 @@ async function fromRequest(request: LLMRequest): Promise<AnthropicBody> {
     stream: true,
   };
 
-  if (systemMsg) {
-    body.system = [{ type: "text", text: systemMsg.content, cache_control: { type: "ephemeral" } }];
+  if (systemMessages.length) {
+    body.system = [{
+      type: "text",
+      text: systemMessages.map((m) => m.content).join("\n\n"),
+      cache_control: { type: "ephemeral" },
+    }];
   }
 
   if (request.schema) {
     // Serialize the Zod schema to a plain JSON Schema object before passing
     // to Anthropic's input_schema. The raw Zod schema object is not serializable
     // and would be sent as-is (with internal Zod properties), causing 400 errors.
-    let jsonSchema: unknown = request.schema;
+    // If `request.schema` is already a plain JSON Schema, forward it as-is and
+    // never silently emit a raw Zod object.
+    let jsonSchema: unknown;
     try {
       const zNS = (await import("zod")).z as unknown as { toJSONSchema?: (s: unknown) => unknown };
-      if (typeof zNS.toJSONSchema === "function") {
-        jsonSchema = zNS.toJSONSchema(request.schema);
+      if (isZodSchema(request.schema)) {
+        if (typeof zNS.toJSONSchema === "function") {
+          jsonSchema = zNS.toJSONSchema(request.schema);
+        } else {
+          throw new Error(
+            "Structured-output schema is a Zod object but `z.toJSONSchema` is unavailable (requires Zod v4). " +
+            "Upgrade Zod or pass a plain JSON Schema."
+          );
+        }
+      } else {
+        jsonSchema = request.schema;
       }
-    } catch { /* fall back to raw if z.toJSONSchema unavailable */ }
+    } catch (err) {
+      // Surface configuration/serialization errors clearly. Only swallow an
+      // import failure when the schema is already a usable plain JSON Schema.
+      if (!isZodSchema(request.schema)) {
+        jsonSchema = request.schema;
+      } else {
+        throw err instanceof Error
+          ? new Error("Failed to serialize structured-output schema: " + err.message)
+          : err;
+      }
+    }
     body.tools = [{ name: "return_json", description: "Return the structured output as JSON", input_schema: jsonSchema }];
     body.tool_choice = { type: "tool", name: "return_json" };
   }
@@ -102,6 +151,16 @@ export const protocol: Protocol<AnthropicBody, string, { type: string; content?:
       const events: Array<{ type: string; content?: string; usage?: StreamState["usage"] }> = [];
       try {
         const data = JSON.parse(frame);
+        if (data.type === "error") {
+          // Anthropic error payloads (`{"type":"error","error":{...}}`) are
+          // valid JSON, so they parse without throwing — but they carry no
+          // `content`, so the caller would otherwise receive empty output and
+          // a success-like completion, masking auth/quota/permission failures.
+          // Surface the error explicitly instead of swallowing it.
+          const err = data.error as { message?: string } | string | undefined;
+          const msg = typeof err === "string" ? err : (err?.message ?? JSON.stringify(data.error ?? data));
+          throw new Error(`Anthropic API error: ${msg}`);
+        }
         if (data.type === "content_block_delta" && data.delta?.text) {
           state.content += data.delta.text;
           events.push({ type: "text", content: data.delta.text });
@@ -169,7 +228,8 @@ export const protocol: Protocol<AnthropicBody, string, { type: string; content?:
           };
         }
       } catch {
-        // Non-JSON — skip
+        // Non-JSON frame — surface for debugging instead of discarding silently.
+        console.warn("[anthropic-messages] Skipping non-JSON SSE frame:", frame);
       }
       return { state, events };
     },
@@ -177,10 +237,11 @@ export const protocol: Protocol<AnthropicBody, string, { type: string; content?:
       try {
         return JSON.parse(frame).type === "message_stop";
       } catch {
+        // Non-JSON frame — not a terminal marker; log for debugging.
+        console.warn("[anthropic-messages] Terminal check on non-JSON SSE frame:", frame);
         return false;
       }
     },
   },
 };
 
-export * as AnthropicMessages from "./anthropic-messages";

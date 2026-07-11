@@ -1,34 +1,77 @@
 import type { NextRequest } from 'next/server';
+import { isIP } from 'node:net';
+
+/** App-authored, client-facing error.
+ *
+ * Throwing a `ClientError` is the ONLY way to get a message echoed verbatim to
+ * the client; `withRouteError` echoes `ClientError.message` and uses
+ * `ClientError.status`, and never falls back to substring sniffing of raw
+ * (potentially internal) error text. Use it for expected validation/business
+ * failures so the client gets an actionable, leak-free message. */
+export class ClientError extends Error {
+  status: number;
+  constructor(message: string, status = 400) {
+    super(message);
+    this.name = 'ClientError';
+    this.status = status;
+  }
+}
+
+/** Maximum request body size we will buffer (256 KiB).
+ *
+ * Every DB-write route funnels through `bodyJson`, which previously buffered the
+ * entire body into memory with no cap — allowing any caller holding the
+ * X-Cowork-Token to exhaust server memory. We now read the stream in bounded
+ * chunks and reject oversize bodies with 413. */
+const MAX_BODY_BYTES = 256 * 1024;
+
+async function readCappedBody(req: NextRequest): Promise<string> {
+  if (!req.body) return '';
+  const reader = req.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_BODY_BYTES) {
+      throw new ClientError('request entity too large', 413);
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  text += decoder.decode();
+  return text;
+}
 
 /** Parse JSON request body.
  *
  * Returns `{}` for an empty/absent body so routes that accept optional bodies
- * keep working, but THROWS on malformed (non-empty) JSON. The throw is caught
- * by `withRouteError` and turned into a generic 400, so a malformed body can
- * no longer silently create a row with defaults. */
+ * keep working, but THROWS (a `ClientError`, mapped to 400 by `withRouteError`)
+ * on malformed (non-empty) JSON, so a malformed body can no longer silently
+ * create a row with defaults. Bodies larger than `MAX_BODY_BYTES` are rejected
+ * with 413 before they can exhaust memory. */
 export async function bodyJson(req: NextRequest): Promise<Record<string, unknown>> {
-  if (!req.body) return {};
-  const text = await req.text();
+  const text = await readCappedBody(req);
   if (!text) return {};
   try {
     return JSON.parse(text) as Record<string, unknown>;
   } catch {
-    // Throw a safe, generic message (no raw parse detail) — `withRouteError`
-    // maps it to a 400 via the "invalid" marker.
-    throw new Error('Invalid JSON body');
+    throw new ClientError('Invalid JSON body', 400);
   }
 }
 
 /** Tolerant variant of `bodyJson` for routes whose body is OPTIONAL.
  *
- * Never throws: returns `{}` for an absent / empty / malformed body so callers
- * that merely enrich an optional payload keep working. Routes that
- * REQUIRE a body must use `bodyJson`, which throws on malformed JSON so the
- * caller returns a 400 instead of silently creating a row with defaults. */
+ * Swallows malformed/empty JSON and returns `{}` so callers that merely enrich
+ * an optional payload keep working, but re-throws `ClientError` (e.g. the 413
+ * oversize rejection) so size limits are still enforced. Routes that REQUIRE a
+ * body must use `bodyJson`, which throws on malformed JSON. */
 export async function bodyJsonOptional(req: NextRequest): Promise<Record<string, unknown>> {
   try {
     return await bodyJson(req);
-  } catch {
+  } catch (e) {
+    if (e instanceof ClientError) throw e;
     return {};
   }
 }
@@ -59,14 +102,15 @@ export function serverError(error: string): Response {
 /** Validate that a URL string uses the http or https protocol.
  *  Returns `null` on success, or a 400 Response on failure.
  *
- * SSRF BOUNDARY: this function ONLY checks the URL *scheme*. It
- * deliberately does NOT reject loopback / RFC1918 / link-local / cloud-metadata
- * hosts, so legitimate localhost bookmarks keep working. Therefore callers MUST
- * enforce the SSRF boundary before a stored URL is ever *fetched or launched
- * server-side* by also gating on `isSsrfSafeUrl(url)` (which rejects
- * private/loopback hosts). The cockpit's storage routes (tabs/bookmarks) now
- * call `isSsrfSafeUrl` at ingest time as well, so a stored URL can never later
- * become an SSRF sink. The signatures of both functions are stable. */
+ * SSRF BOUNDARY: this function ONLY checks the URL *scheme*. It deliberately
+ * does NOT reject loopback / RFC1918 / link-local / cloud-metadata hosts, so
+ * legitimate developer bookmarks such as `http://localhost:3000` or
+ * `http://127.0.0.1:8080` keep working. That is correct for *storage* routes:
+ * stored URLs are opened client-side in the browser, never fetched
+ * server-side, so they cannot become an SSRF sink. The separate
+ * `isSsrfSafeUrl` guard is reserved for the point where a URL is actually
+ * *fetched or launched from the server* (storage routes must NOT call it).
+ * The signature of `validateHttpUrl` is stable. */
 export function validateHttpUrl(url: string): Response | null {
   try {
     const parsed = new URL(url);
@@ -80,12 +124,21 @@ export function validateHttpUrl(url: string): Response | null {
 }
 
 /**
- * Returns `true` if the host of `url` is safe to fetch/launch from the server
+ * Returns `true` if the host of `url` is safe to fetch/launch *from the server*
  * — i.e. it is NOT a loopback, RFC1918 private, link-local, or cloud-metadata
- * address. Defense-in-depth guard for SSRF. The cockpit currently only stores
- * URLs (see `validateHttpUrl`), so this is not yet enforced; it is exported so
- * callers that begin issuing outbound requests or launching URLs can call it.
- */
+ * address. Defense-in-depth guard for SSRF that MUST be applied at the moment
+ * the server issues an outbound request or launches a URL.
+ *
+ * IMPORTANT: this guard is intentionally NOT applied at *storage* time (e.g.
+ * tabs/bookmarks persistence), because stored URLs are only opened client-side
+ * in the browser and a developer's localhost bookmark must stay valid. Storage
+ * routes should use `validateHttpUrl` (scheme-only) instead. Only call
+ * `isSsrfSafeUrl` for genuine server-side outbound fetches/launches.
+ *
+ * The host is classified in its *resolved* form: this covers IPv4-mapped IPv6
+ * literals (`::ffff:127.0.0.1`), decimal (`2130706433`), octal (`0177.0.0.1`),
+ * and hex (`0x7f.0.0.1`) encodings, all of which a real HTTP client resolves to
+ * the same (possibly private) address. */
 export function isSsrfSafeUrl(url: string): boolean {
   let parsed: URL;
   try {
@@ -99,11 +152,86 @@ export function isSsrfSafeUrl(url: string): boolean {
   if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
   // Bare loopback / unspecified addresses.
   if (host === 'localhost' || host === '::1' || host === '0.0.0.0') return false;
-  // IPv6 link-local (fe80::/10) and unique-local (fc00::/7).
-  if (host.startsWith('fe80:') || host.startsWith('fc') || host.startsWith('fd')) return false;
-  // IPv4 private / loopback / link-local / CGNAT ranges.
-  if (isPrivateIpv4(host)) return false;
+  // Any loopback / RFC1918 / link-local / CGNAT host (in resolved form) is unsafe.
+  if (isRestrictedHost(host)) return false;
   return true;
+}
+
+/** True when `host` resolves to a loopback / private / link-local / CGNAT
+ *  address in any of the forms an HTTP client would accept: standard IPv4,
+ *  standard IPv6, IPv4-mapped IPv6, or the various integer encodings of an IPv4
+ *  address (decimal, octal, hex, and inet_aton shorthand). */
+function isRestrictedHost(host: string): boolean {
+  // IPv6 literal.
+  if (isIP(host) === 6) {
+    // IPv4-mapped IPv6 (`::ffff:a.b.c.d`) — classify the embedded address.
+    if (host.startsWith('::ffff:')) {
+      const embedded = host.slice('::ffff:'.length);
+      if (isRestrictedHost(embedded)) return true;
+    }
+    // IPv6 link-local (fe80::/10) and unique-local (fc00::/7). Gate on `isIP === 6`
+    // so a public hostname that merely starts with "fc"/"fd"/"fe80" is not blocked.
+    return host.startsWith('fe80:') || host.startsWith('fc') || host.startsWith('fd');
+  }
+  // Standard IPv4 literal.
+  if (isIP(host) === 4) return isPrivateIpv4(host);
+  // Non-standard encodings (decimal / octal / hex / inet_aton shorthand) that an
+  // HTTP client resolves to the same address. Normalize to dotted IPv4 first.
+  const normalized = normalizeEncodedIpv4(host);
+  if (normalized) return isPrivateIpv4(normalized);
+  return false;
+}
+
+/** Attempt to interpret `host` as an integer-encoded IPv4 address and return it
+ *  in dotted-decimal form, or `null` if it is not an IP-encoding at all.
+ *
+ *  Handles:
+ *    • pure decimal        `2130706433`   -> 127.0.0.1
+ *    • dotted, each octet decimal/octal/hex with inet_aton shorthand
+ *      `0177.0.0.1`        -> 127.0.0.1
+ *      `0x7f.0.0.1`        -> 127.0.0.1
+ *      `127.1`             -> 127.0.0.1
+ *  A genuine DNS hostname (e.g. `example.com`) returns `null` and is treated as
+ *  public. */
+function normalizeEncodedIpv4(host: string): string | null {
+  // Pure decimal integer form (e.g. 2130706433).
+  if (/^\d{1,10}$/.test(host)) {
+    const n = Number(host);
+    if (Number.isInteger(n) && n >= 0 && n <= 0xffffffff) {
+      return [
+        (n >>> 24) & 0xff,
+        (n >>> 16) & 0xff,
+        (n >>> 8) & 0xff,
+        n & 0xff,
+      ].join('.');
+    }
+    return null;
+  }
+  // Dotted form with 1-4 parts, each decimal / octal (0-prefix) / hex (0x-prefix).
+  const parts = host.split('.');
+  if (parts.length < 1 || parts.length > 4) return null;
+  const nums: number[] = [];
+  for (const raw of parts) {
+    const s = raw.toLowerCase();
+    let v: number;
+    if (s.startsWith('0x')) v = parseInt(s.slice(2), 16);
+    else if (s.startsWith('0')) v = parseInt(s, 8);
+    else v = parseInt(s, 10);
+    if (!Number.isFinite(v) || v < 0 || v > 0xffffffff) return null;
+    nums.push(v);
+  }
+  let value: number;
+  if (nums.length === 1) value = nums[0];
+  else if (nums.length === 2) value = (nums[0] << 24) | (nums[1] & 0xffffff);
+  else if (nums.length === 3) value = (nums[0] << 24) | (nums[1] << 16) | (nums[2] & 0xffff);
+  else value = (nums[0] << 24) | (nums[1] << 16) | (nums[2] << 8) | nums[3];
+  if (value < 0 || value > 0xffffffff) return null;
+  return [
+    (value >>> 24) & 0xff,
+    (value >>> 16) & 0xff,
+    (value >>> 8) & 0xff,
+    value & 0xff,
+  ].join('.');
 }
 
 function isPrivateIpv4(host: string): boolean {
@@ -131,6 +259,33 @@ export function parseLimit(req: NextRequest, defaultValue = 100, max = 200): num
   return Math.max(1, Math.min(parseInt(req.nextUrl.searchParams.get('limit') || String(defaultValue), 10) || defaultValue, max));
 }
 
+/** Maximum length for user-supplied free-text fields. These mirror the bounds
+ *  other cowork resources apply (names ≤ 64, userAgent ≤ 512, descriptions ≤
+ *  2000) so bookmarks/tabs can't store unbounded strings that bloat DB rows or
+ *  amplify response sizes. */
+export const MAX_NAME_LEN = 256;
+export const MAX_TITLE_LEN = 512;
+export const MAX_URL_LEN = 2048;
+export const MAX_SOURCE_LEN = 64;
+
+/** Coerce a user-supplied field to a bounded, type-safe string.
+ *
+ * Unlike a bare `String(body.x || fallback)` — which silently turns an object
+ * into `"[object Object]"` and persists it — this REJECTS non-string input with
+ * a 400 and truncates legitimate strings to `maxLen`. A present `undefined` /
+ * `null` falls back to `fallback` (also capped). All DB-write routes should
+ * funnel free-text through this instead of raw `String()` coercion, so stored
+ * invariants (type safety + max length) stay consistent across resources. */
+export function boundedString(value: unknown, maxLen: number, fallback?: string): string {
+  if (value === undefined || value === null) {
+    return (fallback ?? '').slice(0, maxLen);
+  }
+  if (typeof value !== 'string') {
+    throw new ClientError('field must be a string');
+  }
+  return value.slice(0, maxLen);
+}
+
 function newCorrelationId(): string {
   try {
     // crypto.randomUUID is available in Node 19+ and the Edge runtime.
@@ -144,11 +299,18 @@ function newCorrelationId(): string {
  * Redact obvious secret shapes from a loggable string so server-side error
  * logging does not capture credentials. Covers:
  *   • credentials embedded in URLs (http(s)://user:pass@host)
- *   • secret-bearing key=value pairs (password / token / secret / api_key / …)
+ *   • secret-bearing `key=value` pairs (password / token / secret / api_key / …)
+ *   • JSON-shaped secrets (`"password": "…"`, `"api_key": "…"`)
  *   • `Bearer` tokens
  *   • the configured COWORK_EVENT_TOKEN itself (if set and non-dev)
- */
-function redactSecrets(text: string): string {
+ *
+ * Applied to `Error.message` text today (defense-in-depth on potential secret
+ * leakage in error strings); the patterns are intentionally broad and can be
+ * reused to scrub request bodies/headers if a caller passes them.
+ *
+ * This is the canonical implementation — import it where needed (e.g. the log
+ * route) rather than maintaining a divergent copy. */
+export function redactSecrets(text: string): string {
   let out = text;
   // Credentials in URLs: http(s)://user:pass@host -> http(s)://***@host
   out = out.replace(/https?:\/\/[^@\s/]+@/gi, (m) =>
@@ -158,6 +320,11 @@ function redactSecrets(text: string): string {
   out = out.replace(
     /(password|passwd|token|secret|api[_-]?key|access[_-]?token|authorization|authorisation)=[^&\s"'<>]+/gi,
     "$1=***",
+  );
+  // JSON-shaped secrets: `"password": "secret"` / `"api_key": "..."`.
+  out = out.replace(
+    /"(password|passwd|token|secret|api[_-]?key|access[_-]?token|authorization|authorisation)"\s*:\s*"[^"]*"/gi,
+    '"$1":"***"',
   );
   // Bearer tokens.
   out = out.replace(/Bearer\s+[A-Za-z0-9._-]+/g, "Bearer ***");
@@ -175,32 +342,32 @@ function stableErrorCode(message: string): string {
   if (lower.includes("not found")) return "NOT_FOUND";
   if (lower.includes("not implemented")) return "NOT_IMPLEMENTED";
   if (lower.includes("unauthorized") || lower.includes("forbidden")) return "FORBIDDEN";
-  if (lower.includes("invalid") || lower.includes("required") || lower.includes("must be"))
+  if (lower.includes("required") || lower.includes("must be"))
     return "BAD_REQUEST";
   return "INTERNAL";
 }
 
 /**
- * Markers indicating a client-facing validation/business error produced by our
- * own code (vs. an internal failure like a DB/FS error that may leak table or
- * column names, constraint details, or absolute filesystem paths). Only these
- * messages are safe to echo to the client. */
-const SAFE_MESSAGE_MARKERS = [
-  'not found',
-  'not implemented',
-  'unauthorized',
-  'forbidden',
-  'invalid',
-  'required',
-  'must be',
-];
-
-/** Wrap an async route handler with try/catch that produces a JSON error.
+ * Wrap an async route handler with try/catch that produces a JSON error.
  *
  * @param fn         The route handler.
  * @param requestId  Optional request id propagated from middleware. When
  *                   provided it is reused as the `correlationId` so server error
- *                   logs and the client-facing error share one traceable id. */
+ *                   logs and the client-facing error share one traceable id.
+ *
+ * ERROR-LEAK CONTRACT (fail-closed):
+ *
+ * The ONLY messages echoed verbatim to the client are those carried by an
+ * app-authored `ClientError`. Its `message`/`status` are taken directly.
+ *
+ * Every other (internal) error — Prisma constraint/p2025 messages, driver
+ * frames, filesystem paths, etc. — is WITHHELD from the client and replaced with
+ * the generic `internal_error` key (HTTP 500) so operators can trace it via the
+ * server-log `correlationId`. We do NOT do substring sniffing of raw internal
+ * text, and we never echo a non-`ClientError` message, because phrases like
+ * "required" / "must be" / "not found" appear in internal DB/driver strings and
+ * would leak implementation details. Validation/business failures that the
+ * client should see MUST be raised as `ClientError`. */
 export async function withRouteError(
   fn: () => Promise<Response>,
   requestId?: string,
@@ -219,24 +386,15 @@ export async function withRouteError(
       stableErrorCode(message),
       redactSecrets(message),
     );
-    const lower = message.toLowerCase();
 
-    // Map known message markers to the correct HTTP status (unchanged behavior).
-    // NOTE: Prisma's internal "unique constraint"/"p2025" errors are intentionally
-    // NOT mapped here — echoing them would leak table/column names, so they
-    // fall through to the generic 500 below.
-    let status = 500;
-    if (lower.includes('not found')) status = 404;
-    else if (lower.includes('not implemented')) status = 501;
-    else if (lower.includes('unauthorized') || lower.includes('forbidden')) status = 403;
-    else if (lower.includes('invalid') || lower.includes('required') || lower.includes('must be')) status = 400;
+    // App-authored `ClientError`s are the only messages safe to echo verbatim;
+    // their status is taken from the error itself. Any other (internal) error is
+    // withheld from the client and mapped to a generic, leak-free 500.
+    if (e instanceof ClientError) {
+      return json({ error: e.message, correlationId }, e.status);
+    }
 
-    // Withhold the raw message from the client unless it is a known-safe
-    // validation/business error. Internal errors get a generic keyed id so
-    // operators can trace them via the server-log correlation id.
-    const isSafe = SAFE_MESSAGE_MARKERS.some((m) => lower.includes(m));
-    const error = isSafe ? message : 'internal_error';
-
-    return json({ error, correlationId }, status);
+    // Fail-closed: internal errors never reach the client as raw text.
+    return json({ error: 'internal_error', correlationId }, 500);
   }
 }

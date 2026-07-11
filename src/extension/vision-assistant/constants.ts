@@ -32,6 +32,25 @@ export const EMBED_PACKED_URL = `${MODEL_BASE_URL}/onnx/embed_tokens_int4_packed
 export const EMBED_SCALES_URL = `${MODEL_BASE_URL}/onnx/embed_tokens_int4_scales.bin`;
 export const EMBED_META_URL = `${MODEL_BASE_URL}/onnx/embed_tokens_int4_meta.json`;
 
+// ---------------------------------------------------------------------------
+// Integrity pinning (supply-chain protection)
+// ---------------------------------------------------------------------------
+// SHA-256 (lowercase hex) of each model file. The model-loader computes the
+// SHA-256 of every downloaded file and refuses to cache it when it does not
+// match the pinned value. Populate these before shipping — until a hash is
+// pinned for a file, the loader emits a security warning but still caches the
+// (unverified) file so the extension keeps working during rollout.
+// To compute a hash: `sha256sum <file>` (or `openssl dgst -sha256 <file>`).
+export const MODEL_FILE_HASHES: Partial<Record<string, string>> = {
+  // [VISION_GRAPH_URL]:   "0000000000000000000000000000000000000000000000000000000000000000",
+  // [VISION_DATA_URL]:    "0000000000000000000000000000000000000000000000000000000000000000",
+  // [LANGUAGE_GRAPH_URL]: "0000000000000000000000000000000000000000000000000000000000000000",
+  // [LANGUAGE_DATA_URL]:  "0000000000000000000000000000000000000000000000000000000000000000",
+  // [EMBED_PACKED_URL]:   "0000000000000000000000000000000000000000000000000000000000000000",
+  // [EMBED_SCALES_URL]:   "0000000000000000000000000000000000000000000000000000000000000000",
+  // [EMBED_META_URL]:     "0000000000000000000000000000000000000000000000000000000000000000",
+};
+
 // Internal file names for ONNX externalData
 export const VISION_DATA_NAME = "vision_mlp_int4.onnx.data";
 export const LANGUAGE_DATA_NAME = "language_tail_kv_int4.onnx.data";

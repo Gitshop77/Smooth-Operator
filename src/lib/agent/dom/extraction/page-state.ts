@@ -440,6 +440,14 @@ function serializeCompoundChildren(el: HTMLElement, depth: number, acc: WalkAccu
   if (children.length === 0) return;
   const indent = "\t".repeat(depth + 1);
   for (const vc of children) {
-    acc.lines.push(`${indent}<${vc.tag}${attrString(vc.attributes)} />${vc.text ? " " + vc.text : ""}`);
+    // Escape the trailing text (and collapse any stray newlines) so a value
+    // containing `<`, `>`, `&`, or a newline can't break the one-line-per-
+    // element contract after the `/>` token.
+    const safeText = vc.text
+      ? " " + vc.text.replace(/[\r\n]+/g, " ").replace(/[&<>]/g, (c) =>
+          c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;",
+        )
+      : "";
+    acc.lines.push(`${indent}<${vc.tag}${attrString(vc.attributes)} />${safeText}`);
   }
 }

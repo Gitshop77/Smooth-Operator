@@ -103,6 +103,15 @@ export function getFormatInstructions(schema: ZodType): string {
  *   2. The `evaluate` action runs them via {@link substituteCustomToolCalls}
  *      (called by the executor, owned by another agent — wiring documented in
  *      the sidepanel and background modules).
+ *
+ * TRUST BOUNDARY: `code` is arbitrary JavaScript executed on the page's
+ * `window`/`document` via the `evaluate` action. The storage backing it
+ * (`chrome.storage.local`, or `localStorage` on the demo page) can be written
+ * by any extension context or a stored-XSS in the options page, so a custom
+ * tool is effectively an explicit, user-opt-in RCE primitive. This module only
+ * validates the *shape* of a tool on load (see {@link isValidCustomTool}); it
+ * does not sandbox execution. Runtime confirmation of first use is the
+ * executor's responsibility (owned by another agent).
  */
 export interface CustomTool {
   /** Unique tool name (matches the regex below — used as a key). */
@@ -124,6 +133,70 @@ export const CUSTOM_TOOLS_STORAGE_KEY = "__opencowork_custom_tools";
  * escaping concerns, and matches typical `snake_case` tool names.
  */
 export const CUSTOM_TOOL_NAME_REGEX = /^[a-z][a-z0-9_]{0,63}$/;
+
+/**
+ * Maximum length (in characters) of a custom tool's `code`. Bound to keep the
+ * `evaluate` payload from ballooning — the `$` escaping plus the up-to-3-pass
+ * substitution can expand it further, and an oversized/oddly-nested tool risks
+ * hitting `LIMITS.evaluateTimeoutMs` for otherwise-benign tools. Tools exceeding
+ * this are dropped on load (see {@link isValidCustomTool}).
+ */
+export const MAX_CUSTOM_TOOL_CODE_LENGTH = 256 * 1024;
+
+/** Maximum rendered length of a tool description in the `<custom_tools>` block. */
+const MAX_TOOL_DESCRIPTION_LENGTH = 200;
+
+/**
+ * Type guard + validator for a persisted custom-tool entry.
+ *
+ * Guarantees `name` matches the safe name regex and that `code`/`description`
+ * are real strings of bounded length, so downstream prompt formatting and
+ * substitution never receive `undefined`/non-string values from a hand-edited
+ * or corrupted storage entry.
+ *
+ * NOTE — trust boundary: this validates *shape*, not *safety*. Custom-tool
+ * `code` is arbitrary JavaScript executed on the page; this guard does not
+ * sandbox it (see {@link CustomTool}).
+ */
+export function isValidCustomTool(value: unknown): value is CustomTool {
+  if (typeof value !== "object" || value === null) return false;
+  const t = value as Record<string, unknown>;
+  if (typeof t.name !== "string" || !CUSTOM_TOOL_NAME_REGEX.test(t.name)) return false;
+  if (typeof t.description !== "string") return false;
+  if (typeof t.code !== "string" || t.code.length > MAX_CUSTOM_TOOL_CODE_LENGTH) return false;
+  return true;
+}
+
+/**
+ * Sanitize a tool description before inlining it into the `<custom_tools>`
+ * prompt block. The description is untrusted (user-authored, persisted in
+ * `chrome.storage.local`) yet placed inside the trusted system prompt, so we:
+ *   1. collapse all whitespace (incl. newlines) — stops a description breaking
+ *      onto a new prompt line or spoofing block structure;
+ *   2. strip angle brackets — a `</custom_tools>` could otherwise close the
+ *      block early;
+ *   3. cap length so a huge description can't pad the prompt.
+ */
+function sanitizeToolDescription(description: string): string {
+  const collapsed = description.replace(/\s+/g, " ").trim();
+  const stripped = collapsed.replace(/[<>]/g, "");
+  if (stripped.length > MAX_TOOL_DESCRIPTION_LENGTH) {
+    return stripped.slice(0, MAX_TOOL_DESCRIPTION_LENGTH).trimEnd() + "…";
+  }
+  return stripped;
+}
+
+/**
+ * Surface a swallowed storage/parse error on a debug channel. We deliberately
+ * do NOT cache the empty result on error — `loadCustomTools` returns `[]`
+ * without assigning `customToolsCache`, so the next call retries rather than
+ * hiding all custom tools for the rest of the session.
+ */
+function logLoadError(source: string, err: unknown): void {
+  if (typeof console !== "undefined" && typeof console.debug === "function") {
+    console.debug(`[custom-tools] failed to load tools from ${source}:`, err);
+  }
+}
 
 /**
  * Load all custom tools from storage.
@@ -156,11 +229,13 @@ export async function loadCustomTools(): Promise<CustomTool[]> {
     try {
       const res = await chrome.storage.local.get(CUSTOM_TOOLS_STORAGE_KEY);
       const tools = (res[CUSTOM_TOOLS_STORAGE_KEY] as CustomTool[] | undefined) || [];
-      // Filter out any tools that don't pass the name regex (defensive — a
-      // hand-edited storage entry could otherwise smuggle a bad name).
-      customToolsCache = tools.filter((t) => CUSTOM_TOOL_NAME_REGEX.test(t.name));
+      // Keep only well-formed tools: valid name, string code/description, and a
+      // bounded code length (defensive — hand-edited or corrupted storage
+      // entries could otherwise smuggle a bad name or inject undefined values).
+      customToolsCache = tools.filter(isValidCustomTool);
       return customToolsCache;
-    } catch {
+    } catch (err) {
+      logLoadError("chrome.storage.local", err);
       return [];
     }
   }
@@ -168,9 +243,10 @@ export async function loadCustomTools(): Promise<CustomTool[]> {
   try {
     const raw = localStorage.getItem(CUSTOM_TOOLS_STORAGE_KEY);
     const tools = raw ? (JSON.parse(raw) as CustomTool[]) : [];
-    customToolsCache = tools.filter((t) => CUSTOM_TOOL_NAME_REGEX.test(t.name));
+    customToolsCache = tools.filter(isValidCustomTool);
     return customToolsCache;
-  } catch {
+  } catch (err) {
+    logLoadError("localStorage", err);
     return [];
   }
 }
@@ -201,7 +277,9 @@ export async function loadCustomTools(): Promise<CustomTool[]> {
 export async function formatCustomToolsBlock(): Promise<string> {
   const tools = await loadCustomTools();
   if (tools.length === 0) return "";
-  const lines = tools.map((t) => `- ${t.name}: ${t.description}`);
+  // Sanitize each description — it's untrusted input placed in the trusted
+  // system prompt (see {@link sanitizeToolDescription}).
+  const lines = tools.map((t) => `- ${t.name}: ${sanitizeToolDescription(t.description)}`);
   return (
     "<custom_tools>\n" +
     "The following custom JavaScript tools are available. Use `evaluate` with " +
@@ -253,7 +331,20 @@ export async function substituteCustomToolCalls(
       // `(()=>{document.title;})()` is valid (returns undefined, but that's
       // better than crashing).
       const needsIife = /\breturn\b/.test(sub) || /\b(const|let|var|if|for|while|throw|do|switch|try|function|class)\b/.test(sub) || /;/.test(sub);
-      return needsIife ? `(()=>{${sub}})()` : `(${sub})`;
+      // Escape `$` before returning: a function replacer's return value is
+      // re-parsed as a replacement string, so any `$&`/`$``/`$'`/`$n`/`$$`
+      // sequence inside the user's tool code would be silently reinterpreted.
+      // Doubling each `$` (`$` → `$$`) neutralises that interpretation, because
+      // the re-parse turns `$$` back into a single `$` (this correctly preserves
+      // literal `$1`, `$&`, `$'` etc. that appear in the tool code).
+      const escapedSub = sub.replace(/\$/g, "$$");
+      // Guard against a trailing single-line `// comment` in the tool body:
+      // without a trailing newline, the closing `)` / `})()` would land on the
+      // same line and be swallowed by the comment, producing a SyntaxError when
+      // the page evals the result. Appending a newline ends any line comment
+      // first. (Block comments `/* */` are unaffected.)
+      const body = escapedSub.endsWith("\n") ? escapedSub : escapedSub + "\n";
+      return needsIife ? `(()=>{${body}})()` : `(${body})`;
     });
   }
   return result;

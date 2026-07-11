@@ -6,9 +6,11 @@
  * {@link ConfigValidationError}).
  *
  * The schema mirrors the existing {@link AgentConfig} interface in
- * `../types.ts`. The validated output is structurally identical to what
+ * `../types.ts`. The validated output is compatible with what
  * `{ ...DEFAULT_CONFIG, ...userConfig }` produced before — the schema just
- * adds runtime validation at the boundary.
+ * adds runtime validation at the boundary. (Compatible, but not strictly
+ * structurally identical: a few fields such as `enableJudge` differ in
+ * optionality between the input and output types.)
  *
  * Usage:
  *   import { validateConfig, type AgentConfigInput } from "@/lib/agent/config/schema";
@@ -18,9 +20,12 @@
  *     // config is a fully-validated AgentConfig
  *   }
  *
- * The orchestrator calls {@link validateConfig} on every run. If validation
- * fails, it falls back to the plain spread-merge (backward-compatible — the
- * orchestrator never throws on bad config).
+ * The orchestrator calls {@link validateConfig} on every run. The input is
+ * always a merge of {@link DEFAULT_CONFIG} over any user override
+ * (`{ ...DEFAULT_CONFIG, ...userConfig }`), so every field has a value. If
+ * validation fails, {@link validateConfig} throws a {@link ConfigValidationError}
+ * and the orchestrator re-throws it as a hard failure — a broken config is
+ * NEVER silently accepted.
  */
 
 import { z } from "zod";
@@ -28,10 +33,30 @@ import { z } from "zod";
 // ─── Sub-schemas ────────────────────────────────────────────────────────────
 
 /** Schema for a single string-match evaluator input. */
-const StringMatchSchema = z.object({
-  type: z.enum(["exact_match", "must_include", "regex"]),
-  ref: z.string(),
-});
+const StringMatchSchema = z
+  .object({
+    type: z.enum(["exact_match", "must_include", "regex"]),
+    // Bound the pattern length so an attacker-influenced config cannot supply
+    // an arbitrarily huge (and potentially catastrophic-backtracking) regex.
+    ref: z.string().max(2000),
+  })
+  .superRefine((val, ctx) => {
+    // Validate `regex`-type refs compile at the boundary (don't push the check
+    // to evaluator runtime). This also bounds ReDoS risk: an invalid pattern is
+    // rejected here rather than silently treated as "no match" later, and a
+    // compiling-but-pathological pattern is at least length-capped above.
+    if (val.type === "regex") {
+      try {
+        new RegExp(val.ref);
+      } catch {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "regex ref is not a valid regular expression",
+          path: ["ref"],
+        });
+      }
+    }
+  });
 
 /** Schema for the URL-match evaluator input. */
 const UrlMatchSchema = z.object({
@@ -91,14 +116,27 @@ export const AgentConfigSchema = z.object({
   compactionCharThreshold: z.number().int().min(1000).default(30_000),
   /** Optional USD cost cap — aborts the run if exceeded. */
   costCapUsd: z.number().positive().optional(),
-  /** Whether to run the judge LLM after the planner reports task success. */
-  enableJudge: z.boolean().default(true),
+  /**
+   * Whether to run the judge LLM after the planner reports task success.
+   * Optional here (mirrors {@link AgentConfig}) — the orchestrator always merges
+   * {@link DEFAULT_CONFIG}, which sets it to `true`, so the runtime value is
+   * always present. Kept optional (not `.default(true)`) so the validated
+   * output type stays structurally identical to {@link AgentConfig}.
+   */
+  enableJudge: z.boolean().optional(),
   /** Whether to enable early-stop detection. */
   enableEarlyStop: z.boolean().optional(),
   /** Optional thresholds for the early-stop detector. */
   earlyStopThresholds: EarlyStopThresholdsSchema.optional(),
-  /** Whether to run the HTML-summarizer pre-pass before each navigator call. */
-  enableHtmlSummarizer: z.boolean().optional(),
+  /**
+   * Whether to run the HTML-summarizer pre-pass before each navigator call.
+   * Defaults to `true`: the summarizer is the single biggest per-action cost
+   * lever (the raw DOM is the largest part of the navigator request), so it is
+   * ON by default. Operators can opt OUT, but the navigator always applies a
+   * hard cap on the DOM size it ships to the model regardless of this flag (see
+   * `buildNavigatorUserMessage` / `prepareNavigatorRequest`).
+   */
+  enableHtmlSummarizer: z.boolean().optional().default(true),
   /** Optional expected-outcomes spec for deterministic evaluator fast-path. */
   expectedOutcomes: ExpectedOutcomesSchema.optional(),
 });
@@ -106,7 +144,7 @@ export const AgentConfigSchema = z.object({
 /** Input type for {@link AgentConfigSchema} (accepts partial input). */
 export type AgentConfigInput = z.input<typeof AgentConfigSchema>;
 
-/** Validated output type — structurally identical to {@link AgentConfig}. */
+/** Validated output type — compatible with, but not strictly identical to, {@link AgentConfig}. */
 export type AgentConfigValidated = z.output<typeof AgentConfigSchema>;
 
 // ─── Validation error ───────────────────────────────────────────────────────

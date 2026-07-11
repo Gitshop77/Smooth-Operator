@@ -144,29 +144,30 @@ function fetchWithTimeout(
 
   if (userSignal) {
     if (userSignal.aborted) {
+      // Already aborted before we even issue the fetch — reject immediately and
+      // skip constructing/invoking `fetch` against an already-aborted controller.
+      clearTimeout(timer);
+      return Promise.reject(new DOMException("Aborted", "AbortError"));
+    }
+    const onAbort = () => {
       clearTimeout(timer);
       controller.abort();
-    } else {
-      const onAbort = () => {
+    };
+    userSignal.addEventListener("abort", onAbort, { once: true });
+    // Clean up the listener on completion so it doesn't accumulate
+    // on the long-lived run-level abort signal.
+    return fetch(url, { ...init, redirect: "manual", signal: controller.signal })
+      .then(verifyNoRedirect)
+      .finally(() => {
         clearTimeout(timer);
-        controller.abort();
-      };
-      userSignal.addEventListener("abort", onAbort, { once: true });
-      // Clean up the listener on completion so it doesn't accumulate
-      // on the long-lived run-level abort signal.
-      return fetch(url, { ...init, redirect: "manual", signal: controller.signal })
-        .then(verifyNoRedirect)
-        .finally(() => {
-          clearTimeout(timer);
-          userSignal.removeEventListener("abort", onAbort);
-        })
-        .catch((e) => {
-          if (timedOut) {
-            throw new Error(`Request timeout after ${REQUEST_TIMEOUT_MS}ms`);
-          }
-          throw e;
-        });
-    }
+        userSignal.removeEventListener("abort", onAbort);
+      })
+      .catch((e) => {
+        if (timedOut) {
+          throw new Error(`Request timeout after ${REQUEST_TIMEOUT_MS}ms`);
+        }
+        throw e;
+      });
   }
 
   return fetch(url, { ...init, redirect: "manual", signal: controller.signal })
@@ -181,8 +182,8 @@ function fetchWithTimeout(
 }
 
 /** Create an HTTP transport that sends JSON + reads SSE/JSON-line streams. */
-export const httpJson = <FrameType = Frame>(opts: { framing: Framing<FrameType> }): Transport<unknown, HttpPrepared<FrameType>, FrameType> => ({
-  prepare: (input: TransportPrepareInput<unknown>): HttpPrepared<FrameType> => {
+export const httpJson = <Body = unknown, FrameType = Frame>(opts: { framing: Framing<FrameType> }): Transport<Body, HttpPrepared<FrameType>, FrameType> => ({
+  prepare: (input: TransportPrepareInput<Body>): HttpPrepared<FrameType> => {
     const bodyStr = input.encodeBody(input.body);
     const url = buildURL(input.endpoint, input.body);
     const baseHeaders: Record<string, string> = {
@@ -230,9 +231,11 @@ export const httpJson = <FrameType = Frame>(opts: { framing: Framing<FrameType> 
     // throw inside the retry callback above), so `res.ok` is guaranteed true
     // here — no guard needed.
     if (!res.body) {
-      // Non-streaming response — parse as single JSON
+      // Non-streaming response — parse the full body through the framing so it
+      // yields proper `FrameType` objects (consistent with the streaming path).
       const text = await res.text();
-      yield text as unknown as FrameType;
+      const frames = opts.framing.parse(text);
+      for (const frame of frames) yield frame;
       return;
     }
     const reader = res.body.getReader();
@@ -295,9 +298,11 @@ export const httpJson = <FrameType = Frame>(opts: { framing: Framing<FrameType> 
           const frames = opts.framing.parse(buffer);
           for (const frame of frames) yield frame;
         }
-        // Synthetic terminal frame.
-        yield "[DONE]" as unknown as FrameType;
-        return;
+        // A stalled mid-stream response is NOT a successful completion: re-throw
+        // so the consumer (and the orchestrator's retry loop) treats the truncated
+        // stream as a failure rather than silently executing truncated content and
+        // under-reporting usage/cost.
+        throw e;
       }
       // Non-stall errors (real network failures, aborts, etc.) propagate.
       throw e;

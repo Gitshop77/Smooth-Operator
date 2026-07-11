@@ -24,7 +24,7 @@ export async function handleScroll(
   // click reads stale cache before the clear lands.
   if (typeof chrome !== "undefined" && chrome.runtime?.id) {
     try { await chrome.runtime.sendMessage({ type: "CLEAR_VISION_CACHE" }); }
-    catch { /* SW may be asleep — non-fatal */ }
+    catch (err) { console.warn("CLEAR_VISION_CACHE failed; vision cache may be stale (SW may be asleep — non-fatal):", err); }
   }
   return { action, success: true, message: `Scrolled ${down ? "down" : "up"} ${pages} page(s)` };
 }

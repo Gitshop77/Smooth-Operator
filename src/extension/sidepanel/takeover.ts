@@ -24,7 +24,10 @@ import { addLogRow } from "./log-renderer";
  */
 export function showTakeoverBanner(reason: string): void {
   if (!takeoverBanner || !takeoverReason) return;
-  takeoverReason.textContent = `${reason} Perform the action manually, then click Resume.`;
+  // `textContent` replaces the entire node's text, so a single assignment is
+  // sufficient — any previously-rendered reason (including a duplicate render
+  // of the same takeover event) is overwritten, never appended.
+  takeoverReason.textContent = reason;
   takeoverBanner.hidden = false;
   if (resumeBtn) {
     resumeBtn.disabled = false;
@@ -44,10 +47,16 @@ resumeBtn?.addEventListener("click", () => {
   if (resumeBtn) resumeBtn.disabled = true;
   chrome.runtime.sendMessage({ type: "RESUME" }, () => {
     if (chrome.runtime.lastError) {
-      // No handler in background — the orchestrator's own onMessage listener
-      // (registered when it entered the takeover wait) still catches it.
-      // The lastError is expected if the background doesn't have an explicit
-      // RESUME handler; non-fatal.
+      // Best-effort: if the orchestrator is still in its takeover wait its
+      // onMessage listener catches RESUME even without an explicit handler, so
+      // this is normally quiet. A lastError here means the message genuinely
+      // failed to deliver (extension context invalidated, background crashed,
+      // schema mismatch) — log it so the failure is observable instead of
+      // silently swallowed.
+      addLogRow(
+        { type: "warn", message: "RESUME not delivered: " + (chrome.runtime.lastError?.message || "unknown error") },
+        ""
+      );
     }
   });
   // Also clear the pause flag in case the user had clicked Pause separately
@@ -130,8 +139,14 @@ export function promptPassword(message: string): Promise<string | null> {
 
     okBtn.addEventListener("click", () => finish(input.value));
     cancelBtn.addEventListener("click", () => finish(null));
+    // Enter submits from the input field (where typing happens).
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") finish(input.value);
+    });
+    // Esc cancels regardless of which focusable control is active — the input,
+    // OK, or Cancel — not only while focus sits on the password field (the
+    // previous behavior stranded keyboard users who had tabbed to a button).
+    overlay.addEventListener("keydown", (e) => {
       if (e.key === "Escape") finish(null);
     });
     overlay.addEventListener("click", (e) => {

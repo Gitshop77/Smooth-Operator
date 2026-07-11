@@ -49,6 +49,12 @@ export async function handleInput(
     if (action.clear !== false) el.textContent = text;
     else el.textContent = (el.textContent || "") + text;
     el.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    // Mirror the native-input path above and also dispatch `change` so
+    // contenteditable-aware frameworks (React onChange-wrapped
+    // contentEditable, ProseMirror/Slate change observers, etc.) commit the
+    // edit. Without it the host app may never register the change even though
+    // this handler reports success.
+    el.dispatchEvent(new Event("change", { bubbles: true }));
   } else {
     throw new Error(`element [${action.index}] is not a text input`);
   }

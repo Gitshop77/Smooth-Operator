@@ -12,6 +12,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Progress } from "@/components/ui/progress";
 import { ViewHeader } from "@/components/cowork/shared/view-header";
 import { LoadingSkeleton } from "@/components/cowork/shared/loading-skeleton";
+import { EmptyState } from "@/components/cowork/shared/empty-state";
 import { StatusPill, toneForStatus } from "@/components/cowork/shared/status-pill";
 import { timeAgo } from "@/lib/cowork-data/format";
 
@@ -49,9 +50,11 @@ export function AgentsView() {
           {agentsLoading ? (
             <LoadingSkeleton variant="cards" cardCount={4} />
           ) : (agents ?? []).length === 0 ? (
-            <Card className="p-8 text-center text-sm text-muted-foreground">
-              No agent trust grants. Agents are registered via the browser extension.
-            </Card>
+            <EmptyState
+              icon={<Bot className="size-6" />}
+              title="No agent trust grants"
+              description="Agents are registered via the browser extension."
+            />
           ) : (
             <motion.div
               initial={{ opacity: 0 }}
@@ -87,9 +90,11 @@ export function AgentsView() {
           {tasksLoading ? (
             <LoadingSkeleton rows={5} />
           ) : recent.length === 0 ? (
-            <Card className="p-8 text-center text-sm text-muted-foreground">
-              No tasks. Tasks are created by agents running in the browser extension.
-            </Card>
+            <EmptyState
+              icon={<ListChecks className="size-6" />}
+              title="No tasks"
+              description="Tasks are created by agents running in the browser extension."
+            />
           ) : (
             <motion.div
               initial={{ opacity: 0 }}
@@ -141,9 +146,9 @@ export function AgentsView() {
                         </p>
                       </div>
                       {t.status === "failed" ? (
-                        <AlertCircle className="size-5 text-rose-500 shrink-0" />
+                        <AlertCircle className="size-5 text-danger shrink-0" />
                       ) : t.status === "done" ? (
-                        <Check className="size-5 text-emerald-500 shrink-0" />
+                        <Check className="size-5 text-success shrink-0" />
                       ) : null}
                     </div>
                     <div className="space-y-1.5">
@@ -159,7 +164,7 @@ export function AgentsView() {
                         {steps.map((s, i) => (
                           <li key={i} className="flex items-center gap-2">
                             {s.done ? (
-                              <Check className="size-3 text-emerald-500" />
+                              <Check className="size-3 text-success" />
                             ) : (
                               <Clock className="size-3 text-muted-foreground" />
                             )}

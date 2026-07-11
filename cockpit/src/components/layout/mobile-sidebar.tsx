@@ -33,9 +33,9 @@ export function MobileSidebar() {
           <Menu className="size-4" />
         </Button>
       </SheetTrigger>
-      <SheetContent side="left" className="w-64 p-0 border-border">
-        <SheetTitle className="sr-only">Cowork Cockpit Navigation</SheetTitle>
-        <Sidebar onNavigate={() => setOpen(false)} className="border-r-0" />
+      <SheetContent side="left" className="w-60 p-0 border-border">
+        <SheetTitle className="sr-only">Open Cowork Navigation</SheetTitle>
+        <Sidebar onNavigate={() => setOpen(false)} className="border-r-0" forceExpanded />
       </SheetContent>
     </Sheet>
   );

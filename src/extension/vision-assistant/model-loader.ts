@@ -18,10 +18,19 @@ import {
   EMBED_PACKED_URL,
   EMBED_SCALES_URL,
   EMBED_META_URL,
+  MODEL_FILE_HASHES,
 } from "./constants";
 import type { DownloadProgress } from "./types";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** SHA-256 (lowercase hex) of a buffer, via the Web Crypto API. */
+async function sha256(buf: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", buf as BufferSource);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 /** Fetch with a stall watchdog: aborts if no progress within stallMs. */
 async function fetchAbortable(
@@ -30,18 +39,22 @@ async function fetchAbortable(
   stallMs: number = DOWNLOAD_STALL_MS,
 ): Promise<{ buf: Uint8Array; headers: Headers }> {
   const ctrl = new AbortController();
+  // Arm the stall watchdog BEFORE the fetch so a hung TCP/TLS handshake —
+  // the server accepts the connection but never sends response headers — is
+  // also aborted. The timer is reset on every reader.read() below.
+  let timer = setTimeout(() => ctrl.abort(), stallMs);
   const r = await fetch(url, { ...opts, signal: ctrl.signal });
   if (!(r.status === 200 || r.status === 206)) throw new Error(`status ${r.status}`);
-  const reader = r.body!.getReader();
+  if (!r.body) throw new Error(`empty response body for ${url}`);
+  const reader = r.body.getReader();
   const chunks: Uint8Array[] = [];
   let got = 0;
-  let timer = setTimeout(() => ctrl.abort(), stallMs);
   try {
     for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
       clearTimeout(timer);
       timer = setTimeout(() => ctrl.abort(), stallMs);
+      const { done, value } = await reader.read();
+      if (done) break;
       chunks.push(value);
       got += value.length;
     }
@@ -155,8 +168,42 @@ export class ModelLoader {
       const existing = await this.cache!.match(url);
       if (existing) continue; // Already cached
       const buf = await fetchBufProgress(url, name, onProgress);
+      await this.verifyIntegrity(url, name, buf);
       const response = new Response(buf as unknown as ArrayBuffer);
       await this.cache!.put(url, response);
+    }
+  }
+
+  /**
+   * Verify a downloaded model file against its pinned SHA-256.
+   *
+   * - If a hash is pinned for `url` and the computed digest does not match,
+   *   throws — tampered/corrupted weights are never cached (supply-chain guard).
+   * - If no hash is pinned yet, emits a security warning but still caches the
+   *   file so the extension keeps working during rollout. Maintainers MUST pin
+   *   every hash in MODEL_FILE_HASHES before shipping.
+   */
+  private async verifyIntegrity(
+    url: string,
+    name: string,
+    buf: Uint8Array,
+  ): Promise<void> {
+    const expected = MODEL_FILE_HASHES[url];
+    if (!expected) {
+      console.warn(
+        `[vision-assistant] Integrity check SKIPPED for "${name}" (${url}): ` +
+          `no pinned SHA-256 in MODEL_FILE_HASHES. Model weights are unverified ` +
+          `— pin the hash before shipping to guard against tampered weights.`,
+      );
+      return;
+    }
+    const actual = await sha256(buf);
+    if (actual !== expected.toLowerCase()) {
+      throw new Error(
+        `[vision-assistant] Integrity check FAILED for "${name}" (${url}): ` +
+          `expected ${expected.toLowerCase()}, got ${actual}. ` +
+          `Refusing to cache potentially tampered or corrupted model weights.`,
+      );
     }
   }
 

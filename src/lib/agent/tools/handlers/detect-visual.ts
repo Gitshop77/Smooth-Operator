@@ -28,27 +28,35 @@ export async function handleDetectVisual(
     };
   }
   try {
+    // `chrome.runtime.sendMessage` resolves `undefined` (not a rejection) when
+    // no listener is present, so read the response through a typed shape and
+    // validate each field before consuming it.
     const res = (await chrome.runtime.sendMessage({
       type: "DETECT_VISUAL",
       query: action.query,
-    })) as {
-      ok: boolean;
-      count?: number;
-      description?: string;
-      error?: string;
-    };
-    if (!res?.ok) {
+    })) as
+      | { ok?: boolean; count?: number; description?: string; error?: string }
+      | undefined
+      | null;
+    if (typeof res?.ok !== "boolean" || !res.ok) {
+      const err =
+        res && typeof res.error === "string" && res.error ? res.error : "no response from extension";
       return {
         action,
         success: false,
-        message: `detect_visual failed: ${res?.error || "no response"}`,
+        message: `detect_visual failed: ${err}`,
       };
     }
+    const count = typeof res.count === "number" ? res.count : 0;
+    const description =
+      typeof res.description === "string" && res.description
+        ? res.description
+        : `Detected ${count} visual element(s). Use [v1], [v2] etc. to click them on the next step.`;
     return {
       action,
       success: true,
-      message: `Detected ${res.count ?? 0} visual element(s)`,
-      extractedContent: res.description ?? `Detected ${res.count ?? 0} visual element(s). Use [v1], [v2] etc. to click them on the next step.`,
+      message: `Detected ${count} visual element(s)`,
+      extractedContent: description,
     };
   } catch (e) {
     return {

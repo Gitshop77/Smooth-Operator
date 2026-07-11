@@ -54,13 +54,19 @@ export async function runPlanner(
     const result = await deps.plannerCall(plannerRequest);
     raw = result.raw;
     const { tokensIn, tokensOut, reasoningTokens, cachedInputTokens, model, costUsd: precomputedCost } = result;
+    // Read cache-write (creation) tokens when the caller threads them through.
+    // `cachedWriteInputTokens` is billed at the (higher) cache-write rate, so
+    // omitting it under-reports Anthropic cache-creation cost. The field is
+    // read via a cast until the upstream result types (loop/types.ts) and
+    // the loop-deps wiring (llm-direct.ts) propagate it end-to-end.
+    const cachedWriteInputTokens = (result as { cachedWriteInputTokens?: number }).cachedWriteInputTokens ?? 0;
     if (tokensIn !== undefined && tokensOut !== undefined && model) {
       // Prefer the provider-bridge's pre-computed costUsd (correctly accounts
-      // for cachedInputTokens). Fall back to estimateCost with
-      // cachedInputTokens passed through (dropping cachedInputTokens would
-      // under-report Anthropic cached-step cost by up to 90%, disabling
-      // cost-cap enforcement).
-      const cost = precomputedCost ?? estimateCost(model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens);
+      // for cachedInputTokens + cachedWriteInputTokens). Fall back to
+      // estimateCost with cachedInputTokens AND cachedWriteInputTokens passed
+      // through (dropping either under-reports Anthropic cached-step cost by up
+      // to 90%, disabling cost-cap enforcement).
+      const cost = precomputedCost ?? estimateCost(model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens);
       args.onCost(cost, tokensIn, tokensOut);
       deps.onEvent({ type: "cost", step: args.step, tokensIn, tokensOut, costUsd: cost, model });
       usage = { tokensIn, tokensOut, model, costUsd: cost, reasoningTokens, cachedInputTokens };
@@ -100,31 +106,51 @@ export async function callNavigatorWithRetry(
   if (dispatcher && ctx) await dispatcher.llmStart(ctx, [navRequest]);
   // finally block guarantees `llmEnd` fires on every path after `llmStart`
   // (unparseable output throw, transient error, success). `fired` guards
-  // against double-fire on the success path.
+  // against double-fire on the success path. Cost attribution mirrors
+  // `runPlanner`: it is reported once on the success path AND once in the
+  // `finally` block (guarded by `costFired`) so a navigator call that
+  // consumed tokens but returned unparseable output or hit a transient error
+  // is still costed in the per-phase callback breakdown — not only in the
+  // run-level total via `onCost`/`onEvent`.
   let fired = false;
+  let costFired = false;
   let lastRaw = "";
   let lastUsage: LLMUsageInfo | undefined;
   try {
     let lastError: string | undefined;
     for (let retry = 0; retry <= MAX_PARSE_RETRIES; retry++) {
-      const { raw, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, model, costUsd: precomputedCost } = await deps.navigatorCall(navRequest);
+      const navResult = await deps.navigatorCall(navRequest);
+      const { raw, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, model, costUsd: precomputedCost } = navResult;
+      // Read cache-write (creation) tokens when the caller threads them through
+      // (billed at the higher cache-write rate; omitted, it under-reports
+      // Anthropic cache-creation cost). Cast until upstream types/loop-deps
+      // wiring propagate it end-to-end.
+      const cachedWriteInputTokens = (navResult as { cachedWriteInputTokens?: number }).cachedWriteInputTokens ?? 0;
       lastRaw = raw;
       let usage: LLMUsageInfo | undefined;
       if (tokensIn !== undefined && tokensOut !== undefined && model) {
-        // Prefer pre-computed costUsd; fall back to estimateCost with cachedInputTokens.
-        const cost = precomputedCost ?? estimateCost(model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens);
+        // Prefer pre-computed costUsd; fall back to estimateCost with
+        // cachedInputTokens AND cachedWriteInputTokens (billed at the higher
+        // cache-write rate) passed through.
+        const cost = precomputedCost ?? estimateCost(model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens);
+        // Run-level cost accounting stays per-attempt so the run total (and
+        // cost-cap enforcement) stays exact across retries.
         onCost(cost, tokensIn, tokensOut);
         deps.onEvent({ type: "cost", step, tokensIn, tokensOut, costUsd: cost, model });
         usage = { tokensIn, tokensOut, model, costUsd: cost, reasoningTokens, cachedInputTokens };
       }
       lastUsage = usage;
-      if (dispatcher && ctx && usage) {
-        await dispatcher.cost(ctx, usage);
-      }
       const parsed = parseAgentOutput(raw);
       if (parsed.ok && parsed.output) {
-        if (dispatcher && ctx) await dispatcher.llmEnd(ctx, { content: raw, usage });
-        fired = true;
+        if (dispatcher && ctx) {
+          await dispatcher.llmEnd(ctx, { content: raw, usage });
+          fired = true;
+          // Single per-phase cost attribution on the success path.
+          if (usage) {
+            await dispatcher.cost(ctx, usage);
+            costFired = true;
+          }
+        }
         return parsed.output;
       }
       lastError = parsed.error;
@@ -157,6 +183,10 @@ export async function callNavigatorWithRetry(
   } finally {
     if (dispatcher && ctx && !fired) {
       await dispatcher.llmEnd(ctx, { content: lastRaw, usage: lastUsage });
+      // Attribute cost on the parse-failure / transient-error path too — the
+      // LLM call DID consume tokens. `costFired` guards against double-counting
+      // the (already-costed) success path.
+      if (!costFired && lastUsage) await dispatcher.cost(ctx, lastUsage);
     }
   }
 }

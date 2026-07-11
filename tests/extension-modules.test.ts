@@ -114,8 +114,13 @@ describe("provider-config: buildProvider", () => {
 
 describe("provider-config: readProviderConfig", () => {
   beforeEach(() => {
-    // Stub chrome.storage.local for the test.
+    // Stub chrome.storage for the test. The API key is intentionally kept in
+    // `chrome.storage.session` (in-memory, never written to disk) for security —
+    // it must NOT be persisted in chrome.storage.local as plaintext. The test
+    // reflects that design: provider/model/baseUrl live in `local`, the apiKey
+    // lives in `session`.
     const store: Record<string, unknown> = {};
+    const sessionStore: Record<string, unknown> = {};
     (globalThis as unknown as { chrome: unknown }).chrome = {
       storage: {
         local: {
@@ -128,15 +133,28 @@ describe("provider-config: readProviderConfig", () => {
             return Promise.resolve(result);
           }),
         },
+        session: {
+          get: vi.fn((keys: string | string[]) => {
+            const keyArr = Array.isArray(keys) ? keys : [keys];
+            const result: Record<string, unknown> = {};
+            for (const k of keyArr) {
+              if (k in sessionStore) result[k] = sessionStore[k];
+            }
+            return Promise.resolve(result);
+          }),
+        },
       },
     };
-    // Expose store for individual tests to populate.
+    // Expose stores for individual tests to populate.
     (globalThis as unknown as { __testStore: Record<string, unknown> }).__testStore = store;
+    (globalThis as unknown as { __testSessionStore: Record<string, unknown> }).__testSessionStore =
+      sessionStore;
   });
 
   afterEach(() => {
     delete (globalThis as unknown as { chrome?: unknown }).chrome;
     delete (globalThis as unknown as { __testStore?: unknown }).__testStore;
+    delete (globalThis as unknown as { __testSessionStore?: unknown }).__testSessionStore;
   });
 
   test("returns null when no provider is set", async () => {
@@ -146,10 +164,14 @@ describe("provider-config: readProviderConfig", () => {
 
   test("returns the stored provider config", async () => {
     const store = (globalThis as unknown as { __testStore: Record<string, unknown> }).__testStore;
+    const sessionStore = (globalThis as unknown as { __testSessionStore: Record<string, unknown> })
+      .__testSessionStore;
     store.provider = "openai";
-    store.apiKey = "sk-test";
     store.model = "gpt-4o";
     store.baseUrl = "";
+    // The API key is read from chrome.storage.session (in-memory), never from
+    // chrome.storage.local (plaintext on disk).
+    sessionStore.apiKey = "sk-test";
 
     const config = await readProviderConfig();
     expect(config).not.toBeNull();

@@ -24,6 +24,7 @@ import {
   generateAccessibilityTree,
   initElementMap,
   resolveRef,
+  __test_resetRegistry,
 } from "../src/lib/agent/dom/ax-tree";
 import { installJsdomLayoutMock, restoreJsdomLayoutMock } from "./helpers";
 
@@ -43,13 +44,11 @@ import { installJsdomLayoutMock, restoreJsdomLayoutMock } from "./helpers";
 
 beforeEach(() => {
   document.body.innerHTML = "";
-  // Initialize + reset the global element map so ref_N assignments are
-  // deterministic per test (initElementMap is idempotent — it won't reset
-  // an existing map — so we reset manually).
+  // The element-ref registry is module-scoped (off `window`) for security, so
+  // reset it via the test hook to keep ref_N assignments deterministic per
+  // test (initElementMap alone is idempotent and won't clear an existing map).
+  __test_resetRegistry();
   initElementMap();
-  window.__openCoworkElementMap = {};
-  window.__openCoworkElementReverseMap = new WeakMap();
-  window.__openCoworkRefCounter = 0;
   installJsdomLayoutMock();
 });
 

@@ -38,11 +38,30 @@ export interface Route<Body = unknown, Prepared = unknown> {
   readonly prepareTransport: (body: Body, request: LLMRequest) => Prepared;
 }
 
+/**
+ * A `Model` is the serializable handle carried on an `LLMRequest`. It deliberately
+ * contains NO functions and NO reference to the (function-valued) `Route` — only the
+ * `routeId` needed to resolve the live `Route` from the module-level `routeRegistry`
+ * on the side that executes the request. This keeps `LLMRequest` safe to pass across
+ * `chrome.runtime`/`postMessage` boundaries (structured clone), which would otherwise
+ * throw `DataCloneError` on the circular `route` reference and its closures, and would
+ * recurse infinitely under `JSON.stringify`.
+ */
 export interface Model {
   readonly id: string;
   readonly provider: string;
-  readonly route: Route;
+  readonly routeId: string;
 }
+
+/**
+ * Registry mapping a stable route key to its (function-valued) live `Route`.
+ * Routes are registered when constructed via `make`/`makeFromTransport`; `generate`
+ * resolves the executable route from a `Model.routeId` through this registry instead
+ * of carrying the route on the request payload. Both the producer and consumer contexts
+ * import the same route definitions (via the provider modules), so the keys line up
+ * across the message-passing boundary.
+ */
+const routeRegistry = new Map<string, Route<any, any>>();
 
 export interface GenerationOptions {
   readonly temperature?: number;
@@ -87,10 +106,10 @@ export interface MakeRouteInput<Body, FrameType, EventType, State> {
 export function make<Body, FrameType, EventType, State>(
   input: MakeRouteInput<Body, FrameType, EventType, State>
 ): Route<Body, HttpPrepared<FrameType>> {
-  const transport = httpJson<FrameType>({ framing: input.framing });
+  const transport = httpJson<Body, FrameType>({ framing: input.framing });
   return makeFromTransport({
     ...input,
-    transport: transport as unknown as Transport<Body, HttpPrepared<FrameType>, FrameType>,
+    transport,
   });
 }
 
@@ -100,6 +119,7 @@ function makeFromTransport<Body, Prepared, FrameType, EventType, State>(
   const protocol = input.protocol;
   const encodeBody = (body: Body): string => JSON.stringify(body);
 
+  const routeId = `${input.provider ?? input.id}::${input.id}`;
   const route: Route<Body, Prepared> = {
     endpoint: input.endpoint,
     auth: input.auth ?? Auth.none,
@@ -107,7 +127,7 @@ function makeFromTransport<Body, Prepared, FrameType, EventType, State>(
     model: (modelInput: { id: string; provider?: string }): Model => ({
       id: modelInput.id,
       provider: modelInput.provider ?? input.provider ?? input.id,
-      route: route as unknown as Route,
+      routeId,
     }),
     prepareTransport: (body: Body, _request: LLMRequest): Prepared =>
       input.transport.prepare({
@@ -139,6 +159,7 @@ function makeFromTransport<Body, Prepared, FrameType, EventType, State>(
       }
     },
   };
+  routeRegistry.set(routeId, route);
   return route;
 }
 
@@ -149,7 +170,12 @@ export async function generate(
   request: LLMRequest,
   signal?: AbortSignal
 ): Promise<LLMResponse> {
-  const route = request.model.route;
+  const route = routeRegistry.get(request.model.routeId);
+  if (!route) {
+    throw new Error(
+      `No route registered for model "${request.model.provider}/${request.model.id}" (routeId "${request.model.routeId}"). The route definitions must be imported in this execution context.`
+    );
+  }
   const body = await route.body.from(request);
   const prepared = route.prepareTransport(body, request);
   let content = "";

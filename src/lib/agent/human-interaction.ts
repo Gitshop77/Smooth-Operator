@@ -129,5 +129,29 @@ export async function askHuman(req: HumanInteractionRequest): Promise<HumanInter
     const value = window.prompt(req.message, req.defaultValue ?? "");
     return value === null ? { mode: "cancelled" } : { mode: "input", value };
   }
+  if (req.mode === "select") {
+    // List the options so the user can pick by number. A cancelled prompt
+    // (null) or an out-of-range/invalid pick returns `cancelled` rather than
+    // silently swallowing the choice.
+    const options = req.options ?? [];
+    if (options.length === 0) {
+      // No options to choose from — there is nothing meaningful to select.
+      return { mode: "cancelled" };
+    }
+    const list = options.map((opt, i) => `${i + 1}. ${opt}`).join("\n");
+    const raw = window.prompt(`${req.message}\n\n${list}`, "1");
+    if (raw === null) return { mode: "cancelled" };
+    const idx = Number.parseInt(raw.trim(), 10) - 1;
+    if (Number.isNaN(idx) || idx < 0 || idx >= options.length) {
+      return { mode: "cancelled" };
+    }
+    return { mode: "select", value: options[idx] };
+  }
+  if (req.mode === "request_help") {
+    // Free-text help request — capture whatever the user types. A cancelled
+    // prompt returns `cancelled` instead of inventing a value.
+    const value = window.prompt(req.message);
+    return value === null ? { mode: "cancelled" } : { mode: "request_help", value };
+  }
   return { mode: "cancelled" };
 }

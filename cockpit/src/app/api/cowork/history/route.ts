@@ -1,6 +1,15 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
-import { json, badRequest, withRouteError, parseLimit, bodyJsonOptional } from '@/lib/cowork/api/http';
+import { Prisma } from '@prisma/client';
+import {
+  json,
+  badRequest,
+  withRouteError,
+  parseLimit,
+  bodyJsonOptional,
+  bodyJson,
+  validateHttpUrl,
+} from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
 export async function GET(req: NextRequest): Promise<Response> {
@@ -26,11 +35,43 @@ export async function GET(req: NextRequest): Promise<Response> {
   });
 }
 
+// POST /api/cowork/history  — record a visit to a URL.
+// Honors the WRITE CONTRACT in prisma/schema.prisma: `HistoryEntry.url` is
+// @unique, so revisiting a URL MUST NOT raw-create (that throws P2002). We
+// upsert on `url`: a first visit inserts, a revisit increments `visitCount`
+// and refreshes `title`/`lastVisitedAt`. This is the upsert write path the
+// schema comment was referring to; previously the table was GET/DELETE-only
+// and any future naive `create` would 500 on the first revisit.
+export async function POST(req: NextRequest): Promise<Response> {
+  return withRouteError(async () => {
+    const body = await bodyJson(req);
+    const url = typeof body.url === 'string' ? body.url.trim() : '';
+    if (!url) return badRequest('url required (non-empty string)');
+    // Stored URLs open client-side in the browser, never fetched server-side,
+    // so we only enforce the scheme (mirrors the storage-route contract).
+    const urlErr = validateHttpUrl(url);
+    if (urlErr) return urlErr;
+    const title = typeof body.title === 'string' ? body.title.slice(0, 500) : '';
+    const entry = await db.historyEntry.upsert({
+      where: { url },
+      create: { url, title },
+      update: {
+        title,
+        visitCount: { increment: 1 },
+        lastVisitedAt: new Date(),
+      },
+    });
+    return json({ ok: true, entry }, 201);
+  });
+}
+
 // DELETE /api/cowork/history?id=<historyEntryId>  — erase a single history
 // entry. DELETE /api/cowork/history?all=1         — erase all browsing history.
 // Gated by the same X-Cowork-Token check as every other /api/cowork/* data
 // route (enforced in middleware.ts). Representative PII-erasure endpoint
-// (GDPR-style "right to erasure" for stored browsing history).
+// (GDPR-style "right to erasure" for stored browsing history). See PRIVACY.md
+// in the repo root for the full data-flow / retention / deletion disclosure
+// that this endpoint backs.
 // NOTE: history erasure uses Prisma directly (the cockpit owns this
 // table), whereas ai/chat proxies to cowork-events. Both ultimately return the
 // same `{ ok }` envelope shape; the divergence is intentional.
@@ -56,10 +97,9 @@ export async function DELETE(req: NextRequest): Promise<Response> {
     try {
       await db.historyEntry.delete({ where: { id } });
     } catch (e) {
-      // Prisma throws P2025 (RecordNotFound) when the id doesn't exist.
-      const msg = e instanceof Error ? e.message : '';
-      const lower = msg.toLowerCase();
-      if (lower.includes('not found') || lower.includes('p2025')) {
+      // Prisma throws P2025 (RecordNotFound) when the id doesn't exist. The
+      // code lives in `e.code`, not the message, so test that directly.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
         return json({ error: 'not found' }, 404);
       }
       throw e;

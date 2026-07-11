@@ -211,14 +211,29 @@ export async function readProviderConfig(): Promise<ProviderConfig | null> {
   if (typeof chrome === "undefined" || !chrome.storage?.local) return null;
   const res = await chrome.storage.local.get([
     "provider",
-    "apiKey",
     "model",
     "baseUrl",
+    "resourceName",
   ]);
+  // The API key is persisted in `chrome.storage.session` (in-memory, never on
+  // disk) for safety. Read it from there; fall back to `local` only for
+  // not-yet-migrated installs. Never console.log the value.
+  let apiKey = "";
+  if (chrome.storage?.session) {
+    const sres = await chrome.storage.session.get(["apiKey"]);
+    apiKey = (sres.apiKey as string) || "";
+  }
+  if (!apiKey) apiKey = (res.apiKey as string) || "";
   const provider = (res.provider as string) || "";
   if (!provider) return null; // no provider set → unconfigured user
-  const apiKey = (res.apiKey as string) || "";
   const model = (res.model as string) || "";
   const baseUrl = (res.baseUrl as string) || "";
-  return { provider, apiKey, model, baseUrl: baseUrl || undefined };
+  const resourceName = (res.resourceName as string) || "";
+  return {
+    provider,
+    apiKey,
+    model,
+    baseUrl: baseUrl || undefined,
+    resourceName: resourceName || undefined,
+  };
 }

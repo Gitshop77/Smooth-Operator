@@ -2,11 +2,10 @@
 
 import * as React from "react";
 import { motion } from "framer-motion";
-import { Wrench, Search, ChevronRight } from "lucide-react";
+import { Wrench, ChevronRight } from "lucide-react";
 
 import { useMcpTools } from "@/hooks/use-cowork-query";
 import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -14,6 +13,7 @@ import {
 import { ViewHeader } from "@/components/cowork/shared/view-header";
 import { LoadingSkeleton } from "@/components/cowork/shared/loading-skeleton";
 import { EmptyState } from "@/components/cowork/shared/empty-state";
+import { SearchInput } from "@/components/cowork/shared/search-input";
 
 export function McpToolsView() {
   const { data, isLoading } = useMcpTools();
@@ -47,17 +47,15 @@ export function McpToolsView() {
         icon={<Wrench className="size-5" />}
         actions={
           <>
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-              <Input
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
-                placeholder="Search tools…"
-                className="pl-8 h-9 w-44 sm:w-56"
-              />
-            </div>
+            <SearchInput
+              value={filter}
+              onChange={setFilter}
+              ariaLabel="Search tools"
+              placeholder="Search tools…"
+              className="w-44 sm:w-56"
+            />
             <Select value={category} onValueChange={setCategory}>
-              <SelectTrigger className="h-9 w-40" size="sm">
+              <SelectTrigger className="h-9 w-40" size="sm" aria-label="Filter by category">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>

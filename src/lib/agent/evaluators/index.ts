@@ -86,19 +86,24 @@ export class EvaluatorComb {
     const reasons: string[] = [];
     let score = 1.0;
 
-    if (input.string) {
+    // `kinds` gates which evaluators run. When `kinds` is empty (legacy /
+    // unspecified), fall back to input-presence so behavior is unchanged for
+    // callers that don't pass a configured list.
+    const runAll = this.kinds.length === 0;
+
+    if (input.string && (runAll || this.kinds.includes("string_match"))) {
       const r: StringEvaluatorResult = this.stringEval.evaluate(input.string);
       results.push(r);
       score *= r.score;
       if (r.score < 1) reasons.push(r.reason);
     }
-    if (input.url) {
+    if (input.url && (runAll || this.kinds.includes("url_match"))) {
       const r: URLEvaluatorResult = this.urlEval.evaluate(input.url);
       results.push(r);
       score *= r.score;
       if (r.score < 1) reasons.push(r.reason);
     }
-    if (input.html) {
+    if (input.html && (runAll || this.kinds.includes("program_html"))) {
       const r: HTMLContentEvaluatorResult = await this.htmlEval.evaluate(input.html);
       results.push(r);
       score *= r.score;

@@ -1,6 +1,14 @@
 /**
  * Anti-detection / stealth scripts — injected via chrome.scripting into the
- * page's MAIN world before any page JS runs.
+ * page's MAIN world as early as possible.
+ *
+ * NOTE: `injectImmediately: true` only guarantees earliest injection for
+ * *newly created / navigated* documents. For an already-loaded tab the script
+ * necessarily runs after the page's own bootstrap scripts have executed, so
+ * stealth is best-effort on existing tabs: a page that reads
+ * `navigator.webdriver` during its own load may already have captured the
+ * automation signal. For the strongest guarantee call `injectAntiDetection`
+ * immediately on tab creation or at navigation start — not after `load`.
  *
  * Without these, sites like GitHub, Google, and Cloudflare-protected sites
  * detect `navigator.webdriver === true` (and a dozen other automation
@@ -30,11 +38,17 @@
 
 /**
  * Inject the 13 anti-detection patches into a tab.
- * Call this after content-script injection (or before — both work, since the
- * patches run in the MAIN world, isolated from the content-script world).
  *
- * Failures are swallowed — some pages (chrome://, about:) block injection
- * and we don't want to crash the run.
+ * Best called on tab creation / at navigation start. For an already-loaded
+ * tab the patches still run (in the MAIN world, isolated from the
+ * content-script world) but may arrive after the page's own bootstrap, so
+ * timing is best-effort — see the module-level note above.
+ *
+ * Injection failures are non-fatal. Some pages (chrome://, about:, edge://,
+ * other extension pages) block script injection by design; those are logged
+ * at debug level. Any *unexpected* failure (tab closed mid-navigation,
+ * missing permission, etc.) is logged at warning level so the orchestrator
+ * or user can see that stealth was NOT applied to this tab.
  *
  * @param tabId The tab to inject into.
  */
@@ -47,8 +61,20 @@ export async function injectAntiDetection(tabId: number): Promise<void> {
       func: stealthScriptBody,
     });
   } catch (e) {
-    // Non-fatal — some pages (chrome://, about:) block injection.
-    console.debug("[anti-detection] injection failed:", e);
+    const msg = e instanceof Error ? e.message : String(e);
+    // Pages like chrome://, about:, edge:// and other extension pages block
+    // script injection by design — expected and non-fatal.
+    const isBlockedPage =
+      /cannot access|can'?t access|chrome:\/\/|about:|edge:\/\/|not allowed|not permitted|forbidden/i.test(
+        msg,
+      );
+    if (isBlockedPage) {
+      console.debug("[anti-detection] injection skipped (blocked page):", msg);
+    } else {
+      // Unexpected failure — surface so the orchestrator/user knows stealth
+      // was not applied to this tab (rather than failing silently).
+      console.warn("[anti-detection] injection failed unexpectedly:", msg);
+    }
   }
 }
 

@@ -20,8 +20,22 @@ export { COCKPIT_VERSION };
  * who can set `Host` could otherwise redirect LLM agents consuming the
  * bootstrap / manifest to attacker-controlled URLs.
  */
-export function getCockpitBaseUrl(): string {
-  return process.env.COWORK_BASE_URL || "http://localhost:3000";
+function getCockpitBaseUrl(): string {
+  const configured = process.env.COWORK_BASE_URL;
+  if (configured) return configured;
+  // Fail-closed in production: never advertise a localhost origin through the
+  // agent discovery contract. A production deployment without COWORK_BASE_URL
+  // should surface this loudly rather than silently pointing agents at
+  // http://localhost:3000.
+  if (process.env.NODE_ENV === "production") {
+    console.error(
+      "[agent-bootstrap] COWORK_BASE_URL is unset in a production deployment; " +
+        "the agent bootstrap contract will not advertise an absolute base URL. " +
+        "Set COWORK_BASE_URL to the deployed cockpit origin (https://…).",
+    );
+    return "";
+  }
+  return "http://localhost:3000";
 }
 
 /** Back-compat alias kept so existing call sites can migrate incrementally. */
@@ -46,7 +60,7 @@ export const DISCOVERY_ROUTE_AUTH = {
   dataRouteAuth: {
     methods: ["X-Cowork-Token"],
     description:
-      "All /api/cowork/* routes except the 5 public discovery routes (/agent/bootstrap, /agent/manifest, /agent, /agent/version, /skill) require an X-Cowork-Token header matching the server-side COWORK_EVENT_TOKEN env var. Default dev-token in development; fail-closed 401 in production if unset or dev-token.",
+      "All /api/cowork/* routes except the 5 public discovery routes (/agent/bootstrap, /agent/manifest, /agent, /agent/version, /skill) require an X-Cowork-Token header matching the server-side secret. The server resolves the secret as COWORK_UI_TOKEN if set, otherwise falling back to COWORK_EVENT_TOKEN. No token is accepted by default; set a real secret (e.g. COWORK_UI_TOKEN) on the server, and optionally enable COWORK_ALLOW_DEV_TOKEN=1 for loopback dev only. Requests are rejected with 401 in production if no secret is configured or the well-known dev-token is used.",
   },
 } as const;
 
@@ -73,7 +87,8 @@ export const CAPABILITY_FAMILIES = [
 
 // Startup sequence steps reference only endpoints that exist. Steps 1-3 are
 // public discovery routes (no auth). Steps 4-5 require the X-Cowork-Token
-// header — the agent must send `X-Cowork-Token: <COWORK_EVENT_TOKEN>` on these.
+// header — the agent must send `X-Cowork-Token: <COWORK_UI_TOKEN>` (falling
+// back to `COWORK_EVENT_TOKEN`) on these.
 export const AGENT_STARTUP_SEQUENCE = [
   { order: 1, endpoint: '/api/cowork/skill', auth: 'none', purpose: 'Read the version-matched operating guide before using the cockpit API.' },
   { order: 2, endpoint: '/api/cowork/agent/manifest', auth: 'none', purpose: 'Load the machine-readable capability and endpoint map.' },
@@ -90,7 +105,7 @@ export const AGENT_OPERATING_RULES = [
   'Network, DevTools, and Snapshots views are extension-only capabilities and are not exposed via this API.',
 ] as const;
 
-export const AGENT_TOOLBOX = {
+const AGENT_TOOLBOX = {
   orient: [
     { method: 'GET', path: '/agent/bootstrap', use: 'First read after discovery.' },
     { method: 'GET', path: '/agent/manifest', use: 'Full endpoint map.' },

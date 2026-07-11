@@ -154,6 +154,7 @@ export async function maybeJudgeAndFinalize(
     let judgeModel = "";
     let judgeReasoningTokens = 0;
     let judgeCachedInputTokens = 0;
+    let judgeCachedWriteInputTokens = 0;
     const judgeLlmCall = async (systemPrompt: string, userMessage: string): Promise<string> => {
       if (deps.summarizeCall) {
         const res = await deps.summarizeCall({ systemPrompt, userPrompt: userMessage });
@@ -162,6 +163,10 @@ export async function maybeJudgeAndFinalize(
         // Capture cachedInputTokens so the judge's cost recompute applies the
         // cacheRead discount.
         if (res.usage?.cachedInputTokens) judgeCachedInputTokens = res.usage.cachedInputTokens;
+        // Capture cache-write (creation) tokens too (billed at the higher
+        // cache-write rate). Cast until TokenUsage (types.ts) propagates it.
+        if ((res.usage as { cachedWriteInputTokens?: number }).cachedWriteInputTokens)
+          judgeCachedWriteInputTokens = (res.usage as { cachedWriteInputTokens?: number }).cachedWriteInputTokens!;
         return res.content;
       }
       const res = await deps.plannerCall({
@@ -178,6 +183,11 @@ export async function maybeJudgeAndFinalize(
       if (res.reasoningTokens) judgeReasoningTokens = res.reasoningTokens;
       // Capture cachedInputTokens from the planner-fallback path too.
       if (res.cachedInputTokens) judgeCachedInputTokens = res.cachedInputTokens;
+      // Capture cache-write (creation) tokens from the planner-fallback path
+      // too (billed at the higher cache-write rate). Cast until the
+      // PlannerLLMCall result type (loop/types.ts) propagates it.
+      if ((res as { cachedWriteInputTokens?: number }).cachedWriteInputTokens)
+        judgeCachedWriteInputTokens = (res as { cachedWriteInputTokens?: number }).cachedWriteInputTokens!;
       return res.raw;
     };
 
@@ -197,10 +207,11 @@ export async function maybeJudgeAndFinalize(
         // here with the real model name so the budget tracker gets an
         // accurate number.
         const realCost = judgeModel
-          // Pass judgeReasoningTokens + judgeCachedInputTokens (captured as
-          // side effects of judgeLlmCall) so the recompute applies the
-          // reasoning rate + cacheRead discount.
-          ? estimateCost(judgeModel, usage.tokensIn, usage.tokensOut, judgeReasoningTokens, judgeCachedInputTokens)
+          // Pass judgeReasoningTokens + judgeCachedInputTokens +
+          // judgeCachedWriteInputTokens (captured as side effects of
+          // judgeLlmCall) so the recompute applies the reasoning rate, the
+          // cacheRead discount, AND the (higher) cacheWrite rate.
+          ? estimateCost(judgeModel, usage.tokensIn, usage.tokensOut, judgeReasoningTokens, judgeCachedInputTokens, judgeCachedWriteInputTokens)
           : usage.costUsd;
         deps.onEvent({
           type: "cost", step,

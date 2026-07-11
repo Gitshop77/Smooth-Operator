@@ -24,8 +24,8 @@
  * Note on `isInteractive`: the original `extractor.ts` re-exported this
  * symbol (as `export const isInteractive = isInteractiveImpl`). It is
  * re-exported here from `./utils/classification` rather than from
- * `./extraction/page-state` to avoid a name collision in the
- * from `./utils`). Callers importing from this shim see no difference.
+ * `./extraction/page-state` (which does not export it) so callers importing
+ * from this shim see no difference.
  */
 export {
   extractBrowserState,

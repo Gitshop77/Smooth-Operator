@@ -81,10 +81,17 @@ export interface AgentMetrics {
   llmByPhase: {
     planner: PhaseLLMMetrics;
     navigator: PhaseLLMMetrics;
+    /**
+     * Tokens that could not be attributed to a phase (e.g. recovered during
+     * `onRunEnd` reconciliation when this callback was registered late and
+     * missed the per-call `onLLMEnd` events). Always part of the
+     * `totalTokensIn/Out` sum, but not double-counted in planner/navigator.
+     */
+    unattributed: PhaseLLMMetrics;
   };
-  /** Total tokens consumed across all phases (sum of planner + navigator). */
+  /** Total tokens consumed across all phases (sum of planner + navigator + unattributed). */
   totalTokensIn: number;
-  /** Total tokens produced across all phases (sum of planner + navigator). */
+  /** Total tokens produced across all phases (sum of planner + navigator + unattributed). */
   totalTokensOut: number;
   /** Total USD cost across all phases (sum of every `onCost` call). */
   totalCostUsd: number;
@@ -114,6 +121,11 @@ export class AgentMetricsCallback implements AsyncCallbackHandler {
   private navigatorCalls = 0;
   private navigatorTokensIn = 0;
   private navigatorTokensOut = 0;
+  // Tokens recovered during onRunEnd reconciliation (late registration) that
+  // could not be attributed to a specific phase.
+  private unattributedCalls = 0;
+  private unattributedTokensIn = 0;
+  private unattributedTokensOut = 0;
 
   private totalTokensIn = 0;
   private totalTokensOut = 0;
@@ -139,6 +151,9 @@ export class AgentMetricsCallback implements AsyncCallbackHandler {
     this.navigatorCalls = 0;
     this.navigatorTokensIn = 0;
     this.navigatorTokensOut = 0;
+    this.unattributedCalls = 0;
+    this.unattributedTokensIn = 0;
+    this.unattributedTokensOut = 0;
     this.totalTokensIn = 0;
     this.totalTokensOut = 0;
     this.totalCostUsd = 0;
@@ -172,6 +187,11 @@ export class AgentMetricsCallback implements AsyncCallbackHandler {
           calls: this.navigatorCalls,
           tokensIn: this.navigatorTokensIn,
           tokensOut: this.navigatorTokensOut,
+        },
+        unattributed: {
+          calls: this.unattributedCalls,
+          tokensIn: this.unattributedTokensIn,
+          tokensOut: this.unattributedTokensOut,
         },
       },
       totalTokensIn: this.totalTokensIn,
@@ -221,23 +241,39 @@ export class AgentMetricsCallback implements AsyncCallbackHandler {
   onLLMEnd(_ctx: CallbackContext, response: LLMResponseInfo): void {
     const usage = response.usage;
     if (!usage) return;
+    // Guard against malformed/missing `usage` (a provider contract regression
+    // can emit non-numeric or absent fields). Without this, a single `NaN`
+    // poisons every accumulator total AND permanently disables the
+    // `onRunEnd` late-registration recovery (since `totalTokensIn === 0`
+    // then evaluates false). Warn once and skip rather than silently corrupt.
+    const tIn = typeof usage.tokensIn === "number" && Number.isFinite(usage.tokensIn) ? usage.tokensIn : undefined;
+    const tOut = typeof usage.tokensOut === "number" && Number.isFinite(usage.tokensOut) ? usage.tokensOut : undefined;
+    if (tIn === undefined || tOut === undefined) {
+      console.warn("[metrics] onLLMEnd: usage has non-numeric tokensIn/tokensOut; skipping token accounting");
+      return;
+    }
     const phase = this.nextPhase;
     if (phase === "planner") {
       this.plannerCalls += 1;
-      this.plannerTokensIn += usage.tokensIn;
-      this.plannerTokensOut += usage.tokensOut;
+      this.plannerTokensIn += tIn;
+      this.plannerTokensOut += tOut;
     } else {
       this.navigatorCalls += 1;
-      this.navigatorTokensIn += usage.tokensIn;
-      this.navigatorTokensOut += usage.tokensOut;
+      this.navigatorTokensIn += tIn;
+      this.navigatorTokensOut += tOut;
     }
-    this.totalTokensIn += usage.tokensIn;
-    this.totalTokensOut += usage.tokensOut;
+    this.totalTokensIn += tIn;
+    this.totalTokensOut += tOut;
   }
 
   /** @inheritdoc */
   onCost(_ctx: CallbackContext, usage: LLMUsageInfo): void {
-    this.totalCostUsd += usage.costUsd;
+    const cost = typeof usage.costUsd === "number" && Number.isFinite(usage.costUsd) ? usage.costUsd : undefined;
+    if (cost === undefined) {
+      console.warn("[metrics] onCost: costUsd is non-numeric; skipping cost accounting");
+      return;
+    }
+    this.totalCostUsd += cost;
   }
 
   /** @inheritdoc */
@@ -259,18 +295,28 @@ export class AgentMetricsCallback implements AsyncCallbackHandler {
 
   /** @inheritdoc */
   onRunEnd(result: AgentRunResult): void {
-    // Reconcile totals with the authoritative result (the result is built
-    // by the orchestrator from its own counters — treat it as ground truth
-    // when our accumulators are zero, e.g. when this callback was
-    // registered late and missed the onCost / onStepEnd events).
-    if (this.totalCostUsd === 0 && result.totalCostUsd > 0) {
-      this.totalCostUsd = result.totalCostUsd;
+    // Reconcile with the authoritative result. The orchestrator builds the
+    // result from its own counters, so treat its totals as ground truth even
+    // when this callback was registered late and only partially captured the
+    // per-event hooks (onCost / onStepEnd / onLLMEnd). We keep whatever
+    // per-phase attribution we *did* capture and drop the remainder into the
+    // `unattributed` bucket so the `total == sum(llmByPhase.*)` invariant
+    // always holds — neither silently undercounting nor corrupting attribution.
+    if (this.totalSteps === 0 && result.stepCount > 0) {
+      this.totalSteps = result.stepCount;
     }
-    if (this.totalTokensIn === 0 && result.totalTokensIn > 0) {
-      this.totalTokensIn = result.totalTokensIn;
-    }
-    if (this.totalTokensOut === 0 && result.totalTokensOut > 0) {
-      this.totalTokensOut = result.totalTokensOut;
+    // Cost has no per-phase split — the result is authoritative, overwrite.
+    this.totalCostUsd = result.totalCostUsd;
+    // Tokens: set the totals from the authoritative result, then attribute the
+    // gap (anything we missed) to `unattributed` so the phase sums still add up.
+    this.totalTokensIn = result.totalTokensIn;
+    this.totalTokensOut = result.totalTokensOut;
+    const gapIn = result.totalTokensIn - this.plannerTokensIn - this.navigatorTokensIn;
+    const gapOut = result.totalTokensOut - this.plannerTokensOut - this.navigatorTokensOut;
+    if (gapIn > 0 || gapOut > 0) {
+      this.unattributedCalls += 1;
+      this.unattributedTokensIn += Math.max(0, gapIn);
+      this.unattributedTokensOut += Math.max(0, gapOut);
     }
   }
 }

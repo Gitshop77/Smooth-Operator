@@ -4,7 +4,6 @@
  *
  * OpenAI provider facade:
  *   - `configure(input)` returns `{ id, model(id), configure }`
- *   - `provider` is a pre-configured default instance
  *   - `toLLMProvider(config)` bridges to the agent's `LLMProvider` interface
  *     so the orchestrator can use it without knowing about Routes/Protocols.
  *
@@ -18,6 +17,7 @@ import { make } from "../route/client";
 import * as OpenAIChat from "../protocols/openai-chat";
 import type { LLMProvider } from "../provider";
 import { toLLMProvider as toLLMProviderBridge } from "../provider-bridge";
+import { assertSafeUserBaseURL } from "./openai-compatible-profile";
 
 export const id = "openai";
 
@@ -31,6 +31,9 @@ const auth = (options: ProviderAuthOption<"optional">) => {
 };
 
 export function configure(input: Config = {}) {
+  // (SSRF guard): validate any user-supplied baseURL override before
+  // building the route/endpoint. The trusted default is exempt.
+  assertSafeUserBaseURL(input.baseURL);
   const route = make({
     id: "openai-chat",
     provider: id,
@@ -45,8 +48,6 @@ export function configure(input: Config = {}) {
     configure,
   };
 }
-
-export const provider = configure();
 
 /**
  * Bridge to the agent's `LLMProvider` interface. Builds a Route via

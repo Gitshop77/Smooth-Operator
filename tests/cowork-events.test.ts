@@ -237,9 +237,11 @@ describe("shouldRefuseStart", () => {
     expect(shouldRefuseStart("test", DEV_TOKEN)).toBe(true);
   });
 
-  test("allows the dev-token ONLY when COWORK_ALLOW_DEV_TOKEN=1 is explicitly set", () => {
+  test("allows the dev-token in NON-production ONLY when COWORK_ALLOW_DEV_TOKEN=1 is explicitly set, and REFUSES in production", () => {
     process.env.COWORK_ALLOW_DEV_TOKEN = "1";
-    expect(shouldRefuseStart("production", DEV_TOKEN)).toBe(false);
+    // Production always fails closed — the well-known dev-token must never
+    // authenticate in prod, even with the opt-in (a real auth hole otherwise).
+    expect(shouldRefuseStart("production", DEV_TOKEN)).toBe(true);
     expect(shouldRefuseStart("development", DEV_TOKEN)).toBe(false);
     expect(shouldRefuseStart(undefined, DEV_TOKEN)).toBe(false);
   });
@@ -972,14 +974,27 @@ describe("cowork-events socket.io (integration)", () => {
 
     // The generated image is recorded so reconnecting clients see it in
     // `events:replay`. Verify it landed in the buffer (no live broadcast).
+    //
+    // SECURITY CONTRACT: the recorded `snapshot:captured` event DELIBERATELY
+    // OMITS `prompt`. The prompt may contain sensitive user input / PII, and
+    // persisting it into the replay buffer would expose that text to any client
+    // that can authenticate (even though the live `io.emit` broadcast is
+    // suppressed). The HTTP response still returns the prompt to the requesting
+    // client (asserted above via `body.prompt`), but the buffered event only
+    // carries non-sensitive metadata. This test therefore matches on
+    // channel + size + kind, NOT on the prompt — updating it to require the
+    // prompt would revert a privacy hardening fix.
     const evRes = await fetch(`http://127.0.0.1:${port}/events?since_id=0`, {
       headers: { "X-Cowork-Token": token },
     });
     const evBody = await evRes.json();
-    const snap = (evBody.events as Array<{ channel: string; payload: { prompt?: string } }>).find(
-      (e) => e.channel === "snapshot:captured" && e.payload?.prompt === prompt,
+    const snap = (evBody.events as Array<{ channel: string; payload: { kind?: string; size?: string; bytes?: number } }>).find(
+      (e) => e.channel === "snapshot:captured" && e.payload?.kind === "ai-image" && e.payload?.size === "1024x1024",
     );
     expect(snap).toBeDefined();
+    expect(snap!.payload.bytes).toBe("BASE64FAKEIMAGE==".length);
+    // Explicitly assert the prompt is NOT persisted (PII hardening).
+    expect((snap!.payload as { prompt?: string }).prompt).toBeUndefined();
   });
 
   // ── NEGATIVE: unauthenticated (wrong-token) socket is dropped ─────────────

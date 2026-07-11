@@ -75,6 +75,14 @@ export function isVisibleFull(el: HTMLElement, rect?: DOMRect): boolean {
   const style = window.getComputedStyle(el);
   if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return false;
   if (parseFloat(style.opacity) === 0) return false;
+  // `opacity` is NOT an inherited property, so a child of an `opacity:0`
+  // ancestor computes its own opacity as `"1"` even though it is visually
+  // invisible. Walk the ancestor chain (up to the document root) and treat the
+  // element as hidden if any ancestor is fully transparent — otherwise the agent
+  // could target a transparent, non-interactable element.
+  for (let ancestor = el.parentElement; ancestor; ancestor = ancestor.parentElement) {
+    if (parseFloat(window.getComputedStyle(ancestor).opacity) === 0) return false;
+  }
   const r = rect ?? el.getBoundingClientRect();
   if (r.width === 0 && r.height === 0) return false;
   if (el.getAttribute("aria-hidden") === "true") return false;

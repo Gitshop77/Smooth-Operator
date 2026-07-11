@@ -1,14 +1,25 @@
 /**
  * options/history.ts — run-history list + clear/export/import.
  *
- * Renders the persisted run-history entries (stored under
- * `open_cowork_run_history` in chrome.storage.local). Each row opens the
- * full transcript in a new window. Export dumps all runs as JSON; import
- * merges an uploaded JSON file (capped at 50 runs).
+ * Renders persisted run-history entries (under `open_cowork_run_history` in
+ * chrome.storage.local). Each row opens the full transcript in an IN-PAGE
+ * styled modal (no longer a Blob new-tab), export dumps all runs as JSON, and
+ * import merges an uploaded JSON file (capped at 50 runs).
+ *
+ * P3: native `confirm()`/`alert()` replaced by the styled modal.
+ *
+ * Security notes:
+ *  - Imported JSON is fully user/attacker-supplied, so every entry is validated
+ *    against the `RunHistoryEntry` shape before it is stored or rendered
+ *    (findings: unbounded file read + weak schema validation).
+ *  - All interpolated run fields pass through the shared `escapeHtml` helper
+ *    (the duplicate `escapeText` was removed in favour of it).
  */
 
 import { $, escapeHtml } from "@/extension/shared";
-import { STORAGE_KEYS } from "./settings-sync";
+import { STORAGE_KEYS, showSaved } from "./settings-sync";
+import { openModal, confirmModal, alertModal } from "./modal";
+import { runBadge } from "./status";
 
 interface RunHistoryEntry {
   task: string;
@@ -20,14 +31,64 @@ interface RunHistoryEntry {
   transcript?: unknown;
 }
 
+/**
+ * Reject import files larger than this before reading them into memory. Mirrors
+ * the HTTP-layer `readCappedBody` cap: a hostile/malformed multi-MB file should
+ * never be fully buffered + JSON-parsed before validation.
+ */
+const MAX_IMPORT_BYTES = 4 * 1024 * 1024; // 4 MiB
+
+/**
+ * Type guard for a run-history entry. Validates every field's type (and that
+ * timestamps/count/cost are finite numbers) and the optional
+ * `result.success` boolean. Anything else is rejected so downstream rendering
+ * and cost roll-ups never see `NaN`/garbage.
+ */
+function isRunHistoryEntry(value: unknown): value is RunHistoryEntry {
+  if (value === null || typeof value !== "object") return false;
+  const e = value as Record<string, unknown>;
+  if (typeof e.task !== "string") return false;
+  if (typeof e.startedAt !== "number" || !Number.isFinite(e.startedAt)) return false;
+  if (typeof e.endedAt !== "number" || !Number.isFinite(e.endedAt)) return false;
+  if (typeof e.stepCount !== "number" || !Number.isFinite(e.stepCount)) return false;
+  if (typeof e.totalCostUsd !== "number" || !Number.isFinite(e.totalCostUsd)) return false;
+  if (e.result !== undefined && e.result !== null) {
+    if (typeof e.result !== "object") return false;
+    const res = e.result as Record<string, unknown>;
+    if (typeof res.success !== "boolean") return false;
+  }
+  // `transcript` is free-form; accept any value (including absence).
+  return true;
+}
+
 // ─── Run history ───────────────────────────────────────────────────────────
 
 async function readRunHistory(): Promise<RunHistoryEntry[]> {
   const res = await chrome.storage.local.get(STORAGE_KEYS.runHistory);
-  return (res[STORAGE_KEYS.runHistory] as RunHistoryEntry[]) || [];
+  const runs = (res[STORAGE_KEYS.runHistory] as unknown) ?? [];
+  // Defensive: stored data should already be valid, but never trust it.
+  return Array.isArray(runs) ? runs.filter(isRunHistoryEntry) : [];
 }
 
-/** Render the run history list. Each row opens the transcript in a new window. */
+/** Open the in-page transcript modal for a single run. */
+function showTranscript(run: RunHistoryEntry): void {
+  const body = document.createElement("div");
+  body.className = "transcript-wrap";
+  const pre = document.createElement("pre");
+  pre.className = "transcript";
+  // textContent (not innerHTML) — the run data is first-party but this avoids
+  // any accidental markup injection from imported JSON.
+  pre.textContent = JSON.stringify(run, null, 2);
+  body.appendChild(pre);
+  void openModal({
+    title: "Run transcript",
+    body,
+    className: "modal-wide",
+    actions: [{ label: "Close", value: "close", variant: "primary", autofocus: true }],
+  });
+}
+
+/** Render the run history list. Each row opens the transcript in-page. */
 export async function renderHistory(): Promise<void> {
   const runs = await readRunHistory();
   const list = $("historyList") as HTMLDivElement;
@@ -39,47 +100,38 @@ export async function renderHistory(): Promise<void> {
   for (const r of runs) {
     const item = document.createElement("div");
     item.className = "history-item";
-    const date = new Date(r.startedAt).toLocaleString();
-    const duration = ((r.endedAt - r.startedAt) / 1000).toFixed(1);
-    const badge = r.result?.success
-      ? '<span class="badge success">✓ success</span>'
-      : '<span class="badge failure">✗ failed</span>';
+    // Safe formatting: stored/typed as numbers, but coerce defensively so a
+    // malformed row renders as "—" rather than NaN/Invalid Date.
+    const date = Number.isFinite(r.startedAt) ? new Date(r.startedAt).toLocaleString() : "—";
+    const duration =
+      Number.isFinite(r.endedAt) && Number.isFinite(r.startedAt)
+        ? ((r.endedAt - r.startedAt) / 1000).toFixed(1)
+        : "—";
+    const steps = Number.isFinite(r.stepCount) ? String(r.stepCount) : "—";
+    const cost = Number.isFinite(r.totalCostUsd) ? r.totalCostUsd.toFixed(4) : "0.0000";
+    const status = r.result?.success ? "success" : "failure";
+    const badge = runBadge(status, r.result?.success ? "✓ success" : "✗ failed");
     item.innerHTML =
       `<span class="task">${escapeHtml(String((r.task ?? "").slice(0, 60)))}</span>` +
-      // imported runs come from arbitrary user-uploaded JSON
-      // (see the import handler below — no schema validation, just
-      // `Array.isArray`). A malicious import can set `stepCount` to a
-      // string like `"<img src=x onerror=alert(1)>"` or `totalCostUsd`
-      // to an object whose `toFixed` returns arbitrary HTML. Coerce to
-      // String + escapeHtml so neither field can break out of the
-      // surrounding `<span class="meta">…</span>` context.
-      `<span class="meta">${escapeHtml(date)} · ${escapeHtml(String(duration))}s · ${escapeHtml(String(r.stepCount))} steps · $${escapeHtml(String(r.totalCostUsd?.toFixed?.(4) ?? "0.0000"))}</span>` +
+      `<span class="meta">${escapeHtml(date)} · ${escapeHtml(String(duration))}s · ${escapeHtml(steps)} steps · $${escapeHtml(cost)}</span>` +
       badge;
-    item.addEventListener("click", () => {
-      // Use a Blob URL so window.open works with noopener (which returns
-      // null per HTML spec — the direct w.document.write path doesn't work).
-      const html = `<pre style="font:12px monospace;white-space:pre-wrap;padding:20px;">${escapeHtml(JSON.stringify(r, null, 2))}</pre>`;
-      const blob = new Blob([html], { type: "text/html" });
-      const url = URL.createObjectURL(blob);
-      window.open(url, "_blank", "noopener,noreferrer");
-      // Revoke the Blob URL after a short delay — the new tab needs the URL
-      // to resolve during window.open, but after that the reference is held
-      // by the document. 1s is generous; the browser keeps the blob alive
-      // for the resolving tab even after revocation.
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-    });
+    item.addEventListener("click", () => showTranscript(r));
     list.appendChild(item);
   }
 }
 
 document.getElementById("clearHistory")?.addEventListener("click", async () => {
-  if (!confirm("Delete all run history?")) return;
+  const ok = await confirmModal({
+    title: "Clear run history",
+    message: "Delete all run history? This cannot be undone.",
+    confirmLabel: "Delete all",
+    danger: true,
+  });
+  if (!ok) return;
   await chrome.storage.local.remove(STORAGE_KEYS.runHistory);
   await renderHistory();
+  showSaved();
 });
-
-// `escapeHtml` + `$` are imported from `@/extension/shared` at the top of this
-// file (single source of truth for both options.ts and sidepanel.ts).
 
 // ─── A8: Run Export/Import ──────────────────────────────────────────────────
 
@@ -101,24 +153,42 @@ $("importHistory")?.addEventListener("click", () => {
 ($("importHistoryFile") as HTMLInputElement)?.addEventListener("change", async (e) => {
   const file = (e.target as HTMLInputElement).files?.[0];
   if (!file) return;
+  // Bound the upload size before reading it into memory (finding: unbounded
+  // file read before file.text()/JSON.parse).
+  if (file.size > MAX_IMPORT_BYTES) {
+    await alertModal({
+      title: "File too large",
+      message: `The selected file is ${(file.size / (1024 * 1024)).toFixed(1)} MiB; the import limit is ${MAX_IMPORT_BYTES / (1024 * 1024)} MiB.`,
+    });
+    (e.target as HTMLInputElement).value = "";
+    return;
+  }
   try {
     const text = await file.text();
     const imported = JSON.parse(text);
-    if (!Array.isArray(imported)) { alert("Invalid file: expected an array of runs."); return; }
-    // Per-element shape check: an imported entry missing `task` would crash
-    // `renderHistory` (which slices `r.task`). Filter to entries with a
-    // string `task` so a malformed/hand-edited import can't brick the
-    // History tab.
-    const valid = imported.filter(
-      (r: unknown) => r !== null && typeof r === "object" && typeof (r as { task?: unknown }).task === "string",
-    );
+    if (!Array.isArray(imported)) {
+      await alertModal({ title: "Invalid file", message: "Invalid file: expected an array of runs." });
+      return;
+    }
+    // Validate every entry against the RunHistoryEntry shape; reject
+    // non-conforming rows instead of storing garbage.
+    const valid = imported.filter(isRunHistoryEntry);
     const existing = await (await import("@/lib/agent/run-history")).loadRuns();
     const merged = [...valid, ...existing].slice(0, 50);
     await chrome.storage.local.set({ open_cowork_run_history: merged });
     await renderHistory();
+    showSaved();
     const skipped = imported.length - valid.length;
-    alert(`Imported ${valid.length} run(s).${skipped > 0 ? ` Skipped ${skipped} malformed entr${skipped === 1 ? "y" : "ies"}.` : ""}`);
-  } catch (e) {
-    alert("Failed to import: " + (e instanceof Error ? e.message : String(e)));
+    await alertModal({
+      title: "Import complete",
+      message: `Imported ${valid.length} run(s).${skipped > 0 ? ` Skipped ${skipped} malformed/invalid entr${skipped === 1 ? "y" : "ies"}.` : ""}`,
+    });
+  } catch (err) {
+    await alertModal({
+      title: "Import failed",
+      message: "Failed to import: " + (err instanceof Error ? err.message : String(err)),
+    });
+  } finally {
+    (e.target as HTMLInputElement).value = "";
   }
 });

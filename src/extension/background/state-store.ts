@@ -8,7 +8,6 @@
  * execution.
  */
 
-import type { HistoryItem } from "@/lib/agent/types";
 import type { AgentMode } from "@/lib/agent/modes";
 import type { UrlPolicyConfig } from "@/lib/agent/security";
 
@@ -21,7 +20,6 @@ export interface RunState {
   startTabId: number;
   currentTabId: number;
   step: number;
-  history: HistoryItem[];
   active: boolean;
   abortRequested: boolean;
 }
@@ -37,14 +35,28 @@ export const RUN_STATE_KEY = "open_cowork_run_state";
  * We now OR-in the previously stored value unconditionally, which guarantees a
  * concurrent STOP is never lost regardless of read interleaving, and keeps the
  * `abortRequested` key present even when the incoming patch doesn't mention it. */
+/** Serializes `saveRunState` writes so their read-modify-write steps don't interleave. */
+let writeChain: Promise<unknown> = Promise.resolve();
+
 export async function saveRunState(state: Partial<RunState>): Promise<void> {
-  const cur = (await getRunState()) ?? ({} as RunState);
-  const next: RunState = { ...cur, ...state };
-  // Write-safe abort merge: never trust only an equality check on this read.
-  // OR-ing the stored + incoming values makes the STOP flag durable against a
-  // concurrent step-update (or any other) partial write.
-  next.abortRequested = Boolean(cur.abortRequested) || Boolean(state.abortRequested);
-  await chrome.storage.session.set({ [RUN_STATE_KEY]: next });
+  // Serialize all writes through a single promise chain so the read-modify-write
+  // is atomic per call (finding: saveRunState read-modify-write race can clobber
+  // currentTabId). Without this, a `saveRunState({ step })` racing a
+  // `saveRunState(runState)` (full object incl. currentTabId) can overwrite the
+  // other's field, e.g. reverting `currentTabId` to a stale tab. Serializing
+  // guarantees each write observes the result of the prior one.
+  const run = writeChain.then(async () => {
+    const cur = (await getRunState()) ?? ({} as RunState);
+    const next: RunState = { ...cur, ...state };
+    // Write-safe abort merge: never trust only an equality check on this read.
+    // OR-ing the stored + incoming values makes the STOP flag durable against a
+    // concurrent step-update (or any other) partial write.
+    next.abortRequested = Boolean(cur.abortRequested) || Boolean(state.abortRequested);
+    await chrome.storage.session.set({ [RUN_STATE_KEY]: next });
+  });
+  // Keep the chain alive even if a write rejects, so later writes aren't blocked.
+  writeChain = run.catch(() => {});
+  return run;
 }
 
 /** Read the persisted run state, or null if no active run. */
@@ -93,13 +105,16 @@ export async function loadAndSetDomainConfig(): Promise<UrlPolicyConfig> {
     (globalThis as { __openCoworkDomainConfig?: UrlPolicyConfig }).__openCoworkDomainConfig = config;
     return config;
   } catch (e) {
-    // On storage failure, DO NOT cache an empty config — clear the cached value
-    // so `getDomainConfig()` returns {} (no policy = allow all), but log the
-    // error so the user knows their allow/blocklist was bypassed. We only cache
-    // on success; on failure, the stale cached value (if any) remains, and the
-    // error is surfaced. This lets callers distinguish "user has no policy"
-    // from "storage broke".
-    console.error("[Open Cowork] Failed to load domain config — allow/blocklist may be stale:", e);
+    // On storage failure, clear the cached config to an empty policy (no
+    // allow/blocklist) so any synchronous reader (e.g. the executor's
+    // getDomainConfig()) sees an unambiguous "no policy" rather than a stale
+    // allow/blocklist from a previous successful load (finding: loadAndSetDomainConfig
+    // leaves a stale allow/blocklist cached on storage failure). We re-throw so
+    // the caller (startRun) can decide how to handle the failure — it currently
+    // aborts the run rather than proceeding with an empty policy, so this does
+    // NOT silently degrade to "allow all".
+    (globalThis as { __openCoworkDomainConfig?: UrlPolicyConfig }).__openCoworkDomainConfig = {};
+    console.error("[Open Cowork] Failed to load domain config — cached policy cleared to empty:", e);
     throw e;
   }
 }

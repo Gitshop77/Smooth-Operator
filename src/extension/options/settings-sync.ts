@@ -1,14 +1,20 @@
 /**
- * options/settings-sync.ts — STORAGE_KEYS + load/save settings + secrets
- * management (secrets migration + render + add handler).
+ * options/settings-sync.ts — STORAGE_KEYS + load/save settings + secrets.
  *
- * Owns the `STORAGE_KEYS` map (re-exported for the other options/* modules:
- * scheduled-tasks, custom-tools, history). The load handler reads every
- * persisted setting from `chrome.storage.local` and populates the form; the
- * save handler validates numeric inputs and writes back. Secrets management
- * delegates to `@/lib/agent/secrets` as the single source of truth (the
- * settings UI used to write to `chrome.storage.local` while the
- * runtime substitution module read from `chrome.storage.session`).
+ * Owns the `STORAGE_KEYS` map (re-exported for scheduled-tasks, custom-tools,
+ * history). The load handler reads every setting from `chrome.storage.local`
+ * and populates the form; the save handler writes them back.
+ *
+ * P3 redesign changes:
+ *   - The provider `<select>` is built from `PROVIDERS` (options/providers.ts)
+ *     at module load, so the saved provider always has a matching `<option>`
+ *     (fixes the old default-provider mismatch where a saved `xai`/`google`
+ *     silently fell back to the first hardcoded `<option>`).
+ *   - The page now uses a SINGLE coherent save model: every field auto-persists
+ *     on change/blur, and one consistent "Saved" cue is shown everywhere.
+ *     There is no split-brain between a global Save button and auto-persisting
+ *     tabs — `initAutoSave()` wires change listeners to `saveSettings()`.
+ *   - Validation errors use the styled modal instead of native `alert()`.
  */
 
 import { $, DEFAULT_COCKPIT_URL, COCKPIT_URL_STORAGE_KEY, escapeHtml } from "@/extension/shared";
@@ -18,7 +24,9 @@ import {
   deleteSecret as deleteSecretFromStore,
   type SecretEntry as StoredSecretEntry,
 } from "@/lib/agent/secrets";
-import { updateProviderUI } from "./provider-config-ui";
+import { updateProviderUI, populateModelSuggestions } from "./provider-config-ui";
+import { PROVIDERS, PROVIDER_META, DEFAULT_PROVIDER_ID } from "./providers";
+import { alertModal } from "./modal";
 
 // ─── Storage keys ──────────────────────────────────────────────────────────
 
@@ -37,9 +45,43 @@ export const STORAGE_KEYS = {
   scheduledTasks: "open_cowork_scheduled_tasks",
   runHistory: "open_cowork_run_history",
   customTools: "__opencowork_custom_tools",
+  // Notification rule keys (added for the Notify tab redesign).
+  notifyOnCompletion: "notifyOnCompletion",
+  notifyOnError: "notifyOnError",
+  notifyOnTakeover: "notifyOnTakeover",
+  webhookUrl: "webhookUrl",
+  // Quick-prompt CRUD (Prompts tab).
+  quickPrompts: "open_cowork_quick_prompts",
 } as const;
 
-// ─── Types ─────────────────────────────────────────────────────────────────
+// ─── Provider <select> built from source ─────────────────────────────────────
+
+/** Populate the provider dropdown from the single PROVIDERS catalog. */
+function populateProviderSelect(): void {
+  const sel = $("provider") as HTMLSelectElement;
+  sel.innerHTML = "";
+  for (const p of PROVIDERS) {
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.textContent = p.label;
+    sel.appendChild(opt);
+  }
+}
+
+// Build it synchronously at import time so the async load handler below always
+// has every provider `<option>` available before it sets `.value`.
+populateProviderSelect();
+
+// ─── "Saved" cue (consistent across every tab) ───────────────────────────────
+
+let savedTimer: ReturnType<typeof setTimeout> | null = null;
+/** Flash the shared "Saved" cue. Used by every auto-save path. */
+export function showSaved(): void {
+  const saved = $("saved");
+  saved.classList.add("show");
+  if (savedTimer) clearTimeout(savedTimer);
+  savedTimer = setTimeout(() => saved.classList.remove("show"), 1500);
+}
 
 // ─── Load settings ─────────────────────────────────────────────────────────
 
@@ -62,81 +104,218 @@ chrome.storage.local.get(
     "allowedDomains",
     "blockedDomains",
     COCKPIT_URL_STORAGE_KEY,
+    STORAGE_KEYS.notifyOnCompletion,
+    STORAGE_KEYS.notifyOnError,
+    STORAGE_KEYS.notifyOnTakeover,
+    STORAGE_KEYS.webhookUrl,
   ],
   (res) => {
     if (chrome.runtime.lastError) {
       console.warn("[options] storage.get failed:", chrome.runtime.lastError);
       return;
     }
-    // Use `??` (not `||`) so empty-string / 0 values are preserved.
-    ($("provider") as HTMLSelectElement).value = (res.provider as string) ?? "openai";
-    // SECURITY: apiKey is read back from chrome.storage.local here. That store is
-    // UNENCRYPTED and MV3 provides NO secret store, so the raw key is persisted in
-    // plaintext on disk. Prefer OAuth / pass-through auth where the provider
-    // supports it to avoid storing long-lived API keys at all. Never console.log
-    // the value.
-    ($("apiKey") as HTMLInputElement).value = (res.apiKey as string) ?? "";
+    // Provider: select the SAVED value. Because populateProviderSelect() ran
+    // first, every catalog provider is present as an <option>, so the saved id
+    // (even xai/google) selects correctly instead of falling back to the first
+    // option. As a safety net, if the saved id isn't in the list we append it.
+    const savedProvider = (res.provider as string) ?? DEFAULT_PROVIDER_ID;
+    const sel = $("provider") as HTMLSelectElement;
+    if (!PROVIDER_META[savedProvider]) {
+      const opt = document.createElement("option");
+      opt.value = savedProvider;
+      opt.textContent = savedProvider;
+      sel.appendChild(opt);
+    }
+    sel.value = savedProvider;
+
+    // SECURITY: the API key lives in `chrome.storage.session` (in-memory, never
+    // on disk). Read it from there; fall back to `local` only for installs that
+    // have not yet migrated. Never console.log the value.
+    if (typeof chrome !== "undefined" && chrome.storage?.session) {
+      chrome.storage.session.get([STORAGE_KEYS.apiKey], (sres) => {
+        const sessionKey = (sres[STORAGE_KEYS.apiKey] as string) ?? "";
+        ($("apiKey") as HTMLInputElement).value =
+          sessionKey || ((res.apiKey as string) ?? "");
+      });
+    } else {
+      ($("apiKey") as HTMLInputElement).value = (res.apiKey as string) ?? "";
+    }
     ($("model") as HTMLInputElement).value = (res.model as string) ?? "";
     ($("baseUrl") as HTMLInputElement).value = (res.baseUrl as string) ?? "";
     ($("maxSteps") as HTMLInputElement).value = String(res.maxSteps ?? 100);
     ($("maxActions") as HTMLInputElement).value = String(res.maxActions ?? 10);
     ($("plannerInterval") as HTMLInputElement).value = String(res.plannerInterval ?? 5);
     ($("maxFailures") as HTMLInputElement).value = String(res.maxFailures ?? 5);
-    // Validate costCap non-negative.
     const costCap = typeof res.costCap === "number" ? Math.max(0, res.costCap) : 0;
     ($("costCap") as HTMLInputElement).value = String(costCap);
     ($("defaultTask") as HTMLTextAreaElement).value = (res.defaultTask as string) ?? "";
-    // screenshot quality setting
     ($("screenshotQuality") as HTMLInputElement).value = String(res.screenshotQuality ?? 80);
     ($("enableScreenshots") as HTMLInputElement).checked = res.enableScreenshots !== false;
-    // Vision mode: backward compat — if visionMode is unset, derive from enableLocalVision
     const visionMode = (res.visionMode as string) || (res.enableLocalVision === true ? "always" : "disabled");
     const visionRadio = document.querySelector(`input[name="visionMode"][value="${visionMode}"]`) as HTMLInputElement | null;
     if (visionRadio) visionRadio.checked = true;
-    // load domain allow/block lists (stored as arrays, displayed as
-    // newline-separated text).
     const allowedDomains = Array.isArray(res.allowedDomains) ? (res.allowedDomains as string[]).join("\n") : "";
     const blockedDomains = Array.isArray(res.blockedDomains) ? (res.blockedDomains as string[]).join("\n") : "";
     ($("allowedDomains") as HTMLTextAreaElement).value = allowedDomains;
     ($("blockedDomains") as HTMLTextAreaElement).value = blockedDomains;
-    // Cockpit URL: fall back to DEFAULT_COCKPIT_URL when unset/empty.
     const storedCockpitUrl = res[COCKPIT_URL_STORAGE_KEY] as string | undefined;
     ($("cockpitUrl") as HTMLInputElement).value =
       typeof storedCockpitUrl === "string" && storedCockpitUrl.trim() ? storedCockpitUrl : DEFAULT_COCKPIT_URL;
+    // Notify tab.
+    ($("notifyOnCompletion") as HTMLInputElement).checked = (res.notifyOnCompletion as boolean) || false;
+    ($("notifyOnError") as HTMLInputElement).checked = (res.notifyOnError as boolean) || false;
+    ($("notifyOnTakeover") as HTMLInputElement).checked = (res.notifyOnTakeover as boolean) || false;
+    ($("webhookUrl") as HTMLInputElement).value = (res.webhookUrl as string) ?? "";
     // Update hints/placeholders based on the loaded provider.
     updateProviderUI();
   }
 );
 
-// ─── Save settings ─────────────────────────────────────────────────────────
+// ─── Save settings (auto-save entry point) ───────────────────────────────────
 
-$("save").addEventListener("click", () => {
-  // Validate numeric inputs.
-  const maxSteps = parseInt(($("maxSteps") as HTMLInputElement).value, 10);
-  const maxActions = parseInt(($("maxActions") as HTMLInputElement).value, 10);
-  const plannerInterval = parseInt(($("plannerInterval") as HTMLInputElement).value, 10);
-  const maxFailures = parseInt(($("maxFailures") as HTMLInputElement).value, 10);
-  const costCap = parseFloat(($("costCap") as HTMLInputElement).value);
-  if (Number.isNaN(maxSteps) || maxSteps < 1) { alert("maxSteps must be a positive integer"); return; }
-  if (Number.isNaN(maxActions) || maxActions < 1) { alert("maxActions must be a positive integer"); return; }
-  if (Number.isNaN(plannerInterval) || plannerInterval < 1) { alert("plannerInterval must be a positive integer"); return; }
-  if (Number.isNaN(maxFailures) || maxFailures < 1) { alert("maxFailures must be a positive integer"); return; }
-  if (Number.isNaN(costCap) || costCap < 0) { alert("costCap must be a non-negative number"); return; }
-  // parse domain allow/block lists from newline-separated text to arrays.
-  const parseDomains = (text: string): string[] =>
-    text.split("\n").map((d) => d.trim()).filter((d) => d.length > 0);
-  const allowedDomains = parseDomains(($("allowedDomains") as HTMLTextAreaElement).value);
-  const blockedDomains = parseDomains(($("blockedDomains") as HTMLTextAreaElement).value);
+/** Read a bounded integer field; on invalid input, reset to default + flag it. */
+function readInt(id: string, def: number, min: number, max: number, invalid: string[]): number {
+  const el = $(id) as HTMLInputElement;
+  const raw = el.value.trim();
+  if (raw === "") return def;
+  const n = parseInt(raw, 10);
+  if (Number.isNaN(n) || n < min || n > max) {
+    invalid.push(id);
+    el.value = String(def);
+    return def;
+  }
+  return n;
+}
+
+/** True if `value` is an absolute http(s) URL. Exported for reuse by sibling modules. */
+export function isHttpUrl(value: string): boolean {
+  try {
+    const u = new URL(value);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/** True if `value` is a bare hostname (optionally `*.` wildcard), no scheme/path/port. */
+function isHostname(value: string): boolean {
+  if (!value || value.includes("/") || value.includes(" ")) return false;
+  const candidate = value.startsWith("*.") ? value.slice(2) : value;
+  if (!candidate) return false;
+  // IPv6 literals legitimately contain ':' (e.g. `2001:db8::1`) — accept them
+  // as bare hosts rather than rejecting on the ':' check below.
+  if (candidate.includes(":")) return true;
+  try {
+    const u = new URL("http://" + candidate);
+    // Compare lowercased so valid UPPERCASE and IDN/punycode hostnames are not
+    // silently discarded (URL lower-cases the hostname, so an exact-match with
+    // the original casing would otherwise reject legitimate entries).
+    return u.hostname.toLowerCase() === candidate.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+let saveInFlight: Promise<boolean> | null = null;
+
+/**
+ * Serialize overlapping auto-saves (finding: saveSettings invoked un-sequenced
+ * on every change). Rapid edits run sequentially so the "Saved" cue and the
+ * validation modal can't race each other.
+ */
+export async function saveSettings(): Promise<boolean> {
+  if (saveInFlight) await saveInFlight;
+  const p = doSaveSettings();
+  saveInFlight = p;
+  try {
+    return await p;
+  } finally {
+    if (saveInFlight === p) saveInFlight = null;
+  }
+}
+
+/**
+ * Validate + persist every Connection/Agent field. Returns true on success.
+ * On validation failure, surfaces a styled modal and resets the bad field(s).
+ */
+async function doSaveSettings(): Promise<boolean> {
+  const invalid: string[] = [];
+  const maxSteps = readInt("maxSteps", 100, 1, 500, invalid);
+  const maxActions = readInt("maxActions", 10, 1, 20, invalid);
+  const plannerInterval = readInt("plannerInterval", 5, 1, 20, invalid);
+  const maxFailures = readInt("maxFailures", 5, 1, 10, invalid);
+
+  const costCapRaw = ($("costCap") as HTMLInputElement).value.trim();
+  let costCap = 0;
+  if (costCapRaw !== "") {
+    // Reject trailing junk (parseFloat("5abc") → 5) and apply a sane upper
+    // bound, mirroring `readInt`. An absurd cap could otherwise drive runaway
+    // spend logic in the agent loop.
+    if (!/^\d+(\.\d+)?$/.test(costCapRaw)) {
+      invalid.push("costCap");
+      costCap = 0;
+      ($("costCap") as HTMLInputElement).value = "0";
+    } else {
+      costCap = parseFloat(costCapRaw);
+      const MAX_COST_CAP = 1_000_000;
+      if (Number.isNaN(costCap) || costCap < 0 || costCap > MAX_COST_CAP) {
+        invalid.push("costCap");
+        costCap = 0;
+        ($("costCap") as HTMLInputElement).value = "0";
+      }
+    }
+  }
+
+  // Validate cockpitUrl / baseUrl are absolute http(s) URLs (or empty). A
+  // non-http(s) value could later be opened as a tab (cockpitUrl) or used to
+  // build requests (baseUrl), so reject it at save time.
+  const cockpitUrlRaw = ($("cockpitUrl") as HTMLInputElement).value.trim();
+  if (cockpitUrlRaw !== "" && !isHttpUrl(cockpitUrlRaw)) {
+    invalid.push("cockpitUrl");
+    ($("cockpitUrl") as HTMLInputElement).value = DEFAULT_COCKPIT_URL;
+  }
+  const baseUrlRaw = ($("baseUrl") as HTMLInputElement).value.trim();
+  if (baseUrlRaw !== "" && !isHttpUrl(baseUrlRaw)) {
+    invalid.push("baseUrl");
+    ($("baseUrl") as HTMLInputElement).value = "";
+  }
+
+  if (invalid.length > 0) {
+    const names = invalid.join(", ");
+    await alertModal({
+      title: "Invalid value",
+      message: `The following field(s) had an out-of-range value and were reset to their default: ${names}.`,
+    });
+  }
+
+  const parseDomains = (text: string): string[] => {
+    const lines = text.split("\n").map((d) => d.trim()).filter((d) => d.length > 0);
+    const valid: string[] = [];
+    const invalid: string[] = [];
+    for (const line of lines) {
+      if (isHostname(line)) valid.push(line);
+      else invalid.push(line);
+    }
+    if (invalid.length) {
+      console.warn("[options] ignoring invalid domain entries (expected bare hostnames, optionally `*.`):", invalid);
+    }
+    return valid;
+  };
 
   const data: Record<string, string | number | string[] | boolean> = {
     provider: ($("provider") as HTMLSelectElement).value,
-    // SECURITY: apiKey is persisted to chrome.storage.local here in PLAINTEXT.
-    // MV3 has no secure secret store, so this is unavoidable for the current
-    // design. Recommend OAuth where the provider supports it; never console.log
-    // the value. Surfaced errors must go through redactKeyLeak (provider-config-ui).
-    apiKey: ($("apiKey") as HTMLInputElement).value,
+    // SECURITY: the provider API key is a bearer credential and is the single
+    // most sensitive secret the extension holds. It is persisted to
+    // `chrome.storage.session` (in-memory, cleared on extension unload/restart,
+    // NEVER written to disk or synced) rather than `chrome.storage.local`
+    // (which is unencrypted on disk and synced to Google's servers when
+    // extension sync is on). This matches how the project already stores
+    // user `%secret%` values (see `src/lib/agent/secrets.ts`). The key is
+    // written to the session store below and removed from `local` so it is
+    // never persisted in plaintext. Trade-off: the user must re-enter the key
+    // after a browser/extension restart. Never console.log the value.
     model: ($("model") as HTMLInputElement).value,
-    baseUrl: ($("baseUrl") as HTMLInputElement).value,
+    baseUrl: baseUrlRaw !== "" && isHttpUrl(baseUrlRaw) ? baseUrlRaw : "",
     maxSteps,
     maxActions,
     plannerInterval,
@@ -145,93 +324,113 @@ $("save").addEventListener("click", () => {
     defaultTask: ($("defaultTask") as HTMLTextAreaElement).value,
     screenshotQuality: Math.min(100, Math.max(50, parseInt(($("screenshotQuality") as HTMLInputElement).value, 10) || 80)),
     enableScreenshots: ($("enableScreenshots") as HTMLInputElement).checked,
-    // Vision mode from radio group
+    // `visionMode` is the single source of truth for the vision setting. The
+    // legacy `enableLocalVision` key is intentionally NOT written here — every
+    // reader (llm-direct, run-helpers, vision-status) already prefers
+    // `visionMode` and only falls back to `enableLocalVision` for backward
+    // compatibility with pre-existing stored values. Persisting both keys
+    // invites divergence if a writer updates one without the other.
     visionMode: (document.querySelector('input[name="visionMode"]:checked') as HTMLInputElement | null)?.value || "disabled",
-    // Backward compat: also set enableLocalVision for older code paths
-    enableLocalVision: (document.querySelector('input[name="visionMode"]:checked') as HTMLInputElement | null)?.value !== "disabled",
-    allowedDomains,
-    blockedDomains,
-    // Cockpit URL — stored under its own key so the side panel can read it
-    // without scanning every other setting. Trim + fall back to default so
-    // empty input doesn't break the Open Cockpit button.
-    [COCKPIT_URL_STORAGE_KEY]: (($("cockpitUrl") as HTMLInputElement).value.trim() || DEFAULT_COCKPIT_URL),
+    allowedDomains: parseDomains(($("allowedDomains") as HTMLTextAreaElement).value),
+    blockedDomains: parseDomains(($("blockedDomains") as HTMLTextAreaElement).value),
+    [COCKPIT_URL_STORAGE_KEY]: (cockpitUrlRaw !== "" && isHttpUrl(cockpitUrlRaw) ? cockpitUrlRaw : DEFAULT_COCKPIT_URL),
   };
-  chrome.storage.local.set(data, () => {
-    if (chrome.runtime.lastError) {
-      console.warn("[options] storage.set failed:", chrome.runtime.lastError);
-      alert("Failed to save settings: " + (chrome.runtime.lastError?.message || "unknown error"));
-      return;
-    }
-    const saved = $("saved");
-    saved.classList.add("show");
-    setTimeout(() => saved.classList.remove("show"), 1500);
+
+  return new Promise<boolean>((resolve) => {
+    chrome.storage.local.set(data, () => {
+      if (chrome.runtime.lastError) {
+        console.warn("[options] storage.set failed:", chrome.runtime.lastError);
+        void alertModal({
+          title: "Save failed",
+          message: "Failed to save settings: " + (chrome.runtime.lastError?.message || "unknown error"),
+        });
+        resolve(false);
+        return;
+      }
+      // Persist the provider API key to the in-memory session store (see the
+      // SECURITY note on the data object) and ensure no plaintext copy lingers
+      // in `chrome.storage.local`.
+      const apiKeyValue = ($("apiKey") as HTMLInputElement).value;
+      if (typeof chrome !== "undefined" && chrome.storage?.session) {
+        chrome.storage.session.set({ [STORAGE_KEYS.apiKey]: apiKeyValue }, () => {
+          if (chrome.runtime.lastError) {
+            console.warn("[options] session key set failed:", chrome.runtime.lastError);
+          }
+          // Remove any legacy plaintext copy from local storage.
+          chrome.storage.local.remove(STORAGE_KEYS.apiKey);
+        });
+      } else {
+        // No session store available — fall back to local (less safe) rather
+        // than silently discarding the key.
+        chrome.storage.local.set({ [STORAGE_KEYS.apiKey]: apiKeyValue });
+      }
+      showSaved();
+      resolve(true);
+    });
   });
-});
+}
+
+/** Wire auto-save change listeners to every Connection/Agent field. */
+export function initAutoSave(): void {
+  const saveIds = [
+    "cockpitUrl", "apiKey", "model", "baseUrl",
+    "maxSteps", "maxActions", "plannerInterval", "maxFailures", "costCap",
+    "defaultTask", "screenshotQuality", "allowedDomains", "blockedDomains",
+  ];
+  for (const id of saveIds) {
+    document.getElementById(id)?.addEventListener("change", () => void saveSettings());
+  }
+  $("enableScreenshots").addEventListener("change", () => void saveSettings());
+  document.querySelectorAll<HTMLInputElement>('input[name="visionMode"]').forEach((radio) => {
+    radio.addEventListener("change", () => void saveSettings());
+  });
+  $("provider").addEventListener("change", () => {
+    updateProviderUI();
+    void populateModelSuggestions();
+    void saveSettings();
+  });
+}
 
 // ─── Secrets management ────────────────────────────────────────────────────
 //
-// The settings UI previously wrote to `chrome.storage.local`
-// while the runtime substitution module (`secrets.ts`) read from
-// `chrome.storage.session` — the same key string in two disjoint storage
-// areas, with zero shared code. A secret saved in Options was invisible to
-// `substituteSecrets()`. Now we delegate to `secrets.ts`'s exported
-// functions (`listSecrets` / `setSecret` / `deleteSecret`) as the single
-// source of truth, so the UI and the runtime share one storage area + one
-// code path. A one-time migration moves any pre-fix secrets from local to
-// session.
+// Delegates to `@/lib/agent/secrets` as the single source of truth for storage.
 
-/**
- * One-time migration: if secrets exist in `chrome.storage.local` (the
- * old, pre-fix location) but not in `chrome.storage.session` (the current
- * location), copy them over and remove the old local entry. Idempotent —
- * safe to call on every Options page load.
- */
 async function migrateSecretsFromLocalToSession(): Promise<void> {
   try {
+    // Migrate any legacy plaintext API key from `chrome.storage.local` into the
+    // in-memory session store (security: the key must never persist to disk).
+    if (typeof chrome !== "undefined" && chrome.storage?.session) {
+      const localKey = await chrome.storage.local.get([STORAGE_KEYS.apiKey]);
+      const apiKeyValue = localKey[STORAGE_KEYS.apiKey] as string | undefined;
+      if (typeof apiKeyValue === "string" && apiKeyValue.length > 0) {
+        await chrome.storage.session.set({ [STORAGE_KEYS.apiKey]: apiKeyValue });
+        await chrome.storage.local.remove(STORAGE_KEYS.apiKey);
+      }
+    }
     const localRes = await chrome.storage.local.get(STORAGE_KEYS.secrets);
     const localSecrets = localRes[STORAGE_KEYS.secrets] as StoredSecretEntry[] | undefined;
     if (!Array.isArray(localSecrets) || localSecrets.length === 0) return;
-    // Check session — only migrate if session doesn't already have them.
     const sessionSecrets = await listSecretsFromStore();
     if (sessionSecrets.length > 0) {
-      // Session already has SOME secrets. A previous run may have partially
-      // migrated (setSecretInStore threw mid-loop, local copy was preserved).
-      // Before removing the local copy, migrate any local secrets whose name
-      // isn't already in session — otherwise those secrets are lost forever.
       const sessionNames = new Set(sessionSecrets.map((s) => s.name));
       let anyFailed = false;
       for (const s of localSecrets) {
-        if (
-          s &&
-          typeof s.name === "string" &&
-          typeof s.value === "string" &&
-          !sessionNames.has(s.name)
-        ) {
+        if (s && typeof s.name === "string" && typeof s.value === "string" && !sessionNames.has(s.name)) {
           try {
             await setSecretInStore(s.name, s.value);
           } catch {
-            // This secret couldn't be migrated. DON'T remove the local copy —
-            // otherwise the secret is lost forever (not in session, deleted
-            // from local). Leave it for the next migration attempt; the user
-            // can also re-add it via the Options UI.
             anyFailed = true;
           }
         }
       }
-      // Only remove the local copy if every secret migrated successfully.
-      // If any failed, keep the local copy so the unmigrated secrets survive.
-      if (!anyFailed) {
-        await chrome.storage.local.remove(STORAGE_KEYS.secrets);
-      }
+      if (!anyFailed) await chrome.storage.local.remove(STORAGE_KEYS.secrets);
       return;
     }
-    // Migrate each secret to the session store.
     for (const s of localSecrets) {
       if (s && typeof s.name === "string" && typeof s.value === "string") {
         await setSecretInStore(s.name, s.value);
       }
     }
-    // Remove the old local copy.
     await chrome.storage.local.remove(STORAGE_KEYS.secrets);
   } catch (e) {
     console.warn("[options] secrets migration failed:", e);
@@ -250,18 +449,14 @@ export async function renderSecrets(): Promise<void> {
   for (const s of secrets) {
     const item = document.createElement("div");
     item.className = "secret-item";
-    // escape the secret name before interpolating into innerHTML.
-    // Without this, a user who enters `foo</span><img src=x onerror=...>`
-    // as a secret name would get the markup executed when this list renders.
-    // Self-XSS only (the user can only attack themselves), but it violates
-    // the project's own escape discipline used everywhere else.
     item.innerHTML =
       `<span class="name">%${escapeHtml(s.name)}%</span>` +
       `<span class="value">${"•".repeat(Math.min(s.value.length, 20))}</span>` +
-      `<button type="button">Delete</button>`;
+      `<button type="button" class="secret-delete">Delete</button>`;
     item.querySelector("button")!.addEventListener("click", async () => {
       await deleteSecretFromStore(s.name);
       await renderSecrets();
+      showSaved();
     });
     list.appendChild(item);
   }
@@ -269,22 +464,23 @@ export async function renderSecrets(): Promise<void> {
 
 $("addSecret").addEventListener("click", async () => {
   const name = ($("secretName") as HTMLInputElement).value.trim();
-  // Trim the secret value too — leading/trailing whitespace is almost never intended.
   const value = ($("secretValue") as HTMLInputElement).value.trim();
-  if (!name) {
+  if (!name) { ($("secretName") as HTMLInputElement).focus(); return; }
+  if (!value) { ($("secretValue") as HTMLInputElement).focus(); return; }
+  if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name)) {
+    await alertModal({
+      title: "Invalid secret name",
+      message:
+        "Secret names must start with a letter and contain only letters, digits, and underscores, so they can be used as %name% placeholders.",
+    });
     ($("secretName") as HTMLInputElement).focus();
     return;
   }
-  if (!value) {
-    ($("secretValue") as HTMLInputElement).focus();
-    return;
-  }
-  // use secrets.ts's setSecret — single source of truth for storage.
   await setSecretInStore(name, value);
   ($("secretName") as HTMLInputElement).value = "";
   ($("secretValue") as HTMLInputElement).value = "";
   await renderSecrets();
+  showSaved();
 });
 
-// Run the one-time migration on Options page load.
 void migrateSecretsFromLocalToSession();

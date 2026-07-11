@@ -5,8 +5,9 @@
  *     `search_page`).
  *   - {@link safeScrollIntoView} — best-effort `scrollIntoView` that never
  *     throws (jsdom-safe).
- *   - {@link generateCssSelector} + {@link cssEscape} — used by the click
- *     fallback's strategy 3 (re-find element by CSS selector).
+ *   - {@link generateCssSelector} — used by the click fallback's strategy 3
+ *     (re-find element by CSS selector); relies on the module-private
+ *     `cssEscape` helper for identifier escaping.
  */
 
 import type { BrowserState } from "../../types";
@@ -47,9 +48,14 @@ export function safeScrollIntoView(el: HTMLElement): void {
   if (typeof el.scrollIntoView === "function") {
     try {
       el.scrollIntoView({ behavior: "smooth", block: "center" });
-    } catch {
+    } catch (e) {
       // Some environments implement scrollIntoView but reject the options
-      // bag (older Edge / IE). Swallow — scrolling is best-effort.
+      // bag (older Edge / IE). Swallow — scrolling is best-effort — but
+      // surface the error for observability so genuine runtime errors
+      // (e.g. a getter throwing on a proxied element) aren't silently lost.
+      if (typeof console !== "undefined" && typeof console.debug === "function") {
+        console.debug("[executor] safeScrollIntoView failed (best-effort):", e);
+      }
     }
   }
 }
@@ -81,11 +87,23 @@ export function generateCssSelector(el: Element): string {
  * available). Mirrors the `escapeCss` helper from `dom/dom-utils.ts` — kept
  * local to this module so the executor doesn't grow a cross-module import
  * for a 5-line helper.
+ *
+ * Module-private: `generateCssSelector` is the only consumer and is the
+ * public entry point; `cssEscape` is not re-exported from the barrel.
  */
-export function cssEscape(s: string): string {
+function cssEscape(s: string): string {
   if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
     return CSS.escape(s);
   }
   // Minimal hand-rolled fallback (sufficient for typical id/class values).
-  return s.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
+  // Escape special characters the simple way.
+  let escaped = s.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
+  // A CSS identifier must not begin with a digit. `CSS.escape` emits a hex
+  // code point followed by a space for a leading digit (e.g. "5item" ->
+  // "\35 item"); mirror that here so jsdom/test environments (which lack
+  // CSS.escape) still produce a valid, parseable selector.
+  if (/^[0-9]/.test(escaped)) {
+    escaped = "\\3" + escaped[0] + " " + escaped.slice(1);
+  }
+  return escaped;
 }

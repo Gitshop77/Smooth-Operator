@@ -222,7 +222,7 @@ export async function getSkillFrontmatter(url: string): Promise<SkillFrontmatter
     seen.add(s.name);
     out.push({
       name: s.name,
-      description: s.frontmatter ?? s.instructions.split("\n")[0] ?? "",
+      description: s.frontmatter,
     });
   }
   return out;

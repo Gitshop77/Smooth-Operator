@@ -2,10 +2,10 @@
 
 import * as React from "react";
 import { motion } from "framer-motion";
-import { TerminalSquare, Puzzle } from "lucide-react";
+import { TerminalSquare } from "lucide-react";
 
 import { ViewHeader } from "@/components/cowork/shared/view-header";
-import { EmptyState } from "@/components/cowork/shared/empty-state";
+import { ExtensionOnly } from "@/components/cowork/shared/extension-only";
 
 /**
  * DevTools view — console output per tab.
@@ -24,8 +24,7 @@ export function DevToolsView() {
         icon={<TerminalSquare className="size-5" />}
       />
       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-        <EmptyState
-          icon={<Puzzle className="size-6" />}
+        <ExtensionOnly
           title="Available in the extension only"
           description="Per-tab console capture requires a content script running inside the target page, which is only possible from the browser extension. Open the Cowork side panel to view console logs."
         />

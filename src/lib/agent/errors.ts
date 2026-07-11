@@ -59,8 +59,16 @@ function containsStatus(haystack: string, code: string): boolean {
  *
  * Classification is substring-based on the error message. Categories are
  * checked in priority order: auth → forbidden → bad_request → cancelled →
- * rate_limit → server_error → network → parse → max_steps → max_failures →
- * programmer_error → unknown.
+ * server_error → rate_limit → network → <structured status> →
+ * programmer_error → parse → max_steps → max_failures → unknown.
+ *
+ * Ordering notes: `server_error` is checked before `rate_limit` so a 5xx
+ * response whose body mentions "rate limit" stays a `server_error`. The
+ * structured `status` code (when present on the error object) overrides the
+ * substring guesses that follow. The `programmer_error` instanceof check sits
+ * AFTER `network` but BEFORE `parse`: a real browser `fetch` failure is a
+ * `TypeError` ("Failed to fetch") and must remain a retried `network` error,
+ * while a `JSON.parse` SyntaxError (message contains "json") must be FATAL.
  *
  * Auth/forbidden/bad_request are checked BEFORE cancelled because a 401/403/400
  * response from an aborted fetch is more usefully classified as auth (fatal)
@@ -93,17 +101,23 @@ export function classifyError(error: unknown): ClassifiedError {
     return { category: "cancelled", fatal: false, retryable: false, message: originalMessage, originalError: error };
   }
 
+  // Server errors (5xx) — transient. Checked BEFORE rate_limit so that a 5xx
+  // response whose body happens to mention "rate limit" is still classified as
+  // a server_error (retry with backoff) rather than as rate_limit.
+  if (/\b5\d\d\b/.test(lower) || containsAny(lower, ["server error", "internal error", "bad gateway", "service unavailable", "gateway timeout"])) {
+    return { category: "server_error", fatal: false, retryable: true, message: originalMessage, originalError: error };
+  }
+
   // Rate limit — transient, retry with backoff.
   if (containsStatus(lower, "429") || containsAny(lower, ["too many requests", "rate limit"])) {
     return { category: "rate_limit", fatal: false, retryable: true, message: originalMessage, originalError: error };
   }
 
-  // Server errors (5xx) — transient.
-  if (/\b5\d\d\b/.test(lower) || containsAny(lower, ["server error", "internal error", "bad gateway", "service unavailable"])) {
-    return { category: "server_error", fatal: false, retryable: true, message: originalMessage, originalError: error };
-  }
-
   // Network errors — transient.
+  // NOTE: a browser `fetch` network failure surfaces as a `TypeError`
+  // ("Failed to fetch"); that must remain a transient `network` error so it is
+  // retried. For that reason the `programmer_error` instanceof check below is
+  // placed AFTER this branch.
   if (containsAny(lower, ["fetch", "network", "econnreset", "econnrefused", "timeout", "etimedout"])) {
     return { category: "network", fatal: false, retryable: true, message: originalMessage, originalError: error };
   }
@@ -133,7 +147,21 @@ export function classifyError(error: unknown): ClassifiedError {
     }
   }
 
-  // Parse errors — transient (retry with nudge).
+  // Programmer errors (TypeError / ReferenceError / SyntaxError) — fatal, no
+  // retry. These are bugs in our code; retrying would just waste budget.
+  // This check is placed BEFORE the `parse` substring branch so that genuine
+  // code bugs — e.g. a `JSON.parse` failure, whose SyntaxError message contains
+  // "json" — are treated as FATAL rather than being silently retried as a
+  // transient `parse` error. It stays AFTER the `network` branch (above) so a
+  // browser `fetch` network failure (a `TypeError: Failed to fetch`) is still
+  // classified as a transient `network` error and retried.
+  if (error instanceof TypeError || error instanceof ReferenceError || error instanceof SyntaxError) {
+    return { category: "programmer_error", fatal: true, retryable: false, message: originalMessage, originalError: error };
+  }
+
+  // Parse errors — transient (retry with nudge). Only reached for errors that
+  // are NOT TypeError/ReferenceError/SyntaxError (e.g. an `Error` thrown when
+  // the LLM returns unparseable output).
   if (containsAny(lower, ["json", "parse", "schema", "validation"])) {
     return { category: "parse", fatal: false, retryable: true, message: originalMessage, originalError: error };
   }
@@ -146,13 +174,6 @@ export function classifyError(error: unknown): ClassifiedError {
   // Max failures — fatal.
   if (containsAny(lower, ["max failures", "consecutive failures"])) {
     return { category: "max_failures", fatal: true, retryable: false, message: originalMessage, originalError: error };
-  }
-
-  // Programmer errors (TypeError / ReferenceError / SyntaxError) — fatal, no
-  // retry. These are bugs in our code; retrying would just waste budget.
-  // (JSON.parse SyntaxError messages (e.g. "Unexpected token") may NOT contain "parse" — they fall through to programmer_error. Protocol step functions catch JSON.parse errors internally, so this is latent.)
-  if (error instanceof TypeError || error instanceof ReferenceError || error instanceof SyntaxError) {
-    return { category: "programmer_error", fatal: true, retryable: false, message: originalMessage, originalError: error };
   }
 
   // Unknown — retry once.
@@ -219,57 +240,110 @@ export class AgentError extends Error {
   readonly code: string;
   /** Optional remote stack trace (filled when the error crosses a boundary). */
   remoteStacktrace: string;
-  constructor(message: string, code: string = "agent_error") {
-    super(message);
+  constructor(message?: string, code: string = "agent_error") {
+    super(message ?? "");
     this.name = new.target.name;
     this.code = code;
     this.remoteStacktrace = "";
   }
 }
 
-/** An element could not be found in the DOM (NoSuchElement / ElementNotFound). */
-export class NoSuchElementException extends AgentError {
-  constructor(message = "no such element") { super(message, "no_such_element"); }
-}
+// ─── Table-driven typed error subclasses ─────────────────────────────────────
+//
+// The 21 "trivial" subclasses below differ only in their `name`, stable `code`,
+// and default message. Rather than repeat ~60 lines of boilerplate that must
+// stay in lock-step with the `ERROR_CODE_TO_TYPE` map, they are generated from
+// a single `ERROR_SPECS` table via {@link defineError}. The table is the sole
+// source of truth: adding a new error type means adding one row here — plus the
+// special `UnexpectedAlertOpenError` class below (the only subclass that carries
+// extra state). `ERROR_CODE_TO_TYPE` is built from the same table in one pass,
+// so the two can never drift apart.
+//
+// NOTE on the two "element-not-found" codes: `NoSuchElementException`
+// (`no_such_element`) and `ElementNotFoundError` (`element_not_found`) are kept
+// as distinct exports because an external test pins both `code` strings. They
+// are intentionally preserved here so the public API and that test are
+// unaffected; unifying them is left for when the test constraint is lifted.
 
-/** Alias mirroring the common "ElementNotFound" naming. */
-export class ElementNotFoundError extends AgentError {
-  constructor(message = "element not found") { super(message, "element_not_found"); }
-}
+/** Constructor type for every typed error class. */
+type AgentErrorCtor = new (message?: string) => AgentError;
 
-/** An element exists but cannot be interacted with (hidden, disabled, off-screen). */
-export class ElementNotInteractableError extends AgentError {
-  constructor(message = "element not interactable") { super(message, "element_not_interactable"); }
-}
-
-/** A click was blocked by another element on top of the target. */
-export class ElementClickInterceptedError extends AgentError {
-  constructor(message = "element click intercepted") { super(message, "element_click_intercepted"); }
-}
-
-/** An option in a `<select>` cannot be selected because it is disabled. */
-export class ElementNotSelectableError extends AgentError {
-  constructor(message = "element not selectable") { super(message, "element_not_selectable"); }
+interface ErrorSpec {
+  /** Export name (also the runtime `name` of thrown instances). */
+  name: string;
+  /** Stable lowercase `code` used for serialization/dispatch. */
+  code: string;
+  /** Default message when the constructor is called without one. */
+  dflt: string;
 }
 
 /**
- * A previously-resolved element is no longer attached to the document. The
- * page mutated between extraction and action execution; the caller should
- * re-extract state and retry.
+ * Build a trivial {@link AgentError} subclass from a spec. The subclass stamps
+ * its own `name` (so `encodeAgentError` and `instanceof` checks report the
+ * expected identity) alongside the stable `code`.
  */
-export class StaleElementReferenceError extends AgentError {
-  constructor(message = "stale element reference") { super(message, "stale_element_reference"); }
+function defineError(name: string, code: string, dflt: string): AgentErrorCtor {
+  return class extends AgentError {
+    constructor(message: string = dflt) {
+      super(message, code);
+      this.name = name;
+    }
+  };
 }
 
-/** A locator/selector string is malformed or unsupported. */
-export class InvalidSelectorError extends AgentError {
-  constructor(message = "invalid selector") { super(message, "invalid_selector"); }
+const ERROR_SPECS: readonly ErrorSpec[] = [
+  { name: "NoSuchElementException", code: "no_such_element", dflt: "no such element" },
+  { name: "ElementNotFoundError", code: "element_not_found", dflt: "element not found" },
+  { name: "ElementNotInteractableError", code: "element_not_interactable", dflt: "element not interactable" },
+  { name: "ElementClickInterceptedError", code: "element_click_intercepted", dflt: "element click intercepted" },
+  { name: "ElementNotSelectableError", code: "element_not_selectable", dflt: "element not selectable" },
+  { name: "StaleElementReferenceError", code: "stale_element_reference", dflt: "stale element reference" },
+  { name: "InvalidSelectorError", code: "invalid_selector", dflt: "invalid selector" },
+  { name: "TimeoutError", code: "timeout", dflt: "timeout" },
+  { name: "NoSuchAlertError", code: "no_such_alert", dflt: "no such alert" },
+  { name: "MoveTargetOutOfBoundsError", code: "move_target_out_of_bounds", dflt: "move target out of bounds" },
+  { name: "InvalidArgumentError", code: "invalid_argument", dflt: "invalid argument" },
+  { name: "InvalidElementStateError", code: "invalid_element_state", dflt: "invalid element state" },
+  { name: "ScriptTimeoutError", code: "script_timeout", dflt: "script timeout" },
+  { name: "JavascriptError", code: "javascript_error", dflt: "javascript error" },
+  { name: "UnsupportedOperationError", code: "unsupported_operation", dflt: "unsupported operation" },
+  { name: "NoSuchFrameError", code: "no_such_frame", dflt: "no such frame" },
+  { name: "NoSuchWindowError", code: "no_such_window", dflt: "no such window" },
+  { name: "InvalidCookieDomainError", code: "invalid_cookie_domain", dflt: "invalid cookie domain" },
+  { name: "UnableToSetCookieError", code: "unable_to_set_cookie", dflt: "unable to set cookie" },
+  { name: "DetachedShadowRootError", code: "detached_shadow_root", dflt: "detached shadow root" },
+  { name: "NoSuchShadowRootError", code: "no_such_shadow_root", dflt: "no such shadow root" },
+];
+
+/** One class instance per spec, built once. */
+const ERROR_CLASSES: Record<string, AgentErrorCtor> = {};
+for (const spec of ERROR_SPECS) {
+  ERROR_CLASSES[spec.name] = defineError(spec.name, spec.code, spec.dflt);
 }
 
-/** A polling condition did not become true within the timeout. */
-export class TimeoutError extends AgentError {
-  constructor(message = "timeout") { super(message, "timeout"); }
-}
+// Re-export each generated class under its canonical name so existing importers
+// (and their `instanceof` checks) are unaffected.
+export const NoSuchElementException = ERROR_CLASSES.NoSuchElementException;
+export const ElementNotFoundError = ERROR_CLASSES.ElementNotFoundError;
+export const ElementNotInteractableError = ERROR_CLASSES.ElementNotInteractableError;
+export const ElementClickInterceptedError = ERROR_CLASSES.ElementClickInterceptedError;
+export const ElementNotSelectableError = ERROR_CLASSES.ElementNotSelectableError;
+export const StaleElementReferenceError = ERROR_CLASSES.StaleElementReferenceError;
+export const InvalidSelectorError = ERROR_CLASSES.InvalidSelectorError;
+export const TimeoutError = ERROR_CLASSES.TimeoutError;
+export const NoSuchAlertError = ERROR_CLASSES.NoSuchAlertError;
+export const MoveTargetOutOfBoundsError = ERROR_CLASSES.MoveTargetOutOfBoundsError;
+export const InvalidArgumentError = ERROR_CLASSES.InvalidArgumentError;
+export const InvalidElementStateError = ERROR_CLASSES.InvalidElementStateError;
+export const ScriptTimeoutError = ERROR_CLASSES.ScriptTimeoutError;
+export const JavascriptError = ERROR_CLASSES.JavascriptError;
+export const UnsupportedOperationError = ERROR_CLASSES.UnsupportedOperationError;
+export const NoSuchFrameError = ERROR_CLASSES.NoSuchFrameError;
+export const NoSuchWindowError = ERROR_CLASSES.NoSuchWindowError;
+export const InvalidCookieDomainError = ERROR_CLASSES.InvalidCookieDomainError;
+export const UnableToSetCookieError = ERROR_CLASSES.UnableToSetCookieError;
+export const DetachedShadowRootError = ERROR_CLASSES.DetachedShadowRootError;
+export const NoSuchShadowRootError = ERROR_CLASSES.NoSuchShadowRootError;
 
 /** The page reached a state the agent cannot recover from (e.g. dialog open). */
 export class UnexpectedAlertOpenError extends AgentError {
@@ -281,109 +355,21 @@ export class UnexpectedAlertOpenError extends AgentError {
   }
 }
 
-/** No JavaScript dialog is currently open (alert/confirm/prompt). */
-export class NoSuchAlertError extends AgentError {
-  constructor(message = "no such alert") { super(message, "no_such_alert"); }
-}
-
-/** A coordinate is outside the viewport or the page's scrollable area. */
-export class MoveTargetOutOfBoundsError extends AgentError {
-  constructor(message = "move target out of bounds") { super(message, "move_target_out_of_bounds"); }
-}
-
-/** The argument passed to an action is invalid (wrong type, out of range, …). */
-export class InvalidArgumentError extends AgentError {
-  constructor(message = "invalid argument") { super(message, "invalid_argument"); }
-}
-
-/** The element is in a state that does not permit the requested operation. */
-export class InvalidElementStateError extends AgentError {
-  constructor(message = "invalid element state") { super(message, "invalid_element_state"); }
-}
-
-/** A page-load or script-execution timeout fired. */
-export class ScriptTimeoutError extends AgentError {
-  constructor(message = "script timeout") { super(message, "script_timeout"); }
-}
-
-/** A JavaScript error was thrown by page-side code. */
-export class JavascriptError extends AgentError {
-  constructor(message = "javascript error") { super(message, "javascript_error"); }
-}
-
-/** The operation is not supported in the current context. */
-export class UnsupportedOperationError extends AgentError {
-  constructor(message = "unsupported operation") { super(message, "unsupported_operation"); }
-}
-
-/** A frame switch was requested but the frame does not exist. */
-export class NoSuchFrameError extends AgentError {
-  constructor(message = "no such frame") { super(message, "no_such_frame"); }
-}
-
-/** A window switch was requested but the window does not exist. */
-export class NoSuchWindowError extends AgentError {
-  constructor(message = "no such window") { super(message, "no_such_window"); }
-}
-
-/** A cookie operation was requested for a domain the agent cannot access. */
-export class InvalidCookieDomainError extends AgentError {
-  constructor(message = "invalid cookie domain") { super(message, "invalid_cookie_domain"); }
-}
-
-/** A cookie could not be set (invalid shape, size, or domain). */
-export class UnableToSetCookieError extends AgentError {
-  constructor(message = "unable to set cookie") { super(message, "unable_to_set_cookie"); }
-}
-
-/** A shadow root that was previously resolved has been detached. */
-export class DetachedShadowRootError extends AgentError {
-  constructor(message = "detached shadow root") { super(message, "detached_shadow_root"); }
-}
-
-/** A requested shadow root does not exist on the element. */
-export class NoSuchShadowRootError extends AgentError {
-  constructor(message = "no such shadow root") { super(message, "no_such_shadow_root"); }
-}
-
 /**
  * Map of error `code` strings to their typed classes. Used by
  * {@link decodeAgentError} to rehydrate a serialized error back into the
  * correct subclass (mirrors the ERROR_CODE_TO_TYPE map from the source
- * taxonomy). Keeping it explicit (rather than reflection-based) means
- * tree-shaking can drop unused classes when the consumer only imports a
- * subset.
+ * taxonomy). Built from the same {@link ERROR_SPECS} table as the exported
+ * classes, so the two can never drift apart.
  *
- * The constructor type is loosened to `new (...args: any[]) => AgentError`
- * so subclasses with extra optional parameters (e.g. `UnexpectedAlertOpenError`
- * takes an optional `alertText`) can sit in the same map.
+ * Every ctor accepts a single optional `message` (see {@link AgentErrorCtor});
+ * `UnexpectedAlertOpenError` additionally takes an optional `alertText`, which is
+ * still assignable because that extra parameter is optional.
  */
-type AgentErrorCtor = new (...args: any[]) => AgentError;
-
 export const ERROR_CODE_TO_TYPE: ReadonlyMap<string, AgentErrorCtor> = new Map<string, AgentErrorCtor>([
   ["agent_error", AgentError],
-  ["no_such_element", NoSuchElementException],
-  ["element_not_found", ElementNotFoundError],
-  ["element_not_interactable", ElementNotInteractableError],
-  ["element_click_intercepted", ElementClickInterceptedError],
-  ["element_not_selectable", ElementNotSelectableError],
-  ["stale_element_reference", StaleElementReferenceError],
-  ["invalid_selector", InvalidSelectorError],
-  ["timeout", TimeoutError],
+  ...ERROR_SPECS.map((s): [string, AgentErrorCtor] => [s.code, ERROR_CLASSES[s.name]]),
   ["unexpected_alert_open", UnexpectedAlertOpenError],
-  ["no_such_alert", NoSuchAlertError],
-  ["move_target_out_of_bounds", MoveTargetOutOfBoundsError],
-  ["invalid_argument", InvalidArgumentError],
-  ["invalid_element_state", InvalidElementStateError],
-  ["script_timeout", ScriptTimeoutError],
-  ["javascript_error", JavascriptError],
-  ["unsupported_operation", UnsupportedOperationError],
-  ["no_such_frame", NoSuchFrameError],
-  ["no_such_window", NoSuchWindowError],
-  ["invalid_cookie_domain", InvalidCookieDomainError],
-  ["unable_to_set_cookie", UnableToSetCookieError],
-  ["detached_shadow_root", DetachedShadowRootError],
-  ["no_such_shadow_root", NoSuchShadowRootError],
 ]);
 
 /**
@@ -392,9 +378,26 @@ export const ERROR_CODE_TO_TYPE: ReadonlyMap<string, AgentErrorCtor> = new Map<s
  * without losing the typed `code`. Mirrors the `encodeError` helper from the
  * source taxonomy.
  */
-export function encodeAgentError(err: unknown): { code: string; message: string; name: string } {
+export function encodeAgentError(
+  err: unknown,
+): { code: string; message: string; name: string; alertText?: string; remoteStacktrace?: string } {
   if (err instanceof AgentError) {
-    return { code: err.code, message: err.message, name: err.name };
+    const encoded: {
+      code: string;
+      message: string;
+      name: string;
+      alertText?: string;
+      remoteStacktrace?: string;
+    } = {
+      code: err.code,
+      message: err.message,
+      name: err.name,
+      remoteStacktrace: err.remoteStacktrace,
+    };
+    if (err instanceof UnexpectedAlertOpenError) {
+      encoded.alertText = err.alertText;
+    }
+    return encoded;
   }
   if (err instanceof Error) {
     return { code: "agent_error", message: err.message, name: err.name };
@@ -407,11 +410,25 @@ export function encodeAgentError(err: unknown): { code: string; message: string;
  * {@link AgentError} subclass. If the `code` is unknown, falls back to the
  * base {@link AgentError} so callers always get an `instanceof AgentError`.
  */
-export function decodeAgentError(data: { code?: string; message?: string }): AgentError {
+export function decodeAgentError(
+  data: { code?: string; message?: string; alertText?: string; remoteStacktrace?: string } | null | undefined,
+): AgentError {
   const code = typeof data?.code === "string" ? data.code : "agent_error";
   const message = typeof data?.message === "string" ? data.message : "";
-  const ctor = ERROR_CODE_TO_TYPE.get(code) ?? AgentError;
-  return new ctor(message);
+  let result: AgentError;
+  if (code === "unexpected_alert_open") {
+    // `UnexpectedAlertOpenError` carries an additional `alertText` field that
+    // the generic one-arg constructor would drop on rehydration. Optional
+    // chaining keeps a garbled (null/undefined) payload from throwing here.
+    result = new UnexpectedAlertOpenError(message, data?.alertText);
+  } else {
+    const ctor = ERROR_CODE_TO_TYPE.get(code) ?? AgentError;
+    result = new ctor(message);
+  }
+  if (typeof data?.remoteStacktrace === "string") {
+    result.remoteStacktrace = data.remoteStacktrace;
+  }
+  return result;
 }
 
 /** Type guard: did the thrown value come from the typed hierarchy? */

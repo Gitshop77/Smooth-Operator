@@ -55,7 +55,7 @@ const INTERACTIVE_TAGS: ReadonlySet<string> = new Set([
 const INTERACTIVE_ROLES: ReadonlySet<string> = new Set([
   "button", "link", "checkbox", "radio", "tab", "menuitem",
   "menuitemcheckbox", "menuitemradio", "option", "combobox",
-  "slider", "switch", "textbox", "spinbutton", "searchbox",
+  "listbox", "slider", "switch", "textbox", "spinbutton", "searchbox",
   "treeitem", "gridcell",
 ]);
 
@@ -94,7 +94,13 @@ export function isInteractive(el: HTMLElement): boolean {
   if (el.getAttribute("onclick") !== null) return true;
   const tabindex = el.getAttribute("tabindex");
   if (tabindex !== null && parseInt(tabindex, 10) >= 0) return true;
-  if (el.draggable) return true;
+  // Only treat `draggable` as a signal of interactivity when it is explicitly
+  // set to "true". `HTMLElement.draggable` defaults to `true` for `<img>` and
+  // `<a href>` (the HTML "auto" default), so reading the property would
+  // over-classify every image and link as an interactive click target and bloat
+  // the serialized tree. Links are already covered by the `href` check above,
+  // and images are not actionable, so we only honor an explicit opt-in.
+  if (el.getAttribute("draggable") === "true") return true;
   return false;
 }
 
@@ -266,11 +272,18 @@ export const SENSITIVE_AUTOCOMPLETE: readonly string[] = [
  * Determine whether an element holds sensitive data whose `value` should be
  * redacted before being sent to the LLM. True for `type="password"`,
  * `type="hidden"` (CSRF/session tokens), and any field whose `autocomplete`
- * contains a sensitive token (credit-card, OTP, password).
+ * token list includes a sensitive token (credit-card, OTP, password).
  */
 export function isSensitive(el: HTMLElement): boolean {
   const type = (el.getAttribute("type") || "").toLowerCase();
   if (type === "password" || type === "hidden") return true;
-  const autocomplete = (el.getAttribute("autocomplete") || "").toLowerCase();
-  return SENSITIVE_AUTOCOMPLETE.some((s) => autocomplete.includes(s));
+  // The `autocomplete` attribute is a whitespace-separated token list (e.g.
+  // "section-cc cc-number"). Compare tokens rather than doing a raw substring
+  // match, so a benign value whose text merely *contains* a sensitive token as
+  // a substring (e.g. "cc-exp-month" should not match the bare "cc-exp" token
+  // unless it is itself listed) is classified precisely.
+  const autocompleteTokens = (el.getAttribute("autocomplete") || "")
+    .toLowerCase()
+    .split(/\s+/);
+  return autocompleteTokens.some((t) => SENSITIVE_AUTOCOMPLETE.includes(t));
 }

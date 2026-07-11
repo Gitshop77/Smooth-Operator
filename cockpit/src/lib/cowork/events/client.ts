@@ -7,7 +7,8 @@
 // Per project rules:
 //   • Server-to-server fetches may use `http://localhost:3003` directly (the
 //     mini-service is internal and not exposed through Caddy).
-//   • The X-Cowork-Token header must match `process.env.COWORK_EVENT_TOKEN`.
+//   • The X-Cowork-Token header must match `process.env.COWORK_EVENT_TOKEN`
+//     (falling back to `process.env.COWORK_UI_TOKEN` if the former is unset).
 
 const COWORK_EVENTS_BASE = process.env.COWORK_EVENTS_BASE_URL || 'http://localhost:3003';
 
@@ -20,18 +21,31 @@ const COWORK_EVENTS_BASE = process.env.COWORK_EVENTS_BASE_URL || 'http://localho
 // The check is deferred to CALL time (not module load) so that importing a
 // route that references this module — during `next build`, prerender, or a
 // unit test — does not crash the whole module graph. The throw fires only when
-// a relay is actually attempted, where it is caught by the route's error
-// wrapper and surfaced as a 500. This is equally fail-closed, without the
-// import-time fragility of an IIFE.
+// a relay is actually attempted. `broadcastEvent` wraps this in its own
+// try/catch and converts the failure into a `{ ok: false, error }` result
+// (see below) — callers MUST check `result.ok`. The `/api/cowork/events/emit`
+// route does exactly that and surfaces the failure as a 500, so the fail-closed
+// behavior is preserved end-to-end for that path. This is equally fail-closed,
+// without the import-time fragility of an IIFE.
 function getCoworkEventsToken(): string {
+  // Preferred server-to-server secret.
   const token = process.env.COWORK_EVENT_TOKEN;
-  if (!token || token.length === 0) {
-    throw new Error(
-      'COWORK_EVENT_TOKEN is not set — refusing to broadcast/relay events to the ' +
-        'cowork-events mini-service (fail-closed). Set a real secret.',
-    );
+  if (token && token.length > 0) {
+    return token;
   }
-  return token;
+  // Fall back to the UI token. Operators may configure only COWORK_UI_TOKEN
+  // (the preferred browser secret per the auth middleware) and expect
+  // server-to-server relays to work end-to-end with a single configured secret.
+  // This still fails closed if BOTH are unset/empty — we never silently relay
+  // with the well-known dev-token.
+  const uiToken = process.env.COWORK_UI_TOKEN;
+  if (uiToken && uiToken.length > 0) {
+    return uiToken;
+  }
+  throw new Error(
+    'COWORK_EVENT_TOKEN (or COWORK_UI_TOKEN) is not set — refusing to broadcast/relay events to the ' +
+      'cowork-events mini-service (fail-closed). Set a real secret.',
+  );
 }
 
 export interface BroadcastResult {

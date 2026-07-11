@@ -71,7 +71,9 @@ export const DEFAULT_ANNOTATE_PALETTE: readonly string[] = [
 ];
 
 export interface AnnotateOptions {
-  /** Font size for the index label (in scaled / device pixels). Default 14. */
+  /** Base font size for the index label, in CSS pixels. It is multiplied by
+   * `scaleFactor` when drawn on the device-resolution canvas, so the label
+   * renders at a consistent visual size regardless of DPR. Default 14. */
   fontSize?: number;
   /** Hex color of the bounding-box outline (single-color mode). Default `#ef4444` (red-500). Ignored when `boxColors` is set. */
   boxColor?: string;
@@ -162,11 +164,20 @@ export async function annotateScreenshot(
     img.drawTo(ctx);
 
     // Draw numbered boxes on each element.
-    ctx.font = `bold ${fontSize}px sans-serif`;
+    // The canvas is at device resolution, so scale the label font by
+    // `scaleFactor` to match the boxes; otherwise the label text renders at
+    // ~1/scaleFactor of the intended visual size on high-DPR screenshots.
+    const sFont = fontSize * scaleFactor;
+    ctx.font = `bold ${sFont}px sans-serif`;
     ctx.textBaseline = "top";
 
     for (const el of elements) {
       const { x, y, width, height } = el.rect;
+      // Skip malformed / non-finite rects — a NaN passes the `<= 0` checks but
+      // would make `ctx.strokeRect(NaN, …)` draw nothing (silent drop), and a
+      // negative index would break the palette lookup below.
+      if (!Number.isFinite(width) || !Number.isFinite(height)) continue;
+      if (!Number.isFinite(el.index)) continue;
       // Skip zero-size AND sub-`minSize` elements — their boxes would be
       // invisible and their labels unreadable.
       if (width <= 0 || height <= 0) continue;
@@ -181,7 +192,11 @@ export async function annotateScreenshot(
       // Pick this element's color: cycle the palette by index in multi-color
       // mode, or use the single color otherwise. The palette is also used for
       // the label background so the label contrasts with the box outline.
-      const color = palette ? palette[el.index % palette.length] : singleBoxColor;
+      // Use a non-negative modulo so a negative `el.index` still indexes a
+      // valid palette slot instead of yielding `undefined`.
+      const color = palette
+        ? palette[((el.index % palette.length) + palette.length) % palette.length]
+        : singleBoxColor;
       const labelBg = palette ? color : singleBgColor;
 
       // Bounding-box outline.
@@ -193,17 +208,20 @@ export async function annotateScreenshot(
       // ref (the `[index]` the LLM uses to reference it), optionally
       // prefixed (e.g. `"e3"`) when the caller uses a ref-string convention.
       const label = refPrefix + String(el.index);
-      const labelWidth = ctx.measureText(label).width + 6;
-      const labelHeight = fontSize + 4;
+      // `measureText` already reflects the scaled font; pad the box in
+      // device pixels too so the label sits comfortably inside its box at
+      // any DPR.
+      const labelWidth = ctx.measureText(label).width + 6 * scaleFactor;
+      const labelHeight = sFont + 4 * scaleFactor;
 
       ctx.fillStyle = labelBg;
       ctx.fillRect(dx, dy, labelWidth, labelHeight);
 
       ctx.fillStyle = textColor;
-      ctx.fillText(label, dx + 3, dy + 2);
+      ctx.fillText(label, dx + 3 * scaleFactor, dy + 2 * scaleFactor);
     }
 
-    return await canvasToDataUrl(canvas);
+    return await canvasToDataUrl(canvas, screenshotDataUrl);
   } catch {
     // Any drawing / encoding error → return the raw screenshot.
     return screenshotDataUrl;
@@ -258,15 +276,20 @@ function createCanvas(): AnnotatorCanvas | null {
 }
 
 /**
- * Load an image from a data URL. Uses the right API for the canvas type:
- *   - `OffscreenCanvas` → `createImageBitmap(blob)` (works in SWs)
- *   - `HTMLCanvasElement` → `new Image()` (works in DOM contexts)
+ * Load an image from a data URL.
+ *
+ * The path is selected by `createImageBitmap` availability, NOT by canvas
+ * type — `createImageBitmap` is defined in both the Chrome service-worker
+ * (OffscreenCanvas) and DOM (HTMLCanvasElement) contexts, so the
+ * `HTMLImageElement` fallback below is effectively only reached in
+ * jsdom/test environments where `createImageBitmap` is absent. The `_canvas`
+ * argument is accepted for API symmetry but does not drive the path choice.
  *
  * Both paths return a {@link LoadedImage} that knows how to draw itself
  * onto a 2D context.
  */
 async function loadImage(dataUrl: string, _canvas: AnnotatorCanvas): Promise<LoadedImage> {
-  // Path 1: OffscreenCanvas → ImageBitmap (no DOM needed).
+  // Path 1: createImageBitmap available (Chrome SW + DOM) → decode via Blob.
   if (typeof createImageBitmap !== "undefined") {
     const blob = await dataUrlToBlob(dataUrl);
     const bitmap = await createImageBitmap(blob);
@@ -279,7 +302,7 @@ async function loadImage(dataUrl: string, _canvas: AnnotatorCanvas): Promise<Loa
       cleanup: () => { try { bitmap.close(); } catch { /* already closed */ } },
     };
   }
-  // Path 2: HTMLCanvasElement → HTMLImageElement (DOM required).
+  // Path 2: jsdom / non-createImageBitmap fallback (HTMLImageElement).
   return await loadImageViaImg(dataUrl);
 }
 
@@ -319,22 +342,34 @@ async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
  * as PNG (3-5× larger for photographic content) was inflating both the bundle
  * sent to the LLM and the prompt token count with no quality benefit. JPEG q=85
  * preserves the numbered-box outlines cleanly while cutting size ~3-5×. */
-async function canvasToDataUrl(canvas: AnnotatorCanvas): Promise<string> {
+async function canvasToDataUrl(canvas: AnnotatorCanvas, fallback: string): Promise<string> {
   // OffscreenCanvas path.
   const oc = canvas as unknown as {
     convertToBlob?: (opts: { type: string; quality?: number }) => Promise<Blob>;
   };
   if (typeof oc.convertToBlob === "function") {
-    const blob = await oc.convertToBlob({ type: "image/jpeg", quality: 0.85 });
-    return await blobToDataUrl(blob);
+    try {
+      const blob = await oc.convertToBlob({ type: "image/jpeg", quality: 0.85 });
+      return await blobToDataUrl(blob);
+    } catch {
+      // Encoding failed — fall back to the raw screenshot.
+      return fallback;
+    }
   }
   // HTMLCanvasElement path.
   const html = canvas as unknown as { toDataURL?: (type: string, quality?: number) => string };
   if (typeof html.toDataURL === "function") {
-    return html.toDataURL("image/jpeg", 0.85);
+    try {
+      return html.toDataURL("image/jpeg", 0.85);
+    } catch {
+      // Encoding failed — fall back to the raw screenshot.
+      return fallback;
+    }
   }
   // Should never happen — both canvas flavors implement one of the two.
-  throw new Error("No canvas-to-data-URL method available");
+  // Return the raw screenshot rather than throwing so the documented
+  // "always returns a usable image" contract holds airtight.
+  return fallback;
 }
 
 /** Convert a `Blob` to a `data:` URL via `FileReader`. */

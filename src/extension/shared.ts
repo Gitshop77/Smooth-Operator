@@ -44,15 +44,24 @@ export function escapeHtml(s: unknown): string {
 // The Cowork Cockpit is a Next.js dashboard that lives outside the
 // extension (dev: http://localhost:3000, prod: a deployed URL). The side
 // panel's "Open Cowork Cockpit" button opens this URL in a new tab. The
-// user can override it in Settings in case their cockpit runs on a
-// non-default host/port (e.g. behind a gateway or in a container).
+// user must configure it in Settings — there is no baked-in default, so a
+// production install never silently targets a plaintext localhost origin.
+// An empty string means "not configured": the UI should prompt the user to
+// set a real (preferably https) cockpit URL rather than opening localhost.
 
-export const DEFAULT_COCKPIT_URL = "http://localhost:3000";
+/**
+ * Default cockpit URL. Intentionally empty so production artifacts never ship
+ * a plaintext `http://localhost:3000` fallback. Callers should treat "" as
+ * "unconfigured" and gate the "Open Cockpit" action until the user supplies a
+ * real, https-validated URL. A developer running the cockpit locally can set
+ * the URL in Settings (or via the COCKPIT_URL storage key).
+ */
+export const DEFAULT_COCKPIT_URL = "";
 export const COCKPIT_URL_STORAGE_KEY = "coworkCockpitUrl";
 
 /**
- * Read the configured cockpit URL from chrome.storage.local, falling back
- * to DEFAULT_COCKPIT_URL if unset or empty.
+ * Read the configured cockpit URL from chrome.storage.local, falling back to
+ * DEFAULT_COCKPIT_URL (empty = "not configured") if unset or empty.
  */
 export async function getCockpitUrl(): Promise<string> {
   try {
@@ -62,6 +71,7 @@ export async function getCockpitUrl(): Promise<string> {
     // Reject non-http(s) schemes (javascript:, data:, blob:, file:, …). A
     // corrupt or attacker-controlled stored value must never be opened in a
     // new tab as an executable scheme — fall back to the safe default.
+    if (!candidate) return candidate; // empty = explicitly "not configured"
     try {
       const parsed = new URL(candidate);
       if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {

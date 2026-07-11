@@ -91,13 +91,35 @@ describe("confirmation gate in executeActionQueue", () => {
   // "allows the action to proceed" test actually executes the evaluate, so the
   // jsdom origin (localhost) must be allowlisted; the decline test never
   // reaches execution but the config is harmless there.
+  let savedLocation: unknown;
   beforeEach(() => {
     (globalThis as Record<string, unknown>).__openCoworkDomainConfig = {
-      allowedDomains: ["localhost"],
+      // Use a dotted (multi-label) host. The domain-allowlist matcher
+      // intentionally REJECTS single-label hosts like "localhost" (to stop a
+      // typo'd "com"/"org" from over-matching every host), so the jsdom
+      // origin must be represented as a dotted domain here.
+      allowedDomains: ["app.example.com"],
     };
+    // The executor's `evaluate` gate reads the global `location.href`. jsdom's
+    // default origin is `http://localhost:3000/` whose single-label host is
+    // rejected by the hardened matcher above, so point `location` at a dotted
+    // host the allowlist permits. This exercises the REAL executor path
+    // end-to-end (domain allowlist → confirmation → execution) without
+    // weakening the single-label hardening.
+    savedLocation = (globalThis as Record<string, unknown>).location;
+    Object.defineProperty(globalThis, "location", {
+      configurable: true,
+      value: { href: "http://app.example.com/" },
+    });
   });
   afterEach(() => {
     delete (globalThis as Record<string, unknown>).__openCoworkDomainConfig;
+    if (savedLocation !== undefined) {
+      Object.defineProperty(globalThis, "location", {
+        configurable: true,
+        value: savedLocation,
+      });
+    }
   });
 
   test("requestConfirmation is called for confirm-required actions and blocks on decline", async () => {

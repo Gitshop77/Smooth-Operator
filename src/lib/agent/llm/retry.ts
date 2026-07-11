@@ -127,7 +127,19 @@ export async function withLLMRetry<T>(
       // Exclude a deliberate abort from the network/timeout retryable class so a
       // user cancel (which can surface as a "timeout"/"fetch" error) propagates
       // immediately rather than burning an extra backoff.
-      const isNetwork = !signal?.aborted && /fetch|network|econn|timeout/i.test(msg);
+      // A definitive 4xx status (except 429) means the server rejected the
+      // request and it is NOT a transient network glitch — even if its body text
+      // happens to mention "fetch"/"network"/"timeout"/"ECONN". The HTTP
+      // transport stamps `status` on every non-ok response and embeds up to 300
+      // chars of the provider body in the message, so a 400/401/403 whose body
+      // contains "timeout" must propagate immediately, not be retried. Genuine
+      // transport failures surface with no status (or status 0) and still match
+      // the network pattern below.
+      const statusKnownNonRetryable =
+        hasStatus && status >= 400 && status < 500 && status !== 429;
+      const isNetwork =
+        !signal?.aborted && !statusKnownNonRetryable &&
+        /fetch|network|econn|timeout/i.test(msg);
       const retryable = is429 || is5xx || isNetwork;
       if (!retryable || attempt === MAX_RETRIES) throw e;
       // if the error carries a Retry-After value (from a 429 response

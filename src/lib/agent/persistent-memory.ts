@@ -45,6 +45,32 @@ export function __resetMemoryCacheForTests(): void {
 }
 
 /**
+ * Per-context mutex mirroring `withTaskMutation` in `scheduled-tasks.ts`.
+ *
+ * `chrome.storage.local` has no transactions, so a read-modify-write of the
+ * memory map can interleave with another mutation in the *same* context and
+ * clobber it (lost-update race — see audit batch b026). On a cold cache two
+ * concurrent `saveMemory`/`deleteMemory` calls can both read the same stored
+ * map, mutate independent copies, and the last writer silently wins — a user
+ * memory edit is lost. This serializes each mutation's load→mutate→write.
+ *
+ * It cannot prevent a race with a separate JS context (e.g. the Options page);
+ * fixing that would require per-domain storage keys, which is out of scope here.
+ */
+let memoryMutationLock: Promise<void> = Promise.resolve();
+async function withMemoryMutation<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = memoryMutationLock;
+  let release!: () => void;
+  memoryMutationLock = new Promise<void>((r) => (release = r));
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+/**
  * Load the full map of `{ domain -> SiteMemory }` from storage.
  * Returns an empty object on any storage / parse error.
  */
@@ -53,7 +79,14 @@ export async function loadAllMemories(): Promise<Record<string, SiteMemory>> {
   if (isExtensionWithLocal()) {
     try {
       const res = await chrome.storage.local.get(STORAGE_KEY);
-      const map = (res[STORAGE_KEY] as Record<string, SiteMemory> | undefined) || {};
+      const raw = res[STORAGE_KEY];
+      // Guard against type-mismatched / corrupt storage (e.g. a non-object or
+      // array value under the same key) so callers don't throw on `Object.values`
+      // / `for..in` downstream. Require a non-null, non-array object.
+      const map =
+        raw && typeof raw === "object" && !Array.isArray(raw)
+          ? (raw as Record<string, SiteMemory>)
+          : {};
       memoriesCache = map;
       return map;
     } catch {
@@ -61,7 +94,13 @@ export async function loadAllMemories(): Promise<Record<string, SiteMemory>> {
     }
   }
   try {
-    const map = (JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}") as Record<string, SiteMemory>) || {};
+    const raw = localStorage.getItem(STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    // Require a non-null, non-array object; otherwise fall back to empty.
+    const map =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, SiteMemory>)
+        : {};
     memoriesCache = map;
     return map;
   } catch {
@@ -93,23 +132,27 @@ async function writeAllMemories(all: Record<string, SiteMemory>): Promise<void> 
 export async function saveMemory(domain: string, notes: string): Promise<void> {
   const d = domain.trim().toLowerCase();
   if (!d) return;
-  const all = await loadAllMemories();
-  if (!notes.trim()) {
-    delete all[d];
-  } else {
-    all[d] = { domain: d, notes: notes.trim(), updatedAt: Date.now() };
-  }
-  await writeAllMemories(all);
+  await withMemoryMutation(async () => {
+    const all = await loadAllMemories();
+    if (!notes.trim()) {
+      delete all[d];
+    } else {
+      all[d] = { domain: d, notes: notes.trim(), updatedAt: Date.now() };
+    }
+    await writeAllMemories(all);
+  });
 }
 
 /** Delete a site memory by domain. No-op if the domain isn't stored. */
 export async function deleteMemory(domain: string): Promise<void> {
   const d = domain.trim().toLowerCase();
   if (!d) return;
-  const all = await loadAllMemories();
-  if (!(d in all)) return;
-  delete all[d];
-  await writeAllMemories(all);
+  await withMemoryMutation(async () => {
+    const all = await loadAllMemories();
+    if (!(d in all)) return;
+    delete all[d];
+    await writeAllMemories(all);
+  });
 }
 
 /**
@@ -131,7 +174,12 @@ export async function getMemoriesForUrl(url: string): Promise<SiteMemory[]> {
   const matches: SiteMemory[] = [];
   for (const memory of Object.values(all)) {
     const d = memory.domain.toLowerCase();
-    if (hostname === d || hostname.endsWith("." + d)) {
+    // Exact-hostname match always applies. Suffix matching (`.${d}`) is only
+    // safe for a real domain (one containing a dot): a bare TLD like `com`
+    // would otherwise match EVERY `.com` host via `.endsWith(".com")` and
+    // inject that memory site-wide. Bare-TLD entries can therefore only be
+    // matched by exact hostname equality.
+    if (hostname === d || (d.includes(".") && hostname.endsWith("." + d))) {
       matches.push(memory);
     }
   }

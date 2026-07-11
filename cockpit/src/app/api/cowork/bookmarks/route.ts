@@ -1,6 +1,6 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
-import { json, withRouteError, bodyJson, validateHttpUrl, isSsrfSafeUrl, badRequest } from '@/lib/cowork/api/http';
+import { json, withRouteError, bodyJson, validateHttpUrl, badRequest, boundedString, MAX_NAME_LEN, MAX_URL_LEN } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
 // Prisma's `include: { children: true }` only fetches ONE level of
@@ -29,15 +29,29 @@ function buildBookmarkTree(rows: BookmarkRow[]): BookmarkRow[] {
   }
   // Recursively attach `children` arrays. The cast is safe because we're
   // mutating the row objects in place to add the `children` property that
-  // Prisma's `include: { children: true }` would have set.
-  const attach = (parentId: string | null): BookmarkRow[] => {
+  // Prisma's `include: { children: true }` would have set. `ancestors` tracks
+  // the chain of parent ids currently on the recursion stack so a cyclic /
+  // self parent reference can't cause infinite recursion (which previously
+  // turned `GET /api/cowork/bookmarks` into a stack-overflow 500). On a
+  // back-edge we attach an empty `children` array — the node is rendered as a
+  // leaf rather than crashing the request.
+  const attach = (parentId: string | null, ancestors: Set<string>): BookmarkRow[] => {
     const kids = byParent.get(parentId) ?? [];
+    const result: BookmarkRow[] = [];
     for (const k of kids) {
-      (k as BookmarkRow & { children: BookmarkRow[] }).children = attach(k.id);
+      if (ancestors.has(k.id)) {
+        (k as BookmarkRow & { children: BookmarkRow[] }).children = [];
+        result.push(k);
+        continue;
+      }
+      const next = new Set(ancestors);
+      next.add(k.id);
+      (k as BookmarkRow & { children: BookmarkRow[] }).children = attach(k.id, next);
+      result.push(k);
     }
-    return kids;
+    return result;
   };
-  return attach(null);
+  return attach(null, new Set());
 }
 
 export async function GET(): Promise<Response> {
@@ -56,7 +70,7 @@ export async function GET(): Promise<Response> {
 export async function POST(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
     const body = await bodyJson(req);
-    const name = String(body.name || 'Untitled');
+    const name = boundedString(body.name, MAX_NAME_LEN, 'Untitled');
     const parentId = body.parentId ? String(body.parentId) : null;
     // Validate the referenced parent bookmark exists (the analog of a
     // relation-connect). A dangling parentId is rejected with 400 rather than
@@ -79,14 +93,15 @@ export async function POST(req: NextRequest): Promise<Response> {
       });
       return json({ bookmark: bm }, 201);
     }
-    const url = String(body.url || '');
+    const url = boundedString(body.url, MAX_URL_LEN, '');
     // Validate URL scheme (prevents javascript:/data: stored-XSS via <a href>).
     const urlError = validateHttpUrl(url);
     if (urlError) return urlError;
-    // Enforce the SSRF boundary on stored URLs so a private/loopback host
-    // can never later become an SSRF sink if this URL is fetched/launched
-    // server-side.
-    if (!isSsrfSafeUrl(url)) return badRequest('url host is not allowed (private/loopback address)');
+    // NOTE: we intentionally do NOT gate on `isSsrfSafeUrl` here. Stored
+    // bookmark URLs are opened client-side in the browser, never fetched
+    // server-side, so a developer's localhost/loopback bookmark must remain
+    // valid. The SSRF guard is reserved for genuine server-side outbound
+    // fetches/launches.
     const bm = await db.bookmark.create({
       data: { name, url, parentId, type: 'url' },
     });

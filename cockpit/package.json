@@ -12,7 +12,7 @@
     "db:push": "prisma db push",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
-    "db:apply": "prisma db push"
+    "db:apply": "prisma migrate deploy"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",

@@ -25,6 +25,7 @@ import * as OpenAIChat from "../protocols/openai-chat";
 import type { LLMProvider } from "../provider";
 import { toLLMProvider as toLLMProviderBridge } from "../provider-bridge";
 import { encodeModelIdForUrl } from "../modelId";
+import { assertSafeUserBaseURL } from "./openai-compatible-profile";
 
 export const id = "azure";
 
@@ -44,8 +45,35 @@ const auth = (options: ProviderAuthOption<"optional">) => {
     .pipe(Auth.header("api-key"));
 };
 
+/** Resolve the Azure resource name from config or the environment. */
+function resolveEnvResource(): string | undefined {
+  return typeof process !== "undefined" ? process.env?.AZURE_OPENAI_RESOURCE_NAME : undefined;
+}
+
+/**
+ * Throw a clear error when Azure is selected but not properly configured
+ * (neither `resourceName` nor `baseURL` provided, and no
+ * `AZURE_OPENAI_RESOURCE_NAME` env var). This surfaces the misconfiguration
+ * at config time — whether via `configure()` or `toLLMProvider()` — instead
+ * of silently producing an empty/relative URL that fails opaquely at request
+ * time.
+ */
+function assertConfigured(input: Config): void {
+  if (!input.resourceName && !input.baseURL && !resolveEnvResource()) {
+    throw new Error(
+      "Azure OpenAI is not configured. Set your Azure resource name (resourceName) or a custom baseURL in Options."
+    );
+  }
+}
+
 export function configure(input: Config = {}) {
-  const resource = input.resourceName ?? (typeof process !== "undefined" ? process.env?.AZURE_OPENAI_RESOURCE_NAME : undefined);
+  // (SSRF guard): validate any user-supplied baseURL override before
+  // building the route/endpoint. The resource-derived URL (built from a
+  // trusted resource name / env var) is exempt; only untrusted input is checked.
+  assertSafeUserBaseURL(input.baseURL);
+  // Fail closed at config time when no usable endpoint can be derived.
+  assertConfigured(input);
+  const resource = input.resourceName ?? resolveEnvResource();
   const apiVersion = input.apiVersion ?? (typeof process !== "undefined" ? process.env?.AZURE_OPENAI_API_VERSION : undefined) ?? DEFAULT_API_VERSION;
   const baseURL = input.baseURL ?? (resource ? `https://${resource}.openai.azure.com` : undefined);
 
@@ -73,23 +101,17 @@ export function configure(input: Config = {}) {
   };
 }
 
-export const provider = configure();
-
 /**
  * Bridge to the agent's `LLMProvider` interface.
  *
  * Throws a clear error when Azure is selected but not properly configured
  * (neither `resourceName` nor `baseURL` provided, and no
  * `AZURE_OPENAI_RESOURCE_NAME` env var) — instead of silently falling back to
- * OpenAI's public endpoint.
+ * OpenAI's public endpoint. `configure()` performs the same check, so the
+ * misconfiguration surfaces regardless of which entry point is used.
  */
 export function toLLMProvider(config: Config & { model: string }): LLMProvider {
-  const envResource = typeof process !== "undefined" ? process.env?.AZURE_OPENAI_RESOURCE_NAME : undefined;
-  if (!config.resourceName && !config.baseURL && !envResource) {
-    throw new Error(
-      "Azure OpenAI is not configured. Set your Azure resource name (resourceName) or a custom baseURL in Options."
-    );
-  }
+  assertConfigured(config);
   return toLLMProviderBridge({
     providerId: "azure",
     providerDisplayName: "Azure",

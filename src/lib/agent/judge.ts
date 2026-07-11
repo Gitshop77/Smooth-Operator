@@ -108,21 +108,29 @@ Rules:
 
 /**
  * Render a single history item as text for the judge.
- * Truncates extracted content to keep the prompt bounded. Wraps each snippet
- * in `<untrusted>` so the judge LLM can't be prompt-injected by a malicious
- * page (extracted content is page-derived and therefore untrusted).
+ * Truncates extracted content to keep the prompt bounded. Wraps every
+ * non-authoritative field in `<untrusted>` so the judge LLM can't be
+ * prompt-injected — extracted content is page-derived (untrusted), and the
+ * agent's own `evaluation`/`memory`/`goal` notes are model output that may
+ * echo page-derived text it copied, so they are untrusted too. The user
+ * `task` is the only trusted (author-provided) field and is left unwrapped.
  */
 function renderHistoryItem(h: HistoryItem): string {
   let s = `Step ${h.step} (${h.agent}):\n`;
-  if (h.evaluation) s += `  Evaluation: ${h.evaluation}\n`;
-  if (h.memory) s += `  Memory: ${h.memory}\n`;
-  if (h.goal) s += `  Goal: ${h.goal}\n`;
+  if (h.evaluation) s += `  Evaluation: ${wrapUntrusted(h.evaluation)}\n`;
+  if (h.memory) s += `  Memory: ${wrapUntrusted(h.memory)}\n`;
+  if (h.goal) s += `  Goal: ${wrapUntrusted(h.goal)}\n`;
   // Null-guard `h.results` — older history items (or hand-built test fixtures)
   // may have `results: undefined`. Without this, `h.results.length` throws.
   if (h.results?.length) {
     s += `  Actions:\n`;
     for (const r of h.results) {
-      s += `    - ${r.action.type}: ${r.message}${r.success ? "" : " (FAILED)"}\n`;
+      // `r.action.type` is a model-chosen label and `r.message` is the agent's
+      // free-text description of an action, which routinely echoes page-derived
+      // content (e.g. "typed '<extracted text>' into the search box"). Both are
+      // untrusted per this module's trust model and must be wrapped so they
+      // can't prompt-inject the judge LLM.
+      s += `    - ${wrapUntrusted(r.action.type)}: ${wrapUntrusted(r.message)}${r.success ? "" : " (FAILED)"}\n`;
       if (r.extractedContent) {
         // Truncate AND add an ellipsis when truncated so the judge can tell
         // the snippet was cut short (otherwise it might infer the task
@@ -179,7 +187,7 @@ export async function judgeTask(args: JudgeTaskArgs): Promise<JudgementResult | 
 
 Agent's final result:
 - Self-reported success: ${agentResult.success}
-- Summary: ${truncatedSummary}
+- Summary: ${wrapUntrusted(truncatedSummary)}
 
 Action history:
 ${historyText}

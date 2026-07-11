@@ -31,10 +31,11 @@ import {
  * DOM/JS), so failing closed on every access is the strongest possible
  * guarantee: `chrome.storage`, `chrome.storage.session`, `chrome.runtime`,
  * `chrome.tabs`, etc. all throw `Error("access denied by evaluate sandbox")`.
- * This is provably safe — there is no path that reaches the real `chrome`
- * object, and there is no whitelisted accessor that an attacker could abuse.
- * Every trap (get/set/has/apply/construct/deleteProperty) denies, so neither
- * reads, writes, nor `in`-checks nor calls/constructs can slip through.
+ * This is the first (and primary) layer of defense — there is no whitelisted
+ * accessor that an attacker could abuse. Every trap (get/set/has/apply/
+ * construct/deleteProperty) denies, so neither reads, writes, nor `in`-checks
+ * nor calls/constructs can slip through. (Layered with the `Function`/`eval`
+ * and `document` hardening below for defense-in-depth.)
  */
 function makeSandboxChrome(): unknown {
   const deny = (op: string, prop: PropertyKey): never => {
@@ -64,8 +65,8 @@ function makeSandboxChrome(): unknown {
 
 /**
  * A Proxy that FORWARDS to a real global object (`window`,
- * `globalThis`, `self`, ...) for every property EXCEPT `chrome`, which it
- * denies with the sandbox error.
+ * `globalThis`, `self`, ...) for every property EXCEPT a small deny-list of
+ * dangerous properties, which it denies with the sandbox error.
  *
  * `evaluate` legitimately needs the page globals (`window`, `document` via its
  * own parameter, `globalThis`, `self`) for DOM/JS work, so we can't just blank
@@ -74,29 +75,159 @@ function makeSandboxChrome(): unknown {
  * `chrome` parameter shadow above. This proxy lets all normal global access
  * through while slamming the `chrome` property shut on every trap (get/set/has/
  * delete), so those bypass vectors throw `access denied by evaluate sandbox`.
+ *
+ * It ALSO denies `Function` and `eval` (and their `in`-checks), because a
+ * sandboxed script can escape the parameter shadowing by calling
+ * `new Function(...)` / `eval(...)` / indirect `(0, eval)(...)` — those build a
+ * function in the GLOBAL scope, where the free identifier `Function`/`eval`
+ * resolves to the REAL global constructor, not our throwing parameter stub. By
+ * denying `Function`/`eval` on the window/globalThis/self proxies, the
+ * `window.Function(...)` / `globalThis.eval(...)` escape vectors are also
+ * closed (finding: evaluate sandbox is bypassable via new Function / indirect
+ * eval). The direct `Function`/`eval` identifiers are additionally shadowed as
+ * throwing parameters on the generated function (see below).
  */
-function makeChromeDenyingProxy(target: object): unknown {
-  const deny = (): never => {
-    throw new Error("access denied by evaluate sandbox: chrome");
+const SANDBOX_DENIED_PROPS = new Set(["chrome", "Function", "eval"]);
+
+/** A prop → lazy-value map. When a denied/redirected prop is accessed on a
+ * hardened proxy, the getter is invoked and its result returned instead of the
+ * real property. Used to recursively harden window-traversal properties so the
+ * evaluated code cannot climb out of the isolated world to the real `chrome`. */
+type RedirectMap = Record<string, () => unknown>;
+
+function makeChromeDenyingProxy(target: object, redirect?: RedirectMap): unknown {
+  const deny = (prop: PropertyKey): never => {
+    throw new Error(`access denied by evaluate sandbox: ${String(prop)}`);
   };
   return new Proxy(target, {
     get: (t, prop, recv) => {
-      if (prop === "chrome") deny();
+      if (typeof prop === "string") {
+        if (SANDBOX_DENIED_PROPS.has(prop)) deny(prop);
+        if (redirect && prop in redirect) return redirect[prop]();
+      }
       return Reflect.get(t, prop, recv);
     },
     has: (t, prop) => {
-      if (prop === "chrome") deny();
+      if (typeof prop === "string") {
+        if (SANDBOX_DENIED_PROPS.has(prop)) return false;
+        if (redirect && prop in redirect) return true;
+      }
       return Reflect.has(t, prop);
     },
     set: (t, prop, value, recv) => {
-      if (prop === "chrome") deny();
+      if (typeof prop === "string" && SANDBOX_DENIED_PROPS.has(prop)) deny(prop);
       return Reflect.set(t, prop, value, recv);
     },
     deleteProperty: (t, prop) => {
-      if (prop === "chrome") deny();
+      if (typeof prop === "string" && SANDBOX_DENIED_PROPS.has(prop)) deny(prop);
       return Reflect.deleteProperty(t, prop);
     },
   });
+}
+
+/**
+ * Recursively-hardened window-like proxy (used for `window`, `globalThis`,
+ * `self` and their `top`/`parent`/`opener` ancestors). Denies `chrome`,
+ * `Function`, and `eval` at every level AND redirects window-traversal
+ * properties to likewise-hardened objects, so the code cannot reach the REAL
+ * extension `chrome` global through `window.document.defaultView.chrome`,
+ * `window.top.chrome`, `window.parent.chrome`, etc. (finding: evaluate sandbox
+ * correctness depends on content-script isolation semantics — this makes the
+ * guarantee independent of Chrome's internals).
+ */
+function makeHardenedWindowLike(target: object, hardenedDoc: Document): object {
+  const redirect: RedirectMap = {
+    // Route `document` (and `defaultView`/`self`) back to the already-hardened
+    // document, which itself denies `defaultView`/`forms`/`frames`/`top`/
+    // `parent`/`opener`/`window` — closing the `window.document.defaultView
+    // .chrome` escape that would expose the real `chrome` in a content script.
+    document: () => hardenedDoc,
+    defaultView: () => makeHardenedWindowLike(target, hardenedDoc),
+    self: () => makeHardenedWindowLike(target, hardenedDoc),
+    // `window` and `globalThis` MUST also redirect to a hardened proxy. In a
+    // content-script isolated world `window.window === window` (the raw,
+    // un-hardened target), so `window.window` / `globalThis.window` /
+    // `globalThis.globalThis` fall through `Reflect.get(t, prop)` to the REAL
+    // window/globalThis whose `.chrome` is the real extension `chrome`. Without
+    // these redirects the sandbox escape via `window.window.chrome` /
+    // `globalThis.window.chrome` is OPEN (finding: evaluate sandbox escape via
+    // window.window.chrome). Redirecting forces every traversal back through a
+    // hardened proxy that denies `chrome`/`Function`/`eval`.
+    window: () => makeHardenedWindowLike(target, hardenedDoc),
+    globalThis: () => makeHardenedWindowLike(target, hardenedDoc),
+    top: () =>
+      makeHardenedWindowLike(
+        ((target as Window).top ?? target) as object,
+        hardenedDoc,
+      ),
+    parent: () =>
+      makeHardenedWindowLike(
+        ((target as Window).parent ?? target) as object,
+        hardenedDoc,
+      ),
+    opener: () => {
+      const o = (target as Window).opener;
+      return o ? makeHardenedWindowLike(o as object, hardenedDoc) : null;
+    },
+    frames: () =>
+      makeHardenedWindowLike(
+        (target as Window).frames as unknown as object,
+        hardenedDoc,
+      ),
+  };
+  return makeChromeDenyingProxy(target, redirect) as object;
+}
+
+/**
+ * A fully-throwing stub used to shadow the `Function` and `eval` identifiers
+ * passed as parameters to the generated function. Any property access, call,
+ * construct, or assignment throws `access denied by evaluate sandbox`, so even
+ * a direct `new Function(...)` / `eval(...)` reference inside the evaluated code
+ * (not just the `window.Function` form) is blocked.
+ */
+function makeThrowingStub(name: string): unknown {
+  const deny = (op: string, prop: PropertyKey): never => {
+    throw new Error(`access denied by evaluate sandbox: ${name}.${op} ${String(prop)}`);
+  };
+  return new Proxy(
+    {},
+    {
+      get: (_t, prop) => deny("get", prop),
+      set: (_t, prop) => { deny("set", prop); return false; },
+      has: (_t, prop) => { deny("has", prop); return false; },
+      deleteProperty: (_t, prop) => { deny("deleteProperty", prop); return false; },
+      apply: () => deny("apply", "()"),
+      construct: () => deny("construct", "new"),
+    },
+  );
+}
+
+/**
+ * Hardened `document` proxy. Forwards every DOM access EXCEPT a set of
+ * window-traversal properties that could otherwise reach the REAL extension
+ * `chrome` (which lives in the page's window, not the content-script's). This
+ * is defense-in-depth: `document.defaultView.chrome`, `document.forms`,
+ * `document.frames`, `document.top`, `document.parent`, `document.opener` are
+ * all denied so a sandboxed script cannot climb out of the isolated world to
+ * the extension's `chrome.storage.session` secret store (finding: evaluate
+ * sandbox correctness depends on content-script isolation semantics).
+ */
+const DOCUMENT_DENIED_PROPS = new Set([
+  "defaultView", "forms", "frames", "top", "parent", "opener", "window",
+]);
+function makeHardenedDocument(target: Document): Document {
+  return new Proxy(target, {
+    get: (t, prop, recv) => {
+      if (DOCUMENT_DENIED_PROPS.has(prop as string)) {
+        throw new Error(`access denied by evaluate sandbox: document.${String(prop)}`);
+      }
+      return Reflect.get(t, prop, recv);
+    },
+    has: (t, prop) => {
+      if (DOCUMENT_DENIED_PROPS.has(prop as string)) return false;
+      return Reflect.has(t, prop);
+    },
+  }) as Document;
 }
 
 export async function handleEvaluate(
@@ -172,42 +303,115 @@ export async function handleEvaluate(
     // — a prompt-injection in `full_agentic` mode (no confirmation) becomes a
     // direct secret-exfiltration path.
     //
-    // We pass `chrome`, `window`, `document`, `globalThis`, and `self` as
-    // PARAMETERS to the generated function, so the code's *free* references to
-    // those identifiers resolve to our hardened stubs instead of the real
-    // extension globals.
+    // We pass `chrome`, `window`, `document`, `globalThis`, `self`, `Function`,
+    // and `eval` as PARAMETERS to the generated function, so the code's *free*
+    // references to those identifiers resolve to our hardened stubs instead of
+    // the real extension globals.
     //   * `chrome` is replaced by a Proxy that THROWS on ANY property access
     //     (see {@link makeSandboxChrome}) — `evaluate` has no legitimate reason
     //     to touch `chrome` at all, so failing closed on every access is the
-    //     strongest guarantee: there is provably no path back to the real
-    //     `chrome` object.
+    //     strongest guarantee against reaching the real `chrome` object.
     //   * `window`, `globalThis`, and `self` are replaced by forwarding Proxies
     //     (see {@link makeChromeDenyingProxy}) that pass EVERYTHING through to
-    //     the real globals EXCEPT `chrome`, which they also deny. This closes
-    //     the `window.chrome` / `globalThis.chrome` / `self.chrome` bypass
-    //     vectors (the real `chrome` would otherwise be reachable through them)
-    //     while keeping legitimate page-global usage working.
-    //   * `document` is left as the REAL page document — `evaluate`'s job IS
-    //     page-DOM manipulation, and the secret store is NOT in the page DOM (it
-    //     is in `chrome.storage.session`, which is now unreachable — see the
-    //     residual-risk note below for reading page-DOM secrets.
+    //     the real globals EXCEPT `chrome` AND `Function`/`eval`, which they also
+    //     deny. This closes the `window.chrome` / `globalThis.chrome` /
+    //     `self.chrome` bypass vectors AND the `window.Function(...)` /
+    //     `globalThis.eval(...)` escape vectors (the real `chrome` would
+    //     otherwise be reachable through them) while keeping legitimate
+    //     page-global usage working.
+    //   * `document` is replaced by a hardened Proxy (see {@link
+    //     makeHardenedDocument}) that denies `defaultView` / `forms` / `frames`
+    //     / `top` / `parent` / `opener` / `window` so the code cannot climb out
+    //     of the isolated world to the page's real `chrome` (defense-in-depth:
+    //     the guarantee no longer depends solely on Chrome's content-script
+    //     isolation semantics).
+    //   * `Function` and `eval` are replaced by fully-throwing stubs (see
+    //     {@link makeThrowingStub}) so a direct `new Function(...)` / `eval(...)`
+    //     reference inside the code cannot build a function in the global scope
+    //     to escape the sandbox (finding: evaluate sandbox is bypassable via new
+    //     Function / indirect eval).
+    //
+    // RESIDUAL RISK (finding: evaluate sandbox bypassable via the Function-
+    // constructor escape): the parameter/proxy shadowing above CANNOT stop code
+    // from reaching the REAL `Function` constructor through any object's
+    // prototype chain — e.g. `[].constructor.constructor`,
+    // `({}).constructor.constructor`, or `(async function(){}).constructor` (the
+    // `AsyncFunction` equivalent). Those build functions in the live
+    // content-script global, where the free identifiers `chrome`/`globalThis`
+    // resolve to the real extension globals, defeating the `chrome` hardening
+    // above and re-opening the secret-exfil path. Static string-scrubbing of
+    // `constructor`/`prototype` is unreliable and is deliberately NOT used. The
+    // ONLY robust fix is architectural: run `evaluate` in a realm that has no
+    // `chrome` binding AND no reachable `Function` returning the privileged
+    // global (a sandboxed same-origin iframe / Web Worker / `ShadowRealm` whose
+    // global truly lacks `chrome`), OR — strongly preferred — never place
+    // `open_cowork_secrets` where content-script-scope code can read it: keep the
+    // secret store in the background service worker and expose it only via
+    // message passing. Until that cross-cutting change lands (it spans the
+    // executor, `secrets.ts`, and the background page — outside this file's
+    // ownership), treat the `chrome`-hardening here as defense-in-depth and rely
+    // on the secret store being unreachable from content-script scope
+    // (see SECURITY.md).
     const denyChrome = makeSandboxChrome();
-    const sandboxWindow = makeChromeDenyingProxy(
+    // `hardenedDocument` is created first so the window/global proxies can
+    // redirect `document` to it — this closes the `window.document.defaultView
+    // .chrome` escape that would otherwise reach the real extension `chrome`
+    // global in a content-script context (see makeHardenedDocument). The
+    // window/global/self proxies are recursively hardened so traversal
+    // properties (`top`/`parent`/`opener`/`frames`/`self`) cannot expose the
+    // real `chrome` either (finding: evaluate sandbox correctness depends on
+    // content-script isolation semantics).
+    const hardenedDocument = makeHardenedDocument(document);
+    const makeWindowProxy = (target: object): object =>
+      makeHardenedWindowLike(target, hardenedDocument);
+    const sandboxWindow = makeWindowProxy(
       typeof window !== "undefined" ? (window as object) : (globalThis as object),
     );
-    const sandboxGlobal = makeChromeDenyingProxy(globalThis as object);
-    const sandboxSelf = makeChromeDenyingProxy(
+    const sandboxGlobal = makeWindowProxy(globalThis as object);
+    const sandboxSelf = makeWindowProxy(
       typeof self !== "undefined" ? (self as object) : (globalThis as object),
     );
+    // We deliberately do NOT inject `"use strict";` into the wrapper body.
+    // `eval`/`arguments` are reserved parameter names under strict mode, so a
+    // strict function cannot declare an `eval` parameter — `new Function(...)`
+    // throws `SyntaxError: Unexpected eval or arguments in strict mode` at
+    // *creation* time, which previously broke EVERY `evaluate` call in
+    // `full_agentic` mode (finding: evaluate handler broken by strict-mode eval
+    // parameter). We instead run the wrapper in SLOPPY mode and neutralize the
+    // `this` escape (sloppy-mode `this` would otherwise be the content-script
+    // global, re-exposing the real `chrome`/`Function`/`eval`) by binding `this`
+    // to the hardened window proxy in the `fn.call(...)` below. `Function` and
+    // `eval` are still shadowed as throwing parameters, so direct
+    // `new Function(...)` / `eval(...)` references inside the code are blocked.
     const fn = new Function(
       "chrome",
       "window",
       "document",
       "globalThis",
       "self",
-      `"use strict";\n${code}`,
-    ) as (c: unknown, w: unknown, d: unknown, g: unknown, s: unknown) => unknown;
-    const syncResult = fn(denyChrome, sandboxWindow, document, sandboxGlobal, sandboxSelf);
+      "Function",
+      "eval",
+      code,
+    ) as (
+      c: unknown, w: unknown, d: unknown, g: unknown, s: unknown, f: unknown, ev: unknown,
+    ) => unknown;
+    // `Function` and `eval` are shadowed as throwing parameter stubs so a direct
+    // `new Function(...)` / `eval(...)` reference inside the code cannot escape
+    // the sandbox by building a function in the global scope (finding: evaluate
+    // sandbox is bypassable via new Function / indirect eval). We bind `this` to
+    // the hardened window proxy so `this.chrome` / `this.Function` / `this.eval`
+    // cannot reach the real globals — `window`/`document`/`globalThis`/`self`
+    // remain readable on `this` through the denying/redirecting proxy.
+    const syncResult = fn.call(
+      sandboxWindow,
+      denyChrome,
+      sandboxWindow,
+      hardenedDocument,
+      sandboxGlobal,
+      sandboxSelf,
+      makeThrowingStub("Function"),
+      makeThrowingStub("eval"),
+    );
     // If the result is a Promise, race it against a timeout.
     let result: unknown = syncResult;
     if (syncResult instanceof Promise) {

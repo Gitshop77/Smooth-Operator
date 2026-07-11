@@ -24,9 +24,41 @@ export function buildPlannerPrompt(customPrompt?: string): string {
   // SECURITY_INSTRUCTION is ALWAYS prepended — a custom prompt may replace the
   // default planner guidance, but the security rules are non-negotiable.
   if (customPrompt && customPrompt.trim()) {
+    // A custom override replaces the default planner *guidance* — but the
+    // output JSON format is NON-NEGOTIABLE: it must match PlannerOutputSchema
+    // or the planner's response fails to parse. We always re-append the
+    // required JSON shape, the same way SECURITY_INSTRUCTION is always prepended.
     return `${SECURITY_INSTRUCTION}
 
-${customPrompt.trim()}`;
+${customPrompt.trim()}
+
+# Output Format (required — respond with a single valid JSON object, no markdown)
+
+Required \`decision\` values: "continue", "done", or "web_task".
+
+For continue (revising the plan):
+{
+  "thinking": "Your reasoning about progress and what to do next.",
+  "decision": "continue",
+  "plan": ["Step 1 description", "Step 2 description"],
+  "current_plan_item": 0,
+  "next_goal": "The specific, actionable goal for the Navigator's next step(s)."
+}
+
+For completion:
+{
+  "thinking": "Why the task is complete (or impossible).",
+  "decision": "done",
+  "success": true,
+  "text": "Final summary for the user, including all results."
+}
+
+For a pure-knowledge answer:
+{
+  "thinking": "Why this can be answered without the browser.",
+  "decision": "web_task",
+  "text": "The direct answer to the user's question."
+}`;
   }
   // Security rules go FIRST so they sit at the top of the context window and
   // the LLM reads them before any planner-specific reasoning guidance.

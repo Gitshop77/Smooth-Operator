@@ -123,6 +123,14 @@ export async function extractStateFromTab(
   await ensureContent(tabId);
   const res = await chrome.tabs.sendMessage(tabId, { type: "EXTRACT_STATE", tabs });
   if (!res?.ok) throw new Error(`extract failed: ${res?.error || "no response"}`);
+  // The content script may respond `{ ok: true }` with no `state` (or a
+  // non-object). Without this check, line below would throw inside the
+  // screenshot try (swallowed) and we'd return `undefined` state, causing a
+  // downstream crash in the orchestrator instead of a clean observe error
+  // (finding: extractStateFromTab returns res.state without validating it).
+  if (typeof res.state !== "object" || res.state === null) {
+    throw new Error("extract failed: content script returned no state object");
+  }
   if (includeScreenshot) {
     try {
     // default to JPEG quality 80 — 3-5x smaller than PNG for
@@ -131,10 +139,27 @@ export async function extractStateFromTab(
     // quality is cached module-level + invalidated on storage
       // change — avoids a `chrome.storage.local.get` per agent step.
       const screenshotFormat = await getScreenshotQuality();
-      const dataUrl = await chrome.tabs.captureVisibleTab(chrome.windows.WINDOW_ID_CURRENT, {
-        format: "jpeg",
-        quality: screenshotFormat,
-      });
+      // Capture the AGENT's tab (tabId) via CDP `Page.captureScreenshot` rather
+      // than `chrome.tabs.captureVisibleTab(WINDOW_ID_CURRENT)`. captureVisibleTab
+      // grabs whichever tab the USER is currently viewing — if they switched
+      // windows/tabs mid-run, the vision LLM receives a screenshot of the wrong
+      // page (a correctness + privacy bug). CDP targets the exact agent tab,
+      // mirroring the SCREENSHOT handler in message-routing.ts
+      // (finding: per-step screenshot captures the user's visible tab).
+      const { attachDebugger, detachDebugger } = await import("@/lib/agent/cdp-controller");
+      await attachDebugger(tabId);
+      let dataUrl: string;
+      try {
+        const result = (await chrome.debugger.sendCommand(
+          { tabId },
+          "Page.captureScreenshot",
+          { format: "jpeg", quality: screenshotFormat, captureBeyondViewport: false },
+        )) as { data?: string };
+        if (!result?.data) throw new Error("Page.captureScreenshot returned no data");
+        dataUrl = `data:image/jpeg;base64,${result.data}`;
+      } finally {
+        await detachDebugger(tabId).catch(() => { /* tab may have closed */ });
+      }
       res.state.screenshot = dataUrl;
 
       // Annotate the screenshot with numbered Set-of-Marks bounding boxes
@@ -209,6 +234,9 @@ export function waitForTabLoad(tabId: number, timeoutMs = 8000): Promise<void> {
     const finish = () => {
       if (!done) {
         done = true;
+        // Release the timer handle so it doesn't linger for up to `timeoutMs`
+        // after resolution (finding: waitForTabLoad setTimeout is never cleared).
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
         chrome.tabs.onUpdated.removeListener(listener);
         resolve();
       }
@@ -223,7 +251,7 @@ export function waitForTabLoad(tabId: number, timeoutMs = 8000): Promise<void> {
         if (t.status === "complete") finish();
       })
       .catch(finish);
-    setTimeout(finish, timeoutMs);
+    const timeoutId = setTimeout(finish, timeoutMs);
   });
 }
 

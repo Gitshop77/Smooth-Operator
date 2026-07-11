@@ -75,8 +75,8 @@ export function ExtensionsView() {
             return (
             <Card key={ext.id} className="p-5 gap-3">
               <div className="flex items-start gap-3">
-                <div className="size-10 rounded-lg bg-muted grid place-items-center text-lg shrink-0">
-                  🧩
+                <div className="size-10 rounded-lg bg-primary/10 text-primary grid place-items-center shrink-0">
+                  <Puzzle className="size-5" />
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 justify-between">

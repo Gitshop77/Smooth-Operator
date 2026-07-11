@@ -155,9 +155,16 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
         responded = true;
         // a fresh run starts with no download consent.
         fullAgenticDownloadConsent = false;
+        // Sanitize maxSteps before passing it on (finding: run-time numeric/
+        // string inputs are not validated). `msg.maxSteps || DEFAULT_MAX_STEPS`
+        // only normalizes 0/empty, not negative numbers, NaN (falsy), or a
+        // non-numeric string — clamp to a valid positive integer in [1, 1000].
+        const reqMaxSteps = (typeof msg.maxSteps === "number" && Number.isFinite(msg.maxSteps) && msg.maxSteps > 0)
+          ? Math.min(Math.floor(msg.maxSteps), 1000)
+          : DEFAULT_MAX_STEPS;
         await startRun({
           task: msg.task,
-          maxSteps: msg.maxSteps || DEFAULT_MAX_STEPS,
+          maxSteps: reqMaxSteps,
           mode: msg.mode || DEFAULT_MODE,
         });
       } catch (e) {
@@ -251,6 +258,17 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
             cy = rect.y + rect.height / 2;
           } else {
             const rect = m.rect;
+            // Validate the rect payload (finding: message payloads are otherwise
+            // unvalidated). `rect` flows into arithmetic for CDP mouse coords; a
+            // malformed/non-numeric rect would throw with a cryptic error.
+            if (
+              !rect ||
+              typeof rect.x !== "number" || typeof rect.y !== "number" ||
+              typeof rect.width !== "number" || typeof rect.height !== "number"
+            ) {
+              sendResponse({ ok: false, error: "invalid CDP_CLICK rect payload" });
+              return;
+            }
             cx = rect.x + rect.width / 2;
             cy = rect.y + rect.height / 2;
           }
@@ -290,6 +308,19 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
         await attachDebugger(tabId);
         try {
           const m = msg as CdpPressAndHoldMessage;
+          // Validate the payload (finding: message payloads are otherwise
+          // unvalidated). These values flow into a privileged CDP
+          // Input.dispatchMouseEvent via cdpPressAndHold; non-numeric/undefined
+          // values would throw with a cryptic error inside the CDP controller.
+          if (
+            typeof m.x !== "number" || !Number.isFinite(m.x) ||
+            typeof m.y !== "number" || !Number.isFinite(m.y) ||
+            typeof m.holdMs !== "number" || !Number.isFinite(m.holdMs) ||
+            typeof m.delayMs !== "number" || !Number.isFinite(m.delayMs)
+          ) {
+            sendResponse({ ok: false, error: "invalid CDP_PRESS_AND_HOLD payload" });
+            return;
+          }
           await cdpPressAndHold(tabId, m.x, m.y, { holdMs: m.holdMs, delay: m.delayMs });
           sendResponse({ ok: true });
         } finally {
@@ -342,7 +373,11 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
         // does `chrome.tabs.get(tabId)`) instead of a hardcoded "page".
         const tabInfo = await chrome.tabs.get(tabId);
         const title = (tabInfo.title || "page").replace(/[^\w.-]+/g, "_").slice(0, 80);
-        const baseName = (m.fileName || `${title}.pdf`).replace(/[^\w.-]+/g, "_");
+        // Sanitize then collapse any `..` segments (the `[^\w.-]` regex already
+        // turns `/` and `\` into `_`, but `..` would survive as literal dots;
+        // collapse runs of two-or-more dots so a crafted `fileName` can't be
+        // misinterpreted as a parent-directory traversal by the downloads API).
+        const baseName = (m.fileName || `${title}.pdf`).replace(/[^\w.-]+/g, "_").replace(/\.{2,}/g, "_");
         // use `truncateFilename` so the `.pdf` extension is preserved
         // even when the base name has to be truncated to fit the 120-char cap.
         const filename = truncateFilename(baseName, 120);
@@ -405,7 +440,8 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
         }
         // same sanitization + 120-char cap as SAVE_AS_PDF.
         const title = (tab.title || "screenshot").replace(/[^\w.-]+/g, "_").slice(0, 80);
-        const baseName = (m.fileName || `${title}.jpg`).replace(/[^\w.-]+/g, "_");
+        // Sanitize then collapse any `..` segments (see SAVE_AS_PDF handler).
+        const baseName = (m.fileName || `${title}.jpg`).replace(/[^\w.-]+/g, "_").replace(/\.{2,}/g, "_");
         // use `truncateFilename` so the `.jpg` extension is preserved.
         const filename = truncateFilename(baseName, 120);
         // Force a `saveAs` confirmation for the first download of a

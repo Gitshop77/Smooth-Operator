@@ -1,10 +1,16 @@
 /**
  * ESLint config — minimal, no framework dependency.
  *
- * The codebase uses `tsc --noEmit` for type-checking (which catches more
- * than ESLint's TypeScript rules). ESLint is kept for the runtime
- * correctness rules that tsc doesn't cover: unused variables, prefer-const,
- * no-fallthrough, and no-dupe-keys.
+ * NOTE: this repo does NOT currently have a working `tsc --noEmit` type-safety
+ * gate. package.json defines no `tsc`/`typecheck` script, and tsconfig.json
+ * restricts `compilerOptions.types` to `["chrome"]` (excluding `@types/node`),
+ * so a `tsc --noEmit` run would error on the Node-based build/config scripts
+ * (`esbuild.config.ts`, `vitest.config.ts`, etc.) that import `path`/`fs`/
+ * `__dirname`/`process`. Until that is fixed (add a `typecheck` script and a
+ * `tsconfig.node.json` for the Node scripts), ESLint is the only automated
+ * static check that actually runs. It is kept for the runtime correctness
+ * rules that tsc would not cover even once enabled: unused variables,
+ * prefer-const, no-fallthrough, and no-dupe-keys.
  *
  * `.ts` files use the `@typescript-eslint/parser` + `@typescript-eslint/no-unused-vars`
  * rule. Without the parser, ESLint v9+ flat config only lints `.js`/`.mjs`

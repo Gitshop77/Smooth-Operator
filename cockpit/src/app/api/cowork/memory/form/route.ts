@@ -1,22 +1,56 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
+import { Prisma } from '@prisma/client';
 import { json, badRequest, withRouteError, parseLimit } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
-// Well-known sensitive autofill field names whose *values* we redact by
-// default in the response. The form schema does not mark fields, so we
-// redact by field-name heuristic. Field *names* are preserved; only values
-// are masked.
-const SENSITIVE_FIELD_RE =
-  /^(password|passwd|pwd|secret|token|ssn|socialsecurity|card(?:number|no|num)?|ccv|cvv|cvc|creditcard|email|phone|mobile|address|zip|postal|dob|birth|name|firstname|lastname)$/i;
+// ─── Response-only PII redaction (defense-in-depth, NOT at-rest protection) ───
+//
+// IMPORTANT CONTRACT: this route NEVER redacts the stored `formDataJson`. The
+// raw autofill values (including passwords/emails) are persisted verbatim by
+// the write path; `redactFormMemory` masks sensitive *values* ONLY in the JSON
+// returned to the client. Any other reader — the extension, a DB dump, the
+// `/sync` path, other routes — still sees plaintext. Treat this masking purely
+// as defense-in-depth against accidental exposure in API responses; it is NOT
+// a safeguard for data at rest, and high-sensitivity values (passwords,
+// card numbers, OTPs) ideally should not be persisted at all.
+//
+// Field *names* are preserved; only values are masked. Matching is
+// case-insensitive SUBSTRING against the fragment list below, so variants like
+// `username`, `fullname`, `e-mail`, `cc-number`, `phone_number` are caught
+// (the prior exact-anchor regex missed them all). We redact on suspicion: a
+// false positive costs one masked benign value, a false negative leaks a
+// secret, so we bias toward masking.
+const SENSITIVE_FIELD_RE = new RegExp(
+  [
+    'password', 'passwd', 'pwd',
+    'secret', 'token', 'apikey', 'api_key', 'accesstoken', 'csrftoken',
+    'ssn', 'social', 'socialsecurity',
+    'card', 'creditcard', 'credit', 'cardnumber', 'cardno',
+    'ccnum', 'cc-number', 'cc-num', 'ccv', 'cvv', 'cvc', 'cvc2', 'cvv2',
+    'email', 'e-mail',
+    'phone', 'mobile', 'cellphone', 'cell', 'tel', 'fax',
+    'address', 'street', 'zip', 'zipcode', 'postcode', 'postal',
+    'dob', 'birth', 'birthday', 'birthdate',
+    'username', 'userid', 'user_id', 'login', 'userlogin',
+    'passport', 'license', 'licence', 'nationalid', 'national_id', 'sin', 'taxid', 'tin',
+    'pin', 'otp', 'totp',
+    'account', 'routing', 'iban', 'swift', 'sortcode', 'sort_code',
+    'firstname', 'lastname', 'fullname', 'middlename', 'surname', 'givenname', 'familyname', 'realname',
+  ].join('|'),
+  'i',
+);
 
 function redactValue(value: unknown): unknown {
   return typeof value === 'string' && value.length > 0 ? '[redacted]' : value;
 }
 
-// Redact sensitive autofill values in the stored `formDataJson` (a JSON string
-// which the cockpit does not parse at write time). Handles both a flat
-// record of fieldName -> value and the `{ entries: [{ name, value }] }` shape.
+// Mask sensitive autofill values in the *response copy* of `formDataJson`
+// (a JSON string which the cockpit does not parse at write time). Handles a
+// flat record of fieldName -> value, the `{ entries: [{ name, value }] }`
+// shape, and a bare array of `{ name, value }` entries. Returns the input
+// unchanged if it cannot be parsed (the caller should not observe a 500 for a
+// malformed stored value).
 function redactFormMemory(formDataJson: string): string {
   let parsed: unknown;
   try {
@@ -82,10 +116,9 @@ export async function DELETE(req: NextRequest): Promise<Response> {
     try {
       await db.formMemory.delete({ where: { id } });
     } catch (e) {
-      // Prisma throws P2025 (RecordNotFound) when the id doesn't exist.
-      const msg = e instanceof Error ? e.message : '';
-      const lower = msg.toLowerCase();
-      if (lower.includes('not found') || lower.includes('p2025')) {
+      // Prisma throws P2025 (RecordNotFound) when the id doesn't exist. The
+      // code lives in `e.code`, not the message, so test that directly.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
         return json({ error: 'not found' }, 404);
       }
       throw e;

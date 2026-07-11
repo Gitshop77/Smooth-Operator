@@ -2,8 +2,12 @@
  * Agent modes — the 3-tier permission system that controls what the agent
  * can do.
  *
- *   RESTRICTED    — current tab only. No new tabs, no navigation to new URLs.
- *                   Safe for "fill this form" tasks.
+ *   RESTRICTED    — current tab only. No new tabs are opened and the explicit
+ *                   `navigate` action to a new URL is blocked. In-tab
+ *                   navigation caused by a link `click` or a same-tab `search`
+ *                   is permitted (the current tab may still change URL) — it is
+ *                   not a sandbox. Safe for "fill this form" tasks on a page
+ *                   whose links you trust.
  *   STANDARD      — current tab + open new tabs + navigate. Default.
  *                   The agent can browse freely but can't do destructive things.
  *   FULL_AGENTIC  — everything: open/close tabs, navigate, execute JS, upload,
@@ -66,6 +70,21 @@ export const MODE_CONFIGS = {
     canUploadFiles: false,
     canDownloadFiles: false,
     maxSteps: 100,
+    // Standard mode is documented as "can't do destructive things": these
+    // three action types are hard-blocked by their `can*` flags above
+    // (`canExecuteJs`/`canUploadFiles`/`canDownloadFiles` are all `false`),
+    // so a real `evaluate`/`upload_file`/`save_as_pdf` never reaches the
+    // executor in standard mode — the `can*` check fails closed first.
+    //
+    // `confirmRequired` is nonetheless set here as the *intended* policy
+    // declaration: if any of these actions is ever permitted in standard
+    // mode, it MUST require explicit user confirmation. It is complementary
+    // (not contradictory) to the executor's domain-allowlist gate for
+    // `evaluate` (which FAILS CLOSED when no allowlist is configured) — the
+    // allowlist decides *where* JS may run, `confirmRequired` decides that a
+    // human must approve the run. Keeping this list non-empty prevents a
+    // future "allow evaluate in standard" change from silently skipping the
+    // confirmation prompt.
     confirmRequired: ["evaluate", "upload_file", "save_as_pdf"],
   },
   full_agentic: {
@@ -133,8 +152,9 @@ const UNGATED_ACTION_TYPES = [
 /**
  * Check if an action type is allowed in the given mode.
  *
- * - `navigate` requires `canNavigate` OR `canOpenTabs` (a new-tab navigation
- *   is permitted whenever tab-opening is).
+ * - `navigate` requires `canNavigate` (it mutates the current tab, so opening
+ *   a new tab must not implicitly grant current-tab navigation). Tab-opening
+ *   is gated separately by `canOpenTabs` (a dedicated tab-open action owns it).
  * - `save_as_pdf` and `screenshot` are gated by `canDownloadFiles` (was:
  *   `canDownloadFiles && mode !== "restricted"` — the mode special-case was
  *   redundant since restricted mode already has `canDownloadFiles: false`).
@@ -149,7 +169,11 @@ export function checkActionAllowed(actionType: string, mode: AgentMode): ActionP
   const config = MODE_CONFIGS[mode];
   switch (actionType) {
     case "navigate":
-      if (!config.canNavigate && !config.canOpenTabs) {
+      // Gate purely on `canNavigate`: `navigate` mutates the *current* tab, so
+      // it must not be permitted merely because tab-opening is. A mode that
+      // sets `canOpenTabs:true` but `canNavigate:false` asymmetrically must not
+      // silently grant current-tab navigation.
+      if (!config.canNavigate) {
         return { allowed: false, reason: `Navigation is not allowed in ${mode} mode` };
       }
       return { allowed: true };

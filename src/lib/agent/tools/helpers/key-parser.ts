@@ -4,7 +4,7 @@
  */
 
 /** Map of lowercase key aliases → canonical `KeyboardEvent.key` values. */
-export const KEY_MAP: Record<string, string> = {
+const KEY_MAP: Record<string, string> = {
   enter: "Enter",
   escape: "Escape",
   esc: "Escape",
@@ -39,6 +39,15 @@ export function parseKeys(keys: string): ParsedKeys {
   const parts = keys.toLowerCase().split("+").map((p) => p.trim());
   const modifiers = parts.slice(0, -1);
   const main = parts[parts.length - 1];
+  // Guard against empty / "+"-only input (e.g. "" or "ctrl+"). Without this,
+  // `main` would be "" and downstream handlers would dispatch a `key: ""`
+  // (the "Unidentified" sentinel) as a silent no-op instead of failing loudly.
+  if (main === "") {
+    throw new Error(
+      `parseKeys: empty main key in "${keys}" — expected a non-empty key ` +
+        `(e.g. "ctrl+a" or "Enter")`,
+    );
+  }
   return {
     main: KEY_MAP[main] ?? main,
     ctrl: modifiers.includes("ctrl") || modifiers.includes("control"),

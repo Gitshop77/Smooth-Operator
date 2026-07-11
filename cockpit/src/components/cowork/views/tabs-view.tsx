@@ -4,18 +4,19 @@ import * as React from "react";
 import { motion } from "framer-motion";
 import {
   RefreshCw, Pin, VolumeX, Loader2, AlertCircle,
-  Search, AppWindow,
+  AppWindow,
 } from "lucide-react";
 
 import { useTabs } from "@/hooks/use-cowork-query";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { ViewHeader } from "@/components/cowork/shared/view-header";
 import { LoadingSkeleton } from "@/components/cowork/shared/loading-skeleton";
 import { DataTable } from "@/components/cowork/shared/data-table";
 import { StatusPill, toneForStatus } from "@/components/cowork/shared/status-pill";
 import { EmptyState } from "@/components/cowork/shared/empty-state";
+import { SearchInput } from "@/components/cowork/shared/search-input";
+import { StatCard } from "@/components/cowork/shared/stat-card";
 import { timeAgo, hostnameOf, truncateMiddle, safeHref } from "@/lib/cowork-data/format";
 
 export function TabsView() {
@@ -48,15 +49,13 @@ export function TabsView() {
         icon={<AppWindow className="size-5" />}
         actions={
           <>
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
-              <Input
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
-                placeholder="Filter tabs…"
-                className="pl-8 h-8 w-44 sm:w-52 text-sm"
-              />
-            </div>
+            <SearchInput
+              value={filter}
+              onChange={setFilter}
+              ariaLabel="Filter tabs"
+              placeholder="Filter tabs…"
+              className="h-8 w-44 sm:w-52 text-sm"
+            />
             <Button
               variant="outline"
               size="sm"
@@ -73,18 +72,9 @@ export function TabsView() {
 
       {/* Summary metric cards */}
       <div className="grid gap-3 grid-cols-3">
-        <Card className="p-3 gap-0.5">
-          <p className="cowork-eyebrow">Total</p>
-          <p className="text-xl font-semibold tnum">{total}</p>
-        </Card>
-        <Card className="p-3 gap-0.5">
-          <p className="cowork-eyebrow">Workspaces</p>
-          <p className="text-xl font-semibold tnum">{workspaces}</p>
-        </Card>
-        <Card className="p-3 gap-0.5">
-          <p className="cowork-eyebrow">Loading</p>
-          <p className="text-xl font-semibold tnum text-chart-1">{loading}</p>
-        </Card>
+        <StatCard label="Total" value={total} />
+        <StatCard label="Workspaces" value={workspaces} />
+        <StatCard label="Loading" value={loading} tone="accent" />
       </div>
 
       {isLoading ? (

@@ -25,6 +25,17 @@ export type ChallengeKind =
   | "blocked"
   | "rate-limited";
 
+/** Allowed `ChallengeKind` literals, used to validate untrusted parse input. */
+const CHALLENGE_KINDS: readonly ChallengeKind[] = [
+  "cloudflare-js",
+  "cloudflare-block",
+  "cloudflare-turnstile",
+  "hcaptcha",
+  "recaptcha",
+  "blocked",
+  "rate-limited",
+];
+
 /** Information about a detected anti-bot challenge. */
 export interface ChallengeInfo {
   /** What type of challenge is present. */
@@ -50,7 +61,13 @@ function parseChallengeResult(raw: unknown): ChallengeInfo | null {
   if (raw !== null && typeof raw === "object" && "kind" in (raw as Record<string, unknown>)) {
     const obj = raw as { kind: unknown; message: unknown };
     if (typeof obj.kind === "string" && typeof obj.message === "string") {
-      return { kind: obj.kind as ChallengeKind, message: obj.message };
+      // Validate `kind` against the allowed union at this trust boundary before
+      // casting — an unrecognized value would otherwise flow downstream into
+      // orchestrator switch statements that may lack a default branch.
+      const kind = obj.kind as ChallengeKind;
+      if ((CHALLENGE_KINDS as readonly string[]).includes(kind)) {
+        return { kind, message: obj.message };
+      }
     }
   }
   return null;
@@ -80,20 +97,34 @@ export async function detectChallenge(tabId: number): Promise<ChallengeInfo | nu
       func: () => {
         const title = (document.title || "").toLowerCase();
 
-        // Cloudflare JS challenge
-        if (
-          title === "just a moment..." ||
-          document.querySelector("#challenge-running, #cf-please-wait, #challenge-form") ||
-          title.indexOf("checking your browser") !== -1
-        ) {
-          return { kind: "cloudflare-js", message: "Cloudflare JS challenge" };
-        }
-
         let body: string | null = null;
         const getBody = (): string => {
           if (body === null) body = (document.body && document.body.textContent) || "";
           return body;
         };
+
+        // Cloudflare JS challenge.
+        // SECURITY: document.title is attacker-controllable, so a hostile page
+        // could set its title to "Just a moment..." to force the agent into a
+        // Cloudflare-JS auto-wait stall (false-positive availability vector).
+        // Require a corroborating signal — a known Cloudflare JS selector OR a
+        // short interstitial-style body — before treating a title-only match as a
+        // real challenge. This weights the spoofable title signal and still
+        // detects genuine IUAM / "Checking your browser" pages, which carry a
+        // short body and/or the challenge selectors. The trailing selector-only
+        // check preserves detection of CF JS pages whose title differs.
+        const cfJsTitle =
+          title === "just a moment..." ||
+          title.indexOf("checking your browser") !== -1;
+        const cfJsSelector = document.querySelector(
+          "#challenge-running, #cf-please-wait, #challenge-form, #cf-chl-wrapper",
+        );
+        if (
+          (cfJsTitle && (cfJsSelector !== null || getBody().length < 2000)) ||
+          cfJsSelector !== null
+        ) {
+          return { kind: "cloudflare-js", message: "Cloudflare JS challenge" };
+        }
 
         // Cloudflare block page
         if (

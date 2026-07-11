@@ -1,20 +1,59 @@
 /**
  * Compute a fast structural signature of the page's interactive elements.
  * The signature changes when the visible interactive set changes (different
- * tags, types, or aria-labels), so the executor can detect SPA route changes
- * that don't change the URL but do change the DOM.
+ * tags, types, aria-labels, hrefs, values, or text), so the executor can
+ * detect SPA route changes that don't change the URL but do change the DOM.
+ *
+ * The signature incorporates:
+ *  - per-element tag/type/aria-label/href/value/text, so a route change that
+ *    only swaps link targets, input values, or button labels is detected; and
+ *  - a leading + trailing window of elements (plus the total element count), so
+ *    a route change confined to below-the-fold content with a stable top nav is
+ *    still captured rather than falling entirely outside the hashed range.
  */
 import { FINGERPRINT_MAX_ELEMENTS, FNV_OFFSET_BASIS, FNV_PRIME } from "../constants";
+
+function elementSignature(el: Element): string {
+  const type = el.getAttribute("type") || "";
+  const ariaLabel = el.getAttribute("aria-label") || "";
+  const href = el instanceof HTMLAnchorElement ? el.getAttribute("href") || "" : "";
+  const value = getElementValue(el);
+  const text = (el.textContent || "").trim();
+  return el.tagName + type + ariaLabel + href + value + text;
+}
+
+function getElementValue(el: Element): string {
+  if (
+    el instanceof HTMLInputElement ||
+    el instanceof HTMLSelectElement ||
+    el instanceof HTMLTextAreaElement
+  ) {
+    return el.value;
+  }
+  return "";
+}
 
 export function domFingerprint(): string {
   const els = document.querySelectorAll("a,button,input,select,textarea");
   let h = FNV_OFFSET_BASIS;
-  const limit = Math.min(els.length, FINGERPRINT_MAX_ELEMENTS);
-  for (let i = 0; i < limit; i++) {
-    const s = els[i].tagName + (els[i].getAttribute("type") || "") + (els[i].getAttribute("aria-label") || "");
-    for (let j = 0; j < s.length; j++) {
-      h ^= s.charCodeAt(j);
-      h = Math.imul(h, FNV_PRIME);
+
+  // Fold the total interactive element count so that additions or removals
+  // outside the hashed window are still detected as a fingerprint change.
+  h ^= els.length;
+  h = Math.imul(h, FNV_PRIME);
+
+  // Hash a leading and a trailing window of interactive elements. The leading
+  // window covers a stable top nav; the trailing window catches below-the-fold
+  // route changes that would otherwise sit entirely beyond the leading window.
+  const limit = FINGERPRINT_MAX_ELEMENTS;
+  const lastStart = Math.max(0, els.length - limit);
+  for (let i = 0; i < els.length; i++) {
+    if (i < limit || i >= lastStart) {
+      const s = elementSignature(els[i]);
+      for (let j = 0; j < s.length; j++) {
+        h ^= s.charCodeAt(j);
+        h = Math.imul(h, FNV_PRIME);
+      }
     }
   }
   return (h >>> 0).toString(16);
