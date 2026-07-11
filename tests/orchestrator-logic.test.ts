@@ -353,7 +353,7 @@ describe("runAgentLoop — executeActions branch loop-detector integration", () 
     expect(counts).toContain(8);
   });
 
-  test("F-18: done paired with a sibling is rejected at parse time (never reaches a dropped step)", async () => {
+  test("done paired with a sibling is rejected at parse time (never reaches a dropped step)", async () => {
     // The fix enforces `done`-exclusivity at PARSE time: a step pairing `done`
     // with a sibling action (e.g. a final `input`) is rejected by
     // AgentOutputSchema, so it can never reach the orchestrator as a silently

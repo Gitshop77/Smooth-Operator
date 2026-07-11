@@ -12,6 +12,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@002191b3668e769a76cadbdb5cc75d0e1fba2a17 # PIN TO A VERIFIED SHA (was actions/checkout@v4)
 
@@ -31,9 +33,8 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Run tests with coverage gate
-        # F-31: run the suite under v8 coverage and enforce the thresholds
-        # declared in vitest.config.ts. A PR that drops coverage below the
-        # baseline fails CI.
+        # Run the suite under v8 coverage and enforce the thresholds declared
+        # in vitest.config.ts; a PR that drops coverage below the baseline fails CI.
         run: npx vitest run --coverage
 
       - name: Build extension
@@ -88,6 +89,8 @@ jobs:
 
   cockpit:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: cockpit
@@ -111,8 +114,8 @@ jobs:
         run: npm run db:generate
 
       - name: Apply database schema (verify it applies)
-        # F-26: apply the Prisma schema to a throwaway local SQLite DB so a
-        # schema that fails to apply is caught in CI. cockpit uses sqlite
+        # Apply the Prisma schema to a throwaway local SQLite DB so a schema
+        # that fails to apply is caught in CI. cockpit uses sqlite
         # (DATABASE_URL=file:./db/cowork.db); no external DB service required.
         env:
           DATABASE_URL: file:./db/cowork.db
@@ -124,8 +127,38 @@ jobs:
       - name: Lint cockpit
         run: npm run lint
 
+      - name: Run cockpit tests
+        # Run the cockpit test suite (middleware.test.ts, route.test.ts, etc.)
+        # after db:generate/db:apply (the Prisma client may be required by the
+        # tests) and before the production build. DATABASE_URL is supplied so
+        # tests that touch Prisma have a DB target.
+        env:
+          DATABASE_URL: file:./db/cowork.db
+        run: npm test
+
       - name: Build cockpit
         run: npm run build
+
+  # Secret scanning — fail the build if a real secret is committed.
+  # Runs gitleaks against the full git history on every PR and push.
+  secret-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@002191b3668e769a76cadbdb5cc75d0e1fba2a17 # PIN TO A VERIFIED SHA (was actions/checkout@v4)
+        with:
+          fetch-depth: 0
+
+      - name: Run gitleaks secret scan
+        # gitleaks exits non-zero on a detected leak, so the step (and the
+        # build) fails on a committed real secret. `--redact` masks secret
+        # values in any logs/artifacts. fail: true is gitleaks' default
+        # behavior when a leak is found.
+        uses: gitleaks/gitleaks-action@v2
+        with:
+          args: --redact
 
   # SAST: GitHub CodeQL security-and-quality scan for javascript-typescript.
   codeql:

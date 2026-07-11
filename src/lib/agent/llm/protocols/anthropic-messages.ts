@@ -90,7 +90,7 @@ async function fromRequest(request: LLMRequest): Promise<AnthropicBody> {
 export interface StreamState {
   content: string;
   toolInput: string;
-  usage?: { tokensIn: number; tokensOut: number; model: string; costUsd: number; cachedInputTokens?: number; reasoningTokens?: number };
+  usage?: { tokensIn: number; tokensOut: number; model: string; costUsd: number; cachedInputTokens?: number; cachedWriteInputTokens?: number; reasoningTokens?: number };
 }
 
 export const protocol: Protocol<AnthropicBody, string, { type: string; content?: string; usage?: StreamState["usage"] }, StreamState> = {
@@ -125,37 +125,44 @@ export const protocol: Protocol<AnthropicBody, string, { type: string; content?:
           const u = data.message.usage;
           // Anthropic's `input_tokens` is FRESH-only (disjoint from cache_read
           // + cache_creation), unlike OpenAI's `prompt_tokens` which is the
-          // TOTAL. `pricing.ts:114` clamps `cached = Math.min(cached, tokensIn)`
-          // assuming cached ⊆ tokensIn (OpenAI semantics). To make the clamp
-          // correct for Anthropic, set tokensIn to the TOTAL (fresh +
-          // cache_read + cache_creation) so `freshInput = tokensIn - cached` =
-          // fresh-only (correct), and `cached` is billed at cacheReadRate.
-          // (cache_creation is still billed at cacheReadRate rather than
-          // cacheWriteRate — deferred: needs a new LLMUsage field. For now,
-          // cached tokens are non-zero in the production cost-cap path.)
+          // TOTAL. `estimateCost` (pricing.ts) clamps `cachedRead =
+          // Math.min(cachedInputTokens, tokensIn)` assuming cached ⊆ tokensIn
+          // (OpenAI semantics). To make the clamp correct for Anthropic, set
+          // tokensIn to the TOTAL (fresh + cache_read + cache_creation) so
+          // `freshInput = tokensIn - cachedRead - cachedWrite` = fresh-only
+          // (correct).
+          // Split prompt-cache accounting:
+          //   cache_read_input_tokens  -> cachedInputTokens  (billed at cacheReadRate)
+          //   cache_creation_input_tokens -> cachedWriteInputTokens (billed at cacheWriteRate)
+          // Previously cache_creation was folded into cachedInputTokens and
+          // billed at the cheaper read rate, under-reporting cost. Now it is
+          // tracked separately and billed at the (typically higher) write rate.
           const cacheRead = u.cache_read_input_tokens ?? 0;
           const cacheCreation = u.cache_creation_input_tokens ?? 0;
           state.usage = {
             tokensIn: (u.input_tokens ?? 0) + cacheRead + cacheCreation,
             tokensOut: u.output_tokens ?? prev?.tokensOut ?? 0,
             // Anthropic prompt caching: cache_read tokens billed at 0.1× input
-            // rate, cache_creation at 1.25×. Without tracking these, cost is
-            // over-reported by up to 90% on cached steps.
-            cachedInputTokens: cacheRead + cacheCreation,
+            // rate, cache_creation at 1.25×. Tracking them separately lets
+            // estimateCost bill each at its own rate (fixes under-billing).
+            cachedInputTokens: cacheRead,
+            cachedWriteInputTokens: cacheCreation,
             reasoningTokens: prev?.reasoningTokens,
             model: "",
             costUsd: 0,
           };
         }
         // The `message_delta` event only carries output_tokens (cumulative).
-        // Preserve any previously-captured tokensIn + cachedInputTokens from
-        // message_start rather than overwriting them with 0.
+        // Preserve any previously-captured tokensIn + cachedInputTokens +
+        // cachedWriteInputTokens from message_start rather than overwriting
+        // them with 0.
         if (data.type === "message_delta" && data.usage) {
           const prev = state.usage;
           state.usage = {
             tokensIn: prev?.tokensIn ?? 0,
             tokensOut: data.usage.output_tokens ?? prev?.tokensOut ?? 0,
             cachedInputTokens: prev?.cachedInputTokens,
+            cachedWriteInputTokens: prev?.cachedWriteInputTokens,
             reasoningTokens: prev?.reasoningTokens,
             model: "",
             costUsd: 0,

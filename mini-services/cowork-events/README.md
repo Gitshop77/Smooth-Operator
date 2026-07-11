@@ -99,7 +99,7 @@ openssl rand -hex 32
 
 ### ⚠️ Production hardening — READ BEFORE DEPLOYING
 
-These rules are enforced by `security.ts → shouldRefuseStart` (F-05) and the
+These rules are enforced by `security.ts → shouldRefuseStart` and the
 socket.io connection handler. They are easy to get wrong, so they are called out
 explicitly:
 
@@ -218,11 +218,11 @@ even when auth failed — that has been fixed.)
 
 ### Additional safety nets
 
-- **M4** — request body size limit: 1 MiB. Enforced both via the
+- **Request body size limit:** 1 MiB. Enforced both via the
   `content-length` header (cheap, pre-read) and inside the body reader
   (defensive — for clients that stream more bytes than declared). Oversized
   bodies return `413`.
-- **M5** — per-IP rate limit on `/chat` and `/image`: 10 requests / minute /
+- **Per-IP rate limit** on `/chat` and `/image`: 10 requests / minute /
   IP. Exceeding returns `429` with a `Retry-After` header. Tracked in-process
   (no Redis) — resets on service restart.
 
@@ -394,7 +394,7 @@ the full HTTP server + socket.io on a random port and exercises the REST routes
   and two **negative** tests — an unauthenticated (wrong-token) socket is
   disconnected and receives nothing, and a hostile socket that authenticated
   with a *scoped* `sessionId` **cannot** join another session's room and so
-  **cannot** read that session's streamed `chat:message` (F-04 room-scoping).
+  **cannot** read that session's streamed `chat:message`.
 
 The z-ai SDK (`z-ai-web-dev-sdk`) is mocked in the test file so `/chat` and
 `/image` run with no real upstream call.

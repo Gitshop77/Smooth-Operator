@@ -1,51 +1,215 @@
 /**
- * Cost-cap budget warning injection tests.
+ * Agent-loop persistent memory coverage.
+ *
+ * The previously-named `agent-loop-memory.test.ts` only exercised
+ * `injectCostBudgetWarning` (a cost-cap warning) and never touched any
+ * loop-memory / persistence logic. This file actually covers the agent loop's
+ * persistent per-site memory:
+ *
+ *   1. `persistent-memory.ts` — `saveMemory` (append/replace), `getMemoriesForUrl`
+ *      (read + subdomain/root-domain match), `formatMemories` (stable output).
+ *   2. `loop/messages.ts` — `buildNavigatorUserMessage` loads the site memory via
+ *      `getMemoriesForUrl` + `formatMemories` and injects a `<site_memory>` block
+ *      into the navigator prompt. This is the "read/format/append *around the
+ *      loop*" path the old name implied but never tested.
+ *
+ * The localStorage stub is required because `persistent-memory.ts` falls back to
+ * `localStorage` when `chrome.storage.local` is unavailable (jsdom test env).
  */
 
-import { describe, test, expect } from "vitest";
-import { injectCostBudgetWarning } from "../src/lib/agent/loop/context/injection-points";
+import { describe, test, expect, beforeAll, beforeEach } from "vitest";
+import {
+  saveMemory,
+  deleteMemory,
+  getMemoriesForUrl,
+  formatMemories,
+  __resetMemoryCacheForTests,
+  type SiteMemory,
+} from "../src/lib/agent/persistent-memory";
+import { buildNavigatorUserMessage } from "../src/lib/agent/loop/messages";
+import { installLocalStorageStub } from "./helpers";
 
-describe("injectCostBudgetWarning", () => {
-  test("returns null when no cost cap is configured", () => {
-    expect(injectCostBudgetWarning(0.5, undefined)).toBeNull();
-    expect(injectCostBudgetWarning(0.5, 0)).toBeNull();
-    expect(injectCostBudgetWarning(0.5, -1)).toBeNull();
+beforeAll(() => {
+  installLocalStorageStub();
+});
+
+beforeEach(() => {
+  // Clear storage + in-memory cache so each test starts from a clean slate.
+  localStorage.removeItem("__opencowork_site_memories");
+  __resetMemoryCacheForTests();
+});
+
+// ─── Append / read ──────────────────────────────────────────────────────────
+
+describe("persistent-memory append + read", () => {
+  test("saveMemory appends a new entry readable via getMemoriesForUrl", async () => {
+    await saveMemory("example.com", "username is alice");
+    const memories = await getMemoriesForUrl("https://example.com/login");
+    expect(memories).toHaveLength(1);
+    expect(memories[0].domain).toBe("example.com");
+    expect(memories[0].notes).toBe("username is alice");
   });
 
-  test("returns null below the 75% threshold", () => {
-    expect(injectCostBudgetWarning(0.07, 0.10)).toBeNull(); // 70%
-    expect(injectCostBudgetWarning(0.749, 1.0)).toBeNull(); // 74.9%
+  test("saveMemory re-saving the same domain REPLACES (append-merge, not duplicate)", async () => {
+    await saveMemory("example.com", "username is alice");
+    await saveMemory("example.com", "use the search box first");
+    const memories = await getMemoriesForUrl("https://example.com");
+    expect(memories).toHaveLength(1); // not 2 — replaced
+    expect(memories[0].notes).toBe("use the search box first");
   });
 
-  test("returns the warning at 75% threshold", () => {
-    // Use 0.08/0.10 = 0.8 (80%) — clearly above the 75% threshold, and
-    // avoids floating-point edge effects at exactly 0.75
-    // (0.075/0.10 evaluates to 0.7499999999999999 in IEEE-754, which is < 0.75).
-    const warning = injectCostBudgetWarning(0.08, 0.10);
-    expect(warning).not.toBeNull();
-    expect(warning).toContain("COST BUDGET WARNING");
-    expect(warning).toContain("$0.0200"); // remaining = 0.10 - 0.08
-    expect(warning).toContain("80%");
+  test("getMemoriesForUrl matches on root-domain suffix (subdomain)", async () => {
+    await saveMemory("github.com", "prefer the CLI");
+    const memories = await getMemoriesForUrl("https://gist.github.com/foo");
+    expect(memories).toHaveLength(1);
+    expect(memories[0].domain).toBe("github.com");
   });
 
-  test("returns the warning above 75% threshold", () => {
-    const warning = injectCostBudgetWarning(0.95, 1.0);
-    expect(warning).not.toBeNull();
-    expect(warning).toContain("95%");
+  test("getMemoriesForUrl returns [] for a non-matching domain", async () => {
+    await saveMemory("example.com", "note");
+    expect(await getMemoriesForUrl("https://other.org")).toHaveLength(0);
   });
 
-  test("respects a custom fraction", () => {
-    // 50% threshold with 40% usage → no warning.
-    expect(injectCostBudgetWarning(0.40, 1.0, 0.5)).toBeNull();
-    // 50% threshold with 60% usage → warning.
-    const warning = injectCostBudgetWarning(0.60, 1.0, 0.5);
-    expect(warning).not.toBeNull();
-    expect(warning).toContain("60%");
+  test("empty notes deletes the entry (saveMemory append-down to nothing)", async () => {
+    await saveMemory("example.com", "temp note");
+    expect(await getMemoriesForUrl("https://example.com")).toHaveLength(1);
+    await saveMemory("example.com", "");
+    expect(await getMemoriesForUrl("https://example.com")).toHaveLength(0);
   });
 
-  test("rejects invalid fractions", () => {
-    expect(injectCostBudgetWarning(0.95, 1.0, 0)).toBeNull();
-    expect(injectCostBudgetWarning(0.95, 1.0, -0.5)).toBeNull();
-    expect(injectCostBudgetWarning(0.95, 1.0, 1.5)).toBeNull();
+  test("deleteMemory removes a specific domain's entry", async () => {
+    await saveMemory("example.com", "a");
+    await saveMemory("other.com", "b");
+    await deleteMemory("example.com");
+    expect(await getMemoriesForUrl("https://example.com")).toHaveLength(0);
+    expect(await getMemoriesForUrl("https://other.com")).toHaveLength(1);
+  });
+});
+
+// ─── Format stability ────────────────────────────────────────────────────────
+
+describe("formatMemories stable output", () => {
+  test("renders the notes in the order provided (stable, no reordering)", () => {
+    const memories: SiteMemory[] = [
+      { domain: "apple.com", notes: "first", updatedAt: 2 },
+      { domain: "zebra.com", notes: "second", updatedAt: 1 },
+    ];
+    // formatMemories is a pure formatter — it renders exactly in input order,
+    // so the output is stable/byte-for-byte reproducible for a given input.
+    expect(formatMemories(memories)).toBe(
+      "<site_memory>\n[apple.com]: first\n[zebra.com]: second\n</site_memory>",
+    );
+    expect(formatMemories(memories)).toContain("<site_memory>");
+    expect(formatMemories(memories)).toContain("</site_memory>");
+  });
+
+  test("returns empty string for no memories (stable, no empty tag)", () => {
+    expect(formatMemories([])).toBe("");
+  });
+
+  test("output is byte-for-byte stable for identical input", () => {
+    const memories: SiteMemory[] = [
+      { domain: "example.com", notes: "x", updatedAt: 100 },
+    ];
+    expect(formatMemories(memories)).toBe(formatMemories(memories));
+  });
+});
+
+// ─── Loop integration: memory is injected into the navigator prompt ──────────
+
+describe("loop/messages — persistent memory injected into navigator prompt", () => {
+  test("buildNavigatorUserMessage injects a <site_memory> block for the current domain", async () => {
+    await saveMemory("example.com", "username is alice");
+    await saveMemory("github.com", "prefer the CLI");
+
+    const msg = await buildNavigatorUserMessage({
+      task: "Log in",
+      history: [],
+      currentGoal: "fill the form",
+      plan: undefined,
+      currentPlanItem: undefined,
+      browserState: {
+        url: "https://example.com/login",
+        title: "Login",
+        tabs: [],
+        elementsText: "<button>Submit</button>",
+        pageInfo: "0 pages above, 0 below",
+        newElementCount: 0,
+      },
+      step: 0,
+      maxSteps: 50,
+    });
+
+    expect(msg).toContain("<site_memory>");
+    expect(msg).toContain("username is alice");
+    // The github.com memory is for a different domain and must NOT leak into
+    // the example.com navigator prompt.
+    expect(msg).not.toContain("prefer the CLI");
+  });
+
+  test("no <site_memory> block when no memory exists for the domain", async () => {
+    const msg = await buildNavigatorUserMessage({
+      task: "Search",
+      history: [],
+      currentGoal: "type a query",
+      plan: undefined,
+      currentPlanItem: undefined,
+      browserState: {
+        url: "https://no-memory-here.com/page",
+        title: "Page",
+        tabs: [],
+        elementsText: "<input>",
+        pageInfo: "0 pages above, 0 below",
+        newElementCount: 0,
+      },
+      step: 0,
+      maxSteps: 50,
+    });
+    expect(msg).not.toContain("<site_memory>");
+  });
+
+  test("memory is re-read live (an updated note for the current domain is reflected on the next build)", async () => {
+    await saveMemory("example.com", "first note");
+    const first = await buildNavigatorUserMessage({
+      task: "t",
+      history: [],
+      currentGoal: "g",
+      plan: undefined,
+      currentPlanItem: undefined,
+      browserState: {
+        url: "https://example.com",
+        title: "T",
+        tabs: [],
+        elementsText: "",
+        pageInfo: "",
+        newElementCount: 0,
+      },
+      step: 0,
+      maxSteps: 10,
+    });
+    expect(first).toContain("first note");
+
+    // The options page can update the per-site note; the next loop build must
+    // re-read storage and surface the NEW value (live read, not a stale cache).
+    await saveMemory("example.com", "updated note");
+    const second = await buildNavigatorUserMessage({
+      task: "t",
+      history: [],
+      currentGoal: "g",
+      plan: undefined,
+      currentPlanItem: undefined,
+      browserState: {
+        url: "https://example.com",
+        title: "T",
+        tabs: [],
+        elementsText: "",
+        pageInfo: "",
+        newElementCount: 0,
+      },
+      step: 1,
+      maxSteps: 10,
+    });
+    expect(second).toContain("updated note");
+    expect(second).not.toContain("first note");
   });
 });

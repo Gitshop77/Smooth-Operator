@@ -1,5 +1,5 @@
 /**
- * F-07: domain-config fail-closed behavior.
+ * domain-config fail-closed behavior.
  *
  * `getDomainConfig()` previously returned `{}` on ANY error or when the
  * `__openCoworkDomainConfig` global was unset, and `checkUrlAllowed({})`
@@ -70,7 +70,7 @@ describe("isDomainPolicyEnforced / isDomainConfigMissingButEnforced", () => {
   });
 });
 
-describe("checkUrlAllowedWithDomainConfig (F-07 fail-closed)", () => {
+describe("checkUrlAllowedWithDomainConfig (fail-closed)", () => {
   test("enforced + config MISSING → blocks (fail closed)", () => {
     (globalThis as Record<string, unknown>)[ENFORCED] = true;
     const result = checkUrlAllowedWithDomainConfig("https://evil.com");

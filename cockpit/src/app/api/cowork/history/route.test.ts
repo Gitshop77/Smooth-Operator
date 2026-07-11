@@ -14,7 +14,14 @@ vi.mock('@/lib/db', () => ({
 
 import { GET, DELETE } from '@/app/api/cowork/history/route';
 
-function fakeReq(query = ''): any {
+function fakeReq(query = '', body?: unknown): any {
+  if (body !== undefined) {
+    return {
+      nextUrl: { searchParams: new URLSearchParams(query) },
+      body: true,
+      text: async () => JSON.stringify(body),
+    };
+  }
   return { nextUrl: { searchParams: new URLSearchParams(query) } };
 }
 
@@ -28,7 +35,7 @@ describe('GET /api/cowork/history', () => {
   });
 });
 
-describe('DELETE /api/cowork/history (F-35)', () => {
+describe('DELETE /api/cowork/history', () => {
   it('requires an id or ?all=1', async () => {
     const res = await DELETE(fakeReq());
     expect(res.status).toBe(400);
@@ -54,9 +61,17 @@ describe('DELETE /api/cowork/history (F-35)', () => {
     expect(body.error).toBe('not found');
   });
 
-  it('clears all entries with ?all=1', async () => {
-    deleteMany.mockResolvedValueOnce({ count: 42 });
+  it('requires explicit server-side confirmation for ?all=1', async () => {
     const res = await DELETE(fakeReq('all=1'));
+    expect(res.status).toBe(400);
+    expect(deleteMany).not.toHaveBeenCalled();
+    const body = await res.json();
+    expect(body.error).toBe('confirmation required');
+  });
+
+  it('clears all entries with ?all=1 when confirm:true is supplied', async () => {
+    deleteMany.mockResolvedValueOnce({ count: 42 });
+    const res = await DELETE(fakeReq('all=1', { confirm: true }));
     expect(res.status).toBe(200);
     expect(deleteMany).toHaveBeenCalledWith({});
     const body = await res.json();

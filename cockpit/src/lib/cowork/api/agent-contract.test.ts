@@ -25,7 +25,7 @@ function flatten(manifest: { endpoints: Record<string, Record<string, ManifestEn
 
 const endsWith = (p: string) => (e: ManifestEndpoint) => !!e.path && e.path.endsWith(p);
 
-describe('agent contract manifest (F-8 drift guard)', () => {
+describe('agent contract manifest (drift guard)', () => {
   it('declares DELETE for the four destructive endpoints that have DELETE handlers', async () => {
     const manifest = await getManifest();
     const flat = flatten(manifest);
@@ -37,12 +37,15 @@ describe('agent contract manifest (F-8 drift guard)', () => {
     expect(flat.filter(endsWith('/api/cowork/ai/chat')).some((e) => e.method === 'DELETE')).toBe(true);
   });
 
-  it('documents the ?all=1 mass-delete capability on /history', async () => {
+  it('does not disclose the ?all=1 mass-delete mechanism in the manifest (AU-3)', async () => {
     const manifest = await getManifest();
     const flat = flatten(manifest);
     const historyDelete = flat.find((e) => e.method === 'DELETE' && endsWith('/api/cowork/history')(e));
     expect(historyDelete).toBeDefined();
-    expect(historyDelete?.description).toContain('all=1');
+    // The manifest is a discovery surface; it must NOT reveal the destructive
+    // ?all=1 bulk-delete capability (defense-in-depth against exposing
+    // destructive/internal endpoints).
+    expect(historyDelete?.description).not.toContain('all=1');
   });
 
   it('forbids mass-deletion without confirmation in the operating rules', async () => {

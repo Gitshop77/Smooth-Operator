@@ -1,6 +1,6 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
-import { json, withRouteError, bodyJson, validateHttpUrl, badRequest } from '@/lib/cowork/api/http';
+import { json, withRouteError, bodyJson, validateHttpUrl, isSsrfSafeUrl, badRequest } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
 // Prisma's `include: { children: true }` only fetches ONE level of
@@ -58,7 +58,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     const body = await bodyJson(req);
     const name = String(body.name || 'Untitled');
     const parentId = body.parentId ? String(body.parentId) : null;
-    // F16: validate the referenced parent bookmark exists (the analog of a
+    // Validate the referenced parent bookmark exists (the analog of a
     // relation-connect). A dangling parentId is rejected with 400 rather than
     // stored as an orphan reference.
     if (parentId) {
@@ -83,6 +83,10 @@ export async function POST(req: NextRequest): Promise<Response> {
     // Validate URL scheme (prevents javascript:/data: stored-XSS via <a href>).
     const urlError = validateHttpUrl(url);
     if (urlError) return urlError;
+    // Enforce the SSRF boundary on stored URLs so a private/loopback host
+    // can never later become an SSRF sink if this URL is fetched/launched
+    // server-side.
+    if (!isSsrfSafeUrl(url)) return badRequest('url host is not allowed (private/loopback address)');
     const bm = await db.bookmark.create({
       data: { name, url, parentId, type: 'url' },
     });

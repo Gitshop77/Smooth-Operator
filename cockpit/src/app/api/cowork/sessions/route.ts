@@ -1,6 +1,7 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
-import { json, withRouteError, bodyJson } from '@/lib/cowork/api/http';
+import { json, withRouteError, bodyJson, badRequest } from '@/lib/cowork/api/http';
+import { boundedString, nonEmptyString, validateField, truncateTo } from '@/lib/cowork/api/validation';
 import { db } from '@/lib/db';
 
 export async function GET(): Promise<Response> {
@@ -20,10 +21,24 @@ export async function GET(): Promise<Response> {
 export async function POST(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
     const body = await bodyJson(req);
-    const name = String(body.name || 'New Session');
-    const partition = String(body.partition || `persist:${name.toLowerCase().replace(/\s+/g, '-')}`);
+    // Bound free-form strings to reasonable max lengths.
+    const nameResult = validateField(nonEmptyString(256), truncateTo(body.name || 'New Session', 256), 'name');
+    if (!nameResult.ok) return badRequest(nameResult.error);
+    const name = nameResult.value;
+    const partitionRaw = truncateTo(body.partition || `persist:${name.toLowerCase().replace(/\s+/g, '-')}`, 256);
+    const partitionResult = validateField(boundedString(256), partitionRaw, 'partition');
+    if (!partitionResult.ok) return badRequest(partitionResult.error);
+    const partition = partitionResult.value;
     const isIncognito = Boolean(body.isIncognito);
-    const userAgent = body.userAgent ? String(body.userAgent) : null;
+    // Truncate + validate userAgent (cap 512). Store the bounded value.
+    let userAgent: string | null = null;
+    if (body.userAgent != null) {
+      if (typeof body.userAgent !== 'string') return badRequest('userAgent must be a string');
+      const uaRaw = truncateTo(body.userAgent, 512);
+      const uaResult = validateField(boundedString(512), uaRaw, 'userAgent');
+      if (!uaResult.ok) return badRequest(uaResult.error);
+      userAgent = uaResult.value;
+    }
     const session = await db.session.create({ data: { name, partition, isIncognito, userAgent } });
     return json({ session }, 201);
   });

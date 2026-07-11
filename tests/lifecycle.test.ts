@@ -1,5 +1,5 @@
 /**
- * F-14: `appendThinkingEntry` must HTML-escape `body` before interpolating it
+ * `appendThinkingEntry` must HTML-escape `body` before interpolating it
  * into `innerHTML`, so a future unescaped LLM/page string can never XSS the
  * side panel. Callers pass RAW (unescaped) text; newlines render as `<br>`.
  *
@@ -26,7 +26,7 @@ function setupDom(): void {
   `;
 }
 
-describe("appendThinkingEntry body escaping (F-14)", () => {
+describe("appendThinkingEntry body escaping", () => {
   let appendThinkingEntry: (
     kind: "planner" | "navigator" | "error",
     head: string,

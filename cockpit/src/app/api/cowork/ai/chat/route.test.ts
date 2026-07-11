@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
-// F-14: the events client resolves COWORK_EVENT_TOKEN lazily at relay time and
+// The events client resolves COWORK_EVENT_TOKEN lazily at relay time and
 // throws (fail-closed) if it is unset. Provide a token so the proxy paths can
 // be exercised; the actual network call is mocked below.
 process.env.COWORK_EVENT_TOKEN ||= 'test-token';
@@ -9,13 +9,16 @@ process.env.COWORK_EVENT_TOKEN ||= 'test-token';
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
 
-import { GET, POST, DELETE } from '@/app/api/cowork/ai/chat/route';
+import { GET, POST, DELETE, WINGMAN_SYSTEM_PROMPT } from '@/app/api/cowork/ai/chat/route';
 
 function fakeReq(query = '', body?: unknown): any {
   if (body !== undefined) {
+    const text = JSON.stringify(body);
     return {
       nextUrl: { searchParams: new URLSearchParams(query) },
+      body: true,
       json: async () => body,
+      text: async () => text,
     };
   }
   return { nextUrl: { searchParams: new URLSearchParams(query) } };
@@ -67,7 +70,7 @@ describe('POST /api/cowork/ai/chat (F10)', () => {
     expect(sent.systemPrompt.length).toBeGreaterThan(0);
   });
 
-  it('keeps a caller-supplied bounded systemPrompt', async () => {
+  it('ignores a caller-supplied systemPrompt and pins the server prompt', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -82,7 +85,9 @@ describe('POST /api/cowork/ai/chat (F10)', () => {
     );
     const [, init] = fetchMock.mock.calls[0];
     const sent = JSON.parse(init.body);
-    expect(sent.systemPrompt).toBe('be terse');
+    // A caller-supplied systemPrompt must NOT be honored.
+    expect(sent.systemPrompt).not.toBe('be terse');
+    expect(sent.systemPrompt).toBe(WINGMAN_SYSTEM_PROMPT);
   });
 });
 
@@ -93,7 +98,7 @@ describe('DELETE /api/cowork/ai/chat (F29 / F35)', () => {
       status: 200,
       text: async () => JSON.stringify({ ok: true, deleted: 3 }),
     });
-    const res = await DELETE(fakeReq('messageId=m1&sessionId=s1&all=1'));
+    const res = await DELETE(fakeReq('messageId=m1&sessionId=s1&all=1', { confirm: true }));
     expect(res.status).toBe(200);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
@@ -103,8 +108,17 @@ describe('DELETE /api/cowork/ai/chat (F29 / F35)', () => {
     expect(sent.messageId).toBe('m1');
     expect(sent.sessionId).toBe('s1');
     expect(sent.all).toBe(true);
+    expect(sent.confirm).toBe(true);
     const body = await res.json();
     expect(body).toEqual({ ok: true, deleted: 3 });
+  });
+
+  it('requires explicit confirmation for ?all=1', async () => {
+    const res = await DELETE(fakeReq('all=1'));
+    expect(res.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+    const body = await res.json();
+    expect(body.error).toBe('confirmation required');
   });
 
   it('returns 400 when no target (messageId/sessionId/all) is supplied', async () => {
@@ -117,7 +131,7 @@ describe('DELETE /api/cowork/ai/chat (F29 / F35)', () => {
 
   it('returns 500 when the upstream is unreachable (F38)', async () => {
     fetchMock.mockRejectedValueOnce(new Error('ECONNREFUSED'));
-    const res = await DELETE(fakeReq('all=1'));
+    const res = await DELETE(fakeReq('all=1', { confirm: true }));
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body.error).toContain('cowork-events unreachable');

@@ -14,7 +14,7 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       reporter: ["text", "html"],
-      // Baseline thresholds (F-31). These act as a regression gate: a PR that
+      // Baseline thresholds. These act as a regression gate: a PR that
       // drops coverage below the measured baseline fails CI. Keep them just
       // under the current numbers so they catch real drops, not noise.
       // Measured baseline: lines 52.75%, statements 51.07%, functions 52.54%,

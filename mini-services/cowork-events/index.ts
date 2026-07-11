@@ -226,7 +226,7 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
 
     // All other routes require the shared-secret token.
     if (!tokenMatches(req.headers['x-cowork-token'] as string | undefined, SHARED_SECRET)) {
-      // F-16: log failed auth with source IP for security observability.
+      // Log failed auth with source IP for security observability.
       // NEVER log the token itself.
       console.warn(`[cowork-events] 401 Unauthorized (invalid X-Cowork-Token) from ${clientIp(req)}`);
       sendJson(res, 401, { error: 'Invalid X-Cowork-Token' });
@@ -632,7 +632,7 @@ export { io };
 }
 
 // Derive the client IP for a socket.io connection, reusing the HTTP-side
-// `clientIp` helper so IP resolution is consistent across both layers (F-16).
+// `clientIp` helper so IP resolution is consistent across both layers.
 // socket.io exposes the forwarded + direct addresses on `socket.handshake`.
 function socketClientIp(socket: Socket): string {
   return clientIp({
@@ -655,7 +655,7 @@ io.on('connection', (socket: Socket) => {
     (Array.isArray(queryTok) && typeof queryTok[0] === 'string' ? queryTok[0] : '') ||
     '';
   if (!tokenMatches(connToken, SHARED_SECRET)) {
-    // F-16: log the failed handshake auth with source IP for observability.
+    // Log the failed handshake auth with source IP for observability.
     // NEVER log the token. Then drop the connection without emitting anything.
     console.warn(`[cowork-events] socket handshake auth FAILED from ${socketClientIp(socket)} — dropping connection`);
     socket.disconnect(true);
@@ -663,7 +663,7 @@ io.on('connection', (socket: Socket) => {
   }
 
   // Capture a per-connection scoped sessionId if the client presented one in
-  // the handshake auth payload (F-04). The cockpit currently only sends
+  // the handshake auth payload. The cockpit currently only sends
   // `{ token }`, so this is `undefined` for today's clients (legacy /
   // permissive path). When set, `chat:join` enforces strict ownership.
   const authSessionId = (hs.auth as { sessionId?: unknown } | undefined)?.sessionId;
@@ -685,12 +685,8 @@ io.on('connection', (socket: Socket) => {
   // Clients can join a "room" named after their sessionId to receive
   // streamed chat tokens targeted at them only.
   //
-  // ROOM SCOPING (F-04): previously `chat:join` accepted ANY string sessionId
-  // from ANY authenticated client. Because every connected client shares the
-  // same `SHARED_SECRET`, a hostile tab that knew the token could
-  // `socket.emit('chat:join', 'someone-else-session-id')` and receive that
-  // session's streamed `chat:message` tokens in real time — defeating the
-  // `io.to(sessionId)` room-scoping used by the `/chat` HTTP route.
+  // ROOM SCOPING: chat:join enforces strict ownership so a connected client
+  // cannot read another session's streamed `chat:message` tokens.
   //
   // The ownership decision is delegated to the pure `evaluateChatJoin`
   // helper (in `./security.ts`):
@@ -790,7 +786,7 @@ io.on('connection', (socket: Socket) => {
  * does NOT run when the module is imported by the test suite.
  */
 function main(): void {
-  // SEC-4: Refuse to start in production if the shared secret is the
+  // Refuse to start in production if the shared secret is the
   // well-known `dev-token`. An operator who deploys this service without
   // setting `COWORK_EVENT_TOKEN` would otherwise be running with a publicly
   // documented default that anyone on the LAN could use.
@@ -802,7 +798,7 @@ function main(): void {
     process.exit(1);
   }
 
-  // SEC-4: Bind explicitly to 127.0.0.1 — Node's `listen(port)` with no host
+  // Bind explicitly to 127.0.0.1 — Node's `listen(port)` with no host
   // argument binds to 0.0.0.0 (all interfaces), which would expose the
   // mini-service to every host on the LAN. The cockpit dashboard reaches the
   // mini-service via the same-origin Caddy gateway (`XTransformPort=3003`),

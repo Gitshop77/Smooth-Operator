@@ -17,7 +17,9 @@ import * as XAI from "../lib/agent/llm/providers/xai";
 import * as OpenRouter from "../lib/agent/llm/providers/openrouter";
 import * as Azure from "../lib/agent/llm/providers/azure";
 import * as OpenAICompatible from "../lib/agent/llm/providers/openai-compatible";
-import { modelSupportsVision } from "../lib/agent/llm/catalog";
+import { validateLlmBaseUrl } from "../lib/agent/llm/route/ssrf";
+import { modelSupportsVision, getDefaultModelForProvider } from "../lib/agent/llm/catalog";
+import { CATALOG_PROVIDER_ID_MAP } from "./provider-config-map";
 
 /** The user's provider configuration (stored in chrome.storage.local). */
 export interface ProviderConfig {
@@ -36,7 +38,7 @@ export interface ProviderConfig {
 // Import the canonical profile table from openai-compatible-profile.ts
 // instead of maintaining a separate DEFAULT_BASE_URLS copy. The profiles table
 // is the single source of truth for OpenAI-compatible provider base URLs.
-import { profiles } from "../lib/agent/llm/providers/openai-compatible-profile";
+import { profiles, byProvider } from "../lib/agent/llm/providers/openai-compatible-profile";
 
 /** Default base URLs — derived from the canonical profiles table. */
 const DEFAULT_BASE_URLS: Record<string, string> = {
@@ -47,9 +49,9 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
 };
 
 /** Default models for each provider (used when the user doesn't specify one).
- * These are UI defaults, not protocol-level defaults — they don't appear in the
- * profiles table because they change frequently. Each name maps to an entry in
- * `PRICING_PER_MTOK` so cost tracking works out-of-the-box.
+ * These are OFFLINE FALLBACK ONLY — the online default model is resolved from
+ * the models.dev catalog via `getDefaultModelForProvider` (see `buildProvider`).
+ * They don't appear in the profiles table because they change frequently.
  *
  * Exported so `agent-bridge.ts` can apply the SAME default-model resolution
  * when computing `mainModelVision` — otherwise an empty `model` field would
@@ -90,7 +92,30 @@ export const DEFAULT_MODELS: Record<string, string> = {
  */
 export async function buildProvider(config: ProviderConfig): Promise<LLMProvider> {
   const { provider, apiKey, model, baseUrl, resourceName } = config;
-  const resolvedModel = model || DEFAULT_MODELS[provider] || "";
+  // Resolve the model: explicit user choice > live catalog default >
+  // offline DEFAULT_MODELS fallback. `CATALOG_PROVIDER_ID_MAP` maps our
+  // provider id (e.g. "gemini") to the models.dev catalog provider id
+  // (e.g. "google") so `getDefaultModelForProvider` can find the newest
+  // non-deprecated model. Falls back to "" if everything is unavailable.
+  const catalogProviderId = CATALOG_PROVIDER_ID_MAP[provider] ?? provider;
+  const resolvedModel =
+    model ||
+    (await getDefaultModelForProvider(catalogProviderId)) ||
+    DEFAULT_MODELS[provider] ||
+    "";
+
+  // SSRF guard: reject a user-supplied `baseUrl` that points at a loopback /
+  // private / link-local / cloud-metadata address. The user controls `baseUrl`
+  // (entered in Options / written to chrome.storage.local), so it is untrusted
+  // input. The curated `DEFAULT_BASE_URLS` fallbacks (used only when the user
+  // supplies no baseUrl) are trusted and exempted so Ollama/LiteLLM localhost
+  // defaults keep working; they are not validated here.
+  if (baseUrl) {
+    const ssrf = validateLlmBaseUrl(baseUrl);
+    if (!ssrf.ok) {
+      throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${baseUrl} (${ssrf.reason})`);
+    }
+  }
 
   let result: LLMProvider;
   switch (provider) {
@@ -144,11 +169,7 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
       const resolvedBaseURL = baseUrl || DEFAULT_BASE_URLS[provider];
       if (!resolvedBaseURL && needsKey) {
         throw new Error(
-          `Unknown provider "${provider}". Supply a baseUrl in Options, or pick one of: ${[
-            "openai", "anthropic", "gemini", "xai", "openrouter", "azure",
-            "deepseek", "qwen", "groq", "together", "mistral", "cerebras",
-            "ollama", "opencode", "litellm",
-          ].join(", ")}.`
+          `Unknown provider "${provider}". Supply a baseUrl in Options, or pick one of: ${Object.keys(byProvider).join(", ")}.`
         );
       }
       result = OpenAICompatible.toLLMProvider({
@@ -167,8 +188,6 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
   // vision model released after the code was written) that the hardcoded
   // per-provider flag would miss.
   try {
-    const { CATALOG_PROVIDER_ID_MAP } = await import("./provider-config-map");
-    const catalogProviderId = CATALOG_PROVIDER_ID_MAP[provider] ?? provider;
     const visionCapable = await modelSupportsVision(resolvedModel, catalogProviderId);
     if (visionCapable !== result.supportsVision) {
       result = {

@@ -148,7 +148,7 @@ export function geminiPath(model: string): string {
   // `encodeModelIdForUrl` keeps normal ids identical (alphanumerics, ".", "-"
   // are left untouched) but prevents a malicious/garbage model id from
   // injecting path separators or query characters into the request URL, and
-  // throws on structurally-invalid ids (F-23).
+  // throws on structurally-invalid ids.
   return `/${encodeModelIdForUrl(model)}${PATH}`;
 }
 

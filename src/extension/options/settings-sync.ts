@@ -70,6 +70,11 @@ chrome.storage.local.get(
     }
     // Use `??` (not `||`) so empty-string / 0 values are preserved.
     ($("provider") as HTMLSelectElement).value = (res.provider as string) ?? "openai";
+    // SECURITY: apiKey is read back from chrome.storage.local here. That store is
+    // UNENCRYPTED and MV3 provides NO secret store, so the raw key is persisted in
+    // plaintext on disk. Prefer OAuth / pass-through auth where the provider
+    // supports it to avoid storing long-lived API keys at all. Never console.log
+    // the value.
     ($("apiKey") as HTMLInputElement).value = (res.apiKey as string) ?? "";
     ($("model") as HTMLInputElement).value = (res.model as string) ?? "";
     ($("baseUrl") as HTMLInputElement).value = (res.baseUrl as string) ?? "";
@@ -125,6 +130,10 @@ $("save").addEventListener("click", () => {
 
   const data: Record<string, string | number | string[] | boolean> = {
     provider: ($("provider") as HTMLSelectElement).value,
+    // SECURITY: apiKey is persisted to chrome.storage.local here in PLAINTEXT.
+    // MV3 has no secure secret store, so this is unavoidable for the current
+    // design. Recommend OAuth where the provider supports it; never console.log
+    // the value. Surfaced errors must go through redactKeyLeak (provider-config-ui).
     apiKey: ($("apiKey") as HTMLInputElement).value,
     model: ($("model") as HTMLInputElement).value,
     baseUrl: ($("baseUrl") as HTMLInputElement).value,

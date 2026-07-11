@@ -7,10 +7,11 @@
  * action description, secret substitution, compaction, and the action schema.
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import { extractJson, parseAgentOutput, parsePlannerOutput } from "../src/lib/agent/output-parser";
 import { LoopDetector } from "../src/lib/agent/loop/loop-detector";
-import { estimateCost, PRICING_PER_MTOK } from "../src/lib/agent/llm/pricing";
+import { estimateCost, refreshPricingFromCatalog } from "../src/lib/agent/llm/pricing";
+import type { Catalog } from "../src/lib/agent/llm/catalog";
 import { describeAction } from "../src/lib/agent/tools/executor";
 import { actionListForPrompt, ACTION_METADATA } from "../src/lib/agent/tools/schema";
 import {
@@ -618,43 +619,77 @@ describe("extractJson", () => {
   });
 });
 
-// ─── estimateCost — pricing table + substring matcher ────────────────────────
+// ─── estimateCost — catalog-driven rates + substring matcher ─────────────────
 //
-// `estimateCost(model, tokensIn, tokensOut)` does a case-insensitive substring
-// match against `PRICING_PER_MTOK` (ordering matters: gpt-4o-mini is listed
-// BEFORE gpt-4o so it wins for "gpt-4o-mini-2024-07-18"). Returns 0 for
-// unknown models. NOTE: it does NOT bill reasoning tokens — see the BUG test.
+// Pricing is sourced from the live models.dev catalog (hydrated via
+// `refreshPricingFromCatalog`); there is no static table. These tests stub
+// `fetch` so they run without network. `estimateCost` does a case-insensitive
+// substring match against the catalogued rates (the more-specific key must be
+// declared first so it wins for "gpt-4o-mini-…").
+
+const UNIT_CATALOG: Catalog = {
+  openai: {
+    id: "openai",
+    name: "OpenAI",
+    models: {
+      // NB: gpt-4o-mini is declared BEFORE gpt-4o so the substring matcher
+      // (first key that is a substring of the queried id) returns the mini
+      // rate for "gpt-4o-mini-…".
+      "gpt-4o-mini": { id: "gpt-4o-mini", name: "GPT-4o mini", release_date: "2024-07-18", attachment: false, reasoning: false, temperature: true, tool_call: true, cost: { input: 0.15, output: 0.6 } },
+      "gpt-4o": { id: "gpt-4o", name: "GPT-4o", release_date: "2024-05-13", attachment: false, reasoning: false, temperature: true, tool_call: true, cost: { input: 2.5, output: 10 } },
+      // NB: o3-mini / o1-mini declared before o3 / o1.
+      "o3-mini": { id: "o3-mini", name: "o3-mini", release_date: "2025-01-31", attachment: false, reasoning: true, temperature: false, tool_call: true, cost: { input: 1.1, output: 4.4 } },
+      "o3": { id: "o3", name: "o3", release_date: "2025-04-16", attachment: false, reasoning: true, temperature: false, tool_call: true, cost: { input: 2, output: 8 } },
+      "o1-mini": { id: "o1-mini", name: "o1-mini", release_date: "2024-09-12", attachment: false, reasoning: true, temperature: false, tool_call: true, cost: { input: 3, output: 12 } },
+      "o1": { id: "o1", name: "o1", release_date: "2024-12-05", attachment: false, reasoning: true, temperature: false, tool_call: true, cost: { input: 15, output: 60 } },
+    },
+  },
+  anthropic: {
+    id: "anthropic",
+    name: "Anthropic",
+    models: {
+      "claude-3-5-sonnet": { id: "claude-3-5-sonnet", name: "Claude 3.5 Sonnet", release_date: "2024-10-22", attachment: false, reasoning: false, temperature: true, tool_call: true, cost: { input: 3, output: 15 } },
+      "claude-3-opus": { id: "claude-3-opus", name: "Claude 3 Opus", release_date: "2024-02-29", attachment: false, reasoning: false, temperature: true, tool_call: true, cost: { input: 15, output: 75 } },
+    },
+  },
+};
 
 describe("estimateCost", () => {
+  beforeEach(async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, status: 200, json: async () => UNIT_CATALOG })),
+    );
+    await refreshPricingFromCatalog();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   test("estimateCost(key, 1M, 1M) === rate.in + rate.out for every known model", () => {
-    for (const [key, rate] of Object.entries(PRICING_PER_MTOK)) {
-      const cost = estimateCost(key, 1_000_000, 1_000_000);
-      expect(cost).toBe(rate.in + rate.out);
+    for (const provider of Object.values(UNIT_CATALOG)) {
+      for (const m of Object.values(provider.models)) {
+        const cost = estimateCost(m.id, 1_000_000, 1_000_000);
+        expect(cost).toBeCloseTo(m.cost!.input + m.cost!.output, 6);
+      }
     }
   });
 
   test("substring matching: more-specific keys win (gpt-4o-mini before gpt-4o, o3-mini before o3)", () => {
-    // gpt-4o-mini must be listed BEFORE gpt-4o so "gpt-4o-mini-…" matches the
-    // mini rate (0.15) instead of gpt-4o's rate (2.5).
-    expect(estimateCost("gpt-4o-mini-2024-07-18", 1_000_000, 0)).toBe(0.15);
-    // o3-mini must be listed BEFORE o3 so "o3-mini" matches o3-mini's rate
-    // (1.1) instead of o3's rate (15).
-    expect(estimateCost("o3-mini", 1_000_000, 0)).toBe(1.1);
-    expect(estimateCost("o3", 1_000_000, 0)).toBe(2);
+    expect(estimateCost("gpt-4o-mini-2024-07-18", 1_000_000, 0)).toBeCloseTo(0.15, 6);
+    expect(estimateCost("o3-mini", 1_000_000, 0)).toBeCloseTo(1.1, 6);
+    expect(estimateCost("o3", 1_000_000, 0)).toBeCloseTo(2, 6);
   });
 
   test("case-insensitive matching", () => {
-    // estimateCost lowercases the model name before matching.
-    expect(estimateCost("CLAUDE-3-5-SONNET-20241022", 1_000_000, 0)).toBe(3);  // claude-3-5-sonnet in
-    expect(estimateCost("Claude-3-Opus-20240229", 1_000_000, 0)).toBe(15);     // claude-3-opus in
-    expect(estimateCost("GPT-4O-MINI", 1_000_000, 0)).toBe(0.15);              // gpt-4o-mini in
-    expect(estimateCost("O3", 1_000_000, 0)).toBe(2);                         // o3 in
-    // O3-MINI is lowercased to "o3-mini" and matches o3-mini's rate (1.1),
-    // NOT o3's rate (15):
-    expect(estimateCost("O3-MINI", 1_000_000, 0)).toBe(1.1);
+    expect(estimateCost("CLAUDE-3-5-SONNET-20241022", 1_000_000, 0)).toBeCloseTo(3, 6);
+    expect(estimateCost("Claude-3-Opus-20240229", 1_000_000, 0)).toBeCloseTo(15, 6);
+    expect(estimateCost("GPT-4O-MINI", 1_000_000, 0)).toBeCloseTo(0.15, 6);
+    expect(estimateCost("O3", 1_000_000, 0)).toBeCloseTo(2, 6);
+    expect(estimateCost("O3-MINI", 1_000_000, 0)).toBeCloseTo(1.1, 6);
   });
 
-  test("unknown model → returns the conservative default (never free, F-02)", () => {
+  test("unknown model → returns the conservative default (never free)", () => {
     expect(estimateCost("some-unknown-model", 1_000_000, 1_000_000)).toBe(40);
   });
 
@@ -668,33 +703,23 @@ describe("estimateCost", () => {
   });
 
   test("o3-mini is billed at its own rate (not o3's)", () => {
-    // o3-mini is listed BEFORE o3 in PRICING_PER_MTOK, so "o3-mini" matches
-    // o3-mini's rate (1.1/4.4) — NOT o3's rate (15/60).
-    expect(estimateCost("o3-mini", 1_000_000, 1_000_000)).toBe(1.1 + 4.4);
-    expect(estimateCost("o3-mini", 1_000_000, 0)).toBe(1.1);
-    expect(estimateCost("o3-mini", 0, 1_000_000)).toBe(4.4);
+    expect(estimateCost("o3-mini", 1_000_000, 1_000_000)).toBeCloseTo(1.1 + 4.4, 6);
+    expect(estimateCost("o3-mini", 1_000_000, 0)).toBeCloseTo(1.1, 6);
+    expect(estimateCost("o3-mini", 0, 1_000_000)).toBeCloseTo(4.4, 6);
   });
 
-  test("reasoning tokens are billed at the model's reasoning rate", () => {
-    // FIXED: estimateCost now accepts a 4th `reasoningTokens` arg. `tokensOut`
-    // is assumed to INCLUDE reasoning tokens (as OpenAI reports), so visible
-    // output = tokensOut - reasoningTokens is billed at the output rate and
-    // reasoningTokens at the `reasoning` rate (fallback to output rate).
-    // o3: in=2, out=8, reasoning=8.
+  test("reasoning tokens are billed at the model's reasoning rate (fallback to out)", () => {
+    // o3: in=2, out=8. The catalog sets no reasoning rate, so reasoning tokens
+    // fall back to the output rate (8).
     // 1M in + 1M out (all reasoning) -> 2 + 0*8 + 1M*8/1M = 2 + 8 = 10
-    expect(estimateCost("o3", 1_000_000, 1_000_000, 1_000_000)).toBe(10);
+    expect(estimateCost("o3", 1_000_000, 1_000_000, 1_000_000)).toBeCloseTo(10, 6);
     // 1M in + 1M out (none reasoning) -> 2 + 8 = 10
-    expect(estimateCost("o3", 1_000_000, 1_000_000, 0)).toBe(10);
+    expect(estimateCost("o3", 1_000_000, 1_000_000, 0)).toBeCloseTo(10, 6);
     // 1M in + 0.5M visible + 0.5M reasoning -> 2 + 4 + 4 = 10
-    expect(estimateCost("o3", 1_000_000, 1_000_000, 500_000)).toBeCloseTo(10, 10);
+    expect(estimateCost("o3", 1_000_000, 1_000_000, 500_000)).toBeCloseTo(10, 6);
     // Models without a `reasoning` rate fall back to the output rate.
     // claude-3-5-sonnet: in=3, out=15, no reasoning field.
-    expect(estimateCost("claude-3-5-sonnet", 1_000_000, 1_000_000, 1_000_000)).toBe(3 + 15);
-    // The reasoning field exists in the pricing table for reasoning models:
-    expect(PRICING_PER_MTOK["o3"].reasoning).toBe(8);
-    expect(PRICING_PER_MTOK["o3-mini"].reasoning).toBe(4.4);
-    expect(PRICING_PER_MTOK["o1"].reasoning).toBe(60);
-    expect(PRICING_PER_MTOK["o1-mini"].reasoning).toBe(12);
+    expect(estimateCost("claude-3-5-sonnet", 1_000_000, 1_000_000, 1_000_000)).toBeCloseTo(3 + 15, 6);
   });
 });
 

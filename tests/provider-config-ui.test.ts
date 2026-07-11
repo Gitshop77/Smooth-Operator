@@ -1,5 +1,5 @@
 /**
- * F-11: provider error text may embed an API key — `redactKeyLeak` must mask
+ * provider error text may embed an API key — `redactKeyLeak` must mask
  * the common key prefixes before the message is surfaced in the UI.
  *
  * `provider-config-ui.ts` runs DOM side-effects at import time (it wires up
@@ -17,7 +17,7 @@ function setupDom(): void {
   `;
 }
 
-describe("redactKeyLeak (F-11)", () => {
+describe("redactKeyLeak", () => {
   let redactKeyLeak: (s: string) => string;
 
   beforeAll(async () => {

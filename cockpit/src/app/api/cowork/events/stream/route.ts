@@ -153,7 +153,7 @@ export async function GET(req: NextRequest): Promise<Response> {
     },
   });
 
-  // SEC-2: The cockpit dashboard is same-origin — it does not need a wildcard
+  // The cockpit dashboard is same-origin — it does not need a wildcard
   // `Access-Control-Allow-Origin: '*'` header. Cross-origin EventSource
   // connections could otherwise silently exfiltrate every cockpit event. If
   // a specific cross-origin client must be supported, set

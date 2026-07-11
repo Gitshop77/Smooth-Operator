@@ -5,7 +5,7 @@
  * Each facade calls this with its configured `configure()` output + provider
  * metadata (id prefix, display name, vision support). The bridge returns a
  * standard `LLMProvider` instance that runs `generate()` per chat call and
- * re-computes usage/cost from the canonical pricing table.
+ * re-computes usage/cost from the live catalog-backed pricing module.
  *
  * NOTE: this module lives at `src/lib/agent/llm/provider-bridge.ts` (a sibling
  * of `provider.ts` / `pricing.ts` / the `route/` directory) — NOT inside
@@ -49,7 +49,7 @@ export interface ProviderBridgeConfig {
  *   - Builds a model handle via `configureResult.model(model)`.
  *   - Dynamically imports `generate` from `./route/client` (preserves the
  *     existing lazy-import pattern).
- *   - Re-computes `usage.costUsd` from the canonical pricing table (the
+ *   - Re-computes `usage.costUsd` from the live catalog-backed pricing module (the
  *     protocol returns `costUsd: 0`; we override it here).
  */
 export function toLLMProvider(config: ProviderBridgeConfig): LLMProvider {
@@ -74,6 +74,7 @@ export function toLLMProvider(config: ProviderBridgeConfig): LLMProvider {
       const tokensOut = response.usage?.tokensOut ?? 0;
       const reasoningTokens = response.usage?.reasoningTokens ?? 0;
       const cachedInputTokens = response.usage?.cachedInputTokens ?? 0;
+      const cachedWriteInputTokens = response.usage?.cachedWriteInputTokens ?? 0;
       return {
         content: response.content,
         usage: response.usage
@@ -82,8 +83,9 @@ export function toLLMProvider(config: ProviderBridgeConfig): LLMProvider {
               tokensOut,
               reasoningTokens: reasoningTokens > 0 ? reasoningTokens : undefined,
               cachedInputTokens: cachedInputTokens > 0 ? cachedInputTokens : undefined,
+              cachedWriteInputTokens: cachedWriteInputTokens > 0 ? cachedWriteInputTokens : undefined,
               model: config.model,
-              costUsd: estimateCost(config.model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens),
+              costUsd: estimateCost(config.model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens),
             }
           : undefined,
       };

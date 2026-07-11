@@ -115,7 +115,7 @@ export async function fireNotifications(task: string, success?: boolean): Promis
     }
 
     if (webhookUrl) {
-      // F-12: only POST to an absolute http(s) URL. `new URL` rejects
+      // Only POST to an absolute http(s) URL. `new URL` rejects
       // relative/malformed values; we additionally require an `http:` or
       // `https:` scheme so task text is never exfiltrated to `javascript:`/
       // `data:`/`file:`/arbitrary schemes. Invalid or non-http(s) URLs are

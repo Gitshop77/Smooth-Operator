@@ -14,7 +14,7 @@
     "dev:events": "cd mini-services/cowork-events && npx tsx watch index.ts",
     "dev": "concurrently --names \"ext,cockpit,events\" --prefix-colors \"blue,green,magenta\" \"npm:dev:ext\" \"npm:dev:cockpit\" \"npm:dev:events\"",
     "build:all": "npm run build:extension && npm run build:cockpit",
-    "postinstall": "npm ci --prefix cockpit && npm ci --prefix mini-services/cowork-events"
+    "bootstrap": "npm ci --prefix cockpit && npm ci --prefix mini-services/cowork-events"
   },
   "dependencies": {
     "@huggingface/transformers": "3.8.1",

@@ -9,7 +9,7 @@ This document explains the trust model, enforcement boundaries, and known limita
 3. **Per-site memory** — user-defined notes per domain (`persistent-memory.ts`). Treated as trusted (same level as user request) because the user wrote them via the Options page.
 4. **Page content** (lowest priority) — text, attributes, form values, URLs, screenshots extracted from the controlled tab. ALWAYS untrusted.
 
-## ⚠️ Deployment trust boundary (F-03)
+## ⚠️ Deployment trust boundary
 
 **Risk level: LOW when the cockpit runs only on trusted `localhost` / a
 single-operator intranet; HIGH the moment the cockpit is exposed to untrusted
@@ -44,14 +44,14 @@ The SSE event stream authenticates via a `?token=` query param (an `EventSource`
 
 ### Known auth-boundary gaps (tracked)
 
-- **F-04 — `chat:join` room-scoping.** A socket authenticated with the shared
+- **`chat:join` room-scoping.** A socket authenticated with the shared
   secret can `chat:join` *any* session's room and read that session's streamed
   `chat:message` tokens in real time (the shared secret is identical for every
   client). The current mitigation: `chat:join` now enforces a strict sessionId
   charset (`/^[A-Za-z0-9_-]{1,128}$/`) and, when a connection presents a scoped
   `authorizedSessionId` at handshake, only allows joining that exact room. The
   full fix (per-session HMAC / server-minted sessionIds) is future work.
-- **F-05 — dev-token opt-in.** The well-known default `dev-token` previously
+- **dev-token opt-in.** The well-known default `dev-token` previously
   was accepted whenever `NODE_ENV !== 'production'`, so a misconfigured deploy
   (e.g. `npx tsx index.ts` with no `NODE_ENV`) would run unauthenticated. It is
   now refused **unless** `COWORK_ALLOW_DEV_TOKEN=1` is explicitly set. Note the
@@ -92,7 +92,7 @@ Open Cowork defends against prompt-injection attacks from page content via layer
 
 If the model is jailbroken by sophisticated page content, the code-level backstops above are the only hard gates. For high-stakes scenarios (financial, medical, legal), prefer `restricted` mode and review each action before letting the agent proceed.
 
-## ⚠️ `evaluate` action + custom tools can exfiltrate the LLM API key in `full_agentic` mode (SEC-6 / C-6)
+## ⚠️ `evaluate` action + custom tools can exfiltrate the LLM API key in `full_agentic` mode
 
 > **WARNING — only enable `full_agentic` mode on trusted pages.**
 
@@ -156,11 +156,11 @@ The mitigations listed above (mode gate, `checkUrlAllowed`, system-prompt instru
 
 The asymmetry (LLM API key persists, secrets don't) is an intentional UX tradeoff: nobody wants to re-enter their OpenAI key every browser restart, but `%password%`-style secrets should not outlive the session. Both storage areas are local to the user's browser profile — neither is sent anywhere except the chosen LLM provider's API.
 
-### Run history retention (DO-16)
+### Run history retention
 
 Run history (full transcripts including page-derived text, action results, and extracted content) is stored in `chrome.storage.local` with a cap of 50 runs. There is no automatic TTL — history persists until manually cleared via the Options → History → "Clear all history" button. Page-derived PII (form values, extracted text) may sit on disk indefinitely if not cleared. For sensitive environments, clear history regularly or avoid using the agent on pages containing PII.
 
-### Scheduled tasks + `full_agentic` mode (DO-24)
+### Scheduled tasks + `full_agentic` mode
 
 Scheduled tasks (via `chrome.alarms`) can execute runs unattended — no user is present when the alarm fires. If a scheduled task runs in `full_agentic` mode (which has no action-confirmation gates and allows JavaScript execution, file uploads, and downloads), the agent can perform destructive actions autonomously while nobody is watching. The `takeover` pause (the one working safety valve for sensitive actions) will time out after 5 minutes with no user to click "Resume."
 

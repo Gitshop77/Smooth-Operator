@@ -25,12 +25,43 @@ export async function waitForTakeoverResume(
   });
 
   if (deps.requestTakeoverResume) {
-    try {
-      await deps.requestTakeoverResume(reason, deps.signal);
-      return "resumed";
-    } catch {
-      return "timeout";
-    }
+    // Race the caller-provided override against a timeout + abort signal so a
+    // custom `requestTakeoverResume` that never resolves/rejects can't hang the
+    // loop (the chrome.runtime.onMessage path below already has a hard timeout).
+    return await new Promise<"resumed" | "timeout">((resolve) => {
+      let done = false;
+      let abortListener: (() => void) | null = null;
+      // Mirror the message-path's `finish` design: clear the timer + abort
+      // listener on resolution so neither leaks.
+      const finish = (result: "resumed" | "timeout"): void => {
+        if (done) return;
+        done = true;
+        if (timer) clearTimeout(timer);
+        if (abortListener && deps.signal) {
+          try { deps.signal.removeEventListener("abort", abortListener); } catch { /* ignore */ }
+          abortListener = null;
+        }
+        resolve(result);
+      };
+      // Fire-and-forget the override; `finish` resolves the promise when it
+      // settles (resumed on success, timeout on rejection/abort/expiry).
+      (async () => {
+        try {
+          await deps.requestTakeoverResume!(reason, deps.signal);
+          finish("resumed");
+        } catch {
+          finish("timeout");
+        }
+      })();
+      const timer = setTimeout(() => finish("timeout"), TAKEOVER_TIMEOUT_MS);
+      if (deps.signal) {
+        if (deps.signal.aborted) finish("timeout");
+        else {
+          abortListener = () => finish("timeout");
+          deps.signal.addEventListener("abort", abortListener);
+        }
+      }
+    });
   }
 
   if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {

@@ -1,5 +1,5 @@
 /**
- * F-12: completion webhook URL scheme validation.
+ * completion webhook URL scheme validation.
  *
  * `fireNotifications` POSTs the task text to `webhookUrl`. The fix rejects
  * any URL that isn't an absolute `http:`/`https:` URL (so task text is
@@ -45,7 +45,7 @@ afterEach(() => {
   warnSpy.mockRestore();
 });
 
-describe("fireNotifications webhook URL validation (F-12)", () => {
+describe("fireNotifications webhook URL validation", () => {
   test("posts to a valid https webhook URL", async () => {
     stubChrome("https://hooks.example.com/notify", false);
     await fireNotifications("do the thing", true);

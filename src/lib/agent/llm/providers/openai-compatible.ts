@@ -28,6 +28,7 @@ import {
   profiles,
   byProvider,
   type OpenAICompatibleProfile,
+  assertSafeUserBaseURL,
 } from "./openai-compatible-profile";
 
 export const id = "openai-compatible";
@@ -52,6 +53,9 @@ const auth = (options: ProviderAuthOption<"optional">) => {
  * @param input   - Optional config overrides (baseURL, apiKey/auth).
  */
 export function configure(profile: OpenAICompatibleProfile, input: Config = {}) {
+  // (SSRF guard): validate any user-supplied baseURL override before
+  // building the route/endpoint.
+  assertSafeUserBaseURL(input.baseURL);
   const baseURL = input.baseURL ?? profile.baseURL;
   const route = make({
     id: `openai-compatible:${profile.provider}`,
@@ -75,6 +79,9 @@ export function configure(profile: OpenAICompatibleProfile, input: Config = {}) 
 export function resolveProfile(provider: string, baseURL?: string): OpenAICompatibleProfile {
   const direct = byProvider[provider];
   if (direct) return direct;
+  // (SSRF guard): the synthesized profile's baseURL is entirely
+  // caller-supplied (unknown provider), so validate it before it is used.
+  assertSafeUserBaseURL(baseURL);
   // Unknown provider — synthesize from the caller-supplied baseURL.
   if (!baseURL) {
     throw new Error(

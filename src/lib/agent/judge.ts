@@ -164,8 +164,10 @@ function coerceJudgement(parsed: Record<string, unknown>): JudgementResult {
  *
  * @returns The judge's verdict, or `null` if the judge LLM call failed or
  *          returned an unparseable response. Returning `null` (rather than
- *          throwing) ensures a judge failure can't crash the run — a null
- *          verdict is treated as judge agreement.
+ *          throwing) ensures a judge failure can't crash the run — but a null
+ *          verdict is NOT treated as agreement. `maybeJudgeAndFinalize` routes
+ *          a null verdict back to the planner (UNVERIFIED) instead of failing
+ *          open with success:true.
  */
 export async function judgeTask(args: JudgeTaskArgs): Promise<JudgementResult | null> {
   const { task, history, agentResult, llmCall, onCost, modelForCost } = args;
@@ -192,8 +194,9 @@ Evaluate whether the task was actually completed.`;
   try {
     raw = await llmCall(JUDGE_PROMPT, userMessage);
   } catch {
-    // Judge LLM failure — don't crash the run. Return null (treated as
-    // judge agreement so the run isn't blocked by a broken judge).
+    // Judge LLM failure — don't crash the run. Return null (UNVERIFIED). The
+    // caller (`maybeJudgeAndFinalize`) routes a null verdict back to the
+    // planner rather than failing open with success:true.
     return null;
   }
 
@@ -227,13 +230,14 @@ Evaluate whether the task was actually completed.`;
 
   // use the shared extractJson from output-parser (handles markdown
   // fences + balanced-brace extraction). If the extracted text isn't valid
-  // JSON, return null (judge failure → treat as agreement, never block).
+  // JSON, return null (UNVERIFIED — NOT agreement).
   try {
     const jsonText = extractJson(raw);
     const parsed = JSON.parse(jsonText) as Record<string, unknown>;
     return coerceJudgement(parsed);
   } catch {
-    // LLM produced unparseable JSON — treat as judge agreement.
+    // LLM produced unparseable JSON — return null (UNVERIFIED). The caller
+    // routes this back to the planner rather than failing open.
     return null;
   }
 }

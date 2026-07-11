@@ -87,7 +87,7 @@ describe("shouldAskForConfirmation is a single source of truth", () => {
 // through the mode check so the confirmation path is actually exercised).
 
 describe("confirmation gate in executeActionQueue", () => {
-  // F-15: `evaluate` fails closed without an explicit domain allowlist. The
+  // `evaluate` fails closed without an explicit domain allowlist. The
   // "allows the action to proceed" test actually executes the evaluate, so the
   // jsdom origin (localhost) must be allowlisted; the decline test never
   // reaches execution but the config is harmless there.
@@ -178,7 +178,7 @@ describe("confirmation gate in executeActionQueue", () => {
 
     expect(requestConfirmation).toHaveBeenCalledTimes(1);
     // Confirm → the action actually executes (return 2 + 2 === 4). A read-only
-    // `evaluate` no longer flags `pageChanged` (F-19), so the queue does NOT
+    // `evaluate` no longer flags `pageChanged`, so the queue does NOT
     // abort; the action's own result is success.
     expect(result.aborted).toBe(false);
     expect(result.results).toHaveLength(1);

@@ -51,7 +51,7 @@ export const provider = configure();
 /**
  * Bridge to the agent's `LLMProvider` interface. Builds a Route via
  * `configure()`, then runs `generate()` per chat call. Usage/cost is
- * re-computed from the canonical pricing table (the protocol returns
+ * re-computed from the live catalog-backed pricing module (the protocol returns
  * `model: ""` + `costUsd: 0`; we override both here).
  */
 export function toLLMProvider(config: Config & { model: string }): LLMProvider {

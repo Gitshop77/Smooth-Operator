@@ -56,7 +56,7 @@ export const provider = configure();
 /**
  * Bridge to the agent's `LLMProvider` interface. The protocol emits usage
  * with `model: ""` + `costUsd: 0`; we fill them in from the canonical
- * pricing table.
+ * pricing module.
  */
 export function toLLMProvider(config: Config & { model: string }): LLMProvider {
   return toLLMProviderBridge({

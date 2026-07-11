@@ -8,13 +8,15 @@ import { useInvalidateView } from "@/hooks/use-cowork-query";
 
 // The mini-service requires the shared secret on every socket.io
 // connection. The cockpit dashboard is same-origin with the Next.js app, so
-// the operator can publish the token to the browser via
-// `NEXT_PUBLIC_COWORK_EVENT_TOKEN` (defaults to the dev-mode `dev-token`).
-// In production, set BOTH `COWORK_EVENT_TOKEN` (server-side, used by the
-// middleware + mini-service) and `NEXT_PUBLIC_COWORK_EVENT_TOKEN` (browser-
-// visible, used by this hook) to the same value.
+// the operator can publish the token to the browser via the browser-facing
+// `NEXT_PUBLIC_COWORK_UI_TOKEN`, falling back to the legacy
+// `NEXT_PUBLIC_COWORK_EVENT_TOKEN` and then the dev-mode `dev-token`. On any
+// untrusted network the browser-visible value MUST differ from the
+// service-to-service `COWORK_EVENT_TOKEN` (which must never be NEXT_PUBLIC_).
 const WS_TOKEN =
-  process.env.NEXT_PUBLIC_COWORK_EVENT_TOKEN || "dev-token";
+  process.env.NEXT_PUBLIC_COWORK_UI_TOKEN ??
+  process.env.NEXT_PUBLIC_COWORK_EVENT_TOKEN ??
+  "dev-token";
 
 /**
  * useCoworkWebSocket — connects to the cowork-events mini-service on port

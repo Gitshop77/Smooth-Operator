@@ -155,12 +155,12 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     releaseRunGuard();
     return;
   }
-  // F-15: when the resolved mode allows JavaScript execution (full_agentic)
-  // but no explicit domain allowlist is configured, `evaluate` will FAIL
-  // CLOSED — it cannot run on any origin until `allowedDomains` is set. Emit
-  // a prominent startup warning so the user knows why execution is refused
-  // (and what to configure). We do NOT throw: the run can still proceed for
-  // non-JS actions; only the unsandboxed RCE path is gated.
+  // When the resolved mode allows JavaScript execution (full_agentic) but no
+  // explicit domain allowlist is configured, `evaluate` will FAIL CLOSED — it
+  // cannot run on any origin until `allowedDomains` is set. Emit a prominent
+  // startup warning so the user knows why execution is refused (and what to
+  // configure). We do NOT throw: the run can still proceed for non-JS actions;
+  // only the unsandboxed RCE path is gated.
   if (MODE_CONFIGS[mode].canExecuteJs) {
     const configuredAllowlist = (stored.allowedDomains as string[] | undefined) ?? [];
     if (configuredAllowlist.length === 0) {

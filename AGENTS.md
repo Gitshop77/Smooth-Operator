@@ -50,7 +50,7 @@ src/lib/agent/              Core agentic engine (framework-agnostic TypeScript)
   llm/                      LLM provider layer (4-layer architecture, 14 providers)
     provider.ts             LLMProvider interface + registry
     provider-bridge.ts      Shared toLLMProvider bridge
-    pricing.ts              Single canonical pricing table (all models, all providers)
+    pricing.ts              Live catalog-backed pricing (models.dev/api.json via catalog.ts; no static table)
     retry.ts                Shared retry with exponential backoff (429/5xx/network, abort-aware)
     catalog.ts              models.dev live catalog fetcher + cache (5-min TTL, per-model vision detection)
     route/                  Composable route layer (auth, endpoint, transport, framing)

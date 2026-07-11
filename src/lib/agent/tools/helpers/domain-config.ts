@@ -42,7 +42,7 @@ function readGlobal<T>(key: string): T | undefined {
  *   - "a policy WAS configured but the config payload is missing/unavailable"
  *     → fail CLOSED (the allow/block list is silently bypassed otherwise).
  *
- * See F-07. Default (flag absent) = no enforcement expected = allow-all.
+ * Default (flag absent) = no enforcement expected = allow-all.
  */
 export function isDomainPolicyEnforced(): boolean {
   return readGlobal<boolean>("__openCoworkDomainConfigEnforced") === true;
@@ -81,7 +81,7 @@ export function isDomainConfigMissingButEnforced(): boolean {
 }
 
 /**
- * Policy-aware URL check (F-07).
+ * Policy-aware URL check.
  *
  * Fails CLOSED (blocks) when a domain policy was configured
  * (`__openCoworkDomainConfigEnforced`) but the config payload

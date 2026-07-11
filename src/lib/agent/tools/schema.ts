@@ -375,7 +375,7 @@ export const AgentOutputSchema = z.object({
     .array(ActionSchema)
     .min(1)
     .max(50)
-    // F-18: `done` is an exclusive action (see ACTION_METADATA.done.exclusive).
+    // `done` is an exclusive action (see ACTION_METADATA.done.exclusive).
     // If a `done` action is present it MUST be the only action in the step —
     // any sibling actions would otherwise be silently dropped by the
     // orchestrator's short-circuit-to-done path. Enforce this at parse time so
@@ -525,10 +525,13 @@ export function isEquivalentAction(a: Action, b: Action): boolean {
       return a.index === bb.index && (a.hold_ms ?? 1500) === (bb.hold_ms ?? 1500);
     }
     case "input":
-      return (
-        a.index === (b as Extract<Action, { type: "input" }>).index &&
-        a.text === (b as Extract<Action, { type: "input" }>).text
-      );
+      // `index` is a per-field ordinal, NOT part of "same action" identity for
+      // the early-stop detector. Typing the same `text` into 3+ different
+      // fields is suspicious (caught by the whole-history cross-field branch in
+      // early-stop.ts) and must NOT be treated as a distinct action. Compare
+      // only the stable distinguishing field (`text`) so cross-field repeats
+      // are detected. (`alert_send_keys` is already text-only below.)
+      return a.text === (b as Extract<Action, { type: "input" }>).text;
     case "select_dropdown": {
       const bb = b as Extract<Action, { type: "select_dropdown" }>;
       return a.index === bb.index && (a.text ?? "") === (bb.text ?? "") && (a.option_index ?? -1) === (bb.option_index ?? -1);

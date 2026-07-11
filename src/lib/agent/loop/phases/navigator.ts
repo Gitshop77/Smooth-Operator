@@ -162,7 +162,10 @@ export async function runPauseCheck(state: LoopState): Promise<void> {
       try {
         paused = await state.deps.checkPaused!();
       } catch {
-        paused = false;
+        // Transient storage/lookup error — keep the current `paused` value
+        // rather than force-resuming. We re-poll on the next iteration (bounded
+        // by `pauseDeadline`), so an intermittent failure must NOT silently end
+        // an explicit user pause.
       }
     }
     state.onEvent({ type: "resumed", step: state.step });

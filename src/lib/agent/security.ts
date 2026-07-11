@@ -401,7 +401,7 @@ function hostnameMatches(hostname: string, domain: string): boolean {
  * - Otherwise the URL's hostname must equal an entry or be a subdomain of one.
  * - Invalid URLs always return `false`.
  *
- * F-15: only the evaluate/JS-execution path opts into fail-closed via
+ * Only the evaluate/JS-execution path opts into fail-closed via
  * `requireAllowlist`. Non-evaluate paths keep allow-all-by-default so we
  * don't change their behavior.
  */

@@ -55,7 +55,7 @@ export function configure(input: Config = {}) {
       // Azure URL: /openai/deployments/{deployment}/chat/completions?api-version={version}
       // `encodeModelIdForUrl(modelID)` keeps normal deployment names identical
       // but prevents a malicious/garbage id from injecting path separators into
-      // the request URL, and throws on structurally-invalid ids (F-23).
+      // the request URL, and throws on structurally-invalid ids.
       const route = make({
         id: "azure-openai",
         provider: id,

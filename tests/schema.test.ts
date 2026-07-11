@@ -1,5 +1,5 @@
 /**
- * F-18: `done` must be the ONLY action in its step. The actions array on
+ * `done` must be the ONLY action in its step. The actions array on
  * `AgentOutputSchema` enforces done-exclusivity via a superRefine, so a step
  * like [{type:"done"},{type:"input",...}] is rejected at parse time while a
  * single `done` (the valid case) still validates.
@@ -8,7 +8,7 @@
 import { describe, test, expect } from "vitest";
 import { AgentOutputSchema } from "../src/lib/agent/tools/schema";
 
-describe("AgentOutputSchema done-exclusivity (F-18)", () => {
+describe("AgentOutputSchema done-exclusivity", () => {
   test("a single done action is valid", () => {
     const res = AgentOutputSchema.safeParse({
       action: [{ type: "done", text: "all done", success: true }],

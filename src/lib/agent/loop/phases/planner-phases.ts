@@ -159,6 +159,15 @@ export async function handleNavigatorDone(
   const callResult = await callPlannerAndHandleError(state, { url: browserState.url, tabs });
   if (callResult.status === "abort") return { finalized: true };
   if (callResult.status === "continue") {
+    // The planner verification call failed transiently (no decision produced).
+    // Emit an info event and reset the navigator-since-planner counter for
+    // parity with the `decision` branch so the periodic planner check keeps a
+    // correct cadence (otherwise it would re-fire immediately on the next step).
+    onEvent({
+      type: "info",
+      message: "Planner verification skipped (transient planner error) — continuing the run.",
+    });
+    state.navigatorStepsSincePlanner = 0;
     state.step++;
     try {
       await (deps.waitForSettled?.() ?? new Promise<void>((r) => setTimeout(r, settleDelay)));

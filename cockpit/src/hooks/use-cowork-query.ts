@@ -31,12 +31,18 @@ const TQ = {
 } as const;
 
 /**
- * The X-Cowork-Token sent on every cockpit REST fetch. MUST match the
- * server-side `COWORK_EVENT_TOKEN` env var (used by middleware.ts). In dev
- * both default to `dev-token` — in production, set both env vars to the same
- * real secret. The `NEXT_PUBLIC_` prefix exposes this to the browser.
+ * The X-Cowork-Token sent on every cockpit REST fetch. Prefers the dedicated
+ * browser-facing `NEXT_PUBLIC_COWORK_UI_TOKEN`, falling back to the
+ * legacy `NEXT_PUBLIC_COWORK_EVENT_TOKEN` and then `dev-token`. This MUST
+ * match the server-side `COWORK_UI_TOKEN` (preferred) / `COWORK_EVENT_TOKEN`
+ * env var resolved by middleware.ts. The `NEXT_PUBLIC_` prefix exposes this to
+ * the browser, so it must NEVER equal the service-to-service `COWORK_EVENT_TOKEN`
+ * on any untrusted network.
  */
-const COWORK_TOKEN = process.env.NEXT_PUBLIC_COWORK_EVENT_TOKEN || "dev-token";
+const COWORK_TOKEN =
+  process.env.NEXT_PUBLIC_COWORK_UI_TOKEN ??
+  process.env.NEXT_PUBLIC_COWORK_EVENT_TOKEN ??
+  "dev-token";
 
 /** Headers every cockpit fetch must send (auth + accept). */
 const JSON_HEADERS: HeadersInit = {

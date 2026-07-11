@@ -14,7 +14,7 @@ const projectRoot = dirname(fileURLToPath(import.meta.url));
 
 /**
  * Baseline security response headers, applied to every response via the
- * Next.js `headers()` API (F-11). These are defense-in-depth: the cockpit is a
+ * Next.js `headers()` API. These are defense-in-depth: the cockpit is a
  * single-purpose internal app, but setting them costs nothing and hardens it
  * against clickjacking / MIME sniffing / downgrade attacks.
  *   • Content-Security-Policy: `frame-ancestors 'none'` blocks embedding.

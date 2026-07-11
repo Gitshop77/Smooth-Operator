@@ -5,7 +5,7 @@ import type { NextRequest } from 'next/server';
  * Returns `{}` for an empty/absent body so routes that accept optional bodies
  * keep working, but THROWS on malformed (non-empty) JSON. The throw is caught
  * by `withRouteError` and turned into a generic 400, so a malformed body can
- * no longer silently create a row with defaults (F-04b). */
+ * no longer silently create a row with defaults. */
 export async function bodyJson(req: NextRequest): Promise<Record<string, unknown>> {
   if (!req.body) return {};
   const text = await req.text();
@@ -22,7 +22,7 @@ export async function bodyJson(req: NextRequest): Promise<Record<string, unknown
 /** Tolerant variant of `bodyJson` for routes whose body is OPTIONAL.
  *
  * Never throws: returns `{}` for an absent / empty / malformed body so callers
- * that merely enrich an optional payload keep working (F-04b). Routes that
+ * that merely enrich an optional payload keep working. Routes that
  * REQUIRE a body must use `bodyJson`, which throws on malformed JSON so the
  * caller returns a 400 instead of silently creating a row with defaults. */
 export async function bodyJsonOptional(req: NextRequest): Promise<Record<string, unknown>> {
@@ -59,12 +59,14 @@ export function serverError(error: string): Response {
 /** Validate that a URL string uses the http or https protocol.
  *  Returns `null` on success, or a 400 Response on failure.
  *
- * NOTE (F-17 / SSRF defense-in-depth): today the cockpit only STORES these
- * URLs (bookmarks/tabs) and never issues a server-side fetch or launch, so an
- * internal/private host is not yet an SSRF sink. When a URL from this catalog
- * is ever fetched or launched server-side, gate it with `isSsrfSafeUrl()`
- * first. We deliberately do NOT enforce `isSsrfSafeUrl` here, so that legitimate
- * localhost bookmarks keep working. */
+ * SSRF BOUNDARY: this function ONLY checks the URL *scheme*. It
+ * deliberately does NOT reject loopback / RFC1918 / link-local / cloud-metadata
+ * hosts, so legitimate localhost bookmarks keep working. Therefore callers MUST
+ * enforce the SSRF boundary before a stored URL is ever *fetched or launched
+ * server-side* by also gating on `isSsrfSafeUrl(url)` (which rejects
+ * private/loopback hosts). The cockpit's storage routes (tabs/bookmarks) now
+ * call `isSsrfSafeUrl` at ingest time as well, so a stored URL can never later
+ * become an SSRF sink. The signatures of both functions are stable. */
 export function validateHttpUrl(url: string): Response | null {
   try {
     const parsed = new URL(url);
@@ -140,7 +142,7 @@ function newCorrelationId(): string {
 
 /**
  * Redact obvious secret shapes from a loggable string so server-side error
- * logging (F-12) does not capture credentials. Covers:
+ * logging does not capture credentials. Covers:
  *   • credentials embedded in URLs (http(s)://user:pass@host)
  *   • secret-bearing key=value pairs (password / token / secret / api_key / …)
  *   • `Bearer` tokens
@@ -167,7 +169,7 @@ function redactSecrets(text: string): string {
   return out;
 }
 
-/** Map an error message to a stable, secret-free code for server logs (F-12). */
+/** Map an error message to a stable, secret-free code for server logs. */
 function stableErrorCode(message: string): string {
   const lower = message.toLowerCase();
   if (lower.includes("not found")) return "NOT_FOUND";
@@ -182,7 +184,7 @@ function stableErrorCode(message: string): string {
  * Markers indicating a client-facing validation/business error produced by our
  * own code (vs. an internal failure like a DB/FS error that may leak table or
  * column names, constraint details, or absolute filesystem paths). Only these
- * messages are safe to echo to the client (F-04a). */
+ * messages are safe to echo to the client. */
 const SAFE_MESSAGE_MARKERS = [
   'not found',
   'not implemented',
@@ -196,7 +198,7 @@ const SAFE_MESSAGE_MARKERS = [
 /** Wrap an async route handler with try/catch that produces a JSON error.
  *
  * @param fn         The route handler.
- * @param requestId  Optional request id propagated from middleware (F-17). When
+ * @param requestId  Optional request id propagated from middleware. When
  *                   provided it is reused as the `correlationId` so server error
  *                   logs and the client-facing error share one traceable id. */
 export async function withRouteError(
@@ -208,7 +210,7 @@ export async function withRouteError(
   } catch (e) {
     const correlationId = requestId || newCorrelationId();
     const message = e instanceof Error ? e.message : 'Internal server error';
-    // F-12: prefer a stable error code + correlation id over dumping the raw
+    // Prefer a stable error code + correlation id over dumping the raw
     // stack/message (which may leak filesystem paths, table names, or tokens).
     // What we do log is redacted of known secret shapes.
     console.error(
@@ -221,7 +223,7 @@ export async function withRouteError(
 
     // Map known message markers to the correct HTTP status (unchanged behavior).
     // NOTE: Prisma's internal "unique constraint"/"p2025" errors are intentionally
-    // NOT mapped here — echoing them would leak table/column names (F-04a), so they
+    // NOT mapped here — echoing them would leak table/column names, so they
     // fall through to the generic 500 below.
     let status = 500;
     if (lower.includes('not found')) status = 404;

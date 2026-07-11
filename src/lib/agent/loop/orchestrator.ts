@@ -158,7 +158,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       makeCtx(state)
     );
   } catch (e) {
-    const isAbort = deps.signal?.aborted || (e instanceof Error && /abort/i.test(e.name));
+    const isAbort = deps.signal?.aborted || (e instanceof Error && (/abort/i.test(e.name) || /abort/i.test(e.message)));
     let doneText: string;
     if (isAbort) {
       onEvent({ type: "info", message: "Agent stopped by user." });
@@ -254,6 +254,11 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
     const budgetWarnStep = Math.max(1, Math.floor(config.maxSteps * BUDGET_WARNING_FRACTION));
     if (state.step === budgetWarnStep) {
       onEvent({ type: "budget-warning", step: state.step, pct: Math.floor(BUDGET_WARNING_FRACTION * 100) });
+      // Mark the budget warning as fired here so the `buildPreObserveNudges`
+      // call below does NOT ALSO inject the duplicate budget-warning nudge into
+      // the prompt — the inline `budget-warning` event is the single source of
+      // truth for this warning. (Without this, both surfaces fire.)
+      state.budgetWarningFired = true;
     }
 
     const preObserveNudges = buildPreObserveNudges(state);
@@ -443,28 +448,30 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       );
     }
 
-    if (output.action.length > config.maxActionsPerStep) {
-      const truncMsg = `Navigator emitted ${output.action.length} actions (max ${config.maxActionsPerStep}); truncating.`;
-      onEvent({ type: "error", step: state.step, message: truncMsg, recoverable: true });
-      if (dispatcher) await dispatcher.error(makeCtx(state), truncMsg, true);
-    }
-    // F2: preserve a sole `done` action even when the navigator emitted more
+    // Preserve a sole `done` action even when the navigator emitted more
     // actions than maxActionsPerStep. The `done` action always means "stop and
-    // finalize" (F-18 enforces it is the sole action at parse time), so if it
+    // finalize", so if it
     // is present we run ONLY it and discard the rest rather than truncating `done`
     // off the end of the queue.
     const soleDoneAction = output.action.find((a) => a.type === "done");
     const actions = soleDoneAction ? [soleDoneAction] : output.action.slice(0, config.maxActionsPerStep);
+    if (output.action.length > config.maxActionsPerStep) {
+      // Check `soleDoneAction` BEFORE warning: when a `done` is present we keep
+      // ONLY it (we do NOT truncate), so the "truncating" wording would be
+      // misleading. Specialize the message to reflect what actually happens.
+      const truncMsg = soleDoneAction
+        ? `Navigator emitted ${output.action.length} actions (max ${config.maxActionsPerStep}); keeping only the done action.`
+        : `Navigator emitted ${output.action.length} actions (max ${config.maxActionsPerStep}); truncating.`;
+      onEvent({ type: "error", step: state.step, message: truncMsg, recoverable: true });
+      if (dispatcher) await dispatcher.error(makeCtx(state), truncMsg, true);
+    }
 
     const doneAction = actions.find((a) => a.type === "done");
 
     if (doneAction && doneAction.type === "done") {
-      // F-18 is enforced at PARSE TIME (the AgentOutputSchema.action
-      // superRefine): a step that pairs `done` with a sibling action is
-      // rejected before it reaches the orchestrator, so `doneAction` is
-      // ALWAYS the sole action in the step. The previous sibling-
-      // execution branch is therefore dead code and has been removed —
-      // we finalize immediately (preserving the single-`done` behavior).
+      // A step that pairs `done` with a sibling action is rejected at parse
+      // time (AgentOutputSchema.action superRefine) before it reaches the
+      // orchestrator, so `doneAction` is ALWAYS the sole action in the step.
       const result = await handleNavigatorDone(state, doneAction, output, browserState, tabs);
       if (result.finalized) {
         if (dispatcher) await dispatcher.runEnd(buildRunResult(state, false, ""));
@@ -641,7 +648,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
         config.compactionStepInterval,
         config.compactionCharThreshold
       ) || approachingContextLimit) {
-        let compacted: Awaited<ReturnType<typeof runCompaction>>;
+        let compacted: Awaited<ReturnType<typeof runCompaction>> | null = null;
         try {
           compacted = await runCompaction(
             deps,
@@ -662,7 +669,12 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
             state.finalResult = { success: false, text: msg };
             return;
           }
-          throw e;
+          // `runCompaction` only re-throws Budget-exceeded errors; any other
+          // error is caught internally and returns `null`. Re-throwing here
+          // would erroneously kill the whole run if `runCompaction` ever
+          // changed to re-throw transient errors, so we log-and-continue
+          // (deferring compaction to a later step).
+          onEvent({ type: "info", message: `Compaction skipped due to error: ${msg}` });
         }
         if (compacted) {
           state.navigatorHistory.length = 0;

@@ -41,8 +41,20 @@ const STORAGE_KEY = "open_cowork_secrets";
  */
 const PLACEHOLDER_PATTERN = /%([a-zA-Z][a-zA-Z0-9_]*)%/g;
 
-/** Minimum secret length eligible for redaction (avoids redacting tiny common strings). */
-const MIN_REDACTABLE_LENGTH = 4;
+/**
+ * Minimum secret length eligible for redaction.
+ *
+ * Previously `4`, which silently SKIPPED short user-defined secrets
+ * (2–3 char PINs/OTPs/short tokens) so they could be read back from a
+ * `type="text"` field and sent to the LLM provider UNREDACTED.
+ *
+ * These are the user's *explicitly-registered* secrets — there is no "common
+ * short string" false-positive risk like there is for arbitrary page text, so
+ * masking short ones is strictly correct. Set to `0` so EVERY stored secret is
+ * redacted regardless of length. (The `> 0` guard in {@link redactSecrets}
+ * only drops degenerate empty values, which cannot leak anything.)
+ */
+const MIN_REDACTABLE_LENGTH = 0;
 
 /** Persist the secret list to whatever storage backend is available. */
 async function persist(secrets: SecretEntry[]): Promise<void> {
@@ -152,14 +164,20 @@ export function extractPlaceholders(text: string): string[] {
  * could redact substrings of already-redacted markers.
  *
  * Secrets are matched longest-first to avoid partial-match leaks (e.g. if one
- * secret's value is a prefix of another). Secrets shorter than
- * {@link MIN_REDACTABLE_LENGTH} are skipped to avoid redacting common short
- * strings like "ok".
+ * secret's value is a prefix of another).
+ *
+ * ALL stored secrets are redacted regardless of length. We no longer
+ * skip short values — a 2–3 char user-secret that lands in a visible input
+ * field must still be masked before it reaches the LLM provider. Only
+ * degenerate empty values are excluded (they cannot leak anything and an empty
+ * alternation would corrupt the regex).
  */
 export async function redactSecrets(text: string): Promise<string> {
   const secrets = await listSecrets();
   const eligible = secrets
-    .filter((s) => s.value.length >= MIN_REDACTABLE_LENGTH)
+    // `>= MIN_REDACTABLE_LENGTH` (now 0) keeps every real secret; the
+    // extra `> 0` guard only drops empty values that would break the regex.
+    .filter((s) => s.value.length >= MIN_REDACTABLE_LENGTH && s.value.length > 0)
     // Sort longest-first so a secret that's a prefix of another doesn't mask it.
     .sort((a, b) => b.value.length - a.value.length);
   if (eligible.length === 0) return text;

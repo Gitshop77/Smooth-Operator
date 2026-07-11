@@ -176,9 +176,9 @@ describe("httpJson.frames — opaqueredirect security", () => {
   });
 });
 
-// ─── Retry-After header parsing (F-22) ───────────────────────────────────────
+// ─── Retry-After header parsing ───────────────────────────────────────
 
-describe("parseRetryAfterHeader — seconds + HTTP-date (F-22)", () => {
+describe("parseRetryAfterHeader — seconds + HTTP-date", () => {
   test("parses the integer-seconds form", () => {
     expect(parseRetryAfterHeader("5")).toBe(5000);
     expect(parseRetryAfterHeader("0")).toBe(0);

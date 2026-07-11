@@ -1,5 +1,5 @@
 /**
- * F-09: `find_elements` must not leak sensitive attribute values.
+ * `find_elements` must not leak sensitive attribute values.
  *
  * The handler routes attribute extraction through `isSensitive` (the same
  * classifier used by the DOM extractor's `buildAttrs`) and `redactSecrets`, so
@@ -13,7 +13,7 @@ import type { ActionContext } from "../src/lib/agent/tools/handlers/types";
 
 const DUMMY_CTX = {} as ActionContext;
 
-describe("find_elements sensitive-attribute redaction (F-09)", () => {
+describe("find_elements sensitive-attribute redaction", () => {
   beforeEach(() => {
     document.body.innerHTML = `
       <input id="pw" type="password" value="supersecret">

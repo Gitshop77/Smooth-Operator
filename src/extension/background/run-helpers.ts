@@ -25,7 +25,9 @@ import { runAgentLoop } from "@/lib/agent/loop/orchestrator";
 import type { ActionResult, AgentAction, BrowserState, LogEvent, TabInfo } from "@/lib/agent/types";
 import type { AgentMode } from "@/lib/agent/modes";
 import { RunBuilder, saveRun } from "@/lib/agent/run-history";
-import { detectChallenge, waitForChallengeResolution } from "@/lib/agent/anti-bot";
+import { stripUrlFragment } from "./vision";
+import { makeAntiBotHooks } from "./antibot";
+import { captureTabScreenshot } from "./screenshots";
 import {
   saveRunState,
   getRunState,
@@ -47,6 +49,7 @@ import {
 import { navigatorCallDirect, plannerCallDirect } from "../llm-direct";
 import type { VisionAssistant } from "../vision-assistant";
 import { DEFAULT_MODELS } from "../provider-config";
+import { getDefaultModelForProvider } from "@/lib/agent/llm/catalog";
 
 // ─── Vision Assistant singleton (lazy, non-blocking init) ───────────────────
 //
@@ -141,18 +144,6 @@ const visionElementsCache = new Map<string, { x: number; y: number; width: numbe
 // NEW page (could be a delete/payment button). `extractStateForRun` checks
 // this against `domState.url` and clears the cache on mismatch.
 let visionCacheUrl = "";
-
-/**
- * Strip the fragment (`#...`) from a URL for cache-freshness comparison.
- * A fragment-only change (e.g. navigating to `#section-2`) doesn't change
- * the viewport layout, so cached vision rects remain valid. Query strings
- * ARE included in the comparison (SPA route changes via `?route=...` DO
- * change the layout).
- */
-function stripUrlFragment(url: string): string {
-  const hashIdx = url.indexOf("#");
-  return hashIdx === -1 ? url : url.slice(0, hashIdx);
-}
 
 // Track the last known DPR for adaptive vision coordinate scaling.
 // Updated in extractStateForRun from domState.devicePixelRatio.
@@ -281,20 +272,7 @@ export async function handleDetectVisualRequest(query: string): Promise<{
     if (!tabId) {
       return { ok: false, error: "no active run — cannot determine agent tab for screenshot" };
     }
-    const { attachDebugger, detachDebugger } = await import("@/lib/agent/cdp-controller");
-    await attachDebugger(tabId);
-    let screenshotDataUrl: string;
-    try {
-      const result = await chrome.debugger.sendCommand({ tabId }, "Page.captureScreenshot", {
-        format: "jpeg",
-        quality: 80,
-      }) as { data?: string };
-      if (!result?.data) throw new Error("Page.captureScreenshot returned no data");
-      screenshotDataUrl = `data:image/jpeg;base64,${result.data}`;
-    } finally {
-      // always detach — even on throw. Mirrors CDP_CLICK / SCREENSHOT.
-      detachDebugger(tabId).catch(() => { /* tab may already be closed */ });
-    }
+    const screenshotDataUrl = await captureTabScreenshot(tabId);
     const visionDetections = await globalVisionAssistant.detect(screenshotDataUrl).catch(() => []);
     // Cache vision elements for the next step's extractStateForRun
     visionElementsCache.clear();
@@ -373,8 +351,14 @@ export async function extractStateForRun(
     const { modelSupportsVision } = await import("@/lib/agent/llm/catalog");
     const { CATALOG_PROVIDER_ID_MAP } = await import("../provider-config-map");
     const catId = CATALOG_PROVIDER_ID_MAP[providerId as string] ?? providerId;
+    // Resolve the model: explicit user choice > live catalog default >
+    // offline DEFAULT_MODELS fallback. `catId` maps the extension's provider id
+    // to the models.dev catalog provider id (e.g. "gemini" -> "google").
     const resolvedModel =
-      (model as string) || DEFAULT_MODELS[providerId as string] || "";
+      (model as string) ||
+      (await getDefaultModelForProvider(catId as string)) ||
+      DEFAULT_MODELS[providerId as string] ||
+      "";
     mainModelVision = await modelSupportsVision(resolvedModel, catId as string);
   } catch { /* catalog failed */ }
 
@@ -708,36 +692,10 @@ export function buildLoopDeps(ctx: LoopDepsContext): Parameters<typeof runAgentL
         return false;
       }
     },
-    // Anti-bot challenge detection. The orchestrator calls this before each
-    // navigator step; when a challenge is detected we surface it + wait for
-    // it to resolve (Cloudflare JS challenges auto-resolve in ~5s; CAPTCHAs
-    // need user takeover, which `waitForTakeoverResume` handles in the
-    // orchestrator).
-    detectChallenge: async () => {
-      try {
-        const s = await getRunState();
-        if (!s) return null;
-        return await detectChallenge(s.currentTabId);
-      } catch {
-        return null;
-      }
-    },
-    // Poll for the challenge to clear on its own. Wraps
-    // `waitForChallengeResolution` from `anti-bot.ts` against the run's
-    // current tab id.
-    waitForChallengeResolution: async () => {
-      try {
-        const s = await getRunState();
-        if (!s) return false;
-        const result = await waitForChallengeResolution(s.currentTabId, {
-          timeoutMs: 15_000,
-          pollMs: 500,
-        });
-        return result.resolved;
-      } catch {
-        return false;
-      }
-    },
+    // Anti-bot challenge detection + resolution. Assembled in `antibot.ts` so
+    // the logic stays isolated from the rest of the run lifecycle; see that
+    // module for the details. The signatures match `LoopDeps` exactly.
+    ...makeAntiBotHooks(),
     // Pause check. Reads the `paused` flag from chrome.storage.session (set
     // by the side panel's Pause button). When true, the orchestrator emits a
     // `paused` event + polls this callback until it returns false.

@@ -1,5 +1,5 @@
 /**
- * Retry classification tests (F-22) — `withLLMRetry` must classify transient
+ * Retry classification tests — `withLLMRetry` must classify transient
  * errors from the numeric HTTP status carried on the error, not by
  * string-matching the response body. Covers:
  *   - a 429 with a numeric status IS retried
@@ -20,7 +20,7 @@ function statusError(status: number, message = `LLM API ${status}: err`, retryAf
   return e;
 }
 
-describe("withLLMRetry — numeric-status classification (F-22)", () => {
+describe("withLLMRetry — numeric-status classification", () => {
   test("a 429 with a numeric status is retried until it succeeds", async () => {
     vi.useFakeTimers();
     try {

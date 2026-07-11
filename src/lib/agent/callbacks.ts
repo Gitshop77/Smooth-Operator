@@ -17,7 +17,7 @@
  * The {@link Usage} type mirrors the per-call token accounting used by the
  * orchestrator: input_tokens + cached_input_tokens + output_tokens +
  * reasoning_output_tokens. {@link computeCostFromUsage} converts a `Usage`
- * record to USD using the pricing table in `../llm/pricing`.
+ * record to USD using the live catalog-backed pricing module at `../llm/pricing`.
  */
 
 import type { AgentAction, ActionResult, HistoryItem } from "./types";

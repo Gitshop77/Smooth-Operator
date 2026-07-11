@@ -393,14 +393,16 @@ describe("AnthropicMessages.protocol — stream parsing", () => {
     ];
     const { events } = reduceFrames(AnthropicMessages.protocol, frames, makeRequest());
     const finish = events.find((e) => (e as { type?: string }).type === "finish") as
-      | { type: string; usage?: { tokensIn: number; tokensOut: number; cachedInputTokens?: number } }
+      | { type: string; usage?: { tokensIn: number; tokensOut: number; cachedInputTokens?: number; cachedWriteInputTokens?: number } }
       | undefined;
     expect(finish).toBeDefined();
     expect(finish?.usage).toBeDefined();
     // Total input = fresh (42) + cache_read (100) + cache_creation (50) = 192
     expect(finish?.usage?.tokensIn).toBe(192);
-    // cachedInputTokens = cache_read + cache_creation = 150 (billed at cacheReadRate)
-    expect(finish?.usage?.cachedInputTokens).toBe(150);
+    // cachedInputTokens = cache_read (100); cache_creation is now reported
+    // separately as cachedWriteInputTokens (50), billed at the cacheWrite rate.
+    expect(finish?.usage?.cachedInputTokens).toBe(100);
+    expect(finish?.usage?.cachedWriteInputTokens).toBe(50);
     expect(finish?.usage?.tokensOut).toBe(7);
   });
 
@@ -474,7 +476,7 @@ describe("Gemini.protocol — body construction", () => {
     expect(Gemini.geminiPath("gemini-2.0-flash")).toBe("/gemini-2.0-flash:streamGenerateContent");
   });
 
-  test("geminiPath throws on a structurally-invalid model id (F-23 — injection guard)", () => {
+  test("geminiPath throws on a structurally-invalid model id (injection guard)", () => {
     // Model ids containing path separators / query metacharacters are rejected
     // so they can't rewrite the request URL. encodeURIComponent would also
     // neutralize them, but we fail fast on malformed ids.
@@ -484,7 +486,7 @@ describe("Gemini.protocol — body construction", () => {
   });
 });
 
-// ─── Model-id URL encoding/validation (F-23) ─────────────────────────────────
+// ─── Model-id URL encoding/validation ─────────────────────────────────
 
 describe("encodeModelIdForUrl — safe URL encoding + validation", () => {
   test("leaves normal model ids untouched", () => {

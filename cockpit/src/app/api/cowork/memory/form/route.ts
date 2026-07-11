@@ -4,7 +4,7 @@ import { json, badRequest, withRouteError, parseLimit } from '@/lib/cowork/api/h
 import { db } from '@/lib/db';
 
 // Well-known sensitive autofill field names whose *values* we redact by
-// default in the response (F-36). The form schema does not mark fields, so we
+// default in the response. The form schema does not mark fields, so we
 // redact by field-name heuristic. Field *names* are preserved; only values
 // are masked.
 const SENSITIVE_FIELD_RE =
@@ -53,7 +53,7 @@ function redactFormMemory(formDataJson: string): string {
 
 export async function GET(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
-    // Cap the result set + cursor pagination, same as the site route (F-36).
+    // Cap the result set + cursor pagination, same as the site route.
     const limit = parseLimit(req);
     const after = req.nextUrl.searchParams.get('after') || undefined;
     const args: Parameters<typeof db.formMemory.findMany>[0] = {
@@ -73,7 +73,7 @@ export async function GET(req: NextRequest): Promise<Response> {
 // DELETE /api/cowork/memory/form?id=<formMemoryId>
 // Removes a single form-memory entry. Gated by the same X-Cowork-Token check
 // as every other /api/cowork/* data route (enforced in middleware.ts). This is
-// the representative deletion endpoint for stored PII (F-35); further DELETE
+// the representative deletion endpoint for stored PII; further DELETE
 // coverage (history prune, etc.) is follow-up work.
 export async function DELETE(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {

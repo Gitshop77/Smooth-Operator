@@ -14,7 +14,7 @@ function fakeReq(query = ''): any {
   return { nextUrl: { searchParams: new URLSearchParams(query) } };
 }
 
-describe('GET /api/cowork/memory/site (F-36)', () => {
+describe('GET /api/cowork/memory/site', () => {
   it('applies the limit + cursor pagination', async () => {
     findMany.mockResolvedValueOnce([]);
     await GET(fakeReq('limit=5&after=abc'));
@@ -24,7 +24,7 @@ describe('GET /api/cowork/memory/site (F-36)', () => {
   });
 });
 
-describe('DELETE /api/cowork/memory/site (F-35)', () => {
+describe('DELETE /api/cowork/memory/site', () => {
   it('requires an id', async () => {
     const res = await DELETE(fakeReq());
     expect(res.status).toBe(400);

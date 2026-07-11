@@ -5,18 +5,19 @@
  *   - the orchestrator (for cost-cap enforcement via `estimateCost`)
  *   - every provider (for per-call `usage.costUsd` reporting)
  *
- * Prices are per 1M tokens (USD). Rates are BEST-EFFORT and may be stale —
- * the live models.dev catalog override (see {@link refreshPricingFromCatalog})
- * is the source of truth. Rates as of 2026-07 (best-effort snapshot; not
- * guaranteed to match current provider pricing). Models with reasoning-token
- * pricing include a `reasoning` field; reasoning tokens are billed at that
- * rate (falling back to `out`).
+ * Prices are per 1M tokens (USD). The authoritative source is the LIVE
+ * models.dev catalog, hydrated at runtime via {@link refreshPricingFromCatalog}.
+ * Until (or unless) the catalog is loaded, unknown models fall back to
+ * {@link CONSERVATIVE_DEFAULT_PRICING} (in: $10 / out: $30, flagged
+ * `uncatalogued`) so the cost cap still trips — an uncatalogued model is NEVER
+ * billed as free.
  *
- * IMPORTANT: ordering matters for the substring match in {@link getPricingForModel}.
- * More-specific keys MUST be listed BEFORE less-specific ones:
- *   gpt-4o-mini before gpt-4o
- *   o3-mini before o3, o1-mini/o1-pro before o1
- *   gemini-2.0-flash-thinking-exp before gemini-2.0-flash
+ * There is intentionally NO static pricing table in this module. The
+ * models.dev catalog (see {@link refreshPricingFromCatalog}) is the source of
+ * truth and may override any rate at runtime. Models with reasoning tokens
+ * bill those tokens at the `reasoning` rate when present, otherwise falling
+ * back to `out` (models.dev has no reasoning-cost field, so the catalog never
+ * sets `reasoning`).
  */
 
 import type { Catalog } from "./catalog";
@@ -34,73 +35,20 @@ export interface ModelPricing {
   readonly cacheWrite?: number;
   /**
    * True when this pricing came from the conservative fallback for an
-   * uncatalogued model (the model was NOT found in the static table or the
-   * live catalog override). Consumers may use this to ensure cost caps still
-   * trip for unknown models — an uncatalogued model is NEVER billed as free.
+   * uncatalogued model (the model was NOT found in the live catalog override).
+   * Consumers may use this to ensure cost caps still trip for unknown models —
+   * an uncatalogued model is NEVER billed as free.
    */
   readonly uncatalogued?: boolean;
 }
 
 /**
- * The canonical pricing table. When adding a model, also update the
- * models.dev catalog fetcher (which can override these at runtime if the
- * catalog has fresher data).
- *
- * Date-stamped: 2026-07. Rates are best-effort; the live models.dev catalog
- * (see {@link refreshPricingFromCatalog}) is the authoritative source and may
- * override any entry here at runtime.
- */
-export const PRICING_PER_MTOK: Record<string, ModelPricing> = {
-  // OpenAI — more-specific keys first (mini/pro variants before base models).
-  "gpt-4o-mini": { in: 0.15, out: 0.6 },
-  "gpt-4o": { in: 2.5, out: 10 },
-  "gpt-4.1-mini": { in: 0.4, out: 1.6 },
-  "gpt-4.1-nano": { in: 0.1, out: 0.4 },
-  "gpt-4.1": { in: 2, out: 8 },
-  "gpt-4-turbo": { in: 10, out: 30 },
-  "o3-mini": { in: 1.1, out: 4.4, reasoning: 4.4 },
-  "o3": { in: 2, out: 8, reasoning: 8 },
-  "o1-mini": { in: 3, out: 12, reasoning: 12 },
-  "o1-pro": { in: 150, out: 600, reasoning: 600 },
-  "o1": { in: 15, out: 60, reasoning: 60 },
-  // Anthropic — short aliases catch date-tagged variants (e.g.
-  // claude-3-5-sonnet-20241022, claude-3-opus-20240229) via substring match.
-  "claude-3-7-sonnet": { in: 3, out: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-  "claude-3-5-sonnet": { in: 3, out: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-  "claude-3-5-haiku": { in: 0.8, out: 4, cacheRead: 0.08, cacheWrite: 1 },
-  "claude-3-opus": { in: 15, out: 75, cacheRead: 1.5, cacheWrite: 18.75 },
-  // Google Gemini — thinking-exp (free during experimental period) before flash.
-  // Includes cacheRead (cached content billed at 25% of input) + reasoning
-  // (thinking tokens billed at output rate for 2.5 Flash/Pro Thinking).
-  "gemini-2.5-pro": { in: 1.25, out: 10, cacheRead: 0.31, reasoning: 10 },
-  "gemini-2.5-flash-lite": { in: 0.075, out: 0.3, cacheRead: 0.01875 },
-  "gemini-2.5-flash": { in: 0.15, out: 0.6, cacheRead: 0.0375, reasoning: 0.6 },
-  "gemini-2.0-flash-thinking-exp": { in: 0, out: 0 },
-  "gemini-2.0-flash": { in: 0.1, out: 0.4, cacheRead: 0.025 },
-  "gemini-1.5-flash": { in: 0.075, out: 0.3, cacheRead: 0.01875 },
-  "gemini-1.5-pro": { in: 1.25, out: 5, cacheRead: 0.31 },
-  // DeepSeek
-  "deepseek-reasoner": { in: 0.55, out: 2.19, reasoning: 2.19 },
-  "deepseek-chat": { in: 0.27, out: 1.1 },
-  // Mistral (La Plateforme pricing; "mistral-large-latest" resolves to the
-  // current large model — the substring match catches the versioned IDs).
-  "mistral-large": { in: 2, out: 6 },
-  "mistral-small": { in: 0.2, out: 0.6 },
-  // xAI
-  "grok-2-vision": { in: 2, out: 10 },
-  "grok-2": { in: 2, out: 10 },
-  // Qwen (DashScope / Together AI pricing)
-  "qwen-2.5-coder-32b-instruct": { in: 0.5, out: 0.5 },
-  "qwen-2.5-72b-instruct": { in: 0.88, out: 0.88 },
-};
-
-/**
- * Conservative pricing used for models NOT found in the static table or the
- * live catalog override. A missing model must NEVER be billed as free — doing
- * so defeats the cost cap and allows unbounded spend. We therefore default
- * unknown models to a clearly-expensive rate (in: $10 / out: $30 per 1M tokens,
- * roughly GPT-4-class pricing) and flag them `uncatalogued: true` so callers
- * that want to be stricter can block instead of bill.
+ * Conservative pricing used for models NOT found in the live catalog override.
+ * A missing model must NEVER be billed as free — doing so defeats the cost cap
+ * and allows unbounded spend. We therefore default unknown models to a
+ * clearly-expensive rate (in: $10 / out: $30 per 1M tokens, roughly GPT-4-class
+ * pricing) and flag them `uncatalogued: true` so callers that want to be
+ * stricter can block instead of bill.
  *
  * This is the canonical name (F-02a). `CONSERVATIVE_DEFAULT_PRICING` is kept
  * as a backwards-compatible alias so existing importers keep working.
@@ -116,8 +64,8 @@ export const CONSERVATIVE_DEFAULT_PRICING = DEFAULT_UNKNOWN_MODEL_PRICE;
 
 /**
  * Live catalog override table (populated by {@link refreshPricingFromCatalog}),
- * keyed by lowercased model id. Takes precedence over {@link PRICING_PER_MTOK}
- * when present, so fresher models.dev catalog rates win over the static table.
+ * keyed by lowercased model id. This is the ONLY pricing source after the
+ * catalog is hydrated; until then the conservative default applies.
  */
 let pricingOverride: Record<string, ModelPricing> = {};
 
@@ -131,10 +79,13 @@ const pricingCache = new Map<string, ModelPricing>();
 
 /**
  * Models already warned about as uncatalogued. Keeps the fallback warning
- * quiet — emitted at most once per distinct model id (F-06) so a long run
+ * quiet — emitted at most once per distinct model id so a long run
  * against an unpriced model doesn't spam the console on every token estimate.
  */
 const warnedUncataloguedModels = new Set<string>();
+
+/** True while a background {@link refreshPricingFromCatalog} is in flight. */
+let pricingLoading = false;
 
 /** Substring (case-insensitive) lookup over a pricing table. */
 function lookupPricing(table: Record<string, ModelPricing>, model: string): ModelPricing | undefined {
@@ -166,21 +117,19 @@ function convertCatalog(catalog: Catalog): Record<string, ModelPricing> {
 }
 
 /**
- * Hydrate {@link pricingOverride} from a live catalog (F-02b).
+ * Hydrate {@link pricingOverride} from the live models.dev catalog (F-02b).
  *
  * Resolution (best-effort — any failure is swallowed so offline still works
- * and the static table remains the offline fallback):
+ * and the conservative default remains the fallback):
  *   - If `COWORK_MODEL_CATALOG_URL` is set, fetch + parse THAT url directly
  *     (a models.dev-compatible catalog JSON).
  *   - Otherwise, fall back to {@link fetchCatalog} (the models.dev catalog,
  *     which itself has caching + offline fallback).
  *
  * The fetched table is MERGED onto the existing override (so a previously
- * loaded override is preserved) and takes precedence over the static table.
- * Call this EXPLICITLY at app startup to wire the documented live-catalog
- * override into cost accounting. NOTE: this is no longer invoked automatically
- * at module load (the import-time fetch was removed so importing this module
- * has no network side effect) — the app startup path is responsible for calling
+ * loaded override is preserved). Call this EXPLICITLY at app startup to wire
+ * the live-catalog rates into cost accounting. NOTE: importing this module
+ * performs NO network call — the app startup path is responsible for calling
  * it once. The in-memory pricing memo (see {@link getPricingForModel}) is
  * cleared on every successful refresh so catalog rates take effect immediately.
  */
@@ -211,29 +160,15 @@ export async function refreshPricingFromCatalog(): Promise<void> {
 }
 
 /**
- * Wire the live catalog override at module load (offline-safe, F-02b).
- *
- * When `COWORK_MODEL_CATALOG_URL` is set, fetch that URL; otherwise attempt the
- * models.dev catalog if reachable. The result (merged into {@link pricingOverride})
- * lets fresher catalog rates win over the static table without a code change.
- *
- * NOTE: importing this module intentionally performs NO network call. The
- * live-catalog override must be wired explicitly by calling
- * {@link refreshPricingFromCatalog} at app startup — the previous import-time
- * `autoLoadCatalogAtStartup()` invocation was removed to keep module import
- * side-effect free.
- */
-
-/**
  * Look up the pricing for a model by substring match (case-insensitive).
  *
- * Resolution order: (1) live catalog override, (2) the static table, (3) a
- * conservative expensive default for unknown models. A model NOT found in the
- * table or catalog is NEVER billed as free — it returns
- * {@link CONSERVATIVE_DEFAULT_PRICING} flagged `uncatalogued: true` so the
- * cost cap still trips. Ordering of the static table still matters (more-
- * specific keys first); the override is matched first so fresher catalog
- * rates win.
+ * Resolution order: (1) live catalog override, (2) a conservative expensive
+ * default for unknown models. A model NOT found in the catalog is NEVER billed
+ * as free — it returns {@link CONSERVATIVE_DEFAULT_PRICING} flagged
+ * `uncatalogued: true` so the cost cap still trips. If the catalog has not yet
+ * been loaded and no prior load is in flight, a fire-and-forget
+ * {@link refreshPricingFromCatalog} is kicked off so later calls warm; the
+ * current call still returns the conservative default.
  */
 export function getPricingForModel(model: string): ModelPricing {
   // Return a memoized result when available (hot cost path — estimateCost runs
@@ -246,17 +181,23 @@ export function getPricingForModel(model: string): ModelPricing {
     pricingCache.set(model, override);
     return override;
   }
-  const staticRate = lookupPricing(PRICING_PER_MTOK, model);
-  if (staticRate) {
-    pricingCache.set(model, staticRate);
-    return staticRate;
+
+  // Catalog not yet populated for this model. If we've never loaded the catalog
+  // and no load is currently in flight, kick off a fire-and-forget refresh so
+  // subsequent calls use live rates. We still return the conservative default
+  // now (cost cap still trips).
+  if (Object.keys(pricingOverride).length === 0 && !pricingLoading) {
+    pricingLoading = true;
+    void refreshPricingFromCatalog()
+      .finally(() => {
+        pricingLoading = false;
+      });
   }
+
   // Uncatalogued model — never free. Return the conservative default so the
-  // cost cap still trips. Warn (once per distinct model id, F-06) so operators
-  // can spot unpriced models and add them to the static table (or the live
-  // catalog override) for accurate accounting. (The live catalog may be
-  // hydrated at startup via refreshPricingFromCatalog to supply a more accurate
-  // rate later.)
+  // cost cap still trips. Warn (once per distinct model id) so operators
+  // can spot unpriced models and add them to the live catalog override for
+  // accurate accounting.
   const result = { ...DEFAULT_UNKNOWN_MODEL_PRICE };
   if (!warnedUncataloguedModels.has(model)) {
     warnedUncataloguedModels.add(model);
@@ -264,7 +205,7 @@ export function getPricingForModel(model: string): ModelPricing {
       `[pricing] No catalogued price for model "${model}". Falling back to ` +
         `DEFAULT_UNKNOWN_MODEL_PRICE ($${DEFAULT_UNKNOWN_MODEL_PRICE.in}/` +
         `$${DEFAULT_UNKNOWN_MODEL_PRICE.out} per 1M tokens, flagged uncatalogued). ` +
-        `The cost cap still applies, but consider adding this model to the table.`
+        `The cost cap still applies, but consider adding this model to the catalog.`
     );
   }
   pricingCache.set(model, result);
@@ -277,34 +218,50 @@ export function getPricingForModel(model: string): ModelPricing {
  *
  * `reasoningTokens` (when reported by the provider, e.g. OpenAI's
  * `completion_tokens_details.reasoning_tokens`) are billed at the model's
- * `reasoning` rate. `tokensOut` is assumed to INCLUDE reasoning tokens
- * (as OpenAI reports it), so visible output = tokensOut - reasoningTokens
- * is billed at `out` and reasoningTokens at `reasoning ?? out`.
+ * `reasoning` rate (falling back to `out`). `tokensOut` is assumed to INCLUDE
+ * reasoning tokens (as OpenAI reports it), so visible output = tokensOut -
+ * reasoningTokens is billed at `out` and reasoningTokens at `reasoning ?? out`.
  *
- * `cachedInputTokens` (when reported — Anthropic's cache_read + cache_creation,
- * OpenAI's prompt_tokens_details.cached_tokens) are billed at the model's
- * `cacheRead` rate (fallback: `in`). Without this, cost is over-reported
- * because ALL input is billed at the full `in` rate even when a portion
- * was served from the provider's prompt cache at a 50-90% discount.
+ * `cachedInputTokens` (Anthropic `cache_read_input_tokens`, OpenAI
+ * `cached_tokens`) are billed at the model's `cacheRead` rate (fallback: `in`).
+ * `cachedWriteInputTokens` (Anthropic `cache_creation_input_tokens`) are billed
+ * at the model's `cacheWrite` rate (fallback: `in`). Splitting them fixes
+ * under-billing: cache writes cost MORE than reads, so billing both at the
+ * read rate under-charges. Without this split, cost is mis-reported for
+ * Anthropic cache-creation steps.
+ *
+ * The 6th parameter `cachedWriteInputTokens` is OPTIONAL (default 0) so all
+ * existing 5-arg callers continue to compile and behave as before.
  */
 export function estimateCost(
   model: string,
   tokensIn: number,
   tokensOut: number,
   reasoningTokens: number = 0,
-  cachedInputTokens: number = 0
+  cachedInputTokens: number = 0,
+  cachedWriteInputTokens: number = 0
 ): number {
   const rate = getPricingForModel(model);
-  const reasoning = reasoningTokens > 0 ? reasoningTokens : 0;
-  const cached = cachedInputTokens > 0 ? Math.min(cachedInputTokens, tokensIn) : 0;
-  const freshInput = Math.max(0, tokensIn - cached);
-  const visibleOut = Math.max(0, tokensOut - reasoning);
-  const reasoningRate = rate.reasoning ?? rate.out;
+
+  // Cache writes are disjoint from (and typically exceed) cache reads. The
+  // fresh/cached split: reads first, then writes, then fresh input.
+  const cachedRead = Math.min(cachedInputTokens, tokensIn);
+  const cachedWrite = Math.min(
+    cachedWriteInputTokens,
+    Math.max(0, tokensIn - cachedRead),
+  );
+  const freshInput = Math.max(0, tokensIn - cachedRead - cachedWrite);
+
+  const visibleOut = Math.max(0, tokensOut - reasoningTokens);
   const cacheReadRate = rate.cacheRead ?? rate.in;
+  const cacheWriteRate = rate.cacheWrite ?? rate.in;
+  const reasoningRate = rate.reasoning ?? rate.out;
+
   return (
     (freshInput / 1_000_000) * rate.in +
-    (cached / 1_000_000) * cacheReadRate +
+    (cachedRead / 1_000_000) * cacheReadRate +
+    (cachedWrite / 1_000_000) * cacheWriteRate +
     (visibleOut / 1_000_000) * rate.out +
-    (reasoning / 1_000_000) * reasoningRate
+    (reasoningTokens / 1_000_000) * reasoningRate
   );
 }

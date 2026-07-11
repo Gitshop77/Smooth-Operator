@@ -9,8 +9,7 @@ export async function GET(req: NextRequest): Promise<Response> {
 
     // The cockpit does NOT implement any of these tools yet — this is a
     // forward-looking contract only. Mark every entry `implemented: false`
-    // and attach a top-level note so a consuming LLM knows NOT to call them
-    // (F-28).
+    // and attach a top-level note so a consuming LLM knows NOT to call them.
     const catalog: ToolEntry[] = MCP_TOOL_CATALOG.map((t) => ({ ...t, implemented: false }));
     let tools = catalog;
     if (q) {
@@ -35,7 +34,7 @@ interface ToolEntry {
   category: string;
   description: string;
   readOnly: boolean;
-  /** Whether the cockpit actually serves this tool. Always false today (F-28). */
+  /** Whether the cockpit actually serves this tool. Always false today. */
   implemented?: boolean;
 }
 

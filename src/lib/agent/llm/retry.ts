@@ -41,7 +41,11 @@ async function abortAwareSleep(ms: number, signal?: AbortSignal): Promise<void> 
   }
   const chunks = Math.ceil(ms / SLEEP_CHUNK_MS);
   for (let c = 0; c < chunks; c++) {
-    if (signal.aborted) throw new Error("The operation was aborted");
+    if (signal.aborted) {
+      const err = new Error("The operation was aborted");
+      err.name = "AbortError";
+      throw err;
+    }
     await sleep(Math.min(SLEEP_CHUNK_MS, ms - c * SLEEP_CHUNK_MS));
   }
 }
@@ -75,8 +79,16 @@ export async function withLLMRetry<T>(
 ): Promise<T> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    // Honor abort before every attempt (including the first).
-    if (signal?.aborted) throw new Error("The operation was aborted");
+    // Honor abort before every attempt (including the first). Throw an
+    // `AbortError`-named error (not a plain `Error`) so callers that classify
+    // aborts by `e.name` (e.g. the orchestrator's initial-planner catch)
+    // correctly recognize a user stop even if the signal was cleared by the
+    // time the error reaches the handler.
+    if (signal?.aborted) {
+      const err = new Error("The operation was aborted");
+      err.name = "AbortError";
+      throw err;
+    }
     try {
       return await fn();
     } catch (e) {
@@ -124,7 +136,7 @@ export async function withLLMRetry<T>(
       const delay = typeof retryAfterMs === "number" && retryAfterMs > 0
         ? retryAfterMs + Math.random() * BACKOFF_JITTER_MS
         : BASE_DELAY_MS * Math.pow(2, attempt) + Math.random() * BACKOFF_JITTER_MS;
-      // F7: surface retries (debug level — quiet unless explicitly enabled).
+      // Surface retries (debug level — quiet unless explicitly enabled).
       // Includes the optional correlation runId, attempt number, status when
       // available, the computed delay, and any Retry-After value.
       const statusStr = typeof status === "number" ? `status=${status}` : "no-status";

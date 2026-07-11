@@ -137,6 +137,38 @@ export async function getModelsForProvider(providerId: string): Promise<CatalogM
 }
 
 /**
+ * Resolve the online default model for a provider from the live models.dev
+ * catalog.
+ *
+ * Picks the NEWEST non-deprecated model for `catalogProviderId` by
+ * `release_date` (descending). This is the online default — `DEFAULT_MODELS`
+ * (in provider-config.ts) is only an OFFLINE fallback when the catalog is
+ * unreachable. Returns `undefined` if the provider is unknown or has no usable
+ * models (so callers can fall back to `DEFAULT_MODELS`).
+ *
+ * @param catalogProviderId The models.dev provider id (e.g. "openai",
+ *                          "google", "anthropic") — NOT the extension's
+ *                          provider id. Use `CATALOG_PROVIDER_ID_MAP` to map.
+ */
+export async function getDefaultModelForProvider(
+  catalogProviderId: string,
+): Promise<string | undefined> {
+  try {
+    const catalog = await fetchCatalog();
+    const provider = catalog[catalogProviderId];
+    if (!provider) return undefined;
+    const models = Object.values(provider.models)
+      .filter((m) => m.status !== "deprecated")
+      .sort((a, b) => b.release_date.localeCompare(a.release_date));
+    return models[0]?.id;
+  } catch {
+    // Catalog unreachable (offline, network error) — caller falls back to
+    // DEFAULT_MODELS.
+    return undefined;
+  }
+}
+
+/**
  * Search across ALL providers + models. Returns results sorted by relevance.
  * Uses simple substring matching.
  */

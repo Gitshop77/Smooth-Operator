@@ -6,6 +6,9 @@
   "minimum_chrome_version": "116",
   "permissions": ["sidePanel", "scripting", "tabs", "activeTab", "storage", "alarms", "debugger", "notifications", "downloads", "unlimitedStorage", "power"],
   "host_permissions": ["http://*/*", "https://*/*"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  },
   "action": { "default_title": "Open Open Cowork" },
   "side_panel": { "default_path": "sidepanel.html" },
   "background": { "service_worker": "background.js", "type": "module" },

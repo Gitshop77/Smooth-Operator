@@ -1,6 +1,6 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
-import { json, badRequest, withRouteError, parseLimit } from '@/lib/cowork/api/http';
+import { json, badRequest, withRouteError, parseLimit, bodyJsonOptional } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
 export async function GET(req: NextRequest): Promise<Response> {
@@ -30,15 +30,25 @@ export async function GET(req: NextRequest): Promise<Response> {
 // entry. DELETE /api/cowork/history?all=1         — erase all browsing history.
 // Gated by the same X-Cowork-Token check as every other /api/cowork/* data
 // route (enforced in middleware.ts). Representative PII-erasure endpoint
-// (F-35, GDPR-style "right to erasure" for stored browsing history).
-// NOTE (F38): history erasure uses Prisma directly (the cockpit owns this
+// (GDPR-style "right to erasure" for stored browsing history).
+// NOTE: history erasure uses Prisma directly (the cockpit owns this
 // table), whereas ai/chat proxies to cowork-events. Both ultimately return the
 // same `{ ok }` envelope shape; the divergence is intentional.
 export async function DELETE(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
     const all = req.nextUrl.searchParams.get('all') === '1';
     if (all) {
+      // A bulk wipe must be explicitly confirmed server-side. The
+      // UI "are you sure?" prompt is not sufficient — an authenticated caller
+      // (or a stolen token) could otherwise wipe everything with a bare
+      // `?all=1`. Require `confirm: true` in the JSON body.
+      const b = await bodyJsonOptional(req);
+      if (b.confirm !== true) {
+        return badRequest('confirmation required');
+      }
       const { count } = await db.historyEntry.deleteMany({});
+      // Log the bulk delete so the action is observable server-side.
+      console.info('[cowork] bulk delete history', { deleted: count, route: '/api/cowork/history' });
       return json({ ok: true, deleted: count });
     }
     const id = req.nextUrl.searchParams.get('id');

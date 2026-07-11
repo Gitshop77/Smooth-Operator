@@ -1,18 +1,22 @@
 //
 // Cockpit API auth middleware.
 //
-// Requires an `X-Cowork-Token` header matching `process.env.COWORK_EVENT_TOKEN`
-// on every `/api/cowork/*` route, EXCEPT the public agent-discovery endpoints
+// Requires an `X-Cowork-Token` header matching `process.env.COWORK_UI_TOKEN`
+// (preferred) or, as a fallback, `process.env.COWORK_EVENT_TOKEN` (service-to-
+// service only) on every `/api/cowork/*` route, EXCEPT the public agent-
+// discovery endpoints
 // (bootstrap / manifest / agent / agent/version / skill) — those are
 // intentionally public so external LLM agents can discover the cockpit's
 // capabilities without first authenticating.
 //
 // Token rules:
-//   • If `COWORK_EVENT_TOKEN` is unset: fail-closed with 401 (no safe default).
-//   • If `COWORK_EVENT_TOKEN` equals the well-known `dev-token`: fail-closed
+//   • If neither `COWORK_UI_TOKEN` nor `COWORK_EVENT_TOKEN` is set: fail-closed
+//     with 401 (no safe default). `COWORK_UI_TOKEN` is preferred; the
+//     `COWORK_EVENT_TOKEN` fallback exists only for backward compatibility.
+//   • If the resolved token equals the well-known `dev-token`: fail-closed
 //     with 401 UNLESS `COWORK_ALLOW_DEV_TOKEN=1` is explicitly set (local
 //     loopback dev only — never in production). `NODE_ENV` is NOT a safety net.
-//   • If `COWORK_EVENT_TOKEN` is set to a real secret: require the
+//   • If the resolved token is set to a real secret: require the
 //     `X-Cowork-Token` header to match using a constant-time comparison.
 //
 // The matcher (below) limits this middleware to `/api/cowork/:path*`. The
@@ -48,13 +52,10 @@ let devTokenWarned = false;
 /**
  * Constant-time string comparison using only Web Platform APIs (TextEncoder).
  *
- * F-15: previously this returned `false` the instant the byte lengths differed
- * (`if (a.length !== b.length) return false`), which is observable via timing
- * and could leak the expected token's length. Now, when the lengths differ, we
- * still run a full constant-time loop over the LONGER buffer (the shorter side
- * is padded with a fixed zero byte via the bounds check `i < x.length ? x[i] : 0`).
- * The `false` for a genuine length mismatch is computed AFTER the loop, so it
- * does not create a timing side-channel. Never throws.
+ * Always iterates the full normalized length so the result is independent of the
+ * input lengths. A length mismatch is detected but folded in AFTER the loop,
+ * avoiding a timing side-channel that could leak the expected token's length.
+ * Never throws.
  */
 function tokensMatch(received: string | undefined, expected: string): boolean {
   if (typeof received !== 'string' || received.length === 0) return false;
@@ -76,22 +77,28 @@ function tokensMatch(received: string | undefined, expected: string): boolean {
  * Authenticate a protected `/api/cowork/*` request.
  *
  * Returns `null` when the request is authorized (caller should `next()`),
- * or a 401 `NextResponse` when it is not. Centralizes the dev-token rule
- * (F-05) and the constant-time token comparison (F-15).
+ * or a 401 `NextResponse` when it is not. Centralizes the dev-token rule.
  *
  * Token sources (validated with the SAME `tokensMatch`):
  *   • the `X-Cowork-Token` request header (all protected routes), and
  *   • for the SSE stream `/api/cowork/events/stream` ONLY, a `token` query
- *     param (F-42). Browser `EventSource` cannot send custom headers, so it
+ *     param. Browser `EventSource` cannot send custom headers, so it
  *     always 401s on the header path; the query param lets a trusted browser
  *     (or server-to-server client) open the stream. The header path still
  *     works. The query token is validated against the exact same secret using
  *     the exact same constant-time compare — it is not a weaker path.
  */
 function authenticate(req: NextRequest): NextResponse | null {
-  const token = process.env.COWORK_EVENT_TOKEN;
+  // The browser-facing UI secret is `COWORK_UI_TOKEN` (preferred),
+  // falling back to the service-to-service `COWORK_EVENT_TOKEN` for backward
+  // compatibility. They are INDEPENDENT secrets — a deployment that only sets
+  // `COWORK_EVENT_TOKEN` keeps working (existing tests rely on the fallback),
+  // but a deployment that sets `COWORK_UI_TOKEN` uses a distinct UI secret so a
+  // leaked browser bundle (which can only ever see `NEXT_PUBLIC_CO*`) cannot
+  // unlock the server-to-server `COWORK_EVENT_TOKEN` path.
+  const token = process.env.COWORK_UI_TOKEN ?? process.env.COWORK_EVENT_TOKEN;
 
-  // F-05: the well-known default `dev-token` is only acceptable with an
+  // The well-known default `dev-token` is only acceptable with an
   // EXPLICIT opt-in (`COWORK_ALLOW_DEV_TOKEN=1`) — e.g. for a local loopback
   // dev session. `NODE_ENV` is intentionally NOT treated as a safety net: an
   // unset, dev-token, or any non-production token value fails closed with 401
@@ -121,7 +128,7 @@ function authenticate(req: NextRequest): NextResponse | null {
 
   const receivedHeader = req.headers.get('x-cowork-token') ?? undefined;
 
-  // F-42: SSE stream — also accept the token via a signed query param because
+  // SSE stream — also accept the token via a signed query param because
   // browser EventSource cannot set headers. Restricted to this one path so it
   // cannot be used to bypass header auth elsewhere.
   const isSse = req.nextUrl.pathname === '/api/cowork/events/stream';
@@ -140,8 +147,8 @@ function authenticate(req: NextRequest): NextResponse | null {
 
 /**
  * Generate a request id. Reuses an inbound `x-request-id` when present so that
- * callers can correlate their logs with ours; otherwise mints a fresh UUID
- * (F-17). `crypto.randomUUID` is a Web Platform API available in the Edge
+ * callers can correlate their logs with ours; otherwise mints a fresh UUID.
+ * `crypto.randomUUID` is a Web Platform API available in the Edge
  * Runtime.
  */
 function newRequestId(): string {
@@ -160,7 +167,7 @@ function withRequestId(res: NextResponse, requestId: string): NextResponse {
 
 /** `NextResponse.next()` that also forwards `x-request-id` to downstream routes
  *  (so a route handler can read it via `req.headers` and pass it to
- *  `withRouteError`, threading one id end-to-end — F-17). */
+ *  `withRouteError`, threading one id end-to-end). */
 function nextWithRequestId(req: NextRequest, requestId: string): NextResponse {
   const headers = new Headers(req.headers);
   headers.set('x-request-id', requestId);
@@ -181,7 +188,7 @@ export function middleware(req: NextRequest): NextResponse {
     res = denied ? withRequestId(denied, requestId) : nextWithRequestId(req, requestId);
   }
 
-  // F-17: structured request log (no secrets — path only, never the body).
+  // Structured request log (no secrets — path only, never the body).
   const durationMs = Date.now() - start;
   console.log('[cowork request]', requestId, req.method, pathname, res.status, `${durationMs}ms`);
   return res;

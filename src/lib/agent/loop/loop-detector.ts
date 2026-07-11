@@ -37,7 +37,7 @@ const STAGNANT_THRESHOLDS: readonly number[] = [5, 8, 12];
  * in the recent window (the planner is stuck re-assigning the same goal).
  *
  * Exported so callers (e.g. planner-phases.ts) can reuse the SAME
- * constant instead of hard-coding a divergent literal (F-27).
+ * constant instead of hard-coding a divergent literal.
  */
 export const GOAL_WARN_THRESHOLD = 3;
 

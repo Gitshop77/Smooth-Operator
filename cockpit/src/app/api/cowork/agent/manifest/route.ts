@@ -78,7 +78,7 @@ export async function GET(): Promise<Response> {
           bookmarks: { method: 'GET', path: `${P}/bookmarks`, description: 'Read the bookmark tree' },
           addBookmark: { method: 'POST', path: `${P}/bookmarks`, description: 'Add a bookmark or folder (body: `{ name, url?, parentId?, type?: "url" | "folder" }`)' },
           history: { method: 'GET', path: `${P}/history`, description: 'Read browsing history' },
-          deleteHistory: { method: 'DELETE', path: `${P}/history`, description: 'Erase history: ?id=<id> for one entry, or ?all=1 to wipe ALL history (requires user confirmation)' },
+          deleteHistory: { method: 'DELETE', path: `${P}/history`, description: 'Erase one browsing-history entry (?id=<id>)' },
           pinboards: { method: 'GET', path: `${P}/pinboards`, description: 'List pinboards' },
           addPinboard: { method: 'POST', path: `${P}/pinboards`, description: 'Create a pinboard (body: `{ name, color? }`)' },
         },
@@ -86,20 +86,10 @@ export async function GET(): Promise<Response> {
           list: { method: 'GET', path: `${P}/extensions`, description: 'List installed extensions (optional `enabled`)' },
           log: { method: 'POST', path: `${P}/extensions/log`, description: 'Append an extension log entry' },
         },
-        security: {
-          events: { method: 'GET', path: `${P}/security/events`, description: 'Read the security event feed' },
-        },
-        mcp: {
-          tools: { method: 'GET', path: `${P}/mcp/tools`, description: 'Browse the MCP tool catalog — ASPIRATIONAL, NOT served by the cockpit (optional `q`, `category`)' },
-        },
         ai: {
           chat: { method: 'POST', path: `${P}/ai/chat`, description: 'Send a chat completion (body: `{ messages, sessionId }`)' },
-          deleteChat: { method: 'DELETE', path: `${P}/ai/chat`, description: 'Erase chat messages: ?messageId=<id>, ?sessionId=<id>, or ?all=1 to wipe ALL (requires user confirmation)' },
+          deleteChat: { method: 'DELETE', path: `${P}/ai/chat`, description: 'Erase chat messages: ?messageId=<id> or ?sessionId=<id>' },
           image: { method: 'POST', path: `${P}/ai/image`, description: 'Generate an image (body: `{ prompt, size? }`)' },
-        },
-        events: {
-          emit: { method: 'POST', path: `${P}/events/emit`, description: 'Broadcast an event to WebSocket clients (requires X-Cowork-Token)' },
-          stream: { method: 'GET', path: `${P}/events/stream`, description: 'SSE stream of cockpit events' },
         },
       },
     });

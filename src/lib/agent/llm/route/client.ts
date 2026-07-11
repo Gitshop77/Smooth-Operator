@@ -65,6 +65,8 @@ export interface LLMResponse {
     tokensOut: number;
     reasoningTokens?: number;
     cachedInputTokens?: number;
+    /** Cache-creation tokens (Anthropic) — billed at the cacheWrite rate. */
+    cachedWriteInputTokens?: number;
     model: string;
     costUsd: number;
   };

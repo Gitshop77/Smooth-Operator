@@ -6,7 +6,7 @@ import { db } from '@/lib/db';
 export async function GET(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
     // Cap the result set so a caller can't pull the entire table in one shot
-    // (F-36). Default 100, hard max 200 (see parseLimit). Support cursor
+    // (Default 100, hard max 200 — see parseLimit). Support cursor
     // pagination by `id` via the `after` query param.
     const limit = parseLimit(req);
     const after = req.nextUrl.searchParams.get('after') || undefined;
@@ -26,7 +26,7 @@ export async function GET(req: NextRequest): Promise<Response> {
 // DELETE /api/cowork/memory/site?id=<siteMemoryId>
 // Removes a single per-site memory entry. Gated by the same X-Cowork-Token
 // check as every other /api/cowork/* data route (enforced in middleware.ts).
-// PII-erasure endpoint (F-35) — pairs with the FormMemory DELETE handler.
+// PII-erasure endpoint — pairs with the FormMemory DELETE handler.
 export async function DELETE(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
     const id = req.nextUrl.searchParams.get('id');

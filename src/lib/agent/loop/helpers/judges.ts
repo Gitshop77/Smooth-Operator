@@ -223,7 +223,19 @@ export async function maybeJudgeAndFinalize(
       },
     });
 
-    if (verdict === null || verdict.verdict) {
+    if (verdict === null) {
+      // The judge could not be reached (LLM error / unparseable response).
+      // This is UNVERIFIED — NEVER treat a missing verdict as agreement.
+      // Route the run back to the planner for re-evaluation (same as an
+      // explicit disagreement) rather than failing open with success:true.
+      deps.onEvent({
+        type: "info",
+        message: `Judge could not be reached (no verdict) — task left unverified, continuing the run.`,
+      });
+      return false;
+    }
+
+    if (verdict.verdict) {
       deps.onEvent({ type: "done", step, success: true, text });
       state.finalResult = { success: true, text };
       return true;
@@ -254,11 +266,12 @@ export async function maybeJudgeAndFinalize(
     }
     deps.onEvent({
       type: "error", step,
-      message: `Judge failed (treating as agreement): ${msg}`,
+      message: `Judge failed (treating as unverified): ${msg}`,
       recoverable: true,
     });
-    deps.onEvent({ type: "done", step, success: true, text });
-    state.finalResult = { success: true, text };
-    return true;
+    // A judge exception other than a budget cap MUST NOT fail open. Route the
+    // run back to the planner for re-evaluation (same as a null verdict / an
+    // explicit disagreement) rather than declaring success:true.
+    return false;
   }
 }

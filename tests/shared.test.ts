@@ -10,7 +10,7 @@ describe("escapeHtml", () => {
     expect(escapeHtml(`<a href="x">&'</a>`)).toBe("&lt;a href=&quot;x&quot;&gt;&amp;&#39;&lt;&#47;a&gt;");
   });
 
-  test("also escapes '/' to &#47; (F-10)", () => {
+  test("also escapes '/' to &#47;", () => {
     expect(escapeHtml("a/b")).toBe("a&#47;b");
     // Harmless in normal text rendering, but closes the cross-context hole.
     expect(escapeHtml("anthropic/claude-3-5-sonnet")).toBe("anthropic&#47;claude-3-5-sonnet");
@@ -21,7 +21,7 @@ describe("escapeHtml", () => {
   });
 });
 
-// ─── getCockpitUrl scheme validation (F-13) ──────────────────────────────────
+// ─── getCockpitUrl scheme validation ──────────────────────────────────
 
 describe("getCockpitUrl", () => {
   let store: Record<string, unknown>;

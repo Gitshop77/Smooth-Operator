@@ -35,6 +35,10 @@ export interface LLMUsage {
   /** Cached input tokens (billed at a discount by providers that support
    *  prompt caching — Anthropic cache_read + cache_creation, OpenAI cached_tokens). */
   cachedInputTokens?: number;
+  /** Cache-write (creation) input tokens — Anthropic `cache_creation_input_tokens`.
+   *  Billed at the provider's (typically higher) cache-write rate, distinct from
+   *  `cachedInputTokens` (cache reads). */
+  cachedWriteInputTokens?: number;
   /** Model name (provider-specific). */
   model: string;
   /** Cost in USD (best-effort; 0 if unknown). */

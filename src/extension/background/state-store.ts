@@ -30,18 +30,20 @@ export const RUN_STATE_KEY = "open_cowork_run_state";
 
 /** Merge a partial patch into the persisted run state.
  *
- * Preserves `abortRequested` from the current state if the patch doesn't
- * explicitly set it — a STOP arriving between getRunState and set would
- * otherwise be clobbered (the patch's `abortRequested: false` from the
- * orchestrator's normal flow would overwrite the user's `true`). */
+ * `abortRequested` is monotonic (once true it stays true) and must survive a
+ * concurrent STOP arriving between `getRunState` and `set`. The previous guard
+ * only re-stamped the flag when *this* read already saw `abortRequested ===
+ * true`, so a STOP write racing a step-update write could still be clobbered.
+ * We now OR-in the previously stored value unconditionally, which guarantees a
+ * concurrent STOP is never lost regardless of read interleaving, and keeps the
+ * `abortRequested` key present even when the incoming patch doesn't mention it. */
 export async function saveRunState(state: Partial<RunState>): Promise<void> {
   const cur = (await getRunState()) ?? ({} as RunState);
-  // Don't let a normal-flow patch clobber a concurrent STOP request.
-  // `abortRequested` is monotonic: once true, it stays true. A STOP arriving
-  // between getRunState and set (or a normal-flow patch writing
-  // `abortRequested: false`) must not clear a user's abort.
   const next: RunState = { ...cur, ...state };
-  if (cur.abortRequested === true) next.abortRequested = true;
+  // Write-safe abort merge: never trust only an equality check on this read.
+  // OR-ing the stored + incoming values makes the STOP flag durable against a
+  // concurrent step-update (or any other) partial write.
+  next.abortRequested = Boolean(cur.abortRequested) || Boolean(state.abortRequested);
   await chrome.storage.session.set({ [RUN_STATE_KEY]: next });
 }
 

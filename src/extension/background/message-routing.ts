@@ -26,7 +26,6 @@ import {
 interface RunMessage {
   type: "RUN";
   task: string;
-  apiBase?: string;
   maxSteps?: number;
   mode?: AgentMode;
 }
@@ -78,6 +77,17 @@ interface ClearVisionCacheMessage {
   type: "CLEAR_VISION_CACHE";
 }
 type IncomingMessage = RunMessage | StopMessage | StatusMessage | ClearLogMessage | CdpClickMessage | CdpPressAndHoldMessage | SaveAsPdfMessage | ScreenshotMessage | TabActionMessage | DetectVisualMessage | ClearVisionCacheMessage;
+
+// ─── Per-run download consent ────────────────────────────────────────────────
+//
+// In `full_agentic` mode the agent can issue repeated `save_as_pdf` /
+// `screenshot` actions; a prompt injection could otherwise silently spam the
+// download directory. The first download of each run forces a `saveAs`
+// confirmation (so the user must confirm the save location). Once they confirm
+// that one, the rest of the run is treated as consented (one-time per-run
+// consent). Reset when a new run actually starts so consent never leaks across
+// runs.
+let fullAgenticDownloadConsent = false;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -143,6 +153,8 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
         }
         sendResponse({ ok: true });
         responded = true;
+        // a fresh run starts with no download consent.
+        fullAgenticDownloadConsent = false;
         await startRun({
           task: msg.task,
           maxSteps: msg.maxSteps || DEFAULT_MAX_STEPS,
@@ -334,11 +346,18 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
         // use `truncateFilename` so the `.pdf` extension is preserved
         // even when the base name has to be truncated to fit the 120-char cap.
         const filename = truncateFilename(baseName, 120);
+        // In `full_agentic` mode the first download of a run forces a
+        // `saveAs` confirmation so it can't be silent. Once the user confirms
+        // this one, `fullAgenticDownloadConsent` is set and later downloads are
+        // silent — one-time per-run consent. Non-full_agentic modes keep the
+        // prior silent behavior (`saveAs: false`).
+        const requireSaveAs = runState?.mode === "full_agentic" && !fullAgenticDownloadConsent;
         await chrome.downloads.download({
           url: `data:application/pdf;base64,${data}`,
           filename,
-          saveAs: false,
+          saveAs: requireSaveAs,
         });
+        if (requireSaveAs) fullAgenticDownloadConsent = true;
         sendResponse({ ok: true, filename });
       } catch (e) {
         sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });
@@ -389,11 +408,15 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
         const baseName = (m.fileName || `${title}.jpg`).replace(/[^\w.-]+/g, "_");
         // use `truncateFilename` so the `.jpg` extension is preserved.
         const filename = truncateFilename(baseName, 120);
+        // Force a `saveAs` confirmation for the first download of a
+        // `full_agentic` run, then treat the rest of the run as consented.
+        const requireSaveAs = runState?.mode === "full_agentic" && !fullAgenticDownloadConsent;
         await chrome.downloads.download({
           url: dataUrl,
           filename,
-          saveAs: false,
+          saveAs: requireSaveAs,
         });
+        if (requireSaveAs) fullAgenticDownloadConsent = true;
         sendResponse({ ok: true, filename });
       } catch (e) {
         sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });

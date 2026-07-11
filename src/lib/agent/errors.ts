@@ -108,6 +108,31 @@ export function classifyError(error: unknown): ClassifiedError {
     return { category: "network", fatal: false, retryable: true, message: originalMessage, originalError: error };
   }
 
+  // Structured status code (carried by the HTTP transport on the error object)
+  // takes priority over the generic substring matches below. A provider 400
+  // whose body merely contains "validation" must NOT be mislabeled as a
+  // transient `parse` error (which would trigger needless retries of an
+  // unfixable request). 401/403 map to their fatal categories; other 4xx
+  // (except 429) → bad_request (fatal); 429 → rate_limit; 5xx → server_error.
+  const status = (error as { status?: number }).status;
+  if (typeof status === "number") {
+    if (status === 401) {
+      return { category: "auth", fatal: true, retryable: false, message: originalMessage, originalError: error };
+    }
+    if (status === 403) {
+      return { category: "forbidden", fatal: true, retryable: false, message: originalMessage, originalError: error };
+    }
+    if (status === 400 || (status >= 400 && status < 500 && status !== 429)) {
+      return { category: "bad_request", fatal: true, retryable: false, message: originalMessage, originalError: error };
+    }
+    if (status === 429) {
+      return { category: "rate_limit", fatal: false, retryable: true, message: originalMessage, originalError: error };
+    }
+    if (status >= 500 && status < 600) {
+      return { category: "server_error", fatal: false, retryable: true, message: originalMessage, originalError: error };
+    }
+  }
+
   // Parse errors — transient (retry with nudge).
   if (containsAny(lower, ["json", "parse", "schema", "validation"])) {
     return { category: "parse", fatal: false, retryable: true, message: originalMessage, originalError: error };

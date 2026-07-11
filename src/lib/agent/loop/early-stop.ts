@@ -9,9 +9,12 @@
  *
  *   2. **Repeating-action threshold** — the last N actions are all
  *      {@link isEquivalentAction} to each other (and the last action isn't
- *      `input`/`alert_send_keys` — those are legitimately repeatable: typing
- *      the same text in different fields is fine, sending keys to multiple
- *      alert prompts is fine).
+ *      `input`/`alert_send_keys` — those are legitimately repeatable *within a
+ *      single field*: typing the same text into the same field repeatedly is
+ *      fine, sending keys to multiple alert prompts is fine). The per-K
+ *      (consecutive) check excludes these types, but the whole-history branch
+ *      still flags typing the *same text* into 3+ *different* fields, which is
+ *      suspicious.
  *
  * The orchestrator already has a `LoopDetector` that emits escalating
  * warnings at 5 / 8 / 12 repeats. This early-stop is a stricter, opt-in

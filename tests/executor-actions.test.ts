@@ -60,7 +60,7 @@ describe("action execution behavior", () => {
   beforeEach(() => {
     originalPrompt = window.prompt;
     originalConfirm = window.confirm;
-    // F-15: `evaluate` fails closed without an explicit domain allowlist.
+    // `evaluate` fails closed without an explicit domain allowlist.
     // The jsdom env runs at http://localhost, so allowlist "localhost".
     (globalThis as Record<string, unknown>).__openCoworkDomainConfig = {
       allowedDomains: ["localhost"],
@@ -223,7 +223,7 @@ describe("action execution behavior", () => {
     expect(result.extractedContent).toContain("4");
   });
 
-  test("evaluate: read-only script reports pageChanged: false (F-19)", async () => {
+  test("evaluate: read-only script reports pageChanged: false", async () => {
     // A pure computation mutates neither the URL nor the DOM fingerprint,
     // so it must NOT be reported as a page change. The old code reported
     // `pageChanged: true` unconditionally — that reset the loop detector's
@@ -235,7 +235,7 @@ describe("action execution behavior", () => {
     expect(result.pageChanged).toBe(false);
   });
 
-  test("evaluate: a script that changes the URL reports pageChanged: true (F-19)", async () => {
+  test("evaluate: a script that changes the URL reports pageChanged: true", async () => {
     const action = { type: "evaluate", code: "window.history.pushState({}, '', '/changed'); return 1;" } as AgentAction;
     const result = await executeAction(action, makeState());
     expect(result.success).toBe(true);

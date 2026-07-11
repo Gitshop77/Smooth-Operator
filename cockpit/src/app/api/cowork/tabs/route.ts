@@ -1,6 +1,6 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
-import { json, withRouteError, bodyJson, badRequest, validateHttpUrl, parseLimit } from '@/lib/cowork/api/http';
+import { json, withRouteError, bodyJson, badRequest, validateHttpUrl, isSsrfSafeUrl, parseLimit } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
 export async function GET(req: NextRequest): Promise<Response> {
@@ -44,7 +44,11 @@ export async function POST(req: NextRequest): Promise<Response> {
     // Validate URL scheme (prevents javascript:/data: stored-XSS via <a href>).
     const urlError = validateHttpUrl(url);
     if (urlError) return urlError;
-    // F16: a bogus workspaceId would otherwise surface as a Prisma "not found"
+    // Enforce the SSRF boundary on stored URLs so a private/loopback host
+    // can never later become an SSRF sink if this URL is fetched/launched
+    // server-side.
+    if (!isSsrfSafeUrl(url)) return badRequest('url host is not allowed (private/loopback address)');
+    // A bogus workspaceId would otherwise surface as a Prisma "not found"
     // 404 with a raw message. Validate the FK exists first and return 400.
     if (workspaceId) {
       const ws = await db.workspace.findUnique({ where: { id: workspaceId } });

@@ -11,7 +11,7 @@
 
 const COWORK_EVENTS_BASE = process.env.COWORK_EVENTS_BASE_URL || 'http://localhost:3003';
 
-// F-14: fail closed. The cockpit must NOT silently authenticate to the
+// Fail closed. The cockpit must NOT silently authenticate to the
 // cowork-events mini-service with the well-known `dev-token` when the operator
 // forgot to set a real secret. If COWORK_EVENT_TOKEN is unset/empty we refuse to
 // relay instead of sending `dev-token`. The `dev-token` fallback is removed

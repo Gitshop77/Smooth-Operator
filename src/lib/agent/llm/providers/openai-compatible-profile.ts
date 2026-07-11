@@ -49,3 +49,18 @@ export const profiles = {
 export const byProvider: Record<string, OpenAICompatibleProfile> = Object.fromEntries(
   Object.values(profiles).map((p) => [p.provider, p]),
 );
+
+// (SSRF guard): a user-supplied `baseURL` is untrusted input. Validate it
+// before it is used to build a provider profile / endpoint, so the service
+// worker cannot be steered at a loopback, RFC1918, or cloud-metadata address.
+// Curated profiles (Ollama/LiteLLM loopback defaults) are built directly from
+// `profiles` and never pass through this check — `isAllowedLlmBaseUrl` keeps
+// their legitimate local endpoints working while rejecting other internal URLs.
+import { isAllowedLlmBaseUrl } from "../route/ssrf";
+
+export const assertSafeUserBaseURL = (baseURL: string | undefined): void => {
+  if (!baseURL) return; // no user-supplied override → use the curated profile
+  if (!isAllowedLlmBaseUrl(baseURL)) {
+    throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${baseURL}`);
+  }
+};

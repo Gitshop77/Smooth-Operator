@@ -8,6 +8,7 @@ import type { Endpoint } from "./endpoint";
 import type { Framing, Frame } from "./framing";
 import { buildURL } from "./endpoint";
 import { withLLMRetry } from "../retry";
+import { isAllowedLlmBaseUrl } from "./ssrf";
 
 /**
  * Parse an HTTP `Retry-After` header value into a delay in milliseconds.
@@ -110,6 +111,16 @@ function fetchWithTimeout(
   init: RequestInit,
   userSignal?: AbortSignal
 ): Promise<Response> {
+  // (SSRF guard) — defense-in-depth: refuse to fetch an LLM endpoint that
+  // resolves to a loopback / private / link-local / cloud-metadata address.
+  // `redirect: "manual"` already prevents body-forwarding via 3xx, but this
+  // stops the request from ever leaving the service worker in the first place.
+  // `isAllowedLlmBaseUrl` applies the same range checks as `validateLlmBaseUrl`
+  // while exempting the curated Ollama/LiteLLM local endpoints. We throw (rather
+  // than silently contacting the host) so a bad URL fails closed.
+  if (!isAllowedLlmBaseUrl(url)) {
+    throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${url}`);
+  }
   const controller = new AbortController();
   let timedOut = false;
 

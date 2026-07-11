@@ -42,6 +42,50 @@ chrome.runtime.onInstalled.addListener(() => {
     .catch(() => {
       /* setPanelBehavior can reject on unsupported Chrome versions — non-fatal */
     });
+
+  // Warm the live models.dev catalog so cost tracking uses live rates.
+  // pricing.ts no longer has a static table — rates come from the catalog.
+  // Lazy import keeps the (large) pricing module out of the critical install path.
+  void import("../../lib/agent/llm/pricing").then((m) =>
+    m.refreshPricingFromCatalog(),
+  );
+});
+
+// On browser/extension startup (a more reliable trigger than onInstalled for
+// resuming service-worker incarnations), also warm the live catalog.
+chrome.runtime.onStartup.addListener(() => {
+  // Warm the live models.dev catalog so cost tracking uses live rates.
+  // pricing.ts no longer has a static table — rates come from the catalog.
+  // Lazy import keeps the (large) pricing module out of the startup path.
+  void import("../../lib/agent/llm/pricing").then((m) =>
+    m.refreshPricingFromCatalog(),
+  );
+});
+
+// ─── Live pricing: refresh when provider/model/apiKey/baseUrl changes ────────
+// Best-effort: settings changes can alter which model is billable, so re-warm
+// the catalog. Guard with a short throttle so a burst of storage writes
+// (e.g. multiple key/value updates in one save) doesn't trigger redundant
+// refreshes back-to-back.
+let lastPricingRefreshAt = 0;
+const PRICING_REFRESH_THROTTLE_MS = 2000;
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" && area !== "sync") return;
+  const relevant = Object.keys(changes).some((key) =>
+    /^(?:provider|model|apiKey|api_key|baseUrl|base_url|endpoint)/i.test(key),
+  );
+  if (!relevant) return;
+
+  const now = Date.now();
+  if (now - lastPricingRefreshAt < PRICING_REFRESH_THROTTLE_MS) return;
+  lastPricingRefreshAt = now;
+
+  // Warm the live models.dev catalog so cost tracking uses live rates.
+  // pricing.ts no longer has a static table — rates come from the catalog.
+  void import("../../lib/agent/llm/pricing").then((m) =>
+    m.refreshPricingFromCatalog(),
+  );
 });
 
 // ─── Keyboard shortcut: open side panel (Ctrl+E / Cmd+E) ────────────────────

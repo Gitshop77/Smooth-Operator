@@ -9,7 +9,7 @@ import { withLLMRetry } from "../src/lib/agent/llm/retry";
 import { maybeJudgeAndFinalize } from "../src/lib/agent/loop/helpers/judges";
 import { CallbackDispatcher, type AsyncCallbackHandler, type CallbackContext, type LLMUsageInfo } from "../src/lib/agent/callbacks";
 import { LoopDetector } from "../src/lib/agent/loop/loop-detector";
-import { estimateCost } from "../src/lib/agent/llm/pricing";
+import { estimateCost, refreshPricingFromCatalog } from "../src/lib/agent/llm/pricing";
 import { DEFAULT_CONFIG } from "../src/lib/agent/types";
 import type { LoopDeps, LoopState } from "../src/lib/agent/loop/types";
 import type { AgentConfig } from "../src/lib/agent/types";
@@ -344,6 +344,39 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
   });
 
   test("cost recompute uses cachedInputTokens (cacheRead discount applied)", async () => {
+    // Pricing is now catalog-driven (no static table). Stub a catalog so
+    // claude-3-5-sonnet has a real cacheRead rate (0.3 vs in=3); otherwise the
+    // model falls back to the conservative default (no cacheRead discount) and
+    // the with/without-cache costs would be identical.
+    const ORIG_URL = process.env.COWORK_MODEL_CATALOG_URL;
+    process.env.COWORK_MODEL_CATALOG_URL = "https://fake.test/judge-catalog.json";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          anthropic: {
+            id: "anthropic",
+            name: "Anthropic",
+            models: {
+              "claude-3-5-sonnet-20241022": {
+                id: "claude-3-5-sonnet-20241022",
+                name: "Claude 3.5 Sonnet",
+                release_date: "2024-10-22",
+                attachment: true,
+                reasoning: false,
+                temperature: true,
+                tool_call: true,
+                cost: { input: 3, output: 15, cache_read: 0.3 },
+              },
+            },
+          },
+        }),
+      })),
+    );
+    await refreshPricingFromCatalog();
+    try {
     // The onCost callback in judges.ts recomputes the cost via:
     //   estimateCost(judgeModel, tokensIn, tokensOut, judgeReasoningTokens, judgeCachedInputTokens)
     // With cachedInputTokens=200 on claude-3-5-sonnet (cacheRead=0.3 vs in=3),
@@ -416,6 +449,11 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
     // The user's onCost receives the recomputed cost (not 0, not the no-cache cost).
     expect(userOnCostCalls).toHaveLength(1);
     expect(userOnCostCalls[0]).toBeCloseTo(expectedWithCache, 12);
+    } finally {
+      if (ORIG_URL === undefined) delete process.env.COWORK_MODEL_CATALOG_URL;
+      else process.env.COWORK_MODEL_CATALOG_URL = ORIG_URL;
+      vi.restoreAllMocks();
+    }
   });
 
   test("when cachedInputTokens is absent, the cost recompute still works (no discount)", async () => {

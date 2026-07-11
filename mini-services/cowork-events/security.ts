@@ -34,16 +34,14 @@ export const DEV_TOKEN = 'dev-token';
  *   - `received` is the empty string
  *   - the byte-wise comparison fails
  *
- * Length handling (F-15): previously this helper returned `false` the instant
- * `received.length !== expected.length`. That early-exit is observable via
- * timing — a caller probing the endpoint could infer the expected token's
- * length. Now, when the lengths differ, we still run a full constant-time
- * comparison over a buffer normalized to the LONGER length (the shorter side
- * is padded with a fixed zero byte). `crypto.timingSafeEqual` therefore always
- * executes the same number of iterations for a given input length and never
- * throws `RangeError`. The `false` for a genuine length mismatch is computed
- * AFTER the constant-time loop, so it does not leak whether the lengths
- * matched.
+ * Length handling: never throws on length mismatch (which would otherwise leak
+ * the expected token's length via an exception). When the lengths differ, we
+ * still run a full constant-time comparison over a buffer normalized to the
+ * LONGER length (the shorter side is padded with a fixed zero byte).
+ * `crypto.timingSafeEqual` therefore always executes the same number of
+ * iterations for a given input length and never throws `RangeError`. The
+ * `false` for a genuine length mismatch is computed AFTER the constant-time
+ * loop, so it does not leak whether the lengths matched.
  *
  * @param received The token presented by the caller (e.g. from the
  *                 `X-Cowork-Token` HTTP header or `socket.handshake.auth.token`).
@@ -115,7 +113,7 @@ export function applyCorsHeaders(
  * EXPLICIT opt-in (`COWORK_ALLOW_DEV_TOKEN=1`) — e.g. for a local loopback dev
  * session where the operator has consciously chosen to run unauthenticated.
  *
- * `NODE_ENV` is intentionally NOT treated as a safety net (F-05): a
+ * `NODE_ENV` is intentionally NOT treated as a safety net: a
  * misconfigured deploy that runs `npx tsx index.ts` without `NODE_ENV` set
  * (or with any non-production value) must NOT silently accept the public
  * default and expose unauthenticated connections. The service therefore
@@ -137,7 +135,7 @@ export function shouldRefuseStart(
 }
 
 // ---------------------------------------------------------------------------
-// chat:join room-scoping (F-04)
+// chat:join room-scoping
 // ---------------------------------------------------------------------------
 //
 // Decides whether a socket may join the chat room named after `sessionId`.

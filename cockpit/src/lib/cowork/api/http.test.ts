@@ -1,9 +1,47 @@
-import { describe, it, expect } from 'vitest';
-import { withRouteError, bodyJson, bodyJsonOptional, isSsrfSafeUrl } from '@/lib/cowork/api/http';
+import { describe, it, expect, vi } from 'vitest';
+import { withRouteError, bodyJson, bodyJsonOptional, isSsrfSafeUrl, validateHttpUrl } from '@/lib/cowork/api/http';
+import { POST as tabsPost } from '@/app/api/cowork/tabs/route';
+import { POST as bookmarksPost } from '@/app/api/cowork/bookmarks/route';
+import { POST as workflowsPost } from '@/app/api/cowork/workflows/route';
+import { POST as sessionsPost } from '@/app/api/cowork/sessions/route';
+
+// Mock Prisma so route handlers can be exercised without a live DB.
+const created: any[] = [];
+vi.mock('@/lib/db', () => ({
+  db: {
+    tab: {
+      create: vi.fn(async (a: any) => { created.push(a.data); return a.data; }),
+      findMany: vi.fn(async () => []),
+      count: vi.fn(async () => 0),
+    },
+    workspace: { findUnique: vi.fn(async () => ({ id: 'ws1', name: 'ws' })) },
+    bookmark: {
+      create: vi.fn(async (a: any) => { created.push(a.data); return a.data; }),
+      findMany: vi.fn(async () => []),
+    },
+    workflow: {
+      create: vi.fn(async (a: any) => { created.push(a.data); return a.data; }),
+      findMany: vi.fn(async () => []),
+    },
+    session: {
+      create: vi.fn(async (a: any) => { created.push(a.data); return a.data; }),
+    },
+  },
+}));
 
 // Minimal fake of the bits of NextRequest that bodyJson touches.
 function fakeReq(body: unknown, text: string): any {
   return { body, text: async () => text };
+}
+
+// A POST-style NextRequest: needs a truthy `body` (bodyJson checks it) and a
+// `text()` that yields the JSON payload.
+function fakePostReq(body: Record<string, unknown>): any {
+  return {
+    body: {},
+    text: async () => JSON.stringify(body),
+    nextUrl: { searchParams: new URLSearchParams() },
+  };
 }
 
 describe('bodyJson (F-04b)', () => {
@@ -82,7 +120,7 @@ describe('withRouteError (F-04a)', () => {
   });
 });
 
-describe('isSsrfSafeUrl (F-17)', () => {
+describe('isSsrfSafeUrl', () => {
   it('blocks localhost / loopback / metadata / RFC1918 hosts', () => {
     expect(isSsrfSafeUrl('http://localhost/')).toBe(false);
     expect(isSsrfSafeUrl('http://127.0.0.1/')).toBe(false);
@@ -103,5 +141,85 @@ describe('isSsrfSafeUrl (F-17)', () => {
     expect(isSsrfSafeUrl('file:///etc/passwd')).toBe(false);
     expect(isSsrfSafeUrl('javascript:alert(1)')).toBe(false);
     expect(isSsrfSafeUrl('not a url')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stored URLs must be SSRF-safe. The storage routes (tabs/bookmarks) now
+// enforce `isSsrfSafeUrl` at ingest so a stored URL can never later become an
+// SSRF sink. These tests drive the actual route handlers (db mocked).
+// ---------------------------------------------------------------------------
+describe('stored-URL SSRF boundary — tabs route', () => {
+  it('rejects http://169.254.169.254 (cloud metadata) with 400', async () => {
+    const res = await tabsPost(fakePostReq({ url: 'http://169.254.169.254/latest/meta-data/', workspaceId: 'ws1' }));
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects http://localhost (loopback) with 400', async () => {
+    const res = await tabsPost(fakePostReq({ url: 'http://localhost/', workspaceId: 'ws1' }));
+    expect(res.status).toBe(400);
+  });
+
+  it('accepts https://example.com with 201', async () => {
+    const res = await tabsPost(fakePostReq({ url: 'https://example.com/', workspaceId: 'ws1' }));
+    expect(res.status).toBe(201);
+  });
+});
+
+describe('stored-URL SSRF boundary — bookmarks route', () => {
+  it('rejects http://169.254.169.254 (cloud metadata) with 400', async () => {
+    const res = await bookmarksPost(fakePostReq({ name: 'x', url: 'http://169.254.169.254/latest/meta-data/', type: 'url' }));
+    expect(res.status).toBe(400);
+  });
+
+  it('accepts https://example.com with 201', async () => {
+    const res = await bookmarksPost(fakePostReq({ name: 'x', url: 'https://example.com/', type: 'url' }));
+    expect(res.status).toBe(201);
+  });
+
+  it('still allows folder bookmarks (no URL)', async () => {
+    const res = await bookmarksPost(fakePostReq({ name: 'folder', type: 'folder' }));
+    expect(res.status).toBe(201);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Request fields are zod-validated / bounded before storage.
+// ---------------------------------------------------------------------------
+describe('request validation — workflows scheduleCron', () => {
+  it('accepts a valid 5-field cron expression with 201', async () => {
+    const res = await workflowsPost(fakePostReq({ name: 'wf', scheduleCron: '*/5 * * * *' }));
+    expect(res.status).toBe(201);
+    expect(created.some((c) => c.scheduleCron === '*/5 * * * *')).toBe(true);
+  });
+
+  it('rejects a cron expression containing shell metacharacters with 400', async () => {
+    const res = await workflowsPost(fakePostReq({ name: 'wf', scheduleCron: '; rm -rf /' }));
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a cron expression with wrong field count with 400', async () => {
+    const res = await workflowsPost(fakePostReq({ name: 'wf', scheduleCron: '* * *' }));
+    expect(res.status).toBe(400);
+  });
+
+  it('accepts a missing scheduleCron (stored as null)', async () => {
+    const res = await workflowsPost(fakePostReq({ name: 'wf' }));
+    expect(res.status).toBe(201);
+    expect(created.some((c) => c.scheduleCron === null)).toBe(true);
+  });
+});
+
+describe('request validation — sessions userAgent bounded', () => {
+  it('truncates an over-long userAgent to 512 chars and stores it', async () => {
+    const res = await sessionsPost(fakePostReq({ name: 's', userAgent: 'A'.repeat(800) }));
+    expect(res.status).toBe(201);
+    const stored = created.find((c) => c.userAgent && c.userAgent.length === 512);
+    expect(stored).toBeTruthy();
+  });
+
+  it('rejects a userAgent that is not a string with 400', async () => {
+    const res = await sessionsPost(fakePostReq({ name: 's', userAgent: { bad: true } as any }));
+    expect(res.status).toBe(400);
   });
 });

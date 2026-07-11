@@ -113,6 +113,11 @@ $("testConnection").addEventListener("click", async () => {
   testResult.textContent = "Testing…";
 
   const provider = ($("provider") as HTMLSelectElement).value;
+  // SECURITY: apiKey is read from the form here and handed to buildProvider for a
+  // one-shot test. It originates from chrome.storage.local, which is UNENCRYPTED —
+  // MV3 has no secret store. Prefer OAuth where the provider supports it. Never
+  // console.log this value; any error surfaced to the UI below goes through
+  // redactKeyLeak (see catch block).
   const apiKey = ($("apiKey") as HTMLInputElement).value;
   const model = ($("model") as HTMLInputElement).value;
   const baseUrl = ($("baseUrl") as HTMLInputElement).value;

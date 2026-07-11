@@ -78,7 +78,7 @@ function installMinimalDomStubs(): void {
     configurable: true,
     writable: true,
   });
-  // F-15: `evaluate` now fails closed unless the current origin is on an
+  // `evaluate` now fails closed unless the current origin is on an
   // explicit domain allowlist. Configure one for the stub host so the
   // evaluate behavioral tests exercise real JS execution. The blocked
   // (no-allowlist) path is covered by a dedicated test below.
@@ -242,7 +242,7 @@ describe("executeAction — evaluate", () => {
     expect(result.message).not.toContain("[object Promise]");
   });
 
-  test("F-15: evaluate fails closed (BLOCKED) when no domain allowlist is configured", async () => {
+  test("evaluate fails closed (BLOCKED) when no domain allowlist is configured", async () => {
     // Remove the allowlist installed by installMinimalDomStubs so the origin
     // is unconfigured. `evaluate` must refuse to execute rather than run
     // arbitrary JS on an unconstrained origin.

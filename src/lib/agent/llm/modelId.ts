@@ -1,5 +1,5 @@
 /**
- * Safe model-id → URL-path encoding (F-23).
+ * Safe model-id → URL-path encoding.
  *
  * Several providers embed the model id directly in the request URL path
  * (Gemini: `/models/{model}:streamGenerateContent`; Azure:

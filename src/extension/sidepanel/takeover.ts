@@ -71,16 +71,16 @@ resumeBtn?.addEventListener("click", () => {
  */
 export function promptPassword(message: string): Promise<string | null> {
   return new Promise((resolve) => {
-    // F-39 (a11y): remember which element had focus before we opened the
-    // modal so we can return focus to it on close — keyboard/screen-reader
-    // users aren't stranded on <body> after the dialog is removed.
+    // Remember which element had focus before we opened the modal so we can
+    // return focus to it on close — keyboard / screen-reader users aren't
+    // stranded on <body> after the dialog is removed.
     const trigger = (document.activeElement as HTMLElement | null) ?? null;
 
     const overlay = document.createElement("div");
     overlay.className = "password-prompt-overlay";
     overlay.setAttribute("role", "dialog");
     overlay.setAttribute("aria-modal", "true");
-    // Point the dialog's accessible name at the prompt label (F-39).
+    // Point the dialog's accessible name at the prompt label.
     overlay.setAttribute("aria-labelledby", "password-prompt-label");
 
     const box = document.createElement("div");
@@ -95,7 +95,7 @@ export function promptPassword(message: string): Promise<string | null> {
     input.id = "password-prompt-input";
     // Associate the label with the input AND give the field its own
     // accessible name so screen readers announce it even if the association
-    // is lost (F-39).
+    // is lost.
     label.htmlFor = input.id;
     input.setAttribute("aria-label", message);
 
@@ -122,8 +122,8 @@ export function promptPassword(message: string): Promise<string | null> {
       if (settled) return;
       settled = true;
       overlay.remove();
-      // F-39 (a11y): return focus to the trigger so keyboard/screen-reader
-      // users land back where they were instead of on <body>.
+      // Return focus to the trigger so keyboard / screen-reader users land
+      // back where they were instead of on <body>.
       trigger?.focus?.();
       resolve(value);
     };
@@ -137,8 +137,8 @@ export function promptPassword(message: string): Promise<string | null> {
     overlay.addEventListener("click", (e) => {
       if (e.target === overlay) finish(null);
     });
-    // F-39 (a11y): focus trap. Keep Tab / Shift+Tab cycling within the
-    // dialog while it's open instead of escaping to the page behind it.
+    // Focus trap. Keep Tab / Shift+Tab cycling within the dialog while it's
+    // open instead of escaping to the page behind it.
     overlay.addEventListener("keydown", (e) => {
       if (e.key !== "Tab") return;
       const focusables = [input, cancelBtn, okBtn].filter(

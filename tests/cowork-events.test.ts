@@ -14,7 +14,7 @@
  *        - `tokenMatches` — constant-time + length-safe token comparison.
  *        - `applyCorsHeaders` — allowlist-driven CORS header setter.
  *        - `shouldRefuseStart` — production dev-token refusal policy.
- *        - `evaluateChatJoin` — chat:join room-scoping decision (F-04).
+ *        - `evaluateChatJoin` — chat:join room-scoping decision.
  *
  *   2. HTTP integration tests that spin up the REAL `httpServer` exported by
  *      `index.ts` on an OS-assigned port (port 0) and make real `fetch()`
@@ -38,7 +38,7 @@ import {
   DEV_TOKEN,
 } from "../mini-services/cowork-events/security";
 
-// ─── z-ai SDK mock (F-33) ───────────────────────────────────────────────────
+// ─── z-ai SDK mock ───────────────────────────────────────────────────
 //
 // The real mini-service calls `ZAI.create()` then
 // `zai.chat.completions.create(...)` / `zai.images.generations.create(...)`.
@@ -217,7 +217,7 @@ describe("applyCorsHeaders", () => {
 // ─── Pure function tests: shouldRefuseStart ────────────────────────────────
 
 describe("shouldRefuseStart", () => {
-  // F-05: the dev-token is only accepted with an EXPLICIT opt-in
+  // the dev-token is only accepted with an EXPLICIT opt-in
   // (COWORK_ALLOW_DEV_TOKEN=1). NODE_ENV is no longer a safety net, so a
   // misconfigured deploy (e.g. `npx tsx index.ts` with no NODE_ENV) must NOT
   // silently accept the public default.
@@ -260,7 +260,7 @@ describe("shouldRefuseStart", () => {
   });
 });
 
-// ─── Pure function tests: evaluateChatJoin (chat:join room-scoping, F-04) ──
+// ─── Pure function tests: evaluateChatJoin (chat:join room-scoping) ──
 //
 // NOTE: the integration suite below cannot exercise `chat:join` over a real
 // socket because `socket.io-client` is NOT installed at the repo root (the
@@ -756,7 +756,7 @@ describe("cowork-events HTTP server (integration)", () => {
   });
 });
 
-// ─── Socket.io integration tests (F-33) ─────────────────────────────────────
+// ─── Socket.io integration tests ─────────────────────────────────────
 //
 // Spins up a SECOND, independent httpServer + socket.io server from a FRESH
 // module instance (via `vi.resetModules()` + a dynamic re-import). This gives us
@@ -769,10 +769,10 @@ describe("cowork-events HTTP server (integration)", () => {
 // `socket.io-client` package is a devDependency of the repo root, so it resolves
 // from the test file.
 //
-// These tests exercise exactly the gaps called out in F-33: `/chat` success
+// These tests exercise exactly the gaps called out in `/chat` success
 // streaming, `/image` success, `events:replay` on connect, and the negative
 // case where a hostile (but authenticated-with-a-scoped-sessionId) socket CANNOT
-// read another session's `chat:message` (the F-04 room-scoping that the
+// read another session's `chat:message` (the room-scoping that the
 // orchestrator wired into `chat:join` + `evaluateChatJoin`).
 
 describe("cowork-events socket.io (integration)", () => {
@@ -787,7 +787,7 @@ describe("cowork-events socket.io (integration)", () => {
 
   // Connect a socket.io-client to the test server. `auth` is forwarded to the
   // handshake so we can present either just the shared token, or a token plus a
-  // scoped `sessionId` (to exercise the F-04 room-scoping path).
+  // scoped `sessionId` (to exercise the room-scoping path).
   function connect(auth: Record<string, unknown>): Promise<Socket> {
     return new Promise((resolve, reject) => {
       const c = ioClient(`http://127.0.0.1:${port}`, {

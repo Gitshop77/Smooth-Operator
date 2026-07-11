@@ -5,7 +5,7 @@ function fakeReq(query = ''): any {
   return { nextUrl: { searchParams: new URLSearchParams(query) } };
 }
 
-describe('GET /api/cowork/mcp/tools (F-28)', () => {
+describe('GET /api/cowork/mcp/tools', () => {
   it('marks every tool as implemented:false and includes an aspirational note', async () => {
     const res = await GET(fakeReq());
     expect(res.status).toBe(200);
