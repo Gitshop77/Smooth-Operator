@@ -21,6 +21,16 @@ import {
 import { buildPostObserveNudges } from "../context/injection-points";
 
 /**
+ * Hard upper bound on the DOM text shipped to the navigator model per step,
+ * independent of the HTML summarizer. This guarantees a misconfigured run
+ * (summarizer disabled or falling back) can NEVER send an unbounded DOM to the
+ * provider — the single largest per-action cost lever in a paid LLM product.
+ * When the raw/summarized DOM exceeds this, it is truncated and an info event
+ * is emitted so the truncation is observable.
+ */
+const MAX_NAV_ELEMENTS_TEXT_CHARS = 60_000;
+
+/**
  * Prepare the navigator request for the current step: optionally run the
  * HTML-summarizer pre-pass, build the AgentStepRequest, and append the
  * post-observe captcha/downloads nudges to `pendingLoopWarning`.
@@ -51,6 +61,21 @@ export async function prepareNavigatorRequest(
         message: `HTML summarizer skipped: ${e instanceof Error ? e.message : String(e)}`,
       });
     }
+  }
+
+  // Hard cap applied REGARDLESS of the summarizer path: whether the summarizer
+  // is disabled, or it ran but fell back to the full DOM (low keyword
+  // coverage), `navElementsText` must never exceed `MAX_NAV_ELEMENTS_TEXT_CHARS`.
+  // Returning the full DOM on fallback would pay full-DOM token cost for zero
+  // savings; truncating bounds the worst case deterministically.
+  if (navElementsText.length > MAX_NAV_ELEMENTS_TEXT_CHARS) {
+    state.onEvent({
+      type: "info",
+      message:
+        `Navigator DOM truncated to ${MAX_NAV_ELEMENTS_TEXT_CHARS} chars ` +
+        `(raw/fallback was ${navElementsText.length}).`,
+    });
+    navElementsText = navElementsText.slice(0, MAX_NAV_ELEMENTS_TEXT_CHARS);
   }
 
   const navRequest: AgentStepRequest = {
@@ -156,8 +181,15 @@ export async function runPauseCheck(state: LoopState): Promise<void> {
     const PAUSE_POLL_MS = 500;
     const PAUSE_MAX_MS = 30 * 60 * 1000;
     const pauseDeadline = Date.now() + PAUSE_MAX_MS;
+    // Track WHY the poll loop ended so we only emit `resumed` when the user
+    // actually cleared the pause (not when aborted or when the 30-min safety
+    // cap fired while still paused — both must not masquerade as a resume).
+    let exitReason: "cleared" | "deadline" | "aborted" = "cleared";
     while (paused && Date.now() < pauseDeadline) {
-      if (state.signal?.aborted) break;
+      if (state.signal?.aborted) {
+        exitReason = "aborted";
+        break;
+      }
       await new Promise<void>((r) => setTimeout(r, PAUSE_POLL_MS));
       try {
         paused = await state.deps.checkPaused!();
@@ -167,6 +199,29 @@ export async function runPauseCheck(state: LoopState): Promise<void> {
         // by `pauseDeadline`), so an intermittent failure must NOT silently end
         // an explicit user pause.
       }
+    }
+    // Re-check abort after the loop in case it fired on the final iteration.
+    if (exitReason !== "aborted" && state.signal?.aborted) exitReason = "aborted";
+    // If we exited the loop while STILL paused, the 30-min safety cap reached
+    // (the `Date.now() < pauseDeadline` condition went false) — mark it so we
+    // emit the distinct "safety cap reached" message instead of a misleading
+    // "resumed". This assignment was dropped in the reconcile rewrite, which
+    // made the `=== "deadline"` branch unreachable (TS2367).
+    if (exitReason !== "aborted" && paused) exitReason = "deadline";
+
+    if (exitReason === "aborted") {
+      // Honour the abort: emit no misleading "resumed" event. The orchestrator's
+      // top-of-step abort check will exit the run on the next iteration.
+      return;
+    }
+    if (exitReason === "deadline") {
+      // Safety cap elapsed while the user is still paused. We must not claim the
+      // user resumed, so emit a distinct info message instead of "resumed".
+      state.onEvent({
+        type: "info",
+        message: "Pause safety cap (30 min) reached while still paused — continuing.",
+      });
+      return;
     }
     state.onEvent({ type: "resumed", step: state.step });
     state.onEvent({ type: "info", message: "Agent resumed." });

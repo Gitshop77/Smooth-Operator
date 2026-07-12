@@ -33,7 +33,14 @@ export interface ModeConfig {
   canUploadFiles: boolean;
   /** Can download files / save as PDF. */
   canDownloadFiles: boolean;
-  /** Max steps before forced stop. */
+  /**
+   * Max steps before forced stop for this mode. This is a HARD CAP: the
+   * effective step budget handed to the orchestrator MUST be clamped to the
+   * active mode's `maxSteps` (e.g. `Math.min(cfgMaxSteps,
+   * MODE_CONFIGS[mode].maxSteps)` in `buildLoopDeps`/`startRun`). The
+   * user-controlled `chrome.storage.local` `maxSteps` value must never be
+   * honored above this cap, or restricted mode (30 steps) could run 1000 steps.
+   */
   maxSteps: number;
   /** Action types that require explicit user confirmation before executing. */
   confirmRequired: readonly string[];
@@ -70,21 +77,21 @@ export const MODE_CONFIGS = {
     canUploadFiles: false,
     canDownloadFiles: false,
     maxSteps: 100,
-    // Standard mode is documented as "can't do destructive things": these
-    // three action types are hard-blocked by their `can*` flags above
-    // (`canExecuteJs`/`canUploadFiles`/`canDownloadFiles` are all `false`),
-    // so a real `evaluate`/`upload_file`/`save_as_pdf` never reaches the
-    // executor in standard mode — the `can*` check fails closed first.
-    //
-    // `confirmRequired` is nonetheless set here as the *intended* policy
-    // declaration: if any of these actions is ever permitted in standard
-    // mode, it MUST require explicit user confirmation. It is complementary
-    // (not contradictory) to the executor's domain-allowlist gate for
-    // `evaluate` (which FAILS CLOSED when no allowlist is configured) — the
-    // allowlist decides *where* JS may run, `confirmRequired` decides that a
-    // human must approve the run. Keeping this list non-empty prevents a
-    // future "allow evaluate in standard" change from silently skipping the
-    // confirmation prompt.
+    // Security: `evaluate` MUST require explicit user confirmation in standard
+    // mode (security-critical) AND remain allowlist-gated. The allowlist check
+    // in the executor (`checkActionAllowed` → `canExecuteJs:false`) blocks first
+    // and fails closed, so an unallowlisted `evaluate` is still rejected before
+    // it could ever reach execution — but `requiresConfirmation` must ALSO
+    // return `true` for `evaluate` here so the confirmation gate is armed and
+    // the security model is enforced regardless of how the executor is reached.
+    // The two checks are complementary, not contradictory: `canExecuteJs:false`
+    // blocks by default; the domain allowlist opens a narrow exception that the
+    // human must then explicitly approve. `upload_file`/`save_as_pdf` are listed
+    // for the same reason (they are mode-blocked by their `can*` flags too).
+    // Note: the executor checks `checkActionAllowed` BEFORE `requiresConfirmation`,
+    // so absent the domain-allowlist these entries are effectively backups to the
+    // fail-closed `can*` check — but `requiresConfirmation` is also the single
+    // source of truth consumed by `shouldAskForConfirmation`, so it must be correct.
     confirmRequired: ["evaluate", "upload_file", "save_as_pdf"],
   },
   full_agentic: {

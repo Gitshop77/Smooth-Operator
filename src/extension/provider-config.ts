@@ -17,7 +17,7 @@ import * as XAI from "../lib/agent/llm/providers/xai";
 import * as OpenRouter from "../lib/agent/llm/providers/openrouter";
 import * as Azure from "../lib/agent/llm/providers/azure";
 import * as OpenAICompatible from "../lib/agent/llm/providers/openai-compatible";
-import { validateLlmBaseUrl } from "../lib/agent/llm/route/ssrf";
+import { validateLlmBaseUrl, resolveAndValidateLlmBaseUrl } from "../lib/agent/llm/route/ssrf";
 import { modelSupportsVision, getDefaultModelForProvider } from "../lib/agent/llm/catalog";
 import { CATALOG_PROVIDER_ID_MAP } from "./provider-config-map";
 
@@ -33,6 +33,16 @@ export interface ProviderConfig {
   baseUrl?: string;
   /** Azure resource name (optional — Azure URL is built as `https://{resource}.openai.azure.com`). */
   resourceName?: string;
+  /**
+   * Provenance of this config's `baseUrl`. `"user"` = configured by the user
+   * in Options (the curated local-provider loopback exemption applies).
+   * `"injected"` = arrived via an untrusted vector (prompt injection writing
+   * `chrome.storage.local`, malicious settings-sync, crafted tool call).
+   * Injected baseUrls are NOT exempted from the SSRF guard (see below), so an
+   * injected `http://localhost:11434` can't reach a local model. Defaults to
+   * `"user"`.
+   */
+  provenance?: "user" | "injected";
 }
 
 // Import the canonical profile table from openai-compatible-profile.ts
@@ -40,12 +50,28 @@ export interface ProviderConfig {
 // is the single source of truth for OpenAI-compatible provider base URLs.
 import { profiles, byProvider } from "../lib/agent/llm/providers/openai-compatible-profile";
 
-/** Default base URLs — derived from the canonical profiles table. */
+/**
+ * Default base URLs — derived from the canonical profiles table.
+ *
+ * NOTE: `DEFAULT_BASE_URLS` is ONLY consulted by the `default` (OpenAI-
+ * compatible) branch in `buildProvider`, which synthesizes a profile for
+ * providers without a dedicated `case` (deepseek, qwen, groq, ollama, ...).
+ * Providers that have their OWN dedicated `case` (`openai`, `anthropic`,
+ * `gemini`, `xai`, `openrouter`, `azure`) never read this map — their default
+ * base URLs come from the provider facades. So we deliberately exclude
+ * `openrouter` / `xai` from the spread below (they'd be dead entries that look
+ * like they back the dedicated cases but don't).
+ */
 const DEFAULT_BASE_URLS: Record<string, string> = {
   openai: "https://api.openai.com/v1",
   // Spread the profiles table entries (covers deepseek, groq, together, etc.)
-  ...Object.fromEntries(Object.values(profiles).map((p) => [p.provider, p.baseURL])),
-  // Add entries for non-OpenAI-compatible providers not in the profiles table:
+  // — excluding `openrouter` / `xai`, which have dedicated `case` branches and
+  // therefore never consult this map.
+  ...Object.fromEntries(
+    Object.values(profiles)
+      .filter((p) => p.provider !== "openrouter" && p.provider !== "xai")
+      .map((p) => [p.provider, p.baseURL]),
+  ),
 };
 
 /** Default models for each provider (used when the user doesn't specify one).
@@ -91,7 +117,7 @@ export const DEFAULT_MODELS: Record<string, string> = {
  *         that require one — local providers like Ollama don't).
  */
 export async function buildProvider(config: ProviderConfig): Promise<LLMProvider> {
-  const { provider, apiKey, model, baseUrl, resourceName } = config;
+  const { provider, apiKey, model, baseUrl, resourceName, provenance = "user" } = config;
   // Resolve the model: explicit user choice > live catalog default >
   // offline DEFAULT_MODELS fallback. `CATALOG_PROVIDER_ID_MAP` maps our
   // provider id (e.g. "gemini") to the models.dev catalog provider id
@@ -105,13 +131,21 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
     "";
 
   // SSRF guard: reject a user-supplied `baseUrl` that points at a loopback /
-  // private / link-local / cloud-metadata address. The user controls `baseUrl`
-  // (entered in Options / written to chrome.storage.local), so it is untrusted
+  // private / link-local / cloud-metadata address. `baseUrl` is untrusted
   // input. The curated `DEFAULT_BASE_URLS` fallbacks (used only when the user
   // supplies no baseUrl) are trusted and exempted so Ollama/LiteLLM localhost
   // defaults keep working; they are not validated here.
+  //
+  // Provenance matters: a `"user"`-configured `baseUrl` may use the curated
+  // local-provider exemption (their own Ollama/LiteLLM). An `"injected"`
+  // baseUrl (from prompt injection / malicious settings-sync) is NOT exempted
+  // — `resolveAndValidateLlmBaseUrl(... allowLocalExemption=false)` makes the
+  // exemption unreachable, so an injected `http://localhost:11434` (or a
+  // poisoned hostname resolving to 169.254.169.254) is blocked. The async
+  // variant also DNS-resolves hostnames so poisoned-hostname SSRF is caught.
   if (baseUrl) {
-    const ssrf = validateLlmBaseUrl(baseUrl);
+    const allowLocalExemption = provenance === "user";
+    const ssrf = await resolveAndValidateLlmBaseUrl(baseUrl, allowLocalExemption);
     if (!ssrf.ok) {
       throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${baseUrl} (${ssrf.reason})`);
     }
@@ -187,6 +221,15 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
   // accurate per-model data. This catches new vision models (e.g. a Groq
   // vision model released after the code was written) that the hardcoded
   // per-provider flag would miss.
+  //
+  // On catalog lookup failure, FAIL SAFE toward the more conservative vision
+  // state (no screenshot gating) rather than silently trusting the hardcoded
+  // per-provider flag — that flag is the unreliable value that caused the
+  // screenshot-gating flip-flop bug (extractState skipped captureVisibleTab
+  // while navigatorCallDirect tried to embed a non-existent screenshot).
+  // We also persist a debug marker to `chrome.storage.local` so the failure
+  // survives the production build (console.* is stripped), giving operators a
+  // signal instead of an invisible revert to the unreliable flag.
   try {
     const visionCapable = await modelSupportsVision(resolvedModel, catalogProviderId);
     if (visionCapable !== result.supportsVision) {
@@ -195,9 +238,23 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
         supportsVision: visionCapable,
       };
     }
-  } catch {
-    // Catalog lookup failed (offline, network error) — keep the provider's
-    // hardcoded supportsVision.
+  } catch (catErr) {
+    const reason = catErr instanceof Error ? catErr.message : String(catErr);
+    if (typeof chrome !== "undefined" && chrome.storage?.local) {
+      try {
+        await chrome.storage.local.set({
+          lastVisionCatalogFailure: {
+            provider,
+            model: resolvedModel,
+            reason,
+            at: Date.now(),
+          },
+        });
+      } catch {
+        /* storage may be unavailable — non-fatal */
+      }
+    }
+    result = { ...result, supportsVision: false };
   }
 
   return result;
@@ -223,17 +280,29 @@ export async function readProviderConfig(): Promise<ProviderConfig | null> {
     const sres = await chrome.storage.session.get(["apiKey"]);
     apiKey = (sres.apiKey as string) || "";
   }
-  if (!apiKey) apiKey = (res.apiKey as string) || "";
-  const provider = (res.provider as string) || "";
+  if (!apiKey) apiKey = normalizeString(res.apiKey);
+  const provider = normalizeString(res.provider);
   if (!provider) return null; // no provider set → unconfigured user
-  const model = (res.model as string) || "";
-  const baseUrl = (res.baseUrl as string) || "";
-  const resourceName = (res.resourceName as string) || "";
+  const model = normalizeString(res.model);
+  const baseUrl = normalizeString(res.baseUrl);
+  const resourceName = normalizeString(res.resourceName);
   return {
     provider,
     apiKey,
     model,
     baseUrl: baseUrl || undefined,
     resourceName: resourceName || undefined,
+    provenance: "user",
   };
+}
+
+/**
+ * Coerce a stored value to a string. `chrome.storage` access returns `unknown`,
+ * and a corrupted / coerced payload (e.g. a number or boolean from a buggy
+ * synced-settings write) would otherwise flow through `as string` unchanged and
+ * reach the provider constructors as the wrong type. Reject non-string values
+ * explicitly (returning "") so downstream code always sees a real string.
+ */
+function normalizeString(v: unknown): string {
+  return typeof v === "string" ? v : "";
 }

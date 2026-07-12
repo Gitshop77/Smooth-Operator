@@ -63,8 +63,11 @@ async function getCustomPlannerPrompt(): Promise<string | undefined> {
 
 async function getVisionMode(): Promise<"disabled" | "always" | "adaptive"> {
   if (cachedVisionMode !== null) return cachedVisionMode as "disabled" | "always" | "adaptive";
+  // `visionMode` is the single source of truth (disabled | always | adaptive).
+  // `enableLocalVision` is a legacy key kept only for one-time backward
+  // compatibility: if `visionMode` is unset but `enableLocalVision` was true,
+  // treat it as "always". New code should only ever write `visionMode`.
   const { visionMode, enableLocalVision } = await chrome.storage.local.get(["visionMode", "enableLocalVision"]);
-  // Backward compat: if visionMode is unset but enableLocalVision is true, treat as "always"
   const mode = (visionMode as string) || (enableLocalVision === true ? "always" : "disabled");
   cachedVisionMode = mode;
   return mode as "disabled" | "always" | "adaptive";
@@ -86,8 +89,11 @@ async function getProvider(): Promise<LLMProvider> {
       "No LLM provider configured. Open the extension Options page, choose a provider, and enter your API key."
     );
   }
-  // Cache key: provider + apiKey + model + baseUrl. If any change, rebuild.
-  const key = `${config.provider}|${config.apiKey}|${config.model}|${config.baseUrl ?? ""}`;
+  // Cache key: provider + apiKey + model + baseUrl + resourceName. If any
+  // change, rebuild. `resourceName` is included so an Azure resource swap
+  // (which changes the constructed endpoint) forces a provider rebuild rather
+  // than reusing a stale cached instance bound to the old resource.
+  const key = `${config.provider}|${config.apiKey}|${config.model}|${config.baseUrl ?? ""}|${config.resourceName ?? ""}`;
   if (cachedProvider && key === cachedConfigKey) return cachedProvider;
   // If a build is already in-flight for THIS key, await it instead of
   // starting a second concurrent buildProvider() call.

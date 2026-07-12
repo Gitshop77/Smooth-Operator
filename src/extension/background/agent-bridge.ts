@@ -230,7 +230,16 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
   const cfgCostCap = (typeof stored.costCap === "number" && Number.isFinite(stored.costCap) && stored.costCap >= 0)
     ? stored.costCap
     : DEFAULT_COST_CAP;
-  const cfgMaxSteps = clampInt(stored.maxSteps, maxSteps, 1, 1000);
+  // Clamp the effective step budget to BOTH the absolute safety bound (1..1000,
+  // enforced by `clampInt` + the Zod schema) AND the active mode's cap. The
+  // per-mode `maxSteps` (e.g. `restricted: 30`, `standard: 100`,
+  // `full_agentic: 500` in `modes.ts`) is a documented trust-boundary limit —
+  // "restricted" is meant to keep the blast radius small on sensitive sites — so
+  // a user-controlled `chrome.storage.local` value (up to 1000) must never
+  // override it. Without this `Math.min`, the mode cap is dead: the loop honors
+  // only the user value (see finding: zombie maxSteps flag).
+  const modeCap = MODE_CONFIGS[effectiveMode].maxSteps;
+  const cfgMaxSteps = Math.min(clampInt(stored.maxSteps, maxSteps, 1, 1000), modeCap);
 
   const runState: RunState = {
     task,
@@ -291,6 +300,14 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     // will catch a genuine abort on the next step.
   }
 
+  // Wire the AgentMetricsCallback (Phase 8) to track detailed run metrics.
+  // Declared at function scope (NOT inside the try below) so the `finally`
+  // block can read its snapshot after the run ends — a variable declared
+  // inside the try would be out of scope in `finally` (broken by the
+  // reconcile rewrite). The orchestrator's onEvent stream continues to fire
+  // exactly as before — the callback is additive.
+  let metricsCallback: import("@/lib/agent/callbacks/metrics").AgentMetricsCallback | undefined;
+
   try {
     // Reset the SW-side Vision init-failed flag at the start of each new run
     // so a previously-transient init failure (disk full, WebGPU OOM, …) gets
@@ -307,10 +324,6 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     // Idempotent with the cleanupRun clear — double-clear is a no-op.
     clearVisionElementsCacheForNewRun();
 
-    // Wire the AgentMetricsCallback (Phase 8) to track detailed run metrics.
-    // The orchestrator's onEvent stream continues to fire exactly as before —
-    // the callback is additive.
-    let metricsCallback: import("@/lib/agent/callbacks/metrics").AgentMetricsCallback | undefined;
     try {
       const { AgentMetricsCallback } = await import("@/lib/agent/callbacks/metrics");
       metricsCallback = new AgentMetricsCallback();
@@ -352,5 +365,22 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
       releaseRunGuard,
       teardownScheduledVision,
     });
+    // Surface the detailed run metrics so the AgentMetricsCallback is not an
+    // orphaned accumulator: emit a concise summary to the side panel + run
+    // record after every run. (getMetrics()/reset() had no consumer before —
+    // the snapshot was silently discarded. See finding: metrics feature orphaned.)
+    if (metricsCallback) {
+      try {
+        const m = metricsCallback.getMetrics();
+        const summary =
+          `Run metrics — steps: ${m.totalSteps}, actions: ${m.totalActions}, ` +
+          `tokens in/out: ${m.totalTokensIn}/${m.totalTokensOut}, ` +
+          `cost: $${m.totalCostUsd.toFixed(4)}, errors: ${m.errors.total}, ` +
+          `loop warnings: ${m.loopWarnings}, compactions: ${m.compactions}`;
+        sendEvent({ type: "info", message: summary });
+      } catch {
+        /* metrics snapshot unavailable — non-fatal */
+      }
+    }
   }
 }

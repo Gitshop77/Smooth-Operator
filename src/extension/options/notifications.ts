@@ -44,16 +44,22 @@ function persist(key: string, value: string | boolean): void {
   });
 }
 
-$("notifyOnCompletion")?.addEventListener("change", (e) =>
+// NOTE: `$` from @/extension/shared *throws* on a missing element, so the `?.`
+// after it was dead code that implied "skip if absent" while actually crashing
+// the Options page at load. Use `document.getElementById(...)?.` here instead so
+// the optional chaining is meaningful: a missing element is skipped gracefully
+// rather than throwing an uncaught error. (loadNotifications still uses `$`
+// because those required inputs must exist for the tab to function.)
+document.getElementById("notifyOnCompletion")?.addEventListener("change", (e) =>
   persist(STORAGE_KEYS.notifyOnCompletion, (e.target as HTMLInputElement).checked),
 );
-$("notifyOnError")?.addEventListener("change", (e) =>
+document.getElementById("notifyOnError")?.addEventListener("change", (e) =>
   persist(STORAGE_KEYS.notifyOnError, (e.target as HTMLInputElement).checked),
 );
-$("notifyOnTakeover")?.addEventListener("change", (e) =>
+document.getElementById("notifyOnTakeover")?.addEventListener("change", (e) =>
   persist(STORAGE_KEYS.notifyOnTakeover, (e.target as HTMLInputElement).checked),
 );
-$("webhookUrl")?.addEventListener("change", (e) => {
+document.getElementById("webhookUrl")?.addEventListener("change", (e) => {
   // Defense-in-depth: the consumer (`fireNotifications`) already rejects
   // non-http(s)/malformed URLs at POST time, but validate at the input too so
   // a stored value is always safe regardless of future consumers.

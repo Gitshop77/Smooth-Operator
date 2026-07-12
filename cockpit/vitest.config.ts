@@ -20,20 +20,15 @@ export default defineConfig({
     testTimeout: 30_000,
     // Isolate each test file so module-level mocks (e.g. @/lib/db) don't leak.
     isolate: true,
+    // Coverage is opt-in: collected only when the suite is run with
+    // `--coverage`. The cockpit CI job does not currently invoke `--coverage`,
+    // so a `thresholds` gate here would be a silent no-op that gives false
+    // assurance of coverage protection. Thresholds are intentionally omitted
+    // until the CI job runs `npm test -- --coverage` (matching the root job),
+    // at which point a calibrated gate should be added here.
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],
-      // Modest baseline regression gate. Coverage is only collected when the
-      // suite is run with `--coverage`, so this does not affect normal test
-      // runs. Calibrate these numbers against a first `vitest --coverage`
-      // measurement; cockpit coverage is currently unmeasured and these are
-      // intentionally low to avoid immediately failing opt-in coverage runs.
-      thresholds: {
-        lines: 20,
-        statements: 20,
-        functions: 20,
-        branches: 10,
-      },
     },
   },
   resolve: {

@@ -7,9 +7,11 @@
  *   - `step - lastCompactionStep >= compactionStepInterval`, AND
  *   - `historyTextLength >= compactionCharThreshold`
  *
- * Keeps the first item (init) + last N items intact. Summarizes the middle
- * via a structured summarization prompt that preserves counts, errors, and
- * URLs but explicitly avoids inferring success that wasn't confirmed.
+ * Summarizes the oldest steps (including the FIRST item / init, so the summary
+ * keeps its context) and keeps the most recent `KEEP_RECENT` items intact.
+ * `partitionHistory` is the authority here — see its docstring. The
+ * summarization prompt preserves counts, errors, and URLs but explicitly avoids
+ * inferring success that wasn't confirmed.
  */
 
 import type { HistoryItem } from "../types";
@@ -37,6 +39,12 @@ Step history to summarize:`;
  * @param step                 Current step number.
  * @param lastCompactionStep   Step number of the last compaction (undefined = never).
  * @param historyTextLength    Current rendered-history length in characters.
+ *   NOTE: this should be the ACTUAL serialized/rendered length (e.g.
+ *   `renderHistoryForSummarization(...).length`), not a per-item estimate such
+ *   as `history.length * 500`. A non-validated proxy can drift far from the
+ *   real size once extracted content accumulates, defeating the context-window
+ *   protection this gate exists to provide. The caller (orchestrator) is
+ *   responsible for supplying a representative value.
  * @param interval             Minimum steps between compactions.
  * @param threshold            Minimum history length (chars) before compaction.
  */
@@ -47,6 +55,9 @@ export function shouldCompact(
   interval: number,
   threshold: number
 ): boolean {
+  // Guard against a non-validated / malformed length driving a safety-relevant
+  // decision: an infinite or negative value must never trigger compaction.
+  if (!Number.isFinite(historyTextLength) || historyTextLength < 0) return false;
   const stepGap = step - (lastCompactionStep ?? 0);
   return stepGap >= interval && historyTextLength >= threshold;
 }
@@ -103,8 +114,6 @@ export function buildCompactionRequest(history: HistoryItem[]): string {
   return `${SUMMARIZE_PROMPT}\n\n${renderHistoryForSummarization(toSummarize)}`;
 }
 
-/** Re-export PROMPT_TAGS from security.ts so existing importers keep resolving. */
-export { PROMPT_TAGS } from "../security";
 import { PROMPT_TAGS as PROMPT_TAGS_LIST } from "../security";
 
 /** Strip prompt-level XML tags (with or without attributes) from a string so

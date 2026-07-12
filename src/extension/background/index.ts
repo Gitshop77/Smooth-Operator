@@ -46,6 +46,9 @@ chrome.runtime.onInstalled.addListener(() => {
   // Warm the live models.dev catalog so cost tracking uses live rates.
   // pricing.ts no longer has a static table — rates come from the catalog.
   // Lazy import keeps the (large) pricing module out of the critical install path.
+  // NOTE: the catalog is fetched live at runtime (not bundled), so its current
+  // attribution/usage terms must be confirmed before any cached copy is
+  // redistributed — see THIRD_PARTY_LICENSES.md (models.dev entry).
   void import("../../lib/agent/llm/pricing").then((m) =>
     m.refreshPricingFromCatalog(),
   );

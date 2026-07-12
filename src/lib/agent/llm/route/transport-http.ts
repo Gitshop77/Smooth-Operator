@@ -219,7 +219,11 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: { framing: Fra
         const retryAfter = r.headers.get("retry-after");
         if (retryAfter) {
           const ms = parseRetryAfterHeader(retryAfter);
-          if (typeof ms === "number" && ms > 0) {
+          // Honour a zero delay (`Retry-After: 0`) as "retry immediately"
+          // — the doc promises a processed-0 value is honoured, so use
+          // `>= 0` rather than `> 0` (which would silently drop it and
+          // fall back to the default backoff).
+          if (typeof ms === "number" && ms >= 0) {
             (err as Error & { retryAfter?: number }).retryAfter = ms;
           }
         }

@@ -51,6 +51,39 @@ const CATALOG_URL = "https://models.dev/api.json";
 const CACHE_KEY = "__opencowork_models_dev_catalog";
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+/**
+ * Heuristic vision-capable model-name patterns (fallback used only when a
+ * model is NOT in the catalog). Hoisted to module scope so it is allocated
+ * once per process, not on every `modelSupportsVision` call.
+ *
+ * Word-boundary (`\b`) matching replaces the previous `name.includes(kw)`
+ * scan: a bare `includes("vl")` matched any id containing those two letters
+ * (e.g. a non-vision model whose name happened to include "vl"), feeding the
+ * wrong screenshot-gating path in `extractStateForRun`. Anchoring each token
+ * to a word boundary keeps the heuristic precise while still catching the
+ * common vision families (qwen-vl, deepseek-vl, gpt-4o, claude-3, gemini, …).
+ */
+const VISION_PATTERNS: RegExp[] = [
+  /\bvision\b/i,
+  /\bvl\b/i,
+  /\bllava\b/i,
+  /\bbakllava\b/i,
+  /\bmoondream\b/i,
+  /\bminicpm\b/i,
+  /\bpixtral\b/i,
+  /\bflorence\b/i,
+  /\bcogvlm\b/i,
+  /\bgpt-4o\b/i,
+  /\bgpt-5\b/i,
+  /\bclaude-3\b/i,
+  /\bclaude-4\b/i,
+  /\bclaude-sonnet\b/i,
+  /\bclaude-opus\b/i,
+  /\bclaude-haiku\b/i,
+  /\bgemini\b/i,
+  /\bgrok-2-vision\b/i,
+];
+
 interface CachedCatalog {
   data: Catalog;
   fetchedAt: number;
@@ -135,7 +168,12 @@ async function loadCatalog(force: boolean): Promise<Catalog> {
       const cached = await chrome.storage.local.get(CACHE_KEY);
       if (cached[CACHE_KEY]) {
         const entry = cached[CACHE_KEY] as CachedCatalog;
-        if (Date.now() - entry.fetchedAt < CACHE_TTL_MS) {
+        // Trust-boundary guard: a corrupted/compromised persisted entry must
+        // be re-validated before it is served. `isValidCatalog` rejects
+        // non-string `release_date` etc., which would otherwise crash the
+        // model picker (see `getModelsForProvider` below). Skip the cache and
+        // fall through to re-fetch rather than serving malformed data.
+        if (isValidCatalog(entry.data) && Date.now() - entry.fetchedAt < CACHE_TTL_MS) {
           memoryCache = entry.data;
           memoryCacheTime = entry.fetchedAt;
           return entry.data;
@@ -186,8 +224,10 @@ async function loadCatalog(force: boolean): Promise<Catalog> {
     if (typeof chrome !== "undefined" && chrome.storage?.local) {
       try {
         const cached = await chrome.storage.local.get(CACHE_KEY);
-        if (cached[CACHE_KEY]) {
-          return (cached[CACHE_KEY] as CachedCatalog).data;
+        const entry = cached[CACHE_KEY] as CachedCatalog | undefined;
+        // Re-validate stale cache too (same trust-boundary guard as above).
+        if (entry && isValidCatalog(entry.data)) {
+          return entry.data;
         }
       } catch { /* ignore */ }
     }
@@ -202,25 +242,35 @@ let memoryCacheTime = 0;
 /** In-flight fetch promise, memoized to dedupe concurrent callers. */
 let inflight: Promise<Catalog> | null = null;
 
-/** Most recent fetch/validation error, surfaced to the UI for staleness state. */
+/** Most recent fetch/validation error (used for the dev-console staleness warning). */
 let lastFetchError: Error | null = null;
-
-/** Returns the most recent `fetchCatalog` error (or null if the last fetch succeeded). */
-export function getLastFetchError(): Error | null {
-  return lastFetchError;
-}
 
 /**
  * Get all models for a specific provider from the catalog.
  * Returns an array of { id, name, ... } sorted by release date (newest first).
  */
 export async function getModelsForProvider(providerId: string): Promise<CatalogModel[]> {
-  const catalog = await fetchCatalog();
-  const provider = catalog[providerId];
-  if (!provider || !provider.models) return [];
-  return Object.values(provider.models)
-    .filter((m) => m.status !== "deprecated")
-    .sort((a, b) => b.release_date.localeCompare(a.release_date));
+  try {
+    const catalog = await fetchCatalog();
+    const provider = catalog[providerId];
+    if (!provider || !provider.models) return [];
+    return Object.values(provider.models)
+      .filter((m) => m.status !== "deprecated")
+      .sort((a, b) => {
+        // Defensive: a malformed cached entry could have a non-string
+        // `release_date`. Coerce to "" so `.localeCompare` never throws and
+        // the model picker degrades gracefully instead of crashing (mirrors
+        // the defensive `try/catch` in `getDefaultModelForProvider`).
+        const da = typeof a.release_date === "string" ? a.release_date : "";
+        const db = typeof b.release_date === "string" ? b.release_date : "";
+        return db.localeCompare(da);
+      });
+  } catch {
+    // Catalog unreachable (offline, network error, or a stale cache that
+    // failed re-validation) — the picker should show an empty list rather
+    // than throw and break the UI.
+    return [];
+  }
 }
 
 /**
@@ -354,29 +404,11 @@ export async function modelSupportsVision(modelId: string, providerId?: string):
 
   // Fallback: heuristic name-based check for common vision-capable model
   // families. This catches local Ollama models, newly-released models not yet
-  // in the catalog, and custom OpenAI-compatible endpoints.
+  // in the catalog, and custom OpenAI-compatible endpoints. `VISION_PATTERNS`
+  // is the module-scope, word-boundary-anchored list (see its doc-comment for
+  // why `includes` was replaced).
   const name = modelId.toLowerCase();
-  const VISION_KEYWORDS = [
-    "vision",        // llama3.2-vision, gpt-4-vision, etc.
-    "vl",            // qwen-vl, deepseek-vl (Vision-Language)
-    "llava",         // Ollama llava family
-    "bakllava",      // Ollama bakllava
-    "moondream",     // Ollama moondream
-    "minicpm",       // minicpm-o (vision-capable)
-    "pixtral",       // Mistral Pixtral
-    "florence",      // Microsoft Florence
-    "cogvlm",        // CogVLM
-    "gpt-4o",        // OpenAI GPT-4o family (all support vision)
-    "gpt-5",         // OpenAI GPT-5 family (all support vision)
-    "claude-3",      // Anthropic Claude 3+ (all support vision)
-    "claude-4",      // Anthropic Claude 4+ (all support vision)
-    "claude-sonnet", // Claude Sonnet (all support vision)
-    "claude-opus",   // Claude Opus (all support vision)
-    "claude-haiku",  // Claude Haiku (all support vision)
-    "gemini",        // Google Gemini (all support vision)
-    "grok-2-vision", // xAI Grok-2 Vision
-  ];
-  return VISION_KEYWORDS.some((kw) => name.includes(kw));
+  return VISION_PATTERNS.some((re) => re.test(name));
 }
 
 /**

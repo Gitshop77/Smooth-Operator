@@ -20,7 +20,7 @@ import { DEFAULT_CONFIG } from "../types";
 import { classifyError, friendlyErrorMessage } from "../errors";
 import { LoopDetector } from "./loop-detector";
 import { earlyStop, DEFAULT_EARLY_STOP_THRESHOLDS } from "./early-stop";
-import { shouldCompact } from "./compaction";
+import { shouldCompact, renderHistoryForSummarization } from "./compaction";
 import { CallbackDispatcher } from "../callbacks";
 
 // ─── Local imports for the coordinator ──────────────────────────────────────
@@ -99,7 +99,16 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
   let config: import("../types").AgentConfig;
   try {
     const { validateConfig } = await import("../config");
-    config = validateConfig({ ...DEFAULT_CONFIG, ...deps.config });
+    const validatedConfig = validateConfig({ ...DEFAULT_CONFIG, ...deps.config });
+    // The Zod schema keeps `enableJudge` OPTIONAL in its output type
+    // (`enableJudge: z.boolean().optional()`), so `AgentConfigValidated` has
+    // `enableJudge?: boolean`. But `config` is typed `AgentConfig`, which
+    // requires `enableJudge: boolean`. The runtime value is always present
+    // because `DEFAULT_CONFIG` (merged in first) sets it to `true`, so we
+    // re-assert a concrete boolean here. This keeps the shared `AgentConfig`
+    // type intact while satisfying the assignment (regression from the
+    // reconcile rewrite).
+    config = { ...validatedConfig, enableJudge: validatedConfig.enableJudge ?? DEFAULT_CONFIG.enableJudge };
   } catch (e) {
     // `validateConfig` (Zod schema) enforces hard bounds (maxSteps 1–1000,
     // maxActionsPerStep 1–50, maxFailures >= 1, compactionCharThreshold >= 1000).
@@ -608,9 +617,11 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
     await safeDispatch("stepEnd", () => dispatcher!.stepEnd(makeCtx(state), results));
 
     // loopWarningCount is emitted as a "loop-warning" event by
-    // executeActionQueue; buildInjectionBlock at the next step's start
-    // already injects the loop-detection nudge via injectLoopDetectionNudge.
-    // Setting pendingLoopWarning here would duplicate the warning.
+    // executeActionQueue; the next step's injected nudges (built from
+    // buildPreObserveNudges / buildPostObserveNudges in
+    // context/injection-points.ts) already inject the loop-detection nudge via
+    // injectLoopDetectionNudge. Setting pendingLoopWarning here would duplicate
+    // the warning.
 
     // Takeover pause
     const takeoverResult = results.find((r) => r.action.type === "takeover");
@@ -673,12 +684,15 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
     state.step++;
     state.navigatorStepsSincePlanner++;
 
-    // Compaction check — estimate history size from the last rendered history
-    // rather than JSON.stringify on every step (which is O(N²) over the run).
+    // Compaction check — measure the ACTUAL rendered-history size rather than
+    // estimating `length * 500`. The estimate systematically undershoots once
+    // `extract`/evaluation/memory/goal/action results accumulate, so compaction
+    // fired far later than `compactionCharThreshold` intended and the history
+    // could briefly exceed the model's context window before it kicked in.
+    // Rendering is O(N) per step (no worse than the old estimate) and gives
+    // `shouldCompact` the real character count it documents it expects.
     if (config.enableCompaction) {
-      // Quick estimate: average ~500 chars per history item (results +
-      // messages). Avoids serializing the full array every step.
-      const historyLen = state.navigatorHistory.length * 500;
+      const historyLen = renderHistoryForSummarization(state.navigatorHistory).length;
       const contextBudgetChars = 400_000;
       const approachingContextLimit = historyLen > contextBudgetChars && (state.step - (state.lastCompactionStep ?? 0)) >= 3;
       if (approachingContextLimit) {

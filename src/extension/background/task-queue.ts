@@ -79,7 +79,12 @@ export async function handleScheduledTaskFire(taskId: string): Promise<void> {
     const { startRun } = await import("./agent-bridge");
     await startRun({ task: task.task, maxSteps: 100, mode: "standard", isScheduledTaskRun: true });
   } catch (e) {
-    console.error("[scheduled-tasks] failed to handle alarm fire:", e);
+    // Log the message only (not the raw Error object) to avoid leaking stack
+    // traces / absolute filesystem paths into shared logs.
+    console.error(
+      "[scheduled-tasks] failed to handle alarm fire:",
+      e instanceof Error ? e.message : String(e),
+    );
     // release the synchronous RUN-guard flag on failure. The flag
     // was set at line 43 above (`setRunStarting(true)`) BEFORE `startRun`
     // was invoked. If anything between there and the orchestrator's own

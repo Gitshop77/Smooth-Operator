@@ -157,6 +157,13 @@ export function scoreElement(
 /** Default cap on the number of elements the summarizer keeps. */
 export const DEFAULT_MAX_SUMMARIZED_ELEMENTS = 30;
 
+/**
+ * Hard floor on how many elements we keep when falling back (too few keywords
+ * matched). Even on fallback we must not return the FULL DOM — a bounded,
+ * score-ordered subset is always smaller and still useful to the navigator.
+ */
+export const HARD_MIN_ELEMENTS = 50;
+
 /** Default minimum `elementsText` length to trigger the summarizer at all. */
 export const DEFAULT_MIN_HTML_LENGTH = 10_000;
 
@@ -219,9 +226,16 @@ export function summarizeDom(input: SummarizeDomInput): SummarizeDomOutput {
   const pool = fellBack ? scored : nonZero;
   // Sort by score desc, then by original index asc for stable ordering.
   pool.sort((a, b) => b.score - a.score || a.el.index - b.el.index);
-  // When falling back (too few task-relevant matches), keep ALL elements
-  // — a wrong filter is worse than no filter. Otherwise cap at maxElements.
-  const kept = fellBack ? pool : pool.slice(0, maxElements);
+  // When NOT falling back, cap at maxElements. When falling back (too few
+  // task-relevant matches), we used to keep EVERY element — but that returns
+  // the full DOM for zero savings while still paying the O(elements) scoring
+  // pass, and the navigator silently ignores it anyway. Instead we still cap to
+  // `maxElements` (ordered by score), guaranteeing a bounded, smaller-than-full
+  // payload: returning fewer elements is always preferable to sending the
+  // entire DOM. A hard floor (`HARD_MIN_ELEMENTS`) ensures we still surface a
+  // reasonable number of the best elements rather than an over-aggressive 1-2.
+  const cap = fellBack ? Math.max(maxElements, HARD_MIN_ELEMENTS) : maxElements;
+  const kept = pool.slice(0, cap);
   // Re-sort the kept set by index so the navigator sees them in DOM order.
   kept.sort((a, b) => a.el.index - b.el.index);
 
@@ -230,7 +244,7 @@ export function summarizeDom(input: SummarizeDomInput): SummarizeDomOutput {
 
   const intentStr = [...intents].join("+") || "none";
   const summary = fellBack
-    ? `HTML summarizer: kept all ${kept.length} elements (too few task-relevant matches — falling back to full DOM).`
+    ? `HTML summarizer: too few task-relevant matches — kept top ${kept.length}/${elements.length} elements by score (capped, not full DOM).`
     : `HTML summarizer: kept ${kept.length}/${elements.length} elements relevant to ${intentStr} intent (${keywords.size} keywords).`;
 
   return { keptIndices, keptElements, summary, fellBack };

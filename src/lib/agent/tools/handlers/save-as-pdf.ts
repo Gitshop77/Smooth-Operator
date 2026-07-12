@@ -33,9 +33,10 @@ export async function handleSaveAsPdf(
   // it via `chrome.downloads.download`. In the in-page demo (no
   // `chrome.runtime.id`), return an honest error.
   //
-  // NB: the wire field is `fileName` (read by the SW's `SaveAsPdfMessage`),
-  // mapped from the agent schema's snake_case `action.file_name`.
-  const fileName = action.file_name;
+  // The agent schema field is snake_case `action.file_name`; the SW's
+  // `SaveAsPdfMessage` reads it off the wire as `fileName`. The wire field is
+  // named explicitly below so the mapping is unambiguous at the send site.
+  const file_name = action.file_name;
   if (typeof chrome === "undefined" || !chrome.runtime?.id) {
     return {
       action,
@@ -44,7 +45,7 @@ export async function handleSaveAsPdf(
     };
   }
   try {
-    const raw = await chrome.runtime.sendMessage({ type: "SAVE_AS_PDF", fileName });
+    const raw = await chrome.runtime.sendMessage({ type: "SAVE_AS_PDF", fileName: file_name });
     const parsed = saveAsPdfResponseSchema.safeParse(raw);
     if (!parsed.success) {
       return {

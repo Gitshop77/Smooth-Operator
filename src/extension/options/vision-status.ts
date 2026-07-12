@@ -131,6 +131,10 @@ document.querySelectorAll('input[name="visionMode"]').forEach((radio) => {
       });
       if (!ok) {
         ($("visionMode_disabled") as HTMLInputElement).checked = true;
+        // Persist the reverted (disabled) state so the radio UI and stored
+        // config stay consistent — otherwise the UI would show "disabled"
+        // while storage still held the previously-selected mode.
+        await chrome.storage.local.set({ visionMode: "disabled", enableLocalVision: false });
         return;
       }
     }
@@ -147,7 +151,9 @@ document.querySelectorAll('input[name="visionMode"]').forEach((radio) => {
     if (mode !== "disabled") {
       await ensureVisionAssistant();
     }
-  } catch {
-    /* storage unavailable — non-fatal */
+  } catch (e) {
+    // Storage read failed (corruption / quota / policy) — local-vision init
+    // is skipped, but we surface the error so the failure is diagnosable.
+    console.warn("[options] vision init storage read failed:", e);
   }
 })();

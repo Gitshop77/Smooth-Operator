@@ -16,6 +16,12 @@
  * structured-output spec set this `true`.
  */
 
+import {
+  isAllowedLlmBaseUrl,
+  validateLlmBaseUrl,
+  LOCAL_PROVIDER_BASE_URLS,
+} from "../route/ssrf";
+
 export interface OpenAICompatibleProfile {
   readonly provider: string;
   readonly baseURL: string;
@@ -53,14 +59,54 @@ export const byProvider: Record<string, OpenAICompatibleProfile> = Object.fromEn
 // (SSRF guard): a user-supplied `baseURL` is untrusted input. Validate it
 // before it is used to build a provider profile / endpoint, so the service
 // worker cannot be steered at a loopback, RFC1918, or cloud-metadata address.
-// Curated profiles (Ollama/LiteLLM loopback defaults) are built directly from
-// `profiles` and never pass through this check — `isAllowedLlmBaseUrl` keeps
-// their legitimate local endpoints working while rejecting other internal URLs.
-import { isAllowedLlmBaseUrl } from "../route/ssrf";
+//
+// The curated `profiles` table (Ollama/LiteLLM loopback defaults) is built
+// directly from `profiles` and never passes through this check. The localhost
+// exemption below is therefore scoped to those two local providers only — any
+// other provider id (or an unknown provenance) is held to the strict
+// `validateLlmBaseUrl` policy that rejects loopback/RFC1918/metadata URLs.
+const LOCAL_PROVIDER_IDS = new Set(["ollama", "litellm"]);
 
-export const assertSafeUserBaseURL = (baseURL: string | undefined): void => {
+/** True iff `url`'s origin exactly matches a curated local-provider endpoint. */
+function isCuratedLocalOrigin(url: string): boolean {
+  try {
+    const origin = new URL(url).origin;
+    return LOCAL_PROVIDER_BASE_URLS.some((curated) => new URL(curated).origin === origin);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validate a USER-SUPPLIED `baseURL` override before it is used to build a
+ * provider profile / endpoint.
+ *
+ * The localhost exemption (Ollama `http://localhost:11434`, LiteLLM
+ * `http://localhost:4000`) is ONLY granted when `provider` is explicitly one
+ * of those local providers AND the URL matches their exact curated origin. For
+ * every other provider — or when provenance is unknown (`provider` omitted) —
+ * the strict {@link validateLlmBaseUrl} policy is applied, which rejects
+ * loopback / RFC1918 / cloud-metadata URLs. This closes the hole where an
+ * injected `http://localhost:11434` could pass the guard when routed through an
+ * arbitrary provider id (e.g. `deepseek`).
+ *
+ * Note: the final fetch URL is also re-checked at the transport layer
+ * (`transport-http.ts`); that enforcement point is the authoritative
+ * defense-in-depth check and is tracked separately.
+ */
+export const assertSafeUserBaseURL = (
+  baseURL: string | undefined,
+  provider?: string,
+): void => {
   if (!baseURL) return; // no user-supplied override → use the curated profile
-  if (!isAllowedLlmBaseUrl(baseURL)) {
-    throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${baseURL}`);
+  if (provider && LOCAL_PROVIDER_IDS.has(provider) && isCuratedLocalOrigin(baseURL)) {
+    if (!isAllowedLlmBaseUrl(baseURL)) {
+      throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${baseURL}`);
+    }
+    return;
+  }
+  const res = validateLlmBaseUrl(baseURL);
+  if (!res.ok) {
+    throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${baseURL} (${res.reason})`);
   }
 };

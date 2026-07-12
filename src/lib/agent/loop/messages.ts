@@ -9,7 +9,7 @@
  * cheap.
  */
 
-import type { HistoryItem, TabInfo } from "../types";
+import type { HistoryItem, TabInfo, ActionResult } from "../types";
 import { wrapUntrusted, scanForInjection } from "../security";
 import { redactSecrets } from "../secrets";
 
@@ -19,6 +19,25 @@ const NAVIGATOR_HISTORY_LIMIT = 12;
 const PLANNER_HISTORY_LIMIT = 8;
 /** Max chars of extracted content surfaced inline per action result. */
 const EXTRACTED_CONTENT_INLINE_LIMIT = 2000;
+
+/**
+ * Memoize redacted `extractedContent` by `ActionResult` identity. History
+ * items are stable object references across navigator steps, so the same
+ * `extractedContent` is re-redacted on every step — an O(N²) scan over a run.
+ * Caching the redaction (keyed by the result object) lets repeated steps reuse
+ * the prior redaction instead of re-scanning (finding: repeated per-step work
+ * in buildNavigatorUserMessage). A `WeakMap` keeps the cache bounded and
+ * GC-friendly — no module-global run state.
+ */
+const redactionCache = new WeakMap<object, string>();
+async function redactExtractedCached(r: ActionResult): Promise<ActionResult> {
+  if (!r.extractedContent) return r;
+  const cached = redactionCache.get(r);
+  if (cached !== undefined) return { ...r, extractedContent: cached };
+  const redacted = await redactSecrets(r.extractedContent);
+  redactionCache.set(r, redacted);
+  return { ...r, extractedContent: redacted };
+}
 
 /** Format a single tab as a one-line summary for the LLM. */
 function formatTab(t: TabInfo): string {
@@ -165,12 +184,7 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
   // provider on the next step.
   const redactedHistory = await Promise.all(history.map(async (h) => {
     if (!h.results || h.results.length === 0) return h;
-    const results = await Promise.all(h.results.map(async (r) => {
-      if (r.extractedContent) {
-        return { ...r, extractedContent: await redactSecrets(r.extractedContent) };
-      }
-      return r;
-    }));
+    const results = await Promise.all(h.results.map((r) => redactExtractedCached(r)));
     return { ...h, results };
   }));
 
@@ -203,8 +217,16 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
   // the summary of older history items — without rendering it here, the
   // compaction LLM call was paid for but its output was discarded, and the
   // navigator lost all pre-compaction context.
-  const compactedMemoryBlock = args.compactedMemory
-    ? `\n<compacted_memory>\n${wrapUntrusted(args.compactedMemory)}\n</compacted_memory>`
+  // Redact secrets from the compacted summary before it reaches the model: the
+  // compaction path summarizes raw extracted content (which may contain
+  // substituted secrets that round-tripped back into history), so without this
+  // a redacted secret could leak straight back to the provider (finding:
+  // secrets leak through the compaction summarization path).
+  const redactedCompacted = args.compactedMemory
+    ? await redactSecrets(args.compactedMemory)
+    : undefined;
+  const compactedMemoryBlock = redactedCompacted
+    ? `\n<compacted_memory>\n${wrapUntrusted(redactedCompacted)}\n</compacted_memory>`
     : "";
 
   return `<user_request>

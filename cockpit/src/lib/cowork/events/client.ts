@@ -38,8 +38,20 @@ function getCoworkEventsToken(): string {
   // server-to-server relays to work end-to-end with a single configured secret.
   // This still fails closed if BOTH are unset/empty — we never silently relay
   // with the well-known dev-token.
+  //
+  // SECURITY WARNING: if COWORK_UI_TOKEN is mirrored into
+  // NEXT_PUBLIC_COWORK_UI_TOKEN (as the auth middleware reads it from the
+  // browser), this server-to-server relay would be using a secret that is
+  // shipped in the client bundle. Surface that fact so operators notice the
+  // unsafe default rather than it silently "working".
   const uiToken = process.env.COWORK_UI_TOKEN;
   if (uiToken && uiToken.length > 0) {
+    console.warn(
+      "[cowork] COWORK_EVENT_TOKEN is unset — relaying to the cowork-events " +
+        "mini-service with COWORK_UI_TOKEN. If COWORK_UI_TOKEN is also exposed via " +
+        "NEXT_PUBLIC_COWORK_UI_TOKEN, the server-to-server secret is embedded in the " +
+        "shipped browser bundle. Prefer setting COWORK_EVENT_TOKEN for relays.",
+    );
     return uiToken;
   }
   throw new Error(

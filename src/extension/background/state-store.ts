@@ -134,8 +134,8 @@ export function getDomainConfig(): UrlPolicyConfig {
 // sleeps (or the display turns off + OS suspends), `chrome.alarms.onAlarm`
 // never fires — the scheduled task is silently skipped. To bridge this gap,
 // `requestKeepAwake()` calls `chrome.power.requestKeepAwake("system")` whenever
-// at least one enabled scheduled task exists, and `releaseKeepAwake()` calls
-// `chrome.power.releaseKeepAwake()` when an in-flight run completes.
+// at least one enabled scheduled task exists, and `maybeReleaseKeepAwake()`
+// releases the lock only when no enabled scheduled tasks remain.
 //
 // This cannot wake a CLOSED laptop — Chrome itself must be running for the
 // service worker to receive the alarm. The "system" level prevents the OS
@@ -155,8 +155,8 @@ export function getDomainConfig(): UrlPolicyConfig {
  * check — that's harmless.
  *
  * Uses a dynamic import of `@/lib/agent/scheduled-tasks` to avoid a circular
- * dependency (scheduled-tasks.ts statically imports this module's
- * `releaseKeepAwake`).
+ * dependency (scheduled-tasks.ts dynamically imports this module's
+ * `maybeReleaseKeepAwake`).
  */
 export async function requestKeepAwake(): Promise<void> {
   try {
@@ -171,31 +171,6 @@ export async function requestKeepAwake(): Promise<void> {
 }
 
 /**
- * R9-A: Release the system keep-awake lock unconditionally. The caller is
- * responsible for deciding whether releasing is appropriate — if other
- * scheduled tasks remain armed, the caller should check `listScheduledTasks`
- * first and skip the release (so the OS stays awake pending the next alarm).
- *
- * Called from:
- *   - `scheduled-tasks.ts` disable path + `options/scheduled-tasks.ts` delete
- *     path (after an inline `listScheduledTasks` check confirms no other
- *     enabled tasks remain)
- *
- * NOTE: `agent-bridge.ts`'s `finally` block uses {@link maybeReleaseKeepAwake}
- * (conditional) instead of this unconditional release — releasing after every
- * run would drop the lock between scheduled-task fires, allowing the system to
- * sleep through the next alarm. Use this function ONLY when the caller has
- * already confirmed no other enabled tasks remain.
- */
-export function releaseKeepAwake(): void {
-  try {
-    chrome.power.releaseKeepAwake();
-  } catch {
-    /* `chrome.power` unavailable or non-extension context — non-fatal. */
-  }
-}
-
-/**
  * R9-B: Release the system keep-awake lock IF AND ONLY IF no enabled
  * scheduled tasks remain armed. Used by `agent-bridge.ts`'s `finally` block
  * after a run completes — covers both "user clicked Stop after a manual run"
@@ -203,14 +178,14 @@ export function releaseKeepAwake(): void {
  * (other tasks still armed → keep the lock so the system doesn't sleep
  * through the next alarm).
  *
- * Without this conditional check, the unconditional `releaseKeepAwake()` in
- * the `finally` block would release the lock after every scheduled-task run,
- * defeating the purpose of `requestKeepAwake("system")` — the system could
- * sleep between fires and miss subsequent alarms entirely (alarms only fire
- * while Chrome is running, and Chrome can't run if the OS is asleep).
+ * Without this conditional check, an unconditional release in the `finally`
+ * block would drop the lock after every scheduled-task run, defeating the
+ * purpose of `requestKeepAwake("system")` — the system could sleep between
+ * fires and miss subsequent alarms entirely (alarms only fire while Chrome is
+ * running, and Chrome can't run if the OS is asleep).
  *
  * Uses a dynamic import of `@/lib/agent/scheduled-tasks` to avoid a circular
- * dependency (scheduled-tasks.ts statically imports this module).
+ * dependency (scheduled-tasks.ts dynamically imports this module).
  */
 export async function maybeReleaseKeepAwake(): Promise<void> {
   try {

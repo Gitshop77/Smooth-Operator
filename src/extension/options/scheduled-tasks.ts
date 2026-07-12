@@ -1,24 +1,29 @@
 /**
  * options/scheduled-tasks.ts — schedule form + chrome.alarms arming.
  *
- * Reads/writes the persisted scheduled-task list, renders the existing-task
- * rows, computes the next-fire delay for daily/weekly schedules, and arms
- * chrome.alarms so the background service worker can fire them.
+ * Reads/writes the persisted scheduled-task list and renders the existing-task
+ * rows. All alarm arming is delegated to the canonical `saveScheduledTask` /
+ * `listScheduledTasks` in src/lib/agent/scheduled-tasks.ts so the Options page
+ * and the background service worker share ONE source of truth for arming
+ * semantics (enabled check, clear-before-arm, keep-awake bookkeeping).
+ *
+ * This file deliberately keeps NO local copy of the arming logic: that was the
+ * root cause of a prior disable-leak (a disabled task left its chrome.alarm
+ * armed and a keep-awake lock held). Keeping arming canonical makes that class
+ * of bug impossible.
  *
  * P3: validation errors use the styled modal; visibility toggles use the
  * `is-hidden` class instead of inline `style.display`.
  */
 
 import type { ScheduledTask, ScheduledTaskSchedule } from "@/lib/agent/scheduled-tasks";
-import { computeNextFire as computeNextFireCanonical } from "@/lib/agent/scheduled-tasks";
+import { listScheduledTasks, saveScheduledTask } from "@/lib/agent/scheduled-tasks";
 import { $, escapeHtml } from "@/extension/shared";
 import { STORAGE_KEYS } from "./settings-sync";
 import { alertModal } from "./modal";
-import { requestKeepAwake, maybeReleaseKeepAwake } from "@/extension/background/state-store";
+import { maybeReleaseKeepAwake } from "@/extension/background/state-store";
 
 const ALARM_PREFIX = "open_cowork_scheduled_";
-const MINUTES_PER_DAY = 24 * 60;
-const MINUTES_PER_WEEK = 7 * MINUTES_PER_DAY;
 const DEFAULT_HOUR = 9;
 const DEFAULT_MINUTE = 0;
 const DEFAULT_DAY_OF_WEEK = 1;
@@ -47,11 +52,9 @@ $("scheduleType").addEventListener("change", () => {
 
 // ─── Scheduled tasks ───────────────────────────────────────────────────────
 
-async function readScheduledTasks(): Promise<ScheduledTask[]> {
-  const res = await chrome.storage.local.get(STORAGE_KEYS.scheduledTasks);
-  return (res[STORAGE_KEYS.scheduledTasks] as ScheduledTask[]) || [];
-}
-
+/** Persist the full task list. Used by the delete path only — add/toggle go
+ *  through the canonical `saveScheduledTask`, which also arms/disarms the
+ *  alarm and manages the keep-awake lock. */
 async function writeScheduledTasks(tasks: ScheduledTask[]): Promise<void> {
   await chrome.storage.local.set({ [STORAGE_KEYS.scheduledTasks]: tasks });
 }
@@ -68,7 +71,7 @@ function formatSchedule(s: ScheduledTaskSchedule): string {
 
 /** Render the scheduled tasks list. Call after every mutation. */
 export async function renderSchedule(): Promise<void> {
-  const tasks = await readScheduledTasks();
+  const tasks = await listScheduledTasks();
   const list = $("scheduleList") as HTMLDivElement;
   list.innerHTML = "";
   if (tasks.length === 0) {
@@ -93,84 +96,30 @@ export async function renderSchedule(): Promise<void> {
       } catch (e) {
         console.warn("[options] alarms.clear failed:", e);
       }
+      // `maybeReleaseKeepAwake` internally checks whether any enabled task
+      // remains armed before releasing the OS power lock.
       void maybeReleaseKeepAwake();
       await renderSchedule();
     });
     enableBtn.addEventListener("click", async () => {
+      // Flip enabled and persist through the canonical `saveScheduledTask`,
+      // which delegates arming to `scheduleAlarm`:
+      //   - enabling → arms the alarm + requests the keep-awake lock;
+      //   - disabling → clears the alarm + releases the keep-awake lock IF no
+      //     other enabled task remains.
+      // This is the single source of truth for arming, so a disabled task can
+      // never leave an armed alarm or a leaked keep-awake lock.
       t.enabled = !t.enabled;
-      await writeScheduledTasks(tasks);
-      // Mirror the background's arming semantics: re-arm the alarm+keep-awake
-      // lock when enabling, and disarm + release the lock when disabling so a
-      // disabled task neither keeps waking the service worker nor holds the OS
-      // awake (previously the alarm stayed armed and the keep-awake lock leaked).
-      if (t.enabled) {
-        await armAlarm(t);
-      } else {
-        await disarmAlarm(t.id);
+      try {
+        await saveScheduledTask(t);
+      } catch (e) {
+        console.warn("[options] saveScheduledTask failed:", e);
+        // Revert the in-memory flip so the re-render reflects persisted state.
+        t.enabled = !t.enabled;
       }
       await renderSchedule();
     });
     list.appendChild(item);
-  }
-}
-
-/** Minimum delay (ms) for the next fire — guards against scheduling in the
- *  immediate past when `now` ticks forward between compute + alarm create.
- *  Mirrors the canonical constant in src/lib/agent/scheduled-tasks.ts. */
-const MIN_FIRE_DELAY_MS = 60_000;
-
-/**
- * Clear the chrome.alarm for a task and release the system keep-awake lock if
- * no other enabled scheduled tasks remain. Mirrors the canonical `scheduleAlarm`
- * disable path (src/lib/agent/scheduled-tasks.ts).
- */
-async function disarmAlarm(taskId: string): Promise<void> {
-  const name = `${ALARM_PREFIX}${taskId}`;
-  try {
-    await chrome.alarms.clear(name);
-  } catch (e) {
-    console.warn("[options] alarms.clear failed:", e);
-  }
-  // `maybeReleaseKeepAwake` internally checks whether any enabled task remains
-  // armed before releasing the OS power lock — so re-arming another task keeps
-  // the lock and the laptop stays awake through the next fire.
-  void maybeReleaseKeepAwake();
-}
-
-/**
- * (Re)arm the chrome.alarm for a scheduled task. Mirrors the canonical
- * `scheduleAlarm` (src/lib/agent/scheduled-tasks.ts) so the Options page and the
- * background service worker share identical arming semantics:
- *  - clears any existing alarm first (chrome.alarms.create replaces, but an
- *    explicit clear keeps behavior symmetric and avoids stale-period leaks);
- *  - is a no-op (after clearing) when `task.enabled` is false;
- *  - clamps `delayInMinutes` to the 1-minute minimum;
- *  - requests the OS keep-awake lock when arming, and releases it (if no other
- *    enabled tasks remain) when disarming.
- */
-async function armAlarm(task: ScheduledTask): Promise<void> {
-  if (!task.enabled) {
-    await disarmAlarm(task.id);
-    return;
-  }
-  const name = `${ALARM_PREFIX}${task.id}`;
-  try {
-    await chrome.alarms.clear(name);
-    if (task.schedule.type === "interval") {
-      await chrome.alarms.create(name, { periodInMinutes: task.schedule.intervalMinutes });
-    } else {
-      const now = new Date();
-      const target = computeNextFireCanonical(task.schedule, now);
-      const delayInMinutes = Math.max(
-        (target.getTime() - now.getTime()) / 60_000,
-        MIN_FIRE_DELAY_MS / 60_000
-      );
-      const periodInMinutes = task.schedule.type === "weekly" ? MINUTES_PER_WEEK : MINUTES_PER_DAY;
-      await chrome.alarms.create(name, { delayInMinutes, periodInMinutes });
-    }
-    void requestKeepAwake();
-  } catch (e) {
-    console.warn("[options] alarms.create failed:", e);
   }
 }
 
@@ -181,7 +130,7 @@ $("addSchedule").addEventListener("click", async () => {
   const schedule: ScheduledTaskSchedule = { type };
   if (type === "interval") {
     const intervalMinutes = parseInt(($("scheduleInterval") as HTMLInputElement).value, 10);
-    if (Number.isNaN(intervalMinutes) || intervalMinutes < 1 || intervalMinutes > MINUTES_PER_WEEK) {
+    if (Number.isNaN(intervalMinutes) || intervalMinutes < 1 || intervalMinutes > 7 * 24 * 60) {
       await alertModal({ title: "Invalid interval", message: "Interval must be between 1 and 10080 minutes." });
       return;
     }
@@ -211,10 +160,17 @@ $("addSchedule").addEventListener("click", async () => {
     enabled: true,
     createdAt: Date.now(),
   };
-  const tasks = await readScheduledTasks();
-  tasks.push(scheduledTask);
-  await writeScheduledTasks(tasks);
-  await armAlarm(scheduledTask);
+  // Persist + arm via the canonical `saveScheduledTask` (single source of truth
+  // for arming). It validates the schedule, writes storage, and arms the alarm
+  // — rolling storage back if arming fails, so a half-committed state (task
+  // stored + enabled but no alarm) can never persist.
+  try {
+    await saveScheduledTask(scheduledTask);
+  } catch (e) {
+    console.warn("[options] saveScheduledTask failed:", e);
+    await renderSchedule();
+    return;
+  }
   ($("scheduleTask") as HTMLInputElement).value = "";
   await renderSchedule();
 });

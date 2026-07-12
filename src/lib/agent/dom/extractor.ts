@@ -21,11 +21,9 @@
  * original `extractor.ts` did this at module load). The guard catches
  * non-DOM environments (Node.js without jsdom) where `Element` is undefined.
  *
- * Note on `isInteractive`: the original `extractor.ts` re-exported this
- * symbol (as `export const isInteractive = isInteractiveImpl`). It is
- * re-exported here from `./utils/classification` rather than from
- * `./extraction/page-state` (which does not export it) so callers importing
- * from this shim see no difference.
+ * Note on `isInteractive`: it is re-exported here from `./utils/classification`
+ * — the single source of truth that `./extraction/page-state` also sources it
+ * from — so the legacy `extractor` import path resolves to the same symbol.
  */
 export {
   extractBrowserState,

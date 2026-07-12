@@ -310,7 +310,7 @@ export interface AgentConfig {
   /** Whether to run the judge LLM after the planner reports task success.
    * Default true. When true, the judge double-checks the agent's self-reported
    * success against the action history; if it disagrees, the loop continues. */
-  enableJudge?: boolean;
+  enableJudge: boolean;
   /**
    * Whether to enable early-stop detection. When true, the orchestrator
    * calls {@link earlyStop} after each step and stops the run if the agent

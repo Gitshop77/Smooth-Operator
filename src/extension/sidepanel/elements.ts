@@ -12,6 +12,21 @@
 
 import { $ } from "@/extension/shared";
 
+// Resolution contract (documents the deliberately-mixed strategy so reviewers
+// aren't surprised):
+//   • `$("id")` is used for elements that MUST exist for the side panel to
+//     function. It throws on a missing id, which fails fast at load — the HTML
+//     (sidepanel.html) is the single source of truth for these ids, and the
+//     consumers (`index.ts`, `controls.ts`, `log-renderer.ts`) dereference them
+//     unconditionally by design.
+//   • `document.getElementById("id")` (nullable) is used for OPTIONAL elements
+//     (pause/resume controls, takeover banner, cost projection, model switch,
+//     debug toggle). Consumers guard these with `?.`.
+// Mixing the two is intentional, NOT an oversight: required refs fail closed,
+// optional refs degrade gracefully. Do not "standardise" one to the other
+// without updating every consumer, or you'll either crash the panel on a
+// missing optional id or silently break a required-ref consumer.
+
 export const taskInput = $<HTMLTextAreaElement>("task");
 export const runBtn = $<HTMLButtonElement>("runBtn");
 export const stopBtn = $<HTMLButtonElement>("stopBtn");
@@ -42,6 +57,21 @@ export const costCapInfoEl = document.getElementById("costCapInfo") as HTMLSpanE
 
 export const modelSwitchInput = document.getElementById("modelSwitchInput") as HTMLInputElement | null;
 export const modelSwitchBtn = document.getElementById("modelSwitchBtn") as HTMLButtonElement | null;
+
+// Accessibility: the model-switch input is not always wrapped in a <label> and
+// a placeholder is NOT a substitute for an accessible name. Give it a stable
+// programmatic name so screen readers announce its purpose ("Switch model
+// mid-run"). We set it defensively here (a sibling module may consume the ref)
+// only when markup hasn't already provided one. This keeps the side panel usable
+// even if the HTML variant omits the label — the behavioral fix the audit asked
+// for without editing the markup directly.
+if (
+  modelSwitchInput &&
+  !modelSwitchInput.getAttribute("aria-label") &&
+  !modelSwitchInput.getAttribute("aria-labelledby")
+) {
+  modelSwitchInput.setAttribute("aria-label", "Switch model mid-run");
+}
 export const debugModeCheckbox = document.getElementById("debugMode") as HTMLInputElement | null;
 export const openCockpitBtn = document.getElementById("open-cockpit-btn") as HTMLButtonElement | null;
 

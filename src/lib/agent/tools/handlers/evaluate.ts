@@ -383,6 +383,22 @@ export async function handleEvaluate(
     // to the hardened window proxy in the `fn.call(...)` below. `Function` and
     // `eval` are still shadowed as throwing parameters, so direct
     // `new Function(...)` / `eval(...)` references inside the code are blocked.
+    // Ensure the evaluated body never runs in strict mode. The generated
+    // function declares `eval` (and `Function`) as PARAMETERS so bare
+    // references resolve to our throwing stubs; under strict mode `eval`/
+    // `arguments` are illegal parameter names and `new Function` would throw
+    // `SyntaxError: Unexpected eval or arguments in strict mode` at creation
+    // time, breaking EVERY evaluate call (finding: evaluate handler broken by
+    // strict-mode eval parameter). We don't inject "use strict" ourselves, but
+    // LLM/user code could place a "use strict" directive at the top of `code`,
+    // which would re-trigger that same SyntaxError. Strip a leading directive
+    // so the body stays sloppy and the `eval`/`Function` parameter shadows stay
+    // valid (and keep blocking bare `new Function(...)` / `eval(...)` escapes).
+    // We only remove the directive; the executed logic is unchanged. (We keep
+    // the `eval`/`Function` parameter names rather than renaming them, because
+    // they are what shadow the bare `eval`/`Function` identifiers to throwing
+    // stubs — renaming them would re-open the direct `eval(...)` escape.)
+    const strippedCode = code.replace(/^\s*["']use strict["']\s*;?/, "");
     const fn = new Function(
       "chrome",
       "window",
@@ -391,7 +407,7 @@ export async function handleEvaluate(
       "self",
       "Function",
       "eval",
-      code,
+      strippedCode,
     ) as (
       c: unknown, w: unknown, d: unknown, g: unknown, s: unknown, f: unknown, ev: unknown,
     ) => unknown;

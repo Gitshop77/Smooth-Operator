@@ -120,7 +120,20 @@ export async function listSecrets(): Promise<SecretEntry[]> {
   if (isExtensionWithSession()) {
     try {
       const res = await chrome.storage.session.get(STORAGE_KEY);
-      return (res[STORAGE_KEY] as SecretEntry[]) || [];
+      const v = res[STORAGE_KEY];
+      // Defensive: a corrupted / legacy / non-array value for this key would
+      // otherwise be returned as-is and every reader (.findIndex / .map /
+      // .filter) would throw a TypeError. Mirror the localStorage branch's
+      // safe-parse intent and only return a validated array of well-formed
+      // entries (each must have string `name` + `value`).
+      if (!Array.isArray(v)) return [];
+      return v.filter(
+        (e): e is SecretEntry =>
+          e != null &&
+          typeof e === "object" &&
+          typeof (e as SecretEntry).name === "string" &&
+          typeof (e as SecretEntry).value === "string",
+      );
     } catch (e) {
       // A real storage error must NOT be silently treated as "no secrets" —
       // callers rely on the distinction (e.g. redactSecrets must not return

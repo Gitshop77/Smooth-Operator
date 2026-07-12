@@ -109,6 +109,11 @@ export async function handlePlannerDecision(
           addCost(state, usd);
           addTokens(state, tokensIn, tokensOut);
         },
+        // This is the planner's in-run "done" attempt, not the run's final
+        // completion — skip the LLM judge for free-form tasks (no
+        // expectedOutcomes) to avoid an extra full-history completion. The
+        // terminal run-end `done` still forces finalAttempt (verified).
+        finalAttempt: false,
       },
       state,
       state.dispatcher,
@@ -137,9 +142,13 @@ export async function handlePlannerDecision(
   // Clamp `current_plan_item` to a valid plan index (finding: current_plan_item
   // is accepted without bounds validation). Schema only checks `z.number().int()`,
   // so a negative or out-of-range value must be coerced rather than trusted.
+  // Use the EXISTING plan (state.plan, which was just updated above) for the
+  // bound — if we only looked at `plannerResult.plan`, a planner response that
+  // omits `plan` would be bounds-checked against 0 and every index would
+  // collapse to 0, even though a real plan is already loaded.
   if (plannerResult.current_plan_item !== undefined) {
-    const planLen = plannerResult.plan?.length ?? 0;
     const v = plannerResult.current_plan_item;
+    const planLen = state.plan?.length ?? 0;
     state.currentPlanItem = Number.isInteger(v) && v >= 0 && v < planLen
       ? v
       : (v < 0 ? 0 : Math.max(0, planLen - 1));

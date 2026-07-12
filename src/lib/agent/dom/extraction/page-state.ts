@@ -267,7 +267,16 @@ export function resetDomBaseline(): void {
  * Extract the full browser state from the current document.
  *
  * @param tabs open tabs (extension: chrome.tabs query; in-page demo: [current]).
- * @returns a serialized {@link BrowserState} ready to send to the LLM.
+ * @returns a {@link BrowserState} whose serialisable fields (`url`, `title`,
+ *   `elements` (with `text`/`attributes`/`hash`), `elementsText`, `pageInfo`,
+ *   `newElementCount`, `scroll*`, `viewportHeight`) are safe to forward to the
+ *   LLM. **Runtime-only fields** — `selectorMap` (live `HTMLElement`s) and each
+ *   `elements[].rect` (a `DOMRect`) — must be STRIPPED before serialisation:
+ *   a live `HTMLElement`/`DOMRect` JSON-stringifies to `{}`, so forwarding the
+ *   raw object ships useless `{}` bloat (no secret leak, but a latent
+ *   payload/contract bug for any future caller that forgets to strip). The
+ *   action executor resolves an `[index]` back to its live element via
+ *   {@link getSelectorMap}, which returns this same map.
  */
 export function extractBrowserState(tabs: TabInfo[]): BrowserState {
   const acc: WalkAccumulator = {

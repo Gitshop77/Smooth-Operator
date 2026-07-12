@@ -99,16 +99,37 @@ export async function maybeJudgeAndFinalize(
     text: string;
     navigatorHistory: HistoryItem[];
     onCost: (usd: number, tokensIn?: number, tokensOut?: number) => void;
+    /**
+     * Whether this is the FINAL completion attempt (the run is ending). When
+     * true, the LLM judge is always run (unless `enableJudge === false`) so the
+     * terminal outcome is verified. When false (an intermediate planner/navigator
+     * "done" attempt), the judge is SKIPPED for free-form tasks that have no
+     * `expectedOutcomes` — those attempts are finalized directly on the planner's
+     * own decision, avoiding an extra full-history LLM completion on every
+     * in-run "done" attempt. The final run-end `done` always sets this true.
+     */
+    finalAttempt?: boolean;
   },
   state: LoopState,
   dispatcher?: CallbackDispatcher,
   ctx?: CallbackContext
 ): Promise<boolean> {
   const { step, success, text, navigatorHistory, onCost } = args;
+  const finalAttempt = args.finalAttempt ?? true;
 
   if (!success) {
     deps.onEvent({ type: "done", step, success: false, text });
     state.finalResult = { success: false, text };
+    return true;
+  }
+
+  // Cheap pre-check short-circuit: an intermediate "done" attempt on a
+  // free-form task (no deterministic evaluators configured) has no fast-path,
+  // so the judge would be pure added cost. Skip it and trust the planner's
+  // decision for the in-run attempt; the FINAL attempt still runs the judge.
+  if (!finalAttempt && !config.expectedOutcomes) {
+    deps.onEvent({ type: "done", step, success: true, text });
+    state.finalResult = { success: true, text };
     return true;
   }
 

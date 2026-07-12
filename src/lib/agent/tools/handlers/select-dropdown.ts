@@ -14,58 +14,97 @@ import { resolveElement, safeScrollIntoView, Select } from "../helpers";
 import type { ActionContext } from "./types";
 
 /**
- * Collect `[role=option]` elements that are portaled outside the
- * dropdown's own subtree (e.g. to document.body by MUI / React-Select /
- * downshift).
+ * Build the single, canonical enumeration of options for a custom
+ * dropdown. It is used for BOTH reading option text and resolving
+ * `option_index`, so keeping one consistent enumeration — mirroring the
+ * visible options the model observed — is what prevents `option_index`
+ * desync in portaled widgets.
  *
- * We scope the lookup to options that are *actually rendered/visible*
- * so the enumeration order matches what the model saw in the page
- * snapshot. Including every hidden portaled option on the page would
- * (a) mix in unrelated closed dropdowns and (b) re-order the list,
- * which would desync `option_index` resolution.
+ * Custom dropdowns render their options either inside the widget's own
+ * subtree OR portaled to document.body (MUI / React-Select / downshift).
+ * We must therefore look in both places, but we scope the lookup to
+ * *visible* options and to the panel that belongs to this trigger, so we
+ * never (a) pick a widget's hidden in-subtree option stubs while the real,
+ * visible options are portaled, nor (b) mix in unrelated closed dropdowns,
+ * either of which would re-order the list and desync `option_index`.
  *
- * `trigger` is the element the handler just clicked to open the panel;
- * if a visible `[role=listbox]` is reachable from it we read that
- * panel's options directly, otherwise we fall back to all visible
- * `[role=option]` elements on the page.
+ * Resolution order:
+ *   1. Visible `[role=option]` inside the trigger's own subtree.
+ *   2. A visible `[role=listbox]` associated with the trigger (portaled panel).
+ *   3. Any single visible (open) `[role=listbox]` on the page.
+ *   4. Last resort: every visible `[role=option]` on the page. This can
+ *      re-order the list if other dropdowns are open, so `option_index`
+ *      is then unreliable — callers should prefer `text` for selection.
  */
-function collectVisiblePortalOptions(trigger: Element): HTMLElement[] {
-  // Prefer a visible listbox/popup that is associated with the trigger.
+function collectDropdownOptions(trigger: Element): HTMLElement[] {
+  const visible = (els: NodeListOf<Element> | Element[]) =>
+    (Array.from(els) as HTMLElement[]).filter(isVisible);
+
+  // 1. Options inside the widget's own subtree (non-portaled widgets).
+  //    Filtered to *visible* options so hidden in-subtree stubs do not
+  //    shadow the portaled, visible options the model actually enumerated.
+  const subtree = visible(trigger.querySelectorAll('[role="option"]'));
+  if (subtree.length > 0) return subtree;
+
+  // 2. Portaled panel: a listbox labelled by this trigger.
   const triggerId = trigger.getAttribute("id");
   if (triggerId) {
     const labelled = document.querySelector<HTMLElement>(
       `[role="listbox"][aria-labelledby~="${triggerId}"]`,
     );
     if (labelled && isVisible(labelled)) {
-      const opts = Array.from(
-        labelled.querySelectorAll('[role="option"]'),
-      ) as HTMLElement[];
-      if (opts.length > 0) return opts.filter(isVisible);
+      const opts = visible(labelled.querySelectorAll('[role="option"]'));
+      if (opts.length > 0) return opts;
     }
   }
-  // Fallback: any visible [role=listbox] (the just-opened panel) and its
-  // options, or visible [role=option] elements elsewhere on the page.
-  const listboxes = Array.from(
-    document.querySelectorAll('[role="listbox"]'),
-  ) as HTMLElement[];
-  const openListbox = listboxes.find(isVisible);
+
+  // 3. The single currently-open (visible) listbox on the page.
+  const openListbox = (
+    Array.from(document.querySelectorAll('[role="listbox"]')) as HTMLElement[]
+  ).find(isVisible);
   if (openListbox) {
-    const opts = Array.from(
-      openListbox.querySelectorAll('[role="option"]'),
-    ) as HTMLElement[];
-    if (opts.length > 0) return opts.filter(isVisible);
+    const opts = visible(openListbox.querySelectorAll('[role="option"]'));
+    if (opts.length > 0) return opts;
   }
-  return Array.from(
-    document.querySelectorAll('[role="option"]'),
-  ).filter(isVisible) as HTMLElement[];
+
+  // 4. Last resort — see note above.
+  return visible(document.querySelectorAll('[role="option"]'));
 }
 
-/** True when an element is rendered (not display:none / visibility:hidden). */
+/**
+ * True when an element is rendered (not display:none / visibility:hidden)
+ * and is actually laid out.
+ *
+ * The rect-based check (`width > 0 && height > 0`) is a legitimate signal in
+ * a real browser — a genuinely-not-rendered element reports a zero-size rect.
+ * But environments without a layout engine (notably jsdom, used by the test
+ * suite) return a zero-size rect for *every* element, so a zero rect there is
+ * NOT evidence of invisibility. We therefore only reject on a zero-size rect
+ * when a real layout engine is present; otherwise we trust the computed-style
+ * check alone. This keeps real-browser behaviour intact while not breaking
+ * non-layout environments.
+ */
+let _layoutEnginePresent: boolean | null = null;
+function layoutEnginePresent(): boolean {
+  if (_layoutEnginePresent === null) {
+    // Probe the root element: in jsdom neither the documentElement nor the
+    // body is laid out, so their rects are all zeros. If the root reports a
+    // non-zero rect, a real layout engine is active.
+    const root = document.documentElement;
+    const r = root.getBoundingClientRect();
+    _layoutEnginePresent = r.width > 0 || r.height > 0;
+  }
+  return _layoutEnginePresent;
+}
+
 function isVisible(el: Element): boolean {
   const style = getComputedStyle(el);
   if (style.display === "none" || style.visibility === "hidden") return false;
   const rect = el.getBoundingClientRect();
-  return rect.width > 0 && rect.height > 0;
+  if (rect.width > 0 && rect.height > 0) return true;
+  // Zero-size rect: hidden in a real browser, but inconclusive without a
+  // layout engine — treat as visible so non-layout envs still resolve options.
+  return !layoutEnginePresent();
 }
 
 export async function handleSelectDropdown(
@@ -102,23 +141,13 @@ export async function handleSelectDropdown(
         (el as HTMLElement).click();
         await sleep(TIMINGS.clickAfterSettle);
         // 2. Collect the candidate options.
-        // `optionEls` is the canonical enumeration we both (a) read the
-        // option text from and (b) apply `option_index` against. To keep
-        // it consistent with what the model enumerated in the page
-        // snapshot, prefer the options inside the widget's own subtree.
-        let optionEls = Array.from(
-          el.querySelectorAll('[role="option"]'),
-        ) as HTMLElement[];
-        // Many widgets (MUI, React-Select, downshift) portal the option
-        // list to document.body. The model's `option_index` was chosen
-        // against the *visible* options it saw, so we must scope the
-        // portal lookup to the options that are actually rendered/visible
-        // — not every hidden portaled option on the page. Grabbing all
-        // `[role=option]` on document.body would mix in other (closed)
-        // dropdowns and re-order the list, desyncing `option_index`.
-        if (optionEls.length === 0) {
-          optionEls = collectVisiblePortalOptions(el);
-        }
+        // `optionEls` is the single canonical enumeration we use for BOTH
+        // reading option text and resolving `option_index`, built to mirror
+        // the visible options the model observed (in-subtree first, then
+        // the portaled panel scoped to this trigger). This keeps
+        // `option_index` resolution aligned with the model's view. `text`
+        // is always preferred when supplied; `option_index` is the fallback.
+        const optionEls = collectDropdownOptions(el);
         if (optionEls.length === 0) {
           return {
             action,
@@ -127,11 +156,12 @@ export async function handleSelectDropdown(
           };
         }
         // Prefer text matching where possible: when the LLM provides
-        // `text` we never touch `option_index` (text is unambiguous).
-        // Only when `text` is empty do we fall back to `option_index`,
-        // resolving it against this same (consistent) `optionEls`
-        // enumeration and then re-matching by that option's exact text —
-        // which minimises the blast radius of any residual desync.
+        // `text` we select by that unambiguous value (exact, then
+        // case-insensitive substring). Only when `text` is empty do we
+        // fall back to `option_index`, which resolves directly against
+        // this same `optionEls` enumeration — the canonical, visible-option
+        // list we built to mirror what the model observed. If `option_index`
+        // is out of range `want` is empty and we fail safely below.
         const want = (action.text?.trim() || "")
           || (action.option_index != null
             ? (optionEls[action.option_index]?.textContent ?? "").trim()

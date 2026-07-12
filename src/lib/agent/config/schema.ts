@@ -96,6 +96,15 @@ const EarlyStopThresholdsSchema = z.object({
  *   enableLoopDetection: true, enableCompaction: true,
  *   compactionStepInterval: 20, compactionCharThreshold: 30_000,
  *   enableJudge: true.
+ *
+ * NOTE — unknown keys are intentionally NOT rejected: this schema is a plain
+ * `z.object({...})` (NOT `.strict()`), so any key not listed below is silently
+ * stripped by `safeParse`. This is a deliberate choice to tolerate
+ * forward/backward config drift (e.g. a deprecated or misspelled key such as
+ * `maxStep` instead of `maxSteps` won't abort the run, it just has no effect).
+ * Callers that want to surface unknown-key typos must validate explicitly
+ * before calling {@link validateConfig}. Known-INVALID values for known keys
+ * (e.g. `maxSteps: "abc"`) ARE rejected and produce a {@link ConfigValidationError}.
  */
 export const AgentConfigSchema = z.object({
   /** Hard step cap before forced stop (1-1000). */

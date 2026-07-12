@@ -1,10 +1,17 @@
 /**
  * Context injection points.
  *
- * Nine pure functions that each return a nudge string (or `null`) based on
- * the current {@link LoopState} + browser state. {@link buildInjectionBlock}
- * runs all nine and concatenates the results into a single `<sys>` block
- * prepended to the next navigator request.
+ * Pure functions that each return a nudge string (or `null`) based on the
+ * current {@link LoopState} + browser state. The injection flow is split into
+ * two entry points (there is no single "block builder" — the docstring
+ * formerly called it `buildInjectionBlock`, which does not exist):
+ *
+ *   - {@link buildPreObserveNudges} runs the six pre-observe nudges (budget,
+ *     cost-budget, replan, exploration, loop-detection, force-done) and
+ *     concatenates the non-null results into a single `<sys>` block prepended
+ *     to the next navigator request BEFORE `observeState`.
+ *   - {@link buildPostObserveNudges} runs the two URL-dependent nudges
+ *     (captcha-wait, downloads-check) AFTER `observeState`.
  */
 
 import type { LoopState, StepInfo } from "../types";

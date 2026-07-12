@@ -42,6 +42,13 @@
  * re-export shim in `dom/screenshot-annotator.ts`.
  */
 
+import {
+  createCompatibleCanvas,
+  loadCompatibleImage,
+  type CompatibleCanvas,
+  type CompatibleLoadedImage,
+} from "./canvas-utils";
+
 export interface AnnotatableElement {
   /** 1-based index the LLM uses to reference this element. */
   index: number;
@@ -143,12 +150,15 @@ export async function annotateScreenshot(
 
   // Bail out early if no Canvas implementation is available. This is the
   // graceful-degradation path used by the Node.js demo mode.
-  const canvas = createCanvas();
+  const canvas = createCompatibleCanvas();
   if (!canvas) return screenshotDataUrl;
 
   let img: LoadedImage;
   try {
-    img = await loadImage(screenshotDataUrl, canvas);
+    // `loadCompatibleImage` selects the decode path internally (no canvas arg
+    // needed — see ./canvas-utils). Removing the dead `_canvas` param also
+    // fixes the "unused parameter" finding.
+    img = await loadCompatibleImage(screenshotDataUrl);
   } catch {
     // Image load failed (malformed data URL, decode error, …). Return raw.
     return screenshotDataUrl;
@@ -232,108 +242,16 @@ export async function annotateScreenshot(
 }
 
 // ─── Canvas abstraction (OffscreenCanvas ↔ HTMLCanvasElement) ───────────────
+//
+// Canvas creation + image decode now live in `./canvas-utils` so this module
+// and the vision-assistant preprocessor share one implementation (see finding:
+// duplicated `createCanvas()` across two modules). `createCompatibleCanvas`
+// and `loadCompatibleImage` are imported at the top of this file.
 
-/** Minimal common surface we use from either canvas flavor. */
-interface AnnotatorCanvas {
-  width: number;
-  height: number;
-  getContext(type: "2d"): CanvasRenderingContext2D | null;
-}
-
-/** A LoadedImage just knows how to copy itself onto a 2D context. */
-interface LoadedImage {
-  width: number;
-  height: number;
-  drawTo(ctx: CanvasRenderingContext2D): void;
-  cleanup?(): void;
-}
-
-/**
- * Create a canvas that works in the current context. Returns `null` if
- * neither `OffscreenCanvas` nor `document.createElement("canvas")` is
- * available (e.g. Node.js without a DOM shim).
- */
-function createCanvas(): AnnotatorCanvas | null {
-  // OffscreenCanvas is the only option in an MV3 service worker.
-  const oc = (globalThis as { OffscreenCanvas?: typeof OffscreenCanvas }).OffscreenCanvas;
-  if (typeof oc !== "undefined") {
-    try {
-      return new oc(1, 1) as unknown as AnnotatorCanvas;
-    } catch {
-      /* fall through to HTMLCanvasElement */
-    }
-  }
-  // Content-script / DOM context.
-  const doc = (globalThis as { document?: Document }).document;
-  if (doc && typeof doc.createElement === "function") {
-    try {
-      return doc.createElement("canvas") as unknown as AnnotatorCanvas;
-    } catch {
-      /* fall through to null */
-    }
-  }
-  return null;
-}
-
-/**
- * Load an image from a data URL.
- *
- * The path is selected by `createImageBitmap` availability, NOT by canvas
- * type — `createImageBitmap` is defined in both the Chrome service-worker
- * (OffscreenCanvas) and DOM (HTMLCanvasElement) contexts, so the
- * `HTMLImageElement` fallback below is effectively only reached in
- * jsdom/test environments where `createImageBitmap` is absent. The `_canvas`
- * argument is accepted for API symmetry but does not drive the path choice.
- *
- * Both paths return a {@link LoadedImage} that knows how to draw itself
- * onto a 2D context.
- */
-async function loadImage(dataUrl: string, _canvas: AnnotatorCanvas): Promise<LoadedImage> {
-  // Path 1: createImageBitmap available (Chrome SW + DOM) → decode via Blob.
-  if (typeof createImageBitmap !== "undefined") {
-    const blob = await dataUrlToBlob(dataUrl);
-    const bitmap = await createImageBitmap(blob);
-    return {
-      width: bitmap.width,
-      height: bitmap.height,
-      drawTo: (ctx) => ctx.drawImage(bitmap as unknown as CanvasImageSource, 0, 0),
-      // ImageBitmap holds GPU/decoded-image resources — close after drawing
-      // to prevent accumulation across long agent runs.
-      cleanup: () => { try { bitmap.close(); } catch { /* already closed */ } },
-    };
-  }
-  // Path 2: jsdom / non-createImageBitmap fallback (HTMLImageElement).
-  return await loadImageViaImg(dataUrl);
-}
-
-/** Load a data URL into an `HTMLImageElement` (DOM-context fallback). */
-function loadImageViaImg(dataUrl: string): Promise<LoadedImage> {
-  return new Promise((resolve, reject) => {
-    const ImageCtor = (globalThis as { Image?: typeof Image }).Image;
-    if (!ImageCtor) {
-      reject(new Error("Image constructor unavailable"));
-      return;
-    }
-    const img = new ImageCtor();
-    img.onload = () => {
-      resolve({
-        width: img.width,
-        height: img.height,
-        drawTo: (ctx) => ctx.drawImage(img, 0, 0),
-      });
-    };
-    img.onerror = () => reject(new Error("Image decode failed"));
-    img.src = dataUrl;
-  });
-}
-
-/** Convert a `data:image/*;base64,…` URL to a `Blob`. */
-async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
-  // Prefer `fetch(dataUrl)` — works in SW + DOM and decodes any data-URL
-  // mime type without manual base64 work.
-  const res = await fetch(dataUrl);
-  return await res.blob();
-}
+/** Minimal common surface we use from either canvas flavor (alias of the shared type). */
+export type AnnotatorCanvas = CompatibleCanvas;
+/** A LoadedImage just knows how to copy itself onto a 2D context (alias of the shared type). */
+export type LoadedImage = CompatibleLoadedImage;
 
 /** Convert a canvas back to a JPEG data URL.
  *

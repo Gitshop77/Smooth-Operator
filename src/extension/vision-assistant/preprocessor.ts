@@ -167,6 +167,25 @@ function loadImageViaImg(dataUrl: string): Promise<LoadedImage> {
  *      per patch — matches the MoonViT encoder's expected layout).
  */
 export async function preprocessScreenshot(screenshotDataUrl: string): Promise<PreprocessResult> {
+  // Validate the input is a well-formed `image/*` data URL BEFORE decoding —
+  // a malformed/non-image or huge data URL would otherwise throw deep inside
+  // `loadImage`/`createImageBitmap` (an opaque decode error) or allocate an
+  // oversized canvas. Fail fast with a clear message.
+  if (typeof screenshotDataUrl !== "string" || screenshotDataUrl.length === 0) {
+    throw new Error("preprocessScreenshot: screenshotDataUrl must be a non-empty string");
+  }
+  const DATA_URL_RE = /^data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+$/;
+  if (!DATA_URL_RE.test(screenshotDataUrl)) {
+    throw new Error(
+      "preprocessScreenshot: expected a data:image/*;base64,… URL (got a malformed or non-image value)",
+    );
+  }
+  // Upper bound on input size (~50 MiB of base64) to avoid allocating a giant
+  // bitmap/canvas from a hostile or corrupt screenshot.
+  const MAX_SCREENSHOT_CHARS = 50 * 1024 * 1024;
+  if (screenshotDataUrl.length > MAX_SCREENSHOT_CHARS) {
+    throw new Error("preprocessScreenshot: screenshot data URL exceeds the maximum allowed size");
+  }
   const img = await loadImage(screenshotDataUrl);
   // Original screenshot pixel dimensions (BEFORE any rescale/pad). Used
   // downstream by `toPixelCoords` to map the model's 0-1000 normalized box

@@ -23,6 +23,32 @@ import { setPersistentHighlight } from "@/lib/agent/dom/overlay";
 import { installPopupHandler } from "@/lib/agent/dom/popup-handler";
 import type { AgentAction, ActionResult, BrowserState, TabInfo } from "@/lib/agent/types";
 
+/**
+ * Validate that an incoming `domainConfig` payload is a shape-valid URL policy
+ * before it is installed as the security policy (used by the EXECUTE_ACTIONS
+ * handler). A malformed payload must NOT be installed — doing so could either
+ * disable enforcement (empty object treated as "no restrictions") or crash the
+ * executor when it reads fields that don't exist.
+ *
+ * Accepts the canonical policy shape `{ enforced?: boolean, allow?: string[],
+ * block?: string[] }` and a relaxed shape where at least one of `allow` /
+ * `block` is a string array. Returns false for null, non-objects, or objects
+ * whose fields have the wrong types — those are ignored so the last-known-good
+ * policy is retained instead of being downgraded.
+ */
+function isValidDomainConfig(cfg: unknown): cfg is Record<string, unknown> {
+  if (!cfg || typeof cfg !== "object") return false;
+  const c = cfg as Record<string, unknown>;
+  const isStringArray = (v: unknown) =>
+    Array.isArray(v) && v.every((x) => typeof x === "string");
+  if ("enforced" in c && typeof c.enforced !== "boolean") return false;
+  if ("allow" in c && !isStringArray(c.allow)) return false;
+  if ("block" in c && !isStringArray(c.block)) return false;
+  // Require at least one recognized field so a random object can't be
+  // mistaken for a policy.
+  return "enforced" in c || "allow" in c || "block" in c;
+}
+
 // ─── Message contracts ─────────────────────────────────────────────────────
 
 interface PingMessage {
@@ -175,6 +201,16 @@ type Response<T = unknown> = OkResponse<T> | ErrorResponse;
         }
 
         case "EXECUTE_ACTIONS": {
+          let responded = false;
+          const safeRespond = (r: Response) => {
+            if (responded) return;
+            responded = true;
+            try {
+              sendResponse(r);
+            } catch {
+              /* channel already closed — nothing more to do */
+            }
+          };
           (async () => {
             try {
               const actions: AgentAction[] = msg.actions || [];
@@ -190,17 +226,16 @@ type Response<T = unknown> = OkResponse<T> | ErrorResponse;
               // restrictions". If this message omits `domainConfig`, KEEP the
               // last-known-good policy rather than overwriting with `undefined`
               // (which `getDomainConfig` would treat as `{}` → unrestricted).
-              // Only replace the policy when a real object is supplied, so a
-              // malformed/absent payload cannot disable enforcement.
+              // Only replace the policy when a REAL, shape-valid policy object
+              // is supplied, so a malformed/absent payload cannot disable
+              // enforcement.
               const incomingDomainConfig = msg.domainConfig;
               if (incomingDomainConfig !== undefined) {
-                if (
-                  incomingDomainConfig === null ||
-                  typeof incomingDomainConfig === "object"
-                ) {
+                if (isValidDomainConfig(incomingDomainConfig)) {
                   lastDomainConfig = incomingDomainConfig;
                 }
-                // A non-object, non-null payload is ignored (retains last good).
+                // A null, non-object, or shape-invalid payload is ignored
+                // (retains last good).
               }
               (
                 globalThis as { __openCoworkDomainConfig?: unknown }
@@ -257,13 +292,10 @@ type Response<T = unknown> = OkResponse<T> | ErrorResponse;
               sendResponse({ ok: true, results });
             } catch (e) {
               // The tab may have navigated away / port closed mid-execution;
-              // `sendResponse` can then throw. Guard it so we don't produce an
-              // unhandled rejection that hides the real failure.
-              try {
-                sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });
-              } catch {
-                /* channel already closed — nothing more to do */
-              }
+              // `sendResponse` can then throw. Use `safeRespond` (idempotent,
+              // guarded) so we don't produce an unhandled rejection that hides
+              // the real failure, and so we never double-respond.
+              safeRespond({ ok: false, error: e instanceof Error ? e.message : String(e) });
             }
           })();
           return true; // async response — keep the channel open
@@ -284,7 +316,7 @@ type Response<T = unknown> = OkResponse<T> | ErrorResponse;
           try {
             const html = document.documentElement.outerHTML || "";
             const capped = html.length > 500_000 ? html.slice(0, 500_000) : html;
-            sendResponse({ ok: true, html: capped } as Response);
+            sendResponse({ ok: true, html: capped });
           } catch (e) {
             sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });
           }

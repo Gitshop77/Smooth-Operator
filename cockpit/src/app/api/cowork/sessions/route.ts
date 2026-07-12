@@ -8,12 +8,14 @@ import { db } from '@/lib/db';
 export async function GET(): Promise<Response> {
   return withRouteError(async () => {
     const sessions = await db.session.findMany({ orderBy: { createdAt: 'desc' } });
-    // Project `isIncognito` → legacy `incognito` alias and synthesize
-    // `cookieCount` (no column for it in the Prisma model).
+    // Project `isIncognito` → legacy `incognito` alias. The legacy
+    // `cookieCount` field has no backing column on `Session` and no real value
+    // to compute, so it is intentionally omitted rather than synthesized to a
+    // misleading `0`. The consuming view (sessions-view.tsx) and the shared
+    // `Session` type (cowork-data/types.ts) must be updated to drop the field.
     const projected = sessions.map((s) => ({
       ...s,
       incognito: s.isIncognito,
-      cookieCount: 0,
     }));
     return json({ sessions: projected });
   });

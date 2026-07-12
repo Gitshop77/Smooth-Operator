@@ -136,7 +136,12 @@ export function validateSchedule(s: ScheduledTaskSchedule): string | null {
 export async function listScheduledTasks(): Promise<ScheduledTask[]> {
   if (!isExtensionWithAlarms()) return [];
   const res = await chrome.storage.local.get(STORAGE_KEY);
-  return (res[STORAGE_KEY] as ScheduledTask[]) || [];
+  const arr = res[STORAGE_KEY];
+  // Guard against a corrupted/overwritten storage value (a non-array would
+  // otherwise flow into `saveScheduledTask`/`initScheduledTasks`, where
+  // `.findIndex`/`.map` throw a TypeError and break alarm init at SW startup).
+  // Mirrors the `Array.isArray` guards used by `loadRuns`/`loadAllMemories`.
+  return Array.isArray(arr) ? (arr as ScheduledTask[]) : [];
 }
 
 /**

@@ -129,6 +129,11 @@ export function clearRunTotals(): void {
   }
   totalCost = 0;
   totalTokens = 0;
+  // Reset the step counter too — otherwise a previous run that ended at step N
+  // leaves `currentStep = N`, skewing the per-step cost projection
+  // (`totalCost / currentStep`) until the new run's first navigator step
+  // overwrites it (finding: currentStep never reset between runs).
+  currentStep = 0;
   logHistory.length = 0;
   costLabel.textContent = "$0.0000";
   tokenLabel.textContent = formatTokens(0);
@@ -267,13 +272,27 @@ export function addLogRow(event: LogEvent, time: string): void {
       break;
     case "cost": {
       cls = "cost"; label = "cost"; icon = glyph("dollar-sign");
-      body = `${event.tokensIn}+${event.tokensOut} tok · $${event.costUsd.toFixed(4)}`;
+      // Validate the numeric payload BEFORE dereferencing it. A malformed cost
+      // event (missing / non-numeric `costUsd`/`tokensIn`/`tokensOut`) would
+      // throw on `event.costUsd.toFixed(4)` and crash the listener, or — worse
+      // — poison `totalCost`/`totalTokens` with `NaN`, silently corrupting every
+      // downstream metric. Skip + warn instead (see also the envelope guard in
+      // the message listener below).
+      const c = Number(event.costUsd);
+      const ti = Number(event.tokensIn);
+      const to = Number(event.tokensOut);
+      if (!Number.isFinite(c) || !Number.isFinite(ti) || !Number.isFinite(to)) {
+        body = "cost (invalid payload — skipped)";
+        console.warn("[log-renderer] dropped malformed cost event (non-numeric costUsd/tokensIn/tokensOut)");
+        break;
+      }
+      body = `${ti}+${to} tok · $${c.toFixed(4)}`;
       // Skip accumulation during restore — the stored totals are already correct
       // and the log may be truncated (capped at 500 rows), so rebuilding from
       // the log would under-count for long runs.
       if (!isRestoring) {
-        totalCost += event.costUsd;
-        totalTokens += event.tokensIn + event.tokensOut;
+        totalCost += c;
+        totalTokens += ti + to;
         costLabel.textContent = `$${totalCost.toFixed(4)}`;
         tokenLabel.textContent = formatTokens(totalTokens);
         updateCostProjection();
@@ -370,6 +389,10 @@ export function addLogRow(event: LogEvent, time: string): void {
     stepLabel.textContent = `step ${event.step} / ${maxSteps}`;
     const pct = Math.min(100, (event.step / maxSteps) * 100);
     barFill.style.width = `${pct}%`;
+    // Keep the progressbar's ARIA value in sync with the visual width so
+    // assistive tech reports the actual step (finding: aria-valuenow never
+    // updated — it stayed at its initial HTML value).
+    barFill.setAttribute("aria-valuenow", String(event.step));
     updateCostProjection();
   }
   if (event.type === "state") countLabel.textContent = `${event.elementCount} el`;
@@ -383,23 +406,45 @@ chrome.runtime.onMessage.addListener((msg: unknown, sender, _sendResponse) => {
   if (sender.id !== chrome.runtime.id) return false;
   const payload = msg as Partial<AgentEventEnvelope>;
   if (payload?.type === "AGENT_EVENT") {
-    const ev = payload.event;
-    // Validate the envelope before dereferencing it (finding: AGENT_EVENT
-    // envelope is not validated before `addLogRow` dereferences it). A
-    // malformed envelope (no `event`, or `event.type` not a string) would
-    // throw inside `addLogRow` and crash the listener. Ignore it instead.
-    if (
-      typeof ev === "object" && ev !== null &&
-      typeof (ev as { type?: unknown }).type === "string" &&
-      typeof payload.time === "string"
-    ) {
-      addLogRow(ev as LogEvent, payload.time);
+    // Validate the envelope at the trust boundary before dereferencing it
+    // (finding: AGENT_EVENT envelope validation was shallow — only `type` +
+    // `time`). A malformed envelope (no `event`, non-string `type`, or a
+    // `cost` event with non-numeric fields) would throw inside `addLogRow`
+    // and crash the listener, or poison the running totals with `NaN`.
+    // Ignore it instead of forwarding it.
+    if (isValidAgentEvent(payload.event) && typeof payload.time === "string") {
+      addLogRow(payload.event as LogEvent, payload.time);
     } else {
       console.warn("[log-renderer] dropped malformed AGENT_EVENT envelope (missing/invalid event or time)");
     }
   }
   return false;
 });
+
+/**
+ * Validate an incoming `AGENT_EVENT` payload at the message-passing trust
+ * boundary (finding: payload not validated beyond sender id; envelope
+ * validation too shallow). Ensures the `event` is a non-null object with a
+ * string `type`, and — for `cost` events — that the numeric fields are finite
+ * (a malformed cost event would otherwise crash `addLogRow` via `.toFixed` or
+ * inject `NaN` into the totals).
+ */
+function isValidAgentEvent(ev: unknown): ev is LogEvent {
+  if (typeof ev !== "object" || ev === null) return false;
+  const e = ev as { type?: unknown };
+  if (typeof e.type !== "string") return false;
+  if (e.type === "cost") {
+    const c = ev as { costUsd?: unknown; tokensIn?: unknown; tokensOut?: unknown };
+    if (
+      !Number.isFinite(Number(c.costUsd)) ||
+      !Number.isFinite(Number(c.tokensIn)) ||
+      !Number.isFinite(Number(c.tokensOut))
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
 
 // ─── Restore totals from storage (called by controls.ts STATUS check) ──────
 

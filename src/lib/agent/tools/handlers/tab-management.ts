@@ -53,7 +53,10 @@ async function delegateTabAction(
     }
     const res = parsed.data;
     if (!res.ok) {
-      return { action, success: false, message: `${action.type} failed: ${res.error ?? "no response"}` };
+      // Prefer `message` (a descriptive status the SW may set on failure) then
+      // `error`, then a concrete fallback — so a bare `{ ok: false }` no longer
+      // degrades to the uninformative "no response".
+      return { action, success: false, message: `${action.type} failed: ${res.message ?? res.error ?? "unknown error"}` };
     }
     return {
       action,
