@@ -30,7 +30,7 @@ describe('agent contract manifest (drift guard)', () => {
     const manifest = await getManifest();
     const flat = flatten(manifest);
 
-    // These routes implement a DELETE export, so the manifest MUST advertise it.
+ // These routes implement a DELETE export, so the manifest MUST advertise it.
     expect(flat.filter(endsWith('/api/cowork/history')).some((e) => e.method === 'DELETE')).toBe(true);
     expect(flat.filter(endsWith('/api/cowork/memory/site')).some((e) => e.method === 'DELETE')).toBe(true);
     expect(flat.filter(endsWith('/api/cowork/memory/form')).some((e) => e.method === 'DELETE')).toBe(true);
@@ -42,9 +42,9 @@ describe('agent contract manifest (drift guard)', () => {
     const flat = flatten(manifest);
     const historyDelete = flat.find((e) => e.method === 'DELETE' && endsWith('/api/cowork/history')(e));
     expect(historyDelete).toBeDefined();
-    // The manifest is a discovery surface; it must NOT reveal the destructive
-    // ?all=1 bulk-delete capability (defense-in-depth against exposing
-    // destructive/internal endpoints).
+ // The manifest is a discovery surface; it must NOT reveal the destructive
+ // ?all=1 bulk-delete capability (defense-in-depth against exposing
+ // destructive/internal endpoints).
     expect(historyDelete?.description).not.toContain('all=1');
   });
 

@@ -10,15 +10,15 @@
 // capabilities without first authenticating.
 //
 // Token rules:
-//   • If neither `COWORK_UI_TOKEN` nor `COWORK_EVENT_TOKEN` is set: fail-closed
-//     with 401 (no safe default). `COWORK_UI_TOKEN` is preferred; the
-//     `COWORK_EVENT_TOKEN` fallback exists only for backward compatibility.
-//   • If the resolved token equals the well-known `dev-token`: fail-closed
-//     with 401 UNLESS `COWORK_ALLOW_DEV_TOKEN=1` is explicitly set AND the
-//     deployment is not production (`NODE_ENV !== 'production'`). This keeps
-//     the well-known default from ever authenticating the cockpit in prod.
-//   • If the resolved token is set to a real secret: require the
-//     `X-Cowork-Token` header to match using a constant-time comparison.
+// • If neither `COWORK_UI_TOKEN` nor `COWORK_EVENT_TOKEN` is set: fail-closed
+// with 401 (no safe default). `COWORK_UI_TOKEN` is preferred; the
+// `COWORK_EVENT_TOKEN` fallback exists only for backward compatibility.
+// • If the resolved token equals the well-known `dev-token`: fail-closed
+// with 401 UNLESS `COWORK_ALLOW_DEV_TOKEN=1` is explicitly set AND the
+// deployment is not production (`NODE_ENV !== 'production'`). This keeps
+// the well-known default from ever authenticating the cockpit in prod.
+// • If the resolved token is set to a real secret: require the
+// `X-Cowork-Token` header to match using a constant-time comparison.
 //
 // The matcher (below) limits this middleware to `/api/cowork/:path*`. The
 // public-discovery routes are bypassed in the function body (not in the
@@ -57,6 +57,52 @@ let devTokenWarned = false;
 let uiTokenWarned = false;
 
 /**
+ * Module-level guards so the two per-request auth-failure warnings fire at most
+ * once per server process (they otherwise repeat on every protected request and
+ * flood the logs under misconfiguration).
+ */
+let noTokenWarned = false;
+let mismatchWarned = false;
+let pairingWarned = false;
+
+/**
+ * Normalize `NODE_ENV` for the production determination. Only an exact,
+ * lowercase `'production'` previously counted, which let a dev-token opt-in
+ * stay active under `NODE_ENV=prod`/`Prod`/`staging`/unset — a common
+ * operator-induced gap. Treat `production`, `prod`, `1`, and `true`
+ * (case-insensitive) as production so fail-closed auth behavior is honored.
+ */
+function isProductionEnv(): boolean {
+  return /^(production|prod|1|true)$/i.test((process.env.NODE_ENV ?? '').trim());
+}
+
+/**
+ * Warn at most once when the server-side UI token and the browser-exposed
+ * `NEXT_PUBLIC_COWORK_UI_TOKEN` are mismatched (one set, the other not). Such a
+ * split yields a silent 401 on every browser request and is easy to misdiagnose
+ * as a code bug rather than a config mismatch.
+ */
+function warnTokenPairingOnce(): void {
+  if (pairingWarned) return;
+  pairingWarned = true;
+  const serverUi = process.env.COWORK_UI_TOKEN;
+  const clientUi =
+    typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_COWORK_UI_TOKEN : undefined;
+  if (clientUi && !serverUi && !process.env.COWORK_EVENT_TOKEN) {
+    console.warn(
+      '[cowork-auth] NEXT_PUBLIC_COWORK_UI_TOKEN is set in the browser bundle but no server-side ' +
+        'COWORK_UI_TOKEN (or COWORK_EVENT_TOKEN) is configured — every browser request will 401. ' +
+        'Set COWORK_UI_TOKEN to the same value.',
+    );
+  } else if (serverUi && !clientUi) {
+    console.warn(
+      '[cowork-auth] COWORK_UI_TOKEN is configured server-side but NEXT_PUBLIC_COWORK_UI_TOKEN is not ' +
+        'set — the browser cannot authenticate. Set NEXT_PUBLIC_COWORK_UI_TOKEN to the matching value.',
+    );
+  }
+}
+
+/**
  * Constant-time string comparison using only Web Platform APIs (TextEncoder).
  *
  * Always iterates the EXPECTED secret's length (never the received input's
@@ -69,10 +115,10 @@ function tokensMatch(received: string | undefined, expected: string): boolean {
   const encoder = new TextEncoder();
   const a = encoder.encode(received);
   const b = encoder.encode(expected);
-  // Iterate over the EXPECTED secret's length only — never over the
-  // attacker-controlled input length — so timing cannot reveal the secret's
-  // byte length. A longer received input is simply ignored beyond `b.length`
-  // (it can never equal the secret anyway).
+ // Iterate over the EXPECTED secret's length only — never over the
+ // attacker-controlled input length — so timing cannot reveal the secret's
+ // byte length. A longer received input is simply ignored beyond `b.length`
+ // (it can never equal the secret anyway).
   const len = b.length;
   let diff = 0;
   for (let i = 0; i < len; i++) {
@@ -80,7 +126,7 @@ function tokensMatch(received: string | undefined, expected: string): boolean {
     const y = b[i];
     diff |= x ^ y;
   }
-  // Fold the length mismatch in AFTER the constant-time loop.
+ // Fold the length mismatch in AFTER the constant-time loop.
   return diff === 0 && a.length === b.length;
 }
 
@@ -91,35 +137,35 @@ function tokensMatch(received: string | undefined, expected: string): boolean {
  * or a 401 `NextResponse` when it is not. Centralizes the dev-token rule.
  *
  * Token sources (validated with the SAME `tokensMatch`):
- *   • the `X-Cowork-Token` request header (all protected routes), and
- *   • for the SSE stream `/api/cowork/events/stream` ONLY, a `token` query
- *     param. Browser `EventSource` cannot set custom headers, so it MUST use
- *     the `?token=` query param to open the stream; the `X-Cowork-Token`
- *     header path remains available for non-EventSource clients. The query
- *     token is validated against the exact same secret using the exact same
- *     constant-time compare — the *auth* is equally strong, only the *transport*
- *     (URL vs header) is weaker (see the EXPOSURE TRADE-OFF note at the handler).
+ * • the `X-Cowork-Token` request header (all protected routes), and
+ * • for the SSE stream `/api/cowork/events/stream` ONLY, a `token` query
+ * param. Browser `EventSource` cannot set custom headers, so it MUST use
+ * the `?token=` query param to open the stream; the `X-Cowork-Token`
+ * header path remains available for non-EventSource clients. The query
+ * token is validated against the exact same secret using the exact same
+ * constant-time compare — the *auth* is equally strong, only the *transport*
+ * (URL vs header) is weaker (see the EXPOSURE TRADE-OFF note at the handler).
  */
 function authenticate(req: NextRequest): NextResponse | null {
-  // The browser-facing UI secret is `COWORK_UI_TOKEN` (preferred),
-  // falling back to the service-to-service `COWORK_EVENT_TOKEN` for backward
-  // compatibility. They are INDEPENDENT secrets — a deployment that only sets
-  // `COWORK_EVENT_TOKEN` keeps working (existing tests rely on the fallback),
-  // but a deployment that sets `COWORK_UI_TOKEN` uses a distinct UI secret so a
-  // leaked browser bundle (which can only ever see `NEXT_PUBLIC_CO*`) cannot
-  // unlock the server-to-server `COWORK_EVENT_TOKEN` path.
-  // Treat an EMPTY string as unset: `??` only treats `undefined`/`null` as
-  // unset, so a `COWORK_UI_TOKEN=` (empty) in an .env would otherwise blank
-  // `token` and fail-closed on every request even when a real EVENT_TOKEN is
-  // configured. `||` collapses both empty and undefined to the fallback.
+ // The browser-facing UI secret is `COWORK_UI_TOKEN` (preferred),
+ // falling back to the service-to-service `COWORK_EVENT_TOKEN` for backward
+ // compatibility. They are INDEPENDENT secrets — a deployment that only sets
+ // `COWORK_EVENT_TOKEN` keeps working (existing tests rely on the fallback),
+ // but a deployment that sets `COWORK_UI_TOKEN` uses a distinct UI secret so a
+ // leaked browser bundle (which can only ever see `NEXT_PUBLIC_CO*`) cannot
+ // unlock the server-to-server `COWORK_EVENT_TOKEN` path.
+ // Treat an EMPTY string as unset: `??` only treats `undefined`/`null` as
+ // unset, so a `COWORK_UI_TOKEN=` (empty) in an .env would otherwise blank
+ // `token` and fail-closed on every request even when a real EVENT_TOKEN is
+ // configured. `||` collapses both empty and undefined to the fallback.
   const token = process.env.COWORK_UI_TOKEN || process.env.COWORK_EVENT_TOKEN || undefined;
 
-  // Deprecation/risk guard: a deployment that sets only the service-to-service
-  // `COWORK_EVENT_TOKEN` (and mirrors it into `NEXT_PUBLIC_COWORK_UI_TOKEN` so
-  // the browser can authenticate) silently runs the UI on the S2S secret. If
-  // that `NEXT_PUBLIC_*` mirror ever ships, the S2S secret is embedded in the
-  // browser bundle. Warn once so operators learn to set a DISTINCT
-  // `COWORK_UI_TOKEN`.
+ // Deprecation/risk guard: a deployment that sets only the service-to-service
+ // `COWORK_EVENT_TOKEN` (and mirrors it into `NEXT_PUBLIC_COWORK_UI_TOKEN` so
+ // the browser can authenticate) silently runs the UI on the S2S secret. If
+ // that `NEXT_PUBLIC_*` mirror ever ships, the S2S secret is embedded in the
+ // browser bundle. Warn once so operators learn to set a DISTINCT
+ // `COWORK_UI_TOKEN`.
   if (!process.env.COWORK_UI_TOKEN && process.env.COWORK_EVENT_TOKEN && !uiTokenWarned) {
     uiTokenWarned = true;
     console.warn(
@@ -129,26 +175,28 @@ function authenticate(req: NextRequest): NextResponse | null {
     );
   }
 
-  // The well-known default `dev-token` is only acceptable with an
-  // EXPLICIT opt-in (`COWORK_ALLOW_DEV_TOKEN=1`) — and ONLY when not running in
-  // production (`NODE_ENV !== 'production'`). This adds a second, fail-closed
-  // layer: even if an operator mistakenly sets the opt-in in a production
-  // deployment, the publicly-documented dev-token still fails closed with 401.
-  // A real secret (anything other than the dev-token) is always required in
-  // production.
-  // Explicit, fail-closed production determination: only the exact string
-  // `'production'` counts as production. The dev-token opt-in is honored ONLY
-  // outside production — in production the well-known default always fails
-  // closed with 401, even if the opt-in is set.
-  const isProduction = process.env.NODE_ENV === 'production';
+ // The well-known default `dev-token` is only acceptable with an
+ // EXPLICIT opt-in (`COWORK_ALLOW_DEV_TOKEN=1`) — and ONLY when not running in
+ // production (`NODE_ENV !== 'production'`). This adds a second, fail-closed
+ // layer: even if an operator mistakenly sets the opt-in in a production
+ // deployment, the publicly-documented dev-token still fails closed with 401.
+ // A real secret (anything other than the dev-token) is always required in
+ // production.
+ // Explicit, fail-closed production determination. `isProductionEnv()`
+ // normalizes `NODE_ENV` so the dev-token opt-in is honored ONLY outside
+ // production — in production the well-known default always fails closed with
+ // 401, even if the opt-in is set (and even under a mis-set `NODE_ENV`).
   const allowDevToken =
-    process.env.COWORK_ALLOW_DEV_TOKEN === '1' && !isProduction;
+    process.env.COWORK_ALLOW_DEV_TOKEN === '1' && !isProductionEnv();
 
   if (!token || (token === DEV_TOKEN && !allowDevToken)) {
-    console.warn(
-      '[cowork-auth] 401 Unauthorized — no token configured, or dev-token used without the COWORK_ALLOW_DEV_TOKEN opt-in (or in production)',
-      { path: req.nextUrl.pathname },
-    );
+    if (!noTokenWarned) {
+      noTokenWarned = true;
+      console.warn(
+        '[cowork-auth] 401 Unauthorized — no token configured, or dev-token used without the COWORK_ALLOW_DEV_TOKEN opt-in (or in production)',
+        { path: req.nextUrl.pathname },
+      );
+    }
     return NextResponse.json(
       { error: 'Unauthorized' },
       { status: 401 },
@@ -156,8 +204,8 @@ function authenticate(req: NextRequest): NextResponse | null {
   }
 
   if (token === DEV_TOKEN && allowDevToken) {
-    // Opt-in dev-token path — allowed, but logged once so the operator knows
-    // the cockpit is running unauthenticated.
+ // Opt-in dev-token path — allowed, but logged once so the operator knows
+ // the cockpit is running unauthenticated.
     if (!devTokenWarned) {
       devTokenWarned = true;
       const devTokenVar =
@@ -173,29 +221,36 @@ function authenticate(req: NextRequest): NextResponse | null {
     return null;
   }
 
+ // Validate the server/browser token pairing exactly once per process so a
+ // mis-set pair (silent 401 on every request) is surfaced loudly.
+  warnTokenPairingOnce();
+
   const receivedHeader = req.headers.get('x-cowork-token') ?? undefined;
 
-  // SSE stream — also accept the token via a signed query param because
-  // browser EventSource cannot set headers. Restricted to this one path so it
-  // cannot be used to bypass header auth elsewhere.
-  //
-  // EXPOSURE TRADE-OFF (documented): a bearer secret in the URL is recorded in
-  // reverse-proxy/access logs, browser history, and `Referer` headers on any
-  // cross-origin navigation while the stream is open. The comparison is still
-  // constant-time (no auth bypass), but the *transport* is weaker than a header.
-  // Mitigations: (1) prefer the `X-Cowork-Token` header where the client can set
-  // it; (2) ensure upstream proxies/CDNs strip `?token=` from logs; (3) rotate
-  // the token regularly; (4) this middleware logs only `pathname` (never the
-  // query string), so the token is not written to our own request log.
+ // SSE stream — also accept the token via a signed query param because
+ // browser EventSource cannot set headers. Restricted to this one path so it
+ // cannot be used to bypass header auth elsewhere.
+ //
+ // EXPOSURE TRADE-OFF (documented): a bearer secret in the URL is recorded in
+ // reverse-proxy/access logs, browser history, and `Referer` headers on any
+ // cross-origin navigation while the stream is open. The comparison is still
+ // constant-time (no auth bypass), but the *transport* is weaker than a header.
+ // Mitigations: (1) prefer the `X-Cowork-Token` header where the client can set
+ // it; (2) ensure upstream proxies/CDNs strip `?token=` from logs; (3) rotate
+ // the token regularly; (4) this middleware logs only `pathname` (never the
+ // query string), so the token is not written to our own request log.
   const isSse = req.nextUrl.pathname === '/api/cowork/events/stream';
   const receivedQuery = isSse ? (req.nextUrl.searchParams.get('token') ?? undefined) : undefined;
 
   const received = receivedHeader ?? receivedQuery;
   if (!tokensMatch(received, token)) {
-    console.warn('[cowork-auth] 401 Unauthorized — token mismatch', {
-      path: req.nextUrl.pathname,
-      ip: req.headers.get('x-forwarded-for') ?? req.headers.get('x-real-ip') ?? 'unknown',
-    });
+    if (!mismatchWarned) {
+      mismatchWarned = true;
+      console.warn('[cowork-auth] 401 Unauthorized — token mismatch', {
+        path: req.nextUrl.pathname,
+        ip: req.headers.get('x-forwarded-for') ?? req.headers.get('x-real-ip') ?? 'unknown',
+      });
+    }
     return NextResponse.json(
       { error: 'Unauthorized' },
       { status: 401 },
@@ -226,8 +281,8 @@ function withRequestId(res: NextResponse, requestId: string): NextResponse {
 }
 
 /** `NextResponse.next()` that also forwards `x-request-id` to downstream routes
- *  (so a route handler can read it via `req.headers` and pass it to
- *  `withRouteError`, threading one id end-to-end). */
+ * (so a route handler can read it via `req.headers` and pass it to
+ * `withRouteError`, threading one id end-to-end). */
 function nextWithRequestId(req: NextRequest, requestId: string): NextResponse {
   const headers = new Headers(req.headers);
   headers.set('x-request-id', requestId);
@@ -248,7 +303,7 @@ export function middleware(req: NextRequest): NextResponse {
     res = denied ? withRequestId(denied, requestId) : nextWithRequestId(req, requestId);
   }
 
-  // Structured request log (no secrets — path only, never the body).
+ // Structured request log (no secrets — path only, never the body).
   const durationMs = Date.now() - start;
   console.log('[cowork request]', requestId, req.method, pathname, res.status, `${durationMs}ms`);
   return res;

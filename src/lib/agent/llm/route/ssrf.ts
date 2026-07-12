@@ -6,35 +6,35 @@
  * — e.g. via prompt injection that writes `chrome.storage.local`, a malicious
  * settings sync, or a crafted custom-tool payload — the service worker could be
  * made to reach:
- *   - cloud metadata services (`http://169.254.169.254/` — AWS/GCP/Azure), which
- *     live in link-local `169.254.0.0/16` (and IPv6 `fe80::/10`).
+ * - cloud metadata services (`http://169.254.169.254/` — AWS/GCP/Azure), which
+ * live in link-local `169.254.0.0/16` (and IPv6 `fe80:/10`).
  *
  * Self-hosted model servers (Ollama, LiteLLM, LM Studio, …) legitimately run on
- * loopback (`127.0.0.0/8`, `::1`) or a LAN RFC1918 address
- * (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, IPv6 ULA `fc00::/7`). The
+ * loopback (`127.0.0.0/8`, `:1`) or a LAN RFC1918 address
+ * (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, IPv6 ULA `fc00:/7`). The
  * user's own infrastructure is NOT an SSRF target, so those ranges are ALLOWED.
  * Only the genuine SSRF sinks remain blocked: cloud-metadata / link-local
- * `169.254.0.0/16` (+ IPv6 `fe80::/10`), unspecified `0.0.0.0/8`, and
+ * `169.254.0.0/16` (+ IPv6 `fe80:/10`), unspecified `0.0.0.0/8`, and
  * CGNAT `100.64.0.0/10`.
  *
  * This module provides a synchronous, DNS-free validator that rejects the
  * dangerous address ranges. It is wired into:
- *   1. `src/extension/provider-config.ts` — user-supplied `baseUrl`,
- *   2. `src/lib/agent/llm/providers/openai-compatible-profile.ts` — user-supplied
- *      `baseURL` when synthesizing a profile,
- *   3. `src/lib/agent/llm/route/transport-http.ts` — defense-in-depth, on the
- *      final fetch URL.
+ * 1. `src/extension/provider-config.ts` — user-supplied `baseUrl`,
+ * 2. `src/lib/agent/llm/providers/openai-compatible-profile.ts` — user-supplied
+ * `baseURL` when synthesizing a profile,
+ * 3. `src/lib/agent/llm/route/transport-http.ts` — defense-in-depth, on the
+ * final fetch URL.
  *
  * So a bad URL fails closed (throws) rather than silently contacting the host.
  *
  * DESIGN NOTE — curated local providers: Ollama (`http://localhost:11434`) and
  * LiteLLM (`http://localhost:4000`) are legitimate, user-selected local LLM
  * servers whose default base URLs ARE loopback. The SSRF guard
- * (`validateLlmBaseUrl`) ALLOWS loopback (`127.0.0.0/8`, `::1`) and RFC1918
- * private ranges (`10/8`, `172.16/12`, `192.168/16`, IPv6 ULA `fc00::/7`) because
+ * (`validateLlmBaseUrl`) ALLOWS loopback (`127.0.0.0/8`, `:1`) and RFC1918
+ * private ranges (`10/8`, `172.16/12`, `192.168/16`, IPv6 ULA `fc00:/7`) because
  * the user's own Ollama / LiteLLM server is the user's host, not an SSRF target.
  * It STILL blocks the genuine sinks: cloud-metadata / link-local `169.254.0.0/16`
- * (+ IPv6 `fe80::/10`), unspecified `0.0.0.0/8`, and CGNAT `100.64.0.0/10`.
+ * (+ IPv6 `fe80:/10`), unspecified `0.0.0.0/8`, and CGNAT `100.64.0.0/10`.
  * `LOCAL_PROVIDER_BASE_URLS` remains as defense-in-depth for the exact default
  * endpoints at the integration / transport layer (see `isAllowedLlmBaseUrl`).
  *
@@ -90,7 +90,7 @@ export const LOCAL_PROVIDER_BASE_URLS: readonly string[] = [
 function isPrivateOrLoopbackIp(host: string): boolean {
   if (!host) return false;
   if (host.includes(":")) {
-    // IPv6 literal (or IPv4-mapped IPv6).
+ // IPv6 literal (or IPv4-mapped IPv6).
     return isDangerousIpv6(host);
   }
   return isDangerousIpv4(host);
@@ -112,11 +112,11 @@ function parseIPv4Octets(host: string): number[] | null {
 
 /**
  * IPv4-literal SSRF classification. Blocks ONLY the genuine SSRF sinks:
- *   0.0.0.0/8 (unspecified / "this" network),
- *   169.254.0.0/16 (link-local / cloud metadata, e.g. AWS/GCP/Azure IMDS @ 169.254.169.254),
- *   100.64.0.0/10 (CGNAT / shared address space).
+ * 0.0.0.0/8 (unspecified / "this" network),
+ * 169.254.0.0/16 (link-local / cloud metadata, e.g. AWS/GCP/Azure IMDS @ 169.254.169.254),
+ * 100.64.0.0/10 (CGNAT / shared address space).
  * Self-hosted model infra is explicitly ALLOWED:
- *   loopback `127.0.0.0/8`, and RFC1918 `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`.
+ * loopback `127.0.0.0/8`, and RFC1918 `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`.
  * A user's Ollama / LiteLLM / LM-Studio server commonly runs on `127.0.0.1` or a LAN
  * private IP — that is the user's own host, not an SSRF target.
  * Returns false for non-IPv4-literal hosts (caller treats them as hostnames).
@@ -132,20 +132,72 @@ function isDangerousIpv4(host: string): boolean {
 }
 
 /**
- * IPv6-literal SSRF classification. Handles the `::ffff:<ipv4>` mapped form
+ * True if `host` is a hostname that always refers to the local machine
+ * (`localhost` / `*.localhost`). Used by the strict provenance check so a
+ * non-user-configured `baseUrl` cannot reach a local model server by name.
+ */
+function isLocalHostname(host: string): boolean {
+  const h = host.toLowerCase();
+  return h === "localhost" || h.endsWith(".localhost");
+}
+
+/**
+ * True if `host` is an IP literal in a user-local range that the DEFAULT policy
+ * ALLOWS (loopback `127.0.0.0/8` & `:1`, RFC1918 `10/8`·`172.16/12`·`192.168/16`,
+ * IPv6 ULA `fc00:/7`). The strict provenance check ({@link validateLlmBaseUrl}
+ * with `allowLocalExemption=false`) additionally rejects these so an injected
+ * `baseUrl` can never reach the user's own local model server.
+ */
+function isUserLocalIp(host: string): boolean {
+  if (!host) return false;
+  if (host.includes(":")) return isLocalIpv6(host);
+  return isLocalIpv4(host);
+}
+
+function isLocalIpv4(host: string): boolean {
+  const o = parseIPv4Octets(host);
+  if (!o) return false;
+  const [a, b] = o;
+  if (a === 127) return true;                         // loopback 127.0.0.0/8
+  if (a === 10) return true;                          // RFC1918 10.0.0.0/8
+  if (a === 172 && b >= 16 && b <= 31) return true;   // RFC1918 172.16.0.0/12
+  if (a === 192 && b === 168) return true;            // RFC1918 192.168.0.0/16
+  return false;
+}
+
+function isLocalIpv6(host: string): boolean {
+  const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(host);
+  if (mappedHex) {
+    const g5 = parseInt(mappedHex[1], 16);
+    const g6 = parseInt(mappedHex[2], 16);
+    return isLocalIpv4(`${(g5 >> 8) & 0xff}.${g5 & 0xff}.${(g6 >> 8) & 0xff}.${g6 & 0xff}`);
+  }
+  const mappedDotted = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(host);
+  if (mappedDotted) return isLocalIpv4(mappedDotted[1]);
+  const groups = expandIPv6(host);
+  if (!groups) return false;
+ //  1 loopback.
+  if (groups[7] === 1 && groups.slice(0, 7).every((g) => g === 0)) return true;
+ // ULA fc00:/7 (matches fc00:/8 and fd00:/8).
+  if ((groups[0] & 0xfe00) === 0xfc00) return true;
+  return false;
+}
+
+/**
+ * IPv6-literal SSRF classification. Handles the `:ffff:<ipv4>` mapped form
  * (delegates to the IPv4 check) and pure IPv6 (expanded to 8 groups):
- *   - `::` unspecified (all-zeros) — BLOCKED,
- *   - `fe80::/10` link-local — BLOCKED (IPv6 cloud-metadata / IMDS equivalent),
- *   - `::1` loopback — ALLOWED (self-hosted model server),
- *   - `fc00::/7` unique local addresses (ULA) — ALLOWED (IPv6 RFC1918-equiv),
- *   - `::ffff:<dangerous-ipv4>` mapped / NAT64 / IPv4-compatible — BLOCKED when
- *     the embedded IPv4 is in a dangerous range.
+ * - `:` unspecified (all-zeros) — BLOCKED,
+ * - `fe80:/10` link-local — BLOCKED (IPv6 cloud-metadata / IMDS equivalent),
+ * - `:1` loopback — ALLOWED (self-hosted model server),
+ * - `fc00:/7` unique local addresses (ULA) — ALLOWED (IPv6 RFC1918-equiv),
+ * - `:ffff:<dangerous-ipv4>` mapped / NAT64 / IPv4-compatible — BLOCKED when
+ * the embedded IPv4 is in a dangerous range.
  * Returns false for non-IPv6-literal hosts.
  */
 function isDangerousIpv6(host: string): boolean {
-  // IPv4-mapped IPv6. The URL parser canonicalizes `::ffff:127.0.0.1` into the
-  // hex form `::ffff:7f00:1` (the IPv4 packed into the last two 16-bit groups),
-  // so handle both the dotted and canonical-hex representations.
+ // IPv4-mapped IPv6. The URL parser canonicalizes `:ffff:127.0.0.1` into the
+ // hex form `:ffff:7f00:1` (the IPv4 packed into the last two 16-bit groups),
+ // so handle both the dotted and canonical-hex representations.
   const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(host);
   if (mappedHex) {
     const g5 = parseInt(mappedHex[1], 16);
@@ -159,27 +211,27 @@ function isDangerousIpv6(host: string): boolean {
   }
   const groups = expandIPv6(host);
   if (!groups) return false; // not a valid IPv6 literal → treat as hostname
-  // Unspecified :: (equivalent to 0.0.0.0) — still a genuine SSRF sink.
+ // Unspecified : (equivalent to 0.0.0.0) — still a genuine SSRF sink.
   if (groups.every((g) => g === 0)) return true;
-  // Loopback ::1 — IPv6 localhost — ALLOWED (self-hosted model server). Must be
-  // checked BEFORE the deprecated IPv4-compatible block below, which would
-  // otherwise expand ::1 to embedded 0.0.0.1 (unspecified) and wrongly reject it.
+ // Loopback :1 — IPv6 localhost — ALLOWED (self-hosted model server). Must be
+ // checked BEFORE the deprecated IPv4-compatible block below, which would
+ // otherwise expand :1 to embedded 0.0.0.1 (unspecified) and wrongly reject it.
   if (groups[7] === 1 && groups.slice(0, 7).every((g) => g === 0)) return false;
-  // ULA fc00::/7 is ALLOWED (IPv6 equivalent of RFC1918 private ranges).
-  // Link-local fe80::/10 — IPv6 cloud-metadata / IMDS equivalent — BLOCKED.
+ // ULA fc00:/7 is ALLOWED (IPv6 equivalent of RFC1918 private ranges).
+ // Link-local fe80:/10 — IPv6 cloud-metadata / IMDS equivalent — BLOCKED.
   if ((groups[0] & 0xffc0) === 0xfe80) return true;
-  // NAT64 (RFC 6052) `64:ff9b::/96` — first 96 bits are the well-known
-  // prefix, the last 32 bits embed an IPv4 address that the NAT64 gateway
-  // translates. On NAT64-enabled networks `64:ff9b::169.254.169.254` reaches
-  // the cloud metadata service and `64:ff9b::127.0.0.1` reaches loopback.
-  if (groups[0] === 0x64ff && groups[1] === 0x9b &&
+ // NAT64 (RFC 6052) `64:ff9b:/96` — first 96 bits are the well-known
+ // prefix, the last 32 bits embed an IPv4 address that the NAT64 gateway
+ // translates. On NAT64-enabled networks `64:ff9b:169.254.169.254` reaches
+ // the cloud metadata service and `64:ff9b:127.0.0.1` reaches loopback.
+  if (groups[0] === 0x0064 && groups[1] === 0xff9b &&
       groups[2] === 0 && groups[3] === 0 && groups[4] === 0 && groups[5] === 0) {
     const embedded = groupsToIpv4(groups[6], groups[7]);
     if (embedded && isDangerousIpv4(embedded)) return true;
   }
-  // Deprecated IPv4-compatible `::a.b.c.d` — all-zero prefix with the IPv4 in
-  // the last 32 bits. (Skip `::` / `::1`, which the unspecified/loopback
-  // checks above already returned true for.)
+ // Deprecated IPv4-compatible `:a.b.c.d` — all-zero prefix with the IPv4 in
+ // the last 32 bits. (Skip `:` / `:1`, which the unspecified/loopback
+ // checks above already returned true for.)
   if (groups[0] === 0 && groups[1] === 0 && groups[2] === 0 &&
       groups[3] === 0 && groups[4] === 0 && groups[5] === 0) {
     const embedded = groupsToIpv4(groups[6], groups[7]);
@@ -189,7 +241,7 @@ function isDangerousIpv6(host: string): boolean {
 }
 
 /**
- * Expand an IPv6 literal into 8 unsigned-16-bit groups, handling `::`
+ * Expand an IPv6 literal into 8 unsigned-16-bit groups, handling `:`
  * compression. Returns null if the string is not a valid IPv6 literal (e.g.
  * contains characters other than hex digits and colons, or has the wrong group
  * count). Embedded IPv4 (handled separately above) is expected to be absent
@@ -244,23 +296,23 @@ function expandIPv6(host: string): number[] | null {
  * Validate an LLM `baseUrl` against the SSRF guard.
  *
  * @returns `{ ok: true }` for allowed URLs, or `{ ok: false, reason }`
- *   explaining the rejection for blocked URLs.
+ * explaining the rejection for blocked URLs.
  *
  * Blocks:
- *   - non-`http`/`https` schemes (`file:`, `ftp:`, `javascript:`, …),
- *   - link-local `169.254.0.0/16` (cloud metadata / IMDS) and IPv6 `fe80::/10`,
- *   - unspecified `0.0.0.0/8` and IPv6 `::` (all-zeros),
- *   - CGNAT `100.64.0.0/10`,
- *   - the `::ffff:<dangerous-ipv4>` mapped / NAT64 / IPv4-compatible forms when the
- *     embedded IPv4 is dangerous.
+ * - non-`http`/`https` schemes (`file:`, `ftp:`, `javascript:`, …),
+ * - link-local `169.254.0.0/16` (cloud metadata / IMDS) and IPv6 `fe80:/10`,
+ * - unspecified `0.0.0.0/8` and IPv6 `:` (all-zeros),
+ * - CGNAT `100.64.0.0/10`,
+ * - the `:ffff:<dangerous-ipv4>` mapped / NAT64 / IPv4-compatible forms when the
+ * embedded IPv4 is dangerous.
  *
  * ALLOWED (self-hosted model infrastructure — the user's own host, not an SSRF
  * target):
- *   - `localhost` and `*.localhost` hostnames,
- *   - loopback `127.0.0.0/8` and IPv6 `::1`,
- *   - RFC1918 private ranges `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
- *   - IPv6 ULA `fc00::/7`,
- *   - public hostname-based URLs (`api.openai.com`, etc.) — parsed, never DNS-resolved.
+ * - `localhost` and `*.localhost` hostnames,
+ * - loopback `127.0.0.0/8` and IPv6 `:1`,
+ * - RFC1918 private ranges `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
+ * - IPv6 ULA `fc00:/7`,
+ * - public hostname-based URLs (`api.openai.com`, etc.) — parsed, never DNS-resolved.
  *
  * Curated local-provider loopback endpoints are additionally covered by the
  * integration-layer {@link isAllowedLlmBaseUrl} exemption for defense-in-depth.
@@ -282,10 +334,10 @@ function expandIPv6(host: string): number[] | null {
  * layer for untrusted `baseUrl` values.
  *
  * @param allowLocalExemption When true, curated local-provider loopback URLs
- *   (Ollama / LiteLLM) are exempted exactly like {@link isAllowedLlmBaseUrl}.
- *   Pass `false` for a `baseUrl` whose provenance is NOT user-configured
- *   (e.g. injected via prompt injection / settings-sync) so the exemption can
- *   never be abused to reach a local model from an untrusted origin.
+ * (Ollama / LiteLLM) are exempted exactly like {@link isAllowedLlmBaseUrl}.
+ * Pass `false` for a `baseUrl` whose provenance is NOT user-configured
+ * (e.g. injected via prompt injection / settings-sync) so the exemption can
+ * never be abused to reach a local model from an untrusted origin.
  */
 export async function resolveAndValidateLlmBaseUrl(
   url: string,
@@ -294,26 +346,45 @@ export async function resolveAndValidateLlmBaseUrl(
   const base = validateLlmBaseUrl(url);
   if (!base.ok) return base;
 
-  // Apply the curated-local exemption (used only for user-configured URLs).
+ // Apply the curated-local exemption (used only for user-configured URLs).
   if (allowLocalExemption && isAllowedLlmBaseUrl(url)) return { ok: true };
 
   let host = baseUrlHost(url);
   if (!host) return { ok: false, reason: `missing host in URL: ${url}` };
   host = host.replace(/^\[|\]$/g, "");
 
-  // IP-literal hosts are already classified by validateLlmBaseUrl above; only
-  // hostname-based hosts need DNS resolution to catch poisoned-hostname SSRF.
+ // IP-literal hosts are already classified by validateLlmBaseUrl above; only
+ // hostname-based hosts need DNS resolution to catch poisoned-hostname SSRF.
   if (!isLikelyHostname(host)) return { ok: true };
 
-  const resolved = await dnsResolve(host);
-  if (resolved === null) {
-    // No resolver available (or resolution failed) — fail open to the
-    // synchronous result rather than risking a false "blocked" that would
-    // break legitimate public hostnames. The transport layer still re-checks
-    // the literal URL, and the DNS caveat is documented in the module header.
+  const outcome = await dnsResolve(host);
+  if (outcome.kind === "unavailable") {
+ // No DNS resolver exists in this runtime (e.g. a Node context without the
+ // `dns` module). The synchronous {@link validateLlmBaseUrl} already passed
+ // and the transport layer re-checks the literal URL, so we degrade to allow
+ // — but surface a warning so the (rare) gap in SSRF coverage is observable
+ // rather than silent. In a Chrome extension service worker
+ // `chrome.dns.resolve` IS available, so this path is effectively unreachable
+ // in production. See finding: dnsResolve swallows all errors and fails open.
+    console.warn(
+      `[ssrf] dnsResolve unavailable — degrading ${url} to the synchronous SSRF ` +
+        `check (fail-open). Verify the transport-layer guard still blocks ` +
+        `unauthorized targets; do not treat this as a successful validation.`,
+    );
     return { ok: true };
   }
-  for (const ip of resolved) {
+  if (outcome.kind === "error") {
+ // A resolver was available but the lookup FAILED (e.g. DNS error / timeout).
+ // For an untrusted `baseUrl` whose DNS we cannot verify, we FAIL CLOSED
+ // rather than risk reaching an internal/metadata host. This is the
+ // security-correct default for the SSRF guard — a transient resolver error
+ // must not quietly downgrade the check to "allow".
+    return {
+      ok: false,
+      reason: `DNS resolution for ${host} failed; refusing ${url} (fail-closed SSRF guard).`,
+    };
+  }
+  for (const ip of outcome.ips) {
     const blocked = isPrivateOrLoopbackIp(ip);
     if (blocked) {
       return {
@@ -342,23 +413,44 @@ function isLikelyHostname(host: string): boolean {
 }
 
 /**
- * Resolve a hostname to its IP addresses using whatever DNS API is available.
- * Returns null when no resolver exists in this runtime (so callers degrade
- * gracefully to the synchronous check).
+ * Resolution outcome, distinguishing the three cases a DNS lookup can hit:
+ * - `resolved` : a resolver answered (possibly with an empty IP list).
+ * - `error` : a resolver existed but the lookup threw / returned an error
+ * (fail CLOSED on this — see the caller).
+ * - `unavailable`: no DNS resolver API exists in this runtime at all (degrade
+ * to fail-open with a warning — only reachable outside a
+ * Chrome extension SW, which always has `chrome.dns`).
  */
-async function dnsResolve(hostname: string): Promise<string[] | null> {
-  // Chrome extension service worker: chrome.dns.resolve.
+type DnsOutcome =
+  | { kind: "resolved"; ips: string[] }
+  | { kind: "error" }
+  | { kind: "unavailable" };
+
+/**
+ * Resolve a hostname to its IP addresses using whatever DNS API is available.
+ * Never returns null — it distinguishes "no resolver" from "resolver error"
+ * so the caller can FAIL CLOSED on a genuine lookup failure while still
+ * degrading (with a warning) when no resolver exists at all.
+ */
+async function dnsResolve(hostname: string): Promise<DnsOutcome> {
+ // Chrome extension service worker: chrome.dns.resolve.
   const dnsResolveFn = (globalThis as { chrome?: { dns?: { resolve?: (h: string, cb: (r: { addresses?: string[] }) => void) => void } } }).chrome?.dns?.resolve;
   if (dnsResolveFn) {
-    return await new Promise<string[] | null>((resolve) => {
+    return await new Promise<DnsOutcome>((resolve) => {
       try {
-        dnsResolveFn(hostname, (result) => resolve(result?.addresses ?? null));
+        dnsResolveFn(hostname, (result) => {
+          if (chrome.runtime.lastError) {
+            resolve({ kind: "error" });
+            return;
+          }
+          resolve({ kind: "resolved", ips: result?.addresses ?? [] });
+        });
       } catch {
-        resolve(null);
+        resolve({ kind: "error" });
       }
     });
   }
-  // Node.js context (mini-services / tests): dns.promises.lookup with ALL.
+ // Node.js context (mini-services / tests): dns.promises.lookup with ALL.
   const nodeDns = (globalThis as { require?: (m: string) => unknown }).require;
   if (nodeDns) {
     try {
@@ -367,16 +459,26 @@ async function dnsResolve(hostname: string): Promise<string[] | null> {
       if (lookup) {
         const r = await lookup(hostname, { all: true });
         const arr = Array.isArray(r) ? r : [r];
-        return arr.map((x) => x.address);
+        return { kind: "resolved", ips: arr.map((x) => x.address) };
       }
     } catch {
-      return null;
+      return { kind: "error" };
     }
   }
-  return null;
+  return { kind: "unavailable" };
 }
 
-export function validateLlmBaseUrl(url: string): SsrfCheckResult {
+/**
+ * @param allowLocalExemption When `true` (default — preserves the historical
+ * policy for user-configured URLs), loopback / RFC1918 / ULA and `localhost`
+ * are ALLOWED (self-hosted model infra). When `false` (provenance is NOT
+ * user-configured), those user-local endpoints are additionally REJECTED so an
+ * injected `baseUrl` can never reach the user's own local model server.
+ */
+export function validateLlmBaseUrl(
+  url: string,
+  allowLocalExemption = true,
+): SsrfCheckResult {
   if (typeof url !== "string" || url.length === 0) {
     return { ok: false, reason: "baseUrl must be a non-empty string" };
   }
@@ -396,7 +498,7 @@ export function validateLlmBaseUrl(url: string): SsrfCheckResult {
   if (!host) {
     return { ok: false, reason: `missing host in URL: ${url}` };
   }
-  // URL.hostname already strips IPv6 brackets, but guard anyway.
+ // URL.hostname already strips IPv6 brackets, but guard anyway.
   const normalizedHost = host.replace(/^\[|\]$/g, "");
   if (isPrivateOrLoopbackIp(normalizedHost)) {
     return {
@@ -404,7 +506,117 @@ export function validateLlmBaseUrl(url: string): SsrfCheckResult {
       reason: `host resolves to a private/loopback/link-local address: ${normalizedHost}`,
     };
   }
+ // Provenance gate: when the baseUrl is NOT user-configured, also reject
+ // user-local endpoints (localhost / loopback / RFC1918 / ULA) so an injected
+ // baseUrl (prompt injection, malicious settings-sync, crafted tool call)
+ // cannot reach the user's own local model server.
+  if (
+    !allowLocalExemption &&
+    (isLocalHostname(normalizedHost) || isUserLocalIp(normalizedHost))
+  ) {
+    return {
+      ok: false,
+      reason: `host "${normalizedHost}" is a local endpoint not allowed for a non-user-configured baseUrl: ${url}`,
+    };
+  }
   return { ok: true };
+}
+
+/**
+ * Validate a user-configured completion-webhook URL.
+ *
+ * A webhook is an external notification endpoint (Slack / Discord / custom)
+ * that receives task text on completion. It must never point at an internal
+ * host (exfiltration / SSRF), but it MAY be a loopback endpoint — e.g. a
+ * self-hosted notification relay in dev (`http://localhost:8080/hook`) — so
+ * loopback is permitted while the genuine sinks remain blocked:
+ * - non-`http`/`https` schemes (`javascript:`/`data:`/`file:`/…),
+ * - cloud-metadata / link-local `169.254.0.0/16` and IPv6 `fe80:/10`
+ * (AWS/GCP/Azure IMDS),
+ * - unspecified `0.0.0.0/8` / `:`,
+ * - CGNAT `100.64.0.0/10`,
+ * - RFC1918 private ranges `10/8`, `172.16/12`, `192.168/16` and IPv6 ULA
+ * `fc00:/7` (a webhook should reach a real internet endpoint, not a LAN
+ * host).
+ * Public hostname URLs and loopback (`127.0.0.0/8`, `:1`, `localhost`) are
+ * allowed.
+ */
+export function validateWebhookUrl(url: string): SsrfCheckResult {
+  if (typeof url !== "string" || url.length === 0) {
+    return { ok: false, reason: "webhookUrl must be a non-empty string" };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { ok: false, reason: `invalid URL: ${url}` };
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return {
+      ok: false,
+      reason: `scheme "${parsed.protocol}" is not allowed (only http/https): ${url}`,
+    };
+  }
+  const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  if (!host) {
+    return { ok: false, reason: `missing host in URL: ${url}` };
+  }
+  if (isBlockedWebhookHost(host)) {
+    return {
+      ok: false,
+      reason: `host resolves to a private/metadata/link-local address: ${host}`,
+    };
+  }
+  return { ok: true };
+}
+
+/** True if `host` is an IP literal (or hostname) that a webhook must NOT reach. */
+function isBlockedWebhookHost(host: string): boolean {
+  if (host.includes(":")) return isBlockedWebhookIpv6(host);
+  return isBlockedWebhookIpv4(host);
+}
+
+function isBlockedWebhookIpv4(host: string): boolean {
+  const o = parseIPv4Octets(host);
+  if (!o) return false; // not an IPv4 literal → hostname, allowed
+  const [a, b] = o;
+  if (a === 0) return true;                              // 0.0.0.0/8 unspecified
+  if (a === 169 && b === 254) return true;               // 169.254.0.0/16 link-local / cloud metadata
+  if (a === 100 && b >= 64 && b <= 127) return true;     // 100.64.0.0/10 CGNAT
+  if (a === 10) return true;                             // RFC1918 10.0.0.0/8
+  if (a === 172 && b >= 16 && b <= 31) return true;      // RFC1918 172.16.0.0/12
+  if (a === 192 && b === 168) return true;               // RFC1918 192.168.0.0/16
+  return false;                                          // loopback 127/8 + public ALLOWED
+}
+
+function isBlockedWebhookIpv6(host: string): boolean {
+  const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(host);
+  if (mappedHex) {
+    const g5 = parseInt(mappedHex[1], 16);
+    const g6 = parseInt(mappedHex[2], 16);
+    const embedded = `${(g5 >> 8) & 0xff}.${g5 & 0xff}.${(g6 >> 8) & 0xff}.${g6 & 0xff}`;
+    return isBlockedWebhookIpv4(embedded);
+  }
+  const mappedDotted = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(host);
+  if (mappedDotted) return isBlockedWebhookIpv4(mappedDotted[1]);
+  const groups = expandIPv6(host);
+  if (!groups) return false; // not a valid IPv6 literal → hostname, allowed
+  if (groups.every((g) => g === 0)) return true;          //  unspecified
+  if (groups[7] === 1 && groups.slice(0, 7).every((g) => g === 0)) return false; //  1 loopback allowed
+  if ((groups[0] & 0xffc0) === 0xfe80) return true;       // fe80:/10 link-local
+  if ((groups[0] & 0xfe00) === 0xfc00) return true;       // fc00:/7 ULA private
+ // NAT64 (RFC 6052) / deprecated IPv4-compatible embedded dangerous IPv4.
+  if (groups[0] === 0x0064 && groups[1] === 0xff9b &&
+      groups[2] === 0 && groups[3] === 0 && groups[4] === 0 && groups[5] === 0) {
+    const embedded = groupsToIpv4(groups[6], groups[7]);
+    if (embedded && isBlockedWebhookIpv4(embedded)) return true;
+  }
+  if (groups[0] === 0 && groups[1] === 0 && groups[2] === 0 &&
+      groups[3] === 0 && groups[4] === 0 && groups[5] === 0) {
+    const embedded = groupsToIpv4(groups[6], groups[7]);
+    if (embedded && isBlockedWebhookIpv4(embedded)) return true;
+  }
+  return false;
 }
 
 /**
@@ -416,21 +628,27 @@ export function validateLlmBaseUrl(url: string): SsrfCheckResult {
  * @returns true if the URL is safe to fetch (or is a curated local endpoint).
  */
 export function isAllowedLlmBaseUrl(url: string, allowLocalExemption = true): boolean {
-  const res = validateLlmBaseUrl(url);
+ // Strict base check (provenance=false): rejects the genuine SSRF sinks AND
+ // every user-local endpoint (localhost / loopback / RFC1918 / ULA). This is
+ // what makes the provenance gate real — the curated-list exemption below is
+ // the ONLY path by which a local endpoint is ever re-allowed, and only for a
+ // user-configured baseUrl.
+  const res = validateLlmBaseUrl(url, false);
   if (res.ok) return true;
   if (!allowLocalExemption) {
-    // A `baseUrl` whose provenance is NOT user-configured (e.g. injected via
-    // prompt injection / malicious settings-sync) must NEVER be exempted from
-    // the strict check — otherwise an injected `http://localhost:11434` would
-    // reach the user's local Ollama / LiteLLM server. Reject it.
+ // A `baseUrl` whose provenance is NOT user-configured (e.g. injected via
+ // prompt injection / malicious settings-sync) must NEVER be exempted from
+ // the strict check — otherwise an injected `http://localhost:11434` would
+ // reach the user's local Ollama / LiteLLM server. Reject it.
     return false;
   }
-  // Match on the parsed *origin* (scheme://host:port) rather than a raw
-  // substring `startsWith`. A curated entry's host:port pair is the only thing
-  // we exempt, so comparing origins is boundary-aware: it rejects malformed
-  // over-matches like `http://localhost:11434.attacker.com:9999/` (which fails
-  // `new URL` parsing entirely) and never matches a curated origin as a prefix
-  // of an unrelated host.
+ // User-configured: re-allow ONLY the curated local-provider origins. Match on
+ // the parsed *origin* (scheme://host:port) rather than a raw substring
+ // `startsWith`. A curated entry's host:port pair is the only thing we exempt,
+ // so comparing origins is boundary-aware: it rejects malformed over-matches
+ // like `http://localhost:11434.attacker.com:9999/` (which fails `new URL`
+ // parsing entirely) and never matches a curated origin as a prefix of an
+ // unrelated host.
   try {
     const targetOrigin = new URL(url).origin;
     if (
@@ -441,7 +659,7 @@ export function isAllowedLlmBaseUrl(url: string, allowLocalExemption = true): bo
       return true;
     }
   } catch {
-    // Invalid URL → not a curated local provider; leave it rejected.
+ // Invalid URL → not a curated local provider; leave it rejected.
   }
   return false;
 }

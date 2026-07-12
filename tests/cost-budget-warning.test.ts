@@ -18,9 +18,9 @@ describe("injectCostBudgetWarning", () => {
   });
 
   test("returns the warning at 75% threshold", () => {
-    // Use 0.08/0.10 = 0.8 (80%) — clearly above the 75% threshold, and
-    // avoids floating-point edge effects at exactly 0.75
-    // (0.075/0.10 evaluates to 0.7499999999999999 in IEEE-754, which is < 0.75).
+ // Use 0.08/0.10 = 0.8 (80%) — clearly above the 75% threshold, and
+ // avoids floating-point edge effects at exactly 0.75
+ // (0.075/0.10 evaluates to 0.7499999999999999 in IEEE-754, which is < 0.75).
     const warning = injectCostBudgetWarning(0.08, 0.10);
     expect(warning).not.toBeNull();
     expect(warning).toContain("COST BUDGET WARNING");
@@ -35,9 +35,9 @@ describe("injectCostBudgetWarning", () => {
   });
 
   test("respects a custom fraction", () => {
-    // 50% threshold with 40% usage → no warning.
+ // 50% threshold with 40% usage → no warning.
     expect(injectCostBudgetWarning(0.40, 1.0, 0.5)).toBeNull();
-    // 50% threshold with 60% usage → warning.
+ // 50% threshold with 60% usage → warning.
     const warning = injectCostBudgetWarning(0.60, 1.0, 0.5);
     expect(warning).not.toBeNull();
     expect(warning).toContain("60%");

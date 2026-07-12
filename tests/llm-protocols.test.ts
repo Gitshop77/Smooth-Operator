@@ -82,12 +82,12 @@ describe("OpenAIChat.protocol — body construction", () => {
     expect(body.response_format).toBeDefined();
     expect(body.response_format!.type).toBe("json_schema");
     const js = (body.response_format as { json_schema: { name: string; schema: Record<string, unknown>; strict: boolean } }).json_schema;
-    // The `name` is a fixed alphanumeric identifier required by the OpenAI
-    // structured-output API.
+ // The `name` is a fixed alphanumeric identifier required by the OpenAI
+ // structured-output API.
     expect(js.name).toBe("response");
     expect(js.strict).toBe(true);
-    // The schema is serialized into `json_schema.schema` (not discarded, as
-    // the old `json_object` form did).
+ // The schema is serialized into `json_schema.schema` (not discarded, as
+ // the old `json_object` form did).
     expect(js.schema).toBeDefined();
     expect(js.schema).toEqual({ type: "object" });
   });
@@ -101,22 +101,22 @@ describe("OpenAIChat.protocol — body construction", () => {
     const body = await OpenAIChat.protocol.body.from(makeRequest({
       messages: [
         { role: "system", content: "sys" },
-        { role: "user", content: 'See this: <screenshot>data:image/png;base64,iVBOR==</screenshot>' },
+        { role: "user", content: 'See this: <screenshot>data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==</screenshot>' },
       ],
     })) as OpenAIChat.OpenAIChatBody;
     const userMsg = body.messages[1];
-    // The content must be an array of parts, NOT a plain string.
+ // The content must be an array of parts, NOT a plain string.
     expect(Array.isArray(userMsg.content)).toBe(true);
     const parts = userMsg.content as OpenAIChat.OpenAIContentPart[];
     expect(parts).toHaveLength(2);
     expect(parts[0]).toEqual({ type: "text", text: "See this:" });
     expect(parts[1].type).toBe("image_url");
-    expect((parts[1] as { image_url: { url: string } }).image_url.url).toBe("data:image/png;base64,iVBOR==");
-    // The raw base64 must NOT appear as prompt text anywhere.
+    expect((parts[1] as { image_url: { url: string } }).image_url.url).toBe("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==");
+ // The raw base64 must NOT appear as prompt text anywhere.
     const serialized = JSON.stringify(body);
     expect(serialized).toContain("image_url");
-    // The data URL appears exactly once — inside the image_url part, not as text.
-    expect((serialized.match(/data:image\/png;base64,iVBOR==/g) || []).length).toBe(1);
+ // The data URL appears exactly once — inside the image_url part, not as text.
+    expect((serialized.match(/data:image\/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==/g) || []).length).toBe(1);
   });
 
   test("a user message without a screenshot stays a plain string", async () => {
@@ -137,13 +137,13 @@ describe("OpenAIChat.protocol — body construction", () => {
 });
 
 describe("OpenAIChat.protocol — streaming truncation regression", () => {
-  // Realistic OpenAI SSE chunk sequence: every delta includes
-  // `finish_reason: null`; only the final delta sets it to `"stop"`.
-  // OpenAI sends `usage` in a SEPARATE chunk AFTER `finish_reason` (with
-  // empty `choices: []`), followed by the `[DONE]` sentinel. A naive
-  // `terminal` would return `true` on a non-null `finish_reason`, exiting
-  // the stream loop BEFORE the usage chunk arrived — silently dropping
-  // cost/token accounting on every OpenAI-format provider.
+ // Realistic OpenAI SSE chunk sequence: every delta includes
+ // `finish_reason: null`; only the final delta sets it to `"stop"`.
+ // OpenAI sends `usage` in a SEPARATE chunk AFTER `finish_reason` (with
+ // empty `choices: []`), followed by the `[DONE]` sentinel. A naive
+ // `terminal` would return `true` on a non-null `finish_reason`, exiting
+ // the stream loop BEFORE the usage chunk arrived — silently dropping
+ // cost/token accounting on every OpenAI-format provider.
   const realisticChunks = [
     JSON.stringify({ choices: [{ delta: { role: "assistant" }, finish_reason: null }] }),
     JSON.stringify({ choices: [{ delta: { content: "Hello" }, finish_reason: null }] }),
@@ -155,22 +155,22 @@ describe("OpenAIChat.protocol — streaming truncation regression", () => {
   ];
 
   test("does NOT terminate on intermediate chunks with finish_reason: null", async () => {
-    // The first chunk has finish_reason: null — a naive terminal() would
-    // return true for it. The terminal() guard must return false here.
+ // The first chunk has finish_reason: null — a naive terminal() would
+ // return true for it. The terminal() guard must return false here.
     expect(OpenAIChat.protocol.stream.terminal?.(realisticChunks[0])).toBe(false);
   });
 
   test("does NOT terminate on a chunk with non-null finish_reason (waits for usage + [DONE])", async () => {
-    // The chunk with finish_reason: "stop" must NOT terminate the loop —
-    // OpenAI sends `usage` in a separate chunk AFTER it. Terminating here
-    // would silently drop cost/token accounting.
+ // The chunk with finish_reason: "stop" must NOT terminate the loop —
+ // OpenAI sends `usage` in a separate chunk AFTER it. Terminating here
+ // would silently drop cost/token accounting.
     expect(OpenAIChat.protocol.stream.terminal?.(realisticChunks[4])).toBe(false);
   });
 
   test("does NOT terminate on the usage chunk (empty choices + usage)", async () => {
-    // The usage chunk arrives after finish_reason and before [DONE]. It must
-    // NOT terminate the loop — `step()` needs to record the usage first, then
-    // `[DONE]` triggers the finish event.
+ // The usage chunk arrives after finish_reason and before [DONE]. It must
+ // NOT terminate the loop — `step()` needs to record the usage first, then
+ // `[DONE]` triggers the finish event.
     expect(OpenAIChat.protocol.stream.terminal?.(realisticChunks[5])).toBe(false);
   });
 
@@ -180,20 +180,20 @@ describe("OpenAIChat.protocol — streaming truncation regression", () => {
 
   test("reduces a full multi-chunk stream without early termination", async () => {
     const { content, terminatedEarly } = reduceFrames(OpenAIChat.protocol, realisticChunks, makeRequest());
-    // Without the terminal() guard, content would be "" (terminated on the
-    // first chunk before any text delta arrived). With the guard, all three
-    // text deltas accumulate.
+ // Without the terminal() guard, content would be "" (terminated on the
+ // first chunk before any text delta arrived). With the guard, all three
+ // text deltas accumulate.
     expect(content).toBe("Hello, world!");
     expect(terminatedEarly).toBe(true);
   });
 
   test("captures usage from the post-finish_reason usage chunk", async () => {
-    // The full chunk order: deltas -> finish_reason chunk -> usage chunk ->
-    // [DONE]. The usage chunk (index 5) must populate `state.usage` so the
-    // finish event emitted on `[DONE]` carries the real cost data.
+ // The full chunk order: deltas -> finish_reason chunk -> usage chunk ->
+ // [DONE]. The usage chunk (index 5) must populate `state.usage` so the
+ // finish event emitted on `[DONE]` carries the real cost data.
     let state = OpenAIChat.protocol.stream.initial(makeRequest());
-    // Step through every chunk except [DONE] so we can inspect the state
-    // before the finish event is emitted.
+ // Step through every chunk except [DONE] so we can inspect the state
+ // before the finish event is emitted.
     for (let i = 0; i <= 5; i++) {
       const { state: next } = OpenAIChat.protocol.stream.step(state, realisticChunks[i]);
       state = next as OpenAIChat.StreamState;
@@ -215,8 +215,8 @@ describe("OpenAIChat.protocol — streaming truncation regression", () => {
   });
 
   test("reduces a stream that ends with [DONE] but no non-null finish_reason", async () => {
-    // Some OpenAI-compatible providers (e.g. older Ollama) emit only [DONE]
-    // without a non-null finish_reason. The terminal() guard must still terminate.
+ // Some OpenAI-compatible providers (e.g. older Ollama) emit only [DONE]
+ // without a non-null finish_reason. The terminal() guard must still terminate.
     const chunks = [
       JSON.stringify({ choices: [{ delta: { content: "Hi" }, finish_reason: null }] }),
       "[DONE]",
@@ -231,9 +231,9 @@ describe("OpenAIChat.protocol — streaming truncation regression", () => {
 
 describe("OpenAICompatibleChat.protocol", () => {
   test("inherits the fixed terminal() from OpenAIChat (streaming truncation regression)", async () => {
-    // openai-compatible-chat reuses OpenAIChat's stream object verbatim, so
-    // the fix propagates. Verify explicitly so a future refactor that
-    // detaches the two stays correct.
+ // openai-compatible-chat reuses OpenAIChat's stream object verbatim, so
+ // the fix propagates. Verify explicitly so a future refactor that
+ // detaches the two stays correct.
     const intermediateChunk = JSON.stringify({ choices: [{ delta: { content: "x" }, finish_reason: null }] });
     expect(OpenAICompatibleChat.protocol.stream.terminal?.(intermediateChunk)).toBe(false);
   });
@@ -252,7 +252,7 @@ describe("AnthropicMessages.protocol — body construction", () => {
     expect(body.system).toBeDefined();
     expect(body.system).toHaveLength(1);
     expect(body.system![0].text).toBe("You are a test assistant.");
-    // Prompt caching marker
+ // Prompt caching marker
     expect(body.system![0].cache_control).toEqual({ type: "ephemeral" });
   });
 
@@ -267,7 +267,7 @@ describe("AnthropicMessages.protocol — body construction", () => {
     const body = await AnthropicMessages.protocol.body.from(makeRequest({
       messages: [
         { role: "system", content: "sys" },
-        { role: "user", content: 'See this: <screenshot>data:image/png;base64,iVBOR==</screenshot>' },
+        { role: "user", content: 'See this: <screenshot>data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==</screenshot>' },
       ],
     })) as AnthropicMessages.AnthropicBody;
     const userContent = body.messages[0].content as Array<{ type: string; text?: string; source?: { type: string; media_type: string; data: string } }>;
@@ -276,7 +276,7 @@ describe("AnthropicMessages.protocol — body construction", () => {
     expect(userContent[0].text).toBe("See this:");
     expect(userContent[1].type).toBe("image");
     expect(userContent[1].source?.media_type).toBe("image/png");
-    expect(userContent[1].source?.data).toBe("iVBOR==");
+    expect(userContent[1].source?.data).toBe("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==");
   });
 
   test("forces tool_use for structured output when a schema is provided", async () => {
@@ -294,13 +294,13 @@ describe("AnthropicMessages.protocol — body construction", () => {
 
 describe("AnthropicMessages.protocol — stream parsing", () => {
   test("accumulates text from content_block_delta events", async () => {
-    // Realistic Anthropic SSE sequence:
-    //   message_start → carries input_tokens (and initial output_tokens) under
-    //     `data.message.usage`.
-    //   content_block_delta × N → carries text deltas.
-    //   message_delta → carries ONLY `output_tokens` (cumulative). Has no
-    //     input_tokens field at all.
-    //   message_stop → terminal; finish event uses the accumulated usage.
+ // Realistic Anthropic SSE sequence:
+ // message_start → carries input_tokens (and initial output_tokens) under
+ // `data.message.usage`.
+ // content_block_delta × N → carries text deltas.
+ // message_delta → carries ONLY `output_tokens` (cumulative). Has no
+ // input_tokens field at all.
+ // message_stop → terminal; finish event uses the accumulated usage.
     const frames = [
       JSON.stringify({ type: "message_start", message: { usage: { input_tokens: 5, output_tokens: 0 } } }),
       JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: "Hello" } }),
@@ -328,11 +328,11 @@ describe("AnthropicMessages.protocol — stream parsing", () => {
   });
 
   test("captures input_tokens from message_start (not message_delta)", async () => {
-    // Anthropic sends input_tokens in `message_start.data.message.usage`,
-    // NOT in `message_delta`. Reading `input_tokens` from
-    // `message_delta.data.usage` would always be undefined → tokensIn
-    // would always be 0 → cost tracking broken. This test drives the realistic
-    // SSE frame order to assert input_tokens survives into the finish event.
+ // Anthropic sends input_tokens in `message_start.data.message.usage`,
+ // NOT in `message_delta`. Reading `input_tokens` from
+ // `message_delta.data.usage` would always be undefined → tokensIn
+ // would always be 0 → cost tracking broken. This test drives the realistic
+ // SSE frame order to assert input_tokens survives into the finish event.
     const frames = [
       JSON.stringify({ type: "message_start", message: { usage: { input_tokens: 42, output_tokens: 0 } } }),
       JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: "hi" } }),
@@ -350,10 +350,10 @@ describe("AnthropicMessages.protocol — stream parsing", () => {
   });
 
   test("message_delta does not overwrite tokensIn with 0", async () => {
-    // If a stream happens to lack a message_start event, the message_delta
-    // handler must NOT zero out any previously captured tokensIn. Drive two
-    // message_delta events back-to-back and confirm tokensIn (if set) is
-    // preserved rather than clobbered.
+ // If a stream happens to lack a message_start event, the message_delta
+ // handler must NOT zero out any previously captured tokensIn. Drive two
+ // message_delta events back-to-back and confirm tokensIn (if set) is
+ // preserved rather than clobbered.
     const state0 = AnthropicMessages.protocol.stream.initial(makeRequest()) as AnthropicMessages.StreamState;
     state0.usage = { tokensIn: 99, tokensOut: 0, model: "", costUsd: 0 };
     const { state: after } = AnthropicMessages.protocol.stream.step(
@@ -365,16 +365,16 @@ describe("AnthropicMessages.protocol — stream parsing", () => {
   });
 
   test("cache_read + cache_creation tokens folded into tokensIn (total) + cachedInputTokens", async () => {
-    // Anthropic's `input_tokens` is FRESH-only (disjoint from cache_read +
-    // cache_creation), unlike OpenAI's `prompt_tokens` which is the TOTAL.
-    // The protocol sets `tokensIn = input_tokens + cache_read + cache_creation`
-    // so `pricing.ts`'s `cached = Math.min(cached, tokensIn)` clamp (which
-    // assumes cached ⊆ tokensIn, OpenAI semantics) works correctly:
-    //   freshInput = tokensIn - cached = (42+100+50) - 150 = 42 (fresh-only ✓)
-    //   cached = 150 (billed at cacheReadRate ✓)
-    // Without this, `tokensIn` would be just 42, the clamp would zero out
-    // `cached` (min(150, 42) = 42), and 108 cached tokens would be silently
-    // dropped from cost accounting — under-reporting Anthropic cached-step cost.
+ // Anthropic's `input_tokens` is FRESH-only (disjoint from cache_read +
+ // cache_creation), unlike OpenAI's `prompt_tokens` which is the TOTAL.
+ // The protocol sets `tokensIn = input_tokens + cache_read + cache_creation`
+ // so `pricing.ts`'s `cached = Math.min(cached, tokensIn)` clamp (which
+ // assumes cached ⊆ tokensIn, OpenAI semantics) works correctly:
+ // freshInput = tokensIn - cached = (42+100+50) - 150 = 42 (fresh-only ✓)
+ // cached = 150 (billed at cacheReadRate ✓)
+ // Without this, `tokensIn` would be just 42, the clamp would zero out
+ // `cached` (min(150, 42) = 42), and 108 cached tokens would be silently
+ // dropped from cost accounting — under-reporting Anthropic cached-step cost.
     const frames = [
       JSON.stringify({
         type: "message_start",
@@ -397,19 +397,19 @@ describe("AnthropicMessages.protocol — stream parsing", () => {
       | undefined;
     expect(finish).toBeDefined();
     expect(finish?.usage).toBeDefined();
-    // Total input = fresh (42) + cache_read (100) + cache_creation (50) = 192
+ // Total input = fresh (42) + cache_read (100) + cache_creation (50) = 192
     expect(finish?.usage?.tokensIn).toBe(192);
-    // cachedInputTokens = cache_read (100); cache_creation is now reported
-    // separately as cachedWriteInputTokens (50), billed at the cacheWrite rate.
+ // cachedInputTokens = cache_read (100); cache_creation is now reported
+ // separately as cachedWriteInputTokens (50), billed at the cacheWrite rate.
     expect(finish?.usage?.cachedInputTokens).toBe(100);
     expect(finish?.usage?.cachedWriteInputTokens).toBe(50);
     expect(finish?.usage?.tokensOut).toBe(7);
   });
 
   test("cachedInputTokens is preserved across message_delta (not clobbered to 0)", async () => {
-    // message_delta only carries output_tokens — it must NOT zero out the
-    // cachedInputTokens captured by message_start. Same invariant as the
-    // tokensIn preservation test above, applied to cachedInputTokens.
+ // message_delta only carries output_tokens — it must NOT zero out the
+ // cachedInputTokens captured by message_start. Same invariant as the
+ // tokensIn preservation test above, applied to cachedInputTokens.
     const state0 = AnthropicMessages.protocol.stream.initial(makeRequest()) as AnthropicMessages.StreamState;
     state0.usage = { tokensIn: 200, tokensOut: 0, model: "", costUsd: 0, cachedInputTokens: 150 };
     const { state: after } = AnthropicMessages.protocol.stream.step(
@@ -452,13 +452,13 @@ describe("Gemini.protocol — body construction", () => {
     const body = await Gemini.protocol.body.from(makeRequest({
       messages: [
         { role: "system", content: "sys" },
-        { role: "user", content: 'See: <screenshot>data:image/png;base64,iVBOR==</screenshot>' },
+        { role: "user", content: 'See: <screenshot>data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==</screenshot>' },
       ],
     })) as Gemini.GeminiBody;
     const parts = body.contents[0].parts;
     expect(parts).toHaveLength(2);
     expect(parts[0].text).toBe("See:");
-    expect(parts[1].inline_data).toEqual({ mime_type: "image/png", data: "iVBOR==" });
+    expect(parts[1].inline_data).toEqual({ mime_type: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==" });
   });
 
   test("sets responseSchema when a schema is provided", async () => {
@@ -477,9 +477,9 @@ describe("Gemini.protocol — body construction", () => {
   });
 
   test("geminiPath throws on a structurally-invalid model id (injection guard)", () => {
-    // Model ids containing path separators / query metacharacters are rejected
-    // so they can't rewrite the request URL. encodeURIComponent would also
-    // neutralize them, but we fail fast on malformed ids.
+ // Model ids containing path separators / query metacharacters are rejected
+ // so they can't rewrite the request URL. encodeURIComponent would also
+ // neutralize them, but we fail fast on malformed ids.
     expect(() => Gemini.geminiPath("weird/model id?x=1")).toThrow(/Invalid model id/);
     expect(() => Gemini.geminiPath("bad\tid")).toThrow(/Invalid model id/);
     expect(() => Gemini.geminiPath("")).toThrow(/Invalid model id/);
@@ -496,8 +496,8 @@ describe("encodeModelIdForUrl — safe URL encoding + validation", () => {
   });
 
   test("percent-encodes characters encodeURIComponent touches (e.g. ':')", () => {
-    // `:` is a valid model-id char per the allow-list but is percent-encoded
-    // by encodeURIComponent, so it can't be misinterpreted in the URL path.
+ // `:` is a valid model-id char per the allow-list but is percent-encoded
+ // by encodeURIComponent, so it can't be misinterpreted in the URL path.
     expect(encodeModelIdForUrl("ns:model")).toBe("ns%3Amodel");
   });
 

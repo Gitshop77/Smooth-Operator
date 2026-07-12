@@ -12,10 +12,10 @@ export async function handleVerify(
   _ctx: ActionContext,
   action: Extract<Action, { type: "verify" }>,
 ): Promise<ActionResult> {
-  // The executor itself doesn't perform verification — the expectation
-  // is recorded in history (via `extractedContent`) so the next
-  // navigator step can re-observe the page and check against it. This
-  // keeps verify as a pure "prompt the LLM to look" action.
+ // The executor itself doesn't perform verification — the expectation
+ // is recorded in history (via `extractedContent`) so the next
+ // navigator step can re-observe the page and check against it. This
+ // keeps verify as a pure "prompt the LLM to look" action.
   return {
     action,
     success: true,

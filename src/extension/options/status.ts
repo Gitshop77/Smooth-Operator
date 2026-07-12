@@ -2,8 +2,8 @@
  * options/status.ts — single source of truth for status → color/label mappings.
  *
  * Previously the status-color definitions were scattered:
- *   - `vision-status.ts` defined `STATUS_DISPLAY` (badge bg + color per status)
- *   - `history.ts` hard-coded `<span class="badge success|failure">` markup
+ * - `vision-status.ts` defined `STATUS_DISPLAY` (badge bg + color per status)
+ * - `history.ts` hard-coded `<span class="badge success|failure">` markup
  *
  * Both now import from here so the palette lives in exactly ONE module.
  */
@@ -31,7 +31,7 @@ export const RUN_BADGE_CLASS: Record<RunStatus, string> = {
 };
 
 /** Build the badge `<span>` HTML for a run. The `label` is HTML-escaped so the
- *  output is safe to assign to `innerHTML` even with untrusted text. */
+ * output is safe to assign to `innerHTML` even with untrusted text. */
 export function runBadge(status: RunStatus, label: string): string {
   return `<span class="badge ${RUN_BADGE_CLASS[status]}">${escapeHtml(label)}</span>`;
 }

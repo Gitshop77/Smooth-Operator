@@ -1,9 +1,9 @@
 //
 // GET /api/cowork/events/stream?since_id=N
-//   Returns a Server-Sent Events (SSE) stream that proxies the cowork-events
-//   mini-service. Long-running consumers can subscribe to this stream to
-//   receive every event the mini-service broadcasts (tab:updated,
-//   network:request, security:event, etc.).
+// Returns a Server-Sent Events (SSE) stream that proxies the cowork-events
+// mini-service. Long-running consumers can subscribe to this stream to
+// receive every event the mini-service broadcasts (tab:updated,
+// network:request, security:event, etc.).
 //
 // Implementation: the mini-service already runs a realtime socket.io server
 // (`mini-services/cowork-events/index.ts`) that pushes events the instant they
@@ -70,21 +70,21 @@ export async function GET(req: NextRequest): Promise<Response> {
 
   const encoder = new TextEncoder();
 
-  // Lift `closed` + `socket` + `pingInterval` to the outer scope so BOTH
-  // `start()` and `cancel()` can reach them. Previously the poll `setInterval`
-  // lived inside `start()`, which meant `cancel()` (fired when a consumer
-  // explicitly cancels the ReadableStream) couldn't clear it — the 1s poll
-  // leaked indefinitely. The same hazard applies to the socket.io client.
+ // Lift `closed` + `socket` + `pingInterval` to the outer scope so BOTH
+ // `start()` and `cancel()` can reach them. Previously the poll `setInterval`
+ // lived inside `start()`, which meant `cancel()` (fired when a consumer
+ // explicitly cancels the ReadableStream) couldn't clear it — the 1s poll
+ // leaked indefinitely. The same hazard applies to the socket.io client.
   let closed = false;
   let socket: Socket | null = null;
   let pingInterval: ReturnType<typeof setInterval> | null = null;
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      // Resolve the server-side token WITHOUT letting a missing secret throw
-      // out of `start()` (which would crash the whole stream before any bytes
-      // are sent). If unset, `token` stays `''` and the connect attempt will
-      // surface a `connect_error` below — observable, not silent.
+ // Resolve the server-side token WITHOUT letting a missing secret throw
+ // out of `start()` (which would crash the whole stream before any bytes
+ // are sent). If unset, `token` stays `''` and the connect attempt will
+ // surface a `connect_error` below — observable, not silent.
       let token = '';
       try {
         token = getCoworkEventsToken();
@@ -97,15 +97,22 @@ export async function GET(req: NextRequest): Promise<Response> {
         try {
           controller.enqueue(encoder.encode(chunk));
         } catch {
-          // Stream is broken — mark closed + release the socket + ping timer so
-          // the socket.io client is torn down immediately (don't wait for
-          // req.signal).
+ // Stream is broken — mark closed + release the socket + ping timer so
+ // the socket.io client is torn down immediately (don't wait for
+ // req.signal). Also terminate the ReadableStream explicitly so it does
+ // not linger "silently-dead-but-alive" if `req.signal` abort never
+ // fires.
           closed = true;
           teardown();
+          try {
+            controller.error(new Error('events/stream broken transport'));
+          } catch {
+            /* already closed/errored */
+          }
         }
       };
 
-      // Release every long-lived resource this stream owns.
+ // Release every long-lived resource this stream owns.
       const teardown = (): void => {
         closed = true;
         if (socket) {
@@ -119,8 +126,8 @@ export async function GET(req: NextRequest): Promise<Response> {
         }
       };
 
-      // Register the abort listener BEFORE opening the socket so a client
-      // disconnect is observed even if it happens during the (async) handshake.
+ // Register the abort listener BEFORE opening the socket so a client
+ // disconnect is observed even if it happens during the (async) handshake.
       const onAbort = () => {
         teardown();
         try {
@@ -135,14 +142,14 @@ export async function GET(req: NextRequest): Promise<Response> {
       }
       req.signal.addEventListener('abort', onAbort, { once: true });
 
-      // Initial hello so the client knows the stream is alive.
+ // Initial hello so the client knows the stream is alive.
       safeEnqueue(`: cowork-events stream open since_id=${sinceId}\n\n`);
 
-      // Emit a single buffered event as an SSE message, but ONLY if its id is
-      // strictly greater than the cursor. This guards against the upstream
-      // contract ever becoming inclusive-at-boundary or replaying buffered
-      // events: without the guard, the same event would be re-emitted on every
-      // hydration and surface as duplicate SSE messages to consumers.
+ // Emit a single buffered event as an SSE message, but ONLY if its id is
+ // strictly greater than the cursor. This guards against the upstream
+ // contract ever becoming inclusive-at-boundary or replaying buffered
+ // events: without the guard, the same event would be re-emitted on every
+ // hydration and surface as duplicate SSE messages to consumers.
       const emitEvent = (evt: BufferedEvent): void => {
         if (typeof evt?.id !== 'number' || !Number.isFinite(evt.id)) return;
         if (evt.id <= sinceId) return;
@@ -158,9 +165,9 @@ export async function GET(req: NextRequest): Promise<Response> {
         safeEnqueue(`id: ${sseId}\nevent: ${sseEvent}\ndata: ${sseData}\n\n`);
       };
 
-      // Hydration: the mini-service sends the last 50 buffered events as a
-      // single `events:replay` batch on connect. Forward only those past the
-      // cursor (handles resume via `?since_id=`).
+ // Hydration: the mini-service sends the last 50 buffered events as a
+ // single `events:replay` batch on connect. Forward only those past the
+ // cursor (handles resume via `?since_id=`).
       const forwardReplay = (events: unknown): void => {
         if (!Array.isArray(events)) return;
         for (const evt of events as BufferedEvent[]) {
@@ -168,14 +175,14 @@ export async function GET(req: NextRequest): Promise<Response> {
         }
       };
 
-      // Connect to the mini-service's socket.io server. The server authenticates
-      // the handshake with `COWORK_UI_TOKEN` / `COWORK_EVENT_TOKEN` (the same
-      // secret `getCoworkEventsToken()` resolves), passed via the handshake
-      // `auth` and `query` so a failed token produces a `connect_error` here
-      // (and NOT a silent dead stream). `path: '/'` MUST match the mini-service's
-      // hardcoded socket.io path. socket.io auto-reconnects with exponential
-      // backoff, which also satisfies the "back off before the next attempt"
-      // guidance for a broken upstream.
+ // Connect to the mini-service's socket.io server. The server authenticates
+ // the handshake with `COWORK_UI_TOKEN` / `COWORK_EVENT_TOKEN` (the same
+ // secret `getCoworkEventsToken()` resolves), passed via the handshake
+ // `auth` and `query` so a failed token produces a `connect_error` here
+ // (and NOT a silent dead stream). `path: '/'` MUST match the mini-service's
+ // hardcoded socket.io path. socket.io auto-reconnects with exponential
+ // backoff, which also satisfies the "back off before the next attempt"
+ // guidance for a broken upstream.
       socket = ioClient(COWORK_EVENTS_BASE, {
         path: '/',
         auth: { token },
@@ -186,22 +193,22 @@ export async function GET(req: NextRequest): Promise<Response> {
         transports: ['websocket', 'polling'],
       });
 
-      // Connection lifecycle observability.
+ // Connection lifecycle observability.
       socket.on('connect', () => {
         console.info('[cowork] events/stream connected to cowork-events service');
       });
       socket.on('connect_error', (err: Error) => {
-        // Surface the failure: log server-side AND emit a comment so the client
-        // can see the stream is unhealthy (misconfigured token, mini-service
-        // down, etc.) instead of a perpetually-empty-but-"alive" stream.
+ // Surface the failure: log server-side AND emit a comment so the client
+ // can see the stream is unhealthy (misconfigured token, mini-service
+ // down, etc.) instead of a perpetually-empty-but-"alive" stream.
         console.error(
           `[cowork] events/stream socket connect_error: ${err?.message || 'unknown'}`,
         );
         safeEnqueue(`: upstream error ${new Date().toISOString()} ${err?.message || 'unknown'}\n\n`);
       });
       socket.on('disconnect', (reason: string) => {
-        // A mid-session disconnect is expected during mini-service restarts;
-        // socket.io will reconnect. Log at warn so it's visible but not noise.
+ // A mid-session disconnect is expected during mini-service restarts;
+ // socket.io will reconnect. Log at warn so it's visible but not noise.
         if (!closed) {
           console.warn(`[cowork] events/stream socket disconnected: ${reason}`);
         }
@@ -210,21 +217,21 @@ export async function GET(req: NextRequest): Promise<Response> {
         console.error(`[cowork] events/stream socket error: ${err?.message || 'unknown'}`);
       });
 
-      // Hydration batch.
+ // Hydration batch.
       socket.on('events:replay', forwardReplay);
 
-      // Catch-all forwarder. The mini-service emits
-      // `io.emit(channel, payload, { id, ts })`; socket.io-client delivers that
-      // as `(payload, meta)` where `meta = { id, ts }`. Forward every business
-      // channel as an SSE message, skipping reserved/transport events and the
-      // heartbeat/replay channels handled above.
+ // Catch-all forwarder. The mini-service emits
+ // `io.emit(channel, payload, { id, ts })`; socket.io-client delivers that
+ // as `(payload, meta)` where `meta = { id, ts }`. Forward every business
+ // channel as an SSE message, skipping reserved/transport events and the
+ // heartbeat/replay channels handled above.
       socket.onAny((event: string, ...args: unknown[]) => {
         if (RESERVED_EVENTS.has(event)) return;
-        // The mini-service broadcasts as `io.emit(channel, payload, { id, ts })`,
-        // so the sequence id lives in the second argument (`meta`), never in the
-        // business payload. Rely solely on `meta.id`: a payload may itself carry
-        // an `id` field (e.g. a tab/agent id) that is NOT the event-sequence id,
-        // and forwarding it as the SSE `id:` would corrupt resume ordering.
+ // The mini-service broadcasts as `io.emit(channel, payload, { id, ts })`,
+ // so the sequence id lives in the second argument (`meta`), never in the
+ // business payload. Rely solely on `meta.id`: a payload may itself carry
+ // an `id` field (e.g. a tab/agent id) that is NOT the event-sequence id,
+ // and forwarding it as the SSE `id:` would corrupt resume ordering.
         const meta = args[1] as { id?: number; ts?: number } | undefined;
         if (typeof meta?.id !== 'number') return; // can't order/forward without an id
         const payload = args[0];
@@ -232,15 +239,15 @@ export async function GET(req: NextRequest): Promise<Response> {
         emitEvent({ id: meta.id, channel: event, payload, ts });
       });
 
-      // Throttled keep-alive ping so proxies don't time out an idle stream.
+ // Throttled keep-alive ping so proxies don't time out an idle stream.
       pingInterval = setInterval(() => {
         if (closed) return;
         safeEnqueue(`: ping ${new Date().toISOString()}\n\n`);
       }, PING_INTERVAL_MS);
     },
     cancel() {
-      // Consumer explicitly cancelled the stream. Tear down the socket.io client
-      // + ping timer so no resource leaks after the consumer goes away.
+ // Consumer explicitly cancelled the stream. Tear down the socket.io client
+ // + ping timer so no resource leaks after the consumer goes away.
       closed = true;
       if (socket) {
         socket.removeAllListeners();
@@ -254,11 +261,11 @@ export async function GET(req: NextRequest): Promise<Response> {
     },
   });
 
-  // The cockpit dashboard is same-origin — it does not need a wildcard
-  // `Access-Control-Allow-Origin: '*'` header. Cross-origin EventSource
-  // connections could otherwise silently exfiltrate every cockpit event. If
-  // a specific cross-origin client must be supported, set
-  // `process.env.COWORK_BASE_URL` and reflect it here.
+ // The cockpit dashboard is same-origin — it does not need a wildcard
+ // `Access-Control-Allow-Origin: '*'` header. Cross-origin EventSource
+ // connections could otherwise silently exfiltrate every cockpit event. If
+ // a specific cross-origin client must be supported, set
+ // `process.env.COWORK_BASE_URL` and reflect it here.
   const allowOrigin = process.env.COWORK_BASE_URL || null;
 
   return new Response(stream, {

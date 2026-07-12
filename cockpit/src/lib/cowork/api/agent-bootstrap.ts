@@ -23,10 +23,10 @@ export { COCKPIT_VERSION };
 function getCockpitBaseUrl(): string {
   const configured = process.env.COWORK_BASE_URL;
   if (configured) return configured;
-  // Fail-closed in production: never advertise a localhost origin through the
-  // agent discovery contract. A production deployment without COWORK_BASE_URL
-  // should surface this loudly rather than silently pointing agents at
-  // http://localhost:3000.
+ // Fail-closed in production: never advertise a localhost origin through the
+ // agent discovery contract. A production deployment without COWORK_BASE_URL
+ // should surface this loudly rather than silently pointing agents at
+ // http://localhost:3000.
   if (process.env.NODE_ENV === "production") {
     console.error(
       "[agent-bootstrap] COWORK_BASE_URL is unset in a production deployment; " +
@@ -60,7 +60,7 @@ export const DISCOVERY_ROUTE_AUTH = {
   dataRouteAuth: {
     methods: ["X-Cowork-Token"],
     description:
-      "All /api/cowork/* routes except the 5 public discovery routes (/api/cowork/agent/bootstrap, /api/cowork/agent/manifest, /api/cowork/agent, /api/cowork/agent/version, /api/cowork/skill) require an X-Cowork-Token header matching the server-side secret. The server resolves the secret as COWORK_UI_TOKEN if set, otherwise falling back to COWORK_EVENT_TOKEN. No token is accepted by default; set a real secret (e.g. COWORK_UI_TOKEN) on the server, and optionally enable COWORK_ALLOW_DEV_TOKEN=1 for loopback dev only. Requests are rejected with 401 in production if no secret is configured or the well-known dev-token is used. EXCEPTION: the SSE stream /api/cowork/events/stream additionally accepts the same secret via a `?token=` query parameter, because browser EventSource cannot set custom headers. The query token is validated with the same constant-time compare, but the URL transport is weaker (recorded in proxy/access logs, browser history, and Referer headers) — operators should strip `?token=` from logs and rotate the token regularly.",
+      "All /api/cowork/* routes except the 5 public discovery routes (/api/cowork/agent/bootstrap, /api/cowork/agent/manifest, /api/cowork/agent, /api/cowork/agent/version, /api/cowork/skill) require an X-Cowork-Token header matching the server-side secret. Obtain the token from the cockpit operator. Requests without a valid token are rejected with 401.",
   },
 } as const;
 
@@ -181,10 +181,10 @@ export function buildAgentBootstrapContract(baseUrl: string, version: string) {
       humanReadable: `${baseUrl}/api/cowork/agent`,
       llmSkill: `${baseUrl}/api/cowork/skill`,
       machineManifest: `${baseUrl}/api/cowork/agent/manifest`,
-      // The `/agent/bootstrap` route is PUBLIC (one of the 5
-      // discovery routes that middleware.ts exempts from the X-Cowork-Token
-      // check). `publicBootstrap` matches the AGENT_STARTUP_SEQUENCE entry
-      // (`auth: 'none'`).
+ // The `/agent/bootstrap` route is PUBLIC (one of the 5
+ // discovery routes that middleware.ts exempts from the X-Cowork-Token
+ // check). `publicBootstrap` matches the AGENT_STARTUP_SEQUENCE entry
+ // (`auth: 'none'`).
       publicBootstrap: `${baseUrl}/api/cowork/agent/bootstrap`,
     },
     primaryInteractionModel: 'read persisted data via REST; create via POST and remove via DELETE where available',

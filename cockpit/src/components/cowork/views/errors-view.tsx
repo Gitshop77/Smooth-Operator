@@ -44,7 +44,7 @@ const SEVERITY_TONE: Record<string, "error" | "warning" | "info"> = {
   high: "error",
   medium: "warning",
   low: "info",
-  // Prisma also allows `info`; render it distinctly from `low`.
+ // Prisma also allows `info`; render it distinctly from `low`.
   info: "info",
 };
 
@@ -127,7 +127,7 @@ export function ErrorsView() {
       );
   }, [events, severityFilter, typeFilter, search]);
 
-  // Aggregate by type with frequency + worst severity in each group.
+ // Aggregate by type with frequency + worst severity in each group.
   const groups = React.useMemo<EventGroup[]>(() => {
     const map = new Map<string, EventGroup>();
     for (const e of filtered) {
@@ -141,14 +141,14 @@ export function ErrorsView() {
     return Array.from(map.values()).sort((a, b) => b.count - a.count);
   }, [filtered]);
 
-  // "challenge-detected" detection (will be empty until the extension wires it).
+ // "challenge-detected" detection (will be empty until the extension wires it).
   const challengeEvents = React.useMemo(
     () => events.filter((e) => e.type === CHALLENGE_TYPE),
     [events],
   );
   const challengeWired = challengeEvents.length > 0;
 
-  // Summary stats (over the filtered set).
+ // Summary stats (over the filtered set).
   const criticalCount = filtered.filter((e) => e.severity === "critical").length;
   const blockedCount = filtered.filter((e) => e.blocked).length;
   const distinctTypes = groups.length;
@@ -164,9 +164,9 @@ export function ErrorsView() {
 
   const handleRetry = React.useCallback(
     (e: SampleSecurityEvent) => {
-      // Functional stub — there is no run-recovery endpoint in the cockpit API
-      // (see `.audit/data.md` §4/§6). We surface the action via a toast so the
-      // UX is complete and wired for when recovery is added.
+ // Functional stub — there is no run-recovery endpoint in the cockpit API
+ // (see `.audit/data.md` §4/§6). We surface the action via a toast so the
+ // UX is complete and wired for when recovery is added.
       toast({
         title: "Retry queued",
         description: `Retry requested for the ${e.type} incident${

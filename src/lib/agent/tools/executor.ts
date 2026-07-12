@@ -22,17 +22,17 @@
  * `./handlers/*`, the shared helpers live in `./helpers/*`, the constants
  * live in `./constants.ts`, and the description string lives in
  * `./describe.ts`. The dispatcher:
- *   1. Captures `beforeUrl` + `beforeFingerprint` (used by click /
- *      go_back / press_and_hold for page-change detection).
- *   2. Switches on `action.type` and delegates to the matching handler.
- *   3. Wraps handler dispatch in a try/catch that converts *runtime* handler
- *      errors into `{ success: false, message: "..." }` results. The
- *      exhaustiveness guard is a programming error and is re-thrown (see
- *      {@link UnhandledActionError}) rather than downgraded to a soft failure.
+ * 1. Captures `beforeUrl` + `beforeFingerprint` (used by click /
+ * go_back / press_and_hold for page-change detection).
+ * 2. Switches on `action.type` and delegates to the matching handler.
+ * 3. Wraps handler dispatch in a try/catch that converts *runtime* handler
+ * errors into `{ success: false, message: "..." }` results. The
+ * exhaustiveness guard is a programming error and is re-thrown (see
+ * {@link UnhandledActionError}) rather than downgraded to a soft failure.
  *
  * Public API (kept stable for backward compatibility):
- *   - {@link executeAction} — the main entry point
- *   - {@link describeAction} — re-exported from `./describe`
+ * - {@link executeAction} — the main entry point
+ * - {@link describeAction} — re-exported from `./describe`
  */
 
 import type { ActionResult, AgentAction, BrowserState } from "../types";
@@ -103,16 +103,16 @@ class UnhandledActionError extends Error {
  * action-queue layer above it.
  *
  * @param action The validated action to execute.
- * @param state  The current browser state (used to resolve `[index]` → element).
- * @returns      An {@link ActionResult} describing what happened.
+ * @param state The current browser state (used to resolve `[index]` → element).
+ * @returns An {@link ActionResult} describing what happened.
  */
 export async function executeAction(
   action: AgentAction,
   state: BrowserState
 ): Promise<ActionResult> {
   try {
-    // Capture before-state once at the top — used by the click, go_back,
-    // and press_and_hold handlers for page-change detection.
+ // Capture before-state once at the top — used by the click, go_back,
+ // and press_and_hold handlers for page-change detection.
     const ctx: ActionContext = {
       state,
       beforeUrl: location.href,
@@ -154,23 +154,23 @@ export async function executeAction(
       case "done":            return await handleDone(ctx, action);
 
       default: {
-        // Exhaustiveness check: if a new action type is added to the union
-        // without a case here, TypeScript will fail to compile. At runtime this
-        // is a programming error, so we throw a dedicated error that the catch
-        // below re-throws (it must not be downgraded to a soft failure).
+ // Exhaustiveness check: if a new action type is added to the union
+ // without a case here, TypeScript will fail to compile. At runtime this
+ // is a programming error, so we throw a dedicated error that the catch
+ // below re-throws (it must not be downgraded to a soft failure).
         const _exhaustive: never = action;
         throw new UnhandledActionError(_exhaustive);
       }
     }
   } catch (e) {
-    // A programming error (the exhaustiveness guard) must surface as a hard
-    // throw, not as a routine failed action.
+ // A programming error (the exhaustiveness guard) must surface as a hard
+ // throw, not as a routine failed action.
     if (e instanceof UnhandledActionError) throw e;
 
-    // Runtime handler errors are recoverable: report them as a failed result.
-    // Preserve the error's constructor name so the type (e.g. "TypeError")
-    // isn't flattened away, aiding debugging without leaking the full stack to
-    // the user-facing message.
+ // Runtime handler errors are recoverable: report them as a failed result.
+ // Preserve the error's constructor name so the type (e.g. "TypeError")
+ // isn't flattened away, aiding debugging without leaking the full stack to
+ // the user-facing message.
     const err = e instanceof Error ? e : new Error(String(e));
     return {
       action,

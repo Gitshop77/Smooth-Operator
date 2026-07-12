@@ -50,9 +50,9 @@ const CRON_FORBIDDEN = /[;&|`$()]/;
 /**
  * Safe cron-field grammar. Each of the five space-separated fields must be a
  * comma-separated list of components, where each component is one of:
- *   • `*` (optionally followed by `/step`)
- *   • a number (optionally `n/step`, `n-m`, or `n-m/step`)
- *   • `?` (allowed for cron's day-of-month / day-of-week "no specific value")
+ * • `*` (optionally followed by `/step`)
+ * • a number (optionally `n/step`, `n-m`, or `n-m/step`)
+ * • `?` (allowed for cron's day-of-month / day-of-week "no specific value")
  * This rejects the degenerate input the previous loose character class
  * permitted — bare `-` or `/`, leading/trailing/doubled separators, and token
  * soup such as `*,` or `5?`. (Shell metacharacters remain blocked separately

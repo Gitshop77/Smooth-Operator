@@ -62,8 +62,8 @@ interface StubDoc {
 
 function installMinimalDomStubs(): void {
   const fakeDoc: StubDoc = {
-    // domFingerprint only reads `.length` and indexed `[i].tagName` etc.
-    // An empty array short-circuits the loop.
+ // domFingerprint only reads `.length` and indexed `[i].tagName` etc.
+ // An empty array short-circuits the loop.
     querySelectorAll: () => [],
   };
   const fakeLocation = { href: "https://example.test/" };
@@ -78,10 +78,10 @@ function installMinimalDomStubs(): void {
     configurable: true,
     writable: true,
   });
-  // `evaluate` now fails closed unless the current origin is on an
-  // explicit domain allowlist. Configure one for the stub host so the
-  // evaluate behavioral tests exercise real JS execution. The blocked
-  // (no-allowlist) path is covered by a dedicated test below.
+ // `evaluate` now fails closed unless the current origin is on an
+ // explicit domain allowlist. Configure one for the stub host so the
+ // evaluate behavioral tests exercise real JS execution. The blocked
+ // (no-allowlist) path is covered by a dedicated test below.
   (globalThis as Record<string, unknown>).__openCoworkDomainConfig = {
     allowedDomains: ["example.test"],
   };
@@ -89,9 +89,9 @@ function installMinimalDomStubs(): void {
 
 function clearMinimalDomStubs(): void {
   delete (globalThis as Record<string, unknown>).__openCoworkDomainConfig;
-  // Restore the real jsdom-provided globals so the next describe (which may
-  // use real DOM APIs like `document.createElement`) sees a live document.
-  // The originals were captured at module load before any stub was installed.
+ // Restore the real jsdom-provided globals so the next describe (which may
+ // use real DOM APIs like `document.createElement`) sees a live document.
+ // The originals were captured at module load before any stub was installed.
   Object.defineProperty(globalThis, "document", {
     value: REAL_DOCUMENT,
     configurable: true,
@@ -173,8 +173,8 @@ describe("executeAction — wait", () => {
   afterEach(clearMinimalDomStubs);
 
   test("wait action waits the specified seconds", async () => {
-    // Drive timers deterministically: real wall-clock waits are the classic
-    // flakiness source under CI load (timer coalescing / CPU starvation).
+ // Drive timers deterministically: real wall-clock waits are the classic
+ // flakiness source under CI load (timer coalescing / CPU starvation).
     vi.useFakeTimers();
     try {
       const promise = executeAction({ type: "wait", seconds: 1 }, emptyState());
@@ -182,10 +182,10 @@ describe("executeAction — wait", () => {
       void promise.then(() => {
         resolved = true;
       });
-      // Half the requested duration must NOT have elapsed yet.
+ // Half the requested duration must NOT have elapsed yet.
       await vi.advanceTimersByTimeAsync(500);
       expect(resolved).toBe(false);
-      // The full second elapses and the action resolves successfully.
+ // The full second elapses and the action resolves successfully.
       await vi.advanceTimersByTimeAsync(500);
       const result = await promise;
       expect(resolved).toBe(true);
@@ -240,25 +240,25 @@ describe("executeAction — evaluate", () => {
   });
 
   test("evaluate does not coerce the substituted code to a Promise string (regression for missing await)", async () => {
-    // Before the fix, `code = substituteCustomToolCalls(code)` (no await)
-    // assigned a Promise to `code`; `new Function(code)` then coerced that to
-    // "[object Promise]" and threw a SyntaxError. After the fix the await
-    // resolves and the real code runs.
+ // Before the fix, `code = substituteCustomToolCalls(code)` (no await)
+ // assigned a Promise to `code`; `new Function(code)` then coerced that to
+ // "[object Promise]" and threw a SyntaxError. After the fix the await
+ // resolves and the real code runs.
     const result = await executeAction(
       { type: "evaluate", code: "return 42" },
       emptyState(),
     );
     expect(result.success).toBe(true);
     expect(result.extractedContent).toBe("42");
-    // The Promise-coercion bug would have surfaced as a SyntaxError-flavored
-    // message; assert the literal coercion artifact never appears.
+ // The Promise-coercion bug would have surfaced as a SyntaxError-flavored
+ // message; assert the literal coercion artifact never appears.
     expect(result.message).not.toContain("[object Promise]");
   });
 
   test("evaluate fails closed (BLOCKED) when no domain allowlist is configured", async () => {
-    // Remove the allowlist installed by installMinimalDomStubs so the origin
-    // is unconfigured. `evaluate` must refuse to execute rather than run
-    // arbitrary JS on an unconstrained origin.
+ // Remove the allowlist installed by installMinimalDomStubs so the origin
+ // is unconfigured. `evaluate` must refuse to execute rather than run
+ // arbitrary JS on an unconstrained origin.
     delete (globalThis as Record<string, unknown>).__openCoworkDomainConfig;
     const result = await executeAction(
       { type: "evaluate", code: "return 1 + 2" },
@@ -266,7 +266,7 @@ describe("executeAction — evaluate", () => {
     );
     expect(result.success).toBe(false);
     expect(result.message).toContain("BLOCKED evaluate");
-    // The JS must NOT have run (no result surfaced).
+ // The JS must NOT have run (no result surfaced).
     expect(result.extractedContent).toBeUndefined();
   });
 });
@@ -278,8 +278,8 @@ describe("executeAction — click error path", () => {
   afterEach(clearMinimalDomStubs);
 
   test("click action on missing index returns failure", async () => {
-    // Empty selectorMap → resolveElement throws "element [99] not found …"
-    // before any DOM-mutating code runs.
+ // Empty selectorMap → resolveElement throws "element [99] not found …"
+ // before any DOM-mutating code runs.
     const result = await executeAction({ type: "click", index: 99 }, emptyState());
     expect(result.success).toBe(false);
     expect(result.message).toContain("not found");
@@ -293,37 +293,37 @@ describe("executeAction — click error path", () => {
 // `HTMLInputElement.prototype`, `document.activeElement`, `history.back`, etc.
 // jsdom provides all of these. The `beforeEach` below installs three small
 // jsdom-limitation workarounds:
-//   1. `HTMLElement.prototype.scrollIntoView` — jsdom doesn't implement it
-//      (the executor calls it on `click`, `input`, `hover`, `find_text`); we
-//      replace it with a no-op so the executor's `el.scrollIntoView({...})`
-//      calls don't throw `TypeError: el.scrollIntoView is not a function`.
-//   2. `HTMLElement.prototype.getBoundingClientRect` — jsdom returns a
-//      zero-size rect for every element (no real layout), which makes the
-//      executor's local `isVisible()` helper (`rect.width > 0 || rect.height > 0`)
-//      treat every element as hidden. We return a small non-zero rect so the
-//      `find_text` "is the match visible?" check passes.
-//   3. `document.body.innerText` — jsdom doesn't implement `innerText`
-//      (returns `undefined`); the `extract` action uses it for body text. We
-//      alias it to `textContent` (close enough for the test — the test only
-//      checks that the query string and the body text are surfaced together).
+// 1. `HTMLElement.prototype.scrollIntoView` — jsdom doesn't implement it
+// (the executor calls it on `click`, `input`, `hover`, `find_text`); we
+// replace it with a no-op so the executor's `el.scrollIntoView({...})`
+// calls don't throw `TypeError: el.scrollIntoView is not a function`.
+// 2. `HTMLElement.prototype.getBoundingClientRect` — jsdom returns a
+// zero-size rect for every element (no real layout), which makes the
+// executor's local `isVisible()` helper (`rect.width > 0 || rect.height > 0`)
+// treat every element as hidden. We return a small non-zero rect so the
+// `find_text` "is the match visible?" check passes.
+// 3. `document.body.innerText` — jsdom doesn't implement `innerText`
+// (returns `undefined`); the `extract` action uses it for body text. We
+// alias it to `textContent` (close enough for the test — the test only
+// checks that the query string and the body text are surfaced together).
 //
 // The mocks are restored in `afterEach` so they don't leak to other suites.
 
 describe("executeAction — DOM-requiring actions (Task 5C: enabled under jsdom)", () => {
-  // Save originals so we can restore them in afterEach (some are `undefined`
-  // in jsdom — that's fine, `defineProperty` works regardless).
+ // Save originals so we can restore them in afterEach (some are `undefined`
+ // in jsdom — that's fine, `defineProperty` works regardless).
   let origScrollIntoView: typeof HTMLElement.prototype.scrollIntoView | undefined;
   let origGetBoundingClientRect: typeof HTMLElement.prototype.getBoundingClientRect | undefined;
   let innerTextDescriptor: PropertyDescriptor | undefined;
 
   beforeEach(() => {
     document.body.innerHTML = "";
-    // 1. jsdom limitation: scrollIntoView is not implemented.
+ // 1. jsdom limitation: scrollIntoView is not implemented.
     origScrollIntoView = HTMLElement.prototype.scrollIntoView;
     HTMLElement.prototype.scrollIntoView = function scrollIntoView(): void { /* no-op */ };
 
-    // 2. jsdom limitation: no real layout → all rects are zero-size, which
-    //    makes the executor's local `isVisible` check reject everything.
+ // 2. jsdom limitation: no real layout → all rects are zero-size, which
+ // makes the executor's local `isVisible` check reject everything.
     origGetBoundingClientRect = HTMLElement.prototype.getBoundingClientRect;
     HTMLElement.prototype.getBoundingClientRect = function getBoundingClientRect(): DOMRect {
       return {
@@ -332,8 +332,8 @@ describe("executeAction — DOM-requiring actions (Task 5C: enabled under jsdom)
       } as DOMRect;
     };
 
-    // 3. jsdom limitation: `innerText` is not implemented (returns undefined).
-    //    Alias it to `textContent` so the `extract` action surfaces body text.
+ // 3. jsdom limitation: `innerText` is not implemented (returns undefined).
+ // Alias it to `textContent` so the `extract` action surfaces body text.
     innerTextDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "innerText");
     Object.defineProperty(HTMLElement.prototype, "innerText", {
       configurable: true,
@@ -356,13 +356,13 @@ describe("executeAction — DOM-requiring actions (Task 5C: enabled under jsdom)
     } else {
       delete (HTMLElement.prototype as { innerText?: unknown }).innerText;
     }
-    // Cancel any pending highlight-auto-remove setTimeouts scheduled by
-    // `highlightElement` (1200ms) so they don't fire after jsdom has torn
-    // down for this test file. Without this, vitest logs an unhandled
-    // `TypeError: window.removeEventListener is not a function` from
-    // `overlay.ts:86` during module teardown (the timer fires after `window`
-    // is gone). Cancelling is safe — the badges were already removed when we
-    // cleared `document.body.innerHTML` at the start of the next test.
+ // Cancel any pending highlight-auto-remove setTimeouts scheduled by
+ // `highlightElement` (1200ms) so they don't fire after jsdom has torn
+ // down for this test file. Without this, vitest logs an unhandled
+ // `TypeError: window.removeEventListener is not a function` from
+ // `overlay.ts:86` during module teardown (the timer fires after `window`
+ // is gone). Cancelling is safe — the badges were already removed when we
+ // cleared `document.body.innerHTML` at the start of the next test.
     vi.clearAllTimers();
     document.body.innerHTML = "";
   });

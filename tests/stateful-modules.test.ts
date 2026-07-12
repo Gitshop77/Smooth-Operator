@@ -5,7 +5,7 @@
  * code with scheduling math and per-site memory persistence.
  */
 
-import { describe, test, expect, beforeEach, beforeAll } from "vitest";
+import { describe, test, expect, beforeEach, beforeAll, afterAll } from "vitest";
 import {
   validateSchedule,
   computeNextFire,
@@ -19,12 +19,16 @@ import {
   __resetMemoryCacheForTests,
   type SiteMemory,
 } from "../src/lib/agent/persistent-memory";
-import { installLocalStorageStub } from "./helpers";
+import { installLocalStorageStub, restoreLocalStorageStub } from "./helpers";
 
 // ─── Stub localStorage (jsdom doesn't provide one) ──────────────────────────
 
 beforeAll(() => {
   installLocalStorageStub();
+});
+
+afterAll(() => {
+  restoreLocalStorageStub();
 });
 
 // ─── scheduled-tasks.ts ─────────────────────────────────────────────────────
@@ -63,9 +67,9 @@ describe("scheduled-tasks — computeNextFire", () => {
   test("interval schedule returns the current date (interval is handled by chrome.alarms)", () => {
     const now = new Date("2025-01-15T10:00:00");
     const result = computeNextFire({ type: "interval", intervalMinutes: 60 }, now);
-    // computeNextFire sets the time to the default hour:minute for interval
-    // schedules (they don't use hour/minute), so the result should be at
-    // least 1 minute in the future.
+ // computeNextFire sets the time to the default hour:minute for interval
+ // schedules (they don't use hour/minute), so the result should be at
+ // least 1 minute in the future.
     expect(result.getTime()).toBeGreaterThan(now.getTime());
   });
 
@@ -84,11 +88,11 @@ describe("scheduled-tasks — computeNextFire", () => {
   });
 
   test("weekly schedule fires on the correct day of week", () => {
-    // Jan 15, 2025 is a Wednesday (day 3)
+ // Jan 15, 2025 is a Wednesday (day 3)
     const now = new Date("2025-01-15T10:00:00");
-    // Schedule for Monday (day 1) at 9 AM
+ // Schedule for Monday (day 1) at 9 AM
     const result = computeNextFire({ type: "weekly", hour: 9, minute: 0, dayOfWeek: 1 }, now);
-    // Should be the next Monday (Jan 20)
+ // Should be the next Monday (Jan 20)
     expect(result.getDay()).toBe(1);
     expect(result.getDate()).toBe(20);
   });
@@ -96,7 +100,7 @@ describe("scheduled-tasks — computeNextFire", () => {
   test("always returns a date at least 1 minute in the future", () => {
     const now = new Date("2025-01-15T09:00:00");
     const result = computeNextFire({ type: "daily", hour: 9, minute: 0 }, now);
-    // 9:00 has already passed (or is now) — should advance to tomorrow
+ // 9:00 has already passed (or is now) — should advance to tomorrow
     expect(result.getTime()).toBeGreaterThan(now.getTime());
   });
 });
@@ -116,9 +120,9 @@ describe("scheduled-tasks — parseAlarmName", () => {
 
 describe("persistent-memory", () => {
   beforeEach(async () => {
-    // Clear localStorage AND the in-memory cache so each test starts clean.
-    // Without resetting the cache, a previous test's saveMemory could leave
-    // stale data that loadAllMemories reads instead of the cleared storage.
+ // Clear localStorage AND the in-memory cache so each test starts clean.
+ // Without resetting the cache, a previous test's saveMemory could leave
+ // stale data that loadAllMemories reads instead of the cleared storage.
     localStorage.removeItem("__opencowork_site_memories");
     __resetMemoryCacheForTests();
   });

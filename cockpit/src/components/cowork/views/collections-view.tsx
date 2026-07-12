@@ -64,9 +64,9 @@ export function CollectionsView() {
   const [historyQuery, setHistoryQuery] = React.useState("");
 
   const historyFiltered = React.useMemo(() => {
-    // `visitedAt` arrives as an ISO string (Prisma DateTime → JSON
-    // serializes to string). Coerce to ms via `new Date(...).getTime()` so
-    // the sort is stable.
+ // `visitedAt` arrives as an ISO string (Prisma DateTime → JSON
+ // serializes to string). Coerce to ms via `new Date(...).getTime()` so
+ // the sort is stable.
     const all = (history ?? []).slice().sort(
       (a, b) => new Date(b.visitedAt).getTime() - new Date(a.visitedAt).getTime(),
     );

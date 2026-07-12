@@ -10,14 +10,14 @@
  * (`__openCoworkDomainConfig` and `__openCoworkDomainConfigEnforced`) that the
  * extension host populates synchronously before each action batch.
  *
- *  • In a Chrome *content script* (isolated world) page scripts cannot touch
- *    these globals, so enforcement is safe.
- *  • In the explicitly-supported *in-page demo* (same world as page JS), ANY
- *    page script can overwrite these globals — e.g. set
- *    `__openCoworkDomainConfigEnforced = false` to force allow-all. The
- *    fail-closed path (`isDomainConfigMissingButEnforced`) only triggers when
- *    the flag is set, so an untrusted page that simply never sets it gets
- *    allow-all. The demo must NEVER be run against untrusted pages.
+ * • In a Chrome *content script* (isolated world) page scripts cannot touch
+ * these globals, so enforcement is safe.
+ * • In the explicitly-supported *in-page demo* (same world as page JS), ANY
+ * page script can overwrite these globals — e.g. set
+ * `__openCoworkDomainConfigEnforced = false` to force allow-all. The
+ * fail-closed path (`isDomainConfigMissingButEnforced`) only triggers when
+ * the flag is set, so an untrusted page that simply never sets it gets
+ * allow-all. The demo must NEVER be run against untrusted pages.
  *
  * The long-term fix is to thread `domainConfig` explicitly (see
  * `checkUrlAllowedWithDomainConfig`'s optional `explicitConfig` parameter and
@@ -56,7 +56,7 @@ let policyReadFailed = false;
  * a single canonical object keeps `getDomainConfig` references identity-stable
  * across calls (so `toBe` assertions hold) while still meaning "allow-all".
  */
-const EMPTY_CONFIG: DomainConfig = {};
+const EMPTY_CONFIG: DomainConfig = Object.freeze({});
 
 /**
  * Read a global flag from `globalThis`. Reading a property off `globalThis`
@@ -71,10 +71,10 @@ function readGlobal<T>(key: string): T | undefined {
   try {
     return (globalThis as Record<string, unknown>)[key] as T | undefined;
   } catch (err) {
-    // A throwing getter (extremely rare) must NOT be silently downgraded to
-    // "no policy" (allow-all). Flag it so the policy check fails CLOSED, and
-    // surface the error so the failure is visible rather than masking a
-    // legitimate error as a missing config.
+ // A throwing getter (extremely rare) must NOT be silently downgraded to
+ // "no policy" (allow-all). Flag it so the policy check fails CLOSED, and
+ // surface the error so the failure is visible rather than masking a
+ // legitimate error as a missing config.
     policyReadFailed = true;
     console.warn(`[domain-config] reading global "${key}" threw; failing closed:`, err);
     return undefined;
@@ -119,12 +119,12 @@ export function validateDomainConfig(cfg: unknown): DomainConfig | null {
  *
  * Unlike the raw `globalThis.__openCoworkDomainConfig = …` assignment performed
  * by `content.ts` today, this:
- *   • validates the shape (via {@link validateDomainConfig}) and ignores
- *     malformed payloads instead of installing a broken policy;
- *   • NEVER silently downgrades to allow-all — a missing/invalid `config`
- *     retains the last-known-good policy;
- *   • treats the explicit "no restrictions" state (`{}`) as a deliberate,
- *     validated value rather than the implicit default of an absent global.
+ * • validates the shape (via {@link validateDomainConfig}) and ignores
+ * malformed payloads instead of installing a broken policy;
+ * • NEVER silently downgrades to allow-all — a missing/invalid `config`
+ * retains the last-known-good policy;
+ * • treats the explicit "no restrictions" state (`{}`) as a deliberate,
+ * validated value rather than the implicit default of an absent global.
  *
  * The host (extension `content.ts` / service-worker writer) should call this
  * instead of writing the globals directly.
@@ -135,9 +135,9 @@ export function setDomainConfig(config?: DomainConfig, enforced?: boolean): void
     lastKnownGood = validated;
     writeGlobal(DOMAIN_CONFIG_KEY, validated);
   } else {
-    // Missing or malformed config → retain the last-known-good policy rather
-    // than overwriting with `undefined` (which `getDomainConfig` would treat
-    // as `{}` → unrestricted navigation).
+ // Missing or malformed config → retain the last-known-good policy rather
+ // than overwriting with `undefined` (which `getDomainConfig` would treat
+ // as `{}` → unrestricted navigation).
     writeGlobal(DOMAIN_CONFIG_KEY, lastKnownGood);
   }
   if (enforced !== undefined) {
@@ -152,10 +152,10 @@ export function setDomainConfig(config?: DomainConfig, enforced?: boolean): void
  * in the SAME place it sets `__openCoworkDomainConfig`, but ONLY when a
  * user-configured allow/block list exists. This lets the executor
  * distinguish two very different situations:
- *   - "no policy configured"      → allow-all is the intended default
- *     (fail-open by design);
- *   - "a policy WAS configured but the config payload is missing/unavailable"
- *     → fail CLOSED (the allow/block list is silently bypassed otherwise).
+ * - "no policy configured" → allow-all is the intended default
+ * (fail-open by design);
+ * - "a policy WAS configured but the config payload is missing/unavailable"
+ * → fail CLOSED (the allow/block list is silently bypassed otherwise).
  *
  * Default (flag absent) = no enforcement expected = allow-all.
  */
@@ -173,16 +173,39 @@ export function isDomainPolicyEnforced(): boolean {
  *
  * The returned value is validated for shape: a malformed payload yields the
  * stable {@link EMPTY_CONFIG} (allow-all) instead of being passed through
- * unvalidated. When the stored payload is valid we return its CANONICAL
- * reference (not a freshly-allocated copy) so repeated calls with the same
- * global return the SAME object identity — required for `toBe` equivalence
- * and avoids surprising aliasing bugs in callers that cache the result.
+ * unvalidated. When the stored payload is valid we return the CANONICAL stored
+ * config object (the live global) so repeated reads keep a STABLE reference —
+ * required for `toBe` equivalence and avoids surprising aliasing bugs in
+ * callers that cache the result. The returned object is frozen in place so
+ * callers cannot mutate the shared/authoritative policy.
  */
+/**
+ * Freeze a validated config in place (and its domain arrays) so callers cannot
+ * mutate the shared/authoritative policy object. Guards against accidental
+ * corruption of enforcement state (e.g. `cfg.allowedDomains.push(...)` on the
+ * returned reference, or an in-page scenario that mutates the global policy).
+ * Freezing is idempotent and does NOT change object identity, so `toBe`
+ * assertions and cached references still hold.
+ */
+function freezeConfigInPlace(cfg: DomainConfig): DomainConfig {
+  if (!Object.isFrozen(cfg)) {
+    if (cfg.allowedDomains) Object.freeze(cfg.allowedDomains);
+    if (cfg.blockedDomains) Object.freeze(cfg.blockedDomains);
+    Object.freeze(cfg);
+  }
+  return cfg;
+}
+
 export function getDomainConfig(): DomainConfig {
   const raw = readGlobal<unknown>(DOMAIN_CONFIG_KEY);
   if (raw === undefined) return EMPTY_CONFIG;
   if (validateDomainConfig(raw) === null) return EMPTY_CONFIG;
-  return raw as DomainConfig;
+ // Return the CANONICAL stored config object (the live global) so repeated
+ // reads keep a STABLE reference — required for `toBe` identity and the
+ // caching assumption other callers rely on. The stored object is frozen in
+ // place so callers cannot mutate the shared enforcement policy, while the
+ // returned reference stays identical to the stored global object.
+  return freezeConfigInPlace(raw as DomainConfig);
 }
 
 /**
@@ -196,12 +219,15 @@ export function getDomainConfig(): DomainConfig {
  */
 export function isDomainConfigMissingButEnforced(): boolean {
   const enforced = isDomainPolicyEnforced();
-  const cfg = getDomainConfig();
-  const policyPresent = !!(
-    (cfg.allowedDomains && cfg.allowedDomains.length > 0) ||
-    (cfg.blockedDomains && cfg.blockedDomains.length > 0)
-  );
-  return enforced && !policyPresent;
+  if (!enforced) return false;
+ // A policy is "present" when the config global EXISTS and validates — even if
+ // it is deliberately empty (`{}` or `{ allowedDomains: [] }`). Distinguishing
+ // empty-from-missing explicitly is required so a configured-but-empty policy
+ // is NOT mis-handled as absent (which would wrongly trigger fail-closed).
+ // Only a genuinely absent or malformed config counts as missing.
+  const raw = readGlobal<unknown>(DOMAIN_CONFIG_KEY);
+  const policyPresent = raw !== undefined && validateDomainConfig(raw) !== null;
+  return !policyPresent;
 }
 
 /**
@@ -217,9 +243,9 @@ export function isDomainConfigMissingButEnforced(): boolean {
  * empty/absent config means allow-all, exactly as before.
  *
  * @param explicitConfig When provided, the policy is taken from this argument
- *   instead of the `globalThis` side-channel. This is the path the executor
- *   should use once `domainConfig` is threaded through `LoopDeps` /
- *   `ActionContext`; the global remains a fallback for legacy callers.
+ * instead of the `globalThis` side-channel. This is the path the executor
+ * should use once `domainConfig` is threaded through `LoopDeps` /
+ * `ActionContext`; the global remains a fallback for legacy callers.
  */
 export function checkUrlAllowedWithDomainConfig(
   url: string,
@@ -228,17 +254,27 @@ export function checkUrlAllowedWithDomainConfig(
   if (explicitConfig) {
     return checkUrlAllowed(url, explicitConfig);
   }
-  // A throwing global read means we cannot trust the policy state. Failing
-  // closed here (regardless of the enforced flag) prevents a page that
-  // tampered with / broke the policy global from silently downgrading to
-  // allow-all. This is the fix for the readGlobal fail-open path.
+ // Reset the sticky read-failure flag before this call's reads re-evaluate it.
+ // Without this, a single transient throw would leave `policyReadFailed` true
+ // for the entire run (permanent fail-closed) even after the condition cleared.
+  policyReadFailed = false;
+ // Perform the policy reads FIRST so `readGlobal` can (re)set
+ // `policyReadFailed` if a global accessor throws. The previous ordering
+ // checked the flag BEFORE any read ran, so it was always `false` here and the
+ // guard failed OPEN. Evaluating the enforced/missing check now drives those
+ // reads before we inspect the flag.
+  const missingButEnforced = isDomainConfigMissingButEnforced();
+ // A throwing global read means we cannot trust the policy state. Failing
+ // closed here (regardless of the enforced flag) prevents a page that
+ // tampered with / broke the policy global from silently downgrading to
+ // allow-all. This is the fix for the readGlobal fail-open path.
   if (policyReadFailed) {
     return {
       allowed: false,
       reason: "Domain policy global read failed — blocking to fail closed.",
     };
   }
-  if (isDomainConfigMissingButEnforced()) {
+  if (missingButEnforced) {
     return {
       allowed: false,
       reason: "Domain policy is enforced but the config is unavailable — blocking to fail closed.",

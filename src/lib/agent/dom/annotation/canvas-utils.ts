@@ -12,17 +12,22 @@
  */
 
 /** Minimal common surface we use from either canvas flavor. */
+type Any2DContext = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+
 export interface CompatibleCanvas {
   width: number;
   height: number;
-  getContext(type: "2d"): CanvasRenderingContext2D | null;
+ // `OffscreenCanvas.getContext("2d")` returns `OffscreenCanvasRenderingContext2D`,
+ // not `CanvasRenderingContext2D` — widen the type so the SW (OffscreenCanvas)
+ // and DOM (HTMLCanvasElement) paths share one interface.
+  getContext(type: "2d"): Any2DContext | null;
 }
 
 /** A decoded image that knows how to copy itself onto a 2D context. */
 export interface CompatibleLoadedImage {
   width: number;
   height: number;
-  drawTo(ctx: CanvasRenderingContext2D): void;
+  drawTo(ctx: Any2DContext): void;
   cleanup?(): void;
 }
 
@@ -36,12 +41,10 @@ export interface CompatibleLoadedImage {
  * type: `createImageBitmap` is defined in both the Chrome service-worker
  * (OffscreenCanvas) and DOM (HTMLCanvasElement) contexts, so the
  * `HTMLImageElement` fallback is effectively only reached in jsdom/test
- * environments where `createImageBitmap` is absent. The `canvas` argument is
- * intentionally NOT used to drive the path (it is accepted for API symmetry
- * with callers that previously threaded a canvas through).
+ * environments where `createImageBitmap` is absent.
  */
 export function createCompatibleCanvas(): CompatibleCanvas | null {
-  // OffscreenCanvas is the only option in an MV3 service worker.
+ // OffscreenCanvas is the only option in an MV3 service worker.
   const oc = (globalThis as { OffscreenCanvas?: typeof OffscreenCanvas }).OffscreenCanvas;
   if (typeof oc !== "undefined") {
     try {
@@ -50,7 +53,7 @@ export function createCompatibleCanvas(): CompatibleCanvas | null {
       /* fall through to HTMLCanvasElement */
     }
   }
-  // Content-script / DOM context.
+ // Content-script / DOM context.
   const doc = (globalThis as { document?: Document }).document;
   if (doc && typeof doc.createElement === "function") {
     try {
@@ -64,13 +67,20 @@ export function createCompatibleCanvas(): CompatibleCanvas | null {
 
 /** Convert a `data:image/*;base64,…` URL to a `Blob`. */
 export async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
-  // Prefer `fetch(dataUrl)` — works in SW + DOM and decodes any data-URL
-  // mime type without manual base64 work.
+ // Only `data:` URLs are expected here — a caller passing anything else would
+ // have `fetch` issue a real network request (and send the data to a remote
+ // host). Reject non-data URLs up front so the helper can never be coerced
+ // into an outbound fetch.
+  if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) {
+    throw new Error("dataUrlToBlob: expected a data: URL");
+  }
+ // Prefer `fetch(dataUrl)` — works in SW + DOM and decodes any data-URL
+ // mime type without manual base64 work.
   const res = await fetch(dataUrl);
-  // A malformed / unsupported data URL can resolve with a non-OK status while
-  // `res.blob()` still returns an empty/error blob. Fail loudly here (the
-  // caller's fallback already handles the throw) instead of silently passing a
-  // corrupt screenshot through as if annotation succeeded.
+ // A malformed / unsupported data URL can resolve with a non-OK status while
+ // `res.blob()` still returns an empty/error blob. Fail loudly here (the
+ // caller's fallback already handles the throw) instead of silently passing a
+ // corrupt screenshot through as if annotation succeeded.
   if (!res.ok) {
     throw new Error(`dataUrlToBlob: fetch returned ${res.status} for data URL`);
   }
@@ -93,8 +103,8 @@ export async function loadCompatibleImage(dataUrl: string): Promise<CompatibleLo
       width: bitmap.width,
       height: bitmap.height,
       drawTo: (ctx) => ctx.drawImage(bitmap as unknown as CanvasImageSource, 0, 0),
-      // ImageBitmap holds GPU/decoded-image resources — close after drawing
-      // to prevent accumulation across long agent runs.
+ // ImageBitmap holds GPU/decoded-image resources — close after drawing
+ // to prevent accumulation across long agent runs.
       cleanup: () => {
         try {
           bitmap.close();
@@ -110,6 +120,13 @@ export async function loadCompatibleImage(dataUrl: string): Promise<CompatibleLo
 /** Load a data URL into an `HTMLImageElement` (DOM-context fallback). */
 function loadImageViaImg(dataUrl: string): Promise<CompatibleLoadedImage> {
   return new Promise((resolve, reject) => {
+ // Same guard as `dataUrlToBlob`: only `data:` URLs are permitted here.
+ // Assigning an arbitrary URL to `img.src` would have the browser issue a
+ // real outbound request, so reject anything else before touching `.src`.
+    if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) {
+      reject(new Error("loadImageViaImg: expected a data: URL"));
+      return;
+    }
     const ImageCtor = (globalThis as { Image?: typeof Image }).Image;
     if (!ImageCtor) {
       reject(new Error("Image constructor unavailable"));

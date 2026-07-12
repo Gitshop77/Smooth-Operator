@@ -22,7 +22,9 @@ describe('GET /api/cowork/agent/bootstrap', () => {
       identity: { name: 'cowork-cockpit', version: '0.3.1', baseUrl: 'http://localhost:3000' },
     });
 
-    const res = await GET({} as unknown as import('next/server').NextRequest);
+    const res = await GET({
+      headers: new Headers(),
+    } as unknown as import('next/server').NextRequest);
 
     expect(res.status).toBe(200);
     expect(buildAgentBootstrapContract).toHaveBeenCalledWith('http://localhost:3000', '0.3.1');

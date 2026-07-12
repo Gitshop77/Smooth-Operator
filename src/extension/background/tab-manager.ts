@@ -34,6 +34,49 @@ if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
   });
 }
 
+/**
+ * Per-tab debugger session refcount.
+ *
+ * `Page.captureScreenshot` needs a debugger attached to the agent tab, but the
+ * orchestrator can issue multiple concurrent `extractStateFromTab` calls for the
+ * SAME tab (e.g. parallel observers, or a retry that overlaps the in-flight
+ * one). Each call previously did its own `attach`/`detach`, so one call's
+ * `detach` could tear down a session another call was actively using — leaving
+ * the second call without a debugger and dropping its screenshot (FULL-REVIEW
+ * finding 48). We refcount per tab: the session is attached on the first
+ * acquirer and detached only when the last user releases it.
+ */
+const debuggerRefCounts = new Map<number, number>();
+
+async function acquirePageDebugger<T>(
+  tabId: number,
+  attach: (id: number) => Promise<T>,
+): Promise<void> {
+  const n = (debuggerRefCounts.get(tabId) ?? 0) + 1;
+ // Attach BEFORE bumping the refcount. If we bumped first and `attach`
+ // rejected, the count would stay elevated forever: the caller's `finally`
+ // never runs `releasePageDebugger` (the acquire threw), so the tab would be
+ // stuck at n≥1 and no later call would ever retry `attach` — silently
+ // disabling screenshots for that tab .
+  if (n === 1) await attach(tabId);
+  debuggerRefCounts.set(tabId, n);
+}
+
+async function releasePageDebugger<T>(
+  tabId: number,
+  detach: (id: number) => Promise<T>,
+): Promise<void> {
+  const n = (debuggerRefCounts.get(tabId) ?? 0) - 1;
+  if (n <= 0) {
+    debuggerRefCounts.delete(tabId);
+    await detach(tabId).catch(() => {
+      /* tab may have closed */
+    });
+  } else {
+    debuggerRefCounts.set(tabId, n);
+  }
+}
+
 /** Read the user-configured screenshot JPEG quality (0-100). Cached. */
 export async function getScreenshotQuality(): Promise<number> {
   if (cachedScreenshotQuality !== null) return cachedScreenshotQuality;
@@ -81,8 +124,8 @@ export async function ensureContent(tabId: number): Promise<void> {
     /* not injected yet — fall through to injection */
   }
   try {
-    // Inject anti-detection scripts FIRST (before the content script) so they
-    // apply to the page before any agent interaction.
+ // Inject anti-detection scripts FIRST (before the content script) so they
+ // apply to the page before any agent interaction.
     await injectAntiDetection(tabId);
     await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
     for (let i = 0; i < 20; i++) {
@@ -113,41 +156,43 @@ export async function extractStateFromTab(
   tabs: TabInfo[],
   includeScreenshot = true
 ): Promise<BrowserState> {
-  // Ensure the content script is present before messaging it. The manifest
-  // declares no `content_scripts`, so injection is purely programmatic —
-  // without this call, the first EXTRACT_STATE on a freshly loaded tab
-  // rejects and the agent loop aborts after `maxFailures` consecutive
-  // observe errors. `ensureContent` pings first and is a no-op when the
-  // content script is already injected, so the per-step cost is one
-  // round-trip only on the first observe of a new tab.
+ // Ensure the content script is present before messaging it. The manifest
+ // declares no `content_scripts`, so injection is purely programmatic —
+ // without this call, the first EXTRACT_STATE on a freshly loaded tab
+ // rejects and the agent loop aborts after `maxFailures` consecutive
+ // observe errors. `ensureContent` pings first and is a no-op when the
+ // content script is already injected, so the per-step cost is one
+ // round-trip only on the first observe of a new tab.
   await ensureContent(tabId);
   const res = await chrome.tabs.sendMessage(tabId, { type: "EXTRACT_STATE", tabs });
   if (!res?.ok) throw new Error(`extract failed: ${res?.error || "no response"}`);
-  // The content script may respond `{ ok: true }` with no `state` (or a
-  // non-object). Without this check, line below would throw inside the
-  // screenshot try (swallowed) and we'd return `undefined` state, causing a
-  // downstream crash in the orchestrator instead of a clean observe error
-  // (finding: extractStateFromTab returns res.state without validating it).
+ // The content script may respond `{ ok: true }` with no `state` (or a
+ // non-object). Without this check, line below would throw inside the
+ // screenshot try (swallowed) and we'd return `undefined` state, causing a
+ // downstream crash in the orchestrator instead of a clean observe error
+ // (finding: extractStateFromTab returns res.state without validating it).
   if (typeof res.state !== "object" || res.state === null) {
     throw new Error("extract failed: content script returned no state object");
   }
   if (includeScreenshot) {
     try {
-    // default to JPEG quality 80 — 3-5x smaller than PNG for
-      // complex/photographic pages, cutting vision-token cost per step.
-      // Chrome's captureVisibleTab only supports {format: "jpeg", quality: N}.
-    // quality is cached module-level + invalidated on storage
-      // change — avoids a `chrome.storage.local.get` per agent step.
+ // default to JPEG quality 80 — 3-5x smaller than PNG for
+ // complex/photographic pages, cutting vision-token cost per step.
+ // Chrome's captureVisibleTab only supports {format: "jpeg", quality: N}.
+ // quality is cached module-level + invalidated on storage
+ // change — avoids a `chrome.storage.local.get` per agent step.
       const screenshotFormat = await getScreenshotQuality();
-      // Capture the AGENT's tab (tabId) via CDP `Page.captureScreenshot` rather
-      // than `chrome.tabs.captureVisibleTab(WINDOW_ID_CURRENT)`. captureVisibleTab
-      // grabs whichever tab the USER is currently viewing — if they switched
-      // windows/tabs mid-run, the vision LLM receives a screenshot of the wrong
-      // page (a correctness + privacy bug). CDP targets the exact agent tab,
-      // mirroring the SCREENSHOT handler in message-routing.ts
-      // (finding: per-step screenshot captures the user's visible tab).
+ // Capture the AGENT's tab (tabId) via CDP `Page.captureScreenshot` rather
+ // than `chrome.tabs.captureVisibleTab(WINDOW_ID_CURRENT)`. captureVisibleTab
+ // grabs whichever tab the USER is currently viewing — if they switched
+ // windows/tabs mid-run, the vision LLM receives a screenshot of the wrong
+ // page (a correctness + privacy bug). CDP targets the exact agent tab,
+ // mirroring the SCREENSHOT handler in message-routing.ts
+ // (finding: per-step screenshot captures the user's visible tab).
       const { attachDebugger, detachDebugger } = await import("@/lib/agent/cdp-controller");
-      await attachDebugger(tabId);
+ // Acquire a refcounted debugger session so a concurrent screenshot for
+ // the same tab can't detach ours mid-capture (FULL-REVIEW finding 48).
+      await acquirePageDebugger(tabId, attachDebugger);
       let dataUrl: string;
       try {
         const result = (await chrome.debugger.sendCommand(
@@ -158,15 +203,16 @@ export async function extractStateFromTab(
         if (!result?.data) throw new Error("Page.captureScreenshot returned no data");
         dataUrl = `data:image/jpeg;base64,${result.data}`;
       } finally {
-        await detachDebugger(tabId).catch(() => { /* tab may have closed */ });
+ // Release our ref; only the LAST user detaches the actual session.
+        await releasePageDebugger(tabId, detachDebugger);
       }
       res.state.screenshot = dataUrl;
 
-      // Annotate the screenshot with numbered Set-of-Marks bounding boxes
-      // when the content script provided element rects. This is the single
-      // highest-impact accuracy improvement for vision-capable LLM models —
-      // it creates a direct visual-structural link between the `[index]`
-      // numbers in the elements tree and the pixel regions on the screenshot.
+ // Annotate the screenshot with numbered Set-of-Marks bounding boxes
+ // when the content script provided element rects. This is the single
+ // highest-impact accuracy improvement for vision-capable LLM models —
+ // it creates a direct visual-structural link between the `[index]`
+ // numbers in the elements tree and the pixel regions on the screenshot.
       const elementRects = (res.state as { elementRects?: unknown }).elementRects;
       if (Array.isArray(elementRects) && elementRects.length > 0) {
         try {
@@ -175,25 +221,25 @@ export async function extractStateFromTab(
             DEFAULT_ANNOTATE_PALETTE,
           } = await import("@/lib/agent/dom/screenshot-annotator");
           const dpr = (res.state as { devicePixelRatio?: number }).devicePixelRatio ?? 1;
-          // Wire the refPrefix + multi-color palette so each annotated box
-          // gets a stable "e<index>" ref label and neighbouring elements are
-          // visually distinguishable on dense pages. Matches the contract
-          // documented on `annotateScreenshot` (refPrefix="e" → "e3" labels
-          // that line up with the `[3]<...>` entries in the elements tree).
+ // Wire the refPrefix + multi-color palette so each annotated box
+ // gets a stable "e<index>" ref label and neighbouring elements are
+ // visually distinguishable on dense pages. Matches the contract
+ // documented on `annotateScreenshot` (refPrefix="e" → "e3" labels
+ // that line up with the `[3]<...>` entries in the elements tree).
           res.state.screenshot = await annotateScreenshot(dataUrl, elementRects as never, {
             scaleFactor: dpr,
             refPrefix: "e",
             boxColors: [...DEFAULT_ANNOTATE_PALETTE],
           });
         } catch {
-          // Annotation failed (Canvas unavailable, decode error, …).
-          // Non-fatal — keep the raw, unannotated screenshot.
+ // Annotation failed (Canvas unavailable, decode error, …).
+ // Non-fatal — keep the raw, unannotated screenshot.
         }
       }
     } catch {
-      // Screenshot capture (CDP Page.captureScreenshot) can fail if the tab
-      // isn't visible or permissions are missing. Non-fatal — the agent falls
-      // back to DOM-only state.
+ // Screenshot capture (CDP Page.captureScreenshot) can fail if the tab
+ // isn't visible or permissions are missing. Non-fatal — the agent falls
+ // back to DOM-only state.
     }
   }
   return res.state;
@@ -207,13 +253,13 @@ export async function executeActionsInTab(
   tabId: number,
   actions: AgentAction[]
 ): Promise<unknown> {
-  // Ensure the content script is present (see extractStateFromTab). Also ship
-  // the domain allow/blocklist so the content script can enforce `navigate` /
-  // `evaluate` / `search` URL gates — the content script lives in an isolated
-  // world with its own globalThis, so the SW-side `__openCoworkDomainConfig`
-  // global is invisible to it. Without this, `checkUrlAllowed` in the content
-  // script always returns `{ allowed: true }` and the user's domain
-  // allow/blocklist is silently bypassed.
+ // Ensure the content script is present (see extractStateFromTab). Also ship
+ // the domain allow/blocklist so the content script can enforce `navigate` /
+ // `evaluate` / `search` URL gates — the content script lives in an isolated
+ // world with its own globalThis, so the SW-side `__openCoworkDomainConfig`
+ // global is invisible to it. Without this, `checkUrlAllowed` in the content
+ // script always returns `{ allowed: true }` and the user's domain
+ // allow/blocklist is silently bypassed.
   await ensureContent(tabId);
   const res = await chrome.tabs.sendMessage(tabId, {
     type: "EXECUTE_ACTIONS",
@@ -221,10 +267,10 @@ export async function executeActionsInTab(
     domainConfig: getDomainConfig(),
   });
   if (!res?.ok) throw new Error(`execute failed: ${res?.error || "no response"}`);
-  // The content script may respond `{ ok: true }` without a `results` field (or
-  // with a non-array) — without this check the spread in run-helpers.ts
-  // (`[...execResults]`) throws and aborts the run with an unhelpful error.
-  // Mirror the `state` validation already done in `extractStateFromTab`.
+ // The content script may respond `{ ok: true }` without a `results` field (or
+ // with a non-array) — without this check the spread in run-helpers.ts
+ // (`[...execResults]`) throws and aborts the run with an unhelpful error.
+ // Mirror the `state` validation already done in `extractStateFromTab`.
   if (!Array.isArray(res.results)) {
     throw new Error("execute failed: content script returned no results array");
   }
@@ -242,8 +288,8 @@ export function waitForTabLoad(tabId: number, timeoutMs = 8000): Promise<void> {
     const finish = () => {
       if (!done) {
         done = true;
-        // Release the timer handle so it doesn't linger for up to `timeoutMs`
-        // after resolution (finding: waitForTabLoad setTimeout is never cleared).
+ // Release the timer handle so it doesn't linger for up to `timeoutMs`
+ // after resolution (finding: waitForTabLoad setTimeout is never cleared).
         if (timeoutId !== undefined) clearTimeout(timeoutId);
         chrome.tabs.onUpdated.removeListener(listener);
         resolve();
@@ -309,15 +355,35 @@ export async function handleTabAction(
           runState.currentTabId = remaining[0].id;
           await chrome.tabs.update(runState.currentTabId, { active: true });
           await saveRunState(runState);
+        } else {
+ // The closed tab was the last one — clear the pointer so we don't keep
+ // referencing a now-closed tab (which would make the next navigate/
+ // search act on a dead tab id). A 0 sentinel means "no active tab".
+ // FULL-REVIEW finding 47.
+          runState.currentTabId = 0;
+          await saveRunState(runState);
         }
       }
       return { handled: true, pageChanged: true, success: true, message: `Closed tab ${action.tab_id}` };
     }
     case "navigate": {
-      // Enforce the domain allow/blocklist BEFORE calling chrome.tabs.update/
-      // create. The content-script `handleNavigate` also checks, but this SW
-      // path is the authoritative gate for new-tab navigation (which the
-      // content script can't perform).
+ // Reject dangerous / non-navigable schemes (`javascript:`, `data:`,
+ // `file:`, `about:`, …) BEFORE the domain-policy check. `checkUrlAllowed`
+ // only inspects hostnames, so without this gate a `javascript:` URL would
+ // slip through the allow/blocklist and execute in the page. The domain
+ // policy alone cannot gate scheme (FULL-REVIEW finding 62).
+      if (!/^https?:\/\//i.test(String(action.url ?? ""))) {
+        return {
+          handled: true,
+          pageChanged: false,
+          success: false,
+          message: `BLOCKED: unsupported URL scheme in navigate: ${action.url}`,
+        };
+      }
+ // Enforce the domain allow/blocklist BEFORE calling chrome.tabs.update/
+ // create. The content-script `handleNavigate` also checks, but this SW
+ // path is the authoritative gate for new-tab navigation (which the
+ // content script can't perform).
       const urlCheck = checkUrlAllowedWithDomainConfig(action.url);
       if (!urlCheck.allowed) {
         notify?.({
@@ -344,18 +410,28 @@ export async function handleTabAction(
     case "search": {
       const engine = (action as { engine?: string }).engine ?? "duckduckgo";
       const query = (action as { query?: string }).query;
-      // A missing/undefined query would serialize to the literal "undefined"
-      // (encodeURIComponent(undefined) → "undefined"), making the agent silently
-      // search for "undefined". Reject it cleanly instead of building a bogus URL.
+ // A missing/undefined query would serialize to the literal "undefined"
+ // (encodeURIComponent(undefined) → "undefined"), making the agent silently
+ // search for "undefined". Reject it cleanly instead of building a bogus URL.
       if (typeof query !== "string" || query.length === 0) {
         return { handled: true, pageChanged: false, success: false, message: "BLOCKED: missing query" };
       }
-      // Validate the engine is a known key; otherwise fall back to the default.
-      // (`SEARCH_ENGINE_URLS[engine]` is only consulted when `engine` is a real
-      // key — the `|| duckduckgo` covers a malformed/unknown engine.)
-      const baseUrl = SEARCH_ENGINE_URLS[engine] || SEARCH_ENGINE_URLS.duckduckgo;
+ // Validate the engine is a known key; otherwise fall back to the default.
+ // (`SEARCH_ENGINE_URLS[engine]` is only consulted when `engine` is a real
+ // key — the `|| duckduckgo` covers a malformed/unknown engine.)
+      const baseUrl = SEARCH_ENGINE_URLS[engine as keyof typeof SEARCH_ENGINE_URLS] || SEARCH_ENGINE_URLS.duckduckgo;
       const searchUrl = baseUrl + encodeURIComponent(query);
-      // Apply the same domain policy as navigate.
+ // Apply the same domain policy + scheme gate as navigate. The engine base
+ // URLs are constant http(s), but guard anyway (FULL-REVIEW finding 62).
+      if (!/^https?:\/\//i.test(searchUrl)) {
+        return {
+          handled: true,
+          pageChanged: false,
+          success: false,
+          message: `BLOCKED: unsupported search URL scheme`,
+        };
+      }
+ // Apply the same domain policy as navigate.
       const searchUrlCheck = checkUrlAllowedWithDomainConfig(searchUrl);
       if (!searchUrlCheck.allowed) {
         notify?.({

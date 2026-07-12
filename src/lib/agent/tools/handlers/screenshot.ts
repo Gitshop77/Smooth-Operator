@@ -37,19 +37,19 @@ export async function handleScreenshot(
   _ctx: ActionContext,
   action: Extract<Action, { type: "screenshot" }>,
 ): Promise<ActionResult> {
-  // The orchestrator already attaches a fresh screenshot to every
-  // `extractState` call so the LLM sees one per step. The `screenshot`
-  // ACTION is for explicitly saving a standalone screenshot file to the
-  // user's Downloads folder. The content script can't call
-  // `chrome.tabs.captureVisibleTab` or `chrome.downloads`, so we route
-  // the request to the background SW via the `SCREENSHOT` message. In
-  // the in-page demo (no `chrome.runtime.id`), capture is unavailable —
-  // return an honest error instead of claiming success.
+ // The orchestrator already attaches a fresh screenshot to every
+ // `extractState` call so the LLM sees one per step. The `screenshot`
+ // ACTION is for explicitly saving a standalone screenshot file to the
+ // user's Downloads folder. The content script can't call
+ // `chrome.tabs.captureVisibleTab` or `chrome.downloads`, so we route
+ // the request to the background SW via the `SCREENSHOT` message. In
+ // the in-page demo (no `chrome.runtime.id`), capture is unavailable —
+ // return an honest error instead of claiming success.
   const fileName = action.file_name;
-  // Reject path-traversal / separator attempts at the egress boundary before
-  // forwarding to the SW. The SW also re-sanitizes on receipt, so benign
-  // characters (spaces, etc.) are still neutralized downstream; we just give
-  // the agent an explicit error for genuinely abusive filenames.
+ // Reject path-traversal / separator attempts at the egress boundary before
+ // forwarding to the SW. The SW also re-sanitizes on receipt, so benign
+ // characters (spaces, etc.) are still neutralized downstream; we just give
+ // the agent an explicit error for genuinely abusive filenames.
   const fileNameError = validateScreenshotFileName(fileName);
   if (fileNameError) {
     return {
@@ -66,9 +66,9 @@ export async function handleScreenshot(
     };
   }
   try {
-    // `chrome.runtime.sendMessage` resolves `undefined` (not a rejection) when
-    // no listener is present, so read the response through a typed shape and
-    // guard each field before formatting the success message.
+ // `chrome.runtime.sendMessage` resolves `undefined` (not a rejection) when
+ // no listener is present, so read the response through a typed shape and
+ // guard each field before formatting the success message.
     const res = (await chrome.runtime.sendMessage({ type: "SCREENSHOT", fileName })) as
       | { ok?: boolean; filename?: string; error?: string }
       | undefined
@@ -84,6 +84,6 @@ export async function handleScreenshot(
     const err = res && typeof res.error === "string" && res.error ? res.error : "no response from extension";
     return { action, success: false, message: `screenshot failed: ${err}` };
   } catch (e) {
-    return { action, success: false, message: `screenshot failed: ${(e as Error).message}` };
+    return { action, success: false, message: `screenshot failed: ${e instanceof Error ? e.message : String(e)}` };
   }
 }

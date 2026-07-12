@@ -9,18 +9,18 @@
  * that need human help).
  *
  * Public API:
- *   - `detectChallenge(tabId)` — runs the detection script in the tab and
- *     returns the parsed `ChallengeInfo` (or `null` if no challenge). This is
- *     the backward-compatible convenience wrapper used by callers that only
- *     care about a binary "challenge vs. not".
- *   - `detectChallengeResult(tabId)` — the same detection, but returns a
- *     discriminated `DetectChallengeOutcome` (`"challenge"` | `"no-challenge"`
- *     | `"error"`) so the orchestrator can tell a failed injection apart from
- *     a genuine "no challenge" and choose to retry / pause rather than blindly
- *     proceed.
- *   - `waitForChallengeResolution(tabId, opts)` — polls `detectChallengeResult`
- *     until the challenge clears, the timeout expires, or detection repeatedly
- *     fails (errors are treated conservatively as "unresolved").
+ * - `detectChallenge(tabId)` — runs the detection script in the tab and
+ * returns the parsed `ChallengeInfo` (or `null` if no challenge). This is
+ * the backward-compatible convenience wrapper used by callers that only
+ * care about a binary "challenge vs. not".
+ * - `detectChallengeResult(tabId)` — the same detection, but returns a
+ * discriminated `DetectChallengeOutcome` (`"challenge"` | `"no-challenge"`
+ * | `"error"`) so the orchestrator can tell a failed injection apart from
+ * a genuine "no challenge" and choose to retry / pause rather than blindly
+ * proceed.
+ * - `waitForChallengeResolution(tabId, opts)` — polls `detectChallengeResult`
+ * until the challenge clears, the timeout expires, or detection repeatedly
+ * fails (errors are treated conservatively as "unresolved").
  */
 
 /** The kind of anti-bot challenge detected on a page. */
@@ -86,9 +86,9 @@ function parseChallengeResult(raw: unknown): ChallengeInfo | null {
   if (raw !== null && typeof raw === "object" && "kind" in (raw as Record<string, unknown>)) {
     const obj = raw as { kind: unknown; message: unknown };
     if (typeof obj.kind === "string" && typeof obj.message === "string") {
-      // Validate `kind` against the allowed union at this trust boundary before
-      // casting — an unrecognized value would otherwise flow downstream into
-      // orchestrator switch statements that may lack a default branch.
+ // Validate `kind` against the allowed union at this trust boundary before
+ // casting — an unrecognized value would otherwise flow downstream into
+ // orchestrator switch statements that may lack a default branch.
       const kind = obj.kind as ChallengeKind;
       if ((CHALLENGE_KINDS as readonly string[]).includes(kind)) {
         return { kind, message: obj.message };
@@ -124,66 +124,87 @@ export async function detectChallengeResult(
           return body;
         };
 
-        // Cloudflare JS challenge.
-        // SECURITY: document.title is attacker-controllable, so a hostile page
-        // could set its title to "Just a moment..." to force the agent into a
-        // Cloudflare-JS auto-wait stall (false-positive availability vector).
-        // Require a corroborating signal — a known Cloudflare JS selector OR a
-        // short interstitial-style body — before treating a title-only match as a
-        // real challenge. This weights the spoofable title signal and still
-        // detects genuine IUAM / "Checking your browser" pages, which carry a
-        // short body and/or the challenge selectors. The trailing selector-only
-        // check preserves detection of CF JS pages whose title differs.
+ // Cloudflare JS challenge.
+ // SECURITY: document.title is attacker-controllable, so a hostile page
+ // could set its title to "Just a moment..." to force the agent into a
+ // Cloudflare-JS auto-wait stall (false-positive availability vector).
+ // A genuine IUAM / "Checking your browser" page carries a real CF JS
+ // selector — treat the selector as the authoritative signal. A title
+ // match alone is NEVER sufficient: it must be corroborated by that
+ // selector OR by a *short interstitial-style body AND* the page actually
+ // loading the challenge script, never by body length alone (a short
+ // attacker page would otherwise trivially false-positive).
         const cfJsTitle =
           title === "just a moment..." ||
           title.indexOf("checking your browser") !== -1;
         const cfJsSelector = document.querySelector(
           "#challenge-running, #cf-please-wait, #challenge-form, #cf-chl-wrapper",
         );
+ // The interstitial *must* contain a script tag pointing at Cloudflare's
+ // challenge JS — a far stronger corroborator than a short body.
+        const cfJsScript = document.querySelector(
+          'script[src*="challenges.cloudflare.com"], script[src*="/cdn-cgi/"]',
+        );
         if (
-          (cfJsTitle && (cfJsSelector !== null || getBody().length < 2000)) ||
-          cfJsSelector !== null
+          cfJsSelector !== null ||
+          (cfJsTitle && cfJsScript !== null)
         ) {
           return { kind: "cloudflare-js", message: "Cloudflare JS challenge" };
         }
 
-        // Cloudflare block page
+ // Cloudflare block page — require the CF error block selector OR both a
+ // title mentioning "attention required" AND the word "blocked" in the
+ // body. A title-only match is spoofable and is no longer accepted.
+        const cfBlockSelector = document.querySelector(".cf-error-details");
+        const b = getBody();
         if (
-          title.indexOf("attention required") !== -1 ||
-          (document.querySelector(".cf-error-details") && getBody().indexOf("blocked") !== -1)
+          cfBlockSelector !== null ||
+          (title.indexOf("attention required") !== -1 && b.indexOf("blocked") !== -1)
         ) {
           return { kind: "cloudflare-block", message: "Cloudflare block page" };
         }
 
-        // Widget-only challenges (only count when they dominate a sparse page)
+ // Widget-only challenges — only count when the widget iframe is actually
+ // present (the authoritative selector); the short-body check is secondary
+ // corroboration, not the sole signal.
         if (
-          document.querySelector('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]') &&
-          getBody().length < 2000
+          document.querySelector('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]')
         ) {
           return { kind: "cloudflare-turnstile", message: "Cloudflare Turnstile challenge" };
         }
 
         if (
-          document.querySelector('.h-captcha, iframe[src*="hcaptcha.com"]') &&
-          getBody().length < 2000
+          document.querySelector('.h-captcha, iframe[src*="hcaptcha.com"]')
         ) {
           return { kind: "hcaptcha", message: "hCaptcha challenge" };
         }
 
         if (
-          document.querySelector('.g-recaptcha, iframe[src*="google.com/recaptcha"]') &&
-          getBody().length < 2000
+          document.querySelector('.g-recaptcha, iframe[src*="google.com/recaptcha"]')
         ) {
           return { kind: "recaptcha", message: "reCAPTCHA challenge" };
         }
 
-        // Generic access-denied / rate-limit pages
-        const b = getBody();
-        if (b.length < 5000) {
-          if (/access denied|403 forbidden/i.test(title) || /access denied/i.test(b)) {
+ // Generic access-denied / rate-limit pages. The title is attacker-
+ // controllable, so a title-only match is rejected: require a selector OR
+ // title+body corroboration. This prevents a hostile page from stalling
+ // the agent by merely setting <title>429</title>.
+        const bodyText = getBody();
+        if (bodyText.length < 5000) {
+          const accessDeniedBody = /access denied/i.test(bodyText);
+          const rateLimitBody = /too many requests|rate limit/i.test(bodyText);
+          if (
+            (document.querySelector('[class*="forbidden"], [class*="denied"]') &&
+              /403|forbidden/i.test(title)) ||
+            (/access denied|403 forbidden/i.test(title) && accessDeniedBody) ||
+            accessDeniedBody
+          ) {
             return { kind: "blocked", message: "Access denied" };
           }
-          if (/\b429\b/i.test(title) || /too many requests|rate limit/i.test(b)) {
+          if (
+            (/\b429\b/i.test(title) && rateLimitBody) ||
+            rateLimitBody
+          ) {
             return { kind: "rate-limited", message: "Rate limited" };
           }
         }
@@ -197,10 +218,10 @@ export async function detectChallengeResult(
       ? { status: "challenge", info }
       : { status: "no-challenge" };
   } catch (error) {
-    // Tab closed, permission denied, chrome:// URL, CSP, a racing navigation,
-    // or any other injection failure. This is NOT the same as "no challenge":
-    // log it so the orchestrator can observe the failure and choose to retry or
-    // pause rather than proceed onto a possibly-injected page.
+ // Tab closed, permission denied, chrome:// URL, CSP, a racing navigation,
+ // or any other injection failure. This is NOT the same as "no challenge":
+ // log it so the orchestrator can observe the failure and choose to retry or
+ // pause rather than proceed onto a possibly-injected page.
     console.warn(
       `[anti-bot] challenge detection injection failed for tab ${tabId}; ` +
         `treating as unverifiable (agent should not blindly proceed):`,
@@ -252,27 +273,27 @@ export async function waitForChallengeResolution(
   const poll = Math.max(250, Math.min(5000, opts.pollMs ?? 500));
 
   const initial = await detectChallengeResult(tabId);
-  // A genuine "no challenge" at the start means there's nothing to wait for.
+ // A genuine "no challenge" at the start means there's nothing to wait for.
   if (initial.status === "no-challenge") return { resolved: true, challenge: null };
-  // A failed initial check can't be treated as "already resolved" — be
-  // conservative and let the orchestrator retry / pause.
+ // A failed initial check can't be treated as "already resolved" — be
+ // conservative and let the orchestrator retry / pause.
   if (initial.status === "error") return { resolved: false, challenge: null };
-  // initial.status === "challenge": fall through and wait for it to clear.
+ // initial.status === "challenge": fall through and wait for it to clear.
 
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, poll));
     const current = await detectChallengeResult(tabId);
-    // A genuine "no challenge" means the challenge cleared.
+ // A genuine "no challenge" means the challenge cleared.
     if (current.status === "no-challenge") return { resolved: true, challenge: null };
-    // A failed check can't be treated as "resolved" — keep waiting within the
-    // timeout window rather than letting the agent proceed onto an
-    // unverified page.
+ // A failed check can't be treated as "resolved" — keep waiting within the
+ // timeout window rather than letting the agent proceed onto an
+ // unverified page.
   }
 
   const final = await detectChallengeResult(tabId);
   if (final.status === "no-challenge") return { resolved: true, challenge: null };
-  // Either the challenge is still present, or we couldn't verify it cleared —
-  // report unresolved so the orchestrator doesn't proceed blindly.
+ // Either the challenge is still present, or we couldn't verify it cleared —
+ // report unresolved so the orchestrator doesn't proceed blindly.
   return { resolved: false, challenge: final.status === "challenge" ? final.info : null };
 }

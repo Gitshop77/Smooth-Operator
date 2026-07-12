@@ -3,6 +3,7 @@
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import { resolveElement } from "../helpers";
+import { NoSuchElementException } from "../../errors";
 import type { ActionContext } from "./types";
 
 export async function handleDropdownOptions(
@@ -11,7 +12,7 @@ export async function handleDropdownOptions(
 ): Promise<ActionResult> {
   const { state } = ctx;
   const el = resolveElement(state, action.index);
-  if (!(el instanceof HTMLSelectElement)) throw new Error(`element [${action.index}] is not a <select>`);
+  if (!(el instanceof HTMLSelectElement)) throw new NoSuchElementException(`element [${action.index}] is not a <select>`);
   const options = Array.from(el.options).map((o, i) => `${i}: ${o.textContent?.trim() || o.value}`);
   return {
     action,

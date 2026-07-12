@@ -1,8 +1,8 @@
 # Dependency Review — fails PRs that introduce vulnerable dependency changes.
 #
 # Complements Dependabot (`.github/dependabot.yml`): Dependabot proposes updates,
-# this workflow blocks PRs that add a dependency with a high/critical advisory or
-# a license the org disallows. Runs on every PR that touches a lockfile.
+# this workflow blocks PRs that add a dependency with a moderate-or-higher advisory
+# or a license the org disallows. Runs on every PR that touches a lockfile.
 
 name: Dependency Review
 
@@ -27,5 +27,7 @@ jobs:
         with:
           # Block PRs that introduce MODERATE or higher severity advisories.
           fail-on-severity: moderate
+          # Block PRs that introduce a dependency under a license the org disallows.
+          deny-licenses: GPL-3.0, AGPL-3.0
           # All three npm workspaces share the root + their own lockfiles.
           fail-on-scopes: development, runtime

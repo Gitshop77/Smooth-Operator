@@ -71,20 +71,30 @@ export interface ParsedKeys {
  */
 export function parseKeys(keys: string): ParsedKeys {
   const rawParts = keys.split("+").map((p) => p.trim());
-  // Modifier tokens are lowercased for case-insensitive matching.
+ // Modifier tokens are lowercased for case-insensitive matching.
   const modifiers = rawParts.slice(0, -1).map((p) => p.toLowerCase());
-  // The main key is kept at its original case.
-  const mainRaw = rawParts[rawParts.length - 1];
+ // The main key is kept at its original case.
+  let mainRaw = rawParts[rawParts.length - 1] ?? "";
+ // A trailing `+` separator with nothing after it denotes a LITERAL "+"
+ // key (e.g. `"+"` → just "+", `"ctrl++"` → Ctrl + "+"). Without this
+ // special-case `keys.split("+")` yields an empty main token and we'd wrongly
+ // reject a valid request to type a plus sign. The agent can also use the
+ // `shift+=` form; both now work.
+  if (mainRaw === "" && rawParts.length >= 1) {
+    mainRaw = "+";
+  }
 
-  // Reject input that resolves to no real key: empty / "+"-only (`""`,
-  // `"ctrl+"`) or a bare modifier name (`"ctrl"`, `"shift"`). Without this,
-  // `main` would be a modifier token (or "") and downstream handlers would
-  // dispatch a meaningless `KeyboardEvent` as a silent no-op instead of
-  // failing loudly.
+ // Reject input that resolves to no real key: a bare modifier name
+ // (`"ctrl"`, `"shift"`) — or, after the literal-`+` fixup above, a still
+ // empty main. Without this, `main` would be a modifier token and downstream
+ // handlers would dispatch a meaningless `KeyboardEvent` as a silent no-op
+ // instead of failing loudly. To type a literal "+", use `"+"` (or the
+ // `shift+=` form); the error message now hints at that so a model emitting
+ // `send_keys("+")` understands the intended workaround.
   if (mainRaw === "" || MODIFIER_NAMES.has(mainRaw.toLowerCase())) {
     throw new Error(
       `parseKeys: invalid key combination "${keys}" — expected a non-modifier ` +
-        `main key (e.g. "ctrl+a" or "Enter")`,
+        `main key (e.g. "ctrl+a" or "Enter"); to type a literal "+", use "+" or "shift+="`,
     );
   }
 
@@ -92,9 +102,9 @@ export function parseKeys(keys: string): ParsedKeys {
   let main = KEY_MAP[mainLower] ?? mainRaw;
   const shift = modifiers.includes("shift");
 
-  // Apply Shift to produce the correct literal character. This mirrors what a
-  // real keypress would yield; the `send_keys` handler inserts `main`
-  // imperatively, so it must already be the shifted symbol / upper-cased letter.
+ // Apply Shift to produce the correct literal character. This mirrors what a
+ // real keypress would yield; the `send_keys` handler inserts `main`
+ // imperatively, so it must already be the shifted symbol / upper-cased letter.
   if (shift && main.length === 1) {
     const shifted = SHIFT_SYMBOLS[main];
     if (shifted !== undefined) {

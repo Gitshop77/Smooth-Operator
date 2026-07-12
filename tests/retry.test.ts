@@ -2,9 +2,9 @@
  * Retry classification tests — `withLLMRetry` must classify transient
  * errors from the numeric HTTP status carried on the error, not by
  * string-matching the response body. Covers:
- *   - a 429 with a numeric status IS retried
- *   - a 4xx (non-429) with a numeric status is NOT retried
- *   - a Retry-After value attached to the error is honored (retry still fires)
+ * - a 429 with a numeric status IS retried
+ * - a 4xx (non-429) with a numeric status is NOT retried
+ * - a Retry-After value attached to the error is honored (retry still fires)
  */
 
 import { describe, test, expect, vi } from "vitest";
@@ -34,7 +34,7 @@ describe("withLLMRetry — numeric-status classification", () => {
       await vi.runAllTimersAsync();
       const result = await p;
       expect(result).toBe("ok");
-      // 2 failures + 1 success = 3 calls.
+ // 2 failures + 1 success = 3 calls.
       expect(fn).toHaveBeenCalledTimes(3);
     } finally {
       vi.useRealTimers();
@@ -50,10 +50,10 @@ describe("withLLMRetry — numeric-status classification", () => {
   });
 
   test("a 4xx whose body text mentions a 5xx code is NOT retried (classified by numeric status, not body)", async () => {
-    // Regression for the OLD substring classifier: a 400 whose error body
-    // contains "500" (e.g. "upstream returned 500") would have been wrongly
-    // retried because `/\b5\d\d\b/.test(msg)` matched. The numeric `status`
-    // field must win, so this is non-retryable.
+ // Regression for the OLD substring classifier: a 400 whose error body
+ // contains "500" (e.g. "upstream returned 500") would have been wrongly
+ // retried because `/\b5\d\d\b/.test(msg)` matched. The numeric `status`
+ // field must win, so this is non-retryable.
     const fn = vi.fn(async () => {
       throw statusError(400, "LLM API 400: upstream service returned 500 internal error");
     });
@@ -62,8 +62,8 @@ describe("withLLMRetry — numeric-status classification", () => {
   });
 
   test("a 4xx whose body text mentions 429 is NOT retried", async () => {
-    // Same regression for the 429 substring: a 400 body mentioning a 429 rate
-    // limit must NOT be retried — only an actual 429 status is retryable.
+ // Same regression for the 429 substring: a 400 body mentioning a 429 rate
+ // limit must NOT be retried — only an actual 429 status is retryable.
     const fn = vi.fn(async () => {
       throw statusError(400, "LLM API 400: nested 429 Too Many Requests from upstream");
     });

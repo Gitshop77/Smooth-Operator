@@ -6,7 +6,7 @@
  * `extension/content.ts`.
  *
  * All historically-exported symbols are re-exported here:
- *   - `highlightElement`, `setPersistentHighlight`, `OverlayHandle` (interface)
+ * - `highlightElement`, `setPersistentHighlight`, `OverlayHandle` (interface)
  *
  * (`showStatusBanner` was removed — it had no callers.)
  *

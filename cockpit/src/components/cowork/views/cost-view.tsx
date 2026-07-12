@@ -124,7 +124,7 @@ function computeRange(
   if (range === "custom") {
     const sRaw = customStart ? new Date(customStart).getTime() : now - 7 * DAY_MS;
     const eRaw = customEnd ? new Date(customEnd).getTime() : now;
-    // Reject invalid input instead of silently degrading to an empty state.
+ // Reject invalid input instead of silently degrading to an empty state.
     if (
       (customStart !== "" && Number.isNaN(sRaw)) ||
       (customEnd !== "" && Number.isNaN(eRaw))
@@ -194,7 +194,7 @@ export function deriveCostAnalytics(
   endMs: number,
   isEstimate: boolean,
 ): CostAnalytics {
-  // Daily buckets (inclusive of both endpoints).
+ // Daily buckets (inclusive of both endpoints).
   const days: { date: string; ms: number; cost: number; tokens: number }[] = [];
   const byDay = new Map<number, { cost: number; tokens: number }>();
   const cursor = new Date(startMs);
@@ -288,6 +288,23 @@ function downloadCsv(filename: string, content: string): void {
   URL.revokeObjectURL(url);
 }
 
+/**
+ * Escape an arbitrary value for a single CSV field.
+ *
+ * - RFC-4180 quoting: wrap in double quotes and double any embedded quotes so
+ * commas, quotes, and newlines can never corrupt the column/row structure.
+ * - Formula-injection guard: spreadsheet apps (Excel/Sheets/LibreOffice) treat a
+ * cell whose text begins with `=`, `+`, `-`, `@`, tab, or CR as a formula. We
+ * prefix such values with a single quote so they render as literal text.
+ */
+function csvField(value: string | number): string {
+  let s = String(value);
+  if (/^[=+\-@\t\r]/.test(s)) {
+    s = `'${s}`;
+  }
+  return `"${s.replace(/"/g, '""')}"`;
+}
+
 function analyticsToCsv(a: CostAnalytics): string {
   const lines: string[] = [];
   lines.push("Open Cowork — Cost & Usage Export");
@@ -296,23 +313,33 @@ function analyticsToCsv(a: CostAnalytics): string {
       "NOTE: estimated values — backend cost persistence is not yet available, so figures are derived approximations.",
     );
   }
-  lines.push(`range_days,${a.rangeDays}`);
-  lines.push(`start,${new Date(a.startMs).toISOString()}`);
-  lines.push(`end,${new Date(a.endMs).toISOString()}`);
-  lines.push(`total_cost_usd,${a.totalCost.toFixed(6)}`);
-  lines.push(`total_tokens,${a.totalTokens}`);
-  lines.push(`projected_month_cost_usd,${a.projectedMonthCost.toFixed(6)}`);
+  lines.push(`range_days,${csvField(a.rangeDays)}`);
+  lines.push(`start,${csvField(new Date(a.startMs).toISOString())}`);
+  lines.push(`end,${csvField(new Date(a.endMs).toISOString())}`);
+  lines.push(`total_cost_usd,${csvField(a.totalCost.toFixed(6))}`);
+  lines.push(`total_tokens,${csvField(a.totalTokens)}`);
+  lines.push(`projected_month_cost_usd,${csvField(a.projectedMonthCost.toFixed(6))}`);
   lines.push("");
   lines.push("daily");
   lines.push("date,cost_usd,tokens");
-  a.daily.forEach((d) => lines.push(`${d.date},${d.cost.toFixed(6)},${d.tokens}`));
+  a.daily.forEach((d) =>
+    lines.push(
+      [csvField(d.date), csvField(d.cost.toFixed(6)), csvField(d.tokens)].join(","),
+    ),
+  );
   lines.push("");
   const dumpDim = (name: string, rows: CostBreakdownRow[]) => {
     lines.push(name);
     lines.push("key,cost_usd,tokens,runs,share");
     rows.forEach((r) =>
       lines.push(
-        `${JSON.stringify(r.key)},${r.cost.toFixed(6)},${r.tokens},${r.runs},${r.share.toFixed(4)}`,
+        [
+          csvField(r.key),
+          csvField(r.cost.toFixed(6)),
+          csvField(r.tokens),
+          csvField(r.runs),
+          csvField(r.share.toFixed(4)),
+        ].join(","),
       ),
     );
     lines.push("");
@@ -325,15 +352,15 @@ function analyticsToCsv(a: CostAnalytics): string {
   a.topRuns.forEach((r) =>
     lines.push(
       [
-        r.id,
-        new Date(r.timestamp).toISOString(),
-        JSON.stringify(r.agent),
-        JSON.stringify(r.model),
-        JSON.stringify(r.domain),
-        JSON.stringify(r.taskTitle),
-        r.tokensIn,
-        r.tokensOut,
-        r.costUsd.toFixed(6),
+        csvField(r.id),
+        csvField(new Date(r.timestamp).toISOString()),
+        csvField(r.agent),
+        csvField(r.model),
+        csvField(r.domain),
+        csvField(r.taskTitle),
+        csvField(r.tokensIn),
+        csvField(r.tokensOut),
+        csvField(r.costUsd.toFixed(6)),
       ].join(","),
     ),
   );
@@ -408,7 +435,7 @@ function TrendChart({
     ? `M ${x(0).toFixed(1)},${baseY} L ${linePts.join(" L ")} L ${x(n - 1).toFixed(1)},${baseY} Z`
     : "";
 
-  // A few evenly-spaced x-axis date labels.
+ // A few evenly-spaced x-axis date labels.
   const tickIdx = n <= 1 ? [0] : [0, Math.floor((n - 1) / 2), n - 1];
 
   return (
@@ -560,12 +587,12 @@ export function CostView() {
     React.useState<BreakdownDim>("agent");
   const [budget, setBudget] = React.useState(50);
 
-  // ── Cost data source ──────────────────────────────────────────────────────
-  // No persisted cost/usage endpoint exists yet (see file header + .audit/data.md §5).
-  // `/history` (browsing) and `SampleTask` expose no token fields, so even a rough
-  // estimate cannot be derived without fabricating data — which this codebase forbids.
-  // When a `useCostUsage()` hook lands, assign its result here and everything below
-  // renders with real numbers.
+ // ── Cost data source ──────────────────────────────────────────────────────
+ // No persisted cost/usage endpoint exists yet (see file header + .audit/data.md §5).
+ // `/history` (browsing) and `SampleTask` expose no token fields, so even a rough
+ // estimate cannot be derived without fabricating data — which this codebase forbids.
+ // When a `useCostUsage()` hook lands, assign its result here and everything below
+ // renders with real numbers.
   const records: CostUsageRecord[] = [];
   const isEstimate = false;
 

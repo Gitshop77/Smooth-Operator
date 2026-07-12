@@ -38,8 +38,35 @@ export async function executeActionQueue(
   const results: ActionResult[] = [];
   let aborted = false;
 
+ // Pad `results` so its length always equals `actions.length`, even when the
+ // loop breaks early (mode-blocked, confirmation declined/failed, page-change,
+ // or failed action). This keeps per-action history/storage entries aligned
+ // and makes the success-rate tally denominator correct — mirroring the
+ // extension `executeActions` override.
+  const padRemaining = (fromIdx: number): void => {
+    for (let j = fromIdx + 1; j < actions.length; j++) {
+      results.push({
+        action: actions[j],
+        success: false,
+        message: "BLOCKED: prior action in the queue aborted the step",
+      });
+    }
+  };
+
   for (let i = 0; i < actions.length; i++) {
-    if (deps.signal?.aborted) { aborted = true; break; }
+    if (deps.signal?.aborted) {
+ // Push an explicit result for `i` before padding so that
+ // `results.length === actions.length` and per-action entries stay aligned
+ // — mirroring every other break site (push-then-pad).
+      results.push({
+        action: actions[i],
+        success: false,
+        message: "BLOCKED: step aborted before this action ran",
+      });
+      aborted = true;
+      padRemaining(i);
+      break;
+    }
     const action = actions[i];
 
     const allowed = checkActionAllowed(action.type, agentMode);
@@ -53,17 +80,24 @@ export async function executeActionQueue(
         type: "action-result", step, name: action.type,
         success: false, message: blockedResult.message,
       });
-      if (dispatcher && ctx) await dispatcher.actionEnd(ctx, action, blockedResult);
+ // Note: no `dispatcher.actionStart` was emitted for this action, so we
+ // must NOT emit `actionEnd` here — that would unbalance the callback
+ // pair. The success-rate tally still sees a non-success entry.
       results.push(blockedResult);
       aborted = true;
+      padRemaining(i);
       break;
     }
 
     if (deps.requestConfirmation && requiresConfirmation(action.type, agentMode)) {
       let confirmed = false;
+ // Distinguish a genuine infrastructure failure from a deliberate decline.
+ // A thrown error is treated as a *failed request*, never as "user said no".
+      let confirmationError: unknown = null;
       try {
         confirmed = await deps.requestConfirmation(action);
       } catch (e) {
+        confirmationError = e;
         deps.onEvent({
           type: "error", step,
           message: `Confirmation request failed: ${e instanceof Error ? e.message : String(e)}`,
@@ -71,18 +105,22 @@ export async function executeActionQueue(
         });
       }
       if (!confirmed) {
+        const message = confirmationError !== null
+          ? `BLOCKED: confirmation request failed for ${action.type}`
+          : `BLOCKED: user declined confirmation for ${action.type}`;
         const blockedResult: ActionResult = {
           action,
           success: false,
-          message: `BLOCKED: user declined confirmation for ${action.type}`,
+          message,
         };
         deps.onEvent({
           type: "action-result", step, name: action.type,
           success: false, message: blockedResult.message,
         });
-        if (dispatcher && ctx) await dispatcher.actionEnd(ctx, action, blockedResult);
+ // No matching `actionStart` was emitted, so no balanced `actionEnd`.
         results.push(blockedResult);
         aborted = true;
+        padRemaining(i);
         break;
       }
     }
@@ -103,16 +141,18 @@ export async function executeActionQueue(
     }
 
     let result: ActionResult;
+    let pageChangedHandled = false;
     if (deps.onTabAction && TAB_LEVEL_ACTIONS.has(action.type)) {
       try {
         const handled = await deps.onTabAction(action);
         if (handled.handled) {
-          // Use the SW's success/message so a blocked navigation (success:
-          // false, message: "BLOCKED: ...") surfaces correctly instead of a
-          // misleading hardcoded success:true.
+ // Use the SW's success/message so a blocked navigation (success:
+ // false, message: "BLOCKED: ...") surfaces correctly instead of a
+ // misleading hardcoded success:true. Default an unspecified success
+ // to `false` so a handler that omits it can't mask a failure.
           result = {
             action,
-            success: handled.success ?? true,
+            success: handled.success ?? false,
             message: handled.message ?? `${action.type} handled by extension`,
             pageChanged: handled.pageChanged,
           };
@@ -129,6 +169,7 @@ export async function executeActionQueue(
             }
             resetDomBaseline();
             loopDetector.reset();
+            pageChangedHandled = true;
           }
         } else {
           try {
@@ -148,7 +189,10 @@ export async function executeActionQueue(
       }
     }
 
-    if (result.pageChanged) {
+ // Only reset here if the tab-action branch above didn't already do it —
+ // otherwise a single page-change would reset the DOM baseline / loop
+ // detector twice.
+    if (result.pageChanged && !pageChangedHandled) {
       resetDomBaseline();
       loopDetector.reset();
     }
@@ -162,6 +206,7 @@ export async function executeActionQueue(
 
     if (result.isDone || !result.success || result.pageChanged) {
       aborted = true;
+      padRemaining(i);
       break;
     }
   }

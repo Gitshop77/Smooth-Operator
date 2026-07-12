@@ -3,14 +3,19 @@
  * `alert()` / `confirm()` calls across the Options page.
  *
  * Features (per REDESIGN-PLAN §6 a11y acceptance):
- *   - `role="dialog"` + `aria-modal="true"` + `aria-labelledby` / `aria-describedby`
- *   - Focus trap (Tab / Shift+Tab cycle inside the dialog)
- *   - Esc closes (resolves confirm → false, alert → void)
- *   - Focus is moved into the dialog on open and restored to the previously
- *     focused element on close
- *   - Returns a Promise so callers can `await` the user's choice
+ * - `role="dialog"` + `aria-modal="true"` + `aria-labelledby` / `aria-describedby`
+ * - Focus trap (Tab / Shift+Tab cycle inside the dialog)
+ * - Esc closes (resolves confirm → false, alert → void)
+ * - Focus is moved into the dialog on open and restored to the previously
+ * focused element on close
+ * - Returns a Promise so callers can `await` the user's choice
  *
  * Markup is created lazily on first use; styling lives in options.css.
+ *
+ * Concurrency: only one modal is shown at a time. If `openModal` is called
+ * while another modal is already open, the new request is queued and shown
+ * (in order) once the active modal closes. Requests are never silently dropped
+ * (previously a second caller resolved `null` and never displayed).
  */
 
 /** A button description for the modal footer. */
@@ -36,6 +41,12 @@ export interface ModalOptions {
 let activeOverlay: HTMLDivElement | null = null;
 let previouslyFocused: HTMLElement | null = null;
 
+/**
+ * Pending modal-open requests, in arrival order. Each entry re-runs the open
+ * once the currently active modal closes.
+ */
+const pendingQueue: Array<() => void> = [];
+
 /** Collect focusable elements within a container, in DOM order. */
 function getFocusable(container: HTMLElement): HTMLElement[] {
   const sel = [
@@ -47,14 +58,17 @@ function getFocusable(container: HTMLElement): HTMLElement[] {
   );
 }
 
-/**
- * Open a modal. Resolves with the `value` of the action button the user
- * clicked (or `null` if dismissed via Esc / overlay click). Only one modal may
- * be shown at a time; a second call is ignored until the first closes.
- */
-export function openModal(opts: ModalOptions): Promise<string | null> {
-  if (activeOverlay) return Promise.resolve(null);
+/** Open the next queued modal (if any) once the active one has closed. */
+function flushQueue(): void {
+  const next = pendingQueue.shift();
+  if (next) next();
+}
 
+/**
+ * Build, display, and resolve a single modal. Only one modal may be shown at a
+ * time; the caller is responsible for queueing (see `openModal`).
+ */
+function showModal(opts: ModalOptions): Promise<string | null> {
   previouslyFocused = (document.activeElement as HTMLElement) ?? null;
 
   const overlay = document.createElement("div");
@@ -80,8 +94,8 @@ export function openModal(opts: ModalOptions): Promise<string | null> {
   bodyEl.className = "modal-body";
   bodyEl.id = "modal-body";
   if (typeof opts.body === "string") {
-    // Treated as text to avoid accidental HTML injection; callers needing rich
-    // content pass an HTMLElement (the history transcript does exactly that).
+ // Treated as text to avoid accidental HTML injection; callers needing rich
+ // content pass an HTMLElement (the history transcript does exactly that).
     bodyEl.textContent = opts.body;
   } else {
     bodyEl.appendChild(opts.body);
@@ -97,6 +111,8 @@ export function openModal(opts: ModalOptions): Promise<string | null> {
       overlay.remove();
       previouslyFocused?.focus?.();
       resolve(value);
+ // Yield so the closing DOM mutation settles before the next modal opens.
+      flushQueue();
     };
 
     for (const a of opts.actions) {
@@ -144,11 +160,29 @@ export function openModal(opts: ModalOptions): Promise<string | null> {
       if (e.target === overlay) close(null);
     });
 
-    // Move focus into the dialog (prefer the autofocus button, else the last).
+ // Move focus into the dialog (prefer the autofocus button, else the last).
     const autoIndex = opts.actions.findIndex((a) => a.autofocus);
     const target =
       autoIndex >= 0 ? (footer.children[autoIndex] as HTMLElement) : (footer.lastElementChild as HTMLElement);
     (target ?? dialog).focus();
+  });
+}
+
+/**
+ * Open a modal. Resolves with the `value` of the action button the user
+ * clicked (or `null` if dismissed via Esc / overlay click). Modals are shown
+ * one at a time; if one is already open the new request is queued and shown
+ * (in order) once the active modal closes, so no prompt is ever silently
+ * dropped.
+ */
+export function openModal(opts: ModalOptions): Promise<string | null> {
+  if (!activeOverlay) {
+    return showModal(opts);
+  }
+  return new Promise<string | null>((resolve) => {
+    pendingQueue.push(() => {
+      showModal(opts).then(resolve);
+    });
   });
 }
 

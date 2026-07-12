@@ -1,5 +1,6 @@
 //
 // Version-matched usage guide returned as text/markdown.
+import type { NextRequest } from 'next/server';
 import { textResponse, withRouteError } from '@/lib/cowork/api/http';
 import {
   AGENT_OPERATING_RULES,
@@ -9,7 +10,7 @@ import {
   withBaseUrl,
 } from '@/lib/cowork/api/agent-bootstrap';
 
-export async function GET(): Promise<Response> {
+export async function GET(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
     const version = getVersion();
     const baseUrl = getBaseUrl();
@@ -77,5 +78,5 @@ ${AGENT_OPERATING_RULES.map(rule => `- ${rule}`).join('\n')}
 \`GET ${baseUrl}/api/cowork/agent\` has a more detailed getting-started guide.
 `;
     return textResponse(md, 200, 'text/markdown; charset=utf-8');
-  });
+  }, req.headers.get('x-request-id') ?? undefined);
 }

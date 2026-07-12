@@ -1,7 +1,5 @@
 "use client";
 
-import * as React from "react";
-
 import { useCoworkStore } from "@/hooks/use-cowork-store";
 import { VIEW_META } from "@/components/layout/nav-config";
 import { MobileSidebar } from "@/components/layout/mobile-sidebar";

@@ -7,11 +7,11 @@
  * that implements the relevant hook.
  *
  * 15 hooks (in lifecycle order):
- *   onRunStart / onRunEnd / onPlannerStep
- *   onStepStart / onStepEnd / onThinking
- *   onLLMStart / onLLMEnd
- *   onActionStart / onActionEnd / onScreenshot
- *   onLoopWarning / onCompaction / onCost / onError
+ * onRunStart / onRunEnd / onPlannerStep
+ * onStepStart / onStepEnd / onThinking
+ * onLLMStart / onLLMEnd
+ * onActionStart / onActionEnd / onScreenshot
+ * onLoopWarning / onCompaction / onCost / onError
  *
  * ─── Cost tracking ───────────────────────────────────────────────────────────
  * Cost computation is centralized in `pricing.ts` (`estimateCost`) and is
@@ -21,6 +21,11 @@
  */
 
 import type { AgentAction, ActionResult, HistoryItem } from "./types";
+// `redactSecrets` is applied to handler errors before logging so a substituted
+// secret that surfaces in an error string isn't echoed unredacted to the
+// extension console (see finding [28]). It is async (loads the secret map), so
+// we log via a fire-and-forget `.then`.
+import { redactSecrets } from "./secrets";
 // Note: `getPricingForModel` is intentionally not imported here. Cost
 // computation lives in `pricing.ts` (`estimateCost`) and is invoked from the
 // protocol/provider-bridge layer, not from this module.
@@ -64,8 +69,8 @@ export interface LLMUsageInfo {
   /** Reasoning/thinking tokens (billed at the model's reasoning rate). */
   reasoningTokens?: number;
   /** Cached input tokens (Anthropic cache_read+cache_creation, OpenAI cached_tokens).
-   *  Surfaced so downstream cost recomputation (judges.ts) can apply the
-   *  cacheRead discount instead of billing cached tokens at full input rate. */
+ * Surfaced so downstream cost recomputation (judges.ts) can apply the
+ * cacheRead discount instead of billing cached tokens at full input rate. */
   cachedInputTokens?: number;
 }
 
@@ -145,13 +150,13 @@ export class CallbackDispatcher {
   }
 
   /**
-   * Call a handler method safely — errors are logged and skipped so a buggy
-   * callback can't crash the run. The rationale (from the original `cost()`
-   * wrapper) applies equally to all hooks: callbacks are observational
-   * side-channels, never the primary control flow. The orchestrator's own
-   * state checks (costCapExceeded, consecutiveFailures, etc.) are the
-   * authoritative control flow — callback throws must not propagate.
-   */
+ * Call a handler method safely — errors are logged and skipped so a buggy
+ * callback can't crash the run. The rationale (from the original `cost()`
+ * wrapper) applies equally to all hooks: callbacks are observational
+ * side-channels, never the primary control flow. The orchestrator's own
+ * state checks (costCapExceeded, consecutiveFailures, etc.) are the
+ * authoritative control flow — callback throws must not propagate.
+ */
   private async safeCall<T extends keyof AsyncCallbackHandler>(
     handler: AsyncCallbackHandler,
     method: T,
@@ -159,9 +164,19 @@ export class CallbackDispatcher {
   ): Promise<void> {
     try {
       const fn = handler[method] as ((...a: unknown[]) => Promise<void> | void) | undefined;
-      if (fn) await fn(...args);
+ // Invoke via `.apply` to preserve `this` — a bare `fn(...args)` call would
+ // detach the method from its handler (strict-mode ES module => `this ===
+ // undefined`), breaking stateful hooks like AgentMetricsCallback that do
+ // `this.nextPhase = ...` / `this.totalSteps++` (see finding ).
+      if (fn) await fn.apply(handler, args);
     } catch (e) {
-      console.error(`[callbacks] ${String(method)} handler failed:`, e);
+ // Redact any substituted secrets that leaked into the error string before
+ // logging to the extension console (defense-in-depth; mirrors the cockpit
+ // redaction path). `redactSecrets` is async, so log via `.then` and fall
+ // back to the raw error if redaction itself fails.
+      void redactSecrets(String(e))
+        .then((safe) => console.error(`[callbacks] ${String(method)} handler failed:`, safe))
+        .catch(() => console.error(`[callbacks] ${String(method)} handler failed:`, e));
     }
   }
 

@@ -80,9 +80,9 @@ export async function loadAllMemories(): Promise<Record<string, SiteMemory>> {
     try {
       const res = await chrome.storage.local.get(STORAGE_KEY);
       const raw = res[STORAGE_KEY];
-      // Guard against type-mismatched / corrupt storage (e.g. a non-object or
-      // array value under the same key) so callers don't throw on `Object.values`
-      // / `for..in` downstream. Require a non-null, non-array object.
+ // Guard against type-mismatched / corrupt storage (e.g. a non-object or
+ // array value under the same key) so callers don't throw on `Object.values`
+ // / `for..in` downstream. Require a non-null, non-array object.
       const map =
         raw && typeof raw === "object" && !Array.isArray(raw)
           ? (raw as Record<string, SiteMemory>)
@@ -96,7 +96,7 @@ export async function loadAllMemories(): Promise<Record<string, SiteMemory>> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : {};
-    // Require a non-null, non-array object; otherwise fall back to empty.
+ // Require a non-null, non-array object; otherwise fall back to empty.
     const map =
       parsed && typeof parsed === "object" && !Array.isArray(parsed)
         ? (parsed as Record<string, SiteMemory>)
@@ -174,11 +174,11 @@ export async function getMemoriesForUrl(url: string): Promise<SiteMemory[]> {
   const matches: SiteMemory[] = [];
   for (const memory of Object.values(all)) {
     const d = memory.domain.toLowerCase();
-    // Exact-hostname match always applies. Suffix matching (`.${d}`) is only
-    // safe for a real domain (one containing a dot): a bare TLD like `com`
-    // would otherwise match EVERY `.com` host via `.endsWith(".com")` and
-    // inject that memory site-wide. Bare-TLD entries can therefore only be
-    // matched by exact hostname equality.
+ // Exact-hostname match always applies. Suffix matching (`.${d}`) is only
+ // safe for a real domain (one containing a dot): a bare TLD like `com`
+ // would otherwise match EVERY `.com` host via `.endsWith(".com")` and
+ // inject that memory site-wide. Bare-TLD entries can therefore only be
+ // matched by exact hostname equality.
     if (hostname === d || (d.includes(".") && hostname.endsWith("." + d))) {
       matches.push(memory);
     }

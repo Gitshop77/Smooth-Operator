@@ -3,15 +3,31 @@
  * a list of required contents.
  *
  * For each target entry, the evaluator:
- *   1. Optionally selects a sub-element via a CSS selector (or
- *      `document.querySelector`-style JS snippet). When the selector is
- *      empty, the whole page HTML is matched.
- *   2. Matches `required_contents` against the extracted HTML using either
- *      `exact_match` (string equality) and/or `must_include` (each entry must
- *      appear; supports ` |OR| ` alternatives). Both may be set on one target —
- *      when they are, both constraints are enforced (logical AND).
+ * 1. Optionally selects a sub-element via a CSS selector (or
+ * `document.querySelector`-style JS snippet). When the selector is
+ * empty, the whole page HTML is matched.
+ * 2. Matches `required_contents` against the extracted HTML using either
+ * `exact_match` (string equality) and/or `must_include` (each entry must
+ * appear; supports ` |OR| ` alternatives). Both may be set on one target —
+ * when they are, both constraints are enforced (logical AND).
  *
  * Scores multiply across all targets + all required contents.
+ *
+ * Fail-closed on extraction warnings: when a locator cannot be extracted
+ * (unsupported `document.*` snippet without a resolver, missing `DOMParser`,
+ * or an invalid selector) the affected target scores 0 by default rather than
+ * risking a false PASS. This matters because a degenerate spec such as
+ * `exact_match: ""` (or a `must_include` of empty / ` |OR| ` entries) trivially
+ * matches the empty extraction and would otherwise score 1.0. Callers that
+ * knowingly accept that risk can opt in via `failOpenOnExtractionWarning`.
+ *
+ * SECURITY / injection-bypass tradeoff: this evaluator grades the RAW page
+ * HTML, so page-controlled content (attacker- or model-injected markup that
+ * happens to contain the `required_contents` strings) can satisfy the grading
+ * gate. This is by design — the evaluator is a deterministic content check, not
+ * a trust boundary. Do NOT use it as a security gate on untrusted pages; treat
+ * a passing score as "the expected text is present in the DOM", not "the page
+ * is benign".
  */
 
 import { htmlExactMatch, htmlMustInclude } from "./string-evaluator";
@@ -30,11 +46,11 @@ export interface RequiredContents {
 /** A single HTML-content target — extract text from `locator`, then match. */
 export interface HTMLContentTarget {
   /**
-   * CSS selector used to extract the relevant sub-element. When empty,
-   * the whole page HTML is used. (The original benchmark supported
-   * `document.querySelector(...)`-style JS snippets + `func:...` helpers
-   * — we expose a `evaluator` callback on the input for those cases.)
-   */
+ * CSS selector used to extract the relevant sub-element. When empty,
+ * the whole page HTML is used. (The original benchmark supported
+ * `document.querySelector(...)`-style JS snippets + `func:...` helpers
+ * — we expose a `evaluator` callback on the input for those cases.)
+ */
   locator?: string;
   /** Required-contents spec applied to the extracted HTML. */
   required_contents: RequiredContents;
@@ -43,23 +59,34 @@ export interface HTMLContentTarget {
 /** Inputs to {@link HTMLContentEvaluator.evaluate}. */
 export interface HTMLContentEvaluatorInput {
   /**
-   * The full HTML of the page that should be checked. The caller is
-   * responsible for navigating to the right page before extracting the
-   * HTML — this evaluator is pure (no DOM access).
-   */
+ * The full HTML of the page that should be checked. The caller is
+ * responsible for navigating to the right page before extracting the
+ * HTML — this evaluator is pure (no DOM access).
+ */
   pageHtml: string;
   /**
-   * Optional callback that returns the HTML for a given target's locator.
-   * When omitted, the evaluator falls back to:
-   *   - empty locator → `pageHtml` (whole-page match), or
-   *   - non-empty locator → the first match of the CSS selector against
-   *     `pageHtml`, extracted via a `DOMParser` (when available in the
-   *     runtime), or "" when the selector doesn't match.
-   *
-   * The callback form lets the caller plug in a real browser tab (Chrome
-   * extension content script) or a Playwright `page.evaluate` call.
-   */
+ * Optional callback that returns the HTML for a given target's locator.
+ * When omitted, the evaluator falls back to:
+ * - empty locator → `pageHtml` (whole-page match), or
+ * - non-empty locator → the first match of the CSS selector against
+ * `pageHtml`, extracted via a `DOMParser` (when available in the
+ * runtime), or "" when the selector doesn't match.
+ *
+ * The callback form lets the caller plug in a real browser tab (Chrome
+ * extension content script) or a Playwright `page.evaluate` call.
+ */
   resolveLocator?: (locator: string, pageHtml: string) => string | Promise<string>;
+  /**
+ * When `true`, extraction warnings (unsupported `document.*` snippet without
+ * a resolver, missing `DOMParser`, invalid selector) are treated as
+ * diagnostics only — the target is still graded against the (empty)
+ * extraction, so a degenerate spec like `exact_match: ""` can PASS.
+ *
+ * Defaults to `false` (fail-closed): a warned target scores 0 so a
+ * misconfigured/undextractable locator can never masquerade as a pass.
+ * Only enable this if you understand and accept the false-PASS risk.
+ */
+  failOpenOnExtractionWarning?: boolean;
   /** The list of HTML-content targets to evaluate. */
   targets: HTMLContentTarget[];
 }
@@ -88,25 +115,25 @@ interface ExtractResult {
   /** The extracted HTML ("" when it didn't match / couldn't be extracted). */
   html: string;
   /**
-   * When non-empty, explains WHY extraction produced no HTML — distinct from a
-   * genuine content miss. Surfaces config/runtime problems (a `document.*` JS
-   * snippet without a `resolveLocator` callback, a missing `DOMParser`, or an
-   * invalid CSS selector) so a failing evaluator can be diagnosed instead of
-   * being silently confused with a real content mismatch.
-   */
+ * When non-empty, explains WHY extraction produced no HTML — distinct from a
+ * genuine content miss. Surfaces config/runtime problems (a `document.*` JS
+ * snippet without a `resolveLocator` callback, a missing `DOMParser`, or an
+ * invalid CSS selector) so a failing evaluator can be diagnosed instead of
+ * being silently confused with a real content mismatch.
+ */
   warning?: string;
 }
 
 function extractLocatorHtml(locator: string, pageHtml: string): ExtractResult {
   if (!locator?.trim()) return { html: pageHtml };
-  // Only attempt the DOMParser path when the locator looks like a CSS
-  // selector (the original benchmark also supported `document.…` JS snippets
-  // + `func:...` helpers, but those require a real DOM and are routed
-  // through the `resolveLocator` callback by the caller).
+ // Only attempt the DOMParser path when the locator looks like a CSS
+ // selector (the original benchmark also supported `document.…` JS snippets
+ // + `func:...` helpers, but those require a real DOM and are routed
+ // through the `resolveLocator` callback by the caller).
   if (locator.startsWith("document.") || locator.startsWith("[...document.")) {
-    // We can't safely `eval` arbitrary JS here — the caller must pass a
-    // `resolveLocator` callback for these cases. Without one, the target can
-    // never match, so report a warning rather than a silent empty result.
+ // We can't safely `eval` arbitrary JS here — the caller must pass a
+ // `resolveLocator` callback for these cases. Without one, the target can
+ // never match, so report a warning rather than a silent empty result.
     return {
       html: "",
       warning:
@@ -150,9 +177,9 @@ export class HTMLContentEvaluator {
       const target = input.targets[i];
       const rc = target.required_contents;
 
-      // Extract the selected HTML (via the caller's resolver, or our local
-      // CSS-selector extractor). Capture any extraction warning separately so
-      // it isn't mistaken for a content mismatch.
+ // Extract the selected HTML (via the caller's resolver, or our local
+ // CSS-selector extractor). Capture any extraction warning separately so
+ // it isn't mistaken for a content mismatch.
       const scoreBefore = score;
       let selected = "";
       let extractWarn: string | undefined;
@@ -164,20 +191,33 @@ export class HTMLContentEvaluator {
         extractWarn = r.warning;
       }
       if (extractWarn) {
-        // Observable diagnostic — a misconfigured locator yields a permanent
-        // FAIL that should never masquerade as a genuine task failure.
+ // Observable diagnostic — a misconfigured locator yields a permanent
+ // FAIL that should never masquerade as a genuine task failure.
         console.warn(`[html-content-evaluator] target[${i}] extraction warning: ${extractWarn}`);
       }
 
       const hasExact = rc.exact_match !== undefined;
       const hasInclude = rc.must_include !== undefined;
       if (!hasExact && !hasInclude) {
-        // No required_contents specified — skip (don't multiply by 0).
+ // No required_contents specified — skip (don't multiply by 0).
         continue;
       }
+
+ // Fail CLOSED on extraction warnings: a misconfigured / undextractable
+ // locator must never PASS. Without this, a degenerate spec such as
+ // `exact_match: ""` (or a `must_include` of empty / ` |OR| ` entries)
+ // would score 1.0 against the empty extraction, silently turning a broken
+ // selector into a pass. Callers can opt out via
+ // `failOpenOnExtractionWarning` when they accept that risk.
+      if (extractWarn && input.failOpenOnExtractionWarning !== true) {
+        score *= 0;
+        reasons.push(`target[${i}] extraction issue (failing closed): ${extractWarn}`);
+        break; // score is now 0; nothing later can raise it
+      }
+
       if (hasExact && hasInclude) {
-        // Config ambiguity: both constraints set. Enforce BOTH (logical AND)
-        // so neither requirement is silently dropped on a misconfigured task.
+ // Config ambiguity: both constraints set. Enforce BOTH (logical AND)
+ // so neither requirement is silently dropped on a misconfigured task.
         console.warn(
           `[html-content-evaluator] target[${i}] sets BOTH exact_match and ` +
             `must_include; enforcing both (AND).`,
@@ -185,18 +225,18 @@ export class HTMLContentEvaluator {
       }
 
       if (hasExact) {
-        // RAW, case-sensitive equality (HTML text/attributes are case-sensitive;
-        // reusing the answer-cleaning `exactMatch` would wrongly pass
-        // `"<Div>"` against `<div>` and silently strip quotes).
+ // RAW, case-sensitive equality (HTML text/attributes are case-sensitive;
+ // reusing the answer-cleaning `exactMatch` would wrongly pass
+ // `"<Div>"` against `<div>` and silently strip quotes).
         const cur = htmlExactMatch(rc.exact_match!, selected);
         score *= cur;
         if (cur === 0) reasons.push(`target[${i}].exact_match failed`);
       }
       if (hasInclude) {
         for (const content of rc.must_include!) {
-          // `htmlMustInclude` compares RAW (case-sensitive, quotes preserved)
-          // and honors ` |OR| ` alternatives as a pass-if-any. An empty entry
-          // is a no-op (no requirement), not a failure.
+ // `htmlMustInclude` compares RAW (case-sensitive, quotes preserved)
+ // and honors ` |OR| ` alternatives as a pass-if-any. An empty entry
+ // is a no-op (no requirement), not a failure.
           const cur = htmlMustInclude(content, selected);
           score *= cur;
           if (cur === 0) {
@@ -205,13 +245,13 @@ export class HTMLContentEvaluator {
         }
       }
 
-      // If this target failed to match AND extraction itself was problematic,
-      // surface the root cause once so operators can distinguish a bad
-      // selector / unsupported runtime from a real content mismatch.
+ // If this target failed to match AND extraction itself was problematic,
+ // surface the root cause once so operators can distinguish a bad
+ // selector / unsupported runtime from a real content mismatch.
       if (extractWarn && score < scoreBefore) {
         reasons.push(`target[${i}] extraction issue: ${extractWarn}`);
       }
-      // Defensive: ensure we never produce a negative score from float math.
+ // Defensive: ensure we never produce a negative score from float math.
       if (score <= 0) break;
     }
     return {

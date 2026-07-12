@@ -5,8 +5,8 @@
  * (click, hover, press-and-hold).
  *
  * All historically-exported symbols are re-exported here:
- *   - `movePhantomCursor`, `moveCursorToElement`, `startPhantomCursor`,
- *     `stopPhantomCursor`
+ * - `movePhantomCursor`, `moveCursorToElement`, `startPhantomCursor`,
+ * `stopPhantomCursor`
  *
  * The file lives in `interaction/hover.ts` (rather than
  * `interaction/phantom-cursor.ts`) because the phantom cursor is the only

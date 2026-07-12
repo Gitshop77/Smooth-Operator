@@ -12,8 +12,8 @@ import {
 } from '@/lib/cowork/api/agent-bootstrap';
 
 export async function GET(req: NextRequest): Promise<Response> {
-  // Thread the middleware-minted request id so a 500's correlationId matches
-  // the `[cowork request]` log line and the response `x-request-id` header.
+ // Thread the middleware-minted request id so a 500's correlationId matches
+ // the `[cowork request]` log line and the response `x-request-id` header.
   const requestId = req.headers.get('x-request-id') ?? undefined;
   return withRouteError(async () => {
     const version = getVersion();

@@ -48,15 +48,15 @@ export interface CdpClickOptions {
  * Compute the CDP modifier bitmask from a modifier string.
  *
  * Recognized tokens (case-insensitive, split on `+` or whitespace):
- *   - Alt
- *   - Control / Ctrl
- *   - Meta / Cmd / Command
- *   - Shift
+ * - Alt
+ * - Control / Ctrl
+ * - Meta / Cmd / Command
+ * - Shift
  */
 function modifierBitmask(keys: string): number {
-  // Split on `+` or whitespace, normalize to lower-case tokens for matching.
-  // (Previously used `keys.includes("Alt")` etc. — that false-matched
-  // "Altitude" and "ControlPanel".)
+ // Split on `+` or whitespace, normalize to lower-case tokens for matching.
+ // (Previously used `keys.includes("Alt")` etc. — that false-matched
+ // "Altitude" and "ControlPanel".)
   const tokens = keys.toLowerCase().split(/[+\s]+/).filter(Boolean);
   const has = (t: string, aliases: string[]): boolean => aliases.some((a) => t === a);
   let mask = 0;
@@ -83,7 +83,7 @@ export async function attachDebugger(tabId: number): Promise<boolean> {
     await chrome.debugger.attach({ tabId }, CDP_PROTOCOL_VERSION);
     return true;
   } catch (e: unknown) {
-    // Already attached is OK.
+ // Already attached is OK.
     if (isAlreadyAttachedError(e)) return true;
     throw e;
   }
@@ -94,7 +94,7 @@ export async function detachDebugger(tabId: number): Promise<void> {
   try {
     await chrome.debugger.detach({ tabId });
   } catch {
-    // Already detached — fine.
+ // Already detached — fine.
   }
 }
 
@@ -114,7 +114,7 @@ export async function cdpClick(
   const { button = DEFAULT_BUTTON, clickCount = DEFAULT_CLICK_COUNT, modifiers = "" } = options;
   const modifierMask = modifierBitmask(modifiers);
 
-  // Move mouse first (triggers mousemove/hover handlers).
+ // Move mouse first (triggers mousemove/hover handlers).
   await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
     type: "mouseMoved",
     x,
@@ -122,10 +122,10 @@ export async function cdpClick(
     modifiers: modifierMask,
   });
 
-  // Small delay between move and click (matches human behavior + lets hover handlers fire).
+ // Small delay between move and click (matches human behavior + lets hover handlers fire).
   await new Promise((r) => setTimeout(r, MOUSE_MOVE_SETTLE_MS));
 
-  // Press.
+ // Press.
   await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
     type: "mousePressed",
     x,
@@ -135,7 +135,7 @@ export async function cdpClick(
     modifiers: modifierMask,
   });
 
-  // Release.
+ // Release.
   await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
     type: "mouseReleased",
     x,
@@ -149,18 +149,18 @@ export async function cdpClick(
 /** Options for {@link cdpPressAndHold}. */
 export interface CdpPressAndHoldOptions {
   /**
-   * Delay (ms) between `mouseMoved` and `mousePressed`. Mirrors the natural
-   * hover-settle pause before a human begins a press-and-hold gesture.
-   * Defaults to 0 (no extra delay — callers that want a human-like pause
-   * pass `MOUSE_MOVE_SETTLE_MS` or their own value).
-   */
+ * Delay (ms) between `mouseMoved` and `mousePressed`. Mirrors the natural
+ * hover-settle pause before a human begins a press-and-hold gesture.
+ * Defaults to 0 (no extra delay — callers that want a human-like pause
+ * pass `MOUSE_MOVE_SETTLE_MS` or their own value).
+ */
   delay?: number;
   /**
-   * How long to hold the mouse button down (ms) before releasing. This is
-   * the parameter that distinguishes `cdpPressAndHold` from {@link cdpClick}
-   * — a non-zero hold is what Cloudflare Turnstile and other "press and hold
-   * to verify" widgets detect as a human gesture.
-   */
+ * How long to hold the mouse button down (ms) before releasing. This is
+ * the parameter that distinguishes `cdpPressAndHold` from {@link cdpClick}
+ * — a non-zero hold is what Cloudflare Turnstile and other "press and hold
+ * to verify" widgets detect as a human gesture.
+ */
   holdMs?: number;
 }
 
@@ -175,10 +175,10 @@ export interface CdpPressAndHoldOptions {
  * input by the browser.
  *
  * Sequence:
- *   1. `mouseMoved` to (x, y) — triggers hover/mousemove handlers.
- *   2. `mousePressed` (left button, clickCount=1) — begins the hold.
- *   3. Wait `holdMs` milliseconds — the actual "hold".
- *   4. `mouseReleased` (left button, clickCount=1) — ends the hold.
+ * 1. `mouseMoved` to (x, y) — triggers hover/mousemove handlers.
+ * 2. `mousePressed` (left button, clickCount=1) — begins the hold.
+ * 3. Wait `holdMs` milliseconds — the actual "hold".
+ * 4. `mouseReleased` (left button, clickCount=1) — ends the hold.
  *
  * Not cancellable once `mousePressed` is dispatched — interrupting mid-hold
  * would leave the mouse button in a pressed state, breaking subsequent
@@ -186,9 +186,9 @@ export interface CdpPressAndHoldOptions {
  * release to complete (it's typically a sub-second hold).
  *
  * @param tabId The tab to dispatch the events in (debugger must already be attached).
- * @param x     Target X coordinate (in CSS pixels, relative to the viewport).
- * @param y     Target Y coordinate (in CSS pixels, relative to the viewport).
- * @param opts  Optional timing controls (`delay`, `holdMs`).
+ * @param x Target X coordinate (in CSS pixels, relative to the viewport).
+ * @param y Target Y coordinate (in CSS pixels, relative to the viewport).
+ * @param opts Optional timing controls (`delay`, `holdMs`).
  */
 export async function cdpPressAndHold(
   tabId: number,
@@ -198,8 +198,8 @@ export async function cdpPressAndHold(
 ): Promise<void> {
   const { delay = 0, holdMs = 0 } = opts;
 
-  // 1. Move first — triggers mousemove/hover handlers and positions the cursor
-  //    so the subsequent mousePressed lands on the intended element.
+ // 1. Move first — triggers mousemove/hover handlers and positions the cursor
+ // so the subsequent mousePressed lands on the intended element.
   await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
     type: "mouseMoved",
     x,
@@ -207,13 +207,13 @@ export async function cdpPressAndHold(
     button: "none",
   });
 
-  // Optional pre-press delay (e.g. to let hover animations settle).
+ // Optional pre-press delay (e.g. to let hover animations settle).
   if (delay > 0) {
     await new Promise((r) => setTimeout(r, delay));
   }
 
-  // 2. Press the left mouse button — begins the hold. clickCount=1 means
-  //    "single press" (not a double-click).
+ // 2. Press the left mouse button — begins the hold. clickCount=1 means
+ // "single press" (not a double-click).
   await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
     type: "mousePressed",
     x,
@@ -222,14 +222,14 @@ export async function cdpPressAndHold(
     clickCount: 1,
   });
 
-  // 3. Hold for holdMs — this is the actual "press and hold" duration that
-  //    anti-bot widgets measure. Skipping this (holdMs=0) degenerates to a
-  //    regular click without the release-settle that Turnstile checks for.
+ // 3. Hold for holdMs — this is the actual "press and hold" duration that
+ // anti-bot widgets measure. Skipping this (holdMs=0) degenerates to a
+ // regular click without the release-settle that Turnstile checks for.
   if (holdMs > 0) {
     await new Promise((r) => setTimeout(r, holdMs));
   }
 
-  // 4. Release the left mouse button — completes the hold gesture.
+ // 4. Release the left mouse button — completes the hold gesture.
   await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
     type: "mouseReleased",
     x,

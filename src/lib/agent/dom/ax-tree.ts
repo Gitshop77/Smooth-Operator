@@ -5,8 +5,16 @@
  * the AX-tree tests.
  *
  * All historically-exported symbols are re-exported here:
- *   - `generateAccessibilityTree`, `initElementMap`, `resolveRef`,
- *     `AXTreeResult` (interface)
+ * - `generateAccessibilityTree`, `initElementMap`, `resolveRef`,
+ * `AXTreeResult` (interface)
+ *
+ * OBSERVATION-ONLY: `resolveRef` and `AXTreeResult` are provided for reading
+ * and inspecting the accessibility tree (and are consumed by the AX-tree
+ * tests). They are NOT wired into the action executor: action targets are
+ * resolved through the numeric `getSelectorMap()` indices from `page-state`,
+ * and that code path never imports or calls `resolveRef`. AX-tree `ref_NNN`
+ * identifiers therefore cannot be used as actionable targets — do not add a
+ * caller that assumes they resolve an action.
  *
  * SECURITY: the element-ref registry (`elementMap`, `elementReverseMap`,
  * `refCounter`) is kept intentionally in the *module scope* of

@@ -18,17 +18,25 @@ export const PATH = ":streamGenerateContent";
 const SCREENSHOT_PATTERN = /<screenshot>(data:image\/(png|jpeg|webp);base64,[^<]+)<\/screenshot>/g;
 
 /**
+ * Once this many non-JSON SSE frames have been dropped in a single stream,
+ * surface a non-PII warning. A few malformed frames can be a benign proxy
+ * artifact, but a sustained run of them means the assistant output is being
+ * silently truncated — worth flagging without logging frame contents.
+ */
+const DROPPED_FRAME_WARN_THRESHOLD = 5;
+
+/**
  * Validate that a string is well-formed base64 (no whitespace, correct
  * padding, only the legal alphabet). Used to reject malformed `<screenshot>`
  * markers locally instead of forwarding them to the provider for an opaque
  * `400`. Mirrors the `isValidBase64` guard in `anthropic-messages.ts`.
  */
 function isValidBase64(s: string): boolean {
-  // Reject empty / whitespace / illegal-alphabet payloads locally instead of
-  // forwarding them to the provider for an opaque 400. We intentionally do NOT
-  // enforce a strict length-multiple-of-4 rule: a trailing `=` padding string
-  // like `iVBOR==` is a perfectly usable image payload, and over-strict length
-  // gating was a regression that rejected valid screenshots.
+ // Reject empty / whitespace / illegal-alphabet payloads locally instead of
+ // forwarding them to the provider for an opaque 400. We intentionally do NOT
+ // enforce a strict length-multiple-of-4 rule: a trailing `=` padding string
+ // like `iVBOR==` is a perfectly usable image payload, and over-strict length
+ // gating was a regression that rejected valid screenshots.
   return s.length > 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(s);
 }
 
@@ -70,13 +78,13 @@ async function fromRequest(request: LLMRequest): Promise<GeminiBody> {
   const systemMsg = request.messages.find((m) => m.role === "system");
   const userMessages = request.messages.filter((m) => m.role !== "system");
 
-  // Only attach the image to the user message that CONTAINS the <screenshot>
-  // marker — not every user message. Mirrors the OpenAI + Anthropic protocols.
+ // Only attach the image to the user message that CONTAINS the <screenshot>
+ // marker — not every user message. Mirrors the OpenAI + Anthropic protocols.
   const contents = userMessages.map((m) => {
     const textContent = m.content.replace(/<screenshot>[^<]+<\/screenshot>/g, "").trim();
     if (m.role === "user") {
-      // Extract EVERY screenshot marker (not just the first) into its own
-      // `inline_data` part — a multi-screenshot turn must forward all of them.
+ // Extract EVERY screenshot marker (not just the first) into its own
+ // `inline_data` part — a multi-screenshot turn must forward all of them.
       const matches = Array.from(m.content.matchAll(SCREENSHOT_PATTERN));
       if (matches.length > 0) {
         const parts: Record<string, unknown>[] = [];
@@ -100,15 +108,15 @@ async function fromRequest(request: LLMRequest): Promise<GeminiBody> {
     maxOutputTokens: request.generation?.maxTokens ?? 8192,
   };
   if (request.schema) {
-    // Serialize the Zod schema to a plain JSON Schema object before passing
-    // to Gemini's responseSchema. The raw Zod schema object is not serializable.
-    //
-    // If `request.schema` is ALREADY a plain JSON Schema (e.g. `{ type:
-    // "object" }` — the shape callers/tests pass), forward it as-is. Calling
-    // `z.toJSONSchema` on a non-Zod object throws ("reading 'def'"), which was
-    // a genuine regression. Only Zod objects need conversion; we still THROW on
-    // any conversion failure so a non-serializable schema surfaces clearly
-    // rather than being POSTed as a raw Zod object (opaque `400`).
+ // Serialize the Zod schema to a plain JSON Schema object before passing
+ // to Gemini's responseSchema. The raw Zod schema object is not serializable.
+ //
+ // If `request.schema` is ALREADY a plain JSON Schema (e.g. `{ type:
+ // "object" }` — the shape callers/tests pass), forward it as-is. Calling
+ // `z.toJSONSchema` on a non-Zod object throws ("reading 'def'"), which was
+ // a genuine regression. Only Zod objects need conversion; we still THROW on
+ // any conversion failure so a non-serializable schema surfaces clearly
+ // rather than being POSTed as a raw Zod object (opaque `400`).
     let jsonSchema: unknown;
     if (isZodSchema(request.schema)) {
       jsonSchema = await zodToJsonSchema(request.schema);
@@ -129,6 +137,8 @@ async function fromRequest(request: LLMRequest): Promise<GeminiBody> {
 
 interface StreamState {
   content: string;
+  /** Count of non-JSON SSE frames dropped this stream (see DROPPED_FRAME_WARN_THRESHOLD). */
+  dropped?: number;
   usage?: { tokensIn: number; tokensOut: number; reasoningTokens?: number; cachedInputTokens?: number; model: string; costUsd: number };
 }
 
@@ -139,20 +149,29 @@ export const protocol: Protocol<GeminiBody, string, { type: string; content?: st
     initial: () => ({ content: "" }),
     step: (state: StreamState, frame: string) => {
       const events: Array<{ type: string; content?: string; usage?: StreamState["usage"] }> = [];
-      // Separate the two distinct failure modes:
-      //   1. A non-JSON frame (truncated stream / proxy artifact) — log it and
-      //      skip, consistent with `anthropic-messages.ts`.
-      //   2. A provider error payload (`{"error": {...}}`) — valid JSON, so it
-      //      parses fine, but it must NOT be swallowed: we throw so the route
-      //      propagates it instead of returning empty output that masks
-      //      auth/quota/permission failures.
+ // Separate the two distinct failure modes:
+ // 1. A non-JSON frame (truncated stream / proxy artifact) — log it and
+ // skip, consistent with `anthropic-messages.ts`.
+ // 2. A provider error payload (`{"error": {...}}`) — valid JSON, so it
+ // parses fine, but it must NOT be swallowed: we throw so the route
+ // propagates it instead of returning empty output that masks
+ // auth/quota/permission failures.
       let data: unknown;
       try {
         data = JSON.parse(frame);
       } catch {
-        // Log only the byte length — the raw frame can carry model output or
-        // scraped page content (PII, secrets) that must not leak into logs.
+ // Log only the byte length — the raw frame can carry model output or
+ // scraped page content (PII, secrets) that must not leak into logs.
         console.warn(`[gemini] Dropping non-JSON SSE frame (${frame.length} bytes)`);
+ // Count dropped frames; warn once if a sustained run of them suggests the
+ // assistant output is being silently truncated (no frame contents logged).
+        state.dropped = (state.dropped ?? 0) + 1;
+        if (state.dropped === DROPPED_FRAME_WARN_THRESHOLD) {
+          console.warn(
+            `[gemini] ${DROPPED_FRAME_WARN_THRESHOLD} non-JSON SSE frames dropped this stream — ` +
+              `assistant output may be truncated.`,
+          );
+        }
         return { state, events };
       }
       const dataAny = data as { error?: { message?: string } | string };
@@ -172,10 +191,10 @@ export const protocol: Protocol<GeminiBody, string, { type: string; content?: st
       }
       const usage = (data as { usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; cachedContentTokenCount?: number; thoughtsTokenCount?: number } }).usageMetadata;
       if (usage) {
-        // Capture cachedContentTokenCount (cached → billed at cacheRead
-        // rate) + thoughtsTokenCount (Gemini 2.5 Flash/Pro Thinking
-        // reasoning tokens, billed at $0 without this → under-reporting
-        // 30-60%).
+ // Capture cachedContentTokenCount (cached → billed at cacheRead
+ // rate) + thoughtsTokenCount (Gemini 2.5 Flash/Pro Thinking
+ // reasoning tokens, billed at $0 without this → under-reporting
+ // 30-60%).
         const cached = usage.cachedContentTokenCount;
         const reasoning = usage.thoughtsTokenCount;
         state.usage = {
@@ -190,20 +209,20 @@ export const protocol: Protocol<GeminiBody, string, { type: string; content?: st
       return { state, events };
     },
     terminal: (frame: string): boolean => {
-      // Gemini sends usageMetadata only on the final chunk (confirmed
-      // via API docs + community reports). But some edge cases (empty
-      // responses with finishReason=STOP but no content) can also carry
-      // usageMetadata. The safest terminal signal is finishReason on a
-      // candidate — that's the API's explicit "I'm done" marker. We also
-      // accept usageMetadata as a fallback for older API versions.
+ // Gemini sends usageMetadata only on the final chunk (confirmed
+ // via API docs + community reports). But some edge cases (empty
+ // responses with finishReason=STOP but no content) can also carry
+ // usageMetadata. The safest terminal signal is finishReason on a
+ // candidate — that's the API's explicit "I'm done" marker. We also
+ // accept usageMetadata as a fallback for older API versions.
       try {
         const data = JSON.parse(frame);
-        // Primary: check for finishReason on the first candidate
+ // Primary: check for finishReason on the first candidate
         const finishReason = data.candidates?.[0]?.finishReason;
         if (finishReason && finishReason !== "FINISH_REASON_UNSPECIFIED") {
           return true;
         }
-        // Fallback: usageMetadata presence (older API versions)
+ // Fallback: usageMetadata presence (older API versions)
         if (data.usageMetadata) {
           return true;
         }
@@ -217,10 +236,10 @@ export const protocol: Protocol<GeminiBody, string, { type: string; content?: st
 
 /** Build the Gemini endpoint path for a specific model (uses dynamic path). */
 export function geminiPath(model: string): string {
-  // `encodeModelIdForUrl` keeps normal ids identical (alphanumerics, ".", "-"
-  // are left untouched) but prevents a malicious/garbage model id from
-  // injecting path separators or query characters into the request URL, and
-  // throws on structurally-invalid ids.
+ // `encodeModelIdForUrl` keeps normal ids identical (alphanumerics, ".", "-"
+ // are left untouched) but prevents a malicious/garbage model id from
+ // injecting path separators or query characters into the request URL, and
+ // throws on structurally-invalid ids.
   return `/${encodeModelIdForUrl(model)}${PATH}`;
 }
 

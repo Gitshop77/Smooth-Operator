@@ -129,10 +129,10 @@ export function clearRunTotals(): void {
   }
   totalCost = 0;
   totalTokens = 0;
-  // Reset the step counter too — otherwise a previous run that ended at step N
-  // leaves `currentStep = N`, skewing the per-step cost projection
-  // (`totalCost / currentStep`) until the new run's first navigator step
-  // overwrites it (finding: currentStep never reset between runs).
+ // Reset the step counter too — otherwise a previous run that ended at step N
+ // leaves `currentStep = N`, skewing the per-step cost projection
+ // (`totalCost / currentStep`) until the new run's first navigator step
+ // overwrites it (finding: currentStep never reset between runs).
   currentStep = 0;
   logHistory.length = 0;
   costLabel.textContent = "$0.0000";
@@ -172,9 +172,9 @@ const MAX_LOG_ROWS = 500;
  * Also updates the step progress bar, element count, and cost totals.
  */
 export function addLogRow(event: LogEvent, time: string): void {
-  // Don't clobber the whole log when the first row arrives — just remove the
-  // empty-state placeholder (once). Use a flag instead of re-querying the DOM
-  // on every event (finding: per-event DOM scan + forced reflow).
+ // Don't clobber the whole log when the first row arrives — just remove the
+ // empty-state placeholder (once). Use a flag instead of re-querying the DOM
+ // on every event (finding: per-event DOM scan + forced reflow).
   if (!emptyPlaceholderCleared) {
     const empty = logEl.querySelector(".empty");
     if (empty) empty.remove();
@@ -245,15 +245,15 @@ export function addLogRow(event: LogEvent, time: string): void {
     case "done":
       cls = event.success ? "ok" : "err"; label = "done";
       icon = event.success ? glyph("check-circle") : glyph("x"); body = event.text;
-      // setRunning(false) MUST run BEFORE setTaskStatus — otherwise
-      // setRunning's internal `setTaskStatus("pending")` overwrites the
-      // "completed"/"failed" status the very next line sets, and the badge
-      // never reflects completion. Order: disable buttons (setRunning) →
-      // set badge (setTaskStatus) → set lifecycle icon (setLifecycle).
-      // During restore replay (#10) suppress ALL of these side effects so
-      // re-opening the panel mid-run doesn't re-disable the controls / rewrite
-      // the final state / re-append thinking entries (finding: setLifecycle /
-      // setTaskStatus fired unguarded during restore replay).
+ // setRunning(false) MUST run BEFORE setTaskStatus — otherwise
+ // setRunning's internal `setTaskStatus("pending")` overwrites the
+ // "completed"/"failed" status the very next line sets, and the badge
+ // never reflects completion. Order: disable buttons (setRunning) →
+ // set badge (setTaskStatus) → set lifecycle icon (setLifecycle).
+ // During restore replay (#10) suppress ALL of these side effects so
+ // re-opening the panel mid-run doesn't re-disable the controls / rewrite
+ // the final state / re-append thinking entries (finding: setLifecycle /
+ // setTaskStatus fired unguarded during restore replay).
       if (!isRestoring) {
         setRunning(false);
         setTaskStatus(event.success ? "completed" : "failed");
@@ -263,11 +263,11 @@ export function addLogRow(event: LogEvent, time: string): void {
     case "error":
       cls = "err"; label = "error"; icon = glyph("x"); body = event.message;
       if (!event.recoverable) {
-        // Call setRunning(false) BEFORE setLifecycle("error") so the
-        // running→idle transition doesn't clobber the error lifecycle.
-        // Suppressed during restore replay (see done case above) — keep the
-        // lifecycle icon in sync (cheap, idempotent) but skip the
-        // control-disabling / badge-rewriting / thinking side effects.
+ // Call setRunning(false) BEFORE setLifecycle("error") so the
+ // running→idle transition doesn't clobber the error lifecycle.
+ // Suppressed during restore replay (see done case above) — keep the
+ // lifecycle icon in sync (cheap, idempotent) but skip the
+ // control-disabling / badge-rewriting / thinking side effects.
         if (!isRestoring) {
           setRunning(false);
           setTaskStatus("failed");
@@ -280,12 +280,12 @@ export function addLogRow(event: LogEvent, time: string): void {
       break;
     case "cost": {
       cls = "cost"; label = "cost"; icon = glyph("dollar-sign");
-      // Validate the numeric payload BEFORE dereferencing it. A malformed cost
-      // event (missing / non-numeric `costUsd`/`tokensIn`/`tokensOut`) would
-      // throw on `event.costUsd.toFixed(4)` and crash the listener, or — worse
-      // — poison `totalCost`/`totalTokens` with `NaN`, silently corrupting every
-      // downstream metric. Skip + warn instead (see also the envelope guard in
-      // the message listener below).
+ // Validate the numeric payload BEFORE dereferencing it. A malformed cost
+ // event (missing / non-numeric `costUsd`/`tokensIn`/`tokensOut`) would
+ // throw on `event.costUsd.toFixed(4)` and crash the listener, or — worse
+ // — poison `totalCost`/`totalTokens` with `NaN`, silently corrupting every
+ // downstream metric. Skip + warn instead (see also the envelope guard in
+ // the message listener below).
       const c = Number(event.costUsd);
       const ti = Number(event.tokensIn);
       const to = Number(event.tokensOut);
@@ -295,9 +295,9 @@ export function addLogRow(event: LogEvent, time: string): void {
         break;
       }
       body = `${ti}+${to} tok · $${c.toFixed(4)}`;
-      // Skip accumulation during restore — the stored totals are already correct
-      // and the log may be truncated (capped at 500 rows), so rebuilding from
-      // the log would under-count for long runs.
+ // Skip accumulation during restore — the stored totals are already correct
+ // and the log may be truncated (capped at 500 rows), so rebuilding from
+ // the log would under-count for long runs.
       if (!isRestoring) {
         totalCost += c;
         totalTokens += ti + to;
@@ -322,10 +322,10 @@ export function addLogRow(event: LogEvent, time: string): void {
       cls = "err"; label = "challenge"; icon = glyph("alert-triangle");
       body = `${event.kind}: ${event.message}`;
       setLifecycle("waiting");
-      // Show the takeover banner so the user can solve the challenge +
-      // click Resume — same UX as the takeover action. Suppressed during
-      // restore replay (#10) so the banner doesn't re-pop for an already-
-      // cleared challenge.
+ // Show the takeover banner so the user can solve the challenge +
+ // click Resume — same UX as the takeover action. Suppressed during
+ // restore replay (#10) so the banner doesn't re-pop for an already-
+ // cleared challenge.
       if (!isRestoring) showTakeoverBanner(`Anti-bot challenge (${event.kind}): ${event.message}`);
       break;
     case "paused":
@@ -337,22 +337,22 @@ export function addLogRow(event: LogEvent, time: string): void {
       cls = "info"; label = "resumed"; icon = glyph("play");
       body = "Agent resumed";
       setLifecycle("thinking");
-      // Hide the takeover banner when the agent resumes — covers two cases:
-      //   1. Challenge auto-resolved (orchestrator emits `resumed` after
-      //      `challenge_detected` → banner was shown, now needs hiding).
-      //   2. User clicked Resume on the takeover banner (banner already
-      //      hidden by the click handler — this is a no-op).
-      // `hideTakeoverBanner` is a no-op if the banner is already hidden.
-      // Suppressed during restore replay (#10).
+ // Hide the takeover banner when the agent resumes — covers two cases:
+ // 1. Challenge auto-resolved (orchestrator emits `resumed` after
+ // `challenge_detected` → banner was shown, now needs hiding).
+ // 2. User clicked Resume on the takeover banner (banner already
+ // hidden by the click handler — this is a no-op).
+ // `hideTakeoverBanner` is a no-op if the banner is already hidden.
+ // Suppressed during restore replay (#10).
       if (!isRestoring) hideTakeoverBanner();
       break;
     case "takeover":
-      // Show the takeover banner — the agent is paused waiting for the user.
+ // Show the takeover banner — the agent is paused waiting for the user.
       cls = "err"; label = "takeover"; icon = glyph("alert-triangle");
       body = `Paused: ${event.reason}`;
       setLifecycle("waiting");
-      // Suppressed during restore replay (#10) so the banner doesn't re-pop
-      // for an already-handled takeover.
+ // Suppressed during restore replay (#10) so the banner doesn't re-pop
+ // for an already-handled takeover.
       if (!isRestoring) showTakeoverBanner(event.reason);
       break;
     default:
@@ -368,27 +368,27 @@ export function addLogRow(event: LogEvent, time: string): void {
     `<span class="bd ${cls}">${escapeHtml(body)}</span>`;
   logEl.appendChild(row);
 
-  // Cap log rows so a long-running agent doesn't accumulate unbounded DOM.
+ // Cap log rows so a long-running agent doesn't accumulate unbounded DOM.
   while (logEl.children.length > MAX_LOG_ROWS) {
     logEl.firstElementChild?.remove();
   }
 
-  // Mirror the row into logHistory + persist the cost/token/log snapshot so
-  // the panel can restore them if the user closes + reopens it mid-run. The
-  // cap matches MAX_LOG_ROWS so the persisted log and the on-screen log stay
-  // in sync. (Before this fix, the side panel read these keys on reopen but
-  // nothing ever wrote them — the restore path was dead.)
+ // Mirror the row into logHistory + persist the cost/token/log snapshot so
+ // the panel can restore them if the user closes + reopens it mid-run. The
+ // cap matches MAX_LOG_ROWS so the persisted log and the on-screen log stay
+ // in sync. (Before this fix, the side panel read these keys on reopen but
+ // nothing ever wrote them — the restore path was dead.)
   logHistory.push({ event, time });
   while (logHistory.length > MAX_LOG_ROWS) {
     logHistory.shift();
   }
   persistRunTotals();
 
-  // Only auto-scroll if the user is already near the bottom (don't yank the
-  // scroll position if they're scrolled up reading history). Use the cached
-  // `clientHeight` (refreshed by a ResizeObserver) so we only force a reflow
-  // read of scrollHeight/scrollTop here, not of clientHeight too (finding:
-  // per-event DOM scan + forced reflow).
+ // Only auto-scroll if the user is already near the bottom (don't yank the
+ // scroll position if they're scrolled up reading history). Use the cached
+ // `clientHeight` (refreshed by a ResizeObserver) so we only force a reflow
+ // read of scrollHeight/scrollTop here, not of clientHeight too (finding:
+ // per-event DOM scan + forced reflow).
   const nearBottom = logEl.scrollHeight - logEl.scrollTop - cachedClientHeight < 80;
   if (nearBottom) logEl.scrollTop = logEl.scrollHeight;
 
@@ -397,9 +397,9 @@ export function addLogRow(event: LogEvent, time: string): void {
     stepLabel.textContent = `step ${event.step} / ${maxSteps}`;
     const pct = Math.min(100, (event.step / maxSteps) * 100);
     barFill.style.width = `${pct}%`;
-    // Keep the progressbar's ARIA value in sync with the visual width so
-    // assistive tech reports the actual step (finding: aria-valuenow never
-    // updated — it stayed at its initial HTML value).
+ // Keep the progressbar's ARIA value in sync with the visual width so
+ // assistive tech reports the actual step (finding: aria-valuenow never
+ // updated — it stayed at its initial HTML value).
     barFill.setAttribute("aria-valuenow", String(event.step));
     updateCostProjection();
   }
@@ -409,17 +409,17 @@ export function addLogRow(event: LogEvent, time: string): void {
 // ─── AGENT_EVENT listener ───────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg: unknown, sender, _sendResponse) => {
-  // Trust boundary — only accept messages from this extension (matches
-  // the guard in human-interact.ts, content.ts, and background/message-routing.ts).
+ // Trust boundary — only accept messages from this extension (matches
+ // the guard in human-interact.ts, content.ts, and background/message-routing.ts).
   if (sender.id !== chrome.runtime.id) return false;
   const payload = msg as Partial<AgentEventEnvelope>;
   if (payload?.type === "AGENT_EVENT") {
-    // Validate the envelope at the trust boundary before dereferencing it
-    // (finding: AGENT_EVENT envelope validation was shallow — only `type` +
-    // `time`). A malformed envelope (no `event`, non-string `type`, or a
-    // `cost` event with non-numeric fields) would throw inside `addLogRow`
-    // and crash the listener, or poison the running totals with `NaN`.
-    // Ignore it instead of forwarding it.
+ // Validate the envelope at the trust boundary before dereferencing it
+ // (finding: AGENT_EVENT envelope validation was shallow — only `type` +
+ // `time`). A malformed envelope (no `event`, non-string `type`, or a
+ // `cost` event with non-numeric fields) would throw inside `addLogRow`
+ // and crash the listener, or poison the running totals with `NaN`.
+ // Ignore it instead of forwarding it.
     if (isValidAgentEvent(payload.event) && typeof payload.time === "string") {
       addLogRow(payload.event as LogEvent, payload.time);
     } else {
@@ -462,7 +462,7 @@ function isValidAgentEvent(ev: unknown): ev is LogEvent {
  * counters + the log don't appear empty.
  */
 export function restoreTotalsFromStorage(): void {
-  // Restore counters / log history from storage (kept fresh on every event).
+ // Restore counters / log history from storage (kept fresh on every event).
   chrome.storage.local.get([STORAGE_KEYS.costUsd, STORAGE_KEYS.tokens, STORAGE_KEYS.log], (s) => {
     if (chrome.runtime.lastError) return;
     if (typeof s[STORAGE_KEYS.costUsd] === "number") {
@@ -474,25 +474,25 @@ export function restoreTotalsFromStorage(): void {
       tokenLabel.textContent = formatTokens(totalTokens);
     }
     if (Array.isArray(s[STORAGE_KEYS.log])) {
-      // Clear any rows already in the DOM + in-memory mirror BEFORE replaying,
-      // so the persisted log is rendered exactly once. Without this, every
-      // STATUS check (fired on each panel open) would append a duplicate copy
-      // on top of the existing log. The persisted cost/token counters above are
-      // already restored, so clearing here does not lose them.
+ // Clear any rows already in the DOM + in-memory mirror BEFORE replaying,
+ // so the persisted log is rendered exactly once. Without this, every
+ // STATUS check (fired on each panel open) would append a duplicate copy
+ // on top of the existing log. The persisted cost/token counters above are
+ // already restored, so clearing here does not lose them.
       logEl.innerHTML = "";
       logHistory.length = 0;
-      // Set the restore guard so addLogRow's persistRunTotals() and cost
-      // accumulation are both suppressed during this loop. The stored totals
-      // set above are already correct — rebuilding from the log would
-      // under-count for long runs (log is capped at 500 rows).
+ // Set the restore guard so addLogRow's persistRunTotals() and cost
+ // accumulation are both suppressed during this loop. The stored totals
+ // set above are already correct — rebuilding from the log would
+ // under-count for long runs (log is capped at 500 rows).
       isRestoring = true;
       try {
         for (const row of s[STORAGE_KEYS.log] as Array<{ event: LogEvent; time: string }>) {
-          // Route the restored rows through the same envelope validator used at
-          // the live message boundary (finding: restore replay skipped validation
-          // entirely, so a corrupt stored log could feed `addLogRow` unchecked
-          // and render "undefined el · undefined new · undefined"). Drop invalid
-          // stored rows rather than forwarding them.
+ // Route the restored rows through the same envelope validator used at
+ // the live message boundary (finding: restore replay skipped validation
+ // entirely, so a corrupt stored log could feed `addLogRow` unchecked
+ // and render "undefined el · undefined new · undefined"). Drop invalid
+ // stored rows rather than forwarding them.
           if (isValidAgentEvent(row.event) && typeof row.time === "string") {
             addLogRow(row.event, row.time);
           } else {

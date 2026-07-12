@@ -89,8 +89,8 @@ export function RunDetailView({ runId: propRunId }: RunDetailViewProps) {
     [task],
   );
 
-  // Surfaces reasoning/tool-calls if the API ever populates `resultsJson`
-  // with structured data. Today this is empty for most runs (.audit/data.md §2).
+ // Surfaces reasoning/tool-calls if the API ever populates `resultsJson`
+ // with structured data. Today this is empty for most runs (.audit/data.md §2).
   const results = React.useMemo(
     () => (task ? parseJsonArray<ToolCallLike>((task as { resultsJson?: unknown }).resultsJson) : []),
     [task],

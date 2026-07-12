@@ -6,19 +6,19 @@
  * This module (and its siblings under `background/`) provides the
  * Chrome-specific bindings:
  *
- *   - chrome.storage.session for run-state persistence (MV3 resilience)
- *   - chrome.alarms keepalive (service workers die after ~30s of inactivity)
- *   - chrome.tabs queries + content-script injection
- *   - chrome.scripting for programmatic injection
- *   - Anti-detection injection (run before the content script)
- *   - Tab-level action execution (switch/close/navigate)
- *   - Message streaming to the side panel
+ * - chrome.storage.session for run-state persistence (MV3 resilience)
+ * - chrome.alarms keepalive (service workers die after ~30s of inactivity)
+ * - chrome.tabs queries + content-script injection
+ * - chrome.scripting for programmatic injection
+ * - Anti-detection injection (run before the content script)
+ * - Tab-level action execution (switch/close/navigate)
+ * - Message streaming to the side panel
  *
  * Top-level side effects (run when this module is loaded):
- *   - registers `chrome.runtime.onInstalled` (opens side panel on action click)
- *   - registers `chrome.alarms.onAlarm` (keepalive + scheduled-task fires)
- *   - registers `chrome.runtime.onMessage` (via the message-routing import)
- *   - runs the SW-startup check (notifies if a previous run was interrupted)
+ * - registers `chrome.runtime.onInstalled` (opens side panel on action click)
+ * - registers `chrome.alarms.onAlarm` (keepalive + scheduled-task fires)
+ * - registers `chrome.runtime.onMessage` (via the message-routing import)
+ * - runs the SW-startup check (notifies if a previous run was interrupted)
  *
  * The `background.ts` entry shim at `src/extension/background.ts` is a
  * one-line side-effect import of this file.
@@ -43,12 +43,12 @@ chrome.runtime.onInstalled.addListener(() => {
       /* setPanelBehavior can reject on unsupported Chrome versions — non-fatal */
     });
 
-  // Warm the live models.dev catalog so cost tracking uses live rates.
-  // pricing.ts no longer has a static table — rates come from the catalog.
-  // Lazy import keeps the (large) pricing module out of the critical install path.
-  // NOTE: the catalog is fetched live at runtime (not bundled), so its current
-  // attribution/usage terms must be confirmed before any cached copy is
-  // redistributed — see THIRD_PARTY_LICENSES.md (models.dev entry).
+ // Warm the live models.dev catalog so cost tracking uses live rates.
+ // pricing.ts no longer has a static table — rates come from the catalog.
+ // Lazy import keeps the (large) pricing module out of the critical install path.
+ // NOTE: the catalog is fetched live at runtime (not bundled), so its current
+ // attribution/usage terms must be confirmed before any cached copy is
+ // redistributed — see THIRD_PARTY_LICENSES.md (models.dev entry).
   void import("../../lib/agent/llm/pricing").then((m) =>
     m.refreshPricingFromCatalog(),
   );
@@ -57,9 +57,9 @@ chrome.runtime.onInstalled.addListener(() => {
 // On browser/extension startup (a more reliable trigger than onInstalled for
 // resuming service-worker incarnations), also warm the live catalog.
 chrome.runtime.onStartup.addListener(() => {
-  // Warm the live models.dev catalog so cost tracking uses live rates.
-  // pricing.ts no longer has a static table — rates come from the catalog.
-  // Lazy import keeps the (large) pricing module out of the startup path.
+ // Warm the live models.dev catalog so cost tracking uses live rates.
+ // pricing.ts no longer has a static table — rates come from the catalog.
+ // Lazy import keeps the (large) pricing module out of the startup path.
   void import("../../lib/agent/llm/pricing").then((m) =>
     m.refreshPricingFromCatalog(),
   );
@@ -84,8 +84,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (now - lastPricingRefreshAt < PRICING_REFRESH_THROTTLE_MS) return;
   lastPricingRefreshAt = now;
 
-  // Warm the live models.dev catalog so cost tracking uses live rates.
-  // pricing.ts no longer has a static table — rates come from the catalog.
+ // Warm the live models.dev catalog so cost tracking uses live rates.
+ // pricing.ts no longer has a static table — rates come from the catalog.
   void import("../../lib/agent/llm/pricing").then((m) =>
     m.refreshPricingFromCatalog(),
   );
@@ -101,26 +101,26 @@ chrome.commands?.onCommand.addListener(async (command) => {
     try {
       await chrome.sidePanel.open({ windowId: chrome.windows.WINDOW_ID_CURRENT });
     } catch {
-      // sidePanel.open requires a user gesture in some Chrome versions —
-      // keyboard shortcut commands DO count as user gestures, so this should
-      // work. If it doesn't (older Chrome), the action click fallback still
-      // works.
+ // sidePanel.open requires a user gesture in some Chrome versions —
+ // keyboard shortcut commands DO count as user gestures, so this should
+ // work. If it doesn't (older Chrome), the action click fallback still
+ // works.
     }
   }
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === KEEPALIVE_ALARM) {
-    // Touching the SW keeps it alive. The loop's async work does the rest.
-    // Add `.catch` to prevent unhandled rejection if storage fails.
+ // Touching the SW keeps it alive. The loop's async work does the rest.
+ // Add `.catch` to prevent unhandled rejection if storage fails.
     void getRunState().catch(() => { /* best-effort keepalive touch */ });
     return;
   }
-  // Handle scheduled-task alarms. Parse the task ID, look up the stored task,
-  // and start a run with its prompt. (`parseAlarmName` and
-  // `initScheduledTasks` from scheduled-tasks.ts arm the alarms that fire
-  // here — without this listener, alarms would be armed correctly but fire
-  // into a void with no handler.)
+ // Handle scheduled-task alarms. Parse the task ID, look up the stored task,
+ // and start a run with its prompt. (`parseAlarmName` and
+ // `initScheduledTasks` from scheduled-tasks.ts arm the alarms that fire
+ // here — without this listener, alarms would be armed correctly but fire
+ // into a void with no handler.)
   const taskId = parseAlarmName(alarm.name);
   if (taskId) {
     void handleScheduledTaskFire(taskId);
@@ -139,10 +139,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // panel is closed but a scheduled task is running.
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === "keepalive") {
-    // No-op: the port's existence is what keeps the SW alive. We just need
-    // to acknowledge the connection. The port will be torn down when the
-    // side panel closes (or when the SW is killed — the side panel's
-    // `onDisconnect` listener reconnects).
+ // No-op: the port's existence is what keeps the SW alive. We just need
+ // to acknowledge the connection. The port will be torn down when the
+ // side panel closes (or when the SW is killed — the side panel's
+ // `onDisconnect` listener reconnects).
   }
 });
 
@@ -189,22 +189,22 @@ chrome.runtime.onConnect.addListener((port) => {
   } catch (e) {
     console.error("[sw-startup] run-state check failed (alarms still armed below):", e);
   }
-  // re-arm all enabled scheduled-task alarms on SW startup. Alarms
-  // persist across SW restarts, but re-arming is idempotent and ensures any
-  // alarms that were cleared (e.g. by a browser crash) are restored. Runs
-  // independently of the run-state read above.
+ // re-arm all enabled scheduled-task alarms on SW startup. Alarms
+ // persist across SW restarts, but re-arming is idempotent and ensures any
+ // alarms that were cleared (e.g. by a browser crash) are restored. Runs
+ // independently of the run-state read above.
   try {
     await initScheduledTasks();
   } catch (e) {
     console.error("[sw-startup] failed to arm scheduled tasks:", e);
   }
-  // (re)acquire the system keep-awake lock if any enabled scheduled
-  // tasks exist. The lock doesn't persist across SW restarts (chrome.power
-  // state is in-process), so a SW restart while scheduled tasks are armed
-  // would leave the laptop free to sleep through the next alarm. Calling
-  // `requestKeepAwake` here re-acquires the lock; it internally checks that
-  // at least one enabled task exists (no-op otherwise). Runs independently of
-  // the run-state read above.
+ // (re)acquire the system keep-awake lock if any enabled scheduled
+ // tasks exist. The lock doesn't persist across SW restarts (chrome.power
+ // state is in-process), so a SW restart while scheduled tasks are armed
+ // would leave the laptop free to sleep through the next alarm. Calling
+ // `requestKeepAwake` here re-acquires the lock; it internally checks that
+ // at least one enabled task exists (no-op otherwise). Runs independently of
+ // the run-state read above.
   try {
     await requestKeepAwake();
   } catch (e) {

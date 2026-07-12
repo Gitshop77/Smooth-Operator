@@ -116,7 +116,7 @@ describe("getSkillFrontmatter", () => {
     const fm = await getSkillFrontmatter("https://github.com/owner/repo");
     expect(fm.length).toBeGreaterThan(0);
     expect(fm[0].name).toBe("GitHub");
-    // The description is the frontmatter string — one sentence, no full body.
+ // The description is the frontmatter string — one sentence, no full body.
     expect(fm[0].description).toContain("Tips for");
     expect(fm[0].description.length).toBeLessThan(120);
   });
@@ -131,18 +131,18 @@ describe("getSkillFrontmatter", () => {
   });
 
   test("de-duplicates by name (twitter.com + x.com both match)", async () => {
-    // https://x.com/foo matches both twitter.com (no) and x.com (yes) skills,
-    // both named "Twitter/X". The frontmatter list should contain "Twitter/X"
-    // exactly once.
+ // https://x.com/foo matches both twitter.com (no) and x.com (yes) skills,
+ // both named "Twitter/X". The frontmatter list should contain "Twitter/X"
+ // exactly once.
     const fm = await getSkillFrontmatter("https://x.com/foo");
     const twitterCount = fm.filter((s) => s.name === "Twitter/X").length;
     expect(twitterCount).toBe(1);
   });
 
   test("frontmatter is much shorter than the full instructions", async () => {
-    // Sanity check: the frontmatter (always in context) is dramatically
-    // smaller than the full skill body (loaded on demand) — this is the
-    // whole point of the frontmatter-first model.
+ // Sanity check: the frontmatter (always in context) is dramatically
+ // smaller than the full skill body (loaded on demand) — this is the
+ // whole point of the frontmatter-first model.
     const fm = await getSkillFrontmatter("https://github.com/test");
     const full = await getFullSkill("GitHub");
     expect(fm[0].description.length).toBeLessThan(full.length / 4);
@@ -154,9 +154,9 @@ describe("getFullSkill", () => {
     const body = await getFullSkill("GitHub");
     expect(body).toContain("GitHub tips:");
     expect(body).toContain("Issues");
-    // Includes dangerous-actions appendix.
+ // Includes dangerous-actions appendix.
     expect(body).toContain("Dangerous actions");
-    // Includes shortcuts appendix.
+ // Includes shortcuts appendix.
     expect(body).toContain("Shortcuts:");
   });
 
@@ -194,8 +194,8 @@ describe("Mode enforcement", () => {
   });
 
   test("full_agentic allows every action in ACTION_METADATA", () => {
-    // Iterate over ACTION_METADATA keys so this test stays in sync when
-    // actions are added — no hardcoded list to maintain.
+ // Iterate over ACTION_METADATA keys so this test stays in sync when
+ // actions are added — no hardcoded list to maintain.
     const allActions = Object.keys(ACTION_METADATA);
     for (const action of allActions) {
       expect(checkActionAllowed(action, "full_agentic").allowed).toBe(true);
@@ -222,7 +222,7 @@ describe("Mode enforcement", () => {
 
   test("full_agentic mode has the most permissions", () => {
     const f = MODE_CONFIGS.full_agentic;
-    // All 7 capability flags must be true in full_agentic mode.
+ // All 7 capability flags must be true in full_agentic mode.
     expect(f.canNavigate).toBe(true);
     expect(f.canOpenTabs).toBe(true);
     expect(f.canExecuteJs).toBe(true);

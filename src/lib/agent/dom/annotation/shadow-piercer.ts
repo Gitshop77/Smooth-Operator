@@ -48,21 +48,21 @@
  * ## Safety
  *
  * - The WeakMap uses `Element` as the key, so hosts are garbage-collected
- *   when they leave the DOM (no leak).
+ * when they leave the DOM (no leak).
  * - The patch wraps the original `attachShadow` in `try/catch` so a throw
- *   in user code doesn't prevent the root from being recorded.
+ * in user code doesn't prevent the root from being recorded.
  * - `Object.defineProperty` is used with `configurable: true, writable: true`
- *   so a page that detects the patch can still override it (the piercer is
- *   best-effort, not a security boundary).
+ * so a page that detects the patch can still override it (the piercer is
+ * best-effort, not a security boundary).
  * - The cross-world backdoor `window.__openCoworkPiercer__` is written to the
- *   SHARED `window` (see "Worlds" above). Because it lives on the page's
- *   `window`, the page's own MAIN-world scripts can also read it — including
- *   any closed shadow roots the page author attached (the page only learns its
- *   OWN closed roots, never another origin's). This is a deliberate,
- *   low-impact trade-off: the backdoor exists so the isolated-world content
- *   script can reach roots captured by the MAIN-world injection. It is NOT a
- *   secret channel; treat it as read-only page introspection support, not a
- *   security boundary.
+ * SHARED `window` (see "Worlds" above). Because it lives on the page's
+ * `window`, the page's own MAIN-world scripts can also read it — including
+ * any closed shadow roots the page author attached (the page only learns its
+ * OWN closed roots, never another origin's). This is a deliberate,
+ * low-impact trade-off: the backdoor exists so the isolated-world content
+ * script can reach roots captured by the MAIN-world injection. It is NOT a
+ * secret channel; treat it as read-only page introspection support, not a
+ * security boundary.
  *
  * Extracted from the historical `dom/shadow-piercer.ts`. The legacy
  * `@/lib/agent/dom/shadow-piercer` import path stays working via a re-export
@@ -105,6 +105,13 @@ interface PiercerState {
 
 let state: PiercerState | null = null;
 
+/**
+ * Hard cap on traversal depth for {@link pierceShadowRoots}. Real pages nest
+ * far shallower than this; the cap only exists to bound a pathological /
+ * adversarial deep tree so the walker can't run unbounded .
+ */
+const MAX_PIERCE_DEPTH = 10_000;
+
 // `Element` may not exist in non-DOM environments (Node.js without jsdom).
 // Guard every reference so the module loads cleanly in any context.
 const ELEMENT_CTOR: typeof Element | undefined =
@@ -125,8 +132,8 @@ const ELEMENT_CTOR: typeof Element | undefined =
 export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
   if (!ELEMENT_CTOR) return; // non-DOM environment — nothing to pierce.
 
-  // Idempotency: if the prototype already carries our sentinel, just rebind
-  // the backdoor to the live state (handles re-injection on navigation).
+ // Idempotency: if the prototype already carries our sentinel, just rebind
+ // the backdoor to the live state (handles re-injection on navigation).
   const existing = ELEMENT_CTOR.prototype.attachShadow as
     Element["attachShadow"] & { __openCoworkPatched?: boolean; __openCoworkState?: PiercerState };
   if (existing?.__openCoworkPatched && existing.__openCoworkState) {
@@ -146,16 +153,16 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
   const original = existing;
   const patched = function (this: Element, init: ShadowRootInit): ShadowRoot {
     const mode = init?.mode ?? "open";
-    // Call the real attachShadow FIRST so the returned root is the genuine
-    // article (closed roots return a ShadowRoot either way; we just want to
-    // keep our own reference to it).
+ // Call the real attachShadow FIRST so the returned root is the genuine
+ // article (closed roots return a ShadowRoot either way; we just want to
+ // keep our own reference to it).
     const root = original.call(this, init);
     try {
       newState.hostToRoot.set(this, root);
       if (mode === "closed") newState.closedCount++;
       else newState.openCount++;
       if (newState.debug) {
-        // Best-effort logging — never let a console call throw the patch.
+ // Best-effort logging — never let a console call throw the patch.
         try {
           console.info("[open-cowork-piercer] attachShadow", {
             tag: this.tagName?.toLowerCase() ?? "",
@@ -175,19 +182,19 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
   patched.__openCoworkPatched = true;
   patched.__openCoworkState = newState;
 
-  // Define with configurable + writable so the patch can be overridden by a
-  // page that detects it (best-effort, not a security boundary).
+ // Define with configurable + writable so the patch can be overridden by a
+ // page that detects it (best-effort, not a security boundary).
   Object.defineProperty(ELEMENT_CTOR.prototype, "attachShadow", {
     configurable: true,
     writable: true,
     value: patched,
   });
 
-  // Optionally walk the current document and record pre-existing open shadow
-  // roots (ones created before the piercer was installed). Closed roots
-  // created before install are unreachable — there's no way to recover them
-  // without the patch in place. This is why the MAIN-world injection must
-  // happen at document_start before page scripts run.
+ // Optionally walk the current document and record pre-existing open shadow
+ // roots (ones created before the piercer was installed). Closed roots
+ // created before install are unreachable — there's no way to recover them
+ // without the patch in place. This is why the MAIN-world injection must
+ // happen at document_start before page scripts run.
   if (opts.tagExisting) {
     try {
       const walker = document.createTreeWalker(document, NodeFilter.SHOW_ELEMENT);
@@ -199,8 +206,8 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
         }
       }
     } catch (err) {
-      // treeWalker may fail in exotic environments; fail silently in prod but
-      // surface it in debug builds so the feature's failure is observable.
+ // treeWalker may fail in exotic environments; fail silently in prod but
+ // surface it in debug builds so the feature's failure is observable.
       if (newState.debug) {
         try {
           console.warn("[open-cowork-piercer] tagExisting tree walk failed", err);
@@ -226,17 +233,27 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
   }
 }
 
+/** Backdoor tagged with the state it was directly built from (idempotency guard). */
+type TaggedBackdoor = ShadowPiercerBackdoor & { __openCoworkState?: PiercerState };
+
 /** Expose the backdoor on `window` so other worlds/code can read closed roots. */
 function bindBackdoor(s: PiercerState): void {
   if (typeof window === "undefined") return;
-  // Merge with any pre-existing backdoor instead of clobbering it. The MAIN-
-  // world injection captures the page's closed shadow roots into ITS state and
-  // publishes a backdoor here; if the content script (or a re-injection)
-  // re-binds, an unconditional overwrite would discard those captured roots
-  // and break piercing in production. The combined accessor reads BOTH the
-  // local state and any backdoor that was already on `window`.
-  const existing = (window as unknown as { __openCoworkPiercer__?: ShadowPiercerBackdoor }).__openCoworkPiercer__;
-  const backdoor: ShadowPiercerBackdoor = {
+ // Merge with any pre-existing backdoor instead of clobbering it. The MAIN-
+ // world injection captures the page's closed shadow roots into ITS state and
+ // publishes a backdoor here; if the content script (or a re-injection)
+ // re-binds, an unconditional overwrite would discard those captured roots
+ // and break piercing in production. The combined accessor reads BOTH the
+ // local state and any backdoor that was already on `window`.
+  const existing = (window as unknown as { __openCoworkPiercer__?: TaggedBackdoor }).__openCoworkPiercer__;
+
+ // Idempotency guard : if the live backdoor was already built from
+ // THIS SAME state, re-binding it would wrap itself — double-counting
+ // `stats()` and growing an unbounded backdoor wrapper chain on every
+ // re-install. The existing backdoor already reflects `s`, so bail out.
+  if (existing && existing.__openCoworkState === s) return;
+
+  const backdoor: TaggedBackdoor = {
     getShadowRoot: (host: Element): ShadowRoot | null =>
       s.hostToRoot.get(host) ?? existing?.getShadowRoot(host) ?? null,
     hasShadowRoot: (host: Element): boolean =>
@@ -250,8 +267,9 @@ function bindBackdoor(s: PiercerState): void {
       };
     },
   };
+  backdoor.__openCoworkState = s;
   try {
-    (window as unknown as { __openCoworkPiercer__?: ShadowPiercerBackdoor }).__openCoworkPiercer__ = backdoor;
+    (window as unknown as { __openCoworkPiercer__?: TaggedBackdoor }).__openCoworkPiercer__ = backdoor;
     (window as unknown as { __openCoworkPiercerInjected?: boolean }).__openCoworkPiercerInjected = true;
   } catch {
     /* window may be non-writable in some sandboxes — ignore */
@@ -266,44 +284,51 @@ function bindBackdoor(s: PiercerState): void {
  * roots captured by {@link installShadowPiercer}.
  *
  * Resolution order:
- *   1. `el.shadowRoot` — the open root (always accessible from the host).
- *   2. The module-local piercer state (if installed in this world).
- *   3. The cross-world backdoor `window.__openCoworkPiercer__` (set by a
- *      MAIN-world injection of this same module).
+ * 1. `el.shadowRoot` — the open root (always accessible from the host).
+ * 2. The module-local piercer state (if installed in this world).
+ * 3. The cross-world backdoor `window.__openCoworkPiercer__` (set by a
+ * MAIN-world injection of this same module).
  *
  * Returns `null` if no shadow root exists (or the piercer isn't installed
  * and the root is closed).
  */
 export function getShadowRoot(el: Element): ShadowRoot | null {
-  // Open shadow root — always accessible.
+ // Open shadow root — always accessible.
   try {
     if (el.shadowRoot) return el.shadowRoot;
   } catch {
     /* el.shadowRoot can throw on some implementations — fall through */
   }
-  // Closed shadow root — read from the module-local state if installed.
+ // Closed shadow root — read from the module-local state if installed.
   if (state) {
     const root = state.hostToRoot.get(el);
     if (root) return root;
   }
-  // Cross-world backdoor (MAIN-world injection set this on the shared window).
-  // The page's MAIN world can overwrite the backdoor, so treat its return value
-  // as untrusted: only accept a genuine `ShadowRoot` (or a node of the right
-  // `nodeType`), otherwise an attacker-supplied fake node would be walked by the
-  // extractor. Defense-in-depth against a fabricated-DOM injection.
+ // Cross-world backdoor (MAIN-world injection set this on the shared window).
+ // The page's MAIN world can overwrite the backdoor, so treat its return value
+ // as untrusted: only accept a genuine `ShadowRoot` (or a node of the right
+ // `nodeType`), otherwise an attacker-supplied fake node would be walked by the
+ // extractor. Defense-in-depth against a fabricated-DOM injection.
   if (typeof window !== "undefined") {
     const backdoor = (window as unknown as { __openCoworkPiercer__?: ShadowPiercerBackdoor }).__openCoworkPiercer__;
     if (backdoor) {
       try {
         const root = backdoor.getShadowRoot(el);
         if (root instanceof ShadowRoot) return root;
-        // Fallback check for environments where `ShadowRoot` isn't constructable
-        // for an `instanceof` test (nodeType 11 = DOCUMENT_FRAGMENT, which is
-        // what a ShadowRoot is).
+ // Cross-world / non-instanceof fallback: a genuine ShadowRoot is a
+ // DOCUMENT_FRAGMENT_NODE that ALSO exposes a `host` (the element it is
+ // attached to). Requiring `host` distinguishes a real ShadowRoot from a
+ // fabricated `DocumentFragment`, which lacks `host` — otherwise an
+ // attacker-supplied fake node (or a hostile page that overwrote the
+ // backdoor) could be walked by the extractor as if it were a shadow
+ // root (finding: backdoor validated too loosely / accepted any
+ // nodeType-11 node incl. DocumentFragment; content script trusts the
+ // page-controlled backdoor without validation).
         if (
           typeof Node !== "undefined" &&
           root &&
-          (root as Node).nodeType === (Node.DOCUMENT_FRAGMENT_NODE ?? 11)
+          (root as Node).nodeType === (Node.DOCUMENT_FRAGMENT_NODE ?? 11) &&
+          (root as { host?: unknown }).host
         ) {
           return root as unknown as ShadowRoot;
         }
@@ -351,35 +376,55 @@ export function isShadowHost(el: Element): boolean {
 export function pierceShadowRoots(root: Element | Document | ShadowRoot): Element[] {
   const out: Element[] = [];
   const visited = new Set<Node>();
-  walk(root);
-  return out;
+  const elementNodeType = typeof Node !== "undefined" ? Node.ELEMENT_NODE : 1;
 
-  function walk(node: Node): void {
-    if (!node || visited.has(node)) return;
+ // Iterative DFS with an explicit stack : a recursive walk overflows
+ // the call stack on pathologically deep shadow/light DOM trees. The explicit
+ // stack removes that limit, `visited` guards re-projected/cyclic nodes, and
+ // `MAX_PIERCE_DEPTH` caps descent so a truly unbounded tree can't run forever.
+  const stack: Array<{ node: Node; depth: number }> = [{ node: root, depth: 0 }];
+  while (stack.length > 0) {
+    const { node, depth } = stack.pop()!;
+    if (!node || visited.has(node)) continue;
     visited.add(node);
 
-    if (node.nodeType === (typeof Node !== "undefined" ? Node.ELEMENT_NODE : 1)) {
+    if (node.nodeType === elementNodeType) {
       out.push(node as Element);
     }
 
-    // Light-DOM children (works for Element, Document, ShadowRoot — all have
-    // `childNodes`). `Array.from` snapshots the live NodeList so mutation
-    // during the walk doesn't corrupt iteration.
+ // Stop descending past the depth cap, but keep processing the rest of the
+ // stack (already-queued siblings/subtrees are still emitted).
+    if (depth >= MAX_PIERCE_DEPTH) continue;
+
+ // Collect this node's descendants (light-DOM children, then shadow root),
+ // then push them in reverse so they pop in depth-first source order —
+ // matching the previous recursive traversal exactly.
+    const children: Node[] = [];
+
+ // Light-DOM children (works for Element, Document, ShadowRoot — all have
+ // `childNodes`). `Array.from` snapshots the live NodeList so mutation
+ // during the walk doesn't corrupt iteration.
     const childNodes = (node as { childNodes?: NodeListOf<ChildNode> }).childNodes;
     if (childNodes) {
       for (const child of Array.from(childNodes)) {
-        walk(child);
+        children.push(child);
       }
     }
 
-    // Shadow DOM — pierce both open and closed roots. Only Elements can be
-    // shadow hosts, so guard with an instanceof check (cheap and safe even
-    // when `Element` is undefined in non-DOM environments).
+ // Shadow DOM — pierce both open and closed roots. Only Elements can be
+ // shadow hosts, so guard with an instanceof check (cheap and safe even
+ // when `Element` is undefined in non-DOM environments).
     if (ELEMENT_CTOR && node instanceof ELEMENT_CTOR) {
       const sr = getShadowRoot(node);
-      if (sr) walk(sr);
+      if (sr) children.push(sr);
+    }
+
+    for (let i = children.length - 1; i >= 0; i--) {
+      stack.push({ node: children[i], depth: depth + 1 });
     }
   }
+
+  return out;
 }
 
 /**

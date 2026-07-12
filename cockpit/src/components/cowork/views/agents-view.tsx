@@ -20,14 +20,14 @@ export function AgentsView() {
   const { data: agents, isLoading: agentsLoading } = useAgents();
   const { data: tasks, isLoading: tasksLoading } = useAgentTasks();
 
-  // Prisma `Task.status` enum: 'pending' | 'running' | 'paused' |
-  // 'waiting-approval' | 'ready-to-resume' | 'done' | 'failed' | 'cancelled'.
-  // Count everything that isn't terminal as "pending" for the tab badge.
+ // Prisma `Task.status` enum: 'pending' | 'running' | 'paused' |
+ // 'waiting-approval' | 'ready-to-resume' | 'done' | 'failed' | 'cancelled'.
+ // Count everything that isn't terminal as "pending" for the tab badge.
   const TERMINAL = new Set(["done", "failed", "cancelled"]);
   const pending = (tasks ?? []).filter((t) => !TERMINAL.has(t.status));
-  // `createdAt` arrives as an ISO string (Prisma DateTime serialized over
-  // JSON). Coerce to ms before subtracting so the sort is stable regardless
-  // of whether the value is a number, ISO string, or Date.
+ // `createdAt` arrives as an ISO string (Prisma DateTime serialized over
+ // JSON). Coerce to ms before subtracting so the sort is stable regardless
+ // of whether the value is a number, ISO string, or Date.
   const recent = (tasks ?? []).slice().sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt));
 
   return (
@@ -102,10 +102,10 @@ export function AgentsView() {
               className="space-y-3"
             >
               {recent.map((t) => {
-                // `stepsJson` is a JSON-encoded string from Prisma (NOT an
-                // array). Parse defensively (default to [] on parse error)
-                // so a malformed row never crashes the whole view. Each step
-                // is `{ label: string; done: boolean }`.
+ // `stepsJson` is a JSON-encoded string from Prisma (NOT an
+ // array). Parse defensively (default to [] on parse error)
+ // so a malformed row never crashes the whole view. Each step
+ // is `{ label: string; done: boolean }`.
                 const steps = (() => {
                   const raw = (t as { stepsJson?: unknown }).stepsJson;
                   if (Array.isArray(raw)) return raw as { label?: string; done?: boolean }[];

@@ -2,9 +2,9 @@
 //
 // These tests are intentionally DB-free (no `prisma db push`, no live SQLite).
 // They guard the *contract* only:
-//   - F21: the string-typed "enums" have a documented, exact allowed-value set.
-//   - F22: HistoryEntry.url is @unique, so writes MUST upsert on url (never a
-//          raw create) or they throw P2002.
+// - F21: the string-typed "enums" have a documented, exact allowed-value set.
+// - F22: HistoryEntry.url is @unique, so writes MUST upsert on url (never a
+// raw create) or they throw P2002.
 //
 // We assert against literal arrays that mirror the inline enum comments in
 // prisma/schema.prisma, and re-validate those sets through an inline zod enum
@@ -63,8 +63,8 @@ const ENUM_ALLOWED_VALUES = {
     'cancelled',
   ],
   extensionSource: ['chrome-import', 'gallery', 'local'],
-  // trustLevel is a free String with no closed set enforced on SQLite; the
-  // known values observed in the codebase are listed here for documentation.
+ // trustLevel is a free String with no closed set enforced on SQLite; the
+ // known values observed in the codebase are listed here for documentation.
   extensionTrustLevel: ['unknown', 'low', 'medium', 'high'],
   pinboardLayout: ['default', 'spacious', 'dense'],
   pinboardBackground: ['dark', 'light'],
@@ -79,29 +79,33 @@ describe('F21 — string-typed enum allowed-value sets', () => {
     it(`${key} is a non-empty, distinct set of literal strings`, () => {
       expect(Array.isArray(values)).toBe(true);
       expect(values.length).toBeGreaterThan(0);
-      // Every value must be a non-empty string.
+ // Every value must be a non-empty string.
       for (const v of values) {
         expect(typeof v).toBe('string');
         expect(v.length).toBeGreaterThan(0);
       }
-      // No duplicates in the allowed set.
+ // No duplicates in the allowed set.
       expect(new Set(values).size).toBe(values.length);
     });
 
     it(`${key} validates via an inline zod enum (closed set)`, () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+ // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const schema = z.enum(values as any);
-      // A documented allowed value passes.
+ // A documented allowed value passes.
       expect(() => schema.parse(values[0])).not.toThrow();
-      // An out-of-contract value is rejected (this is what the API boundary
-      // should enforce, since SQLite does not enforce it).
+ // An out-of-contract value is rejected (this is what the API boundary
+ // should enforce, since SQLite does not enforce it).
       expect(() => schema.parse('__not_a_real_value__')).toThrow();
     });
 
     it(`${key} allowed values are present in prisma/schema.prisma`, () => {
-      // The source of truth documents the contract; guard against drift.
+ // The source of truth documents the contract; guard against drift.
+ // Match the *quoted* token (e.g. `'low'`) rather than a bare substring:
+ // a plain `toContain('low')` false-passes on unrelated words like
+ // "below"/"allowed" that merely contain the value as a substring. The
+ // schema documents every enum value as a single-quoted literal.
       for (const v of values) {
-        expect(schemaText).toContain(v);
+        expect(schemaText).toContain(`'${v}'`);
       }
     });
   });
@@ -118,16 +122,16 @@ describe('F22 — HistoryEntry.url @unique write contract', () => {
   });
 
   it('documents the upsert-only write contract (no raw create on url)', () => {
-    // The contract lives in the `// ─── History` section comment above the
-    // HistoryEntry model, so assert against the whole file content.
+ // The contract lives in the `// ─── History` section comment above the
+ // HistoryEntry model, so assert against the whole file content.
     expect(schemaText).toContain('WRITE CONTRACT');
     expect(schemaText).toContain('upsert');
     expect(schemaText).toContain('P2002');
   });
 
-  // Simulate the contract: a pure upsert-on-url helper must never call a raw
-  // create when the url already exists. This models the behavior the extension
-  // write path is required to follow.
+ // Simulate the contract: a pure upsert-on-url helper must never call a raw
+ // create when the url already exists. This models the behavior the extension
+ // write path is required to follow.
   it('upsert-on-url helper updates instead of throwing on revisit', () => {
     type Row = { url: string; visitCount: number; title: string };
     const store = new Map<string, Row>();
@@ -147,8 +151,8 @@ describe('F22 — HistoryEntry.url @unique write contract', () => {
     upsertHistory('https://example.com', 'Example');
     const second = upsertHistory('https://example.com', 'Example v2');
 
-    // A revisited URL does not create a duplicate row (which would be the P2002
-    // failure mode for a raw create) — it updates the existing row instead.
+ // A revisited URL does not create a duplicate row (which would be the P2002
+ // failure mode for a raw create) — it updates the existing row instead.
     expect(store.size).toBe(1);
     expect(second.visitCount).toBe(2);
     expect(second.title).toBe('Example v2');

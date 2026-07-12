@@ -21,26 +21,26 @@ type TaskStatus = (typeof ALLOWED_TASK_STATUSES)[number];
 
 export async function GET(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
-    // Cap `limit` to a hard max (parseLimit default 100, max 200) so a single
-    // authenticated GET can't pull the entire task table in one shot.
+ // Cap `limit` to a hard max (parseLimit default 100, max 200) so a single
+ // authenticated GET can't pull the entire task table in one shot.
     const limit = parseLimit(req);
     const status = req.nextUrl.searchParams.get('status');
     const agentId = req.nextUrl.searchParams.get('agentId') || undefined;
-    // Reject junk `status` values with 400 instead of silently returning an
-    // empty set. Prisma parameterizes the input (not an injection risk), but an
-    // unvalidated string yields a confusing empty result for non-matching input.
-    // An absent or empty param (`?status=` or no param) falls back to "no
-    // filter", preserving the prior `|| undefined` behaviour.
+ // Reject junk `status` values with 400 instead of silently returning an
+ // empty set. Prisma parameterizes the input (not an injection risk), but an
+ // unvalidated string yields a confusing empty result for non-matching input.
+ // An absent or empty param (`?status=` or no param) falls back to "no
+ // filter", preserving the prior `|| undefined` behaviour.
     if (status !== null && status !== '' && !ALLOWED_TASK_STATUSES.includes(status as TaskStatus)) {
       return badRequest(
         `Invalid status "${status}"; allowed values: ${ALLOWED_TASK_STATUSES.join(', ')}`,
       );
     }
-    // AND-combine filters so `?status=running&agentId=agent-7`
-    // returns tasks for agent-7 that are running (previously the exclusive
-    // if/else if silently dropped `agentId` whenever `status` was present).
-    // Building the `where` object conditionally keeps the empty-object case
-    // (no filters) equivalent to `findMany({})` — same as the prior fallback.
+ // AND-combine filters so `?status=running&agentId=agent-7`
+ // returns tasks for agent-7 that are running (previously the exclusive
+ // if/else if silently dropped `agentId` whenever `status` was present).
+ // Building the `where` object conditionally keeps the empty-object case
+ // (no filters) equivalent to `findMany({})` — same as the prior fallback.
     const where: { status?: string; agentId?: string } = {};
     if (status) where.status = status;
     if (agentId) where.agentId = agentId;

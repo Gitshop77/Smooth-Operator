@@ -16,9 +16,60 @@ import { PROVIDER_META, DEFAULT_PROVIDER_ID, catalogIdFor } from "./providers";
  * the message is shown in the UI. A provider error string can include the full
  * key (e.g. `401: Invalid API key: sk-ant-api03-...`), which must not be
  * surfaced verbatim. Non-key error text is returned unchanged.
+ *
+ * The allowlist is derived from the provider catalog (`PROVIDER_META`) so a new
+ * or custom provider's key prefix is covered automatically (finding:
+ * redactKeyLeak was a fixed allowlist not derived from PROVIDERS, so new/custom
+ * provider keys could leak). Well-known global prefixes that aren't tied to a
+ * single catalog entry (GitHub PATs, JWTs, AWS, Slack, GitLab, generic `sk-` /
+ * `sk-ant-`) are kept as a base set.
  */
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Base key patterns not derivable from a single catalog placeholder. */
+const BASE_KEY_PATTERNS = [
+  "sk-ant-[A-Za-z0-9_-]+",
+  "sk-[A-Za-z0-9_-]+",
+  "AIza[A-Za-z0-9_-]+",
+  "ya29\\.[A-Za-z0-9_-]+",
+  "ghp_[A-Za-z0-9_-]+",
+  "gho_[A-Za-z0-9_-]+",
+  "ghu_[A-Za-z0-9_-]+",
+  "ghs_[A-Za-z0-9_-]+",
+  "ghr_[A-Za-z0-9_-]+",
+  "github_pat_[A-Za-z0-9_-]+",
+  "glpat-[A-Za-z0-9_-]+",
+  "gsk_[A-Za-z0-9_-]+",
+  "xoxb-[A-Za-z0-9_-]+",
+  "xoxp-[A-Za-z0-9_-]+",
+  "xoxa-[A-Za-z0-9_-]+",
+  "xoxs-[A-Za-z0-9_-]+",
+  "AKIA[0-9A-Z]{16}",
+ // JWT: mask the ENTIRE token (header.payload.signature), not just the header.
+  "eyJ[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*",
+];
+
+/** Derive concrete key prefixes from provider placeholders (e.g. `sk-ant-api03-...` → `sk-ant-`). */
+function providerKeyPrefixes(): string[] {
+  const out = new Set<string>();
+  for (const p of Object.values(PROVIDER_META)) {
+    const ph = p.keyPlaceholder;
+    if (!ph || ph === "...") continue;
+    const m = /^[A-Za-z0-9_-]+/.exec(ph);
+    if (!m) continue;
+    const prefix = m[0];
+ // Skip obviously non-secret placeholders (provider labels, not keys).
+    if (prefix === "ollama" || prefix === "your-opencode-key") continue;
+    out.add(escapeRegex(prefix) + "[A-Za-z0-9_-]+");
+  }
+  return [...out];
+}
+
+const KEY_RE = new RegExp("(" + [...providerKeyPrefixes(), ...BASE_KEY_PATTERNS].join("|") + ")", "g");
+
 export function redactKeyLeak(s: string): string {
-  const KEY_RE = /(sk-ant-[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+|AIza[A-Za-z0-9_-]+|ya29\.[A-Za-z0-9_-]+|ghp_[A-Za-z0-9_-]+|gho_[A-Za-z0-9_-]+|ghu_[A-Za-z0-9_-]+|ghs_[A-Za-z0-9_-]+|ghr_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+|glpat-[A-Za-z0-9_-]+|gsk_[A-Za-z0-9_-]+|xox[baprs]-[A-Za-z0-9_-]+|xai-[A-Za-z0-9_-]+|eyJ[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*|AKIA[0-9A-Z]{16})/g;
   return s.replace(KEY_RE, (m) => {
     const dash = m.indexOf("-");
     const prefix = dash > 0 ? m.slice(0, dash + 1) : m.slice(0, 4);
@@ -31,16 +82,19 @@ export function redactKeyLeak(s: string): string {
 let lastProvider = "";
 
 /**
- * Update the connection-tab UI based on the selected provider. On initial load
- * (lastProvider === ""), only fill if the field is empty (preserving any saved
- * custom URL). On provider change, always replace.
+ * Update the connection-tab UI based on the selected provider. The default
+ * baseUrl is shown as a *placeholder* only. On a genuine provider change the
+ * field is reset to the new provider's default; on initial load we preserve
+ * whatever was loaded from storage — including an intentionally-cleared (empty)
+ * baseUrl, which should fall back to the provider's built-in endpoint rather
+ * than be silently replaced by the default here.
  */
 export function updateProviderUI(): void {
   const provider = ($("provider") as HTMLSelectElement).value;
   const meta = PROVIDER_META[provider] || PROVIDER_META[DEFAULT_PROVIDER_ID];
-  // A *real* provider change (vs. the initial call) is what may carry a stale
-  // baseUrl from the previous provider. Track the last provider so we can tell
-  // the two apart instead of clobbering a user's custom URL on first paint.
+ // A *real* provider change (vs. the initial call) is what may carry a stale
+ // baseUrl from the previous provider. Track the last provider so we can tell
+ // the two apart instead of clobbering a user's custom URL on first paint.
   const providerChanged = lastProvider !== "" && lastProvider !== provider;
   lastProvider = provider;
   ($("provider-hint") as HTMLElement).textContent = meta.hint;
@@ -56,19 +110,20 @@ export function updateProviderUI(): void {
   if (meta.defaultBaseUrl) {
     baseUrlLabel.classList.remove("is-hidden");
     baseUrlInput.placeholder = meta.defaultBaseUrl;
-    // On a genuine provider change, always swap in the NEW provider's default
-    // baseUrl — the previous provider's custom URL must not leak to it (that
-    // would send requests to the wrong endpoint). Otherwise only fill the
-    // default when the field is empty, so a user-set custom baseUrl on the
-    // SAME provider is preserved.
-    if (providerChanged || !baseUrlInput.value) {
+ // Only overwrite the field on a genuine provider change. On initial load
+ // we must preserve whatever was loaded from storage — including an
+ // intentionally-cleared (empty) baseUrl, which should fall back to the
+ // provider's built-in endpoint rather than be silently replaced by the
+ // default here (finding: updateProviderUI overwrote an empty saved baseUrl
+ // with the provider default on load).
+    if (providerChanged) {
       baseUrlInput.value = meta.defaultBaseUrl;
     }
   } else {
     baseUrlLabel.classList.add("is-hidden");
     baseUrlInput.placeholder = "";
-    // Providers without a default have no canonical endpoint — clear any
-    // leftover value from a previous provider so it isn't sent by mistake.
+ // Providers without a default have no canonical endpoint — clear any
+ // leftover value from a previous provider so it isn't sent by mistake.
     if (providerChanged) baseUrlInput.value = "";
   }
 }
@@ -83,10 +138,10 @@ $("testConnection")?.addEventListener("click", async () => {
   testResult.textContent = "Testing…";
 
   const provider = ($("provider") as HTMLSelectElement).value;
-  // SECURITY: apiKey is read from the form here for a one-shot test. It
-  // originates from chrome.storage.local (UNENCRYPTED, MV3 has no secret
-  // store). Prefer OAuth where supported; never console.log it. Errors surfaced
-  // below go through redactKeyLeak.
+ // SECURITY: apiKey is read from the form here for a one-shot test. It
+ // originates from chrome.storage.local (UNENCRYPTED, MV3 has no secret
+ // store). Prefer OAuth where supported; never console.log it. Errors surfaced
+ // below go through redactKeyLeak.
   const apiKey = ($("apiKey") as HTMLInputElement).value;
   const model = ($("model") as HTMLInputElement).value;
   const baseUrl = ($("baseUrl") as HTMLInputElement).value;
@@ -118,8 +173,8 @@ $("testConnection")?.addEventListener("click", async () => {
       : "✗ Empty response from provider.";
   } catch (e) {
     testResult.className = "test-result failure";
-    // Redact BEFORE truncating so a key that appears past the first 100 chars is
-    // still masked (previously the slice ran first and leaked it).
+ // Redact BEFORE truncating so a key that appears past the first 100 chars is
+ // still masked (previously the slice ran first and leaked it).
     const raw = e instanceof Error ? e.message : String(e);
     testResult.textContent = `✗ ${redactKeyLeak(raw).slice(0, 240)}`;
   } finally {
@@ -155,7 +210,7 @@ export async function populateModelSuggestions(): Promise<void> {
       }
     }
   } catch (e) {
-    // Catalog not available — datalist stays empty, user types manually
+ // Catalog not available — datalist stays empty, user types manually
     console.warn("[options] model suggestions failed:", e);
   }
 }
@@ -174,7 +229,7 @@ $("model")?.addEventListener("input", () => {
     try {
       const { searchModels, formatCost, formatContext, formatVision } = await import("../../lib/agent/llm/catalog");
       const results = await searchModels(query, 10);
-      // A newer keystroke has superseded this search — drop the stale result.
+ // A newer keystroke has superseded this search — drop the stale result.
       if (myToken !== modelSearchToken) return;
       if (results.length === 0) {
         resultsDiv.classList.add("is-hidden");

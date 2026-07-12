@@ -3,10 +3,10 @@
  * a reference answer.
  *
  * Three matching modes (mirroring the canonical benchmark pattern):
- *   - `exact_match(ref, pred)` — case-insensitive, strips surrounding quotes.
- *   - `must_include(ref, pred)` — substring check; supports ` |OR| `
- *     alternatives (the prediction must contain ANY one of the alternatives).
- *   - `regex_match(ref, pred)` — `ref` treated as a regular expression.
+ * - `exact_match(ref, pred)` — case-insensitive, strips surrounding quotes.
+ * - `must_include(ref, pred)` — substring check; supports ` |OR| `
+ * alternatives (the prediction must contain ANY one of the alternatives).
+ * - `regex_match(ref, pred)` — `ref` treated as a regular expression.
  *
  * Scores multiply across all entries in `referenceAnswers`: 1.0 only if every
  * entry passes. The evaluator is fully deterministic (no LLM call) — it is
@@ -18,6 +18,15 @@
 
 /** Tag used by {@link StringEvaluator} when surfacing which check failed. */
 export const STRING_EVALUATOR_TAG = "string_match";
+
+/**
+ * Maximum prediction length fed to a `regex` match. Config-supplied patterns
+ * are already validated/length-capped/bounded against catastrophic constructs
+ * by the schema, but large inputs still widen the ReDoS window — capping the
+ * subject bounds the worst case. Predictions longer than this are matched
+ * against their prefix only.
+ */
+const MAX_REGEX_INPUT_CHARS = 200_000;
 
 /** A single reference-answer entry — one of three matching modes. */
 export interface StringReferenceAnswer {
@@ -34,9 +43,9 @@ export interface StringEvaluatorInput {
   /** One or more reference answers; the overall score is the product. */
   referenceAnswers: StringReferenceAnswer[];
   /**
-   * When true, `must_include` performs word-boundary matching to avoid
-   * false positives like `ref="0"` matching `"10"`. Default `false`.
-   */
+ * When true, `must_include` performs word-boundary matching to avoid
+ * false positives like `ref="0"` matching `"10"`. Default `false`.
+ */
   tokenize?: boolean;
 }
 
@@ -98,9 +107,9 @@ export function mustInclude(ref: string, pred: string, tokenize = false): number
   if (alternatives.length === 0) return 1;
   if (tokenize && alternatives.every((a) => /^\S+$/.test(a))) {
     const tokens = cp.split(/\s+/);
-    return alternatives.every((a) => tokens.includes(a)) ? 1 : 0;
+    return alternatives.some((a) => tokens.includes(a)) ? 1 : 0;
   }
-  return alternatives.every((a) => cp.includes(a)) ? 1 : 0;
+  return alternatives.some((a) => cp.includes(a)) ? 1 : 0;
 }
 
 /**
@@ -152,10 +161,17 @@ export class StringEvaluator {
           cur = mustInclude(ref.ref, input.prediction, input.tokenize);
           break;
         case "regex": {
-          // Invalid regex pattern — treat as no match (don't crash).
+ // Invalid regex pattern — treat as no match (don't crash).
           try {
             const re = new RegExp(ref.ref, "i");
-            cur = re.test(input.prediction) ? 1 : 0;
+ // Bound the subject length to limit ReDoS exposure (see
+ // MAX_REGEX_INPUT_CHARS). The schema already rejects the worst
+ // nested-quantifier patterns and caps pattern length.
+            const subject =
+              input.prediction.length > MAX_REGEX_INPUT_CHARS
+                ? input.prediction.slice(0, MAX_REGEX_INPUT_CHARS)
+                : input.prediction;
+            cur = re.test(subject) ? 1 : 0;
           } catch {
             cur = 0;
           }

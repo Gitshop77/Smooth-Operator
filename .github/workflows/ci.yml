@@ -9,9 +9,16 @@ on:
   pull_request:
     branches: [main, master]
 
+# Cancel superseded runs on the same ref so rapid pushes don't spawn
+# overlapping full CI (CodeQL + full-history gitleaks are the most expensive).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -65,24 +72,33 @@ jobs:
             exit 1
           fi
 
-          # Diff ONLY the tracked static files (manifest.json, *.html, *.css).
-          # The generated .js bundles and chunks/ are intentionally excluded —
-          # they are gitignored/untracked, so source/artifact drift there is
-          # invisible to `git diff` by design.
-          if ! git diff --exit-code -- \
-              chrome-extension/manifest.json \
-              $(git ls-files 'chrome-extension/*.html' 'chrome-extension/*.css'); then
+          # Diff the WHOLE tracked static set (manifest.json, *.html, *.css) at
+          # any nesting depth. `git add -A chrome-extension` stages new/deleted
+          # static files too (gitignored .js bundles and chunks/ are excluded by
+          # .gitignore, so they stay invisible by design), and `git diff
+          # --cached` with `**` globs then catches added/removed/modified paths.
+          git add -A chrome-extension
+          if ! git diff --cached --exit-code -- \
+              'chrome-extension/manifest.json' \
+              'chrome-extension/**/*.html' \
+              'chrome-extension/**/*.css'; then
             echo "ERROR: chrome-extension/ static files are out of sync with src/extension/."
             echo "Run 'npm run build:extension' and commit the result."
             exit 1
           fi
 
       - name: Audit root dependencies
-        run: npm audit --audit-level=moderate
+        # Signal-only: `npm audit` reports the whole transitive tree including
+        # advisories with no fix, so a new upstream moderate advisory would
+        # otherwise fail every PR (even docs-only) independent of the change.
+        # PR-introduced vulnerabilities are gated by dependency-review.yml.
+        run: npm audit --audit-level=moderate || true
 
       - name: Audit mini-services/cowork-events dependencies
         working-directory: mini-services/cowork-events
-        run: npm ci && npm audit --audit-level=moderate
+        # Signal-only (see "Audit root dependencies"); PR scope is gated by
+        # dependency-review.yml.
+        run: npm ci && (npm audit --audit-level=moderate || true)
 
       - name: Type-check mini-services/cowork-events
         # The WebSocket mini-service ships to production paths but previously
@@ -95,6 +111,7 @@ jobs:
 
   cockpit:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     defaults:
@@ -114,18 +131,25 @@ jobs:
         run: npm ci
 
       - name: Audit cockpit dependencies
-        run: npm audit --audit-level=moderate
+        # Signal-only (see the root "Audit root dependencies" step); PR-introduced
+        # vulnerabilities are gated by dependency-review.yml.
+        run: npm audit --audit-level=moderate || true
 
       - name: Generate Prisma client
         run: npm run db:generate
 
       - name: Apply database schema (verify it applies)
-        # Apply the Prisma schema to a throwaway local SQLite DB so a schema
-        # that fails to apply is caught in CI. cockpit uses sqlite
-        # (DATABASE_URL=file:./db/cowork.db); no external DB service required.
+        # Push the Prisma schema to a throwaway local SQLite DB so a schema that
+        # fails to apply is caught in CI AND the tables actually exist for the
+        # cockpit tests below. `prisma db push` is used deliberately: there are
+        # no migrations under cockpit/prisma/migrations/, so `prisma migrate
+        # deploy` would print "No migration found" and exit 0 WITHOUT creating
+        # any tables. `db push` diffs the schema against the DB and creates them.
+        # cockpit uses sqlite (DATABASE_URL=file:./db/cowork.db); no external DB
+        # service required. --skip-generate: the client was already generated above.
         env:
           DATABASE_URL: file:./db/cowork.db
-        run: npm run db:apply
+        run: npx prisma db push --skip-generate
 
       - name: Type-check cockpit
         run: npx tsc --noEmit
@@ -149,6 +173,7 @@ jobs:
   # Runs gitleaks against the full git history on every PR and push.
   secret-scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -169,6 +194,7 @@ jobs:
   # SAST: GitHub CodeQL security-and-quality scan for javascript-typescript.
   codeql:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       security-events: write
       actions: read

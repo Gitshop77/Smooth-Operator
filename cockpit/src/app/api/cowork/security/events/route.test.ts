@@ -3,12 +3,12 @@
  *
  * GET lists persisted security events (Prisma-backed). We mock `@/lib/db` so no
  * real DB is needed, and assert:
- *   - a well-formed request returns 200 with events projected onto the legacy
- *     shape (`createdAt` → `timestamp`, `details` → `description`);
- *   - a `severity` filter is forwarded to `db.securityEvent.findMany`;
- *   - the `limit` query param is capped (defense against full-table dumps);
- *   - auth is enforced by the middleware (covered in `auth-contract.test.ts`,
- *     but asserted here too for completeness of this route's contract).
+ * - a well-formed request returns 200 with events projected onto the legacy
+ * shape (`createdAt` → `timestamp`, `details` → `description`);
+ * - a `severity` filter is forwarded to `db.securityEvent.findMany`;
+ * - the `limit` query param is capped (defense against full-table dumps);
+ * - auth is enforced by the middleware (covered in `auth-contract.test.ts`,
+ * but asserted here too for completeness of this route's contract).
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -57,7 +57,7 @@ describe('GET /api/cowork/security/events', () => {
     const e = body.events[0];
     expect(e.timestamp).toBe('2025-01-01T00:00:00.000Z');
     expect(e.description).toBe('suspicious navigation');
-    // The raw Prisma fields are still present (spread) + projected aliases.
+ // The raw Prisma fields are still present (spread) + projected aliases.
     expect(e.severity).toBe('high');
   });
 

@@ -14,11 +14,11 @@ export async function handleLoadSkill(
   _ctx: ActionContext,
   action: Extract<Action, { type: "load_skill" }>,
 ): Promise<ActionResult> {
-  // Pull the full instruction body for the named skill from the skill
-  // registry. The body is returned as `extractedContent` so the next
-  // navigator step sees the full tips + shortcuts + dangerous-actions
-  // list in its history. Cheap (no DOM access, no page mutation) —
-  // safe to call in every mode.
+ // Pull the full instruction body for the named skill from the skill
+ // registry. The body is returned as `extractedContent` so the next
+ // navigator step sees the full tips + shortcuts + dangerous-actions
+ // list in its history. Cheap (no DOM access, no page mutation) —
+ // safe to call in every mode.
   const body = await getFullSkill(action.name);
   if (!body) {
     return {

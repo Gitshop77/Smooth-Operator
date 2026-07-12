@@ -16,8 +16,8 @@ import {
 import type { Catalog } from "../src/lib/agent/llm/catalog";
 
 describe("getPricingForModel — uncatalogued models are never free", () => {
-  // Stub fetch to a benign empty catalog so the fire-and-forget catalog load
-  // triggered here is a no-op (deterministic, no network).
+ // Stub fetch to a benign empty catalog so the fire-and-forget catalog load
+ // triggered here is a no-op (deterministic, no network).
   beforeEach(() => {
     vi.stubGlobal(
       "fetch",
@@ -32,7 +32,7 @@ describe("getPricingForModel — uncatalogued models are never free", () => {
     const rate = getPricingForModel("totally-unknown-model-xyz-123");
     expect(rate.in).toBeGreaterThan(0);
     expect(rate.out).toBeGreaterThan(0);
-    // It must equal the conservative default (not the old { in: 0, out: 0 }).
+ // It must equal the conservative default (not the old { in: 0, out: 0 }).
     expect(rate.in).toBe(CONSERVATIVE_DEFAULT_PRICING.in);
     expect(rate.out).toBe(CONSERVATIVE_DEFAULT_PRICING.out);
   });
@@ -107,7 +107,7 @@ describe("refreshPricingFromCatalog — COWORK_MODEL_CATALOG_URL override (F-02b
     const rate = getPricingForModel("acme-ultra");
     expect(rate.in).toBe(1);
     expect(rate.out).toBe(2);
-    // Catalog-sourced rates are NOT flagged uncatalogued.
+ // Catalog-sourced rates are NOT flagged uncatalogued.
     expect(rate.uncatalogued).toBeUndefined();
   });
 
@@ -247,17 +247,17 @@ describe("Catalog-driven pricing accuracy (replaces static-table)", () => {
   });
 
   test("catalog does NOT set a reasoning rate (falls back to out)", () => {
-    // models.dev has no reasoning-cost field, so reasoning tokens fall back to
-    // the output rate in estimateCost.
-    // 1M in + 1M out (all reasoning) -> 2 + 8 = 10 (reasoning at output rate).
+ // models.dev has no reasoning-cost field, so reasoning tokens fall back to
+ // the output rate in estimateCost.
+ // 1M in + 1M out (all reasoning) -> 2 + 8 = 10 (reasoning at output rate).
     expect(estimateCost("o3", 1_000_000, 1_000_000, 1_000_000)).toBeCloseTo(10, 6);
   });
 });
 
 describe("cache_write is mapped and billed (cache_creation fix)", () => {
-  // A synthetic provider/model whose cache_write rate is LOWER than its input
-  // rate, so billing the write tokens at the cacheWrite rate is provably less
-  // than billing them at the full input rate.
+ // A synthetic provider/model whose cache_write rate is LOWER than its input
+ // rate, so billing the write tokens at the cacheWrite rate is provably less
+ // than billing them at the full input rate.
   const CACHE_WRITE_CATALOG: Catalog = {
     testprovider: {
       id: "testprovider",
@@ -278,9 +278,9 @@ describe("cache_write is mapped and billed (cache_creation fix)", () => {
   };
 
   beforeEach(async () => {
-    // Use the COWORK_MODEL_CATALOG_URL path so refreshPricingFromCatalog parses
-    // THIS catalog directly (bypassing fetchCatalog's cross-test in-memory cache,
-    // which would otherwise serve a stale catalog from an earlier test).
+ // Use the COWORK_MODEL_CATALOG_URL path so refreshPricingFromCatalog parses
+ // THIS catalog directly (bypassing fetchCatalog's cross-test in-memory cache,
+ // which would otherwise serve a stale catalog from an earlier test).
     process.env.COWORK_MODEL_CATALOG_URL = "https://fake.test/cw.json";
     vi.stubGlobal(
       "fetch",
@@ -294,16 +294,16 @@ describe("cache_write is mapped and billed (cache_creation fix)", () => {
   });
 
   test("cache_write tokens are billed at the cacheWrite rate (not the full input rate)", () => {
-    // All 1M input tokens are cache-writes. Billed at cacheWrite (2) => 2.
+ // All 1M input tokens are cache-writes. Billed at cacheWrite (2) => 2.
     const cost = estimateCost("cw-model", 1_000_000, 0, 0, 0, 1_000_000);
     expect(cost).toBeCloseTo(2, 6);
-    // 2 < billing those tokens at the full input rate of 10.
+ // 2 < billing those tokens at the full input rate of 10.
     expect(cost).toBeLessThan((1_000_000 / 1_000_000) * 10);
-    // With no cache-write tokens, the 1M fresh input is billed at the full
-    // input rate (10), NOT zero — cache-write absence doesn't void the input.
+ // With no cache-write tokens, the 1M fresh input is billed at the full
+ // input rate (10), NOT zero — cache-write absence doesn't void the input.
     expect(estimateCost("cw-model", 1_000_000, 0, 0, 0, 0)).toBeCloseTo(10, 6);
-    // Supplying cache-write tokens makes the cost strictly less than billing
-    // all 1M input fresh at the full input rate (the cache_creation discount).
+ // Supplying cache-write tokens makes the cost strictly less than billing
+ // all 1M input fresh at the full input rate (the cache_creation discount).
     expect(estimateCost("cw-model", 1_000_000, 0, 0, 0, 1_000_000)).toBeLessThan(
       estimateCost("cw-model", 1_000_000, 0, 0, 0, 0),
     );

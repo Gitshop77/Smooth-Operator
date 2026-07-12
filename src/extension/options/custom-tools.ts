@@ -8,12 +8,19 @@
  *
  * P3: delete confirmation + validation errors use the styled modal; the Tools
  * tab also renders the extension's manifest permission set as badges.
+ *
+ * TRUST BOUNDARY: the `code` string is persisted to `chrome.storage.local` and
+ * executed by the agent runtime (via the `evaluate` action) in the extension's
+ * privileged context. Any actor that can write that storage key — a second
+ * extension with overlapping access, a synced/compromised profile, or XSS in a
+ * linked page — can plant executable JavaScript. There is deliberately no
+ * source allow-list, signature, or sandbox here; treat the custom-tools store
+ * as a high-trust, developer-only surface, not end-user-friendly storage.
  */
 
 import { $, escapeHtml } from "@/extension/shared";
 import { CUSTOM_TOOL_NAME_REGEX } from "@/lib/agent/tools/registry";
-import { STORAGE_KEYS } from "./settings-sync";
-import { showSaved } from "./settings-sync";
+import { STORAGE_KEYS, showSaved } from "./settings-sync";
 import { confirmModal, alertModal } from "./modal";
 
 /** A user-defined custom tool. */
@@ -37,7 +44,7 @@ const CODE_MAX = 50_000;
 let mutationQueue: Promise<unknown> = Promise.resolve();
 function serialize<T>(task: () => Promise<T>): Promise<T> {
   const run = mutationQueue.then(task, task);
-  // Swallow rejections so one failed mutation doesn't poison the queue.
+ // Swallow rejections so one failed mutation doesn't poison the queue.
   mutationQueue = run.then(
     () => undefined,
     () => undefined,
@@ -82,6 +89,13 @@ async function readCustomTools(): Promise<CustomToolEntry[]> {
 
 async function writeCustomTools(tools: CustomToolEntry[]): Promise<void> {
   await chrome.storage.local.set({ [STORAGE_KEYS.customTools]: tools });
+ // Surface a storage failure instead of silently dropping the write. In MV3
+ // the promise form usually rejects, but checking `lastError` is defensive
+ // belt-and-suspenders so a failed persist isn't mistaken for success.
+  const err = chrome.runtime.lastError;
+  if (err) {
+    throw new Error(`Failed to persist custom tools: ${err.message}`);
+  }
 }
 
 /** Render the manifest permission set as badges (read-only, informational). */
@@ -102,7 +116,7 @@ async function renderToolPermissions(): Promise<void> {
     host.innerHTML = '<p class="empty-hint">No manifest permissions declared.</p>';
     return;
   }
-  // Use the project-standard sanitizer rather than the ad-hoc `<`-only replace.
+ // Use the project-standard sanitizer rather than the ad-hoc `<`-only replace.
   host.innerHTML = permissions
     .map((p) => `<span class="perm-badge">${escapeHtml(p)}</span>`)
     .join("");
@@ -141,8 +155,8 @@ export async function renderTools(): Promise<void> {
           danger: true,
         });
         if (!ok) return;
-        // Delete by index, not by name, so a pre-existing duplicate name
-        // cannot mass-delete sibling entries.
+ // Delete by index, not by name, so a pre-existing duplicate name
+ // cannot mass-delete sibling entries.
         const current = await readCustomTools();
         current.splice(index, 1);
         await writeCustomTools(current);
@@ -159,7 +173,9 @@ export async function renderTools(): Promise<void> {
     item.appendChild(code);
     list.appendChild(item);
   });
-  await renderToolPermissions();
+ // `renderToolPermissions` is invoked once at module load (the manifest
+ // permission set is static and doesn't change when tools are added/deleted),
+ // so it is intentionally NOT re-rendered here — avoids a redundant call.
 }
 
 $("addTool").addEventListener("click", () => {
@@ -202,8 +218,8 @@ $("addTool").addEventListener("click", () => {
       return;
     }
     const tools = await readCustomTools();
-    // Enforce name uniqueness: overwrite the existing entry instead of adding a
-    // second one, so delete-by-name (and delete-by-index) stays safe.
+ // Enforce name uniqueness: overwrite the existing entry instead of adding a
+ // second one, so delete-by-name (and delete-by-index) stays safe.
     const idx = tools.findIndex((t) => t.name === name);
     const entry: CustomToolEntry = { name, description, code, createdAt: Date.now() };
     if (idx >= 0) {

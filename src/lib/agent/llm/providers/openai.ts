@@ -57,9 +57,9 @@ export function makeOpenAIChatFacade<P extends Protocol<any, any, any, any> = Pr
   };
 
   function configure(input: Config = {}): OpenAIChatFacadeConfigure {
-    // (SSRF guard): validate any user-supplied baseURL override before
-    // building the route/endpoint. The trusted default is exempt.
-    assertSafeUserBaseURL(input.baseURL);
+ // (SSRF guard): validate any user-supplied baseURL override before
+ // building the route/endpoint. The trusted default is exempt.
+    assertSafeUserBaseURL(input.baseURL, def.id);
     const route = make({
       id: def.routeId,
       provider: def.id,
@@ -80,6 +80,11 @@ export function makeOpenAIChatFacade<P extends Protocol<any, any, any, any> = Pr
       providerId: def.id,
       providerDisplayName: def.displayName,
       model: config.model,
+ // `supportsVision` defaults to `true`; the authoritative per-model value is
+ // patched by the catalog layer (`buildProvider`) after default resolution, so
+ // a model id absent from the catalog is reported as vision-capable. This matches
+ // Anthropic's facade pattern (which gates legacy models) — the catalog is the
+ // single source of truth and must cover every model these facades can serve.
       supportsVision: true,
       supportsStructuredOutput: true,
       configureResult: configure(config),

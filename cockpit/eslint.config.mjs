@@ -8,7 +8,7 @@ const __dirname = dirname(__filename);
 
 const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
   rules: {
-    // General JavaScript rules — keep the rules that catch real bugs.
+ // General JavaScript rules — keep the rules that catch real bugs.
     "prefer-const": "error",
     "no-unused-vars": "off", // handled by @typescript-eslint/no-unused-vars below
     "no-console": "off",
@@ -23,11 +23,9 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "no-unreachable": "error",
     "no-useless-escape": "warn",
     "no-dupe-keys": "error",
-  },
-}, {
-  rules: {
-    // TypeScript rules — keep the high-signal ones as warnings so they
-    // surface real issues without blocking the build on style nits.
+
+ // TypeScript rules — keep the high-signal ones as warnings so they
+ // surface real issues without blocking the build on style nits.
     "@typescript-eslint/no-unused-vars": [
       "warn",
       { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" },
@@ -35,10 +33,8 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "@typescript-eslint/no-explicit-any": "warn",
     "@typescript-eslint/no-non-null-assertion": "warn",
     "@typescript-eslint/ban-ts-comment": "warn",
-  },
-}, {
-  // React rules — keep exhaustive-deps (catches stale-closure bugs).
-  rules: {
+
+ // React rules — keep exhaustive-deps (catches stale-closure bugs).
     "react-hooks/exhaustive-deps": "warn",
     "react-hooks/set-state-in-effect": "warn",
     "react-hooks/purity": "warn",

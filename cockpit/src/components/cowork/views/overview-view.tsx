@@ -89,7 +89,7 @@ function lastNDaysBuckets(tasks: SampleTask[], days: number): number[] {
     const ms = toTime(t.createdAt);
     if (!Number.isFinite(ms)) continue;
     const dayIdx = Math.floor((ms - startOfToday) / dayMs);
-    // dayIdx is 0 for today, -1 for yesterday, -2 for two days ago, etc.
+ // dayIdx is 0 for today, -1 for yesterday, -2 for two days ago, etc.
     const bucketPos = days - 1 + dayIdx; // today is the last bucket
     if (bucketPos >= 0 && bucketPos < days) buckets[bucketPos] += 1;
   }
@@ -179,7 +179,7 @@ export function OverviewView() {
   const dayMs = 86_400_000;
   const now = Date.now();
 
-  // ─── KPI derivations ────────────────────────────────────────────────────
+ // ─── KPI derivations ────────────────────────────────────────────────────
   const runs7d = React.useMemo(
     () => tasksList.filter((t) => now - toTime(t.createdAt) <= 7 * dayMs),
     [tasksList, now],
@@ -214,7 +214,7 @@ export function OverviewView() {
     [eventsList],
   );
 
-  // ─── Recent lists ───────────────────────────────────────────────────────
+ // ─── Recent lists ───────────────────────────────────────────────────────
   const recentRuns = React.useMemo(
     () =>
       [...tasksList]

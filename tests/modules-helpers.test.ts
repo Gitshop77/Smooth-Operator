@@ -1,10 +1,10 @@
 /**
  * Smoke tests for four unrelated modules whose public APIs aren't big enough
  * to warrant a dedicated test file each:
- *   - `tools/registry` — `getFormatInstructions` (prompt-injection helper)
- *   - `dom/dom-utils`  — `By` / `findByLocator` (CSS/XPath/tag-name locators)
- *   - `errors`         — typed hierarchy + encode/decode round-trip
- *   - `tools/executor` — `Select` helper, alert actions, native-click fallback
+ * - `tools/registry` — `getFormatInstructions` (prompt-injection helper)
+ * - `dom/dom-utils` — `By` / `findByLocator` (CSS/XPath/tag-name locators)
+ * - `errors` — typed hierarchy + encode/decode round-trip
+ * - `tools/executor` — `Select` helper, alert actions, native-click fallback
  *
  * Renamed from `agent4-probe.test.ts` (the historical name referenced an
  * internal development phase and didn't describe the file's scope).
@@ -36,7 +36,7 @@ describe("dom-utils: By + findByLocator", () => {
   test("By.id / By.name / By.className escape into CSS selectors", async () => {
     const { By } = await import("../src/lib/agent/dom/dom-utils");
     expect(By.id("submit").value).toContain('id="submit"');
-    expect(By.name("q").value).toContain('name="q"');
+    expect(By.byName("q").value).toContain('name="q"');
     expect(By.className("btn primary").using).toBe("css selector");
   });
 
@@ -125,7 +125,7 @@ describe("executor: Select helper + alert actions + click fallback", () => {
 
   test("alert_get_text returns empty content when no dialog open", async () => {
     const { executeAction } = await import("../src/lib/agent/tools/executor");
-    // Reset the popup-handler's pending queue by dismissing.
+ // Reset the popup-handler's pending queue by dismissing.
     const { dismissAlert } = await import("../src/lib/agent/dom/popup-handler");
     dismissAlert();
     const result = await executeAction({ type: "alert_get_text" } as any, { selectorMap: {} } as any);
@@ -168,13 +168,13 @@ describe("executor: Select helper + alert actions + click fallback", () => {
 
   test("click fallback falls through to dispatched-event when el.click() throws", async () => {
     const { executeAction } = await import("../src/lib/agent/tools/executor");
-    // Create an element whose .click() throws.
+ // Create an element whose .click() throws.
     const button = document.createElement("button");
     document.body.appendChild(button);
     (button as any).click = () => { throw new Error("synthetic failure"); };
-    // CSS selector strategy should also fail (the only button on the page is
-    // the broken one), and text-search will skip the same element. Dispatched
-    // MouseEvent on `button` should succeed and we report dispatched-event.
+ // CSS selector strategy should also fail (the only button on the page is
+ // the broken one), and text-search will skip the same element. Dispatched
+ // MouseEvent on `button` should succeed and we report dispatched-event.
     let dispatched = false;
     button.addEventListener("click", () => { dispatched = true; });
     const state = { selectorMap: { 1: button } } as any;
@@ -216,8 +216,8 @@ describe("executor: CDP-first click cascade", () => {
   function installChromeMock(sendMessage: ReturnType<typeof vi.fn>): void {
     (globalThis as unknown as { chrome: unknown }).chrome = {
       runtime: {
-        // `chrome.runtime.id` is truthy in extension context, undefined in
-        // test pages. The CDP guard checks `chrome.runtime?.id`.
+ // `chrome.runtime.id` is truthy in extension context, undefined in
+ // test pages. The CDP guard checks `chrome.runtime?.id`.
         id: "test-extension-id",
         sendMessage,
       },
@@ -237,19 +237,19 @@ describe("executor: CDP-first click cascade", () => {
     const state = { selectorMap: { 1: button } } as any;
     const result = await executeAction({ type: "click", index: 1 }, state);
 
-    // CDP was tried (sendMessage called with CDP_CLICK).
+ // CDP was tried (sendMessage called with CDP_CLICK).
     expect(sendMsg).toHaveBeenCalledTimes(1);
     expect((sendMsg.mock.calls[0] as unknown[])[0]).toMatchObject({ type: "CDP_CLICK" });
-    // Native el.click() was NOT tried (CDP succeeded → strategy 2 skipped).
+ // Native el.click() was NOT tried (CDP succeeded → strategy 2 skipped).
     expect(nativeClicked).toBe(false);
-    // Result reports CDP as the strategy used.
+ // Result reports CDP as the strategy used.
     expect(result.success).toBe(true);
     expect(result.message).toContain("CDP");
   });
 
   test("CDP message includes the element's bounding rect", async () => {
-    // The CDP click needs the element's center coordinates to dispatch the
-    // mouse event. The message MUST carry `rect` (the BoundingClientRect).
+ // The CDP click needs the element's center coordinates to dispatch the
+ // mouse event. The message MUST carry `rect` (the BoundingClientRect).
     const { executeAction } = await import("../src/lib/agent/tools/executor");
     const sendMsg = vi.fn(async () => ({ ok: true }));
     installChromeMock(sendMsg);
@@ -263,7 +263,7 @@ describe("executor: CDP-first click cascade", () => {
     const msg = (sendMsg.mock.calls[0] as unknown[])[0] as { type: string; rect: unknown };
     expect(msg.type).toBe("CDP_CLICK");
     expect(msg.rect).toBeDefined();
-    // `rect` is the result of el.getBoundingClientRect() — must have x/y/width/height.
+ // `rect` is the result of el.getBoundingClientRect() — must have x/y/width/height.
     expect(typeof (msg.rect as DOMRect).x).toBe("number");
     expect(typeof (msg.rect as DOMRect).y).toBe("number");
     expect(typeof (msg.rect as DOMRect).width).toBe("number");
@@ -271,9 +271,9 @@ describe("executor: CDP-first click cascade", () => {
   });
 
   test("when CDP fails, falls through to native el.click() (strategy 2)", async () => {
-    // CDP-first does NOT mean CDP-only — when CDP returns `{ ok: false }`,
-    // the cascade must continue to native. This proves the cascade ORDER
-    // (CDP before native) rather than just CDP-only behavior.
+ // CDP-first does NOT mean CDP-only — when CDP returns `{ ok: false }`,
+ // the cascade must continue to native. This proves the cascade ORDER
+ // (CDP before native) rather than just CDP-only behavior.
     const { executeAction } = await import("../src/lib/agent/tools/executor");
     const sendMsg = vi.fn(async () => ({ ok: false, error: "debugger rejected" }));
     installChromeMock(sendMsg);
@@ -286,25 +286,25 @@ describe("executor: CDP-first click cascade", () => {
     const state = { selectorMap: { 1: button } } as any;
     const result = await executeAction({ type: "click", index: 1 }, state);
 
-    // CDP was tried first.
+ // CDP was tried first.
     expect(sendMsg).toHaveBeenCalledTimes(1);
     expect((sendMsg.mock.calls[0] as unknown[])[0]).toMatchObject({ type: "CDP_CLICK" });
-    // Native was tried AFTER CDP failed (cascade continued).
+ // Native was tried AFTER CDP failed (cascade continued).
     expect(nativeClicked).toBe(true);
-    // Result reports native as the strategy used (CDP failed).
+ // Result reports native as the strategy used (CDP failed).
     expect(result.success).toBe(true);
     expect(result.message).toContain("native");
     expect(result.message).not.toContain("CDP");
   });
 
   test("when chrome.runtime.id is absent (test/demo context), CDP is skipped — native first (regression guard)", async () => {
-    // The CDP guard is `chrome.runtime?.id`. In test/demo context (no chrome
-    // global), CDP must be skipped entirely and native el.click() runs first.
-    // This test pins the guard so a future refactor that always-tries CDP
-    // (e.g. by dropping the `chrome.runtime?.id` check) would break tests
-    // that don't mock chrome — making the regression immediately visible.
+ // The CDP guard is `chrome.runtime?.id`. In test/demo context (no chrome
+ // global), CDP must be skipped entirely and native el.click() runs first.
+ // This test pins the guard so a future refactor that always-tries CDP
+ // (e.g. by dropping the `chrome.runtime?.id` check) would break tests
+ // that don't mock chrome — making the regression immediately visible.
     const { executeAction } = await import("../src/lib/agent/tools/executor");
-    // No chrome global installed — simulate non-extension context.
+ // No chrome global installed — simulate non-extension context.
     delete (globalThis as unknown as { chrome?: unknown }).chrome;
 
     const button = document.createElement("button");

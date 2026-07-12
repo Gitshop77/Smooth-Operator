@@ -2,9 +2,9 @@
  * Scheduled tasks — lets users schedule recurring agent runs.
  *
  * Uses chrome.alarms (MV3-compliant). Each scheduled task stores:
- *   - task prompt
- *   - schedule (cronlike interval or fixed time)
- *   - target tab (or "active")
+ * - task prompt
+ * - schedule (cronlike interval or fixed time)
+ * - target tab (or "active")
  *
  * When the alarm fires, the background service worker opens the side panel
  * and starts the run.
@@ -66,7 +66,7 @@ const MINUTES_PER_DAY = 24 * 60;
 /** Minutes per week — used to compute the period for weekly alarms. */
 const MINUTES_PER_WEEK = 7 * MINUTES_PER_DAY;
 /** Minimum delay (ms) for the next fire — guards against scheduling in the
- *  immediate past when `now` ticks forward between compute + alarm create. */
+ * immediate past when `now` ticks forward between compute + alarm create. */
 const MIN_FIRE_DELAY_MS = 60_000;
 
 /** Build the chrome.alarms name for a given task id. */
@@ -137,11 +137,17 @@ export async function listScheduledTasks(): Promise<ScheduledTask[]> {
   if (!isExtensionWithAlarms()) return [];
   const res = await chrome.storage.local.get(STORAGE_KEY);
   const arr = res[STORAGE_KEY];
-  // Guard against a corrupted/overwritten storage value (a non-array would
-  // otherwise flow into `saveScheduledTask`/`initScheduledTasks`, where
-  // `.findIndex`/`.map` throw a TypeError and break alarm init at SW startup).
-  // Mirrors the `Array.isArray` guards used by `loadRuns`/`loadAllMemories`.
-  return Array.isArray(arr) ? (arr as ScheduledTask[]) : [];
+ // Guard against a corrupted/overwritten storage value (a non-array would
+ // otherwise flow into `saveScheduledTask`/`initScheduledTasks`, where
+ // `.findIndex`/`.map` throw a TypeError and break alarm init at SW startup).
+ // Mirrors the `Array.isArray` guards used by `loadRuns`/`loadAllMemories`.
+ // Also drop any persisted task whose schedule no longer validates (FULL-REVIEW
+ // finding 97: schedule is validated on save but previously trusted on load).
+  if (!Array.isArray(arr)) return [];
+  return arr.filter(
+    (t): t is ScheduledTask =>
+      t != null && typeof t === "object" && validateSchedule((t as ScheduledTask).schedule) === null
+  );
 }
 
 /**
@@ -155,22 +161,34 @@ export async function listScheduledTasks(): Promise<ScheduledTask[]> {
 export async function saveScheduledTask(task: ScheduledTask): Promise<void> {
   if (!isExtensionWithAlarms()) return;
   return withTaskMutation(async () => {
-  // Validate the schedule up-front — don't persist a malformed task.
+ // Validate the schedule up-front — don't persist a malformed task.
   const validationError = validateSchedule(task.schedule);
   if (validationError) {
     throw new Error(`Invalid schedule: ${validationError}`);
   }
   const tasks = await listScheduledTasks();
   const idx = tasks.findIndex((t) => t.id === task.id);
-  // Keep the original `lastRunAt` if the task already exists (don't clobber
-  // run history on a config update).
+ // Keep the original `lastRunAt` if the task already exists (don't clobber
+ // run history on a config update).
   const merged: ScheduledTask =
     idx >= 0 ? { ...tasks[idx], ...task, lastRunAt: task.lastRunAt ?? tasks[idx].lastRunAt } : task;
+ // Populate `nextRunAt` (declared + documented on the interface) so the UI /
+ // run-history can show when the task will next fire. Previously left
+ // `undefined` (FULL-REVIEW finding 61). For interval schedules the next fire
+ // is simply now + the interval; for daily/weekly we reuse `computeNextFire`.
+  if (merged.enabled) {
+    merged.nextRunAt =
+      merged.schedule.type === "interval"
+        ? Date.now() + (merged.schedule.intervalMinutes ?? 0) * 60_000
+        : computeNextFire(merged.schedule, new Date()).getTime();
+  } else {
+    merged.nextRunAt = undefined;
+  }
   if (idx >= 0) tasks[idx] = merged;
   else tasks.push(merged);
 
-  // Snapshot the previous storage state so we can roll back if alarm arming
-  // fails. (chrome.storage.local has no transaction support.)
+ // Snapshot the previous storage state so we can roll back if alarm arming
+ // fails. (chrome.storage.local has no transaction support.)
   const previousTasks = (await chrome.storage.local.get(STORAGE_KEY))[STORAGE_KEY] as
     | ScheduledTask[]
     | undefined;
@@ -178,16 +196,23 @@ export async function saveScheduledTask(task: ScheduledTask): Promise<void> {
   try {
     await scheduleAlarm(merged);
   } catch (e) {
-    // Roll back storage to the previous state. If `previousTasks` was
-    // undefined we remove the key entirely.
+ // Roll back storage to the previous state. If `previousTasks` was
+ // undefined we remove the key entirely.
     try {
       if (previousTasks) {
         await chrome.storage.local.set({ [STORAGE_KEY]: previousTasks });
       } else {
         await chrome.storage.local.remove(STORAGE_KEY);
       }
-    } catch {
-      // Rollback failure is best-effort — log + re-throw the original.
+    } catch (rbErr) {
+ // Rollback failure is best-effort, but a silent swallow would hide a
+ // real inconsistency (storage says "enabled" but no alarm armed, or
+ // vice-versa). Surface it so the breakage is diagnosable (FULL-REVIEW
+ // finding 4), then re-throw the original arming error.
+      console.error(
+        `[scheduled-tasks] rollback of storage for task ${task.id} failed:`,
+        rbErr instanceof Error ? rbErr.message : String(rbErr)
+      );
     }
     throw new Error(
       `Failed to arm alarm for task ${task.id}: ${e instanceof Error ? e.message : String(e)}`,
@@ -198,18 +223,55 @@ export async function saveScheduledTask(task: ScheduledTask): Promise<void> {
 }
 
 /**
+ * Request the OS keep-awake lock so the laptop doesn't sleep through an
+ * armed alarm. This is a platform (`chrome.power`) concern that used to be
+ * reached by dynamically importing the extension's `state-store` module —
+ * that created a layering inversion (`lib/agent` → `extension/background`)
+ * and a hidden circular dependency. We now call `chrome.power` directly
+ * (guarded for non-extension contexts), keeping this module free of any
+ * `@/extension/*` import (see FULL-REVIEW finding 0 / 1).
+ */
+async function requestKeepAwakeLocal(): Promise<void> {
+  try {
+    if (typeof chrome !== "undefined" && chrome.power?.requestKeepAwake) {
+      chrome.power.requestKeepAwake("system");
+    }
+  } catch {
+    /* chrome.power unavailable — non-fatal */
+  }
+}
+
+/**
+ * Release the OS keep-awake lock, but only if no other enabled scheduled
+ * task remains that would still need it. Mirrors the "maybe release" check
+ * that previously lived in `state-store`; inlined here to avoid the
+ * cross-layer dependency.
+ */
+async function maybeReleaseKeepAwakeLocal(): Promise<void> {
+  try {
+    if (typeof chrome === "undefined" || !chrome.power?.releaseKeepAwake) return;
+    const tasks = await listScheduledTasks();
+    if (!tasks.some((t) => t.enabled)) {
+      chrome.power.releaseKeepAwake();
+    }
+  } catch {
+    /* chrome.power unavailable — non-fatal */
+  }
+}
+
+/**
  * Compute the next fire time for a daily/weekly schedule.
  *
  * Algorithm (corrected — the original advanced the day first then checked
  * the time, which produced wrong next-fire previews when the target time
  * had already passed today):
  *
- *  1. Set the target time-of-day on `now`.
- *  2. For weekly: advance the date to the next occurrence of `dayOfWeek`
- *     (starting from today — 0 days if today is the target day).
- *  3. If the resulting datetime is in the past (or within the 1-minute
- *     minimum-delay window), advance by the recurrence interval
- *     (1 day for daily, 7 days for weekly) until it's in the future.
+ * 1. Set the target time-of-day on `now`.
+ * 2. For weekly: advance the date to the next occurrence of `dayOfWeek`
+ * (starting from today — 0 days if today is the target day).
+ * 3. If the resulting datetime is in the past (or within the 1-minute
+ * minimum-delay window), advance by the recurrence interval
+ * (1 day for daily, 7 days for weekly) until it's in the future.
  *
  * Returns a Date at least {@link MIN_FIRE_DELAY_MS} in the future.
  */
@@ -223,17 +285,17 @@ export function computeNextFire(schedule: ScheduledTaskSchedule, now: Date): Dat
   );
 
   if (schedule.type === "weekly") {
-    // Advance to the desired day-of-week (0 = today is the target day).
+ // Advance to the desired day-of-week (0 = today is the target day).
     const desiredDay = schedule.dayOfWeek ?? DEFAULT_DAY_OF_WEEK;
     const daysUntil = (desiredDay - target.getDay() + 7) % 7;
     target.setDate(target.getDate() + daysUntil);
   }
 
-  // If the target time has already passed (or is within the min-delay
-  // window), advance by whole recurrence intervals until it's in the
-  // future. Computed arithmetically (not looped) so extreme clock skew
-  // can't leave the target in the past — the previous 8-iteration loop
-  // cap could return a past date if `now` was weeks ahead of `target`.
+ // If the target time has already passed (or is within the min-delay
+ // window), advance by whole recurrence intervals until it's in the
+ // future. Computed arithmetically (not looped) so extreme clock skew
+ // can't leave the target in the past — the previous 8-iteration loop
+ // cap could return a past date if `now` was weeks ahead of `target`.
   const minFuture = now.getTime() + MIN_FIRE_DELAY_MS;
   const stepDays = schedule.type === "weekly" ? 7 : 1;
   if (target.getTime() <= minFuture) {
@@ -257,15 +319,13 @@ async function scheduleAlarm(task: ScheduledTask): Promise<void> {
   const name = alarmName(task.id);
   await chrome.alarms.clear(name);
   if (!task.enabled) {
-  // task was disabled — release the system keep-awake lock IF no
-    // other scheduled tasks are still armed. `maybeReleaseKeepAwake`
-    // performs the inline check internally. Dynamic import to avoid a
-    // circular dependency (state-store.ts dynamically imports this module).
+ // task was disabled — release the system keep-awake lock IF no
+ // other scheduled tasks are still armed. `maybeReleaseKeepAwakeLocal`
+ // performs the inline check internally. No cross-layer import required.
     try {
-      const { maybeReleaseKeepAwake } = await import("@/extension/background/state-store");
-      await maybeReleaseKeepAwake();
+      await maybeReleaseKeepAwakeLocal();
     } catch {
-      /* state-store unavailable in non-extension context — non-fatal. */
+      /* chrome.power unavailable in non-extension context — non-fatal. */
     }
     return;
   }
@@ -282,18 +342,16 @@ async function scheduleAlarm(task: ScheduledTask): Promise<void> {
     const periodInMinutes = task.schedule.type === "weekly" ? MINUTES_PER_WEEK : MINUTES_PER_DAY;
     await chrome.alarms.create(name, { delayInMinutes, periodInMinutes });
   }
-  // alarm armed successfully — request the OS keep the system awake
-  // so the laptop doesn't sleep through the alarm. `requestKeepAwake`
-  // internally checks that at least one enabled task exists (this one),
-  // so it's a no-op if all tasks were disabled between arming + firing.
-  // Dynamic import to avoid a circular dependency (this module is imported
-  // by state-store.ts). Safe to call outside the extension context (silent
-  // no-op when `chrome.power` is unavailable).
+ // alarm armed successfully — request the OS keep the system awake
+ // so the laptop doesn't sleep through the alarm. `requestKeepAwakeLocal`
+ // internally checks that at least one enabled task exists (this one),
+ // so it's a no-op if all tasks were disabled between arming + firing.
+ // Safe to call outside the extension context (silent no-op when
+ // `chrome.power` is unavailable).
   try {
-    const { requestKeepAwake } = await import("@/extension/background/state-store");
-    await requestKeepAwake();
+    await requestKeepAwakeLocal();
   } catch {
-    /* state-store unavailable in non-extension context — non-fatal. */
+    /* chrome.power unavailable in non-extension context — non-fatal. */
   }
 }
 
@@ -310,11 +368,11 @@ export async function initScheduledTasks(): Promise<void> {
   const tasks = await listScheduledTasks();
   await Promise.all(
     tasks.map(async (task) => {
-      // Call scheduleAlarm unconditionally — it clears stale alarms for
-      // disabled tasks (chrome.alarms persist across SW restarts, so a task
-      // disabled while the SW was down may still have an armed alarm).
-      // The early-return on !task.enabled was a bug: it left stale alarms
-      // firing indefinitely.
+ // Call scheduleAlarm unconditionally — it clears stale alarms for
+ // disabled tasks (chrome.alarms persist across SW restarts, so a task
+ // disabled while the SW was down may still have an armed alarm).
+ // The early-return on !task.enabled was a bug: it left stale alarms
+ // firing indefinitely.
       try {
         await scheduleAlarm(task);
       } catch (e) {

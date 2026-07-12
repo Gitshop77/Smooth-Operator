@@ -3,49 +3,33 @@
  * against `https://api.x.ai/v1/chat/completions` with bearer auth.
  *
  * Auth chain: explicit `apiKey` → `XAI_API_KEY` env var → throw.
+ *
+ * Built on the shared {@link makeOpenAIChatFacade} factory (see `openai.ts`) so
+ * security-relevant boilerplate — the SSRF guard on user-supplied `baseURL`,
+ * auth chain, error/framing wiring — lives in one place and cannot diverge
+ * between the OpenAI-compatible facades.
  */
 
-import { Auth, type ProviderAuthOption } from "../route/auth";
-import { Endpoint } from "../route/endpoint";
-import { Framing } from "../route/framing";
-import { make } from "../route/client";
 import * as OpenAICompatibleChat from "../protocols/openai-compatible-chat";
 import { PATH } from "../protocols/openai-compatible-chat";
 import type { LLMProvider } from "../provider";
-import { toLLMProvider as toLLMProviderBridge } from "../provider-bridge";
-import { profiles, assertSafeUserBaseURL } from "./openai-compatible-profile";
+import { makeOpenAIChatFacade, type Config } from "./openai";
+import { profiles } from "./openai-compatible-profile";
 
-export const id = "xai";
+export type { Config };
 
-export type Config = { baseURL?: string } & ProviderAuthOption<"optional">;
+const facade = makeOpenAIChatFacade({
+  id: "xai",
+  displayName: "xAI",
+  envKey: "XAI_API_KEY",
+  routeId: "openai-compatible-chat",
+  protocol: OpenAICompatibleChat.protocol,
+  path: PATH,
+  defaultBaseURL: profiles.xai.baseURL,
+});
 
-const auth = (options: ProviderAuthOption<"optional">) => {
-  if ("auth" in options && options.auth) return options.auth;
-  return Auth.optional("apiKey" in options ? options.apiKey : undefined, "apiKey")
-    .orElse(Auth.config("XAI_API_KEY"))
-    .pipe(Auth.bearer);
-};
-
-export function configure(input: Config = {}) {
-  // (SSRF guard): validate any user-supplied baseURL override before
-  // building the route/endpoint. The trusted default is exempt.
-  assertSafeUserBaseURL(input.baseURL);
-  const route = make({
-    id: "openai-compatible-chat",
-    provider: id,
-    protocol: OpenAICompatibleChat.protocol,
-    endpoint: Endpoint.path(PATH, {
-      baseURL: input.baseURL ?? profiles.xai.baseURL,
-    }),
-    auth: auth(input),
-    framing: Framing.sse,
-  });
-  return {
-    id,
-    model: (modelID: string) => route.model({ id: modelID }),
-    configure,
-  };
-}
+export const id = facade.id;
+export const configure = facade.configure;
 
 /**
  * Bridge to the agent's `LLMProvider` interface.
@@ -58,12 +42,5 @@ export function configure(input: Config = {}) {
  * downgraded by the catalog lookup.
  */
 export function toLLMProvider(config: Config & { model: string }): LLMProvider {
-  return toLLMProviderBridge({
-    providerId: "xai",
-    providerDisplayName: "xAI",
-    model: config.model,
-    supportsVision: true,
-    supportsStructuredOutput: true,
-    configureResult: configure(config),
-  });
+  return facade.toLLMProvider(config);
 }

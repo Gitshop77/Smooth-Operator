@@ -92,9 +92,12 @@ interface CachedCatalog {
 /**
  * Minimal structural validation of a parsed models.dev catalog. Rejects
  * obviously-wrong shapes (non-object, missing provider entries, `models`
- * not a record, non-numeric cost fields, or a non-string `name`) so
- * malformed/compromised data can't flow into the model picker. Returns a
- * typed `Catalog` on success.
+ * not a record, non-numeric or negative cost fields, or a non-string `name`)
+ * so malformed/compromised data can't flow into the model picker. A negative
+ * rate is rejected because it would feed `estimateCost` (pricing.ts) and
+ * subtract from accumulated spend, silently defeating the cost cap; zero is
+ * permitted so an operator may legitimately reprice a private model to free.
+ * Returns a typed `Catalog` on success.
  *
  * Exported so pricing.ts can reuse the same single trust-boundary rule for
  * its custom-`COWORK_MODEL_CATALOG_URL` path instead of maintaining a
@@ -110,9 +113,9 @@ export function isValidCatalog(value: unknown): value is Catalog {
     for (const model of Object.values(provider.models as Record<string, unknown>)) {
       if (!model || typeof model !== "object") return false;
       const m = model as Record<string, unknown>;
-      // `release_date` and `name` are dereferenced via `.localeCompare` /
-      // `.toLowerCase()` by callers (`getModelsForProvider`, `searchModels`);
-      // a non-string here would throw and crash the picker, so reject it.
+ // `release_date` and `name` are dereferenced via `.localeCompare` /
+ // `.toLowerCase()` by callers (`getModelsForProvider`, `searchModels`);
+ // a non-string here would throw and crash the picker, so reject it.
       if (
         typeof m.id !== "string" ||
         typeof m.name !== "string" ||
@@ -120,7 +123,20 @@ export function isValidCatalog(value: unknown): value is Catalog {
       ) return false;
       if (m.cost !== undefined) {
         const c = m.cost as Record<string, unknown>;
-        if (typeof c.input !== "number" || typeof c.output !== "number") return false;
+ // Reject non-numeric OR negative cost rates. A negative rate would flow
+ // into `estimateCost` (pricing.ts) and subtract from accumulated spend,
+ // silently defeating the cost cap. Zero is permitted (operator may
+ // reprice a private model to free); only strictly-negative values are
+ // treated as malformed/compromised. `cache_read`/`cache_write` follow
+ // the same rule when present.
+        if (
+          typeof c.input !== "number" ||
+          typeof c.output !== "number" ||
+          c.input < 0 ||
+          c.output < 0
+        ) return false;
+        if (c.cache_read !== undefined && (typeof c.cache_read !== "number" || c.cache_read < 0)) return false;
+        if (c.cache_write !== undefined && (typeof c.cache_write !== "number" || c.cache_write < 0)) return false;
       }
     }
   }
@@ -134,18 +150,18 @@ export function isValidCatalog(value: unknown): value is Catalog {
  * or an empty catalog if not.
  */
 export async function fetchCatalog(force = false): Promise<Catalog> {
-  // Reuse an in-flight fetch so concurrent callers share one network request.
-  // Without this, a service worker handling several overlapping model-picker
-  // requests would each issue a 10s fetch + a chrome.storage.local write.
+ // Reuse an in-flight fetch so concurrent callers share one network request.
+ // Without this, a service worker handling several overlapping model-picker
+ // requests would each issue a 10s fetch + a chrome.storage.local write.
   if (!force && inflight) return inflight;
 
-  // Fast in-memory hit (synchronous — safe to short-circuit before memoizing).
+ // Fast in-memory hit (synchronous — safe to short-circuit before memoizing).
   if (!force && memoryCache && Date.now() - memoryCacheTime < CACHE_TTL_MS) {
     return memoryCache;
   }
 
-  // Memoize synchronously so any caller entering during `loadCatalog`'s awaits
-  // reuses this single in-flight promise instead of starting its own fetch.
+ // Memoize synchronously so any caller entering during `loadCatalog`'s awaits
+ // reuses this single in-flight promise instead of starting its own fetch.
   let resolveFn!: (value: Catalog) => void;
   let rejectFn!: (reason: unknown) => void;
   const promise = new Promise<Catalog>((resolve, reject) => {
@@ -160,12 +176,12 @@ export async function fetchCatalog(force = false): Promise<Catalog> {
     } catch (err) {
       rejectFn(err);
     } finally {
-      // Only clear the shared `inflight` slot if it still points at THIS
-      // promise. A concurrent force/non-force call may have started a newer
-      // fetch and overwritten `inflight` while we were awaiting; clearing it
-      // then would orphan that newer in-flight promise and let a later caller
-      // kick off a redundant third fetch. Capturing the local `promise`
-      // defends the dedup guarantee for overlapping requests.
+ // Only clear the shared `inflight` slot if it still points at THIS
+ // promise. A concurrent force/non-force call may have started a newer
+ // fetch and overwritten `inflight` while we were awaiting; clearing it
+ // then would orphan that newer in-flight promise and let a later caller
+ // kick off a redundant third fetch. Capturing the local `promise`
+ // defends the dedup guarantee for overlapping requests.
       if (inflight === promise) inflight = null;
     }
   })();
@@ -179,17 +195,17 @@ export async function fetchCatalog(force = false): Promise<Catalog> {
  * persistent cache, and finally to an empty catalog.
  */
 async function loadCatalog(force: boolean): Promise<Catalog> {
-  // Check persistent cache (chrome.storage.local)
+ // Check persistent cache (chrome.storage.local)
   if (!force && typeof chrome !== "undefined" && chrome.storage?.local) {
     try {
       const cached = await chrome.storage.local.get(CACHE_KEY);
       if (cached[CACHE_KEY]) {
         const entry = cached[CACHE_KEY] as CachedCatalog;
-        // Trust-boundary guard: a corrupted/compromised persisted entry must
-        // be re-validated before it is served. `isValidCatalog` rejects
-        // non-string `release_date` etc., which would otherwise crash the
-        // model picker (see `getModelsForProvider` below). Skip the cache and
-        // fall through to re-fetch rather than serving malformed data.
+ // Trust-boundary guard: a corrupted/compromised persisted entry must
+ // be re-validated before it is served. `isValidCatalog` rejects
+ // non-string `release_date` etc., which would otherwise crash the
+ // model picker (see `getModelsForProvider` below). Skip the cache and
+ // fall through to re-fetch rather than serving malformed data.
         if (isValidCatalog(entry.data) && Date.now() - entry.fetchedAt < CACHE_TTL_MS) {
           memoryCache = entry.data;
           memoryCacheTime = entry.fetchedAt;
@@ -199,25 +215,24 @@ async function loadCatalog(force: boolean): Promise<Catalog> {
     } catch { /* ignore storage errors */ }
   }
 
-  // Fetch from models.dev
+ // Fetch from models.dev
   try {
-    // The `User-Agent` header is a forbidden header name in browser/SW fetch
-    // (silently dropped per Fetch spec §3.4). models.dev doesn't require a UA.
+ // The `User-Agent` header is a forbidden header name in browser/SW fetch
+ // (silently dropped per Fetch spec §3.4). models.dev doesn't require a UA.
     const res = await fetch(CATALOG_URL, {
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) throw new Error(`models.dev API ${res.status}`);
     const raw = await res.json();
     if (!isValidCatalog(raw)) {
-      // Trust-boundary guard: reject malformed/compromised data and fall back.
+ // Trust-boundary guard: reject malformed/compromised data and fall back.
       throw new Error("models.dev catalog failed shape validation");
     }
     const data = raw;
     memoryCache = data;
     memoryCacheTime = Date.now();
-    lastFetchError = null;
 
-    // Persist to chrome.storage
+ // Persist to chrome.storage
     if (typeof chrome !== "undefined" && chrome.storage?.local) {
       try {
         await chrome.storage.local.set({
@@ -228,27 +243,27 @@ async function loadCatalog(force: boolean): Promise<Catalog> {
 
     return data;
   } catch (err) {
-    // Record + surface the failure so the UI can show staleness/offline state.
-    lastFetchError = err instanceof Error ? err : new Error(String(err));
+ // Log the failure for the dev-console staleness warning.
+    const fetchError = err instanceof Error ? err : new Error(String(err));
     if (
       typeof process !== "undefined" &&
       process.env &&
       process.env.NODE_ENV !== "production"
     ) {
-      console.warn("[catalog] fetchCatalog failed:", lastFetchError.message);
+      console.warn("[catalog] fetchCatalog failed:", fetchError.message);
     }
-    // Network/validation failure — try stale cache
+ // Network/validation failure — try stale cache
     if (typeof chrome !== "undefined" && chrome.storage?.local) {
       try {
         const cached = await chrome.storage.local.get(CACHE_KEY);
         const entry = cached[CACHE_KEY] as CachedCatalog | undefined;
-        // Re-validate stale cache too (same trust-boundary guard as above).
+ // Re-validate stale cache too (same trust-boundary guard as above).
         if (entry && isValidCatalog(entry.data)) {
           return entry.data;
         }
       } catch { /* ignore */ }
     }
-    // No cache available — return empty
+ // No cache available — return empty
     return {};
   }
 }
@@ -258,9 +273,6 @@ let memoryCacheTime = 0;
 
 /** In-flight fetch promise, memoized to dedupe concurrent callers. */
 let inflight: Promise<Catalog> | null = null;
-
-/** Most recent fetch/validation error (used for the dev-console staleness warning). */
-let lastFetchError: Error | null = null;
 
 /**
  * Get all models for a specific provider from the catalog.
@@ -274,18 +286,18 @@ export async function getModelsForProvider(providerId: string): Promise<CatalogM
     return Object.values(provider.models)
       .filter((m) => m.status !== "deprecated")
       .sort((a, b) => {
-        // Defensive: a malformed cached entry could have a non-string
-        // `release_date`. Coerce to "" so `.localeCompare` never throws and
-        // the model picker degrades gracefully instead of crashing (mirrors
-        // the defensive `try/catch` in `getDefaultModelForProvider`).
+ // Defensive: a malformed cached entry could have a non-string
+ // `release_date`. Coerce to "" so `.localeCompare` never throws and
+ // the model picker degrades gracefully instead of crashing (mirrors
+ // the defensive `try/catch` in `getDefaultModelForProvider`).
         const da = typeof a.release_date === "string" ? a.release_date : "";
         const db = typeof b.release_date === "string" ? b.release_date : "";
         return db.localeCompare(da);
       });
   } catch {
-    // Catalog unreachable (offline, network error, or a stale cache that
-    // failed re-validation) — the picker should show an empty list rather
-    // than throw and break the UI.
+ // Catalog unreachable (offline, network error, or a stale cache that
+ // failed re-validation) — the picker should show an empty list rather
+ // than throw and break the UI.
     return [];
   }
 }
@@ -301,8 +313,8 @@ export async function getModelsForProvider(providerId: string): Promise<CatalogM
  * models (so callers can fall back to `DEFAULT_MODELS`).
  *
  * @param catalogProviderId The models.dev provider id (e.g. "openai",
- *                          "google", "anthropic") — NOT the extension's
- *                          provider id. Use `CATALOG_PROVIDER_ID_MAP` to map.
+ * "google", "anthropic") — NOT the extension's
+ * provider id. Use `CATALOG_PROVIDER_ID_MAP` to map.
  */
 export async function getDefaultModelForProvider(
   catalogProviderId: string,
@@ -316,8 +328,8 @@ export async function getDefaultModelForProvider(
       .sort((a, b) => b.release_date.localeCompare(a.release_date));
     return models[0]?.id;
   } catch {
-    // Catalog unreachable (offline, network error) — caller falls back to
-    // DEFAULT_MODELS.
+ // Catalog unreachable (offline, network error) — caller falls back to
+ // DEFAULT_MODELS.
     return undefined;
   }
 }
@@ -391,39 +403,59 @@ export function formatContext(limit?: CatalogModel["limit"]): string {
  * stale.
  *
  * @param modelId The model identifier (e.g. "gpt-4o", "llama3.2-vision",
- *                "claude-sonnet-5").
+ * "claude-sonnet-5").
  * @param providerId The provider id (e.g. "openai", "ollama"). Used to look
- *                   up the catalog entry.
+ * up the catalog entry.
  * @returns `true` if the model supports image inputs, `false` otherwise.
  */
 export async function modelSupportsVision(modelId: string, providerId?: string): Promise<boolean> {
-  // Primary: check the catalog's per-model `attachment` field.
+ // Primary: check the catalog's per-model `attachment` field.
   if (providerId) {
     try {
       const models = await getModelsForProvider(providerId);
-      // Try exact match first, then substring match (catalog IDs sometimes
-      // differ from what the user typed — e.g. "gpt-4o" vs "gpt-4o-2024-08-06").
+ // Try exact match first, then substring match (catalog IDs sometimes
+ // differ from what the user typed — e.g. "gpt-4o" vs "gpt-4o-2024-08-06").
       const exact = models.find((m) => m.id.toLowerCase() === modelId.toLowerCase());
-      const candidate = exact ?? models.find((m) => m.id.toLowerCase().includes(modelId.toLowerCase()));
-      if (candidate) {
-        // `attachment: true` means the model accepts file/image attachments.
-        if (candidate.attachment) return true;
-        // Also check `modalities.input` for "image" — some providers declare
-        // it there instead of via `attachment`.
-        if (candidate.modalities?.input?.some((m) => m.toLowerCase().includes("image"))) return true;
-        // If the catalog explicitly says `attachment: false`, trust it.
-        if (candidate.attachment === false) return false;
+ // An EXACT id match is conclusive: trust its `attachment`/`modalities`
+ // signals directly (including an explicit `attachment: false`).
+      if (exact) {
+ // `attachment: true` means the model accepts file/image attachments.
+        if (exact.attachment) return true;
+ // Also check `modalities.input` for "image" — some providers declare
+ // it there instead of via `attachment`.
+        if (exact.modalities?.input?.some((m) => m.toLowerCase().includes("image"))) return true;
+ // If the catalog explicitly says `attachment: false`, trust it.
+        if (exact.attachment === false) return false;
+      }
+ // Substring matches are ambiguous (e.g. "gpt-4" may match a non-vision
+ // base variant before a vision variant, alphabetically). Don't
+ // short-circuit on the first such match: if ANY substring match is
+ // vision-capable we return true; otherwise we fall through to the
+ // name-based heuristic instead of returning false — an inconclusive
+ // substring match must not wrongly gate vision input.
+      const substringMatches = models.filter((m) =>
+        m.id.toLowerCase().includes(modelId.toLowerCase())
+      );
+      if (substringMatches.length > 0) {
+        const vision = substringMatches.find(
+          (m) =>
+            m.attachment ||
+            m.modalities?.input?.some((x) => x.toLowerCase().includes("image"))
+        );
+        if (vision) return true;
+ // No vision-capable substring match and no conclusive exact match:
+ // fall through to the heuristic below (do NOT return false).
       }
     } catch {
-      // Catalog unavailable (offline, network error) — fall through to heuristic.
+ // Catalog unavailable (offline, network error) — fall through to heuristic.
     }
   }
 
-  // Fallback: heuristic name-based check for common vision-capable model
-  // families. This catches local Ollama models, newly-released models not yet
-  // in the catalog, and custom OpenAI-compatible endpoints. `VISION_PATTERNS`
-  // is the module-scope, word-boundary-anchored list (see its doc-comment for
-  // why `includes` was replaced).
+ // Fallback: heuristic name-based check for common vision-capable model
+ // families. This catches local Ollama models, newly-released models not yet
+ // in the catalog, and custom OpenAI-compatible endpoints. `VISION_PATTERNS`
+ // is the module-scope, word-boundary-anchored list (see its doc-comment for
+ // why `includes` was replaced).
   const name = modelId.toLowerCase();
   return VISION_PATTERNS.some((re) => re.test(name));
 }

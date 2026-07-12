@@ -1,9 +1,9 @@
 /**
  * Zod schemas for every agent action — the single source of truth for the
  * action set. The schemas are consumed by:
- *   - the tool registry (generates the LLM-facing JSON schema),
- *   - the output parser (validates LLM responses),
- *   - the action executor (narrows on the validated `type` discriminator).
+ * - the tool registry (generates the LLM-facing JSON schema),
+ * - the output parser (validates LLM responses),
+ * - the action executor (narrows on the validated `type` discriminator).
  *
  * Using a `type` discriminator field (not `Object.keys()[0]`) lets TypeScript
  * narrow the union without casts and lets Zod produce a clean
@@ -48,10 +48,10 @@ export const flexibleBoolean = z
 // context, and persistent storage. Cap every free-text field so a single huge
 // model output can't exhaust extension storage, bloat exported history, or
 // saturate the context window. Three tiers:
-//   - LONG (64 KiB): prose / query / question / reason / expectation fields.
-//   - CODE (256 KiB): `evaluate` JavaScript — mirrors the custom-tool cap, large
-//     enough for legitimate scripts but still bounded.
-//   - SHORT (8 KiB): selectors, URLs, key names, file paths, patterns.
+// - LONG (64 KiB): prose / query / question / reason / expectation fields.
+// - CODE (256 KiB): `evaluate` JavaScript — mirrors the custom-tool cap, large
+// enough for legitimate scripts but still bounded.
+// - SHORT (8 KiB): selectors, URLs, key names, file paths, patterns.
 const MAX_FREE_TEXT_CHARS = 64 * 1024; // 64 KiB
 const MAX_CODE_CHARS = 256 * 1024; // 256 KiB (matches MAX_CUSTOM_TOOL_CODE_LENGTH)
 const MAX_SHORT_TEXT_CHARS = 8 * 1024; // 8 KiB
@@ -67,10 +67,10 @@ function boundedText(max: number, msg?: string): z.ZodType<string> {
  * Click an interactive element by its `[index]`.
  *
  * The index may be either:
- *   - a positive integer `[N]` referencing a DOM-extracted element, OR
- *   - a `vN` string (e.g. `"v1"`) referencing a vision-only element emitted
- *     by the Local Vision Assistant. Vision elements are clickable via CDP
- *     coordinate clicks — see `click.ts:handleVisionClick`.
+ * - a positive integer `[N]` referencing a DOM-extracted element, OR
+ * - a `vN` string (e.g. `"v1"`) referencing a vision-only element emitted
+ * by the Local Vision Assistant. Vision elements are clickable via CDP
+ * coordinate clicks — see `click.ts:handleVisionClick`.
  *
  * The union tries the numeric arm first (so `"5"` and `5` both coerce to
  * `5`), then falls back to the `vN` regex arm for vision indices. The
@@ -146,13 +146,13 @@ export const GoBackSchema = z.object({
 /** Wait for the page to load or settle (or for a fixed number of seconds). */
 export const WaitSchema = z.object({
   type: z.literal("wait").describe("Wait for the page to load or settle."),
-  // `z.coerce.number()` calls `Number(v)` under the hood, so
-  // `null` and `""` coerce to 0 (not undefined), defeating `.default(3)`.
-  // The preprocess converts null/"" → undefined BEFORE coercion so the
-  // default kicks in.
-  // Bound the value to [0, 300]: a negative `seconds` would resolve to a
-  // near-instant `setTimeout(0)` (wrong behavior) and an unbounded value could
-  // hang the orchestrator, which awaits this handler with no per-step timeout.
+ // `z.coerce.number()` calls `Number(v)` under the hood, so
+ // `null` and `""` coerce to 0 (not undefined), defeating `.default(3)`.
+ // The preprocess converts null/"" → undefined BEFORE coercion so the
+ // default kicks in.
+ // Bound the value to [0, 300]: a negative `seconds` would resolve to a
+ // near-instant `setTimeout(0)` (wrong behavior) and an unbounded value could
+ // hang the orchestrator, which awaits this handler with no per-step timeout.
   seconds: z.preprocess(
     (v) => (v === null || v === "" ? undefined : v),
     z.coerce.number().min(0).max(300),
@@ -174,13 +174,13 @@ export const ExtractSchema = z.object({
 /** Finish the task. MUST be the only action in its step. */
 export const DoneSchema = z.object({
   type: z.literal("done").describe("Finish the task. MUST be the ONLY action in the step."),
-  // `z.coerce.string()` calls `String(v)` under the hood, so
-  // `null` becomes the literal string `"null"` — and the user sees "null"
-  // as their task summary if the LLM emits `{"text": null}` (some local
-  // models do this when they have nothing to summarize). The preprocess
-  // converts null/undefined → "" BEFORE coercion, preserving the existing
-  // coercion behavior for other types (numbers, booleans → stringified)
-  // so the existing "model emits text as number" test still passes.
+ // `z.coerce.string()` calls `String(v)` under the hood, so
+ // `null` becomes the literal string `"null"` — and the user sees "null"
+ // as their task summary if the LLM emits `{"text": null}` (some local
+ // models do this when they have nothing to summarize). The preprocess
+ // converts null/undefined → "" BEFORE coercion, preserving the existing
+ // coercion behavior for other types (numbers, booleans → stringified)
+ // so the existing "model emits text as number" test still passes.
   text: z.preprocess(
     (v) => (v === null || v === undefined ? "" : v),
     z.coerce.string().max(MAX_FREE_TEXT_CHARS),
@@ -233,8 +233,8 @@ export const FindElementsSchema = z.object({
   type: z.literal("find_elements").describe("Find elements matching a CSS selector (instant, free). Great for counting items or getting attributes."),
   selector: boundedText(MAX_SHORT_TEXT_CHARS).describe("CSS selector to match."),
   attributes: z.array(z.coerce.string()).max(20).optional().describe("Attributes to extract from each match (max 20)."),
-  // preprocess null/"" → undefined so `.default(50)` applies
-  // (otherwise `Number("") === 0` coerces successfully and bypasses the default).
+ // preprocess null/"" → undefined so `.default(50)` applies
+ // (otherwise `Number("") === 0` coerces successfully and bypasses the default).
   max_results: z.preprocess(
     (v) => (v === null || v === "" ? undefined : v),
     z.coerce.number().int().min(1).max(200),
@@ -264,8 +264,8 @@ export const HoverSchema = z.object({
 export const PressAndHoldSchema = z.object({
   type: z.literal("press_and_hold").describe("Press and hold an element (anti-bot 'press and hold to verify' widgets). Page-changing — put LAST."),
   index: z.coerce.number().int().min(1).describe("The [index] of the element to press and hold."),
-  // preprocess null/"" → undefined so `.default(1500)` applies
-  // (otherwise `Number(null) === 0` coerces successfully and bypasses the default).
+ // preprocess null/"" → undefined so `.default(1500)` applies
+ // (otherwise `Number(null) === 0` coerces successfully and bypasses the default).
   hold_ms: z.preprocess(
     (v) => (v === null || v === "" ? undefined : v),
     z.coerce.number().int().min(0).max(60000),
@@ -381,12 +381,12 @@ export const ActionSchema = z.discriminatedUnion("type", [
 /** Schema for the navigator's per-step structured output.
  *
  * Tolerant of model variation:
- *   - `evaluation_previous_goal` is optional with a default — many models omit
- *     it on step 0 (no previous goal to evaluate yet).
- *   - `thinking`/`memory`/`next_goal` default to empty strings so a model that
- *     emits only `action` still validates.
- *   - Extra/unknown fields are stripped (Zod default), so a model that adds
- *     e.g. `"confidence": 0.9` doesn't fail validation.
+ * - `evaluation_previous_goal` is optional with a default — many models omit
+ * it on step 0 (no previous goal to evaluate yet).
+ * - `thinking`/`memory`/`next_goal` default to empty strings so a model that
+ * emits only `action` still validates.
+ * - Extra/unknown fields are stripped (Zod default), so a model that adds
+ * e.g. `"confidence": 0.9` doesn't fail validation.
  */
 export const AgentOutputSchema = z.object({
   thinking: z.string().default("").describe("Your step-by-step reasoning about the current state and what to do next."),
@@ -397,16 +397,16 @@ export const AgentOutputSchema = z.object({
     .array(ActionSchema)
     .min(1)
     .max(50)
-    // Exclusive actions (see ACTION_METADATA[*].exclusive — e.g. `done`,
-    // `ask_human`, `takeover`, `detect_visual`) MUST be the only action in
-    // their step. Any sibling actions would otherwise be silently dropped by
-    // the orchestrator's short-circuit paths (e.g. short-circuit-to-done) or
-    // never reach execution. The prompt already tags these "[must be the only
-    // action]", and the metadata flag drives this check, so the parser and the
-    // prompt stay consistent and the flag is not dead data. Enforce at parse
-    // time so invalid multi-action steps (e.g. [{type:"done"},{type:"input"}])
-    // are rejected before they reach execution. A single exclusive action (the
-    // valid case) is unaffected.
+ // Exclusive actions (see ACTION_METADATA[*].exclusive — e.g. `done`,
+ // `ask_human`, `takeover`, `detect_visual`) MUST be the only action in
+ // their step. Any sibling actions would otherwise be silently dropped by
+ // the orchestrator's short-circuit paths (e.g. short-circuit-to-done) or
+ // never reach execution. The prompt already tags these "[must be the only
+ // action]", and the metadata flag drives this check, so the parser and the
+ // prompt stay consistent and the flag is not dead data. Enforce at parse
+ // time so invalid multi-action steps (e.g. [{type:"done"},{type:"input"}])
+ // are rejected before they reach execution. A single exclusive action (the
+ // valid case) is unaffected.
     .superRefine((actions, ctx) => {
       const exclusive = actions.filter((a) => ACTION_METADATA[a.type]?.exclusive);
       if (exclusive.length > 0 && actions.length > 1) {
@@ -508,7 +508,7 @@ export function actionListForPrompt(maxActions: number, visionMode: "disabled" |
   if (cached !== undefined) return cached;
   const lines: string[] = [];
   for (const [, meta] of Object.entries(ACTION_METADATA)) {
-    // Skip detect_visual when vision mode doesn't use it as a tool
+ // Skip detect_visual when vision mode doesn't use it as a tool
     if (meta.name === "detect_visual" && visionMode !== "adaptive") continue;
     const tag = meta.pageChanging
       ? " [page-changing — put last]"
@@ -529,18 +529,18 @@ export function actionListForPrompt(maxActions: number, visionMode: "disabled" |
 // spot when the agent repeats the same action 3+ times in a row.
 //
 // Per-type comparison:
-//   - CLICK / HOVER / INPUT / SELECT_DROPDOWN: same `index`.
-//   - SCROLL: same direction (down vs up).
-//   - SEND_KEYS: same `keys`.
-//   - NAVIGATE: same `url`.
-//   - SWITCH_TAB / CLOSE_TAB: same `tab_id`.
-//   - GO_BACK / WAIT / DONE / TAKEOVER / ASK_HUMAN / VERIFY / LOAD_SKILL /
-//     SEARCH_PAGE / FIND_ELEMENTS / FIND_TEXT / EXTRACT / DROPDOWN_OPTIONS /
-//     EVALUATE: compared by their distinguishing param (or always-equivalent
-//     for parameterless actions like GO_BACK).
-//   - SCREENSHOT / SAVE_AS_PDF: compared by `file_name` (different filenames =
-//     distinct actions).
-//   - SEARCH: same `query` (+ engine when specified).
+// - CLICK / HOVER / INPUT / SELECT_DROPDOWN: same `index`.
+// - SCROLL: same direction (down vs up).
+// - SEND_KEYS: same `keys`.
+// - NAVIGATE: same `url`.
+// - SWITCH_TAB / CLOSE_TAB: same `tab_id`.
+// - GO_BACK / WAIT / DONE / TAKEOVER / ASK_HUMAN / VERIFY / LOAD_SKILL /
+// SEARCH_PAGE / FIND_ELEMENTS / FIND_TEXT / EXTRACT / DROPDOWN_OPTIONS /
+// EVALUATE: compared by their distinguishing param (or always-equivalent
+// for parameterless actions like GO_BACK).
+// - SCREENSHOT / SAVE_AS_PDF: compared by `file_name` (different filenames =
+// distinct actions).
+// - SEARCH: same `query` (+ engine when specified).
 //
 // Different action types are NEVER equivalent.
 export function isEquivalentAction(a: Action, b: Action): boolean {
@@ -554,12 +554,12 @@ export function isEquivalentAction(a: Action, b: Action): boolean {
       return a.index === bb.index && (a.hold_ms ?? 1500) === (bb.hold_ms ?? 1500);
     }
     case "input":
-      // `index` is a per-field ordinal, NOT part of "same action" identity for
-      // the early-stop detector. Typing the same `text` into 3+ different
-      // fields is suspicious (caught by the whole-history cross-field branch in
-      // early-stop.ts) and must NOT be treated as a distinct action. Compare
-      // only the stable distinguishing field (`text`) so cross-field repeats
-      // are detected. (`alert_send_keys` is already text-only below.)
+ // `index` is a per-field ordinal, NOT part of "same action" identity for
+ // the early-stop detector. Typing the same `text` into 3+ different
+ // fields is suspicious (caught by the whole-history cross-field branch in
+ // early-stop.ts) and must NOT be treated as a distinct action. Compare
+ // only the stable distinguishing field (`text`) so cross-field repeats
+ // are detected. (`alert_send_keys` is already text-only below.)
       return a.text === (b as Extract<Action, { type: "input" }>).text;
     case "select_dropdown": {
       const bb = b as Extract<Action, { type: "select_dropdown" }>;
@@ -578,9 +578,9 @@ export function isEquivalentAction(a: Action, b: Action): boolean {
       return a.tab_id === (b as Extract<Action, { type: typeof a.type }>).tab_id;
     case "go_back":
     case "wait":
-      // Both are essentially parameterless from the loop-detector's POV.
-      // `wait.seconds` differences don't matter — repeating wait(s) of any
-      // duration is the same kind of stuck.
+ // Both are essentially parameterless from the loop-detector's POV.
+ // `wait.seconds` differences don't matter — repeating wait(s) of any
+ // duration is the same kind of stuck.
       return true;
     case "find_text":
       return a.text === (b as Extract<Action, { type: "find_text" }>).text;
@@ -601,10 +601,10 @@ export function isEquivalentAction(a: Action, b: Action): boolean {
       );
     case "screenshot":
     case "save_as_pdf":
-      // Two screenshots / PDFs to DIFFERENT filenames are distinct actions
-      // (e.g. capturing evidence at different steps), so compare `file_name`.
-      // Only genuinely parameterless actions (go_back, alert_accept/dismiss/
-      // get_text) are always-equivalent.
+ // Two screenshots / PDFs to DIFFERENT filenames are distinct actions
+ // (e.g. capturing evidence at different steps), so compare `file_name`.
+ // Only genuinely parameterless actions (go_back, alert_accept/dismiss/
+ // get_text) are always-equivalent.
       return (a.file_name ?? "") === ((b as Extract<Action, { type: "screenshot" | "save_as_pdf" }>).file_name ?? "");
     case "dropdown_options":
       return a.index === (b as Extract<Action, { type: "dropdown_options" }>).index;
@@ -632,16 +632,16 @@ export function isEquivalentAction(a: Action, b: Action): boolean {
     case "alert_accept":
     case "alert_dismiss":
     case "alert_get_text":
-      // All three are parameterless — equivalent to themselves.
+ // All three are parameterless — equivalent to themselves.
       return true;
     case "alert_send_keys":
       return a.text === (b as Extract<Action, { type: "alert_send_keys" }>).text;
     case "detect_visual":
       return a.query === (b as Extract<Action, { type: "detect_visual" }>).query;
     default: {
-      // Exhaustiveness guard — every known action type has a `case` above, so
-      // this branch is unreachable for the current union. For any unknown/future
-      // action type, treat it as NOT equivalent (safe default for loop detection).
+ // Exhaustiveness guard — every known action type has a `case` above, so
+ // this branch is unreachable for the current union. For any unknown/future
+ // action type, treat it as NOT equivalent (safe default for loop detection).
       const _exhaustive: never = a;
       void _exhaustive;
       return false;

@@ -34,13 +34,13 @@ describe("find_elements sensitive-attribute redaction", () => {
     expect(res.success).toBe(true);
     const out = res.extractedContent ?? "";
 
-    // Sensitive `value`s are redacted — the raw secrets must NOT appear.
+ // Sensitive `value`s are redacted — the raw secrets must NOT appear.
     expect(out).toContain("[value redacted]");
     expect(out).not.toContain("supersecret");
     expect(out).not.toContain("000999");
     expect(out).not.toContain("4111111111111111");
 
-    // Non-sensitive value + attribute are returned verbatim.
+ // Non-sensitive value + attribute are returned verbatim.
     expect(out).toContain("alice");
     expect(out).toContain("meta-info");
   });

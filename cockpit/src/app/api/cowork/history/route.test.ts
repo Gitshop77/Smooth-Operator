@@ -1,9 +1,24 @@
 import { describe, it, expect, vi } from 'vitest';
 
-const { findMany, del, deleteMany } = vi.hoisted(() => ({
-  findMany: vi.fn(),
-  del: vi.fn(),
-  deleteMany: vi.fn(),
+const { findMany, del, deleteMany, PrismaClientKnownRequestError } = vi.hoisted(() => {
+  class PrismaClientKnownRequestError extends Error {
+    code: string;
+    constructor(message: string, code: string) {
+      super(message);
+      this.name = 'PrismaClientKnownRequestError';
+      this.code = code;
+    }
+  }
+  return {
+    findMany: vi.fn(),
+    del: vi.fn(),
+    deleteMany: vi.fn(),
+    PrismaClientKnownRequestError,
+  };
+});
+
+vi.mock('@prisma/client', () => ({
+  Prisma: { PrismaClientKnownRequestError },
 }));
 
 vi.mock('@/lib/db', () => ({
@@ -15,14 +30,20 @@ vi.mock('@/lib/db', () => ({
 import { GET, DELETE } from '@/app/api/cowork/history/route';
 
 function fakeReq(query = '', body?: unknown): any {
+  const headers = new Headers();
   if (body !== undefined) {
     return {
       nextUrl: { searchParams: new URLSearchParams(query) },
-      body: true,
-      text: async () => JSON.stringify(body),
+      headers,
+      body: body === null ? null : new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(JSON.stringify(body)));
+          controller.close();
+        },
+      }),
     };
   }
-  return { nextUrl: { searchParams: new URLSearchParams(query) } };
+  return { nextUrl: { searchParams: new URLSearchParams(query) }, headers };
 }
 
 describe('GET /api/cowork/history', () => {
@@ -53,7 +74,10 @@ describe('DELETE /api/cowork/history', () => {
   });
 
   it('returns 404 when the entry does not exist', async () => {
-    const err = new Error('Record to delete does not exist. (Prisma error P2025)');
+    const err = new PrismaClientKnownRequestError(
+      'Record to delete does not exist.',
+      'P2025',
+    );
     del.mockRejectedValueOnce(err);
     const res = await DELETE(fakeReq('id=missing'));
     expect(res.status).toBe(404);
@@ -73,7 +97,7 @@ describe('DELETE /api/cowork/history', () => {
     deleteMany.mockResolvedValueOnce({ count: 42 });
     const res = await DELETE(fakeReq('all=1', { confirm: true }));
     expect(res.status).toBe(200);
-    expect(deleteMany).toHaveBeenCalledWith({});
+    expect(deleteMany).toHaveBeenCalledWith({ where: {} });
     const body = await res.json();
     expect(body.ok).toBe(true);
     expect(body.deleted).toBe(42);

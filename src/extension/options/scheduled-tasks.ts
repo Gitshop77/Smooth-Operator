@@ -27,6 +27,29 @@ const ALARM_PREFIX = "open_cowork_scheduled_";
 const DEFAULT_HOUR = 9;
 const DEFAULT_MINUTE = 0;
 const DEFAULT_DAY_OF_WEEK = 1;
+/** Max characters allowed in a scheduled-task prompt (storage / UI sanity). */
+const MAX_SCHEDULED_TASK_PROMPT = 10_000;
+
+/**
+ * Serialize Options-side scheduled-task mutations so rapid delete clicks in the
+ * SAME context can't interleave their read-modify-write of the whole list and
+ * resurrect a just-deleted task (finding #10 — lost-update / task resurrection).
+ * This mirrors the `withTaskMutation` mutex in `lib/agent/scheduled-tasks.ts`.
+ * The canonical delete should ultimately live in the lib (sharing ONE lock with
+ * the SW context), but until then this prevents the same-context race.
+ */
+let optionsTaskLock: Promise<void> = Promise.resolve();
+async function withTaskMutation<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = optionsTaskLock;
+  let release!: () => void;
+  optionsTaskLock = new Promise<void>((r) => (release = r));
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
 
 const show = (id: string) => $(id).classList.remove("is-hidden");
 const hide = (id: string) => $(id).classList.add("is-hidden");
@@ -53,8 +76,8 @@ $("scheduleType").addEventListener("change", () => {
 // ─── Scheduled tasks ───────────────────────────────────────────────────────
 
 /** Persist the full task list. Used by the delete path only — add/toggle go
- *  through the canonical `saveScheduledTask`, which also arms/disarms the
- *  alarm and manages the keep-awake lock. */
+ * through the canonical `saveScheduledTask`, which also arms/disarms the
+ * alarm and manages the keep-awake lock. */
 async function writeScheduledTasks(tasks: ScheduledTask[]): Promise<void> {
   await chrome.storage.local.set({ [STORAGE_KEYS.scheduledTasks]: tasks });
 }
@@ -66,7 +89,13 @@ function formatSchedule(s: ScheduledTaskSchedule): string {
   if (s.type === "interval") return `every ${s.intervalMinutes ?? 60} min`;
   if (s.type === "daily") return `daily at ${hh}:${mm}`;
   const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  return `weekly ${days[s.dayOfWeek ?? DEFAULT_DAY_OF_WEEK]} ${hh}:${mm}`;
+ // Guard the stored `dayOfWeek` (a corrupt/absent value would index `days`
+ // as `undefined` and render "weekly undefined HH:MM").
+  const dow =
+    typeof s.dayOfWeek === "number" && s.dayOfWeek >= 0 && s.dayOfWeek <= 6
+      ? s.dayOfWeek
+      : DEFAULT_DAY_OF_WEEK;
+  return `weekly ${days[dow]} ${hh}:${mm}`;
 }
 
 /** Render the scheduled tasks list. Call after every mutation. */
@@ -89,35 +118,52 @@ export async function renderSchedule(): Promise<void> {
       `</span>`;
     const [enableBtn, delBtn] = Array.from(item.querySelectorAll("button"));
     delBtn.addEventListener("click", async () => {
-      const filtered = tasks.filter((x) => x.id !== t.id);
-      await writeScheduledTasks(filtered);
-      try {
-        await chrome.alarms.clear(`${ALARM_PREFIX}${t.id}`);
-      } catch (e) {
-        console.warn("[options] alarms.clear failed:", e);
-      }
-      // `maybeReleaseKeepAwake` internally checks whether any enabled task
-      // remains armed before releasing the OS power lock.
-      void maybeReleaseKeepAwake();
-      await renderSchedule();
+      await withTaskMutation(async () => {
+ // Re-read the freshest list INSIDE the lock so two rapid deletes can't
+ // each overwrite the other's write (task-resurrection race, finding
+ // #10). Removing by id (not by a stale render snapshot) is safe even if
+ // another context mutated the list between renders.
+        const current = await listScheduledTasks();
+        const filtered = current.filter((x) => x.id !== t.id);
+        await writeScheduledTasks(filtered);
+ // Clear the alarm. If the storage write succeeded but `clear` fails, the
+ // alarm would otherwise linger (orphaned) and fire for a deleted task,
+ // so retry once before giving up (finding: delete storage-write success
+ // not matched by alarm-clear success). A canonical `deleteScheduledTask`
+ // in the lib would make this transactional.
+        try {
+          await chrome.alarms.clear(`${ALARM_PREFIX}${t.id}`);
+        } catch (e) {
+          console.warn("[options] alarms.clear failed, retrying:", e);
+          try {
+            await chrome.alarms.clear(`${ALARM_PREFIX}${t.id}`);
+          } catch (e2) {
+            console.warn("[options] alarms.clear retry failed (alarm may be orphaned):", e2);
+          }
+        }
+ // `maybeReleaseKeepAwake` internally checks whether any enabled task
+ // remains armed before releasing the OS power lock.
+        void maybeReleaseKeepAwake();
+      });
+      await renderSchedule().catch((err) => console.warn("[options] renderSchedule failed:", err));
     });
     enableBtn.addEventListener("click", async () => {
-      // Flip enabled and persist through the canonical `saveScheduledTask`,
-      // which delegates arming to `scheduleAlarm`:
-      //   - enabling → arms the alarm + requests the keep-awake lock;
-      //   - disabling → clears the alarm + releases the keep-awake lock IF no
-      //     other enabled task remains.
-      // This is the single source of truth for arming, so a disabled task can
-      // never leave an armed alarm or a leaked keep-awake lock.
+ // Flip enabled and persist through the canonical `saveScheduledTask`,
+ // which delegates arming to `scheduleAlarm`:
+ // - enabling → arms the alarm + requests the keep-awake lock;
+ // - disabling → clears the alarm + releases the keep-awake lock IF no
+ // other enabled task remains.
+ // This is the single source of truth for arming, so a disabled task can
+ // never leave an armed alarm or a leaked keep-awake lock.
       t.enabled = !t.enabled;
       try {
         await saveScheduledTask(t);
       } catch (e) {
         console.warn("[options] saveScheduledTask failed:", e);
-        // Revert the in-memory flip so the re-render reflects persisted state.
+ // Revert the in-memory flip so the re-render reflects persisted state.
         t.enabled = !t.enabled;
       }
-      await renderSchedule();
+      await renderSchedule().catch((err) => console.warn("[options] renderSchedule failed:", err));
     });
     list.appendChild(item);
   }
@@ -127,6 +173,16 @@ $("addSchedule").addEventListener("click", async () => {
   const task = ($("scheduleTask") as HTMLInputElement).value.trim();
   const type = ($("scheduleType") as HTMLSelectElement).value as ScheduledTaskSchedule["type"];
   if (!task) return;
+ // Bound the prompt length before persisting (finding: scheduled task prompt
+ // stored with no length/content guard). An unbounded prompt bloats
+ // chrome.storage.local and is only shown truncated in the list preview.
+  if (task.length > MAX_SCHEDULED_TASK_PROMPT) {
+    await alertModal({
+      title: "Prompt too long",
+      message: `Scheduled task prompt must be ${MAX_SCHEDULED_TASK_PROMPT} characters or fewer.`,
+    });
+    return;
+  }
   const schedule: ScheduledTaskSchedule = { type };
   if (type === "interval") {
     const intervalMinutes = parseInt(($("scheduleInterval") as HTMLInputElement).value, 10);
@@ -160,15 +216,21 @@ $("addSchedule").addEventListener("click", async () => {
     enabled: true,
     createdAt: Date.now(),
   };
-  // Persist + arm via the canonical `saveScheduledTask` (single source of truth
-  // for arming). It validates the schedule, writes storage, and arms the alarm
-  // — rolling storage back if arming fails, so a half-committed state (task
-  // stored + enabled but no alarm) can never persist.
+ // Persist + arm via the canonical `saveScheduledTask` (single source of truth
+ // for arming). It validates the schedule, writes storage, and arms the alarm
+ // — rolling storage back if arming fails, so a half-committed state (task
+ // stored + enabled but no alarm) can never persist.
   try {
     await saveScheduledTask(scheduledTask);
   } catch (e) {
     console.warn("[options] saveScheduledTask failed:", e);
-    await renderSchedule();
+ // Surface the failure to the user instead of silently dropping the task
+ // (finding: addSchedule silently swallowed saveScheduledTask failures).
+    await alertModal({
+      title: "Could not save scheduled task",
+      message: e instanceof Error ? e.message : String(e),
+    });
+    await renderSchedule().catch((err) => console.warn("[options] renderSchedule failed:", err));
     return;
   }
   ($("scheduleTask") as HTMLInputElement).value = "";

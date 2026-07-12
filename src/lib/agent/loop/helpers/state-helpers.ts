@@ -40,9 +40,9 @@ export function costCapExceeded(state: LoopState): boolean {
   if (config.costCapUsd !== undefined && config.costCapUsd > 0 && totalCostUsd >= config.costCapUsd) {
     const text = `Cost cap of $${config.costCapUsd} reached.`;
     onEvent({ type: "done", step, success: false, text });
-    // Set state.finalResult so buildRunResult returns the real text for the
-    // runEnd callback (not ""). Without this, dispatcher.runEnd subscribers
-    // get an empty string even though the SSE done event has the real text.
+ // Set state.finalResult so buildRunResult returns the real text for the
+ // runEnd callback (not ""). Without this, dispatcher.runEnd subscribers
+ // get an empty string even though the SSE done event has the real text.
     state.finalResult = { success: false, text };
     return true;
   }

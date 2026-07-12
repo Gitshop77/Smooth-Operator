@@ -6,18 +6,18 @@
  * loop-memory / persistence logic. This file actually covers the agent loop's
  * persistent per-site memory:
  *
- *   1. `persistent-memory.ts` — `saveMemory` (append/replace), `getMemoriesForUrl`
- *      (read + subdomain/root-domain match), `formatMemories` (stable output).
- *   2. `loop/messages.ts` — `buildNavigatorUserMessage` loads the site memory via
- *      `getMemoriesForUrl` + `formatMemories` and injects a `<site_memory>` block
- *      into the navigator prompt. This is the "read/format/append *around the
- *      loop*" path the old name implied but never tested.
+ * 1. `persistent-memory.ts` — `saveMemory` (append/replace), `getMemoriesForUrl`
+ * (read + subdomain/root-domain match), `formatMemories` (stable output).
+ * 2. `loop/messages.ts` — `buildNavigatorUserMessage` loads the site memory via
+ * `getMemoriesForUrl` + `formatMemories` and injects a `<site_memory>` block
+ * into the navigator prompt. This is the "read/format/append *around the
+ * loop*" path the old name implied but never tested.
  *
  * The localStorage stub is required because `persistent-memory.ts` falls back to
  * `localStorage` when `chrome.storage.local` is unavailable (jsdom test env).
  */
 
-import { describe, test, expect, beforeAll, beforeEach } from "vitest";
+import { describe, test, expect, beforeAll, beforeEach, afterAll } from "vitest";
 import {
   saveMemory,
   deleteMemory,
@@ -27,14 +27,18 @@ import {
   type SiteMemory,
 } from "../src/lib/agent/persistent-memory";
 import { buildNavigatorUserMessage } from "../src/lib/agent/loop/messages";
-import { installLocalStorageStub } from "./helpers";
+import { installLocalStorageStub, restoreLocalStorageStub } from "./helpers";
 
 beforeAll(() => {
   installLocalStorageStub();
 });
 
+afterAll(() => {
+  restoreLocalStorageStub();
+});
+
 beforeEach(() => {
-  // Clear storage + in-memory cache so each test starts from a clean slate.
+ // Clear storage + in-memory cache so each test starts from a clean slate.
   localStorage.removeItem("__opencowork_site_memories");
   __resetMemoryCacheForTests();
 });
@@ -94,8 +98,8 @@ describe("formatMemories stable output", () => {
       { domain: "apple.com", notes: "first", updatedAt: 2 },
       { domain: "zebra.com", notes: "second", updatedAt: 1 },
     ];
-    // formatMemories is a pure formatter — it renders exactly in input order,
-    // so the output is stable/byte-for-byte reproducible for a given input.
+ // formatMemories is a pure formatter — it renders exactly in input order,
+ // so the output is stable/byte-for-byte reproducible for a given input.
     expect(formatMemories(memories)).toBe(
       "<site_memory>\n[apple.com]: first\n[zebra.com]: second\n</site_memory>",
     );
@@ -142,8 +146,8 @@ describe("loop/messages — persistent memory injected into navigator prompt", (
 
     expect(msg).toContain("<site_memory>");
     expect(msg).toContain("username is alice");
-    // The github.com memory is for a different domain and must NOT leak into
-    // the example.com navigator prompt.
+ // The github.com memory is for a different domain and must NOT leak into
+ // the example.com navigator prompt.
     expect(msg).not.toContain("prefer the CLI");
   });
 
@@ -189,8 +193,8 @@ describe("loop/messages — persistent memory injected into navigator prompt", (
     });
     expect(first).toContain("first note");
 
-    // The options page can update the per-site note; the next loop build must
-    // re-read storage and surface the NEW value (live read, not a stale cache).
+ // The options page can update the per-site note; the next loop build must
+ // re-read storage and surface the NEW value (live read, not a stale cache).
     await saveMemory("example.com", "updated note");
     const second = await buildNavigatorUserMessage({
       task: "t",

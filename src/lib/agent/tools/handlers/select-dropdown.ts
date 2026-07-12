@@ -8,7 +8,7 @@
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import { highlightElement } from "../../dom/overlay";
-import { NoSuchElementException } from "../../errors";
+import { NoSuchElementException, ElementNotSelectableError } from "../../errors";
 import { TIMINGS, sleep } from "../constants";
 import { resolveElement, safeScrollIntoView, Select } from "../helpers";
 import type { ActionContext } from "./types";
@@ -29,26 +29,31 @@ import type { ActionContext } from "./types";
  * either of which would re-order the list and desync `option_index`.
  *
  * Resolution order:
- *   1. Visible `[role=option]` inside the trigger's own subtree.
- *   2. A visible `[role=listbox]` associated with the trigger (portaled panel).
- *   3. Any single visible (open) `[role=listbox]` on the page.
- *   4. Last resort: every visible `[role=option]` on the page. This can
- *      re-order the list if other dropdowns are open, so `option_index`
- *      is then unreliable — callers should prefer `text` for selection.
+ * 1. Visible `[role=option]` inside the trigger's own subtree.
+ * 2. A visible `[role=listbox]` associated with the trigger (portaled panel).
+ * 3. Any single visible (open) `[role=listbox]` on the page.
+ * 4. Last resort: every visible `[role=option]` on the page. This can
+ * re-order the list if other dropdowns are open, so `option_index`
+ * is then unreliable — callers should prefer `text` for selection.
  */
 function collectDropdownOptions(trigger: Element): HTMLElement[] {
   const visible = (els: NodeListOf<Element> | Element[]) =>
     (Array.from(els) as HTMLElement[]).filter(isVisible);
 
-  // 1. Options inside the widget's own subtree (non-portaled widgets).
-  //    Filtered to *visible* options so hidden in-subtree stubs do not
-  //    shadow the portaled, visible options the model actually enumerated.
+ // 1. Options inside the widget's own subtree (non-portaled widgets).
+ // Filtered to *visible* options so hidden in-subtree stubs do not
+ // shadow the portaled, visible options the model actually enumerated.
   const subtree = visible(trigger.querySelectorAll('[role="option"]'));
   if (subtree.length > 0) return subtree;
 
-  // 2. Portaled panel: a listbox labelled by this trigger.
+ // 2. Portaled panel: a listbox labelled by this trigger.
   const triggerId = trigger.getAttribute("id");
-  if (triggerId) {
+ // `aria-labelledby~="…"` is a whitespace-token match; an attacker-controlled
+ // id containing quotes/CSS metacharacters could otherwise break the selector
+ // (or, worse, be parsed as a malformed selector that throws). Only use the
+ // id-scoped lookup when it is a valid CSS identifier; otherwise skip straight
+ // to the page-wide listbox scan below.
+  if (triggerId && /^-?[_a-zA-Z][_a-zA-Z0-9-]*$/.test(triggerId)) {
     const labelled = document.querySelector<HTMLElement>(
       `[role="listbox"][aria-labelledby~="${triggerId}"]`,
     );
@@ -58,7 +63,7 @@ function collectDropdownOptions(trigger: Element): HTMLElement[] {
     }
   }
 
-  // 3. The single currently-open (visible) listbox on the page.
+ // 3. The single currently-open (visible) listbox on the page.
   const openListbox = (
     Array.from(document.querySelectorAll('[role="listbox"]')) as HTMLElement[]
   ).find(isVisible);
@@ -67,7 +72,7 @@ function collectDropdownOptions(trigger: Element): HTMLElement[] {
     if (opts.length > 0) return opts;
   }
 
-  // 4. Last resort — see note above.
+ // 4. Last resort — see note above.
   return visible(document.querySelectorAll('[role="option"]'));
 }
 
@@ -87,9 +92,9 @@ function collectDropdownOptions(trigger: Element): HTMLElement[] {
 let _layoutEnginePresent: boolean | null = null;
 function layoutEnginePresent(): boolean {
   if (_layoutEnginePresent === null) {
-    // Probe the root element: in jsdom neither the documentElement nor the
-    // body is laid out, so their rects are all zeros. If the root reports a
-    // non-zero rect, a real layout engine is active.
+ // Probe the root element: in jsdom neither the documentElement nor the
+ // body is laid out, so their rects are all zeros. If the root reports a
+ // non-zero rect, a real layout engine is active.
     const root = document.documentElement;
     const r = root.getBoundingClientRect();
     _layoutEnginePresent = r.width > 0 || r.height > 0;
@@ -102,8 +107,8 @@ function isVisible(el: Element): boolean {
   if (style.display === "none" || style.visibility === "hidden") return false;
   const rect = el.getBoundingClientRect();
   if (rect.width > 0 && rect.height > 0) return true;
-  // Zero-size rect: hidden in a real browser, but inconclusive without a
-  // layout engine — treat as visible so non-layout envs still resolve options.
+ // Zero-size rect: hidden in a real browser, but inconclusive without a
+ // layout engine — treat as visible so non-layout envs still resolve options.
   return !layoutEnginePresent();
 }
 
@@ -113,21 +118,21 @@ export async function handleSelectDropdown(
 ): Promise<ActionResult> {
   const { state } = ctx;
   const el = resolveElement(state, action.index);
-  // Custom-dropdown fallback: when the resolved element isn't a
-  // native `<select>` but is a custom dropdown widget
-  // (`div[role=listbox]`, `div[role=combobox]`, or any element
-  // containing `[role=option]` children), the standard `Select`
-  // helper can't operate on it. The old implementation threw
-  // `element is not a <select>` immediately — leaving the agent
-  // unable to interact with the many modern SPAs (React-Select,
-  // MUI Autocomplete, downshift) that use custom dropdowns.
-  //
-  // The fallback:
-  //   1. Click the dropdown to open its options panel.
-  //   2. Find the option whose text matches `want` (exact match
-  //      first, then case-insensitive substring).
-  //   3. Click the matched option.
-  //   4. Settle briefly so the widget's onChange fires.
+ // Custom-dropdown fallback: when the resolved element isn't a
+ // native `<select>` but is a custom dropdown widget
+ // (`div[role=listbox]`, `div[role=combobox]`, or any element
+ // containing `[role=option]` children), the standard `Select`
+ // helper can't operate on it. The old implementation threw
+ // `element is not a <select>` immediately — leaving the agent
+ // unable to interact with the many modern SPAs (React-Select,
+ // MUI Autocomplete, downshift) that use custom dropdowns.
+ //
+ // The fallback:
+ // 1. Click the dropdown to open its options panel.
+ // 2. Find the option whose text matches `want` (exact match
+ // first, then case-insensitive substring).
+ // 3. Click the matched option.
+ // 4. Settle briefly so the widget's onChange fires.
   if (!(el instanceof HTMLSelectElement)) {
     const isCustomDropdown =
       el.getAttribute("role") === "listbox" ||
@@ -137,16 +142,16 @@ export async function handleSelectDropdown(
       try {
         safeScrollIntoView(el);
         await sleep(TIMINGS.clickScrollIntoView);
-        // 1. Open the dropdown.
+ // 1. Open the dropdown.
         (el as HTMLElement).click();
         await sleep(TIMINGS.clickAfterSettle);
-        // 2. Collect the candidate options.
-        // `optionEls` is the single canonical enumeration we use for BOTH
-        // reading option text and resolving `option_index`, built to mirror
-        // the visible options the model observed (in-subtree first, then
-        // the portaled panel scoped to this trigger). This keeps
-        // `option_index` resolution aligned with the model's view. `text`
-        // is always preferred when supplied; `option_index` is the fallback.
+ // 2. Collect the candidate options.
+ // `optionEls` is the single canonical enumeration we use for BOTH
+ // reading option text and resolving `option_index`, built to mirror
+ // the visible options the model observed (in-subtree first, then
+ // the portaled panel scoped to this trigger). This keeps
+ // `option_index` resolution aligned with the model's view. `text`
+ // is always preferred when supplied; `option_index` is the fallback.
         const optionEls = collectDropdownOptions(el);
         if (optionEls.length === 0) {
           return {
@@ -155,13 +160,13 @@ export async function handleSelectDropdown(
             message: "custom-dropdown has no options (opened but none found in subtree or portal)",
           };
         }
-        // Prefer text matching where possible: when the LLM provides
-        // `text` we select by that unambiguous value (exact, then
-        // case-insensitive substring). Only when `text` is empty do we
-        // fall back to `option_index`, which resolves directly against
-        // this same `optionEls` enumeration — the canonical, visible-option
-        // list we built to mirror what the model observed. If `option_index`
-        // is out of range `want` is empty and we fail safely below.
+ // Prefer text matching where possible: when the LLM provides
+ // `text` we select by that unambiguous value (exact, then
+ // case-insensitive substring). Only when `text` is empty do we
+ // fall back to `option_index`, which resolves directly against
+ // this same `optionEls` enumeration — the canonical, visible-option
+ // list we built to mirror what the model observed. If `option_index`
+ // is out of range `want` is empty and we fail safely below.
         const want = (action.text?.trim() || "")
           || (action.option_index != null
             ? (optionEls[action.option_index]?.textContent ?? "").trim()
@@ -191,7 +196,15 @@ export async function handleSelectDropdown(
             `custom-dropdown option "${want}" not found. Available: ${available}`,
           );
         }
-        // 3. Click the matched option.
+ // 3. Click the matched option. The click is what performs the
+ // selection in the widget — MUI / React-Select / downshift all
+ // select via the option's own click handler, and that handler fires
+ // from this click. A successfully-resolved, clicked option is a
+ // successful selection, so we report success here. (We deliberately
+ // do not infer success from the trigger's text/value changing:
+ // many widgets reflect the selection asynchronously or not on the
+ // trigger at all, so such a check would report false failures for
+ // genuine selections.)
         safeScrollIntoView(match);
         await sleep(TIMINGS.clickScrollIntoView);
         match.click();
@@ -211,25 +224,25 @@ export async function handleSelectDropdown(
     throw new Error(`element [${action.index}] is not a <select> or custom dropdown (role=listbox/combobox)`);
   }
   highlightElement(el, `select [${action.index}]`);
-  // Use the Select helper (modelled on the standard `<select>` wrapper
-  // class) for robust option selection — handles `<optgroup>`-nested
-  // options, multi-select, disabled-option guards, and the
-  // exact-match-then-substring fallback for text-based selection.
+ // Use the Select helper (modelled on the standard `<select>` wrapper
+ // class) for robust option selection — handles `<optgroup>`-nested
+ // options, multi-select, disabled-option guards, and the
+ // exact-match-then-substring fallback for text-based selection.
   const select = new Select(el);
   const want = action.text;
   let selectedLabel: string;
   try {
     if (want !== undefined && want !== "") {
-      // Try by visible text first (also matches `value` via the
-      // substring fallback). If that throws NoSuchElementException,
-      // fall back to treating `want` as the option's `value`.
+ // Try by visible text first (also matches `value` via the
+ // substring fallback). If that throws NoSuchElementException,
+ // fall back to treating `want` as the option's `value`.
       try {
         select.selectByVisibleText(want);
         const opt = select.getFirstSelectedOption();
         selectedLabel = opt ? (opt.textContent?.trim() || opt.value) : want;
       } catch (e) {
         if (e instanceof NoSuchElementException) {
-          // Try by value, then by index (if `want` parses as a number).
+ // Try by value, then by index (if `want` parses as a number).
           try {
             select.selectByValue(want);
             const opt = select.getFirstSelectedOption();
@@ -255,10 +268,14 @@ export async function handleSelectDropdown(
       throw new Error("must provide either text or option_index");
     }
   } catch (e) {
-    // Re-throw with the available-options hint so the LLM can recover.
-    if (e instanceof NoSuchElementException) {
+ // Re-throw with the available-options hint so the LLM can recover. Both a
+ // genuinely-missing option (NoSuchElementException) and a matched-but-
+ // disabled option (ElementNotSelectableError) are surfaced with the same
+ // actionable list, since both are common "option by value/index" failures.
+    if (e instanceof NoSuchElementException || e instanceof ElementNotSelectableError) {
       const available = select.getOptions().slice(0, 8).map((o, i) => `${i}:${o.textContent?.trim() || o.value || ""}`).join(", ");
-      throw new Error(`option "${want ?? action.option_index}" not found. Available: ${available}`);
+      const reason = e instanceof ElementNotSelectableError ? " (option is disabled)" : "";
+      throw new Error(`option "${want ?? action.option_index}" not found${reason}. Available: ${available}`);
     }
     throw e;
   }

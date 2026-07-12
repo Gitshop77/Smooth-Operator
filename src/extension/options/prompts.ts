@@ -76,12 +76,30 @@ $("customPlannerPrompt")?.addEventListener("change", () => {
   chrome.storage.local.set({ customPlannerPrompt: ($("customPlannerPrompt") as HTMLTextAreaElement).value });
   showSaved();
 });
-$("defaultTask")?.addEventListener("change", () => {
-  chrome.storage.local.set({ [STORAGE_KEYS.defaultTask]: ($("defaultTask") as HTMLTextAreaElement).value });
-  showSaved();
-});
+// NOTE: `defaultTask` persistence is owned by `settings-sync.ts` (its
+// `initAutoSave` writes the full settings snapshot, which already includes
+// `defaultTask`). A second change-listener here would be redundant and risk
+// divergence, so it is intentionally NOT registered.
 
 // ─── Quick-prompt CRUD ───────────────────────────────────────────────────────
+
+/**
+ * Show a styled, non-blocking inline validation error (replacing the previous
+ * native `alert()` calls, which are jarring and inconsistent with the rest of
+ * the options UI). The message auto-dismisses.
+ */
+function flashFieldError(message: string): void {
+  const host = (($("quickPromptName") as HTMLElement | null)?.parentElement) ?? document.body;
+  const el = document.createElement("div");
+  el.className = "qp-field-error";
+  el.textContent = message;
+  el.style.cssText =
+    "color:#b91c1c;background:#fef2f2;border:1px solid #fecaca;" +
+    "font:500 12px/1.3 ui-sans-serif,system-ui;padding:6px 9px;border-radius:6px;" +
+    "margin:6px 0;max-width:320px;";
+  host.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
 
 async function readQuickPrompts(): Promise<QuickPrompt[]> {
   const res = await chrome.storage.local.get(STORAGE_KEYS.quickPrompts);
@@ -104,8 +122,8 @@ function renderQuickPrompts(items: QuickPrompt[]): void {
       `<button type="button" class="qp-delete">Delete</button>`;
     item.querySelector("button")!.addEventListener("click", () => {
       void serialize(async () => {
-        // Delete by index, not by name, so a pre-existing duplicate name
-        // cannot mass-delete sibling entries.
+ // Delete by index, not by name, so a pre-existing duplicate name
+ // cannot mass-delete sibling entries.
         const current = await readQuickPrompts();
         current.splice(index, 1);
         await chrome.storage.local.set({ [STORAGE_KEYS.quickPrompts]: current });
@@ -123,16 +141,16 @@ $("addQuickPrompt")?.addEventListener("click", () => {
     const text = ($("quickPromptText") as HTMLInputElement).value.trim();
     if (!name || !text) return;
     if (name.length > NAME_MAX) {
-      alert(`Quick-prompt name must be at most ${NAME_MAX} characters.`);
+      flashFieldError(`Quick-prompt name must be at most ${NAME_MAX} characters.`);
       return;
     }
     if (text.length > TEXT_MAX) {
-      alert(`Quick-prompt text must be at most ${TEXT_MAX} characters.`);
+      flashFieldError(`Quick-prompt text must be at most ${TEXT_MAX} characters.`);
       return;
     }
     const items = await readQuickPrompts();
-    // Enforce name uniqueness: overwrite the existing entry instead of adding a
-    // second one, so delete-by-name (and delete-by-index) stays safe.
+ // Enforce name uniqueness: overwrite the existing entry instead of adding a
+ // second one, so delete-by-name (and delete-by-index) stays safe.
     const idx = items.findIndex((q) => q.name === name);
     if (idx >= 0) items[idx] = { name, text };
     else items.push({ name, text });

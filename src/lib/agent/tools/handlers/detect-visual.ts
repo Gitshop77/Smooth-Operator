@@ -28,9 +28,9 @@ export async function handleDetectVisual(
     };
   }
   try {
-    // `chrome.runtime.sendMessage` resolves `undefined` (not a rejection) when
-    // no listener is present, so read the response through a typed shape and
-    // validate each field before consuming it.
+ // `chrome.runtime.sendMessage` resolves `undefined` (not a rejection) when
+ // no listener is present, so read the response through a typed shape and
+ // validate each field before consuming it.
     const res = (await chrome.runtime.sendMessage({
       type: "DETECT_VISUAL",
       query: action.query,

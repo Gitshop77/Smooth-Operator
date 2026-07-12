@@ -30,7 +30,7 @@ const DOMAIN_MAX = 100;
 const INSTRUCTIONS_MAX = 50_000;
 // Human-readable skill names (e.g. "GitHub") — keep them to a single line and
 // within a sane length rather than forcing the strict tool-name regex.
-const NAME_RE = /^[^\n\r\t]{1,64}$/;
+const NAME_RE = new RegExp("^[^\\n\\r\\t]{1," + NAME_MAX + "}$");
 
 /**
  * True if `value` is a bare hostname (optionally a `*.` wildcard prefix), with
@@ -44,8 +44,8 @@ function isBareHostname(value: string): boolean {
   if (!candidate) return false;
   try {
     const u = new URL("http://" + candidate);
-    // URL lower-cases the hostname; compare lowercased so legitimate UPPERCASE
-    // / IDN hostnames aren't silently rejected.
+ // URL lower-cases the hostname; compare lowercased so legitimate UPPERCASE
+ // / IDN hostnames aren't silently rejected.
     return u.hostname.toLowerCase() === candidate.toLowerCase();
   } catch {
     return false;
@@ -86,8 +86,8 @@ function validateCustomSkills(raw: unknown): CustomSkill[] {
       console.warn(`[skills] dropping malformed custom skill at index ${i}.`, entry);
       return;
     }
-    // `frontmatter` is optional in storage (older entries may lack it); derive
-    // it when missing so the runtime keeps getting a one-line description.
+ // `frontmatter` is optional in storage (older entries may lack it); derive
+ // it when missing so the runtime keeps getting a one-line description.
     const frontmatter =
       typeof entry.frontmatter === "string"
         ? entry.frontmatter
@@ -116,7 +116,7 @@ export async function renderSkills(): Promise<void> {
     list.innerHTML = '<p class="empty-hint">No custom skills defined. Add one above.</p>';
     return;
   }
-  skills.forEach((s, index) => {
+  skills.forEach((s) => {
     const item = document.createElement("div");
     item.className = "skill-item";
     item.innerHTML =
@@ -128,7 +128,11 @@ export async function renderSkills(): Promise<void> {
       `<button type="button" class="skill-delete">Delete</button>`;
     item.querySelector("button")!.addEventListener("click", () => {
       void serialize(async () => {
-        const filtered = skills.filter((_, i) => i !== index);
+ // Re-read storage inside the task and delete by stable `name` so
+ // concurrent deletes don't operate on a stale render-time snapshot
+ // (index-based filtering resurrects/removes the wrong skill).
+        const current = await readCustomSkills();
+        const filtered = current.filter((sk) => sk.name !== s.name);
         await chrome.storage.local.set({ [CUSTOM_SKILLS_KEY]: filtered });
         await renderSkills();
         showSaved();
@@ -175,14 +179,14 @@ $("addSkill")?.addEventListener("click", () => {
       return;
     }
     const skills = await readCustomSkills();
-    // Enforce name uniqueness: overwrite the existing entry instead of adding a
-    // second one, so delete-by-name (and delete-by-index) stays safe.
+ // Enforce name uniqueness: overwrite the existing entry instead of adding a
+ // second one, so delete-by-name (and delete-by-index) stays safe.
     const idx = skills.findIndex((s) => s.name === name);
     const frontmatter = instructions.split("\n")[0].slice(0, 100);
-    // When updating an existing skill, preserve its other domains and merge in
-    // the newly-entered one — re-adding by name must not silently discard a
-    // multi-domain entry (e.g. re-adding "github.com" used to wipe the other
-    // domains the skill was already configured for).
+ // When updating an existing skill, preserve its other domains and merge in
+ // the newly-entered one — re-adding by name must not silently discard a
+ // multi-domain entry (e.g. re-adding "github.com" used to wipe the other
+ // domains the skill was already configured for).
     let domains: string[];
     if (idx >= 0) {
       const existing = skills[idx].domains;

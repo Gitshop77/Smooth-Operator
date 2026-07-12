@@ -13,15 +13,15 @@
  * `onLLMEnd`, so the callback uses a small state machine driven by the
  * other hooks to attribute each LLM call to the planner vs the navigator:
  *
- *   - Initially the next LLM call is the planner (the very first call in
- *     a run is the planner establishing the initial plan).
- *   - `onPlannerStep` sets the next phase to "navigator" (the planner just
- *     ran; the navigator runs next).
- *   - `onStepStart` sets the next phase to "navigator" (we're inside a
- *     navigator step).
- *   - `onStepEnd` sets the next phase to "planner" (between steps the
- *     planner MAY run if the interval hits — if it doesn't, the next
- *     `onStepStart` overrides the guess back to "navigator").
+ * - Initially the next LLM call is the planner (the very first call in
+ * a run is the planner establishing the initial plan).
+ * - `onPlannerStep` sets the next phase to "navigator" (the planner just
+ * ran; the navigator runs next).
+ * - `onStepStart` sets the next phase to "navigator" (we're inside a
+ * navigator step).
+ * - `onStepEnd` sets the next phase to "planner" (between steps the
+ * planner MAY run if the interval hits — if it doesn't, the next
+ * `onStepStart` overrides the guess back to "navigator").
  *
  * This is a best-effort heuristic; for exact attribution, the orchestrator
  * would need to pass phase info via the callback context.
@@ -82,17 +82,17 @@ export interface AgentMetrics {
     planner: PhaseLLMMetrics;
     navigator: PhaseLLMMetrics;
     /**
-     * Tokens that could not be attributed to a phase (e.g. recovered during
-     * `onRunEnd` reconciliation when this callback was registered late and
-     * missed the per-call `onLLMEnd` events). Always part of the
-     * `totalTokensIn/Out` sum, but not double-counted in planner/navigator.
-     *
-     * NOTE: `unattributed.calls` is NOT a true missed-call count — the
-     * callback cannot recover how many calls it missed, only the token
-     * deltas. It is a boolean-ish "had-gap" indicator: `1` when any
-     * unattributed tokens exist, `0` otherwise (see `onRunEnd`). Only
-     * `unattributed.tokensIn/Out` are accurate.
-     */
+ * Tokens that could not be attributed to a phase (e.g. recovered during
+ * `onRunEnd` reconciliation when this callback was registered late and
+ * missed the per-call `onLLMEnd` events). Always part of the
+ * `totalTokensIn/Out` sum, but not double-counted in planner/navigator.
+ *
+ * NOTE: `unattributed.calls` is NOT a true missed-call count — the
+ * callback cannot recover how many calls it missed, only the token
+ * deltas. It is a boolean-ish "had-gap" indicator: `1` when any
+ * unattributed tokens exist, `0` otherwise (see `onRunEnd`). Only
+ * `unattributed.tokensIn/Out` are accurate.
+ */
     unattributed: PhaseLLMMetrics;
   };
   /** Total tokens consumed across all phases (sum of planner + navigator + unattributed). */
@@ -100,11 +100,11 @@ export interface AgentMetrics {
   /** Total tokens produced across all phases (sum of planner + navigator + unattributed). */
   totalTokensOut: number;
   /**
-   * Total USD cost across all phases. Sourced from the authoritative
-   * `AgentRunResult.totalCostUsd` in `onRunEnd` (which OVERWRITES any value
-   * accumulated by `onCost`) — the orchestrator's own counters are ground
-   * truth, so per-call `onCost` accumulation is discarded when the run ends.
-   */
+ * Total USD cost across all phases. Sourced from the authoritative
+ * `AgentRunResult.totalCostUsd` in `onRunEnd` (which OVERWRITES any value
+ * accumulated by `onCost`) — the orchestrator's own counters are ground
+ * truth, so per-call `onCost` accumulation is discarded when the run ends.
+ */
   totalCostUsd: number;
   /** Number of loop-warning events fired by the loop detector. */
   loopWarnings: number;
@@ -124,7 +124,7 @@ export class AgentMetricsCallback implements AsyncCallbackHandler {
   private totalActions = 0;
   private readonly actionsByType: Record<string, ActionCounts> = {};
 
-  // LLM phase attribution state machine (see file-level docstring).
+ // LLM phase attribution state machine (see file-level docstring).
   private nextPhase: "planner" | "navigator" = "planner";
   private plannerCalls = 0;
   private plannerTokensIn = 0;
@@ -132,8 +132,8 @@ export class AgentMetricsCallback implements AsyncCallbackHandler {
   private navigatorCalls = 0;
   private navigatorTokensIn = 0;
   private navigatorTokensOut = 0;
-  // Tokens recovered during onRunEnd reconciliation (late registration) that
-  // could not be attributed to a specific phase.
+ // Tokens recovered during onRunEnd reconciliation (late registration) that
+ // could not be attributed to a specific phase.
   private unattributedCalls = 0;
   private unattributedTokensIn = 0;
   private unattributedTokensOut = 0;
@@ -148,9 +148,9 @@ export class AgentMetricsCallback implements AsyncCallbackHandler {
   private errorFatal = 0;
 
   /**
-   * Reset all accumulators to zero and re-initialise the phase state
-   * machine. Useful when reusing one instance across multiple runs.
-   */
+ * Reset all accumulators to zero and re-initialise the phase state
+ * machine. Useful when reusing one instance across multiple runs.
+ */
   reset(): void {
     this.totalSteps = 0;
     this.totalActions = 0;
@@ -176,9 +176,9 @@ export class AgentMetricsCallback implements AsyncCallbackHandler {
   }
 
   /**
-   * Snapshot the current accumulator state. The returned object is a deep
-   * copy — safe to mutate without affecting the callback's internal state.
-   */
+ * Snapshot the current accumulator state. The returned object is a deep
+ * copy — safe to mutate without affecting the callback's internal state.
+ */
   getMetrics(): AgentMetrics {
     const actionsByType: Record<string, ActionCounts> = {};
     for (const [k, v] of Object.entries(this.actionsByType)) {
@@ -220,13 +220,13 @@ export class AgentMetricsCallback implements AsyncCallbackHandler {
 
   /** @inheritdoc */
   onPlannerStep(): void {
-    // Planner just emitted a decision — the next LLM call is the navigator.
+ // Planner just emitted a decision — the next LLM call is the navigator.
     this.nextPhase = "navigator";
   }
 
   /** @inheritdoc */
   onStepStart(): void {
-    // Inside a navigator step — the next LLM call is the navigator.
+ // Inside a navigator step — the next LLM call is the navigator.
     this.nextPhase = "navigator";
   }
 
@@ -242,9 +242,9 @@ export class AgentMetricsCallback implements AsyncCallbackHandler {
       else counts.failures += 1;
       this.actionsByType[type] = counts;
     }
-    // Between steps — the next LLM call COULD be the planner (if the
-    // interval hits). Guess "planner"; if the next hook is onStepStart
-    // (no planner this round), it will override back to "navigator".
+ // Between steps — the next LLM call COULD be the planner (if the
+ // interval hits). Guess "planner"; if the next hook is onStepStart
+ // (no planner this round), it will override back to "navigator".
     this.nextPhase = "planner";
   }
 
@@ -252,11 +252,11 @@ export class AgentMetricsCallback implements AsyncCallbackHandler {
   onLLMEnd(_ctx: CallbackContext, response: LLMResponseInfo): void {
     const usage = response.usage;
     if (!usage) return;
-    // Guard against malformed/missing `usage` (a provider contract regression
-    // can emit non-numeric or absent fields). Without this, a single `NaN`
-    // poisons every accumulator total AND permanently disables the
-    // `onRunEnd` late-registration recovery (since `totalTokensIn === 0`
-    // then evaluates false). Warn once and skip rather than silently corrupt.
+ // Guard against malformed/missing `usage` (a provider contract regression
+ // can emit non-numeric or absent fields). Without this, a single `NaN`
+ // poisons every accumulator total AND permanently disables the
+ // `onRunEnd` late-registration recovery (since `totalTokensIn === 0`
+ // then evaluates false). Warn once and skip rather than silently corrupt.
     const tIn = typeof usage.tokensIn === "number" && Number.isFinite(usage.tokensIn) ? usage.tokensIn : undefined;
     const tOut = typeof usage.tokensOut === "number" && Number.isFinite(usage.tokensOut) ? usage.tokensOut : undefined;
     if (tIn === undefined || tOut === undefined) {
@@ -306,28 +306,54 @@ export class AgentMetricsCallback implements AsyncCallbackHandler {
 
   /** @inheritdoc */
   onRunEnd(result: AgentRunResult): void {
-    // Reconcile with the authoritative result. The orchestrator builds the
-    // result from its own counters, so treat its totals as ground truth even
-    // when this callback was registered late and only partially captured the
-    // per-event hooks (onCost / onStepEnd / onLLMEnd). We keep whatever
-    // per-phase attribution we *did* capture and drop the remainder into the
-    // `unattributed` bucket so the `total == sum(llmByPhase.*)` invariant
-    // always holds — neither silently undercounting nor corrupting attribution.
+ // Reconcile with the authoritative result. The orchestrator builds the
+ // result from its own counters, so treat its totals as ground truth even
+ // when this callback was registered late and only partially captured the
+ // per-event hooks (onCost / onStepEnd / onLLMEnd). We keep whatever
+ // per-phase attribution we *did* capture and drop the remainder into the
+ // `unattributed` bucket so the `total == sum(llmByPhase.*)` invariant
+ // always holds — neither silently undercounting nor corrupting attribution.
     if (this.totalSteps === 0 && result.stepCount > 0) {
       this.totalSteps = result.stepCount;
     }
-    // Cost has no per-phase split — the result is authoritative, overwrite.
+ // `totalActions` is intentionally NOT reconciled here: `AgentRunResult`
+ // exposes no authoritative action count, so there is no source to recover
+ // missed `onStepEnd` action tallies from. `totalActions` therefore reflects
+ // only the steps this callback captured (it equals the sum of
+ // `actionsByType[*].total`). This avoids the overstatement in the earlier
+ // "recovers when registered late" comment — step count IS recoverable,
+ // action count is not (FULL-REVIEW finding 8 / 73).
+ // Cost has no per-phase split — the result is authoritative, overwrite.
     this.totalCostUsd = result.totalCostUsd;
-    // Tokens: set the totals from the authoritative result, then attribute the
-    // gap (anything we missed) to `unattributed` so the phase sums still add up.
+ // Tokens: set the totals from the authoritative result, then attribute the
+ // gap (anything we missed) to `unattributed` so the phase sums still add up.
     this.totalTokensIn = result.totalTokensIn;
     this.totalTokensOut = result.totalTokensOut;
     const gapIn = result.totalTokensIn - this.plannerTokensIn - this.navigatorTokensIn;
     const gapOut = result.totalTokensOut - this.plannerTokensOut - this.navigatorTokensOut;
+ // Positive gap: tokens we missed (late registration) — attribute the
+ // remainder to `unattributed` so `total == sum(llmByPhase.*)` holds.
     if (gapIn > 0 || gapOut > 0) {
       this.unattributedCalls += 1;
       this.unattributedTokensIn += Math.max(0, gapIn);
       this.unattributedTokensOut += Math.max(0, gapOut);
+    }
+ // Negative gap: the per-phase tokens we accumulated EXCEED the
+ // authoritative total. This should not happen (double counting, a
+ // provider usage regression, or the result being built from stale/partial
+ // counters), and the `total == sum(llmByPhase.*)` invariant CANNOT be
+ // preserved by pushing into `unattributed` (that would only widen the
+ // overshoot). Do not silently drop it: warn explicitly, and record the
+ // overshoot magnitude on the `unattributed` bucket as a negative delta so
+ // the reconciliation invariant is restored (planner + navigator +
+ // unattributed == authoritative total) rather than left broken.
+    if (gapIn < 0 || gapOut < 0) {
+      console.warn(
+        `[metrics] onRunEnd: accumulated phase tokens exceed authoritative total ` +
+          `(gapIn=${gapIn}, gapOut=${gapOut}); reconciling invariant against ground-truth total.`,
+      );
+      if (gapIn < 0) this.unattributedTokensIn += gapIn;
+      if (gapOut < 0) this.unattributedTokensOut += gapOut;
     }
   }
 }

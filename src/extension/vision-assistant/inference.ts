@@ -61,12 +61,12 @@ export class VisionAssistant {
   private _status: VisionStatus = "uninitialized";
   private statusCallback: StatusCallback | null = null;
   /**
-   * Re-entrancy guard for `init()`. Two concurrent `init()` callers would both
-   * pass the `isReady` check (neither is ready yet) and duplicate the ~2.1 GB
-   * download + leak a WebGPU session. We cache the in-flight promise and return
-   * it; the promise is cleared on settle (success or failure) so a failed init
-   * can be retried — mirroring the `tokenizerLoadPromise` pattern.
-   */
+ * Re-entrancy guard for `init()`. Two concurrent `init()` callers would both
+ * pass the `isReady` check (neither is ready yet) and duplicate the ~2.1 GB
+ * download + leak a WebGPU session. We cache the in-flight promise and return
+ * it; the promise is cleared on settle (success or failure) so a failed init
+ * can be retried — mirroring the `tokenizerLoadPromise` pattern.
+ */
   private initPromise: Promise<void> | null = null;
 
   get status(): VisionStatus {
@@ -93,14 +93,14 @@ export class VisionAssistant {
 
   /** Initialize: download model (if needed) + create ONNX sessions. */
   async init(onProgress?: (p: DownloadProgress) => void): Promise<void> {
-    // Already fully initialized — cheap fast-path.
+ // Already fully initialized — cheap fast-path.
     if (this.isReady) return;
-    // A concurrent init() is in flight — join it instead of double-downloading
-    // and leaking a second WebGPU session.
+ // A concurrent init() is in flight — join it instead of double-downloading
+ // and leaking a second WebGPU session.
     if (this.initPromise) return this.initPromise;
 
-    // Cache the in-flight promise; clear it on settle so a failed init can be
-    // retried and a subsequent call re-runs from scratch.
+ // Cache the in-flight promise; clear it on settle so a failed init can be
+ // retried and a subsequent call re-runs from scratch.
     this.initPromise = this.doInit(onProgress).finally(() => {
       this.initPromise = null;
     });
@@ -117,7 +117,7 @@ export class VisionAssistant {
     }
 
     try {
-      // 1. Download / verify cache
+ // 1. Download / verify cache
       this.setStatus("checking");
       await this.loader.init();
       const cached = await this.loader.isCached();
@@ -126,17 +126,17 @@ export class VisionAssistant {
         await this.loader.downloadAll(onProgress);
       }
 
-      // 2. Create ONNX sessions
+ // 2. Create ONNX sessions
       this.setStatus("compiling");
-      // `executionProviders` accepts strings per the
-      // onnxruntime-common type definition (`ExecutionProviderConfig` includes
-      // `string` in its union), so we can drop the previous `as any` cast.
+ // `executionProviders` accepts strings per the
+ // onnxruntime-common type definition (`ExecutionProviderConfig` includes
+ // `string` in its union), so we can drop the previous `as any` cast.
       const sessOpts: ort.InferenceSession.SessionOptions = {
         executionProviders: ["webgpu", "wasm"],
         graphOptimizationLevel: "all",
       };
 
-      // Vision session
+ // Vision session
       const visGraph = await this.loader.getBuffer(VISION_GRAPH_URL);
       const visData = await this.loader.getBuffer(VISION_DATA_URL);
       this.visionSession = await ort.InferenceSession.create(visGraph, {
@@ -144,7 +144,7 @@ export class VisionAssistant {
         externalData: [{ path: VISION_DATA_NAME, data: visData }],
       });
 
-      // Language session
+ // Language session
       const langGraph = await this.loader.getBuffer(LANGUAGE_GRAPH_URL);
       const langData = await this.loader.getBuffer(LANGUAGE_DATA_URL);
       this.languageSession = await ort.InferenceSession.create(langGraph, {
@@ -152,27 +152,35 @@ export class VisionAssistant {
         externalData: [{ path: LANGUAGE_DATA_NAME, data: langData }],
       });
 
-      // Assert the ONNX export names its KV-cache outputs as expected
-      // (`present_key_${i}` / `present_value_${i}`). The decode loop feeds
-      // these straight back as `past_key_*` / `past_value_*`; a differently
-      // named export would silently feed `undefined` and break every decode
-      // step. Fail loudly here rather than mid-detection.
+ // Assert the ONNX export names its KV-cache outputs as expected
+ // (`present_key_${i}` / `present_value_${i}`). The decode loop feeds
+ // these straight back as `past_key_*` / `past_value_*`; a differently
+ // named export would silently feed `undefined` and break every decode
+ // step. Fail loudly here rather than mid-detection.
       this.assertKvCacheOutputs();
 
-      // 3. Load tokenizer + embedding table
+ // Assert the language ONNX export exposes a `logits` output by the exact
+ // name this code reads. The decode loop and prefill both index
+ // `res["logits"]`; if the export names it anything else (a model/export
+ // version skew — exactly the failure class the KV-assert guards against),
+ // `logits.dims[2]` would throw a cryptic "Cannot read properties of
+ // undefined (reading 'dims')" mid-`detect()`. Fail loudly here instead.
+      this.assertLogitsOutput();
+
+ // 3. Load tokenizer + embedding table
       this.tokenizer = await getTokenizer();
-      // Fail fast at init (rather than mid-`detect()`) if the tokenizer does not
-      // map the literal "<IMG_CONTEXT>" to exactly one id equal to
-      // IMG_CONTEXT_TOKEN. See `assertImageContextToken` for why this matters.
+ // Fail fast at init (rather than mid-`detect()`) if the tokenizer does not
+ // map the literal "<IMG_CONTEXT>" to exactly one id equal to
+ // IMG_CONTEXT_TOKEN. See `assertImageContextToken` for why this matters.
       await this.assertImageContextToken();
       this.embMeta = (await this.loader.getJSON(EMBED_META_URL)) as EmbeddingMeta;
       this.embPacked = await this.loader.getBuffer(EMBED_PACKED_URL);
       const scalesBytes = await this.loader.getBuffer(EMBED_SCALES_URL);
 
-      // Reject a corrupt/partial cache up-front: the meta JSON MUST agree with
-      // the binary layout, otherwise `gatherEmbed` reads misaligned bytes and
-      // emits silently-garbage embeddings. (Further per-call guards live in
-      // `gatherEmbed`.)
+ // Reject a corrupt/partial cache up-front: the meta JSON MUST agree with
+ // the binary layout, otherwise `gatherEmbed` reads misaligned bytes and
+ // emits silently-garbage embeddings. (Further per-call guards live in
+ // `gatherEmbed`.)
       this.validateEmbeddingShapes(scalesBytes);
 
       const sv = new DataView(scalesBytes.buffer);
@@ -183,15 +191,15 @@ export class VisionAssistant {
 
       this.setStatus("ready");
     } catch (e) {
-    // if init() threw partway through (e.g. vision session created
-      // successfully but language session failed, or tokenizer/embedding
-      // fetch failed after both sessions were up), the partially-created
-      // ONNX sessions + embedding buffers would be leaked — ONNX WebGPU
-      // sessions hold GPU memory that JS GC cannot free without an explicit
-      // `session.release()` (see `cleanup()` below). Call cleanup() before
-      // re-throwing so VRAM is reclaimed and the next init() attempt starts
-      // from a clean slate. cleanup() is idempotent (re-entrant guard via
-      // field-nulling) so this is safe even if it has already been called.
+ // if init() threw partway through (e.g. vision session created
+ // successfully but language session failed, or tokenizer/embedding
+ // fetch failed after both sessions were up), the partially-created
+ // ONNX sessions + embedding buffers would be leaked — ONNX WebGPU
+ // sessions hold GPU memory that JS GC cannot free without an explicit
+ // `session.release()` (see `cleanup()` below). Call cleanup() before
+ // re-throwing so VRAM is reclaimed and the next init() attempt starts
+ // from a clean slate. cleanup() is idempotent (re-entrant guard via
+ // field-nulling) so this is safe even if it has already been called.
       await this.cleanup();
       this.setStatus("error", e instanceof Error ? e.message : String(e));
       throw e;
@@ -199,13 +207,13 @@ export class VisionAssistant {
   }
 
   /**
-   * Reject a `meta.json` that disagrees with the binary embedding buffers.
-   * `packed` must hold exactly `vocab * hidden / 2` bytes (two 4-bit values per
-   * byte) and `scales` must hold exactly `vocab * n_groups` fp16 values. The
-   * group layout must also cover every hidden dimension (`n_groups * block_size
-   * === hidden`). Throws on any mismatch so a partial/version-skewed cache
-   * fails loudly instead of yielding garbage detections.
-   */
+ * Reject a `meta.json` that disagrees with the binary embedding buffers.
+ * `packed` must hold exactly `vocab * hidden / 2` bytes (two 4-bit values per
+ * byte) and `scales` must hold exactly `vocab * n_groups` fp16 values. The
+ * group layout must also cover every hidden dimension (`n_groups * block_size
+ * === hidden`). Throws on any mismatch so a partial/version-skewed cache
+ * fails loudly instead of yielding garbage detections.
+ */
   private validateEmbeddingShapes(scalesBytes: Uint8Array): void {
     const meta = this.embMeta;
     const packed = this.embPacked;
@@ -248,12 +256,12 @@ export class VisionAssistant {
   }
 
   /**
-   * Assert the language ONNX export exposes KV-cache outputs named
-   * `present_key_${i}` / `present_value_${i}` for every layer, deriving the
-   * expected count from `N_LAYERS`. If the export names them differently, the
-   * decode loop would feed `undefined` into `past_key_0` and fail silently, so
-   * we surface the real available names in the error.
-   */
+ * Assert the language ONNX export exposes KV-cache outputs named
+ * `present_key_${i}` / `present_value_${i}` for every layer, deriving the
+ * expected count from `N_LAYERS`. If the export names them differently, the
+ * decode loop would feed `undefined` into `past_key_0` and fail silently, so
+ * we surface the real available names in the error.
+ */
   private assertKvCacheOutputs(): void {
     const session = this.languageSession;
     if (!session) {
@@ -274,14 +282,50 @@ export class VisionAssistant {
   }
 
   /**
-   * Verify at init time — rather than mid-`detect()` — that the literal
-   * `<IMG_CONTEXT>` maps to exactly one tokenizer id equal to
-   * `IMG_CONTEXT_TOKEN`. The detection pipeline injects
-   * `"<IMG_CONTEXT>".repeat(N)` and then counts occurrences of that token; if
-   * the tokenizer BPE-splits the literal, `detect()` would count 0 occurrences
-   * and throw — surfacing that here gives a clear, early error instead of a
-   * feature that appears to work but detects nothing.
-   */
+ * Assert the language ONNX export exposes a `logits` output named exactly
+ * `"logits"` — the key read by both the prefill (`res["logits"]`) and every
+ * decode step (`res["logits"]`). A model/export version skew that renames the
+ * output (e.g. to `logits_0`) would otherwise make `res["logits"]` undefined
+ * and throw a cryptic `Cannot read properties of undefined (reading 'dims')`
+ * mid-`detect()`, masked by the caller's `.catch(() => [])` into silent
+ * zero-detection. Surface the real available names here instead.
+ */
+  private assertLogitsOutput(): void {
+    const session = this.languageSession;
+    if (!session) {
+      throw new Error("assertLogitsOutput: language session not created");
+    }
+    if (!session.outputNames.includes("logits")) {
+      throw new Error(
+        `Language ONNX export missing expected "logits" output. ` +
+          `Actual outputs: ${session.outputNames.join(", ")}`,
+      );
+    }
+  }
+
+  /** Read the `logits` output from a language-session run, failing loudly if
+ * the export did not produce it (defensive — name validity is asserted at
+ * init via `assertLogitsOutput`). */
+  private getLogits(res: Record<string, ort.Tensor>): ort.Tensor {
+    const logits = res["logits"];
+    if (!logits) {
+      throw new Error(
+        `Language session produced no "logits" output. ` +
+          `Actual keys: ${Object.keys(res).join(", ")}`,
+      );
+    }
+    return logits;
+  }
+
+  /**
+ * Verify at init time — rather than mid-`detect()` — that the literal
+ * `<IMG_CONTEXT>` maps to exactly one tokenizer id equal to
+ * `IMG_CONTEXT_TOKEN`. The detection pipeline injects
+ * `"<IMG_CONTEXT>".repeat(N)` and then counts occurrences of that token; if
+ * the tokenizer BPE-splits the literal, `detect()` would count 0 occurrences
+ * and throw — surfacing that here gives a clear, early error instead of a
+ * feature that appears to work but detects nothing.
+ */
   private async assertImageContextToken(): Promise<void> {
     const t = this.tokenizer as (
       str: string,
@@ -306,11 +350,11 @@ export class VisionAssistant {
 
     const H = this.embMeta.hidden;
 
-    // 1. Preprocess screenshot
+ // 1. Preprocess screenshot
     const { pixelValues, gridHeight, gridWidth, nPatches, originalWidth, originalHeight, targetWidth, targetHeight, rescaledWidth, rescaledHeight } =
       await preprocessScreenshot(screenshotDataUrl);
 
-    // 2. Vision session: pixel_values → visual_features
+ // 2. Vision session: pixel_values → visual_features
     const pvTensor = new ort.Tensor("float32", pixelValues, [nPatches, 3, PATCH_SIZE, PATCH_SIZE]);
     const ghTensor = new ort.Tensor(
       "int64",
@@ -322,12 +366,12 @@ export class VisionAssistant {
       image_grid_hws: ghTensor,
     });
     const visual = vOut[this.visionSession.outputNames[0]];
-    // The vision encoder's feature width MUST equal the LM embedding dim `H`
-    // from meta.json. If they differ, every <IMG_CONTEXT> slot reads the wrong
-    // H floats at the wrong byte offset (`visIdx*H` instead of `visIdx*width`)
-    // and the model emits confidently-wrong boxes with no error. Fail loudly
-    // before any splicing occurs. (Replaces the misleading hard-coded `[N, 2048]`
-    // comment, which contradicted the actual stride used below.)
+ // The vision encoder's feature width MUST equal the LM embedding dim `H`
+ // from meta.json. If they differ, every <IMG_CONTEXT> slot reads the wrong
+ // H floats at the wrong byte offset (`visIdx*H` instead of `visIdx*width`)
+ // and the model emits confidently-wrong boxes with no error. Fail loudly
+ // before any splicing occurs. (Replaces the misleading hard-coded `[N, 2048]`
+ // comment, which contradicted the actual stride used below.)
     if (!visual || visual.dims.length !== 2 || Number(visual.dims[1]) !== H) {
       throw new Error(
         `Vision encoder output shape mismatch: feature width ` +
@@ -336,19 +380,19 @@ export class VisionAssistant {
       );
     }
 
-    // 3. Build prompt + tokenize
+ // 3. Build prompt + tokenize
     const N = Math.floor((gridHeight * gridWidth) / (MERGE_FACTOR * MERGE_FACTOR));
     const promptStr =
       `<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>\n<|im_start|>user\n<image 1><img>` +
       "<IMG_CONTEXT>".repeat(N) +
       `</img>${DETECTION_PROMPT}<|im_end|>\n<|im_start|>assistant\n`;
 
-    // transformers.js `PreTrainedTokenizer` extends `Callable` — the tokenizer
-    // is invoked directly as a function (the `Callable` closure delegates to
-    // `_call`), there is no `__call__` method. The previous `.__call__(...)`
-    // cast compiled but threw `TypeError: tokenizer.__call__ is not a function`
-    // at runtime, silently killing Local Vision. Cast to the actual callable
-    // signature instead.
+ // transformers.js `PreTrainedTokenizer` extends `Callable` — the tokenizer
+ // is invoked directly as a function (the `Callable` closure delegates to
+ // `_call`), there is no `__call__` method. The previous `.__call__(...)`
+ // cast compiled but threw `TypeError: tokenizer.__call__ is not a function`
+ // at runtime, silently killing Local Vision. Cast to the actual callable
+ // signature instead.
     const tokenizer = this.tokenizer as (
       str: string,
       opts: { add_special_tokens: boolean },
@@ -356,13 +400,13 @@ export class VisionAssistant {
     const enc = await tokenizer(promptStr, { add_special_tokens: false });
     const ids = Array.from(enc.input_ids.data, (x: unknown) => Number(x));
 
-    // The tokenizer must emit exactly N <IMG_CONTEXT> tokens to match the N
-    // placeholders injected into the prompt and the N rows of `visual_features`.
-    // If it emits a different count (e.g. it splits/merges the token for this
-    // model/input), splicing by occurrence would run `visIdx` past `vdata`
-    // (length N*H); `subarray` would then clamp to an empty slice that
-    // `embeds.set` silently writes as a zeroed embedding, degrading detection
-    // without raising an error. Detect and bail out rather than mis-embed.
+ // The tokenizer must emit exactly N <IMG_CONTEXT> tokens to match the N
+ // placeholders injected into the prompt and the N rows of `visual_features`.
+ // If it emits a different count (e.g. it splits/merges the token for this
+ // model/input), splicing by occurrence would run `visIdx` past `vdata`
+ // (length N*H); `subarray` would then clamp to an empty slice that
+ // `embeds.set` silently writes as a zeroed embedding, degrading detection
+ // without raising an error. Detect and bail out rather than mis-embed.
     const ctxCount = ids.reduce((acc: number, id: number) => acc + (id === IMG_CONTEXT_TOKEN ? 1 : 0), 0);
     if (ctxCount !== N) {
       const msg = `Vision detect(): tokenizer emitted ${ctxCount} <IMG_CONTEXT> tokens but ${N} were injected; aborting to avoid mis-embedding.`;
@@ -370,7 +414,7 @@ export class VisionAssistant {
       throw new Error(msg);
     }
 
-    // 4. Build inputs_embeds: INT4 gather + visual splice at IMG_CONTEXT positions
+ // 4. Build inputs_embeds: INT4 gather + visual splice at IMG_CONTEXT positions
     const L = ids.length;
     const embeds = new Float32Array(L * H);
     let visIdx = 0;
@@ -384,7 +428,7 @@ export class VisionAssistant {
       }
     }
 
-    // 5. KV-cache prefill
+ // 5. KV-cache prefill
     const idsBig = BigInt64Array.from(ids.map((x: number) => BigInt(x)));
     const mkEmptyPast = (): Record<string, ort.Tensor> => {
       const f: Record<string, ort.Tensor> = {};
@@ -405,12 +449,12 @@ export class VisionAssistant {
 
     let res = await this.languageSession.run(feeds);
     let present = res as Record<string, ort.Tensor>;
-    const logits = res["logits"] as ort.Tensor;
+    const logits = this.getLogits(res);
     const V = logits.dims[2];
     let next = argmaxLast(logits.data as Float32Array, V);
     const gen: number[] = [next];
 
-    // 6. Decode loop with KV cache
+ // 6. Decode loop with KV cache
     let pastLen = L;
     for (let step = 0; step < MAX_NEW_TOKENS - 1; step++) {
       if (next === IM_END_TOKEN) break;
@@ -428,25 +472,25 @@ export class VisionAssistant {
       }
       res = await this.languageSession.run(f);
       present = res as Record<string, ort.Tensor>;
-      next = argmaxLast((res["logits"] as ort.Tensor).data as Float32Array, V);
+      next = argmaxLast(this.getLogits(res).data as Float32Array, V);
       gen.push(next);
       pastLen += 1;
     }
 
-    // 7. Decode + parse
+ // 7. Decode + parse
     const decodeTokenizer = this.tokenizer as { decode: (ids: number[], opts: unknown) => string };
     const text = decodeTokenizer.decode(gen, { skip_special_tokens: false });
     const detections = parseBoxes(text);
 
-    // Convert normalized 0-1000 coordinates to pixel coordinates in the
-    // ORIGINAL screenshot's pixel space. The model normalizes over the
-    // PADDED canvas (targetWidth × targetHeight), so we must account for
-    // both the rescale (original → rescaled) and the padding (rescaled →
-    // target) when mapping back to original device pixels.
-    // Formula: X_original = (X_model / 1000) * targetWidth * (originalWidth / rescaledWidth)
-    // Guard against a degenerate screenshot (e.g. 1x1) that drives rescaledWidth/
-    // rescaledHeight to 0 after `Math.floor(w * scale)`; dividing by 0 would yield
-    // Infinity/NaN coordinates flowing into CDP Input.dispatchMouseEvent.
+ // Convert normalized 0-1000 coordinates to pixel coordinates in the
+ // ORIGINAL screenshot's pixel space. The model normalizes over the
+ // PADDED canvas (targetWidth × targetHeight), so we must account for
+ // both the rescale (original → rescaled) and the padding (rescaled →
+ // target) when mapping back to original device pixels.
+ // Formula: X_original = (X_model / 1000) * targetWidth * (originalWidth / rescaledWidth)
+ // Guard against a degenerate screenshot (e.g. 1x1) that drives rescaledWidth/
+ // rescaledHeight to 0 after `Math.floor(w * scale)`; dividing by 0 would yield
+ // Infinity/NaN coordinates flowing into CDP Input.dispatchMouseEvent.
     if (!(rescaledWidth > 0) || !(rescaledHeight > 0)) {
       throw new Error(
         `Vision detect(): non-positive rescaled screenshot dimension ` +
@@ -456,23 +500,23 @@ export class VisionAssistant {
     }
     const effectiveWidth = targetWidth * (originalWidth / rescaledWidth);
     const effectiveHeight = targetHeight * (originalHeight / rescaledHeight);
-    // Clamp to the ORIGINAL screenshot bounds (originalWidth ×
-    // originalHeight), not the padded canvas bounds (effectiveWidth ×
-    // effectiveHeight). effectiveWidth ≥ originalWidth due to padding; clamping
-    // to effectiveWidth-1 would allow coords 3-6 CSS px beyond the viewport.
+ // Clamp to the ORIGINAL screenshot bounds (originalWidth ×
+ // originalHeight), not the padded canvas bounds (effectiveWidth ×
+ // effectiveHeight). effectiveWidth ≥ originalWidth due to padding; clamping
+ // to effectiveWidth-1 would allow coords 3-6 CSS px beyond the viewport.
     return toPixelCoords(detections, effectiveWidth, effectiveHeight, originalWidth, originalHeight);
   }
 
   /** Release ONNX sessions and free VRAM. */
   async cleanup(): Promise<void> {
-    // ONNX WebGPU InferenceSessions hold GPU memory that JavaScript GC
-    // cannot free — only an explicit `await session.release()` reclaims it.
-    // Capture the sessions into locals BEFORE nulling the fields so we can
-    // release them even if `cleanup()` is re-entered concurrently (the field
-    // reads happen first; the second call sees nulls and skips the release).
-    // Wrap each release in try/catch because `release()` can throw if the
-    // session is already released/disposed (e.g. user toggled off twice or
-    // the WebGPU device was lost).
+ // ONNX WebGPU InferenceSessions hold GPU memory that JavaScript GC
+ // cannot free — only an explicit `await session.release()` reclaims it.
+ // Capture the sessions into locals BEFORE nulling the fields so we can
+ // release them even if `cleanup()` is re-entered concurrently (the field
+ // reads happen first; the second call sees nulls and skips the release).
+ // Wrap each release in try/catch because `release()` can throw if the
+ // session is already released/disposed (e.g. user toggled off twice or
+ // the WebGPU device was lost).
     const vision = this.visionSession;
     const language = this.languageSession;
     this.visionSession = null;
@@ -486,14 +530,14 @@ export class VisionAssistant {
       try {
         await vision.release();
       } catch {
-        // Already released or device lost — safe to ignore.
+ // Already released or device lost — safe to ignore.
       }
     }
     if (language) {
       try {
         await language.release();
       } catch {
-        // Already released or device lost — safe to ignore.
+ // Already released or device lost — safe to ignore.
       }
     }
   }

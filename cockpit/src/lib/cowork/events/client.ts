@@ -5,10 +5,10 @@
 // in-memory buffer (last 1000) and emits it on the matching socket.io channel.
 //
 // Per project rules:
-//   • Server-to-server fetches may use `http://localhost:3003` directly (the
-//     mini-service is internal and not exposed through Caddy).
-//   • The X-Cowork-Token header must match `process.env.COWORK_UI_TOKEN`
-//     (preferred) or, as a fallback, `process.env.COWORK_EVENT_TOKEN`.
+// • Server-to-server fetches may use `http://localhost:3003` directly (the
+// mini-service is internal and not exposed through Caddy).
+// • The X-Cowork-Token header must match `process.env.COWORK_UI_TOKEN`
+// (preferred) or, as a fallback, `process.env.COWORK_EVENT_TOKEN`.
 //
 // Token resolution order is CANONICAL and MUST match the auth middleware
 // (`middleware.ts`), which also prefers `COWORK_UI_TOKEN` then falls back to
@@ -48,15 +48,15 @@ const BROADCAST_TIMEOUT_MS = 5000;
 // COWORK_UI_TOKEN, falling back to COWORK_EVENT_TOKEN. See the module header
 // for why the two must agree.
 function getCoworkEventsToken(): string {
-  // Preferred browser-facing secret (also what the API accepts first).
+ // Preferred browser-facing secret (also what the API accepts first).
   const uiToken = process.env.COWORK_UI_TOKEN;
   if (uiToken && uiToken.length > 0) {
-    // SECURITY WARNING: if COWORK_UI_TOKEN is mirrored into
-    // NEXT_PUBLIC_COWORK_UI_TOKEN (as the auth middleware reads it from the
-    // browser), this server-to-server relay would be using a secret that is
-    // shipped in the client bundle. Surface that fact so operators notice the
-    // unsafe default rather than it silently "working". We only warn when the
-    // dedicated service-to-service token is not also configured.
+ // SECURITY WARNING: if COWORK_UI_TOKEN is mirrored into
+ // NEXT_PUBLIC_COWORK_UI_TOKEN (as the auth middleware reads it from the
+ // browser), this server-to-server relay would be using a secret that is
+ // shipped in the client bundle. Surface that fact so operators notice the
+ // unsafe default rather than it silently "working". We only warn when the
+ // dedicated service-to-service token is not also configured.
     if (!process.env.COWORK_EVENT_TOKEN) {
       console.warn(
         '[cowork] COWORK_EVENT_TOKEN is unset — relaying to the cowork-events ' +
@@ -67,8 +67,8 @@ function getCoworkEventsToken(): string {
     }
     return uiToken;
   }
-  // Service-to-server fallback. Operators that set only COWORK_EVENT_TOKEN
-  // (legacy) still get end-to-end relay with a single configured secret.
+ // Service-to-server fallback. Operators that set only COWORK_EVENT_TOKEN
+ // (legacy) still get end-to-end relay with a single configured secret.
   const token = process.env.COWORK_EVENT_TOKEN;
   if (token && token.length > 0) {
     return token;
@@ -89,10 +89,10 @@ export interface BroadcastResult {
 /**
  * Broadcast an event to all connected cowork-events WebSocket clients.
  *
- * @param channel  One of the documented channels (e.g. 'tab:updated',
- *                 'agent:task-updated', 'network:request', etc.).
- * @param payload  Arbitrary JSON-serializable payload.
- * @returns        The mini-service's acknowledgement ({ ok, id, channel }).
+ * @param channel One of the documented channels (e.g. 'tab:updated',
+ * 'agent:task-updated', 'network:request', etc.).
+ * @param payload Arbitrary JSON-serializable payload.
+ * @returns The mini-service's acknowledgement ({ ok, id, channel }).
  *
  * Fail-closed on a missing secret: `getCoworkEventsToken()` is read BEFORE the
  * try/catch so its throw escapes `broadcastEvent` (instead of being swallowed
@@ -107,8 +107,8 @@ export async function broadcastEvent(
   channel: string,
   payload: unknown,
 ): Promise<BroadcastResult> {
-  // Read the token outside the try so an unset secret throws out (fail-closed)
-  // rather than being silently converted to `{ ok: false }`.
+ // Read the token outside the try so an unset secret throws out (fail-closed)
+ // rather than being silently converted to `{ ok: false }`.
   const token = getCoworkEventsToken();
   try {
     const res = await fetch(`${COWORK_EVENTS_BASE}/emit`, {

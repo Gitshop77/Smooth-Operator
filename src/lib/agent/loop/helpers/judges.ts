@@ -2,10 +2,10 @@
  * Loop helper — judge + deterministic evaluators.
  *
  * - `runDeterministicEvaluators` runs the deterministic evaluators
- *   (string / URL / HTML-content) against the agent's final result + current
- *   page state.
+ * (string / URL / HTML-content) against the agent's final result + current
+ * page state.
  * - `maybeJudgeAndFinalize` optionally runs the judge LLM to verify the
- *   agent's self-reported success, then emits the terminal `done` event.
+ * agent's self-reported success, then emits the terminal `done` event.
  */
 
 import type { HistoryItem } from "../../types";
@@ -100,14 +100,14 @@ export async function maybeJudgeAndFinalize(
     navigatorHistory: HistoryItem[];
     onCost: (usd: number, tokensIn?: number, tokensOut?: number) => void;
     /**
-     * Whether this is the FINAL completion attempt (the run is ending). When
-     * true, the LLM judge is always run (unless `enableJudge === false`) so the
-     * terminal outcome is verified. When false (an intermediate planner/navigator
-     * "done" attempt), the judge is SKIPPED for free-form tasks that have no
-     * `expectedOutcomes` — those attempts are finalized directly on the planner's
-     * own decision, avoiding an extra full-history LLM completion on every
-     * in-run "done" attempt. The final run-end `done` always sets this true.
-     */
+ * Whether this is the FINAL completion attempt (the run is ending). When
+ * true, the LLM judge is always run (unless `enableJudge === false`) so the
+ * terminal outcome is verified. When false (an intermediate planner/navigator
+ * "done" attempt), the judge is SKIPPED for free-form tasks that have no
+ * `expectedOutcomes` — those attempts are finalized directly on the planner's
+ * own decision, avoiding an extra full-history LLM completion on every
+ * in-run "done" attempt. The final run-end `done` always sets this true.
+ */
     finalAttempt?: boolean;
   },
   state: LoopState,
@@ -123,19 +123,20 @@ export async function maybeJudgeAndFinalize(
     return true;
   }
 
-  // Cheap pre-check short-circuit: an intermediate "done" attempt on a
-  // free-form task (no deterministic evaluators configured) has no fast-path,
-  // so the judge would be pure added cost. Skip it and trust the planner's
-  // decision for the in-run attempt; the FINAL attempt still runs the judge.
+ // Cheap pre-check short-circuit: an intermediate "done" attempt on a
+ // free-form task (no deterministic evaluators configured) has no fast-path,
+ // so the judge would be pure added cost. Skip it and trust the planner's
+ // decision for the in-run attempt; the FINAL attempt still runs the judge.
   if (!finalAttempt && !config.expectedOutcomes) {
     deps.onEvent({ type: "done", step, success: true, text });
     state.finalResult = { success: true, text };
     return true;
   }
 
+  let evaluatorResult: Awaited<ReturnType<typeof runDeterministicEvaluators>> = null;
   if (success && config.expectedOutcomes) {
     try {
-      const evaluatorResult = await runDeterministicEvaluators(deps, config, text, state);
+      evaluatorResult = await runDeterministicEvaluators(deps, config, text, state);
       if (evaluatorResult !== null && evaluatorResult.score === 1) {
         deps.onEvent({
           type: "info",
@@ -161,17 +162,30 @@ export async function maybeJudgeAndFinalize(
   }
 
   if (config.enableJudge === false) {
+ // The LLM judge is disabled, so the deterministic evaluators are the only
+ // gate. If they ran and scored < 1, they are authoritative — finalize as
+ // FAILURE rather than discarding the failing score and declaring success.
+    if (evaluatorResult !== null && evaluatorResult.score < 1) {
+      deps.onEvent({
+        type: "done",
+        step,
+        success: false,
+        text,
+      });
+      state.finalResult = { success: false, text };
+      return true;
+    }
     deps.onEvent({ type: "done", step, success: true, text });
     state.finalResult = { success: true, text };
     return true;
   }
 
   try {
-    // Capture the model name + reasoning-token count + cached-token count from
-    // the LLM call so the judge's cost estimate accounts for reasoning models
-    // (o1/o3 bill reasoning tokens at their own rate) AND prompt-cache discounts
-    // (Anthropic cache_read billed at 0.1× input). Without these, `estimateCost`
-    // undercounts the judge's true cost and delays cost-cap enforcement.
+ // Capture the model name + reasoning-token count + cached-token count from
+ // the LLM call so the judge's cost estimate accounts for reasoning models
+ // (o1/o3 bill reasoning tokens at their own rate) AND prompt-cache discounts
+ // (Anthropic cache_read billed at 0.1× input). Without these, `estimateCost`
+ // undercounts the judge's true cost and delays cost-cap enforcement.
     let judgeModel = "";
     let judgeReasoningTokens = 0;
     let judgeCachedInputTokens = 0;
@@ -181,11 +195,11 @@ export async function maybeJudgeAndFinalize(
         const res = await deps.summarizeCall({ systemPrompt, userPrompt: userMessage });
         if (res.usage?.model) judgeModel = res.usage.model;
         if (res.usage?.reasoningTokens) judgeReasoningTokens = res.usage.reasoningTokens;
-        // Capture cachedInputTokens so the judge's cost recompute applies the
-        // cacheRead discount.
+ // Capture cachedInputTokens so the judge's cost recompute applies the
+ // cacheRead discount.
         if (res.usage?.cachedInputTokens) judgeCachedInputTokens = res.usage.cachedInputTokens;
-        // Capture cache-write (creation) tokens too (billed at the higher
-        // cache-write rate). Cast until TokenUsage (types.ts) propagates it.
+ // Capture cache-write (creation) tokens too (billed at the higher
+ // cache-write rate). Cast until TokenUsage (types.ts) propagates it.
         if ((res.usage as { cachedWriteInputTokens?: number }).cachedWriteInputTokens)
           judgeCachedWriteInputTokens = (res.usage as { cachedWriteInputTokens?: number }).cachedWriteInputTokens!;
         return res.content;
@@ -202,11 +216,11 @@ export async function maybeJudgeAndFinalize(
       });
       if (res.model) judgeModel = res.model;
       if (res.reasoningTokens) judgeReasoningTokens = res.reasoningTokens;
-      // Capture cachedInputTokens from the planner-fallback path too.
+ // Capture cachedInputTokens from the planner-fallback path too.
       if (res.cachedInputTokens) judgeCachedInputTokens = res.cachedInputTokens;
-      // Capture cache-write (creation) tokens from the planner-fallback path
-      // too (billed at the higher cache-write rate). Cast until the
-      // PlannerLLMCall result type (loop/types.ts) propagates it.
+ // Capture cache-write (creation) tokens from the planner-fallback path
+ // too (billed at the higher cache-write rate). Cast until the
+ // PlannerLLMCall result type (loop/types.ts) propagates it.
       if ((res as { cachedWriteInputTokens?: number }).cachedWriteInputTokens)
         judgeCachedWriteInputTokens = (res as { cachedWriteInputTokens?: number }).cachedWriteInputTokens!;
       return res.raw;
@@ -217,21 +231,21 @@ export async function maybeJudgeAndFinalize(
       history: navigatorHistory,
       agentResult: { success, text },
       llmCall: judgeLlmCall,
-      // `onCost` is async so cost tracking + dispatcher fire after the judge
-      // LLM call completes. The dispatcher's cost() method internally
-      // try/catches handler errors, so no throw propagates — cost-cap
-      // enforcement is via the orchestrator's `costCapExceeded(state)` check.
+ // `onCost` is async so cost tracking + dispatcher fire after the judge
+ // LLM call completes. The dispatcher's cost() method internally
+ // try/catches handler errors, so no throw propagates — cost-cap
+ // enforcement is via the orchestrator's `costCapExceeded(state)` check.
       onCost: async (usage) => {
-        // The judge's internal cost estimate uses modelForCost (which is ""
-        // because the model name is only known AFTER llmCall returns, and
-        // judgeLlmCall sets judgeModel as a side effect). Recompute the cost
-        // here with the real model name so the budget tracker gets an
-        // accurate number.
+ // The judge's internal cost estimate uses modelForCost (which is ""
+ // because the model name is only known AFTER llmCall returns, and
+ // judgeLlmCall sets judgeModel as a side effect). Recompute the cost
+ // here with the real model name so the budget tracker gets an
+ // accurate number.
         const realCost = judgeModel
-          // Pass judgeReasoningTokens + judgeCachedInputTokens +
-          // judgeCachedWriteInputTokens (captured as side effects of
-          // judgeLlmCall) so the recompute applies the reasoning rate, the
-          // cacheRead discount, AND the (higher) cacheWrite rate.
+ // Pass judgeReasoningTokens + judgeCachedInputTokens +
+ // judgeCachedWriteInputTokens (captured as side effects of
+ // judgeLlmCall) so the recompute applies the reasoning rate, the
+ // cacheRead discount, AND the (higher) cacheWrite rate.
           ? estimateCost(judgeModel, usage.tokensIn, usage.tokensOut, judgeReasoningTokens, judgeCachedInputTokens, judgeCachedWriteInputTokens)
           : usage.costUsd;
         deps.onEvent({
@@ -241,8 +255,8 @@ export async function maybeJudgeAndFinalize(
         });
         onCost(realCost, usage.tokensIn, usage.tokensOut);
         if (dispatcher && ctx) {
-          // Include reasoningTokens + cachedInputTokens for
-          // AgentMetricsCallback per-phase breakdown.
+ // Include reasoningTokens + cachedInputTokens for
+ // AgentMetricsCallback per-phase breakdown.
           await dispatcher.cost(ctx, {
             tokensIn: usage.tokensIn,
             tokensOut: usage.tokensOut,
@@ -256,10 +270,10 @@ export async function maybeJudgeAndFinalize(
     });
 
     if (verdict === null) {
-      // The judge could not be reached (LLM error / unparseable response).
-      // This is UNVERIFIED — NEVER treat a missing verdict as agreement.
-      // Route the run back to the planner for re-evaluation (same as an
-      // explicit disagreement) rather than failing open with success:true.
+ // The judge could not be reached (LLM error / unparseable response).
+ // This is UNVERIFIED — NEVER treat a missing verdict as agreement.
+ // Route the run back to the planner for re-evaluation (same as an
+ // explicit disagreement) rather than failing open with success:true.
       deps.onEvent({
         type: "info",
         message: `Judge could not be reached (no verdict) — task left unverified, continuing the run.`,
@@ -286,11 +300,11 @@ export async function maybeJudgeAndFinalize(
     return false;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    // If the cost callback throws "Budget exceeded" (from a custom budget
-    // handler), finalize as FAILURE. In the default extension config, the
-    // dispatcher's cost() catches all handler errors, so this path only
-    // fires if a caller installs a throwing cost handler. Cost-cap
-    // enforcement in the default config is via `costCapExceeded(state)`.
+ // If the cost callback throws "Budget exceeded" (from a custom budget
+ // handler), finalize as FAILURE. In the default extension config, the
+ // dispatcher's cost() catches all handler errors, so this path only
+ // fires if a caller installs a throwing cost handler. Cost-cap
+ // enforcement in the default config is via `costCapExceeded(state)`.
     if (/^Budget exceeded:/i.test(msg)) {
       deps.onEvent({ type: "done", step, success: false, text: msg });
       state.finalResult = { success: false, text: msg };
@@ -301,9 +315,9 @@ export async function maybeJudgeAndFinalize(
       message: `Judge failed (treating as unverified): ${msg}`,
       recoverable: true,
     });
-    // A judge exception other than a budget cap MUST NOT fail open. Route the
-    // run back to the planner for re-evaluation (same as a null verdict / an
-    // explicit disagreement) rather than declaring success:true.
+ // A judge exception other than a budget cap MUST NOT fail open. Route the
+ // run back to the planner for re-evaluation (same as a null verdict / an
+ // explicit disagreement) rather than declaring success:true.
     return false;
   }
 }

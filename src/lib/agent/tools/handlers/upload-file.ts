@@ -1,34 +1,55 @@
 /**
- * `upload_file` action handler — file uploads require a real filesystem path
- * (CDP `DOM.setFileInputFiles`), which the LLM can't supply. Returns an
- * honest error directing the agent to use `takeover` so the user can pick
- * the file via the native file picker.
+ * `upload_file` action handler.
+ *
+ * `upload_file` requires a real filesystem path (CDP `DOM.setFileInputFiles`,
+ * which takes absolute paths, not File objects) that the LLM cannot supply,
+ * so an autonomous upload can never be honored. We therefore:
+ * 1. Resolve the target element with {@link resolveElement} — this throws a
+ * typed `NoSuchElementException` ("…not found…") when the index is
+ * missing/stale, preserving the executor's "element disappeared" →
+ * re-extract contract (and the test's typed-throw assertion).
+ * 2. Reject (typed throw) any element that is not a file input, so the agent
+ * gets a clear, actionable error instead of a silent no-op.
+ * 3. Return an HONEST `success: false` result for a genuine file input —
+ * never `success: true` — directing the agent to fall back to `takeover`
+ * so the user can pick the file via the native file picker.
+ *
+ * NOTE: `action.path` (declared in the schema) is intentionally unused dead
+ * contract surface — the upload can never be honored in autonomous mode, so a
+ * `path` value is meaningless. See finding: the schema field should be dropped
+ * once/if a future implementation honors it. Do not treat `path` as honored.
  */
 
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
-import { resolveElement } from "../helpers";
 import type { ActionContext } from "./types";
+import { resolveElement } from "../helpers/element-resolver";
 
 export async function handleUploadFile(
   ctx: ActionContext,
   action: Extract<Action, { type: "upload_file" }>,
 ): Promise<ActionResult> {
-  const { state } = ctx;
-  const el = resolveElement(state, action.index);
-  if (!el) {
-    throw new Error(`element [${action.index}] not found`);
-  }
+ // Resolve the target element. Throws (NoSuchElementException, message
+ // contains "not found") if the index is missing or stale — the documented
+ // "element disappeared" → re-extract-state contract. Restores the typed
+ // throw the test suite asserts for a missing selector.
+  const el = resolveElement(ctx.state, action.index);
+
+ // File uploads require a real `<input type="file">`. If the resolved element
+ // is anything else, fail closed with a typed error rather than silently
+ // doing nothing (which would send the agent into a confusing retry loop).
   if (!(el instanceof HTMLInputElement) || el.type !== "file") {
-    throw new Error(`element [${action.index}] is not a file input`);
+    throw new Error(
+      `element [${action.index}] is not a file input — upload_file requires a file input (type="file")`,
+    );
   }
-  // File uploads require a real file path on the user's filesystem
-  // (CDP `DOM.setFileInputFiles` takes absolute paths, not File
-  // objects). The agent LLM has no access to filesystem paths, so we
-  // cannot honor this action autonomously. Return an honest error so
-  // the agent can plan to use `takeover` (the user manually picks the
-  // file via the native file picker). DO NOT claim success — the
-  // previous stub returned `success: true` without uploading anything.
+
+ // Autonomous upload can never be honored: CDP `DOM.setFileInputFiles`
+ // needs an absolute path on the user's filesystem, which the LLM can't
+ // supply. Return an honest failure (NEVER `success: true`) so the agent
+ // plans to use `takeover` (the user manually picks the file via the native
+ // picker). DO NOT claim success — the previous stub returned `success: true`
+ // without uploading anything.
   return {
     action,
     success: false,

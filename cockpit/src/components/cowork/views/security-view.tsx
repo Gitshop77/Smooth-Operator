@@ -51,9 +51,9 @@ const SEVERITY_TONE: Record<string, "error" | "warning" | "info"> = {
   high: "error",
   medium: "warning",
   low: "info",
-  // The Prisma `SecurityEvent.severity` field also allows `'info'`
-  // (see schema.prisma). Map to the `info` tone so info events render
-  // distinctly from `low`.
+ // The Prisma `SecurityEvent.severity` field also allows `'info'`
+ // (see schema.prisma). Map to the `info` tone so info events render
+ // distinctly from `low`.
   info: "info",
 };
 
@@ -63,7 +63,7 @@ const SEVERITY_BORDER: Record<string, string> = {
   high: "border-l-[3px] border-l-destructive",
   medium: "border-l-[3px] border-l-chart-1",
   low: "border-l-[3px] border-l-muted-foreground/30",
-  // Match SEVERITY_TONE — give info-severity rows a neutral border.
+ // Match SEVERITY_TONE — give info-severity rows a neutral border.
   info: "border-l-[3px] border-l-muted-foreground/30",
 };
 
@@ -78,9 +78,9 @@ export function SecurityView() {
   }, [data]);
 
   const rows = React.useMemo(() => {
-    // `timestamp` arrives as an ISO string (Prisma DateTime → JSON
-    // serializes to string). Coerce to ms via `new Date(...).getTime()` so
-    // the sort is stable.
+ // `timestamp` arrives as an ISO string (Prisma DateTime → JSON
+ // serializes to string). Coerce to ms via `new Date(...).getTime()` so
+ // the sort is stable.
     const all = (data ?? []).slice().sort(
       (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
     );

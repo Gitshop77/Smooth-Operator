@@ -1,16 +1,20 @@
 /**
  * ESLint config — minimal, no framework dependency.
  *
- * NOTE: this repo does NOT currently have a working `tsc --noEmit` type-safety
- * gate. package.json defines no `tsc`/`typecheck` script, and tsconfig.json
- * restricts `compilerOptions.types` to `["chrome"]` (excluding `@types/node`),
- * so a `tsc --noEmit` run would error on the Node-based build/config scripts
- * (`esbuild.config.ts`, `vitest.config.ts`, etc.) that import `path`/`fs`/
- * `__dirname`/`process`. Until that is fixed (add a `typecheck` script and a
- * `tsconfig.node.json` for the Node scripts), ESLint is the only automated
- * static check that actually runs. It is kept for the runtime correctness
- * rules that tsc would not cover even once enabled: unused variables,
- * prefer-const, no-fallthrough, and no-dupe-keys.
+ * NOTE: type-safety is provided by `npx tsc --noEmit`, which CI runs directly
+ * (see `.github/workflows/ci.yml` — the `Type-check root TypeScript` step and
+ * the cockpit type-check step both invoke it). It uses the root tsconfig.json,
+ * which includes .ts / .tsx through the ** glob and excludes `cockpit`,
+ * `mini-services`, and `chrome-extension` (those have their own CI type-checks
+ * via their own tsconfigs). The `compilerOptions.types: ["chrome"]` setting
+ * does NOT break this: explicitly-imported Node modules (`path`, `fs`,
+ * `process`) still resolve through `@types/node`, which is present in
+ * node_modules, so `npx tsc --noEmit` exits 0 (clean). package.json defines no
+ * `tsc`/`typecheck` *script* — CI invokes `tsc` directly — so there is no
+ * `npm run typecheck`, but the type-check gate itself is real and passing.
+ * ESLint remains the automated static check for the runtime-correctness rules
+ * that tsc does not cover: unused variables, prefer-const, no-fallthrough,
+ * no-dupe-keys, and others configured below.
  *
  * `.ts` files use the `@typescript-eslint/parser` + `@typescript-eslint/no-unused-vars`
  * rule. Without the parser, ESLint v9+ flat config only lints `.js`/`.mjs`
@@ -39,10 +43,10 @@ const sharedRules = {
 };
 
 export default [
-  // .ts / .tsx files: TS parser + TS-aware no-unused-vars. The glob also
-  // matches `.tsx` so JSX in extension/agent `.tsx` files is parsed by the
-  // TypeScript parser rather than falling through to espree (which cannot
-  // parse TS/JSX and would make `npm run lint` fail with parse errors).
+ // .ts / .tsx files: TS parser + TS-aware no-unused-vars. The glob also
+ // matches `.tsx` so JSX in extension/agent `.tsx` files is parsed by the
+ // TypeScript parser rather than falling through to espree (which cannot
+ // parse TS/JSX and would make `npm run lint` fail with parse errors).
   {
     files: ["**/*.ts", "**/*.tsx"],
     languageOptions: {
@@ -54,15 +58,15 @@ export default [
       "no-unused-vars": "off",
       "@typescript-eslint/no-unused-vars": [
         "warn",
-        // `args: "none"` — do not flag unused function parameters. In a TS
-        // codebase, params are frequently interface/callback conformances.
-        // tsc's `noUnusedParameters` covers genuinely-unused params if the
-        // project opts in; ESLint here focuses on unused vars/imports.
+ // `args: "none"` — do not flag unused function parameters. In a TS
+ // codebase, params are frequently interface/callback conformances.
+ // tsc's `noUnusedParameters` covers genuinely-unused params if the
+ // project opts in; ESLint here focuses on unused vars/imports.
         { "args": "none", "varsIgnorePattern": "^_", "ignoreRestSiblings": true },
       ],
     },
   },
-  // .js/.mjs files: core no-unused-vars (TS rule doesn't apply to JS).
+ // .js/.mjs files: core no-unused-vars (TS rule doesn't apply to JS).
   {
     files: ["**/*.js", "**/*.mjs"],
     rules: {

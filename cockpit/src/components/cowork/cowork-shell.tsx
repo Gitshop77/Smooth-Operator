@@ -43,7 +43,7 @@ import { PromptsView } from "@/components/cowork/views/prompts-view";
 import type { ViewId } from "@/hooks/use-cowork-store";
 
 const VIEWS: Record<ViewId, React.ComponentType> = {
-  // Observe
+ // Observe
   overview: OverviewView,
   "runs-history": RunsHistoryView,
   logs: LogsExplorerView,
@@ -55,7 +55,7 @@ const VIEWS: Record<ViewId, React.ComponentType> = {
   network: NetworkView,
   snapshots: SnapshotsView,
   devtools: DevToolsView,
-  // Build
+ // Build
   agents: AgentsView,
   workflows: WorkflowsView,
   "mcp-tools": McpToolsView,
@@ -65,11 +65,11 @@ const VIEWS: Record<ViewId, React.ComponentType> = {
   collections: CollectionsView,
   extensions: ExtensionsView,
   chat: ChatView,
-  // Secure
+ // Secure
   security: SecurityView,
-  // Settings
+ // Settings
   settings: SettingsView,
-  // Depth views (no nav entry)
+ // Depth views (no nav entry)
   "session-replay": SessionReplayView,
   "run-detail": RunDetailView,
 };
@@ -91,13 +91,13 @@ const EXTENSION_ONLY_IDS: ViewId[] = [
  * CoworkShell — the whole dashboard layout.
  *
  * Structure (critical for the sticky footer requirement):
- *   <div min-h-screen flex flex-col>      ← root
- *     <div flex flex-1 min-h-screen>      ← row: sidebar + main
- *       <aside sticky top-0 h-screen>     ← desktop sidebar (mobile uses Sheet)
- *       <div flex-1 flex flex-col>        ← main column
- *         <Header sticky top-0>           ← sticky header
- *         <main flex-1>                   ← content grows, pushing footer down
- *         <Footer>                        ← mt-auto backup
+ * <div min-h-screen flex flex-col> ← root
+ * <div flex flex-1 min-h-screen> ← row: sidebar + main
+ * <aside sticky top-0 h-screen> ← desktop sidebar (mobile uses Sheet)
+ * <div flex-1 flex flex-col> ← main column
+ * <Header sticky top-0> ← sticky header
+ * <main flex-1> ← content grows, pushing footer down
+ * <Footer> ← mt-auto backup
  */
 export function CoworkShell() {
   const currentView = useCoworkStore((s) => s.currentView);

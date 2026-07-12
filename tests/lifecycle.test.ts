@@ -42,8 +42,8 @@ describe("appendThinkingEntry body escaping", () => {
   });
 
   beforeEach(() => {
-    // Each test appends a new entry; clear so querySelector finds THIS test's
-    // entry rather than the first one ever appended.
+ // Each test appends a new entry; clear so querySelector finds THIS test's
+ // entry rather than the first one ever appended.
     thinkingBody.innerHTML = "";
   });
 
@@ -51,7 +51,7 @@ describe("appendThinkingEntry body escaping", () => {
     appendThinkingEntry("navigator", "Step 1", `<img src=x onerror=alert(1)>`);
     const entry = thinkingBody.querySelector(".te-body") as HTMLElement;
     expect(entry).not.toBeNull();
-    // The raw tag is escaped — no <img> element was actually created.
+ // The raw tag is escaped — no <img> element was actually created.
     expect(entry.querySelector("img")).toBeNull();
     expect(entry.innerHTML).toContain("&lt;img");
     expect(entry.innerHTML).not.toContain("<img");

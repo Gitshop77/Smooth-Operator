@@ -5,15 +5,15 @@
 // persistence layer. Targets SQLite via `prisma db push`.
 //
 // Conventions:
-//   - IDs are cuid() strings.
-//   - createdAt defaults to now(); updatedAt uses @updatedAt where applicable.
-//   - SQLite has no native enum / JSON type — enums are stored as `String`
-//     (documented inline) and complex/nested values are stored as JSON-encoded
-//     `String` columns (suffix `Json` for clarity, e.g. `treeJson`).
-//   - Foreign keys use Prisma relations; onDelete defaults to NO ACTION to
-//     avoid losing data on parent deletion. Cascade only for children that
-//     cannot exist without the parent (e.g. PinboardItem → Pinboard).
-//   - Indexes on hot lookup paths: url, domain, tabId, sessionId, createdAt.
+// - IDs are cuid() strings.
+// - createdAt defaults to now(); updatedAt uses @updatedAt where applicable.
+// - SQLite has no native enum / JSON type — enums are stored as `String`
+// (documented inline) and complex/nested values are stored as JSON-encoded
+// `String` columns (suffix `Json` for clarity, e.g. `treeJson`).
+// - Foreign keys use Prisma relations; onDelete defaults to NO ACTION to
+// avoid losing data on parent deletion. Cascade only for children that
+// cannot exist without the parent (e.g. PinboardItem → Pinboard).
+// - Indexes on hot lookup paths: url, domain, tabId, sessionId, createdAt.
 // ============================================================================
 
 generator client {
@@ -34,7 +34,7 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Relations
+ // Relations
   chatMessages ChatMessage[] @relation("UserChatMessages")
 }
 
@@ -60,10 +60,10 @@ model Tab {
   url            String
   title          String   @default("")
   favicon        String?
-  // status — string-typed enum (SQLite has no native enum; values are NOT
-  // enforced at the DB layer). Allowed values are exactly:
-  //   'loading' | 'loaded' | 'crashed' | 'idle'
-  // Only these four values should ever be written. Defaults to 'idle'.
+ // status — string-typed enum (SQLite has no native enum; values are NOT
+ // enforced at the DB layer). Allowed values are exactly:
+ // 'loading' | 'loaded' | 'crashed' | 'idle'
+ // Only these four values should ever be written. Defaults to 'idle'.
   status         String   @default("idle")
   webContentsId  Int?
   workspaceId    String?
@@ -75,7 +75,7 @@ model Tab {
   emoji          String?
   emojiFlash     Boolean  @default(false)
   partition      String?
-  // JSON-encoded loader flags / source descriptor (TabSource is a free-form string in the ported code).
+ // JSON-encoded loader flags / source descriptor (TabSource is a free-form string in the ported code).
   loaderFlags    String?
   source         String?
   activeAt       DateTime?
@@ -95,7 +95,7 @@ model Tab {
   @@index([url])
   @@index([workspaceId])
   @@index([groupId])
-  @@index([active])
+ // Note: no index on `active` — a two-value boolean is non-selective.
   @@index([lastAccessedAt])
 }
 
@@ -105,7 +105,7 @@ model Bookmark {
   id        String    @id @default(cuid())
   name      String
   url       String?
-  // type: 'folder' | 'url' (string-typed enum on SQLite)
+ // type: 'folder' | 'url' (string-typed enum on SQLite)
   type      String    @default("url")
   favicon   String?
   parentId  String?
@@ -130,7 +130,7 @@ model Bookmark {
 
 model HistoryEntry {
   id            String   @id @default(cuid())
-  // @unique — see WRITE CONTRACT note on the model. Writes must upsert on url.
+ // @unique — see WRITE CONTRACT note on the model. Writes must upsert on url.
   url           String   @unique
   title         String   @default("")
   visitCount    Int      @default(1)
@@ -175,19 +175,19 @@ model Extension {
   name          String
   version       String
   description   String?
-  // Full manifest serialized as JSON.
+ // Full manifest serialized as JSON.
   manifestJson  String?
   isInstalled   Boolean  @default(true)
   isEnabled     Boolean  @default(true)
-  // source — string-typed enum (SQLite has no native enum; values NOT enforced
-  // at the DB layer). Allowed values are exactly:
-  //   'chrome-import' | 'gallery' | 'local'
-  // Defaults to 'local'.
+ // source — string-typed enum (SQLite has no native enum; values NOT enforced
+ // at the DB layer). Allowed values are exactly:
+ // 'chrome-import' | 'gallery' | 'local'
+ // Defaults to 'local'.
   source        String   @default("local")
-  // trustLevel — free String (no closed set is enforced on SQLite). Callers
-  // currently write trust-tier strings such as 'unknown' (default), 'low',
-  // 'medium', 'high'. Documented here so the contract is explicit; validate at
-  // the API boundary if a closed set is required.
+ // trustLevel — free String (no closed set is enforced on SQLite). Callers
+ // currently write trust-tier strings such as 'unknown' (default), 'low',
+ // 'medium', 'high'. Documented here so the contract is explicit; validate at
+ // the API boundary if a closed set is required.
   trustLevel    String   @default("unknown")
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
@@ -201,7 +201,7 @@ model Extension {
 model Snapshot {
   id          String   @id @default(cuid())
   tabId       String
-  // JSON-encoded accessibility/DOM tree (AccessibilityNode[]).
+ // JSON-encoded accessibility/DOM tree (AccessibilityNode[]).
   treeJson    String
   capturedAt  DateTime @default(now())
 
@@ -215,26 +215,26 @@ model Snapshot {
 
 model SecurityEvent {
   id         String   @id @default(cuid())
-  // type — string-typed enum (SQLite has no native enum; values NOT enforced
-  // at the DB layer). Allowed values are exactly:
-  //   'prompt-injection' | 'script-injection' | 'network-block' | 'secret-leak'
-  //   | 'behavior-critical' | 'anomaly' | 'zero-day' | 'exfiltration-attempt'
-  //   | 'blocked' | 'warned'
+ // type — string-typed enum (SQLite has no native enum; values NOT enforced
+ // at the DB layer). Allowed values are exactly:
+ // 'prompt-injection' | 'script-injection' | 'network-block' | 'secret-leak'
+ // | 'behavior-critical' | 'anomaly' | 'zero-day' | 'exfiltration-attempt'
+ // | 'blocked' | 'warned'
   type       String
-  // severity — string-typed enum. Allowed values are exactly:
-  //   'info' | 'low' | 'medium' | 'high' | 'critical'
-  // Defaults to 'info'.
+ // severity — string-typed enum. Allowed values are exactly:
+ // 'info' | 'low' | 'medium' | 'high' | 'critical'
+ // Defaults to 'info'.
   severity   String   @default("info")
-  // category — string-typed enum. Allowed values are exactly:
-  //   'network' | 'script' | 'form' | 'outbound' | 'behavior' | 'content'
+ // category — string-typed enum. Allowed values are exactly:
+ // 'network' | 'script' | 'form' | 'outbound' | 'behavior' | 'content'
   category   String?
-  // action — string-typed enum. Allowed values are exactly:
-  //   'auto_block' | 'agent_block' | 'user_allowed' | 'logged' | 'flagged'
+ // action — string-typed enum. Allowed values are exactly:
+ // 'auto_block' | 'agent_block' | 'user_allowed' | 'logged' | 'flagged'
   action     String?
   sourceUrl  String?
   domain     String?
   tabId      String?
-  // JSON-encoded full event payload (SecurityEvent.details).
+ // JSON-encoded full event payload (SecurityEvent.details).
   details    String?
   blocked    Boolean  @default(false)
   confidence Int?
@@ -254,9 +254,9 @@ model AgentTrust {
   id          String    @id @default(cuid())
   agentId     String
   name        String?
-  // trustLevel: 'T1' (modal) | 'T2' (per-domain window) | 'T3' (persistent) | 'T4' (global window)
+ // trustLevel: 'T1' (modal) | 'T2' (per-domain window) | 'T3' (persistent) | 'T4' (global window)
   trustLevel  String    @default("T1")
-  // JSON-encoded scope, e.g. { domains: ["example.com"], minutes: 30 }
+ // JSON-encoded scope, e.g. { domains: ["example.com"], minutes: 30 }
   scope       String?
   grantedAt   DateTime  @default(now())
   lastUsedAt  DateTime?
@@ -275,16 +275,16 @@ model Task {
   tabId       String?
   title       String
   description String?
-  // status — string-typed enum (SQLite has no native enum; values NOT enforced
-  // at the DB layer). Allowed values are exactly:
-  //   'pending' | 'running' | 'paused' | 'waiting-approval' | 'ready-to-resume'
-  //   | 'done' | 'failed' | 'cancelled'
-  // Defaults to 'pending'.
+ // status — string-typed enum (SQLite has no native enum; values NOT enforced
+ // at the DB layer). Allowed values are exactly:
+ // 'pending' | 'running' | 'paused' | 'waiting-approval' | 'ready-to-resume'
+ // | 'done' | 'failed' | 'cancelled'
+ // Defaults to 'pending'.
   status      String   @default("pending")
-  // JSON-encoded TaskStep[].
+ // JSON-encoded TaskStep[].
   stepsJson   String   @default("[]")
   currentStep Int      @default(0)
-  // JSON-encoded results array.
+ // JSON-encoded results array.
   resultsJson String   @default("[]")
   assignedTo  String?
   createdBy   String?
@@ -306,9 +306,9 @@ model Workflow {
   id            String    @id @default(cuid())
   name          String
   description   String?
-  // JSON-encoded WorkflowStep[].
+ // JSON-encoded WorkflowStep[].
   stepsJson     String    @default("[]")
-  // JSON-encoded WorkflowVariables.
+ // JSON-encoded WorkflowVariables.
   variablesJson String?
   isRecurring   Boolean   @default(false)
   scheduleCron  String?
@@ -317,7 +317,7 @@ model Workflow {
   updatedAt     DateTime  @updatedAt
 
   @@index([name])
-  @@index([isRecurring])
+ // Note: no index on `isRecurring` — a two-value boolean is non-selective.
 }
 
 // ─── Pinboards ─────────────────────────────────────────────────────────────
@@ -327,14 +327,14 @@ model Pinboard {
   name      String
   emoji     String   @default("📌")
   color     String   @default("#4285f4")
-  // layout — string-typed enum (SQLite has no native enum; values NOT enforced
-  // at the DB layer). Allowed values are exactly:
-  //   'default' | 'spacious' | 'dense'
-  // Defaults to 'default'.
+ // layout — string-typed enum (SQLite has no native enum; values NOT enforced
+ // at the DB layer). Allowed values are exactly:
+ // 'default' | 'spacious' | 'dense'
+ // Defaults to 'default'.
   layout    String   @default("default")
-  // background — string-typed enum. Allowed values are exactly:
-  //   'dark' | 'light'
-  // Defaults to 'dark'.
+ // background — string-typed enum. Allowed values are exactly:
+ // 'dark' | 'light'
+ // Defaults to 'dark'.
   background String  @default("dark")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -355,7 +355,7 @@ model PinboardItem {
   thumbnail   String?
   note        String?
   sourceUrl   String?
-  // type: 'link' | 'image' | 'text' | 'quote'
+ // type: 'link' | 'image' | 'text' | 'quote'
   type        String   @default("link")
   position    Int      @default(0)
   createdAt   DateTime @default(now())
@@ -371,15 +371,16 @@ model PinboardItem {
 model SiteMemory {
   id         String   @id @default(cuid())
   domain     String
-  // JSON-encoded SiteData (visits[], diffs[], stats).
+ // JSON-encoded SiteData (visits[], diffs[], stats).
   dataJson   String
   version    Int      @default(1)
   capturedAt DateTime @default(now())
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
+ // @@unique([domain]) already provides a backing index; a standalone
+ // @@index([domain]) would be redundant.
   @@unique([domain])
-  @@index([domain])
   @@index([capturedAt])
 }
 
@@ -388,13 +389,14 @@ model SiteMemory {
 model FormMemory {
   id            String   @id @default(cuid())
   domain        String
-  // JSON-encoded DomainFormData (entries[]).
+ // JSON-encoded DomainFormData (entries[]).
   formDataJson  String
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
+ // @@unique([domain]) already provides a backing index; a standalone
+ // @@index([domain]) would be redundant.
   @@unique([domain])
-  @@index([domain])
 }
 
 // ─── Network Capture ───────────────────────────────────────────────────────
@@ -407,7 +409,11 @@ model NetworkRequest {
   status       Int?
   mimeType     String?
   resourceType String?
-  // Truncated to a sane limit by the capture layer.
+ // REDACTION CONTRACT: requestBody/responseBody may contain PII, credentials,
+ // tokens, or other secrets. Write paths MUST redact sensitive values (e.g.
+ // Authorization headers, cookies, passwords, API keys) and truncate to a sane
+ // limit BEFORE persisting — never store raw HTTP bodies verbatim. Prefer
+ // storing only metadata when the body is not required.
   requestBody  String?
   responseBody String?
   durationMs   Int?
@@ -427,10 +433,10 @@ model NetworkRequest {
 model DevToolsLog {
   id        String   @id @default(cuid())
   tabId     String
-  // level: 'log' | 'info' | 'warn' | 'error' | 'debug' | 'verbose'
+ // level: 'log' | 'info' | 'warn' | 'error' | 'debug' | 'verbose'
   level     String   @default("log")
   message   String
-  // JSON-encoded string[] of arg previews.
+ // JSON-encoded string[] of arg previews.
   argsJson  String?
   source    String?
   line      Int?
@@ -450,14 +456,17 @@ model DevToolsLog {
 model MCPToolCall {
   id         String   @id @default(cuid())
   toolName   String
-  // JSON-encoded tool args (Zod-validated input).
+ // JSON-encoded tool args (Zod-validated input).
   argsJson   String?
-  // JSON-encoded tool result.
+ // JSON-encoded tool result.
   resultJson String?
   agentId    String?
   sessionId  String?
-  // status: 'success' | 'error' | 'pending'
-  status     String   @default("success")
+ // status: 'success' | 'error' | 'pending'
+ // Defaults to 'pending' so an unfinished/never-finalized tool invocation is
+ // NOT recorded as a success (audit rows must not fail open). Write paths must
+ // explicitly set 'success' or 'error' on completion.
+  status     String   @default("pending")
   durationMs Int?
   errorMessage String?
   createdAt  DateTime @default(now())
@@ -476,7 +485,7 @@ model ActivityEvent {
   tabId        String?
   agentId      String?
   summary      String
-  // JSON-encoded event-specific metadata.
+ // JSON-encoded event-specific metadata.
   metadataJson String?
   createdAt    DateTime @default(now())
 
@@ -494,7 +503,7 @@ model WatchJob {
   id              String    @id @default(cuid())
   url             String
   selector        String?
-  // diffMode: 'content' | 'title' | 'title-or-content' | 'text-length'
+ // diffMode: 'content' | 'title' | 'title-or-content' | 'text-length'
   diffMode        String    @default("content")
   intervalSec     Int       @default(3600)
   enabled         Boolean   @default(true)
@@ -512,21 +521,22 @@ model WatchJob {
   tab             Tab?      @relation(fields: [tabId], references: [id])
 
   @@index([url])
-  @@index([enabled])
+ // Note: no index on `enabled` — a two-value boolean is non-selective.
+  @@index([tabId])
 }
 
 // ─── Chat Messages (LLM conversation history) ──────────────────────────────
 
 model ChatMessage {
   id         String   @id @default(cuid())
-  // role: 'user' | 'assistant' | 'system' | 'tool'
+ // role: 'user' | 'assistant' | 'system' | 'tool'
   role       String
   content    String
   sessionId  String?
   agentId    String?
   tokensUsed Int?
   model      String?
-  // JSON-encoded tool calls / function calls.
+ // JSON-encoded tool calls / function calls.
   toolCallsJson String?
   userId     String?
   createdAt  DateTime @default(now())

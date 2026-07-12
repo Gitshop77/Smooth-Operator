@@ -34,24 +34,35 @@ const auth = (options: ProviderAuthOption<"optional">) => {
 };
 
 export function configure(input: Config = {}) {
-  // (SSRF guard): validate any user-supplied baseURL override before
-  // building the route/endpoint. The trusted default (Gemini.ENDPOINT) is
-  // exempt — only untrusted, user-controlled input is checked.
-  assertSafeUserBaseURL(input.baseURL);
+ // (SSRF guard): validate any user-supplied baseURL override before
+ // building the route/endpoint. The trusted default (Gemini.ENDPOINT) is
+ // exempt — only untrusted, user-controlled input is checked.
+  assertSafeUserBaseURL(input.baseURL, id);
   const baseURL = input.baseURL ?? Gemini.ENDPOINT;
   return {
     id,
     model: (modelID: string) => {
-      // Per-model Route — Gemini puts the model in the URL path, not the body.
-      // `alt=sse` is REQUIRED for the streaming endpoint: without it the API
-      // returns a newline-delimited JSON-stream (one array per chunk) instead
-      // of SSE `data: {...}\n\n` frames, which the `Framing.sse` parser can't
-      // split into frames. The whole stream would be silently dropped.
+ // Per-model Route — Gemini puts the model in the URL path, not the body.
+ // `alt=sse` is REQUIRED for the streaming endpoint: without it the API
+ // returns a newline-delimited JSON-stream (one array per chunk) instead
+ // of SSE `data: {...}\n\n` frames, which the `Framing.sse` parser can't
+ // split into frames. The whole stream would be silently dropped.
+ //
+ // The route's `buildURL` resolves the path with `new URL(path, base)`. A
+ // leading-slash `geminiPath` (`/{model}:streamGenerateContent`) would
+ // REPLACE the whole base path per the URL spec, silently dropping the
+ // `/v1beta/models` prefix baked into `Gemini.ENDPOINT` (and any path a
+ // user-supplied `baseURL` carries). To preserve it, split the base into
+ // origin + path prefix and prepend the prefix to the per-model path, so
+ // the final URL is `<origin>/v1beta/models/{model}:streamGenerateContent`.
+      const parsed = new URL(baseURL);
+      const basePath = parsed.pathname.replace(/\/+$/, "");
+      const fullPath = `${basePath}${Gemini.geminiPath(modelID)}`;
       const route = make({
         id: "gemini",
         provider: id,
         protocol: Gemini.protocol,
-        endpoint: Endpoint.path(Gemini.geminiPath(modelID), { baseURL, query: { alt: "sse" } }),
+        endpoint: Endpoint.path(fullPath, { baseURL: parsed.origin, query: { alt: "sse" } }),
         auth: auth(input),
         framing: Framing.sse,
       });
@@ -68,11 +79,17 @@ export function configure(input: Config = {}) {
  */
 export function toLLMProvider(config: Config & { model: string }): LLMProvider {
   return toLLMProviderBridge({
-    // Keep `providerId` consistent with this module's `id` ("google") and the
-    // route's `provider` field, so telemetry / cost / catalog keys line up.
+ // Keep `providerId` consistent with this module's `id` ("google") and the
+ // route's `provider` field, so telemetry / cost / catalog keys line up.
     providerId: "google",
     providerDisplayName: "Google",
     model: config.model,
+ // `supportsVision` defaults to `true`; the authoritative per-model value is
+ // patched by the catalog layer (`buildProvider`) after default resolution, so
+ // a model id absent from the catalog is reported as vision-capable. The catalog
+ // is the single source of truth and must cover every Gemini model this facade
+ // can serve (legacy models without vision are corrected there, mirroring the
+ // Anthropic facade's coarse gate).
     supportsVision: true,
     supportsStructuredOutput: true,
     configureResult: configure(config),

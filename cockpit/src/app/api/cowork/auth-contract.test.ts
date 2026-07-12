@@ -4,10 +4,10 @@
  * The cockpit enforces `X-Cowork-Token` (or, for the SSE stream, a `?token=`
  * query param) on every `/api/cowork/*` route via `middleware`. These thin
  * tests assert the contract holds for the previously-untested routes:
- *   - ai/image (proxy to the image-generation mini-service)
- *   - events/stream (SSE proxy — query-token path, and NEVER logs the raw secret)
- *   - security/events (Prisma-backed security event list)
- *   - tabs / bookmarks (CRUD) — 401 without token, 200 with token.
+ * - ai/image (proxy to the image-generation mini-service)
+ * - events/stream (SSE proxy — query-token path, and NEVER logs the raw secret)
+ * - security/events (Prisma-backed security event list)
+ * - tabs / bookmarks (CRUD) — 401 without token, 200 with token.
  *
  * Pattern mirrors `src/middleware.test.ts`.
  */
@@ -74,16 +74,21 @@ describe('cockpit route auth contract', () => {
 
   it('the raw stream token is NEVER logged in cleartext (redacted at log time)', async () => {
     const { middleware } = await import('@/middleware');
-    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const res = middleware(fakeReq(SSE, `token=${REAL_TOKEN}`));
     expect(res.status).toBe(200);
-    // Inspect every argument of every console.log call.
-    for (const call of spy.mock.calls) {
-      for (const arg of call) {
-        expect(JSON.stringify(arg)).not.toContain(REAL_TOKEN);
+ // Inspect every argument of every console.log / warn / error call — the
+ // "never logged" guarantee covers all console sinks, not just console.log.
+    for (const spy of [logSpy, warnSpy, errorSpy]) {
+      for (const call of spy.mock.calls) {
+        for (const arg of call) {
+          expect(JSON.stringify(arg)).not.toContain(REAL_TOKEN);
+        }
       }
     }
-    // Sanity: the request log WAS emitted (so we actually exercised logging).
-    expect(spy).toHaveBeenCalled();
+ // Sanity: the request log WAS emitted (so we actually exercised logging).
+    expect(logSpy).toHaveBeenCalled();
   });
 });

@@ -13,22 +13,32 @@
  * optionality between the input and output types.)
  *
  * Usage:
- *   import { validateConfig, type AgentConfigInput } from "@/lib/agent/config/schema";
- *   function createAgent(userConfig: Partial<AgentConfigInput>) {
- *     const merged = { ...DEFAULT_CONFIG, ...userConfig };
- *     const config = validateConfig(merged);
- *     // config is a fully-validated AgentConfig
- *   }
+ * import { validateConfig } from "@/lib/agent/config/schema";
+ * function createAgent(userConfig: Partial<AgentConfig>) {
+ * const merged = { ...DEFAULT_CONFIG, ...userConfig };
+ * const config = validateConfig(merged);
+ * // config is a fully-validated AgentConfig
+ * }
  *
  * The orchestrator calls {@link validateConfig} on every run. The input is
  * always a merge of {@link DEFAULT_CONFIG} over any user override
  * (`{ ...DEFAULT_CONFIG, ...userConfig }`), so every field has a value. If
- * validation fails, {@link validateConfig} throws a {@link ConfigValidationError}
+ * validation fails, {@link validateConfig} throws a `ConfigValidationError`
  * and the orchestrator re-throws it as a hard failure — a broken config is
  * NEVER silently accepted.
  */
 
 import { z } from "zod";
+
+/**
+ * Matches a group that contains a quantifier and is itself immediately
+ * quantified again — the classic catastrophic-backtracking shape, e.g.
+ * `(a+)+`, `(.*)*`, `(\d{2,})+`. Used to reject pathological `regex` evaluator
+ * patterns before they can hang the evaluator (ReDoS). The inner
+ * `[*+{]` requires a real quantifier inside the group; `?` after a group is
+ * benign (optional/lazy) and intentionally not flagged.
+ */
+const CATASTROPHIC_REGEX = /\((?:[^()\\]|\\.)*[*+{]\s*\)\s*[*+{]/;
 
 // ─── Sub-schemas ────────────────────────────────────────────────────────────
 
@@ -36,15 +46,15 @@ import { z } from "zod";
 const StringMatchSchema = z
   .object({
     type: z.enum(["exact_match", "must_include", "regex"]),
-    // Bound the pattern length so an attacker-influenced config cannot supply
-    // an arbitrarily huge (and potentially catastrophic-backtracking) regex.
+ // Bound the pattern length so an attacker-influenced config cannot supply
+ // an arbitrarily huge (and potentially catastrophic-backtracking) regex.
     ref: z.string().max(2000),
   })
   .superRefine((val, ctx) => {
-    // Validate `regex`-type refs compile at the boundary (don't push the check
-    // to evaluator runtime). This also bounds ReDoS risk: an invalid pattern is
-    // rejected here rather than silently treated as "no match" later, and a
-    // compiling-but-pathological pattern is at least length-capped above.
+ // Validate `regex`-type refs compile at the boundary (don't push the check
+ // to evaluator runtime). This also bounds ReDoS risk: an invalid pattern is
+ // rejected here rather than silently treated as "no match" later, and a
+ // compiling-but-pathological pattern is at least length-capped above.
     if (val.type === "regex") {
       try {
         new RegExp(val.ref);
@@ -52,6 +62,16 @@ const StringMatchSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: "regex ref is not a valid regular expression",
+          path: ["ref"],
+        });
+        return;
+      }
+ // Reject obvious catastrophic-backtracking patterns so an
+ // attacker-influenced config cannot hang the evaluator (ReDoS).
+      if (CATASTROPHIC_REGEX.test(val.ref)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "regex ref looks like a catastrophic-backtracking pattern",
           path: ["ref"],
         });
       }
@@ -65,13 +85,30 @@ const UrlMatchSchema = z.object({
 });
 
 /** Schema for a single HTML-content evaluator target. */
-const HtmlContentTargetSchema = z.object({
-  locator: z.string().optional(),
-  required_contents: z.object({
-    exact_match: z.string().optional(),
-    must_include: z.array(z.string()).optional(),
-  }),
-});
+const HtmlContentTargetSchema = z
+  .object({
+    locator: z.string().optional(),
+    required_contents: z.object({
+      exact_match: z.string().optional(),
+      must_include: z.array(z.string()).optional(),
+    }),
+  })
+  .superRefine((val, ctx) => {
+ // An empty target (neither `exact_match` nor a non-empty `must_include`)
+ // would make the evaluator pass trivially — reject it so config authors
+ // can't add a no-op target they think is meaningful.
+    const rc = val.required_contents;
+    const hasContent =
+      (typeof rc.exact_match === "string" && rc.exact_match.length > 0) ||
+      (Array.isArray(rc.must_include) && rc.must_include.length > 0);
+    if (!hasContent) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "required_contents must specify a non-empty exact_match or must_include",
+        path: ["required_contents"],
+      });
+    }
+  });
 
 /** Schema for the expected-outcomes spec. */
 const ExpectedOutcomesSchema = z.object({
@@ -92,10 +129,10 @@ const EarlyStopThresholdsSchema = z.object({
  * Zod schema for {@link AgentConfig}. Mirrors the interface in `../types.ts`.
  *
  * Defaults match {@link DEFAULT_CONFIG} from `../types.ts`:
- *   maxSteps: 100, maxActionsPerStep: 10, plannerInterval: 5, maxFailures: 5,
- *   enableLoopDetection: true, enableCompaction: true,
- *   compactionStepInterval: 20, compactionCharThreshold: 30_000,
- *   enableJudge: true.
+ * maxSteps: 100, maxActionsPerStep: 10, plannerInterval: 5, maxFailures: 5,
+ * enableLoopDetection: true, enableCompaction: true,
+ * compactionStepInterval: 20, compactionCharThreshold: 30_000,
+ * enableJudge: true.
  *
  * NOTE — unknown keys are intentionally NOT rejected: this schema is a plain
  * `z.object({...})` (NOT `.strict()`), so any key not listed below is silently
@@ -106,7 +143,7 @@ const EarlyStopThresholdsSchema = z.object({
  * before calling {@link validateConfig}. Known-INVALID values for known keys
  * (e.g. `maxSteps: "abc"`) ARE rejected and produce a {@link ConfigValidationError}.
  */
-export const AgentConfigSchema = z.object({
+const AgentConfigSchema = z.object({
   /** Hard step cap before forced stop (1-1000). */
   maxSteps: z.number().int().min(1).max(1000).default(100),
   /** Max actions the navigator can emit per step (1-50). */
@@ -122,47 +159,49 @@ export const AgentConfigSchema = z.object({
   /** Run compaction every N steps once threshold is met (>=1). */
   compactionStepInterval: z.number().int().min(1).default(20),
   /** Minimum history character length before compaction triggers (>=1000). */
-  compactionCharThreshold: z.number().int().min(1000).default(30_000),
+  compactionCharThreshold: z.number().int().min(1000).max(5_000_000).default(30_000),
   /** Optional USD cost cap — aborts the run if exceeded. */
   costCapUsd: z.number().positive().optional(),
   /**
-   * Whether to run the judge LLM after the planner reports task success.
-   * Optional here (mirrors {@link AgentConfig}) — the orchestrator always merges
-   * {@link DEFAULT_CONFIG}, which sets it to `true`, so the runtime value is
-   * always present. Kept optional (not `.default(true)`) so the validated
-   * output type stays structurally identical to {@link AgentConfig}.
-   */
+ * Whether to run the judge LLM after the planner reports task success.
+ * Optional here (mirrors {@link AgentConfig}) — the orchestrator always merges
+ * {@link DEFAULT_CONFIG}, which sets it to `true`, so the runtime value is
+ * always present. Kept optional (not `.default(true)`) so the validated
+ * output type stays structurally identical to {@link AgentConfig}.
+ */
   enableJudge: z.boolean().optional(),
   /** Whether to enable early-stop detection. */
   enableEarlyStop: z.boolean().optional(),
   /** Optional thresholds for the early-stop detector. */
   earlyStopThresholds: EarlyStopThresholdsSchema.optional(),
   /**
-   * Whether to run the HTML-summarizer pre-pass before each navigator call.
-   * Defaults to `true`: the summarizer is the single biggest per-action cost
-   * lever (the raw DOM is the largest part of the navigator request), so it is
-   * ON by default. Operators can opt OUT, but the navigator always applies a
-   * hard cap on the DOM size it ships to the model regardless of this flag (see
-   * `buildNavigatorUserMessage` / `prepareNavigatorRequest`).
-   */
+ * Whether to run the HTML-summarizer pre-pass before each navigator call.
+ * Defaults to `true`: the summarizer is the single biggest per-action cost
+ * lever (the raw DOM is the largest part of the navigator request), so it is
+ * ON by default. Operators can opt OUT, but the navigator always applies a
+ * hard cap on the DOM size it ships to the model regardless of this flag (see
+ * `buildNavigatorUserMessage` / `prepareNavigatorRequest`).
+ */
   enableHtmlSummarizer: z.boolean().optional().default(true),
   /** Optional expected-outcomes spec for deterministic evaluator fast-path. */
   expectedOutcomes: ExpectedOutcomesSchema.optional(),
 });
 
 /** Input type for {@link AgentConfigSchema} (accepts partial input). */
-export type AgentConfigInput = z.input<typeof AgentConfigSchema>;
+type AgentConfigInput = z.input<typeof AgentConfigSchema>;
 
 /** Validated output type — compatible with, but not strictly identical to, {@link AgentConfig}. */
-export type AgentConfigValidated = z.output<typeof AgentConfigSchema>;
+type AgentConfigValidated = z.output<typeof AgentConfigSchema>;
 
 // ─── Validation error ───────────────────────────────────────────────────────
 
 /**
  * Thrown by {@link validateConfig} when the input fails schema validation.
  * Wraps the underlying ZodError in `cause` for structured inspection.
+ * (Not exported — consumers duck-type on the `issues` property, which the
+ * orchestrator forwards unchanged.)
  */
-export class ConfigValidationError extends Error {
+class ConfigValidationError extends Error {
   /** The Zod issues that caused the failure. */
   readonly issues: z.ZodIssue[];
   constructor(cause: z.ZodError) {
@@ -183,7 +222,7 @@ export class ConfigValidationError extends Error {
  * Validate a raw config object against {@link AgentConfigSchema}.
  *
  * @param input The raw config (typically a partial user override merged on
- *              top of {@link DEFAULT_CONFIG}).
+ * top of {@link DEFAULT_CONFIG}).
  * @returns The validated config with defaults filled in.
  * @throws {ConfigValidationError} when validation fails.
  */

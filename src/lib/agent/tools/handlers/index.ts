@@ -1,9 +1,9 @@
 /**
  * Barrel re-export of every action handler. The dispatcher (`executor.ts`)
  * imports from here so adding a new action only requires:
- *   1. Writing a new `handlers/<name>.ts` file.
- *   2. Adding it to this barrel.
- *   3. Adding a case to the dispatcher's switch.
+ * 1. Writing a new `handlers/<name>.ts` file.
+ * 2. Adding it to this barrel.
+ * 3. Adding a case to the dispatcher's switch.
  *
  * Also re-exports `ActionContext` (the shared handler-context type) for the
  * dispatcher.

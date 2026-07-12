@@ -98,24 +98,24 @@ function implicitRole(el: HTMLElement): string | null {
 export function buildAttrs(el: HTMLElement): Record<string, string> {
   const attrs: Record<string, string> = {};
   for (const name of DOM_CONFIG.includeAttrs) {
-    // Sensitive fields: never surface `autocomplete` / `placeholder`. These
-    // reveal what *secret* the field holds (e.g. `autocomplete="cc-number"`),
-    // undermining the value redaction. The value itself is already redacted
-    // (see the `value` branch below — `isSensitive(el)` short-circuits it to
-    // `undefined`), so the two extractors (AX tree + indexed tree) redact
-    // consistently. We deliberately DO still surface `type` (e.g.
-    // `type="password"`) because it is non-secret semantic metadata the
-    // navigator LLM needs to classify the field — only the *value* is secret.
+ // Sensitive fields: never surface `autocomplete` / `placeholder`. These
+ // reveal what *secret* the field holds (e.g. `autocomplete="cc-number"`),
+ // undermining the value redaction. The value itself is already redacted
+ // (see the `value` branch below — `isSensitive(el)` short-circuits it to
+ // `undefined`), so the two extractors (AX tree + indexed tree) redact
+ // consistently. We deliberately DO still surface `type` (e.g.
+ // `type="password"`) because it is non-secret semantic metadata the
+ // navigator LLM needs to classify the field — only the *value* is secret.
     if (isSensitive(el) && (name === "autocomplete" || name === "placeholder")) {
       continue;
     }
     let val: string | null = null;
     if (name === "value") {
       if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
-        // Never expose sensitive values to the LLM. `isSensitive` (shared
-        // with the AX-tree extractor) redacts password, hidden (CSRF/session
-        // tokens), and sensitive-autocomplete fields (credit-card, OTP).
-        // Reading a non-sensitive `<select>`'s value is safe (chosen option).
+ // Never expose sensitive values to the LLM. `isSensitive` (shared
+ // with the AX-tree extractor) redacts password, hidden (CSRF/session
+ // tokens), and sensitive-autocomplete fields (credit-card, OTP).
+ // Reading a non-sensitive `<select>`'s value is safe (chosen option).
         if (!isSensitive(el)) val = el.value;
       } else {
         const a = el.getAttribute("value");
@@ -125,10 +125,10 @@ export function buildAttrs(el: HTMLElement): Record<string, string> {
       val = el.getAttribute(name);
     }
     if (val !== null) {
-      // Keep boolean attributes even when their value is "" — their presence
-      // IS the information (e.g. `required` means "this field is required",
-      // absence means "it isn't"). For all other attributes, an empty string
-      // carries no information and is dropped to save tokens.
+ // Keep boolean attributes even when their value is "" — their presence
+ // IS the information (e.g. `required` means "this field is required",
+ // absence means "it isn't"). For all other attributes, an empty string
+ // carries no information and is dropped to save tokens.
       if (val === "" && !BOOLEAN_ATTRS.has(name)) continue;
       attrs[name] = val;
     }
@@ -179,13 +179,15 @@ function fnv1aHash(s: string): string {
  * with the same identity will hash the same, so we can detect "this element
  * was already here last step" reliably across re-renders.
  *
- * The tag+keyAttrs portion is cached (it doesn't change when the element
- * moves). The ancestor path is computed fresh each call (it changes when the
- * element moves, so caching it would produce stale hashes).
+ * The tag+keyAttrs portion is recomputed FRESH every call (it is NOT cached —
+ * see the note above `elementIdentity`: caching it would let in-place edits to
+ * a tracked key attribute slip past `isNew`). The ancestor path is also computed
+ * fresh each call (it changes when the element moves, so caching it would
+ * produce stale hashes).
  */
 function elementIdentity(el: HTMLElement): string {
-  // Compute the stable portion (tag + key attrs) fresh every call. Not cached,
-  // so in-place edits to a tracked key attribute are reflected (see note above).
+ // Compute the stable portion (tag + key attrs) fresh every call. Not cached,
+ // so in-place edits to a tracked key attribute are reflected (see note above).
   const tag = el.tagName.toLowerCase();
   const attrs = buildAttrs(el);
   const keyAttrs = DOM_CONFIG.identityKeyAttrs
@@ -194,7 +196,7 @@ function elementIdentity(el: HTMLElement): string {
     .join("|");
   const stablePart = `${tag}|${keyAttrs}`;
 
-  // Compute the path fresh each time (changes when the element moves).
+ // Compute the path fresh each time (changes when the element moves).
   const path: string[] = [];
   let cur: Element | null = el;
   let depth = 0;
@@ -206,10 +208,10 @@ function elementIdentity(el: HTMLElement): string {
     depth++;
   }
 
-  // Defensive: if the path ended up empty (e.g. a detached element, or an
-  // element whose parent is `document.body` with no ancestor chain), append a
-  // per-element discriminator so two distinct empty-path elements never
-  // collide and are wrongly reported as "not new".
+ // Defensive: if the path ended up empty (e.g. a detached element, or an
+ // element whose parent is `document.body` with no ancestor chain), append a
+ // per-element discriminator so two distinct empty-path elements never
+ // collide and are wrongly reported as "not new".
   if (path.length === 0) {
     return `${stablePart}|#${collisionFreeId(el)}`;
   }

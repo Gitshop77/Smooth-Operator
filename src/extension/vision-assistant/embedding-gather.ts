@@ -46,8 +46,8 @@ export function gatherEmbed(
   const NG = meta.n_groups;
   const ZP = meta.zero_point;
 
-  // `H` MUST be even: each byte packs two 4-bit values, so each token consumes
-  // exactly `H / 2` packed bytes. A non-even `hidden` would misalign every row.
+ // `H` MUST be even: each byte packs two 4-bit values, so each token consumes
+ // exactly `H / 2` packed bytes. A non-even `hidden` would misalign every row.
   if (!Number.isInteger(H) || H <= 0 || H % 2 !== 0) {
     throw new Error(`gatherEmbed: meta.hidden=${H} must be a positive even integer`);
   }
@@ -57,8 +57,8 @@ export function gatherEmbed(
   if (!Number.isInteger(NG) || NG <= 0) {
     throw new Error(`gatherEmbed: meta.n_groups=${NG} must be a positive integer`);
   }
-  // Every group must map to an index in `[0, NG)`; the last element lands in
-  // group `(H - 1) / B`, which must stay below `NG`.
+ // Every group must map to an index in `[0, NG)`; the last element lands in
+ // group `(H - 1) / B`, which must stay below `NG`.
   if (!Number.isInteger(B) || B <= 0 || Math.floor((H - 1) / B) >= NG) {
     throw new Error(
       `gatherEmbed: block_size=${B} / n_groups=${NG} disagree with hidden=${H}`,
@@ -71,9 +71,9 @@ export function gatherEmbed(
   const packedRow = tokenId * (H / 2);
   const scaleRow = tokenId * NG;
 
-  // The cache-wide shape checks in `init()` already guarantee
-  // `packed.length === vocab * H/2` and `scales.length === vocab * NG`, so a
-  // valid `tokenId` (above) can never overflow. Re-assert cheaply for safety.
+ // The cache-wide shape checks in `init()` already guarantee
+ // `packed.length === vocab * H/2` and `scales.length === vocab * NG`, so a
+ // valid `tokenId` (above) can never overflow. Re-assert cheaply for safety.
   if (packedRow + H / 2 > packed.length) {
     throw new Error(`gatherEmbed: packed buffer too small for token ${tokenId}`);
   }

@@ -497,7 +497,7 @@ export function SettingsView() {
   const toggleArrayItem = (list: string[], item: string) =>
     list.includes(item) ? list.filter((x) => x !== item) : [...list, item];
 
-  // Live accent re-themes this view's subtree so the picker is visibly functional.
+ // Live accent re-themes this view's subtree so the picker is visibly functional.
   const accentStyle: React.CSSProperties & Record<`--${string}`, string> = {
     "--primary": settings.appearance.accent,
   };
@@ -731,7 +731,10 @@ export function SettingsView() {
                     value={settings.agent.maxSteps}
                     onChange={(e) =>
                       setSection("agent", {
-                        maxSteps: Number(e.target.value) || 0,
+                        maxSteps: Math.min(
+                          Math.max(Math.trunc(Number(e.target.value) || 1), 1),
+                          100000,
+                        ),
                       })
                     }
                   />

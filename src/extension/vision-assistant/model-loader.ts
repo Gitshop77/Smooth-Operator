@@ -6,13 +6,13 @@
  * Ported from Reza2kn's fetchBufProgress.
  *
  * Integrity guarantees:
- *  - Every download is SHA-256 verified against a pinned hash before caching
- *    (supply-chain guard). Files whose hash is not yet pinned are still
- *    hashed and the computed digest is stored alongside the cached Response.
- *  - On every subsequent load (`getBuffer`/`getJSON`) the cached bytes are
- *    re-hashed and compared against the stored digest (and the pinned hash,
- *    when present) so a corrupted / rolled-back / poisoned cache entry is
- *    rejected instead of silently executed as model weights.
+ * - Every download is SHA-256 verified against a pinned hash before caching
+ * (supply-chain guard). Files whose hash is not yet pinned are still
+ * hashed and the computed digest is stored alongside the cached Response.
+ * - On every subsequent load (`getBuffer`/`getJSON`) the cached bytes are
+ * re-hashed and compared against the stored digest (and the pinned hash,
+ * when present) so a corrupted / rolled-back / poisoned cache entry is
+ * rejected instead of silently executed as model weights.
  */
 
 import {
@@ -55,6 +55,7 @@ async function fetchToBuffer(
   opts: RequestInit,
   onProgress?: (downloaded: number, total: number) => void,
   stallMs: number = DOWNLOAD_STALL_MS,
+  maxBytes?: number,
 ): Promise<{ buf: Uint8Array; headers: Headers; status: number }> {
   const ctrl = new AbortController();
   let timer = setTimeout(() => ctrl.abort(), stallMs);
@@ -75,6 +76,15 @@ async function fetchToBuffer(
       if (done) break;
       chunks.push(value);
       got += value.length;
+ // `maxBytes` caps how much of the body we consume. Used by the probe:
+ // if the server IGNORES the Range header and returns the whole multi-GB
+ // file, we only keep the first `maxBytes` (the probe chunk) instead of
+ // buffering the entire response in memory (finding: probe fetch buffers
+ // the entire response even when the server ignores Range).
+      if (maxBytes !== undefined && got >= maxBytes) {
+        try { await reader.cancel(); } catch { /* ignore */ }
+        break;
+      }
       if (onProgress && Number.isFinite(cl) && cl > 0) {
         const pct = Math.floor((got / cl) * 100);
         if (pct >= lastPct + 10) {
@@ -102,15 +112,22 @@ async function fetchBufProgress(
   onProgress?: (p: DownloadProgress) => void,
   chunkSize: number = DOWNLOAD_CHUNK_SIZE,
 ): Promise<Uint8Array> {
-  // Probe: request a small leading range to learn whether the server supports
-  // Range and what the total size is. Retry the probe with the same ceiling as
-  // the chunked loop below so the two retry sites never silently drift.
+ // Probe: request a small leading range to learn whether the server supports
+ // Range and what the total size is. Retry the probe with the same ceiling as
+ // the chunked loop below so the two retry sites never silently drift.
   let first: { buf: Uint8Array; headers: Headers; status: number };
   for (let tr = 0; ; tr++) {
     try {
-      first = await fetchToBuffer(url, {
-        headers: { Range: `bytes=0-${chunkSize - 1}` },
-      });
+ // Cap the probe at `chunkSize` bytes so a server that ignores Range and
+ // returns the whole file only costs us one chunk of memory here. The real
+ // download proceeds via the logic below.
+      first = await fetchToBuffer(
+        url,
+        { headers: { Range: `bytes=0-${chunkSize - 1}` } },
+        undefined,
+        DOWNLOAD_STALL_MS,
+        chunkSize,
+      );
       break;
     } catch (e) {
       if (tr >= DOWNLOAD_MAX_RETRIES - 1) throw e;
@@ -120,14 +137,14 @@ async function fetchBufProgress(
 
   const cr = first.headers.get("content-range");
 
-  // Resolve the total size (or detect "unknown total").
+ // Resolve the total size (or detect "unknown total").
   if (cr) {
     const crTotal = cr.split("/")[1];
     if (crTotal === "*") {
-      // Range-capable but total unknown (`bytes 0-1048575/*`). We MUST NOT
-      // return the single probe chunk as the whole file — that would cache a
-      // silently-truncated ~48 MB model that then passes the integrity check.
-      // Fall back to a single full-file GET (no Range) instead.
+ // Range-capable but total unknown (`bytes 0-1048575/*`). We MUST NOT
+ // return the single probe chunk as the whole file — that would cache a
+ // silently-truncated ~48 MB model that then passes the integrity check.
+ // Fall back to a single full-file GET (no Range) instead.
       return (
         await fetchToBuffer(url, {}, (d, t) =>
           onProgress?.({ file: label, downloaded: d, total: t, percent: t ? Math.floor((d / t) * 100) : 0 }),
@@ -141,15 +158,15 @@ async function fetchBufProgress(
       );
     }
     if (total <= first.buf.length) {
-      // Server returned the entire file in the probe (small file / 200).
+ // Server returned the entire file in the probe (small file / 200).
       return first.buf;
     }
     return downloadChunks(url, label, first.buf, total, onProgress, chunkSize);
   }
 
-  // No Content-Range: either the server does not support Range (200 + whole
-  // file) or it omitted a usable total. If a positive Content-Length is
-  // present and larger than what we already have, fetch the whole file once.
+ // No Content-Range: either the server does not support Range (200 + whole
+ // file) or it omitted a usable total. If a positive Content-Length is
+ // present and larger than what we already have, fetch the whole file once.
   const cl = Number(first.headers.get("content-length"));
   if (Number.isFinite(cl) && cl > 0 && cl > first.buf.length) {
     return (
@@ -159,9 +176,17 @@ async function fetchBufProgress(
     ).buf;
   }
 
-  // No usable size information at all — return what we got only if it is
-  // plausibly the whole file (first.buf covers the declared/implied total).
-  return first.buf;
+ // No usable size information from either Content-Range or Content-Length —
+ // we cannot trust the probe chunk as the whole file. Force a full-file GET
+ // (no Range) so we download everything rather than silently caching a
+ // truncated partial (finding: truncated download cached without error / a
+ // download with an unknown total was cached as complete). The integrity
+ // check still runs afterwards.
+  return (
+    await fetchToBuffer(url, {}, (d, t) =>
+      onProgress?.({ file: label, downloaded: d, total: t, percent: t ? Math.floor((d / t) * 100) : 0 }),
+    )
+  ).buf;
 }
 
 /** Fetch the remaining chunks for a known total size. */
@@ -200,7 +225,7 @@ async function downloadChunks(
       throw new Error(`[vision-assistant] Internal error fetching ${label} (${url})`);
     }
     if (status === 200) {
-      // Server ignored the Range header and returned the whole file.
+ // Server ignored the Range header and returned the whole file.
       return part;
     }
     if (part.length !== end - off + 1) {
@@ -219,8 +244,8 @@ async function downloadChunks(
     }
   }
 
-  // Final sanity check: the assembled buffer must exactly equal the declared
-  // total, otherwise a misbehaving server truncated us mid-stream.
+ // Final sanity check: the assembled buffer must exactly equal the declared
+ // total, otherwise a misbehaving server truncated us mid-stream.
   if (buf.byteLength !== total) {
     throw new Error(
       `[vision-assistant] Download of ${label} (${url}) assembled ` +
@@ -254,8 +279,8 @@ export class ModelLoader {
       ({ name }) => name,
     );
     if (unpinned.length > 0) {
-      // Loud, not silent: shipping with unpinned weights means the
-      // supply-chain guard only protects the first download, not the cache.
+ // Loud, not silent: shipping with unpinned weights means the
+ // supply-chain guard only protects the first download, not the cache.
       console.error(
         `[vision-assistant] SECURITY: ${unpinned.length}/7 model file hashes are ` +
           `UNPINNED in MODEL_FILE_HASHES (${unpinned.join(", ")}). Weights are ` +
@@ -288,10 +313,10 @@ export class ModelLoader {
       try {
         await this.cache!.put(url, response);
       } catch (e) {
-        // Caching failed (quota / SW eviction). We deliberately throw instead
-        // of swallowing — the already-downloaded buffer is large and we must not
-        // silently loop re-downloading it on every call. Surface the cause so
-        // the UI can tell the user to free storage.
+ // Caching failed (quota / SW eviction). We deliberately throw instead
+ // of swallowing — the already-downloaded buffer is large and we must not
+ // silently loop re-downloading it on every call. Surface the cause so
+ // the UI can tell the user to free storage.
         throw new Error(
           `[vision-assistant] Failed to persist model file "${name}" (${url}): ` +
             `${(e as Error).message}. Usually caused by insufficient storage ` +
@@ -303,15 +328,15 @@ export class ModelLoader {
   }
 
   /**
-   * Verify a downloaded model file against its pinned SHA-256.
-   *
-   * - If a hash is pinned for `url` and the computed digest does not match,
-   *   throws — tampered/corrupted weights are never cached (supply-chain guard).
-   * - If no hash is pinned yet, the file is still hashed and the digest is
-   *   stored (see `downloadAll`) so subsequent loads can detect cache
-   *   corruption. Maintainers MUST pin every hash in MODEL_FILE_HASHES before
-   *   shipping (also enforced loudly in `init`).
-   */
+ * Verify a downloaded model file against its pinned SHA-256.
+ *
+ * - If a hash is pinned for `url` and the computed digest does not match,
+ * throws — tampered/corrupted weights are never cached (supply-chain guard).
+ * - If no hash is pinned yet, the file is still hashed and the digest is
+ * stored (see `downloadAll`) so subsequent loads can detect cache
+ * corruption. Maintainers MUST pin every hash in MODEL_FILE_HASHES before
+ * shipping (also enforced loudly in `init`).
+ */
   private async verifyIntegrity(
     url: string,
     name: string,
@@ -337,10 +362,10 @@ export class ModelLoader {
   }
 
   /**
-   * Re-verify a cached buffer against the digest stored when it was written
-   * (catches cache corruption / rollback / poisoning) and, when a hash is
-   * pinned, against that pinned value (catches tampering with the cache).
-   */
+ * Re-verify a cached buffer against the digest stored when it was written
+ * (catches cache corruption / rollback / poisoning) and, when a hash is
+ * pinned, against that pinned value (catches tampering with the cache).
+ */
   private async reverifyIntegrity(
     url: string,
     buf: Uint8Array,
@@ -375,7 +400,27 @@ export class ModelLoader {
     if (buf.byteLength === 0) {
       throw new Error(`[vision-assistant] Cached model file ${url} is empty; refusing to load.`);
     }
-    await this.reverifyIntegrity(url, buf, response);
+ // Defense-in-depth: a cached "model" that is actually an HTML/XML error
+ // page (e.g. from a bad CDN redirect) must never reach ONNX Runtime. Genuine
+ // model weights are binary; markup begins with '<', so reject it with a
+ // descriptive error rather than a generic parse failure (finding: cached
+ // file type/content not validated before parsing).
+    if (buf.byteLength >= 1 && buf[0] === 0x3c /* '<' */) {
+      throw new Error(
+        `[vision-assistant] Cached model file ${url} looks like markup (starts with '<'), ` +
+          `not model weights; refusing to load. The cache entry is likely an error page.`,
+      );
+    }
+    try {
+      await this.reverifyIntegrity(url, buf, response);
+    } catch (e) {
+ // Auto-recover: delete the poisoned / rolled-back / tampered entry so the
+ // next load re-downloads a clean copy instead of repeatedly failing
+ // (finding: integrity re-verify failure does not auto-recover the poisoned
+ // cache entry).
+      try { await this.cache!.delete(url); } catch { /* best-effort */ }
+      throw e;
+    }
     return buf;
   }
 
@@ -401,7 +446,15 @@ export class ModelLoader {
       );
     }
     const buf = new TextEncoder().encode(text);
-    await this.reverifyIntegrity(url, buf, response);
+    try {
+      await this.reverifyIntegrity(url, buf, response);
+    } catch (e) {
+ // Auto-recover: delete the poisoned / rolled-back entry so the next load
+ // re-downloads a clean copy (finding: integrity re-verify failure does not
+ // auto-recover the poisoned cache entry).
+      try { await this.cache!.delete(url); } catch { /* best-effort */ }
+      throw e;
+    }
     return parsed;
   }
 

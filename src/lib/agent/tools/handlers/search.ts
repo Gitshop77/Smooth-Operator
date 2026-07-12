@@ -20,11 +20,24 @@ export async function handleSearch(
   action: Extract<Action, { type: "search" }>,
 ): Promise<ActionResult> {
   const engine = action.engine;
-  const baseUrl = SEARCH_ENGINE_URLS[engine] || SEARCH_ENGINE_URLS.duckduckgo;
-  const searchUrl = baseUrl + encodeURIComponent(action.query);
-  // Enforce the domain policy — same gate as `navigate`. Without this,
-  // a user with a blocklist covering search-engine domains would have that
-  // policy silently bypassed for the `search` action.
+  const baseUrl = SEARCH_ENGINE_URLS[engine];
+  if (!baseUrl) {
+ // `engine` is a Zod enum so this is unreachable in normal validation, but
+ // guard anyway and report the *actual* requested engine rather than a
+ // misleading "duckduckgo" fallback echo.
+    return { action, success: false, message: `Unknown search engine "${engine}"` };
+  }
+ // Defense-in-depth: an empty query would navigate to the bare engine
+ // homepage (wasting a same-tab navigation and destroying the content
+ // script). The schema should enforce `.min(1)`; this catches it regardless.
+  const query = action.query ?? "";
+  if (!query.trim()) {
+    return { action, success: false, message: "search requires a non-empty query" };
+  }
+  const searchUrl = baseUrl + encodeURIComponent(query);
+ // Enforce the domain policy — same gate as `navigate`. Without this,
+ // a user with a blocklist covering search-engine domains would have that
+ // policy silently bypassed for the `search` action.
   const urlCheck = checkUrlAllowedWithDomainConfig(searchUrl);
   if (!urlCheck.allowed) {
     return {
@@ -33,8 +46,8 @@ export async function handleSearch(
       message: `BLOCKED: ${urlCheck.reason} (${searchUrl})`,
     };
   }
-  // Navigate the current tab to the search URL. The content script is
-  // destroyed on navigation; the orchestrator recovers on the next step.
+ // Navigate the current tab to the search URL. The content script is
+ // destroyed on navigation; the orchestrator recovers on the next step.
   location.href = searchUrl;
   return { action, success: true, message: `Searching "${action.query}" on ${engine}`, pageChanged: true };
 }

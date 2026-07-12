@@ -21,7 +21,7 @@ const MODEL_ID_RE = /^[\w.:-]+$/;
  * Encode a model id for safe embedding in a request URL path.
  *
  * @throws if the raw id contains characters outside `[\w.:-]+` (a malformed
- *         or potentially-hostile model id).
+ * or potentially-hostile model id).
  */
 export function encodeModelIdForUrl(model: string): string {
   if (typeof model !== "string" || !MODEL_ID_RE.test(model)) {

@@ -62,17 +62,17 @@ describe("LoopDetector", () => {
     const det = new LoopDetector();
     for (let i = 0; i < 4; i++) det.record({ type: "click", index: 1 } as AgentAction, i);
     for (let i = 0; i < 4; i++) det.record({ type: "input", index: 2, text: "x", clear: true } as AgentAction, i);
-    // 4 clicks + 4 inputs — neither hits the 5 threshold.
+ // 4 clicks + 4 inputs — neither hits the 5 threshold.
     expect(det.shouldWarn()).toBe(0);
   });
 
-  // test that normalizeAction distinguishes same-type-different-param actions.
-  // The new cases (detect_visual/screenshot/save_as_pdf) must hash DIFFERENTLY
-  // for same-type-different-param invocations. Without this, detect_visual with
-  // different queries would hash the same → false-positive loop warnings.
+ // test that normalizeAction distinguishes same-type-different-param actions.
+ // The new cases (detect_visual/screenshot/save_as_pdf) must hash DIFFERENTLY
+ // for same-type-different-param invocations. Without this, detect_visual with
+ // different queries would hash the same → false-positive loop warnings.
   test("normalizeAction distinguishes detect_visual by query", () => {
     const det = new LoopDetector();
-    // 4 detect_visual with query A + 4 with query B — neither should hit 5.
+ // 4 detect_visual with query A + 4 with query B — neither should hit 5.
     for (let i = 0; i < 4; i++) det.record({ type: "detect_visual", query: "button" } as AgentAction, i);
     for (let i = 0; i < 4; i++) det.record({ type: "detect_visual", query: "form" } as AgentAction, i + 4);
     expect(det.shouldWarn()).toBe(0);
@@ -101,7 +101,7 @@ describe("LoopDetector", () => {
 
   test("normalizes equivalent scroll actions to the same hash", () => {
     const det = new LoopDetector();
-    // {type:"scroll", down:true, pages:1} === {type:"scroll"} after normalization
+ // {type:"scroll", down:true, pages:1} === {type:"scroll"} after normalization
     for (let i = 0; i < 5; i++) {
       det.record({ type: "scroll", down: true, pages: 1 } as AgentAction, i);
     }
@@ -147,13 +147,13 @@ describe("partitionHistory", () => {
     const history: HistoryItem[] = [];
     for (let i = 0; i < 10; i++) history.push(makeHistoryItem(i));
     const { toSummarize, toKeep } = partitionHistory(history);
-    // toSummarize = first (1) + middle (10 - 1 - 6 = 3) = 4
+ // toSummarize = first (1) + middle (10 - 1 - 6 = 3) = 4
     expect(toSummarize).toHaveLength(4);
     expect(toKeep).toHaveLength(6);
-    // toKeep is the last 6
+ // toKeep is the last 6
     expect(toKeep[0].step).toBe(4);
     expect(toKeep[5].step).toBe(9);
-    // toSummarize starts with the first item (init context)
+ // toSummarize starts with the first item (init context)
     expect(toSummarize[0].step).toBe(0);
   });
 });
@@ -185,7 +185,7 @@ describe("buildCompactionRequest", () => {
     expect(request).toContain("summarizing");
     expect(request).toContain("step_0");
     expect(request).toContain("step_3"); // first + middle 3 = 4 items to summarize
-    // The last 6 items should NOT be in the request (they're kept, not summarized)
+ // The last 6 items should NOT be in the request (they're kept, not summarized)
     expect(request).not.toContain("step_9");
   });
 });
@@ -263,10 +263,10 @@ describe("runAgentLoop — executeActions branch loop-detector integration", () 
   }
 
   test("emits loop-warning (count=5) when executeActions is set + same action repeats 5× in one batch", async () => {
-    // 5 clicks in one navigator step → the executeActions branch records each
-    // click via loopDetector.record; after the 5th record, shouldWarn returns 5 → emit.
-    // WITHOUT this branch, the records would never be made (executeActions
-    // bypassed executeActionQueue) and no loop-warning would fire.
+ // 5 clicks in one navigator step → the executeActions branch records each
+ // click via loopDetector.record; after the 5th record, shouldWarn returns 5 → emit.
+ // WITHOUT this branch, the records would never be made (executeActions
+ // bypassed executeActionQueue) and no loop-warning would fire.
     const events: LogEvent[] = [];
     const deps = makeDeps({
       navigatorOutput: navigatorOutputWithRepeatedClicks(5),
@@ -281,28 +281,28 @@ describe("runAgentLoop — executeActions branch loop-detector integration", () 
     const warnings = events.filter(isLoopWarning);
     expect(warnings.length).toBeGreaterThan(0);
     expect(warnings[0].count).toBe(5);
-    // executeActions must have been called (proves we exercised the branch).
+ // executeActions must have been called (proves we exercised the branch).
     expect(deps.executeActions).toHaveBeenCalled();
   });
 
   test("loopDetector.reset() fires when executeActions returns pageChanged: true", async () => {
-    // After step 1 emits loop-warning (5 clicks) + pageChanged reset, step 2's
-    // 5 clicks should emit ANOTHER count=5 warning (the window was reset to
-    // empty, so the 5th click is count=5 again). WITHOUT the reset, the
-    // window would carry over the 5 clicks from step 1 → step 2's 5 clicks
-    // would push the count to 10, and shouldWarn would return 0 (10 is NOT
-    // in WARN_THRESHOLDS = [5, 8, 12]). The 8th click (count=8) WOULD fire,
-    // but with count=8, not count=5.
-    //
-    // So the assertion "second warning has count=5" distinguishes:
-    //   - reset in place: reset fired → window empty → step 2's 5th click = count 5.
-    //   - reset broken (no reset): window carried over → step 2's 8th click = count 8.
+ // After step 1 emits loop-warning (5 clicks) + pageChanged reset, step 2's
+ // 5 clicks should emit ANOTHER count=5 warning (the window was reset to
+ // empty, so the 5th click is count=5 again). WITHOUT the reset, the
+ // window would carry over the 5 clicks from step 1 → step 2's 5 clicks
+ // would push the count to 10, and shouldWarn would return 0 (10 is NOT
+ // in WARN_THRESHOLDS = [5, 8, 12]). The 8th click (count=8) WOULD fire,
+ // but with count=8, not count=5.
+ //
+ // So the assertion "second warning has count=5" distinguishes:
+ // - reset in place: reset fired → window empty → step 2's 5th click = count 5.
+ // - reset broken (no reset): window carried over → step 2's 8th click = count 8.
     const events: LogEvent[] = [];
     const deps = makeDeps({
       navigatorOutput: navigatorOutputWithRepeatedClicks(5),
       executeActionsResult: (actions) => actions.map((action) => ({
         action, success: true, message: "ok",
-        // pageChanged: true on every result triggers the reset branch.
+ // pageChanged: true on every result triggers the reset branch.
         pageChanged: true,
       } as ActionResult)),
       events,
@@ -311,29 +311,29 @@ describe("runAgentLoop — executeActions branch loop-detector integration", () 
     await runAgentLoop(deps);
 
     const warnings = events.filter(isLoopWarning);
-    // With reset working: 3 steps × 1 warning per step = 3 warnings, all count=5.
-    // Without reset: step 1 emits count=5; step 2 emits count=8 (5+3); step 3 emits count=8 again.
+ // With reset working: 3 steps × 1 warning per step = 3 warnings, all count=5.
+ // Without reset: step 1 emits count=5; step 2 emits count=8 (5+3); step 3 emits count=8 again.
     expect(warnings.length).toBeGreaterThanOrEqual(2);
-    // EVERY warning must have count=5 — if any has count=8, the reset is broken.
+ // EVERY warning must have count=5 — if any has count=8, the reset is broken.
     for (const w of warnings) {
       expect(w.count).toBe(5);
     }
   });
 
   test("WITHOUT pageChanged, the loop window carries over (no reset) — count escalates to 8", async () => {
-    // Control: when executeActions returns pageChanged: false (or undefined),
-    // the reset does NOT fire. Step 1's 5 clicks carry over to step 2.
-    // Step 2's 5 clicks push the count to 10; shouldWarn fires at count=8
-    // (the 3rd click of step 2, when window has 5+3=8 entries).
-    // This test confirms the reset is CONDITIONAL on pageChanged — without
-    // that condition, the reset would fire every step and the escalation
-    // semantics would be lost.
+ // Control: when executeActions returns pageChanged: false (or undefined),
+ // the reset does NOT fire. Step 1's 5 clicks carry over to step 2.
+ // Step 2's 5 clicks push the count to 10; shouldWarn fires at count=8
+ // (the 3rd click of step 2, when window has 5+3=8 entries).
+ // This test confirms the reset is CONDITIONAL on pageChanged — without
+ // that condition, the reset would fire every step and the escalation
+ // semantics would be lost.
     const events: LogEvent[] = [];
     const deps = makeDeps({
       navigatorOutput: navigatorOutputWithRepeatedClicks(5),
       executeActionsResult: (actions) => actions.map((action) => ({
         action, success: true, message: "ok",
-        // pageChanged: false → reset does NOT fire.
+ // pageChanged: false → reset does NOT fire.
       } as ActionResult)),
       events,
     });
@@ -341,12 +341,12 @@ describe("runAgentLoop — executeActions branch loop-detector integration", () 
     await runAgentLoop(deps);
 
     const warnings = events.filter(isLoopWarning);
-    // Step 1: 5th click → count=5 → warning.
-    // Step 2: 3rd click → count=8 → warning (window: 5 + 3 = 8).
-    // Step 2: 4th, 5th clicks → count=9, 10 → no warning (not in [5,8,12]).
-    // Step 3: 1st click → count=11 → no warning.
-    // Step 3: 2nd click → count=12 → warning.
-    // So warnings should be: 5, 8, 12.
+ // Step 1: 5th click → count=5 → warning.
+ // Step 2: 3rd click → count=8 → warning (window: 5 + 3 = 8).
+ // Step 2: 4th, 5th clicks → count=9, 10 → no warning (not in [5,8,12]).
+ // Step 3: 1st click → count=11 → no warning.
+ // Step 3: 2nd click → count=12 → warning.
+ // So warnings should be: 5, 8, 12.
     expect(warnings.length).toBeGreaterThanOrEqual(2);
     const counts = warnings.map((w) => w.count);
     expect(counts).toContain(5);
@@ -354,10 +354,10 @@ describe("runAgentLoop — executeActions branch loop-detector integration", () 
   });
 
   test("done paired with a sibling is rejected at parse time (never reaches a dropped step)", async () => {
-    // The fix enforces `done`-exclusivity at PARSE time: a step pairing `done`
-    // with a sibling action (e.g. a final `input`) is rejected by
-    // AgentOutputSchema, so it can never reach the orchestrator as a silently
-    // dropped step. A single `done` (the valid case) still finalizes the run.
+ // The fix enforces `done`-exclusivity at PARSE time: a step pairing `done`
+ // with a sibling action (e.g. a final `input`) is rejected by
+ // AgentOutputSchema, so it can never reach the orchestrator as a silently
+ // dropped step. A single `done` (the valid case) still finalizes the run.
     const bad = AgentOutputSchema.safeParse({
       thinking: "x",
       evaluation_previous_goal: "y",
@@ -370,7 +370,7 @@ describe("runAgentLoop — executeActions branch loop-detector integration", () 
     });
     expect(bad.success).toBe(false);
 
-    // A single `done` step still drives the orchestrator to finalize normally.
+ // A single `done` step still drives the orchestrator to finalize normally.
     const events: LogEvent[] = [];
     const deps = makeDeps({
       navigatorOutput: {

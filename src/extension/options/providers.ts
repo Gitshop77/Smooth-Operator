@@ -2,9 +2,9 @@
  * options/providers.ts — single source of truth for the provider catalog.
  *
  * Replaces the previous three-way duplication:
- *   1. the hard-coded 14 `<option>`s in options.html,
- *   2. `PROVIDER_META` in provider-config-ui.ts,
- *   3. `CATALOG_PROVIDER_ID_MAP` in provider-config-map.ts (provider → models.dev id).
+ * 1. the hard-coded 14 `<option>`s in options.html,
+ * 2. `PROVIDER_META` in provider-config-ui.ts,
+ * 3. `CATALOG_PROVIDER_ID_MAP` in provider-config-map.ts (provider → models.dev id).
  *
  * Every surface that needs the provider list (the Connection-tab `<select>`,
  * `updateProviderUI` hints, the model-search catalog lookup) now reads from the

@@ -13,6 +13,14 @@ import { alertModal } from "./modal";
 // `isHttpUrl` is imported from `settings-sync` (single shared definition) rather
 // than duplicated here, so validation stays consistent across the options pages.
 
+/**
+ * Last successfully-persisted (valid) webhook URL. Used as the revert value when
+ * the user types an invalid URL: even if the storage re-read in `loadNotifications`
+ * fails (quota/disabled), we can still restore the field to a known-good value
+ * instead of leaving the rejected URL visible as if it had been accepted.
+ */
+let lastKnownGoodWebhookUrl = "";
+
 /** Load the persisted notification settings into the form. */
 export async function loadNotifications(): Promise<void> {
   const res = await chrome.storage.local.get([
@@ -21,10 +29,10 @@ export async function loadNotifications(): Promise<void> {
     STORAGE_KEYS.notifyOnTakeover,
     STORAGE_KEYS.webhookUrl,
   ]);
-  // Mirror the careful error handling in settings-sync.ts: a transient storage
-  // failure (quota, disabled storage) must degrade gracefully rather than throw
-  // an unhandled rejection. Without this guard `res` can be `undefined` on
-  // failure and `res.notifyOnCompletion` would throw a TypeError.
+ // Mirror the careful error handling in settings-sync.ts: a transient storage
+ // failure (quota, disabled storage) must degrade gracefully rather than throw
+ // an unhandled rejection. Without this guard `res` can be `undefined` on
+ // failure and `res.notifyOnCompletion` would throw a TypeError.
   if (chrome.runtime.lastError) {
     console.warn("[options] failed to load notification settings:", chrome.runtime.lastError);
     return;
@@ -33,13 +41,17 @@ export async function loadNotifications(): Promise<void> {
   ($("notifyOnCompletion") as HTMLInputElement).checked = (res.notifyOnCompletion as boolean) || false;
   ($("notifyOnError") as HTMLInputElement).checked = (res.notifyOnError as boolean) || false;
   ($("notifyOnTakeover") as HTMLInputElement).checked = (res.notifyOnTakeover as boolean) || false;
-  ($("webhookUrl") as HTMLInputElement).value = (res.webhookUrl as string) || "";
+  const webhook = (res.webhookUrl as string) || "";
+  ($("webhookUrl") as HTMLInputElement).value = webhook;
+ // Record the verified-good value so an invalid edit can be reverted even if a
+ // subsequent storage read fails.
+  lastKnownGoodWebhookUrl = webhook;
 }
 
 function persist(key: string, value: string | boolean): void {
-  // Use the `set` callback so a failed write (quota, disabled storage, etc.)
-  // is not silently reported as success. Mirrors settings-sync.saveSettings,
-  // which checks `chrome.runtime.lastError` and surfaces a modal on failure.
+ // Use the `set` callback so a failed write (quota, disabled storage, etc.)
+ // is not silently reported as success. Mirrors settings-sync.saveSettings,
+ // which checks `chrome.runtime.lastError` and surfaces a modal on failure.
   chrome.storage.local.set({ [key]: value }, () => {
     if (chrome.runtime.lastError) {
       console.warn(`[options] failed to save ${key}:`, chrome.runtime.lastError);
@@ -69,19 +81,24 @@ document.getElementById("notifyOnTakeover")?.addEventListener("change", (e) =>
   persist(STORAGE_KEYS.notifyOnTakeover, (e.target as HTMLInputElement).checked),
 );
 document.getElementById("webhookUrl")?.addEventListener("change", (e) => {
-  // Defense-in-depth: the consumer (`fireNotifications`) already rejects
-  // non-http(s)/malformed URLs at POST time, but validate at the input too so
-  // a stored value is always safe regardless of future consumers.
-  const value = (e.target as HTMLInputElement).value.trim();
+ // Defense-in-depth: the consumer (`fireNotifications`) already rejects
+ // non-http(s)/malformed URLs at POST time, but validate at the input too so
+ // a stored value is always safe regardless of future consumers.
+  const field = e.target as HTMLInputElement;
+  const value = field.value.trim();
   if (value !== "" && !isHttpUrl(value)) {
     void alertModal({
       title: "Invalid webhook URL",
       message:
         "The webhook URL must be an absolute http(s) URL. It was not saved; the previous value is kept.",
     });
-    // Revert the field to the last persisted (valid) value.
-    void loadNotifications();
+ // Revert to the last known-good value directly from cache. This is robust
+ // even if the storage re-read in `loadNotifications()` were to fail (quota/
+ // disabled storage), which would otherwise leave the rejected URL on screen.
+    field.value = lastKnownGoodWebhookUrl;
     return;
   }
+ // Only cache once we know the value is valid (and will be persisted).
+  if (value !== "") lastKnownGoodWebhookUrl = value;
   persist(STORAGE_KEYS.webhookUrl, value);
 });

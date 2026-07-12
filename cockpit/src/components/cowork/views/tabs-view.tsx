@@ -107,7 +107,9 @@ export function TabsView() {
               "Last Accessed",
             ]}
           >
-            {tabs.map((tab) => (
+            {tabs.map((tab) => {
+              const url = tab.url ?? "";
+              return (
               <tr
                 key={tab.id}
                 className="hover:bg-accent/50 transition-colors border-l-[3px] border-transparent hover:border-primary"
@@ -115,7 +117,7 @@ export function TabsView() {
                 <td className="px-4 py-2.5 min-w-[200px]">
                   <div className="flex items-center gap-2.5 min-w-0">
                     <div className="size-6 rounded border border-primary/20 bg-primary/5 text-primary grid place-items-center shrink-0 text-[10px] cowork-mono font-semibold">
-                      {hostnameOf(tab.url).slice(0, 1).toUpperCase() || "?"}
+                      {hostnameOf(url).slice(0, 1).toUpperCase() || "?"}
                     </div>
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5">
@@ -126,13 +128,13 @@ export function TabsView() {
                         {tab.audiblyMuted ? <VolumeX className="size-3 text-muted-foreground shrink-0" /> : null}
                       </div>
                       <a
-                        href={safeHref(tab.url)}
+                        href={safeHref(url)}
                         target="_blank"
                         rel="noreferrer"
                         className="text-[11px] cowork-mono text-muted-foreground hover:text-primary hover:underline truncate block max-w-[320px]"
-                        title={tab.url}
+                        title={url}
                       >
-                        {truncateMiddle(tab.url, 64)}
+                        {truncateMiddle(url, 64)}
                       </a>
                     </div>
                   </div>
@@ -151,7 +153,8 @@ export function TabsView() {
                   {timeAgo(tab.lastAccessed)} ago
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </DataTable>
         </motion.div>
       )}

@@ -5,16 +5,16 @@
  * The existing `tests/ax-tree.test.ts` (written before jsdom was available)
  * only tests ref bookkeeping + error paths via a hand-rolled window stub.
  * These tests exercise the real DOM-walking path against jsdom:
- *   - empty page → no error, empty pageContent
- *   - single button → `button "name" [ref_N]` line emitted
- *   - link with href → `link "name" [ref_N] href="..."` line emitted
- *   - input with label → accessible name from associated `<label for>`
- *   - select with options → `combobox "<selected text>"` + child option lines
- *   - heading → `heading "<text>"` line emitted
- *   - sensitive input redaction → `[value redacted]` instead of the real value
- *   - ref resolution → `resolveRef("ref_N")` returns the live HTMLElement
- *   - depth limiting → tree stops at the caller-specified max depth
- *   - filter="interactive" → only interactive elements appear
+ * - empty page → no error, empty pageContent
+ * - single button → `button "name" [ref_N]` line emitted
+ * - link with href → `link "name" [ref_N] href="..."` line emitted
+ * - input with label → accessible name from associated `<label for>`
+ * - select with options → `combobox "<selected text>"` + child option lines
+ * - heading → `heading "<text>"` line emitted
+ * - sensitive input redaction → `[value redacted]` instead of the real value
+ * - ref resolution → `resolveRef("ref_N")` returns the live HTMLElement
+ * - depth limiting → tree stops at the caller-specified max depth
+ * - filter="interactive" → only interactive elements appear
  *
  * Run with: `npx vitest run tests/ax-tree-dom.test.ts`
  */
@@ -44,9 +44,9 @@ import { installJsdomLayoutMock, restoreJsdomLayoutMock } from "./helpers";
 
 beforeEach(() => {
   document.body.innerHTML = "";
-  // The element-ref registry is module-scoped (off `window`) for security, so
-  // reset it via the test hook to keep ref_N assignments deterministic per
-  // test (initElementMap alone is idempotent and won't clear an existing map).
+ // The element-ref registry is module-scoped (off `window`) for security, so
+ // reset it via the test hook to keep ref_N assignments deterministic per
+ // test (initElementMap alone is idempotent and won't clear an existing map).
   __test_resetRegistry();
   initElementMap();
   installJsdomLayoutMock();
@@ -98,9 +98,9 @@ describe("generateAccessibilityTree (DOM walking)", () => {
     input.setAttribute("placeholder", "Email");
     document.body.append(label, input);
     const result = generateAccessibilityTree();
-    // The input's accessible name resolves to "Email" (from the label or
-    // placeholder — both happen to equal "Email" here). Verify the input
-    // line is emitted with name "Email" and the right role (textbox).
+ // The input's accessible name resolves to "Email" (from the label or
+ // placeholder — both happen to equal "Email" here). Verify the input
+ // line is emitted with name "Email" and the right role (textbox).
     expect(result.pageContent).toContain("textbox");
     expect(result.pageContent).toContain('"Email"');
   });
@@ -117,10 +117,10 @@ describe("generateAccessibilityTree (DOM walking)", () => {
     select.append(opt1, opt2);
     document.body.appendChild(select);
     const result = generateAccessibilityTree();
-    // The combobox line uses the selected option's text ("B").
+ // The combobox line uses the selected option's text ("B").
     expect(result.pageContent).toContain("combobox");
     expect(result.pageContent).toContain('"B"');
-    // Child option lines are emitted (with the selected flag on "B").
+ // Child option lines are emitted (with the selected flag on "B").
     expect(result.pageContent).toContain("option");
     expect(result.pageContent).toContain('"A"');
     expect(result.pageContent).toContain("(selected)");
@@ -141,7 +141,7 @@ describe("generateAccessibilityTree (DOM walking)", () => {
     document.body.appendChild(input);
     const result = generateAccessibilityTree();
     expect(result.pageContent).toContain("[value redacted]");
-    // The real password value must NEVER appear in the AX tree.
+ // The real password value must NEVER appear in the AX tree.
     expect(result.pageContent).not.toContain("secret");
   });
 
@@ -156,9 +156,9 @@ describe("generateAccessibilityTree (DOM walking)", () => {
   });
 
   test("9. depth limiting — tree stops at the caller-specified max depth", () => {
-    // Use <nav> (a structural landmark) so each level IS included in the
-    // tree and increments the depth counter. With maxDepth=2, the button
-    // at depth 3 is never reached.
+ // Use <nav> (a structural landmark) so each level IS included in the
+ // tree and increments the depth counter. With maxDepth=2, the button
+ // at depth 3 is never reached.
     document.body.innerHTML = `
       <nav aria-label="nav1">
         <nav aria-label="nav2">
@@ -169,16 +169,16 @@ describe("generateAccessibilityTree (DOM walking)", () => {
       </nav>
     `;
     const result = generateAccessibilityTree("all", 2);
-    // All three nav levels (depth 0, 1, 2) appear.
+ // All three nav levels (depth 0, 1, 2) appear.
     expect(result.pageContent).toContain("navigation");
     expect(result.pageContent).toContain('"nav1"');
     expect(result.pageContent).toContain('"nav2"');
     expect(result.pageContent).toContain('"nav3"');
-    // The button at depth 3 is NOT included (depth > maxDepth returns early).
+ // The button at depth 3 is NOT included (depth > maxDepth returns early).
     expect(result.pageContent).not.toContain("button");
     expect(result.pageContent).not.toContain('"Deep"');
 
-    // With maxDepth=3, the button at depth 3 IS included.
+ // With maxDepth=3, the button at depth 3 IS included.
     const result2 = generateAccessibilityTree("all", 3);
     expect(result2.pageContent).toContain("button");
     expect(result2.pageContent).toContain('"Deep"');
@@ -193,16 +193,16 @@ describe("generateAccessibilityTree (DOM walking)", () => {
       <input type="text" placeholder="Search" />
     `;
     const result = generateAccessibilityTree("interactive");
-    // Interactive elements appear.
+ // Interactive elements appear.
     expect(result.pageContent).toContain("button");
     expect(result.pageContent).toContain('"Click Me"');
     expect(result.pageContent).toContain("link");
     expect(result.pageContent).toContain('"A Link"');
     expect(result.pageContent).toContain("textbox");
-    // Non-interactive structural / generic elements do NOT appear.
+ // Non-interactive structural / generic elements do NOT appear.
     expect(result.pageContent).not.toContain("heading");
     expect(result.pageContent).not.toContain('"Page Title"');
-    // The div has no interactive role and no name worth surfacing — excluded.
+ // The div has no interactive role and no name worth surfacing — excluded.
     expect(result.pageContent).not.toContain("Some div text");
   });
 });

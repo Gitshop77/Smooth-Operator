@@ -16,7 +16,7 @@ async function getRequestLocale(): Promise<string> {
   if (!header) return "en";
   const first = header.split(",")[0]?.split(";")[0]?.trim();
   if (!first) return "en";
-  // Allow only letters, digits and hyphens; cap length.
+ // Allow only letters, digits and hyphens; cap length.
   if (!/^[a-zA-Z0-9-]{2,35}$/.test(first)) return "en";
   return first.toLowerCase();
 }

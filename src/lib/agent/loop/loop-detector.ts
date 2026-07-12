@@ -29,8 +29,10 @@ const LOOP_WINDOW_SIZE = 20;
 const WARN_THRESHOLDS = [5, 8, 12] as const;
 /** Max page fingerprints kept in the rolling window. */
 const PAGE_FP_WINDOW_SIZE = 5;
-/** Threshold milestones for stagnant-page warnings (matches WARN_THRESHOLDS). */
-const STAGNANT_THRESHOLDS: readonly number[] = [5, 8, 12];
+/** Threshold milestones for stagnant-page warnings. MUST stay in lockstep with
+ * {@link WARN_THRESHOLDS} — derive it from the same source so the two can
+ * never drift apart (FULL-REVIEW finding 134). */
+const STAGNANT_THRESHOLDS: readonly number[] = WARN_THRESHOLDS;
 
 /**
  * Goal-level loop detection: warn when the same goal appears this many times
@@ -82,10 +84,10 @@ class PageFingerprint {
   ) {}
 
   /**
-   * Build a fingerprint from a raw browser-state snapshot. The DOM text is
-   * hashed with SHA-256 (truncated to 16 hex chars) so the fingerprint is
-   * cheap to store and compare.
-   */
+ * Build a fingerprint from a raw browser-state snapshot. The DOM text is
+ * hashed with SHA-256 (truncated to 16 hex chars) so the fingerprint is
+ * cheap to store and compare.
+ */
   static async fromBrowserState(
     url: string,
     domText: string,
@@ -111,6 +113,15 @@ class PageFingerprint {
  * Only the params that distinguish the action's effect on the page are
  * included — pure cosmetic defaults are dropped.
  */
+/**
+ * Render an action field for hashing, turning `undefined`/`null` into `""` so
+ * we never emit the literal "undefined" into the signature (FULL-REVIEW
+ * finding 103).
+ */
+function field(v: unknown): string {
+  return v === undefined || v === null ? "" : String(v);
+}
+
 function normalizeAction(action: AgentAction): string {
   const a = action as Record<string, unknown>;
   const parts: string[] = [a.type as string];
@@ -119,68 +130,68 @@ function normalizeAction(action: AgentAction): string {
     case "hover":
     case "dropdown_options":
     case "upload_file":
-      parts.push(`idx=${a.index}`);
+      parts.push(`idx=${field(a.index)}`);
       break;
     case "input":
-      parts.push(`idx=${a.index}`, `text=${a.text}`);
+      parts.push(`idx=${field(a.index)}`, `text=${field(a.text)}`);
       break;
     case "select_dropdown":
-      parts.push(`idx=${a.index}`, `text=${a.text}`, `optidx=${a.option_index ?? -1}`);
+      parts.push(`idx=${field(a.index)}`, `text=${field(a.text)}`, `optidx=${a.option_index ?? -1}`);
       break;
     case "press_and_hold":
-      parts.push(`idx=${a.index}`, `hold=${a.hold_ms ?? 1500}`);
+      parts.push(`idx=${field(a.index)}`, `hold=${a.hold_ms ?? 1500}`);
       break;
     case "scroll":
       parts.push(`dir=${a.down === false ? "up" : "down"}`, `pages=${a.pages ?? 1}`);
       break;
     case "send_keys":
-      parts.push(`keys=${a.keys}`);
+      parts.push(`keys=${field(a.keys)}`);
       break;
     case "navigate":
-      parts.push(`url=${a.url}`);
+      parts.push(`url=${field(a.url)}`);
       break;
     case "switch_tab":
     case "close_tab":
-      parts.push(`tab=${a.tab_id}`);
+      parts.push(`tab=${field(a.tab_id)}`);
       break;
     case "find_text":
-      parts.push(`text=${a.text}`);
+      parts.push(`text=${field(a.text)}`);
       break;
     case "extract":
     case "search":
-      parts.push(`query=${a.query}`);
+      parts.push(`query=${field(a.query)}`);
       break;
     case "search_page":
-      parts.push(`pattern=${a.pattern}`);
+      parts.push(`pattern=${field(a.pattern)}`);
       break;
     case "find_elements":
-      parts.push(`selector=${a.selector}`);
+      parts.push(`selector=${field(a.selector)}`);
       break;
     case "evaluate":
-      parts.push(`code=${a.code}`);
+      parts.push(`code=${field(a.code)}`);
       break;
     case "ask_human":
-      parts.push(`question=${a.question}`);
+      parts.push(`question=${field(a.question)}`);
       break;
     case "takeover":
-      parts.push(`reason=${a.reason}`);
+      parts.push(`reason=${field(a.reason)}`);
       break;
     case "verify":
-      parts.push(`expectation=${a.expectation}`);
+      parts.push(`expectation=${field(a.expectation)}`);
       break;
     case "load_skill":
-      parts.push(`name=${a.name}`);
+      parts.push(`name=${field(a.name)}`);
       break;
     case "alert_send_keys":
-      parts.push(`text=${a.text}`);
+      parts.push(`text=${field(a.text)}`);
       break;
-    // Normalize the remaining parametrized actions so semantically-different
-    // invocations hash differently. Without these, `detect_visual` with
-    // different queries, `screenshot`/`save_as_pdf` with different filenames,
-    // and `alert_accept`/`alert_dismiss` all hash the same → false-positive
-    // loop warnings.
+ // Normalize the remaining parametrized actions so semantically-different
+ // invocations hash differently. Without these, `detect_visual` with
+ // different queries, `screenshot`/`save_as_pdf` with different filenames,
+ // and `alert_accept`/`alert_dismiss` all hash the same → false-positive
+ // loop warnings.
     case "detect_visual":
-      parts.push(`query=${a.query}`);
+      parts.push(`query=${field(a.query)}`);
       break;
     case "screenshot":
       parts.push(`file=${a.fileName ?? ""}`);
@@ -188,9 +199,9 @@ function normalizeAction(action: AgentAction): string {
     case "save_as_pdf":
       parts.push(`file=${a.fileName ?? ""}`);
       break;
-    // No-params actions (verified against schema.ts): wait, go_back, done,
-    // alert_accept, alert_dismiss, alert_get_text. `load_url` is intentionally
-    // absent — the schema has no such action (navigate covers URL loading).
+ // No-params actions (verified against schema.ts): wait, go_back, done,
+ // alert_accept, alert_dismiss, alert_get_text. `load_url` is intentionally
+ // absent — the schema has no such action (navigate covers URL loading).
   }
   return parts.join("|");
 }
@@ -233,9 +244,9 @@ export class LoopDetector {
   private static readonly GOAL_WINDOW_SIZE = 6;
 
   /**
-   * Record an action and return how many times it (or an equivalent) has
-   * occurred in the rolling window (including this one).
-   */
+ * Record an action and return how many times it (or an equivalent) has
+ * occurred in the rolling window (including this one).
+ */
   record(action: AgentAction, step: number): number {
     const hash = fnv1a(normalizeAction(action));
     this.window.push({ hash, step });
@@ -246,9 +257,9 @@ export class LoopDetector {
   }
 
   /**
-   * Decide whether to inject a loop-warning nudge. Returns the repetition
-   * count if it matches one of {@link WARN_THRESHOLDS}, else `0`.
-   */
+ * Decide whether to inject a loop-warning nudge. Returns the repetition
+ * count if it matches one of {@link WARN_THRESHOLDS}, else `0`.
+ */
   shouldWarn(): number {
     if (this.window.length === 0) return 0;
     const last = this.window[this.window.length - 1];
@@ -263,14 +274,14 @@ export class LoopDetector {
   }
 
   /**
-   * Record a page-state snapshot for stagnation detection. The DOM text is
-   * hashed with SHA-256; if the resulting fingerprint matches the previous
-   * one, the stagnant counter increments.
-   *
-   * Async because SHA-256 uses the Web Crypto API (`crypto.subtle.digest`).
-   * Callers in the agent loop should `await` this after each
-   * `extractBrowserState` call.
-   */
+ * Record a page-state snapshot for stagnation detection. The DOM text is
+ * hashed with SHA-256; if the resulting fingerprint matches the previous
+ * one, the stagnant counter increments.
+ *
+ * Async because SHA-256 uses the Web Crypto API (`crypto.subtle.digest`).
+ * Callers in the agent loop should `await` this after each
+ * `extractBrowserState` call.
+ */
   async recordPageState(url: string, domText: string, elementCount: number): Promise<void> {
     const fp = await PageFingerprint.fromBrowserState(url, domText, elementCount);
     const last = this.pageFingerprints[this.pageFingerprints.length - 1];
@@ -286,28 +297,33 @@ export class LoopDetector {
   }
 
   /**
-   * Decide whether to inject a stagnant-page nudge. Returns the consecutive
-   * stagnant count if it has reached a threshold milestone, else `0`.
-   */
+ * Decide whether to inject a stagnant-page nudge. Returns the consecutive
+ * stagnant count if it has reached a threshold milestone, else `0`.
+ */
   shouldWarnStagnant(): number {
-    // Use threshold matching (like shouldWarn) so the warning fires only at
-    // specific count milestones, not on every step after the threshold.
+ // Use threshold matching (like shouldWarn) so the warning fires only at
+ // specific count milestones, not on every step after the threshold.
     if (!STAGNANT_THRESHOLDS.includes(this.consecutiveStagnantPages)) return 0;
     return this.consecutiveStagnantPages;
   }
 
   /** Build the stagnant-page nudge text shown to the LLM. */
   static stagnantWarningText(count: number): string {
-    return `<sys>STAGNANT PAGE: the page content has not changed across ${count} consecutive actions. Your actions might not be having the intended effect. Try a different element, scroll to find new content, or reconsider your approach.</sys>`;
+ // `count` is the number of consecutive snapshots that matched the previous
+ // one (so the page has actually been unchanged for `count + 1` captures).
+ // Wording it as "the last N consecutive snapshots" avoids an off-by-one
+ // implication that exactly N actions produced N identical pages
+ // (FULL-REVIEW finding 70).
+    return `<sys>STAGNANT PAGE: the page content has not changed across the last ${count} consecutive snapshots. Your actions might not be having the intended effect. Try a different element, scroll to find new content, or reconsider your approach.</sys>`;
   }
 
   /**
-   * Record a goal for goal-level loop detection. If the same goal
-   * appears GOAL_WARN_THRESHOLD times in the recent window, the planner
-   * is stuck re-assigning the same goal.
-   */
+ * Record a goal for goal-level loop detection. If the same goal
+ * appears GOAL_WARN_THRESHOLD times in the recent window, the planner
+ * is stuck re-assigning the same goal.
+ */
   recordGoal(goal: string): number {
-    // Normalize: lowercase + trim for comparison
+ // Normalize: lowercase + trim for comparison
     const normalized = goal.toLowerCase().trim().slice(0, 200);
     this.goalWindow.push(normalized);
     if (this.goalWindow.length > LoopDetector.GOAL_WINDOW_SIZE) {

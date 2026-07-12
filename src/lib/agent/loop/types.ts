@@ -32,8 +32,8 @@ export type NavigatorLLMCall = (req: import("../types").AgentStepRequest) => Pro
   cachedInputTokens?: number;
   model?: string;
   /** Pre-computed cost in USD (from provider-bridge, includes cachedInputTokens).
-   *  When present, callers SHOULD use this instead of recomputing via estimateCost
-   *  (which may not have cachedInputTokens). */
+ * When present, callers SHOULD use this instead of recomputing via estimateCost
+ * (which may not have cachedInputTokens). */
   costUsd?: number;
 }>;
 
@@ -48,7 +48,7 @@ export type PlannerLLMCall = (req: import("../types").PlannerStepRequest) => Pro
   cachedInputTokens?: number;
   model?: string;
   /** Pre-computed cost in USD (from provider-bridge, includes cachedInputTokens).
-   *  When present, callers SHOULD use this instead of recomputing via estimateCost. */
+ * When present, callers SHOULD use this instead of recomputing via estimateCost. */
   costUsd?: number;
 }>;
 
@@ -96,52 +96,52 @@ export interface LoopDeps {
   /** Agent mode: restricted (current tab only), standard (default), full_agentic. */
   mode?: AgentMode;
   /**
-   * Optional override for browser-state extraction (extension routes state
-   * extraction through a content-script bridge). When absent the orchestrator
-   * calls {@link extractBrowserState} directly (in-page demo mode).
-   */
+ * Optional override for browser-state extraction (extension routes state
+ * extraction through a content-script bridge). When absent the orchestrator
+ * calls {@link extractBrowserState} directly (in-page demo mode).
+ */
   extractState?: (tabs: TabInfo[]) => Promise<BrowserState>;
   /**
-   * Optional override for action-queue execution. When absent the orchestrator
-   * uses the built-in {@link executeActionQueue}.
-   */
+ * Optional override for action-queue execution. When absent the orchestrator
+ * uses the built-in {@link executeActionQueue}.
+ */
   executeActions?: (actions: AgentAction[], state: BrowserState) => Promise<ActionResult[]>;
   /**
-   * Optional summarization call used by compaction. When absent the orchestrator
-   * routes the summarization request through {@link plannerCall}.
-   */
+ * Optional summarization call used by compaction. When absent the orchestrator
+ * routes the summarization request through {@link plannerCall}.
+ */
   summarizeCall?: SummarizeLLMCall;
   /**
-   * Optional override for the takeover-resume wait.
-   */
+ * Optional override for the takeover-resume wait.
+ */
   requestTakeoverResume?: (reason: string, signal?: AbortSignal) => Promise<void>;
   /**
-   * Optional anti-bot challenge detector.
-   */
+ * Optional anti-bot challenge detector.
+ */
   detectChallenge?: () => Promise<{ kind: string; message: string } | null>;
   /**
-   * Optional: wait for an anti-bot challenge to clear on its own.
-   */
+ * Optional: wait for an anti-bot challenge to clear on its own.
+ */
   waitForChallengeResolution?: () => Promise<boolean>;
   /**
-   * Optional pause-check callback.
-   */
+ * Optional pause-check callback.
+ */
   checkPaused?: () => Promise<boolean>;
   /**
-   * Optional page-HTML extractor for the HTML-content evaluator.
-   */
+ * Optional page-HTML extractor for the HTML-content evaluator.
+ */
   getPageHtml?: () => Promise<string>;
   /**
-   * Optional current-URL fetcher for the URL evaluator.
-   */
+ * Optional current-URL fetcher for the URL evaluator.
+ */
   getCurrentUrl?: () => Promise<string>;
   /**
-   * Optional confirmation gate.
-   */
+ * Optional confirmation gate.
+ */
   requestConfirmation?: (action: AgentAction) => Promise<boolean>;
   /**
-   * Optional array of {@link AsyncCallbackHandler} instances.
-   */
+ * Optional array of {@link AsyncCallbackHandler} instances.
+ */
   callbacks?: AsyncCallbackHandler[];
 }
 
@@ -158,8 +158,8 @@ export interface PlannerCallArgs {
   step: number;
   maxSteps: number;
   /** Fired after each LLM call with the cost (USD) + optional token counts.
-   *  The token counts let the caller accumulate `totalTokensIn`/`totalTokensOut`
-   *  for the `runEnd` callback (without this, token totals were always 0). */
+ * The token counts let the caller accumulate `totalTokensIn`/`totalTokensOut`
+ * for the `runEnd` callback (without this, token totals were always 0). */
   onCost: (usd: number, tokensIn?: number, tokensOut?: number) => void;
 }
 
@@ -172,7 +172,7 @@ export interface PlannerCallArgs {
  * `runAgentLoopInner` and passed by reference.
  */
 export interface LoopState {
-  // ── Immutable ──
+ // ── Immutable ──
   /** The loop's external dependencies (LLM calls, tabs, sink, signal, …). */
   deps: LoopDeps;
   /** Merged config (DEFAULT_CONFIG + deps.config). */
@@ -185,7 +185,7 @@ export interface LoopState {
   signal?: AbortSignal;
   /** Delay between steps when `deps.waitForSettled` is absent. */
   settleDelay: number;
-  // ── Mutable ──
+ // ── Mutable ──
   /** Accumulated navigator history (one entry per navigator step). */
   navigatorHistory: HistoryItem[];
   /** Loop detector (repetition + A,B,A,B alternation). */
@@ -215,7 +215,7 @@ export interface LoopState {
   /** Loop-warning text from the previous step (prepended to the next nav request). */
   pendingLoopWarning: string | undefined;
   /** Track whether the step-budget warning has already fired so it doesn't
-   *  repeat on every step from 75% to maxSteps-2 (context bloat). */
+ * repeat on every step from 75% to maxSteps-2 (context bloat). */
   budgetWarningFired: boolean;
   /** Track whether the cost-budget warning has already fired. */
   costBudgetWarningFired: boolean;
@@ -225,7 +225,7 @@ export interface LoopState {
   finalResult?: { success: boolean; text: string };
   /** The last URL observed by `observeState`. */
   lastObservedUrl?: string;
-  // ── Optional callback dispatcher ──
+ // ── Optional callback dispatcher ──
   /** The dispatcher (constructed iff `deps.callbacks` was provided). */
   dispatcher?: CallbackDispatcher;
 }
@@ -241,14 +241,14 @@ export interface ActionQueueResult {
 }
 
 /** Successful observe-state result. */
-export interface ObserveStateOk {
+interface ObserveStateOk {
   status: "ok";
   state: BrowserState;
   tabs: TabInfo[];
 }
 
 /** Failed observe-state result (getTabs or extractState threw). */
-export interface ObserveStateError {
+interface ObserveStateError {
   status: "error";
   /** Which sub-call failed. */
   phase: "getTabs" | "extractState";

@@ -2,13 +2,13 @@
  * The agentic loop orchestrator — Planner + Navigator duo.
  *
  * Architecture:
- *   1. PLANNER runs first (and every N navigator steps) to decompose the
- *      task into a plan and give the navigator a concrete `next_goal`.
- *   2. NAVIGATOR runs for up to N steps, executing actions toward `next_goal`.
- *   3. After N navigator steps (or when the navigator emits `done`), PLANNER
- *      runs again to evaluate progress, update the plan, or call done.
- *   4. ONLY the planner can call `done(success=true)`. The navigator's `done`
- *      is treated as "I think I'm done, planner please verify".
+ * 1. PLANNER runs first (and every N navigator steps) to decompose the
+ * task into a plan and give the navigator a concrete `next_goal`.
+ * 2. NAVIGATOR runs for up to N steps, executing actions toward `next_goal`.
+ * 3. After N navigator steps (or when the navigator emits `done`), PLANNER
+ * runs again to evaluate progress, update the plan, or call done.
+ * 4. ONLY the planner can call `done(success=true)`. The navigator's `done`
+ * is treated as "I think I'm done, planner please verify".
  */
 
 import type {
@@ -71,11 +71,11 @@ export async function runAgentLoop(deps: LoopDeps): Promise<void> {
     await runAgentLoopInner(deps);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    // Durable signal for operators: the outer catch only fires for truly
-    // uncaught errors (e.g. a thrown config-error bubble or an unexpected
-    // throw). Surface it to the SW console so a run failure isn't invisible
-    // once the side panel is closed (finding: agent run errors have no durable
-    // log or alerting). The SSE `error` event only reaches the side panel.
+ // Durable signal for operators: the outer catch only fires for truly
+ // uncaught errors (e.g. a thrown config-error bubble or an unexpected
+ // throw). Surface it to the SW console so a run failure isn't invisible
+ // once the side panel is closed (finding: agent run errors have no durable
+ // log or alerting). The SSE `error` event only reaches the side panel.
     console.error("[orchestrator] runAgentLoop uncaught error:", e);
     try {
       deps.onEvent({
@@ -85,47 +85,47 @@ export async function runAgentLoop(deps: LoopDeps): Promise<void> {
         text: `Uncaught error in agent loop: ${message}`,
       });
     } catch {
-      // If onEvent itself throws, there's nothing we can do — swallow.
+ // If onEvent itself throws, there's nothing we can do — swallow.
     }
   }
 }
 
 /** Inner implementation — does the real work; outer wrapper catches any throw. */
 async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
-  // Merge user config over defaults, then validate via the Zod schema.
-  // validateConfig fills in defaults + catches invalid values (negative maxSteps,
-  // etc.) at the boundary. If validation fails it THROWS — the run aborts with a
-  // clear error rather than silently running on a broken config.
+ // Merge user config over defaults, then validate via the Zod schema.
+ // validateConfig fills in defaults + catches invalid values (negative maxSteps,
+ // etc.) at the boundary. If validation fails it THROWS — the run aborts with a
+ // clear error rather than silently running on a broken config.
   let config: import("../types").AgentConfig;
   try {
     const { validateConfig } = await import("../config");
     const validatedConfig = validateConfig({ ...DEFAULT_CONFIG, ...deps.config });
-    // The Zod schema keeps `enableJudge` OPTIONAL in its output type
-    // (`enableJudge: z.boolean().optional()`), so `AgentConfigValidated` has
-    // `enableJudge?: boolean`. But `config` is typed `AgentConfig`, which
-    // requires `enableJudge: boolean`. The runtime value is always present
-    // because `DEFAULT_CONFIG` (merged in first) sets it to `true`, so we
-    // re-assert a concrete boolean here. This keeps the shared `AgentConfig`
-    // type intact while satisfying the assignment (regression from the
-    // reconcile rewrite).
+ // The Zod schema keeps `enableJudge` OPTIONAL in its output type
+ // (`enableJudge: z.boolean().optional()`), so `AgentConfigValidated` has
+ // `enableJudge?: boolean`. But `config` is typed `AgentConfig`, which
+ // requires `enableJudge: boolean`. The runtime value is always present
+ // because `DEFAULT_CONFIG` (merged in first) sets it to `true`, so we
+ // re-assert a concrete boolean here. This keeps the shared `AgentConfig`
+ // type intact while satisfying the assignment (regression from the
+ // reconcile rewrite).
     config = { ...validatedConfig, enableJudge: validatedConfig.enableJudge ?? DEFAULT_CONFIG.enableJudge };
   } catch (e) {
-    // `validateConfig` (Zod schema) enforces hard bounds (maxSteps 1–1000,
-    // maxActionsPerStep 1–50, maxFailures >= 1, compactionCharThreshold >= 1000).
-    // On failure it throws. Do NOT re-merge the SAME unvalidated input — that
-    // would silently let out-of-range/malformed values (negative maxSteps,
-    // maxActionsPerStep > 50, negative maxFailures) reach the loop logic, making
-    // the schema purely decorative (finding: Zod config validation silently
-    // discarded / validation failure silently bypassed). Surface the error so
-    // the caller/UI gets a clear signal and refuse to start with a broken config.
+ // `validateConfig` (Zod schema) enforces hard bounds (maxSteps 1–1000,
+ // maxActionsPerStep 1–50, maxFailures >= 1, compactionCharThreshold >= 1000).
+ // On failure it throws. Do NOT re-merge the SAME unvalidated input — that
+ // would silently let out-of-range/malformed values (negative maxSteps,
+ // maxActionsPerStep > 50, negative maxFailures) reach the loop logic, making
+ // the schema purely decorative (finding: Zod config validation silently
+ // discarded / validation failure silently bypassed). Surface the error so
+ // the caller/UI gets a clear signal and refuse to start with a broken config.
     const msg = e instanceof Error ? e.message : String(e);
     console.error("[orchestrator] config validation failed:", msg);
-    // Preserve structured validation details (e.g. ConfigValidationError.issues)
-    // when available, so callers / UI can surface field-level errors instead of
-    // only the first message (finding: ConfigValidationError structured details
-    // discarded). Re-throw the original error; only synthesize a generic one for
-    // non-ConfigValidation errors (duck-type on the `issues` property to avoid a
-    // cross-module import).
+ // Preserve structured validation details (e.g. ConfigValidationError.issues)
+ // when available, so callers / UI can surface field-level errors instead of
+ // only the first message (finding: ConfigValidationError structured details
+ // discarded). Re-throw the original error; only synthesize a generic one for
+ // non-ConfigValidation errors (duck-type on the `issues` property to avoid a
+ // cross-module import).
     if (e instanceof Error && (e as { issues?: unknown }).issues) {
       throw e;
     }
@@ -140,13 +140,13 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
   }
 
   /**
-   * Safely invoke a user-supplied dispatcher/callback handler. Dispatcher
-   * handlers are an externally-supplied extension point; a throwing handler
-   * must NOT abort the whole agent loop (finding: user-provided dispatcher/
-   * callback exceptions abort the whole run). We log and continue. This also
-   * prevents a `runEnd` failure from throwing out of `runAgentLoopInner` and
-   * producing a duplicate `done` event via the outer catch.
-   */
+ * Safely invoke a user-supplied dispatcher/callback handler. Dispatcher
+ * handlers are an externally-supplied extension point; a throwing handler
+ * must NOT abort the whole agent loop (finding: user-provided dispatcher/
+ * callback exceptions abort the whole run). We log and continue. This also
+ * prevents a `runEnd` failure from throwing out of `runAgentLoopInner` and
+ * producing a duplicate `done` event via the outer catch.
+ */
   const safeDispatch = async (label: string, fn: () => Promise<void>): Promise<void> => {
     if (!dispatcher) return;
     try {
@@ -188,7 +188,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
   onEvent({ type: "run-start", task, maxSteps: config.maxSteps });
   await safeDispatch("runStart", () => dispatcher!.runStart(makeCtx(state)));
 
-  // ── Phase 1: initial planner call ──────────────────────────────────────
+ // ── Phase 1: initial planner call ──────────────────────────────────────
   let plannerResult: PlannerOutput;
   try {
     const initialTabs = await deps.getTabs();
@@ -272,10 +272,10 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
     }
   }
   state.plan = plannerResult.plan;
-  // Clamp `current_plan_item` to a valid plan index (finding: current_plan_item
-  // is accepted without bounds validation). The planner prompt asks for a
-  // 0-indexed value < plan.length, but the schema only validates `z.number().int()`,
-  // so a negative or out-of-range value must be coerced rather than trusted.
+ // Clamp `current_plan_item` to a valid plan index (finding: current_plan_item
+ // is accepted without bounds validation). The planner prompt asks for a
+ // 0-indexed value < plan.length, but the schema only validates `z.number().int()`,
+ // so a negative or out-of-range value must be coerced rather than trusted.
   {
     const cpiRaw = plannerResult.current_plan_item ?? 0;
     const planLen = plannerResult.plan?.length ?? 0;
@@ -293,7 +293,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
     await safeDispatch("plannerStep", () => dispatcher!.plannerStep(makeCtx(state), plannerResult.decision, state.currentGoal, state.plan));
   }
 
-  // ── Phase 2: navigator loop ────────────────────────────────────────────
+ // ── Phase 2: navigator loop ────────────────────────────────────────────
   while (state.step < config.maxSteps) {
     if (signal?.aborted) {
       onEvent({ type: "info", message: "Agent stopped by user." });
@@ -307,19 +307,19 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       return;
     }
 
-    // Budget warning fires once, when step reaches the configured fraction of
-    // maxSteps. `Math.max(1, ...)` guards the small-`maxSteps` edge case
-    // (e.g. maxSteps=1 → floor(0.75)=0 → warning would fire at step 0 before
-    // any navigator step had run). With the floor at 1, the warning either
-    // fires at step 1+ (a meaningful "75% used" point) or never fires at all
-    // when maxSteps is so small the threshold lands outside the loop range.
+ // Budget warning fires once, when step reaches the configured fraction of
+ // maxSteps. `Math.max(1, ...)` guards the small-`maxSteps` edge case
+ // (e.g. maxSteps=1 → floor(0.75)=0 → warning would fire at step 0 before
+ // any navigator step had run). With the floor at 1, the warning either
+ // fires at step 1+ (a meaningful "75% used" point) or never fires at all
+ // when maxSteps is so small the threshold lands outside the loop range.
     const budgetWarnStep = Math.max(1, Math.floor(config.maxSteps * BUDGET_WARNING_FRACTION));
     if (state.step === budgetWarnStep) {
       onEvent({ type: "budget-warning", step: state.step, pct: Math.floor(BUDGET_WARNING_FRACTION * 100) });
-      // Mark the budget warning as fired here so the `buildPreObserveNudges`
-      // call below does NOT ALSO inject the duplicate budget-warning nudge into
-      // the prompt — the inline `budget-warning` event is the single source of
-      // truth for this warning. (Without this, both surfaces fire.)
+ // Mark the budget warning as fired here so the `buildPreObserveNudges`
+ // call below does NOT ALSO inject the duplicate budget-warning nudge into
+ // the prompt — the inline `budget-warning` event is the single source of
+ // truth for this warning. (Without this, both surfaces fire.)
       state.budgetWarningFired = true;
     }
 
@@ -351,9 +351,9 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       state.step++;
       continue;
     }
-    // `tabs` is declared with `let` so the challenge-re-observe branch below
-    // can refresh it. `browserState` is mutated in place via
-    // `Object.assign` so `const` is fine for it.
+ // `tabs` is declared with `let` so the challenge-re-observe branch below
+ // can refresh it. `browserState` is mutated in place via
+ // `Object.assign` so `const` is fine for it.
     const { state: browserState, tabs: initialTabs } = observed;
     let tabs = initialTabs;
     state.lastObservedUrl = browserState.url;
@@ -376,8 +376,16 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
             : LoopDetector.stagnantWarningText(stagnantCount);
           onEvent({ type: "loop-warning", step: state.step, count: stagnantCount });
         }
-      } catch {
-        // Page-fingerprint hashing is best-effort — never block the loop.
+      } catch (e) {
+ // Page-fingerprint hashing is best-effort — never block the loop — but
+ // surface failures so the stagnation detector isn't silently dead (e.g. a
+ // hidden `crypto.subtle`-unavailable degradation, or a real bug in the
+ // fingerprint path). `console.warn` survives the production log-strip, so
+ // operational telemetry reflects when stagnation detection is inactive.
+        console.warn(
+          "[orchestrator] recordPageState failed (stagnation detection may be inactive):",
+          e,
+        );
       }
     }
     if (browserState.screenshot && dispatcher) {
@@ -387,7 +395,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
 
     appendPostObserveNudges(state, browserState);
 
-    // Challenge detection + pause check
+ // Challenge detection + pause check
     const challengeResult = await runChallengeDetection(state);
     if (challengeResult.challenge) {
       if (challengeResult.timedOut) {
@@ -401,7 +409,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
           return;
         }
       }
-      // Re-observe the page after the challenge cleared / user resumed.
+ // Re-observe the page after the challenge cleared / user resumed.
       const reObserved = await observeState(state);
       if (reObserved.status === "error") {
         onEvent({
@@ -413,19 +421,19 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
         continue;
       }
       Object.assign(browserState, reObserved.state);
-      // Refresh the captured `tabs` reference too — the challenge branch
-      // re-observed the page, so the tab list may have changed (Cloudflare
-      // redirects, login flows opening new tabs, …).
+ // Refresh the captured `tabs` reference too — the challenge branch
+ // re-observed the page, so the tab list may have changed (Cloudflare
+ // redirects, login flows opening new tabs, …).
       tabs = reObserved.tabs;
-      // Emit a `resumed` event so the side panel hides the takeover banner
-      // that was shown by `challenge_detected`.
+ // Emit a `resumed` event so the side panel hides the takeover banner
+ // that was shown by `challenge_detected`.
       onEvent({ type: "resumed", step: state.step });
       onEvent({ type: "info", message: `Anti-bot challenge cleared — resuming.` });
     }
 
     await runPauseCheck(state);
 
-    // ── 2b. Reason: call navigator LLM (with parse retry) ──
+ // ── 2b. Reason: call navigator LLM (with parse retry) ──
     const navRequest = await prepareNavigatorRequest(state, browserState);
 
     let output: AgentOutput;
@@ -511,17 +519,17 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       ));
     }
 
-    // Preserve a sole `done` action even when the navigator emitted more
-    // actions than maxActionsPerStep. The `done` action always means "stop and
-    // finalize", so if it
-    // is present we run ONLY it and discard the rest rather than truncating `done`
-    // off the end of the queue.
+ // Preserve a sole `done` action even when the navigator emitted more
+ // actions than maxActionsPerStep. The `done` action always means "stop and
+ // finalize", so if it
+ // is present we run ONLY it and discard the rest rather than truncating `done`
+ // off the end of the queue.
     const soleDoneAction = output.action.find((a) => a.type === "done");
     const actions = soleDoneAction ? [soleDoneAction] : output.action.slice(0, config.maxActionsPerStep);
     if (output.action.length > config.maxActionsPerStep) {
-      // Check `soleDoneAction` BEFORE warning: when a `done` is present we keep
-      // ONLY it (we do NOT truncate), so the "truncating" wording would be
-      // misleading. Specialize the message to reflect what actually happens.
+ // Check `soleDoneAction` BEFORE warning: when a `done` is present we keep
+ // ONLY it (we do NOT truncate), so the "truncating" wording would be
+ // misleading. Specialize the message to reflect what actually happens.
       const truncMsg = soleDoneAction
         ? `Navigator emitted ${output.action.length} actions (max ${config.maxActionsPerStep}); keeping only the done action.`
         : `Navigator emitted ${output.action.length} actions (max ${config.maxActionsPerStep}); truncating.`;
@@ -532,45 +540,45 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
     const doneAction = actions.find((a) => a.type === "done");
 
     if (doneAction && doneAction.type === "done") {
-      // A step that pairs `done` with a sibling action is rejected at parse
-      // time (AgentOutputSchema.action superRefine) before it reaches the
-      // orchestrator, so `doneAction` is ALWAYS the sole action in the step.
+ // A step that pairs `done` with a sibling action is rejected at parse
+ // time (AgentOutputSchema.action superRefine) before it reaches the
+ // orchestrator, so `doneAction` is ALWAYS the sole action in the step.
       const result = await handleNavigatorDone(state, doneAction, output, browserState, tabs);
       if (result.finalized) {
         await safeDispatch("runEnd", () => dispatcher!.runEnd(buildRunResult(state, false, "")));
         return;
       }
-      // Fire stepEnd for the done step so metrics are accurate.
+ // Fire stepEnd for the done step so metrics are accurate.
       await safeDispatch("stepEnd", () => dispatcher!.stepEnd(makeCtx(state), [{ action: doneAction, success: doneAction.success ?? true, message: `Navigator requested completion: ${doneAction.text}`, isDone: true }]));
       continue;
     }
 
-    // Execute the action queue
+ // Execute the action queue
     const agentMode = deps.mode ?? "standard";
     let results: ActionResult[];
     if (deps.executeActions) {
       try {
-        // The `deps.executeActions` override (always set in the extension
-        // path — see run-helpers.ts) bypasses `executeActionQueue`, which is
-        // the only caller of `loopDetector.record(action, step)`. Without
-        // recording here, the action-repetition loop detector would be dead
-        // code in production — only the page-fingerprint detector
-        // (`recordPageState` above) would fire. Record each action in the
-        // batch here so the rolling FNV-1a hash window detects repeated
-        // action sequences (e.g. click→scroll→click→scroll) even when the
-        // page fingerprint hasn't changed. The per-action
-        // `loopDetector.reset()` on page-change (action-queue.ts:131,153) is
-        // approximated by a single post-batch reset below — the override
-        // contract returns batch results, not per-action page-change events,
-        // so mid-batch resets aren't possible without refactoring the
-        // contract. The page-fingerprint detector still resets per step.
+ // The `deps.executeActions` override (always set in the extension
+ // path — see run-helpers.ts) bypasses `executeActionQueue`, which is
+ // the only caller of `loopDetector.record(action, step)`. Without
+ // recording here, the action-repetition loop detector would be dead
+ // code in production — only the page-fingerprint detector
+ // (`recordPageState` above) would fire. Record each action in the
+ // batch here so the rolling FNV-1a hash window detects repeated
+ // action sequences (e.g. click→scroll→click→scroll) even when the
+ // page fingerprint hasn't changed. The per-action
+ // `loopDetector.reset()` on page-change (action-queue.ts:131,153) is
+ // approximated by a single post-batch reset below — the override
+ // contract returns batch results, not per-action page-change events,
+ // so mid-batch resets aren't possible without refactoring the
+ // contract. The page-fingerprint detector still resets per step.
         if (config.enableLoopDetection) {
-          // Check `shouldWarn` AFTER EACH `record`, not once at the end.
-          // `shouldWarn` only examines the LAST action's hash count — checking
-          // once after the whole batch would miss a repeated action earlier in
-          // the batch (e.g. [click×5, scroll] → shouldWarn checks scroll,
-          // count=1, no warning — but click has count=5). Matches
-          // action-queue.ts:96-103 semantics (per-action record+warn).
+ // Check `shouldWarn` AFTER EACH `record`, not once at the end.
+ // `shouldWarn` only examines the LAST action's hash count — checking
+ // once after the whole batch would miss a repeated action earlier in
+ // the batch (e.g. [click×5, scroll] → shouldWarn checks scroll,
+ // count=1, no warning — but click has count=5). Matches
+ // action-queue.ts:96-103 semantics (per-action record+warn).
           for (const action of actions) {
             state.loopDetector.record(action, state.step);
             const warnCount = state.loopDetector.shouldWarn();
@@ -581,8 +589,8 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
           }
         }
         results = await deps.executeActions(actions, browserState);
-        // Reset the action-repetition window if any action in the batch
-        // changed the page — matches action-queue.ts:151-153 semantics.
+ // Reset the action-repetition window if any action in the batch
+ // changed the page — matches action-queue.ts:151-153 semantics.
         if (config.enableLoopDetection && results.some((r) => r.pageChanged)) {
           state.loopDetector.reset();
         }
@@ -625,14 +633,14 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
 
     await safeDispatch("stepEnd", () => dispatcher!.stepEnd(makeCtx(state), results));
 
-    // loopWarningCount is emitted as a "loop-warning" event by
-    // executeActionQueue; the next step's injected nudges (built from
-    // buildPreObserveNudges / buildPostObserveNudges in
-    // context/injection-points.ts) already inject the loop-detection nudge via
-    // injectLoopDetectionNudge. Setting pendingLoopWarning here would duplicate
-    // the warning.
+ // loopWarningCount is emitted as a "loop-warning" event by
+ // executeActionQueue; the next step's injected nudges (built from
+ // buildPreObserveNudges / buildPostObserveNudges in
+ // context/injection-points.ts) already inject the loop-detection nudge via
+ // injectLoopDetectionNudge. Setting pendingLoopWarning here would duplicate
+ // the warning.
 
-    // Takeover pause
+ // Takeover pause
     const takeoverResult = results.find((r) => r.action.type === "takeover");
     if (takeoverResult) {
       const takeoverAction = takeoverResult.action as { type: "takeover"; reason: string };
@@ -645,17 +653,17 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       }
     }
 
-    // Record history
+ // Record history
     state.navigatorHistory.push({
       step: state.step, agent: "navigator",
       evaluation: output.evaluation_previous_goal,
       memory: output.memory, goal: output.next_goal, results,
     });
 
-    // Reset consecutiveFailures only when the MAJORITY of actions succeed (not
-    // when ALL succeed — a single benign failure on a step with 5 successful
-    // actions shouldn't count as a "consecutive failure"). This prevents
-    // premature maxFailures abort on steps with mixed results.
+ // Reset consecutiveFailures only when the MAJORITY of actions succeed (not
+ // when ALL succeed — a single benign failure on a step with 5 successful
+ // actions shouldn't count as a "consecutive failure"). This prevents
+ // premature maxFailures abort on steps with mixed results.
     const failureCount = results.filter((r) => !r.success).length;
     state.consecutiveFailures = failureCount > results.length / 2 ? state.consecutiveFailures + 1 : 0;
 
@@ -667,9 +675,9 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       );
       if (es.stop) {
         const doneText = `Early-stop: ${es.reason}`;
-        // Reflect the actual stop reason's count: parse-failure stops report
-        // the parse-failure counter; repeating-action stops report the
-        // repeating-action threshold.
+ // Reflect the actual stop reason's count: parse-failure stops report
+ // the parse-failure counter; repeating-action stops report the
+ // repeating-action threshold.
         const isParseFailure = es.reason.includes("parse");
         const warnCount = isParseFailure
           ? state.consecutiveParseFailures
@@ -682,7 +690,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       }
     }
 
-    // Settle & advance
+ // Settle & advance
     try {
       await (deps.waitForSettled?.() ?? sleep(settleDelay));
     } catch (e) {
@@ -693,13 +701,13 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
     state.step++;
     state.navigatorStepsSincePlanner++;
 
-    // Compaction check — measure the ACTUAL rendered-history size rather than
-    // estimating `length * 500`. The estimate systematically undershoots once
-    // `extract`/evaluation/memory/goal/action results accumulate, so compaction
-    // fired far later than `compactionCharThreshold` intended and the history
-    // could briefly exceed the model's context window before it kicked in.
-    // Rendering is O(N) per step (no worse than the old estimate) and gives
-    // `shouldCompact` the real character count it documents it expects.
+ // Compaction check — measure the ACTUAL rendered-history size rather than
+ // estimating `length * 500`. The estimate systematically undershoots once
+ // `extract`/evaluation/memory/goal/action results accumulate, so compaction
+ // fired far later than `compactionCharThreshold` intended and the history
+ // could briefly exceed the model's context window before it kicked in.
+ // Rendering is O(N) per step (no worse than the old estimate) and gives
+ // `shouldCompact` the real character count it documents it expects.
     if (config.enableCompaction) {
       const historyLen = renderHistoryForSummarization(state.navigatorHistory).length;
       const contextBudgetChars = 400_000;
@@ -737,16 +745,16 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
             state.finalResult = { success: false, text: msg };
             return;
           }
-          // `runCompaction` only re-throws Budget-exceeded errors; any other
-          // error is caught internally and returns `null`. Re-throwing here
-          // would erroneously kill the whole run if `runCompaction` ever
-          // changed to re-throw transient errors, so we log-and-continue
-          // (deferring compaction to a later step).
-          //
-          // Back off: record this step as the last compaction attempt so the
-          // per-step retry doesn't fire compaction on EVERY subsequent step
-          // (which would amplify cost/error rate while the failure persists).
-          // The next attempt waits `compactionStepInterval` steps as normal.
+ // `runCompaction` only re-throws Budget-exceeded errors; any other
+ // error is caught internally and returns `null`. Re-throwing here
+ // would erroneously kill the whole run if `runCompaction` ever
+ // changed to re-throw transient errors, so we log-and-continue
+ // (deferring compaction to a later step).
+ //
+ // Back off: record this step as the last compaction attempt so the
+ // per-step retry doesn't fire compaction on EVERY subsequent step
+ // (which would amplify cost/error rate while the failure persists).
+ // The next attempt waits `compactionStepInterval` steps as normal.
           state.lastCompactionStep = state.step;
           onEvent({ type: "info", message: `Compaction skipped due to error: ${msg}` });
         }
@@ -761,7 +769,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       }
     }
 
-    // Periodic planner check
+ // Periodic planner check
     if (state.navigatorStepsSincePlanner >= config.plannerInterval) {
       const result = await runPeriodicPlannerCheck(state, browserState);
       if (result.finalized) {

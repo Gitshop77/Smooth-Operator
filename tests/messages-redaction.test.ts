@@ -8,13 +8,17 @@
  * injection markers embedded in the AX tree are still flagged.
  */
 
-import { describe, test, expect, beforeAll } from "vitest";
+import { describe, test, expect, beforeAll, afterAll } from "vitest";
 import { buildNavigatorUserMessage } from "../src/lib/agent/loop/messages";
 import { setSecret, deleteSecret } from "../src/lib/agent/secrets";
-import { installLocalStorageStub } from "./helpers";
+import { installLocalStorageStub, restoreLocalStorageStub } from "./helpers";
 
 beforeAll(() => {
   installLocalStorageStub();
+});
+
+afterAll(() => {
+  restoreLocalStorageStub();
 });
 
 /** Minimal args sufficient to build a navigator message. */
@@ -49,7 +53,7 @@ describe("buildNavigatorUserMessage secret redaction", () => {
         baseArgs({ browserState: { ...baseArgs().browserState, elementsText } }),
       );
       expect(msg).not.toContain(secretValue);
-      // And it should be replaced by a redaction marker, not silently dropped.
+ // And it should be replaced by a redaction marker, not silently dropped.
       expect(msg).toContain("[REDACTED:mysecret]");
     } finally {
       await deleteSecret("mysecret");

@@ -10,6 +10,7 @@
  */
 
 import { getScheduledTask } from "@/lib/agent/scheduled-tasks";
+import { validateWebhookUrl } from "@/lib/agent/llm/route/ssrf";
 import { getRunState, requestKeepAwake } from "./state-store";
 import { isRunStarting, setRunStarting } from "./agent-bridge";
 
@@ -22,18 +23,18 @@ export async function handleScheduledTaskFire(taskId: string): Promise<void> {
   try {
     const task = await getScheduledTask(taskId);
     if (!task || !task.enabled) return; // deleted or disabled — skip
-    // Don't start if a run is already active.
+ // Don't start if a run is already active.
     const existing = await getRunState();
     if (existing?.active) {
       console.warn("[scheduled-tasks] skipping fire — a run is already active");
       return;
     }
-    // acquire the synchronous `runStarting` guard BEFORE calling
-    // `startRun`. Without this, a scheduled-task alarm fire racing a manual
-    // RUN click within ~50ms could both pass the `existing?.active` check
-    // (the storage read is async) and both call `startRun`, starting two
-    // concurrent loops. The RUN handler in message-routing.ts uses this
-    // same flag — so whichever caller sets it first wins, the other bails.
+ // acquire the synchronous `runStarting` guard BEFORE calling
+ // `startRun`. Without this, a scheduled-task alarm fire racing a manual
+ // RUN click within ~50ms could both pass the `existing?.active` check
+ // (the storage read is async) and both call `startRun`, starting two
+ // concurrent loops. The RUN handler in message-routing.ts uses this
+ // same flag — so whichever caller sets it first wins, the other bails.
     if (isRunStarting()) {
       console.warn(
         "[scheduled-tasks] skipping fire — runStarting guard already set (a manual RUN may be starting)",
@@ -41,15 +42,15 @@ export async function handleScheduledTaskFire(taskId: string): Promise<void> {
       return;
     }
     setRunStarting(true);
-    // re-acquire the system keep-awake lock right before starting the
-    // run. The lock was acquired when the alarm was armed, but the OS may
-    // have suspended Chrome between arming and firing (especially for long
-    // daily/weekly schedules). Re-requesting here is idempotent and ensures
-    // the system stays awake for the duration of the run. `requestKeepAwake`
-    // internally checks that at least one enabled task exists (this one) —
-    // so it's a no-op if all tasks were disabled between arming + firing.
+ // re-acquire the system keep-awake lock right before starting the
+ // run. The lock was acquired when the alarm was armed, but the OS may
+ // have suspended Chrome between arming and firing (especially for long
+ // daily/weekly schedules). Re-requesting here is idempotent and ensures
+ // the system stays awake for the duration of the run. `requestKeepAwake`
+ // internally checks that at least one enabled task exists (this one) —
+ // so it's a no-op if all tasks were disabled between arming + firing.
     await requestKeepAwake();
-    // Update lastRunAt + persist.
+ // Update lastRunAt + persist.
     const { listScheduledTasks, saveScheduledTask } = await import("@/lib/agent/scheduled-tasks");
     const allTasks = await listScheduledTasks();
     const idx = allTasks.findIndex((t) => t.id === taskId);
@@ -57,10 +58,10 @@ export async function handleScheduledTaskFire(taskId: string): Promise<void> {
       allTasks[idx].lastRunAt = Date.now();
       await saveScheduledTask(allTasks[idx]);
     }
-    // Open the side panel + start the run. chrome.sidePanel.open requires a
-    // user gesture, which alarm callbacks don't have — so it will throw. Fall
-    // back to a notification + badge so the user knows a scheduled task fired;
-    // the panel opens on the next action-click (which IS a user gesture).
+ // Open the side panel + start the run. chrome.sidePanel.open requires a
+ // user gesture, which alarm callbacks don't have — so it will throw. Fall
+ // back to a notification + badge so the user knows a scheduled task fired;
+ // the panel opens on the next action-click (which IS a user gesture).
     try {
       await chrome.sidePanel.open({ windowId: chrome.windows.WINDOW_ID_CURRENT });
     } catch {
@@ -74,25 +75,25 @@ export async function handleScheduledTaskFire(taskId: string): Promise<void> {
         priority: 2,
       }, () => { /* notifications API may not be available */ });
     }
-    // Dynamic import breaks the circular dep with agent-bridge.ts (which calls
-    // fireNotifications from its `finally` block).
+ // Dynamic import breaks the circular dep with agent-bridge.ts (which calls
+ // fireNotifications from its `finally` block).
     const { startRun } = await import("./agent-bridge");
     await startRun({ task: task.task, maxSteps: 100, mode: "standard", isScheduledTaskRun: true });
   } catch (e) {
-    // Log the message only (not the raw Error object) to avoid leaking stack
-    // traces / absolute filesystem paths into shared logs.
+ // Log the message only (not the raw Error object) to avoid leaking stack
+ // traces / absolute filesystem paths into shared logs.
     console.error(
       "[scheduled-tasks] failed to handle alarm fire:",
       e instanceof Error ? e.message : String(e),
     );
-    // release the synchronous RUN-guard flag on failure. The flag
-    // was set at line 43 above (`setRunStarting(true)`) BEFORE `startRun`
-    // was invoked. If anything between there and the orchestrator's own
-    // `finally` throws (e.g. `requestKeepAwake` rejects, `chrome.sidePanel.open`
-    // throws, or `startRun` itself throws before reaching its own try/finally),
-    // the flag sticks `true` and every subsequent RUN message — manual OR
-    // scheduled — is rejected with "already starting" until the SW restarts.
-    // Same anti-pattern as (which fixed the manual-RUN path).
+ // release the synchronous RUN-guard flag on failure. The flag
+ // was set at line 43 above (`setRunStarting(true)`) BEFORE `startRun`
+ // was invoked. If anything between there and the orchestrator's own
+ // `finally` throws (e.g. `requestKeepAwake` rejects, `chrome.sidePanel.open`
+ // throws, or `startRun` itself throws before reaching its own try/finally),
+ // the flag sticks `true` and every subsequent RUN message — manual OR
+ // scheduled — is rejected with "already starting" until the SW restarts.
+ // Same anti-pattern as (which fixed the manual-RUN path).
     setRunStarting(false);
   }
 }
@@ -120,27 +121,31 @@ export async function fireNotifications(task: string, success?: boolean): Promis
     }
 
     if (webhookUrl) {
-      // Only POST to an absolute http(s) URL. `new URL` rejects
-      // relative/malformed values; we additionally require an `http:` or
-      // `https:` scheme so task text is never exfiltrated to `javascript:`/
-      // `data:`/`file:`/arbitrary schemes. Invalid or non-http(s) URLs are
-      // logged + skipped (non-fatal), preserving the existing rejection of
-      // `javascript:`/`data:` URLs.
+ // Only POST to an absolute http(s) URL that also passes the webhook
+ // SSRF guard. `validateWebhookUrl` rejects relative/malformed values,
+ // non-http(s) schemes (`javascript:`/`data:`/`file:`), and internal
+ // hosts — cloud-metadata / link-local (`169.254.0.0/16`, `fe80:/10`),
+ // unspecified `0.0.0.0/8`, CGNAT `100.64.0.0/10`, and RFC1918/ULA private
+ // ranges. A webhook is an external notification endpoint
+ // (Slack/Discord/custom), so it must never be pointed at internal/metadata
+ // hosts to exfiltrate task text or reach internal services. Loopback
+ // (`localhost`, `127.0.0.0/8`) is permitted so a self-hosted relay in dev
+ // keeps working. Invalid or unsafe URLs are logged + skipped (non-fatal).
       let safeUrl: string | null = null;
-      try {
-        const parsed = new URL(webhookUrl);
-        if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-          safeUrl = parsed.toString();
+      const ssrfCheck = validateWebhookUrl(webhookUrl);
+      if (ssrfCheck.ok) {
+        try {
+          safeUrl = new URL(webhookUrl).toString();
+        } catch {
+          safeUrl = null;
         }
-      } catch {
-        safeUrl = null;
       }
       if (!safeUrl) {
-        // Log only the host, never the full URL: webhook endpoints (Slack,
-        // Discord, custom) frequently embed secret bearer tokens in the path
-        // or query (e.g. https://hooks.slack.com/services/T000/B000/XXXX).
-        // Leaking the raw URL into the service-worker console exposes that
-        // credential in shared logs / bug reports / screen recordings.
+ // Log only the host, never the full URL: webhook endpoints (Slack,
+ // Discord, custom) frequently embed secret bearer tokens in the path
+ // or query (e.g. https://hooks.slack.com/services/T000/B000/XXXX).
+ // Leaking the raw URL into the service-worker console exposes that
+ // credential in shared logs / bug reports / screen recordings.
         let redactedHost = "(unknown host)";
         try {
           redactedHost = new URL(webhookUrl).host;
@@ -148,7 +153,8 @@ export async function fireNotifications(task: string, success?: boolean): Promis
           /* leave default */
         }
         console.warn(
-          `[task-queue] skipping webhook — URL must be absolute http(s): ${redactedHost}`,
+          `[task-queue] skipping webhook — URL must be an absolute http(s) ` +
+            `endpoint that is not a loopback/private/cloud-metadata host: ${redactedHost}`,
         );
       } else {
         const payload = {
@@ -157,8 +163,8 @@ export async function fireNotifications(task: string, success?: boolean): Promis
           task,
           timestamp: Date.now(),
         };
-        // Bound the request with a 5s timeout so a slow/hanging endpoint does
-        // not retain a connection inside the MV3 service worker indefinitely.
+ // Bound the request with a 5s timeout so a slow/hanging endpoint does
+ // not retain a connection inside the MV3 service worker indefinitely.
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 5000);
         fetch(safeUrl, {
@@ -172,6 +178,6 @@ export async function fireNotifications(task: string, success?: boolean): Promis
       }
     }
   } catch {
-    // Notification settings not available — non-fatal.
+ // Notification settings not available — non-fatal.
   }
 }

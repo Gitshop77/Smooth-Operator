@@ -80,11 +80,11 @@ const INTERACTIVE_ROLES: ReadonlySet<string> = new Set([
  */
 export function isInteractive(el: HTMLElement): boolean {
   const tag = el.tagName.toLowerCase();
-  // <a> is only interactive when it has an `href` attribute — per HTML spec,
-  // <a> without href is a plain placeholder with no interactive semantics
-  // (it's not focusable, not clickable-as-a-link, and ARIA assigns it the
-  // generic role rather than "link"). Treating every <a> as interactive
-  // would surface dead anchors to the LLM as click targets.
+ // <a> is only interactive when it has an `href` attribute — per HTML spec,
+ // <a> without href is a plain placeholder with no interactive semantics
+ // (it's not focusable, not clickable-as-a-link, and ARIA assigns it the
+ // generic role rather than "link"). Treating every <a> as interactive
+ // would surface dead anchors to the LLM as click targets.
   if (tag === "a") return el.getAttribute("href") !== null;
   if (INTERACTIVE_TAGS.has(tag)) return true;
   const role = el.getAttribute("role");
@@ -94,12 +94,12 @@ export function isInteractive(el: HTMLElement): boolean {
   if (el.getAttribute("onclick") !== null) return true;
   const tabindex = el.getAttribute("tabindex");
   if (tabindex !== null && parseInt(tabindex, 10) >= 0) return true;
-  // Only treat `draggable` as a signal of interactivity when it is explicitly
-  // set to "true". `HTMLElement.draggable` defaults to `true` for `<img>` and
-  // `<a href>` (the HTML "auto" default), so reading the property would
-  // over-classify every image and link as an interactive click target and bloat
-  // the serialized tree. Links are already covered by the `href` check above,
-  // and images are not actionable, so we only honor an explicit opt-in.
+ // Only treat `draggable` as a signal of interactivity when it is explicitly
+ // set to "true". `HTMLElement.draggable` defaults to `true` for `<img>` and
+ // `<a href>` (the HTML "auto" default), so reading the property would
+ // over-classify every image and link as an interactive click target and bloat
+ // the serialized tree. Links are already covered by the `href` check above,
+ // and images are not actionable, so we only honor an explicit opt-in.
   if (el.getAttribute("draggable") === "true") return true;
   return false;
 }
@@ -116,13 +116,13 @@ export function isInteractive(el: HTMLElement): boolean {
 //
 // Pattern set (canonical — modelled on the well-known `PROPAGATING_ELEMENTS`
 // taxonomy):
-//   - `{tag:"a"}` — anchors propagate (the whole link is clickable)
-//   - `{tag:"button"}` — buttons propagate
-//   - `{tag:"div",  role:"button"}`  — div-as-button
-//   - `{tag:"div",  role:"combobox"}` — div-as-combobox
-//   - `{tag:"span", role:"button"}`  — span-as-button
-//   - `{tag:"span", role:"combobox"}` — span-as-combobox
-//   - `{tag:"input", role:"combobox"}` — combobox input
+// - `{tag:"a"}` — anchors propagate (the whole link is clickable)
+// - `{tag:"button"}` — buttons propagate
+// - `{tag:"div", role:"button"}` — div-as-button
+// - `{tag:"div", role:"combobox"}` — div-as-combobox
+// - `{tag:"span", role:"button"}` — span-as-button
+// - `{tag:"span", role:"combobox"}` — span-as-combobox
+// - `{tag:"input", role:"combobox"}` — combobox input
 
 /** A single propagating-element pattern: tag + optional role constraint. */
 export interface PropagatingElementPattern {
@@ -176,7 +176,7 @@ export const DEFAULT_CONTAINMENT_THRESHOLD = 0.99;
  * (0–1). Returns 0 if either element has a zero-area box (detached, hidden,
  * or not yet laid out).
  *
- * @param child  The candidate contained element.
+ * @param child The candidate contained element.
  * @param parent The candidate containing element.
  * @returns `intersectionArea / childArea` in `[0, 1]`.
  */
@@ -198,8 +198,8 @@ export function containmentRatio(child: Element, parent: Element): number {
  * propagation filter to suppress duplicate click targets (e.g. a `<span>`
  * inside a `<button>` where the span fills the whole button).
  *
- * @param child     The candidate contained element.
- * @param parent    The candidate containing element.
+ * @param child The candidate contained element.
+ * @param parent The candidate containing element.
  * @param threshold Fraction of `child`'s area that must lie inside `parent` (default 0.99).
  */
 export function isContained(child: Element, parent: Element, threshold: number = DEFAULT_CONTAINMENT_THRESHOLD): boolean {
@@ -230,21 +230,21 @@ export function nearestPropagatingAncestor(el: Element): Element | null {
  * target — the user clicks the ancestor either way.
  *
  * Exceptions (never excluded even when contained):
- *   - form elements (`input`, `select`, `textarea`) — they have their own
- *     interaction semantics (typing, selecting) independent of the ancestor
- *   - elements with an explicit `aria-label` — the label is independent
- *     information the LLM should see
- *   - elements with `role` in `{button, link, checkbox, radio, textbox,
- *     combobox, listbox, option, tab, menuitem, switch}` — they're
- *     independently interactive
+ * - form elements (`input`, `select`, `textarea`) — they have their own
+ * interaction semantics (typing, selecting) independent of the ancestor
+ * - elements with an explicit `aria-label` — the label is independent
+ * information the LLM should see
+ * - elements with `role` in `{button, link, checkbox, radio, textbox,
+ * combobox, listbox, option, tab, menuitem, switch}` — they're
+ * independently interactive
  */
 export function shouldExcludeAsContained(child: Element): boolean {
   const tag = child.tagName.toLowerCase();
-  // Form elements are never excluded — they have independent interaction.
+ // Form elements are never excluded — they have independent interaction.
   if (tag === "input" || tag === "select" || tag === "textarea") return false;
-  // Elements with an explicit aria-label carry independent information.
+ // Elements with an explicit aria-label carry independent information.
   if (child.hasAttribute("aria-label")) return false;
-  // Elements with an independent interactive role are not redundant.
+ // Elements with an independent interactive role are not redundant.
   const role = child.getAttribute("role");
   if (role && INTERACTIVE_ROLES.has(role.toLowerCase())) return false;
 
@@ -277,11 +277,11 @@ export const SENSITIVE_AUTOCOMPLETE: readonly string[] = [
 export function isSensitive(el: HTMLElement): boolean {
   const type = (el.getAttribute("type") || "").toLowerCase();
   if (type === "password" || type === "hidden") return true;
-  // The `autocomplete` attribute is a whitespace-separated token list (e.g.
-  // "section-cc cc-number"). Compare tokens rather than doing a raw substring
-  // match, so a benign value whose text merely *contains* a sensitive token as
-  // a substring (e.g. "cc-exp-month" should not match the bare "cc-exp" token
-  // unless it is itself listed) is classified precisely.
+ // The `autocomplete` attribute is a whitespace-separated token list (e.g.
+ // "section-cc cc-number"). Compare tokens rather than doing a raw substring
+ // match, so a benign value whose text merely *contains* a sensitive token as
+ // a substring (e.g. "cc-exp-month" should not match the bare "cc-exp" token
+ // unless it is itself listed) is classified precisely.
   const autocompleteTokens = (el.getAttribute("autocomplete") || "")
     .toLowerCase()
     .split(/\s+/);

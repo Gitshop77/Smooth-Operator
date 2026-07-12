@@ -2,13 +2,20 @@
  * Barrel re-export for the `dom/utils/` subdirectory.
  *
  * Each file in this subdirectory owns a single concern:
- *   - {@link ./classification} — `SKIP_TAGS`, `isInteractive`, the
- *     `PROPAGATING_ELEMENTS` taxonomy + bounding-box containment helpers.
- *   - {@link ./visibility}    — `isLikelyHidden` (cheap pre-check) +
- *     `isVisibleFull` (expensive full check).
- *   - {@link ./tree-walker}   — `directText` text-node helper.
- *   - {@link ./selectors}     — `By` locator taxonomy + `escapeCss` /
- *     `findByLocator`.
+ * - {@link ./classification} — `SKIP_TAGS`, `isInteractive`, and the
+ * `PROPAGATING_ELEMENTS` taxonomy.
+ * NOTE: the bounding-box containment helpers defined in that module
+ * (`containmentRatio`, `isContained`, `nearestPropagatingAncestor`,
+ * `shouldExcludeAsContained`, `isPropagatingElement`,
+ * `DEFAULT_CONTAINMENT_THRESHOLD`) are currently NOT consumed by the
+ * page-state indexed-tree walker, so they perform no runtime
+ * de-duplication today. They are exported for completeness only; see the
+ * owning module for the full picture.
+ * - {@link ./visibility} — `isLikelyHidden` (cheap pre-check) +
+ * `isVisibleFull` (expensive full check).
+ * - {@link ./tree-walker} — `directText` text-node helper.
+ * - {@link ./selectors} — `By` locator taxonomy + `escapeCss` /
+ * `findByLocator`.
  *
  * These were originally a single `dom/dom-utils.ts`; the categorisation
  * keeps each concern in its own file while letting callers `import { ... }

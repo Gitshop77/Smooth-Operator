@@ -15,7 +15,7 @@
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import type { ActionContext } from "../src/lib/agent/tools/handlers/types";
-import { makeState, installLocalStorageStub } from "./helpers";
+import { makeState, installLocalStorageStub, restoreLocalStorageStub } from "./helpers";
 
 // Visual/feedback helpers that schedule timers or need real layout — stub them
 // so the tests assert only on the click/input/hover *side effects*.
@@ -51,6 +51,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   delete (globalThis as Record<string, unknown>).chrome;
   delete (globalThis as Record<string, unknown>).__openCoworkDomainConfig;
+  restoreLocalStorageStub();
 });
 
 /** Build an ActionContext whose `state.selectorMap[index]` is `el`. */
@@ -129,12 +130,12 @@ describe("handleInput", () => {
       ctxFor(input, 1),
       { type: "input", index: 1, text: "%email%" } as never,
     );
-    // The placeholder WAS substituted into the DOM (the field is filled).
+ // The placeholder WAS substituted into the DOM (the field is filled).
     expect(input.value).toBe("real-secret-value@x.com");
-    // substituteSecrets must have been called with the original placeholder.
+ // substituteSecrets must have been called with the original placeholder.
     expect(secrets.substituteSecrets).toHaveBeenCalledWith("%email%");
-    // The real secret value must NOT leak into the result message that the
-    // loop replays into every subsequent LLM prompt / run-history.
+ // The real secret value must NOT leak into the result message that the
+ // loop replays into every subsequent LLM prompt / run-history.
     expect(res.message).not.toContain("real-secret-value@x.com");
     expect(res.message).toContain("REDACTED");
   });

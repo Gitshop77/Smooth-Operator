@@ -83,12 +83,12 @@ export function clearThinkingPanel(): void {
 /**
  * Append a single reasoning entry to the thinking panel.
  *
- * @param kind  Which agent produced this entry ("planner" / "navigator" / "error").
- * @param head  Short header line (e.g. "Step 3 · planner").
- * @param body  The reasoning text. Callers may pass RAW (unescaped) text — this
- *   function HTML-escapes it before interpolating into `innerHTML`, so a
- *   future unescaped LLM/page string can never XSS the side panel. Newlines in
- *   `body` are rendered as `<br>` so multi-line reasoning keeps its structure.
+ * @param kind Which agent produced this entry ("planner" / "navigator" / "error").
+ * @param head Short header line (e.g. "Step 3 · planner").
+ * @param body The reasoning text. Callers may pass RAW (unescaped) text — this
+ * function HTML-escapes it before interpolating into `innerHTML`, so a
+ * future unescaped LLM/page string can never XSS the side panel. Newlines in
+ * `body` are rendered as `<br>` so multi-line reasoning keeps its structure.
  */
 export function appendThinkingEntry(kind: "planner" | "navigator" | "error", head: string, body: string): void {
   if (!thinkingBody) return;
@@ -104,7 +104,7 @@ export function appendThinkingEntry(kind: "planner" | "navigator" | "error", hea
   while (thinkingBody.children.length > MAX_THINKING_ENTRIES) {
     thinkingBody.firstElementChild?.remove();
   }
-  // Auto-scroll to the newest entry (only if the panel is open + user is near bottom).
+ // Auto-scroll to the newest entry (only if the panel is open + user is near bottom).
   if (thinkingPanel?.open) {
     const nearBottom = thinkingBody.scrollHeight - thinkingBody.scrollTop - thinkingBody.clientHeight < 60;
     if (nearBottom) thinkingBody.scrollTop = thinkingBody.scrollHeight;

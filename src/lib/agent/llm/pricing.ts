@@ -2,8 +2,8 @@
  * Pricing — the single source of truth for LLM token costs.
  *
  * This module is imported by:
- *   - the orchestrator (for cost-cap enforcement via `estimateCost`)
- *   - every provider (for per-call `usage.costUsd` reporting)
+ * - the orchestrator (for cost-cap enforcement via `estimateCost`)
+ * - every provider (for per-call `usage.costUsd` reporting)
  *
  * Prices are per 1M tokens (USD). The authoritative source is the LIVE
  * models.dev catalog, hydrated at runtime via {@link refreshPricingFromCatalog}.
@@ -35,11 +35,11 @@ export interface ModelPricing {
   /** Cache write tokens — per 1M tokens, USD (optional). */
   readonly cacheWrite?: number;
   /**
-   * True when this pricing came from the conservative fallback for an
-   * uncatalogued model (the model was NOT found in the live catalog override).
-   * Consumers may use this to ensure cost caps still trip for unknown models —
-   * an uncatalogued model is NEVER billed as free.
-   */
+ * True when this pricing came from the conservative fallback for an
+ * uncatalogued model (the model was NOT found in the live catalog override).
+ * Consumers may use this to ensure cost caps still trip for unknown models —
+ * an uncatalogued model is NEVER billed as free.
+ */
   readonly uncatalogued?: boolean;
 }
 
@@ -97,12 +97,29 @@ let pricingLoading = false;
 /** Most recent {@link refreshPricingFromCatalog} error (null = last refresh succeeded). */
 let lastPricingError: Error | null = null;
 
+/** Timestamp (ms) of the last fire-and-forget refresh trigger, used for cooldown. */
+let lastRefreshAttempt = 0;
+
+/**
+ * Minimum gap between fire-and-forget refresh triggers. After a failed refresh
+ * `pricingOverride` stays empty and `pricingLoading` is reset to `false`, so a
+ * naive trigger would spawn a new background `fetch` on *every* subsequent
+ * `estimateCost` (one per LLM call). The cooldown bounds that to at most one
+ * trigger per window, preventing network/connection exhaustion when the catalog
+ * host is unreachable .
+ */
+const REFRESH_COOLDOWN_MS = 30_000;
+
+/** Bounds on the in-memory pricing memo / warned-model set (long-lived SW, F-15). */
+const MAX_PRICING_CACHE = 256;
+const MAX_WARNED_MODELS = 128;
+
 /**
  * Substring (case-insensitive) lookup over a pricing table.
  *
  * Resolution strategy to avoid order-dependent over-billing:
- *   1. An EXACT id match wins immediately (the common, correct case).
- *   2. Otherwise the LONGEST matching key wins, not the first one encountered.
+ * 1. An EXACT id match wins immediately (the common, correct case).
+ * 2. Otherwise the LONGEST matching key wins, not the first one encountered.
  *
  * The original implementation returned the first substring match, which over-
  * bills when a shorter model id is a prefix/substring of a longer one and
@@ -111,14 +128,34 @@ let lastPricingError: Error | null = null;
  * whenever "gpt-4o" appeared before "gpt-4o-mini" in the table. Preferring the
  * longest key makes the most-specific catalog entry win.
  */
-function lookupPricing(table: Record<string, ModelPricing>, model: string): ModelPricing | undefined {
+function lookupPricing(
+  table: Record<string, ModelPricing>,
+  model: string,
+  providerId?: string,
+): ModelPricing | undefined {
   const m = model.toLowerCase();
+  const prefix = providerId ? providerId.toLowerCase() : undefined;
+ // 1. When the caller knows its provider, a provider-prefixed key
+ // (`openai/gpt-4o`) disambiguates same-named models across providers and
+ // wins over any bare-id entry (which may belong to a different provider).
+  if (prefix && table[`${prefix}/${m}`]) return table[`${prefix}/${m}`];
+ // 2. An EXACT bare id match wins immediately (the common, correct case).
+  if (table[m]) return table[m];
+ // 3. Otherwise the LONGEST matching key wins, preferring the caller's provider
+ // prefix so a same-named model from a different provider isn't billed at the
+ // wrong rate. The original implementation returned the first substring match,
+ // which over-bills when a shorter model id is a prefix of a longer one and
+ // happens to be enumerated earlier.
   let best: { key: string; rate: ModelPricing } | undefined;
   for (const [key, rate] of Object.entries(table)) {
-    if (m === key) return rate; // exact id match wins immediately
-    if (m.includes(key) && (!best || key.length > best.key.length)) {
-      best = { key, rate };
+    if (!m.includes(key)) continue;
+    if (best) {
+      const keyIsPreferred = prefix !== undefined && key.startsWith(`${prefix}/`);
+      const bestIsPreferred = prefix !== undefined && best.key.startsWith(`${prefix}/`);
+      const better = key.length > best.key.length || (keyIsPreferred && !bestIsPreferred);
+      if (!better) continue;
     }
+    best = { key, rate };
   }
   return best?.rate;
 }
@@ -127,36 +164,40 @@ function lookupPricing(table: Record<string, ModelPricing>, model: string): Mode
  * Convert a models.dev-shaped catalog into a lowercased pricing table.
  * Only models that declare a `cost` block contribute a rate.
  *
- * Defensive by design: the catalog is treated as `unknown` at the trust
- * boundary (e.g. an unvalidated custom `COWORK_MODEL_CATALOG_URL` response),
- * so any entry with a non-string `id` or non-numeric `cost.input/.output` is
- * skipped rather than allowed to corrupt the whole table. This keeps the
- * function safe regardless of which caller feeds it.
+ * Both call sites (`refreshPricingFromCatalog`) run `isValidCatalog` first, so
+ * `cost` is already shape/range-validated. This function additionally defends
+ * itself: any entry with a non-string `id`, non-numeric `cost.input/.output`,
+ * or a negative rate is skipped rather than allowed to corrupt the whole table
+ * (negative rates would defeat the cost cap, see `estimateCost`).
+ *
+ * Each model is keyed by its bare id (legacy behavior) AND by a
+ * provider-prefixed id (`<providerId>/<modelId>`) so a caller that knows its
+ * provider can disambiguate same-named models across providers (see
+ * `lookupPricing`).
  */
 function convertCatalog(catalog: Catalog): Record<string, ModelPricing> {
   const table: Record<string, ModelPricing> = {};
-  const providers = catalog as Record<string, unknown>;
-  for (const provider of Object.values(providers)) {
-    if (!provider || typeof provider !== "object") continue;
-    const p = provider as { models?: unknown };
-    if (!p.models || typeof p.models !== "object") continue;
-    for (const model of Object.values(p.models as Record<string, unknown>)) {
-      if (!model || typeof model !== "object") continue;
-      const m = model as { id?: unknown; cost?: unknown };
-      if (typeof m.id !== "string") continue;
-      const cost = m.cost as {
-        input?: unknown;
-        output?: unknown;
-        cache_read?: unknown;
-        cache_write?: unknown;
-      } | undefined;
+  for (const [providerId, provider] of Object.entries(catalog)) {
+    if (!provider?.models) continue;
+    for (const model of Object.values(provider.models)) {
+      if (!model || typeof model.id !== "string") continue;
+      const cost = model.cost;
       if (!cost || typeof cost.input !== "number" || typeof cost.output !== "number") continue;
-      table[m.id.toLowerCase()] = {
+ // Reject negative rates even though `isValidCatalog` already did: this
+ // keeps the function safe if a future caller feeds it unvalidated data,
+ // and prevents negative costs from subtracting from accumulated spend.
+      if (cost.input < 0 || cost.output < 0) continue;
+      if (cost.cache_read !== undefined && (typeof cost.cache_read !== "number" || cost.cache_read < 0)) continue;
+      if (cost.cache_write !== undefined && (typeof cost.cache_write !== "number" || cost.cache_write < 0)) continue;
+      const id = model.id.toLowerCase();
+      const entry: ModelPricing = {
         in: cost.input,
         out: cost.output,
         cacheRead: typeof cost.cache_read === "number" ? cost.cache_read : undefined,
         cacheWrite: typeof cost.cache_write === "number" ? cost.cache_write : undefined,
       };
+      table[id] = entry;
+      table[`${providerId.toLowerCase()}/${id}`] = entry;
     }
   }
   return table;
@@ -170,12 +211,12 @@ function convertCatalog(catalog: Catalog): Record<string, ModelPricing> {
  * the failure reason is recorded (see {@link lastPricingError}) and warned in
  * non-production, so a misconfigured `COWORK_MODEL_CATALOG_URL` is visible to
  * operators instead of being silently swallowed.
- *   - If the `COWORK_MODEL_CATALOG_URL` environment variable is set, fetch +
- *     parse THAT url directly (a models.dev-compatible catalog JSON). This is
- *     the supported override knob for pointing cost accounting at a self-hosted
- *     or pinned catalog; omit it to use the live models.dev catalog.
- *   - Otherwise, fall back to {@link fetchCatalog} (the models.dev catalog,
- *     which itself has caching + offline fallback).
+ * - If the `COWORK_MODEL_CATALOG_URL` environment variable is set, fetch +
+ * parse THAT url directly (a models.dev-compatible catalog JSON). This is
+ * the supported override knob for pointing cost accounting at a self-hosted
+ * or pinned catalog; omit it to use the live models.dev catalog.
+ * - Otherwise, fall back to {@link fetchCatalog} (the models.dev catalog,
+ * which itself has caching + offline fallback).
  *
  * The fetched table is MERGED onto the existing override (so a previously
  * loaded override is preserved). Call this EXPLICITLY at app startup to wire
@@ -189,55 +230,58 @@ export async function refreshPricingFromCatalog(): Promise<void> {
     const url = typeof process !== "undefined" ? process.env?.COWORK_MODEL_CATALOG_URL : undefined;
     let table: Record<string, ModelPricing> = {};
     if (url) {
-      // Custom catalog URL override (e.g. a self-hosted models.dev mirror).
-      //
-      // TRUST ASSUMPTION: whoever controls `COWORK_MODEL_CATALOG_URL` (an
-      // operator-injected env var, by design) fully controls the rates that
-      // feed cost-cap enforcement. This is an intentional operator knob — a
-      // hostile/compromised mirror could set prices to `0` to defeat the cap,
-      // just as a self-hosted mirror legitimately reprices private models. We
-      // deliberately do NOT floor these rates (that would override operator
-      // intent); we only validate shape and surface failures via
-      // `lastPricingError` + a non-production console.warn so misconfiguration
-      // is visible rather than silent.
+ // Custom catalog URL override (e.g. a self-hosted models.dev mirror).
+ //
+ // TRUST ASSUMPTION: whoever controls `COWORK_MODEL_CATALOG_URL` (an
+ // operator-injected env var, by design) fully controls the rates that
+ // feed cost-cap enforcement. This is an intentional operator knob — a
+ // hostile/compromised mirror could set prices to `0` to defeat the cap,
+ // just as a self-hosted mirror legitimately reprices private models. We
+ // therefore do NOT floor these rates (that would override operator
+ // intent), but we DO reject strictly-NEGATIVE rates: a negative cost
+ // would subtract from accumulated spend and silently defeat the cap, and
+ // no legitimate repricing produces a negative number. Shape/range
+ // validation happens via `isValidCatalog` (which also rejects negatives);
+ // failures surface via `lastPricingError` + a non-production console.warn
+ // so misconfiguration is visible rather than silent.
       const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
       if (!res.ok) throw new Error(`catalog ${res.status}`);
       const raw = await res.json();
-      // Trust-boundary guard: the custom-URL path bypasses the validation that
-      // fetchCatalog() performs on the default path, so validate the shape here
-      // using the SAME guard catalog.ts uses (single shared rule, no drift). A
-      // malformed/compromised response would otherwise flow into convertCatalog
-      // and feed non-numeric rates to estimateCost (producing NaN that silently
-      // defeats the cost cap). Drop the response rather than merge it.
+ // Trust-boundary guard: the custom-URL path bypasses the validation that
+ // fetchCatalog() performs on the default path, so validate the shape here
+ // using the SAME guard catalog.ts uses (single shared rule, no drift). A
+ // malformed/compromised response would otherwise flow into convertCatalog
+ // and feed non-numeric rates to estimateCost (producing NaN that silently
+ // defeats the cost cap). Drop the response rather than merge it.
       if (!isValidCatalog(raw)) {
         throw new Error("custom catalog failed shape validation");
       }
       table = convertCatalog(raw);
     } else {
-      // Default: the live models.dev catalog (with its own cache + offline fallback).
+ // Default: the live models.dev catalog (with its own cache + offline fallback).
       const { fetchCatalog } = await import("./catalog");
-      // Pass `force = true` so we bypass catalog.ts's module-level memoryCache
-      // and always re-read the LIVE catalog on refresh. refreshPricingFromCatalog
-      // is the deliberate hydration entry point (called at app startup / on an
-      // explicit pricing refresh), so it must reflect the current catalog rather
-      // than a stale in-memory snapshot from a previous fetch. The cost here is
-      // one extra network fetch at refresh time; the graceful offline/stale-cache
-      // fallback inside fetchCatalog still applies if the network is down.
+ // Pass `force = true` so we bypass catalog.ts's module-level memoryCache
+ // and always re-read the LIVE catalog on refresh. refreshPricingFromCatalog
+ // is the deliberate hydration entry point (called at app startup / on an
+ // explicit pricing refresh), so it must reflect the current catalog rather
+ // than a stale in-memory snapshot from a previous fetch. The cost here is
+ // one extra network fetch at refresh time; the graceful offline/stale-cache
+ // fallback inside fetchCatalog still applies if the network is down.
       const catalog = await fetchCatalog(true);
       table = convertCatalog(catalog);
     }
-    // Merge so a prior override (e.g. from a previous explicit call) survives.
+ // Merge so a prior override (e.g. from a previous explicit call) survives.
     pricingOverride = { ...pricingOverride, ...table };
-    // Invalidate the pricing lookup memo so the freshly-fetched catalog rates
-    // take effect immediately for subsequent cost estimates.
+ // Invalidate the pricing lookup memo so the freshly-fetched catalog rates
+ // take effect immediately for subsequent cost estimates.
     pricingCache.clear();
     lastPricingError = null;
   } catch (err) {
-    // Keep the current override (or empty) if the catalog is unreachable — the
-    // conservative default remains the fallback so offline still works. Record
-    // the error so operators can detect a misconfigured COWORK_MODEL_CATALOG_URL
-    // (an unreachable/hostile URL would otherwise silently leave every model on
-    // the expensive DEFAULT_UNKNOWN_MODEL_PRICE, or worse, on NaN rates).
+ // Keep the current override (or empty) if the catalog is unreachable — the
+ // conservative default remains the fallback so offline still works. Record
+ // the error so operators can detect a misconfigured COWORK_MODEL_CATALOG_URL
+ // (an unreachable/hostile URL would otherwise silently leave every model on
+ // the expensive DEFAULT_UNKNOWN_MODEL_PRICE, or worse, on NaN rates).
     lastPricingError = err instanceof Error ? err : new Error(String(err));
     if (
       typeof process !== "undefined" &&
@@ -250,46 +294,69 @@ export async function refreshPricingFromCatalog(): Promise<void> {
 }
 
 /**
+ * Store a result in the pricing memo, evicting the oldest entry when the memo
+ * exceeds {@link MAX_PRICING_CACHE} so it can't grow without bound in a
+ * long-lived service worker .
+ */
+function setPricingCache(key: string, value: ModelPricing): void {
+  if (pricingCache.size >= MAX_PRICING_CACHE) {
+    const oldest = pricingCache.keys().next().value;
+    if (oldest !== undefined) pricingCache.delete(oldest);
+  }
+  pricingCache.set(key, value);
+}
+
+/**
  * Look up the pricing for a model by substring match (case-insensitive).
  *
  * Resolution order: (1) live catalog override, (2) a conservative expensive
  * default for unknown models. A model NOT found in the catalog is NEVER billed
- * as free — it returns {@link CONSERVATIVE_DEFAULT_PRICING} flagged
+ * free — it returns {@link CONSERVATIVE_DEFAULT_PRICING} flagged
  * `uncatalogued: true` so the cost cap still trips. If the catalog has not yet
- * been loaded and no prior load is in flight, a fire-and-forget
- * {@link refreshPricingFromCatalog} is kicked off so later calls warm; the
- * current call still returns the conservative default.
+ * been loaded and no prior load is in flight (and we're outside the failure
+ * cooldown), a fire-and-forget {@link refreshPricingFromCatalog} is kicked off
+ * so later calls warm; the current call still returns the conservative default.
  */
-export function getPricingForModel(model: string): ModelPricing {
-  // Return a memoized result when available (hot cost path — estimateCost runs
-  // on every LLM call). The memo is invalidated on every catalog refresh.
-  const cached = pricingCache.get(model);
+export function getPricingForModel(model: string, providerId?: string): ModelPricing {
+ // Return a memoized result when available (hot cost path — estimateCost runs
+ // on every LLM call). The memo is invalidated on every catalog refresh. The
+ // cache key incorporates the provider when known so same-named models from
+ // different providers don't collide.
+  const cacheKey = providerId ? `${providerId}::${model}` : model;
+  const cached = pricingCache.get(cacheKey);
   if (cached) return cached;
 
-  const override = lookupPricing(pricingOverride, model);
+  const override = lookupPricing(pricingOverride, model, providerId);
   if (override) {
-    pricingCache.set(model, override);
+    setPricingCache(cacheKey, override);
     return override;
   }
 
-  // Catalog not yet populated for this model. If we've never loaded the catalog
-  // and no load is currently in flight, kick off a fire-and-forget refresh so
-  // subsequent calls use live rates. We still return the conservative default
-  // now (cost cap still trips).
-  if (Object.keys(pricingOverride).length === 0 && !pricingLoading) {
+ // Catalog not yet populated for this model. If we've never loaded the catalog
+ // and no load is currently in flight (and we're outside the failure cooldown),
+ // kick off a fire-and-forget refresh so subsequent calls use live rates. We
+ // still return the conservative default now (cost cap still trips).
+  if (
+    Object.keys(pricingOverride).length === 0 &&
+    !pricingLoading &&
+    Date.now() - lastRefreshAttempt > REFRESH_COOLDOWN_MS
+  ) {
     pricingLoading = true;
+    lastRefreshAttempt = Date.now();
     void refreshPricingFromCatalog()
       .finally(() => {
         pricingLoading = false;
       });
   }
 
-  // Uncatalogued model — never free. Return the conservative default so the
-  // cost cap still trips. Warn (once per distinct model id) so operators
-  // can spot unpriced models and add them to the live catalog override for
-  // accurate accounting.
+ // Uncatalogued model — never free. Return the conservative default so the
+ // cost cap still trips. Warn (once per distinct model id) so operators
+ // can spot unpriced models and add them to the live catalog override for
+ // accurate accounting. The warned-set is bounded so a very long run against
+ // many distinct unpriced models can't grow it without limit.
   const result = { ...DEFAULT_UNKNOWN_MODEL_PRICE };
   if (!warnedUncataloguedModels.has(model)) {
+    if (warnedUncataloguedModels.size >= MAX_WARNED_MODELS) warnedUncataloguedModels.clear();
     warnedUncataloguedModels.add(model);
     console.warn(
       `[pricing] No catalogued price for model "${model}". Falling back to ` +
@@ -298,7 +365,7 @@ export function getPricingForModel(model: string): ModelPricing {
         `The cost cap still applies, but consider adding this model to the catalog.`
     );
   }
-  pricingCache.set(model, result);
+  setPricingCache(cacheKey, result);
   return result;
 }
 
@@ -330,6 +397,9 @@ export function getPricingForModel(model: string): ModelPricing {
  *
  * The 6th parameter `cachedWriteInputTokens` and the 7th `completionTokens`
  * are OPTIONAL so all existing callers continue to compile and behave as before.
+ * An 8th optional `providerId` argument, when supplied, lets the pricing lookup
+ * prefer that provider's rate for same-named models that appear under multiple
+ * providers (disambiguating cost-cap accounting across providers).
  */
 export function estimateCost(
   model: string,
@@ -338,12 +408,28 @@ export function estimateCost(
   reasoningTokens: number = 0,
   cachedInputTokens: number = 0,
   cachedWriteInputTokens: number = 0,
-  completionTokens?: number
+  completionTokens?: number,
+  providerId?: string
 ): number {
-  const rate = getPricingForModel(model);
+  const rate = getPricingForModel(model, providerId);
 
-  // Cache writes are disjoint from (and typically exceed) cache reads. The
-  // fresh/cached split: reads first, then writes, then fresh input.
+ // Token-count guards: malformed usage (NaN/Infinity/negative token counts)
+ // would otherwise flow straight into the summation and silently defeat the
+ // cost cap — a NaN count makes the whole estimate NaN (cap can't trip), and a
+ // negative count subtracts from accumulated spend. Clamp every count to a
+ // finite, non-negative integer BEFORE any arithmetic. `completionTokens` is
+ // sanitized only when supplied so the "omitted" branch below still applies.
+  const tokenCount = (v: number | undefined): number =>
+    typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
+  tokensIn = tokenCount(tokensIn);
+  tokensOut = tokenCount(tokensOut);
+  reasoningTokens = tokenCount(reasoningTokens);
+  cachedInputTokens = tokenCount(cachedInputTokens);
+  cachedWriteInputTokens = tokenCount(cachedWriteInputTokens);
+  if (completionTokens !== undefined) completionTokens = tokenCount(completionTokens);
+
+ // Cache writes are disjoint from (and typically exceed) cache reads. The
+ // fresh/cached split: reads first, then writes, then fresh input.
   const cachedRead = Math.min(cachedInputTokens, tokensIn);
   const cachedWrite = Math.min(
     cachedWriteInputTokens,
@@ -351,18 +437,18 @@ export function estimateCost(
   );
   const freshInput = Math.max(0, tokensIn - cachedRead - cachedWrite);
 
-  // Visible (non-reasoning) output tokens billed at `out`.
-  // When the caller separately reports completionTokens (reasoning tokens live
-  // OUTSIDE tokensOut), use that directly; otherwise assume the OpenAI-style
-  // contract that tokensOut INCLUDES reasoning tokens.
+ // Visible (non-reasoning) output tokens billed at `out`.
+ // When the caller separately reports completionTokens (reasoning tokens live
+ // OUTSIDE tokensOut), use that directly; otherwise assume the OpenAI-style
+ // contract that tokensOut INCLUDES reasoning tokens.
   const visibleOut =
     completionTokens !== undefined
       ? Math.max(0, completionTokens)
       : Math.max(0, tokensOut - reasoningTokens);
-  // Finite-rate guards: a non-numeric rate (e.g. from a malformed custom
-  // catalog that slipped past validation) would make the whole estimate NaN,
-  // which silently defeats the cost cap. Fall back to the conservative default
-  // rates for any non-finite term so the cap still trips.
+ // Finite-rate guards: a non-numeric rate (e.g. from a malformed custom
+ // catalog that slipped past validation) would make the whole estimate NaN,
+ // which silently defeats the cost cap. Fall back to the conservative default
+ // rates for any non-finite term so the cap still trips.
   const def = DEFAULT_UNKNOWN_MODEL_PRICE;
   const finite = (v: number | undefined, fallback: number): number =>
     typeof v === "number" && Number.isFinite(v) ? v : fallback;

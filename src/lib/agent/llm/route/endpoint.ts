@@ -26,8 +26,6 @@ export const path = <Body = unknown>(p: string, opts?: { baseURL?: string; query
   return base;
 };
 
-export const merge = <Body>(base: Endpoint<Body>, patch: EndpointPatch<Body>): Endpoint<Body> => mergeEndpoint(base, patch);
-
 function mergeEndpoint<Body>(base: Endpoint<Body>, patch: EndpointPatch<Body>): Endpoint<Body> {
   const merged: Endpoint<Body> = {
     baseURL: patch.baseURL ?? base.baseURL,
@@ -44,15 +42,15 @@ export const buildURL = <Body>(endpoint: Endpoint<Body>, body: Body): string => 
   const p = typeof endpoint.path === "function" ? endpoint.path(body) : endpoint.path;
 
   if (!base) {
-    // No base URL: preserve the (relative) path exactly, but merge any
-    // endpoint-level query params into a query `p` may already carry, so we
-    // never emit a malformed double-"?…?…" (e.g. "?v=1?k=2").
+ // No base URL: preserve the (relative) path exactly, but merge any
+ // endpoint-level query params into a query `p` may already carry, so we
+ // never emit a malformed double-"?…?…" (e.g. "?v=1?k=2").
     return mergeQueryIntoPath(p, endpoint.query);
   }
 
-  // Absolute base: the URL constructor already folds any query present in `p`
-  // into the result, so we merge `endpoint.query` into it instead of appending
-  // a second "?", which would produce a malformed double-"?…?…" string.
+ // Absolute base: the URL constructor already folds any query present in `p`
+ // into the result, so we merge `endpoint.query` into it instead of appending
+ // a second "?", which would produce a malformed double-"?…?…" string.
   const url = new URL(p, base);
   for (const [k, v] of Object.entries(endpoint.query)) {
     url.searchParams.set(k, v);

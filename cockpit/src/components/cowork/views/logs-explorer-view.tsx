@@ -221,8 +221,8 @@ function LogRow({ entry }: LogRowProps) {
 // ─── Main view ────────────────────────────────────────────────────────────────
 
 export function LogsExplorerView() {
-  // Backend feed is not wired yet — this stays empty until a GET endpoint exists.
-  // A `useLogs()` hook (like the other createQueryHook list hooks) would populate it.
+ // Backend feed is not wired yet — this stays empty until a GET endpoint exists.
+ // A `useLogs()` hook (like the other createQueryHook list hooks) would populate it.
   const logs: CoworkLogEntry[] = [];
 
   const [query, setQuery] = React.useState("");
@@ -266,15 +266,15 @@ export function LogsExplorerView() {
     });
   }, [logs, levels, source, agent, rangeIdx, query]);
 
-  // Streaming tail: keep the newest entry in view when enabled (no-op without data).
+ // Streaming tail: keep the newest entry in view when enabled (no-op without data).
   React.useEffect(() => {
     if (tail && tailRef.current) {
       tailRef.current.scrollTop = tailRef.current.scrollHeight;
     }
   }, [filtered, tail]);
 
-  // Return to the first page whenever the filtered set changes (new filter or
-  // new data), so a stale "load more" offset never applies to a different list.
+ // Return to the first page whenever the filtered set changes (new filter or
+ // new data), so a stale "load more" offset never applies to a different list.
   React.useEffect(() => {
     setVisibleCount(LOG_PAGE_SIZE);
   }, [filtered]);

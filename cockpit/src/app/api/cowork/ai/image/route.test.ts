@@ -3,25 +3,43 @@
  *
  * POST proxies to the cowork-events image-generation mini-service. We mock the
  * upstream `fetch` (no real network) and assert:
- *   - a well-formed prompt is forwarded and the upstream JSON is returned (200);
- *   - a non-OK upstream surfaces a sane 500 error envelope;
- *   - a missing/empty/oversized prompt is rejected with a 400 (badRequest);
- *   - an invalid size is rejected with a 400;
- *   - GET returns route metadata.
+ * - a well-formed prompt is forwarded and the upstream JSON is returned (200);
+ * - a non-OK upstream surfaces a sane 500 error envelope;
+ * - a missing/empty/oversized prompt is rejected with a 400 (badRequest);
+ * - an invalid size is rejected with a 400;
+ * - GET returns route metadata.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-process.env.COWORK_EVENT_TOKEN ||= 'test-image-token';
+// `getCoworkEventsToken()` prefers COWORK_UI_TOKEN and only falls back to
+// COWORK_EVENT_TOKEN. Delete the UI token so the service-to-service token below
+// is the one actually forwarded (otherwise a stray COWORK_UI_TOKEN in the
+// environment would shadow it and break the `X-Cowork-Token` assertion).
+delete process.env.COWORK_UI_TOKEN;
+process.env.COWORK_EVENT_TOKEN = 'test-image-token';
 
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
 
 import { POST, GET } from '@/app/api/cowork/ai/image/route';
 
-function jsonReq(body: unknown): any {
+// The route reads the body via `bodyJson(req)` (which consumes `req.body` as a
+// ReadableStream, not `req.json()`) and reads `req.headers.get('x-request-id')`
+// both inside the handler and as the `withRouteError` correlation id — so the
+// mock request MUST expose a real `body` stream and a `headers.get`.
+function jsonReq(body: unknown, headers: Record<string, string> = {}): any {
+  const text = JSON.stringify(body);
+  const lower: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) lower[k.toLowerCase()] = v;
   return {
-    json: async () => body,
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(text));
+        controller.close();
+      },
+    }),
+    headers: { get: (name: string) => lower[name.toLowerCase()] ?? null },
     nextUrl: { searchParams: new URLSearchParams() },
   };
 }
@@ -45,7 +63,7 @@ describe('POST /api/cowork/ai/image', () => {
     const body = await res.json();
     expect(body.ok).toBe(true);
     expect(body.base64).toBe('AAAA');
-    // The upstream fetch must have been called with the server-to-server token.
+ // The upstream fetch must have been called with the server-to-server token.
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toContain('/image');
@@ -72,8 +90,8 @@ describe('POST /api/cowork/ai/image', () => {
   });
 
   it('returns a 500 error envelope on a non-OK upstream', async () => {
-    // A long upstream detail (>200 chars) to prove the route does NOT echo it
-    // verbatim — it is truncated via `.slice(0, 200)` in the serverError.
+ // A long upstream detail (>200 chars) to prove the route does NOT echo it
+ // verbatim — it is truncated via `.slice(0, 200)` in the serverError.
     const longDetail = 'upstream image service failure detail ' + 'x'.repeat(500);
     fetchMock.mockResolvedValueOnce({
       ok: false,
@@ -84,8 +102,8 @@ describe('POST /api/cowork/ai/image', () => {
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body.error).toContain('503');
-    // The error envelope is bounded — the full upstream detail is truncated,
-    // not echoed whole to the client.
+ // The error envelope is bounded — the full upstream detail is truncated,
+ // not echoed whole to the client.
     expect(body.error.length).toBeLessThan(longDetail.length);
     expect(body.error).not.toContain('x'.repeat(500));
   });

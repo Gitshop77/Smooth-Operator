@@ -76,12 +76,12 @@ export interface BrowserState {
   /** Optional AX tree (semantic accessibility tree) for vision/semantic models. */
   axTree?: string;
   /** Device pixel ratio of the tab (for screenshot/vision coordinate scaling).
-   *  Sent by content.ts; typed here so call sites don't need `as unknown as`
-   *  casts. */
+ * Sent by content.ts; typed here so call sites don't need `as unknown as`
+ * casts. */
   devicePixelRatio?: number;
   /** Element bounding rects (for Set-of-Marks screenshot annotation).
-   *  Each entry has an element index + a nested `rect` with CSS-pixel coords.
-   *  Sent by content.ts; used by the screenshot annotator (scaled by devicePixelRatio). */
+ * Each entry has an element index + a nested `rect` with CSS-pixel coords.
+ * Sent by content.ts; used by the screenshot annotator (scaled by devicePixelRatio). */
   elementRects?: Array<{ index: number; rect: { x: number; y: number; width: number; height: number } }>;
 }
 
@@ -241,10 +241,10 @@ export interface AgentStepRequest {
   /** Provider id override (e.g. "ollama", "openai-compat:gpt-4o"). */
   provider?: string;
   /** Loop-warning text from the previous step's loop detector (prepended to
-   *  the next nav request so the navigator sees the repetition nudge). */
+ * the next nav request so the navigator sees the repetition nudge). */
   loopWarning?: string;
   /** Compacted-memory block from history compaction (replaces older history
-   *  items with a summarized block when the threshold fires). */
+ * items with a summarized block when the threshold fires). */
   compactedMemory?: string;
 }
 
@@ -256,10 +256,10 @@ export interface TokenUsage {
   /** Reasoning/thinking tokens (billed separately for reasoning models). */
   reasoningTokens?: number;
   /** Cached input tokens (Anthropic cache_read+cache_creation, OpenAI cached_tokens).
-   *  Surfaced so cost-cap enforcement accounts for prompt-cache discounts. */
+ * Surfaced so cost-cap enforcement accounts for prompt-cache discounts. */
   cachedInputTokens?: number;
   /** Pre-computed cost in USD (from provider-bridge). When present, callers
-   *  SHOULD use this instead of recomputing via estimateCost. */
+ * SHOULD use this instead of recomputing via estimateCost. */
   costUsd?: number;
 }
 
@@ -308,40 +308,41 @@ export interface AgentConfig {
   /** Optional USD cost cap — aborts the run if exceeded. */
   costCapUsd?: number;
   /** Whether to run the judge LLM after the planner reports task success.
-   * Default true. When true, the judge double-checks the agent's self-reported
-   * success against the action history; if it disagrees, the loop continues. */
+ * Default true. When true, the judge double-checks the agent's self-reported
+ * success against the action history; if it disagrees, the loop continues. */
   enableJudge: boolean;
   /**
-   * Whether to enable early-stop detection. When true, the orchestrator
-   * calls {@link earlyStop} after each step and stops the run if the agent
-   * is clearly stuck (N consecutive parse failures OR N consecutive
-   * equivalent actions). Default `false` — existing behavior is preserved
-   * when the flag is omitted.
-   */
+ * Whether to enable early-stop detection. When true, the orchestrator
+ * calls {@link earlyStop} after each step and stops the run if the agent
+ * is clearly stuck (N consecutive parse failures OR N consecutive
+ * equivalent actions). Default `false` — existing behavior is preserved
+ * when the flag is omitted.
+ */
   enableEarlyStop?: boolean;
   /**
-   * Optional thresholds for the early-stop detector. When omitted, the
-   * defaults (`parsingFailure: 5`, `repeatingAction: 3`) are used.
-   */
+ * Optional thresholds for the early-stop detector. When omitted, the
+ * defaults (`parsingFailure: 5`, `repeatingAction: 3`) are used.
+ */
   earlyStopThresholds?: { parsingFailure: number; repeatingAction: number };
   /**
-   * Whether to run the HTML-summarizer pre-pass before each navigator
-   * call. When true, the orchestrator filters the page DOM down to
-   * task-relevant elements before sending it to the navigator — this can
-   * reduce prompt size 10× on dense pages (forms, tables, dashboards).
-   * Default `false`.
-   */
+ * Whether to run the HTML-summarizer pre-pass before each navigator
+ * call. When true, the orchestrator filters the page DOM down to
+ * task-relevant elements before sending it to the navigator — this can
+ * reduce prompt size 10× on dense pages (forms, tables, dashboards).
+ * Default `true` (see `DEFAULT_CONFIG` — the summarizer is the single
+ * biggest per-action prompt-size lever).
+ */
   enableHtmlSummarizer?: boolean;
   /**
-   * Optional expected-outcomes spec. When set, the orchestrator + judge
-   * run the deterministic evaluators (string / URL / HTML-content) as a
-   * fast-path before the LLM judge. If every evaluator passes, the run is
-   * finalized as success without spending tokens on the LLM judge. If any
-   * evaluator fails, the LLM judge still runs (the evaluators are a
-   * fast-PASS path, not a fast-FAIL path — a single failed evaluator
-   * doesn't override the agent's self-reported success, since the
-   * evaluator config may be stale or overly strict).
-   */
+ * Optional expected-outcomes spec. When set, the orchestrator + judge
+ * run the deterministic evaluators (string / URL / HTML-content) as a
+ * fast-path before the LLM judge. If every evaluator passes, the run is
+ * finalized as success without spending tokens on the LLM judge. If any
+ * evaluator fails, the LLM judge still runs (the evaluators are a
+ * fast-PASS path, not a fast-FAIL path — a single failed evaluator
+ * doesn't override the agent's self-reported success, since the
+ * evaluator config may be stale or overly strict).
+ */
   expectedOutcomes?: ExpectedOutcomes;
 }
 
@@ -374,8 +375,13 @@ export const DEFAULT_CONFIG: AgentConfig = {
   compactionStepInterval: 20,
   compactionCharThreshold: 30_000,
   enableJudge: true,
-  // ON by default — the HTML summarizer is the single biggest per-action cost
-  // lever (the raw DOM is the largest part of the navigator request). See
-  // `enableHtmlSummarizer` in config/schema.ts.
+ // Explicitly false by default so the documented "Default false" for
+ // `enableEarlyStop` matches the actual resolved config (finding: the doc
+ // claimed a default but the value was never set in DEFAULT_CONFIG, leaving
+ // it implicitly `undefined`/falsy).
+  enableEarlyStop: false,
+ // ON by default — the HTML summarizer is the single biggest per-action cost
+ // lever (the raw DOM is the largest part of the navigator request). See
+ // `enableHtmlSummarizer` in config/schema.ts.
   enableHtmlSummarizer: true,
 };

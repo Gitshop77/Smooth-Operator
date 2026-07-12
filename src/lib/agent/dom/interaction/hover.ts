@@ -33,7 +33,6 @@ const CURSOR_MOVE_TIMEOUT_MS = 220;
 const CURSOR_ELEMENT_ID = "open-cowork-phantom-cursor";
 
 let cursorEl: HTMLDivElement | null = null;
-let isActive = false;
 /**
  * The `finish` callback of the currently in-flight move, or `null` when no move
  * is pending. Tracking a single active move lets a new `movePhantomCursor` cancel
@@ -45,10 +44,9 @@ let activeMoveFinish: (() => void) | null = null;
 /**
  * Move the phantom cursor to a viewport-relative `(x, y)` position.
  * Resolves once the CSS transition completes (or after a safety timeout).
- * No-op if the cursor isn't active or the tab is hidden.
+ * No-op if the tab is hidden.
  */
 export function movePhantomCursor(x: number, y: number): Promise<void> {
-  if (!isActive) return Promise.resolve();
   if (document.hidden) return Promise.resolve();
 
   if (!cursorEl) {
@@ -72,18 +70,18 @@ export function movePhantomCursor(x: number, y: number): Promise<void> {
 
   cursorEl.style.transform = `translate3d(${x}px, ${y}px, 0)`;
 
-  // Cancel any in-flight move before starting a new one. Without this, rapid
-  // sequential moves stack a `transitionend` listener per call, and an earlier
-  // move's promise would only resolve when a *later* transition ends (its own
-  // transform was overwritten before it could finish). Cancelling resolves the
-  // prior promise promptly and drops its listener.
+ // Cancel any in-flight move before starting a new one. Without this, rapid
+ // sequential moves stack a `transitionend` listener per call, and an earlier
+ // move's promise would only resolve when a *later* transition ends (its own
+ // transform was overwritten before it could finish). Cancelling resolves the
+ // prior promise promptly and drops its listener.
   if (activeMoveFinish) {
     activeMoveFinish();
   }
 
-  // Wait for the transition to complete (with safety timeout).
-  // `cursorEl` is non-null here (we just set its transform above), but TS
-  // can't narrow across the Promise boundary, so capture a local reference.
+ // Wait for the transition to complete (with safety timeout).
+ // `cursorEl` is non-null here (we just set its transform above), but TS
+ // can't narrow across the Promise boundary, so capture a local reference.
   const target = cursorEl;
   return new Promise<void>((resolve) => {
     if (!target) {
@@ -91,9 +89,13 @@ export function movePhantomCursor(x: number, y: number): Promise<void> {
       return;
     }
     let done = false;
+ // Captured so `finish` can always reclaim the safety timer, even when the
+ // transition ends before the timeout fires (or vice-versa). Previously the
+ // handle was never stored, leaving a dangling one-shot timer per move.
     const finish = (): void => {
       if (done) return;
       done = true;
+      clearTimeout(safetyTimer);
       target.removeEventListener("transitionend", finish);
       if (activeMoveFinish === finish) {
         activeMoveFinish = null;
@@ -102,7 +104,7 @@ export function movePhantomCursor(x: number, y: number): Promise<void> {
     };
     activeMoveFinish = finish;
     target.addEventListener("transitionend", finish, { once: true });
-    setTimeout(finish, CURSOR_MOVE_TIMEOUT_MS);
+    const safetyTimer = setTimeout(finish, CURSOR_MOVE_TIMEOUT_MS);
   });
 }
 
@@ -117,22 +119,4 @@ export async function moveCursorToElement(el: HTMLElement): Promise<{ x: number;
   const y = rect.top + rect.height / 2;
   await movePhantomCursor(x, y);
   return { x, y };
-}
-
-/** Enable the phantom cursor (subsequent `movePhantomCursor` calls will animate). */
-export function startPhantomCursor(): void {
-  isActive = true;
-}
-
-/** Disable the phantom cursor and remove it from the DOM. */
-export function stopPhantomCursor(): void {
-  isActive = false;
-  if (activeMoveFinish) {
-    activeMoveFinish();
-    activeMoveFinish = null;
-  }
-  if (cursorEl) {
-    cursorEl.remove();
-    cursorEl = null;
-  }
 }

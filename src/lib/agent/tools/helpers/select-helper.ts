@@ -3,14 +3,13 @@
  *
  * A small helper that wraps an `HTMLSelectElement` and provides robust
  * option-selection semantics:
- *   - selectByVisibleText / selectByValue / selectByIndex with multi-select
- *     awareness (the helper iterates ALL matching options for `multiple`
- *     selects, only the first for single-selects)
- *   - disabled-option guard (throws {@link ElementNotSelectableError})
- *   - optgroup awareness (collects options from `<optgroup>` as well as
- *     direct `<option>` children)
- *   - deselectAll (used internally by single-select reset)
- *   - getOptions / getFirstSelectedOption accessors
+ * - selectByVisibleText / selectByValue / selectByIndex with multi-select
+ * awareness (the helper iterates ALL matching options for `multiple`
+ * selects, only the first for single-selects)
+ * - disabled-option guard (throws {@link ElementNotSelectableError})
+ * - optgroup awareness (collects options from `<optgroup>` as well as
+ * direct `<option>` children)
+ * - getOptions / getFirstSelectedOption accessors
  *
  * Mirrors the standard `Select` helper class from the source taxonomy,
  * adapted to operate on a live `HTMLSelectElement` (no WebElement promises).
@@ -31,26 +30,26 @@ export class Select {
   private readonly multiple: boolean;
 
   constructor(el: HTMLSelectElement) {
-    // Defensive guard: the typed signature already guarantees `el` is a
-    // `<select>` at compile time, but a caller could pass a non-`<select>`
-    // element through a cast. Fail fast with a clear error instead of letting
-    // confusing `querySelectorAll`/property behaviour surface later.
+ // Defensive guard: the typed signature already guarantees `el` is a
+ // `<select>` at compile time, but a caller could pass a non-`<select>`
+ // element through a cast. Fail fast with a clear error instead of letting
+ // confusing `querySelectorAll`/property behaviour surface later.
     if (el.tagName !== "SELECT") {
       throw new Error(
         `Select expected a <select> element, got <${(el.tagName || "unknown").toLowerCase()}>`,
       );
     }
     this.element = el;
-    // The `multiple` attribute's presence (any value, including "false"
-    // string, since HTML treats its presence as truthy) determines
-    // multi-select semantics. Use `hasAttribute` for spec-compliance.
+ // The `multiple` attribute's presence (any value, including "false"
+ // string, since HTML treats its presence as truthy) determines
+ // multi-select semantics. Use `hasAttribute` for spec-compliance.
     this.multiple = el.hasAttribute("multiple");
   }
 
   /**
-   * All `<option>` elements under this `<select>`, including those nested
-   * inside `<optgroup>` elements. Order matches DOM order.
-   */
+ * All `<option>` elements under this `<select>`, including those nested
+ * inside `<optgroup>` elements. Order matches DOM order.
+ */
   getOptions(): HTMLOptionElement[] {
     return Array.from(this.element.querySelectorAll("option"));
   }
@@ -61,20 +60,20 @@ export class Select {
   }
 
   /**
-   * Select an option by its visible text. Exact match first; if none, a
-   * case-insensitive substring match. For multi-selects, all matching
-   * options are selected; for single-select, only the first match.
-   *
-   * @throws {ElementNotSelectableError} if the matched option is `disabled`.
-   * @throws {NoSuchElementException}    if no option matches the text.
-   */
+ * Select an option by its visible text. Exact match first; if none, a
+ * case-insensitive substring match. For multi-selects, all matching
+ * options are selected; for single-select, only the first match.
+ *
+ * @throws {ElementNotSelectableError} if the matched option is `disabled`.
+ * @throws {NoSuchElementException} if no option matches the text.
+ */
   selectByVisibleText(text: string): void {
     const want = String(text).trim();
     if (want === "") {
-      // An empty/whitespace-only argument is almost always a missing-field
-      // bug (e.g. an LLM tool call with an omitted field). Treat it as an
-      // invalid argument rather than silently matching every option via the
-      // substring fallback, where `"".includes("")` is true for all text.
+ // An empty/whitespace-only argument is almost always a missing-field
+ // bug (e.g. an LLM tool call with an omitted field). Treat it as an
+ // invalid argument rather than silently matching every option via the
+ // substring fallback, where `"".includes("")` is true for all text.
       throw new NoSuchElementException(
         "selectByVisibleText requires a non-empty visible text argument",
       );
@@ -82,7 +81,7 @@ export class Select {
     const opts = this.getOptions();
     let matched = opts.filter((o) => (o.textContent || "").trim() === want);
     if (matched.length === 0) {
-      // Substring fallback (case-insensitive).
+ // Substring fallback (case-insensitive).
       const lower = want.toLowerCase();
       matched = opts.filter((o) => (o.textContent || "").trim().toLowerCase().includes(lower));
     }
@@ -92,7 +91,7 @@ export class Select {
       );
     }
     if (!this.multiple) {
-      // Single-select: clear all silently, then select + dispatch ONE change.
+ // Single-select: clear all silently, then select + dispatch ONE change.
       for (const o of this.getOptions()) o.selected = false;
       this.setSelected(matched[0]);
       return;
@@ -101,12 +100,12 @@ export class Select {
   }
 
   /**
-   * Select an option by its `value` attribute. For multi-selects, all
-   * matching options are selected; for single-select, only the first.
-   *
-   * @throws {ElementNotSelectableError} if the matched option is `disabled`.
-   * @throws {NoSuchElementException}    if no option has the value.
-   */
+ * Select an option by its `value` attribute. For multi-selects, all
+ * matching options are selected; for single-select, only the first.
+ *
+ * @throws {ElementNotSelectableError} if the matched option is `disabled`.
+ * @throws {NoSuchElementException} if no option has the value.
+ */
   selectByValue(value: string): void {
     const want = String(value);
     const matched = this.getOptions().filter((o) => o.value === want);
@@ -124,14 +123,25 @@ export class Select {
   }
 
   /**
-   * Select an option by its 0-based `index` property (matches the
-   * `HTMLOptionElement.index` semantics — the option's position among all
-   * options in the select, including those inside optgroups).
-   *
-   * @throws {ElementNotSelectableError} if the option is `disabled`.
-   * @throws {NoSuchElementException}    if the index is out of range.
-   */
+ * Select an option by its 0-based `index` property (matches the
+ * `HTMLOptionElement.index` semantics — the option's position among all
+ * options in the select, including those inside optgroups).
+ *
+ * @throws {UnsupportedOperationError} if `index` is not an integer or is negative.
+ * @throws {ElementNotSelectableError} if the option is `disabled`.
+ * @throws {NoSuchElementException} if the index is out of range.
+ */
   selectByIndex(index: number): void {
+    if (!Number.isInteger(index)) {
+ // The signature is `index: number`, so floats (`1.5`), `NaN`, and
+ // `Infinity` are type-legal but meaningless for an option position.
+ // Reject them at the boundary instead of letting `opts[index]` resolve
+ // to `undefined` and crashing deep inside `setSelected` with an opaque
+ // `TypeError: Cannot read properties of undefined`.
+      throw new UnsupportedOperationError(
+        `select index must be an integer (got ${index})`,
+      );
+    }
     if (index < 0) {
       throw new UnsupportedOperationError(
         `select index must be >= 0 (got ${index})`,
@@ -150,25 +160,11 @@ export class Select {
   }
 
   /**
-   * Clear all selected options. No-op on single-selects that don't allow
-   * deselection (per the HTML spec, single-selects must always have one
-   * option selected — calling `deselectAll` on a single-select clears
-   * `.selected` on every option, but the browser will re-select the first
-   * option on the next paint).
-   */
-  deselectAll(): void {
-    for (const o of this.getOptions()) {
-      o.selected = false;
-    }
-    this.element.dispatchEvent(new Event("change", { bubbles: true }));
-  }
-
-  /**
-   * Mark `option` as selected. Throws {@link ElementNotSelectableError} if
-   * the option is `disabled` — mirrors the standard guard from the source
-   * taxonomy. Fires a `change` event on the `<select>` so framework listeners
-   * (React, Vue, etc.) pick up the new value.
-   */
+ * Mark `option` as selected. Throws {@link ElementNotSelectableError} if
+ * the option is `disabled` — mirrors the standard guard from the source
+ * taxonomy. Fires a `change` event on the `<select>` so framework listeners
+ * (React, Vue, etc.) pick up the new value.
+ */
   private setSelected(option: HTMLOptionElement): void {
     if (option.disabled) {
       throw new ElementNotSelectableError(
@@ -176,28 +172,28 @@ export class Select {
       );
     }
     option.selected = true;
-    // Sync the select's value too — setting `option.selected` does this for
-    // single-selects, but for multi-selects the `value` property reflects
-    // only the first selected option. Setting it explicitly avoids surprises
-    // when callers read `select.value` after a multi-select operation.
+ // Sync the select's value too — setting `option.selected` does this for
+ // single-selects, but for multi-selects the `value` property reflects
+ // only the first selected option. Setting it explicitly avoids surprises
+ // when callers read `select.value` after a multi-select operation.
     if (!this.multiple) this.element.value = option.value;
     this.element.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
   /**
-   * Select several options at once (multi-select path). Every matched option
-   * is marked `selected` first, and a SINGLE `change` event is dispatched
-   * afterwards — mirroring the single-select batch behaviour and avoiding N
-   * redundant events (one per option) for what is logically one user action
-   * (React/Vue `onChange` listeners otherwise see intermediate states).
-   *
-   * @throws {ElementNotSelectableError} if any matched option is `disabled`.
-   */
+ * Select several options at once (multi-select path). Every matched option
+ * is marked `selected` first, and a SINGLE `change` event is dispatched
+ * afterwards — mirroring the single-select batch behaviour and avoiding N
+ * redundant events (one per option) for what is logically one user action
+ * (React/Vue `onChange` listeners otherwise see intermediate states).
+ *
+ * @throws {ElementNotSelectableError} if any matched option is `disabled`.
+ */
   private selectMultiple(options: HTMLOptionElement[]): void {
-    // Validate ALL options BEFORE mutating any (atomicity): a disabled option
-    // encountered after some options were already marked selected would
-    // otherwise leave the `<select>` in a partially-applied, inconsistent
-    // state. Check first, then select in a second pass.
+ // Validate ALL options BEFORE mutating any (atomicity): a disabled option
+ // encountered after some options were already marked selected would
+ // otherwise leave the `<select>` in a partially-applied, inconsistent
+ // state. Check first, then select in a second pass.
     for (const o of options) {
       if (o.disabled) {
         throw new ElementNotSelectableError(

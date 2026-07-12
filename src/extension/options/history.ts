@@ -9,11 +9,11 @@
  * P3: native `confirm()`/`alert()` replaced by the styled modal.
  *
  * Security notes:
- *  - Imported JSON is fully user/attacker-supplied, so every entry is validated
- *    against the `RunHistoryEntry` shape before it is stored or rendered
- *    (findings: unbounded file read + weak schema validation).
- *  - All interpolated run fields pass through the shared `escapeHtml` helper
- *    (the duplicate `escapeText` was removed in favour of it).
+ * - Imported JSON is fully user/attacker-supplied, so every entry is validated
+ * against the `RunHistoryEntry` shape before it is stored or rendered
+ * (findings: unbounded file read + weak schema validation).
+ * - All interpolated run fields pass through the shared `escapeHtml` helper
+ * (the duplicate `escapeText` was removed in favour of it).
  */
 
 import { $, escapeHtml } from "@/extension/shared";
@@ -56,18 +56,30 @@ function isRunHistoryEntry(value: unknown): value is RunHistoryEntry {
     if (typeof e.result !== "object") return false;
     const res = e.result as Record<string, unknown>;
     if (typeof res.success !== "boolean") return false;
+ // `RunRecord.result` is `{ success: boolean; text: string } | null`, so a
+ // present result must carry a `text` (consumers read `result.text`). A
+ // hand-authored import omitting `text` would otherwise persist and yield
+ // `undefined` downstream — reconcile the guard with the stored contract.
+    if (typeof res.text !== "string") return false;
   }
-  // `transcript` is free-form; accept any value (including absence).
+ // `transcript` is free-form; accept any value (including absence).
   return true;
 }
 
 // ─── Run history ───────────────────────────────────────────────────────────
 
 async function readRunHistory(): Promise<RunHistoryEntry[]> {
-  const res = await chrome.storage.local.get(STORAGE_KEYS.runHistory);
-  const runs = (res[STORAGE_KEYS.runHistory] as unknown) ?? [];
-  // Defensive: stored data should already be valid, but never trust it.
-  return Array.isArray(runs) ? runs.filter(isRunHistoryEntry) : [];
+ // Promise-mode storage APIs reject on failure; `chrome.runtime.lastError` is
+ // only set in callback mode, so catch the rejection to fail-safe with [].
+  try {
+    const res = await chrome.storage.local.get(STORAGE_KEYS.runHistory);
+    const runs = (res[STORAGE_KEYS.runHistory] as unknown) ?? [];
+ // Defensive: stored data should already be valid, but never trust it.
+    return Array.isArray(runs) ? runs.filter(isRunHistoryEntry) : [];
+  } catch (err) {
+    console.error("[history] failed to read run history:", err);
+    return [];
+  }
 }
 
 /** Open the in-page transcript modal for a single run. */
@@ -76,8 +88,8 @@ function showTranscript(run: RunHistoryEntry): void {
   body.className = "transcript-wrap";
   const pre = document.createElement("pre");
   pre.className = "transcript";
-  // textContent (not innerHTML) — the run data is first-party but this avoids
-  // any accidental markup injection from imported JSON.
+ // textContent (not innerHTML) — the run data is first-party but this avoids
+ // any accidental markup injection from imported JSON.
   pre.textContent = JSON.stringify(run, null, 2);
   body.appendChild(pre);
   void openModal({
@@ -100,8 +112,8 @@ export async function renderHistory(): Promise<void> {
   for (const r of runs) {
     const item = document.createElement("div");
     item.className = "history-item";
-    // Safe formatting: stored/typed as numbers, but coerce defensively so a
-    // malformed row renders as "—" rather than NaN/Invalid Date.
+ // Safe formatting: stored/typed as numbers, but coerce defensively so a
+ // malformed row renders as "—" rather than NaN/Invalid Date.
     const date = Number.isFinite(r.startedAt) ? new Date(r.startedAt).toLocaleString() : "—";
     const duration =
       Number.isFinite(r.endedAt) && Number.isFinite(r.startedAt)
@@ -128,7 +140,16 @@ document.getElementById("clearHistory")?.addEventListener("click", async () => {
     danger: true,
   });
   if (!ok) return;
-  await chrome.storage.local.remove(STORAGE_KEYS.runHistory);
+ // Promise-mode storage rejects on failure (`chrome.runtime.lastError` is
+ // callback-only), so catch the rejection to surface the error.
+  try {
+    await chrome.storage.local.remove(STORAGE_KEYS.runHistory);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[history] failed to clear run history:", message);
+    await alertModal({ title: "Clear failed", message: `Storage error: ${message}` });
+    return;
+  }
   await renderHistory();
   showSaved();
 });
@@ -153,8 +174,8 @@ $("importHistory")?.addEventListener("click", () => {
 ($("importHistoryFile") as HTMLInputElement)?.addEventListener("change", async (e) => {
   const file = (e.target as HTMLInputElement).files?.[0];
   if (!file) return;
-  // Bound the upload size before reading it into memory (finding: unbounded
-  // file read before file.text()/JSON.parse).
+ // Bound the upload size before reading it into memory (finding: unbounded
+ // file read before file.text()/JSON.parse).
   if (file.size > MAX_IMPORT_BYTES) {
     await alertModal({
       title: "File too large",
@@ -170,18 +191,54 @@ $("importHistory")?.addEventListener("click", () => {
       await alertModal({ title: "Invalid file", message: "Invalid file: expected an array of runs." });
       return;
     }
-    // Validate every entry against the RunHistoryEntry shape; reject
-    // non-conforming rows instead of storing garbage.
-    const valid = imported.filter(isRunHistoryEntry);
+ // Validate every entry against the RunHistoryEntry shape; reject
+ // non-conforming rows instead of storing garbage. Also bound each entry's
+ // serialized size so a single multi-MB transcript can't blow the
+ // ~5 MB chrome.storage.local quota (finding: import does not bound
+ // per-entry size). Oversized entries are dropped (and counted as skipped)
+ // rather than aborting the whole import.
+    const MAX_ENTRY_BYTES = 2 * 1024 * 1024; // 2 MiB per entry
+    const valid = imported.filter((e) => {
+      if (!isRunHistoryEntry(e)) return false;
+      try {
+        return JSON.stringify(e).length <= MAX_ENTRY_BYTES;
+      } catch {
+        return false;
+      }
+    });
     const existing = await (await import("@/lib/agent/run-history")).loadRuns();
-    const merged = [...valid, ...existing].slice(0, 50);
-    await chrome.storage.local.set({ open_cowork_run_history: merged });
+ // Keep the 50 most-recent runs across BOTH the import and existing history
+ // (sorted by startedAt desc) so importing a full file never silently wipes
+ // prior runs (finding: import discards all existing history when valid>=50).
+    const merged = [...valid, ...existing]
+      .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))
+      .slice(0, 50);
+ // Detect whether any pre-existing run was dropped by the cap so we can warn
+ // the user instead of silently losing data.
+    const existingKept = merged.filter((r) => existing.includes(r as (typeof existing)[number])).length;
+    const existingDropped = existing.length - existingKept;
+ // Surface storage failures (e.g. quota exceeded) rather than reporting
+ // success. Promise-mode `set` rejects on failure (`chrome.runtime.lastError`
+ // is callback-only), so catch the rejection instead of guarding lastError.
+    try {
+      await chrome.storage.local.set({ open_cowork_run_history: merged });
+    } catch (err) {
+      await alertModal({
+        title: "Import failed",
+        message: `Storage error: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
     await renderHistory();
     showSaved();
     const skipped = imported.length - valid.length;
     await alertModal({
       title: "Import complete",
-      message: `Imported ${valid.length} run(s).${skipped > 0 ? ` Skipped ${skipped} malformed/invalid entr${skipped === 1 ? "y" : "ies"}.` : ""}`,
+      message: `Imported ${valid.length} run(s).` +
+        (skipped > 0 ? ` Skipped ${skipped} malformed/invalid entr${skipped === 1 ? "y" : "ies"}.` : "") +
+        (existingDropped > 0
+          ? ` ${existingDropped} older stored run(s) dropped to stay within the 50-run limit.`
+          : ""),
     });
   } catch (err) {
     await alertModal({

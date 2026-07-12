@@ -10,6 +10,12 @@
 
 import type { AgentMode } from "@/lib/agent/modes";
 import type { UrlPolicyConfig } from "@/lib/agent/security";
+// `extension/background` depends on `lib/agent` (correct layering: the lib
+// never imports `extension/background/*`). A static import here is safe — there
+// is no cycle. (Previously this used a dynamic import under the mistaken belief
+// that `scheduled-tasks.ts` imported this module; that layering inversion was
+// removed and `scheduled-tasks.ts` now calls `chrome.power` directly.)
+import { listScheduledTasks } from "@/lib/agent/scheduled-tasks";
 
 // ─── Run state (persisted to chrome.storage.session for MV3 resilience) ─────
 
@@ -39,22 +45,22 @@ export const RUN_STATE_KEY = "open_cowork_run_state";
 let writeChain: Promise<unknown> = Promise.resolve();
 
 export async function saveRunState(state: Partial<RunState>): Promise<void> {
-  // Serialize all writes through a single promise chain so the read-modify-write
-  // is atomic per call (finding: saveRunState read-modify-write race can clobber
-  // currentTabId). Without this, a `saveRunState({ step })` racing a
-  // `saveRunState(runState)` (full object incl. currentTabId) can overwrite the
-  // other's field, e.g. reverting `currentTabId` to a stale tab. Serializing
-  // guarantees each write observes the result of the prior one.
+ // Serialize all writes through a single promise chain so the read-modify-write
+ // is atomic per call (finding: saveRunState read-modify-write race can clobber
+ // currentTabId). Without this, a `saveRunState({ step })` racing a
+ // `saveRunState(runState)` (full object incl. currentTabId) can overwrite the
+ // other's field, e.g. reverting `currentTabId` to a stale tab. Serializing
+ // guarantees each write observes the result of the prior one.
   const run = writeChain.then(async () => {
     const cur = (await getRunState()) ?? ({} as RunState);
     const next: RunState = { ...cur, ...state };
-    // Write-safe abort merge: never trust only an equality check on this read.
-    // OR-ing the stored + incoming values makes the STOP flag durable against a
-    // concurrent step-update (or any other) partial write.
+ // Write-safe abort merge: never trust only an equality check on this read.
+ // OR-ing the stored + incoming values makes the STOP flag durable against a
+ // concurrent step-update (or any other) partial write.
     next.abortRequested = Boolean(cur.abortRequested) || Boolean(state.abortRequested);
     await chrome.storage.session.set({ [RUN_STATE_KEY]: next });
   });
-  // Keep the chain alive even if a write rejects, so later writes aren't blocked.
+ // Keep the chain alive even if a write rejects, so later writes aren't blocked.
   writeChain = run.catch(() => {});
   return run;
 }
@@ -67,7 +73,17 @@ export async function getRunState(): Promise<RunState | null> {
 
 /** Remove the persisted run state (called at the end of every run). */
 export async function clearRunState(): Promise<void> {
-  await chrome.storage.session.remove(RUN_STATE_KEY);
+ // Serialize teardown through the SAME write chain as `saveRunState` so a late
+ // `saveRunState` write can't interleave and re-persist a (partial) run state
+ // after teardown (finding: saveRunState writes not serialized against
+ // clearRunState). A `saveRunState` enqueued before this will run first; a
+ // `saveRunState` after teardown won't occur within the same run.
+  const run = writeChain.then(async () => {
+    await chrome.storage.session.remove(RUN_STATE_KEY);
+  });
+ // Keep the chain alive even if removal rejects, so later writes aren't blocked.
+  writeChain = run.catch(() => {});
+  return run;
 }
 
 // ─── Keepalive alarm (MV3 SW lifecycle workaround) ──────────────────────────
@@ -105,14 +121,14 @@ export async function loadAndSetDomainConfig(): Promise<UrlPolicyConfig> {
     (globalThis as { __openCoworkDomainConfig?: UrlPolicyConfig }).__openCoworkDomainConfig = config;
     return config;
   } catch (e) {
-    // On storage failure, clear the cached config to an empty policy (no
-    // allow/blocklist) so any synchronous reader (e.g. the executor's
-    // getDomainConfig()) sees an unambiguous "no policy" rather than a stale
-    // allow/blocklist from a previous successful load (finding: loadAndSetDomainConfig
-    // leaves a stale allow/blocklist cached on storage failure). We re-throw so
-    // the caller (startRun) can decide how to handle the failure — it currently
-    // aborts the run rather than proceeding with an empty policy, so this does
-    // NOT silently degrade to "allow all".
+ // On storage failure, clear the cached config to an empty policy (no
+ // allow/blocklist) so any synchronous reader (e.g. the executor's
+ // getDomainConfig()) sees an unambiguous "no policy" rather than a stale
+ // allow/blocklist from a previous successful load (finding: loadAndSetDomainConfig
+ // leaves a stale allow/blocklist cached on storage failure). We re-throw so
+ // the caller (startRun) can decide how to handle the failure — it currently
+ // aborts the run rather than proceeding with an empty policy, so this does
+ // NOT silently degrade to "allow all".
     (globalThis as { __openCoworkDomainConfig?: UrlPolicyConfig }).__openCoworkDomainConfig = {};
     console.error("[Open Cowork] Failed to load domain config — cached policy cleared to empty:", e);
     throw e;
@@ -154,19 +170,18 @@ export function getDomainConfig(): UrlPolicyConfig {
  * startup). Callers that JUST armed an alarm will redundantly re-confirm the
  * check — that's harmless.
  *
- * Uses a dynamic import of `@/lib/agent/scheduled-tasks` to avoid a circular
- * dependency (scheduled-tasks.ts dynamically imports this module's
- * `maybeReleaseKeepAwake`).
+ * `listScheduledTasks` is a static import from `@/lib/agent/scheduled-tasks`
+ * (see top-of-file). The layering is `extension/background` → `lib/agent`,
+ * which is the correct direction; there is no circular dependency to avoid.
  */
 export async function requestKeepAwake(): Promise<void> {
   try {
-    const { listScheduledTasks } = await import("@/lib/agent/scheduled-tasks");
     const tasks = await listScheduledTasks();
     if (!tasks.some((t) => t.enabled)) return; // no pending scheduled tasks
     chrome.power.requestKeepAwake("system");
   } catch {
     /* `chrome.power` unavailable (no `power` permission) or non-extension
-     * context — non-fatal, scheduled-task reliability degrades gracefully. */
+ * context — non-fatal, scheduled-task reliability degrades gracefully. */
   }
 }
 
@@ -184,12 +199,12 @@ export async function requestKeepAwake(): Promise<void> {
  * fires and miss subsequent alarms entirely (alarms only fire while Chrome is
  * running, and Chrome can't run if the OS is asleep).
  *
- * Uses a dynamic import of `@/lib/agent/scheduled-tasks` to avoid a circular
- * dependency (scheduled-tasks.ts dynamically imports this module).
+ * `listScheduledTasks` is a static import from `@/lib/agent/scheduled-tasks`
+ * (see top-of-file). The layering is `extension/background` → `lib/agent`,
+ * which is the correct direction; there is no circular dependency to avoid.
  */
 export async function maybeReleaseKeepAwake(): Promise<void> {
   try {
-    const { listScheduledTasks } = await import("@/lib/agent/scheduled-tasks");
     const tasks = await listScheduledTasks();
     if (tasks.some((t) => t.enabled)) return; // other scheduled tasks still pending
     chrome.power.releaseKeepAwake();

@@ -10,10 +10,10 @@
  * observe-state}.ts`, and the extractor tests.
  *
  * All historically-exported symbols are re-exported here:
- *   - `extractBrowserState`, `resetDomBaseline`, `getSelectorMap`,
- *     `isVisible` (from `./extraction/page-state`)
- *   - `buildAttrs`, `hashElement` (from `./extraction/element-info`)
- *   - `isInteractive` (from `./utils/classification`)
+ * - `extractBrowserState`, `resetDomBaseline`, `getSelectorMap`,
+ * `isVisible` (from `./extraction/page-state`)
+ * - `buildAttrs`, `hashElement` (from `./extraction/element-info`)
+ * - `isInteractive` (from `./utils/classification`)
  *
  * Module-load side effect preserved: importing this shim triggers
  * `./extraction/page-state` to evaluate, which calls

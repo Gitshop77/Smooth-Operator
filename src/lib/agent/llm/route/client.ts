@@ -151,9 +151,9 @@ function makeFromTransport<Body, Prepared, FrameType, EventType, State>(
           break;
         }
       }
-      // If the protocol's `step` never emitted a `finish` event (truncated/
-      // aborted streams, or Gemini whose step never emits finish), synthesize
-      // one so `generate()` receives the accumulated usage.
+ // If the protocol's `step` never emitted a `finish` event (truncated/
+ // aborted streams, or Gemini whose step never emits finish), synthesize
+ // one so `generate()` receives the accumulated usage.
       if (!emittedFinish) {
         yield { type: "finish", usage: (state as { usage?: unknown }).usage };
       }
@@ -172,8 +172,17 @@ export async function generate(
 ): Promise<LLMResponse> {
   const route = routeRegistry.get(request.model.routeId);
   if (!route) {
+ // This is almost always a module-load-order problem, not a provider/auth
+ // failure: the route for this model was never imported in the current
+ // execution context (service worker vs. sidepanel vs. offscreen doc). Route
+ // registration is a side effect of importing the provider's route
+ // definitions, so the caller must ensure the matching provider module
+ // (e.g. `openai`, `anthropic`) has been imported here before calling
+ // `generate`. It is NOT a 4xx/5xx from the model provider.
     throw new Error(
-      `No route registered for model "${request.model.provider}/${request.model.id}" (routeId "${request.model.routeId}"). The route definitions must be imported in this execution context.`
+      `No route registered for model "${request.model.provider}/${request.model.id}" (routeId "${request.model.routeId}"). ` +
+        `This means the matching provider/route module was not imported in this execution context — ` +
+        `import the provider's route definitions before generating, rather than treating this as a provider error.`
     );
   }
   const body = await route.body.from(request);

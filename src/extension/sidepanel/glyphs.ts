@@ -53,8 +53,8 @@ const PATHS: Record<GlyphName, string> = {
 /**
  * Return an inline-SVG string for the named glyph.
  *
- * @param name  Glyph identifier (see {@link GlyphName}).
- * @param size  Square pixel size (default 14 — fits the log-row `.ic` column).
+ * @param name Glyph identifier (see {@link GlyphName}).
+ * @param size Square pixel size (default 14 — fits the log-row `.ic` column).
  */
 export function glyph(name: GlyphName, size = 14): string {
   return (

@@ -33,13 +33,13 @@ const TQ = {
 /**
  * The X-Cowork-Token sent on every cockpit REST fetch. It is taken ONLY from
  * the browser-facing `NEXT_PUBLIC_COWORK_UI_TOKEN`. We accept no fallback:
- *  - Dropping the legacy `NEXT_PUBLIC_COWORK_EVENT_TOKEN` fallback removes the
- *    S2S-leak path: that name shadows the service-to-service
- *    `COWORK_EVENT_TOKEN`, and mirroring its value would embed the secret in
- *    public JS.
- *  - Dropping the `dev-token` literal avoids shipping a hard-coded credential in
- *    the client bundle and avoids silently sending a token the server rejects in
- *    production (broken-but-not-obvious).
+ * - Dropping the legacy `NEXT_PUBLIC_COWORK_EVENT_TOKEN` fallback removes the
+ * S2S-leak path: that name shadows the service-to-service
+ * `COWORK_EVENT_TOKEN`, and mirroring its value would embed the secret in
+ * public JS.
+ * - Dropping the `dev-token` literal avoids shipping a hard-coded credential in
+ * the client bundle and avoids silently sending a token the server rejects in
+ * production (broken-but-not-obvious).
  * This MUST match the server-side `COWORK_UI_TOKEN` resolved by middleware.ts.
  * The `NEXT_PUBLIC_` prefix exposes this to the browser, so it must NEVER equal
  * the service-to-service `COWORK_EVENT_TOKEN` on any untrusted network.
@@ -77,12 +77,12 @@ const JSON_HEADERS: HeadersInit = {
  *
  * This is the single choke-point for ALL cockpit API reads (REST list hooks
  * via `getJson`, and the chat POST via `useSendChat`). It enforces:
- *   1. HTTP success (`r.ok`) — otherwise throw with the status + a body
- *      snippet so failures are actionable rather than opaque.
- *   2. `Content-Type: application/json` — an HTML error page or gateway
- *      response is rejected rather than blindly `JSON.parse`'d.
- *   3. A non-`{ error }` envelope — a 200 that carries `{ "error": "..." }`
- *      is treated as a failure so an outage is never masked as "no data".
+ * 1. HTTP success (`r.ok`) — otherwise throw with the status + a body
+ * snippet so failures are actionable rather than opaque.
+ * 2. `Content-Type: application/json` — an HTML error page or gateway
+ * response is rejected rather than blindly `JSON.parse`'d.
+ * 3. A non-`{ error }` envelope — a 200 that carries `{ "error": "..." }`
+ * is treated as a failure so an outage is never masked as "no data".
  *
  * Note: this asserts the *top-level* response shape only. Per-element
  * contract validation (e.g. zod on `Sample*`) is intentionally left to the
@@ -104,8 +104,8 @@ async function parseApiResponse<T>(r: Response, url: string): Promise<T> {
   } catch {
     throw new Error(`Invalid JSON body from ${url}`);
   }
-  // A 200 response carrying an `{ error }` envelope is still a failure — do NOT
-  // coerce it into an empty list (which would mask an outage as "no data").
+ // A 200 response carrying an `{ error }` envelope is still a failure — do NOT
+ // coerce it into an empty list (which would mask an outage as "no data").
   if (
     data &&
     typeof data === "object" &&
@@ -119,8 +119,8 @@ async function parseApiResponse<T>(r: Response, url: string): Promise<T> {
 
 async function getJson<T>(url: string): Promise<T> {
   const r = await fetch(url, { headers: JSON_HEADERS });
-  // Delegate all validation + parsing to the shared helper so every cockpit
-  // read applies the same content-type + error-envelope guards.
+ // Delegate all validation + parsing to the shared helper so every cockpit
+ // read applies the same content-type + error-envelope guards.
   return parseApiResponse<T>(r, url);
 }
 
@@ -163,16 +163,16 @@ function pickList<T>(payload: unknown, respKey?: string): T[] {
  * `/api/cowork/<path>` endpoint. Collapses ~14 near-identical hand-written
  * hooks (each 8 lines) into one-liners below.
  *
- * @param key      TanStack query key segments after the shared "cowork" root.
- * @param url      Relative API URL (e.g. "/api/cowork/tabs").
- * @param respKey  Optional named key in the JSON response (e.g. "tabs"). When
- *                 provided, the hook requires `data[respKey]` to be a present
- *                 array so a route returning `{ tabs: [...] }` is decoded
- *                 deterministically (instead of relying on `pickList`'s
- *                 "first array wins" scan, which can pick the wrong field if a
- *                 route ever adds a second array — or mask a degraded response
- *                 as an empty list). If the key is absent or not an array, the
- *                 query enters `isError` rather than silently showing "no data".
+ * @param key TanStack query key segments after the shared "cowork" root.
+ * @param url Relative API URL (e.g. "/api/cowork/tabs").
+ * @param respKey Optional named key in the JSON response (e.g. "tabs"). When
+ * provided, the hook requires `data[respKey]` to be a present
+ * array so a route returning `{ tabs: [...] }` is decoded
+ * deterministically (instead of relying on `pickList`'s
+ * "first array wins" scan, which can pick the wrong field if a
+ * route ever adds a second array — or mask a degraded response
+ * as an empty list). If the key is absent or not an array, the
+ * query enters `isError` rather than silently showing "no data".
  */
 function createQueryHook<T>(key: string[], url: string, respKey?: string) {
   return () => useQuery<T[]>({
@@ -240,31 +240,31 @@ export function useSendChat() {
         },
         body: JSON.stringify({
           messages,
-          // Generate a unique sessionId per request so each chat session
-          // gets its own socket.io room on the mini-service. Previously this
-          // was `payload.from ?? "ui"` — which collapsed every dashboard chat
-          // session into room "user", so two browser tabs would receive each
-          // other's streamed tokens.
+ // Generate a unique sessionId per request so each chat session
+ // gets its own socket.io room on the mini-service. Previously this
+ // was `payload.from ?? "ui"` — which collapsed every dashboard chat
+ // session into room "user", so two browser tabs would receive each
+ // other's streamed tokens.
           sessionId: `ui-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         }),
-        // Thread the AbortController signal through so the caller (chat-view)
-        // can cancel an in-flight chat request — e.g. when the user clicks Clear
-        // while the LLM is still streaming. If the signal aborts, `fetch` rejects
-        // with an AbortError and TanStack Query surfaces it via `onError`.
+ // Thread the AbortController signal through so the caller (chat-view)
+ // can cancel an in-flight chat request — e.g. when the user clicks Clear
+ // while the LLM is still streaming. If the signal aborts, `fetch` rejects
+ // with an AbortError and TanStack Query surfaces it via `onError`.
         signal: payload.signal,
       });
-      // Reuse the shared API-response validator so the chat POST gets the same
-      // content-type + `{ error }` envelope guards as the REST list hooks
-      // (instead of blindly `r.json()`-ing an HTML error page or a 200
-      // `{ "error": ... }` payload, which would crash the chat renderer).
-      // The `any` return preserves the caller's `data.content` / `data.error`
-      // access in chat-view.tsx without a schema change here.
+ // Reuse the shared API-response validator so the chat POST gets the same
+ // content-type + `{ error }` envelope guards as the REST list hooks
+ // (instead of blindly `r.json()`-ing an HTML error page or a 200
+ // `{ "error": ... }` payload, which would crash the chat renderer).
+ // The `any` return preserves the caller's `data.content` / `data.error`
+ // access in chat-view.tsx without a schema change here.
       return parseApiResponse<any>(r, "/api/cowork/ai/chat");
     },
-    // No cache invalidation here — chat state is local `useState` in the chat
-    // view, not a TanStack Query. If a future chat-history query is added, it
-    // should use a distinct key like `["cowork", "chat", "history"]` and
-    // invalidate it explicitly.
+ // No cache invalidation here — chat state is local `useState` in the chat
+ // view, not a TanStack Query. If a future chat-history query is added, it
+ // should use a distinct key like `["cowork", "chat", "history"]` and
+ // invalidate it explicitly.
   });
 }
 

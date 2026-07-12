@@ -10,27 +10,27 @@
  * elements can shrink the prompt 10× without hurting accuracy.
  *
  * This implementation is HEURISTIC (no LLM in the loop):
- *   1. Tokenize the user task + current goal into keywords (lowercase,
- *      stop-word-filtered).
- *   2. Score each interactive element by how well it matches the keywords:
- *        - +3 if the element's text/accessibility-name contains a keyword.
- *        - +2 if any attribute value (placeholder, aria-label, name, id,
- *          href, value) contains a keyword.
- *        - +1 if the element's tag is "task-relevant" (see below).
- *   3. Keep the top N elements by score (preserving their original indices
- *      so the navigator's `[index]` references still resolve via the
- *      selector map). When fewer than N elements have a non-zero score,
- *      fall back to returning the full DOM (the summarizer is best-effort
- *      — a wrong filter is worse than no filter).
+ * 1. Tokenize the user task + current goal into keywords (lowercase,
+ * stop-word-filtered).
+ * 2. Score each interactive element by how well it matches the keywords:
+ * - +3 if the element's text/accessibility-name contains a keyword.
+ * - +2 if any attribute value (placeholder, aria-label, name, id,
+ * href, value) contains a keyword.
+ * - +1 if the element's tag is "task-relevant" (see below).
+ * 3. Keep the top N elements by score (preserving their original indices
+ * so the navigator's `[index]` references still resolve via the
+ * selector map). When fewer than N elements have a non-zero score,
+ * fall back to returning the full DOM (the summarizer is best-effort
+ * — a wrong filter is worse than no filter).
  *
  * Tag-relevance heuristics (tuned for web-form / navigation tasks):
- *   - Form tasks ("fill", "submit", "login", "form", "enter"): input,
- *     textarea, select, button, label.
- *   - Navigation tasks ("go to", "open", "navigate", "visit"): a, button.
- *   - Search tasks ("search", "find", "look up"): input[type=search],
- *     input, button, a.
- *   - Reading tasks ("read", "summarize", "what", "list"): a, h1-h6, p,
- *     li, td, article.
+ * - Form tasks ("fill", "submit", "login", "form", "enter"): input,
+ * textarea, select, button, label.
+ * - Navigation tasks ("go to", "open", "navigate", "visit"): a, button.
+ * - Search tasks ("search", "find", "look up"): input[type=search],
+ * input, button, a.
+ * - Reading tasks ("read", "summarize", "what", "list"): a, h1-h6, p,
+ * li, td, article.
  *
  * The function is pure — it takes the task/goal/elements and returns a
  * filtered elementsText string + the list of kept indices. The orchestrator
@@ -118,7 +118,7 @@ export function scoreElement(
 ): number {
   let score = 0;
 
-  // Tag-based intent match.
+ // Tag-based intent match.
   for (const intent of intents) {
     if (INTENT_TAGS[intent].has(el.tag)) {
       score += 1;
@@ -126,8 +126,8 @@ export function scoreElement(
     }
   }
 
-  // Text-based keyword match (highest weight — the element's accessible
-  // name is the most direct signal of what it does).
+ // Text-based keyword match (highest weight — the element's accessible
+ // name is the most direct signal of what it does).
   const textLower = (el.text ?? "").toLowerCase();
   for (const kw of keywords) {
     if (textLower.includes(kw)) {
@@ -136,9 +136,9 @@ export function scoreElement(
     }
   }
 
-  // Attribute-based keyword match (placeholder, aria-label, name, id, href,
-  // value, type — these often carry task-relevant hints even when the
-  // visible text doesn't).
+ // Attribute-based keyword match (placeholder, aria-label, name, id, href,
+ // value, type — these often carry task-relevant hints even when the
+ // visible text doesn't).
   const attrStr = el.attributes
     ? Object.entries(el.attributes).map(([k, v]) => `${k}=${v}`).join(" ").toLowerCase()
     : "";
@@ -195,14 +195,14 @@ export interface SummarizeDomOutput {
  * Filter the page's interactive elements down to the task-relevant subset.
  *
  * Steps:
- *   1. Extract keywords from `task` + `currentGoal`.
- *   2. Detect task intents (form / nav / search / read).
- *   3. Score every element against the keywords + intents.
- *   4. Keep the top `maxElements` by score (preserving original order).
- *   5. If fewer than ~5 elements scored non-zero, fall back to keeping all
- *      (the summarizer is best-effort — returning too few elements is
- *      worse than no filter at all, since the navigator can't act on what
- *      it can't see).
+ * 1. Extract keywords from `task` + `currentGoal`.
+ * 2. Detect task intents (form / nav / search / read).
+ * 3. Score every element against the keywords + intents.
+ * 4. Keep the top `maxElements` by score (preserving original order).
+ * 5. If fewer than ~5 elements scored non-zero, fall back to keeping all
+ * (the summarizer is best-effort — returning too few elements is
+ * worse than no filter at all, since the navigator can't act on what
+ * it can't see).
  */
 export function summarizeDom(input: SummarizeDomInput): SummarizeDomOutput {
   const { task, currentGoal, elements } = input;
@@ -214,29 +214,29 @@ export function summarizeDom(input: SummarizeDomInput): SummarizeDomOutput {
   ]);
   const intents = detectIntents(`${task} ${currentGoal}`);
 
-  // Score every element.
+ // Score every element.
   const scored = elements.map((el) => ({
     el,
     score: scoreElement(el, keywords, intents),
   }));
 
-  // Keep the top N by score (preserve original order).
+ // Keep the top N by score (preserve original order).
   const nonZero = scored.filter((s) => s.score > 0);
   const fellBack = nonZero.length < 5;
   const pool = fellBack ? scored : nonZero;
-  // Sort by score desc, then by original index asc for stable ordering.
+ // Sort by score desc, then by original index asc for stable ordering.
   pool.sort((a, b) => b.score - a.score || a.el.index - b.el.index);
-  // When NOT falling back, cap at maxElements. When falling back (too few
-  // task-relevant matches), we used to keep EVERY element — but that returns
-  // the full DOM for zero savings while still paying the O(elements) scoring
-  // pass, and the navigator silently ignores it anyway. Instead we still cap to
-  // `maxElements` (ordered by score), guaranteeing a bounded, smaller-than-full
-  // payload: returning fewer elements is always preferable to sending the
-  // entire DOM. A hard floor (`HARD_MIN_ELEMENTS`) ensures we still surface a
-  // reasonable number of the best elements rather than an over-aggressive 1-2.
+ // When NOT falling back, cap at maxElements. When falling back (too few
+ // task-relevant matches), we used to keep EVERY element — but that returns
+ // the full DOM for zero savings while still paying the O(elements) scoring
+ // pass, and the navigator silently ignores it anyway. Instead we still cap to
+ // `maxElements` (ordered by score), guaranteeing a bounded, smaller-than-full
+ // payload: returning fewer elements is always preferable to sending the
+ // entire DOM. A hard floor (`HARD_MIN_ELEMENTS`) ensures we still surface a
+ // reasonable number of the best elements rather than an over-aggressive 1-2.
   const cap = fellBack ? Math.max(maxElements, HARD_MIN_ELEMENTS) : maxElements;
   const kept = pool.slice(0, cap);
-  // Re-sort the kept set by index so the navigator sees them in DOM order.
+ // Re-sort the kept set by index so the navigator sees them in DOM order.
   kept.sort((a, b) => a.el.index - b.el.index);
 
   const keptElements = kept.map((s) => s.el);

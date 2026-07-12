@@ -1,3 +1,4 @@
+import type { NextRequest } from 'next/server';
 import { textResponse, withRouteError } from '@/lib/cowork/api/http';
 import {
   AGENT_OPERATING_RULES,
@@ -8,7 +9,7 @@ import {
   withBaseUrl,
 } from '@/lib/cowork/api/agent-bootstrap';
 
-export async function GET(): Promise<Response> {
+export async function GET(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
     const version = getVersion();
     const baseUrl = getBaseUrl();
@@ -34,12 +35,10 @@ ${AGENT_OPERATING_RULES.map(rule => `- ${rule}`).join('\n')}
 ## Using the cockpit API
 
 All endpoints live under \`${baseUrl}/api/cowork\`. **All \`/api/cowork/*\` routes
-except the 5 public discovery routes require an \`X-Cowork-Token\` header matching
-the server-side \`COWORK_EVENT_TOKEN\` env var** (default \`dev-token\` in dev).
-The 5 public discovery routes (no auth required) are: \`/agent/bootstrap\`,
-\`/agent/manifest\`, \`/agent\`, \`/agent/version\`, and \`/skill\`. In production,
-set \`COWORK_EVENT_TOKEN\` to a real secret — the middleware fails closed with
-401 if the token is unset or the well-known \`dev-token\` in production. POST
+except the 5 public discovery routes require an \`X-Cowork-Token\` header.** Requests
+without a valid token are rejected with 401. Obtain the token from the cockpit
+operator. The 5 public discovery routes (no auth required) are: \`/agent/bootstrap\`,
+\`/agent/manifest\`, \`/agent\`, \`/agent/version\`, and \`/skill\`. POST
 endpoints create rows in SQLite; DELETE endpoints exist for \`/history\`,
 \`/memory/site\`, \`/memory/form\`, and \`/ai/chat\` (see Operating rules for the
 mass-deletion caution below).
@@ -67,6 +66,7 @@ mass-deletion caution below).
 - \`POST ${baseUrl}/api/cowork/workflows\` — create a workflow
 - \`POST ${baseUrl}/api/cowork/bookmarks\` — add a bookmark
 - \`POST ${baseUrl}/api/cowork/pinboards\` — create a pinboard
+- \`POST ${baseUrl}/api/cowork/extensions/log\` — append an extension log entry
 
 ### Data you can delete (DELETE)
 - \`DELETE ${baseUrl}/api/cowork/history?id=<historyEntryId>\` — erase one history entry
@@ -92,5 +92,5 @@ mass-deletion caution below).
 ${CAPABILITY_FAMILIES.map(f => `- ${f}`).join('\n')}
 `;
     return textResponse(md, 200, 'text/markdown; charset=utf-8');
-  });
+  }, req.headers.get('x-request-id') ?? undefined);
 }

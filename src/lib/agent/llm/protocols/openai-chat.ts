@@ -71,11 +71,11 @@ const DEFAULT_MAX_TOKENS = 4096;
  * `400`. Mirrors the `isValidBase64` guard in `anthropic-messages.ts`.
  */
 function isValidBase64(s: string): boolean {
-  // Reject empty / whitespace / illegal-alphabet payloads locally instead of
-  // forwarding them to the provider for an opaque 400. We intentionally do NOT
-  // enforce a strict length-multiple-of-4 rule: a trailing `=` padding string
-  // like `iVBOR==` is a perfectly usable image payload, and over-strict length
-  // gating was a regression that rejected valid screenshots.
+ // Reject empty / whitespace / illegal-alphabet payloads locally instead of
+ // forwarding them to the provider for an opaque 400. We intentionally do NOT
+ // enforce a strict length-multiple-of-4 rule: a trailing `=` padding string
+ // like `iVBOR==` is a perfectly usable image payload, and over-strict length
+ // gating was a regression that rejected valid screenshots.
   return s.length > 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(s);
 }
 
@@ -106,25 +106,25 @@ function isZodSchema(value: unknown): boolean {
  * Normalize a JSON Schema to OpenAI "strict" requirements so providers that
  * enforce `strict: true` (OpenAI, Azure, xAI, OpenRouter, + compatible) don't
  * reject it with a `400`:
- *   - every object schema gets `additionalProperties: false`;
- *   - every property is listed in `required`;
- *   - `nullable: true` is rewritten to `anyOf: [<schema>, { type: "null" }]`
- *     (OpenAI strict mode forbids the `nullable` keyword).
+ * - every object schema gets `additionalProperties: false`;
+ * - every property is listed in `required`;
+ * - `nullable: true` is rewritten to `anyOf: [<schema>, { type: "null" }]`
+ * (OpenAI strict mode forbids the `nullable` keyword).
  *
  * Recursion is depth-bounded to stay cheap on large schemas.
  */
 function normalizeStrictSchema(node: unknown, depth = 0): unknown {
   if (depth > 24 || typeof node !== "object" || node === null) return node;
-  const obj: Record<string, unknown> = { ...(node as Record<string, unknown>) };
+ // A `$ref` points at a definition we can't resolve here (no schema catalog
+ // at this layer) — leave it untouched rather than dropping it, which would
+ // lose the reference. Previously `$ref`/`$defs` were not descended into, so
+ // referenced subschemas escaped normalization (FULL-REVIEW finding 63).
+  const refObj = node as Record<string, unknown>;
+  if ("$ref" in refObj) return node;
+  const obj: Record<string, unknown> = { ...refObj };
 
-  if (obj.nullable === true) {
-    delete obj.nullable;
-    const baseType = obj.type as string | string[] | undefined;
-    const nonNullType = Array.isArray(baseType) ? baseType : (baseType ?? "string");
-    obj.anyOf = [{ ...obj, type: nonNullType }, { type: "null" }];
-    delete obj.type;
-  }
-
+ // 1. Object schemas: enforce `additionalProperties: false` + full `required`
+ // FIRST, so a later nullable wrap captures an already-strict object.
   if (obj.type === "object" && obj.properties && typeof obj.properties === "object") {
     const props = obj.properties as Record<string, unknown>;
     obj.additionalProperties = false;
@@ -135,7 +135,22 @@ function normalizeStrictSchema(node: unknown, depth = 0): unknown {
     obj.required = required;
   }
 
-  for (const key of ["properties", "items", "anyOf", "allOf", "oneOf", "not"]) {
+ // 2. Nullable: rewrite to `anyOf: [<non-null branch>, { type: "null" }]`.
+ // The non-null branch is the (already-normalized) object above, so it is
+ // strict-compliant (additionalProperties:false + required). Previously the
+ // branch was built AFTER the object block had been skipped (type deleted),
+ // producing a non-strict `anyOf` that OpenAI strict mode rejects
+ // (FULL-REVIEW finding 64).
+  if (obj.nullable === true) {
+    delete obj.nullable;
+    const baseType = obj.type as string | string[] | undefined;
+    const nonNullType = Array.isArray(baseType) ? baseType : (baseType ?? "string");
+    obj.anyOf = [{ ...obj, type: nonNullType }, { type: "null" }];
+    delete obj.type;
+  }
+
+ // 3. Recurse into child schemas (now including `$defs`).
+  for (const key of ["properties", "items", "anyOf", "allOf", "oneOf", "not", "$defs"]) {
     const child = obj[key];
     if (Array.isArray(child)) obj[key] = child.map((c) => normalizeStrictSchema(c, depth + 1));
     else if (child && typeof child === "object") obj[key] = normalizeStrictSchema(child, depth + 1);
@@ -150,14 +165,24 @@ function normalizeStrictSchema(node: unknown, depth = 0): unknown {
  * of a giant base64 string in the prompt text.
  */
 async function fromRequest(request: LLMRequest): Promise<OpenAIChatBody> {
+ // Validate the model id up front — `request.model.id` flows into the request
+ // body unchecked, and a missing/garbage id produces an opaque provider 400.
+ // Surface it clearly instead (FULL-REVIEW finding 98).
+  if (!request.model || typeof request.model.id !== "string" || request.model.id.length === 0) {
+    throw new Error("OpenAI request is missing a valid model id");
+  }
   const messages = request.messages.map((m) => {
     if (m.role === "user") {
-      // Extract EVERY screenshot marker (not just the first) into its own
-      // `image_url` content part — a multi-screenshot turn must forward all
-      // of them, matching the Anthropic protocol.
+ // Extract EVERY screenshot marker (not just the first) into its own
+ // `image_url` content part — a multi-screenshot turn must forward all
+ // of them, matching the Anthropic protocol.
       const matches = Array.from(m.content.matchAll(SCREENSHOT_PATTERN));
       if (matches.length > 0) {
-        const textContent = m.content.replace(/<screenshot>[^<]+<\/screenshot>/g, "").trim();
+ // Strip with the SAME pattern we match on, so the text we keep always
+ // agrees with the screenshots we extract (the previous literal regex
+ // `[^<]+` would also strip non-image `<screenshot>...</screenshot>`
+ // markers — FULL-REVIEW finding 65).
+        const textContent = m.content.replace(SCREENSHOT_PATTERN, "").trim();
         const parts: OpenAIContentPart[] = [];
         if (textContent) parts.push({ type: "text", text: textContent });
         for (const match of matches) {
@@ -180,28 +205,28 @@ async function fromRequest(request: LLMRequest): Promise<OpenAIChatBody> {
     stream_options: { include_usage: true },
     temperature: request.generation?.temperature ?? 0,
   };
-  // match Anthropic (4096) and Gemini (8192) by having a hardcoded
-  // fallback so output length is governed for OpenAI-format providers too.
+ // match Anthropic (4096) and Gemini (8192) by having a hardcoded
+ // fallback so output length is governed for OpenAI-format providers too.
   body.max_tokens = request.generation?.maxTokens ?? DEFAULT_MAX_TOKENS;
   if (request.generation?.topP) body.top_p = request.generation.topP;
   if (request.schema) {
-    // Serialize the Zod schema into a JSON Schema object and send it via
-    // `response_format: { type: "json_schema", … }` so OpenAI-format providers
-    // (OpenAI, Azure, xAI, OpenRouter, + openai-compatible) honor the contract
-    // instead of discarding the schema (the old `json_object` form ignored it).
-    // Reuses the same `z.toJSONSchema` import pattern as the Anthropic/Gemini
-    // protocols. The `name` ("response") is a fixed alphanumeric identifier as
-    // required by the OpenAI structured-output API.
-    //
-    // If `request.schema` is ALREADY a plain JSON Schema (e.g. `{ type:
-    // "object" }` — the shape callers/tests pass), forward it as-is. Calling
-    // `z.toJSONSchema` on a non-Zod object throws ("Cannot read properties of
-    // undefined (reading 'def')"), which was a genuine regression. Only Zod
-    // objects need conversion; we still THROW on any conversion failure so a
-    // non-serializable schema surfaces clearly rather than being POSTed as a
-    // raw Zod object (opaque provider `400`). We also normalize to OpenAI
-    // "strict" mode requirements (`additionalProperties: false`, all properties
-    // `required`, no `nullable`) so `strict: true` is honored consistently.
+ // Serialize the Zod schema into a JSON Schema object and send it via
+ // `response_format: { type: "json_schema", … }` so OpenAI-format providers
+ // (OpenAI, Azure, xAI, OpenRouter, + openai-compatible) honor the contract
+ // instead of discarding the schema (the old `json_object` form ignored it).
+ // Reuses the same `z.toJSONSchema` import pattern as the Anthropic/Gemini
+ // protocols. The `name` ("response") is a fixed alphanumeric identifier as
+ // required by the OpenAI structured-output API.
+ //
+ // If `request.schema` is ALREADY a plain JSON Schema (e.g. `{ type:
+ // "object" }` — the shape callers/tests pass), forward it as-is. Calling
+ // `z.toJSONSchema` on a non-Zod object throws ("Cannot read properties of
+ // undefined (reading 'def')"), which was a genuine regression. Only Zod
+ // objects need conversion; we still THROW on any conversion failure so a
+ // non-serializable schema surfaces clearly rather than being POSTed as a
+ // raw Zod object (opaque provider `400`). We also normalize to OpenAI
+ // "strict" mode requirements (`additionalProperties: false`, all properties
+ // `required`, no `nullable`) so `strict: true` is honored consistently.
     let jsonSchema: unknown;
     if (isZodSchema(request.schema)) {
       jsonSchema = await zodToJsonSchema(request.schema);
@@ -228,6 +253,8 @@ async function fromRequest(request: LLMRequest): Promise<OpenAIChatBody> {
 export interface StreamState {
   content: string;
   finishReason: string | null;
+  /** Number of non-JSON SSE frames dropped (logged, not forwarded). */
+  droppedFrames?: number;
   usage?: {
     tokensIn: number;
     tokensOut: number;
@@ -257,20 +284,32 @@ export const protocol: Protocol<OpenAIChatBody, string, { type: string; content?
         });
         return { state, events };
       }
-      // Separate the two distinct failure modes:
-      //   1. A non-JSON frame (truncated stream / proxy artifact) — log it and
-      //      skip, consistent with `anthropic-messages.ts`.
-      //   2. A provider error payload (`{"error": {...}}`) — valid JSON, so it
-      //      parses fine, but it must NOT be swallowed: we throw so the route
-      //      propagates it instead of returning empty output that masks
-      //      auth/quota/permission failures.
+ // Separate the two distinct failure modes:
+ // 1. A non-JSON frame (truncated stream / proxy artifact) — log it and
+ // skip, consistent with `anthropic-messages.ts`.
+ // 2. A provider error payload (`{"error": {...}}`) — valid JSON, so it
+ // parses fine, but it must NOT be swallowed: we throw so the route
+ // propagates it instead of returning empty output that masks
+ // auth/quota/permission failures.
       let chunk: OpenAIChatChunk;
       try {
         chunk = JSON.parse(frame);
       } catch {
-        // Log only the byte length — the raw frame can carry model output or
-        // scraped page content (PII, secrets) that must not leak into logs.
-        console.warn(`[openai-chat] Dropping non-JSON SSE frame (${frame.length} bytes)`);
+ // Log only the byte length — the raw frame can carry model output or
+ // scraped page content (PII, secrets) that must not leak into logs.
+        const dropped = (state.droppedFrames ?? 0) + 1;
+        state.droppedFrames = dropped;
+ // If we already streamed real content, a dropped frame mid-stream means
+ // the assistant output may be silently truncated. Surface a non-PII
+ // warning (frame contents are NOT logged) so the truncation is
+ // observable rather than invisible (FULL-REVIEW finding 5 / 133).
+        if (state.content.length > 0) {
+          console.warn(
+            `[openai-chat] Dropped non-JSON SSE frame (${frame.length} bytes) after ${state.content.length} chars of content were already streamed — output may be truncated (${dropped} frame(s) dropped total).`
+          );
+        } else {
+          console.warn(`[openai-chat] Dropping non-JSON SSE frame (${frame.length} bytes)`);
+        }
         return { state, events };
       }
       const chunkAny = chunk as unknown as { error?: { message?: string } | string };
@@ -303,22 +342,22 @@ export const protocol: Protocol<OpenAIChatBody, string, { type: string; content?
       return { state, events };
     },
     terminal: (frame: string): boolean => {
-      // OpenAI sends `usage` in a SEPARATE chunk AFTER `finish_reason`
-      // (with empty `choices: []`), and then a final `[DONE]` sentinel. The
-      // previous implementation returned `true` on a non-null `finish_reason`,
-      // which terminated the stream loop BEFORE the usage chunk arrived —
-      // silently dropping cost/token accounting on every OpenAI-format
-      // provider (OpenAI, Azure, xAI, OpenRouter, + 10 openai-compatible
-      // profiles).
-      //
-      // The `step()` reducer above already handles `[DONE]` by emitting a
-      // `finish` event carrying `state.usage` (which was populated by the
-      // preceding usage chunk). Returning `true` ONLY on `[DONE]` lets the
-      // loop continue reading the usage chunk so cost tracking works.
-      //
-      // The earlier streaming-truncation regression is preserved: every
-      // delta chunk still carries `finish_reason: null`, which is neither
-      // `[DONE]` nor a non-null value, so `terminal()` returns `false` for it.
+ // OpenAI sends `usage` in a SEPARATE chunk AFTER `finish_reason`
+ // (with empty `choices: []`), and then a final `[DONE]` sentinel. The
+ // previous implementation returned `true` on a non-null `finish_reason`,
+ // which terminated the stream loop BEFORE the usage chunk arrived —
+ // silently dropping cost/token accounting on every OpenAI-format
+ // provider (OpenAI, Azure, xAI, OpenRouter, + 10 openai-compatible
+ // profiles).
+ //
+ // The `step()` reducer above already handles `[DONE]` by emitting a
+ // `finish` event carrying `state.usage` (which was populated by the
+ // preceding usage chunk). Returning `true` ONLY on `[DONE]` lets the
+ // loop continue reading the usage chunk so cost tracking works.
+ //
+ // The earlier streaming-truncation regression is preserved: every
+ // delta chunk still carries `finish_reason: null`, which is neither
+ // `[DONE]` nor a non-null value, so `terminal()` returns `false` for it.
       if (frame === "[DONE]") return true;
       return false;
     },

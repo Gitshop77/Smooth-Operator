@@ -38,12 +38,12 @@ export function WorkflowsView() {
           className="grid gap-4 grid-cols-1 lg:grid-cols-2"
         >
           {(data ?? []).map((wf) => {
-            // `stepsJson` is a JSON-encoded string from Prisma (NOT an
-            // array). Parse defensively (default to [] on parse error) so a
-            // malformed row never crashes the whole view. The schema documents
-            // the element type as `WorkflowStep[]` — objects with `{ name?,
-            // action? }` — but historical rows may carry bare-string labels,
-            // so the renderer falls back to `String(s)` for back-compat.
+ // `stepsJson` is a JSON-encoded string from Prisma (NOT an
+ // array). Parse defensively (default to [] on parse error) so a
+ // malformed row never crashes the whole view. The schema documents
+ // the element type as `WorkflowStep[]` — objects with `{ name?,
+ // action? }` — but historical rows may carry bare-string labels,
+ // so the renderer falls back to `String(s)` for back-compat.
             const steps: Array<{ name?: string; action?: string }> = (() => {
               const raw = wf.stepsJson;
               if (Array.isArray(raw)) return raw as Array<{ name?: string; action?: string }>;

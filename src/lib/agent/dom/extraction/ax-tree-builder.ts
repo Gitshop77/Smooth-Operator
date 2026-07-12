@@ -84,11 +84,30 @@ export function resolveRef(refId: string): HTMLElement | null {
   if (!ref) return null;
   const el = ref.deref();
   if (!el) {
-    // Clean up dead ref.
+ // Clean up dead ref.
     delete map[refId];
     return null;
   }
   return el;
+}
+
+// ─── Attribute serialization ────────────────────────────────────────────────
+
+/**
+ * Escape an attribute value for safe interpolation into a serialized AX-tree
+ * line.
+ *
+ * SECURITY : the serialized tree's invariant is "one element per line"
+ * and is consumed by the navigator LLM as ground-truth page structure. A page
+ * controls attribute text (`href`/`type`/`placeholder`/option `value`), which
+ * may contain literal newlines/tabs/carriage-returns. Quote-escaping alone
+ * lets a hostile page inject line breaks and forge additional AX-tree rows
+ * (e.g. a spoofed `link Approve transfer [ref_1] ...` line). Collapse all
+ * `\r`/`\n`/`\t` runs to a single space *before* quote-escaping so a value can
+ * never span or spoof a line.
+ */
+function escapeAttributeValue(s: string): string {
+  return s.replace(/[\r\n\t]+/g, " ").replace(/"/g, '\\"');
 }
 
 // ─── Role detection ─────────────────────────────────────────────────────────
@@ -156,7 +175,7 @@ const NAME_MIN_TEXT_LENGTH = 3;
 function getName(el: HTMLElement, labelMap: Map<string, HTMLLabelElement>): string {
   const tag = el.tagName.toLowerCase();
 
-  // <select> — get selected option text (or redact if sensitive).
+ // <select> — get selected option text (or redact if sensitive).
   if (tag === "select") {
     if (isSensitive(el)) {
       const ariaLabel = el.getAttribute("aria-label");
@@ -174,7 +193,7 @@ function getName(el: HTMLElement, labelMap: Map<string, HTMLLabelElement>): stri
     if (selected?.textContent) return selected.textContent.trim();
   }
 
-  // Standard accessible name sources (in priority order).
+ // Standard accessible name sources (in priority order).
   const ariaLabel = el.getAttribute("aria-label");
   if (ariaLabel?.trim()) return ariaLabel.trim();
 
@@ -187,30 +206,30 @@ function getName(el: HTMLElement, labelMap: Map<string, HTMLLabelElement>): stri
   const alt = el.getAttribute("alt");
   if (alt?.trim()) return alt.trim();
 
-  // <label for="id">
+ // <label for="id">
   if (el.id) {
     const label = labelMap.get(el.id);
     if (label) { const t = directText(label); if (t) return t; }
   }
 
-  // Input-specific.
+ // Input-specific.
   if (tag === "input") {
     const input = el as HTMLInputElement;
     const type = input.getAttribute("type") || "";
     const value = input.getAttribute("value");
     if (type === "submit" && value?.trim()) return value.trim();
     if (isSensitive(el)) return input.value ? "[value redacted]" : "";
-    // Truncate long values (e.g. search/address fields) instead of dropping
-    // them — otherwise the navigator LLM can't see the field's current content.
+ // Truncate long values (e.g. search/address fields) instead of dropping
+ // them — otherwise the navigator LLM can't see the field's current content.
     if (input.value && input.value.trim()) {
       const v = input.value.trim();
       return v.length > NAME_MAX_LENGTH ? v.substring(0, NAME_MAX_LENGTH) + "..." : v;
     }
   }
 
-  // Textarea (non-sensitive): surface the live value, mirroring the indexed
-  // tree which reads `el.value` for `<textarea>`. The sensitive case is
-  // redacted separately below.
+ // Textarea (non-sensitive): surface the live value, mirroring the indexed
+ // tree which reads `el.value` for `<textarea>`. The sensitive case is
+ // redacted separately below.
   if (tag === "textarea" && !isSensitive(el)) {
     const v = (el as HTMLTextAreaElement).value;
     if (v && v.trim()) {
@@ -218,27 +237,27 @@ function getName(el: HTMLElement, labelMap: Map<string, HTMLLabelElement>): stri
     }
   }
 
-  // Textarea sensitive redaction.
+ // Textarea sensitive redaction.
   if (tag === "textarea" && isSensitive(el)) {
     return (el as HTMLTextAreaElement).value ? "[value redacted]" : "";
   }
 
-  // Button/link/summary — direct text.
+ // Button/link/summary — direct text.
   if (tag === "button" || tag === "a" || tag === "summary") {
     const t = directText(el);
     if (t) return t;
   }
 
-  // Headings — text content (truncated).
+ // Headings — text content (truncated).
   if (tag.match(/^h[1-6]$/)) {
     const text = el.textContent;
     if (text?.trim()) return text.trim().substring(0, NAME_MAX_LENGTH);
   }
 
-  // Images — no name (alt already checked).
+ // Images — no name (alt already checked).
   if (tag === "img") return "";
 
-  // Fallback: direct text content (truncated).
+ // Fallback: direct text content (truncated).
   const text = directText(el);
   if (text.length >= NAME_MIN_TEXT_LENGTH) {
     return text.length > NAME_MAX_LENGTH
@@ -277,14 +296,14 @@ function isStructural(el: HTMLElement): boolean {
 function shouldInclude(el: HTMLElement, filter: string, hasRefId: boolean, labelMap: Map<string, HTMLLabelElement>): boolean {
   const tag = el.tagName.toLowerCase();
   if (SKIP_TAGS.has(tag)) return false;
-  // apply visibility + aria-hidden gating even in "all" mode so
-  // hidden modals, off-screen duplicates, and aria-hidden decorative elements
-  // don't inflate the AX payload with content the user can't see.
+ // apply visibility + aria-hidden gating even in "all" mode so
+ // hidden modals, off-screen duplicates, and aria-hidden decorative elements
+ // don't inflate the AX payload with content the user can't see.
   if (el.getAttribute("aria-hidden") === "true") return false;
   if (isLikelyHidden(el)) return false;
   if (filter !== "all" && !isVisible(el)) return false;
   if (filter !== "all" && !hasRefId) {
-    // When not extracting a specific subtree, only include viewport-visible els.
+ // When not extracting a specific subtree, only include viewport-visible els.
     const rect = el.getBoundingClientRect();
     if (!(rect.top < window.innerHeight && rect.bottom > 0 && rect.left < window.innerWidth && rect.right > 0)) return false;
   }
@@ -331,10 +350,10 @@ function buildTree(
       .replace(/"/g, '\\"');
     const indent = " ".repeat(depth);
 
-    // Get or assign ref ID (with WeakRef + reverse WeakMap for dedup).
+ // Get or assign ref ID (with WeakRef + reverse WeakMap for dedup).
     let ref = elementReverseMap!.get(el) || null;
     if (ref) {
-      // Verify the ref still points to this element.
+ // Verify the ref still points to this element.
       const existing = elementMap![ref];
       if (!existing || existing.deref() !== el) ref = null;
     }
@@ -345,26 +364,28 @@ function buildTree(
     }
     counter.count++;
 
-    // Build the line: `role "name" [ref_N] href="..." type="..." placeholder="..."`
-    // LOW-2 fix: escape `"` in href/type/placeholder attribute values (the
-    // `name` field was already escaped at line 299, but these three were
-    // interpolated raw — a `"` in the value would break the line format).
+ // Build the line: `role "name" [ref_N] href="..." type="..." placeholder="..."`
+ // escape `"` AND collapse `\r\n\t` in href/type/placeholder
+ // attribute values via `escapeAttributeValue` (the `name` field is already
+ // whitespace-collapsed at line 329). Quote-escaping alone let a page inject
+ // literal newlines to forge extra AX-tree rows (line spoofing / prompt
+ // injection into the navigator LLM's ground-truth page view).
     let line = indent + role;
     if (name) line += ` "${name}"`;
     line += ` [${ref}]`;
     const href = el.getAttribute("href");
     const type = el.getAttribute("type");
     const placeholder = el.getAttribute("placeholder");
-    if (href) line += ` href="${href.replace(/"/g, '\\"')}"`;
-    // For sensitive fields (password, credit-card, OTP, hidden CSRF/session
-    // tokens) the *value* is already redacted — but `type`/`placeholder` still
-    // leak what secret the field holds. Suppress them so the field's semantics
-    // aren't exposed to the LLM, consistent with the indexed-tree redactions.
-    if (type && !isSensitive(el)) line += ` type="${type.replace(/"/g, '\\"')}"`;
-    if (placeholder && !isSensitive(el)) line += ` placeholder="${placeholder.replace(/"/g, '\\"')}"`;
+    if (href) line += ` href="${escapeAttributeValue(href)}"`;
+ // For sensitive fields (password, credit-card, OTP, hidden CSRF/session
+ // tokens) the *value* is already redacted — but `type`/`placeholder` still
+ // leak what secret the field holds. Suppress them so the field's semantics
+ // aren't exposed to the LLM, consistent with the indexed-tree redactions.
+    if (type && !isSensitive(el)) line += ` type="${escapeAttributeValue(type)}"`;
+    if (placeholder && !isSensitive(el)) line += ` placeholder="${escapeAttributeValue(placeholder)}"`;
     lines.push(line);
 
-    // For <select> (non-sensitive), emit child <option> elements.
+ // For <select> (non-sensitive), emit child <option> elements.
     if (el.tagName.toLowerCase() === "select" && !isSensitive(el)) {
       const select = el as HTMLSelectElement;
       for (const option of Array.from(select.options)) {
@@ -372,24 +393,24 @@ function buildTree(
         const optText = option.textContent?.trim() || "";
         if (optText) optLine += ` "${optText.replace(/\s+/g, " ").substring(0, NAME_MAX_LENGTH).replace(/"/g, '\\"')}"`;
         if (option.selected) optLine += " (selected)";
-        if (option.value && option.value !== optText) optLine += ` value="${option.value.replace(/"/g, '\\"')}"`;
+        if (option.value && option.value !== optText) optLine += ` value="${escapeAttributeValue(option.value)}"`;
         lines.push(optLine);
       }
     }
   }
 
-  // Recurse into children (skip <option> children of non-sensitive <select> —
-  // they were already emitted explicitly above to avoid duplication).
+ // Recurse into children (skip <option> children of non-sensitive <select> —
+ // they were already emitted explicitly above to avoid duplication).
   if (depth < maxDepth) {
     if (el.tagName.toLowerCase() !== "select" && el.children) {
       for (const child of Array.from(el.children)) {
         buildTree(child as HTMLElement, included ? depth + 1 : depth, filter, refId, maxDepth, lines, counter, labelMap);
       }
     }
-    // Pierce shadow DOM so controls rendered inside open/closed shadow roots
-    // (web components, design systems) are visible to the AX tree — matching
-    // the indexed-tree extractor's shadow-piercing behavior. Without this the
-    // AX tree silently omits shadow-DOM content that the indexed tree sees.
+ // Pierce shadow DOM so controls rendered inside open/closed shadow roots
+ // (web components, design systems) are visible to the AX tree — matching
+ // the indexed-tree extractor's shadow-piercing behavior. Without this the
+ // AX tree silently omits shadow-DOM content that the indexed tree sees.
     const sr = getShadowRoot(el);
     if (sr) {
       for (const child of Array.from(sr.children)) {
@@ -405,9 +426,9 @@ function buildTree(
  * Generate the accessibility tree for the current page.
  *
  * @param filter `"all"` (default) or `"interactive"` — limits which elements appear.
- * @param depth  Max tree depth (default 15).
+ * @param depth Max tree depth (default 15).
  * @param maxLength Optional cap on output character length; emits an error if exceeded.
- * @param refId  If provided, only extract that element's subtree.
+ * @param refId If provided, only extract that element's subtree.
  * @returns Serialized tree content + viewport metadata, or an error message.
  */
 export function generateAccessibilityTree(
@@ -418,19 +439,19 @@ export function generateAccessibilityTree(
 ): AXTreeResult {
   initElementMap();
 
-  // Validate `filter` against the allowed set so a mistyped value produces a
-  // clear error instead of silently degraded (hybrid) output.
+ // Validate `filter` against the allowed set so a mistyped value produces a
+ // clear error instead of silently degraded (hybrid) output.
   if (filter !== "all" && filter !== "interactive") {
     throw new TypeError(
       `Invalid filter: ${JSON.stringify(filter)}. Expected "all" or "interactive".`
     );
   }
 
-  // Validate `depth` with the same rigor as `filter`: reject NaN, negative,
-  // non-finite, or non-positive values with a clear error instead of silently
-  // degrading to the default. A fractional (but positive) depth is floored.
-  // (The parameter already defaults to DEFAULT_MAX_DEPTH, so it is never
-  // `undefined` here — the prior `depth ?? DEFAULT_MAX_DEPTH` was dead code.)
+ // Validate `depth` with the same rigor as `filter`: reject NaN, negative,
+ // non-finite, or non-positive values with a clear error instead of silently
+ // degrading to the default. A fractional (but positive) depth is floored.
+ // (The parameter already defaults to DEFAULT_MAX_DEPTH, so it is never
+ // `undefined` here — the prior `depth ?? DEFAULT_MAX_DEPTH` was dead code.)
   if (!Number.isFinite(depth) || depth < 1) {
     throw new TypeError(
       `Invalid depth: ${JSON.stringify(depth)}. Expected a positive integer (>= 1).`
@@ -442,23 +463,23 @@ export function generateAccessibilityTree(
     const lines: string[] = [];
     const counter = { count: 0 };
 
-    // pre-build a Map of all <label for="..."> elements ONCE per
-    // generateAccessibilityTree call. Previously, getName() called
-    // `document.querySelector('label[for="<id>"]')` per element — O(N²) on
-    // pages with many IDs (React apps auto-generate id=":r1:" etc.). A single
-    // querySelectorAll + Map lookup is O(N) + O(1) per element.
+ // pre-build a Map of all <label for="..."> elements ONCE per
+ // generateAccessibilityTree call. Previously, getName() called
+ // `document.querySelector('label[for="<id>"]')` per element — O(N²) on
+ // pages with many IDs (React apps auto-generate id=":r1:" etc.). A single
+ // querySelectorAll + Map lookup is O(N) + O(1) per element.
     const labelMap = new Map<string, HTMLLabelElement>();
     if (typeof document !== "undefined" && typeof document.querySelectorAll === "function") {
       for (const label of Array.from(document.querySelectorAll<HTMLLabelElement>("label[for]"))) {
-        // First-write-wins: if multiple labels point at the same `for`, the
-        // first one in document order wins (matches the old querySelector
-        // behavior, which returns the first match).
+ // First-write-wins: if multiple labels point at the same `for`, the
+ // first one in document order wins (matches the old querySelector
+ // behavior, which returns the first match).
         if (!labelMap.has(label.htmlFor)) labelMap.set(label.htmlFor, label);
       }
     }
 
     if (refId) {
-      // Extract only the subtree for the given ref.
+ // Extract only the subtree for the given ref.
       const ref = elementMap![refId];
       if (!ref) {
         return {
@@ -480,7 +501,7 @@ export function generateAccessibilityTree(
       buildTree(document.body, 0, filter, undefined, maxDepth, lines, counter, labelMap);
     }
 
-    // Cleanup dead WeakRefs to avoid unbounded map growth.
+ // Cleanup dead WeakRefs to avoid unbounded map growth.
     for (const key in elementMap!) {
       if (!elementMap![key].deref()) {
         delete elementMap![key];
@@ -489,7 +510,7 @@ export function generateAccessibilityTree(
 
     let pageContent = lines.join("\n");
 
-    // Truncation warnings.
+ // Truncation warnings.
     if (counter.count >= MAX_ELEMENTS) {
       const hint = refId
         ? "use a smaller depth or focus on a more specific child element"
@@ -510,8 +531,8 @@ export function generateAccessibilityTree(
       viewport: { width: window.innerWidth, height: window.innerHeight },
     };
   } catch (e) {
-    // Preserve the original error's type and stack; only prefix the message so
-    // field debugging can still distinguish TypeError/RangeError etc.
+ // Preserve the original error's type and stack; only prefix the message so
+ // field debugging can still distinguish TypeError/RangeError etc.
     const err = e instanceof Error ? e : new Error(String(e));
     err.message = `Error generating accessibility tree: ${err.message}`;
     throw err;

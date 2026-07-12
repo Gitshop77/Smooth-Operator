@@ -61,15 +61,15 @@ export function setPersistentHighlight(enabled: boolean): void {
  * The highlight auto-removes after {@link HIGHLIGHT_DURATION_MS} milliseconds,
  * unless C19 persistent mode is enabled (then it stays until the next action).
  *
- * @param el    The element to highlight.
+ * @param el The element to highlight.
  * @param label Text shown in the floating badge (typically the action summary).
  * @returns A handle whose `remove()` clears the highlight immediately.
  */
 export function highlightElement(el: HTMLElement, label: string): OverlayHandle {
-  // Track ownership per element so overlapping highlights don't corrupt style
-  // restoration. The first highlight captures + applies the styles; later
-  // highlights on the same element reuse the applied styles and only restore
-  // the originals once the last highlight for that element is removed.
+ // Track ownership per element so overlapping highlights don't corrupt style
+ // restoration. The first highlight captures + applies the styles; later
+ // highlights on the same element reuse the applied styles and only restore
+ // the originals once the last highlight for that element is removed.
   let state = elementHighlights.get(el);
   if (!state) {
     state = {
@@ -86,6 +86,7 @@ export function highlightElement(el: HTMLElement, label: string): OverlayHandle 
   state.count += 1;
 
   const badge = document.createElement("div");
+  badge.setAttribute("aria-hidden", "true");
   badge.textContent = label;
   badge.style.cssText = [
     "position:fixed",
@@ -109,7 +110,7 @@ export function highlightElement(el: HTMLElement, label: string): OverlayHandle 
   position();
   document.body.appendChild(badge);
 
-  // Reposition on scroll/resize while visible.
+ // Reposition on scroll/resize while visible.
   window.addEventListener("scroll", position, { passive: true });
   window.addEventListener("resize", position);
 
@@ -121,8 +122,8 @@ export function highlightElement(el: HTMLElement, label: string): OverlayHandle 
     badge.remove();
     window.removeEventListener("scroll", position);
     window.removeEventListener("resize", position);
-    // Only restore the element's original styles when this was the last
-    // active highlight for it, preventing a stale highlight from lingering.
+ // Only restore the element's original styles when this was the last
+ // active highlight for it, preventing a stale highlight from lingering.
     if (state.count === 0) {
       el.style.outline = state.prevOutline;
       el.style.outlineOffset = state.prevOffset;
@@ -131,9 +132,9 @@ export function highlightElement(el: HTMLElement, label: string): OverlayHandle 
     }
   };
 
-  // in persistent mode, highlights stay until explicitly removed
-  // (the executor calls remove() on the previous highlight before adding a
-  // new one). In normal mode, they auto-remove after HIGHLIGHT_DURATION_MS.
+ // in persistent mode, highlights stay until explicitly removed
+ // (the executor calls remove() on the previous highlight before adding a
+ // new one). In normal mode, they auto-remove after HIGHLIGHT_DURATION_MS.
   if (!persistentHighlightMode) {
     setTimeout(remove, HIGHLIGHT_DURATION_MS);
   }

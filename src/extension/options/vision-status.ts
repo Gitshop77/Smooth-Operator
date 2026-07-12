@@ -12,8 +12,53 @@
 
 import { $ } from "@/extension/shared";
 import type { DownloadProgress, StatusCallback, VisionStatus } from "../vision-assistant";
+import {
+  CACHE_NAME,
+  VISION_GRAPH_URL,
+  VISION_DATA_URL,
+  LANGUAGE_GRAPH_URL,
+  LANGUAGE_DATA_URL,
+  EMBED_PACKED_URL,
+  EMBED_SCALES_URL,
+  EMBED_META_URL,
+} from "../vision-assistant";
 import { STATUS_DISPLAY } from "./status";
 import { confirmModal } from "./modal";
+
+/**
+ * The 7 model artifacts that make up the Local Vision model. Mirrors the
+ * private `ALL_FILES` set in `model-loader.ts`; kept in sync so the options
+ * page can probe Cache Storage without triggering a download.
+ */
+const MODEL_FILE_URLS = [
+  VISION_GRAPH_URL,
+  VISION_DATA_URL,
+  LANGUAGE_GRAPH_URL,
+  LANGUAGE_DATA_URL,
+  EMBED_PACKED_URL,
+  EMBED_SCALES_URL,
+  EMBED_META_URL,
+];
+
+/**
+ * Probe Cache Storage to see whether the Local Vision model is already cached.
+ *
+ * Used on page load to decide whether we can safely initialize the assistant
+ * (loading cached sessions) *without* triggering an unexpected multi-GB
+ * download. If Cache Storage is unavailable or the probe fails, we conservatively
+ * return `false` so the load path never auto-downloads — the actual download
+ * stays gated behind the user-driven confirm modal in the radio `change` handler.
+ */
+async function isModelCached(): Promise<boolean> {
+  try {
+    if (typeof caches === "undefined") return false;
+    const cache = await caches.open(CACHE_NAME);
+    const hits = await Promise.all(MODEL_FILE_URLS.map((url) => cache.match(url)));
+    return hits.every((response) => response !== undefined);
+  } catch {
+    return false;
+  }
+}
 
 type VisionAssistantInstance = import("../vision-assistant").VisionAssistant;
 
@@ -131,9 +176,9 @@ document.querySelectorAll('input[name="visionMode"]').forEach((radio) => {
       });
       if (!ok) {
         ($("visionMode_disabled") as HTMLInputElement).checked = true;
-        // Persist the reverted (disabled) state so the radio UI and stored
-        // config stay consistent — otherwise the UI would show "disabled"
-        // while storage still held the previously-selected mode.
+ // Persist the reverted (disabled) state so the radio UI and stored
+ // config stay consistent — otherwise the UI would show "disabled"
+ // while storage still held the previously-selected mode.
         await chrome.storage.local.set({ visionMode: "disabled", enableLocalVision: false });
         return;
       }
@@ -148,12 +193,30 @@ document.querySelectorAll('input[name="visionMode"]').forEach((radio) => {
   try {
     const { visionMode, enableLocalVision } = await chrome.storage.local.get(["visionMode", "enableLocalVision"]);
     const mode = (visionMode as string) || (enableLocalVision === true ? "always" : "disabled");
-    if (mode !== "disabled") {
+    if (mode === "disabled") return;
+ // Do NOT auto-download the ~2.1 GB model purely because the options page
+ // loaded with Local Vision enabled. Only initialize when the model is
+ // already cached — loading the cached ONNX sessions is cheap and has no
+ // bandwidth/disk cost. The actual download stays gated behind the
+ // user-driven confirm modal in the radio `change` handler, so a user who
+ // enabled Local Vision previously is never surprised by a multi-GB download
+ // the moment they open the options page.
+    if (await isModelCached()) {
       await ensureVisionAssistant();
+    } else {
+ // Model not cached and we deliberately won't auto-download it. Surface a
+ // neutral hint so the status UI isn't silently empty; the radio already
+ // reflects the enabled mode, and toggling it re-triggers the download
+ // confirmation.
+      showStatusUI();
+      updateBadge(
+        "uninitialized",
+        "Model not downloaded yet — re-select the vision mode to download it",
+      );
     }
   } catch (e) {
-    // Storage read failed (corruption / quota / policy) — local-vision init
-    // is skipped, but we surface the error so the failure is diagnosable.
+ // Storage read failed (corruption / quota / policy) — local-vision init
+ // is skipped, but we surface the error so the failure is diagnosable.
     console.warn("[options] vision init storage read failed:", e);
   }
 })();

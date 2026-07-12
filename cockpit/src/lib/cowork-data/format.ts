@@ -1,10 +1,8 @@
-"use client";
-
 /** Format a timestamp as a short relative string ("3s", "12m", "4h", "2d"). */
 export function timeAgo(ts: number | string | Date | null | undefined): string {
-  // `0` (and `""`) is a sentinel for "no value" — without this
-  // check, `timeAgo(0)` computes `Date.now() - 0` ≈ 1.7 trillion ms ≈
-  // ~20000 days, rendering "20000d" in the UI. Treat 0 / "" like null.
+ // `0` (and `""`) is a sentinel for "no value" — without this
+ // check, `timeAgo(0)` computes `Date.now() - 0` ≈ 1.7 trillion ms ≈
+ // ~20000 days, rendering "20000d" in the UI. Treat 0 / "" like null.
   if (ts == null || ts === 0 || ts === "") return "—";
   const ms = typeof ts === "number" ? ts : new Date(ts).getTime();
   if (!Number.isFinite(ms) || ms === 0) return "—";
@@ -43,9 +41,11 @@ export function hostnameOf(url: string): string {
  */
 export function safeHref(url: string | null | undefined): string {
   if (!url || typeof url !== "string") return "#";
+  const trimmed = url.trim();
+  if (!trimmed) return "#";
   try {
-    const parsed = new URL(url);
-    if (parsed.protocol === "http:" || parsed.protocol === "https:") return url;
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") return trimmed;
     return "#";
   } catch {
     return "#";

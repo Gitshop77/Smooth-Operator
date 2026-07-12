@@ -105,7 +105,7 @@ describe("provider-config: buildProvider", () => {
       apiKey: "sk-test",
       model: "",
     });
-    // The provider should still be built — the default model is used.
+ // The provider should still be built — the default model is used.
     expect(provider).toBeDefined();
   });
 });
@@ -114,11 +114,11 @@ describe("provider-config: buildProvider", () => {
 
 describe("provider-config: readProviderConfig", () => {
   beforeEach(() => {
-    // Stub chrome.storage for the test. The API key is intentionally kept in
-    // `chrome.storage.session` (in-memory, never written to disk) for security —
-    // it must NOT be persisted in chrome.storage.local as plaintext. The test
-    // reflects that design: provider/model/baseUrl live in `local`, the apiKey
-    // lives in `session`.
+ // Stub chrome.storage for the test. The API key is intentionally kept in
+ // `chrome.storage.session` (in-memory, never written to disk) for security —
+ // it must NOT be persisted in chrome.storage.local as plaintext. The test
+ // reflects that design: provider/model/baseUrl live in `local`, the apiKey
+ // lives in `session`.
     const store: Record<string, unknown> = {};
     const sessionStore: Record<string, unknown> = {};
     (globalThis as unknown as { chrome: unknown }).chrome = {
@@ -145,7 +145,7 @@ describe("provider-config: readProviderConfig", () => {
         },
       },
     };
-    // Expose stores for individual tests to populate.
+ // Expose stores for individual tests to populate.
     (globalThis as unknown as { __testStore: Record<string, unknown> }).__testStore = store;
     (globalThis as unknown as { __testSessionStore: Record<string, unknown> }).__testSessionStore =
       sessionStore;
@@ -169,8 +169,8 @@ describe("provider-config: readProviderConfig", () => {
     store.provider = "openai";
     store.model = "gpt-4o";
     store.baseUrl = "";
-    // The API key is read from chrome.storage.session (in-memory), never from
-    // chrome.storage.local (plaintext on disk).
+ // The API key is read from chrome.storage.session (in-memory), never from
+ // chrome.storage.local (plaintext on disk).
     sessionStore.apiKey = "sk-test";
 
     const config = await readProviderConfig();

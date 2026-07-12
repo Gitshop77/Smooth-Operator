@@ -12,10 +12,10 @@ export async function handleTakeover(
   _ctx: ActionContext,
   action: Extract<Action, { type: "takeover" }>,
 ): Promise<ActionResult> {
-  // Signal intent — the orchestrator intercepts this result and pauses
-  // the loop until the user clicks Resume in the side panel. The
-  // extractedContent surfaces the reason in the next navigator step's
-  // history so the LLM knows why it paused.
+ // Signal intent — the orchestrator intercepts this result and pauses
+ // the loop until the user clicks Resume in the side panel. The
+ // extractedContent surfaces the reason in the next navigator step's
+ // history so the LLM knows why it paused.
   return {
     action,
     success: true,

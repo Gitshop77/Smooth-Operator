@@ -15,8 +15,8 @@ import { isExtensionWithLocal } from "./runtime";
 /** Definition of a per-site instruction pack. */
 export interface DomainSkill {
   /** Root domains to match (e.g. ["github.com"] or ["twitter.com", "x.com"]).
-   * Changed from a single string to an array so multi-domain sites
-   * (Twitter/X) don't require duplicate skill objects. */
+ * Changed from a single string to an array so multi-domain sites
+ * (Twitter/X) don't require duplicate skill objects. */
   domains: string[];
   /** Human-readable site name (used in the prompt header). */
   name: string;
@@ -106,7 +106,7 @@ export const BUILT_IN_SKILLS: readonly DomainSkill[] = [
     },
   },
   {
-    // merged twitter.com + x.com into one entry with domains array
+ // merged twitter.com + x.com into one entry with domains array
     domains: ["twitter.com", "x.com"],
     name: "Twitter/X",
     frontmatter: "Tips for posting, replying, searching, profile navigation",
@@ -176,12 +176,60 @@ if (isExtensionWithLocal() && typeof chrome !== "undefined" && chrome.storage?.o
 }
 
 /**
+ * Length caps for custom-skill content. Custom skills are attacker-influenced
+ * data (anyone with write access to `chrome.storage.local`) that flows into the
+ * TRUSTED system prompt, so unbounded content is a token-bloat / cost-DoS
+ * vector. These caps bound the worst-case prompt contribution of a single
+ * skill; over-long content is truncated rather than dropped so legitimate large
+ * skills still work in a reduced form.
+ */
+const SKILL_LIMITS = {
+  /** Max chars for the skill name (used in the prompt header). */
+  name: 100,
+  /** Max chars for the one-line frontmatter description. */
+  frontmatter: 300,
+  /** Max chars for the full instruction body. */
+  instructions: 8000,
+  /** Max number of match domains. */
+  domains: 20,
+  /** Max chars for a single domain. */
+  domain: 253,
+  /** Max number of dangerous-action entries. */
+  dangerousActions: 50,
+  /** Max chars for a single dangerous-action entry. */
+  dangerousAction: 200,
+  /** Max number of shortcut entries. */
+  shortcuts: 50,
+  /** Max chars for a shortcut label / value. */
+  shortcutField: 300,
+} as const;
+
+/**
+ * Sanitize a single untrusted string that will be injected into the trusted
+ * system prompt: strip control characters (which can obfuscate prompt-injection
+ * payloads or corrupt rendering), neutralize sequences that could forge a
+ * `<system-reminder>` boundary (so a custom skill can't close/open the
+ * injection wrapper and escape its block), and hard-cap the length.
+ */
+function sanitizeSkillText(value: string, maxLen: number): string {
+  const cleaned = value
+ // Strip C0/C1 control chars except tab (\t), newline (\n), carriage return (\r).
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, "")
+ // Neutralize forged system-reminder open/close tags.
+    .replace(/<(\/?\s*system-reminder\b[^>]*)>/gi, "[$1]");
+  return cleaned.length > maxLen ? cleaned.slice(0, maxLen) : cleaned;
+}
+
+/**
  * Normalize a single raw custom-skill object into a validated {@link DomainSkill}.
  *
  * `chrome.storage.local` is the trust boundary for custom skills: a corrupted
  * or injected payload must not flow verbatim into the (TRUSTED) system prompt.
  * We require `name` + at least one `domain`, coerce `instructions`/`frontmatter`
- * to strings, and constrain the optional `dangerousActions` / `shortcuts` shapes.
+ * to strings, constrain the optional `dangerousActions` / `shortcuts` shapes,
+ * and — because this content is untrusted — content-sanitize and length-cap
+ * every field so a hostile/oversized payload cannot inject prompt boundaries or
+ * bloat the system prompt (token / cost DoS).
  * Returns `null` for any object that fails validation so the caller can drop it.
  */
 function normalizeCustomSkill(raw: unknown): DomainSkill | null {
@@ -189,17 +237,35 @@ function normalizeCustomSkill(raw: unknown): DomainSkill | null {
   const s = raw as Record<string, unknown>;
   if (typeof s.name !== "string" || !s.name) return null;
 
-  const domains: string[] = Array.isArray(s.domains)
-    ? s.domains.filter((d): d is string => typeof d === "string" && d.length > 0)
-    : typeof s.domain === "string"
-      ? [s.domain]
-      : [];
+  const name = sanitizeSkillText(s.name, SKILL_LIMITS.name);
+  if (!name) return null; // name collapsed to empty after sanitization
+
+  const domains: string[] = (
+    Array.isArray(s.domains)
+      ? s.domains.filter((d): d is string => typeof d === "string" && d.length > 0)
+      : typeof s.domain === "string"
+        ? [s.domain]
+        : []
+  )
+    .map((d) => sanitizeSkillText(d, SKILL_LIMITS.domain).trim())
+    .filter((d) => d.length > 0)
+    .slice(0, SKILL_LIMITS.domains);
   if (domains.length === 0) return null; // a skill with no domain can never match
 
-  const frontmatter = typeof s.frontmatter === "string" ? s.frontmatter : s.name;
-  const instructions = typeof s.instructions === "string" ? s.instructions : "";
+  const frontmatter =
+    typeof s.frontmatter === "string"
+      ? sanitizeSkillText(s.frontmatter, SKILL_LIMITS.frontmatter)
+      : name;
+  const instructions =
+    typeof s.instructions === "string"
+      ? sanitizeSkillText(s.instructions, SKILL_LIMITS.instructions)
+      : "";
   const dangerousActions = Array.isArray(s.dangerousActions)
-    ? s.dangerousActions.filter((d): d is string => typeof d === "string")
+    ? s.dangerousActions
+        .filter((d): d is string => typeof d === "string")
+        .map((d) => sanitizeSkillText(d, SKILL_LIMITS.dangerousAction))
+        .filter((d) => d.length > 0)
+        .slice(0, SKILL_LIMITS.dangerousActions)
     : undefined;
   const shortcuts =
     s.shortcuts && typeof s.shortcuts === "object"
@@ -208,13 +274,22 @@ function normalizeCustomSkill(raw: unknown): DomainSkill | null {
             Object.entries(s.shortcuts as Record<string, unknown>).filter(
               ([k, v]) => typeof k === "string" && typeof v === "string",
             ) as Array<[string, string]>
-          ),
+          )
+            .slice(0, SKILL_LIMITS.shortcuts)
+            .map(
+              ([k, v]) =>
+                [
+                  sanitizeSkillText(k, SKILL_LIMITS.shortcutField),
+                  sanitizeSkillText(v, SKILL_LIMITS.shortcutField),
+                ] as [string, string],
+            )
+            .filter(([k]) => k.length > 0),
         )
       : undefined;
 
   return {
     domains,
-    name: s.name,
+    name,
     frontmatter,
     instructions,
     ...(dangerousActions && dangerousActions.length ? { dangerousActions } : {}),
@@ -245,9 +320,9 @@ async function loadCustomDomainSkills(): Promise<DomainSkill[]> {
   } catch (e) {
     console.error("[domain-skills] Failed to load custom skills from storage:", e);
   }
-  // Non-extension context or storage access denied: cache the empty result so
-  // the `customSkillsCache !== null` short-circuit works and we don't re-run
-  // the (no-op) path on every call.
+ // Non-extension context or storage access denied: cache the empty result so
+ // the `customSkillsCache !== null` short-circuit works and we don't re-run
+ // the (no-op) path on every call.
   customSkillsCache = [];
   return customSkillsCache;
 }
@@ -275,8 +350,8 @@ export interface SkillFrontmatter {
  */
 export async function getSkillFrontmatter(url: string): Promise<SkillFrontmatter[]> {
   const skills = await getDomainSkills(url);
-  // De-duplicate by name (twitter.com + x.com both match for the same page —
-  // the navigator only needs to see "Twitter/X" once in its available-skills list).
+ // De-duplicate by name (twitter.com + x.com both match for the same page —
+ // the navigator only needs to see "Twitter/X" once in its available-skills list).
   const seen = new Set<string>();
   const out: SkillFrontmatter[] = [];
   for (const s of skills) {
@@ -355,29 +430,24 @@ export async function getDomainSkills(url: string): Promise<DomainSkill[]> {
   }
   const matches: DomainSkill[] = [];
   for (const skill of BUILT_IN_SKILLS) {
-    // check all domains in the array (was single `skill.domain`)
+ // check all domains in the array (was single `skill.domain`)
     if (skill.domains.some((d) => hostnameMatches(hostname, d))) {
       matches.push(skill);
     }
   }
-  // Merge user-defined custom skills (chrome.storage.local). In the demo /
-  // test context (no chrome.storage), this returns [] and the function
-  // behaves identically to the old built-in-only version.
+ // Merge user-defined custom skills (chrome.storage.local). In the demo /
+ // test context (no chrome.storage), this returns [] and the function
+ // behaves identically to the old built-in-only version. Custom skills are
+ // always normalized by `normalizeCustomSkill` (which sets `domains`), so the
+ // legacy single-`domain` fallback here is dead code (finding: redundant
+ // legacy `skill.domain` fallback in getDomainSkills is dead code) and has
+ // been removed.
   const custom = await loadCustomDomainSkills();
   for (const skill of custom) {
-    // Support both the new `domains: string[]` shape and the legacy
-    // `domain: string` shape (custom skills saved before the multi-domain
-    // change). Without this fallback, legacy single-domain skills have
-    // `domains: undefined`, fail the `Array.isArray` check, and are silently
-    // dropped — the user's saved skill stops matching.
-    const domains: string[] = Array.isArray(skill?.domains)
-      ? skill.domains
-      : typeof (skill as unknown as { domain?: unknown })?.domain === "string"
-        ? [(skill as unknown as { domain: string }).domain]
-        : [];
     if (
       typeof skill?.name === "string" &&
-      domains.some((d: string) => hostnameMatches(hostname, d))
+      Array.isArray(skill.domains) &&
+      skill.domains.some((d: string) => hostnameMatches(hostname, d))
     ) {
       matches.push(skill);
     }

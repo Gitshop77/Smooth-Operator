@@ -58,8 +58,8 @@ const fromCredential = (source: Credential, render: (secret: string) => HeaderMa
   });
 
 const secretValue = (secret: string | null | undefined, source: string): string => {
-  // Treat `null` like `undefined`/`""` so a planted/empty entry is indistinguishable
-  // from "no credential here" and falls through the surrounding `orElse()` chain.
+ // Treat `null` like `undefined`/`""` so a planted/empty entry is indistinguishable
+ // from "no credential here" and falls through the surrounding `orElse()` chain.
   if (secret == null || secret === "") throw new MissingCredentialError(source);
   return secret;
 };
@@ -116,9 +116,9 @@ export const config = (name: string): Credential =>
       return secretValue(process.env[name], name);
     }
     const injected = getInjectedEnv()[name];
-    // `injected` is `string | undefined`; a `null` entry in the source map would
-    // be coerced to `undefined` by the index access, and `secretValue` already
-    // treats both `null` and `undefined` as "missing".
+ // `injected` is `string | undefined`; a `null` entry in the source map would
+ // be coerced to `undefined` by the index access, and `secretValue` already
+ // treats both `null` and `undefined` as "missing".
     return secretValue(injected, name);
   });
 

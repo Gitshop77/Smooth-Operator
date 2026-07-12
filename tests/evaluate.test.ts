@@ -15,11 +15,11 @@ import type { ActionContext } from "../src/lib/agent/tools/handlers/types";
 describe("evaluate pageChanged", () => {
   beforeEach(() => {
     document.body.innerHTML = "";
-    // `evaluate` fails closed without an explicit domain allowlist.
-    // The jsdom env runs at http://127.0.0.1:3000, so allowlist "127.0.0.1"
-    // (an IP literal — the hardened hostname matcher rejects single-label
-    // hosts like "localhost" to block TLD-wide matches, so we use a dotted/IP
-    // host that it accepts).
+ // `evaluate` fails closed without an explicit domain allowlist.
+ // The jsdom env runs at http://127.0.0.1:3000, so allowlist "127.0.0.1"
+ // (an IP literal — the hardened hostname matcher rejects single-label
+ // hosts like "localhost" to block TLD-wide matches, so we use a dotted/IP
+ // host that it accepts).
     (globalThis as Record<string, unknown>).__openCoworkDomainConfig = {
       allowedDomains: ["127.0.0.1"],
     };
@@ -55,9 +55,9 @@ describe("evaluate pageChanged", () => {
   });
 
   test("an evaluate whose captured URL differs reports pageChanged: true", async () => {
-    // The handler compares the LIVE location.href against the URL the executor
-    // captured in `ctx.beforeUrl`. A genuine navigation between capture + run
-    // makes them differ → pageChanged true (even with a read-only script).
+ // The handler compares the LIVE location.href against the URL the executor
+ // captured in `ctx.beforeUrl`. A genuine navigation between capture + run
+ // makes them differ → pageChanged true (even with a read-only script).
     const c = ctx();
     c.beforeUrl = "http://127.0.0.2/now-different";
     const res = await handleEvaluate(c, { type: "evaluate", code: "1 + 1" });
@@ -72,11 +72,11 @@ describe("evaluate pageChanged", () => {
     expect(res.message).toContain("BLOCKED evaluate");
   });
 
-  // ─── evaluate sandbox must deny `chrome` access (no secret exfil) ───
+ // ─── evaluate sandbox must deny `chrome` access (no secret exfil) ───
 
   test("evaluate code cannot read chrome.storage.session (throws)", async () => {
-    // A prompt-injection payload trying to exfiltrate the secret store must be
-    // denied by the sandbox rather than reaching the real `chrome` global.
+ // A prompt-injection payload trying to exfiltrate the secret store must be
+ // denied by the sandbox rather than reaching the real `chrome` global.
     await expect(
       handleEvaluate(ctx(), {
         type: "evaluate",
@@ -110,7 +110,7 @@ describe("evaluate pageChanged", () => {
   });
 
   test("document is still available for legitimate DOM evaluation", async () => {
-    // The sandbox hardens `chrome` but keeps the page `document` usable.
+ // The sandbox hardens `chrome` but keeps the page `document` usable.
     const res = await handleEvaluate(ctx(), {
       type: "evaluate",
       code: "document.body.appendChild(document.createElement('span')); return 'ok'",

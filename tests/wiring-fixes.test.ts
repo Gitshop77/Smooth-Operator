@@ -4,20 +4,20 @@
  * so it doesn't regress back to dead code.
  *
  * Covers:
- *   - EvaluatorComb + the orchestrator's `runDeterministicEvaluators`
- *     fast-path (string + URL evaluators).
- *   - `press_and_hold` action schema, ACTION_METADATA entry, loop
- *     normalization, and native-click fallback.
- *   - `getFormatInstructions` returns a non-empty string for any Zod schema
- *     (the prompt-injection point used by llm-direct.ts).
- *   - parse-error feedback — the orchestrator's parse-retry loop appends a
- *     `<parse_error>` block to the next attempt's loopWarning.
- *   - `ask_human` password mode — the executor returns a redacted message +
- *     extractedContent (the real value never reaches the LLM).
- *   - `select_dropdown` custom-dropdown fallback — clicks the dropdown,
- *     finds the matching `[role=option]`, and clicks it.
- *   - `find_elements` with `xpath:` / `id:` / `tag:` prefixes resolves via
- *     `findByLocator` instead of bare `querySelectorAll`.
+ * - EvaluatorComb + the orchestrator's `runDeterministicEvaluators`
+ * fast-path (string + URL evaluators).
+ * - `press_and_hold` action schema, ACTION_METADATA entry, loop
+ * normalization, and native-click fallback.
+ * - `getFormatInstructions` returns a non-empty string for any Zod schema
+ * (the prompt-injection point used by llm-direct.ts).
+ * - parse-error feedback — the orchestrator's parse-retry loop appends a
+ * `<parse_error>` block to the next attempt's loopWarning.
+ * - `ask_human` password mode — the executor returns a redacted message +
+ * extractedContent (the real value never reaches the LLM).
+ * - `select_dropdown` custom-dropdown fallback — clicks the dropdown,
+ * finds the matching `[role=option]`, and clicks it.
+ * - `find_elements` with `xpath:` / `id:` / `tag:` prefixes resolves via
+ * `findByLocator` instead of bare `querySelectorAll`.
  *
  * The integration-level fixes (CDP debugger leak, alarm listener wiring,
  * screenshot route, etc.) require the full orchestrator + extension plumbing
@@ -71,9 +71,9 @@ describe("EvaluatorComb (deterministic-evaluator fast-path)", () => {
     const result = await comb.evaluate({
       url: {
         prediction: "https://example.com/products/123?ref=abc",
-        // Reference URL needs a protocol so the URL parser can extract a
-        // `host + pathname` (bare `example.com/...` has no protocol and
-        // produces an empty basePath, which the evaluator treats as no match).
+ // Reference URL needs a protocol so the URL parser can extract a
+ // `host + pathname` (bare `example.com/...` has no protocol and
+ // produces an empty basePath, which the evaluator treats as no match).
         referenceUrl: "https://example.com/products/123",
       },
     });
@@ -143,7 +143,7 @@ describe("press_and_hold action wiring", () => {
   test("isEquivalentAction: press_and_hold compared by index + hold_ms", () => {
     const a = { type: "press_and_hold", index: 1, hold_ms: 1500, delay_ms: 0 } as AgentAction;
     const b = { type: "press_and_hold", index: 1, hold_ms: 1500, delay_ms: 100 } as AgentAction;
-    // delay_ms differs but hold_ms matches → equivalent (delay is a UX knob, not a page-effect knob)
+ // delay_ms differs but hold_ms matches → equivalent (delay is a UX knob, not a page-effect knob)
     expect(isEquivalentAction(a, b)).toBe(true);
     const c = { type: "press_and_hold", index: 1, hold_ms: 3000, delay_ms: 0 } as AgentAction;
     expect(isEquivalentAction(a, c)).toBe(false);
@@ -158,14 +158,14 @@ describe("press_and_hold action wiring", () => {
   });
 
   test("executeAction press_and_hold falls back to native click when CDP unavailable", async () => {
-    // Set up a DOM element at index 1.
+ // Set up a DOM element at index 1.
     const btn = document.createElement("button");
     btn.textContent = "Hold me";
     let clicked = false;
     btn.addEventListener("click", () => { clicked = true; });
     document.body.appendChild(btn);
     const state = makeState({ selectorMap: { 1: btn } });
-    // hold_ms=0 so the test doesn't actually wait.
+ // hold_ms=0 so the test doesn't actually wait.
     const action = { type: "press_and_hold", index: 1, hold_ms: 0, delay_ms: 0 } as AgentAction;
     const result = await executeAction(action, state);
     expect(result.success).toBe(true);
@@ -198,8 +198,8 @@ describe("getFormatInstructions", () => {
 describe("parse-error feedback contract", () => {
   test("AgentStepRequest.loopWarning is a string field (mutable for parse-error injection)", async () => {
     const { parseAgentOutput } = await import("../src/lib/agent/output-parser");
-    // A malformed response → parseAgentOutput returns ok:false with an error
-    // the orchestrator can interpolate into a <parse_error> block.
+ // A malformed response → parseAgentOutput returns ok:false with an error
+ // the orchestrator can interpolate into a <parse_error> block.
     const result = parseAgentOutput("not json at all");
     expect(result.ok).toBe(false);
     expect(result.error).toBeTruthy();
@@ -207,8 +207,8 @@ describe("parse-error feedback contract", () => {
   });
 
   test("parse_error block format matches the orchestrator's injection contract", () => {
-    // Mirror the exact format the orchestrator uses so a future change to
-    // either side breaks this test.
+ // Mirror the exact format the orchestrator uses so a future change to
+ // either side breaks this test.
     const error = "JSON parse error: Unexpected token";
     const raw = "not json at all";
     const block =
@@ -242,13 +242,13 @@ describe("ask_human password mode", () => {
     } as AgentAction;
     const result = await executeAction(action, makeState());
     expect(result.success).toBe(true);
-    // The real value must NOT appear in either LLM-bound field.
+ // The real value must NOT appear in either LLM-bound field.
     expect(result.message).not.toContain("super-secret-api-key");
     expect(result.extractedContent).not.toContain("super-secret-api-key");
-    // Both should mention "REDACTED" so the LLM knows a value was provided.
+ // Both should mention "REDACTED" so the LLM knows a value was provided.
     expect(result.message).toContain("redacted");
     expect(result.extractedContent).toContain("REDACTED");
-    // "super-secret-api-key" is 20 chars (s-u-p-e-r + - + s-e-c-r-e-t + - + a-p-i + - + k-e-y = 5+1+6+1+3+1+3 = 20).
+ // "super-secret-api-key" is 20 chars (s-u-p-e-r + - + s-e-c-r-e-t + - + a-p-i + - + k-e-y = 5+1+6+1+3+1+3 = 20).
     expect(result.extractedContent).toContain("20 chars");
   });
 
@@ -265,8 +265,8 @@ describe("ask_human password mode", () => {
   });
 
   test("password mode AskHumanSchema field defaults to 'input'", () => {
-    // Sanity: the schema accepts the action without mode (default) AND with
-    // explicit "password" mode.
+ // Sanity: the schema accepts the action without mode (default) AND with
+ // explicit "password" mode.
     const withoutMode = { type: "ask_human", question: "?" } as AgentAction;
     const withPassword = { type: "ask_human", question: "?", mode: "password" } as AgentAction;
     expect(withoutMode).toBeDefined();
@@ -278,7 +278,7 @@ describe("ask_human password mode", () => {
 
 describe("select_dropdown custom-dropdown fallback", () => {
   test("clicks the dropdown + matching [role=option]", async () => {
-    // Build a custom dropdown: a div[role=combobox] with two [role=option] children.
+ // Build a custom dropdown: a div[role=combobox] with two [role=option] children.
     const dropdown = document.createElement("div");
     dropdown.setAttribute("role", "combobox");
     dropdown.tabIndex = 0;
@@ -292,8 +292,8 @@ describe("select_dropdown custom-dropdown fallback", () => {
     dropdown.appendChild(opt2);
     document.body.appendChild(dropdown);
 
-    // Track ONLY clicks on the dropdown itself (not bubbled-from-children
-    // clicks) — the dropdown.click() call to open it.
+ // Track ONLY clicks on the dropdown itself (not bubbled-from-children
+ // clicks) — the dropdown.click() call to open it.
     let openedClickCount = 0;
     dropdown.addEventListener("click", (e) => {
       if (e.target === dropdown) openedClickCount++;
@@ -400,7 +400,7 @@ describe("LoopDetector page-fingerprint stagnant detection", () => {
 
   test("shouldWarnStagnant returns the count when the page is unchanged across STAGNANT_THRESHOLD", async () => {
     const det = new LoopDetector();
-    // Same page state 6 times (STAGNANT_THRESHOLD is 5).
+ // Same page state 6 times (STAGNANT_THRESHOLD is 5).
     for (let i = 0; i < 6; i++) {
       await det.recordPageState("https://example.com", "same text", 100);
     }

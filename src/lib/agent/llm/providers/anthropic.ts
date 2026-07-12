@@ -30,9 +30,9 @@ const auth = (options: ProviderAuthOption<"optional">) => {
 };
 
 export function configure(input: Config = {}) {
-  // (SSRF guard): validate any user-supplied baseURL override before
-  // building the route/endpoint. The trusted default is exempt.
-  assertSafeUserBaseURL(input.baseURL);
+ // (SSRF guard): validate any user-supplied baseURL override before
+ // building the route/endpoint. The trusted default is exempt.
+  assertSafeUserBaseURL(input.baseURL, id);
   const route = make({
     id: "anthropic-messages",
     provider: id,
@@ -44,7 +44,7 @@ export function configure(input: Config = {}) {
     framing: Framing.sse,
     headers: {
       "anthropic-version": AnthropicMessages.API_VERSION,
-      // Lets browser contexts (extension service worker) call the API directly.
+ // Lets browser contexts (extension service worker) call the API directly.
       "anthropic-dangerous-direct-browser-access": "true",
     },
   });

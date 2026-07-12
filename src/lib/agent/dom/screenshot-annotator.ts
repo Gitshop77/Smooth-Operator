@@ -5,8 +5,8 @@
  * `extension/background.ts` and `tests/dom-extraction-enhancements.test.ts`.
  *
  * All historically-exported symbols are re-exported here:
- *   - `annotateScreenshot`, `DEFAULT_ANNOTATE_PALETTE`,
- *     `AnnotatableElement` (interface), `AnnotateOptions` (interface)
+ * - `annotateScreenshot`, `DEFAULT_ANNOTATE_PALETTE`,
+ * `AnnotatableElement` (interface), `AnnotateOptions` (interface)
  *
  * New code should import from
  * `@/lib/agent/dom/annotation/screenshot-annotator` or from the top-level

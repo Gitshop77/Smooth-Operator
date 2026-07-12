@@ -3,18 +3,18 @@
  *
  * Two stopping conditions (both opt-in via the orchestrator config):
  *
- *   1. **Parse-failure threshold** — N consecutive navigator steps produced
- *      unparseable output. Tracked via a counter the orchestrator passes in
- *      (incremented on parse failure, reset on any successful step).
+ * 1. **Parse-failure threshold** — N consecutive navigator steps produced
+ * unparseable output. Tracked via a counter the orchestrator passes in
+ * (incremented on parse failure, reset on any successful step).
  *
- *   2. **Repeating-action threshold** — the last N actions are all
- *      {@link isEquivalentAction} to each other (and the last action isn't
- *      `input`/`alert_send_keys` — those are legitimately repeatable *within a
- *      single field*: typing the same text into the same field repeatedly is
- *      fine, sending keys to multiple alert prompts is fine). The per-K
- *      (consecutive) check excludes these types, but the whole-history branch
- *      still flags typing the *same text* into 3+ *different* fields, which is
- *      suspicious.
+ * 2. **Repeating-action threshold** — the last N actions are all
+ * {@link isEquivalentAction} to each other (and the last action isn't
+ * `input`/`alert_send_keys` — those are legitimately repeatable *within a
+ * single field* typing the same text into the same field repeatedly is
+ * fine, sending keys to multiple alert prompts is fine). The per-K
+ * (consecutive) check excludes these types, but the whole-history branch
+ * still flags typing the *same text* into 3+ *different* fields, which is
+ * suspicious.
  *
  * The orchestrator already has a `LoopDetector` that emits escalating
  * warnings at 5 / 8 / 12 repeats. This early-stop is a stricter, opt-in
@@ -57,6 +57,22 @@ export interface EarlyStopResult {
 const REPEATABLE_ACTION_TYPES = new Set<string>(["input", "alert_send_keys"]);
 
 /**
+ * Action types that should NEVER trigger the repeating-action early-stop.
+ *
+ * `alert_accept` / `alert_dismiss` / `alert_get_text` are one-shot UI
+ * interactions with no content-bearing parameters — `isEquivalentAction`
+ * treats them as always-equivalent, so three of them in a row (e.g. dismissing
+ * a run of genuinely-distinct JS dialogs) would otherwise be misread as a
+ * stuck loop and halt the run. They are excluded entirely from the
+ * repeating-action check.
+ */
+const NEVER_STOP_ON_REPEAT = new Set<string>([
+  "alert_accept",
+  "alert_dismiss",
+  "alert_get_text",
+]);
+
+/**
  * Clamp a threshold to a positive integer. A non-positive, NaN, or missing
  * value falls back to `fallback` so `earlyStop` can't be trivially disabled
  * (parsingFailure<=0 → stop on the first step) or made degenerate
@@ -71,10 +87,10 @@ function clampThreshold(v: unknown, fallback: number): number {
  * Check whether the run should early-stop.
  *
  * The caller passes in:
- *   - `history` — the navigator history (used to extract the last K actions).
- *   - `consecutiveParseFailures` — current counter (incremented on parse
- *     failure, reset on any successful step).
- *   - `thresholds` — the configured thresholds.
+ * - `history` — the navigator history (used to extract the last K actions).
+ * - `consecutiveParseFailures` — current counter (incremented on parse
+ * failure, reset on any successful step).
+ * - `thresholds` — the configured thresholds.
  *
  * The function is pure — it doesn't mutate any state. The orchestrator owns
  * the counters and decides what to do with the result (typically: emit a
@@ -85,17 +101,17 @@ export function earlyStop(
   consecutiveParseFailures: number,
   thresholds: EarlyStopThresholds = DEFAULT_EARLY_STOP_THRESHOLDS,
 ): EarlyStopResult {
-  // Normalize + clamp the (possibly attacker-influenced / misconfigured)
-  // thresholds so a non-positive value can't abort every run instantly or
-  // make the repeating-action slice degenerate (e.g. slice(-0) returns the
-  // whole array).
+ // Normalize + clamp the (possibly attacker-influenced / misconfigured)
+ // thresholds so a non-positive value can't abort every run instantly or
+ // make the repeating-action slice degenerate (e.g. slice(-0) returns the
+ // whole array).
   const parsingFailure = clampThreshold(thresholds.parsingFailure, DEFAULT_EARLY_STOP_THRESHOLDS.parsingFailure);
   const repeatingAction = clampThreshold(thresholds.repeatingAction, DEFAULT_EARLY_STOP_THRESHOLDS.repeatingAction);
   const parseFails = Number.isFinite(consecutiveParseFailures) && consecutiveParseFailures > 0
     ? Math.floor(consecutiveParseFailures)
     : 0;
 
-  // Case 1: K consecutive parse failures.
+ // Case 1: K consecutive parse failures.
   if (parseFails >= parsingFailure) {
     return {
       stop: true,
@@ -103,23 +119,29 @@ export function earlyStop(
     };
   }
 
-  // Case 2: last K actions are all equivalent to the last action (and the
-  // last action isn't a legitimately-repeatable TYPE-like action).
-  // Filter out any results with no associated action so a malformed/empty
-  // history entry can't crash the index into `lastAction.type`.
+ // Case 2: last K actions are all equivalent to the last action (and the
+ // last action isn't a legitimately-repeatable TYPE-like action).
+ // Filter out any results with no associated action so a malformed/empty
+ // history entry can't crash the index into `lastAction.type`.
   const allActions = history
     .flatMap((h) => h.results.map((r) => r.action))
     .filter((a): a is Action => a != null);
   if (allActions.length === 0) return { stop: false, reason: "" };
   const lastAction = allActions[allActions.length - 1];
   if (!lastAction) return { stop: false, reason: "" };
+
+ // One-shot UI interactions must never halt the run on a repeat check.
+  if (NEVER_STOP_ON_REPEAT.has(lastAction.type)) {
+    return { stop: false, reason: "" };
+  }
+
   const k = repeatingAction;
   const lastK = allActions.slice(-k);
   if (lastK.length < k) return { stop: false, reason: "" };
 
   if (REPEATABLE_ACTION_TYPES.has(lastAction.type)) {
-    // For TYPE-like actions, count across the WHOLE history (typing the
-    // same text in 3+ different fields IS suspicious).
+ // For TYPE-like actions, count across the WHOLE history (typing the
+ // same text in 3+ different fields IS suspicious).
     const sameCount = allActions.filter((a) => isEquivalentAction(a, lastAction)).length;
     if (sameCount >= k) {
       return {
@@ -130,9 +152,9 @@ export function earlyStop(
     return { stop: false, reason: "" };
   }
 
-  // For non-TYPE actions: only the last K matter (a few equivalent clicks in
-  // a row is suspicious; the same click 3 steps ago + 10 different actions
-  // in between is NOT).
+ // For non-TYPE actions: only the last K matter (a few equivalent clicks in
+ // a row is suspicious; the same click 3 steps ago + 10 different actions
+ // in between is NOT).
   const allEquivalent = lastK.every((a) => isEquivalentAction(a, lastAction));
   if (allEquivalent) {
     return {

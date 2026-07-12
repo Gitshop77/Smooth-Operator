@@ -21,9 +21,9 @@ const SUGGESTIONS = [
 export function ChatView() {
   const sendChat = useSendChat();
   const { toast } = useToast();
-  // `timestamp: 0` avoids an SSR/client hydration mismatch (`Date.now()`
-  // differs between server render and client hydration). The greeting is
-  // static so the exact timestamp doesn't matter.
+ // `timestamp: 0` avoids an SSR/client hydration mismatch (`Date.now()`
+ // differs between server render and client hydration). The greeting is
+ // static so the exact timestamp doesn't matter.
   const [messages, setMessages] = React.useState<ChatMessage[]>(() => [
     {
       id: "m0",
@@ -35,22 +35,22 @@ export function ChatView() {
   const [input, setInput] = React.useState("");
   const [streaming, setStreaming] = React.useState<string | null>(null);
   const scrollRef = React.useRef<HTMLDivElement>(null);
-  // AbortController for the in-flight chat fetch, kept in a ref (not state)
-  // so `.abort()` from the Clear handler doesn't trigger a re-render.
+ // AbortController for the in-flight chat fetch, kept in a ref (not state)
+ // so `.abort()` from the Clear handler doesn't trigger a re-render.
   const abortRef = React.useRef<AbortController | null>(null);
-  // Track the typewriter setTimeout chain so `clearChat` can cancel it.
+ // Track the typewriter setTimeout chain so `clearChat` can cancel it.
   const typewriterTimeouts = React.useRef<number[]>([]);
-  // Boolean flag checked at the top of every `tick`. Set by `clearChat` so
-  // any tick already in the microtask queue returns immediately without
-  // writing to state.
+ // Boolean flag checked at the top of every `tick`. Set by `clearChat` so
+ // any tick already in the microtask queue returns immediately without
+ // writing to state.
   const typewriterAborted = React.useRef(false);
 
   React.useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, streaming]);
 
-  // On unmount, clear any pending typewriter timeouts so they don't fire
-  // after the component is gone.
+ // On unmount, clear any pending typewriter timeouts so they don't fire
+ // after the component is gone.
   React.useEffect(() => {
     return () => {
       typewriterTimeouts.current.forEach((id) => clearTimeout(id));
@@ -58,12 +58,12 @@ export function ChatView() {
     };
   }, []);
 
-  // On unmount, abort any in-flight chat fetch. The `useSendChat` mutation's
-  // `onError` callback fires the "Chat backend offline" toast — without
-  // aborting on unmount, navigating away from the Chat view while a request
-  // is in flight would surface that toast on the next view. Aborting causes
-  // `fetch` to reject with an `AbortError`, which the `onError` handler
-  // short-circuits via the `isAbort` check.
+ // On unmount, abort any in-flight chat fetch. The `useSendChat` mutation's
+ // `onError` callback fires the "Chat backend offline" toast — without
+ // aborting on unmount, navigating away from the Chat view while a request
+ // is in flight would surface that toast on the next view. Aborting causes
+ // `fetch` to reject with an `AbortError`, which the `onError` handler
+ // short-circuits via the `isAbort` check.
   React.useEffect(() => {
     return () => {
       abortRef.current?.abort();
@@ -71,19 +71,19 @@ export function ChatView() {
   }, []);
 
   const finishAssistantReply = (text: string) => {
-    // Reset the abort flag for this fresh reply. A previous Clear may have
-    // set it true; we flip it back so ticks aren't no-ops.
+ // Reset the abort flag for this fresh reply. A previous Clear may have
+ // set it true; we flip it back so ticks aren't no-ops.
     typewriterAborted.current = false;
     let i = 0;
     setStreaming("");
     const tick = () => {
-      // If Clear was clicked between scheduling and firing, bail immediately.
+ // If Clear was clicked between scheduling and firing, bail immediately.
       if (typewriterAborted.current) return;
       i += Math.max(1, Math.round(Math.random() * 4));
       setStreaming(text.slice(0, i));
       if (i < text.length) {
-        // Track every scheduled timeout so `clearChat` can cancel the
-        // whole chain in O(N).
+ // Track every scheduled timeout so `clearChat` can cancel the
+ // whole chain in O(N).
         const id = window.setTimeout(tick, 18);
         typewriterTimeouts.current.push(id);
       } else {
@@ -98,11 +98,11 @@ export function ChatView() {
     typewriterTimeouts.current.push(id);
   };
 
-  // `send` is defined in the render body, so the purity rule flags
-  // `Date.now()` calls inside it. We take the timestamp as a parameter
-  // from the caller (an event-handler lambda, exempt from the rule)
-  // instead of computing it here. The id and timestamp are derived from
-  // the same `ts` so they stay consistent.
+ // `send` is defined in the render body, so the purity rule flags
+ // `Date.now()` calls inside it. We take the timestamp as a parameter
+ // from the caller (an event-handler lambda, exempt from the rule)
+ // instead of computing it here. The id and timestamp are derived from
+ // the same `ts` so they stay consistent.
   const send = (text: string, ts: number) => {
     const trimmed = text.trim();
     if (!trimmed || streaming) return;
@@ -115,16 +115,16 @@ export function ChatView() {
     setMessages((m) => [...m, userMsg]);
     setInput("");
 
-    // Create a fresh AbortController for this run. Abort the previous
-    // controller (if any) before creating a new one so rapid Enter keypresses
-    // don't fire concurrent fetches whose replies clobber each other.
+ // Create a fresh AbortController for this run. Abort the previous
+ // controller (if any) before creating a new one so rapid Enter keypresses
+ // don't fire concurrent fetches whose replies clobber each other.
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
-    // Pass conversation history so the LLM has context for follow-up questions.
-    // Filter out the greeting (id "m0") and error messages (id "e...") so the
-    // LLM doesn't receive fabricated prior assistant replies as context.
+ // Pass conversation history so the LLM has context for follow-up questions.
+ // Filter out the greeting (id "m0") and error messages (id "e...") so the
+ // LLM doesn't receive fabricated prior assistant replies as context.
     const history = messages
       .filter((m) => m.id !== "m0" && !m.id.startsWith("e"))
       .map((m) => ({ role: m.role, content: m.text }));
@@ -135,8 +135,8 @@ export function ChatView() {
           const reply =
             data && typeof data.content === "string" ? data.content.trim() : "";
           if (!reply) {
-            // The mini-service answered but returned no content. Surface the
-            // real error (if any) instead of fabricating a reply.
+ // The mini-service answered but returned no content. Surface the
+ // real error (if any) instead of fabricating a reply.
             const apiError =
               data && typeof data.error === "string" ? data.error : "No content returned.";
             setMessages((m) => [
@@ -158,8 +158,8 @@ export function ChatView() {
           finishAssistantReply(reply);
         },
         onError: (err: unknown) => {
-          // If the fetch was aborted (user clicked Clear), don't surface an
-          // error toast — the abort was intentional.
+ // If the fetch was aborted (user clicked Clear), don't surface an
+ // error toast — the abort was intentional.
           const isAbort =
             err instanceof DOMException && err.name === "AbortError";
           if (isAbort) return;
@@ -183,23 +183,23 @@ export function ChatView() {
     );
   };
 
-  // Clear button handler. Aborts the in-flight fetch (if any) AND cancels
-  // the typewriter setTimeout chain so pending ticks can't re-show the
-  // typing indicator or append a ghost reply after Clear.
+ // Clear button handler. Aborts the in-flight fetch (if any) AND cancels
+ // the typewriter setTimeout chain so pending ticks can't re-show the
+ // typing indicator or append a ghost reply after Clear.
   const clearChat = () => {
-    // 1. Cancel the in-flight LLM fetch.
+ // 1. Cancel the in-flight LLM fetch.
     if (abortRef.current) {
       abortRef.current.abort();
       abortRef.current = null;
     }
-    // 2. Cancel the typewriter setTimeout chain.
+ // 2. Cancel the typewriter setTimeout chain.
     typewriterAborted.current = true;
     typewriterTimeouts.current.forEach((id) => clearTimeout(id));
     typewriterTimeouts.current = [];
-    // 3. Reset the visible state. `setStreaming(null)` hides the typing
-    //    indicator; `setMessages([greeting])` resets the list. With the
-    //    timeouts cleared + the abort flag set, no pending tick can
-    //    re-populate either.
+ // 3. Reset the visible state. `setStreaming(null)` hides the typing
+ // indicator; `setMessages([greeting])` resets the list. With the
+ // timeouts cleared + the abort flag set, no pending tick can
+ // re-populate either.
     setStreaming(null);
     setMessages([
       {
@@ -316,8 +316,8 @@ export function ChatView() {
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                // Guard Enter the same way the Send button is guarded
-                // (`disabled={... || streaming !== null}`).
+ // Guard Enter the same way the Send button is guarded
+ // (`disabled={... || streaming !== null}`).
                 if (streaming !== null) return;
                 send(input, Date.now());
               }

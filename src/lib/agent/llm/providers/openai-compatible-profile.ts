@@ -41,14 +41,14 @@ export const profiles = {
   openrouter: { provider: "openrouter", baseURL: "https://openrouter.ai/api/v1", supportsStructuredOutput: true },
   together: { provider: "together", baseURL: "https://api.together.xyz/v1", supportsStructuredOutput: true },
   xai: { provider: "xai", baseURL: "https://api.x.ai/v1", supportsStructuredOutput: true },
-  // Ollama's OpenAI-compatible shim accepts `response_format: { type: "json_object" }`
-  // but does NOT honor the full `json_schema` variant reliably across model
-  // families. Default false so the in-prompt schema fallback fires.
+ // Ollama's OpenAI-compatible shim accepts `response_format: { type: "json_object" }`
+ // but does NOT honor the full `json_schema` variant reliably across model
+ // families. Default false so the in-prompt schema fallback fires.
   ollama: { provider: "ollama", baseURL: "http://localhost:11434/v1", supportsStructuredOutput: false },
   opencode: { provider: "opencode", baseURL: "https://opencode.ai/api/v1", supportsStructuredOutput: true },
-  // LiteLLM is a proxy — structured-output support depends on the upstream
-  // model it routes to, which we can't know at config time. Default false so
-  // the fallback fires; users whose upstream supports it can override.
+ // LiteLLM is a proxy — structured-output support depends on the upstream
+ // model it routes to, which we can't know at config time. Default false so
+ // the fallback fires; users whose upstream supports it can override.
   litellm: { provider: "litellm", baseURL: "http://localhost:4000/v1", supportsStructuredOutput: false },
 } as const satisfies Record<string, OpenAICompatibleProfile>;
 
@@ -56,15 +56,37 @@ export const byProvider: Record<string, OpenAICompatibleProfile> = Object.fromEn
   Object.values(profiles).map((p) => [p.provider, p]),
 );
 
+/**
+ * Thrown when a user-supplied LLM `baseURL` fails the SSRF guard. Callers can
+ * branch on `instanceof UnsafeBaseUrlError` to surface a specific "invalid /
+ * unsafe endpoint" message rather than string-matching a generic `Error`.
+ */
+export class UnsafeBaseUrlError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnsafeBaseUrlError";
+  }
+}
+
 // (SSRF guard): a user-supplied `baseURL` is untrusted input. Validate it
 // before it is used to build a provider profile / endpoint, so the service
 // worker cannot be steered at a loopback, RFC1918, or cloud-metadata address.
 //
 // The curated `profiles` table (Ollama/LiteLLM loopback defaults) is built
-// directly from `profiles` and never passes through this check. The localhost
-// exemption below is therefore scoped to those two local providers only — any
-// other provider id (or an unknown provenance) is held to the strict
-// `validateLlmBaseUrl` policy that rejects loopback/RFC1918/metadata URLs.
+// directly from `profiles` and never passes through this check. The narrow
+// localhost exemption below is scoped to those two local providers ONLY — when
+// `provider` is explicitly `ollama`/`litellm` AND the URL matches the exact
+// curated origin, the stricter `isAllowedLlmBaseUrl` (which still rejects
+// private/metadata addresses) is applied. For every other provider — or when
+// provenance is unknown — the strict `validateLlmBaseUrl` policy is applied,
+// which rejects loopback / RFC1918 / cloud-metadata URLs. This closes the hole
+// where an injected `http://localhost:11434` could pass the guard when routed
+// through an arbitrary provider id (e.g. `deepseek`). `openai-compatible.ts`
+// actually passes `profile.provider`, so the exemption is applied per-provider
+// rather than universally.
+//
+// Failures throw {@link UnsafeBaseUrlError} so callers can branch on the type
+// rather than string-matching the message.
 const LOCAL_PROVIDER_IDS = new Set(["ollama", "litellm"]);
 
 /** True iff `url`'s origin exactly matches a curated local-provider endpoint. */
@@ -77,23 +99,6 @@ function isCuratedLocalOrigin(url: string): boolean {
   }
 }
 
-/**
- * Validate a USER-SUPPLIED `baseURL` override before it is used to build a
- * provider profile / endpoint.
- *
- * The localhost exemption (Ollama `http://localhost:11434`, LiteLLM
- * `http://localhost:4000`) is ONLY granted when `provider` is explicitly one
- * of those local providers AND the URL matches their exact curated origin. For
- * every other provider — or when provenance is unknown (`provider` omitted) —
- * the strict {@link validateLlmBaseUrl} policy is applied, which rejects
- * loopback / RFC1918 / cloud-metadata URLs. This closes the hole where an
- * injected `http://localhost:11434` could pass the guard when routed through an
- * arbitrary provider id (e.g. `deepseek`).
- *
- * Note: the final fetch URL is also re-checked at the transport layer
- * (`transport-http.ts`); that enforcement point is the authoritative
- * defense-in-depth check and is tracked separately.
- */
 export const assertSafeUserBaseURL = (
   baseURL: string | undefined,
   provider?: string,
@@ -101,12 +106,12 @@ export const assertSafeUserBaseURL = (
   if (!baseURL) return; // no user-supplied override → use the curated profile
   if (provider && LOCAL_PROVIDER_IDS.has(provider) && isCuratedLocalOrigin(baseURL)) {
     if (!isAllowedLlmBaseUrl(baseURL)) {
-      throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${baseURL}`);
+      throw new UnsafeBaseUrlError(`Unsafe LLM baseUrl rejected (SSRF guard): ${baseURL}`);
     }
     return;
   }
   const res = validateLlmBaseUrl(baseURL);
   if (!res.ok) {
-    throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${baseURL} (${res.reason})`);
+    throw new UnsafeBaseUrlError(`Unsafe LLM baseUrl rejected (SSRF guard): ${baseURL} (${res.reason})`);
   }
 };

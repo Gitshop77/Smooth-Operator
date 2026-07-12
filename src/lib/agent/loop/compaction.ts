@@ -4,8 +4,8 @@
  * the per-step token budget bounded without losing long-horizon context.
  *
  * Triggers when both:
- *   - `step - lastCompactionStep >= compactionStepInterval`, AND
- *   - `historyTextLength >= compactionCharThreshold`
+ * - `step - lastCompactionStep >= compactionStepInterval`, AND
+ * - `historyTextLength >= compactionCharThreshold`
  *
  * Summarizes the oldest steps — INCLUDING the FIRST item / init — for context,
  * while keeping the most recent `KEEP_RECENT` items intact. `partitionHistory`
@@ -36,17 +36,17 @@ Step history to summarize:`;
 /**
  * Decide whether compaction should run on this step.
  *
- * @param step                 Current step number.
- * @param lastCompactionStep   Step number of the last compaction (undefined = never).
- * @param historyTextLength    Current rendered-history length in characters.
- *   This should be the ACTUAL serialized/rendered length (e.g.
- *   `renderHistoryForSummarization(...).length`), not a per-item estimate such
- *   as `history.length * 500`. A non-validated proxy can drift far from the
- *   real size once extracted content accumulates, defeating the context-window
- *   protection this gate exists to provide. The caller (orchestrator) supplies
- *   the real rendered length.
- * @param interval             Minimum steps between compactions.
- * @param threshold            Minimum history length (chars) before compaction.
+ * @param step Current step number.
+ * @param lastCompactionStep Step number of the last compaction (undefined = never).
+ * @param historyTextLength Current rendered-history length in characters.
+ * This should be the ACTUAL serialized/rendered length (e.g.
+ * `renderHistoryForSummarization(...).length`), not a per-item estimate such
+ * as `history.length * 500`. A non-validated proxy can drift far from the
+ * real size once extracted content accumulates, defeating the context-window
+ * protection this gate exists to provide. The caller (orchestrator) supplies
+ * the real rendered length.
+ * @param interval Minimum steps between compactions.
+ * @param threshold Minimum history length (chars) before compaction.
  */
 export function shouldCompact(
   step: number,
@@ -55,9 +55,14 @@ export function shouldCompact(
   interval: number,
   threshold: number
 ): boolean {
-  // Guard against a non-validated / malformed length driving a safety-relevant
-  // decision: an infinite or negative value must never trigger compaction.
+ // Guard against a non-validated / malformed length driving a safety-relevant
+ // decision: an infinite or negative value must never trigger compaction.
   if (!Number.isFinite(historyTextLength) || historyTextLength < 0) return false;
+ // Validate the gate config: a degenerate interval/threshold (0, negative, NaN,
+ // or non-finite) would make the gate fail-open to always-compact. Both must be
+ // positive, finite numbers for compaction to ever run.
+  if (!Number.isFinite(interval) || interval <= 0) return false;
+  if (!Number.isFinite(threshold) || threshold <= 0) return false;
   const stepGap = step - (lastCompactionStep ?? 0);
   return stepGap >= interval && historyTextLength >= threshold;
 }
@@ -191,17 +196,17 @@ export function buildCompactionRequest(history: HistoryItem[]): string {
  * truth) so both sanitizers stay in sync.
  */
 export function sanitizeCompactedMemory(memory: string): string {
-  // 1) Replace ONLY the tag markers (`<tag>`/`</tag>`, with or without
-  //    attributes) with `[tag]`. Content between tags is preserved.
+ // 1) Replace ONLY the tag markers (`<tag>`/`</tag>`, with or without
+ // attributes) with `[tag]`. Content between tags is preserved.
   const tagStripped = memory.replace(
     new RegExp(`<\\/?(?:${PROMPT_TAGS.join("|")})[^>]*>`, "g"),
     "[tag]",
   );
-  // 2) Redact high-confidence secrets echoed by the summarizer (defense in
-  //    depth — the navigator must not receive a real key/JWT).
+ // 2) Redact high-confidence secrets echoed by the summarizer (defense in
+ // depth — the navigator must not receive a real key/JWT).
   const secretsOut = redactSecrets(tagStripped);
-  // 3) Run the shared untrusted sanitizer (injection phrases, %token%,
-  //    NFKC + zero-width). Tag markers are already gone, so its block-redaction
-  //    pattern cannot over-redact content.
+ // 3) Run the shared untrusted sanitizer (injection phrases, %token%,
+ // NFKC + zero-width). Tag markers are already gone, so its block-redaction
+ // pattern cannot over-redact content.
   return sanitizeUntrusted(secretsOut);
 }

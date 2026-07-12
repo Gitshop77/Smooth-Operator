@@ -17,7 +17,7 @@ import { db } from '@/lib/db';
 //
 // Field *names* are preserved; only values are masked. Matching is
 // case-insensitive SUBSTRING against the fragment list below, so variants like
-// `username`, `fullname`, `e-mail`, `cc-number`, `phone_number` are caught
+// `login`, `fullname`, `e-mail`, `cc-number`, `phone_number` are caught
 // (the prior exact-anchor regex missed them all). We redact on suspicion: a
 // false positive costs one masked benign value, a false negative leaks a
 // secret, so we bias toward masking.
@@ -32,7 +32,7 @@ const SENSITIVE_FIELD_RE = new RegExp(
     'phone', 'mobile', 'cellphone', 'cell', 'tel', 'fax',
     'address', 'street', 'zip', 'zipcode', 'postcode', 'postal',
     'dob', 'birth', 'birthday', 'birthdate',
-    'username', 'userid', 'user_id', 'login', 'userlogin',
+    'userid', 'user_id', 'login', 'userlogin',
     'passport', 'license', 'licence', 'nationalid', 'national_id', 'sin', 'taxid', 'tin',
     'pin', 'otp', 'totp',
     'account', 'routing', 'iban', 'swift', 'sortcode', 'sort_code',
@@ -43,62 +43,108 @@ const SENSITIVE_FIELD_RE = new RegExp(
 
 const REDACTED = '[redacted]';
 
-// Redact a single `{ name, value }` entry in place-shape: if its field name
-// matches a sensitive fragment (case-insensitive substring), mask its value
-// regardless of the value's type (string, number, boolean, null, object). A
-// false positive costs one masked benign value; a false negative leaks a
-// secret, so we mask on suspicion.
+// Cursor id shape used for `after` pagination (table ids are cuid strings).
+const CURSOR_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+// Heuristic: does a *scalar* value look like a secret worth masking even when no
+// field name is available to match against? Used only for the non-object/array
+// shapes (parse failure or a bare scalar) that otherwise bypass field-name
+// masking. Biased toward masking: a long high-entropy token or a value containing
+// a secret keyword is treated as sensitive.
+function looksLikeSecret(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const t = value.trim();
+  if (t.length < 8) return false;
+  if (/(password|passwd|secret|token|api[_-]?key|access[_-]?token|cvv|otp|ssn|pin)/i.test(t)) return true;
+ // Long base64 / hex / token-shaped value with no obvious structure.
+  return /^[A-Za-z0-9+/=_-]{20,}$/.test(t);
+}
+
+// Redact an object that carries a `name` key (the `{ name, value }` entry shape).
+// If its field name matches a sensitive fragment (case-insensitive substring), the
+// associated `value` is masked regardless of the value's type. In addition, EVERY
+// other key of the object is inspected in its own right: a key that matches a
+// sensitive fragment is masked, otherwise its value is recursed into. This ensures
+// sibling sensitive keys (e.g. `{ name: "form1", password: "hunter2" }`) are never
+// leaked just because the object happened to expose a `name` field.
 function redactEntry(entry: unknown): unknown {
   if (!entry || typeof entry !== 'object' || !('name' in entry)) return entry;
   const e = entry as Record<string, unknown>;
-  if (SENSITIVE_FIELD_RE.test(String(e.name ?? ''))) {
-    return { ...e, value: REDACTED };
+  const nameIsSensitive = SENSITIVE_FIELD_RE.test(String(e.name ?? ''));
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(e)) {
+    if (key === 'value' && nameIsSensitive) {
+      out[key] = REDACTED;
+    } else if (SENSITIVE_FIELD_RE.test(key)) {
+      out[key] = REDACTED;
+    } else {
+      out[key] = redactNode(e[key]);
+    }
   }
-  return e;
+  return out;
 }
 
-// Redact an array of `{ name, value }` entries.
-function redactEntryArray(arr: unknown[]): unknown[] {
-  return arr.map(redactEntry);
+// Recursively mask sensitive values in any parsed shape:
+// • arrays → recurse element-wise (covers bare arrays of `{ name, value }`);
+// • objects with a `name` key → treated as an entry (`redactEntry`);
+// • other objects → if a key matches a sensitive fragment the value is masked,
+// otherwise the value is recursed so nested sensitive keys are still caught;
+// • primitive/scalar values → returned as-is.
+function redactNode(node: unknown): unknown {
+  if (Array.isArray(node)) {
+    return node.map(redactNode);
+  }
+  if (node && typeof node === 'object') {
+    if ('name' in node) {
+      return redactEntry(node);
+    }
+    const obj = node as Record<string, unknown>;
+    for (const key of Object.keys(obj)) {
+      if (SENSITIVE_FIELD_RE.test(key)) {
+        obj[key] = REDACTED;
+      } else {
+        obj[key] = redactNode(obj[key]);
+      }
+    }
+    return obj;
+  }
+  return node;
 }
 
-// Mask sensitive autofill values in the *response copy* of `formDataJson`
-// (a JSON string which the cockpit does not parse at write time). Handles a
-// flat record of fieldName -> value, the `{ entries: [{ name, value }] }`
-// shape, AND a bare array of `{ name, value }` entries. The bare-array case is
-// tested FIRST because `typeof [] === 'object'` would otherwise be swallowed by
-// the generic object branch and never reach its own redaction. Returns the
-// input unchanged (unparsed, but with sensitive values masked) if it cannot be
-// parsed — the caller should not observe a 500 for a malformed stored value.
+// Mask sensitive autofill values in the *response copy* of `formDataJson` (a JSON
+// string which the cockpit does not parse at write time). Handles a flat record
+// of fieldName → value, the `{ entries: [{ name, value }] }` shape, AND a bare
+// array of `{ name, value }` entries, recursing into nested objects/arrays so a
+// sensitive key is never leaked regardless of depth.
+//
+// NOTE: field-name masking only applies to parseable object/array shapes. When
+// `formDataJson` is unparseable or a bare scalar, field names are unavailable, so
+// the value is returned unchanged UNLESS it `looksLikeSecret` (then it is masked).
+// This is response-only masking — NOT at-rest protection; see the file header.
 function redactFormMemory(formDataJson: string): string {
   let parsed: unknown;
   try {
     parsed = JSON.parse(formDataJson);
   } catch {
-    return formDataJson;
+ // Unparseable stored value: cannot match by field name. Mask it only if it
+ // looks secret-shaped; otherwise return unchanged (no 500 for malformed data).
+    return looksLikeSecret(formDataJson) ? REDACTED : formDataJson;
   }
-  if (Array.isArray(parsed)) {
-    return JSON.stringify(redactEntryArray(parsed));
+  if (parsed === null || typeof parsed !== 'object') {
+ // Scalar (string/number/boolean) or null: no field name to match against.
+    return looksLikeSecret(parsed) ? REDACTED : JSON.stringify(parsed);
   }
-  if (parsed && typeof parsed === 'object') {
-    const obj = parsed as Record<string, unknown>;
-    if (Array.isArray(obj.entries)) {
-      obj.entries = redactEntryArray(obj.entries as unknown[]);
-    } else {
-      for (const key of Object.keys(obj)) {
-        if (SENSITIVE_FIELD_RE.test(key)) obj[key] = REDACTED;
-      }
-    }
-    return JSON.stringify(obj);
-  }
-  return formDataJson;
+  return JSON.stringify(redactNode(parsed));
 }
 
 export async function GET(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
-    // Cap the result set + cursor pagination, same as the site route.
+ // Cap the result set + cursor pagination, same as the site route.
     const limit = parseLimit(req);
     const after = req.nextUrl.searchParams.get('after') || undefined;
+    if (after !== undefined && !CURSOR_ID_RE.test(after)) {
+      return badRequest('invalid after cursor');
+    }
     const args: Parameters<typeof db.formMemory.findMany>[0] = {
       take: limit,
       orderBy: { createdAt: 'desc' },
@@ -107,7 +153,17 @@ export async function GET(req: NextRequest): Promise<Response> {
       args.cursor = { id: after };
       args.skip = 1;
     }
-    const rows = await db.formMemory.findMany(args);
+    let rows;
+    try {
+      rows = await db.formMemory.findMany(args);
+    } catch (e) {
+ // A well-formed but stale/unknown cursor id makes Prisma throw P2025
+ // (RecordNotFound); return a precise 400 instead of a generic 500.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+        return badRequest('invalid after cursor');
+      }
+      throw e;
+    }
     const memories = rows.map((m) => ({ ...m, formDataJson: redactFormMemory(m.formDataJson) }));
     return json({ memories });
   });
@@ -125,9 +181,14 @@ export async function DELETE(req: NextRequest): Promise<Response> {
     try {
       await db.formMemory.delete({ where: { id } });
     } catch (e) {
-      // Prisma throws P2025 (RecordNotFound) when the id doesn't exist. The
-      // code lives in `e.code`, not the message, so test that directly.
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+ // Prisma throws P2025 (RecordNotFound) when the id doesn't exist. The
+ // code lives in `e.code`, but a caller may surface a plain Error whose
+ // message still reports P2025 (e.g. certain driver/adapter layers);
+ // detect both so a missing entry is a precise 404 rather than a 500.
+      if (
+        (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') ||
+        (e instanceof Error && /P2025/.test(e.message))
+      ) {
         return json({ error: 'not found' }, 404);
       }
       throw e;

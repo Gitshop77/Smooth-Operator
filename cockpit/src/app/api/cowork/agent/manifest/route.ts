@@ -29,11 +29,11 @@ export async function GET(): Promise<Response> {
       baseUrl,
       role: 'web dashboard for persisted cowork data (read, create via POST, delete via DELETE)',
       transports: HTTP_TRANSPORT,
-      // This manifest endpoint is itself one of the 5 public discovery routes,
-      // so `authMethods: []` here means "this route requires no auth to
-      // access". The broader API auth model is described in `dataRouteAuth`
-      // below — every other `/api/cowork/*` route requires the X-Cowork-Token
-      // header.
+ // This manifest endpoint is itself one of the 5 public discovery routes,
+ // so `authMethods: []` here means "this route requires no auth to
+ // access". The broader API auth model is described in `dataRouteAuth`
+ // below — every other `/api/cowork/*` route requires the X-Cowork-Token
+ // header.
       ...DISCOVERY_ROUTE_AUTH,
       pairingSupported: false,
       startupSequence: withBaseUrl(baseUrl, AGENT_STARTUP_SEQUENCE),
@@ -100,7 +100,7 @@ export async function GET(): Promise<Response> {
         },
         events: {
           emit: { method: 'POST', path: `${P}/events/emit`, description: 'Emit an event to a channel (body: `{ channel, payload? }`)' },
-          stream: { method: 'GET', path: `${P}/events/stream`, description: 'Subscribe to the SSE event stream (token accepted via ?token= for EventSource)' },
+          stream: { method: 'GET', path: `${P}/events/stream`, description: 'Subscribe to the SSE event stream (requires the X-Cowork-Token header)' },
         },
       },
     });

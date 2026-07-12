@@ -13,13 +13,13 @@
  * catching exactly that drift.
  *
  * Strategy:
- *   - For each shim we import the shim (`@/lib/agent/dom/<shim>`) and its
- *     canonical target(s) (`@/lib/agent/dom/<canonical>`), then compare the
- *     sorted set of exported names.
- *   - Every shim here re-exports the FULL canonical surface (`export *`), so we
- *     assert EXACT equality of the key sets.
- *   - `dom-utils` aggregates four canonical `utils/*` modules; we merge their
- *     export names and assert exact equality against the shim.
+ * - For each shim we import the shim (`@/lib/agent/dom/<shim>`) and its
+ * canonical target(s) (`@/lib/agent/dom/<canonical>`), then compare the
+ * sorted set of exported names.
+ * - Every shim here re-exports the FULL canonical surface (`export *`), so we
+ * assert EXACT equality of the key sets.
+ * - `dom-utils` aggregates four canonical `utils/*` modules; we merge their
+ * export names and assert exact equality against the shim.
  *
  * If, in future, a shim legitimately re-exports only a SUBSET of its canonical
  * module, switch that entry's `relation` to `"subset"` and the assertion will
@@ -67,7 +67,7 @@ function assertConsistent(
       canonicalKeys,
     );
   } else {
-    // subset: every canonical export must be present in the shim.
+ // subset: every canonical export must be present in the shim.
     const missing = canonicalKeys.filter((k) => !shimKeys.includes(k));
     expect(
       missing,

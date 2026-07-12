@@ -62,27 +62,25 @@ export async function POST(req: NextRequest): Promise<Response> {
     const b = await bodyJson(req);
     const {
       source,
-      error,
       msg,
       stack,
       level,
     } = b as {
       source?: unknown;
-      error?: unknown;
       msg?: unknown;
       stack?: unknown;
       level?: unknown;
     };
-    // Sanitize (CRLF-strip + length-cap) THEN redact secrets: the values have
-    // already been stripped of CRLF + length-capped before redaction runs.
-    // `sanitizeLogField` returns '' for any non-string input, so we fall back
-    // with `||` (not `??`) — `??` would let a present non-nullish object slip
-    // through un-stringified.
-    const label = redactSecrets(sanitizeLogField(source) || sanitizeLogField(error) || 'SW');
+ // Sanitize (CRLF-strip + length-cap) THEN redact secrets: the values have
+ // already been stripped of CRLF + length-capped before redaction runs.
+ // `sanitizeLogField` returns '' for any non-string input, so we fall back
+ // with `||` (not `??`) — `??` would let a present non-nullish object slip
+ // through un-stringified.
+    const label = redactSecrets(sanitizeLogField(source) || 'SW');
     const detail = redactSecrets(sanitizeLogField(msg) || '(no message)');
     const stackField = redactSecrets(sanitizeLogField(stack));
-    // Use structured (object) logging so the values can't break log-line
-    // formatting. Respect the client's severity; default to info.
+ // Use structured (object) logging so the values can't break log-line
+ // formatting. Respect the client's severity; default to info.
     const requested = typeof level === 'string' ? level.toLowerCase() : 'info';
     const lvl: LogLevel = (LOG_LEVELS as readonly string[]).includes(requested)
       ? (requested as LogLevel)

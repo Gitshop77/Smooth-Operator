@@ -22,12 +22,17 @@ import { isAllowedLlmBaseUrl } from "./ssrf";
 export function parseRetryAfterHeader(value: string): number | undefined {
   const trimmed = value.trim();
   if (!trimmed) return undefined;
-  // Integer-seconds form (most common). Also handles "5.5"-style decimals.
-  const seconds = Number(trimmed);
-  if (Number.isFinite(seconds) && seconds >= 0) {
-    return seconds * 1000;
+ // Integer-seconds form (most common). Also tolerate "5.5"-style decimals.
+ // Restrict to a plain decimal shape so JS numeric quirks (hex `0x10`,
+ // scientific `1e3`, `Infinity`) are NOT silently accepted as delays —
+ // RFC 7231 `delay-seconds` is `1*DIGIT`.
+  if (/^\d+(?:\.\d+)?$/.test(trimmed)) {
+    const seconds = Number(trimmed);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return seconds * 1000;
+    }
   }
-  // HTTP-date form (RFC 7231).
+ // HTTP-date form (RFC 7231).
   const dateMs = Date.parse(trimmed);
   if (!Number.isNaN(dateMs)) {
     return Math.max(0, dateMs - Date.now());
@@ -36,8 +41,8 @@ export function parseRetryAfterHeader(value: string): number | undefined {
 }
 
 /** Per-request timeout (ms). A stalled provider connection
- *  hangs the agent indefinitely without this — a user-abort is the only
- *  other way to interrupt it. 60s matches the SSE route's documented maxDuration. */
+ * hangs the agent indefinitely without this — a user-abort is the only
+ * other way to interrupt it. 60s matches the SSE route's documented maxDuration. */
 const REQUEST_TIMEOUT_MS = 60_000;
 
 /**
@@ -111,13 +116,13 @@ function fetchWithTimeout(
   init: RequestInit,
   userSignal?: AbortSignal
 ): Promise<Response> {
-  // (SSRF guard) — defense-in-depth: refuse to fetch an LLM endpoint that
-  // resolves to a loopback / private / link-local / cloud-metadata address.
-  // `redirect: "manual"` already prevents body-forwarding via 3xx, but this
-  // stops the request from ever leaving the service worker in the first place.
-  // `isAllowedLlmBaseUrl` applies the same range checks as `validateLlmBaseUrl`
-  // while exempting the curated Ollama/LiteLLM local endpoints. We throw (rather
-  // than silently contacting the host) so a bad URL fails closed.
+ // (SSRF guard) — defense-in-depth: refuse to fetch an LLM endpoint that
+ // resolves to a loopback / private / link-local / cloud-metadata address.
+ // `redirect: "manual"` already prevents body-forwarding via 3xx, but this
+ // stops the request from ever leaving the service worker in the first place.
+ // `isAllowedLlmBaseUrl` applies the same range checks as `validateLlmBaseUrl`
+ // while exempting the curated Ollama/LiteLLM local endpoints. We throw (rather
+ // than silently contacting the host) so a bad URL fails closed.
   if (!isAllowedLlmBaseUrl(url)) {
     throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${url}`);
   }
@@ -129,13 +134,25 @@ function fetchWithTimeout(
     controller.abort();
   }, REQUEST_TIMEOUT_MS);
 
+ // Single source of truth for the terminal `.catch` on both fetch branches
+ // (with / without a user signal). A timeout abort is surfaced as a retryable
+ // "Request timeout" error; every other rejection (SSRF guard, opaque-redirect
+ // refusal, real network error, user abort) passes through unchanged. Keeping
+ // this in one place stops the two branches from silently diverging.
+  const wrapTimeoutError = (e: unknown): never => {
+    if (timedOut) {
+      throw new Error(`Request timeout after ${REQUEST_TIMEOUT_MS}ms`);
+    }
+    throw e;
+  };
+
   const verifyNoRedirect = (res: Response): Response => {
-    // `redirect: "manual"` returns an opaque-redirect response (type
-    // "opaqueredirect", status 0, no body/headers) when the server sends a
-    // 3xx. The body was NOT forwarded (the redirect was not followed). Throw
-    // a NON-retryable error so withLLMRetry doesn't waste 10.5s re-attempting.
-    // The "redirect" keyword deliberately doesn't match retry.ts's
-    // /fetch|network|econn|timeout/i regex.
+ // `redirect: "manual"` returns an opaque-redirect response (type
+ // "opaqueredirect", status 0, no body/headers) when the server sends a
+ // 3xx. The body was NOT forwarded (the redirect was not followed). Throw
+ // a NON-retryable error so withLLMRetry doesn't waste 10.5s re-attempting.
+ // The "redirect" keyword deliberately doesn't match retry.ts's
+ // /fetch|network|econn|timeout/i regex.
     if (res.type === "opaqueredirect") {
       throw new Error(`LLM endpoint returned a redirect — refused to follow (potential request-body exfiltration). URL: ${url}`);
     }
@@ -144,8 +161,8 @@ function fetchWithTimeout(
 
   if (userSignal) {
     if (userSignal.aborted) {
-      // Already aborted before we even issue the fetch — reject immediately and
-      // skip constructing/invoking `fetch` against an already-aborted controller.
+ // Already aborted before we even issue the fetch — reject immediately and
+ // skip constructing/invoking `fetch` against an already-aborted controller.
       clearTimeout(timer);
       return Promise.reject(new DOMException("Aborted", "AbortError"));
     }
@@ -154,31 +171,21 @@ function fetchWithTimeout(
       controller.abort();
     };
     userSignal.addEventListener("abort", onAbort, { once: true });
-    // Clean up the listener on completion so it doesn't accumulate
-    // on the long-lived run-level abort signal.
+ // Clean up the listener on completion so it doesn't accumulate
+ // on the long-lived run-level abort signal.
     return fetch(url, { ...init, redirect: "manual", signal: controller.signal })
       .then(verifyNoRedirect)
       .finally(() => {
         clearTimeout(timer);
         userSignal.removeEventListener("abort", onAbort);
       })
-      .catch((e) => {
-        if (timedOut) {
-          throw new Error(`Request timeout after ${REQUEST_TIMEOUT_MS}ms`);
-        }
-        throw e;
-      });
+      .catch(wrapTimeoutError);
   }
 
   return fetch(url, { ...init, redirect: "manual", signal: controller.signal })
     .then(verifyNoRedirect)
     .finally(() => clearTimeout(timer))
-    .catch((e) => {
-      if (timedOut) {
-        throw new Error(`Request timeout after ${REQUEST_TIMEOUT_MS}ms`);
-      }
-      throw e;
-    });
+    .catch(wrapTimeoutError);
 }
 
 /** Create an HTTP transport that sends JSON + reads SSE/JSON-line streams. */
@@ -208,21 +215,21 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: { framing: Fra
       if (!r.ok) {
         const txt = await r.text().catch(() => "");
         const err = new Error(`LLM API ${r.status}: ${txt.slice(0, 300)}`);
-        // Carry the numeric HTTP status so withLLMRetry can classify retryable
-        // errors from the status code (429 / 5xx) instead of string-matching
-        // the response body — which is fragile and language-dependent.
+ // Carry the numeric HTTP status so withLLMRetry can classify retryable
+ // errors from the status code (429 / 5xx) instead of string-matching
+ // the response body — which is fragile and language-dependent.
         (err as Error & { status?: number }).status = r.status;
-        // Capture a `Retry-After` header (integer-seconds OR HTTP-date) so
-        // withLLMRetry can honor it instead of exponential backoff. Invalid
-        // values yield `undefined` so withLLMRetry falls back to its default
-        // delay (never `NaN`).
+ // Capture a `Retry-After` header (integer-seconds OR HTTP-date) so
+ // withLLMRetry can honor it instead of exponential backoff. Invalid
+ // values yield `undefined` so withLLMRetry falls back to its default
+ // delay (never `NaN`).
         const retryAfter = r.headers.get("retry-after");
         if (retryAfter) {
           const ms = parseRetryAfterHeader(retryAfter);
-          // Honour a zero delay (`Retry-After: 0`) as "retry immediately"
-          // — the doc promises a processed-0 value is honoured, so use
-          // `>= 0` rather than `> 0` (which would silently drop it and
-          // fall back to the default backoff).
+ // Honour a zero delay (`Retry-After: 0`) as "retry immediately"
+ // — the doc promises a processed-0 value is honoured, so use
+ // `>= 0` rather than `> 0` (which would silently drop it and
+ // fall back to the default backoff).
           if (typeof ms === "number" && ms >= 0) {
             (err as Error & { retryAfter?: number }).retryAfter = ms;
           }
@@ -231,12 +238,12 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: { framing: Fra
       }
       return r;
     }, signal);
-    // `withLLMRetry` only returns when the fetch succeeded (non-ok responses
-    // throw inside the retry callback above), so `res.ok` is guaranteed true
-    // here — no guard needed.
+ // `withLLMRetry` only returns when the fetch succeeded (non-ok responses
+ // throw inside the retry callback above), so `res.ok` is guaranteed true
+ // here — no guard needed.
     if (!res.body) {
-      // Non-streaming response — parse the full body through the framing so it
-      // yields proper `FrameType` objects (consistent with the streaming path).
+ // Non-streaming response — parse the full body through the framing so it
+ // yields proper `FrameType` objects (consistent with the streaming path).
       const text = await res.text();
       const frames = opts.framing.parse(text);
       for (const frame of frames) yield frame;
@@ -247,10 +254,10 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: { framing: Fra
     let buffer = "";
     try {
       while (true) {
-        // race the read against a 30s timeout. If the provider
-        // stalls mid-stream, cancel the reader and throw a retryable error
-        // so `withLLMRetry` re-attempts the whole request. The timeout timer
-        // is cleared as soon as the chunk arrives (or as soon as we throw).
+ // race the read against a 30s timeout. If the provider
+ // stalls mid-stream, cancel the reader and throw a retryable error
+ // so `withLLMRetry` re-attempts the whole request. The timeout timer
+ // is cleared as soon as the chunk arrives (or as soon as we throw).
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           const { done, value } = await Promise.race([
@@ -264,52 +271,62 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: { framing: Fra
           ]);
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
-          // Split on newlines — each line is a frame (SSE `data:` payload
-          // or a JSON line). The framing-type-specific parsing happens in
-          // `opts.framing.parse(part + "\n")` below.
-          const parts = buffer.split("\n");
-          buffer = parts.pop() ?? "";
-          for (const part of parts) {
-            const frames = opts.framing.parse(part + "\n");
+ // SSE events are terminated by a blank line (`\n\n`). The framing's
+ // SSE parser builds a FRESH accumulator on every `parse` call (it is
+ // stateless across calls), so we must feed it COMPLETE events — not
+ // individual lines — otherwise a `data:` line and its terminating
+ // blank line land in two separate stateless parses, the accumulator
+ // is reset before the event flushes, and we yield 0 frames (the
+ // regression this block restores). Split on the event boundary and
+ // keep the trailing partial event (everything after the last `\n\n`)
+ // buffered for the next chunk. Real streaming is preserved: a partial
+ // event that has not yet received its terminating blank line stays
+ // buffered until more bytes arrive or the stream ends.
+          const events = buffer.split("\n\n");
+ // The segment after the final `\n\n` is an incomplete event; keep it.
+          buffer = events.pop() ?? "";
+          for (const event of events) {
+            if (event === "") continue;
+            const frames = opts.framing.parse(event + "\n\n");
             for (const frame of frames) yield frame;
           }
         } finally {
           if (timer) clearTimeout(timer);
         }
       }
-      // Flush remaining buffer
+ // Flush remaining buffer
       if (buffer.trim()) {
         const frames = opts.framing.parse(buffer);
         for (const frame of frames) yield frame;
       }
     } catch (e) {
-      // On per-chunk timeout (stream stall) cancel the reader to release the
-      // underlying network resources. A stalled mid-stream response is NOT a
-      // successful completion: we flush any buffered partial frames (so the
-      // consumer still sees them) and then RE-THROW below so the consumer (and
-      // the orchestrator's retry loop) treats the truncated stream as a failure
-      // rather than silently executing truncated content and under-reporting
-      // usage/cost. `withLLMRetry` only wraps the INITIAL fetch, so a
-      // mid-stream stall cannot be transparently retried here.
+ // On per-chunk timeout (stream stall) cancel the reader to release the
+ // underlying network resources. A stalled mid-stream response is NOT a
+ // successful completion: we flush any buffered partial frames (so the
+ // consumer still sees them) and then RE-THROW below so the consumer (and
+ // the orchestrator's retry loop) treats the truncated stream as a failure
+ // rather than silently executing truncated content and under-reporting
+ // usage/cost. `withLLMRetry` only wraps the INITIAL fetch, so a
+ // mid-stream stall cannot be transparently retried here.
       try {
         await reader.cancel();
       } catch {
-        // `cancel` can throw if the reader is already closed — ignore.
+ // `cancel` can throw if the reader is already closed — ignore.
       }
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.startsWith("stream stall:")) {
-        // Flush any buffered partial frames first so the consumer sees them.
+ // Flush any buffered partial frames first so the consumer sees them.
         if (buffer.trim()) {
           const frames = opts.framing.parse(buffer);
           for (const frame of frames) yield frame;
         }
-        // A stalled mid-stream response is NOT a successful completion: re-throw
-        // so the consumer (and the orchestrator's retry loop) treats the truncated
-        // stream as a failure rather than silently executing truncated content and
-        // under-reporting usage/cost.
+ // A stalled mid-stream response is NOT a successful completion: re-throw
+ // so the consumer (and the orchestrator's retry loop) treats the truncated
+ // stream as a failure rather than silently executing truncated content and
+ // under-reporting usage/cost.
         throw e;
       }
-      // Non-stall errors (real network failures, aborts, etc.) propagate.
+ // Non-stall errors (real network failures, aborts, etc.) propagate.
       throw e;
     } finally {
       try { reader.releaseLock(); } catch { /* already released */ }

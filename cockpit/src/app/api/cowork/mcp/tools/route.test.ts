@@ -15,7 +15,7 @@ describe('GET /api/cowork/mcp/tools', () => {
     expect(typeof body.description).toBe('string');
     expect(Array.isArray(body.tools)).toBe(true);
     expect(body.tools.length).toBeGreaterThan(0);
-    // Every advertised tool must be flagged as not-yet-served.
+ // Every advertised tool must be flagged as not-yet-served.
     expect(body.tools.every((t: any) => t.implemented === false)).toBe(true);
     expect(body.total).toBe(body.tools.length);
     expect(body.totalCatalog).toBe(body.tools.length);

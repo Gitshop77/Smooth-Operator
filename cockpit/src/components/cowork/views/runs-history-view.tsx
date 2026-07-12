@@ -91,7 +91,7 @@ export function RunsHistoryView() {
   const [agentFilter, setAgentFilter] = React.useState("all");
   const [dateRange, setDateRange] = React.useState<keyof typeof RANGE_MS>("all");
 
-  // Distinct status + agent values for the Runs filters.
+ // Distinct status + agent values for the Runs filters.
   const statuses = React.useMemo(() => {
     const set = new Set<string>();
     (tasks ?? []).forEach((t) => set.add(t.status));
@@ -139,11 +139,11 @@ export function RunsHistoryView() {
     );
   }, [history, search]);
 
-  // Runs summary stats (terminal-aware, like agents-view).
+ // Runs summary stats (terminal-aware, like agents-view).
   const TERMINAL = new Set(["done", "failed", "cancelled"]);
   const totalRuns = tasks?.length ?? 0;
-  // Single pass over tasks (memoized) instead of three separate filter().length
-  // scans per render — consistent with filteredRuns/agents above.
+ // Single pass over tasks (memoized) instead of three separate filter().length
+ // scans per render — consistent with filteredRuns/agents above.
   const { running, done, failed } = React.useMemo(() => {
     let r = 0, d = 0, f = 0;
     for (const t of tasks ?? []) {
@@ -329,7 +329,7 @@ export function RunsHistoryView() {
                         href={safeHref(h.url)}
                         className="text-[11px] cowork-mono text-primary hover:underline truncate block"
                         onClick={(e) => {
-                          // Defensive: never navigate to a non-http(s) href.
+ // Defensive: never navigate to a non-http(s) href.
                           if (safeHref(h.url) === "#") e.preventDefault();
                         }}
                       >

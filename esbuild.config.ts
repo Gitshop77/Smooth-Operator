@@ -6,8 +6,8 @@
  * (manifest, HTML, CSS, icons) are copied verbatim.
  *
  * Usage:
- *   npm run build:extension           # one-shot build
- *   npm run build:extension -- --watch # rebuild on change
+ * npm run build:extension # one-shot build
+ * npm run build:extension -- --watch # rebuild on change
  */
 
 import { build, context, type BuildOptions, type Plugin } from "esbuild";
@@ -42,11 +42,11 @@ const zodLocalesStubPlugin: Plugin = {
   name: "zod-locales-stub",
   setup(b) {
     b.onResolve({ filter: /locales\/index/ }, (args) => {
-      // Only intercept imports originating from inside the zod package —
-      // avoids clobbering an unrelated `locales/index.js` somewhere else.
-      // esbuild always reports `importer` in POSIX form (even on Windows), so
-      // match with "/" rather than path.sep, which would be "\" on Windows and
-      // silently no-op the guard there.
+ // Only intercept imports originating from inside the zod package —
+ // avoids clobbering an unrelated `locales/index.js` somewhere else.
+ // esbuild always reports `importer` in POSIX form (even on Windows), so
+ // match with "/" rather than path.sep, which would be "\" on Windows and
+ // silently no-op the guard there.
       if (
         args.importer &&
         args.importer.includes("/node_modules/zod/")
@@ -82,14 +82,14 @@ const zodLocalesStubPlugin: Plugin = {
  * transform, not a full AST walk. Two cases are intentionally NOT rewritten —
  * both because doing so correctly requires scope-aware resolution of the
  * `console` binding, which a regex cannot do safely:
- *   1. A locally-shadowed `console` (e.g. `function f(console) { console.log() }`)
- *      is still rewritten. A shadowed binding is extremely rare in first-party
- *      source; if it ever appears, the log call is dropped (no side effects are
- *      lost in practice).
- *   2. `console.log` passed as a *callback* or via an alias
- *      (`arr.forEach(console.log)`, `const fn = console.log; fn("x")`) is not
- *      rewritten and the log survives into the bundle. This is the lesser evil
- *      versus a dangerous AST rewrite that could corrupt unrelated identifiers.
+ * 1. A locally-shadowed `console` (e.g. `function f(console) { console.log() }`)
+ * is still rewritten. A shadowed binding is extremely rare in first-party
+ * source; if it ever appears, the log call is dropped (no side effects are
+ * lost in practice).
+ * 2. `console.log` passed as a *callback* or via an alias
+ * (`arr.forEach(console.log)`, `const fn = console.log; fn("x")`) is not
+ * rewritten and the log survives into the bundle. This is the lesser evil
+ * versus a dangerous AST rewrite that could corrupt unrelated identifiers.
  * A full AST-aware transform (esbuild onTransform + parser) would close both;
  * until then these are accepted, documented trade-offs. Occurrences inside
  * string literals / comments are data, not executed code, and do not crash.
@@ -106,10 +106,10 @@ const stripConsoleDebugPlugin: Plugin = {
       if (!inSource) return undefined;
       const original = await readFile(args.path, "utf8");
       const contents = original
-        // Zero-argument calls first → `void 0;` (valid). Must run before the
-        // general rewrite so `(void 0;)` isn't re-matched into `(void (0;)`.
+ // Zero-argument calls first → `void 0;` (valid). Must run before the
+ // general rewrite so `(void 0;)` isn't re-matched into `(void (0;)`.
         .replace(/(?<![\w.$])console\.(debug|log)\(\)/g, "void 0;")
-        // All other calls → `void (…)`.
+ // All other calls → `void (…)`.
         .replace(/(?<![\w.$])console\.(debug|log)\(/g, "void (");
       const loader = args.path.endsWith(".tsx")
         ? "tsx"
@@ -170,9 +170,9 @@ const backgroundConfig: BuildOptions = {
   format: "esm",
   splitting: true,
   chunkNames: "chunks/[name]-[hash]",
-  // `entryNames` preserves the output filename as `background.js` (no hash)
-  // so the manifest's `"service_worker": "background.js"` reference stays
-  // valid. Chunk files get hashed names via `chunkNames`.
+ // `entryNames` preserves the output filename as `background.js` (no hash)
+ // so the manifest's `"service_worker": "background.js"` reference stays
+ // valid. Chunk files get hashed names via `chunkNames`.
   entryNames: "[name]",
 };
 
@@ -220,26 +220,38 @@ async function assertOnlyEnZodLocales(): Promise<void> {
     try {
       entries = (await readdir(dir)).map((n) => path.join(dir, n));
     } catch (e) {
-      // Fail-closed guard must stay observable: a *missing* directory is a
-      // normal stop condition (e.g. a root that doesn't exist), but any other
-      // FS error (EACCES, broken symlink, transient I/O) must be surfaced so a
-      // real non-`en` locale import in that subtree can't go undetected.
+ // Fail-closed guard must stay observable: a *missing* directory is a
+ // normal stop condition (e.g. a root that doesn't exist), but any other
+ // FS error (EACCES, broken symlink, transient I/O) must be surfaced so a
+ // real non-`en` locale import in that subtree can't go undetected. We
+ // THROW rather than warn-and-continue: a swallowed error would let the
+ // guard silently skip a subtree, defeating the fail-closed contract.
       if ((e as { code?: string }).code === "ENOENT") return;
-      console.warn(`[zod-locale-lint] readdir failed for ${dir}:`, e);
-      return;
+      throw new Error(
+        `[zod-locale-lint] readdir failed for ${dir} — cannot verify zod-locale ` +
+          `invariant, failing closed: ${e instanceof Error ? e.message : String(e)}`,
+      );
     }
     for (const e of entries) {
-      const st = await stat(e).catch((err) => {
-        console.warn(`[zod-locale-lint] stat failed for ${e}:`, err);
-        return null;
-      });
-      if (!st) continue;
+      let st: Awaited<ReturnType<typeof stat>>;
+      try {
+        st = await stat(e);
+      } catch (err) {
+ // A vanished entry (race with a concurrent delete) is a benign skip;
+ // any other stat error must be surfaced so the fail-closed guard can't
+ // silently overlook a file it failed to inspect.
+        if ((err as { code?: string }).code === "ENOENT") continue;
+        throw new Error(
+          `[zod-locale-lint] stat failed for ${e} — cannot verify zod-locale ` +
+            `invariant, failing closed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
       if (st.isDirectory()) {
         if (path.basename(e) === "node_modules") continue;
         await walk(e);
       } else if (/\.(ts|tsx|js|jsx|mjs)$/.test(e)) {
         const src = await readFile(e, "utf8");
-        // Match zod locale imports that are NOT the `en` locale nor the barrel.
+ // Match zod locale imports that are NOT the `en` locale nor the barrel.
         const m = src.match(/zod\/v4\/locales\/(?!en\.js|index\.js)[a-zA-Z-]+\.js/g);
         if (m) bad.push(`${e}: ${m.join(", ")}`);
       }
@@ -262,33 +274,33 @@ async function assertOnlyEnZodLocales(): Promise<void> {
  * a large attack surface.
  *
  * Behavior after remediation:
- *   - A MISSING or MALFORMED manifest is a hard build error — the SEC-1 guard
- *     is worthless exactly when the manifest can't be read/parsed, so we fail
- *     closed (Apache-2.0/extension validity requires a real manifest).
- *   - `permissions` / `host_permissions` / `optional_permissions` are validated
- *     to be arrays of strings; a bad merge (e.g. a nested object) no longer
- *     silently slips through.
- *   - High-risk permissions (debugger, scripting, nativeMessaging, management,
- *     cookies, tabs, history, bookmarks, proxy) present in `permissions` OR
- *     `optional_permissions`, plus universal host access, are surfaced as a
- *     WARNING (the local fast-fail signal).
- *   - To actually ENFORCE the "no new high-risk permission" intent in CI, set
- *     `MANIFEST_LINT_FAIL_HIGH_RISK=1` in the build environment. That promotes
- *     the warning to a hard build error. We keep the default as a warning so
- *     legitimate, reviewed permissions don't break every local developer build
- *     (the documented in-repo justification for `debugger` + universal host
- *     access is referenced in FULL-REVIEW). The recommended companion gate is a
- *     CI manifest-lint *diff* that only fails on *newly-added* high-risk perms.
+ * - A MISSING or MALFORMED manifest is a hard build error — the SEC-1 guard
+ * is worthless exactly when the manifest can't be read/parsed, so we fail
+ * closed (Apache-2.0/extension validity requires a real manifest).
+ * - `permissions` / `host_permissions` / `optional_permissions` are validated
+ * to be arrays of strings; a bad merge (e.g. a nested object) no longer
+ * silently slips through.
+ * - High-risk permissions (debugger, scripting, nativeMessaging, management,
+ * cookies, tabs, history, bookmarks, proxy) present in `permissions` OR
+ * `optional_permissions`, plus universal host access, are surfaced as a
+ * WARNING (the local fast-fail signal).
+ * - To actually ENFORCE the "no new high-risk permission" intent in CI, set
+ * `MANIFEST_LINT_FAIL_HIGH_RISK=1` in the build environment. That promotes
+ * the warning to a hard build error. We keep the default as a warning so
+ * legitimate, reviewed permissions don't break every local developer build
+ * (the documented in-repo justification for `debugger` + universal host
+ * access is referenced in FULL-REVIEW). The recommended companion gate is a
+ * CI manifest-lint *diff* that only fails on *newly-added* high-risk perms.
  *
  * Why these permissions are requested (documented in-repo per FULL-REVIEW):
- *   - `debugger`: drives the CDP "take over this page" click/automation path
- *     (attach to a tab, synthesize input, inspect the DOM).
- *   - `scripting`: injects `executeScript` for automation without a persistent
- *     content-script manifest entry.
- *   - universal `host_permissions` (the `<all_urls>`-equivalent http/https
- *     wildcards): the assistant
- *     operates on whatever arbitrary web page the user points it at, so it
- *     needs read access to any origin.
+ * - `debugger`: drives the CDP "take over this page" click/automation path
+ * (attach to a tab, synthesize input, inspect the DOM).
+ * - `scripting`: injects `executeScript` for automation without a persistent
+ * content-script manifest entry.
+ * - universal `host_permissions` (the `<all_urls>`-equivalent http/https
+ * wildcards): the assistant
+ * operates on whatever arbitrary web page the user points it at, so it
+ * needs read access to any origin.
  */
 function lintManifestPermissions(): void {
   const manifestPath = path.join(SRC, "manifest.json");
@@ -305,7 +317,7 @@ function lintManifestPermissions(): void {
   try {
     manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   } catch (e) {
-    // Fail closed: a malformed manifest must NOT be silently swallowed.
+ // Fail closed: a malformed manifest must NOT be silently swallowed.
     throw new Error(
       `[manifest-lint] failed to read/parse ${manifestPath}: ${e instanceof Error ? e.message : String(e)}`,
     );
@@ -317,8 +329,8 @@ function lintManifestPermissions(): void {
     "optional_permissions",
   );
 
-  // Dangerous permissions that widen the extension's attack surface. Optional
-  // permissions can escalate privilege at runtime, so they are checked too.
+ // Dangerous permissions that widen the extension's attack surface. Optional
+ // permissions can escalate privilege at runtime, so they are checked too.
   const HIGH_RISK = new Set([
     "debugger",
     "scripting",
@@ -336,18 +348,39 @@ function lintManifestPermissions(): void {
     (h) => h === "<all_urls>" || h === "http://*/*" || h === "https://*/*"
   );
 
-  if (risky.length || riskyOptional.length || wideHost) {
+ // Reviewed baseline: the high-risk permissions + universal host access already
+ // present in the shipped manifest, each with an in-repo justification (see the
+ // doc comment above: `debugger` drives CDP automation, `scripting` injects
+ // automation scripts, `tabs` reads tab metadata, and universal host_permissions
+ // lets the assistant operate on whatever page the user points it at).
+ //
+ // The lint is a *creep* guard, not a presence check: it only fires when a NEW
+ // high-risk permission (or new universal-host entry) is added BEYOND this
+ // baseline. That makes MANIFEST_LINT_FAIL_HIGH_RISK=1 safe to enable in CI —
+ // it catches permission creep without failing the already-reviewed build. A
+ // maintainer who intentionally adds a high-risk permission must also extend
+ // this baseline (with a documented justification) so the addition is a
+ // deliberate, reviewed change rather than silent creep.
+  const BASELINE_HIGH_RISK = new Set(["debugger", "scripting", "tabs"]);
+  const BASELINE_WIDE_HOST = true;
+
+  const newRisky = risky.filter((p) => !BASELINE_HIGH_RISK.has(p));
+  const newRiskyOptional = riskyOptional.filter((p) => !BASELINE_HIGH_RISK.has(p));
+  const newWideHost = wideHost && !BASELINE_WIDE_HOST;
+
+  if (newRisky.length || newRiskyOptional.length || newWideHost) {
     const items = [
-      ...risky,
-      ...riskyOptional,
-      ...(wideHost ? ["universal host_permissions"] : []),
+      ...newRisky,
+      ...newRiskyOptional,
+      ...(newWideHost ? ["universal host_permissions"] : []),
     ];
     const msg =
-      "[manifest-lint] HIGH-RISK permissions present: " +
+      "[manifest-lint] NEW high-risk permission(s) added beyond the reviewed " +
+      "baseline: " +
       items.join(", ") +
-      " — confirm each is strictly necessary (see FULL-REVIEW).";
-    // Default: warn only. CI can promote this to a hard error via env flag so
-    // local builds with reviewed permissions still work.
+      " — confirm each is strictly necessary and has a documented justification (see FULL-REVIEW).";
+ // Default: warn only. CI can promote this to a hard error via env flag so
+ // local builds with reviewed permissions still work.
     if (process.env.MANIFEST_LINT_FAIL_HIGH_RISK === "1") {
       throw new Error(msg);
     }
@@ -393,7 +426,7 @@ async function emitThirdPartyLicenses(): Promise<void> {
   const targets: Array<[string, string]> = [
     [path.resolve("THIRD_PARTY_LICENSES.md"), "THIRD_PARTY_LICENSES.md"],
   ];
-  // Full Apache-2.0 text from the transformers package (best-effort).
+ // Full Apache-2.0 text from the transformers package (best-effort).
   const apache = path.resolve("node_modules/@huggingface/transformers/LICENSE");
   if (existsSync(apache)) targets.push([apache, "LICENSE-APACHE"]);
   for (const [src, out] of targets) {
@@ -418,14 +451,14 @@ async function copyStatic(): Promise<void> {
   await mkdir(path.join(OUT, "icons"), { recursive: true });
   const iconSrc = path.join(SRC, "icons", "icon.png");
   if (existsSync(iconSrc)) await copyFile(iconSrc, path.join(OUT, "icons", "icon.png"));
-  // Wire per-size icon PNGs referenced by both manifest files. The manifest
-  // uses distinct assets per size (icon-16/32/48/128.png); copy each so a
-  // build does not leave dangling icon references in the loaded extension.
+ // Wire per-size icon PNGs referenced by both manifest files. The manifest
+ // uses distinct assets per size (icon-16/32/48/128.png); copy each so a
+ // build does not leave dangling icon references in the loaded extension.
   for (const size of ["16", "32", "48", "128"]) {
     const p = path.join(SRC, "icons", `icon-${size}.png`);
     if (existsSync(p)) await copyFile(p, path.join(OUT, "icons", `icon-${size}.png`));
   }
-  // Ship third-party license/attribution text alongside the bundle (LIC-1).
+ // Ship third-party license/attribution text alongside the bundle (LIC-1).
   await emitThirdPartyLicenses();
 }
 
@@ -449,7 +482,7 @@ async function buildAll(): Promise<void> {
     return build({
       ...e.config,
       entryPoints: [path.join(SRC, e.entry)],
-      // ESM with splitting requires `outdir`; IIFE entries use `outfile`.
+ // ESM with splitting requires `outdir`; IIFE entries use `outfile`.
       ...(isEsm
         ? { outdir: OUT }
         : { outfile: path.join(OUT, e.out) }),

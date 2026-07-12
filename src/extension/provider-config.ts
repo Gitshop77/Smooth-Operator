@@ -17,7 +17,7 @@ import * as XAI from "../lib/agent/llm/providers/xai";
 import * as OpenRouter from "../lib/agent/llm/providers/openrouter";
 import * as Azure from "../lib/agent/llm/providers/azure";
 import * as OpenAICompatible from "../lib/agent/llm/providers/openai-compatible";
-import { validateLlmBaseUrl, resolveAndValidateLlmBaseUrl } from "../lib/agent/llm/route/ssrf";
+import { resolveAndValidateLlmBaseUrl } from "../lib/agent/llm/route/ssrf";
 import { modelSupportsVision, getDefaultModelForProvider } from "../lib/agent/llm/catalog";
 import { CATALOG_PROVIDER_ID_MAP } from "./provider-config-map";
 
@@ -34,14 +34,14 @@ export interface ProviderConfig {
   /** Azure resource name (optional — Azure URL is built as `https://{resource}.openai.azure.com`). */
   resourceName?: string;
   /**
-   * Provenance of this config's `baseUrl`. `"user"` = configured by the user
-   * in Options (the curated local-provider loopback exemption applies).
-   * `"injected"` = arrived via an untrusted vector (prompt injection writing
-   * `chrome.storage.local`, malicious settings-sync, crafted tool call).
-   * Injected baseUrls are NOT exempted from the SSRF guard (see below), so an
-   * injected `http://localhost:11434` can't reach a local model. Defaults to
-   * `"user"`.
-   */
+ * Provenance of this config's `baseUrl`. `"user"` = configured by the user
+ * in Options (the curated local-provider loopback exemption applies).
+ * `"injected"` = arrived via an untrusted vector (prompt injection writing
+ * `chrome.storage.local`, malicious settings-sync, crafted tool call).
+ * Injected baseUrls are NOT exempted from the SSRF guard (see below), so an
+ * injected `http://localhost:11434` can't reach a local model. Defaults to
+ * `"user"`.
+ */
   provenance?: "user" | "injected";
 }
 
@@ -53,23 +53,33 @@ import { profiles, byProvider } from "../lib/agent/llm/providers/openai-compatib
 /**
  * Default base URLs — derived from the canonical profiles table.
  *
- * NOTE: `DEFAULT_BASE_URLS` is ONLY consulted by the `default` (OpenAI-
- * compatible) branch in `buildProvider`, which synthesizes a profile for
- * providers without a dedicated `case` (deepseek, qwen, groq, ollama, ...).
- * Providers that have their OWN dedicated `case` (`openai`, `anthropic`,
- * `gemini`, `xai`, `openrouter`, `azure`) never read this map — their default
- * base URLs come from the provider facades. So we deliberately exclude
- * `openrouter` / `xai` from the spread below (they'd be dead entries that look
- * like they back the dedicated cases but don't).
+ * NOTE: `DEFAULT_BASE_URLS` is ONLY consulted by:
+ * - the `default` (OpenAI-compatible) branch in `buildProvider`, which
+ * synthesizes a profile for providers without a dedicated `case`
+ * (deepseek, qwen, groq, ollama, ...);
+ * - the dedicated `case "google"` branch (Vertex AI), which has no static
+ * default URL and falls back to `DEFAULT_BASE_URLS["google"]` when the
+ * user supplies no `baseUrl`.
+ *
+ * Providers that have their OWN dedicated `case` AND a static default in their
+ * facade (`openai`, `anthropic`, `gemini`, `xai`, `openrouter`, `azure`) never
+ * read this map. So we deliberately exclude `openrouter` / `xai` from the
+ * spread below (they'd be dead entries that look like they back the dedicated
+ * cases but don't). `google` is intentionally NOT in the profiles table, so
+ * it is absent here and the `case "google"` branch requires an explicit
+ * `baseUrl` from the user (FULL-REVIEW finding 124 corrects the prior comment
+ * that omitted google from the list of map readers).
  */
 const DEFAULT_BASE_URLS: Record<string, string> = {
-  // Spread the profiles table entries (covers deepseek, groq, together, etc.)
-  // — excluding `openrouter` / `xai`, which have dedicated `case` branches and
-  // therefore never consult this map. Providers with a dedicated `case`
-  // (`openai`, `anthropic`, `gemini`, `xai`, `openrouter`, `azure`) are NOT
-  // listed here on purpose: their default base URLs come from the provider
-  // facades, so a dead entry here would be misleading and a regression risk if
-  // a dedicated `case` ever regressed to the `default` branch.
+ // Spread the profiles table entries (covers deepseek, groq, together, etc.)
+ // — excluding `openrouter` / `xai`, which have dedicated `case` branches and
+ // therefore never consult this map. Providers with a dedicated `case`
+ // (`openai`, `anthropic`, `gemini`, `xai`, `openrouter`, `azure`) are NOT
+ // listed here on purpose: their default base URLs come from the provider
+ // facades, so a dead entry here would be misleading and a regression risk if
+ // a dedicated `case` ever regressed to the `default` branch. `google` is
+ // handled separately by its own `case` branch and is intentionally absent
+ // from this spread.
   ...Object.fromEntries(
     Object.values(profiles)
       .filter((p) => p.provider !== "openrouter" && p.provider !== "xai")
@@ -143,15 +153,15 @@ export const DEFAULT_MODELS: Record<string, string> = {
  * detect new vision models released after the code was written.
  *
  * @throws if the provider is unknown or the API key is missing (for providers
- *         that require one — local providers like Ollama don't).
+ * that require one — local providers like Ollama don't).
  */
 export async function buildProvider(config: ProviderConfig): Promise<LLMProvider> {
   const { provider, apiKey, model, baseUrl, resourceName, provenance = "user" } = config;
-  // Resolve the model: explicit user choice > live catalog default >
-  // offline DEFAULT_MODELS fallback. `CATALOG_PROVIDER_ID_MAP` maps our
-  // provider id (e.g. "gemini") to the models.dev catalog provider id
-  // (e.g. "google") so `getDefaultModelForProvider` can find the newest
-  // non-deprecated model. Falls back to "" if everything is unavailable.
+ // Resolve the model: explicit user choice > live catalog default >
+ // offline DEFAULT_MODELS fallback. `CATALOG_PROVIDER_ID_MAP` maps our
+ // provider id (e.g. "gemini") to the models.dev catalog provider id
+ // (e.g. "google") so `getDefaultModelForProvider` can find the newest
+ // non-deprecated model. Falls back to "" if everything is unavailable.
   const catalogProviderId = CATALOG_PROVIDER_ID_MAP[provider] ?? provider;
   const resolvedModel =
     model ||
@@ -159,19 +169,19 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
     DEFAULT_MODELS[provider] ||
     "";
 
-  // SSRF guard: reject a user-supplied `baseUrl` that points at a loopback /
-  // private / link-local / cloud-metadata address. `baseUrl` is untrusted
-  // input. The curated `DEFAULT_BASE_URLS` fallbacks (used only when the user
-  // supplies no baseUrl) are trusted and exempted so Ollama/LiteLLM localhost
-  // defaults keep working; they are not validated here.
-  //
-  // Provenance matters: a `"user"`-configured `baseUrl` may use the curated
-  // local-provider exemption (their own Ollama/LiteLLM). An `"injected"`
-  // baseUrl (from prompt injection / malicious settings-sync) is NOT exempted
-  // — `resolveAndValidateLlmBaseUrl(... allowLocalExemption=false)` makes the
-  // exemption unreachable, so an injected `http://localhost:11434` (or a
-  // poisoned hostname resolving to 169.254.169.254) is blocked. The async
-  // variant also DNS-resolves hostnames so poisoned-hostname SSRF is caught.
+ // SSRF guard: reject a user-supplied `baseUrl` that points at a loopback /
+ // private / link-local / cloud-metadata address. `baseUrl` is untrusted
+ // input. The curated `DEFAULT_BASE_URLS` fallbacks (used only when the user
+ // supplies no baseUrl) are trusted and exempted so Ollama/LiteLLM localhost
+ // defaults keep working; they are not validated here.
+ //
+ // Provenance matters: a `"user"`-configured `baseUrl` may use the curated
+ // local-provider exemption (their own Ollama/LiteLLM). An `"injected"`
+ // baseUrl (from prompt injection / malicious settings-sync) is NOT exempted
+ // — `resolveAndValidateLlmBaseUrl(... allowLocalExemption=false)` makes the
+ // exemption unreachable, so an injected `http://localhost:11434` (or a
+ // poisoned hostname resolving to 169.254.169.254) is blocked. The async
+ // variant also DNS-resolves hostnames so poisoned-hostname SSRF is caught.
   if (baseUrl) {
     const allowLocalExemption = provenance === "user";
     const ssrf = await resolveAndValidateLlmBaseUrl(baseUrl, allowLocalExemption);
@@ -225,12 +235,12 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
       break;
 
     case "google": {
-      // Google Vertex AI is reached through its OpenAI-compatible endpoint
-      // (https://ai.googleapis.com/v1beta1/projects/{project}/locations/{loc}/...).
-      // The project/location are specific to the user's GCP setup, so there is
-      // no single static default URL — the user must supply `baseUrl` in
-      // Options. Route through the OpenAICompatible facade once a baseUrl is
-      // present.
+ // Google Vertex AI is reached through its OpenAI-compatible endpoint
+ // (https://ai.googleapis.com/v1beta1/projects/{project}/locations/{loc}/...).
+ // The project/location are specific to the user's GCP setup, so there is
+ // no single static default URL — the user must supply `baseUrl` in
+ // Options. Route through the OpenAICompatible facade once a baseUrl is
+ // present.
       if (!apiKey) throw new Error("Google (Vertex AI) requires an API key. Add one in Options.");
       const resolvedBaseURL = baseUrl || DEFAULT_BASE_URLS["google"];
       if (!resolvedBaseURL) {
@@ -248,6 +258,16 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
     }
 
     default: {
+ // A provider that isn't in `KNOWN_PROVIDERS` and isn't a recognized
+ // openai-compatible alias is genuinely unknown. Report that precisely
+ // instead of masking it behind the API-key check (which would otherwise
+ // throw "${provider} requires an API key" for an unrecognized id,
+ // hiding the real problem — FULL-REVIEW finding 53).
+      if (!KNOWN_PROVIDERS.has(provider) && provider !== "ollama") {
+        throw new Error(
+          `Unknown provider "${provider}". Pick one of: ${[...KNOWN_PROVIDERS].join(", ")}.`
+        );
+      }
       const needsKey = provider !== "ollama";
       if (needsKey && !apiKey) {
         throw new Error(`${provider} requires an API key. Add one in Options.`);
@@ -268,20 +288,20 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
     }
   }
 
-  // Patch supportsVision based on per-MODEL detection. The provider facade's
-  // hardcoded value is the fallback; the catalog lookup overrides it with
-  // accurate per-model data. This catches new vision models (e.g. a Groq
-  // vision model released after the code was written) that the hardcoded
-  // per-provider flag would miss.
-  //
-  // On catalog lookup failure, FAIL SAFE toward the more conservative vision
-  // state (no screenshot gating) rather than silently trusting the hardcoded
-  // per-provider flag — that flag is the unreliable value that caused the
-  // screenshot-gating flip-flop bug (extractState skipped captureVisibleTab
-  // while navigatorCallDirect tried to embed a non-existent screenshot).
-  // We also persist a debug marker to `chrome.storage.local` so the failure
-  // survives the production build (console.* is stripped), giving operators a
-  // signal instead of an invisible revert to the unreliable flag.
+ // Patch supportsVision based on per-MODEL detection. The provider facade's
+ // hardcoded value is the fallback; the catalog lookup overrides it with
+ // accurate per-model data. This catches new vision models (e.g. a Groq
+ // vision model released after the code was written) that the hardcoded
+ // per-provider flag would miss.
+ //
+ // On catalog lookup failure, FAIL SAFE toward the more conservative vision
+ // state (no screenshot gating) rather than silently trusting the hardcoded
+ // per-provider flag — that flag is the unreliable value that caused the
+ // screenshot-gating flip-flop bug (extractState skipped captureVisibleTab
+ // while navigatorCallDirect tried to embed a non-existent screenshot).
+ // We also persist a debug marker to `chrome.storage.local` so the failure
+ // survives the production build (console.* is stripped), giving operators a
+ // signal instead of an invisible revert to the unreliable flag.
   try {
     const visionCapable = await modelSupportsVision(resolvedModel, catalogProviderId);
     if (visionCapable !== result.supportsVision) {
@@ -323,10 +343,14 @@ export async function readProviderConfig(): Promise<ProviderConfig | null> {
     "model",
     "baseUrl",
     "resourceName",
+ // Legacy migration fallback only: the API key normally lives in
+ // `chrome.storage.session`. Reading `apiKey` here lets upgraded installs
+ // that still have the key in `local` (not yet migrated to session) work.
+    "apiKey",
   ]);
-  // The API key is persisted in `chrome.storage.session` (in-memory, never on
-  // disk) for safety. Read it from there; fall back to `local` only for
-  // not-yet-migrated installs. Never console.log the value.
+ // The API key is persisted in `chrome.storage.session` (in-memory, never on
+ // disk) for safety. Read it from there; fall back to `local` only for
+ // not-yet-migrated installs. Never console.log the value.
   let apiKey = "";
   if (chrome.storage?.session) {
     const sres = await chrome.storage.session.get(["apiKey"]);
@@ -335,10 +359,10 @@ export async function readProviderConfig(): Promise<ProviderConfig | null> {
   if (!apiKey) apiKey = normalizeString(res.apiKey);
   const provider = normalizeString(res.provider);
   if (!provider) return null; // no provider set → unconfigured user
-  // Defense-in-depth: a corrupted / injected `chrome.storage.local` payload
-  // could carry an arbitrary provider id. We still return it so `buildProvider`
-  // throws its precise "Unknown provider" error (the actionable message the UI
-  // surfaces), but we log a warning here so the anomaly is observable in dev.
+ // Defense-in-depth: a corrupted / injected `chrome.storage.local` payload
+ // could carry an arbitrary provider id. We still return it so `buildProvider`
+ // throws its precise "Unknown provider" error (the actionable message the UI
+ // surfaces), but we log a warning here so the anomaly is observable in dev.
   if (!KNOWN_PROVIDERS.has(provider)) {
     console.warn(
       `[provider-config] Unknown provider "${provider}" read from storage; buildProvider will reject it.`

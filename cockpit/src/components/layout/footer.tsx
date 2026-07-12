@@ -1,7 +1,5 @@
 "use client";
 
-import * as React from "react";
-
 import { ConnectionStatus } from "@/components/layout/connection-status";
 import { COCKPIT_VERSION } from "@/lib/cowork/version";
 

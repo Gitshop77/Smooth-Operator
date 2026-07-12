@@ -34,9 +34,12 @@ async function readCappedBody(req: NextRequest): Promise<string> {
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    // Reject BEFORE the chunk is appended to `text` so a single oversized
-    // chunk (or a cumulative overflow) can never be buffered into memory.
+ // Reject BEFORE the chunk is appended to `text` so a single oversized
+ // chunk (or a cumulative overflow) can never be buffered into memory.
     if (total + value.byteLength > MAX_BODY_BYTES) {
+ // Release the underlying body reader so the request socket/stream is not
+ // left unconsumed (resource hygiene under a flood of oversize requests).
+      try { await reader.cancel(); } catch { /* ignore */ }
       throw new ClientError('request entity too large', 413);
     }
     total += value.byteLength;
@@ -74,15 +77,27 @@ export async function bodyJsonOptional(req: NextRequest): Promise<Record<string,
     return await bodyJson(req);
   } catch (e) {
     if (e instanceof ClientError) throw e;
+ // A non-`ClientError` (e.g. a read/abort error) is being swallowed into an
+ // empty body. Log it so upload/body failures are observable server-side
+ // rather than silently disappearing (defense-in-depth observability).
+    console.error(
+      '[cowork] bodyJsonOptional swallowed non-ClientError:',
+      e instanceof Error ? e.message : String(e),
+    );
     return {};
   }
 }
 
-/** JSON Response helper. */
+/** JSON Response helper.
+ *
+ * All cockpit API responses are authenticated and carry volatile data, so a
+ * `no-store` directive is applied by default to prevent shared/proxy caches or
+ * the browser back-forward cache from retaining credentials or stale payloads.
+ * Callers may override it via the `headers` argument. */
 export function json(data: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'content-type': 'application/json', ...headers },
+    headers: { 'content-type': 'application/json', 'cache-control': 'no-store', ...headers },
   });
 }
 
@@ -102,7 +117,7 @@ export function serverError(error: string): Response {
 }
 
 /** Validate that a URL string uses the http or https protocol.
- *  Returns `null` on success, or a 400 Response on failure.
+ * Returns `null` on success, or a 400 Response on failure.
  *
  * SSRF BOUNDARY: this function ONLY checks the URL *scheme*. It deliberately
  * does NOT reject loopback / RFC1918 / link-local / cloud-metadata hosts, so
@@ -138,7 +153,7 @@ export function validateHttpUrl(url: string): Response | null {
  * `isSsrfSafeUrl` for genuine server-side outbound fetches/launches.
  *
  * The host is classified in its *resolved* form: this covers IPv4-mapped IPv6
- * literals (`::ffff:127.0.0.1`), decimal (`2130706433`), octal (`0177.0.0.1`),
+ * literals (`:ffff:127.0.0.1`), decimal (`2130706433`), octal (`0177.0.0.1`),
  * and hex (`0x7f.0.0.1`) encodings, all of which a real HTTP client resolves to
  * the same (possibly private) address. */
 export function isSsrfSafeUrl(url: string): boolean {
@@ -150,58 +165,67 @@ export function isSsrfSafeUrl(url: string): boolean {
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
   let host = parsed.hostname.toLowerCase();
-  // Strip IPv6 bracket notation (`[::1]`) so comparisons below work.
+ // Strip IPv6 bracket notation (`[:1]`) so comparisons below work.
   if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
-  // Bare loopback / unspecified addresses.
+ // Bare loopback / unspecified addresses.
   if (host === 'localhost' || host === '::1' || host === '0.0.0.0') return false;
-  // Any loopback / RFC1918 / link-local / CGNAT host (in resolved form) is unsafe.
+ // Any loopback / RFC1918 / link-local / CGNAT host (in resolved form) is unsafe.
   if (isRestrictedHost(host)) return false;
   return true;
 }
 
 /** True when `host` resolves to a loopback / private / link-local / CGNAT
- *  address in any of the forms an HTTP client would accept: standard IPv4,
- *  standard IPv6, IPv4-mapped IPv6, or the various integer encodings of an IPv4
- *  address (decimal, octal, hex, and inet_aton shorthand). */
+ * address in any of the forms an HTTP client would accept: standard IPv4,
+ * standard IPv6, IPv4-mapped IPv6, or the various integer encodings of an IPv4
+ * address (decimal, octal, hex, and inet_aton shorthand). */
 function isRestrictedHost(host: string): boolean {
-  // A zone-id (`fe80::1%eth0`) makes the host an invalid bare IP, so `isIP`
-  // returns 0 and the value would otherwise fall through to `normalizeEncodedIpv4`
-  // and be treated as a public/safe host. Zone-scoped link-local addresses are
-  // still link-local — reject any `%` in the host outright.
+ // A zone-id (`fe80:1%eth0`) makes the host an invalid bare IP, so `isIP`
+ // returns 0 and the value would otherwise fall through to `normalizeEncodedIpv4`
+ // and be treated as a public/safe host. Zone-scoped link-local addresses are
+ // still link-local — reject any `%` in the host outright.
   if (host.includes('%')) return true;
-  // IPv6 literal.
+ // IPv6 literal.
   if (isIP(host) === 6) {
-    // IPv4-mapped IPv6 (`::ffff:a.b.c.d`) — classify the embedded address.
+ // IPv4-mapped IPv6 (`:ffff:a.b.c.d`) — classify the embedded address.
     if (host.startsWith('::ffff:')) {
       const embedded = host.slice('::ffff:'.length);
       if (isRestrictedHost(embedded)) return true;
     }
-    // IPv6 link-local (fe80::/10) and unique-local (fc00::/7). Gate on `isIP === 6`
-    // so a public hostname that merely starts with "fc"/"fd"/"fe80" is not blocked.
-    return host.startsWith('fe80:') || host.startsWith('fc') || host.startsWith('fd');
+ // IPv6 link-local (fe80:/10) and unique-local (fc00:/7). Classify by the
+ // first hextet's bitmask rather than by string prefixes, so the WHOLE
+ // fe80:/10 link-local range (fe80: … febf:) is blocked — not just fe80:,
+ // and fc00:/7 (fc00 … fdff) is covered without a fragile startsWith.
+    const firstHextet = parseInt(host.split(':')[0], 16);
+    if (!Number.isNaN(firstHextet)) {
+ // Link-local: fe80:/10 → (firstHextet & 0xffc0) === 0xfe80
+      if ((firstHextet & 0xffc0) === 0xfe80) return true;
+ // Unique-local: fc00:/7 → (firstHextet & 0xfe00) === 0xfc00
+      if ((firstHextet & 0xfe00) === 0xfc00) return true;
+    }
+    return false;
   }
-  // Standard IPv4 literal.
+ // Standard IPv4 literal.
   if (isIP(host) === 4) return isPrivateIpv4(host);
-  // Non-standard encodings (decimal / octal / hex / inet_aton shorthand) that an
-  // HTTP client resolves to the same address. Normalize to dotted IPv4 first.
+ // Non-standard encodings (decimal / octal / hex / inet_aton shorthand) that an
+ // HTTP client resolves to the same address. Normalize to dotted IPv4 first.
   const normalized = normalizeEncodedIpv4(host);
   if (normalized) return isPrivateIpv4(normalized);
   return false;
 }
 
 /** Attempt to interpret `host` as an integer-encoded IPv4 address and return it
- *  in dotted-decimal form, or `null` if it is not an IP-encoding at all.
+ * in dotted-decimal form, or `null` if it is not an IP-encoding at all.
  *
- *  Handles:
- *    • pure decimal        `2130706433`   -> 127.0.0.1
- *    • dotted, each octet decimal/octal/hex with inet_aton shorthand
- *      `0177.0.0.1`        -> 127.0.0.1
- *      `0x7f.0.0.1`        -> 127.0.0.1
- *      `127.1`             -> 127.0.0.1
- *  A genuine DNS hostname (e.g. `example.com`) returns `null` and is treated as
- *  public. */
+ * Handles:
+ * • pure decimal `2130706433` -> 127.0.0.1
+ * • dotted, each octet decimal/octal/hex with inet_aton shorthand
+ * `0177.0.0.1` -> 127.0.0.1
+ * `0x7f.0.0.1` -> 127.0.0.1
+ * `127.1` -> 127.0.0.1
+ * A genuine DNS hostname (e.g. `example.com`) returns `null` and is treated as
+ * public. */
 function normalizeEncodedIpv4(host: string): string | null {
-  // Pure decimal integer form (e.g. 2130706433).
+ // Pure decimal integer form (e.g. 2130706433).
   if (/^\d{1,10}$/.test(host)) {
     const n = Number(host);
     if (Number.isInteger(n) && n >= 0 && n <= 0xffffffff) {
@@ -214,7 +238,7 @@ function normalizeEncodedIpv4(host: string): string | null {
     }
     return null;
   }
-  // Dotted form with 1-4 parts, each decimal / octal (0-prefix) / hex (0x-prefix).
+ // Dotted form with 1-4 parts, each decimal / octal (0-prefix) / hex (0x-prefix).
   const parts = host.split('.');
   if (parts.length < 1 || parts.length > 4) return null;
   const nums: number[] = [];
@@ -246,22 +270,22 @@ function isPrivateIpv4(host: string): boolean {
   const parts = host.split('.').map(Number);
   if (parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) return false;
   const [a, b] = parts;
-  // 0.0.0.0/8 — "this network" / unspecified. Encoded forms (`0`, `0x0.0.0.0`,
-  // `00.0.0.0`, …) all normalize to `0.0.0.0` and must be blocked exactly like
-  // loopback, otherwise a server-side fetch/launch can reach the unspecified
-  // address and bypass the guard's intent.
+ // 0.0.0.0/8 — "this network" / unspecified. Encoded forms (`0`, `0x0.0.0.0`,
+ // `00.0.0.0`, …) all normalize to `0.0.0.0` and must be blocked exactly like
+ // loopback, otherwise a server-side fetch/launch can reach the unspecified
+ // address and bypass the guard's intent.
   if (a === 0) return true;
-  // 10.0.0.0/8
+ // 10.0.0.0/8
   if (a === 10) return true;
-  // 172.16.0.0/12
+ // 172.16.0.0/12
   if (a === 172 && b >= 16 && b <= 31) return true;
-  // 192.168.0.0/16
+ // 192.168.0.0/16
   if (a === 192 && b === 168) return true;
-  // 127.0.0.0/8 (loopback)
+ // 127.0.0.0/8 (loopback)
   if (a === 127) return true;
-  // 169.254.0.0/16 (link-local, incl. cloud metadata 169.254.169.254)
+ // 169.254.0.0/16 (link-local, incl. cloud metadata 169.254.169.254)
   if (a === 169 && b === 254) return true;
-  // 100.64.0.0/10 (CGNAT)
+ // 100.64.0.0/10 (CGNAT)
   if (a === 100 && b >= 64 && b <= 127) return true;
   return false;
 }
@@ -272,9 +296,9 @@ export function parseLimit(req: NextRequest, defaultValue = 100, max = 200): num
 }
 
 /** Maximum length for user-supplied free-text fields. These mirror the bounds
- *  other cowork resources apply (names ≤ 64, userAgent ≤ 512, descriptions ≤
- *  2000) so bookmarks/tabs can't store unbounded strings that bloat DB rows or
- *  amplify response sizes. */
+ * other cowork resources apply (names ≤ 64, userAgent ≤ 512, descriptions ≤
+ * 2000) so bookmarks/tabs can't store unbounded strings that bloat DB rows or
+ * amplify response sizes. */
 export const MAX_NAME_LEN = 256;
 export const MAX_TITLE_LEN = 512;
 export const MAX_URL_LEN = 2048;
@@ -300,7 +324,7 @@ export function boundedString(value: unknown, maxLen: number, fallback?: string)
 
 function newCorrelationId(): string {
   try {
-    // crypto.randomUUID is available in Node 19+ and the Edge runtime.
+ // crypto.randomUUID is available in Node 19+ and the Edge runtime.
     return globalThis.crypto.randomUUID();
   } catch {
     return `err-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -310,11 +334,11 @@ function newCorrelationId(): string {
 /**
  * Redact obvious secret shapes from a loggable string so server-side error
  * logging does not capture credentials. Covers:
- *   • credentials embedded in URLs (http(s)://user:pass@host)
- *   • secret-bearing `key=value` pairs (password / token / secret / api_key / …)
- *   • JSON-shaped secrets (`"password": "…"`, `"api_key": "…"`)
- *   • `Bearer` tokens
- *   • the configured COWORK_EVENT_TOKEN itself (if set and non-dev)
+ * • credentials embedded in URLs (http(s)://user:pass@host)
+ * • secret-bearing `key=value` pairs (password / token / secret / api_key / …)
+ * • JSON-shaped secrets (`"password": "…"`, `"api_key": "…"`)
+ * • `Bearer` tokens
+ * • the configured COWORK_EVENT_TOKEN itself (if set and non-dev)
  *
  * Applied to `Error.message` text today (defense-in-depth on potential secret
  * leakage in error strings); the patterns are intentionally broad and can be
@@ -324,30 +348,30 @@ function newCorrelationId(): string {
  * route) rather than maintaining a divergent copy. */
 export function redactSecrets(text: string): string {
   let out = text;
-  // Credentials in URLs: http(s)://user:pass@host -> http(s)://***@host
+ // Credentials in URLs: http(s)://user:pass@host -> http(s)://***@host
   out = out.replace(/https?:\/\/[^@\s/]+@/gi, (m) =>
     m.replace(/\/\/[^@\s/]+@/, "//***@"),
   );
-  // Secret-bearing key=value pairs in URLs / bodies / headers.
+ // Secret-bearing key=value pairs in URLs / bodies / headers.
   out = out.replace(
     /(password|passwd|token|secret|api[_-]?key|access[_-]?token|authorization|authorisation)=[^&\s"'<>]+/gi,
     "$1=***",
   );
-  // JSON-shaped secrets: `"password": "secret"` / `"api_key": "..."`.
+ // JSON-shaped secrets: `"password": "secret"` / `"api_key": "..."`.
   out = out.replace(
     /"(password|passwd|token|secret|api[_-]?key|access[_-]?token|authorization|authorisation)"\s*:\s*"[^"]*"/gi,
     '"$1":"***"',
   );
-  // Bearer tokens.
+ // Bearer tokens.
   out = out.replace(/Bearer\s+[A-Za-z0-9._-]+/g, "Bearer ***");
-  // The configured token value itself (avoid echoing the real secret).
+ // The configured token value itself (avoid echoing the real secret).
   const configured = process.env.COWORK_EVENT_TOKEN;
   if (configured && configured.length > 0 && configured !== "dev-token") {
     out = out.split(configured).join("***");
   }
-  // The browser/UI secret is independent of the service-to-service secret (the
-  // preferred one when distinct). Redact it too, or a leaked distinct UI token
-  // would survive `redactSecrets` and show up in error strings/logs.
+ // The browser/UI secret is independent of the service-to-service secret (the
+ // preferred one when distinct). Redact it too, or a leaked distinct UI token
+ // would survive `redactSecrets` and show up in error strings/logs.
   const uiToken = process.env.COWORK_UI_TOKEN;
   if (uiToken && uiToken.length > 0 && uiToken !== "dev-token") {
     out = out.split(uiToken).join("***");
@@ -369,10 +393,10 @@ function stableErrorCode(message: string): string {
 /**
  * Wrap an async route handler with try/catch that produces a JSON error.
  *
- * @param fn         The route handler.
- * @param requestId  Optional request id propagated from middleware. When
- *                   provided it is reused as the `correlationId` so server error
- *                   logs and the client-facing error share one traceable id.
+ * @param fn The route handler.
+ * @param requestId Optional request id propagated from middleware. When
+ * provided it is reused as the `correlationId` so server error
+ * logs and the client-facing error share one traceable id.
  *
  * ERROR-LEAK CONTRACT (fail-closed):
  *
@@ -396,9 +420,9 @@ export async function withRouteError(
   } catch (e) {
     const correlationId = requestId || newCorrelationId();
     const message = e instanceof Error ? e.message : 'Internal server error';
-    // Prefer a stable error code + correlation id over dumping the raw
-    // stack/message (which may leak filesystem paths, table names, or tokens).
-    // What we do log is redacted of known secret shapes.
+ // Prefer a stable error code + correlation id over dumping the raw
+ // stack/message (which may leak filesystem paths, table names, or tokens).
+ // What we do log is redacted of known secret shapes.
     console.error(
       '[cowork route error]',
       correlationId,
@@ -406,14 +430,14 @@ export async function withRouteError(
       redactSecrets(message),
     );
 
-    // App-authored `ClientError`s are the only messages safe to echo verbatim;
-    // their status is taken from the error itself. Any other (internal) error is
-    // withheld from the client and mapped to a generic, leak-free 500.
+ // App-authored `ClientError`s are the only messages safe to echo verbatim;
+ // their status is taken from the error itself. Any other (internal) error is
+ // withheld from the client and mapped to a generic, leak-free 500.
     if (e instanceof ClientError) {
       return json({ error: e.message, correlationId }, e.status);
     }
 
-    // Fail-closed: internal errors never reach the client as raw text.
+ // Fail-closed: internal errors never reach the client as raw text.
     return json({ error: 'internal_error', correlationId }, 500);
   }
 }

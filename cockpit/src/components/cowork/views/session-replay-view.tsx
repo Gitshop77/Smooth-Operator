@@ -64,13 +64,24 @@ export function SessionReplayView() {
     [sessionId, sessions.data],
   );
 
-  // Flatten every task's stepsJson into one ordered, scrubable timeline.
+ // Flatten every task's stepsJson into one ordered, scrubable timeline.
+ //
+ // DATA LIMITATION: the persisted `SampleTask` model has NO session linkage
+ // (no `sessionId` field; tasks reference only `agentId`/`tabId`, and
+ // `SampleSession` exposes no task relation). We therefore cannot scope this
+ // timeline to `sessionId` — the same global task-step list is shown for every
+ // session, and the UI states this explicitly below. `sessionId` is kept in
+ // the dependency list so this memo re-evaluates if a real linkage is added.
   const steps = React.useMemo<ReplayStep[]>(() => {
+    void sessionId; // no persisted field to filter tasks by session (see above)
     const out: ReplayStep[] = [];
     for (const t of tasks.data ?? []) {
       let parsed: Array<{ label?: string; done?: boolean }> = [];
       try {
-        parsed = JSON.parse(t.stepsJson || "[]");
+        const raw = JSON.parse(t.stepsJson || "[]");
+ // JSON.parse of `{}` / `5` / `null` succeeds but is not an array —
+ // guard so a non-array value can't crash the render with a TypeError.
+        parsed = Array.isArray(raw) ? raw : [];
       } catch {
         parsed = [];
       }
@@ -90,11 +101,11 @@ export function SessionReplayView() {
       });
     }
     return out;
-  }, [tasks.data]);
+  }, [tasks.data, sessionId]);
 
   const [activeIndex, setActiveIndex] = React.useState(0);
 
-  // Default the scrubber to the first not-yet-done step (the live frontier).
+ // Default the scrubber to the first not-yet-done step (the live frontier).
   React.useEffect(() => {
     if (steps.length === 0) return;
     const firstUndone = steps.findIndex((s) => !s.done);
@@ -118,7 +129,7 @@ export function SessionReplayView() {
         title={session ? session.name : "Session replay"}
         description={
           session
-            ? `${session.partition} · ${session.userAgent ?? "unknown agent"}`
+            ? `${session.partition} · ${session.userAgent ?? "unknown agent"} — note: task steps are shown across all sessions (no session linkage is persisted)`
             : "Reconstructing the agent's run from persisted task steps."
         }
         icon={<PlayCircle className="size-5" />}
@@ -301,7 +312,9 @@ export function SessionReplayView() {
           <p className="text-xs text-muted-foreground">
             Per-step timestamps are not persisted — the times shown are task-level
             (created). The active step is derived from each task&apos;s{" "}
-            <code className="font-mono">currentStep</code> index.
+            <code className="font-mono">currentStep</code> index. The timeline
+            below aggregates all persisted task steps because the data model does
+            not link tasks to a specific session.
           </p>
         </motion.div>
       ) : null}

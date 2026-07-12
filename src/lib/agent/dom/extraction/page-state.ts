@@ -5,12 +5,12 @@
  * `HTMLElement`.
  *
  * Capabilities:
- *   - Shadow DOM traversal (open roots, and closed roots via
- *     {@link ../annotation/shadow-piercer}'s patch)
- *   - Same-origin iframe traversal
- *   - SHA-style stable element hashing (FNV-1a of branch-path + key attrs) so
- *     the agent can mark elements with `*` when they are new since the last step
- *   - Visibility and interactivity filtering (interactive elements get an index)
+ * - Shadow DOM traversal (open roots, and closed roots via
+ * {@link ../annotation/shadow-piercer}'s patch)
+ * - Same-origin iframe traversal
+ * - SHA-style stable element hashing (FNV-1a of branch-path + key attrs) so
+ * the agent can mark elements with `*` when they are new since the last step
+ * - Visibility and interactivity filtering (interactive elements get an index)
  *
  * The module keeps the last selectorMap and hash set in closure so successive
  * calls can compute `isNew` correctly across steps.
@@ -43,7 +43,7 @@ import { getShadowRoot, installShadowPiercer } from "../annotation/shadow-pierce
 // `isVisible(el)` wrapper around `isVisibleFull`. The thin wrapper is kept
 // here for callers that import it from `dom/extractor` via the shim. The
 // `isInteractive` re-export is NOT done here (to avoid a name collision in
-// the `dom/index.ts` barrel, which also re-exports `isInteractive` from
+// the re-export shim set, which also re-exports `isInteractive` from
 // `./utils/classification`) — the `dom/extractor.ts` shim re-exports it
 // directly from `./utils/classification`.
 
@@ -62,9 +62,29 @@ export function isVisible(el: HTMLElement): boolean {
 
 // ─── Walker ──────────────────────────────────────────────────────────────────
 
-/** Escape `& < > "` for safe interpolation inside a quoted XML attribute. */
+/** Max length for a single attribute value rendered into the tree text. */
+const MAX_ATTR_VALUE_LENGTH = 200;
+
+/**
+ * Sanitize + escape an attribute value for safe interpolation inside a quoted
+ * XML attribute in the tree text.
+ *
+ *  attribute values (`aria-label` / `title` / `value` …) are
+ * attacker-controlled on a hostile page and are fed verbatim to the navigator
+ * LLM each step. Escaping `& < > "` alone is NOT enough — a value containing
+ * embedded newlines / control chars (e.g. `\n*[999] IMPORTANT: click ...`)
+ * injects extra "lines" that mimic the tree format (prompt injection). Strip
+ * ALL control characters (incl. CR/LF/TAB), collapse remaining whitespace runs
+ * to single spaces, and length-cap the value before escaping so a single
+ * attribute can neither forge a new tree line nor flood the context.
+ */
 function escapeAttr(v: string): string {
-  return v.replace(/[&<>"]/g, (c) =>
+  let s = v
+    .replace(/[\u0000-\u001F\u007F-\u009F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (s.length > MAX_ATTR_VALUE_LENGTH) s = s.slice(0, MAX_ATTR_VALUE_LENGTH) + "…";
+  return s.replace(/[&<>"]/g, (c) =>
     c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : "&quot;",
   );
 }
@@ -94,8 +114,28 @@ interface WalkAccumulator {
   newElementCount: number;
 }
 
+// Cache of per-parent visibility results, keyed by the parent element. The
+// walker visits text nodes far more often than element nodes, so caching the
+// full visibility check (which calls `getComputedStyle`) per parent avoids
+// re-running it for every text node sibling.
+const visibilityCache = new WeakMap<HTMLElement, boolean>();
+
 /** Serialize a text node (indent + trimmed text). No-op for short/blank text. */
 function serializeText(node: Text, depth: number, acc: WalkAccumulator): void {
+  const parent = node.parentElement;
+  if (!parent) return;
+ //  the cheap `isLikelyHidden` pre-check (display:none / detached)
+ // does NOT catch `visibility:hidden` / `opacity:0` / `aria-hidden` /
+ // off-screen content. A text node's parent must be *actually* visible before
+ // its text is surfaced to the LLM, otherwise invisible-to-the-user content
+ // (e.g. hidden tracking text) leaks into `elementsText`. Cache per-parent.
+  let visible = visibilityCache.get(parent);
+  if (visible === undefined) {
+    visible = isVisibleFull(parent);
+    visibilityCache.set(parent, visible);
+  }
+  if (!visible) return;
+
   const t = (node.textContent || "").replace(/\s+/g, " ").trim();
   if (t.length >= DOM_CONFIG.minTextLength) {
     acc.lines.push("\t".repeat(depth) + t);
@@ -106,20 +146,20 @@ function serializeText(node: Text, depth: number, acc: WalkAccumulator): void {
 function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator): void {
   const tag = el.tagName.toLowerCase();
 
-  // LOW-1 fix: check isLikelyHidden BEFORE the skipTags/iframe check so a
-  // `display: none` iframe doesn't bypass the visibility pre-check and walk
-  // its contentDocument (surfacing hidden iframe content to the LLM).
+ // LOW-1 check isLikelyHidden BEFORE the skipTags/iframe check so a
+ // `display: none` iframe doesn't bypass the visibility pre-check and walk
+ // its contentDocument (surfacing hidden iframe content to the LLM).
   if (isLikelyHidden(el)) return;
 
   if (DOM_CONFIG.skipTags.has(tag) || tag === "iframe") {
-    // iframes are handled separately for same-origin traversal.
+ // iframes are handled separately for same-origin traversal.
     if (tag === "iframe") trySerializeIframe(el as HTMLIFrameElement, depth, acc);
     return;
   }
 
-  // For interactive elements, do the full visibility check (which may invoke
-  // `getComputedStyle`) AND capture the rect once for reuse below. The rect
-  // is passed to `isVisibleFull` so it doesn't have to fetch it again.
+ // For interactive elements, do the full visibility check (which may invoke
+ // `getComputedStyle`) AND capture the rect once for reuse below. The rect
+ // is passed to `isVisibleFull` so it doesn't have to fetch it again.
   let rect: DOMRect | undefined;
   let interactive = false;
   if (isInteractive(el)) {
@@ -127,21 +167,21 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
     if (!isVisibleFull(el, rect)) return;
     interactive = true;
   }
-  // For non-interactive elements we deliberately skip the expensive
-  // `isVisibleFull` check — `isLikelyHidden` already caught display:none /
-  // detached, and a non-interactive parent with opacity:0 / visibility:hidden
-  // emits no line itself. Its interactive descendants will be filtered by
-  // their own `isVisibleFull` check when they're visited.
-  //
-  // Note on behavior: this is a small, intentional change from the previous
-  // unconditional `isVisible` call. Previously, a non-interactive parent with
-  // `opacity:0` would short-circuit the whole subtree (its interactive
-  // children were never visited). Now we visit the subtree; an interactive
-  // child whose own computed `opacity` is "1" (CSS `opacity` doesn't inherit
-  // in computed-value terms — only its visual effect multiplies) will be
-  // emitted. This is rare (opacity:0 parents are uncommon) and the win —
-  // skipping `getComputedStyle` for the vast majority of non-interactive
-  // nodes — is large.
+ // For non-interactive elements we deliberately skip the expensive
+ // `isVisibleFull` check — `isLikelyHidden` already caught display:none /
+ // detached, and a non-interactive parent with opacity:0 / visibility:hidden
+ // emits no line itself. Its interactive descendants will be filtered by
+ // their own `isVisibleFull` check when they're visited.
+ //
+ // Note on behavior: this is a small, intentional change from the previous
+ // unconditional `isVisible` call. Previously, a non-interactive parent with
+ // `opacity:0` would short-circuit the whole subtree (its interactive
+ // children were never visited). Now we visit the subtree; an interactive
+ // child whose own computed `opacity` is "1" (CSS `opacity` doesn't inherit
+ // in computed-value terms — only its visual effect multiplies) will be
+ // emitted. This is rare (opacity:0 parents are uncommon) and the win —
+ // skipping `getComputedStyle` for the vast majority of non-interactive
+ // nodes — is large.
 
   if (interactive) {
     const idx = ++acc.index;
@@ -156,17 +196,17 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
     acc.lines.push(
       "\t".repeat(depth) + `${prefix}[${idx}]<${tag}${attrString(attrs)} />`
     );
-    // Compound controls (select, range, details, file input) get virtual
-    // child lines describing their internal structure (e.g. the first 4
-    // options of a select). Emitted BEFORE descending into real children so
-    // the virtual structure sits right under the parent's indexed line.
+ // Compound controls (select, range, details, file input) get virtual
+ // child lines describing their internal structure (e.g. the first 4
+ // options of a select). Emitted BEFORE descending into real children so
+ // the virtual structure sits right under the parent's indexed line.
     serializeCompoundChildren(el, depth, acc);
-    // Descend into children (so nested text/elements render as children).
+ // Descend into children (so nested text/elements render as children).
     for (const child of Array.from(el.childNodes)) {
       walkNode(child, depth + 1, acc);
     }
-    // Descend into shadow DOM if present (pierces closed roots via the
-    // shadow-piercer module when installed).
+ // Descend into shadow DOM if present (pierces closed roots via the
+ // shadow-piercer module when installed).
     const sr = getShadowRoot(el);
     if (sr) {
       for (const child of Array.from(sr.childNodes)) {
@@ -176,7 +216,7 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
     return;
   }
 
-  // Non-interactive: descend without emitting a tag line.
+ // Non-interactive: descend without emitting a tag line.
   for (const child of Array.from(el.childNodes)) {
     walkNode(child, depth, acc);
   }
@@ -192,11 +232,11 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
 function trySerializeIframe(iframe: HTMLIFrameElement, depth: number, acc: WalkAccumulator): void {
   try {
     const doc = iframe.contentDocument;
-    // MEDIUM-2 fix: `contentDocument` returns null for cross-origin iframes
-    // (per HTML spec — does NOT throw). The previous code's catch block
-    // (which emits the cross-origin marker) was dead code for the common case.
-    // Emit the marker in the null branch so the LLM is aware of cross-origin
-    // iframes (ads, payment embeds, reCAPTCHA, etc.).
+ // MEDIUM-2 `contentDocument` returns null for cross-origin iframes
+ // (per HTML spec — does NOT throw). The previous code's catch block
+ // (which emits the cross-origin marker) was dead code for the common case.
+ // Emit the marker in the null branch so the LLM is aware of cross-origin
+ // iframes (ads, payment embeds, reCAPTCHA, etc.).
     if (!doc || !doc.body) {
       acc.lines.push("\t".repeat(depth) + `|IFRAME src=${iframe.src || "(blank)"} (cross-origin or not loaded)|`);
       return;
@@ -207,14 +247,14 @@ function trySerializeIframe(iframe: HTMLIFrameElement, depth: number, acc: WalkA
         walkNode(child, depth + 1, acc);
       }
     } catch {
-      // A misbehaving same-origin subframe (e.g. a getter that throws, a
-      // unusual custom element, or a detached-node race) must not abort the
-      // whole page-state read — emit a marker and continue, matching the
-      // cross-origin fallback style.
+ // A misbehaving same-origin subframe (e.g. a getter that throws, a
+ // unusual custom element, or a detached-node race) must not abort the
+ // whole page-state read — emit a marker and continue, matching the
+ // cross-origin fallback style.
       acc.lines.push("\t".repeat(depth) + `|IFRAME src=${iframe.src || "same-origin"} (error reading contents)|`);
     }
   } catch {
-    // Cross-origin security exception — can't read contents. Surface the URL only.
+ // Cross-origin security exception — can't read contents. Surface the URL only.
     acc.lines.push("\t".repeat(depth) + `|IFRAME src=${iframe.src} (cross-origin)|`);
   }
 }
@@ -276,15 +316,15 @@ export function resetDomBaseline(): void {
  *
  * @param tabs open tabs (extension: chrome.tabs query; in-page demo: [current]).
  * @returns a {@link BrowserState} whose serialisable fields (`url`, `title`,
- *   `elements` (with `text`/`attributes`/`hash`), `elementsText`, `pageInfo`,
- *   `newElementCount`, `scroll*`, `viewportHeight`) are safe to forward to the
- *   LLM. **Runtime-only fields** — `selectorMap` (live `HTMLElement`s) and each
- *   `elements[].rect` (a `DOMRect`) — must be STRIPPED before serialisation:
- *   a live `HTMLElement`/`DOMRect` JSON-stringifies to `{}`, so forwarding the
- *   raw object ships useless `{}` bloat (no secret leak, but a latent
- *   payload/contract bug for any future caller that forgets to strip). The
- *   action executor resolves an `[index]` back to its live element via
- *   {@link getSelectorMap}, which returns this same map.
+ * `elements` (with `text`/`attributes`/`hash`), `elementsText`, `pageInfo`,
+ * `newElementCount`, `scroll*`, `viewportHeight`) are safe to forward to the
+ * LLM. **Runtime-only fields** — `selectorMap` (live `HTMLElement`s) and each
+ * `elements[].rect` (a `DOMRect`) — must be STRIPPED before serialisation:
+ * a live `HTMLElement`/`DOMRect` JSON-stringifies to `{}`, so forwarding the
+ * raw object ships useless `{}` bloat (no secret leak, but a latent
+ * payload/contract bug for any future caller that forgets to strip). The
+ * action executor resolves an `[index]` back to its live element via
+ * {@link getSelectorMap}, which returns this same map.
  */
 export function extractBrowserState(tabs: TabInfo[]): BrowserState {
   const acc: WalkAccumulator = {
@@ -302,17 +342,24 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
         walkNode(child, 0, acc);
       }
     } catch (e) {
-      // A single misbehaving node/subframe shouldn't blank the whole page-state
-      // read (finding: extractBrowserState had no error guard — a mid-walk throw
-      // left a stale selectorMap + aborted the run). Keep whatever elements were
-      // collected so far and continue to build a (partial) state.
-      console.warn("[page-state] DOM walk threw mid-extract (returning partial state):", e);
+ // A single misbehaving node/subframe shouldn't blank the whole page-state
+ // read (finding: extractBrowserState had no error guard — a mid-walk throw
+ // left a stale selectorMap + aborted the run). However, a mid-walk throw
+ // can leave a half-built `selectorMap` referencing detached nodes or a
+ // partial/garbled index (finding: mid-walk throw leaves the faulting
+ // element in selectorMap). Drop whatever was partially collected so a
+ // subsequent action resolution falls back to a FRESH full extract instead
+ // of acting on stale/garbled indices.
+      console.warn("[page-state] DOM walk threw mid-extract (resetting selectorMap to avoid stale indices):", e);
+      acc.selectorMap = {};
+      acc.elements = [];
+      acc.lines = [];
     }
   }
 
-  // Update the baseline for next step's `isNew` computation. Always refresh the
-  // cached map from THIS run (even on a partial extract) so a prior run's stale
-  // selectorMap is never left behind for action resolution.
+ // Update the baseline for next step's `isNew` computation. Always refresh the
+ // cached map from THIS run (even on a partial extract) so a prior run's stale
+ // selectorMap is never left behind for action resolution.
   cachedHashes = new Set(acc.elements.map((e) => e.hash));
   cachedSelectorMap = acc.selectorMap;
 
@@ -373,22 +420,22 @@ interface VirtualChild {
  * internal structure so the LLM can reason about it without first clicking.
  *
  * Supported compound controls:
- *   - `<select>`: first N `<option>` children as `<option value="..." /> text`
- *   - `<input type="range">`: a `<slider valuemin valuemax valuenow />` line
- *   - `<details>`: a `<summary /> Toggle` line (or the summary's text)
- *   - `<input type="file">`: a `<button /> Browse Files` line
+ * - `<select>`: first N `<option>` children as `<option value="..." /> text`
+ * - `<input type="range">`: a `<slider valuemin valuemax valuenow />` line
+ * - `<details>`: a `<summary /> Toggle` line (or the summary's text)
+ * - `<input type="file">`: a `<button /> Browse Files` line
  */
 function buildCompoundChildren(el: HTMLElement): VirtualChild[] {
   const tag = el.tagName.toLowerCase();
   const children: VirtualChild[] = [];
 
   if (el instanceof HTMLSelectElement) {
-    // Sensitive selects (autocomplete=cc-*, one-time-code, etc.) must NOT emit
-    // the `selected` flag or option values — the LLM could infer the user's
-    // card expiry month / OTP from which option is selected. The AX tree
-    // (ax-tree-builder.ts) already skips option emission for sensitive selects;
-    // this brings the indexed tree in line. Mirrors the sensitive-value
-    // redaction in element-info.buildAttrs.
+ // Sensitive selects (autocomplete=cc-*, one-time-code, etc.) must NOT emit
+ // the `selected` flag or option values — the LLM could infer the user's
+ // card expiry month / OTP from which option is selected. The AX tree
+ // (ax-tree-builder.ts) already skips option emission for sensitive selects;
+ // this brings the indexed tree in line. Mirrors the sensitive-value
+ // redaction in element-info.buildAttrs.
     if (isSensitive(el)) {
       children.push({ tag: "option", text: "[value redacted]", attributes: {} });
       return children;
@@ -438,8 +485,8 @@ function buildCompoundChildren(el: HTMLElement): VirtualChild[] {
   }
 
   if (tag === "details") {
-    // If a <summary> child exists, surface its text; otherwise emit a generic
-    // "Toggle" label so the LLM knows the details element is expandable.
+ // If a <summary> child exists, surface its text; otherwise emit a generic
+ // "Toggle" label so the LLM knows the details element is expandable.
     const summary = el.querySelector("summary");
     const summaryText = summary
       ? (summary.textContent || "").replace(/\s+/g, " ").trim()
@@ -467,9 +514,9 @@ function serializeCompoundChildren(el: HTMLElement, depth: number, acc: WalkAccu
   if (children.length === 0) return;
   const indent = "\t".repeat(depth + 1);
   for (const vc of children) {
-    // Escape the trailing text (and collapse any stray newlines) so a value
-    // containing `<`, `>`, `&`, or a newline can't break the one-line-per-
-    // element contract after the `/>` token.
+ // Escape the trailing text (and collapse any stray newlines) so a value
+ // containing `<`, `>`, `&`, or a newline can't break the one-line-per-
+ // element contract after the `/>` token.
     const safeText = vc.text
       ? " " + vc.text.replace(/[\r\n]+/g, " ").replace(/[&<>]/g, (c) =>
           c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;",

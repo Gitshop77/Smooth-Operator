@@ -86,9 +86,9 @@ export class EvaluatorComb {
     const reasons: string[] = [];
     let score = 1.0;
 
-    // `kinds` gates which evaluators run. When `kinds` is empty (legacy /
-    // unspecified), fall back to input-presence so behavior is unchanged for
-    // callers that don't pass a configured list.
+ // `kinds` gates which evaluators run. When `kinds` is empty (legacy /
+ // unspecified), fall back to input-presence so behavior is unchanged for
+ // callers that don't pass a configured list.
     const runAll = this.kinds.length === 0;
 
     if (input.string && (runAll || this.kinds.includes("string_match"))) {
@@ -108,6 +108,34 @@ export class EvaluatorComb {
       results.push(r);
       score *= r.score;
       if (r.score < 1) reasons.push(r.reason);
+    }
+
+ // Fail CLOSED against a silent false pass: when `kinds` is configured but
+ // NONE of the configured evaluators had a matching input present, no branch
+ // ran and `score` would otherwise stay 1.0 — which the orchestrator reads
+ // as a PASS with zero evaluation evidence. This is only a real concern when
+ // the caller SUPPLIED some input that matched none of the configured kinds
+ // (e.g. `kinds=["url_match"]` while only a `string` input is supplied). When
+ // no input is supplied at all, the product of the empty evaluator set is the
+ // neutral default score of 1.0, so we return that rather than a false
+ // failure.
+    if (this.kinds.length > 0 && results.length === 0) {
+      const hasAnyInput = !!(input.string || input.url || input.html);
+      if (!hasAnyInput) {
+        return { score: 1, results: [], reasons: [] };
+      }
+      const kinds = this.kinds.join(", ");
+      console.warn(
+        `[EvaluatorComb] No evaluator ran: configured kinds [${kinds}] ` +
+        `matched none of the provided inputs ` +
+        `(string=${!!input.string}, url=${!!input.url}, html=${!!input.html}). ` +
+        `Failing closed (score 0). Check eval_types vs expectedOutcomes.`
+      );
+      return {
+        score: 0,
+        results: [],
+        reasons: [`no configured evaluator (${kinds}) had a matching input`],
+      };
     }
 
     return { score, results, reasons };

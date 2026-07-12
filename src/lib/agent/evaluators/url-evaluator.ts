@@ -17,9 +17,9 @@ export interface URLEvaluatorInput {
   /** The agent's final page URL (the "prediction"). */
   prediction: string;
   /**
-   * Reference URL(s). Multiple acceptable URLs may be joined with ` |OR| `.
-   * The evaluator passes if ANY of them matches.
-   */
+ * Reference URL(s). Multiple acceptable URLs may be joined with ` |OR| `.
+ * The evaluator passes if ANY of them matches.
+ */
   referenceUrl: string;
   /** Matching rule. Currently only `"GOLD in PRED"` is supported. */
   matchingRule?: "GOLD in PRED";
@@ -61,12 +61,13 @@ export function parseUrl(url: string): ParsedUrl {
     u.searchParams.forEach((value, key) => {
       (query[key] ??= []).push(value);
     });
-    // Use `hostname` (port-stripped) for the base path so host matching is
-    // port-insensitive — a reference pinned with/without a port still matches
-    // the same origin (the port is not part of same-site semantics).
+ // Use `hostname` (port-stripped) for the base path so host matching is
+ // port-insensitive — a reference pinned with/without a port still matches
+ // the same origin (the port is not part of same-site semantics).
     return { basePath: u.hostname + u.pathname, query };
   } catch {
-    // Fallback regex parse — handles `host/path?query` without a protocol.
+ // Fallback regex parse — requires a `scheme://host/path?query` form (a
+ // protocol IS required; protocol-less inputs return an empty parse).
     const m = /^[a-z]+:\/\/([^/?]+)([^?]*)\??(.*)$/i.exec(url);
     if (!m) return { basePath: "", query: {} };
     const host = m[1].replace(/:\d+$/, "");
@@ -92,8 +93,8 @@ export function parseUrl(url: string): ParsedUrl {
  */
 function hostMatches(refHost: string, predHost: string): boolean {
   if (refHost === predHost) return true;
-  // Subdomain suffix: ref `example.com` matches pred `shop.example.com`
-  // but NOT `notexample.com` (must be preceded by `.`).
+ // Subdomain suffix: ref `example.com` matches pred `shop.example.com`
+ // but NOT `notexample.com` (must be preceded by `.`).
   return predHost.endsWith("." + refHost);
 }
 
@@ -106,11 +107,13 @@ export function evaluateUrl(input: URLEvaluatorInput): URLEvaluatorResult {
   const refUrls = input.referenceUrl.split(/\s\|OR\|\s/).map((s) => cleanUrl(s.trim()));
   const pred = cleanUrl(input.prediction);
   const predParsed = parseUrl(pred);
+ // Parse each reference exactly once, then run all three checks (host, path,
+ // query) against the cached parse instead of re-parsing per loop.
+  const refParsedList = refUrls.map((ref) => parseUrl(ref));
 
-  // Host check: ANY reference host must exact-match or be a subdomain-suffix
-  // of the prediction host. This prevents lookalike-domain bypass.
-  const hostScore = refUrls.some((ref) => {
-    const refParsed = parseUrl(ref);
+ // Host check: ANY reference host must exact-match or be a subdomain-suffix
+ // of the prediction host. This prevents lookalike-domain bypass.
+  const hostScore = refParsedList.some((refParsed) => {
     return refParsed.basePath !== "" && hostMatches(refParsed.basePath.split("/")[0], predParsed.basePath.split("/")[0]);
   }) ? 1 : 0;
   if (hostScore === 0) {
@@ -121,20 +124,19 @@ export function evaluateUrl(input: URLEvaluatorInput): URLEvaluatorResult {
     };
   }
 
-  // Path-prefix check: the prediction's path must start with the reference's
-  // path (after host matching).
-  const pathMatch = refUrls.some((ref) => {
-    const refParsed = parseUrl(ref);
+ // Path-prefix check: the prediction's path must start with the reference's
+ // path (after host matching).
+  const pathMatch = refParsedList.some((refParsed) => {
     const refHost = refParsed.basePath.split("/")[0];
     const predHost = predParsed.basePath.split("/")[0];
     if (!hostMatches(refHost, predHost)) return false;
     const refPath = refParsed.basePath.slice(refHost.length); // "/path" or ""
     const predPath = predParsed.basePath.slice(predHost.length); // "/path" or ""
-    // Empty ref path matches anything; otherwise pred path must start with ref path.
+ // Empty ref path matches anything; otherwise pred path must start with ref path.
     if (refPath === "" || refPath === "/") return true;
-    // Require a path-segment boundary after the ref path prefix.
-    // `startsWith` alone allows `/foo` to match `/foobar` (false positive).
-    // After the prefix, the next char must be `/`, `?`, `#`, or end-of-string.
+ // Require a path-segment boundary after the ref path prefix.
+ // `startsWith` alone allows `/foo` to match `/foobar` (false positive).
+ // After the prefix, the next char must be `/`, `?`, `#`, or end-of-string.
     if (!predPath.startsWith(refPath)) return false;
     const nextChar = predPath[refPath.length];
     return nextChar === undefined || nextChar === "/" || nextChar === "?" || nextChar === "#";
@@ -147,11 +149,10 @@ export function evaluateUrl(input: URLEvaluatorInput): URLEvaluatorResult {
     };
   }
 
-  // Query-param check: every key in the union of reference queries must
-  // have at least one matching value in the prediction.
+ // Query-param check: every key in the union of reference queries must
+ // have at least one matching value in the prediction.
   const refQueries: Record<string, Set<string>> = {};
-  for (const ref of refUrls) {
-    const parsed = parseUrl(ref);
+  for (const parsed of refParsedList) {
     for (const [k, vs] of Object.entries(parsed.query)) {
       if (!refQueries[k]) refQueries[k] = new Set();
       for (const v of vs) refQueries[k].add(v);

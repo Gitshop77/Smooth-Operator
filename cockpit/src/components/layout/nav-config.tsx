@@ -15,10 +15,10 @@ export interface NavItem {
   icon: LucideIcon;
   description?: string;
   /**
-   * True for views that depend on a live extension connection (browser tabs,
-   * workspaces, network, snapshots, devtools). The shell renders an
-   * <ExtensionOnly> standby state for these when no extension data is present.
-   */
+ * True for views that depend on a live extension connection (browser tabs,
+ * workspaces, network, snapshots, devtools). The shell renders an
+ * <ExtensionOnly> standby state for these when no extension data is present.
+ */
   extensionOnly?: boolean;
 }
 

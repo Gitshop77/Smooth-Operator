@@ -62,10 +62,10 @@ describe("action execution behavior", () => {
   beforeEach(() => {
     originalPrompt = window.prompt;
     originalConfirm = window.confirm;
-    // `evaluate` fails closed without an explicit domain allowlist.
-    // The jsdom env runs at http://127.0.0.1:3000, so allowlist "127.0.0.1"
-    // (an IP literal — the hardened hostname matcher rejects single-label
-    // hosts like "localhost" to block TLD-wide matches).
+ // `evaluate` fails closed without an explicit domain allowlist.
+ // The jsdom env runs at http://127.0.0.1:3000, so allowlist "127.0.0.1"
+ // (an IP literal — the hardened hostname matcher rejects single-label
+ // hosts like "localhost" to block TLD-wide matches).
     (globalThis as Record<string, unknown>).__openCoworkDomainConfig = {
       allowedDomains: ["127.0.0.1"],
     };
@@ -109,8 +109,8 @@ describe("action execution behavior", () => {
 
   test("wait: waits the specified seconds", async () => {
     const action = { type: "wait", seconds: 1 } as AgentAction;
-    // Drive timers deterministically instead of an unbounded wall-clock wait,
-    // which flakes under CI load.
+ // Drive timers deterministically instead of an unbounded wall-clock wait,
+ // which flakes under CI load.
     vi.useFakeTimers();
     try {
       const promise = executeAction(action, makeState());
@@ -136,11 +136,11 @@ describe("action execution behavior", () => {
   });
 
   test("screenshot: returns an honest failure when not in extension context", async () => {
-    // The screenshot action routes through chrome.runtime.sendMessage to the
-    // background SW (which has chrome.tabs.captureVisibleTab + chrome.downloads).
-    // In the jsdom test environment there's no chrome.runtime.id, so the
-    // action must return an honest failure rather than falsely claiming the
-    // extension will handle the capture.
+ // The screenshot action routes through chrome.runtime.sendMessage to the
+ // background SW (which has chrome.tabs.captureVisibleTab + chrome.downloads).
+ // In the jsdom test environment there's no chrome.runtime.id, so the
+ // action must return an honest failure rather than falsely claiming the
+ // extension will handle the capture.
     const action = { type: "screenshot" } as AgentAction;
     const result = await executeAction(action, makeState());
     expect(result.success).toBe(false);
@@ -148,10 +148,10 @@ describe("action execution behavior", () => {
   });
 
   test("save_as_pdf: returns an honest failure when not in extension context", async () => {
-    // save_as_pdf routes through chrome.runtime.sendMessage to the background
-    // SW (which uses CDP Page.printToPDF + chrome.downloads). In the jsdom
-    // test environment there's no chrome.runtime.id, so the action must
-    // return an honest failure rather than falsely claiming success.
+ // save_as_pdf routes through chrome.runtime.sendMessage to the background
+ // SW (which uses CDP Page.printToPDF + chrome.downloads). In the jsdom
+ // test environment there's no chrome.runtime.id, so the action must
+ // return an honest failure rather than falsely claiming success.
     const action = { type: "save_as_pdf" } as AgentAction;
     const result = await executeAction(action, makeState());
     expect(result.success).toBe(false);
@@ -159,7 +159,7 @@ describe("action execution behavior", () => {
   });
 
   test("dropdown_options: throws for non-select element", async () => {
-    // Create a mock state with a non-select element at index 1.
+ // Create a mock state with a non-select element at index 1.
     const mockEl = document.createElement("div");
     const state = makeState({ selectorMap: { 1: mockEl } });
     const action = { type: "dropdown_options", index: 1 } as AgentAction;
@@ -187,13 +187,13 @@ describe("action execution behavior", () => {
   });
 
   test("search_page: finds text matches", async () => {
-    // Set up a page with some text.
+ // Set up a page with some text.
     document.body.innerHTML = "<div>Hello world. Hello again.</div>";
     const action = { type: "search_page", pattern: "Hello", regex: false, case_sensitive: false } as AgentAction;
     const result = await executeAction(action, makeState());
     expect(result.success).toBe(true);
-    // search_page counts text NODES containing the pattern, not occurrences.
-    // "Hello world. Hello again." is one text node → 1 match.
+ // search_page counts text NODES containing the pattern, not occurrences.
+ // "Hello world. Hello again." is one text node → 1 match.
     expect(result.message).toContain("1 match");
     document.body.innerHTML = "";
   });
@@ -202,8 +202,8 @@ describe("action execution behavior", () => {
     document.body.innerHTML = "<div>No matching text here.</div>";
     const action = { type: "search_page", pattern: "xyzzy", regex: false, case_sensitive: false } as AgentAction;
     const result = await executeAction(action, makeState());
-    // search_page is read-only; success=true even on 0 matches
-    // (the search succeeded, it just found nothing — same as find_elements).
+ // search_page is read-only; success=true even on 0 matches
+ // (the search succeeded, it just found nothing — same as find_elements).
     expect(result.success).toBe(true);
     expect(result.message).toContain("No matches");
     document.body.innerHTML = "";
@@ -241,11 +241,11 @@ describe("action execution behavior", () => {
   });
 
   test("evaluate: read-only script reports pageChanged: false", async () => {
-    // A pure computation mutates neither the URL nor the DOM fingerprint,
-    // so it must NOT be reported as a page change. The old code reported
-    // `pageChanged: true` unconditionally — that reset the loop detector's
-    // repetition window on every read-only evaluate and forced a full DOM
-    // re-extract each step.
+ // A pure computation mutates neither the URL nor the DOM fingerprint,
+ // so it must NOT be reported as a page change. The old code reported
+ // `pageChanged: true` unconditionally — that reset the loop detector's
+ // repetition window on every read-only evaluate and forced a full DOM
+ // re-extract each step.
     const action = { type: "evaluate", code: "return 2 + 2;" } as AgentAction;
     const result = await executeAction(action, makeState());
     expect(result.success).toBe(true);

@@ -83,8 +83,8 @@ export const reducer = (state: State, action: Action): State => {
   switch (action.type) {
     case "ADD_TOAST": {
       const newToasts = [action.toast, ...state.toasts].slice(0, TOAST_LIMIT)
-      // Toasts evicted by the limit may still have a pending removal timer;
-      // clear those so their timer handles are not left orphaned.
+ // Toasts evicted by the limit may still have a pending removal timer;
+ // clear those so their timer handles are not left orphaned.
       const keptIds = new Set(newToasts.map((t) => t.id))
       state.toasts.forEach((t) => {
         if (!keptIds.has(t.id)) {
@@ -108,8 +108,8 @@ export const reducer = (state: State, action: Action): State => {
     case "DISMISS_TOAST": {
       const { toastId } = action
 
-      // ! Side effects ! - This could be extracted into a dismissToast() action,
-      // but I'll keep it here for simplicity
+ // ! Side effects ! - This could be extracted into a dismissToast() action,
+ // but I'll keep it here for simplicity
       if (toastId) {
         addToRemoveQueue(toastId)
       } else {

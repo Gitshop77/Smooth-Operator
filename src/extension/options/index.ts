@@ -39,7 +39,7 @@ function activateTab(tab: HTMLButtonElement, focus = true): void {
   document.querySelectorAll<HTMLElement>(".tab-content").forEach((c) => {
     c.classList.toggle("active", c.dataset.tab === target);
   });
-  // Lazily render dynamic tab content on first activation.
+ // Lazily render dynamic tab content on first activation.
   if (target === "secrets") void renderSecrets();
   if (target === "schedule") void renderSchedule();
   if (target === "tools") void renderTools();

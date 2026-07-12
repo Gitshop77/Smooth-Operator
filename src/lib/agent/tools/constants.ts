@@ -6,6 +6,9 @@
  * durations are in milliseconds; all character limits are character counts.
  */
 
+import { SearchSchema } from "./schema";
+
+
 /** All wait/settle durations used by the executor (in milliseconds). */
 export const TIMINGS = {
   clickScrollIntoView: 150,
@@ -61,18 +64,70 @@ export const FNV_PRIME = 0x01000193;
  * Map of supported search engines → their query URL prefix.
  *
  * This MUST stay in sync with the `engine` enum in {@link ActionSchema}'s
- * `search` action. Both the executor (`src/lib/agent/tools/handlers/search.ts`)
- * and the extension's tab-level action handler
- * (`src/extension/background/tab-manager.ts`) import this same map so the
- * agent never falls back to a different engine than the one it requested.
+ * `search` action (see the dev-time guard below). Both the executor
+ * (`src/lib/agent/tools/handlers/search.ts`) and the extension's tab-level
+ * action handler (`src/extension/background/tab-manager.ts`) import this same
+ * map so the agent never falls back to a different engine than the one it
+ * requested.
+ *
+ * Declared `as const` so the keys form a precise literal type and a missing
+ * entry fails type-checking at the call site instead of producing an
+ * `"undefined?q=..."` navigation URL.
  */
-export const SEARCH_ENGINE_URLS: Record<string, string> = {
+export const SEARCH_ENGINE_URLS = {
   duckduckgo: "https://duckduckgo.com/?q=",
   google: "https://www.google.com/search?q=",
   bing: "https://www.bing.com/search?q=",
   yahoo: "https://search.yahoo.com/search?p=",
   baidu: "https://www.baidu.com/s?wd=",
-};
+} as const;
+
+/** The set of search-engine ids that have a known query URL. */
+export type SearchEngineId = keyof typeof SEARCH_ENGINE_URLS;
+
+/**
+ * Resolve a search engine's query URL prefix, or `null` if the engine is
+ * unknown. Callers should use this instead of indexing `SEARCH_ENGINE_URLS`
+ * directly so a typo'd / drifted engine never yields `undefined + query`.
+ */
+export function getSearchEngineUrl(engine: string): string | null {
+  return (SEARCH_ENGINE_URLS as Record<string, string>)[engine] ?? null;
+}
+
+/**
+ * Dev-time guard: the engine keys MUST stay in sync with the `engine` enum in
+ * `schema.ts`'s `SearchSchema`. A mismatch (an engine added to one but not the
+ * other) would otherwise produce a `"undefined?q=..."` navigation URL with no
+ * compile-time error. The check runs once at module load and only logs when the
+ * two sets diverge.
+ */
+/**
+ * The `engine` field is `z.enum([...]).optional().default(...)`, so
+ * `SearchSchema.shape.engine` is a `ZodDefault` wrapping a `ZodOptional`
+ * wrapping the `ZodEnum`. `.options` lives on the innermost `ZodEnum`, so we
+ * unwrap the optional/default layers to reach it. This keeps the dev-time
+ * sync guard between the enum and `SEARCH_ENGINE_URLS` working.
+ */
+function unwrapEnumOptions(schema: unknown): readonly string[] {
+  let s = schema as { options?: readonly string[]; _def?: { innerType?: unknown; schema?: unknown } };
+  while (s && !Array.isArray(s.options) && (s._def?.innerType || s._def?.schema)) {
+    s = (s._def.innerType ?? s._def.schema) as typeof s;
+  }
+  return Array.isArray(s?.options) ? s.options : [];
+}
+
+const searchEngineEnumValues = unwrapEnumOptions(SearchSchema.shape.engine);
+const searchEngineUrlKeys = Object.keys(SEARCH_ENGINE_URLS);
+const searchEngineMissing = searchEngineEnumValues.filter((k) => !searchEngineUrlKeys.includes(k));
+const searchEngineExtra = searchEngineUrlKeys.filter(
+  (k) => !(searchEngineEnumValues as readonly string[]).includes(k),
+);
+if (searchEngineMissing.length || searchEngineExtra.length) {
+  console.error(
+    "[tools/constants] SEARCH_ENGINE_URLS is out of sync with the search engine enum in schema.ts:",
+    { missingFromMap: searchEngineMissing, extraInMap: searchEngineExtra },
+  );
+}
 
 /** Sleep helper. */
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));

@@ -80,59 +80,78 @@ export function classifyError(error: unknown): ClassifiedError {
   const originalMessage = error instanceof Error ? error.message : String(error);
   const lower = toLowerMessage(error);
 
-  // Auth errors — fatal, don't retry.
+ // Auth errors — fatal, don't retry.
   if (containsStatus(lower, "401") || containsAny(lower, ["unauthorized", "invalid api key"])) {
     return { category: "auth", fatal: true, retryable: false, message: originalMessage, originalError: error };
   }
 
-  // Forbidden — fatal.
+ // Forbidden — fatal.
   if (containsStatus(lower, "403") || containsAny(lower, ["forbidden", "access denied"])) {
     return { category: "forbidden", fatal: true, retryable: false, message: originalMessage, originalError: error };
   }
 
-  // Bad request — fatal.
+ // Bad request — fatal.
   if (containsStatus(lower, "400") || containsAny(lower, ["bad request", "invalid request"])) {
     return { category: "bad_request", fatal: true, retryable: false, message: originalMessage, originalError: error };
   }
 
-  // Cancelled (AbortError) — never retry. Checked AFTER auth/forbidden so an
-  // aborted 401 fetch still classifies as auth (which is the more useful label).
+ // Cancelled (AbortError) — never retry. Checked AFTER auth/forbidden so an
+ // aborted 401 fetch still classifies as auth (which is the more useful label).
   if (containsAny(lower, ["abort", "cancelled", "canceled"])) {
     return { category: "cancelled", fatal: false, retryable: false, message: originalMessage, originalError: error };
   }
 
-  // Server errors (5xx) — transient. Checked BEFORE rate_limit so that a 5xx
-  // response whose body happens to mention "rate limit" is still classified as
-  // a server_error (retry with backoff) rather than as rate_limit.
+ // Server errors (5xx) — transient. Checked BEFORE rate_limit so that a 5xx
+ // response whose body happens to mention "rate limit" is still classified as
+ // a server_error (retry with backoff) rather than as rate_limit.
   if (/\b5\d\d\b/.test(lower) || containsAny(lower, ["server error", "internal error", "bad gateway", "service unavailable", "gateway timeout"])) {
     return { category: "server_error", fatal: false, retryable: true, message: originalMessage, originalError: error };
   }
 
-  // Rate limit — transient, retry with backoff.
+ // Rate limit — transient, retry with backoff.
   if (containsStatus(lower, "429") || containsAny(lower, ["too many requests", "rate limit"])) {
     return { category: "rate_limit", fatal: false, retryable: true, message: originalMessage, originalError: error };
   }
 
-  // Network errors — transient.
-  // NOTE: a browser `fetch` network failure surfaces as a `TypeError`
-  // ("Failed to fetch"); that must remain a transient `network` error so it is
-  // retried. For that reason the `programmer_error` instanceof check below is
-  // placed AFTER this branch.
-  // A truncated/mid-stream stall ("stream stall: no data for 30000ms") is a
-  // transient transport interruption, not an unexpected `unknown`. Include
-  // `stall` (and the `stream` token it carries) so it classifies as `network`
-  // and gets retried with the friendly "Network error" message rather than
-  // surfacing the raw, internally-coupled stall string to the user.
-  if (containsAny(lower, ["fetch", "network", "econnreset", "econnrefused", "timeout", "etimedout", "stall", "stream"])) {
+ // Network errors — transient.
+ // A browser `fetch` network failure surfaces as a `TypeError` ("Failed to
+ // fetch" / "NetworkError" / "fetch failed"). That case MUST stay a transient
+ // `network` error so it is retried — detect it explicitly here, BEFORE the
+ // generic `programmer_error` instanceof check near the bottom, so a fetch
+ // failure is not mistaken for a code bug.
+  if (
+    error instanceof TypeError &&
+    /(failed to fetch|fetch failed|networkerror|network request failed|load failed)/.test(lower)
+  ) {
     return { category: "network", fatal: false, retryable: true, message: originalMessage, originalError: error };
   }
 
-  // Structured status code (carried by the HTTP transport on the error object)
-  // takes priority over the generic substring matches below. A provider 400
-  // whose body merely contains "validation" must NOT be mislabeled as a
-  // transient `parse` error (which would trigger needless retries of an
-  // unfixable request). 401/403 map to their fatal categories; other 4xx
-  // (except 429) → bad_request (fatal); 429 → rate_limit; 5xx → server_error.
+ // Broad network substring match. This is intentionally restricted to values
+ // that are NOT a TypeError/ReferenceError/SyntaxError: a genuine code bug
+ // whose message coincidentally mentions a transport word (e.g.
+ // `TypeError: Cannot read property 'network' of undefined`, or
+ // `Error("fetch() config is invalid")` thrown as a plain Error) must be
+ // classified as a FATAL `programmer_error` (below), not retried as if it were
+ // a transient network hiccup. Only the fetch-failure TypeError form above is
+ // treated as transient network.
+ // A truncated/mid-stream stall ("stream stall: no data for 30000ms") is a
+ // transient transport interruption, not an unexpected `unknown`. Include
+ // `stall` (and the `stream` token it carries) so it classifies as `network`
+ // and gets retried with the friendly "Network error" message rather than
+ // surfacing the raw, internally-coupled stall string to the user.
+  if (
+    !(error instanceof TypeError || error instanceof ReferenceError || error instanceof SyntaxError) &&
+    containsAny(lower, ["fetch failed", "network", "econnreset", "econnrefused", "timeout", "etimedout", "stall", "stream"])
+  ) {
+    return { category: "network", fatal: false, retryable: true, message: originalMessage, originalError: error };
+  }
+
+ // Structured status code (carried by the HTTP transport on the error object)
+ // takes priority over the generic substring matches below. A provider 400
+ // whose body merely contains "validation" must NOT be mislabeled as a
+ // transient `parse` error (which would trigger needless retries of an
+ // unfixable request). 401/403 map to their fatal categories; other 4xx
+ // (except 429) → bad_request (fatal); 429 → rate_limit; 5xx → server_error.
   const status = (error as { status?: number }).status;
   if (typeof status === "number") {
     if (status === 401) {
@@ -152,36 +171,50 @@ export function classifyError(error: unknown): ClassifiedError {
     }
   }
 
-  // Programmer errors (TypeError / ReferenceError / SyntaxError) — fatal, no
-  // retry. These are bugs in our code; retrying would just waste budget.
-  // This check is placed BEFORE the `parse` substring branch so that genuine
-  // code bugs — e.g. a `JSON.parse` failure, whose SyntaxError message contains
-  // "json" — are treated as FATAL rather than being silently retried as a
-  // transient `parse` error. It stays AFTER the `network` branch (above) so a
-  // browser `fetch` network failure (a `TypeError: Failed to fetch`) is still
-  // classified as a transient `network` error and retried.
+ // Programmer errors (TypeError / ReferenceError / SyntaxError) — fatal, no
+ // retry. These are bugs in our code; retrying would just waste budget.
+ // This check is placed BEFORE the `parse` substring branch so that genuine
+ // code bugs — e.g. a `JSON.parse` failure, whose SyntaxError message contains
+ // "json" — are treated as FATAL rather than being silently retried as a
+ // transient `parse` error. It stays AFTER the `network` branch (above) so a
+ // browser `fetch` network failure (a `TypeError: Failed to fetch`) is still
+ // classified as a transient `network` error and retried.
   if (error instanceof TypeError || error instanceof ReferenceError || error instanceof SyntaxError) {
     return { category: "programmer_error", fatal: true, retryable: false, message: originalMessage, originalError: error };
   }
 
-  // Parse errors — transient (retry with nudge). Only reached for errors that
-  // are NOT TypeError/ReferenceError/SyntaxError (e.g. an `Error` thrown when
-  // the LLM returns unparseable output).
-  if (containsAny(lower, ["json", "parse", "schema", "validation"])) {
+ // Request-shape / validation errors — FATAL. A provider SDK may throw a
+ // plain `Error("validation failed")` WITHOUT attaching a `status` field, so it
+ // never reaches the structured-status block above. Validation/schema problems
+ // are non-recoverable (retrying the same request yields the same failure), so
+ // such an error must be classified as a FATAL `bad_request` rather than a
+ // transient `parse` error (which would be retried indefinitely and burn step
+ // budget). This branch only applies when no `status` is present; any error
+ // carrying a 4xx status is already handled by the structured-status block.
+  if (containsAny(lower, ["validation", "schema"])) {
+    return { category: "bad_request", fatal: true, retryable: false, message: originalMessage, originalError: error };
+  }
+
+ // Parse errors — transient (retry with nudge). Only reached for errors that
+ // are NOT TypeError/ReferenceError/SyntaxError (e.g. an `Error` thrown when
+ // the LLM returns unparseable output) and whose message mentions a genuine
+ // decode signal ("json"/"parse"). Request-shape phrasing ("validation"/
+ // "schema") is handled above as a FATAL `bad_request`, not retried here.
+  if (containsAny(lower, ["json", "parse"])) {
     return { category: "parse", fatal: false, retryable: true, message: originalMessage, originalError: error };
   }
 
-  // Max steps — fatal.
+ // Max steps — fatal.
   if (containsAny(lower, ["max steps", "step budget"])) {
     return { category: "max_steps", fatal: true, retryable: false, message: originalMessage, originalError: error };
   }
 
-  // Max failures — fatal.
+ // Max failures — fatal.
   if (containsAny(lower, ["max failures", "consecutive failures"])) {
     return { category: "max_failures", fatal: true, retryable: false, message: originalMessage, originalError: error };
   }
 
-  // Unknown — retry once.
+ // Unknown — retry once.
   return { category: "unknown", fatal: false, retryable: true, message: originalMessage, originalError: error };
 }
 
@@ -422,9 +455,9 @@ export function decodeAgentError(
   const message = typeof data?.message === "string" ? data.message : "";
   let result: AgentError;
   if (code === "unexpected_alert_open") {
-    // `UnexpectedAlertOpenError` carries an additional `alertText` field that
-    // the generic one-arg constructor would drop on rehydration. Optional
-    // chaining keeps a garbled (null/undefined) payload from throwing here.
+ // `UnexpectedAlertOpenError` carries an additional `alertText` field that
+ // the generic one-arg constructor would drop on rehydration. Optional
+ // chaining keeps a garbled (null/undefined) payload from throwing here.
     result = new UnexpectedAlertOpenError(message, data?.alertText);
   } else {
     const ctor = ERROR_CODE_TO_TYPE.get(code) ?? AgentError;

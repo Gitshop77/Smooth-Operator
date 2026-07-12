@@ -3,12 +3,12 @@
  * provider directly. Used by the Chrome extension's background worker.
  *
  * The extension:
- *   1. Builds the system + user messages.
- *   2. Resolves the provider from `chrome.storage.local` config.
- *   3. Calls `provider.chat()` directly (the provider uses `fetch` to the LLM
- *      API, which works because the extension has `host_permissions:
- *      ["<all_urls>"]`).
- *   4. Parses the output.
+ * 1. Builds the system + user messages.
+ * 2. Resolves the provider from `chrome.storage.local` config.
+ * 3. Calls `provider.chat()` directly (the provider uses `fetch` to the LLM
+ * API, which works because the extension has `host_permissions:
+ * ["<all_urls>"]`).
+ * 4. Parses the output.
  *
  * No server, no env vars. The extension is fully self-contained.
  */
@@ -71,14 +71,29 @@ async function getCustomPlannerPrompt(): Promise<string | undefined> {
 
 async function getVisionMode(): Promise<"disabled" | "always" | "adaptive"> {
   if (cachedVisionMode !== null) return cachedVisionMode as "disabled" | "always" | "adaptive";
-  // `visionMode` is the single source of truth (disabled | always | adaptive).
-  // `enableLocalVision` is a legacy key kept only for one-time backward
-  // compatibility: if `visionMode` is unset but `enableLocalVision` was true,
-  // treat it as "always". New code should only ever write `visionMode`.
+ // `visionMode` is the single source of truth (disabled | always | adaptive).
+ // `enableLocalVision` is a legacy key kept only for one-time backward
+ // compatibility: if `visionMode` is unset but `enableLocalVision` was true,
+ // treat it as "always". New code should only ever write `visionMode`.
   const { visionMode, enableLocalVision } = await chrome.storage.local.get(["visionMode", "enableLocalVision"]);
   const mode = (visionMode as string) || (enableLocalVision === true ? "always" : "disabled");
   cachedVisionMode = mode;
   return mode as "disabled" | "always" | "adaptive";
+}
+
+/**
+ * Resolve the active agent mode (full_agentic | standard | restricted) for the
+ * run. Used so `buildNavigatorPrompt` can describe `evaluate`'s availability
+ * accurately (confirmation-gated outside full_agentic mode). Falls back to
+ * "standard" if unset or unrecognized so a corrupt/legacy `agentMode` value in
+ * chrome.storage can never crash prompt construction or put the navigator into
+ * an undefined mode.
+ */
+const AGENT_MODES = new Set(["full_agentic", "standard", "restricted"]);
+async function getAgentMode(): Promise<string> {
+  const { agentMode } = await chrome.storage.local.get(["agentMode"]);
+  const mode = agentMode as string | undefined;
+  return mode && AGENT_MODES.has(mode) ? mode : "standard";
 }
 
 /**
@@ -91,10 +106,10 @@ async function getVisionMode(): Promise<"disabled" | "always" | "adaptive"> {
  * @throws if no provider is configured or the API key is missing.
  */
 async function getProvider(): Promise<LLMProvider> {
-  // Hot path: reuse the cached provider WITHOUT a storage round-trip. The cache
-  // is invalidated by the `chrome.storage.onChanged` listener above whenever a
-  // provider-config key changes, so this short-circuit is safe and avoids an
-  // async `chrome.storage.local.get` on every navigator/planner step.
+ // Hot path: reuse the cached provider WITHOUT a storage round-trip. The cache
+ // is invalidated by the `chrome.storage.onChanged` listener above whenever a
+ // provider-config key changes, so this short-circuit is safe and avoids an
+ // async `chrome.storage.local.get` on every navigator/planner step.
   if (cachedProvider && cachedProviderConfig) return cachedProvider;
   const config = await readProviderConfig();
   if (!config) {
@@ -102,24 +117,24 @@ async function getProvider(): Promise<LLMProvider> {
       "No LLM provider configured. Open the extension Options page, choose a provider, and enter your API key."
     );
   }
-  // Cache key: provider + apiKey + model + baseUrl + resourceName. If any
-  // change, rebuild. `resourceName` is included so an Azure resource swap
-  // (which changes the constructed endpoint) forces a provider rebuild rather
-  // than reusing a stale cached instance bound to the old resource.
+ // Cache key: provider + apiKey + model + baseUrl + resourceName. If any
+ // change, rebuild. `resourceName` is included so an Azure resource swap
+ // (which changes the constructed endpoint) forces a provider rebuild rather
+ // than reusing a stale cached instance bound to the old resource.
   const key = `${config.provider}|${config.apiKey}|${config.model}|${config.baseUrl ?? ""}|${config.resourceName ?? ""}`;
   cachedProviderConfig = config;
   if (cachedProvider && key === cachedConfigKey) return cachedProvider;
-  // If a build is already in-flight for THIS key, await it instead of
-  // starting a second concurrent buildProvider() call.
+ // If a build is already in-flight for THIS key, await it instead of
+ // starting a second concurrent buildProvider() call.
   if (pendingProvider && key === pendingProviderKey) return pendingProvider;
   pendingProviderKey = key;
-  // Capture the in-flight promise locally so its resolve/reject closures only
-  // clear the SHARED `pendingProvider`/`pendingProviderKey` when they still
-  // refer to THIS promise. Otherwise, if two calls with different cache keys
-  // overlap, call A's closure could null B's in-flight build (causing a
-  // redundant rebuild) or overwrite the cache with A's stale key/provider
-  // (finding: concurrent provider builds corrupt shared pendingProvider/
-  // cachedProvider state).
+ // Capture the in-flight promise locally so its resolve/reject closures only
+ // clear the SHARED `pendingProvider`/`pendingProviderKey` when they still
+ // refer to THIS promise. Otherwise, if two calls with different cache keys
+ // overlap, call A's closure could null B's in-flight build (causing a
+ // redundant rebuild) or overwrite the cache with A's stale key/provider
+ // (finding: concurrent provider builds corrupt shared pendingProvider/
+ // cachedProvider state).
   const p = buildProvider(config).then((provider) => {
     cachedProvider = provider;
     cachedConfigKey = key;
@@ -146,10 +161,10 @@ async function getProvider(): Promise<LLMProvider> {
  * in the extension's background worker.
  *
  * @returns `{ raw, tokensIn, tokensOut, model }` — same shape the orchestrator
- *          expects from `navigatorCall`.
+ * expects from `navigatorCall`.
  * @throws on provider errors, parse failures (caller surfaces to the
- *         orchestrator's parse-retry loop; transient HTTP errors are retried
- *         inside `withLLMRetry` at the transport layer).
+ * orchestrator's parse-retry loop; transient HTTP errors are retried
+ * inside `withLLMRetry` at the transport layer).
  */
 export async function navigatorCallDirect(req: AgentStepRequest): Promise<{
   raw: string;
@@ -160,7 +175,7 @@ export async function navigatorCallDirect(req: AgentStepRequest): Promise<{
   model?: string;
   costUsd?: number;
 }> {
-  // Cap elementsText (same abuse-prevention as the Next.js route).
+ // Cap elementsText (same abuse-prevention as the Next.js route).
   const cappedElementsText =
     req.browserState.elementsText.length > MAX_ELEMENTS_CHARS
       ? req.browserState.elementsText.slice(0, MAX_ELEMENTS_CHARS) +
@@ -176,40 +191,41 @@ export async function navigatorCallDirect(req: AgentStepRequest): Promise<{
     browserState: { ...req.browserState, elementsText: cappedElementsText, axTree: req.browserState.axTree },
     step: req.step,
     maxSteps: req.maxSteps,
-    // pass the compacted-memory block so it's rendered in the prompt.
+ // pass the compacted-memory block so it's rendered in the prompt.
     compactedMemory: req.compactedMemory,
   });
 
-  // load custom navigator prompt override (cached, invalidated on storage change).
+ // load custom navigator prompt override (cached, invalidated on storage change).
   const customNavigatorPrompt = await getCustomNavigatorPrompt();
   const visionMode = await getVisionMode();
-  let systemPrompt = buildNavigatorPrompt(MAX_ACTIONS, customNavigatorPrompt, visionMode);
+  const agentMode = await getAgentMode();
+  let systemPrompt = buildNavigatorPrompt(MAX_ACTIONS, customNavigatorPrompt, visionMode, agentMode);
   const provider = await getProvider();
 
-  // Embed screenshot marker ONLY for vision-capable models. Text-only models
-  // would either error (HTTP 400 from the API) or waste tokens processing a
-  // giant base64 string they can't interpret. The `provider.supportsVision`
-  // flag is set per-MODEL via the models.dev catalog lookup in buildProvider().
-  // Also check the user's "enableScreenshots" setting (defaults to true for
-  // vision models, false for text-only models).
+ // Embed screenshot marker ONLY for vision-capable models. Text-only models
+ // would either error (HTTP 400 from the API) or waste tokens processing a
+ // giant base64 string they can't interpret. The `provider.supportsVision`
+ // flag is set per-MODEL via the models.dev catalog lookup in buildProvider().
+ // Also check the user's "enableScreenshots" setting (defaults to true for
+ // vision models, false for text-only models).
   const enableScreenshots = provider.supportsVision &&
     ((await chrome.storage.local.get("enableScreenshots")).enableScreenshots ?? true);
   const screenshot = enableScreenshots ? req.browserState.screenshot : undefined;
-  // The screenshot is raw, page-rendered pixels — it is NOT subject to the text
-  // sanitizer (which only inspects DOM/AX text) and must be treated as untrusted
-  // page data, exactly like <untrusted_page_data>. The navigator prompt already
-  // tells the model the screenshot is untrusted evidence, never an instruction.
+ // The screenshot is raw, page-rendered pixels — it is NOT subject to the text
+ // sanitizer (which only inspects DOM/AX text) and must be treated as untrusted
+ // page data, exactly like <untrusted_page_data>. The navigator prompt already
+ // tells the model the screenshot is untrusted evidence, never an instruction.
   const fullUserContent = screenshot
     ? `${userMessage}\n\n<untrusted_page_data><screenshot>${screenshot}</screenshot></untrusted_page_data>`
     : userMessage;
 
-  // Wire `getFormatInstructions` for providers that don't support structured
-  // output natively (Ollama, OpenAI-compatible providers without
-  // `response_format`, local models). Without the schema inlined into the
-  // system prompt, those providers can only guess the JSON shape from the
-  // prompt examples — inlining the canonical JSON schema (via Zod 4's
-  // `z.toJSONSchema`) gives the model a concrete contract to emit. The
-  // format-instructions text is short and provider-agnostic.
+ // Wire `getFormatInstructions` for providers that don't support structured
+ // output natively (Ollama, OpenAI-compatible providers without
+ // `response_format`, local models). Without the schema inlined into the
+ // system prompt, those providers can only guess the JSON shape from the
+ // prompt examples — inlining the canonical JSON schema (via Zod 4's
+ // `z.toJSONSchema`) gives the model a concrete contract to emit. The
+ // format-instructions text is short and provider-agnostic.
   if (!provider.supportsStructuredOutput) {
     systemPrompt += "\n\n" + getFormatInstructions(AgentOutputSchema);
   }
@@ -225,12 +241,12 @@ export async function navigatorCallDirect(req: AgentStepRequest): Promise<{
     schema: provider.supportsStructuredOutput ? AgentOutputSchema : undefined,
   });
 
-  // The orchestrator re-parses `raw` itself, so we just return the raw content.
-  // Return cachedInputTokens + the provider-bridge's pre-computed costUsd
-  // (which correctly accounts for cached tokens). Dropping these here would
-  // force llm-calls.ts to recompute cost via estimateCost WITHOUT
-  // cachedInputTokens — under-reporting Anthropic cached-step cost by up to
-  // 90% and effectively disabling cost-cap enforcement for cached calls.
+ // The orchestrator re-parses `raw` itself, so we just return the raw content.
+ // Return cachedInputTokens + the provider-bridge's pre-computed costUsd
+ // (which correctly accounts for cached tokens). Dropping these here would
+ // force llm-calls.ts to recompute cost via estimateCost WITHOUT
+ // cachedInputTokens — under-reporting Anthropic cached-step cost by up to
+ // 90% and effectively disabling cost-cap enforcement for cached calls.
   return {
     raw: response.content,
     tokensIn: response.usage?.tokensIn,
@@ -249,7 +265,7 @@ export async function navigatorCallDirect(req: AgentStepRequest): Promise<{
  * in the extension's background worker.
  *
  * @returns `{ raw, tokensIn, tokensOut, model }` — same shape the orchestrator
- *          expects from `plannerCall`.
+ * expects from `plannerCall`.
  */
 export async function plannerCallDirect(req: PlannerStepRequest): Promise<{
   raw: string;
@@ -260,7 +276,7 @@ export async function plannerCallDirect(req: PlannerStepRequest): Promise<{
   model?: string;
   costUsd?: number;
 }> {
-  const userMessage = buildPlannerUserMessage({
+  const userMessage = await buildPlannerUserMessage({
     task: req.task,
     navigatorHistory: req.history,
     plan: req.plan,
@@ -271,16 +287,16 @@ export async function plannerCallDirect(req: PlannerStepRequest): Promise<{
     maxSteps: req.maxSteps,
   });
 
-  // load custom planner prompt override (cached, invalidated on storage change).
+ // load custom planner prompt override (cached, invalidated on storage change).
   const customPlannerPrompt = await getCustomPlannerPrompt();
   let systemPrompt = buildPlannerPrompt(customPlannerPrompt);
   const provider = await getProvider();
 
-  // Wire `getFormatInstructions` for providers without native structured
-  // output. Symmetric with the navigator path above — without the JSON schema
-  // inlined, non-structured-output providers may emit free-form text that
-  // fails the planner parser. Inlining the schema gives the model a concrete
-  // contract for the planner's `{thinking, decision, success, ...}` shape.
+ // Wire `getFormatInstructions` for providers without native structured
+ // output. Symmetric with the navigator path above — without the JSON schema
+ // inlined, non-structured-output providers may emit free-form text that
+ // fails the planner parser. Inlining the schema gives the model a concrete
+ // contract for the planner's `{thinking, decision, success, ...}` shape.
   if (!provider.supportsStructuredOutput) {
     systemPrompt += "\n\n" + getFormatInstructions(PlannerOutputSchema);
   }
@@ -296,7 +312,7 @@ export async function plannerCallDirect(req: PlannerStepRequest): Promise<{
     schema: provider.supportsStructuredOutput ? PlannerOutputSchema : undefined,
   });
 
-  // Return cachedInputTokens + pre-computed costUsd (see navigatorCallDirect).
+ // Return cachedInputTokens + pre-computed costUsd (see navigatorCallDirect).
   return {
     raw: response.content,
     tokensIn: response.usage?.tokensIn,

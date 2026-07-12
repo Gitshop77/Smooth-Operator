@@ -92,7 +92,7 @@ describe("fireNotifications webhook URL validation", () => {
     const chrome = stubChrome("javascript:alert(1)", true);
     await fireNotifications("task", true);
     expect(fetchMock).not.toHaveBeenCalled();
-    // The notification path is exercised even though the webhook was rejected.
+ // The notification path is exercised even though the webhook was rejected.
     expect(chrome.notifications.create).toHaveBeenCalled();
   });
 });

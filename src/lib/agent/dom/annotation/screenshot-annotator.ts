@@ -77,41 +77,64 @@ export const DEFAULT_ANNOTATE_PALETTE: readonly string[] = [
   "#6366f1", // indigo-500
 ];
 
+/**
+ * Test whether a string is a well-formed CSS hex color: `#rgb`, `#rgba`,
+ * `#rrggbb`, or `#rrggbbaa` (3/4/6/8 hex digits). A naive `{3}([…]{3}){0,2}`
+ * pattern both rejects valid 8-digit `#rrggbbaa` and accepts invalid 9-digit
+ * strings that Canvas silently ignores, so the digit counts are enumerated
+ * explicitly.
+ */
+function isHexColor(c: string): boolean {
+  return /^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(c);
+}
+
+/**
+ * Validate a CSS hex color string. Canvas silently ignores an invalid
+ * `strokeStyle`/`fillStyle` (keeping the previous value), which would make a
+ * malformed `boxColor`/`bgColor`/`textColor` silently produce wrong-colored
+ * boxes/labels. Reject anything that isn't a well-formed `#rgb`/`#rgba`/
+ * `#rrggbb`/`#rrggbbaa` value and fall back to `fallback` so annotation always
+ * uses a real, valid color (FULL-REVIEW finding 105).
+ */
+function sanitizeColor(c: string | undefined, fallback: string): string {
+  return typeof c === "string" && isHexColor(c.trim()) ? c.trim() : fallback;
+}
+
 export interface AnnotateOptions {
   /** Base font size for the index label, in CSS pixels. It is multiplied by
-   * `scaleFactor` when drawn on the device-resolution canvas, so the label
-   * renders at a consistent visual size regardless of DPR. Default 14. */
+ * `scaleFactor` when drawn on the device-resolution canvas, so the label
+ * renders at a consistent visual size regardless of DPR. Default 14. */
   fontSize?: number;
   /** Hex color of the bounding-box outline (single-color mode). Default `#ef4444` (red-500). Ignored when `boxColors` is set. */
   boxColor?: string;
   /**
-   * Array of hex colors cycled by element index (multi-color mode). When set,
-   * each element's box outline + label background uses
-   * `boxColors[index % boxColors.length]`, making neighbouring elements
-   * visually distinguishable. Default: `undefined` (single-color via `boxColor`).
-   */
+ * Array of hex colors cycled by element index (multi-color mode). When set,
+ * each element's box outline + label background uses
+ * `boxColors[index % boxColors.length]`, making neighbouring elements
+ * visually distinguishable. Default: `undefined` (single-color via `boxColor`).
+ */
   boxColors?: string[];
   /** Hex color of the label text. Default `#ffffff` (white). */
   textColor?: string;
   /** Hex color of the label background (single-color mode). Default `#ef4444` (red-500). Ignored when `boxColors` is set. */
   bgColor?: string;
   /**
-   * Minimum width AND height (in CSS pixels) for an element to be annotated.
-   * Elements smaller than this are skipped — their boxes would be too tiny to
-   * see and their labels would be unreadable. Default 5.
-   */
+ * Minimum width AND height (in CSS pixels) for an element to be annotated.
+ * Elements smaller than this are skipped — their boxes would be too tiny to
+ * see and their labels would be unreadable. Default 5.
+ */
   minSize?: number;
   /**
-   * Multiplier applied to all rect coordinates to convert CSS pixels →
-   * device pixels (matches the screenshot's intrinsic resolution).
-   * Default `1` (no scaling — caller should pass `window.devicePixelRatio`
-   * for the screenshot's tab).
-   */
+ * Multiplier applied to all rect coordinates to convert CSS pixels →
+ * device pixels (matches the screenshot's intrinsic resolution).
+ * Default `1` (no scaling — caller should pass `window.devicePixelRatio`
+ * for the screenshot's tab).
+ */
   scaleFactor?: number;
   /**
-   * Optional prefix prepended to each label (e.g. `"e"` → label `"e3"`).
-   * When omitted, the label is the bare index number (`"3"`). Default `""`.
-   */
+ * Optional prefix prepended to each label (e.g. `"e"` → label `"e3"`).
+ * When omitted, the label is the bare index number (`"3"`). Default `""`.
+ */
   refPrefix?: string;
 }
 
@@ -133,40 +156,44 @@ export async function annotateScreenshot(
   elements: AnnotatableElement[],
   options?: AnnotateOptions,
 ): Promise<string> {
-  // Fast-path: nothing to draw. Avoids canvas creation entirely.
+ // Fast-path: nothing to draw. Avoids canvas creation entirely.
   if (!elements || elements.length === 0) return screenshotDataUrl;
 
   const fontSize = options?.fontSize ?? 14;
-  const textColor = options?.textColor ?? "#ffffff"; // white
-  // `scaleFactor` must be a finite positive number (it multiplies every
-  // coordinate + the font size). A `0` collapses boxes to the origin; a
-  // negative one mirrors drawing. Fall back to `1` for any bad input so a
-  // malformed caller can't produce silently-wrong output.
+ // `scaleFactor` must be a finite positive number (it multiplies every
+ // coordinate + the font size). A `0` collapses boxes to the origin; a
+ // negative one mirrors drawing. Fall back to `1` for any bad input so a
+ // malformed caller can't produce silently-wrong output.
   const rawScale = options?.scaleFactor;
   const scaleFactor =
     typeof rawScale === "number" && Number.isFinite(rawScale) && rawScale > 0 ? rawScale : 1;
   const minSize = options?.minSize ?? 5;
   const refPrefix = options?.refPrefix ?? "";
-  // Multi-color mode: cycle through `boxColors` by index. Single-color mode:
-  // use `boxColor` for every box. An empty `boxColors` array is "no palette"
-  // (not a palette of length 0, which would yield `NaN` indices → black boxes).
-  const palette = options?.boxColors?.length ? options.boxColors : null;
-  const singleBoxColor = options?.boxColor ?? "#ef4444"; // red-500
-  const singleBgColor = options?.bgColor ?? "#ef4444"; // red-500
+ // Multi-color mode: cycle through `boxColors` by index. Single-color mode:
+ // use `boxColor` for every box. An empty / all-invalid `boxColors` array is
+ // "no palette" (not a palette of length 0, which would yield `NaN` indices →
+ // black boxes). Drop any entry that isn't a valid hex color.
+  const validBoxColors = options?.boxColors?.filter(
+    (c): c is string => typeof c === "string" && isHexColor(c),
+  );
+  const palette = validBoxColors?.length ? validBoxColors : null;
+  const singleBoxColor = sanitizeColor(options?.boxColor, "#ef4444"); // red-500
+  const singleBgColor = sanitizeColor(options?.bgColor, "#ef4444"); // red-500
+  const textColor = sanitizeColor(options?.textColor, "#ffffff"); // white
 
-  // Bail out early if no Canvas implementation is available. This is the
-  // graceful-degradation path used by the Node.js demo mode.
+ // Bail out early if no Canvas implementation is available. This is the
+ // graceful-degradation path used by the Node.js demo mode.
   const canvas = createCompatibleCanvas();
   if (!canvas) return screenshotDataUrl;
 
   let img: LoadedImage;
   try {
-    // `loadCompatibleImage` selects the decode path internally (no canvas arg
-    // needed — see ./canvas-utils). Removing the dead `_canvas` param also
-    // fixes the "unused parameter" finding.
+ // `loadCompatibleImage` selects the decode path internally (no canvas arg
+ // needed — see ./canvas-utils). Removing the dead `_canvas` param also
+ // fixes the "unused parameter" finding.
     img = await loadCompatibleImage(screenshotDataUrl);
   } catch {
-    // Image load failed (malformed data URL, decode error, …). Return raw.
+ // Image load failed (malformed data URL, decode error, …). Return raw.
     return screenshotDataUrl;
   }
 
@@ -176,61 +203,61 @@ export async function annotateScreenshot(
     const ctx = canvas.getContext("2d");
     if (!ctx) return screenshotDataUrl;
 
-    // Draw the original screenshot as the base layer.
+ // Draw the original screenshot as the base layer.
     img.drawTo(ctx);
 
-    // Draw numbered boxes on each element.
-    // The canvas is at device resolution, so scale the label font by
-    // `scaleFactor` to match the boxes; otherwise the label text renders at
-    // ~1/scaleFactor of the intended visual size on high-DPR screenshots.
+ // Draw numbered boxes on each element.
+ // The canvas is at device resolution, so scale the label font by
+ // `scaleFactor` to match the boxes; otherwise the label text renders at
+ // ~1/scaleFactor of the intended visual size on high-DPR screenshots.
     const sFont = fontSize * scaleFactor;
     ctx.font = `bold ${sFont}px sans-serif`;
     ctx.textBaseline = "top";
 
     for (const el of elements) {
       const { x, y, width, height } = el.rect;
-      // Skip malformed / non-finite rects — a NaN passes the `<= 0` checks but
-      // would make `ctx.strokeRect(NaN, …)` draw nothing (silent drop), and a
-      // negative index would break the palette lookup below.
+ // Skip malformed / non-finite rects — a NaN passes the `<= 0` checks but
+ // would make `ctx.strokeRect(NaN, …)` draw nothing (silent drop), and a
+ // negative index would break the palette lookup below.
       if (!Number.isFinite(width) || !Number.isFinite(height)) continue;
-      // `x`/`y` are also guarded: a `NaN` coordinate passes all the size checks
-      // but `strokeRect(NaN, …)` / `fillRect(NaN, …)` draw nothing, silently
-      // dropping that element's annotation.
+ // `x`/`y` are also guarded: a `NaN` coordinate passes all the size checks
+ // but `strokeRect(NaN, …)` / `fillRect(NaN, …)` draw nothing, silently
+ // dropping that element's annotation.
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
       if (!Number.isFinite(el.index)) continue;
-      // Skip zero-size AND sub-`minSize` elements — their boxes would be
-      // invisible and their labels unreadable.
+ // Skip zero-size AND sub-`minSize` elements — their boxes would be
+ // invisible and their labels unreadable.
       if (width <= 0 || height <= 0) continue;
       if (width < minSize || height < minSize) continue;
 
-      // Scale CSS-pixel rect → device-pixel canvas coordinates.
+ // Scale CSS-pixel rect → device-pixel canvas coordinates.
       const dx = x * scaleFactor;
       const dy = y * scaleFactor;
       const dw = width * scaleFactor;
       const dh = height * scaleFactor;
 
-      // Pick this element's color: cycle the palette by index in multi-color
-      // mode, or use the single color otherwise. The palette is also used for
-      // the label background so the label contrasts with the box outline.
-      // Use a non-negative modulo so a negative `el.index` still indexes a
-      // valid palette slot instead of yielding `undefined`.
+ // Pick this element's color: cycle the palette by index in multi-color
+ // mode, or use the single color otherwise. The palette is also used for
+ // the label background so the label contrasts with the box outline.
+ // Use a non-negative modulo so a negative `el.index` still indexes a
+ // valid palette slot instead of yielding `undefined`.
       const color = palette
         ? palette[((el.index % palette.length) + palette.length) % palette.length]
         : singleBoxColor;
       const labelBg = palette ? color : singleBgColor;
 
-      // Bounding-box outline.
+ // Bounding-box outline.
       ctx.strokeStyle = color;
       ctx.lineWidth = Math.max(1, scaleFactor);
       ctx.strokeRect(dx, dy, dw, dh);
 
-      // Number label in the top-left corner — the label IS the element's
-      // ref (the `[index]` the LLM uses to reference it), optionally
-      // prefixed (e.g. `"e3"`) when the caller uses a ref-string convention.
+ // Number label in the top-left corner — the label IS the element's
+ // ref (the `[index]` the LLM uses to reference it), optionally
+ // prefixed (e.g. `"e3"`) when the caller uses a ref-string convention.
       const label = refPrefix + String(el.index);
-      // `measureText` already reflects the scaled font; pad the box in
-      // device pixels too so the label sits comfortably inside its box at
-      // any DPR.
+ // `measureText` already reflects the scaled font; pad the box in
+ // device pixels too so the label sits comfortably inside its box at
+ // any DPR.
       const labelWidth = ctx.measureText(label).width + 6 * scaleFactor;
       const labelHeight = sFont + 4 * scaleFactor;
 
@@ -243,13 +270,13 @@ export async function annotateScreenshot(
 
     return await canvasToDataUrl(canvas, screenshotDataUrl);
   } catch {
-    // Any drawing / encoding error → return the raw screenshot.
+ // Any drawing / encoding error → return the raw screenshot.
     return screenshotDataUrl;
   } finally {
-    // Release the ImageBitmap's GPU resources (no-op for HTMLImageElement).
-    // `img` may be `undefined` if image load failed (the inner try returned
-    // early) — guard against it so the `finally` can't throw and override the
-    // graceful-degradation return of the raw screenshot.
+ // Release the ImageBitmap's GPU resources (no-op for HTMLImageElement).
+ // `img` may be `undefined` if image load failed (the inner try returned
+ // early) — guard against it so the `finally` can't throw and override the
+ // graceful-degradation return of the raw screenshot.
     img?.cleanup?.();
   }
 }
@@ -274,7 +301,7 @@ export type LoadedImage = CompatibleLoadedImage;
  * sent to the LLM and the prompt token count with no quality benefit. JPEG q=85
  * preserves the numbered-box outlines cleanly while cutting size ~3-5×. */
 async function canvasToDataUrl(canvas: AnnotatorCanvas, fallback: string): Promise<string> {
-  // OffscreenCanvas path.
+ // OffscreenCanvas path.
   const oc = canvas as unknown as {
     convertToBlob?: (opts: { type: string; quality?: number }) => Promise<Blob>;
   };
@@ -283,30 +310,30 @@ async function canvasToDataUrl(canvas: AnnotatorCanvas, fallback: string): Promi
       const blob = await oc.convertToBlob({ type: "image/jpeg", quality: 0.85 });
       return await blobToDataUrl(blob);
     } catch {
-      // Encoding failed — fall back to the raw screenshot.
+ // Encoding failed — fall back to the raw screenshot.
       return fallback;
     }
   }
-  // HTMLCanvasElement path.
+ // HTMLCanvasElement path.
   const html = canvas as unknown as { toDataURL?: (type: string, quality?: number) => string };
   if (typeof html.toDataURL === "function") {
     try {
       return html.toDataURL("image/jpeg", 0.85);
     } catch {
-      // Encoding failed — fall back to the raw screenshot.
+ // Encoding failed — fall back to the raw screenshot.
       return fallback;
     }
   }
-  // Should never happen — both canvas flavors implement one of the two.
-  // Return the raw screenshot rather than throwing so the documented
-  // "always returns a usable image" contract holds airtight.
+ // Should never happen — both canvas flavors implement one of the two.
+ // Return the raw screenshot rather than throwing so the documented
+ // "always returns a usable image" contract holds airtight.
   return fallback;
 }
 
 /** Convert a `Blob` to a `data:` URL via `FileReader`. */
 function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
-    // FileReader is available in both SW and DOM contexts.
+ // FileReader is available in both SW and DOM contexts.
     const FR = (globalThis as { FileReader?: typeof FileReader }).FileReader;
     if (!FR) {
       reject(new Error("FileReader unavailable"));

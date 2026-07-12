@@ -22,20 +22,19 @@ const saveAsPdfResponseSchema = z.object({
   filename: z.string().optional(),
   error: z.string().optional(),
 });
-type SaveAsPdfResponse = z.infer<typeof saveAsPdfResponseSchema>;
 
 export async function handleSaveAsPdf(
   _ctx: ActionContext,
   action: Extract<Action, { type: "save_as_pdf" }>,
 ): Promise<ActionResult> {
-  // Render the current page as a PDF via CDP `Page.printToPDF` (background
-  // SW has `chrome.debugger`; the content script does not) and download
-  // it via `chrome.downloads.download`. In the in-page demo (no
-  // `chrome.runtime.id`), return an honest error.
-  //
-  // The agent schema field is snake_case `action.file_name`; the SW's
-  // `SaveAsPdfMessage` reads it off the wire as `fileName`. The wire field is
-  // named explicitly below so the mapping is unambiguous at the send site.
+ // Render the current page as a PDF via CDP `Page.printToPDF` (background
+ // SW has `chrome.debugger`; the content script does not) and download
+ // it via `chrome.downloads.download`. In the in-page demo (no
+ // `chrome.runtime.id`), return an honest error.
+ //
+ // The agent schema field is snake_case `action.file_name`; the SW's
+ // `SaveAsPdfMessage` reads it off the wire as `fileName`. The wire field is
+ // named explicitly below so the mapping is unambiguous at the send site.
   const file_name = action.file_name;
   if (typeof chrome === "undefined" || !chrome.runtime?.id) {
     return {
@@ -46,6 +45,17 @@ export async function handleSaveAsPdf(
   }
   try {
     const raw = await chrome.runtime.sendMessage({ type: "SAVE_AS_PDF", fileName: file_name });
+ // `chrome.runtime.sendMessage` resolves `undefined` (not a rejection) when
+ // there is no listener, so distinguish a missing/unreachable SW handler
+ // from a malformed payload — both otherwise collapse to the same
+ // "invalid response" string and hide the real cause.
+    if (typeof raw === "undefined") {
+      return {
+        action,
+        success: false,
+        message: "save_as_pdf failed: no response from extension (background service worker unreachable)",
+      };
+    }
     const parsed = saveAsPdfResponseSchema.safeParse(raw);
     if (!parsed.success) {
       return {
@@ -56,8 +66,8 @@ export async function handleSaveAsPdf(
     }
     const res = parsed.data;
     if (res.ok) {
-      // Guard against a drifted SW payload that omits `filename` while still
-      // reporting success — never emit the literal "PDF saved as undefined".
+ // Guard against a drifted SW payload that omits `filename` while still
+ // reporting success — never emit the literal "PDF saved as undefined".
       const filename = res.filename ?? "(unknown file)";
       return { action, success: true, message: `PDF saved as ${filename}` };
     }

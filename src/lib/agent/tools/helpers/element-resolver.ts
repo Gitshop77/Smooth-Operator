@@ -1,13 +1,13 @@
 /**
  * Element-resolution + DOM helpers used by the executor's handlers:
- *   - {@link resolveElement} — index → live `HTMLElement` from the browser state.
- *   - {@link isVisible} — local visibility check (used by `find_text` +
- *     `search_page`).
- *   - {@link safeScrollIntoView} — best-effort `scrollIntoView` that never
- *     throws (jsdom-safe).
- *   - {@link generateCssSelector} — used by the click fallback's strategy 3
- *     (re-find element by CSS selector); relies on the module-private
- *     `cssEscape` helper for identifier escaping.
+ * - {@link resolveElement} — index → live `HTMLElement` from the browser state.
+ * - {@link isVisible} — local visibility check (used by `find_text` +
+ * `search_page`).
+ * - {@link safeScrollIntoView} — best-effort `scrollIntoView` that never
+ * throws (jsdom-safe).
+ * - {@link generateCssSelector} — used by the click fallback's strategy 3
+ * (re-find element by CSS selector); relies on the module-private
+ * `cssEscape` helper for identifier escaping.
  */
 
 import type { BrowserState } from "../../types";
@@ -20,11 +20,11 @@ import { NoSuchElementException } from "../../errors";
  */
 export function resolveElement(state: BrowserState, index: number): HTMLElement {
   const el = state.selectorMap[index];
-  // `selectorMap` values are typed `unknown`, so a corrupted / incorrectly
-  // populated entry must be caught here rather than failing later as an opaque
-  // "el.scrollIntoView is not a function" deep in a handler. Throwing the
-  // typed `NoSuchElementException` lets the executor branch on it and re-extract
-  // state (the documented "element disappeared" → retry contract).
+ // `selectorMap` values are typed `unknown`, so a corrupted / incorrectly
+ // populated entry must be caught here rather than failing later as an opaque
+ // "el.scrollIntoView is not a function" deep in a handler. Throwing the
+ // typed `NoSuchElementException` lets the executor branch on it and re-extract
+ // state (the documented "element disappeared" → retry contract).
   if (el === undefined || el === null) {
     throw new NoSuchElementException(
       `element [${index}] not found (page may have changed — extract state again)`,
@@ -44,7 +44,17 @@ export function isVisible(el: HTMLElement): boolean {
   if (style.display === "none" || style.visibility === "hidden") return false;
   if (parseFloat(style.opacity) === 0) return false;
   const rect = el.getBoundingClientRect();
-  return rect.width > 0 || rect.height > 0;
+ // Rendered (non-zero box) is necessary but not sufficient: `getBoundingClientRect`
+ // is viewport-relative, so an element scrolled fully off-screen still reports a
+ // positive size. Callers (`find_text`, `search_page`) use this to decide whether
+ // to scroll an element into view, so we also require viewport intersection.
+  if (rect.width <= 0 && rect.height <= 0) return false;
+  const vh = typeof window !== "undefined" ? window.innerHeight : undefined;
+  const vw = typeof window !== "undefined" ? window.innerWidth : undefined;
+  const inViewport =
+    (vh === undefined || (rect.bottom > 0 && rect.top < vh)) &&
+    (vw === undefined || (rect.right > 0 && rect.left < vw));
+  return inViewport;
 }
 
 /**
@@ -64,10 +74,10 @@ export function safeScrollIntoView(el: HTMLElement): void {
     try {
       el.scrollIntoView({ behavior: "smooth", block: "center" });
     } catch (e) {
-      // Some environments implement scrollIntoView but reject the options
-      // bag (older Edge / IE). Swallow — scrolling is best-effort — but
-      // surface the error for observability so genuine runtime errors
-      // (e.g. a getter throwing on a proxied element) aren't silently lost.
+ // Some environments implement scrollIntoView but reject the options
+ // bag (older Edge / IE). Swallow — scrolling is best-effort — but
+ // surface the error for observability so genuine runtime errors
+ // (e.g. a getter throwing on a proxied element) aren't silently lost.
       if (typeof console !== "undefined" && typeof console.debug === "function") {
         console.debug("[executor] safeScrollIntoView failed (best-effort):", e);
       }
@@ -80,9 +90,9 @@ export function safeScrollIntoView(el: HTMLElement): void {
  * Used by the click fallback's strategy 3 (re-find element by selector).
  *
  * Strategy:
- *   1. If `el.id` is non-empty, return `#<escaped-id>`.
- *   2. Otherwise, build `tagname.class1.class2...` from the element's
- *      `tagName` + `classList`. If `classList` is empty, return just the tag.
+ * 1. If `el.id` is non-empty, return `#<escaped-id>`.
+ * 2. Otherwise, build `tagname.class1.class2...` from the element's
+ * `tagName` + `classList`. If `classList` is empty, return just the tag.
  *
  * The returned selector is NOT guaranteed to be unique on the page — the
  * caller (strategy 3) handles the "matched multiple elements" case by
@@ -90,13 +100,13 @@ export function safeScrollIntoView(el: HTMLElement): void {
  */
 export function generateCssSelector(el: Element): string {
   if (el.id) {
-    // The id is interpolated into a DOUBLE-QUOTED attribute string
-    // (`*[id="…"]`), so it must be escaped for STRING context, not identifier
-    // context — `CSS.escape` (used by `cssEscape` for the class branch below)
-    // is for identifier context and would mis-escape an id whose escaped form is
-    // immediately followed by a hex digit (e.g. id `"b` → `\22b` parses as
-    // U+022B, not `"` + `b`). Escape only the characters that are special
-    // inside a CSS string: backslash and double-quote.
+ // The id is interpolated into a DOUBLE-QUOTED attribute string
+ // (`*[id="…"]`), so it must be escaped for STRING context, not identifier
+ // context — `CSS.escape` (used by `cssEscape` for the class branch below)
+ // is for identifier context and would mis-escape an id whose escaped form is
+ // immediately followed by a hex digit (e.g. id `"b` → `\22b` parses as
+ // U+022B, not `"` + `b`). Escape only the characters that are special
+ // inside a CSS string: backslash and double-quote.
     const id = el.id.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
     return `*[id="${id}"]`;
   }
@@ -118,13 +128,13 @@ function cssEscape(s: string): string {
   if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
     return CSS.escape(s);
   }
-  // Minimal hand-rolled fallback (sufficient for typical id/class values).
-  // Escape special characters the simple way.
+ // Minimal hand-rolled fallback (sufficient for typical id/class values).
+ // Escape special characters the simple way.
   let escaped = s.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
-  // A CSS identifier must not begin with a digit. `CSS.escape` emits a hex
-  // code point followed by a space for a leading digit (e.g. "5item" ->
-  // "\35 item"); mirror that here so jsdom/test environments (which lack
-  // CSS.escape) still produce a valid, parseable selector.
+ // A CSS identifier must not begin with a digit. `CSS.escape` emits a hex
+ // code point followed by a space for a leading digit (e.g. "5item" ->
+ // "\35 item"); mirror that here so jsdom/test environments (which lack
+ // CSS.escape) still produce a valid, parseable selector.
   if (/^[0-9]/.test(escaped)) {
     escaped = "\\3" + escaped[0] + " " + escaped.slice(1);
   }

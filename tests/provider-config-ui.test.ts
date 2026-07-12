@@ -34,8 +34,8 @@ describe("redactKeyLeak", () => {
 
   test("masks a sk-ant- key", () => {
     const redacted = redactKeyLeak("error: sk-ant-api03-xyz789");
-    // The implementation masks at the first '-', so `sk-ant-api03-xyz789`
-    // collapses to `sk-[REDACTED]` — the random secret body is gone.
+ // The implementation masks at the first '-', so `sk-ant-api03-xyz789`
+ // collapses to `sk-[REDACTED]` — the random secret body is gone.
     expect(redacted).toContain("sk-[REDACTED]");
     expect(redacted).not.toContain("sk-ant-api03-xyz789");
     expect(redacted).not.toContain("api03-xyz789");
@@ -61,8 +61,8 @@ describe("redactKeyLeak", () => {
 
   test("masks a JWT (eyJ...) key", () => {
     const redacted = redactKeyLeak("token: eyJhbGciOiJIUzI1NiJ9.abc");
-    // The regex stops at the JWT's first '.', so the leading `eyJh` segment is
-    // masked; the full token must not survive.
+ // The regex stops at the JWT's first '.', so the leading `eyJh` segment is
+ // masked; the full token must not survive.
     expect(redacted).toContain("eyJh[REDACTED]");
     expect(redacted).not.toContain("eyJhbGciOiJIUzI1NiJ9");
   });

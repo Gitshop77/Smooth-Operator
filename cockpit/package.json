@@ -7,7 +7,7 @@
     "dev": "next dev -H 127.0.0.1 -p 3000",
     "build": "next build",
     "start": "next start -p 3000",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings 0",
     "test": "vitest run",
     "db:push": "prisma db push",
     "db:generate": "prisma generate",
@@ -36,6 +36,7 @@
     "prisma": "^6.11.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "server-only": "^0.0.1",
     "socket.io-client": "^4.8.3",
     "tailwind-merge": "^3.3.1",
     "zustand": "^5.0.6"

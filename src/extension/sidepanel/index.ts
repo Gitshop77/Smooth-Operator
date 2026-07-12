@@ -40,7 +40,7 @@ import "./lifecycle";
 
 // ─── Collapse-state persistence (BOTH Reasoning + Activity) ─────────────────
 //
-// P2 fix: both the Reasoning and Activity <details> panels remember their
+// P2 both the Reasoning and Activity <details> panels remember their
 // open/closed state across panel close/reopen via chrome.storage.local
 // (keys cw-reasoning / cw-activity). Restored on load, then a `toggle`
 // listener persists every change. This is the side-panel equivalent of the
@@ -96,30 +96,39 @@ connectKeepalivePort();
 
 // ─── Hydrate from chrome.storage.local ─────────────────────────────────────
 
-chrome.storage.local.get([STORAGE_KEYS.task, STORAGE_KEYS.agentMode, STORAGE_KEYS.maxSteps, "costCap", "defaultTask"], (res) => {
-  if (chrome.runtime.lastError) {
-    console.warn("[sidepanel] storage.get failed:", chrome.runtime.lastError);
-    return;
-  }
-  if (res.task) taskInput.value = res.task as string;
-  if (typeof res.defaultTask === "string" && res.defaultTask.trim()) {
-    taskInput.placeholder = res.defaultTask;
-  }
-  // Validate the cost-cap value: `chrome.storage` returns `unknown`, and a
-  // corrupted / wrongly-typed payload (string, NaN, negative) would otherwise
-  // flow straight into the cost-cap badge and render as "cap: NaN%".
-  const rawCostCap = res.costCap;
-  const costCapUsd =
-    typeof rawCostCap === "number" && Number.isFinite(rawCostCap) && rawCostCap >= 0
-      ? rawCostCap
-      : 0;
-  setCostCapUsd(costCapUsd);
-  if (res.agentMode) {
-    setCurrentMode(res.agentMode as string);
-    syncModeDropdown();
-  }
-  if (typeof res.maxSteps === "number") setMaxSteps(res.maxSteps);
-});
+chrome.storage.local.get(
+  [STORAGE_KEYS.task, STORAGE_KEYS.agentMode, STORAGE_KEYS.maxSteps, STORAGE_KEYS.costCap, STORAGE_KEYS.defaultTask],
+  (res) => {
+    if (chrome.runtime.lastError) {
+      console.warn("[sidepanel] storage.get failed:", chrome.runtime.lastError);
+      return;
+    }
+    if (res.task) taskInput.value = res.task as string;
+    if (typeof res.defaultTask === "string" && res.defaultTask.trim()) {
+      taskInput.placeholder = res.defaultTask;
+    }
+ // Validate the cost-cap value: `chrome.storage` returns `unknown`, and a
+ // corrupted / wrongly-typed payload (string, NaN, negative) would otherwise
+ // flow straight into the cost-cap badge and render as "cap: NaN%".
+    const rawCostCap = res.costCap;
+    const costCapUsd =
+      typeof rawCostCap === "number" && Number.isFinite(rawCostCap) && rawCostCap >= 0
+        ? rawCostCap
+        : 0;
+    setCostCapUsd(costCapUsd);
+ // Validate `agentMode` against the known set before adopting it. A corrupt
+ // or legacy value in chrome.storage must not poison the mode state (the
+ // typed `setCurrentMode` would otherwise broadcast an unrecognized mode to
+ // the orchestrator). Fall back to the safe default when unrecognized.
+    const ALLOWED_MODES = new Set(["full_agentic", "standard", "restricted"]);
+    const mode = res.agentMode as string | undefined;
+    if (mode && ALLOWED_MODES.has(mode)) {
+      setCurrentMode(mode);
+      syncModeDropdown();
+    }
+    if (typeof res.maxSteps === "number") setMaxSteps(res.maxSteps);
+  },
+);
 
 // ─── Mode selector ─────────────────────────────────────────────────────────
 
@@ -161,17 +170,17 @@ openOptionsLink?.addEventListener("click", (e) => {
 
 openCockpitBtn?.addEventListener("click", async () => {
   const cockpitUrl = await getCockpitUrl();
-  // Check if the cockpit is actually running BEFORE opening the tab,
-  // so we can show a helpful notification instead of a dead page.
+ // Check if the cockpit is actually running BEFORE opening the tab,
+ // so we can show a helpful notification instead of a dead page.
   let isRunning = false;
   try {
-    // Best-effort connectivity probe. `mode: "no-cors"` makes the response
-    // opaque, so we CANNOT inspect HTTP status — any host that answers the
-    // TCP/TLS connection (captive portal, unrelated dev server, error page)
-    // resolves the promise and is treated as "running". This is a known
-    // limitation: we only confirm *something* is listening at the URL, not
-    // that it's the Cockpit server. A definitive check would need a CORS-
-    // enabled `/api/health` endpoint on the Cockpit server.
+ // Best-effort connectivity probe. `mode: "no-cors"` makes the response
+ // opaque, so we CANNOT inspect HTTP status — any host that answers the
+ // TCP/TLS connection (captive portal, unrelated dev server, error page)
+ // resolves the promise and is treated as "running". This is a known
+ // limitation: we only confirm *something* is listening at the URL, not
+ // that it's the Cockpit server. A definitive check would need a CORS-
+ // enabled `/api/health` endpoint on the Cockpit server.
     await fetch(cockpitUrl, { mode: "no-cors", signal: AbortSignal.timeout(2000) });
     isRunning = true;
   } catch {
@@ -197,17 +206,24 @@ openCockpitBtn?.addEventListener("click", async () => {
 // Debug highlight overlay — a user opt-in debugging aid (default OFF in the
 // sidepanel UI). It asks the active tab's content script to paint a transient
 // highlight layer so an operator can verify which element the agent is about to
-// act on. It is intentionally exposed in production as a support/debugging tool
-// and is gated behind the manifest `debugger` permission; no code change is
-// required, only explicit user opt-in.
+// act on. It is intentionally exposed in production as a support/debugging tool.
+// The actual control here is two-fold: (1) the user must physically toggle the
+// checkbox in the panel, and (2) the active tab must have an injected content
+// script that handles the `SET_DEBUG_HIGHLIGHT` message (sendMessage rejects for
+// `chrome://`, extension pages, or tabs without the content script — and we
+// revert the checkbox + log on that failure). NOTE: this path does NOT invoke
+// `chrome.debugger`; the `debugger` permission is consumed only by the
+// screenshot/CDP paths (screenshots.ts, cdp-controller.ts, message-routing.ts).
+// The comment previously claimed a `debugger`-permission gate that does not
+// exist on this code path — corrected to describe the real controls.
 debugModeCheckbox?.addEventListener("change", () => {
   const cb = debugModeCheckbox;
   if (!cb) return;
   const enabled = cb.checked;
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const tabId = tabs[0]?.id;
-    // No active tab (e.g. the caller is the target window without a focused
-    // tab). Surface it and revert so the checkbox doesn't lie.
+ // No active tab (e.g. the caller is the target window without a focused
+ // tab). Surface it and revert so the checkbox doesn't lie.
     if (!tabId) {
       console.warn("[sidepanel] debug highlight: no active tab to message");
       cb.checked = !enabled;
@@ -216,12 +232,12 @@ debugModeCheckbox?.addEventListener("change", () => {
     chrome.tabs
       .sendMessage(tabId, { type: "SET_DEBUG_HIGHLIGHT", enabled })
       .catch((err) => {
-        // Every failure mode (no content script injected, a chrome:// or
-        // other privileged page, the tab having been closed) lands here.
-        // Log it so the operator has a diagnostic path, and revert the
-        // checkbox so the UI reflects reality instead of showing "on" with
-        // no highlight applied. Setting .checked programmatically does not
-        // re-fire the change event, so this won't recurse.
+ // Every failure mode (no content script injected, a chrome:// or
+ // other privileged page, the tab having been closed) lands here.
+ // Log it so the operator has a diagnostic path, and revert the
+ // checkbox so the UI reflects reality instead of showing "on" with
+ // no highlight applied. Setting .checked programmatically does not
+ // re-fire the change event, so this won't recurse.
         console.warn(
           `[sidepanel] debug highlight ${enabled ? "enable" : "disable"} failed — no content script or unsupported page:`,
           err
@@ -254,6 +270,6 @@ debugModeCheckbox?.addEventListener("change", () => {
       datalist.appendChild(opt);
     }
   } catch {
-    // Catalog unavailable — datalist stays empty.
+ // Catalog unavailable — datalist stays empty.
   }
 })();

@@ -3,10 +3,10 @@
  *
  * The full DOM-walking path requires a browser (or JSDOM), so these tests
  * cover the exported API surface that can be exercised in Node:
- *   - `generateAccessibilityTree` (signature + error path)
- *   - `initElementMap` (idempotent; creates the off-window registry)
- *   - `resolveRef` (returns null for unknown/unregistered refs, the element
- *     for a live registered ref)
+ * - `generateAccessibilityTree` (signature + error path)
+ * - `initElementMap` (idempotent; creates the off-window registry)
+ * - `resolveRef` (returns null for unknown/unregistered refs, the element
+ * for a live registered ref)
  *
  * The element-ref registry is intentionally module-scoped (off `window`) for
  * security, so these tests use the `__test_*` accessors (the same mechanism
@@ -55,19 +55,19 @@ describe("ax-tree module exports", () => {
   });
 
   test("initElementMap + resolveRef behave correctly (behavioral)", () => {
-    // Before any registration, an unknown ref resolves to null.
+ // Before any registration, an unknown ref resolves to null.
     initElementMap();
     expect(__test_registry().initialized).toBe(true);
     expect(__test_registry().size).toBe(0);
     expect(resolveRef("ref_never_registered")).toBeNull();
 
-    // Register a real element (mirrors how buildTree registers during a real
-    // DOM walk) and confirm resolveRef returns it.
+ // Register a real element (mirrors how buildTree registers during a real
+ // DOM walk) and confirm resolveRef returns it.
     const fakeEl = { tagName: "BUTTON" } as unknown as HTMLElement;
     __test_registerElement("ref_1", fakeEl);
     expect(resolveRef("ref_1")).toBe(fakeEl);
 
-    // Unknown refs still resolve to null even after registration.
+ // Unknown refs still resolve to null even after registration.
     expect(resolveRef("ref_does_not_exist")).toBeNull();
   });
 
@@ -100,7 +100,7 @@ describe("initElementMap", () => {
     __test_registerElement("ref_1", fakeEl);
     expect(resolveRef("ref_1")).toBe(fakeEl);
 
-    // Second init must NOT wipe the registry (idempotent, not a reset).
+ // Second init must NOT wipe the registry (idempotent, not a reset).
     initElementMap();
     expect(resolveRef("ref_1")).toBe(fakeEl);
     expect(__test_registry().size).toBeGreaterThan(0);

@@ -15,6 +15,18 @@ import type { LoopState, ObserveStateResult } from "../types";
  * browser state on success, or an error result that the caller can use to
  * increment `consecutiveFailures` and decide whether to abort.
  */
+/**
+ * IMPORTANT (serialization contract): the `BrowserState` returned on success
+ * may contain NON-SERIALIZABLE runtime-only fields — `selectorMap` (a map of
+ * live `HTMLElement`s) and `elements[].rect` (`DOMRect`s). `JSON.stringify`
+ * turns these into `{}`, so this object MUST NOT cross a serialization
+ * boundary (e.g. `runtime.sendMessage` / `postMessage`, or a persisted/debug
+ * log). The extension caller (`content.ts`) already strips `selectorMap` before
+ * messaging; the in-loop caller here returns the raw object relying on the
+ * orchestrator/navigator reading only the `elementsText` string. If a future
+ * caller needs to serialize it, project to a plain shape first (or expose
+ * `getSelectorMap()` separately).
+ */
 export async function observeState(state: LoopState): Promise<ObserveStateResult> {
   let tabs: TabInfo[];
   try {

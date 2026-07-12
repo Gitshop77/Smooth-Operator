@@ -11,17 +11,36 @@ vi.stubGlobal('fetch', fetchMock);
 
 import { GET, POST, DELETE, WINGMAN_SYSTEM_PROMPT } from '@/app/api/cowork/ai/chat/route';
 
+// Build a NextRequest-shaped stub. The route reads the body via `bodyJson`,
+// which calls `req.body.getReader()` (a real ReadableStream — a plain
+// `body: true` is not readable), and it reads `req.headers.get('x-request-id')`
+// synchronously when invoking `withRouteError` (outside the try/catch), so the
+// stub MUST provide a `headers` object with `.get`. Omitting either made every
+// POST/DELETE throw before the proxy logic ran.
 function fakeReq(query = '', body?: unknown): any {
+  const headers = new Headers();
   if (body !== undefined) {
     const text = JSON.stringify(body);
+    const bytes = new TextEncoder().encode(text);
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes);
+        controller.close();
+      },
+    });
     return {
       nextUrl: { searchParams: new URLSearchParams(query) },
-      body: true,
+      headers,
+      body: stream,
       json: async () => body,
       text: async () => text,
     };
   }
-  return { nextUrl: { searchParams: new URLSearchParams(query) } };
+  return {
+    nextUrl: { searchParams: new URLSearchParams(query) },
+    headers,
+    body: null,
+  };
 }
 
 afterEach(() => {
@@ -32,9 +51,9 @@ describe('GET /api/cowork/ai/chat (F9)', () => {
   it('does not expose the internal upstream URL', async () => {
     const res = await GET();
     const body = await res.json();
-    // F9: the internal cowork-events URL must not leak in the metadata.
+ // F9: the internal cowork-events URL must not leak in the metadata.
     expect(body).not.toHaveProperty('upstream');
-    // Sanity: the rest of the metadata is still present.
+ // Sanity: the rest of the metadata is still present.
     expect(body.route).toBe('/api/cowork/ai/chat');
     expect(body.method).toBe('POST');
     expect(body.body).toBeDefined();
@@ -61,11 +80,11 @@ describe('POST /api/cowork/ai/chat (F10)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [, init] = fetchMock.mock.calls[0];
     const sent = JSON.parse(init.body);
-    // system-role message must NOT be forwarded.
+ // system-role message must NOT be forwarded.
     expect(sent.messages.every((m: { role: string }) => m.role !== 'system')).toBe(true);
     expect(sent.messages).toHaveLength(1);
     expect(sent.messages[0].role).toBe('user');
-    // system prompt pinned when the caller supplies none.
+ // system prompt pinned when the caller supplies none.
     expect(typeof sent.systemPrompt).toBe('string');
     expect(sent.systemPrompt.length).toBeGreaterThan(0);
   });
@@ -85,7 +104,7 @@ describe('POST /api/cowork/ai/chat (F10)', () => {
     );
     const [, init] = fetchMock.mock.calls[0];
     const sent = JSON.parse(init.body);
-    // A caller-supplied systemPrompt must NOT be honored.
+ // A caller-supplied systemPrompt must NOT be honored.
     expect(sent.systemPrompt).not.toBe('be terse');
     expect(sent.systemPrompt).toBe(WINGMAN_SYSTEM_PROMPT);
   });
@@ -148,7 +167,7 @@ describe('DELETE /api/cowork/ai/chat (F29 / F35)', () => {
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body.error).toContain('503');
-    // The long upstream detail must be truncated, not echoed verbatim.
+ // The long upstream detail must be truncated, not echoed verbatim.
     expect(body.error).not.toContain('must not leak in full to the client');
   });
 });

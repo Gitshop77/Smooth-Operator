@@ -44,7 +44,7 @@ function parseSiteData(e: SampleSiteMemoryEntry): {
     const parsed = JSON.parse(e.dataJson) as Record<string, unknown>;
     const visits = Array.isArray(parsed.visits) ? parsed.visits.length : 0;
     const diffs = Array.isArray(parsed.diffs) ? parsed.diffs.length : 0;
-    // Build a short preview from the JSON itself (capped at 120 chars).
+ // Build a short preview from the JSON itself (capped at 120 chars).
     const preview = e.dataJson.length > 120
       ? e.dataJson.slice(0, 120) + "…"
       : e.dataJson;
@@ -66,7 +66,7 @@ function parseFormEntries(
   if (typeof e.formDataJson !== "string" || e.formDataJson.length === 0) return [];
   try {
     const parsed = JSON.parse(e.formDataJson) as Record<string, unknown>;
-    // Preferred shape: { entries: [{ field, value }] }
+ // Preferred shape: { entries: [{ field, value }] }
     if (Array.isArray(parsed.entries)) {
       return parsed.entries
         .filter((x): x is { field: string; value: string } =>
@@ -76,7 +76,7 @@ function parseFormEntries(
           typeof (x as { value: unknown }).value === "string")
         .map((x) => ({ field: x.field, value: x.value }));
     }
-    // Fallback: flatten top-level string keys.
+ // Fallback: flatten top-level string keys.
     return Object.entries(parsed)
       .filter(([, v]) => typeof v === "string" || typeof v === "number")
       .map(([k, v]) => ({ field: k, value: String(v) }));
@@ -105,8 +105,8 @@ export function MemoryView() {
     return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]));
   }, [site, filter]);
 
-  // Flatten form memory into rows of { domain, field, value, updatedAt }
-  // by parsing each row's `formDataJson`.
+ // Flatten form memory into rows of { domain, field, value, updatedAt }
+ // by parsing each row's `formDataJson`.
   const formFlattened = React.useMemo(() => {
     const q = filter.trim().toLowerCase();
     const rows: Array<{
@@ -117,14 +117,14 @@ export function MemoryView() {
     }> = [];
     for (const e of form ?? []) {
       if (q && !formMatches(e, q)) continue;
-      // Fall back to 0 (rendered as "—" by `timeAgo`) instead of
-      // `Date.now()` — `Date.now()` is impure and triggers React's
-      // "impure function during render" lint warning inside `useMemo`.
+ // Fall back to 0 (rendered as "—" by `timeAgo`) instead of
+ // `Date.now()` — `Date.now()` is impure and triggers React's
+ // "impure function during render" lint warning inside `useMemo`.
       const ts = e.updatedAt ?? e.createdAt ?? 0;
       const entries = parseFormEntries(e);
       if (entries.length === 0) {
-        // No parsed entries — show a single row with the raw JSON so the
-        // user sees that *something* is stored for this domain.
+ // No parsed entries — show a single row with the raw JSON so the
+ // user sees that *something* is stored for this domain.
         rows.push({
           domain: e.domain,
           field: "(raw)",
@@ -145,9 +145,9 @@ export function MemoryView() {
     return rows;
   }, [form, filter]);
 
-  // Prisma `FormMemory` has `domain` + `formDataJson` — no `field`/`value`/
-  // `formUrl` columns. The filter matches against `domain` AND the raw
-  // `formDataJson` string.
+ // Prisma `FormMemory` has `domain` + `formDataJson` — no `field`/`value`/
+ // `formUrl` columns. The filter matches against `domain` AND the raw
+ // `formDataJson` string.
   function formMatches(e: { domain: string; formDataJson: string }, q: string): boolean {
     if (e.domain?.toLowerCase().includes(q)) return true;
     if (typeof e.formDataJson === "string" && e.formDataJson.toLowerCase().includes(q)) return true;
