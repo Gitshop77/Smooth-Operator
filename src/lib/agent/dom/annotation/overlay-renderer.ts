@@ -16,12 +16,8 @@ const HIGHLIGHT_COLOR = "#f97316";
 const HIGHLIGHT_BG = "rgba(249,115,22,0.12)";
 /** How long a highlight stays on screen before auto-removing. */
 const HIGHLIGHT_DURATION_MS = 1200;
-/** Default status-banner duration. */
-const DEFAULT_BANNER_DURATION_MS = 2000;
 /** Maximum z-index (used for highlight badges). */
 const MAX_Z_INDEX = "2147483647";
-/** Second-to-max z-index (used for banners so badges can sit on top). */
-const BANNER_Z_INDEX = "2147483646";
 /** Vertical offset of the badge above the element (px). */
 const BADGE_VERTICAL_OFFSET = 22;
 /** Minimum left/top coordinate for the badge (px). */
@@ -144,34 +140,7 @@ export function highlightElement(el: HTMLElement, label: string): OverlayHandle 
   return { remove };
 }
 
-/**
- * Show a transient status banner (e.g. "Agent step 3") in the bottom-right
- * corner. Fades out and removes itself after `durationMs`.
- *
- * @param text       Banner text.
- * @param durationMs How long to show the banner before fading out.
- */
-export function showStatusBanner(text: string, durationMs: number = DEFAULT_BANNER_DURATION_MS): void {
-  const banner = document.createElement("div");
-  banner.textContent = text;
-  banner.style.cssText = [
-    "position:fixed",
-    "bottom:12px",
-    "right:12px",
-    `z-index:${BANNER_Z_INDEX}`,
-    "background:#1e293b",
-    "color:#fff",
-    "font:600 11px/1 ui-sans-serif,system-ui",
-    "padding:6px 10px",
-    "border-radius:999px",
-    "box-shadow:0 4px 14px rgba(0,0,0,.3)",
-    "opacity:0.95",
-    "transition:opacity .3s",
-    "pointer-events:none",
-  ].join(";");
-  document.body.appendChild(banner);
-  setTimeout(() => {
-    banner.style.opacity = "0";
-    setTimeout(() => banner.remove(), 400);
-  }, durationMs);
-}
+// NOTE: a `showStatusBanner` helper previously lived here but had no callers
+// (production or test) and was removed to shrink the public API — see the
+// removal tracked in the continuous-improvement audit. Re-add it only if a
+// status-reporting path actually wires it up.

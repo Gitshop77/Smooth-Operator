@@ -272,9 +272,23 @@ export async function handleEvaluate(
       const { substituteCustomToolCalls } = await import("../registry");
       code = await substituteCustomToolCalls(code);
     } catch (e) {
-      // Log the import failure rather than silently falling through to
-      // running unmodified LLM-authored code.
-      console.warn("[executor] substituteCustomToolCalls import failed:", e);
+      // Substitution is a security-relevant transform: it inlines stored
+      // custom-tool code in place of the LLM-authored `__opencowork_custom_tool()`
+      // placeholders. If the registry can't be loaded we must NOT silently fall
+      // through to executing the UNMODIFIED LLM-authored code — that would skip
+      // the substitution the caller expected and run raw model output. Fail
+      // closed: block the evaluate action and report why. (Previous behaviour
+      // logged a warning and then ran the unmodified code, which was
+      // contradictory and unsafe — finding: substituteCustomToolCalls import
+      // failure runs UNMODIFIED code despite contradictory comment.)
+      console.error("[executor] substituteCustomToolCalls import failed:", e);
+      return {
+        action,
+        success: false,
+        message: `BLOCKED evaluate: custom-tool substitution unavailable (${
+          e instanceof Error ? e.message : String(e)
+        }). Refusing to run unmodified LLM-authored code.`,
+      };
     }
     // Wrap execution in a wall-clock timeout race. If the code returns a
     // Promise (async code), we race it against a timeout and surface a
@@ -392,13 +406,22 @@ export async function handleEvaluate(
     // strict-mode eval parameter). We don't inject "use strict" ourselves, but
     // LLM/user code could place a "use strict" directive at the top of `code`,
     // which would re-trigger that same SyntaxError. Strip a leading directive
-    // so the body stays sloppy and the `eval`/`Function` parameter shadows stay
-    // valid (and keep blocking bare `new Function(...)` / `eval(...)` escapes).
-    // We only remove the directive; the executed logic is unchanged. (We keep
-    // the `eval`/`Function` parameter names rather than renaming them, because
-    // they are what shadow the bare `eval`/`Function` identifiers to throwing
-    // stubs — renaming them would re-open the direct `eval(...)` escape.)
-    const strippedCode = code.replace(/^\s*["']use strict["']\s*;?/, "");
+    // (after first removing any leading line/block comments — a strict snippet
+    // that begins with a comment like `// generated\n"use strict";` would
+    // otherwise keep its directive, the wrapper would become strict, and
+    // `new Function` would throw `SyntaxError: Unexpected eval or arguments in
+    // strict mode` because we declare `eval`/`Function` as parameters;
+    // finding: incomplete "use strict" stripping breaks valid strict-mode code
+    // with a leading comment) so the body stays sloppy and the `eval`/`Function`
+    // parameter shadows stay valid (and keep blocking bare `new Function(...)`
+    // / `eval(...)` escapes). We only remove the directive and any leading
+    // comments; the executed logic is otherwise unchanged. (We keep the
+    // `eval`/`Function` parameter names rather than renaming them, because they
+    // are what shadow the bare `eval`/`Function` identifiers to throwing stubs
+    // — renaming them would re-open the direct `eval(...)` escape.)
+    const strippedCode = code
+      .replace(/^\s*(?:\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*\s*/, "")
+      .replace(/^\s*["']use strict["']\s*;?/, "");
     const fn = new Function(
       "chrome",
       "window",

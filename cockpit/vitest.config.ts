@@ -20,15 +20,30 @@ export default defineConfig({
     testTimeout: 30_000,
     // Isolate each test file so module-level mocks (e.g. @/lib/db) don't leak.
     isolate: true,
-    // Coverage is opt-in: collected only when the suite is run with
-    // `--coverage`. The cockpit CI job does not currently invoke `--coverage`,
-    // so a `thresholds` gate here would be a silent no-op that gives false
-    // assurance of coverage protection. Thresholds are intentionally omitted
-    // until the CI job runs `npm test -- --coverage` (matching the root job),
-    // at which point a calibrated gate should be added here.
+    // Coverage is opt-in: collected only when the suite is run with `--coverage`.
+    // Thresholds below are a no-op until coverage is actually collected (i.e.
+    // until the cockpit CI job runs `npm test -- --coverage` — see
+    // `.github/workflows/ci.yml`, which is owned by a different batch and is the
+    // actual blocker for this gate). Mirrors the root `vitest.config.ts` pattern:
+    // floors are pinned just below a measured baseline so the gate stays GREEN
+    // (a gate pinned above baseline fails every PR and trains contributors to
+    // ignore it) and still fails on any regression below baseline.
+    //
+    // UNCALIBRATED PLACEHOLDER — cockpit's own baseline has not been measured
+    // yet (it requires a `--coverage` run). The values below are borrowed from
+    // the root package's measured baseline and MUST be replaced with cockpit's
+    // own measured numbers (one point below each metric) on the first
+    // `npm test -- --coverage` run, then ratcheted upward over time. Do not ship
+    // enforcement on these borrowed numbers without measuring cockpit first.
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],
+      thresholds: {
+        lines: 53,
+        statements: 51,
+        functions: 50,
+        branches: 43,
+      },
     },
   },
   resolve: {

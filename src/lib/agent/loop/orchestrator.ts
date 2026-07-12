@@ -120,6 +120,15 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
     // the caller/UI gets a clear signal and refuse to start with a broken config.
     const msg = e instanceof Error ? e.message : String(e);
     console.error("[orchestrator] config validation failed:", msg);
+    // Preserve structured validation details (e.g. ConfigValidationError.issues)
+    // when available, so callers / UI can surface field-level errors instead of
+    // only the first message (finding: ConfigValidationError structured details
+    // discarded). Re-throw the original error; only synthesize a generic one for
+    // non-ConfigValidation errors (duck-type on the `issues` property to avoid a
+    // cross-module import).
+    if (e instanceof Error && (e as { issues?: unknown }).issues) {
+      throw e;
+    }
     throw new Error(`Invalid agent configuration: ${msg}`);
   }
   const settleDelay = deps.settleDelayMs ?? 500;

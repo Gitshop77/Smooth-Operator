@@ -1,9 +1,18 @@
 /**
  * Vision Assistant — model loader.
  *
- * Downloads the 2.1 GB ONNX INT4 model in 48 MB chunks with retry.
+ * Downloads the ~2.1 GB ONNX INT4 model in 48 MB chunks with retry.
  * Caches in the browser Cache Storage API (persists across sessions).
  * Ported from Reza2kn's fetchBufProgress.
+ *
+ * Integrity guarantees:
+ *  - Every download is SHA-256 verified against a pinned hash before caching
+ *    (supply-chain guard). Files whose hash is not yet pinned are still
+ *    hashed and the computed digest is stored alongside the cached Response.
+ *  - On every subsequent load (`getBuffer`/`getJSON`) the cached bytes are
+ *    re-hashed and compared against the stored digest (and the pinned hash,
+ *    when present) so a corrupted / rolled-back / poisoned cache entry is
+ *    rejected instead of silently executed as model weights.
  */
 
 import {
@@ -32,16 +41,22 @@ async function sha256(buf: Uint8Array): Promise<string> {
     .join("");
 }
 
-/** Fetch with a stall watchdog: aborts if no progress within stallMs. */
-async function fetchAbortable(
+/**
+ * Fetch a URL to a buffer with a stall watchdog.
+ *
+ * The watchdog is armed BEFORE `fetch()` so a hung TCP/TLS handshake — the
+ * server accepts the connection but never sends response headers — is also
+ * aborted. The timer is reset on every `reader.read()` so a slow but live
+ * stream is never mistaken for a stall. `onProgress` (when provided) is fed
+ * with the running byte count and, if known, the declared Content-Length.
+ */
+async function fetchToBuffer(
   url: string,
   opts: RequestInit,
+  onProgress?: (downloaded: number, total: number) => void,
   stallMs: number = DOWNLOAD_STALL_MS,
-): Promise<{ buf: Uint8Array; headers: Headers }> {
+): Promise<{ buf: Uint8Array; headers: Headers; status: number }> {
   const ctrl = new AbortController();
-  // Arm the stall watchdog BEFORE the fetch so a hung TCP/TLS handshake —
-  // the server accepts the connection but never sends response headers — is
-  // also aborted. The timer is reset on every reader.read() below.
   let timer = setTimeout(() => ctrl.abort(), stallMs);
   const r = await fetch(url, { ...opts, signal: ctrl.signal });
   if (!(r.status === 200 || r.status === 206)) throw new Error(`status ${r.status}`);
@@ -49,6 +64,9 @@ async function fetchAbortable(
   const reader = r.body.getReader();
   const chunks: Uint8Array[] = [];
   let got = 0;
+  const clHeader = r.headers.get("content-length");
+  const cl = clHeader ? Number(clHeader) : NaN;
+  let lastPct = -1;
   try {
     for (;;) {
       clearTimeout(timer);
@@ -57,6 +75,13 @@ async function fetchAbortable(
       if (done) break;
       chunks.push(value);
       got += value.length;
+      if (onProgress && Number.isFinite(cl) && cl > 0) {
+        const pct = Math.floor((got / cl) * 100);
+        if (pct >= lastPct + 10) {
+          lastPct = pct;
+          onProgress(got, cl);
+        }
+      }
     }
   } finally {
     clearTimeout(timer);
@@ -67,7 +92,7 @@ async function fetchAbortable(
     buf.set(c, o);
     o += c.length;
   }
-  return { buf, headers: r.headers };
+  return { buf, headers: r.headers, status: r.status };
 }
 
 /** Chunked Range download with retry. */
@@ -77,59 +102,130 @@ async function fetchBufProgress(
   onProgress?: (p: DownloadProgress) => void,
   chunkSize: number = DOWNLOAD_CHUNK_SIZE,
 ): Promise<Uint8Array> {
-  let total = 0;
-  let first: { buf: Uint8Array; headers: Headers };
+  // Probe: request a small leading range to learn whether the server supports
+  // Range and what the total size is. Retry the probe with the same ceiling as
+  // the chunked loop below so the two retry sites never silently drift.
+  let first: { buf: Uint8Array; headers: Headers; status: number };
   for (let tr = 0; ; tr++) {
     try {
-      first = await fetchAbortable(url, {
+      first = await fetchToBuffer(url, {
         headers: { Range: `bytes=0-${chunkSize - 1}` },
       });
-      const cr = first.headers.get("content-range");
-      total = cr
-        ? +cr.split("/")[1]
-        : +first.headers.get("content-length")! || first.buf.length;
       break;
     } catch (e) {
-      // was a hardcoded `4`. Use `DOWNLOAD_MAX_RETRIES - 1` so this first
-      // fetch's retry ceiling matches the chunked-download retry ceiling below
-      // (which already uses `tr === DOWNLOAD_MAX_RETRIES - 1`). If the constant
-      // ever changes (e.g. to 7 for flakier networks), this loop updates too —
-      // no silent drift between the two retry sites.
       if (tr >= DOWNLOAD_MAX_RETRIES - 1) throw e;
       await sleep(1200);
     }
   }
 
-  if (!total || total <= first.buf.length) {
-    return first.buf;
+  const cr = first.headers.get("content-range");
+
+  // Resolve the total size (or detect "unknown total").
+  if (cr) {
+    const crTotal = cr.split("/")[1];
+    if (crTotal === "*") {
+      // Range-capable but total unknown (`bytes 0-1048575/*`). We MUST NOT
+      // return the single probe chunk as the whole file — that would cache a
+      // silently-truncated ~48 MB model that then passes the integrity check.
+      // Fall back to a single full-file GET (no Range) instead.
+      return (
+        await fetchToBuffer(url, {}, (d, t) =>
+          onProgress?.({ file: label, downloaded: d, total: t, percent: t ? Math.floor((d / t) * 100) : 0 }),
+        )
+      ).buf;
+    }
+    const total = Number(crTotal);
+    if (!Number.isFinite(total) || total <= 0) {
+      throw new Error(
+        `[vision-assistant] Bad Content-Range total "${crTotal}" for ${label} (${url})`,
+      );
+    }
+    if (total <= first.buf.length) {
+      // Server returned the entire file in the probe (small file / 200).
+      return first.buf;
+    }
+    return downloadChunks(url, label, first.buf, total, onProgress, chunkSize);
   }
 
+  // No Content-Range: either the server does not support Range (200 + whole
+  // file) or it omitted a usable total. If a positive Content-Length is
+  // present and larger than what we already have, fetch the whole file once.
+  const cl = Number(first.headers.get("content-length"));
+  if (Number.isFinite(cl) && cl > 0 && cl > first.buf.length) {
+    return (
+      await fetchToBuffer(url, {}, (d, t) =>
+        onProgress?.({ file: label, downloaded: d, total: t, percent: t ? Math.floor((d / t) * 100) : 0 }),
+      )
+    ).buf;
+  }
+
+  // No usable size information at all — return what we got only if it is
+  // plausibly the whole file (first.buf covers the declared/implied total).
+  return first.buf;
+}
+
+/** Fetch the remaining chunks for a known total size. */
+async function downloadChunks(
+  url: string,
+  label: string,
+  firstBuf: Uint8Array,
+  total: number,
+  onProgress?: (p: DownloadProgress) => void,
+  chunkSize: number = DOWNLOAD_CHUNK_SIZE,
+): Promise<Uint8Array> {
   const buf = new Uint8Array(total);
-  buf.set(first.buf, 0);
-  let off = first.buf.length;
+  buf.set(firstBuf, 0);
+  let off = firstBuf.length;
   let lastPct = -1;
 
   while (off < total) {
     const end = Math.min(off + chunkSize, total) - 1;
     let ok = false;
+    let part: Uint8Array | null = null;
+    let status = 0;
     for (let tr = 0; tr < DOWNLOAD_MAX_RETRIES && !ok; tr++) {
       try {
-        const { buf: part } = await fetchAbortable(url, {
+        const res = await fetchToBuffer(url, {
           headers: { Range: `bytes=${off}-${end}` },
         });
-        buf.set(part, off);
-        off += part.length;
+        part = res.buf;
+        status = res.status;
         ok = true;
       } catch (e) {
         if (tr === DOWNLOAD_MAX_RETRIES - 1) throw e;
         await sleep(1000);
       }
     }
+    if (part === null) {
+      throw new Error(`[vision-assistant] Internal error fetching ${label} (${url})`);
+    }
+    if (status === 200) {
+      // Server ignored the Range header and returned the whole file.
+      return part;
+    }
+    if (part.length !== end - off + 1) {
+      throw new Error(
+        `[vision-assistant] Chunk size mismatch for ${label} (${url}): ` +
+          `requested bytes ${off}-${end} but received ${part.length} bytes. ` +
+          `The server is not honouring Range requests as expected.`,
+      );
+    }
+    buf.set(part, off);
+    off += part.length;
     const pct = Math.floor((off / total) * 100);
     if (pct >= lastPct + 10 && onProgress) {
       lastPct = pct;
       onProgress({ file: label, downloaded: off, total, percent: pct });
     }
+  }
+
+  // Final sanity check: the assembled buffer must exactly equal the declared
+  // total, otherwise a misbehaving server truncated us mid-stream.
+  if (buf.byteLength !== total) {
+    throw new Error(
+      `[vision-assistant] Download of ${label} (${url}) assembled ` +
+        `${buf.byteLength} bytes but expected ${total}`,
+    );
   }
 
   return buf;
@@ -146,11 +242,27 @@ const ALL_FILES: Array<{ url: string; name: string }> = [
   { url: EMBED_META_URL, name: "embed meta" },
 ];
 
+/** Header we stamp on every cached Response with the computed SHA-256. */
+const DIGEST_HEADER = "x-model-sha256";
+
 export class ModelLoader {
   private cache: Cache | null = null;
 
   async init(): Promise<void> {
     this.cache = await caches.open(CACHE_NAME);
+    const unpinned = ALL_FILES.filter(({ url }) => !MODEL_FILE_HASHES[url]).map(
+      ({ name }) => name,
+    );
+    if (unpinned.length > 0) {
+      // Loud, not silent: shipping with unpinned weights means the
+      // supply-chain guard only protects the first download, not the cache.
+      console.error(
+        `[vision-assistant] SECURITY: ${unpinned.length}/7 model file hashes are ` +
+          `UNPINNED in MODEL_FILE_HASHES (${unpinned.join(", ")}). Weights are ` +
+          `downloaded without a pinned integrity check — pin every SHA-256 before ` +
+          `shipping to guard against tampered/poisoned weights.`,
+      );
+    }
   }
 
   async isCached(): Promise<boolean> {
@@ -169,8 +281,24 @@ export class ModelLoader {
       if (existing) continue; // Already cached
       const buf = await fetchBufProgress(url, name, onProgress);
       await this.verifyIntegrity(url, name, buf);
-      const response = new Response(buf as unknown as ArrayBuffer);
-      await this.cache!.put(url, response);
+      const digest = await sha256(buf);
+      const response = new Response(buf as unknown as ArrayBuffer, {
+        headers: { [DIGEST_HEADER]: digest },
+      });
+      try {
+        await this.cache!.put(url, response);
+      } catch (e) {
+        // Caching failed (quota / SW eviction). We deliberately throw instead
+        // of swallowing — the already-downloaded buffer is large and we must not
+        // silently loop re-downloading it on every call. Surface the cause so
+        // the UI can tell the user to free storage.
+        throw new Error(
+          `[vision-assistant] Failed to persist model file "${name}" (${url}): ` +
+            `${(e as Error).message}. Usually caused by insufficient storage ` +
+            `quota (the model is ~2.1 GB). Free space and retry; the downloaded ` +
+            `bytes were not saved.`,
+        );
+      }
     }
   }
 
@@ -179,9 +307,10 @@ export class ModelLoader {
    *
    * - If a hash is pinned for `url` and the computed digest does not match,
    *   throws — tampered/corrupted weights are never cached (supply-chain guard).
-   * - If no hash is pinned yet, emits a security warning but still caches the
-   *   file so the extension keeps working during rollout. Maintainers MUST pin
-   *   every hash in MODEL_FILE_HASHES before shipping.
+   * - If no hash is pinned yet, the file is still hashed and the digest is
+   *   stored (see `downloadAll`) so subsequent loads can detect cache
+   *   corruption. Maintainers MUST pin every hash in MODEL_FILE_HASHES before
+   *   shipping (also enforced loudly in `init`).
    */
   private async verifyIntegrity(
     url: string,
@@ -207,18 +336,73 @@ export class ModelLoader {
     }
   }
 
+  /**
+   * Re-verify a cached buffer against the digest stored when it was written
+   * (catches cache corruption / rollback / poisoning) and, when a hash is
+   * pinned, against that pinned value (catches tampering with the cache).
+   */
+  private async reverifyIntegrity(
+    url: string,
+    buf: Uint8Array,
+    response: Response,
+  ): Promise<void> {
+    const stored = response.headers.get(DIGEST_HEADER);
+    const expected = MODEL_FILE_HASHES[url];
+    if (!stored && !expected) return; // nothing to check against
+    const actual = await sha256(buf);
+    if (stored && actual !== stored) {
+      throw new Error(
+        `[vision-assistant] Cached model file ${url} failed re-verification ` +
+          `(stored digest ${stored}, recomputed ${actual}). The Cache Storage ` +
+          `entry appears corrupted, rolled back, or poisoned — clear the model ` +
+          `cache and re-download.`,
+      );
+    }
+    if (expected && actual !== expected.toLowerCase()) {
+      throw new Error(
+        `[vision-assistant] Cached model file ${url} does not match its pinned ` +
+          `SHA-256 (expected ${expected.toLowerCase()}, got ${actual}). ` +
+          `Refusing to load potentially tampered weights.`,
+      );
+    }
+  }
+
   async getBuffer(url: string): Promise<Uint8Array> {
     if (!this.cache) await this.init();
     const response = await this.cache!.match(url);
     if (!response) throw new Error(`Model file not cached: ${url}`);
-    return new Uint8Array(await response.arrayBuffer());
+    const buf = new Uint8Array(await response.arrayBuffer());
+    if (buf.byteLength === 0) {
+      throw new Error(`[vision-assistant] Cached model file ${url} is empty; refusing to load.`);
+    }
+    await this.reverifyIntegrity(url, buf, response);
+    return buf;
   }
 
   async getJSON(url: string): Promise<unknown> {
     if (!this.cache) await this.init();
     const response = await this.cache!.match(url);
     if (!response) throw new Error(`Model file not cached: ${url}`);
-    return response.json();
+    const text = await response.text();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new Error(
+        `[vision-assistant] Cached model file ${url} is not valid JSON ` +
+          `(likely an HTML error page from a bad CDN redirect). First 200 chars: ` +
+          `${text.slice(0, 200)}`,
+      );
+    }
+    if (parsed === null || typeof parsed !== "object") {
+      throw new Error(
+        `[vision-assistant] Cached model file ${url} did not parse to a JSON ` +
+          `object; refusing to use an unexpected payload as model metadata.`,
+      );
+    }
+    const buf = new TextEncoder().encode(text);
+    await this.reverifyIntegrity(url, buf, response);
+    return parsed;
   }
 
   async clearCache(): Promise<void> {

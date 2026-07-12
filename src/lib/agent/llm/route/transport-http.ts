@@ -283,13 +283,14 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: { framing: Fra
         for (const frame of frames) yield frame;
       }
     } catch (e) {
-      // On per-chunk timeout (stream stall), cancel the reader to release the
-      // underlying network resources, then emit a synthetic "[DONE]" sentinel
-      // frame so the protocol's `step()` reducer emits its normal `finish`
-      // event carrying whatever partial content + usage was accumulated before
-      // the stall. `withLLMRetry` only wraps the INITIAL fetch, so we cannot
-      // retry mid-stream — partial content + partial usage is strictly better
-      // than a hard failure for the agent loop.
+      // On per-chunk timeout (stream stall) cancel the reader to release the
+      // underlying network resources. A stalled mid-stream response is NOT a
+      // successful completion: we flush any buffered partial frames (so the
+      // consumer still sees them) and then RE-THROW below so the consumer (and
+      // the orchestrator's retry loop) treats the truncated stream as a failure
+      // rather than silently executing truncated content and under-reporting
+      // usage/cost. `withLLMRetry` only wraps the INITIAL fetch, so a
+      // mid-stream stall cannot be transparently retried here.
       try {
         await reader.cancel();
       } catch {

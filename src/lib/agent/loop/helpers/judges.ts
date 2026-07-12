@@ -22,7 +22,7 @@ import type { LoopDeps, LoopState } from "../types";
  * Run the deterministic evaluators (string / URL / HTML-content) against
  * the agent's final result + current page state.
  */
-export async function runDeterministicEvaluators(
+async function runDeterministicEvaluators(
   deps: LoopDeps,
   config: import("../../types").AgentConfig,
   agentText: string,

@@ -33,7 +33,12 @@ function parseHumanRequest(msg: unknown): { mode: string; message: string } | nu
   const mode = (request as { mode?: unknown }).mode;
   if (typeof mode !== "string") return null;
   const rawMessage = (request as { message?: unknown }).message;
-  const message = typeof rawMessage === "string" ? rawMessage : String(rawMessage ?? "");
+  // A non-string `message` (object / array / number) is not a usable dialog
+  // prompt. Default to an empty string rather than coercing it to
+  // "[object Object]" (which would mislead the operator). `mode` was already
+  // validated above, so the dialog still opens — it just shows no text instead
+  // of garbage. A fully-malformed payload was already rejected as `null`.
+  const message = typeof rawMessage === "string" ? rawMessage : "";
   return { mode, message };
 }
 

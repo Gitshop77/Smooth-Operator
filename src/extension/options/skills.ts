@@ -13,6 +13,7 @@
 
 import { $, escapeHtml } from "@/extension/shared";
 import { showSaved } from "./settings-sync";
+import { alertModal } from "./modal";
 
 const CUSTOM_SKILLS_KEY = "open_cowork_custom_skills";
 
@@ -30,6 +31,26 @@ const INSTRUCTIONS_MAX = 50_000;
 // Human-readable skill names (e.g. "GitHub") — keep them to a single line and
 // within a sane length rather than forcing the strict tool-name regex.
 const NAME_RE = /^[^\n\r\t]{1,64}$/;
+
+/**
+ * True if `value` is a bare hostname (optionally a `*.` wildcard prefix), with
+ * no scheme, path, port, or space. Mirrors the validation applied to
+ * `allowedDomains` / `blockedDomains` in `settings-sync.ts` so skill domains
+ * match the same contract the domain-skills matcher relies on.
+ */
+function isBareHostname(value: string): boolean {
+  if (!value || value.includes("/") || value.includes(" ") || value.includes(":")) return false;
+  const candidate = value.startsWith("*.") ? value.slice(2) : value;
+  if (!candidate) return false;
+  try {
+    const u = new URL("http://" + candidate);
+    // URL lower-cases the hostname; compare lowercased so legitimate UPPERCASE
+    // / IDN hostnames aren't silently rejected.
+    return u.hostname.toLowerCase() === candidate.toLowerCase();
+  } catch {
+    return false;
+  }
+}
 
 // ─── Mutation serialization ──────────────────────────────────────────────────
 let mutationQueue: Promise<unknown> = Promise.resolve();
@@ -124,15 +145,33 @@ $("addSkill")?.addEventListener("click", () => {
     const instructions = ($("skillInstructions") as HTMLTextAreaElement).value.trim();
     if (!domain || !name || !instructions) return;
     if (!NAME_RE.test(name)) {
-      alert("Skill name must be a single line of at most 64 characters.");
+      await alertModal({
+        title: "Invalid skill name",
+        message: "Skill name must be a single line of at most 64 characters.",
+      });
+      return;
+    }
+    if (!isBareHostname(domain)) {
+      await alertModal({
+        title: "Invalid skill domain",
+        message:
+          "Skill domain must be a bare hostname (e.g. example.com), optionally " +
+          "with a *. wildcard. No scheme (http://), path, or port is allowed.",
+      });
       return;
     }
     if (domain.length > DOMAIN_MAX) {
-      alert(`Skill domain must be at most ${DOMAIN_MAX} characters.`);
+      await alertModal({
+        title: "Domain too long",
+        message: `Skill domain must be at most ${DOMAIN_MAX} characters.`,
+      });
       return;
     }
     if (instructions.length > INSTRUCTIONS_MAX) {
-      alert(`Skill instructions must be at most ${INSTRUCTIONS_MAX} characters.`);
+      await alertModal({
+        title: "Instructions too long",
+        message: `Skill instructions must be at most ${INSTRUCTIONS_MAX} characters.`,
+      });
       return;
     }
     const skills = await readCustomSkills();
@@ -140,7 +179,18 @@ $("addSkill")?.addEventListener("click", () => {
     // second one, so delete-by-name (and delete-by-index) stays safe.
     const idx = skills.findIndex((s) => s.name === name);
     const frontmatter = instructions.split("\n")[0].slice(0, 100);
-    const entry: CustomSkill = { domains: [domain], name, frontmatter, instructions };
+    // When updating an existing skill, preserve its other domains and merge in
+    // the newly-entered one — re-adding by name must not silently discard a
+    // multi-domain entry (e.g. re-adding "github.com" used to wipe the other
+    // domains the skill was already configured for).
+    let domains: string[];
+    if (idx >= 0) {
+      const existing = skills[idx].domains;
+      domains = existing.includes(domain) ? existing : [...existing, domain];
+    } else {
+      domains = [domain];
+    }
+    const entry: CustomSkill = { domains, name, frontmatter, instructions };
     if (idx >= 0) skills[idx] = entry;
     else skills.push(entry);
     await chrome.storage.local.set({ [CUSTOM_SKILLS_KEY]: skills });

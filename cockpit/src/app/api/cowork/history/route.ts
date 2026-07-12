@@ -6,9 +6,11 @@ import {
   badRequest,
   withRouteError,
   parseLimit,
-  bodyJsonOptional,
   bodyJson,
   validateHttpUrl,
+  boundedString,
+  MAX_URL_LEN,
+  MAX_TITLE_LEN,
 } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
@@ -45,13 +47,16 @@ export async function GET(req: NextRequest): Promise<Response> {
 export async function POST(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
     const body = await bodyJson(req);
-    const url = typeof body.url === 'string' ? body.url.trim() : '';
-    if (!url) return badRequest('url required (non-empty string)');
-    // Stored URLs open client-side in the browser, never fetched server-side,
-    // so we only enforce the scheme (mirrors the storage-route contract).
+    const rawUrl = typeof body.url === 'string' ? body.url.trim() : '';
+    if (!rawUrl) return badRequest('url required (non-empty string)');
+    // Bound the URL length (aligns with the sibling tabs/bookmarks routes) and
+    // rejects a non-string URL with 400 instead of silently persisting
+    // `"[object Object]"`. Stored URLs open client-side in the browser, never
+    // fetched server-side, so we only enforce the scheme (storage-route contract).
+    const url = boundedString(rawUrl, MAX_URL_LEN, '');
     const urlErr = validateHttpUrl(url);
     if (urlErr) return urlErr;
-    const title = typeof body.title === 'string' ? body.title.slice(0, 500) : '';
+    const title = boundedString(body.title, MAX_TITLE_LEN, '');
     const entry = await db.historyEntry.upsert({
       where: { url },
       create: { url, title },
@@ -62,7 +67,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       },
     });
     return json({ ok: true, entry }, 201);
-  });
+  }, req.headers.get('x-request-id') ?? undefined);
 }
 
 // DELETE /api/cowork/history?id=<historyEntryId>  — erase a single history
@@ -83,13 +88,25 @@ export async function DELETE(req: NextRequest): Promise<Response> {
       // UI "are you sure?" prompt is not sufficient — an authenticated caller
       // (or a stolen token) could otherwise wipe everything with a bare
       // `?all=1`. Require `confirm: true` in the JSON body.
-      const b = await bodyJsonOptional(req);
+      const b = await bodyJson(req);
       if (b.confirm !== true) {
         return badRequest('confirmation required');
       }
-      const { count } = await db.historyEntry.deleteMany({});
+      // Optional scoping: `olderThan` (ISO-8601 timestamp) limits the wipe to
+      // entries older than that time, so a single fat-fingered `?all=1` can't
+      // unconditionally destroy the entire history. `confirm` is still required.
+      const where: { lastVisitedAt?: { lt: Date } } = {};
+      const scope = typeof b.olderThan === 'string' ? b.olderThan : undefined;
+      if (scope) {
+        const ts = Date.parse(scope);
+        if (Number.isNaN(ts)) {
+          return badRequest('olderThan must be an ISO-8601 timestamp');
+        }
+        where.lastVisitedAt = { lt: new Date(ts) };
+      }
+      const { count } = await db.historyEntry.deleteMany({ where });
       // Log the bulk delete so the action is observable server-side.
-      console.info('[cowork] bulk delete history', { deleted: count, route: '/api/cowork/history' });
+      console.info('[cowork] bulk delete history', { deleted: count, scope: scope ?? 'all', route: '/api/cowork/history' });
       return json({ ok: true, deleted: count });
     }
     const id = req.nextUrl.searchParams.get('id');
@@ -105,5 +122,5 @@ export async function DELETE(req: NextRequest): Promise<Response> {
       throw e;
     }
     return json({ ok: true });
-  });
+  }, req.headers.get('x-request-id') ?? undefined);
 }

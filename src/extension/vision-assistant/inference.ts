@@ -161,6 +161,10 @@ export class VisionAssistant {
 
       // 3. Load tokenizer + embedding table
       this.tokenizer = await getTokenizer();
+      // Fail fast at init (rather than mid-`detect()`) if the tokenizer does not
+      // map the literal "<IMG_CONTEXT>" to exactly one id equal to
+      // IMG_CONTEXT_TOKEN. See `assertImageContextToken` for why this matters.
+      await this.assertImageContextToken();
       this.embMeta = (await this.loader.getJSON(EMBED_META_URL)) as EmbeddingMeta;
       this.embPacked = await this.loader.getBuffer(EMBED_PACKED_URL);
       const scalesBytes = await this.loader.getBuffer(EMBED_SCALES_URL);
@@ -269,6 +273,31 @@ export class VisionAssistant {
     }
   }
 
+  /**
+   * Verify at init time — rather than mid-`detect()` — that the literal
+   * `<IMG_CONTEXT>` maps to exactly one tokenizer id equal to
+   * `IMG_CONTEXT_TOKEN`. The detection pipeline injects
+   * `"<IMG_CONTEXT>".repeat(N)` and then counts occurrences of that token; if
+   * the tokenizer BPE-splits the literal, `detect()` would count 0 occurrences
+   * and throw — surfacing that here gives a clear, early error instead of a
+   * feature that appears to work but detects nothing.
+   */
+  private async assertImageContextToken(): Promise<void> {
+    const t = this.tokenizer as (
+      str: string,
+      opts: { add_special_tokens: boolean },
+    ) => Promise<{ input_ids: { data: BigInt64Array | number[] } }>;
+    const enc = await t("<IMG_CONTEXT>", { add_special_tokens: false });
+    const ids = Array.from(enc.input_ids.data, (x: unknown) => Number(x));
+    if (ids.length !== 1 || ids[0] !== IMG_CONTEXT_TOKEN) {
+      throw new Error(
+        `Vision init: literal "<IMG_CONTEXT>" tokenized to ${JSON.stringify(ids)} ` +
+          `(expected a single id === IMG_CONTEXT_TOKEN=${IMG_CONTEXT_TOKEN}). ` +
+          `Local Vision cannot function with this tokenizer/model.`,
+      );
+    }
+  }
+
   /** Run detection on a screenshot. Returns pixel-coordinate detections. */
   async detect(screenshotDataUrl: string): Promise<PixelDetection[]> {
     if (!this.isReady || !this.visionSession || !this.languageSession || !this.embMeta || !this.embPacked || !this.embScales) {
@@ -292,7 +321,20 @@ export class VisionAssistant {
       pixel_values: pvTensor,
       image_grid_hws: ghTensor,
     });
-    const visual = vOut[this.visionSession.outputNames[0]]; // [N, 2048] float32
+    const visual = vOut[this.visionSession.outputNames[0]];
+    // The vision encoder's feature width MUST equal the LM embedding dim `H`
+    // from meta.json. If they differ, every <IMG_CONTEXT> slot reads the wrong
+    // H floats at the wrong byte offset (`visIdx*H` instead of `visIdx*width`)
+    // and the model emits confidently-wrong boxes with no error. Fail loudly
+    // before any splicing occurs. (Replaces the misleading hard-coded `[N, 2048]`
+    // comment, which contradicted the actual stride used below.)
+    if (!visual || visual.dims.length !== 2 || Number(visual.dims[1]) !== H) {
+      throw new Error(
+        `Vision encoder output shape mismatch: feature width ` +
+          `${visual ? visual.dims[1] : "n/a"} !== embedding hidden ${H} ` +
+          `(dims=${JSON.stringify(visual?.dims)})`,
+      );
+    }
 
     // 3. Build prompt + tokenize
     const N = Math.floor((gridHeight * gridWidth) / (MERGE_FACTOR * MERGE_FACTOR));
@@ -402,6 +444,16 @@ export class VisionAssistant {
     // both the rescale (original → rescaled) and the padding (rescaled →
     // target) when mapping back to original device pixels.
     // Formula: X_original = (X_model / 1000) * targetWidth * (originalWidth / rescaledWidth)
+    // Guard against a degenerate screenshot (e.g. 1x1) that drives rescaledWidth/
+    // rescaledHeight to 0 after `Math.floor(w * scale)`; dividing by 0 would yield
+    // Infinity/NaN coordinates flowing into CDP Input.dispatchMouseEvent.
+    if (!(rescaledWidth > 0) || !(rescaledHeight > 0)) {
+      throw new Error(
+        `Vision detect(): non-positive rescaled screenshot dimension ` +
+          `(rescaledWidth=${rescaledWidth}, rescaledHeight=${rescaledHeight}); ` +
+          `cannot map to pixel coords`,
+      );
+    }
     const effectiveWidth = targetWidth * (originalWidth / rescaledWidth);
     const effectiveHeight = targetHeight * (originalHeight / rescaledHeight);
     // Clamp to the ORIGINAL screenshot bounds (originalWidth ×

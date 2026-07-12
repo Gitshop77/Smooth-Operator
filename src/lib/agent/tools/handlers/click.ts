@@ -52,6 +52,25 @@ export async function handleClick(
   // selector map. TypeScript narrows `action.index` to `number` here.
   const numericIndex = action.index;
   const el = resolveElement(state, numericIndex);
+
+  // Reject stale/detached nodes before doing anything with them. A node may
+  // become detached between state extraction and this click (SPA re-render,
+  // navigation, or a node replacement). Strategy 1 (CDP) calls
+  // `getBoundingClientRect()`, which returns all-zero rects for a detached
+  // node, so CDP would dispatch a click at the viewport origin (0,0) — often
+  // a fixed header or nothing — while still reporting `ok: true`. That is a
+  // silent wrong-target click reported as success, which is worse than
+  // failing. Returning a clear "detached" error lets the orchestrator
+  // re-extract state rather than act on a stale node. (Also guards the
+  // highlight/scroll/focus side effects below against a dead reference.)
+  if (!el || !el.isConnected) {
+    return {
+      action,
+      success: false,
+      message: `element [${numericIndex}] is detached (page may have changed — extract state again)`,
+    };
+  }
+
   highlightElement(el, `click [${numericIndex}]`);
   // Move phantom cursor to the element for visual feedback.
   await moveCursorToElement(el);

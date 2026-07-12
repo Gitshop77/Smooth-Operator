@@ -1,9 +1,12 @@
 /**
  * Re-export shim — the canonical shadow-DOM piercer implementation now lives
  * in `./annotation/shadow-piercer`. This file preserves the legacy
- * `@/lib/agent/dom/shadow-piercer` import path used by
- * `extension/background.ts` and the dom-extraction-enhancements /
- * dom-shim-consistency tests.
+ * `@/lib/agent/dom/shadow-piercer` import path. Production code does NOT use
+ * this shim — `extraction/page-state.ts` imports `installShadowPiercer` /
+ * `getShadowRoot` STATICALLY and directly from `../annotation/shadow-piercer`
+ * (the canonical module). The only consumer of the legacy path is the
+ * `dom-shim-consistency` test, which asserts the shim still mirrors the
+ * canonical module.
  *
  * All historically-exported symbols are re-exported here:
  *   - `installShadowPiercer`, `getShadowRoot`, `isShadowHost`,

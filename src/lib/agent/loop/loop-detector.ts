@@ -74,7 +74,7 @@ async function sha256Hex(text: string): Promise<string> {
  * collisions on realistic DOM sizes are vanishingly unlikely
  * (16 hex chars = 64 bits ≈ 1.8e19 buckets).
  */
-export class PageFingerprint {
+class PageFingerprint {
   constructor(
     public readonly url: string,
     public readonly elementCount: number,
@@ -195,18 +195,26 @@ function normalizeAction(action: AgentAction): string {
   return parts.join("|");
 }
 
-/** FNV-1a 32-bit offset basis + prime. */
-const FNV_OFFSET_BASIS = 0x811c9dc5;
-const FNV_PRIME = 0x01000193;
-
-/** Fast FNV-1a 32-bit hash (returns an 8-char hex string). */
+/**
+ * Fast FNV-1a 64-bit hash, returned as a 16-char zero-padded hex string.
+ *
+ * We use the 64-bit variant (instead of the classic 32-bit one) to push the
+ * birthday collision bound far past any realistic rolling-window size: the
+ * loop detector buckets equivalent actions by this hash, and a 32-bit hash
+ * (~65k distinct signatures) could let two genuinely different normalized
+ * actions collide, emitting a spurious loop warning or nudging an early-stop.
+ * 64 bits makes that vanishingly unlikely. The value is padded to a fixed
+ * width so every signature is exactly 16 hex chars.
+ */
 function fnv1a(s: string): string {
-  let h = FNV_OFFSET_BASIS;
+  const mask = BigInt("0xffffffffffffffff");
+  let h = BigInt("0xcbf29ce484222325"); // FNV-1a 64-bit offset basis
+  const prime = BigInt("0x100000001b3"); // FNV-1a 64-bit prime
   for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, FNV_PRIME);
+    h ^= BigInt(s.charCodeAt(i));
+    h = (h * prime) & mask;
   }
-  return (h >>> 0).toString(16);
+  return h.toString(16).padStart(16, "0");
 }
 
 /**

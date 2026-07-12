@@ -18,6 +18,18 @@ export async function handleInput(
 ): Promise<ActionResult> {
   const { state } = ctx;
   const el = resolveElement(state, action.index);
+  // Fail fast: validate the element is editable BEFORE applying any side
+  // effects (highlight / scroll / focus). Otherwise a non-text element would
+  // have its focus stolen and be scrolled into view and highlighted, only for
+  // the handler to throw afterwards — leaving the executor to recover from an
+  // unexpected page state.
+  if (
+    !(el instanceof HTMLInputElement) &&
+    !(el instanceof HTMLTextAreaElement) &&
+    !el.isContentEditable
+  ) {
+    throw new Error(`element [${action.index}] is not a text input`);
+  }
   highlightElement(el, `input [${action.index}]`);
   safeScrollIntoView(el);
   await sleep(TIMINGS.inputScrollIntoView);
@@ -56,6 +68,10 @@ export async function handleInput(
     // this handler reports success.
     el.dispatchEvent(new Event("change", { bubbles: true }));
   } else {
+    // Defensive: unreachable after the fail-fast check above (which guarantees
+    // the element is a text input / textarea / contentEditable), but keeps this
+    // function total (always returns an ActionResult) and satisfies the
+    // type-checker, since `el.isContentEditable` is not a TS type guard.
     throw new Error(`element [${action.index}] is not a text input`);
   }
   await sleep(TIMINGS.inputAfterType);

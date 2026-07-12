@@ -20,7 +20,7 @@ import { buildNavigatorUserMessage, buildPlannerUserMessage } from "../lib/agent
 import { AgentOutputSchema, PlannerOutputSchema } from "../lib/agent/tools/schema";
 import { getFormatInstructions } from "../lib/agent/tools/registry";
 import type { AgentStepRequest, PlannerStepRequest } from "../lib/agent/types";
-import { buildProvider, readProviderConfig } from "./provider-config";
+import { buildProvider, readProviderConfig, type ProviderConfig } from "./provider-config";
 // Import the canonical constants from validations.ts instead of re-declaring
 // them as magic numbers — now they share the same source of truth.
 import { MAX_ACTIONS, MAX_ELEMENTS_CHARS } from "@/lib/validations";
@@ -28,6 +28,8 @@ import { MAX_ACTIONS, MAX_ELEMENTS_CHARS } from "@/lib/validations";
 /** Cached provider instance + the config it was built from (rebuilt on config change). */
 let cachedProvider: LLMProvider | null = null;
 let cachedConfigKey: string | null = null;
+/** The full config object backing `cachedProvider` (used for the hot-path short-circuit). */
+let cachedProviderConfig: ProviderConfig | null = null;
 /** In-flight promise + its key — prevents double-building when two calls race. */
 let pendingProvider: Promise<LLMProvider> | null = null;
 let pendingProviderKey: string | null = null;
@@ -37,13 +39,19 @@ let cachedCustomNavigatorPrompt: string | undefined | null = null;
 let cachedCustomPlannerPrompt: string | undefined | null = null;
 let cachedVisionMode: string | null = null;
 
+/** Provider-config storage keys whose change must invalidate the cached provider. */
+const PROVIDER_CONFIG_KEYS = ["provider", "model", "baseUrl", "resourceName", "apiKey"];
+
 if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === "local") {
-      if (changes.customNavigatorPrompt) cachedCustomNavigatorPrompt = null;
-      if (changes.customPlannerPrompt) cachedCustomPlannerPrompt = null;
-      if (changes.visionMode || changes.enableLocalVision) cachedVisionMode = null;
+  chrome.storage.onChanged.addListener((changes, _area) => {
+    if (PROVIDER_CONFIG_KEYS.some((k) => k in changes)) {
+      cachedProvider = null;
+      cachedConfigKey = null;
+      cachedProviderConfig = null;
     }
+    if (changes.customNavigatorPrompt) cachedCustomNavigatorPrompt = null;
+    if (changes.customPlannerPrompt) cachedCustomPlannerPrompt = null;
+    if (changes.visionMode || changes.enableLocalVision) cachedVisionMode = null;
   });
 }
 
@@ -83,6 +91,11 @@ async function getVisionMode(): Promise<"disabled" | "always" | "adaptive"> {
  * @throws if no provider is configured or the API key is missing.
  */
 async function getProvider(): Promise<LLMProvider> {
+  // Hot path: reuse the cached provider WITHOUT a storage round-trip. The cache
+  // is invalidated by the `chrome.storage.onChanged` listener above whenever a
+  // provider-config key changes, so this short-circuit is safe and avoids an
+  // async `chrome.storage.local.get` on every navigator/planner step.
+  if (cachedProvider && cachedProviderConfig) return cachedProvider;
   const config = await readProviderConfig();
   if (!config) {
     throw new Error(
@@ -94,6 +107,7 @@ async function getProvider(): Promise<LLMProvider> {
   // (which changes the constructed endpoint) forces a provider rebuild rather
   // than reusing a stale cached instance bound to the old resource.
   const key = `${config.provider}|${config.apiKey}|${config.model}|${config.baseUrl ?? ""}|${config.resourceName ?? ""}`;
+  cachedProviderConfig = config;
   if (cachedProvider && key === cachedConfigKey) return cachedProvider;
   // If a build is already in-flight for THIS key, await it instead of
   // starting a second concurrent buildProvider() call.
@@ -181,8 +195,12 @@ export async function navigatorCallDirect(req: AgentStepRequest): Promise<{
   const enableScreenshots = provider.supportsVision &&
     ((await chrome.storage.local.get("enableScreenshots")).enableScreenshots ?? true);
   const screenshot = enableScreenshots ? req.browserState.screenshot : undefined;
+  // The screenshot is raw, page-rendered pixels — it is NOT subject to the text
+  // sanitizer (which only inspects DOM/AX text) and must be treated as untrusted
+  // page data, exactly like <untrusted_page_data>. The navigator prompt already
+  // tells the model the screenshot is untrusted evidence, never an instruction.
   const fullUserContent = screenshot
-    ? `${userMessage}\n\n<screenshot>${screenshot}</screenshot>`
+    ? `${userMessage}\n\n<untrusted_page_data><screenshot>${screenshot}</screenshot></untrusted_page_data>`
     : userMessage;
 
   // Wire `getFormatInstructions` for providers that don't support structured

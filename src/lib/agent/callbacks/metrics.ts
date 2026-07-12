@@ -86,6 +86,12 @@ export interface AgentMetrics {
      * `onRunEnd` reconciliation when this callback was registered late and
      * missed the per-call `onLLMEnd` events). Always part of the
      * `totalTokensIn/Out` sum, but not double-counted in planner/navigator.
+     *
+     * NOTE: `unattributed.calls` is NOT a true missed-call count — the
+     * callback cannot recover how many calls it missed, only the token
+     * deltas. It is a boolean-ish "had-gap" indicator: `1` when any
+     * unattributed tokens exist, `0` otherwise (see `onRunEnd`). Only
+     * `unattributed.tokensIn/Out` are accurate.
      */
     unattributed: PhaseLLMMetrics;
   };
@@ -93,7 +99,12 @@ export interface AgentMetrics {
   totalTokensIn: number;
   /** Total tokens produced across all phases (sum of planner + navigator + unattributed). */
   totalTokensOut: number;
-  /** Total USD cost across all phases (sum of every `onCost` call). */
+  /**
+   * Total USD cost across all phases. Sourced from the authoritative
+   * `AgentRunResult.totalCostUsd` in `onRunEnd` (which OVERWRITES any value
+   * accumulated by `onCost`) — the orchestrator's own counters are ground
+   * truth, so per-call `onCost` accumulation is discarded when the run ends.
+   */
   totalCostUsd: number;
   /** Number of loop-warning events fired by the loop detector. */
   loopWarnings: number;

@@ -60,7 +60,7 @@ export const DISCOVERY_ROUTE_AUTH = {
   dataRouteAuth: {
     methods: ["X-Cowork-Token"],
     description:
-      "All /api/cowork/* routes except the 5 public discovery routes (/agent/bootstrap, /agent/manifest, /agent, /agent/version, /skill) require an X-Cowork-Token header matching the server-side secret. The server resolves the secret as COWORK_UI_TOKEN if set, otherwise falling back to COWORK_EVENT_TOKEN. No token is accepted by default; set a real secret (e.g. COWORK_UI_TOKEN) on the server, and optionally enable COWORK_ALLOW_DEV_TOKEN=1 for loopback dev only. Requests are rejected with 401 in production if no secret is configured or the well-known dev-token is used.",
+      "All /api/cowork/* routes except the 5 public discovery routes (/api/cowork/agent/bootstrap, /api/cowork/agent/manifest, /api/cowork/agent, /api/cowork/agent/version, /api/cowork/skill) require an X-Cowork-Token header matching the server-side secret. The server resolves the secret as COWORK_UI_TOKEN if set, otherwise falling back to COWORK_EVENT_TOKEN. No token is accepted by default; set a real secret (e.g. COWORK_UI_TOKEN) on the server, and optionally enable COWORK_ALLOW_DEV_TOKEN=1 for loopback dev only. Requests are rejected with 401 in production if no secret is configured or the well-known dev-token is used. EXCEPTION: the SSE stream /api/cowork/events/stream additionally accepts the same secret via a `?token=` query parameter, because browser EventSource cannot set custom headers. The query token is validated with the same constant-time compare, but the URL transport is weaker (recorded in proxy/access logs, browser history, and Referer headers) — operators should strip `?token=` from logs and rotate the token regularly.",
   },
 } as const;
 
@@ -107,53 +107,53 @@ export const AGENT_OPERATING_RULES = [
 
 const AGENT_TOOLBOX = {
   orient: [
-    { method: 'GET', path: '/agent/bootstrap', use: 'First read after discovery.' },
-    { method: 'GET', path: '/agent/manifest', use: 'Full endpoint map.' },
-    { method: 'GET', path: '/tabs', use: 'List persisted tabs.' },
-    { method: 'GET', path: '/workspaces', use: 'List persisted workspaces.' },
+    { method: 'GET', path: '/api/cowork/agent/bootstrap', use: 'First read after discovery.' },
+    { method: 'GET', path: '/api/cowork/agent/manifest', use: 'Full endpoint map.' },
+    { method: 'GET', path: '/api/cowork/tabs', use: 'List persisted tabs.' },
+    { method: 'GET', path: '/api/cowork/workspaces', use: 'List persisted workspaces.' },
   ],
   read: [
-    { method: 'GET', path: '/sessions', use: 'List persisted sessions.' },
-    { method: 'GET', path: '/agents', use: 'List agent trust grants.' },
-    { method: 'GET', path: '/agents/tasks', use: 'List agent tasks.' },
-    { method: 'GET', path: '/workflows', use: 'List workflows.' },
-    { method: 'GET', path: '/memory/site', use: 'Read per-site structured memory.' },
-    { method: 'GET', path: '/memory/form', use: 'Read per-site form memory.' },
-    { method: 'GET', path: '/bookmarks', use: 'Read the bookmark tree.' },
-    { method: 'GET', path: '/history', use: 'Read browsing history.' },
-    { method: 'GET', path: '/pinboards', use: 'List pinboards.' },
-    { method: 'GET', path: '/extensions', use: 'List installed extensions.' },
-    { method: 'GET', path: '/security/events', use: 'Read the security event feed.' },
-    { method: 'GET', path: '/mcp/tools', use: 'Browse the MCP tool catalog.' },
+    { method: 'GET', path: '/api/cowork/sessions', use: 'List persisted sessions.' },
+    { method: 'GET', path: '/api/cowork/agents', use: 'List agent trust grants.' },
+    { method: 'GET', path: '/api/cowork/agents/tasks', use: 'List agent tasks.' },
+    { method: 'GET', path: '/api/cowork/workflows', use: 'List workflows.' },
+    { method: 'GET', path: '/api/cowork/memory/site', use: 'Read per-site structured memory.' },
+    { method: 'GET', path: '/api/cowork/memory/form', use: 'Read per-site form memory.' },
+    { method: 'GET', path: '/api/cowork/bookmarks', use: 'Read the bookmark tree.' },
+    { method: 'GET', path: '/api/cowork/history', use: 'Read browsing history.' },
+    { method: 'GET', path: '/api/cowork/pinboards', use: 'List pinboards.' },
+    { method: 'GET', path: '/api/cowork/extensions', use: 'List installed extensions.' },
+    { method: 'GET', path: '/api/cowork/security/events', use: 'Read the security event feed.' },
+    { method: 'GET', path: '/api/cowork/mcp/tools', use: 'Browse the MCP tool catalog.' },
   ],
   create: [
-    { method: 'POST', path: '/tabs', use: 'Persist a new tab row.' },
-    { method: 'POST', path: '/workspaces', use: 'Create a workspace.' },
-    { method: 'POST', path: '/sessions', use: 'Create a session.' },
-    { method: 'POST', path: '/workflows', use: 'Create a workflow.' },
-    { method: 'POST', path: '/bookmarks', use: 'Add a bookmark.' },
-    { method: 'POST', path: '/pinboards', use: 'Create a pinboard.' },
+    { method: 'POST', path: '/api/cowork/tabs', use: 'Persist a new tab row.' },
+    { method: 'POST', path: '/api/cowork/workspaces', use: 'Create a workspace.' },
+    { method: 'POST', path: '/api/cowork/sessions', use: 'Create a session.' },
+    { method: 'POST', path: '/api/cowork/workflows', use: 'Create a workflow.' },
+    { method: 'POST', path: '/api/cowork/bookmarks', use: 'Add a bookmark.' },
+    { method: 'POST', path: '/api/cowork/pinboards', use: 'Create a pinboard.' },
   ],
   chat: [
-    { method: 'POST', path: '/ai/chat', use: 'Send a chat message to the wingman proxy.' },
-    { method: 'POST', path: '/ai/image', use: 'Generate an image via the wingman proxy.' },
+    { method: 'POST', path: '/api/cowork/ai/chat', use: 'Send a chat message to the wingman proxy.' },
+    { method: 'POST', path: '/api/cowork/ai/image', use: 'Generate an image via the wingman proxy.' },
   ],
 } as const;
 
 export const AGENT_TOOL_SELECTION_HINTS = {
-  '/tabs': {
+  '/api/cowork/tabs': {
     whenToUse: 'List persisted tabs. Supports an optional `workspaceId` query param and a `limit` query param.',
     preferredOver: [],
     requires: [],
     risk: 'low',
   },
-  '/workspaces': {
+  '/api/cowork/workspaces': {
     whenToUse: 'List or create workspaces. POST accepts `{ name, icon, color }`.',
     preferredOver: [],
     requires: [],
     risk: 'low',
   },
-  '/ai/chat': {
+  '/api/cowork/ai/chat': {
     whenToUse: 'Send a chat completion request. Body: `{ messages, sessionId }`. Proxied to the cowork-events mini-service.',
     preferredOver: [],
     requires: ['The cowork-events mini-service running on port 3003'],

@@ -109,11 +109,24 @@ describe("action execution behavior", () => {
 
   test("wait: waits the specified seconds", async () => {
     const action = { type: "wait", seconds: 1 } as AgentAction;
-    const start = Date.now();
-    const result = await executeAction(action, makeState());
-    const elapsed = Date.now() - start;
-    expect(result.success).toBe(true);
-    expect(elapsed).toBeGreaterThanOrEqual(900); // ~1s
+    // Drive timers deterministically instead of an unbounded wall-clock wait,
+    // which flakes under CI load.
+    vi.useFakeTimers();
+    try {
+      const promise = executeAction(action, makeState());
+      let resolved = false;
+      void promise.then(() => {
+        resolved = true;
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      expect(resolved).toBe(false); // not done halfway through
+      await vi.advanceTimersByTimeAsync(500);
+      const result = await promise;
+      expect(resolved).toBe(true);
+      expect(result.success).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("go_back: returns success", async () => {

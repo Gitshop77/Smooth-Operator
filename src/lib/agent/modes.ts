@@ -77,21 +77,15 @@ export const MODE_CONFIGS = {
     canUploadFiles: false,
     canDownloadFiles: false,
     maxSteps: 100,
-    // Security: `evaluate` MUST require explicit user confirmation in standard
-    // mode (security-critical) AND remain allowlist-gated. The allowlist check
-    // in the executor (`checkActionAllowed` → `canExecuteJs:false`) blocks first
-    // and fails closed, so an unallowlisted `evaluate` is still rejected before
-    // it could ever reach execution — but `requiresConfirmation` must ALSO
-    // return `true` for `evaluate` here so the confirmation gate is armed and
-    // the security model is enforced regardless of how the executor is reached.
-    // The two checks are complementary, not contradictory: `canExecuteJs:false`
-    // blocks by default; the domain allowlist opens a narrow exception that the
-    // human must then explicitly approve. `upload_file`/`save_as_pdf` are listed
-    // for the same reason (they are mode-blocked by their `can*` flags too).
-    // Note: the executor checks `checkActionAllowed` BEFORE `requiresConfirmation`,
-    // so absent the domain-allowlist these entries are effectively backups to the
-    // fail-closed `can*` check — but `requiresConfirmation` is also the single
-    // source of truth consumed by `shouldAskForConfirmation`, so it must be correct.
+    // SECURITY: these actions require explicit user confirmation in standard
+    // mode. `requiresConfirmation` is a fail-safe gate independent of
+    // `checkActionAllowed` — `evaluate`, `upload_file`, and `save_as_pdf` remain
+    // HARD-BLOCKED here via `canExecuteJs:false` / `canUploadFiles:false` /
+    // `canDownloadFiles:false` (fail-closed before any prompt), but the
+    // confirmation flag is still asserted by callers and must report `true` so
+    // the gate cannot be bypassed if/when the capability flags change. The
+    // domain-allowlist gating on `evaluate` is enforced separately in
+    // `evaluate.ts` / `agent-bridge.ts` and is NOT affected by this entry.
     confirmRequired: ["evaluate", "upload_file", "save_as_pdf"],
   },
   full_agentic: {

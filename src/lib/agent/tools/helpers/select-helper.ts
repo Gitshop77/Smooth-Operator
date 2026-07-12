@@ -31,6 +31,15 @@ export class Select {
   private readonly multiple: boolean;
 
   constructor(el: HTMLSelectElement) {
+    // Defensive guard: the typed signature already guarantees `el` is a
+    // `<select>` at compile time, but a caller could pass a non-`<select>`
+    // element through a cast. Fail fast with a clear error instead of letting
+    // confusing `querySelectorAll`/property behaviour surface later.
+    if (el.tagName !== "SELECT") {
+      throw new Error(
+        `Select expected a <select> element, got <${(el.tagName || "unknown").toLowerCase()}>`,
+      );
+    }
     this.element = el;
     // The `multiple` attribute's presence (any value, including "false"
     // string, since HTML treats its presence as truthy) determines
@@ -185,12 +194,18 @@ export class Select {
    * @throws {ElementNotSelectableError} if any matched option is `disabled`.
    */
   private selectMultiple(options: HTMLOptionElement[]): void {
+    // Validate ALL options BEFORE mutating any (atomicity): a disabled option
+    // encountered after some options were already marked selected would
+    // otherwise leave the `<select>` in a partially-applied, inconsistent
+    // state. Check first, then select in a second pass.
     for (const o of options) {
       if (o.disabled) {
         throw new ElementNotSelectableError(
           `cannot select a disabled option: "${(o.textContent || "").trim() || o.value}"`,
         );
       }
+    }
+    for (const o of options) {
       o.selected = true;
     }
     this.element.dispatchEvent(new Event("change", { bubbles: true }));

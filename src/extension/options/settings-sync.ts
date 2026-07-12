@@ -133,6 +133,12 @@ chrome.storage.local.get(
     // have not yet migrated. Never console.log the value.
     if (typeof chrome !== "undefined" && chrome.storage?.session) {
       chrome.storage.session.get([STORAGE_KEYS.apiKey], (sres) => {
+        if (chrome.runtime.lastError) {
+          // Session store unavailable — fall back to any legacy local value
+          // rather than leaving the field blank.
+          ($("apiKey") as HTMLInputElement).value = (res.apiKey as string) ?? "";
+          return;
+        }
         const sessionKey = (sres[STORAGE_KEYS.apiKey] as string) ?? "";
         ($("apiKey") as HTMLInputElement).value =
           sessionKey || ((res.apiKey as string) ?? "");
@@ -152,7 +158,13 @@ chrome.storage.local.get(
     ($("screenshotQuality") as HTMLInputElement).value = String(res.screenshotQuality ?? 80);
     ($("enableScreenshots") as HTMLInputElement).checked = res.enableScreenshots !== false;
     const visionMode = (res.visionMode as string) || (res.enableLocalVision === true ? "always" : "disabled");
-    const visionRadio = document.querySelector(`input[name="visionMode"][value="${visionMode}"]`) as HTMLInputElement | null;
+    // Resolve the matching radio by comparing values (NOT by interpolating
+    // `visionMode` into a `querySelector` string — a corrupt/attacker-influenced
+    // stored value could break out of the attribute selector). Iterate the
+    // radio group and set `.checked` on an exact match only.
+    const visionRadio = Array.from(
+      document.querySelectorAll<HTMLInputElement>('input[name="visionMode"]'),
+    ).find((r) => r.value === visionMode) ?? null;
     if (visionRadio) visionRadio.checked = true;
     const allowedDomains = Array.isArray(res.allowedDomains) ? (res.allowedDomains as string[]).join("\n") : "";
     const blockedDomains = Array.isArray(res.blockedDomains) ? (res.blockedDomains as string[]).join("\n") : "";
@@ -197,14 +209,25 @@ export function isHttpUrl(value: string): boolean {
   }
 }
 
+/** True if `candidate` is a valid IPv6 address literal (no brackets/port). */
+function isIpv6Literal(candidate: string): boolean {
+  if (!/^[0-9a-fA-F:]+$/.test(candidate)) return false;
+  if (candidate.includes("::")) return true; // compressed form
+  const groups = candidate.split(":");
+  return groups.length === 8 && groups.every((g) => /^[0-9a-fA-F]{1,4}$/.test(g));
+}
+
 /** True if `value` is a bare hostname (optionally `*.` wildcard), no scheme/path/port. */
 function isHostname(value: string): boolean {
   if (!value || value.includes("/") || value.includes(" ")) return false;
   const candidate = value.startsWith("*.") ? value.slice(2) : value;
   if (!candidate) return false;
   // IPv6 literals legitimately contain ':' (e.g. `2001:db8::1`) — accept them
-  // as bare hosts rather than rejecting on the ':' check below.
-  if (candidate.includes(":")) return true;
+  // as bare hosts. Only a GENUINE IPv6 literal is allowed through the ':' fast
+  // path; a `host:port` form (e.g. `evil.com:9999`) is NOT a valid IPv6 and
+  // falls through to the URL validation below, which rejects it because the
+  // parsed hostname (`evil.com`) won't equal the candidate (`evil.com:9999`).
+  if (candidate.includes(":")) return isIpv6Literal(candidate);
   try {
     const u = new URL("http://" + candidate);
     // Compare lowercased so valid UPPERCASE and IDN/punycode hostnames are not

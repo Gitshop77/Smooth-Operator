@@ -37,7 +37,8 @@ export type HumanInteractionResponse =
   | { mode: "input"; value: string }
   | { mode: "select"; value: string }
   | { mode: "request_help"; value: string }
-  | { mode: "cancelled" }; // user dismissed the prompt
+  | { mode: "cancelled" } // user dismissed the prompt (or no response within timeout)
+  | { mode: "error"; reason: string }; // transport/messaging failure — distinct from a user dismissal
 
 /**
  * Check if an action type requires human confirmation before executing.
@@ -91,16 +92,30 @@ export async function askHumanExtension(
         (response: HumanInteractionResponse | undefined) => {
           const lastError = chrome.runtime.lastError;
           if (lastError) {
-            // Receiver missing (side panel closed, etc.) — resolve as
-            // cancelled rather than waiting the full timeout.
-            finish({ mode: "cancelled" });
+            // Receiver missing (side panel closed, etc.) — this is a transport
+            // failure, NOT a user dismissal. Report it distinctly so the agent
+            // can tell "prompt failed to deliver" apart from "user declined".
+            finish({
+              mode: "error",
+              reason: lastError.message || "chrome.runtime.lastError (no receiver)",
+            });
             return;
           }
+          // A defined response (including `{ mode: "cancelled" }`) came back
+          // from the side panel — the prompt was delivered and the user acted
+          // (or dismissed) it. An undefined response means the listener never
+          // called sendResponse; treat that as a missing/cancelled prompt.
           finish(response ?? { mode: "cancelled" });
         }
       );
-    } catch {
-      finish({ mode: "cancelled" });
+    } catch (err) {
+      // An exception while dispatching the message is a transport failure,
+      // distinct from a user cancellation. Surface it as an error so the agent
+      // can decide whether to retry, abort, or ask again.
+      finish({
+        mode: "error",
+        reason: err instanceof Error ? err.message : String(err),
+      });
     }
   });
 }

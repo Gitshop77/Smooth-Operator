@@ -45,6 +45,13 @@ const DOMAIN_CONFIG_ENFORCED_KEY = "__openCoworkDomainConfigEnforced";
 let lastKnownGood: DomainConfig = {};
 
 /**
+ * Set when a `globalThis` policy read throws (e.g. a hostile/buggy accessor).
+ * A throwing read must NOT be silently treated as "no policy" (allow-all) — we
+ * fail CLOSED instead (see {@link checkUrlAllowedWithDomainConfig}).
+ */
+let policyReadFailed = false;
+
+/**
  * Stable, shared reference for the "no policy / invalid policy" case. Returning
  * a single canonical object keeps `getDomainConfig` references identity-stable
  * across calls (so `toBe` assertions hold) while still meaning "allow-all".
@@ -65,9 +72,11 @@ function readGlobal<T>(key: string): T | undefined {
     return (globalThis as Record<string, unknown>)[key] as T | undefined;
   } catch (err) {
     // A throwing getter (extremely rare) must NOT be silently downgraded to
-    // "no policy" (allow-all). Surface it so the failure is visible rather
-    // than masking a legitimate error as a missing config.
-    console.warn(`[domain-config] reading global "${key}" threw; treating as unset:`, err);
+    // "no policy" (allow-all). Flag it so the policy check fails CLOSED, and
+    // surface the error so the failure is visible rather than masking a
+    // legitimate error as a missing config.
+    policyReadFailed = true;
+    console.warn(`[domain-config] reading global "${key}" threw; failing closed:`, err);
     return undefined;
   }
 }
@@ -218,6 +227,16 @@ export function checkUrlAllowedWithDomainConfig(
 ): UrlPolicyResult {
   if (explicitConfig) {
     return checkUrlAllowed(url, explicitConfig);
+  }
+  // A throwing global read means we cannot trust the policy state. Failing
+  // closed here (regardless of the enforced flag) prevents a page that
+  // tampered with / broke the policy global from silently downgrading to
+  // allow-all. This is the fix for the readGlobal fail-open path.
+  if (policyReadFailed) {
+    return {
+      allowed: false,
+      reason: "Domain policy global read failed — blocking to fail closed.",
+    };
   }
   if (isDomainConfigMissingButEnforced()) {
     return {

@@ -143,7 +143,19 @@ export async function listSecrets(): Promise<SecretEntry[]> {
     }
   }
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]") as SecretEntry[];
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+    // Defensive: mirror the extension branch. A corrupted / legacy / non-array
+    // localStorage value would otherwise be returned as-is and every reader
+    // (.findIndex / .map / .filter) would throw a TypeError. Only return a
+    // validated array of well-formed entries (each must have string name+value).
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (e): e is SecretEntry =>
+        e != null &&
+        typeof e === "object" &&
+        typeof (e as SecretEntry).name === "string" &&
+        typeof (e as SecretEntry).value === "string",
+    );
   } catch {
     return [];
   }

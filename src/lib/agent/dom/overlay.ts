@@ -6,8 +6,9 @@
  * `extension/content.ts`.
  *
  * All historically-exported symbols are re-exported here:
- *   - `highlightElement`, `setPersistentHighlight`, `showStatusBanner`,
- *     `OverlayHandle` (interface)
+ *   - `highlightElement`, `setPersistentHighlight`, `OverlayHandle` (interface)
+ *
+ * (`showStatusBanner` was removed — it had no callers.)
  *
  * New code should import from
  * `@/lib/agent/dom/annotation/overlay-renderer` or from the top-level

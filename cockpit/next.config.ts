@@ -47,7 +47,8 @@ const nextConfig: NextConfig = {
     const nonce = randomBytes(16).toString("base64");
 
     /**
-     * Baseline security response headers, applied to every response.
+     * Baseline security response headers applied to every response (HSTS, noted
+     * below, is production-only — see its conditional below).
      *   • Content-Security-Policy — `frame-ancestors 'none'` blocks embedding;
      *     strict `script-src`/`style-src` (self + per-request nonce) allow only
      *     the framework's own inline code; `img-src 'self' data:` permits inline
@@ -56,7 +57,7 @@ const nextConfig: NextConfig = {
      *     calls `io()` with no URL so it targets the page's own origin).
      *   • X-Frame-Options: DENY — legacy clickjacking guard.
      *   • X-Content-Type-Options: nosniff — stops MIME sniffing.
-     *   • Strict-Transport-Security — enforces TLS.
+     *   • Strict-Transport-Security — enforces TLS (production only).
      */
     const securityHeaders = [
       {
@@ -72,10 +73,19 @@ const nextConfig: NextConfig = {
       },
       { key: "X-Frame-Options", value: "DENY" },
       { key: "X-Content-Type-Options", value: "nosniff" },
-      {
-        key: "Strict-Transport-Security",
-        value: "max-age=63072000; includeSubDomains",
-      },
+      // Strict-Transport-Security is only meaningful over TLS. Emitting it on
+      // plaintext `next dev` (http://127.0.0.1) is a no-op today, but if the dev
+      // server is ever reached over a real hostname via a proxy it would cache an
+      // HSTS policy the deployment may not honor. Gate it to production only so
+      // the policy is set exactly where TLS is actually terminated.
+      ...(process.env.NODE_ENV === "production"
+        ? [
+            {
+              key: "Strict-Transport-Security",
+              value: "max-age=63072000; includeSubDomains",
+            },
+          ]
+        : []),
     ];
 
     return [

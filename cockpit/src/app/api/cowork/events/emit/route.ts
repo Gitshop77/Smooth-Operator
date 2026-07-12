@@ -36,7 +36,10 @@ export async function POST(req: NextRequest): Promise<Response> {
     // (which could OOM browser tabs or the mini-service's in-memory buffer).
     const PAYLOAD_MAX_BYTES = 64 * 1024; // 64KB
     const serialized = JSON.stringify(body.payload ?? null);
-    if (serialized.length > PAYLOAD_MAX_BYTES) {
+    // Measure UTF-8 byte length, not UTF-16 code-unit count: a payload of
+    // CJK/emoji text is 1 code unit but 3-4 UTF-8 bytes, so counting `.length`
+    // (code units) would over-permit the real serialized size by ~3x.
+    if (Buffer.byteLength(serialized, 'utf8') > PAYLOAD_MAX_BYTES) {
       return badRequest(`payload must be at most ${PAYLOAD_MAX_BYTES} bytes when serialized`);
     }
     const result = await broadcastEvent(body.channel, body.payload);

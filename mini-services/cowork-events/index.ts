@@ -41,6 +41,20 @@ const SHARED_SECRET = process.env.COWORK_EVENT_TOKEN || DEV_TOKEN;
 // (the same value as `NEXT_PUBLIC_COWORK_UI_TOKEN`) here; fall back to the
 // server-to-server secret only for backward-compatible single-secret dev setups.
 const SOCKET_SECRET = process.env.COWORK_UI_TOKEN || process.env.COWORK_EVENT_TOKEN || DEV_TOKEN;
+
+// Warn when the socket secret silently collapsed onto the service-to-service
+// secret (or the dev-token) because `COWORK_UI_TOKEN` is unset. The browser
+// bundle can only ever carry `NEXT_PUBLIC_*` values, so reusing the S2S secret
+// for the socket means a leaked bundle could unlock the S2S path. Operators
+// should set a distinct `COWORK_UI_TOKEN`.
+if (!process.env.COWORK_UI_TOKEN) {
+  console.warn(
+    '[cowork-events] WARNING: COWORK_UI_TOKEN is unset — SOCKET_SECRET fell ' +
+      'back to COWORK_EVENT_TOKEN (or the dev-token). Set a COWORK_UI_TOKEN ' +
+      'that differs from COWORK_EVENT_TOKEN so the browser socket secret is ' +
+      'distinct from the service-to-service secret.',
+  );
+}
 const STATUS_INTERVAL_MS = 15_000;
 // Maximum request body size — 1 MiB. Applies to all POST routes
 // (/emit, /chat, /image). Enforced both via `content-length` header (cheap,
@@ -218,6 +232,12 @@ const SERVER_OWNED_CHANNELS = new Set([
   'system:status', 'events:replay', 'chat:message', 'chat:done', 'chat:error',
 ]);
 
+// Max time we wait for a single chunk from the upstream LLM stream before
+// treating the connection as stalled. Without this, a hung upstream leaves the
+// HTTP request (and the socket.io room) open forever. See finding: /chat
+// streaming reader has no per-chunk timeout.
+const CHAT_STREAM_CHUNK_TIMEOUT_MS = 30_000;
+
 // ---------------------------------------------------------------------------
 // In-memory event store
 // ---------------------------------------------------------------------------
@@ -283,6 +303,12 @@ async function getZai(): Promise<ZAI> {
 // ---------------------------------------------------------------------------
 
 async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  // Capture the inbound request id (forwarded by the cockpit's X-Cowork-Token
+  // proxy) so this service's logs can be correlated with the originating
+  // cockpit request. See finding: correlation ID forwarded to the mini-service
+  // is never consumed.
+  const requestId =
+    typeof req.headers['x-request-id'] === 'string' ? (req.headers['x-request-id'] as string) : undefined;
   // CORS preflight — only allow the configured origin. `applyCorsHeaders`
   // is a pure function (sets headers iff the origin matches `CORS_ORIGIN`).
   const origin = typeof req.headers.origin === 'string' ? req.headers.origin : null;
@@ -352,6 +378,15 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
         sendJson(res, 413, { error: 'Request body too large (max 1 MB)' });
         return;
       }
+      // Per-IP rate limit on the HTTP `/emit` fan-out too (the socket `emit`
+      // path already applies it) so an authenticated caller can't flood the
+      // replay buffer and evict genuine events for reconnecting clients.
+      const rl = rateLimitCheck(clientIp(req));
+      if (!rl.allowed) {
+        res.setHeader('Retry-After', String(Math.ceil((rl.resetAt - Date.now()) / 1000)));
+        sendJson(res, 429, { error: 'Rate limit exceeded. Try again later.', resetAt: rl.resetAt });
+        return;
+      }
       const body = await readJson<Record<string, unknown>>(req);
       const channel = typeof body.channel === 'string' ? body.channel : '';
       if (!channel) {
@@ -375,7 +410,8 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
       // Success-path audit log: the `/emit` route proxies to a paid external
       // API-adjacent fan-out, so record what was posted and from where.
       console.info(
-        `[/emit] ok channel=${channel} from=${clientIp(req)} payloadBytes=${JSON.stringify(payload).length} id=${evt.id}`,
+        `[/emit] ok channel=${channel} from=${clientIp(req)} payloadBytes=${JSON.stringify(payload).length} id=${evt.id}` +
+          (requestId ? ` requestId=${requestId}` : ''),
       );
       sendJson(res, 200, { ok: true, id: evt.id, channel });
       return;
@@ -441,7 +477,7 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
             const decoder = new TextDecoder('utf-8');
             let sseBuffer = '';
             while (true) {
-              const { done, value } = await reader.read();
+              const { done, value } = await readWithTimeout(reader, CHAT_STREAM_CHUNK_TIMEOUT_MS);
               if (done) break;
               sseBuffer += decoder.decode(value, { stream: true });
               // SSE events are separated by `\n\n`.
@@ -507,12 +543,13 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
         // LLM). Without it there is no way to attribute cost or detect abuse.
         console.info(
           `[/chat] ok sessionId=${sessionId} from=${clientIp(req)} ` +
-            `messages=${messages.length} streamed=${wantStream} contentBytes=${finalText.length}`,
+            `messages=${messages.length} streamed=${wantStream} contentBytes=${finalText.length}` +
+            (requestId ? ` requestId=${requestId}` : ''),
         );
         sendJson(res, 200, { ok: true, sessionId, content: finalText, streamed: wantStream });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.error('[/chat] error:', msg);
+        console.error('[/chat] error:', msg, requestId ? { requestId } : '');
         io.to(sessionId).emit('chat:error', { sessionId, error: msg, ts: Date.now() });
         // Return HTTP 500 (not 200 with `{ok:false}`) when the
         // z-ai SDK throws. The previous `{ok:false}` shape was indistinguishable
@@ -580,12 +617,13 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
         // image API). Record size + byte count; the prompt is intentionally not
         // logged (it may contain sensitive user input).
         console.info(
-          `[/image] ok from=${clientIp(req)} size=${size} bytes=${base64.length} promptBytes=${body.prompt.length}`,
+          `[/image] ok from=${clientIp(req)} size=${size} bytes=${base64.length} promptBytes=${body.prompt.length}` +
+            (requestId ? ` requestId=${requestId}` : ''),
         );
         sendJson(res, 200, { ok: true, base64, prompt: body.prompt, size, bytes: base64.length });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.error('[/image] error:', msg);
+        console.error('[/image] error:', msg, requestId ? { requestId } : '');
         // Return HTTP 500 (not 200 with `{ok:false}`) when the
         // z-ai SDK throws — same rationale as the /chat catch block above.
         sendJson(res, 500, { ok: false, error: msg });
@@ -702,6 +740,29 @@ function parseQuery(url: string): Record<string, string> {
     }
   }
   return out;
+}
+
+// Read the next chunk from `reader`, rejecting if no chunk arrives within `ms`.
+// A stalled upstream should fail the request loudly (and let the request
+// handler tear down the socket.io room) rather than hang the HTTP response
+// forever. See finding: /chat streaming reader has no per-chunk timeout.
+function readWithTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  ms: number,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('upstream stream stalled (chunk timeout)')), ms);
+    reader
+      .read()
+      .then((r) => {
+        clearTimeout(timer);
+        resolve(r);
+      })
+      .catch((e) => {
+        clearTimeout(timer);
+        reject(e);
+      });
+  });
 }
 
 // ---------------------------------------------------------------------------

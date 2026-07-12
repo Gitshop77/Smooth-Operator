@@ -9,6 +9,30 @@ import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import type { ActionContext } from "./types";
 
+/**
+ * Validate the `file_name` the LLM supplied for a `screenshot` action before it
+ * is forwarded to the background SW. This is defense-in-depth at the egress
+ * boundary: the SW itself re-sanitizes on receipt (coercing to a string,
+ * collapsing `..` segments, stripping non-`[\w.-]` characters and truncating to
+ * 120 chars — see message-routing.ts). We reject only path-traversal /
+ * separator attempts here so the agent receives a clear error rather than a file
+ * silently renamed by the sanitizer.
+ *
+ * Returns `null` when the value is safe to forward (including `undefined`, in
+ * which case the SW falls back to a title-derived default name), or a
+ * human-readable reason string when it must be rejected.
+ */
+function validateScreenshotFileName(fileName: unknown): string | null {
+  if (fileName === undefined || fileName === null) return null;
+  if (typeof fileName !== "string" || fileName.length === 0) {
+    return "file_name must be a non-empty string";
+  }
+  if (/[\\/]/.test(fileName) || fileName.includes("..")) {
+    return "file_name must be a bare filename (no path separators or '..')";
+  }
+  return null;
+}
+
 export async function handleScreenshot(
   _ctx: ActionContext,
   action: Extract<Action, { type: "screenshot" }>,
@@ -22,6 +46,18 @@ export async function handleScreenshot(
   // the in-page demo (no `chrome.runtime.id`), capture is unavailable —
   // return an honest error instead of claiming success.
   const fileName = action.file_name;
+  // Reject path-traversal / separator attempts at the egress boundary before
+  // forwarding to the SW. The SW also re-sanitizes on receipt, so benign
+  // characters (spaces, etc.) are still neutralized downstream; we just give
+  // the agent an explicit error for genuinely abusive filenames.
+  const fileNameError = validateScreenshotFileName(fileName);
+  if (fileNameError) {
+    return {
+      action,
+      success: false,
+      message: `screenshot failed: invalid file_name — ${fileNameError}`,
+    };
+  }
   if (typeof chrome === "undefined" || !chrome.runtime?.id) {
     return {
       action,

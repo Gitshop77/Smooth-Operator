@@ -11,6 +11,7 @@
  */
 
 import type { BrowserState } from "../../types";
+import { NoSuchElementException } from "../../errors";
 
 /**
  * Resolve an `[index]` to its live `HTMLElement` from the browser state's
@@ -19,8 +20,22 @@ import type { BrowserState } from "../../types";
  */
 export function resolveElement(state: BrowserState, index: number): HTMLElement {
   const el = state.selectorMap[index];
-  if (!el) throw new Error(`element [${index}] not found (page may have changed — extract state again)`);
-  return el as HTMLElement;
+  // `selectorMap` values are typed `unknown`, so a corrupted / incorrectly
+  // populated entry must be caught here rather than failing later as an opaque
+  // "el.scrollIntoView is not a function" deep in a handler. Throwing the
+  // typed `NoSuchElementException` lets the executor branch on it and re-extract
+  // state (the documented "element disappeared" → retry contract).
+  if (el === undefined || el === null) {
+    throw new NoSuchElementException(
+      `element [${index}] not found (page may have changed — extract state again)`,
+    );
+  }
+  if (!(el instanceof HTMLElement)) {
+    throw new NoSuchElementException(
+      `element [${index}] is not an HTMLElement (got ${el?.constructor?.name ?? typeof el})`,
+    );
+  }
+  return el;
 }
 
 /** Local visibility check used by `find_text` and `search_page`. */
@@ -75,7 +90,15 @@ export function safeScrollIntoView(el: HTMLElement): void {
  */
 export function generateCssSelector(el: Element): string {
   if (el.id) {
-    return `*[id="${cssEscape(el.id)}"]`;
+    // The id is interpolated into a DOUBLE-QUOTED attribute string
+    // (`*[id="…"]`), so it must be escaped for STRING context, not identifier
+    // context — `CSS.escape` (used by `cssEscape` for the class branch below)
+    // is for identifier context and would mis-escape an id whose escaped form is
+    // immediately followed by a hex digit (e.g. id `"b` → `\22b` parses as
+    // U+022B, not `"` + `b`). Escape only the characters that are special
+    // inside a CSS string: backslash and double-quote.
+    const id = el.id.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    return `*[id="${id}"]`;
   }
   const tag = el.tagName.toLowerCase();
   const classes = Array.from(el.classList).map((c) => `.${cssEscape(c)}`);

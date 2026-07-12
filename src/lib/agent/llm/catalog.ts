@@ -92,10 +92,15 @@ interface CachedCatalog {
 /**
  * Minimal structural validation of a parsed models.dev catalog. Rejects
  * obviously-wrong shapes (non-object, missing provider entries, `models`
- * not a record, non-numeric cost fields) so malformed/compromised data
- * can't flow into the model picker. Returns a typed `Catalog` on success.
+ * not a record, non-numeric cost fields, or a non-string `name`) so
+ * malformed/compromised data can't flow into the model picker. Returns a
+ * typed `Catalog` on success.
+ *
+ * Exported so pricing.ts can reuse the same single trust-boundary rule for
+ * its custom-`COWORK_MODEL_CATALOG_URL` path instead of maintaining a
+ * parallel copy (which would drift and weaken whichever copy lags).
  */
-function isValidCatalog(value: unknown): value is Catalog {
+export function isValidCatalog(value: unknown): value is Catalog {
   if (!value || typeof value !== "object") return false;
   for (const entry of Object.values(value as Record<string, unknown>)) {
     if (!entry || typeof entry !== "object") return false;
@@ -105,9 +110,14 @@ function isValidCatalog(value: unknown): value is Catalog {
     for (const model of Object.values(provider.models as Record<string, unknown>)) {
       if (!model || typeof model !== "object") return false;
       const m = model as Record<string, unknown>;
-      // `release_date` is dereferenced via `.localeCompare` by callers; a
-      // non-string here would crash the picker, so reject it.
-      if (typeof m.id !== "string" || typeof m.release_date !== "string") return false;
+      // `release_date` and `name` are dereferenced via `.localeCompare` /
+      // `.toLowerCase()` by callers (`getModelsForProvider`, `searchModels`);
+      // a non-string here would throw and crash the picker, so reject it.
+      if (
+        typeof m.id !== "string" ||
+        typeof m.name !== "string" ||
+        typeof m.release_date !== "string"
+      ) return false;
       if (m.cost !== undefined) {
         const c = m.cost as Record<string, unknown>;
         if (typeof c.input !== "number" || typeof c.output !== "number") return false;
@@ -138,10 +148,11 @@ export async function fetchCatalog(force = false): Promise<Catalog> {
   // reuses this single in-flight promise instead of starting its own fetch.
   let resolveFn!: (value: Catalog) => void;
   let rejectFn!: (reason: unknown) => void;
-  inflight = new Promise<Catalog>((resolve, reject) => {
+  const promise = new Promise<Catalog>((resolve, reject) => {
     resolveFn = resolve;
     rejectFn = reject;
   });
+  inflight = promise;
 
   (async () => {
     try {
@@ -149,11 +160,17 @@ export async function fetchCatalog(force = false): Promise<Catalog> {
     } catch (err) {
       rejectFn(err);
     } finally {
-      inflight = null;
+      // Only clear the shared `inflight` slot if it still points at THIS
+      // promise. A concurrent force/non-force call may have started a newer
+      // fetch and overwritten `inflight` while we were awaiting; clearing it
+      // then would orphan that newer in-flight promise and let a later caller
+      // kick off a redundant third fetch. Capturing the local `promise`
+      // defends the dedup guarantee for overlapping requests.
+      if (inflight === promise) inflight = null;
     }
   })();
 
-  return inflight;
+  return promise;
 }
 
 /**
@@ -322,9 +339,9 @@ export async function searchModels(query: string, limit = 50): Promise<Array<{
     if (!provider?.models) continue;
     for (const model of Object.values(provider.models)) {
       if (model.status === "deprecated") continue;
-      const modelId = model.id.toLowerCase();
-      const modelName = model.name.toLowerCase();
-      const providerName = provider.name.toLowerCase();
+      const modelId = typeof model.id === "string" ? model.id.toLowerCase() : "";
+      const modelName = typeof model.name === "string" ? model.name.toLowerCase() : "";
+      const providerName = typeof provider.name === "string" ? provider.name.toLowerCase() : "";
 
       let score = 0;
       if (modelId.includes(q)) score += 3;

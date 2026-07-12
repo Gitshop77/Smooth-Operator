@@ -222,14 +222,13 @@ export function findByLocator(by: By): Element[] {
         return Array.from(document.getElementsByTagName(by.value));
       case "class name":
         return Array.from(document.getElementsByClassName(by.value));
-      // `name` and `id` are compiled to `css selector` at factory time, so
-      // they're handled by the css branch. Keep these cases for completeness
-      // (in case a hand-constructed By bypasses the factories).
-      case "name":
-        return Array.from(document.querySelectorAll(`*[name="${escapeCss(by.value)}"]`));
-      case "id":
-        return Array.from(document.querySelectorAll(`*[id="${escapeCss(by.value)}"]`));
       default:
+        // All `using` strategies reachable through the public `By` factories are
+        // handled above: `css selector`, `xpath`, `link text`, `partial link text`,
+        // `tag name`, and `class name`. `name` and `id` are compiled into a
+        // `css selector` by `By.name` / `By.id` at construction time, so they also
+        // resolve via the `css selector` branch and never arrive here through the
+        // supported API. Anything else is unknown → empty result.
         return [];
     }
   } catch (err) {

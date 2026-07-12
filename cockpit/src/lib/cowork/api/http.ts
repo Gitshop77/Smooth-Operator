@@ -34,10 +34,12 @@ async function readCappedBody(req: NextRequest): Promise<string> {
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    total += value.byteLength;
-    if (total > MAX_BODY_BYTES) {
+    // Reject BEFORE the chunk is appended to `text` so a single oversized
+    // chunk (or a cumulative overflow) can never be buffered into memory.
+    if (total + value.byteLength > MAX_BODY_BYTES) {
       throw new ClientError('request entity too large', 413);
     }
+    total += value.byteLength;
     text += decoder.decode(value, { stream: true });
   }
   text += decoder.decode();
@@ -162,6 +164,11 @@ export function isSsrfSafeUrl(url: string): boolean {
  *  standard IPv6, IPv4-mapped IPv6, or the various integer encodings of an IPv4
  *  address (decimal, octal, hex, and inet_aton shorthand). */
 function isRestrictedHost(host: string): boolean {
+  // A zone-id (`fe80::1%eth0`) makes the host an invalid bare IP, so `isIP`
+  // returns 0 and the value would otherwise fall through to `normalizeEncodedIpv4`
+  // and be treated as a public/safe host. Zone-scoped link-local addresses are
+  // still link-local — reject any `%` in the host outright.
+  if (host.includes('%')) return true;
   // IPv6 literal.
   if (isIP(host) === 6) {
     // IPv4-mapped IPv6 (`::ffff:a.b.c.d`) — classify the embedded address.
@@ -239,6 +246,11 @@ function isPrivateIpv4(host: string): boolean {
   const parts = host.split('.').map(Number);
   if (parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) return false;
   const [a, b] = parts;
+  // 0.0.0.0/8 — "this network" / unspecified. Encoded forms (`0`, `0x0.0.0.0`,
+  // `00.0.0.0`, …) all normalize to `0.0.0.0` and must be blocked exactly like
+  // loopback, otherwise a server-side fetch/launch can reach the unspecified
+  // address and bypass the guard's intent.
+  if (a === 0) return true;
   // 10.0.0.0/8
   if (a === 10) return true;
   // 172.16.0.0/12
@@ -332,6 +344,13 @@ export function redactSecrets(text: string): string {
   const configured = process.env.COWORK_EVENT_TOKEN;
   if (configured && configured.length > 0 && configured !== "dev-token") {
     out = out.split(configured).join("***");
+  }
+  // The browser/UI secret is independent of the service-to-service secret (the
+  // preferred one when distinct). Redact it too, or a leaked distinct UI token
+  // would survive `redactSecrets` and show up in error strings/logs.
+  const uiToken = process.env.COWORK_UI_TOKEN;
+  if (uiToken && uiToken.length > 0 && uiToken !== "dev-token") {
+    out = out.split(uiToken).join("***");
   }
   return out;
 }

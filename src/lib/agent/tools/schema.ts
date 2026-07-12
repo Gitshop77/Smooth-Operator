@@ -42,6 +42,25 @@ export const flexibleBoolean = z
   ])
   .transform((v) => v !== null && truthy.has(v as unknown as boolean | string | number));
 
+// ─── Bounded free-text helpers ───────────────────────────────────────────────
+//
+// LLM/prompt-injection-controlled strings flow into the executor, the agent
+// context, and persistent storage. Cap every free-text field so a single huge
+// model output can't exhaust extension storage, bloat exported history, or
+// saturate the context window. Three tiers:
+//   - LONG (64 KiB): prose / query / question / reason / expectation fields.
+//   - CODE (256 KiB): `evaluate` JavaScript — mirrors the custom-tool cap, large
+//     enough for legitimate scripts but still bounded.
+//   - SHORT (8 KiB): selectors, URLs, key names, file paths, patterns.
+const MAX_FREE_TEXT_CHARS = 64 * 1024; // 64 KiB
+const MAX_CODE_CHARS = 256 * 1024; // 256 KiB (matches MAX_CUSTOM_TOOL_CODE_LENGTH)
+const MAX_SHORT_TEXT_CHARS = 8 * 1024; // 8 KiB
+
+/** A free-text field capped to `max` characters after coercion. */
+function boundedText(max: number, msg?: string): z.ZodType<string> {
+  return z.coerce.string().max(max, msg ?? `text exceeds ${max} character limit`);
+}
+
 // ─── Individual action schemas ──────────────────────────────────────────────
 
 /**
@@ -71,7 +90,7 @@ export const ClickSchema = z.object({
 export const InputSchema = z.object({
   type: z.literal("input").describe("Type text into an input or textarea element."),
   index: z.coerce.number().int().min(1).describe("The [index] of the input element."),
-  text: z.coerce.string().describe("The text to type."),
+  text: boundedText(MAX_FREE_TEXT_CHARS).describe("The text to type."),
   clear: flexibleBoolean.optional().default(true).describe("If true (default), replace existing content; if false, append."),
 });
 
@@ -80,7 +99,7 @@ export const SelectDropdownSchema = z
   .object({
     type: z.literal("select_dropdown").describe("Choose an option in a <select> dropdown."),
     index: z.coerce.number().int().min(1).describe("The [index] of the <select> element."),
-    text: z.coerce.string().optional().describe("The exact visible text (or value) of the option to select. Use this OR option_index."),
+    text: boundedText(MAX_FREE_TEXT_CHARS).optional().describe("The exact visible text (or value) of the option to select. Use this OR option_index."),
     option_index: z.coerce.number().int().min(0).optional().describe("0-based index of the option (from dropdown_options output). Use this OR text."),
   })
   .refine((d) => (d.text !== undefined && d.text !== "") || d.option_index !== undefined, {
@@ -91,19 +110,19 @@ export const SelectDropdownSchema = z
 export const ScrollSchema = z.object({
   type: z.literal("scroll").describe("Scroll the page up or down."),
   down: flexibleBoolean.optional().default(true).describe("true = scroll down (default), false = scroll up."),
-  pages: z.number().min(0).optional().default(1).describe("Number of viewport-heights to scroll (default 1)."),
+  pages: z.number().min(0).max(100).optional().default(1).describe("Number of viewport-heights to scroll (default 1, capped at 100)."),
 });
 
 /** Press a single key or a key combination (e.g. Enter, Ctrl+S). */
 export const SendKeysSchema = z.object({
   type: z.literal("send_keys").describe("Press a key or key combination (e.g. 'Enter', 'Escape', 'Tab')."),
-  keys: z.coerce.string().describe("The key name: Enter, Escape, Tab, Space, ArrowUp/Down/Left/Right, Backspace, or a printable character."),
+  keys: boundedText(MAX_SHORT_TEXT_CHARS).describe("The key name: Enter, Escape, Tab, Space, ArrowUp/Down/Left/Right, Backspace, or a printable character."),
 });
 
 /** Navigate to a URL (optionally in a new tab). Page-changing — put LAST. */
 export const NavigateSchema = z.object({
   type: z.literal("navigate").describe("Navigate to a URL. This is a page-changing action — put it LAST in your action list."),
-  url: z.coerce.string().describe("The URL to navigate to."),
+  url: boundedText(MAX_SHORT_TEXT_CHARS).describe("The URL to navigate to."),
   new_tab: flexibleBoolean.optional().default(false).describe("If true, open in a new tab."),
 });
 
@@ -143,13 +162,13 @@ export const WaitSchema = z.object({
 /** Scroll the page until the given text becomes visible. */
 export const FindTextSchema = z.object({
   type: z.literal("find_text").describe("Scroll the page until the given text becomes visible."),
-  text: z.coerce.string().describe("The text to search for and scroll to."),
+  text: boundedText(MAX_FREE_TEXT_CHARS).describe("The text to search for and scroll to."),
 });
 
 /** Extract specific information from the full page text using a query. */
 export const ExtractSchema = z.object({
   type: z.literal("extract").describe("Extract specific information from the full page text using a query. Use when the info you need is not in the interactive elements list."),
-  query: z.coerce.string().describe("A specific question describing what to extract from the page."),
+  query: boundedText(MAX_FREE_TEXT_CHARS).describe("A specific question describing what to extract from the page."),
 });
 
 /** Finish the task. MUST be the only action in its step. */
@@ -164,7 +183,7 @@ export const DoneSchema = z.object({
   // so the existing "model emits text as number" test still passes.
   text: z.preprocess(
     (v) => (v === null || v === undefined ? "" : v),
-    z.coerce.string(),
+    z.coerce.string().max(MAX_FREE_TEXT_CHARS),
   ).describe("A summary of what was accomplished, including all results the user asked for."),
   success: flexibleBoolean.describe("true ONLY if the entire user request is fully complete; false otherwise."),
 });
@@ -172,7 +191,7 @@ export const DoneSchema = z.object({
 /** Search the web using a search engine. Page-changing — put LAST. */
 export const SearchSchema = z.object({
   type: z.literal("search").describe("Search the web using a search engine. Page-changing — put LAST."),
-  query: z.coerce.string().describe("The search query."),
+  query: boundedText(MAX_FREE_TEXT_CHARS).describe("The search query."),
   engine: z.enum(["google", "bing", "duckduckgo", "yahoo", "baidu"]).optional().default("duckduckgo").describe("Search engine: duckduckgo, google, bing, yahoo, or baidu (default duckduckgo)."),
 });
 
@@ -180,19 +199,19 @@ export const SearchSchema = z.object({
 export const UploadFileSchema = z.object({
   type: z.literal("upload_file").describe("Upload a file to a file input element."),
   index: z.coerce.number().int().min(1).describe("The [index] of the file input element."),
-  path: z.coerce.string().describe("The path to the file to upload."),
+  path: boundedText(MAX_SHORT_TEXT_CHARS).describe("The path to the file to upload."),
 });
 
 /** Take a screenshot of the current page. */
 export const ScreenshotSchema = z.object({
   type: z.literal("screenshot").describe("Take a screenshot of the current page."),
-  file_name: z.string().optional().describe("Optional filename for the screenshot."),
+  file_name: z.string().max(MAX_SHORT_TEXT_CHARS).optional().describe("Optional filename for the screenshot."),
 });
 
 /** Save the current page as a PDF. */
 export const SaveAsPdfSchema = z.object({
   type: z.literal("save_as_pdf").describe("Save the current page as a PDF."),
-  file_name: z.string().optional().describe("Optional filename for the PDF."),
+  file_name: z.string().max(MAX_SHORT_TEXT_CHARS).optional().describe("Optional filename for the PDF."),
 });
 
 /** List all options of a `<select>` dropdown element. */
@@ -204,7 +223,7 @@ export const DropdownOptionsSchema = z.object({
 /** Search for text/regex on the current page (instant, free). */
 export const SearchPageSchema = z.object({
   type: z.literal("search_page").describe("Search for text/pattern on the current page (instant, free). Use before scrolling to find specific content."),
-  pattern: z.coerce.string().describe("The text or regex pattern to search for."),
+  pattern: boundedText(MAX_SHORT_TEXT_CHARS).describe("The text or regex pattern to search for."),
   regex: flexibleBoolean.optional().default(false).describe("If true, treat pattern as a regular expression."),
   case_sensitive: flexibleBoolean.optional().default(false).describe("If true, case-sensitive search."),
 });
@@ -212,20 +231,20 @@ export const SearchPageSchema = z.object({
 /** Find elements matching a CSS selector (instant, free). */
 export const FindElementsSchema = z.object({
   type: z.literal("find_elements").describe("Find elements matching a CSS selector (instant, free). Great for counting items or getting attributes."),
-  selector: z.coerce.string().describe("CSS selector to match."),
-  attributes: z.array(z.coerce.string()).optional().describe("Attributes to extract from each match."),
+  selector: boundedText(MAX_SHORT_TEXT_CHARS).describe("CSS selector to match."),
+  attributes: z.array(z.coerce.string()).max(20).optional().describe("Attributes to extract from each match (max 20)."),
   // preprocess null/"" → undefined so `.default(50)` applies
   // (otherwise `Number("") === 0` coerces successfully and bypasses the default).
   max_results: z.preprocess(
     (v) => (v === null || v === "" ? undefined : v),
-    z.coerce.number(),
-  ).optional().default(50).describe("Max results to return (default 50)."),
+    z.coerce.number().int().min(1).max(200),
+  ).optional().default(50).describe("Max results to return (default 50, capped at 200)."),
 });
 
 /** Execute arbitrary JavaScript on the page. Page-changing — put LAST. */
 export const EvaluateSchema = z.object({
   type: z.literal("evaluate").describe("Execute JavaScript on the page. Page-changing — put LAST. Use only when no other action works."),
-  code: z.coerce.string().describe("JavaScript code to execute (wrapped in an IIFE). Only browser APIs, no Node.js."),
+  code: boundedText(MAX_CODE_CHARS).describe("JavaScript code to execute (wrapped in an IIFE). Only browser APIs, no Node.js."),
 });
 
 /** Hover over an element to trigger menus or tooltips. */
@@ -249,15 +268,15 @@ export const PressAndHoldSchema = z.object({
   // (otherwise `Number(null) === 0` coerces successfully and bypasses the default).
   hold_ms: z.preprocess(
     (v) => (v === null || v === "" ? undefined : v),
-    z.coerce.number().int().min(0),
-  ).optional().default(1500).describe("How long to hold the mouse button down, in milliseconds (default 1500)."),
-  delay_ms: z.coerce.number().int().min(0).optional().default(0).describe("Optional pre-press hover-settle delay, in milliseconds (default 0)."),
+    z.coerce.number().int().min(0).max(60000),
+  ).optional().default(1500).describe("How long to hold the mouse button down, in milliseconds (default 1500, capped at 60000)."),
+  delay_ms: z.coerce.number().int().min(0).max(60000).optional().default(0).describe("Optional pre-press hover-settle delay, in milliseconds (default 0, capped at 60000)."),
 });
 
 /** Ask the user a question when stuck or needing a decision. */
 export const AskHumanSchema = z.object({
   type: z.literal("ask_human").describe("Ask the user a question. Use when stuck, confused, or needing a decision."),
-  question: z.coerce.string().describe("The question to ask the user."),
+  question: boundedText(MAX_FREE_TEXT_CHARS).describe("The question to ask the user."),
   mode: z.enum(["input", "password"]).optional().default("input").describe("Input mode: 'input' (default, visible text) or 'password' (masked — use for credentials, API keys, tokens)."),
 });
 
@@ -269,7 +288,7 @@ export const AskHumanSchema = z.object({
  * 5-minute timeout). The agent then re-observes the page and continues. */
 export const TakeoverSchema = z.object({
   type: z.literal("takeover").describe("Pause the agent and let the user perform an action manually. Use for logins, payments, captchas, or any sensitive action the agent should not perform."),
-  reason: z.coerce.string().describe("Why the user needs to take over (e.g. 'Login required', 'Payment form detected', 'CAPTCHA present')."),
+  reason: boundedText(MAX_FREE_TEXT_CHARS).describe("Why the user needs to take over (e.g. 'Login required', 'Payment form detected', 'CAPTCHA present')."),
 });
 
 /** Verify that the last action had the expected effect.
@@ -279,7 +298,7 @@ export const TakeoverSchema = z.object({
  * so the next navigator step can check the page against it. */
 export const VerifySchema = z.object({
   type: z.literal("verify").describe("Verify that the last action had the expected effect. Use after clicks that should change the page, form submissions, or any action where success is uncertain."),
-  expectation: z.coerce.string().describe("What you expect to see if the action succeeded (e.g. 'success message visible', 'new page loaded', 'form cleared')."),
+  expectation: boundedText(MAX_FREE_TEXT_CHARS).describe("What you expect to see if the action succeeded (e.g. 'success message visible', 'new page loaded', 'form cleared')."),
 });
 
 /** Load full instructions for a domain skill.
@@ -291,7 +310,7 @@ export const VerifySchema = z.object({
  * returns the full instruction body as `extractedContent` for the next step. */
 export const LoadSkillSchema = z.object({
   type: z.literal("load_skill").describe("Load full instructions for a domain skill. Use when you need site-specific tips for the current page."),
-  name: z.coerce.string().describe("The skill name (from the <available_skills> list)."),
+  name: boundedText(MAX_FREE_TEXT_CHARS).describe("The skill name (from the <available_skills> list)."),
 });
 
 /** Accept the currently-open JavaScript dialog (alert / confirm / prompt). */
@@ -312,13 +331,13 @@ export const AlertGetTextSchema = z.object({
 /** Queue `text` to be returned by the next `window.prompt()` call. */
 export const AlertSendKeysSchema = z.object({
   type: z.literal("alert_send_keys").describe("Stage text to be returned by the NEXT window.prompt() call. window.prompt is synchronous, so once a prompt has fired the page already received the auto-dismiss override's empty-string return — there is no way to retroactively deliver text. Call this BEFORE triggering the action that opens the prompt so the staged text reaches the page. When no dialog is open the text is staged (success); returns failure for non-prompt dialogs (alert/confirm)."),
-  text: z.coerce.string().describe("The text to stage for the next prompt dialog."),
+  text: boundedText(MAX_FREE_TEXT_CHARS).describe("The text to stage for the next prompt dialog."),
 });
 
 /** Run local vision detection (LocateAnything-3B) on the current screenshot. */
 export const DetectVisualSchema = z.object({
   type: z.literal("detect_visual").describe("Run local vision detection on the current screenshot to find UI elements that aren't in the DOM tree (Canvas, WebGL, custom widgets, image-based buttons). Returns [v1], [v2] etc. entries you can click with {\"type\":\"click\",\"index\":\"v1\"}. Use ONLY when you can see something visually on the page but can't find it in the elements list. Takes 2-5 seconds. Only available when Local Vision Assistant is enabled in AI Adaptive mode."),
-  query: z.coerce.string().describe("What you're looking for (e.g. 'submit button', 'login form', 'canvas dropdown')."),
+  query: boundedText(MAX_FREE_TEXT_CHARS).describe("What you're looking for (e.g. 'submit button', 'login form', 'canvas dropdown')."),
 });
 
 // ─── Union + helpers ────────────────────────────────────────────────────────
@@ -515,10 +534,12 @@ export function actionListForPrompt(maxActions: number, visionMode: "disabled" |
 //   - SEND_KEYS: same `keys`.
 //   - NAVIGATE: same `url`.
 //   - SWITCH_TAB / CLOSE_TAB: same `tab_id`.
-//   - GO_BACK / WAIT / DONE / TAKEOVER / ASK_HUMAN / VERIFY / SCREENSHOT /
-//     SAVE_AS_PDF / LOAD_SKILL / SEARCH_PAGE / FIND_ELEMENTS / FIND_TEXT /
-//     EXTRACT / DROPDOWN_OPTIONS / EVALUATE: compared by their distinguishing
-//     param (or always-equivalent for parameterless actions like GO_BACK).
+//   - GO_BACK / WAIT / DONE / TAKEOVER / ASK_HUMAN / VERIFY / LOAD_SKILL /
+//     SEARCH_PAGE / FIND_ELEMENTS / FIND_TEXT / EXTRACT / DROPDOWN_OPTIONS /
+//     EVALUATE: compared by their distinguishing param (or always-equivalent
+//     for parameterless actions like GO_BACK).
+//   - SCREENSHOT / SAVE_AS_PDF: compared by `file_name` (different filenames =
+//     distinct actions).
 //   - SEARCH: same `query` (+ engine when specified).
 //
 // Different action types are NEVER equivalent.
@@ -580,7 +601,11 @@ export function isEquivalentAction(a: Action, b: Action): boolean {
       );
     case "screenshot":
     case "save_as_pdf":
-      return true;
+      // Two screenshots / PDFs to DIFFERENT filenames are distinct actions
+      // (e.g. capturing evidence at different steps), so compare `file_name`.
+      // Only genuinely parameterless actions (go_back, alert_accept/dismiss/
+      // get_text) are always-equivalent.
+      return (a.file_name ?? "") === ((b as Extract<Action, { type: "screenshot" | "save_as_pdf" }>).file_name ?? "");
     case "dropdown_options":
       return a.index === (b as Extract<Action, { type: "dropdown_options" }>).index;
     case "search_page":
@@ -614,8 +639,9 @@ export function isEquivalentAction(a: Action, b: Action): boolean {
     case "detect_visual":
       return a.query === (b as Extract<Action, { type: "detect_visual" }>).query;
     default: {
-      // Exhaustiveness check — if a new action type is added without a case
-      // here, fall back to reference equality of the `type` discriminator.
+      // Exhaustiveness guard — every known action type has a `case` above, so
+      // this branch is unreachable for the current union. For any unknown/future
+      // action type, treat it as NOT equivalent (safe default for loop detection).
       const _exhaustive: never = a;
       void _exhaustive;
       return false;

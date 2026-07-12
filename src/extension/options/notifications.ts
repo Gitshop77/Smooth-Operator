@@ -21,6 +21,15 @@ export async function loadNotifications(): Promise<void> {
     STORAGE_KEYS.notifyOnTakeover,
     STORAGE_KEYS.webhookUrl,
   ]);
+  // Mirror the careful error handling in settings-sync.ts: a transient storage
+  // failure (quota, disabled storage) must degrade gracefully rather than throw
+  // an unhandled rejection. Without this guard `res` can be `undefined` on
+  // failure and `res.notifyOnCompletion` would throw a TypeError.
+  if (chrome.runtime.lastError) {
+    console.warn("[options] failed to load notification settings:", chrome.runtime.lastError);
+    return;
+  }
+  if (!res) return;
   ($("notifyOnCompletion") as HTMLInputElement).checked = (res.notifyOnCompletion as boolean) || false;
   ($("notifyOnError") as HTMLInputElement).checked = (res.notifyOnError as boolean) || false;
   ($("notifyOnTakeover") as HTMLInputElement).checked = (res.notifyOnTakeover as boolean) || false;

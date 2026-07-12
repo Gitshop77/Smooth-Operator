@@ -138,13 +138,19 @@ export async function annotateScreenshot(
 
   const fontSize = options?.fontSize ?? 14;
   const textColor = options?.textColor ?? "#ffffff"; // white
-  const scaleFactor = options?.scaleFactor ?? 1;
+  // `scaleFactor` must be a finite positive number (it multiplies every
+  // coordinate + the font size). A `0` collapses boxes to the origin; a
+  // negative one mirrors drawing. Fall back to `1` for any bad input so a
+  // malformed caller can't produce silently-wrong output.
+  const rawScale = options?.scaleFactor;
+  const scaleFactor =
+    typeof rawScale === "number" && Number.isFinite(rawScale) && rawScale > 0 ? rawScale : 1;
   const minSize = options?.minSize ?? 5;
   const refPrefix = options?.refPrefix ?? "";
   // Multi-color mode: cycle through `boxColors` by index. Single-color mode:
-  // use `boxColor` for every box. Multi-color makes neighbouring elements
-  // distinguishable on dense pages.
-  const palette = options?.boxColors ?? null;
+  // use `boxColor` for every box. An empty `boxColors` array is "no palette"
+  // (not a palette of length 0, which would yield `NaN` indices → black boxes).
+  const palette = options?.boxColors?.length ? options.boxColors : null;
   const singleBoxColor = options?.boxColor ?? "#ef4444"; // red-500
   const singleBgColor = options?.bgColor ?? "#ef4444"; // red-500
 
@@ -187,6 +193,10 @@ export async function annotateScreenshot(
       // would make `ctx.strokeRect(NaN, …)` draw nothing (silent drop), and a
       // negative index would break the palette lookup below.
       if (!Number.isFinite(width) || !Number.isFinite(height)) continue;
+      // `x`/`y` are also guarded: a `NaN` coordinate passes all the size checks
+      // but `strokeRect(NaN, …)` / `fillRect(NaN, …)` draw nothing, silently
+      // dropping that element's annotation.
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
       if (!Number.isFinite(el.index)) continue;
       // Skip zero-size AND sub-`minSize` elements — their boxes would be
       // invisible and their labels unreadable.
@@ -237,7 +247,10 @@ export async function annotateScreenshot(
     return screenshotDataUrl;
   } finally {
     // Release the ImageBitmap's GPU resources (no-op for HTMLImageElement).
-    img.cleanup?.();
+    // `img` may be `undefined` if image load failed (the inner try returned
+    // early) — guard against it so the `finally` can't throw and override the
+    // graceful-degradation return of the raw screenshot.
+    img?.cleanup?.();
   }
 }
 

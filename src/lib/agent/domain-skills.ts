@@ -175,19 +175,81 @@ if (isExtensionWithLocal() && typeof chrome !== "undefined" && chrome.storage?.o
   });
 }
 
+/**
+ * Normalize a single raw custom-skill object into a validated {@link DomainSkill}.
+ *
+ * `chrome.storage.local` is the trust boundary for custom skills: a corrupted
+ * or injected payload must not flow verbatim into the (TRUSTED) system prompt.
+ * We require `name` + at least one `domain`, coerce `instructions`/`frontmatter`
+ * to strings, and constrain the optional `dangerousActions` / `shortcuts` shapes.
+ * Returns `null` for any object that fails validation so the caller can drop it.
+ */
+function normalizeCustomSkill(raw: unknown): DomainSkill | null {
+  if (!raw || typeof raw !== "object") return null;
+  const s = raw as Record<string, unknown>;
+  if (typeof s.name !== "string" || !s.name) return null;
+
+  const domains: string[] = Array.isArray(s.domains)
+    ? s.domains.filter((d): d is string => typeof d === "string" && d.length > 0)
+    : typeof s.domain === "string"
+      ? [s.domain]
+      : [];
+  if (domains.length === 0) return null; // a skill with no domain can never match
+
+  const frontmatter = typeof s.frontmatter === "string" ? s.frontmatter : s.name;
+  const instructions = typeof s.instructions === "string" ? s.instructions : "";
+  const dangerousActions = Array.isArray(s.dangerousActions)
+    ? s.dangerousActions.filter((d): d is string => typeof d === "string")
+    : undefined;
+  const shortcuts =
+    s.shortcuts && typeof s.shortcuts === "object"
+      ? Object.fromEntries(
+          (
+            Object.entries(s.shortcuts as Record<string, unknown>).filter(
+              ([k, v]) => typeof k === "string" && typeof v === "string",
+            ) as Array<[string, string]>
+          ),
+        )
+      : undefined;
+
+  return {
+    domains,
+    name: s.name,
+    frontmatter,
+    instructions,
+    ...(dangerousActions && dangerousActions.length ? { dangerousActions } : {}),
+    ...(shortcuts && Object.keys(shortcuts).length ? { shortcuts } : {}),
+  };
+}
+
+/** Validate a raw `chrome.storage.local` value into a clean `DomainSkill[]`. */
+function validateCustomSkills(stored: unknown): DomainSkill[] {
+  if (!Array.isArray(stored)) return [];
+  const out: DomainSkill[] = [];
+  for (const item of stored) {
+    const skill = normalizeCustomSkill(item);
+    if (skill) out.push(skill);
+    else console.error("[domain-skills] Skipping malformed custom skill:", item);
+  }
+  return out;
+}
+
 async function loadCustomDomainSkills(): Promise<DomainSkill[]> {
   if (customSkillsCache !== null) return customSkillsCache;
   try {
     if (isExtensionWithLocal()) {
       const res = await chrome.storage.local.get(CUSTOM_SKILLS_STORAGE_KEY);
-      const stored = res[CUSTOM_SKILLS_STORAGE_KEY];
-      customSkillsCache = Array.isArray(stored) ? (stored as DomainSkill[]) : [];
+      customSkillsCache = validateCustomSkills(res[CUSTOM_SKILLS_STORAGE_KEY]);
       return customSkillsCache;
     }
-  } catch {
-    // Non-extension context or storage access denied — return empty.
+  } catch (e) {
+    console.error("[domain-skills] Failed to load custom skills from storage:", e);
   }
-  return [];
+  // Non-extension context or storage access denied: cache the empty result so
+  // the `customSkillsCache !== null` short-circuit works and we don't re-run
+  // the (no-op) path on every call.
+  customSkillsCache = [];
+  return customSkillsCache;
 }
 
 /**
@@ -222,7 +284,7 @@ export async function getSkillFrontmatter(url: string): Promise<SkillFrontmatter
     seen.add(s.name);
     out.push({
       name: s.name,
-      description: s.frontmatter,
+      description: s.frontmatter ?? s.name ?? "",
     });
   }
   return out;
@@ -274,9 +336,8 @@ export async function getFullSkill(name: string): Promise<string> {
 }
 
 /**
- * @legacy Use {@link getSkillFrontmatter} (always in context) + {@link getFullSkill}
- *         (on-demand via the `load_skill` action) instead. Kept for backward
- *         compatibility with code paths that still inject the full skill body.
+ * Shared internal matcher — used by both {@link getSkillFrontmatter} (always in
+ * context) and {@link getFullSkill} (on-demand via the `load_skill` action).
  *
  * Get all matching domain skills for a URL — both built-in AND user-defined
  * custom skills (loaded from chrome.storage.local).

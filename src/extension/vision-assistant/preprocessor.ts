@@ -215,6 +215,17 @@ export async function preprocessScreenshot(screenshotDataUrl: string): Promise<P
     th = Math.ceil(h / pad) * pad;
   }
 
+  // Guard against a degenerate (zero-sized) source image. A zero-width/height
+  // source leaves `w`/`h` at 0 and the rescale loop's floor(… × scale) can also
+  // floor a small dimension down to 0. That would make `tw`/`th` (and therefore
+  // the canvas) zero-sized AND turn `rescaledWidth`/`rescaledHeight` into
+  // divisors of zero downstream (non-finite 0-1000 → pixel coordinates). Clamp
+  // to ≥1 and recompute the padded dimensions so the invariant holds.
+  w = Math.max(1, w);
+  h = Math.max(1, h);
+  tw = Math.ceil(w / pad) * pad;
+  th = Math.ceil(h / pad) * pad;
+
   const canvas = createCanvas();
   if (!canvas) {
     throw new Error("Canvas unavailable — cannot preprocess screenshot");

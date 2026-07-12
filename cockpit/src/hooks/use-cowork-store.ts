@@ -60,7 +60,6 @@ interface CoworkState {
   lastEvent: string | null;
   /** Navigate to a view, optionally carrying context (e.g. a run id / session id). */
   setView: (v: ViewId, params?: Record<string, string>) => void;
-  toggleSidebar: () => void;
   setSidebar: (open: boolean) => void;
   toggleSidebarCollapsed: () => void;
   setSocketConnected: (c: boolean) => void;
@@ -76,7 +75,6 @@ export const useCoworkStore = create<CoworkState>((set) => ({
   lastEvent: null,
   setView: (v, params) =>
     set({ currentView: v, viewParams: params ?? null, sidebarOpen: false }),
-  toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   setSidebar: (open) => set({ sidebarOpen: open }),
   toggleSidebarCollapsed: () =>
     set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),

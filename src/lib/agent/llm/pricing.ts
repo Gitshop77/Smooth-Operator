@@ -21,6 +21,7 @@
  */
 
 import type { Catalog } from "./catalog";
+import { isValidCatalog } from "./catalog";
 
 export interface ModelPricing {
   /** Input (prompt) tokens — per 1M tokens, USD. */
@@ -60,7 +61,12 @@ export const DEFAULT_UNKNOWN_MODEL_PRICE: ModelPricing = {
   uncatalogued: true,
 };
 
-/** Backwards-compatible alias for {@link DEFAULT_UNKNOWN_MODEL_PRICE}. */
+/**
+ * Public alias for {@link DEFAULT_UNKNOWN_MODEL_PRICE}, kept purely as a tested
+ * API-compatibility name (referenced by tests/pricing.test.ts). No production
+ * module currently imports this alias — they use {@link DEFAULT_UNKNOWN_MODEL_PRICE}
+ * directly.
+ */
 export const CONSERVATIVE_DEFAULT_PRICING = DEFAULT_UNKNOWN_MODEL_PRICE;
 
 /**
@@ -118,37 +124,6 @@ function lookupPricing(table: Record<string, ModelPricing>, model: string): Mode
 }
 
 /**
- * Structural validation of a parsed models.dev-shaped catalog. Mirrors the
- * (unexported) `isValidCatalog` guard in catalog.ts so the custom-URL path of
- * {@link refreshPricingFromCatalog} can reject malformed/compromised data
- * before it reaches {@link convertCatalog}. A single bad entry would otherwise
- * corrupt the pricing override table and feed non-numeric rates into
- * {@link estimateCost}, producing `NaN` (which silently defeats the cost cap).
- *
- * Accepts `unknown` (parsed JSON) rather than `Catalog` because the custom-URL
- * path receives untrusted data that has not yet been statically typed.
- */
-function isValidCatalogShape(value: unknown): value is Catalog {
-  if (!value || typeof value !== "object") return false;
-  for (const entry of Object.values(value as Record<string, unknown>)) {
-    if (!entry || typeof entry !== "object") return false;
-    const provider = entry as Record<string, unknown>;
-    if (typeof provider.id !== "string" || typeof provider.name !== "string") return false;
-    if (!provider.models || typeof provider.models !== "object") return false;
-    for (const model of Object.values(provider.models as Record<string, unknown>)) {
-      if (!model || typeof model !== "object") return false;
-      const m = model as Record<string, unknown>;
-      if (typeof m.id !== "string" || typeof m.release_date !== "string") return false;
-      if (m.cost !== undefined) {
-        const c = m.cost as Record<string, unknown>;
-        if (typeof c.input !== "number" || typeof c.output !== "number") return false;
-      }
-    }
-  }
-  return true;
-}
-
-/**
  * Convert a models.dev-shaped catalog into a lowercased pricing table.
  * Only models that declare a `cost` block contribute a rate.
  *
@@ -192,7 +167,7 @@ function convertCatalog(catalog: Catalog): Record<string, ModelPricing> {
  *
  * Resolution (best-effort — any failure leaves the current override in place
  * so offline still works and the conservative default remains the fallback):
- * the failure reason is recorded via {@link getLastPricingError} and warned in
+ * the failure reason is recorded (see {@link lastPricingError}) and warned in
  * non-production, so a misconfigured `COWORK_MODEL_CATALOG_URL` is visible to
  * operators instead of being silently swallowed.
  *   - If the `COWORK_MODEL_CATALOG_URL` environment variable is set, fetch +
@@ -215,22 +190,40 @@ export async function refreshPricingFromCatalog(): Promise<void> {
     let table: Record<string, ModelPricing> = {};
     if (url) {
       // Custom catalog URL override (e.g. a self-hosted models.dev mirror).
+      //
+      // TRUST ASSUMPTION: whoever controls `COWORK_MODEL_CATALOG_URL` (an
+      // operator-injected env var, by design) fully controls the rates that
+      // feed cost-cap enforcement. This is an intentional operator knob — a
+      // hostile/compromised mirror could set prices to `0` to defeat the cap,
+      // just as a self-hosted mirror legitimately reprices private models. We
+      // deliberately do NOT floor these rates (that would override operator
+      // intent); we only validate shape and surface failures via
+      // `lastPricingError` + a non-production console.warn so misconfiguration
+      // is visible rather than silent.
       const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
       if (!res.ok) throw new Error(`catalog ${res.status}`);
       const raw = await res.json();
       // Trust-boundary guard: the custom-URL path bypasses the validation that
-      // fetchCatalog() performs on the default path, so validate here. A
+      // fetchCatalog() performs on the default path, so validate the shape here
+      // using the SAME guard catalog.ts uses (single shared rule, no drift). A
       // malformed/compromised response would otherwise flow into convertCatalog
       // and feed non-numeric rates to estimateCost (producing NaN that silently
       // defeats the cost cap). Drop the response rather than merge it.
-      if (!isValidCatalogShape(raw)) {
+      if (!isValidCatalog(raw)) {
         throw new Error("custom catalog failed shape validation");
       }
       table = convertCatalog(raw);
     } else {
       // Default: the live models.dev catalog (with its own cache + offline fallback).
       const { fetchCatalog } = await import("./catalog");
-      const catalog = await fetchCatalog();
+      // Pass `force = true` so we bypass catalog.ts's module-level memoryCache
+      // and always re-read the LIVE catalog on refresh. refreshPricingFromCatalog
+      // is the deliberate hydration entry point (called at app startup / on an
+      // explicit pricing refresh), so it must reflect the current catalog rather
+      // than a stale in-memory snapshot from a previous fetch. The cost here is
+      // one extra network fetch at refresh time; the graceful offline/stale-cache
+      // fallback inside fetchCatalog still applies if the network is down.
+      const catalog = await fetchCatalog(true);
       table = convertCatalog(catalog);
     }
     // Merge so a prior override (e.g. from a previous explicit call) survives.
@@ -254,16 +247,6 @@ export async function refreshPricingFromCatalog(): Promise<void> {
       console.warn("[pricing] refreshPricingFromCatalog failed:", lastPricingError.message);
     }
   }
-}
-
-/**
- * Returns the most recent {@link refreshPricingFromCatalog} error, or `null`
- * if the last refresh succeeded. Mirrors `getLastFetchError` in catalog.ts so
- * callers/UI can surface catalog-staleness or misconfiguration (e.g. a bad
- * `COWORK_MODEL_CATALOG_URL`).
- */
-export function getLastPricingError(): Error | null {
-  return lastPricingError;
 }
 
 /**

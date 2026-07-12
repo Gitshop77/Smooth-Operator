@@ -24,12 +24,38 @@ const LOG_PREFIX = "[Open Cowork]";
  * Redact page-supplied dialog text before logging. Dialog text can contain
  * OTP/2FA codes, PII, or session tokens, so we never log it verbatim — we
  * surface only its length as a metadata hint for debugging.
+ *
+ * Exported so the `alert_*` handlers can redact dialog text in their result
+ * messages (which otherwise end up in cockpit / service-worker logs).
  */
-function redactDialogText(text: string): string {
+export function redactDialogText(text: string): string {
   return `${text.length} char(s) (redacted)`;
 }
 
 let installed = false;
+
+/**
+ * Per-installation nonce shared (only) between the MAIN-world override and the
+ * isolated-world message listener. A page script cannot guess it, so it cannot
+ * forge dialog metadata (`__openCoworkDialog`) or hijack the staged prompt
+ * return value (`__openCoworkSetPrompt`). Without it, any same-world script
+ * could postMessage attacker-controlled "dialog" text into the agent's state.
+ */
+let dialogNonce: string | null = null;
+
+/** Generate a cryptographically-random, unguessable nonce for this install. */
+function generateDialogNonce(): string {
+  try {
+    const buf = new Uint8Array(16);
+    (globalThis.crypto ?? (globalThis as { msCrypto?: Crypto }).msCrypto)?.getRandomValues?.(buf);
+    if (buf.some((b) => b !== 0)) {
+      return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
+    }
+  } catch {
+    /* fall through to Math.random fallback */
+  }
+  return `n${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+}
 
 /** Describes which kind of native dialog was triggered. */
 export type DialogKind = "alert" | "confirm" | "prompt";
@@ -81,6 +107,11 @@ export function installPopupHandler(): void {
   // dialog metadata back here. We listen for those cross-world messages and
   // record them in `pendingAlert` exactly as before, so `getPendingAlert*`
   // and the `alert_*` actions now observe REAL page dialogs.
+  //
+  // The bridge is authenticated with a per-install `dialogNonce` so a page
+  // script cannot forge dialog metadata (prompt-injection) or hijack the
+  // staged prompt return value.
+  dialogNonce = generateDialogNonce();
   if (typeof window !== "undefined") {
     window.addEventListener("message", onMainWorldDialogMessage);
   }
@@ -128,18 +159,30 @@ export function installPopupHandler(): void {
 const MAIN_WORLD_DIALOG_MSG = "__openCoworkDialog";
 /** Message tag the isolated world sends to stage prompt text in MAIN world. */
 const MAIN_WORLD_SET_PROMPT_MSG = "__openCoworkSetPrompt";
+/** Shared-secret nonce tag — proves a cross-world message came from OUR override. */
+const MAIN_WORLD_NONCE = "__openCoworkNonce";
+
+/** The allowed `DialogKind` union, used to validate untrusted message payloads. */
+const DIALOG_KINDS: readonly DialogKind[] = ["alert", "confirm", "prompt"];
 
 /**
  * Receive dialog metadata bridged from the MAIN-world override. Validates that
  * the message originated from this same `window` (cross-world `postMessage`
- * lands here) and carries our tag before trusting it.
+ * lands here), carries our tag, AND carries the install nonce — so a page
+ * script cannot forge "dialog" metadata to inject into the agent's state.
+ * The `kind` field is validated against the allowed union (defaulting to
+ * `"alert"`) so a forged/garbage kind can't reach downstream switches.
  */
 function onMainWorldDialogMessage(e: MessageEvent): void {
   if (e.source !== window) return;
   const data = e.data as Record<string, unknown> | null;
   if (!data || data[MAIN_WORLD_DIALOG_MSG] !== true) return;
+  if (dialogNonce !== null && data[MAIN_WORLD_NONCE] !== dialogNonce) return;
+  const kind = DIALOG_KINDS.includes(data.kind as DialogKind)
+    ? (data.kind as DialogKind)
+    : "alert";
   pendingAlert = {
-    kind: (data.kind as DialogKind) ?? "alert",
+    kind,
     text: String(data.text ?? ""),
     defaultValue: String(data.defaultValue ?? ""),
   };
@@ -166,29 +209,46 @@ function installMainWorldDialogOverride(): void {
         target: { tabId: tab.id },
         world: "MAIN",
         func: mainWorldDialogOverride,
+        // Pass the per-install nonce so only OUR override can bridge dialog
+        // metadata back (a page script can't guess it).
+        args: [dialogNonce ?? ""],
       });
     });
-  } catch {
-    /* scripting unavailable — fall back to isolated-world-only behavior */
+  } catch (err) {
+    // If injection fails (e.g. missing host permission for the current tab),
+    // the MAIN-world override is never installed and real page dialogs will
+    // NOT be intercepted — the exact opposite of the documented guarantee.
+    // Surface it (the isolated-world fallback is silent and ineffective) so
+    // the breakage is observable rather than invisible until an action hangs.
+    console.warn("[popup-handler] failed to install MAIN-world dialog override:", err);
   }
 }
 
 /** Runs in the page's MAIN world. Must be self-contained (no closure capture). */
-function mainWorldDialogOverride(): void {
+function mainWorldDialogOverride(nonce: string): void {
   const RECEIVE = "__openCoworkDialog";
   const SET_PROMPT = "__openCoworkSetPrompt";
+  const NONCE = "__openCoworkNonce";
   let staged: string | null = null;
   window.addEventListener("message", (e: MessageEvent) => {
     if (e.source !== window) return;
     const d = e.data as Record<string, unknown> | null;
-    if (d && d[SET_PROMPT] !== undefined) {
+    // Only honor staged-prompt messages carrying the correct nonce — a page
+    // script can't guess it, so it can't hijack the agent's staged text.
+    if (d && d[SET_PROMPT] !== undefined && d[NONCE] === nonce) {
       const v = d[SET_PROMPT];
       staged = v === true || v == null ? null : String(v);
     }
   });
   const post = (kind: string, message: unknown, defaultValue: unknown): void => {
     window.postMessage(
-      { __openCoworkDialog: true, kind, text: String(message ?? ""), defaultValue: String(defaultValue ?? "") },
+      {
+        __openCoworkDialog: true,
+        [NONCE]: nonce,
+        kind,
+        text: String(message ?? ""),
+        defaultValue: String(defaultValue ?? ""),
+      },
       "*",
     );
   };
@@ -285,11 +345,13 @@ export function dismissAlert(): boolean {
  * Returns `true` if the text was staged, `false` if no prompt was open.
  */
 export function sendAlertText(text: string): boolean {
-  // Bridge the staged value into the MAIN world so the MAIN-world prompt
-  // override (which is what actually returns to the page) returns it.
+  // Stage the value for the NEXT prompt (mirrors {@link stagePromptText}): the
+  // MAIN-world override returns it when the page opens a prompt. This keeps the
+  // staging contract identical whether or not a dialog is currently open, so
+  // callers can rely on the boolean return to mean "a prompt was pending".
+  nextPromptValue = String(text);
   postToMainWorld(MAIN_WORLD_SET_PROMPT_MSG, String(text));
   if (!pendingAlert || pendingAlert.kind !== "prompt") return false;
-  nextPromptValue = String(text);
   pendingAlert = null;
   return true;
 }
@@ -309,7 +371,8 @@ export function stagePromptText(text: string): void {
 /** Post a bridged message to the page's MAIN world (best-effort). */
 function postToMainWorld(tag: string, value: unknown): void {
   try {
-    window.postMessage({ [tag]: value }, "*");
+    // Attach the nonce so the MAIN-world override trusts the staged-prompt msg.
+    window.postMessage({ [tag]: value, [MAIN_WORLD_NONCE]: dialogNonce }, "*");
   } catch {
     /* postMessage unavailable — isolated-world-only fallback still works */
   }

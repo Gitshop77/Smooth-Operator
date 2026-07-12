@@ -105,7 +105,15 @@ chrome.storage.local.get([STORAGE_KEYS.task, STORAGE_KEYS.agentMode, STORAGE_KEY
   if (typeof res.defaultTask === "string" && res.defaultTask.trim()) {
     taskInput.placeholder = res.defaultTask;
   }
-  setCostCapUsd((res.costCap as number) || 0);
+  // Validate the cost-cap value: `chrome.storage` returns `unknown`, and a
+  // corrupted / wrongly-typed payload (string, NaN, negative) would otherwise
+  // flow straight into the cost-cap badge and render as "cap: NaN%".
+  const rawCostCap = res.costCap;
+  const costCapUsd =
+    typeof rawCostCap === "number" && Number.isFinite(rawCostCap) && rawCostCap >= 0
+      ? rawCostCap
+      : 0;
+  setCostCapUsd(costCapUsd);
   if (res.agentMode) {
     setCurrentMode(res.agentMode as string);
     syncModeDropdown();

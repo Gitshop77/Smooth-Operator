@@ -141,6 +141,7 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
   const injectionScanText = browserState.elementsText
     + "\n" + browserState.title
     + "\n" + browserState.url
+    + "\n" + browserState.pageInfo
     + "\n" + tabsBlock
     + (browserState.axTree ? "\n" + browserState.axTree : "");
   const injectionScan = scanForInjection(injectionScanText);
@@ -183,9 +184,22 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
   // secret that ended up in extracted text would otherwise leak back to the
   // provider on the next step.
   const redactedHistory = await Promise.all(history.map(async (h) => {
-    if (!h.results || h.results.length === 0) return h;
-    const results = await Promise.all(h.results.map((r) => redactExtractedCached(r)));
-    return { ...h, results };
+    try {
+      if (!h.results || h.results.length === 0) return h;
+      // Per-item isolation: a single malformed/persisted `extractedContent` that
+      // makes `redactSecrets` throw must NOT abort the whole navigator/planner
+      // step (finding: one corrupt run-history entry could poison the entire
+      // prompt assembly). Degrade the offending record to its un-redacted form
+      // rather than killing the step.
+      const results = await Promise.all(
+        h.results.map((r) => redactExtractedCached(r).catch(() => r)),
+      );
+      return { ...h, results };
+    } catch {
+      // Pathological record — degrade to the unchanged history item so the step
+      // still assembles instead of rejecting.
+      return h;
+    }
   }));
 
   // Persistent per-site memory: load user-defined notes for the current domain.
@@ -337,13 +351,21 @@ function renderHistory(history: HistoryItem[], limit: number): string {
   }
   for (const h of recent) {
     out += `<step_${h.step} agent="${h.agent}">\n`;
-    if (h.evaluation) out += `Evaluation: ${h.evaluation}\n`;
-    if (h.memory) out += `Memory: ${h.memory}\n`;
-    if (h.goal) out += `Goal: ${h.goal}\n`;
+    // `evaluation`/`memory`/`goal` are the agent's own prior reasoning, but they
+    // summarize page-derived content and a prompt-injection could have
+    // influenced them — wrap them as untrusted data so the LLM doesn't treat
+    // injected text inside them as instructions (finding: action-result message
+    // / evaluation / memory / goal rendered into the prompt without the
+    // untrusted wrapper).
+    if (h.evaluation) out += `Evaluation: ${wrapUntrusted(h.evaluation)}\n`;
+    if (h.memory) out += `Memory: ${wrapUntrusted(h.memory)}\n`;
+    if (h.goal) out += `Goal: ${wrapUntrusted(h.goal)}\n`;
     if (h.results.length) {
       out += `Action Results:\n`;
       for (const r of h.results) {
-        out += `- ${r.action.type}: ${r.message}${r.success ? "" : " (FAILED)"}\n`;
+        // `r.message` can carry page-derived content (e.g. a `navigate`-result
+        // URL or an `extract`-style message) — wrap it as untrusted data.
+        out += `- ${r.action.type}: ${wrapUntrusted(r.message)}${r.success ? "" : " (FAILED)"}\n`;
         if (r.extractedContent) {
           // Surface extracted content so the LLM can use it next step.
           // Page-derived extracted content (e.g. from the `extract` action) is

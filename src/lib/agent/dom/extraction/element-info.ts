@@ -98,6 +98,17 @@ function implicitRole(el: HTMLElement): string | null {
 export function buildAttrs(el: HTMLElement): Record<string, string> {
   const attrs: Record<string, string> = {};
   for (const name of DOM_CONFIG.includeAttrs) {
+    // Sensitive fields: never surface `autocomplete` / `placeholder`. These
+    // reveal what *secret* the field holds (e.g. `autocomplete="cc-number"`),
+    // undermining the value redaction. The value itself is already redacted
+    // (see the `value` branch below — `isSensitive(el)` short-circuits it to
+    // `undefined`), so the two extractors (AX tree + indexed tree) redact
+    // consistently. We deliberately DO still surface `type` (e.g.
+    // `type="password"`) because it is non-secret semantic metadata the
+    // navigator LLM needs to classify the field — only the *value* is secret.
+    if (isSensitive(el) && (name === "autocomplete" || name === "placeholder")) {
+      continue;
+    }
     let val: string | null = null;
     if (name === "value") {
       if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
@@ -123,7 +134,7 @@ export function buildAttrs(el: HTMLElement): Record<string, string> {
     }
   }
 
-  if (el instanceof HTMLSelectElement) {
+  if (el instanceof HTMLSelectElement && !isSensitive(el)) {
     const opts = Array.from(el.options)
       .slice(0, DOM_CONFIG.selectOptionLimit)
       .map((o) => o.textContent?.trim() || o.value);
@@ -154,10 +165,13 @@ function fnv1aHash(s: string): string {
   return (h >>> 0).toString(16).padStart(8, "0");
 }
 
-// WeakMap cache for the STABLE part of an element's identity (tag +
-// key attrs). The ancestor path is NOT cached because it changes when the
-// element moves. Only the expensive attribute-extraction is cached.
-const stableIdentityCache = new WeakMap<HTMLElement, string>();
+// NOTE: we deliberately do NOT cache the stable portion of an element's
+// identity. A cached `tag + keyAttrs` string goes stale when a tracked key
+// attribute changes in place (e.g. a button's `aria-label` updates, a tab's
+// `aria-selected` flips), so `isNew` would miss meaningful UI changes. The
+// ancestor path is already recomputed per call; recomputing the (cheap)
+// attribute portion too keeps the hash correct at the cost of a tiny amount of
+// redundant work.
 
 /**
  * Build a stable identity string for an element: tag + key attributes + the
@@ -170,18 +184,15 @@ const stableIdentityCache = new WeakMap<HTMLElement, string>();
  * element moves, so caching it would produce stale hashes).
  */
 function elementIdentity(el: HTMLElement): string {
-  // Cache the stable portion (tag + key attrs).
-  let stablePart = stableIdentityCache.get(el);
-  if (stablePart === undefined) {
-    const tag = el.tagName.toLowerCase();
-    const attrs = buildAttrs(el);
-    const keyAttrs = DOM_CONFIG.identityKeyAttrs
-      .map((k) => attrs[k] ? `${k}=${attrs[k]}` : "")
-      .filter(Boolean)
-      .join("|");
-    stablePart = `${tag}|${keyAttrs}`;
-    stableIdentityCache.set(el, stablePart);
-  }
+  // Compute the stable portion (tag + key attrs) fresh every call. Not cached,
+  // so in-place edits to a tracked key attribute are reflected (see note above).
+  const tag = el.tagName.toLowerCase();
+  const attrs = buildAttrs(el);
+  const keyAttrs = DOM_CONFIG.identityKeyAttrs
+    .map((k) => attrs[k] ? `${k}=${attrs[k]}` : "")
+    .filter(Boolean)
+    .join("|");
+  const stablePart = `${tag}|${keyAttrs}`;
 
   // Compute the path fresh each time (changes when the element moves).
   const path: string[] = [];
@@ -194,7 +205,28 @@ function elementIdentity(el: HTMLElement): string {
     cur = cur.parentElement;
     depth++;
   }
+
+  // Defensive: if the path ended up empty (e.g. a detached element, or an
+  // element whose parent is `document.body` with no ancestor chain), append a
+  // per-element discriminator so two distinct empty-path elements never
+  // collide and are wrongly reported as "not new".
+  if (path.length === 0) {
+    return `${stablePart}|#${collisionFreeId(el)}`;
+  }
   return `${stablePart}|${path.join(">")}`;
+}
+
+// Stable per-element unique id used to disambiguate elements that yield an
+// empty ancestor path (defensive against hash collisions — see `elementIdentity`).
+const uidMap = new WeakMap<HTMLElement, string>();
+let uidCounter = 0;
+function collisionFreeId(el: HTMLElement): string {
+  let id = uidMap.get(el);
+  if (!id) {
+    id = `el${++uidCounter}`;
+    uidMap.set(el, id);
+  }
+  return id;
 }
 
 /**

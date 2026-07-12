@@ -69,15 +69,30 @@ const zodLocalesStubPlugin: Plugin = {
  *
  * `console.debug(x)` / `console.log(x)` become `void (x)` — the argument
  * expression still evaluates but its result is discarded, so call-site
- * behavior (other than the dropped log) is unchanged.
+ * behavior (other than the dropped log) is unchanged. A zero-argument call
+ * `console.log()` becomes `void 0;` (a valid statement) rather than the
+ * invalid `void ()` a naive rewrite would produce.
  *
  * The match is anchored with a negative lookbehind `(?<![\w.$])` so a member
  * expression like `window.console.log("x")` is NOT rewritten to
  * `window.void ("x")` (which would throw a `TypeError` at runtime), and
- * `myconsole.log(...)` is likewise left alone. This addresses the dangerous
- * runtime-crash corruption vector; a full AST-aware transform would additionally
- * skip occurrences inside string literals/comments, but those are data, not
- * executed code, and do not crash the bundle.
+ * `myconsole.log(...)` is likewise left alone.
+ *
+ * KNOWN LIMITATIONS (documented, not silently swallowed): this is a textual
+ * transform, not a full AST walk. Two cases are intentionally NOT rewritten —
+ * both because doing so correctly requires scope-aware resolution of the
+ * `console` binding, which a regex cannot do safely:
+ *   1. A locally-shadowed `console` (e.g. `function f(console) { console.log() }`)
+ *      is still rewritten. A shadowed binding is extremely rare in first-party
+ *      source; if it ever appears, the log call is dropped (no side effects are
+ *      lost in practice).
+ *   2. `console.log` passed as a *callback* or via an alias
+ *      (`arr.forEach(console.log)`, `const fn = console.log; fn("x")`) is not
+ *      rewritten and the log survives into the bundle. This is the lesser evil
+ *      versus a dangerous AST rewrite that could corrupt unrelated identifiers.
+ * A full AST-aware transform (esbuild onTransform + parser) would close both;
+ * until then these are accepted, documented trade-offs. Occurrences inside
+ * string literals / comments are data, not executed code, and do not crash.
  *
  * This plugin is only attached in production builds (see `sharedConfig`); dev
  * (`--watch`) builds keep the logs.
@@ -91,8 +106,11 @@ const stripConsoleDebugPlugin: Plugin = {
       if (!inSource) return undefined;
       const original = await readFile(args.path, "utf8");
       const contents = original
-        .replace(/(?<![\w.$])console\.debug\(/g, "void (")
-        .replace(/(?<![\w.$])console\.log\(/g, "void (");
+        // Zero-argument calls first → `void 0;` (valid). Must run before the
+        // general rewrite so `(void 0;)` isn't re-matched into `(void (0;)`.
+        .replace(/(?<![\w.$])console\.(debug|log)\(\)/g, "void 0;")
+        // All other calls → `void (…)`.
+        .replace(/(?<![\w.$])console\.(debug|log)\(/g, "void (");
       const loader = args.path.endsWith(".tsx")
         ? "tsx"
         : args.path.endsWith(".ts")
@@ -201,11 +219,20 @@ async function assertOnlyEnZodLocales(): Promise<void> {
     let entries: string[];
     try {
       entries = (await readdir(dir)).map((n) => path.join(dir, n));
-    } catch {
+    } catch (e) {
+      // Fail-closed guard must stay observable: a *missing* directory is a
+      // normal stop condition (e.g. a root that doesn't exist), but any other
+      // FS error (EACCES, broken symlink, transient I/O) must be surfaced so a
+      // real non-`en` locale import in that subtree can't go undetected.
+      if ((e as { code?: string }).code === "ENOENT") return;
+      console.warn(`[zod-locale-lint] readdir failed for ${dir}:`, e);
       return;
     }
     for (const e of entries) {
-      const st = await stat(e).catch(() => null);
+      const st = await stat(e).catch((err) => {
+        console.warn(`[zod-locale-lint] stat failed for ${e}:`, err);
+        return null;
+      });
       if (!st) continue;
       if (st.isDirectory()) {
         if (path.basename(e) === "node_modules") continue;
@@ -238,14 +265,20 @@ async function assertOnlyEnZodLocales(): Promise<void> {
  *   - A MISSING or MALFORMED manifest is a hard build error — the SEC-1 guard
  *     is worthless exactly when the manifest can't be read/parsed, so we fail
  *     closed (Apache-2.0/extension validity requires a real manifest).
- *   - `permissions` / `host_permissions` are validated to be arrays of strings;
- *     a bad merge (e.g. a nested object) no longer silently slips through.
- *   - High-risk permissions are surfaced as a WARNING (the local fast-fail
- *     signal). They are intentionally NOT a hard error here: the current
- *     permissions below are reviewed and legitimate, and failing the build on
- *     them would break every developer build. The recommended gate that FAILS
- *     on *newly-added* high-risk permissions is a CI manifest-lint diff
- *     (tracked outside this build file, in `.github/workflows/ci.yml`).
+ *   - `permissions` / `host_permissions` / `optional_permissions` are validated
+ *     to be arrays of strings; a bad merge (e.g. a nested object) no longer
+ *     silently slips through.
+ *   - High-risk permissions (debugger, scripting, nativeMessaging, management,
+ *     cookies, tabs, history, bookmarks, proxy) present in `permissions` OR
+ *     `optional_permissions`, plus universal host access, are surfaced as a
+ *     WARNING (the local fast-fail signal).
+ *   - To actually ENFORCE the "no new high-risk permission" intent in CI, set
+ *     `MANIFEST_LINT_FAIL_HIGH_RISK=1` in the build environment. That promotes
+ *     the warning to a hard build error. We keep the default as a warning so
+ *     legitimate, reviewed permissions don't break every local developer build
+ *     (the documented in-repo justification for `debugger` + universal host
+ *     access is referenced in FULL-REVIEW). The recommended companion gate is a
+ *     CI manifest-lint *diff* that only fails on *newly-added* high-risk perms.
  *
  * Why these permissions are requested (documented in-repo per FULL-REVIEW):
  *   - `debugger`: drives the CDP "take over this page" click/automation path
@@ -264,7 +297,11 @@ function lintManifestPermissions(): void {
       `[manifest-lint] ${manifestPath} is missing — a manifest is required to build a valid extension.`,
     );
   }
-  let manifest: { permissions?: unknown; host_permissions?: unknown };
+  let manifest: {
+    permissions?: unknown;
+    host_permissions?: unknown;
+    optional_permissions?: unknown;
+  };
   try {
     manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   } catch (e) {
@@ -275,16 +312,46 @@ function lintManifestPermissions(): void {
   }
   const perms = assertStringArray(manifest.permissions, "permissions");
   const host = assertStringArray(manifest.host_permissions, "host_permissions");
-  const risky = perms.filter((p) => p === "debugger" || p === "scripting");
+  const optional = assertStringArray(
+    manifest.optional_permissions,
+    "optional_permissions",
+  );
+
+  // Dangerous permissions that widen the extension's attack surface. Optional
+  // permissions can escalate privilege at runtime, so they are checked too.
+  const HIGH_RISK = new Set([
+    "debugger",
+    "scripting",
+    "nativeMessaging",
+    "management",
+    "cookies",
+    "tabs",
+    "history",
+    "bookmarks",
+    "proxy",
+  ]);
+  const risky = perms.filter((p) => HIGH_RISK.has(p));
+  const riskyOptional = optional.filter((p) => HIGH_RISK.has(p));
   const wideHost = host.some(
     (h) => h === "<all_urls>" || h === "http://*/*" || h === "https://*/*"
   );
-  if (risky.length || wideHost) {
-    console.warn(
+
+  if (risky.length || riskyOptional.length || wideHost) {
+    const items = [
+      ...risky,
+      ...riskyOptional,
+      ...(wideHost ? ["universal host_permissions"] : []),
+    ];
+    const msg =
       "[manifest-lint] HIGH-RISK permissions present: " +
-        [...risky, ...(wideHost ? ["universal host_permissions"] : [])].join(", ") +
-        " — confirm each is strictly necessary (see FULL-REVIEW)."
-    );
+      items.join(", ") +
+      " — confirm each is strictly necessary (see FULL-REVIEW).";
+    // Default: warn only. CI can promote this to a hard error via env flag so
+    // local builds with reviewed permissions still work.
+    if (process.env.MANIFEST_LINT_FAIL_HIGH_RISK === "1") {
+      throw new Error(msg);
+    }
+    console.warn(msg);
   }
 }
 

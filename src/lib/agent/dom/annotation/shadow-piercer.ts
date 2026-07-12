@@ -287,12 +287,26 @@ export function getShadowRoot(el: Element): ShadowRoot | null {
     if (root) return root;
   }
   // Cross-world backdoor (MAIN-world injection set this on the shared window).
+  // The page's MAIN world can overwrite the backdoor, so treat its return value
+  // as untrusted: only accept a genuine `ShadowRoot` (or a node of the right
+  // `nodeType`), otherwise an attacker-supplied fake node would be walked by the
+  // extractor. Defense-in-depth against a fabricated-DOM injection.
   if (typeof window !== "undefined") {
     const backdoor = (window as unknown as { __openCoworkPiercer__?: ShadowPiercerBackdoor }).__openCoworkPiercer__;
     if (backdoor) {
       try {
         const root = backdoor.getShadowRoot(el);
-        if (root) return root;
+        if (root instanceof ShadowRoot) return root;
+        // Fallback check for environments where `ShadowRoot` isn't constructable
+        // for an `instanceof` test (nodeType 11 = DOCUMENT_FRAGMENT, which is
+        // what a ShadowRoot is).
+        if (
+          typeof Node !== "undefined" &&
+          root &&
+          (root as Node).nodeType === (Node.DOCUMENT_FRAGMENT_NODE ?? 11)
+        ) {
+          return root as unknown as ShadowRoot;
+        }
       } catch {
         /* ignore — backdoor may be from a stale injection */
       }

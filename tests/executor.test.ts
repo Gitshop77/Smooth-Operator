@@ -173,13 +173,26 @@ describe("executeAction — wait", () => {
   afterEach(clearMinimalDomStubs);
 
   test("wait action waits the specified seconds", async () => {
-    const start = Date.now();
-    await executeAction({ type: "wait", seconds: 1 }, emptyState());
-    const elapsed = Date.now() - start;
-    // 1s ± jitter (timers in CI can fire slightly late; allow a small floor
-    // and a generous ceiling so this doesn't flake).
-    expect(elapsed).toBeGreaterThanOrEqual(900);
-    expect(elapsed).toBeLessThan(2500);
+    // Drive timers deterministically: real wall-clock waits are the classic
+    // flakiness source under CI load (timer coalescing / CPU starvation).
+    vi.useFakeTimers();
+    try {
+      const promise = executeAction({ type: "wait", seconds: 1 }, emptyState());
+      let resolved = false;
+      void promise.then(() => {
+        resolved = true;
+      });
+      // Half the requested duration must NOT have elapsed yet.
+      await vi.advanceTimersByTimeAsync(500);
+      expect(resolved).toBe(false);
+      // The full second elapses and the action resolves successfully.
+      await vi.advanceTimersByTimeAsync(500);
+      const result = await promise;
+      expect(resolved).toBe(true);
+      expect(result.success).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

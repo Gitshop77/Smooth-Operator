@@ -67,6 +67,13 @@ export async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
   // Prefer `fetch(dataUrl)` — works in SW + DOM and decodes any data-URL
   // mime type without manual base64 work.
   const res = await fetch(dataUrl);
+  // A malformed / unsupported data URL can resolve with a non-OK status while
+  // `res.blob()` still returns an empty/error blob. Fail loudly here (the
+  // caller's fallback already handles the throw) instead of silently passing a
+  // corrupt screenshot through as if annotation succeeded.
+  if (!res.ok) {
+    throw new Error(`dataUrlToBlob: fetch returned ${res.status} for data URL`);
+  }
   return await res.blob();
 }
 

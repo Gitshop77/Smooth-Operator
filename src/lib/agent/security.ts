@@ -435,12 +435,16 @@ function hostnameMatches(hostname: string, domain: string): boolean {
   // Reject malformed allow/block-list entries so a typo or careless copy can't
   // silently widen or narrow the matched surface:
   //   • empty — never a valid bare host;
-  //   • leading-dot (`.example.com`) — never a valid bare hostname;
   //   • wildcard (`*`) — has no meaning in exact/subdomain matching;
   //   • whitespace — almost certainly a copy/paste artifact.
-  // A trailing dot (FQDN form, e.g. `example.com.`) is normalized to the bare
-  // host so it still matches as intended.
-  if (!d || d.startsWith('.') || d.includes('*') || /\s/.test(d)) return false;
+  // A leading-dot (`.example.com`) is a common "match subdomains of" convention
+  // — strip it so it behaves as `example.com` (which already matches subdomains
+  // via the `h.endsWith(".${d}")` check below) instead of being silently
+  // discarded as malformed. A trailing dot (FQDN form, e.g. `example.com.`) is
+  // normalized to the bare host so it still matches as intended.
+  if (!d) return false;
+  d = d.replace(/^\.+/, ""); // accept ".example.com" as "subdomains of example.com"
+  if (!d || d.includes('*') || /\s/.test(d)) return false;
   d = d.replace(/\.+$/, '');
   if (!d) return false;
   // Reject single-label entries (e.g. "com", "org") — `h.endsWith(".com")` would

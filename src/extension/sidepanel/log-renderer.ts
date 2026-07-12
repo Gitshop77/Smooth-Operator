@@ -250,22 +250,30 @@ export function addLogRow(event: LogEvent, time: string): void {
       // "completed"/"failed" status the very next line sets, and the badge
       // never reflects completion. Order: disable buttons (setRunning) →
       // set badge (setTaskStatus) → set lifecycle icon (setLifecycle).
-      // During restore replay (#10) suppress this so re-opening the panel
-      // mid-run doesn't re-disable the controls / rewrite the final state.
-      if (!isRestoring) setRunning(false);
-      setTaskStatus(event.success ? "completed" : "failed");
-      setLifecycle(event.success ? "done" : "error");
+      // During restore replay (#10) suppress ALL of these side effects so
+      // re-opening the panel mid-run doesn't re-disable the controls / rewrite
+      // the final state / re-append thinking entries (finding: setLifecycle /
+      // setTaskStatus fired unguarded during restore replay).
+      if (!isRestoring) {
+        setRunning(false);
+        setTaskStatus(event.success ? "completed" : "failed");
+        setLifecycle(event.success ? "done" : "error");
+      }
       break;
     case "error":
       cls = "err"; label = "error"; icon = glyph("x"); body = event.message;
       if (!event.recoverable) {
         // Call setRunning(false) BEFORE setLifecycle("error") so the
         // running→idle transition doesn't clobber the error lifecycle.
-        // Suppressed during restore replay (see done case above).
-        if (!isRestoring) setRunning(false);
+        // Suppressed during restore replay (see done case above) — keep the
+        // lifecycle icon in sync (cheap, idempotent) but skip the
+        // control-disabling / badge-rewriting / thinking side effects.
+        if (!isRestoring) {
+          setRunning(false);
+          setTaskStatus("failed");
+          appendThinkingEntry("error", `Step ${event.step} · error`, event.message);
+        }
         setLifecycle("error");
-        setTaskStatus("failed");
-        appendThinkingEntry("error", `Step ${event.step} · error`, event.message);
       } else {
         setLifecycle("error");
       }
@@ -480,7 +488,16 @@ export function restoreTotalsFromStorage(): void {
       isRestoring = true;
       try {
         for (const row of s[STORAGE_KEYS.log] as Array<{ event: LogEvent; time: string }>) {
-          addLogRow(row.event, row.time);
+          // Route the restored rows through the same envelope validator used at
+          // the live message boundary (finding: restore replay skipped validation
+          // entirely, so a corrupt stored log could feed `addLogRow` unchecked
+          // and render "undefined el · undefined new · undefined"). Drop invalid
+          // stored rows rather than forwarding them.
+          if (isValidAgentEvent(row.event) && typeof row.time === "string") {
+            addLogRow(row.event, row.time);
+          } else {
+            console.warn("[log-renderer] dropped malformed restored AGENT_EVENT row");
+          }
         }
       } finally {
         isRestoring = false;

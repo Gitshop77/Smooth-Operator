@@ -297,9 +297,16 @@ export async function handleDetectVisualRequest(query: string): Promise<{
     } catch {
       /* tab may have closed — leave visionCacheUrl as "" */
     }
-    const descriptions = visionDetections.map((d, i) => {
-      const r = d.pixelBox;
-      return `[v${i + 1}] ${d.label} at (${Math.round(r.x)}, ${Math.round(r.y)}) ${Math.round(r.width)}x${Math.round(r.height)}`;
+    // Build the description from the MERGED vision elements (not the raw
+    // `visionDetections` array) so the `[vN]` index printed to the LLM exactly
+    // matches the `visionId` key used to populate `visionElementsCache` below
+    // (finding: the description used a sequential `i+1` index that could
+    // diverge from the cached `visionId`, producing clicks on the wrong
+    // element). `merged` is the same array the cache loop iterates.
+    const visionEls = merged.filter((m) => m.source === "vision" && m.visionId && m.pixelRect);
+    const descriptions = visionEls.map((m) => {
+      const r = m.pixelRect as { x: number; y: number; width: number; height: number };
+      return `[${m.visionId}] ${m.text} at (${Math.round(r.x)}, ${Math.round(r.y)}) ${Math.round(r.width)}x${Math.round(r.height)}`;
     });
     const description = descriptions.length > 0
       ? `Visual elements detected:\n${descriptions.join("\n")}\n\nUse {"type":"click","index":"v1"} to click them on the next step.`
@@ -614,9 +621,27 @@ export function buildLoopDeps(ctx: LoopDepsContext): Parameters<typeof runAgentL
       // is in the extension), executeActionQueue is bypassed — so the gate
       // must be applied here to preserve the SECURITY.md trust model.
       const { checkActionAllowed, requiresConfirmation } = await import("@/lib/agent/modes");
-      const filtered: AgentAction[] = [];
+      // Build one ActionResult per input action so the orchestrator's history
+      // alignment always holds (finding: executeActions returned a misaligned /
+      // truncated ActionResult array when an action was blocked or declined —
+      // the actions AFTER the block got no result, breaking per-action storage
+      // + the success-rate tally). We keep a blocked/declined action (and every
+      // subsequent action) as a BLOCKED result, and only the contiguous leading
+      // run of allowed+confirmed actions is shipped to the content script.
       const preResults: ActionResult[] = [];
+      const filtered: AgentAction[] = [];
+      let aborted = false;
       for (const action of actions) {
+        if (aborted) {
+          // A prior action in the batch was blocked/declined — abort the rest
+          // of the queue (the selectorMap context is invalidated) but still
+          // emit a result so alignment is preserved.
+          preResults.push({
+            action, success: false,
+            message: "BLOCKED: prior action in the queue was blocked or declined",
+          });
+          continue;
+        }
         const allowed = checkActionAllowed(action.type, agentMode);
         if (!allowed.allowed) {
           preResults.push({
@@ -625,7 +650,8 @@ export function buildLoopDeps(ctx: LoopDepsContext): Parameters<typeof runAgentL
           });
           // Abort the remaining queue — a blocked action invalidates the
           // selectorMap context for subsequent actions.
-          break;
+          aborted = true;
+          continue;
         }
         if (requiresConfirmation(action.type, agentMode)) {
           try {
@@ -639,26 +665,30 @@ export function buildLoopDeps(ctx: LoopDepsContext): Parameters<typeof runAgentL
                 action, success: false,
                 message: `BLOCKED: user declined confirmation for ${action.type}`,
               });
-              break;
+              aborted = true;
+              continue;
             }
           } catch {
             preResults.push({
               action, success: false,
               message: `BLOCKED: confirmation request failed for ${action.type}`,
             });
-            break;
+            aborted = true;
+            continue;
           }
         }
         filtered.push(action);
       }
 
-      // If all actions were blocked, return the pre-results without messaging
-      // the content script.
+      // If all actions were blocked, return the aligned pre-results without
+      // messaging the content script.
       if (filtered.length === 0) {
         return preResults;
       }
 
-      // Execute the filtered actions via the content script.
+      // Execute the filtered actions via the content script. `preResults`
+      // already holds one entry for every blocked/declined action, so the
+      // concatenation yields exactly one ActionResult per input action.
       const execResults = await executeActionsInTab(tabId, filtered);
       return [...preResults, ...(execResults as ActionResult[])];
     },

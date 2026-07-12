@@ -11,6 +11,7 @@
  */
 
 import { Protocol, type LLMRequest } from "../route/client";
+import { zodToJsonSchema } from "../zod-json-schema";
 
 const ADAPTER = "anthropic-messages";
 export const DEFAULT_BASE_URL = "https://api.anthropic.com";
@@ -102,25 +103,16 @@ async function fromRequest(request: LLMRequest): Promise<AnthropicBody> {
     // to Anthropic's input_schema. The raw Zod schema object is not serializable
     // and would be sent as-is (with internal Zod properties), causing 400 errors.
     // If `request.schema` is already a plain JSON Schema, forward it as-is and
-    // never silently emit a raw Zod object.
+    // never silently emit a raw Zod object. A Zod object that can't be converted
+    // throws a clear error via `zodToJsonSchema`.
     let jsonSchema: unknown;
     try {
-      const zNS = (await import("zod")).z as unknown as { toJSONSchema?: (s: unknown) => unknown };
-      if (isZodSchema(request.schema)) {
-        if (typeof zNS.toJSONSchema === "function") {
-          jsonSchema = zNS.toJSONSchema(request.schema);
-        } else {
-          throw new Error(
-            "Structured-output schema is a Zod object but `z.toJSONSchema` is unavailable (requires Zod v4). " +
-            "Upgrade Zod or pass a plain JSON Schema."
-          );
-        }
-      } else {
-        jsonSchema = request.schema;
-      }
+      jsonSchema = isZodSchema(request.schema)
+        ? await zodToJsonSchema(request.schema)
+        : request.schema;
     } catch (err) {
       // Surface configuration/serialization errors clearly. Only swallow an
-      // import failure when the schema is already a usable plain JSON Schema.
+      // error when the schema is already a usable plain JSON Schema.
       if (!isZodSchema(request.schema)) {
         jsonSchema = request.schema;
       } else {
@@ -206,7 +198,9 @@ export const protocol: Protocol<AnthropicBody, string, { type: string; content?:
             // estimateCost bill each at its own rate (fixes under-billing).
             cachedInputTokens: cacheRead,
             cachedWriteInputTokens: cacheCreation,
-            reasoningTokens: prev?.reasoningTokens,
+            // Extended-thinking reasoning tokens (Anthropic bills these at the
+            // `out` rate). Surface them so consumers can attribute think-budget usage.
+            reasoningTokens: u.output_tokens_details?.reasoning_tokens ?? prev?.reasoningTokens,
             model: "",
             costUsd: 0,
           };
@@ -222,14 +216,16 @@ export const protocol: Protocol<AnthropicBody, string, { type: string; content?:
             tokensOut: data.usage.output_tokens ?? prev?.tokensOut ?? 0,
             cachedInputTokens: prev?.cachedInputTokens,
             cachedWriteInputTokens: prev?.cachedWriteInputTokens,
-            reasoningTokens: prev?.reasoningTokens,
+            reasoningTokens: data.usage.output_tokens_details?.reasoning_tokens ?? prev?.reasoningTokens,
             model: "",
             costUsd: 0,
           };
         }
       } catch {
         // Non-JSON frame — surface for debugging instead of discarding silently.
-        console.warn("[anthropic-messages] Skipping non-JSON SSE frame:", frame);
+        // Log only the byte length; the raw frame can contain model output /
+        // scraped page content (PII, secrets) that must not leak into logs.
+        console.warn(`[anthropic-messages] Skipping non-JSON SSE frame (${frame.length} bytes)`);
       }
       return { state, events };
     },
@@ -237,8 +233,8 @@ export const protocol: Protocol<AnthropicBody, string, { type: string; content?:
       try {
         return JSON.parse(frame).type === "message_stop";
       } catch {
-        // Non-JSON frame — not a terminal marker; log for debugging.
-        console.warn("[anthropic-messages] Terminal check on non-JSON SSE frame:", frame);
+        // Non-JSON frame — not a terminal marker; log for debugging (length only).
+        console.warn(`[anthropic-messages] Terminal check on non-JSON SSE frame (${frame.length} bytes)`);
         return false;
       }
     },

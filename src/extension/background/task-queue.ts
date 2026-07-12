@@ -136,7 +136,20 @@ export async function fireNotifications(task: string, success?: boolean): Promis
         safeUrl = null;
       }
       if (!safeUrl) {
-        console.warn(`[task-queue] skipping webhook — URL must be absolute http(s): ${webhookUrl}`);
+        // Log only the host, never the full URL: webhook endpoints (Slack,
+        // Discord, custom) frequently embed secret bearer tokens in the path
+        // or query (e.g. https://hooks.slack.com/services/T000/B000/XXXX).
+        // Leaking the raw URL into the service-worker console exposes that
+        // credential in shared logs / bug reports / screen recordings.
+        let redactedHost = "(unknown host)";
+        try {
+          redactedHost = new URL(webhookUrl).host;
+        } catch {
+          /* leave default */
+        }
+        console.warn(
+          `[task-queue] skipping webhook — URL must be absolute http(s): ${redactedHost}`,
+        );
       } else {
         const payload = {
           success: success ?? false,
@@ -144,11 +157,18 @@ export async function fireNotifications(task: string, success?: boolean): Promis
           task,
           timestamp: Date.now(),
         };
+        // Bound the request with a 5s timeout so a slow/hanging endpoint does
+        // not retain a connection inside the MV3 service worker indefinitely.
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5000);
         fetch(safeUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
-        }).catch(() => { /* non-fatal */ });
+          signal: controller.signal,
+        })
+          .catch(() => { /* non-fatal */ })
+          .finally(() => clearTimeout(timer));
       }
     }
   } catch {

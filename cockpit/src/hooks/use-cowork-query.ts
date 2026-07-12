@@ -72,9 +72,24 @@ const JSON_HEADERS: HeadersInit = {
   ...(COWORK_TOKEN ? { "X-Cowork-Token": COWORK_TOKEN } : {}),
 };
 
-async function getJson<T>(url: string): Promise<T> {
-  const r = await fetch(url, { headers: JSON_HEADERS });
-  // Read the body once so we can both validate it and surface a useful message.
+/**
+ * Validate a fetch `Response` and parse its body into `T`.
+ *
+ * This is the single choke-point for ALL cockpit API reads (REST list hooks
+ * via `getJson`, and the chat POST via `useSendChat`). It enforces:
+ *   1. HTTP success (`r.ok`) — otherwise throw with the status + a body
+ *      snippet so failures are actionable rather than opaque.
+ *   2. `Content-Type: application/json` — an HTML error page or gateway
+ *      response is rejected rather than blindly `JSON.parse`'d.
+ *   3. A non-`{ error }` envelope — a 200 that carries `{ "error": "..." }`
+ *      is treated as a failure so an outage is never masked as "no data".
+ *
+ * Note: this asserts the *top-level* response shape only. Per-element
+ * contract validation (e.g. zod on `Sample*`) is intentionally left to the
+ * view layer / types — adding a schema dependency here would be heavier than
+ * the contract drift risk warrants.
+ */
+async function parseApiResponse<T>(r: Response, url: string): Promise<T> {
   const contentType = r.headers.get("content-type") ?? "";
   const text = await r.text();
   if (!r.ok) {
@@ -97,16 +112,43 @@ async function getJson<T>(url: string): Promise<T> {
     "error" in data &&
     (data as { error?: unknown }).error
   ) {
-    throw new Error(`Backend error from ${url}: ${(data as { error?: unknown }).error}`);
+    throw new Error(`Backend error from ${url}: ${String((data as { error?: unknown }).error)}`);
   }
   return data as T;
 }
 
+async function getJson<T>(url: string): Promise<T> {
+  const r = await fetch(url, { headers: JSON_HEADERS });
+  // Delegate all validation + parsing to the shared helper so every cockpit
+  // read applies the same content-type + error-envelope guards.
+  return parseApiResponse<T>(r, url);
+}
+
 /**
- * Extract the first non-empty array among the API payload values. Returns
- * `[]` if nothing useful is found — never returns fabricated data.
+ * Extract the list payload for a view.
+ *
+ * When `respKey` is provided, the hook has a deterministic contract: the
+ * response MUST be an object carrying an array at `respKey` (e.g.
+ * `{ "tabs": [...] }`). If that array is missing or non-array, we throw —
+ * this is a contract violation / degraded backend response and must NOT be
+ * silently turned into an empty list (which would mask an outage as "no
+ * data"). The "first array wins" scan is reserved strictly for endpoints that
+ * genuinely have no `respKey`; in that case a non-array-but-valid payload
+ * yields `[]` (a legitimately empty dataset), never fabricating data.
  */
-function pickList<T>(payload: unknown): T[] {
+function pickList<T>(payload: unknown, respKey?: string): T[] {
+  if (respKey) {
+    if (!payload || typeof payload !== "object") {
+      throw new Error(`Expected object response with key "${respKey}"`);
+    }
+    const value = (payload as Record<string, unknown>)[respKey];
+    if (!Array.isArray(value)) {
+      throw new Error(
+        `Expected array at "${respKey}" but got ${typeof value} (backend contract drift / outage?)`,
+      );
+    }
+    return value as T[];
+  }
   if (Array.isArray(payload)) return payload as T[];
   if (payload && typeof payload === "object") {
     for (const v of Object.values(payload as Record<string, unknown>)) {
@@ -124,18 +166,20 @@ function pickList<T>(payload: unknown): T[] {
  * @param key      TanStack query key segments after the shared "cowork" root.
  * @param url      Relative API URL (e.g. "/api/cowork/tabs").
  * @param respKey  Optional named key in the JSON response (e.g. "tabs"). When
- *                 provided, the hook prefers `data[respKey] ?? data` so a
- *                 route returning `{ tabs: [...] }` is decoded deterministically
- *                 (instead of relying on `pickList`'s "first array wins"
- *                 scan, which can pick the wrong field if a route ever adds a
- *                 second array).
+ *                 provided, the hook requires `data[respKey]` to be a present
+ *                 array so a route returning `{ tabs: [...] }` is decoded
+ *                 deterministically (instead of relying on `pickList`'s
+ *                 "first array wins" scan, which can pick the wrong field if a
+ *                 route ever adds a second array — or mask a degraded response
+ *                 as an empty list). If the key is absent or not an array, the
+ *                 query enters `isError` rather than silently showing "no data".
  */
 function createQueryHook<T>(key: string[], url: string, respKey?: string) {
   return () => useQuery<T[]>({
     queryKey: ["cowork", ...key],
     queryFn: async () => {
       const data = await getJson<Record<string, unknown>>(url);
-      return pickList<T>(respKey ? data[respKey] ?? data : data);
+      return pickList<T>(data, respKey);
     },
     ...TQ,
   });
@@ -209,8 +253,13 @@ export function useSendChat() {
         // with an AbortError and TanStack Query surfaces it via `onError`.
         signal: payload.signal,
       });
-      if (!r.ok) throw new Error(`chat ${r.status}`);
-      return r.json();
+      // Reuse the shared API-response validator so the chat POST gets the same
+      // content-type + `{ error }` envelope guards as the REST list hooks
+      // (instead of blindly `r.json()`-ing an HTML error page or a 200
+      // `{ "error": ... }` payload, which would crash the chat renderer).
+      // The `any` return preserves the caller's `data.content` / `data.error`
+      // access in chat-view.tsx without a schema change here.
+      return parseApiResponse<any>(r, "/api/cowork/ai/chat");
     },
     // No cache invalidation here — chat state is local `useState` in the chat
     // view, not a TanStack Query. If a future chat-history query is added, it

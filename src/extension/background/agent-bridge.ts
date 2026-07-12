@@ -116,6 +116,19 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
   /** Stream a {@link LogEvent} to the side panel + persist step count.
    * Declared at the top of the function so the early `tab.id` check below can
    * call it before `runState` is constructed. */
+  // Declared UP FRONT (before `sendEvent`) so the TDZ can never bite:
+  // `sendEvent` reads `runState.step` in its navigator-step-start branch, but
+  // that branch only fires after `runState` is assigned at run start (line
+  // below). Hoisting the declaration above the closure removes any chance of a
+  // ReferenceError if a future change makes an early (pre-assignment) event
+  // touch `runState` (finding: latent TDZ / ordering fragility in sendEvent
+  // closure).
+  // `runState` is held in a `const` ref so the `sendEvent` closure (declared
+  // below, before `runState` is constructed) can read it without risking a
+  // TDZ ReferenceError if an early (pre-run-start) event ever touches it. The
+  // `const` ref satisfies `prefer-const`; the mutable payload lives on
+  // `.current`, which stays `null` until run start assigns it.
+  const runStateRef: { current: RunState | null } = { current: null };
   const sendEvent = (event: LogEvent): void => {
     chrome.runtime
       .sendMessage({
@@ -140,9 +153,11 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
       // (finding: runState.step is never updated in memory; only persisted via
       // delta). Otherwise `handleTabAction`'s notify events report step 0.
       // Gated on `runFinished` so a late step event after cleanup can't
-      // resurrect the persisted run-state (finding: late saveRunState).
-      if (!runFinished) {
-        runState.step = event.step;
+      // resurrect the persisted run-state (finding: late saveRunState). Also
+      // guarded by `runState` being assigned, so an early (pre-run) event can
+      // never dereference an undefined object.
+      if (runStateRef.current && !runFinished) {
+        runStateRef.current.step = event.step;
         saveRunState({ step: event.step }).catch(() => {
           /* best-effort persistence */
         });
@@ -241,7 +256,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
   const modeCap = MODE_CONFIGS[effectiveMode].maxSteps;
   const cfgMaxSteps = Math.min(clampInt(stored.maxSteps, maxSteps, 1, 1000), modeCap);
 
-  const runState: RunState = {
+  runStateRef.current = {
     task,
     maxSteps: cfgMaxSteps,
     mode: effectiveMode,
@@ -258,7 +273,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
   // be rejected with "already starting". On throw, release the guard,
   // surface an error event, and bail out cleanly so the user can retry.
   try {
-    await initRunState(runState);
+    await initRunState(runStateRef.current);
   } catch (e) {
     sendEvent({
       type: "error",

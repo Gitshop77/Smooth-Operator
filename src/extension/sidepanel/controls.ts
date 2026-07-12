@@ -70,7 +70,11 @@ export function setRunning(v: boolean): void {
   // Sync the lifecycle icon + task badge to the new run state.
   setLifecycle(v ? "thinking" : "idle");
   setTaskStatus(v ? "running" : "pending");
-  if (!v) clearThinkingPanel();
+  // NOTE: the reasoning (thinking) panel is intentionally NOT cleared here when
+  // the run stops — clearing it would discard the reviewable reasoning history
+  // after completion. The panel is cleared explicitly when a NEW run starts
+  // (see the runBtn handler), so this only preserves history between a finished
+  // run and the next one.
 }
 
 // ─── Mid-run model switching (S5) ───────────────────────────────────────────
@@ -153,9 +157,25 @@ stopBtn.addEventListener("click", () => {
   stopDebounceTimer = setTimeout(() => { stopDebounceTimer = null; }, 1000);
   stopBtn.disabled = true;
   chrome.runtime.sendMessage({ type: "STOP" }, () => {
-    if (chrome.runtime.lastError) console.warn("[sidepanel] STOP failed:", chrome.runtime.lastError);
+    if (chrome.runtime.lastError) {
+      // The STOP message couldn't be delivered (e.g. the SW crashed or the
+      // extension context was invalidated). Re-enable the stop button and show
+      // an error row so the user isn't locked out of both controls until the
+      // panel is reloaded.
+      stopBtn.disabled = false;
+      addLogRow(
+        {
+          type: "error",
+          step: 0,
+          message: `Stop failed: ${chrome.runtime.lastError.message || "extension context unavailable"}`,
+          recoverable: true,
+        },
+        ""
+      );
+      return;
+    }
+    addLogRow({ type: "info", message: "Stopping after current step…" }, "");
   });
-  addLogRow({ type: "info", message: "Stopping after current step…" }, "");
 });
 
 // ─── Pause button ───────────────────────────────────────────────────────────

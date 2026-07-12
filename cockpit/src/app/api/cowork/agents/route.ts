@@ -1,6 +1,6 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
-import { json, withRouteError, parseLimit } from '@/lib/cowork/api/http';
+import { json, withRouteError, parseLimit, badRequest } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
 export async function GET(req: NextRequest): Promise<Response> {
@@ -8,7 +8,21 @@ export async function GET(req: NextRequest): Promise<Response> {
     // Cap `limit` to a hard max (parseLimit default 100, max 200) so a single
     // authenticated GET can't pull the entire agent-trust table in one shot.
     const limit = parseLimit(req);
-    const agentId = req.nextUrl.searchParams.get('agentId') || undefined;
+    // `agentId` is forwarded straight into the Prisma `where` filter. Prisma
+    // parameterizes it (no SQLi), but previously an arbitrarily long (multi-MB)
+    // string was accepted and forwarded to the DB, bloating request size and
+    // query-parse work. Bound it to ≤ 128 chars (consistent with the `sessionId`
+    // cap on other routes) and reject control/whitespace characters. An absent
+    // param or an empty value (`?agentId=`) still means "no filter", preserving
+    // the prior `|| undefined` behaviour.
+    const rawAgentId = req.nextUrl.searchParams.get('agentId');
+    let agentId: string | undefined;
+    if (rawAgentId !== null && rawAgentId !== '') {
+      if (rawAgentId.length > 128 || /[\s\u0000-\u001f]/.test(rawAgentId)) {
+        return badRequest('Invalid agentId; must be 1-128 chars with no control/whitespace characters');
+      }
+      agentId = rawAgentId;
+    }
     const agents = await db.agentTrust.findMany({
       where: agentId ? { agentId } : undefined,
       orderBy: { grantedAt: 'desc' },

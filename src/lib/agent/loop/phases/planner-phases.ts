@@ -17,6 +17,7 @@ import type {
 import type { LoopState, CallPlannerResult, HandlePlannerDecisionResult, HandleNavigatorDoneResult, RunPeriodicPlannerCheckResult } from "../types";
 import { runPlanner, maybeJudgeAndFinalize, makeCtx, addCost, addTokens, costCapExceeded } from "../helpers";
 import { GOAL_WARN_THRESHOLD } from "../loop-detector";
+import { classifyError, friendlyErrorMessage, type ClassifiedError } from "../../errors";
 
 /**
  * Call the planner LLM and handle the error classification + failure-tracking
@@ -53,10 +54,26 @@ export async function callPlannerAndHandleError(
       state.finalResult = { success: false, text: msg };
       return { status: "abort" };
     }
-    const classified = (await import("../../errors")).classifyError(e);
+    // Classify the error for the error event + abort/retry decision. Wrapped
+    // in its own try/catch so a failure to load/run the classifier can never
+    // swallow the real reason: if classification itself throws (or the module
+    // failed to resolve), we fall back to the raw message and treat it as a
+    // non-fatal transient error. Without this guard, a throwing classifier
+    // would propagate out of `callPlannerAndHandleError` entirely — no `done`
+    // event and no `state.finalResult`, which is exactly the lost-reason
+    // failure mode the surrounding code is careful to avoid.
+    let classified: ClassifiedError;
+    let errorMessage: string;
+    try {
+      classified = classifyError(e);
+      errorMessage = friendlyErrorMessage(classified);
+    } catch {
+      classified = { category: "unknown", fatal: false, retryable: true, message: msg, originalError: e };
+      errorMessage = msg;
+    }
     onEvent({
       type: "error", step,
-      message: (await import("../../errors")).friendlyErrorMessage(classified),
+      message: errorMessage,
       recoverable: !classified.fatal,
     });
     if (classified.fatal || classified.category === "cancelled") {

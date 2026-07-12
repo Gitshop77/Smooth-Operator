@@ -12,6 +12,7 @@
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import type { ActionContext } from "./types";
+import { redactDialogText } from "../../dom/popup-handler";
 
 export async function handleAlertAccept(
   _ctx: ActionContext,
@@ -35,7 +36,9 @@ export async function handleAlertAccept(
     return {
       action,
       success: true,
-      message: `Accepted JS dialog: "${text.slice(0, 100)}"`,
+      // Redact the dialog text — it may contain OTP/2FA codes, PII, or session
+      // tokens, and this message is echoed into service-worker / cockpit logs.
+      message: `Accepted JS dialog: ${redactDialogText(text)}`,
     };
   } catch (e) {
     return {
@@ -65,7 +68,9 @@ export async function handleAlertDismiss(
     return {
       action,
       success: true,
-      message: `Dismissed JS dialog: "${text.slice(0, 100)}"`,
+      // Redact the dialog text — it may contain OTP/2FA codes, PII, or session
+      // tokens, and this message is echoed into service-worker / cockpit logs.
+      message: `Dismissed JS dialog: ${redactDialogText(text)}`,
     };
   } catch (e) {
     return {

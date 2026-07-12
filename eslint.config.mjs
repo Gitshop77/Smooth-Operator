@@ -39,9 +39,12 @@ const sharedRules = {
 };
 
 export default [
-  // .ts files: TS parser + TS-aware no-unused-vars.
+  // .ts / .tsx files: TS parser + TS-aware no-unused-vars. The glob also
+  // matches `.tsx` so JSX in extension/agent `.tsx` files is parsed by the
+  // TypeScript parser rather than falling through to espree (which cannot
+  // parse TS/JSX and would make `npm run lint` fail with parse errors).
   {
-    files: ["**/*.ts"],
+    files: ["**/*.ts", "**/*.tsx"],
     languageOptions: {
       parser: tsParser,
     },

@@ -18,7 +18,7 @@ import { PROVIDER_META, DEFAULT_PROVIDER_ID, catalogIdFor } from "./providers";
  * surfaced verbatim. Non-key error text is returned unchanged.
  */
 export function redactKeyLeak(s: string): string {
-  const KEY_RE = /(sk-ant-[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+|AIza[A-Za-z0-9_-]+|ya29\.[A-Za-z0-9_-]+|ghp_[A-Za-z0-9_-]+|gho_[A-Za-z0-9_-]+|ghu_[A-Za-z0-9_-]+|ghs_[A-Za-z0-9_-]+|ghr_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+|glpat-[A-Za-z0-9_-]+|gsk_[A-Za-z0-9_-]+|xox[baprs]-[A-Za-z0-9_-]+|xai-[A-Za-z0-9_-]+|eyJ[A-Za-z0-9_-]+|AKIA[0-9A-Z]{16})/g;
+  const KEY_RE = /(sk-ant-[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+|AIza[A-Za-z0-9_-]+|ya29\.[A-Za-z0-9_-]+|ghp_[A-Za-z0-9_-]+|gho_[A-Za-z0-9_-]+|ghu_[A-Za-z0-9_-]+|ghs_[A-Za-z0-9_-]+|ghr_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+|glpat-[A-Za-z0-9_-]+|gsk_[A-Za-z0-9_-]+|xox[baprs]-[A-Za-z0-9_-]+|xai-[A-Za-z0-9_-]+|eyJ[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*|AKIA[0-9A-Z]{16})/g;
   return s.replace(KEY_RE, (m) => {
     const dash = m.indexOf("-");
     const prefix = dash > 0 ? m.slice(0, dash + 1) : m.slice(0, 4);
@@ -38,6 +38,10 @@ let lastProvider = "";
 export function updateProviderUI(): void {
   const provider = ($("provider") as HTMLSelectElement).value;
   const meta = PROVIDER_META[provider] || PROVIDER_META[DEFAULT_PROVIDER_ID];
+  // A *real* provider change (vs. the initial call) is what may carry a stale
+  // baseUrl from the previous provider. Track the last provider so we can tell
+  // the two apart instead of clobbering a user's custom URL on first paint.
+  const providerChanged = lastProvider !== "" && lastProvider !== provider;
   lastProvider = provider;
   ($("provider-hint") as HTMLElement).textContent = meta.hint;
   const keyInput = $("apiKey") as HTMLInputElement;
@@ -52,16 +56,20 @@ export function updateProviderUI(): void {
   if (meta.defaultBaseUrl) {
     baseUrlLabel.classList.remove("is-hidden");
     baseUrlInput.placeholder = meta.defaultBaseUrl;
-    // Only fill with the catalog default when the field is empty, so a
-    // user-set custom baseUrl is preserved across provider switches
-    // (previously `isProviderChange` clobbered it with the default).
-    if (!baseUrlInput.value) {
+    // On a genuine provider change, always swap in the NEW provider's default
+    // baseUrl — the previous provider's custom URL must not leak to it (that
+    // would send requests to the wrong endpoint). Otherwise only fill the
+    // default when the field is empty, so a user-set custom baseUrl on the
+    // SAME provider is preserved.
+    if (providerChanged || !baseUrlInput.value) {
       baseUrlInput.value = meta.defaultBaseUrl;
     }
   } else {
     baseUrlLabel.classList.add("is-hidden");
     baseUrlInput.placeholder = "";
-    // Leave any user-entered value intact rather than wiping it on switch.
+    // Providers without a default have no canonical endpoint — clear any
+    // leftover value from a previous provider so it isn't sent by mistake.
+    if (providerChanged) baseUrlInput.value = "";
   }
 }
 
@@ -122,6 +130,11 @@ $("testConnection")?.addEventListener("click", async () => {
 // ─── Model search (models.dev catalog) ──────────────────────────────────────
 
 let modelSearchTimer: ReturnType<typeof setTimeout> | null = null;
+// Monotonic token identifying the latest scheduled search. When an earlier
+// search's async `searchModels` promise resolves after a newer keystroke has
+// already fired, we discard the stale result so the dropdown only ever shows
+// matches for the CURRENT text-box contents.
+let modelSearchToken = 0;
 
 /** Populate the model datalist from the models.dev catalog. */
 export async function populateModelSuggestions(): Promise<void> {
@@ -156,10 +169,13 @@ $("model")?.addEventListener("input", () => {
     resultsDiv.classList.add("is-hidden");
     return;
   }
+  const myToken = ++modelSearchToken;
   modelSearchTimer = setTimeout(async () => {
     try {
       const { searchModels, formatCost, formatContext, formatVision } = await import("../../lib/agent/llm/catalog");
       const results = await searchModels(query, 10);
+      // A newer keystroke has superseded this search — drop the stale result.
+      if (myToken !== modelSearchToken) return;
       if (results.length === 0) {
         resultsDiv.classList.add("is-hidden");
         return;

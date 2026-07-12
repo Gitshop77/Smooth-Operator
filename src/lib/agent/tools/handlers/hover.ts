@@ -22,12 +22,12 @@ export async function handleHover(
   const clientX = Math.round(rect.left + rect.width / 2);
   const clientY = Math.round(rect.top + rect.height / 2);
   // Simulate a real hover. When a pointer enters a new element the browser
-  // emits `mouseout` on the element left behind, then `mouseover` (which
-  // bubbles and carries the `relatedTarget` of the element just left) on the
-  // element entered, followed by `mouseenter` (the non-bubbling enter event),
-  // and finally `mousemove` with the pointer coordinates. We dispatch all
-  // three so hover widgets keyed off `mouseover`, `mouseenter`, or
-  // `mousemove` all open correctly.
+  // first emits `mouseover` (which bubbles and carries the `relatedTarget` of
+  // the element just left) on the element entered, then a non-bubbling
+  // `mouseenter` on that same element, then `mousemove` with the pointer
+  // coordinates. We dispatch all three with the expected fields so hover
+  // widgets keyed off any of `mouseover` (+`relatedTarget`), `mouseenter`, or
+  // `mousemove` (+coordinates) open correctly.
   el.dispatchEvent(
     new MouseEvent("mouseover", {
       bubbles: true,

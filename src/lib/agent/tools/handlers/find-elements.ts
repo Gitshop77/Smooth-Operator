@@ -118,13 +118,17 @@ export async function handleFindElements(
     matchedEls = res.els;
   }
 
-  const els = matchedEls.slice(0, action.max_results ?? 50);
+  // Schema caps `max_results` at 200; clamp defensively so a value that
+  // bypassed validation can't produce a runaway payload fed back into the
+  // LLM context / persisted history.
+  const cap = Math.min(action.max_results ?? 50, 200);
+  const els = matchedEls.slice(0, cap);
   const attrs = action.attributes;
   const results = await Promise.all(els.map(async (el, i) => {
     if (attrs) {
       const picked: Record<string, string> = {};
       for (const a of attrs) {
-        let v = el.getAttribute(a) || "";
+        let v = (el.getAttribute(a) || "").slice(0, LIMITS.findElementsTextChars);
         // Never return a raw sensitive value (password / OTP / credit-card /
         // hidden token) — a page could be probed for secret-laden attributes,
         // and `isSensitive` mirrors the DOM extractor's sensitivity check.

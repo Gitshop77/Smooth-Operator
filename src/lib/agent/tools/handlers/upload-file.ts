@@ -16,6 +16,9 @@ export async function handleUploadFile(
 ): Promise<ActionResult> {
   const { state } = ctx;
   const el = resolveElement(state, action.index);
+  if (!el) {
+    throw new Error(`element [${action.index}] not found`);
+  }
   if (!(el instanceof HTMLInputElement) || el.type !== "file") {
     throw new Error(`element [${action.index}] is not a file input`);
   }

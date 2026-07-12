@@ -24,7 +24,7 @@
  */
 
 import type { HistoryItem } from "../types";
-import { isEquivalentAction } from "../tools/schema";
+import { isEquivalentAction, type Action } from "../tools/schema";
 
 /** Configurable thresholds for the two early-stop conditions. */
 export interface EarlyStopThresholds {
@@ -57,6 +57,17 @@ export interface EarlyStopResult {
 const REPEATABLE_ACTION_TYPES = new Set<string>(["input", "alert_send_keys"]);
 
 /**
+ * Clamp a threshold to a positive integer. A non-positive, NaN, or missing
+ * value falls back to `fallback` so `earlyStop` can't be trivially disabled
+ * (parsingFailure<=0 → stop on the first step) or made degenerate
+ * (repeatingAction<=0 → `slice(-0)` returns the whole action array).
+ */
+function clampThreshold(v: unknown, fallback: number): number {
+  const n = Math.floor(Number(v));
+  return Number.isFinite(n) && n >= 1 ? n : fallback;
+}
+
+/**
  * Check whether the run should early-stop.
  *
  * The caller passes in:
@@ -74,20 +85,35 @@ export function earlyStop(
   consecutiveParseFailures: number,
   thresholds: EarlyStopThresholds = DEFAULT_EARLY_STOP_THRESHOLDS,
 ): EarlyStopResult {
+  // Normalize + clamp the (possibly attacker-influenced / misconfigured)
+  // thresholds so a non-positive value can't abort every run instantly or
+  // make the repeating-action slice degenerate (e.g. slice(-0) returns the
+  // whole array).
+  const parsingFailure = clampThreshold(thresholds.parsingFailure, DEFAULT_EARLY_STOP_THRESHOLDS.parsingFailure);
+  const repeatingAction = clampThreshold(thresholds.repeatingAction, DEFAULT_EARLY_STOP_THRESHOLDS.repeatingAction);
+  const parseFails = Number.isFinite(consecutiveParseFailures) && consecutiveParseFailures > 0
+    ? Math.floor(consecutiveParseFailures)
+    : 0;
+
   // Case 1: K consecutive parse failures.
-  if (consecutiveParseFailures >= thresholds.parsingFailure) {
+  if (parseFails >= parsingFailure) {
     return {
       stop: true,
-      reason: `Failed to parse actions for ${consecutiveParseFailures} consecutive steps`,
+      reason: `Failed to parse actions for ${parseFails} consecutive steps`,
     };
   }
 
   // Case 2: last K actions are all equivalent to the last action (and the
   // last action isn't a legitimately-repeatable TYPE-like action).
-  const allActions = history.flatMap((h) => h.results.map((r) => r.action));
+  // Filter out any results with no associated action so a malformed/empty
+  // history entry can't crash the index into `lastAction.type`.
+  const allActions = history
+    .flatMap((h) => h.results.map((r) => r.action))
+    .filter((a): a is Action => a != null);
   if (allActions.length === 0) return { stop: false, reason: "" };
   const lastAction = allActions[allActions.length - 1];
-  const k = thresholds.repeatingAction;
+  if (!lastAction) return { stop: false, reason: "" };
+  const k = repeatingAction;
   const lastK = allActions.slice(-k);
   if (lastK.length < k) return { stop: false, reason: "" };
 

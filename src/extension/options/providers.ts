@@ -66,9 +66,6 @@ export const PROVIDER_META: Record<string, ProviderDef> = Object.fromEntries(
   PROVIDERS.map((p) => [p.id, p]),
 );
 
-/** Just the provider ids, in display order. */
-export const PROVIDER_IDS: string[] = PROVIDERS.map((p) => p.id);
-
 /** The provider metadata used as the implicit default when a saved id is unknown. */
 export const DEFAULT_PROVIDER_ID = "openai";
 

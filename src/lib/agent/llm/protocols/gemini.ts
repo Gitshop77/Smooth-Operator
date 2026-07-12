@@ -9,6 +9,7 @@
 
 import { Protocol, type LLMRequest } from "../route/client";
 import { encodeModelIdForUrl } from "../modelId";
+import { zodToJsonSchema } from "../zod-json-schema";
 
 const ADAPTER = "gemini";
 export const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -110,18 +111,7 @@ async function fromRequest(request: LLMRequest): Promise<GeminiBody> {
     // rather than being POSTed as a raw Zod object (opaque `400`).
     let jsonSchema: unknown;
     if (isZodSchema(request.schema)) {
-      try {
-        const zNS = (await import("zod")).z as unknown as { toJSONSchema?: (s: unknown) => unknown };
-        if (typeof zNS.toJSONSchema === "function") {
-          jsonSchema = zNS.toJSONSchema(request.schema);
-        } else {
-          throw new Error("z.toJSONSchema is unavailable in this Zod version");
-        }
-      } catch (e) {
-        throw new Error(
-          `Failed to convert response schema to JSON Schema: ${e instanceof Error ? e.message : String(e)}`
-        );
-      }
+      jsonSchema = await zodToJsonSchema(request.schema);
     } else {
       jsonSchema = request.schema;
     }
@@ -160,7 +150,9 @@ export const protocol: Protocol<GeminiBody, string, { type: string; content?: st
       try {
         data = JSON.parse(frame);
       } catch {
-        console.warn(`[gemini] Dropping non-JSON SSE frame: ${frame.slice(0, 200)}`);
+        // Log only the byte length — the raw frame can carry model output or
+        // scraped page content (PII, secrets) that must not leak into logs.
+        console.warn(`[gemini] Dropping non-JSON SSE frame (${frame.length} bytes)`);
         return { state, events };
       }
       const dataAny = data as { error?: { message?: string } | string };

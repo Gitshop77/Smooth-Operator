@@ -673,17 +673,23 @@ describe("cowork-events HTTP server (integration)", () => {
     // required) — the rate-limit counter is incremented BEFORE the body
     // validation, so 10 × 400 consumes the budget and the 11th gets 429.
     //
-    // This test MUST be the only test that makes /chat or /image requests
-    // (other than the 413 test above, which returns before the rate-limit
-    // check). The rate-limit counter is in-process and shared across the
-    // whole test suite — if a prior test had already consumed the budget
-    // for 127.0.0.1, the 11th request here would still be 429 but the
-    // first 10 would NOT be 400 (they'd be 429 too). The assertion below
-    // checks BOTH the first 10 (400) AND the 11th (429) so the test fails
-    // loudly if the counter was non-zero at start.
+    // The rate-limit counter is a fixed-window, in-process Map keyed by
+    // client IP and shared across the WHOLE test suite. Other tests in this
+    // file legitimately make /emit and /chat requests against 127.0.0.1,
+    // which would consume the shared per-IP budget and leave this test's
+    // first requests returning 429 (exhausted) instead of 400 (validation).
+    // To test the per-IP rate-limit feature in isolation WITHOUT weakening
+    // the assertions, send a dedicated, otherwise-unused client IP via the
+    // `X-Real-IP` header (the same header the production Caddy proxy sets
+    // per-connection). That gives this test its own fresh budget so the
+    // first 10 requests correctly fail body validation (400) and only the
+    // 11th exceeds the limit (429). HTTP 429 is the CORRECT status for rate
+    // limiting — the code is right, not the stale 400 the test used to
+    // expect.
     const headers: HeadersInit = {
       "Content-Type": "application/json",
       "X-Cowork-Token": token,
+      "X-Real-IP": "203.0.113.77",
     };
     const emptyBody = JSON.stringify({ messages: [] });
     // First 10: should pass rate limit + fail body validation → 400.
@@ -881,18 +887,25 @@ describe("cowork-events socket.io (integration)", () => {
       timeout: 5000,
     });
 
-    const result = await new Promise<{ status: unknown; replay: unknown[] }>((resolve) => {
-      const data: { status: unknown; replay: unknown[] } = { status: null, replay: [] };
-      c.on("system:status", (s) => {
-        data.status = s;
-      });
-      c.on("events:replay", (e) => {
-        data.replay = e as unknown[];
-        resolve(data);
-      });
-      // Fallback: resolve whatever we have even if events:replay never fires.
-      setTimeout(() => resolve(data), 3000);
-    });
+    const result = await new Promise<{ status: unknown; replay: unknown[] }>(
+      (resolve, reject) => {
+        const data: { status: unknown; replay: unknown[] } = { status: null, replay: [] };
+        // Fail fast (rather than silently resolving with an empty replay buffer)
+        // if the server never sends `events:replay` after a successful handshake.
+        const failTimer = setTimeout(() => {
+          c.close();
+          reject(new Error("timed out waiting for events:replay after handshake"));
+        }, 3000);
+        c.on("system:status", (s) => {
+          data.status = s;
+        });
+        c.on("events:replay", (e) => {
+          clearTimeout(failTimer);
+          data.replay = e as unknown[];
+          resolve(data);
+        });
+      },
+    );
     c.close();
 
     // The server emits a `system:status` hello packet on every successful

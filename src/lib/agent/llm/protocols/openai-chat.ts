@@ -7,6 +7,7 @@
  */
 
 import { Protocol, type LLMRequest } from "../route/client";
+import { zodToJsonSchema } from "../zod-json-schema";
 
 const ADAPTER = "openai-chat";
 export const DEFAULT_BASE_URL = "https://api.openai.com/v1";
@@ -203,18 +204,7 @@ async function fromRequest(request: LLMRequest): Promise<OpenAIChatBody> {
     // `required`, no `nullable`) so `strict: true` is honored consistently.
     let jsonSchema: unknown;
     if (isZodSchema(request.schema)) {
-      try {
-        const zNS = (await import("zod")).z as unknown as { toJSONSchema?: (s: unknown) => unknown };
-        if (typeof zNS.toJSONSchema === "function") {
-          jsonSchema = zNS.toJSONSchema(request.schema);
-        } else {
-          throw new Error("z.toJSONSchema is unavailable in this Zod version");
-        }
-      } catch (e) {
-        throw new Error(
-          `Failed to convert response schema to JSON Schema: ${e instanceof Error ? e.message : String(e)}`
-        );
-      }
+      jsonSchema = await zodToJsonSchema(request.schema);
     } else {
       jsonSchema = request.schema;
     }
@@ -278,7 +268,9 @@ export const protocol: Protocol<OpenAIChatBody, string, { type: string; content?
       try {
         chunk = JSON.parse(frame);
       } catch {
-        console.warn(`[openai-chat] Dropping non-JSON SSE frame: ${frame.slice(0, 200)}`);
+        // Log only the byte length — the raw frame can carry model output or
+        // scraped page content (PII, secrets) that must not leak into logs.
+        console.warn(`[openai-chat] Dropping non-JSON SSE frame (${frame.length} bytes)`);
         return { state, events };
       }
       const chunkAny = chunk as unknown as { error?: { message?: string } | string };

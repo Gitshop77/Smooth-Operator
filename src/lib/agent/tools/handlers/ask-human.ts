@@ -41,15 +41,17 @@ export async function handleAskHuman(
     }
     const answer = "value" in response ? response.value : "(no text response)";
     if (isPassword) {
-      // Never surface the password in the message or extractedContent —
-      // both fields are replayed into subsequent LLM prompts and persisted
-      // to disk via run-history.ts. The agent should pair this with an
-      // `input` action using a %secret% placeholder.
+      // Never surface the password VALUE in the message or extractedContent —
+      // both fields are replayed into subsequent LLM prompts and persisted to
+      // disk via run-history.ts. The agent should pair this with an `input`
+      // action using a %secret% placeholder. We report only the *length* (so
+      // downstream tooling knows a value was captured) — the actual characters
+      // are never included, keeping the secret redacted.
       return {
         action,
         success: true,
-        message: `User provided a password (${answer.length} chars, redacted)`,
-        extractedContent: `User's password response to "${action.question}": [REDACTED — ${answer.length} chars]`,
+        message: `User provided a password (redacted, ${answer.length} chars)`,
+        extractedContent: `[REDACTED password response — ${answer.length} chars]`,
       };
     }
     return {

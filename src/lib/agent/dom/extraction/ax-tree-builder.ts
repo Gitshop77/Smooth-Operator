@@ -11,9 +11,15 @@
  * module-scoped variables (NOT on `window`). Content scripts share the same
  * `window` object as the page (only the JS execution context differs), so any
  * page could read or overwrite a `window.__openCoworkElementMap` entry and
- * hijack the element an action resolves to. Because the action executor and
- * this extractor share the same module instance in the isolated world, no
- * `window` handle is needed for cross-module access.
+ * hijack the element an action resolves to. Keeping the registry off `window`
+ * is purely a defense against a hostile page hijacking an action's target
+ * element.
+ *
+ * NOTE: AX-tree `ref_NNN` identifiers are OBSERVATION-ONLY. The action executor
+ * resolves action targets through `getSelectorMap()` (numeric indices) from
+ * `page-state`, and never imports or calls `resolveRef`. The off-`window`
+ * design is correct and good, but it does NOT provide cross-module action
+ * resolution — AX-tree refs are not wired to the action executor.
  *
  * Shared DOM classification helpers (`isInteractive`, `isVisible`,
  * `directText`, `SKIP_TAGS`) live in {@link ../utils} (extracted from the
@@ -30,14 +36,16 @@ import {
   SKIP_TAGS,
   isSensitive,
 } from "../utils";
+import { getShadowRoot } from "../annotation/shadow-piercer";
 
 /**
  * Module-scoped element-ref registry.
  *
  * Kept off `window` (see SECURITY note at the top of this file) so a hostile
  * page cannot read or overwrite an entry to hijack an action's target element.
- * The action executor and this extractor share the same module instance in the
- * content-script isolated world, which is sufficient for cross-module access.
+ * AX-tree refs are observation-only (not wired to the action executor, which
+ * uses numeric `getSelectorMap()` indices), so no `window` handle is needed
+ * for cross-module action resolution.
  */
 let elementMap: Record<string, WeakRef<HTMLElement>> | null = null;
 let elementReverseMap: WeakMap<HTMLElement, string> | null = null;
@@ -192,7 +200,22 @@ function getName(el: HTMLElement, labelMap: Map<string, HTMLLabelElement>): stri
     const value = input.getAttribute("value");
     if (type === "submit" && value?.trim()) return value.trim();
     if (isSensitive(el)) return input.value ? "[value redacted]" : "";
-    if (input.value && input.value.length < 50 && input.value.trim()) return input.value.trim();
+    // Truncate long values (e.g. search/address fields) instead of dropping
+    // them — otherwise the navigator LLM can't see the field's current content.
+    if (input.value && input.value.trim()) {
+      const v = input.value.trim();
+      return v.length > NAME_MAX_LENGTH ? v.substring(0, NAME_MAX_LENGTH) + "..." : v;
+    }
+  }
+
+  // Textarea (non-sensitive): surface the live value, mirroring the indexed
+  // tree which reads `el.value` for `<textarea>`. The sensitive case is
+  // redacted separately below.
+  if (tag === "textarea" && !isSensitive(el)) {
+    const v = (el as HTMLTextAreaElement).value;
+    if (v && v.trim()) {
+      return v.length > NAME_MAX_LENGTH ? v.trim().substring(0, NAME_MAX_LENGTH) + "..." : v.trim();
+    }
   }
 
   // Textarea sensitive redaction.
@@ -333,8 +356,12 @@ function buildTree(
     const type = el.getAttribute("type");
     const placeholder = el.getAttribute("placeholder");
     if (href) line += ` href="${href.replace(/"/g, '\\"')}"`;
-    if (type) line += ` type="${type.replace(/"/g, '\\"')}"`;
-    if (placeholder) line += ` placeholder="${placeholder.replace(/"/g, '\\"')}"`;
+    // For sensitive fields (password, credit-card, OTP, hidden CSRF/session
+    // tokens) the *value* is already redacted — but `type`/`placeholder` still
+    // leak what secret the field holds. Suppress them so the field's semantics
+    // aren't exposed to the LLM, consistent with the indexed-tree redactions.
+    if (type && !isSensitive(el)) line += ` type="${type.replace(/"/g, '\\"')}"`;
+    if (placeholder && !isSensitive(el)) line += ` placeholder="${placeholder.replace(/"/g, '\\"')}"`;
     lines.push(line);
 
     // For <select> (non-sensitive), emit child <option> elements.
@@ -353,11 +380,21 @@ function buildTree(
 
   // Recurse into children (skip <option> children of non-sensitive <select> —
   // they were already emitted explicitly above to avoid duplication).
-  if (el.tagName.toLowerCase() !== "select"
-
-      && el.children && depth < maxDepth) {
-    for (const child of Array.from(el.children)) {
-      buildTree(child as HTMLElement, included ? depth + 1 : depth, filter, refId, maxDepth, lines, counter, labelMap);
+  if (depth < maxDepth) {
+    if (el.tagName.toLowerCase() !== "select" && el.children) {
+      for (const child of Array.from(el.children)) {
+        buildTree(child as HTMLElement, included ? depth + 1 : depth, filter, refId, maxDepth, lines, counter, labelMap);
+      }
+    }
+    // Pierce shadow DOM so controls rendered inside open/closed shadow roots
+    // (web components, design systems) are visible to the AX tree — matching
+    // the indexed-tree extractor's shadow-piercing behavior. Without this the
+    // AX tree silently omits shadow-DOM content that the indexed tree sees.
+    const sr = getShadowRoot(el);
+    if (sr) {
+      for (const child of Array.from(sr.children)) {
+        buildTree(child as HTMLElement, included ? depth + 1 : depth, filter, refId, maxDepth, lines, counter, labelMap);
+      }
     }
   }
 }
@@ -389,13 +426,17 @@ export function generateAccessibilityTree(
     );
   }
 
-  // Validate / clamp `depth` to a sane positive integer. Rejects NaN, negative,
-  // and non-integer values that would otherwise yield empty or runaway output.
-  const rawDepth = depth ?? DEFAULT_MAX_DEPTH;
-  const maxDepth =
-    Number.isFinite(rawDepth) && rawDepth >= 1
-      ? Math.floor(rawDepth)
-      : DEFAULT_MAX_DEPTH;
+  // Validate `depth` with the same rigor as `filter`: reject NaN, negative,
+  // non-finite, or non-positive values with a clear error instead of silently
+  // degrading to the default. A fractional (but positive) depth is floored.
+  // (The parameter already defaults to DEFAULT_MAX_DEPTH, so it is never
+  // `undefined` here — the prior `depth ?? DEFAULT_MAX_DEPTH` was dead code.)
+  if (!Number.isFinite(depth) || depth < 1) {
+    throw new TypeError(
+      `Invalid depth: ${JSON.stringify(depth)}. Expected a positive integer (>= 1).`
+    );
+  }
+  const maxDepth = Math.floor(depth);
 
   try {
     const lines: string[] = [];

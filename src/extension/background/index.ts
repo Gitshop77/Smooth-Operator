@@ -160,12 +160,12 @@ chrome.runtime.onConnect.addListener((port) => {
  * by the `./message-routing` import above) is already in place.
  */
 (async () => {
-// wrap the entire SW-startup body in try/catch. The previous
-  // unguarded `await getRunState()` would skip `initScheduledTasks` AND
-  // `requestKeepAwake` if storage rejected (quota exceeded, SW mid-teardown,
-  // Chrome bug) — leaving scheduled-task alarms un-armed on this SW
-  // incarnation. The SW self-heals on the next restart (the IIFE re-runs),
-  // so on catch we just log + return.
+// The run-state notification and the alarm/keep-awake arming are independent
+// concerns. A transient `getRunState()` rejection (quota exceeded, SW
+// mid-teardown, Chrome bug) must NOT block `initScheduledTasks` /
+// `requestKeepAwake` — otherwise scheduled-task alarms stay un-armed for this
+// entire SW incarnation (the SW only self-heals on its next restart). So each
+// concern is wrapped in its own try/catch.
   try {
     const state = await getRunState();
     if (state?.active) {
@@ -186,18 +186,28 @@ chrome.runtime.onConnect.addListener((port) => {
         });
       await clearRunState();
     }
-    // re-arm all enabled scheduled-task alarms on SW startup. Alarms
-    // persist across SW restarts, but re-arming is idempotent and ensures any
-    // alarms that were cleared (e.g. by a browser crash) are restored.
+  } catch (e) {
+    console.error("[sw-startup] run-state check failed (alarms still armed below):", e);
+  }
+  // re-arm all enabled scheduled-task alarms on SW startup. Alarms
+  // persist across SW restarts, but re-arming is idempotent and ensures any
+  // alarms that were cleared (e.g. by a browser crash) are restored. Runs
+  // independently of the run-state read above.
+  try {
     await initScheduledTasks();
-    // (re)acquire the system keep-awake lock if any enabled scheduled
-    // tasks exist. The lock doesn't persist across SW restarts (chrome.power
-    // state is in-process), so a SW restart while scheduled tasks are armed
-    // would leave the laptop free to sleep through the next alarm. Calling
-    // `requestKeepAwake` here re-acquires the lock; it internally checks that
-    // at least one enabled task exists (no-op otherwise).
+  } catch (e) {
+    console.error("[sw-startup] failed to arm scheduled tasks:", e);
+  }
+  // (re)acquire the system keep-awake lock if any enabled scheduled
+  // tasks exist. The lock doesn't persist across SW restarts (chrome.power
+  // state is in-process), so a SW restart while scheduled tasks are armed
+  // would leave the laptop free to sleep through the next alarm. Calling
+  // `requestKeepAwake` here re-acquires the lock; it internally checks that
+  // at least one enabled task exists (no-op otherwise). Runs independently of
+  // the run-state read above.
+  try {
     await requestKeepAwake();
   } catch (e) {
-    console.error("[sw-startup] initialization failed — SW will retry on next restart:", e);
+    console.error("[sw-startup] failed to acquire keep-awake lock:", e);
   }
 })();

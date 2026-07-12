@@ -237,9 +237,16 @@ type Response<T = unknown> = OkResponse<T> | ErrorResponse;
                 // A null, non-object, or shape-invalid payload is ignored
                 // (retains last good).
               }
-              (
-                globalThis as { __openCoworkDomainConfig?: unknown }
-              ).__openCoworkDomainConfig = lastDomainConfig;
+              // SECURITY: only publish the policy once a REAL, shape-valid one
+              // has been received. Writing `undefined` here would make
+              // `getDomainConfig()` treat it as `{}` → unrestricted navigation,
+              // silently downgrading enforcement before the first valid policy
+              // arrives. If we never got a policy, leave the global unset.
+              if (lastDomainConfig !== undefined) {
+                (
+                  globalThis as { __openCoworkDomainConfig?: unknown }
+                ).__openCoworkDomainConfig = lastDomainConfig;
+              }
               // avoid a redundant full DOM walk just to rebuild the
               // selectorMap. `EXTRACT_STATE` already walked the DOM this step
               // (the orchestrator always calls EXTRACT_STATE before
@@ -289,7 +296,10 @@ type Response<T = unknown> = OkResponse<T> | ErrorResponse;
                   break;
                 }
               }
-              sendResponse({ ok: true, results });
+              // Route the success reply through `safeRespond` too, so a closed
+              // channel (tab navigated away mid-execution) doesn't throw here
+              // and can't mask the already-computed `results` as a failure.
+              safeRespond({ ok: true, results });
             } catch (e) {
               // The tab may have navigated away / port closed mid-execution;
               // `sendResponse` can then throw. Use `safeRespond` (idempotent,

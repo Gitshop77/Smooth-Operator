@@ -13,7 +13,7 @@
 // directly — the mini-service is internal and not exposed through Caddy.
 
 import type { NextRequest } from 'next/server';
-import { json, badRequest, serverError, withRouteError, bodyJson, bodyJsonOptional } from '@/lib/cowork/api/http';
+import { json, badRequest, serverError, withRouteError, bodyJson, redactSecrets } from '@/lib/cowork/api/http';
 import { COWORK_EVENTS_BASE, getCoworkEventsToken } from '@/lib/cowork/events/client';
 
 interface ChatProxyBody {
@@ -49,6 +49,20 @@ export const WINGMAN_SYSTEM_PROMPT =
 // the `<untrusted_page_data>` wrapper used by the navigator/planner paths).
 const UNTRUSTED_USER_MESSAGE_TAG = 'untrusted_user_message';
 
+// Neutralize any occurrence of the wrapping delimiter inside caller-supplied
+// content so a payload cannot close the `<untrusted_user_message>` tag early
+// and escape the "untrusted DATA" zone (prompt-injection boundary). The tag is
+// wrapped in an HTML comment — content is preserved but can no longer act as a
+// boundary delimiter. See finding: chat prompt-injection boundary.
+function neutralizeUntrustedDelimiter(content: string): string {
+  return content.replace(/<\/?untrusted_user_message>/g, (tag) => `<!--${tag}-->`);
+}
+
+// Allowed `sessionId` charset — shared by the POST and DELETE handlers so the
+// same identifier is validated identically regardless of HTTP method (a
+// session created via POST must be addressable by DELETE and vice-versa).
+const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
 export async function POST(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
     // `bodyJson` caps the raw body at MAX_BODY_BYTES (256KB) and rejects
@@ -73,17 +87,20 @@ export async function POST(req: NextRequest): Promise<Response> {
       // Validate role against the literal union — an authenticated caller
       // could forward arbitrary roles (e.g. 'developer', 'tool') to the
       // z-ai SDK. Defense-in-depth: the SDK may reject unknown roles, but
-      // don't rely on downstream validation.
-      if (m.role !== 'system' && m.role !== 'user' && m.role !== 'assistant') {
-        return badRequest('each message.role must be "system", "user", or "assistant"');
+      // don't rely on downstream validation. `system` is rejected here (not
+      // silently dropped later) so a caller gets a clear error instead of a
+      // 200 with its system message ignored — the system context is
+      // ALWAYS server-pinned (WINGMAN_SYSTEM_PROMPT).
+      if (m.role !== 'user' && m.role !== 'assistant') {
+        return badRequest('each message.role must be "user" or "assistant" (system context is server-pinned)');
       }
       if (m.content.length > 32_000) {
         return badRequest('each message.content must be at most 32KB');
       }
     }
     if (body.sessionId !== undefined) {
-      if (typeof body.sessionId !== 'string' || body.sessionId.length > 128) {
-        return badRequest('sessionId must be a string of at most 128 chars');
+      if (typeof body.sessionId !== 'string' || !SESSION_ID_RE.test(body.sessionId)) {
+        return badRequest('sessionId must match [A-Za-z0-9_-]{1,128}');
       }
     }
 
@@ -99,27 +116,27 @@ export async function POST(req: NextRequest): Promise<Response> {
     // delimiters (see above) and the server-pinned system prompt instructs the
     // model to treat that content as DATA, not instructions — a lightweight
     // injection boundary consistent with the rest of the codebase. A
-    // caller-supplied `system` role message is NOT forwarded (it could override
-    // the assistant's system context); such messages are dropped above. The
-    // system prompt is ALWAYS server-pinned (WINGMAN_SYSTEM_PROMPT). A
-    // caller-supplied `systemPrompt` field is ignored entirely — there is no
-    // admin role in this route, so honoring it would let any authenticated
-    // caller rebase the assistant's system context.
+    // caller-supplied `system` role message is REJECTED above (it could override
+    // the assistant's system context). The system prompt is ALWAYS
+    // server-pinned (WINGMAN_SYSTEM_PROMPT). A caller-supplied `systemPrompt`
+    // field is ignored entirely — there is no admin role in this route, so
+    // honoring it would let any authenticated caller rebase the assistant's
+    // system context.
 
     const sessionId = body.sessionId || `proxy-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-    // Drop any caller-supplied `system` role messages so untrusted input
-    // can't hijack the assistant's system context. Keep user/assistant only.
-    // Wrap the surviving messages' content in `<untrusted_user_message>`
-    // delimiters so the upstream model treats it as DATA, not instructions
-    // (the same trust boundary the navigator/planner paths enforce via
-    // `wrapUntrusted`). This neutralizes "ignore previous instructions" /
+    // `system` role messages were already rejected at validation above, so the
+    // surviving messages are user/assistant only. Wrap each message's content in
+    // `<untrusted_user_message>` delimiters (neutralizing any embedded delimiter
+    // in the content itself) so the upstream model treats it as DATA, not
+    // instructions (the same trust boundary the navigator/planner paths enforce
+    // via `wrapUntrusted`). This neutralizes "ignore previous instructions" /
     // `<system>`-forgery / role-reassignment payloads in chat content.
     const forwardedMessages = body.messages
       .filter((m) => m.role !== 'system')
       .map((m) => ({
         role: m.role,
-        content: `<${UNTRUSTED_USER_MESSAGE_TAG}>\n${m.content}\n</${UNTRUSTED_USER_MESSAGE_TAG}>`,
+        content: `<${UNTRUSTED_USER_MESSAGE_TAG}>\n${neutralizeUntrustedDelimiter(m.content)}\n</${UNTRUSTED_USER_MESSAGE_TAG}>`,
       }));
 
     // Pin the server-side system prompt. A caller-supplied
@@ -132,7 +149,10 @@ export async function POST(req: NextRequest): Promise<Response> {
       systemPrompt: resolvedSystemPrompt,
       sessionId,
       stream: body.stream !== false, // default: stream via socket.io
-      thinking: body.thinking,
+      // Pin the documented default: the upstream behavior for an absent
+      // `thinking` is not guaranteed, so we force 'disabled' here to honor the
+      // contract advertised in the GET handler.
+      thinking: body.thinking ?? 'disabled',
     };
 
     let upstream: Response;
@@ -159,8 +179,11 @@ export async function POST(req: NextRequest): Promise<Response> {
       const text = await upstream.text().catch(() => '');
       // Do NOT forward raw upstream error text to the client — it may expose
       // internal implementation details (SDK names, stack fragments). Log it
-      // server-side and return a generic message instead.
-      console.error('[cowork] /chat upstream failed', { status: upstream.status, body: text.slice(0, 200) });
+      // server-side (redacted of secret shapes) and return a generic message.
+      console.error('[cowork] /chat upstream failed', {
+        status: upstream.status,
+        body: redactSecrets(text.slice(0, 200)),
+      });
       return serverError(`cowork-events /chat request failed (status ${upstream.status})`);
     }
 
@@ -173,7 +196,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       return serverError('cowork-events /chat returned a non-JSON body');
     }
     return json(data);
-  });
+  }, req.headers.get('x-request-id') ?? undefined);
 }
 
 export async function GET(): Promise<Response> {
@@ -233,7 +256,6 @@ export async function DELETE(req: NextRequest): Promise<Response> {
     // Validate the caller-supplied identifiers before forwarding, matching the
     // POST handler's `sessionId` cap so the two paths are consistent. Unbounded
     // values would otherwise be passed straight to the mini-service's store.
-    const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
     if (sessionId !== undefined && !SESSION_ID_RE.test(sessionId)) {
       return badRequest('sessionId must match [A-Za-z0-9_-]{1,128}');
     }
@@ -252,7 +274,10 @@ export async function DELETE(req: NextRequest): Promise<Response> {
     let confirm = false;
     let scope: unknown;
     if (all) {
-      const b = await bodyJsonOptional(req);
+      // `bodyJson` (not `bodyJsonOptional`) so a malformed/oversized body is
+      // rejected with 400/413 instead of being silently swallowed into an empty
+      // object — the bulk-delete confirm gate must observe the real body.
+      const b = await bodyJson(req);
       if (b.confirm !== true) {
         return badRequest('confirmation required');
       }
@@ -277,5 +302,5 @@ export async function DELETE(req: NextRequest): Promise<Response> {
       console.info('[cowork] bulk delete ai/chat', { deleted, route: '/api/cowork/ai/chat' });
     }
     return json(body, status);
-  });
+  }, req.headers.get('x-request-id') ?? undefined);
 }

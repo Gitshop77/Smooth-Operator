@@ -118,7 +118,12 @@ export function classifyError(error: unknown): ClassifiedError {
   // ("Failed to fetch"); that must remain a transient `network` error so it is
   // retried. For that reason the `programmer_error` instanceof check below is
   // placed AFTER this branch.
-  if (containsAny(lower, ["fetch", "network", "econnreset", "econnrefused", "timeout", "etimedout"])) {
+  // A truncated/mid-stream stall ("stream stall: no data for 30000ms") is a
+  // transient transport interruption, not an unexpected `unknown`. Include
+  // `stall` (and the `stream` token it carries) so it classifies as `network`
+  // and gets retried with the friendly "Network error" message rather than
+  // surfacing the raw, internally-coupled stall string to the user.
+  if (containsAny(lower, ["fetch", "network", "econnreset", "econnrefused", "timeout", "etimedout", "stall", "stream"])) {
     return { category: "network", fatal: false, retryable: true, message: originalMessage, originalError: error };
   }
 

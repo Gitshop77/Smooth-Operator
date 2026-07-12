@@ -93,11 +93,12 @@ function tokensMatch(received: string | undefined, expected: string): boolean {
  * Token sources (validated with the SAME `tokensMatch`):
  *   • the `X-Cowork-Token` request header (all protected routes), and
  *   • for the SSE stream `/api/cowork/events/stream` ONLY, a `token` query
- *     param. Browser `EventSource` cannot send custom headers, so it
- *     always 401s on the header path; the query param lets a trusted browser
- *     (or server-to-server client) open the stream. The header path still
- *     works. The query token is validated against the exact same secret using
- *     the exact same constant-time compare — it is not a weaker path.
+ *     param. Browser `EventSource` cannot set custom headers, so it MUST use
+ *     the `?token=` query param to open the stream; the `X-Cowork-Token`
+ *     header path remains available for non-EventSource clients. The query
+ *     token is validated against the exact same secret using the exact same
+ *     constant-time compare — the *auth* is equally strong, only the *transport*
+ *     (URL vs header) is weaker (see the EXPOSURE TRADE-OFF note at the handler).
  */
 function authenticate(req: NextRequest): NextResponse | null {
   // The browser-facing UI secret is `COWORK_UI_TOKEN` (preferred),

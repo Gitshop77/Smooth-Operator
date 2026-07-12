@@ -15,7 +15,11 @@ import { db } from '@/lib/db';
 // `BookmarkNode` recursive renderer in `collections-view.tsx`.
 type BookmarkRow = Awaited<ReturnType<typeof db.bookmark.findMany>>[number];
 
-function buildBookmarkTree(rows: BookmarkRow[]): BookmarkRow[] {
+// Cap the number of bookmark rows returned by GET so a huge table can't be
+// served unbounded in a single response.
+const MAX_BOOKMARKS = 5000;
+
+function buildBookmarkTree(rows: BookmarkRow[]): { tree: BookmarkRow[]; orphans: BookmarkRow[] } {
   // Index every bookmark by its parent id (null → root bucket).
   const byParent = new Map<string | null, BookmarkRow[]>();
   for (const row of rows) {
@@ -35,10 +39,12 @@ function buildBookmarkTree(rows: BookmarkRow[]): BookmarkRow[] {
   // turned `GET /api/cowork/bookmarks` into a stack-overflow 500). On a
   // back-edge we attach an empty `children` array — the node is rendered as a
   // leaf rather than crashing the request.
+  const visited = new Set<string>();
   const attach = (parentId: string | null, ancestors: Set<string>): BookmarkRow[] => {
     const kids = byParent.get(parentId) ?? [];
     const result: BookmarkRow[] = [];
     for (const k of kids) {
+      visited.add(k.id);
       if (ancestors.has(k.id)) {
         (k as BookmarkRow & { children: BookmarkRow[] }).children = [];
         result.push(k);
@@ -51,19 +57,33 @@ function buildBookmarkTree(rows: BookmarkRow[]): BookmarkRow[] {
     }
     return result;
   };
-  return attach(null, new Set());
+  const tree = attach(null, new Set());
+  // Any row not reachable from a root (dangling / broken `parentId`, or a
+  // node orphaned by a cycle) is reported separately instead of being silently
+  // dropped — surfacing broken references so they're observable rather than
+  // appearing as lost data.
+  const orphans = rows.filter((r) => r.parentId !== null && !visited.has(r.id));
+  if (orphans.length > 0) {
+    console.warn('[cowork] bookmarks: dropping orphaned rows (broken parentId / cycle)', {
+      count: orphans.length,
+      ids: orphans.slice(0, 20).map((o) => o.id),
+    });
+  }
+  return { tree, orphans };
 }
 
 export async function GET(): Promise<Response> {
   return withRouteError(async () => {
     // Single flat query — `findMany({})` returns every row, ordered by
     // `dateAdded` desc so siblings within the same parent appear in
-    // recency order (matching the original sort intent).
+    // recency order (matching the original sort intent). Capped so a huge
+    // table can't be returned unbounded in one response.
     const all = await db.bookmark.findMany({
       orderBy: { dateAdded: 'desc' },
+      take: MAX_BOOKMARKS,
     });
-    const tree = buildBookmarkTree(all);
-    return json({ bookmarks: tree });
+    const { tree, orphans } = buildBookmarkTree(all);
+    return json({ bookmarks: tree, orphans });
   });
 }
 
@@ -71,7 +91,12 @@ export async function POST(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
     const body = await bodyJson(req);
     const name = boundedString(body.name, MAX_NAME_LEN, 'Untitled');
-    const parentId = body.parentId ? String(body.parentId) : null;
+    // Coerce `parentId` through the same bounded-string path as every other
+    // free-text field (a bare `String(body.parentId)` would silently persist
+    // `"[object Object]"` for a non-string value, or an unbounded string).
+    const rawParentId =
+      body.parentId !== undefined && body.parentId !== null ? boundedString(body.parentId, 128, '') : '';
+    const parentId = rawParentId.length > 0 ? rawParentId : null;
     // Validate the referenced parent bookmark exists (the analog of a
     // relation-connect). A dangling parentId is rejected with 400 rather than
     // stored as an orphan reference.
@@ -106,5 +131,5 @@ export async function POST(req: NextRequest): Promise<Response> {
       data: { name, url, parentId, type: 'url' },
     });
     return json({ bookmark: bm }, 201);
-  });
+  }, req.headers.get('x-request-id') ?? undefined);
 }

@@ -31,6 +31,17 @@ import { buildPostObserveNudges } from "../context/injection-points";
 const MAX_NAV_ELEMENTS_TEXT_CHARS = 60_000;
 
 /**
+ * Hard byte budget for the vision `screenshot` shipped to the navigator per
+ * step. A full-DPR viewport can be a multi-megabyte base64 blob; bounding it
+ * keeps the "a misconfigured run can NEVER send an unbounded payload" promise
+ * true for the screenshot lever too (not just `elementsText`).
+ */
+const MAX_NAV_SCREENSHOT_CHARS = 1_500_000;
+
+/** Hard char cap for the accessibility tree, a second large per-step payload. */
+const MAX_NAV_AXTREE_CHARS = 200_000;
+
+/**
  * Prepare the navigator request for the current step: optionally run the
  * HTML-summarizer pre-pass, build the AgentStepRequest, and append the
  * post-observe captcha/downloads nudges to `pendingLoopWarning`.
@@ -78,6 +89,29 @@ export async function prepareNavigatorRequest(
     navElementsText = navElementsText.slice(0, MAX_NAV_ELEMENTS_TEXT_CHARS);
   }
 
+  // Bound the other two large per-step payloads (vision screenshot + a11y tree)
+  // so the "never an unbounded payload" guarantee holds for them as well.
+  let screenshot = browserState.screenshot;
+  if (screenshot && screenshot.length > MAX_NAV_SCREENSHOT_CHARS) {
+    state.onEvent({
+      type: "info",
+      message:
+        `Navigator screenshot dropped (${screenshot.length} chars exceeds ` +
+        `the ${MAX_NAV_SCREENSHOT_CHARS}-char cap) to bound vision-token cost.`,
+    });
+    screenshot = undefined;
+  }
+  let axTree = browserState.axTree;
+  if (axTree && axTree.length > MAX_NAV_AXTREE_CHARS) {
+    state.onEvent({
+      type: "info",
+      message:
+        `Navigator axTree truncated to ${MAX_NAV_AXTREE_CHARS} chars ` +
+        `(was ${axTree.length}).`,
+    });
+    axTree = axTree.slice(0, MAX_NAV_AXTREE_CHARS);
+  }
+
   const navRequest: AgentStepRequest = {
     task: state.task,
     history: state.navigatorHistory,
@@ -88,8 +122,8 @@ export async function prepareNavigatorRequest(
       url: browserState.url, title: browserState.title, tabs: browserState.tabs,
       elementsText: navElementsText, pageInfo: browserState.pageInfo,
       newElementCount: browserState.newElementCount,
-      screenshot: browserState.screenshot,
-      axTree: browserState.axTree,
+      screenshot,
+      axTree,
     },
     step: state.step,
     maxSteps: state.config.maxSteps,
@@ -225,7 +259,16 @@ export async function runPauseCheck(state: LoopState): Promise<void> {
     }
     state.onEvent({ type: "resumed", step: state.step });
     state.onEvent({ type: "info", message: "Agent resumed." });
-  } catch {
-    // Pause check is best-effort — never crash the loop.
+  } catch (e) {
+    // Pause check is best-effort — never crash the loop — but a genuine storage
+    // failure (the initial `checkPaused()` or the poll loop) must be observable
+    // rather than silently swallowed, so the loop doesn't proceed as if the user
+    // never paused.
+    state.onEvent({
+      type: "error",
+      step: state.step,
+      message: `pause check failed: ${e instanceof Error ? e.message : String(e)}`,
+      recoverable: true,
+    });
   }
 }

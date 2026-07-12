@@ -93,4 +93,9 @@ export const STORAGE_KEYS = {
   log: "__oc_log",
   reasoningCollapse: "cw-reasoning",
   activityCollapse: "cw-activity",
+  // Kept in sync with the canonical options-side map (settings-sync.ts) so the
+  // side panel can reference these keys without hardcoding literals. The actual
+  // persistence for these two is owned by the options page.
+  costCap: "costCap",
+  defaultTask: "defaultTask",
 } as const;

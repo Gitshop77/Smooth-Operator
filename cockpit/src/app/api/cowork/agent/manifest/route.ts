@@ -1,9 +1,10 @@
 //
-// Machine-readable manifest of every endpoint that actually exists under
-// /api/cowork/*. The web cockpit is a dashboard backed by Prisma that supports
-// reads, POST creates, and DELETE removals; it does not drive a live browser.
-// Only the implemented routes are advertised here. Agents that consume this
-// manifest will never hit a 404.
+// Machine-readable manifest of the implemented endpoints under /api/cowork/*.
+// The web cockpit is a dashboard backed by Prisma that supports reads, POST
+// creates, and DELETE removals; it does not drive a live browser. This list is
+// kept in sync with CAPABILITY_FAMILIES below: every advertised family has a
+// matching entry under `endpoints`, and every entry here corresponds to a real
+// route on disk, so agents that consume this manifest will never hit a 404.
 import { json, withRouteError } from '@/lib/cowork/api/http';
 import {
   AGENT_OPERATING_RULES,
@@ -86,10 +87,20 @@ export async function GET(): Promise<Response> {
           list: { method: 'GET', path: `${P}/extensions`, description: 'List installed extensions (optional `enabled`)' },
           log: { method: 'POST', path: `${P}/extensions/log`, description: 'Append an extension log entry' },
         },
+        security: {
+          events: { method: 'GET', path: `${P}/security/events`, description: 'Read the security event feed' },
+        },
+        mcp: {
+          tools: { method: 'GET', path: `${P}/mcp/tools`, description: 'Browse the MCP tool catalog' },
+        },
         ai: {
           chat: { method: 'POST', path: `${P}/ai/chat`, description: 'Send a chat completion (body: `{ messages, sessionId }`)' },
           deleteChat: { method: 'DELETE', path: `${P}/ai/chat`, description: 'Erase chat messages: ?messageId=<id> or ?sessionId=<id>' },
           image: { method: 'POST', path: `${P}/ai/image`, description: 'Generate an image (body: `{ prompt, size? }`)' },
+        },
+        events: {
+          emit: { method: 'POST', path: `${P}/events/emit`, description: 'Emit an event to a channel (body: `{ channel, payload? }`)' },
+          stream: { method: 'GET', path: `${P}/events/stream`, description: 'Subscribe to the SSE event stream (token accepted via ?token= for EventSource)' },
         },
       },
     });

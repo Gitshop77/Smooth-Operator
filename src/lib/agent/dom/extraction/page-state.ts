@@ -202,8 +202,16 @@ function trySerializeIframe(iframe: HTMLIFrameElement, depth: number, acc: WalkA
       return;
     }
     acc.lines.push("\t".repeat(depth) + `|IFRAME src=${iframe.src || "same-origin"}|`);
-    for (const child of Array.from(doc.body.childNodes)) {
-      walkNode(child, depth + 1, acc);
+    try {
+      for (const child of Array.from(doc.body.childNodes)) {
+        walkNode(child, depth + 1, acc);
+      }
+    } catch {
+      // A misbehaving same-origin subframe (e.g. a getter that throws, a
+      // unusual custom element, or a detached-node race) must not abort the
+      // whole page-state read — emit a marker and continue, matching the
+      // cross-origin fallback style.
+      acc.lines.push("\t".repeat(depth) + `|IFRAME src=${iframe.src || "same-origin"} (error reading contents)|`);
     }
   } catch {
     // Cross-origin security exception — can't read contents. Surface the URL only.
@@ -289,12 +297,22 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
   };
 
   if (document.body) {
-    for (const child of Array.from(document.body.childNodes)) {
-      walkNode(child, 0, acc);
+    try {
+      for (const child of Array.from(document.body.childNodes)) {
+        walkNode(child, 0, acc);
+      }
+    } catch (e) {
+      // A single misbehaving node/subframe shouldn't blank the whole page-state
+      // read (finding: extractBrowserState had no error guard — a mid-walk throw
+      // left a stale selectorMap + aborted the run). Keep whatever elements were
+      // collected so far and continue to build a (partial) state.
+      console.warn("[page-state] DOM walk threw mid-extract (returning partial state):", e);
     }
   }
 
-  // Update the baseline for next step's `isNew` computation.
+  // Update the baseline for next step's `isNew` computation. Always refresh the
+  // cached map from THIS run (even on a partial extract) so a prior run's stale
+  // selectorMap is never left behind for action resolution.
   cachedHashes = new Set(acc.elements.map((e) => e.hash));
   cachedSelectorMap = acc.selectorMap;
 

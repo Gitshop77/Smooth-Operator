@@ -41,16 +41,35 @@ const SENSITIVE_FIELD_RE = new RegExp(
   'i',
 );
 
-function redactValue(value: unknown): unknown {
-  return typeof value === 'string' && value.length > 0 ? '[redacted]' : value;
+const REDACTED = '[redacted]';
+
+// Redact a single `{ name, value }` entry in place-shape: if its field name
+// matches a sensitive fragment (case-insensitive substring), mask its value
+// regardless of the value's type (string, number, boolean, null, object). A
+// false positive costs one masked benign value; a false negative leaks a
+// secret, so we mask on suspicion.
+function redactEntry(entry: unknown): unknown {
+  if (!entry || typeof entry !== 'object' || !('name' in entry)) return entry;
+  const e = entry as Record<string, unknown>;
+  if (SENSITIVE_FIELD_RE.test(String(e.name ?? ''))) {
+    return { ...e, value: REDACTED };
+  }
+  return e;
+}
+
+// Redact an array of `{ name, value }` entries.
+function redactEntryArray(arr: unknown[]): unknown[] {
+  return arr.map(redactEntry);
 }
 
 // Mask sensitive autofill values in the *response copy* of `formDataJson`
 // (a JSON string which the cockpit does not parse at write time). Handles a
 // flat record of fieldName -> value, the `{ entries: [{ name, value }] }`
-// shape, and a bare array of `{ name, value }` entries. Returns the input
-// unchanged if it cannot be parsed (the caller should not observe a 500 for a
-// malformed stored value).
+// shape, AND a bare array of `{ name, value }` entries. The bare-array case is
+// tested FIRST because `typeof [] === 'object'` would otherwise be swallowed by
+// the generic object branch and never reach its own redaction. Returns the
+// input unchanged (unparsed, but with sensitive values masked) if it cannot be
+// parsed — the caller should not observe a 500 for a malformed stored value.
 function redactFormMemory(formDataJson: string): string {
   let parsed: unknown;
   try {
@@ -58,29 +77,19 @@ function redactFormMemory(formDataJson: string): string {
   } catch {
     return formDataJson;
   }
+  if (Array.isArray(parsed)) {
+    return JSON.stringify(redactEntryArray(parsed));
+  }
   if (parsed && typeof parsed === 'object') {
     const obj = parsed as Record<string, unknown>;
     if (Array.isArray(obj.entries)) {
-      obj.entries = (obj.entries as Array<Record<string, unknown>>).map((entry) =>
-        SENSITIVE_FIELD_RE.test(String(entry?.name ?? ''))
-          ? { ...entry, value: redactValue(entry?.value) }
-          : entry,
-      );
+      obj.entries = redactEntryArray(obj.entries as unknown[]);
     } else {
       for (const key of Object.keys(obj)) {
-        if (SENSITIVE_FIELD_RE.test(key)) obj[key] = redactValue(obj[key]);
+        if (SENSITIVE_FIELD_RE.test(key)) obj[key] = REDACTED;
       }
     }
     return JSON.stringify(obj);
-  }
-  if (Array.isArray(parsed)) {
-    return JSON.stringify(
-      parsed.map((entry) =>
-        entry && typeof entry === 'object' && 'name' in entry && SENSITIVE_FIELD_RE.test(String((entry as Record<string, unknown>).name))
-          ? { ...(entry as Record<string, unknown>), value: redactValue((entry as Record<string, unknown>).value) }
-          : entry,
-      ),
-    );
   }
   return formDataJson;
 }

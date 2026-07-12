@@ -75,8 +75,11 @@ export async function POST(req: NextRequest): Promise<Response> {
     };
     // Sanitize (CRLF-strip + length-cap) THEN redact secrets: the values have
     // already been stripped of CRLF + length-capped before redaction runs.
-    const label = redactSecrets(sanitizeLogField(source ?? error ?? 'SW'));
-    const detail = redactSecrets(sanitizeLogField(msg ?? '(no message)'));
+    // `sanitizeLogField` returns '' for any non-string input, so we fall back
+    // with `||` (not `??`) — `??` would let a present non-nullish object slip
+    // through un-stringified.
+    const label = redactSecrets(sanitizeLogField(source) || sanitizeLogField(error) || 'SW');
+    const detail = redactSecrets(sanitizeLogField(msg) || '(no message)');
     const stackField = redactSecrets(sanitizeLogField(stack));
     // Use structured (object) logging so the values can't break log-line
     // formatting. Respect the client's severity; default to info.
@@ -88,11 +91,22 @@ export async function POST(req: NextRequest): Promise<Response> {
     pushLog(entry);
     emitLog(lvl, { source: label, message: detail, stack: stackField });
     return json({ ok: true });
-  });
+  }, req.headers.get('x-request-id') ?? undefined);
 }
 
 // Serve the in-memory ring buffer so the Logs Explorer can render real data
-// instead of a permanently-empty standby list.
+// instead of a permanently-empty standby list. Re-apply `redactSecrets` at read
+// time (defense-in-depth): any secret shape the write-time regex missed is
+// scrubbed here before it can be disclosed to an authenticated reader.
 export async function GET(): Promise<Response> {
-  return withRouteError(async () => json({ logs: logRing }));
+  return withRouteError(async () =>
+    json({
+      logs: logRing.map((e) => ({
+        ...e,
+        source: redactSecrets(e.source),
+        message: redactSecrets(e.message),
+        stack: redactSecrets(e.stack),
+      })),
+    }),
+  );
 }

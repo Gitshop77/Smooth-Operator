@@ -63,16 +63,45 @@ import { profiles, byProvider } from "../lib/agent/llm/providers/openai-compatib
  * like they back the dedicated cases but don't).
  */
 const DEFAULT_BASE_URLS: Record<string, string> = {
-  openai: "https://api.openai.com/v1",
   // Spread the profiles table entries (covers deepseek, groq, together, etc.)
   // — excluding `openrouter` / `xai`, which have dedicated `case` branches and
-  // therefore never consult this map.
+  // therefore never consult this map. Providers with a dedicated `case`
+  // (`openai`, `anthropic`, `gemini`, `xai`, `openrouter`, `azure`) are NOT
+  // listed here on purpose: their default base URLs come from the provider
+  // facades, so a dead entry here would be misleading and a regression risk if
+  // a dedicated `case` ever regressed to the `default` branch.
   ...Object.fromEntries(
     Object.values(profiles)
       .filter((p) => p.provider !== "openrouter" && p.provider !== "xai")
       .map((p) => [p.provider, p.baseURL]),
   ),
 };
+
+/**
+ * The set of provider ids the extension knows how to build via `buildProvider`.
+ *
+ * Used ONLY for a defensive warning in `readProviderConfig`: if a corrupted or
+ * injected `chrome.storage.local` payload carries a provider id we don't
+ * recognise, we surface a dev warning here (so the anomaly is observable)
+ * while still returning it, letting `buildProvider` reject it with a precise
+ * "Unknown provider" error. It is not a security boundary.
+ *
+ * Forwards the canonical OpenAI-compatible profile ids (via `byProvider`) plus
+ * the dedicated-case providers that have their own `switch` branch in
+ * `buildProvider` (`openai`, `anthropic`, `gemini`, `xai`, `openrouter`,
+ * `azure`, `google`, `ollama`). Duplicates are harmless (it's a Set).
+ */
+export const KNOWN_PROVIDERS: Set<string> = new Set<string>([
+  "openai",
+  "anthropic",
+  "gemini",
+  "xai",
+  "openrouter",
+  "azure",
+  "google",
+  "ollama",
+  ...Object.keys(byProvider),
+]);
 
 /** Default models for each provider (used when the user doesn't specify one).
  * These are OFFLINE FALLBACK ONLY — the online default model is resolved from
@@ -195,6 +224,29 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
       });
       break;
 
+    case "google": {
+      // Google Vertex AI is reached through its OpenAI-compatible endpoint
+      // (https://ai.googleapis.com/v1beta1/projects/{project}/locations/{loc}/...).
+      // The project/location are specific to the user's GCP setup, so there is
+      // no single static default URL — the user must supply `baseUrl` in
+      // Options. Route through the OpenAICompatible facade once a baseUrl is
+      // present.
+      if (!apiKey) throw new Error("Google (Vertex AI) requires an API key. Add one in Options.");
+      const resolvedBaseURL = baseUrl || DEFAULT_BASE_URLS["google"];
+      if (!resolvedBaseURL) {
+        throw new Error(
+          "Google (Vertex AI) requires a baseUrl. Enter your Vertex OpenAI-compatible endpoint in Options (e.g. https://ai.googleapis.com/v1beta1/projects/…/locations/…/endpoints/openai)."
+        );
+      }
+      result = OpenAICompatible.toLLMProvider({
+        provider: "google",
+        apiKey,
+        model: resolvedModel,
+        baseURL: resolvedBaseURL,
+      });
+      break;
+    }
+
     default: {
       const needsKey = provider !== "ollama";
       if (needsKey && !apiKey) {
@@ -283,6 +335,15 @@ export async function readProviderConfig(): Promise<ProviderConfig | null> {
   if (!apiKey) apiKey = normalizeString(res.apiKey);
   const provider = normalizeString(res.provider);
   if (!provider) return null; // no provider set → unconfigured user
+  // Defense-in-depth: a corrupted / injected `chrome.storage.local` payload
+  // could carry an arbitrary provider id. We still return it so `buildProvider`
+  // throws its precise "Unknown provider" error (the actionable message the UI
+  // surfaces), but we log a warning here so the anomaly is observable in dev.
+  if (!KNOWN_PROVIDERS.has(provider)) {
+    console.warn(
+      `[provider-config] Unknown provider "${provider}" read from storage; buildProvider will reject it.`
+    );
+  }
   const model = normalizeString(res.model);
   const baseUrl = normalizeString(res.baseUrl);
   const resourceName = normalizeString(res.resourceName);

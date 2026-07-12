@@ -67,6 +67,7 @@ export async function handleSaveAsPdf(
       message: `save_as_pdf failed: ${res.error ?? "unknown error"}`,
     };
   } catch (e) {
-    return { action, success: false, message: `save_as_pdf failed: ${(e as Error).message}` };
+    const m = e instanceof Error ? e.message : String(e);
+    return { action, success: false, message: `save_as_pdf failed: ${m}` };
   }
 }

@@ -28,11 +28,14 @@ const WS_TOKEN = process.env.NEXT_PUBLIC_COWORK_UI_TOKEN;
  * 3003 via socket.io-client. Real-time events invalidate the relevant
  * TanStack Query caches so views update live.
  *
- * The connection is best-effort: if the mini-service isn't running, the
- * socket silently fails to connect and the store's `socketConnected` flag
- * stays false (the footer shows "offline"). The dashboard still works
- * because every view polls its endpoint on mount + every 30s via TanStack
- * Query.
+ * The connection is best-effort and reconnects indefinitely with backoff
+ * (the mini-service is the same-machine, always-on event source for the
+ * cockpit). If it isn't running at page load, the socket keeps retrying and
+ * the store's `socketConnected` flag stays false (the footer shows
+ * "offline"); the dashboard still works because every view polls its
+ * endpoint on mount + every 30s via TanStack Query. When the service comes
+ * back, the socket re-attaches automatically and realtime invalidation
+ * resumes without a manual reload.
  */
 export function useCoworkWebSocket(): void {
   const setSocketConnected = useCoworkStore((s) => s.setSocketConnected);
@@ -55,8 +58,14 @@ export function useCoworkWebSocket(): void {
           // mini-service doesn't reject the connection.
           auth: { token: WS_TOKEN },
           transports: ["websocket", "polling"],
+          // Retry forever with socket.io's built-in backoff. The mini-service
+          // is the same-machine, always-on event source for the cockpit, so
+          // capping attempts (the previous `reconnectionAttempts: 5`) meant a
+          // service restart or a brief downtime at page load would drop the
+          // dashboard into 30s polling *permanently* — the realtime layer was
+          // never recovered without a manual reload. Indefinite reconnection
+          // lets it reattach automatically once the service is back.
           reconnection: true,
-          reconnectionAttempts: 5,
           reconnectionDelay: 1500,
           timeout: 4000,
         });
@@ -82,8 +91,23 @@ export function useCoworkWebSocket(): void {
         setLastEvent("disconnected");
       });
 
-      socket.on("connect_error", () => {
+      socket.on("connect_error", (err: unknown) => {
         setSocketConnected(false);
+        // Don't leave a stale "connected" footer: if we had connected once
+        // (lastEvent === "connected") and then entered a reconnect loop, the
+        // footer tooltip would keep claiming "connected" while the live socket
+        // is actually down. Reflect the real state.
+        setLastEvent("connect error");
+        // Surface the rejection reason (auth failure, 4xx handshake, gateway
+        // down) so field diagnosis is possible. Throttle-free in dev; in
+        // production log at most a one-line message rather than the raw object.
+        const message =
+          err instanceof Error ? err.message : String(err ?? "unknown");
+        if (process.env.NODE_ENV !== "production") {
+          console.error("[cowork-ws] connect_error:", message);
+        } else {
+          console.warn(`[cowork-ws] connect_error: ${message}`);
+        }
       });
 
       // Real-time event handlers (the mini-service emits these).

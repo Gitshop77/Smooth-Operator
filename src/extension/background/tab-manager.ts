@@ -191,8 +191,9 @@ export async function extractStateFromTab(
         }
       }
     } catch {
-      // captureVisibleTab can fail if the tab isn't visible or permissions
-      // are missing. Non-fatal — the agent falls back to DOM-only state.
+      // Screenshot capture (CDP Page.captureScreenshot) can fail if the tab
+      // isn't visible or permissions are missing. Non-fatal — the agent falls
+      // back to DOM-only state.
     }
   }
   return res.state;
@@ -220,6 +221,13 @@ export async function executeActionsInTab(
     domainConfig: getDomainConfig(),
   });
   if (!res?.ok) throw new Error(`execute failed: ${res?.error || "no response"}`);
+  // The content script may respond `{ ok: true }` without a `results` field (or
+  // with a non-array) — without this check the spread in run-helpers.ts
+  // (`[...execResults]`) throws and aborts the run with an unhelpful error.
+  // Mirror the `state` validation already done in `extractStateFromTab`.
+  if (!Array.isArray(res.results)) {
+    throw new Error("execute failed: content script returned no results array");
+  }
   return res.results;
 }
 
@@ -335,8 +343,18 @@ export async function handleTabAction(
     }
     case "search": {
       const engine = (action as { engine?: string }).engine ?? "duckduckgo";
+      const query = (action as { query?: string }).query;
+      // A missing/undefined query would serialize to the literal "undefined"
+      // (encodeURIComponent(undefined) → "undefined"), making the agent silently
+      // search for "undefined". Reject it cleanly instead of building a bogus URL.
+      if (typeof query !== "string" || query.length === 0) {
+        return { handled: true, pageChanged: false, success: false, message: "BLOCKED: missing query" };
+      }
+      // Validate the engine is a known key; otherwise fall back to the default.
+      // (`SEARCH_ENGINE_URLS[engine]` is only consulted when `engine` is a real
+      // key — the `|| duckduckgo` covers a malformed/unknown engine.)
       const baseUrl = SEARCH_ENGINE_URLS[engine] || SEARCH_ENGINE_URLS.duckduckgo;
-      const searchUrl = baseUrl + encodeURIComponent((action as { query: string }).query);
+      const searchUrl = baseUrl + encodeURIComponent(query);
       // Apply the same domain policy as navigate.
       const searchUrlCheck = checkUrlAllowedWithDomainConfig(searchUrl);
       if (!searchUrlCheck.allowed) {

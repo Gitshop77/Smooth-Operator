@@ -81,9 +81,14 @@ export async function POST(req: NextRequest): Promise<Response> {
       return serverError(`cowork-events /image request failed (status ${upstream.status})`);
     }
 
-    const data = await upstream.json();
+    const data = await upstream.json().catch(() => null);
+    // Mirror the chat route: a 200 with a non-JSON body (HTML error page,
+    // truncated payload) is an upstream contract violation, not a generic 500.
+    if (data === null) {
+      return serverError('cowork-events /image returned a non-JSON body');
+    }
     return json(data);
-  });
+  }, req.headers.get('x-request-id') ?? undefined);
 }
 
 export async function GET(): Promise<Response> {

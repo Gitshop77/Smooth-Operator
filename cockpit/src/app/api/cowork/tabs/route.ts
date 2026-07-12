@@ -65,5 +65,5 @@ export async function POST(req: NextRequest): Promise<Response> {
       },
     });
     return json({ tab }, 201);
-  });
+  }, req.headers.get('x-request-id') ?? undefined);
 }

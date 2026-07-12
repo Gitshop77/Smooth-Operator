@@ -28,7 +28,15 @@ import {
   assertSafeUserBaseURL,
 } from "./openai-compatible-profile";
 
-export const id = "openai-compatible";
+// NOTE: this facade intentionally does NOT export a module-level `id`. The
+// runtime provider identifier is always `config.provider` (e.g. "groq",
+// "ollama") — `toLLMProvider` emits `providerId: config.provider` and the
+// route id is `openai-compatible:${profile.provider}`. A misleading
+// `export const id = "openai-compatible"` would not match either the providerId
+// used for telemetry/cost/catalog keys nor the route id, and would tempt a
+// future maintainer into wiring lookups against a string that never matches a
+// registry entry. The other per-provider facades (anthropic, etc.) expose an
+// `id` only because theirs is a single fixed provider; this factory is not.
 
 export type Config = { baseURL?: string } & ProviderAuthOption<"optional">;
 

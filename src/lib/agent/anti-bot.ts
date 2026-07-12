@@ -8,11 +8,19 @@
  * auto-resolving JS challenges) or surface it to the planner (for CAPTCHAs
  * that need human help).
  *
- * Two public functions:
+ * Public API:
  *   - `detectChallenge(tabId)` — runs the detection script in the tab and
- *     returns the parsed `ChallengeInfo` (or `null` if no challenge).
- *   - `waitForChallengeResolution(tabId, opts)` — polls `detectChallenge`
- *     until the challenge clears or the timeout expires.
+ *     returns the parsed `ChallengeInfo` (or `null` if no challenge). This is
+ *     the backward-compatible convenience wrapper used by callers that only
+ *     care about a binary "challenge vs. not".
+ *   - `detectChallengeResult(tabId)` — the same detection, but returns a
+ *     discriminated `DetectChallengeOutcome` (`"challenge"` | `"no-challenge"`
+ *     | `"error"`) so the orchestrator can tell a failed injection apart from
+ *     a genuine "no challenge" and choose to retry / pause rather than blindly
+ *     proceed.
+ *   - `waitForChallengeResolution(tabId, opts)` — polls `detectChallengeResult`
+ *     until the challenge clears, the timeout expires, or detection repeatedly
+ *     fails (errors are treated conservatively as "unresolved").
  */
 
 /** The kind of anti-bot challenge detected on a page. */
@@ -48,9 +56,26 @@ export interface ChallengeInfo {
 export interface ChallengeWaitResult {
   /** Whether the challenge cleared within the timeout. */
   resolved: boolean;
-  /** The challenge still present (null if resolved). */
+  /** The challenge still present (null if resolved or undetectable). */
   challenge: ChallengeInfo | null;
 }
+
+/**
+ * Discriminated outcome of a single challenge-detection attempt.
+ *
+ * `detectChallenge` collapses this to `ChallengeInfo | null`, but the
+ * `"error"` case is important: it means the MAIN-world injection could not be
+ * performed (tab closed, permission denied, `chrome://`/extension URL, CSP, a
+ * racing navigation, etc.). Previously this was silently treated the same as
+ * `"no-challenge"`, so a page that made injection throw could bypass challenge
+ * detection and the agent would proceed onto an interstitial. Callers that
+ * want to be safe should treat `"error"` as "couldn't verify — pause or
+ * retry" rather than "all clear".
+ */
+export type DetectChallengeOutcome =
+  | { status: "challenge"; info: ChallengeInfo }
+  | { status: "no-challenge" }
+  | { status: "error"; error: unknown };
 
 /**
  * Parse the raw result returned by the detection script. The script returns
@@ -74,22 +99,18 @@ function parseChallengeResult(raw: unknown): ChallengeInfo | null {
 }
 
 /**
- * Detect whether the current page is showing an anti-bot challenge.
+ * Run the MAIN-world detection script and return a discriminated outcome.
  *
- * Runs the inlined detection script in the tab's MAIN world via
- * `chrome.scripting.executeScript` and parses the result. Returns `null` if
- * no challenge is detected, or if the tab is closed / injection fails (so
- * callers can treat "couldn't check" the same as "no challenge" — the agent
- * proceeds and may re-check on the next step).
- *
- * The script body is inlined inside `func` (rather than referenced from a
- * separate exported constant) because `chrome.scripting.executeScript`
- * serializes `func` via `Function.prototype.toString`, so closed-over
- * constants are not available in the page's MAIN world.
+ * Unlike `detectChallenge`, this distinguishes a failed injection from a
+ * genuine "no challenge": an `executeScript` rejection is reported as
+ * `{ status: "error" }` (with a warning logged) so the orchestrator can retry
+ * or pause instead of proceeding blindly onto a possibly-injected page.
  *
  * @param tabId The tab to check.
  */
-export async function detectChallenge(tabId: number): Promise<ChallengeInfo | null> {
+export async function detectChallengeResult(
+  tabId: number,
+): Promise<DetectChallengeOutcome> {
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId },
@@ -171,11 +192,38 @@ export async function detectChallenge(tabId: number): Promise<ChallengeInfo | nu
       },
     });
     const result = results?.[0]?.result;
-    return parseChallengeResult(result);
-  } catch {
-    // Tab closed, permission denied, chrome:// URL, etc. — treat as "no challenge".
-    return null;
+    const info = parseChallengeResult(result);
+    return info
+      ? { status: "challenge", info }
+      : { status: "no-challenge" };
+  } catch (error) {
+    // Tab closed, permission denied, chrome:// URL, CSP, a racing navigation,
+    // or any other injection failure. This is NOT the same as "no challenge":
+    // log it so the orchestrator can observe the failure and choose to retry or
+    // pause rather than proceed onto a possibly-injected page.
+    console.warn(
+      `[anti-bot] challenge detection injection failed for tab ${tabId}; ` +
+        `treating as unverifiable (agent should not blindly proceed):`,
+      error,
+    );
+    return { status: "error", error };
   }
+}
+
+/**
+ * Detect whether the current page is showing an anti-bot challenge.
+ *
+ * Convenience wrapper around {@link detectChallengeResult} that collapses the
+ * discriminated outcome to `ChallengeInfo | null` for callers that only need
+ * the binary signal. Injection failures are collapsed to `null` here (matching
+ * the historical contract) — callers that need to distinguish a failed check
+ * from a genuine "no challenge" should use `detectChallengeResult` directly.
+ *
+ * @param tabId The tab to check.
+ */
+export async function detectChallenge(tabId: number): Promise<ChallengeInfo | null> {
+  const outcome = await detectChallengeResult(tabId);
+  return outcome.status === "challenge" ? outcome.info : null;
 }
 
 /**
@@ -184,9 +232,13 @@ export async function detectChallenge(tabId: number): Promise<ChallengeInfo | nu
  * Cloudflare JS challenges auto-resolve via navigation (title changes);
  * CAPTCHAs need a human.
  *
- * Polls {@link detectChallenge} every `pollMs` until either the challenge
- * clears (returns `{resolved: true, challenge: null}`) or `timeoutMs` expires
- * (returns `{resolved: false, challenge}` with the still-present challenge).
+ * Polls {@link detectChallengeResult} every `pollMs` until either the
+ * challenge clears (returns `{resolved: true, challenge: null}`) or `timeoutMs`
+ * expires (returns `{resolved: false, challenge}` with the still-present
+ * challenge). If detection itself fails during polling, the failure is treated
+ * conservatively: we do not report the challenge as resolved (which would let
+ * the agent proceed blindly) — instead the wait reports unresolved so the
+ * orchestrator can retry or surface the issue.
  *
  * @param tabId The tab to monitor.
  * @param opts.timeoutMs Max wait time (default 15000, clamped 500–120000).
@@ -199,16 +251,28 @@ export async function waitForChallengeResolution(
   const timeout = Math.max(500, Math.min(120000, opts.timeoutMs ?? 15000));
   const poll = Math.max(250, Math.min(5000, opts.pollMs ?? 500));
 
-  const initial = await detectChallenge(tabId);
-  if (initial === null) return { resolved: true, challenge: null };
+  const initial = await detectChallengeResult(tabId);
+  // A genuine "no challenge" at the start means there's nothing to wait for.
+  if (initial.status === "no-challenge") return { resolved: true, challenge: null };
+  // A failed initial check can't be treated as "already resolved" — be
+  // conservative and let the orchestrator retry / pause.
+  if (initial.status === "error") return { resolved: false, challenge: null };
+  // initial.status === "challenge": fall through and wait for it to clear.
 
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, poll));
-    const current = await detectChallenge(tabId);
-    if (current === null) return { resolved: true, challenge: null };
+    const current = await detectChallengeResult(tabId);
+    // A genuine "no challenge" means the challenge cleared.
+    if (current.status === "no-challenge") return { resolved: true, challenge: null };
+    // A failed check can't be treated as "resolved" — keep waiting within the
+    // timeout window rather than letting the agent proceed onto an
+    // unverified page.
   }
 
-  const final = await detectChallenge(tabId);
-  return { resolved: final === null, challenge: final };
+  const final = await detectChallengeResult(tabId);
+  if (final.status === "no-challenge") return { resolved: true, challenge: null };
+  // Either the challenge is still present, or we couldn't verify it cleared —
+  // report unresolved so the orchestrator doesn't proceed blindly.
+  return { resolved: false, challenge: final.status === "challenge" ? final.info : null };
 }

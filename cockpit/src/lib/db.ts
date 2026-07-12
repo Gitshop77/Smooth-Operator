@@ -7,8 +7,10 @@ const globalForPrisma = globalThis as unknown as {
 export const db = globalForPrisma.prisma ?? new PrismaClient()
 
 // Cache the singleton on globalThis in ALL environments so it survives
-// serverless/edge cold-starts (the canonical Next.js pattern). The previous
-// guard `!== 'production'` was effectively backwards and would have spawned a
-// fresh client per cold start on any serverless host, exhausting the
-// connection pool.
+// dev HMR reloads and warm serverless invocations (the canonical Next.js
+// pattern). The previous guard `!== 'production'` was effectively backwards
+// and would have spawned a fresh client per invocation, exhausting the
+// connection pool. Note: globalThis is per-process, so an actual cold start
+// (a fresh container/process) still recreates the client — the cache does not
+// persist across cold starts.
 globalForPrisma.prisma = db
