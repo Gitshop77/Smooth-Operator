@@ -435,20 +435,16 @@ function assertStringArray(value: unknown, field: string): string[] {
  * NOTICE) to travel with the redistribution; MIT requires reproduction of the
  * copyright/permission notice.
  *
- * `THIRD_PARTY_LICENSES.md` (repo root) already enumerates every bundled
- * dependency and its license, so we copy it into the package root, plus the
- * full Apache-2.0 text shipped inside the transformers package. `onnxruntime-web`
- * ships no `LICENSE` file in its package, but its MIT attribution is already
- * recorded in `THIRD_PARTY_LICENSES.md` (which we copy), satisfying the
- * attribution requirement.
+ * We copy the full Apache-2.0 text shipped inside the transformers package
+ * (best-effort). `onnxruntime-web` ships no `LICENSE` file in its package, but
+ * its MIT attribution is recorded elsewhere alongside the other bundled
+ * dependencies' licenses.
  *
- * Note: referencing this file from the Options/About page and `manifest.json`
- * is tracked separately, outside this build file.
+ * Note: referencing the third-party license text from the Options/About page
+ * and `manifest.json` is tracked separately, outside this build file.
  */
 async function emitThirdPartyLicenses(): Promise<void> {
-  const targets: Array<[string, string]> = [
-    [path.resolve("THIRD_PARTY_LICENSES.md"), "THIRD_PARTY_LICENSES.md"],
-  ];
+  const targets: Array<[string, string]> = [];
  // Full Apache-2.0 text from the transformers package (best-effort).
   const apache = path.resolve("node_modules/@huggingface/transformers/LICENSE");
   if (existsSync(apache)) targets.push([apache, "LICENSE-APACHE"]);

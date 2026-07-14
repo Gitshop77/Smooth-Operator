@@ -1,33 +1,26 @@
-# Dependencies
+# dependencies
 node_modules/
 
-# Local AI / editor state — never tracked (force push ignores .gitignore, so keep this explicit)
-.claude
-
-# Build outputs
+# build output
 .next/
-# esbuild output — entry bundles + content-hashed chunks (ESM code-splitting).
-# Static assets (manifest.json, *.html, *.css, icons/) ARE tracked; CI verifies
-# they stay in sync with src/extension/.
 chrome-extension/*.js
 chrome-extension/chunks/
 
-# Dev files
+# dev
 dev.log
 *.log
 
-# Environment — ignore all env files except the example template
+# env
 .env*
 !.env.example
 
-# Z-AI SDK credentials — `z-ai-web-dev-sdk` reads from a `.z-ai-config`
-# JSON file containing `baseUrl` + `apiKey`. Never commit a real key.
+# credentials
 .z-ai-config
 
-# Database
+# db
 db/
 
-# Build artifacts
+# build artifacts
 *.tsbuildinfo
 coverage/
 .turbo/
@@ -37,13 +30,13 @@ build/
 .audit/
 FULL-REVIEW.md
 
-# OS files
+# os
 .DS_Store
 Thumbs.db
 
-# IDE
+# ide
 .vscode/
 .idea/
 
-# Workflow / audit process artifacts
-.audit/
+# ai
+.claude

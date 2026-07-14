@@ -303,4 +303,4 @@ Issues and pull requests are welcome. If you're adding a new domain skill or LLM
 
 ## License
 
-MIT — do what you want with it. See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for third-party attributions and license terms (shadcn/ui, Radix UI, HuggingFace transformers, models.dev).
+MIT — do what you want with it. Third-party attributions and license terms (shadcn/ui, Radix UI, HuggingFace transformers, models.dev) are maintained in the repository.

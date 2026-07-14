@@ -39,7 +39,7 @@ import "./message-routing";
 // Lazy import keeps the (large) pricing module out of the critical path.
 // NOTE: the catalog is fetched live at runtime (not bundled), so its current
 // attribution/usage terms must be confirmed before any cached copy is
-// redistributed — see THIRD_PARTY_LICENSES.md (models.dev entry).
+// redistributed (models.dev entry).
 function warmPricingCatalog(): void {
   void import("../../lib/agent/llm/pricing")
     .then((m) => m.refreshPricingFromCatalog())

@@ -1199,9 +1199,7 @@ export function SettingsView() {
               </div>
               <Field label="Licenses">
                 <p className="text-sm text-muted-foreground">
-                  Open Cowork is distributed under the MIT license. Third-party
-                  license text is maintained in{" "}
-                  <span className="font-mono">THIRD_PARTY_LICENSES.md</span>.
+                  Open Cowork is distributed under the MIT license.
                 </p>
               </Field>
             </CardContent>
