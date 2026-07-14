@@ -10,12 +10,16 @@
 import { Protocol, type LLMRequest } from "../route/client";
 import { encodeModelIdForUrl } from "../modelId";
 import { zodToJsonSchema } from "../zod-json-schema";
+import {
+  SCREENSHOT_PATTERN_G,
+  isValidBase64,
+  hasImageProvenance,
+  isZodSchema,
+} from "../shared-image";
 
 const ADAPTER = "gemini";
 export const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
 export const PATH = ":streamGenerateContent";
-
-const SCREENSHOT_PATTERN = /<screenshot>(data:image\/(png|jpeg|webp);base64,[^<]+)<\/screenshot>/g;
 
 /**
  * Once this many non-JSON SSE frames have been dropped in a single stream,
@@ -24,21 +28,6 @@ const SCREENSHOT_PATTERN = /<screenshot>(data:image\/(png|jpeg|webp);base64,[^<]
  * silently truncated — worth flagging without logging frame contents.
  */
 const DROPPED_FRAME_WARN_THRESHOLD = 5;
-
-/**
- * Validate that a string is well-formed base64 (no whitespace, correct
- * padding, only the legal alphabet). Used to reject malformed `<screenshot>`
- * markers locally instead of forwarding them to the provider for an opaque
- * `400`. Mirrors the `isValidBase64` guard in `anthropic-messages.ts`.
- */
-function isValidBase64(s: string): boolean {
- // Reject empty / whitespace / illegal-alphabet payloads locally instead of
- // forwarding them to the provider for an opaque 400. We intentionally do NOT
- // enforce a strict length-multiple-of-4 rule: a trailing `=` padding string
- // like `iVBOR==` is a perfectly usable image payload, and over-strict length
- // gating was a regression that rejected valid screenshots.
-  return s.length > 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(s);
-}
 
 /**
  * A converted JSON Schema must be a plain object, never a raw Zod schema
@@ -53,15 +42,14 @@ function isPlainJSONSchema(v: unknown): v is Record<string, unknown> {
   return true;
 }
 
-/** Heuristic: is this a Zod schema object (vs. an already-plain JSON Schema)? */
-function isZodSchema(value: unknown): boolean {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    (("safeParse" in value && typeof (value as { safeParse?: unknown }).safeParse === "function") ||
-      "_def" in value)
-  );
-}
+/**
+ * Non-global copy of the screenshot marker pattern, used only for the
+ * plain `.replace(...)` strip. Keeping it separate from the shared `/g`
+ * instance (used for `matchAll`) avoids sharing mutable `lastIndex` state
+ * between the two consumers.
+ */
+const SCREENSHOT_STRIP_RE =
+  /<screenshot>(data:image\/(png|jpeg|webp);base64,[^<]+)<\/screenshot>/;
 
 export interface GeminiBody {
   contents: Array<{ role: string; parts: Array<Record<string, unknown>> }>;
@@ -81,11 +69,16 @@ async function fromRequest(request: LLMRequest): Promise<GeminiBody> {
  // Only attach the image to the user message that CONTAINS the <screenshot>
  // marker — not every user message. Mirrors the OpenAI + Anthropic protocols.
   const contents = userMessages.map((m) => {
-    const textContent = m.content.replace(/<screenshot>[^<]+<\/screenshot>/g, "").trim();
     if (m.role === "user") {
+ // Only strip + extract <screenshot> markers from USER messages, mirroring
+ // the Anthropic protocol. Non-user (assistant/model) messages keep their
+ // literal text intact — an assistant message whose generated text happens
+ // to contain the characters "<screenshot>...</screenshot>" must not have
+ // that text deleted before being sent to Gemini.
+      const textContent = m.content.replace(SCREENSHOT_STRIP_RE, "").trim();
  // Extract EVERY screenshot marker (not just the first) into its own
  // `inline_data` part — a multi-screenshot turn must forward all of them.
-      const matches = Array.from(m.content.matchAll(SCREENSHOT_PATTERN));
+      const matches = Array.from(m.content.matchAll(SCREENSHOT_PATTERN_G));
       if (matches.length > 0) {
         const parts: Record<string, unknown>[] = [];
         if (textContent) parts.push({ text: textContent });
@@ -95,12 +88,21 @@ async function fromRequest(request: LLMRequest): Promise<GeminiBody> {
           if (!isValidBase64(b64 ?? "")) {
             throw new Error("Invalid base64 screenshot payload in user message");
           }
+ // Provenance: reject markers whose payload does not actually decode to
+ // an image of the declared type (see hasImageProvenance). Prevents
+ // injected <screenshot> markers in scraped/tool content from
+ // forwarding attacker-chosen bytes to the model as an image part.
+          if (!hasImageProvenance(b64 ?? "", match[2])) {
+            throw new Error("<screenshot> marker failed provenance check: base64 payload does not match its declared image type.");
+          }
           parts.push({ inline_data: { mime_type: `image/${match[2]}`, data: b64 } });
         }
         return { role: "user", parts };
       }
+      return { role: "user", parts: [{ text: textContent }] };
     }
-    return { role: m.role === "assistant" ? "model" : "user", parts: [{ text: textContent }] };
+ // Non-user message: preserve as-is (no screenshot processing).
+    return { role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content.trim() }] };
   });
 
   const generationConfig: GeminiBody["generationConfig"] = {

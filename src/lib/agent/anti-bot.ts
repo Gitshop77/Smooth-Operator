@@ -33,8 +33,11 @@ export type ChallengeKind =
   | "blocked"
   | "rate-limited";
 
-/** Allowed `ChallengeKind` literals, used to validate untrusted parse input. */
-const CHALLENGE_KINDS: readonly ChallengeKind[] = [
+/**
+ * Allowed `ChallengeKind` literals, used to validate untrusted parse input at
+ * the trust boundary. Stored as a `Set` for an O(1) membership check.
+ */
+const CHALLENGE_KINDS: ReadonlySet<ChallengeKind> = new Set<ChallengeKind>([
   "cloudflare-js",
   "cloudflare-block",
   "cloudflare-turnstile",
@@ -42,7 +45,12 @@ const CHALLENGE_KINDS: readonly ChallengeKind[] = [
   "recaptcha",
   "blocked",
   "rate-limited",
-];
+]);
+
+/** Type guard validating an arbitrary value against {@link CHALLENGE_KINDS}. */
+function isChallengeKind(x: unknown): x is ChallengeKind {
+  return typeof x === "string" && CHALLENGE_KINDS.has(x as ChallengeKind);
+}
 
 /** Information about a detected anti-bot challenge. */
 export interface ChallengeInfo {
@@ -89,9 +97,8 @@ function parseChallengeResult(raw: unknown): ChallengeInfo | null {
  // Validate `kind` against the allowed union at this trust boundary before
  // casting — an unrecognized value would otherwise flow downstream into
  // orchestrator switch statements that may lack a default branch.
-      const kind = obj.kind as ChallengeKind;
-      if ((CHALLENGE_KINDS as readonly string[]).includes(kind)) {
-        return { kind, message: obj.message };
+      if (isChallengeKind(obj.kind)) {
+        return { kind: obj.kind, message: obj.message };
       }
     }
   }
@@ -190,21 +197,23 @@ export async function detectChallengeResult(
  // title+body corroboration. This prevents a hostile page from stalling
  // the agent by merely setting <title>429</title>.
         const bodyText = getBody();
+        // Strong, attacker-hard-to-spoof block signal that must NOT be gated by
+        // body length: a forbidden/denied selector paired with a 403/forbidden
+        // title. A verbose access-denied interstitial (footer/support boilerplate
+        // over 5000 chars) would otherwise slip through the length gate undetected.
+        if (
+          document.querySelector('[class*="forbidden"], [class*="denied"]') &&
+          /403|forbidden/i.test(title)
+        ) {
+          return { kind: "blocked", message: "Access denied" };
+        }
         if (bodyText.length < 5000) {
           const accessDeniedBody = /access denied/i.test(bodyText);
           const rateLimitBody = /too many requests|rate limit/i.test(bodyText);
-          if (
-            (document.querySelector('[class*="forbidden"], [class*="denied"]') &&
-              /403|forbidden/i.test(title)) ||
-            (/access denied|403 forbidden/i.test(title) && accessDeniedBody) ||
-            accessDeniedBody
-          ) {
+          if (/access denied|403 forbidden/i.test(title) && accessDeniedBody) {
             return { kind: "blocked", message: "Access denied" };
           }
-          if (
-            (/\b429\b/i.test(title) && rateLimitBody) ||
-            rateLimitBody
-          ) {
+          if (/\b429\b/i.test(title) && rateLimitBody) {
             return { kind: "rate-limited", message: "Rate limited" };
           }
         }

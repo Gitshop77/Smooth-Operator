@@ -122,6 +122,18 @@ describe("formatMemories stable output", () => {
 // ─── Loop integration: memory is injected into the navigator prompt ──────────
 
 describe("loop/messages — persistent memory injected into navigator prompt", () => {
+ // Local factory: the four tests below each hand `buildNavigatorUserMessage`
+ // an identical browser-state shape. Collapse the repeated literal into one
+ // helper so the per-test delta (the URL / elements under test) is obvious.
+  const makeBrowserState = (url: string, elementsText = "") => ({
+    url,
+    title: "T",
+    tabs: [] as unknown[],
+    elementsText,
+    pageInfo: "",
+    newElementCount: 0,
+  });
+
   test("buildNavigatorUserMessage injects a <site_memory> block for the current domain", async () => {
     await saveMemory("example.com", "username is alice");
     await saveMemory("github.com", "prefer the CLI");
@@ -132,14 +144,7 @@ describe("loop/messages — persistent memory injected into navigator prompt", (
       currentGoal: "fill the form",
       plan: undefined,
       currentPlanItem: undefined,
-      browserState: {
-        url: "https://example.com/login",
-        title: "Login",
-        tabs: [],
-        elementsText: "<button>Submit</button>",
-        pageInfo: "0 pages above, 0 below",
-        newElementCount: 0,
-      },
+      browserState: makeBrowserState("https://example.com/login", "<button>Submit</button>"),
       step: 0,
       maxSteps: 50,
     });
@@ -158,14 +163,7 @@ describe("loop/messages — persistent memory injected into navigator prompt", (
       currentGoal: "type a query",
       plan: undefined,
       currentPlanItem: undefined,
-      browserState: {
-        url: "https://no-memory-here.com/page",
-        title: "Page",
-        tabs: [],
-        elementsText: "<input>",
-        pageInfo: "0 pages above, 0 below",
-        newElementCount: 0,
-      },
+      browserState: makeBrowserState("https://no-memory-here.com/page", "<input>"),
       step: 0,
       maxSteps: 50,
     });
@@ -180,14 +178,7 @@ describe("loop/messages — persistent memory injected into navigator prompt", (
       currentGoal: "g",
       plan: undefined,
       currentPlanItem: undefined,
-      browserState: {
-        url: "https://example.com",
-        title: "T",
-        tabs: [],
-        elementsText: "",
-        pageInfo: "",
-        newElementCount: 0,
-      },
+      browserState: makeBrowserState("https://example.com"),
       step: 0,
       maxSteps: 10,
     });
@@ -202,14 +193,7 @@ describe("loop/messages — persistent memory injected into navigator prompt", (
       currentGoal: "g",
       plan: undefined,
       currentPlanItem: undefined,
-      browserState: {
-        url: "https://example.com",
-        title: "T",
-        tabs: [],
-        elementsText: "",
-        pageInfo: "",
-        newElementCount: 0,
-      },
+      browserState: makeBrowserState("https://example.com"),
       step: 1,
       maxSteps: 10,
     });

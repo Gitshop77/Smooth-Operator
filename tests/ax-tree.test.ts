@@ -41,6 +41,36 @@ function clearWindowStub(): void {
   delete (globalThis as unknown as { window?: WindowStub }).window;
 }
 
+// Factory for the minimal fake element used throughout these tests.
+const makeFakeButton = (): HTMLElement =>
+  ({ tagName: "BUTTON" } as unknown as HTMLElement);
+
+// Factory for a minimal fake `document` whose `body` satisfies the shape
+// `generateAccessibilityTree` reads (tagName/children/getBoundingClientRect/…).
+const makeFakeDocument = (): { document: unknown } => ({
+  document: {
+    body: {
+      tagName: "BODY",
+      children: [],
+      childNodes: [],
+      getAttribute: () => null,
+      getBoundingClientRect: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
+      offsetWidth: 0,
+      offsetHeight: 0,
+    },
+  },
+});
+
+// Register the window-stub before/after hooks on the enclosing describe block.
+function withWindowStub(): void {
+  beforeEach(() => {
+    installWindowStub();
+  });
+  afterEach(() => {
+    clearWindowStub();
+  });
+}
+
 // Keep the module-scoped registry deterministic across tests (it persists for
 // the lifetime of the module, and initElementMap alone is idempotent).
 beforeEach(() => {
@@ -63,7 +93,7 @@ describe("ax-tree module exports", () => {
 
  // Register a real element (mirrors how buildTree registers during a real
  // DOM walk) and confirm resolveRef returns it.
-    const fakeEl = { tagName: "BUTTON" } as unknown as HTMLElement;
+    const fakeEl = makeFakeButton();
     __test_registerElement("ref_1", fakeEl);
     expect(resolveRef("ref_1")).toBe(fakeEl);
 
@@ -73,18 +103,12 @@ describe("ax-tree module exports", () => {
 
   test("generateAccessibilityTree is callable (throws cleanly without a DOM)", () => {
     clearWindowStub();
-    expect(() => generateAccessibilityTree()).toThrow();
+    expect(() => generateAccessibilityTree()).toThrow(/document|window/i);
   });
 });
 
 describe("initElementMap", () => {
-  beforeEach(() => {
-    installWindowStub();
-  });
-
-  afterEach(() => {
-    clearWindowStub();
-  });
+  withWindowStub();
 
   test("initializes the off-window registry on first call", () => {
     initElementMap();
@@ -96,7 +120,7 @@ describe("initElementMap", () => {
 
   test("is idempotent — a second call preserves existing state", () => {
     initElementMap();
-    const fakeEl = { tagName: "BUTTON" } as unknown as HTMLElement;
+    const fakeEl = makeFakeButton();
     __test_registerElement("ref_1", fakeEl);
     expect(resolveRef("ref_1")).toBe(fakeEl);
 
@@ -108,13 +132,7 @@ describe("initElementMap", () => {
 });
 
 describe("resolveRef", () => {
-  beforeEach(() => {
-    installWindowStub();
-  });
-
-  afterEach(() => {
-    clearWindowStub();
-  });
+  withWindowStub();
 
   test("returns null for an unknown / unregistered ref id", () => {
     initElementMap();
@@ -123,20 +141,14 @@ describe("resolveRef", () => {
 
   test("returns the registered element when the ref is live", () => {
     initElementMap();
-    const fakeEl = { tagName: "BUTTON" } as unknown as HTMLElement;
+    const fakeEl = makeFakeButton();
     __test_registerElement("ref_1", fakeEl);
     expect(resolveRef("ref_1")).toBe(fakeEl);
   });
 });
 
 describe("generateAccessibilityTree", () => {
-  beforeEach(() => {
-    installWindowStub();
-  });
-
-  afterEach(() => {
-    clearWindowStub();
-  });
+  withWindowStub();
 
   test("returns an error result for an unknown refId (after init)", () => {
     initElementMap();
@@ -151,17 +163,7 @@ describe("generateAccessibilityTree", () => {
   });
 
   test("honors a generous maxLength cap (content fits) — no error returned", () => {
-    (globalThis as unknown as { document: unknown }).document = {
-      body: {
-        tagName: "BODY",
-        children: [],
-        childNodes: [],
-        getAttribute: () => null,
-        getBoundingClientRect: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
-        offsetWidth: 0,
-        offsetHeight: 0,
-      },
-    };
+    (globalThis as unknown as { document: unknown }).document = makeFakeDocument().document;
     try {
       const result = generateAccessibilityTree("all", 15, 1000);
       expect(result.error).toBeUndefined();

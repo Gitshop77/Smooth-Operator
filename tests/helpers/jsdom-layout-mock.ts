@@ -43,6 +43,26 @@ const offsetParentDescriptor = Object.getOwnPropertyDescriptor(
 
 /** Install the layout mocks. Safe to call multiple times — each call overwrites the previous. */
 export function installJsdomLayoutMock(): void {
+ // Cache the computed `display` per element so both getters below share a
+ // single `getComputedStyle` call (it's the hottest cost in the mock during
+ // extraction, which walks hundreds of elements). Display is stable for the
+ // duration of a single extraction, so the cache is safe within a test and is
+ // discarded on re-install.
+  const displayCache = new WeakMap<HTMLElement, "none" | "other">();
+  const getDisplay = (el: HTMLElement): "none" | "other" => {
+    const cached = displayCache.get(el);
+    if (cached) return cached;
+    let display: "none" | "other" = "other";
+    try {
+      if (window.getComputedStyle(el).display === "none") display = "none";
+    } catch {
+ // getComputedStyle can throw for detached elements; treat as hidden.
+      display = "none";
+    }
+    displayCache.set(el, display);
+    return display;
+  };
+
  // 1. `offsetParent` — return body for non-display:none elements so the
  // extractor's `isLikelyHidden` pre-check doesn't short-circuit every
  // visible element. Mirrors real-browser behavior (block elements have
@@ -50,13 +70,7 @@ export function installJsdomLayoutMock(): void {
   Object.defineProperty(HTMLElement.prototype, "offsetParent", {
     configurable: true,
     get(this: HTMLElement): Element | null {
-      try {
-        if (window.getComputedStyle(this).display === "none") return null;
-      } catch {
- // getComputedStyle can throw for detached elements; treat as hidden.
-        return null;
-      }
-      return document.body;
+      return getDisplay(this) === "none" ? null : document.body;
     },
   });
 
@@ -65,46 +79,31 @@ export function installJsdomLayoutMock(): void {
  // Real-browser layout would give each element its actual rendered size;
  // we approximate with a fixed 100x30 rect (the dimensions don't matter
  // for any assertion, only that width/height are non-zero).
-  HTMLElement.prototype.getBoundingClientRect = function (): DOMRect {
-    try {
-      if (window.getComputedStyle(this).display === "none") {
-        return {
-          width: 0,
-          height: 0,
-          top: 0,
-          right: 0,
-          bottom: 0,
-          left: 0,
-          x: 0,
-          y: 0,
-          toJSON: () => ({}),
-        } as DOMRect;
-      }
-    } catch {
- // detached — return zero rect
-      return {
-        width: 0,
-        height: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-        left: 0,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      } as DOMRect;
-    }
-    return {
+  const makeRect = (width: number, height: number): DOMRect =>
+    ({
       x: 0,
       y: 0,
       top: 0,
-      right: 100,
-      bottom: 30,
       left: 0,
-      width: 100,
-      height: 30,
-      toJSON: () => ({}) as DOMRect,
-    } as DOMRect;
+      width,
+      height,
+      right: width,
+      bottom: height,
+      toJSON: () => ({
+        x: 0,
+        y: 0,
+        width,
+        height,
+        top: 0,
+        right: width,
+        bottom: height,
+        left: 0,
+      }),
+    }) as DOMRect;
+
+  HTMLElement.prototype.getBoundingClientRect = function (): DOMRect {
+    if (getDisplay(this) === "none") return makeRect(0, 0);
+    return makeRect(100, 30);
   };
 }
 
@@ -120,4 +119,71 @@ export function restoreJsdomLayoutMock(): void {
   } else {
     delete (HTMLElement.prototype as { offsetParent?: unknown }).offsetParent;
   }
+}
+
+// ─── viewport mocks (pageInfo math) ────────────────────────────────────────────
+//
+// `buildPageInfo` consumes `window.innerHeight`, `document.documentElement.
+// scrollHeight`, and `window.scrollY`. jsdom defaults differ from the values a
+// real page would report, so tests pin them explicitly. These helpers save the
+// originals and restore them, keeping the file's documented "restored in
+// afterEach" contract true (a plain `Object.defineProperty` assignment would
+// leak the mocked values into later tests).
+
+const viewportOriginals: {
+  innerHeight?: number;
+  scrollHeight?: number;
+  scrollY?: number;
+} = {};
+
+export function installViewportMock(values: {
+  innerHeight: number;
+  scrollHeight: number;
+  scrollY: number;
+}): void {
+  viewportOriginals.innerHeight = window.innerHeight;
+  viewportOriginals.scrollHeight = document.documentElement.scrollHeight;
+  viewportOriginals.scrollY = window.scrollY;
+  Object.defineProperty(window, "innerHeight", {
+    configurable: true,
+    writable: true,
+    value: values.innerHeight,
+  });
+  Object.defineProperty(document.documentElement, "scrollHeight", {
+    configurable: true,
+    writable: true,
+    value: values.scrollHeight,
+  });
+  Object.defineProperty(window, "scrollY", {
+    configurable: true,
+    writable: true,
+    value: values.scrollY,
+  });
+}
+
+export function restoreViewportMock(): void {
+  if (viewportOriginals.innerHeight !== undefined) {
+    Object.defineProperty(window, "innerHeight", {
+      configurable: true,
+      writable: true,
+      value: viewportOriginals.innerHeight,
+    });
+  }
+  if (viewportOriginals.scrollHeight !== undefined) {
+    Object.defineProperty(document.documentElement, "scrollHeight", {
+      configurable: true,
+      writable: true,
+      value: viewportOriginals.scrollHeight,
+    });
+  }
+  if (viewportOriginals.scrollY !== undefined) {
+    Object.defineProperty(window, "scrollY", {
+      configurable: true,
+      writable: true,
+      value: viewportOriginals.scrollY,
+    });
+  }
+  delete viewportOriginals.innerHeight;
+  delete viewportOriginals.scrollHeight;
+  delete viewportOriginals.scrollY;
 }

@@ -70,6 +70,7 @@ function providerKeyPrefixes(): string[] {
 const KEY_RE = new RegExp("(" + [...providerKeyPrefixes(), ...BASE_KEY_PATTERNS].join("|") + ")", "g");
 
 export function redactKeyLeak(s: string): string {
+  KEY_RE.lastIndex = 0;
   return s.replace(KEY_RE, (m) => {
     const dash = m.indexOf("-");
     const prefix = dash > 0 ? m.slice(0, dash + 1) : m.slice(0, 4);
@@ -80,6 +81,13 @@ export function redactKeyLeak(s: string): string {
 // ─── Provider config display ───────────────────────────────────────────────
 
 let lastProvider = "";
+
+/** Reset the model field's placeholder to the current provider's default model. */
+function applyDefaultModelPlaceholder(): void {
+  const provider = ($("provider") as HTMLSelectElement).value;
+  const meta = PROVIDER_META[provider] || PROVIDER_META[DEFAULT_PROVIDER_ID];
+  if (meta?.defaultModel) ($("model") as HTMLInputElement).placeholder = meta.defaultModel;
+}
 
 /**
  * Update the connection-tab UI based on the selected provider. The default
@@ -104,7 +112,7 @@ export function updateProviderUI(): void {
     ? `Get your key at ${meta.keyUrl}`
     : "Local provider — no key required (leave as-is).";
   const modelInput = $("model") as HTMLInputElement;
-  if (!modelInput.value) modelInput.placeholder = meta.defaultModel;
+  if (!modelInput.value) applyDefaultModelPlaceholder();
   const baseUrlLabel = $("baseurl-label") as HTMLElement;
   const baseUrlInput = $("baseUrl") as HTMLInputElement;
   if (meta.defaultBaseUrl) {
@@ -133,7 +141,9 @@ export function updateProviderUI(): void {
 $("testConnection")?.addEventListener("click", async () => {
   const testBtn = $("testConnection") as HTMLButtonElement;
   const testResult = $("testResult") as HTMLSpanElement;
+  testResult.setAttribute("aria-live", "polite");
   testBtn.disabled = true;
+  testBtn.setAttribute("aria-busy", "true");
   testResult.className = "test-result pending";
   testResult.textContent = "Testing…";
 
@@ -179,6 +189,7 @@ $("testConnection")?.addEventListener("click", async () => {
     testResult.textContent = `✗ ${redactKeyLeak(raw).slice(0, 240)}`;
   } finally {
     testBtn.disabled = false;
+    testBtn.setAttribute("aria-busy", "false");
   }
 });
 
@@ -220,6 +231,11 @@ $("model")?.addEventListener("input", () => {
   const query = ($("model") as HTMLInputElement).value.trim();
   const resultsDiv = $("model-search-results") as HTMLDivElement;
   if (modelSearchTimer) clearTimeout(modelSearchTimer);
+ // Refresh the placeholder when the field is emptied so it shows the current
+ // provider's default model (the two concerns now live in one listener).
+  if (query.length === 0) {
+    applyDefaultModelPlaceholder();
+  }
   if (query.length < 2) {
     resultsDiv.classList.add("is-hidden");
     return;
@@ -238,8 +254,10 @@ $("model")?.addEventListener("input", () => {
       resultsDiv.innerHTML = "";
       resultsDiv.classList.remove("is-hidden");
       for (const r of results) {
-        const item = document.createElement("div");
+        const item = document.createElement("button");
+        item.type = "button";
         item.className = "model-search-result-item";
+        item.setAttribute("aria-label", `Select model ${r.model.name} from ${r.providerName}`);
         const visionTag = formatVision(r.model.attachment);
         item.innerHTML = `<strong>${escapeHtml(r.model.name)}</strong> <span class="provider-name">${escapeHtml(r.providerName)}</span> <span class="meta">${escapeHtml(formatCost(r.model.cost))} · ${escapeHtml(formatContext(r.model.limit))} ctx${visionTag ? " · " + escapeHtml(visionTag) : ""}</span>`;
         item.addEventListener("click", () => {

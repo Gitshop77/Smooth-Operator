@@ -19,6 +19,9 @@
 // Prisma field is preferred for new code; the legacy alias is documented on
 // each field with its source route.
 
+/** A timestamp as accepted by the API — epoch ms, ISO/parseable string, or Date. */
+export type CoworkTimestamp = number | string | Date;
+
 export interface SampleTab {
   id: string;
   url: string;
@@ -36,8 +39,8 @@ export interface SampleTab {
   favicon?: string | null;
  // Prisma stores `lastAccessedAt: DateTime?`. `lastAccessed` is the legacy
  // alias projected by `/api/cowork/tabs` (mirrors `lastAccessedAt`).
-  lastAccessed: number | string | Date | null;
-  lastAccessedAt?: number | string | Date | null;
+  lastAccessed: CoworkTimestamp | null;
+  lastAccessedAt?: CoworkTimestamp | null;
   active?: boolean;
  // Prisma boolean flags + legacy aliases projected by `/api/cowork/tabs`.
   isPinned?: boolean;
@@ -52,9 +55,9 @@ export interface SampleTab {
   partition?: string | null;
   loaderFlags?: string | null;
   source?: string | null;
-  activeAt?: number | string | Date | null;
-  createdAt?: number | string | Date;
-  updatedAt?: number | string | Date;
+  activeAt?: CoworkTimestamp | null;
+  createdAt?: CoworkTimestamp;
+  updatedAt?: CoworkTimestamp;
 }
 
 export interface SampleWorkspace {
@@ -70,8 +73,8 @@ export interface SampleWorkspace {
  // Populated by `/api/cowork/workspaces` projection (`ws._count.tabs`).
  // Prisma `Workspace` has no `tabCount` column.
   tabCount: number;
-  createdAt?: number | string | Date;
-  updatedAt?: number | string | Date;
+  createdAt?: CoworkTimestamp;
+  updatedAt?: CoworkTimestamp;
 }
 
 export interface SampleAgent {
@@ -83,10 +86,10 @@ export interface SampleAgent {
   name: string | null;
   trustLevel: string;
   scope: string | null;
-  grantedAt: number | string | Date;
-  lastUsedAt: number | string | Date | null;
-  createdAt?: number | string | Date;
-  updatedAt?: number | string | Date;
+  grantedAt: CoworkTimestamp;
+  lastUsedAt: CoworkTimestamp | null;
+  createdAt?: CoworkTimestamp;
+  updatedAt?: CoworkTimestamp;
  // Legacy aliases projected by `/api/cowork/agents` (sensible defaults — the
  // dashboard is read-only with no live run-state). `type` →
  // 'browser-extension'; `status` → 'idle'; `lastActive` → `lastUsedAt ??
@@ -94,7 +97,7 @@ export interface SampleAgent {
   type: string;
   status: string;
   currentTask?: string | null;
-  lastActive: number | string | Date | null;
+  lastActive: CoworkTimestamp | null;
   tasksCompleted: number;
 }
 
@@ -113,12 +116,14 @@ export interface SampleTask {
  // raw value is a JSON string, NOT an array.
   stepsJson: string;
   currentStep: number;
+  // JSON-encoded result payload. Parse with `JSON.parse(t.resultsJson || "{}")`
+  // before accessing — raw value is a JSON string, not an object.
   resultsJson: string;
   assignedTo: string | null;
   createdBy: string | null;
-  completedAt: number | string | Date | null;
-  createdAt: number | string | Date;
-  updatedAt?: number | string | Date;
+  completedAt: CoworkTimestamp | null;
+  createdAt: CoworkTimestamp;
+  updatedAt?: CoworkTimestamp;
 }
 
 export interface SampleWorkflow {
@@ -133,15 +138,15 @@ export interface SampleWorkflow {
   variablesJson: string | null;
   isRecurring: boolean;
   scheduleCron: string | null;
-  lastRunAt: number | string | Date | null;
-  createdAt?: number | string | Date;
-  updatedAt?: number | string | Date;
+  lastRunAt: CoworkTimestamp | null;
+  createdAt?: CoworkTimestamp;
+  updatedAt?: CoworkTimestamp;
  // Legacy aliases projected by `/api/cowork/workflows`: `enabled` mirrors
  // `isRecurring`; `runs` is hardcoded `0` (no run log yet); `lastRun`
  // mirrors `lastRunAt`.
   enabled?: boolean;
   runs?: number;
-  lastRun?: number | string | Date | null;
+  lastRun?: CoworkTimestamp | null;
 }
 
 export interface SampleSecurityEvent {
@@ -162,11 +167,11 @@ export interface SampleSecurityEvent {
   blocked: boolean;
   confidence?: number | null;
   falsePositive?: boolean | null;
-  createdAt: number | string | Date;
+  createdAt: CoworkTimestamp;
  // Legacy aliases projected by `/api/cowork/security/events`: `timestamp`
  // mirrors `createdAt`; `description` mirrors `details ?? ''`.
   description?: string;
-  timestamp: number | string | Date;
+  timestamp: CoworkTimestamp;
 }
 
 export interface SampleSession {
@@ -177,8 +182,8 @@ export interface SampleSession {
   isIncognito?: boolean;
   isDefault?: boolean;
   userAgent: string | null;
-  createdAt: number | string | Date;
-  updatedAt?: number | string | Date;
+  createdAt: CoworkTimestamp;
+  updatedAt?: CoworkTimestamp;
  // Legacy aliases projected by `/api/cowork/sessions`: `incognito` mirrors
  // `isIncognito`; `cookieCount` is hardcoded `0` (Prisma `Session` has no
  // cookie-count column — the dashboard can't derive one from the DB).
@@ -201,8 +206,8 @@ export interface SampleExtension {
   isEnabled: boolean;
   source: string;
   trustLevel: string;
-  createdAt: number | string | Date;
-  updatedAt?: number | string | Date;
+  createdAt: CoworkTimestamp;
+  updatedAt?: CoworkTimestamp;
  // Legacy aliases projected by `/api/cowork/extensions`: `enabled` mirrors
  // `isEnabled`; `size` is hardcoded `0` (Prisma `Extension` has no size
  // column); `installedAt` mirrors `createdAt`. The Prisma model has NO
@@ -210,7 +215,7 @@ export interface SampleExtension {
  // site instead.
   enabled?: boolean;
   size?: number;
-  installedAt?: number | string | Date;
+  installedAt?: CoworkTimestamp;
 }
 
 export interface SampleSiteMemoryEntry {
@@ -222,9 +227,9 @@ export interface SampleSiteMemoryEntry {
  // Prisma model has NO `key` or `value` columns.
   dataJson: string;
   version: number;
-  capturedAt: number | string | Date;
-  createdAt?: number | string | Date;
-  updatedAt?: number | string | Date;
+  capturedAt: CoworkTimestamp;
+  createdAt?: CoworkTimestamp;
+  updatedAt?: CoworkTimestamp;
 }
 
 export interface SampleFormMemoryEntry {
@@ -235,8 +240,8 @@ export interface SampleFormMemoryEntry {
  // `JSON.parse(e.formDataJson || "{}")` to inspect form fields/values.
  // The Prisma model has NO `field`, `value`, or `formUrl` columns.
   formDataJson: string;
-  createdAt?: number | string | Date;
-  updatedAt?: number | string | Date;
+  createdAt?: CoworkTimestamp;
+  updatedAt?: CoworkTimestamp;
 }
 
 export interface SampleMcpTool {
@@ -256,9 +261,9 @@ export interface SampleBookmark {
   type?: string;
   favicon?: string | null;
   parentId?: string | null;
-  dateAdded?: number | string | Date;
-  createdAt?: number | string | Date;
-  updatedAt?: number | string | Date;
+  dateAdded?: CoworkTimestamp;
+  createdAt?: CoworkTimestamp;
+  updatedAt?: CoworkTimestamp;
   children?: SampleBookmark[];
 }
 
@@ -267,14 +272,14 @@ export interface SampleHistoryEntry {
   title: string;
   url: string;
   visitCount: number;
-  firstVisitedAt?: number | string | Date;
-  lastVisitedAt?: number | string | Date;
-  createdAt?: number | string | Date;
-  updatedAt?: number | string | Date;
+  firstVisitedAt?: CoworkTimestamp;
+  lastVisitedAt?: CoworkTimestamp;
+  createdAt?: CoworkTimestamp;
+  updatedAt?: CoworkTimestamp;
  // Legacy alias projected by `/api/cowork/history`: `visitedAt` mirrors
  // `lastVisitedAt`. Kept because `collections-view`'s history-tab sort +
  // "visited N ago" renderer read `visitedAt` directly.
-  visitedAt: number | string | Date;
+  visitedAt: CoworkTimestamp;
 }
 
 export interface SamplePinboard {
@@ -284,8 +289,8 @@ export interface SamplePinboard {
   color?: string;
   layout?: string;
   background?: string;
-  createdAt?: number | string | Date;
-  updatedAt?: number | string | Date;
+  createdAt?: CoworkTimestamp;
+  updatedAt?: CoworkTimestamp;
  // Legacy alias projected by `/api/cowork/pinboards`: `itemCount` mirrors
  // `_count.items` (Prisma `Pinboard` has no `itemCount` column — derived
  // from the `items` relation count via the `_count` include).

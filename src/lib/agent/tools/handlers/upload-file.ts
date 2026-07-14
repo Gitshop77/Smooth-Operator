@@ -36,9 +36,20 @@ export async function handleUploadFile(
   const el = resolveElement(ctx.state, action.index);
 
  // File uploads require a real `<input type="file">`. If the resolved element
- // is anything else, fail closed with a typed error rather than silently
- // doing nothing (which would send the agent into a confusing retry loop).
-  if (!(el instanceof HTMLInputElement) || el.type !== "file") {
+ // is anything else, fail closed with a plain (untyped) Error rather than
+ // silently doing nothing (which would send the agent into a confusing retry
+ // loop). The executor's structured failure path surfaces this as a thrown
+ // rejection the caller handles.
+ // Duck-typed check: `HTMLInputElement` is a DOM global that throws a
+ // TypeError under `instanceof` in a non-DOM realm (service-worker/Node
+ // harness). The tagName/type test yields identical results for a genuine
+ // file input and fails closed safely otherwise. tagName is compared
+ // case-insensitively so non-HTML namespaces ("input") still match.
+  if (
+    !el ||
+    ((el as unknown as { tagName?: string }).tagName || "").toUpperCase() !== "INPUT" ||
+    (el as unknown as { type?: string }).type !== "file"
+  ) {
     throw new Error(
       `element [${action.index}] is not a file input — upload_file requires a file input (type="file")`,
     );

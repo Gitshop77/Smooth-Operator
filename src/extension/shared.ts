@@ -25,6 +25,7 @@ export function $<T extends HTMLElement = HTMLElement>(id: string): T {
  * latent cross-context injection hole.
  */
 export function escapeHtml(s: unknown): string {
+  if (s == null) return "";
   return String(s).replace(
     /[&<>"'/]/g,
     (c) =>

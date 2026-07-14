@@ -43,8 +43,10 @@ function sumUsages(usages: LLMUsageInfo[]): LLMUsageInfo | undefined {
   let costUsd = 0;
   let reasoningTokens = 0;
   let cachedInputTokens = 0;
+  let cachedWriteInputTokens = 0;
   let hasReasoning = false;
   let hasCached = false;
+  let hasWriteCached = false;
   for (const u of usages) {
     tokensIn += u.tokensIn;
     tokensOut += u.tokensOut;
@@ -57,6 +59,10 @@ function sumUsages(usages: LLMUsageInfo[]): LLMUsageInfo | undefined {
       cachedInputTokens += u.cachedInputTokens;
       hasCached = true;
     }
+    if (u.cachedWriteInputTokens) {
+      cachedWriteInputTokens += u.cachedWriteInputTokens;
+      hasWriteCached = true;
+    }
   }
   return {
     tokensIn,
@@ -65,6 +71,72 @@ function sumUsages(usages: LLMUsageInfo[]): LLMUsageInfo | undefined {
     costUsd,
     ...(hasReasoning ? { reasoningTokens } : {}),
     ...(hasCached ? { cachedInputTokens } : {}),
+    ...(hasWriteCached ? { cachedWriteInputTokens } : {}),
+  };
+}
+
+/**
+ * Build a per-attempt {@link LLMUsageInfo} record (helper for the runPlanner /
+ * callNavigatorWithRetry usage literals — both construct the identical shape).
+ */
+function buildUsage(
+  model: string,
+  tokensIn: number,
+  tokensOut: number,
+  costUsd: number,
+  reasoningTokens?: number,
+  cachedInputTokens?: number,
+  cachedWriteInputTokens?: number,
+): LLMUsageInfo {
+  return {
+    model,
+    tokensIn,
+    tokensOut,
+    costUsd,
+    reasoningTokens,
+    cachedInputTokens,
+    cachedWriteInputTokens,
+  };
+}
+
+/**
+ * Read cache-write (creation) tokens off an LLM result via a cast. The
+ * upstream result types do not yet carry the field natively, so it is read
+ * defensively and defaults to 0 when absent.
+ */
+function readCachedWriteTokens(u: unknown): number {
+  return (u as { cachedWriteInputTokens?: number } | undefined)?.cachedWriteInputTokens ?? 0;
+}
+
+/**
+ * Shared token→cost→usage accounting used by both {@link runPlanner} and
+ * {@link callNavigatorWithRetry}. Returns the finite dollar cost (or
+ * `undefined`) and the matching per-attempt {@link LLMUsageInfo} (or
+ * `undefined`), or `undefined` entirely when token counts are missing. The
+ * caller is responsible for the `onCost` / `onEvent` side-effects and for
+ * pushing the usage into the per-phase aggregate.
+ */
+function accountUsage(params: {
+  precomputedCost?: number;
+  model?: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  reasoningTokens?: number;
+  cachedInputTokens?: number;
+  cachedWriteInputTokens?: number;
+}): { cost: number | undefined; usage: LLMUsageInfo | undefined } | undefined {
+  const { precomputedCost, model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens } = params;
+  if (tokensIn === undefined || tokensOut === undefined) return undefined;
+  const cost = precomputedCost ?? (model ? estimateCost(model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens) : undefined);
+  const usage: LLMUsageInfo | undefined =
+    typeof cost === "number" && Number.isFinite(cost)
+      ? buildUsage(model ?? "", tokensIn, tokensOut, cost, reasoningTokens, cachedInputTokens, cachedWriteInputTokens)
+      : model
+        ? buildUsage(model, tokensIn, tokensOut, 0, reasoningTokens, cachedInputTokens, cachedWriteInputTokens)
+        : undefined;
+  return {
+    cost: typeof cost === "number" && Number.isFinite(cost) ? cost : undefined,
+    usage,
   };
 }
 
@@ -104,25 +176,26 @@ export async function runPlanner(
  // omitting it under-reports Anthropic cache-creation cost. The field is
  // read via a cast until the upstream result types (loop/types.ts) and
  // the loop-deps wiring (llm-direct.ts) propagate it end-to-end.
-    const cachedWriteInputTokens = (result as { cachedWriteInputTokens?: number }).cachedWriteInputTokens ?? 0;
-    if (tokensIn !== undefined && tokensOut !== undefined && model) {
- // Prefer the provider-bridge's pre-computed costUsd (correctly accounts
- // for cachedInputTokens + cachedWriteInputTokens). Fall back to
- // estimateCost with cachedInputTokens AND cachedWriteInputTokens passed
- // through (dropping either under-reports Anthropic cached-step cost by up
- // to 90%, disabling cost-cap enforcement).
-      const cost = precomputedCost ?? estimateCost(model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens);
-      args.onCost(cost, tokensIn, tokensOut);
-      deps.onEvent({ type: "cost", step: args.step, tokensIn, tokensOut, costUsd: cost, model });
-      usage = { tokensIn, tokensOut, model, costUsd: cost, reasoningTokens, cachedInputTokens };
+    const cachedWriteInputTokens = readCachedWriteTokens(result);
+    const accounted = accountUsage({ precomputedCost, model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens });
+    if (accounted) {
+      const { cost, usage: u } = accounted;
+      if (typeof cost === "number" && u) {
+        args.onCost(cost, u.tokensIn, u.tokensOut);
+        deps.onEvent({ type: "cost", step: args.step, tokensIn: u.tokensIn, tokensOut: u.tokensOut, costUsd: cost, model: model ?? "" });
+      }
+      usage = u;
     }
     const parsed = parsePlannerOutput(raw);
     if (!parsed.ok || !parsed.output) {
       throw new Error(`Planner output parse failed: ${parsed.error}`);
     }
     if (dispatcher && ctx) {
-      await dispatcher.llmEnd(ctx, { content: raw, usage });
+ // Set the guard before the awaited dispatcher calls so a throwing
+ // dispatcher on the success path does not get re-emitted by the finally
+ // block (duplicate llmEnd/cost + masked original error).
       fired = true;
+      await dispatcher.llmEnd(ctx, { content: raw, usage });
       if (usage) await dispatcher.cost(ctx, usage);
     }
     return parsed.output;
@@ -182,34 +255,40 @@ export async function callNavigatorWithRetry(
  // (billed at the higher cache-write rate; omitted, it under-reports
  // Anthropic cache-creation cost). Cast until upstream types/loop-deps
  // wiring propagate it end-to-end.
-      const cachedWriteInputTokens = (navResult as { cachedWriteInputTokens?: number }).cachedWriteInputTokens ?? 0;
+      const cachedWriteInputTokens = readCachedWriteTokens(navResult);
       lastRaw = raw;
       let usage: LLMUsageInfo | undefined;
-      if (tokensIn !== undefined && tokensOut !== undefined && model) {
  // Prefer pre-computed costUsd; fall back to estimateCost with
  // cachedInputTokens AND cachedWriteInputTokens (billed at the higher
- // cache-write rate) passed through.
-        const cost = precomputedCost ?? estimateCost(model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens);
+ // cache-write rate) passed through. When only a precomputed cost is
+ // supplied (no `model`), report it regardless of model presence.
+      const accounted = accountUsage({ precomputedCost, model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens });
+      if (accounted) {
+        const { cost, usage: u } = accounted;
+        if (typeof cost === "number" && u) {
  // Run-level cost accounting stays per-attempt so the run total (and
  // cost-cap enforcement) stays exact across retries.
-        onCost(cost, tokensIn, tokensOut);
-        deps.onEvent({ type: "cost", step, tokensIn, tokensOut, costUsd: cost, model });
-        usage = { tokensIn, tokensOut, model, costUsd: cost, reasoningTokens, cachedInputTokens };
-        attemptUsages.push(usage);
+          onCost(cost, u.tokensIn, u.tokensOut);
+          deps.onEvent({ type: "cost", step, tokensIn: u.tokensIn, tokensOut: u.tokensOut, costUsd: cost, model: model ?? "" });
+        }
+        usage = u;
       }
       lastUsage = usage;
       const parsed = parseAgentOutput(raw);
       if (parsed.ok && parsed.output) {
         if (dispatcher && ctx) {
-          await dispatcher.llmEnd(ctx, { content: raw, usage });
+ // Set the guards before the awaited dispatcher calls so a throwing
+ // dispatcher on the success path does not get re-emitted by the finally
+ // block (duplicate llmEnd/cost + masked original error).
           fired = true;
+          await dispatcher.llmEnd(ctx, { content: raw, usage });
  // Per-phase cost attribution: report the SUM of all attempted
  // usages (failed + this successful attempt) so the per-phase
  // callback breakdown is accurate across retries.
           const summed = sumUsages(attemptUsages);
           if (summed) {
-            await dispatcher.cost(ctx, summed);
             costFired = true;
+            await dispatcher.cost(ctx, summed);
           }
         }
         return parsed.output;

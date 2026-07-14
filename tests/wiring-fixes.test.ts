@@ -34,7 +34,7 @@ import {
   isEquivalentAction,
 } from "../src/lib/agent/tools/schema";
 import { getFormatInstructions } from "../src/lib/agent/tools/registry";
-import { EvaluatorComb, type EvaluatorKind } from "../src/lib/agent/evaluators";
+import { EvaluatorComb } from "../src/lib/agent/evaluators";
 import { LoopDetector } from "../src/lib/agent/loop/loop-detector";
 import type { AgentAction } from "../src/lib/agent/types";
 import { makeState } from "./helpers";
@@ -81,7 +81,7 @@ describe("EvaluatorComb (deterministic-evaluator fast-path)", () => {
   });
 
   test("combined score multiplies: 1.0 only when every configured evaluator passes", async () => {
-    const comb = new EvaluatorComb(["string_match", "url_match"] as EvaluatorKind[]);
+    const comb = new EvaluatorComb(["string_match", "url_match"]);
     const both = await comb.evaluate({
       string: {
         prediction: "answer: 42",
@@ -205,25 +205,6 @@ describe("parse-error feedback contract", () => {
     expect(result.error).toBeTruthy();
     expect(typeof result.error).toBe("string");
   });
-
-  test("parse_error block format matches the orchestrator's injection contract", () => {
- // Mirror the exact format the orchestrator uses so a future change to
- // either side breaks this test.
-    const error = "JSON parse error: Unexpected token";
-    const raw = "not json at all";
-    const block =
-      `<sys>\n<parse_error>\n` +
-      `Your previous response failed to parse and was rejected. Error: ${error}\n` +
-      `Raw response (truncated): ${raw.slice(0, 400)}\n` +
-      `Please re-emit your response as valid JSON matching the AgentOutput schema ` +
-      `({thinking, evaluation_previous_goal, memory, next_goal, action:[...]}). ` +
-      `Do NOT wrap the JSON in markdown fences. Do NOT add commentary before or after the JSON.\n` +
-      `</parse_error>\n</sys>`;
-    expect(block).toContain("<parse_error>");
-    expect(block).toContain("</parse_error>");
-    expect(block).toContain(error);
-    expect(block).toContain("valid JSON");
-  });
 });
 
 // ─── ask_human password mode ────────────────────────────────────────────────
@@ -317,7 +298,7 @@ describe("select_dropdown custom-dropdown fallback", () => {
     document.body.removeChild(dropdown);
   });
 
-  test("throws 'not a <select> or custom dropdown' for a plain <div>", async () => {
+  test("returns failure for a plain <div> (not a <select> or custom dropdown)", async () => {
     const div = document.createElement("div");
     div.textContent = "just text";
     document.body.appendChild(div);

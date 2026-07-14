@@ -88,14 +88,8 @@ async function readCustomTools(): Promise<CustomToolEntry[]> {
 }
 
 async function writeCustomTools(tools: CustomToolEntry[]): Promise<void> {
+ // The promise form rejects on storage failure; callers catch and surface it.
   await chrome.storage.local.set({ [STORAGE_KEYS.customTools]: tools });
- // Surface a storage failure instead of silently dropping the write. In MV3
- // the promise form usually rejects, but checking `lastError` is defensive
- // belt-and-suspenders so a failed persist isn't mistaken for success.
-  const err = chrome.runtime.lastError;
-  if (err) {
-    throw new Error(`Failed to persist custom tools: ${err.message}`);
-  }
 }
 
 /** Render the manifest permission set as badges (read-only, informational). */
@@ -131,13 +125,14 @@ export async function renderTools(): Promise<void> {
     list.innerHTML = '<p class="empty-hint">No custom tools defined. Add one above.</p>';
     return;
   }
+  const frag = document.createDocumentFragment();
   tools.forEach((t, index) => {
     const item = document.createElement("div");
     item.className = "tool-item";
     const header = document.createElement("div");
     header.className = "tool-header";
     const nameSpan = document.createElement("span");
-    nameSpan.style.fontWeight = "500";
+    nameSpan.className = "tool-name";
     nameSpan.textContent = t.name;
     const descSpan = document.createElement("span");
     descSpan.className = "tool-desc";
@@ -146,6 +141,7 @@ export async function renderTools(): Promise<void> {
     delBtn.type = "button";
     delBtn.className = "tool-delete";
     delBtn.textContent = "Delete";
+    delBtn.setAttribute("aria-label", `Delete custom tool "${t.name}"`);
     delBtn.addEventListener("click", () => {
       void serialize(async () => {
         const ok = await confirmModal({
@@ -159,9 +155,16 @@ export async function renderTools(): Promise<void> {
  // cannot mass-delete sibling entries.
         const current = await readCustomTools();
         current.splice(index, 1);
-        await writeCustomTools(current);
-        await renderTools();
-        showSaved();
+        try {
+          await writeCustomTools(current);
+          await renderTools();
+          showSaved();
+        } catch (e) {
+          await alertModal({
+            title: "Save failed",
+            message: `Could not delete tool: ${e instanceof Error ? e.message : String(e)}`,
+          });
+        }
       });
     });
     header.appendChild(nameSpan);
@@ -171,8 +174,9 @@ export async function renderTools(): Promise<void> {
     code.textContent = t.code;
     item.appendChild(header);
     item.appendChild(code);
-    list.appendChild(item);
+    frag.appendChild(item);
   });
+  list.appendChild(frag);
  // `renderToolPermissions` is invoked once at module load (the manifest
  // permission set is static and doesn't change when tools are added/deleted),
  // so it is intentionally NOT re-rendered here — avoids a redundant call.
@@ -228,12 +232,19 @@ $("addTool").addEventListener("click", () => {
     } else {
       tools.push(entry);
     }
-    await writeCustomTools(tools);
-    ($("toolName") as HTMLInputElement).value = "";
-    ($("toolDesc") as HTMLInputElement).value = "";
-    ($("toolCode") as HTMLTextAreaElement).value = "";
-    await renderTools();
-    showSaved();
+    try {
+      await writeCustomTools(tools);
+      ($("toolName") as HTMLInputElement).value = "";
+      ($("toolDesc") as HTMLInputElement).value = "";
+      ($("toolCode") as HTMLTextAreaElement).value = "";
+      await renderTools();
+      showSaved();
+    } catch (e) {
+      await alertModal({
+        title: "Save failed",
+        message: `Could not save tool: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
   });
 });
 

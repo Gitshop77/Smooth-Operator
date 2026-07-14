@@ -125,7 +125,7 @@ export async function renderSkills(): Promise<void> {
         `<span class="skill-domains">${escapeHtml(s.domains.join(", "))}</span>` +
       `</div>` +
       `<pre class="skill-instructions">${escapeHtml(s.instructions)}</pre>` +
-      `<button type="button" class="skill-delete">Delete</button>`;
+      `<button type="button" class="skill-delete" aria-label="Delete skill ${escapeHtml(s.name)}">Delete</button>`;
     item.querySelector("button")!.addEventListener("click", () => {
       void serialize(async () => {
  // Re-read storage inside the task and delete by stable `name` so
@@ -147,7 +147,9 @@ $("addSkill")?.addEventListener("click", () => {
     const domain = ($("skillDomain") as HTMLInputElement).value.trim();
     const name = ($("skillName") as HTMLInputElement).value.trim();
     const instructions = ($("skillInstructions") as HTMLTextAreaElement).value.trim();
-    if (!domain || !name || !instructions) return;
+    if (!domain) { ($("skillDomain") as HTMLInputElement).focus(); return; }
+    if (!name) { ($("skillName") as HTMLInputElement).focus(); return; }
+    if (!instructions) { ($("skillInstructions") as HTMLTextAreaElement).focus(); return; }
     if (!NAME_RE.test(name)) {
       await alertModal({
         title: "Invalid skill name",

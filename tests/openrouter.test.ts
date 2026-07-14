@@ -32,6 +32,19 @@ describe("openrouter facade", () => {
   });
 
   test("a user-supplied baseURL must pass the SSRF guard (invalid throws)", () => {
+ // A legitimate HTTPS endpoint MUST be accepted — this pins the guard's scope
+ // so a regression toward over-rejection (the realistic failure mode that
+ // erodes the control) is caught. Do not weaken the guard to make this pass.
+    expect(() => openrouter.configure({ baseURL: "https://openrouter.ai/api/v1" })).not.toThrow();
     expect(() => openrouter.configure({ baseURL: "http://169.254.169.254/" })).toThrow();
+ // Alternate IP encodings must also be rejected (Node normalizes them to the
+ // same dangerous host, e.g. decimal 2852039166 → 169.254.169.254, and IPv4-
+ // mapped IPv6). A regression here would re-open the cloud-metadata SSRF sink.
+    expect(() => openrouter.configure({ baseURL: "http://2852039166/" })).toThrow();
+    expect(() => openrouter.configure({ baseURL: "http://[::ffff:169.254.169.254]/" })).toThrow();
+ // Hex dotted-form encodings normalize to the same metadata IP too.
+    expect(() => openrouter.configure({ baseURL: "http://0xa9.0xfe.0xa9.0xfe/" })).toThrow();
+ // Non-network schemes must be rejected too (no file:///etc/passwd exfil sink).
+    expect(() => openrouter.configure({ baseURL: "file:///etc/passwd" })).toThrow();
   });
 });

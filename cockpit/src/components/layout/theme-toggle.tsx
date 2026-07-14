@@ -26,6 +26,12 @@ function useIsClientMounted() {
   return React.useSyncExternalStore(subscribeNoop, () => true, () => false);
 }
 
+const THEMES = [
+  { value: "light", Icon: Sun, label: "Light" },
+  { value: "dark", Icon: Moon, label: "Dark" },
+  { value: "system", Icon: Laptop, label: "System" },
+] as const;
+
 export function ThemeToggle() {
   const { theme, setTheme } = useTheme();
   const mounted = useIsClientMounted();
@@ -33,29 +39,27 @@ export function ThemeToggle() {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" aria-label="Toggle theme">
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={`Theme: ${mounted ? (theme ?? "system") : "system"}`}
+        >
           {mounted && theme === "dark" ? (
-            <Moon className="size-4" />
+            <Moon className="size-4 transition-transform motion-reduce:transition-none" />
           ) : mounted && theme === "light" ? (
-            <Sun className="size-4" />
+            <Sun className="size-4 transition-transform motion-reduce:transition-none" />
           ) : (
-            <Laptop className="size-4" />
+            <Laptop className="size-4 transition-transform motion-reduce:transition-none" />
           )}
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-32">
-        <DropdownMenuItem onClick={() => setTheme("light")}>
-          <Sun className="size-4" /> Light
-          {theme === "light" ? <Check className="size-4 ml-auto" /> : null}
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => setTheme("dark")}>
-          <Moon className="size-4" /> Dark
-          {theme === "dark" ? <Check className="size-4 ml-auto" /> : null}
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => setTheme("system")}>
-          <Laptop className="size-4" /> System
-          {theme === "system" ? <Check className="size-4 ml-auto" /> : null}
-        </DropdownMenuItem>
+        {THEMES.map(({ value, Icon, label }) => (
+          <DropdownMenuItem key={value} onClick={() => setTheme(value)}>
+            <Icon className="size-4" /> {label}
+            {theme === value ? <Check className="size-4 ml-auto" /> : null}
+          </DropdownMenuItem>
+        ))}
       </DropdownMenuContent>
     </DropdownMenu>
   );

@@ -151,8 +151,8 @@ export const CUSTOM_TOOL_NAME_REGEX = /^[a-z][a-z0-9_]{0,63}$/;
  */
 export const MAX_CUSTOM_TOOL_CODE_LENGTH = 256 * 1024;
 
-/** Maximum rendered length of a tool description in the `<custom_tools>` block. */
-const MAX_TOOL_DESCRIPTION_LENGTH = 200;
+/** Maximum *rendered* length of a tool description in the `<custom_tools>` block. */
+const RENDERED_TOOL_DESCRIPTION_LENGTH = 200;
 
 /**
  * Maximum *stored* length of a custom-tool `description`. Bounds the payload
@@ -199,8 +199,8 @@ export function isValidCustomTool(value: unknown): value is CustomTool {
 function sanitizeToolDescription(description: string): string {
   const collapsed = description.replace(/\s+/g, " ").trim();
   const stripped = collapsed.replace(/[<>]/g, "");
-  if (stripped.length > MAX_TOOL_DESCRIPTION_LENGTH) {
-    return stripped.slice(0, MAX_TOOL_DESCRIPTION_LENGTH).trimEnd() + "…";
+  if (stripped.length > RENDERED_TOOL_DESCRIPTION_LENGTH) {
+    return stripped.slice(0, RENDERED_TOOL_DESCRIPTION_LENGTH).trimEnd() + "…";
   }
   return stripped;
 }
@@ -331,7 +331,15 @@ export async function formatCustomToolsBlock(): Promise<string> {
  * Match `__opencowork_custom_tool('<name>')` / `__opencowork_custom_tool("<name>")`
  * calls in an evaluate payload. Used internally by {@link substituteCustomToolCalls}.
  */
-const CUSTOM_TOOL_CALL_REGEX = /__opencowork_custom_tool\(\s*['"]([a-z][a-z0-9_]{0,63})['"]\s*\)/g;
+ // Build the call regex from the name validator's source so the two can never
+ // drift (the hardcoded name grammar lives only in CUSTOM_TOOL_NAME_REGEX).
+ // The name validator anchors with `^`/`$`; strip those before embedding so the
+ // pattern matches a name surrounded by quotes rather than the whole string.
+const CUSTOM_TOOL_NAME_PATTERN = CUSTOM_TOOL_NAME_REGEX.source.replace(/^\^|\$$/g, "");
+const CUSTOM_TOOL_CALL_REGEX = new RegExp(
+  "__opencowork_custom_tool(\\s*['\"](" + CUSTOM_TOOL_NAME_PATTERN + ")['\"]\\s*)",
+  "g",
+);
 
 /**
  * Replace every `__opencowork_custom_tool('<name>')` call in `code` with the

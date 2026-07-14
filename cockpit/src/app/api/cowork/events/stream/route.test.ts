@@ -72,12 +72,13 @@ function streamReq(signal: AbortSignal): NextRequest {
 function readWithTimeout(
   reader: ReadableStreamDefaultReader<Uint8Array>,
 ): Promise<ReadableStreamReadResult<Uint8Array>> {
+  let t: ReturnType<typeof setTimeout>;
   return Promise.race([
     reader.read(),
-    new Promise<never>((_, rej) =>
-      setTimeout(() => rej(new Error('stream read timed out')), 2000),
-    ),
-  ]);
+    new Promise<never>((_, rej) => {
+      t = setTimeout(() => rej(new Error('stream read timed out')), 2000);
+    }),
+  ]).finally(() => clearTimeout(t));
 }
 
 beforeEach(() => {
@@ -133,6 +134,20 @@ describe('GET /api/cowork/events/stream', () => {
     expect(text).toContain('ECONNREFUSED');
 
     ac.abort();
+    await reader.cancel().catch(() => {});
+  });
+
+  it('returns 200 and emits nothing when the request is already aborted', async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const res = await GET(streamReq(ac.signal));
+    expect(res.status).toBe(200);
+    // No socket is opened when the request is already aborted.
+    expect(ioMock).not.toHaveBeenCalled();
+    const reader = res.body!.getReader();
+    const { value, done } = await readWithTimeout(reader);
+    expect(done).toBe(true);
+    expect(value).toBeUndefined();
     await reader.cancel().catch(() => {});
   });
 });

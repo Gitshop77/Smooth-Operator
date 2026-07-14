@@ -93,7 +93,8 @@ async function parseApiResponse<T>(r: Response, url: string): Promise<T> {
   const contentType = r.headers.get("content-type") ?? "";
   const text = await r.text();
   if (!r.ok) {
-    throw new Error(`${r.status} on ${url}${text ? `: ${text.slice(0, 200)}` : ""}`);
+    const body = contentType.includes("application/json") ? text.slice(0, 200) : "(non-JSON body omitted)";
+    throw new Error(`${r.status} ${r.statusText} on ${url}${body ? `: ${body}` : ""}`);
   }
   if (!contentType.includes("application/json")) {
     throw new Error(`Unexpected content-type "${contentType || "none"}" from ${url}`);
@@ -181,6 +182,9 @@ function createQueryHook<T>(key: string[], url: string, respKey?: string) {
       const data = await getJson<Record<string, unknown>>(url);
       return pickList<T>(data, respKey);
     },
+ // Retain the previous list during a background refetch so switching between
+ // list views (e.g. tabs → agents) does not flash an empty/loading state.
+    placeholderData: (prev: T[] | undefined) => prev,
     ...TQ,
   });
 }
@@ -217,6 +221,12 @@ export interface ChatMessage {
   timestamp: number;
 }
 
+/** Minimal shape returned by the chat proxy. */
+interface ChatResponse {
+  content?: string;
+  error?: string;
+}
+
 /**
  * Send a chat message to the Wingman chat proxy.
  *
@@ -235,8 +245,8 @@ export function useSendChat() {
       const r = await fetch("/api/cowork/ai/chat", {
         method: "POST",
         headers: {
+          ...JSON_HEADERS,
           "content-type": "application/json",
-          ...(COWORK_TOKEN ? { "X-Cowork-Token": COWORK_TOKEN } : {}),
         },
         body: JSON.stringify({
           messages,
@@ -245,7 +255,11 @@ export function useSendChat() {
  // was `payload.from ?? "ui"` — which collapsed every dashboard chat
  // session into room "user", so two browser tabs would receive each
  // other's streamed tokens.
-          sessionId: `ui-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          sessionId: `ui-${
+            typeof crypto !== "undefined" && crypto.randomUUID
+              ? crypto.randomUUID()
+              : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+          }`,
         }),
  // Thread the AbortController signal through so the caller (chat-view)
  // can cancel an in-flight chat request — e.g. when the user clicks Clear
@@ -257,9 +271,7 @@ export function useSendChat() {
  // content-type + `{ error }` envelope guards as the REST list hooks
  // (instead of blindly `r.json()`-ing an HTML error page or a 200
  // `{ "error": ... }` payload, which would crash the chat renderer).
- // The `any` return preserves the caller's `data.content` / `data.error`
- // access in chat-view.tsx without a schema change here.
-      return parseApiResponse<any>(r, "/api/cowork/ai/chat");
+      return parseApiResponse<ChatResponse>(r, "/api/cowork/ai/chat");
     },
  // No cache invalidation here — chat state is local `useState` in the chat
  // view, not a TanStack Query. If a future chat-history query is added, it

@@ -32,6 +32,18 @@
 
 import { NextResponse, type NextRequest } from 'next/server';
 
+// Reused across requests so the Edge runtime doesn't reallocate a fresh
+// TextEncoder on every `tokensMatch` call (hot path: every protected request).
+const encoder = new TextEncoder();
+
+// The server secret (`expected`) is process-constant, so we encode it once per
+// distinct value instead of re-encoding it on every protected request.
+let cachedExpected: { v: string; b: Uint8Array } | null = null;
+
+// Anchored, ReDoS-safe production-detection pattern, hoisted to module scope
+// so it isn't recompiled on every auth check.
+const PROD_ENV_RE = /^(production|prod|1|true)$/i;
+
 const PUBLIC_DISCOVERY_PATHS = new Set<string>([
   '/api/cowork/agent/bootstrap',
   '/api/cowork/agent/manifest',
@@ -44,36 +56,15 @@ const PUBLIC_DISCOVERY_PATHS = new Set<string>([
 const DEV_TOKEN = 'dev-token';
 
 /**
- * Module-level guard so the dev-token opt-in warning fires at most once per
- * server process. The message is identical on every request, so repeating it
- * adds no signal.
+ * Consolidated warn-once helper: each key fires its message at most once per
+ * server process. Replaces the previous five independent boolean flags so the
+ * warning logic stays in one place and cannot drift.
  */
-let devTokenWarned = false;
-
-/**
- * Module-level guard so the S2S-secret UI-auth fallback warning fires at most
- * once per server process.
- */
-let uiTokenWarned = false;
-
-/**
- * Module-level guards so the two per-request auth-failure warnings fire at most
- * once per server process (they otherwise repeat on every protected request and
- * flood the logs under misconfiguration).
- */
-let noTokenWarned = false;
-let mismatchWarned = false;
-let pairingWarned = false;
-
-/**
- * Normalize `NODE_ENV` for the production determination. Only an exact,
- * lowercase `'production'` previously counted, which let a dev-token opt-in
- * stay active under `NODE_ENV=prod`/`Prod`/`staging`/unset — a common
- * operator-induced gap. Treat `production`, `prod`, `1`, and `true`
- * (case-insensitive) as production so fail-closed auth behavior is honored.
- */
-function isProductionEnv(): boolean {
-  return /^(production|prod|1|true)$/i.test((process.env.NODE_ENV ?? '').trim());
+const warnedOnce = new Set<string>();
+function warnOnce(key: string, msg: () => string): void {
+  if (warnedOnce.has(key)) return;
+  warnedOnce.add(key);
+  console.warn(msg());
 }
 
 /**
@@ -83,23 +74,21 @@ function isProductionEnv(): boolean {
  * as a code bug rather than a config mismatch.
  */
 function warnTokenPairingOnce(): void {
-  if (pairingWarned) return;
-  pairingWarned = true;
   const serverUi = process.env.COWORK_UI_TOKEN;
   const clientUi =
     typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_COWORK_UI_TOKEN : undefined;
+  let msg: string | null = null;
   if (clientUi && !serverUi && !process.env.COWORK_EVENT_TOKEN) {
-    console.warn(
+    msg =
       '[cowork-auth] NEXT_PUBLIC_COWORK_UI_TOKEN is set in the browser bundle but no server-side ' +
-        'COWORK_UI_TOKEN (or COWORK_EVENT_TOKEN) is configured — every browser request will 401. ' +
-        'Set COWORK_UI_TOKEN to the same value.',
-    );
+      'COWORK_UI_TOKEN (or COWORK_EVENT_TOKEN) is configured — every browser request will 401. ' +
+      'Set COWORK_UI_TOKEN to the same value.';
   } else if (serverUi && !clientUi) {
-    console.warn(
+    msg =
       '[cowork-auth] COWORK_UI_TOKEN is configured server-side but NEXT_PUBLIC_COWORK_UI_TOKEN is not ' +
-        'set — the browser cannot authenticate. Set NEXT_PUBLIC_COWORK_UI_TOKEN to the matching value.',
-    );
+      'set — the browser cannot authenticate. Set NEXT_PUBLIC_COWORK_UI_TOKEN to the matching value.';
   }
+  if (msg) warnOnce('pairing', () => msg as string);
 }
 
 /**
@@ -112,9 +101,18 @@ function warnTokenPairingOnce(): void {
  */
 function tokensMatch(received: string | undefined, expected: string): boolean {
   if (typeof received !== 'string' || received.length === 0) return false;
-  const encoder = new TextEncoder();
+ // Bound the attacker-controlled token size to prevent a memory-exhaustion DoS
+ // on the Edge hot path (the encode below otherwise doubles the allocation). The
+ // cap is a FIXED (non-secret-derived) constant so no secret-length timing
+ // signal is introduced, preserving the constant-time design. A length-mismatch
+ // token is rejected anyway by the fold below.
+  const MAX_TOKEN_CHARS = 1024;
+  if (received.length > MAX_TOKEN_CHARS) return false;
   const a = encoder.encode(received);
-  const b = encoder.encode(expected);
+  if (!cachedExpected || cachedExpected.v !== expected) {
+    cachedExpected = { v: expected, b: encoder.encode(expected) };
+  }
+  const b = cachedExpected.b;
  // Iterate over the EXPECTED secret's length only — never over the
  // attacker-controlled input length — so timing cannot reveal the secret's
  // byte length. A longer received input is simply ignored beyond `b.length`
@@ -166,10 +164,11 @@ function authenticate(req: NextRequest): NextResponse | null {
  // that `NEXT_PUBLIC_*` mirror ever ships, the S2S secret is embedded in the
  // browser bundle. Warn once so operators learn to set a DISTINCT
  // `COWORK_UI_TOKEN`.
-  if (!process.env.COWORK_UI_TOKEN && process.env.COWORK_EVENT_TOKEN && !uiTokenWarned) {
-    uiTokenWarned = true;
-    console.warn(
-      '[cowork-auth] UI auth is falling back to the service-to-server COWORK_EVENT_TOKEN ' +
+  if (!process.env.COWORK_UI_TOKEN && process.env.COWORK_EVENT_TOKEN) {
+    warnOnce(
+      'ui-token',
+      () =>
+        '[cowork-auth] UI auth is falling back to the service-to-server COWORK_EVENT_TOKEN ' +
         'because COWORK_UI_TOKEN is unset. This risks embedding the S2S secret in the browser ' +
         'bundle (NEXT_PUBLIC_COWORK_UI_TOKEN). Set a distinct COWORK_UI_TOKEN.',
     );
@@ -182,42 +181,42 @@ function authenticate(req: NextRequest): NextResponse | null {
  // deployment, the publicly-documented dev-token still fails closed with 401.
  // A real secret (anything other than the dev-token) is always required in
  // production.
- // Explicit, fail-closed production determination. `isProductionEnv()`
- // normalizes `NODE_ENV` so the dev-token opt-in is honored ONLY outside
- // production — in production the well-known default always fails closed with
- // 401, even if the opt-in is set (and even under a mis-set `NODE_ENV`).
+ // Explicit, fail-closed production determination. The well-known dev-token is
+ // honored ONLY outside production AND only when `NODE_ENV` is set to an
+ // explicit non-production value — a blank/unset `NODE_ENV` fails closed with
+ // 401 even if the opt-in is set.
+  const nodeEnv = (process.env.NODE_ENV ?? '').trim();
   const allowDevToken =
-    process.env.COWORK_ALLOW_DEV_TOKEN === '1' && !isProductionEnv();
+    process.env.COWORK_ALLOW_DEV_TOKEN === '1' &&
+    nodeEnv.length > 0 &&
+    !PROD_ENV_RE.test(nodeEnv);
 
   if (!token || (token === DEV_TOKEN && !allowDevToken)) {
-    if (!noTokenWarned) {
-      noTokenWarned = true;
-      console.warn(
+    warnOnce(
+      'no-token',
+      () =>
         '[cowork-auth] 401 Unauthorized — no token configured, or dev-token used without the COWORK_ALLOW_DEV_TOKEN opt-in (or in production)',
-        { path: req.nextUrl.pathname },
-      );
-    }
+    );
     return NextResponse.json(
       { error: 'Unauthorized' },
-      { status: 401 },
+      { status: 401, headers: { 'Cache-Control': 'no-store', 'WWW-Authenticate': 'Bearer realm="cowork"' } },
     );
   }
 
   if (token === DEV_TOKEN && allowDevToken) {
  // Opt-in dev-token path — allowed, but logged once so the operator knows
  // the cockpit is running unauthenticated.
-    if (!devTokenWarned) {
-      devTokenWarned = true;
+    warnOnce('dev-token', () => {
       const devTokenVar =
         process.env.COWORK_UI_TOKEN === DEV_TOKEN
           ? 'COWORK_UI_TOKEN'
           : process.env.COWORK_EVENT_TOKEN === DEV_TOKEN
             ? 'COWORK_EVENT_TOKEN'
             : 'the resolved token';
-      console.warn(
-        `[cowork-auth] ${devTokenVar} is the dev-token AND COWORK_ALLOW_DEV_TOKEN=1 — allowing the well-known default. NEVER set this in production.`,
+      return (
+        `[cowork-auth] ${devTokenVar} is the dev-token AND COWORK_ALLOW_DEV_TOKEN=1 — allowing the well-known default. NEVER set this in production.`
       );
-    }
+    });
     return null;
   }
 
@@ -244,16 +243,14 @@ function authenticate(req: NextRequest): NextResponse | null {
 
   const received = receivedHeader ?? receivedQuery;
   if (!tokensMatch(received, token)) {
-    if (!mismatchWarned) {
-      mismatchWarned = true;
-      console.warn('[cowork-auth] 401 Unauthorized — token mismatch', {
-        path: req.nextUrl.pathname,
-        ip: req.headers.get('x-forwarded-for') ?? req.headers.get('x-real-ip') ?? 'unknown',
-      });
-    }
+    const ip = req.headers.get('x-forwarded-for') ?? req.headers.get('x-real-ip') ?? 'unknown';
+    warnOnce(
+      'mismatch',
+      () => `[cowork-auth] 401 Unauthorized — token mismatch (path: ${req.nextUrl.pathname}, ip: ${ip})`,
+    );
     return NextResponse.json(
       { error: 'Unauthorized' },
-      { status: 401 },
+      { status: 401, headers: { 'Cache-Control': 'no-store', 'WWW-Authenticate': 'Bearer realm="cowork"' } },
     );
   }
 

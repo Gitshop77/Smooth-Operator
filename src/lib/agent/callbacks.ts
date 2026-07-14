@@ -72,6 +72,10 @@ export interface LLMUsageInfo {
  * Surfaced so downstream cost recomputation (judges.ts) can apply the
  * cacheRead discount instead of billing cached tokens at full input rate. */
   cachedInputTokens?: number;
+  /** Cache-creation (write) input tokens (Anthropic cache_creation_input_tokens),
+   * billed at the higher cache-write rate. Surfaced for cost-accounting parity
+   * with the estimate produced by `estimateCost`. */
+  cachedWriteInputTokens?: number;
 }
 
 /** Ambient context handed to every hook. */
@@ -137,6 +141,8 @@ export interface AsyncCallbackHandler {
  */
 export class CallbackDispatcher {
   private readonly handlers: AsyncCallbackHandler[] = [];
+  /** Tracks hook methods that have already logged a failure, to suppress repeat spam. */
+  private readonly warnedMethods = new Set<string>();
 
   /** Register a handler. Hooks the handler doesn't implement are no-ops. */
   register(handler: AsyncCallbackHandler): void {
@@ -170,13 +176,19 @@ export class CallbackDispatcher {
  // `this.nextPhase = ...` / `this.totalSteps++` (see finding ).
       if (fn) await fn.apply(handler, args);
     } catch (e) {
+ // A single buggy handler can throw on every event across a long run; throttle
+ // the (possibly secret-laden) error logging to the first failure per hook
+ // method so the console stays readable. Successful dispatch is unaffected.
+      const k = String(method);
+      if (this.warnedMethods.has(k)) return;
+      this.warnedMethods.add(k);
  // Redact any substituted secrets that leaked into the error string before
  // logging to the extension console (defense-in-depth; mirrors the cockpit
  // redaction path). `redactSecrets` is async, so log via `.then` and fall
  // back to the raw error if redaction itself fails.
       void redactSecrets(String(e))
         .then((safe) => console.error(`[callbacks] ${String(method)} handler failed:`, safe))
-        .catch(() => console.error(`[callbacks] ${String(method)} handler failed:`, e));
+        .catch(() => console.error(`[callbacks] ${String(method)} handler failed (secret redaction unavailable)`));
     }
   }
 

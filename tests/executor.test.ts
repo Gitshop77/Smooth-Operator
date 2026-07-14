@@ -16,7 +16,10 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
-import type { AgentAction, BrowserState } from "../src/lib/agent/types";
+import { installJsdomLayoutMock, restoreJsdomLayoutMock } from "./helpers/jsdom-layout-mock";
+import { allowDomain, clearDomainAllowlist } from "./helpers/domain-stub";
+import { testDescribeActionNewerTypes } from "./helpers/action-behavior";
+import type { BrowserState } from "../src/lib/agent/types";
 
 // Mock the visual overlay so `highlightElement` is a no-op. The real
 // `highlightElement` schedules a 1200ms `setTimeout` to auto-remove the
@@ -34,7 +37,7 @@ vi.mock("../src/lib/agent/dom/overlay", async (importOriginal) => {
   };
 });
 
-import { executeAction, describeAction } from "../src/lib/agent/tools/executor";
+import { executeAction } from "../src/lib/agent/tools/executor";
 
 // ─── Minimal DOM stubs ──────────────────────────────────────────────────────
 //
@@ -82,13 +85,11 @@ function installMinimalDomStubs(): void {
  // explicit domain allowlist. Configure one for the stub host so the
  // evaluate behavioral tests exercise real JS execution. The blocked
  // (no-allowlist) path is covered by a dedicated test below.
-  (globalThis as Record<string, unknown>).__openCoworkDomainConfig = {
-    allowedDomains: ["example.test"],
-  };
+  allowDomain("example.test");
 }
 
 function clearMinimalDomStubs(): void {
-  delete (globalThis as Record<string, unknown>).__openCoworkDomainConfig;
+  clearDomainAllowlist();
  // Restore the real jsdom-provided globals so the next describe (which may
  // use real DOM APIs like `document.createElement`) sees a live document.
  // The originals were captured at module load before any stub was installed.
@@ -111,31 +112,10 @@ function emptyState(): BrowserState {
 
 // ─── describeAction (extends coverage from unit.test.ts) ────────────────────
 
-describe("describeAction — newer action types", () => {
-  test("takeover surfaces the reason", () => {
-    const desc = describeAction({ type: "takeover", reason: "Login required" } as AgentAction);
-    expect(desc).toContain("takeover");
-    expect(desc).toContain("Login required");
-  });
-
-  test("verify surfaces the expectation", () => {
-    const desc = describeAction({ type: "verify", expectation: "success message visible" } as AgentAction);
-    expect(desc).toContain("verify");
-    expect(desc).toContain("success message visible");
-  });
-
-  test("load_skill surfaces the skill name", () => {
-    const desc = describeAction({ type: "load_skill", name: "GitHub" } as AgentAction);
-    expect(desc).toContain("load_skill");
-    expect(desc).toContain("GitHub");
-  });
-
-  test("ask_human surfaces the question", () => {
-    const desc = describeAction({ type: "ask_human", question: "Which option?" } as AgentAction);
-    expect(desc).toContain("ask_human");
-    expect(desc).toContain("Which option?");
-  });
-});
+// ─── describeAction (newer action types) ─────────────────────────────────
+// Shared with executor-actions.test.ts so the semantic behavior is asserted
+// exactly once (see tests/helpers/action-behavior.ts).
+testDescribeActionNewerTypes();
 
 // ─── executeAction: done (pure, no DOM) ─────────────────────────────────────
 
@@ -313,7 +293,6 @@ describe("executeAction — DOM-requiring actions (Task 5C: enabled under jsdom)
  // Save originals so we can restore them in afterEach (some are `undefined`
  // in jsdom — that's fine, `defineProperty` works regardless).
   let origScrollIntoView: typeof HTMLElement.prototype.scrollIntoView | undefined;
-  let origGetBoundingClientRect: typeof HTMLElement.prototype.getBoundingClientRect | undefined;
   let innerTextDescriptor: PropertyDescriptor | undefined;
 
   beforeEach(() => {
@@ -323,14 +302,9 @@ describe("executeAction — DOM-requiring actions (Task 5C: enabled under jsdom)
     HTMLElement.prototype.scrollIntoView = function scrollIntoView(): void { /* no-op */ };
 
  // 2. jsdom limitation: no real layout → all rects are zero-size, which
- // makes the executor's local `isVisible` check reject everything.
-    origGetBoundingClientRect = HTMLElement.prototype.getBoundingClientRect;
-    HTMLElement.prototype.getBoundingClientRect = function getBoundingClientRect(): DOMRect {
-      return {
-        x: 0, y: 0, top: 0, right: 100, bottom: 30, left: 0,
-        width: 100, height: 30, toJSON: () => ({}) as DOMRect,
-      } as DOMRect;
-    };
+ // makes the executor's local `isVisible` check reject everything. Use the
+ // shared layout mock (non-zero rect for visible elements).
+    installJsdomLayoutMock();
 
  // 3. jsdom limitation: `innerText` is not implemented (returns undefined).
  // Alias it to `textContent` so the `extract` action surfaces body text.
@@ -348,9 +322,7 @@ describe("executeAction — DOM-requiring actions (Task 5C: enabled under jsdom)
     } else {
       delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
     }
-    if (origGetBoundingClientRect) {
-      HTMLElement.prototype.getBoundingClientRect = origGetBoundingClientRect;
-    }
+    restoreJsdomLayoutMock();
     if (innerTextDescriptor) {
       Object.defineProperty(HTMLElement.prototype, "innerText", innerTextDescriptor);
     } else {
@@ -364,6 +336,7 @@ describe("executeAction — DOM-requiring actions (Task 5C: enabled under jsdom)
  // is gone). Cancelling is safe — the badges were already removed when we
  // cleared `document.body.innerHTML` at the start of the next test.
     vi.clearAllTimers();
+    vi.restoreAllMocks();
     document.body.innerHTML = "";
   });
 
@@ -412,8 +385,7 @@ describe("executeAction — DOM-requiring actions (Task 5C: enabled under jsdom)
   });
 
   test("scroll calls window.scrollBy", async () => {
-    const spy = vi.fn();
-    window.scrollBy = spy as unknown as typeof window.scrollBy;
+    const spy = vi.spyOn(window, "scrollBy");
     await executeAction({ type: "scroll", down: true, pages: 1 }, emptyState());
     expect(spy).toHaveBeenCalledOnce();
   });

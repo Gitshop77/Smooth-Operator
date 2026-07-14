@@ -20,12 +20,24 @@ import { redactSecrets } from "../../secrets";
  */
 function tryQuerySelectorAll(
   selector: string,
+  cap = 200,
 ): { ok: true; els: Element[] } | { ok: false; error: string } {
   try {
-    return { ok: true, els: Array.from(document.querySelectorAll(selector)) };
+ // Bound collection so an oversized NodeList (e.g. a broad `*` selector on a
+ // large page) is never materialized into a giant array — the result is
+ // sliced to `cap` (<= 200) downstream, so the returned set is unchanged.
+    const all = document.querySelectorAll(selector);
+    const els: Element[] = [];
+    for (let i = 0; i < all.length && i < cap; i++) els.push(all[i]);
+    return { ok: true, els };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+/** Build the canonical "Invalid selector" failure result. */
+function invalidSelectorResult(action: Action, selector: string, error: string): ActionResult {
+  return { action, success: false, message: `Invalid selector "${selector}": ${error}` };
 }
 
 /**
@@ -89,10 +101,27 @@ export async function handleFindElements(
   const looksLikeCssPseudoClass = kind === "link" && linkValueIsCssPseudoClass(value);
   const useLocator = prefixMatch !== null && !(isLinkLocator && looksLikeCssPseudoClass);
 
+ // Bound the echoed selector in messages so a very long LLM-supplied selector
+ // doesn't bloat the agent context / persisted history. The result data is
+ // untouched.
+  const echo = action.selector.length > 80 ? action.selector.slice(0, 80) + "…" : action.selector;
+
+  // Plain-CSS fallback used by the bare-selector path and when a locator's
+  // dynamic import itself fails. An invalid *locator scan* (e.g. malformed
+  // XPath) is reported with its strategy name instead, so it isn't mislabeled
+  // as a CSS-selector error.
+  const cssFallback = (): Element[] | ActionResult => {
+    const res = tryQuerySelectorAll(selector);
+    if (!res.ok) return invalidSelectorResult(action, echo, res.error);
+    return res.els;
+  };
+
   let matchedEls: Element[] = [];
   if (useLocator) {
+    let importOk = false;
     try {
       const { By, findByLocator } = await import("../../dom/dom-utils");
+      importOk = true;
       let by: InstanceType<typeof By> | null = null;
       switch (kind) {
         case "css":     by = By.css(value); break;
@@ -107,36 +136,32 @@ export async function handleFindElements(
       if (by) {
         matchedEls = findByLocator(by);
       }
-    } catch {
- // Locator import / resolution failed — fall through to the CSS path
- // with the original (un-prefixed) selector so the action still returns
- // a useful result. An invalid selector here is reported, not thrown.
-      const res = tryQuerySelectorAll(selector);
-      if (!res.ok) {
-        return {
-          action,
-          success: false,
-          message: `Invalid selector "${selector}": ${res.error}`,
-        };
+    } catch (e) {
+      if (!importOk) {
+ // The dynamic import of the locator helpers failed — degrade to a plain CSS
+ // query of the original selector so the action still returns useful output.
+        const fb = cssFallback();
+        if (!Array.isArray(fb)) return fb;
+        matchedEls = fb;
+      } else {
+ // The locator resolved but the scan itself threw (e.g. an invalid XPath).
+ // Name the strategy and value so the agent can fix it rather than seeing a
+ // misleading "Invalid selector \"xpath://div[\"" generic CSS error.
+        const msg = e instanceof Error ? e.message : String(e);
+        return { action, success: false, message: `Invalid ${kind} locator "${value}": ${msg}` };
       }
-      matchedEls = res.els;
     }
   } else {
-    const res = tryQuerySelectorAll(selector);
-    if (!res.ok) {
-      return {
-        action,
-        success: false,
-        message: `Invalid selector "${selector}": ${res.error}`,
-      };
-    }
-    matchedEls = res.els;
+    const fb = cssFallback();
+    if (!Array.isArray(fb)) return fb;
+    matchedEls = fb;
   }
 
  // Schema caps `max_results` at 200; clamp defensively so a value that
  // bypassed validation can't produce a runaway payload fed back into the
  // LLM context / persisted history.
-  const cap = Math.min(action.max_results ?? 50, 200);
+  const raw = action.max_results ?? 50;
+  const cap = Math.min(Math.max(Math.floor(raw), 0), 200);
   const els = matchedEls.slice(0, cap);
   const attrs = action.attributes;
   const results = await Promise.all(els.map(async (el, i) => {
@@ -184,7 +209,7 @@ export async function handleFindElements(
   return {
     action,
     success: true,
-    message: `Found ${els.length} elements matching "${action.selector}"`,
+    message: `Found ${els.length} elements matching "${echo}"`,
     extractedContent: results.length > 0 ? `Elements:\n${results.join("\n")}` : "No elements found",
   };
 }

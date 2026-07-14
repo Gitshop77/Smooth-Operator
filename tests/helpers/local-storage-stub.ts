@@ -10,8 +10,8 @@
  * - `security.test.ts`
  * - `stateful-modules.test.ts`
  *
- * Call `installLocalStorageStub()` in `beforeAll` (or `beforeEach` if you need
- * you want a clean slate between tests in the same file.
+ * Call `installLocalStorageStub()` in `beforeAll` (or `beforeEach`) if you want
+ * a clean slate between tests in the same file.
  *
  * IMPORTANT: `installLocalStorageStub` overwrites the global `localStorage`,
  * which otherwise leaks into every subsequent test file in the same worker.
@@ -34,22 +34,27 @@ export function installLocalStorageStub(): () => void {
   }
 
   const store = new Map<string, string>();
-  (globalThis as unknown as { localStorage: Storage }).localStorage = {
-    getItem: (key: string) => store.get(key) ?? null,
-    setItem: (key: string, value: string) => {
-      store.set(key, String(value));
-    },
-    removeItem: (key: string) => {
-      store.delete(key);
-    },
-    clear: () => {
-      store.clear();
-    },
-    key: (index: number) => Array.from(store.keys())[index] ?? null,
-    get length() {
-      return store.size;
-    },
-  } as Storage;
+  Object.defineProperty(globalThis, "localStorage", {
+    value: {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        store.set(key, String(value));
+      },
+      removeItem: (key: string) => {
+        store.delete(key);
+      },
+      clear: () => {
+        store.clear();
+      },
+      key: (index: number) => Array.from(store.keys())[index] ?? null,
+      get length() {
+        return store.size;
+      },
+    } as Storage,
+    configurable: true,
+    writable: true,
+    enumerable: true,
+  });
 
   return restoreLocalStorageStub;
 }
@@ -65,6 +70,19 @@ export function restoreLocalStorageStub(): void {
  // is idempotent: calling it after every test keeps `localStorage` present
  // rather than destroying it on the second call.
     Object.defineProperty(globalThis, "localStorage", savedDescriptor);
+ // jsdom can surface a non-functional `localStorage` descriptor — when its
+ // backing store isn't configured (the `--localstorage-file` warning case),
+ // re-applying the descriptor yields an object WITHOUT `setItem`/`getItem`.
+ // Restoring to that would silently break every module that falls back to
+ // localStorage (secrets, run-history) after the very first test. If the
+ // restored store isn't functional, keep the stub instead so dependent
+ // tests retain a working `localStorage`.
+    if (
+      typeof (globalThis as GlobalWithLocalStorage).localStorage?.setItem !== "function" ||
+      typeof (globalThis as GlobalWithLocalStorage).localStorage?.getItem !== "function"
+    ) {
+      installLocalStorageStub();
+    }
   } else {
     delete (globalThis as GlobalWithLocalStorage).localStorage;
   }

@@ -47,11 +47,29 @@ function fakeReq(query = '', body?: unknown): any {
 }
 
 describe('GET /api/cowork/history', () => {
-  it('caps the result set via parseLimit default (50) + orderBy', async () => {
+  it('honors an explicit limit param (limit=7)', async () => {
     findMany.mockResolvedValueOnce([]);
     await GET(fakeReq('limit=7'));
     expect(findMany).toHaveBeenCalledWith(
       expect.objectContaining({ take: 7, orderBy: { lastVisitedAt: 'desc' } }),
+    );
+  });
+
+  // This route calls `parseLimit(req, 50)` — its per-route default is 50
+  // (distinct from extensions/route, which uses the helper's 100 default).
+  it('falls back to the per-route default (50) when limit is omitted', async () => {
+    findMany.mockResolvedValueOnce([]);
+    await GET(fakeReq());
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ take: 50, orderBy: { lastVisitedAt: 'desc' } }),
+    );
+  });
+
+  it('clamps an over-large limit to the max (200)', async () => {
+    findMany.mockResolvedValueOnce([]);
+    await GET(fakeReq('limit=9999'));
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ take: 200, orderBy: { lastVisitedAt: 'desc' } }),
     );
   });
 });

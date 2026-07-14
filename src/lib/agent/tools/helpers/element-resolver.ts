@@ -32,7 +32,7 @@ export function resolveElement(state: BrowserState, index: number): HTMLElement 
   }
   if (!(el instanceof HTMLElement)) {
     throw new NoSuchElementException(
-      `element [${index}] is not an HTMLElement (got ${el?.constructor?.name ?? typeof el})`,
+      `element [${index}] is not an HTMLElement (got ${el.constructor.name})`,
     );
   }
   return el;
@@ -40,21 +40,31 @@ export function resolveElement(state: BrowserState, index: number): HTMLElement 
 
 /** Local visibility check used by `find_text` and `search_page`. */
 export function isVisible(el: HTMLElement): boolean {
-  const style = window.getComputedStyle(el);
-  if (style.display === "none" || style.visibility === "hidden") return false;
-  if (parseFloat(style.opacity) === 0) return false;
   const rect = el.getBoundingClientRect();
  // Rendered (non-zero box) is necessary but not sufficient: `getBoundingClientRect`
  // is viewport-relative, so an element scrolled fully off-screen still reports a
  // positive size. Callers (`find_text`, `search_page`) use this to decide whether
  // to scroll an element into view, so we also require viewport intersection.
   if (rect.width <= 0 && rect.height <= 0) return false;
-  const vh = typeof window !== "undefined" ? window.innerHeight : undefined;
-  const vw = typeof window !== "undefined" ? window.innerWidth : undefined;
-  const inViewport =
-    (vh === undefined || (rect.bottom > 0 && rect.top < vh)) &&
-    (vw === undefined || (rect.right > 0 && rect.left < vw));
-  return inViewport;
+ // `isVisible` always runs in a DOM context (it takes an `HTMLElement`), so the
+ // viewport dimensions are always available. An off-screen element is not visible
+ // regardless of its computed style, so we reject it BEFORE the (more expensive)
+ // `getComputedStyle` call below — this trims forced style/layout flushes in the
+ // `find_text`/`search_page` hot loops (and avoids a burst of `getComputedStyle`
+ // calls that reads as an automation signal).
+  const vh = window.innerHeight;
+  const vw = window.innerWidth;
+  const inViewport = rect.bottom > 0 && rect.top < vh && rect.right > 0 && rect.left < vw;
+  if (!inViewport) return false;
+ // Elements inside an `[inert]` subtree are not focusable or clickable for real
+ // users/AT — surfacing or clicking them would be both an a11y gap and a
+ // correctness issue (clicks on inert elements are no-ops). A fast attribute
+ // lookup (no style/layout flush) excludes only genuinely non-interactable nodes.
+  if (el.closest("[inert]")) return false;
+  const style = window.getComputedStyle(el);
+  if (style.display === "none" || style.visibility === "hidden") return false;
+  if (parseFloat(style.opacity) === 0) return false;
+  return true;
 }
 
 /**
@@ -107,7 +117,12 @@ export function generateCssSelector(el: Element): string {
  // immediately followed by a hex digit (e.g. id `"b` → `\22b` parses as
  // U+022B, not `"` + `b`). Escape only the characters that are special
  // inside a CSS string: backslash and double-quote.
-    const id = el.id.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const id = el.id
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, '\\"')
+      .replace(/\n/g, "\\A ")
+      .replace(/\r/g, "\\D ")
+      .replace(/\0/g, "\\0 ");
     return `*[id="${id}"]`;
   }
   const tag = el.tagName.toLowerCase();

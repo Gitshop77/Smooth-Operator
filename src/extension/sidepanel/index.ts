@@ -38,6 +38,16 @@ import "./takeover";
 import "./human-interact";
 import "./lifecycle";
 
+/** The set of agent modes the side panel will accept from storage. */
+const ALLOWED_MODES = new Set(["full_agentic", "standard", "restricted"]);
+
+/** Persist the task text to storage, logging a warning on failure. */
+function persistTask(value: string): void {
+  chrome.storage.local.set({ [STORAGE_KEYS.task]: value }, () => {
+    if (chrome.runtime.lastError) console.warn("[sidepanel] set task failed:", chrome.runtime.lastError);
+  });
+}
+
 // ─── Collapse-state persistence (BOTH Reasoning + Activity) ─────────────────
 //
 // P2 both the Reasoning and Activity <details> panels remember their
@@ -103,7 +113,7 @@ chrome.storage.local.get(
       console.warn("[sidepanel] storage.get failed:", chrome.runtime.lastError);
       return;
     }
-    if (res.task) taskInput.value = res.task as string;
+    if (typeof res.task === "string") taskInput.value = res.task;
     if (typeof res.defaultTask === "string" && res.defaultTask.trim()) {
       taskInput.placeholder = res.defaultTask;
     }
@@ -120,7 +130,6 @@ chrome.storage.local.get(
  // or legacy value in chrome.storage must not poison the mode state (the
  // typed `setCurrentMode` would otherwise broadcast an unrecognized mode to
  // the orchestrator). Fall back to the safe default when unrecognized.
-    const ALLOWED_MODES = new Set(["full_agentic", "standard", "restricted"]);
     const mode = res.agentMode as string | undefined;
     if (mode && ALLOWED_MODES.has(mode)) {
       setCurrentMode(mode);
@@ -146,18 +155,12 @@ modeSelect?.addEventListener("change", () => {
   syncModeDropdown();
 });
 
-taskInput.addEventListener("change", () =>
-  chrome.storage.local.set({ [STORAGE_KEYS.task]: taskInput.value }, () => {
-    if (chrome.runtime.lastError) console.warn("[sidepanel] set task failed:", chrome.runtime.lastError);
-  })
-);
+taskInput.addEventListener("change", () => persistTask(taskInput.value));
 
 document.querySelectorAll<HTMLButtonElement>(".preset").forEach((el) => {
   el.addEventListener("click", () => {
     taskInput.value = el.dataset.task || "";
-    chrome.storage.local.set({ [STORAGE_KEYS.task]: taskInput.value }, () => {
-      if (chrome.runtime.lastError) console.warn("[sidepanel] set task failed:", chrome.runtime.lastError);
-    });
+    persistTask(taskInput.value);
   });
 });
 

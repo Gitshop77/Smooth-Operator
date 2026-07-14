@@ -48,24 +48,46 @@ if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
  */
 const debuggerRefCounts = new Map<number, number>();
 
-async function acquirePageDebugger<T>(
+export async function acquirePageDebugger<T>(
   tabId: number,
   attach: (id: number) => Promise<T>,
 ): Promise<void> {
   const n = (debuggerRefCounts.get(tabId) ?? 0) + 1;
- // Attach BEFORE bumping the refcount. If we bumped first and `attach`
- // rejected, the count would stay elevated forever: the caller's `finally`
- // never runs `releasePageDebugger` (the acquire threw), so the tab would be
- // stuck at n≥1 and no later call would ever retry `attach` — silently
- // disabling screenshots for that tab .
-  if (n === 1) await attach(tabId);
+ // Bump the refcount synchronously BEFORE awaiting `attach` so two concurrent
+ // acquirers both observe the incremented count. This closes the TOCTOU race
+ // where two concurrent callers could each read get()===0, both attach, and
+ // then a premature release from one detach the session the other is
+ // mid-capture on.
   debuggerRefCounts.set(tabId, n);
+  try {
+ // Every acquirer attempts to attach. The first holder creates the session;
+ // a concurrent (n>1) holder that finds the session already attached (e.g.
+ // because the original attacher is mid-flow, or a prior attacher failed and
+ // this one is retrying) receives an "already attached" error, which we
+ // swallow — the session is live and we hold a valid ref.
+    await attach(tabId);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/already attached/i.test(msg)) return;
+ // Genuine attach failure: roll back only our own contribution (decrement
+ // rather than delete) so a concurrent holder's refcount is preserved and
+ // its pending screenshot isn't silently dropped.
+    const m = (debuggerRefCounts.get(tabId) ?? 1) - 1;
+    if (m <= 0) debuggerRefCounts.delete(tabId);
+    else debuggerRefCounts.set(tabId, m);
+    throw e;
+  }
 }
 
-async function releasePageDebugger<T>(
+export async function releasePageDebugger<T>(
   tabId: number,
   detach: (id: number) => Promise<T>,
 ): Promise<void> {
+ // Never detach a session we don't own. After a genuine (non-"already
+ // attached") attach failure, the caller's finally still calls this with no
+ // tracked entry — without this guard we'd issue a detach that could tear down
+ // a concurrent legitimate holder's CDP session (FULL-REVIEW-48 class of bug).
+  if ((debuggerRefCounts.get(tabId) ?? 0) <= 0) return;
   const n = (debuggerRefCounts.get(tabId) ?? 0) - 1;
   if (n <= 0) {
     debuggerRefCounts.delete(tabId);
@@ -81,7 +103,8 @@ async function releasePageDebugger<T>(
 export async function getScreenshotQuality(): Promise<number> {
   if (cachedScreenshotQuality !== null) return cachedScreenshotQuality;
   const { screenshotQuality } = await chrome.storage.local.get("screenshotQuality");
-  cachedScreenshotQuality = typeof screenshotQuality === "number" ? screenshotQuality : 80;
+  cachedScreenshotQuality =
+    typeof screenshotQuality === "number" ? Math.min(100, Math.max(0, screenshotQuality)) : 80;
   return cachedScreenshotQuality;
 }
 
@@ -236,10 +259,15 @@ export async function extractStateFromTab(
  // Non-fatal — keep the raw, unannotated screenshot.
         }
       }
-    } catch {
+    } catch (e) {
  // Screenshot capture (CDP Page.captureScreenshot) can fail if the tab
  // isn't visible or permissions are missing. Non-fatal — the agent falls
- // back to DOM-only state.
+ // back to DOM-only state. Log at debug level for field diagnostics
+ // (e.g. "why is the model blind?") without leaking data.
+      console.debug(
+        "[tab-manager] screenshot capture failed, using DOM-only state:",
+        e instanceof Error ? e.message : "",
+      );
     }
   }
   return res.state;
@@ -285,6 +313,10 @@ export async function executeActionsInTab(
 export function waitForTabLoad(tabId: number, timeoutMs = 8000): Promise<void> {
   return new Promise((resolve) => {
     let done = false;
+ // Declared before `finish` so they are in scope when `finish` (which may be
+ // invoked synchronously) references them — removing a latent TDZ footgun.
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let listener: (id: number, info: chrome.tabs.TabChangeInfo) => void;
     const finish = () => {
       if (!done) {
         done = true;
@@ -295,7 +327,7 @@ export function waitForTabLoad(tabId: number, timeoutMs = 8000): Promise<void> {
         resolve();
       }
     };
-    const listener = (id: number, info: chrome.tabs.TabChangeInfo) => {
+    listener = (id: number, info: chrome.tabs.TabChangeInfo) => {
       if (id === tabId && info.status === "complete") finish();
     };
     chrome.tabs.onUpdated.addListener(listener);
@@ -305,7 +337,7 @@ export function waitForTabLoad(tabId: number, timeoutMs = 8000): Promise<void> {
         if (t.status === "complete") finish();
       })
       .catch(finish);
-    const timeoutId = setTimeout(finish, timeoutMs);
+    timeoutId = setTimeout(finish, timeoutMs);
   });
 }
 
@@ -334,9 +366,9 @@ export async function handleTabAction(
   runState: RunState,
   notify?: (event: LogEvent) => void
 ): Promise<TabActionResult> {
-  const tabs = await listTabs();
   switch (action.type) {
     case "switch_tab": {
+      const tabs = await listTabs();
       const tab = tabs.find((t) => t.id === action.tab_id);
       if (!tab) return { handled: false, pageChanged: false, success: false, message: `tab ${action.tab_id} not found` };
       await chrome.tabs.update(tab.id, { active: true });
@@ -346,6 +378,7 @@ export async function handleTabAction(
       return { handled: true, pageChanged: true, success: true, message: `Switched to tab ${action.tab_id}` };
     }
     case "close_tab": {
+      const tabs = await listTabs();
       const tab = tabs.find((t) => t.id === action.tab_id);
       if (!tab) return { handled: false, pageChanged: false, success: false, message: `tab ${action.tab_id} not found` };
       await chrome.tabs.remove(tab.id);
@@ -401,6 +434,9 @@ export async function handleTabAction(
         await waitForTabLoad(newTab.id!);
         await ensureContent(newTab.id!);
       } else {
+        if (!runState.currentTabId) {
+          return { handled: true, pageChanged: false, success: false, message: "BLOCKED: no active tab — set new_tab:true to open one" };
+        }
         await chrome.tabs.update(runState.currentTabId, { url: action.url });
         await waitForTabLoad(runState.currentTabId);
         await ensureContent(runState.currentTabId);
@@ -409,6 +445,10 @@ export async function handleTabAction(
     }
     case "search": {
       const engine = (action as { engine?: string }).engine ?? "duckduckgo";
+      const resolvedEngine =
+        SEARCH_ENGINE_URLS[engine as keyof typeof SEARCH_ENGINE_URLS]
+          ? String(engine)
+          : "duckduckgo";
       const query = (action as { query?: string }).query;
  // A missing/undefined query would serialize to the literal "undefined"
  // (encodeURIComponent(undefined) → "undefined"), making the agent silently
@@ -419,7 +459,7 @@ export async function handleTabAction(
  // Validate the engine is a known key; otherwise fall back to the default.
  // (`SEARCH_ENGINE_URLS[engine]` is only consulted when `engine` is a real
  // key — the `|| duckduckgo` covers a malformed/unknown engine.)
-      const baseUrl = SEARCH_ENGINE_URLS[engine as keyof typeof SEARCH_ENGINE_URLS] || SEARCH_ENGINE_URLS.duckduckgo;
+      const baseUrl = SEARCH_ENGINE_URLS[resolvedEngine as keyof typeof SEARCH_ENGINE_URLS];
       const searchUrl = baseUrl + encodeURIComponent(query);
  // Apply the same domain policy + scheme gate as navigate. The engine base
  // URLs are constant http(s), but guard anyway (FULL-REVIEW finding 62).
@@ -442,10 +482,13 @@ export async function handleTabAction(
         });
         return { handled: true, pageChanged: false, success: false, message: `BLOCKED: ${searchUrlCheck.reason}` };
       }
+      if (!runState.currentTabId) {
+        return { handled: true, pageChanged: false, success: false, message: "BLOCKED: no active tab — set new_tab:true to open one" };
+      }
       await chrome.tabs.update(runState.currentTabId, { url: searchUrl });
       await waitForTabLoad(runState.currentTabId);
       await ensureContent(runState.currentTabId);
-      return { handled: true, pageChanged: true, success: true, message: `Searching on ${engine}` };
+      return { handled: true, pageChanged: true, success: true, message: `Searching on ${resolvedEngine}` };
     }
     default:
       return { handled: false, pageChanged: false, success: false, message: "" };

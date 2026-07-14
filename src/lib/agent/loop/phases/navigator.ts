@@ -19,6 +19,7 @@ import {
   DEFAULT_MIN_HTML_LENGTH,
 } from "../../html-summarizer";
 import { buildPostObserveNudges } from "../context/injection-points";
+import { ELEMENTS_TEXT_CHAR_CAP } from "../messages";
 
 /**
  * Hard upper bound on the DOM text shipped to the navigator model per step,
@@ -28,7 +29,7 @@ import { buildPostObserveNudges } from "../context/injection-points";
  * When the raw/summarized DOM exceeds this, it is truncated and an info event
  * is emitted so the truncation is observable.
  */
-const MAX_NAV_ELEMENTS_TEXT_CHARS = 60_000;
+const MAX_NAV_ELEMENTS_TEXT_CHARS = ELEMENTS_TEXT_CHAR_CAP;
 
 /**
  * Hard byte budget for the vision `screenshot` shipped to the navigator per
@@ -79,38 +80,45 @@ export async function prepareNavigatorRequest(
  // coverage), `navElementsText` must never exceed `MAX_NAV_ELEMENTS_TEXT_CHARS`.
  // Returning the full DOM on fallback would pay full-DOM token cost for zero
  // savings; truncating bounds the worst case deterministically.
-  if (navElementsText.length > MAX_NAV_ELEMENTS_TEXT_CHARS) {
-    state.onEvent({
-      type: "info",
-      message:
-        `Navigator DOM truncated to ${MAX_NAV_ELEMENTS_TEXT_CHARS} chars ` +
-        `(raw/fallback was ${navElementsText.length}).`,
-    });
-    navElementsText = navElementsText.slice(0, MAX_NAV_ELEMENTS_TEXT_CHARS);
-  }
-
  // Bound the other two large per-step payloads (vision screenshot + a11y tree)
  // so the "never an unbounded payload" guarantee holds for them as well.
-  let screenshot = browserState.screenshot;
-  if (screenshot && screenshot.length > MAX_NAV_SCREENSHOT_CHARS) {
-    state.onEvent({
-      type: "info",
-      message:
-        `Navigator screenshot dropped (${screenshot.length} chars exceeds ` +
-        `the ${MAX_NAV_SCREENSHOT_CHARS}-char cap) to bound vision-token cost.`,
-    });
-    screenshot = undefined;
-  }
-  let axTree = browserState.axTree;
-  if (axTree && axTree.length > MAX_NAV_AXTREE_CHARS) {
-    state.onEvent({
-      type: "info",
-      message:
-        `Navigator axTree truncated to ${MAX_NAV_AXTREE_CHARS} chars ` +
-        `(was ${axTree.length}).`,
-    });
-    axTree = axTree.slice(0, MAX_NAV_AXTREE_CHARS);
-  }
+  const capPayload = (
+    value: string | undefined,
+    max: number,
+    mode: "truncate" | "drop",
+    message: () => string,
+  ): string | undefined => {
+    if (!value || value.length <= max) return value;
+    state.onEvent({ type: "info", message: message() });
+    return mode === "drop" ? undefined : value.slice(0, max);
+  };
+
+  navElementsText = capPayload(
+    navElementsText,
+    MAX_NAV_ELEMENTS_TEXT_CHARS,
+    "truncate",
+    () =>
+      `Navigator DOM truncated to ${MAX_NAV_ELEMENTS_TEXT_CHARS} chars ` +
+      `(raw/fallback was ${navElementsText.length}).`,
+  ) ?? navElementsText;
+
+  let screenshot = capPayload(
+    browserState.screenshot,
+    MAX_NAV_SCREENSHOT_CHARS,
+    "drop",
+    () =>
+      `Navigator screenshot dropped (${browserState.screenshot?.length} chars exceeds ` +
+      `the ${MAX_NAV_SCREENSHOT_CHARS}-char cap) to bound vision-token cost.`,
+  );
+
+  let axTree = capPayload(
+    browserState.axTree,
+    MAX_NAV_AXTREE_CHARS,
+    "truncate",
+    () =>
+      `Navigator axTree truncated to ${MAX_NAV_AXTREE_CHARS} chars ` +
+      `(was ${browserState.axTree?.length}).`,
+  );
 
   const navRequest: AgentStepRequest = {
     task: state.task,
@@ -161,14 +169,14 @@ export function appendPostObserveNudges(
  */
 export async function runChallengeDetection(
   state: LoopState
-): Promise<{ challenge: { kind: string; message: string } | null; resolved: boolean; timedOut: boolean }> {
+): Promise<{ challenge: { kind: string; message: string } | null; timedOut: boolean }> {
   if (!state.deps.detectChallenge) {
-    return { challenge: null, resolved: false, timedOut: false };
+    return { challenge: null, timedOut: false };
   }
   try {
     const challenge = await state.deps.detectChallenge();
     if (!challenge) {
-      return { challenge: null, resolved: false, timedOut: false };
+      return { challenge: null, timedOut: false };
     }
     state.onEvent({
       type: "challenge_detected", step: state.step,
@@ -186,14 +194,14 @@ export async function runChallengeDetection(
         resolved = false;
       }
     }
-    return { challenge, resolved, timedOut: !resolved };
+    return { challenge, timedOut: !resolved };
   } catch (e) {
     state.onEvent({
       type: "error", step: state.step,
       message: `detectChallenge failed: ${e instanceof Error ? e.message : String(e)}`,
       recoverable: true,
     });
-    return { challenge: null, resolved: false, timedOut: false };
+    return { challenge: null, timedOut: false };
   }
 }
 

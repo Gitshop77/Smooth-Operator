@@ -5,7 +5,7 @@
 /** A raw detection from LocateAnything (normalized 0-1000 coordinates). */
 export interface Detection {
   label: string;
-  box: [number, number, number, number]; // [x1, y1, x2, y2] normalized 0-1000
+  box: [x1: number, y1: number, x2: number, y2: number]; // normalized 0-1000
 }
 
 /** A detection with pixel coordinates resolved to the screenshot size. */

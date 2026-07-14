@@ -19,32 +19,16 @@ import { ViewHeader } from "@/components/cowork/shared/view-header";
 import { SearchInput } from "@/components/cowork/shared/search-input";
 import { StatusPill, toneForStatus } from "@/components/cowork/shared/status-pill";
 import { StatCard } from "@/components/cowork/shared/stat-card";
-import { timeAgo, hostnameOf, safeHref, truncateMiddle } from "@/lib/cowork-data/format";
+import { timeAgo, hostnameOf, safeHref, truncateMiddle, safeParseJsonArray } from "@/lib/cowork-data/format";
 
 import type { SampleTask, SampleHistoryEntry } from "@/lib/cowork-data/types";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-/**
- * Parse a Prisma JSON-encoded string column defensively. The API stores
- * nested values as JSON strings; a malformed/empty row must never crash the
- * view. Mirrors the pattern used in agents-view.
- */
-function parseJsonArray<T>(raw: unknown): T[] {
-  if (Array.isArray(raw)) return raw as T[];
-  if (typeof raw !== "string" || !raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as T[]) : [];
-  } catch {
-    return [];
-  }
-}
-
 type TaskStep = { label?: string; done?: boolean };
 
 function parseSteps(task: SampleTask): TaskStep[] {
-  return parseJsonArray<TaskStep>((task as { stepsJson?: unknown }).stepsJson);
+  return safeParseJsonArray<TaskStep>((task as { stepsJson?: unknown }).stepsJson);
 }
 
 /**
@@ -106,14 +90,19 @@ export function RunsHistoryView() {
     return ["all", ...Array.from(set).sort()];
   }, [tasks]);
 
+  const sortedRuns = React.useMemo(
+    () =>
+      (tasks ?? []).slice().sort(
+        (a, b) => +new Date(b.createdAt) - +new Date(a.createdAt),
+      ),
+    [tasks],
+  );
+
   const filteredRuns = React.useMemo(() => {
-    const all = (tasks ?? []).slice().sort(
-      (a, b) => +new Date(b.createdAt) - +new Date(a.createdAt),
-    );
     const q = search.trim().toLowerCase();
     const cutoff = RANGE_MS[dateRange];
     const now = Date.now();
-    return all.filter((t) => {
+    return sortedRuns.filter((t) => {
       if (statusFilter !== "all" && t.status !== statusFilter) return false;
       if (agentFilter !== "all" && (t.agentId ?? "") !== agentFilter) return false;
       if (cutoff != null) {
@@ -126,7 +115,7 @@ export function RunsHistoryView() {
       }
       return true;
     });
-  }, [tasks, statusFilter, agentFilter, dateRange, search]);
+  }, [sortedRuns, statusFilter, agentFilter, dateRange, search]);
 
   const filteredHistory = React.useMemo(() => {
     const all = (history ?? []).slice().sort(
@@ -248,16 +237,18 @@ export function RunsHistoryView() {
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.2 }}>
               <DataTable
                 caption="Agent runs"
-                columns={["Mission", "Status", "Duration", "Steps", "Cost", "Model", "Started"]}
+                columns={["Mission", "Status", "Duration", "Steps", "Started"]}
               >
                 {filteredRuns.map((t) => {
                   const steps = parseSteps(t);
-                  const doneSteps = steps.filter((s) => s.done).length;
+                  let doneSteps = 0;
+                  for (const s of steps) if (s.done) doneSteps++;
                   return (
                     <tr
                       key={t.id}
                       role="button"
                       tabIndex={0}
+                      aria-label={`Open run: ${t.title}`}
                       onClick={() => openRun(t.id)}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" || e.key === " ") {
@@ -265,7 +256,7 @@ export function RunsHistoryView() {
                           openRun(t.id);
                         }
                       }}
-                      className="hover:bg-accent/40 transition-colors cursor-pointer"
+                      className="hover:bg-accent/40 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
                     >
                       <td className="px-4 py-2.5 min-w-[220px]">
                         <p className="text-sm font-medium truncate">{t.title}</p>
@@ -283,14 +274,6 @@ export function RunsHistoryView() {
                       </td>
                       <td className="px-4 py-2.5 text-[11px] cowork-mono tnum whitespace-nowrap">
                         {steps.length === 0 ? "—" : `${doneSteps}/${steps.length}`}
-                      </td>
-                      {/* Cost is NOT exposed by the cockpit API (.audit/data.md §5). */}
-                      <td className="px-4 py-2.5 text-[11px] cowork-mono text-muted-foreground tnum whitespace-nowrap">
-                        —
-                      </td>
-                      {/* Model is NOT stored on the Task model. */}
-                      <td className="px-4 py-2.5 text-[11px] cowork-mono text-muted-foreground tnum whitespace-nowrap">
-                        —
                       </td>
                       <td className="px-4 py-2.5 text-[11px] cowork-mono text-muted-foreground tnum whitespace-nowrap">
                         {timeAgo(t.createdAt)} ago
@@ -327,6 +310,8 @@ export function RunsHistoryView() {
                     <td className="px-4 py-2.5 max-w-[280px]">
                       <a
                         href={safeHref(h.url)}
+                        target="_blank"
+                        rel="noopener noreferrer"
                         className="text-[11px] cowork-mono text-primary hover:underline truncate block"
                         onClick={(e) => {
  // Defensive: never navigate to a non-http(s) href.

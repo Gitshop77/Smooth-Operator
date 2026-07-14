@@ -16,7 +16,7 @@ export function Header() {
   return (
     <header className="sticky top-0 z-30 flex h-14 items-center gap-3 border-b border-border bg-background/80 backdrop-blur-sm supports-[backdrop-filter]:bg-background/65 px-4 sm:px-6">
       <MobileSidebar />
-      <div className="flex items-center gap-2 min-w-0">
+      <div key={currentView} className="flex items-center gap-2 min-w-0 animate-in fade-in-0 duration-200">
         {Icon ? <Icon className="size-4 text-accent shrink-0" /> : null}
         <h1 className="font-semibold text-sm truncate">{meta?.label ?? "Cowork"}</h1>
         <span className="hidden md:inline text-[13px] text-muted-foreground truncate">

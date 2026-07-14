@@ -13,6 +13,7 @@
  * `./route/client`. The 7 facades import it as `../provider-bridge`.
  */
 import { estimateCost } from "./pricing";
+import { omitZero } from "./shared";
 import type { LLMProvider, LLMRequest, LLMResponse } from "./provider";
 
 export interface ProviderBridgeConfig {
@@ -102,9 +103,9 @@ export function toLLMProvider(config: ProviderBridgeConfig): LLMProvider {
           ? {
               tokensIn,
               tokensOut,
-              reasoningTokens: reasoningTokens > 0 ? reasoningTokens : undefined,
-              cachedInputTokens: cachedInputTokens > 0 ? cachedInputTokens : undefined,
-              cachedWriteInputTokens: cachedWriteInputTokens > 0 ? cachedWriteInputTokens : undefined,
+              reasoningTokens: omitZero(reasoningTokens),
+              cachedInputTokens: omitZero(cachedInputTokens),
+              cachedWriteInputTokens: omitZero(cachedWriteInputTokens),
               model: config.model,
               costUsd: estimateCost(config.model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens),
             }

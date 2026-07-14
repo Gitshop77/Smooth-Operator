@@ -11,11 +11,6 @@ import { extractBrowserState } from "../../dom/extractor";
 import type { LoopState, ObserveStateResult } from "../types";
 
 /**
- * Wrap the getTabs + extractState logic with error handling. Returns the
- * browser state on success, or an error result that the caller can use to
- * increment `consecutiveFailures` and decide whether to abort.
- */
-/**
  * IMPORTANT (serialization contract): the `BrowserState` returned on success
  * may contain NON-SERIALIZABLE runtime-only fields — `selectorMap` (a map of
  * live `HTMLElement`s) and `elements[].rect` (`DOMRect`s). `JSON.stringify`
@@ -39,20 +34,17 @@ export async function observeState(state: LoopState): Promise<ObserveStateResult
     };
   }
 
-  let browserState: BrowserState;
+  const usedOverride = !!state.deps.extractState;
   try {
-    if (state.deps.extractState) {
-      browserState = await state.deps.extractState(tabs);
-    } else {
-      browserState = extractBrowserState(tabs);
-    }
+    const browserState = usedOverride
+      ? await state.deps.extractState!(tabs)
+      : extractBrowserState(tabs);
+    return { status: "ok", state: browserState, tabs };
   } catch (e) {
     return {
       status: "error",
       phase: "extractState",
-      message: `extractBrowserState failed: ${e instanceof Error ? e.message : String(e)}`,
+      message: `${usedOverride ? "extractState" : "extractBrowserState"} failed: ${e instanceof Error ? e.message : String(e)}`,
     };
   }
-
-  return { status: "ok", state: browserState, tabs };
 }

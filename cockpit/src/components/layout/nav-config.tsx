@@ -79,3 +79,20 @@ export const VIEW_META: Record<ViewId, { label: string; icon: LucideIcon; descri
       g.items.map((i) => [i.id, { label: i.label, icon: i.icon, description: i.description ?? "" }]),
     ),
   ) as Record<ViewId, { label: string; icon: LucideIcon; description: string }>;
+
+// Dev-only completeness guard: every view wired into the nav must have a
+// VIEW_META entry. (Depth views like "session-replay"/"run-detail" are
+// intentionally reached via routing, not the nav, so they are not required.)
+function assertViewMetaComplete(
+  meta: Record<string, { label: string; icon: LucideIcon; description: string }>,
+) {
+  if (process.env.NODE_ENV !== "development") return;
+  const expected = NAV_GROUPS.flatMap((g) => g.items.map((i) => i.id)).sort();
+  const actual = Object.keys(meta).sort();
+  const missing = expected.filter((id) => !actual.includes(id));
+  if (missing.length) {
+    throw new Error(`VIEW_META is missing entries for: ${missing.join(", ")}`);
+  }
+}
+
+assertViewMetaComplete(VIEW_META);

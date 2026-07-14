@@ -11,7 +11,11 @@
  */
 
 import type { AgentMode } from "@/lib/agent/modes";
+import { MODE_CONFIGS } from "@/lib/agent/modes";
 import type { AgentAction } from "@/lib/agent/types";
+
+// Static set of valid run modes (O(1) lookup instead of rebuilding Object.keys per RUN).
+const KNOWN_MODES = new Set(Object.keys(MODE_CONFIGS) as AgentMode[]);
 import { getRunState, saveRunState } from "./state-store";
 import {
   startRun,
@@ -159,6 +163,55 @@ function isPrivilegedSender(sender: chrome.runtime.MessageSender): boolean {
   return false;
 }
 
+/** Reject a message from a non-privileged sender. Returns false (after responding) when rejected. */
+function requirePrivileged(
+  sender: chrome.runtime.MessageSender,
+  sendResponse: (r?: unknown) => void,
+): boolean {
+  if (!isPrivilegedSender(sender)) {
+    sendResponse({ ok: false, error: "unauthorized sender" });
+    return false;
+  }
+  return true;
+}
+
+/** Resolve the active run's current tab id + mode, responding + returning null when there is none. */
+async function requireActiveTabId(
+  sendResponse: (r?: unknown) => void,
+): Promise<{ tabId: number; mode: string | undefined } | null> {
+  const runState = await getRunState();
+  const tabId = runState?.currentTabId;
+  if (!tabId) {
+    sendResponse({ ok: false, error: "no active run" });
+    return null;
+  }
+  return { tabId, mode: runState?.mode };
+}
+
+/**
+ * Wrap a privileged handler that needs the active run's tab. Runs the same
+ * `requirePrivileged` + `requireActiveTabId` + null-guard preamble shared by
+ * the CDP_CLICK / CDP_PRESS_AND_HOLD / SAVE_AS_PDF / SCREENSHOT handlers, then
+ * calls `fn(tabId, mode, sendResponse)`. Check order and response text mirror
+ * the original inline sequence exactly.
+ */
+function bindPrivilegedTabHandler(
+  sendResponse: (r?: unknown) => void,
+  sender: chrome.runtime.MessageSender,
+  fn: (
+    tabId: number,
+    mode: string | undefined,
+    sendResponse: (r?: unknown) => void,
+  ) => Promise<void>,
+): boolean {
+  return bindHandler(sendResponse, async () => {
+    if (!requirePrivileged(sender, sendResponse)) return;
+    const tabRes = await requireActiveTabId(sendResponse);
+    if (tabRes === null) return;
+    await fn(tabRes.tabId, tabRes.mode, sendResponse);
+  });
+}
+
 // ─── Listener ───────────────────────────────────────────────────────────────
 
 /**
@@ -194,8 +247,16 @@ async function captureAndDownload(opts: {
  // always detach — even on throw (mirrors CDP_CLICK / CDP_PRESS_AND_HOLD).
     detachDebugger(opts.tabId).catch(() => { /* tab may already be closed */ });
   }
-  const tab = await chrome.tabs.get(opts.tabId);
-  const title = (tab.title || opts.fallbackTitle).replace(/[^\w.-]+/g, "_").slice(0, 80);
+  let title: string;
+  try {
+    const tab = await chrome.tabs.get(opts.tabId);
+    title = (tab.title || opts.fallbackTitle).replace(/[^\w.-]+/g, "_").slice(0, 80);
+  } catch {
+    // Tab lookup can fail if the tab closed between capture and here. The
+    // capture already succeeded, so fall back to the default name and still
+    // save the (good) file instead of falsely reporting a download failure.
+    title = opts.fallbackTitle.replace(/[^\w.-]+/g, "_").slice(0, 80);
+  }
  // Coerce `rawFileName` to a STRING before sanitizing (finding: a non-string
  // `fileName`, e.g. a number, would survive the `||` fallback and then throw
  // on `.replace`, defeating the sanitization).
@@ -213,8 +274,12 @@ async function captureAndDownload(opts: {
  // flag (owned by agent-bridge, reset for every run) — it is consumed
  // synchronously so two concurrent messages don't both prompt the user.
   const requireSaveAs = consumeDownloadConsentForMode(opts.mode);
-  await chrome.downloads.download({ url: dataUrl, filename, saveAs: requireSaveAs });
-  opts.sendResponse({ ok: true, filename });
+  try {
+    await chrome.downloads.download({ url: dataUrl, filename, saveAs: requireSaveAs });
+    opts.sendResponse({ ok: true, filename });
+  } catch (e) {
+    opts.sendResponse({ ok: false, error: e instanceof Error ? e.message : "download failed" });
+  }
 }
 
 chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse) => {
@@ -278,13 +343,16 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
  // string inputs are not validated). `msg.maxSteps || DEFAULT_MAX_STEPS`
  // only normalizes 0/empty, not negative numbers, NaN (falsy), or a
  // non-numeric string — clamp to a valid positive integer in [1, 1000].
-        const reqMaxSteps = (typeof msg.maxSteps === "number" && Number.isFinite(msg.maxSteps) && msg.maxSteps > 0)
-          ? Math.min(Math.floor(msg.maxSteps), 1000)
+        const reqMaxSteps = (typeof msg.maxSteps === "number" && Number.isFinite(msg.maxSteps) && msg.maxSteps >= 1)
+          ? Math.max(1, Math.min(Math.floor(msg.maxSteps), 1000))
           : DEFAULT_MAX_STEPS;
         await startRun({
           task: msg.task,
           maxSteps: reqMaxSteps,
-          mode: msg.mode || DEFAULT_MODE,
+          mode:
+            typeof msg.mode === "string" && KNOWN_MODES.has(msg.mode as AgentMode)
+              ? msg.mode
+              : DEFAULT_MODE,
         });
       } catch (e) {
  // Release the guard so the next RUN can start.
@@ -330,17 +398,10 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
  // page change. Try a CDP-level Input.dispatchMouseEvent at the element's
  // center coordinates.
   if (msg?.type === "CDP_CLICK") {
-    return bindHandler(sendResponse, async () => {
-      if (!isPrivilegedSender(sender)) {
-        sendResponse({ ok: false, error: "unauthorized sender" });
-        return;
-      }
+    return bindPrivilegedTabHandler(sendResponse, sender, async (tabId) => {
  // `msg` is already narrowed to `CdpClickMessage` by the type
  // discriminator — no cast needed (finding: redundant `as` casts hid the
  // union narrowing that already guarantees the shape).
-      const runState = await getRunState();
-      const tabId = runState?.currentTabId;
-      if (!tabId) { sendResponse({ ok: false, error: "no active run" }); return; }
       const { attachDebugger, cdpClick, detachDebugger } = await import("@/lib/agent/cdp-controller");
       await attachDebugger(tabId);
       try {
@@ -389,14 +450,7 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
  // action needs to hold the mouse button down for a duration (anti-bot
  // "press and hold to verify" widgets).
   if (msg?.type === "CDP_PRESS_AND_HOLD") {
-    return bindHandler(sendResponse, async () => {
-      if (!isPrivilegedSender(sender)) {
-        sendResponse({ ok: false, error: "unauthorized sender" });
-        return;
-      }
-      const runState = await getRunState();
-      const tabId = runState?.currentTabId;
-      if (!tabId) { sendResponse({ ok: false, error: "no active run" }); return; }
+    return bindPrivilegedTabHandler(sendResponse, sender, async (tabId) => {
       const { attachDebugger, cdpPressAndHold, detachDebugger } = await import("@/lib/agent/cdp-controller");
       await attachDebugger(tabId);
       try {
@@ -427,14 +481,7 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
  // context), so the executor's `save_as_pdf` action sends this message to
  // the background SW, which has both.
   if (msg?.type === "SAVE_AS_PDF") {
-    return bindHandler(sendResponse, async () => {
-      if (!isPrivilegedSender(sender)) {
-        sendResponse({ ok: false, error: "unauthorized sender" });
-        return;
-      }
-      const runState = await getRunState();
-      const tabId = runState?.currentTabId;
-      if (!tabId) { sendResponse({ ok: false, error: "no active run" }); return; }
+    return bindPrivilegedTabHandler(sendResponse, sender, async (tabId, mode) => {
       await captureAndDownload({
         sendResponse,
         tabId,
@@ -447,7 +494,7 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
         extension: "pdf",
         fallbackTitle: "page",
         rawFileName: msg.fileName,
-        mode: runState?.mode,
+        mode,
       });
     });
   }
@@ -466,14 +513,7 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
  // debugger is attached only for the duration of the capture (same
  // attach/detach pattern as SAVE_AS_PDF).
   if (msg?.type === "SCREENSHOT") {
-    return bindHandler(sendResponse, async () => {
-      if (!isPrivilegedSender(sender)) {
-        sendResponse({ ok: false, error: "unauthorized sender" });
-        return;
-      }
-      const runState = await getRunState();
-      const tabId = runState?.currentTabId;
-      if (!tabId) { sendResponse({ ok: false, error: "no active run" }); return; }
+    return bindPrivilegedTabHandler(sendResponse, sender, async (tabId, mode) => {
       const { getScreenshotQuality } = await import("./tab-manager");
       const screenshotQuality = await getScreenshotQuality();
       await captureAndDownload({
@@ -488,7 +528,7 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
         extension: "jpg",
         fallbackTitle: "screenshot",
         rawFileName: msg.fileName,
-        mode: runState?.mode,
+        mode,
       });
     });
   }
@@ -510,10 +550,7 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
  // script on navigation, so a round-trip response couldn't get back anyway.
   if (msg?.type === "TAB_ACTION") {
     return bindHandler(sendResponse, async () => {
-      if (!isPrivilegedSender(sender)) {
-        sendResponse({ ok: false, error: "unauthorized sender" });
-        return;
-      }
+      if (!requirePrivileged(sender, sendResponse)) return;
       const runState = await getRunState();
       if (!runState) { sendResponse({ ok: false, error: "no active run" }); return; }
       const { handleTabAction } = await import("./tab-manager");
@@ -533,10 +570,7 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
  // request via this message.
   if (msg?.type === "DETECT_VISUAL") {
     return bindHandler(sendResponse, async () => {
-      if (!isPrivilegedSender(sender)) {
-        sendResponse({ ok: false, error: "unauthorized sender" });
-        return;
-      }
+      if (!requirePrivileged(sender, sendResponse)) return;
  // Validate `query` at the boundary (finding: `DetectVisualMessage.query`
  // type is erased at runtime; a non-string/missing query would flow into
  // the vision prompt and a user-visible string as the literal

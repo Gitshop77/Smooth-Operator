@@ -1,6 +1,6 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
-import { json, withRouteError, bodyJson, badRequest, validateHttpUrl, parseLimit, boundedString, MAX_URL_LEN, MAX_TITLE_LEN, MAX_SOURCE_LEN } from '@/lib/cowork/api/http';
+import { json, withRouteError, bodyJson, badRequest, validateHttpUrl, parseLimit, boundedString, MAX_URL_LEN, MAX_TITLE_LEN, MAX_SOURCE_LEN, sanitizeRequestId } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
 export async function GET(req: NextRequest): Promise<Response> {
@@ -12,13 +12,15 @@ export async function GET(req: NextRequest): Promise<Response> {
     const where = workspaceId ? { workspaceId } : undefined;
  // Include the `workspace` relation so the dashboard can show
  // `workspaceName` without a second round-trip.
-    const tabs = await db.tab.findMany({
-      where,
-      take: limit,
-      orderBy: { lastAccessedAt: 'desc' },
-      include: { workspace: { select: { name: true } } },
-    });
-    const count = await db.tab.count({ where });
+    const [tabs, count] = await Promise.all([
+      db.tab.findMany({
+        where,
+        take: limit,
+        orderBy: { lastAccessedAt: 'desc' },
+        include: { workspace: { select: { name: true } } },
+      }),
+      db.tab.count({ where }),
+    ]);
  // Project the workspace name onto each tab row so the legacy
  // `workspaceName` field expected by `tabs-view` is populated. Also
  // mirror `lastAccessedAt` → `lastAccessed` for the same reason.
@@ -65,5 +67,5 @@ export async function POST(req: NextRequest): Promise<Response> {
       },
     });
     return json({ tab }, 201);
-  }, req.headers.get('x-request-id') ?? undefined);
+  }, sanitizeRequestId(req.headers.get('x-request-id')));
 }

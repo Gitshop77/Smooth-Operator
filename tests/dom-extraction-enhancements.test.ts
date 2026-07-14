@@ -44,6 +44,12 @@ const MOCK_TABS: TabInfo[] = [
   { id: 1, label: "1", url: "https://example.com", title: "Test", active: true },
 ];
 
+// Compact DOMRect stub factory — avoids repeating the full rect object at
+// every call site below. `top`/`left` derive from (x, y) and width/height
+// from (right, bottom) exactly as the verbose inline literals did.
+const makeRect = (x: number, y: number, right: number, bottom: number): DOMRect =>
+  ({ x, y, top: y, right, bottom, left: x, width: right - x, height: bottom - y, toJSON: () => ({}) }) as DOMRect;
+
 // ─── jsdom-limitation mocks (shared helper) ──────────────────────────────────
 //
 // The shared `installJsdomLayoutMock` helper overrides `offsetParent` and
@@ -191,8 +197,8 @@ describe("extractor: compound control virtual children", () => {
     expect(state.elementsText).toContain("<option value=\"ca\" /> CA");
     expect(state.elementsText).toContain("<option value=\"mx\" /> MX");
     expect(state.elementsText).toContain("<option value=\"uk\" /> UK");
- // The 5th+ options are summarized as "… N more options".
-    expect(state.elementsText).toContain("… 2 more options");
+ // The 5th+ options are summarized as "... N more options".
+    expect(state.elementsText).toContain("... 2 more options");
  // The 5th option's value is NOT surfaced as a virtual child.
     expect(state.elementsText).not.toContain("<option value=\"au\" />");
   });
@@ -298,12 +304,8 @@ describe("dom-utils: propagating elements + 99% containment", () => {
     document.body.appendChild(parent);
 
  // Stub rects: parent is 100x100 at (0,0), child is 50x50 at (10,10).
-    parent.getBoundingClientRect = () => ({
-      x: 0, y: 0, top: 0, right: 100, bottom: 100, left: 0, width: 100, height: 100, toJSON: () => ({}),
-    } as DOMRect);
-    child.getBoundingClientRect = () => ({
-      x: 10, y: 10, top: 10, right: 60, bottom: 60, left: 10, width: 50, height: 50, toJSON: () => ({}),
-    } as DOMRect);
+    parent.getBoundingClientRect = () => makeRect(0, 0, 100, 100);
+    child.getBoundingClientRect = () => makeRect(10, 10, 60, 60);
 
  // 100% contained (intersection = 50*50 = 2500, childArea = 50*50 = 2500).
     expect(containmentRatio(child, parent)).toBeCloseTo(1, 5);
@@ -318,12 +320,8 @@ describe("dom-utils: propagating elements + 99% containment", () => {
     document.body.appendChild(parent);
 
  // Parent 100x100 at (0,0); child 100x100 at (50,50) — only 25% overlaps.
-    parent.getBoundingClientRect = () => ({
-      x: 0, y: 0, top: 0, right: 100, bottom: 100, left: 0, width: 100, height: 100, toJSON: () => ({}),
-    } as DOMRect);
-    child.getBoundingClientRect = () => ({
-      x: 50, y: 50, top: 50, right: 150, bottom: 150, left: 50, width: 100, height: 100, toJSON: () => ({}),
-    } as DOMRect);
+    parent.getBoundingClientRect = () => makeRect(0, 0, 100, 100);
+    child.getBoundingClientRect = () => makeRect(50, 50, 150, 150);
 
     expect(containmentRatio(child, parent)).toBeCloseTo(0.25, 5);
     expect(isContained(child, parent, 0.99)).toBe(false);
@@ -335,12 +333,8 @@ describe("dom-utils: propagating elements + 99% containment", () => {
     parent.appendChild(child);
     document.body.appendChild(parent);
 
-    parent.getBoundingClientRect = () => ({
-      x: 0, y: 0, top: 0, right: 100, bottom: 100, left: 0, width: 100, height: 100, toJSON: () => ({}),
-    } as DOMRect);
-    child.getBoundingClientRect = () => ({
-      x: 0, y: 0, top: 0, right: 0, bottom: 0, left: 0, width: 0, height: 0, toJSON: () => ({}),
-    } as DOMRect);
+    parent.getBoundingClientRect = () => makeRect(0, 0, 100, 100);
+    child.getBoundingClientRect = () => makeRect(0, 0, 0, 0);
 
     expect(containmentRatio(child, parent)).toBe(0);
     expect(isContained(child, parent)).toBe(false);
@@ -364,7 +358,7 @@ describe("dom-utils: propagating elements + 99% containment", () => {
     document.body.appendChild(button);
 
  // Stub identical rects so span is 100% contained.
-    const rect = { x: 0, y: 0, top: 0, right: 100, bottom: 30, left: 0, width: 100, height: 30, toJSON: () => ({}) } as DOMRect;
+    const rect = makeRect(0, 0, 100, 30);
     button.getBoundingClientRect = () => rect;
     span.getBoundingClientRect = () => rect;
 
@@ -378,7 +372,7 @@ describe("dom-utils: propagating elements + 99% containment", () => {
     button.appendChild(input);
     document.body.appendChild(button);
 
-    const rect = { x: 0, y: 0, top: 0, right: 100, bottom: 30, left: 0, width: 100, height: 30, toJSON: () => ({}) } as DOMRect;
+    const rect = makeRect(0, 0, 100, 30);
     button.getBoundingClientRect = () => rect;
     input.getBoundingClientRect = () => rect;
 
@@ -393,7 +387,7 @@ describe("dom-utils: propagating elements + 99% containment", () => {
     button.appendChild(span);
     document.body.appendChild(button);
 
-    const rect = { x: 0, y: 0, top: 0, right: 100, bottom: 30, left: 0, width: 100, height: 30, toJSON: () => ({}) } as DOMRect;
+    const rect = makeRect(0, 0, 100, 30);
     button.getBoundingClientRect = () => rect;
     span.getBoundingClientRect = () => rect;
 

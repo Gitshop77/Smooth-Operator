@@ -8,8 +8,9 @@
  * `id`, display name, env var and default base URL differ. The shared boilerplate
  * lives in `makeOpenAIChatFacade` below, so a single change (e.g. an SSRF guard
  * or a new capability flag) propagates to every compatible provider at once.
- * xAI keeps its own file only because it is owned by a different batch; it can
- * adopt the same factory later without further behavioral change.
+ * xAI keeps its own file for clearer module ownership but already uses this
+ * same factory via makeOpenAIChatFacade, so SSRF/auth/framing boilerplate
+ * cannot diverge.
  */
 
 import { Auth, type ProviderAuthOption } from "../route/auth";

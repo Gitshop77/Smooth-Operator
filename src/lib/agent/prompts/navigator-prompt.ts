@@ -98,6 +98,35 @@ Use this SPARINGLY — it takes 2-5 seconds per call. Only use it when the DOM e
   return "";
 }
 
+/** Canonical Output Format block — shared by the default and custom-prompt
+ * branches so a custom override can never diverge (e.g. drop the
+ * `select_dropdown` example). Includes the richer `select_dropdown` example
+ * from the default branch. */
+const OUTPUT_FORMAT_BLOCK = `# Output Format
+
+Respond with a single valid JSON object in EXACTLY this format (no markdown, no extra text):
+{
+  "thinking": "Your step-by-step reasoning about the current state and what to do.",
+  "evaluation_previous_goal": "One sentence: did your last action succeed, fail, or is uncertain? End with 'Verdict: Success' or 'Verdict: Failure'.",
+  "memory": "1-3 sentences tracking progress (what's done, what's next, counts).",
+  "next_goal": "One clear sentence stating the immediate goal of this step.",
+  "action": [
+    {"type": "click", "index": 5},
+    {"type": "input", "index": 2, "text": "Paris", "clear": true},
+    {"type": "select_dropdown", "index": 8, "text": "Engineering"}
+  ]
+}
+The \`action\` array MUST NOT be empty. Use the exact \`type\` field and parameter names from the action set.`;
+
+/** JavaScript-execution guidance — shared by both prompt branches. */
+function evaluateGuidance(): string {
+  return `# JavaScript Execution (\`evaluate\`)
+
+\`evaluate\` runs JavaScript in the page and is always listed in the action set. Its availability is gated by the run's mode, NOT by this prompt:
+- In **full_agentic** mode it runs freely when no other action works.
+- In **standard** / **restricted** modes it is always **confirmation-gated** — emitting it triggers a user prompt (or is blocked) rather than executing silently. Use it sparingly and only when truly necessary; prefer the dedicated actions (\`click\`, \`input\`, \`extract\`, \`select_dropdown\`, \`search_page\`, …) whenever they suffice.`;
+}
+
 export function buildNavigatorPrompt(
   maxActions: number,
   customPrompt?: string,
@@ -125,25 +154,9 @@ ${visionGuidance(visionMode) || "_(No local vision mode is enabled for this run.
 
 ${actionListForPrompt(safeMax, visionMode)}
 
-# Output Format (required — respond with a single valid JSON object, no markdown)
+${OUTPUT_FORMAT_BLOCK}
 
-{
-  "thinking": "Your step-by-step reasoning about the current state and what to do.",
-  "evaluation_previous_goal": "One sentence: did your last action succeed, fail, or is uncertain? End with 'Verdict: Success' or 'Verdict: Failure'.",
-  "memory": "1-3 sentences tracking progress (what's done, what's next, counts).",
-  "next_goal": "One clear sentence stating the immediate goal of this step.",
-  "action": [
-    {"type": "click", "index": 5},
-    {"type": "input", "index": 2, "text": "Paris", "clear": true}
-  ]
-}
-The \`action\` array MUST NOT be empty. Use the exact \`type\` field and parameter names from the action set above.
-
-# JavaScript Execution (\`evaluate\`)
-
-\`evaluate\` runs JavaScript in the page and is always listed in the action set. Its availability is gated by the run's mode, NOT by this prompt:
-- In **full_agentic** mode it runs freely when no other action works.
-- In **standard** / **restricted** modes it is always **confirmation-gated** — emitting it triggers a user prompt (or is blocked) rather than executing silently. Use it sparingly and only when truly necessary; prefer the dedicated actions (\`click\`, \`input\`, \`extract\`, \`select_dropdown\`, \`search_page\`, …) whenever they suffice.`;
+${evaluateGuidance()}`;
   }
   return `You are Open Cowork — an autonomous browser agent that controls a real Chrome tab to accomplish the user's task. You operate in an iterative observe-reason-act loop. You can read pages, click elements, type text, scroll, navigate between websites, open and switch tabs, extract information, and submit forms — just like a human user.
 
@@ -191,31 +204,7 @@ Rules:
 - If you can't see all content, use \`scroll\` to reveal more.
 - Use \`search_page\` to find specific text instantly, or \`find_elements\` to locate elements by CSS selector.
 - The <accessibility_tree> provides a SEMANTIC view — elements shown by ARIA role and accessible name. Use it to understand page structure and find the right element.
-${visionMode === "always" ? `
-## Vision-only elements (Local Vision Assistant)
-
-When the Local Vision Assistant is enabled (for text-only LLMs that can't see the screenshot directly), the elements list may also contain **vision-only** entries with \`[v-N]\` indices:
-
-\`[v1]<vision_element label="Submit" x=320 y=440 w=120 h=40 />\`
-
-These are elements the vision model detected on the screenshot that have **no DOM counterpart** — typically Canvas/WebGL/WebComponent content the DOM walker can't see. Click them with the same \`click\` action and the bare \`vN\` index (no brackets):
-
-\`{"type":"click","index":"v1"}\`
-
-Vision elements are clicked via CDP coordinate dispatch (real OS-level mouse event at the element's center), so they work even on sites where JS click handlers are blocked. Use them when a DOM element is missing for something you can see on the page.
-` : ""}${visionMode === "adaptive" ? `
-## Visual Detection Tool (AI Adaptive Vision)
-
-When you can see a button, icon, or interactive element on the page but cannot find it in the elements tree (it may be a Canvas-rendered button, WebGL widget, or custom control with no DOM representation), use the \`detect_visual\` action to run local vision detection:
-
-\`{"type":"detect_visual","query":"what you're looking for"}\`
-
-This runs a local vision model (LocateAnything-3B via WebGPU) on the current screenshot and returns detected UI elements as [v1], [v2] etc. You can then click them on the NEXT step with:
-
-\`{"type":"click","index":"v1"}\`
-
-Use this SPARINGLY — it takes 2-5 seconds per call. Only use it when the DOM elements tree is missing something you can see visually. If the elements tree already has what you need, do NOT call detect_visual.
-` : ""}
+${visionGuidance(visionMode)}
 # Browsing Capability
 
 You are a FULLY AUTONOMOUS browser agent. You can:
@@ -305,27 +294,9 @@ Call \`done\` when:
 Set \`success\` to true ONLY if the entire request is complete. Otherwise false with a clear explanation in \`text\`.
 Before calling done with success=true, re-read the user request and verify every part is done.
 
-# Output Format
+${OUTPUT_FORMAT_BLOCK}
 
-Respond with a single valid JSON object in EXACTLY this format (no markdown, no extra text):
-{
-  "thinking": "Your step-by-step reasoning about the current state and what to do.",
-  "evaluation_previous_goal": "One sentence: did your last action succeed, fail, or is uncertain? End with 'Verdict: Success' or 'Verdict: Failure'.",
-  "memory": "1-3 sentences tracking progress (what's done, what's next, counts).",
-  "next_goal": "One clear sentence stating the immediate goal of this step.",
-  "action": [
-    {"type": "click", "index": 5},
-    {"type": "input", "index": 2, "text": "Paris", "clear": true},
-    {"type": "select_dropdown", "index": 8, "text": "Engineering"}
-  ]
-}
-The \`action\` array MUST NOT be empty. Use the exact \`type\` field and parameter names from the action set.
-
-# JavaScript Execution (\`evaluate\`)
-
-\`evaluate\` runs JavaScript in the page and is always listed in the action set. Its availability is gated by the run's mode, NOT by this prompt:
-- In **full_agentic** mode it runs freely when no other action works.
-- In **standard** / **restricted** modes it is always **confirmation-gated** — emitting it triggers a user prompt (or is blocked) rather than executing silently. Use it sparingly and only when truly necessary; prefer the dedicated actions (\`click\`, \`input\`, \`extract\`, \`select_dropdown\`, \`search_page\`, …) whenever they suffice.
+${evaluateGuidance()}
 
 # Worked Examples
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { io, type Socket } from "socket.io-client";
 
 import { useCoworkStore } from "@/hooks/use-cowork-store";
@@ -83,9 +83,18 @@ export function useCoworkWebSocket(): void {
   const setLastEvent = useCoworkStore((s) => s.setLastEvent);
   const invalidate = useInvalidateView();
 
+  // Keep the latest callbacks in a ref so the connection effect can run once
+  // (with `[]` deps) regardless of how often these identities change. Today
+  // they are stable, but this decouples socket lifecycle from callback identity.
+  const cbs = useRef({ setSocketConnected, setLastEvent, invalidate });
+  cbs.current = { setSocketConnected, setLastEvent, invalidate };
+
   useEffect(() => {
+    const { setSocketConnected, setLastEvent, invalidate } = cbs.current;
     let socket: Socket | null = null;
     let disposed = false;
+    let rafId: number | null = null;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
     const connect = () => {
       if (disposed) return;
@@ -147,10 +156,11 @@ export function useCoworkWebSocket(): void {
  // production log at most a one-line message rather than the raw object.
         const message =
           err instanceof Error ? err.message : String(err ?? "unknown");
+        const safeMessage = message.replace(/(token[=:]\s*)\S+/gi, "$1***");
         if (process.env.NODE_ENV !== "production") {
-          console.error("[cowork-ws] connect_error:", message);
+          console.error("[cowork-ws] connect_error:", safeMessage);
         } else {
-          console.warn(`[cowork-ws] connect_error: ${message}`);
+          console.warn(`[cowork-ws] connect_error: ${safeMessage}`);
         }
       });
 
@@ -173,32 +183,46 @@ export function useCoworkWebSocket(): void {
  // same frame yields at most one refetch per query key, instead of one
  // refetch per event. Pending keys are batched and flushed once on the
  // next animation frame (or macrotask where rAF is unavailable).
-      const pendingKeys = new Set<string>();
+      const pendingKeys = new Map<string, string[]>();
       let flushScheduled = false;
       const scheduleInvalidate = (key: string[]) => {
-        pendingKeys.add(JSON.stringify(key));
+        pendingKeys.set(key.join(" "), key);
         if (flushScheduled) return;
         flushScheduled = true;
         const flush = () => {
+ // Guard against a flush that fires after the effect has torn down (e.g. a
+ // rAF/timeout scheduled just before unmount): touching the store/query
+ // client with a closed-over `disposed` reference would be a use-after-mount.
+          if (disposed) return;
           flushScheduled = false;
-          const keys = Array.from(pendingKeys);
+          rafId = null;
+          timeoutId = null;
+          const keys = Array.from(pendingKeys.values());
           pendingKeys.clear();
-          for (const raw of keys) {
-            try {
-              invalidate(JSON.parse(raw) as string[]);
-            } catch {
-              /* ignore malformed key */
-            }
+          for (const k of keys) {
+            invalidate(k);
           }
         };
         if (typeof requestAnimationFrame === "function") {
-          requestAnimationFrame(flush);
- // `requestAnimationFrame` does not fire while the tab is backgrounded,
- // which would defer realtime invalidation indefinitely. Guarantee a
- // flush via a macrotask timeout so backgrounded tabs still update.
-          setTimeout(flush, 100);
+ // Prefer rAF; only keep the 100ms timeout as a background-tab fallback
+ // (rAF is throttled when the tab is backgrounded). Clear the fallback
+ // once rAF fires so a foreground burst schedules exactly one flush.
+          rafId = requestAnimationFrame(() => {
+            if (timeoutId !== null) {
+              clearTimeout(timeoutId);
+              timeoutId = null;
+            }
+            flush();
+          });
+          timeoutId = setTimeout(() => {
+            if (rafId !== null) {
+              cancelAnimationFrame(rafId);
+              rafId = null;
+            }
+            flush();
+          }, 100);
         } else {
-          setTimeout(flush, 0);
+          timeoutId = setTimeout(flush, 0);
         }
       };
 
@@ -258,9 +282,11 @@ export function useCoworkWebSocket(): void {
 
     return () => {
       disposed = true;
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      if (timeoutId !== null) clearTimeout(timeoutId);
       socket?.removeAllListeners();
       socket?.disconnect();
       socket = null;
     };
-  }, [setSocketConnected, setLastEvent, invalidate]);
+  }, []);
 }

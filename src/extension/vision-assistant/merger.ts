@@ -44,6 +44,15 @@ function iou(
   a: { x: number; y: number; width: number; height: number },
   b: { x: number; y: number; width: number; height: number },
 ): number {
+ // Early-out: disjoint boxes never intersect, so the IoU is 0.
+  if (
+    a.x + a.width < b.x ||
+    b.x + b.width < a.x ||
+    a.y + a.height < b.y ||
+    b.y + b.height < a.y
+  ) {
+    return 0;
+  }
   const ax2 = a.x + a.width;
   const ay2 = a.y + a.height;
   const bx2 = b.x + b.width;
@@ -126,13 +135,7 @@ export function mergeDetections(
 
     for (const domEl of domElements) {
       if (!domEl.rect) continue;
-      const domRect = {
-        x: domEl.rect.x,
-        y: domEl.rect.y,
-        width: domEl.rect.width,
-        height: domEl.rect.height,
-      };
-      if (iou(visionRectCss, domRect) > 0.5) {
+      if (iou(visionRectCss, domEl.rect) > 0.5) {
         isDuplicate = true;
         break;
       }

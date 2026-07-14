@@ -30,14 +30,32 @@ export async function handleDetectVisual(
   try {
  // `chrome.runtime.sendMessage` resolves `undefined` (not a rejection) when
  // no listener is present, so read the response through a typed shape and
- // validate each field before consuming it.
-    const res = (await chrome.runtime.sendMessage({
-      type: "DETECT_VISUAL",
-      query: action.query,
-    })) as
+ // validate each field before consuming it. Race the call against a timeout
+ // so a busy/hung/crashed SW can't hang the agent step indefinitely.
+    let t: ReturnType<typeof setTimeout> | undefined;
+    let res:
       | { ok?: boolean; count?: number; description?: string; error?: string }
       | undefined
       | null;
+    try {
+      res = (await Promise.race([
+        chrome.runtime.sendMessage({
+          type: "DETECT_VISUAL",
+          query: action.query,
+        }),
+        new Promise<never>((_, reject) => {
+          t = setTimeout(
+            () => reject(new Error("detect_visual timed out waiting for the extension")),
+            30000,
+          );
+        }),
+      ])) as
+        | { ok?: boolean; count?: number; description?: string; error?: string }
+        | undefined
+        | null;
+    } finally {
+      if (t) clearTimeout(t);
+    }
     if (typeof res?.ok !== "boolean" || !res.ok) {
       const err =
         res && typeof res.error === "string" && res.error ? res.error : "no response from extension";

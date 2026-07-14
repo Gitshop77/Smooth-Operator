@@ -83,6 +83,7 @@ const BARE_TAG_REDACTION_TAGS = [
   "action_categories",
   "untrusted_page_data", "accessibility_tree", "injection_warnings",
   "compacted_memory", "untrusted_injection_warning",
+  "system", "sys",
   "site_memory",
   "security_rules", "content_isolation", "instruction_detection",
   "manipulation_resistance", "sensitive_data_handling",
@@ -94,6 +95,29 @@ const BARE_TAG_REDACTION_TAGS = [
 
 /** Build a regex alternation of the bare-tag redaction tags (escaped). */
 const BARE_TAG_PATTERN = BARE_TAG_REDACTION_TAGS.join("|");
+
+/**
+ * Allow optional whitespace between the characters of a tag name so a name
+ * split by whitespace (e.g. `<site_\nmemory>`) still matches the redaction
+ * patterns and is fully stripped — without mutating legitimate HTML, which is
+ * left untouched (its tag names are never in the prompt-tag lists). The only
+ * escape sequence in the tag lists is `\d` (for `step_\d+`), preserved verbatim.
+ */
+function interleaveTagName(name: string): string {
+  let out = "";
+  for (let i = 0; i < name.length; i++) {
+    const ch = name[i];
+    if (ch === "\\") {
+      out += name[i] + (name[i + 1] ?? "");
+      i++;
+      continue;
+    }
+    out += ch + "\\s*";
+  }
+  return out;
+}
+const INTERLEAVED_PROMPT_TAGS = PROMPT_TAG_PATTERN.split("|").map(interleaveTagName).join("|");
+const INTERLEAVED_BARE_TAGS = BARE_TAG_PATTERN.split("|").map(interleaveTagName).join("|");
 
 /**
  * Source strings + flags for each injection pattern.
@@ -125,12 +149,12 @@ const INJECTION_PATTERN_SOURCES: readonly { source: string; flags: string }[] = 
  // them and we want the paired pattern to redact the entire block (tag +
  // content + close) rather than leaving the content stranded between two
  // bare-tag redactions.
-  { source: `<(${PROMPT_TAG_PATTERN})[^>]*>[\\s\\S]*?<\\/\\1[^>]*>`, flags: "gi" },
+  { source: `<(${INTERLEAVED_PROMPT_TAGS})[^>]*>[\\s\\S]*?<\\/\\1[^>]*>`, flags: "gi" },
  // Bare opening / closing tags (for cases where the attacker only emits one
  // half — e.g. `</untrusted_page_data>` to try to escape the wrapper, or
  // `<site_memory>` without a close to open a forged trusted block).
  // `[^>]*` matches attributes on opening tags (same rationale as above).
-  { source: `<\\/?(?:${BARE_TAG_PATTERN})[^>]*>`, flags: "gi" },
+  { source: `<\\/?(?:${INTERLEAVED_BARE_TAGS})[^>]*>`, flags: "gi" },
   { source: "ignore\\s+(all\\s+)?previous\\s+instructions", flags: "gi" },
  // Tightened: `you\s+are\s+now\s+(a|an)\s+` alone would match any text
  // starting with "you are now a " — including benign phrases like "you are
@@ -202,18 +226,25 @@ const INJECTION_PATTERNS: readonly RegExp[] = INJECTION_PATTERN_SOURCES.map(
 // to smuggle an injection keyword is handled separately in {@link normalize}.
 const INVISIBLE_CHARS_SOURCE = "\\p{Default_Ignorable_Code_Point}|\u200b|\u200c|\u200d|\ufeff";
 
+// Mid-word U+2028/U+2029 collapse: a smuggled injection keyword (e.g.
+// `ig\u2028nore`) is joined back into a single word, while legitimate
+// standalone separators (between words/lines) are preserved. Shared by
+// `normalize` and `scanForInjection` so the two never drift \u2014 `.replace()`
+// resets `lastIndex` on each call, so sharing the global regex is safe.
+const MIDWORD_SEPARATOR_RE = /(\w)[\u2028\u2029](\w)/gu;
+
 function normalize(text: string): string {
  // Strip the invisible / format / Default-Ignorable set (see
  // INVISIBLE_CHARS_SOURCE). U+2028/U+2029 are NOT stripped here \u2014 they are
  // legitimate content separators and must be preserved.
   const stripped = text
     .normalize("NFKC")
-    .replace(new RegExp(INVISIBLE_CHARS_SOURCE, "gu"), "");
+    .replace(INVISIBLE_CHARS_STRIP_RE, "");
  // A malicious page can smuggle an injection keyword through a MID-WORD
  // U+2028/U+2029 (e.g. `ig\u2028nore`). Collapse the separator only when it is
  // wedged between two word characters (so `ig\u2028nore` \u2192 `ignore`), while
  // leaving legitimate standalone separators (between words/lines) intact.
-  return stripped.replace(/(\w)[\u2028\u2029](\w)/gu, "$1$2");
+  return stripped.replace(MIDWORD_SEPARATOR_RE, "$1$2");
 }
 
 /**
@@ -338,6 +369,17 @@ const COMPILED_DETECTORS: readonly CompiledDetector[] = INJECTION_DETECTORS.map(
  */
 const ZERO_WIDTH_CHARS = new RegExp(INVISIBLE_CHARS_SOURCE, "u");
 
+/** Precompiled, shared strip regex for {@link normalize} (see INVISIBLE_CHARS_SOURCE).
+ * Safe to share across `normalize` calls: `.replace()` resets a global-flag regex's
+ * `lastIndex` to 0 on each call (per the file's own note on INJECTION_PATTERNS). */
+const INVISIBLE_CHARS_STRIP_RE = new RegExp(INVISIBLE_CHARS_SOURCE, "gu");
+
+/** Precompiled repetition-detection regexes for {@link scanForInjection}.
+ * Used read-only via `.match()` (which resets `lastIndex` to 0 for global regexes),
+ * so sharing them across calls is safe and avoids recompiling on every scan. */
+const PLEASE_RE = /\bplease\b/gi;
+const URGENT_RE = /\burgent(?:ly)?\b/gi;
+
 /**
  * Excessive-repetition threshold for social-engineering detection. Counts
  * occurrences of the word "please" or "urgent" (case-insensitive, word
@@ -393,8 +435,11 @@ export function scanForInjection(text: string): InjectionScanResult {
  // NFKC-normalize once so lookalike characters (e.g. full-width ｉｇｎｏｒｅ)
  // collapse to their ASCII equivalents before the regexes run. We do NOT
  // strip zero-width chars here (unlike sanitizeUntrusted) — we want to
- // detect their presence, not erase them.
-  const normalized = text.normalize("NFKC");
+ // detect their presence, not erase them. Mirror the mid-word U+2028/U+2029
+ // collapse that sanitizeUntrusted's normalize() applies, so a keyword
+ // smuggled through a line/paragraph separator (e.g. `ig\u2028nore`) is
+ // detected here just as it is redacted there.
+  const normalized = text.normalize("NFKC").replace(MIDWORD_SEPARATOR_RE, "$1$2");
 
   for (const det of COMPILED_DETECTORS) {
     det.regex.lastIndex = 0; // reset before each .test() — global flag is stateful
@@ -409,8 +454,8 @@ export function scanForInjection(text: string): InjectionScanResult {
  // Social-engineering repetition: count "please" and "urgent" word
  // occurrences. A page that pleads or urges excessively is leaning on
  // social pressure rather than legitimate instruction.
-  const pleases = (normalized.match(/\bplease\b/gi) ?? []).length;
-  const urgents = (normalized.match(/\burgent(?:ly)?\b/gi) ?? []).length;
+  const pleases = (normalized.match(PLEASE_RE) ?? []).length;
+  const urgents = (normalized.match(URGENT_RE) ?? []).length;
   if (pleases >= SOCIAL_ENGINEERING_REPETITION_THRESHOLD || urgents >= SOCIAL_ENGINEERING_REPETITION_THRESHOLD) {
     add("social-engineering-repetition");
   }
@@ -428,8 +473,16 @@ export function scanForInjection(text: string): InjectionScanResult {
  * (`[:1]`). Strip the brackets on both sides so callers can specify the
  * bare IPv6 address in the allow/block list (`":1"`).
  */
+/**
+ * Strip surrounding `[`/`]` (IPv6 brackets) and lowercase a host — for use in
+ * hostname comparison. Does NOT strip leading/trailing dots (those are handled
+ * separately below so FQDN `.example.com` / `example.com.` forms normalize).
+ */
+function normalizeHost(h: string): string {
+  return h.replace(/^\[|\]$/g, "").toLowerCase();
+}
+
 function hostnameMatches(hostname: string, domain: string): boolean {
-  const normalizeHost = (h: string) => h.replace(/^\[|\]$/g, "").toLowerCase();
   const h = normalizeHost(hostname);
   let d = normalizeHost(domain).trim();
  // Reject malformed allow/block-list entries so a typo or careless copy can't
@@ -454,6 +507,10 @@ function hostnameMatches(hostname: string, domain: string): boolean {
  // no dot and are explicitly allowed.
   const looksLikeIp = /^[0-9.]+$/.test(d) || d.includes(':');
   if (!d.includes('.') && !looksLikeIp) return false;
+ // IP literals have no real subdomains — only an exact host match is allowed,
+ // so an allowlist entry of `127.0.0.1` (or `::1`) does not also permit
+ // `evil.127.0.0.1` / `evil.::1`.
+  if (looksLikeIp) return h === d;
   return h === d || h.endsWith(`.${d}`);
 }
 

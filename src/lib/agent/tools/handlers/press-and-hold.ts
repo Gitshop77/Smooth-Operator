@@ -8,10 +8,9 @@ import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import { highlightElement } from "../../dom/overlay";
 import { moveCursorToElement } from "../../dom/phantom-cursor";
-import { TIMINGS, sleep } from "../constants";
-import { resolveElement, safeScrollIntoView } from "../helpers";
-import { domFingerprint } from "../helpers";
-import type { ActionContext } from "./types";
+import { TIMINGS, sleep, SW_RPC_TIMEOUT_MS } from "../constants";
+import { domFingerprint, resolveElement, safeScrollIntoView } from "../helpers";
+import { type ActionContext, isExtensionContext } from "./types";
 
 export async function handlePressAndHold(
   ctx: ActionContext,
@@ -29,10 +28,10 @@ export async function handlePressAndHold(
  // contexts where the user hasn't accepted the debugger infobar).
   const el = resolveElement(state, action.index);
   highlightElement(el, `press_and_hold [${action.index}]`);
-  await moveCursorToElement(el);
   safeScrollIntoView(el);
   await sleep(TIMINGS.clickScrollIntoView);
   const rect = el.getBoundingClientRect();
+  await moveCursorToElement(el);
   const cx = rect.x + rect.width / 2;
   const cy = rect.y + rect.height / 2;
 
@@ -45,17 +44,24 @@ export async function handlePressAndHold(
  // (in-page demo, tests, no extension context) we skip straight to the
  // native fallback (Strategy 2) — that is the only case where a synthetic
  // click is an acceptable stand-in.
-  const debuggerAvailable = typeof chrome !== "undefined" && !!chrome.runtime?.id;
+  const debuggerAvailable = isExtensionContext();
 
   if (debuggerAvailable) {
     try {
-      const cdpResult = await chrome.runtime.sendMessage({
-        type: "CDP_PRESS_AND_HOLD",
-        x: cx,
-        y: cy,
-        holdMs,
-        delayMs,
-      });
+ // Race against a timeout so a SW that receives the message but never
+ // responds (debugger attach race / hung SW) can't block the agent loop.
+      const cdpResult = await Promise.race([
+        chrome.runtime.sendMessage({
+          type: "CDP_PRESS_AND_HOLD",
+          x: cx,
+          y: cy,
+          holdMs,
+          delayMs,
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("CDP_PRESS_AND_HOLD timeout")), SW_RPC_TIMEOUT_MS),
+        ),
+      ]);
       if (cdpResult?.ok) {
         const changed = location.href !== ctx.beforeUrl || domFingerprint() !== ctx.beforeFingerprint;
         return {

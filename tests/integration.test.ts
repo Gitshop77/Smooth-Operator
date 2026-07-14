@@ -17,8 +17,6 @@ import {
 import type {
   HistoryItem,
   TabInfo,
-  AgentOutput,
-  PlannerOutput,
 } from "../src/lib/agent/types";
 import { makeHistoryItem } from "./helpers";
 
@@ -33,6 +31,14 @@ function makeTab(overrides: Partial<TabInfo> = {}): TabInfo {
     active: true,
     ...overrides,
   };
+}
+
+/** Assert a block's wrapper `<open>`/`<close>` tags are balanced and present. */
+function expectBalancedWrappers(block: string, open: string, close: string, minOpens: number): void {
+  const o = block.match(new RegExp(open, "g")) ?? [];
+  const c = block.match(new RegExp(close, "g")) ?? [];
+  expect(o.length).toBe(c.length);
+  expect(o.length).toBeGreaterThanOrEqual(minOpens);
 }
 
 // ─── parseAgentOutput ───────────────────────────────────────────────────────
@@ -58,7 +64,7 @@ Let me know if you need anything else.`;
     const result = parseAgentOutput(raw);
     expect(result.ok).toBe(true);
     if (!result.ok) return; // narrows
-    const out = result.output as AgentOutput;
+    const out = result.output;
     expect(out.thinking).toContain("click the login button");
     expect(out.next_goal).toContain("login button");
     expect(out.action).toHaveLength(3);
@@ -85,7 +91,7 @@ Let me know if you need anything else.`;
     const result = parseAgentOutput(raw);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const out = result.output as AgentOutput;
+    const out = result.output;
     expect(out.action).toHaveLength(1);
     expect(out.action[0]).toMatchObject({ type: "input", index: 3, text: "set x = {a:1}" });
   });
@@ -109,7 +115,7 @@ Let me know if you need anything else.`;
     const result = parseAgentOutput(raw);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const out = result.output as AgentOutput;
+    const out = result.output;
     expect(out.action[0]).toMatchObject({
       type: "find_elements",
       selector: "a.search-result",
@@ -138,7 +144,7 @@ Let me know if you need anything else.`;
     const result = parseAgentOutput(raw);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const out = result.output as AgentOutput;
+    const out = result.output;
     expect(out.thinking).toBe("first object");
     expect(out.action[0]).toEqual({ type: "click", index: 1 });
  // The second object's content must NOT leak into the parsed output.
@@ -188,7 +194,7 @@ describe("parsePlannerOutput with realistic samples", () => {
     const result = parsePlannerOutput(raw);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const out = result.output as PlannerOutput;
+    const out = result.output;
     expect(out.decision).toBe("continue");
     expect(out.plan).toEqual(["Open the site", "Log in", "Download the report", "Verify the file"]);
     expect(out.current_plan_item).toBe(1);
@@ -206,7 +212,7 @@ describe("parsePlannerOutput with realistic samples", () => {
     const result = parsePlannerOutput(raw);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const out = result.output as PlannerOutput;
+    const out = result.output;
     expect(out.decision).toBe("done");
     expect(out.success).toBe(true);
     expect(out.text).toContain("q3-report.pdf");
@@ -222,7 +228,7 @@ describe("parsePlannerOutput with realistic samples", () => {
     const result = parsePlannerOutput(raw);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const out = result.output as PlannerOutput;
+    const out = result.output;
     expect(out.decision).toBe("web_task");
     expect(out.text).toContain("Paris");
   });
@@ -237,7 +243,7 @@ Hope that helps!`;
     const result = parsePlannerOutput(raw);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const out = result.output as PlannerOutput;
+    const out = result.output;
     expect(out.decision).toBe("continue");
     expect(out.thinking).toBe("wrapped");
     expect(out.plan).toEqual(["a", "b"]);
@@ -366,10 +372,7 @@ describe("buildNavigatorUserMessage", () => {
  // on every formatting change. An un-redacted injected close tag would make
  // the count unbalanced (closes > opens), so balance is the real invariant.
     const bs = msg.slice(msg.indexOf("<browser_state>"), msg.indexOf("</browser_state>"));
-    const bsOpens = bs.match(/<untrusted_page_data>/g) ?? [];
-    const bsCloses = bs.match(/<\/untrusted_page_data>/g) ?? [];
-    expect(bsOpens.length).toBe(bsCloses.length);
-    expect(bsOpens.length).toBeGreaterThanOrEqual(5); // 5 page-derived fields
+    expectBalancedWrappers(bs, "<untrusted_page_data>", "</untrusted_page_data>", 5);
 
  // The injected <system>...</system> tag and injection phrases must be
  // redacted to [redacted] (sanitizeUntrusted runs BEFORE the wrapper is
@@ -405,16 +408,10 @@ describe("buildNavigatorUserMessage", () => {
  // the prompt. Balance is the real invariant (an escaped injected wrapper would
  // unbalance the counts); a minimum bound proves every field is wrapped.
     const bs = msg.slice(msg.indexOf("<browser_state>"), msg.indexOf("</browser_state>"));
-    const bsOpens = bs.match(/<untrusted_page_data>/g) ?? [];
-    const bsCloses = bs.match(/<\/untrusted_page_data>/g) ?? [];
-    expect(bsOpens.length).toBe(bsCloses.length);
-    expect(bsOpens.length).toBeGreaterThanOrEqual(5); // 5 page-derived fields
+    expectBalancedWrappers(bs, "<untrusted_page_data>", "</untrusted_page_data>", 5);
 
     const ax = msg.slice(msg.indexOf("<accessibility_tree>"), msg.indexOf("</accessibility_tree>"));
-    const axOpens = ax.match(/<untrusted_page_data>/g) ?? [];
-    const axCloses = ax.match(/<\/untrusted_page_data>/g) ?? [];
-    expect(axOpens.length).toBe(axCloses.length);
-    expect(axOpens.length).toBeGreaterThanOrEqual(1); // axTree is wrapped
+    expectBalancedWrappers(ax, "<untrusted_page_data>", "</untrusted_page_data>", 1);
 
  // The injected <system> tag is redacted everywhere.
     expect(msg).not.toContain("<system>");
@@ -459,6 +456,10 @@ describe("buildNavigatorUserMessage", () => {
     expect(msg).not.toContain("Goal 0");
  // History is wrapped in <agent_history>.
     expect(msg).toContain("<agent_history>");
+ // Pin the exact truncation boundary (15 in → last 12 rendered), not just one
+ // present + one absent item, so an off-by-one would be caught.
+    const histBlock = msg.slice(msg.indexOf("<agent_history>"), msg.indexOf("</agent_history>"));
+    expect((histBlock.match(/Goal /g) ?? []).length).toBe(12);
   });
 
   test("includes <available_skills> block (frontmatter-first) when URL matches a built-in skill", async () => {
@@ -561,14 +562,8 @@ describe("buildNavigatorUserMessage", () => {
     expect(msg).toContain("<available_skills>");
     expect(msg).toContain("<injection_warnings>");
  // The two blocks don't share wrapper tags — each opens/closes its own.
-    const avOpens = (msg.match(/<available_skills>/g) ?? []).length;
-    const avCloses = (msg.match(/<\/available_skills>/g) ?? []).length;
-    expect(avOpens).toBe(1);
-    expect(avCloses).toBe(1);
-    const injOpens = (msg.match(/<injection_warnings>/g) ?? []).length;
-    const injCloses = (msg.match(/<\/injection_warnings>/g) ?? []).length;
-    expect(injOpens).toBe(1);
-    expect(injCloses).toBe(1);
+    expectBalancedWrappers(msg, "<available_skills>", "</available_skills>", 1);
+    expectBalancedWrappers(msg, "<injection_warnings>", "</injection_warnings>", 1);
   });
 });
 
@@ -665,5 +660,8 @@ describe("buildPlannerUserMessage", () => {
  // marker should announce the 4 omitted steps so the LLM knows history was
  // condensed.
     expect(msg).toContain("<sys>[4 previous steps omitted]</sys>");
+ // Pin the exact planner-history truncation boundary (12 in → last 8 rendered).
+    const planHistBlock = msg.slice(msg.indexOf("<navigator_history>"), msg.indexOf("</navigator_history>"));
+    expect((planHistBlock.match(/PlannerGoal /g) ?? []).length).toBe(8);
   });
 });

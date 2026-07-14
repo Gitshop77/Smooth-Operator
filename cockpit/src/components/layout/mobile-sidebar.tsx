@@ -1,6 +1,7 @@
 "use client";
 
 import { Menu } from "lucide-react";
+import { useCallback } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -18,6 +19,8 @@ export function MobileSidebar() {
   const open = useCoworkStore((s) => s.sidebarOpen);
   const setOpen = useCoworkStore((s) => s.setSidebar);
 
+  const handleNavigate = useCallback(() => setOpen(false), [setOpen]);
+
   if (!isMobile) return null;
 
   return (
@@ -27,14 +30,15 @@ export function MobileSidebar() {
           variant="ghost"
           size="icon"
           aria-label="Open navigation menu"
-          className="md:hidden size-8 -ml-1.5 text-muted-foreground hover:text-foreground"
+          aria-expanded={open}
+          className="size-8 -ml-1.5 text-muted-foreground hover:text-foreground"
         >
           <Menu className="size-4" />
         </Button>
       </SheetTrigger>
       <SheetContent side="left" className="w-60 p-0 border-border">
         <SheetTitle className="sr-only">Open Cowork Navigation</SheetTitle>
-        <Sidebar onNavigate={() => setOpen(false)} className="border-r-0" forceExpanded />
+        <Sidebar onNavigate={handleNavigate} className="border-r-0" forceExpanded />
       </SheetContent>
     </Sheet>
   );

@@ -97,6 +97,9 @@ function implicitRole(el: HTMLElement): string | null {
  */
 export function buildAttrs(el: HTMLElement): Record<string, string> {
   const attrs: Record<string, string> = {};
+ // Sensitive-field scan is (relatively) expensive and consulted several times
+ // below per element — hoist it once for the whole attribute loop.
+  const sensitive = isSensitive(el);
   for (const name of DOM_CONFIG.includeAttrs) {
  // Sensitive fields: never surface `autocomplete` / `placeholder`. These
  // reveal what *secret* the field holds (e.g. `autocomplete="cc-number"`),
@@ -106,7 +109,7 @@ export function buildAttrs(el: HTMLElement): Record<string, string> {
  // consistently. We deliberately DO still surface `type` (e.g.
  // `type="password"`) because it is non-secret semantic metadata the
  // navigator LLM needs to classify the field — only the *value* is secret.
-    if (isSensitive(el) && (name === "autocomplete" || name === "placeholder")) {
+    if (sensitive && (name === "autocomplete" || name === "placeholder")) {
       continue;
     }
     let val: string | null = null;
@@ -116,7 +119,7 @@ export function buildAttrs(el: HTMLElement): Record<string, string> {
  // with the AX-tree extractor) redacts password, hidden (CSRF/session
  // tokens), and sensitive-autocomplete fields (credit-card, OTP).
  // Reading a non-sensitive `<select>`'s value is safe (chosen option).
-        if (!isSensitive(el)) val = el.value;
+        if (!sensitive) val = el.value;
       } else {
         const a = el.getAttribute("value");
         if (a !== null) val = a;
@@ -134,7 +137,7 @@ export function buildAttrs(el: HTMLElement): Record<string, string> {
     }
   }
 
-  if (el instanceof HTMLSelectElement && !isSensitive(el)) {
+  if (el instanceof HTMLSelectElement && !sensitive) {
     const opts = Array.from(el.options)
       .slice(0, DOM_CONFIG.selectOptionLimit)
       .map((o) => o.textContent?.trim() || o.value);
@@ -185,13 +188,13 @@ function fnv1aHash(s: string): string {
  * fresh each call (it changes when the element moves, so caching it would
  * produce stale hashes).
  */
-function elementIdentity(el: HTMLElement): string {
+function elementIdentity(el: HTMLElement, attrs?: Record<string, string>): string {
  // Compute the stable portion (tag + key attrs) fresh every call. Not cached,
  // so in-place edits to a tracked key attribute are reflected (see note above).
   const tag = el.tagName.toLowerCase();
-  const attrs = buildAttrs(el);
+  const a = attrs ?? buildAttrs(el);
   const keyAttrs = DOM_CONFIG.identityKeyAttrs
-    .map((k) => attrs[k] ? `${k}=${attrs[k]}` : "")
+    .map((k) => a[k] ? `${k}=${a[k]}` : "")
     .filter(Boolean)
     .join("|");
   const stablePart = `${tag}|${keyAttrs}`;
@@ -235,6 +238,6 @@ function collisionFreeId(el: HTMLElement): string {
  * Compute a stable hash for an element. Two elements with the same hash are
  * considered "the same element" for `isNew` purposes.
  */
-export function hashElement(el: HTMLElement): string {
-  return fnv1aHash(elementIdentity(el));
+export function hashElement(el: HTMLElement, attrs?: Record<string, string>): string {
+  return fnv1aHash(elementIdentity(el, attrs));
 }

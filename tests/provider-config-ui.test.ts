@@ -27,9 +27,9 @@ describe("redactKeyLeak", () => {
   });
 
   test("masks a sk- key", () => {
-    const redacted = redactKeyLeak("401: Invalid API key: sk-proj-abc123");
-    expect(redacted).toContain("sk-[REDACTED]");
-    expect(redacted).not.toContain("sk-proj-abc123");
+    expect(redactKeyLeak("401: Invalid API key: sk-proj-abc123")).toBe(
+      "401: Invalid API key: sk-[REDACTED]",
+    );
   });
 
   test("masks a sk-ant- key", () => {
@@ -75,5 +75,17 @@ describe("redactKeyLeak", () => {
     const redacted = redactKeyLeak("curl failed: sk-live-abcdefghijklmnopqr");
     expect(redacted).toContain("sk-[REDACTED]");
     expect(redacted).not.toContain("abcdefghijklmnopqr");
+  });
+
+  test("is idempotent (re-masking an already-redacted string is a no-op)", () => {
+    const once = redactKeyLeak("401: Invalid API key: sk-proj-abc123");
+    expect(redactKeyLeak(once)).toBe(once);
+  });
+
+  test("masks two different secrets in one string", () => {
+    const redacted = redactKeyLeak("401: sk-proj-abc123 and gsk_xyz789");
+    expect(redacted).toBe("401: sk-[REDACTED] and gsk_[REDACTED]");
+    expect(redacted).not.toContain("abc123");
+    expect(redacted).not.toContain("xyz789");
   });
 });

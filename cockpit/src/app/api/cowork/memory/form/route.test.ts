@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { Prisma } from '@prisma/client';
 
 const { findMany, del } = vi.hoisted(() => ({ findMany: vi.fn(), del: vi.fn() }));
 
@@ -48,6 +49,53 @@ describe('GET /api/cowork/memory/form', () => {
     expect(parsed.entries[2].name).toBe('username');
     expect(parsed.entries[2].value).toBe('bob'); // non-sensitive kept
   });
+
+  it('rejects an invalid after cursor with 400', async () => {
+    const res = await GET(fakeReq('after=!!!bad'));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe('invalid after cursor');
+  });
+
+  it('redacts a sibling sensitive key on the entry shape', async () => {
+    findMany.mockResolvedValueOnce([
+      { id: '1', domain: 'example.com', formDataJson: JSON.stringify({ name: 'form1', password: 'hunter2' }) },
+    ]);
+    const res = await GET(fakeReq());
+    const parsed = JSON.parse((await res.json()).memories[0].formDataJson);
+    expect(parsed.name).toBe('form1');
+    expect(parsed.password).toBe('[redacted]');
+  });
+
+  it('redacts a flat record by field name', async () => {
+    findMany.mockResolvedValueOnce([
+      { id: '1', domain: 'example.com', formDataJson: JSON.stringify({ password: 'x', username: 'bob' }) },
+    ]);
+    const res = await GET(fakeReq());
+    const parsed = JSON.parse((await res.json()).memories[0].formDataJson);
+    expect(parsed.password).toBe('[redacted]');
+    expect(parsed.username).toBe('bob');
+  });
+
+  it('redacts a bare array of entries', async () => {
+    findMany.mockResolvedValueOnce([
+      { id: '1', domain: 'example.com', formDataJson: JSON.stringify([{ name: 'email', value: 'a@b.com' }]) },
+    ]);
+    const res = await GET(fakeReq());
+    const parsed = JSON.parse((await res.json()).memories[0].formDataJson);
+    expect(parsed[0].name).toBe('email');
+    expect(parsed[0].value).toBe('[redacted]');
+  });
+
+  it('returns 400 for a stale after cursor (P2025)', async () => {
+    const err = new Prisma.PrismaClientKnownRequestError('Record does not exist', {
+      code: 'P2025',
+      clientVersion: 'unknown',
+    });
+    findMany.mockRejectedValueOnce(err);
+    const res = await GET(fakeReq('after=abc'));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe('invalid after cursor');
+  });
 });
 
 describe('DELETE /api/cowork/memory/form', () => {
@@ -68,7 +116,10 @@ describe('DELETE /api/cowork/memory/form', () => {
   });
 
   it('returns 404 when the entry does not exist', async () => {
-    const err = new Error('Record to delete does not exist. (Prisma error P2025)');
+    const err = Object.assign(new Error('Record to delete does not exist.'), {
+      code: 'P2025',
+      name: 'PrismaClientKnownRequestError',
+    });
     del.mockRejectedValueOnce(err);
     const res = await DELETE(fakeReq('id=missing'));
     expect(res.status).toBe(404);

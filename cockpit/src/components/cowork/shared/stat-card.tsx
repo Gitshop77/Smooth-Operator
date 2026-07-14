@@ -7,24 +7,15 @@ import { Card } from "@/components/ui/card";
 
 type StatTone = "default" | "success" | "danger" | "info" | "warn" | "accent";
 
-// Severity-colored left accent border. All values are Signal Indigo tokens
-// (via the `--color-*` mapping in globals.css) — no hardcoded hex.
-const TONE_BORDER: Record<StatTone, string> = {
-  default: "border-l-border",
-  success: "border-l-success",
-  danger: "border-l-danger",
-  info: "border-l-info",
-  warn: "border-l-warn",
-  accent: "border-l-primary",
-};
-
-const TONE_VALUE: Record<StatTone, string> = {
-  default: "text-foreground",
-  success: "text-success",
-  danger: "text-danger",
-  info: "text-info",
-  warn: "text-warn",
-  accent: "text-primary",
+// Severity-colored left accent border + value color. All values are Signal
+// Indigo tokens (via the `--color-*` mapping in globals.css) — no hardcoded hex.
+const TONE: Record<StatTone, { border: string; value: string }> = {
+  default: { border: "border-l-border", value: "text-foreground" },
+  success: { border: "border-l-success", value: "text-success" },
+  danger: { border: "border-l-danger", value: "text-danger" },
+  info: { border: "border-l-info", value: "text-info" },
+  warn: { border: "border-l-warn", value: "text-warn" },
+  accent: { border: "border-l-primary", value: "text-primary" },
 };
 
 interface StatCardProps {
@@ -53,17 +44,18 @@ export function StatCard({
 }: StatCardProps) {
   return (
     <Card
+      title={typeof label === "string" ? label : undefined}
       className={cn(
         "p-3 gap-0.5 border-l-[3px]",
-        TONE_BORDER[tone],
+        TONE[tone].border,
         className,
       )}
     >
-      <div className="flex items-center justify-between gap-2">
-        <p className="cowork-eyebrow">{label}</p>
+      <div className="flex items-center justify-between gap-2 min-w-0">
+        <p className="cowork-eyebrow truncate">{label}</p>
         {icon ? <span className="text-muted-foreground">{icon}</span> : null}
       </div>
-      <p className={cn("text-xl font-semibold tnum", TONE_VALUE[tone])}>{value}</p>
+      <p className={cn("text-xl font-semibold tnum", TONE[tone].value)}>{value}</p>
       {delta ? (
         <p className="text-xs text-muted-foreground tnum">{delta}</p>
       ) : null}

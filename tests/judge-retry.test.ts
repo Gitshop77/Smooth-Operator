@@ -211,7 +211,9 @@ describe("withLLMRetry", () => {
     const fn = vi.fn().mockRejectedValue(new Error("HTTP 429: Too many requests"));
     const promise = withLLMRetry(fn);
  // Advance through all backoff delays: 1.5s, 3s, 6s = 10.5s total.
- // Catch the rejection to prevent unhandled rejection errors.
+ // Catch the rejection to prevent an unhandled-rejection error while the
+ // timers are advancing (the awaited `expect(...).rejects` handler below
+ // attaches only after this resolves).
     promise.catch(() => {});
     await vi.advanceTimersByTimeAsync(12000);
     await expect(promise).rejects.toThrow("429");
@@ -275,6 +277,32 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
     };
   }
 
+  /** Build the deps + dispatcher + capturedCosts + state + ctx for a judge run. */
+  function buildJudgeHarness(plannerCall: ReturnType<typeof vi.fn>): {
+    deps: LoopDeps;
+    dispatcher: CallbackDispatcher;
+    capturedCosts: LLMUsageInfo[];
+    state: LoopState;
+    ctx: CallbackContext;
+  } {
+    const deps: LoopDeps = {
+      task: "test",
+      navigatorCall: vi.fn(async () => ({ raw: "" })),
+      plannerCall: plannerCall as unknown as LoopDeps["plannerCall"],
+      getTabs: vi.fn(async () => []),
+      onEvent: () => {},
+    };
+    const capturedCosts: LLMUsageInfo[] = [];
+    const handler: AsyncCallbackHandler = {
+      onCost: async (_ctx, usage) => { capturedCosts.push(usage); },
+    };
+    const dispatcher = new CallbackDispatcher();
+    dispatcher.register(handler);
+    const state = makeLoopState(deps, dispatcher);
+    const ctx: CallbackContext = { task: "test", step: 0, history: [] };
+    return { deps, dispatcher, capturedCosts, state, ctx };
+  }
+
   test("cachedInputTokens flows from plannerCall → dispatcher.cost usage", async () => {
  // Mock plannerCall to return a verdict-true judge response WITH
  // cachedInputTokens: 200. The judge wrapper captures this value into
@@ -294,23 +322,7 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
       cachedInputTokens: 200,
       model: "claude-3-5-sonnet-20241022",
     }));
-    const deps: LoopDeps = {
-      task: "test",
-      navigatorCall: vi.fn(async () => ({ raw: "" })),
-      plannerCall,
-      getTabs: vi.fn(async () => []),
-      onEvent: () => {},
-    };
-
-    const capturedCosts: LLMUsageInfo[] = [];
-    const handler: AsyncCallbackHandler = {
-      onCost: async (_ctx, usage) => { capturedCosts.push(usage); },
-    };
-    const dispatcher = new CallbackDispatcher();
-    dispatcher.register(handler);
-
-    const state = makeLoopState(deps, dispatcher);
-    const ctx: CallbackContext = { task: "test", step: 0, history: [] };
+    const { deps, dispatcher, capturedCosts, state, ctx } = buildJudgeHarness(plannerCall);
     const userOnCostCalls: Array<{ usd: number; tokensIn: number; tokensOut: number }> = [];
     const userOnCost = (usd: number, tokensIn?: number, tokensOut?: number) => {
       userOnCostCalls.push({ usd, tokensIn: tokensIn ?? 0, tokensOut: tokensOut ?? 0 });
@@ -393,23 +405,7 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
       cachedInputTokens: 200,
       model: "claude-3-5-sonnet-20241022",
     }));
-    const deps: LoopDeps = {
-      task: "test",
-      navigatorCall: vi.fn(async () => ({ raw: "" })),
-      plannerCall,
-      getTabs: vi.fn(async () => []),
-      onEvent: () => {},
-    };
-
-    const capturedCosts: LLMUsageInfo[] = [];
-    const handler: AsyncCallbackHandler = {
-      onCost: async (_ctx, usage) => { capturedCosts.push(usage); },
-    };
-    const dispatcher = new CallbackDispatcher();
-    dispatcher.register(handler);
-
-    const state = makeLoopState(deps, dispatcher);
-    const ctx: CallbackContext = { task: "test", step: 0, history: [] };
+    const { deps, dispatcher, capturedCosts, state, ctx } = buildJudgeHarness(plannerCall);
     const userOnCostCalls: number[] = [];
     const userOnCost = (usd: number) => { userOnCostCalls.push(usd); };
 
@@ -452,6 +448,7 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
     } finally {
       if (ORIG_URL === undefined) delete process.env.COWORK_MODEL_CATALOG_URL;
       else process.env.COWORK_MODEL_CATALOG_URL = ORIG_URL;
+      vi.unstubAllGlobals();
       vi.restoreAllMocks();
     }
   });
@@ -471,23 +468,7 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
       model: "claude-3-5-sonnet-20241022",
  // No cachedInputTokens field.
     }));
-    const deps: LoopDeps = {
-      task: "test",
-      navigatorCall: vi.fn(async () => ({ raw: "" })),
-      plannerCall,
-      getTabs: vi.fn(async () => []),
-      onEvent: () => {},
-    };
-
-    const capturedCosts: LLMUsageInfo[] = [];
-    const handler: AsyncCallbackHandler = {
-      onCost: async (_ctx, usage) => { capturedCosts.push(usage); },
-    };
-    const dispatcher = new CallbackDispatcher();
-    dispatcher.register(handler);
-
-    const state = makeLoopState(deps, dispatcher);
-    const ctx: CallbackContext = { task: "test", step: 0, history: [] };
+    const { deps, dispatcher, capturedCosts, state, ctx } = buildJudgeHarness(plannerCall);
 
     await maybeJudgeAndFinalize(
       deps,

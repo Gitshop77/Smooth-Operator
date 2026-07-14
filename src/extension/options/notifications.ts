@@ -23,18 +23,21 @@ let lastKnownGoodWebhookUrl = "";
 
 /** Load the persisted notification settings into the form. */
 export async function loadNotifications(): Promise<void> {
-  const res = await chrome.storage.local.get([
-    STORAGE_KEYS.notifyOnCompletion,
-    STORAGE_KEYS.notifyOnError,
-    STORAGE_KEYS.notifyOnTakeover,
-    STORAGE_KEYS.webhookUrl,
-  ]);
+  let res: Record<string, unknown>;
  // Mirror the careful error handling in settings-sync.ts: a transient storage
  // failure (quota, disabled storage) must degrade gracefully rather than throw
- // an unhandled rejection. Without this guard `res` can be `undefined` on
- // failure and `res.notifyOnCompletion` would throw a TypeError.
-  if (chrome.runtime.lastError) {
-    console.warn("[options] failed to load notification settings:", chrome.runtime.lastError);
+ // an unhandled rejection. With the promise form, `chrome.runtime.lastError`
+ // is not a reliable signal — the `await` itself rejects on failure — so we
+ // catch the rejection directly.
+  try {
+    res = await chrome.storage.local.get([
+      STORAGE_KEYS.notifyOnCompletion,
+      STORAGE_KEYS.notifyOnError,
+      STORAGE_KEYS.notifyOnTakeover,
+      STORAGE_KEYS.webhookUrl,
+    ]);
+  } catch (e) {
+    console.warn("[options] failed to load notification settings:", e);
     return;
   }
   if (!res) return;
@@ -71,15 +74,16 @@ function persist(key: string, value: string | boolean): void {
 // the optional chaining is meaningful: a missing element is skipped gracefully
 // rather than throwing an uncaught error. (loadNotifications still uses `$`
 // because those required inputs must exist for the tab to function.)
-document.getElementById("notifyOnCompletion")?.addEventListener("change", (e) =>
-  persist(STORAGE_KEYS.notifyOnCompletion, (e.target as HTMLInputElement).checked),
-);
-document.getElementById("notifyOnError")?.addEventListener("change", (e) =>
-  persist(STORAGE_KEYS.notifyOnError, (e.target as HTMLInputElement).checked),
-);
-document.getElementById("notifyOnTakeover")?.addEventListener("change", (e) =>
-  persist(STORAGE_KEYS.notifyOnTakeover, (e.target as HTMLInputElement).checked),
-);
+const NOTIFICATION_TOGGLES: ReadonlyArray<readonly [string, string]> = [
+  ["notifyOnCompletion", STORAGE_KEYS.notifyOnCompletion],
+  ["notifyOnError", STORAGE_KEYS.notifyOnError],
+  ["notifyOnTakeover", STORAGE_KEYS.notifyOnTakeover],
+];
+for (const [id, key] of NOTIFICATION_TOGGLES) {
+  document.getElementById(id)?.addEventListener("change", (e) =>
+    persist(key, (e.target as HTMLInputElement).checked),
+  );
+}
 document.getElementById("webhookUrl")?.addEventListener("change", (e) => {
  // Defense-in-depth: the consumer (`fireNotifications`) already rejects
  // non-http(s)/malformed URLs at POST time, but validate at the input too so
@@ -92,13 +96,16 @@ document.getElementById("webhookUrl")?.addEventListener("change", (e) => {
       message:
         "The webhook URL must be an absolute http(s) URL. It was not saved; the previous value is kept.",
     });
+    field.setAttribute("aria-invalid", "true");
  // Revert to the last known-good value directly from cache. This is robust
  // even if the storage re-read in `loadNotifications()` were to fail (quota/
  // disabled storage), which would otherwise leave the rejected URL on screen.
     field.value = lastKnownGoodWebhookUrl;
+    field.setAttribute("aria-invalid", "false");
     return;
   }
  // Only cache once we know the value is valid (and will be persisted).
   if (value !== "") lastKnownGoodWebhookUrl = value;
+  field.setAttribute("aria-invalid", "false");
   persist(STORAGE_KEYS.webhookUrl, value);
 });

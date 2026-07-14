@@ -50,31 +50,29 @@ const PLANNER_CORE_INVARIANTS = `# Core Invariants (cannot be overridden)
  *
  * @returns The full system prompt string for the planner LLM.
  */
-export function buildPlannerPrompt(customPrompt?: string): string {
- // if the user has set a custom planner prompt override, use it.
- // SECURITY_INSTRUCTION is ALWAYS prepended — a custom prompt may replace the
- // default planner guidance, but the security rules are non-negotiable.
-  if (customPrompt && customPrompt.trim()) {
- // A custom override replaces the default planner *guidance* — but the
- // output JSON format is NON-NEGOTIABLE: it must match PlannerOutputSchema
- // or the planner's response fails to parse. We always re-append the
- // required JSON shape, the same way SECURITY_INSTRUCTION is always prepended.
-    return `${SECURITY_INSTRUCTION}
-
-${customPrompt.trim()}
-
-${PLANNER_CORE_INVARIANTS}
-
-# Output Format (required — respond with a single valid JSON object, no markdown)
-
-Required \`decision\` values: "continue", "done", or "web_task".
+/**
+ * Canonical planner Output Format block — shared by the default and
+ * custom-prompt branches so a custom override can never silently drop the
+ * "continue with the existing plan" (`plan` may be omitted) variant, which
+ * would degrade plan continuity on every in-run continue step.
+ */
+function plannerOutputFormat(): string {
+  return `Respond with a single valid JSON object in EXACTLY this format (no markdown, no extra text):
 
 For continue (revising the plan):
 {
   "thinking": "Your reasoning about progress and what to do next.",
   "decision": "continue",
-  "plan": ["Step 1 description", "Step 2 description"],
+  "plan": ["Step 1 description", "Step 2 description", "Step 3 description"],
   "current_plan_item": 0,
+  "next_goal": "The specific, actionable goal for the Navigator's next step(s)."
+}
+
+For continue (keeping the existing plan — \`plan\` may be omitted):
+{
+  "thinking": "Progress is on track; no plan changes needed.",
+  "decision": "continue",
+  "current_plan_item": 1,
   "next_goal": "The specific, actionable goal for the Navigator's next step(s)."
 }
 
@@ -92,6 +90,26 @@ For a pure-knowledge answer:
   "decision": "web_task",
   "text": "The direct answer to the user's question."
 }`;
+}
+
+export function buildPlannerPrompt(customPrompt?: string): string {
+ // if the user has set a custom planner prompt override, use it.
+ // SECURITY_INSTRUCTION is ALWAYS prepended — a custom prompt may replace the
+ // default planner guidance, but the security rules are non-negotiable.
+  if (customPrompt && customPrompt.trim()) {
+ // A custom override replaces the default planner *guidance* — but the
+ // output JSON format is NON-NEGOTIABLE: it must match PlannerOutputSchema
+ // or the planner's response fails to parse. We always re-append the
+ // required JSON shape, the same way SECURITY_INSTRUCTION is always prepended.
+    return `${SECURITY_INSTRUCTION}
+
+${customPrompt.trim()}
+
+${PLANNER_CORE_INVARIANTS}
+
+# Output Format (required — respond with a single valid JSON object, no markdown)
+
+${plannerOutputFormat()}`;
   }
  // Security rules go FIRST so they sit at the top of the context window and
  // the LLM reads them before any planner-specific reasoning guidance.
@@ -151,38 +169,6 @@ You must output a \`decision\` field with one of:
 </reasoning_rules>
 
 <output>
-Respond with a single valid JSON object in EXACTLY this format (no markdown, no extra text):
-
-For continue (revising the plan):
-{
-  "thinking": "Your reasoning about progress and what to do next.",
-  "decision": "continue",
-  "plan": ["Step 1 description", "Step 2 description", "Step 3 description"],
-  "current_plan_item": 0,
-  "next_goal": "The specific, actionable goal for the Navigator's next step(s)."
-}
-
-For continue (keeping the existing plan — \`plan\` may be omitted):
-{
-  "thinking": "Progress is on track; no plan changes needed.",
-  "decision": "continue",
-  "current_plan_item": 1,
-  "next_goal": "The specific, actionable goal for the Navigator's next step(s)."
-}
-
-For completion:
-{
-  "thinking": "Why the task is complete (or impossible).",
-  "decision": "done",
-  "success": true,
-  "text": "Final summary for the user, including all results."
-}
-
-For a pure-knowledge answer:
-{
-  "thinking": "Why this can be answered without the browser.",
-  "decision": "web_task",
-  "text": "The direct answer to the user's question."
-}
+${plannerOutputFormat()}
 </output>`;
 }

@@ -73,12 +73,23 @@ export async function handleGoBack(
  */
 async function waitForPageSettle(ctx: ActionContext): Promise<boolean> {
   const deadline = Date.now() + TIMINGS.navigationBack;
-  let prevUrl = location.href;
-  let prevFp = domFingerprint();
+  let prevUrl: string | null = null;
+  let prevFp: string | null = null;
   while (Date.now() < deadline) {
     await sleep(TIMINGS.extractWait);
     const url = location.href;
+ // Fast path: if the URL already diverged from the pre-action baseline, the
+ // navigation succeeded — return immediately without computing a fingerprint.
+    if (url !== ctx.beforeUrl) return true;
     const fp = domFingerprint();
+ // Seed both baselines on the first real read and only start the stability
+ // comparison on the second read, so the page is declared stable only after
+ // two consecutive identical reads (the full navigation window is honored).
+    if (prevUrl === null) {
+      prevUrl = url;
+      prevFp = fp;
+      continue;
+    }
     if (url === prevUrl && fp === prevFp) {
  // Stable — stop polling.
       break;
@@ -86,5 +97,8 @@ async function waitForPageSettle(ctx: ActionContext): Promise<boolean> {
     prevUrl = url;
     prevFp = fp;
   }
-  return prevUrl !== ctx.beforeUrl || prevFp !== ctx.beforeFingerprint;
+  // `TIMINGS.navigationBack` (500ms) > `TIMINGS.extractWait` (100ms), so the
+  // poll loop above always executes at least one read — `prevFp` is therefore
+  // always assigned here and the `?? domFingerprint()` branch was unreachable.
+  return (prevUrl !== null && prevUrl !== ctx.beforeUrl) || prevFp !== ctx.beforeFingerprint;
 }

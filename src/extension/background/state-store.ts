@@ -44,14 +44,17 @@ export const RUN_STATE_KEY = "open_cowork_run_state";
 /** Serializes `saveRunState` writes so their read-modify-write steps don't interleave. */
 let writeChain: Promise<unknown> = Promise.resolve();
 
+/** Serialize a storage mutation through the shared `writeChain` so its
+ * read-modify-write steps never interleave with another write. */
+function enqueueWrite<T>(task: () => Promise<T>): Promise<T> {
+  const run = writeChain.then(task);
+  // Keep the chain alive even if a write rejects, so later writes aren't blocked.
+  writeChain = run.catch(() => {});
+  return run;
+}
+
 export async function saveRunState(state: Partial<RunState>): Promise<void> {
- // Serialize all writes through a single promise chain so the read-modify-write
- // is atomic per call (finding: saveRunState read-modify-write race can clobber
- // currentTabId). Without this, a `saveRunState({ step })` racing a
- // `saveRunState(runState)` (full object incl. currentTabId) can overwrite the
- // other's field, e.g. reverting `currentTabId` to a stale tab. Serializing
- // guarantees each write observes the result of the prior one.
-  const run = writeChain.then(async () => {
+  return enqueueWrite(async () => {
     const cur = (await getRunState()) ?? ({} as RunState);
     const next: RunState = { ...cur, ...state };
  // Write-safe abort merge: never trust only an equality check on this read.
@@ -60,9 +63,6 @@ export async function saveRunState(state: Partial<RunState>): Promise<void> {
     next.abortRequested = Boolean(cur.abortRequested) || Boolean(state.abortRequested);
     await chrome.storage.session.set({ [RUN_STATE_KEY]: next });
   });
- // Keep the chain alive even if a write rejects, so later writes aren't blocked.
-  writeChain = run.catch(() => {});
-  return run;
 }
 
 /** Read the persisted run state, or null if no active run. */
@@ -73,17 +73,9 @@ export async function getRunState(): Promise<RunState | null> {
 
 /** Remove the persisted run state (called at the end of every run). */
 export async function clearRunState(): Promise<void> {
- // Serialize teardown through the SAME write chain as `saveRunState` so a late
- // `saveRunState` write can't interleave and re-persist a (partial) run state
- // after teardown (finding: saveRunState writes not serialized against
- // clearRunState). A `saveRunState` enqueued before this will run first; a
- // `saveRunState` after teardown won't occur within the same run.
-  const run = writeChain.then(async () => {
+  return enqueueWrite(async () => {
     await chrome.storage.session.remove(RUN_STATE_KEY);
   });
- // Keep the chain alive even if removal rejects, so later writes aren't blocked.
-  writeChain = run.catch(() => {});
-  return run;
 }
 
 // ─── Keepalive alarm (MV3 SW lifecycle workaround) ──────────────────────────
@@ -109,6 +101,16 @@ export async function stopKeepalive(): Promise<void> {
  * `getDomainConfig()` can read it synchronously during action execution.
  * Returns the loaded config so the caller can also use it directly.
  */
+// Centralized typed bridge to the `globalThis.__openCoworkDomainConfig` value.
+// Reading a global property can never throw, so the single unsafe cast lives
+// only here (not repeated at every read/write site).
+function setDomainConfigGlobal(c: UrlPolicyConfig): void {
+  (globalThis as { __openCoworkDomainConfig?: UrlPolicyConfig }).__openCoworkDomainConfig = c;
+}
+function getDomainConfigGlobal(): UrlPolicyConfig | undefined {
+  return (globalThis as { __openCoworkDomainConfig?: UrlPolicyConfig }).__openCoworkDomainConfig;
+}
+
 export async function loadAndSetDomainConfig(): Promise<UrlPolicyConfig> {
   try {
     const res = await chrome.storage.local.get(["allowedDomains", "blockedDomains"]);
@@ -118,7 +120,7 @@ export async function loadAndSetDomainConfig(): Promise<UrlPolicyConfig> {
       allowedDomains: allowedDomains.length > 0 ? allowedDomains : undefined,
       blockedDomains: blockedDomains.length > 0 ? blockedDomains : undefined,
     };
-    (globalThis as { __openCoworkDomainConfig?: UrlPolicyConfig }).__openCoworkDomainConfig = config;
+    setDomainConfigGlobal(config);
     return config;
   } catch (e) {
  // On storage failure, clear the cached config to an empty policy (no
@@ -129,7 +131,7 @@ export async function loadAndSetDomainConfig(): Promise<UrlPolicyConfig> {
  // the caller (startRun) can decide how to handle the failure — it currently
  // aborts the run rather than proceeding with an empty policy, so this does
  // NOT silently degrade to "allow all".
-    (globalThis as { __openCoworkDomainConfig?: UrlPolicyConfig }).__openCoworkDomainConfig = {};
+    setDomainConfigGlobal({});
     console.error("[Open Cowork] Failed to load domain config — cached policy cleared to empty:", e);
     throw e;
   }
@@ -137,11 +139,7 @@ export async function loadAndSetDomainConfig(): Promise<UrlPolicyConfig> {
 
 /** Synchronous read of the domain config (set by {@link loadAndSetDomainConfig}). */
 export function getDomainConfig(): UrlPolicyConfig {
-  try {
-    return (globalThis as { __openCoworkDomainConfig?: UrlPolicyConfig }).__openCoworkDomainConfig ?? {};
-  } catch {
-    return {};
-  }
+  return getDomainConfigGlobal() ?? {};
 }
 
 // ─── System keep-awake (chrome.power) ────────────────────────────────────────

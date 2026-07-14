@@ -164,22 +164,6 @@ export function isDomainPolicyEnforced(): boolean {
 }
 
 /**
- * Get domain config (allowlist/blocklist) from the extension global or local
- * storage. In the in-page demo no domain restrictions are applied by default.
- *
- * The extension sets `globalThis.__openCoworkDomainConfig` synchronously
- * before running actions (because `chrome.storage.local` is async and we
- * can't `await` inside the synchronous executor dispatch).
- *
- * The returned value is validated for shape: a malformed payload yields the
- * stable {@link EMPTY_CONFIG} (allow-all) instead of being passed through
- * unvalidated. When the stored payload is valid we return the CANONICAL stored
- * config object (the live global) so repeated reads keep a STABLE reference —
- * required for `toBe` equivalence and avoids surprising aliasing bugs in
- * callers that cache the result. The returned object is frozen in place so
- * callers cannot mutate the shared/authoritative policy.
- */
-/**
  * Freeze a validated config in place (and its domain arrays) so callers cannot
  * mutate the shared/authoritative policy object. Guards against accidental
  * corruption of enforcement state (e.g. `cfg.allowedDomains.push(...)` on the
@@ -196,6 +180,22 @@ function freezeConfigInPlace(cfg: DomainConfig): DomainConfig {
   return cfg;
 }
 
+/**
+ * Get domain config (allowlist/blocklist) from the extension global or local
+ * storage. In the in-page demo no domain restrictions are applied by default.
+ *
+ * The extension sets `globalThis.__openCoworkDomainConfig` synchronously
+ * before running actions (because `chrome.storage.local` is async and we
+ * can't `await` inside the synchronous executor dispatch).
+ *
+ * The returned value is validated for shape: a malformed payload yields the
+ * stable {@link EMPTY_CONFIG} (allow-all) instead of being passed through
+ * unvalidated. When the stored payload is valid we return the CANONICAL stored
+ * config object (the live global) so repeated reads keep a STABLE reference —
+ * required for `toBe` equivalence and avoids surprising aliasing bugs in
+ * callers that cache the result. The returned object is frozen in place so
+ * callers cannot mutate the shared/authoritative policy.
+ */
 export function getDomainConfig(): DomainConfig {
   const raw = readGlobal<unknown>(DOMAIN_CONFIG_KEY);
   if (raw === undefined) return EMPTY_CONFIG;
@@ -280,5 +280,12 @@ export function checkUrlAllowedWithDomainConfig(
       reason: "Domain policy is enforced but the config is unavailable — blocking to fail closed.",
     };
   }
-  return checkUrlAllowed(url, getDomainConfig());
+  const cfg = getDomainConfig();
+  if (policyReadFailed) {
+    return {
+      allowed: false,
+      reason: "Domain policy global read failed — blocking to fail closed.",
+    };
+  }
+  return checkUrlAllowed(url, cfg);
 }

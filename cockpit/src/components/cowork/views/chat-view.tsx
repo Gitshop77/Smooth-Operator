@@ -18,6 +18,12 @@ const SUGGESTIONS = [
   "Watch the github.com tab for changes",
 ];
 
+const AssistantAvatar = () => (
+  <div className="size-8 rounded-full bg-primary text-primary-foreground grid place-items-center shrink-0">
+    <Bot className="size-4" />
+  </div>
+);
+
 export function ChatView() {
   const sendChat = useSendChat();
   const { toast } = useToast();
@@ -46,7 +52,11 @@ export function ChatView() {
   const typewriterAborted = React.useRef(false);
 
   React.useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+    const el = scrollRef.current;
+    if (!el) return;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    const behavior: ScrollBehavior = streaming !== null || reduce ? "auto" : "smooth";
+    el.scrollTo({ top: el.scrollHeight, behavior });
   }, [messages, streaming]);
 
  // On unmount, clear any pending typewriter timeouts so they don't fire
@@ -105,7 +115,7 @@ export function ChatView() {
  // the same `ts` so they stay consistent.
   const send = (text: string, ts: number) => {
     const trimmed = text.trim();
-    if (!trimmed || streaming) return;
+    if (!trimmed || streaming !== null) return;
     const userMsg: ChatMessage = {
       id: `u${ts}`,
       role: "user",
@@ -126,7 +136,7 @@ export function ChatView() {
  // Filter out the greeting (id "m0") and error messages (id "e...") so the
  // LLM doesn't receive fabricated prior assistant replies as context.
     const history = messages
-      .filter((m) => m.id !== "m0" && !m.id.startsWith("e"))
+      .filter((m) => m.id !== "m0" && m.id !== "m-cleared" && !m.id.startsWith("e"))
       .map((m) => ({ role: m.role, content: m.text }));
     sendChat.mutate(
       { text: trimmed, history, signal: controller.signal },
@@ -203,7 +213,7 @@ export function ChatView() {
     setStreaming(null);
     setMessages([
       {
-        id: "m0",
+        id: "m-cleared",
         role: "assistant",
         text: "Cleared. What next?",
         timestamp: Date.now(),
@@ -221,6 +231,7 @@ export function ChatView() {
           <Button
             size="sm"
             variant="outline"
+            type="button"
             onClick={clearChat}
           >
             <Trash2 className="size-4" /> Clear
@@ -230,7 +241,11 @@ export function ChatView() {
 
       <Card className="flex-1 p-0 gap-0 overflow-hidden flex flex-col min-h-[60vh]">
         {/* Messages */}
-        <div ref={scrollRef} className="flex-1 overflow-auto cowork-scroll p-4 space-y-4">
+        <div
+          ref={scrollRef}
+          aria-busy={streaming !== null || sendChat.isPending}
+          className="flex-1 overflow-auto cowork-scroll p-4 space-y-4"
+        >
           <AnimatePresence initial={false}>
             {messages.map((m) => (
               <motion.div
@@ -239,11 +254,7 @@ export function ChatView() {
                 animate={{ opacity: 1, y: 0 }}
                 className={`flex gap-3 ${m.role === "user" ? "justify-end" : ""}`}
               >
-                {m.role === "assistant" ? (
-                  <div className="size-8 rounded-full bg-primary text-primary-foreground grid place-items-center shrink-0">
-                    <Bot className="size-4" />
-                  </div>
-                ) : null}
+                {m.role === "assistant" ? <AssistantAvatar /> : null}
                 <div
                   className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm ${
                     m.role === "user"
@@ -269,9 +280,7 @@ export function ChatView() {
 
           {streaming !== null ? (
             <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="flex gap-3">
-              <div className="size-8 rounded-full bg-primary text-primary-foreground grid place-items-center shrink-0">
-                <Bot className="size-4" />
-              </div>
+              <AssistantAvatar />
               <div className="max-w-[80%] rounded-2xl px-4 py-2.5 text-sm bg-muted rounded-bl-sm">
                 <p className="whitespace-pre-wrap leading-relaxed">
                   {streaming}
@@ -283,9 +292,7 @@ export function ChatView() {
 
           {sendChat.isPending && streaming === null ? (
             <div className="flex gap-3">
-              <div className="size-8 rounded-full bg-primary text-primary-foreground grid place-items-center shrink-0">
-                <Bot className="size-4" />
-              </div>
+              <AssistantAvatar />
               <div className="rounded-2xl px-4 py-2.5 text-sm bg-muted rounded-bl-sm flex items-center gap-2 text-muted-foreground">
                 <Loader2 className="size-3.5 animate-spin" /> thinking…
               </div>
@@ -299,6 +306,7 @@ export function ChatView() {
             {SUGGESTIONS.map((s) => (
               <button
                 key={s}
+                type="button"
                 onClick={() => send(s, Date.now())}
                 className="text-xs px-3 py-1.5 rounded-full border bg-background hover:bg-accent transition-colors"
               >
@@ -330,6 +338,7 @@ export function ChatView() {
           <Button
             size="icon"
             className="size-10 shrink-0"
+            type="button"
             onClick={() => send(input, Date.now())}
             disabled={!input.trim() || streaming !== null}
             aria-label="Send"

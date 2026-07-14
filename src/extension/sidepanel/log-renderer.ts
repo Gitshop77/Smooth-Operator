@@ -215,7 +215,7 @@ export function addLogRow(event: LogEvent, time: string): void {
       break;
     case "thinking":
       cls = "reason"; label = "reason"; icon = glyph("sparkles");
-      body = event.nextGoal || event.text;
+      body = event.nextGoal || event.text || "";
       setLifecycle("thinking");
       appendThinkingEntry(
         "navigator",
@@ -228,12 +228,12 @@ export function addLogRow(event: LogEvent, time: string): void {
       break;
     case "action":
       cls = "act"; label = `act ${event.index}/${event.total}`; icon = glyph("mouse-pointer");
-      body = event.description;
+      body = event.description || "";
       setLifecycle("acting");
       break;
     case "action-result":
       cls = event.success ? "ok" : "err"; label = event.name;
-      icon = event.success ? glyph("check") : glyph("x"); body = event.message;
+      icon = event.success ? glyph("check") : glyph("x"); body = event.message || "";
       setLifecycle(event.success ? "acting" : "error");
       break;
     case "budget-warning":
@@ -289,7 +289,7 @@ export function addLogRow(event: LogEvent, time: string): void {
       const c = Number(event.costUsd);
       const ti = Number(event.tokensIn);
       const to = Number(event.tokensOut);
-      if (!Number.isFinite(c) || !Number.isFinite(ti) || !Number.isFinite(to)) {
+      if (!isFiniteCostEvent(event)) {
         body = "cost (invalid payload — skipped)";
         console.warn("[log-renderer] dropped malformed cost event (non-numeric costUsd/tokensIn/tokensOut)");
         break;
@@ -308,11 +308,11 @@ export function addLogRow(event: LogEvent, time: string): void {
       break;
     }
     case "info":
-      cls = "info"; label = "info"; icon = glyph("info"); body = event.message;
+      cls = "info"; label = "info"; icon = glyph("info"); body = event.message || "";
       if (event.message === "Run finished.") setRunning(false);
       break;
     case "warn":
-      cls = "warn"; label = "warn"; icon = glyph("alert-triangle"); body = event.message;
+      cls = "warn"; label = "warn"; icon = glyph("alert-triangle"); body = event.message || "";
       break;
     case "compaction":
       cls = "info"; label = "compact"; icon = glyph("refresh-cw");
@@ -355,15 +355,21 @@ export function addLogRow(event: LogEvent, time: string): void {
  // for an already-handled takeover.
       if (!isRestoring) showTakeoverBanner(event.reason);
       break;
-    default:
-      body = JSON.stringify(event).slice(0, 100);
+    default: {
+      try {
+        body = JSON.stringify(event).slice(0, 100);
+      } catch {
+        body = "[unserializable event]";
+      }
+      break;
+    }
   }
 
   const row = document.createElement("div");
   row.className = "row";
   row.innerHTML =
     `<span class="t">${escapeHtml(time)}</span>` +
-    `<span class="ic ${cls}">${icon}</span>` +
+    `<span class="ic ${cls}" aria-hidden="true">${icon}</span>` +
     `<span class="lb">${escapeHtml(label)}</span>` +
     `<span class="bd ${cls}">${escapeHtml(body)}</span>`;
   logEl.appendChild(row);
@@ -398,9 +404,11 @@ export function addLogRow(event: LogEvent, time: string): void {
     const pct = Math.min(100, (event.step / maxSteps) * 100);
     barFill.style.width = `${pct}%`;
  // Keep the progressbar's ARIA value in sync with the visual width so
- // assistive tech reports the actual step (finding: aria-valuenow never
- // updated — it stayed at its initial HTML value).
-    barFill.setAttribute("aria-valuenow", String(event.step));
+ // assistive tech reports the actual step. The `role="progressbar"` lives on
+ // the parent `.bar`, so the value must be set there — not on the inner fill.
+    barFill.parentElement?.setAttribute("aria-valuemin", "0");
+    barFill.parentElement?.setAttribute("aria-valuemax", String(maxSteps));
+    barFill.parentElement?.setAttribute("aria-valuenow", String(event.step));
     updateCostProjection();
   }
   if (event.type === "state") countLabel.textContent = `${event.elementCount} el`;
@@ -441,17 +449,23 @@ function isValidAgentEvent(ev: unknown): ev is LogEvent {
   if (typeof ev !== "object" || ev === null) return false;
   const e = ev as { type?: unknown };
   if (typeof e.type !== "string") return false;
-  if (e.type === "cost") {
-    const c = ev as { costUsd?: unknown; tokensIn?: unknown; tokensOut?: unknown };
-    if (
-      !Number.isFinite(Number(c.costUsd)) ||
-      !Number.isFinite(Number(c.tokensIn)) ||
-      !Number.isFinite(Number(c.tokensOut))
-    ) {
-      return false;
-    }
-  }
+  if (e.type === "cost" && !isFiniteCostEvent(ev)) return false;
   return true;
+}
+
+/**
+ * True when a `cost` event's `costUsd` / `tokensIn` / `tokensOut` fields are all
+ * finite numbers. Shared by the message-boundary validator and the in-row cost
+ * handler so the two numeric checks can't drift.
+ */
+function isFiniteCostEvent(e: unknown): boolean {
+  if (typeof e !== "object" || e === null) return false;
+  const c = e as { costUsd?: unknown; tokensIn?: unknown; tokensOut?: unknown };
+  return (
+    Number.isFinite(Number(c.costUsd)) &&
+    Number.isFinite(Number(c.tokensIn)) &&
+    Number.isFinite(Number(c.tokensOut))
+  );
 }
 
 // ─── Restore totals from storage (called by controls.ts STATUS check) ──────
@@ -465,15 +479,15 @@ export function restoreTotalsFromStorage(): void {
  // Restore counters / log history from storage (kept fresh on every event).
   chrome.storage.local.get([STORAGE_KEYS.costUsd, STORAGE_KEYS.tokens, STORAGE_KEYS.log], (s) => {
     if (chrome.runtime.lastError) return;
-    if (typeof s[STORAGE_KEYS.costUsd] === "number") {
+    if (typeof s[STORAGE_KEYS.costUsd] === "number" && totalCost === 0) {
       totalCost = s[STORAGE_KEYS.costUsd] as number;
       costLabel.textContent = `$${totalCost.toFixed(4)}`;
     }
-    if (typeof s[STORAGE_KEYS.tokens] === "number") {
+    if (typeof s[STORAGE_KEYS.tokens] === "number" && totalTokens === 0) {
       totalTokens = s[STORAGE_KEYS.tokens] as number;
       tokenLabel.textContent = formatTokens(totalTokens);
     }
-    if (Array.isArray(s[STORAGE_KEYS.log])) {
+    if (Array.isArray(s[STORAGE_KEYS.log]) && logHistory.length === 0) {
  // Clear any rows already in the DOM + in-memory mirror BEFORE replaying,
  // so the persisted log is rendered exactly once. Without this, every
  // STATUS check (fired on each panel open) would append a duplicate copy

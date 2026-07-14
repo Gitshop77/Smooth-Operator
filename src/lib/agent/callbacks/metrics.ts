@@ -120,59 +120,63 @@ export interface AgentMetrics {
  * interface; hooks that don't contribute to a metric are no-ops.
  */
 export class AgentMetricsCallback implements AsyncCallbackHandler {
-  private totalSteps = 0;
-  private totalActions = 0;
+  private totalSteps = AgentMetricsCallback.ZERO.totalSteps;
+  private totalActions = AgentMetricsCallback.ZERO.totalActions;
   private readonly actionsByType: Record<string, ActionCounts> = {};
 
  // LLM phase attribution state machine (see file-level docstring).
   private nextPhase: "planner" | "navigator" = "planner";
-  private plannerCalls = 0;
-  private plannerTokensIn = 0;
-  private plannerTokensOut = 0;
-  private navigatorCalls = 0;
-  private navigatorTokensIn = 0;
-  private navigatorTokensOut = 0;
+  private plannerCalls = AgentMetricsCallback.ZERO.plannerCalls;
+  private plannerTokensIn = AgentMetricsCallback.ZERO.plannerTokensIn;
+  private plannerTokensOut = AgentMetricsCallback.ZERO.plannerTokensOut;
+  private navigatorCalls = AgentMetricsCallback.ZERO.navigatorCalls;
+  private navigatorTokensIn = AgentMetricsCallback.ZERO.navigatorTokensIn;
+  private navigatorTokensOut = AgentMetricsCallback.ZERO.navigatorTokensOut;
  // Tokens recovered during onRunEnd reconciliation (late registration) that
  // could not be attributed to a specific phase.
-  private unattributedCalls = 0;
-  private unattributedTokensIn = 0;
-  private unattributedTokensOut = 0;
+  private unattributedCalls = AgentMetricsCallback.ZERO.unattributedCalls;
+  private unattributedTokensIn = AgentMetricsCallback.ZERO.unattributedTokensIn;
+  private unattributedTokensOut = AgentMetricsCallback.ZERO.unattributedTokensOut;
 
-  private totalTokensIn = 0;
-  private totalTokensOut = 0;
-  private totalCostUsd = 0;
-  private loopWarnings = 0;
-  private compactions = 0;
-  private errorTotal = 0;
-  private errorRecoverable = 0;
-  private errorFatal = 0;
+  private totalTokensIn = AgentMetricsCallback.ZERO.totalTokensIn;
+  private totalTokensOut = AgentMetricsCallback.ZERO.totalTokensOut;
+  private totalCostUsd = AgentMetricsCallback.ZERO.totalCostUsd;
+  private loopWarnings = AgentMetricsCallback.ZERO.loopWarnings;
+  private compactions = AgentMetricsCallback.ZERO.compactions;
+  private errorTotal = AgentMetricsCallback.ZERO.errorTotal;
+  private errorRecoverable = AgentMetricsCallback.ZERO.errorRecoverable;
+  private errorFatal = AgentMetricsCallback.ZERO.errorFatal;
+
+  private static readonly ZERO = {
+    totalSteps: 0,
+    totalActions: 0,
+    plannerCalls: 0,
+    plannerTokensIn: 0,
+    plannerTokensOut: 0,
+    navigatorCalls: 0,
+    navigatorTokensIn: 0,
+    navigatorTokensOut: 0,
+    unattributedCalls: 0,
+    unattributedTokensIn: 0,
+    unattributedTokensOut: 0,
+    totalTokensIn: 0,
+    totalTokensOut: 0,
+    totalCostUsd: 0,
+    loopWarnings: 0,
+    compactions: 0,
+    errorTotal: 0,
+    errorRecoverable: 0,
+    errorFatal: 0,
+  };
 
   /**
  * Reset all accumulators to zero and re-initialise the phase state
  * machine. Useful when reusing one instance across multiple runs.
  */
   reset(): void {
-    this.totalSteps = 0;
-    this.totalActions = 0;
+    Object.assign(this, AgentMetricsCallback.ZERO);
     for (const k of Object.keys(this.actionsByType)) delete this.actionsByType[k];
     this.nextPhase = "planner";
-    this.plannerCalls = 0;
-    this.plannerTokensIn = 0;
-    this.plannerTokensOut = 0;
-    this.navigatorCalls = 0;
-    this.navigatorTokensIn = 0;
-    this.navigatorTokensOut = 0;
-    this.unattributedCalls = 0;
-    this.unattributedTokensIn = 0;
-    this.unattributedTokensOut = 0;
-    this.totalTokensIn = 0;
-    this.totalTokensOut = 0;
-    this.totalCostUsd = 0;
-    this.loopWarnings = 0;
-    this.compactions = 0;
-    this.errorTotal = 0;
-    this.errorRecoverable = 0;
-    this.errorFatal = 0;
   }
 
   /**
@@ -352,6 +356,10 @@ export class AgentMetricsCallback implements AsyncCallbackHandler {
         `[metrics] onRunEnd: accumulated phase tokens exceed authoritative total ` +
           `(gapIn=${gapIn}, gapOut=${gapOut}); reconciling invariant against ground-truth total.`,
       );
+ // Mirror the positive-gap branch: a negative reconciliation is also a gap,
+ // so flag `unattributedCalls` (the boolean-ish "had-gap" indicator) so the
+ // field is consistent whether the phase sums over- or under-shot the total.
+      this.unattributedCalls = 1;
       if (gapIn < 0) this.unattributedTokensIn += gapIn;
       if (gapOut < 0) this.unattributedTokensOut += gapOut;
     }

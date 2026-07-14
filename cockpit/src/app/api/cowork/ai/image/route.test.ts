@@ -16,8 +16,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // COWORK_EVENT_TOKEN. Delete the UI token so the service-to-service token below
 // is the one actually forwarded (otherwise a stray COWORK_UI_TOKEN in the
 // environment would shadow it and break the `X-Cowork-Token` assertion).
-delete process.env.COWORK_UI_TOKEN;
-process.env.COWORK_EVENT_TOKEN = 'test-image-token';
+// `getCoworkEventsToken()` prefers COWORK_UI_TOKEN and only falls back to
+// COWORK_EVENT_TOKEN. Stub the UI token empty so the service-to-service token
+// below is the one actually forwarded (otherwise a stray COWORK_UI_TOKEN in the
+// environment would shadow it and break the `X-Cowork-Token` assertion).
+// Scoped via vi.stubEnv so it is restored after the suite and does not leak
+// into other test files.
+vi.stubEnv('COWORK_UI_TOKEN', '');
+vi.stubEnv('COWORK_EVENT_TOKEN', 'test-image-token');
 
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
@@ -49,6 +55,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   fetchMock.mockReset();
+  vi.unstubAllEnvs();
 });
 
 describe('POST /api/cowork/ai/image', () => {
@@ -87,6 +94,19 @@ describe('POST /api/cowork/ai/image', () => {
     const res = await POST(jsonReq({ prompt: 'ok', size: '999x999' as never }));
     expect(res.status).toBe(400);
     expect((await res.json()).error).toContain('size must be one of');
+  });
+
+  it('forwards a valid size in the upstream body', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, base64: 'AAAA', prompt: 'a cat', size: '768x1344', bytes: 3 }),
+    });
+    const res = await POST(jsonReq({ prompt: 'a cat', size: '768x1344' }));
+    expect(res.status).toBe(200);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain('/image');
+    expect(JSON.parse(init.body).size).toBe('768x1344');
   });
 
   it('returns a 500 error envelope on a non-OK upstream', async () => {

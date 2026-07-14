@@ -22,6 +22,9 @@ export const TIMINGS = {
   extractWait: 100,
 } as const;
 
+/** Timeout (ms) for SW/CDP RPC responses (new-tab navigate, press-and-hold). */
+export const SW_RPC_TIMEOUT_MS = 15000;
+
 /**
  * Character / element truncation limits used by handlers when surfacing text
  * (extracted content, action echoes, search matches, etc.) back to the LLM.
@@ -122,12 +125,35 @@ const searchEngineMissing = searchEngineEnumValues.filter((k) => !searchEngineUr
 const searchEngineExtra = searchEngineUrlKeys.filter(
   (k) => !(searchEngineEnumValues as readonly string[]).includes(k),
 );
-if (searchEngineMissing.length || searchEngineExtra.length) {
+if (
+  ((typeof process !== "undefined" ? process.env?.NODE_ENV : undefined) ?? "production") !== "production" &&
+  (searchEngineMissing.length || searchEngineExtra.length)
+) {
   console.error(
     "[tools/constants] SEARCH_ENGINE_URLS is out of sync with the search engine enum in schema.ts:",
     { missingFromMap: searchEngineMissing, extraInMap: searchEngineExtra },
   );
 }
 
-/** Sleep helper. */
-export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+/**
+ * Sleep helper. When an `AbortSignal` is supplied, the pending sleep rejects
+ * with an `AbortError` (and its timer is cleared) if the signal fires — letting
+ * a cancellation interrupt an in-flight wait instead of hanging the orchestrator
+ * for the full duration. With no signal the behavior is unchanged.
+ */
+export const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });

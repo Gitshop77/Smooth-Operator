@@ -128,7 +128,6 @@ export function earlyStop(
     .filter((a): a is Action => a != null);
   if (allActions.length === 0) return { stop: false, reason: "" };
   const lastAction = allActions[allActions.length - 1];
-  if (!lastAction) return { stop: false, reason: "" };
 
  // One-shot UI interactions must never halt the run on a repeat check.
   if (NEVER_STOP_ON_REPEAT.has(lastAction.type)) {
@@ -140,13 +139,23 @@ export function earlyStop(
   if (lastK.length < k) return { stop: false, reason: "" };
 
   if (REPEATABLE_ACTION_TYPES.has(lastAction.type)) {
- // For TYPE-like actions, count across the WHOLE history (typing the
- // same text in 3+ different fields IS suspicious).
-    const sameCount = allActions.filter((a) => isEquivalentAction(a, lastAction)).length;
-    if (sameCount >= k) {
+ // `alert_send_keys` has no stable field to distinguish prompts, so it can
+ // only be judged as "stuck" by the consecutive-K check above — treat it like
+ // NEVER_STOP_ON_REPEAT and never stop on the whole-history count alone.
+    if (lastAction.type === "alert_send_keys") {
+      return { stop: false, reason: "" };
+    }
+ // For `input`, count DISTINCT target fields across the WHOLE history (typing
+ // the same text into 3+ *different* fields IS suspicious). Three retries into
+ // the *same* field are legitimate and must not trigger early-stop.
+    const equiv = allActions.filter((a) => isEquivalentAction(a, lastAction));
+    const distinctFields = new Set(
+      equiv.map((a) => (a as { index?: number }).index),
+    ).size;
+    if (distinctFields >= k) {
       return {
         stop: true,
-        reason: `Same typing action ("${lastAction.type}") for ${sameCount} steps`,
+        reason: `Same typing action ("${lastAction.type}") in ${distinctFields} distinct fields`,
       };
     }
     return { stop: false, reason: "" };

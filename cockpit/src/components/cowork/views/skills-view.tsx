@@ -11,7 +11,6 @@ import { EmptyState } from "@/components/cowork/shared/empty-state";
 import { StatCard } from "@/components/cowork/shared/stat-card";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 
 /**
  * Skills view.
@@ -97,10 +96,9 @@ export function SkillsView() {
   const [filter, setFilter] = React.useState("");
 
   const visible = React.useMemo(() => {
-    const all = skills;
-    if (!filter.trim()) return all;
+    if (!filter.trim()) return skills;
     const q = filter.toLowerCase();
-    return all.filter(
+    return skills.filter(
       (s) =>
         s.name.toLowerCase().includes(q) ||
         s.description.toLowerCase().includes(q) ||
@@ -169,7 +167,7 @@ export function SkillsView() {
                 <td className="px-4 py-2.5 min-w-[180px]">
                   <div className="flex items-center gap-2.5 min-w-0">
                     <div className="size-6 rounded border border-primary/20 bg-primary/5 text-primary grid place-items-center shrink-0">
-                      <Sparkles className="size-3.5" />
+                      <Sparkles className="size-3.5" aria-hidden />
                     </div>
                     <span className="font-medium text-sm">{skill.name}</span>
                   </div>
@@ -180,7 +178,7 @@ export function SkillsView() {
                   </span>
                 </td>
                 <td className="px-4 py-2.5 max-w-[420px]">
-                  <span className="text-sm text-muted-foreground line-clamp-2">
+                  <span className="text-sm text-muted-foreground line-clamp-2" title={skill.description}>
                     {skill.description}
                   </span>
                 </td>
@@ -195,7 +193,7 @@ export function SkillsView() {
                     variant={skill.enabled ? "default" : "outline"}
                     aria-pressed={skill.enabled}
                     onClick={() => toggle(skill.id)}
-                    className={cn("h-8")}
+                    className="h-8"
                   >
                     {skill.enabled ? "Disable" : "Enable"}
                   </Button>

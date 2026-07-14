@@ -41,6 +41,12 @@ export function isLikelyHidden(el: HTMLElement): boolean {
  // them as hidden — which would drop the entire page from the serialized tree.
  // Guard them explicitly; they are never genuinely hidden.
   if (el === document.body || el === document.documentElement) return false;
+ // `HTMLElement.offsetParent` does NOT cross shadow-tree boundaries: a
+ // normally-flowing, fully-visible element inside an open/closed shadow root
+ // also reports `offsetParent === null`. Don't mark such elements hidden here;
+ // defer to isVisibleFull, which resolves real computed-style/rect visibility
+ // across shadow boundaries (so visible shadow-DOM content isn't dropped).
+  if (el.getRootNode() instanceof ShadowRoot) return false;
   if (el.offsetParent === null) {
  // Could be display:none, detached, or position:fixed/sticky. Disambiguate
  // with one getComputedStyle call (rare path — most elements either have
@@ -87,6 +93,7 @@ export function isVisibleFull(el: HTMLElement, rect?: DOMRect): boolean {
  // could target a transparent, non-interactable element.
   for (let ancestor = el.parentElement; ancestor; ancestor = ancestor.parentElement) {
     if (parseFloat(window.getComputedStyle(ancestor).opacity) === 0) return false;
+    if (ancestor.getAttribute("aria-hidden") === "true") return false;
   }
   const r = rect ?? el.getBoundingClientRect();
   if (r.width === 0 && r.height === 0) return false;
@@ -95,9 +102,6 @@ export function isVisibleFull(el: HTMLElement, rect?: DOMRect): boolean {
  // from the accessibility tree while keeping it visible. An element inside such
  // a subtree is not a legitimate interaction target for an AT-driven agent, so
  // walk the ancestor chain and treat it as hidden if any ancestor is aria-hidden.
-  for (let ancestor = el.parentElement; ancestor; ancestor = ancestor.parentElement) {
-    if (ancestor.getAttribute("aria-hidden") === "true") return false;
-  }
  // `clip: rect(0, 0, 0, 0)` (legacy) and `clip-path: inset(100%)` (modern)
  // are both common techniques to hide an element while keeping it in the
  // accessibility tree. Treat them as hidden — they're invisible to the user

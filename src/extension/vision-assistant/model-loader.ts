@@ -58,7 +58,9 @@ async function fetchToBuffer(
   maxBytes?: number,
 ): Promise<{ buf: Uint8Array; headers: Headers; status: number }> {
   const ctrl = new AbortController();
-  let timer = setTimeout(() => ctrl.abort(), stallMs);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    timer = setTimeout(() => ctrl.abort(), stallMs);
   const r = await fetch(url, { ...opts, signal: ctrl.signal });
   if (!(r.status === 200 || r.status === 206)) throw new Error(`status ${r.status}`);
   if (!r.body) throw new Error(`empty response body for ${url}`);
@@ -102,7 +104,10 @@ async function fetchToBuffer(
     buf.set(c, o);
     o += c.length;
   }
-  return { buf, headers: r.headers, status: r.status };
+    return { buf, headers: r.headers, status: r.status };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /** Chunked Range download with retry. */
@@ -305,8 +310,7 @@ export class ModelLoader {
       const existing = await this.cache!.match(url);
       if (existing) continue; // Already cached
       const buf = await fetchBufProgress(url, name, onProgress);
-      await this.verifyIntegrity(url, name, buf);
-      const digest = await sha256(buf);
+      const digest = await this.verifyIntegrity(url, name, buf);
       const response = new Response(buf as unknown as ArrayBuffer, {
         headers: { [DIGEST_HEADER]: digest },
       });
@@ -341,7 +345,7 @@ export class ModelLoader {
     url: string,
     name: string,
     buf: Uint8Array,
-  ): Promise<void> {
+  ): Promise<string> {
     const expected = MODEL_FILE_HASHES[url];
     if (!expected) {
       console.warn(
@@ -349,7 +353,7 @@ export class ModelLoader {
           `no pinned SHA-256 in MODEL_FILE_HASHES. Model weights are unverified ` +
           `— pin the hash before shipping to guard against tampered weights.`,
       );
-      return;
+      return await sha256(buf);
     }
     const actual = await sha256(buf);
     if (actual !== expected.toLowerCase()) {
@@ -359,6 +363,7 @@ export class ModelLoader {
           `Refusing to cache potentially tampered or corrupted model weights.`,
       );
     }
+    return actual;
   }
 
   /**
@@ -405,7 +410,8 @@ export class ModelLoader {
  // model weights are binary; markup begins with '<', so reject it with a
  // descriptive error rather than a generic parse failure (finding: cached
  // file type/content not validated before parsing).
-    if (buf.byteLength >= 1 && buf[0] === 0x3c /* '<' */) {
+    const stored = response.headers.get(DIGEST_HEADER);
+    if (buf.byteLength >= 1 && buf[0] === 0x3c /* '<' */ && !MODEL_FILE_HASHES[url] && !stored) {
       throw new Error(
         `[vision-assistant] Cached model file ${url} looks like markup (starts with '<'), ` +
           `not model weights; refusing to load. The cache entry is likely an error page.`,
@@ -428,7 +434,8 @@ export class ModelLoader {
     if (!this.cache) await this.init();
     const response = await this.cache!.match(url);
     if (!response) throw new Error(`Model file not cached: ${url}`);
-    const text = await response.text();
+    const rawBuf = new Uint8Array(await response.arrayBuffer());
+    const text = new TextDecoder().decode(rawBuf);
     let parsed: unknown;
     try {
       parsed = JSON.parse(text);
@@ -445,9 +452,8 @@ export class ModelLoader {
           `object; refusing to use an unexpected payload as model metadata.`,
       );
     }
-    const buf = new TextEncoder().encode(text);
     try {
-      await this.reverifyIntegrity(url, buf, response);
+      await this.reverifyIntegrity(url, rawBuf, response);
     } catch (e) {
  // Auto-recover: delete the poisoned / rolled-back entry so the next load
  // re-downloads a clean copy (finding: integrity re-verify failure does not

@@ -21,8 +21,8 @@ import type { LoopDetector } from "./loop-detector";
 
 // ─── LLM call signatures ────────────────────────────────────────────────────
 
-/** Call the navigator LLM API with a structured request. Returns raw text + optional usage. */
-export type NavigatorLLMCall = (req: import("../types").AgentStepRequest) => Promise<{
+/** Shared return shape for an LLM call that yields raw text + optional usage. */
+export type LLMCall<Req> = (req: Req) => Promise<{
   raw: string;
   tokensIn?: number;
   tokensOut?: number;
@@ -37,20 +37,11 @@ export type NavigatorLLMCall = (req: import("../types").AgentStepRequest) => Pro
   costUsd?: number;
 }>;
 
+/** Call the navigator LLM API with a structured request. Returns raw text + optional usage. */
+export type NavigatorLLMCall = LLMCall<import("../types").AgentStepRequest>;
+
 /** Call the planner LLM API with a structured request. Returns raw text + optional usage. */
-export type PlannerLLMCall = (req: import("../types").PlannerStepRequest) => Promise<{
-  raw: string;
-  tokensIn?: number;
-  tokensOut?: number;
-  /** Reasoning/thinking tokens (billed at the model's `reasoning` rate when present). */
-  reasoningTokens?: number;
-  /** Cached input tokens (Anthropic cache_read+cache_creation, OpenAI cached_tokens). */
-  cachedInputTokens?: number;
-  model?: string;
-  /** Pre-computed cost in USD (from provider-bridge, includes cachedInputTokens).
- * When present, callers SHOULD use this instead of recomputing via estimateCost. */
-  costUsd?: number;
-}>;
+export type PlannerLLMCall = LLMCall<import("../types").PlannerStepRequest>;
 
 /**
  * Optional summarization call used by compaction. Accepts a system + user
@@ -92,7 +83,7 @@ export interface LoopDeps {
   /** Wait for the page to settle (network idle + DOM stable). Replaces fixed sleep. */
   waitForSettled?: () => Promise<void>;
   /** Delay between steps (let SPA rerenders settle). Used if `waitForSettled` not provided. */
-  settleDelayMs?: number;
+  settleDelay?: number;
   /** Agent mode: restricted (current tab only), standard (default), full_agentic. */
   mode?: AgentMode;
   /**

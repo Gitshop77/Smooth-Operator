@@ -1,5 +1,6 @@
 "use client";
 
+import * as React from "react";
 import { Plug } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -12,6 +13,8 @@ interface ExtensionOnlyProps {
   /** Supporting copy explaining why the view is empty. */
   description?: string;
   className?: string;
+  /** When provided, wires the CTA to actually connect; otherwise it is disabled. */
+  onConnect?: () => void;
 }
 
 /**
@@ -19,10 +22,11 @@ interface ExtensionOnlyProps {
  * is present. Renders a consistent "connect the extension" message + CTA and
  * replaces the ad-hoc empty markup that previously lived in several views.
  */
-export function ExtensionOnly({
+export const ExtensionOnly = React.memo(function ExtensionOnly({
   title = "Extension-only view",
   description = "This view reflects live data from the Open Cowork browser extension. Connect the extension to see it here.",
   className,
+  onConnect,
 }: ExtensionOnlyProps) {
   return (
     <Card
@@ -31,16 +35,16 @@ export function ExtensionOnly({
         className,
       )}
     >
-      <div className="grid size-12 place-items-center rounded-2xl bg-primary/10 text-primary">
+      <div className="grid size-12 place-items-center rounded-2xl bg-primary/10 text-primary" aria-hidden="true">
         <Plug className="size-6" />
       </div>
       <div className="max-w-sm space-y-1.5">
-        <p className="text-sm font-semibold text-foreground">{title}</p>
+        <h2 className="text-sm font-semibold text-foreground">{title}</h2>
         <p className="text-sm leading-relaxed text-muted-foreground">{description}</p>
       </div>
-      <Button variant="outline" size="sm" className="mt-1">
+      <Button variant="outline" size="sm" type="button" className="mt-1" onClick={onConnect} disabled={!onConnect}>
         Connect the Open Cowork extension
       </Button>
     </Card>
   );
-}
+});

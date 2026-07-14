@@ -65,15 +65,25 @@ export function createCompatibleCanvas(): CompatibleCanvas | null {
   return null;
 }
 
+/**
+ * Guard ensuring only raster `data:image/*` URLs are processed, preventing
+ * outbound fetch/exfil AND rejecting SVG payloads (which would otherwise be
+ * rasterized in the `HTMLImageElement` fallback — an unnecessary decode/exfil
+ * surface for a screenshot annotator that should only handle raster captures).
+ */
+function assertDataUrl(url: string, label: string): void {
+  if (typeof url !== "string" || !/^data:image\/(?!svg\+xml)[^;]+;/.test(url)) {
+    throw new Error(`${label}: expected a raster data:image URL`);
+  }
+}
+
 /** Convert a `data:image/*;base64,…` URL to a `Blob`. */
 export async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
  // Only `data:` URLs are expected here — a caller passing anything else would
  // have `fetch` issue a real network request (and send the data to a remote
  // host). Reject non-data URLs up front so the helper can never be coerced
  // into an outbound fetch.
-  if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) {
-    throw new Error("dataUrlToBlob: expected a data: URL");
-  }
+  assertDataUrl(dataUrl, "dataUrlToBlob");
  // Prefer `fetch(dataUrl)` — works in SW + DOM and decodes any data-URL
  // mime type without manual base64 work.
   const res = await fetch(dataUrl);
@@ -123,8 +133,10 @@ function loadImageViaImg(dataUrl: string): Promise<CompatibleLoadedImage> {
  // Same guard as `dataUrlToBlob`: only `data:` URLs are permitted here.
  // Assigning an arbitrary URL to `img.src` would have the browser issue a
  // real outbound request, so reject anything else before touching `.src`.
-    if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) {
-      reject(new Error("loadImageViaImg: expected a data: URL"));
+    try {
+      assertDataUrl(dataUrl, "loadImageViaImg");
+    } catch (e) {
+      reject(e);
       return;
     }
     const ImageCtor = (globalThis as { Image?: typeof Image }).Image;

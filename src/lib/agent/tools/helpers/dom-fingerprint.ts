@@ -25,7 +25,13 @@ function elementSignature(el: Element): string {
   const ariaLabel = el.getAttribute("aria-label") || "";
   const href = el instanceof HTMLAnchorElement ? el.getAttribute("href") || "" : "";
   const value = getElementValue(el);
-  const text = (el.textContent || "").trim();
+ // Bound the hashed `text` length. `.slice(0, 256)` limits how many
+ // characters of `text` enter the FNV hash (keeping the signature compact
+ // for text-heavy elements); it does NOT avoid allocating the full
+ // `textContent` string — that is always materialized by the DOM. The outer
+ // `.slice(0, 256)` below remains a final safety cap on the concatenated
+ // signature.
+  const text = (el.textContent || "").trim().slice(0, 256);
   return el.tagName + type + ariaLabel + href + value + text;
 }
 
@@ -39,16 +45,34 @@ function getElementValue(el: Element): string {
  // leak secrets if the fingerprint is externalized, and would otherwise flip
  // the fingerprint on every keystroke inside a login form. `el.type` is
  // normalized to lowercase by the DOM, so a direct equality check suffices.
-    if (el instanceof HTMLInputElement && el.type === "password") {
-      return "";
+    if (el instanceof HTMLInputElement) {
+      // Skip `value` for transient inputs: typing in them would churn the
+      // fingerprint and trigger spurious SPA-route-change detection (the
+      // module's purpose is to ignore transient input, exactly as it already
+      // does for passwords). For stateful checkbox/radio controls we fold in
+      // `checked` instead so meaningful state is still captured.
+      const transientTextTypes = ["password", "text", "email", "search", "tel", "url", "number"];
+      if (transientTextTypes.includes(el.type)) return "";
+      if (el.type === "checkbox" || el.type === "radio") return el.checked ? "1" : "0";
     }
     return el.value;
   }
   return "";
 }
 
+/** Fold a string into the running FNV-1a hash (FNV offset basis + prime). */
+function hashString(h: number, s: string): number {
+  for (let j = 0; j < s.length; j++) {
+    h ^= s.charCodeAt(j);
+    h = Math.imul(h, FNV_PRIME);
+  }
+  return h;
+}
+
 export function domFingerprint(): string {
-  const els = document.querySelectorAll("a,button,input,select,textarea");
+  const els = document.querySelectorAll(
+    "a,button,input,select,textarea,[role=\"button\"],[role=\"link\"],[role=\"menuitem\"],[role=\"tab\"]",
+  );
   let h = FNV_OFFSET_BASIS;
 
  // Fold the total interactive element count so that additions or removals
@@ -59,16 +83,15 @@ export function domFingerprint(): string {
  // Hash a leading and a trailing window of interactive elements. The leading
  // window covers a stable top nav; the trailing window catches below-the-fold
  // route changes that would otherwise sit entirely beyond the leading window.
+ // Iterate only the two windows (not every element) so we don't scan the full
+ // list performing a branch per element on large DOMs.
   const limit = FINGERPRINT_MAX_ELEMENTS;
   const lastStart = Math.max(0, els.length - limit);
-  for (let i = 0; i < els.length; i++) {
-    if (i < limit || i >= lastStart) {
-      const s = elementSignature(els[i]);
-      for (let j = 0; j < s.length; j++) {
-        h ^= s.charCodeAt(j);
-        h = Math.imul(h, FNV_PRIME);
-      }
-    }
+  for (let i = 0; i < limit && i < els.length; i++) {
+    h = hashString(h, elementSignature(els[i]));
+  }
+  for (let i = lastStart; i < els.length; i++) {
+    h = hashString(h, elementSignature(els[i]));
   }
   return (h >>> 0).toString(16);
 }

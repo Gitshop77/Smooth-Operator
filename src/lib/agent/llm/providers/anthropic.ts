@@ -9,7 +9,7 @@
  * Auth chain: explicit `apiKey` → `ANTHROPIC_API_KEY` env var → throw.
  */
 
-import { Auth, type ProviderAuthOption } from "../route/auth";
+import { apiKeyAuth, type ProviderAuthOption } from "../route/auth";
 import { Endpoint } from "../route/endpoint";
 import { Framing } from "../route/framing";
 import { make } from "../route/client";
@@ -22,12 +22,8 @@ export const id = "anthropic";
 
 export type Config = { baseURL?: string } & ProviderAuthOption<"optional">;
 
-const auth = (options: ProviderAuthOption<"optional">) => {
-  if ("auth" in options && options.auth) return options.auth;
-  return Auth.optional("apiKey" in options ? options.apiKey : undefined, "apiKey")
-    .orElse(Auth.config("ANTHROPIC_API_KEY"))
-    .pipe(Auth.header("x-api-key"));
-};
+const auth = (options: ProviderAuthOption<"optional">) =>
+  apiKeyAuth(options, "ANTHROPIC_API_KEY", "x-api-key");
 
 export function configure(input: Config = {}) {
  // (SSRF guard): validate any user-supplied baseURL override before
@@ -70,11 +66,11 @@ export function configure(input: Config = {}) {
  * `claude-2`, and `claude-instant` do not.
  */
 function anthropicModelSupportsVision(modelId: string): boolean {
-  const id = modelId.toLowerCase();
+  const lowerId = modelId.toLowerCase();
   return !(
-    id.startsWith("claude-1") ||
-    id.startsWith("claude-2") ||
-    id.includes("claude-instant")
+    lowerId.startsWith("claude-1") ||
+    lowerId.startsWith("claude-2") ||
+    lowerId.includes("claude-instant")
   );
 }
 

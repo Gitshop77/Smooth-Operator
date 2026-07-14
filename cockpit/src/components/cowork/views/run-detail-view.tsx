@@ -84,20 +84,23 @@ export function RunDetailView({ runId: propRunId }: RunDetailViewProps) {
     [tasks, runId],
   );
 
+  const stepsJson = task ? (task as { stepsJson?: unknown }).stepsJson : undefined;
+  const resultsJson = task ? (task as { resultsJson?: unknown }).resultsJson : undefined;
+
   const steps = React.useMemo<TaskStep[]>(
-    () => (task ? parseJsonArray<TaskStep>((task as { stepsJson?: unknown }).stepsJson) : []),
-    [task],
+    () => (task ? parseJsonArray<TaskStep>(stepsJson) : []),
+    [task, stepsJson],
   );
 
  // Surfaces reasoning/tool-calls if the API ever populates `resultsJson`
  // with structured data. Today this is empty for most runs (.audit/data.md §2).
   const results = React.useMemo(
-    () => (task ? parseJsonArray<ToolCallLike>((task as { resultsJson?: unknown }).resultsJson) : []),
-    [task],
+    () => (task ? parseJsonArray<ToolCallLike>(resultsJson) : []),
+    [task, resultsJson],
   );
   const resultsObj = React.useMemo(
-    () => (task ? parseJsonObject((task as { resultsJson?: unknown }).resultsJson) : null),
-    [task],
+    () => (task ? parseJsonObject(resultsJson) : null),
+    [task, resultsJson],
   );
 
   const exportJson = React.useCallback(() => {
@@ -118,8 +121,8 @@ export function RunDetailView({ runId: propRunId }: RunDetailViewProps) {
         completedAt: task.completedAt,
         updatedAt: task.updatedAt,
       },
-      steps: parseJsonArray<TaskStep>((task as { stepsJson?: unknown }).stepsJson),
-      results: parseJsonArray<unknown>((task as { resultsJson?: unknown }).resultsJson),
+      steps: parseJsonArray<TaskStep>(stepsJson),
+      results: parseJsonArray<unknown>(resultsJson),
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -129,8 +132,8 @@ export function RunDetailView({ runId: propRunId }: RunDetailViewProps) {
     document.body.appendChild(a);
     a.click();
     a.remove();
-    URL.revokeObjectURL(url);
-  }, [task]);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }, [task, stepsJson, resultsJson]);
 
   if (isLoading) {
     return (
@@ -169,6 +172,7 @@ export function RunDetailView({ runId: propRunId }: RunDetailViewProps) {
 
   const doneSteps = steps.filter((s) => s.done).length;
   const pct = steps.length === 0 ? 0 : Math.round((doneSteps / steps.length) * 100);
+  const duration = React.useMemo(() => computeDuration(task), [task]);
 
   const hasStructuredResults =
     results.length > 0 ||
@@ -204,9 +208,12 @@ export function RunDetailView({ runId: propRunId }: RunDetailViewProps) {
         <span className="text-xs text-muted-foreground cowork-mono inline-flex items-center gap-1.5">
           <User className="size-3.5" /> {task.assignedTo ?? "unassigned"}
         </span>
-        <span className="text-xs text-muted-foreground cowork-mono inline-flex items-center gap-1.5">
+        <time
+          dateTime={Number.isFinite(+new Date(task.createdAt)) ? new Date(task.createdAt).toISOString() : undefined}
+          className="text-xs text-muted-foreground cowork-mono inline-flex items-center gap-1.5"
+        >
           <CalendarDays className="size-3.5" /> started {timeAgo(task.createdAt)} ago
-        </span>
+        </time>
         {task.createdBy ? (
           <span className="text-xs text-muted-foreground cowork-mono inline-flex items-center gap-1.5">
             by {truncateMiddle(task.createdBy, 20)}
@@ -217,7 +224,7 @@ export function RunDetailView({ runId: propRunId }: RunDetailViewProps) {
       {/* Summary stat cards */}
       <div className="grid gap-3 grid-cols-2 md:grid-cols-4">
         <StatCard label="Steps" value={`${doneSteps}/${steps.length}`} tone="accent" icon={<ListChecks className="size-4" />} delta={steps.length ? `${pct}% complete` : "no steps"} />
-        <StatCard label="Duration" value={computeDuration(task)} icon={<Clock className="size-4" />} />
+        <StatCard label="Duration" value={duration} icon={<Clock className="size-4" />} />
         {/* Cost is NOT exposed by the cockpit API (.audit/data.md §5). */}
         <StatCard label="Cost" value="—" icon={<DollarSign className="size-4" />} delta="not tracked" />
         {/* Model is NOT stored on the Task model. */}
@@ -298,7 +305,12 @@ export function RunDetailView({ runId: propRunId }: RunDetailViewProps) {
             })}
           </ul>
         ) : (
-          <pre className="text-xs cowork-mono text-muted-foreground max-h-64 overflow-auto cowork-scroll rounded-lg border border-border bg-muted/30 p-3">
+          <pre
+            tabIndex={0}
+            role="region"
+            aria-label="Run log (JSON)"
+            className="text-xs cowork-mono text-muted-foreground max-h-64 overflow-auto cowork-scroll rounded-lg border border-border bg-muted/30 p-3"
+          >
             {JSON.stringify(resultsObj, null, 2)}
           </pre>
         )}

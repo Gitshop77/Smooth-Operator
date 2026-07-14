@@ -4,27 +4,27 @@ import { json, withRouteError } from '@/lib/cowork/api/http';
 
 export async function GET(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
-    const q = req.nextUrl.searchParams.get('q') || '';
-    const category = req.nextUrl.searchParams.get('category') || '';
+    const q = (req.nextUrl.searchParams.get('q') || '').trim();
+    const category = (req.nextUrl.searchParams.get('category') || '').trim();
 
  // The cockpit does NOT implement any of these tools yet — this is a
  // forward-looking contract only. Mark every entry `implemented: false`
  // and attach a top-level note so a consuming LLM knows NOT to call them.
-    const catalog: ToolEntry[] = MCP_TOOL_CATALOG.map((t) => ({ ...t, implemented: false }));
-    let tools = catalog;
-    if (q) {
-      const lower = q.toLowerCase();
-      tools = tools.filter(t => t.name.toLowerCase().includes(lower) || t.description.toLowerCase().includes(lower));
-    }
-    if (category) {
-      tools = tools.filter(t => t.category.toLowerCase() === category.toLowerCase());
-    }
+    const ql = q.toLowerCase();
+    const cl = category.toLowerCase();
+    const tools = CATALOG.filter((t) => {
+      const name = t.name.toLowerCase();
+      const desc = t.description.toLowerCase();
+      const mq = !ql || name.includes(ql) || desc.includes(ql);
+      const mc = !cl || t.category.toLowerCase() === cl;
+      return mq && mc;
+    });
     return json({
       description: 'MCP tool catalog — ASPIRATIONAL, not implemented by the cockpit.',
       note: 'None of these tools are served by the cockpit yet. This catalog is published as a forward-looking contract only. Do not invoke these tools against the cockpit; they will return 404 or 501.',
       tools,
       total: tools.length,
-      totalCatalog: catalog.length,
+      totalCatalog: CATALOG.length,
     });
   });
 }
@@ -320,3 +320,8 @@ const MCP_TOOL_CATALOG: ToolEntry[] = [
   { name: 'workspaces_switch', category: 'workspaces', description: 'Switch to a workspace', readOnly: false },
   { name: 'workspaces_move_tab', category: 'workspaces', description: 'Move a tab to a different workspace', readOnly: false },
 ];
+
+// The cockpit does NOT implement any of these tools yet — this is a
+// forward-looking contract only. Materialize the `implemented: false` flag
+// once at module scope rather than rebuilding the catalog on every request.
+const CATALOG: ToolEntry[] = MCP_TOOL_CATALOG.map((t) => ({ ...t, implemented: false }));

@@ -8,7 +8,7 @@
 import * as ort from "onnxruntime-web";
 import { ModelLoader } from "./model-loader";
 import { preprocessScreenshot } from "./preprocessor";
-import { gatherEmbed, f16to32, type EmbeddingMeta } from "./embedding-gather";
+import { gatherEmbed, f16to32, markEmbeddingMetaValidated, type EmbeddingMeta } from "./embedding-gather";
 import { parseBoxes, toPixelCoords } from "./box-parser";
 import type { PixelDetection, DownloadProgress, StatusCallback, VisionStatus } from "./types";
 import {
@@ -32,6 +32,20 @@ import {
   MAX_NEW_TOKENS,
   MODEL_REPO,
 } from "./constants";
+
+/** Tokenizer callable signature (also used for the decode tokenizer below). */
+type TokenizeFn = (
+  str: string,
+  opts: { add_special_tokens: boolean },
+) => Promise<{ input_ids: { data: BigInt64Array | number[] } }>;
+/** Tokenizer decode signature. */
+type DecodeFn = { decode: (ids: number[], opts: unknown) => string };
+
+/** Precomputed KV-cache key/value name arrays (avoids per-step string concat). */
+const pastKeyNames = Array.from({ length: N_LAYERS }, (_, i) => `past_key_${i}`);
+const presentKeyNames = Array.from({ length: N_LAYERS }, (_, i) => `present_key_${i}`);
+const pastValueNames = Array.from({ length: N_LAYERS }, (_, i) => `past_value_${i}`);
+const presentValueNames = Array.from({ length: N_LAYERS }, (_, i) => `present_value_${i}`);
 
 // Lazy-load transformers.js only when needed (keeps the extension bundle small).
 // Reset the cached promise on rejection so a transient fetch failure (network
@@ -182,8 +196,9 @@ export class VisionAssistant {
  // emits silently-garbage embeddings. (Further per-call guards live in
  // `gatherEmbed`.)
       this.validateEmbeddingShapes(scalesBytes);
+      markEmbeddingMetaValidated();
 
-      const sv = new DataView(scalesBytes.buffer);
+      const sv = new DataView(scalesBytes.buffer, scalesBytes.byteOffset, scalesBytes.byteLength);
       this.embScales = new Float32Array(scalesBytes.length >> 1);
       for (let i = 0; i < this.embScales.length; i++) {
         this.embScales[i] = f16to32(sv.getUint16(i * 2, true));
@@ -327,10 +342,7 @@ export class VisionAssistant {
  * feature that appears to work but detects nothing.
  */
   private async assertImageContextToken(): Promise<void> {
-    const t = this.tokenizer as (
-      str: string,
-      opts: { add_special_tokens: boolean },
-    ) => Promise<{ input_ids: { data: BigInt64Array | number[] } }>;
+    const t = this.tokenizer as TokenizeFn;
     const enc = await t("<IMG_CONTEXT>", { add_special_tokens: false });
     const ids = Array.from(enc.input_ids.data, (x: unknown) => Number(x));
     if (ids.length !== 1 || ids[0] !== IMG_CONTEXT_TOKEN) {
@@ -382,6 +394,16 @@ export class VisionAssistant {
 
  // 3. Build prompt + tokenize
     const N = Math.floor((gridHeight * gridWidth) / (MERGE_FACTOR * MERGE_FACTOR));
+ // The vision encoder must emit exactly N feature vectors (one per injected
+ // <IMG_CONTEXT> slot). If dims[0] !== N (model/export skew), the splice at
+ // `visIdx*H` would read past `vdata` and `subarray` would silently clamp to
+ // an empty slice that `embeds.set` writes as a zeroed, confidently-wrong
+ // embedding. Fail loudly instead of emitting garbage boxes.
+    if (Number(visual.dims[0]) !== N) {
+      throw new Error(
+        `Vision encoder output token count ${visual.dims[0]} !== injected <IMG_CONTEXT> count ${N}`,
+      );
+    }
     const promptStr =
       `<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>\n<|im_start|>user\n<image 1><img>` +
       "<IMG_CONTEXT>".repeat(N) +
@@ -393,10 +415,7 @@ export class VisionAssistant {
  // cast compiled but threw `TypeError: tokenizer.__call__ is not a function`
  // at runtime, silently killing Local Vision. Cast to the actual callable
  // signature instead.
-    const tokenizer = this.tokenizer as (
-      str: string,
-      opts: { add_special_tokens: boolean },
-    ) => Promise<{ input_ids: { data: BigInt64Array | number[] } }>;
+    const tokenizer = this.tokenizer as TokenizeFn;
     const enc = await tokenizer(promptStr, { add_special_tokens: false });
     const ids = Array.from(enc.input_ids.data, (x: unknown) => Number(x));
 
@@ -429,20 +448,23 @@ export class VisionAssistant {
     }
 
  // 5. KV-cache prefill
-    const idsBig = BigInt64Array.from(ids.map((x: number) => BigInt(x)));
+    const idsBig = BigInt64Array.from(ids);
     const mkEmptyPast = (): Record<string, ort.Tensor> => {
       const f: Record<string, ort.Tensor> = {};
       for (let i = 0; i < N_LAYERS; i++) {
-        f[`past_key_${i}`] = new ort.Tensor("float32", new Float32Array(0), [1, KV_HEADS, 0, HEAD_DIM]);
-        f[`past_value_${i}`] = new ort.Tensor("float32", new Float32Array(0), [1, KV_HEADS, 0, HEAD_DIM]);
+        f[pastKeyNames[i]] = new ort.Tensor("float32", new Float32Array(0), [1, KV_HEADS, 0, HEAD_DIM]);
+        f[pastValueNames[i]] = new ort.Tensor("float32", new Float32Array(0), [1, KV_HEADS, 0, HEAD_DIM]);
       }
       return f;
     };
 
+    const attnMaskBuf = new BigInt64Array(L + MAX_NEW_TOKENS);
+    attnMaskBuf.fill(BigInt(1));
+
     const feeds: Record<string, ort.Tensor> = {
       input_ids: new ort.Tensor("int64", idsBig, [1, L]),
       inputs_embeds: new ort.Tensor("float32", embeds, [1, L, H]),
-      attention_mask: new ort.Tensor("int64", BigInt64Array.from(new Array(L).fill(BigInt(1))), [1, L]),
+      attention_mask: new ort.Tensor("int64", attnMaskBuf.subarray(0, L), [1, L]),
       position_ids: new ort.Tensor("int64", BigInt64Array.from(ids.map((_: number, i: number) => BigInt(i))), [1, L]),
       ...mkEmptyPast(),
     };
@@ -450,6 +472,9 @@ export class VisionAssistant {
     let res = await this.languageSession.run(feeds);
     let present = res as Record<string, ort.Tensor>;
     const logits = this.getLogits(res);
+    if (logits.dims.length !== 3 || !Number.isFinite(Number(logits.dims[2])) || Number(logits.dims[2]) <= 0) {
+      throw new Error(`Vision detect(): logits tensor is not a valid 3-D [1,T,V] tensor (dims=${JSON.stringify(logits.dims)})`);
+    }
     const V = logits.dims[2];
     let next = argmaxLast(logits.data as Float32Array, V);
     const gen: number[] = [next];
@@ -463,22 +488,26 @@ export class VisionAssistant {
       const f: Record<string, ort.Tensor> = {
         input_ids: new ort.Tensor("int64", BigInt64Array.from([BigInt(next)]), [1, 1]),
         inputs_embeds: new ort.Tensor("float32", emb1, [1, 1, H]),
-        attention_mask: new ort.Tensor("int64", BigInt64Array.from(new Array(pastLen + 1).fill(BigInt(1))), [1, pastLen + 1]),
+        attention_mask: new ort.Tensor("int64", attnMaskBuf.subarray(0, pastLen + 1), [1, pastLen + 1]),
         position_ids: new ort.Tensor("int64", BigInt64Array.from([BigInt(pastLen)]), [1, 1]),
       };
       for (let i = 0; i < N_LAYERS; i++) {
-        f[`past_key_${i}`] = present[`present_key_${i}`];
-        f[`past_value_${i}`] = present[`present_value_${i}`];
+        f[pastKeyNames[i]] = present[presentKeyNames[i]];
+        f[pastValueNames[i]] = present[presentValueNames[i]];
       }
       res = await this.languageSession.run(f);
       present = res as Record<string, ort.Tensor>;
-      next = argmaxLast(this.getLogits(res).data as Float32Array, V);
+      const stepLogits = this.getLogits(res);
+      if (stepLogits.dims.length !== 3 || !Number.isFinite(Number(stepLogits.dims[2])) || Number(stepLogits.dims[2]) <= 0) {
+        throw new Error(`Vision detect(): decode-step logits tensor is not a valid 3-D [1,T,V] tensor (dims=${JSON.stringify(stepLogits.dims)})`);
+      }
+      next = argmaxLast(stepLogits.data as Float32Array, stepLogits.dims[2]);
       gen.push(next);
       pastLen += 1;
     }
 
  // 7. Decode + parse
-    const decodeTokenizer = this.tokenizer as { decode: (ids: number[], opts: unknown) => string };
+    const decodeTokenizer = this.tokenizer as DecodeFn;
     const text = decodeTokenizer.decode(gen, { skip_special_tokens: false });
     const detections = parseBoxes(text);
 

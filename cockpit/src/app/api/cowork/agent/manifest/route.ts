@@ -5,7 +5,8 @@
 // kept in sync with CAPABILITY_FAMILIES below: every advertised family has a
 // matching entry under `endpoints`, and every entry here corresponds to a real
 // route on disk, so agents that consume this manifest will never hit a 404.
-import { json, withRouteError } from '@/lib/cowork/api/http';
+import { json, withRouteError, sanitizeRequestId } from '@/lib/cowork/api/http';
+import type { NextRequest } from 'next/server';
 import {
   AGENT_OPERATING_RULES,
   AGENT_STARTUP_SEQUENCE,
@@ -18,7 +19,7 @@ import {
   withBaseUrl,
 } from '@/lib/cowork/api/agent-bootstrap';
 
-export async function GET(): Promise<Response> {
+export async function GET(req?: NextRequest): Promise<Response> {
   return withRouteError(async () => {
     const version = getVersion();
     const baseUrl = getBaseUrl();
@@ -28,12 +29,12 @@ export async function GET(): Promise<Response> {
       version,
       baseUrl,
       role: 'web dashboard for persisted cowork data (read, create via POST, delete via DELETE)',
-      transports: HTTP_TRANSPORT,
  // This manifest endpoint is itself one of the 5 public discovery routes,
  // so `authMethods: []` here means "this route requires no auth to
  // access". The broader API auth model is described in `dataRouteAuth`
  // below — every other `/api/cowork/*` route requires the X-Cowork-Token
  // header.
+      transports: HTTP_TRANSPORT,
       ...DISCOVERY_ROUTE_AUTH,
       pairingSupported: false,
       startupSequence: withBaseUrl(baseUrl, AGENT_STARTUP_SEQUENCE),
@@ -103,6 +104,8 @@ export async function GET(): Promise<Response> {
           stream: { method: 'GET', path: `${P}/events/stream`, description: 'Subscribe to the SSE event stream (requires the X-Cowork-Token header)' },
         },
       },
+    }, 200, {
+      'cache-control': 'public, max-age=300, stale-while-revalidate=60',
     });
-  });
+  }, sanitizeRequestId(req?.headers.get('x-request-id') ?? null));
 }

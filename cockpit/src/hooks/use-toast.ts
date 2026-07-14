@@ -9,20 +9,21 @@ import type {
 } from "@/components/ui/toast"
 
 const TOAST_LIMIT = 1
-const TOAST_REMOVE_DELAY = 1000000
+const TOAST_REMOVE_DELAY = 1000
 
 type ToasterToast = ToastProps & {
   id: string
   title?: React.ReactNode
   description?: React.ReactNode
   action?: ToastActionElement
+  /** Auto-dismiss after this many ms. Omit for sticky (e.g. error) toasts. */
+  duration?: number
 }
 
-let count = 0
-
-function genId() {
-  count = (count + 1) % Number.MAX_SAFE_INTEGER
-  return count.toString()
+function genId(): string {
+  const c = globalThis.crypto as Crypto | undefined
+  if (c && typeof c.randomUUID === "function") return c.randomUUID()
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
 // Action type literals are inlined directly in the `Action` union — the
@@ -160,7 +161,7 @@ function dispatch(action: Action) {
 
 type Toast = Omit<ToasterToast, "id">
 
-function toast({ ...props }: Toast) {
+function toast(props: Toast) {
   const id = genId()
 
   const update = (props: ToasterToast) =>
@@ -168,7 +169,14 @@ function toast({ ...props }: Toast) {
       type: "UPDATE_TOAST",
       toast: { ...props, id },
     })
-  const dismiss = () => dispatch({ type: "DISMISS_TOAST", toastId: id })
+  let durationTimer: ReturnType<typeof setTimeout> | null = null
+  const dismiss = () => {
+    if (durationTimer) {
+      clearTimeout(durationTimer)
+      durationTimer = null
+    }
+    dispatch({ type: "DISMISS_TOAST", toastId: id })
+  }
 
   dispatch({
     type: "ADD_TOAST",
@@ -181,6 +189,14 @@ function toast({ ...props }: Toast) {
       },
     },
   })
+
+ // Non-persistent toasts auto-expire after `duration` ms (error/critical toasts
+ // omit `duration` and stay until manually dismissed). Reuses the same
+ // DISMISS_TOAST dispatch rather than a new timer. The timer is cleared if the
+ // toast is dismissed early so it never fires a redundant dispatch.
+  if (typeof props.duration === "number" && props.duration > 0) {
+    durationTimer = setTimeout(() => dismiss(), props.duration)
+  }
 
   return {
     id: id,

@@ -16,10 +16,11 @@ export async function handleTakeover(
  // the loop until the user clicks Resume in the side panel. The
  // extractedContent surfaces the reason in the next navigator step's
  // history so the LLM knows why it paused.
+  const reason = action.reason ?? "(no reason provided)";
   return {
     action,
     success: true,
-    message: `Takeover requested: ${action.reason}`,
-    extractedContent: `User takeover needed: ${action.reason}`,
+    message: `Takeover requested: ${reason}`,
+    extractedContent: `User takeover needed: ${reason}`,
   };
 }

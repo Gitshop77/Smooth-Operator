@@ -330,6 +330,43 @@ function ToggleChip({
   );
 }
 
+function SelectField({
+  label,
+  htmlFor,
+  description,
+  value,
+  onValueChange,
+  ariaLabel,
+  options,
+  disabled,
+}: {
+  label: string;
+  htmlFor: string;
+  description?: string;
+  value: string;
+  onValueChange: (v: string) => void;
+  ariaLabel: string;
+  options: { value: string; label: string }[];
+  disabled?: boolean;
+}) {
+  return (
+    <Field label={label} htmlFor={htmlFor} description={description}>
+      <Select value={value} onValueChange={onValueChange} disabled={disabled}>
+        <SelectTrigger id={htmlFor} aria-label={ariaLabel}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map((o) => (
+            <SelectItem key={o.value} value={o.value}>
+              {o.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </Field>
+  );
+}
+
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -359,6 +396,17 @@ const ENUM_VALUES: Record<string, readonly string[]> = {
 };
 
 const HEX_COLOR = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+
+/** Coerce an unknown import value to a boolean, matching the prior inline rule. */
+function coerceBool(v: unknown): boolean {
+  const s = typeof v === "string" ? v.toLowerCase() : v;
+  if (s === true || s === "true") return true;
+  if (s === false || s === "false") return false;
+  return Boolean(v);
+}
+
+/** Clamp the max-steps setting to a finite positive integer (1..100000). */
+const clampMaxSteps = (n: number) => Math.min(Math.max(Math.trunc(n), 1), 100000);
 
 /* Sanitize one section of an *untrusted* import: only known keys (whitelisted
  * via the DEFAULT_SETTINGS shape) are carried over, values are coerced to the
@@ -393,12 +441,17 @@ function sanitizeSection<K extends keyof SettingsState>(
       const n = Number(value);
       if (!Number.isFinite(n)) continue;
       out[key] =
-        key === "maxSteps" ? Math.min(Math.max(Math.trunc(n), 1), 100000) : n;
+        key === "maxSteps" ? clampMaxSteps(n) : n;
     } else if (typeof ref === "boolean") {
-      out[key] = Boolean(value);
+      out[key] = coerceBool(value);
     } else if (typeof ref === "string") {
       const s = String(value);
-      out[key] = key === "accent" && !HEX_COLOR.test(s) ? ref : s;
+      out[key] =
+        key === "accent" && !HEX_COLOR.test(s)
+          ? ref
+          : key === "apiKey"
+            ? s.slice(0, 512)
+            : s;
     } else if (Array.isArray(ref)) {
       out[key] = Array.isArray(value)
         ? value.filter((x) => typeof x === "string")
@@ -443,7 +496,15 @@ export function SettingsView() {
     setSettings((s) => ({ ...s, [key]: { ...s[key], ...patch } }));
 
   const handleExportAll = () => {
-    downloadJson("open-cowork-settings.json", settings);
+ // Redact the secret API key before serializing to disk — exporting the raw
+ // key would write it to the filesystem in cleartext. A re-import of this
+ // file is harmless because the placeholder is not a real credential.
+    const { connections, ...rest } = settings;
+    const exportable = {
+      ...rest,
+      connections: { ...connections, apiKey: "<exported redacted>" },
+    };
+    downloadJson("open-cowork-settings.json", exportable);
     toast({
       title: "Settings exported",
       description: "Downloaded open-cowork-settings.json",
@@ -506,7 +567,14 @@ export function SettingsView() {
     settings.appearance.density === "compact" ? "space-y-4" : "space-y-5";
 
   return (
-    <div className="space-y-6" style={accentStyle}>
+    <div
+      className={cn(
+        "space-y-6",
+        settings.appearance.reduceMotion &&
+          "[&_*]:transition-none [&_*]:animate-none",
+      )}
+      style={accentStyle}
+    >
       <ViewHeader
         eyebrow="Settings"
         title="Configuration"
@@ -567,73 +635,50 @@ export function SettingsView() {
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="grid gap-4 sm:grid-cols-2">
-                <Field label="Theme" htmlFor="appearance-theme">
-                  <Select
-                    value={theme ?? "system"}
-                    onValueChange={(v) => setTheme(v)}
-                  >
-                    <SelectTrigger
-                      id="appearance-theme"
-                      aria-label="Theme"
-                    >
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="light">Light</SelectItem>
-                      <SelectItem value="dark">Dark</SelectItem>
-                      <SelectItem value="system">System</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </Field>
+                <SelectField
+                  label="Theme"
+                  htmlFor="appearance-theme"
+                  ariaLabel="Theme"
+                  value={theme ?? "system"}
+                  onValueChange={(v) => setTheme(v)}
+                  options={[
+                    { value: "light", label: "Light" },
+                    { value: "dark", label: "Dark" },
+                    { value: "system", label: "System" },
+                  ]}
+                />
 
-                <Field
+                <SelectField
                   label="Density"
                   htmlFor="appearance-density"
                   description="Compact tightens vertical spacing."
-                >
-                  <Select
-                    value={settings.appearance.density}
-                    onValueChange={(v) =>
-                      setSection("appearance", {
-                        density: v as SettingsState["appearance"]["density"],
-                      })
-                    }
-                  >
-                    <SelectTrigger
-                      id="appearance-density"
-                      aria-label="Density"
-                    >
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="comfortable">Comfortable</SelectItem>
-                      <SelectItem value="compact">Compact</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </Field>
+                  ariaLabel="Density"
+                  value={settings.appearance.density}
+                  onValueChange={(v) =>
+                    setSection("appearance", {
+                      density: v as SettingsState["appearance"]["density"],
+                    })
+                  }
+                  options={[
+                    { value: "comfortable", label: "Comfortable" },
+                    { value: "compact", label: "Compact" },
+                  ]}
+                />
 
-                <Field
+                <SelectField
                   label="Base font size"
                   htmlFor="appearance-font"
                   description="Applied to the interface text scale."
-                >
-                  <Select
-                    value={settings.appearance.fontSize}
-                    onValueChange={(v) =>
-                      setSection("appearance", { fontSize: v })
-                    }
-                  >
-                    <SelectTrigger id="appearance-font" aria-label="Base font size">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="12">Small · 12px</SelectItem>
-                      <SelectItem value="13">Default · 13px</SelectItem>
-                      <SelectItem value="14">Large · 14px</SelectItem>
-                      <SelectItem value="15">Extra large · 15px</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </Field>
+                  ariaLabel="Base font size"
+                  value={settings.appearance.fontSize}
+                  onValueChange={(v) => setSection("appearance", { fontSize: v })}
+                  options={[
+                    { value: "12", label: "Small · 12px" },
+                    { value: "13", label: "Default · 13px" },
+                    { value: "14", label: "Large · 14px" },
+                    { value: "15", label: "Extra large · 15px" },
+                  ]}
+                />
               </div>
 
               <SettingRow
@@ -731,10 +776,7 @@ export function SettingsView() {
                     value={settings.agent.maxSteps}
                     onChange={(e) =>
                       setSection("agent", {
-                        maxSteps: Math.min(
-                          Math.max(Math.trunc(Number(e.target.value) || 1), 1),
-                          100000,
-                        ),
+                        maxSteps: clampMaxSteps(Number(e.target.value) || 1),
                       })
                     }
                   />
@@ -755,7 +797,7 @@ export function SettingsView() {
               </Field>
 
               <Field label="Modes" description="Enabled agent operating modes.">
-                <div className="flex flex-wrap gap-2">
+                <div className="flex flex-wrap gap-2" role="group" aria-label="Modes">
                   {AGENT_MODES.map((m) => (
                     <ToggleChip
                       key={m}
@@ -950,29 +992,15 @@ export function SettingsView() {
                 />
               </Field>
 
-              <Field
+              <SelectField
                 label="Provider"
                 htmlFor="conn-provider"
                 description="Default model provider."
-              >
-                <Select
-                  value={settings.connections.provider}
-                  onValueChange={(v) =>
-                    setSection("connections", { provider: v })
-                  }
-                >
-                  <SelectTrigger id="conn-provider" aria-label="Provider">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {PROVIDERS.map((p) => (
-                      <SelectItem key={p.id} value={p.id}>
-                        {p.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </Field>
+                ariaLabel="Provider"
+                value={settings.connections.provider}
+                onValueChange={(v) => setSection("connections", { provider: v })}
+                options={PROVIDERS.map((p) => ({ value: p.id, label: p.name }))}
+              />
 
               <Field
                 label="API key"
@@ -1061,7 +1089,7 @@ export function SettingsView() {
               </div>
 
               <Field label="Channels" description="Where alerts are delivered.">
-                <div className="flex flex-wrap gap-2">
+                <div className="flex flex-wrap gap-2" role="group" aria-label="Channels">
                   {NOTIFY_CHANNELS.map((c) => (
                     <ToggleChip
                       key={c}
@@ -1094,26 +1122,20 @@ export function SettingsView() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <Field
+              <SelectField
                 label="Retention policy"
                 htmlFor="data-retention"
                 description="How long run and history records are kept."
-              >
-                <Select
-                  value={settings.data.retention}
-                  onValueChange={(v) => setSection("data", { retention: v })}
-                >
-                  <SelectTrigger id="data-retention" aria-label="Retention policy">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="7d">7 days</SelectItem>
-                    <SelectItem value="30d">30 days</SelectItem>
-                    <SelectItem value="90d">90 days</SelectItem>
-                    <SelectItem value="forever">Forever</SelectItem>
-                  </SelectContent>
-                </Select>
-              </Field>
+                ariaLabel="Retention policy"
+                value={settings.data.retention}
+                onValueChange={(v) => setSection("data", { retention: v })}
+                options={[
+                  { value: "7d", label: "7 days" },
+                  { value: "30d", label: "30 days" },
+                  { value: "90d", label: "90 days" },
+                  { value: "forever", label: "Forever" },
+                ]}
+              />
 
               <div className="flex flex-wrap gap-2 pt-1">
                 <Button variant="outline" onClick={handleExportAll}>
@@ -1201,7 +1223,7 @@ export function SettingsView() {
             <DialogClose asChild>
               <Button variant="outline">Cancel</Button>
             </DialogClose>
-            <Button variant="destructive" onClick={handleClearHistory}>
+            <Button variant="outline" onClick={handleClearHistory}>
               <Trash2 className="size-4" /> Clear history
             </Button>
           </DialogFooter>

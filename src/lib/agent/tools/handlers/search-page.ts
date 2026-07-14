@@ -51,13 +51,17 @@ const SEARCH_PAGE_TIME_BUDGET_MS = 1000;
 
 // ── Static guard against catastrophic-backtracking (ReDoS) patterns ──
 
+// Matches an unbounded (or open-bounded) quantifier token `{n,}` / `{n,m}`.
+// Shared by the two helpers below so the regex can't drift between them.
+const UNBOUNDED_Q = /^\{\d+,\d*\}/;
+
 // A quantifier is "dangerous" when it is unbounded (or open-bounded) repetition:
 // `*` or `+`, or `{n,}` / `{n,m}`. `?` and exact `{n}` cannot create the
 // ambiguity that produces exponential backtracking, so they are treated as safe.
 function atUnboundedQuantifier(src: string, i: number): boolean {
   const c = src[i];
   if (c === "*" || c === "+") return true;
-  if (c === "{") return /^\{\d+,\d*\}/.test(src.slice(i));
+  if (c === "{") return UNBOUNDED_Q.test(src.slice(i));
   return false;
 }
 
@@ -67,7 +71,7 @@ function quantifierLengthAt(src: string, i: number): number {
   const c = src[i];
   if (c === "*" || c === "+") return 1;
   if (c === "{") {
-    const m = /^\{\d+,\d*\}/.exec(src.slice(i));
+    const m = UNBOUNDED_Q.exec(src.slice(i));
     if (m) return m[0].length;
   }
   return 0;
@@ -177,31 +181,32 @@ function splitTopLevelAlternation(content: string): string[] | null {
 // alternatives of an alternation can match overlapping input.
 type CharSet = Set<string> | "ANY";
 
-function digitSet(): Set<string> {
+// Char sets used by `firstCharSet` to judge branch overlap. Hoisted to
+// module-level constants (built once at load) instead of re-allocating a fresh
+// Set on every `hasNestedQuantifier` call.
+const DIGIT_SET: Set<string> = (() => {
   const s = new Set<string>();
   for (let k = 48; k <= 57; k++) s.add(String.fromCharCode(k));
   return s;
-}
-function wordSet(): Set<string> {
+})();
+const WORD_SET: Set<string> = (() => {
   const s = new Set<string>();
   for (let k = 48; k <= 57; k++) s.add(String.fromCharCode(k));
   for (let k = 65; k <= 90; k++) s.add(String.fromCharCode(k));
   for (let k = 97; k <= 122; k++) s.add(String.fromCharCode(k));
   s.add("_");
   return s;
-}
-function spaceSet(): Set<string> {
-  return new Set<string>([" ", "\t", "\n", "\r", "\f", "\v"]);
-}
+})();
+const SPACE_SET: Set<string> = new Set<string>([" ", "\t", "\n", "\r", "\f", "\v"]);
 
 function firstCharSet(branch: string): CharSet {
   if (branch === "") return new Set<string>();
   const c = branch[0];
   if (c === "\\") {
     const e = branch[1];
-    if (e === "d") return digitSet();
-    if (e === "w") return wordSet();
-    if (e === "s") return spaceSet();
+    if (e === "d") return DIGIT_SET;
+    if (e === "w") return WORD_SET;
+    if (e === "s") return SPACE_SET;
     if (e === "D" || e === "W" || e === "S" || e === "b" || e === "B") return "ANY";
     return new Set<string>([e]);
   }
@@ -371,6 +376,7 @@ export async function handleSearchPage(
 ): Promise<ActionResult> {
   const pattern = action.pattern;
   const flags = action.case_sensitive ? "g" : "gi";
+  const needle = pattern.toLowerCase();
   let regex: RegExp | null = null;
   if (action.regex) {
     if (pattern.length > LIMITS.searchPageMaxRegexPattern) {
@@ -404,7 +410,11 @@ export async function handleSearchPage(
     }
   }
   const results: string[] = [];
-  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  const root = document.body;
+  if (!root) {
+    return { action, success: false, message: "document body not available" };
+  }
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   let node: Node | null;
   let count = 0;
   let visits = 0;
@@ -416,21 +426,51 @@ export async function handleSearchPage(
     if (Date.now() > deadline) break;
     visits++;
     let text = node.textContent || "";
+ // Skip text inside <script>/<style> — it is not user-visible and only adds
+ // noise (e.g. matches against code/CSS) and wasted visits on large inline
+ // scripts. Still counted toward the visit cap above so the budget is preserved.
+    const parentTag = (node.parentElement as HTMLElement | null)?.tagName;
+    if (parentTag === "SCRIPT" || parentTag === "STYLE") continue;
  // Cap the per-node text handed to the regex so any pattern we didn't
  // statically reject still operates on bounded input (backtracking cost
  // grows with input length). Substring search is linear and needs no cap.
     if (regex && text.length > SEARCH_PAGE_NODE_TEXT_CAP) {
       text = text.slice(0, SEARCH_PAGE_NODE_TEXT_CAP);
     }
- // Reset lastIndex for global regexes so repeated test() calls work.
-    if (regex) regex.lastIndex = 0;
-    const match = regex
-      ? regex.test(text)
-      : action.case_sensitive
-        ? text.includes(pattern)
-        : text.toLowerCase().includes(pattern.toLowerCase());
+ // Compute only the form each branch actually needs, so we never lowercased
+ // an entire (capped-at-4096-char) text node when a case-sensitive or regex
+ // match is being performed (the ReDoS-guarded regex path handles case itself).
+    let match = false;
+    let matchIdx = -1;
+    let matchLen = 0;
+    if (regex) {
+      regex.lastIndex = 0;
+      const m = regex.exec(text);
+      if (m) {
+        match = true;
+        matchIdx = m.index;
+        matchLen = m[0].length;
+      }
+    } else if (action.case_sensitive) {
+      match = text.includes(pattern);
+      if (match) {
+        matchIdx = text.indexOf(pattern);
+        matchLen = pattern.length;
+      }
+    } else {
+      const textLower = text.toLowerCase();
+      match = textLower.includes(needle);
+      if (match) {
+        matchIdx = textLower.indexOf(needle);
+        matchLen = needle.length;
+      }
+    }
     if (match) {
-      const ctx = text.trim().slice(0, LIMITS.searchPageContextChars);
+ // Center the returned snippet on the actual match (not the node start) so the
+ // LLM sees the relevant region even when the match sits mid-node.
+      const start = Math.max(0, matchIdx - 40);
+      const end = matchIdx + matchLen + 40;
+      const ctx = text.slice(start, end).trim().slice(0, LIMITS.searchPageContextChars);
       results.push(`- ${ctx}`);
       count++;
     }

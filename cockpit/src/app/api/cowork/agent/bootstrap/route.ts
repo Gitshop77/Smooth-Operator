@@ -4,7 +4,7 @@
 // This route is PUBLIC (one of the 5 discovery routes exempted from the
 // X-Cowork-Token middleware check).
 import type { NextRequest } from 'next/server';
-import { json, withRouteError } from '@/lib/cowork/api/http';
+import { json, withRouteError, sanitizeRequestId } from '@/lib/cowork/api/http';
 import {
   buildAgentBootstrapContract,
   getVersion,
@@ -14,10 +14,12 @@ import {
 export async function GET(req: NextRequest): Promise<Response> {
  // Thread the middleware-minted request id so a 500's correlationId matches
  // the `[cowork request]` log line and the response `x-request-id` header.
-  const requestId = req.headers.get('x-request-id') ?? undefined;
+  const requestId = sanitizeRequestId(req.headers.get('x-request-id'));
   return withRouteError(async () => {
     const version = getVersion();
     const baseUrl = getBaseUrl();
-    return json(buildAgentBootstrapContract(baseUrl, version));
+    return json(buildAgentBootstrapContract(baseUrl, version), 200, {
+      'cache-control': 'public, max-age=300',
+    });
   }, requestId);
 }

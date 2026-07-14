@@ -177,6 +177,21 @@ function rateLimitCheck(ip: string): { allowed: boolean; resetAt: number; remain
   return { allowed: true, resetAt, remaining: RATE_LIMIT_MAX - 1 };
 }
 
+// Extract the first non-empty handshake token from `auth.token` /
+// `query.token` (coercing a string[] query to its first element, else '').
+// Shared by the connection handler and the socket `emit` handler so the
+// token-extraction logic stays in one place and cannot drift.
+function extractHandshakeToken(hs: Socket['handshake']): string {
+  const authTok = (hs.auth as { token?: unknown } | undefined)?.token;
+  const queryTok = (hs.query as Record<string, unknown> | undefined)?.token;
+  return (
+    (typeof authTok === 'string' ? authTok : '') ||
+    (typeof queryTok === 'string' ? queryTok : '') ||
+    (Array.isArray(queryTok) && typeof queryTok[0] === 'string' ? queryTok[0] : '') ||
+    ''
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -250,22 +265,10 @@ const eventBuffer: BufferedEvent[] = [];
 let eventCounter = 0;
 
 function recordEvent(channel: string, payload: unknown): BufferedEvent {
- // Do NOT record `system:status` events into the replay buffer. The
- // 15-second status broadcaster (in `main()`) calls
- // `recordEvent('system:status', ...)` which would otherwise push a tick
- // into the 1000-entry buffer every 15s. After ~4.2 hours (1000 × 15s), the
- // buffer would be entirely status ticks — real events (tab:updated,
- // agent:task-updated, network:request, etc.) would be spliced out and
- // reconnecting clients would receive only noise in `events:replay`.
- //
- // Skip the buffer for `system:status`. The broadcaster still calls
- // `io.emit('system:status', ...)` for live consumers; we just don't pollute
- // the replay history. If status history is needed, use a separate small
- // ring buffer (not the shared event buffer).
+  // `system:status` events are emitted directly to live consumers and must not
+  // pollute the replay buffer (the 15s broadcaster would otherwise fill it with
+  // status ticks, evicting real events). Skip the buffer for that channel.
   if (channel === 'system:status') {
- // Return a synthetic event with the next id (so the caller's `io.emit`
- // still receives a consistent `{ id, ts }` envelope) without pushing
- // into `eventBuffer`.
     eventCounter += 1;
     return { id: eventCounter, channel, payload, ts: Date.now() };
   }
@@ -332,6 +335,11 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
 
   const url = (req.url || '/').split('?')[0];
 
+ // Resolve the client IP once per request so it can be reused for the
+ // auth-failure log, the per-IP rate limit, and the success audit log without
+ // re-reading/re-parsing the forwarded-IP headers on each call.
+  const ip = clientIp(req);
+
   try {
  // `/health` is the only unauthenticated route — and it returns
  // ONLY `{ ok: true }` so a liveness probe can't leak client count, event
@@ -342,11 +350,27 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
       return;
     }
 
+ // Per-IP rate limit on the authenticated proxy routes (/emit, /chat, /image)
+ // BEFORE the token check, so an unauthenticated client cannot bypass the
+ // throttle by never supplying a valid token (which would otherwise only ever
+ // produce a 401 and skip the per-IP limit). /health and OPTIONS are excluded.
+    if (
+      req.method === 'POST' &&
+      (url === '/emit' || url === '/chat' || url === '/image')
+    ) {
+      const rl = rateLimitCheck(ip);
+      if (!rl.allowed) {
+        res.setHeader('Retry-After', String(Math.ceil((rl.resetAt - Date.now()) / 1000)));
+        sendJson(res, 429, { error: 'Rate limit exceeded. Try again later.', resetAt: rl.resetAt });
+        return;
+      }
+    }
+
  // All other routes require the shared-secret token.
     if (!tokenMatches(req.headers['x-cowork-token'] as string | undefined, SHARED_SECRET)) {
  // Log failed auth with source IP for security observability.
  // NEVER log the token itself.
-      console.warn(`[cowork-events] 401 Unauthorized (invalid X-Cowork-Token) from ${clientIp(req)}`);
+      console.warn(`[cowork-events] 401 Unauthorized (invalid X-Cowork-Token) from ${ip}`);
       sendJson(res, 401, { error: 'Invalid X-Cowork-Token' });
       return;
     }
@@ -382,15 +406,6 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
         sendJson(res, 413, { error: 'Request body too large (max 1 MB)' });
         return;
       }
- // Per-IP rate limit on the HTTP `/emit` fan-out too (the socket `emit`
- // path already applies it) so an authenticated caller can't flood the
- // replay buffer and evict genuine events for reconnecting clients.
-      const rl = rateLimitCheck(clientIp(req));
-      if (!rl.allowed) {
-        res.setHeader('Retry-After', String(Math.ceil((rl.resetAt - Date.now()) / 1000)));
-        sendJson(res, 429, { error: 'Rate limit exceeded. Try again later.', resetAt: rl.resetAt });
-        return;
-      }
       const body = await readJson<Record<string, unknown>>(req);
       const channel = typeof body.channel === 'string' ? body.channel : '';
       if (!channel) {
@@ -405,7 +420,9 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
       }
       const payload = body.payload ?? null;
  // Mirror the cockpit proxy's 64 KB payload cap (see MAX_EMIT_PAYLOAD_BYTES).
-      if (JSON.stringify(payload).length > MAX_EMIT_PAYLOAD_BYTES) {
+ // Serialize once and reuse for both the cap check and the audit log below.
+      const payloadJson = JSON.stringify(payload);
+      if (payloadJson.length > MAX_EMIT_PAYLOAD_BYTES) {
         sendJson(res, 413, { error: 'payload too large (max 64 KB)' });
         return;
       }
@@ -424,7 +441,7 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
  // Success-path audit log: the `/emit` route proxies to a paid external
  // API-adjacent fan-out, so record what was posted and from where.
       console.info(
-        `[/emit] ok channel=${channel} from=${clientIp(req)} payloadBytes=${JSON.stringify(payload).length} id=${evt.id}` +
+        `[/emit] ok channel=${channel} from=${ip} payloadBytes=${payloadJson.length} id=${evt.id}` +
           (requestId ? ` requestId=${requestId}` : ''),
       );
       sendJson(res, 200, { ok: true, id: evt.id, channel });
@@ -438,13 +455,6 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
       const contentLength = parseInt(req.headers['content-length'] || '0', 10);
       if (contentLength > MAX_BODY_BYTES) {
         sendJson(res, 413, { error: 'Request body too large (max 1 MB)' });
-        return;
-      }
- // Per-IP rate limit — 10 chat requests / minute.
-      const rl = rateLimitCheck(clientIp(req));
-      if (!rl.allowed) {
-        res.setHeader('Retry-After', String(Math.ceil((rl.resetAt - Date.now()) / 1000)));
-        sendJson(res, 429, { error: 'Rate limit exceeded. Try again later.', resetAt: rl.resetAt });
         return;
       }
  // Auth: already enforced above (the global token check).
@@ -567,7 +577,7 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
  // Success-path audit log (the /chat route proxies to a paid external
  // LLM). Without it there is no way to attribute cost or detect abuse.
         console.info(
-          `[/chat] ok sessionId=${sessionId} from=${clientIp(req)} ` +
+          `[/chat] ok sessionId=${sessionId} from=${ip} ` +
             `messages=${messages.length} streamed=${wantStream} contentBytes=${finalText.length}` +
             (requestId ? ` requestId=${requestId}` : ''),
         );
@@ -595,13 +605,6 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
       const contentLength = parseInt(req.headers['content-length'] || '0', 10);
       if (contentLength > MAX_BODY_BYTES) {
         sendJson(res, 413, { error: 'Request body too large (max 1 MB)' });
-        return;
-      }
- // Per-IP rate limit — 10 image requests / minute.
-      const rl = rateLimitCheck(clientIp(req));
-      if (!rl.allowed) {
-        res.setHeader('Retry-After', String(Math.ceil((rl.resetAt - Date.now()) / 1000)));
-        sendJson(res, 429, { error: 'Rate limit exceeded. Try again later.', resetAt: rl.resetAt });
         return;
       }
  // Auth: already enforced above (the global token check).
@@ -642,7 +645,7 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
  // image API). Record size + byte count; the prompt is intentionally not
  // logged (it may contain sensitive user input).
         console.info(
-          `[/image] ok from=${clientIp(req)} size=${size} bytes=${base64.length} promptBytes=${body.prompt.length}` +
+          `[/image] ok from=${ip} size=${size} bytes=${base64.length} promptBytes=${body.prompt.length}` +
             (requestId ? ` requestId=${requestId}` : ''),
         );
         sendJson(res, 200, { ok: true, base64, prompt: body.prompt, size, bytes: base64.length });
@@ -692,6 +695,8 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
  // all, and cross-origin callers must match the allowlist.
   res.writeHead(status, {
     'Content-Type': 'application/json',
+    'X-Content-Type-Options': 'nosniff',
+    'Cache-Control': 'no-store',
   });
   res.end(payload);
 }
@@ -753,15 +758,29 @@ function parseQuery(url: string): Record<string, string> {
  // `decodeURIComponent` throws `URIError` on malformed
  // percent-escapes like `%ZZ` or `%E0%A4%A` (truncated multibyte). A
  // hostile or buggy client could otherwise crash the whole request
- // with a malformed query string. Fall back to the raw value — the
- // caller (currently `/events?since_id=N`) only reads `since_id`,
- // which a sane client always sends as a plain integer; the fallback
- // only kicks in for keys/values the caller didn't intend to read.
+ // with a malformed query string. Decode the key and value
+ // independently: a malformed VALUE still yields the raw value under
+ // the decoded key, rather than dropping the entry entirely (which
+ // would make a consumer's `since_id` lookup miss). The caller
+ // (currently `/events?since_id=N`) only reads `since_id`, which a
+ // sane client always sends as a plain integer; the fallback only
+ // kicks in for keys/values the caller didn't intend to read.
+      let dk: string;
       try {
-        out[decodeURIComponent(k)] = decodeURIComponent(v || '');
+        dk = decodeURIComponent(k);
       } catch {
-        out[k] = v || '';
+        continue;
       }
+      let dv: string;
+      try {
+        dv = decodeURIComponent(v || '');
+      } catch {
+        dv = v || '';
+      }
+      if (dk === '__proto__' || dk === 'constructor' || dk === 'prototype') {
+        continue;
+      }
+      out[dk] = dv;
     }
   }
   return out;
@@ -884,13 +903,7 @@ io.on('connection', (socket: Socket) => {
  // NOT receive `system:status` or `events:replay` — otherwise it would
  // silently read every cockpit event in real time.
   const hs = socket.handshake;
-  const authTok = (hs.auth as { token?: unknown } | undefined)?.token;
-  const queryTok = (hs.query as Record<string, unknown> | undefined)?.token;
-  const connToken =
-    (typeof authTok === 'string' ? authTok : '') ||
-    (typeof queryTok === 'string' ? queryTok : '') ||
-    (Array.isArray(queryTok) && typeof queryTok[0] === 'string' ? queryTok[0] : '') ||
-    '';
+  const connToken = extractHandshakeToken(hs);
   if (!tokenMatches(connToken, SOCKET_SECRET)) {
  // Log the failed handshake auth with source IP for observability.
  // NEVER log the token. Then drop the connection without emitting anything.
@@ -978,13 +991,7 @@ io.on('connection', (socket: Socket) => {
  // auth state is tampered with after connection (defense-in-depth).
   socket.on('emit', (msg: { channel?: string; payload?: unknown }, ack?: (r: unknown) => void) => {
     const hs2 = socket.handshake;
-    const authTok2 = (hs2.auth as { token?: unknown } | undefined)?.token;
-    const queryTok2 = (hs2.query as Record<string, unknown> | undefined)?.token;
-    const emitToken =
-      (typeof authTok2 === 'string' ? authTok2 : '') ||
-      (typeof queryTok2 === 'string' ? queryTok2 : '') ||
-      (Array.isArray(queryTok2) && typeof queryTok2[0] === 'string' ? queryTok2[0] : '') ||
-      '';
+    const emitToken = extractHandshakeToken(hs2);
     if (!tokenMatches(emitToken, SHARED_SECRET)) {
       if (ack) ack({ ok: false, error: 'Invalid X-Cowork-Token' });
       return;

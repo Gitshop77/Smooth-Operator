@@ -8,14 +8,19 @@
  * - `orchestrator-logic.test.ts` — `makeHistoryItem(step, overrides)`
  *
  * Unified signature: `makeHistoryItem(step?, overrides?)` — `step` defaults to
- * 0 and `overrides` defaults to `{}`. Both old call patterns work.
+ * 0 and `overrides` defaults to `{}`. Passing a single object as the first
+ * argument is also supported (treated as `overrides`) via the guard below.
  */
 import type { HistoryItem } from "../../src/lib/agent/types";
 
 export function makeHistoryItem(
-  step: number = 0,
+  step: number | Partial<HistoryItem> = 0,
   overrides: Partial<HistoryItem> = {},
 ): HistoryItem {
+  if (typeof step === "object" && step !== null) {
+    overrides = step as Partial<HistoryItem>;
+    step = 0;
+  }
   return {
     step,
     agent: "navigator",

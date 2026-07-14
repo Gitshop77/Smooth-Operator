@@ -24,6 +24,13 @@ import type { LoopDeps, ActionQueueResult } from "../types";
 import type { LoopDetector } from "../loop-detector";
 import { TAB_LEVEL_ACTIONS } from "../constants";
 
+/** Build a uniform failure {@link ActionResult} for an exception. */
+const toActionError = (a: AgentAction, e: unknown): ActionResult => ({
+  action: a,
+  success: false,
+  message: `Error: ${e instanceof Error ? e.message : String(e)}`,
+});
+
 export async function executeActionQueue(
   deps: LoopDeps,
   actions: AgentAction[],
@@ -125,9 +132,12 @@ export async function executeActionQueue(
       }
     }
 
+    const description = (() => {
+      try { return describeAction(action); } catch { return action.type; }
+    })();
     deps.onEvent({
       type: "action", step, index: i + 1, total: actions.length,
-      name: action.type, description: describeAction(action),
+      name: action.type, description,
     });
     if (dispatcher && ctx) await dispatcher.actionStart(ctx, action);
 
@@ -142,6 +152,10 @@ export async function executeActionQueue(
 
     let result: ActionResult;
     let pageChangedHandled = false;
+    const runLocalAction = async (): Promise<ActionResult> => {
+      try { return await executeAction(action, state); }
+      catch (e) { return toActionError(action, e); }
+    };
     if (deps.onTabAction && TAB_LEVEL_ACTIONS.has(action.type)) {
       try {
         const handled = await deps.onTabAction(action);
@@ -172,21 +186,13 @@ export async function executeActionQueue(
             pageChangedHandled = true;
           }
         } else {
-          try {
-            result = await executeAction(action, state);
-          } catch (e) {
-            result = { action, success: false, message: `Error: ${e instanceof Error ? e.message : String(e)}` };
-          }
+          result = await runLocalAction();
         }
       } catch (e) {
-        result = { action, success: false, message: `Error: ${e instanceof Error ? e.message : String(e)}` };
+        result = toActionError(action, e);
       }
     } else {
-      try {
-        result = await executeAction(action, state);
-      } catch (e) {
-        result = { action, success: false, message: `Error: ${e instanceof Error ? e.message : String(e)}` };
-      }
+      result = await runLocalAction();
     }
 
  // Only reset here if the tab-action branch above didn't already do it —

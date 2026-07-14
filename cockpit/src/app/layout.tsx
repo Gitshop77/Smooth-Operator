@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { headers } from "next/headers";
 import { Geist, Geist_Mono, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
@@ -66,14 +66,24 @@ export const metadata: Metadata = {
   },
 };
 
+// Theme surfaced to native UI surfaces (form controls, scrollbars, color
+// inputs) so they follow the cockpit's dark/light theme. Must live on the
+// `viewport` export — putting `colorScheme`/`themeColor` on `metadata` is a
+// no-op in the App Router.
+export const viewport: Viewport = {
+  colorScheme: "dark light",
+  themeColor: "#0b0b0f",
+};
+
 export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
   const locale = await getRequestLocale();
+  const dir = /^(ar|he|fa|ur|yi|dv)/.test(locale) ? "rtl" : "ltr";
   return (
-    <html lang={locale} suppressHydrationWarning>
+    <html lang={locale} dir={dir} suppressHydrationWarning>
       <body
         className={`${geistSans.variable} ${geistMono.variable} ${jetbrainsMono.variable} antialiased bg-background text-foreground`}
       >

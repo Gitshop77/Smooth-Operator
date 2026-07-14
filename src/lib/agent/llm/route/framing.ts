@@ -52,7 +52,12 @@ function createSSEFramer(): Framing {
  // The transport appends "\n" to every complete line it forwards; that
  // trailing newline is NOT a real blank-line terminator, so drop the
  // empty element it produces before scanning for genuine boundaries.
+ // Strip a single trailing CR from each line so CRLF line endings
+ // (permitted by the SSE spec) don't leak a "\r" into the data value.
       const lines = chunk.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        lines[i] = lines[i].replace(/\r$/, "");
+      }
       if (lines.length > 0 && lines[lines.length - 1] === "") {
         lines.pop();
       }

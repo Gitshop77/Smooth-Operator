@@ -25,7 +25,7 @@ describe("getPricingForModel — uncatalogued models are never free", () => {
     );
   });
   afterEach(() => {
-    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   test("returns a non-zero conservative price for an unknown model", () => {
@@ -49,6 +49,20 @@ describe("getPricingForModel — uncatalogued models are never free", () => {
 });
 
 describe("getPricingForModel — DEFAULT_UNKNOWN_MODEL_PRICE constant (F-02a)", () => {
+  // Stub fetch to a benign empty catalog so the fire-and-forget catalog load
+  // triggered by getPricingForModel is a no-op (deterministic, no network).
+  // Once the prior block's fetch stub no longer leaks in (after the
+  // unstubAllGlobals fix), this block needs its own stub to stay network-free.
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, status: 200, json: async () => ({}) })),
+    );
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   test("DEFAULT_UNKNOWN_MODEL_PRICE is non-zero and flagged uncatalogued", () => {
     expect(DEFAULT_UNKNOWN_MODEL_PRICE.in).toBeGreaterThan(0);
     expect(DEFAULT_UNKNOWN_MODEL_PRICE.out).toBeGreaterThan(0);
@@ -76,7 +90,7 @@ describe("refreshPricingFromCatalog — COWORK_MODEL_CATALOG_URL override (F-02b
   afterEach(() => {
     if (ORIGINAL === undefined) delete process.env.COWORK_MODEL_CATALOG_URL;
     else process.env.COWORK_MODEL_CATALOG_URL = ORIGINAL;
-    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   test("merges a COWORK_MODEL_CATALOG_URL catalog into pricing (override wins)", async () => {
@@ -190,16 +204,21 @@ const SAMPLE_CATALOG: Catalog = {
   },
 };
 
+/** Load SAMPLE_CATALOG into the pricing override via a stubbed fetch (shared by the catalog describe blocks). */
+async function loadSampleCatalog(): Promise<void> {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => ({ ok: true, status: 200, json: async () => SAMPLE_CATALOG }))
+  );
+  await refreshPricingFromCatalog();
+}
+
 describe("getPricingForModel — catalogued models resolve via the live catalog (substring/variant)", () => {
   beforeEach(async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => ({ ok: true, status: 200, json: async () => SAMPLE_CATALOG }))
-    );
-    await refreshPricingFromCatalog();
+    await loadSampleCatalog();
   });
   afterEach(() => {
-    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   test("known model resolves from the catalogued rates", () => {
@@ -224,14 +243,10 @@ describe("getPricingForModel — catalogued models resolve via the live catalog 
 
 describe("Catalog-driven pricing accuracy (replaces static-table)", () => {
   beforeEach(async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => ({ ok: true, status: 200, json: async () => SAMPLE_CATALOG }))
-    );
-    await refreshPricingFromCatalog();
+    await loadSampleCatalog();
   });
   afterEach(() => {
-    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   test("gemini-2.5-pro output resolved from catalog", () => {
@@ -290,7 +305,7 @@ describe("cache_write is mapped and billed (cache_creation fix)", () => {
   });
   afterEach(() => {
     delete process.env.COWORK_MODEL_CATALOG_URL;
-    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   test("cache_write tokens are billed at the cacheWrite rate (not the full input rate)", () => {
@@ -298,7 +313,7 @@ describe("cache_write is mapped and billed (cache_creation fix)", () => {
     const cost = estimateCost("cw-model", 1_000_000, 0, 0, 0, 1_000_000);
     expect(cost).toBeCloseTo(2, 6);
  // 2 < billing those tokens at the full input rate of 10.
-    expect(cost).toBeLessThan((1_000_000 / 1_000_000) * 10);
+    expect(cost).toBeLessThan(10);
  // With no cache-write tokens, the 1M fresh input is billed at the full
  // input rate (10), NOT zero — cache-write absence doesn't void the input.
     expect(estimateCost("cw-model", 1_000_000, 0, 0, 0, 0)).toBeCloseTo(10, 6);

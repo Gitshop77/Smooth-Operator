@@ -32,9 +32,9 @@ export function DataTable({
       )}
     >
       <div className={cn("max-h-[72vh] overflow-auto cowork-scroll", containerClassName)}>
-        <table className="w-full text-sm tnum" aria-label={caption}>
+        <table className="w-full text-sm tnum">
           {caption ? <caption className="sr-only">{caption}</caption> : null}
-          <thead className="sticky top-0 z-10 bg-muted/60 backdrop-blur-sm">
+          <thead className="sticky top-0 z-10 bg-muted/90">
             <tr className="border-b border-border">
               {columns.map((c, i) => (
                 <th

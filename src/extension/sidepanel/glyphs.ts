@@ -50,16 +50,42 @@ const PATHS: Record<GlyphName, string> = {
   loader: `<line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/>`,
 };
 
+/** Escape a string for safe use inside an SVG attribute value. */
+function escapeAttr(s: unknown): string {
+  return String(s).replace(
+    /[&<>"']/g,
+    (c) =>
+      ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[c]!,
+  );
+}
+
+const glyphCache = new Map<string, string>();
+
 /**
  * Return an inline-SVG string for the named glyph.
  *
  * @param name Glyph identifier (see {@link GlyphName}).
  * @param size Square pixel size (default 14 — fits the log-row `.ic` column).
+ * @param label When provided, the glyph becomes an accessible named image
+ *   (`role="img"` + `aria-label`) instead of a decorative `aria-hidden` icon.
  */
-export function glyph(name: GlyphName, size = 14): string {
-  return (
+export function glyph(name: GlyphName, size = 14, label?: string): string {
+  const cacheKey = `${name}:${size}:${label ?? ""}`;
+  const cached = glyphCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  const a11y = label
+    ? `role="img" aria-label="${escapeAttr(label)}"`
+    : `aria-hidden="true"`;
+  const svg =
     `<svg class="glyph" width="${size}" height="${size}" viewBox="0 0 24 24" ` +
     `fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ` +
-    `stroke-linejoin="round" aria-hidden="true">${PATHS[name]}</svg>`
-  );
+    `stroke-linejoin="round" ${a11y}>${PATHS[name]}</svg>`;
+  glyphCache.set(cacheKey, svg);
+  return svg;
 }

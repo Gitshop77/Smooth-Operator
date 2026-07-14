@@ -37,17 +37,17 @@ function DropdownMenuContent({
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.Content>) {
   return (
-    <DropdownMenuPrimitive.Portal>
+    <DropdownMenuPortal>
       <DropdownMenuPrimitive.Content
         data-slot="dropdown-menu-content"
         sideOffset={sideOffset}
         className={cn(
-          "bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 max-h-(--radix-dropdown-menu-content-available-height) min-w-[8rem] origin-(--radix-dropdown-menu-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-md border p-1 shadow-md",
+          "bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 max-h-(--radix-dropdown-menu-content-available-height) min-w-[8rem] origin-(--radix-dropdown-menu-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-md border p-1 shadow-md motion-reduce:animate-none",
           className
         )}
         {...props}
       />
-    </DropdownMenuPrimitive.Portal>
+    </DropdownMenuPortal>
   )
 }
 
@@ -59,7 +59,7 @@ function DropdownMenuGroup({
   )
 }
 
-function DropdownMenuItem({
+const DropdownMenuItem = React.memo(function DropdownMenuItem({
   className,
   inset,
   variant = "default",
@@ -80,9 +80,9 @@ function DropdownMenuItem({
       {...props}
     />
   )
-}
+})
 
-function DropdownMenuCheckboxItem({
+const DropdownMenuCheckboxItem = React.memo(function DropdownMenuCheckboxItem({
   className,
   children,
   checked,
@@ -106,7 +106,7 @@ function DropdownMenuCheckboxItem({
       {children}
     </DropdownMenuPrimitive.CheckboxItem>
   )
-}
+})
 
 function DropdownMenuRadioGroup({
   ...props
@@ -119,7 +119,7 @@ function DropdownMenuRadioGroup({
   )
 }
 
-function DropdownMenuRadioItem({
+const DropdownMenuRadioItem = React.memo(function DropdownMenuRadioItem({
   className,
   children,
   ...props
@@ -141,9 +141,9 @@ function DropdownMenuRadioItem({
       {children}
     </DropdownMenuPrimitive.RadioItem>
   )
-}
+})
 
-function DropdownMenuLabel({
+const DropdownMenuLabel = React.memo(function DropdownMenuLabel({
   className,
   inset,
   ...props
@@ -161,9 +161,9 @@ function DropdownMenuLabel({
       {...props}
     />
   )
-}
+})
 
-function DropdownMenuSeparator({
+const DropdownMenuSeparator = React.memo(function DropdownMenuSeparator({
   className,
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.Separator>) {
@@ -174,7 +174,7 @@ function DropdownMenuSeparator({
       {...props}
     />
   )
-}
+})
 
 function DropdownMenuShortcut({
   className,
@@ -230,7 +230,7 @@ function DropdownMenuSubContent({
     <DropdownMenuPrimitive.SubContent
       data-slot="dropdown-menu-sub-content"
       className={cn(
-        "bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] origin-(--radix-dropdown-menu-content-transform-origin) overflow-hidden rounded-md border p-1 shadow-lg",
+        "bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] origin-(--radix-dropdown-menu-content-transform-origin) overflow-hidden rounded-md border p-1 shadow-lg motion-reduce:animate-none",
         className
       )}
       {...props}

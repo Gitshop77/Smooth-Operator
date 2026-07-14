@@ -110,26 +110,32 @@ async function withTaskMutation<T>(fn: () => Promise<T>): Promise<T> {
  */
 export function validateSchedule(s: ScheduledTaskSchedule): string | null {
   if (s.type === "interval") {
-    if (typeof s.intervalMinutes !== "number" || s.intervalMinutes < 1) {
+    if (typeof s.intervalMinutes !== "number" || !Number.isFinite(s.intervalMinutes) || s.intervalMinutes < 1) {
       return "intervalMinutes must be ≥ 1";
     }
     return null;
   }
   if (s.type === "daily" || s.type === "weekly") {
-    if (typeof s.hour !== "number" || s.hour < 0 || s.hour > 23) {
+    if (typeof s.hour !== "number" || !Number.isFinite(s.hour) || s.hour < 0 || s.hour > 23) {
       return "hour must be 0-23";
     }
-    if (typeof s.minute !== "number" || s.minute < 0 || s.minute > 59) {
+    if (typeof s.minute !== "number" || !Number.isFinite(s.minute) || s.minute < 0 || s.minute > 59) {
       return "minute must be 0-59";
     }
     if (s.type === "weekly") {
-      if (typeof s.dayOfWeek !== "number" || s.dayOfWeek < 0 || s.dayOfWeek > 6) {
+      if (typeof s.dayOfWeek !== "number" || !Number.isFinite(s.dayOfWeek) || s.dayOfWeek < 0 || s.dayOfWeek > 6) {
         return "dayOfWeek must be 0-6 (0=Sun..6=Sat)";
       }
     }
     return null;
   }
   return `unknown schedule type: ${s.type as string}`;
+}
+
+/** Type guard: a persisted entry is a usable {@link ScheduledTask} iff it's an
+ * object whose `schedule` still validates (FULL-REVIEW finding 97). */
+function isValidTaskEntry(t: unknown): t is ScheduledTask {
+  return t != null && typeof t === "object" && validateSchedule((t as ScheduledTask).schedule) === null;
 }
 
 /** List all scheduled tasks (regardless of `enabled`). */
@@ -144,10 +150,7 @@ export async function listScheduledTasks(): Promise<ScheduledTask[]> {
  // Also drop any persisted task whose schedule no longer validates (FULL-REVIEW
  // finding 97: schedule is validated on save but previously trusted on load).
   if (!Array.isArray(arr)) return [];
-  return arr.filter(
-    (t): t is ScheduledTask =>
-      t != null && typeof t === "object" && validateSchedule((t as ScheduledTask).schedule) === null
-  );
+  return arr.filter(isValidTaskEntry);
 }
 
 /**
@@ -166,7 +169,11 @@ export async function saveScheduledTask(task: ScheduledTask): Promise<void> {
   if (validationError) {
     throw new Error(`Invalid schedule: ${validationError}`);
   }
-  const tasks = await listScheduledTasks();
+ // Read the stored task list once and reuse it as the rollback snapshot
+ // (chrome.storage.local has no transaction support). Snapshot the raw value
+ // so rollback is byte-for-byte identical to the prior state.
+  const previousTasks = (await chrome.storage.local.get(STORAGE_KEY))[STORAGE_KEY];
+  const tasks = Array.isArray(previousTasks) ? previousTasks.filter(isValidTaskEntry) : [];
   const idx = tasks.findIndex((t) => t.id === task.id);
  // Keep the original `lastRunAt` if the task already exists (don't clobber
  // run history on a config update).
@@ -187,11 +194,6 @@ export async function saveScheduledTask(task: ScheduledTask): Promise<void> {
   if (idx >= 0) tasks[idx] = merged;
   else tasks.push(merged);
 
- // Snapshot the previous storage state so we can roll back if alarm arming
- // fails. (chrome.storage.local has no transaction support.)
-  const previousTasks = (await chrome.storage.local.get(STORAGE_KEY))[STORAGE_KEY] as
-    | ScheduledTask[]
-    | undefined;
   await chrome.storage.local.set({ [STORAGE_KEY]: tasks });
   try {
     await scheduleAlarm(merged);

@@ -31,7 +31,7 @@ export function ConnectionStatus({ className, compact }: ConnectionStatusProps) 
         <span
           className={cn(
             "absolute inline-flex h-full w-full rounded-full opacity-60",
-            connected ? "bg-accent cowork-pulse" : "bg-muted-foreground/50",
+            connected ? "bg-accent motion-safe:cowork-pulse" : "bg-muted-foreground/50",
           )}
         />
         <span
@@ -41,11 +41,9 @@ export function ConnectionStatus({ className, compact }: ConnectionStatusProps) 
           )}
         />
       </span>
-      {!compact ? (
-        <span className="hidden sm:inline">
-          {connected ? "Live" : "Offline"}
-        </span>
-      ) : null}
+      <span className={cn(!compact && "hidden sm:inline", "sr-only")}>
+        {connected ? "Live" : "Offline"}
+      </span>
     </div>
   );
 }

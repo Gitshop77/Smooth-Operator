@@ -50,7 +50,8 @@ function BookmarkNode({ node, depth }: { node: SampleBookmark; depth: number }) 
           <span className="text-xs text-muted-foreground truncate hidden sm:inline">
             {hostnameOf(node.url ?? "")}
           </span>
-          <ExternalLink className="size-3 text-muted-foreground opacity-0 group-hover:opacity-100 ml-auto shrink-0" />
+          <span className="sr-only"> (opens in new tab)</span>
+          <ExternalLink className="size-3 text-muted-foreground opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 max-sm:opacity-100 ml-auto shrink-0" />
         </a>
       )}
     </div>
@@ -63,17 +64,27 @@ export function CollectionsView() {
   const { data: pinboards, isLoading: pbLoading } = usePinboards();
   const [historyQuery, setHistoryQuery] = React.useState("");
 
+  const enriched = React.useMemo(
+    () =>
+      (history ?? []).map((e) => ({
+        ...e,
+        _ts: new Date(e.visitedAt).getTime(),
+        _title: e.title.toLowerCase(),
+        _url: e.url.toLowerCase(),
+      })),
+    [history],
+  );
+  const sortedHistory = React.useMemo(
+    () => enriched.slice().sort((a, b) => b._ts - a._ts),
+    [enriched],
+  );
   const historyFiltered = React.useMemo(() => {
- // `visitedAt` arrives as an ISO string (Prisma DateTime → JSON
- // serializes to string). Coerce to ms via `new Date(...).getTime()` so
- // the sort is stable.
-    const all = (history ?? []).slice().sort(
-      (a, b) => new Date(b.visitedAt).getTime() - new Date(a.visitedAt).getTime(),
-    );
-    if (!historyQuery.trim()) return all;
+    if (!historyQuery.trim()) return sortedHistory;
     const q = historyQuery.toLowerCase();
-    return all.filter((e) => e.title.toLowerCase().includes(q) || e.url.toLowerCase().includes(q));
-  }, [history, historyQuery]);
+    return sortedHistory.filter(
+      (e) => e._title.includes(q) || e._url.includes(q),
+    );
+  }, [sortedHistory, historyQuery]);
 
   return (
     <div className="space-y-4">
@@ -126,10 +137,21 @@ export function CollectionsView() {
               className="w-56"
             />
           </div>
+          <p role="status" aria-live="polite" className="sr-only">
+            {historyFiltered.length} history entries shown
+          </p>
           {hLoading ? (
             <LoadingSkeleton rows={8} />
           ) : historyFiltered.length === 0 ? (
-            <EmptyState icon={<History className="size-6" />} title="No history" />
+            <EmptyState
+              icon={<History className="size-6" />}
+              title={historyQuery.trim() ? "No matching history" : "No history"}
+              description={
+                historyQuery.trim()
+                  ? `No history entries match “${historyQuery}”.`
+                  : undefined
+              }
+            />
           ) : (
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
               <DataTable caption="Browsing history" columns={["Page", "Visits"]}>
@@ -149,6 +171,7 @@ export function CollectionsView() {
                             title={h.url}
                           >
                             {h.title}
+                            <span className="sr-only"> (opens in new tab)</span>
                           </a>
                           <p className="text-xs text-muted-foreground cowork-mono truncate">{h.url}</p>
                         </div>

@@ -61,7 +61,7 @@ export interface Model {
  * import the same route definitions (via the provider modules), so the keys line up
  * across the message-passing boundary.
  */
-const routeRegistry = new Map<string, Route<any, any>>();
+const routeRegistry = new Map<string, Route<unknown, unknown>>();
 
 export interface GenerationOptions {
   readonly temperature?: number;
@@ -159,7 +159,7 @@ function makeFromTransport<Body, Prepared, FrameType, EventType, State>(
       }
     },
   };
-  routeRegistry.set(routeId, route);
+  routeRegistry.set(routeId, route as Route<unknown, unknown>);
   return route;
 }
 
@@ -170,6 +170,11 @@ export async function generate(
   request: LLMRequest,
   signal?: AbortSignal
 ): Promise<LLMResponse> {
+  if (signal?.aborted) {
+    const err = new Error("The operation was aborted");
+    err.name = "AbortError";
+    throw err;
+  }
   const route = routeRegistry.get(request.model.routeId);
   if (!route) {
  // This is almost always a module-load-order problem, not a provider/auth
@@ -187,12 +192,12 @@ export async function generate(
   }
   const body = await route.body.from(request);
   const prepared = route.prepareTransport(body, request);
-  let content = "";
+  const chunks: string[] = [];
   let usage: LLMResponse["usage"] | undefined;
   for await (const event of route.streamPrepared(prepared, request, signal)) {
     const e = event as { type: string; content?: string; usage?: LLMResponse["usage"] };
-    if (e.type === "text" && e.content) content += e.content;
+    if (e.type === "text" && e.content) chunks.push(e.content);
     if (e.type === "finish" && e.usage) usage = e.usage;
   }
-  return { content, usage };
+  return { content: chunks.join(""), usage };
 }

@@ -24,6 +24,10 @@ const KEY_MAP: Record<string, string> = {
   end: "End",
   pageup: "PageUp",
   pagedown: "PageDown",
+  capslock: "CapsLock",
+  insert: "Insert",
+  contextmenu: "ContextMenu",
+  printscreen: "PrintScreen",
 };
 
 /**
@@ -48,6 +52,14 @@ const MODIFIER_NAMES = new Set([
   "ctrl", "control", "shift", "alt", "meta", "cmd", "command",
 ]);
 
+/** Alias → canonical modifier name, so `control`/`cmd`/`command` collapse to
+ * the same key as `ctrl`/`meta` and membership tests become O(1) Set lookups. */
+const MODIFIER_ALIASES: Record<string, string> = {
+  control: "ctrl",
+  cmd: "meta",
+  command: "meta",
+};
+
 /** Parsed key combination: the main key + active modifiers. */
 export interface ParsedKeys {
   main: string;
@@ -71,8 +83,10 @@ export interface ParsedKeys {
  */
 export function parseKeys(keys: string): ParsedKeys {
   const rawParts = keys.split("+").map((p) => p.trim());
- // Modifier tokens are lowercased for case-insensitive matching.
+ // Modifier tokens are lowercased for case-insensitive matching, then
+ // normalized through the alias table (e.g. `control` → `ctrl`, `cmd` → `meta`).
   const modifiers = rawParts.slice(0, -1).map((p) => p.toLowerCase());
+  const modifierSet = new Set(modifiers.map((m) => MODIFIER_ALIASES[m] ?? m));
  // The main key is kept at its original case.
   let mainRaw = rawParts[rawParts.length - 1] ?? "";
  // A trailing `+` separator with nothing after it denotes a LITERAL "+"
@@ -100,7 +114,7 @@ export function parseKeys(keys: string): ParsedKeys {
 
   const mainLower = mainRaw.toLowerCase();
   let main = KEY_MAP[mainLower] ?? mainRaw;
-  const shift = modifiers.includes("shift");
+  const shift = modifierSet.has("shift");
 
  // Apply Shift to produce the correct literal character. This mirrors what a
  // real keypress would yield; the `send_keys` handler inserts `main`
@@ -116,9 +130,9 @@ export function parseKeys(keys: string): ParsedKeys {
 
   return {
     main,
-    ctrl: modifiers.includes("ctrl") || modifiers.includes("control"),
+    ctrl: modifierSet.has("ctrl"),
     shift,
-    alt: modifiers.includes("alt"),
-    meta: modifiers.includes("meta") || modifiers.includes("cmd") || modifiers.includes("command"),
+    alt: modifierSet.has("alt"),
+    meta: modifierSet.has("meta"),
   };
 }

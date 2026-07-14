@@ -12,6 +12,8 @@ import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import { executeAction, describeAction } from "../src/lib/agent/tools/executor";
 import type { AgentAction } from "../src/lib/agent/types";
 import { makeState } from "./helpers";
+import { allowDomain, clearDomainAllowlist } from "./helpers/domain-stub";
+import { testDescribeActionNewerTypes } from "./helpers/action-behavior";
 
 // ─── describeAction formatting (quick check) ───────────────────────────────
 
@@ -53,27 +55,28 @@ describe("describeAction", () => {
   });
 });
 
+// ─── describeAction (newer action types) ─────────────────────────────────
+// Shared semantic assertions (takeover/verify/load_skill/ask_human), kept in
+// tests/helpers/action-behavior.ts so they aren't duplicated across files.
+testDescribeActionNewerTypes();
+
 // ─── Execution behavior tests ───────────────────────────────────────────────
 
 describe("action execution behavior", () => {
   let originalPrompt: typeof window.prompt;
-  let originalConfirm: typeof window.confirm;
 
   beforeEach(() => {
     originalPrompt = window.prompt;
-    originalConfirm = window.confirm;
  // `evaluate` fails closed without an explicit domain allowlist.
  // The jsdom env runs at http://127.0.0.1:3000, so allowlist "127.0.0.1"
  // (an IP literal — the hardened hostname matcher rejects single-label
  // hosts like "localhost" to block TLD-wide matches).
-    (globalThis as Record<string, unknown>).__openCoworkDomainConfig = {
-      allowedDomains: ["127.0.0.1"],
-    };
+    allowDomain("127.0.0.1");
   });
   afterEach(() => {
     window.prompt = originalPrompt;
-    window.confirm = originalConfirm;
-    delete (globalThis as Record<string, unknown>).__openCoworkDomainConfig;
+    clearDomainAllowlist();
+    document.body.innerHTML = "";
   });
 
   test("takeover: returns success with the reason in extractedContent", async () => {
@@ -195,7 +198,6 @@ describe("action execution behavior", () => {
  // search_page counts text NODES containing the pattern, not occurrences.
  // "Hello world. Hello again." is one text node → 1 match.
     expect(result.message).toContain("1 match");
-    document.body.innerHTML = "";
   });
 
   test("search_page: returns no matches for absent text", async () => {
@@ -206,7 +208,6 @@ describe("action execution behavior", () => {
  // (the search succeeded, it just found nothing — same as find_elements).
     expect(result.success).toBe(true);
     expect(result.message).toContain("No matches");
-    document.body.innerHTML = "";
   });
 
   test("search_page rejects overly long regex patterns", async () => {
@@ -230,7 +231,6 @@ describe("action execution behavior", () => {
     const result = await executeAction(action, makeState());
     expect(result.success).toBe(true);
     expect(result.message).toContain("2 elements");
-    document.body.innerHTML = "";
   });
 
   test("evaluate: executes JS and returns the result", async () => {

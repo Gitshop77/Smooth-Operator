@@ -58,7 +58,7 @@
 
         <div class="test-connection">
           <button type="button" id="testConnection" class="btn btn-ghost">Test connection</button>
-          <span id="testResult" class="test-result"></span>
+          <span id="testResult" class="test-result" role="status" aria-live="polite"></span>
         </div>
       </section>
 
@@ -203,6 +203,9 @@
           <span>JavaScript code (tool implementation)</span>
           <textarea id="toolCode" rows="5" placeholder="// Return a string or object — runs with the page's window/document in scope.&#10;return document.querySelector('table')?.innerText || 'No table found';"></textarea>
         </label>
+        <p class="warning" role="note">
+          Warning: custom-tool code runs in the extension's privileged context. Only add code you trust — never paste untrusted or third-party snippets, as they execute with extension privileges.
+        </p>
         <button type="button" id="addTool" class="btn btn-ghost">Add tool</button>
         <div class="tool-permissions" id="toolPermissions"></div>
         <div id="toolsList"></div>

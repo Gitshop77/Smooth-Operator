@@ -214,7 +214,7 @@ const SKILL_LIMITS = {
 function sanitizeSkillText(value: string, maxLen: number): string {
   const cleaned = value
  // Strip C0/C1 control chars except tab (\t), newline (\n), carriage return (\r).
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, "")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\u00ad\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "")
  // Neutralize forged system-reminder open/close tags.
     .replace(/<(\/?\s*system-reminder\b[^>]*)>/gi, "[$1]");
   return cleaned.length > maxLen ? cleaned.slice(0, maxLen) : cleaned;
@@ -247,7 +247,13 @@ function normalizeCustomSkill(raw: unknown): DomainSkill | null {
         ? [s.domain]
         : []
   )
-    .map((d) => sanitizeSkillText(d, SKILL_LIMITS.domain).trim())
+    .map((d) =>
+      sanitizeSkillText(d, SKILL_LIMITS.domain)
+        .trim()
+        .replace(/^https?:\/\//i, "")
+        .replace(/^\./, "")
+        .replace(/\/+$/, ""),
+    )
     .filter((d) => d.length > 0)
     .slice(0, SKILL_LIMITS.domains);
   if (domains.length === 0) return null; // a skill with no domain can never match
@@ -375,36 +381,29 @@ export async function getSkillFrontmatter(url: string): Promise<SkillFrontmatter
  * chrome.storage.local). The first match wins; built-ins are checked first
  * so user-defined skills can't shadow the bundled ones.
  */
+function appendSkillMeta(body: string, skill: DomainSkill): string {
+  if (skill.dangerousActions?.length) {
+    body += `\n\nDangerous actions on this site: ${skill.dangerousActions.join(", ")}`;
+  }
+  if (skill.shortcuts && Object.keys(skill.shortcuts).length > 0) {
+    body += `\n\nShortcuts:`;
+    for (const [label, how] of Object.entries(skill.shortcuts)) {
+      body += `\n- ${label}: ${how}`;
+    }
+  }
+  return body;
+}
+
 export async function getFullSkill(name: string): Promise<string> {
   for (const skill of BUILT_IN_SKILLS) {
     if (skill.name === name) {
-      let body = skill.instructions;
-      if (skill.dangerousActions?.length) {
-        body += `\n\nDangerous actions on this site: ${skill.dangerousActions.join(", ")}`;
-      }
-      if (skill.shortcuts && Object.keys(skill.shortcuts).length > 0) {
-        body += `\n\nShortcuts:`;
-        for (const [label, how] of Object.entries(skill.shortcuts)) {
-          body += `\n- ${label}: ${how}`;
-        }
-      }
-      return body;
+      return appendSkillMeta(skill.instructions, skill);
     }
   }
   const custom = await loadCustomDomainSkills();
   for (const skill of custom) {
     if (skill?.name === name) {
-      let body = skill.instructions ?? "";
-      if (skill.dangerousActions?.length) {
-        body += `\n\nDangerous actions on this site: ${skill.dangerousActions.join(", ")}`;
-      }
-      if (skill.shortcuts && Object.keys(skill.shortcuts).length > 0) {
-        body += `\n\nShortcuts:`;
-        for (const [label, how] of Object.entries(skill.shortcuts)) {
-          body += `\n- ${label}: ${how}`;
-        }
-      }
-      return body;
+      return appendSkillMeta(skill.instructions ?? "", skill);
     }
   }
   return "";
@@ -444,11 +443,7 @@ export async function getDomainSkills(url: string): Promise<DomainSkill[]> {
  // been removed.
   const custom = await loadCustomDomainSkills();
   for (const skill of custom) {
-    if (
-      typeof skill?.name === "string" &&
-      Array.isArray(skill.domains) &&
-      skill.domains.some((d: string) => hostnameMatches(hostname, d))
-    ) {
+    if (skill.domains.some((d: string) => hostnameMatches(hostname, d))) {
       matches.push(skill);
     }
   }

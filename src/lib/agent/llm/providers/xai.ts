@@ -11,8 +11,6 @@
  */
 
 import * as OpenAICompatibleChat from "../protocols/openai-compatible-chat";
-import { PATH } from "../protocols/openai-compatible-chat";
-import type { LLMProvider } from "../provider";
 import { makeOpenAIChatFacade, type Config } from "./openai";
 import { profiles } from "./openai-compatible-profile";
 
@@ -24,7 +22,7 @@ const facade = makeOpenAIChatFacade({
   envKey: "XAI_API_KEY",
   routeId: "openai-compatible-chat",
   protocol: OpenAICompatibleChat.protocol,
-  path: PATH,
+  path: OpenAICompatibleChat.PATH,
   defaultBaseURL: profiles.xai.baseURL,
 });
 
@@ -41,6 +39,4 @@ export const configure = facade.configure;
  * vision-capable models are correctly detected, and non-vision models get
  * downgraded by the catalog lookup.
  */
-export function toLLMProvider(config: Config & { model: string }): LLMProvider {
-  return facade.toLLMProvider(config);
-}
+export const toLLMProvider = facade.toLLMProvider;

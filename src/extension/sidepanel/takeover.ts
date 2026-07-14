@@ -18,6 +18,16 @@
 import { takeoverBanner, takeoverReason, resumeBtn } from "./elements";
 import { addLogRow } from "./log-renderer";
 
+// The persistent takeover banner is a status region: when it is un-hidden with
+// a new reason, assistive tech should announce it (e.g. the agent paused for a
+// sensitive action the user must perform).
+takeoverBanner?.setAttribute("role", "status");
+takeoverBanner?.setAttribute("aria-live", "polite");
+takeoverBanner?.setAttribute("aria-atomic", "true");
+
+/** Last reason shown in the takeover banner, so a failed RESUME can re-offer it. */
+let lastTakeoverReason: string | null = null;
+
 // ─── Takeover banner ────────────────────────────────────────────────────────
 
 /**
@@ -26,6 +36,7 @@ import { addLogRow } from "./log-renderer";
  * perform a sensitive action (login, payment, captcha, …) and click Resume.
  */
 export function showTakeoverBanner(reason: string): void {
+  lastTakeoverReason = reason;
   if (!takeoverBanner || !takeoverReason) return;
  // `textContent` replaces the entire node's text, so a single assignment is
  // sufficient — any previously-rendered reason (including a duplicate render
@@ -50,14 +61,14 @@ resumeBtn?.addEventListener("click", () => {
   if (resumeBtn) resumeBtn.disabled = true;
   chrome.runtime.sendMessage({ type: "RESUME" }, () => {
     if (chrome.runtime.lastError) {
- // Best-effort: if the orchestrator is still in its takeover wait its
- // onMessage listener catches RESUME even without an explicit handler, so
- // this is normally quiet. A lastError here means the message genuinely
- // failed to deliver (extension context invalidated, background crashed,
- // schema mismatch) — log it so the failure is observable instead of
- // silently swallowed.
+ // The RESUME message genuinely failed to deliver (extension context
+ // invalidated, background crashed, schema mismatch). Re-show the banner with
+ // a retry affordance so the user isn't left believing the agent resumed while
+ // it is still paused.
+      if (resumeBtn) resumeBtn.disabled = false;
+      if (lastTakeoverReason) showTakeoverBanner(lastTakeoverReason);
       addLogRow(
-        { type: "warn", message: "RESUME not delivered: " + (chrome.runtime.lastError?.message || "unknown error") },
+        { type: "error", step: 0, recoverable: true, message: "RESUME not delivered: " + (chrome.runtime.lastError?.message || "unknown error") },
         ""
       );
     }
@@ -88,27 +99,35 @@ function buildDialogOverlay(message: string, okLabel = "OK") {
  // stranded on <body> after the dialog is removed.
   const trigger = (document.activeElement as HTMLElement | null) ?? null;
 
+ // Scope the label/id per dialog instance so two stacked dialogs (e.g. a
+ // confirm over a credential prompt) never produce duplicate element IDs or
+ // ambiguous aria-labelledby/htmlFor associations.
+  const uid = globalThis.crypto?.randomUUID?.() ?? `d${Math.random().toString(36).slice(2)}`;
+  const labelId = `inline-prompt-label-${uid}`;
+
   const overlay = document.createElement("div");
   overlay.className = "password-prompt-overlay";
   overlay.setAttribute("role", "dialog");
   overlay.setAttribute("aria-modal", "true");
  // Point the dialog's accessible name at the prompt label.
-  overlay.setAttribute("aria-labelledby", "inline-prompt-label");
+  overlay.setAttribute("aria-labelledby", labelId);
 
   const box = document.createElement("div");
   box.className = "password-prompt-box";
 
   const label = document.createElement("label");
-  label.id = "inline-prompt-label";
+  label.id = labelId;
   label.textContent = message;
 
   const btnRow = document.createElement("div");
   btnRow.className = "btn-row";
 
   const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
   cancelBtn.textContent = "Cancel";
 
   const okBtn = document.createElement("button");
+  okBtn.type = "button";
   okBtn.textContent = okLabel;
   okBtn.className = "btn-ok";
 
@@ -117,7 +136,7 @@ function buildDialogOverlay(message: string, okLabel = "OK") {
   overlay.append(box);
   document.body.appendChild(overlay);
 
-  return { trigger, overlay, box, label, btnRow, cancelBtn, okBtn };
+  return { trigger, overlay, box, label, btnRow, cancelBtn, okBtn, uid };
 }
 
 /**
@@ -181,7 +200,7 @@ export function promptConfirm(message: string): Promise<boolean> {
     attachDismissBehavior(overlay, () => [cancelBtn, okBtn], () => finish(false));
  // Focus the OK button so keyboard / screen-reader users can confirm
  // immediately (they can Tab to Cancel).
-    setTimeout(() => okBtn.focus(), 0);
+    okBtn.focus();
   });
 }
 
@@ -205,14 +224,18 @@ function openInputDialog(opts: {
   initialValue?: string;
 }): Promise<string | null> {
   return new Promise((resolve) => {
-    const { trigger, overlay, label, btnRow, cancelBtn, okBtn } = buildDialogOverlay(
+    const { trigger, overlay, label, btnRow, cancelBtn, okBtn, uid } = buildDialogOverlay(
       opts.message,
       "OK"
     );
 
     const input = document.createElement("input");
     input.type = opts.masked ? "password" : "text";
-    input.id = "inline-prompt-input";
+    input.id = `inline-prompt-input-${uid}`;
+ // Don't let the browser offer to save credentials typed into the masked
+ // field (secret-redaction hardening) or spell-check the value.
+    input.autocomplete = opts.masked ? "new-password" : "off";
+    input.spellcheck = false;
  // Associate the label with the input AND give the field its own
  // accessible name so screen readers announce it even if the association
  // is lost.
@@ -241,6 +264,6 @@ function openInputDialog(opts: {
     });
     attachDismissBehavior(overlay, () => [input, cancelBtn, okBtn], () => finish(null));
  // Auto-focus the input so the user can type immediately.
-    setTimeout(() => input.focus(), 0);
+    input.focus();
   });
 }

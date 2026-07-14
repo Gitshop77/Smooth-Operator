@@ -82,7 +82,7 @@ export interface BrowserState {
   /** Element bounding rects (for Set-of-Marks screenshot annotation).
  * Each entry has an element index + a nested `rect` with CSS-pixel coords.
  * Sent by content.ts; used by the screenshot annotator (scaled by devicePixelRatio). */
-  elementRects?: Array<{ index: number; rect: { x: number; y: number; width: number; height: number } }>;
+  elementRects?: Array<{ index: number; rect: ElementRect }>;
 }
 
 // ─── Agent output ───────────────────────────────────────────────────────────
@@ -185,7 +185,7 @@ export interface HistoryItem {
 /** Tagged union of all events the agent loop emits to the UI. */
 export type LogEvent =
   | { type: "run-start"; task: string; maxSteps: number }
-  | { type: "planner-step"; step: number; decision: string; goal?: string; plan?: string[] }
+  | { type: "planner-step"; step: number; decision: "continue" | "done" | "web_task"; goal?: string; plan?: string[] }
   | { type: "navigator-step-start"; step: number }
   | { type: "state"; step: number; url: string; elementCount: number; newElementCount: number; pageInfo: string }
   | { type: "thinking"; step: number; text: string; evaluation: string; memory: string; nextGoal: string }

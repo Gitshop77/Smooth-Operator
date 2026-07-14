@@ -1,7 +1,7 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
 import { Prisma } from '@prisma/client';
-import { json, withRouteError, bodyJson, badRequest } from '@/lib/cowork/api/http';
+import { json, withRouteError, bodyJson, badRequest, MAX_NAME_LEN, MAX_TITLE_LEN } from '@/lib/cowork/api/http';
 import { boundedString, validateField, truncateTo } from '@/lib/cowork/api/validation';
 import { db } from '@/lib/db';
 
@@ -39,12 +39,12 @@ export async function POST(req: NextRequest): Promise<Response> {
     } else {
       const trimmed = body.name.trim();
       if (trimmed.length === 0) return badRequest('name is invalid');
-      const nameResult = validateField(boundedString(256), truncateTo(trimmed, 256), 'name');
+      const nameResult = validateField(boundedString(MAX_NAME_LEN), truncateTo(trimmed, MAX_NAME_LEN), 'name');
       if (!nameResult.ok) return badRequest(nameResult.error);
       name = nameResult.value;
     }
-    const partitionRaw = truncateTo(body.partition || `persist:${name.toLowerCase().replace(/\s+/g, '-')}`, 256);
-    const partitionResult = validateField(boundedString(256), partitionRaw, 'partition');
+    const partitionRaw = truncateTo(body.partition || `persist:${name.toLowerCase().replace(/\s+/g, '-')}`, MAX_NAME_LEN);
+    const partitionResult = validateField(boundedString(MAX_NAME_LEN), partitionRaw, 'partition');
     if (!partitionResult.ok) return badRequest(partitionResult.error);
     const partition = partitionResult.value;
     const isIncognito = Boolean(body.isIncognito);
@@ -52,8 +52,8 @@ export async function POST(req: NextRequest): Promise<Response> {
     let userAgent: string | null = null;
     if (body.userAgent != null) {
       if (typeof body.userAgent !== 'string') return badRequest('userAgent must be a string');
-      const uaRaw = truncateTo(body.userAgent, 512);
-      const uaResult = validateField(boundedString(512), uaRaw, 'userAgent');
+      const uaRaw = truncateTo(body.userAgent, MAX_TITLE_LEN);
+      const uaResult = validateField(boundedString(MAX_TITLE_LEN), uaRaw, 'userAgent');
       if (!uaResult.ok) return badRequest(uaResult.error);
       userAgent = uaResult.value;
     }

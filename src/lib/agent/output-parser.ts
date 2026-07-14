@@ -8,6 +8,7 @@
  */
 
 import { AgentOutputSchema, PlannerOutputSchema } from "./tools/schema";
+import type { ZodType } from "zod";
 import type { AgentOutput, PlannerOutput } from "./types";
 
 /** Maximum characters of the raw payload to include in error messages. */
@@ -24,17 +25,20 @@ const MAX_ZOD_ISSUES = 5;
  */
 const MAX_JSON_LENGTH = 1_000_000;
 
+/**
+ * Upper bound on how many `{` candidates {@link extractJson} will balanced-scan
+ * before bailing to the last-open/last-close fallback. An adversarial payload of
+ * all `{` would otherwise scan O(n²) char-compares; capping the candidates keeps
+ * the worst case at MAX_CANDIDATES × n and stays correct for well-formed output
+ * (the first balanced brace wins) and for the legitimate large balanced payloads
+ * (the first candidate balances quickly, well under the cap).
+ */
+const MAX_CANDIDATES = 1000;
+
 /** Tagged-union result of a parse attempt. */
-export interface ParseResult<T> {
-  /** Whether parsing + validation succeeded. */
-  ok: boolean;
-  /** The validated output (only present when `ok` is true). */
-  output?: T;
-  /** Human-readable error message (only present when `ok` is false). */
-  error?: string;
-  /** The original raw text, always present (for debugging / streaming). */
-  raw: string;
-}
+export type ParseResult<T> =
+  | { ok: true; output: T; error?: string; raw: string }
+  | { ok: false; output?: T; error: string; raw: string };
 
 /**
  * Strip markdown fences and isolate the JSON object from surrounding prose.
@@ -81,7 +85,19 @@ export function extractJson(raw: string): string {
   }
   if (candidates.length === 0) return s;
 
+  let checked = 0;
+  let scanned = 0;
+ // Cumulative scan budget (a few × the raw-length cap). An all-`{` payload
+ // within MAX_JSON_LENGTH would otherwise incur ~MAX_CANDIDATES × n char
+ // comparisons before the fallback; bound total work so an adversarial input
+ // aborts after a handful of scans instead of ~1e9 comparisons.
+  const SCAN_BUDGET = MAX_JSON_LENGTH * 4;
   for (const start of candidates) {
+    if (checked >= MAX_CANDIDATES) break;
+    const span = s.length - start;
+    if (scanned + span > SCAN_BUDGET) break;
+    scanned += span;
+    checked++;
     const end = balancedEnd(s, start);
     if (end !== -1) return s.slice(start, end + 1);
   }
@@ -188,13 +204,6 @@ function decodeJson(
   raw: string,
   jsonStr: string,
 ): { ok: false; error: string; raw: string } | { ok: true; parsed: unknown } {
-  if (jsonStr.length > MAX_JSON_LENGTH) {
-    return {
-      ok: false,
-      error: `Extracted JSON is ${jsonStr.length} characters — exceeds the ${MAX_JSON_LENGTH}-character budget.`,
-      raw,
-    };
-  }
   try {
     return { ok: true, parsed: JSON.parse(jsonStr) };
   } catch (e) {
@@ -206,14 +215,19 @@ function decodeJson(
  * Parse a raw navigator LLM response into a validated {@link AgentOutput}.
  * Returns `{ ok: false, error }` on JSON, budget, or schema failure.
  */
-export function parseAgentOutput(raw: string): ParseResult<AgentOutput> {
+/**
+ * Generic parser shared by {@link parseAgentOutput} / {@link parsePlannerOutput}.
+ * Guards the raw length, decodes + extracts the JSON, then validates against the
+ * given schema — returning the same {@link ParseResult} shape for both.
+ */
+function parseOutput<T>(schema: ZodType<T>, raw: string): ParseResult<T> {
   const oversize = guardRawLength(raw);
   if (oversize) return oversize;
   const decoded = decodeJson(raw, extractJson(raw));
   if (!decoded.ok) return decoded;
-  const result = AgentOutputSchema.safeParse(decoded.parsed);
+  const result = schema.safeParse(decoded.parsed);
   if (result.success) {
-    return { ok: true, output: result.data as AgentOutput, raw };
+    return { ok: true, output: result.data, raw };
   }
   return {
     ok: false,
@@ -222,22 +236,14 @@ export function parseAgentOutput(raw: string): ParseResult<AgentOutput> {
   };
 }
 
+export function parseAgentOutput(raw: string): ParseResult<AgentOutput> {
+  return parseOutput(AgentOutputSchema, raw);
+}
+
 /**
  * Parse a raw planner LLM response into a validated {@link PlannerOutput}.
  * Returns `{ ok: false, error }` on JSON, budget, or schema failure.
  */
 export function parsePlannerOutput(raw: string): ParseResult<PlannerOutput> {
-  const oversize = guardRawLength(raw);
-  if (oversize) return oversize;
-  const decoded = decodeJson(raw, extractJson(raw));
-  if (!decoded.ok) return decoded;
-  const result = PlannerOutputSchema.safeParse(decoded.parsed);
-  if (result.success) {
-    return { ok: true, output: result.data as PlannerOutput, raw };
-  }
-  return {
-    ok: false,
-    error: `Schema validation error: ${formatZodError(result.error)}`,
-    raw,
-  };
+  return parseOutput(PlannerOutputSchema, raw);
 }

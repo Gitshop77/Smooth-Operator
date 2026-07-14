@@ -24,6 +24,9 @@ export async function handleFindText(
   if (!want) {
     return { action, success: false, message: "find_text requires non-empty text" };
   }
+  if (!document.body) {
+    return { action, success: false, message: "find_text: page has no body" };
+  }
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
  // Skip text inside non-rendered containers (script/style/noscript/template):
  // those text nodes are not user-visible but would otherwise pass the
@@ -38,7 +41,8 @@ export async function handleFindText(
   let visits = 0;
   while ((node = walker.nextNode()) && visits < LIMITS.searchPageMaxNodeVisits) {
     visits++;
-    if (node.textContent && node.textContent.toLowerCase().includes(want)) {
+    const t = node.textContent;
+    if (t && t.length >= want.length && t.toLowerCase().includes(want)) {
  // Text nodes inside document.body always have a non-null `parentElement`;
  // if it is somehow missing (detached/oddly-attached node), skip it rather
  // than risking an unsafe `parentNode` cast that could throw in isVisible.

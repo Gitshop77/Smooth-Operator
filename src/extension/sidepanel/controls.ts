@@ -29,6 +29,25 @@ let running = false;
 let stopDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let isPaused = false;
 
+// Mark the decorative live-dot and the step-progress label for assistive tech.
+if (liveDot) liveDot.setAttribute("aria-hidden", "true");
+if (stepLabel) stepLabel.setAttribute("aria-live", "polite");
+
+/** Single source of truth for the pause button's label / accessible name / class. */
+function setPauseButtonUi(paused: boolean): void {
+  if (!pauseBtn) return;
+  pauseBtn.textContent = paused
+    ? (chrome.i18n?.getMessage("resume") || "Resume")
+    : (chrome.i18n?.getMessage("pause") || "Pause");
+  pauseBtn.setAttribute(
+    "aria-label",
+    paused
+      ? (chrome.i18n?.getMessage("resume_agent") || "Resume agent")
+      : (chrome.i18n?.getMessage("pause_agent") || "Pause agent")
+  );
+  pauseBtn.classList.toggle("paused", paused);
+}
+
 // ─── Run / Stop UI ─────────────────────────────────────────────────────────
 
 /** Toggle run/stop button state and the live activity indicator. */
@@ -56,21 +75,12 @@ export function setRunning(v: boolean): void {
  // starts. Without resetting isPaused on new-run, the first Pause click on
  // a fresh run would toggle the stale `true` → `false` (no-op write) and the
  // agent wouldn't actually pause — the user had to click twice.
-  if (pauseBtn) {
-    pauseBtn.textContent = chrome.i18n?.getMessage("pause") || "Pause";
- // Keep the accessible name in lockstep with the visible label (finding:
- // pause button's accessible name never updates with its state). Localize
- // from the same i18n bundle as the visible label so screen-reader users
- // hear the label in their locale, not hardcoded English.
-    pauseBtn.setAttribute(
-      "aria-label",
-      chrome.i18n?.getMessage("pause_agent") || "Pause agent"
-    );
-    pauseBtn.classList.remove("paused");
-  }
+  setPauseButtonUi(false);
   isPaused = false;
   if (!v) {
-    chrome.storage.session.set({ open_cowork_paused: false }).catch(() => { /* best-effort */ });
+    if (typeof chrome !== "undefined" && chrome.storage?.session) {
+      chrome.storage.session.set({ open_cowork_paused: false }).catch(() => { /* best-effort */ });
+    }
   }
  // Sync the lifecycle icon + task badge to the new run state.
   setLifecycle(v ? "thinking" : "idle");
@@ -113,6 +123,7 @@ runBtn.addEventListener("click", () => {
   clearRunTotals();
   stepLabel.textContent = `step 0 / ${maxSteps}`;
   barFill.style.width = "0%";
+  barFill.parentElement?.setAttribute("aria-valuenow", "0");
   hideTakeoverBanner();
   clearThinkingPanel();
   setTaskStatus("pending");
@@ -177,6 +188,8 @@ stopBtn.addEventListener("click", () => {
         },
         ""
       );
+      clearTimeout(stopDebounceTimer ?? undefined);
+      stopDebounceTimer = null;
       return;
     }
     addLogRow({ type: "info", message: "Stopping after current step…" }, "");
@@ -193,22 +206,7 @@ stopBtn.addEventListener("click", () => {
 
 pauseBtn?.addEventListener("click", () => {
   isPaused = !isPaused;
-  if (pauseBtn) {
-    pauseBtn.textContent = isPaused
-      ? (chrome.i18n?.getMessage("resume") || "Resume")
-      : (chrome.i18n?.getMessage("pause") || "Pause");
- // Update the accessible name in lockstep with the visible label (finding:
- // pause button's accessible name never updates with its state). This also
- // overrides the static aria-label declared in sidepanel.html at runtime.
- // Localize from the same i18n bundle as the visible label.
-    pauseBtn.setAttribute(
-      "aria-label",
-      isPaused
-        ? (chrome.i18n?.getMessage("resume_agent") || "Resume agent")
-        : (chrome.i18n?.getMessage("pause_agent") || "Pause agent")
-    );
-    pauseBtn.classList.toggle("paused", isPaused);
-  }
+  setPauseButtonUi(isPaused);
   chrome.storage.session.set({ open_cowork_paused: isPaused }, () => {
     if (chrome.runtime.lastError) {
       console.warn("[sidepanel] set paused flag failed:", chrome.runtime.lastError);
@@ -247,15 +245,8 @@ chrome.runtime.sendMessage({ type: "STATUS" }, (res: StatusResponse) => {
   chrome.storage.session.get(["open_cowork_paused"], (s) => {
     if (chrome.runtime.lastError) return;
     if (s?.open_cowork_paused === true && res?.running) {
-      if (pauseBtn) {
-        pauseBtn.textContent = chrome.i18n?.getMessage("resume") || "Resume";
- // Sync the accessible name when restoring a paused run on panel reopen.
-        pauseBtn.setAttribute(
-          "aria-label",
-          chrome.i18n?.getMessage("resume_agent") || "Resume agent"
-        );
-        pauseBtn.classList.add("paused");
-      }
+      setPauseButtonUi(true);
+      setLifecycle("waiting");
       isPaused = true;
     }
   });

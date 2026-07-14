@@ -1,10 +1,14 @@
 /**
  * Context injection points.
  *
- * Pure functions that each return a nudge string (or `null`) based on the
- * current {@link LoopState} + browser state. The injection flow is split into
- * two entry points (there is no single "block builder" — the docstring
- * formerly called it `buildInjectionBlock`, which does not exist):
+ * The individual `inject*` helpers are pure — each returns a nudge string (or
+ * `null`) based on the current {@link LoopState} + browser state. The two
+ * `build*` entry points below are NOT pure: they intentionally carry fire-once
+ * side effects on caller-owned {@link LoopState} (the budget-warning flags).
+ *
+ * The injection flow is split into two entry points (there is no single "block
+ * builder" — the docstring formerly called it `buildInjectionBlock`, which does
+ * not exist):
  *
  * - {@link buildPreObserveNudges} runs the six pre-observe nudges (budget,
  * cost-budget, replan, exploration, loop-detection, force-done) and
@@ -21,7 +25,7 @@ import {
   REPLAN_NUDGE_FAILURES,
   EXPLORATION_NUDGE_STEPS,
   CAPTCHA_URL_HINTS,
-  DOWNLOAD_URL_HINTS,
+  DOWNLOAD_RE,
 } from "../constants";
 
 /**
@@ -185,14 +189,18 @@ export function injectCaptchaWaitNudge(url: string, title: string = ""): string 
  * 8. Downloads-check nudge — returns a nudge string when the page URL suggests
  * a download is in progress.
  */
+/** Boundary-aware download-URL detector (avoids substring false positives
+ * like `.target` matching `.tar`, `.gzip` matching `.gz`, `.pdfx` matching
+ * `.pdf`). Derived from `DOWNLOAD_URL_HINTS` in `../constants`. */
 export function injectDownloadsCheckNudge(url: string): string | null {
-  const lower = url.toLowerCase();
-  if (!DOWNLOAD_URL_HINTS.some((h) => lower.includes(h))) return null;
+  if (!DOWNLOAD_RE.test(url)) return null;
  // Escape the page-controlled URL before embedding it in the `<sys>` block so
- // a hostile page can't forge tag structure (finding [33]).
-  const safeUrl = escapeXml(url);
+ // a hostile page can't forge tag structure (finding [33]). Truncate BEFORE
+ // escaping so a trailing entity (e.g. `&am`) can never be split mid-escape.
+  const display = url.length > 40 ? "…" + url.slice(-40) : url;
+  const safeUrl = escapeXml(display);
   return (
-    `DOWNLOAD DETECTED: this URL appears to be a downloadable file (${safeUrl.slice(-40)}). ` +
+    `DOWNLOAD DETECTED: this URL appears to be a downloadable file (${safeUrl}). ` +
     `If a download has started, wait for it to complete before navigating away. ` +
     `If the browser is showing a download prompt, accept it; otherwise call done with the file path.`
   );

@@ -77,8 +77,8 @@ export function cleanAnswer(answer: string): string {
 }
 
 /** Exact-match check (case-insensitive, quote-stripped). Returns 1 or 0. */
-export function exactMatch(ref: string, pred: string): number {
-  return cleanAnswer(pred) === cleanAnswer(ref) ? 1 : 0;
+export function exactMatch(ref: string, pred: string, predClean?: string): number {
+  return (predClean ?? cleanAnswer(pred)) === cleanAnswer(ref) ? 1 : 0;
 }
 
 /**
@@ -101,8 +101,8 @@ export function splitOrAlternatives(ref: string): string[] {
  * `ref="0"` does NOT match `pred="10"`. Otherwise falls back to a plain
  * substring check. An empty reference (no alternatives) is a no-op → 1.
  */
-export function mustInclude(ref: string, pred: string, tokenize = false): number {
-  const cp = cleanAnswer(pred);
+export function mustInclude(ref: string, pred: string, tokenize = false, predClean?: string): number {
+  const cp = predClean ?? cleanAnswer(pred);
   const alternatives = splitOrAlternatives(ref).map(cleanAnswer);
   if (alternatives.length === 0) return 1;
   if (tokenize && alternatives.every((a) => /^\S+$/.test(a))) {
@@ -151,14 +151,15 @@ export class StringEvaluator {
   evaluate(input: StringEvaluatorInput): StringEvaluatorResult {
     let score = 1.0;
     const reasons: string[] = [];
+    const cleanPred = cleanAnswer(input.prediction);
     for (const ref of input.referenceAnswers) {
       let cur: number;
       switch (ref.type) {
         case "exact_match":
-          cur = exactMatch(ref.ref, input.prediction);
+          cur = exactMatch(ref.ref, input.prediction, cleanPred);
           break;
         case "must_include":
-          cur = mustInclude(ref.ref, input.prediction, input.tokenize);
+          cur = mustInclude(ref.ref, input.prediction, input.tokenize, cleanPred);
           break;
         case "regex": {
  // Invalid regex pattern — treat as no match (don't crash).

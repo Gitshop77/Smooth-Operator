@@ -71,6 +71,19 @@ async function withMemoryMutation<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
+ * Normalize a stored value into a `{ domain -> SiteMemory }` map. Guards
+ * against type-mismatched / corrupt storage (a non-object or array value
+ * under the key) so callers don't throw on `Object.values` / `for..in`
+ * downstream. Returns an empty object when the value isn't a non-null,
+ * non-array object.
+ */
+function normalizeMemoryMap(raw: unknown): Record<string, SiteMemory> {
+  return raw && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as Record<string, SiteMemory>)
+    : {};
+}
+
+/**
  * Load the full map of `{ domain -> SiteMemory }` from storage.
  * Returns an empty object on any storage / parse error.
  */
@@ -80,13 +93,7 @@ export async function loadAllMemories(): Promise<Record<string, SiteMemory>> {
     try {
       const res = await chrome.storage.local.get(STORAGE_KEY);
       const raw = res[STORAGE_KEY];
- // Guard against type-mismatched / corrupt storage (e.g. a non-object or
- // array value under the same key) so callers don't throw on `Object.values`
- // / `for..in` downstream. Require a non-null, non-array object.
-      const map =
-        raw && typeof raw === "object" && !Array.isArray(raw)
-          ? (raw as Record<string, SiteMemory>)
-          : {};
+      const map = normalizeMemoryMap(raw);
       memoriesCache = map;
       return map;
     } catch {
@@ -96,11 +103,7 @@ export async function loadAllMemories(): Promise<Record<string, SiteMemory>> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : {};
- // Require a non-null, non-array object; otherwise fall back to empty.
-    const map =
-      parsed && typeof parsed === "object" && !Array.isArray(parsed)
-        ? (parsed as Record<string, SiteMemory>)
-        : {};
+    const map = normalizeMemoryMap(parsed);
     memoriesCache = map;
     return map;
   } catch {
@@ -133,7 +136,7 @@ export async function saveMemory(domain: string, notes: string): Promise<void> {
   const d = domain.trim().toLowerCase();
   if (!d) return;
   await withMemoryMutation(async () => {
-    const all = await loadAllMemories();
+    const all = { ...(await loadAllMemories()) };
     if (!notes.trim()) {
       delete all[d];
     } else {
@@ -148,7 +151,7 @@ export async function deleteMemory(domain: string): Promise<void> {
   const d = domain.trim().toLowerCase();
   if (!d) return;
   await withMemoryMutation(async () => {
-    const all = await loadAllMemories();
+    const all = { ...(await loadAllMemories()) };
     if (!(d in all)) return;
     delete all[d];
     await writeAllMemories(all);
@@ -194,6 +197,9 @@ export async function getMemoriesForUrl(url: string): Promise<SiteMemory[]> {
  */
 export function formatMemories(memories: SiteMemory[]): string {
   if (memories.length === 0) return "";
-  const lines = memories.map((m) => `[${m.domain}]: ${m.notes}`);
+  const lines = memories.map(
+    (m) =>
+      `[${m.domain.replace(/<\/site_memory>/gi, "<\\/site_memory>")}]: ${m.notes.replace(/<\/site_memory>/gi, "<\\/site_memory>")}`,
+  );
   return `<site_memory>\n${lines.join("\n")}\n</site_memory>`;
 }

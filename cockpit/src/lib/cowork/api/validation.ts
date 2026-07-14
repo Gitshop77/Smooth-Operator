@@ -36,16 +36,8 @@ export function boundedString(max: number): z.ZodString {
 
 /** Zod helper: a non-empty bounded string (1..max chars). */
 export function nonEmptyString(max: number): z.ZodString {
-  return z.string().min(1).max(max);
+  return boundedString(max).min(1);
 }
-
-/**
- * Shell / injection metacharacters that must never appear in a cron
- * expression (the cockpit stores these and a future scheduler may shell out
- * or pass them to a cron parser). Covers `;`, `&`, `|`, `$`, backticks and
- * parentheses `(`, `)`.
- */
-const CRON_FORBIDDEN = /[;&|`$()]/;
 
 /**
  * Safe cron-field grammar. Each of the five space-separated fields must be a
@@ -55,11 +47,18 @@ const CRON_FORBIDDEN = /[;&|`$()]/;
  * • `?` (allowed for cron's day-of-month / day-of-week "no specific value")
  * This rejects the degenerate input the previous loose character class
  * permitted — bare `-` or `/`, leading/trailing/doubled separators, and token
- * soup such as `*,` or `5?`. (Shell metacharacters remain blocked separately
- * by `CRON_FORBIDDEN` above.)
+ * soup such as `*,` or `5?`.
  */
-const CRON_FIELD =
-  /^(?:\?|(?:\*|\d+)(?:\/\d+)?(?:-\d+(?:\/\d+)?)?(?:,(?:\*|\d+)(?:\/\d+)?(?:-\d+(?:\/\d+)?)?)*)$/;
+// One component of a cron field, factored out so the (ReDoS-safe, anchored)
+// grammar is defined exactly once and composed below. Kept disjoint so a `*` can
+// carry only a step (never a range) and a numeric can carry a range or a step
+// (never both) — this vetoes degenerate forms like `*-5` or `5/5-10`.
+const CRON_STAR = '\\*(?:\\/[1-9]\\d*)?';
+const CRON_NUM = '\\d+(?:-\\d+)?(?:\\/[1-9]\\d*)?';
+const CRON_COMP = '(?:' + CRON_STAR + '|' + CRON_NUM + ')';
+const CRON_FIELD = new RegExp(
+  '^(?:\\?|' + CRON_COMP + '(?:,' + CRON_COMP + ')*)$',
+);
 
 /**
  * Validate a strict 5-field cron expression. Rejects anything containing shell
@@ -71,7 +70,6 @@ export const scheduleCronSchema = z
   .max(100)
   .refine(
     (val) => {
-      if (CRON_FORBIDDEN.test(val)) return false;
       const fields = val.trim().split(/\s+/);
       if (fields.length !== 5) return false;
       return fields.every((f) => f.length > 0 && CRON_FIELD.test(f));

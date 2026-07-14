@@ -124,7 +124,11 @@ interface ExtractResult {
   warning?: string;
 }
 
-function extractLocatorHtml(locator: string, pageHtml: string): ExtractResult {
+function extractLocatorHtml(
+  locator: string,
+  pageHtml: string,
+  doc: Document | null,
+): ExtractResult {
   if (!locator?.trim()) return { html: pageHtml };
  // Only attempt the DOMParser path when the locator looks like a CSS
  // selector (the original benchmark also supported `document.…` JS snippets
@@ -141,7 +145,7 @@ function extractLocatorHtml(locator: string, pageHtml: string): ExtractResult {
         `resolveLocator callback; without one it can never match (target always fails).`,
     };
   }
-  if (typeof DOMParser === "undefined") {
+  if (doc === null) {
     return {
       html: "",
       warning:
@@ -150,7 +154,6 @@ function extractLocatorHtml(locator: string, pageHtml: string): ExtractResult {
     };
   }
   try {
-    const doc = new DOMParser().parseFromString(pageHtml, "text/html");
     const el = doc.querySelector(locator);
     if (!el) return { html: "" }; // genuine content miss — no warning
     return { html: el.innerHTML };
@@ -163,6 +166,9 @@ function extractLocatorHtml(locator: string, pageHtml: string): ExtractResult {
   }
 }
 
+/** Bound on {@link HTMLContentEvaluator.warnedLocators} so it cannot grow unbounded across a long session. */
+const MAX_WARNED_LOCATORS = 256;
+
 /**
  * Deterministic evaluator — checks page DOM content against a list of required
  * contents; returns a 0/1 score that is the product of every target's score.
@@ -170,9 +176,25 @@ function extractLocatorHtml(locator: string, pageHtml: string): ExtractResult {
 export class HTMLContentEvaluator {
   readonly tag = HTML_CONTENT_EVALUATOR_TAG;
 
+  /**
+   * Locators whose extraction warning has already been logged. Keeps the
+   * per-`evaluate()` diagnostic from spamming the console on every pass of a
+   * task loop when a locator is permanently broken — the failure is still
+   * recorded in the returned `reasons` every time.
+   */
+  private readonly warnedLocators = new Map<string, true>();
+
   async evaluate(input: HTMLContentEvaluatorInput): Promise<HTMLContentEvaluatorResult> {
     let score = 1.0;
     const reasons: string[] = [];
+ // Parse the page HTML once when we are grading locators locally (no
+ // `resolveLocator`). The same `Document` is then reused for every target,
+ // instead of re-parsing the whole page HTML per target.
+    const useLocalDoc = input.resolveLocator === undefined;
+    const doc =
+      useLocalDoc && typeof DOMParser !== "undefined"
+        ? new DOMParser().parseFromString(input.pageHtml, "text/html")
+        : null;
     for (let i = 0; i < input.targets.length; i++) {
       const target = input.targets[i];
       const rc = target.required_contents;
@@ -184,16 +206,32 @@ export class HTMLContentEvaluator {
       let selected = "";
       let extractWarn: string | undefined;
       if (input.resolveLocator !== undefined) {
-        selected = await input.resolveLocator(target.locator ?? "", input.pageHtml);
+        try {
+          selected = (await input.resolveLocator(target.locator ?? "", input.pageHtml)) ?? "";
+        } catch (e) {
+          selected = "";
+          extractWarn = `resolveLocator threw: ${e instanceof Error ? e.message : String(e)}`;
+        }
       } else {
-        const r = extractLocatorHtml(target.locator ?? "", input.pageHtml);
+        const r = extractLocatorHtml(target.locator ?? "", input.pageHtml, doc);
         selected = r.html;
         extractWarn = r.warning;
       }
       if (extractWarn) {
  // Observable diagnostic — a misconfigured locator yields a permanent
- // FAIL that should never masquerade as a genuine task failure.
-        console.warn(`[html-content-evaluator] target[${i}] extraction warning: ${extractWarn}`);
+ // FAIL that should never masquerade as a genuine task failure. Only log
+ // the first time we see a given locator so a broken locator doesn't
+ // spam the console on every pass of a task loop (the failure still
+ // contributes to `reasons` below on every iteration).
+        const locKey = target.locator ?? "";
+        if (!this.warnedLocators.has(locKey)) {
+          if (this.warnedLocators.size >= MAX_WARNED_LOCATORS) {
+            const oldest = this.warnedLocators.keys().next().value;
+            if (oldest !== undefined) this.warnedLocators.delete(oldest);
+          }
+          this.warnedLocators.set(locKey, true);
+          console.warn(`[html-content-evaluator] target[${i}] extraction warning: ${extractWarn}`);
+        }
       }
 
       const hasExact = rc.exact_match !== undefined;

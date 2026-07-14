@@ -19,6 +19,13 @@ import { requiresConfirmation, MODE_CONFIGS } from "../src/lib/agent/modes";
 import type { AgentAction, LogEvent } from "../src/lib/agent/types";
 import { makeState } from "./helpers";
 
+// The full action-type list iterated by the policy assertions below. Hoisted
+// to module scope so the two policy tests share one source of truth.
+const ACTION_TYPES = [
+  "click", "input", "evaluate", "upload_file", "save_as_pdf",
+  "navigate", "close_tab", "switch_tab", "search",
+] as const;
+
 // The orchestrator's `executeActionQueue` runs `checkActionAllowed` BEFORE
 // `requiresConfirmation`. In the shipped mode table no action is BOTH
 // mode-allowed and confirm-required — standard mode's `confirmRequired`
@@ -41,10 +48,7 @@ import { makeState } from "./helpers";
 
 describe("shouldAskForConfirmation reports the per-mode confirmation policy", () => {
   test("standard mode requires confirmation for evaluate/upload_file/save_as_pdf only", () => {
-    const actionTypes = [
-      "click", "input", "evaluate", "upload_file", "save_as_pdf",
-      "navigate", "close_tab", "switch_tab", "search",
-    ] as const;
+    const actionTypes = ACTION_TYPES;
     for (const actionType of actionTypes) {
       const expected =
         actionType === "evaluate" ||
@@ -55,10 +59,7 @@ describe("shouldAskForConfirmation reports the per-mode confirmation policy", ()
   });
 
   test("restricted and full_agentic modes never require confirmation", () => {
-    const actionTypes = [
-      "click", "input", "evaluate", "upload_file", "save_as_pdf",
-      "navigate", "close_tab", "switch_tab", "search",
-    ] as const;
+    const actionTypes = ACTION_TYPES;
     for (const mode of ["restricted", "full_agentic"] as const) {
       for (const actionType of actionTypes) {
         expect(shouldAskForConfirmation(actionType, mode)).toBe(false);
@@ -275,6 +276,56 @@ describe("confirmation gate in executeActionQueue", () => {
     expect(requestConfirmation).not.toHaveBeenCalled();
     document.body.innerHTML = "";
   });
+
+  test("single-label host is rejected by the domain allowlist (security hardening)", async () => {
+    const { executeActionQueue } = await import("../src/lib/agent/loop/helpers/action-queue");
+    const { LoopDetector } = await import("../src/lib/agent/loop/loop-detector");
+    const { DEFAULT_CONFIG } = await import("../src/lib/agent/types");
+
+    // beforeEach points `location` at a dotted, allowlisted host. Override it
+    // with a SINGLE-LABEL host. The hardened matcher deliberately REJECTS
+    // single-label hosts (e.g. "localhost") so a typo'd "com"/"org" can't
+    // over-match every host — so `evaluate` must be blocked even with
+    // canExecuteJs flipped on.
+    Object.defineProperty(globalThis, "location", {
+      configurable: true,
+      value: { href: "http://localhost/" },
+    });
+
+    const requestConfirmation = vi.fn().mockResolvedValue(true);
+    const onEvent = vi.fn();
+    const evaluateAction: AgentAction = {
+      type: "evaluate",
+      code: "return 2 + 2;",
+    } as AgentAction;
+
+    const result = await executeActionQueue(
+      {
+        task: "test",
+        navigatorCall: vi.fn(),
+        plannerCall: vi.fn(),
+        getTabs: vi.fn(),
+        onEvent,
+        requestConfirmation,
+      },
+      [evaluateAction],
+      makeState(),
+      0,
+      "standard",
+      new LoopDetector(),
+      DEFAULT_CONFIG,
+    );
+
+    // Confirmation is requested (the gate runs after the mode/confirm checks),
+    // but the `evaluate` domain allowlist is enforced inside the executor and
+    // rejects the single-label host — so the action never actually executes
+    // (no "4") and surfaces a BLOCKED failure, aborting the queue.
+    expect(requestConfirmation).toHaveBeenCalledTimes(1);
+    expect(result.aborted).toBe(true);
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0].success).toBe(false);
+    expect(result.results[0].message).toContain("BLOCKED evaluate");
+  });
 });
 
 // ─── ask_human executor action calls askHuman (not fabricated) ──────────────
@@ -306,8 +357,13 @@ describe("ask_human executor action", () => {
     expect(result.message).toContain("user typed this answer");
     expect(result.extractedContent).toContain("user typed this answer");
     expect(result.extractedContent).toContain("What is your name?");
- // Verify window.prompt was actually called.
+ // Verify window.prompt was actually called — and with the question, so a
+ // regression that passes the wrong/empty argument to the dialog is caught.
     expect(window.prompt).toHaveBeenCalled();
+    expect(window.prompt).toHaveBeenCalledWith(
+      expect.stringContaining("What is your name?"),
+      expect.any(String),
+    );
   });
 
   test("returns failure when the user dismisses the prompt", async () => {

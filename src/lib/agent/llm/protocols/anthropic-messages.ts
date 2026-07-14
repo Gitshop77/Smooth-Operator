@@ -12,6 +12,12 @@
 
 import { Protocol, type LLMRequest } from "../route/client";
 import { zodToJsonSchema } from "../zod-json-schema";
+import {
+  SCREENSHOT_PATTERN_G,
+  isZodSchema,
+  isValidBase64,
+  hasImageProvenance,
+} from "../shared-image";
 
 const ADAPTER = "anthropic-messages";
 export const DEFAULT_BASE_URL = "https://api.anthropic.com";
@@ -25,55 +31,6 @@ export const API_VERSION = "2023-06-01";
  * silently truncated — worth flagging without logging frame contents.
  */
 const DROPPED_FRAME_WARN_THRESHOLD = 5;
-
-/** Match a `<screenshot>data:image/...;base64,...</screenshot>` marker. */
-const SCREENSHOT_PATTERN = /<screenshot>(data:image\/(png|jpeg|webp);base64,[^<]+)<\/screenshot>/;
-/** Global variant used to iterate over every screenshot in a single message. */
-const SCREENSHOT_PATTERN_G = new RegExp(SCREENSHOT_PATTERN.source, "g");
-
-/** Heuristic: is this a Zod schema object (vs. an already-plain JSON Schema)? */
-function isZodSchema(value: unknown): boolean {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    (("safeParse" in value && typeof (value as { safeParse?: unknown }).safeParse === "function") ||
-      "_def" in value)
-  );
-}
-
-/** Validate a base64 image payload before forwarding it to the API. */
-function isValidBase64(value: string): boolean {
-  return value.length > 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(value);
-}
-
-/**
- * Base64-encoded magic-byte prefixes for the image formats we accept. A real
- * screenshot produced by the extension always begins with the format's signature
- * bytes, so requiring the declared `media_type` to match the actual payload is a
- * lightweight provenance check.
- */
-const IMAGE_SIGNATURES: Record<string, string[]> = {
- // PNG: 89 50 4E 47 0D 0A 1A 0A -> "iVBORw0KGgo"
-  png: ["iVBORw0KGgo"],
- // JPEG: FF D8 FF -> "/9j/"
-  jpeg: ["/9j/"],
- // WebP: "RIFF"....."WEBP" -> "UklGR"
-  webp: ["UklGR"],
-};
-
-/**
- * Provenance check for `<screenshot>` markers. Markers can be injected into
- * scraped page text or tool output by an untrusted source; treating any such
- * marker as a genuine image would let injected content smuggle attacker-chosen
- * images (or arbitrary bytes) to the model. Requiring the base64 payload's
- * magic bytes to match the declared media type rejects markers whose contents
- * are not a well-formed image of that type.
- */
-function hasImageProvenance(b64: string, mediaType: string): boolean {
-  const prefixes = IMAGE_SIGNATURES[mediaType];
-  if (!prefixes) return false;
-  return prefixes.some((p) => b64.startsWith(p));
-}
 
 
 export interface AnthropicBody {

@@ -48,13 +48,22 @@ export const buildURL = <Body>(endpoint: Endpoint<Body>, body: Body): string => 
     return mergeQueryIntoPath(p, endpoint.query);
   }
 
- // Absolute base: the URL constructor already folds any query present in `p`
- // into the result, so we merge `endpoint.query` into it instead of appending
- // a second "?", which would produce a malformed double-"?…?…" string.
+ // Absolute base: merge the base URL's own query, any query carried by the
+ // (relative) path `p`, and the endpoint-level `query` into a SINGLE "?".
+ // `new URL(p, base)` would otherwise DROP the base's query (and vice-versa)
+ // because a relative reference's query overrides the base's — producing a
+ // lost `?x=1` or a malformed double "?". Build one merged params object.
+  const baseUrl = new URL(base);
   const url = new URL(p, base);
-  for (const [k, v] of Object.entries(endpoint.query)) {
-    url.searchParams.set(k, v);
+  const params = new URLSearchParams(baseUrl.search);
+ // Fold any query already present in the path (e.g. "/chat?foo=1").
+  const pQueryIndex = p.indexOf("?");
+  if (pQueryIndex !== -1) {
+    const pQuery = new URLSearchParams(p.slice(pQueryIndex + 1));
+    for (const [k, v] of pQuery) params.set(k, v);
   }
+  for (const [k, v] of Object.entries(endpoint.query)) params.set(k, v);
+  url.search = params.toString();
   return url.toString();
 };
 
@@ -64,13 +73,20 @@ export const buildURL = <Body>(endpoint: Endpoint<Body>, body: Body): string => 
  * nothing to add.
  */
 function mergeQueryIntoPath(path: string, query: Record<string, string>): string {
+  if (Object.keys(query).length === 0) return path;
   const queryStr = new URLSearchParams(query).toString();
   if (queryStr === "") return path;
-  const qIndex = path.indexOf("?");
-  if (qIndex === -1) return `${path}?${queryStr}`;
-  const params = new URLSearchParams(path.slice(qIndex + 1));
+ // Split off any URL fragment so it isn't absorbed into the query by
+ // URLSearchParams (which would otherwise merge everything after '#' into a
+ // value). The base-URL branch above preserves fragments; keep them here too.
+  const hashIndex = path.indexOf("#");
+  const frag = hashIndex === -1 ? "" : path.slice(hashIndex);
+  const pathNoFrag = hashIndex === -1 ? path : path.slice(0, hashIndex);
+  const qIndex = pathNoFrag.indexOf("?");
+  if (qIndex === -1) return `${pathNoFrag}?${queryStr}${frag}`;
+  const params = new URLSearchParams(pathNoFrag.slice(qIndex + 1));
   for (const [k, v] of Object.entries(query)) params.set(k, v);
-  return `${path.slice(0, qIndex)}?${params.toString()}`;
+  return `${pathNoFrag.slice(0, qIndex)}?${params.toString()}${frag}`;
 }
 
 export * as Endpoint from "./endpoint";

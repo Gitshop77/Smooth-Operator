@@ -26,6 +26,12 @@ const BACKOFF_JITTER_MS = 500;
 /** Chunk size (ms) for the abort-aware sleep loop. */
 const SLEEP_CHUNK_MS = 100;
 
+/** Compiled once — reused on every retry attempt instead of recompiled inline. */
+const ABORT_NAME_RE = /\b(abort|cancelled|canceled)/i;
+const TOO_MANY_RE = /too many requests/i;
+const STATUS_5XX_RE = /\b5\d\d\b/;
+const NETWORK_RE = /fetch|network|econn|timeout/i;
+
 /** Sleep helper. */
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -38,6 +44,11 @@ async function abortAwareSleep(ms: number, signal?: AbortSignal): Promise<void> 
   if (!signal) {
     await sleep(ms);
     return;
+  }
+  if (signal.aborted) {
+    const err = new Error("The operation was aborted");
+    err.name = "AbortError";
+    throw err;
   }
   const chunks = Math.ceil(ms / SLEEP_CHUNK_MS);
   for (let c = 0; c < chunks; c++) {
@@ -77,8 +88,7 @@ export async function withLLMRetry<T>(
   signal?: AbortSignal,
   runId?: string
 ): Promise<T> {
-  let lastErr: unknown;
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+  for (let attempt = 0; ; attempt++) {
  // Honor abort before every attempt (including the first). Throw an
  // `AbortError`-named error (not a plain `Error`) so callers that classify
  // aborts by `e.name` (e.g. the orchestrator's initial-planner catch)
@@ -92,7 +102,6 @@ export async function withLLMRetry<T>(
     try {
       return await fn();
     } catch (e) {
-      lastErr = e;
       const err = e instanceof Error ? e : new Error(String(e));
       const msg = err.message;
       const status = (e as Error & { status?: number }).status;
@@ -101,13 +110,23 @@ export async function withLLMRetry<T>(
  // (AbortError / TimeoutError thrown by fetch / fetch-with-timeout), plus
  // the legacy message-substring match. A deliberate abort must never be
  // treated as a retryable network glitch.
-      if (signal?.aborted) throw e;
+      if (signal?.aborted) {
+        const norm = e instanceof Error ? e : new Error(String(e));
+        norm.name = "AbortError";
+        throw norm;
+      }
       if (
         err.name === "AbortError" ||
         err.name === "TimeoutError" ||
-        /\b(abort|cancelled|canceled)/i.test(err.name)
+        ABORT_NAME_RE.test(err.name)
       ) throw e;
-      if (/\b(abort|cancelled|canceled)/i.test(msg)) throw e;
+ // A message that mentions abort/cancel is only a deliberate-abort signal for
+ // transport/non-HTTP errors (which carry no authoritative numeric status).
+ // When the error carries a real HTTP status, let the 429/5xx classification
+ // decide retry instead — a genuine retryable 429/5xx whose provider body text
+ // happens to mention "cancelled" must still be retried.
+      const hasStatus = typeof status === "number";
+      if (!hasStatus && ABORT_NAME_RE.test(msg)) throw e;
  // Prefer the numeric HTTP status carried on the error (set by the HTTP
  // transport) for classifying retryable transients. Fall back to scanning
  // the message body if the status isn't available (e.g. non-transport errors).
@@ -117,13 +136,12 @@ export async function withLLMRetry<T>(
  // because the substring appears in the (up to 300-char) provider body.
  // Only when the status is absent (non-transport errors) do we fall back to
  // scanning the message for 429/5xx signals.
-      const hasStatus = typeof status === "number";
       const is429 = hasStatus
         ? status === 429
-        : msg.includes("429") || /too many requests/i.test(msg);
+        : msg.includes("429") || TOO_MANY_RE.test(msg);
       const is5xx = hasStatus
         ? status >= 500 && status < 600
-        : /\b5\d\d\b/.test(msg);
+        : STATUS_5XX_RE.test(msg);
  // Exclude a deliberate abort from the network/timeout retryable class so a
  // user cancel (which can surface as a "timeout"/"fetch" error) propagates
  // immediately rather than burning an extra backoff.
@@ -139,9 +157,9 @@ export async function withLLMRetry<T>(
         hasStatus && status >= 400 && status < 500 && status !== 429;
       const isNetwork =
         !signal?.aborted && !statusKnownNonRetryable &&
-        /fetch|network|econn|timeout/i.test(msg);
+        NETWORK_RE.test(msg);
       const retryable = is429 || is5xx || isNetwork;
-      if (!retryable || attempt === MAX_RETRIES) throw e;
+      if (!retryable || attempt >= MAX_RETRIES) throw e;
  // if the error carries a Retry-After value (from a 429 response
  // header), use that instead of exponential backoff. `Retry-After: 0`
  // is an explicit "retry immediately" — honor it rather than silently
@@ -171,7 +189,4 @@ export async function withLLMRetry<T>(
       await abortAwareSleep(delay, signal);
     }
   }
- // Unreachable — the loop always throws on the final iteration.
- // This satisfies TypeScript's "not all code paths return" check.
-  throw lastErr;
 }

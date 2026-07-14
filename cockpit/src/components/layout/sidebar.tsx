@@ -1,11 +1,12 @@
 "use client";
 
+import * as React from "react";
 import { Hexagon, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { useCoworkStore } from "@/hooks/use-cowork-store";
 import { useIsMobile } from "@/hooks/use-mobile";
-import { NAV_GROUPS } from "@/components/layout/nav-config";
+import { NAV_GROUPS, type NavItem } from "@/components/layout/nav-config";
 import { ConnectionStatus } from "@/components/layout/connection-status";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
 
@@ -27,7 +28,6 @@ interface SidebarProps {
  */
 export function Sidebar({ className, onNavigate, forceExpanded }: SidebarProps) {
   const currentView = useCoworkStore((s) => s.currentView);
-  const setView = useCoworkStore((s) => s.setView);
   const collapsed = useCoworkStore((s) => s.sidebarCollapsed);
   const toggleCollapsed = useCoworkStore((s) => s.toggleSidebarCollapsed);
   const isMobile = useIsMobile();
@@ -37,13 +37,14 @@ export function Sidebar({ className, onNavigate, forceExpanded }: SidebarProps) 
   return (
     <div
       className={cn(
-        "flex h-full flex-col bg-sidebar text-sidebar-foreground border-r border-sidebar-border",
+        "flex h-full flex-col bg-sidebar text-sidebar-foreground border-r border-sidebar-border motion-reduce:transition-none",
         isCollapsed ? "w-16" : "w-60",
         className,
       )}
     >
       {/* Brand */}
       <div className="flex items-center gap-2.5 px-4 h-14 border-b border-sidebar-border shrink-0">
+        <h2 className="sr-only">Open Cowork</h2>
         <div className="size-7 rounded-[10px] bg-accent text-accent-foreground grid place-items-center shrink-0">
           <Hexagon className="size-4" />
         </div>
@@ -82,46 +83,15 @@ export function Sidebar({ className, onNavigate, forceExpanded }: SidebarProps) 
             {!isCollapsed ? (
               <p className="cowork-eyebrow px-2 pb-1.5">{group.label}</p>
             ) : null}
-            {group.items.map((item) => {
-              const Icon = item.icon;
-              const active = currentView === item.id;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => {
-                    setView(item.id);
-                    onNavigate?.();
-                  }}
-                  title={isCollapsed ? item.label : undefined}
-                  aria-current={active ? "page" : undefined}
-                  className={cn(
-                    "w-full flex items-center rounded-[10px] text-[13px] font-medium transition-colors relative",
-                    isCollapsed
-                      ? "justify-center size-9"
-                      : "gap-2.5 px-2.5 py-1.5 min-h-[34px] text-left",
-                    active
-                      ? "bg-accent-subtle text-accent"
-                      : "text-muted-foreground hover:bg-muted hover:text-sidebar-foreground",
-                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                  )}
-                >
-                  {active ? (
-                    <span
-                      className="absolute left-0 top-1 bottom-1 w-[3px] rounded-r bg-accent"
-                      aria-hidden="true"
-                    />
-                  ) : null}
-                  <Icon
-                    className={cn(
-                      "size-4 shrink-0 transition-colors",
-                      active ? "text-accent" : "text-muted-foreground",
-                    )}
-                  />
-                  {!isCollapsed ? <span className="truncate">{item.label}</span> : null}
-                </button>
-              );
-            })}
+            {group.items.map((item) => (
+              <NavItemButton
+                key={item.id}
+                item={item}
+                active={currentView === item.id}
+                isCollapsed={isCollapsed}
+                onNavigate={onNavigate}
+              />
+            ))}
           </div>
         ))}
       </nav>
@@ -139,3 +109,54 @@ export function Sidebar({ className, onNavigate, forceExpanded }: SidebarProps) 
     </div>
   );
 }
+
+const NavItemButton = React.memo(function NavItemButton({
+  item,
+  active,
+  isCollapsed,
+  onNavigate,
+}: {
+  item: NavItem;
+  active: boolean;
+  isCollapsed: boolean;
+  onNavigate?: () => void;
+}) {
+  const setView = useCoworkStore((s) => s.setView);
+  const Icon = item.icon;
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        setView(item.id);
+        onNavigate?.();
+      }}
+      title={isCollapsed ? item.label : undefined}
+      aria-current={active ? "page" : undefined}
+      aria-label={item.label}
+      className={cn(
+        "w-full flex items-center rounded-[10px] text-[13px] font-medium transition-colors relative active:scale-[0.98]",
+        isCollapsed
+          ? "justify-center size-9"
+          : "gap-2.5 px-2.5 py-1.5 min-h-[34px] text-left",
+        active
+          ? "bg-accent-subtle text-accent"
+          : "text-muted-foreground hover:bg-muted hover:text-sidebar-foreground",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+      )}
+    >
+      {active ? (
+        <span
+          className="absolute left-0 top-1 bottom-1 w-[3px] rounded-r bg-accent"
+          aria-hidden="true"
+        />
+      ) : null}
+      <Icon
+        className={cn(
+          "size-4 shrink-0 transition-colors",
+          active ? "text-accent" : "text-muted-foreground",
+        )}
+      />
+      {!isCollapsed ? <span className="truncate">{item.label}</span> : null}
+    </button>
+  );
+});

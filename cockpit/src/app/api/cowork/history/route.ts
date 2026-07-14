@@ -19,17 +19,18 @@ export async function GET(req: NextRequest): Promise<Response> {
  // Bound the free-text search term so a hostile/buggy caller can't submit an
  // unbounded `LIKE '%…%'` pattern against the indexed url/title columns.
     const qRaw = req.nextUrl.searchParams.get('q');
-    const q = qRaw ? boundedString(qRaw, 256, '') : undefined;
+    const q = qRaw ? boundedString(qRaw.trim(), 256) : undefined;
  // Cap `limit` to a hard max of 200 so a hostile or buggy
  // caller can't ask for the entire table in one shot. Default 50.
     const limit = parseLimit(req, 50);
-    const entries = q
-      ? await db.historyEntry.findMany({
-          where: { OR: [{ url: { contains: q } }, { title: { contains: q } }] },
-          take: limit,
-          orderBy: { lastVisitedAt: 'desc' },
-        })
-      : await db.historyEntry.findMany({ take: limit, orderBy: { lastVisitedAt: 'desc' } });
+    const where = q
+      ? { OR: [{ url: { contains: q } }, { title: { contains: q } }] }
+      : undefined;
+    const entries = await db.historyEntry.findMany({
+      where,
+      take: limit,
+      orderBy: { lastVisitedAt: 'desc' },
+    });
  // Project `lastVisitedAt` → legacy `visitedAt` alias so the
  // `collections-view`'s history tab keeps sorting + rendering correctly.
     const projected = entries.map((h) => ({
@@ -37,7 +38,7 @@ export async function GET(req: NextRequest): Promise<Response> {
       visitedAt: h.lastVisitedAt,
     }));
     return json({ history: projected });
-  });
+  }, req.headers.get('x-request-id') ?? undefined);
 }
 
 // POST /api/cowork/history — record a visit to a URL.
@@ -109,7 +110,7 @@ export async function DELETE(req: NextRequest): Promise<Response> {
       }
       const { count } = await db.historyEntry.deleteMany({ where });
  // Log the bulk delete so the action is observable server-side.
-      console.info('[cowork] bulk delete history', { deleted: count, scope: scope ?? 'all', route: '/api/cowork/history' });
+      console.info('[cowork] bulk delete history', { deleted: count, scope: scope ?? 'all', route: '/api/cowork/history', reqId: req.headers.get('x-request-id') ?? 'n/a' });
       return json({ ok: true, deleted: count });
     }
     const id = req.nextUrl.searchParams.get('id');

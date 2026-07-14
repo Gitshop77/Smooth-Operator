@@ -79,13 +79,13 @@ const VIEWS: Record<ViewId, React.ComponentType> = {
  * is present the shell renders the shared <ExtensionOnly> standby (created in
  * the primitives phase) instead of — or wrapping — the live view.
  */
-const EXTENSION_ONLY_IDS: ViewId[] = [
+const EXTENSION_ONLY_IDS = new Set<ViewId>([
   "tabs",
   "workspaces",
   "network",
   "snapshots",
   "devtools",
-];
+]);
 
 /**
  * CoworkShell — the whole dashboard layout.
@@ -105,7 +105,7 @@ export function CoworkShell() {
   useCoworkWebSocket();
 
   const View = VIEWS[currentView] ?? TabsView;
-  const isExtensionOnly = EXTENSION_ONLY_IDS.includes(currentView);
+  const isExtensionOnly = EXTENSION_ONLY_IDS.has(currentView);
   const meta = VIEW_META[currentView];
 
   return (
@@ -126,7 +126,7 @@ export function CoworkShell() {
           {/* Main column */}
           <div className="flex-1 flex flex-col min-w-0">
             <Header />
-            <main id="main-content" className="flex-1 p-4 sm:p-6 cowork-scroll">
+            <main id="main-content" tabIndex={-1} className="flex-1 p-4 sm:p-6 cowork-scroll outline-none">
               <AnimatePresence mode="wait">
                 <motion.div
                   key={currentView}

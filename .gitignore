@@ -29,6 +29,10 @@ db/
 coverage/
 .turbo/
 .cache/
+dist/
+build/
+.audit/
+FULL-REVIEW.md
 
 # OS files
 .DS_Store

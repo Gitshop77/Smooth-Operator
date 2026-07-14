@@ -33,6 +33,13 @@ afterEach(() => {
   delete (globalThis as Record<string, unknown>)[CONFIG];
 });
 
+const enforce = (v = true): void => {
+  (globalThis as Record<string, unknown>)[ENFORCED] = v;
+};
+const setCfg = (c: unknown): void => {
+  (globalThis as Record<string, unknown>)[CONFIG] = c;
+};
+
 describe("getDomainConfig", () => {
   test("returns {} when no config global is set (default allow-all)", () => {
     expect(getDomainConfig()).toEqual({});
@@ -40,12 +47,12 @@ describe("getDomainConfig", () => {
 
   test("returns the configured object when the global is set", () => {
     const cfg: DomainConfig = { allowedDomains: ["example.com"] };
-    (globalThis as Record<string, unknown>)[CONFIG] = cfg;
+    setCfg(cfg);
     expect(getDomainConfig()).toBe(cfg);
   });
 
   test("returns {} when the global is set to a non-object", () => {
-    (globalThis as Record<string, unknown>)[CONFIG] = 42;
+    setCfg(42);
     expect(getDomainConfig()).toEqual({});
   });
 });
@@ -57,14 +64,14 @@ describe("isDomainPolicyEnforced / isDomainConfigMissingButEnforced", () => {
   });
 
   test("enforced flag true + config present → not 'missing but enforced'", () => {
-    (globalThis as Record<string, unknown>)[ENFORCED] = true;
-    (globalThis as Record<string, unknown>)[CONFIG] = { allowedDomains: ["example.com"] };
+    enforce();
+    setCfg({ allowedDomains: ["example.com"] });
     expect(isDomainPolicyEnforced()).toBe(true);
     expect(isDomainConfigMissingButEnforced()).toBe(false);
   });
 
   test("enforced flag true + config missing → missing-but-enforced", () => {
-    (globalThis as Record<string, unknown>)[ENFORCED] = true;
+    enforce();
     expect(isDomainPolicyEnforced()).toBe(true);
     expect(isDomainConfigMissingButEnforced()).toBe(true);
   });
@@ -72,7 +79,7 @@ describe("isDomainPolicyEnforced / isDomainConfigMissingButEnforced", () => {
 
 describe("checkUrlAllowedWithDomainConfig (fail-closed)", () => {
   test("enforced + config MISSING → blocks (fail closed)", () => {
-    (globalThis as Record<string, unknown>)[ENFORCED] = true;
+    enforce();
     const result = checkUrlAllowedWithDomainConfig("https://evil.com");
     expect(result.allowed).toBe(false);
     expect(result.reason ?? "").toMatch(/fail closed/i);
@@ -84,14 +91,14 @@ describe("checkUrlAllowedWithDomainConfig (fail-closed)", () => {
   });
 
   test("NOT enforced + config present → delegates to checkUrlAllowed (allowlist)", () => {
-    (globalThis as Record<string, unknown>)[CONFIG] = { allowedDomains: ["example.com"] };
+    setCfg({ allowedDomains: ["example.com"] });
     expect(checkUrlAllowedWithDomainConfig("https://example.com").allowed).toBe(true);
     expect(checkUrlAllowedWithDomainConfig("https://evil.com").allowed).toBe(false);
   });
 
   test("enforced + config present → delegates to checkUrlAllowed (blocklist)", () => {
-    (globalThis as Record<string, unknown>)[ENFORCED] = true;
-    (globalThis as Record<string, unknown>)[CONFIG] = { blockedDomains: ["evil.com"] };
+    enforce();
+    setCfg({ blockedDomains: ["evil.com"] });
     expect(checkUrlAllowedWithDomainConfig("https://evil.com").allowed).toBe(false);
     expect(checkUrlAllowedWithDomainConfig("https://example.com").allowed).toBe(true);
   });
@@ -99,5 +106,16 @@ describe("checkUrlAllowedWithDomainConfig (fail-closed)", () => {
   test("scheme floor still applies even when not enforced", () => {
     const result = checkUrlAllowedWithDomainConfig("javascript:alert(1)");
     expect(result.allowed).toBe(false);
+  });
+
+  test("enforced=true + config present-but-empty {} delegates to allow-all (fail-open boundary)", () => {
+    // A deliberately empty config ({}) is treated as PRESENT (not missing), so
+    // it does NOT trigger the fail-closed path — it is allow-all by design.
+    // This pins that boundary so a future regression cannot silently flip the
+    // present-but-empty case to block (or vice versa).
+    enforce();
+    setCfg({});
+    const result = checkUrlAllowedWithDomainConfig("https://anything.com");
+    expect(result.allowed).toBe(true);
   });
 });

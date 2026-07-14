@@ -67,10 +67,22 @@ function getActionType(opt: unknown): string {
 /** All `type` discriminator values defined on `ActionSchema`. */
 function schemaActionTypes(): string[] {
  // `ActionSchema.options` is the array of `ZodObject`s passed to
- // `z.discriminatedUnion("type", [...])`.
-  const opts = (ActionSchema as unknown as { options: unknown[] }).options;
+ // `z.discriminatedUnion("type", [...])`. Resolve it defensively so the
+ // sync-guard survives Zod 3/4 internal relocations instead of throwing an
+ // opaque "Cannot read properties of undefined" that fails every test.
+  const schema = ActionSchema as unknown as {
+    options?: unknown[];
+    _def?: { options?: unknown[]; def?: { options?: unknown[] } };
+  };
+  const opts =
+    schema.options ?? schema._def?.options ?? schema._def?.def?.options;
+  if (!opts) throw new Error("Could not locate discriminatedUnion options");
   return opts.map((o) => getActionType(o));
 }
+
+// Computed once at module scope — every test below references the same value,
+// avoiding repeated (fragile) Zod-internal traversal on each run.
+const SCHEMA_ACTION_TYPES = schemaActionTypes();
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
@@ -103,17 +115,18 @@ describe("AgentAction <-> Action schema sync", () => {
 
 describe("ACTION_METADATA <-> ActionSchema sync", () => {
   test("every ActionSchema variant has a matching ACTION_METADATA entry", () => {
-    const types = schemaActionTypes();
+    const types = SCHEMA_ACTION_TYPES;
     const metaKeys = Object.keys(ACTION_METADATA);
- // Sanity: we know the schema currently defines 32 actions.
-    expect(types.length).toBeGreaterThanOrEqual(32);
+ // Derived guard: the count must track ACTION_METADATA automatically rather
+ // than a hand-maintained magic number (which drifts as actions are added).
+    expect(types.length).toBe(metaKeys.length);
     for (const t of types) {
       expect(metaKeys).toContain(t);
     }
   });
 
   test("every ACTION_METADATA entry matches an ActionSchema variant", () => {
-    const types = schemaActionTypes();
+    const types = SCHEMA_ACTION_TYPES;
     const metaKeys = Object.keys(ACTION_METADATA);
     for (const k of metaKeys) {
       expect(types).toContain(k);
@@ -121,7 +134,7 @@ describe("ACTION_METADATA <-> ActionSchema sync", () => {
   });
 
   test("ACTION_METADATA keys and ActionSchema variants are exactly equal (no extras either way)", () => {
-    const types = schemaActionTypes().sort();
+    const types = SCHEMA_ACTION_TYPES.slice().sort();
     const metaKeys = Object.keys(ACTION_METADATA).sort();
     expect(metaKeys).toEqual(types);
   });

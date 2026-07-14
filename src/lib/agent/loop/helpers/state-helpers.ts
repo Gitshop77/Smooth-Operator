@@ -22,13 +22,13 @@ export function makeCtx(state: LoopState): CallbackContext {
 
 /** Add cost (USD) to the running total. */
 export function addCost(state: LoopState, usd: number): void {
-  state.totalCostUsd += usd;
+  if (Number.isFinite(usd)) state.totalCostUsd += Math.max(0, usd);
 }
 
 /** Add token usage to the running totals (for the `runEnd` callback hook). */
 export function addTokens(state: LoopState, tokensIn: number | undefined, tokensOut: number | undefined): void {
-  if (tokensIn !== undefined) state.totalTokensIn += tokensIn;
-  if (tokensOut !== undefined) state.totalTokensOut += tokensOut;
+  if (typeof tokensIn === "number" && Number.isFinite(tokensIn)) state.totalTokensIn += Math.max(0, tokensIn);
+  if (typeof tokensOut === "number" && Number.isFinite(tokensOut)) state.totalTokensOut += Math.max(0, tokensOut);
 }
 
 /**
@@ -37,8 +37,14 @@ export function addTokens(state: LoopState, tokensIn: number | undefined, tokens
  */
 export function costCapExceeded(state: LoopState): boolean {
   const { config, totalCostUsd, step, onEvent } = state;
-  if (config.costCapUsd !== undefined && config.costCapUsd > 0 && totalCostUsd >= config.costCapUsd) {
-    const text = `Cost cap of $${config.costCapUsd} reached.`;
+  const exceeded =
+    Number.isFinite(totalCostUsd) &&
+    config.costCapUsd !== undefined &&
+    config.costCapUsd > 0 &&
+    totalCostUsd >= config.costCapUsd;
+  if (exceeded) {
+    const cap = config.costCapUsd ?? 0;
+    const text = `Cost cap of $${cap.toFixed(2)} reached.`;
     onEvent({ type: "done", step, success: false, text });
  // Set state.finalResult so buildRunResult returns the real text for the
  // runEnd callback (not ""). Without this, dispatcher.runEnd subscribers

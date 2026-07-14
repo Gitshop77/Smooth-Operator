@@ -43,6 +43,43 @@ const CONTENT_KEYS = new Set([
  * are shortcuts (e.g. `ctrl+a` selects all) rather than typed text. A bare
  * `Shift` is allowed since it produces the intended upper-case/symbol char.
  */
+/**
+ * Map the small set of named/forwarded control keys to their legacy
+ * `keyCode`/`which` numbers. Synthetic events dispatched without these set
+ * `keyCode === 0` / `which === 0`, which bot/automation detectors and a lot of
+ * legacy page code use to flag a non-human (non-trusted) event — undermining the
+ * extension's stealth goal. (Printable chars are handled separately below.)
+ */
+const NAMED_KEY_CODES: Record<string, number> = {
+  Enter: 13,
+  Backspace: 8,
+  Delete: 46,
+  ArrowLeft: 37,
+  ArrowRight: 39,
+  Home: 36,
+  End: 35,
+};
+
+/** Resolve `keyCode`/`which`/`code` for a synthetic KeyboardEvent. */
+function keyEventCodes(key: string): { keyCode: number; which: number; code: string } {
+  if (key in NAMED_KEY_CODES) {
+    const kc = NAMED_KEY_CODES[key];
+    return { keyCode: kc, which: kc, code: key };
+  }
+  if (key.length === 1) {
+    const isLetter = key >= "a" && key <= "z";
+    const upper = isLetter ? key.toUpperCase() : key;
+    const keyCode = key >= "a" && key <= "z" ? upper.charCodeAt(0) : key.charCodeAt(0);
+    let code: string;
+    if (key === " ") code = "Space";
+    else if (isLetter) code = `Key${upper}`;
+    else if (key >= "0" && key <= "9") code = `Digit${key}`;
+    else code = key;
+    return { keyCode, which: keyCode, code };
+  }
+  return { keyCode: 0, which: 0, code: "" };
+}
+
 function isPrintableKey(parsed: ParsedKeys): boolean {
   if (parsed.ctrl || parsed.alt || parsed.meta) return false;
   const k = parsed.main;
@@ -62,15 +99,25 @@ function isEditableTarget(el: EventTarget | null): boolean {
   return isTextInput(el) || (el instanceof HTMLElement && el.isContentEditable);
 }
 
+ // Resolve the native prototype `value` setters once at module load instead
+ // of re-deriving the descriptor on every keystroke inside a `send_keys` loop.
+const INPUT_VALUE_SETTER = Object.getOwnPropertyDescriptor(
+  HTMLInputElement.prototype,
+  "value",
+)?.set;
+const TEXTAREA_VALUE_SETTER = Object.getOwnPropertyDescriptor(
+  HTMLTextAreaElement.prototype,
+  "value",
+)?.set;
+
 function setNativeValue(
   el: HTMLInputElement | HTMLTextAreaElement,
   value: string,
 ): void {
  // Use the native prototype setter so React-controlled inputs sync state.
-  const proto = el instanceof HTMLTextAreaElement
-    ? window.HTMLTextAreaElement.prototype
-    : window.HTMLInputElement.prototype;
-  const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+  const setter = el instanceof HTMLTextAreaElement
+    ? TEXTAREA_VALUE_SETTER
+    : INPUT_VALUE_SETTER;
   if (setter) setter.call(el, value);
   else el.value = value;
 }
@@ -96,7 +143,6 @@ function safeSetSelectionRange(
 
 function fireInputEvents(el: HTMLElement): void {
   el.dispatchEvent(new Event("input", { bubbles: true }));
-  el.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
 /** Apply the edit imperatively to an `<input>`/`<textarea>`. */
@@ -161,10 +207,20 @@ function mutateTextInput(
  // below are still dispatched, but we don't claim a mutation occurred.
     switch (parsed.main) {
       case "ArrowLeft":
-        parsed.shift ? setCaret(start - 1, end) : setCaret(start - 1, start - 1);
+        if (parsed.shift) {
+          setCaret(start - 1, end);
+        } else {
+          const pos = start === end ? start - 1 : start;
+          setCaret(pos, pos);
+        }
         break;
       case "ArrowRight":
-        parsed.shift ? setCaret(start, end + 1) : setCaret(end + 1, end + 1);
+        if (parsed.shift) {
+          setCaret(start, end + 1);
+        } else {
+          const pos = start === end ? end + 1 : end;
+          setCaret(pos, pos);
+        }
         break;
       case "Home":
         parsed.shift ? setCaret(0, end) : setCaret(0, 0);
@@ -173,10 +229,12 @@ function mutateTextInput(
         parsed.shift ? setCaret(start, len) : setCaret(len, len);
         break;
     }
-    el.dispatchEvent(new Event("selectionchange", { bubbles: true }));
  // The platform fires `selectionchange` on `document`, and page code
- // (rich-text editors, custom caret UIs) listens there — so notify document
- // too for consistency with native selection changes.
+ // (rich-text editors, custom caret UIs) listens there — notify document
+ // for consistency with native selection changes. We do NOT dispatch a
+ // synthetic `selectionchange` on the element itself: native
+ // `selectionchange` targets `document` only and never bubbles, so an
+ // element-targeted dispatch is a detectable anomaly.
     document.dispatchEvent(new Event("selectionchange"));
     return true;
   }
@@ -227,12 +285,23 @@ export async function handleSendKeys(
     };
   }
   const target = (document.activeElement as HTMLElement) || document.body;
+  if (!target) {
+    return {
+      action,
+      success: false,
+      message: `Sent keys: ${action.keys} — no focusable target (no active element or body)`,
+    };
+  }
 
  // `parsed.main` already carries the correct character: `parseKeys` preserves
  // the original case of printable keys and applies Shift-produced symbols
  // (`shift+1` → `!`, `shift+a` → `A`), so no further re-derivation is needed.
+  const { keyCode, which, code } = keyEventCodes(parsed.main);
   const opts: KeyboardEventInit = {
     key: parsed.main,
+    keyCode,
+    which,
+    code,
     bubbles: true,
     cancelable: true,
     ctrlKey: parsed.ctrl,
@@ -241,7 +310,10 @@ export async function handleSendKeys(
     metaKey: parsed.meta,
   };
   target.dispatchEvent(new KeyboardEvent("keydown", opts));
-  if (parsed.main === "Enter") {
+ // Native typing order is keydown → keypress → input → keyup. A `keypress`
+ // fires for printable characters and for Enter (the only non-printable key
+ // we forward it for, since other control keys don't emit keypress).
+  if (parsed.main === "Enter" || isPrintableKey(parsed)) {
     target.dispatchEvent(new KeyboardEvent("keypress", opts));
   }
   target.dispatchEvent(new KeyboardEvent("keyup", opts));

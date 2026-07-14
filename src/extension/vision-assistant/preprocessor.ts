@@ -25,6 +25,12 @@ import {
   IMAGE_STD,
 } from "./constants";
 
+/** Matches a well-formed `data:image/*;base64,…` URL (compiled once, not per screenshot). */
+const DATA_URL_RE = /^data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+$/;
+
+/** Mean normalization value as a 0–255 grey (image mean is a constant import). */
+const MEAN_GREY = Math.round(IMAGE_MEAN * 255);
+
 export interface PreprocessResult {
   pixelValues: Float32Array; // [nPatches, 3, PATCH_SIZE, PATCH_SIZE]
   gridHeight: number;
@@ -174,7 +180,6 @@ export async function preprocessScreenshot(screenshotDataUrl: string): Promise<P
   if (typeof screenshotDataUrl !== "string" || screenshotDataUrl.length === 0) {
     throw new Error("preprocessScreenshot: screenshotDataUrl must be a non-empty string");
   }
-  const DATA_URL_RE = /^data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+$/;
   if (!DATA_URL_RE.test(screenshotDataUrl)) {
     throw new Error(
       "preprocessScreenshot: expected a data:image/*;base64,… URL (got a malformed or non-image value)",
@@ -205,14 +210,14 @@ export async function preprocessScreenshot(screenshotDataUrl: string): Promise<P
   const pad = MERGE_FACTOR * PATCH_SIZE;
   let tw = Math.ceil(w / pad) * pad;
   let th = Math.ceil(h / pad) * pad;
-  while ((tw / PATCH_SIZE) * (th / PATCH_SIZE) > MAX_IMAGE_PATCHES) {
-    const scale = Math.sqrt(
-      MAX_IMAGE_PATCHES / ((tw / PATCH_SIZE) * (th / PATCH_SIZE)),
-    );
+  let patches = (tw / PATCH_SIZE) * (th / PATCH_SIZE);
+  while (patches > MAX_IMAGE_PATCHES) {
+    const scale = Math.sqrt(MAX_IMAGE_PATCHES / patches);
     w = Math.floor(w * scale);
     h = Math.floor(h * scale);
     tw = Math.ceil(w / pad) * pad;
     th = Math.ceil(h / pad) * pad;
+    patches = (tw / PATCH_SIZE) * (th / PATCH_SIZE);
   }
 
  // Guard against a degenerate (zero-sized) source image. A zero-width/height
@@ -247,8 +252,7 @@ export async function preprocessScreenshot(screenshotDataUrl: string): Promise<P
  // normalization `(128/255 - 0.5) / 0.5 ≈ 0.004`, effectively zero — the
  // padded border contributes ~nothing to the vision encoder's output for
  // those patches.
-  const meanGrey = Math.round(IMAGE_MEAN * 255);
-  cx.fillStyle = `rgb(${meanGrey}, ${meanGrey}, ${meanGrey})`;
+  cx.fillStyle = `rgb(${MEAN_GREY}, ${MEAN_GREY}, ${MEAN_GREY})`;
   cx.fillRect(0, 0, tw, th);
  // Draw the (possibly-rescaled) image at its scaled size in the top-left
  // corner. The remaining `tw - w` × `th - h` strip stays mean-grey.

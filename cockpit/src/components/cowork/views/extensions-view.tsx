@@ -35,8 +35,7 @@ function parseManifest(ext: SampleExtension): Record<string, unknown> {
   }
 }
 
-function manifestPermissions(ext: SampleExtension): string[] {
-  const manifest = parseManifest(ext);
+function permissionsOf(manifest: Record<string, unknown>): string[] {
   const perms = manifest.permissions;
   if (!Array.isArray(perms)) return [];
   return perms.filter((p): p is string => typeof p === "string");
@@ -46,7 +45,18 @@ export function ExtensionsView() {
   const { data, isLoading } = useExtensions();
   const [manifestFor, setManifestFor] = React.useState<string | null>(null);
 
-  const manifestExt = (data ?? []).find((e) => e.id === manifestFor);
+  const manifestExt = React.useMemo(
+    () => (data ?? []).find((e) => e.id === manifestFor),
+    [data, manifestFor],
+  );
+
+  const manifests = React.useMemo(
+    () => new Map((data ?? []).map((e) => [e.id, parseManifest(e)])),
+    [data],
+  );
+
+  const manifest = manifestFor ? manifests.get(manifestFor) : undefined;
+  const hasManifest = !!manifest && Object.keys(manifest).length > 0;
 
   return (
     <div className="space-y-4">
@@ -71,7 +81,7 @@ export function ExtensionsView() {
           className="grid gap-4 grid-cols-1 md:grid-cols-2"
         >
           {(data ?? []).map((ext) => {
-            const permissions = manifestPermissions(ext);
+            const permissions = permissionsOf(manifests.get(ext.id) ?? {});
             return (
             <Card key={ext.id} className="p-5 gap-3">
               <div className="flex items-start gap-3">
@@ -124,9 +134,12 @@ export function ExtensionsView() {
           </DialogHeader>
           {/* Parse `manifestJson` on demand; the parsed object is non-empty
               whenever the backend returned a real manifest. */}
-          {manifestExt && Object.keys(parseManifest(manifestExt)).length > 0 ? (
-            <pre className="text-xs font-mono bg-muted/50 rounded-md p-4 max-h-[60vh] overflow-auto cowork-scroll">
-{JSON.stringify(parseManifest(manifestExt), null, 2)}
+          {hasManifest ? (
+            <pre
+              aria-label={`${manifestExt?.name ?? "extension"} manifest JSON`}
+              className="text-xs font-mono bg-muted/50 rounded-md p-4 max-h-[60vh] overflow-auto cowork-scroll"
+            >
+{JSON.stringify(manifest, null, 2)}
             </pre>
           ) : (
             <div className="text-sm text-muted-foreground py-8 text-center">

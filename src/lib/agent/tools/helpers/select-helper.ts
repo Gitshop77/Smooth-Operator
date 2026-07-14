@@ -79,20 +79,32 @@ export class Select {
       );
     }
     const opts = this.getOptions();
-    let matched = opts.filter((o) => (o.textContent || "").trim() === want);
-    if (matched.length === 0) {
- // Substring fallback (case-insensitive).
-      const lower = want.toLowerCase();
-      matched = opts.filter((o) => (o.textContent || "").trim().toLowerCase().includes(lower));
+ // Single pass: keep exact matches and (separately) case-insensitive
+ // substring matches, then prefer exact — preserves the original
+ // exact-first semantics while scanning the options only once.
+    const lower = want.toLowerCase();
+    const exact: HTMLOptionElement[] = [];
+    const sub: HTMLOptionElement[] = [];
+    for (const o of opts) {
+      const t = (o.textContent || "").trim();
+      if (t === want) exact.push(o);
+      else if (t.toLowerCase().includes(lower)) sub.push(o);
     }
+    let matched = exact.length > 0 ? exact : sub;
     if (matched.length === 0) {
       throw new NoSuchElementException(
         `select option with text "${want}" not found`,
       );
     }
     if (!this.multiple) {
+ // Validate the target option BEFORE clearing, so a disabled option
+ // (injection-controllable via the select_dropdown tool) leaves the
+ // prior selection intact instead of wiping it before the guard throws.
+      if (matched[0].disabled) {
+        throw new ElementNotSelectableError(this.disabledOptionMessage(matched[0]));
+      }
  // Single-select: clear all silently, then select + dispatch ONE change.
-      for (const o of this.getOptions()) o.selected = false;
+      for (const o of opts) o.selected = false;
       this.setSelected(matched[0]);
       return;
     }
@@ -108,14 +120,22 @@ export class Select {
  */
   selectByValue(value: string): void {
     const want = String(value);
-    const matched = this.getOptions().filter((o) => o.value === want);
+    const opts = this.getOptions();
+    const matched = opts.filter((o) => o.value === want);
     if (matched.length === 0) {
       throw new NoSuchElementException(
         `select option with value "${want}" not found`,
       );
     }
     if (!this.multiple) {
-      for (const o of this.getOptions()) o.selected = false;
+ // Validate the target option BEFORE clearing, so a disabled option
+ // leaves the prior selection intact instead of wiping it before the
+ // guard throws.
+      if (matched[0].disabled) {
+        throw new ElementNotSelectableError(this.disabledOptionMessage(matched[0]));
+      }
+ // Reuse the already-fetched options array instead of re-querying the DOM.
+      for (const o of opts) o.selected = false;
       this.setSelected(matched[0]);
       return;
     }
@@ -154,7 +174,13 @@ export class Select {
       );
     }
     if (!this.multiple) {
-      for (const o of this.getOptions()) o.selected = false;
+ // Validate the target option BEFORE clearing, so a disabled option
+ // leaves the prior selection intact instead of wiping it before the
+ // guard throws.
+      if (opts[index].disabled) {
+        throw new ElementNotSelectableError(this.disabledOptionMessage(opts[index]));
+      }
+      for (const o of opts) o.selected = false;
     }
     this.setSelected(opts[index]);
   }
@@ -165,11 +191,19 @@ export class Select {
  * taxonomy. Fires a `change` event on the `<select>` so framework listeners
  * (React, Vue, etc.) pick up the new value.
  */
+  /**
+   * Build the standard error message for attempting to select a disabled
+   * `<option>`. Centralized so the wording can't drift between the five
+   * guard sites.
+   */
+  private disabledOptionMessage(o: HTMLOptionElement): string {
+    const label = (o.textContent || "").trim() || o.value || "(option)";
+    return `cannot select a disabled option: "${label}"`;
+  }
+
   private setSelected(option: HTMLOptionElement): void {
     if (option.disabled) {
-      throw new ElementNotSelectableError(
-        `cannot select a disabled option: "${(option.textContent || "").trim() || option.value}"`,
-      );
+      throw new ElementNotSelectableError(this.disabledOptionMessage(option));
     }
     option.selected = true;
  // Sync the select's value too — setting `option.selected` does this for
@@ -177,7 +211,8 @@ export class Select {
  // only the first selected option. Setting it explicitly avoids surprises
  // when callers read `select.value` after a multi-select operation.
     if (!this.multiple) this.element.value = option.value;
-    this.element.dispatchEvent(new Event("change", { bubbles: true }));
+    this.element.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    this.element.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }));
   }
 
   /**
@@ -196,14 +231,13 @@ export class Select {
  // state. Check first, then select in a second pass.
     for (const o of options) {
       if (o.disabled) {
-        throw new ElementNotSelectableError(
-          `cannot select a disabled option: "${(o.textContent || "").trim() || o.value}"`,
-        );
+        throw new ElementNotSelectableError(this.disabledOptionMessage(o));
       }
     }
     for (const o of options) {
       o.selected = true;
     }
-    this.element.dispatchEvent(new Event("change", { bubbles: true }));
+    this.element.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    this.element.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }));
   }
 }

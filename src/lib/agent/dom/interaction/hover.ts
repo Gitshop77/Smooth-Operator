@@ -23,14 +23,21 @@ const CURSOR_SVG = `
 </svg>
 `;
 
-/** z-index for the cursor (just below the highlight badge). */
-const CURSOR_Z_INDEX = "2147483646";
+/** z-index for the cursor (just below the highlight badge). A large but
+ * always-valid value (max ~2000999999, safely below the CSS z-index limit of
+ * 2^31-1 = 2147483647) — the previous formula could overflow into an invalid
+ * integer ~83% of the time, dropping the cursor behind page content. The
+ * random spread still preserves the stealth intent. */
+const CURSOR_Z_INDEX = String(2000000000 + Math.floor(Math.random() * 1000000));
 /** CSS transition for cursor movement. */
 const CURSOR_TRANSITION = "transform 180ms cubic-bezier(0.2, 0, 0, 1)";
 /** Safety timeout for `transitionend` (slightly longer than the transition). */
 const CURSOR_MOVE_TIMEOUT_MS = 220;
-/** ID assigned to the cursor element so it can be styled externally. */
-const CURSOR_ELEMENT_ID = "open-cowork-phantom-cursor";
+/** Whether the user prefers reduced motion (computed once at module load). */
+const REDUCE_MOTION =
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 let cursorEl: HTMLDivElement | null = null;
 /**
@@ -39,36 +46,53 @@ let cursorEl: HTMLDivElement | null = null;
  * the prior one so stacked `transitionend` listeners can't accumulate across
  * rapid moves.
  */
-let activeMoveFinish: (() => void) | null = null;
+let activeMoveFinish: ((e?: TransitionEvent) => void) | null = null;
 
 /**
  * Move the phantom cursor to a viewport-relative `(x, y)` position.
  * Resolves once the CSS transition completes (or after a safety timeout).
  * No-op if the tab is hidden.
  */
+/** Lazily create, style, and append the phantom-cursor element (exactly once). */
+function ensureCursor(x: number, y: number): HTMLDivElement {
+  const el = document.createElement("div");
+  el.setAttribute("aria-hidden", "true");
+ // `data-oc-cursor` is the stable, styleable hook (external CSS targets the
+ // attribute selector, not a fixed id — a constant element id is a detectable
+ // fingerprint that anti-automation scanners enumerate).
+  el.setAttribute("data-oc-cursor", "");
+  el.style.cssText = `
+    position: fixed;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+    z-index: ${CURSOR_Z_INDEX};
+    transform: translate3d(${x}px, ${y}px, 0);
+    transition: ${REDUCE_MOTION ? "none" : CURSOR_TRANSITION};
+  `;
+  el.innerHTML = CURSOR_SVG;
+  document.body.appendChild(el);
+  return el;
+}
+
 export function movePhantomCursor(x: number, y: number): Promise<void> {
   if (document.hidden) return Promise.resolve();
 
   if (!cursorEl) {
-    cursorEl = document.createElement("div");
-    cursorEl.id = CURSOR_ELEMENT_ID;
-    cursorEl.setAttribute("aria-hidden", "true");
-    cursorEl.style.cssText = `
-      position: fixed;
-      top: 0;
-      left: 0;
-      pointer-events: none;
-      z-index: ${CURSOR_Z_INDEX};
-      transform: translate3d(${x}px, ${y}px, 0);
-      transition: ${CURSOR_TRANSITION};
-      will-change: transform;
-    `;
-    cursorEl.innerHTML = CURSOR_SVG;
-    document.body.appendChild(cursorEl);
+    cursorEl = ensureCursor(x, y);
     return Promise.resolve();
   }
 
   cursorEl.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+
+ // Honor prefers-reduced-motion: resolve immediately so reduced-motion moves
+ // are instant rather than delayed by the safety timeout (no transition fires).
+  if (REDUCE_MOTION) {
+    if (activeMoveFinish) {
+      activeMoveFinish();
+    }
+    return Promise.resolve();
+  }
 
  // Cancel any in-flight move before starting a new one. Without this, rapid
  // sequential moves stack a `transitionend` listener per call, and an earlier
@@ -89,22 +113,31 @@ export function movePhantomCursor(x: number, y: number): Promise<void> {
       return;
     }
     let done = false;
- // Captured so `finish` can always reclaim the safety timer, even when the
- // transition ends before the timeout fires (or vice-versa). Previously the
- // handle was never stored, leaving a dangling one-shot timer per move.
-    const finish = (): void => {
+    // Resolve the move promise. Marked `done` so neither the transitionend nor
+    // the safety-timeout path can resolve twice.
+    const settle = (): void => {
       if (done) return;
       done = true;
       clearTimeout(safetyTimer);
-      target.removeEventListener("transitionend", finish);
-      if (activeMoveFinish === finish) {
+      target.removeEventListener("transitionend", onTransitionEnd);
+      if (activeMoveFinish === onTransitionEnd) {
         activeMoveFinish = null;
       }
       resolve();
     };
-    activeMoveFinish = finish;
-    target.addEventListener("transitionend", finish, { once: true });
-    const safetyTimer = setTimeout(finish, CURSOR_MOVE_TIMEOUT_MS);
+    // Only the transform transition drives the move; ignore unrelated
+    // transitionend events (e.g. a future opacity transition). The safety
+    // timeout below covers the identical-coordinates case where no transition
+    // fires at all — in environments without a layout engine (jsdom) the
+    // safety timeout is the ONLY thing that resolves the promise, so it must
+    // call `settle()` unconditionally.
+    const onTransitionEnd = (e?: TransitionEvent): void => {
+      if (e && e.propertyName !== "transform") return;
+      settle();
+    };
+    activeMoveFinish = onTransitionEnd;
+    target.addEventListener("transitionend", onTransitionEnd, { once: true });
+    const safetyTimer = setTimeout(settle, CURSOR_MOVE_TIMEOUT_MS);
   });
 }
 

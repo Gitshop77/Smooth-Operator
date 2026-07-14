@@ -30,14 +30,15 @@ let cachedProvider: LLMProvider | null = null;
 let cachedConfigKey: string | null = null;
 /** The full config object backing `cachedProvider` (used for the hot-path short-circuit). */
 let cachedProviderConfig: ProviderConfig | null = null;
-/** In-flight promise + its key — prevents double-building when two calls race. */
-let pendingProvider: Promise<LLMProvider> | null = null;
-let pendingProviderKey: string | null = null;
+/** In-flight build promises keyed by cache key — prevents double-building when
+ * concurrent calls (even with different keys) race. */
+const pendingProviders = new Map<string, Promise<LLMProvider>>();
 
-// Cached prompt overrides + vision mode (invalidated on chrome.storage.onChanged).
-let cachedCustomNavigatorPrompt: string | undefined | null = null;
-let cachedCustomPlannerPrompt: string | undefined | null = null;
-let cachedVisionMode: string | null = null;
+// Cached settings (invalidated on chrome.storage.onChanged via the listener
+// below). A single Map backs every cached setting so the per-key invalidation
+// is the only place that touches the cache and the four getters share one
+// memoization path instead of four copy-pasted cache variables.
+const settingCache = new Map<string, unknown>();
 
 /** Provider-config storage keys whose change must invalidate the cached provider. */
 const PROVIDER_CONFIG_KEYS = ["provider", "model", "baseUrl", "resourceName", "apiKey"];
@@ -49,36 +50,85 @@ if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
       cachedConfigKey = null;
       cachedProviderConfig = null;
     }
-    if (changes.customNavigatorPrompt) cachedCustomNavigatorPrompt = null;
-    if (changes.customPlannerPrompt) cachedCustomPlannerPrompt = null;
-    if (changes.visionMode || changes.enableLocalVision) cachedVisionMode = null;
+    if (changes.customNavigatorPrompt) settingCache.delete("customNavigatorPrompt");
+    if (changes.customPlannerPrompt) settingCache.delete("customPlannerPrompt");
+    if (changes.visionMode || changes.enableLocalVision) settingCache.delete("visionMode");
+    if (changes.enableScreenshots) settingCache.delete("enableScreenshots");
   });
 }
 
+const VISION_MODES = new Set(["disabled", "always", "adaptive"]);
+
 async function getCustomNavigatorPrompt(): Promise<string | undefined> {
-  if (cachedCustomNavigatorPrompt !== null) return cachedCustomNavigatorPrompt ?? undefined;
+  if (settingCache.has("customNavigatorPrompt")) {
+    return (settingCache.get("customNavigatorPrompt") as string | undefined) ?? undefined;
+  }
   const { customNavigatorPrompt } = await chrome.storage.local.get("customNavigatorPrompt");
-  cachedCustomNavigatorPrompt = (customNavigatorPrompt as string | undefined) ?? "";
-  return cachedCustomNavigatorPrompt ?? undefined;
+  settingCache.set("customNavigatorPrompt", customNavigatorPrompt);
+  return (customNavigatorPrompt as string | undefined) ?? undefined;
 }
 
 async function getCustomPlannerPrompt(): Promise<string | undefined> {
-  if (cachedCustomPlannerPrompt !== null) return cachedCustomPlannerPrompt ?? undefined;
+  if (settingCache.has("customPlannerPrompt")) {
+    return (settingCache.get("customPlannerPrompt") as string | undefined) ?? undefined;
+  }
   const { customPlannerPrompt } = await chrome.storage.local.get("customPlannerPrompt");
-  cachedCustomPlannerPrompt = (customPlannerPrompt as string | undefined) ?? "";
-  return cachedCustomPlannerPrompt ?? undefined;
+  settingCache.set("customPlannerPrompt", customPlannerPrompt);
+  return (customPlannerPrompt as string | undefined) ?? undefined;
 }
 
 async function getVisionMode(): Promise<"disabled" | "always" | "adaptive"> {
-  if (cachedVisionMode !== null) return cachedVisionMode as "disabled" | "always" | "adaptive";
+  if (settingCache.has("visionMode")) {
+    return settingCache.get("visionMode") as "disabled" | "always" | "adaptive";
+  }
  // `visionMode` is the single source of truth (disabled | always | adaptive).
  // `enableLocalVision` is a legacy key kept only for one-time backward
  // compatibility: if `visionMode` is unset but `enableLocalVision` was true,
  // treat it as "always". New code should only ever write `visionMode`.
-  const { visionMode, enableLocalVision } = await chrome.storage.local.get(["visionMode", "enableLocalVision"]);
-  const mode = (visionMode as string) || (enableLocalVision === true ? "always" : "disabled");
-  cachedVisionMode = mode;
-  return mode as "disabled" | "always" | "adaptive";
+  const { visionMode, enableLocalVision } = await chrome.storage.local.get([
+    "visionMode",
+    "enableLocalVision",
+  ]);
+  const mode = VISION_MODES.has(visionMode as string)
+    ? (visionMode as "disabled" | "always" | "adaptive")
+    : (enableLocalVision === true ? "always" : "disabled");
+  settingCache.set("visionMode", mode);
+  return mode;
+}
+
+/** Cached `enableScreenshots` setting (defaults to true). */
+async function getEnableScreenshots(): Promise<boolean> {
+  if (settingCache.has("enableScreenshots")) {
+    return settingCache.get("enableScreenshots") as boolean;
+  }
+  const { enableScreenshots } = await chrome.storage.local.get("enableScreenshots");
+  const value = (enableScreenshots as boolean | undefined) ?? true;
+  settingCache.set("enableScreenshots", value);
+  return value;
+}
+
+/** Map a provider chat response's `content`/`usage` to the shape the
+ * orchestrator expects from `navigatorCall`/`plannerCall`. */
+function extractUsage(r: {
+  content: string;
+  usage?: {
+    tokensIn?: number;
+    tokensOut?: number;
+    reasoningTokens?: number;
+    cachedInputTokens?: number;
+    model?: string;
+    costUsd?: number;
+  };
+}) {
+  return {
+    raw: r.content,
+    tokensIn: r.usage?.tokensIn,
+    tokensOut: r.usage?.tokensOut,
+    reasoningTokens: r.usage?.reasoningTokens,
+    cachedInputTokens: r.usage?.cachedInputTokens,
+    model: r.usage?.model,
+    costUsd: r.usage?.costUsd,
+  };
 }
 
 /**
@@ -105,6 +155,18 @@ async function getAgentMode(): Promise<string> {
  *
  * @throws if no provider is configured or the API key is missing.
  */
+/**
+ * Cheap, non-reversible digest of a secret (e.g. an API key) for use inside a
+ * cache key. The key material is never persisted as plaintext — only this short
+ * digest survives in the long-lived `cachedConfigKey` string — while cache
+ * invalidation still fires whenever the secret changes.
+ */
+function hashStr(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
 async function getProvider(): Promise<LLMProvider> {
  // Hot path: reuse the cached provider WITHOUT a storage round-trip. The cache
  // is invalidated by the `chrome.storage.onChanged` listener above whenever a
@@ -120,37 +182,38 @@ async function getProvider(): Promise<LLMProvider> {
  // Cache key: provider + apiKey + model + baseUrl + resourceName. If any
  // change, rebuild. `resourceName` is included so an Azure resource swap
  // (which changes the constructed endpoint) forces a provider rebuild rather
- // than reusing a stale cached instance bound to the old resource.
-  const key = `${config.provider}|${config.apiKey}|${config.model}|${config.baseUrl ?? ""}|${config.resourceName ?? ""}`;
+ // than reusing a stale cached instance bound to the old resource. Use a
+ // JSON-encoded tuple so user-controlled fields containing the `|` separator
+ // cannot collide and produce a wrong-provider key.
+  const key = JSON.stringify([
+    config.provider,
+    hashStr(config.apiKey ?? ""),
+    config.model,
+    config.baseUrl ?? null,
+    config.resourceName ?? null,
+  ]);
   cachedProviderConfig = config;
   if (cachedProvider && key === cachedConfigKey) return cachedProvider;
  // If a build is already in-flight for THIS key, await it instead of
  // starting a second concurrent buildProvider() call.
-  if (pendingProvider && key === pendingProviderKey) return pendingProvider;
-  pendingProviderKey = key;
+  const existing = pendingProviders.get(key);
+  if (existing) return existing;
  // Capture the in-flight promise locally so its resolve/reject closures only
- // clear the SHARED `pendingProvider`/`pendingProviderKey` when they still
- // refer to THIS promise. Otherwise, if two calls with different cache keys
- // overlap, call A's closure could null B's in-flight build (causing a
+ // clear the entry for THIS key. Otherwise, if two calls with different cache
+ // keys overlap, call A's closure could null B's in-flight build (causing a
  // redundant rebuild) or overwrite the cache with A's stale key/provider
  // (finding: concurrent provider builds corrupt shared pendingProvider/
  // cachedProvider state).
   const p = buildProvider(config).then((provider) => {
     cachedProvider = provider;
     cachedConfigKey = key;
-    if (pendingProvider === p) {
-      pendingProvider = null;
-      pendingProviderKey = null;
-    }
+    pendingProviders.delete(key);
     return provider;
   }).catch((e) => {
-    if (pendingProvider === p) {
-      pendingProvider = null;
-      pendingProviderKey = null;
-    }
+    pendingProviders.delete(key);
     throw e;
   });
-  pendingProvider = p;
+  pendingProviders.set(key, p);
   return p;
 }
 
@@ -196,11 +259,15 @@ export async function navigatorCallDirect(req: AgentStepRequest): Promise<{
   });
 
  // load custom navigator prompt override (cached, invalidated on storage change).
-  const customNavigatorPrompt = await getCustomNavigatorPrompt();
-  const visionMode = await getVisionMode();
-  const agentMode = await getAgentMode();
+ // These four reads are independent — fetch them in parallel so a cache miss
+ // doesn't serialize 3-4 extra chrome.storage.local.get round-trips per step.
+  const [customNavigatorPrompt, visionMode, agentMode, provider] = await Promise.all([
+    getCustomNavigatorPrompt(),
+    getVisionMode(),
+    getAgentMode(),
+    getProvider(),
+  ]);
   let systemPrompt = buildNavigatorPrompt(MAX_ACTIONS, customNavigatorPrompt, visionMode, agentMode);
-  const provider = await getProvider();
 
  // Embed screenshot marker ONLY for vision-capable models. Text-only models
  // would either error (HTTP 400 from the API) or waste tokens processing a
@@ -208,8 +275,7 @@ export async function navigatorCallDirect(req: AgentStepRequest): Promise<{
  // flag is set per-MODEL via the models.dev catalog lookup in buildProvider().
  // Also check the user's "enableScreenshots" setting (defaults to true for
  // vision models, false for text-only models).
-  const enableScreenshots = provider.supportsVision &&
-    ((await chrome.storage.local.get("enableScreenshots")).enableScreenshots ?? true);
+  const enableScreenshots = provider.supportsVision && (await getEnableScreenshots());
   const screenshot = enableScreenshots ? req.browserState.screenshot : undefined;
  // The screenshot is raw, page-rendered pixels — it is NOT subject to the text
  // sanitizer (which only inspects DOM/AX text) and must be treated as untrusted
@@ -247,15 +313,7 @@ export async function navigatorCallDirect(req: AgentStepRequest): Promise<{
  // force llm-calls.ts to recompute cost via estimateCost WITHOUT
  // cachedInputTokens — under-reporting Anthropic cached-step cost by up to
  // 90% and effectively disabling cost-cap enforcement for cached calls.
-  return {
-    raw: response.content,
-    tokensIn: response.usage?.tokensIn,
-    tokensOut: response.usage?.tokensOut,
-    reasoningTokens: response.usage?.reasoningTokens,
-    cachedInputTokens: response.usage?.cachedInputTokens,
-    model: response.usage?.model,
-    costUsd: response.usage?.costUsd,
-  };
+  return extractUsage(response);
 }
 
 /**
@@ -288,9 +346,12 @@ export async function plannerCallDirect(req: PlannerStepRequest): Promise<{
   });
 
  // load custom planner prompt override (cached, invalidated on storage change).
-  const customPlannerPrompt = await getCustomPlannerPrompt();
+ // Planner prompt + provider are independent reads — fetch them in parallel.
+  const [customPlannerPrompt, provider] = await Promise.all([
+    getCustomPlannerPrompt(),
+    getProvider(),
+  ]);
   let systemPrompt = buildPlannerPrompt(customPlannerPrompt);
-  const provider = await getProvider();
 
  // Wire `getFormatInstructions` for providers without native structured
  // output. Symmetric with the navigator path above — without the JSON schema
@@ -313,13 +374,5 @@ export async function plannerCallDirect(req: PlannerStepRequest): Promise<{
   });
 
  // Return cachedInputTokens + pre-computed costUsd (see navigatorCallDirect).
-  return {
-    raw: response.content,
-    tokensIn: response.usage?.tokensIn,
-    tokensOut: response.usage?.tokensOut,
-    reasoningTokens: response.usage?.reasoningTokens,
-    cachedInputTokens: response.usage?.cachedInputTokens,
-    model: response.usage?.model,
-    costUsd: response.usage?.costUsd,
-  };
+  return extractUsage(response);
 }

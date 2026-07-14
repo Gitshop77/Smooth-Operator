@@ -12,6 +12,12 @@
 import { describe, test, expect } from "vitest";
 import { validateLlmBaseUrl, isAllowedLlmBaseUrl } from "../src/lib/agent/llm/route/ssrf";
 
+function assertRejected(res: ReturnType<typeof validateLlmBaseUrl>, re: RegExp): void {
+  expect(res.ok).toBe(false);
+  if (res.ok) throw new Error("expected rejection");
+  expect(res.reason).toMatch(re);
+}
+
 describe("validateLlmBaseUrl (SSRF guard)", () => {
   test("allows a public hostname", () => {
     expect(validateLlmBaseUrl("https://api.openai.com/v1").ok).toBe(true);
@@ -32,59 +38,40 @@ describe("validateLlmBaseUrl (SSRF guard)", () => {
   });
 
   test("rejects non-http(s) schemes", () => {
-    const r1 = validateLlmBaseUrl("file:///etc/passwd");
-    expect(r1.ok).toBe(false);
-    if (r1.ok) throw new Error("expected rejection");
-    expect(r1.reason).toMatch(/is not allowed/i);
-
-    const r2 = validateLlmBaseUrl("ftp://169.254.169.254/");
-    expect(r2.ok).toBe(false);
-    if (r2.ok) throw new Error("expected rejection");
-    expect(r2.reason).toMatch(/is not allowed/i);
+    assertRejected(validateLlmBaseUrl("file:///etc/passwd"), /is not allowed/i);
+    assertRejected(validateLlmBaseUrl("ftp://169.254.169.254/"), /is not allowed/i);
   });
 
   test("rejects the cloud-metadata link-local address", () => {
-    const res = validateLlmBaseUrl("http://169.254.169.254/");
-    expect(res.ok).toBe(false);
-    if (res.ok) throw new Error("expected rejection");
-    expect(res.reason).toMatch(/link-local/i);
+    assertRejected(validateLlmBaseUrl("http://169.254.169.254/"), /link-local/i);
   });
 
   test("rejects the unspecified 0.0.0.0 address", () => {
-    const res = validateLlmBaseUrl("http://0.0.0.0/");
-    expect(res.ok).toBe(false);
-    if (res.ok) throw new Error("expected rejection");
-    expect(res.reason).toMatch(/private\/loopback\/link-local/i);
+    assertRejected(validateLlmBaseUrl("http://0.0.0.0/"), /private\/loopback\/link-local/i);
   });
 
  // Extra coverage beyond the required cases:
   test("rejects CGNAT / link-local / unspecified but allows loopback + RFC1918", () => {
     expect(validateLlmBaseUrl("http://172.16.5.5/").ok).toBe(true); // RFC1918 allowed
     expect(validateLlmBaseUrl("http://127.0.0.1/").ok).toBe(true); // loopback allowed
-    const cgnat = validateLlmBaseUrl("http://100.64.0.1/");
-    expect(cgnat.ok).toBe(false); // CGNAT blocked
-    if (cgnat.ok) throw new Error("expected rejection");
-    expect(cgnat.reason).toMatch(/private\/loopback\/link-local/i);
+    assertRejected(validateLlmBaseUrl("http://100.64.0.1/"), /private\/loopback\/link-local/i);
   });
 
   test("IPv6: allows loopback / ULA / mapped-v4 but rejects link-local", () => {
-    expect(validateLlmBaseUrl("http://[:1]/").ok).toBe(true); // loopback allowed
-    expect(validateLlmBaseUrl("http://[fc00:1]/").ok).toBe(true); // ULA allowed
-    expect(validateLlmBaseUrl("http://[:ffff:127.0.0.1]/").ok).toBe(true); // loopback mapped allowed
-    expect(validateLlmBaseUrl("http://[:ffff:10.0.0.1]/").ok).toBe(true); // RFC1918 mapped allowed
-    expect(validateLlmBaseUrl("http://[fe80:1]/").ok).toBe(false); // link-local blocked
+    expect(validateLlmBaseUrl("http://[::1]/").ok).toBe(true); // loopback allowed
+    expect(validateLlmBaseUrl("http://[fc00::1]/").ok).toBe(true); // ULA allowed
+    expect(validateLlmBaseUrl("http://[::ffff:127.0.0.1]/").ok).toBe(true); // loopback mapped allowed
+    expect(validateLlmBaseUrl("http://[::ffff:10.0.0.1]/").ok).toBe(true); // RFC1918 mapped allowed
+    expect(validateLlmBaseUrl("http://[fe80::1]/").ok).toBe(false); // link-local blocked
+ // Parse-layer defense-in-depth: IPv4-mapped cloud-metadata must be rejected
+ // here, not only at the transport layer (isAllowedLlmBaseUrl).
+    assertRejected(validateLlmBaseUrl("http://[::ffff:169.254.169.254]/"), /link-local|metadata/i);
+    assertRejected(validateLlmBaseUrl("http://[::ffff:0.0.0.0]/"), /link-local|metadata/i);
   });
 
   test("rejects a malformed / empty URL", () => {
-    const malformed = validateLlmBaseUrl("not a url");
-    expect(malformed.ok).toBe(false);
-    if (malformed.ok) throw new Error("expected rejection");
-    expect(malformed.reason).toMatch(/invalid URL/i);
-
-    const empty = validateLlmBaseUrl("");
-    expect(empty.ok).toBe(false);
-    if (empty.ok) throw new Error("expected rejection");
-    expect(empty.reason).toMatch(/non-empty string/i);
+    assertRejected(validateLlmBaseUrl("not a url"), /invalid URL/i);
+    assertRejected(validateLlmBaseUrl(""), /non-empty string/i);
   });
 });
 
@@ -123,5 +110,27 @@ describe("isAllowedLlmBaseUrl (transport-layer SSRF guard)", () => {
     expect(isAllowedLlmBaseUrl("http://127.0.0.1:4000/v1", false)).toBe(false);
  // A genuine sink is still rejected when the exemption is disabled.
     expect(isAllowedLlmBaseUrl("http://169.254.169.254/", false)).toBe(false);
+  });
+
+  test("IPv6 parity: transport guard rejects loopback/ULA/link-local/mapped regardless of exemption", () => {
+ // Unlike the parse-layer `validateLlmBaseUrl` (which ALLOWS IPv6 loopback
+ // `:1` and ULA `fc00:/7` as self-hosted infra), the transport-layer guard
+ // only exempts the curated IPv4 local-provider origins (localhost /
+ // 127.0.0.1). So every IPv6 variant — even loopback/ULA — is rejected, which
+ // closes the gap where an IPv6 SSRF sink could slip through to `fetch`. Pin
+ // this so a future change that adds IPv6 to the curated exemption is caught.
+    const ipv6 = [
+      "http://[::1]/v1",
+      "http://[fc00::1]/v1",
+      "http://[::ffff:127.0.0.1]/v1",
+      "http://[::ffff:10.0.0.1]/v1",
+      "http://[fe80::1]/",
+      "http://[::ffff:169.254.169.254]/",
+      "http://[::ffff:0.0.0.0]/",
+    ];
+    for (const u of ipv6) {
+      expect(isAllowedLlmBaseUrl(u)).toBe(false);
+      expect(isAllowedLlmBaseUrl(u, false)).toBe(false);
+    }
   });
 });

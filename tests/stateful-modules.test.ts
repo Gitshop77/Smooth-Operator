@@ -69,8 +69,9 @@ describe("scheduled-tasks — computeNextFire", () => {
     const result = computeNextFire({ type: "interval", intervalMinutes: 60 }, now);
  // computeNextFire sets the time to the default hour:minute for interval
  // schedules (they don't use hour/minute), so the result should be at
- // least 1 minute in the future.
+ // least 1 minute in the future. Pin the documented minimum 1-minute delay.
     expect(result.getTime()).toBeGreaterThan(now.getTime());
+    expect(result.getTime() - now.getTime()).toBeGreaterThanOrEqual(60_000);
   });
 
   test("daily schedule fires at the specified time today if it hasn't passed yet", () => {
@@ -93,6 +94,16 @@ describe("scheduled-tasks — computeNextFire", () => {
  // Schedule for Monday (day 1) at 9 AM
     const result = computeNextFire({ type: "weekly", hour: 9, minute: 0, dayOfWeek: 1 }, now);
  // Should be the next Monday (Jan 20)
+    expect(result.getDay()).toBe(1);
+    expect(result.getDate()).toBe(20);
+  });
+
+  test("weekly schedule that already passed today rolls forward a full week", () => {
+ // 2025-01-13 is a Monday (day 1). Schedule for Monday at 09:00, but now is
+ // 10:00 (the target time already passed today) → must roll to the NEXT
+ // Monday (Jan 20), not later today.
+    const now = new Date("2025-01-13T10:00:00");
+    const result = computeNextFire({ type: "weekly", hour: 9, minute: 0, dayOfWeek: 1 }, now);
     expect(result.getDay()).toBe(1);
     expect(result.getDate()).toBe(20);
   });

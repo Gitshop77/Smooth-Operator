@@ -21,6 +21,12 @@ const MAX_EXTRACT_SNIPPET = 200;
 /** Maximum number of characters to include from the agent's final summary. */
 const MAX_SUMMARY_SNIPPET = 4000;
 
+/** Slice `text` to `max` chars, appending an ellipsis only when actually truncated. */
+function truncate(text: string, max: number): string {
+  const s = text.slice(0, max);
+  return s + (text.length > max ? "…" : "");
+}
+
 /** Result returned by the judge LLM. */
 export interface JudgementResult {
   /** The judge's step-by-step reasoning, or null if the LLM omitted it. */
@@ -135,9 +141,7 @@ function renderHistoryItem(h: HistoryItem): string {
  // the snippet was cut short (otherwise it might infer the task
  // failed because the data "ended abruptly").
         const full = r.extractedContent;
-        const snippet = full.slice(0, MAX_EXTRACT_SNIPPET);
-        const ellipsis = full.length > MAX_EXTRACT_SNIPPET ? "…" : "";
-        s += `      Extracted: ${wrapUntrusted(snippet + ellipsis)}\n`;
+        s += `      Extracted: ${wrapUntrusted(truncate(full, MAX_EXTRACT_SNIPPET))}\n`;
       }
     }
   }
@@ -199,7 +203,7 @@ export async function judgeTask(args: JudgeTaskArgs): Promise<JudgementResult | 
 
   const historyText = history.map(renderHistoryItem).join("\n");
 
-  const truncatedSummary = agentResult.text.slice(0, MAX_SUMMARY_SNIPPET);
+  const truncatedSummary = truncate(agentResult.text, MAX_SUMMARY_SNIPPET);
   const userMessage = `Task: ${task}
 
 Agent's final result:

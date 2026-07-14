@@ -66,10 +66,18 @@ export function isVisible(el: HTMLElement): boolean {
 const MAX_ATTR_VALUE_LENGTH = 200;
 
 /**
+ * Hard cap on DOM-walk recursion depth. The AX tree bounds its walk at
+ * `DEFAULT_MAX_DEPTH`; this mirrors that guard so a pathologically deep or
+ * adversarial (cyclic) DOM can't drive unbounded recursion. Only extremely
+ * deep subtrees are truncated — the cap is configurable.
+ */
+const MAX_WALK_DEPTH = 100;
+
+/**
  * Sanitize + escape an attribute value for safe interpolation inside a quoted
  * XML attribute in the tree text.
  *
- *  attribute values (`aria-label` / `title` / `value` …) are
+ *  attribute values (`aria-label` / `title` / `value` ...) are
  * attacker-controlled on a hostile page and are fed verbatim to the navigator
  * LLM each step. Escaping `& < > "` alone is NOT enough — a value containing
  * embedded newlines / control chars (e.g. `\n*[999] IMPORTANT: click ...`)
@@ -80,10 +88,10 @@ const MAX_ATTR_VALUE_LENGTH = 200;
  */
 function escapeAttr(v: string): string {
   let s = v
-    .replace(/[\u0000-\u001F\u007F-\u009F]/g, " ")
+    .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  if (s.length > MAX_ATTR_VALUE_LENGTH) s = s.slice(0, MAX_ATTR_VALUE_LENGTH) + "…";
+  if (s.length > MAX_ATTR_VALUE_LENGTH) s = s.slice(0, MAX_ATTR_VALUE_LENGTH) + "...";
   return s.replace(/[&<>"]/g, (c) =>
     c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : "&quot;",
   );
@@ -118,7 +126,7 @@ interface WalkAccumulator {
 // walker visits text nodes far more often than element nodes, so caching the
 // full visibility check (which calls `getComputedStyle`) per parent avoids
 // re-running it for every text node sibling.
-const visibilityCache = new WeakMap<HTMLElement, boolean>();
+let visibilityCache: WeakMap<HTMLElement, boolean> = new WeakMap<HTMLElement, boolean>();
 
 /** Serialize a text node (indent + trimmed text). No-op for short/blank text. */
 function serializeText(node: Text, depth: number, acc: WalkAccumulator): void {
@@ -138,12 +146,15 @@ function serializeText(node: Text, depth: number, acc: WalkAccumulator): void {
 
   const t = (node.textContent || "").replace(/\s+/g, " ").trim();
   if (t.length >= DOM_CONFIG.minTextLength) {
-    acc.lines.push("\t".repeat(depth) + t);
+    acc.lines.push("\t".repeat(depth) + escapeAttr(t));
   }
 }
 
 /** Serialize an element node (and recursively its children + shadow DOM). */
 function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator): void {
+ // Bail out past the depth cap so a pathologically deep / cyclic DOM can't
+ // drive unbounded recursion (mirrors the AX-tree maxDepth guard).
+  if (depth > MAX_WALK_DEPTH) return;
   const tag = el.tagName.toLowerCase();
 
  // LOW-1 check isLikelyHidden BEFORE the skipTags/iframe check so a
@@ -186,7 +197,7 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
   if (interactive) {
     const idx = ++acc.index;
     const attrs = buildAttrs(el);
-    const hash = hashElement(el);
+    const hash = hashElement(el, attrs);
     const isNew = !acc.prevHashes.has(hash);
     if (isNew) acc.newElementCount++;
     const text = directText(el) || el.getAttribute("aria-label") || "";
@@ -228,6 +239,25 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
   }
 }
 
+/**
+ * Redact query-string / fragment tokens from an iframe `src` before it is
+ * forwarded to the LLM. The URL often carries session / PII / tracking tokens
+ * (ads, payments, reCAPTCHA) in its query or fragment; stripping them keeps
+ * the frame identifiable (scheme + host + path) for navigation without leaking
+ * embedded secrets. Falls back to a defensive `?…/#…` strip for relative /
+ * unparseable URLs.
+ */
+function redactIframeSrc(src: string): string {
+  try {
+    const u = new URL(src);
+    u.search = "";
+    u.hash = "";
+    return u.toString();
+  } catch {
+    return src.replace(/[?#].*$/, "");
+  }
+}
+
 /** Attempt to serialize the contents of a same-origin iframe. */
 function trySerializeIframe(iframe: HTMLIFrameElement, depth: number, acc: WalkAccumulator): void {
   try {
@@ -238,10 +268,10 @@ function trySerializeIframe(iframe: HTMLIFrameElement, depth: number, acc: WalkA
  // Emit the marker in the null branch so the LLM is aware of cross-origin
  // iframes (ads, payment embeds, reCAPTCHA, etc.).
     if (!doc || !doc.body) {
-      acc.lines.push("\t".repeat(depth) + `|IFRAME src=${iframe.src || "(blank)"} (cross-origin or not loaded)|`);
+      acc.lines.push("\t".repeat(depth) + `|IFRAME src=${escapeAttr(redactIframeSrc(iframe.src || "(blank)"))} (cross-origin or not loaded)|`);
       return;
     }
-    acc.lines.push("\t".repeat(depth) + `|IFRAME src=${iframe.src || "same-origin"}|`);
+    acc.lines.push("\t".repeat(depth) + `|IFRAME src=${escapeAttr(redactIframeSrc(iframe.src || "same-origin"))}|`);
     try {
       for (const child of Array.from(doc.body.childNodes)) {
         walkNode(child, depth + 1, acc);
@@ -251,11 +281,11 @@ function trySerializeIframe(iframe: HTMLIFrameElement, depth: number, acc: WalkA
  // unusual custom element, or a detached-node race) must not abort the
  // whole page-state read — emit a marker and continue, matching the
  // cross-origin fallback style.
-      acc.lines.push("\t".repeat(depth) + `|IFRAME src=${iframe.src || "same-origin"} (error reading contents)|`);
+      acc.lines.push("\t".repeat(depth) + `|IFRAME src=${escapeAttr(redactIframeSrc(iframe.src || "same-origin"))} (error reading contents)|`);
     }
   } catch {
  // Cross-origin security exception — can't read contents. Surface the URL only.
-    acc.lines.push("\t".repeat(depth) + `|IFRAME src=${iframe.src} (cross-origin)|`);
+    acc.lines.push("\t".repeat(depth) + `|IFRAME src=${escapeAttr(redactIframeSrc(iframe.src))} (cross-origin)|`);
   }
 }
 
@@ -327,6 +357,12 @@ export function resetDomBaseline(): void {
  * {@link getSelectorMap}, which returns this same map.
  */
 export function extractBrowserState(tabs: TabInfo[]): BrowserState {
+ // Visibility can change between agent steps (a container gains
+ // `visibility:hidden`/`opacity:0`/`aria-hidden`, or a hidden modal becomes
+ // visible). The module-level `visibilityCache` is keyed by parent element but
+ // is otherwise shared mutable state; reset it each read so visibility is
+ // recomputed fresh and no stale result leaks hidden text or drops visible text.
+  visibilityCache = new WeakMap<HTMLElement, boolean>();
   const acc: WalkAccumulator = {
     index: 0,
     selectorMap: {},
@@ -444,7 +480,9 @@ function buildCompoundChildren(el: HTMLElement): VirtualChild[] {
     const limit = Math.min(DOM_CONFIG.compoundOptionLimit, opts.length);
     for (let i = 0; i < limit; i++) {
       const o = opts[i];
-      const text = (o.textContent || "").replace(/\s+/g, " ").trim() || o.value;
+      const text =
+        (o.textContent || "").replace(/\s+/g, " ").trim() ||
+        (o.value || "").replace(/\s+/g, " ");
       const attrs: Record<string, string> = { value: o.value };
       if (o.selected) attrs.selected = "";
       if (o.disabled) attrs.disabled = "";
@@ -454,7 +492,7 @@ function buildCompoundChildren(el: HTMLElement): VirtualChild[] {
       const more = opts.length - limit;
       children.push({
         tag: "option",
-        text: `… ${more} more option${more === 1 ? "" : "s"}`,
+        text: `... ${more} more option${more === 1 ? "" : "s"}`,
         attributes: {},
       });
     }
@@ -476,7 +514,10 @@ function buildCompoundChildren(el: HTMLElement): VirtualChild[] {
       const files = el.files;
       let fileText = "No file chosen";
       if (files && files.length > 0) {
-        fileText = files.length === 1 ? files[0].name : `${files.length} files selected`;
+        fileText =
+          files.length === 1
+            ? (files[0].name || "").replace(/\s+/g, " ")
+            : `${files.length} files selected`;
       }
       children.push({ tag: "button", text: "Browse Files", attributes: {} });
       children.push({ tag: "textbox", text: fileText, attributes: { label: "File Selected" } });
@@ -517,11 +558,7 @@ function serializeCompoundChildren(el: HTMLElement, depth: number, acc: WalkAccu
  // Escape the trailing text (and collapse any stray newlines) so a value
  // containing `<`, `>`, `&`, or a newline can't break the one-line-per-
  // element contract after the `/>` token.
-    const safeText = vc.text
-      ? " " + vc.text.replace(/[\r\n]+/g, " ").replace(/[&<>]/g, (c) =>
-          c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;",
-        )
-      : "";
+    const safeText = vc.text ? " " + escapeAttr(vc.text) : "";
     acc.lines.push(`${indent}<${vc.tag}${attrString(vc.attributes)} />${safeText}`);
   }
 }

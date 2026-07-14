@@ -8,7 +8,7 @@
  * consistently").
  */
 
-import { $, escapeHtml } from "@/extension/shared";
+import { $ } from "@/extension/shared";
 import { STORAGE_KEYS, showSaved } from "./settings-sync";
 
 interface QuickPrompt {
@@ -55,12 +55,18 @@ function validateQuickPrompts(raw: unknown): QuickPrompt[] {
 
 /** Load the persisted custom prompts into the textareas. */
 export async function loadPrompts(): Promise<void> {
-  const res = await chrome.storage.local.get([
-    "customNavigatorPrompt",
-    "customPlannerPrompt",
-    STORAGE_KEYS.defaultTask,
-    STORAGE_KEYS.quickPrompts,
-  ]);
+  let res: Record<string, unknown>;
+  try {
+    res = await chrome.storage.local.get([
+      "customNavigatorPrompt",
+      "customPlannerPrompt",
+      STORAGE_KEYS.defaultTask,
+      STORAGE_KEYS.quickPrompts,
+    ]);
+  } catch (e) {
+    console.warn("[prompts] failed to load prompts:", e);
+    return;
+  }
   ($("customNavigatorPrompt") as HTMLTextAreaElement).value = (res.customNavigatorPrompt as string) || "";
   ($("customPlannerPrompt") as HTMLTextAreaElement).value = (res.customPlannerPrompt as string) || "";
   ($("defaultTask") as HTMLTextAreaElement).value = (res.defaultTask as string) || "";
@@ -68,12 +74,14 @@ export async function loadPrompts(): Promise<void> {
 }
 
 // Save prompts on change (textareas fire `change` on blur).
-$("customNavigatorPrompt")?.addEventListener("change", () => {
-  chrome.storage.local.set({ customNavigatorPrompt: ($("customNavigatorPrompt") as HTMLTextAreaElement).value });
+const navPromptEl = $("customNavigatorPrompt") as HTMLTextAreaElement;
+navPromptEl.addEventListener("change", () => {
+  chrome.storage.local.set({ customNavigatorPrompt: navPromptEl.value });
   showSaved();
 });
-$("customPlannerPrompt")?.addEventListener("change", () => {
-  chrome.storage.local.set({ customPlannerPrompt: ($("customPlannerPrompt") as HTMLTextAreaElement).value });
+const planPromptEl = $("customPlannerPrompt") as HTMLTextAreaElement;
+planPromptEl.addEventListener("change", () => {
+  chrome.storage.local.set({ customPlannerPrompt: planPromptEl.value });
   showSaved();
 });
 // NOTE: `defaultTask` persistence is owned by `settings-sync.ts` (its
@@ -90,13 +98,12 @@ $("customPlannerPrompt")?.addEventListener("change", () => {
  */
 function flashFieldError(message: string): void {
   const host = (($("quickPromptName") as HTMLElement | null)?.parentElement) ?? document.body;
+  // Only one error at a time — drop a stale one before showing the new message.
+  host.querySelector(".qp-field-error")?.remove();
   const el = document.createElement("div");
   el.className = "qp-field-error";
+  el.setAttribute("role", "alert");
   el.textContent = message;
-  el.style.cssText =
-    "color:#b91c1c;background:#fef2f2;border:1px solid #fecaca;" +
-    "font:500 12px/1.3 ui-sans-serif,system-ui;padding:6px 9px;border-radius:6px;" +
-    "margin:6px 0;max-width:320px;";
   host.appendChild(el);
   setTimeout(() => el.remove(), 4000);
 }
@@ -108,6 +115,7 @@ async function readQuickPrompts(): Promise<QuickPrompt[]> {
 
 function renderQuickPrompts(items: QuickPrompt[]): void {
   const list = $("quickPromptsList") as HTMLDivElement;
+  list.setAttribute("aria-live", "polite");
   list.innerHTML = "";
   if (items.length === 0) {
     list.innerHTML = '<p class="empty-hint">No quick prompts saved.</p>';
@@ -116,11 +124,17 @@ function renderQuickPrompts(items: QuickPrompt[]): void {
   items.forEach((q, index) => {
     const item = document.createElement("div");
     item.className = "quick-prompt-item";
-    item.innerHTML =
-      `<span class="qp-name">${escapeHtml(q.name)}</span>` +
-      `<span class="qp-text">${escapeHtml(q.text.slice(0, 80))}</span>` +
-      `<button type="button" class="qp-delete">Delete</button>`;
-    item.querySelector("button")!.addEventListener("click", () => {
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "qp-name";
+    nameSpan.textContent = q.name;
+    const textSpan = document.createElement("span");
+    textSpan.className = "qp-text";
+    textSpan.textContent = q.text.slice(0, 80);
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "qp-delete";
+    deleteBtn.textContent = "Delete";
+    deleteBtn.addEventListener("click", () => {
       void serialize(async () => {
  // Delete by index, not by name, so a pre-existing duplicate name
  // cannot mass-delete sibling entries.
@@ -131,11 +145,12 @@ function renderQuickPrompts(items: QuickPrompt[]): void {
         showSaved();
       });
     });
+    item.append(nameSpan, textSpan, deleteBtn);
     list.appendChild(item);
   });
 }
 
-$("addQuickPrompt")?.addEventListener("click", () => {
+document.getElementById("addQuickPrompt")?.addEventListener("click", () => {
   void serialize(async () => {
     const name = ($("quickPromptName") as HTMLInputElement).value.trim();
     const text = ($("quickPromptText") as HTMLInputElement).value.trim();

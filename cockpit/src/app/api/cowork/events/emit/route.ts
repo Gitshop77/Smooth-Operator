@@ -33,6 +33,9 @@ const SERVER_OWNED_CHANNELS = new Set<string>([
   'chat:error',
 ]);
 
+// Cap serialized payload size (see the size check below). Module-level constant.
+const PAYLOAD_MAX_BYTES = 64 * 1024; // 64KB
+
 export async function POST(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
  // `bodyJson` caps the raw body at MAX_BODY_BYTES (256KB) and rejects
@@ -45,6 +48,11 @@ export async function POST(req: NextRequest): Promise<Response> {
     if (body.channel.length > 128) {
       return badRequest('channel must be at most 128 chars');
     }
+ // Screen control/null bytes so a crafted channel can't forge log lines
+ // or confuse downstream socket.io channel routing.
+    if (/[\x00-\x1f\x7f]/.test(body.channel)) {
+      return badRequest('channel contains invalid characters');
+    }
  // Reject server-owned channels so a token holder cannot impersonate
  // server-originated status/chat streams (mirrors the socket ingress guard).
     if (SERVER_OWNED_CHANNELS.has(body.channel)) {
@@ -53,8 +61,16 @@ export async function POST(req: NextRequest): Promise<Response> {
  // Cap serialized payload size so an authenticated caller can't
  // broadcast multi-MB payloads to every connected WebSocket client
  // (which could OOM browser tabs or the mini-service's in-memory buffer).
-    const PAYLOAD_MAX_BYTES = 64 * 1024; // 64KB
-    const serialized = JSON.stringify(body.payload ?? null);
+    let serialized: string;
+    try {
+ // A payload with a circular reference or a BigInt makes `JSON.stringify`
+ // throw synchronously; surfacing that as a clean 400 (instead of an
+ // opaque 500) also closes the 64KB size-gate bypass the throw would
+ // otherwise cause.
+      serialized = JSON.stringify(body.payload ?? null);
+    } catch {
+      return badRequest('payload is not JSON-serializable');
+    }
  // Measure UTF-8 byte length, not UTF-16 code-unit count: a payload of
  // CJK/emoji text is 1 code unit but 3-4 UTF-8 bytes, so counting `.length`
  // (code units) would over-permit the real serialized size by ~3x.

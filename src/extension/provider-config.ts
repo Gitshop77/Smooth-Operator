@@ -140,6 +140,7 @@ export const DEFAULT_MODELS: Record<string, string> = {
   opencode: "",
   litellm: "gpt-4o",
   azure: "gpt-4o",
+  xai: "grok-2",
 };
 
 /**
@@ -193,8 +194,9 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
   let result: LLMProvider;
   switch (provider) {
     case "openai":
+      if (!apiKey) throw new Error("OpenAI requires an API key. Add one in Options.");
       result = OpenAI.toLLMProvider({
-        apiKey: apiKey || undefined,
+        apiKey,
         model: resolvedModel,
         ...(baseUrl ? { baseURL: baseUrl } : {}),
       });
@@ -263,7 +265,7 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
  // instead of masking it behind the API-key check (which would otherwise
  // throw "${provider} requires an API key" for an unrecognized id,
  // hiding the real problem — FULL-REVIEW finding 53).
-      if (!KNOWN_PROVIDERS.has(provider) && provider !== "ollama") {
+      if (!KNOWN_PROVIDERS.has(provider)) {
         throw new Error(
           `Unknown provider "${provider}". Pick one of: ${[...KNOWN_PROVIDERS].join(", ")}.`
         );
@@ -275,7 +277,7 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
       const resolvedBaseURL = baseUrl || DEFAULT_BASE_URLS[provider];
       if (!resolvedBaseURL && needsKey) {
         throw new Error(
-          `Unknown provider "${provider}". Supply a baseUrl in Options, or pick one of: ${Object.keys(byProvider).join(", ")}.`
+          `Provider "${provider}" requires a baseUrl. Enter one in Options, or pick one of: ${Object.keys(byProvider).join(", ")}.`
         );
       }
       result = OpenAICompatible.toLLMProvider({

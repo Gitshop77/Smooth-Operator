@@ -9,6 +9,7 @@ import {
   AlertTriangle,
   Info,
   Bug,
+  XOctagon,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -114,16 +115,16 @@ const LOG_PAGE_SIZE = 200;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+const pad = (n: number) => n.toString().padStart(2, "0");
+
 function formatTs(ts: number): string {
   const d = new Date(ts);
-  const pad = (n: number) => n.toString().padStart(2, "0");
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 function formatDate(ts: number): string {
   const d = new Date(ts);
-  const pad = (n: number) => n.toString().padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${formatTs(ts)}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 // ─── Filter controls ─────────────────────────────────────────────────────────
@@ -159,7 +160,7 @@ function LevelFilterChips({ active, onToggle }: LevelFilterProps) {
             ) : lvl === "warn" ? (
               <AlertTriangle className="size-3" aria-hidden />
             ) : (
-              <AlertTriangle className="size-3" aria-hidden />
+              <XOctagon className="size-3" aria-hidden />
             )}
             {meta.label}
           </button>
@@ -186,6 +187,7 @@ function LogRow({ entry }: LogRowProps) {
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
+        aria-label={`${level.label} ${kind.label} from ${entry.source}: ${entry.message}`}
         className="flex w-full items-start gap-3 px-3 py-2 text-left hover:bg-raised/50 transition-colors"
       >
         <span className={cn("mt-1 size-2 shrink-0 rounded-full", kind.dot)} aria-hidden />
@@ -210,7 +212,10 @@ function LogRow({ entry }: LogRowProps) {
         <span className="min-w-0 flex-1 truncate text-[13px] text-foreground/90">{entry.message}</span>
       </button>
       {open && entry.meta ? (
-        <pre className="cowork-mono mx-3 mb-2 overflow-x-auto rounded-lg border border-border bg-bg/60 p-3 text-[11px] leading-relaxed text-muted-foreground">
+        <pre
+          aria-label={`${level.label} ${kind.label} details for ${entry.agent}`}
+          className="cowork-mono mx-3 mb-2 overflow-x-auto rounded-lg border border-border bg-bg/60 p-3 text-[11px] leading-relaxed text-muted-foreground"
+        >
           {entry.meta}
         </pre>
       ) : null}
@@ -226,6 +231,12 @@ export function LogsExplorerView() {
   const logs: CoworkLogEntry[] = [];
 
   const [query, setQuery] = React.useState("");
+  const [debouncedQuery, setDebouncedQuery] = React.useState("");
+
+  React.useEffect(() => {
+    const id = setTimeout(() => setDebouncedQuery(query), 180);
+    return () => clearTimeout(id);
+  }, [query]);
   const [levels, setLevels] = React.useState<Set<LogLevel>>(new Set(ALL_LEVELS));
   const [source, setSource] = React.useState<LogSource | "all">("all");
   const [agent, setAgent] = React.useState<string>("all");
@@ -250,7 +261,7 @@ export function LogsExplorerView() {
   );
 
   const filtered = React.useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const q = debouncedQuery.trim().toLowerCase();
     const range = TIME_RANGES[rangeIdx].ms;
     const now = Date.now();
     return logs.filter((l) => {
@@ -264,7 +275,7 @@ export function LogsExplorerView() {
       }
       return true;
     });
-  }, [logs, levels, source, agent, rangeIdx, query]);
+  }, [logs, levels, source, agent, rangeIdx, debouncedQuery]);
 
  // Streaming tail: keep the newest entry in view when enabled (no-op without data).
   React.useEffect(() => {
@@ -279,8 +290,8 @@ export function LogsExplorerView() {
     setVisibleCount(LOG_PAGE_SIZE);
   }, [filtered]);
 
-  const visibleLogs = filtered.slice(0, visibleCount);
-  const hasMoreLogs = visibleCount < filtered.length;
+  const visibleLogs = tail ? filtered : filtered.slice(0, visibleCount);
+  const hasMoreLogs = !tail && visibleCount < filtered.length;
 
   const exportLogs = React.useCallback(() => {
     if (filtered.length === 0) return;
@@ -290,7 +301,7 @@ export function LogsExplorerView() {
     a.href = url;
     a.download = `cowork-logs-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.json`;
     a.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   }, [filtered]);
 
   const hasAnyLogs = logs.length > 0;

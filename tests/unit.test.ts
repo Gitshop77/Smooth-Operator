@@ -821,7 +821,7 @@ describe("LoopDetector — expanded", () => {
       ["go_back", { type: "go_back" }],
       ["done", { type: "done", text: "done", success: true }],
     ];
-    for (const [name, action] of cases) {
+    for (const [, action] of cases) {
       const det = new LoopDetector();
       const c1 = det.record(action, 1);
       const c2 = det.record(action, 2);
@@ -829,9 +829,6 @@ describe("LoopDetector — expanded", () => {
       expect(c2).toBe(2);
  // Sanity: shouldWarn reflects the count (2 is not a threshold).
       expect(det.shouldWarn()).toBe(0);
- // Use `name` so the loop variable is exercised (defensive — keeps the
- // test readable in failure output).
-      expect(name.length).toBeGreaterThan(0);
     }
   });
 

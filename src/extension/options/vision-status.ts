@@ -66,10 +66,20 @@ let visionAssistant: VisionAssistantInstance | null = null;
 let visionInitInProgress = false;
 let visionAbortRequested = false;
 
+/** Best-effort cleanup when an abort was requested; returns true if it ran. */
+async function abortCleanup(va: VisionAssistantInstance): Promise<boolean> {
+  if (!visionAbortRequested) return false;
+  try { await va.cleanup(); } catch { /* best-effort */ }
+  hideStatusUI();
+  return true;
+}
+
 // ─── Status badge ───────────────────────────────────────────────────────────
 
 function updateBadge(status: VisionStatus, message?: string): void {
   const badge = $("localVisionBadge") as HTMLSpanElement;
+  badge.setAttribute("role", "status");
+  badge.setAttribute("aria-live", "polite");
   const display = STATUS_DISPLAY[status] ?? STATUS_DISPLAY.uninitialized;
   badge.textContent = message ? `${display.label} — ${message}` : display.label;
   badge.style.background = display.bg;
@@ -78,6 +88,8 @@ function updateBadge(status: VisionStatus, message?: string): void {
 
 function updateProgress(visible: boolean, percent?: number): void {
   const progress = $("localVisionProgress") as HTMLProgressElement;
+  progress.setAttribute("aria-label", "Local vision model download progress");
+  progress.max = 100;
   if (visible) progress.classList.remove("is-hidden");
   else progress.classList.add("is-hidden");
   if (typeof percent === "number") {
@@ -109,21 +121,14 @@ async function ensureVisionAssistant(): Promise<void> {
       updateProgress(status === "downloading");
     };
     va.onStatus(onStatus);
-    if (visionAbortRequested) {
-      try { await va.cleanup(); } catch { /* fresh instance, nothing to release */ }
-      return;
-    }
+    if (await abortCleanup(va)) return;
     showStatusUI();
     updateBadge("checking");
     await va.init((p: DownloadProgress) => {
       if (visionAbortRequested) return;
       updateProgress(true, p.percent);
     });
-    if (visionAbortRequested) {
-      try { await va.cleanup(); } catch { /* best-effort */ }
-      hideStatusUI();
-      return;
-    }
+    if (await abortCleanup(va)) return;
     visionAssistant = va;
   } catch (e) {
     if (visionAbortRequested) {
@@ -180,6 +185,7 @@ document.querySelectorAll('input[name="visionMode"]').forEach((radio) => {
  // config stay consistent — otherwise the UI would show "disabled"
  // while storage still held the previously-selected mode.
         await chrome.storage.local.set({ visionMode: "disabled", enableLocalVision: false });
+        hideStatusUI();
         return;
       }
     }

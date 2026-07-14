@@ -26,7 +26,7 @@ export type Config = { baseURL?: string } & ProviderAuthOption<"optional">;
 
 const auth = (options: ProviderAuthOption<"optional">) => {
   if ("auth" in options && options.auth) return options.auth;
-  return Auth.optional("apiKey" in options ? options.apiKey : undefined, "apiKey")
+  return Auth.optional(options.apiKey, "apiKey")
     .orElse(Auth.config("GOOGLE_GENERATIVE_AI_API_KEY"))
     .orElse(Auth.config("GEMINI_API_KEY"))
     .orElse(Auth.config("GOOGLE_API_KEY"))
@@ -39,6 +39,12 @@ export function configure(input: Config = {}) {
  // exempt — only untrusted, user-controlled input is checked.
   assertSafeUserBaseURL(input.baseURL, id);
   const baseURL = input.baseURL ?? Gemini.ENDPOINT;
+ // These depend only on the fixed `baseURL`/`input` captured by `configure`,
+ // so compute them once instead of re-parsing the URL and rebuilding the auth
+ // pipeline on every `model()` call.
+  const parsed = new URL(baseURL);
+  const basePath = parsed.pathname.replace(/\/+$/, "");
+  const builtAuth = auth(input);
   return {
     id,
     model: (modelID: string) => {
@@ -55,15 +61,13 @@ export function configure(input: Config = {}) {
  // user-supplied `baseURL` carries). To preserve it, split the base into
  // origin + path prefix and prepend the prefix to the per-model path, so
  // the final URL is `<origin>/v1beta/models/{model}:streamGenerateContent`.
-      const parsed = new URL(baseURL);
-      const basePath = parsed.pathname.replace(/\/+$/, "");
       const fullPath = `${basePath}${Gemini.geminiPath(modelID)}`;
       const route = make({
         id: "gemini",
         provider: id,
         protocol: Gemini.protocol,
         endpoint: Endpoint.path(fullPath, { baseURL: parsed.origin, query: { alt: "sse" } }),
-        auth: auth(input),
+        auth: builtAuth,
         framing: Framing.sse,
       });
       return route.model({ id: modelID });

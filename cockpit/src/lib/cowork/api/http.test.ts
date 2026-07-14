@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ClientError, withRouteError, bodyJson, bodyJsonOptional, isSsrfSafeUrl } from '@/lib/cowork/api/http';
 import { POST as tabsPost } from '@/app/api/cowork/tabs/route';
 import { POST as bookmarksPost } from '@/app/api/cowork/bookmarks/route';
@@ -7,6 +7,13 @@ import { POST as sessionsPost } from '@/app/api/cowork/sessions/route';
 
 // Mock Prisma so route handlers can be exercised without a live DB.
 const created: any[] = [];
+
+// Reset the shared `created` array between tests so assertions that rely on
+// value uniqueness (e.g. a 512-char userAgent) cannot match a record inserted
+// by an earlier test.
+beforeEach(() => {
+  created.length = 0;
+});
 
 // `vi.mock` factories are hoisted above all other module-level statements, so a
 // factory that closes over a `const bookmarkFakes` declared below would hit a
@@ -178,7 +185,17 @@ describe('isSsrfSafeUrl', () => {
     expect(isSsrfSafeUrl('http://192.168.1.1/')).toBe(false);
     expect(isSsrfSafeUrl('http://172.16.5.4/')).toBe(false);
     expect(isSsrfSafeUrl('http://0.0.0.0/')).toBe(false);
+ // Invalid IPv6 literal — caught by the URL-parse catch path (negative case).
+ // `[:1]` should NOT be used as a proxy for valid IPv6: it never exercises the
+ // real bracketed-IPv6 handling, so do not rely on it to cover that path.
     expect(isSsrfSafeUrl('http://[:1]/')).toBe(false);
+ // Valid IPv6 literals that exercise the real bracketed-IPv6 handling below.
+    expect(isSsrfSafeUrl('http://[::1]/')).toBe(false);
+    expect(isSsrfSafeUrl('http://[fe80::1]/')).toBe(false);
+    expect(isSsrfSafeUrl('http://[::]/')).toBe(false);
+    expect(isSsrfSafeUrl('http://[::ffff:ac10:0000]/')).toBe(false);
+    expect(isSsrfSafeUrl('http://[::ffff:c0a8:0001]/')).toBe(false);
+    expect(isSsrfSafeUrl('http://[::ffff:127.0.0.1]/')).toBe(false);
   });
 
   it('allows public hosts', () => {

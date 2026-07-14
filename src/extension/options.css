@@ -534,6 +534,7 @@ button:focus-visible {
   font-size: 12px;
   flex: 1;
 }
+.tool-name { font-weight: 500; }
 .tool-item pre {
   background: var(--cw-void);
   color: var(--cw-text);
@@ -925,6 +926,17 @@ p strong { color: var(--cw-text); }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.qp-field-error {
+  color: #b91c1c;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  font: 500 12px/1.3 ui-sans-serif, system-ui;
+  padding: 6px 9px;
+  border-radius: 6px;
+  margin: 6px 0;
+  max-width: 320px;
 }
 
 /* ─── Tools: manifest permission badges ───────────────────────────────────── */

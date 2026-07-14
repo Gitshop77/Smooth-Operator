@@ -17,4 +17,6 @@ export {
 export {
   installJsdomLayoutMock,
   restoreJsdomLayoutMock,
+  installViewportMock,
+  restoreViewportMock,
 } from "./jsdom-layout-mock";

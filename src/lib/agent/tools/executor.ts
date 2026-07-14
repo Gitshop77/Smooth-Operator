@@ -86,8 +86,8 @@ export { describeAction };
  * result, so the defect surfaces loudly rather than being silently swallowed.
  */
 class UnhandledActionError extends Error {
-  constructor(action: never) {
-    super(`unhandled action: ${JSON.stringify(action)}`);
+  constructor(action: { type: string }) {
+    super(`unhandled action type: ${action.type}`);
     this.name = "UnhandledActionError";
   }
 }
@@ -175,7 +175,7 @@ export async function executeAction(
     return {
       action,
       success: false,
-      message: `${err.name}: ${err.message}`,
+      message: `${action.type} failed: ${err.name}: ${err.message}`,
     };
   }
 }

@@ -12,6 +12,19 @@ import { EmptyState } from "@/components/cowork/shared/empty-state";
 import { StatusPill } from "@/components/cowork/shared/status-pill";
 import { timeAgo } from "@/lib/cowork-data/format";
 
+type WorkflowStep = { name?: string; action?: string };
+
+function parseStepsJson(raw: unknown): WorkflowStep[] {
+  if (Array.isArray(raw)) return raw as WorkflowStep[];
+  if (typeof raw !== "string") return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as WorkflowStep[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 export function WorkflowsView() {
   const { data, isLoading } = useWorkflows();
 
@@ -38,25 +51,7 @@ export function WorkflowsView() {
           className="grid gap-4 grid-cols-1 lg:grid-cols-2"
         >
           {(data ?? []).map((wf) => {
- // `stepsJson` is a JSON-encoded string from Prisma (NOT an
- // array). Parse defensively (default to [] on parse error) so a
- // malformed row never crashes the whole view. The schema documents
- // the element type as `WorkflowStep[]` — objects with `{ name?,
- // action? }` — but historical rows may carry bare-string labels,
- // so the renderer falls back to `String(s)` for back-compat.
-            const steps: Array<{ name?: string; action?: string }> = (() => {
-              const raw = wf.stepsJson;
-              if (Array.isArray(raw)) return raw as Array<{ name?: string; action?: string }>;
-              if (typeof raw !== "string") return [];
-              try {
-                const parsed = JSON.parse(raw);
-                return Array.isArray(parsed)
-                  ? (parsed as Array<{ name?: string; action?: string }>)
-                  : [];
-              } catch {
-                return [];
-              }
-            })();
+            const steps = parseStepsJson(wf.stepsJson);
             return (
             <Card key={wf.id} className="p-5 gap-3">
               <div className="flex items-start justify-between gap-2">
@@ -80,7 +75,7 @@ export function WorkflowsView() {
                         {s.name ?? s.action ?? String(s)}
                       </li>
                       {i < steps.length - 1 ? (
-                        <ChevronRight className="size-3 text-muted-foreground/50" />
+                        <ChevronRight className="size-3 text-muted-foreground/50" aria-hidden focusable={false} />
                       ) : null}
                     </React.Fragment>
                   ))}
@@ -91,7 +86,7 @@ export function WorkflowsView() {
                 <div className="flex items-center gap-3 text-xs text-muted-foreground">
                   {wf.lastRun ? (
                     <span className="flex items-center gap-1">
-                      <Clock className="size-3" /> last {timeAgo(wf.lastRun)} ago
+                      <Clock className="size-3" aria-hidden focusable={false} /> last {timeAgo(wf.lastRun)} ago
                     </span>
                   ) : (
                     <span>never run</span>

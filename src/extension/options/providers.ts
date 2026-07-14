@@ -66,6 +66,14 @@ export const PROVIDER_META: Record<string, ProviderDef> = Object.fromEntries(
   PROVIDERS.map((p) => [p.id, p]),
 );
 
+// Dev guard: every provider in `PROVIDERS` should be a key of
+// `CATALOG_PROVIDER_ID_MAP`, otherwise model search silently breaks for that
+// provider. Catch the drift at load instead of debugging a mysteriously empty
+// model dropdown later.
+for (const p of PROVIDERS) {
+  if (!(p.id in CATALOG_PROVIDER_ID_MAP)) console.warn("[providers] no catalogId for", p.id);
+}
+
 /** The provider metadata used as the implicit default when a saved id is unknown. */
 export const DEFAULT_PROVIDER_ID = "openai";
 

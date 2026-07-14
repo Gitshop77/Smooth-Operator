@@ -8,6 +8,7 @@
 
 import { Protocol, type LLMRequest } from "../route/client";
 import { zodToJsonSchema } from "../zod-json-schema";
+import { omitZero } from "../shared";
 
 const ADAPTER = "openai-chat";
 export const DEFAULT_BASE_URL = "https://api.openai.com/v1";
@@ -50,6 +51,8 @@ export interface OpenAIChatChunk {
     completion_tokens_details?: { reasoning_tokens?: number };
     prompt_tokens_details?: { cached_tokens?: number };
   };
+  /** Provider-reported error payload (OpenAI surfaces errors as JSON, not a thrown exception). */
+  error?: { message?: string } | string;
 }
 
 /**
@@ -59,7 +62,34 @@ export interface OpenAIChatChunk {
  * we extract it into a proper `image_url` content part, mirroring the logic
  * already implemented in `anthropic-messages.ts` / `gemini.ts`.
  */
-const SCREENSHOT_PATTERN = /<screenshot>(data:image\/(png|jpeg|webp);base64,[^<]+)<\/screenshot>/g;
+/** Source pattern for screenshot markers — construct a fresh `/g` instance per use to avoid shared mutable state. */
+const SCREENSHOT_SOURCE = "<screenshot>(data:image\\/(png|jpeg|webp);base64,[^<]+)<\\/screenshot>";
+
+/**
+ * Magic-byte signatures for the image media types we accept in `<screenshot>`
+ * markers. The declared `media_type` must match the actual payload so injected
+ * markers in scraped/tool content can't forward attacker-chosen bytes to the
+ * model as an image block (a lightweight provenance check).
+ */
+const IMAGE_SIGNATURES: Record<string, string[]> = {
+ // PNG: 89 50 4E 47 0D 0A 1A 0A -> "iVBORw0KGgo"
+  png: ["iVBORw0KGgo"],
+ // JPEG: FF D8 FF -> "/9j/"
+  jpeg: ["/9j/"],
+ // WebP: "RIFF"....."WEBP" -> "UklGR"
+  webp: ["UklGR"],
+};
+
+/**
+ * Provenance check for `<screenshot>` markers. Requiring the base64 payload's
+ * magic bytes to match the declared media type rejects markers whose contents
+ * are not a well-formed image of that type.
+ */
+function hasImageProvenance(b64: string, mediaType: string): boolean {
+  const prefixes = IMAGE_SIGNATURES[mediaType];
+  if (!prefixes) return false;
+  return prefixes.some((p) => b64.startsWith(p));
+}
 
 /** Default max_tokens fallback when the caller doesn't set one. */
 const DEFAULT_MAX_TOKENS = 4096;
@@ -120,6 +150,14 @@ function normalizeStrictSchema(node: unknown, depth = 0): unknown {
  // lose the reference. Previously `$ref`/`$defs` were not descended into, so
  // referenced subschemas escaped normalization (FULL-REVIEW finding 63).
   const refObj = node as Record<string, unknown>;
+ // A `{ nullable: true, $ref: "..." }` node must be normalized BEFORE the
+ // `$ref` early-return below, otherwise the forbidden `nullable` keyword
+ // survives and OpenAI strict mode rejects the request with a 400. Rewrite it
+ // to a strict-compliant `anyOf` union of the reference and a `null` branch,
+ // dropping `nullable` (the `$ref` still points at the unresolved definition).
+  if (refObj.nullable === true && "$ref" in refObj) {
+    return { anyOf: [{ $ref: refObj["$ref"] }, { type: "null" }] };
+  }
   if ("$ref" in refObj) return node;
   const obj: Record<string, unknown> = { ...refObj };
 
@@ -147,6 +185,12 @@ function normalizeStrictSchema(node: unknown, depth = 0): unknown {
     const nonNullType = Array.isArray(baseType) ? baseType : (baseType ?? "string");
     obj.anyOf = [{ ...obj, type: nonNullType }, { type: "null" }];
     delete obj.type;
+   // The non-null branch (anyOf[0]) already carries these via the spread
+   // above; leaving them as siblings of `anyOf` violates OpenAI strict-mode
+   // schema rules (object keywords alongside a union keyword).
+    delete obj.properties;
+    delete obj.additionalProperties;
+    delete obj.required;
   }
 
  // 3. Recurse into child schemas (now including `$defs`).
@@ -169,20 +213,20 @@ async function fromRequest(request: LLMRequest): Promise<OpenAIChatBody> {
  // body unchecked, and a missing/garbage id produces an opaque provider 400.
  // Surface it clearly instead (FULL-REVIEW finding 98).
   if (!request.model || typeof request.model.id !== "string" || request.model.id.length === 0) {
-    throw new Error("OpenAI request is missing a valid model id");
+    throw new Error("OpenAI-format request is missing a valid model id");
   }
   const messages = request.messages.map((m) => {
     if (m.role === "user") {
  // Extract EVERY screenshot marker (not just the first) into its own
  // `image_url` content part — a multi-screenshot turn must forward all
  // of them, matching the Anthropic protocol.
-      const matches = Array.from(m.content.matchAll(SCREENSHOT_PATTERN));
+      const matches = Array.from(m.content.matchAll(new RegExp(SCREENSHOT_SOURCE, "g")));
       if (matches.length > 0) {
  // Strip with the SAME pattern we match on, so the text we keep always
  // agrees with the screenshots we extract (the previous literal regex
  // `[^<]+` would also strip non-image `<screenshot>...</screenshot>`
  // markers — FULL-REVIEW finding 65).
-        const textContent = m.content.replace(SCREENSHOT_PATTERN, "").trim();
+        const textContent = m.content.replace(new RegExp(SCREENSHOT_SOURCE, "g"), "").trim();
         const parts: OpenAIContentPart[] = [];
         if (textContent) parts.push({ type: "text", text: textContent });
         for (const match of matches) {
@@ -190,6 +234,13 @@ async function fromRequest(request: LLMRequest): Promise<OpenAIChatBody> {
           const b64 = dataUri.split(",")[1];
           if (!isValidBase64(b64 ?? "")) {
             throw new Error("Invalid base64 screenshot payload in user message");
+          }
+ // Provenance: reject markers whose payload does not actually decode to
+ // an image of the declared type (see hasImageProvenance). Prevents
+ // injected <screenshot> markers in scraped/tool content from
+ // forwarding attacker-chosen bytes to the model as an image block.
+          if (!hasImageProvenance(b64 ?? "", match[2])) {
+            throw new Error("<screenshot> marker failed provenance check: base64 payload does not match its declared image type.");
           }
           parts.push({ type: "image_url", image_url: { url: dataUri } });
         }
@@ -253,6 +304,8 @@ async function fromRequest(request: LLMRequest): Promise<OpenAIChatBody> {
 export interface StreamState {
   content: string;
   finishReason: string | null;
+  /** Model id for usage attribution (carried from the request). */
+  model?: string;
   /** Number of non-JSON SSE frames dropped (logged, not forwarded). */
   droppedFrames?: number;
   usage?: {
@@ -271,9 +324,10 @@ export const protocol: Protocol<OpenAIChatBody, string, { type: string; content?
     from: fromRequest,
   },
   stream: {
-    initial: (_request: LLMRequest): StreamState => ({
+    initial: (request: LLMRequest): StreamState => ({
       content: "",
       finishReason: null,
+      model: request.model.id,
     }),
     step: (state: StreamState, frame: string) => {
       const events: Array<{ type: string; content?: string; usage?: StreamState["usage"] }> = [];
@@ -312,9 +366,8 @@ export const protocol: Protocol<OpenAIChatBody, string, { type: string; content?
         }
         return { state, events };
       }
-      const chunkAny = chunk as unknown as { error?: { message?: string } | string };
-      if (chunkAny.error) {
-        const err = chunkAny.error;
+      if (chunk.error) {
+        const err = chunk.error;
         const msg = typeof err === "string" ? err : (err.message ?? JSON.stringify(err));
         throw new Error(`OpenAI API error: ${msg}`);
       }
@@ -333,9 +386,9 @@ export const protocol: Protocol<OpenAIChatBody, string, { type: string; content?
         state.usage = {
           tokensIn: chunk.usage.prompt_tokens ?? 0,
           tokensOut: chunk.usage.completion_tokens ?? 0,
-          reasoningTokens: reasoningTokens > 0 ? reasoningTokens : undefined,
-          cachedInputTokens: cachedTokens > 0 ? cachedTokens : undefined,
-          model: "",
+          reasoningTokens: omitZero(reasoningTokens),
+          cachedInputTokens: omitZero(cachedTokens),
+          model: state.model ?? "",
           costUsd: 0,
         };
       }

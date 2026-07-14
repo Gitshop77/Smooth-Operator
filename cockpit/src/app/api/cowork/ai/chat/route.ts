@@ -14,17 +14,28 @@
 
 import type { NextRequest } from 'next/server';
 import { randomUUID } from 'node:crypto';
-import { json, badRequest, serverError, withRouteError, bodyJson, redactSecrets } from '@/lib/cowork/api/http';
+import { json, badRequest, serverError, withRouteError, bodyJson, redactSecrets, sanitizeRequestId } from '@/lib/cowork/api/http';
 import { COWORK_EVENTS_BASE, getCoworkEventsToken } from '@/lib/cowork/events/client';
 
-interface ChatProxyBody {
+// Inbound request body from the caller. `systemPrompt` is accepted but
+// ignored — the assistant's context is always the server-pinned
+// WINGMAN_SYSTEM_PROMPT (see POST handler).
+interface ChatRequest {
   messages?: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
   sessionId?: string;
   stream?: boolean;
   thinking?: 'enabled' | 'disabled';
- // Server-pinned system prompt (WINGMAN_SYSTEM_PROMPT). Always set by the
- // route; a caller-supplied `systemPrompt` is ignored (see POST handler).
   systemPrompt?: string;
+}
+
+// Outbound payload forwarded to the cowork-events mini-service. The system
+// prompt is required (and server-pinned) — it is never caller-controlled.
+interface ChatUpstreamBody {
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+  systemPrompt: string;
+  sessionId: string;
+  stream: boolean;
+  thinking: 'enabled' | 'disabled';
 }
 
 // Server-pinned system prompt for the Wingman chat proxy. This
@@ -56,7 +67,7 @@ const UNTRUSTED_USER_MESSAGE_TAG = 'untrusted_user_message';
 // wrapped in an HTML comment — content is preserved but can no longer act as a
 // boundary delimiter. See finding: chat prompt-injection boundary.
 function neutralizeUntrustedDelimiter(content: string): string {
-  return content.replace(/<\/?untrusted_user_message>/g, (tag) => `<!--${tag}-->`);
+  return content.replace(/<\/?untrusted_user_message\b[^>]*>/gi, (tag) => `<!--${tag}-->`);
 }
 
 // Allowed `sessionId` charset — shared by the POST and DELETE handlers so the
@@ -65,6 +76,7 @@ function neutralizeUntrustedDelimiter(content: string): string {
 const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
 export async function POST(req: NextRequest): Promise<Response> {
+  const reqId = sanitizeRequestId(req.headers.get('x-request-id'));
   return withRouteError(async () => {
  // `bodyJson` caps the raw body at MAX_BODY_BYTES (256KB) and rejects
  // oversize bodies with 413 *before* buffering — `req.json()` would read
@@ -116,6 +128,14 @@ export async function POST(req: NextRequest): Promise<Response> {
       return badRequest('thinking must be "enabled" or "disabled"');
     }
 
+ // Validate the `stream` type — it crosses the server-to-server boundary and
+ // is forwarded to the upstream SDK verbatim, so reject non-booleans rather
+ // than relying on the mini-service to coerce them (a string/number could flip
+ // streaming behavior or surface as an unexpected 500).
+    if (body.stream !== undefined && typeof body.stream !== 'boolean') {
+      return badRequest('stream must be a boolean');
+    }
+
  // SECURITY NOTE: this is a chat *proxy*. user/assistant content is
  // inherently untrusted. It is wrapped in `<untrusted_user_message>`
  // delimiters (see above) and the server-pinned system prompt instructs the
@@ -149,7 +169,7 @@ export async function POST(req: NextRequest): Promise<Response> {
  // is always the server-pinned WINGMAN_SYSTEM_PROMPT.
     const resolvedSystemPrompt = WINGMAN_SYSTEM_PROMPT;
 
-    const payload: ChatProxyBody = {
+    const payload: ChatUpstreamBody = {
       messages: forwardedMessages,
       systemPrompt: resolvedSystemPrompt,
       sessionId,
@@ -170,9 +190,7 @@ export async function POST(req: NextRequest): Promise<Response> {
           'X-Cowork-Token': getCoworkEventsToken(),
  // Forward the cockpit request id so the mini-service can correlate its
  // own logs to the originating cockpit request (distributed tracing).
-          ...(req.headers.get('x-request-id')
-            ? { 'x-request-id': req.headers.get('x-request-id') as string }
-            : {}),
+          ...(reqId ? { 'x-request-id': reqId } : {}),
         },
         body: JSON.stringify(payload),
       });
@@ -202,7 +220,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       return serverError('cowork-events /chat returned a non-JSON body');
     }
     return json(data);
-  }, req.headers.get('x-request-id') ?? undefined);
+  }, reqId);
 }
 
 export async function GET(): Promise<Response> {
@@ -259,6 +277,7 @@ async function mapErasureResult(res: Response): Promise<{ status: number; body: 
 // `DELETE /chat` with the same server→server `X-Cowork-Token`. The cockpit
 // does not claim success on its own — it forwards the mini-service's verdict.
 export async function DELETE(req: NextRequest): Promise<Response> {
+  const reqId = sanitizeRequestId(req.headers.get('x-request-id'));
   return withRouteError(async () => {
     const messageId = req.nextUrl.searchParams.get('messageId') ?? undefined;
     const sessionId = req.nextUrl.searchParams.get('sessionId') ?? undefined;
@@ -302,7 +321,11 @@ export async function DELETE(req: NextRequest): Promise<Response> {
       upstream = await fetch(`${COWORK_EVENTS_BASE}/chat`, {
         method: 'DELETE',
         signal: AbortSignal.timeout(60_000),
-        headers: { 'Content-Type': 'application/json', 'X-Cowork-Token': getCoworkEventsToken() },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Cowork-Token': getCoworkEventsToken(),
+          ...(reqId ? { 'x-request-id': reqId } : {}),
+        },
         body: JSON.stringify({ messageId, sessionId, all, confirm, scope }),
       });
     } catch (err) {
@@ -316,5 +339,5 @@ export async function DELETE(req: NextRequest): Promise<Response> {
       console.info('[cowork] bulk delete ai/chat', { deleted, route: '/api/cowork/ai/chat' });
     }
     return json(body, status);
-  }, req.headers.get('x-request-id') ?? undefined);
+  }, reqId);
 }

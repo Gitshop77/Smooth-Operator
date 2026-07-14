@@ -14,10 +14,17 @@ export function Toaster() {
   const { toasts } = useToast()
 
   return (
-    <ToastProvider>
-      {toasts.map(function ({ id, title, description, action, ...props }) {
+    <ToastProvider swipeDirection="right" duration={5000}>
+      {toasts.map(function ({ id, title, description, action, variant, duration, ...props }) {
+        const effectiveDuration = variant === "destructive" ? 9000 : duration;
         return (
-          <Toast key={id} {...props}>
+          <Toast
+            key={id}
+            variant={variant}
+            duration={effectiveDuration}
+            type={variant === "destructive" ? "foreground" : "background"}
+            {...props}
+          >
             <div className="grid gap-1">
               {title && <ToastTitle>{title}</ToastTitle>}
               {description && (
@@ -25,7 +32,7 @@ export function Toaster() {
               )}
             </div>
             {action}
-            <ToastClose />
+            <ToastClose aria-label={title ? `Close: ${title}` : "Close notification"} />
           </Toast>
         )
       })}

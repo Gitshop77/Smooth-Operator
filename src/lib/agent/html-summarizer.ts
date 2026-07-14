@@ -78,19 +78,25 @@ export function extractKeywords(text: string): Set<string> {
 }
 
 /** Task-intent detection — returns a set of "intents" the task implies. */
+/** Pre-compiled intent-detection patterns (hoisted so they aren't reallocated on every call). */
+const FORM_INTENT_RE = /\b(fill|submit|login|sign in|sign up|register|enter|form|password|email|username|checkout|pay)\b/;
+const NAV_INTENT_RE = /\b(go to|open|navigate|visit|browse|click|link)\b/;
+const SEARCH_INTENT_RE = /\b(search|find|look up|query|filter)\b/;
+const READ_INTENT_RE = /\b(read|summarize|list|what|who|when|where|how many|tell me|give me|show me)\b/;
+
 export function detectIntents(text: string): Set<"form" | "nav" | "search" | "read"> {
   const intents = new Set<"form" | "nav" | "search" | "read">();
   const t = text.toLowerCase();
-  if (/\b(fill|submit|login|sign in|sign up|register|enter|form|password|email|username|checkout|pay)\b/.test(t)) {
+  if (FORM_INTENT_RE.test(t)) {
     intents.add("form");
   }
-  if (/\b(go to|open|navigate|visit|browse|click|link)\b/.test(t)) {
+  if (NAV_INTENT_RE.test(t)) {
     intents.add("nav");
   }
-  if (/\b(search|find|look up|query|filter)\b/.test(t)) {
+  if (SEARCH_INTENT_RE.test(t)) {
     intents.add("search");
   }
-  if (/\b(read|summarize|list|what|who|when|where|how many|tell me|give me|show me)\b/.test(t)) {
+  if (READ_INTENT_RE.test(t)) {
     intents.add("read");
   }
   return intents;
@@ -126,27 +132,31 @@ export function scoreElement(
     }
   }
 
+ // Text/attribute keyword scoring only matters when there are keywords to
+ // match against; skip the lowercasing/attribute-join entirely otherwise.
+  if (keywords.size > 0) {
  // Text-based keyword match (highest weight — the element's accessible
  // name is the most direct signal of what it does).
-  const textLower = (el.text ?? "").toLowerCase();
-  for (const kw of keywords) {
-    if (textLower.includes(kw)) {
-      score += 3;
-      break; // Don't double-count the same keyword.
+    const textLower = (el.text ?? "").toLowerCase();
+    for (const kw of keywords) {
+      if (textLower.includes(kw)) {
+        score += 3;
+        break; // Don't double-count the same keyword.
+      }
     }
-  }
 
  // Attribute-based keyword match (placeholder, aria-label, name, id, href,
  // value, type — these often carry task-relevant hints even when the
  // visible text doesn't).
-  const attrStr = el.attributes
-    ? Object.entries(el.attributes).map(([k, v]) => `${k}=${v}`).join(" ").toLowerCase()
-    : "";
-  if (attrStr) {
-    for (const kw of keywords) {
-      if (attrStr.includes(kw)) {
-        score += 2;
-        break;
+    const attrStr = el.attributes
+      ? Object.entries(el.attributes).map(([k, v]) => `${k}=${v}`).join(" ").toLowerCase()
+      : "";
+    if (attrStr) {
+      for (const kw of keywords) {
+        if (attrStr.includes(kw)) {
+          score += 2;
+          break;
+        }
       }
     }
   }
@@ -158,11 +168,13 @@ export function scoreElement(
 export const DEFAULT_MAX_SUMMARIZED_ELEMENTS = 30;
 
 /**
- * Hard floor on how many elements we keep when falling back (too few keywords
+ * Bounded cap on how many elements we keep when falling back (too few keywords
  * matched). Even on fallback we must not return the FULL DOM — a bounded,
  * score-ordered subset is always smaller and still useful to the navigator.
+ * Guarantees at least this many best-scored elements are surfaced, but never
+ * the full DOM.
  */
-export const HARD_MIN_ELEMENTS = 50;
+export const FALLBACK_CAP_ELEMENTS = 50;
 
 /** Default minimum `elementsText` length to trigger the summarizer at all. */
 export const DEFAULT_MIN_HTML_LENGTH = 10_000;
@@ -232,9 +244,9 @@ export function summarizeDom(input: SummarizeDomInput): SummarizeDomOutput {
  // pass, and the navigator silently ignores it anyway. Instead we still cap to
  // `maxElements` (ordered by score), guaranteeing a bounded, smaller-than-full
  // payload: returning fewer elements is always preferable to sending the
- // entire DOM. A hard floor (`HARD_MIN_ELEMENTS`) ensures we still surface a
+ // entire DOM. A fallback cap (`FALLBACK_CAP_ELEMENTS`) ensures we still surface a
  // reasonable number of the best elements rather than an over-aggressive 1-2.
-  const cap = fellBack ? Math.max(maxElements, HARD_MIN_ELEMENTS) : maxElements;
+  const cap = fellBack ? Math.max(maxElements, FALLBACK_CAP_ELEMENTS) : maxElements;
   const kept = pool.slice(0, cap);
  // Re-sort the kept set by index so the navigator sees them in DOM order.
   kept.sort((a, b) => a.el.index - b.el.index);
@@ -259,19 +271,26 @@ export function summarizeDom(input: SummarizeDomInput): SummarizeDomOutput {
  * threaded into this layer. The orchestrator swaps this filtered text into
  * the navigator request when the summarizer is enabled.
  */
+/** Collapse runs of CR/LF into a single space for compact element text. */
+function stripNewlines(s: string): string {
+  return s.replace(/[\r\n]+/g, " ");
+}
+
+/** HTML-attribute string escape (ampersand / angle brackets / quotes). */
+function escapeAttr(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 export function renderElementsText(keptElements: ExtractedElement[]): string {
   const lines: string[] = [];
   for (const el of keptElements) {
-    const stripNewlines = (s: string) => s.replace(/[\r\n]+/g, " ");
-    const escapeAttr = (s: string) =>
-      s
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;");
     const attrs = el.attributes
       ? Object.entries(el.attributes)
-          .map(([k, v]) => `${k}="${escapeAttr(stripNewlines(v))}"`)
+          .map(([k, v]) => `${escapeAttr(k)}="${escapeAttr(stripNewlines(v))}"`)
           .join(" ")
       : "";
     const attrStr = attrs ? ` ${attrs}` : "";

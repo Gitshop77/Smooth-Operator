@@ -46,7 +46,7 @@ export type DialogKind = "alert" | "confirm" | "prompt";
  * we capture the dialog metadata here first so the agent can inspect it
  * after the fact.
  */
-let pendingAlert: { kind: DialogKind; text: string; defaultValue: string } | null = null;
+let pendingAlert: { kind: DialogKind; text: string } | null = null;
 
 /**
  * Text the agent has queued for the NEXT `window.prompt()` call.
@@ -76,36 +76,36 @@ let nextPromptValue: string | null = null;
  * bridged over a channel a page script cannot read or forge; because the only
  * cross-world transport available here (`window.postMessage`) is observable
  * to page scripts (any broadcast secret can be sniffed and replayed to forge
- * dialog metadata — see ), no such bridge is installed. Do not document
+ * dialog metadata), no such bridge is installed. Do not document
  * or rely on real page-dialog interception from this handler.
  */
+/** Capture a dismissed dialog's metadata (and log its text redacted). */
+function captureDialog(kind: DialogKind, message?: string): void {
+  const text = String(message ?? "");
+  console.debug(`${LOG_PREFIX} Auto-handled ${kind}:`, redactDialogText(text));
+  pendingAlert = { kind, text };
+}
+
 export function installPopupHandler(): void {
   if (installed) return;
   installed = true;
 
  // Override window.alert to capture + auto-dismiss (isolated-world bindings).
   window.alert = function (message?: string): void {
-    console.debug(`${LOG_PREFIX} Auto-dismissed alert:`, redactDialogText(String(message ?? "")));
-    pendingAlert = { kind: "alert", text: String(message ?? ""), defaultValue: "" };
+    captureDialog("alert", message);
  // Don't call the original — just swallow it.
   };
 
  // Override window.confirm — auto-accept (return true).
   window.confirm = function (message?: string): boolean {
-    console.debug(`${LOG_PREFIX} Auto-accepted confirm:`, redactDialogText(String(message ?? "")));
-    pendingAlert = { kind: "confirm", text: String(message ?? ""), defaultValue: "" };
+    captureDialog("confirm", message);
     return true;
   };
 
  // Override window.prompt — return any agent-queued text (set via
  // sendAlertText), else empty string (treated as dismiss).
   window.prompt = function (message?: string, defaultValue?: string): string | null {
-    console.debug(`${LOG_PREFIX} Auto-responded prompt:`, redactDialogText(String(message ?? "")));
-    pendingAlert = {
-      kind: "prompt",
-      text: String(message ?? ""),
-      defaultValue: String(defaultValue ?? ""),
-    };
+    captureDialog("prompt", message);
     if (nextPromptValue !== null) {
       const v = nextPromptValue;
       nextPromptValue = null;
@@ -140,9 +140,23 @@ export function installPopupHandler(): void {
  * last `acceptAlert`/`dismissAlert`" — the auto-dismiss override already
  * returned to the caller, but the dialog's text is preserved for the agent
  * to inspect.
+ *
+ * NOTE: this returns the RAW dialog text (which may contain OTP/2FA, PII, or
+ * session tokens). Do NOT log or serialize it without redaction — use
+ * {@link getPendingAlertTextRedacted} for any channel that leaves the page.
  */
 export function getPendingAlertText(): string | null {
   return pendingAlert?.text ?? null;
+}
+
+/**
+ * Get the redacted text of the currently-open dialog, or `null` if none is
+ * open. The raw dialog text (OTP/2FA/PII/tokens) is replaced by a length-only
+ * hint so it is safe to log or forward to a cockpit/LLM channel. Use this
+ * instead of {@link getPendingAlertText} whenever the value leaves the page.
+ */
+export function getPendingAlertTextRedacted(): string | null {
+  return pendingAlert ? redactDialogText(pendingAlert.text) : null;
 }
 
 /**
@@ -162,10 +176,15 @@ export function getPendingAlertKind(): DialogKind | null {
  * override already returned to the page) — this function only clears the
  * pending entry so subsequent `alert_*` actions report "no such alert".
  */
-export function acceptAlert(): boolean {
+/** Clear the most-recently-recorded dialog from the pending queue. */
+function clearMostRecentAlert(): boolean {
   if (!pendingAlert) return false;
   pendingAlert = null;
   return true;
+}
+
+export function acceptAlert(): boolean {
+  return clearMostRecentAlert();
 }
 
 /**
@@ -177,9 +196,7 @@ export function acceptAlert(): boolean {
  * override's return value.
  */
 export function dismissAlert(): boolean {
-  if (!pendingAlert) return false;
-  pendingAlert = null;
-  return true;
+  return clearMostRecentAlert();
 }
 
 /**
@@ -196,14 +213,10 @@ export function dismissAlert(): boolean {
  * Returns `true` if the text was staged, `false` if no prompt was open.
  */
 export function sendAlertText(text: string): boolean {
- // Stage the value for the NEXT prompt (mirrors {@link stagePromptText}): the
- // isolated-world `window.prompt` override returns it when the page opens a
- // prompt. This keeps the staging contract identical whether or not a dialog
- // is currently open, so callers can rely on the boolean return to mean "a
- // prompt was pending".
-  nextPromptValue = String(text);
+ // Stage the value for the NEXT prompt via the single staging implementation.
+ // Keeping one staging path avoids the two assignments drifting apart.
+  stagePromptText(text);
   if (!pendingAlert || pendingAlert.kind !== "prompt") return false;
-  pendingAlert = null;
   return true;
 }
 

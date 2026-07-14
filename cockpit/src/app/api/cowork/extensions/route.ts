@@ -21,10 +21,16 @@ export async function GET(req: NextRequest): Promise<Response> {
       }
       enabledFilter = enabled === 'true';
     }
-    const extensions =
-      enabledFilter !== undefined
-        ? await db.extension.findMany({ where: { isEnabled: enabledFilter }, take: limit })
-        : await db.extension.findMany({ take: limit });
+ // Build the `where` conditionally and issue a single deterministic query.
+ // `findMany` treats `where: undefined` as "no filter", so the absent-param
+ // path is preserved exactly; `orderBy: { createdAt: 'desc' }` gives a
+ // stable per-request order (Postgres would otherwise return unspecified order).
+    const where = enabledFilter !== undefined ? { isEnabled: enabledFilter } : undefined;
+    const extensions = await db.extension.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    });
  // Project the Prisma `Extension` rows onto the `SampleExtension` shape the
  // view consumes. We map fields explicitly (no `...ext` spread) so the
  // response carries each field exactly once. The previous version spread

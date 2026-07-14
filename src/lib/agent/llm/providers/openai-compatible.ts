@@ -91,10 +91,11 @@ function configure(profile: OpenAICompatibleProfile, input: Config = {}) {
  // narrow curated-local-origin exemption (if ever enabled) can apply.
   assertSafeUserBaseURL(input.baseURL, profile.provider);
   const baseURL = input.baseURL ?? profile.baseURL;
+  const apiKey = "apiKey" in input ? input.apiKey : undefined;
   const route = make({
- // Fold the (effective) baseURL into the route id so distinct endpoints
- // don't clobber each other in the global route registry.
-    id: `openai-compatible:${profile.provider}:${routeKey(baseURL)}`,
+ // Fold the (effective) baseURL AND credentials into the route id so distinct
+ // endpoints/credentials don't clobber each other in the global route registry.
+    id: `openai-compatible:${profile.provider}:${routeKey(`${baseURL}::${apiKey ?? ""}`)}`,
     provider: profile.provider,
     protocol: OpenAICompatibleChat.protocol,
     endpoint: Endpoint.path(PATH, { baseURL }),

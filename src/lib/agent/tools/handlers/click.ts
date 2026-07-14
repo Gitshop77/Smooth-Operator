@@ -25,12 +25,31 @@ import { highlightElement } from "../../dom/overlay";
 import { moveCursorToElement } from "../../dom/phantom-cursor";
 import { TIMINGS, sleep } from "../constants";
 import {
+  domFingerprint,
   generateCssSelector,
   resolveElement,
   safeScrollIntoView,
 } from "../helpers";
-import { domFingerprint } from "../helpers";
 import type { ActionContext } from "./types";
+
+type CdpClickResult = { ok?: boolean; error?: string } | undefined | null;
+
+/** Send a CDP_CLICK to the background SW and return the normalized result. */
+async function sendCdpClick(
+  rect: { x: number; y: number; width: number; height: number },
+  visionIndex?: string,
+): Promise<CdpClickResult> {
+  return (await chrome.runtime.sendMessage(
+    visionIndex !== undefined
+      ? { type: "CDP_CLICK", rect, visionIndex }
+      : { type: "CDP_CLICK", rect },
+  )) as CdpClickResult;
+}
+
+/** True when the page changed since the action started. */
+function pageChanged(beforeUrl: string, beforeFingerprint: string): boolean {
+  return location.href !== beforeUrl || domFingerprint() !== beforeFingerprint;
+}
 
 export async function handleClick(
   ctx: ActionContext,
@@ -132,16 +151,19 @@ export async function handleClick(
  // serializes to `{}` and the background rejects it (rect.x !== "number").
  // Send a plain object with the coordinates copied out (mirrors
  // `press-and-hold.ts`).
-      const r = el.getBoundingClientRect();
-      const cdpResult = await chrome.runtime.sendMessage({
-        type: "CDP_CLICK",
-        rect: { x: r.x, y: r.y, width: r.width, height: r.height },
-      });
-      if (cdpResult?.ok) {
-        clicked = true;
-        strategyUsed = "CDP";
-      } else if (cdpResult?.error) {
-        errors.push(`CDP click failed: ${cdpResult.error}`);
+      if (!el.isConnected) {
+        errors.push("element became detached before CDP click");
+      } else {
+        const r = el.getBoundingClientRect();
+        const cdpResult = await sendCdpClick({ x: r.x, y: r.y, width: r.width, height: r.height });
+        if (cdpResult?.ok) {
+          clicked = true;
+          strategyUsed = "CDP";
+        } else if (cdpResult?.error) {
+          errors.push(`CDP click failed: ${cdpResult.error}`);
+        } else {
+          errors.push("CDP click: no response from service worker");
+        }
       }
     } catch (e) {
       errors.push(`CDP click failed: ${(e as Error).message}`);
@@ -221,17 +243,26 @@ export async function handleClick(
       if (targetText) {
         const normalize = (s: string) => s.replace(/\s+/g, " ").trim();
         const needle = normalize(targetText);
-        const all = Array.from(document.querySelectorAll("*"));
-        const exactMatches = all.filter((cand) => {
+        const all = document.querySelectorAll("*");
+        let count = 0;
+        let firstMatch: Element | null = null;
+        for (let i = 0; i < all.length; i++) {
+          const cand = all[i];
           const candTag = cand.tagName.toLowerCase();
-          return (
+          const candText = cand.textContent || "";
+          if (
             candTag === targetType &&
             typeof (cand as HTMLElement).click === "function" &&
-            normalize(cand.textContent || "") === needle
-          );
-        });
-        if (exactMatches.length === 1) {
-          const match = exactMatches[0] as HTMLElement;
+            candText.length >= needle.length &&
+            normalize(candText) === needle
+          ) {
+            count++;
+            if (count === 1) firstMatch = cand;
+            else if (count > 1) break; // ambiguous — stop scanning
+          }
+        }
+        if (count === 1) {
+          const match = firstMatch as HTMLElement;
           if (match !== el) {
             match.click();
             clicked = true;
@@ -240,9 +271,9 @@ export async function handleClick(
  // Unique match is the same node we already hold — skip to avoid
  // a double click.
           }
-        } else if (exactMatches.length > 1) {
+        } else if (count > 1) {
           errors.push(
-            `JS text search skipped: "${targetText}" matches ${exactMatches.length} elements ambiguously`,
+            `JS text search skipped: "${targetText}" matches ${count} elements ambiguously`,
           );
         }
       }
@@ -282,7 +313,7 @@ export async function handleClick(
   }
 
   await sleep(TIMINGS.clickAfterSettle);
-  const changed = location.href !== ctx.beforeUrl || domFingerprint() !== ctx.beforeFingerprint;
+  const changed = pageChanged(ctx.beforeUrl, ctx.beforeFingerprint);
   if (!clicked) {
     return {
       action,
@@ -318,14 +349,10 @@ async function handleVisionClick(
   try {
  // Send CDP_CLICK to the background service worker with the vision element's pixel coordinates
  // The background's message-routing.ts CDP_CLICK handler does Input.dispatchMouseEvent
-    const result = await chrome.runtime.sendMessage({
-      type: "CDP_CLICK",
-      rect: { x: 0, y: 0, width: 1, height: 1 }, // placeholder — the background will use the vision cache
-      visionIndex: indexStr,
-    });
+    const result = await sendCdpClick({ x: 0, y: 0, width: 1, height: 1 }, indexStr);
     if (result?.ok) {
       await sleep(TIMINGS.clickAfterSettle);
-      const changed = location.href !== beforeUrl || domFingerprint() !== beforeFingerprint;
+      const changed = pageChanged(beforeUrl, beforeFingerprint);
       return {
         action,
         success: true,

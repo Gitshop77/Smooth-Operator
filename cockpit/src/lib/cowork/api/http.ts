@@ -30,11 +30,14 @@ async function readCappedBody(req: NextRequest): Promise<string> {
   const reader = req.body.getReader();
   const decoder = new TextDecoder();
   let total = 0;
-  let text = '';
+  const chunks: string[] = [];
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
- // Reject BEFORE the chunk is appended to `text` so a single oversized
+ // A non-conformant stream can yield `value === undefined` with `done ===
+ // false`; skip the empty chunk before accessing `value.byteLength`.
+    if (!value) continue;
+ // Reject BEFORE the chunk is appended to `chunks` so a single oversized
  // chunk (or a cumulative overflow) can never be buffered into memory.
     if (total + value.byteLength > MAX_BODY_BYTES) {
  // Release the underlying body reader so the request socket/stream is not
@@ -43,10 +46,10 @@ async function readCappedBody(req: NextRequest): Promise<string> {
       throw new ClientError('request entity too large', 413);
     }
     total += value.byteLength;
-    text += decoder.decode(value, { stream: true });
+    chunks.push(decoder.decode(value, { stream: true }));
   }
-  text += decoder.decode();
-  return text;
+  chunks.push(decoder.decode());
+  return chunks.join('');
 }
 
 /** Parse JSON request body.
@@ -60,7 +63,15 @@ export async function bodyJson(req: NextRequest): Promise<Record<string, unknown
   const text = await readCappedBody(req);
   if (!text) return {};
   try {
-    return JSON.parse(text) as Record<string, unknown>;
+    const parsed: unknown = JSON.parse(text);
+ // A top-level array / string / number / null is not a JSON object, so a
+ // route that does `body.field` would silently get `undefined`. Reject it
+ // with a clean 400 (mapped via withRouteError) instead of letting a 500 or
+ // a defaulted row slip through.
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new ClientError('Invalid JSON body', 400);
+    }
+    return parsed as Record<string, unknown>;
   } catch {
     throw new ClientError('Invalid JSON body', 400);
   }
@@ -102,8 +113,16 @@ export function json(data: unknown, status = 200, headers: Record<string, string
 }
 
 /** Plain-text Response helper. */
-export function textResponse(data: string, status = 200, contentType = 'text/plain'): Response {
-  return new Response(data, { status, headers: { 'content-type': contentType } });
+export function textResponse(
+  data: string,
+  status = 200,
+  contentType = 'text/plain',
+  headers: Record<string, string> = {},
+): Response {
+  return new Response(data, {
+    status,
+    headers: { 'content-type': contentType, 'cache-control': 'no-store', ...headers },
+  });
 }
 
 /** Build a 400 response with a structured error. */
@@ -167,8 +186,12 @@ export function isSsrfSafeUrl(url: string): boolean {
   let host = parsed.hostname.toLowerCase();
  // Strip IPv6 bracket notation (`[:1]`) so comparisons below work.
   if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
+ // Collapse a trailing dot on a registered name (e.g. `localhost.`) to its
+ // bare form — the URL parser strips trailing dots only for IP literals, so a
+ // trailing dot on a reg-name would otherwise slip past the loopback block.
+  if (host.endsWith('.')) host = host.slice(0, -1);
  // Bare loopback / unspecified addresses.
-  if (host === 'localhost' || host === '::1' || host === '0.0.0.0') return false;
+  if (host === 'localhost' || host === '::1' || host === '::' || host === '0.0.0.0') return false;
  // Any loopback / RFC1918 / link-local / CGNAT host (in resolved form) is unsafe.
   if (isRestrictedHost(host)) return false;
   return true;
@@ -186,10 +209,24 @@ function isRestrictedHost(host: string): boolean {
   if (host.includes('%')) return true;
  // IPv6 literal.
   if (isIP(host) === 6) {
- // IPv4-mapped IPv6 (`:ffff:a.b.c.d`) — classify the embedded address.
+ // IPv4-mapped IPv6 (`:ffff:a.b.c.d` or `::ffff:WWXX:YYZZ`) — classify the
+ // embedded address. The two-hextet form (`WWXX:YYZZ`) is a valid encoding of
+ // an IPv4 address and must be normalized to dotted decimal before classification,
+ // otherwise the embedded value parses as NaN and slips through as "safe".
     if (host.startsWith('::ffff:')) {
       const embedded = host.slice('::ffff:'.length);
-      if (isRestrictedHost(embedded)) return true;
+      let dotted = embedded;
+      if (embedded.includes(':')) {
+        const parts = embedded.split(':');
+        if (parts.length === 2) {
+          const hi = parseInt(parts[0], 16);
+          const lo = parseInt(parts[1], 16);
+          if (!Number.isNaN(hi) && !Number.isNaN(lo)) {
+            dotted = `${(hi >>> 8) & 0xff}.${(hi & 0xff)}.${(lo >>> 8) & 0xff}.${lo & 0xff}`;
+          }
+        }
+      }
+      if (isRestrictedHost(dotted)) return true;
     }
  // IPv6 link-local (fe80:/10) and unique-local (fc00:/7). Classify by the
  // first hextet's bitmask rather than by string prefixes, so the WHOLE
@@ -292,7 +329,54 @@ function isPrivateIpv4(host: string): boolean {
 
 /** Parse a `limit` query param with a default + max cap. */
 export function parseLimit(req: NextRequest, defaultValue = 100, max = 200): number {
-  return Math.max(1, Math.min(parseInt(req.nextUrl.searchParams.get('limit') || String(defaultValue), 10) || defaultValue, max));
+  const raw = req.nextUrl.searchParams.get("limit");
+  const parsed = raw !== null ? parseInt(raw, 10) : NaN;
+  const value = Number.isFinite(parsed) && parsed !== 0 ? parsed : defaultValue;
+  return Math.max(1, Math.min(value, max));
+}
+
+/** Shared cursor-id validation for `after` pagination (cuid/uuid tokens). */
+export const CURSOR_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** True when `e` is Prisma's "record not found" (P2025) error. Structured
+ * check (code + error name) — avoids fragile message-substring sniffing. */
+export function isPrismaRecordNotFound(e: unknown): boolean {
+  if (!e || typeof e !== 'object') return false;
+  const err = e as { code?: unknown; name?: unknown };
+  return err.code === 'P2025' && err.name === 'PrismaClientKnownRequestError';
+}
+
+/** Parse and validate the optional `agentId` query param.
+ *
+ * Returns `undefined` when the param is absent or empty (the "no filter"
+ * contract), and throws a `ClientError` (400) for a present value that is
+ * longer than 128 chars or contains whitespace/control characters. The error
+ * message and bounds match the route-local guard that this consolidates. */
+export function parseAgentId(req: NextRequest): string | undefined {
+  const raw = req.nextUrl.searchParams.get('agentId');
+  if (raw === null || raw === '') return undefined;
+  const hasBadChar =
+    /\s/.test(raw) ||
+    [...raw].some((ch) => {
+      const c = ch.charCodeAt(0);
+      return c <= 0x1f || c === 0x7f;
+    });
+  if (raw.length > 128 || hasBadChar) {
+    throw new ClientError('Invalid agentId; must be 1-128 chars with no control/whitespace characters', 400);
+  }
+  return raw;
+}
+
+/** Sanitize a caller-supplied `x-request-id` header for use as a correlation
+ * id / upstream trace header.
+ *
+ * Only printable ASCII (space through tilde) up to 64 chars is accepted;
+ * anything else (control/CRLF bytes, over-length) returns `undefined` so it is
+ * never forwarded to logs or the upstream service. This is the single source of
+ * truth for the request-id validation shared by the chat POST/DELETE and image
+ * POST handlers, preventing the log-injection guard from drifting between them. */
+export function sanitizeRequestId(raw: string | null): string | undefined {
+  return raw && /^[ -~]{1,64}$/.test(raw) ? raw : undefined;
 }
 
 /** Maximum length for user-supplied free-text fields. These mirror the bounds
@@ -349,9 +433,7 @@ function newCorrelationId(): string {
 export function redactSecrets(text: string): string {
   let out = text;
  // Credentials in URLs: http(s)://user:pass@host -> http(s)://***@host
-  out = out.replace(/https?:\/\/[^@\s/]+@/gi, (m) =>
-    m.replace(/\/\/[^@\s/]+@/, "//***@"),
-  );
+  out = out.replace(/(https?:\/\/)[^@\s/]+@/gi, "$1***@");
  // Secret-bearing key=value pairs in URLs / bodies / headers.
   out = out.replace(
     /(password|passwd|token|secret|api[_-]?key|access[_-]?token|authorization|authorisation)=[^&\s"'<>]+/gi,
@@ -418,7 +500,7 @@ export async function withRouteError(
   try {
     return await fn();
   } catch (e) {
-    const correlationId = requestId || newCorrelationId();
+    const correlationId = sanitizeRequestId(requestId ?? null) ?? newCorrelationId();
     const message = e instanceof Error ? e.message : 'Internal server error';
  // Prefer a stable error code + correlation id over dumping the raw
  // stack/message (which may leak filesystem paths, table names, or tokens).

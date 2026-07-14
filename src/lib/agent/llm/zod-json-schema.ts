@@ -11,8 +11,12 @@
  * so a non-serializable schema surfaces to the caller instead of being POSTed as
  * a raw Zod object (which yields an opaque provider `400`).
  */
+/** Cached `zod` module so the dynamic import + availability check run once. */
+let cachedZod: typeof import("zod") | null = null;
+
 export async function zodToJsonSchema(schema: unknown): Promise<unknown> {
-  const zNS = (await import("zod")).z as unknown as {
+  const zodMod = (cachedZod ??= await import("zod"));
+  const zNS = zodMod.z as unknown as {
     toJSONSchema?: (s: unknown) => unknown;
   };
   if (typeof zNS.toJSONSchema !== "function") {

@@ -27,6 +27,7 @@ import {
 import { updateProviderUI, populateModelSuggestions } from "./provider-config-ui";
 import { PROVIDERS, PROVIDER_META, DEFAULT_PROVIDER_ID } from "./providers";
 import { alertModal } from "./modal";
+import { validateWebhookUrl } from "@/lib/agent/llm/route/ssrf";
 
 // ─── Storage keys ──────────────────────────────────────────────────────────
 
@@ -78,6 +79,8 @@ let savedTimer: ReturnType<typeof setTimeout> | null = null;
 /** Flash the shared "Saved" cue. Used by every auto-save path. */
 export function showSaved(): void {
   const saved = $("saved");
+  saved.setAttribute("role", "status");
+  saved.setAttribute("aria-live", "polite");
   saved.classList.add("show");
   if (savedTimer) clearTimeout(savedTimer);
   savedTimer = setTimeout(() => saved.classList.remove("show"), 1500);
@@ -317,6 +320,12 @@ async function doSaveSettings(): Promise<boolean> {
     invalid.push("baseUrl");
     ($("baseUrl") as HTMLInputElement).value = "";
   }
+  const webhookUrlRaw = ($("webhookUrl") as HTMLInputElement).value.trim();
+  const webhookCheck = webhookUrlRaw !== "" ? validateWebhookUrl(webhookUrlRaw) : null;
+  if (webhookUrlRaw !== "" && webhookCheck && !webhookCheck.ok) {
+    invalid.push("webhookUrl");
+    ($("webhookUrl") as HTMLInputElement).value = "";
+  }
 
   if (invalid.length > 0) {
     const names = invalid.join(", ");
@@ -340,6 +349,10 @@ async function doSaveSettings(): Promise<boolean> {
     return valid;
   };
 
+  const screenshotQualityEl = $("screenshotQuality") as HTMLInputElement;
+  const sq = Math.min(100, Math.max(50, parseInt(screenshotQualityEl.value, 10) || 80));
+  screenshotQualityEl.value = String(sq);
+
   const data: Record<string, string | number | string[] | boolean> = {
     provider: ($("provider") as HTMLSelectElement).value,
  // SECURITY: the provider API key is a bearer credential and is the single
@@ -360,7 +373,7 @@ async function doSaveSettings(): Promise<boolean> {
     maxFailures,
     costCap,
     defaultTask: ($("defaultTask") as HTMLTextAreaElement).value,
-    screenshotQuality: Math.min(100, Math.max(50, parseInt(($("screenshotQuality") as HTMLInputElement).value, 10) || 80)),
+    screenshotQuality: sq,
     enableScreenshots: ($("enableScreenshots") as HTMLInputElement).checked,
  // `visionMode` is the single source of truth for the vision setting. The
  // legacy `enableLocalVision` key is intentionally NOT written here — every
@@ -372,6 +385,10 @@ async function doSaveSettings(): Promise<boolean> {
     allowedDomains: parseDomains(($("allowedDomains") as HTMLTextAreaElement).value),
     blockedDomains: parseDomains(($("blockedDomains") as HTMLTextAreaElement).value),
     [COCKPIT_URL_STORAGE_KEY]: (cockpitUrlRaw !== "" && isHttpUrl(cockpitUrlRaw) ? cockpitUrlRaw : DEFAULT_COCKPIT_URL),
+    [STORAGE_KEYS.webhookUrl]: webhookUrlRaw !== "" && webhookCheck?.ok ? webhookUrlRaw : "",
+    [STORAGE_KEYS.notifyOnCompletion]: ($("notifyOnCompletion") as HTMLInputElement).checked,
+    [STORAGE_KEYS.notifyOnError]: ($("notifyOnError") as HTMLInputElement).checked,
+    [STORAGE_KEYS.notifyOnTakeover]: ($("notifyOnTakeover") as HTMLInputElement).checked,
   };
 
   return new Promise<boolean>((resolve) => {
@@ -393,9 +410,11 @@ async function doSaveSettings(): Promise<boolean> {
         chrome.storage.session.set({ [STORAGE_KEYS.apiKey]: apiKeyValue }, () => {
           if (chrome.runtime.lastError) {
             console.warn("[options] session key set failed:", chrome.runtime.lastError);
+          } else {
+ // Remove any legacy plaintext copy from local storage only when the
+ // session write succeeded; on failure keep the legacy local copy.
+            chrome.storage.local.remove(STORAGE_KEYS.apiKey);
           }
- // Remove any legacy plaintext copy from local storage.
-          chrome.storage.local.remove(STORAGE_KEYS.apiKey);
         });
       } else {
  // No session store available — fall back to local (less safe) rather
@@ -427,15 +446,16 @@ export function initAutoSave(): void {
     "cockpitUrl", "apiKey", "model", "baseUrl",
     "maxSteps", "maxActions", "plannerInterval", "maxFailures", "costCap",
     "defaultTask", "screenshotQuality", "allowedDomains", "blockedDomains",
+    "webhookUrl", "notifyOnCompletion", "notifyOnError", "notifyOnTakeover",
   ];
   for (const id of saveIds) {
     document.getElementById(id)?.addEventListener("change", () => void saveSettings());
   }
-  $("enableScreenshots").addEventListener("change", () => void saveSettings());
+  $("enableScreenshots")?.addEventListener("change", () => void saveSettings());
   document.querySelectorAll<HTMLInputElement>('input[name="visionMode"]').forEach((radio) => {
     radio.addEventListener("change", () => void saveSettings());
   });
-  $("provider").addEventListener("change", () => {
+  $("provider")?.addEventListener("change", () => {
     updateProviderUI();
     void populateModelSuggestions();
     void saveSettings();
@@ -503,7 +523,7 @@ export async function renderSecrets(): Promise<void> {
     item.innerHTML =
       `<span class="name">%${escapeHtml(s.name)}%</span>` +
       `<span class="value">${"•".repeat(Math.min(s.value.length, 20))}</span>` +
-      `<button type="button" class="secret-delete">Delete</button>`;
+      `<button type="button" class="secret-delete" aria-label="Delete secret %${escapeHtml(s.name)}%">Delete</button>`;
     item.querySelector("button")!.addEventListener("click", async () => {
       await deleteSecretFromStore(s.name);
       await renderSecrets();
@@ -513,7 +533,7 @@ export async function renderSecrets(): Promise<void> {
   }
 }
 
-$("addSecret").addEventListener("click", async () => {
+$("addSecret")?.addEventListener("click", async () => {
   const name = ($("secretName") as HTMLInputElement).value.trim();
   const value = ($("secretValue") as HTMLInputElement).value.trim();
   if (!name) { ($("secretName") as HTMLInputElement).focus(); return; }

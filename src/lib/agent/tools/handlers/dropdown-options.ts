@@ -13,7 +13,10 @@ export async function handleDropdownOptions(
   const { state } = ctx;
   const el = resolveElement(state, action.index);
   if (!(el instanceof HTMLSelectElement)) throw new NoSuchElementException(`element [${action.index}] is not a <select>`);
-  const options = Array.from(el.options).map((o, i) => `${i}: ${o.textContent?.trim() || o.value}`);
+  const options = Array.from(el.options, (o, i) => {
+    const label = o.textContent?.trim() || o.value;
+    return `${i}: ${label}${o.value && o.value !== label ? ` (value="${o.value}")` : ""}`;
+  });
   return {
     action,
     success: true,

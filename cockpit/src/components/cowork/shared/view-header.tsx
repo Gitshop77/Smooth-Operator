@@ -39,7 +39,7 @@ export function ViewHeader({
     >
       <div className="flex items-start gap-3 min-w-0">
         {icon ? (
-          <div className="size-9 shrink-0 rounded-[10px] bg-primary/10 text-primary grid place-items-center">
+          <div className="size-9 shrink-0 rounded-[10px] bg-primary/10 text-primary grid place-items-center" aria-hidden="true">
             {icon}
           </div>
         ) : null}
@@ -47,9 +47,9 @@ export function ViewHeader({
           {eyebrow ? (
             <p className="cowork-eyebrow mb-1">{eyebrow}</p>
           ) : null}
-          <h1 className="text-xl font-semibold tracking-tight truncate">{title}</h1>
+          <h1 className="text-xl font-semibold tracking-tight truncate" title={title}>{title}</h1>
           {description ? (
-            <p className="text-sm text-muted-foreground mt-1 line-clamp-2">
+            <p className="text-sm text-muted-foreground mt-1 line-clamp-2" title={description}>
               {description}
             </p>
           ) : null}

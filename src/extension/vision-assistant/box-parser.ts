@@ -7,6 +7,9 @@
 
 import type { Detection, PixelDetection } from "./types";
 
+/** Fresh instance per use so `lastIndex` state never leaks between loops. */
+const makeBoxRe = (): RegExp => /<box>([\s\S]*?)<\/box>/gi;
+
 /**
  * Strictly parse a single <box> body into four numbers.
  *
@@ -31,11 +34,13 @@ function parseBoxBody(body: string): [number, number, number, number] | null {
 export function parseBoxes(text: string): Detection[] {
   const out: Detection[] = [];
   const re = /<ref>([\s\S]*?)<\/ref>((?:\s*<box>[\s\S]*?<\/box>)+)/gi;
+  const refRanges: Array<[number, number]> = [];
   let m: RegExpExecArray | null;
 
   while ((m = re.exec(text)) !== null) {
+    refRanges.push([m.index, m.index + m[0].length]);
     const label = m[1].trim();
-    const boxRe = /<box>([\s\S]*?)<\/box>/gi;
+    const boxRe = makeBoxRe();
     let b: RegExpExecArray | null;
     while ((b = boxRe.exec(m[2])) !== null) {
       const box = parseBoxBody(b[1]);
@@ -45,15 +50,19 @@ export function parseBoxes(text: string): Detection[] {
     }
   }
 
- // Bare boxes without a preceding ref
-  if (out.length === 0) {
-    const boxRe = /<box>([\s\S]*?)<\/box>/gi;
-    let b: RegExpExecArray | null;
-    while ((b = boxRe.exec(text)) !== null) {
-      const box = parseBoxBody(b[1]);
-      if (box) {
-        out.push({ label: "", box });
-      }
+ // Recover bare <box>es that have no preceding <ref>. Strictly additive: a box
+ // is only added when its offset falls OUTSIDE every ref'd match range, so we
+ // never duplicate a box already captured above (and never drop a valid one
+ // that follows a ref'd box in the same output).
+  const boxRe = makeBoxRe();
+  let b: RegExpExecArray | null;
+  while ((b = boxRe.exec(text)) !== null) {
+    const start = b.index;
+    const end = start + b[0].length;
+    if (refRanges.some(([rs, re2]) => start >= rs && end <= re2)) continue;
+    const box = parseBoxBody(b[1]);
+    if (box) {
+      out.push({ label: "", box });
     }
   }
 

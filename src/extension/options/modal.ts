@@ -81,6 +81,7 @@ function showModal(opts: ModalOptions): Promise<string | null> {
   dialog.setAttribute("aria-modal", "true");
   dialog.setAttribute("aria-labelledby", "modal-title");
   dialog.setAttribute("aria-describedby", "modal-body");
+  dialog.tabIndex = -1;
 
   const header = document.createElement("div");
   header.className = "modal-header";
@@ -105,16 +106,6 @@ function showModal(opts: ModalOptions): Promise<string | null> {
   footer.className = "modal-footer";
 
   return new Promise<string | null>((resolve) => {
-    const close = (value: string | null) => {
-      if (activeOverlay !== overlay) return;
-      activeOverlay = null;
-      overlay.remove();
-      previouslyFocused?.focus?.();
-      resolve(value);
- // Yield so the closing DOM mutation settles before the next modal opens.
-      flushQueue();
-    };
-
     for (const a of opts.actions) {
       const btn = document.createElement("button");
       btn.type = "button";
@@ -133,12 +124,41 @@ function showModal(opts: ModalOptions): Promise<string | null> {
     document.body.appendChild(overlay);
     activeOverlay = overlay;
 
+    // Make the background inert + lock its scroll while the modal is open, so
+    // keyboard/screen-reader users can't escape into the page behind the
+    // dialog (aria-modal alone doesn't prevent that) and the page can't shift.
+    const inerted = Array.from(document.body.children)
+      .filter((c) => c !== overlay)
+      .map((c) => {
+        const el = c as HTMLElement;
+        const wasInert = el.inert;
+        el.inert = true;
+        return { el, wasInert };
+      });
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    // Cache the focusable set once; the modal content is static.
+    const focusable = getFocusable(dialog);
+
+    // Defined here (AFTER `inerted` / `prevOverflow` above are initialized) so
+    // it closes over those already-assigned bindings rather than relying on the
+    // accident that it only runs after they're set.
+    const close = (value: string | null) => {
+      if (activeOverlay !== overlay) return;
+      activeOverlay = null;
+      inerted.forEach(({ el, wasInert }) => { el.inert = wasInert; });
+      document.body.style.overflow = prevOverflow;
+      overlay.remove();
+      previouslyFocused?.focus?.();
+      resolve(value);
+      flushQueue();
+    };
+
     overlay.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         e.preventDefault();
         close(null);
       } else if (e.key === "Tab") {
-        const focusable = getFocusable(dialog);
         if (focusable.length === 0) {
           e.preventDefault();
           return;

@@ -20,6 +20,67 @@ import { GOAL_WARN_THRESHOLD } from "../loop-detector";
 import { classifyError, friendlyErrorMessage, type ClassifiedError } from "../../errors";
 
 /**
+ * Emit a `plannerStep` dispatcher event, swallowing any callback exception so a
+ * throwing dispatcher/callback can never abort the whole run (finding:
+ * user-provided dispatcher/callback exceptions aborted the whole run). Shared
+ * by the navigator-done and periodic-planner paths so the two cannot drift.
+ */
+async function safeEmitPlannerStep(state: LoopState, plannerResult: PlannerOutput): Promise<void> {
+  if (!state.dispatcher) return;
+  try {
+    await state.dispatcher.plannerStep(
+      makeCtx(state), plannerResult.decision, state.currentGoal, state.plan
+    );
+  } catch (e) {
+    console.error("[planner-phases] dispatcher.plannerStep threw (continuing run):", e);
+  }
+}
+
+/**
+ * Wait for the page to settle after an action, honoring `state.signal` so an
+ * abort is respected at this step boundary (the previous inline `setTimeout`
+ * fallback ignored the signal and always slept the full `settleDelay`).
+ * Dedupes the wait logic that was inlined at two call sites in
+ * `handleNavigatorDone`; the abort listener is removed on the timer path so it
+ * doesn't leak.
+ */
+async function safeWaitForSettled(state: LoopState): Promise<void> {
+  const { deps, step, onEvent, signal } = state;
+  try {
+    if (deps.waitForSettled) {
+      await deps.waitForSettled();
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      const onAbort = () => {
+        signal?.removeEventListener("abort", onAbort);
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, state.settleDelay);
+      if (signal) {
+        if (signal.aborted) {
+          clearTimeout(timer);
+          resolve();
+        } else {
+          signal.addEventListener("abort", onAbort);
+        }
+      }
+    });
+  } catch (e) {
+    onEvent({
+      type: "error",
+      step,
+      message: `waitForSettled failed: ${e instanceof Error ? e.message : String(e)}`,
+      recoverable: true,
+    });
+  }
+}
+
+/**
  * Call the planner LLM and handle the error classification + failure-tracking
  * pattern.
  */
@@ -110,7 +171,10 @@ export async function handlePlannerDecision(
 ): Promise<HandlePlannerDecisionResult> {
   const { config, step, onEvent, navigatorHistory } = state;
 
-  if (costCapExceeded(state)) return { status: "finalized" };
+  if (costCapExceeded(state)) {
+    state.finalResult = { success: false, text: "Cost cap exceeded" };
+    return { status: "finalized" };
+  }
 
   let plannerResult = plannerResultIn;
   if (plannerResult.decision === "done") {
@@ -208,7 +272,7 @@ export async function handleNavigatorDone(
   browserState: BrowserState,
   tabs: TabInfo[]
 ): Promise<HandleNavigatorDoneResult> {
-  const { deps, step, onEvent, settleDelay, navigatorHistory } = state;
+  const { step, onEvent, navigatorHistory } = state;
 
   navigatorHistory.push({
     step, agent: "navigator",
@@ -234,15 +298,7 @@ export async function handleNavigatorDone(
     });
     state.navigatorStepsSincePlanner = 0;
     state.step++;
-    try {
-      await (deps.waitForSettled?.() ?? new Promise<void>((r) => setTimeout(r, settleDelay)));
-    } catch (e) {
-      onEvent({
-        type: "error", step,
-        message: `waitForSettled failed: ${e instanceof Error ? e.message : String(e)}`,
-        recoverable: true,
-      });
-    }
+    await safeWaitForSettled(state);
     return { finalized: false };
   }
 
@@ -255,28 +311,10 @@ export async function handleNavigatorDone(
     type: "planner-step", step, decision: decisionResult.plannerResult.decision,
     goal: state.currentGoal, plan: state.plan,
   });
-  if (state.dispatcher) {
- // A throwing dispatcher/callback must not abort the whole run (finding:
- // user-provided dispatcher/callback exceptions abort the whole run).
-    try {
-      await state.dispatcher.plannerStep(
-        makeCtx(state), decisionResult.plannerResult.decision, state.currentGoal, state.plan
-      );
-    } catch (e) {
-      console.error("[planner-phases] dispatcher.plannerStep threw (continuing run):", e);
-    }
-  }
+  await safeEmitPlannerStep(state, decisionResult.plannerResult);
   state.navigatorStepsSincePlanner = 0;
   state.step++;
-  try {
-    await (deps.waitForSettled?.() ?? new Promise<void>((r) => setTimeout(r, settleDelay)));
-  } catch (e) {
-    onEvent({
-      type: "error", step,
-      message: `waitForSettled failed: ${e instanceof Error ? e.message : String(e)}`,
-      recoverable: true,
-    });
-  }
+  await safeWaitForSettled(state);
   return { finalized: false };
 }
 
@@ -331,16 +369,6 @@ export async function runPeriodicPlannerCheck(
     type: "planner-step", step, decision: decisionResult.plannerResult.decision,
     goal: state.currentGoal, plan: state.plan,
   });
-  if (state.dispatcher) {
- // A throwing dispatcher/callback must not abort the whole run (finding:
- // user-provided dispatcher/callback exceptions abort the whole run).
-    try {
-      await state.dispatcher.plannerStep(
-        makeCtx(state), decisionResult.plannerResult.decision, state.currentGoal, state.plan
-      );
-    } catch (e) {
-      console.error("[planner-phases] dispatcher.plannerStep threw (continuing run):", e);
-    }
-  }
+  await safeEmitPlannerStep(state, decisionResult.plannerResult);
   return { finalized: false };
 }

@@ -12,12 +12,15 @@ import * as OpenAIChat from "./openai-chat";
 
 export { DEFAULT_BASE_URL, PATH } from "./openai-chat";
 
+/** Default `frequency_penalty` applied to discourage runaway generation. */
+const DEFAULT_FREQUENCY_PENALTY = 0.3;
+
 export const protocol: Protocol<OpenAIChat.OpenAIChatBody, string, { type: string; content?: string; usage?: unknown }, OpenAIChat.StreamState> = {
   id: "openai-compatible-chat",
   body: {
     from: async (request) => {
       const body = await OpenAIChat.protocol.body.from(request);
-      body.frequency_penalty = 0.3;
+      body.frequency_penalty = DEFAULT_FREQUENCY_PENALTY;
       return body;
     },
   },

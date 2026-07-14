@@ -12,9 +12,21 @@ import { LIMITS, TIMINGS, sleep } from "../constants";
 import { resolveElement, safeScrollIntoView } from "../helpers";
 import type { ActionContext } from "./types";
 
+/**
+ * Parameter type for the `input` action. Mirrors the parsed {@link Action}
+ * shape exactly, except `clear` is made optional: it carries a `.default(true)`
+ * at parse time, but callers (the executor, LLM prompts, and tests) legitimately
+ * omit it — and the handler already treats a missing `clear` as "replace"
+ * (`action.clear !== false`). Keeping `index`/`text` as their real (non-coerced)
+ * types avoids the `unknown` widening that `z.input` would introduce.
+ */
+type InputAction = Omit<Extract<Action, { type: "input" }>, "clear"> & {
+  clear?: boolean | null;
+};
+
 export async function handleInput(
   ctx: ActionContext,
-  action: Extract<Action, { type: "input" }>,
+  action: InputAction,
 ): Promise<ActionResult> {
   const { state } = ctx;
   const el = resolveElement(state, action.index);
@@ -33,7 +45,7 @@ export async function handleInput(
   highlightElement(el, `input [${action.index}]`);
   safeScrollIntoView(el);
   await sleep(TIMINGS.inputScrollIntoView);
-  el.focus();
+  el.focus({ preventScroll: true });
  // Substitute %secret_name% placeholders at execution time.
  // The LLM only sees the placeholder — the real value never reaches the LLM.
  // `action.text ?? ""` guards the (schema-required) text so a future relaxation
@@ -58,11 +70,13 @@ export async function handleInput(
       if (nativeSetter) nativeSetter.call(el, el.value + text);
       else el.value += text;
     }
+    el.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "insertText", data: text }));
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
   } else if (el.isContentEditable) {
     if (action.clear !== false) el.textContent = text;
     else el.textContent = (el.textContent || "") + text;
+    el.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "insertText", data: text }));
     el.dispatchEvent(new InputEvent("input", { bubbles: true }));
  // Mirror the native-input path above and also dispatch `change` so
  // contenteditable-aware frameworks (React onChange-wrapped
@@ -95,10 +109,10 @@ export async function handleInput(
  // text" loops.
   if (text !== action.text) {
     return {
-      action,
+      action: { ...action, clear: action.clear !== false },
       success: true,
       message: `Typed [REDACTED — secret substituted] into [${action.index}]`,
     };
   }
-  return { action, success: true, message: `Typed "${text.slice(0, LIMITS.inputEchoChars)}" into [${action.index}]` };
+  return { action: { ...action, clear: action.clear !== false }, success: true, message: `Typed "${text.slice(0, LIMITS.inputEchoChars)}" into [${action.index}]` };
 }

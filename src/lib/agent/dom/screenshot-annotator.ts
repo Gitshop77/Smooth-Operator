@@ -10,6 +10,7 @@
  *
  * New code should import from
  * `@/lib/agent/dom/annotation/screenshot-annotator` or from the top-level
+ * `@/lib/agent/dom` barrel export.
 
  */
 export * from "./annotation/screenshot-annotator";

@@ -69,6 +69,12 @@ interface EventGroup {
   topSeverity: string;
 }
 
+/** Format a timestamp as ISO, or "n/a" when missing/invalid. */
+const safeIso = (ts?: string | number | Date) => {
+  const d = new Date(ts ?? "");
+  return isNaN(d.getTime()) ? "n/a" : d.toISOString();
+};
+
 /** Build a readable trace/context block from the event's available fields. */
 function buildTrace(e: SampleSecurityEvent): string {
   const lines = [
@@ -80,7 +86,7 @@ function buildTrace(e: SampleSecurityEvent): string {
     `domain:      ${e.domain ?? "n/a"}`,
     `sourceUrl:   ${e.sourceUrl ?? "n/a"}`,
     `tabId:       ${e.tabId ?? "n/a"}`,
-    `createdAt:   ${String(e.timestamp)}`,
+    `createdAt:   ${safeIso(e.timestamp)}`,
   ];
   const detail = e.details ?? e.description;
   return [...lines, "", "details:", detail || "(no details provided)"].join("\n");
@@ -105,7 +111,7 @@ export function ErrorsView() {
 
   const filtered = React.useMemo(() => {
     const q = search.trim().toLowerCase();
-    return events
+    const withTs = events
       .filter((e) => {
         if (severityFilter !== "all" && e.severity !== severityFilter) return false;
         if (typeFilter !== "all" && e.type !== typeFilter) return false;
@@ -121,24 +127,30 @@ export function ErrorsView() {
         }
         return true;
       })
-      .slice()
-      .sort(
-        (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
-      );
+      .map((e) => ({ e, ts: new Date(e.timestamp).getTime() }));
+    withTs.sort((a, b) => b.ts - a.ts);
+    return withTs.map((x) => x.e);
   }, [events, severityFilter, typeFilter, search]);
 
  // Aggregate by type with frequency + worst severity in each group.
-  const groups = React.useMemo<EventGroup[]>(() => {
+ // Fold the critical/blocked tallies into the same single pass so we don't
+ // re-scan the filtered set just to count them.
+  const { groups, criticalCount, blockedCount } = React.useMemo(() => {
     const map = new Map<string, EventGroup>();
+    let critical = 0;
+    let blocked = 0;
     for (const e of filtered) {
       const g = map.get(e.type) ?? { type: e.type, count: 0, topSeverity: "info" };
       g.count += 1;
+      if (e.severity === "critical") critical += 1;
+      if (e.blocked) blocked += 1;
       if ((SEVERITY_RANK[e.severity] ?? 0) > (SEVERITY_RANK[g.topSeverity] ?? 0)) {
         g.topSeverity = e.severity;
       }
       map.set(e.type, g);
     }
-    return Array.from(map.values()).sort((a, b) => b.count - a.count);
+    const groups = Array.from(map.values()).sort((a, b) => b.count - a.count);
+    return { groups, criticalCount: critical, blockedCount: blocked };
   }, [filtered]);
 
  // "challenge-detected" detection (will be empty until the extension wires it).
@@ -149,8 +161,6 @@ export function ErrorsView() {
   const challengeWired = challengeEvents.length > 0;
 
  // Summary stats (over the filtered set).
-  const criticalCount = filtered.filter((e) => e.severity === "critical").length;
-  const blockedCount = filtered.filter((e) => e.blocked).length;
   const distinctTypes = groups.length;
 
   const toggleExpand = React.useCallback((id: string) => {
@@ -351,6 +361,7 @@ export function ErrorsView() {
                           size="sm"
                           variant="ghost"
                           aria-expanded={isOpen}
+                          aria-controls={`trace-${e.id}`}
                           aria-label={isOpen ? "Hide stack trace" : "Show stack trace"}
                           onClick={() => toggleExpand(e.id)}
                         >
@@ -367,7 +378,7 @@ export function ErrorsView() {
                       </td>
                     </tr>
                     {isOpen ? (
-                      <tr className="bg-muted/30">
+                      <tr className="bg-muted/30" id={`trace-${e.id}`}>
                         <td colSpan={6} className="px-4 py-3">
                           <pre className="cowork-mono text-xs text-muted-foreground overflow-auto cowork-scroll rounded-lg bg-muted/40 p-3 whitespace-pre">
                             {buildTrace(e)}

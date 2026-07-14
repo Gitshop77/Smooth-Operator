@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import type { NextRequest } from 'next/server';
 
 const { getVersion, getBaseUrl, buildAgentBootstrapContract } = vi.hoisted(() => ({
   getVersion: vi.fn(),
@@ -24,11 +25,28 @@ describe('GET /api/cowork/agent/bootstrap', () => {
 
     const res = await GET({
       headers: new Headers(),
-    } as unknown as import('next/server').NextRequest);
+    } as unknown as NextRequest);
 
     expect(res.status).toBe(200);
     expect(buildAgentBootstrapContract).toHaveBeenCalledWith('http://localhost:3000', '0.3.1');
     const body = await res.json();
     expect(body.identity.version).toBe('0.3.1');
+    expect(res.headers.get('content-type')).toContain('application/json');
+    expect(res.headers.get('cache-control')).toBe('public, max-age=300');
+  });
+
+  it('returns a fail-closed 500 with a correlationId on internal error', async () => {
+    buildAgentBootstrapContract.mockImplementation(() => {
+      throw new Error('boom');
+    });
+
+    const res = await GET({
+      headers: new Headers(),
+    } as unknown as NextRequest);
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toBe('internal_error');
+    expect(typeof body.correlationId).toBe('string');
   });
 });

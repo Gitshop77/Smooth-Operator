@@ -22,7 +22,40 @@ export { COCKPIT_VERSION };
  */
 function getCockpitBaseUrl(): string {
   const configured = process.env.COWORK_BASE_URL;
-  if (configured) return configured;
+  if (configured) {
+ // Defense-in-depth: the value is concatenated into agent-facing URLs. Reject
+ // a non-http(s) scheme (e.g. `javascript:`) the same way the rest of the
+ // codebase gates outbound URLs, failing closed rather than echoing a
+ // dangerous origin through to consuming LLM agents.
+    try {
+      const parsed = new URL(configured);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        console.error(
+          "[agent-bootstrap] COWORK_BASE_URL has a non-http(s) scheme; " +
+            "refusing to advertise it through the agent bootstrap contract.",
+        );
+        return "";
+      }
+ // Fail-closed on embedded credentials: a base URL like
+ // `https://user:secret@example.com` would otherwise be concatenated into
+ // agent-facing URLs and leak the secret through logs/LLM agents. This parallels
+ // the existing non-http(s) rejection.
+      if (parsed.username || parsed.password) {
+        console.error(
+          "[agent-bootstrap] COWORK_BASE_URL contains credentials; refusing " +
+            "to advertise it through the agent bootstrap contract.",
+        );
+        return "";
+      }
+    } catch {
+      console.error(
+        "[agent-bootstrap] COWORK_BASE_URL is not a valid URL; " +
+          "refusing to advertise it through the agent bootstrap contract.",
+      );
+      return "";
+    }
+    return configured;
+  }
  // Fail-closed in production: never advertise a localhost origin through the
  // agent discovery contract. A production deployment without COWORK_BASE_URL
  // should surface this loudly rather than silently pointing agents at
@@ -165,7 +198,8 @@ export function withBaseUrl<T extends { endpoint: string }>(
   baseUrl: string,
   steps: readonly T[],
 ): Array<T & { url: string }> {
-  return steps.map(step => ({ ...step, url: `${baseUrl}${step.endpoint}` }));
+  const normalized = baseUrl.replace(/\/+$/, "");
+  return steps.map(step => ({ ...step, url: `${normalized}${step.endpoint}` }));
 }
 
 export function buildAgentBootstrapContract(baseUrl: string, version: string) {

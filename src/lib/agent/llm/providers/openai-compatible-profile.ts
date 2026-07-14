@@ -89,14 +89,23 @@ export class UnsafeBaseUrlError extends Error {
 // rather than string-matching the message.
 const LOCAL_PROVIDER_IDS = new Set(["ollama", "litellm"]);
 
+/** Pre-computed set of curated local-provider origins (parsed once). */
+const CURATED_LOCAL_ORIGINS = new Set(
+  LOCAL_PROVIDER_BASE_URLS.map((u) => new URL(u).origin),
+);
+
 /** True iff `url`'s origin exactly matches a curated local-provider endpoint. */
 function isCuratedLocalOrigin(url: string): boolean {
   try {
-    const origin = new URL(url).origin;
-    return LOCAL_PROVIDER_BASE_URLS.some((curated) => new URL(curated).origin === origin);
+    return CURATED_LOCAL_ORIGINS.has(new URL(url).origin);
   } catch {
     return false;
   }
+}
+
+/** Strip embedded `user:pass@` credentials from a URL before it reaches logs/UI. */
+function redactUrl(u: string): string {
+  return u.replace(/\/\/[^@/]*@/, "//");
 }
 
 export const assertSafeUserBaseURL = (
@@ -106,12 +115,12 @@ export const assertSafeUserBaseURL = (
   if (!baseURL) return; // no user-supplied override → use the curated profile
   if (provider && LOCAL_PROVIDER_IDS.has(provider) && isCuratedLocalOrigin(baseURL)) {
     if (!isAllowedLlmBaseUrl(baseURL)) {
-      throw new UnsafeBaseUrlError(`Unsafe LLM baseUrl rejected (SSRF guard): ${baseURL}`);
+      throw new UnsafeBaseUrlError(`Unsafe LLM baseUrl rejected (SSRF guard): ${redactUrl(baseURL)}`);
     }
     return;
   }
   const res = validateLlmBaseUrl(baseURL);
   if (!res.ok) {
-    throw new UnsafeBaseUrlError(`Unsafe LLM baseUrl rejected (SSRF guard): ${baseURL} (${res.reason})`);
+    throw new UnsafeBaseUrlError(`Unsafe LLM baseUrl rejected (SSRF guard): ${redactUrl(baseURL)} (${res.reason})`);
   }
 };

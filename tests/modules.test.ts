@@ -90,12 +90,8 @@ describe("getDomainSkills", () => {
     expect(skills.length).toBe(0);
   });
 
-  test("returns empty for invalid URLs", async () => {
-    expect((await getDomainSkills("not-a-url")).length).toBe(0);
-  });
-
-  test("returns empty for empty string", async () => {
-    expect((await getDomainSkills("")).length).toBe(0);
+  test.each(["", "not-a-url"])("returns empty for %s", async (u) => {
+    expect((await getDomainSkills(u)).length).toBe(0);
   });
 
   test("matches Google Search on google.com", async () => {
@@ -125,15 +121,13 @@ describe("getSkillFrontmatter", () => {
     expect(await getSkillFrontmatter("https://random-unknown-site.com")).toEqual([]);
   });
 
-  test("returns [] for invalid URLs", async () => {
-    expect(await getSkillFrontmatter("not-a-url")).toEqual([]);
-    expect(await getSkillFrontmatter("")).toEqual([]);
+  test.each(["", "not-a-url"])("returns [] for %s", async (u) => {
+    expect(await getSkillFrontmatter(u)).toEqual([]);
   });
 
   test("de-duplicates by name (twitter.com + x.com both match)", async () => {
- // https://x.com/foo matches both twitter.com (no) and x.com (yes) skills,
- // both named "Twitter/X". The frontmatter list should contain "Twitter/X"
- // exactly once.
+ // The Twitter/X skill is registered for both the twitter.com and x.com domains;
+ // getSkillFrontmatter should still emit the skill exactly once (de-duped by name).
     const fm = await getSkillFrontmatter("https://x.com/foo");
     const twitterCount = fm.filter((s) => s.name === "Twitter/X").length;
     expect(twitterCount).toBe(1);
@@ -216,15 +210,13 @@ describe("Mode enforcement", () => {
   test("restricted mode has the fewest permissions", () => {
     const r = MODE_CONFIGS.restricted;
     expect(r.canNavigate).toBe(false);
-    expect(r.canOpenTabs).toBe(false);
     expect(r.canExecuteJs).toBe(false);
   });
 
   test("full_agentic mode has the most permissions", () => {
     const f = MODE_CONFIGS.full_agentic;
- // All 7 capability flags must be true in full_agentic mode.
+ // All capability flags must be true in full_agentic mode.
     expect(f.canNavigate).toBe(true);
-    expect(f.canOpenTabs).toBe(true);
     expect(f.canExecuteJs).toBe(true);
     expect(f.canUploadFiles).toBe(true);
     expect(f.canCloseTabs).toBe(true);

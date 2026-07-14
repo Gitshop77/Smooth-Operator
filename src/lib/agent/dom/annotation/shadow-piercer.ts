@@ -29,7 +29,7 @@
  * `shadow-piercer.js` entry point in the MAIN world (before the content
  * script). The MAIN-world instance patches the REAL page's
  * `Element.prototype.attachShadow` and exposes a backdoor on `window` —
- * `window.__openCoworkPiercer__` — that the content script (isolated world)
+ * `window.__oc_bd__` — that the content script (isolated world)
  * can read via the shared DOM element wrappers. When the module is loaded
  * directly in the content script's isolated world (e.g. during tests or
  * in-page demo mode), the patch is installed locally and the backdoor is
@@ -39,7 +39,7 @@
  * ## Idempotency
  *
  * {@link installShadowPiercer} is idempotent — calling it twice is a no-op.
- * The patched `attachShadow` carries a `__openCoworkPatched` sentinel so a
+ * The patched `attachShadow` carries a `__oc_p__` sentinel so a
  * second install call detects the existing patch, rebinds the backdoor to
  * the live state, and returns immediately. This matters because the content
  * script may be re-injected on page navigation while the MAIN-world piercer
@@ -54,7 +54,7 @@
  * - `Object.defineProperty` is used with `configurable: true, writable: true`
  * so a page that detects the patch can still override it (the piercer is
  * best-effort, not a security boundary).
- * - The cross-world backdoor `window.__openCoworkPiercer__` is written to the
+ * - The cross-world backdoor `window.__oc_bd__` is written to the
  * SHARED `window` (see "Worlds" above). Because it lives on the page's
  * `window`, the page's own MAIN-world scripts can also read it — including
  * any closed shadow roots the page author attached (the page only learns its
@@ -79,7 +79,7 @@ export interface ShadowPiercerOptions {
   debug?: boolean;
 }
 
-/** Backdoor exposed on `window.__openCoworkPiercer__` for cross-world access. */
+/** Backdoor exposed on `window.__oc_bd__` for cross-world access. */
 export interface ShadowPiercerBackdoor {
   /** Get the closed (or open) shadow root captured for `host`, if any. */
   getShadowRoot(host: Element): ShadowRoot | null;
@@ -105,12 +105,24 @@ interface PiercerState {
 
 let state: PiercerState | null = null;
 
+// Obscure internal property names — avoid the product name as a detectable
+// fingerprint that page bot-detection can scan for on `Element.prototype` or
+// `window`.
+const PIERCER_PATCHED_KEY = "__oc_p__";
+const PIERCER_STATE_KEY = "__oc_s__";
+const PIERCER_BACKDOOR_KEY = "__oc_bd__";
+const PIERCER_INJECTED_KEY = "__oc_in__";
+// Neutral, opaque console prefix for debug-only logs — never embeds the
+// product name, so the page console can't be fingerprinted by that string.
+const PIERCER_LOG_TAG = "[oc-piercer]";
+
 /**
- * Hard cap on traversal depth for {@link pierceShadowRoots}. Real pages nest
- * far shallower than this; the cap only exists to bound a pathological /
- * adversarial deep tree so the walker can't run unbounded .
+ * Hard cap on traversal depth for {@link pierceShadowRoots}. No legitimate
+ * page approaches this depth; the cap only guards against adversarial /
+ * cyclic deep nesting so the walker can't run unbounded. (pierceShadowRoots
+ * is test-only — see its docstring — but the bound is kept tight regardless.)
  */
-const MAX_PIERCE_DEPTH = 10_000;
+const MAX_PIERCE_DEPTH = 512;
 
 // `Element` may not exist in non-DOM environments (Node.js without jsdom).
 // Guard every reference so the module loads cleanly in any context.
@@ -126,7 +138,7 @@ const ELEMENT_CTOR: typeof Element | undefined =
  * After install, {@link getShadowRoot} returns the captured root for any
  * host, and {@link pierceShadowRoots} walks both open and closed shadow
  * trees. Also exposes the {@link ShadowPiercerBackdoor} on
- * `window.__openCoworkPiercer__` so the content script can read roots
+ * `window.__oc_bd__` so the content script can read roots
  * captured by a MAIN-world injection of this same module.
  */
 export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
@@ -135,9 +147,9 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
  // Idempotency: if the prototype already carries our sentinel, just rebind
  // the backdoor to the live state (handles re-injection on navigation).
   const existing = ELEMENT_CTOR.prototype.attachShadow as
-    Element["attachShadow"] & { __openCoworkPatched?: boolean; __openCoworkState?: PiercerState };
-  if (existing?.__openCoworkPatched && existing.__openCoworkState) {
-    state = existing.__openCoworkState;
+    Element["attachShadow"] & { [PIERCER_PATCHED_KEY]?: boolean; [PIERCER_STATE_KEY]?: PiercerState };
+  if (existing?.[PIERCER_PATCHED_KEY] && existing[PIERCER_STATE_KEY]) {
+    state = existing[PIERCER_STATE_KEY];
     state.debug = !!opts.debug;
     bindBackdoor(state);
     return;
@@ -164,7 +176,7 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
       if (newState.debug) {
  // Best-effort logging — never let a console call throw the patch.
         try {
-          console.info("[open-cowork-piercer] attachShadow", {
+          console.info(`${PIERCER_LOG_TAG} attachShadow`, {
             tag: this.tagName?.toLowerCase() ?? "",
             mode,
             url: typeof location !== "undefined" ? location.href : "",
@@ -177,10 +189,25 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
       /* recording must never throw into the page */
     }
     return root;
-  } as Element["attachShadow"] & { __openCoworkPatched?: boolean; __openCoworkState?: PiercerState };
+  } as Element["attachShadow"] & { [PIERCER_PATCHED_KEY]?: boolean; [PIERCER_STATE_KEY]?: PiercerState };
 
-  patched.__openCoworkPatched = true;
-  patched.__openCoworkState = newState;
+  patched[PIERCER_PATCHED_KEY] = true;
+  patched[PIERCER_STATE_KEY] = newState;
+
+ // Hide the patch from Function.prototype.toString-based tamper detection:
+ // expose the native attachShadow's toString so the replacement reads as a
+ // built-in rather than a hook.
+  patched.toString = original.toString.bind(original);
+ // Mirror the native method's own descriptors: a patched plain function has
+ // `.name === ""` and a real `.prototype` object, whereas the built-in
+ // `attachShadow` has `.name === "attachShadow"` and `.prototype === undefined`.
+ // Detectors that inspect these would otherwise flag the hook. Both are no-ops
+ // for callers (attachShadow is never used as a constructor).
+ // `.name` is configurable so it can be redefined; `.prototype` is NOT
+ // configurable on a function (a `defineProperty` would throw), but it is
+ // writable — assign it directly to mirror the native `undefined` value.
+  Object.defineProperty(patched, "name", { value: "attachShadow", configurable: true });
+  patched.prototype = undefined;
 
  // Define with configurable + writable so the patch can be overridden by a
  // page that detects it (best-effort, not a security boundary).
@@ -210,7 +237,7 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
  // surface it in debug builds so the feature's failure is observable.
       if (newState.debug) {
         try {
-          console.warn("[open-cowork-piercer] tagExisting tree walk failed", err);
+          console.warn(`${PIERCER_LOG_TAG} tagExisting tree walk failed`, err);
         } catch {
           /* ignore — console must never throw */
         }
@@ -223,7 +250,7 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
 
   if (newState.debug) {
     try {
-      console.info("[open-cowork-piercer] installed", {
+      console.info(`${PIERCER_LOG_TAG} installed`, {
         url: typeof location !== "undefined" ? location.href : "",
         readyState: typeof document !== "undefined" ? document.readyState : "",
       });
@@ -234,7 +261,54 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
 }
 
 /** Backdoor tagged with the state it was directly built from (idempotency guard). */
-type TaggedBackdoor = ShadowPiercerBackdoor & { __openCoworkState?: PiercerState };
+type TaggedBackdoor = ShadowPiercerBackdoor & { [PIERCER_STATE_KEY]?: PiercerState };
+
+/** Read the cross-world backdoor, if present, as a {@link TaggedBackdoor}. */
+function readTaggedBackdoor(): TaggedBackdoor | undefined {
+  if (typeof window === "undefined") return undefined;
+  return (window as unknown as Record<string, TaggedBackdoor | undefined>)[PIERCER_BACKDOOR_KEY];
+}
+
+/** Read the cross-world backdoor, if present, as a {@link ShadowPiercerBackdoor}. */
+function readBackdoor(): ShadowPiercerBackdoor | undefined {
+  return readTaggedBackdoor() as ShadowPiercerBackdoor | undefined;
+}
+
+/**
+ * Module-scope cache of the resolved cross-world backdoor. `getShadowRoot`
+ * reads it on the hot path (per element) instead of re-reading the `window`
+ * property on every miss, then falls back to {@link readBackdoor} if unset.
+ */
+let cachedBackdoor: TaggedBackdoor | undefined;
+
+/** Publish the cross-world backdoor on `window` (best-effort). */
+function writeBackdoor(b: TaggedBackdoor): void {
+  try {
+    (window as unknown as Record<string, unknown>)[PIERCER_BACKDOOR_KEY] = b;
+  } catch {
+    /* window may be non-writable in some sandboxes — ignore */
+  }
+}
+
+/** Mark that the backdoor has been injected (best-effort). */
+function markInjected(): void {
+  try {
+    (window as unknown as Record<string, unknown>)[PIERCER_INJECTED_KEY] = true;
+  } catch {
+    /* window may be non-writable in some sandboxes — ignore */
+  }
+}
+
+/** Clear the cross-world backdoor keys (test reset). */
+function clearBackdoorKeys(): void {
+  cachedBackdoor = undefined;
+  try {
+    delete (window as unknown as Record<string, unknown>)[PIERCER_BACKDOOR_KEY];
+    delete (window as unknown as Record<string, unknown>)[PIERCER_INJECTED_KEY];
+  } catch {
+    /* ignore */
+  }
+}
 
 /** Expose the backdoor on `window` so other worlds/code can read closed roots. */
 function bindBackdoor(s: PiercerState): void {
@@ -245,13 +319,13 @@ function bindBackdoor(s: PiercerState): void {
  // re-binds, an unconditional overwrite would discard those captured roots
  // and break piercing in production. The combined accessor reads BOTH the
  // local state and any backdoor that was already on `window`.
-  const existing = (window as unknown as { __openCoworkPiercer__?: TaggedBackdoor }).__openCoworkPiercer__;
+  const existing = readTaggedBackdoor();
 
  // Idempotency guard : if the live backdoor was already built from
  // THIS SAME state, re-binding it would wrap itself — double-counting
  // `stats()` and growing an unbounded backdoor wrapper chain on every
  // re-install. The existing backdoor already reflects `s`, so bail out.
-  if (existing && existing.__openCoworkState === s) return;
+  if (existing && existing[PIERCER_STATE_KEY] === s) return;
 
   const backdoor: TaggedBackdoor = {
     getShadowRoot: (host: Element): ShadowRoot | null =>
@@ -267,13 +341,10 @@ function bindBackdoor(s: PiercerState): void {
       };
     },
   };
-  backdoor.__openCoworkState = s;
-  try {
-    (window as unknown as { __openCoworkPiercer__?: TaggedBackdoor }).__openCoworkPiercer__ = backdoor;
-    (window as unknown as { __openCoworkPiercerInjected?: boolean }).__openCoworkPiercerInjected = true;
-  } catch {
-    /* window may be non-writable in some sandboxes — ignore */
-  }
+  backdoor[PIERCER_STATE_KEY] = s;
+  writeBackdoor(backdoor);
+  cachedBackdoor = backdoor;
+  markInjected();
 }
 
 // ─── Public helpers ─────────────────────────────────────────────────────────
@@ -286,7 +357,7 @@ function bindBackdoor(s: PiercerState): void {
  * Resolution order:
  * 1. `el.shadowRoot` — the open root (always accessible from the host).
  * 2. The module-local piercer state (if installed in this world).
- * 3. The cross-world backdoor `window.__openCoworkPiercer__` (set by a
+ * 3. The cross-world backdoor `window.__oc_bd__` (set by a
  * MAIN-world injection of this same module).
  *
  * Returns `null` if no shadow root exists (or the piercer isn't installed
@@ -310,7 +381,7 @@ export function getShadowRoot(el: Element): ShadowRoot | null {
  // `nodeType`), otherwise an attacker-supplied fake node would be walked by the
  // extractor. Defense-in-depth against a fabricated-DOM injection.
   if (typeof window !== "undefined") {
-    const backdoor = (window as unknown as { __openCoworkPiercer__?: ShadowPiercerBackdoor }).__openCoworkPiercer__;
+    const backdoor = cachedBackdoor ?? readBackdoor();
     if (backdoor) {
       try {
         const root = backdoor.getShadowRoot(el);
@@ -406,8 +477,8 @@ export function pierceShadowRoots(root: Element | Document | ShadowRoot): Elemen
  // during the walk doesn't corrupt iteration.
     const childNodes = (node as { childNodes?: NodeListOf<ChildNode> }).childNodes;
     if (childNodes) {
-      for (const child of Array.from(childNodes)) {
-        children.push(child);
+      for (let i = 0; i < childNodes.length; i++) {
+        children.push(childNodes[i]);
       }
     }
 
@@ -435,8 +506,7 @@ export function _resetShadowPiercerForTests(): void {
   state = null;
   if (typeof window !== "undefined") {
     try {
-      delete (window as unknown as { __openCoworkPiercer__?: unknown }).__openCoworkPiercer__;
-      delete (window as unknown as { __openCoworkPiercerInjected?: unknown }).__openCoworkPiercerInjected;
+      clearBackdoorKeys();
     } catch {
       /* ignore */
     }

@@ -1,13 +1,11 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
-import { Prisma } from '@prisma/client';
-import { json, withRouteError, bodyJson, badRequest, parseLimit } from '@/lib/cowork/api/http';
+import { json, withRouteError, bodyJson, badRequest, parseLimit, CURSOR_ID_RE, isPrismaRecordNotFound } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
-// Cursor id shape used for `after` pagination. A valid id is a short, URL-safe
-// token (cuid/uuid); anything else is rejected at the boundary with 400 rather
-// than reaching Prisma. (Table ids are cuid strings, well within this bound.)
-const CURSOR_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+// Valid CSS hex color lengths only: 3, 4, 6, or 8 hex digits. (5/7-digit
+// strings are not valid CSS colors and would be silently dropped by the browser.)
+const COLOR_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
 
 export async function GET(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
@@ -35,12 +33,15 @@ export async function GET(req: NextRequest): Promise<Response> {
     } catch (e) {
  // A well-formed but stale/unknown cursor id makes Prisma throw P2025
  // (RecordNotFound); return a precise 400 instead of a generic 500.
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+      if (isPrismaRecordNotFound(e)) {
         return badRequest('invalid after cursor');
       }
       throw e;
     }
-    const total = await db.pinboard.count();
+ // `?total=0` skips the extra full-table count() (useful for paginated
+ // `after` loads); otherwise the grand total is returned as before.
+    const wantTotal = req.nextUrl.searchParams.get('total') !== '0';
+    const total = wantTotal ? await db.pinboard.count() : pinboards.length;
  // Include the `items` relation count so the dashboard can show
  // `itemCount` without a second round-trip.
     const projected = pinboards.map((pb) => ({
@@ -55,7 +56,6 @@ export async function POST(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
     const body = await bodyJson(req);
  // F17-val: validate/normalize color and name.
-    const COLOR_RE = /^#[0-9a-fA-F]{3,8}$/;
     let name: string;
     if (body.name == null || body.name === '') {
       name = 'Untitled Pinboard';

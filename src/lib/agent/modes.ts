@@ -19,8 +19,6 @@ export type AgentMode = "restricted" | "standard" | "full_agentic";
 
 /** Per-mode permission + step-budget configuration. */
 export interface ModeConfig {
-  /** Can open new tabs. */
-  canOpenTabs: boolean;
   /** Can close tabs. */
   canCloseTabs: boolean;
   /** Can navigate to a new URL (different origin). */
@@ -55,7 +53,6 @@ export interface ModeConfig {
  */
 export const MODE_CONFIGS = {
   restricted: {
-    canOpenTabs: false,
     canCloseTabs: false,
     canNavigate: false,
     canSwitchTabs: false,
@@ -69,7 +66,6 @@ export const MODE_CONFIGS = {
     confirmRequired: [],
   },
   standard: {
-    canOpenTabs: true,
     canCloseTabs: true,
     canNavigate: true,
     canSwitchTabs: true,
@@ -89,7 +85,6 @@ export const MODE_CONFIGS = {
     confirmRequired: ["evaluate", "upload_file", "save_as_pdf"],
   },
   full_agentic: {
-    canOpenTabs: true,
     canCloseTabs: true,
     canNavigate: true,
     canSwitchTabs: true,
@@ -154,8 +149,10 @@ const UNGATED_ACTION_TYPES = [
  * Check if an action type is allowed in the given mode.
  *
  * - `navigate` requires `canNavigate` (it mutates the current tab, so opening
- * a new tab must not implicitly grant current-tab navigation). Tab-opening
- * is gated separately by `canOpenTabs` (a dedicated tab-open action owns it).
+ * a new tab must not implicitly grant current-tab navigation). New-tab opening
+ * is also gated by `canNavigate` — the `navigate` action with `new_tab: true`
+ * is the only path that opens a tab, so no separate tab-open capability is
+ * needed (or possible) in any mode.
  * - `save_as_pdf` and `screenshot` are gated by `canDownloadFiles` (was:
  * `canDownloadFiles && mode !== "restricted"` — the mode special-case was
  * redundant since restricted mode already has `canDownloadFiles: false`).
@@ -168,34 +165,37 @@ const UNGATED_ACTION_TYPES = [
  */
 export function checkActionAllowed(actionType: string, mode: AgentMode): ActionPolicyResult {
   const config = MODE_CONFIGS[mode];
+  const deny = (what: string): ActionPolicyResult => ({
+    allowed: false,
+    reason: `${what} is not allowed in ${mode} mode`,
+  });
   switch (actionType) {
     case "navigate":
- // Gate purely on `canNavigate`: `navigate` mutates the *current* tab, so
- // it must not be permitted merely because tab-opening is. A mode that
- // sets `canOpenTabs:true` but `canNavigate:false` asymmetrically must not
- // silently grant current-tab navigation.
+ // Gate purely on `canNavigate`: `navigate` mutates the *current* tab and is
+ // the only action that can open a new tab (via `new_tab: true`), so both
+ // current-tab navigation and tab-opening are controlled by this single flag.
       if (!config.canNavigate) {
-        return { allowed: false, reason: `Navigation is not allowed in ${mode} mode` };
+        return deny("Navigation");
       }
       return { allowed: true };
     case "switch_tab":
       if (!config.canSwitchTabs) {
-        return { allowed: false, reason: `Tab switching is not allowed in ${mode} mode` };
+        return deny("Tab switching");
       }
       return { allowed: true };
     case "close_tab":
       if (!config.canCloseTabs) {
-        return { allowed: false, reason: `Closing tabs is not allowed in ${mode} mode` };
+        return deny("Closing tabs");
       }
       return { allowed: true };
     case "evaluate":
       if (!config.canExecuteJs) {
-        return { allowed: false, reason: `JavaScript execution is not allowed in ${mode} mode` };
+        return deny("JavaScript execution");
       }
       return { allowed: true };
     case "upload_file":
       if (!config.canUploadFiles) {
-        return { allowed: false, reason: `File upload is not allowed in ${mode} mode` };
+        return deny("File upload");
       }
       return { allowed: true };
     case "save_as_pdf":
@@ -205,7 +205,7 @@ export function checkActionAllowed(actionType: string, mode: AgentMode): ActionP
  // so the redundant mode check would let a misconfigured mode silently
  // bypass the download block.
       if (!config.canDownloadFiles) {
-        return { allowed: false, reason: `Downloads are not allowed in ${mode} mode` };
+        return deny("Downloads");
       }
       return { allowed: true };
     default:

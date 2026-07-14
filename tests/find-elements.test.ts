@@ -7,11 +7,24 @@
  * while non-sensitive attributes are returned verbatim.
  */
 
-import { describe, test, expect, beforeEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
 import { handleFindElements } from "../src/lib/agent/tools/handlers/find-elements";
 import type { ActionContext } from "../src/lib/agent/tools/handlers/types";
+import { setSecret, deleteSecret } from "../src/lib/agent/secrets";
+import { installLocalStorageStub, restoreLocalStorageStub } from "./helpers";
+
+beforeAll(installLocalStorageStub);
+afterAll(restoreLocalStorageStub);
 
 const DUMMY_CTX = {} as ActionContext;
+
+/** Parse the `Elements:\n0: {...}\n1: {...}` payload into structured rows. */
+function parseElementRows(content: string | undefined): Record<string, string>[] {
+  return (content ?? "")
+    .split("\n")
+    .filter((l) => l.includes("{"))
+    .map((l) => JSON.parse(l.replace(/^\d+:\s*/, "")) as Record<string, string>);
+}
 
 describe("find_elements sensitive-attribute redaction", () => {
   beforeEach(() => {
@@ -24,6 +37,44 @@ describe("find_elements sensitive-attribute redaction", () => {
     `;
   });
 
+  test("redacts a stored secret appearing in a non-value attribute", async () => {
+    await setSecret("apitoken", "sk_live_test_123");
+    try {
+      document.body.innerHTML = `<div id="tok" data-token="sk_live_test_123">hi</div>`;
+      const res = await handleFindElements(DUMMY_CTX, {
+        type: "find_elements",
+        selector: "#tok",
+        attributes: ["data-token"],
+        max_results: 50,
+      });
+      expect(res.success).toBe(true);
+      const rows = parseElementRows(res.extractedContent);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]["data-token"]).toBe("[REDACTED:apitoken]");
+      expect(res.extractedContent).not.toContain("sk_live_test_123");
+    } finally {
+      await deleteSecret("apitoken");
+    }
+  });
+
+  test("redacts a stored secret appearing directly in a value attribute", async () => {
+    await setSecret("pw", "hunter2");
+    try {
+      document.body.innerHTML = `<input id="s" type="text" value="hunter2">`;
+      const res = await handleFindElements(DUMMY_CTX, {
+        type: "find_elements",
+        selector: "#s",
+        attributes: ["value"],
+        max_results: 50,
+      });
+      expect(res.success).toBe(true);
+      expect(res.extractedContent).toContain("[REDACTED:pw]");
+      expect(res.extractedContent).not.toContain("hunter2");
+    } finally {
+      await deleteSecret("pw");
+    }
+  });
+
   test("redacts password / OTP / credit-card value but keeps non-sensitive attrs", async () => {
     const res = await handleFindElements(DUMMY_CTX, {
       type: "find_elements",
@@ -33,6 +84,7 @@ describe("find_elements sensitive-attribute redaction", () => {
     });
     expect(res.success).toBe(true);
     const out = res.extractedContent ?? "";
+    const rows = parseElementRows(out);
 
  // Sensitive `value`s are redacted — the raw secrets must NOT appear.
     expect(out).toContain("[value redacted]");
@@ -40,9 +92,10 @@ describe("find_elements sensitive-attribute redaction", () => {
     expect(out).not.toContain("000999");
     expect(out).not.toContain("4111111111111111");
 
- // Non-sensitive value + attribute are returned verbatim.
-    expect(out).toContain("alice");
-    expect(out).toContain("meta-info");
+ // Structural: password input value redacted; non-sensitive value + attr kept.
+    expect(rows[0].value).toBe("[value redacted]");
+    expect(rows[3].value).toBe("alice");
+    expect(rows[4]["data-x"]).toBe("meta-info");
   });
 
   test("returns the real value for a non-sensitive input", async () => {

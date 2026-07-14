@@ -43,15 +43,6 @@ const MAX_RUNS = 50;
 const ID_SUFFIX_LENGTH = 6;
 
 /**
- * Persist a run record. Prepends it to the stored list and trims to
- * {@link MAX_RUNS} entries.
- *
- * Wraps localStorage.setItem in try/catch — a QuotaExceededError (older
- * browsers / private mode) is retried after trimming the oldest entry, and
- * any remaining failure is logged + swallowed so a persistence error can't
- * crash the run.
- */
-/**
  * Validate a single loaded history entry. A corrupt/partial record (written by
  * another extension under the same key, or truncated by a crashed write) must
  * not be returned to callers that assume `steps` is an array — they would throw
@@ -66,6 +57,27 @@ function isValidRunRecord(v: unknown): v is RunRecord {
     typeof r.startedAt === "number" &&
     Array.isArray(r.steps)
   );
+}
+
+/** Persist the run list to localStorage as a single JSON string. */
+function writeLocalStorage(runs: RunRecord[]): void {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(runs));
+}
+
+/**
+ * Coerce optional numeric history fields to `0` so a partial/corrupt record
+ * that passed {@link isValidRunRecord} can't surface `undefined`/`NaN` in the
+ * History UI. Does NOT reject records — history is preserved.
+ */
+function normalizeRunRecord(r: RunRecord): RunRecord {
+  return {
+    ...r,
+    totalTokensIn: r.totalTokensIn ?? 0,
+    totalTokensOut: r.totalTokensOut ?? 0,
+    totalCostUsd: r.totalCostUsd ?? 0,
+    stepCount: r.stepCount ?? 0,
+    endedAt: r.endedAt ?? 0,
+  };
 }
 
 /**
@@ -133,13 +145,13 @@ export async function saveRun(run: RunRecord): Promise<void> {
     }
  // localStorage path — may throw QuotaExceededError.
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(runs));
+      writeLocalStorage(runs);
     } catch (e) {
       if (e instanceof DOMException && e.name === "QuotaExceededError") {
  // Trim oldest (last) entry and retry once. If it still fails, log + give up.
         runs.pop();
         try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(runs));
+          writeLocalStorage(runs);
         } catch (e2) {
           console.warn("[run-history] localStorage quota exhausted even after trim:", e2);
         }
@@ -219,7 +231,8 @@ async function redactRunSecrets(run: RunRecord): Promise<RunRecord> {
   const result = run.result;
   const resultText = result?.text ?? "";
   const redactedResultText = typeof resultText === "string" ? await redactSecrets(resultText) : resultText;
-  return { ...run, steps, result: result ? { success: result.success, text: redactedResultText } : null };
+  const task = typeof run.task === "string" ? await redactSecrets(run.task) : run.task;
+  return { ...run, task, steps, result: result ? { success: result.success, text: redactedResultText } : null };
 }
 
 /**
@@ -236,12 +249,12 @@ export async function loadRuns(): Promise<RunRecord[]> {
  // drop any partial/corrupt record rather than letting a bad `steps` value
  // propagate into the UI / replay.
     if (!Array.isArray(arr)) return [];
-    return (arr as unknown[]).filter(isValidRunRecord);
+    return (arr as unknown[]).filter(isValidRunRecord).map(normalizeRunRecord);
   }
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? (parsed as RunRecord[]) : [];
+    return Array.isArray(parsed) ? (parsed as unknown[]).filter(isValidRunRecord).map(normalizeRunRecord) : [];
   } catch {
     return [];
   }

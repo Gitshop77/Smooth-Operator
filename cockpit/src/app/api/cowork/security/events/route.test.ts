@@ -64,6 +64,19 @@ describe('GET /api/cowork/security/events', () => {
   it('forwards a severity filter to the query', async () => {
     await GET(getReq('severity=high'));
     expect(findMany.mock.lastCall![0].where).toEqual({ severity: 'high' });
+    expect(count).toHaveBeenCalledWith({ where: { severity: 'high' } });
+  });
+
+  it('rejects an invalid severity with 400', async () => {
+    const res = await GET(getReq('severity=boom'));
+    expect(res.status).toBe(400);
+  });
+
+  it('falls back to an empty description when details is null', async () => {
+    findMany.mockResolvedValueOnce([{ ...SAMPLE[0], id: 2, details: null }] as unknown as typeof SAMPLE);
+    const res = await GET(getReq());
+    const e = (await res.json()).events[0];
+    expect(e.description).toBe('');
   });
 
   it('caps limit at 200 (cannot dump the whole table at once)', async () => {

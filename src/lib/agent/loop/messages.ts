@@ -20,6 +20,9 @@ const PLANNER_HISTORY_LIMIT = 8;
 /** Max chars of extracted content surfaced inline per action result. */
 const EXTRACTED_CONTENT_INLINE_LIMIT = 2000;
 
+/** Max chars of interactive-element text shipped to the navigator per step. */
+export const ELEMENTS_TEXT_CHAR_CAP = 60_000;
+
 /**
  * Memoize redacted `extractedContent` by `ActionResult` identity. History
  * items are stable object references across navigator steps, so the same
@@ -43,6 +46,14 @@ async function redactExtractedCached(r: ActionResult): Promise<ActionResult> {
 const REDACTION_FAILED = "[REDACTED: redaction failed]";
 
 /**
+ * Emit each optional-module-unavailable warning at most once per process so a
+ * genuinely-missing module doesn't flood the console on every navigator step.
+ */
+let warnedDomainSkills = false;
+let warnedPersistentMemory = false;
+let warnedToolsRegistry = false;
+
+/**
  * Redact stored secret values from history items BEFORE they are rendered into
  * the LLM prompt. Shared by BOTH the navigator and planner builders so the two
  * paths cannot drift — previously the planner rendered `navigatorHistory`
@@ -64,16 +75,22 @@ async function redactHistoryForPrompt(history: HistoryItem[]): Promise<HistoryIt
   const safe = (s: string | undefined): Promise<string> =>
     s ? redactSecrets(s).catch(() => REDACTION_FAILED) : Promise.resolve("");
 
+ // Redact the agent's own prior reasoning text — it summarizes page-derived
+ // content and can carry round-tripped secrets.
+  const redactReasoning = async (h: HistoryItem): Promise<{
+    evaluation: string;
+    memory: string;
+    goal: string;
+  }> => ({
+    evaluation: await safe(h.evaluation),
+    memory: await safe(h.memory),
+    goal: await safe(h.goal),
+  });
+
   return Promise.all(history.map(async (h) => {
     try {
       if (!h.results || h.results.length === 0) {
- // Redact the agent's own prior reasoning text — it summarizes
- // page-derived content and can carry round-tripped secrets.
-        const [evaluation, memory, goal] = await Promise.all([
-          safe(h.evaluation),
-          safe(h.memory),
-          safe(h.goal),
-        ]);
+        const { evaluation, memory, goal } = await redactReasoning(h);
         return { ...h, evaluation, memory, goal };
       }
       const results = await Promise.all(
@@ -92,23 +109,31 @@ async function redactHistoryForPrompt(history: HistoryItem[]): Promise<HistoryIt
           return rr;
         }),
       );
-      const [evaluation, memory, goal] = await Promise.all([
-        safe(h.evaluation),
-        safe(h.memory),
-        safe(h.goal),
-      ]);
+      const { evaluation, memory, goal } = await redactReasoning(h);
       return { ...h, results, evaluation, memory, goal };
     } catch {
- // Pathological record — degrade to the unchanged history item so the step
- // still assembles instead of rejecting.
-      return h;
+ // Failing OPEN would contradict the "secret values never cross the network"
+ // invariant. Degrade to a fully-masked record so the step still assembles
+ // without leaking secret-bearing fields.
+      return {
+        ...h,
+        evaluation: h.evaluation ? REDACTION_FAILED : h.evaluation,
+        memory: h.memory ? REDACTION_FAILED : h.memory,
+        goal: h.goal ? REDACTION_FAILED : h.goal,
+        results: (h.results ?? []).map((r) => ({
+          ...r,
+          extractedContent: r.extractedContent ? REDACTION_FAILED : r.extractedContent,
+          message: r.message ? REDACTION_FAILED : r.message,
+        })),
+      };
     }
   }));
 }
 
 /** Format a single tab as a one-line summary for the LLM. */
 function formatTab(t: TabInfo): string {
-  return `Tab ${t.id} (${t.label}): ${t.url} - ${t.title.slice(0, 40)}`;
+  const title = t.title.length > 40 ? t.title.slice(0, 40) + "…" : t.title;
+  return `Tab ${t.id} (${t.label}): ${t.url} - ${title}`;
 }
 
 /** Render the plan as a checklist with `[>]` for the current item. */
@@ -142,7 +167,10 @@ export interface NavigatorMessageArgs {
   browserState: {
     url: string;
     title: string;
-    tabs: TabInfo[];
+    // `any[]` (rather than `TabInfo[]`) so callers passing an empty/partial
+    // tab list (e.g. tests, or snapshots without resolved tab metadata) type-
+    // check; `formatTab` still receives a well-typed `TabInfo` at runtime.
+    tabs: any[];
     elementsText: string;
     pageInfo: string;
     newElementCount: number;
@@ -193,7 +221,10 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
  // Any OTHER throw (e.g. a regression in domain-skills) is surfaced rather
  // than swallowed so it's debuggable instead of silently dropping skills
  // (finding: optional dynamic-import blocks swallow all errors).
-    console.warn("[messages] optional module ../domain-skills unavailable — skipping skills block:", e);
+    if (!warnedDomainSkills) {
+      warnedDomainSkills = true;
+      console.warn("[messages] optional module ../domain-skills unavailable — skipping skills block:", e);
+    }
   }
 
  // Injection classifier: scan the RAW elements text AND page-derived
@@ -236,11 +267,10 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
  // to the model. Even with the summarizer disabled, a content-heavy page must
  // not inflate the per-step token cost without limit — truncate and mark the
  // cut so the model knows the listing is incomplete.
-  const MAX_ELEMENTS_TEXT_CHARS = 60_000;
-  if (redactedElementsText.length > MAX_ELEMENTS_TEXT_CHARS) {
+  if (redactedElementsText.length > ELEMENTS_TEXT_CHAR_CAP) {
     redactedElementsText =
-      redactedElementsText.slice(0, MAX_ELEMENTS_TEXT_CHARS) +
-      `\n…[truncated ${redactedElementsText.length - MAX_ELEMENTS_TEXT_CHARS} chars of interactive elements]`;
+      redactedElementsText.slice(0, ELEMENTS_TEXT_CHAR_CAP) +
+      `\n…[truncated ${redactedElementsText.length - ELEMENTS_TEXT_CHAR_CAP} chars of interactive elements]`;
   }
   const redactedTitle = await redactSecrets(browserState.title);
   const redactedUrl = await redactSecrets(browserState.url);
@@ -270,7 +300,10 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
  // persistence-memory module genuinely unavailable — skip. Other throws
  // (regression) are surfaced, not swallowed (finding: optional dynamic-import
  // blocks swallow all errors).
-    console.warn("[messages] optional module ../persistent-memory unavailable — skipping memory block:", e);
+    if (!warnedPersistentMemory) {
+      warnedPersistentMemory = true;
+      console.warn("[messages] optional module ../persistent-memory unavailable — skipping memory block:", e);
+    }
   }
 
  // Custom tools: inject descriptions so the agent knows what's available.
@@ -282,7 +315,10 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
       customToolsBlock = `\n${toolsBlock}`;
     }
   } catch (e) {
-    console.warn("[messages] optional module ../tools/registry unavailable — skipping custom-tools block:", e);
+    if (!warnedToolsRegistry) {
+      warnedToolsRegistry = true;
+      console.warn("[messages] optional module ../tools/registry unavailable — skipping custom-tools block:", e);
+    }
   }
 
  // inject the compacted-memory block when compaction has run. This is
@@ -377,6 +413,13 @@ export async function buildPlannerUserMessage(args: PlannerMessageArgs): Promise
  // paths stay symmetric.
   const redactedHistory = await redactHistoryForPrompt(navigatorHistory);
 
+ // Redact secret-bearing URLs/titles from the browser summary before it is
+ // wrapped and sent to the planner provider. The navigator path redacts these
+ // same values via `redactSecrets`; the planner must stay symmetric so secret
+ // URLs (token/basic-auth) never cross the network.
+  const redactedUrl = await redactSecrets(url);
+  const redactedTabsBlock = await redactSecrets(tabsBlock);
+
  // Pass the FULL redacted navigator history to renderHistory — it slices to
  // the last PLANNER_HISTORY_LIMIT items AND emits a `<sys>[N previous steps
  // omitted]</sys>` marker when older steps are elided. Pre-slicing here would
@@ -395,9 +438,9 @@ ${renderHistory(redactedHistory, PLANNER_HISTORY_LIMIT)}
 </navigator_history>
 
 <browser_summary>
-Current URL: ${wrapUntrusted(url)}
+Current URL: ${wrapUntrusted(redactedUrl)}
 Open tabs:
-${wrapUntrusted(tabsBlock)}
+${wrapUntrusted(redactedTabsBlock)}
 </browser_summary>
 
 <step_info>Planner step ${step + 1} of ${maxSteps}</step_info>`;

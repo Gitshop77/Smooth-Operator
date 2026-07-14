@@ -8,7 +8,7 @@
  * agent's self-reported success, then emits the terminal `done` event.
  */
 
-import type { HistoryItem } from "../../types";
+import type { AgentConfig, HistoryItem } from "../../types";
 import { judgeTask } from "../../judge";
 import { EvaluatorComb, type EvaluatorKind } from "../../evaluators";
 import { estimateCost } from "../../llm/pricing";
@@ -24,7 +24,7 @@ import type { LoopDeps, LoopState } from "../types";
  */
 async function runDeterministicEvaluators(
   deps: LoopDeps,
-  config: import("../../types").AgentConfig,
+  config: AgentConfig,
   agentText: string,
   state: LoopState,
 ): Promise<{ score: number; results: { tag: string; score: number; reason: string }[]; reasons: string[] } | null> {
@@ -92,7 +92,7 @@ async function runDeterministicEvaluators(
  */
 export async function maybeJudgeAndFinalize(
   deps: LoopDeps,
-  config: import("../../types").AgentConfig,
+  config: AgentConfig,
   args: {
     step: number;
     success: boolean;
@@ -134,6 +134,7 @@ export async function maybeJudgeAndFinalize(
   }
 
   let evaluatorResult: Awaited<ReturnType<typeof runDeterministicEvaluators>> = null;
+  let evaluatorErrored = false;
   if (success && config.expectedOutcomes) {
     try {
       evaluatorResult = await runDeterministicEvaluators(deps, config, text, state);
@@ -149,10 +150,11 @@ export async function maybeJudgeAndFinalize(
       if (evaluatorResult !== null) {
         deps.onEvent({
           type: "info",
-          message: `Deterministic evaluators scored ${evaluatorResult.score} (${evaluatorResult.reasons.join("; ")}) — falling back to LLM judge.`,
+          message: `Deterministic evaluators scored ${evaluatorResult.score.toFixed(2)} (${evaluatorResult.reasons.join("; ")}) — falling back to LLM judge.`,
         });
       }
     } catch (e) {
+      evaluatorErrored = true;
       deps.onEvent({
         type: "error", step,
         message: `Evaluator fast-path failed: ${e instanceof Error ? e.message : String(e)}`,
@@ -175,6 +177,13 @@ export async function maybeJudgeAndFinalize(
       state.finalResult = { success: false, text };
       return true;
     }
+ // If the evaluators could not run (threw) we cannot verify the task. Do NOT
+ // fail open to success — an unverified gate is not a passing one.
+    if (evaluatorErrored) {
+      deps.onEvent({ type: "done", step, success: false, text });
+      state.finalResult = { success: false, text };
+      return true;
+    }
     deps.onEvent({ type: "done", step, success: true, text });
     state.finalResult = { success: true, text };
     return true;
@@ -190,18 +199,24 @@ export async function maybeJudgeAndFinalize(
     let judgeReasoningTokens = 0;
     let judgeCachedInputTokens = 0;
     let judgeCachedWriteInputTokens = 0;
+ // Capture model + reasoning/cached/cache-write token counts from an LLM
+ // result into the closure vars so the judge's cost recompute can apply the
+ // reasoning rate, the cacheRead discount, and the (higher) cacheWrite rate.
+ // Shared by the summarizeCall and planner-fallback branches to avoid drift.
+    const captureJudgeUsage = (
+      u: { model?: string; reasoningTokens?: number; cachedInputTokens?: number } | null | undefined,
+    ): void => {
+      if (!u) return;
+      if (u.model) judgeModel = u.model;
+      if (u.reasoningTokens) judgeReasoningTokens = u.reasoningTokens;
+      if (u.cachedInputTokens) judgeCachedInputTokens = u.cachedInputTokens;
+      const cw = (u as { cachedWriteInputTokens?: number }).cachedWriteInputTokens;
+      if (cw) judgeCachedWriteInputTokens = cw;
+    };
     const judgeLlmCall = async (systemPrompt: string, userMessage: string): Promise<string> => {
       if (deps.summarizeCall) {
         const res = await deps.summarizeCall({ systemPrompt, userPrompt: userMessage });
-        if (res.usage?.model) judgeModel = res.usage.model;
-        if (res.usage?.reasoningTokens) judgeReasoningTokens = res.usage.reasoningTokens;
- // Capture cachedInputTokens so the judge's cost recompute applies the
- // cacheRead discount.
-        if (res.usage?.cachedInputTokens) judgeCachedInputTokens = res.usage.cachedInputTokens;
- // Capture cache-write (creation) tokens too (billed at the higher
- // cache-write rate). Cast until TokenUsage (types.ts) propagates it.
-        if ((res.usage as { cachedWriteInputTokens?: number }).cachedWriteInputTokens)
-          judgeCachedWriteInputTokens = (res.usage as { cachedWriteInputTokens?: number }).cachedWriteInputTokens!;
+        captureJudgeUsage(res.usage);
         return res.content;
       }
       const res = await deps.plannerCall({
@@ -214,15 +229,7 @@ export async function maybeJudgeAndFinalize(
         step,
         maxSteps: 0,
       });
-      if (res.model) judgeModel = res.model;
-      if (res.reasoningTokens) judgeReasoningTokens = res.reasoningTokens;
- // Capture cachedInputTokens from the planner-fallback path too.
-      if (res.cachedInputTokens) judgeCachedInputTokens = res.cachedInputTokens;
- // Capture cache-write (creation) tokens from the planner-fallback path
- // too (billed at the higher cache-write rate). Cast until the
- // PlannerLLMCall result type (loop/types.ts) propagates it.
-      if ((res as { cachedWriteInputTokens?: number }).cachedWriteInputTokens)
-        judgeCachedWriteInputTokens = (res as { cachedWriteInputTokens?: number }).cachedWriteInputTokens!;
+      captureJudgeUsage(res);
       return res.raw;
     };
 
@@ -264,6 +271,7 @@ export async function maybeJudgeAndFinalize(
             costUsd: realCost,
             reasoningTokens: judgeReasoningTokens > 0 ? judgeReasoningTokens : undefined,
             cachedInputTokens: judgeCachedInputTokens > 0 ? judgeCachedInputTokens : undefined,
+            cachedWriteInputTokens: judgeCachedWriteInputTokens > 0 ? judgeCachedWriteInputTokens : undefined,
           });
         }
       },
@@ -282,6 +290,20 @@ export async function maybeJudgeAndFinalize(
     }
 
     if (verdict.verdict) {
+ // A passing LLM judge must not override a failing deterministic evaluator.
+ // The expectedOutcomes gate is the ground-truth acceptance check; if it ran
+ // and scored < 1, its verdict is authoritative — finalize as FAILURE rather
+ // than letting the (page-content-influenced) judge self-certify completion.
+      if (evaluatorResult !== null && evaluatorResult.score < 1) {
+        deps.onEvent({
+          type: "done",
+          step,
+          success: false,
+          text,
+        });
+        state.finalResult = { success: false, text };
+        return true;
+      }
       deps.onEvent({ type: "done", step, success: true, text });
       state.finalResult = { success: true, text };
       return true;

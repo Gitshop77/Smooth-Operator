@@ -14,6 +14,54 @@ import type { Action } from "../schema";
 import type { ActionContext } from "./types";
 import { redactDialogText } from "../../dom/popup-handler";
 
+/** Normalize an unknown thrown value into a human-readable message. */
+const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+type PopupHandler = typeof import("../../dom/popup-handler");
+
+// Hoist a single module-level promise for the popup-handler module so the
+// repeated dynamic imports across the handlers resolve the same cached module
+// instead of re-issuing the import resolution on every call.
+const popupHandlerMod = import("../../dom/popup-handler");
+
+/**
+ * Shared body for `alert_accept` / `alert_dismiss`. Opens the pending JS
+ * dialog, runs `op` (the accept/dismiss call), and returns a redacted
+ * success/failure result. Redaction behavior is preserved.
+ */
+async function acceptOrDismiss(
+  action: Action,
+  op: (mod: PopupHandler) => void,
+  verb: string,
+  pastTense: string,
+): Promise<ActionResult> {
+  try {
+    const mod = await popupHandlerMod;
+    const text = mod.getPendingAlertText();
+    if (text === null) {
+      return {
+        action,
+        success: false,
+        message: `No JS dialog open (nothing to ${verb})`,
+      };
+    }
+    op(mod);
+    return {
+      action,
+      success: true,
+ // Redact the dialog text — it may contain OTP/2FA codes, PII, or session
+ // tokens, and this message is echoed into service-worker / cockpit logs.
+      message: `${pastTense} JS dialog: ${redactDialogText(text)}`,
+    };
+  } catch (e) {
+    return {
+      action,
+      success: false,
+      message: `alert_${verb} failed: ${errMsg(e)}`,
+    };
+  }
+}
+
 export async function handleAlertAccept(
   _ctx: ActionContext,
   action: Extract<Action, { type: "alert_accept" }>,
@@ -22,31 +70,7 @@ export async function handleAlertAccept(
  // every dialog so the agent can explicitly accept/dismiss it after
  // the auto-dismiss override has returned to the page. Returns
  // failure if no dialog is open.
-  try {
-    const mod = await import("../../dom/popup-handler");
-    const text = mod.getPendingAlertText();
-    if (text === null) {
-      return {
-        action,
-        success: false,
-        message: "No JS dialog open (nothing to accept)",
-      };
-    }
-    mod.acceptAlert();
-    return {
-      action,
-      success: true,
- // Redact the dialog text — it may contain OTP/2FA codes, PII, or session
- // tokens, and this message is echoed into service-worker / cockpit logs.
-      message: `Accepted JS dialog: ${redactDialogText(text)}`,
-    };
-  } catch (e) {
-    return {
-      action,
-      success: false,
-      message: `alert_accept failed: ${e instanceof Error ? e.message : String(e)}`,
-    };
-  }
+  return acceptOrDismiss(action, (mod) => mod.acceptAlert(), "accept", "Accepted");
 }
 
 export async function handleAlertDismiss(
@@ -54,31 +78,7 @@ export async function handleAlertDismiss(
   action: Extract<Action, { type: "alert_dismiss" }>,
 ): Promise<ActionResult> {
  // Dismiss the currently-open JS dialog. Symmetric with `alert_accept`.
-  try {
-    const mod = await import("../../dom/popup-handler");
-    const text = mod.getPendingAlertText();
-    if (text === null) {
-      return {
-        action,
-        success: false,
-        message: "No JS dialog open (nothing to dismiss)",
-      };
-    }
-    mod.dismissAlert();
-    return {
-      action,
-      success: true,
- // Redact the dialog text — it may contain OTP/2FA codes, PII, or session
- // tokens, and this message is echoed into service-worker / cockpit logs.
-      message: `Dismissed JS dialog: ${redactDialogText(text)}`,
-    };
-  } catch (e) {
-    return {
-      action,
-      success: false,
-      message: `alert_dismiss failed: ${e instanceof Error ? e.message : String(e)}`,
-    };
-  }
+  return acceptOrDismiss(action, (mod) => mod.dismissAlert(), "dismiss", "Dismissed");
 }
 
 export async function handleAlertGetText(
@@ -89,7 +89,7 @@ export async function handleAlertGetText(
  // content (success: true) if no dialog is open — the LLM can branch
  // on the extractedContent length.
   try {
-    const mod = await import("../../dom/popup-handler");
+    const mod = await popupHandlerMod;
     const text = mod.getPendingAlertText();
     if (text === null) {
       return {
@@ -114,7 +114,7 @@ export async function handleAlertGetText(
     return {
       action,
       success: false,
-      message: `alert_get_text failed: ${e instanceof Error ? e.message : String(e)}`,
+      message: `alert_get_text failed: ${errMsg(e)}`,
     };
   }
 }
@@ -132,7 +132,7 @@ export async function handleAlertSendKeys(
  // text is staged (success); returns failure for non-prompt dialogs
  // (`alert`/`confirm`).
   try {
-    const mod = await import("../../dom/popup-handler");
+    const mod = await popupHandlerMod;
     const kind = mod.getPendingAlertKind();
     if (kind === null) {
  // No dialog currently open — stage the text for the NEXT prompt.
@@ -169,7 +169,7 @@ export async function handleAlertSendKeys(
     return {
       action,
       success: false,
-      message: `alert_send_keys failed: ${e instanceof Error ? e.message : String(e)}`,
+      message: `alert_send_keys failed: ${errMsg(e)}`,
     };
   }
 }

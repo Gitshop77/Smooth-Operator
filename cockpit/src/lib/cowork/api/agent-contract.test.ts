@@ -31,10 +31,9 @@ describe('agent contract manifest (drift guard)', () => {
     const flat = flatten(manifest);
 
  // These routes implement a DELETE export, so the manifest MUST advertise it.
-    expect(flat.filter(endsWith('/api/cowork/history')).some((e) => e.method === 'DELETE')).toBe(true);
-    expect(flat.filter(endsWith('/api/cowork/memory/site')).some((e) => e.method === 'DELETE')).toBe(true);
-    expect(flat.filter(endsWith('/api/cowork/memory/form')).some((e) => e.method === 'DELETE')).toBe(true);
-    expect(flat.filter(endsWith('/api/cowork/ai/chat')).some((e) => e.method === 'DELETE')).toBe(true);
+    for (const p of ['/api/cowork/history', '/api/cowork/memory/site', '/api/cowork/memory/form', '/api/cowork/ai/chat']) {
+      expect(flat.filter(endsWith(p)).some((e) => e.method === 'DELETE')).toBe(true);
+    }
   });
 
   it('does not disclose the ?all=1 mass-delete mechanism in the manifest (AU-3)', async () => {

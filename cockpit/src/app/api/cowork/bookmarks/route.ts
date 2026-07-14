@@ -1,6 +1,6 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
-import { json, withRouteError, bodyJson, validateHttpUrl, isSsrfSafeUrl, badRequest, boundedString, MAX_NAME_LEN, MAX_URL_LEN } from '@/lib/cowork/api/http';
+import { json, withRouteError, bodyJson, validateHttpUrl, isSsrfSafeUrl, badRequest, boundedString, MAX_NAME_LEN, MAX_URL_LEN, sanitizeRequestId } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
 // Prisma's `include: { children: true }` only fetches ONE level of
@@ -64,12 +64,32 @@ function buildBookmarkTree(rows: BookmarkRow[]): { tree: BookmarkRow[]; orphans:
  // appearing as lost data.
   const orphans = rows.filter((r) => r.parentId !== null && !visited.has(r.id));
   if (orphans.length > 0) {
-    console.warn('[cowork] bookmarks: dropping orphaned rows (broken parentId / cycle)', {
+    console.warn('[cowork] bookmarks: orphaned rows (broken parentId / cycle) — returned separately', {
       count: orphans.length,
       ids: orphans.slice(0, 20).map((o) => o.id),
     });
   }
   return { tree, orphans };
+}
+
+// Atomically validate the parent and create the bookmark in one transaction so a
+// concurrent delete can't leave a dangling `parentId` (see the branch notes
+// below). A `null` return signals the parent was missing -> 400.
+async function createBookmark(
+  type: 'url' | 'folder',
+  name: string,
+  url: string | null,
+  parentId: string | null,
+): Promise<BookmarkRow | null> {
+  return db.$transaction(async (tx) => {
+    if (parentId) {
+      const parent = await tx.bookmark.findUnique({ where: { id: parentId } });
+      if (!parent) return null;
+    }
+    return tx.bookmark.create({
+      data: { name, url, parentId, type },
+    });
+  });
 }
 
 export async function GET(): Promise<Response> {
@@ -82,7 +102,30 @@ export async function GET(): Promise<Response> {
       orderBy: { dateAdded: 'desc' },
       take: MAX_BOOKMARKS,
     });
-    const { tree, orphans } = buildBookmarkTree(all);
+ // Preserve referential integrity under the recency cap. The take above only
+ // returns the `MAX_BOOKMARKS` most-recent rows; any bookmark in an *older*
+ // row that is the child of an in-cap parent would otherwise be silently
+ // dropped (the parent renders with no children) and any in-cap row that
+ // references an older parent would surface as a dangling orphan. Close the
+ // parent/child references reachable from the fetched rows so every in-cap
+ // node keeps its full subtree and fetched rows attach to a real parent.
+ // Bounded by the total row count and converges once the connected component
+ // is fully materialized.
+    const known = new Map<string, BookmarkRow>(all.map((r) => [r.id, r]));
+    const frontier: string[] = all.map((r) => r.id);
+    while (frontier.length > 0) {
+      const batch = frontier.splice(0, frontier.length);
+      const related = await db.bookmark.findMany({
+        where: { OR: [{ id: { in: batch } }, { parentId: { in: batch } }] },
+      });
+      for (const row of related) {
+        if (!known.has(row.id)) {
+          known.set(row.id, row);
+          frontier.push(row.id);
+        }
+      }
+    }
+    const { tree, orphans } = buildBookmarkTree([...known.values()]);
     return json({ bookmarks: tree, orphans });
   });
 }
@@ -123,15 +166,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       return badRequest('type must be "url" or "folder"');
     }
     if (rawType === 'folder') {
-      const bm = await db.$transaction(async (tx) => {
-        if (parentId) {
-          const parent = await tx.bookmark.findUnique({ where: { id: parentId } });
-          if (!parent) return null;
-        }
-        return tx.bookmark.create({
-          data: { name, url: null, parentId, type: 'folder' },
-        });
-      });
+      const bm = await createBookmark('folder', name, null, parentId);
       if (!bm) return badRequest('unknown parentId');
       return json({ bookmark: bm }, 201);
     }
@@ -146,16 +181,8 @@ export async function POST(req: NextRequest): Promise<Response> {
  // plain tab URLs that are only ever opened in the user's browser. A
  // developer's `localhost` bookmark is therefore rejected (400) here.
     if (!isSsrfSafeUrl(url)) return badRequest('URL host is not allowed');
-    const bm = await db.$transaction(async (tx) => {
-      if (parentId) {
-        const parent = await tx.bookmark.findUnique({ where: { id: parentId } });
-        if (!parent) return null;
-      }
-      return tx.bookmark.create({
-        data: { name, url, parentId, type: 'url' },
-      });
-    });
+    const bm = await createBookmark('url', name, url, parentId);
     if (!bm) return badRequest('unknown parentId');
     return json({ bookmark: bm }, 201);
-  }, req.headers.get('x-request-id') ?? undefined);
+  }, sanitizeRequestId(req.headers.get('x-request-id')));
 }

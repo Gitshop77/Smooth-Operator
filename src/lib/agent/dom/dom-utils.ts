@@ -8,7 +8,8 @@
  * - `SKIP_TAGS`, `isInteractive`, `isPropagatingElement`,
  * `PROPAGATING_ELEMENTS`, `PropagatingElementPattern`,
  * `DEFAULT_CONTAINMENT_THRESHOLD`, `containmentRatio`, `isContained`,
- * `nearestPropagatingAncestor`, `shouldExcludeAsContained`
+ * `nearestPropagatingAncestor`, `shouldExcludeAsContained`,
+ * `isSensitive`, `SENSITIVE_AUTOCOMPLETE`
  * (from `./utils/classification`)
  * - `isLikelyHidden`, `isVisibleFull` (from `./utils/visibility`)
  * - `directText` (from `./utils/tree-walker`)

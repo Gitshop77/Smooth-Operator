@@ -109,18 +109,22 @@ export async function renderHistory(): Promise<void> {
     list.innerHTML = '<p class="empty-hint">No runs yet.</p>';
     return;
   }
+  const frag = document.createDocumentFragment();
   for (const r of runs) {
     const item = document.createElement("div");
     item.className = "history-item";
  // Safe formatting: stored/typed as numbers, but coerce defensively so a
  // malformed row renders as "—" rather than NaN/Invalid Date.
     const date = Number.isFinite(r.startedAt) ? new Date(r.startedAt).toLocaleString() : "—";
+    item.tabIndex = 0;
+    item.setAttribute("role", "button");
+    item.setAttribute("aria-label", `View transcript of run starting ${date}`);
     const duration =
       Number.isFinite(r.endedAt) && Number.isFinite(r.startedAt)
         ? ((r.endedAt - r.startedAt) / 1000).toFixed(1)
         : "—";
     const steps = Number.isFinite(r.stepCount) ? String(r.stepCount) : "—";
-    const cost = Number.isFinite(r.totalCostUsd) ? r.totalCostUsd.toFixed(4) : "0.0000";
+    const cost = Number.isFinite(r.totalCostUsd) ? r.totalCostUsd.toFixed(4) : "—";
     const status = r.result?.success ? "success" : "failure";
     const badge = runBadge(status, r.result?.success ? "✓ success" : "✗ failed");
     item.innerHTML =
@@ -128,8 +132,15 @@ export async function renderHistory(): Promise<void> {
       `<span class="meta">${escapeHtml(date)} · ${escapeHtml(String(duration))}s · ${escapeHtml(steps)} steps · $${escapeHtml(cost)}</span>` +
       badge;
     item.addEventListener("click", () => showTranscript(r));
-    list.appendChild(item);
+    item.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        showTranscript(r);
+      }
+    });
+    frag.appendChild(item);
   }
+  list.appendChild(frag);
 }
 
 document.getElementById("clearHistory")?.addEventListener("click", async () => {
@@ -164,7 +175,7 @@ $("exportHistory")?.addEventListener("click", async () => {
   a.href = url;
   a.download = `open-cowork-history-${Date.now()}.json`;
   a.click();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 
 $("importHistory")?.addEventListener("click", () => {
@@ -221,7 +232,7 @@ $("importHistory")?.addEventListener("click", () => {
  // success. Promise-mode `set` rejects on failure (`chrome.runtime.lastError`
  // is callback-only), so catch the rejection instead of guarding lastError.
     try {
-      await chrome.storage.local.set({ open_cowork_run_history: merged });
+      await chrome.storage.local.set({ [STORAGE_KEYS.runHistory]: merged });
     } catch (err) {
       await alertModal({
         title: "Import failed",

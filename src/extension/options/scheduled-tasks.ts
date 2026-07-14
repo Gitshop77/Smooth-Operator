@@ -102,6 +102,7 @@ function formatSchedule(s: ScheduledTaskSchedule): string {
 export async function renderSchedule(): Promise<void> {
   const tasks = await listScheduledTasks();
   const list = $("scheduleList") as HTMLDivElement;
+  list.setAttribute("role", "list");
   list.innerHTML = "";
   if (tasks.length === 0) {
     list.innerHTML = '<p class="empty-hint">No scheduled tasks.</p>';
@@ -110,13 +111,16 @@ export async function renderSchedule(): Promise<void> {
   for (const t of tasks) {
     const item = document.createElement("div");
     item.className = "schedule-item";
+    item.setAttribute("role", "listitem");
+    const preview = t.task.length > 50 ? t.task.slice(0, 50) + "…" : t.task;
     item.innerHTML =
-      `<span class="schedule-summary">${escapeHtml(t.task.slice(0, 50))} — ${escapeHtml(formatSchedule(t.schedule))}</span>` +
+      `<span class="schedule-summary">${escapeHtml(preview)} — ${escapeHtml(formatSchedule(t.schedule))}</span>` +
       `<span class="schedule-controls">` +
         `<button type="button" class="toggle-enable" data-enabled="${t.enabled}">${t.enabled ? "Disable" : "Enable"}</button>` +
         `<button type="button" class="schedule-delete">Delete</button>` +
       `</span>`;
-    const [enableBtn, delBtn] = Array.from(item.querySelectorAll("button"));
+    const enableBtn = item.querySelector("button.toggle-enable") as HTMLButtonElement;
+    const delBtn = item.querySelector("button.schedule-delete") as HTMLButtonElement;
     delBtn.addEventListener("click", async () => {
       await withTaskMutation(async () => {
  // Re-read the freshest list INSIDE the lock so two rapid deletes can't
@@ -148,21 +152,19 @@ export async function renderSchedule(): Promise<void> {
       await renderSchedule().catch((err) => console.warn("[options] renderSchedule failed:", err));
     });
     enableBtn.addEventListener("click", async () => {
- // Flip enabled and persist through the canonical `saveScheduledTask`,
- // which delegates arming to `scheduleAlarm`:
- // - enabling → arms the alarm + requests the keep-awake lock;
- // - disabling → clears the alarm + releases the keep-awake lock IF no
- // other enabled task remains.
- // This is the single source of truth for arming, so a disabled task can
- // never leave an armed alarm or a leaked keep-awake lock.
-      t.enabled = !t.enabled;
-      try {
-        await saveScheduledTask(t);
-      } catch (e) {
-        console.warn("[options] saveScheduledTask failed:", e);
- // Revert the in-memory flip so the re-render reflects persisted state.
-        t.enabled = !t.enabled;
-      }
+      await withTaskMutation(async () => {
+ // Re-read the freshest list so a stale render-closure object can't resurrect
+ // a task that was deleted in another context (finding #44).
+        const current = await listScheduledTasks();
+        const target = current.find((x) => x.id === t.id);
+        if (!target) return; // deleted — do not re-persist
+        target.enabled = !target.enabled;
+        try {
+          await saveScheduledTask(target);
+        } catch (e) {
+          console.warn("[options] saveScheduledTask failed:", e);
+        }
+      });
       await renderSchedule().catch((err) => console.warn("[options] renderSchedule failed:", err));
     });
     list.appendChild(item);
@@ -234,5 +236,10 @@ $("addSchedule").addEventListener("click", async () => {
     return;
   }
   ($("scheduleTask") as HTMLInputElement).value = "";
+  ($("scheduleInterval") as HTMLInputElement).value = "";
+  ($("scheduleTime") as HTMLInputElement).value = "";
+  ($("scheduleDay") as HTMLSelectElement).value = String(DEFAULT_DAY_OF_WEEK);
+ // Re-sync the visible schedule sections to the now-reset form.
+  ($("scheduleType") as HTMLSelectElement).dispatchEvent(new Event("change"));
   await renderSchedule();
 });

@@ -159,10 +159,11 @@ function sanitizeResponse(
  */
 export async function askHumanExtension(
   req: HumanInteractionRequest,
-  timeoutMs: number = DEFAULT_ASK_HUMAN_TIMEOUT_MS
+  timeoutMs: number
 ): Promise<HumanInteractionResponse> {
   return new Promise<HumanInteractionResponse>((resolve) => {
     let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
     const finish = (resp: HumanInteractionResponse) => {
       if (settled) return;
       settled = true;
@@ -170,7 +171,7 @@ export async function askHumanExtension(
       resolve(resp);
     };
 
-    const timer = setTimeout(() => finish({ mode: "cancelled" }), timeoutMs);
+    timer = setTimeout(() => finish({ mode: "cancelled" }), timeoutMs);
 
  // The side panel's onMessage listener for HUMAN_INTERACT calls
  // `sendResponse(...)` synchronously, so the response arrives via this
@@ -236,9 +237,8 @@ export async function askHuman(req: HumanInteractionRequest): Promise<HumanInter
  // cleartext isn't surfaced in the prompt UI. Only plain `input` mode uses
  // `defaultValue`.
     const isSecret = req.mode === "password";
-    const value = isSecret
-      ? window.prompt(req.message)
-      : window.prompt(req.message, req.defaultValue ?? "");
+    const def = isSecret ? "" : (req.defaultValue ?? "");
+    const value = window.prompt(req.message, def);
     return value === null ? { mode: "cancelled" } : { mode: "input", value };
   }
   if (req.mode === "select") {

@@ -10,6 +10,11 @@ import { buildURL } from "./endpoint";
 import { withLLMRetry } from "../retry";
 import { isAllowedLlmBaseUrl } from "./ssrf";
 
+/** Strip query/fragment (possible secret-bearing tokens) from a URL for logs/errors. */
+function redactUrlForLog(u: string): string {
+  return u.replace(/[?#].*$/, "[redacted-query]");
+}
+
 /**
  * Parse an HTTP `Retry-After` header value into a delay in milliseconds.
  *
@@ -60,6 +65,10 @@ const REQUEST_TIMEOUT_MS = 60_000;
  * re-attempts the whole request.
  */
 const CHUNK_TIMEOUT_MS = 30_000;
+
+/** Upper bound on a `Retry-After` delay (1 hour) so a malicious or exhausted
+ * provider can't stall the agent for an unbounded duration (availability/DoS). */
+const MAX_RETRY_AFTER_MS = 3_600_000;
 
 export interface TransportPrepareInput<Body> {
   readonly body: Body;
@@ -124,7 +133,7 @@ function fetchWithTimeout(
  // while exempting the curated Ollama/LiteLLM local endpoints. We throw (rather
  // than silently contacting the host) so a bad URL fails closed.
   if (!isAllowedLlmBaseUrl(url)) {
-    throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${url}`);
+    throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${redactUrlForLog(url)}`);
   }
   const controller = new AbortController();
   let timedOut = false;
@@ -154,7 +163,7 @@ function fetchWithTimeout(
  // The "redirect" keyword deliberately doesn't match retry.ts's
  // /fetch|network|econn|timeout/i regex.
     if (res.type === "opaqueredirect") {
-      throw new Error(`LLM endpoint returned a redirect — refused to follow (potential request-body exfiltration). URL: ${url}`);
+      throw new Error(`LLM endpoint returned a redirect — refused to follow (potential request-body exfiltration). URL: ${redactUrlForLog(url)}`);
     }
     return res;
   };
@@ -230,7 +239,7 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: { framing: Fra
  // — the doc promises a processed-0 value is honoured, so use
  // `>= 0` rather than `> 0` (which would silently drop it and
  // fall back to the default backoff).
-          if (typeof ms === "number" && ms >= 0) {
+          if (typeof ms === "number" && ms >= 0 && ms <= MAX_RETRY_AFTER_MS) {
             (err as Error & { retryAfter?: number }).retryAfter = ms;
           }
         }
@@ -252,6 +261,11 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: { framing: Fra
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    const flushRemaining = function* (): Generator<FrameType> {
+      if (buffer.trim()) {
+        for (const frame of opts.framing.parse(buffer)) yield frame;
+      }
+    };
     try {
       while (true) {
  // race the read against a 30s timeout. If the provider
@@ -282,8 +296,11 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: { framing: Fra
  // buffered for the next chunk. Real streaming is preserved: a partial
  // event that has not yet received its terminating blank line stays
  // buffered until more bytes arrive or the stream ends.
-          const events = buffer.split("\n\n");
+          const normalized = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+          const events = normalized.split("\n\n");
  // The segment after the final `\n\n` is an incomplete event; keep it.
+ // It stays LF-normalized, so a split event completes correctly on the next
+ // chunk.
           buffer = events.pop() ?? "";
           for (const event of events) {
             if (event === "") continue;
@@ -295,10 +312,7 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: { framing: Fra
         }
       }
  // Flush remaining buffer
-      if (buffer.trim()) {
-        const frames = opts.framing.parse(buffer);
-        for (const frame of frames) yield frame;
-      }
+      yield* flushRemaining();
     } catch (e) {
  // On per-chunk timeout (stream stall) cancel the reader to release the
  // underlying network resources. A stalled mid-stream response is NOT a
@@ -316,10 +330,7 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: { framing: Fra
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.startsWith("stream stall:")) {
  // Flush any buffered partial frames first so the consumer sees them.
-        if (buffer.trim()) {
-          const frames = opts.framing.parse(buffer);
-          for (const frame of frames) yield frame;
-        }
+        yield* flushRemaining();
  // A stalled mid-stream response is NOT a successful completion: re-throw
  // so the consumer (and the orchestrator's retry loop) treats the truncated
  // stream as a failure rather than silently executing truncated content and

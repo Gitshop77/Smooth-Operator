@@ -44,6 +44,8 @@ function toTime(ts: number | string | Date | null | undefined): number {
   return Number.isFinite(ms) ? ms : NaN;
 }
 
+const DAY_MS = 86_400_000;
+
 /** Map a security severity to a StatusPill tone (critical/high → error). */
 function toneForSeverity(sev: string): PillTone {
   switch (sev.toLowerCase()) {
@@ -76,19 +78,18 @@ function severityWeight(sev: string): number {
 }
 
 /** Count tasks per day over the last `days` days (oldest → newest). */
-function lastNDaysBuckets(tasks: SampleTask[], days: number): number[] {
+function lastNDaysBuckets(tasks: SampleTask[], days: number, now: number): number[] {
   const buckets = new Array<number>(days).fill(0);
-  const now = new Date();
+  const nowDate = new Date(now);
   const startOfToday = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate(),
+    nowDate.getFullYear(),
+    nowDate.getMonth(),
+    nowDate.getDate(),
   ).getTime();
-  const dayMs = 86_400_000;
   for (const t of tasks) {
     const ms = toTime(t.createdAt);
     if (!Number.isFinite(ms)) continue;
-    const dayIdx = Math.floor((ms - startOfToday) / dayMs);
+    const dayIdx = Math.floor((ms - startOfToday) / DAY_MS);
  // dayIdx is 0 for today, -1 for yesterday, -2 for two days ago, etc.
     const bucketPos = days - 1 + dayIdx; // today is the last bucket
     if (bucketPos >= 0 && bucketPos < days) buckets[bucketPos] += 1;
@@ -151,6 +152,25 @@ function Sparkline({
  * current API layer, so those cards render "—" gracefully. See `.audit/data.md`
  * (§1 Overview KPIs / §5 Cost & Usage) for the availability matrix.
  */
+/** Renders a relative time with an absolute, machine-readable `dateTime`. */
+function RelativeTime({
+  ts,
+  className,
+}: {
+  ts: number | string | Date | null | undefined;
+  className?: string;
+}) {
+  const iso = toTime(ts);
+  return (
+    <time
+      dateTime={Number.isFinite(iso) ? new Date(iso).toISOString() : undefined}
+      className={className}
+    >
+      {timeAgo(ts)}
+    </time>
+  );
+}
+
 export function OverviewView() {
   const agents = useAgents();
   const tasks = useAgentTasks();
@@ -176,22 +196,21 @@ export function OverviewView() {
   );
   const tabsList = React.useMemo<SampleTab[]>(() => tabs.data ?? [], [tabs.data]);
 
-  const dayMs = 86_400_000;
-  const now = Date.now();
+  const now = React.useMemo(() => Date.now(), []);
 
  // ─── KPI derivations ────────────────────────────────────────────────────
   const runs7d = React.useMemo(
-    () => tasksList.filter((t) => now - toTime(t.createdAt) <= 7 * dayMs),
+    () => tasksList.filter((t) => now - toTime(t.createdAt) <= 7 * DAY_MS),
     [tasksList, now],
   );
   const runsToday = React.useMemo(
-    () => runs7d.filter((t) => now - toTime(t.createdAt) <= dayMs),
+    () => runs7d.filter((t) => now - toTime(t.createdAt) <= DAY_MS),
     [runs7d, now],
   );
 
   const runs7dBuckets = React.useMemo(
-    () => lastNDaysBuckets(tasksList, 7),
-    [tasksList],
+    () => lastNDaysBuckets(tasksList, 7, now),
+    [tasksList, now],
   );
 
   const successRate = React.useMemo(() => {
@@ -205,12 +224,10 @@ export function OverviewView() {
 
   const openErrors = React.useMemo(
     () =>
-      eventsList.filter(
-        (e) =>
-          (e.severity.toLowerCase() === "critical" ||
-            e.severity.toLowerCase() === "high") &&
-          !e.falsePositive,
-      ),
+      eventsList.filter((e) => {
+        const sev = e.severity.toLowerCase();
+        return (sev === "critical" || sev === "high") && !e.falsePositive;
+      }),
     [eventsList],
   );
 
@@ -281,7 +298,6 @@ export function OverviewView() {
         <StatCard
           label="Active agents"
           value={agents.isLoading ? dash : agentsList.length}
-          delta="trust grants"
           tone="accent"
           icon={<Bot className="size-4" />}
         />
@@ -359,9 +375,7 @@ export function OverviewView() {
                     <p className="text-sm truncate" title={t.title}>
                       {t.title || "Untitled run"}
                     </p>
-                    <p className="text-xs text-dim cowork-mono">
-                      {timeAgo(t.createdAt)}
-                    </p>
+                    <RelativeTime ts={t.createdAt} className="text-xs text-dim cowork-mono" />
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <span
@@ -404,7 +418,7 @@ export function OverviewView() {
                       {e.description || e.type}
                     </p>
                     <p className="text-xs text-dim cowork-mono">
-                      {e.type} · {timeAgo(e.timestamp)}
+                      {e.type} · <RelativeTime ts={e.timestamp} />
                     </p>
                   </div>
                   <StatusPill tone={toneForSeverity(e.severity)}>

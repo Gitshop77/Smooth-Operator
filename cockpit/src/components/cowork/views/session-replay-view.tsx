@@ -17,7 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/cowork/shared/empty-state";
 import { LoadingSkeleton } from "@/components/cowork/shared/loading-skeleton";
-import { timeAgo } from "@/lib/cowork-data/format";
+import { timeAgo, safeParseJsonArray } from "@/lib/cowork-data/format";
 
 /**
  * Session Replay — scrubable timeline reconstructing what the agent did.
@@ -73,18 +73,11 @@ export function SessionReplayView() {
  // session, and the UI states this explicitly below. `sessionId` is kept in
  // the dependency list so this memo re-evaluates if a real linkage is added.
   const steps = React.useMemo<ReplayStep[]>(() => {
-    void sessionId; // no persisted field to filter tasks by session (see above)
     const out: ReplayStep[] = [];
     for (const t of tasks.data ?? []) {
-      let parsed: Array<{ label?: string; done?: boolean }> = [];
-      try {
-        const raw = JSON.parse(t.stepsJson || "[]");
- // JSON.parse of `{}` / `5` / `null` succeeds but is not an array —
- // guard so a non-array value can't crash the render with a TypeError.
-        parsed = Array.isArray(raw) ? raw : [];
-      } catch {
-        parsed = [];
-      }
+      const parsed = safeParseJsonArray<{ label?: string; done?: boolean }>(
+        (t as { stepsJson?: unknown }).stepsJson,
+      );
       parsed.forEach((step, i) => {
         const isActive =
           ACTIVE_STATUSES.has(t.status) && i === (t.currentStep ?? 0) && !step.done;
@@ -113,7 +106,8 @@ export function SessionReplayView() {
   }, [steps]);
 
   const total = steps.length;
-  const doneCount = steps.filter((s) => s.done).length;
+  let doneCount = 0;
+  for (const s of steps) if (s.done) doneCount++;
   const pct = total ? Math.round((doneCount / total) * 100) : 0;
   const idx = Math.min(activeIndex, Math.max(0, total - 1));
   const current = steps[idx];
@@ -265,7 +259,7 @@ export function SessionReplayView() {
                   <li key={s.key}>
                     <button
                       type="button"
-                      onClick={() => setActiveIndex(i)}
+                      onClick={() => goTo(i)}
                       aria-current={isActive ? "step" : undefined}
                       className={cn(
                         "w-full text-left rounded-xl border px-4 py-3 flex items-start gap-3 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",

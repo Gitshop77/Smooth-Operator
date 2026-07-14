@@ -42,7 +42,7 @@ const makeCredential = (loadFn: () => string): Credential => {
     load: loadFn,
     orElse: (that: Credential): Credential =>
       makeCredential(() => {
-        try { return loadFn(); } catch { return that.load(); }
+        try { return loadFn(); } catch (e) { if (e instanceof MissingCredentialError) return that.load(); throw e; }
       }),
     bearer: (): Auth => fromCredential(self, (secret) => ({ authorization: `Bearer ${secret}` })),
     header: (name: string): Auth => fromCredential(self, (secret) => ({ [name]: secret })),
@@ -110,6 +110,18 @@ const getInjectedEnv = (): Readonly<Record<string, string>> => {
   return injectedEnvSnapshot;
 };
 
+/**
+ * Clear the frozen injected-env snapshot so the next access re-snapshots the
+ * (fully hydrated) map. The service worker hydrates `globalThis.__openCoworkEnv`
+ * from `chrome.storage.session` asynchronously; call this once after hydration
+ * completes so credentials resolved before hydration finished are re-resolved
+ * against the real values. This is additive — the freeze-once security property
+ * is preserved (the snapshot is only ever refreshed by an explicit caller).
+ */
+export const resetInjectedEnv = (): void => {
+  injectedEnvSnapshot = null;
+};
+
 export const config = (name: string): Credential =>
   makeCredential(() => {
     if (typeof process !== "undefined" && process.env?.[name] !== undefined) {
@@ -135,6 +147,23 @@ export function header(name: string, source: string | Credential): Auth;
 export function header(name: string, source?: string | Credential): Auth | ((source: string | Credential) => Auth) {
   if (source === undefined) return (next: string | Credential): Auth => (typeof next === "string" ? value(next) : next).header(name);
   return (typeof source === "string" ? value(source) : source).header(name);
+}
+
+/**
+ * Resolve an optional API-key auth: caller-supplied key → named env var → throw.
+ * Renders the resolved key as `headerName`. The `auth` short-circuit (an explicit
+ * credential passed via `options.auth`) is preserved. Shared by the provider
+ * facades so the same key-resolution chain isn't copy-pasted per provider.
+ */
+export function apiKeyAuth(
+  options: ProviderAuthOption<"optional">,
+  envVar: string,
+  headerName: string,
+): Auth {
+  if ("auth" in options && options.auth) return options.auth;
+  return optional("apiKey" in options ? options.apiKey : undefined, "apiKey")
+    .orElse(config(envVar))
+    .pipe(header(headerName));
 }
 
 export type ApiKeyMode = "optional" | "required";

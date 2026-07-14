@@ -51,6 +51,13 @@ const CATALOG_URL = "https://models.dev/api.json";
 const CACHE_KEY = "__opencowork_models_dev_catalog";
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+/** In-memory cache of the most recently fetched catalog. */
+let memoryCache: Catalog | null = null;
+/** Timestamp (ms) of the last `memoryCache` population. */
+let memoryCacheTime = 0;
+/** In-flight fetch promise, memoized to dedupe concurrent callers. */
+let inflight: Promise<Catalog> | null = null;
+
 /**
  * Heuristic vision-capable model-name patterns (fallback used only when a
  * model is NOT in the catalog). Hoisted to module scope so it is allocated
@@ -190,29 +197,37 @@ export async function fetchCatalog(force = false): Promise<Catalog> {
 }
 
 /**
+ * Read the persistent cache entry (chrome.storage.local) and re-validate it
+ * with {@link isValidCatalog} before it is trusted. Swallows storage errors and
+ * returns `null` when no usable entry is present.
+ */
+async function readCachedCatalog(): Promise<CachedCatalog | null> {
+  if (typeof chrome === "undefined" || !chrome.storage?.local) return null;
+  try {
+    const cached = await chrome.storage.local.get(CACHE_KEY);
+    const entry = cached[CACHE_KEY] as CachedCatalog | undefined;
+ // Trust-boundary guard: a corrupted/compromised persisted entry must be
+ // re-validated before it is served. `isValidCatalog` rejects non-string
+ // `release_date` etc., which would otherwise crash the model picker.
+    if (entry && isValidCatalog(entry.data)) return entry;
+  } catch { /* ignore storage errors */ }
+  return null;
+}
+
+/**
  * Perform the actual cache-lookup + network fetch for `fetchCatalog`.
  * Never throws: on any network/validation failure it falls back to the stale
  * persistent cache, and finally to an empty catalog.
  */
 async function loadCatalog(force: boolean): Promise<Catalog> {
  // Check persistent cache (chrome.storage.local)
-  if (!force && typeof chrome !== "undefined" && chrome.storage?.local) {
-    try {
-      const cached = await chrome.storage.local.get(CACHE_KEY);
-      if (cached[CACHE_KEY]) {
-        const entry = cached[CACHE_KEY] as CachedCatalog;
- // Trust-boundary guard: a corrupted/compromised persisted entry must
- // be re-validated before it is served. `isValidCatalog` rejects
- // non-string `release_date` etc., which would otherwise crash the
- // model picker (see `getModelsForProvider` below). Skip the cache and
- // fall through to re-fetch rather than serving malformed data.
-        if (isValidCatalog(entry.data) && Date.now() - entry.fetchedAt < CACHE_TTL_MS) {
-          memoryCache = entry.data;
-          memoryCacheTime = entry.fetchedAt;
-          return entry.data;
-        }
-      }
-    } catch { /* ignore storage errors */ }
+  if (!force) {
+    const cached = await readCachedCatalog();
+    if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+      memoryCache = cached.data;
+      memoryCacheTime = cached.fetchedAt;
+      return cached.data;
+    }
   }
 
  // Fetch from models.dev
@@ -253,38 +268,28 @@ async function loadCatalog(force: boolean): Promise<Catalog> {
       console.warn("[catalog] fetchCatalog failed:", fetchError.message);
     }
  // Network/validation failure — try stale cache
-    if (typeof chrome !== "undefined" && chrome.storage?.local) {
-      try {
-        const cached = await chrome.storage.local.get(CACHE_KEY);
-        const entry = cached[CACHE_KEY] as CachedCatalog | undefined;
- // Re-validate stale cache too (same trust-boundary guard as above).
-        if (entry && isValidCatalog(entry.data)) {
-          return entry.data;
-        }
-      } catch { /* ignore */ }
-    }
+    const cached = await readCachedCatalog();
+    if (cached) return cached.data;
  // No cache available — return empty
     return {};
   }
 }
 
-let memoryCache: Catalog | null = null;
-let memoryCacheTime = 0;
-
-/** In-flight fetch promise, memoized to dedupe concurrent callers. */
-let inflight: Promise<Catalog> | null = null;
-
 /**
  * Get all models for a specific provider from the catalog.
  * Returns an array of { id, name, ... } sorted by release date (newest first).
  */
+/** Non-deprecated models for a provider — the "usable" set. */
+function usableModels(provider: CatalogProvider): CatalogModel[] {
+  return Object.values(provider.models).filter((m) => m.status !== "deprecated");
+}
+
 export async function getModelsForProvider(providerId: string): Promise<CatalogModel[]> {
   try {
     const catalog = await fetchCatalog();
     const provider = catalog[providerId];
     if (!provider || !provider.models) return [];
-    return Object.values(provider.models)
-      .filter((m) => m.status !== "deprecated")
+    return usableModels(provider)
       .sort((a, b) => {
  // Defensive: a malformed cached entry could have a non-string
  // `release_date`. Coerce to "" so `.localeCompare` never throws and
@@ -323,8 +328,7 @@ export async function getDefaultModelForProvider(
     const catalog = await fetchCatalog();
     const provider = catalog[catalogProviderId];
     if (!provider || !provider.models) return undefined;
-    const models = Object.values(provider.models)
-      .filter((m) => m.status !== "deprecated")
+    const models = usableModels(provider)
       .sort((a, b) => b.release_date.localeCompare(a.release_date));
     return models[0]?.id;
   } catch {
@@ -345,12 +349,25 @@ export async function searchModels(query: string, limit = 50): Promise<Array<{
 }>> {
   const catalog = await fetchCatalog();
   const q = query.toLowerCase().trim();
+  if (q === "") {
+ // Empty query → return the full usable catalog (newest-first) so a cleared
+ // search box shows the whole picker rather than an empty list.
+    const all: Array<{ providerId: string; providerName: string; model: CatalogModel }> = [];
+    for (const [providerId, provider] of Object.entries(catalog)) {
+      if (!provider?.models) continue;
+      for (const model of usableModels(provider)) {
+        all.push({ providerId, providerName: provider.name, model });
+      }
+    }
+    return all
+      .sort((a, b) => b.model.release_date.localeCompare(a.model.release_date))
+      .slice(0, limit);
+  }
   const results: Array<{ providerId: string; providerName: string; model: CatalogModel; score: number }> = [];
 
   for (const [providerId, provider] of Object.entries(catalog)) {
     if (!provider?.models) continue;
-    for (const model of Object.values(provider.models)) {
-      if (model.status === "deprecated") continue;
+    for (const model of usableModels(provider)) {
       const modelId = typeof model.id === "string" ? model.id.toLowerCase() : "";
       const modelName = typeof model.name === "string" ? model.name.toLowerCase() : "";
       const providerName = typeof provider.name === "string" ? provider.name.toLowerCase() : "";
@@ -462,9 +479,9 @@ export async function modelSupportsVision(modelId: string, providerId?: string):
 
 /**
  * Format a model's vision capability for display in the UI.
- * Returns "👁 Vision" if the model supports image inputs, "" otherwise.
+ * Returns "Vision" if the model supports image inputs, "" otherwise.
  */
 export function formatVision(attachment?: boolean): string {
-  return attachment ? "👁 Vision" : "";
+  return attachment ? "Vision" : "";
 }
 

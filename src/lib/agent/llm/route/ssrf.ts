@@ -121,14 +121,27 @@ function parseIPv4Octets(host: string): number[] | null {
  * private IP — that is the user's own host, not an SSRF target.
  * Returns false for non-IPv4-literal hosts (caller treats them as hostnames).
  */
+/** True iff `(a, b)` octets are in a genuine SSRF-sink IPv4 range. */
+function isSsrfSinkIpv4(a: number, b: number): boolean {
+  if (a === 0) return true;                              // 0.0.0.0/8 unspecified
+  if (a === 169 && b === 254) return true;               // 169.254.0.0/16 link-local / cloud metadata
+  if (a === 100 && b >= 64 && b <= 127) return true;     // 100.64.0.0/10 CGNAT
+  return false;
+}
+
+/** True iff `(a, b)` octets are in an RFC1918 private IPv4 range. */
+function isRfc1918Ipv4(a: number, b: number): boolean {
+  if (a === 10) return true;                             // RFC1918 10.0.0.0/8
+  if (a === 172 && b >= 16 && b <= 31) return true;      // RFC1918 172.16.0.0/12
+  if (a === 192 && b === 168) return true;               // RFC1918 192.168.0.0/16
+  return false;
+}
+
 function isDangerousIpv4(host: string): boolean {
   const o = parseIPv4Octets(host);
   if (!o) return false;
   const [a, b] = o;
-  if (a === 0) return true;                              // 0.0.0.0/8 unspecified
-  if (a === 169 && b === 254) return true;               // 169.254.0.0/16 link-local / cloud metadata
-  if (a === 100 && b >= 64 && b <= 127) return true;     // 100.64.0.0/10 CGNAT
-  return false;                                          // loopback 127/8 + RFC1918 10/8,172.16/12,192.168/16 ALLOWED
+  return isSsrfSinkIpv4(a, b);                           // loopback 127/8 + RFC1918 ALLOWED
 }
 
 /**
@@ -159,21 +172,12 @@ function isLocalIpv4(host: string): boolean {
   if (!o) return false;
   const [a, b] = o;
   if (a === 127) return true;                         // loopback 127.0.0.0/8
-  if (a === 10) return true;                          // RFC1918 10.0.0.0/8
-  if (a === 172 && b >= 16 && b <= 31) return true;   // RFC1918 172.16.0.0/12
-  if (a === 192 && b === 168) return true;            // RFC1918 192.168.0.0/16
-  return false;
+  return isRfc1918Ipv4(a, b);
 }
 
 function isLocalIpv6(host: string): boolean {
-  const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(host);
-  if (mappedHex) {
-    const g5 = parseInt(mappedHex[1], 16);
-    const g6 = parseInt(mappedHex[2], 16);
-    return isLocalIpv4(`${(g5 >> 8) & 0xff}.${g5 & 0xff}.${(g6 >> 8) & 0xff}.${g6 & 0xff}`);
-  }
-  const mappedDotted = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(host);
-  if (mappedDotted) return isLocalIpv4(mappedDotted[1]);
+  const emb = parseMappedIpv4(host);
+  if (emb !== null) return isLocalIpv4(emb);
   const groups = expandIPv6(host);
   if (!groups) return false;
  //  1 loopback.
@@ -198,19 +202,19 @@ function isDangerousIpv6(host: string): boolean {
  // IPv4-mapped IPv6. The URL parser canonicalizes `:ffff:127.0.0.1` into the
  // hex form `:ffff:7f00:1` (the IPv4 packed into the last two 16-bit groups),
  // so handle both the dotted and canonical-hex representations.
-  const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(host);
-  if (mappedHex) {
-    const g5 = parseInt(mappedHex[1], 16);
-    const g6 = parseInt(mappedHex[2], 16);
-    const embedded = `${(g5 >> 8) & 0xff}.${g5 & 0xff}.${(g6 >> 8) & 0xff}.${g6 & 0xff}`;
-    return isDangerousIpv4(embedded);
-  }
-  const mappedDotted = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(host);
-  if (mappedDotted) {
-    return isDangerousIpv4(mappedDotted[1]);
-  }
+  const emb = parseMappedIpv4(host);
+  if (emb !== null) return isDangerousIpv4(emb);
   const groups = expandIPv6(host);
   if (!groups) return false; // not a valid IPv6 literal → treat as hostname
+ // IPv4-mapped /96 prefix (::ffff:0:0/96): the last 32 bits are a native IPv4
+ // address the stack reaches directly. The WHATWG URL parser canonicalizes
+ // `::ffff:0:<ipv4>` to the three-group form `::ffff:0:WWXX:YYZZ`, which the
+ // 2-group parseMappedIpv4 above misses, so detect it here and block when the
+ // embedded IPv4 is dangerous (e.g. 169.254.169.254 cloud metadata).
+  if (groups[4] === 0xffff && groups[5] === 0) {
+    const embedded = groupsToIpv4(groups[6], groups[7]);
+    if (embedded && isDangerousIpv4(embedded)) return true;
+  }
  // Unspecified : (equivalent to 0.0.0.0) — still a genuine SSRF sink.
   if (groups.every((g) => g === 0)) return true;
  // Loopback :1 — IPv6 localhost — ALLOWED (self-hosted model server). Must be
@@ -255,6 +259,24 @@ function isDangerousIpv6(host: string): boolean {
 function groupsToIpv4(g6: number, g7: number): string | null {
   if (g6 < 0 || g6 > 0xffff || g7 < 0 || g7 > 0xffff) return null;
   return `${(g6 >> 8) & 0xff}.${g6 & 0xff}.${(g7 >> 8) & 0xff}.${g7 & 0xff}`;
+}
+
+/**
+ * Extract the embedded IPv4 address from an IPv4-mapped IPv6 literal
+ * (`::ffff:<ipv4>` in either dotted or canonical-hex form). Returns the
+ * dotted-quad IPv4 string, or `null` when the host is not a mapped form.
+ * Shared by the three IPv6 classifiers so the decomposition isn't duplicated.
+ */
+function parseMappedIpv4(host: string): string | null {
+  const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(host);
+  if (mappedHex) {
+    const g5 = parseInt(mappedHex[1], 16);
+    const g6 = parseInt(mappedHex[2], 16);
+    return `${(g5 >> 8) & 0xff}.${g5 & 0xff}.${(g6 >> 8) & 0xff}.${g6 & 0xff}`;
+  }
+  const mappedDotted = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(host);
+  if (mappedDotted) return mappedDotted[1];
+  return null;
 }
 
 function expandIPv6(host: string): number[] | null {
@@ -343,7 +365,7 @@ export async function resolveAndValidateLlmBaseUrl(
   url: string,
   allowLocalExemption = true,
 ): Promise<SsrfCheckResult> {
-  const base = validateLlmBaseUrl(url);
+  const base = validateLlmBaseUrl(url, allowLocalExemption);
   if (!base.ok) return base;
 
  // Apply the curated-local exemption (used only for user-configured URLs).
@@ -360,12 +382,21 @@ export async function resolveAndValidateLlmBaseUrl(
   const outcome = await dnsResolve(host);
   if (outcome.kind === "unavailable") {
  // No DNS resolver exists in this runtime (e.g. a Node context without the
- // `dns` module). The synchronous {@link validateLlmBaseUrl} already passed
- // and the transport layer re-checks the literal URL, so we degrade to allow
- // — but surface a warning so the (rare) gap in SSRF coverage is observable
- // rather than silent. In a Chrome extension service worker
- // `chrome.dns.resolve` IS available, so this path is effectively unreachable
- // in production. See finding: dnsResolve swallows all errors and fails open.
+ // `dns` module). For an UNTRUSTED baseUrl (provenance NOT user-configured,
+ // allowLocalExemption=false) we FAIL CLOSED: without a resolver we cannot
+ // verify the real target IP, so a hostname that resolves to a cloud-metadata /
+ // internal address would be a live SSRF exfil path. Only a user-configured
+ // baseUrl (allowLocalExemption=true) degrades to the synchronous check's pass
+ // (fail-open) so legit self-hosted endpoints keep working in odd runtimes; the
+ // transport layer re-checks the literal URL regardless. In a Chrome extension
+ // service worker `chrome.dns.resolve` IS available, so this path is
+ // effectively unreachable in production.
+    if (!allowLocalExemption) {
+      return {
+        ok: false,
+        reason: `DNS resolver unavailable; refusing untrusted ${url} (fail-closed SSRF guard).`,
+      };
+    }
     console.warn(
       `[ssrf] dnsResolve unavailable — degrading ${url} to the synchronous SSRF ` +
         `check (fail-open). Verify the transport-layer guard still blocks ` +
@@ -385,8 +416,9 @@ export async function resolveAndValidateLlmBaseUrl(
     };
   }
   for (const ip of outcome.ips) {
-    const blocked = isPrivateOrLoopbackIp(ip);
-    if (blocked) {
+    const alwaysBlocked = ip.includes(":") ? isDangerousIpv6(ip) : isDangerousIpv4(ip);
+    const localUntrusted = !allowLocalExemption && isUserLocalIp(ip);
+    if (alwaysBlocked || localUntrusted) {
       return {
         ok: false,
         reason: `host ${host} resolves to a private/loopback/link-local address (${ip}): ${url}`,
@@ -398,11 +430,8 @@ export async function resolveAndValidateLlmBaseUrl(
 
 /** Extract just the hostname from a URL (no brackets, no port). */
 function baseUrlHost(url: string): string {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return "";
-  }
+  const parsed = parseBaseUrl(url);
+  return parsed ? parsed.hostname : "";
 }
 
 /** True for a DNS hostname (contains a dot or is not a pure IP literal). */
@@ -475,6 +504,32 @@ async function dnsResolve(hostname: string): Promise<DnsOutcome> {
  * user-configured), those user-local endpoints are additionally REJECTED so an
  * injected `baseUrl` can never reach the user's own local model server.
  */
+/**
+ * Parse a `baseUrl` into a {@link URL}, repairing a common IPv6-literal typo
+ * where `::` was written as a single `:` inside the brackets
+ * (e.g. `[:1]` → `[::1]`, `[fc00:1]` → `[fc00::1]`,
+ * `[:ffff:127.0.0.1]` → `[::ffff:127.0.0.1]`). The repair runs ONLY when the
+ * original string is not a valid URL, so legitimate URLs are never altered and
+ * the SSRF classification below still applies in full. Returns null for any URL
+ * that cannot be parsed even after the repair attempt.
+ */
+function parseBaseUrl(url: string): URL | null {
+  try {
+    return new URL(url);
+  } catch {
+    const m = /^([^[\]]*)\[([^\]]+)\](.*)$/.exec(url);
+    if (m) {
+      const repairedHost = m[2].replace(/:(?!:)/, "::");
+      try {
+        return new URL(`${m[1]}[${repairedHost}]${m[3]}`);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
 export function validateLlmBaseUrl(
   url: string,
   allowLocalExemption = true,
@@ -482,10 +537,8 @@ export function validateLlmBaseUrl(
   if (typeof url !== "string" || url.length === 0) {
     return { ok: false, reason: "baseUrl must be a non-empty string" };
   }
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
+  const parsed = parseBaseUrl(url);
+  if (!parsed) {
     return { ok: false, reason: `invalid URL: ${url}` };
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
@@ -504,6 +557,15 @@ export function validateLlmBaseUrl(
     return {
       ok: false,
       reason: `host resolves to a private/loopback/link-local address: ${normalizedHost}`,
+    };
+  }
+ // Cloud-metadata / internal hostnames (e.g. `metadata.google.internal`, which
+ // resolves to 169.254.169.254) are never legitimate LLM endpoints and are not
+ // caught by the IP-literal checks above. Reject them unconditionally.
+  if (normalizedHost.toLowerCase().replace(/\.$/, "").endsWith(".internal")) {
+    return {
+      ok: false,
+      reason: `host is a cloud-metadata/internal endpoint not allowed: ${url}`,
     };
   }
  // Provenance gate: when the baseUrl is NOT user-configured, also reject
@@ -572,7 +634,22 @@ export function validateWebhookUrl(url: string): SsrfCheckResult {
 
 /** True if `host` is an IP literal (or hostname) that a webhook must NOT reach. */
 function isBlockedWebhookHost(host: string): boolean {
-  if (host.includes(":")) return isBlockedWebhookIpv6(host);
+ // Reject internal/metadata hostnames that the IP-range checks can't see:
+ // cloud-metadata zones, mDNS/local zones, and single-label names (which can
+ // resolve to unexpected local targets). `localhost` stays allowed per the
+ // module doc (a self-hosted notification relay in dev).
+  const h = host.toLowerCase().replace(/\.$/, "");
+  if (h === "localhost" || h.endsWith(".localhost")) return false;
+  if (
+    h.endsWith(".internal") ||
+    h.endsWith(".local") ||
+    h.endsWith(".lan") ||
+    h.endsWith(".home") ||
+    (!h.includes(".") && !h.includes(":"))
+  ) {
+    return true;
+  }
+  if (h.includes(":")) return isBlockedWebhookIpv6(host);
   return isBlockedWebhookIpv4(host);
 }
 
@@ -580,27 +657,22 @@ function isBlockedWebhookIpv4(host: string): boolean {
   const o = parseIPv4Octets(host);
   if (!o) return false; // not an IPv4 literal → hostname, allowed
   const [a, b] = o;
-  if (a === 0) return true;                              // 0.0.0.0/8 unspecified
-  if (a === 169 && b === 254) return true;               // 169.254.0.0/16 link-local / cloud metadata
-  if (a === 100 && b >= 64 && b <= 127) return true;     // 100.64.0.0/10 CGNAT
-  if (a === 10) return true;                             // RFC1918 10.0.0.0/8
-  if (a === 172 && b >= 16 && b <= 31) return true;      // RFC1918 172.16.0.0/12
-  if (a === 192 && b === 168) return true;               // RFC1918 192.168.0.0/16
-  return false;                                          // loopback 127/8 + public ALLOWED
+  return isSsrfSinkIpv4(a, b) || isRfc1918Ipv4(a, b);    // loopback 127/8 + public ALLOWED
 }
 
 function isBlockedWebhookIpv6(host: string): boolean {
-  const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(host);
-  if (mappedHex) {
-    const g5 = parseInt(mappedHex[1], 16);
-    const g6 = parseInt(mappedHex[2], 16);
-    const embedded = `${(g5 >> 8) & 0xff}.${g5 & 0xff}.${(g6 >> 8) & 0xff}.${g6 & 0xff}`;
-    return isBlockedWebhookIpv4(embedded);
-  }
-  const mappedDotted = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(host);
-  if (mappedDotted) return isBlockedWebhookIpv4(mappedDotted[1]);
+  const emb = parseMappedIpv4(host);
+  if (emb !== null) return isBlockedWebhookIpv4(emb);
   const groups = expandIPv6(host);
   if (!groups) return false; // not a valid IPv6 literal → hostname, allowed
+ // IPv4-mapped /96 prefix (::ffff:0:0/96): the last 32 bits are a native IPv4
+ // address reachable directly. The WHATWG URL parser canonicalizes
+ // `::ffff:0:<ipv4>` to `::ffff:0:WWXX:YYZZ`, which parseMappedIpv4 misses,
+ // so detect it here and block when the embedded IPv4 is dangerous.
+  if (groups[4] === 0xffff && groups[5] === 0) {
+    const embedded = groupsToIpv4(groups[6], groups[7]);
+    if (embedded && isBlockedWebhookIpv4(embedded)) return true;
+  }
   if (groups.every((g) => g === 0)) return true;          //  unspecified
   if (groups[7] === 1 && groups.slice(0, 7).every((g) => g === 0)) return false; //  1 loopback allowed
   if ((groups[0] & 0xffc0) === 0xfe80) return true;       // fe80:/10 link-local

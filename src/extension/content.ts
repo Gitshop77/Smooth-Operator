@@ -21,33 +21,8 @@ import { generateAccessibilityTree, initElementMap } from "@/lib/agent/dom/ax-tr
 import { executeAction } from "@/lib/agent/tools/executor";
 import { setPersistentHighlight } from "@/lib/agent/dom/overlay";
 import { installPopupHandler } from "@/lib/agent/dom/popup-handler";
+import { setDomainConfig, validateDomainConfig } from "@/lib/agent/tools/helpers/domain-config";
 import type { AgentAction, ActionResult, BrowserState, TabInfo } from "@/lib/agent/types";
-
-/**
- * Validate that an incoming `domainConfig` payload is a shape-valid URL policy
- * before it is installed as the security policy (used by the EXECUTE_ACTIONS
- * handler). A malformed payload must NOT be installed — doing so could either
- * disable enforcement (empty object treated as "no restrictions") or crash the
- * executor when it reads fields that don't exist.
- *
- * Accepts the canonical policy shape `{ enforced?: boolean, allow?: string[],
- * block?: string[] }` and a relaxed shape where at least one of `allow` /
- * `block` is a string array. Returns false for null, non-objects, or objects
- * whose fields have the wrong types — those are ignored so the last-known-good
- * policy is retained instead of being downgraded.
- */
-function isValidDomainConfig(cfg: unknown): cfg is Record<string, unknown> {
-  if (!cfg || typeof cfg !== "object") return false;
-  const c = cfg as Record<string, unknown>;
-  const isStringArray = (v: unknown) =>
-    Array.isArray(v) && v.every((x) => typeof x === "string");
-  if ("enforced" in c && typeof c.enforced !== "boolean") return false;
-  if ("allow" in c && !isStringArray(c.allow)) return false;
-  if ("block" in c && !isStringArray(c.block)) return false;
- // Require at least one recognized field so a random object can't be
- // mistaken for a policy.
-  return "enforced" in c || "allow" in c || "block" in c;
-}
 
 // ─── Message contracts ─────────────────────────────────────────────────────
 
@@ -113,17 +88,17 @@ type Response<T = unknown> = OkResponse<T> | ErrorResponse;
 const DEBUG_HIGHLIGHT_ENABLED =
   (globalThis as { __openCoworkDebug?: boolean }).__openCoworkDebug === true;
 
+// Debug-gated logger: writes diagnostics to the shared devtools console only
+// when the debug overlay is enabled. Production keeps a clean console (better
+// stealth), debug mode retains the diagnostics.
+const log: (...args: unknown[]) => void = DEBUG_HIGHLIGHT_ENABLED
+  ? console.warn.bind(console, "[content]")
+  : () => {};
+
 /** Entry point. Idempotent — re-injection is a no-op. */
 (() => {
   if ((window as unknown as { __openCoworkInjected?: boolean }).__openCoworkInjected) return;
-  (window as unknown as { __openCoworkInjected?: boolean }).__openCoworkInjected = true;
-
- // Last-known-good URL policy (allow/blocklist). Retained across messages so a
- // single EXECUTE_ACTIONS that omits `domainConfig` cannot silently downgrade
- // enforcement to "no restrictions" (which would let the autonomous agent be
- // steered to attacker sites). Reset only when a new policy is explicitly
- // provided.
-  let lastDomainConfig: unknown = undefined;
+  Object.defineProperty(window, "__openCoworkInjected", { value: true, enumerable: false, configurable: true });
 
  // Initialize the AX-tree element map on injection. Wrap in try/catch so a
  // failure here doesn't block the rest of the content script (e.g. some
@@ -131,13 +106,13 @@ const DEBUG_HIGHLIGHT_ENABLED =
   try {
     initElementMap();
   } catch (e) {
-    console.warn("[content] initElementMap failed:", e);
+    log("initElementMap failed:", e);
   }
  // Auto-dismiss alert/confirm/prompt dialogs so the agent can't hang.
   try {
     installPopupHandler();
   } catch (e) {
-    console.warn("[content] installPopupHandler failed:", e);
+    log("installPopupHandler failed:", e);
   }
 
   chrome.runtime.onMessage.addListener(
@@ -193,8 +168,7 @@ const DEBUG_HIGHLIGHT_ENABLED =
               index: el.index,
               rect: el.rect,
             }));
-            const devicePixelRatio =
-              (typeof window !== "undefined" && window.devicePixelRatio) || 1;
+            const devicePixelRatio = window.devicePixelRatio || 1;
 
             sendResponse({
               ok: true,
@@ -241,27 +215,22 @@ const DEBUG_HIGHLIGHT_ENABLED =
  // policy.
           const incomingDomainConfig = msg.domainConfig;
           if (incomingDomainConfig !== undefined) {
- // SECURITY: never silently downgrade the policy to "no
- // restrictions". If this message omits `domainConfig`, KEEP the
- // last-known-good policy rather than overwriting with `undefined`
- // (which `getDomainConfig` would treat as `{}` → unrestricted).
- // Only replace the policy when a REAL, shape-valid policy object is
- // supplied, so a malformed/absent payload cannot disable enforcement.
-            if (isValidDomainConfig(incomingDomainConfig)) {
-              lastDomainConfig = incomingDomainConfig;
+ // SECURITY: only install a REAL, shape-valid policy. The shared
+ // `validateDomainConfig` recognizes the canonical
+ // { allowedDomains, blockedDomains } shape shipped by the service
+ // worker (the previous ad-hoc validator only knew allow/block and
+ // therefore never set the global — leaving the content-script URL
+ // gate dead). `setDomainConfig` retains the last-known-good policy
+ // when the payload is absent or malformed, so we never silently
+ // downgrade to allow-all, and sets the `__openCoworkDomainConfigEnforced`
+ // flag only when a list is actually configured.
+            const v = validateDomainConfig(incomingDomainConfig);
+            if (v) {
+              setDomainConfig(
+                v,
+                Boolean(v.allowedDomains?.length || v.blockedDomains?.length),
+              );
             }
- // A null, non-object, or shape-invalid payload is ignored
- // (retains last good).
-          }
- // SECURITY: only publish the policy once a REAL, shape-valid one has
- // been received. Writing `undefined` here would make `getDomainConfig()`
- // treat it as `{}` → unrestricted navigation, silently downgrading
- // enforcement before the first valid policy arrives. If we never got a
- // policy, leave the global unset.
-          if (lastDomainConfig !== undefined) {
-            (
-              globalThis as { __openCoworkDomainConfig?: unknown }
-            ).__openCoworkDomainConfig = lastDomainConfig;
           }
           (async () => {
             try {

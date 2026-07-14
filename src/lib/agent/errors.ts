@@ -50,9 +50,18 @@ function containsAny(haystack: string, needles: readonly string[]): boolean {
 }
 
 /** Test whether `haystack` contains a status code as a standalone token (word boundary). */
+const STATUS_RES = new Map<string, RegExp>();
 function containsStatus(haystack: string, code: string): boolean {
-  return new RegExp(`\\b${code}\\b`).test(haystack);
+  let re = STATUS_RES.get(code);
+  if (!re) {
+    re = new RegExp(`\\b${code}\\b`);
+    STATUS_RES.set(code, re);
+  }
+  return re.test(haystack);
 }
+
+/** Matches a 5xx server-error status code as a standalone token (word boundary). */
+const FIVE_XX_RE = /\b5\d\d\b/;
 
 /**
  * Classify an error into one of {@link ErrorCategory}.
@@ -80,37 +89,49 @@ export function classifyError(error: unknown): ClassifiedError {
   const originalMessage = error instanceof Error ? error.message : String(error);
   const lower = toLowerMessage(error);
 
+  const mk = (
+    category: ErrorCategory,
+    fatal: boolean,
+    retryable: boolean,
+  ): ClassifiedError => ({
+    category,
+    fatal,
+    retryable,
+    message: originalMessage,
+    originalError: error,
+  });
+
  // Auth errors — fatal, don't retry.
   if (containsStatus(lower, "401") || containsAny(lower, ["unauthorized", "invalid api key"])) {
-    return { category: "auth", fatal: true, retryable: false, message: originalMessage, originalError: error };
+    return mk("auth", true, false);
   }
 
  // Forbidden — fatal.
   if (containsStatus(lower, "403") || containsAny(lower, ["forbidden", "access denied"])) {
-    return { category: "forbidden", fatal: true, retryable: false, message: originalMessage, originalError: error };
+    return mk("forbidden", true, false);
   }
 
  // Bad request — fatal.
   if (containsStatus(lower, "400") || containsAny(lower, ["bad request", "invalid request"])) {
-    return { category: "bad_request", fatal: true, retryable: false, message: originalMessage, originalError: error };
+    return mk("bad_request", true, false);
   }
 
  // Cancelled (AbortError) — never retry. Checked AFTER auth/forbidden so an
  // aborted 401 fetch still classifies as auth (which is the more useful label).
   if (containsAny(lower, ["abort", "cancelled", "canceled"])) {
-    return { category: "cancelled", fatal: false, retryable: false, message: originalMessage, originalError: error };
+    return mk("cancelled", false, false);
   }
 
  // Server errors (5xx) — transient. Checked BEFORE rate_limit so that a 5xx
  // response whose body happens to mention "rate limit" is still classified as
  // a server_error (retry with backoff) rather than as rate_limit.
-  if (/\b5\d\d\b/.test(lower) || containsAny(lower, ["server error", "internal error", "bad gateway", "service unavailable", "gateway timeout"])) {
-    return { category: "server_error", fatal: false, retryable: true, message: originalMessage, originalError: error };
+  if (FIVE_XX_RE.test(lower) || containsAny(lower, ["server error", "internal error", "bad gateway", "service unavailable", "gateway timeout"])) {
+    return mk("server_error", false, true);
   }
 
  // Rate limit — transient, retry with backoff.
   if (containsStatus(lower, "429") || containsAny(lower, ["too many requests", "rate limit"])) {
-    return { category: "rate_limit", fatal: false, retryable: true, message: originalMessage, originalError: error };
+    return mk("rate_limit", false, true);
   }
 
  // Network errors — transient.
@@ -123,7 +144,7 @@ export function classifyError(error: unknown): ClassifiedError {
     error instanceof TypeError &&
     /(failed to fetch|fetch failed|networkerror|network request failed|load failed)/.test(lower)
   ) {
-    return { category: "network", fatal: false, retryable: true, message: originalMessage, originalError: error };
+    return mk("network", false, true);
   }
 
  // Broad network substring match. This is intentionally restricted to values
@@ -143,7 +164,7 @@ export function classifyError(error: unknown): ClassifiedError {
     !(error instanceof TypeError || error instanceof ReferenceError || error instanceof SyntaxError) &&
     containsAny(lower, ["fetch failed", "network", "econnreset", "econnrefused", "timeout", "etimedout", "stall", "stream"])
   ) {
-    return { category: "network", fatal: false, retryable: true, message: originalMessage, originalError: error };
+    return mk("network", false, true);
   }
 
  // Structured status code (carried by the HTTP transport on the error object)
@@ -155,19 +176,22 @@ export function classifyError(error: unknown): ClassifiedError {
   const status = (error as { status?: number }).status;
   if (typeof status === "number") {
     if (status === 401) {
-      return { category: "auth", fatal: true, retryable: false, message: originalMessage, originalError: error };
+      return mk("auth", true, false);
     }
     if (status === 403) {
-      return { category: "forbidden", fatal: true, retryable: false, message: originalMessage, originalError: error };
+      return mk("forbidden", true, false);
     }
-    if (status === 400 || (status >= 400 && status < 500 && status !== 429)) {
-      return { category: "bad_request", fatal: true, retryable: false, message: originalMessage, originalError: error };
+    if (status === 400 || (status >= 400 && status < 500 && status !== 429 && status !== 408 && status !== 425)) {
+      return mk("bad_request", true, false);
+    }
+    if (status === 408 || status === 425) {
+      return mk("network", false, true);
     }
     if (status === 429) {
-      return { category: "rate_limit", fatal: false, retryable: true, message: originalMessage, originalError: error };
+      return mk("rate_limit", false, true);
     }
     if (status >= 500 && status < 600) {
-      return { category: "server_error", fatal: false, retryable: true, message: originalMessage, originalError: error };
+      return mk("server_error", false, true);
     }
   }
 
@@ -180,7 +204,7 @@ export function classifyError(error: unknown): ClassifiedError {
  // browser `fetch` network failure (a `TypeError: Failed to fetch`) is still
  // classified as a transient `network` error and retried.
   if (error instanceof TypeError || error instanceof ReferenceError || error instanceof SyntaxError) {
-    return { category: "programmer_error", fatal: true, retryable: false, message: originalMessage, originalError: error };
+    return mk("programmer_error", true, false);
   }
 
  // Request-shape / validation errors — FATAL. A provider SDK may throw a
@@ -192,7 +216,7 @@ export function classifyError(error: unknown): ClassifiedError {
  // budget). This branch only applies when no `status` is present; any error
  // carrying a 4xx status is already handled by the structured-status block.
   if (containsAny(lower, ["validation", "schema"])) {
-    return { category: "bad_request", fatal: true, retryable: false, message: originalMessage, originalError: error };
+    return mk("bad_request", true, false);
   }
 
  // Parse errors — transient (retry with nudge). Only reached for errors that
@@ -201,21 +225,21 @@ export function classifyError(error: unknown): ClassifiedError {
  // decode signal ("json"/"parse"). Request-shape phrasing ("validation"/
  // "schema") is handled above as a FATAL `bad_request`, not retried here.
   if (containsAny(lower, ["json", "parse"])) {
-    return { category: "parse", fatal: false, retryable: true, message: originalMessage, originalError: error };
+    return mk("parse", false, true);
   }
 
  // Max steps — fatal.
   if (containsAny(lower, ["max steps", "step budget"])) {
-    return { category: "max_steps", fatal: true, retryable: false, message: originalMessage, originalError: error };
+    return mk("max_steps", true, false);
   }
 
  // Max failures — fatal.
   if (containsAny(lower, ["max failures", "consecutive failures"])) {
-    return { category: "max_failures", fatal: true, retryable: false, message: originalMessage, originalError: error };
+    return mk("max_failures", true, false);
   }
 
  // Unknown — retry once.
-  return { category: "unknown", fatal: false, retryable: true, message: originalMessage, originalError: error };
+  return mk("unknown", false, true);
 }
 
 /**
@@ -247,7 +271,7 @@ export function friendlyErrorMessage(error: ClassifiedError): string {
     case "programmer_error":
       return "An internal error occurred (this is likely a bug — please report it).";
     default:
-      return error.message;
+      return "An unexpected error occurred. The agent will retry.";
   }
 }
 
@@ -361,27 +385,29 @@ for (const spec of ERROR_SPECS) {
 
 // Re-export each generated class under its canonical name so existing importers
 // (and their `instanceof` checks) are unaffected.
-export const NoSuchElementException = ERROR_CLASSES.NoSuchElementException;
-export const ElementNotFoundError = ERROR_CLASSES.ElementNotFoundError;
-export const ElementNotInteractableError = ERROR_CLASSES.ElementNotInteractableError;
-export const ElementClickInterceptedError = ERROR_CLASSES.ElementClickInterceptedError;
-export const ElementNotSelectableError = ERROR_CLASSES.ElementNotSelectableError;
-export const StaleElementReferenceError = ERROR_CLASSES.StaleElementReferenceError;
-export const InvalidSelectorError = ERROR_CLASSES.InvalidSelectorError;
-export const TimeoutError = ERROR_CLASSES.TimeoutError;
-export const NoSuchAlertError = ERROR_CLASSES.NoSuchAlertError;
-export const MoveTargetOutOfBoundsError = ERROR_CLASSES.MoveTargetOutOfBoundsError;
-export const InvalidArgumentError = ERROR_CLASSES.InvalidArgumentError;
-export const InvalidElementStateError = ERROR_CLASSES.InvalidElementStateError;
-export const ScriptTimeoutError = ERROR_CLASSES.ScriptTimeoutError;
-export const JavascriptError = ERROR_CLASSES.JavascriptError;
-export const UnsupportedOperationError = ERROR_CLASSES.UnsupportedOperationError;
-export const NoSuchFrameError = ERROR_CLASSES.NoSuchFrameError;
-export const NoSuchWindowError = ERROR_CLASSES.NoSuchWindowError;
-export const InvalidCookieDomainError = ERROR_CLASSES.InvalidCookieDomainError;
-export const UnableToSetCookieError = ERROR_CLASSES.UnableToSetCookieError;
-export const DetachedShadowRootError = ERROR_CLASSES.DetachedShadowRootError;
-export const NoSuchShadowRootError = ERROR_CLASSES.NoSuchShadowRootError;
+export const {
+  NoSuchElementException,
+  ElementNotFoundError,
+  ElementNotInteractableError,
+  ElementClickInterceptedError,
+  ElementNotSelectableError,
+  StaleElementReferenceError,
+  InvalidSelectorError,
+  TimeoutError,
+  NoSuchAlertError,
+  MoveTargetOutOfBoundsError,
+  InvalidArgumentError,
+  InvalidElementStateError,
+  ScriptTimeoutError,
+  JavascriptError,
+  UnsupportedOperationError,
+  NoSuchFrameError,
+  NoSuchWindowError,
+  InvalidCookieDomainError,
+  UnableToSetCookieError,
+  DetachedShadowRootError,
+  NoSuchShadowRootError,
+} = ERROR_CLASSES;
 
 /** The page reached a state the agent cannot recover from (e.g. dialog open). */
 export class UnexpectedAlertOpenError extends AgentError {

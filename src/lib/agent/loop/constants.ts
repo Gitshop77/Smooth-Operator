@@ -17,6 +17,9 @@ export const EXPLORATION_NUDGE_STEPS = 5;
 export const CAPTCHA_URL_HINTS = ["recaptcha", "hcaptcha", "captcha", "cf-chl", "challenge"];
 /** URL substrings / file extensions that suggest a download is in progress. */
 export const DOWNLOAD_URL_HINTS = [".pdf", ".zip", ".tar", ".gz", ".docx", ".xlsx", ".csv", "download"];
+/** Boundary-aware download-URL detector, derived from {@link DOWNLOAD_URL_HINTS}. */
+const DOWNLOAD_EXT = DOWNLOAD_URL_HINTS.map((e) => e.replace(/^\./, ""));
+export const DOWNLOAD_RE = new RegExp(`\\.(${DOWNLOAD_EXT.join("|")})(?:[?#/]|$)`, "i");
 /** Tab-level action types that the extension background worker must handle. */
 export const TAB_LEVEL_ACTIONS = new Set(["switch_tab", "close_tab", "navigate", "search"]);
 /** How long to wait for the user to click "Resume" after a `takeover` action

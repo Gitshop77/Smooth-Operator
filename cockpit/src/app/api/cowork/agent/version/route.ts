@@ -1,5 +1,5 @@
 import type { NextRequest } from 'next/server';
-import { json, withRouteError } from '@/lib/cowork/api/http';
+import { json, withRouteError, sanitizeRequestId } from '@/lib/cowork/api/http';
 import {
   CAPABILITY_FAMILIES,
   DISCOVERY_ROUTE_AUTH,
@@ -7,7 +7,7 @@ import {
   COCKPIT_VERSION,
 } from '@/lib/cowork/api/agent-bootstrap';
 
-export async function GET(_req: NextRequest): Promise<Response> {
+export async function GET(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
     return json({
       name: 'cowork-cockpit',
@@ -27,6 +27,8 @@ export async function GET(_req: NextRequest): Promise<Response> {
  // `/agent/version` knows it must send the token for data routes.
       ...DISCOVERY_ROUTE_AUTH,
       pairingSupported: false,
+    }, 200, {
+      'cache-control': 'public, max-age=300',
     });
-  });
+  }, sanitizeRequestId(req.headers.get('x-request-id')));
 }

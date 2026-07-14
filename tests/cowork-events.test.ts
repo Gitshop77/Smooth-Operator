@@ -967,6 +967,18 @@ describe("cowork-events socket.io (integration)", () => {
     c.close();
   });
 
+ // NEGATIVE: /chat must reject a missing token with 401 (same auth gate as
+ // /emit and /events) — a regression that drops the middleware on /chat would
+ // otherwise silently expose the LLM proxy.
+  test("POST /chat WITHOUT token returns 401", async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "user", content: "hi" }], sessionId: "x", stream: true }),
+    });
+    expect(res.status).toBe(401);
+  });
+
  // ── /image success: returns base64 and records snapshot:captured ───────────
 
   test("POST /image returns the generated image and records snapshot:captured", async () => {
@@ -1008,6 +1020,18 @@ describe("cowork-events socket.io (integration)", () => {
     expect(snap!.payload.bytes).toBe("BASE64FAKEIMAGE==".length);
  // Explicitly assert the prompt is NOT persisted (PII hardening).
     expect((snap!.payload as { prompt?: string }).prompt).toBeUndefined();
+  });
+
+ // NEGATIVE: /image must reject a missing token with 401 (same auth gate as
+ // /emit and /events) — a regression that drops the middleware on /image would
+ // otherwise silently expose the image-generation proxy.
+  test("POST /image WITHOUT token returns 401", async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/image`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "a tiny cat", size: "1024x1024" }),
+    });
+    expect(res.status).toBe(401);
   });
 
  // ── NEGATIVE: unauthenticated (wrong-token) socket is dropped ─────────────

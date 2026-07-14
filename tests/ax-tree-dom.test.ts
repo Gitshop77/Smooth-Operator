@@ -95,7 +95,7 @@ describe("generateAccessibilityTree (DOM walking)", () => {
     const input = document.createElement("input");
     input.id = "email";
     input.setAttribute("type", "email");
-    input.setAttribute("placeholder", "Email");
+    input.setAttribute("placeholder", "your-email-address");
     document.body.append(label, input);
     const result = generateAccessibilityTree();
  // The input's accessible name resolves to "Email" (from the label or

@@ -12,6 +12,7 @@ import { EmptyState } from "@/components/cowork/shared/empty-state";
 
 export function WorkspacesView() {
   const { data, isLoading } = useWorkspaces();
+  const workspaces = data ?? [];
 
   return (
     <div className="space-y-4">
@@ -23,11 +24,11 @@ export function WorkspacesView() {
 
       {isLoading ? (
         <LoadingSkeleton variant="cards" cardCount={6} />
-      ) : (data?.length ?? 0) === 0 ? (
+      ) : workspaces.length === 0 ? (
         <EmptyState
           icon={<LayoutGrid className="size-6" />}
           title="No workspaces yet"
-          description="Workspaces are created via POST /api/cowork/workspaces. The cockpit dashboard is currently read-only."
+          description="Workspaces are created from the browser extension. The cockpit dashboard currently shows them read-only."
         />
       ) : (
         <motion.div
@@ -35,23 +36,23 @@ export function WorkspacesView() {
           animate={{ opacity: 1 }}
           className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3"
         >
-          {(data ?? []).map((ws) => (
+          {workspaces.map((ws) => (
             <Card key={ws.id} className="p-5 gap-3">
               <div className="flex items-start justify-between gap-2">
                 <div className="flex items-center gap-3 min-w-0">
-                  <div className="size-11 rounded-lg bg-muted grid place-items-center text-xl shrink-0">
+                  <div
+                    className="size-11 rounded-lg bg-muted grid place-items-center text-xl shrink-0"
+                    aria-hidden="true"
+                  >
                     {ws.icon}
                   </div>
                   <div className="min-w-0">
                     <p className="font-semibold truncate">{ws.name}</p>
                     <p className="text-xs text-muted-foreground">
-                      <span className="tnum">{ws.tabCount}</span> tabs
+                      <span className="tnum">{ws.tabCount ?? 0}</span> tabs
                     </p>
                   </div>
                 </div>
-              </div>
-              <div className="flex items-center justify-between pt-1">
-                <span className="text-xs text-muted-foreground">Idle</span>
               </div>
             </Card>
           ))}

@@ -69,6 +69,30 @@ function makeDeps(
   };
 }
 
+/** Run `maybeJudgeAndFinalize` with the standard base args, merged with overrides. */
+async function runJudge(
+  deps: LoopDeps,
+  state: LoopState,
+  judgeArgsOverrides: Record<string, unknown> = {},
+): Promise<boolean> {
+  const baseArgs = {
+    step: 0,
+    success: true,
+    text: "agent claims done",
+    navigatorHistory: [],
+    onCost: () => {},
+  };
+  const ctx: CallbackContext = { task: "test", step: 0, history: [] };
+  return maybeJudgeAndFinalize(
+    deps,
+    state.config,
+    { ...baseArgs, ...judgeArgsOverrides } as Parameters<typeof maybeJudgeAndFinalize>[2],
+    state,
+    state.dispatcher,
+    ctx,
+  );
+}
+
 // ─── positive control (judge agrees → run finalizes as success) ────────
 
 describe("judge success path finalizes correctly (positive control)", () => {
@@ -83,23 +107,8 @@ describe("judge success path finalizes correctly (positive control)", () => {
       plannerCall: vi.fn(async () => ({ raw: judgeJson, tokensIn: 10, tokensOut: 10, model: "m" })),
     });
     const state = makeLoopState(deps, events);
-    const ctx: CallbackContext = { task: "test", step: 0, history: [] };
 
-    const finalized = await maybeJudgeAndFinalize(
-      deps,
-      state.config,
-      {
-        step: 0,
-        success: true,
-        text: "agent claims done",
-        navigatorHistory: [],
- // Non-throwing cost callback so the success-finalization branch runs.
-        onCost: () => {},
-      },
-      state,
-      state.dispatcher,
-      ctx,
-    );
+    const finalized = await runJudge(deps, state);
 
  // The judge agreed → the run must finalize as success.
     expect(finalized).toBe(true);
@@ -122,16 +131,8 @@ describe("null judge verdict must NOT fail open", () => {
       plannerCall: vi.fn(async () => ({ raw: "this is not json at all" })),
     });
     const state = makeLoopState(deps, events);
-    const ctx: CallbackContext = { task: "test", step: 0, history: [] };
 
-    const finalized = await maybeJudgeAndFinalize(
-      deps,
-      state.config,
-      { step: 0, success: true, text: "agent claims done", navigatorHistory: [], onCost: () => {} },
-      state,
-      state.dispatcher,
-      ctx,
-    );
+    const finalized = await runJudge(deps, state);
 
  // Key invariant: a null verdict must never finalize as success:true.
     expect(finalized).toBe(false);
@@ -154,19 +155,34 @@ describe("null judge verdict must NOT fail open", () => {
       plannerCall: vi.fn(async () => { throw new Error("LLM unavailable"); }),
     });
     const state = makeLoopState(deps, events);
-    const ctx: CallbackContext = { task: "test", step: 0, history: [] };
 
-    const finalized = await maybeJudgeAndFinalize(
-      deps,
-      state.config,
-      { step: 0, success: true, text: "agent claims done", navigatorHistory: [], onCost: () => {} },
-      state,
-      state.dispatcher,
-      ctx,
-    );
+    const finalized = await runJudge(deps, state);
 
     expect(finalized).toBe(false);
     expect(state.finalResult).toBeUndefined();
+    const successDone = events.find((e) => e.type === "done" && e.success === true);
+    expect(successDone).toBeUndefined();
+  });
+
+  test("explicit verdict:false (judge disagrees) → run is NOT finalized as success", async () => {
+    const events: LogEvent[] = [];
+    const judgeJson = JSON.stringify({
+      reasoning: "x", verdict: false, failureReason: "incomplete",
+      impossibleTask: false, reachedCaptcha: false,
+    });
+    const deps = makeDeps(events, {
+ // Valid, parseable judge response that explicitly disagrees. This must route
+ // back to the planner (return false) — identical to the null-verdict path.
+      plannerCall: vi.fn(async () => ({ raw: judgeJson, tokensIn: 10, tokensOut: 10, model: "m" })),
+    });
+    const state = makeLoopState(deps, events);
+
+    const finalized = await runJudge(deps, state);
+
+ // An explicit disagreement must never finalize as success:true.
+    expect(finalized).toBe(false);
+    expect(state.finalResult).toBeUndefined();
+ // No terminal `done` event with success:true may be emitted.
     const successDone = events.find((e) => e.type === "done" && e.success === true);
     expect(successDone).toBeUndefined();
   });
@@ -186,24 +202,10 @@ describe("non-budget judge error must NOT fail open", () => {
       plannerCall: vi.fn(async () => ({ raw: judgeJson, tokensIn: 10, tokensOut: 10, model: "m" })),
     });
     const state = makeLoopState(deps, events);
-    const ctx: CallbackContext = { task: "test", step: 0, history: [] };
 
-    const finalized = await maybeJudgeAndFinalize(
-      deps,
-      state.config,
-      {
-        step: 0,
-        success: true,
-        text: "agent claims done",
-        navigatorHistory: [],
- // Non-budget error thrown from the cost callback propagates out of
- // judgeTask and is caught by maybeJudgeAndFinalize's catch-all.
-        onCost: () => { throw new Error("judge transport exploded"); },
-      },
-      state,
-      state.dispatcher,
-      ctx,
-    );
+    const finalized = await runJudge(deps, state, {
+      onCost: () => { throw new Error("judge transport exploded"); },
+    });
 
     expect(finalized).toBe(false);
     expect(state.finalResult).toBeUndefined();
@@ -228,22 +230,10 @@ describe("non-budget judge error must NOT fail open", () => {
       plannerCall: vi.fn(async () => ({ raw: judgeJson, tokensIn: 10, tokensOut: 10, model: "m" })),
     });
     const state = makeLoopState(deps, events);
-    const ctx: CallbackContext = { task: "test", step: 0, history: [] };
 
-    const finalized = await maybeJudgeAndFinalize(
-      deps,
-      state.config,
-      {
-        step: 0,
-        success: true,
-        text: "agent claims done",
-        navigatorHistory: [],
-        onCost: () => { throw new Error("Budget exceeded: $5.00 limit hit"); },
-      },
-      state,
-      state.dispatcher,
-      ctx,
-    );
+    const finalized = await runJudge(deps, state, {
+      onCost: () => { throw new Error("Budget exceeded: $5.00 limit hit"); },
+    });
 
  // Budget cap is a real failure — preserved from the old behavior.
     expect(finalized).toBe(true);

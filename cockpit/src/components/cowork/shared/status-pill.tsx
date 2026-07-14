@@ -5,14 +5,17 @@ import { cn } from "@/lib/utils";
 
 type Tone = "success" | "warning" | "error" | "info" | "neutral" | "running";
 
+// warning and running reuse the accent token for visual emphasis.
+const ACCENT_TONE = "bg-accent/10 text-accent border-accent/20";
+
 const TONES: Record<Tone, string> = {
   success: "bg-success/10 text-success border-success/20",
-  warning: "bg-accent/10 text-accent border-accent/20",
+  warning: ACCENT_TONE,
   error: "bg-destructive/10 text-destructive border-destructive/20",
- // Distinct blue (#60A5FA dark / #2563EB light) — the spec's `--info`.
+  // Info tone — informational/low-severity statuses.
   info: "bg-info/10 text-info border-info/20",
   neutral: "bg-muted text-muted-foreground border-border",
-  running: "bg-accent/10 text-accent border-accent/20",
+  running: ACCENT_TONE,
 };
 
 interface StatusPillProps {
@@ -37,7 +40,7 @@ export function StatusPill({
       )}
     >
       {(pulse || tone === "running") ? (
-        <span className="relative flex size-1.5">
+        <span className="relative flex size-1.5" aria-hidden="true">
           <span className="absolute inline-flex h-full w-full rounded-full bg-current opacity-60 cowork-pulse" />
           <span className="relative inline-flex size-1.5 rounded-full bg-current" />
         </span>
@@ -48,11 +51,20 @@ export function StatusPill({
 }
 
 /** Map common status strings to tones. */
+const STATUS_TONE: Record<string, Tone> = {
+  ok: "success", online: "success", connected: "success", active: "success",
+  interactive: "success", running: "success", approved: "success",
+  completed: "success", done: "success", enabled: "success", strong: "success",
+  "very-strong": "success", success: "success",
+  idle: "warning", loading: "warning", pending: "warning", thinking: "warning",
+  fair: "warning", warn: "warning", warning: "warning", medium: "warning",
+  paused: "warning", "waiting-approval": "warning", "ready-to-resume": "warning",
+  error: "error", failed: "error", crashed: "error", blocked: "error",
+  rejected: "error", weak: "error", critical: "error", offline: "error",
+  disabled: "error", "disabled-by-policy": "error", cancelled: "error",
+  info: "info", low: "info", log: "info", debug: "info",
+};
+
 export function toneForStatus(status: string): Tone {
-  const s = status.toLowerCase();
-  if (["ok", "online", "connected", "active", "interactive", "running", "approved", "completed", "done", "enabled", "strong", "very-strong", "success"].includes(s)) return "success";
-  if (["idle", "loading", "pending", "thinking", "fair", "warn", "warning", "medium", "paused", "waiting-approval", "ready-to-resume"].includes(s)) return "warning";
-  if (["error", "failed", "crashed", "blocked", "rejected", "weak", "critical", "offline", "disabled", "disabled-by-policy", "cancelled"].includes(s)) return "error";
-  if (["info", "low", "log", "debug"].includes(s)) return "info";
-  return "neutral";
+  return STATUS_TONE[(status ?? "").toLowerCase()] ?? "neutral";
 }

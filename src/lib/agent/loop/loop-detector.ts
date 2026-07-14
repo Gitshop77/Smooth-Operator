@@ -23,10 +23,15 @@
 
 import type { AgentAction } from "../types";
 
+/** Reused across every `sha256Hex` call (the hot path) instead of re-allocating. */
+const TEXT_ENCODER = new TextEncoder();
+/** Precomputed 2-char hex for every byte value (0–255) — avoids per-byte formatting. */
+const HEX_LOOKUP: string[] = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, "0"));
+
 /** Max actions kept in the rolling window. */
 const LOOP_WINDOW_SIZE = 20;
 /** Repetition counts that trigger a warning (escalating severity). */
-const WARN_THRESHOLDS = [5, 8, 12] as const;
+const WARN_THRESHOLDS: readonly number[] = [5, 8, 12];
 /** Max page fingerprints kept in the rolling window. */
 const PAGE_FP_WINDOW_SIZE = 5;
 /** Threshold milestones for stagnant-page warnings. MUST stay in lockstep with
@@ -60,10 +65,10 @@ interface ActionRecord {
  * {@link LoopDetector.recordPageState} are async.
  */
 async function sha256Hex(text: string): Promise<string> {
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return Array.from(new Uint8Array(buf))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  const buf = await crypto.subtle.digest("SHA-256", TEXT_ENCODER.encode(text));
+  const bytes = new Uint8Array(buf);
+  const out = Array.from(bytes, (b) => HEX_LOOKUP[b]).join("");
+  return out;
 }
 
 /**
@@ -207,25 +212,23 @@ function normalizeAction(action: AgentAction): string {
 }
 
 /**
- * Fast FNV-1a 64-bit hash, returned as a 16-char zero-padded hex string.
+ * Fast FNV-1a 32-bit hash, returned as an 8-char zero-padded hex string.
  *
- * We use the 64-bit variant (instead of the classic 32-bit one) to push the
- * birthday collision bound far past any realistic rolling-window size: the
- * loop detector buckets equivalent actions by this hash, and a 32-bit hash
- * (~65k distinct signatures) could let two genuinely different normalized
- * actions collide, emitting a spurious loop warning or nudging an early-stop.
- * 64 bits makes that vanishingly unlikely. The value is padded to a fixed
- * width so every signature is exactly 16 hex chars.
+ * The hash is used only for in-memory equality within a single run (the
+ * rolling window), so its value can change freely across versions without
+ * affecting detection results. 32 bits gives ~4.3e9 buckets — far more than
+ * the 20-item window can ever need — so collisions are negligible, and the
+ * Number-based `Math.imul` implementation is dramatically faster than a
+ * BigInt loop on the agent hot path. The value is padded to a fixed width so
+ * every signature is exactly 8 hex chars.
  */
 function fnv1a(s: string): string {
-  const mask = BigInt("0xffffffffffffffff");
-  let h = BigInt("0xcbf29ce484222325"); // FNV-1a 64-bit offset basis
-  const prime = BigInt("0x100000001b3"); // FNV-1a 64-bit prime
+  let h = 2166136261; // FNV-1a 32-bit offset basis
   for (let i = 0; i < s.length; i++) {
-    h ^= BigInt(s.charCodeAt(i));
-    h = (h * prime) & mask;
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0; // FNV-1a 32-bit prime
   }
-  return h.toString(16).padStart(16, "0");
+  return h.toString(16).padStart(8, "0");
 }
 
 /**
@@ -242,6 +245,8 @@ export class LoopDetector {
   /** How many consecutive page snapshots have been identical to the previous one. */
   private consecutiveStagnantPages = 0;
   private static readonly GOAL_WINDOW_SIZE = 6;
+  /** Count of the most-recently recorded action's hash in the window. */
+  private lastCount = 0;
 
   /**
  * Record an action and return how many times it (or an equivalent) has
@@ -253,7 +258,9 @@ export class LoopDetector {
     if (this.window.length > LOOP_WINDOW_SIZE) {
       this.window.shift();
     }
-    return this.window.filter((r) => r.hash === hash).length;
+    const count = this.window.filter((r) => r.hash === hash).length;
+    this.lastCount = count;
+    return count;
   }
 
   /**
@@ -262,10 +269,7 @@ export class LoopDetector {
  */
   shouldWarn(): number {
     if (this.window.length === 0) return 0;
-    const last = this.window[this.window.length - 1];
-    const count = this.window.filter((r) => r.hash === last.hash).length;
-    if ((WARN_THRESHOLDS as readonly number[]).includes(count)) return count;
-    return 0;
+    return WARN_THRESHOLDS.includes(this.lastCount) ? this.lastCount : 0;
   }
 
   /** Build the warning nudge text shown to the LLM. */
@@ -338,5 +342,6 @@ export class LoopDetector {
     this.goalWindow = [];
     this.pageFingerprints = [];
     this.consecutiveStagnantPages = 0;
+    this.lastCount = 0;
   }
 }

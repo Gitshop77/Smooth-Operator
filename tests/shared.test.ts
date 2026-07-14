@@ -70,8 +70,27 @@ describe("getCockpitUrl", () => {
     expect(await getCockpitUrl()).toBe(DEFAULT_COCKPIT_URL);
   });
 
+  test.each(["blob:foo", "file:///etc/passwd", "ftp://evil.com", "about:blank"])(
+    "falls back to default for a %s URL (non-http(s) scheme floor)",
+    async (u) => {
+      store[COCKPIT_URL_STORAGE_KEY] = u;
+      expect(await getCockpitUrl()).toBe(DEFAULT_COCKPIT_URL);
+    },
+  );
+
   test("falls back to default for an empty/invalid stored value", async () => {
     store[COCKPIT_URL_STORAGE_KEY] = "   ";
+    expect(await getCockpitUrl()).toBe(DEFAULT_COCKPIT_URL);
+  });
+
+  test("falls back to default when storage get rejects", async () => {
+    (globalThis as unknown as { chrome: unknown }).chrome = {
+      storage: {
+        local: {
+          get: () => Promise.reject(new Error("storage unavailable")),
+        },
+      },
+    };
     expect(await getCockpitUrl()).toBe(DEFAULT_COCKPIT_URL);
   });
 });

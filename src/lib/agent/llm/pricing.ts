@@ -115,6 +115,24 @@ const MAX_PRICING_CACHE = 256;
 const MAX_WARNED_MODELS = 128;
 
 /**
+ * Drop the oldest pricing-memo entry (insertion-ordered) so the cache can't
+ * grow without bound in a long-lived service worker.
+ */
+function evictPricingCache(): void {
+  if (pricingCache.size >= MAX_PRICING_CACHE) {
+    const oldest = pricingCache.keys().next().value;
+    if (oldest !== undefined) pricingCache.delete(oldest);
+  }
+}
+
+/** Clear the warned-model set wholesale (bounded spam control) once it hits its cap. */
+function maybeClearWarnedModels(): void {
+  if (warnedUncataloguedModels.size >= MAX_WARNED_MODELS) {
+    warnedUncataloguedModels.clear();
+  }
+}
+
+/**
  * Substring (case-insensitive) lookup over a pricing table.
  *
  * Resolution strategy to avoid order-dependent over-billing:
@@ -167,8 +185,10 @@ function lookupPricing(
  * Both call sites (`refreshPricingFromCatalog`) run `isValidCatalog` first, so
  * `cost` is already shape/range-validated. This function additionally defends
  * itself: any entry with a non-string `id`, non-numeric `cost.input/.output`,
- * or a negative rate is skipped rather than allowed to corrupt the whole table
- * (negative rates would defeat the cost cap, see `estimateCost`).
+ * or a non-positive rate is skipped rather than allowed to corrupt the whole
+ * table (a 0 rate would make `estimateCost` multiply token counts by zero and
+ * never accumulate spend, silently defeating the cost cap; negative rates would
+ * subtract from it — see `estimateCost`).
  *
  * Each model is keyed by its bare id (legacy behavior) AND by a
  * provider-prefixed id (`<providerId>/<modelId>`) so a caller that knows its
@@ -183,10 +203,16 @@ function convertCatalog(catalog: Catalog): Record<string, ModelPricing> {
       if (!model || typeof model.id !== "string") continue;
       const cost = model.cost;
       if (!cost || typeof cost.input !== "number" || typeof cost.output !== "number") continue;
- // Reject negative rates even though `isValidCatalog` already did: this
- // keeps the function safe if a future caller feeds it unvalidated data,
- // and prevents negative costs from subtracting from accumulated spend.
-      if (cost.input < 0 || cost.output < 0) continue;
+ // Reject non-positive rates (0 OR negative). `isValidCatalog` permits 0
+ // so the picker UI can still display legitimately-free models, but a 0
+ // input/output rate here would make `estimateCost` multiply token counts
+ // by zero and never accumulate spend — silently defeating the cost cap.
+ // Skipping the entry treats a non-positive rate as "uncatalogued", so
+ // `getPricingForModel` falls back to DEFAULT_UNKNOWN_MODEL_PRICE
+ // (expensive) and the cap still trips. We keep this check even though
+ // `isValidCatalog` already ran, so the function stays safe if a future
+ // caller feeds it unvalidated data.
+      if (cost.input <= 0 || cost.output <= 0) continue;
       if (cost.cache_read !== undefined && (typeof cost.cache_read !== "number" || cost.cache_read < 0)) continue;
       if (cost.cache_write !== undefined && (typeof cost.cache_write !== "number" || cost.cache_write < 0)) continue;
       const id = model.id.toLowerCase();
@@ -233,17 +259,28 @@ export async function refreshPricingFromCatalog(): Promise<void> {
  // Custom catalog URL override (e.g. a self-hosted models.dev mirror).
  //
  // TRUST ASSUMPTION: whoever controls `COWORK_MODEL_CATALOG_URL` (an
- // operator-injected env var, by design) fully controls the rates that
- // feed cost-cap enforcement. This is an intentional operator knob — a
- // hostile/compromised mirror could set prices to `0` to defeat the cap,
- // just as a self-hosted mirror legitimately reprices private models. We
- // therefore do NOT floor these rates (that would override operator
- // intent), but we DO reject strictly-NEGATIVE rates: a negative cost
- // would subtract from accumulated spend and silently defeat the cap, and
- // no legitimate repricing produces a negative number. Shape/range
- // validation happens via `isValidCatalog` (which also rejects negatives);
- // failures surface via `lastPricingError` + a non-production console.warn
- // so misconfiguration is visible rather than silent.
+ // operator-injected env var, by design) controls the rates that feed
+ // cost-cap enforcement. This is an intentional operator knob — a
+ // self-hosted mirror legitimately reprices private models. We still
+ // reject non-positive rates (0 AND negative) in `convertCatalog`, which
+ // both this path and the default path flow through: a 0 rate would make
+ // `estimateCost` multiply token counts by zero and never trip the cap, a
+ // negative rate would subtract from spend — and no legitimate repricing
+ // produces either. A non-positive entry is simply dropped and falls back
+ // to DEFAULT_UNKNOWN_MODEL_PRICE (expensive) so the cap holds regardless
+ // of the mirror's contents. Strictly-negative rates are additionally
+ // caught up-front by `isValidCatalog` below (its validation is shared
+ // with the default path); failures surface via `lastPricingError` + a
+ // non-production console.warn so misconfiguration is visible.
+ // SSRF guard: only allow http/https catalog URLs. A value such as
+ // `file:///etc/passwd` or the cloud-metadata endpoint (`http://169.254.169.254/`)
+ // would otherwise be fetched (the response is rejected by isValidCatalog, but
+ // the outbound request still fires). The env var is operator-controlled but
+ // should never drive a non-HTTP fetch.
+      const parsedUrl = new URL(url);
+      if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+        throw new Error(`refusing to fetch non-HTTP catalog URL: ${parsedUrl.protocol}`);
+      }
       const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
       if (!res.ok) throw new Error(`catalog ${res.status}`);
       const raw = await res.json();
@@ -283,13 +320,7 @@ export async function refreshPricingFromCatalog(): Promise<void> {
  // (an unreachable/hostile URL would otherwise silently leave every model on
  // the expensive DEFAULT_UNKNOWN_MODEL_PRICE, or worse, on NaN rates).
     lastPricingError = err instanceof Error ? err : new Error(String(err));
-    if (
-      typeof process !== "undefined" &&
-      process.env &&
-      process.env.NODE_ENV !== "production"
-    ) {
-      console.warn("[pricing] refreshPricingFromCatalog failed:", lastPricingError.message);
-    }
+    console.warn("[pricing] refreshPricingFromCatalog failed:", lastPricingError.message);
   }
 }
 
@@ -299,10 +330,7 @@ export async function refreshPricingFromCatalog(): Promise<void> {
  * long-lived service worker .
  */
 function setPricingCache(key: string, value: ModelPricing): void {
-  if (pricingCache.size >= MAX_PRICING_CACHE) {
-    const oldest = pricingCache.keys().next().value;
-    if (oldest !== undefined) pricingCache.delete(oldest);
-  }
+  evictPricingCache();
   pricingCache.set(key, value);
 }
 
@@ -356,7 +384,7 @@ export function getPricingForModel(model: string, providerId?: string): ModelPri
  // many distinct unpriced models can't grow it without limit.
   const result = { ...DEFAULT_UNKNOWN_MODEL_PRICE };
   if (!warnedUncataloguedModels.has(model)) {
-    if (warnedUncataloguedModels.size >= MAX_WARNED_MODELS) warnedUncataloguedModels.clear();
+    maybeClearWarnedModels();
     warnedUncataloguedModels.add(model);
     console.warn(
       `[pricing] No catalogued price for model "${model}". Falling back to ` +
@@ -401,6 +429,16 @@ export function getPricingForModel(model: string, providerId?: string): ModelPri
  * prefer that provider's rate for same-named models that appear under multiple
  * providers (disambiguating cost-cap accounting across providers).
  */
+/** Clamp a (possibly malformed) token count to a finite, non-negative integer. */
+function tokenCount(v: number | undefined): number {
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+/** Fall back to a conservative rate when a pricing term is non-finite. */
+function finite(v: number | undefined, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+}
+
 export function estimateCost(
   model: string,
   tokensIn: number,
@@ -419,8 +457,6 @@ export function estimateCost(
  // negative count subtracts from accumulated spend. Clamp every count to a
  // finite, non-negative integer BEFORE any arithmetic. `completionTokens` is
  // sanitized only when supplied so the "omitted" branch below still applies.
-  const tokenCount = (v: number | undefined): number =>
-    typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
   tokensIn = tokenCount(tokensIn);
   tokensOut = tokenCount(tokensOut);
   reasoningTokens = tokenCount(reasoningTokens);
@@ -450,8 +486,6 @@ export function estimateCost(
  // which silently defeats the cost cap. Fall back to the conservative default
  // rates for any non-finite term so the cap still trips.
   const def = DEFAULT_UNKNOWN_MODEL_PRICE;
-  const finite = (v: number | undefined, fallback: number): number =>
-    typeof v === "number" && Number.isFinite(v) ? v : fallback;
   const inRate = finite(rate.in, def.in);
   const cacheReadRate = finite(rate.cacheRead, inRate);
   const cacheWriteRate = finite(rate.cacheWrite, inRate);

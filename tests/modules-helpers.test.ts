@@ -10,8 +10,27 @@
  * internal development phase and didn't describe the file's scope).
  */
 
-import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, vi, beforeEach, afterEach, beforeAll } from "vitest";
 import { z } from "zod";
+import type { BrowserState } from "../src/lib/agent/types";
+
+// Clear the DOM after every test so elements don't leak between tests and
+// skew later assertions (e.g. findByLocator queries document.body).
+afterEach(() => {
+  document.body.innerHTML = "";
+});
+
+/** Build a minimal executor state from a single element (or an empty map). */
+function stateWith(el?: Element, index = 1): BrowserState {
+  return { selectorMap: el ? { [index]: el } : {} } as BrowserState;
+}
+
+// `executeAction` is imported once and reused, rather than re-imported in every
+// test — the module is an ESM singleton, so the cached instance is identical.
+let executeAction: typeof import("../src/lib/agent/tools/executor").executeAction;
+beforeAll(async () => {
+  ({ executeAction } = await import("../src/lib/agent/tools/executor"));
+});
 
 describe("registry: getFormatInstructions", () => {
   test("getFormatInstructions produces a JSON-schema-bearing string", async () => {
@@ -53,7 +72,6 @@ describe("dom-utils: By + findByLocator", () => {
     document.body.innerHTML = '<button class="x">A</button><button class="x">B</button>';
     const els = findByLocator(By.css("button.x"));
     expect(els.length).toBe(2);
-    document.body.innerHTML = "";
   });
 });
 
@@ -90,7 +108,6 @@ describe("errors: typed hierarchy", () => {
 
 describe("executor: Select helper + alert actions + click fallback", () => {
   test("select_dropdown uses Select class for text match", async () => {
-    const { executeAction } = await import("../src/lib/agent/tools/executor");
     const select = document.createElement("select");
     const opt1 = document.createElement("option");
     opt1.textContent = "Apple";
@@ -100,15 +117,13 @@ describe("executor: Select helper + alert actions + click fallback", () => {
     opt2.value = "banana";
     select.append(opt1, opt2);
     document.body.appendChild(select);
-    const state = { selectorMap: { 1: select } } as any;
+    const state = stateWith(select);
     const result = await executeAction({ type: "select_dropdown", index: 1, text: "Banana" }, state);
     expect(result.success).toBe(true);
     expect(select.value).toBe("banana");
-    document.body.innerHTML = "";
   });
 
   test("select_dropdown guards against disabled options", async () => {
-    const { executeAction } = await import("../src/lib/agent/tools/executor");
     const select = document.createElement("select");
     const opt = document.createElement("option");
     opt.textContent = "Disabled";
@@ -116,58 +131,57 @@ describe("executor: Select helper + alert actions + click fallback", () => {
     opt.disabled = true;
     select.appendChild(opt);
     document.body.appendChild(select);
-    const state = { selectorMap: { 1: select } } as any;
+    const state = stateWith(select);
     const result = await executeAction({ type: "select_dropdown", index: 1, text: "Disabled" }, state);
     expect(result.success).toBe(false);
     expect(result.message).toMatch(/disabled|not selectable/i);
-    document.body.innerHTML = "";
   });
 
   test("alert_get_text returns empty content when no dialog open", async () => {
-    const { executeAction } = await import("../src/lib/agent/tools/executor");
  // Reset the popup-handler's pending queue by dismissing.
     const { dismissAlert } = await import("../src/lib/agent/dom/popup-handler");
     dismissAlert();
-    const result = await executeAction({ type: "alert_get_text" } as any, { selectorMap: {} } as any);
+    const result = await executeAction({ type: "alert_get_text" }, stateWith());
     expect(result.success).toBe(true);
     expect(result.extractedContent).toBe("");
   });
 
   test("alert_accept fails when no dialog is open", async () => {
-    const { executeAction } = await import("../src/lib/agent/tools/executor");
     const { dismissAlert } = await import("../src/lib/agent/dom/popup-handler");
     dismissAlert();
-    const result = await executeAction({ type: "alert_accept" } as any, { selectorMap: {} } as any);
+    const result = await executeAction({ type: "alert_accept" }, stateWith());
     expect(result.success).toBe(false);
     expect(result.message).toMatch(/nothing to accept/i);
   });
 
   test("popup-handler queues dialogs for later inspection", async () => {
     const { installPopupHandler, getPendingAlertText, getPendingAlertKind, acceptAlert } = await import("../src/lib/agent/dom/popup-handler");
-    installPopupHandler();
-    window.alert("hello world");
-    expect(getPendingAlertText()).toBe("hello world");
-    expect(getPendingAlertKind()).toBe("alert");
-    expect(acceptAlert()).toBe(true);
-    expect(getPendingAlertText()).toBe(null);
+    const origAlert = window.alert;
+    try {
+      installPopupHandler();
+      window.alert("hello world");
+      expect(getPendingAlertText()).toBe("hello world");
+      expect(getPendingAlertKind()).toBe("alert");
+      expect(acceptAlert()).toBe(true);
+      expect(getPendingAlertText()).toBe(null);
+    } finally {
+      window.alert = origAlert;
+    }
   });
 
   test("click fallback uses native el.click() when no chrome.runtime", async () => {
-    const { executeAction } = await import("../src/lib/agent/tools/executor");
     const button = document.createElement("button");
     document.body.appendChild(button);
     let clicked = false;
     button.addEventListener("click", () => { clicked = true; });
-    const state = { selectorMap: { 1: button } } as any;
+    const state = stateWith(button);
     const result = await executeAction({ type: "click", index: 1 }, state);
     expect(result.success).toBe(true);
     expect(clicked).toBe(true);
     expect(result.message).toContain("native");
-    document.body.innerHTML = "";
   });
 
   test("click fallback falls through to dispatched-event when el.click() throws", async () => {
-    const { executeAction } = await import("../src/lib/agent/tools/executor");
  // Create an element whose .click() throws.
     const button = document.createElement("button");
     document.body.appendChild(button);
@@ -177,11 +191,10 @@ describe("executor: Select helper + alert actions + click fallback", () => {
  // MouseEvent on `button` should succeed and we report dispatched-event.
     let dispatched = false;
     button.addEventListener("click", () => { dispatched = true; });
-    const state = { selectorMap: { 1: button } } as any;
+    const state = stateWith(button);
     const result = await executeAction({ type: "click", index: 1 }, state);
     expect(result.success).toBe(true);
     expect(dispatched).toBe(true);
-    document.body.innerHTML = "";
   });
 });
 
@@ -209,7 +222,6 @@ describe("executor: CDP-first click cascade", () => {
     } else {
       (globalThis as unknown as { chrome: unknown }).chrome = originalChrome;
     }
-    document.body.innerHTML = "";
   });
 
   /** Install a chrome global with `runtime.id` + a `sendMessage` mock. */
@@ -225,7 +237,6 @@ describe("executor: CDP-first click cascade", () => {
   }
 
   test("CDP is tried FIRST when chrome.runtime.id is set (strategy 1) — native el.click() is NOT called", async () => {
-    const { executeAction } = await import("../src/lib/agent/tools/executor");
     const sendMsg = vi.fn(async () => ({ ok: true }));
     installChromeMock(sendMsg);
 
@@ -234,7 +245,7 @@ describe("executor: CDP-first click cascade", () => {
     let nativeClicked = false;
     button.addEventListener("click", () => { nativeClicked = true; });
 
-    const state = { selectorMap: { 1: button } } as any;
+    const state = stateWith(button);
     const result = await executeAction({ type: "click", index: 1 }, state);
 
  // CDP was tried (sendMessage called with CDP_CLICK).
@@ -250,13 +261,12 @@ describe("executor: CDP-first click cascade", () => {
   test("CDP message includes the element's bounding rect", async () => {
  // The CDP click needs the element's center coordinates to dispatch the
  // mouse event. The message MUST carry `rect` (the BoundingClientRect).
-    const { executeAction } = await import("../src/lib/agent/tools/executor");
     const sendMsg = vi.fn(async () => ({ ok: true }));
     installChromeMock(sendMsg);
 
     const button = document.createElement("button");
     document.body.appendChild(button);
-    const state = { selectorMap: { 1: button } } as any;
+    const state = stateWith(button);
     await executeAction({ type: "click", index: 1 }, state);
 
     expect(sendMsg).toHaveBeenCalledTimes(1);
@@ -274,7 +284,6 @@ describe("executor: CDP-first click cascade", () => {
  // CDP-first does NOT mean CDP-only — when CDP returns `{ ok: false }`,
  // the cascade must continue to native. This proves the cascade ORDER
  // (CDP before native) rather than just CDP-only behavior.
-    const { executeAction } = await import("../src/lib/agent/tools/executor");
     const sendMsg = vi.fn(async () => ({ ok: false, error: "debugger rejected" }));
     installChromeMock(sendMsg);
 
@@ -283,7 +292,7 @@ describe("executor: CDP-first click cascade", () => {
     let nativeClicked = false;
     button.addEventListener("click", () => { nativeClicked = true; });
 
-    const state = { selectorMap: { 1: button } } as any;
+    const state = stateWith(button);
     const result = await executeAction({ type: "click", index: 1 }, state);
 
  // CDP was tried first.
@@ -303,7 +312,6 @@ describe("executor: CDP-first click cascade", () => {
  // This test pins the guard so a future refactor that always-tries CDP
  // (e.g. by dropping the `chrome.runtime?.id` check) would break tests
  // that don't mock chrome — making the regression immediately visible.
-    const { executeAction } = await import("../src/lib/agent/tools/executor");
  // No chrome global installed — simulate non-extension context.
     delete (globalThis as unknown as { chrome?: unknown }).chrome;
 
@@ -312,7 +320,7 @@ describe("executor: CDP-first click cascade", () => {
     let nativeClicked = false;
     button.addEventListener("click", () => { nativeClicked = true; });
 
-    const state = { selectorMap: { 1: button } } as any;
+    const state = stateWith(button);
     const result = await executeAction({ type: "click", index: 1 }, state);
 
     expect(nativeClicked).toBe(true);

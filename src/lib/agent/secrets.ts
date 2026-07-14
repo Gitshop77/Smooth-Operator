@@ -78,7 +78,16 @@ interface RedactionArtifacts {
   pattern: RegExp;
   /** value → placeholder-name lookup for building the `[REDACTED:name]` marker. */
   valueToName: Map<string, string>;
+  /** name → value lookup for `%placeholder%` substitution (keyed on the same cache). */
+  nameToValue: Map<string, string>;
 }
+
+/** Validate a stored secret entry has string `name` + `value`. */
+const isValidSecretEntry = (e: unknown): e is SecretEntry =>
+  e != null &&
+  typeof e === "object" &&
+  typeof (e as SecretEntry).name === "string" &&
+  typeof (e as SecretEntry).value === "string";
 
 /**
  * Memoized redaction artifacts . {@link redactSecrets} is called
@@ -96,16 +105,19 @@ const escapeRegex = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$
  * the given secret list. Returns `null` when nothing is eligible for redaction.
  */
 function getRedactionArtifacts(secrets: SecretEntry[]): RedactionArtifacts | null {
+ // Cheap cache key from the full secret set (name+value), computed BEFORE the
+ // filter/sort so the memoization short-circuits before the expensive work on
+ // every `redactSecrets` / `substituteSecrets` call. The key covers the whole
+ // set (including empty-valued entries) so no stale hits occur.
+  const key = JSON.stringify(secrets.map((s) => [s.name, s.value]));
+  if (redactionCache && redactionCache.key === key) return redactionCache.artifacts;
+
   const eligible = secrets
  // `>= MIN_REDACTABLE_LENGTH` (now 0) keeps every real secret; the
  // extra `> 0` guard only drops empty values that would break the regex.
     .filter((s) => s.value.length >= MIN_REDACTABLE_LENGTH && s.value.length > 0)
  // Sort longest-first so a secret that's a prefix of another doesn't mask it.
     .sort((a, b) => b.value.length - a.value.length);
-
- // Cache key: identity of the eligible set (name+value pairs, in sorted order).
-  const key = JSON.stringify(eligible.map((s) => [s.name, s.value]));
-  if (redactionCache && redactionCache.key === key) return redactionCache.artifacts;
 
   let artifacts: RedactionArtifacts | null;
   if (eligible.length === 0) {
@@ -119,7 +131,14 @@ function getRedactionArtifacts(secrets: SecretEntry[]): RedactionArtifacts | nul
     for (const s of eligible) {
       if (!valueToName.has(s.value)) valueToName.set(s.value, s.name);
     }
-    artifacts = { pattern, valueToName };
+ // Build the name→value lookup for substitution from the full secret set (so
+ // every placeholder resolves, including empty-valued entries), memoized on
+ // the same cache so per-call allocation is avoided on cache hits.
+    const nameToValue = new Map<string, string>();
+    for (const s of secrets) {
+      if (!nameToValue.has(s.name)) nameToValue.set(s.name, s.value);
+    }
+    artifacts = { pattern, valueToName, nameToValue };
   }
   redactionCache = { key, artifacts };
   return artifacts;
@@ -180,13 +199,7 @@ export async function listSecrets(): Promise<SecretEntry[]> {
  // safe-parse intent and only return a validated array of well-formed
  // entries (each must have string `name` + `value`).
       if (!Array.isArray(v)) return [];
-      return v.filter(
-        (e): e is SecretEntry =>
-          e != null &&
-          typeof e === "object" &&
-          typeof (e as SecretEntry).name === "string" &&
-          typeof (e as SecretEntry).value === "string",
-      );
+      return v.filter(isValidSecretEntry);
     } catch (e) {
  // A real storage error must NOT be silently treated as "no secrets" —
  // callers rely on the distinction (e.g. redactSecrets must not return
@@ -202,13 +215,7 @@ export async function listSecrets(): Promise<SecretEntry[]> {
  // (.findIndex / .map / .filter) would throw a TypeError. Only return a
  // validated array of well-formed entries (each must have string name+value).
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (e): e is SecretEntry =>
-        e != null &&
-        typeof e === "object" &&
-        typeof (e as SecretEntry).name === "string" &&
-        typeof (e as SecretEntry).value === "string",
-    );
+    return parsed.filter(isValidSecretEntry);
   } catch {
     return [];
   }
@@ -298,7 +305,12 @@ export async function substituteSecrets(
     );
     throw e;
   }
-  const map = new Map(secrets.map((s) => [s.name, s.value]));
+ // Reuse the memoized name→value map (built alongside redaction artifacts and
+ // keyed on the same secret-set signature) so we don't re-allocate it on every
+ // per-field/per-step substitution call. Fall back to a fresh map only when no
+ // artifacts were produced.
+  const artifacts = getRedactionArtifacts(secrets);
+  const map = artifacts ? artifacts.nameToValue : new Map(secrets.map((s) => [s.name, s.value]));
   return text.replace(PLACEHOLDER_PATTERN, (match, name: string) => map.get(name) ?? match);
 }
 

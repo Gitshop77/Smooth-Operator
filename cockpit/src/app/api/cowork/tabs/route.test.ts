@@ -1,15 +1,23 @@
 import { describe, it, expect, vi } from 'vitest';
 
-const { create } = vi.hoisted(() => ({ create: vi.fn() }));
+const { create, findMany, count } = vi.hoisted(() => ({
+  create: vi.fn(),
+  findMany: vi.fn(),
+  count: vi.fn(),
+}));
 
 vi.mock('@/lib/db', () => ({
   db: {
-    tab: { create },
+    tab: { create, findMany, count },
   },
 }));
 
-import { POST } from '@/app/api/cowork/tabs/route';
+import { GET, POST } from '@/app/api/cowork/tabs/route';
 import { db } from '@/lib/db';
+
+function getReq(query = ''): any {
+  return { nextUrl: { searchParams: new URLSearchParams(query) } };
+}
 
 function reqWithBody(text: string | null): any {
   if (text === null) {
@@ -56,5 +64,31 @@ describe('POST /api/cowork/tabs (F-04b)', () => {
     const res = await POST(reqWithBody('{"url":"https://example.com"}'));
     expect(res.status).toBe(201);
     expect(create).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('GET /api/cowork/tabs', () => {
+  it('projects fields and returns the total', async () => {
+    findMany.mockResolvedValueOnce([
+      {
+        id: 't1',
+        url: 'https://example.com',
+        favicon: 'https://example.com/f.ico',
+        isPinned: true,
+        isMuted: false,
+        lastAccessedAt: '2025-01-01T00:00:00Z',
+        workspace: { name: 'Default' },
+      },
+    ]);
+    count.mockResolvedValueOnce(1);
+    const res = await GET(getReq());
+    const body = await res.json();
+    expect(body.total).toBe(1);
+    const t = body.tabs[0];
+    expect(t.workspaceName).toBe('Default');
+    expect(t.lastAccessed).toBe('2025-01-01T00:00:00Z');
+    expect(t.favIconUrl).toBe('https://example.com/f.ico');
+    expect(t.pinned).toBe(true);
+    expect(t.audiblyMuted).toBe(false);
   });
 });

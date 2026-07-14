@@ -2,7 +2,7 @@
 
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
-import { TIMINGS, sleep } from "../constants";
+import { TIMINGS } from "../constants";
 import type { ActionContext } from "./types";
 
 /**
@@ -53,10 +53,32 @@ export async function handleScroll(
 ): Promise<ActionResult> {
   const down = action.down !== false;
   const pages = action.pages;
- // 0.85 of a viewport height matches a typical "page down" feel.
-  const dy = (down ? 1 : -1) * pages * window.innerHeight * 0.85;
-  window.scrollBy({ top: dy, behavior: "smooth" });
-  await sleep(TIMINGS.scrollSmooth);
+ // ~0.85 of a viewport height matches a typical "page down" feel; perturb the
+ // per-page factor by a few percent so the scroll distance is not a perfectly
+ // deterministic, repeatable fingerprint (humans vary per page too).
+  const factor = 0.82 + Math.random() * 0.06;
+  const dy = (down ? 1 : -1) * pages * window.innerHeight * factor;
+ // Honor prefers-reduced-motion: avoid an animated scroll for users who asked
+ // the OS to minimize motion (vestibular/migraine triggers).
+  const reduceMotion =
+    typeof window.matchMedia === "function"
+      ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      : false;
+  window.scrollBy({ top: dy, behavior: reduceMotion ? "auto" : "smooth" });
+ // Wait for the scroll to actually settle before the next action reads the
+ // viewport. Prefer the `scrollend` event (scales with distance) and cap the
+ // wait so a non-firing event can't hang the step.
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    };
+    window.addEventListener("scrollend", finish, { once: true });
+    setTimeout(finish, Math.min(TIMINGS.scrollSmooth * Math.max(pages, 1), 3000));
+  });
 
   const cacheCleared = await clearVisionCache();
 

@@ -30,6 +30,20 @@ function hasValidTab(s: { currentTabId?: unknown; active?: unknown } | null): s 
 }
 
 /**
+ * Resolve the active run's current tab id, or `null` if RunState is missing a
+ * valid tab. Both antibot hooks share the identical `getRunState` +
+ * `hasValidTab` preamble; this helper keeps them from drifting.
+ */
+async function getActiveTabId(): Promise<number | null> {
+  const s = await getRunState();
+  if (!hasValidTab(s)) {
+    console.warn("[antibot] RunState missing a valid currentTabId — skipping challenge hook.");
+    return null;
+  }
+  return s.currentTabId;
+}
+
+/**
  * Build the `detectChallenge` + `waitForChallengeResolution` callbacks passed
  * to `runAgentLoop` by `buildLoopDeps`. Each reads the active run's current
  * tab id from RunState and delegates to the corresponding `anti-bot` helper.
@@ -50,29 +64,19 @@ export function makeAntiBotHooks(): {
  // need user takeover, which `waitForTakeoverResume` handles in the
  // orchestrator).
     detectChallenge: async () => {
-      const s = await getRunState();
-      if (!hasValidTab(s)) {
- // A stale / malformed / old-version RunState blob missing `currentTabId`
- // would otherwise produce `undefined` typed as `number` and let a failed
- // `executeScript({ target: { tabId: undefined } })` be silently swallowed
- // as "no challenge" — disabling challenge detection with no signal.
-        console.warn(
-          "[antibot] detectChallenge: RunState missing a valid `currentTabId` " +
-            "(stale or malformed persisted state) — skipping challenge detection.",
-        );
-        return null;
-      }
+      const tabId = await getActiveTabId();
+      if (tabId === null) return null;
  // Use `detectChallengeResult` (not the collapsed `detectChallenge`) so the
  // "error" outcome — a failed injection (tab closed, chrome:// URL, CSP, a
  // racing navigation) — is NOT treated as "all clear". We surface it as a
  // distinct, truthy sentinel the orchestrator treats as an unverified page
  // (it pauses/waitForChallengeResolution rather than proceeding blindly).
-      const outcome = await detectChallengeResult(s.currentTabId);
+      const outcome = await detectChallengeResult(tabId);
       if (outcome.status === "challenge") return outcome.info;
       if (outcome.status === "error") {
         console.warn(
           "[antibot] detectChallenge: injection could not be performed for tab " +
-            `${s.currentTabId} — treating as UNVERIFIED (orchestrator should pause, ` +
+            `${tabId} — treating as UNVERIFIED (orchestrator should pause, ` +
             "not proceed onto a possibly-injected page).",
           outcome.error,
         );
@@ -92,17 +96,13 @@ export function makeAntiBotHooks(): {
  // a transient detection failure surfaces as "still present" rather than
  // "cleared".
     waitForChallengeResolution: async () => {
-      const s = await getRunState();
-      if (!hasValidTab(s)) {
-        console.warn(
-          "[antibot] waitForChallengeResolution: RunState missing a valid " +
-            "`currentTabId` — cannot wait for challenge resolution.",
-        );
-        return false;
-      }
-      const result = await waitForChallengeResolution(s.currentTabId, {
+      const tabId = await getActiveTabId();
+      if (tabId === null) return false;
+      const result = await waitForChallengeResolution(tabId, {
         timeoutMs: 15_000,
-        pollMs: 500,
+        // Jitter the poll cadence so the anti-bot challenge-resolution poll is
+        // not a perfectly regular 500ms timer (a minor automation fingerprint).
+        pollMs: 500 + Math.floor(Math.random() * 100),
       });
       return result.resolved;
     },

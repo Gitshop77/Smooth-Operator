@@ -6,7 +6,16 @@ const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined
 }
 
-export const db = globalForPrisma.prisma ?? new PrismaClient()
+export const db =
+  globalForPrisma.prisma ??
+  new PrismaClient({
+    // Reduce production log noise/overhead (keep error + warn for diagnosability);
+    // surface query logs only in development.
+    log:
+      process.env.NODE_ENV === 'development'
+        ? ['query', 'error', 'warn']
+        : ['error', 'warn'],
+  })
 
 // Cache the singleton on globalThis in ALL environments so it survives
 // dev HMR reloads and warm serverless invocations (the canonical Next.js

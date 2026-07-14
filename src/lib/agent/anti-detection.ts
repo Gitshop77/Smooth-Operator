@@ -105,7 +105,7 @@ function stealthScriptBody(): void {
     p(function () {
       Object.defineProperty(navigator, "webdriver", {
         get: function () {
-          return undefined;
+          return false;
         },
         configurable: true,
       });
@@ -150,50 +150,30 @@ function stealthScriptBody(): void {
         (this as { description: string }).description = desc;
       }
 
-      const m1 = new (M as unknown as new (type: string, suf: string, desc: string) => {
+      type MimeShape = {
         type: string;
         suffixes: string;
         description: string;
         enabledPlugin?: unknown;
-      })("application/pdf", "pdf", "Portable Document Format");
-      const m2 = new (M as unknown as new (type: string, suf: string, desc: string) => {
-        type: string;
-        suffixes: string;
-        description: string;
-        enabledPlugin?: unknown;
-      })("application/x-google-chrome-pdf", "pdf", "Portable Document Format");
-      const m3 = new (M as unknown as new (type: string, suf: string, desc: string) => {
-        type: string;
-        suffixes: string;
-        description: string;
-        enabledPlugin?: unknown;
-      })("application/x-nacl", "", "Native Client Executable");
-      const m4 = new (M as unknown as new (type: string, suf: string, desc: string) => {
-        type: string;
-        suffixes: string;
-        description: string;
-        enabledPlugin?: unknown;
-      })("application/x-pnacl", "", "Portable Native Client Executable");
+      };
+      const MimeCtor = M as unknown as new (t: string, s: string, d: string) => MimeShape;
+      const [m1, m2, m3, m4] = [
+        ["application/pdf", "pdf", "Portable Document Format"],
+        ["application/x-google-chrome-pdf", "pdf", "Portable Document Format"],
+        ["application/x-nacl", "", "Native Client Executable"],
+        ["application/x-pnacl", "", "Portable Native Client Executable"],
+      ].map(([t, s, d]) => new MimeCtor(t, s, d));
 
+      const PluginCtor = FakePlugin as unknown as new (
+        name: string,
+        fn: string,
+        desc: string,
+        mimes: MimeShape[],
+      ) => unknown;
       const plugins = [
-        new (FakePlugin as unknown as new (
-          name: string,
-          fn: string,
-          desc: string,
-          mimes: typeof m1[],
-        ) => unknown)("Chrome PDF Plugin", "internal-pdf-viewer", "Portable Document Format", [m1]),
-        new (FakePlugin as unknown as new (
-          name: string,
-          fn: string,
-          desc: string,
-          mimes: typeof m1[],
-        ) => unknown)("Chrome PDF Viewer", "mhjfbmdgcfjbbpaeojofohoefgiehjai", "", [m2]),
-        new (FakePlugin as unknown as new (
-          name: string,
-          fn: string,
-          desc: string,
-          mimes: typeof m1[],
-        ) => unknown)("Native Client", "internal-nacl-plugin", "", [m3, m4]),
+        new PluginCtor("Chrome PDF Plugin", "internal-pdf-viewer", "Portable Document Format", [m1]),
+        new PluginCtor("Chrome PDF Viewer", "mhjfbmdgcfjbbpaeojofohoefgiehjai", "", [m2]),
+        new PluginCtor("Native Client", "internal-nacl-plugin", "", [m3, m4]),
       ];
 
       function makeIterable(
@@ -271,13 +251,19 @@ function stealthScriptBody(): void {
 
  // ── 3. navigator.languages (cached + frozen so identity check passes) ──
     p(function () {
-      const nav = navigator as Navigator & { languages?: readonly string[] };
+      const nav = navigator as Navigator & { languages?: readonly string[]; language?: string };
       if (!nav.languages || nav.languages.length === 0) {
         const langs = Object.freeze(["en-US", "en"]);
         Object.defineProperty(navigator, "languages", {
           get: function () {
             return langs;
           },
+        });
+        Object.defineProperty(navigator, "language", {
+          get: function () {
+            return "en-US";
+          },
+          configurable: true,
         });
       }
     });
@@ -453,8 +439,11 @@ function stealthScriptBody(): void {
     });
 
  // ── 9. Iframe contentWindow.chrome ──
- // Covered by patch 4 — the chrome object is now on window, propagates to
- // iframes on the same origin via the prototype chain.
+ // Covered by patch 4 — the chrome stub is set on the top window's realm only.
+ // Each same-origin iframe has its own realm/global, so there is NO
+ // prototype-chain propagation into child frames: the stub reaches an iframe
+ // only when this script is independently injected into that frame's realm
+ // (which requires allFrames:true).
 
  // ── 10. console method toString ──
     p(function () {

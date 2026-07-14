@@ -3,11 +3,11 @@ export function timeAgo(ts: number | string | Date | null | undefined): string {
  // `0` (and `""`) is a sentinel for "no value" — without this
  // check, `timeAgo(0)` computes `Date.now() - 0` ≈ 1.7 trillion ms ≈
  // ~20000 days, rendering "20000d" in the UI. Treat 0 / "" like null.
-  if (ts == null || ts === 0 || ts === "") return "—";
+  if (ts == null || ts === 0) return "—";
   const ms = typeof ts === "number" ? ts : new Date(ts).getTime();
   if (!Number.isFinite(ms) || ms === 0) return "—";
   const diff = Date.now() - ms;
-  if (diff < 0) return "now";
+  if (diff < 1000) return "now";
   if (diff < 60_000) return `${Math.max(1, Math.floor(diff / 1000))}s`;
   if (diff < 3600_000) return `${Math.floor(diff / 60_000)}m`;
   if (diff < 86_400_000) return `${Math.floor(diff / 3600_000)}h`;
@@ -17,9 +17,9 @@ export function timeAgo(ts: number | string | Date | null | undefined): string {
 /** Format a number of bytes as a human-readable size. */
 export function formatBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  const i = Math.max(0, Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024))));
-  return `${(n / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  const i = Math.max(0, Math.min(units.length - 1, Math.floor(Math.log2(n) / 10)));
+  return `${(n / (1024 ** i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
 /** Extract the hostname from a URL. Falls back to the raw string. */
@@ -45,6 +45,12 @@ export function safeHref(url: string | null | undefined): string {
   if (!trimmed) return "#";
   try {
     const parsed = new URL(trimmed);
+    if (!parsed.hostname) return "#";
+    if (parsed.username || parsed.password) {
+      parsed.username = "";
+      parsed.password = "";
+      return parsed.toString();
+    }
     if (parsed.protocol === "http:" || parsed.protocol === "https:") return trimmed;
     return "#";
   } catch {
@@ -54,8 +60,26 @@ export function safeHref(url: string | null | undefined): string {
 
 /** Truncate a long string in the middle. */
 export function truncateMiddle(s: string, max = 64): string {
-  if (max <= 1) return s.slice(0, Math.max(0, max));
+  if (max <= 2) return s.slice(0, Math.max(0, max));
   if (s.length <= max) return s;
-  const half = Math.max(1, Math.floor((max - 1) / 2));
-  return `${s.slice(0, half)}…${s.slice(-half)}`;
+  const keep = max - 1;
+  const half = Math.max(1, Math.floor(keep / 2));
+  return `${s.slice(0, half)}…${s.slice(-(keep - half))}`;
+}
+
+/**
+ * Defensive parse of a Prisma JSON-encoded string column (or an already-decoded
+ * array) into `T[]`. A malformed/empty row must never crash the view, so any
+ * parse error, non-array, or empty/missing input yields `[]`. Shared by the
+ * runs/session views so the defensive contract lives in exactly one place.
+ */
+export function safeParseJsonArray<T>(raw: unknown): T[] {
+  if (Array.isArray(raw)) return raw as T[];
+  if (typeof raw !== "string" || !raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as T[]) : [];
+  } catch {
+    return [];
+  }
 }

@@ -51,6 +51,58 @@ import type { VisionAssistant } from "../vision-assistant";
 import { DEFAULT_MODELS } from "../provider-config";
 import { getDefaultModelForProvider } from "@/lib/agent/llm/catalog";
 
+// ─── Memoized dynamic imports (hot path: once per agent step) ───────────────
+//
+// These helpers cache the namespace promise so the repetitive `import()` calls
+// on the per-step hot path reuse a single module load instead of re-triggering
+// the (cheap but noisy) dynamic-import round-trip every step.
+
+/** Resolve `{ modelSupportsVision, CATALOG_PROVIDER_ID_MAP }` once, cached. */
+let catalogRefs: Promise<{
+  modelSupportsVision: typeof import("@/lib/agent/llm/catalog")["modelSupportsVision"];
+  CATALOG_PROVIDER_ID_MAP: typeof import("../provider-config-map")["CATALOG_PROVIDER_ID_MAP"];
+}> | null = null;
+function loadCatalogRefs() {
+  if (!catalogRefs) {
+    catalogRefs = Promise.all([
+      import("@/lib/agent/llm/catalog"),
+      import("../provider-config-map"),
+    ]).then(([cat, pcm]) => ({
+      modelSupportsVision: cat.modelSupportsVision,
+      CATALOG_PROVIDER_ID_MAP: pcm.CATALOG_PROVIDER_ID_MAP,
+    }));
+  }
+  return catalogRefs;
+}
+
+/** Resolve the `../vision-assistant` module namespace once, cached. */
+let visionAssistantMod: Promise<typeof import("../vision-assistant")> | null = null;
+function loadVisionAssistant(): Promise<typeof import("../vision-assistant")> {
+  return (visionAssistantMod ??= import("../vision-assistant"));
+}
+
+/** Build a short, human-readable detail suffix for a confirmation prompt. */
+function confirmationDetail(action: AgentAction): string {
+  const a = action as unknown as {
+    type: string; text?: string; index?: number | string; indexStr?: string;
+  };
+  switch (a.type) {
+    case "input_text":
+      return ` value "${a.text ?? ""}"`;
+    case "click":
+      return ` on element ${a.index ?? a.indexStr ?? ""}`;
+    case "type":
+      return ` text "${a.text ?? ""}"`;
+    default:
+      return "";
+  }
+}
+
+/** Build the full confirmation prompt shown to the user for a given action. */
+function confirmationMessage(action: AgentAction): string {
+  return `Allow the agent to perform: ${action.type}${confirmationDetail(action)}?`;
+}
+
 // ─── Vision Assistant singleton (lazy, non-blocking init) ───────────────────
 //
 // The 2.1 GB ONNX model download can take 5+ minutes. Awaiting `init()` in
@@ -288,7 +340,7 @@ export async function handleDetectVisualRequest(query: string): Promise<{
  // Cache vision elements for the next step's extractStateForRun
     visionElementsCache.clear();
     visionCacheUrl = ""; // reset before re-population (in case tab get fails below)
-    const { mergeDetections } = await import("../vision-assistant");
+    const { mergeDetections } = await loadVisionAssistant();
  // Use lastKnownDpr (updated by extractStateForRun) — vision detections
  // from captureVisibleTab are in device pixels; the merger divides by dpr
  // to produce CSS-pixel rects for CDP clicks.
@@ -316,7 +368,8 @@ export async function handleDetectVisualRequest(query: string): Promise<{
  // element). `merged` is the same array the cache loop iterates.
     const visionEls = merged.filter((m) => m.source === "vision" && m.visionId && m.pixelRect);
     const descriptions = visionEls.map((m) => {
-      const r = m.pixelRect as { x: number; y: number; width: number; height: number };
+      const r = m.pixelRect;
+      if (!r) return "";
       return `[${m.visionId}] ${m.text} at (${Math.round(r.x)}, ${Math.round(r.y)}) ${Math.round(r.width)}x${Math.round(r.height)}`;
     });
     const description = descriptions.length > 0
@@ -366,8 +419,7 @@ export async function extractStateForRun(
  // from a default GPT-4o model.
   let mainModelVision = false;
   try {
-    const { modelSupportsVision } = await import("@/lib/agent/llm/catalog");
-    const { CATALOG_PROVIDER_ID_MAP } = await import("../provider-config-map");
+    const { modelSupportsVision, CATALOG_PROVIDER_ID_MAP } = await loadCatalogRefs();
     const catId = CATALOG_PROVIDER_ID_MAP[providerId as string] ?? providerId;
  // Resolve the model: explicit user choice > live catalog default >
  // offline DEFAULT_MODELS fallback. `catId` maps the extension's provider id
@@ -414,7 +466,7 @@ export async function extractStateForRun(
         visionCacheUrl = "";
       } else {
  // Merge cached vision elements into the DOM state
-        const { mergeDetections, renderMergedElementsText } = await import("../vision-assistant");
+        const { mergeDetections, renderMergedElementsText } = await loadVisionAssistant();
         const visionEntries = Array.from(visionElementsCache.entries()).map(([id, data]) => ({
           index: -1,
           tag: "vision_element",
@@ -472,7 +524,7 @@ export async function extractStateForRun(
  // PARALLEL: DOM extraction + local vision detection
   try {
     const { mergeDetections, renderMergedElementsText } =
-      await import("../vision-assistant");
+      await loadVisionAssistant();
 
  // Capture the AGENT'S tab (runState.currentTabId), not the user's visible
  // tab. `chrome.tabs.captureVisibleTab(WINDOW_ID_CURRENT)` would capture
@@ -639,26 +691,27 @@ export function buildLoopDeps(ctx: LoopDepsContext): Parameters<typeof runAgentL
  // + the success-rate tally). We keep a blocked/declined action (and every
  // subsequent action) as a BLOCKED result, and only the contiguous leading
  // run of allowed+confirmed actions is shipped to the content script.
-      const preResults: ActionResult[] = [];
-      const filtered: AgentAction[] = [];
+      const results: ActionResult[] = new Array(actions.length);
+      const filtered: { action: AgentAction; i: number }[] = [];
       let aborted = false;
-      for (const action of actions) {
+      for (let i = 0; i < actions.length; i++) {
+        const action = actions[i];
         if (aborted) {
  // A prior action in the batch was blocked/declined — abort the rest
  // of the queue (the selectorMap context is invalidated) but still
  // emit a result so alignment is preserved.
-          preResults.push({
+          results[i] = {
             action, success: false,
             message: "BLOCKED: prior action in the queue was blocked or declined",
-          });
+          };
           continue;
         }
         const allowed = checkActionAllowed(action.type, agentMode);
         if (!allowed.allowed) {
-          preResults.push({
+          results[i] = {
             action, success: false,
             message: `BLOCKED: ${allowed.reason}`,
-          });
+          };
  // Abort the remaining queue — a blocked action invalidates the
  // selectorMap context for subsequent actions.
           aborted = true;
@@ -669,39 +722,42 @@ export function buildLoopDeps(ctx: LoopDepsContext): Parameters<typeof runAgentL
             const { askHuman } = await import("@/lib/agent/human-interaction");
             const resp = await askHuman({
               mode: "confirm",
-              message: `Allow the agent to perform: ${action.type}?`,
+              message: confirmationMessage(action),
             });
             if (resp.mode !== "confirm" || !resp.confirmed) {
-              preResults.push({
+              results[i] = {
                 action, success: false,
                 message: `BLOCKED: user declined confirmation for ${action.type}`,
-              });
+              };
               aborted = true;
               continue;
             }
           } catch {
-            preResults.push({
+            results[i] = {
               action, success: false,
               message: `BLOCKED: confirmation request failed for ${action.type}`,
-            });
+            };
             aborted = true;
             continue;
           }
         }
-        filtered.push(action);
+        filtered.push({ action, i });
       }
 
- // If all actions were blocked, return the aligned pre-results without
+ // If all actions were blocked, return the aligned results without
  // messaging the content script.
       if (filtered.length === 0) {
-        return preResults;
+        return results;
       }
 
- // Execute the filtered actions via the content script. `preResults`
- // already holds one entry for every blocked/declined action, so the
- // concatenation yields exactly one ActionResult per input action.
-      const execResults = await executeActionsInTab(tabId, filtered);
-      return [...preResults, ...(execResults as ActionResult[])];
+ // Execute the filtered actions via the content script, then slot each
+ // result back into its original input position so the returned
+ // ActionResult[] matches the input action order in all cases.
+      const execResults = await executeActionsInTab(tabId, filtered.map((f) => f.action));
+      filtered.forEach((f, k) => {
+        results[f.i] = (execResults as ActionResult[])[k];
+      });
+      return results;
     },
     navigatorCall: navigatorCallDirect,
     plannerCall: plannerCallDirect,
@@ -719,7 +775,7 @@ export function buildLoopDeps(ctx: LoopDepsContext): Parameters<typeof runAgentL
       await waitForTabLoad(s.currentTabId);
       await ensureContent(s.currentTabId);
     },
-    settleDelayMs: 500,
+    settleDelay: 500,
  // Wire the confirmation gate. When the orchestrator encounters an action
  // in the mode's confirmRequired list, it calls this callback. We dispatch
  // to askHumanExtension(), which sends a HUMAN_INTERACT message to the
@@ -729,7 +785,7 @@ export function buildLoopDeps(ctx: LoopDepsContext): Parameters<typeof runAgentL
         const { askHuman } = await import("@/lib/agent/human-interaction");
         const resp = await askHuman({
           mode: "confirm",
-          message: `Allow the agent to perform: ${action.type}?`,
+          message: confirmationMessage(action),
         });
         return resp.mode === "confirm" ? resp.confirmed : false;
       } catch {

@@ -1,7 +1,7 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
 import { Prisma } from '@prisma/client';
-import { json, badRequest, withRouteError, parseLimit } from '@/lib/cowork/api/http';
+import { json, badRequest, withRouteError, parseLimit, isPrismaRecordNotFound } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
 // ─── Response-only PII redaction (defense-in-depth, NOT at-rest protection) ───
@@ -46,18 +46,21 @@ const REDACTED = '[redacted]';
 // Cursor id shape used for `after` pagination (table ids are cuid strings).
 const CURSOR_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
-// Heuristic: does a *scalar* value look like a secret worth masking even when no
-// field name is available to match against? Used only for the non-object/array
-// shapes (parse failure or a bare scalar) that otherwise bypass field-name
-// masking. Biased toward masking: a long high-entropy token or a value containing
-// a secret keyword is treated as sensitive.
+// Heuristic: does a *scalar* value look like a secret worth masking? Used as a
+// fallback for bare scalars / unparseable JSON (where no field name is available
+// to match against), AND as a secondary heuristic on scalar string values inside
+// objects/entries when the field name did not match a sensitive fragment. Biased
+// toward masking: a value containing a secret keyword is masked regardless of
+// length, while only the generic token-shape branch requires a length floor.
 function looksLikeSecret(value: unknown): boolean {
   if (typeof value !== 'string') return false;
   const t = value.trim();
-  if (t.length < 8) return false;
+ // Keyword match is NOT gated by the length floor — a short but clearly
+ // secret-shaped scalar (e.g. "token", "secret") must still be masked.
   if (/(password|passwd|secret|token|api[_-]?key|access[_-]?token|cvv|otp|ssn|pin)/i.test(t)) return true;
- // Long base64 / hex / token-shaped value with no obvious structure.
-  return /^[A-Za-z0-9+/=_-]{20,}$/.test(t);
+ // Long base64 / hex / token-shaped value with no obvious structure. Only this
+ // generic branch needs the length floor; the keyword branch above stands alone.
+  return t.length >= 20 && /^[A-Za-z0-9+/=_-]{20,}$/.test(t);
 }
 
 // Redact an object that carries a `name` key (the `{ name, value }` entry shape).
@@ -68,17 +71,20 @@ function looksLikeSecret(value: unknown): boolean {
 // sibling sensitive keys (e.g. `{ name: "form1", password: "hunter2" }`) are never
 // leaked just because the object happened to expose a `name` field.
 function redactEntry(entry: unknown): unknown {
-  if (!entry || typeof entry !== 'object' || !('name' in entry)) return entry;
+  if (!entry || typeof entry !== 'object') return entry;
   const e = entry as Record<string, unknown>;
   const nameIsSensitive = SENSITIVE_FIELD_RE.test(String(e.name ?? ''));
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(e)) {
-    if (key === 'value' && nameIsSensitive) {
-      out[key] = REDACTED;
+    if (key === 'name') {
+      out[key] = e.name;
     } else if (SENSITIVE_FIELD_RE.test(key)) {
       out[key] = REDACTED;
+    } else if (nameIsSensitive) {
+      out[key] = REDACTED;
     } else {
-      out[key] = redactNode(e[key]);
+      const v = e[key];
+      out[key] = (typeof v === 'string' && looksLikeSecret(v)) ? REDACTED : redactNode(v);
     }
   }
   return out;
@@ -99,6 +105,8 @@ function redactNode(node: unknown): unknown {
       return redactEntry(node);
     }
     const obj = node as Record<string, unknown>;
+ // Mutate in place on the freshly-parsed local copy (avoids extra allocations).
+ // Safe because we only ever operate on a local produced by JSON.parse above.
     for (const key of Object.keys(obj)) {
       if (SENSITIVE_FIELD_RE.test(key)) {
         obj[key] = REDACTED;
@@ -164,8 +172,15 @@ export async function GET(req: NextRequest): Promise<Response> {
       }
       throw e;
     }
-    const memories = rows.map((m) => ({ ...m, formDataJson: redactFormMemory(m.formDataJson) }));
-    return json({ memories });
+    const memories = rows.map((m) => ({ ...m, formDataJson: redactFormMemory(m.formDataJson ?? '') }));
+ // Signal whether more pages exist (only when a full page was returned and the
+ // cursor id is well-formed) so the UI can drive cursor-based "load more".
+    const last = rows.length === limit ? rows[rows.length - 1] : undefined;
+    const nextCursor = last && CURSOR_ID_RE.test(last.id) ? last.id : null;
+    const r = json({ memories, nextCursor });
+ // Form-memory holds autofill PII; never let browsers/proxies/CDNs cache it.
+    r.headers.set('Cache-Control', 'no-store, private');
+    return r;
   });
 }
 
@@ -177,7 +192,11 @@ export async function GET(req: NextRequest): Promise<Response> {
 export async function DELETE(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
     const id = req.nextUrl.searchParams.get('id');
-    if (!id) return badRequest('id is required');
+    if (!id) {
+      const r = badRequest('id is required');
+      r.headers.set('Cache-Control', 'no-store, private');
+      return r;
+    }
     try {
       await db.formMemory.delete({ where: { id } });
     } catch (e) {
@@ -185,14 +204,15 @@ export async function DELETE(req: NextRequest): Promise<Response> {
  // code lives in `e.code`, but a caller may surface a plain Error whose
  // message still reports P2025 (e.g. certain driver/adapter layers);
  // detect both so a missing entry is a precise 404 rather than a 500.
-      if (
-        (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') ||
-        (e instanceof Error && /P2025/.test(e.message))
-      ) {
-        return json({ error: 'not found' }, 404);
+      if (isPrismaRecordNotFound(e)) {
+        const r = json({ error: 'not found' }, 404);
+        r.headers.set('Cache-Control', 'no-store, private');
+        return r;
       }
       throw e;
     }
-    return json({ ok: true });
+    const ok = json({ ok: true });
+    ok.headers.set('Cache-Control', 'no-store, private');
+    return ok;
   });
 }

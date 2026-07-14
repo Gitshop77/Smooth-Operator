@@ -17,4 +17,16 @@ export interface ActionContext {
   beforeUrl: string;
   /** `domFingerprint()` captured BEFORE the handler ran. */
   beforeFingerprint: string;
+  /** Optional cancellation signal, plumbed so a handler can abort early. */
+  signal?: AbortSignal;
+}
+
+/**
+ * True only when running inside the extension's content-script / service-worker
+ * context (a `chrome` global with a live `runtime.id`). Used to gate actions
+ * that must delegate to the background SW rather than fall back to in-page
+ * behaviour. Centralized so the guard can't drift between handlers.
+ */
+export function isExtensionContext(): boolean {
+  return typeof chrome !== "undefined" && !!chrome.runtime?.id;
 }

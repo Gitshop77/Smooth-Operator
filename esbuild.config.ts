@@ -18,6 +18,9 @@ import path from "path";
 const watch = process.argv.includes("--watch");
 const OUT = path.resolve("chrome-extension");
 const SRC = path.resolve("src/extension");
+// Hoisted: `path.resolve("src/lib")` is constant for the whole build, so it is
+// computed once rather than on every source file the plugin loads.
+const LIB_SRC = path.resolve("src/lib");
 
 /**
  * PERF-1: zod locales stub plugin.
@@ -91,8 +94,13 @@ const zodLocalesStubPlugin: Plugin = {
  * rewritten and the log survives into the bundle. This is the lesser evil
  * versus a dangerous AST rewrite that could corrupt unrelated identifiers.
  * A full AST-aware transform (esbuild onTransform + parser) would close both;
- * until then these are accepted, documented trade-offs. Occurrences inside
- * string literals / comments are data, not executed code, and do not crash.
+ * until then these are accepted, documented trade-offs. String literals /
+ * comments are NOT exempt: this is a blind textual regex (no parser awareness),
+ * so a `console.log(` that appears inside a string literal (e.g.
+ * `const s = "console.log(x)"`) or a `// console.log(x)` comment IS rewritten
+ * to `void (x)` / `// void (x)`. Such literals will be altered — keep this
+ * limitation accurate rather than implying literal/comment occurrences are left
+ * intact.
  *
  * This plugin is only attached in production builds (see `sharedConfig`); dev
  * (`--watch`) builds keep the logs.
@@ -102,13 +110,14 @@ const stripConsoleDebugPlugin: Plugin = {
   setup(b) {
     b.onLoad({ filter: /\.(ts|tsx|js|jsx|mjs)$/ }, async (args) => {
       const abs = path.resolve(args.path);
-      const inSource = abs.startsWith(SRC) || abs.startsWith(path.resolve("src/lib"));
+      const inSource = abs.startsWith(SRC) || abs.startsWith(LIB_SRC);
       if (!inSource) return undefined;
       const original = await readFile(args.path, "utf8");
       const contents = original
- // Zero-argument calls first → `void 0;` (valid). Must run before the
- // general rewrite so `(void 0;)` isn't re-matched into `(void (0;)`.
-        .replace(/(?<![\w.$])console\.(debug|log)\(\)/g, "void 0;")
+ // Zero-argument calls first → `void 0` (valid expression, no trailing
+ // semicolon). Must run before the general rewrite so the result isn't
+ // re-matched into `(void (0;)`.
+        .replace(/(?<![\w.$])console\.(debug|log)\(\)/g, "void 0")
  // All other calls → `void (…)`.
         .replace(/(?<![\w.$])console\.(debug|log)\(/g, "void (");
       const loader = args.path.endsWith(".tsx")
@@ -213,7 +222,7 @@ const ENTRIES = [
  * makes the "only en" assumption a checked invariant instead of a comment.
  */
 async function assertOnlyEnZodLocales(): Promise<void> {
-  const roots = [SRC, path.resolve("src/lib")];
+  const roots = [SRC, LIB_SRC];
   const bad: string[] = [];
   const walk = async (dir: string): Promise<void> => {
     let entries: string[];
@@ -252,7 +261,7 @@ async function assertOnlyEnZodLocales(): Promise<void> {
       } else if (/\.(ts|tsx|js|jsx|mjs)$/.test(e)) {
         const src = await readFile(e, "utf8");
  // Match zod locale imports that are NOT the `en` locale nor the barrel.
-        const m = src.match(/zod\/v4\/locales\/(?!en\.js|index\.js)[a-zA-Z-]+\.js/g);
+        const m = src.match(/zod\/v4\/locales\/(?!en(-[A-Za-z]+)?\.js|index\.js)[a-zA-Z-]+\.js/g);
         if (m) bad.push(`${e}: ${m.join(", ")}`);
       }
     }
@@ -263,6 +272,20 @@ async function assertOnlyEnZodLocales(): Promise<void> {
       "Non-en zod locale import detected — the stub plugin only provides 'en', " +
         "so this would resolve to undefined at runtime:\n" +
         bad.join("\n")
+    );
+  }
+}
+
+/**
+ * PERF-1 robustness: fail closed if the zod-locales stub file the redirect
+ * plugin depends on is missing. Without it, esbuild fails later with a cryptic
+ * "could not resolve zod-locales-stub.js" error unrelated to the real cause.
+ */
+function assertZodLocalesStub(): void {
+  const stub = path.resolve(SRC, "zod-locales-stub.js");
+  if (!existsSync(stub)) {
+    throw new Error(
+      `[zod-locales-stub] missing stub at ${stub} — the zod-locale strip plugin requires it`,
     );
   }
 }
@@ -477,6 +500,7 @@ async function buildAll(): Promise<void> {
   await mkdir(OUT, { recursive: true });
   await copyStatic();
   await assertOnlyEnZodLocales();
+  assertZodLocalesStub();
   const builds = ENTRIES.map((e) => {
     const isEsm = e.config.format === "esm";
     return build({
@@ -502,6 +526,7 @@ async function buildAll(): Promise<void> {
  */
 async function watchMode(): Promise<void> {
   await assertOnlyEnZodLocales();
+  assertZodLocalesStub();
   const ctxs = await Promise.all(
     ENTRIES.map((e) => {
       const isEsm = e.config.format === "esm";

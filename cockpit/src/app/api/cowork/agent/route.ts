@@ -1,5 +1,5 @@
 import type { NextRequest } from 'next/server';
-import { textResponse, withRouteError } from '@/lib/cowork/api/http';
+import { textResponse, withRouteError, sanitizeRequestId } from '@/lib/cowork/api/http';
 import {
   AGENT_OPERATING_RULES,
   AGENT_STARTUP_SEQUENCE,
@@ -91,6 +91,8 @@ mass-deletion caution below).
 ## Capability families
 ${CAPABILITY_FAMILIES.map(f => `- ${f}`).join('\n')}
 `;
-    return textResponse(md, 200, 'text/markdown; charset=utf-8');
-  }, req.headers.get('x-request-id') ?? undefined);
+    return textResponse(md, 200, 'text/markdown; charset=utf-8', {
+      'cache-control': 'public, max-age=300',
+    });
+  }, sanitizeRequestId(req.headers.get('x-request-id')));
 }

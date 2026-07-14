@@ -9,7 +9,8 @@
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import { checkUrlAllowedWithDomainConfig } from "../helpers/domain-config";
-import type { ActionContext } from "./types";
+import { SW_RPC_TIMEOUT_MS } from "../constants";
+import { type ActionContext, isExtensionContext } from "./types";
 
 export async function handleNavigate(
   _ctx: ActionContext,
@@ -29,9 +30,16 @@ export async function handleNavigate(
  // survives new-tab opens (the current tab stays), so the TAB_ACTION
  // response can reach us.
   if (action.new_tab) {
-    if (typeof chrome !== "undefined" && chrome.runtime?.id) {
+    if (isExtensionContext()) {
       try {
-        const res = (await chrome.runtime.sendMessage({ type: "TAB_ACTION", action })) as {
+ // Race against a timeout so a SW that receives the message but never calls
+ // sendResponse (throws / is hung) can't block the agent loop forever.
+        const res = (await Promise.race([
+          chrome.runtime.sendMessage({ type: "TAB_ACTION", action }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("TAB_ACTION timeout")), SW_RPC_TIMEOUT_MS),
+          ),
+        ])) as {
           ok: boolean;
           success?: boolean;
           message?: string;
@@ -51,9 +59,14 @@ export async function handleNavigate(
         return { action, success: false, message: `navigate failed: ${e instanceof Error ? e.message : String(e)}` };
       }
     }
- // No extension context (demo) — fall back to window.open. The popup may be
- // blocked, but the delegate still happened; report success.
-    window.open(action.url, "_blank");
+ // No extension context (demo) — fall back to window.open. If the popup is
+ // blocked by the browser, window.open returns null and no navigation occurs;
+ // report that honestly instead of a false success (which could make the agent
+ // loop proceed against a stale page).
+    const w = window.open(action.url, "_blank");
+    if (!w) {
+      return { action, success: false, message: "navigate failed: popup blocked (demo)" };
+    }
     return { action, success: true, message: "navigated via content script (new tab)", pageChanged: true };
   }
  // Same-tab navigation — location.href works. The content script is

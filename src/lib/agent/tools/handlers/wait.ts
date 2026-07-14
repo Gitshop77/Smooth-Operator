@@ -17,6 +17,7 @@ export async function handleWait(
  // unbounded value would hang the orchestrator, which awaits this handler.
   const raw = Number(action.seconds);
   const s = Number.isFinite(raw) ? Math.min(Math.max(0, raw), 300) : 3;
-  await sleep(s * 1000);
-  return { action, success: true, message: `Waited ${s}s` };
+  await sleep(s * 1000, _ctx.signal);
+  const message = raw !== s ? `Waited ${s}s (requested ${String(raw)})` : `Waited ${s}s`;
+  return { action, success: true, message };
 }

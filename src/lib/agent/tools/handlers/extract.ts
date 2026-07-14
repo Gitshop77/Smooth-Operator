@@ -14,7 +14,11 @@ export async function handleExtract(
 ): Promise<ActionResult> {
   await sleep(TIMINGS.extractWait);
   const bodyText = (document.body?.innerText || "").slice(0, LIMITS.extractBodyChars);
-  const tagged = `Query: ${action.query}\n\nPage content:\n${bodyText}`;
+  const truncated =
+    bodyText.length >= LIMITS.extractBodyChars
+      ? `\n\n[truncated: page content exceeded ${LIMITS.extractBodyChars} chars]`
+      : "";
+  const tagged = `Query: ${action.query}\n\nPage content:\n${bodyText}${truncated}`;
   return {
     action,
     success: true,

@@ -5,6 +5,10 @@
  * Ported from Reza2kn's gatherEmbed() + f16to32().
  */
 
+/** Reusable scratch buffers for fp16 → fp32 conversion (avoids per-call allocs). */
+const _f32 = new Float32Array(1);
+const _u32 = new Uint32Array(_f32.buffer);
+
 /** fp16 → fp32 conversion. */
 export function f16to32(h: number): number {
   const s = (h & 0x8000) >> 15;
@@ -12,7 +16,9 @@ export function f16to32(h: number): number {
   const f = h & 0x03ff;
   if (e === 0) return (s ? -1 : 1) * Math.pow(2, -14) * (f / 1024);
   if (e === 0x1f) return f ? NaN : s ? -Infinity : Infinity;
-  return (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
+  const u = (s << 16) | ((e + 112) << 23) | (f << 13);
+  _u32[0] = u;
+  return _f32[0];
 }
 
 export interface EmbeddingMeta {
@@ -21,6 +27,18 @@ export interface EmbeddingMeta {
   block_size: number;
   n_groups: number;
   zero_point: number;
+}
+
+/**
+ * Set once after `validateEmbeddingShapes()` passes at init. `gatherEmbed` then
+ * skips the immutable meta-level shape checks on every (hot-path) call, keeping
+ * only the per-token range check + the cheap per-call buffer-bounds asserts.
+ */
+let metaValidated = false;
+
+/** Call once after the embedding meta/packed/scales shape validation succeeds. */
+export function markEmbeddingMetaValidated(): void {
+  metaValidated = true;
 }
 
 /**
@@ -48,21 +66,26 @@ export function gatherEmbed(
 
  // `H` MUST be even: each byte packs two 4-bit values, so each token consumes
  // exactly `H / 2` packed bytes. A non-even `hidden` would misalign every row.
-  if (!Number.isInteger(H) || H <= 0 || H % 2 !== 0) {
-    throw new Error(`gatherEmbed: meta.hidden=${H} must be a positive even integer`);
-  }
-  if (!Number.isInteger(meta.vocab) || meta.vocab <= 0) {
-    throw new Error(`gatherEmbed: meta.vocab=${meta.vocab} must be a positive integer`);
-  }
-  if (!Number.isInteger(NG) || NG <= 0) {
-    throw new Error(`gatherEmbed: meta.n_groups=${NG} must be a positive integer`);
-  }
- // Every group must map to an index in `[0, NG)`; the last element lands in
- // group `(H - 1) / B`, which must stay below `NG`.
-  if (!Number.isInteger(B) || B <= 0 || Math.floor((H - 1) / B) >= NG) {
-    throw new Error(
-      `gatherEmbed: block_size=${B} / n_groups=${NG} disagree with hidden=${H}`,
-    );
+ // These meta-level invariants are validated once at init; once
+ // `metaValidated` is set they are skipped in this hot path (the per-token
+ // `tokenId` range check + buffer-bounds asserts below still run every call).
+  if (!metaValidated) {
+    if (!Number.isInteger(H) || H <= 0 || H % 2 !== 0) {
+      throw new Error(`gatherEmbed: meta.hidden=${H} must be a positive even integer`);
+    }
+    if (!Number.isInteger(meta.vocab) || meta.vocab <= 0) {
+      throw new Error(`gatherEmbed: meta.vocab=${meta.vocab} must be a positive integer`);
+    }
+    if (!Number.isInteger(NG) || NG <= 0) {
+      throw new Error(`gatherEmbed: meta.n_groups=${NG} must be a positive integer`);
+    }
+   // Every group must map to an index in `[0, NG)`; the last element lands in
+   // group `(H - 1) / B`, which must stay below `NG`.
+    if (!Number.isInteger(B) || B <= 0 || Math.floor((H - 1) / B) >= NG) {
+      throw new Error(
+        `gatherEmbed: block_size=${B} / n_groups=${NG} disagree with hidden=${H}`,
+      );
+    }
   }
   if (!Number.isInteger(tokenId) || tokenId < 0 || tokenId >= meta.vocab) {
     throw new Error(`gatherEmbed: token id ${tokenId} out of vocab range [0, ${meta.vocab})`);

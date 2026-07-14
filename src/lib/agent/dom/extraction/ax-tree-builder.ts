@@ -107,7 +107,7 @@ export function resolveRef(refId: string): HTMLElement | null {
  * never span or spoof a line.
  */
 function escapeAttributeValue(s: string): string {
-  return s.replace(/[\r\n\t]+/g, " ").replace(/"/g, '\\"');
+  return s.replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ").replace(/"/g, '\\"');
 }
 
 // ─── Role detection ─────────────────────────────────────────────────────────
@@ -174,10 +174,14 @@ const NAME_MIN_TEXT_LENGTH = 3;
  */
 function getName(el: HTMLElement, labelMap: Map<string, HTMLLabelElement>): string {
   const tag = el.tagName.toLowerCase();
+ // Hoist the (relatively expensive) sensitive-field scan once — it is
+ // consulted several times below, and re-scanning every call was wasted work
+ // on the hot path.
+  const sensitive = isSensitive(el);
 
  // <select> — get selected option text (or redact if sensitive).
   if (tag === "select") {
-    if (isSensitive(el)) {
+    if (sensitive) {
       const ariaLabel = el.getAttribute("aria-label");
       if (ariaLabel?.trim()) return ariaLabel.trim();
       const title = el.getAttribute("title");
@@ -196,6 +200,20 @@ function getName(el: HTMLElement, labelMap: Map<string, HTMLLabelElement>): stri
  // Standard accessible name sources (in priority order).
   const ariaLabel = el.getAttribute("aria-label");
   if (ariaLabel?.trim()) return ariaLabel.trim();
+
+ // aria-labelledby (per WAI-ARIA, higher priority than the implicit text
+ // sources below): concatenate the direct text of each referenced element.
+  const labelledby = el.getAttribute("aria-labelledby");
+  if (labelledby) {
+    const t = labelledby
+      .split(/\s+/)
+      .map((id) => document.getElementById(id))
+      .filter(Boolean)
+      .map((x) => directText(x as HTMLElement))
+      .join(" ")
+      .trim();
+    if (t) return t;
+  }
 
   const placeholder = el.getAttribute("placeholder");
   if (placeholder?.trim()) return placeholder.trim();
@@ -218,7 +236,7 @@ function getName(el: HTMLElement, labelMap: Map<string, HTMLLabelElement>): stri
     const type = input.getAttribute("type") || "";
     const value = input.getAttribute("value");
     if (type === "submit" && value?.trim()) return value.trim();
-    if (isSensitive(el)) return input.value ? "[value redacted]" : "";
+    if (sensitive) return input.value ? "[value redacted]" : "";
  // Truncate long values (e.g. search/address fields) instead of dropping
  // them — otherwise the navigator LLM can't see the field's current content.
     if (input.value && input.value.trim()) {
@@ -230,7 +248,7 @@ function getName(el: HTMLElement, labelMap: Map<string, HTMLLabelElement>): stri
  // Textarea (non-sensitive): surface the live value, mirroring the indexed
  // tree which reads `el.value` for `<textarea>`. The sensitive case is
  // redacted separately below.
-  if (tag === "textarea" && !isSensitive(el)) {
+  if (tag === "textarea" && !sensitive) {
     const v = (el as HTMLTextAreaElement).value;
     if (v && v.trim()) {
       return v.length > NAME_MAX_LENGTH ? v.trim().substring(0, NAME_MAX_LENGTH) + "..." : v.trim();
@@ -238,7 +256,7 @@ function getName(el: HTMLElement, labelMap: Map<string, HTMLLabelElement>): stri
   }
 
  // Textarea sensitive redaction.
-  if (tag === "textarea" && isSensitive(el)) {
+  if (tag === "textarea" && sensitive) {
     return (el as HTMLTextAreaElement).value ? "[value redacted]" : "";
   }
 
@@ -293,7 +311,13 @@ function isStructural(el: HTMLElement): boolean {
  * mode (all vs interactive), visibility, viewport bounds, and the element's
  * role / name significance.
  */
-function shouldInclude(el: HTMLElement, filter: string, hasRefId: boolean, labelMap: Map<string, HTMLLabelElement>): boolean {
+function shouldInclude(
+  el: HTMLElement,
+  filter: string,
+  hasRefId: boolean,
+  labelMap: Map<string, HTMLLabelElement>,
+  name: string,
+): boolean {
   const tag = el.tagName.toLowerCase();
   if (SKIP_TAGS.has(tag)) return false;
  // apply visibility + aria-hidden gating even in "all" mode so
@@ -301,16 +325,20 @@ function shouldInclude(el: HTMLElement, filter: string, hasRefId: boolean, label
  // don't inflate the AX payload with content the user can't see.
   if (el.getAttribute("aria-hidden") === "true") return false;
   if (isLikelyHidden(el)) return false;
-  if (filter !== "all" && !isVisible(el)) return false;
-  if (filter !== "all" && !hasRefId) {
- // When not extracting a specific subtree, only include viewport-visible els.
+  if (filter !== "all") {
+ // Reuse a single rect for both the visibility check and the viewport-bounds
+ // test so we don't call getBoundingClientRect twice on the hot path.
     const rect = el.getBoundingClientRect();
-    if (!(rect.top < window.innerHeight && rect.bottom > 0 && rect.left < window.innerWidth && rect.right > 0)) return false;
+    if (!isVisible(el, rect)) return false;
+    if (!hasRefId) {
+ // When not extracting a specific subtree, only include viewport-visible els.
+      if (!(rect.top < window.innerHeight && rect.bottom > 0 && rect.left < window.innerWidth && rect.right > 0)) return false;
+    }
   }
   if (filter === "interactive") return isInteractive(el);
   if (isInteractive(el)) return true;
   if (isStructural(el)) return true;
-  if (getName(el, labelMap).length > 0) return true;
+  if (name.length > 0) return true;
   const role = getRole(el);
   return role !== "generic" && role !== "image";
 }
@@ -340,11 +368,12 @@ function buildTree(
   if (depth > maxDepth) return;
   if (!el || !el.tagName) return;
 
-  const included = shouldInclude(el, filter, !!refId, labelMap) || (!!refId && depth === 0);
+  const name = getName(el, labelMap);
+  const included = shouldInclude(el, filter, !!refId, labelMap, name) || (!!refId && depth === 0);
 
   if (included) {
     const role = getRole(el);
-    const name = getName(el, labelMap)
+    const displayName = name
       .replace(/\s+/g, " ")
       .substring(0, NAME_MAX_LENGTH)
       .replace(/"/g, '\\"');
@@ -370,8 +399,8 @@ function buildTree(
  // whitespace-collapsed at line 329). Quote-escaping alone let a page inject
  // literal newlines to forge extra AX-tree rows (line spoofing / prompt
  // injection into the navigator LLM's ground-truth page view).
-    let line = indent + role;
-    if (name) line += ` "${name}"`;
+    let line = indent + escapeAttributeValue(role);
+    if (displayName) line += ` "${displayName}"`;
     line += ` [${ref}]`;
     const href = el.getAttribute("href");
     const type = el.getAttribute("type");
@@ -383,6 +412,16 @@ function buildTree(
  // aren't exposed to the LLM, consistent with the indexed-tree redactions.
     if (type && !isSensitive(el)) line += ` type="${escapeAttributeValue(type)}"`;
     if (placeholder && !isSensitive(el)) line += ` placeholder="${escapeAttributeValue(placeholder)}"`;
+ // Surface a curated set of interactive state attributes so the navigator LLM
+ // can avoid clicking disabled controls or mishandling collapsed/expanded
+ // elements. Additive — emitted only when present (mirrors the indexed tree).
+    if (isInteractive(el)) {
+      for (const stateAttr of ["disabled", "aria-disabled", "aria-expanded", "aria-checked", "aria-selected", "readonly"] as const) {
+        if (!el.hasAttribute(stateAttr)) continue;
+        const raw = el.getAttribute(stateAttr) ?? "";
+        line += ` ${stateAttr}="${escapeAttributeValue(raw || "true")}"`;
+      }
+    }
     lines.push(line);
 
  // For <select> (non-sensitive), emit child <option> elements.
@@ -502,7 +541,7 @@ export function generateAccessibilityTree(
     }
 
  // Cleanup dead WeakRefs to avoid unbounded map growth.
-    for (const key in elementMap!) {
+    for (const key of Object.keys(elementMap!)) {
       if (!elementMap![key].deref()) {
         delete elementMap![key];
       }

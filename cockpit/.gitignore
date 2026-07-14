@@ -29,6 +29,10 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# Build artifacts
+coverage/
+dist/
+
 # Logs
 *.log
 dev.log

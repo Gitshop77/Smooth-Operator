@@ -112,6 +112,14 @@ describe('middleware token enforcement', () => {
     expect(res.status).toBe(401);
   });
 
+  it('rejects an over-length token (>1024 chars) before the constant-time compare', async () => {
+    process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
+    const { middleware } = await import('@/middleware');
+    const tooLong = `${REAL_TOKEN}${'x'.repeat(2000)}`;
+    const res = middleware(fakeReq(PROTECTED, '', { 'x-cowork-token': tooLong }));
+    expect(res.status).toBe(401);
+  });
+
   it('returns 401 when the presented token is an empty string', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
     const { middleware } = await import('@/middleware');
@@ -125,6 +133,17 @@ describe('middleware token enforcement', () => {
     process.env.COWORK_EVENT_TOKEN = 'dev-token';
     process.env.COWORK_ALLOW_DEV_TOKEN = '1';
     (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+    const { middleware } = await import('@/middleware');
+    const res = middleware(fakeReq(PROTECTED));
+    expect(res.status).toBe(401);
+  });
+
+  it('fails closed (401) on the dev-token even with opt-in when NODE_ENV is blank/unset', async () => {
+    // A blank/unset NODE_ENV must fail closed with 401 even when the dev-token
+    // opt-in is set (the `nodeEnv.length > 0` guard in middleware.ts).
+    process.env.COWORK_EVENT_TOKEN = 'dev-token';
+    process.env.COWORK_ALLOW_DEV_TOKEN = '1';
+    delete (process.env as Record<string, string | undefined>).NODE_ENV;
     const { middleware } = await import('@/middleware');
     const res = middleware(fakeReq(PROTECTED));
     expect(res.status).toBe(401);

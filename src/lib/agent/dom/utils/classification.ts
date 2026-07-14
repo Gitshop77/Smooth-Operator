@@ -42,7 +42,7 @@ export const SKIP_TAGS: ReadonlySet<string> = new Set([
 
 /** Tags that are always treated as interactive (in addition to role-based). */
 const INTERACTIVE_TAGS: ReadonlySet<string> = new Set([
-  "a", "button", "input", "select", "textarea", "summary", "details",
+  "button", "input", "select", "textarea", "summary", "details",
 ]);
 
 /**
@@ -78,6 +78,15 @@ const INTERACTIVE_ROLES: ReadonlySet<string> = new Set([
  * that contract means the ax-tree tests don't need to be expanded when the
  * canonical helper is unified here.
  */
+/**
+ * Read an element's ARIA `role` attribute, lowercased, or `null` when absent.
+ * Centralizes the `getAttribute("role")?.toLowerCase()` idiom so the two
+ * extractors can't drift on role normalization.
+ */
+function getRole(el: Element): string | null {
+  return el.getAttribute("role")?.toLowerCase() ?? null;
+}
+
 export function isInteractive(el: HTMLElement): boolean {
   const tag = el.tagName.toLowerCase();
  // <a> is only interactive when it has an `href` attribute — per HTML spec,
@@ -87,8 +96,8 @@ export function isInteractive(el: HTMLElement): boolean {
  // would surface dead anchors to the LLM as click targets.
   if (tag === "a") return el.getAttribute("href") !== null;
   if (INTERACTIVE_TAGS.has(tag)) return true;
-  const role = el.getAttribute("role");
-  if (role && INTERACTIVE_ROLES.has(role.toLowerCase())) return true;
+  const role = getRole(el);
+  if (role && INTERACTIVE_ROLES.has(role)) return true;
   const contenteditable = el.getAttribute("contenteditable");
   if (contenteditable !== null && contenteditable !== "false") return true;
   if (el.getAttribute("onclick") !== null) return true;
@@ -155,7 +164,7 @@ export const PROPAGATING_ELEMENTS: readonly PropagatingElementPattern[] = [
  */
 export function isPropagatingElement(el: Element): boolean {
   const tag = el.tagName.toLowerCase();
-  const role = el.getAttribute("role");
+  const role = getRole(el);
   for (const p of PROPAGATING_ELEMENTS) {
     if (p.tag !== tag) continue;
     if (p.role !== undefined && p.role !== role) continue;
@@ -245,8 +254,8 @@ export function shouldExcludeAsContained(child: Element): boolean {
  // Elements with an explicit aria-label carry independent information.
   if (child.hasAttribute("aria-label")) return false;
  // Elements with an independent interactive role are not redundant.
-  const role = child.getAttribute("role");
-  if (role && INTERACTIVE_ROLES.has(role.toLowerCase())) return false;
+  const role = getRole(child);
+  if (role && INTERACTIVE_ROLES.has(role)) return false;
 
   const ancestor = nearestPropagatingAncestor(child);
   if (!ancestor) return false;
@@ -268,6 +277,8 @@ export const SENSITIVE_AUTOCOMPLETE: readonly string[] = [
   "cc-number", "cc-csc", "cc-exp", "cc-exp-month", "cc-exp-year",
 ];
 
+const SENSITIVE_AUTOCOMPLETE_SET = new Set(SENSITIVE_AUTOCOMPLETE);
+
 /**
  * Determine whether an element holds sensitive data whose `value` should be
  * redacted before being sent to the LLM. True for `type="password"`,
@@ -285,5 +296,5 @@ export function isSensitive(el: HTMLElement): boolean {
   const autocompleteTokens = (el.getAttribute("autocomplete") || "")
     .toLowerCase()
     .split(/\s+/);
-  return autocompleteTokens.some((t) => SENSITIVE_AUTOCOMPLETE.includes(t));
+  return autocompleteTokens.some((t) => SENSITIVE_AUTOCOMPLETE_SET.has(t));
 }

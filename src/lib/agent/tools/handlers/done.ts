@@ -11,7 +11,7 @@ export async function handleDone(
   return {
     action,
     success: action.success,
-    message: action.success ? `Task complete: ${action.text}` : `Task incomplete: ${action.text}`,
+    message: action.success ? `Task complete: ${action.text ?? ""}` : `Task incomplete: ${action.text ?? ""}`,
     isDone: true,
   };
 }

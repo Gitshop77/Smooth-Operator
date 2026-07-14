@@ -12,6 +12,7 @@
  *
  * New code should import from
  * `@/lib/agent/dom/annotation/overlay-renderer` or from the top-level
+ * `@/lib/agent/dom` index.
 
  */
-export * from "./annotation/overlay-renderer";
+export { highlightElement, setPersistentHighlight, type OverlayHandle } from "./annotation/overlay-renderer";

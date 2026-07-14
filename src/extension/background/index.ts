@@ -34,6 +34,18 @@ import { handleScheduledTaskFire } from "./task-queue";
 // becomes ready to receive messages.
 import "./message-routing";
 
+// Warm the live models.dev catalog so cost tracking uses live rates.
+// pricing.ts no longer has a static table — rates come from the catalog.
+// Lazy import keeps the (large) pricing module out of the critical path.
+// NOTE: the catalog is fetched live at runtime (not bundled), so its current
+// attribution/usage terms must be confirmed before any cached copy is
+// redistributed — see THIRD_PARTY_LICENSES.md (models.dev entry).
+function warmPricingCatalog(): void {
+  void import("../../lib/agent/llm/pricing")
+    .then((m) => m.refreshPricingFromCatalog())
+    .catch((e) => console.warn("[pricing] live catalog refresh failed:", e));
+}
+
 // ─── Side panel wiring ──────────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -43,26 +55,13 @@ chrome.runtime.onInstalled.addListener(() => {
       /* setPanelBehavior can reject on unsupported Chrome versions — non-fatal */
     });
 
- // Warm the live models.dev catalog so cost tracking uses live rates.
- // pricing.ts no longer has a static table — rates come from the catalog.
- // Lazy import keeps the (large) pricing module out of the critical install path.
- // NOTE: the catalog is fetched live at runtime (not bundled), so its current
- // attribution/usage terms must be confirmed before any cached copy is
- // redistributed — see THIRD_PARTY_LICENSES.md (models.dev entry).
-  void import("../../lib/agent/llm/pricing").then((m) =>
-    m.refreshPricingFromCatalog(),
-  );
+  warmPricingCatalog();
 });
 
 // On browser/extension startup (a more reliable trigger than onInstalled for
 // resuming service-worker incarnations), also warm the live catalog.
 chrome.runtime.onStartup.addListener(() => {
- // Warm the live models.dev catalog so cost tracking uses live rates.
- // pricing.ts no longer has a static table — rates come from the catalog.
- // Lazy import keeps the (large) pricing module out of the startup path.
-  void import("../../lib/agent/llm/pricing").then((m) =>
-    m.refreshPricingFromCatalog(),
-  );
+  warmPricingCatalog();
 });
 
 // ─── Live pricing: refresh when provider/model/apiKey/baseUrl changes ────────
@@ -84,11 +83,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (now - lastPricingRefreshAt < PRICING_REFRESH_THROTTLE_MS) return;
   lastPricingRefreshAt = now;
 
- // Warm the live models.dev catalog so cost tracking uses live rates.
- // pricing.ts no longer has a static table — rates come from the catalog.
-  void import("../../lib/agent/llm/pricing").then((m) =>
-    m.refreshPricingFromCatalog(),
-  );
+  warmPricingCatalog();
 });
 
 // ─── Keyboard shortcut: open side panel (Ctrl+E / Cmd+E) ────────────────────
@@ -159,7 +154,11 @@ chrome.runtime.onConnect.addListener((port) => {
  * evaluation finishes — by which point the `onMessage` listener (registered
  * by the `./message-routing` import above) is already in place.
  */
-(async () => {
+// On service worker startup, check whether a run was active when the previous
+// SW was killed, re-arm scheduled-task alarms, and (re)acquire the keep-awake
+// lock. Each concern is independent and wrapped in its own try/catch so a
+// transient failure in one does not block the others.
+async function onServiceWorkerStartup(): Promise<void> {
 // The run-state notification and the alarm/keep-awake arming are independent
 // concerns. A transient `getRunState()` rejection (quota exceeded, SW
 // mid-teardown, Chrome bug) must NOT block `initScheduledTasks` /
@@ -210,4 +209,6 @@ chrome.runtime.onConnect.addListener((port) => {
   } catch (e) {
     console.error("[sw-startup] failed to acquire keep-awake lock:", e);
   }
-})();
+}
+
+void onServiceWorkerStartup();

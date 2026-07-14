@@ -1,6 +1,6 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
-import { json, withRouteError, parseLimit, badRequest } from '@/lib/cowork/api/http';
+import { json, withRouteError, parseLimit, badRequest, parseAgentId } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
 // Mirrors the closed `status` enum documented on the `Task` model in
@@ -25,7 +25,7 @@ export async function GET(req: NextRequest): Promise<Response> {
  // authenticated GET can't pull the entire task table in one shot.
     const limit = parseLimit(req);
     const status = req.nextUrl.searchParams.get('status');
-    const agentId = req.nextUrl.searchParams.get('agentId') || undefined;
+    const agentId = parseAgentId(req);
  // Reject junk `status` values with 400 instead of silently returning an
  // empty set. Prisma parameterizes the input (not an injection risk), but an
  // unvalidated string yields a confusing empty result for non-matching input.
@@ -41,8 +41,8 @@ export async function GET(req: NextRequest): Promise<Response> {
  // if/else if silently dropped `agentId` whenever `status` was present).
  // Building the `where` object conditionally keeps the empty-object case
  // (no filters) equivalent to `findMany({})` — same as the prior fallback.
-    const where: { status?: string; agentId?: string } = {};
-    if (status) where.status = status;
+    const where: { status?: TaskStatus; agentId?: string } = {};
+    if (status) where.status = status as TaskStatus;
     if (agentId) where.agentId = agentId;
     const tasks = await db.task.findMany({
       where,

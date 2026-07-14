@@ -20,6 +20,7 @@ import { runAgentLoop } from "@/lib/agent/loop/orchestrator";
 import type { LogEvent } from "@/lib/agent/types";
 import type { AgentMode } from "@/lib/agent/modes";
 import { MODE_CONFIGS } from "@/lib/agent/modes";
+import { DEFAULT_MAX_ACTIONS } from "@/lib/validations";
 import { RunBuilder } from "@/lib/agent/run-history";
 import {
   saveRunState,
@@ -44,7 +45,8 @@ import {
 export { getVisionElementRect };
 
 export const DEFAULT_MAX_STEPS = 100;
-const DEFAULT_MAX_ACTIONS = 10;
+/** No-op catch for fire-and-forget `sendMessage` calls (side panel may be closed). */
+const SWALLOW_CLOSED_PORT = (): void => {};
 const DEFAULT_PLANNER_INTERVAL = 5;
 const DEFAULT_MAX_FAILURES = 5;
 const DEFAULT_COST_CAP = 0;
@@ -60,6 +62,13 @@ function clampInt(v: unknown, def: number, min: number, max: number): number {
   const n = typeof v === "number" ? v : Number(v);
   if (!Number.isFinite(n)) return def;
   return Math.min(max, Math.max(min, Math.floor(n)));
+}
+
+/** Coerce an unknown stored/override value into a finite number >= min (unbounded above). */
+function clampNumber(v: unknown, def: number, min: number): number {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return def;
+  return Math.max(min, n);
 }
 
 // Synchronous in-memory guard flag set BEFORE the first `await` in the RUN
@@ -129,6 +138,10 @@ interface StartRunArgs {
  * thin orchestrator — ~80 lines of setup + delegation.
  */
 export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = false }: StartRunArgs): Promise<void> {
+ // Local helper to extract a human-readable message from an unknown error,
+ // used in every catch site below. Centralized so the two branches can never
+ // drift apart if one copy is edited.
+  const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
  // Reset the per-run download-consent flag for EVERY run — this is the single
  // shared entry point for both manual RUN and scheduled-task runs, so resetting
  // here guarantees per-run isolation regardless of how the run was started
@@ -167,17 +180,15 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  // TDZ ReferenceError if an early (pre-run-start) event ever touches it. The
  // `const` ref satisfies `prefer-const`; the mutable payload lives on
  // `.current`, which stays `null` until run start assigns it.
-  const runStateRef: { current: RunState | null } = { current: null };
+  let runState: RunState | null = null;
   const sendEvent = (event: LogEvent): void => {
     chrome.runtime
       .sendMessage({
         type: "AGENT_EVENT",
         event,
-        time: new Date().toLocaleTimeString("en-GB", { hour12: false }),
+        time: new Date().toTimeString().slice(0, 8),
       })
-      .catch(() => {
-        /* side panel may not be open — non-fatal */
-      });
+      .catch(SWALLOW_CLOSED_PORT);
  // Feed every event into the RunBuilder so the persisted run record has
  // the full transcript for replay in the Options → History tab.
     runBuilder.addEvent(event);
@@ -195,8 +206,8 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  // resurrect the persisted run-state (finding: late saveRunState). Also
  // guarded by `runState` being assigned, so an early (pre-run) event can
  // never dereference an undefined object.
-      if (runStateRef.current && !runFinished) {
-        runStateRef.current.step = event.step;
+      if (runState && !runFinished) {
+        runState.step = event.step;
         saveRunState({ step: event.step }).catch(() => {
           /* best-effort persistence */
         });
@@ -212,7 +223,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
   try {
     [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   } catch (e) {
-    sendEvent({ type: "error", step: 0, message: `Tab query failed: ${e instanceof Error ? e.message : String(e)}`, recoverable: false });
+    sendEvent({ type: "error", step: 0, message: `Tab query failed: ${errMsg(e)}`, recoverable: false });
     releaseRunGuard();
     return;
   }
@@ -231,7 +242,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
       "allowedDomains", "blockedDomains",
     ]);
   } catch (e) {
-    sendEvent({ type: "error", step: 0, message: `Settings load failed: ${e instanceof Error ? e.message : String(e)}`, recoverable: false });
+    sendEvent({ type: "error", step: 0, message: `Settings load failed: ${errMsg(e)}`, recoverable: false });
     releaseRunGuard();
     return;
   }
@@ -271,7 +282,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
   try {
     await loadAndSetDomainConfig();
   } catch (e) {
-    sendEvent({ type: "error", step: 0, message: `Domain config load failed: ${e instanceof Error ? e.message : String(e)}`, recoverable: false });
+    sendEvent({ type: "error", step: 0, message: `Domain config load failed: ${errMsg(e)}`, recoverable: false });
     releaseRunGuard();
     return;
   }
@@ -281,9 +292,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
   const cfgMaxActions = clampInt(stored.maxActions, DEFAULT_MAX_ACTIONS, 1, 50);
   const cfgPlannerInterval = clampInt(stored.plannerInterval, DEFAULT_PLANNER_INTERVAL, 1, 100);
   const cfgMaxFailures = clampInt(stored.maxFailures, DEFAULT_MAX_FAILURES, 1, 100);
-  const cfgCostCap = (typeof stored.costCap === "number" && Number.isFinite(stored.costCap) && stored.costCap >= 0)
-    ? stored.costCap
-    : DEFAULT_COST_CAP;
+  const cfgCostCap = clampNumber(stored.costCap, DEFAULT_COST_CAP, 0);
  // Clamp the effective step budget to BOTH the absolute safety bound (1..1000,
  // enforced by `clampInt` + the Zod schema) AND the active mode's cap. The
  // per-mode `maxSteps` (e.g. `restricted: 30`, `standard: 100`,
@@ -295,7 +304,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
   const modeCap = MODE_CONFIGS[effectiveMode].maxSteps;
   const cfgMaxSteps = Math.min(clampInt(stored.maxSteps, maxSteps, 1, 1000), modeCap);
 
-  runStateRef.current = {
+  runState = {
     task,
     maxSteps: cfgMaxSteps,
     mode: effectiveMode,
@@ -312,12 +321,12 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  // be rejected with "already starting". On throw, release the guard,
  // surface an error event, and bail out cleanly so the user can retry.
   try {
-    await initRunState(runStateRef.current);
+    await initRunState(runState);
   } catch (e) {
     sendEvent({
       type: "error",
       step: 0,
-      message: `Run state initialization failed: ${e instanceof Error ? e.message : String(e)}`,
+      message: `Run state initialization failed: ${errMsg(e)}`,
       recoverable: false,
     });
  // If saveRunState succeeded but startKeepalive threw inside initRunState,
@@ -329,7 +338,27 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     return;
   }
 
-  const { controller, onStorageChanged } = wireAbortController();
+  let controller: AbortController;
+  let onStorageChanged: (changes: { [k: string]: chrome.storage.StorageChange }, area: string) => void;
+  try {
+    const wired = wireAbortController();
+    controller = wired.controller;
+    onStorageChanged = wired.onStorageChanged;
+  } catch (e) {
+ // If wiring the abort controller throws (e.g. chrome.storage API
+ // unavailable after SW teardown), release the run guard and clear
+ // persisted state so the next RUN isn't rejected with "already starting".
+    sendEvent({
+      type: "error",
+      step: 0,
+      message: `Abort wiring failed: ${errMsg(e)}`,
+      recoverable: false,
+    });
+    runFinished = true;
+    try { await clearRunState(); } catch { /* best-effort */ }
+    releaseRunGuard();
+    return;
+  }
 
  // Re-check for a STOP that arrived between `initRunState` and
  // `wireAbortController`. The storage.onChanged listener is now registered
@@ -404,7 +433,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     sendEvent({
       type: "error",
       step: 0,
-      message: e instanceof Error ? e.message : String(e),
+      message: errMsg(e),
       recoverable: false,
     });
   } finally {

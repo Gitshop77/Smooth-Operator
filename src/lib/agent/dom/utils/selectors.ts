@@ -17,8 +17,38 @@
  * XPath, a text-node walk for link/partial-link text, etc.).
  */
 
-/** Upper bound on a resolved XPath expression length. */
-const MAX_XPATH_LENGTH = 8192;
+/** Upper bound on a locator value (CSS selector or XPath expression) length. */
+const MAX_LOCATOR_VALUE_LENGTH = 8192;
+
+/** Upper bound on nodes returned by a single locator resolution (anti-DoS cap). */
+const MAX_NODES = 100_000;
+
+/**
+ * Collect a live `Element[]` from a DOM node collection, keeping only element
+ * nodes and stopping once {@link MAX_NODES} is reached. Shared by the CSS /
+ * tag / class locator branches so a hostile or pathological selector can't
+ * materialize an unbounded array (the `xpath` branch enforces the same element
+ * filter inline).
+ */
+function collectElements(
+  nodes: HTMLCollectionOf<Element> | NodeListOf<Element>,
+): Element[] {
+  const out: Element[] = [];
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
+    if (node && node.nodeType === 1) {
+      out.push(node);
+      if (out.length >= MAX_NODES) break;
+    }
+  }
+  return out;
+}
+
+/** Render a `By` for logging, truncating a long `value` (e.g. a huge xpath). */
+function logBy(by: By): string {
+  const v = by.value.length > 200 ? by.value.slice(0, 200) + "…" : by.value;
+  return `By(${by.using}, ${v})`;
+}
 
 /** The set of locator strategies supported by {@link findByLocator}. */
 export type LocatorUsing =
@@ -149,14 +179,14 @@ export function escapeCss(css: string): string {
   if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
     return CSS.escape(css);
   }
-  let ret = "";
+  const out: string[] = [];
   const n = css.length;
   for (let i = 0; i < n; i++) {
     const c = css.charCodeAt(i);
  // NUL is not representable in CSS; `CSS.escape` substitutes U+FFFD, so we do
  // the same here to keep both code paths equivalent (and never throw).
     if (c === 0x0) {
-      ret += "�";
+      out.push("�");
       continue;
     }
     if (
@@ -165,11 +195,11 @@ export function escapeCss(css: string): string {
       (i === 0 && c >= 0x0030 && c <= 0x0039) ||
       (i === 1 && c >= 0x0030 && c <= 0x0039 && css.charCodeAt(0) === 0x002d)
     ) {
-      ret += "\\" + c.toString(16) + " ";
+      out.push("\\" + c.toString(16) + " ");
       continue;
     }
     if (i === 0 && c === 0x002d && n === 1) {
-      ret += "\\" + css.charAt(i);
+      out.push("\\" + css.charAt(i));
       continue;
     }
     if (
@@ -180,12 +210,12 @@ export function escapeCss(css: string): string {
       (c >= 0x0041 && c <= 0x005a) ||
       (c >= 0x0061 && c <= 0x007a)
     ) {
-      ret += css.charAt(i);
+      out.push(css.charAt(i));
       continue;
     }
-    ret += "\\" + css.charAt(i);
+    out.push("\\" + css.charAt(i));
   }
-  return ret;
+  return out.join("");
 }
 
 /**
@@ -205,11 +235,25 @@ export function escapeCss(css: string): string {
  * handler. Failures are nonetheless surfaced to the console so genuine bugs
  * aren't masked as "no match" (see the notes in the `catch`/`default` below).
  */
+const isProd = (): boolean =>
+  typeof process !== "undefined" && process.env?.NODE_ENV === "production";
+
 export function findByLocator(by: By): Element[] {
   try {
     switch (by.using) {
-      case "css selector":
-        return Array.from(document.querySelectorAll(by.value));
+      case "css selector": {
+        if (by.value.length > MAX_LOCATOR_VALUE_LENGTH) {
+          if (!isProd()) {
+            console.warn(
+              "[findByLocator] css selector exceeds",
+              MAX_LOCATOR_VALUE_LENGTH,
+              "chars; refusing to evaluate",
+            );
+          }
+          return [];
+        }
+        return collectElements(document.querySelectorAll(by.value));
+      }
       case "xpath": {
  // Trust boundary: `by.value` originates from an LLM / prompt-injection-
  // controlled string (the `find_elements` handler). `document.evaluate`
@@ -218,14 +262,11 @@ export function findByLocator(by: By): Element[] {
  // expensive read over the entire page DOM. We cap the length to bound
  // pathological input. (The `id`/`name`/`class name` strategies are
  // escaped via `escapeCss` and are NOT injectable.)
-        if (by.value.length > MAX_XPATH_LENGTH) {
-          if (
-            typeof process === "undefined" ||
-            process.env?.NODE_ENV !== "production"
-          ) {
+        if (by.value.length > MAX_LOCATOR_VALUE_LENGTH) {
+          if (!isProd()) {
             console.warn(
               "[findByLocator] xpath expression exceeds",
-              MAX_XPATH_LENGTH,
+              MAX_LOCATOR_VALUE_LENGTH,
               "chars; refusing to evaluate",
             );
           }
@@ -243,6 +284,7 @@ export function findByLocator(by: By): Element[] {
           const node = xpe.snapshotItem(i);
           if (node && node.nodeType === Node.ELEMENT_NODE) {
             out.push(node as Element);
+            if (out.length >= MAX_NODES) break;
           }
         }
         return out;
@@ -260,9 +302,9 @@ export function findByLocator(by: By): Element[] {
         );
       }
       case "tag name":
-        return Array.from(document.getElementsByTagName(by.value));
+        return collectElements(document.getElementsByTagName(by.value));
       case "class name":
-        return Array.from(document.getElementsByClassName(by.value));
+        return collectElements(document.getElementsByClassName(by.value));
       default:
  // Unknown `using`. The public factories never produce this — it is only
  // reachable via a hand-constructed `By` with a non-standard strategy,
@@ -270,7 +312,7 @@ export function findByLocator(by: By): Element[] {
  // selector (genuine user input), this is unexpected: surface it (in every
  // environment, including production) so it isn't silently swallowed as
  // "no match", while still honoring the "never throws" contract.
-        console.error("[findByLocator] unknown locator strategy", by);
+        console.error("[findByLocator] unknown locator strategy", logBy(by));
         return [];
     }
   } catch (err) {
@@ -287,12 +329,9 @@ export function findByLocator(by: By): Element[] {
     const expected =
       err instanceof DOMException || err instanceof SyntaxError;
     if (!expected) {
-      console.error("[findByLocator] unexpected error resolving", by, err);
-    } else if (
-      typeof process === "undefined" ||
-      process.env?.NODE_ENV !== "production"
-    ) {
-      console.warn("[findByLocator] invalid selector/xpath", by, err);
+      console.error("[findByLocator] unexpected error resolving", logBy(by), err);
+    } else if (!isProd()) {
+      console.warn("[findByLocator] invalid selector/xpath", logBy(by), err);
     }
     return [];
   }

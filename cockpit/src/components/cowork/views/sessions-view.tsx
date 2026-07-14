@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import { Boxes, Cookie, EyeOff, PlayCircle, Smartphone } from "lucide-react";
 
 import { useSessions } from "@/hooks/use-cowork-query";
@@ -29,6 +29,7 @@ import { timeAgo } from "@/lib/cowork-data/format";
 export function SessionsView() {
   const { data, isLoading } = useSessions();
   const setView = useCoworkStore((s) => s.setView);
+  const reduceMotion = useReducedMotion();
 
   const sessions = data ?? [];
 
@@ -51,15 +52,24 @@ export function SessionsView() {
         />
       ) : (
         <motion.div
-          initial={{ opacity: 0 }}
+          initial={reduceMotion ? false : { opacity: 0 }}
           animate={{ opacity: 1 }}
           className="grid gap-4 grid-cols-1 md:grid-cols-2"
         >
-          {sessions.map((s) => (
-            <button
+          {sessions.map((s) => {
+            const activate = () => setView("session-replay", { sessionId: s.id });
+            return (
+            <div
               key={s.id}
-              type="button"
-              onClick={() => setView("session-replay", { sessionId: s.id })}
+              role="button"
+              tabIndex={0}
+              onClick={activate}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  activate();
+                }
+              }}
               aria-label={`Replay session ${s.name}`}
               className="group text-left rounded-2xl border border-border bg-card p-5 transition-colors hover:border-primary/40 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
             >
@@ -80,7 +90,7 @@ export function SessionsView() {
                   </p>
                 </div>
                 <span
-                  className="shrink-0 grid size-8 place-items-center rounded-lg bg-primary/10 text-primary opacity-0 group-hover:opacity-100 transition-opacity"
+                  className="shrink-0 grid size-8 place-items-center rounded-lg bg-primary/10 text-primary opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 transition-opacity"
                   aria-hidden
                 >
                   <PlayCircle className="size-5" />
@@ -105,8 +115,8 @@ export function SessionsView() {
                   </span>
                 </p>
               </div>
-            </button>
-          ))}
+            </div>
+          );})}
         </motion.div>
       )}
     </div>

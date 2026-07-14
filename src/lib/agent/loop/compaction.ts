@@ -92,16 +92,15 @@ export function partitionHistory(history: HistoryItem[]): {
 // `<step_N>` / prompt-like structure inside the summarization request. Escape
 // both attribute and text contexts so injected markup stays inert.
 
-function escapeXmlAttr(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function escapeXmlText(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+/**
+ * XML-escape untrusted text. Escapes `&`, `<`, `>` always, and `"` in
+ * attribute context (`attr = true`). A single-pass helper keeps the attribute
+ * and text variants from drifting apart.
+ */
+function escapeXml(s: string, attr = false): string {
+  let out = s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  if (attr) out = out.replace(/\"/g, "&quot;");
+  return out;
 }
 
 // ─── Secret redaction ─────────────────────────────────────────────────────────
@@ -114,17 +113,25 @@ function escapeXmlText(s: string): string {
 // Patterns are intentionally conservative (well-known key formats) to avoid
 // wiping legitimate extracted data (prices, ids, etc.).
 
+/** Secret-detection patterns, compiled once at module scope (hot path). */
+const SECRET_SK_RE = /\bsk-[A-Za-z0-9]{20,}\b/g;
+const SECRET_AKIA_RE = /\bAKIA[0-9A-Z]{16}\b/g;
+const SECRET_XOX_RE = /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/gi;
+const SECRET_AIZA_RE = /\bAIza[0-9A-Za-z_-]{35}\b/g;
+const SECRET_BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b/gi;
+const SECRET_JWT_RE =
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
+
+/** Combined `sk-/AKIA/xox/AIza/JWT` alternation — single full-text pass. */
+const SECRET_COMBINED_RE = new RegExp(
+  `(?:${SECRET_SK_RE.source}|${SECRET_AKIA_RE.source}|${SECRET_XOX_RE.source}|${SECRET_AIZA_RE.source}|${SECRET_JWT_RE.source})`,
+  "gi",
+);
+
 function redactSecrets(text: string): string {
   return text
-    .replace(/\bsk-[A-Za-z0-9]{20,}\b/g, "[redacted]")
-    .replace(/\bAKIA[0-9A-Z]{16}\b/g, "[redacted]")
-    .replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/gi, "[redacted]")
-    .replace(/\bAIza[0-9A-Za-z_-]{35}\b/g, "[redacted]")
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b/gi, "Bearer [redacted]")
-    .replace(
-      /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
-      "[redacted]",
-    );
+    .replace(SECRET_COMBINED_RE, "[redacted]")
+    .replace(SECRET_BEARER_RE, "Bearer [redacted]");
 }
 
 /** Render history items for the summarization LLM call.
@@ -137,25 +144,31 @@ function redactSecrets(text: string): string {
  * honor the "preserve verbatim" instruction — long extracted data is the whole
  * point of compaction, not something to silently drop. */
 export function renderHistoryForSummarization(items: HistoryItem[]): string {
-  return items
+  const rendered = items
     .map((h) => {
-      let s = `<step_${escapeXmlAttr(String(h.step))} agent="${escapeXmlAttr(h.agent)}">\n`;
-      if (h.evaluation) s += `Evaluation: ${escapeXmlText(h.evaluation)}\n`;
-      if (h.memory) s += `Memory: ${escapeXmlText(h.memory)}\n`;
-      if (h.goal) s += `Goal: ${escapeXmlText(h.goal)}\n`;
+      let s = `<step_${escapeXml(String(h.step), true)} agent="${escapeXml(h.agent, true)}">\n`;
+      if (h.evaluation) s += `Evaluation: ${escapeXml(h.evaluation)}\n`;
+      if (h.memory) s += `Memory: ${escapeXml(h.memory)}\n`;
+      if (h.goal) s += `Goal: ${escapeXml(h.goal)}\n`;
       if (h.results.length) {
         s += `Results:\n`;
         for (const r of h.results) {
-          s += `- ${escapeXmlText(r.action.type)}: ${escapeXmlText(r.message)}${r.success ? "" : " (FAILED)"}\n`;
+          s += `- ${escapeXml(r.action.type)}: ${escapeXml(r.message)}${r.success ? "" : " (FAILED)"}\n`;
           if (r.extractedContent) {
-            s += `  Extracted: ${wrapUntrusted(redactSecrets(r.extractedContent))}\n`;
+            s += `  Extracted: ${wrapUntrusted(r.extractedContent)}\n`;
           }
         }
       }
-      s += `</step_${escapeXmlAttr(String(h.step))}>\n`;
+      s += `</step_${escapeXml(String(h.step), true)}>\n`;
       return s;
     })
     .join("\n");
+ // Redact secrets across the FULL rendered history (action result messages,
+ // evaluations, memory, and goal text — not just extracted content) before
+ // the text leaves the user's machine. Secret shapes contain no `<`, `>`, or
+ // `&`, so the XML-escaping above never mangles them, and the regex still
+ // matches. `wrapUntrusted` is kept for the per-extraction injection defense.
+  return redactSecrets(rendered);
 }
 
 /**
@@ -195,13 +208,16 @@ export function buildCompactionRequest(history: HistoryItem[]): string {
  * Uses the shared `PROMPT_TAGS` constant from security.ts (single source of
  * truth) so both sanitizers stay in sync.
  */
+/** Prompt-tag marker stripper, compiled once at module scope (hot path). */
+const PROMPT_TAG_STRIP_RE = new RegExp(
+  `<\\/?(?:${PROMPT_TAGS.join("|")})[^>]*>`,
+  "g",
+);
+
 export function sanitizeCompactedMemory(memory: string): string {
  // 1) Replace ONLY the tag markers (`<tag>`/`</tag>`, with or without
  // attributes) with `[tag]`. Content between tags is preserved.
-  const tagStripped = memory.replace(
-    new RegExp(`<\\/?(?:${PROMPT_TAGS.join("|")})[^>]*>`, "g"),
-    "[tag]",
-  );
+  const tagStripped = memory.replace(PROMPT_TAG_STRIP_RE, "[tag]");
  // 2) Redact high-confidence secrets echoed by the summarizer (defense in
  // depth — the navigator must not receive a real key/JWT).
   const secretsOut = redactSecrets(tagStripped);

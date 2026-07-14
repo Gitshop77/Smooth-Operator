@@ -37,31 +37,38 @@ import {
  * nor calls/constructs can slip through. (Layered with the `Function`/`eval`
  * and `document` hardening below for defense-in-depth.)
  */
-function makeSandboxChrome(): unknown {
+/**
+ * A fully-throwing Proxy used to shadow dangerous globals (`chrome`,
+ * `Function`, `eval`) passed as parameters to the generated function. ANY
+ * property access, call, construct, or assignment throws `access denied by
+ * evaluate sandbox`, so even a direct `new Function(...)` / `eval(...)` /
+ * `chrome.x` reference inside the evaluated code is blocked. The `name` is
+ * embedded in the thrown message (e.g. `chrome.get`, `Function.apply`) so the
+ * source of a denial is diagnosable.
+ */
+function makeThrowingProxy(name: string): unknown {
   const deny = (op: string, prop: PropertyKey): never => {
-    throw new Error(`access denied by evaluate sandbox: chrome.${op} ${String(prop)}`);
+    throw new Error(`access denied by evaluate sandbox: ${name}.${op} ${String(prop)}`);
   };
   return new Proxy(
     {},
     {
       get: (_t, prop) => deny("get", prop),
-      set: (_t, prop) => {
-        deny("set", prop);
-        return false;
-      },
-      has: (_t, prop) => {
-        deny("has", prop);
-        return false;
-      },
-      deleteProperty: (_t, prop) => {
-        deny("delete", prop);
-        return false;
-      },
-      apply: (_t, _this, _args) => deny("apply", "()"),
-      construct: (_t, _args) => deny("construct", "new"),
+      set: (_t, prop) => deny("set", prop),
+      has: (_t, prop) => deny("has", prop),
+      deleteProperty: (_t, prop) => deny("deleteProperty", prop),
+      apply: () => deny("apply", "()"),
+      construct: () => deny("construct", "new"),
     },
   );
 }
+
+// Stateless throwing stubs for the dangerous globals passed as parameters to
+// the generated function. These are identical on every `handleEvaluate` call,
+// so build them once at module load instead of re-creating them per invocation.
+const DENY_CHROME = makeThrowingProxy("chrome");
+const DENY_FUNCTION = makeThrowingProxy("Function");
+const DENY_EVAL = makeThrowingProxy("eval");
 
 /**
  * A Proxy that FORWARDS to a real global object (`window`,
@@ -225,22 +232,6 @@ function makeHardenedWindowLike(target: object, hardenedDoc: Document): object {
  * a direct `new Function(...)` / `eval(...)` reference inside the evaluated code
  * (not just the `window.Function` form) is blocked.
  */
-function makeThrowingStub(name: string): unknown {
-  const deny = (op: string, prop: PropertyKey): never => {
-    throw new Error(`access denied by evaluate sandbox: ${name}.${op} ${String(prop)}`);
-  };
-  return new Proxy(
-    {},
-    {
-      get: (_t, prop) => deny("get", prop),
-      set: (_t, prop) => { deny("set", prop); return false; },
-      has: (_t, prop) => { deny("has", prop); return false; },
-      deleteProperty: (_t, prop) => { deny("deleteProperty", prop); return false; },
-      apply: () => deny("apply", "()"),
-      construct: () => deny("construct", "new"),
-    },
-  );
-}
 
 /**
  * Best-effort `document` obfuscation proxy. Forwards every DOM access EXCEPT a
@@ -461,7 +452,7 @@ export async function handleEvaluate(
  // HIGH-185).
  // Do NOT rely on this handler for confidentiality; the mitigation is
  // architectural and owned elsewhere.
-    const denyChrome = makeSandboxChrome();
+    const denyChrome = DENY_CHROME;
  // `hardenedDocument` is created first so the window/global proxies can
  // redirect `document` to it — this only obstructs the DIRECT traversal
  // `window.document.defaultView.chrome`. It does NOT close the
@@ -559,8 +550,8 @@ export async function handleEvaluate(
       hardenedDocument,
       sandboxGlobal,
       sandboxSelf,
-      makeThrowingStub("Function"),
-      makeThrowingStub("eval"),
+      DENY_FUNCTION,
+      DENY_EVAL,
     );
  // If the result is a Promise, race it against a timeout.
     let result: unknown = syncResult;
@@ -610,6 +601,9 @@ export async function handleEvaluate(
       pageChanged,
     };
   } catch (e) {
-    throw new Error(`JS evaluation failed: ${e instanceof Error ? e.message : String(e)}`);
+    throw new Error(
+      `JS evaluation failed: ${e instanceof Error ? e.message : String(e)}`,
+      { cause: e },
+    );
   }
 }

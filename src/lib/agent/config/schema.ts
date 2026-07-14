@@ -80,7 +80,9 @@ const StringMatchSchema = z
 
 /** Schema for the URL-match evaluator input. */
 const UrlMatchSchema = z.object({
-  referenceUrl: z.string(),
+ // Require a non-empty referenceUrl so a no-op/missing target cannot make the
+ // URL evaluator pass trivially (mirrors the empty-target guard below).
+  referenceUrl: z.string().min(1),
   matchingRule: z.literal("GOLD in PRED").optional(),
 });
 
@@ -112,9 +114,12 @@ const HtmlContentTargetSchema = z
 
 /** Schema for the expected-outcomes spec. */
 const ExpectedOutcomesSchema = z.object({
-  string: z.array(StringMatchSchema).optional(),
+ // Bound the pattern arrays so an attacker-influenced config cannot supply
+ // thousands of entries (CPU amplification on top of the per-pattern
+ // length/ReDoS checks, which remain fully intact below).
+  string: z.array(StringMatchSchema).max(200).optional(),
   url: UrlMatchSchema.optional(),
-  html: z.array(HtmlContentTargetSchema).optional(),
+  html: z.array(HtmlContentTargetSchema).max(200).optional(),
 });
 
 /** Schema for the early-stop thresholds. */
@@ -182,7 +187,7 @@ const AgentConfigSchema = z.object({
  * hard cap on the DOM size it ships to the model regardless of this flag (see
  * `buildNavigatorUserMessage` / `prepareNavigatorRequest`).
  */
-  enableHtmlSummarizer: z.boolean().optional().default(true),
+  enableHtmlSummarizer: z.boolean().default(true),
   /** Optional expected-outcomes spec for deterministic evaluator fast-path. */
   expectedOutcomes: ExpectedOutcomesSchema.optional(),
 });

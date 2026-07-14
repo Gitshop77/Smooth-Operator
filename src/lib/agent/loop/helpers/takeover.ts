@@ -14,6 +14,49 @@ import type { LoopDeps } from "../types";
 import { TAKEOVER_TIMEOUT_MS } from "../constants";
 
 /**
+ * Race an external resume trigger against a hard timeout + abort signal.
+ *
+ * Owns the `done` guard, the timeout timer, and the abort listener so neither
+ * leaks. The caller supplies only its distinct resume trigger via `arm`, which
+ * receives `finish` to call with the outcome. Both resume paths in
+ * {@link waitForTakeoverResume} share this; only their `arm` differs.
+ */
+function raceResumeWithTimeout(
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+  arm: (finish: (result: "resumed" | "timeout") => void) => void,
+): Promise<"resumed" | "timeout"> {
+  return new Promise<"resumed" | "timeout">((resolve) => {
+    let done = false;
+    let timer: ReturnType<typeof setTimeout>;
+    let abortListener: (() => void) | null = null;
+    const finish = (result: "resumed" | "timeout"): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (abortListener && signal) {
+        try { signal.removeEventListener("abort", abortListener); } catch { /* ignore */ }
+        abortListener = null;
+      }
+      resolve(result);
+    };
+ // Arm the caller's distinct resume trigger first (push to the registry /
+ // fire the override) so it happens before the timer + abort check — matching
+ // the original per-branch ordering in which a synchronous abort can still
+ // clean up the registry entry.
+    arm(finish);
+    timer = setTimeout(() => finish("timeout"), timeoutMs);
+    if (signal) {
+      if (signal.aborted) finish("timeout");
+      else {
+        abortListener = () => finish("timeout");
+        signal.addEventListener("abort", abortListener);
+      }
+    }
+  });
+}
+
+/**
  * Only trust a RESUME that originates from our own extension and that is NOT
  * carried on a content-script `tab` — i.e. a message from one of our own
  * extension pages (the sidepanel/options), never from a content script injected
@@ -47,7 +90,6 @@ let resumeListenerAttached = false;
 
 function attachResumeListener(): void {
   if (resumeListenerAttached) return;
-  resumeListenerAttached = true;
   try {
     chrome.runtime.onMessage.addListener(
       (msg: unknown, sender?: chrome.runtime.MessageSender): void => {
@@ -61,6 +103,11 @@ function attachResumeListener(): void {
         }
       }
     );
+ // Only mark attached once addListener has actually succeeded, so a
+ // throwing call (e.g. extension context invalidated) leaves the flag
+ // false and the next wait retries — rather than silently breaking RESUME
+ // for the whole session.
+    resumeListenerAttached = true;
   } catch {
     /* listener attachment failed — waits simply fall back to timeout */
   }
@@ -81,21 +128,7 @@ export async function waitForTakeoverResume(
  // Race the caller-provided override against a timeout + abort signal so a
  // custom `requestTakeoverResume` that never resolves/rejects can't hang the
  // loop (the chrome.runtime.onMessage path below already has a hard timeout).
-    return await new Promise<"resumed" | "timeout">((resolve) => {
-      let done = false;
-      let abortListener: (() => void) | null = null;
- // Mirror the message-path's `finish` design: clear the timer + abort
- // listener on resolution so neither leaks.
-      const finish = (result: "resumed" | "timeout"): void => {
-        if (done) return;
-        done = true;
-        if (timer) clearTimeout(timer);
-        if (abortListener && deps.signal) {
-          try { deps.signal.removeEventListener("abort", abortListener); } catch { /* ignore */ }
-          abortListener = null;
-        }
-        resolve(result);
-      };
+    return raceResumeWithTimeout(deps.signal, TAKEOVER_TIMEOUT_MS, (finish) => {
  // Fire-and-forget the override; `finish` resolves the promise when it
  // settles (resumed on success, timeout on rejection/abort/expiry).
       (async () => {
@@ -106,46 +139,21 @@ export async function waitForTakeoverResume(
           finish("timeout");
         }
       })();
-      const timer = setTimeout(() => finish("timeout"), TAKEOVER_TIMEOUT_MS);
-      if (deps.signal) {
-        if (deps.signal.aborted) finish("timeout");
-        else {
-          abortListener = () => finish("timeout");
-          deps.signal.addEventListener("abort", abortListener);
-        }
-      }
     });
   }
 
   if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
-    return await new Promise<"resumed" | "timeout">((resolve) => {
-      let done = false;
-      let abortListener: (() => void) | null = null;
- // The shared listener holds a reference to `finish`; remove it from the
- // registry on every resolution path so a resolved/expired pause can't be
- // released again by a later RESUME.
-      const finish = (result: "resumed" | "timeout"): void => {
-        if (done) return;
-        done = true;
-        const idx = activeResumeFinishers.indexOf(finish);
+    return raceResumeWithTimeout(deps.signal, TAKEOVER_TIMEOUT_MS, (finish) => {
+ // The shared onMessage listener holds a reference to `finish`; remove it
+ // from the registry on every resolution path so a resolved/expired pause
+ // can't be released again by a later RESUME.
+      const finishWithRegistry = (result: "resumed" | "timeout"): void => {
+        const idx = activeResumeFinishers.indexOf(finishWithRegistry);
         if (idx >= 0) activeResumeFinishers.splice(idx, 1);
-        if (abortListener && deps.signal) {
-          try { deps.signal.removeEventListener("abort", abortListener); } catch { /* ignore */ }
-          abortListener = null;
-        }
-        clearTimeout(timer);
-        resolve(result);
+        finish(result);
       };
-      activeResumeFinishers.push(finish);
+      activeResumeFinishers.push(finishWithRegistry);
       attachResumeListener();
-      const timer = setTimeout(() => finish("timeout"), TAKEOVER_TIMEOUT_MS);
-      if (deps.signal) {
-        if (deps.signal.aborted) finish("timeout");
-        else {
-          abortListener = () => finish("timeout");
-          deps.signal.addEventListener("abort", abortListener);
-        }
-      }
     });
   }
 

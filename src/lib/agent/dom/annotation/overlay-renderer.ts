@@ -16,8 +16,10 @@ const HIGHLIGHT_COLOR = "#f97316";
 const HIGHLIGHT_BG = "rgba(249,115,22,0.12)";
 /** How long a highlight stays on screen before auto-removing. */
 const HIGHLIGHT_DURATION_MS = 1200;
-/** Maximum z-index (used for highlight badges). */
-const MAX_Z_INDEX = "2147483647";
+/** Maximum z-index (used for highlight badges). Sub-max to avoid the literal
+ * 2147483647 automation fingerprint while still sitting above essentially all
+ * page content. */
+const MAX_Z_INDEX = "2147483000";
 /** Vertical offset of the badge above the element (px). */
 const BADGE_VERTICAL_OFFSET = 22;
 /** Minimum left/top coordinate for the badge (px). */
@@ -57,6 +59,32 @@ export function setPersistentHighlight(enabled: boolean): void {
 }
 
 /**
+ * Single memoized visually-hidden `aria-live` region that announces which
+ * element the agent is acting on, so screen-reader users can follow the
+ * agent's actions (the visual badge stays `aria-hidden`/decorative).
+ */
+let liveRegion: HTMLElement | null = null;
+function announceAction(label: string): void {
+  if (!liveRegion) {
+    liveRegion = document.createElement("div");
+    liveRegion.setAttribute("aria-live", "polite");
+    liveRegion.style.cssText = [
+      "position:absolute",
+      "width:1px",
+      "height:1px",
+      "margin:-1px",
+      "padding:0",
+      "border:0",
+      "overflow:hidden",
+      "clip:rect(0 0 0 0)",
+      "white-space:nowrap",
+    ].join(";");
+    document.body.appendChild(liveRegion);
+  }
+  liveRegion.textContent = label;
+}
+
+/**
  * Highlight an element with an orange outline + a floating label badge.
  * The highlight auto-removes after {@link HIGHLIGHT_DURATION_MS} milliseconds,
  * unless C19 persistent mode is enabled (then it stays until the next action).
@@ -88,6 +116,8 @@ export function highlightElement(el: HTMLElement, label: string): OverlayHandle 
   const badge = document.createElement("div");
   badge.setAttribute("aria-hidden", "true");
   badge.textContent = label;
+ // Announce the action to assistive technology (the badge is decorative).
+  announceAction(label);
   badge.style.cssText = [
     "position:fixed",
     `z-index:${MAX_Z_INDEX}`,
@@ -110,9 +140,21 @@ export function highlightElement(el: HTMLElement, label: string): OverlayHandle 
   position();
   document.body.appendChild(badge);
 
- // Reposition on scroll/resize while visible.
-  window.addEventListener("scroll", position, { passive: true });
-  window.addEventListener("resize", position);
+ // Coalesce scroll/resize events into at most one reposition per animation
+ // frame (avoids synchronous layout reads on the scroll hot path). Capture
+ // phase catches non-bubbling scroll events from nested scrollable containers
+ // — a position:fixed badge must follow the element in the viewport even when
+ // an inner container scrolls.
+  let rafId: number | null = null;
+  const schedulePosition = (): void => {
+    if (rafId !== null) return;
+    rafId = requestAnimationFrame(() => {
+      rafId = null;
+      position();
+    });
+  };
+  window.addEventListener("scroll", schedulePosition, { passive: true, capture: true });
+  window.addEventListener("resize", schedulePosition, { passive: true });
 
   let removed = false;
   const remove = (): void => {
@@ -120,8 +162,12 @@ export function highlightElement(el: HTMLElement, label: string): OverlayHandle 
     removed = true;
     state.count -= 1;
     badge.remove();
-    window.removeEventListener("scroll", position);
-    window.removeEventListener("resize", position);
+    window.removeEventListener("scroll", schedulePosition);
+    window.removeEventListener("resize", schedulePosition);
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
  // Only restore the element's original styles when this was the last
  // active highlight for it, preventing a stale highlight from lingering.
     if (state.count === 0) {

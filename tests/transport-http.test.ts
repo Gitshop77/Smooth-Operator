@@ -47,33 +47,40 @@ function stringToStream(s: string): ReadableStream<Uint8Array> {
   });
 }
 
+/** Build a `FakeResponse` with safe defaults; override only what a test needs. */
+function makeFakeResponse(o: Partial<FakeResponse> = {}): FakeResponse {
+  return {
+    type: "basic",
+    status: 200,
+    ok: true,
+    headers: { get: () => null },
+    body: null,
+    text: () => Promise.resolve(""),
+    ...o,
+  };
+}
+
 // ─── opaqueredirect security ───────────────────────────────────────────────
 
+// Save/restore globalThis.fetch around every test that mocks it, so a mock
+// never leaks into a later test (a single shared helper instead of three
+// copy-pasted save/restore blocks).
+let savedFetch: typeof globalThis.fetch;
+beforeEach(() => {
+  savedFetch = globalThis.fetch;
+});
+afterEach(() => {
+  globalThis.fetch = savedFetch;
+});
+
 describe("httpJson.frames — opaqueredirect security", () => {
-  let originalFetch: typeof globalThis.fetch;
-
-  beforeEach(() => {
-    originalFetch = globalThis.fetch;
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-  });
-
   test("THROWS when fetch resolves with type:'opaqueredirect' (refuses to follow redirect)", async () => {
  // `redirect: "manual"` makes fetch resolve with an opaque-redirect response
  // (type "opaqueredirect", status 0, no body) instead of following the 3xx.
  // The transport's `verifyNoRedirect` must throw so the request BODY
  // (conversation + extracted page content) is NEVER forwarded to the
  // redirect target — blocks body-exfiltration via 3xx redirects.
-    const fakeResponse: FakeResponse = {
-      type: "opaqueredirect",
-      status: 0,
-      ok: false,
-      headers: { get: () => null },
-      body: null,
-      text: () => Promise.resolve(""),
-    };
+    const fakeResponse = makeFakeResponse({ type: "opaqueredirect", status: 0, ok: false });
     globalThis.fetch = vi.fn(async () => fakeResponse as unknown as Response) as typeof globalThis.fetch;
 
     const transport = httpJson({ framing: sse });
@@ -89,14 +96,7 @@ describe("httpJson.frames — opaqueredirect security", () => {
  // misconfigured endpoint (or an attacker-controlled 3xx) would trigger a
  // 10.5s retry storm (3 retries × ~3.5s backoff) on every request. The
  // "redirect" keyword is deliberately chosen to fall outside the regex.
-    const fakeResponse: FakeResponse = {
-      type: "opaqueredirect",
-      status: 0,
-      ok: false,
-      headers: { get: () => null },
-      body: null,
-      text: () => Promise.resolve(""),
-    };
+    const fakeResponse = makeFakeResponse({ type: "opaqueredirect", status: 0, ok: false });
     const fetchMock = vi.fn(async () => fakeResponse as unknown as Response);
     globalThis.fetch = fetchMock as typeof globalThis.fetch;
 
@@ -123,14 +123,7 @@ describe("httpJson.frames — opaqueredirect security", () => {
     const sseBody =
       'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}\n\n' +
       'data: [DONE]\n\n';
-    const fakeResponse: FakeResponse = {
-      type: "basic",
-      status: 200,
-      ok: true,
-      headers: { get: () => null },
-      body: stringToStream(sseBody),
-      text: () => Promise.resolve(""),
-    };
+    const fakeResponse = makeFakeResponse({ body: stringToStream(sseBody) });
     const fetchMock = vi.fn(async () => fakeResponse as unknown as Response);
     globalThis.fetch = fetchMock as typeof globalThis.fetch;
 
@@ -154,14 +147,7 @@ describe("httpJson.frames — opaqueredirect security", () => {
  // Even on a non-redirect response, the init MUST carry `redirect: "manual"`.
  // A future refactor that drops this back to the default ("follow") would
  // re-open the body-exfiltration vector the opaqueredirect check closes.
-    const fakeResponse: FakeResponse = {
-      type: "basic",
-      status: 200,
-      ok: true,
-      headers: { get: () => null },
-      body: stringToStream("data: [DONE]\n\n"),
-      text: () => Promise.resolve(""),
-    };
+    const fakeResponse = makeFakeResponse({ body: stringToStream("data: [DONE]\n\n") });
     const fetchMock = vi.fn(async () => fakeResponse as unknown as Response);
     globalThis.fetch = fetchMock as typeof globalThis.fetch;
 
@@ -208,58 +194,46 @@ describe("parseRetryAfterHeader — seconds + HTTP-date", () => {
 // ─── Retry-After delay + SSRF guard (end-to-end through frames()) ─────────
 
 describe("httpJson.frames — Retry-After + SSRF guard", () => {
-  let originalFetch: typeof globalThis.fetch;
-
-  beforeEach(() => {
-    originalFetch = globalThis.fetch;
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-  });
-
   test("Retry-After: 0 is honored as an immediate retry (no exponential backoff)", async () => {
  // Regression guard for the contract that `Retry-After: 0` means "retry
  // immediately". `retry.ts` honors `>= 0`, so the second attempt must fire
- // with essentially no delay rather than the ~1.5s base exponential backoff.
-    let attempt = 0;
-    let firstCall = 0;
-    let secondCall = 0;
-    const fetchMock = vi.fn(async () => {
-      const t = Date.now();
-      if (attempt === 0) {
-        firstCall = t;
-        attempt++;
-        return {
-          type: "basic",
-          status: 429,
-          ok: false,
-          headers: { get: (n: string) => (n.toLowerCase() === "retry-after" ? "0" : null) },
-          body: null,
-          text: () => Promise.resolve("rate limited"),
-        } as unknown as Response;
-      }
-      secondCall = t;
-      return {
-        type: "basic",
-        status: 200,
-        ok: true,
-        headers: { get: () => null },
-        body: stringToStream("data: [DONE]\n\n"),
-        text: () => Promise.resolve(""),
-      } as unknown as Response;
-    });
-    globalThis.fetch = fetchMock as typeof globalThis.fetch;
+ // with a delay of exactly 0ms rather than the ~1.5s base exponential backoff.
+ // Driven with fake timers so the contract is pinned deterministically — the
+ // old `gap < 600` wall-clock check was flaky on slow CI runners.
+    vi.useFakeTimers();
+    try {
+      let attempt = 0;
+      const fetchMock = vi.fn(async () => {
+        if (attempt === 0) {
+          attempt++;
+          return makeFakeResponse({
+            status: 429,
+            ok: false,
+            headers: { get: (n: string) => (n.toLowerCase() === "retry-after" ? "0" : null) },
+            text: () => Promise.resolve("rate limited"),
+          }) as unknown as Response;
+        }
+        return makeFakeResponse({ body: stringToStream("data: [DONE]\n\n") }) as unknown as Response;
+      });
+      globalThis.fetch = fetchMock as typeof globalThis.fetch;
 
-    const transport = httpJson({ framing: sse });
- // Drain the iterator so both fetch attempts fire.
-    for await (const _ of transport.frames(makePrepared())) { void _; }
+      const transport = httpJson({ framing: sse });
+      const iter = transport.frames(makePrepared());
+      const drained = (async () => {
+        for await (const _ of iter) { void _; }
+      })();
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    const gap = secondCall - firstCall;
- // Far below the 1.5s BASE_DELAY_MS exponential backoff — proves the 0
- // value was honored instead of silently downgraded to the default wait.
-    expect(gap).toBeLessThan(600);
+ // Retry-After: 0 → delay is exactly 0ms, so advancing past 0 fires the
+ // second attempt. The exponential backoff (~1500ms) would NOT fire within
+ // 1ms — this pins the "retry immediately" contract (no wall-clock dependence).
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+ // Drain the rest of the stream deterministically.
+      await vi.advanceTimersByTimeAsync(1);
+      await drained;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("frames() THROWS before calling fetch when baseUrl is an SSRF sink", async () => {
@@ -287,16 +261,12 @@ describe("httpJson.frames — per-chunk stream-stall timeout", () => {
  // not exported, so we mirror the value here to drive fake timers past it.
   const CHUNK_TIMEOUT_MS = 30_000;
 
-  let originalFetch: typeof globalThis.fetch;
-
   beforeEach(() => {
-    originalFetch = globalThis.fetch;
     vi.useFakeTimers();
   });
 
   afterEach(() => {
     vi.useRealTimers();
-    globalThis.fetch = originalFetch;
   });
 
   test("THROWS a retryable-safe 'stream stall' error and cancels the reader when a chunk read stalls past CHUNK_TIMEOUT_MS", async () => {
@@ -317,14 +287,7 @@ describe("httpJson.frames — per-chunk stream-stall timeout", () => {
         cancelled = true;
       },
     });
-    const fakeResponse: FakeResponse = {
-      type: "basic",
-      status: 200,
-      ok: true,
-      headers: { get: () => null },
-      body: stallStream,
-      text: () => Promise.resolve(""),
-    };
+    const fakeResponse = makeFakeResponse({ body: stallStream });
     globalThis.fetch = vi.fn(async () => fakeResponse as unknown as Response) as typeof globalThis.fetch;
 
     const transport = httpJson({ framing: sse });

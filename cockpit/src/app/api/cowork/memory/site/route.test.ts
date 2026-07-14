@@ -22,6 +22,18 @@ describe('GET /api/cowork/memory/site', () => {
       expect.objectContaining({ take: 5, orderBy: { createdAt: 'desc' }, cursor: { id: 'abc' }, skip: 1 }),
     );
   });
+
+  it('rejects an invalid after cursor with 400', async () => {
+    const res = await GET(fakeReq('after=!!!bad'));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe('invalid after cursor');
+  });
+
+  it('returns the memories envelope', async () => {
+    findMany.mockResolvedValueOnce([{ id: 's1', domain: 'example.com' }]);
+    const res = await GET(fakeReq('limit=5'));
+    expect(await res.json()).toEqual({ memories: [{ id: 's1', domain: 'example.com' }] });
+  });
 });
 
 describe('DELETE /api/cowork/memory/site', () => {

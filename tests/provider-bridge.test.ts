@@ -4,7 +4,7 @@
  * recomputation and the conditional dropping of zero usage fields on every chat
  * call. We mock the route-layer `generate` so no network/credential is needed.
  */
-import { describe, test, expect, vi } from "vitest";
+import { describe, test, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@/lib/agent/llm/route/client", () => ({
   generate: vi.fn(),
@@ -30,6 +30,10 @@ const makeProvider = () =>
   });
 
 describe("provider-bridge chat()", () => {
+  beforeEach(() => {
+    mockedGenerate.mockReset();
+  });
+
   test("recomputes costUsd and drops zero usage fields", async () => {
     mockedGenerate.mockResolvedValue({
       content: "hi",

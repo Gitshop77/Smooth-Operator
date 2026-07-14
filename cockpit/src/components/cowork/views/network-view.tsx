@@ -24,7 +24,7 @@ export function NetworkView() {
         eyebrow="Inspect"
         icon={<Activity className="size-5" />}
       />
-      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.3 }}>
+      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.3 }} role="status" aria-live="polite">
         <ExtensionOnly
           title="Available in the extension only"
           description="Live network inspection requires the chrome.webRequest API, which is only available inside the browser extension. Open the Cowork side panel to monitor network traffic in real time."

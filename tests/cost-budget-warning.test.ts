@@ -34,6 +34,24 @@ describe("injectCostBudgetWarning", () => {
     expect(warning).toContain("95%");
   });
 
+  test("returns the warning exactly at the cap (100%)", () => {
+    const warning = injectCostBudgetWarning(1.0, 1.0);
+    expect(warning).not.toBeNull();
+    expect(warning).toContain("100%");
+    expect(warning).toContain("$0.0000 remaining");
+  });
+
+  test("handles over-budget spend", () => {
+    const warning = injectCostBudgetWarning(1.20, 1.0);
+    expect(warning).not.toBeNull();
+    expect(warning).toContain("COST BUDGET WARNING");
+ // Remaining is floored at 0 (never negative) when spend exceeds the cap.
+    expect(warning).toContain("$0.0000 remaining");
+ // Pin the over-budget percentage rendering so a regression that garbles it
+ // (negative or NaN %) is caught.
+    expect(warning).toContain("120%");
+  });
+
   test("respects a custom fraction", () => {
  // 50% threshold with 40% usage → no warning.
     expect(injectCostBudgetWarning(0.40, 1.0, 0.5)).toBeNull();

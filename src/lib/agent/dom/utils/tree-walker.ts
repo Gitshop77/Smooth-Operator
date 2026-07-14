@@ -18,10 +18,10 @@
  * `getName` (which collapses whitespace again before emitting the line) or
  * compares against a min-length threshold after a trim.
  */
-export function directText(el: HTMLElement): string {
-  let text = "";
-  for (const node of Array.from(el.childNodes)) {
-    if (node.nodeType === Node.TEXT_NODE) text += node.textContent || "";
+export function directText(el: Element): string {
+  const parts: string[] = [];
+  for (const node of el.childNodes) {
+    if (node.nodeType === Node.TEXT_NODE) parts.push(node.nodeValue ?? "");
   }
-  return text.replace(/\s+/g, " ").trim();
+  return parts.join("").replace(/\s+/g, " ").trim();
 }

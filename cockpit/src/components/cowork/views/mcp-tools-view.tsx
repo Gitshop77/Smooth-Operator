@@ -27,15 +27,20 @@ export function McpToolsView() {
     return ["all", ...Array.from(set).sort()];
   }, [data]);
 
+  const lowerHaystack = React.useMemo(
+    () => (data ?? []).map((t) => `${t.name ?? ""} ${t.description ?? ""}`.toLowerCase()),
+    [data],
+  );
+
   const filtered = React.useMemo(() => {
     const all = data ?? [];
-    return all.filter((t) => {
+    const q = filter.trim().toLowerCase();
+    return all.filter((t, i) => {
       if (category !== "all" && t.category !== category) return false;
-      if (!filter.trim()) return true;
-      const q = filter.toLowerCase();
-      return t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q);
+      if (!q) return true;
+      return (lowerHaystack[i] ?? "").includes(q);
     });
-  }, [data, filter, category]);
+  }, [data, filter, category, lowerHaystack]);
 
   const selectedTool = filtered.find((t) => t.name === selected) ?? filtered[0];
 
@@ -93,6 +98,7 @@ export function McpToolsView() {
                   <button
                     key={t.name}
                     onClick={() => setSelected(t.name)}
+                    aria-current={active ? "true" : undefined}
                     className={`w-full text-left px-4 py-3 flex items-start gap-3 transition-colors ${active ? "bg-accent" : "hover:bg-accent/50"}`}
                   >
                     <div className="min-w-0 flex-1">
@@ -109,19 +115,22 @@ export function McpToolsView() {
             </div>
           </Card>
 
-          {selectedTool ? (
-            <Card className="p-5 gap-3 lg:sticky lg:top-20 self-start">
-              <div>
-                <Badge variant="secondary" className="text-[10px] font-mono mb-2">{selectedTool.category}</Badge>
-                <p className="font-mono font-semibold text-base break-all">{selectedTool.name}</p>
-                <p className="text-sm text-muted-foreground mt-1.5">{selectedTool.description}</p>
-              </div>
-              <div className="space-y-1.5">
-                <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Access</p>
-                <p className="text-xs font-mono">{selectedTool.readOnly ? "read-only" : "read-write"}</p>
-              </div>
-            </Card>
-          ) : null}
+          <Card
+            role="region"
+            aria-label="Tool details"
+            aria-live="polite"
+            className="p-5 gap-3 lg:sticky lg:top-20 self-start"
+          >
+            <div>
+              <Badge variant="secondary" className="text-[10px] font-mono mb-2">{selectedTool.category}</Badge>
+              <p className="font-mono font-semibold text-base break-all">{selectedTool.name}</p>
+              <p className="text-sm text-muted-foreground mt-1.5">{selectedTool.description}</p>
+            </div>
+            <div className="space-y-1.5">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Access</p>
+              <p className="text-xs font-mono">{selectedTool.readOnly ? "read-only" : "read-write"}</p>
+            </div>
+          </Card>
         </motion.div>
       )}
     </div>

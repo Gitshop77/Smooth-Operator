@@ -10,20 +10,31 @@
 import { describe, test, expect, vi } from "vitest";
 import { withLLMRetry } from "../src/lib/agent/llm/retry";
 
+type StatusError = Error & { status?: number; retryAfter?: number };
+
 /** Build an Error carrying a numeric `status` (as the transport attaches). */
-function statusError(status: number, message = `LLM API ${status}: err`, retryAfter?: number): Error {
-  const e = new Error(message);
-  (e as Error & { status?: number }).status = status;
+function statusError(status: number, message = `LLM API ${status}: err`, retryAfter?: number): StatusError {
+  const e = new Error(message) as StatusError;
+  e.status = status;
   if (typeof retryAfter === "number") {
-    (e as Error & { retryAfter?: number }).retryAfter = retryAfter;
+    e.retryAfter = retryAfter;
   }
   return e;
 }
 
+/** Run `run` with fake timers installed, guaranteeing real timers are restored. */
+async function withFakeTimers<T>(run: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers();
+  try {
+    return await run();
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 describe("withLLMRetry — numeric-status classification", () => {
   test("a 429 with a numeric status is retried until it succeeds", async () => {
-    vi.useFakeTimers();
-    try {
+    await withFakeTimers(async () => {
       let calls = 0;
       const fn = vi.fn(async () => {
         calls++;
@@ -36,9 +47,7 @@ describe("withLLMRetry — numeric-status classification", () => {
       expect(result).toBe("ok");
  // 2 failures + 1 success = 3 calls.
       expect(fn).toHaveBeenCalledTimes(3);
-    } finally {
-      vi.useRealTimers();
-    }
+    });
   });
 
   test("a 4xx without 429 is NOT retried (single attempt)", async () => {
@@ -72,8 +81,7 @@ describe("withLLMRetry — numeric-status classification", () => {
   });
 
   test("a 5xx with a numeric status is retried", async () => {
-    vi.useFakeTimers();
-    try {
+    await withFakeTimers(async () => {
       let calls = 0;
       const fn = vi.fn(async () => {
         calls++;
@@ -85,27 +93,35 @@ describe("withLLMRetry — numeric-status classification", () => {
       const result = await p;
       expect(result).toBe("ok");
       expect(fn).toHaveBeenCalledTimes(2);
-    } finally {
-      vi.useRealTimers();
-    }
+    });
   });
 
-  test("a Retry-After value on the error is honored (retry still fires)", async () => {
-    vi.useFakeTimers();
-    try {
-      let calls = 0;
-      const fn = vi.fn(async () => {
-        calls++;
-        if (calls < 2) throw statusError(429, "LLM API 429: rate", 1000);
-        return "ok";
-      });
-      const p = withLLMRetry(fn);
-      await vi.runAllTimersAsync();
-      const result = await p;
-      expect(result).toBe("ok");
-      expect(fn).toHaveBeenCalledTimes(2);
-    } finally {
-      vi.useRealTimers();
-    }
+  test("a Retry-After value on the error is honored (delay is applied)", async () => {
+    await withFakeTimers(async () => {
+ // Pin jitter to 0 so the scheduled retry delay equals the Retry-After
+ // value exactly, making the delay observable and deterministic.
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+      try {
+        let calls = 0;
+        const fn = vi.fn(async () => {
+          calls++;
+          if (calls < 2) throw statusError(429, "LLM API 429: rate", 1000);
+          return "ok";
+        });
+        const p = withLLMRetry(fn);
+ // The first attempt fails and schedules the retry after exactly 1000ms
+ // (Retry-After honored, jitter = 0). Advancing 999ms must NOT have
+ // retried yet — proving the real delay is applied rather than skipped.
+        await vi.advanceTimersByTimeAsync(999);
+        expect(fn).toHaveBeenCalledTimes(1);
+ // Advancing the final 1ms fires the scheduled retry.
+        await vi.advanceTimersByTimeAsync(1);
+        const result = await p;
+        expect(result).toBe("ok");
+        expect(fn).toHaveBeenCalledTimes(2);
+      } finally {
+        randomSpy.mockRestore();
+      }
+    });
   });
 });

@@ -11,7 +11,7 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
  // General JavaScript rules — keep the rules that catch real bugs.
     "prefer-const": "error",
     "no-unused-vars": "off", // handled by @typescript-eslint/no-unused-vars below
-    "no-console": "off",
+    "no-console": ["warn", { "allow": ["warn", "error"] }],
     "no-debugger": "error",
     "no-empty": "warn",
     "no-irregular-whitespace": "error",

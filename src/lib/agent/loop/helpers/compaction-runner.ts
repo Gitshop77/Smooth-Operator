@@ -30,6 +30,86 @@ import type { LoopDeps } from "../types";
 import type { CallbackDispatcher, CallbackContext, LLMUsageInfo } from "../../callbacks";
 import { estimateCost } from "../../llm/pricing";
 
+/**
+ * Report a compaction call's cost + tokens to the caller (`onCost`), emit a
+ * `cost` event, and — when a dispatcher is wired — attribute the usage to the
+ * planner phase. Shared by the summarize and planner-fallback branches so the
+ * three-step reporting sequence can't drift between them.
+ */
+async function reportCompactionUsage(
+  step: number,
+  usage: LLMUsageInfo,
+  onCost: ((usd: number, tokensIn?: number, tokensOut?: number) => void) | undefined,
+  deps: LoopDeps,
+  dispatcher: CallbackDispatcher | undefined,
+  ctx: CallbackContext | undefined,
+): Promise<void> {
+  if (!onCost) return;
+  onCost(usage.costUsd, usage.tokensIn, usage.tokensOut);
+  deps.onEvent({
+    type: "cost",
+    step,
+    tokensIn: usage.tokensIn,
+    tokensOut: usage.tokensOut,
+    costUsd: usage.costUsd,
+    model: usage.model,
+  });
+  if (dispatcher && ctx) await dispatcher.cost(ctx, usage);
+}
+
+/**
+ * Normalize a raw usage shape (from the summarize or planner call), compute the
+ * cost (preferring any pre-computed `costUsd`), and report it via
+ * {@link reportCompactionUsage}. Shared by both compaction branches so the
+ * token/cost attribution can't drift. No-op when cost reporting is disabled or
+ * the usage is missing the required `tokensIn`/`tokensOut`/`model`.
+ */
+async function reportUsage(
+  step: number,
+  rawUsage:
+    | {
+        tokensIn?: number;
+        tokensOut?: number;
+        model?: string;
+        reasoningTokens?: number;
+        cachedInputTokens?: number;
+        cachedWriteInputTokens?: number;
+        costUsd?: number;
+      }
+    | undefined,
+  onCost: ((usd: number, tokensIn?: number, tokensOut?: number) => void) | undefined,
+  deps: LoopDeps,
+  dispatcher: CallbackDispatcher | undefined,
+  ctx: CallbackContext | undefined,
+): Promise<void> {
+  if (!onCost || !rawUsage) return;
+  const {
+    tokensIn,
+    tokensOut,
+    model,
+    reasoningTokens,
+    cachedInputTokens,
+    cachedWriteInputTokens,
+    costUsd,
+  } = rawUsage;
+  // Cache-write (creation) tokens are billed at the higher cache-write rate;
+  // default to 0 until the TokenUsage type propagates the field.
+  const cw = cachedWriteInputTokens ?? 0;
+  if (tokensIn === undefined || tokensOut === undefined || !model) return;
+  const computedCost =
+    costUsd ?? estimateCost(model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cw);
+  const usage: LLMUsageInfo = {
+    tokensIn,
+    tokensOut,
+    model,
+    costUsd: computedCost,
+    reasoningTokens,
+    cachedInputTokens,
+    cachedWriteInputTokens: cw,
+  };
+  await reportCompactionUsage(step, usage, onCost, deps, dispatcher, ctx);
+}
+
 export async function runCompaction(
   deps: LoopDeps,
   navigatorHistory: HistoryItem[],
@@ -57,30 +137,7 @@ export async function runCompaction(
  // token totals + live UI cost counter). Mirrors the pattern in
  // `runPlanner` / `callNavigatorWithRetry`.
       if (onCost && res.usage) {
-        const { tokensIn, tokensOut, model, reasoningTokens, cachedInputTokens, costUsd: precomputedCost } = res.usage;
- // Read cache-write (creation) tokens when threaded through (billed at
- // the higher cache-write rate; omitted, it under-reports Anthropic
- // cache-creation cost). Cast until TokenUsage (types.ts) propagates it.
-        const cachedWriteInputTokens = (res.usage as { cachedWriteInputTokens?: number }).cachedWriteInputTokens ?? 0;
-        if (tokensIn !== undefined && tokensOut !== undefined && model) {
- // Prefer pre-computed costUsd; fall back to estimateCost with
- // cachedInputTokens AND cachedWriteInputTokens passed through.
-          const cost = precomputedCost ?? estimateCost(model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens);
-          onCost(cost, tokensIn, tokensOut);
-          deps.onEvent({ type: "cost", step, tokensIn, tokensOut, costUsd: cost, model });
- // Also report to the dispatcher so AgentMetricsCallback attributes
- // the compaction call's tokens/cost to the planner phase. The
- // dispatcher's cost() method internally try/catches handler errors,
- // so no throw propagates — cost-cap enforcement is handled by the
- // orchestrator's `costCapExceeded(state)` check, not by callback
- // throws.
-          if (dispatcher && ctx) {
- // Include reasoningTokens + cachedInputTokens so
- // AgentMetricsCallback's per-phase breakdown is accurate.
-            const usage: LLMUsageInfo = { tokensIn, tokensOut, model, costUsd: cost, reasoningTokens, cachedInputTokens };
-            await dispatcher.cost(ctx, usage);
-          }
-        }
+        await reportUsage(step, res.usage, onCost, deps, dispatcher, ctx);
       }
     } else {
       const res = await deps.plannerCall({
@@ -102,31 +159,7 @@ export async function runCompaction(
       }
  // Surface the planner-fallback cost + tokens to the caller.
       if (onCost && res.tokensIn !== undefined && res.tokensOut !== undefined && res.model) {
- // Read cache-write (creation) tokens when threaded through (billed at
- // the higher cache-write rate). Cast until the PlannerLLMCall result
- // type (loop/types.ts) and loop-deps wiring propagate it.
-        const cachedWriteInputTokens = (res as { cachedWriteInputTokens?: number }).cachedWriteInputTokens ?? 0;
- // Prefer pre-computed costUsd; fall back to estimateCost with
- // cachedInputTokens AND cachedWriteInputTokens passed through.
-        const cost = res.costUsd ?? estimateCost(res.model, res.tokensIn, res.tokensOut, res.reasoningTokens, res.cachedInputTokens, cachedWriteInputTokens);
-        onCost(cost, res.tokensIn, res.tokensOut);
-        deps.onEvent({ type: "cost", step, tokensIn: res.tokensIn, tokensOut: res.tokensOut, costUsd: cost, model: res.model });
- // same dispatcher reporting as the summarize path above.
- // NO try/catch — same rationale as the summarize path
- // above (let budget-exceeded propagate to the outer catch).
-        if (dispatcher && ctx) {
- // Include reasoningTokens + cachedInputTokens so
- // AgentMetricsCallback's per-phase breakdown is accurate.
-          const usage: LLMUsageInfo = {
-            tokensIn: res.tokensIn,
-            tokensOut: res.tokensOut,
-            model: res.model,
-            costUsd: cost,
-            reasoningTokens: res.reasoningTokens,
-            cachedInputTokens: res.cachedInputTokens,
-          };
-          await dispatcher.cost(ctx, usage);
-        }
+        await reportUsage(step, res, onCost, deps, dispatcher, ctx);
       }
     }
     const safeMemory = sanitizeCompactedMemory(summary);

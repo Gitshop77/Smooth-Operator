@@ -1,11 +1,8 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
 import { Prisma } from '@prisma/client';
-import { json, badRequest, withRouteError, parseLimit } from '@/lib/cowork/api/http';
+import { json, badRequest, withRouteError, parseLimit, CURSOR_ID_RE, isPrismaRecordNotFound } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
-
-// Cursor id shape used for `after` pagination (table ids are cuid strings).
-const CURSOR_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 export async function GET(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
@@ -31,7 +28,7 @@ export async function GET(req: NextRequest): Promise<Response> {
     } catch (e) {
  // A well-formed but stale/unknown cursor id makes Prisma throw P2025
  // (RecordNotFound); return a precise 400 instead of a generic 500.
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+      if (isPrismaRecordNotFound(e)) {
         return badRequest('invalid after cursor');
       }
       throw e;
@@ -48,6 +45,7 @@ export async function DELETE(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
     const id = req.nextUrl.searchParams.get('id');
     if (!id) return badRequest('id is required');
+    if (!CURSOR_ID_RE.test(id)) return badRequest('invalid id');
     try {
       await db.siteMemory.delete({ where: { id } });
     } catch (e) {

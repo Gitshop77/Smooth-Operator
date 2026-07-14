@@ -54,6 +54,12 @@ export function tokenMatches(
   expected: string,
 ): boolean {
   if (typeof received !== 'string' || received.length === 0) return false;
+  // Fail-closed length cap, independent of `expected` so it does not
+  // reintroduce a length side-channel. The constant-time compare below
+  // already bounds the comparison cost; this bounds the allocation cost so a
+  // client cannot force a multi-megabyte allocation per connection attempt.
+  const MAX_TOKEN_LEN = 4096;
+  if (received.length > MAX_TOKEN_LEN) return false;
   const a = Buffer.from(received, 'utf8');
   const b = Buffer.from(expected, 'utf8');
  // Compare over the EXPECTED secret's length only — never over the

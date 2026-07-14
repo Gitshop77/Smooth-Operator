@@ -51,6 +51,8 @@ export interface LLMResponse {
   content: string;
   /** Optional usage/cost breakdown. */
   usage?: LLMUsage;
+  /** Model id that produced the response (echoed even when usage is absent). */
+  model?: string;
 }
 
 /** A streamed text chunk from a streaming chat completion. */

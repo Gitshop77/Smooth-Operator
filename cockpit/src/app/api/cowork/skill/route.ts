@@ -1,7 +1,7 @@
 //
 // Version-matched usage guide returned as text/markdown.
 import type { NextRequest } from 'next/server';
-import { textResponse, withRouteError } from '@/lib/cowork/api/http';
+import { textResponse, withRouteError, sanitizeRequestId } from '@/lib/cowork/api/http';
 import {
   AGENT_OPERATING_RULES,
   AGENT_STARTUP_SEQUENCE,
@@ -77,6 +77,8 @@ ${AGENT_OPERATING_RULES.map(rule => `- ${rule}`).join('\n')}
 \`GET ${baseUrl}/api/cowork/agent/manifest\` returns all endpoints as structured JSON.
 \`GET ${baseUrl}/api/cowork/agent\` has a more detailed getting-started guide.
 `;
-    return textResponse(md, 200, 'text/markdown; charset=utf-8');
-  }, req.headers.get('x-request-id') ?? undefined);
+    return textResponse(md, 200, 'text/markdown; charset=utf-8', {
+      'cache-control': 'public, max-age=300',
+    });
+  }, sanitizeRequestId(req.headers.get('x-request-id')));
 }

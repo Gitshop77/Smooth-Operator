@@ -5,23 +5,11 @@
  * error.
  */
 
-import { z } from "zod";
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import type { ActionContext } from "./types";
-
-/**
- * Shape the background SW returns for a `SAVE_AS_PDF` message. Both endpoints
- * are same-extension, but we validate the payload instead of blindly casting
- * it, so a contract drift between the content script and the SW is surfaced
- * as an explicit error rather than a misleading "PDF saved as undefined" /
- * "failed: unknown error" message.
- */
-const saveAsPdfResponseSchema = z.object({
-  ok: z.boolean(),
-  filename: z.string().optional(),
-  error: z.string().optional(),
-});
+import { validateFileName } from "./validate-file-name";
+import { swOkResponseSchema as saveAsPdfResponseSchema } from "./sw-response";
 
 export async function handleSaveAsPdf(
   _ctx: ActionContext,
@@ -36,6 +24,18 @@ export async function handleSaveAsPdf(
  // `SaveAsPdfMessage` reads it off the wire as `fileName`. The wire field is
  // named explicitly below so the mapping is unambiguous at the send site.
   const file_name = action.file_name;
+ // Reject path-traversal / separator attempts at the egress boundary before
+ // forwarding to the SW (it also re-sanitizes on receipt). Mirrors the
+ // `screenshot` path: defense-in-depth that gives the agent a clear error
+ // rather than a file silently renamed by the sanitizer.
+  const fileNameError = validateFileName(file_name);
+  if (fileNameError) {
+    return {
+      action,
+      success: false,
+      message: `save_as_pdf failed: invalid file_name — ${fileNameError}`,
+    };
+  }
   if (typeof chrome === "undefined" || !chrome.runtime?.id) {
     return {
       action,

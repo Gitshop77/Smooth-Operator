@@ -1,3 +1,5 @@
+// @vitest-environment-options {"url":"https://extractor.test/"}
+
 /**
  * DOM extractor tests — covers `src/lib/agent/dom/extractor.ts` `extractBrowserState`
  * (the hottest path in the agent loop) plus the public helpers `isInteractive`,
@@ -6,21 +8,10 @@
  * Per Finding 2 in the refactor brief, this module had ZERO coverage before
  * these tests. They run under vitest's `environment: "jsdom"` (set by Task 6).
  *
- * jsdom limitations worked around in `beforeEach`:
- * - `HTMLElement.prototype.offsetParent` is always `null` in jsdom (no
- * layout engine), which makes `isLikelyHidden` (the cheap pre-check in
- * `dom-utils.ts`) return `true` for EVERY element and short-circuit the
- * whole walk. We override the getter to return `document.body` for
- * elements whose computed `display` is not `none` — this mirrors what a
- * real browser does (visible block elements have `body` as offsetParent).
- * - `HTMLElement.prototype.getBoundingClientRect` returns a zero-size rect
- * for every element in jsdom (no layout), which makes `isVisibleFull`'s
- * `r.width === 0 && r.height === 0` check reject everything. We return a
- * small non-zero rect for non-`display:none` elements so interactive
- * elements pass the visibility check.
- *
- * The mocks are scoped to this file only (restored in `afterEach`) so they
- * don't leak to other test files.
+ * jsdom has no layout engine, so `beforeEach` installs the shared layout
+ * mocks from `tests/helpers/jsdom-layout-mock.ts` (authoritative rationale
+ * there) so the extractor's visibility checks pass. They are restored in
+ * `afterEach` so they don't leak to other test files.
  *
  * Run with: `npx vitest run tests/extractor.test.ts`
  */
@@ -36,7 +27,7 @@ import {
   getSelectorMap,
 } from "../src/lib/agent/dom/extractor";
 import type { TabInfo } from "../src/lib/agent/types";
-import { installJsdomLayoutMock, restoreJsdomLayoutMock } from "./helpers";
+import { installJsdomLayoutMock, restoreJsdomLayoutMock, installViewportMock, restoreViewportMock } from "./helpers";
 
 const MOCK_TABS: TabInfo[] = [
   { id: 1, label: "1", url: "https://example.com", title: "Test", active: true },
@@ -44,12 +35,8 @@ const MOCK_TABS: TabInfo[] = [
 
 // ─── jsdom-limitation mocks (shared helper) ──────────────────────────────────
 //
-// The shared `installJsdomLayoutMock` helper overrides `offsetParent` and
-// `getBoundingClientRect` so jsdom (which has no layout engine) reports
-// elements as visible. Without these overrides, the extractor's
-// `isLikelyHidden` pre-check short-circuits every element and
-// `isVisibleFull`'s zero-size check rejects the rest. See
-// `tests/helpers/jsdom-layout-mock.ts` for the full rationale.
+// jsdom has no layout engine; the layout mocks live in
+// `tests/helpers/jsdom-layout-mock.ts` (authoritative rationale there).
 
 beforeEach(() => {
   document.body.innerHTML = "";
@@ -59,6 +46,7 @@ beforeEach(() => {
 
 afterEach(() => {
   restoreJsdomLayoutMock();
+  restoreViewportMock();
 });
 
 // ─── extractBrowserState ────────────────────────────────────────────────────
@@ -310,9 +298,7 @@ describe("extractBrowserState", () => {
  // scrollTop+vh and ends at scrollHeight. A naive `(scrollHeight -
  // scrollTop) / vh = 1.5` would double-count the viewport (an early
  // spec draft did this); the implementation correctly excludes it.
-    Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 800 });
-    Object.defineProperty(document.documentElement, "scrollHeight", { configurable: true, writable: true, value: 1600 });
-    Object.defineProperty(window, "scrollY", { configurable: true, writable: true, value: 400 });
+    installViewportMock({ innerHeight: 800, scrollHeight: 1600, scrollY: 400 });
 
     const state = extractBrowserState(MOCK_TABS);
     expect(state.pageInfo).toContain("0.5 pages above");
@@ -322,7 +308,10 @@ describe("extractBrowserState", () => {
   test("15. URL + title — extractBrowserState returns location.href and document.title", () => {
     document.title = "My Page";
     const state = extractBrowserState(MOCK_TABS);
-    expect(state.url).toBe(location.href);
+    // Assert against a concrete known URL (not the same global extraction reads
+    // from) so a regression that returns "" / undefined is caught.
+    expect(state.url).toBe("https://extractor.test/");
+    expect(state.url).toMatch(/^https?:/);
     expect(state.title).toBe("My Page");
   });
 

@@ -14,6 +14,19 @@ import { resolveElement, safeScrollIntoView, Select } from "../helpers";
 import type { ActionContext } from "./types";
 
 /**
+ * Render the first `n` options as a compact `i:label` list for error/help
+ * messages. Used by both the custom-dropdown and native-`<select>` paths so the
+ * format can't drift between them. Emits `value` as a fallback when an option
+ * has no visible text.
+ */
+function formatOptionList(opts: Element[], n = 8): string {
+  return opts
+    .slice(0, n)
+    .map((o, i) => `${i}:${(o.textContent || "").trim() || (o as HTMLOptionElement).value || ""}`)
+    .join(", ");
+}
+
+/**
  * Build the single, canonical enumeration of options for a custom
  * dropdown. It is used for BOTH reading option text and resolving
  * `option_index`, so keeping one consistent enumeration — mirroring the
@@ -141,6 +154,7 @@ export async function handleSelectDropdown(
     if (isCustomDropdown) {
       try {
         safeScrollIntoView(el);
+        highlightElement(el, `select [${action.index}]`);
         await sleep(TIMINGS.clickScrollIntoView);
  // 1. Open the dropdown.
         (el as HTMLElement).click();
@@ -160,41 +174,46 @@ export async function handleSelectDropdown(
             message: "custom-dropdown has no options (opened but none found in subtree or portal)",
           };
         }
- // Prefer text matching where possible: when the LLM provides
- // `text` we select by that unambiguous value (exact, then
- // case-insensitive substring). Only when `text` is empty do we
- // fall back to `option_index`, which resolves directly against
- // this same `optionEls` enumeration — the canonical, visible-option
- // list we built to mirror what the model observed. If `option_index`
- // is out of range `want` is empty and we fail safely below.
-        const want = (action.text?.trim() || "")
-          || (action.option_index != null
-            ? (optionEls[action.option_index]?.textContent ?? "").trim()
-            : "");
-        const wantTrim = want.trim().toLowerCase();
-        if (!wantTrim) {
-          return {
-            action,
-            success: false,
-            message: "custom-dropdown option not found (no text and option_index out of range)",
-          };
-        }
-        let match: HTMLElement | undefined = optionEls.find((o) =>
-          (o.textContent || "").trim().toLowerCase() === wantTrim,
-        );
-        if (!match) {
+ // Resolve the target option. Prefer an explicit `text` (exact, then
+ // case-insensitive substring). When only `option_index` is supplied,
+ // resolve DIRECTLY by index instead of round-tripping the option's
+ // (possibly empty or duplicated) text — that round-trip mis-resolves when
+ // two visible options share identical text or the indexed option has
+ // empty text.
+        let match: HTMLElement | undefined;
+        if (!action.text?.trim() && action.option_index != null) {
+          const target = optionEls[action.option_index];
+          if (!target) {
+            return { action, success: false, message: "custom-dropdown option_index out of range" };
+          }
+          match = target;
+        } else {
+          const want = (action.text?.trim() || "")
+            || (action.option_index != null
+              ? (optionEls[action.option_index]?.textContent ?? "").trim()
+              : "");
+          const wantTrim = want.trim().toLowerCase();
+          if (!wantTrim) {
+            return {
+              action,
+              success: false,
+              message: "custom-dropdown option not found (no text and option_index out of range)",
+            };
+          }
           match = optionEls.find((o) =>
-            (o.textContent || "").trim().toLowerCase().includes(wantTrim),
+            (o.textContent || "").trim().toLowerCase() === wantTrim,
           );
-        }
-        if (!match) {
-          const available = optionEls
-            .slice(0, 8)
-            .map((o, i) => `${i}:${(o.textContent || "").trim()}`)
-            .join(", ");
-          throw new Error(
-            `custom-dropdown option "${want}" not found. Available: ${available}`,
-          );
+          if (!match) {
+            match = optionEls.find((o) =>
+              (o.textContent || "").trim().toLowerCase().includes(wantTrim),
+            );
+          }
+          if (!match) {
+            const available = formatOptionList(optionEls);
+            throw new Error(
+              `custom-dropdown option "${want}" not found. Available: ${available}`,
+            );
+          }
         }
  // 3. Click the matched option. The click is what performs the
  // selection in the widget — MUI / React-Select / downshift all
@@ -206,6 +225,7 @@ export async function handleSelectDropdown(
  // trigger at all, so such a check would report false failures for
  // genuine selections.)
         safeScrollIntoView(match);
+        highlightElement(match, `select [${action.index}]`);
         await sleep(TIMINGS.clickScrollIntoView);
         match.click();
         await sleep(TIMINGS.clickAfterSettle);
@@ -230,6 +250,10 @@ export async function handleSelectDropdown(
  // exact-match-then-substring fallback for text-based selection.
   const select = new Select(el);
   const want = action.text;
+  // Resolve the displayed label for the selected option, falling back to the
+  // supplied value (or an explicit fallback) when the option has no text.
+  const labelOf = (opt: HTMLOptionElement | null, fallback: string): string =>
+    opt ? (opt.textContent?.trim() || opt.value) : fallback;
   let selectedLabel: string;
   try {
     if (want !== undefined && want !== "") {
@@ -238,20 +262,17 @@ export async function handleSelectDropdown(
  // fall back to treating `want` as the option's `value`.
       try {
         select.selectByVisibleText(want);
-        const opt = select.getFirstSelectedOption();
-        selectedLabel = opt ? (opt.textContent?.trim() || opt.value) : want;
+        selectedLabel = labelOf(select.getFirstSelectedOption(), want);
       } catch (e) {
         if (e instanceof NoSuchElementException) {
  // Try by value, then by index (if `want` parses as a number).
           try {
             select.selectByValue(want);
-            const opt = select.getFirstSelectedOption();
-            selectedLabel = opt ? (opt.textContent?.trim() || opt.value) : want;
+            selectedLabel = labelOf(select.getFirstSelectedOption(), want);
           } catch (e2) {
             if (e2 instanceof NoSuchElementException && /^\d+$/.test(want)) {
               select.selectByIndex(parseInt(want, 10));
-              const opt = select.getFirstSelectedOption();
-              selectedLabel = opt ? (opt.textContent?.trim() || opt.value) : want;
+              selectedLabel = labelOf(select.getFirstSelectedOption(), want);
             } else {
               throw e2;
             }
@@ -262,8 +283,7 @@ export async function handleSelectDropdown(
       }
     } else if (action.option_index !== undefined) {
       select.selectByIndex(action.option_index);
-      const opt = select.getFirstSelectedOption();
-      selectedLabel = opt ? (opt.textContent?.trim() || opt.value) : `index ${action.option_index}`;
+      selectedLabel = labelOf(select.getFirstSelectedOption(), `index ${action.option_index}`);
     } else {
       throw new Error("must provide either text or option_index");
     }
@@ -273,7 +293,7 @@ export async function handleSelectDropdown(
  // disabled option (ElementNotSelectableError) are surfaced with the same
  // actionable list, since both are common "option by value/index" failures.
     if (e instanceof NoSuchElementException || e instanceof ElementNotSelectableError) {
-      const available = select.getOptions().slice(0, 8).map((o, i) => `${i}:${o.textContent?.trim() || o.value || ""}`).join(", ");
+      const available = formatOptionList(select.getOptions());
       const reason = e instanceof ElementNotSelectableError ? " (option is disabled)" : "";
       throw new Error(`option "${want ?? action.option_index}" not found${reason}. Available: ${available}`);
     }

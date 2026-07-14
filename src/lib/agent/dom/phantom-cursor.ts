@@ -4,9 +4,11 @@
  * `@/lib/agent/dom/phantom-cursor` import path used by the executor handlers
  * (click, hover, press-and-hold).
  *
- * All historically-exported symbols are re-exported here:
- * - `movePhantomCursor`, `moveCursorToElement`, `startPhantomCursor`,
- * `stopPhantomCursor`
+ * The documented contract is exactly:
+ * - `movePhantomCursor`, `moveCursorToElement`
+ *
+ * (`startPhantomCursor` / `stopPhantomCursor` were never part of this shim's
+ * contract; the `dom-shim-consistency` test enforces these two symbols.)
  *
  * The file lives in `interaction/hover.ts` (rather than
  * `interaction/phantom-cursor.ts`) because the phantom cursor is the only
@@ -20,4 +22,4 @@
  * New code should import from `@/lib/agent/dom/interaction/hover`
  *
  */
-export * from "./interaction/hover";
+export { movePhantomCursor, moveCursorToElement } from "./interaction/hover";

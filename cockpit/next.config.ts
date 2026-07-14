@@ -27,7 +27,7 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: projectRoot,
   },
-  async headers() {
+  headers() {
     /**
  * Per-request CSP nonce.
  *
@@ -85,6 +85,7 @@ const nextConfig: NextConfig = {
       },
       { key: "X-Frame-Options", value: "DENY" },
       { key: "X-Content-Type-Options", value: "nosniff" },
+      { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
  // Strict-Transport-Security is only meaningful over TLS. Emitting it on
  // plaintext `next dev` (http://127.0.0.1) is a no-op today, but if the dev
  // server is ever reached over a real hostname via a proxy it would cache an

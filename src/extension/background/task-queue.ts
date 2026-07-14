@@ -14,6 +14,9 @@ import { validateWebhookUrl } from "@/lib/agent/llm/route/ssrf";
 import { getRunState, requestKeepAwake } from "./state-store";
 import { isRunStarting, setRunStarting } from "./agent-bridge";
 
+/** Truncate a string for display, adding an ellipsis only when actually truncated. */
+const clip = (s: string, n = 80): string => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+
 /**
  * Handle a scheduled-task alarm fire. Looks up the stored task and
  * starts a run with its prompt. Skips if the task was deleted or disabled,
@@ -50,14 +53,10 @@ export async function handleScheduledTaskFire(taskId: string): Promise<void> {
  // internally checks that at least one enabled task exists (this one) —
  // so it's a no-op if all tasks were disabled between arming + firing.
     await requestKeepAwake();
- // Update lastRunAt + persist.
-    const { listScheduledTasks, saveScheduledTask } = await import("@/lib/agent/scheduled-tasks");
-    const allTasks = await listScheduledTasks();
-    const idx = allTasks.findIndex((t) => t.id === taskId);
-    if (idx >= 0) {
-      allTasks[idx].lastRunAt = Date.now();
-      await saveScheduledTask(allTasks[idx]);
-    }
+ // Update lastRunAt + persist (reuse the object already in hand).
+    const { saveScheduledTask } = await import("@/lib/agent/scheduled-tasks");
+    task.lastRunAt = Date.now();
+    await saveScheduledTask(task);
  // Open the side panel + start the run. chrome.sidePanel.open requires a
  // user gesture, which alarm callbacks don't have — so it will throw. Fall
  // back to a notification + badge so the user knows a scheduled task fired;
@@ -71,7 +70,7 @@ export async function handleScheduledTaskFire(taskId: string): Promise<void> {
         type: "basic",
         iconUrl: "icons/icon.png",
         title: "Open Cowork — Scheduled Task",
-        message: `Starting: ${task.task.slice(0, 80)}\nClick the extension icon to view.`,
+        message: `Starting: ${clip(task.task)}\nClick the extension icon to view.`,
         priority: 2,
       }, () => { /* notifications API may not be available */ });
     }
@@ -115,7 +114,7 @@ export async function fireNotifications(task: string, success?: boolean): Promis
         type: "basic",
         iconUrl: "icons/icon.png",
         title: success ? "Open Cowork — Run Succeeded" : "Open Cowork — Run Finished",
-        message: `Task: ${task.slice(0, 80)}`,
+        message: `Task: ${clip(task)}`,
         priority: 2,
       }, () => { /* non-fatal */ });
     }
@@ -132,11 +131,14 @@ export async function fireNotifications(task: string, success?: boolean): Promis
  // (`localhost`, `127.0.0.0/8`) is permitted so a self-hosted relay in dev
  // keeps working. Invalid or unsafe URLs are logged + skipped (non-fatal).
       let safeUrl: string | null = null;
+      let parsed: URL | null = null;
       const ssrfCheck = validateWebhookUrl(webhookUrl);
       if (ssrfCheck.ok) {
         try {
-          safeUrl = new URL(webhookUrl).toString();
+          parsed = new URL(webhookUrl);
+          safeUrl = parsed.toString();
         } catch {
+          parsed = null;
           safeUrl = null;
         }
       }
@@ -148,7 +150,7 @@ export async function fireNotifications(task: string, success?: boolean): Promis
  // credential in shared logs / bug reports / screen recordings.
         let redactedHost = "(unknown host)";
         try {
-          redactedHost = new URL(webhookUrl).host;
+          redactedHost = (parsed ?? new URL(webhookUrl)).host;
         } catch {
           /* leave default */
         }

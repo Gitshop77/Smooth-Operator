@@ -100,6 +100,29 @@ function sanitizeColor(c: string | undefined, fallback: string): string {
   return typeof c === "string" && isHexColor(c.trim()) ? c.trim() : fallback;
 }
 
+/** WCAG relative luminance (0 = black, 1 = white) of a `#rgb`/`#rrggbb` hex color. */
+function relativeLuminance(hex: string): number {
+  const c = hex.replace("#", "");
+  const expanded =
+    c.length === 3 || c.length === 4
+      ? c
+          .slice(0, 3)
+          .split("")
+          .map((ch) => ch + ch)
+          .join("")
+      : c.slice(0, 6);
+  const channel = (i: number): number => {
+    const v = parseInt(expanded.slice(i, i + 2), 16) / 255;
+    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4);
+}
+
+/** Pick `#000`/`#fff` label text for best contrast against a background color. */
+function pickReadableTextColor(bg: string): string {
+  return relativeLuminance(bg) > 0.5 ? "#000000" : "#ffffff";
+}
+
 export interface AnnotateOptions {
   /** Base font size for the index label, in CSS pixels. It is multiplied by
  * `scaleFactor` when drawn on the device-resolution canvas, so the label
@@ -159,7 +182,12 @@ export async function annotateScreenshot(
  // Fast-path: nothing to draw. Avoids canvas creation entirely.
   if (!elements || elements.length === 0) return screenshotDataUrl;
 
-  const fontSize = options?.fontSize ?? 14;
+  const fontSize =
+    typeof options?.fontSize === "number" &&
+    Number.isFinite(options.fontSize) &&
+    options.fontSize > 0
+      ? options.fontSize
+      : 14;
  // `scaleFactor` must be a finite positive number (it multiplies every
  // coordinate + the font size). A `0` collapses boxes to the origin; a
  // negative one mirrors drawing. Fall back to `1` for any bad input so a
@@ -167,7 +195,12 @@ export async function annotateScreenshot(
   const rawScale = options?.scaleFactor;
   const scaleFactor =
     typeof rawScale === "number" && Number.isFinite(rawScale) && rawScale > 0 ? rawScale : 1;
-  const minSize = options?.minSize ?? 5;
+  const minSize =
+    typeof options?.minSize === "number" &&
+    Number.isFinite(options.minSize) &&
+    options.minSize > 0
+      ? options.minSize
+      : 5;
   const refPrefix = options?.refPrefix ?? "";
  // Multi-color mode: cycle through `boxColors` by index. Single-color mode:
  // use `boxColor` for every box. An empty / all-invalid `boxColors` array is
@@ -180,6 +213,23 @@ export async function annotateScreenshot(
   const singleBoxColor = sanitizeColor(options?.boxColor, "#ef4444"); // red-500
   const singleBgColor = sanitizeColor(options?.bgColor, "#ef4444"); // red-500
   const textColor = sanitizeColor(options?.textColor, "#ffffff"); // white
+
+ // Fast-path: if no element survives the draw filter (finite, positive,
+ // >= minSize, finite index) there is nothing to draw — skip the full image
+ // decode + canvas allocation and return the raw screenshot unchanged.
+  const hasDrawable = elements.some(
+    (el) =>
+      Number.isFinite(el.index) &&
+      Number.isFinite(el.rect.x) &&
+      Number.isFinite(el.rect.y) &&
+      Number.isFinite(el.rect.width) &&
+      Number.isFinite(el.rect.height) &&
+      el.rect.width > 0 &&
+      el.rect.height > 0 &&
+      el.rect.width >= minSize &&
+      el.rect.height >= minSize,
+  );
+  if (!hasDrawable) return screenshotDataUrl;
 
  // Bail out early if no Canvas implementation is available. This is the
  // graceful-degradation path used by the Node.js demo mode.
@@ -264,7 +314,11 @@ export async function annotateScreenshot(
       ctx.fillStyle = labelBg;
       ctx.fillRect(dx, dy, labelWidth, labelHeight);
 
-      ctx.fillStyle = textColor;
+ // Use the caller-supplied textColor verbatim when provided; otherwise pick
+ // black/white by the label background's luminance so light palette colors
+ // (amber/lime/cyan) don't yield unreadable white-on-light text.
+      ctx.fillStyle =
+        typeof options?.textColor === "string" ? textColor : pickReadableTextColor(labelBg);
       ctx.fillText(label, dx + 3 * scaleFactor, dy + 2 * scaleFactor);
     }
 

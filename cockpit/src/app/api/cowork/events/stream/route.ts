@@ -143,7 +143,7 @@ export async function GET(req: NextRequest): Promise<Response> {
       req.signal.addEventListener('abort', onAbort, { once: true });
 
  // Initial hello so the client knows the stream is alive.
-      safeEnqueue(`: cowork-events stream open since_id=${sinceId}\n\n`);
+      safeEnqueue(`: cowork-events stream open since_id=${sinceId}\nretry: 3000\n\n`);
 
  // Emit a single buffered event as an SSE message, but ONLY if its id is
  // strictly greater than the cursor. This guards against the upstream
@@ -186,7 +186,6 @@ export async function GET(req: NextRequest): Promise<Response> {
       socket = ioClient(COWORK_EVENTS_BASE, {
         path: '/',
         auth: { token },
-        query: { token },
         reconnection: true,
         reconnectionDelay: 1_000,
         reconnectionDelayMax: 5_000,
@@ -204,7 +203,8 @@ export async function GET(req: NextRequest): Promise<Response> {
         console.error(
           `[cowork] events/stream socket connect_error: ${err?.message || 'unknown'}`,
         );
-        safeEnqueue(`: upstream error ${new Date().toISOString()} ${err?.message || 'unknown'}\n\n`);
+        const msg = String(err?.message || 'unknown').replace(/[\r\n]/g, ' ');
+        safeEnqueue(`: upstream error ${new Date().toISOString()} ${msg}\n\n`);
       });
       socket.on('disconnect', (reason: string) => {
  // A mid-session disconnect is expected during mini-service restarts;

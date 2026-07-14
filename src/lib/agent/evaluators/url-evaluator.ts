@@ -40,6 +40,18 @@ function cleanUrl(url: string): string {
   return String(url).replace(/\/+$/, "");
 }
 
+/** Recover the host portion of a `basePath` (`hostname + pathname`). */
+const hostOf = (basePath: string): string => basePath.split("/")[0];
+
+/** Percent-decode without throwing on malformed input (returns the raw string). */
+function safeDecode(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
 /** A parsed URL split into its base path + query-param map. */
 interface ParsedUrl {
   basePath: string;
@@ -57,7 +69,7 @@ interface ParsedUrl {
 export function parseUrl(url: string): ParsedUrl {
   try {
     const u = new URL(url);
-    const query: Record<string, string[]> = {};
+    const query: Record<string, string[]> = Object.create(null);
     u.searchParams.forEach((value, key) => {
       (query[key] ??= []).push(value);
     });
@@ -70,13 +82,14 @@ export function parseUrl(url: string): ParsedUrl {
  // protocol IS required; protocol-less inputs return an empty parse).
     const m = /^[a-z]+:\/\/([^/?]+)([^?]*)\??(.*)$/i.exec(url);
     if (!m) return { basePath: "", query: {} };
-    const host = m[1].replace(/:\d+$/, "");
+    const bracketedWithPort = m[1].match(/^(\[.+\]):\d+$/);
+    const host = bracketedWithPort ? bracketedWithPort[1] : m[1].replace(/:\d+$/, "");
     const basePath = host + m[2];
-    const query: Record<string, string[]> = {};
+    const query: Record<string, string[]> = Object.create(null);
     if (m[3]) {
       for (const pair of m[3].split("&")) {
         const [k, v = ""] = pair.split("=");
-        (query[decodeURIComponent(k)] ??= []).push(decodeURIComponent(v));
+        (query[safeDecode(k)] ??= []).push(safeDecode(v));
       }
     }
     return { basePath, query };
@@ -111,37 +124,43 @@ export function evaluateUrl(input: URLEvaluatorInput): URLEvaluatorResult {
  // query) against the cached parse instead of re-parsing per loop.
   const refParsedList = refUrls.map((ref) => parseUrl(ref));
 
- // Host check: ANY reference host must exact-match or be a subdomain-suffix
- // of the prediction host. This prevents lookalike-domain bypass.
-  const hostScore = refParsedList.some((refParsed) => {
-    return refParsed.basePath !== "" && hostMatches(refParsed.basePath.split("/")[0], predParsed.basePath.split("/")[0]);
-  }) ? 1 : 0;
-  if (hostScore === 0) {
-    return {
-      score: 0,
-      tag: URL_EVALUATOR_TAG,
-      reason: `host "${predParsed.basePath.split("/")[0]}" does not match any reference host`,
-    };
-  }
-
- // Path-prefix check: the prediction's path must start with the reference's
- // path (after host matching).
-  const pathMatch = refParsedList.some((refParsed) => {
-    const refHost = refParsed.basePath.split("/")[0];
-    const predHost = predParsed.basePath.split("/")[0];
-    if (!hostMatches(refHost, predHost)) return false;
+ // Single pass over the references: first a host check (any reference host
+ // must exact-match or be a subdomain-suffix of the prediction host — this
+ // prevents lookalike-domain bypass), then a path-prefix check on the
+ // host-matched references. Reasons are surfaced distinctly so the caller
+ // can tell a host mismatch from a path mismatch.
+  const predHost = hostOf(predParsed.basePath);
+  let hostOk = false;
+  let pathOk = false;
+  for (const refParsed of refParsedList) {
+    const refHost = hostOf(refParsed.basePath);
+    if (refParsed.basePath === "" || !hostMatches(refHost, predHost)) continue;
+    hostOk = true;
     const refPath = refParsed.basePath.slice(refHost.length); // "/path" or ""
     const predPath = predParsed.basePath.slice(predHost.length); // "/path" or ""
  // Empty ref path matches anything; otherwise pred path must start with ref path.
-    if (refPath === "" || refPath === "/") return true;
+    if (refPath === "" || refPath === "/") {
+      pathOk = true;
+      break;
+    }
  // Require a path-segment boundary after the ref path prefix.
  // `startsWith` alone allows `/foo` to match `/foobar` (false positive).
  // After the prefix, the next char must be `/`, `?`, `#`, or end-of-string.
-    if (!predPath.startsWith(refPath)) return false;
+    if (!predPath.startsWith(refPath)) continue;
     const nextChar = predPath[refPath.length];
-    return nextChar === undefined || nextChar === "/" || nextChar === "?" || nextChar === "#";
-  });
-  if (!pathMatch) {
+    if (nextChar === undefined || nextChar === "/" || nextChar === "?" || nextChar === "#") {
+      pathOk = true;
+      break;
+    }
+  }
+  if (!hostOk) {
+    return {
+      score: 0,
+      tag: URL_EVALUATOR_TAG,
+      reason: `host "${predHost}" does not match any reference host`,
+    };
+  }
+  if (!pathOk) {
     return {
       score: 0,
       tag: URL_EVALUATOR_TAG,

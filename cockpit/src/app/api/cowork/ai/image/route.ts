@@ -8,24 +8,10 @@
 // { ok: false, error } on failure.
 
 import type { NextRequest } from 'next/server';
-import { json, badRequest, serverError, withRouteError, bodyJson, redactSecrets } from '@/lib/cowork/api/http';
+import { json, badRequest, serverError, withRouteError, bodyJson, redactSecrets, sanitizeRequestId } from '@/lib/cowork/api/http';
 import { COWORK_EVENTS_BASE, getCoworkEventsToken } from '@/lib/cowork/events/client';
 
-type ImageSize =
-  | '1024x1024'
-  | '768x1344'
-  | '864x1152'
-  | '1344x768'
-  | '1152x864'
-  | '1440x720'
-  | '720x1440';
-
-interface ImageProxyBody {
-  prompt?: string;
-  size?: ImageSize;
-}
-
-const SUPPORTED_SIZES: ImageSize[] = [
+const SUPPORTED_SIZES = [
   '1024x1024',
   '768x1344',
   '864x1152',
@@ -33,9 +19,16 @@ const SUPPORTED_SIZES: ImageSize[] = [
   '1152x864',
   '1440x720',
   '720x1440',
-];
+] as const;
+type ImageSize = (typeof SUPPORTED_SIZES)[number];
+
+interface ImageProxyBody {
+  prompt?: string;
+  size?: ImageSize;
+}
 
 export async function POST(req: NextRequest): Promise<Response> {
+  const reqId = sanitizeRequestId(req.headers.get('x-request-id'));
   return withRouteError(async () => {
  // `bodyJson` caps the raw body at MAX_BODY_BYTES (256KB) and rejects
  // oversize bodies with 413 *before* buffering — `req.json()` would read
@@ -67,9 +60,7 @@ export async function POST(req: NextRequest): Promise<Response> {
           'Content-Type': 'application/json',
           'X-Cowork-Token': coworkToken,
  // Forward the cockpit request id for correlation with the mini-service.
-          ...(req.headers.get('x-request-id')
-            ? { 'x-request-id': req.headers.get('x-request-id') as string }
-            : {}),
+          ...(reqId ? { 'x-request-id': reqId } : {}),
         },
         body: JSON.stringify({ prompt: body.prompt, size: body.size }),
       });
@@ -96,7 +87,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       return serverError('cowork-events /image returned a non-JSON body');
     }
     return json(data);
-  }, req.headers.get('x-request-id') ?? undefined);
+  }, reqId);
 }
 
 export async function GET(): Promise<Response> {

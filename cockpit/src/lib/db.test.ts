@@ -18,7 +18,16 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 const SCHEMA_PATH = resolve(__dirname, '..', '..', 'prisma', 'schema.prisma');
-const schemaText = readFileSync(SCHEMA_PATH, 'utf8');
+let schemaText: string;
+try {
+  schemaText = readFileSync(SCHEMA_PATH, 'utf8');
+} catch (e) {
+  throw new Error(
+    'db.test.ts could not read ' + SCHEMA_PATH +
+      ' — ensure prisma/schema.prisma exists (run `prisma generate`). Original: ' +
+      (e as Error).message,
+  );
+}
 
 // ─── F21: Allowed-value sets for every string-typed "enum" ───────────────────
 // These MUST stay in sync with the inline comments in prisma/schema.prisma.
@@ -89,8 +98,7 @@ describe('F21 — string-typed enum allowed-value sets', () => {
     });
 
     it(`${key} validates via an inline zod enum (closed set)`, () => {
- // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const schema = z.enum(values as any);
+      const schema = z.enum([...values] as [string, ...string[]]);
  // A documented allowed value passes.
       expect(() => schema.parse(values[0])).not.toThrow();
  // An out-of-contract value is rejected (this is what the API boundary
@@ -111,14 +119,29 @@ describe('F21 — string-typed enum allowed-value sets', () => {
   });
 });
 
+// Brace-balanced model extractor — tracks `{`/`}` depth so a `//` comment or any
+// stray `}`-starting line inside the model region cannot truncate the captured
+// block (which would give the F22 @unique assertion a false PASS/FAIL).
+function extractModelBlock(text: string, name: string): string {
+  const start = text.indexOf(`model ${name} {`);
+  if (start === -1) return '';
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return '';
+}
+
 // ─── F22: HistoryEntry.url uniqueness → writes MUST upsert ───────────────────
 describe('F22 — HistoryEntry.url @unique write contract', () => {
   it('declares url as @unique in the schema', () => {
-    const model = schemaText.slice(
-      schemaText.indexOf('model HistoryEntry'),
-      schemaText.indexOf('model Session'),
-    );
-    expect(model).toContain('url           String   @unique');
+    const model = extractModelBlock(schemaText, 'HistoryEntry');
+    expect(model).toMatch(/url\s+String\s+@unique/);
   });
 
   it('documents the upsert-only write contract (no raw create on url)', () => {

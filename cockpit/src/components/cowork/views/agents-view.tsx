@@ -16,19 +16,48 @@ import { EmptyState } from "@/components/cowork/shared/empty-state";
 import { StatusPill, toneForStatus } from "@/components/cowork/shared/status-pill";
 import { timeAgo } from "@/lib/cowork-data/format";
 
+// Prisma `Task.status` enum: 'pending' | 'running' | 'paused' |
+// 'waiting-approval' | 'ready-to-resume' | 'done' | 'failed' | 'cancelled'.
+// Count everything that isn't terminal as "pending" for the tab badge.
+const TERMINAL = new Set(["done", "failed", "cancelled"]);
+
 export function AgentsView() {
   const { data: agents, isLoading: agentsLoading } = useAgents();
   const { data: tasks, isLoading: tasksLoading } = useAgentTasks();
 
- // Prisma `Task.status` enum: 'pending' | 'running' | 'paused' |
- // 'waiting-approval' | 'ready-to-resume' | 'done' | 'failed' | 'cancelled'.
- // Count everything that isn't terminal as "pending" for the tab badge.
-  const TERMINAL = new Set(["done", "failed", "cancelled"]);
-  const pending = (tasks ?? []).filter((t) => !TERMINAL.has(t.status));
+  const list = tasks ?? [];
+  const pending = list.filter((t) => !TERMINAL.has(t.status));
  // `createdAt` arrives as an ISO string (Prisma DateTime serialized over
  // JSON). Coerce to ms before subtracting so the sort is stable regardless
- // of whether the value is a number, ISO string, or Date.
-  const recent = (tasks ?? []).slice().sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt));
+ // of whether the value is a number, ISO string, or Date. Fall back to the
+ // id on ties so the order is deterministic across renders.
+  const recent = React.useMemo(
+    () =>
+      list.slice().sort((a, b) => {
+        const diff = +new Date(b.createdAt) - +new Date(a.createdAt);
+        return diff !== 0 ? diff : a.id.localeCompare(b.id);
+      }),
+    [list],
+  );
+  const recentWithSteps = React.useMemo(() => {
+    return recent.map((t) => {
+      const raw = (t as { stepsJson?: unknown }).stepsJson;
+      let steps: { label?: string; done?: boolean }[] = [];
+      if (Array.isArray(raw)) {
+        steps = raw as { label?: string; done?: boolean }[];
+      } else if (typeof raw === "string") {
+        try {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) steps = parsed as { label?: string; done?: boolean }[];
+        } catch {
+          steps = [];
+        }
+      }
+      const done = steps.filter((s) => s.done).length;
+      const pct = steps.length === 0 ? 0 : Math.round((done / steps.length) * 100);
+      return { t, steps, done, pct };
+    });
+  }, [recent]);
 
   return (
     <div className="space-y-4">
@@ -42,7 +71,7 @@ export function AgentsView() {
         <TabsList>
           <TabsTrigger value="agents">Agents</TabsTrigger>
           <TabsTrigger value="tasks">
-            Tasks <span className="ml-1 text-xs text-muted-foreground tnum">({pending.length})</span>
+            Tasks <span className="ml-1 text-xs text-muted-foreground tnum">({pending.length} active)</span>
           </TabsTrigger>
         </TabsList>
 
@@ -101,26 +130,7 @@ export function AgentsView() {
               animate={{ opacity: 1 }}
               className="space-y-3"
             >
-              {recent.map((t) => {
- // `stepsJson` is a JSON-encoded string from Prisma (NOT an
- // array). Parse defensively (default to [] on parse error)
- // so a malformed row never crashes the whole view. Each step
- // is `{ label: string; done: boolean }`.
-                const steps = (() => {
-                  const raw = (t as { stepsJson?: unknown }).stepsJson;
-                  if (Array.isArray(raw)) return raw as { label?: string; done?: boolean }[];
-                  if (typeof raw !== "string") return [];
-                  try {
-                    const parsed = JSON.parse(raw);
-                    return Array.isArray(parsed)
-                      ? (parsed as { label?: string; done?: boolean }[])
-                      : [];
-                  } catch {
-                    return [];
-                  }
-                })();
-                const done = steps.filter((s) => s.done).length;
-                const pct = steps.length === 0 ? 0 : Math.round((done / steps.length) * 100);
+              {recentWithSteps.map(({ t, steps, done, pct }) => {
                 return (
                   <Card key={t.id} className="p-4 gap-3">
                     <div className="flex items-start justify-between gap-3">
@@ -159,7 +169,11 @@ export function AgentsView() {
                         </span>
                         <span className="tnum">{pct}%</span>
                       </div>
-                      <Progress value={pct} className="h-1.5" />
+                      <Progress
+                        value={pct}
+                        className="h-1.5"
+                        aria-label={`Progress for ${t.title}: ${pct}% (${done} of ${steps.length} steps)`}
+                      />
                       <ol className="text-xs space-y-1 mt-2">
                         {steps.map((s, i) => (
                           <li key={i} className="flex items-center gap-2">

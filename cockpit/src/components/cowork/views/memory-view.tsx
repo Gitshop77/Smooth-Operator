@@ -17,13 +17,19 @@ import type { SampleSiteMemoryEntry } from "@/lib/cowork-data/types";
 
 // Prisma `SiteMemory` has `domain` + `dataJson` (JSON-encoded `SiteData`).
 // There are no `key`/`value` columns. The filter matches against `domain`
-// AND the raw `dataJson` string so users can search both.
-function siteMatches(e: SampleSiteMemoryEntry, q: string): boolean {
-  if (e.domain?.toLowerCase().includes(q)) return true;
-  const data = e.dataJson;
-  if (typeof data === "string" && data.toLowerCase().includes(q)) return true;
+// AND the raw JSON string so users can search both. `lowerJson` is a
+// pre-lowercased copy to avoid re-lowercasing on every keystroke.
+function matchesJson(domain: string | undefined, lowerJson: string, q: string): boolean {
+  if (domain?.toLowerCase().includes(q)) return true;
+  if (lowerJson.includes(q)) return true;
   return false;
 }
+
+// Form-field names that may carry secrets — their values are masked in the
+// UI so captured passwords/tokens/card numbers are never shown in plaintext.
+const SENSITIVE_FIELD = /pass|pwd|password|secret|cvv|card|ssn|token|otp|pin/i;
+const maskValue = (field: string, value: string): string =>
+  SENSITIVE_FIELD.test(field) ? "••••••" : value;
 
 /**
  * Parse `dataJson` defensively. Returns the parsed object on success,
@@ -90,11 +96,27 @@ export function MemoryView() {
   const { data: form, isLoading: formLoading } = useFormMemory();
   const [filter, setFilter] = React.useState("");
 
+  const siteSummaries = React.useMemo(
+    () => new Map((site ?? []).map((e) => [e, parseSiteData(e)])),
+    [site],
+  );
+
+  const siteLowerJson = React.useMemo(
+    () =>
+      new Map(
+        (site ?? []).map((e) => [
+          e,
+          typeof e.dataJson === "string" ? e.dataJson.toLowerCase() : "",
+        ]),
+      ),
+    [site],
+  );
+
   const siteByDomain = React.useMemo(() => {
     const map = new Map<string, SampleSiteMemoryEntry[]>();
     const q = filter.trim().toLowerCase();
-    for (const e of site ?? []) {
-      if (q && !siteMatches(e, q)) continue;
+    for (const e of siteSummaries.keys()) {
+      if (q && !matchesJson(e.domain, siteLowerJson.get(e) ?? "", q)) continue;
       const list = map.get(e.domain);
       if (list) {
         list.push(e);
@@ -103,10 +125,21 @@ export function MemoryView() {
       }
     }
     return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]));
-  }, [site, filter]);
+  }, [siteSummaries, siteLowerJson, filter]);
 
  // Flatten form memory into rows of { domain, field, value, updatedAt }
  // by parsing each row's `formDataJson`.
+  const formLowerJson = React.useMemo(
+    () =>
+      new Map(
+        (form ?? []).map((e) => [
+          e,
+          typeof e.formDataJson === "string" ? e.formDataJson.toLowerCase() : "",
+        ]),
+      ),
+    [form],
+  );
+
   const formFlattened = React.useMemo(() => {
     const q = filter.trim().toLowerCase();
     const rows: Array<{
@@ -116,7 +149,7 @@ export function MemoryView() {
       updatedAt: number | string | Date;
     }> = [];
     for (const e of form ?? []) {
-      if (q && !formMatches(e, q)) continue;
+      if (q && !matchesJson(e.domain, formLowerJson.get(e) ?? "", q)) continue;
  // Fall back to 0 (rendered as "—" by `timeAgo`) instead of
  // `Date.now()` — `Date.now()` is impure and triggers React's
  // "impure function during render" lint warning inside `useMemo`.
@@ -124,11 +157,12 @@ export function MemoryView() {
       const entries = parseFormEntries(e);
       if (entries.length === 0) {
  // No parsed entries — show a single row with the raw JSON so the
- // user sees that *something* is stored for this domain.
+ // user sees that *something* is stored for this domain. Mask it if
+ // it likely contains a secret.
         rows.push({
           domain: e.domain,
           field: "(raw)",
-          value: e.formDataJson.slice(0, 80) || "(empty)",
+          value: SENSITIVE_FIELD.test(e.formDataJson) ? "••••••" : e.formDataJson.slice(0, 80) || "(empty)",
           updatedAt: ts,
         });
       } else {
@@ -143,16 +177,7 @@ export function MemoryView() {
       }
     }
     return rows;
-  }, [form, filter]);
-
- // Prisma `FormMemory` has `domain` + `formDataJson` — no `field`/`value`/
- // `formUrl` columns. The filter matches against `domain` AND the raw
- // `formDataJson` string.
-  function formMatches(e: { domain: string; formDataJson: string }, q: string): boolean {
-    if (e.domain?.toLowerCase().includes(q)) return true;
-    if (typeof e.formDataJson === "string" && e.formDataJson.toLowerCase().includes(q)) return true;
-    return false;
-  }
+  }, [form, formLowerJson, filter]);
 
   return (
     <div className="space-y-4">
@@ -194,11 +219,11 @@ export function MemoryView() {
                     <p className="font-mono text-sm font-semibold">{domain}</p>
                     <span className="text-xs text-muted-foreground"><span className="tnum">{entries.length}</span> snapshots</span>
                   </div>
-                  <div className="divide-y divide-border/60">
+                  <div className="divide-y divide-border/60" role="list">
                     {entries.map((e, i) => {
-                      const summary = parseSiteData(e);
+                      const summary = siteSummaries.get(e)!;
                       return (
-                        <div key={i} className="flex items-start gap-3 py-2 text-sm">
+                        <div key={i} role="listitem" className="flex items-start gap-3 py-2 text-sm">
                           <span className="font-mono text-xs text-muted-foreground shrink-0 w-32 truncate" title={`v${e.version}`}>
                             v{e.version} · {summary.visitCount} visits · {summary.diffCount} diffs
                           </span>
@@ -226,9 +251,9 @@ export function MemoryView() {
               <DataTable caption="Form memory" columns={["Domain", "Field", "Value", "Updated"]}>
                 {formFlattened.map((e, i) => (
                   <tr key={i} className="hover:bg-accent/40 transition-colors align-top">
-                    <td className="px-4 py-2.5 font-mono text-xs truncate">{e.domain}</td>
-                    <td className="px-4 py-2.5 font-mono text-xs text-muted-foreground truncate">{e.field}</td>
-                    <td className="px-4 py-2.5 font-mono text-xs truncate">{e.value}</td>
+                    <td className="px-4 py-2.5 font-mono text-xs truncate" title={e.domain}>{e.domain}</td>
+                    <td className="px-4 py-2.5 font-mono text-xs text-muted-foreground truncate" title={e.field}>{e.field}</td>
+                    <td className="px-4 py-2.5 font-mono text-xs truncate" title={maskValue(e.field, e.value)}>{maskValue(e.field, e.value)}</td>
                     <td className="px-4 py-2.5 text-xs text-muted-foreground tnum sm:text-right whitespace-nowrap">
                       {timeAgo(e.updatedAt)} ago
                     </td>

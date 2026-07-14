@@ -36,9 +36,16 @@ export function TabsView() {
   }, [data, filter]);
 
   /* Summary metrics */
-  const total = data?.length ?? 0;
-  const loading = (data ?? []).filter((t) => t.status === "loading").length;
-  const workspaces = new Set((data ?? []).map((t) => t.workspaceName).filter(Boolean)).size;
+  const { total, loading, workspaces } = React.useMemo(() => {
+    const all = data ?? [];
+    let loading = 0;
+    const ws = new Set<string>();
+    for (const t of all) {
+      if (t.status === "loading") loading++;
+      if (t.workspaceName) ws.add(t.workspaceName);
+    }
+    return { total: all.length, loading, workspaces: ws.size };
+  }, [data]);
 
   return (
     <div className="space-y-4">
@@ -62,6 +69,7 @@ export function TabsView() {
               onClick={() => refetch()}
               disabled={isFetching}
               className="h-8"
+              aria-label="Refresh tabs"
             >
               <RefreshCw className={`size-3.5 ${isFetching ? "animate-spin" : ""}`} />
               <span className="hidden sm:inline">Refresh</span>
@@ -135,6 +143,7 @@ export function TabsView() {
                         title={url}
                       >
                         {truncateMiddle(url, 64)}
+                        <span className="sr-only"> (opens in new tab)</span>
                       </a>
                     </div>
                   </div>

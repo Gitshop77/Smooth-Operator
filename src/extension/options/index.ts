@@ -24,6 +24,18 @@ import "./vision-status";
 
 const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>(".tab"));
 
+// Lazily render dynamic tab content on first activation. Hoisted to module
+// scope so it is built once, not re-allocated on every tab switch.
+const renderers: Record<string, () => void> = {
+  secrets: renderSecrets,
+  schedule: renderSchedule,
+  tools: renderTools,
+  skills: renderSkills,
+  history: renderHistory,
+  prompts: loadPrompts,
+  notify: loadNotifications,
+};
+
 function activateTab(tab: HTMLButtonElement, focus = true): void {
   const target = tab.dataset.tab;
   if (!target) return;
@@ -37,16 +49,12 @@ function activateTab(tab: HTMLButtonElement, focus = true): void {
   tab.tabIndex = 0;
   if (focus) tab.focus();
   document.querySelectorAll<HTMLElement>(".tab-content").forEach((c) => {
-    c.classList.toggle("active", c.dataset.tab === target);
+    const isActive = c.dataset.tab === target;
+    c.classList.toggle("active", isActive);
+    c.hidden = !isActive;
   });
  // Lazily render dynamic tab content on first activation.
-  if (target === "secrets") void renderSecrets();
-  if (target === "schedule") void renderSchedule();
-  if (target === "tools") void renderTools();
-  if (target === "skills") void renderSkills();
-  if (target === "history") void renderHistory();
-  if (target === "prompts") void loadPrompts();
-  if (target === "notify") void loadNotifications();
+  renderers[target]?.();
 }
 
 tabs.forEach((tab) => {
@@ -92,3 +100,10 @@ try {
 } catch {
   /* manifest unavailable — version stays as the static fallback text */
 }
+
+// Activate the default tab on load so inactive panels receive the `hidden`
+// attribute even if the stylesheet fails to load (finding: panels otherwise
+// rely solely on the CSS `.active { display }` rule and would remain in the
+// accessibility tree / focusable if the CSS never arrives).
+const initialTab = document.querySelector(".tab.active") as HTMLButtonElement | null;
+if (initialTab) activateTab(initialTab, false);

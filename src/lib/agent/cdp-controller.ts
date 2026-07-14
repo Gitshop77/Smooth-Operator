@@ -74,6 +74,18 @@ function isAlreadyAttachedError(e: unknown): boolean {
   return e instanceof Error && /already/i.test(e.message);
 }
 
+/** CDP mouse-event `type` values accepted by `Input.dispatchMouseEvent`. */
+type MouseEventType = "mouseMoved" | "mousePressed" | "mouseReleased";
+
+/** Send a single CDP `Input.dispatchMouseEvent` with the given type and params. */
+async function dispatchMouseEvent(
+  tabId: number,
+  type: MouseEventType,
+  params: Record<string, unknown>,
+): Promise<void> {
+  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", { type, ...params });
+}
+
 /**
  * Attach the chrome.debugger to a tab.
  * @returns `true` on success, `true` if already attached (not an error).
@@ -113,34 +125,30 @@ export async function cdpClick(
 ): Promise<void> {
   const { button = DEFAULT_BUTTON, clickCount = DEFAULT_CLICK_COUNT, modifiers = "" } = options;
   const modifierMask = modifierBitmask(modifiers);
+  const buttonMask = button === "right" ? 2 : button === "middle" ? 4 : 1;
 
  // Move mouse first (triggers mousemove/hover handlers).
-  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
-    type: "mouseMoved",
-    x,
-    y,
-    modifiers: modifierMask,
-  });
+  await dispatchMouseEvent(tabId, "mouseMoved", { x, y, modifiers: modifierMask });
 
  // Small delay between move and click (matches human behavior + lets hover handlers fire).
   await new Promise((r) => setTimeout(r, MOUSE_MOVE_SETTLE_MS));
 
  // Press.
-  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
-    type: "mousePressed",
+  await dispatchMouseEvent(tabId, "mousePressed", {
     x,
     y,
     button,
+    buttons: buttonMask,
     clickCount,
     modifiers: modifierMask,
   });
 
  // Release.
-  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
-    type: "mouseReleased",
+  await dispatchMouseEvent(tabId, "mouseReleased", {
     x,
     y,
     button,
+    buttons: 0,
     clickCount,
     modifiers: modifierMask,
   });
@@ -200,12 +208,7 @@ export async function cdpPressAndHold(
 
  // 1. Move first — triggers mousemove/hover handlers and positions the cursor
  // so the subsequent mousePressed lands on the intended element.
-  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
-    type: "mouseMoved",
-    x,
-    y,
-    button: "none",
-  });
+  await dispatchMouseEvent(tabId, "mouseMoved", { x, y, button: "none" });
 
  // Optional pre-press delay (e.g. to let hover animations settle).
   if (delay > 0) {
@@ -214,11 +217,11 @@ export async function cdpPressAndHold(
 
  // 2. Press the left mouse button — begins the hold. clickCount=1 means
  // "single press" (not a double-click).
-  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
-    type: "mousePressed",
+  await dispatchMouseEvent(tabId, "mousePressed", {
     x,
     y,
     button: "left",
+    buttons: 1,
     clickCount: 1,
   });
 
@@ -230,11 +233,11 @@ export async function cdpPressAndHold(
   }
 
  // 4. Release the left mouse button — completes the hold gesture.
-  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
-    type: "mouseReleased",
+  await dispatchMouseEvent(tabId, "mouseReleased", {
     x,
     y,
     button: "left",
+    buttons: 0,
     clickCount: 1,
   });
 }

@@ -16,8 +16,10 @@
  * - For each shim we import the shim (`@/lib/agent/dom/<shim>`) and its
  * canonical target(s) (`@/lib/agent/dom/<canonical>`), then compare the
  * sorted set of exported names.
- * - Every shim here re-exports the FULL canonical surface (`export *`), so we
- * assert EXACT equality of the key sets.
+ * - Most shims here re-export the FULL canonical surface (`export *`), so we
+ * assert EXACT equality of the key sets. A few legitimately re-export only a
+ * SUBSET of their canonical module and use the `subset` relation (see below),
+ * which only verifies the canonical exports are present in the shim.
  * - `dom-utils` aggregates four canonical `utils/*` modules; we merge their
  * export names and assert exact equality against the shim.
  *
@@ -62,13 +64,16 @@ function assertConsistent(
   canonicalKeys: string[],
   relation: Relation,
 ): void {
+  const shimSet = new Set(shimKeys);
+  const canonicalSet = new Set(canonicalKeys);
   if (relation === "exact") {
-    expect(shimKeys, `${shimName} exports must equal ${canonicalName} exports`).toEqual(
-      canonicalKeys,
-    );
+    const added = shimKeys.filter((k) => !canonicalSet.has(k));
+    const removed = canonicalKeys.filter((k) => !shimSet.has(k));
+    expect(added, `${shimName} has unexpected exports: ${added}`).toEqual([]);
+    expect(removed, `${shimName} is missing exports: ${removed}`).toEqual([]);
   } else {
  // subset: every canonical export must be present in the shim.
-    const missing = canonicalKeys.filter((k) => !shimKeys.includes(k));
+    const missing = canonicalKeys.filter((k) => !shimSet.has(k));
     expect(
       missing,
       `${shimName} is missing canonical exports from ${canonicalName}: ${missing.join(", ")}`,
@@ -77,55 +82,28 @@ function assertConsistent(
 }
 
 describe("DOM re-export shim consistency", () => {
-  it("overlay shim mirrors ./annotation/overlay-renderer", () => {
-    assertConsistent(
-      "@/lib/agent/dom/overlay",
-      sortedKeys(overlayShim),
-      "@/lib/agent/dom/annotation/overlay-renderer",
-      sortedKeys(overlayCanonical),
-      "exact",
-    );
-  });
+  const simpleCases: Array<
+    [string, Record<string, unknown>, Record<string, unknown>, Relation]
+  > = [
+    ["overlay", overlayShim, overlayCanonical, "subset"],
+    ["shadow-piercer", shadowPiercerShim, shadowPiercerCanonical, "exact"],
+    ["screenshot-annotator", screenshotAnnotatorShim, screenshotAnnotatorCanonical, "exact"],
+    ["phantom-cursor", phantomCursorShim, phantomCursorCanonical, "subset"],
+    ["popup-handler", popupHandlerShim, popupHandlerCanonical, "subset"],
+  ];
 
-  it("shadow-piercer shim mirrors ./annotation/shadow-piercer", () => {
-    assertConsistent(
-      "@/lib/agent/dom/shadow-piercer",
-      sortedKeys(shadowPiercerShim),
-      "@/lib/agent/dom/annotation/shadow-piercer",
-      sortedKeys(shadowPiercerCanonical),
-      "exact",
-    );
-  });
-
-  it("screenshot-annotator shim mirrors ./annotation/screenshot-annotator", () => {
-    assertConsistent(
-      "@/lib/agent/dom/screenshot-annotator",
-      sortedKeys(screenshotAnnotatorShim),
-      "@/lib/agent/dom/annotation/screenshot-annotator",
-      sortedKeys(screenshotAnnotatorCanonical),
-      "exact",
-    );
-  });
-
-  it("phantom-cursor shim mirrors ./interaction/hover", () => {
-    assertConsistent(
-      "@/lib/agent/dom/phantom-cursor",
-      sortedKeys(phantomCursorShim),
-      "@/lib/agent/dom/interaction/hover",
-      sortedKeys(phantomCursorCanonical),
-      "exact",
-    );
-  });
-
-  it("popup-handler shim mirrors ./navigation/popup-handler", () => {
-    assertConsistent(
-      "@/lib/agent/dom/popup-handler",
-      sortedKeys(popupHandlerShim),
-      "@/lib/agent/dom/navigation/popup-handler",
-      sortedKeys(popupHandlerCanonical),
-      "exact",
-    );
-  });
+  it.each(simpleCases)(
+    "%s shim mirrors its canonical",
+    (name, shim, canonical, relation) => {
+      assertConsistent(
+        "@/lib/agent/dom/" + name,
+        sortedKeys(shim),
+        "@/lib/agent/dom/" + name,
+        sortedKeys(canonical),
+        relation,
+      );
+    },
+  );
 
   it("dom-utils shim mirrors the aggregated ./utils/* modules", () => {
     const canonicalKeys = [

@@ -33,8 +33,9 @@ export const SearchInput = React.forwardRef<HTMLInputElement, SearchInputProps>(
         <Input
           ref={ref}
           type="search"
-          role="searchbox"
           aria-label={ariaLabel}
+          autoComplete="off"
+          spellCheck={false}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}

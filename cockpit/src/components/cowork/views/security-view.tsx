@@ -46,25 +46,15 @@ const MESSAGES = {
   whenSuffix: "ago",
 } as const;
 
-const SEVERITY_TONE: Record<string, "error" | "warning" | "info"> = {
-  critical: "error",
-  high: "error",
-  medium: "warning",
-  low: "info",
+const SEVERITY_META: Record<string, { tone: "error" | "warning" | "info"; border: string }> = {
+  critical: { tone: "error", border: "border-l-[3px] border-l-destructive" },
+  high: { tone: "error", border: "border-l-[3px] border-l-destructive" },
+  medium: { tone: "warning", border: "border-l-[3px] border-l-chart-1" },
+  low: { tone: "info", border: "border-l-[3px] border-l-muted-foreground/30" },
  // The Prisma `SecurityEvent.severity` field also allows `'info'`
  // (see schema.prisma). Map to the `info` tone so info events render
- // distinctly from `low`.
-  info: "info",
-};
-
-/** Map severity to the CSS border class. */
-const SEVERITY_BORDER: Record<string, string> = {
-  critical: "border-l-[3px] border-l-destructive",
-  high: "border-l-[3px] border-l-destructive",
-  medium: "border-l-[3px] border-l-chart-1",
-  low: "border-l-[3px] border-l-muted-foreground/30",
- // Match SEVERITY_TONE — give info-severity rows a neutral border.
-  info: "border-l-[3px] border-l-muted-foreground/30",
+ // distinctly from `low`, with a neutral border to match.
+  info: { tone: "info", border: "border-l-[3px] border-l-muted-foreground/30" },
 };
 
 export function SecurityView() {
@@ -77,20 +67,32 @@ export function SecurityView() {
     return ["all", ...Array.from(set).sort()];
   }, [data]);
 
-  const rows = React.useMemo(() => {
+  const sorted = React.useMemo(
+    () =>
  // `timestamp` arrives as an ISO string (Prisma DateTime → JSON
  // serializes to string). Coerce to ms via `new Date(...).getTime()` so
  // the sort is stable.
-    const all = (data ?? []).slice().sort(
-      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
-    );
-    if (typeFilter === "all") return all;
-    return all.filter((e) => e.type === typeFilter);
-  }, [data, typeFilter]);
+      (data ?? []).slice().sort(
+        (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+      ),
+    [data],
+  );
 
-  const blocked = (data ?? []).filter((e) => e.blocked).length;
-  const allowed = (data ?? []).length - blocked;
-  const critical = (data ?? []).filter((e) => e.severity === "critical").length;
+  const rows = React.useMemo(() => {
+    if (typeFilter === "all") return sorted;
+    return sorted.filter((e) => e.type === typeFilter);
+  }, [sorted, typeFilter]);
+
+  const { blocked, allowed, critical } = React.useMemo(() => {
+    const all = data ?? [];
+    let blockedCount = 0;
+    let criticalCount = 0;
+    for (const e of all) {
+      if (e.blocked) blockedCount++;
+      if (e.severity === "critical") criticalCount++;
+    }
+    return { blocked: blockedCount, allowed: all.length - blockedCount, critical: criticalCount };
+  }, [data]);
 
   return (
     <div className="space-y-4">
@@ -138,10 +140,10 @@ export function SecurityView() {
             {rows.map((e) => (
               <tr
                 key={e.id}
-                className={`hover:bg-accent/40 transition-colors align-top ${SEVERITY_BORDER[e.severity] ?? ""}`}
+                className={`hover:bg-accent/40 transition-colors align-top ${SEVERITY_META[e.severity]?.border ?? ""}`}
               >
                 <td className="px-4 py-2.5">
-                  <StatusPill tone={SEVERITY_TONE[e.severity]}>{e.severity}</StatusPill>
+                  <StatusPill tone={SEVERITY_META[e.severity]?.tone ?? "info"}>{e.severity}</StatusPill>
                 </td>
                 <td className="px-4 py-2.5">
                   <span className="text-[11px] cowork-mono">{e.type}</span>

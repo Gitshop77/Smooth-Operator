@@ -50,19 +50,20 @@ const DEFAULT_SYSTEM_PROMPT =
   "You are Open Cowork, a careful browsing agent. Follow the user's mission, " +
   "verify before acting, and summarize what you did.";
 
-let quickPromptSeq = 0;
-const nextId = () => `qp-${Date.now()}-${quickPromptSeq++}`;
+const nextId = () => crypto.randomUUID();
 
 export function PromptsView() {
   const [systemPrompt, setSystemPrompt] = React.useState(DEFAULT_SYSTEM_PROMPT);
   const [quickPrompts, setQuickPrompts] = React.useState<QuickPrompt[]>([]);
   const [newName, setNewName] = React.useState("");
   const [newText, setNewText] = React.useState("");
+  const nameRef = React.useRef<HTMLInputElement>(null);
+  const canAdd = newName.trim() !== "" && newText.trim() !== "";
 
   const addQuickPrompt = React.useCallback(() => {
     const name = newName.trim();
     const text = newText.trim();
-    if (!name || !text) return;
+    if (!canAdd) return;
     setQuickPrompts((prev) => {
       const idx = prev.findIndex((q) => q.name === name);
       const entry: QuickPrompt = { id: nextId(), name, text };
@@ -75,6 +76,7 @@ export function PromptsView() {
     });
     setNewName("");
     setNewText("");
+    nameRef.current?.focus();
   }, [newName, newText]);
 
   const removeQuickPrompt = React.useCallback((id: string) => {
@@ -136,14 +138,23 @@ export function PromptsView() {
 
         {/* Add row */}
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+          <label htmlFor="quick-prompt-name" className="sr-only">
+            Quick prompt name
+          </label>
           <Input
+            id="quick-prompt-name"
+            ref={nameRef}
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             placeholder="Name (e.g. Summarize)"
             aria-label="Quick prompt name"
             className="sm:w-48 shrink-0"
           />
+          <label htmlFor="quick-prompt-text" className="sr-only">
+            Quick prompt text
+          </label>
           <Textarea
+            id="quick-prompt-text"
             value={newText}
             onChange={(e) => setNewText(e.target.value)}
             placeholder="Prompt text…"
@@ -154,7 +165,7 @@ export function PromptsView() {
           <Button
             type="button"
             onClick={addQuickPrompt}
-            disabled={!newName.trim() || !newText.trim()}
+            disabled={!canAdd}
             className="shrink-0 sm:mt-0.5"
           >
             <Plus className="size-4" />

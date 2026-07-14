@@ -14,6 +14,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { NextRequest } from 'next/server';
+import { middleware } from '@/middleware';
 
 function fakeReq(pathname: string, search = '', headers: Record<string, string> = {}): NextRequest {
   const h = new Headers();
@@ -51,44 +52,42 @@ describe('cockpit route auth contract', () => {
 
   for (const route of ROUTES) {
     it(`401s on ${route} without a token (fail-closed)`, async () => {
-      const { middleware } = await import('@/middleware');
       expect(middleware(fakeReq(route)).status).toBe(401);
     });
 
     it(`200s on ${route} with a matching X-Cowork-Token header`, async () => {
-      const { middleware } = await import('@/middleware');
       const res = middleware(fakeReq(route, '', { 'x-cowork-token': REAL_TOKEN }));
       expect(res.status).toBe(200);
     });
   }
 
   it('events/stream accepts a valid ?token= query param', async () => {
-    const { middleware } = await import('@/middleware');
     expect(middleware(fakeReq(SSE, `token=${REAL_TOKEN}`)).status).toBe(200);
   });
 
   it('events/stream 401s on a wrong ?token= query param', async () => {
-    const { middleware } = await import('@/middleware');
     expect(middleware(fakeReq(SSE, 'token=wrong')).status).toBe(401);
   });
 
   it('the raw stream token is NEVER logged in cleartext (redacted at log time)', async () => {
-    const { middleware } = await import('@/middleware');
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Cover all console sinks so a leak through info/debug is also caught.
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
     const res = middleware(fakeReq(SSE, `token=${REAL_TOKEN}`));
     expect(res.status).toBe(200);
- // Inspect every argument of every console.log / warn / error call — the
- // "never logged" guarantee covers all console sinks, not just console.log.
-    for (const spy of [logSpy, warnSpy, errorSpy]) {
+    // Inspect every argument of every console sink — the "never logged"
+    // guarantee covers all console sinks, not just console.log.
+    for (const spy of [logSpy, warnSpy, errorSpy, infoSpy, debugSpy]) {
       for (const call of spy.mock.calls) {
         for (const arg of call) {
           expect(JSON.stringify(arg)).not.toContain(REAL_TOKEN);
         }
       }
     }
- // Sanity: the request log WAS emitted (so we actually exercised logging).
+    // Sanity: the request log WAS emitted (so we actually exercised logging).
     expect(logSpy).toHaveBeenCalled();
   });
 });

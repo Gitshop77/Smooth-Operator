@@ -34,15 +34,19 @@ export async function GET(req: NextRequest): Promise<Response> {
     }
     const args: Parameters<typeof db.workflow.findMany>[0] = {
       take: limit,
-      orderBy: { createdAt: 'desc' },
+ // `id` as a deterministic tiebreaker keeps the order a strict total order
+ // (two workflows can share a `createdAt`), so cursor pagination is correct.
+      orderBy: { createdAt: 'desc', id: 'desc' },
+      ...(after ? { cursor: { id: after }, skip: 1 } : {}),
     };
-    if (after) {
-      args.cursor = { id: after };
-      args.skip = 1;
-    }
-    let workflows;
+    let workflows: Awaited<ReturnType<typeof db.workflow.findMany>>;
+    let total: number;
     try {
-      workflows = await db.workflow.findMany(args);
+ // Run the independent findMany + count concurrently in a single round-trip.
+      [workflows, total] = await Promise.all([
+        db.workflow.findMany(args),
+        db.workflow.count(),
+      ]);
     } catch (e: unknown) {
  // A well-formed but stale/unknown cursor id makes Prisma throw P2025
  // (RecordNotFound); return a precise 400 instead of a generic 500.
@@ -51,7 +55,6 @@ export async function GET(req: NextRequest): Promise<Response> {
       }
       throw e;
     }
-    const total = await db.workflow.count();
  // Project the Prisma `Workflow` fields onto the legacy `SampleWorkflow`
  // shape the view expects: `isRecurring` → `enabled`, `lastRunAt` →
  // `lastRun`. The legacy `runs` field has no backing column and no consumer,
@@ -61,7 +64,11 @@ export async function GET(req: NextRequest): Promise<Response> {
       enabled: wf.isRecurring,
       lastRun: wf.lastRunAt,
     }));
-    return json({ workflows: projected, total });
+ // Signal whether more pages exist (only when a full page was returned and the
+ // cursor id is well-formed) so the UI can drive cursor-based "load more".
+    const last = workflows.length === limit ? workflows[workflows.length - 1] : undefined;
+    const nextCursor = last && CURSOR_ID_RE.test(last.id) ? last.id : null;
+    return json({ workflows: projected, total, nextCursor });
   });
 }
 
@@ -80,17 +87,12 @@ export async function POST(req: NextRequest): Promise<Response> {
     const rawSteps = Array.isArray(body.steps) ? body.steps : [];
     const stepsResult = validateField(stepsSchema, rawSteps, 'steps');
     if (!stepsResult.ok) return badRequest(stepsResult.error);
-    let stepsJson: string;
-    try {
-      stepsJson = JSON.stringify(stepsResult.value);
-    } catch {
-      return badRequest('steps are not serializable');
-    }
+    const stepsJson = JSON.stringify(stepsResult.value);
     if (stepsJson.length > MAX_STEPS_BYTES) {
       return badRequest('steps are too large');
     }
 
-    const isRecurring = Boolean(body.isRecurring);
+    const isRecurring = typeof body.isRecurring === 'boolean' ? body.isRecurring : false;
  // Validate the cron expression against a strict, shell-safe grammar
  // before storing it (a future scheduler may act on this value).
     let scheduleCron: string | null = null;
@@ -106,12 +108,7 @@ export async function POST(req: NextRequest): Promise<Response> {
  // value; we store its serialized form and bound its size.
     let variablesJson: string | null = null;
     if (body.variables != null) {
-      let serialized: string;
-      try {
-        serialized = JSON.stringify(body.variables);
-      } catch {
-        return badRequest('variables are not serializable');
-      }
+      const serialized = JSON.stringify(body.variables);
       if (serialized.length > MAX_VARIABLES_BYTES) {
         return badRequest('variables are too large');
       }

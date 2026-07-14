@@ -24,7 +24,13 @@ const MODEL_ID_RE = /^[\w.:-]+$/;
  * or potentially-hostile model id).
  */
 export function encodeModelIdForUrl(model: string): string {
-  if (typeof model !== "string" || !MODEL_ID_RE.test(model)) {
+  if (
+    typeof model !== "string" ||
+    model === "." ||
+    model === ".." ||
+    model.includes("..") ||
+    !MODEL_ID_RE.test(model)
+  ) {
     throw new Error(
       `Invalid model id "${model}": model ids may only contain letters, digits, ` +
         `'_', '.', ':' and '-'.`

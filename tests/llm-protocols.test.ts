@@ -14,6 +14,15 @@ import * as Gemini from "../src/lib/agent/llm/protocols/gemini";
 import { encodeModelIdForUrl } from "../src/lib/agent/llm/modelId";
 import type { LLMRequest } from "../src/lib/agent/llm/route/client";
 
+/** Minimal structural shape of a protocol's stream reducer, used by `reduceFrames`. */
+type StreamProtocol = {
+  stream: {
+    initial(request: LLMRequest): unknown;
+    step(state: unknown, frame: string): { state: unknown; events: unknown[] };
+    terminal?(frame: string): boolean;
+  };
+};
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /** Build a minimal LLMRequest the protocol's `body.from()` can consume. */
@@ -31,7 +40,7 @@ function makeRequest(overrides: Partial<LLMRequest> = {}): LLMRequest {
 
 /** Drive a list of raw frame strings through a protocol's stream reducer. */
 function reduceFrames(
-  protocol: any,
+  protocol: StreamProtocol,
   frames: string[],
   request: LLMRequest
 ): { content: string; events: unknown[]; terminatedEarly: boolean } {

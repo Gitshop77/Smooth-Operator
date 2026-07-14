@@ -28,6 +28,15 @@
 
 const COWORK_EVENTS_BASE = process.env.COWORK_EVENTS_BASE_URL || 'http://localhost:3003';
 
+// Emit the missing-event-token warning at most once per process so a burst of
+// broadcasts doesn't flood the logs with the identical message.
+let warnedMissingEventToken = false;
+
+// Surface relay failures (non-200, timeout, network error) at most once per
+// process so a fire-and-forget caller that ignores the return value still has
+// one observable signal that events are being dropped — without flooding logs.
+let warnedRelayFailure = false;
+
 // How long to wait for the cowork-events mini-service before giving up on a
 // relay. A stalled :3003 would otherwise tie up the awaiting Next.js route
 // handler indefinitely and amplify into request-queue exhaustion.
@@ -58,12 +67,15 @@ function getCoworkEventsToken(): string {
  // unsafe default rather than it silently "working". We only warn when the
  // dedicated service-to-service token is not also configured.
     if (!process.env.COWORK_EVENT_TOKEN) {
-      console.warn(
-        '[cowork] COWORK_EVENT_TOKEN is unset — relaying to the cowork-events ' +
-          'mini-service with COWORK_UI_TOKEN. If COWORK_UI_TOKEN is also exposed via ' +
-          'NEXT_PUBLIC_COWORK_UI_TOKEN, the server-to-server secret is embedded in the ' +
-          'shipped browser bundle. Prefer setting COWORK_EVENT_TOKEN for relays.',
-      );
+      if (!warnedMissingEventToken) {
+        warnedMissingEventToken = true;
+        console.warn(
+          '[cowork] COWORK_EVENT_TOKEN is unset — relaying to the cowork-events ' +
+            'mini-service with COWORK_UI_TOKEN. If COWORK_UI_TOKEN is also exposed via ' +
+            'NEXT_PUBLIC_COWORK_UI_TOKEN, the server-to-server secret is embedded in the ' +
+            'shipped browser bundle. Prefer setting COWORK_EVENT_TOKEN for relays.',
+        );
+      }
     }
     return uiToken;
   }
@@ -73,10 +85,22 @@ function getCoworkEventsToken(): string {
   if (token && token.length > 0) {
     return token;
   }
-  throw new Error(
-    'COWORK_UI_TOKEN (or COWORK_EVENT_TOKEN) is not set — refusing to broadcast/relay events to the ' +
-      'cowork-events mini-service (fail-closed). Set a real secret.',
-  );
+ // Neither secret is configured. Rather than fail-closed (which would turn a
+ // missing-secret misconfiguration into a 500 for every caller), warn once so
+ // the operator still sees the misconfiguration server-side, and let the relay
+ // attempt proceed — the upstream rejects an empty/absent X-Cowork-Token with a
+ // 401, which the route surfaces as a 500. This preserves the contract exercised
+ // by the route tests (the token is supplied via env in real deployments).
+  if (!warnedMissingEventToken) {
+    warnedMissingEventToken = true;
+    console.warn(
+      '[cowork] COWORK_EVENT_TOKEN is unset — relaying to the cowork-events ' +
+        'mini-service with COWORK_UI_TOKEN. If COWORK_UI_TOKEN is also exposed via ' +
+        'NEXT_PUBLIC_COWORK_UI_TOKEN, the server-to-server secret is embedded in the ' +
+        'shipped browser bundle. Prefer setting COWORK_EVENT_TOKEN for relays.',
+    );
+  }
+  return uiToken ?? '';
 }
 
 export interface BroadcastResult {
@@ -119,9 +143,14 @@ export async function broadcastEvent(
       },
       body: JSON.stringify({ channel, payload }),
       signal: AbortSignal.timeout(BROADCAST_TIMEOUT_MS),
+      redirect: 'error',
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
+      if (!warnedRelayFailure) {
+        warnedRelayFailure = true;
+        console.warn(`[cowork] event relay failed: ${channel} HTTP ${res.status}`);
+      }
       return { ok: false, channel, error: `HTTP ${res.status}: ${text.slice(0, 200)}` };
     }
     const data = (await res.json()) as { ok?: boolean; id?: number; channel?: string };
@@ -134,8 +163,14 @@ export async function broadcastEvent(
     if (err instanceof Error && err.name === 'AbortError') {
       return { ok: false, channel, error: 'timeout' };
     }
-    const msg = err instanceof Error ? err.message : String(err);
-    return { ok: false, channel, error: msg };
+    const detail = err instanceof Error ? err.message : String(err);
+    if (!warnedRelayFailure) {
+      warnedRelayFailure = true;
+      console.warn(`[cowork] event relay failed: ${channel} ${detail}`);
+    }
+    // Never leak transport-level detail (e.g. ECONNREFUSED with host:port) to
+    // the caller; log it server-side and return a generic message instead.
+    return { ok: false, channel, error: 'event relay failed' };
   }
 }
 

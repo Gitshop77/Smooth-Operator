@@ -130,16 +130,16 @@ function computeRange(
       (customEnd !== "" && Number.isNaN(eRaw))
     ) {
       return {
-        startMs: sRaw,
-        endMs: eRaw,
+        startMs: Number.isFinite(sRaw) ? sRaw : now - 7 * DAY_MS,
+        endMs: Number.isFinite(eRaw) ? eRaw : now,
         rangeDays: 1,
         rangeError: "Enter valid start and end dates.",
       };
     }
     if (sRaw > eRaw) {
       return {
-        startMs: sRaw,
-        endMs: eRaw,
+        startMs: Number.isFinite(sRaw) ? sRaw : now - 7 * DAY_MS,
+        endMs: Number.isFinite(eRaw) ? eRaw : now,
         rangeDays: 1,
         rangeError: "Start date must be on or before the end date.",
       };
@@ -285,7 +285,7 @@ function downloadCsv(filename: string, content: string): void {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 /**
@@ -376,6 +376,18 @@ const RANGE_OPTIONS: { key: RangeKey; label: string }[] = [
   { key: "custom", label: "Custom" },
 ];
 
+const BREAKDOWN_DIMENSIONS = [
+  { key: "agent", label: "Agent", icon: Boxes },
+  { key: "model", label: "Model", icon: Cpu },
+  { key: "domain", label: "Domain", icon: Globe },
+] as const;
+
+const DIM_TO_FIELD = {
+  agent: "byAgent",
+  model: "byModel",
+  domain: "byDomain",
+} as const;
+
 function RangeSelector({
   range,
   onRange,
@@ -396,7 +408,7 @@ function RangeSelector({
           aria-pressed={range === opt.key}
           onClick={() => onRange(opt.key)}
           className={cn(
-            "h-7 rounded-[8px] px-2.5 text-xs font-medium transition-colors",
+            "h-7 rounded-[8px] px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
             range === opt.key
               ? "bg-primary text-primary-foreground"
               : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -416,6 +428,7 @@ function TrendChart({
 }) {
   const W = 720;
   const H = 180;
+  const gradId = React.useId();
   const pad = { t: 14, r: 10, b: 24, l: 10 };
   const innerW = W - pad.l - pad.r;
   const innerH = H - pad.t - pad.b;
@@ -447,12 +460,12 @@ function TrendChart({
       preserveAspectRatio="none"
     >
       <defs>
-        <linearGradient id="cost-area" x1="0" y1="0" x2="0" y2="1">
+        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor="var(--accent-subtle)" />
           <stop offset="100%" stopColor="var(--accent-subtle)" stopOpacity="0" />
         </linearGradient>
       </defs>
-      {areaPath ? <path d={areaPath} fill="url(#cost-area)" /> : null}
+      {areaPath ? <path d={areaPath} fill={`url(#${gradId})`} /> : null}
       {linePath ? (
         <path
           d={linePath}
@@ -615,21 +628,13 @@ export function CostView() {
     downloadCsv(`open-cowork-cost-${stamp}.csv`, csv);
   }, [hasData, analytics]);
 
-  const breakdownRows =
-    breakdownDim === "agent"
-      ? analytics.byAgent
-      : breakdownDim === "model"
-        ? analytics.byModel
-        : analytics.byDomain;
-
-  const breakdownIcon =
-    breakdownDim === "agent" ? (
-      <Boxes className="size-3.5" aria-hidden />
-    ) : breakdownDim === "model" ? (
-      <Cpu className="size-3.5" aria-hidden />
-    ) : (
-      <Globe className="size-3.5" aria-hidden />
-    );
+  const dimMeta =
+    BREAKDOWN_DIMENSIONS.find((d) => d.key === breakdownDim)!;
+  const breakdownRows = analytics[DIM_TO_FIELD[breakdownDim]];
+  const breakdownIcon = React.createElement(dimMeta.icon, {
+    className: "size-3.5",
+    "aria-hidden": true,
+  });
 
   return (
     <div className="space-y-4">
@@ -770,35 +775,26 @@ export function CostView() {
                   aria-label="Breakdown dimension"
                   className="inline-flex items-center rounded-[10px] border border-border bg-muted p-0.5"
                 >
-                  {(
-                    [
-                      { key: "agent", label: "Agent" },
-                      { key: "model", label: "Model" },
-                      { key: "domain", label: "Domain" },
-                    ] as { key: BreakdownDim; label: string }[]
-                  ).map((opt) => (
+                  {BREAKDOWN_DIMENSIONS.map((opt) => {
+                  const Icon = opt.icon;
+                  return (
                     <button
                       key={opt.key}
                       type="button"
                       aria-pressed={breakdownDim === opt.key}
                       onClick={() => setBreakdownDim(opt.key)}
                       className={cn(
-                        "inline-flex h-7 items-center gap-1 rounded-[8px] px-2 text-xs font-medium transition-colors",
+                        "inline-flex h-7 items-center gap-1 rounded-[8px] px-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
                         breakdownDim === opt.key
                           ? "bg-primary text-primary-foreground"
                           : "text-muted-foreground hover:bg-accent hover:text-foreground",
                       )}
                     >
-                      {opt.key === "agent" ? (
-                        <Boxes className="size-3.5" aria-hidden />
-                      ) : opt.key === "model" ? (
-                        <Cpu className="size-3.5" aria-hidden />
-                      ) : (
-                        <Globe className="size-3.5" aria-hidden />
-                      )}
+                      <Icon className="size-3.5" aria-hidden />
                       {opt.label}
                     </button>
-                  ))}
+                  );
+                })}
                 </div>
               </div>
               <BreakdownBars rows={breakdownRows} />

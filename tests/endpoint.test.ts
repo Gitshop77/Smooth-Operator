@@ -35,6 +35,29 @@ describe("endpoint buildURL", () => {
     const ep = Endpoint.path("/v1/chat", { baseURL: "https://api.openai.com" });
     expect(buildURL(ep, {})).toBe("https://api.openai.com/v1/chat");
   });
+
+  test("base URL already carrying a query merges endpoint.query into one '?'", () => {
+    const ep = Endpoint.path("/v1/chat", {
+      baseURL: "https://api.openai.com/v1/chat?x=1",
+      query: { alt: "sse" },
+    });
+    const url = buildURL(ep, {});
+    const parsed = new URL(url);
+    expect(url.split("?").length).toBe(2);
+    expect(parsed.searchParams.get("x")).toBe("1");
+    expect(parsed.searchParams.get("alt")).toBe("sse");
+  });
+
+  test("percent-encodes reserved characters in query values", () => {
+    const ep = Endpoint.path("/v1/chat", {
+      baseURL: "https://api.openai.com",
+      query: { q: "a&b=c d", alt: "sse#" },
+    });
+    const url = buildURL(ep, {});
+    const parsed = new URL(url);
+    expect(parsed.searchParams.get("q")).toBe("a&b=c d");
+    expect(parsed.searchParams.get("alt")).toBe("sse#");
+  });
 });
 
 describe("endpoint merge", () => {

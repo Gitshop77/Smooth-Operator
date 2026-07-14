@@ -18,6 +18,36 @@ import type { HistoryItem, AgentAction, ActionResult, LogEvent, AgentOutput } fr
 import { AgentOutputSchema } from "../src/lib/agent/tools/schema";
 import { makeHistoryItem, makeState } from "./helpers";
 
+// Records an action n times (with consecutive step indices) into a LoopDetector.
+// Centralizes the `as AgentAction` cast and the step-index convention so the
+// loop-detector tests stay uniform and drift-resistant.
+function recordN(det: LoopDetector, a: AgentAction, n: number, start = 0) {
+  for (let i = 0; i < n; i++) det.record(a, start + i);
+}
+
+// BASE_CONFIG mirrors the default LoopDeps config. The non-obvious coupling is
+// that maxSteps (3) must be < plannerInterval (100) so the periodic planner
+// never re-runs mid-test. Every test that needs this baseline spreads BASE_CONFIG
+// and overrides only what it needs.
+const BASE_CONFIG = {
+  maxSteps: 3,
+  maxActionsPerStep: 10,
+  plannerInterval: 100,
+  maxFailures: 5,
+  enableLoopDetection: true,
+  enableCompaction: false,
+  compactionStepInterval: 1000,
+  compactionCharThreshold: 1_000_000,
+  enableJudge: false,
+};
+
+// Pin the hidden, non-obvious coupling documented above: maxSteps must stay
+// below plannerInterval or the periodic planner re-runs mid-test and every
+// test that relies on BASE_CONFIG silently exercises a different path.
+test("BASE_CONFIG invariant: maxSteps < plannerInterval", () => {
+  expect(BASE_CONFIG.maxSteps).toBeLessThan(BASE_CONFIG.plannerInterval);
+});
+
 // ─── LoopDetector ───────────────────────────────────────────────────────────
 
 describe("LoopDetector", () => {
@@ -29,39 +59,35 @@ describe("LoopDetector", () => {
 
   test("warns at 5 repetitions", () => {
     const det = new LoopDetector();
-    const action = { type: "click", index: 1 } as AgentAction;
-    for (let i = 0; i < 5; i++) det.record(action, i);
+    recordN(det, { type: "click", index: 1 }, 5);
     expect(det.shouldWarn()).toBe(5);
   });
 
   test("warns at 8 repetitions (escalating)", () => {
     const det = new LoopDetector();
-    const action = { type: "scroll", down: true, pages: 1 } as AgentAction;
-    for (let i = 0; i < 8; i++) det.record(action, i);
+    recordN(det, { type: "scroll", down: true, pages: 1 }, 8);
     expect(det.shouldWarn()).toBe(8);
   });
 
   test("does not warn between thresholds (6, 7)", () => {
     const det = new LoopDetector();
-    const action = { type: "click", index: 1 } as AgentAction;
-    for (let i = 0; i < 6; i++) det.record(action, i);
+    recordN(det, { type: "click", index: 1 }, 6);
     expect(det.shouldWarn()).toBe(0);
   });
 
   test("reset clears the window", () => {
     const det = new LoopDetector();
-    const action = { type: "click", index: 1 } as AgentAction;
-    for (let i = 0; i < 5; i++) det.record(action, i);
+    recordN(det, { type: "click", index: 1 }, 5);
     expect(det.shouldWarn()).toBe(5);
     det.reset();
-    det.record(action, 5);
+    det.record({ type: "click", index: 1 } as AgentAction, 5);
     expect(det.shouldWarn()).toBe(0);
   });
 
   test("distinguishes between different actions", () => {
     const det = new LoopDetector();
-    for (let i = 0; i < 4; i++) det.record({ type: "click", index: 1 } as AgentAction, i);
-    for (let i = 0; i < 4; i++) det.record({ type: "input", index: 2, text: "x", clear: true } as AgentAction, i);
+    recordN(det, { type: "click", index: 1 }, 4);
+    recordN(det, { type: "input", index: 2, text: "x", clear: true }, 4);
  // 4 clicks + 4 inputs — neither hits the 5 threshold.
     expect(det.shouldWarn()).toBe(0);
   });
@@ -73,22 +99,21 @@ describe("LoopDetector", () => {
   test("normalizeAction distinguishes detect_visual by query", () => {
     const det = new LoopDetector();
  // 4 detect_visual with query A + 4 with query B — neither should hit 5.
-    for (let i = 0; i < 4; i++) det.record({ type: "detect_visual", query: "button" } as AgentAction, i);
-    for (let i = 0; i < 4; i++) det.record({ type: "detect_visual", query: "form" } as AgentAction, i + 4);
+    recordN(det, { type: "detect_visual", query: "button" }, 4);
+    recordN(det, { type: "detect_visual", query: "form" }, 4, 4);
     expect(det.shouldWarn()).toBe(0);
   });
 
   test("normalizeAction distinguishes screenshot by fileName", () => {
     const det = new LoopDetector();
-    for (let i = 0; i < 4; i++) det.record({ type: "screenshot", fileName: "a.jpg" } as AgentAction, i);
-    for (let i = 0; i < 4; i++) det.record({ type: "screenshot", fileName: "b.jpg" } as AgentAction, i + 4);
+    recordN(det, { type: "screenshot", fileName: "a.jpg" } as AgentAction, 4);
+    recordN(det, { type: "screenshot", fileName: "b.jpg" } as AgentAction, 4, 4);
     expect(det.shouldWarn()).toBe(0);
   });
 
   test("same detect_visual query 5× DOES warn (no false negative)", () => {
     const det = new LoopDetector();
-    const action = { type: "detect_visual", query: "button" } as AgentAction;
-    for (let i = 0; i < 5; i++) det.record(action, i);
+    recordN(det, { type: "detect_visual", query: "button" }, 5);
     expect(det.shouldWarn()).toBe(5);
   });
 
@@ -102,9 +127,7 @@ describe("LoopDetector", () => {
   test("normalizes equivalent scroll actions to the same hash", () => {
     const det = new LoopDetector();
  // {type:"scroll", down:true, pages:1} === {type:"scroll"} after normalization
-    for (let i = 0; i < 5; i++) {
-      det.record({ type: "scroll", down: true, pages: 1 } as AgentAction, i);
-    }
+    recordN(det, { type: "scroll", down: true, pages: 1 }, 5);
     expect(det.shouldWarn()).toBe(5);
   });
 });
@@ -215,7 +238,7 @@ describe("runAgentLoop — executeActions branch loop-detector integration", () 
       evaluation_previous_goal: "y",
       memory: "z",
       next_goal: "w",
-      action: Array.from({ length: n }, () => REPEATED_CLICK),
+      action: Array.from({ length: n }, () => ({ ...REPEATED_CLICK })),
     };
   }
 
@@ -242,17 +265,9 @@ describe("runAgentLoop — executeActions branch loop-detector integration", () 
       extractState: vi.fn(async () => makeState()),
       executeActions: vi.fn(async (actions: AgentAction[]) => opts.executeActionsResult(actions)),
       onEvent: (e: LogEvent) => { opts.events.push(e); },
-      settleDelayMs: 0,
+      settleDelay: 0,
       config: {
-        maxSteps: 3,
-        maxActionsPerStep: 10,
-        plannerInterval: 100, // disable periodic planner re-runs
-        maxFailures: 5,
-        enableLoopDetection: true,
-        enableCompaction: false,
-        compactionStepInterval: 1000,
-        compactionCharThreshold: 1_000_000,
-        enableJudge: false,
+        ...BASE_CONFIG,
       },
     };
   }
@@ -347,10 +362,8 @@ describe("runAgentLoop — executeActions branch loop-detector integration", () 
  // Step 3: 1st click → count=11 → no warning.
  // Step 3: 2nd click → count=12 → warning.
  // So warnings should be: 5, 8, 12.
-    expect(warnings.length).toBeGreaterThanOrEqual(2);
     const counts = warnings.map((w) => w.count);
-    expect(counts).toContain(5);
-    expect(counts).toContain(8);
+    expect(counts).toEqual([5, 8, 12]);
   });
 
   test("done paired with a sibling is rejected at parse time (never reaches a dropped step)", async () => {

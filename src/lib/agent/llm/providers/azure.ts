@@ -17,7 +17,7 @@
  * Auth chain: explicit `apiKey` → `AZURE_OPENAI_API_KEY` env var → throw.
  */
 
-import { Auth, type ProviderAuthOption } from "../route/auth";
+import { apiKeyAuth, type ProviderAuthOption } from "../route/auth";
 import { Endpoint } from "../route/endpoint";
 import { Framing } from "../route/framing";
 import { make } from "../route/client";
@@ -32,22 +32,39 @@ export const id = "azure";
 /** Default Azure OpenAI API version (recent stable). */
 export const DEFAULT_API_VERSION = "2024-10-21";
 
+/**
+ * Azure `api-version` is untrusted (Options UI / settings sync / env var) and
+ * flows straight into the request URL's query string. Restrict it to the same
+ * strict allowlist shape as a real Azure API version so it cannot inject extra
+ * query parameters (e.g. `2024-10-21&evil=1`) or steer the request elsewhere.
+ */
+const AZURE_API_VERSION_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])(-(preview|beta))?$/;
+
+function assertValidAzureApiVersion(apiVersion: string): void {
+  if (!AZURE_API_VERSION_RE.test(apiVersion)) {
+    throw new Error(
+      `Invalid Azure API version "${apiVersion}" — must match YYYY-MM-DD or YYYY-MM-DD-(preview|beta)`,
+    );
+  }
+}
+
 export type Config = {
   baseURL?: string;
   resourceName?: string;
   apiVersion?: string;
 } & ProviderAuthOption<"optional">;
 
-const auth = (options: ProviderAuthOption<"optional">) => {
-  if ("auth" in options && options.auth) return options.auth;
-  return Auth.optional("apiKey" in options ? options.apiKey : undefined, "apiKey")
-    .orElse(Auth.config("AZURE_OPENAI_API_KEY"))
-    .pipe(Auth.header("api-key"));
-};
+const auth = (options: ProviderAuthOption<"optional">) =>
+  apiKeyAuth(options, "AZURE_OPENAI_API_KEY", "api-key");
 
 /** Resolve the Azure resource name from config or the environment. */
 function resolveEnvResource(): string | undefined {
   return typeof process !== "undefined" ? process.env?.AZURE_OPENAI_RESOURCE_NAME : undefined;
+}
+
+/** Resolve the Azure API version from the environment (undefined when unavailable). */
+function resolveEnvApiVersion(): string | undefined {
+  return typeof process !== "undefined" ? process.env?.AZURE_OPENAI_API_VERSION : undefined;
 }
 
 /**
@@ -84,9 +101,6 @@ function assertValidAzureResourceName(resource: string): void {
 }
 
 export function configure(input: Config = {}) {
- // (SSRF guard): validate any user-supplied baseURL override before
- // building the route/endpoint.
-  assertSafeUserBaseURL(input.baseURL);
  // Fail closed at config time when no usable endpoint can be derived.
   assertConfigured(input);
 
@@ -101,7 +115,8 @@ export function configure(input: Config = {}) {
     assertValidAzureResourceName(resource);
   }
 
-  const apiVersion = input.apiVersion ?? (typeof process !== "undefined" ? process.env?.AZURE_OPENAI_API_VERSION : undefined) ?? DEFAULT_API_VERSION;
+  const apiVersion = input.apiVersion ?? resolveEnvApiVersion() ?? DEFAULT_API_VERSION;
+  assertValidAzureApiVersion(apiVersion);
   const baseURL = input.baseURL ?? (resource ? `https://${resource}.openai.azure.com` : undefined);
 
  // Validate the FINAL baseURL (whether user-supplied OR resource-derived) so
@@ -143,7 +158,6 @@ export function configure(input: Config = {}) {
  * misconfiguration surfaces regardless of which entry point is used.
  */
 export function toLLMProvider(config: Config & { model: string }): LLMProvider {
-  assertConfigured(config);
   return toLLMProviderBridge({
     providerId: "azure",
     providerDisplayName: "Azure",

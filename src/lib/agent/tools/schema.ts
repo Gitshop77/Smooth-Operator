@@ -11,6 +11,7 @@
  */
 
 import { z } from "zod";
+import { MAX_CUSTOM_TOOL_CODE_LENGTH } from "./registry";
 
 // ─── Safe boolean coercion ─────────────────────────────────────────────────
 //
@@ -23,24 +24,22 @@ import { z } from "zod";
 // and transforms them to a real boolean. Use it anywhere `z.coerce.boolean()`
 // would have been used for a field that the LLM can populate.
 // Accept `z.null()` — some local models emit `null` for booleans.
-const truthy = new Set([true, "true", "True", "TRUE", 1, "1"]);
+// Single source of truth for the accepted truthy spellings — both the `Set`
+// used by the transform and the Zod union literals are derived from `TRUTHY`
+// (plus the parallel falsey literals), so adding a new spelling can't desync
+// the two.
+const TRUTHY = [true, "true", "True", "TRUE", 1, "1"] as const;
+const FALSEY = ["false", "False", "FALSE", "0", 0] as const;
+const truthy = new Set<unknown>(TRUTHY);
 /** Coerce a flexible boolean-like input to a real boolean (no truthy-string trap). */
 export const flexibleBoolean = z
   .union([
     z.boolean(),
     z.null(),
-    z.literal("true"),
-    z.literal("false"),
-    z.literal("True"),
-    z.literal("False"),
-    z.literal("TRUE"),
-    z.literal("FALSE"),
-    z.literal("1"),
-    z.literal("0"),
-    z.literal(1),
-    z.literal(0),
+    ...TRUTHY.map((v) => z.literal(v as never)),
+    ...FALSEY.map((v) => z.literal(v as never)),
   ])
-  .transform((v) => v !== null && truthy.has(v as unknown as boolean | string | number));
+  .transform((v) => v !== null && truthy.has(v));
 
 // ─── Bounded free-text helpers ───────────────────────────────────────────────
 //
@@ -53,7 +52,8 @@ export const flexibleBoolean = z
 // enough for legitimate scripts but still bounded.
 // - SHORT (8 KiB): selectors, URLs, key names, file paths, patterns.
 const MAX_FREE_TEXT_CHARS = 64 * 1024; // 64 KiB
-const MAX_CODE_CHARS = 256 * 1024; // 256 KiB (matches MAX_CUSTOM_TOOL_CODE_LENGTH)
+// 256 KiB — share the single source of truth with the custom-tool code cap.
+const MAX_CODE_CHARS = MAX_CUSTOM_TOOL_CODE_LENGTH;
 const MAX_SHORT_TEXT_CHARS = 8 * 1024; // 8 KiB
 
 /** A free-text field capped to `max` characters after coercion. */
@@ -102,7 +102,7 @@ export const SelectDropdownSchema = z
     text: boundedText(MAX_FREE_TEXT_CHARS).optional().describe("The exact visible text (or value) of the option to select. Use this OR option_index."),
     option_index: z.coerce.number().int().min(0).optional().describe("0-based index of the option (from dropdown_options output). Use this OR text."),
   })
-  .refine((d) => (d.text !== undefined && d.text !== "") || d.option_index !== undefined, {
+  .refine((d) => (d.text !== undefined && d.text.trim() !== "") || d.option_index !== undefined, {
     message: "must provide either text or option_index",
   });
 
@@ -110,7 +110,7 @@ export const SelectDropdownSchema = z
 export const ScrollSchema = z.object({
   type: z.literal("scroll").describe("Scroll the page up or down."),
   down: flexibleBoolean.optional().default(true).describe("true = scroll down (default), false = scroll up."),
-  pages: z.number().min(0).max(100).optional().default(1).describe("Number of viewport-heights to scroll (default 1, capped at 100)."),
+  pages: z.coerce.number().min(0).max(100).optional().default(1).describe("Number of viewport-heights to scroll (default 1, capped at 100)."),
 });
 
 /** Press a single key or a key combination (e.g. Enter, Ctrl+S). */
@@ -507,7 +507,7 @@ export function actionListForPrompt(maxActions: number, visionMode: "disabled" |
   const cached = actionListCache.get(cacheKey);
   if (cached !== undefined) return cached;
   const lines: string[] = [];
-  for (const [, meta] of Object.entries(ACTION_METADATA)) {
+  for (const meta of Object.values(ACTION_METADATA)) {
  // Skip detect_visual when vision mode doesn't use it as a tool
     if (meta.name === "detect_visual" && visionMode !== "adaptive") continue;
     const tag = meta.pageChanging
@@ -611,7 +611,9 @@ export function isEquivalentAction(a: Action, b: Action): boolean {
     case "search_page":
       return (
         a.pattern === (b as Extract<Action, { type: "search_page" }>).pattern &&
-        a.regex === (b as Extract<Action, { type: "search_page" }>).regex
+        a.regex === (b as Extract<Action, { type: "search_page" }>).regex &&
+        (a.case_sensitive ?? false) ===
+          ((b as Extract<Action, { type: "search_page" }>).case_sensitive ?? false)
       );
     case "find_elements":
       return (

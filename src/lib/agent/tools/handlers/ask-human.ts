@@ -26,6 +26,7 @@ export async function handleAskHuman(
  // input-type time.)
   try {
     const { askHuman } = await import("../../human-interaction");
+    const questionPreview = action.question.slice(0, LIMITS.askHumanQuestionChars);
     const isPassword = (action.mode ?? "input") === "password";
     const response = await askHuman({
       mode: isPassword ? "password" : "input",
@@ -35,7 +36,7 @@ export async function handleAskHuman(
       return {
         action,
         success: false,
-        message: `User dismissed the question: ${action.question.slice(0, LIMITS.askHumanQuestionChars)}`,
+        message: `User dismissed the question: ${questionPreview}`,
         extractedContent: `User dismissed the question. No answer provided.`,
       };
     }
@@ -74,7 +75,7 @@ export async function handleAskHuman(
       action,
       success: true,
       message: `User answered: ${answer.slice(0, LIMITS.askHumanAnswerChars)}`,
-      extractedContent: `User's answer to "${action.question}": ${answer}`,
+      extractedContent: `User's answer to "${questionPreview}": ${answer}`,
     };
   } catch (e) {
     return {
