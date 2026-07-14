@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+# Local AI / editor state — never tracked (force push ignores .gitignore, so keep this explicit)
+.claude
+
 # Build outputs
 .next/
 # esbuild output — entry bundles + content-hashed chunks (ESM code-splitting).
