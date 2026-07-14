@@ -31,6 +31,7 @@ import {
   ActionSchema,
   ACTION_METADATA,
   AgentOutputSchema,
+  AskHumanSchema,
   isEquivalentAction,
 } from "../src/lib/agent/tools/schema";
 import { getFormatInstructions } from "../src/lib/agent/tools/registry";
@@ -246,12 +247,12 @@ describe("ask_human password mode", () => {
   });
 
   test("password mode AskHumanSchema field defaults to 'input'", () => {
- // Sanity: the schema accepts the action without mode (default) AND with
- // explicit "password" mode.
+ // The schema accepts the action without mode (default) AND with explicit
+ // "password" mode — a regression that made mode required would fail here.
     const withoutMode = { type: "ask_human", question: "?" } as AgentAction;
     const withPassword = { type: "ask_human", question: "?", mode: "password" } as AgentAction;
-    expect(withoutMode).toBeDefined();
-    expect(withPassword).toBeDefined();
+    expect(AskHumanSchema.parse(withoutMode).mode).toBe("input");
+    expect(AskHumanSchema.parse(withPassword).mode).toBe("password");
   });
 });
 

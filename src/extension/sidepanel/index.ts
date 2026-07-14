@@ -173,6 +173,18 @@ openOptionsLink?.addEventListener("click", (e) => {
 
 openCockpitBtn?.addEventListener("click", async () => {
   const cockpitUrl = await getCockpitUrl();
+ // An unconfigured Cockpit URL yields ""; guard before the no-cors probe so
+ // the user gets the setup hint instead of a swallowed chrome.tabs.create({url:""}).
+  if (!cockpitUrl) {
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: "icons/icon.png",
+      title: "Open Cowork — Cockpit not configured",
+      message: "Set the Cockpit URL in Settings, then start it with:\n  npm run dev:cockpit",
+      priority: 2,
+    }, () => {});
+    return;
+  }
  // Check if the cockpit is actually running BEFORE opening the tab,
  // so we can show a helpful notification instead of a dead page.
   let isRunning = false;

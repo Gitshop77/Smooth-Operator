@@ -61,11 +61,17 @@ export function makeOpenAIChatFacade<P extends Protocol<any, any, any, any> = Pr
  // (SSRF guard): validate any user-supplied baseURL override before
  // building the route/endpoint. The trusted default is exempt.
     assertSafeUserBaseURL(input.baseURL, def.id);
+    // Split the (possibly path-prefixed) base URL into origin + path-prefix and
+    // re-attach the prefix to `def.path` so `buildURL`'s `new URL(path, base)`
+    // (which replaces the base path for a leading-slash path) doesn't drop a
+    // required segment like `/v1` (would yield a 404/401).
+    const url = new URL(input.baseURL ?? def.defaultBaseURL);
+    const prefix = url.pathname.replace(/\/+$/, "");
     const route = make({
       id: def.routeId,
       provider: def.id,
       protocol: def.protocol,
-      endpoint: Endpoint.path(def.path, { baseURL: input.baseURL ?? def.defaultBaseURL }),
+      endpoint: Endpoint.path(`${prefix}${def.path}`, { baseURL: url.origin }),
       auth: auth(input),
       framing: Framing.sse,
     });

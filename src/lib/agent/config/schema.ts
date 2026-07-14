@@ -29,16 +29,7 @@
  */
 
 import { z } from "zod";
-
-/**
- * Matches a group that contains a quantifier and is itself immediately
- * quantified again — the classic catastrophic-backtracking shape, e.g.
- * `(a+)+`, `(.*)*`, `(\d{2,})+`. Used to reject pathological `regex` evaluator
- * patterns before they can hang the evaluator (ReDoS). The inner
- * `[*+{]` requires a real quantifier inside the group; `?` after a group is
- * benign (optional/lazy) and intentionally not flagged.
- */
-const CATASTROPHIC_REGEX = /\((?:[^()\\]|\\.)*[*+{]\s*\)\s*[*+{]/;
+import { hasNestedQuantifier } from "@/lib/agent/tools/handlers/search-page";
 
 // ─── Sub-schemas ────────────────────────────────────────────────────────────
 
@@ -66,12 +57,14 @@ const StringMatchSchema = z
         });
         return;
       }
- // Reject obvious catastrophic-backtracking patterns so an
- // attacker-influenced config cannot hang the evaluator (ReDoS).
-      if (CATASTROPHIC_REGEX.test(val.ref)) {
+ // Reject catastrophic-backtracking patterns (nested quantifiers AND
+ // ambiguous alternation such as `(a|aa)+`) so an attacker-influenced
+ // config cannot hang the evaluator (ReDoS). `hasNestedQuantifier` is the
+ // shared, established guard used elsewhere in the agent tooling.
+      if (hasNestedQuantifier(val.ref)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: "regex ref looks like a catastrophic-backtracking pattern",
+          message: "regex ref is a catastrophic-backtracking pattern",
           path: ["ref"],
         });
       }

@@ -269,7 +269,7 @@ function getName(el: HTMLElement, labelMap: Map<string, HTMLLabelElement>): stri
  // Headings — text content (truncated).
   if (tag.match(/^h[1-6]$/)) {
     const text = el.textContent;
-    if (text?.trim()) return text.trim().substring(0, NAME_MAX_LENGTH);
+    if (text?.trim()) return escapeAttributeValue(text.trim()).substring(0, NAME_MAX_LENGTH);
   }
 
  // Images — no name (alt already checked).
@@ -373,10 +373,7 @@ function buildTree(
 
   if (included) {
     const role = getRole(el);
-    const displayName = name
-      .replace(/\s+/g, " ")
-      .substring(0, NAME_MAX_LENGTH)
-      .replace(/"/g, '\\"');
+    const displayName = escapeAttributeValue(name).substring(0, NAME_MAX_LENGTH);
     const indent = " ".repeat(depth);
 
  // Get or assign ref ID (with WeakRef + reverse WeakMap for dedup).
@@ -430,7 +427,7 @@ function buildTree(
       for (const option of Array.from(select.options)) {
         let optLine = " ".repeat(depth + 1) + "option";
         const optText = option.textContent?.trim() || "";
-        if (optText) optLine += ` "${optText.replace(/\s+/g, " ").substring(0, NAME_MAX_LENGTH).replace(/"/g, '\\"')}"`;
+        if (optText) optLine += ` "${escapeAttributeValue(optText).substring(0, NAME_MAX_LENGTH)}"`;
         if (option.selected) optLine += " (selected)";
         if (option.value && option.value !== optText) optLine += ` value="${escapeAttributeValue(option.value)}"`;
         lines.push(optLine);

@@ -122,7 +122,7 @@ export function buildAttrs(el: HTMLElement): Record<string, string> {
         if (!sensitive) val = el.value;
       } else {
         const a = el.getAttribute("value");
-        if (a !== null) val = a;
+        if (a !== null && !sensitive) val = a;
       }
     } else {
       val = el.getAttribute(name);

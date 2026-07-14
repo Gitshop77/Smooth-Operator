@@ -92,13 +92,19 @@ function configure(profile: OpenAICompatibleProfile, input: Config = {}) {
   assertSafeUserBaseURL(input.baseURL, profile.provider);
   const baseURL = input.baseURL ?? profile.baseURL;
   const apiKey = "apiKey" in input ? input.apiKey : undefined;
+  // Split the (possibly path-prefixed) base URL into origin + path-prefix and
+  // re-attach the prefix to `PATH` so `buildURL`'s `new URL(path, base)` (which
+  // replaces the base path for a leading-slash path) doesn't drop a required
+  // segment like `/v1` (would yield a 404/401 on every curated profile).
+  const url = new URL(baseURL);
+  const prefix = url.pathname.replace(/\/+$/, "");
   const route = make({
  // Fold the (effective) baseURL AND credentials into the route id so distinct
  // endpoints/credentials don't clobber each other in the global route registry.
     id: `openai-compatible:${profile.provider}:${routeKey(`${baseURL}::${apiKey ?? ""}`)}`,
     provider: profile.provider,
     protocol: OpenAICompatibleChat.protocol,
-    endpoint: Endpoint.path(PATH, { baseURL }),
+    endpoint: Endpoint.path(`${prefix}${PATH}`, { baseURL: url.origin }),
     auth: auth(input),
     framing: Framing.sse,
   });

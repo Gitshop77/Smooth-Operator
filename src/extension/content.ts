@@ -78,22 +78,14 @@ interface ErrorResponse {
 type Response<T = unknown> = OkResponse<T> | ErrorResponse;
 
 /**
- * Whether the persistent-debug-highlight overlay is enabled. It's a debug aid
- * (shows every clicked element's box + the Set-of-Marks labels) and must NOT
- * be active in production by default — it's gated behind an explicit opt-in so
- * the production content script doesn't register/run the overlay unconditionally
- * (FULL-REVIEW finding 32). Flip via `globalThis.__openCoworkDebug = true`
- * (e.g. from the side panel's debug toggle) to enable it.
+ * The persistent-debug-highlight overlay is a debug aid (shows every clicked
+ * element's box + the Set-of-Marks labels). It is gated behind an explicit
+ * opt-in: the side panel's debug toggle sends a `SET_DEBUG_HIGHLIGHT` message
+ * to this content script, and the handler below applies it on receipt — the
+ * overlay is never registered/run unconditionally.
  */
-const DEBUG_HIGHLIGHT_ENABLED =
-  (globalThis as { __openCoworkDebug?: boolean }).__openCoworkDebug === true;
-
-// Debug-gated logger: writes diagnostics to the shared devtools console only
-// when the debug overlay is enabled. Production keeps a clean console (better
-// stealth), debug mode retains the diagnostics.
-const log: (...args: unknown[]) => void = DEBUG_HIGHLIGHT_ENABLED
-  ? console.warn.bind(console, "[content]")
-  : () => {};
+// Diagnostic logger for content-script init failures.
+const log: (...args: unknown[]) => void = console.warn.bind(console, "[content]");
 
 /** Entry point. Idempotent — re-injection is a no-op. */
 (() => {
@@ -300,13 +292,10 @@ const log: (...args: unknown[]) => void = DEBUG_HIGHLIGHT_ENABLED
         }
 
         case "SET_DEBUG_HIGHLIGHT": {
- // toggle persistent highlight mode — but only when the debug overlay
- // is explicitly enabled (see DEBUG_HIGHLIGHT_ENABLED). In production
- // this handler is a no-op so the overlay isn't registered/run
- // unconditionally (FULL-REVIEW finding 32).
-          if (DEBUG_HIGHLIGHT_ENABLED) {
-            setPersistentHighlight((msg as { enabled?: boolean }).enabled ?? false);
-          }
+ // toggle persistent highlight mode. The message itself is the explicit
+ // opt-in (sent by the side panel's debug toggle), so the overlay is only
+ // registered when the operator enables it — never unconditionally.
+          setPersistentHighlight((msg as { enabled?: boolean }).enabled ?? false);
           sendResponse({ ok: true });
           return false;
         }

@@ -380,7 +380,7 @@ function downloadJson(filename: string, data: unknown) {
   a.href = url;
   a.download = filename;
   a.click();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 /* Allowed values for enum-style settings. Imported values are constrained to
@@ -1213,8 +1213,8 @@ export function SettingsView() {
           <DialogHeader>
             <DialogTitle>Clear browsing history?</DialogTitle>
             <DialogDescription>
-              This permanently removes browsing history for this session. This
-              action cannot be undone.
+              This local-only view does not store browsing history, so there is
+              nothing to remove.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

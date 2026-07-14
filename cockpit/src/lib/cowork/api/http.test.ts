@@ -196,6 +196,11 @@ describe('isSsrfSafeUrl', () => {
     expect(isSsrfSafeUrl('http://[::ffff:ac10:0000]/')).toBe(false);
     expect(isSsrfSafeUrl('http://[::ffff:c0a8:0001]/')).toBe(false);
     expect(isSsrfSafeUrl('http://[::ffff:127.0.0.1]/')).toBe(false);
+ // Fully-expanded IPv4-mapped IPv6 literals (8-hextet form) must also be
+ // blocked — `0:0:0:0:0:ffff:a9fe:a9fe` === ::ffff:169.254.169.254 (cloud
+ // metadata) and `0:0:0:0:0:ffff:7f00:1` === ::ffff:127.0.0.1 (loopback).
+    expect(isSsrfSafeUrl('http://[0:0:0:0:0:ffff:a9fe:a9fe]/')).toBe(false);
+    expect(isSsrfSafeUrl('http://[0:0:0:0:0:ffff:7f00:1]/')).toBe(false);
   });
 
   it('allows public hosts', () => {
@@ -213,13 +218,16 @@ describe('isSsrfSafeUrl', () => {
 // ---------------------------------------------------------------------------
 // Storage-route URL contract (tabs / bookmarks).
 //
-// IMPORTANT: storage routes deliberately do NOT apply `isSsrfSafeUrl`. Stored
-// URLs are opened client-side in the browser, never fetched server-side, so a
-// developer's `http://localhost:3000` bookmark must stay valid and cloud
-// metadata / loopback / RFC1918 hosts are ACCEPTED at storage time. What the
-// routes enforce is the *scheme* (http/https only) via `validateHttpUrl`, which
-// blocks `javascript:` / `data:` stored-XSS. These tests drive the real route
-// handlers (db mocked) and pin that scheme-only contract.
+// IMPORTANT: the *tabs* storage route deliberately does NOT apply
+// `isSsrfSafeUrl` — stored URLs are opened client-side in the browser, never
+// fetched server-side, so a developer's `http://localhost:3000` bookmark must
+// stay valid and cloud metadata / loopback / RFC1918 hosts are ACCEPTED at
+// storage time. The *bookmarks* route, by contrast, DOES apply `isSsrfSafeUrl`
+// at storage time and rejects those same hosts with 400. What both routes
+// enforce is the *scheme* (http/https only) via `validateHttpUrl`, which blocks
+// `javascript:` / `data:` stored-XSS. These tests drive the real route handlers
+// (db mocked) and pin that contract — tabs stays scheme-only, bookmarks is
+// SSRF-gated.
 // ---------------------------------------------------------------------------
 describe('stored-URL scheme boundary — tabs route', () => {
   it('accepts http://169.254.169.254 (cloud metadata) with 201 — storage is scheme-only, not SSRF-gated', async () => {

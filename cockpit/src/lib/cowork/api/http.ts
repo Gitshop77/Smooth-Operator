@@ -141,12 +141,14 @@ export function serverError(error: string): Response {
  * SSRF BOUNDARY: this function ONLY checks the URL *scheme*. It deliberately
  * does NOT reject loopback / RFC1918 / link-local / cloud-metadata hosts, so
  * legitimate developer bookmarks such as `http://localhost:3000` or
- * `http://127.0.0.1:8080` keep working. That is correct for *storage* routes:
- * stored URLs are opened client-side in the browser, never fetched
- * server-side, so they cannot become an SSRF sink. The separate
+ * `http://127.0.0.1:8080` keep working. That is correct for *storage* routes
+ * where the stored URL is opened client-side in the browser, never fetched
+ * server-side — the `tabs` route intentionally stays scheme-only for exactly
+ * this reason. The `bookmarks` route, however, additionally applies
+ * `isSsrfSafeUrl` at storage time, so it IS SSRF-gated. The separate
  * `isSsrfSafeUrl` guard is reserved for the point where a URL is actually
- * *fetched or launched from the server* (storage routes must NOT call it).
- * The signature of `validateHttpUrl` is stable. */
+ * *fetched or launched from the server*. The signature of `validateHttpUrl`
+ * is stable. */
 export function validateHttpUrl(url: string): Response | null {
   try {
     const parsed = new URL(url);
@@ -227,6 +229,21 @@ function isRestrictedHost(host: string): boolean {
         }
       }
       if (isRestrictedHost(dotted)) return true;
+    }
+ // Fully-expanded IPv4-mapped IPv6 form: `0:0:0:0:0:ffff:WWXX:YYZZ`
+ // (e.g. `0:0:0:0:0:ffff:a9fe:a9fe` === ::ffff:169.254.169.254, the cloud
+ // metadata address). The abbreviated `::ffff:` prefix check above misses it
+ // because the leading zeros are written out, so the embedded IPv4 is
+ // classified here. A real HTTP client resolves these to loopback / private /
+ // metadata, so they must be rejected too.
+    const mapped = /^0(?::0){4}:ffff:([0-9a-f]+):([0-9a-f]+)$/i.exec(host);
+    if (mapped) {
+      const hi = parseInt(mapped[1], 16);
+      const lo = parseInt(mapped[2], 16);
+      if (!Number.isNaN(hi) && !Number.isNaN(lo)) {
+        const dotted = `${(hi >>> 8) & 0xff}.${(hi & 0xff)}.${(lo >>> 8) & 0xff}.${lo & 0xff}`;
+        if (isRestrictedHost(dotted)) return true;
+      }
     }
  // IPv6 link-local (fe80:/10) and unique-local (fc00:/7). Classify by the
  // first hextet's bitmask rather than by string prefixes, so the WHOLE

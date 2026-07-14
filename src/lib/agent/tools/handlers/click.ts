@@ -173,9 +173,13 @@ export async function handleClick(
  // Strategy 2: Native el.click() — the standard DOM click.
   if (!clicked) {
     try {
-      el.click();
-      clicked = true;
-      strategyUsed = "native";
+      if (el.isConnected) {
+        el.click();
+        clicked = true;
+        strategyUsed = "native";
+      } else {
+        errors.push("element became detached before native click");
+      }
     } catch (e) {
       errors.push(`native click failed: ${(e as Error).message}`);
     }

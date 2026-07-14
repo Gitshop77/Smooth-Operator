@@ -17,7 +17,7 @@ Open Cowork is an open-source agentic browser-control Chrome extension (MV3). It
 
 ## Design System
 
-- **Palette**: Terracotta on Warm Charcoal — `#262624` (void) → `#30302E` (surface) → `#353330` (raised) with `#D97757` (terracotta) accent. Semantic: muted green (success), muted warm red (error), violet (planner), sky blue (navigator/step), teal (observe).
+- **Palette**: Signal Indigo on deep-ink — `#14161C` (void) → `#1C1F27` (surface) → `#232732` (raised) with `#6C5CE7` (signal indigo) accent. Semantic: muted green (success), muted warm red (error), violet (planner), sky blue (navigator/step), teal (observe).
 - **Typography**: System mono (`ui-monospace, SF Mono, Menlo, Consolas`) for telemetry/data in the extension; JetBrains Mono in the cockpit (loaded via `next/font/google`). System sans for body text in both.
 - **Signature element**: Monospace activity log in the side panel — color-coded rows (step/observe/reason/act/ok/err/info) with a live pulsing dot indicator. (No step-rail timeline — the log is a flat timestamped list.)
 - **Dark-first**: Both the extension and cockpit are designed dark-first, with light variants via `prefers-color-scheme`.
@@ -47,7 +47,7 @@ src/lib/agent/              Core agentic engine (framework-agnostic TypeScript)
   persistent-memory.ts      Per-site memory across sessions
   html-summarizer.ts        HTML → text summarization
   runtime.ts                Runtime context
-  llm/                      LLM provider layer (4-layer architecture, 14 providers)
+  llm/                      LLM provider layer (4-layer architecture, 16 providers)
     provider.ts             LLMProvider interface + registry
     provider-bridge.ts      Shared toLLMProvider bridge
     pricing.ts              Live catalog-backed pricing (models.dev/api.json via catalog.ts; no static table)
@@ -116,7 +116,7 @@ src/extension/              Chrome extension (bundled via esbuild)
   provider-config.ts        Builds LLMProvider from chrome.storage config (async, patches supportsVision per-model)
   provider-config-map.ts    Provider ID → models.dev catalog ID mapping
   shared.ts                 $, escapeHtml, DEFAULT_COCKPIT_URL, COCKPIT_URL_STORAGE_KEY, getCockpitUrl()
-  sidepanel.html + .css     Side panel UI (terracotta on warm charcoal, instrument-stack layout, flat timestamped log)
+  sidepanel.html + .css     Side panel UI (signal indigo on deep-ink, instrument-stack layout, flat timestamped log)
   sidepanel.ts              esbuild entry → sidepanel/index.ts
   sidepanel/                Side panel modules
     index.ts                Init + message listeners + chrome.runtime.connect keepalive port
@@ -125,7 +125,7 @@ src/extension/              Chrome extension (bundled via esbuild)
     log-renderer.ts         Activity log + thinking panel rendering (escapeHtml on all dynamic content)
     takeover.ts             Takeover banner show/resume
     human-interact.ts       ask-human modal + password prompt
-  options.html + .css      Settings page (left sidebar rail, 10 tabs, terracotta active indicator)
+  options.html + .css      Settings page (left sidebar rail, 10 tabs, indigo active indicator)
   options.ts                esbuild entry → options/index.ts
   options/                  Options modules (10 tabs)
     index.ts                Tab switching + save/load
@@ -149,7 +149,7 @@ src/extension/              Chrome extension (bundled via esbuild)
     constants.ts            Model URLs (MODEL_REPO_URL + MODEL_BASE_URL), token IDs, architecture
     types.ts                Vision types
 
-tests/                      Vitest test suite (640 test() calls across 29 files)
+tests/                      Vitest test suite (778 test() calls across 42 files)
 
 cockpit/                    Next.js 16 dashboard (read + create + delete over Prisma/SQLite — includes POST create and DELETE erase endpoints for history, form memory, site memory, and chat)
   prisma/schema.prisma      SQLite schema (22 models: Tab, Workspace, Session, Task, AgentTrust, SecurityEvent, …)
@@ -203,7 +203,7 @@ All scripts use npm. A single `npm install && npm run dev` bootstraps and starts
 - `npm run dev:cockpit` — Next.js cockpit dev server on port 3000 (bound to `127.0.0.1`)
 - `npm run dev:events` — cowork-events mini-service on port 3003 (`tsx watch`)
 - `npm run lint` — ESLint (root)
-- `npm run test` — Vitest suite (640 test() calls across 29 files)
+- `npm run test` — Vitest suite (778 test() calls across 42 files)
 - `npm run test:watch` — Vitest watch mode
 - `npm run test:coverage` — Vitest with coverage
 - `npm run build:extension` — esbuild → `chrome-extension/`
@@ -250,7 +250,7 @@ The `postinstall` hook auto-installs `cockpit/` and `mini-services/cowork-events
 
 ## Testing
 
-Run `npm run test` to execute the Vitest test suite (640 test() calls across 29 files):
+Run `npm run test` to execute the Vitest test suite (778 test() calls across 42 files):
 
 - `tests/unit.test.ts` — Output parser, loop detector, pricing, compaction, secrets, schema coercion
 - `tests/security.test.ts` — Sanitization, injection classifier, domain allowlist, error taxonomy, mode enforcement, secret-leak prevention

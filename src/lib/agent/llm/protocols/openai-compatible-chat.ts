@@ -26,5 +26,3 @@ export const protocol: Protocol<OpenAIChat.OpenAIChatBody, string, { type: strin
   },
   stream: OpenAIChat.protocol.stream,
 };
-
-export * as OpenAICompatibleChat from "./openai-compatible-chat";

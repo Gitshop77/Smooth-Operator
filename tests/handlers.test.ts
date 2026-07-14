@@ -15,7 +15,6 @@
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import type { ActionContext } from "../src/lib/agent/tools/handlers/types";
-import type { Action } from "../src/lib/agent/tools/schema";
 import { makeState, installLocalStorageStub, restoreLocalStorageStub } from "./helpers";
 
 // Visual/feedback helpers that schedule timers or need real layout — stub them

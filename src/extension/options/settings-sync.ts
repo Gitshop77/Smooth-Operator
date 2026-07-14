@@ -335,16 +335,13 @@ async function doSaveSettings(): Promise<boolean> {
     });
   }
 
+  const droppedDomains: string[] = [];
   const parseDomains = (text: string): string[] => {
     const lines = text.split("\n").map((d) => d.trim()).filter((d) => d.length > 0);
     const valid: string[] = [];
-    const invalid: string[] = [];
     for (const line of lines) {
       if (isHostname(line)) valid.push(line);
-      else invalid.push(line);
-    }
-    if (invalid.length) {
-      console.warn("[options] ignoring invalid domain entries (expected bare hostnames, optionally `*.`):", invalid);
+      else droppedDomains.push(line);
     }
     return valid;
   };
@@ -435,6 +432,12 @@ async function doSaveSettings(): Promise<boolean> {
         });
       }
       showSaved();
+      if (droppedDomains.length) {
+        void alertModal({
+          title: "Invalid domain entries ignored",
+          message: "The following domain lines were not valid bare hostnames and were dropped:\n" + droppedDomains.join("\n"),
+        });
+      }
       resolve(true);
     });
   });

@@ -14,12 +14,6 @@ export interface NavItem {
   label: string;
   icon: LucideIcon;
   description?: string;
-  /**
- * True for views that depend on a live extension connection (browser tabs,
- * workspaces, network, snapshots, devtools). The shell renders an
- * <ExtensionOnly> standby state for these when no extension data is present.
- */
-  extensionOnly?: boolean;
 }
 
 export interface NavGroup {
@@ -37,11 +31,11 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: "errors", label: "Errors & Incidents", icon: AlertTriangle, description: "Errors & incidents" },
       { id: "cost", label: "Cost & Usage", icon: CircleDollarSign, description: "Spend & token usage" },
       { id: "sessions", label: "Sessions", icon: Boxes, description: "Isolated sessions" },
-      { id: "tabs", label: "Tabs", icon: AppWindow, description: "Open browser tabs", extensionOnly: true },
-      { id: "workspaces", label: "Workspaces", icon: LayoutGrid, description: "Tab collections", extensionOnly: true },
-      { id: "network", label: "Network", icon: Activity, description: "Live requests", extensionOnly: true },
-      { id: "snapshots", label: "Snapshots", icon: ListTree, description: "AX tree", extensionOnly: true },
-      { id: "devtools", label: "DevTools", icon: TerminalSquare, description: "Console logs", extensionOnly: true },
+      { id: "tabs", label: "Tabs", icon: AppWindow, description: "Open browser tabs" },
+      { id: "workspaces", label: "Workspaces", icon: LayoutGrid, description: "Tab collections" },
+      { id: "network", label: "Network", icon: Activity, description: "Live requests" },
+      { id: "snapshots", label: "Snapshots", icon: ListTree, description: "AX tree" },
+      { id: "devtools", label: "DevTools", icon: TerminalSquare, description: "Console logs" },
     ],
   },
   {

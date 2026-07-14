@@ -27,6 +27,13 @@ export async function handlePressAndHold(
  // debugger isn't available (in-page demo, tests, or extension
  // contexts where the user hasn't accepted the debugger infobar).
   const el = resolveElement(state, action.index);
+  if (!el || !el.isConnected) {
+    return {
+      action,
+      success: false,
+      message: `element [${action.index}] is detached (page may have changed — extract state again)`,
+    };
+  }
   highlightElement(el, `press_and_hold [${action.index}]`);
   safeScrollIntoView(el);
   await sleep(TIMINGS.clickScrollIntoView);

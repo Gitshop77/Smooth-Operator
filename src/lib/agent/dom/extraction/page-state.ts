@@ -229,12 +229,12 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
 
  // Non-interactive: descend without emitting a tag line.
   for (const child of Array.from(el.childNodes)) {
-    walkNode(child, depth, acc);
+    walkNode(child, depth + 1, acc);
   }
   const sr = getShadowRoot(el);
   if (sr) {
     for (const child of Array.from(sr.childNodes)) {
-      walkNode(child, depth, acc);
+      walkNode(child, depth + 1, acc);
     }
   }
 }

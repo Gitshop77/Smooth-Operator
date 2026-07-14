@@ -13,7 +13,6 @@ vi.mock('@/lib/db', () => ({
 }));
 
 import { GET, POST } from '@/app/api/cowork/tabs/route';
-import { db } from '@/lib/db';
 
 function getReq(query = ''): any {
   return { nextUrl: { searchParams: new URLSearchParams(query) } };

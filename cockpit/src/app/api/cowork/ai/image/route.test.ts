@@ -22,9 +22,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // environment would shadow it and break the `X-Cowork-Token` assertion).
 // Scoped via vi.stubEnv so it is restored after the suite and does not leak
 // into other test files.
-vi.stubEnv('COWORK_UI_TOKEN', '');
-vi.stubEnv('COWORK_EVENT_TOKEN', 'test-image-token');
-
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
 
@@ -51,6 +48,12 @@ function jsonReq(body: unknown, headers: Record<string, string> = {}): any {
 }
 
 beforeEach(() => {
+  // `getCoworkEventsToken()` prefers COWORK_UI_TOKEN and only falls back to
+  // COWORK_EVENT_TOKEN. Stub the UI token empty so the service-to-service token
+  // below is the one actually forwarded (otherwise a stray COWORK_UI_TOKEN in the
+  // environment would shadow it and break the `X-Cowork-Token` assertion).
+  vi.stubEnv('COWORK_UI_TOKEN', '');
+  vi.stubEnv('COWORK_EVENT_TOKEN', 'test-image-token');
   fetchMock.mockReset();
 });
 afterEach(() => {

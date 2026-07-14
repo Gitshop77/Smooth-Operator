@@ -39,9 +39,10 @@ export async function GET(req: NextRequest): Promise<Response> {
       throw e;
     }
  // `?total=0` skips the extra full-table count() (useful for paginated
- // `after` loads); otherwise the grand total is returned as before.
+ // `after` loads); the client must treat a `-1` total as "unknown" rather
+ // than an exact count. Otherwise the grand total is returned as before.
     const wantTotal = req.nextUrl.searchParams.get('total') !== '0';
-    const total = wantTotal ? await db.pinboard.count() : pinboards.length;
+    const total = wantTotal ? await db.pinboard.count() : -1;
  // Include the `items` relation count so the dashboard can show
  // `itemCount` without a second round-trip.
     const projected = pinboards.map((pb) => ({

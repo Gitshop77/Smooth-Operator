@@ -196,7 +196,16 @@ function normalizeStrictSchema(node: unknown, depth = 0): unknown {
  // 3. Recurse into child schemas (now including `$defs`).
   for (const key of ["properties", "items", "anyOf", "allOf", "oneOf", "not", "$defs"]) {
     const child = obj[key];
-    if (Array.isArray(child)) obj[key] = child.map((c) => normalizeStrictSchema(c, depth + 1));
+    if (key === "$defs" && child && typeof child === "object" && !Array.isArray(child)) {
+      // `$defs` is a dict of named subschemas — descend into each *value* so
+      // referenced definitions also get strict-normalized (additionalProperties:
+      // false + required). Treating the dict as one node was a no-op, leaving
+      // referenced $refs un-normalized and OpenAI strict mode rejecting with 400.
+      const defs = child as Record<string, unknown>;
+      obj[key] = Object.fromEntries(
+        Object.entries(defs).map(([k, v]) => [k, normalizeStrictSchema(v, depth + 1)]),
+      );
+    } else if (Array.isArray(child)) obj[key] = child.map((c) => normalizeStrictSchema(c, depth + 1));
     else if (child && typeof child === "object") obj[key] = normalizeStrictSchema(child, depth + 1);
   }
   return obj;
@@ -416,5 +425,3 @@ export const protocol: Protocol<OpenAIChatBody, string, { type: string; content?
     },
   },
 };
-
-export * as OpenAIChat from "./openai-chat";

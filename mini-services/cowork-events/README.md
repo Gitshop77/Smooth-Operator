@@ -192,9 +192,15 @@ Socket.io connections require the same secret in the handshake:
 
 ```typescript
 io('/?XTransformPort=3003', {
-  auth: { token: process.env.COWORK_EVENT_TOKEN },
+  auth: { token: process.env.COWORK_UI_TOKEN ?? process.env.COWORK_EVENT_TOKEN },
 });
 ```
+
+The socket handshake authenticates against `SOCKET_SECRET` (= `COWORK_UI_TOKEN`,
+falling back to `COWORK_EVENT_TOKEN`), while the HTTP `/emit/` routes
+authenticate against `SHARED_SECRET` (= `COWORK_EVENT_TOKEN`). Use
+`COWORK_UI_TOKEN` here so the browser-facing secret stays distinct from the
+service-to-service secret.
 
 The token can be supplied in either `socket.handshake.auth.token` **or**
 `socket.handshake.query.token`. **Unauthenticated connections are

@@ -337,7 +337,7 @@ export async function formatCustomToolsBlock(): Promise<string> {
  // pattern matches a name surrounded by quotes rather than the whole string.
 const CUSTOM_TOOL_NAME_PATTERN = CUSTOM_TOOL_NAME_REGEX.source.replace(/^\^|\$$/g, "");
 const CUSTOM_TOOL_CALL_REGEX = new RegExp(
-  "__opencowork_custom_tool(\\s*['\"](" + CUSTOM_TOOL_NAME_PATTERN + ")['\"]\\s*)",
+  "__opencowork_custom_tool\\s*\\(\\s*['\"](" + CUSTOM_TOOL_NAME_PATTERN + ")['\"]\\s*\\)",
   "g",
 );
 

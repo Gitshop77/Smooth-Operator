@@ -155,6 +155,21 @@ function hostnameMatches(hostname: string, domain: string): boolean {
   return hostname === domain || hostname.endsWith(`.${domain}`);
 }
 
+/**
+ * Single-label domains (no '.') like a bare TLD (`com`) would, via
+ * `hostnameMatches`, match *every* host under that TLD (`.com` → matches all
+ * of `evil.com`, `bank.com`, …) — an accidental over-match that would inject a
+ * custom skill's (untrusted, prompt-flowing) instructions onto far more sites
+ * than intended. Reject them for the subdomain-matching fallback, but keep a
+ * small allowlist of legitimate single-label hosts (e.g. `localhost`) so
+ * local-dev skills still resolve. A dotted domain (or exact-match single label)
+ * passes.
+ */
+const LOCAL_SINGLE_LABEL_HOSTS = new Set(["localhost"]);
+function isValidSkillDomain(domain: string): boolean {
+  return domain.includes(".") || LOCAL_SINGLE_LABEL_HOSTS.has(domain);
+}
+
 /** Storage key under which custom skills are persisted. */
 const CUSTOM_SKILLS_STORAGE_KEY = "open_cowork_custom_skills";
 
@@ -254,7 +269,7 @@ function normalizeCustomSkill(raw: unknown): DomainSkill | null {
         .replace(/^\./, "")
         .replace(/\/+$/, ""),
     )
-    .filter((d) => d.length > 0)
+    .filter((d) => d.length > 0 && isValidSkillDomain(d))
     .slice(0, SKILL_LIMITS.domains);
   if (domains.length === 0) return null; // a skill with no domain can never match
 

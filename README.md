@@ -109,6 +109,7 @@ The extension talks to your LLM provider directly.
 | **OpenAI** | `gpt-5.5` | every gpt-5 model | [platform.openai.com](https://platform.openai.com/api-keys) |
 | **Anthropic** | `claude-sonnet-5`, `claude-opus-4.8` | every Claude model | [console.anthropic.com](https://console.anthropic.com/) |
 | **Google Gemini** | `gemini-3.5-flash`, `gemini-3.1-pro` | every Gemini model | [aistudio.google.com](https://aistudio.google.com/apikey) |
+| **Google (Vertex)** | `gemini-3.5-flash`, `gemini-3.1-pro` | every Gemini model | [console.cloud.google.com/vertex-ai](https://console.cloud.google.com/vertex-ai) |
 | **DeepSeek** | `deepseek-v4-pro`, `deepseek-v4-flash` | DeepSeek-VL2 (V4 itself doesn't have confirmed vision yet) | [platform.deepseek.com](https://platform.deepseek.com) |
 | **Qwen / Alibaba** | `qwen3.6`, `qwen3-vl` | qwen3-vl | [dashscope.aliyun.com](https://dashscope.aliyun.com) |
 | **Groq** | `openai/gpt-oss-120b`, `qwen/qwen3.6-27b` | `llama-4-scout-17b-16e-instruct`, `llama-4-maverick-17b-128e-instruct` | [console.groq.com](https://console.groq.com) |
@@ -118,6 +119,7 @@ The extension talks to your LLM provider directly.
 | **OpenRouter** | 300+ models | routes to any vision model | [openrouter.ai](https://openrouter.ai) |
 | **LiteLLM** | whatever your proxy routes to | varies by routed model | [github.com/BerriAI/litellm](https://github.com/BerriAI/litellm) |
 | **Azure OpenAI** | `gpt-5.5` | gpt-5.5 | [portal.azure.com](https://portal.azure.com) |
+| **xAI (Grok)** | `grok-2` | varies by model | [x.ai/api](https://x.ai/api) |
 
 > [!NOTE]
 > The OpenAI-compatible profile in `src/lib/agent/llm/providers/openai-compatible-profile.ts` also ships ready-made configurations for **baseten**, **deepinfra**, **fireworks**, and **xAI** (Grok). Pick the matching provider ID in Settings and the Base URL fills itself in — bring your own API key from each provider's dashboard.
@@ -216,7 +218,7 @@ npm install && npm run dev
 #      Ctrl+C stops all three at once.
 
 npm run lint             # ESLint
-npm run test             # Vitest (574 tests)
+npm run test             # Vitest (778 tests)
 npm run test:watch       # Vitest watch mode
 npm run test:coverage    # Vitest with coverage
 npm run build:extension  # Build Chrome extension (esbuild, one-shot)
@@ -233,7 +235,7 @@ npm run build:all        # Build extension + cockpit
 open-cowork-chrome-extension/
 ├── src/
 │   ├── lib/agent/           Core agentic engine
-│   │   ├── llm/             4-layer LLM provider architecture (14 providers)
+│   │   ├── llm/             4-layer LLM provider architecture (16 providers)
 │   │   ├── loop/            Planner + Navigator orchestration
 │   │   ├── tools/           32 actions + executor + registry
 │   │   ├── prompts/         Navigator + Planner system prompts
@@ -248,7 +250,7 @@ open-cowork-chrome-extension/
 ├── cockpit/                 Next.js 16 dashboard (Prisma/SQLite)
 ├── mini-services/
 │   └── cowork-events/       WebSocket + AI-proxy service (port 3003)
-├── tests/                   574 tests / 22 files (Vitest)
+├── tests/                   778 tests / 42 files (Vitest)
 ├── .github/                 CI (npm) + Dependabot
 ├── docs/safety.md           12 trust-boundary rules
 └── package.json
@@ -259,7 +261,7 @@ open-cowork-chrome-extension/
 ### Shipped
 - [x] Planner + Navigator multi-agent architecture
 - [x] 32 actions (click, input, scroll, navigate, evaluate, and more)
-- [x] 14 LLM providers (OpenAI, Anthropic, Gemini, DeepSeek, Ollama, and more)
+- [x] 16 LLM providers (OpenAI, Anthropic, Google Gemini, Google Vertex, DeepSeek, Ollama, and more)
 - [x] Set-of-Marks annotated screenshots for vision models
 - [x] Per-model vision detection via the models.dev catalog
 - [x] Prompt-injection defense (10-pattern classifier + NFKC normalization)
@@ -279,7 +281,7 @@ open-cowork-chrome-extension/
 - [x] Keyboard shortcut (`Ctrl+E` / `Cmd+E`)
 - [x] Local Vision Assistant (LocateAnything-3B via WebGPU, 2.1 GB, INT4)
 - [x] npm as the default runtime across CI, scripts, and docs
-- [x] 542 passing tests (Vitest)
+- [x] 778 passing tests (Vitest)
 
 ### Building now
 - [ ] Real-time tab/agent view in the Cockpit dashboard (currently read-mostly)

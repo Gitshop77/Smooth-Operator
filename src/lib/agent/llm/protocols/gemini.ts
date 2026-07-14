@@ -244,5 +244,3 @@ export function geminiPath(model: string): string {
  // throws on structurally-invalid ids.
   return `/${encodeModelIdForUrl(model)}${PATH}`;
 }
-
-export * as Gemini from "./gemini";

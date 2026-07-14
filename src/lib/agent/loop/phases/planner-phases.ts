@@ -297,7 +297,6 @@ export async function handleNavigatorDone(
       message: "Planner verification skipped (transient planner error) — continuing the run.",
     });
     state.navigatorStepsSincePlanner = 0;
-    state.step++;
     await safeWaitForSettled(state);
     return { finalized: false };
   }
@@ -313,7 +312,6 @@ export async function handleNavigatorDone(
   });
   await safeEmitPlannerStep(state, decisionResult.plannerResult);
   state.navigatorStepsSincePlanner = 0;
-  state.step++;
   await safeWaitForSettled(state);
   return { finalized: false };
 }

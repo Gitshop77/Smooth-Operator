@@ -43,7 +43,8 @@ use `npm run dev:cockpit` to start it. The cockpit talks to the
 
 The cockpit dashboard is a read-mostly view over persisted data. POST
 endpoints exist for creating tabs, workspaces, sessions, workflows, bookmarks,
-and pinboards. There are no DELETE endpoints yet.
+and pinboards. DELETE endpoints also exist for erasing history, form memory,
+site memory, and chat (GDPR erasure).
 
 ## Code Style
 
