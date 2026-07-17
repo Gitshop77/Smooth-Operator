@@ -27,7 +27,7 @@ afterAll(() => {
 });
 
 const sha256Hex = async (buf: Uint8Array): Promise<string> => {
-  const d = await webcrypto.subtle.digest("SHA-256", buf.buffer as unknown as ArrayBuffer);
+  const d = await webcrypto.subtle.digest("SHA-256", buf.slice().buffer);
   return Array.from(new Uint8Array(d))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
