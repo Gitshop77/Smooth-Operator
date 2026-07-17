@@ -1,3 +1,4 @@
+import type { NextRequest } from 'next/server';
 import { describe, it, expect, vi } from 'vitest';
 import { Prisma } from '@prisma/client';
 
@@ -11,8 +12,8 @@ vi.mock('@/lib/db', () => ({
 
 import { GET, DELETE } from '@/app/api/cowork/memory/site/route';
 
-function fakeReq(query = ''): any {
-  return { nextUrl: { searchParams: new URLSearchParams(query) } };
+function fakeReq(query = ''): NextRequest {
+  return { nextUrl: { searchParams: new URLSearchParams(query) } } as unknown as NextRequest;
 }
 
 describe('GET /api/cowork/memory/site', () => {

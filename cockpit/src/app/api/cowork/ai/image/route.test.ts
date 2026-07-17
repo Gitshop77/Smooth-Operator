@@ -10,6 +10,7 @@
  * - GET returns route metadata.
  */
 
+import type { NextRequest } from 'next/server';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // `getCoworkEventsToken()` prefers COWORK_UI_TOKEN and only falls back to
@@ -31,7 +32,7 @@ import { POST, GET } from '@/app/api/cowork/ai/image/route';
 // ReadableStream, not `req.json()`) and reads `req.headers.get('x-request-id')`
 // both inside the handler and as the `withRouteError` correlation id — so the
 // mock request MUST expose a real `body` stream and a `headers.get`.
-function jsonReq(body: unknown, headers: Record<string, string> = {}): any {
+function jsonReq(body: unknown, headers: Record<string, string> = {}): NextRequest {
   const text = JSON.stringify(body);
   const lower: Record<string, string> = {};
   for (const [k, v] of Object.entries(headers)) lower[k.toLowerCase()] = v;
@@ -44,7 +45,7 @@ function jsonReq(body: unknown, headers: Record<string, string> = {}): any {
     }),
     headers: { get: (name: string) => lower[name.toLowerCase()] ?? null },
     nextUrl: { searchParams: new URLSearchParams() },
-  };
+  } as unknown as NextRequest;
 }
 
 // The route reads the upstream body via `readCappedUpstream`, which requires a

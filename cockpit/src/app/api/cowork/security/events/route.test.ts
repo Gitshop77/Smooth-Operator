@@ -65,16 +65,16 @@ describe('GET /api/cowork/security/events', () => {
 
   it('forwards a severity filter to the query', async () => {
     await GET(getReq('severity=high'));
-    expect(findMany.mock.lastCall![0].where).toEqual({ severity: 'high' });
+    expect((findMany.mock.lastCall?.[0] ?? {}).where).toEqual({ severity: 'high' });
     expect(count).toHaveBeenCalledWith({ where: { severity: 'high' } });
  // count must share findMany's where so `total` matches the filtered page.
-    expect(count.mock.lastCall![0].where).toEqual(findMany.mock.lastCall![0].where);
+    expect((count.mock.lastCall?.[0] ?? {}).where).toEqual((findMany.mock.lastCall?.[0] ?? {}).where);
   });
 
   it('runs count with the same empty where as findMany on the unfiltered path', async () => {
     await GET(getReq());
     expect(count).toHaveBeenCalledWith({ where: {} });
-    expect(count.mock.lastCall![0].where).toEqual(findMany.mock.lastCall![0].where);
+    expect((count.mock.lastCall?.[0] ?? {}).where).toEqual((findMany.mock.lastCall?.[0] ?? {}).where);
   });
 
   it('rejects an invalid severity with 400', async () => {
@@ -93,22 +93,22 @@ describe('GET /api/cowork/security/events', () => {
 
   it('caps limit at 200 (cannot dump the whole table at once)', async () => {
     await GET(getReq('limit=99999'));
-    expect(findMany.mock.lastCall![0].take).toBe(200);
+    expect((findMany.mock.lastCall?.[0] ?? {}).take).toBe(200);
   });
 
   it('defaults limit to 100 when omitted', async () => {
     await GET(getReq());
-    expect(findMany.mock.lastCall![0].take).toBe(100);
+    expect((findMany.mock.lastCall?.[0] ?? {}).take).toBe(100);
   });
 
   it('clamps an over-large offset to 10000', async () => {
     await GET(getReq('offset=999999999'));
-    expect(findMany.mock.lastCall![0].skip).toBe(10_000);
+    expect((findMany.mock.lastCall?.[0] ?? {}).skip).toBe(10_000);
   });
 
   it('falls back to skip 0 for a non-numeric offset', async () => {
     await GET(getReq('offset=abc'));
-    expect(findMany.mock.lastCall![0].skip).toBe(0);
+    expect((findMany.mock.lastCall?.[0] ?? {}).skip).toBe(0);
   });
 
   it('preserves the payload field in the projected response', async () => {

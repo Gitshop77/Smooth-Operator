@@ -181,7 +181,7 @@ export function MemoryView() {
                   </div>
                   <div className="divide-y divide-border/60" role="list">
                     {entries.map((e, i) => {
-                      const summary = siteSummaries.get(e)!;
+                      const summary = siteSummaries.get(e) ?? parseSiteData(e);
                       return (
                         <div key={i} role="listitem" className="flex items-start gap-3 py-2 text-sm">
                           <span className="font-mono text-xs text-muted-foreground shrink-0 w-32 truncate" title={`v${e.version}`}>

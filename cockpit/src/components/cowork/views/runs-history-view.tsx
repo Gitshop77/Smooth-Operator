@@ -25,6 +25,10 @@ import type { SampleTask, SampleHistoryEntry } from "@/lib/cowork-data/types";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+// Terminal task statuses (stable module-level identity so effects/memos that
+// reference it don't need it in their dependency arrays).
+const TERMINAL = new Set(["done", "failed", "cancelled"]);
+
 type TaskStep = { label?: string; done?: boolean };
 
 function parseSteps(task: SampleTask): TaskStep[] {
@@ -101,6 +105,9 @@ export function RunsHistoryView() {
   const filteredRuns = React.useMemo(() => {
     const q = search.trim().toLowerCase();
     const cutoff = RANGE_MS[dateRange];
+    // Relative date-range filtering needs the current wall clock; recomputed
+    // only when the memo deps change.
+    // eslint-disable-next-line react-hooks/purity
     const now = Date.now();
     return sortedRuns.filter((t) => {
       if (statusFilter !== "all" && t.status !== statusFilter) return false;
@@ -123,6 +130,9 @@ export function RunsHistoryView() {
     );
     const q = search.trim().toLowerCase();
     const cutoff = RANGE_MS[dateRange];
+    // Relative date-range filtering needs the current wall clock; recomputed
+    // only when the memo deps change.
+    // eslint-disable-next-line react-hooks/purity
     const now = Date.now();
     const searchFiltered = q
       ? all.filter((h) => `${h.title} ${h.url}`.toLowerCase().includes(q))
@@ -135,7 +145,6 @@ export function RunsHistoryView() {
   }, [history, search, dateRange]);
 
  // Runs summary stats (terminal-aware, like agents-view).
-  const TERMINAL = new Set(["done", "failed", "cancelled"]);
   const totalRuns = tasks?.length ?? 0;
  // Single pass over tasks (memoized) instead of three separate filter().length
  // scans per render — consistent with filteredRuns/agents above.

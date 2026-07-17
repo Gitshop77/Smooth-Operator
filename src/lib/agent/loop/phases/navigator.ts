@@ -102,7 +102,7 @@ export async function prepareNavigatorRequest(
       `(raw/fallback was ${navElementsText.length}).`,
   ) ?? navElementsText;
 
-  let screenshot = capPayload(
+  const screenshot = capPayload(
     browserState.screenshot,
     MAX_NAV_SCREENSHOT_CHARS,
     "drop",
@@ -111,7 +111,7 @@ export async function prepareNavigatorRequest(
       `the ${MAX_NAV_SCREENSHOT_CHARS}-char cap) to bound vision-token cost.`,
   );
 
-  let axTree = capPayload(
+  const axTree = capPayload(
     browserState.axTree,
     MAX_NAV_AXTREE_CHARS,
     "truncate",

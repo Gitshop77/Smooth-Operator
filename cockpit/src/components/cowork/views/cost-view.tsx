@@ -315,7 +315,9 @@ export function CostView() {
  // estimate cannot be derived without fabricating data — which this codebase forbids.
  // When a `useCostUsage()` hook lands, assign its result here and everything below
  // renders with real numbers.
-  const records: CostUsageRecord[] = [];
+  // Stable empty placeholder until a real cost/usage source lands, so the
+  // analytics useMemo below does not recompute on every render.
+  const records = React.useMemo<CostUsageRecord[]>(() => [], []);
   const isEstimate = false;
 
   const { startMs, endMs, rangeDays, rangeError } = React.useMemo(
@@ -338,7 +340,7 @@ export function CostView() {
   }, [hasData, analytics]);
 
   const dimMeta =
-    BREAKDOWN_DIMENSIONS.find((d) => d.key === breakdownDim)!;
+    BREAKDOWN_DIMENSIONS.find((d) => d.key === breakdownDim) ?? BREAKDOWN_DIMENSIONS[0];
   const breakdownRows = analytics[DIM_TO_FIELD[breakdownDim]];
   const breakdownIcon = React.createElement(dimMeta.icon, {
     className: "size-3.5",

@@ -18,16 +18,6 @@ import { json, badRequest, serverError, withRouteError, bodyJson, redactSecrets,
 import { getCoworkEventsToken, getValidatedEventsBase } from '@/lib/cowork/events/client';
 import { db } from '@/lib/db';
 
-// Inbound request body from the caller. `systemPrompt` is accepted but
-// ignored — the assistant's context is always the server-pinned
-// WINGMAN_SYSTEM_PROMPT (see POST handler).
-interface ChatRequest {
-  messages?: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
-  sessionId?: string;
-  stream?: boolean;
-  thinking?: 'enabled' | 'disabled';
-  systemPrompt?: string;
-}
 
 // Server-pinned per-request completion ceiling. A caller cannot raise this —
 // it is resolved from the cockpit's own environment (never from the request
@@ -393,7 +383,7 @@ export async function DELETE(req: NextRequest): Promise<Response> {
  // non-secret principal (a one-way hash of the token, never the raw secret)
  // and the `confirm:true` receipt for AU-3 audit completeness.
       const deleted = (body as { deleted?: unknown })?.deleted ?? 'unknown';
-      console.info('[cowork] bulk delete ai/chat', {
+      console.warn('[cowork] bulk delete ai/chat', {
         deleted,
         route: '/api/cowork/ai/chat',
         reqId,

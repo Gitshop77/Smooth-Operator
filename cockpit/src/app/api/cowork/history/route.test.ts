@@ -1,4 +1,11 @@
+import type { NextRequest } from 'next/server';
 import { describe, it, expect, vi, afterEach } from 'vitest';
+
+interface UpsertInput {
+  where: { url: string };
+  create: { url: string; title: string };
+  update: { title: string };
+}
 
 const { findMany, del, deleteMany, upsert, historyStore, PrismaClientKnownRequestError } = vi.hoisted(() => {
   class PrismaClientKnownRequestError extends Error {
@@ -14,7 +21,7 @@ const { findMany, del, deleteMany, upsert, historyStore, PrismaClientKnownReques
  // what the real Prisma upsert does, so the POST contract test below exercises
  // the actual write path instead of a hand-rolled in-test simulation.
   const historyStore = new Map<string, { id: string; url: string; title: string; visitCount: number }>();
-  const upsert = vi.fn(async ({ where, create, update }: any) => {
+  const upsert = vi.fn(async ({ where, create, update }: UpsertInput) => {
     const existing = historyStore.get(where.url);
     if (existing) {
       existing.visitCount += 1;
@@ -52,7 +59,7 @@ afterEach(() => {
   historyStore.clear();
 });
 
-function fakeReq(query = '', body?: unknown): any {
+function fakeReq(query = '', body?: unknown): NextRequest {
   const headers = new Headers();
   if (body !== undefined) {
     return {
@@ -64,9 +71,9 @@ function fakeReq(query = '', body?: unknown): any {
           controller.close();
         },
       }),
-    };
+    } as unknown as NextRequest;
   }
-  return { nextUrl: { searchParams: new URLSearchParams(query) }, headers };
+  return { nextUrl: { searchParams: new URLSearchParams(query) }, headers } as unknown as NextRequest;
 }
 
 describe('GET /api/cowork/history', () => {
@@ -111,7 +118,7 @@ describe('GET /api/cowork/history', () => {
     const longQ = 'a'.repeat(500);
     await GET(fakeReq(`q=${longQ}`));
     const callArg = findMany.mock.calls[0][0] as { where: { OR: Array<{ url?: { contains: string } }> } };
-    expect(callArg.where.OR[0].url!.contains.length).toBe(256);
+    expect(callArg.where.OR[0].url?.contains.length).toBe(256);
   });
 });
 
@@ -166,7 +173,7 @@ describe('DELETE /api/cowork/history', () => {
     deleteMany.mockResolvedValueOnce({ count: 3 });
     const req = fakeReq('all=1', { confirm: true });
     req.headers.set('x-forwarded-for', '203.0.113.7, 10.0.0.1');
-    const spy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const res = await DELETE(req);
       expect(res.status).toBe(200);
@@ -186,8 +193,8 @@ describe('DELETE /api/cowork/history', () => {
     expect(deleteMany).toHaveBeenCalledTimes(1);
     const callArg = deleteMany.mock.calls[0][0] as { where: { lastVisitedAt?: { lt: Date } } };
     expect(callArg.where.lastVisitedAt).toBeDefined();
-    expect(callArg.where.lastVisitedAt!.lt).toBeInstanceOf(Date);
-    expect(callArg.where.lastVisitedAt!.lt.toISOString()).toBe('2020-01-01T00:00:00.000Z');
+    expect(callArg.where.lastVisitedAt?.lt).toBeInstanceOf(Date);
+    expect(callArg.where.lastVisitedAt?.lt.toISOString()).toBe('2020-01-01T00:00:00.000Z');
     const body = await res.json();
     expect(body.deleted).toBe(7);
   });

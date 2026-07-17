@@ -151,7 +151,7 @@ export const protocol: Protocol<AnthropicBody, string, { type: string; content?:
  // valid frame (e.g. a surfaced Anthropic error frame below) must propagate
  // to the caller — folding both into one catch silently swallowed API
  // error frames .
- // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  
       let data: any;
       try {
         data = JSON.parse(frame);

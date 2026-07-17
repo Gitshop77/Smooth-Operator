@@ -23,7 +23,7 @@ import {
   __test_resetRegistry,
 } from "../src/lib/agent/dom/extraction/ax-tree-builder";
 import type { TabInfo } from "../src/lib/agent/types";
-import { installJsdomLayoutMock, restoreJsdomLayoutMock } from "./helpers";
+import { installJsdomLayoutMock } from "./helpers";
 
 const MOCK_TABS: TabInfo[] = [
   { id: 1, label: "1", url: "https://example.com", title: "Test", active: true },

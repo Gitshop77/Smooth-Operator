@@ -1,3 +1,4 @@
+import type { NextRequest } from 'next/server';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const { findMany } = vi.hoisted(() => ({ findMany: vi.fn() }));
@@ -10,8 +11,8 @@ vi.mock('@/lib/db', () => ({
 
 import { GET } from '@/app/api/cowork/extensions/route';
 
-function fakeReq(query = ''): any {
-  return { nextUrl: { searchParams: new URLSearchParams(query) } };
+function fakeReq(query = ''): NextRequest {
+  return { nextUrl: { searchParams: new URLSearchParams(query) } } as unknown as NextRequest;
 }
 
 beforeEach(() => {

@@ -44,12 +44,12 @@ describe("hasNestedQuantifier (ReDoS static guard)", () => {
     "((a|b)+)+",
   ];
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   test.each(safe as any[])("accepts safe shape: %s", (pattern) => {
     expect(hasNestedQuantifier(pattern)).toBe(false);
   });
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   test.each(unsafe as any[])("rejects unsafe shape: %s", (pattern) => {
     expect(hasNestedQuantifier(pattern)).toBe(true);
   });
@@ -80,12 +80,12 @@ describe("hasBackreference (ReDoS backreference guard)", () => {
     "(a|b)\\k",
   ];
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   test.each(withBackref as any[])("rejects backreference pattern: %s", (pattern) => {
     expect(hasBackreference(pattern)).toBe(true);
   });
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   test.each(withoutBackref as any[])("accepts non-backreference pattern: %s", (pattern) => {
     expect(hasBackreference(pattern)).toBe(false);
   });

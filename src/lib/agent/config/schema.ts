@@ -199,9 +199,6 @@ const AgentConfigSchema = z.object({
   expectedOutcomes: ExpectedOutcomesSchema.optional(),
 });
 
-/** Input type for {@link AgentConfigSchema} (accepts partial input). */
-type AgentConfigInput = z.input<typeof AgentConfigSchema>;
-
 /** Validated output type — compatible with, but not strictly identical to, {@link AgentConfig}. */
 type AgentConfigValidated = z.output<typeof AgentConfigSchema>;
 

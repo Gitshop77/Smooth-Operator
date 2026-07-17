@@ -77,7 +77,7 @@ export function PromptsView() {
     setNewName("");
     setNewText("");
     nameRef.current?.focus();
-  }, [newName, newText]);
+  }, [newName, newText, canAdd]);
 
   const removeQuickPrompt = React.useCallback((id: string) => {
     setQuickPrompts((prev) => prev.filter((q) => q.id !== id));

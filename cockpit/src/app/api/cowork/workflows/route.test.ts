@@ -1,5 +1,5 @@
+import type { NextRequest } from 'next/server';
 import { describe, it, expect, vi } from 'vitest';
-import { Prisma } from '@prisma/client';
 
 const { create, findMany, count, PrismaClientKnownRequestError } = vi.hoisted(() => {
   class PrismaClientKnownRequestError extends Error {
@@ -30,7 +30,7 @@ vi.mock('@/lib/db', () => ({
 
 import { POST, GET } from '@/app/api/cowork/workflows/route';
 
-function reqWithBody(text: string): any {
+function reqWithBody(text: string): NextRequest {
   const chunk = new TextEncoder().encode(text);
   return {
     body: {
@@ -47,13 +47,13 @@ function reqWithBody(text: string): any {
       },
     },
     headers: { get: () => null },
-  };
+  } as unknown as NextRequest;
 }
 
-function reqWithQuery(query: string): any {
+function reqWithQuery(query: string): NextRequest {
   return {
     nextUrl: { searchParams: new URLSearchParams(query) },
-  };
+  } as unknown as NextRequest;
 }
 
 describe('POST /api/cowork/workflows', () => {

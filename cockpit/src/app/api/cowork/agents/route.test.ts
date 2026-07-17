@@ -1,3 +1,4 @@
+import type { NextRequest } from 'next/server';
 import { describe, it, expect, vi } from 'vitest';
 
 const { findMany } = vi.hoisted(() => ({ findMany: vi.fn() }));
@@ -10,8 +11,8 @@ vi.mock('@/lib/db', () => ({
 
 import { GET } from '@/app/api/cowork/agents/route';
 
-function getReq(query = ''): any {
-  return { nextUrl: { searchParams: new URLSearchParams(query) } };
+function getReq(query = ''): NextRequest {
+  return { nextUrl: { searchParams: new URLSearchParams(query) } } as unknown as NextRequest;
 }
 
 describe('GET /api/cowork/agents (parseAgentId boundary)', () => {

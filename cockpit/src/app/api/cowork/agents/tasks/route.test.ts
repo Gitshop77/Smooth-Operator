@@ -1,3 +1,4 @@
+import type { NextRequest } from 'next/server';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const { findMany } = vi.hoisted(() => ({ findMany: vi.fn() }));
@@ -10,8 +11,8 @@ vi.mock('@/lib/db', () => ({
 
 import { GET } from '@/app/api/cowork/agents/tasks/route';
 
-function getReq(query = ''): any {
-  return { nextUrl: { searchParams: new URLSearchParams(query) } };
+function getReq(query = ''): NextRequest {
+  return { nextUrl: { searchParams: new URLSearchParams(query) } } as unknown as NextRequest;
 }
 
 // Clear call history between tests so boundary assertions (e.g. "findMany was
@@ -42,7 +43,7 @@ describe('GET /api/cowork/agents/tasks', () => {
     findMany.mockResolvedValueOnce([]);
     const res = await GET(getReq('status=running&agentId=agent-7'));
     expect(res.status).toBe(200);
-    const where = (findMany.mock.lastCall as any[])[0].where;
+    const where = (findMany.mock.lastCall as [{ where: unknown }])[0].where;
     expect(where).toEqual({ status: 'running', agentId: 'agent-7' });
   });
 
@@ -50,7 +51,7 @@ describe('GET /api/cowork/agents/tasks', () => {
     findMany.mockResolvedValueOnce([]);
     const res = await GET(getReq('agentId=agent-7'));
     expect(res.status).toBe(200);
-    const where = (findMany.mock.lastCall as any[])[0].where;
+    const where = (findMany.mock.lastCall as [{ where: unknown }])[0].where;
     expect(where).toEqual({ agentId: 'agent-7' });
   });
 

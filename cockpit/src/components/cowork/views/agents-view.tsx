@@ -26,7 +26,9 @@ export function AgentsView() {
   const { data: agents, isLoading: agentsLoading, isError: agentsError, refetch: refetchAgents } = useAgents();
   const { data: tasks, isLoading: tasksLoading, isError: tasksError, refetch: refetchTasks } = useAgentTasks();
 
-  const list = tasks ?? [];
+  // Memoize so the fallback `[]` keeps a stable identity across renders — this
+  // prevents downstream useMemo hooks (keyed on `list`) from recomputing every render.
+  const list = React.useMemo(() => tasks ?? [], [tasks]);
   const pending = list.filter((t) => !TERMINAL.has(t.status));
  // `createdAt` arrives as an ISO string (Prisma DateTime serialized over
  // JSON). Coerce to ms before subtracting so the sort is stable regardless

@@ -27,6 +27,9 @@ function pushLog(entry: { ts: string; level: LogLevel; source: string; message: 
 }
 
 // Emit the structured log line at the requested severity, defaulting to `info`.
+// This is a deliberate severity-preserving console passthrough for extension
+// service-worker logs, so debug/info are intentional here.
+/* eslint-disable no-console */
 function emitLog(level: LogLevel, payload: { source: string; message: string; stack: string }): void {
   const loggers: Record<LogLevel, (...args: unknown[]) => void> = {
     debug: console.debug,
@@ -36,6 +39,7 @@ function emitLog(level: LogLevel, payload: { source: string; message: string; st
   };
   (loggers[level] ?? console.info)('[SW]', payload);
 }
+/* eslint-enable no-console */
 
 export async function POST(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {

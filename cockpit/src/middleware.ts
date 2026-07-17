@@ -515,7 +515,7 @@ export function middleware(req: NextRequest): NextResponse {
  // production by default (intentional, path-only/no-secrets discipline kept).
   if (process.env.COWORK_REQUEST_LOG === '1') {
     const durationMs = Date.now() - start;
-    console.log('[cowork request]', requestId, req.method, pathname, res.status, `${durationMs}ms`);
+    console.warn('[cowork request]', requestId, req.method, pathname, res.status, `${durationMs}ms`);
   }
   return res;
 }

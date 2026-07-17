@@ -1,3 +1,4 @@
+import type { NextRequest } from 'next/server';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 // Provide a token so the proxy paths can be exercised; the actual network call
@@ -23,7 +24,7 @@ import { GET, POST, DELETE, WINGMAN_SYSTEM_PROMPT } from '@/app/api/cowork/ai/ch
 // `body: true` is not readable), and it reads `req.headers.get('x-request-id')`
 // synchronously when invoking `withRouteError` (outside the try/catch), so the
 // stub MUST provide a `headers` object with `.get`.
-function fakeReq(query = '', body?: unknown): any {
+function fakeReq(query = '', body?: unknown): NextRequest {
   const headers = new Headers();
   if (body !== undefined) {
     const text = JSON.stringify(body);
@@ -40,13 +41,13 @@ function fakeReq(query = '', body?: unknown): any {
       body: stream,
       json: async () => body,
       text: async () => text,
-    };
+    } as unknown as NextRequest;
   }
   return {
     nextUrl: { searchParams: new URLSearchParams(query) },
     headers,
     body: null,
-  };
+  } as unknown as NextRequest;
 }
 
 // DRY the repeated upstream success fixture. The route reads the upstream body
@@ -349,7 +350,7 @@ describe('DELETE /api/cowork/ai/chat (F29 / F35)', () => {
       nextUrl: { searchParams: new URLSearchParams('messageId=m1') },
       headers,
       body: null,
-    } as any);
+    } as unknown as NextRequest);
     expect(res.status).toBe(200);
     const [, init] = fetchMock.mock.calls[0];
     expect(init.headers['x-request-id']).toBe('req-abc-123');

@@ -163,7 +163,6 @@ export async function askHumanExtension(
 ): Promise<HumanInteractionResponse> {
   return new Promise<HumanInteractionResponse>((resolve) => {
     let settled = false;
-    let timer: ReturnType<typeof setTimeout>;
     const finish = (resp: HumanInteractionResponse) => {
       if (settled) return;
       settled = true;
@@ -171,7 +170,7 @@ export async function askHumanExtension(
       resolve(resp);
     };
 
-    timer = setTimeout(() => finish({ mode: "cancelled" }), timeoutMs);
+    const timer = setTimeout(() => finish({ mode: "cancelled" }), timeoutMs);
 
  // The side panel's onMessage listener for HUMAN_INTERACT calls
  // `sendResponse(...)` synchronously, so the response arrives via this

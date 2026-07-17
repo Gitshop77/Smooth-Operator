@@ -1,0 +1,29 @@
+# gitleaks configuration for CI secret scanning.
+#
+# Extends the built-in gitleaks ruleset (useDefault = true) and adds a narrow
+# allowlist for a single unit-test fixture file. That file
+# (cockpit/src/lib/redact-client.test.ts) is a CORPUS of deliberately
+# secret-SHAPED but entirely fake placeholder strings (e.g. AWS's documented
+# example key AKIAIOSFODNN7EXAMPLE, "sk-1234567890abcdef",
+# "xoxb-1234567890-...") used to test the client/server secret-redaction
+# functions. They are not real credentials — allowlisting the path prevents
+# false positives without weakening detection anywhere else in the repo.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Unit/integration test fixtures: fake secret-shaped strings, not real credentials"
+# Every path below is a test file whose findings are deliberately fake,
+# documented placeholder values used to exercise secret-redaction and
+# security logic — e.g. AWS's example key AKIAIOSFODNN7EXAMPLE /
+# AKIA0123456789ABCDEF, "sk-proj-abc123", "integration-test-secret-xyz-abc-123",
+# "abcdef123456", and JWTs with the standard "1234567890" subject. None are
+# real credentials.
+paths = [
+  '''cockpit/src/lib/redact-client\.test\.ts''',
+  '''tests/cowork-events\.test\.ts''',
+  '''tests/messages-redaction\.test\.ts''',
+  '''tests/provider-config-ui\.test\.ts''',
+  '''tests/security\.test\.ts''',
+  '''tests/shared\.test\.ts''',
+]

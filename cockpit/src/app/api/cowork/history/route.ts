@@ -106,7 +106,7 @@ export async function DELETE(req: NextRequest): Promise<Response> {
       const clientIp = (req.headers.get('x-forwarded-for')?.split(',')[0]?.trim())
         || req.headers.get('x-real-ip')
         || 'unknown';
-      console.info('[cowork] bulk delete history', {
+      console.warn('[cowork] bulk delete history', {
         deleted: count,
         confirm: b.confirm === true,
         scope: sanitizeRequestId(scope ?? null) ?? 'all',

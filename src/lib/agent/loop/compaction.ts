@@ -100,7 +100,7 @@ export function partitionHistory(history: HistoryItem[]): {
  */
 function escapeXml(s: string, attr = false): string {
   let out = s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  if (attr) out = out.replace(/\"/g, "&quot;");
+  if (attr) out = out.replace(/"/g, "&quot;");
   return out;
 }
 

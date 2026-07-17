@@ -766,7 +766,7 @@ export function wireAbortController(): AbortWiring {
   const onStorageChanged = (changes: { [k: string]: chrome.storage.StorageChange }, area: string): void => {
     if (area !== "session") return;
     const c = changes[RUN_STATE_KEY];
-    if (c?.newValue?.abortRequested) controller.abort();
+    if ((c?.newValue as { abortRequested?: boolean } | undefined)?.abortRequested) controller.abort();
   };
   chrome.storage.onChanged.addListener(onStorageChanged);
   return { controller, onStorageChanged };

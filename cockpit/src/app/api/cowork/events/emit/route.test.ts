@@ -10,6 +10,7 @@
  * (silently weakening the boundary) is caught.
  */
 
+import type { NextRequest } from 'next/server';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -25,7 +26,7 @@ vi.mock('@/lib/cowork/events/client', () => ({
 
 import { POST } from '@/app/api/cowork/events/emit/route';
 
-function reqWithBody(body: unknown): any {
+function reqWithBody(body: unknown): NextRequest {
   const text = JSON.stringify(body);
   const bytes = new TextEncoder().encode(text);
   const stream = new ReadableStream<Uint8Array>({
@@ -34,7 +35,7 @@ function reqWithBody(body: unknown): any {
       ctrl.close();
     },
   });
-  return { body: stream, headers: new Headers() };
+  return { body: stream, headers: new Headers() } as unknown as NextRequest;
 }
 
 afterEach(() => {
@@ -53,7 +54,8 @@ function extractChannels(file: string): string[] {
   const text = readFileSync(file, 'utf8');
   const m = text.match(/SERVER_OWNED_CHANNELS = new Set(?:<[^>]*>)?\(\[([\s\S]*?)\]\)/);
   expect(m, `could not find SERVER_OWNED_CHANNELS in ${file}`).not.toBeNull();
-  const body = m![1];
+  if (!m) throw new Error(`could not find SERVER_OWNED_CHANNELS in ${file}`);
+  const body = m[1];
   return [...body.matchAll(/'([^']+)'/g)].map((x) => x[1]).sort();
 }
 
@@ -138,7 +140,8 @@ describe('POST /api/cowork/events/emit (impersonation boundary)', () => {
       (c) => typeof c[1] === 'object' && c[1] !== null && (c[1] as { error?: unknown }).error !== undefined,
     );
     expect(redactedCall).toBeTruthy();
-    const logged = (redactedCall![1] as { error: string }).error;
+    if (!redactedCall) throw new Error('expected a redacted error log call');
+    const logged = (redactedCall[1] as { error: string }).error;
     expect(logged).toContain('***');
     expect(logged).not.toContain('sk-ant-SECRET0123456789ABCDEF');
     errorSpy.mockRestore();

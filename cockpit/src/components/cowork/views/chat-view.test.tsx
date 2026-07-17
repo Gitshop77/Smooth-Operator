@@ -54,8 +54,8 @@ describe("ChatView composer guard", () => {
 
     expect(input).not.toBeNull();
     expect(sendButton).not.toBeNull();
-    expect(input!.disabled).toBe(true);
-    expect(sendButton!.disabled).toBe(true);
+    expect(input?.disabled ?? false).toBe(true);
+    expect(sendButton?.disabled ?? false).toBe(true);
 
     act(() => {
       root.unmount();
@@ -74,9 +74,9 @@ describe("ChatView composer guard", () => {
       'button[aria-label="Send"]',
     );
 
-    expect(input!.disabled).toBe(false);
+    expect(input?.disabled ?? true).toBe(false);
     // Send is disabled because the composer is empty, not because of pending.
-    expect(sendButton!.disabled).toBe(true);
+    expect(sendButton?.disabled ?? true).toBe(true);
 
     act(() => {
       root.unmount();

@@ -2,6 +2,13 @@ import { describe, it, expect } from 'vitest';
 import type { NextRequest } from 'next/server';
 import { GET } from '@/app/api/cowork/mcp/tools/route';
 
+interface ToolEntry {
+  name: string;
+  description: string;
+  category: string;
+  implemented: boolean;
+}
+
 function fakeReq(query = ''): NextRequest {
   return {
     nextUrl: { searchParams: new URLSearchParams(query) },
@@ -20,7 +27,7 @@ describe('GET /api/cowork/mcp/tools', () => {
     expect(Array.isArray(body.tools)).toBe(true);
     expect(body.tools.length).toBeGreaterThan(0);
  // Every advertised tool must be flagged as not-yet-served.
-    expect(body.tools.every((t: any) => t.implemented === false)).toBe(true);
+    expect(body.tools.every((t: ToolEntry) => t.implemented === false)).toBe(true);
     expect(body.total).toBe(body.tools.length);
     expect(body.totalCatalog).toBe(body.tools.length);
   });
@@ -31,7 +38,7 @@ describe('GET /api/cowork/mcp/tools', () => {
     expect(body.tools.length).toBeGreaterThan(0);
     expect(
       body.tools.every(
-        (t: any) =>
+        (t: ToolEntry) =>
           t.name.toLowerCase().includes('bookmark') ||
           t.description.toLowerCase().includes('bookmark'),
       ),
@@ -42,6 +49,6 @@ describe('GET /api/cowork/mcp/tools', () => {
     const res = await GET(fakeReq('category=bookmarks'));
     const body = await res.json();
     expect(body.tools.length).toBeGreaterThan(0);
-    expect(body.tools.every((t: any) => t.category === 'bookmarks')).toBe(true);
+    expect(body.tools.every((t: ToolEntry) => t.category === 'bookmarks')).toBe(true);
   });
 });

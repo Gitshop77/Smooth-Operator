@@ -87,6 +87,17 @@ function readWithTimeout(
   ]).finally(() => clearTimeout(t));
 }
 
+// Narrow the (nullable) Response body / captured socket without a non-null
+// assertion, throwing a clear message if the invariant is somehow violated.
+function bodyReader(res: Response): ReadableStreamDefaultReader<Uint8Array> {
+  if (!res.body) throw new Error('expected a streaming response body');
+  return res.body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+}
+function requireSocket(): FakeSocket {
+  if (!lastSocket) throw new Error('expected socket.io client to have been opened');
+  return lastSocket;
+}
+
 beforeEach(() => {
   ioMock.mockClear();
   lastSocket = null;
@@ -106,7 +117,7 @@ describe('GET /api/cowork/events/stream', () => {
  // Read the first chunk (the initial hello comment) to prove the stream
  // produces data, then cancel so the socket.io client + ping interval don't
  // leak.
-    const reader = res.body!.getReader();
+    const reader = bodyReader(res);
     const { value } = await readWithTimeout(reader);
     const text = new TextDecoder().decode(value as Uint8Array);
     expect(text).toContain('cowork-events stream open');
@@ -125,7 +136,7 @@ describe('GET /api/cowork/events/stream', () => {
     expect(ioMock).toHaveBeenCalledTimes(1);
     expect(lastSocket).not.toBeNull();
 
-    const reader = res.body!.getReader();
+    const reader = bodyReader(res);
  // Initial hello is always emitted first, before any connection outcome.
     const first = await readWithTimeout(reader);
     expect(new TextDecoder().decode(first.value as Uint8Array)).toContain(
@@ -133,7 +144,7 @@ describe('GET /api/cowork/events/stream', () => {
     );
 
  // Now simulate the upstream socket.io connection failing.
-    lastSocket!.emitLifecycle('connect_error', new Error('ECONNREFUSED'));
+    requireSocket().emitLifecycle('connect_error', new Error('ECONNREFUSED'));
     const second = await readWithTimeout(reader);
     const text = new TextDecoder().decode(second.value as Uint8Array);
     expect(text).toContain('upstream error');
@@ -150,7 +161,7 @@ describe('GET /api/cowork/events/stream', () => {
     expect(res.status).toBe(200);
     // No socket is opened when the request is already aborted.
     expect(ioMock).not.toHaveBeenCalled();
-    const reader = res.body!.getReader();
+    const reader = bodyReader(res);
     const { value, done } = await readWithTimeout(reader);
     expect(done).toBe(true);
     expect(value).toBeUndefined();
@@ -164,7 +175,7 @@ describe('GET /api/cowork/events/stream', () => {
     expect(ioMock).toHaveBeenCalledTimes(1);
     expect(lastSocket).not.toBeNull();
 
-    const reader = res.body!.getReader();
+    const reader = bodyReader(res);
     // Initial hello is always emitted first. It echoes the cursor so we can
     // prove since_id=10 was parsed (not the default 0).
     const first = await readWithTimeout(reader);
@@ -174,7 +185,7 @@ describe('GET /api/cowork/events/stream', () => {
 
     // Hydrate a batch spanning the cursor: id 5 must be suppressed (<= 10),
     // id 11 must be forwarded (strictly greater).
-    lastSocket!.emitLifecycle('events:replay', [
+    requireSocket().emitLifecycle('events:replay', [
       { id: 5, channel: 'tab:updated', payload: {} },
       { id: 11, channel: 'tab:updated', payload: {} },
     ]);
@@ -192,13 +203,13 @@ describe('GET /api/cowork/events/stream', () => {
     const res = await GET(streamReq(ac.signal, 'abc'));
     expect(res.status).toBe(200);
 
-    const reader = res.body!.getReader();
+    const reader = bodyReader(res);
     const first = await readWithTimeout(reader);
     expect(new TextDecoder().decode(first.value as Uint8Array)).toContain(
       'cowork-events stream open since_id=0',
     );
 
-    lastSocket!.emitLifecycle('events:replay', [
+    requireSocket().emitLifecycle('events:replay', [
       { id: 1, channel: 'tab:updated', payload: {} },
     ]);
     const second = await readWithTimeout(reader);
@@ -215,13 +226,13 @@ describe('GET /api/cowork/events/stream', () => {
     expect(res.status).toBe(200);
     expect(lastSocket).not.toBeNull();
 
-    const reader = res.body!.getReader();
+    const reader = bodyReader(res);
     // Drain the initial hello comment first.
     await readWithTimeout(reader);
 
     // A live business event whose payload carries a Bearer token. The
     // mini-service delivers `(payload, meta)`; the sequence id lives in meta.
-    lastSocket!.emitAny(
+    requireSocket().emitAny(
       'security:event',
       { note: 'Authorization: Bearer sekritTokenValue' },
       { id: 7, ts: 123 },
@@ -244,7 +255,7 @@ describe('GET /api/cowork/events/stream', () => {
       controllers.push(ac);
       const res = await GET(streamReq(ac.signal));
       expect(res.status).toBe(200);
-      readers.push(res.body!.getReader());
+      readers.push(bodyReader(res));
     }
 
     // The next stream is over the cap: rejected without opening a socket.
@@ -267,9 +278,9 @@ describe('GET /api/cowork/events/stream', () => {
     // Never read: the internal queue fills, desiredSize drops to <=0, and every
     // further chunk is held in the bounded pending buffer. Emit well past the
     // 1024-chunk cap to trip the hard-overflow termination.
-    const reader = res.body!.getReader();
+    const reader = bodyReader(res);
     for (let i = 1; i <= 1200; i += 1) {
-      lastSocket!.emitAny('tab:updated', { n: i }, { id: i, ts: 1 });
+      requireSocket().emitAny('tab:updated', { n: i }, { id: i, ts: 1 });
     }
 
     let overflowed = false;

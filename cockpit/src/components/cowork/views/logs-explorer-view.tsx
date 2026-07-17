@@ -297,6 +297,9 @@ export function LogsExplorerView() {
   const filtered = React.useMemo(() => {
     const q = debouncedQuery.trim().toLowerCase();
     const range = TIME_RANGES[rangeIdx].ms;
+    // Relative time-range filtering needs the current wall clock; recomputed
+    // only when the memo deps change, which is the intended behavior here.
+    // eslint-disable-next-line react-hooks/purity
     const now = Date.now();
     return logs.filter((l) => {
       if (!levels.has(l.level)) return false;
@@ -321,6 +324,8 @@ export function LogsExplorerView() {
  // Return to the first page whenever the filtered set changes (new filter or
  // new data), so a stale "load more" offset never applies to a different list.
   React.useEffect(() => {
+    // Intentional pagination reset when the filtered set changes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setVisibleCount(LOG_PAGE_SIZE);
   }, [filtered]);
 

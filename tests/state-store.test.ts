@@ -137,7 +137,6 @@ describe("initRunState abort-merge preservation", () => {
 
 describe("loadAndSetDomainConfig fail-closed", () => {
   test("storage failure throws, flags enforcement, and the live gate blocks", async () => {
-    let chromeRef: Record<string, unknown> | undefined;
     const chrome = {
       storage: {
         local: {
@@ -147,7 +146,7 @@ describe("loadAndSetDomainConfig fail-closed", () => {
         },
       },
     };
-    chromeRef = chrome as unknown as Record<string, unknown>;
+    const chromeRef = chrome as unknown as Record<string, unknown>;
     (globalThis as Record<string, unknown>).chrome = chromeRef;
     delete (globalThis as Record<string, unknown>).__openCoworkDomainConfig;
     delete (globalThis as Record<string, unknown>).__openCoworkDomainConfigEnforced;
@@ -172,7 +171,6 @@ describe("loadAndSetDomainConfig fail-closed", () => {
   });
 
   test("a loaded allowlist is consulted and an off-allowlist host blocks", async () => {
-    const store: Record<string, unknown> = {};
     const chrome = {
       storage: {
         local: {

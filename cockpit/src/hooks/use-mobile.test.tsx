@@ -12,7 +12,7 @@ import { renderToString } from 'react-dom/server';
 // caches a single MediaQueryList per module instance, so each scenario reloads
 // the module (vi.resetModules) with a fresh matchMedia before the first render.
 function installMatchMedia(matches: boolean) {
-  const mql: any = {
+  const mql: MediaQueryList = {
     matches,
     media: '(max-width: 767px)',
     onchange: null,
@@ -21,8 +21,8 @@ function installMatchMedia(matches: boolean) {
     addListener: vi.fn(),
     removeListener: vi.fn(),
     dispatchEvent: vi.fn(),
-  };
-  (window as any).matchMedia = vi.fn(() => mql);
+  } as Partial<MediaQueryList> as MediaQueryList;
+  (window as unknown as { matchMedia: (q: string) => MediaQueryList }).matchMedia = vi.fn(() => mql);
   return mql;
 }
 

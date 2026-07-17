@@ -15,6 +15,14 @@ const projectRoot = dirname(fileURLToPath(import.meta.url));
 const nextConfig: NextConfig = {
   output: "standalone",
   poweredByHeader: false,
+  // Prisma 7's better-sqlite3 driver adapter is a native Node addon. Keep it
+  // (and the generated client) external to the server bundle so the standalone
+  // build does not try to inline the .node binding and fail at build/runtime.
+  serverExternalPackages: [
+    "better-sqlite3",
+    "@prisma/adapter-better-sqlite3",
+    "@prisma/client",
+  ],
  // Strict mode is intentionally ON. The double-invocation of effects in
  // development is the most effective built-in detector of missing effect
  // cleanups and stale-closure bugs. The realtime `useCoworkWebSocket` hook

@@ -333,7 +333,7 @@ async function scheduleAlarm(task: ScheduledTask): Promise<void> {
   }
 
   if (task.schedule.type === "interval") {
-    await chrome.alarms.create(name, { periodInMinutes: task.schedule.intervalMinutes });
+    await chrome.alarms.create(name, { periodInMinutes: task.schedule.intervalMinutes } as chrome.alarms.AlarmCreateInfo);
   } else {
     const now = new Date();
     const target = computeNextFire(task.schedule, now);

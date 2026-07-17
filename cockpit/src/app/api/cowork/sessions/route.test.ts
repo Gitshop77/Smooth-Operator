@@ -1,5 +1,5 @@
+import type { NextRequest } from 'next/server';
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { Prisma } from '@prisma/client';
 
 const { create, findMany, PrismaClientKnownRequestError } = vi.hoisted(() => {
   class PrismaClientKnownRequestError extends Error {
@@ -33,7 +33,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-function reqWithBody(text: string): any {
+function reqWithBody(text: string): NextRequest {
   const chunk = new TextEncoder().encode(text);
   return {
     body: {
@@ -50,7 +50,7 @@ function reqWithBody(text: string): any {
       },
     },
     headers: { get: () => null },
-  };
+  } as unknown as NextRequest;
 }
 
 describe('POST /api/cowork/sessions', () => {
@@ -94,7 +94,7 @@ describe('POST /api/cowork/sessions', () => {
 describe('GET /api/cowork/sessions', () => {
   it('projects isIncognito to the legacy incognito alias', async () => {
     findMany.mockResolvedValueOnce([{ id: 's1', isIncognito: true, name: 'n' }]);
-    const res = await GET({ nextUrl: { searchParams: new URLSearchParams() } } as any);
+    const res = await GET({ nextUrl: { searchParams: new URLSearchParams() } } as unknown as NextRequest);
     const body = await res.json();
     expect(body.sessions[0].incognito).toBe(true);
   });

@@ -1,8 +1,9 @@
+import type { NextRequest } from 'next/server';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 import { POST, GET } from '@/app/api/cowork/extensions/log/route';
 
-function fakeReq(body: unknown): any {
+function fakeReq(body: unknown): NextRequest {
   const payload = new TextEncoder().encode(JSON.stringify(body));
   return {
     nextUrl: { searchParams: new URLSearchParams('') },
@@ -13,7 +14,7 @@ function fakeReq(body: unknown): any {
         controller.close();
       },
     }),
-  };
+  } as unknown as NextRequest;
 }
 
 // One shared console.info spy for every test in this file; the existing

@@ -6,7 +6,7 @@
  * increment `consecutiveFailures` and decide whether to abort.
  */
 
-import type { BrowserState, TabInfo } from "../../types";
+import type { TabInfo } from "../../types";
 import { extractBrowserState } from "../../dom/extractor";
 import type { LoopState, ObserveStateResult } from "../types";
 

@@ -54,10 +54,16 @@ function StreamingMessage({
  // array that grows with message length.
   const timeoutId = React.useRef<number | null>(null);
   const onCompleteRef = React.useRef(onComplete);
-  onCompleteRef.current = onComplete;
+  // Keep the callback ref fresh after commit (never mutate a ref during render).
+  React.useEffect(() => {
+    onCompleteRef.current = onComplete;
+  });
 
   React.useEffect(() => {
     abortedRef.current = false;
+    // Intentional reset of the typewriter's local animation state whenever the
+    // source text changes — this synchronizes local UI state to a prop.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setShown("");
     let i = 0;
     const tick = () => {

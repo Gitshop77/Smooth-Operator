@@ -63,7 +63,7 @@ describe("provider-config: buildProvider", () => {
  // the resolved model. An empty input must resolve to a CONCRETE default model
  // (the models.dev catalog default, or `DEFAULT_MODELS['openai'] = 'gpt-4o'`
  // offline) rather than staying empty — assert a non-empty model was resolved.
-    expect(provider.id).toMatch(/^openai:[a-z0-9.\-]+$/i);
+    expect(provider.id).toMatch(/^openai:[a-z0-9.-]+$/i);
   });
 });
 

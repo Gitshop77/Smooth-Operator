@@ -1,7 +1,6 @@
 import type { NextRequest } from 'next/server';
 import type { Prisma } from '@prisma/client';
 import { createHash } from 'node:crypto';
-import { isIP } from 'node:net';
 
 /** App-authored, client-facing error.
  *
@@ -327,6 +326,28 @@ export function isSsrfSafeUrl(url: string): boolean {
   return true;
 }
 
+/** Pure-JS stand-in for Node's `net.isIP`, so this module can be bundled into
+ * client components without pulling the `node:net` builtin into the browser
+ * bundle. Returns 4 for a standard dotted-decimal IPv4 literal, 6 for any
+ * address containing a `:` (IPv6 literals always do), and 0 otherwise.
+ *
+ * Routing every `:`-containing host to the IPv6 branch preserves the SSRF
+ * guard's `fe80:/10` / `fc00:/7` classification; invalid `:` hosts simply fail
+ * the IPv6 checks and are rejected. Dotted-decimal IPv4 octets are bounded to
+ * 0–255, matching `net.isIP`'s literal form (encoded octal/hex forms still fall
+ * through to `normalizeEncodedIpv4`). */
+function ipVersion(host: string): 0 | 4 | 6 {
+  if (host.includes(':')) return 6;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (m) {
+    for (let i = 1; i <= 4; i++) {
+      if (Number(m[i]) > 255) return 0;
+    }
+    return 4;
+  }
+  return 0;
+}
+
 /** True when `host` resolves to a loopback / private / link-local / CGNAT
  * address in any of the forms an HTTP client would accept: standard IPv4,
  * standard IPv6, IPv4-mapped IPv6, or the various integer encodings of an IPv4
@@ -363,7 +384,7 @@ function isRestrictedHost(host: string): boolean {
    if (dotted && isRestrictedHost(dotted)) return true;
  }
  // IPv6 literal.
-  if (isIP(host) === 6) {
+  if (ipVersion(host) === 6) {
  // IPv4-mapped IPv6 (`:ffff:a.b.c.d` or `::ffff:WWXX:YYZZ`) — classify the
  // embedded address. The two-hextet form (`WWXX:YYZZ`) is a valid encoding of
  // an IPv4 address and must be normalized to dotted decimal before classification,
@@ -412,7 +433,7 @@ function isRestrictedHost(host: string): boolean {
     return false;
   }
  // Standard IPv4 literal.
-  if (isIP(host) === 4) return isPrivateIpv4(host);
+  if (ipVersion(host) === 4) return isPrivateIpv4(host);
  // Non-standard encodings (decimal / octal / hex / inet_aton shorthand) that an
  // HTTP client resolves to the same address. Normalize to dotted IPv4 first.
   const normalized = normalizeEncodedIpv4(host);

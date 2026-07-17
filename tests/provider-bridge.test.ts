@@ -10,9 +10,7 @@ vi.mock("@/lib/agent/llm/route/client", () => ({
   generate: vi.fn(),
 }));
 
-// eslint-disable-next-line import/first
 import { generate } from "@/lib/agent/llm/route/client";
-// eslint-disable-next-line import/first
 import { toLLMProvider } from "@/lib/agent/llm/provider-bridge";
 
 const mockedGenerate = generate as unknown as ReturnType<typeof vi.fn>;

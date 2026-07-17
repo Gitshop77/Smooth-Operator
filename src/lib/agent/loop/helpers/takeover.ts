@@ -29,6 +29,12 @@ function raceResumeWithTimeout(
 ): Promise<"resumed" | "timeout"> {
   return new Promise<"resumed" | "timeout">((resolve) => {
     let done = false;
+ // Must stay `let` (declared, uninitialized): `arm(finish)` below can invoke
+ // `finish` synchronously (e.g. an already-aborted signal), and `finish` calls
+ // `clearTimeout(timer)`. Keeping `timer` in scope but unassigned makes that a
+ // safe `clearTimeout(undefined)` no-op; a `const` initialized after `arm`
+ // would throw a TDZ ReferenceError on that synchronous path.
+ // eslint-disable-next-line prefer-const
     let timer: ReturnType<typeof setTimeout>;
     let abortListener: (() => void) | null = null;
     const finish = (result: "resumed" | "timeout"): void => {

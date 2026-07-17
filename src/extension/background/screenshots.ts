@@ -36,7 +36,11 @@ export async function captureTabScreenshot(tabId: number): Promise<string> {
  // losing branch's rejection is never orphaned (no unhandled rejection).
     const result = await new Promise<{ data?: string }>((resolve, reject) => {
       let settled = false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timer: ReturnType<typeof setTimeout> = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error("captureTabScreenshot timed out after 10s"));
+      }, 10_000);
       (chrome.debugger.sendCommand(
         { tabId },
         "Page.captureScreenshot",
@@ -54,21 +58,16 @@ export async function captureTabScreenshot(tabId: number): Promise<string> {
         (r) => {
           if (settled) return;
           settled = true;
-          if (timer !== undefined) clearTimeout(timer);
+          clearTimeout(timer);
           resolve(r);
         },
         (e) => {
           if (settled) return;
           settled = true;
-          if (timer !== undefined) clearTimeout(timer);
+          clearTimeout(timer);
           reject(e);
         },
       );
-      timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        reject(new Error("captureTabScreenshot timed out after 10s"));
-      }, 10_000);
     });
     if (!result?.data) throw new Error("Page.captureScreenshot returned no data");
     return `data:image/jpeg;base64,${result.data}`;

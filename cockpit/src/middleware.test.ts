@@ -305,7 +305,7 @@ describe('middleware request logging never leaks the SSE bearer token', () => {
   it('never writes the ?token= bearer secret to the request log for an authorized SSE request', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
     const { middleware } = await import('@/middleware');
-    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const res = middleware(fakeReq(SSE, `token=${REAL_TOKEN}`));
       expect(res.status).toBe(200);
@@ -320,7 +320,7 @@ describe('middleware request logging never leaks the SSE bearer token', () => {
   it('logs only the pathname (not the query string) for a protected request carrying ?token=', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
     const { middleware } = await import('@/middleware');
-    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       middleware(fakeReq(PROTECTED, `token=${REAL_TOKEN}`));
       const logged = spy.mock.calls.map((c) => c.join(' ')).join('\n');

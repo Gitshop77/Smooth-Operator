@@ -1,3 +1,4 @@
+import type { NextRequest } from 'next/server';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 const { create, findMany } = vi.hoisted(() => ({
@@ -17,7 +18,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-function reqWithBody(text: string): any {
+function reqWithBody(text: string): NextRequest {
   const chunk = new TextEncoder().encode(text);
   return {
     body: {
@@ -34,7 +35,7 @@ function reqWithBody(text: string): any {
       },
     },
     headers: { get: () => null },
-  };
+  } as unknown as NextRequest;
 }
 
 describe('POST /api/cowork/workspaces', () => {

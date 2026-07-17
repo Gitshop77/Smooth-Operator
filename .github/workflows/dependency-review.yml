@@ -18,10 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # PIN TO A VERIFIED SHA (actions/checkout@v4 tag)
+        uses: actions/checkout@v7.0.0 # actions/checkout v7 (Node 24 runtime; dependabot PR #36)
 
       - name: Dependency Review
-        uses: actions/dependency-review-action@4901385134134e04cec5fbe5ddfe3b2c5bd5d976 # v4.0.0
+        uses: actions/dependency-review-action@v5.0.0 # dependency-review-action v5 (Node 24 runtime; dependabot PR #37)
         with:
           # Block PRs that introduce MODERATE or higher severity advisories.
           fail-on-severity: moderate

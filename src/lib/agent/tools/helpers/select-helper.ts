@@ -90,7 +90,7 @@ export class Select {
       if (t === want) exact.push(o);
       else if (t.toLowerCase().includes(lower)) sub.push(o);
     }
-    let matched = exact.length > 0 ? exact : sub;
+    const matched = exact.length > 0 ? exact : sub;
     if (matched.length === 0) {
       throw new NoSuchElementException(
         `select option with text "${want}" not found`,

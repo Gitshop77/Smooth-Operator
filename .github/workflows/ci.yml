@@ -22,10 +22,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # PIN TO A VERIFIED SHA (actions/checkout@v4 tag)
+      - uses: actions/checkout@v7.0.0 # actions/checkout v7 (Node 24 runtime; dependabot PR #36)
 
       - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # PIN TO A VERIFIED SHA (actions/setup-node@v4 tag)
+        uses: actions/setup-node@v7.0.0 # actions/setup-node v7 (Node 24 runtime; dependabot PR #44)
         with:
           node-version: '20.18.0'
           cache: 'npm'
@@ -119,10 +119,10 @@ jobs:
       run:
         working-directory: cockpit
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # PIN TO A VERIFIED SHA (actions/checkout@v4 tag)
+      - uses: actions/checkout@v7.0.0 # actions/checkout v7 (Node 24 runtime; dependabot PR #36)
 
       - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # PIN TO A VERIFIED SHA (actions/setup-node@v4 tag)
+        uses: actions/setup-node@v7.0.0 # actions/setup-node v7 (Node 24 runtime; dependabot PR #44)
         with:
           node-version: '20.18.0'
           cache: 'npm'
@@ -180,18 +180,20 @@ jobs:
       contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # PIN TO A VERIFIED SHA (actions/checkout@v4 tag)
+        uses: actions/checkout@v7.0.0 # actions/checkout v7 (Node 24 runtime; dependabot PR #36)
         with:
           fetch-depth: 0
 
       - name: Run gitleaks secret scan
         # gitleaks exits non-zero on a detected leak, so the step (and the
-        # build) fails on a committed real secret. `--redact` masks secret
-        # values in any logs/artifacts. fail: true is gitleaks' default
-        # behavior when a leak is found.
-        uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # PIN TO A VERIFIED SHA (gitleaks/gitleaks-action@v2 tag)
-        with:
-          args: --redact
+        # build) fails on a committed real secret. The action does NOT accept an
+        # `args` input (that caused the "Unexpected input(s) 'args'" failure);
+        # configuration is supplied via env instead. GITLEAKS_CONFIG points at
+        # our ruleset (built-in rules + a narrow allowlist for the redaction
+        # test fixtures). fail-on-leak is the action's default behavior.
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # gitleaks-action (Node 24 runtime; dependabot PR #35)
+        env:
+          GITLEAKS_CONFIG: .github/gitleaks.toml
 
   # SAST: GitHub CodeQL security-and-quality scan for javascript-typescript.
   codeql:
@@ -202,11 +204,11 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # PIN TO A VERIFIED SHA (actions/checkout@v4 tag)
+      - uses: actions/checkout@v7.0.0 # actions/checkout v7 (Node 24 runtime; dependabot PR #36)
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@641a925cfafe92d0fdf8b239ba4053e3f8d99d6d # PIN TO A VERIFIED SHA (github/codeql-action/init@v3 tag)
+        uses: github/codeql-action/init@v4 # github/codeql-action v4 (Node 24 runtime)
         with:
           languages: javascript-typescript
           queries: security-and-quality
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@641a925cfafe92d0fdf8b239ba4053e3f8d99d6d # PIN TO A VERIFIED SHA (github/codeql-action/analyze@v3 tag)
+        uses: github/codeql-action/analyze@v4 # github/codeql-action v4 (Node 24 runtime)

@@ -1,3 +1,4 @@
+import type { NextRequest } from 'next/server';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 const { create, findMany, count, findUnique, del } = vi.hoisted(() => ({
@@ -21,13 +22,13 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-function getReq(query = ''): any {
-  return { nextUrl: { searchParams: new URLSearchParams(query) } };
+function getReq(query = ''): NextRequest {
+  return { nextUrl: { searchParams: new URLSearchParams(query) } } as unknown as NextRequest;
 }
 
-function reqWithBody(text: string | null): any {
+function reqWithBody(text: string | null): NextRequest {
   if (text === null) {
-    return { body: null, headers: { get: () => null } };
+    return { body: null, headers: { get: () => null } } as unknown as NextRequest;
   }
  // Mirror what the real route consumes: `bodyJson` reads the request via
  // `req.body.getReader()`, so the mock must expose a ReadableStream-style
@@ -48,7 +49,7 @@ function reqWithBody(text: string | null): any {
       },
     },
     headers: { get: () => null },
-  };
+  } as unknown as NextRequest;
 }
 
 describe('POST /api/cowork/tabs (F-04b)', () => {

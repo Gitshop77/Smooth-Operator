@@ -1,3 +1,4 @@
+import type { NextRequest } from 'next/server';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   ClientError, withRouteError, bodyJson, bodyJsonOptional, isSsrfSafeUrl,
@@ -10,7 +11,7 @@ import { POST as workflowsPost } from '@/app/api/cowork/workflows/route';
 import { POST as sessionsPost } from '@/app/api/cowork/sessions/route';
 
 // Mock Prisma so route handlers can be exercised without a live DB.
-const created: any[] = [];
+const created: Array<Record<string, unknown>> = [];
 
 // Reset the shared `created` array between tests so assertions that rely on
 // value uniqueness (e.g. a 512-char userAgent) cannot match a record inserted
@@ -26,7 +27,7 @@ beforeEach(() => {
 // callback's `tx.bookmark` share the exact same mock instances.
 const { bookmarkFakes } = vi.hoisted(() => ({
   bookmarkFakes: {
-    create: vi.fn(async (a: any) => { created.push(a.data); return a.data; }),
+    create: vi.fn(async (a: { data: Record<string, unknown> }) => { created.push(a.data); return a.data; }),
     findMany: vi.fn(async () => []),
     findUnique: vi.fn(async () => null),
   },
@@ -35,19 +36,19 @@ const { bookmarkFakes } = vi.hoisted(() => ({
 vi.mock('@/lib/db', () => ({
   db: {
     tab: {
-      create: vi.fn(async (a: any) => { created.push(a.data); return a.data; }),
+      create: vi.fn(async (a: { data: Record<string, unknown> }) => { created.push(a.data); return a.data; }),
       findMany: vi.fn(async () => []),
       count: vi.fn(async () => 0),
     },
     workspace: { findUnique: vi.fn(async () => ({ id: 'ws1', name: 'ws' })) },
     bookmark: bookmarkFakes,
     workflow: {
-      create: vi.fn(async (a: any) => { created.push(a.data); return a.data; }),
+      create: vi.fn(async (a: { data: Record<string, unknown> }) => { created.push(a.data); return a.data; }),
       findMany: vi.fn(async () => []),
       count: vi.fn(async () => 0),
     },
     session: {
-      create: vi.fn(async (a: any) => { created.push(a.data); return a.data; }),
+      create: vi.fn(async (a: { data: Record<string, unknown> }) => { created.push(a.data); return a.data; }),
       findMany: vi.fn(async () => []),
     },
  // The bookmarks route wraps create/lookup in `db.$transaction`, which the
@@ -56,7 +57,10 @@ vi.mock('@/lib/db', () => ({
  // callback with a `tx` that carries the same `bookmark` fakes so the in-tx
  // `findUnique`/`create` resolve. A callback that returns `null` (unknown
  // parentId) is propagated unchanged so the route can map it to a 400.
-    $transaction: vi.fn(async (fn: (tx: any) => Promise<any>) => fn({ bookmark: bookmarkFakes })),
+    $transaction: vi.fn(
+      async (fn: (tx: { bookmark: typeof bookmarkFakes }) => Promise<unknown>) =>
+        fn({ bookmark: bookmarkFakes }),
+    ),
   },
 }));
 
@@ -78,25 +82,25 @@ function streamFromString(text: string): ReadableStream<Uint8Array> {
 // A minimal request for the low-level body helpers. `text === null` models an
 // absent body (`req.body` falsy); otherwise the body is a real stream carrying
 // exactly that text.
-function fakeReq(text: string | null): any {
-  return { body: text === null ? null : streamFromString(text) };
+function fakeReq(text: string | null): NextRequest {
+  return { body: text === null ? null : streamFromString(text) } as unknown as NextRequest;
 }
 
 // A POST-style NextRequest: a real stream body plus the `headers.get` and
 // `nextUrl.searchParams` accessors the route handlers touch (tabs/bookmarks read
 // `req.headers.get('x-request-id')`).
-function fakePostReq(body: Record<string, unknown>): any {
+function fakePostReq(body: Record<string, unknown>): NextRequest {
   return {
     body: streamFromString(JSON.stringify(body)),
     headers: { get: () => null },
     nextUrl: { searchParams: new URLSearchParams() },
-  };
+  } as unknown as NextRequest;
 }
 
 // A minimal NextRequest carrying only `nextUrl.searchParams` (for parseLimit /
 // parseAgentId, which never read the body).
-function fakeNextReq(search: string): any {
-  return { nextUrl: { searchParams: new URLSearchParams(search) } };
+function fakeNextReq(search: string): NextRequest {
+  return { nextUrl: { searchParams: new URLSearchParams(search) } } as unknown as NextRequest;
 }
 
 describe('bodyJson (F-04b)', () => {
@@ -393,12 +397,14 @@ describe('request validation — sessions userAgent bounded', () => {
   it('truncates an over-long userAgent to 512 chars and stores it', async () => {
     const res = await sessionsPost(fakePostReq({ name: 's', userAgent: 'A'.repeat(800) }));
     expect(res.status).toBe(201);
-    const stored = created.find((c) => c.userAgent && c.userAgent.length === 512);
+    const stored = created.find(
+      (c: Record<string, unknown>) => typeof c.userAgent === 'string' && c.userAgent.length === 512,
+    );
     expect(stored).toBeTruthy();
   });
 
   it('rejects a userAgent that is not a string with 400', async () => {
-    const res = await sessionsPost(fakePostReq({ name: 's', userAgent: { bad: true } as any }));
+    const res = await sessionsPost(fakePostReq({ name: 's', userAgent: { bad: true } as unknown as string }));
     expect(res.status).toBe(400);
   });
 });

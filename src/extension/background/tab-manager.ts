@@ -346,7 +346,11 @@ export async function extractStateFromTab(
       const dataUrl = await withPageDebugger(tabId, async () => {
         const result = await new Promise<{ data?: string }>((resolve, reject) => {
           let settled = false;
-          let timer: ReturnType<typeof setTimeout> | undefined;
+          const timer: ReturnType<typeof setTimeout> = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            reject(new Error("captureScreenshot timed out after 10s"));
+          }, 10_000);
           (chrome.debugger.sendCommand(
             { tabId },
             "Page.captureScreenshot",
@@ -355,21 +359,16 @@ export async function extractStateFromTab(
             (r) => {
               if (settled) return;
               settled = true;
-              if (timer !== undefined) clearTimeout(timer);
+              clearTimeout(timer);
               resolve(r);
             },
             (e) => {
               if (settled) return;
               settled = true;
-              if (timer !== undefined) clearTimeout(timer);
+              clearTimeout(timer);
               reject(e);
             },
           );
-          timer = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            reject(new Error("captureScreenshot timed out after 10s"));
-          }, 10_000);
         });
         if (!result?.data) throw new Error("Page.captureScreenshot returned no data");
         return `data:image/jpeg;base64,${result.data}`;
@@ -525,21 +524,20 @@ export async function executeActionsInTab(
 export function waitForTabLoad(tabId: number, timeoutMs = 8000): Promise<void> {
   return new Promise((resolve) => {
     let done = false;
- // Declared before `finish` so they are in scope when `finish` (which may be
- // invoked synchronously) references them — removing a latent TDZ footgun.
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    let listener: (id: number, info: chrome.tabs.TabChangeInfo) => void;
+ // `finish` only ever runs asynchronously (via the onUpdated listener, the
+ // `chrome.tabs.get` promise, or the timeout), never synchronously during this
+ // setup block, so referencing these `const`s from the closure is TDZ-safe.
     const finish = () => {
       if (!done) {
         done = true;
  // Release the timer handle so it doesn't linger for up to `timeoutMs`
  // after resolution (finding: waitForTabLoad setTimeout is never cleared).
-        if (timeoutId !== undefined) clearTimeout(timeoutId);
+        clearTimeout(timeoutId);
         chrome.tabs.onUpdated.removeListener(listener);
         resolve();
       }
     };
-    listener = (id: number, info: chrome.tabs.TabChangeInfo) => {
+    const listener = (id: number, info: chrome.tabs.OnUpdatedInfo) => {
       if (id === tabId && info.status === "complete") finish();
     };
     chrome.tabs.onUpdated.addListener(listener);
@@ -549,7 +547,7 @@ export function waitForTabLoad(tabId: number, timeoutMs = 8000): Promise<void> {
         if (t.status === "complete") finish();
       })
       .catch(finish);
-    timeoutId = setTimeout(finish, timeoutMs);
+    const timeoutId = setTimeout(finish, timeoutMs);
   });
 }
 

@@ -165,6 +165,9 @@ function documentedEnumValues(text: string, anchor: string): string[] {
 describe('F21 (reverse) — documented schema enum set exactly equals ENUM_ALLOWED_VALUES', () => {
   (Object.keys(SCHEMA_ENUM_ANCHORS) as EnumKey[]).forEach((key) => {
     it(`${key} — no schema→test drift (set equality)`, () => {
+      // Each `key` comes from `Object.keys(SCHEMA_ENUM_ANCHORS)`, so the anchor
+      // is guaranteed present here; the `Partial` is only for the literal's shape.
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
       const documented = documentedEnumValues(schemaText, SCHEMA_ENUM_ANCHORS[key]!);
       const expected = ENUM_ALLOWED_VALUES[key];
       expect(documented.length).toBeGreaterThan(0);

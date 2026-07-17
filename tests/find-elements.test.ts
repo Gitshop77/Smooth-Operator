@@ -7,7 +7,7 @@
  * while non-sensitive attributes are returned verbatim.
  */
 
-import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from "vitest";
+import { describe, test, expect, beforeEach, beforeAll, afterAll, vi } from "vitest";
 import { handleFindElements } from "../src/lib/agent/tools/handlers/find-elements";
 import type { ActionContext } from "../src/lib/agent/tools/handlers/types";
 import { setSecret, deleteSecret } from "../src/lib/agent/secrets";

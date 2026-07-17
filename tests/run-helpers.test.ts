@@ -28,7 +28,7 @@ import { buildLoopDeps } from "../src/extension/background/run-helpers";
 import { RUN_STATE_KEY } from "../src/extension/background/state-store";
 import { checkActionAllowed, requiresConfirmation } from "@/lib/agent/modes";
 import { askHuman } from "@/lib/agent/human-interaction";
-import type { AgentAction, ActionResult } from "@/lib/agent/types";
+import type { AgentAction } from "@/lib/agent/types";
 import type { AgentMode } from "@/lib/agent/modes";
 
 let sessionStore: Record<string, unknown> = {};

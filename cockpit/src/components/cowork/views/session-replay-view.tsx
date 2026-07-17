@@ -94,6 +94,9 @@ export function SessionReplayView() {
       });
     }
     return out;
+    // `sessionId` is intentionally retained (see comment above) so the memo
+    // re-evaluates once a real task↔session linkage exists.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tasks.data, sessionId]);
 
   const [activeIndex, setActiveIndex] = React.useState(0);
@@ -102,6 +105,8 @@ export function SessionReplayView() {
   React.useEffect(() => {
     if (steps.length === 0) return;
     const firstUndone = steps.findIndex((s) => !s.done);
+    // Intentional: reset the scrubber to the live frontier when steps change.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setActiveIndex(firstUndone >= 0 ? firstUndone : steps.length - 1);
   }, [steps]);
 

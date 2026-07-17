@@ -70,7 +70,6 @@ export async function handleScroll(
  // wait so a non-firing event can't hang the step.
   await new Promise<void>((resolve) => {
     let settled = false;
-    let t: ReturnType<typeof setTimeout>;
     const finish = () => {
       if (!settled) {
         settled = true;
@@ -80,7 +79,7 @@ export async function handleScroll(
       }
     };
     window.addEventListener("scrollend", finish, { once: true });
-    t = setTimeout(finish, Math.min(TIMINGS.scrollSmooth * Math.max(pages, 1), 3000));
+    const t = setTimeout(finish, Math.min(TIMINGS.scrollSmooth * Math.max(pages, 1), 3000));
   });
 
   const cacheCleared = await clearVisionCache();

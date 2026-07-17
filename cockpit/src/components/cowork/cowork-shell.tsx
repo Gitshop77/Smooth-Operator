@@ -108,8 +108,10 @@ export function CoworkShell() {
 
   const [bannerDismissed, setBannerDismissed] = React.useState(false);
 
-  // Re-arm the banner whenever the socket reconnects.
+  // Re-arm the banner whenever the socket reconnects — intentional sync of
+  // local UI state to the external socket-connection signal.
   React.useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (socketConnected) setBannerDismissed(false);
   }, [socketConnected]);
 

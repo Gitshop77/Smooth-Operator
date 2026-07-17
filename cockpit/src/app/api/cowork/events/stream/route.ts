@@ -275,7 +275,7 @@ export async function GET(req: NextRequest): Promise<Response> {
 
  // Connection lifecycle observability.
       socket.on('connect', () => {
-        console.info('[cowork] events/stream connected to cowork-events service');
+        console.warn('[cowork] events/stream connected to cowork-events service');
       });
       socket.on('connect_error', (err: Error) => {
  // Surface the failure: log server-side AND emit a comment so the client

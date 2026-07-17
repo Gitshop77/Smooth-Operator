@@ -1,3 +1,4 @@
+import type { NextRequest } from 'next/server';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 // Mock Prisma so no real DB is touched. The route creates bookmarks inside a
@@ -12,7 +13,8 @@ const { findMany, txFindUnique, txCreate } = vi.hoisted(() => ({
 vi.mock('@/lib/db', () => ({
   db: {
     bookmark: { findMany },
-    $transaction: (cb: any) => cb({ bookmark: { findUnique: txFindUnique, create: txCreate } }),
+    $transaction: (cb: (tx: { bookmark: { findUnique: typeof txFindUnique; create: typeof txCreate } }) => unknown) =>
+      cb({ bookmark: { findUnique: txFindUnique, create: txCreate } }),
   },
 }));
 
@@ -22,10 +24,10 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-function reqWithBody(body?: unknown): any {
+function reqWithBody(body?: unknown): NextRequest {
   const headers = new Headers();
   if (body === undefined) {
-    return { nextUrl: { searchParams: new URLSearchParams() }, headers, body: null };
+    return { nextUrl: { searchParams: new URLSearchParams() }, headers, body: null } as unknown as NextRequest;
   }
   const chunk = new TextEncoder().encode(JSON.stringify(body));
   return {
@@ -44,7 +46,7 @@ function reqWithBody(body?: unknown): any {
         };
       },
     },
-  };
+  } as unknown as NextRequest;
 }
 
 describe('POST /api/cowork/bookmarks', () => {
@@ -123,8 +125,9 @@ describe('GET /api/cowork/bookmarks', () => {
     expect(body.bookmarks).toHaveLength(1);
     const root = body.bookmarks[0];
     expect(root.id).toBe('r');
-    expect((root as any).children).toHaveLength(1);
-    expect((root as any).children[0].id).toBe('c');
+    const rootWithChildren = root as { children: Array<{ id: string }> };
+    expect(rootWithChildren.children).toHaveLength(1);
+    expect(rootWithChildren.children[0].id).toBe('c');
   });
 
   it('survives a cyclic parentId without crashing', async () => {

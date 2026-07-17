@@ -100,10 +100,14 @@ export function useCoworkWebSocket(): void {
   // (with `[]` deps) regardless of how often these identities change. Today
   // they are stable, but this decouples socket lifecycle from callback identity.
   const cbs = useRef({ setSocketConnected, setSocketStatus, setLastEvent, invalidate });
-  cbs.current = { setSocketConnected, setSocketStatus, setLastEvent, invalidate };
+  // Refresh the ref after each commit (not during render) so the long-lived
+  // connection effect always sees the latest callbacks without re-subscribing.
+  useEffect(() => {
+    cbs.current = { setSocketConnected, setSocketStatus, setLastEvent, invalidate };
+  });
 
   useEffect(() => {
-    const { setSocketConnected, setLastEvent, invalidate } = cbs.current;
+    const { setSocketConnected, setSocketStatus, setLastEvent, invalidate } = cbs.current;
     let socket: Socket | null = null;
     let disposed = false;
     let rafId: number | null = null;
@@ -265,7 +269,7 @@ export function useCoworkWebSocket(): void {
           }
  // Surface payload shape in dev tools for debugging.
           if (process.env.NODE_ENV !== "production") {
-            console.debug(`[cowork-ws] ${event}`, payload);
+            console.warn(`[cowork-ws] ${event}`, payload);
           }
         });
       };
