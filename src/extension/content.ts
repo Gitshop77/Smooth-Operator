@@ -21,7 +21,13 @@ import { generateAccessibilityTree, initElementMap } from "@/lib/agent/dom/ax-tr
 import { executeAction } from "@/lib/agent/tools/executor";
 import { setPersistentHighlight } from "@/lib/agent/dom/overlay";
 import { installPopupHandler } from "@/lib/agent/dom/popup-handler";
-import { setDomainConfig, validateDomainConfig } from "@/lib/agent/tools/helpers/domain-config";
+import { setSecretsResolvedExternally } from "@/lib/agent/secrets";
+import {
+  isDomainPolicyEnforced,
+  setDomainConfig,
+  validateDomainConfig,
+} from "@/lib/agent/tools/helpers/domain-config";
+import { domFingerprint } from "@/lib/agent/tools/helpers";
 import type { AgentAction, ActionResult, BrowserState, TabInfo } from "@/lib/agent/types";
 
 // ─── Message contracts ─────────────────────────────────────────────────────
@@ -48,6 +54,14 @@ interface ExecuteActionsMessage {
  * on both ends instead of being read through an untyped cast.
  */
   domainConfig?: unknown;
+  /**
+ * True when the service worker has already resolved `%placeholder%`
+ * substitution + performed redaction on the shipped actions/results (the SW
+ * can read `chrome.storage.session`; the content script cannot). When set, the
+ * content-side `substituteSecrets`/`redactSecrets` calls short-circuit without
+ * touching the (unreadable-from-content-script) secret store. See finding F-1.
+ */
+  secretsResolved?: boolean;
 }
 interface SetDebugHighlightMessage {
   type: "SET_DEBUG_HIGHLIGHT";
@@ -56,13 +70,17 @@ interface SetDebugHighlightMessage {
 interface ExtractHtmlMessage {
   type: "EXTRACT_HTML";
 }
+interface GetDomFingerprintMessage {
+  type: "GET_DOM_FINGERPRINT";
+}
 
 type IncomingMessage =
   | PingMessage
   | ExtractStateMessage
   | ExecuteActionsMessage
   | SetDebugHighlightMessage
-  | ExtractHtmlMessage;
+  | ExtractHtmlMessage
+  | GetDomFingerprintMessage;
 
 interface OkResponse<T = unknown> {
   ok: true;
@@ -70,6 +88,8 @@ interface OkResponse<T = unknown> {
   results?: T;
   /** Set by the EXTRACT_HTML handler (raw page HTML, capped). */
   html?: string;
+  /** Set by the GET_DOM_FINGERPRINT handler (structural page signature). */
+  fingerprint?: string;
 }
 interface ErrorResponse {
   ok: false;
@@ -129,19 +149,19 @@ const log: (...args: unknown[]) => void = console.warn.bind(console, "[content]"
  // to sane bounds (finding: numeric message overrides in EXTRACT_STATE
  // are not validated) — a malformed/buggy negative or absurd value
  // could trigger a degenerate/expensive DOM walk.
-            const rawDepth = (msg as { depth?: number }).depth;
-            const depth = Number.isFinite(rawDepth)
-              ? Math.min(Math.max(1, Math.floor(rawDepth as number)), 50)
+            const rawDepth = msg.depth;
+            const depth = rawDepth !== undefined && Number.isFinite(rawDepth)
+              ? Math.min(Math.max(1, Math.floor(rawDepth)), 50)
               : 15;
-            const rawMaxLength = (msg as { maxLength?: number }).maxLength;
-            const maxLength = Number.isFinite(rawMaxLength)
-              ? Math.min(Math.max(1, Math.floor(rawMaxLength as number)), 1_000_000)
+            const rawMaxLength = msg.maxLength;
+            const maxLength = rawMaxLength !== undefined && Number.isFinite(rawMaxLength)
+              ? Math.min(Math.max(1, Math.floor(rawMaxLength)), 1_000_000)
               : 50_000;
  // AX tree generation walks the full DOM a second time. Make
  // it opt-in via the `includeAxTree` flag (default true for backward
  // compatibility). Set to false to halve DOM-walk cost on pages
  // where the semantic view isn't needed.
-            const includeAxTree = (msg as { includeAxTree?: boolean }).includeAxTree ?? true;
+            const includeAxTree = msg.includeAxTree ?? true;
             const axTree = includeAxTree
               ? generateAccessibilityTree("all", depth, maxLength)
               : { pageContent: "", viewport: { width: window.innerWidth, height: window.innerHeight } };
@@ -169,6 +189,13 @@ const log: (...args: unknown[]) => void = console.warn.bind(console, "[content]"
                 elementRects,
                 devicePixelRatio,
                 axTree: axTree.pageContent,
+ // Structural signature of the interactive DOM. The service worker caches
+ // this alongside the vision-element rects so it can detect an SPA
+ // re-render at the SAME url between detect_visual and the click (which
+ // would otherwise leave the cached pixel rects pointing at the OLD
+ // element). Folding it into extractState's per-step payload avoids an
+ // extra round-trip in the always-on vision path.
+                fingerprint: domFingerprint(),
               },
             });
           } catch (e) {
@@ -224,9 +251,18 @@ const log: (...args: unknown[]) => void = console.warn.bind(console, "[content]"
               );
             }
           }
+          if (!isDomainPolicyEnforced()) {
+            console.warn("[content] executing actions with NO URL policy enforced");
+          }
+          // F-1: when the SW resolved secrets on our behalf, mark the shared
+          // handlers so their `substituteSecrets`/`redactSecrets` calls
+          // short-circuit instead of reading the (unreadable-from-content-script)
+          // `chrome.storage.session`. Set synchronously, before the async action
+          // loop runs, so the handlers see it.
+          if (msg.secretsResolved) setSecretsResolvedExternally(true);
           (async () => {
             try {
-              const actions: AgentAction[] = msg.actions || [];
+              const actions: AgentAction[] = Array.isArray(msg.actions) ? msg.actions : [];
  // avoid a redundant full DOM walk just to rebuild the
  // selectorMap. `EXTRACT_STATE` already walked the DOM this step
  // (the orchestrator always calls EXTRACT_STATE before
@@ -309,6 +345,15 @@ const log: (...args: unknown[]) => void = console.warn.bind(console, "[content]"
             const html = document.documentElement.outerHTML || "";
             const capped = html.length > 500_000 ? html.slice(0, 500_000) : html;
             sendResponse({ ok: true, html: capped });
+          } catch (e) {
+            sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return false;
+        }
+
+        case "GET_DOM_FINGERPRINT": {
+          try {
+            sendResponse({ ok: true, fingerprint: domFingerprint() });
           } catch (e) {
             sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });
           }

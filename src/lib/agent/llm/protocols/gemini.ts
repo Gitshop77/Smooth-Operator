@@ -43,13 +43,14 @@ function isPlainJSONSchema(v: unknown): v is Record<string, unknown> {
 }
 
 /**
- * Non-global copy of the screenshot marker pattern, used only for the
- * plain `.replace(...)` strip. Keeping it separate from the shared `/g`
- * instance (used for `matchAll`) avoids sharing mutable `lastIndex` state
- * between the two consumers.
+ * Separate instance of the screenshot marker pattern used only for the
+ * plain `.replace(...)` strip. It is global so EVERY marker is removed from
+ * the text (a multi-screenshot turn would otherwise leave the 2nd+ raw
+ * base64 in the prompt), while `matchAll` over the shared `/g` pattern
+ * extracts each marker into its own `inline_data` part.
  */
 const SCREENSHOT_STRIP_RE =
-  /<screenshot>(data:image\/(png|jpeg|webp);base64,[^<]+)<\/screenshot>/;
+  /<screenshot>(data:image\/(png|jpeg|webp);base64,[^<]+)<\/screenshot>/g;
 
 export interface GeminiBody {
   contents: Array<{ role: string; parts: Array<Record<string, unknown>> }>;
@@ -63,7 +64,8 @@ export interface GeminiBody {
 }
 
 async function fromRequest(request: LLMRequest): Promise<GeminiBody> {
-  const systemMsg = request.messages.find((m) => m.role === "system");
+  const systemMessages = request.messages.filter((m) => m.role === "system");
+  const systemText = systemMessages.map((m) => m.content).join("\n\n");
   const userMessages = request.messages.filter((m) => m.role !== "system");
 
  // Only attach the image to the user message that CONTAINS the <screenshot>
@@ -133,12 +135,14 @@ async function fromRequest(request: LLMRequest): Promise<GeminiBody> {
   }
 
   const body: GeminiBody = { contents, generationConfig };
-  if (systemMsg) body.systemInstruction = { parts: [{ text: systemMsg.content }] };
+  if (systemText) body.systemInstruction = { parts: [{ text: systemText }] };
   return body;
 }
 
 interface StreamState {
   content: string;
+  /** Model id captured at stream start so usage attribution survives reduction. */
+  model?: string;
   /** Count of non-JSON SSE frames dropped this stream (see DROPPED_FRAME_WARN_THRESHOLD). */
   dropped?: number;
   usage?: { tokensIn: number; tokensOut: number; reasoningTokens?: number; cachedInputTokens?: number; model: string; costUsd: number };
@@ -148,7 +152,7 @@ export const protocol: Protocol<GeminiBody, string, { type: string; content?: st
   id: ADAPTER,
   body: { from: fromRequest },
   stream: {
-    initial: () => ({ content: "" }),
+    initial: (request: LLMRequest) => ({ content: "", model: request.model.id }),
     step: (state: StreamState, frame: string) => {
       const events: Array<{ type: string; content?: string; usage?: StreamState["usage"] }> = [];
  // Separate the two distinct failure modes:
@@ -201,10 +205,10 @@ export const protocol: Protocol<GeminiBody, string, { type: string; content?: st
         const reasoning = usage.thoughtsTokenCount;
         state.usage = {
           tokensIn: usage.promptTokenCount ?? 0,
-          tokensOut: usage.candidatesTokenCount ?? 0,
+          tokensOut: (usage.candidatesTokenCount ?? 0) + (typeof reasoning === "number" && reasoning > 0 ? reasoning : 0),
           reasoningTokens: typeof reasoning === "number" && reasoning > 0 ? reasoning : undefined,
           cachedInputTokens: typeof cached === "number" && cached > 0 ? cached : undefined,
-          model: "",
+          model: state.model ?? "",
           costUsd: 0,
         };
       }

@@ -11,11 +11,30 @@
 import type { AgentMode } from "@/lib/agent/modes";
 import type { UrlPolicyConfig } from "@/lib/agent/security";
 // `extension/background` depends on `lib/agent` (correct layering: the lib
-// never imports `extension/background/*`). A static import here is safe — there
-// is no cycle. (Previously this used a dynamic import under the mistaken belief
-// that `scheduled-tasks.ts` imported this module; that layering inversion was
-// removed and `scheduled-tasks.ts` now calls `chrome.power` directly.)
+// never imports `extension/background/*`), so a static import here is safe.
 import { listScheduledTasks } from "@/lib/agent/scheduled-tasks";
+import { redactSecrets } from "@/lib/agent/secrets";
+
+/**
+ * Log helper that redacts any embedded secrets before writing to the console.
+ * Error objects (and the messages around them) can carry untrusted URLs, host
+ * strings, or storage values, so the error is stringified and run through
+ * `redactSecrets`. The call is fire-and-forget: if redaction itself fails we
+ * fall back to the original (already-escaped) log line rather than losing it.
+ */
+export async function safeLog(
+  level: "error" | "warn",
+  msg: string,
+  err?: unknown,
+): Promise<void> {
+  const raw = err == null ? msg : `${msg} ${err instanceof Error && err.stack ? err.stack : String(err)}`;
+  try {
+    const redacted = await redactSecrets(raw);
+    console[level](redacted);
+  } catch {
+    console[level](msg, err);
+  }
+}
 
 // ─── Run state (persisted to chrome.storage.session for MV3 resilience) ─────
 
@@ -31,6 +50,24 @@ export interface RunState {
 }
 
 export const RUN_STATE_KEY = "open_cowork_run_state";
+
+/**
+ * In-memory cache of the last-read `RunState`. `getRunState` is called several
+ * times per navigator step (extract/execute/navigate callbacks each read it),
+ * so we serve the cached value to avoid redundant `chrome.storage.session`
+ * round-trips on the hot path. The cache is invalidated on every external
+ * `RUN_STATE_KEY` change (via `chrome.storage.onChanged`), and internal writers
+ * (`saveRunState`/`clearRunState`) clear or refresh it, so it never diverges
+ * from the persisted value. Session storage is sub-ms, so this is purely a
+ * redundancy reduction — correctness is unchanged.
+ */
+let cachedRunState: RunState | null | undefined;
+
+if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, _area) => {
+    if (RUN_STATE_KEY in changes) cachedRunState = undefined;
+  });
+}
 
 /** Merge a partial patch into the persisted run state.
  *
@@ -54,6 +91,10 @@ function enqueueWrite<T>(task: () => Promise<T>): Promise<T> {
 }
 
 export async function saveRunState(state: Partial<RunState>): Promise<void> {
+  // Invalidate the cache before the (async) write so any concurrent read during
+  // the write re-reads storage rather than serving a pre-write value. Refreshed
+  // to the merged value once the write lands (below).
+  cachedRunState = undefined;
   return enqueueWrite(async () => {
     const cur = (await getRunState()) ?? ({} as RunState);
     const next: RunState = { ...cur, ...state };
@@ -61,18 +102,23 @@ export async function saveRunState(state: Partial<RunState>): Promise<void> {
  // OR-ing the stored + incoming values makes the STOP flag durable against a
  // concurrent step-update (or any other) partial write.
     next.abortRequested = Boolean(cur.abortRequested) || Boolean(state.abortRequested);
+    cachedRunState = next;
     await chrome.storage.session.set({ [RUN_STATE_KEY]: next });
   });
 }
 
 /** Read the persisted run state, or null if no active run. */
 export async function getRunState(): Promise<RunState | null> {
+  if (cachedRunState !== undefined) return cachedRunState;
   const res = await chrome.storage.session.get(RUN_STATE_KEY);
-  return (res[RUN_STATE_KEY] as RunState) || null;
+  const state = (res[RUN_STATE_KEY] as RunState) || null;
+  cachedRunState = state;
+  return state;
 }
 
 /** Remove the persisted run state (called at the end of every run). */
 export async function clearRunState(): Promise<void> {
+  cachedRunState = undefined;
   return enqueueWrite(async () => {
     await chrome.storage.session.remove(RUN_STATE_KEY);
   });
@@ -123,16 +169,16 @@ export async function loadAndSetDomainConfig(): Promise<UrlPolicyConfig> {
     setDomainConfigGlobal(config);
     return config;
   } catch (e) {
- // On storage failure, clear the cached config to an empty policy (no
- // allow/blocklist) so any synchronous reader (e.g. the executor's
- // getDomainConfig()) sees an unambiguous "no policy" rather than a stale
- // allow/blocklist from a previous successful load (finding: loadAndSetDomainConfig
- // leaves a stale allow/blocklist cached on storage failure). We re-throw so
- // the caller (startRun) can decide how to handle the failure — it currently
- // aborts the run rather than proceeding with an empty policy, so this does
- // NOT silently degrade to "allow all".
-    setDomainConfigGlobal({});
-    console.error("[Open Cowork] Failed to load domain config — cached policy cleared to empty:", e);
+ // On storage failure, fail CLOSED: cache a distinct "deny" posture rather
+ // than an empty `{}` (which is indistinguishable from "no policy → allow
+ // all" in `checkUrlAllowedWithDomainConfig`). We mark the policy as enforced
+ // and clear the cached config so any navigation is BLOCKED until a valid
+ // policy is reloaded, instead of silently degrading to allow-all. We
+ // re-throw so the caller (startRun) can decide how to handle the failure —
+ // it currently aborts the run rather than proceeding with an empty policy.
+    (globalThis as { __openCoworkDomainConfigEnforced?: boolean }).__openCoworkDomainConfigEnforced = true;
+    delete (globalThis as { __openCoworkDomainConfig?: unknown }).__openCoworkDomainConfig;
+    void safeLog("error", "[Open Cowork] Failed to load domain config — cached policy cleared, failing closed:", e);
     throw e;
   }
 }

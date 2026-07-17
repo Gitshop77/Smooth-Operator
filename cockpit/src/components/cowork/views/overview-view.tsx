@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   DollarSign,
   ListChecks,
+  RotateCcw,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -17,6 +18,7 @@ import { StatCard } from "@/components/cowork/shared/stat-card";
 import { StatusPill, toneForStatus } from "@/components/cowork/shared/status-pill";
 import { ViewHeader } from "@/components/cowork/shared/view-header";
 import { EmptyState } from "@/components/cowork/shared/empty-state";
+import { Button } from "@/components/ui/button";
 import { ConnectionStatus } from "@/components/layout/connection-status";
 import { timeAgo } from "@/lib/cowork-data/format";
 import {
@@ -196,15 +198,39 @@ export function OverviewView() {
   );
   const tabsList = React.useMemo<SampleTab[]>(() => tabs.data ?? [], [tabs.data]);
 
-  const now = React.useMemo(() => Date.now(), []);
+ // `now` drives the "Runs today" / "Runs 7d" / sparkline day buckets. Refresh it
+ // on a slow interval so day boundaries stay current if the tab is left open.
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+ // Surface a backend outage instead of silently zeroing KPIs: when any
+ // composed query errors, show a top-level banner and render affected
+ // metrics as "—" until a retry succeeds.
+  const dataError = agents.isError || tasks.isError || events.isError || sessions.isError || tabs.isError;
+  const retryAll = React.useCallback(() => {
+    agents.refetch();
+    tasks.refetch();
+    events.refetch();
+    sessions.refetch();
+    tabs.refetch();
+  }, [agents, tasks, events, sessions, tabs]);
 
  // ─── KPI derivations ────────────────────────────────────────────────────
   const runs7d = React.useMemo(
-    () => tasksList.filter((t) => now - toTime(t.createdAt) <= 7 * DAY_MS),
+    () => tasksList.filter((t) => {
+      const dt = now - toTime(t.createdAt);
+      return dt >= 0 && dt <= 7 * DAY_MS;
+    }),
     [tasksList, now],
   );
   const runsToday = React.useMemo(
-    () => runs7d.filter((t) => now - toTime(t.createdAt) <= DAY_MS),
+    () => runs7d.filter((t) => {
+      const dt = now - toTime(t.createdAt);
+      return dt >= 0 && dt <= DAY_MS;
+    }),
     [runs7d, now],
   );
 
@@ -293,23 +319,40 @@ export function OverviewView() {
         </span>
       </div>
 
+      {dataError ? (
+        <div className="flex items-center gap-3 rounded-2xl border border-dashed border-border bg-muted/30 p-4">
+          <AlertTriangle className="size-5 mt-0.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+          <div className="flex-1 space-y-1">
+            <p className="text-sm font-medium text-foreground">
+              Some data couldn&rsquo;t be loaded
+            </p>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              One or more cockpit endpoints returned an error. Metrics may be incomplete.
+            </p>
+          </div>
+          <Button size="sm" variant="outline" onClick={retryAll}>
+            <RotateCcw className="size-3.5 mr-1" /> Retry
+          </Button>
+        </div>
+      ) : null}
+
       {/* KPI cards */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
         <StatCard
           label="Active agents"
-          value={agents.isLoading ? dash : agentsList.length}
+          value={agents.isLoading || agents.isError ? dash : agentsList.length}
           tone="accent"
           icon={<Bot className="size-4" />}
         />
         <StatCard
           label="Runs today"
-          value={tasks.isLoading ? dash : runsToday.length}
+          value={tasks.isLoading || tasks.isError ? dash : runsToday.length}
           tone="info"
           icon={<ListChecks className="size-4" />}
         />
         <StatCard
           label="Runs 7d"
-          value={tasks.isLoading ? dash : runs7d.length}
+          value={tasks.isLoading || tasks.isError ? dash : runs7d.length}
           tone="info"
           icon={<CalendarDays className="size-4" />}
           delta={
@@ -344,7 +387,7 @@ export function OverviewView() {
         />
         <StatCard
           label="Open errors"
-          value={events.isLoading ? dash : openErrors.length}
+          value={events.isLoading || events.isError ? dash : openErrors.length}
           tone={openErrors.length > 0 ? "danger" : "success"}
           icon={<AlertTriangle className="size-4" />}
         />
@@ -359,7 +402,18 @@ export function OverviewView() {
               {tasksList.length}
             </span>
           </div>
-          {recentRuns.length === 0 ? (
+          {tasks.isError ? (
+            <EmptyState
+              icon={<AlertTriangle className="size-5" />}
+              title="Couldn't load runs"
+              description="The tasks endpoint returned an error. Try again shortly."
+              action={
+                <Button size="sm" variant="outline" onClick={() => tasks.refetch()}>
+                  <RotateCcw className="size-3.5 mr-1" /> Retry
+                </Button>
+              }
+            />
+          ) : recentRuns.length === 0 ? (
             <EmptyState
               title="No runs yet"
               description="Agent tasks will appear here as they are created."
@@ -401,7 +455,18 @@ export function OverviewView() {
               {eventsList.length}
             </span>
           </div>
-          {recentErrors.length === 0 ? (
+          {events.isError ? (
+            <EmptyState
+              icon={<AlertTriangle className="size-5" />}
+              title="Couldn't load security events"
+              description="The security events endpoint returned an error. Try again shortly."
+              action={
+                <Button size="sm" variant="outline" onClick={() => events.refetch()}>
+                  <RotateCcw className="size-3.5 mr-1" /> Retry
+                </Button>
+              }
+            />
+          ) : recentErrors.length === 0 ? (
             <EmptyState
               title="No security events"
               description="Flagged injections, blocks, and incidents will appear here."

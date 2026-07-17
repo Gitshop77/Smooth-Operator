@@ -18,12 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
-        # PIN TO A VERIFIED SHA: replace with the verified full commit SHA for actions/checkout@v4.
-        uses: actions/checkout@002191b3668e769a76cadbdb5cc75d0e1fba2a17
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # PIN TO A VERIFIED SHA (actions/checkout@v4 tag)
 
       - name: Dependency Review
-        # PIN TO A VERIFIED SHA: replace with the verified full commit SHA for actions/dependency-review-action@v4.
-        uses: actions/dependency-review-action@a4985d3c1b8d0833692d3486907ddeb0e402ad8c
+        uses: actions/dependency-review-action@4901385134134e04cec5fbe5ddfe3b2c5bd5d976 # v4.0.0
         with:
           # Block PRs that introduce MODERATE or higher severity advisories.
           fail-on-severity: moderate

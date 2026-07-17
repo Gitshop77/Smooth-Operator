@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { motion } from "framer-motion";
-import { Workflow as WorkflowIcon, Clock, ChevronRight } from "lucide-react";
+import { Workflow as WorkflowIcon, Clock, ChevronRight, AlertCircle } from "lucide-react";
 
 import { useWorkflows } from "@/hooks/use-cowork-query";
 import { Card } from "@/components/ui/card";
@@ -26,7 +26,7 @@ function parseStepsJson(raw: unknown): WorkflowStep[] {
 }
 
 export function WorkflowsView() {
-  const { data, isLoading } = useWorkflows();
+  const { data, isLoading, isError, error } = useWorkflows();
 
   return (
     <div className="space-y-4">
@@ -38,6 +38,12 @@ export function WorkflowsView() {
 
       {isLoading ? (
         <LoadingSkeleton variant="cards" cardCount={4} />
+      ) : isError ? (
+        <EmptyState
+          icon={<AlertCircle className="size-6" />}
+          title="Couldn't load workflows"
+          description={error?.message ?? "The workflows endpoint returned an error. Check that the backend is reachable and NEXT_PUBLIC_COWORK_UI_TOKEN is configured."}
+        />
       ) : (data?.length ?? 0) === 0 ? (
         <EmptyState
           icon={<WorkflowIcon className="size-6" />}
@@ -72,7 +78,7 @@ export function WorkflowsView() {
                     <React.Fragment key={i}>
                       <li className="px-2 py-1 rounded-md bg-muted text-muted-foreground">
                         <span className="tnum text-foreground/70 mr-1">{i + 1}.</span>
-                        {s.name ?? s.action ?? String(s)}
+                        {s.name ?? s.action ?? (typeof s === "string" ? s : `Step ${i + 1}`)}
                       </li>
                       {i < steps.length - 1 ? (
                         <ChevronRight className="size-3 text-muted-foreground/50" aria-hidden focusable={false} />

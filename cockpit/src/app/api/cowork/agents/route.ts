@@ -1,6 +1,6 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
-import { json, withRouteError, parseLimit, parseAgentId } from '@/lib/cowork/api/http';
+import { json, withRouteError, parseLimit, parseAgentId, sanitizeRequestId } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
 export async function GET(req: NextRequest): Promise<Response> {
@@ -34,5 +34,5 @@ export async function GET(req: NextRequest): Promise<Response> {
       tasksCompleted: 0,
     }));
     return json({ agents: projected });
-  });
+  }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
 }

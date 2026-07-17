@@ -312,6 +312,76 @@ describe("evaluateChatJoin", () => {
   });
 });
 
+// ─── Pure function tests: redactSecrets ─────────────────────────────────────
+//
+// redactSecrets is the primitive applied to every error / SDK message before it
+// reaches logs or client sinks. It must mask the common credential shapes plus
+// any of the service's own configured secrets. These cases lock in that
+// coverage so a future edit cannot silently drop a regex or the SHARED_SECRET
+// masking branch.
+
+describe("redactSecrets", () => {
+  let mod: typeof import("../mini-services/cowork-events/index");
+
+  beforeAll(async () => {
+    process.env.COWORK_EVENT_TOKEN = "redact-test-secret-abc-123";
+    process.env.NODE_ENV = "test";
+ // Fresh module instance so this suite observes a deterministic SHARED_SECRET
+ // (the repo-root vitest cache would otherwise reuse another describe's load).
+    vi.resetModules();
+    mod = await import("../mini-services/cowork-events/index");
+  });
+
+  test("masks Anthropic / OpenAI / Google / Grok / Slack / AWS token prefixes", () => {
+    // Samples use realistic key lengths (>= 20 chars after the `sk-ant-` /
+    // `sk-` prefix, >= 35 after `AIza`) to mirror the canonical cockpit
+    // redactor's min-lengths — short decoys are intentionally NOT masked.
+    expect(mod.redactSecrets("leak sk-ant-1234567890abcdefghij here")).toContain("sk-ant-***");
+    expect(mod.redactSecrets("leak sk-1234567890abcdefghij here")).toContain("sk-***");
+    expect(mod.redactSecrets("leak AIza" + "a".repeat(35) + " here")).toContain("AIza***");
+    expect(mod.redactSecrets("leak gsk_1234567890abcdef here")).toContain("gsk_***");
+    expect(mod.redactSecrets("leak xoxb-1234567890abcdef here")).toContain("xoxb-***");
+    expect(mod.redactSecrets("leak AKIA1234567890ABCDEF here")).toContain("AKIA***");
+  });
+
+  test("masks GitHub / GitLab / AWS-session / Google-OAuth token prefixes", () => {
+    expect(mod.redactSecrets("leak ghp_1234567890abcdef here")).toContain("ghp_***");
+    expect(mod.redactSecrets("leak glpat-1234567890abcdef here")).toContain("glpat-***");
+    expect(mod.redactSecrets("leak ASIA1234567890ABCDEF here")).toContain("ASIA***");
+    expect(mod.redactSecrets("leak ya291234567890abcdef here")).toContain("ya29***");
+  });
+
+  test("masks credentials embedded in connection URLs", () => {
+    const out = mod.redactSecrets("mongodb://user:pass@db.example.com:27017/app");
+    expect(out).toContain("mongodb://***:***@db.example.com:27017/app");
+    expect(out).not.toContain("pass");
+    const https = mod.redactSecrets("https://admin:secret@api.example.com/v1");
+    expect(https).toContain("https://***:***@api.example.com/v1");
+    expect(https).not.toContain("secret");
+  });
+
+  test("masks the service's own configured secret", () => {
+    const secret = mod.SHARED_SECRET;
+    expect(secret).toBeTruthy();
+    const out = mod.redactSecrets(`token=${secret}`);
+    expect(out).not.toContain(secret);
+    expect(out).toContain("***");
+  });
+
+  test("masks Authorization: Bearer tokens in SDK / error messages", () => {
+    const out = mod.redactSecrets("Authorization: Bearer abc.def.ghi");
+    expect(out).toContain("Authorization: Bearer ***");
+    expect(out).not.toContain("abc.def.ghi");
+  });
+
+  test("masks JSON-shaped credential field values", () => {
+    expect(mod.redactSecrets('{"password":"hunter2"}')).not.toContain("hunter2");
+    expect(mod.redactSecrets('{"password":"hunter2"}')).toContain('"password":"***"');
+    expect(mod.redactSecrets('{"apiKey":"xyz-123"}')).not.toContain("xyz-123");
+    expect(mod.redactSecrets('{"token":"tok-9"}')).toContain('"token":"***"');
+  });
+});
+
 // ─── HTTP integration tests ────────────────────────────────────────────────
 //
 // Spin up the REAL httpServer + socket.io server exported by `index.ts` on an
@@ -345,6 +415,12 @@ describe("cowork-events HTTP server (integration)", () => {
  // defensive: the integration test runs against a real server).
     process.env.NODE_ENV = "test";
 
+ // Fresh module instance so this suite observes a deterministic SHARED_SECRET
+ // / CORS_ORIGIN. The `redactSecrets` describe above also imports this module
+ // (with a different COWORK_EVENT_TOKEN) and its cached instance would
+ // otherwise leak in here — SHARED_SECRET/CORS_ORIGIN are computed at module
+ // load time and never re-read, so we must reset before re-importing.
+    vi.resetModules();
     mod = await import("../mini-services/cowork-events/index");
     server = mod.httpServer;
     io = mod.io;
@@ -589,6 +665,91 @@ describe("cowork-events HTTP server (integration)", () => {
     expect(body.error).toMatch(/channel required/);
   });
 
+  // ── trust-boundary security rails ─────────────────────────────────────
+  //
+  // Regression tests for the controls that stop a caller from corrupting
+  // shared state or impersonating server-owned channels. These guard
+  // exactly the paths a hostile-but-authenticated caller would probe.
+
+  test("parseQuery blocks __proto__/constructor/prototype keys (prototype pollution guard)", () => {
+    const out = mod.parseQuery("?__proto__=polluted&normal=1");
+    expect(out.normal).toBe("1");
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    const c = mod.parseQuery("?constructor=evil&normal=2");
+    expect(c.normal).toBe("2");
+    expect(({} as Record<string, unknown>).evil).toBeUndefined();
+    const p = mod.parseQuery("?prototype=leak&normal=3");
+    expect(p.normal).toBe("3");
+    expect(({} as Record<string, unknown>).leak).toBeUndefined();
+  });
+
+  describe("rateLimitCheck + parseQuery unit", () => {
+    test("parseQuery tolerates malformed %ZZ URIs without crashing", () => {
+      const out = mod.parseQuery("?ok=good&bad=%ZZ&__proto__=x");
+      expect(out.ok).toBe("good");
+      expect(out.bad).toBe("%ZZ");
+      expect(Object.prototype.hasOwnProperty.call(out, "__proto__")).toBe(false);
+    });
+
+    test("rateLimitCheck allows up to RATE_LIMIT_MAX then blocks", () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date(0));
+        const ip = `unit-${Math.random()}`;
+        let allowed = 0;
+        for (let i = 0; i < mod.RATE_LIMIT_MAX; i++) {
+          if (mod.rateLimitCheck(ip).allowed) allowed++;
+        }
+        expect(allowed).toBe(mod.RATE_LIMIT_MAX);
+        const blocked = mod.rateLimitCheck(ip);
+        expect(blocked.allowed).toBe(false);
+        expect(blocked.remaining).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    test("rateLimitCheck resets exactly at the window boundary", () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date(1000));
+        const ip = `unit-${Math.random()}`;
+        const resetAt = mod.rateLimitCheck(ip).resetAt;
+        for (let i = 1; i < mod.RATE_LIMIT_MAX; i++) mod.rateLimitCheck(ip);
+        expect(mod.rateLimitCheck(ip).allowed).toBe(false);
+        vi.setSystemTime(new Date(resetAt - 1));
+        expect(mod.rateLimitCheck(ip).allowed).toBe(false);
+        vi.setSystemTime(new Date(resetAt + 1));
+        expect(mod.rateLimitCheck(ip).allowed).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  test("POST /emit on a server-owned channel returns 400 (channel not allowed)", async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/emit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Cowork-Token": token },
+      body: JSON.stringify({ channel: "system:status", payload: {} }),
+    });
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.error).toMatch(/channel not allowed/i);
+  });
+
+  test("POST /emit with an over-length channel returns 400 (channel too long)", async () => {
+    const channel = "x".repeat(129);
+    const res = await fetch(`http://127.0.0.1:${port}/emit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Cowork-Token": token },
+      body: JSON.stringify({ channel, payload: {} }),
+    });
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.error).toMatch(/channel too long/i);
+  });
+
  // ── /events?since_id=N ─────────────────────────────────────────────────
 
   test("GET /events?since_id=N returns only events with id > N", async () => {
@@ -635,6 +796,40 @@ describe("cowork-events HTTP server (integration)", () => {
     expect(body.events.length).toBeGreaterThan(0); // we've emitted several by now
   });
 
+  // REGRESSION (O1): a previous build serialized the replay buffer with NO
+  // redaction, so a secret captured into an event payload (e.g. a token
+  // scraped from a tab) was returned to any authenticated client in
+  // cleartext. This test emits a secret-bearing payload, then asserts the
+  // GET /events replay has it masked — proving the endpoint path actually
+  // redacts, not just the `redactSecrets` unit primitive.
+  test("GET /events redacts secrets embedded in event payloads", async () => {
+    const secret = "sk-ant-SECRET12345678";
+    const channel = "tab:updated";
+    const payload = { token: secret, note: "benign" };
+    const emitRes = await fetch(`http://127.0.0.1:${port}/emit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Cowork-Token": token },
+      body: JSON.stringify({ channel, payload }),
+    });
+    expect(emitRes.status).toBe(200);
+    const emittedId = (await emitRes.json()).id as number;
+
+    const evRes = await fetch(`http://127.0.0.1:${port}/events?since_id=${emittedId - 1}`, {
+      headers: { "X-Cowork-Token": token },
+    });
+    expect(evRes.status).toBe(200);
+    const raw = await evRes.text();
+    // The raw secret must never appear in the response body.
+    expect(raw).not.toContain(secret);
+    // The masked shape must be present.
+    expect(raw).toContain("***");
+    // And the structured payload must carry the masked token (not the secret).
+    const body = JSON.parse(raw) as { events: Array<{ id: number; payload: { token: string } }> };
+    const found = body.events.find((e) => e.id === emittedId);
+    expect(found).toBeDefined();
+    expect(found?.payload.token).toBe("***");
+  });
+
  // Body limit, rate limit, system:status exclusion
  //
  // Three regression tests for the safety rails: the 1 MB body limit, the
@@ -666,53 +861,92 @@ describe("cowork-events HTTP server (integration)", () => {
     expect(json.error).toMatch(/too large/i);
   });
 
-  test("/chat 11 times in the same minute returns 429 on the 11th (rate limit)", async () => {
- // Per-IP rate limit — 10 /chat requests per minute. The 11th must
- // be rejected with 429 + a Retry-After header. We send empty-message
- // bodies so each of the first 10 requests returns 400 (messages
- // required) — the rate-limit counter is incremented BEFORE the body
- // validation, so 10 × 400 consumes the budget and the 11th gets 429.
- //
- // The rate-limit counter is a fixed-window, in-process Map keyed by
- // client IP and shared across the WHOLE test suite. Other tests in this
- // file legitimately make /emit and /chat requests against 127.0.0.1,
- // which would consume the shared per-IP budget and leave this test's
- // first requests returning 429 (exhausted) instead of 400 (validation).
- // To test the per-IP rate-limit feature in isolation WITHOUT weakening
- // the assertions, send a dedicated, otherwise-unused client IP via the
- // `X-Real-IP` header (the same header the production Caddy proxy sets
- // per-connection). That gives this test its own fresh budget so the
- // first 10 requests correctly fail body validation (400) and only the
- // 11th exceeds the limit (429). HTTP 429 is the CORRECT status for rate
- // limiting — the code is right, not the stale 400 the test used to
- // expect.
-    const headers: HeadersInit = {
-      "Content-Type": "application/json",
-      "X-Cowork-Token": token,
-      "X-Real-IP": "203.0.113.77",
-    };
-    const emptyBody = JSON.stringify({ messages: [] });
- // First 10: should pass rate limit + fail body validation → 400.
-    for (let i = 0; i < 10; i++) {
-      const res = await fetch(`http://127.0.0.1:${port}/chat`, {
+ // Per-IP rate limit, exercised in isolation. The limit is keyed on the
+ // real TCP peer (127.0.0.1 for every test client), so the bucket is SHARED
+ // across the whole suite. To test the 10-per-minute cap without contending
+ // with other tests' requests, spin up a FRESH module instance (clean
+ // rate-limit map + its own server port) — the same pattern the socket.io
+ // block uses for the same reason.
+  describe("per-IP /chat rate limit (isolated module)", () => {
+    let server: import("http").Server;
+    let io2: { close: (cb?: () => void) => void };
+    let port2: number;
+    let token2: string;
+    let mod2: typeof import("../mini-services/cowork-events/index");
+
+    beforeAll(async () => {
+      token2 = "rate-limit-isolated-secret-abc-123";
+      process.env.COWORK_EVENT_TOKEN = token2;
+      process.env.COWORK_CORS_ORIGIN = "http://test-origin.local";
+      process.env.NODE_ENV = "test";
+      vi.resetModules();
+      mod2 = await import("../mini-services/cowork-events/index");
+      server = mod2.httpServer;
+      io2 = mod2.io;
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+      const addr = server.address();
+      if (!addr || typeof addr === "string") {
+        throw new Error(`Expected AddressInfo, got: ${JSON.stringify(addr)}`);
+      }
+      port2 = (addr as AddressInfo).port;
+    });
+
+    afterAll(async () => {
+      await new Promise<void>((resolve) => {
+        io2.close(() => resolve());
+        setTimeout(resolve, 2000).unref();
+      });
+      if (server.listening) {
+        const anyServer = server as unknown as { closeAllConnections?: () => void };
+        if (typeof anyServer.closeAllConnections === "function") {
+          anyServer.closeAllConnections();
+        }
+        await new Promise<void>((resolve) => {
+          server.close(() => resolve());
+          setTimeout(resolve, 2000).unref();
+        });
+      }
+    });
+
+    test("/chat 11 times in the same minute returns 429 on the 11th (rate limit)", async () => {
+   // Per-IP rate limit — 10 /chat requests per minute. The 11th must
+   // be rejected with 429 + a Retry-After header. We send empty-message
+   // bodies so each of the first 10 requests returns 400 (messages
+   // required) — the rate-limit counter is incremented BEFORE the body
+   // validation, so 10 × 400 consumes the budget and the 11th gets 429.
+      const headers: HeadersInit = {
+        "Content-Type": "application/json",
+        "X-Cowork-Token": token2,
+      };
+      const emptyBody = JSON.stringify({ messages: [] });
+   // First 10: should pass rate limit + fail body validation (400).
+      for (let i = 0; i < 10; i++) {
+        const res = await fetch(`http://127.0.0.1:${port2}/chat`, {
+          method: "POST",
+          headers,
+          body: emptyBody,
+        });
+        expect(res.status).toBe(400);
+        const json = await res.json();
+        expect(json.error).toMatch(/messages required/);
+      }
+   // 11th: rate limit exceeded (429) + Retry-After header.
+      const res = await fetch(`http://127.0.0.1:${port2}/chat`, {
         method: "POST",
         headers,
         body: emptyBody,
       });
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(429);
+      expect(res.headers.get("retry-after")).not.toBeNull();
       const json = await res.json();
-      expect(json.error).toMatch(/messages required/);
-    }
- // 11th: rate limit exceeded → 429 + Retry-After header.
-    const res = await fetch(`http://127.0.0.1:${port}/chat`, {
-      method: "POST",
-      headers,
-      body: emptyBody,
+      expect(json.error).toMatch(/rate limit/i);
     });
-    expect(res.status).toBe(429);
-    expect(res.headers.get("retry-after")).not.toBeNull();
-    const json = await res.json();
-    expect(json.error).toMatch(/rate limit/i);
   });
 
   test("system:status events are NOT recorded in the replay buffer", async () => {
@@ -961,10 +1195,67 @@ describe("cowork-events socket.io (integration)", () => {
     expect(httpBody.ok).toBe(true);
     expect(httpBody.content).toBe("Hello world");
 
-    const got = await Promise.race([donePromise, delay(4000).then(() => tokens)]);
+    const got = await donePromise;
     expect(done).toBe(true);
     expect(got.join("")).toBe("Hello world");
     c.close();
+  });
+
+ // REGRESSION: a mid-stream upstream failure must STILL terminate the
+ // session room with chat:done. The cockpit client keys its stream-finalize /
+ // spinner-clear signal on chat:done; if the error path emits only chat:error
+ // the room is left without a terminator and the client can hang. chat:error
+ // already carries the failure state, so chat:done serves purely as a
+ // terminator and never masks the error.
+  test("POST /chat stream error still emits chat:done to the session room", async () => {
+    zaiStore.failChat = true;
+    try {
+      const sessionId = "test-sess-err";
+      const c = await connect({ token });
+      c.emit("chat:join", sessionId);
+
+      let sawError = false;
+      let sawDone = false;
+      const finishPromise = new Promise<void>((resolve, reject) => {
+        const failTimer = setTimeout(() => {
+          c.close();
+          reject(new Error("timed out waiting for chat:error + chat:done on upstream failure"));
+        }, 3000);
+        c.on("chat:error", () => {
+          sawError = true;
+          if (sawDone) {
+            clearTimeout(failTimer);
+            resolve();
+          }
+        });
+        c.on("chat:done", () => {
+          sawDone = true;
+          if (sawError) {
+            clearTimeout(failTimer);
+            resolve();
+          }
+        });
+      });
+
+      await delay(150); // let the server process the chat:join
+      const res = await fetch(`http://127.0.0.1:${port}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Cowork-Token": token },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "hi" }],
+          sessionId,
+          stream: true,
+        }),
+      });
+      expect(res.status).toBe(500);
+
+      await finishPromise;
+      expect(sawError).toBe(true);
+      expect(sawDone).toBe(true);
+      c.close();
+    } finally {
+      zaiStore.failChat = false;
+    }
   });
 
  // NEGATIVE: /chat must reject a missing token with 401 (same auth gate as
@@ -1123,7 +1414,7 @@ describe("cowork-events socket.io (integration)", () => {
     expect(res.status).toBe(200);
 
  // Victim legitimately receives the streamed tokens.
-    const got = await Promise.race([victimDonePromise, delay(4000).then(() => victimTokens)]);
+    const got = await victimDonePromise;
     expect(victimDone).toBe(true);
     expect(got.join("")).toBe("secret-token");
 

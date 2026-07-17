@@ -5,7 +5,7 @@ Thanks for your interest in contributing! Open Cowork is an open-source agentic 
 ## Getting Started
 
 1. Clone the repo: `git clone https://github.com/Gitshop77/open-cowork-chrome-extension.git`
-2. Install dependencies: `npm install` (the `postinstall` hook also installs the `cockpit/` and `mini-services/cowork-events/` sub-packages)
+2. Install dependencies: `npm install` (the `cockpit/` and `mini-services/cowork-events/` sub-packages are installed separately via `npm run bootstrap`)
 3. Build the extension: `npm run build:extension`
 4. Load `chrome-extension/` as an unpacked extension in Chrome
 5. Run tests: `npm run test`
@@ -15,7 +15,7 @@ Thanks for your interest in contributing! Open Cowork is an open-source agentic 
 All commands use npm. For one-command dev (starts extension watch-build + cockpit + events together):
 
 ```bash
-npm install && npm run dev
+npm install && npm run bootstrap && npm run dev
 ```
 
 Individual commands:
@@ -46,12 +46,36 @@ endpoints exist for creating tabs, workspaces, sessions, workflows, bookmarks,
 and pinboards. DELETE endpoints also exist for erasing history, form memory,
 site memory, and chat (GDPR erasure).
 
+> [!NOTE]
+> The Cockpit stores data in a local SQLite database that is **not** created by
+> `npm run dev:cockpit` / `npm run build:cockpit` alone. Before first run,
+> install the sub-package deps with `npm run bootstrap`, then create the schema
+> once with `cd cockpit && npx prisma db push`. Without the `db push` step the
+> dashboard builds but every Prisma query 500s (no tables).
+
 ## Code Style
 
 - TypeScript throughout with strict typing
 - shadcn/ui components preferred over custom implementations
 - JSDoc-style header comments on every exported function
 - See `AGENTS.md` for the full architecture guide
+
+## Test File Naming (accepted inconsistency)
+
+The test suite intentionally contains similarly-named files that cover
+**different modules** — do **not** consolidate or auto-rename them, as each is a
+distinct, valuable suite and a blind merge could delete a real test or break a
+CI reference:
+
+- `tests/anti-bot.test.ts` — `src/lib/agent/anti-bot.ts` DOM challenge classifier (corroboration guard)
+- `tests/antibot.test.ts` — `src/extension/background/antibot.ts` `makeAntiBotHooks` detection-error trust boundary
+- `tests/agent/anti-bot.test.ts` — agent lib `isChallengeKind` / `detectChallengeResult` / `waitForChallengeResolution`
+- `tests/human-interact.test.ts` — `src/extension/sidepanel/human-interact.ts` `HUMAN_INTERACT` listener trust boundary
+- `tests/human-interaction.test.ts` — `src/lib/agent/human-interaction.ts` `sanitizeResponse` cross-boundary payload guard
+
+New tests should follow a clear `<module>.test.ts` convention where possible, but
+existing near-duplicate names above are kept on purpose and are not to be
+"fixed" by renaming.
 
 ## Pull Requests
 

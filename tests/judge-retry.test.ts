@@ -227,6 +227,23 @@ describe("withLLMRetry", () => {
     await expect(withLLMRetry(fn, controller.signal)).rejects.toThrow("aborted");
     expect(fn).not.toHaveBeenCalled();
   });
+
+  test("honors an abort raised DURING a backoff sleep (no second attempt)", async () => {
+    const fn = vi.fn().mockRejectedValueOnce(new Error("HTTP 429: Too many requests"));
+    const controller = new AbortController();
+    const promise = withLLMRetry(fn, controller.signal);
+    promise.catch(() => {});
+    // Advance partway into the first backoff (1.5s base + jitter) so the first
+    // attempt has failed and the retry loop is sleeping.
+    await vi.advanceTimersByTimeAsync(800);
+    expect(fn).toHaveBeenCalledTimes(1);
+    // Abort mid-backoff; the chunked sleep must observe it promptly.
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(2000);
+    await expect(promise).rejects.toThrow("abort");
+    // The abort must cancel the retry — fn is never invoked a second time.
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
 });
 
 // ─── judgeCachedInputTokens capture ─────────────────────────────────────
@@ -353,6 +370,8 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
     expect(capturedCosts[0].cachedInputTokens).toBe(200);
  // The model name is captured too (used for the cost recompute).
     expect(capturedCosts[0].model).toBe("claude-3-5-sonnet-20241022");
+ // The user-facing onCost callback is also invoked in the non-catalog path.
+    expect(userOnCostCalls).toHaveLength(1);
   });
 
   test("cost recompute uses cachedInputTokens (cacheRead discount applied)", async () => {

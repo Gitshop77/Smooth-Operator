@@ -64,8 +64,9 @@ let nextPromptValue: string | null = null;
  * Install the popup handler. Call once per content script injection — safe to
  * call multiple times (subsequent calls are no-ops).
  *
- * Overrides `window.alert` (swallow), `window.confirm` (return true), and
- * `window.prompt` (return empty string) so dialogs never block the agent.
+ * Overrides `window.alert` (swallow), `window.confirm` (return false —
+ * fail-closed), and `window.prompt` (return empty string) so dialogs never
+ * block the agent.
  * Each call also records the dialog into {@link pendingAlert} so the
  * `alert_*` actions can inspect / accept / dismiss it after the fact.
  *
@@ -96,10 +97,16 @@ export function installPopupHandler(): void {
  // Don't call the original — just swallow it.
   };
 
- // Override window.confirm — auto-accept (return true).
+ // Override window.confirm — fail-closed (return false).
+ // `window.confirm` is synchronous: the page receives the return value before
+ // the agent can inspect `pendingAlert`, so auto-accepting would silently
+ // approve destructive/sensitive confirms ("Delete account?", "Submit payment?")
+ // with no chance for the agent or user to veto. Defaulting to false blocks
+ // those by default; `captureDialog` still records the text so the agent can
+ // observe what was asked.
   window.confirm = function (message?: string): boolean {
     captureDialog("confirm", message);
-    return true;
+    return false;
   };
 
  // Override window.prompt — return any agent-queued text (set via
@@ -213,10 +220,13 @@ export function dismissAlert(): boolean {
  * Returns `true` if the text was staged, `false` if no prompt was open.
  */
 export function sendAlertText(text: string): boolean {
- // Stage the value for the NEXT prompt via the single staging implementation.
- // Keeping one staging path avoids the two assignments drifting apart.
-  stagePromptText(text);
+  // Staging is only valid for the NEXT prompt. The currently-open prompt
+  // already received the auto-dismiss override's empty-string return, so we
+  // cannot retroactively fill it. Only stage when the pending dialog is a
+  // prompt; for alert/confirm we must NOT stage, otherwise the text would
+  // silently contaminate the next real prompt.
   if (!pendingAlert || pendingAlert.kind !== "prompt") return false;
+  stagePromptText(text);
   return true;
 }
 

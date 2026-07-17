@@ -1,17 +1,12 @@
 // Cowork Web Cockpit WebSocket mini-service — replaces Electron IPC with socket.io.
-//
-// This service replaces Electron's `ipcMain`/`ipcRenderer` with socket.io. It:
+// It:
 // • Broadcasts real-time browser/agent events to all connected web clients
 // • Buffers the last 1000 events for replay on reconnect
 // • Exposes POST /emit so Next.js API routes can fan out events
 // • Exposes POST /chat (z-ai-web-dev-sdk streaming chat) and POST /image (image gen)
 //
 // PORT IS HARDCODED to 3003 per project rules. Do NOT read from env.
-//
-// NOTE: This service emits ONLY real events (received via POST /emit or the
-// socket.io `emit` event). There is no synthetic event simulator — the
-// dashboard must show whatever the real browser/agent produces, or empty
-// states.
+// Emits ONLY real events — there is no synthetic event simulator.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import { fileURLToPath } from 'url';
@@ -19,11 +14,53 @@ import { Server as SocketIOServer, type Socket } from 'socket.io';
 import ZAI from 'z-ai-web-dev-sdk';
 
 // Re-exported so consumers + tests can import the security primitives from a
-// single entry point. The implementations live in `./security.ts` (no
-// socket.io / z-ai-web-dev-sdk dependencies) so they can be unit-tested by
-// the root vitest config without dragging in the mini-service runtime.
+// single entry point.
 export { tokenMatches, applyCorsHeaders, shouldRefuseStart, evaluateChatJoin, DEV_TOKEN } from './security';
 import { tokenMatches, applyCorsHeaders, shouldRefuseStart, evaluateChatJoin, DEV_TOKEN } from './security';
+
+// Redact likely-secret material from free-form error / SDK messages before they
+// reach logs — API keys, bearer/basic tokens, credential-bearing URLs, and any
+// value equal to one of this service's own configured secrets.
+export function redactSecrets(input: string): string {
+  let out = input;
+  // Standalone credential literals (min-lengths mirror the cockpit redactor).
+  out = out.replace(/(sk-ant-)[A-Za-z0-9_-]{20,}/g, '$1***');
+  out = out.replace(/(sk-)[A-Za-z0-9_-]{20,}/g, '$1***');
+  out = out.replace(/(AIza)[0-9A-Za-z_-]{35}/g, '$1***');
+  out = out.replace(/(gsk_)[0-9A-Za-z_-]{8,}/g, '$1***');
+  out = out.replace(/(xox[baprs]-)[0-9A-Za-z-]{8,}/g, '$1***');
+  out = out.replace(/(AKIA)[0-9A-Z]{8,}/g, '$1***');
+  out = out.replace(/(ghp_)[A-Za-z0-9]{8,}/g, '$1***');
+  out = out.replace(/(glpat-)[A-Za-z0-9_-]{8,}/g, '$1***');
+  out = out.replace(/(ASIA)[A-Za-z0-9]{8,}/g, '$1***');
+  out = out.replace(/(ya29)[A-Za-z0-9_-]{8,}/g, '$1***');
+  // Authorization Bearer tokens embedded in SDK/error messages.
+  out = out.replace(/Bearer\s+[A-Za-z0-9._-]+/g, 'Bearer ***');
+  // HTTP Basic credentials: `Authorization: Basic <base64>` (colon-space, no `=`).
+  // Short base64 escapes the 20+ entropy fallback below, so it is masked explicitly.
+  out = out.replace(/Basic\s+[A-Za-z0-9+/=]+/g, 'Basic ***');
+  // JSON-shaped credential fields.
+  out = out.replace(/"((?:password|apiKey|api_key|secret|token))"\s*:\s*"[^"]+"/g, '"$1":"***"');
+  // Connection URLs that can carry credentials inline.
+  out = out.replace(
+    /\b(mongodb(?:\+srv)?|postgres(?:ql)?|mysql|redis|amqp|https?):\/\/[^\s:@/]+:[^\s:@/]+@/g,
+    '$1://***:***@',
+  );
+  // Bounded fallback for bare high-entropy scalars (no prefix) — only 20+ char
+  // runs of the token alphabet, so short words / `***` markers are untouched.
+  out = out.replace(
+    /(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{20,}(?![A-Za-z0-9+/=_-])/g,
+    '***',
+  );
+  // Mask this service's own configured secrets that appear verbatim. Skip the
+  // dev-token fallback so a loopback dev setup doesn't redact the default.
+  for (const secret of [SHARED_SECRET, SOCKET_SECRET]) {
+    if (secret && secret.length > 3 && secret !== DEV_TOKEN && out.includes(secret)) {
+      out = out.split(secret).join('***');
+    }
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -31,22 +68,17 @@ import { tokenMatches, applyCorsHeaders, shouldRefuseStart, evaluateChatJoin, DE
 
 const PORT = 3003; // Hardcoded per project rules — do NOT use env.PORT
 const EVENT_BUFFER_MAX = 1000;
-// Server-to-server secret — used to authenticate the cockpit's HTTP proxy
-// (`X-Cowork-Token`) and must NEVER be exposed to the browser bundle.
+// Server-to-server secret — authenticates the cockpit's HTTP proxy
+// (`X-Cowork-Token`); must NEVER reach the browser bundle.
 const SHARED_SECRET = process.env.COWORK_EVENT_TOKEN || DEV_TOKEN;
-// Browser-facing secret — used to authenticate the cockpit's real-time socket
-// handshake. This is intentionally distinct from `SHARED_SECRET` so the
-// browser bundle (which can only ever see a `NEXT_PUBLIC_*` value) does NOT
-// embed the service-to-service credential. Operators set `COWORK_UI_TOKEN`
-// (the same value as `NEXT_PUBLIC_COWORK_UI_TOKEN`) here; fall back to the
-// server-to-server secret only for backward-compatible single-secret dev setups.
+// Browser-facing secret — authenticates the real-time socket handshake. Kept
+// distinct from `SHARED_SECRET` so the browser bundle (a `NEXT_PUBLIC_*` value)
+// never embeds the S2S credential. Falls back to the S2S secret only for
+// single-secret dev setups.
 const SOCKET_SECRET = process.env.COWORK_UI_TOKEN || process.env.COWORK_EVENT_TOKEN || DEV_TOKEN;
 
-// Warn when the socket secret silently collapsed onto the service-to-service
-// secret (or the dev-token) because `COWORK_UI_TOKEN` is unset. The browser
-// bundle can only ever carry `NEXT_PUBLIC_*` values, so reusing the S2S secret
-// for the socket means a leaked bundle could unlock the S2S path. Operators
-// should set a distinct `COWORK_UI_TOKEN`.
+// Warn when SOCKET_SECRET collapsed onto the S2S secret (or dev-token) because
+// COWORK_UI_TOKEN is unset — a leaked browser bundle could then unlock the S2S path.
 if (!process.env.COWORK_UI_TOKEN) {
   console.warn(
     '[cowork-events] WARNING: COWORK_UI_TOKEN is unset — SOCKET_SECRET fell ' +
@@ -56,38 +88,46 @@ if (!process.env.COWORK_UI_TOKEN) {
   );
 }
 const STATUS_INTERVAL_MS = 15_000;
-// Maximum request body size — 1 MiB. Applies to all POST routes
-// (/emit, /chat, /image). Enforced both via `content-length` header (cheap,
-// pre-read) and inside `readJson` (defensive — in case the header is missing
-// or spoofed by a client that streams more bytes than declared).
+// Maximum request body size — 1 MiB — for all POST routes. Enforced via the
+// `content-length` header (pre-read) and inside `readJson` (defensive, for
+// missing/spoofed headers).
 const MAX_BODY_BYTES = 1_048_576; // 1 MB
-// Per-IP rate limit on the z-ai-web-dev-sdk proxy routes. Each IP gets
-// RATE_LIMIT_MAX requests per RATE_LIMIT_WINDOW_MS. Exceeding the limit
-// returns 429.
+// Idle bound between body-read chunks. `httpServer.requestTimeout` is disabled
+// (0) so engine.io long-polls aren't force-closed, which also removes the
+// per-body-read bound — this timer restores it, defeating slowloris-style
+// trickled bodies without touching engine.io's reader.
+const BODY_READ_IDLE_MS = 30_000;
+// Per-IP rate limit on the proxy routes: RATE_LIMIT_MAX requests per window, 429
+// beyond that.
 //
-// SINGLE-INSTANCE REQUIREMENT: the rate-limit map and the 1000-event replay
-// buffer are in-memory and process-local. They are lost on restart (reconnecting
-// clients see only the post-restart window) and, if this service is ever scaled
-// horizontally, each replica holds its own independent state. The rate limit
-// therefore collapses to a per-replica bucket (or a single shared bucket behind
-// a proxy that spoofs a constant client IP). This deployment is designed for a
-// single operator on loopback only — do NOT run multiple replicas without
-// moving this state to a shared store (e.g. Redis). Replay history is
-// best-effort and is not a durable event log.
+// SINGLE-INSTANCE REQUIREMENT: the rate-limit map and replay buffer are
+// in-memory and process-local — lost on restart and per-replica if scaled
+// horizontally. This deployment targets a single operator on loopback; move
+// this state to a shared store (e.g. Redis) before running multiple replicas.
 const RATE_LIMIT_MAX = 10;
 const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
-// CORS allowlist. Default to the cockpit dashboard's origin so a
-// browser tab on a hostile site can't `fetch('http://localhost:3003/...')` and
-// read the response. The operator can override via `COWORK_CORS_ORIGIN`.
+// Max chat rooms a single socket may join. Without a cap an authenticated client
+// could join unbounded distinct sessionIds and OOM the in-memory room map. The
+// socket's own id room is excluded from this count.
+const MAX_SOCKET_ROOMS = 32;
+// Max concurrent engine.io connections (pre-auth inclusive). Without a ceiling
+// an unauthenticated client could loop handshakes and exhaust fds/memory before
+// the token check drops each one; `io.use()` (below) rejects new handshakes past
+// this ceiling.
+const MAX_CONCURRENT_CONNECTIONS = 256;
+// Explicit engine.io max HTTP buffer size (the 1 MiB default) so a single
+// oversized packet can't exceed the intended bound.
+const MAX_HTTP_BUFFER_SIZE = 1_048_576; // 1 MiB
+// CORS allowlist — default to the cockpit origin so a hostile tab can't
+// `fetch('http://localhost:3003/...')` and read the response. Override via
+// `COWORK_CORS_ORIGIN`.
 const DEFAULT_CORS_ORIGIN = 'http://localhost:3000';
 let CORS_ORIGIN = process.env.COWORK_CORS_ORIGIN || DEFAULT_CORS_ORIGIN;
 
-// A wildcard origin is dangerous here: the HTTP layer (`applyCorsHeaders`) only
-// mirrors an EXACT-matching origin, so '*' silently blocks all HTTP CORS, while
-// socket.io's `cors` option treats '*' as a true wildcard and permits ANY
-// origin. The two layers disagree, leaving socket.io wide open while HTTP
-// appears locked down. Refuse to treat '*' as a valid value — clamp it back to
-// the safe default so socket.io is NEVER handed a true wildcard origin.
+// Refuse a wildcard origin: `applyCorsHeaders` only mirrors an exact match (so
+// '*' blocks all HTTP CORS) while socket.io treats '*' as a true wildcard
+// (permitting ANY origin). The two would disagree, leaving socket.io wide open —
+// clamp '*' back to the safe default.
 if (CORS_ORIGIN === '*') {
   console.error(
     '[cowork-events] ERROR: COWORK_CORS_ORIGIN="*" is not supported — the ' +
@@ -99,20 +139,17 @@ if (CORS_ORIGIN === '*') {
 }
 
 // Timestamp (ms) when `main()` bound the server — surfaced to reconnecting
-// clients so the dashboard can detect an event-bus restart (and that the
-// buffered history was lost). Set in `main()` only.
+// clients so the dashboard can detect an event-bus restart. Set in `main()` only.
 let serverStartedAt: number | undefined;
+let statusTimer: ReturnType<typeof setInterval> | undefined;
 
 // ---------------------------------------------------------------------------
 // Per-IP in-memory rate limiter
 // ---------------------------------------------------------------------------
 //
-// Fixed-window counter keyed by remote IP (NOT a true sliding window — once a
-// window resets the counter starts a brand-new full window, so a burst of
-// RATE_LIMIT_MAX requests is possible at each window boundary). Cleans up
-// expired entries opportunistically on each check (cheap O(n) scan, n is
-// bounded by the number of distinct IPs seen in the last minute). Returns true
-// if the request is allowed, false if the limit has been exceeded.
+// Fixed-window counter keyed by remote IP (not a sliding window — a burst of
+// RATE_LIMIT_MAX is possible at each window boundary). Expired entries are GC'd
+// opportunistically on each check.
 
 interface RateLimitEntry {
   count: number;
@@ -121,23 +158,23 @@ interface RateLimitEntry {
 
 const rateLimitMap = new Map<string, RateLimitEntry>();
 
+// Proxy IPs trusted to supply an accurate client address via `X-Real-IP` /
+// `X-Forwarded-For`. Those headers are attacker-controllable unless the TCP peer
+// is a trusted proxy that OVERWRITES (never appends) them. Empty by default (the
+// service binds to loopback); populate ONLY when a hardened reverse proxy sits
+// in front.
+const TRUSTED_PROXY_IPS = new Set<string>();
+
 function clientIp(req: IncomingMessage): string {
- // The service binds to 127.0.0.1, so every direct TCP peer is the Caddy
- // gateway (or a localhost dev client). The real client IP is therefore only
- // available via a proxy-supplied header — and that header is fully
- // attacker-controllable UNLESS the proxy OVERWRITES it rather than appending.
- //
- // HARD REQUIREMENT: the upstream proxy (Caddy) MUST overwrite `X-Forwarded-For`
- // and `X-Real-IP` with the real peer — never append to a client-supplied
- // value. If the proxy appends, a client can prepend a spoofed IP and evade the
- // per-IP rate limit / distort the IP logged on auth failures.
- //
- // Strategy: prefer `X-Real-IP` (a single value the proxy sets from the actual
- // connection, which a well-configured proxy never lets the client inject),
- // then the leftmost `X-Forwarded-For` entry, then the socket address. Under
- // correct proxy config all three agree. This is defense-in-depth around the
- // documented loopback-only assumption, not an absolute guarantee against a
- // misconfigured append-proxy.
+  // Key on the real TCP peer unless it is a configured trusted proxy.
+  const sock = req.socket as { remoteAddress?: string };
+  const peer = sock.remoteAddress || 'unknown';
+  if (peer !== 'unknown' && !TRUSTED_PROXY_IPS.has(peer)) return peer;
+
+ // Trusted-proxy path: the real client IP is only available via a
+ // proxy-supplied header, which is safe ONLY if the proxy (Caddy) overwrites
+ // `X-Forwarded-For` / `X-Real-IP` rather than appending. Prefer `X-Real-IP`,
+ // then the leftmost `X-Forwarded-For` entry.
   const realIp = req.headers['x-real-ip'];
   if (typeof realIp === 'string' && realIp.trim()) return realIp.trim();
 
@@ -146,19 +183,17 @@ function clientIp(req: IncomingMessage): string {
     const first = xff.split(',')[0].trim();
     if (first) return first;
   }
- // `x-forwarded-for` may also arrive as an array (Node lowercases + splits
- // duplicate headers). Handle that case too.
+ // `x-forwarded-for` may also arrive as an array (Node splits duplicate headers).
   if (Array.isArray(xff) && xff.length > 0) {
     const first = xff[0].split(',')[0].trim();
     if (first) return first;
   }
-  const sock = req.socket as { remoteAddress?: string };
-  return sock.remoteAddress || 'unknown';
+  return peer;
 }
 
 function rateLimitCheck(ip: string): { allowed: boolean; resetAt: number; remaining: number } {
   const now = Date.now();
- // Opportunistic GC: drop expired entries so the Map can't grow unbounded.
+ // Opportunistic GC so the Map can't grow unbounded.
   if (rateLimitMap.size > 0) {
     for (const [key, entry] of rateLimitMap) {
       if (entry.resetAt <= now) rateLimitMap.delete(key);
@@ -177,10 +212,9 @@ function rateLimitCheck(ip: string): { allowed: boolean; resetAt: number; remain
   return { allowed: true, resetAt, remaining: RATE_LIMIT_MAX - 1 };
 }
 
-// Extract the first non-empty handshake token from `auth.token` /
-// `query.token` (coercing a string[] query to its first element, else '').
-// Shared by the connection handler and the socket `emit` handler so the
-// token-extraction logic stays in one place and cannot drift.
+// Extract the first non-empty handshake token from `auth.token` / `query.token`
+// (coercing a string[] query to its first element, else ''). Shared by the
+// connection and `emit` handlers so the logic can't drift.
 function extractHandshakeToken(hs: Socket['handshake']): string {
   const authTok = (hs.auth as { token?: unknown } | undefined)?.token;
   const queryTok = (hs.query as Record<string, unknown> | undefined)?.token;
@@ -220,42 +254,69 @@ interface ImageRequest {
 // Shared validation constants (kept in sync with the cockpit event proxy)
 // ---------------------------------------------------------------------------
 
-// `sessionId` charset enforced on the socket `chat:join` path (see
-// `evaluateChatJoin` in `./security.ts`). The HTTP `/chat` route now validates
-// against the SAME pattern so the room name it emits to can always be joined.
+// `sessionId` charset enforced on `chat:join` (see `evaluateChatJoin`). The HTTP
+// `/chat` route validates the SAME pattern so the room it emits to is joinable.
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
-// Channel name cap — mirrors `cockpit/src/app/api/cowork/events/emit/route.ts`
-// so the trust boundary is identical regardless of which entry point an
-// authenticated caller uses.
+// Channel name cap — mirrors the cockpit events/emit proxy.
 const MAX_CHANNEL_LENGTH = 128;
 
+// Safe charset for client-supplied channel names — keeps CR/LF and other control
+// characters out of the audit log (log-injection defense) while covering every
+// namespaced channel this service uses (e.g. `tab:updated`).
+const CHANNEL_PATTERN = /^[A-Za-z0-9:_-]{1,128}$/;
+
 // Payload cap for client-broadcast events (HTTP `/emit` + socket `emit`),
-// matching the cockpit proxy's 64 KB limit. The 1 MB `MAX_BODY_BYTES` still
-// bounds the raw POST, but the *event payload* is capped here so a caller
-// hitting the mini-service directly can't broadcast larger events than the
-// proxy allows.
+// matching the cockpit proxy's 64 KB limit (MAX_BODY_BYTES bounds the raw POST).
 const MAX_EMIT_PAYLOAD_BYTES = 64 * 1024;
 
 // The seven image sizes the z-ai SDK accepts. Validated at the boundary so an
-// invalid size yields a 400 instead of a wasted upstream round-trip + 500.
+// invalid size yields a 400 instead of a wasted upstream round-trip.
 const ALLOWED_IMAGE_SIZES = [
   '1024x1024', '768x1344', '864x1152', '1344x768', '1152x864', '1440x720', '720x1440',
 ] as const;
 
-// Channels the SERVER owns and that a client must never broadcast on the
-// client `emit` path. Allowing a client to emit these would let an
-// authenticated caller impersonate server status / replay / streamed chat to
-// every connected dashboard.
+// Channels the SERVER owns — a client `emit` of these would let it impersonate
+// server status / replay / streamed chat to every connected dashboard.
 const SERVER_OWNED_CHANNELS = new Set([
   'system:status', 'events:replay', 'chat:message', 'chat:done', 'chat:error',
 ]);
 
-// Max time we wait for a single chunk from the upstream LLM stream before
-// treating the connection as stalled. Without this, a hung upstream leaves the
-// HTTP request (and the socket.io room) open forever. See finding: /chat
-// streaming reader has no per-chunk timeout.
+// Max wait for a single chunk from the upstream LLM stream before treating the
+// connection as stalled — otherwise a hung upstream leaves the HTTP request and
+// socket.io room open forever.
 const CHAT_STREAM_CHUNK_TIMEOUT_MS = 30_000;
+
+// Bound on a single non-streaming upstream SDK call (auth, the initial
+// `create({stream:true})`, the non-streaming completion, image generation).
+// `requestTimeout` is 0 to protect long-polls and `headersTimeout` only bounds
+// the header phase, so without this a stalled upstream would hang the socket
+// forever. `withUpstreamTimeout` races the await against a timer.
+const UPSTREAM_CALL_TIMEOUT_MS = 30_000;
+
+// Consecutive empty-room ticks (after a listener was seen) before the chat
+// stream is aborted. Hysteresis so a transient blip (tab switch / momentary
+// disconnect) doesn't truncate the stream into a partial HTTP 200.
+const EMPTY_ROOM_ABORT_TICKS = 5;
+
+// Cap on the accumulated upstream response. A runaway upstream with a joined
+// listener would otherwise grow `finalText` without bound in RAM; truncate past
+// this cap and flag the result.
+const MAX_CHAT_RESPONSE_BYTES = 4 * 1024 * 1024; // 4 MB
+
+// Server-pinned per-request completion token ceiling, resolved from THIS
+// service's environment (never the request body), so an authenticated caller
+// can't raise it. Override via WINGMAN_MAX_TOKENS.
+const WINGMAN_MAX_TOKENS = (() => {
+  const n = Number(process.env.WINGMAN_MAX_TOKENS);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 8192;
+})();
+
+// True when no socket is currently joined to `sessionId`. Used to stop paying
+// for (and emitting to) an upstream chat stream that nobody is listening to.
+function roomIsEmpty(sessionId: string): boolean {
+  return (io.sockets.adapter.rooms.get(sessionId)?.size ?? 0) === 0;
+}
 
 // ---------------------------------------------------------------------------
 // In-memory event store
@@ -265,9 +326,8 @@ const eventBuffer: BufferedEvent[] = [];
 let eventCounter = 0;
 
 function recordEvent(channel: string, payload: unknown): BufferedEvent {
-  // `system:status` events are emitted directly to live consumers and must not
-  // pollute the replay buffer (the 15s broadcaster would otherwise fill it with
-  // status ticks, evicting real events). Skip the buffer for that channel.
+  // Skip the replay buffer for `system:status` — the 15s broadcaster would
+  // otherwise fill it with status ticks and evict real events.
   if (channel === 'system:status') {
     eventCounter += 1;
     return { id: eventCounter, channel, payload, ts: Date.now() };
@@ -296,8 +356,8 @@ let zaiPromise: Promise<ZAI> | null = null;
 
 async function getZai(): Promise<ZAI> {
   if (!zaiPromise) {
-    zaiPromise = ZAI.create().catch((err) => {
- // Reset so the next attempt can try again — auth issues may be transient.
+    zaiPromise = withUpstreamTimeout(ZAI.create(), UPSTREAM_CALL_TIMEOUT_MS).catch((err) => {
+ // Reset so the next attempt can retry — auth issues may be transient.
       zaiPromise = null;
       throw err;
     });
@@ -305,23 +365,23 @@ async function getZai(): Promise<ZAI> {
   return zaiPromise;
 }
 
+// Per-sessionId in-flight chat lock: the first POST /chat owns the stream for a
+// sessionId; a concurrent duplicate is rejected with 409 (otherwise both would
+// open independent upstream streams and double-bill).
+const inflightChat = new Map<string, Promise<void>>();
+
 // ---------------------------------------------------------------------------
 // HTTP server (low-level so we can attach socket.io + REST on the same port)
 // ---------------------------------------------------------------------------
 
 async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
- // Capture the inbound request id (forwarded by the cockpit's X-Cowork-Token
- // proxy) so this service's logs can be correlated with the originating
- // cockpit request. See finding: correlation ID forwarded to the mini-service
- // is never consumed.
-  const requestId =
+ // Capture the forwarded correlation id so logs can be tied to the originating
+ // cockpit request. Strip control chars to prevent log injection.
+  const rawRequestId =
     typeof req.headers['x-request-id'] === 'string' ? (req.headers['x-request-id'] as string) : undefined;
- // CORS preflight — only allow the configured origin. `applyCorsHeaders`
- // is a pure function (sets headers iff the origin matches `CORS_ORIGIN`).
+  const requestId = rawRequestId ? rawRequestId.replace(/[\r\n\x00-\x1f]/g, '') : undefined;
   const origin = typeof req.headers.origin === 'string' ? req.headers.origin : null;
- // `applyCorsHeaders` returns whether the origin was allowlisted. Only
- // advertise CORS method/header permissions when the origin actually matched —
- // advertising them to a disallowed origin is pointless and aids probing.
+ // Only advertise CORS method/header permissions when the origin matched.
   const corsAllowed = applyCorsHeaders(res, origin, CORS_ORIGIN);
   if (corsAllowed) {
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -335,41 +395,52 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
 
   const url = (req.url || '/').split('?')[0];
 
- // Resolve the client IP once per request so it can be reused for the
- // auth-failure log, the per-IP rate limit, and the success audit log without
- // re-reading/re-parsing the forwarded-IP headers on each call.
-  const ip = clientIp(req);
+ // Resolve the client IP once per request (reused for auth-failure log, rate
+ // limit, and audit log). Strip control chars — the IP is attacker-controllable
+ // via forwarded headers behind a trusted proxy (log-injection defense).
+  const ip = clientIp(req).replace(/[\r\n\x00-\x1f]/g, '');
 
   try {
- // `/health` is the only unauthenticated route — and it returns
- // ONLY `{ ok: true }` so a liveness probe can't leak client count, event
- // buffer size, uptime, or port. Every other route requires the
- // `X-Cowork-Token` header.
+ // `/health` is the only unauthenticated route, and returns ONLY `{ ok: true }`
+ // so a probe can't leak client count / buffer size / uptime / port. Every
+ // other route requires the `X-Cowork-Token` header.
     if (url === '/health' && req.method === 'GET') {
       sendJson(res, 200, { ok: true });
       return;
     }
 
- // Per-IP rate limit on the authenticated proxy routes (/emit, /chat, /image)
- // BEFORE the token check, so an unauthenticated client cannot bypass the
- // throttle by never supplying a valid token (which would otherwise only ever
- // produce a 401 and skip the per-IP limit). /health and OPTIONS are excluded.
+ // Per-IP rate limit on the proxy routes BEFORE the token check, so an
+ // unauthenticated client can't bypass the throttle by never supplying a valid
+ // token. /health and OPTIONS are excluded.
     if (
       req.method === 'POST' &&
       (url === '/emit' || url === '/chat' || url === '/image')
     ) {
-      const rl = rateLimitCheck(ip);
-      if (!rl.allowed) {
-        res.setHeader('Retry-After', String(Math.ceil((rl.resetAt - Date.now()) / 1000)));
-        sendJson(res, 429, { error: 'Rate limit exceeded. Try again later.', resetAt: rl.resetAt });
+ // CSRF/drive-by guard, before the rate limit: a browser always sends `Origin`
+ // on cross-origin POSTs, so reject a non-allowlisted Origin before it can burn
+ // the shared loopback rate-limit bucket. The cockpit's server-side fetch sends
+ // no Origin (or the allowlisted one) and is unaffected.
+      if (origin !== null && !corsAllowed) {
+        sendJson(res, 403, { error: 'Cross-origin request forbidden' });
         return;
+      }
+      {
+        const rl = rateLimitCheck(ip);
+        if (!rl.allowed) {
+          res.setHeader('Retry-After', String(Math.ceil((rl.resetAt - Date.now()) / 1000)));
+          sendJson(res, 429, { error: 'Rate limit exceeded. Try again later.', resetAt: rl.resetAt });
+          return;
+        }
       }
     }
 
- // All other routes require the shared-secret token.
+ // All other routes require the shared-secret token. These HTTP proxy routes
+ // are SERVICE-TO-SERVICE only and accept ONLY the S2S `SHARED_SECRET` — the
+ // browser-facing `SOCKET_SECRET` must NOT unlock these paid LLM/image/erasure
+ // proxies, or a leaked browser bundle could bill upstream on the operator's
+ // account. (SOCKET_SECRET remains accepted on the realtime socket only.)
     if (!tokenMatches(req.headers['x-cowork-token'] as string | undefined, SHARED_SECRET)) {
- // Log failed auth with source IP for security observability.
- // NEVER log the token itself.
+ // Log failed auth with source IP — NEVER the token itself.
       console.warn(`[cowork-events] 401 Unauthorized (invalid X-Cowork-Token) from ${ip}`);
       sendJson(res, 401, { error: 'Invalid X-Cowork-Token' });
       return;
@@ -396,11 +467,8 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
     }
 
     if (url === '/emit' && req.method === 'POST') {
- // Pre-read body size check via `content-length` (same as /chat and
- // /image). The in-stream check inside `readJson` still catches chunked
- // bodies without `content-length`, but the cheap pre-read check rejects
- // oversized declared bodies before we consume the stream — saving
- // bandwidth + CPU on the stream/destroy cycle.
+ // Pre-read body-size check (readJson still catches chunked bodies without
+ // content-length).
       const contentLength = parseInt(req.headers['content-length'] || '0', 10);
       if (contentLength > MAX_BODY_BYTES) {
         sendJson(res, 413, { error: 'Request body too large (max 1 MB)' });
@@ -412,34 +480,30 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
         sendJson(res, 400, { error: 'channel required' });
         return;
       }
- // Mirror the cockpit proxy's channel-length cap so an authenticated caller
- // hitting the mini-service directly can't broadcast on an abusive channel.
       if (channel.length > MAX_CHANNEL_LENGTH) {
         sendJson(res, 400, { error: 'channel too long (max 128 chars)' });
         return;
       }
+ // Restrict the channel charset (log-injection defense).
+      if (!CHANNEL_PATTERN.test(channel)) {
+        sendJson(res, 400, { error: 'invalid channel (allowed A-Za-z0-9:_- 1-128 chars)' });
+        return;
+      }
       const payload = body.payload ?? null;
- // Mirror the cockpit proxy's 64 KB payload cap (see MAX_EMIT_PAYLOAD_BYTES).
- // Serialize once and reuse for both the cap check and the audit log below.
+ // Serialize once, reused for the 64 KB cap check and the audit log.
       const payloadJson = JSON.stringify(payload);
       if (payloadJson.length > MAX_EMIT_PAYLOAD_BYTES) {
         sendJson(res, 413, { error: 'payload too large (max 64 KB)' });
         return;
       }
- // Clients may broadcast real UI→server events, but they must NEVER be able
- // to impersonate a server-owned channel (status / replay / streamed chat).
- // The socket `emit` handler enforces the same guard; without this an
- // authenticated caller to the HTTP endpoint could forge `system:status`,
- // `chat:message`, `chat:done`, `chat:error`, etc. to every connected
- // dashboard — the exact invariant the socket path already defends.
+ // A client must never impersonate a server-owned channel (same guard as the
+ // socket `emit` path).
       if (SERVER_OWNED_CHANNELS.has(channel)) {
         sendJson(res, 400, { error: 'channel not allowed on client emit' });
         return;
       }
       const evt = recordEvent(channel, payload);
       io.emit(channel, evt.payload, { id: evt.id, ts: evt.ts });
- // Success-path audit log: the `/emit` route proxies to a paid external
- // API-adjacent fan-out, so record what was posted and from where.
       console.info(
         `[/emit] ok channel=${channel} from=${ip} payloadBytes=${payloadJson.length} id=${evt.id}` +
           (requestId ? ` requestId=${requestId}` : ''),
@@ -449,21 +513,15 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
     }
 
     if (url === '/chat' && req.method === 'POST') {
- // Pre-read body size check via `content-length` (cheap — no body
- // parsing). If the client declares a body larger than MAX_BODY_BYTES,
- // reject before consuming the stream.
+ // Pre-read body-size check.
       const contentLength = parseInt(req.headers['content-length'] || '0', 10);
       if (contentLength > MAX_BODY_BYTES) {
         sendJson(res, 413, { error: 'Request body too large (max 1 MB)' });
         return;
       }
- // Auth: already enforced above (the global token check).
       const body = await readJson<ChatRequest>(req);
- // Validate the caller-supplied sessionId against the SAME pattern the
- // socket `chat:join` enforces. A sessionId with characters outside that
- // set would be used as a room name here but could never be joined by the
- // client (chat:join rejects it) — silently breaking streaming. Reject
- // such values at the boundary instead of emitting to an unjoinable room.
+ // Validate sessionId against the SAME pattern chat:join enforces, so we never
+ // emit to a room the client could never join.
       if (body.sessionId !== undefined && !SESSION_ID_PATTERN.test(body.sessionId)) {
         sendJson(res, 400, { error: 'Invalid sessionId (allowed: A-Za-z0-9_- , 1-128 chars)' });
         return;
@@ -480,170 +538,241 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
         return;
       }
 
+ // Serialize concurrent /chat per sessionId so a duplicate can't open a second
+ // upstream stream and double-bill. A random default sessionId never collides.
+      if (inflightChat.has(sessionId)) {
+        sendJson(res, 409, { error: 'Chat already in progress for this sessionId' });
+        return;
+      }
+      const chatRun = (async () => {
       try {
         const zai = await getZai();
         let finalText = '';
+        let truncated = false;
 
         if (wantStream) {
- // The z-ai-web-dev-sdk returns a raw `ReadableStream<Uint8Array>`
- // (the fetch response.body) when `stream: true` is set. We need to
- // parse the SSE event stream manually: each event is a line
- // beginning with `data: ` and ending with a blank line.
- // The final event is `data: [DONE]`.
-          const stream = (await zai.chat.completions.create({
-            messages,
-            stream: true,
-            thinking: { type: body.thinking === 'enabled' ? 'enabled' : 'disabled' },
-          })) as ReadableStream<Uint8Array> | null;
+ // With `stream: true` the SDK returns a raw `ReadableStream<Uint8Array>`
+ // (the fetch response.body); parse the SSE manually — each event is a
+ // `data:` line block separated by `\n\n`, terminated by `data: [DONE]`.
+          const stream = (await withUpstreamTimeout(
+            zai.chat.completions.create({
+              messages,
+              stream: true,
+              thinking: { type: body.thinking === 'enabled' ? 'enabled' : 'disabled' },
+              max_tokens: WINGMAN_MAX_TOKENS,
+            }),
+            UPSTREAM_CALL_TIMEOUT_MS,
+          )) as ReadableStream<Uint8Array> | null;
 
+          let sawListener = false;
+          let emptyStreak = 0;
           if (stream && typeof stream.getReader === 'function') {
             const reader = stream.getReader();
             const decoder = new TextDecoder('utf-8');
             let sseBuffer = '';
-            while (true) {
-              const { done, value } = await readWithTimeout(reader, CHAT_STREAM_CHUNK_TIMEOUT_MS);
-              if (done) break;
-              sseBuffer += decoder.decode(value, { stream: true });
- // SSE events are separated by `\n\n`.
-              let sepIdx: number;
-              while ((sepIdx = sseBuffer.indexOf('\n\n')) !== -1) {
-                const rawEvent = sseBuffer.slice(0, sepIdx);
-                sseBuffer = sseBuffer.slice(sepIdx + 2);
-                for (const line of rawEvent.split('\n')) {
-                  if (!line.startsWith('data:')) continue;
-                  const data = line.slice(5).trim();
-                  if (!data || data === '[DONE]') continue;
-                  try {
-                    const parsed = JSON.parse(data) as {
-                      choices?: Array<{ delta?: { content?: string } }>;
-                    };
-                    const token = parsed?.choices?.[0]?.delta?.content || '';
-                    if (token) {
-                      finalText += token;
-                      io.to(sessionId).emit('chat:message', { sessionId, token, ts: Date.now() });
-                    }
-                  } catch {
+ // Always tear down the upstream stream on exit (including error paths) so a
+ // failed emit/parse doesn't leak the upstream socket. `cancel()` is idempotent.
+            try {
+              streamLoop: while (true) {
+                const { done, value } = await readWithTimeout(reader, CHAT_STREAM_CHUNK_TIMEOUT_MS);
+                if (done) break;
+                sseBuffer += decoder.decode(value, { stream: true });
+                let sepIdx: number;
+                while ((sepIdx = sseBuffer.indexOf('\n\n')) !== -1) {
+                  const rawEvent = sseBuffer.slice(0, sepIdx);
+                  sseBuffer = sseBuffer.slice(sepIdx + 2);
+                  for (const line of rawEvent.split('\n')) {
+                    if (!line.startsWith('data:')) continue;
+                    const data = line.slice(5).trim();
+                    if (!data || data === '[DONE]') continue;
+                    try {
+                      const parsed = JSON.parse(data) as {
+                        choices?: Array<{ delta?: { content?: string } }>;
+                      };
+                      const token = parsed?.choices?.[0]?.delta?.content || '';
+                      if (token) {
+                        finalText += token;
+                        if (finalText.length > MAX_CHAT_RESPONSE_BYTES) {
+                          truncated = true;
+                          break streamLoop;
+                        }
+                        if (roomIsEmpty(sessionId)) {
+ // Only abort on an empty room after a listener was seen — otherwise a client
+ // that hasn't joined yet would truncate the first token. Hysteresis: tolerate
+ // a transient blip and only abort after a sustained empty window.
+                          if (sawListener) {
+                            emptyStreak += 1;
+                            if (emptyStreak >= EMPTY_ROOM_ABORT_TICKS) {
+                              truncated = true;
+                              break streamLoop;
+                            }
+                          }
+                        } else {
+                          sawListener = true;
+                          emptyStreak = 0;
+                          io.to(sessionId).emit('chat:message', { sessionId, token, ts: Date.now() });
+                        }
+                      }
+                    } catch {
  // Skip malformed event lines.
+                    }
                   }
                 }
               }
+            } finally {
+              reader.cancel().catch(() => {});
             }
           } else {
- // Fallback: some SDK versions might return an async iterable.
- // Treat any non-ReadableStream as such — but guard against a null
- // stream first: `for await of null` throws TypeError at runtime.
+ // Fallback: some SDK versions return an async iterable. Guard against a null
+ // stream first (auth failure / upstream error) — emit done to the room only
+ // (never leak sessionId to other clients) and return the empty result.
             if (!stream) {
- // SDK returned null (auth failure / upstream error). Emit done
- // to the room ONLY (sessionId must not leak to other clients)
- // and return the partial (empty) result so the client doesn't hang.
               io.to(sessionId).emit('chat:done', { sessionId, ts: Date.now() });
               sendJson(res, 200, { ok: true, sessionId, content: finalText, streamed: wantStream });
               return;
             }
-            for await (const chunk of (stream as unknown as AsyncIterable<{
+            const chatIter = (stream as unknown as AsyncIterable<{
               choices?: Array<{ delta?: { content?: string } }>;
-            }>)) {
+            }>)[Symbol.asyncIterator]();
+            while (true) {
+              const { value: chunk, done } = await chatIter.next();
+              if (done) break;
               const token = chunk?.choices?.[0]?.delta?.content || '';
               if (token) {
                 finalText += token;
-                io.to(sessionId).emit('chat:message', { sessionId, token, ts: Date.now() });
+                if (finalText.length > MAX_CHAT_RESPONSE_BYTES) {
+                  truncated = true;
+                  await chatIter.return?.();
+                  break;
+                }
+                if (roomIsEmpty(sessionId)) {
+                  if (sawListener) {
+ // Hysteresis, mirrors the ReadableStream branch above.
+                    emptyStreak += 1;
+                    if (emptyStreak >= EMPTY_ROOM_ABORT_TICKS) {
+                      truncated = true;
+                      await chatIter.return?.();
+                      break;
+                    }
+                  }
+                } else {
+                  sawListener = true;
+                  emptyStreak = 0;
+                  io.to(sessionId).emit('chat:message', { sessionId, token, ts: Date.now() });
+                }
               }
             }
           }
-          io.to(sessionId).emit('chat:done', { sessionId, ts: Date.now() });
- // NOTE: Do NOT `io.emit('chat:done', ...)` globally — that leaks
- // `sessionId` to every connected client (including ones in other
- // sessions). Room-scoped broadcast above is sufficient; clients that
- // want chat updates must `chat:join` the session room first.
+          io.to(sessionId).emit('chat:done', { sessionId, ts: Date.now(), truncated });
+ // Room-scoped only — a global `io.emit` would leak sessionId to other sessions.
         } else {
-          const completion = await zai.chat.completions.create({
-            messages,
-            thinking: { type: body.thinking === 'enabled' ? 'enabled' : 'disabled' },
-          });
+          const completion = await withUpstreamTimeout(
+            zai.chat.completions.create({
+              messages,
+              thinking: { type: body.thinking === 'enabled' ? 'enabled' : 'disabled' },
+              max_tokens: WINGMAN_MAX_TOKENS,
+            }),
+            UPSTREAM_CALL_TIMEOUT_MS,
+          );
           finalText = completion?.choices?.[0]?.message?.content || '';
- // Surface the completed message to the session room so a client that
- // joined via `chat:join` also receives output for non-streaming
- // requests (parity with the streaming branch, which emits tokens as
- // they arrive + a single `chat:done`). This emission MUST live inside
- // the non-streaming branch only: the streaming branch already emits
- // each token individually (above) and a final `chat:done`, so emitting
- // `finalText` again here would double-deliver every token. Room-scoped
- // broadcast only — never a global `io.emit`, which would leak the
- // sessionId to other sessions.
+          if (finalText.length > MAX_CHAT_RESPONSE_BYTES) {
+            truncated = true;
+            finalText = finalText.slice(0, MAX_CHAT_RESPONSE_BYTES);
+          }
+ // Surface the completed message to the session room for parity with the
+ // streaming branch. MUST stay in the non-streaming branch only — the streaming
+ // branch already emits per-token, so emitting here too would double-deliver.
+ // Room-scoped only (never a global `io.emit`, which would leak sessionId).
           io.to(sessionId).emit('chat:message', { sessionId, token: finalText, ts: Date.now() });
-          io.to(sessionId).emit('chat:done', { sessionId, ts: Date.now() });
+          io.to(sessionId).emit('chat:done', { sessionId, ts: Date.now(), truncated });
         }
 
- // Success-path audit log (the /chat route proxies to a paid external
- // LLM). Without it there is no way to attribute cost or detect abuse.
+ // Success-path audit log (paid external LLM — cost attribution / abuse).
         console.info(
           `[/chat] ok sessionId=${sessionId} from=${ip} ` +
             `messages=${messages.length} streamed=${wantStream} contentBytes=${finalText.length}` +
             (requestId ? ` requestId=${requestId}` : ''),
         );
-        sendJson(res, 200, { ok: true, sessionId, content: finalText, streamed: wantStream });
+        sendJson(res, 200, { ok: true, sessionId, content: finalText, streamed: wantStream, truncated });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.error('[/chat] error:', msg, requestId ? { requestId } : '');
-        io.to(sessionId).emit('chat:error', { sessionId, error: msg, ts: Date.now() });
- // Return HTTP 500 (not 200 with `{ok:false}`) when the
- // z-ai SDK throws. The previous `{ok:false}` shape was indistinguishable
- // from a successful empty-content response at the HTTP layer — fetch
- // callers that only checked `res.ok` (the React Query mutation in
- // `useSendChat` does exactly that: `if (!r.ok) throw`) treated the
- // SDK failure as a success, then surfaced the empty content as
- // "Empty response" instead of "Chat backend offline". 500 lets the
- // client distinguish "the server-side SDK blew up" from "the LLM
- // returned no content".
-        sendJson(res, 500, { ok: false, sessionId, content: '', error: msg });
+        console.error('[/chat] error:', redactSecrets(msg), requestId ? { requestId } : '');
+        io.to(sessionId).emit('chat:error', { sessionId, error: redactSecrets(msg), ts: Date.now() });
+ // Terminator so a client keyed on chat:done doesn't hang on a mid-stream
+ // failure (chat:error already carries the failure state).
+        io.to(sessionId).emit('chat:done', { sessionId, ts: Date.now() });
+ // 500 (not 200 with `{ok:false}`) so callers that only check `res.ok` can
+ // distinguish an SDK failure from an empty-but-successful response.
+        sendJson(res, 500, { ok: false, sessionId, content: '', error: redactSecrets(msg) });
+      }
+      })();
+      inflightChat.set(sessionId, chatRun);
+      try {
+        await chatRun;
+      } finally {
+        inflightChat.delete(sessionId);
       }
       return;
     }
 
+    if (url === '/chat' && req.method === 'DELETE') {
+ // GDPR Art.17 erasure proxy. This service holds no persistent chat rows (state
+ // is room-scoped/ephemeral), so a compliant response is a clean ack plus a
+ // room-scoped chat:done. `confirm:true` gate mirrors the cockpit proxy.
+      const body = await readJson<{ sessionId?: string; all?: boolean; confirm?: boolean }>(req);
+      if (body.confirm !== true) {
+        sendJson(res, 400, { error: 'confirm:true required' });
+        return;
+      }
+      if (body.sessionId !== undefined) {
+ // Validate against the chat:join pattern; room-scoped chat:done only (never a
+ // global io.emit that would leak sessionId to other sessions).
+        if (!SESSION_ID_PATTERN.test(body.sessionId)) {
+          sendJson(res, 400, { error: 'Invalid sessionId (allowed: A-Za-z0-9_- , 1-128 chars)' });
+          return;
+        }
+        io.to(body.sessionId).emit('chat:done', { sessionId: body.sessionId, ts: Date.now() });
+      } else if (body.all !== true) {
+        sendJson(res, 400, { error: 'sessionId or all:true required' });
+        return;
+      }
+      console.info(`[/chat] delete ok from=${ip} sessionId=${body.sessionId ?? 'all'}` + (requestId ? ` requestId=${requestId}` : ''));
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
     if (url === '/image' && req.method === 'POST') {
- // Pre-read body size check (same as /chat).
+ // Pre-read body-size check.
       const contentLength = parseInt(req.headers['content-length'] || '0', 10);
       if (contentLength > MAX_BODY_BYTES) {
         sendJson(res, 413, { error: 'Request body too large (max 1 MB)' });
         return;
       }
- // Auth: already enforced above (the global token check).
       const body = await readJson<ImageRequest>(req);
       if (!body.prompt || typeof body.prompt !== 'string') {
         sendJson(res, 400, { error: 'prompt required' });
         return;
       }
       const size = body.size || '1024x1024';
- // Validate the size against the SDK's allowed union at the boundary, so an
- // invalid value yields a 400 instead of a wasted upstream round-trip that
- // surfaces as a 500.
+ // Validate size at the boundary so an invalid value yields a 400, not a wasted
+ // upstream round-trip.
       if (body.size && !ALLOWED_IMAGE_SIZES.includes(body.size as (typeof ALLOWED_IMAGE_SIZES)[number])) {
         sendJson(res, 400, { error: 'Invalid size (must be one of the allowed dimensions)' });
         return;
       }
       try {
         const zai = await getZai();
-        const response = await zai.images.generations.create({ prompt: body.prompt, size });
+        const response = await withUpstreamTimeout(
+          zai.images.generations.create({ prompt: body.prompt, size }),
+          UPSTREAM_CALL_TIMEOUT_MS,
+        );
         const base64 = response?.data?.[0]?.base64 || '';
- // Broadcasting `io.emit('snapshot:captured', ...)` would push the
- // prompt (which may contain sensitive user input) to EVERY connected
- // socket.io client — including clients in other browser tabs or other
- // users sharing the same `SHARED_SECRET`. The HTTP response already
- // returns the result to the requesting client (the cockpit server-side
- // fetch), so the live broadcast is unnecessary AND a privacy leak.
- //
- // Only `recordEvent` (so reconnecting clients see the event in
- // `events:replay` — the documented event-sourcing behavior), and skip
- // the live `io.emit`. The requester already has the response
- // via the HTTP round-trip; other live clients don't need to see the
- // prompt in real time. The recorded event deliberately OMITS the prompt
- // (which may contain sensitive user input / PII) — including it would
- // persist that text into the replay buffer observable by any client that
- // can authenticate, even though we already suppress the live broadcast.
+ // Record only (no live `io.emit`): the HTTP response already returns the
+ // result to the requester, and broadcasting would push the prompt to every
+ // connected client. The recorded event deliberately OMITS the prompt (possible
+ // PII) so it isn't persisted into the replay buffer.
         recordEvent('snapshot:captured', { kind: 'ai-image', size, bytes: base64.length });
- // Success-path audit log (the /image route proxies to a paid external
- // image API). Record size + byte count; the prompt is intentionally not
- // logged (it may contain sensitive user input).
+ // Success-path audit log (paid external image API). Prompt not logged (PII).
         console.info(
           `[/image] ok from=${ip} size=${size} bytes=${base64.length} promptBytes=${body.prompt.length}` +
             (requestId ? ` requestId=${requestId}` : ''),
@@ -651,30 +780,39 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
         sendJson(res, 200, { ok: true, base64, prompt: body.prompt, size, bytes: base64.length });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.error('[/image] error:', msg, requestId ? { requestId } : '');
- // Return HTTP 500 (not 200 with `{ok:false}`) when the
- // z-ai SDK throws — same rationale as the /chat catch block above.
-        sendJson(res, 500, { ok: false, error: msg });
+        console.error('[/image] error:', redactSecrets(msg), requestId ? { requestId } : '');
+ // 500 on SDK throw — same rationale as the /chat catch block above.
+        sendJson(res, 500, { ok: false, error: redactSecrets(msg) });
       }
       return;
     }
 
     if (url === '/events' && req.method === 'GET') {
- // SSE-style replay: returns the buffered events as JSON.
+ // Replay the buffered events as JSON.
       const sinceId = parseInt(parseQuery(req.url || '').since_id || '0', 10) || 0;
-      sendJson(res, 200, { events: getRecentEvents(sinceId) });
+      // Redact any secret shapes in user-supplied payloads before they leave.
+      const events = getRecentEvents(sinceId).map((e) => {
+        try {
+          return JSON.parse(redactSecrets(JSON.stringify(e)));
+        } catch {
+          return e;
+        }
+      });
+      sendJson(res, 200, { events });
       return;
     }
 
     sendJson(res, 404, { error: 'Not found', url });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error('[http] error:', msg);
- // If the body exceeded the size limit during streaming, `readJson`
- // rejects with our size-limit error message — surface that as a 413 rather
- // than a generic 500.
+    console.error('[http] error:', redactSecrets(msg));
+ // Map the typed body-read errors to 413 / 408 rather than a generic 500.
     if (err instanceof BodyTooLargeError) {
       sendJson(res, 413, { error: msg });
+      return;
+    }
+    if (err instanceof BodyReadTimeoutError) {
+      sendJson(res, 408, { error: msg });
       return;
     }
     sendJson(res, 500, { error: msg });
@@ -682,17 +820,20 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
 }
 
 const httpServer = createServer(httpRequestHandler);
-// Exported so the test suite can drive a real HTTP server bound to a
-// random port without invoking `main()` (which would bind to port 3003 +
-// register signal handlers + start the 15-second status interval).
+// Cap the header phase so a client can't trickle bytes to hold a connection open
+// (slowloris). Disable the raw `requestTimeout` — engine.io's long-polls would
+// otherwise be force-closed, causing spurious realtime disconnects; engine.io
+// bounds its own connection liveness.
+httpServer.headersTimeout = 15_000;
+httpServer.requestTimeout = 0;
+// Exported so the test suite can drive a real HTTP server on a random port
+// without invoking `main()`.
 export { httpServer };
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
- // `Access-Control-Allow-Origin` is set per-request by
- // `applyCorsHeaders` in `httpRequestHandler`. We do NOT set a wildcard
- // here — same-origin callers (the cockpit dashboard) don't need CORS at
- // all, and cross-origin callers must match the allowlist.
+ // `Access-Control-Allow-Origin` is set per-request by `applyCorsHeaders`; no
+ // wildcard here.
   res.writeHead(status, {
     'Content-Type': 'application/json',
     'X-Content-Type-Options': 'nosniff',
@@ -701,13 +842,19 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
-// Typed error for the body-size guard so the HTTP handler can map it to a 413
-// by CLASS rather than by substring-matching an error message (which regressed
-// silently whenever the message wording changed).
+// Typed errors so the HTTP handler can map them by CLASS (413 / 408) rather than
+// by substring-matching a message.
 class BodyTooLargeError extends Error {
   constructor(public readonly maxBytes: number) {
     super(`Request body too large (max ${maxBytes} bytes)`);
     this.name = 'BodyTooLargeError';
+  }
+}
+
+class BodyReadTimeoutError extends Error {
+  constructor(public readonly idleMs: number) {
+    super(`Request body read timed out after ${idleMs} ms idle`);
+    this.name = 'BodyReadTimeoutError';
   }
 }
 
@@ -716,24 +863,38 @@ function readJson<T>(req: IncomingMessage): Promise<T> {
     const chunks: Buffer[] = [];
     let totalBytes = 0;
     let aborted = false;
+    // Idle guard: reject if no chunk arrives within BODY_READ_IDLE_MS (the only
+    // bound on a stalled body read, since `requestTimeout` is disabled).
+    const idleTimer = setTimeout(() => {
+      if (!aborted) {
+        aborted = true;
+        req.destroy();
+        reject(new BodyReadTimeoutError(BODY_READ_IDLE_MS));
+      }
+    }, BODY_READ_IDLE_MS);
+    const resetIdle = () => {
+      if (aborted) return;
+      idleTimer.refresh();
+    };
     req.on('data', (c: Buffer) => {
- // Defensive size limit — even if `content-length` is missing or
- // spoofed, abort reading once we've buffered more than MAX_BODY_BYTES.
- // This stops a client from streaming an unbounded payload and exhausting
- // memory. We destroy the socket so the client gets an RST/ECONNRESET.
+ // Defensive size limit for missing/spoofed `content-length`: abort once we've
+ // buffered more than MAX_BODY_BYTES and destroy the socket.
       totalBytes += c.length;
       if (totalBytes > MAX_BODY_BYTES) {
         if (!aborted) {
           aborted = true;
+          clearTimeout(idleTimer);
           req.destroy();
           reject(new BodyTooLargeError(MAX_BODY_BYTES));
         }
         return;
       }
       chunks.push(c);
+      resetIdle();
     });
     req.on('end', () => {
       if (aborted) return; // already rejected in 'data'
+      clearTimeout(idleTimer);
       const text = Buffer.concat(chunks).toString('utf8');
       if (!text) return resolve({} as T);
       try {
@@ -743,7 +904,10 @@ function readJson<T>(req: IncomingMessage): Promise<T> {
       }
     });
     req.on('error', (err) => {
-      if (!aborted) reject(err instanceof Error ? err : new Error(String(err)));
+      if (!aborted) {
+        clearTimeout(idleTimer);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
     });
   });
 }
@@ -755,16 +919,9 @@ function parseQuery(url: string): Record<string, string> {
   for (const pair of q.split('&')) {
     const eq = pair.indexOf("="); const k = eq >= 0 ? pair.slice(0, eq) : pair; const v = eq >= 0 ? pair.slice(eq + 1) : "";
     if (k) {
- // `decodeURIComponent` throws `URIError` on malformed
- // percent-escapes like `%ZZ` or `%E0%A4%A` (truncated multibyte). A
- // hostile or buggy client could otherwise crash the whole request
- // with a malformed query string. Decode the key and value
- // independently: a malformed VALUE still yields the raw value under
- // the decoded key, rather than dropping the entry entirely (which
- // would make a consumer's `since_id` lookup miss). The caller
- // (currently `/events?since_id=N`) only reads `since_id`, which a
- // sane client always sends as a plain integer; the fallback only
- // kicks in for keys/values the caller didn't intend to read.
+ // `decodeURIComponent` throws `URIError` on malformed percent-escapes; decode
+ // key and value independently so a malformed value falls back to its raw form
+ // rather than crashing the request or dropping the entry.
       let dk: string;
       try {
         dk = decodeURIComponent(k);
@@ -786,19 +943,58 @@ function parseQuery(url: string): Record<string, string> {
   return out;
 }
 
-// Read the next chunk from `reader`, rejecting if no chunk arrives within `ms`.
-// A stalled upstream should fail the request loudly (and let the request
-// handler tear down the socket.io room) rather than hang the HTTP response
-// forever. See finding: /chat streaming reader has no per-chunk timeout.
+// Race an upstream SDK await against a timeout so a stalled provider can't hang
+// the HTTP handler forever. On expiry the promise rejects and the caller's
+// try/catch returns an error response.
+//
+// The z-ai SDK has no `signal` abort hook, so an op that resolves AFTER the
+// timeout fired must be torn down here: a streaming `create` resolves to a live
+// `ReadableStream` which would leak the upstream socket if abandoned, so cancel
+// it via its reader. Non-stream ops resolve to non-cancelable values.
+function withUpstreamTimeout<T>(op: Promise<T>, ms: number): Promise<T> {
+  let timedOut = false;
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      timedOut = true;
+      reject(new Error('upstream call stalled (timeout)'));
+    }, ms);
+    op.then(
+      (v) => {
+        clearTimeout(timer);
+        if (timedOut) {
+          // Op resolved AFTER the timeout fired. The caller has already taken
+          // the error path; tear down any cancelable resource so it doesn't
+          // leak. Only streaming creates return a live ReadableStream.
+          const streamish = v as { getReader?: unknown };
+          if (streamish && typeof streamish.getReader === 'function') {
+            try {
+              (streamish as ReadableStream<Uint8Array>).getReader().cancel().catch(() => {
+                /* stream may already be released/errored */
+              });
+            } catch {
+              /* not a real stream in practice; nothing to clean up */
+            }
+          }
+          return;
+        }
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 function readWithTimeout(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   ms: number,
 ): Promise<ReadableStreamReadResult<Uint8Array>> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
- // On timeout, cancel the reader so the underlying upstream socket is torn
- // down instead of leaking (the pending `reader.read()` below rejects and
- // is swallowed). Without this the upstream connection stays open forever.
+ // On timeout, cancel the reader so the upstream socket is torn down instead of
+ // leaking (the pending `reader.read()` rejects and is swallowed).
       reader.cancel(new Error('upstream stream stalled (chunk timeout)')).catch(() => {
         /* reader may already be released/errored — nothing to clean up */
       });
@@ -821,33 +1017,56 @@ function readWithTimeout(
 // Socket.IO server
 // ---------------------------------------------------------------------------
 //
-// IMPORTANT: socket.io's `path: '/'` is required by project rules so the
-// frontend can connect via `io('/?XTransformPort=3003', ...)`. But engine.io's
-// `attach()` (called by the `SocketIOServer` constructor below) registers a
-// `request` listener that matches every URL when `path === '/'` — that would
-// intercept our HTTP routes (/health, /chat, /image, /emit, /events) and
-// return `{"code":0,"message":"Transport unknown"}`.
-//
-// To work around this, after SocketIOServer attaches we replace the request
-// listener with a dispatcher: HTTP routes go to `httpRequestHandler` directly,
-// while engine.io handshake/polling URLs (containing `EIO=` or `transport=`)
-// fall through to socket.io's wrapper. See the re-wrap block below.
+// `path: '/'` is required so the frontend can connect via
+// `io('/?XTransformPort=3003', ...)`. But engine.io's `attach()` registers a
+// `request` listener that matches every URL when `path === '/'`, intercepting
+// our HTTP routes. The re-wrap block below replaces that listener with a
+// dispatcher: HTTP routes go to `httpRequestHandler`, engine.io URLs (containing
+// `EIO=` or `transport=`) fall through to socket.io.
 
-// Exported so the test suite can call `io.close()` to release socket.io's
-// hold on the underlying httpServer before tearing the test process down.
+// Exported so the test suite can call `io.close()` before teardown.
 const io = new SocketIOServer(httpServer, {
   path: '/', // MUST be '/' — Caddy uses this to route via XTransformPort
- // Restrict CORS to the configured cockpit origin (default
- // `http://localhost:3000`). A wildcard would let any hostile site connect
- // and read every broadcast event.
+ // Restrict CORS to the configured cockpit origin; a wildcard would let any
+ // hostile site connect and read every broadcast event.
   cors: {
     origin: CORS_ORIGIN,
     methods: ['GET', 'POST'],
   },
   pingTimeout: 60_000,
   pingInterval: 25_000,
+  // Explicit engine.io max HTTP buffer size (see MAX_HTTP_BUFFER_SIZE above).
+  maxHttpBufferSize: MAX_HTTP_BUFFER_SIZE,
 });
 export { io };
+
+// Pre-auth engine.io gate: reject unauthenticated handshakes BEFORE a Socket is
+// established and enforce the concurrent-connection ceiling. The connection-level
+// check in `io.on('connection')` fires only after a transport is allocated, so
+// without this an unauthenticated client could loop handshakes and exhaust
+// resources. Accepts SOCKET_SECRET like the connection handler (the S2S/UI split
+// is enforced on the HTTP proxy routes, not here).
+io.use((socket, next) => {
+  // Concurrent-connection ceiling (includes handshakes still in flight).
+  if (io.engine.clientsCount > MAX_CONCURRENT_CONNECTIONS) {
+    console.warn(
+      `[cowork-events] socket handshake REJECTED (connection cap ` +
+        `${MAX_CONCURRENT_CONNECTIONS} exceeded) from ${socketClientIp(socket)}`,
+    );
+    next(new Error('connection limit exceeded'));
+    return;
+  }
+  const hsToken = extractHandshakeToken(socket.handshake);
+  if (!tokenMatches(hsToken, SOCKET_SECRET)) {
+    // Log the failed handshake auth with source IP — NEVER the token — then drop.
+    console.warn(
+      `[cowork-events] socket handshake auth FAILED from ${socketClientIp(socket)} — dropping connection`,
+    );
+    next(new Error('unauthorized'));
+    return;
+  }
+  next();
+});
 
 // Re-wrap request listeners: HTTP routes first, socket.io for the rest.
 {
@@ -856,21 +1075,15 @@ export { io };
   httpServer.removeAllListeners('request');
   httpServer.on('request', (req, res) => {
     const url = req.url || '/';
- // Engine.io handshake/polling URLs always contain `EIO=` (protocol version)
- // and/or `transport=` (transport name). Anything else is an HTTP route.
+ // Engine.io handshake/polling URLs contain `EIO=` and/or `transport=`.
     const isEngineIo = url.includes('EIO=') || url.includes('transport=');
     if (!isEngineIo) {
- // A floating `void httpRequestHandler(req, res)` promise
- // silently swallowed any rejection that escaped the handler — most
- // likely a sync throw before the first `await` (e.g. inside
- // `applyCorsHeaders` or `res.setHeader` on a closed socket). The
- // client would see a hung connection and the operator would see no
- // log. Catch + log + send a structured 500 so the failure is at
- // least observable. `res.headersSent` guards against double-writing
- // when the handler had already started a response.
+ // Catch + log + 500 so a rejection escaping the handler (e.g. a sync throw
+ // before the first await) is observable instead of hanging the client.
+ // `res.headersSent` guards against double-writing.
       httpRequestHandler(req, res).catch((e: unknown) => {
         const msg = e instanceof Error ? e.message : String(e);
-        console.error('[http] uncaught handler error:', msg);
+        console.error('[http] uncaught handler error:', redactSecrets(msg));
         if (!res.headersSent) {
           try {
             sendJson(res, 500, { error: 'Internal server error' });
@@ -887,41 +1100,45 @@ export { io };
   });
 }
 
-// Derive the client IP for a socket.io connection, reusing the HTTP-side
-// `clientIp` helper so IP resolution is consistent across both layers.
-// socket.io exposes the forwarded + direct addresses on `socket.handshake`.
+// Derive the client IP for a socket.io connection, reusing `clientIp` for
+// consistency across layers.
 function socketClientIp(socket: Socket): string {
+  // Strip control chars — the header-derived IP is attacker-controllable (log
+  // injection).
   return clientIp({
     headers: (socket.handshake.headers || {}) as IncomingMessage['headers'],
     socket: { remoteAddress: socket.handshake.address },
-  } as IncomingMessage);
+  } as IncomingMessage).replace(/[\r\n\x00-\x1f]/g, '');
 }
 
 io.on('connection', (socket: Socket) => {
- // Require the shared-secret token on EVERY connection. A malicious
- // website that just opens `io('/?XTransformPort=3003')` with no token must
- // NOT receive `system:status` or `events:replay` — otherwise it would
- // silently read every cockpit event in real time.
+ // Re-check the token on EVERY connection so a tokenless client can't receive
+ // `system:status` / `events:replay` and read every cockpit event.
   const hs = socket.handshake;
   const connToken = extractHandshakeToken(hs);
   if (!tokenMatches(connToken, SOCKET_SECRET)) {
- // Log the failed handshake auth with source IP for observability.
- // NEVER log the token. Then drop the connection without emitting anything.
+ // Log the failed handshake auth with source IP — NEVER the token — then drop.
     console.warn(`[cowork-events] socket handshake auth FAILED from ${socketClientIp(socket)} — dropping connection`);
     socket.disconnect(true);
     return;
   }
 
- // Capture a per-connection scoped sessionId if the client presented one in
- // the handshake auth payload. The cockpit currently only sends
- // `{ token }`, so this is `undefined` for today's clients (legacy /
- // permissive path). When set, `chat:join` enforces strict ownership.
+ // Capture a scoped sessionId if the handshake auth payload carried one (the
+ // cockpit sends only `{ token }` today → undefined → legacy/permissive path).
+ // When set, `chat:join` enforces strict ownership.
   const authSessionId = (hs.auth as { sessionId?: unknown } | undefined)?.sessionId;
   socket.data.authorizedSessionId =
     typeof authSessionId === 'string' && authSessionId ? authSessionId : undefined;
 
- // Send last 50 events on connect so the dashboard can hydrate immediately.
-  const recent = eventBuffer.slice(-50);
+ // Hydrate the dashboard with the last 50 events, redacting secret shapes
+ // (mirrors the GET /events path).
+  const recent = eventBuffer.slice(-50).map((e) => {
+    try {
+      return JSON.parse(redactSecrets(JSON.stringify(e)));
+    } catch {
+      return e;
+    }
+  });
   socket.emit('system:status', {
     hello: true,
     clients: io.engine.clientsCount,
@@ -933,30 +1150,37 @@ io.on('connection', (socket: Socket) => {
     socket.emit('events:replay', recent);
   }
 
- // Clients can join a "room" named after their sessionId to receive
- // streamed chat tokens targeted at them only.
- //
- // ROOM SCOPING: chat:join enforces strict ownership so a connected client
- // cannot read another session's streamed `chat:message` tokens.
- //
- // The ownership decision is delegated to the pure `evaluateChatJoin`
- // helper (in `./security.ts`):
- // • `sessionId` must match `/^[A-Za-z0-9_-]{1,128}$/` (defeats arbitrary
- // room-name abuse).
- // • If this connection authenticated with a scoped `authorizedSessionId`
- // (captured above), it may ONLY join that exact session's room.
- // • Legacy clients (no scoped sessionId — e.g. the current cockpit) are
- // still allowed to join any room, but the join is logged as
- // `permissive-legacy` so operators can spot the unconstrained path.
- //
- // TODO (unchanged intent): bind room membership to a per-client identifier
- // that the client cannot spoof — e.g. the cockpit mints sessionIds and the
- // client proves ownership with a per-session HMAC. The current
- // `authorizedSessionId`-from-handshake model only restricts clients that
- // voluntarily present a scoped sessionId; a client that omits it stays on
- // the permissive path. Out of scope here — the current deployment assumes a
- // single trusted user (the operator) on loopback.
+ // Join a room named after sessionId to receive that session's streamed chat
+ // tokens. Ownership is delegated to `evaluateChatJoin`:
+ // • `sessionId` must match `/^[A-Za-z0-9_-]{1,128}$/`.
+ // • A connection with a scoped `authorizedSessionId` may join only that room.
+ // • Legacy clients (no scoped sessionId, e.g. the cockpit) may join any room,
+ //   logged `permissive-legacy`.
+ // Per-session-HMAC ownership is future work — the deployment assumes a single
+ // trusted user on loopback.
   socket.on('chat:join', (sessionId: unknown) => {
+    // Rate-limit chat:join (before the join, even if the sessionId is rejected)
+    // so a client can't flood the room map. Keyed SEPARATELY from the proxy /
+    // socket-emit bucket: on loopback all buckets collapse to 127.0.0.1, so a
+    // shared key would let a join burst starve the operator's own /chat calls.
+    const rl = rateLimitCheck('chat-join:' + socketClientIp(socket));
+    if (!rl.allowed) {
+      console.warn(
+        `[cowork-events] chat:join RATE-LIMITED from ${socketClientIp(socket)} ` +
+          `(retry after ${rl.resetAt})`,
+      );
+      return;
+    }
+    // Per-socket room cap. `socket.rooms` includes the socket's own id room, so
+    // subtract 1 before comparing.
+    const joinedRooms = socket.rooms.size - 1;
+    if (joinedRooms >= MAX_SOCKET_ROOMS) {
+      console.warn(
+        `[cowork-events] chat:join REJECTED (room cap ${MAX_SOCKET_ROOMS} exceeded) ` +
+          `from ${socketClientIp(socket)}`,
+      );
+      return;
+    }
     const decision = evaluateChatJoin(socket.data.authorizedSessionId, sessionId);
     if (!decision.allowed) {
       if (decision.reason === 'not-authorized-for-session') {
@@ -982,17 +1206,15 @@ io.on('connection', (socket: Socket) => {
     }
   });
 
- // Allow a connected client to broadcast an event too (e.g. UI → server → others).
- //
- // Auth: the client must present the shared secret (`COWORK_EVENT_TOKEN`, same
- // value as the HTTP `X-Cowork-Token` header) in either `socket.handshake.auth.token`
- // or `socket.handshake.query.token`. The connection-level auth check above
- // already enforces this, but we re-check here in case socket.io's handshake
- // auth state is tampered with after connection (defense-in-depth).
+ // Allow a connected client to broadcast an event (UI → server → others).
+ // Re-check the token (defense-in-depth), accepting EITHER SOCKET_SECRET or
+ // SHARED_SECRET — both legitimately open a connection, and a browser bundle
+ // only ever holds the UI token, so requiring the S2S secret here would break
+ // browser `emit` when the two tokens differ.
   socket.on('emit', (msg: { channel?: string; payload?: unknown }, ack?: (r: unknown) => void) => {
     const hs2 = socket.handshake;
     const emitToken = extractHandshakeToken(hs2);
-    if (!tokenMatches(emitToken, SHARED_SECRET)) {
+    if (!tokenMatches(emitToken, SOCKET_SECRET) && !tokenMatches(emitToken, SHARED_SECRET)) {
       if (ack) ack({ ok: false, error: 'Invalid X-Cowork-Token' });
       return;
     }
@@ -1000,16 +1222,19 @@ io.on('connection', (socket: Socket) => {
       if (ack) ack({ ok: false, error: 'channel required' });
       return;
     }
- // Clients may broadcast real UI→server events, but they must NEVER be able
- // to impersonate a server-owned channel (status / replay / streamed chat).
+ // Never let a client impersonate a server-owned channel.
     if (SERVER_OWNED_CHANNELS.has(msg.channel)) {
       if (ack) ack({ ok: false, error: 'channel not allowed on client emit' });
       return;
     }
- // Channel-length + payload caps, mirrored from the HTTP `/emit` route so the
- // trust boundary is identical regardless of entry point.
+ // Channel-length + payload caps, mirrored from the HTTP `/emit` route.
     if (msg.channel.length > MAX_CHANNEL_LENGTH) {
       if (ack) ack({ ok: false, error: 'channel too long (max 128 chars)' });
+      return;
+    }
+ // Restrict the channel charset (log-injection defense).
+    if (!CHANNEL_PATTERN.test(msg.channel)) {
+      if (ack) ack({ ok: false, error: 'invalid channel (allowed A-Za-z0-9:_- 1-128 chars)' });
       return;
     }
     const payload = msg.payload ?? null;
@@ -1017,9 +1242,8 @@ io.on('connection', (socket: Socket) => {
       if (ack) ack({ ok: false, error: 'payload too large (max 64 KB)' });
       return;
     }
- // Per-IP rate limit on the client emit path too (the HTTP routes already
- // apply it) so an authenticated client can't flood the replay buffer and
- // evict genuine events for reconnecting clients.
+ // Per-IP rate limit on the client emit path too, so an authenticated client
+ // can't flood the replay buffer.
     const rl = rateLimitCheck(socketClientIp(socket));
     if (!rl.allowed) {
       if (ack) ack({ ok: false, error: 'Rate limit exceeded. Try again later.', resetAt: rl.resetAt });
@@ -1033,32 +1257,21 @@ io.on('connection', (socket: Socket) => {
 });
 
 // ---------------------------------------------------------------------------
-// Periodic system:status broadcaster
-// ---------------------------------------------------------------------------
-//
-// (Moved inside `main()` below so that simply importing this module — e.g. for
-// unit tests — does NOT start the 15-second interval + bind to port 3003 +
-// register signal handlers. Tests that need a live HTTP server call
-// `httpServer.listen(0, '127.0.0.1')` themselves.)
-
-// ---------------------------------------------------------------------------
 // Boot (only runs when this file is executed directly, not when imported)
 // ---------------------------------------------------------------------------
+//
+// The status broadcaster, port bind, and signal handlers all live inside
+// `main()` so importing this module (e.g. for tests) starts none of them.
 
 /**
  * Bind to port 3003 on 127.0.0.1, start the periodic status broadcaster, and
- * register SIGTERM/SIGINT handlers. Pure side-effect — returns void.
- *
- * Guarded by the ESM `import.meta.url` check at the bottom of the file so it
- * does NOT run when the module is imported by the test suite.
+ * register SIGTERM/SIGINT handlers. Guarded by the `import.meta.url` check at
+ * the bottom so it does not run when imported by the test suite.
  */
 function main(): void {
- // Refuse to start unless a real `COWORK_EVENT_TOKEN` is configured. The
- // well-known default `dev-token` is rejected in EVERY environment — not just
- // production — unless `COWORK_ALLOW_DEV_TOKEN=1` is explicitly set. An
- // operator who runs this service (even in dev) without a real secret AND
- // without the opt-in would otherwise be running with a publicly documented
- // default that anyone who can reach the service could use.
+ // Refuse to start on the default `dev-token` in EVERY environment unless
+ // `COWORK_ALLOW_DEV_TOKEN=1` is set — otherwise anyone who can reach the
+ // service could use the publicly documented default.
   if (shouldRefuseStart(process.env.NODE_ENV, SHARED_SECRET)) {
     console.error(
       '[cowork-events] FATAL: COWORK_EVENT_TOKEN is unset or set to the default "dev-token". ' +
@@ -1070,11 +1283,9 @@ function main(): void {
  // Record the boot time so reconnecting clients can detect a restart.
   serverStartedAt = Date.now();
 
- // Bind explicitly to 127.0.0.1 — Node's `listen(port)` with no host
- // argument binds to 0.0.0.0 (all interfaces), which would expose the
- // mini-service to every host on the LAN. The cockpit dashboard reaches the
- // mini-service via the same-origin Caddy gateway (`XTransformPort=3003`),
- // not via direct LAN access.
+ // Bind explicitly to 127.0.0.1 — `listen(port)` with no host binds to 0.0.0.0
+ // (all interfaces), exposing the service to the LAN. The cockpit reaches it via
+ // the same-origin Caddy gateway.
   httpServer.listen(PORT, '127.0.0.1', () => {
     console.log(`[cowork-events] listening on http://127.0.0.1:${PORT} (loopback only)`);
     console.log(`[cowork-events] socket.io path=/  cors=${CORS_ORIGIN}  buffer=${EVENT_BUFFER_MAX}`);
@@ -1085,25 +1296,21 @@ function main(): void {
     );
   });
 
- // Advisory (startup, once): the current cockpit authenticates to the socket
- // layer with only the shared token (no scoped sessionId), so chat rooms run
- // in `permissive-legacy` mode — any authenticated client may join any
- // session room and read that session's streamed chat. Safe ONLY for the
- // documented single-trusted-user-on-loopback model; mint per-session HMACs
- // before exposing this service beyond loopback.
+ // Startup advisory: chat:join runs in permissive-legacy mode (the cockpit
+ // presents no scoped sessionId), so any authenticated client can join any
+ // session room. Safe only for the single-trusted-user-on-loopback model.
   console.warn(
     '[cowork-events] WARNING: chat:join is in permissive-legacy mode (no ' +
       'per-session HMAC). Cross-session chat leakage is possible if exposed ' +
       'beyond loopback — single-user-loopback deployment only.',
   );
 
- // Broadcast a buffer-reset marker so reconnecting cockpit clients can tell
- // "no events yet" apart from "event history was lost on restart".
+ // Buffer-reset marker so reconnecting clients can tell "no events yet" apart
+ // from "history lost on restart".
   io.emit('system:status', { bufferReset: true, serverStartedAt, ts: Date.now() });
 
- // Periodic system:status broadcaster — fires every 15 seconds. Inside
- // `main()` so tests don't inherit the interval.
-  setInterval(() => {
+ // Periodic system:status broadcaster (every 15s).
+  statusTimer = setInterval(() => {
     const status = {
       clients: io.engine.clientsCount,
       eventsBuffered: eventBuffer.length,
@@ -1114,66 +1321,51 @@ function main(): void {
     io.emit('system:status', status);
   }, STATUS_INTERVAL_MS);
 
- // `shutdown` is async (it awaits `io.close()`). Signal
- // handlers can't await, so we kick off the promise and attach a `.catch`
- // handler so a rejection (e.g. `io.close()` throwing on a half-closed
- // socket) is observable in the logs instead of becoming an
- // unhandledRejection. The previous `void shutdown(...)` form marked the
- // floating promise as intentional but still swallowed rejections silently.
+ // Signal handlers can't await, so kick off the async `shutdown` and log any
+ // rejection (instead of it becoming an unhandledRejection), force-exiting since
+ // the process is then in an unknown state.
   const shutdownFromSignal = (signal: string) => {
     shutdown(signal).catch((e: unknown) => {
       console.error(`[cowork-events] shutdown rejected:`, e instanceof Error ? e.message : String(e));
- // Force-exit if graceful shutdown failed — the process is in an
- // unknown state and shouldn't keep running.
       process.exit(1);
     });
   };
   process.on('SIGTERM', () => shutdownFromSignal('SIGTERM'));
   process.on('SIGINT', () => shutdownFromSignal('SIGINT'));
 
- // Global crash handlers: a lone unhandled rejection / uncaught exception
- // would otherwise terminate the process with no auto-restart and silently
- // kill the realtime event bus. Log it and attempt a graceful shutdown. The
- // service should be run under a supervisor (systemd / pm2 / docker
- // `--restart`) so transient crashes self-heal.
+ // Crash handlers: log an otherwise-fatal rejection/exception and attempt a
+ // graceful shutdown. Run under a supervisor so transient crashes self-heal.
   const onCrash = (where: string, e: unknown) => {
     const msg = e instanceof Error ? (e.stack || e.message) : String(e);
     console.error(`[cowork-events] ${where}:`, msg);
-    shutdown(where).catch(() => process.exit(1));
+    shutdown(where, true).catch(() => process.exit(1));
   };
   process.on('uncaughtException', (e) => onCrash('uncaughtException', e));
   process.on('unhandledRejection', (e) => onCrash('unhandledRejection', e));
 }
 
-// Graceful shutdown
-//
-// `shutdown` is async so we can `await io.close()` before
-// `httpServer.close()`. `io.close()` is the socket.io Server's async teardown
-// — it sends disconnect packets to all connected clients, waits for
-// acknowledgements, and releases the engine.io listeners that hold references
-// to the underlying httpServer. Without awaiting it, `httpServer.close()`
-// races with socket.io's teardown: pending socket.io HTTP long-poll requests
-// can keep the httpServer's connection count above zero, causing
-// `httpServer.close()` to hang until the 3s force-exit fallback fires.
-async function shutdown(signal: string): Promise<void> {
+// Graceful shutdown. Await socket.io's async teardown FIRST — it releases the
+// engine.io listeners holding the httpServer, otherwise pending long-polls keep
+// the connection count above zero and `httpServer.close()` hangs until the 3s
+// force-exit fires.
+async function shutdown(signal: string, crash = false): Promise<void> {
   console.log(`[cowork-events] ${signal} received, shutting down...`);
- // Await socket.io's graceful teardown FIRST so it can send disconnect
- // packets + release its hold on the httpServer. `io.close` returns a
- // Promise (socket.io v4+) that resolves when all connections are closed.
+  if (statusTimer !== undefined) {
+    clearInterval(statusTimer);
+    statusTimer = undefined;
+  }
   await io.close();
   httpServer.close(() => {
     console.log('[cowork-events] closed');
-    process.exit(0);
+ // Non-zero on the crash path so a supervisor's restart detection fires.
+    process.exit(crash ? 1 : 0);
   });
- // Force-exit after 3s if httpServer.close stalls (e.g., keep-alive
- // connections that never drain).
+ // Force-exit if httpServer.close stalls (e.g. keep-alives that never drain).
   setTimeout(() => process.exit(1), 3000).unref();
 }
 
-// ESM equivalent of CommonJS `if (require.main === module)`. When this file
-// is executed directly via `npx tsx index.ts` / `npm run dev`, `process.argv[1]`
-// is the absolute path to this file — so we boot. When the test suite imports
-// the module, `process.argv[1]` is the vitest binary — so we skip `main()`.
+// ESM equivalent of `if (require.main === module)`: boot only when executed
+// directly (not when the test suite imports the module).
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   main();
 }
@@ -1181,10 +1373,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 // ---------------------------------------------------------------------------
 // Test exports — pure utilities + handler reference
 // ---------------------------------------------------------------------------
-//
-// Exported so `tests/cowork-events.test.ts` can drive the HTTP routes directly
-// against a real `httpServer` bound to port 0 (OS-assigned), without invoking
-// `main()` (which would bind to port 3003 + register signal handlers).
 
 export {
   httpRequestHandler,
@@ -1193,6 +1381,8 @@ export {
   sendJson,
   readJson,
   parseQuery,
+  rateLimitCheck,
+  RATE_LIMIT_MAX,
   SHARED_SECRET,
   CORS_ORIGIN,
 };

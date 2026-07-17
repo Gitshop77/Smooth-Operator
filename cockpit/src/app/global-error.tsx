@@ -1,0 +1,49 @@
+"use client";
+
+export default function GlobalError({
+  error,
+  reset,
+}: {
+  error: Error & { digest?: string };
+  reset: () => void;
+}) {
+  return (
+    <html lang="en" dir="ltr">
+      <body
+        className="antialiased bg-background text-foreground"
+        style={{ fontFamily: "system-ui, sans-serif" }}
+      >
+        <div
+          role="alert"
+          className="mx-auto max-w-2xl p-6 my-8 rounded-lg border border-border bg-background"
+        >
+          <h2 className="text-lg font-semibold text-foreground">
+            Open Cowork encountered a problem
+          </h2>
+          <p className="mt-2 text-sm text-muted-foreground">
+            The dashboard could not be displayed. Reload to restore the cockpit.
+          </p>
+          <pre className="mt-3 max-h-40 overflow-auto rounded bg-muted/40 p-3 text-xs text-muted-foreground">
+            {error?.message}
+          </pre>
+          <div className="mt-4 flex gap-2">
+            <button
+              type="button"
+              onClick={reset}
+              className="rounded bg-accent px-3 py-1.5 text-sm font-medium text-accent-foreground"
+            >
+              Try again
+            </button>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="rounded border border-border px-3 py-1.5 text-sm font-medium text-foreground"
+            >
+              Reload
+            </button>
+          </div>
+        </div>
+      </body>
+    </html>
+  );
+}

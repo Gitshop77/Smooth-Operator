@@ -162,7 +162,7 @@ export function highlightElement(el: HTMLElement, label: string): OverlayHandle 
     removed = true;
     state.count -= 1;
     badge.remove();
-    window.removeEventListener("scroll", schedulePosition);
+    window.removeEventListener("scroll", schedulePosition, { capture: true });
     window.removeEventListener("resize", schedulePosition);
     if (rafId !== null) {
       cancelAnimationFrame(rafId);

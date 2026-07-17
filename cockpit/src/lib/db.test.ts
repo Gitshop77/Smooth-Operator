@@ -16,6 +16,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
+import { upsertHistoryEntry } from '@/lib/cowork/api/http';
 
 const SCHEMA_PATH = resolve(__dirname, '..', '..', 'prisma', 'schema.prisma');
 let schemaText: string;
@@ -119,6 +120,60 @@ describe('F21 — string-typed enum allowed-value sets', () => {
   });
 });
 
+// ─── F21 (reverse) — schema→test drift guard ─────────────────────────────────
+// The forward suite above catches test→schema drift (a value in
+// ENUM_ALLOWED_VALUES missing from schema.prisma). This catches the reverse:
+// a value added to a schema enum that ENUM_ALLOWED_VALUES never learned about,
+// which would silently diverge the API's zod closed set from the DB. We parse
+// the documented single-quoted literals straight from each enum's inline comment
+// block and assert exact set equality. `extensionTrustLevel` is intentionally
+// excluded — it is a documented *free* String with no closed set, so equality
+// does not apply to it.
+const SCHEMA_ENUM_ANCHORS: Partial<Record<EnumKey, string>> = {
+  tabStatus: 'loading',
+  securityEventType: 'prompt-injection',
+  securityEventSeverity: 'critical',
+  securityEventCategory: 'outbound',
+  securityEventAction: 'auto_block',
+  taskStatus: 'waiting-approval',
+  extensionSource: 'chrome-import',
+  pinboardLayout: 'spacious',
+  pinboardBackground: 'light',
+};
+
+// Collect the single-quoted literals documented in the pipe-delimited enum
+// comment block that contains `'<anchor>'`. The block is the comment line that
+// holds the anchor plus any immediately-following `// |` continuation lines.
+function documentedEnumValues(text: string, anchor: string): string[] {
+  const lines = text.split('\n');
+  const start = lines.findIndex((l) => l.includes(`'${anchor}'`));
+  if (start === -1) return [];
+  const block: string[] = [lines[start]];
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^\s*\/\/\s*\|/.test(lines[i])) block.push(lines[i]);
+    else break;
+  }
+  const tokens: string[] = [];
+  const re = /'([^']+)'/g;
+  for (const line of block) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(line)) !== null) tokens.push(m[1]);
+  }
+  return tokens;
+}
+
+describe('F21 (reverse) — documented schema enum set exactly equals ENUM_ALLOWED_VALUES', () => {
+  (Object.keys(SCHEMA_ENUM_ANCHORS) as EnumKey[]).forEach((key) => {
+    it(`${key} — no schema→test drift (set equality)`, () => {
+      const documented = documentedEnumValues(schemaText, SCHEMA_ENUM_ANCHORS[key]!);
+      const expected = ENUM_ALLOWED_VALUES[key];
+      expect(documented.length).toBeGreaterThan(0);
+      expect(new Set(documented)).toEqual(new Set(expected));
+      expect(documented.length).toBe(expected.length);
+    });
+  });
+});
+
 // Brace-balanced model extractor — tracks `{`/`}` depth so a `//` comment or any
 // stray `}`-starting line inside the model region cannot truncate the captured
 // block (which would give the F22 @unique assertion a false PASS/FAIL).
@@ -152,32 +207,30 @@ describe('F22 — HistoryEntry.url @unique write contract', () => {
     expect(schemaText).toContain('P2002');
   });
 
- // Simulate the contract: a pure upsert-on-url helper must never call a raw
- // create when the url already exists. This models the behavior the extension
- // write path is required to follow.
-  it('upsert-on-url helper updates instead of throwing on revisit', () => {
-    type Row = { url: string; visitCount: number; title: string };
-    const store = new Map<string, Row>();
-
-    const upsertHistory = (url: string, title: string) => {
-      const existing = store.get(url);
-      if (existing) {
-        existing.visitCount += 1;
-        existing.title = title;
-        return existing;
-      }
-      const row: Row = { url, visitCount: 1, title };
-      store.set(url, row);
-      return row;
+ // Exercise the real shared write path (the helper the history route and the
+ // extension sync actually call). A revisit MUST route through `upsert`, never
+ // a raw `create` — that's the P2002 failure mode the @unique url would
+ // otherwise trigger.
+  it('upsert-on-url write path calls upsert (never create) on revisit', async () => {
+    const calls: string[] = [];
+    const fakePrisma = {
+      historyEntry: {
+        upsert: async () => {
+          calls.push('upsert');
+          return { id: '1', url: 'https://example.com', title: 'Example v2', visitCount: 2 };
+        },
+        create: async () => {
+          calls.push('create');
+          return {};
+        },
+      },
     };
 
-    upsertHistory('https://example.com', 'Example');
-    const second = upsertHistory('https://example.com', 'Example v2');
+    await upsertHistoryEntry(fakePrisma, 'https://example.com', 'Example');
+    await upsertHistoryEntry(fakePrisma, 'https://example.com', 'Example v2');
 
- // A revisited URL does not create a duplicate row (which would be the P2002
- // failure mode for a raw create) — it updates the existing row instead.
-    expect(store.size).toBe(1);
-    expect(second.visitCount).toBe(2);
-    expect(second.title).toBe('Example v2');
+   // A revisit does not call a raw create (the P2002 failure mode) — it upserts.
+    expect(calls).toEqual(['upsert', 'upsert']);
+    expect(calls).not.toContain('create');
   });
 });

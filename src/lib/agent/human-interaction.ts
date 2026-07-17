@@ -96,7 +96,7 @@ const KNOWN_RESPONSE_MODES = new Set<HumanInteractionResponse["mode"]>([
  * as a transport `error` rather than handing the agent loop an unexpected
  * shape.
  */
-function sanitizeResponse(
+export function sanitizeResponse(
   response: HumanInteractionResponse | undefined | null
 ): HumanInteractionResponse {
   if (response === undefined || response === null) {

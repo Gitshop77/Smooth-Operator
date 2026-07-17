@@ -58,6 +58,17 @@ describe("withLLMRetry — numeric-status classification", () => {
     expect(fn).toHaveBeenCalledTimes(1);
   });
 
+  test("an Error without a numeric status is NOT retried (single attempt)", async () => {
+    // Regression guard against a retry storm: only 429/5xx/network errors are
+    // retried (classified by the numeric status). A plain Error carrying no
+    // status must be attempted exactly once and then rejected.
+    const fn = vi.fn(async () => {
+      throw new Error("boom");
+    });
+    await expect(withLLMRetry(fn)).rejects.toThrow(/boom/);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
   test("a 4xx whose body text mentions a 5xx code is NOT retried (classified by numeric status, not body)", async () => {
  // Regression for the OLD substring classifier: a 400 whose error body
  // contains "500" (e.g. "upstream returned 500") would have been wrongly

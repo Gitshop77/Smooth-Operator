@@ -1,0 +1,175 @@
+/**
+ * Tests for llm-direct.ts pure helpers and the security-relevant
+ * screenshot-gating branch.
+ *
+ * Locks:
+ * - hashStr: deterministic, distinct inputs differ.
+ * - getVisionMode: unset→"disabled"; legacy enableLocalVision===true→"always";
+ *   explicit visionMode wins.
+ * - getAgentMode: unknown/absent→"standard" fail-safe.
+ * - navigatorCallDirect: a non-vision provider must NEVER embed a <screenshot>
+ *   block; a vision provider with enableScreenshots on MUST embed it.
+ *
+ * Each case re-imports the module (vi.resetModules) so the module-level
+ * setting/provider caches never bleed across scenarios.
+ */
+
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import type { AgentStepRequest } from "../src/lib/agent/types";
+
+const h = vi.hoisted(() => ({
+  supportsVision: false,
+  chatMessages: [] as { role: string; content: string }[][],
+}));
+
+vi.mock("../src/extension/provider-config", () => ({
+  readProviderConfig: async () => ({ provider: "openai", apiKey: "k", model: "m" }),
+  buildProvider: async () => ({
+    id: "openai",
+    supportsStructuredOutput: true,
+    get supportsVision() {
+      return h.supportsVision;
+    },
+    chat: async ({ messages }: { messages: { role: string; content: string }[] }) => {
+      h.chatMessages.push(messages);
+      return { content: "{}" };
+    },
+  }),
+}));
+
+vi.mock("../src/lib/agent/prompts/navigator-prompt", () => ({
+  buildNavigatorPrompt: () => "SYSTEM_PROMPT",
+}));
+
+vi.mock("../src/lib/agent/loop/messages", () => ({
+  buildNavigatorUserMessage: async () => "USER_MESSAGE",
+  buildPlannerUserMessage: async () => "PLANNER_MESSAGE",
+}));
+
+let store: Record<string, unknown>;
+
+function installChrome() {
+  store = {};
+  const get = (keys: string | string[]) => {
+    const arr = Array.isArray(keys) ? keys : [keys];
+    const result: Record<string, unknown> = {};
+    for (const k of arr) if (k in store) result[k] = store[k];
+    return Promise.resolve(result);
+  };
+  (globalThis as unknown as { chrome: unknown }).chrome = {
+    storage: {
+      local: { get, set: () => Promise.resolve() },
+      onChanged: { addListener: () => {} },
+    },
+  };
+}
+
+beforeEach(() => {
+  h.supportsVision = false;
+  h.chatMessages = [];
+  installChrome();
+});
+
+afterEach(() => {
+  delete (globalThis as unknown as { chrome?: unknown }).chrome;
+  vi.resetModules();
+});
+
+function makeRequest(): AgentStepRequest {
+  return {
+    task: "do something",
+    history: [],
+    browserState: {
+      url: "https://example.com",
+      title: "Example",
+      tabs: [],
+      elementsText: "els",
+      pageInfo: "",
+      newElementCount: 0,
+      screenshot: "BASE64_SCREENSHOT_DATA",
+    },
+    step: 1,
+    maxSteps: 10,
+  };
+}
+
+describe("hashStr", () => {
+  test("is deterministic for the same input", async () => {
+    const { hashStr } = await import("../src/extension/llm-direct");
+    expect(hashStr("a")).toBe(hashStr("a"));
+    expect(hashStr("some-secret-key")).toBe(hashStr("some-secret-key"));
+  });
+
+  test("distinct inputs produce distinct digests", async () => {
+    const { hashStr } = await import("../src/extension/llm-direct");
+    expect(hashStr("a")).not.toBe(hashStr("b"));
+    expect(hashStr("")).not.toBe(hashStr("x"));
+  });
+});
+
+describe("getVisionMode", () => {
+  test("both keys unset → 'disabled'", async () => {
+    const { getVisionMode } = await import("../src/extension/llm-direct");
+    expect(await getVisionMode()).toBe("disabled");
+  });
+
+  test("legacy enableLocalVision===true (visionMode unset) → 'always'", async () => {
+    store.enableLocalVision = true;
+    const { getVisionMode } = await import("../src/extension/llm-direct");
+    expect(await getVisionMode()).toBe("always");
+  });
+
+  test("explicit visionMode 'always' wins", async () => {
+    store.visionMode = "always";
+    const { getVisionMode } = await import("../src/extension/llm-direct");
+    expect(await getVisionMode()).toBe("always");
+  });
+});
+
+describe("getAgentMode", () => {
+  test("absent agentMode → 'standard' (fail-safe)", async () => {
+    const { getAgentMode } = await import("../src/extension/llm-direct");
+    expect(await getAgentMode()).toBe("standard");
+  });
+
+  test("unknown agentMode → 'standard' (fail-safe)", async () => {
+    store.agentMode = "totally-bogus";
+    const { getAgentMode } = await import("../src/extension/llm-direct");
+    expect(await getAgentMode()).toBe("standard");
+  });
+
+  test("a recognized agentMode passes through", async () => {
+    store.agentMode = "full_agentic";
+    const { getAgentMode } = await import("../src/extension/llm-direct");
+    expect(await getAgentMode()).toBe("full_agentic");
+  });
+});
+
+describe("navigatorCallDirect screenshot gating", () => {
+  test("non-vision provider never embeds a <screenshot> block", async () => {
+    h.supportsVision = false;
+    store.enableScreenshots = true; // even if enabled, non-vision must not embed
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest());
+    const userContent = h.chatMessages[0].find((m) => m.role === "user")!.content;
+    expect(userContent).not.toContain("<screenshot>");
+  });
+
+  test("vision provider with enableScreenshots embeds the <screenshot> block", async () => {
+    h.supportsVision = true;
+    store.enableScreenshots = true;
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest());
+    const userContent = h.chatMessages[0].find((m) => m.role === "user")!.content;
+    expect(userContent).toContain("<screenshot>BASE64_SCREENSHOT_DATA</screenshot>");
+  });
+
+  test("vision provider with enableScreenshots off does not embed the block", async () => {
+    h.supportsVision = true;
+    store.enableScreenshots = false;
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest());
+    const userContent = h.chatMessages[0].find((m) => m.role === "user")!.content;
+    expect(userContent).not.toContain("<screenshot>");
+  });
+});

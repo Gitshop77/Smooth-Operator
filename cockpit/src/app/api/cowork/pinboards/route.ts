@@ -1,6 +1,6 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
-import { json, withRouteError, bodyJson, badRequest, parseLimit, CURSOR_ID_RE, isPrismaRecordNotFound } from '@/lib/cowork/api/http';
+import { json, withRouteError, bodyJson, badRequest, parseLimit, CURSOR_ID_RE, isPrismaRecordNotFound, sanitizeRequestId } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
 // Valid CSS hex color lengths only: 3, 4, 6, or 8 hex digits. (5/7-digit
@@ -23,7 +23,7 @@ export async function GET(req: NextRequest): Promise<Response> {
  // `satisfies` to keep the precise type for overload resolution.
     const args = {
       take: limit,
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: 'desc', id: 'desc' },
       include: { _count: { select: { items: true } } },
       ...(after ? { cursor: { id: after }, skip: 1 } : {}),
     } satisfies Parameters<typeof db.pinboard.findMany>[0];
@@ -49,8 +49,10 @@ export async function GET(req: NextRequest): Promise<Response> {
       ...pb,
       itemCount: pb._count?.items ?? 0,
     }));
-    return json({ pinboards: projected, total });
-  });
+    const r = json({ pinboards: projected, total });
+    r.headers.set('Cache-Control', 'no-store, private');
+    return r;
+  }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
 }
 
 export async function POST(req: NextRequest): Promise<Response> {
@@ -71,5 +73,31 @@ export async function POST(req: NextRequest): Promise<Response> {
     const color = COLOR_RE.test(rawColor) ? rawColor : '#4285f4';
     const pb = await db.pinboard.create({ data: { name, color } });
     return json({ pinboard: pb }, 201);
-  });
+  }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
+}
+
+// DELETE /api/cowork/pinboards?id=<pinboardId>
+// Removes a single pinboard row. Gated by the same X-Cowork-Token check as
+// every other /api/cowork/* data route (enforced in middleware.ts). Distinct
+// from the AU-3 `?all=1` confirm:true mass-delete gate; per-id deletes are
+// scoped erasure only.
+export async function DELETE(req: NextRequest): Promise<Response> {
+  return withRouteError(async () => {
+    const id = req.nextUrl.searchParams.get('id');
+    if (!id) return badRequest('id is required');
+    if (!CURSOR_ID_RE.test(id)) return badRequest('invalid id');
+    try {
+      await db.pinboard.delete({ where: { id } });
+    } catch (e) {
+ // A well-formed but non-existent id makes Prisma throw P2025
+ // (RecordNotFound); return a precise 404 instead of a generic 500.
+      if (isPrismaRecordNotFound(e)) {
+        return json({ error: 'not found' }, 404);
+      }
+      throw e;
+    }
+    const r = json({ ok: true });
+    r.headers.set('Cache-Control', 'no-store, private');
+    return r;
+  }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
 }

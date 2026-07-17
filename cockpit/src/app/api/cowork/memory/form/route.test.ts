@@ -86,6 +86,70 @@ describe('GET /api/cowork/memory/form', () => {
     expect(parsed[0].value).toBe('[redacted]');
   });
 
+  it('masks a bare array of secret-shaped scalar strings', async () => {
+    findMany.mockResolvedValueOnce([
+      {
+        id: '1',
+        domain: 'example.com',
+        formDataJson: JSON.stringify(['abcdefghijklmnopqrstuvwxyz0123456789ABCDEF', 'plainvalue']),
+      },
+    ]);
+    const res = await GET(fakeReq());
+    const parsed = JSON.parse((await res.json()).memories[0].formDataJson);
+    expect(parsed).toEqual(['[redacted]', 'plainvalue']);
+  });
+
+  it('masks a secret-shaped value via the looksLikeSecret fallback (no sensitive field name)', async () => {
+    findMany.mockResolvedValueOnce([
+      {
+        id: '1',
+        domain: 'x',
+        formDataJson: JSON.stringify({
+          name: 'note',
+          value: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEF',
+        }),
+      },
+    ]);
+    const res = await GET(fakeReq());
+    const parsed = JSON.parse((await res.json()).memories[0].formDataJson);
+    // The field name "note" is not sensitive, but the 40-char token-shaped value
+    // must still be masked by the value-only heuristic.
+    expect(parsed.name).toBe('note');
+    expect(parsed.value).toBe('[redacted]');
+  });
+
+  it('masks a secret-shaped value under a non-sensitive top-level key', async () => {
+    findMany.mockResolvedValueOnce([
+      {
+        id: '1',
+        domain: 'x',
+        formDataJson: JSON.stringify({
+          data: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEF',
+        }),
+      },
+    ]);
+    const res = await GET(fakeReq());
+    const parsed = JSON.parse((await res.json()).memories[0].formDataJson);
+    // The field name "data" is not sensitive, but the 40-char token-shaped value
+    // must still be masked (fail-closed redaction of stored autofill secrets).
+    expect(parsed.data).toBe('[redacted]');
+  });
+
+  it('masks a secret-shaped value nested under a non-sensitive object', async () => {
+    findMany.mockResolvedValueOnce([
+      {
+        id: '1',
+        domain: 'x',
+        formDataJson: JSON.stringify({
+          profile: { note: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEF' },
+        }),
+      },
+    ]);
+    const res = await GET(fakeReq());
+    const parsed = JSON.parse((await res.json()).memories[0].formDataJson);
+    expect(parsed.profile.note).toBe('[redacted]');
+  });
+
   it('returns 400 for a stale after cursor (P2025)', async () => {
     const err = new Prisma.PrismaClientKnownRequestError('Record does not exist', {
       code: 'P2025',

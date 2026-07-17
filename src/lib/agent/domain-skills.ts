@@ -11,6 +11,7 @@
  */
 
 import { isExtensionWithLocal } from "./runtime";
+import { neutralizePromptTags } from "./security";
 
 /** Definition of a per-site instruction pack. */
 export interface DomainSkill {
@@ -149,10 +150,26 @@ export const BUILT_IN_SKILLS: readonly DomainSkill[] = [
 ] as const;
 
 /**
+ * Names of all built-in skills. A custom skill that reuses one of these names is
+ * unreachable: `getFullSkill` resolves built-ins first by exact name, so the
+ * custom body would be silently dead while the agent receives the bundled
+ * instructions for a possibly-different (private) host. Custom skills with a
+ * colliding name are dropped during normalization (`null` → skipped by the
+ * caller), which is safer than letting the navigator list an unloadable skill.
+ */
+const BUILT_IN_SKILL_NAMES = new Set(BUILT_IN_SKILLS.map((s) => s.name));
+
+/**
  * Test whether `hostname` matches `domain` (exact match or subdomain).
  */
 function hostnameMatches(hostname: string, domain: string): boolean {
-  return hostname === domain || hostname.endsWith(`.${domain}`);
+  // Lowercase both sides so a custom-skill domain configured with mixed case
+  // (e.g. "GitHub.com") still matches the URL parser's lowercased hostname
+  // (e.g. "github.com"). Custom domains are not normalized for case by
+  // `normalizeCustomSkill`, so the comparison must be case-insensitive.
+  const h = hostname.toLowerCase();
+  const d = domain.toLowerCase();
+  return h === d || h.endsWith(`.${d}`);
 }
 
 /**
@@ -226,13 +243,17 @@ const SKILL_LIMITS = {
  * `<system-reminder>` boundary (so a custom skill can't close/open the
  * injection wrapper and escape its block), and hard-cap the length.
  */
-function sanitizeSkillText(value: string, maxLen: number): string {
+export function sanitizeSkillText(value: string, maxLen: number): string {
   const cleaned = value
  // Strip C0/C1 control chars except tab (\t), newline (\n), carriage return (\r).
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\u00ad\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "")
  // Neutralize forged system-reminder open/close tags.
     .replace(/<(\/?\s*system-reminder\b[^>]*)>/gi, "[$1]");
-  return cleaned.length > maxLen ? cleaned.slice(0, maxLen) : cleaned;
+ // Neutralize ALL prompt-level tags so a custom skill can't forge a trusted
+ // block (<user_request>/<plan>/<security_rules>/<site_memory>/\u2026) inside the
+ // trusted system prompt it is injected into.
+  const neutralized = neutralizePromptTags(cleaned);
+  return neutralized.length > maxLen ? neutralized.slice(0, maxLen) : neutralized;
 }
 
 /**
@@ -247,13 +268,14 @@ function sanitizeSkillText(value: string, maxLen: number): string {
  * bloat the system prompt (token / cost DoS).
  * Returns `null` for any object that fails validation so the caller can drop it.
  */
-function normalizeCustomSkill(raw: unknown): DomainSkill | null {
+export function normalizeCustomSkill(raw: unknown): DomainSkill | null {
   if (!raw || typeof raw !== "object") return null;
   const s = raw as Record<string, unknown>;
   if (typeof s.name !== "string" || !s.name) return null;
 
   const name = sanitizeSkillText(s.name, SKILL_LIMITS.name);
   if (!name) return null; // name collapsed to empty after sanitization
+  if (BUILT_IN_SKILL_NAMES.has(name)) return null; // built-in name collision — unreachable custom skill
 
   const domains: string[] = (
     Array.isArray(s.domains)
@@ -267,6 +289,7 @@ function normalizeCustomSkill(raw: unknown): DomainSkill | null {
         .trim()
         .replace(/^https?:\/\//i, "")
         .replace(/^\./, "")
+        .replace(/^\*\./, "")
         .replace(/\/+$/, ""),
     )
     .filter((d) => d.length > 0 && isValidSkillDomain(d))

@@ -12,7 +12,7 @@
  */
 
 import type { LogEvent } from "@/lib/agent/types";
-import { escapeHtml } from "@/extension/shared";
+import { escapeHtml, redactKeyLeak } from "@/extension/shared";
 import { glyph } from "./glyphs";
 import {
   logEl,
@@ -78,6 +78,29 @@ interface AgentEventEnvelope {
   type: "AGENT_EVENT";
   event: LogEvent;
   time: string;
+}
+
+/**
+ * Return a copy of a LogEvent with every string field redacted via
+ * {@link redactKeyLeak}, leaving numbers / booleans / structure untouched.
+ * Used before the event is mirrored into `logHistory` (which is persisted to
+ * chrome.storage.local) so the on-disk snapshot never holds unredacted
+ * page/LLM/credential-derived secrets. Render-time redaction stays as a second
+ * layer; redactKeyLeak is idempotent so a restored (already-redacted) copy
+ * survives replays unchanged.
+ */
+function redactEventForStorage(ev: LogEvent): LogEvent {
+  const redact = (v: unknown): unknown => {
+    if (typeof v === "string") return redactKeyLeak(v);
+    if (Array.isArray(v)) return v.map(redact);
+    if (v && typeof v === "object") {
+      const out: Record<string, unknown> = {};
+      for (const [k, val] of Object.entries(v)) out[k] = redact(val);
+      return out;
+    }
+    return v;
+  };
+  return redact(ev) as LogEvent;
 }
 
 /** Format a token count with correct English pluralization (finding: log renderer
@@ -309,7 +332,7 @@ export function addLogRow(event: LogEvent, time: string): void {
     }
     case "info":
       cls = "info"; label = "info"; icon = glyph("info"); body = event.message || "";
-      if (event.message === "Run finished.") setRunning(false);
+      if (!isRestoring && event.message === "Run finished.") setRunning(false);
       break;
     case "warn":
       cls = "warn"; label = "warn"; icon = glyph("alert-triangle"); body = event.message || "";
@@ -357,7 +380,7 @@ export function addLogRow(event: LogEvent, time: string): void {
       break;
     default: {
       try {
-        body = JSON.stringify(event).slice(0, 100);
+        body = redactKeyLeak(JSON.stringify(event).slice(0, 100));
       } catch {
         body = "[unserializable event]";
       }
@@ -371,7 +394,7 @@ export function addLogRow(event: LogEvent, time: string): void {
     `<span class="t">${escapeHtml(time)}</span>` +
     `<span class="ic ${cls}" aria-hidden="true">${icon}</span>` +
     `<span class="lb">${escapeHtml(label)}</span>` +
-    `<span class="bd ${cls}">${escapeHtml(body)}</span>`;
+    `<span class="bd ${cls}">${escapeHtml(redactKeyLeak(body))}</span>`;
   logEl.appendChild(row);
 
  // Cap log rows so a long-running agent doesn't accumulate unbounded DOM.
@@ -384,7 +407,7 @@ export function addLogRow(event: LogEvent, time: string): void {
  // cap matches MAX_LOG_ROWS so the persisted log and the on-screen log stay
  // in sync. (Before this fix, the side panel read these keys on reopen but
  // nothing ever wrote them — the restore path was dead.)
-  logHistory.push({ event, time });
+  logHistory.push({ event: redactEventForStorage(event), time });
   while (logHistory.length > MAX_LOG_ROWS) {
     logHistory.shift();
   }
@@ -420,6 +443,7 @@ chrome.runtime.onMessage.addListener((msg: unknown, sender, _sendResponse) => {
  // Trust boundary — only accept messages from this extension (matches
  // the guard in human-interact.ts, content.ts, and background/message-routing.ts).
   if (sender.id !== chrome.runtime.id) return false;
+  if (sender.tab || sender.url) return false;
   const payload = msg as Partial<AgentEventEnvelope>;
   if (payload?.type === "AGENT_EVENT") {
  // Validate the envelope at the trust boundary before dereferencing it
@@ -445,7 +469,7 @@ chrome.runtime.onMessage.addListener((msg: unknown, sender, _sendResponse) => {
  * (a malformed cost event would otherwise crash `addLogRow` via `.toFixed` or
  * inject `NaN` into the totals).
  */
-function isValidAgentEvent(ev: unknown): ev is LogEvent {
+export function isValidAgentEvent(ev: unknown): ev is LogEvent {
   if (typeof ev !== "object" || ev === null) return false;
   const e = ev as { type?: unknown };
   if (typeof e.type !== "string") return false;
@@ -458,7 +482,7 @@ function isValidAgentEvent(ev: unknown): ev is LogEvent {
  * finite numbers. Shared by the message-boundary validator and the in-row cost
  * handler so the two numeric checks can't drift.
  */
-function isFiniteCostEvent(e: unknown): boolean {
+export function isFiniteCostEvent(e: unknown): boolean {
   if (typeof e !== "object" || e === null) return false;
   const c = e as { costUsd?: unknown; tokensIn?: unknown; tokensOut?: unknown };
   return (

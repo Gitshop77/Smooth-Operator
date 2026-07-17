@@ -9,7 +9,6 @@
 </head>
 <body>
   <div class="container">
-    <!-- Left sidebar rail -->
     <nav class="tabs" role="tablist" aria-label="Settings sections" id="tablist">
       <button type="button" class="tab active" data-tab="connection" role="tab" aria-selected="true" tabindex="0">Connection</button>
       <button type="button" class="tab" data-tab="agent" role="tab" aria-selected="false" tabindex="-1">Agent</button>
@@ -23,9 +22,7 @@
       <button type="button" class="tab" data-tab="about" role="tab" aria-selected="false" tabindex="-1">About</button>
     </nav>
 
-    <!-- Content area -->
     <div class="content-area">
-      <!-- Connection tab -->
       <section class="tab-content active" data-tab="connection" role="tabpanel">
         <div class="view-header">
           <h2 class="view-title">Connection</h2>
@@ -46,7 +43,7 @@
 
         <label>
           <span>API key</span>
-          <input type="password" id="apiKey" placeholder="sk-…" autocomplete="off" />
+          <input type="password" id="apiKey" placeholder="sk-…" autocomplete="new-password" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" />
           <small id="apikey-hint">Your API key — stored locally in your browser profile. Only sent to the provider you choose.</small>
         </label>
 
@@ -58,11 +55,10 @@
 
         <div class="test-connection">
           <button type="button" id="testConnection" class="btn btn-ghost">Test connection</button>
-          <span id="testResult" class="test-result"></span>
+          <span id="testResult" class="test-result" role="status" aria-live="polite"></span>
         </div>
       </section>
 
-      <!-- Agent tab -->
       <section class="tab-content" data-tab="agent" role="tabpanel">
         <div class="view-header">
           <h2 class="view-title">Agent</h2>
@@ -146,10 +142,18 @@
             <input type="checkbox" id="enableScreenshots" checked />
             <span>Enable screenshots for vision models</span>
           </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="enableStealth" />
+            <span>
+              Enable MAIN-world stealth patches (anti-detection) —
+              <strong>off by default</strong>. Circumventing bot-detection may
+              violate a site's Terms of Service. Enable only for sites you are
+              authorized to automate.
+            </span>
+          </label>
         </details>
       </section>
 
-      <!-- Secrets tab -->
       <section class="tab-content" data-tab="secrets" role="tabpanel">
         <div class="view-header">
           <h2 class="view-title">Secrets</h2>
@@ -157,13 +161,12 @@
         </div>
         <div class="secret-add">
           <input type="text" id="secretName" placeholder="name (e.g. email)" autocomplete="off" />
-          <input type="password" id="secretValue" placeholder="value" />
+          <input type="password" id="secretValue" placeholder="value" autocomplete="new-password" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" />
           <button type="button" id="addSecret" class="btn btn-ghost">Add</button>
         </div>
         <div id="secretsList"></div>
       </section>
 
-      <!-- Schedule tab -->
       <section class="tab-content" data-tab="schedule" role="tabpanel">
         <div class="view-header">
           <h2 class="view-title">Schedule</h2>
@@ -189,7 +192,6 @@
         <div id="scheduleList"></div>
       </section>
 
-      <!-- Custom Tools tab -->
       <section class="tab-content" data-tab="tools" role="tabpanel">
         <div class="view-header">
           <h2 class="view-title">Custom tools</h2>
@@ -203,12 +205,14 @@
           <span>JavaScript code (tool implementation)</span>
           <textarea id="toolCode" rows="5" placeholder="// Return a string or object — runs with the page's window/document in scope.&#10;return document.querySelector('table')?.innerText || 'No table found';"></textarea>
         </label>
+        <p class="warning" role="note">
+          Warning: custom-tool code runs in the extension's privileged context. Only add code you trust — never paste untrusted or third-party snippets, as they execute with extension privileges.
+        </p>
         <button type="button" id="addTool" class="btn btn-ghost">Add tool</button>
         <div class="tool-permissions" id="toolPermissions"></div>
         <div id="toolsList"></div>
       </section>
 
-      <!-- Skills tab -->
       <section class="tab-content" data-tab="skills" role="tabpanel">
         <div class="view-header">
           <h2 class="view-title">Skills</h2>
@@ -226,7 +230,6 @@
         <div id="skillsList"></div>
       </section>
 
-      <!-- Prompts tab -->
       <section class="tab-content" data-tab="prompts" role="tabpanel">
         <div class="view-header">
           <h2 class="view-title">Prompts</h2>
@@ -253,7 +256,6 @@
         <div id="quickPromptsList"></div>
       </section>
 
-      <!-- History tab -->
       <section class="tab-content" data-tab="history" role="tabpanel">
         <div class="view-header">
           <h2 class="view-title">Run history</h2>
@@ -268,7 +270,6 @@
         </div>
       </section>
 
-      <!-- Notifications tab -->
       <section class="tab-content" data-tab="notify" role="tabpanel">
         <div class="view-header">
           <h2 class="view-title">Notify</h2>
@@ -293,13 +294,12 @@
         </label>
       </section>
 
-      <!-- About tab -->
       <section class="tab-content" data-tab="about" role="tabpanel">
         <div class="view-header">
           <h2 class="view-title">About</h2>
           <p class="view-subtitle">Open-source agentic browser control.</p>
         </div>
-        <p><strong>Open Cowork v<span id="aboutVersion">0.3.1</span></strong> — bring your own LLM key. Your task data is sent only to the provider you choose.</p>
+        <p><strong>Open Cowork v<span id="aboutVersion"></span></strong> — bring your own LLM key. Your task data is sent only to the provider you choose.</p>
         <h3>Features</h3>
         <ul>
           <li>32 actions (click, input, select, scroll, navigate, evaluate, …)</li>
@@ -316,11 +316,20 @@
         </ul>
         <h3>Links</h3>
         <p>
-          <a href="https://github.com/Gitshop77/open-cowork-chrome-extension" target="_blank" rel="noopener noreferrer">GitHub</a> ·
-          <a href="https://github.com/Gitshop77/open-cowork-chrome-extension/issues" target="_blank" rel="noopener noreferrer">Report an issue</a>
+          <a href="https://github.com/wasd/open-cowork" target="_blank" rel="noopener noreferrer">GitHub</a> ·
+          <a href="https://github.com/wasd/open-cowork/issues" target="_blank" rel="noopener noreferrer">Report an issue</a>
         </p>
         <h3>License</h3>
         <p>Open-source under the MIT license.</p>
+        <p>This build also bundles third-party components under Apache-2.0 (HuggingFace Transformers) and MIT (onnxruntime-web); their license texts ship alongside this extension as LICENSE-APACHE and LICENSE-MIT.</p>
+        <h3>Permissions &amp; privacy</h3>
+        <p>This extension requests powerful permissions so it can act on whatever page you point it at:</p>
+        <ul>
+          <li><code>debugger</code> — can attach to any open tab (including incognito), read its DOM, and synthesize input as if you were clicking and typing.</li>
+          <li><code>scripting</code> — injects scripts to drive page automation.</li>
+          <li><code>tabs</code> + universal host access — read access to any origin the assistant operates on.</li>
+        </ul>
+        <p>For sensitive or authenticated sites, prefer a restricted host-permission scope rather than granting universal access.</p>
       </section>
 
       <div class="actions">

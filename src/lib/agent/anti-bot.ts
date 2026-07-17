@@ -31,7 +31,8 @@ export type ChallengeKind =
   | "hcaptcha"
   | "recaptcha"
   | "blocked"
-  | "rate-limited";
+  | "rate-limited"
+  | "auth-wall";
 
 /**
  * Allowed `ChallengeKind` literals, used to validate untrusted parse input at
@@ -45,10 +46,11 @@ const CHALLENGE_KINDS: ReadonlySet<ChallengeKind> = new Set<ChallengeKind>([
   "recaptcha",
   "blocked",
   "rate-limited",
+  "auth-wall",
 ]);
 
 /** Type guard validating an arbitrary value against {@link CHALLENGE_KINDS}. */
-function isChallengeKind(x: unknown): x is ChallengeKind {
+export function isChallengeKind(x: unknown): x is ChallengeKind {
   return typeof x === "string" && CHALLENGE_KINDS.has(x as ChallengeKind);
 }
 
@@ -90,7 +92,7 @@ export type DetectChallengeOutcome =
  * either `null` (no challenge) or `{kind, message}`. Any other shape is
  * treated as "no challenge" so a malformed result never crashes the agent.
  */
-function parseChallengeResult(raw: unknown): ChallengeInfo | null {
+export function parseChallengeResult(raw: unknown): ChallengeInfo | null {
   if (raw !== null && typeof raw === "object" && "kind" in (raw as Record<string, unknown>)) {
     const obj = raw as { kind: unknown; message: unknown };
     if (typeof obj.kind === "string" && typeof obj.message === "string") {
@@ -101,6 +103,165 @@ function parseChallengeResult(raw: unknown): ChallengeInfo | null {
         return { kind: obj.kind, message: obj.message };
       }
     }
+  }
+  return null;
+}
+
+/**
+ * MAIN-world challenge classifier. Runs inside the target page (injected via
+ * `chrome.scripting.executeScript`), so it MUST be self-contained: it may
+ * reference only `document`, never module-scope bindings, or serialization
+ * would drop them. Returns the detected `{kind, message}` or `null`.
+ *
+ * SECURITY: `document.title`/body/CSS are attacker-controllable. A title match
+ * alone is NEVER sufficient — it must be corroborated by an authoritative
+ * selector (or the challenge script) — and content-only block/rate-limit
+ * heuristics are deliberately refused (see the trailing comment). Loosening any
+ * of the AND-corroboration below re-opens a false-challenge stall vector.
+ */
+export function detectChallengeInPage(): ChallengeInfo | null {
+  const title = (document.title || "").toLowerCase();
+
+  let body: string | null = null;
+  const getBody = (): string => {
+    if (body === null) body = (document.body && document.body.textContent) || "";
+    return body;
+  };
+
+ // Cloudflare JS challenge.
+ // SECURITY: document.title is attacker-controllable, so a hostile page
+ // could set its title to "Just a moment..." to force the agent into a
+ // Cloudflare-JS auto-wait stall (false-positive availability vector).
+ // A genuine IUAM / "Checking your browser" page carries a real CF JS
+ // selector — treat the selector as the authoritative signal. A title
+ // match alone is NEVER sufficient: it must be corroborated by that
+ // selector OR by a *short interstitial-style body AND* the page actually
+ // loading the challenge script, never by body length alone (a short
+ // attacker page would otherwise trivially false-positive).
+  const cfJsTitle =
+    title === "just a moment..." ||
+    title.indexOf("checking your browser") !== -1;
+  const cfJsSelector = document.querySelector(
+    "#challenge-running, #cf-please-wait, #challenge-form, #cf-chl-wrapper",
+  );
+ // The interstitial *must* contain a script tag pointing at Cloudflare's
+ // challenge JS — a far stronger corroborator than a short body.
+  const cfJsScript = document.querySelector(
+    'script[src^="https://challenges.cloudflare.com/"], script[src*="/cdn-cgi/"]',
+  );
+  if (
+    cfJsSelector !== null ||
+    (cfJsTitle && cfJsScript !== null)
+  ) {
+    return { kind: "cloudflare-js", message: "Cloudflare JS challenge" };
+  }
+
+ // Cloudflare block page — require the CF error block selector OR both a
+ // title mentioning "attention required" AND the word "blocked" in the
+ // body. A title-only match is spoofable and is no longer accepted.
+  const cfBlockSelector = document.querySelector(".cf-error-details");
+  const b = getBody();
+  if (
+    cfBlockSelector !== null ||
+    (title.indexOf("attention required") !== -1 && b.indexOf("blocked") !== -1)
+  ) {
+    return { kind: "cloudflare-block", message: "Cloudflare block page" };
+  }
+
+ // Widget-only challenges — only count when the widget iframe is actually
+ // present (the authoritative selector); the short-body check is secondary
+ // corroboration, not the sole signal.
+  if (
+    document.querySelector('.cf-turnstile, iframe[src^="https://challenges.cloudflare.com/"]')
+  ) {
+    return { kind: "cloudflare-turnstile", message: "Cloudflare Turnstile challenge" };
+  }
+
+  if (
+    document.querySelector('.h-captcha, iframe[src^="https://hcaptcha.com/"]')
+  ) {
+    return { kind: "hcaptcha", message: "hCaptcha challenge" };
+  }
+
+  if (
+    document.querySelector('.g-recaptcha, iframe[src^="https://www.google.com/recaptcha/"]')
+  ) {
+    return { kind: "recaptcha", message: "reCAPTCHA challenge" };
+  }
+
+  // Genuine "access denied" / "rate limited" states are derived from the
+  // real HTTP response status at the network layer, not from page content.
+  // The document title, body text, and CSS classes are all attacker-
+  // settable, so classifying a block or rate-limit from them alone lets a
+  // hostile page force a false challenge and stall the agent. Do not
+  // reintroduce content-only heuristics here; the network status is the
+  // authoritative signal for these states.
+
+  return null;
+}
+
+/**
+ * MAIN-world authentication-wall classifier. Runs inside the target page (in
+ * the same injected script as `detectChallengeInPage`), so it MUST be
+ * self-contained: it may reference only `document`, never module-scope
+ * bindings. Returns `{kind:"auth-wall", message}` or `null`.
+ *
+ * Unlike the CF/CAPTCHA challenges, an auth wall means the agent has landed on
+ * a login/SSO page and must NOT be acted on by the model (typing credentials,
+ * clicking "Sign in"). It surfaces as a challenge so the orchestrator pauses
+ * and requests human takeover for credential entry.
+ *
+ * SECURITY: `document.title`/body/CSS are attacker-controllable, so a title or
+ * body match alone is NEVER sufficient (the same false-positive stall vector
+ * defended against in `detectChallengeInPage`). A genuine auth wall is
+ * corroborated by a real `input[type=password]` PLUS an authoritative login
+ * signal: a login/sign-in/SSO URL, a form action pointing at a login endpoint,
+ * an identity-provider iframe/script, or a sign-in submit control. Without that
+ * AND-corroboration an arbitrary password field (e.g. an account-recovery or
+ * settings form) is NOT treated as an auth wall.
+ */
+export function detectAuthWallInPage(): ChallengeInfo | null {
+  const passwordField = document.querySelector('input[type="password"]');
+  if (passwordField === null) return null;
+
+  const href = (document.location && document.location.href) || "";
+  const url = href.toLowerCase();
+  const loginUrl =
+    /(^|\/)(login|signin|sign-in|sign_in|auth|sso|oauth|oidc|authorize|connect\/authorize|account\/login)(\/|\?|#|$)/.test(
+      url,
+    );
+
+  const form = passwordField.closest("form") as HTMLFormElement | null;
+  let loginFormAction = false;
+  if (form && form.action) {
+    const action = form.action.toLowerCase();
+    loginFormAction =
+      /(login|signin|sign-in|sign_in|auth|sso|oauth|oidc|authorize|token)/.test(action);
+  }
+
+  const idpMarker =
+    document.querySelector(
+      'iframe[src*="okta.com"], iframe[src*="login.microsoftonline.com"], ' +
+        'iframe[src*="auth0.com"], iframe[src*="accounts.google.com/o/"], ' +
+        'script[src*="okta.com"], a[href*="login.microsoftonline.com"]',
+    ) !== null;
+
+  const submit = form
+    ? (form.querySelector(
+        'button[type="submit"], input[type="submit"]',
+      ) as HTMLInputElement | HTMLButtonElement | null)
+    : null;
+  const submitLabel = (
+    (submit && submit.textContent) ||
+    (submit && (submit as HTMLInputElement).value) ||
+    ""
+  ).toLowerCase();
+  const submitLogin = /(sign in|signin|log in|login|continue|authorize|verify)/.test(
+    submitLabel,
+  );
+
+  if (loginUrl || loginFormAction || idpMarker || submitLogin) {
+    return { kind: "auth-wall", message: "Authentication required (login page)" };
   }
   return null;
 }
@@ -122,109 +283,25 @@ export async function detectChallengeResult(
     const results = await chrome.scripting.executeScript({
       target: { tabId },
       world: "MAIN",
-      func: () => {
-        const title = (document.title || "").toLowerCase();
-
-        let body: string | null = null;
-        const getBody = (): string => {
-          if (body === null) body = (document.body && document.body.textContent) || "";
-          return body;
-        };
-
- // Cloudflare JS challenge.
- // SECURITY: document.title is attacker-controllable, so a hostile page
- // could set its title to "Just a moment..." to force the agent into a
- // Cloudflare-JS auto-wait stall (false-positive availability vector).
- // A genuine IUAM / "Checking your browser" page carries a real CF JS
- // selector — treat the selector as the authoritative signal. A title
- // match alone is NEVER sufficient: it must be corroborated by that
- // selector OR by a *short interstitial-style body AND* the page actually
- // loading the challenge script, never by body length alone (a short
- // attacker page would otherwise trivially false-positive).
-        const cfJsTitle =
-          title === "just a moment..." ||
-          title.indexOf("checking your browser") !== -1;
-        const cfJsSelector = document.querySelector(
-          "#challenge-running, #cf-please-wait, #challenge-form, #cf-chl-wrapper",
-        );
- // The interstitial *must* contain a script tag pointing at Cloudflare's
- // challenge JS — a far stronger corroborator than a short body.
-        const cfJsScript = document.querySelector(
-          'script[src*="challenges.cloudflare.com"], script[src*="/cdn-cgi/"]',
-        );
-        if (
-          cfJsSelector !== null ||
-          (cfJsTitle && cfJsScript !== null)
-        ) {
-          return { kind: "cloudflare-js", message: "Cloudflare JS challenge" };
-        }
-
- // Cloudflare block page — require the CF error block selector OR both a
- // title mentioning "attention required" AND the word "blocked" in the
- // body. A title-only match is spoofable and is no longer accepted.
-        const cfBlockSelector = document.querySelector(".cf-error-details");
-        const b = getBody();
-        if (
-          cfBlockSelector !== null ||
-          (title.indexOf("attention required") !== -1 && b.indexOf("blocked") !== -1)
-        ) {
-          return { kind: "cloudflare-block", message: "Cloudflare block page" };
-        }
-
- // Widget-only challenges — only count when the widget iframe is actually
- // present (the authoritative selector); the short-body check is secondary
- // corroboration, not the sole signal.
-        if (
-          document.querySelector('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]')
-        ) {
-          return { kind: "cloudflare-turnstile", message: "Cloudflare Turnstile challenge" };
-        }
-
-        if (
-          document.querySelector('.h-captcha, iframe[src*="hcaptcha.com"]')
-        ) {
-          return { kind: "hcaptcha", message: "hCaptcha challenge" };
-        }
-
-        if (
-          document.querySelector('.g-recaptcha, iframe[src*="google.com/recaptcha"]')
-        ) {
-          return { kind: "recaptcha", message: "reCAPTCHA challenge" };
-        }
-
- // Generic access-denied / rate-limit pages. The title is attacker-
- // controllable, so a title-only match is rejected: require a selector OR
- // title+body corroboration. This prevents a hostile page from stalling
- // the agent by merely setting <title>429</title>.
-        const bodyText = getBody();
-        // Strong, attacker-hard-to-spoof block signal that must NOT be gated by
-        // body length: a forbidden/denied selector paired with a 403/forbidden
-        // title. A verbose access-denied interstitial (footer/support boilerplate
-        // over 5000 chars) would otherwise slip through the length gate undetected.
-        if (
-          document.querySelector('[class*="forbidden"], [class*="denied"]') &&
-          /403|forbidden/i.test(title)
-        ) {
-          return { kind: "blocked", message: "Access denied" };
-        }
-        if (bodyText.length < 5000) {
-          const accessDeniedBody = /access denied/i.test(bodyText);
-          const rateLimitBody = /too many requests|rate limit/i.test(bodyText);
-          if (/access denied|403 forbidden/i.test(title) && accessDeniedBody) {
-            return { kind: "blocked", message: "Access denied" };
-          }
-          if (/\b429\b/i.test(title) && rateLimitBody) {
-            return { kind: "rate-limited", message: "Rate limited" };
-          }
-        }
-
-        return null;
-      },
+      func: detectChallengeInPage,
     });
     const result = results?.[0]?.result;
     const info = parseChallengeResult(result);
-    return info
-      ? { status: "challenge", info }
+    if (info) {
+      return { status: "challenge", info };
+    }
+    // No CF/CAPTCHA challenge — also check for a generic auth/login wall so
+    // the orchestrator can pause and request human takeover instead of acting
+    // on the login form. Two separate injections keep each detector
+    // self-contained; this one only runs when no challenge was found.
+    const authResults = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: detectAuthWallInPage,
+    });
+    const authInfo = parseChallengeResult(authResults?.[0]?.result);
+    return authInfo
+      ? { status: "challenge", info: authInfo }
       : { status: "no-challenge" };
   } catch (error) {
  // Tab closed, permission denied, chrome:// URL, CSP, a racing navigation,

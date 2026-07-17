@@ -36,7 +36,10 @@ interface RunHistoryEntry {
  * the HTTP-layer `readCappedBody` cap: a hostile/malformed multi-MB file should
  * never be fully buffered + JSON-parsed before validation.
  */
-const MAX_IMPORT_BYTES = 4 * 1024 * 1024; // 4 MiB
+export const MAX_IMPORT_BYTES = 4 * 1024 * 1024; // 4 MiB
+
+/** Max serialized size of a single imported run entry (keeps the ~5 MB storage quota safe). */
+export const MAX_RUN_ENTRY_BYTES = 2 * 1024 * 1024; // 2 MiB per entry
 
 /**
  * Type guard for a run-history entry. Validates every field's type (and that
@@ -44,7 +47,7 @@ const MAX_IMPORT_BYTES = 4 * 1024 * 1024; // 4 MiB
  * `result.success` boolean. Anything else is rejected so downstream rendering
  * and cost roll-ups never see `NaN`/garbage.
  */
-function isRunHistoryEntry(value: unknown): value is RunHistoryEntry {
+export function isRunHistoryEntry(value: unknown): value is RunHistoryEntry {
   if (value === null || typeof value !== "object") return false;
   const e = value as Record<string, unknown>;
   if (typeof e.task !== "string") return false;
@@ -151,10 +154,10 @@ document.getElementById("clearHistory")?.addEventListener("click", async () => {
     danger: true,
   });
   if (!ok) return;
- // Promise-mode storage rejects on failure (`chrome.runtime.lastError` is
- // callback-only), so catch the rejection to surface the error.
+ // Route through run-history's saveChain so the clear can't race a concurrent
+ // `saveRun` (which writes the same `open_cowork_run_history` key).
   try {
-    await chrome.storage.local.remove(STORAGE_KEYS.runHistory);
+    await (await import("@/lib/agent/run-history")).clearAllRuns();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[history] failed to clear run history:", message);
@@ -208,7 +211,7 @@ $("importHistory")?.addEventListener("click", () => {
  // ~5 MB chrome.storage.local quota (finding: import does not bound
  // per-entry size). Oversized entries are dropped (and counted as skipped)
  // rather than aborting the whole import.
-    const MAX_ENTRY_BYTES = 2 * 1024 * 1024; // 2 MiB per entry
+    const MAX_ENTRY_BYTES = MAX_RUN_ENTRY_BYTES; // 2 MiB per entry
     const valid = imported.filter((e) => {
       if (!isRunHistoryEntry(e)) return false;
       try {
@@ -217,11 +220,27 @@ $("importHistory")?.addEventListener("click", () => {
         return false;
       }
     });
-    const existing = await (await import("@/lib/agent/run-history")).loadRuns();
+    const rh = await import("@/lib/agent/run-history");
+    const existing = await rh.loadRuns();
  // Keep the 50 most-recent runs across BOTH the import and existing history
  // (sorted by startedAt desc) so importing a full file never silently wipes
  // prior runs (finding: import discards all existing history when valid>=50).
-    const merged = [...valid, ...existing]
+ // De-duplicate on a stable key (startedAt + task) before the cap so
+ // re-importing an exported file does not create duplicate runs, and only
+ // genuinely-new runs displace older ones.
+    const keyOf = (r: RunHistoryEntry) => `${r.startedAt}|${r.task}`;
+    const seen = new Set<string>();
+    const deduped: RunHistoryEntry[] = [];
+ // Iterate existing first so existing object references survive (used by the
+ // dropped-run warning below) and imported duplicates fold into them.
+    for (const r of [...existing, ...valid]) {
+      const k = keyOf(r);
+      if (!seen.has(k)) {
+        seen.add(k);
+        deduped.push(r);
+      }
+    }
+    const merged = deduped
       .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))
       .slice(0, 50);
  // Detect whether any pre-existing run was dropped by the cap so we can warn
@@ -232,7 +251,9 @@ $("importHistory")?.addEventListener("click", () => {
  // success. Promise-mode `set` rejects on failure (`chrome.runtime.lastError`
  // is callback-only), so catch the rejection instead of guarding lastError.
     try {
-      await chrome.storage.local.set({ [STORAGE_KEYS.runHistory]: merged });
+ // Route through run-history's saveChain so this bulk write can't race a
+ // concurrent `saveRun` and silently drop a just-finished run.
+      await rh.replaceAllRuns(merged as unknown as Parameters<typeof rh.replaceAllRuns>[0]);
     } catch (err) {
       await alertModal({
         title: "Import failed",

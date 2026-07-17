@@ -3,7 +3,7 @@
 import * as React from "react";
 import {
   ArrowLeft, Download, ImageOff, Activity, Cpu, DollarSign,
-  Clock, GitBranch, User, CalendarDays, FileJson, ListChecks,
+  Clock, GitBranch, User, CalendarDays, FileJson, ListChecks, AlertCircle,
 } from "lucide-react";
 
 import { useAgentTasks } from "@/hooks/use-cowork-query";
@@ -74,7 +74,7 @@ interface RunDetailViewProps {
 }
 
 export function RunDetailView({ runId: propRunId }: RunDetailViewProps) {
-  const { data: tasks, isLoading } = useAgentTasks();
+  const { data: tasks, isLoading, isError, error } = useAgentTasks();
   const storeRunId = useCoworkStore((s) => s.viewParams?.runId ?? null);
   const setView = useCoworkStore((s) => s.setView);
 
@@ -122,7 +122,7 @@ export function RunDetailView({ runId: propRunId }: RunDetailViewProps) {
         updatedAt: task.updatedAt,
       },
       steps: parseJsonArray<TaskStep>(stepsJson),
-      results: parseJsonArray<unknown>(resultsJson),
+      results: parseJsonObject(resultsJson) ?? parseJsonArray<unknown>(resultsJson),
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -144,6 +144,28 @@ export function RunDetailView({ runId: propRunId }: RunDetailViewProps) {
           icon={<Activity className="size-5" />}
         />
         <LoadingSkeleton rows={5} />
+      </div>
+    );
+  }
+
+  if (isError) {
+    return (
+      <div className="space-y-4">
+        <ViewHeader
+          title="Run detail"
+          eyebrow="Observe"
+          icon={<Activity className="size-5" />}
+          actions={
+            <Button variant="outline" size="sm" onClick={() => setView("runs-history")}>
+              <ArrowLeft className="size-4 mr-1" /> Back to runs
+            </Button>
+          }
+        />
+        <EmptyState
+          icon={<AlertCircle className="size-6" />}
+          title="Couldn't load run"
+          description={error?.message ?? "The tasks endpoint returned an error. Check that the backend is reachable and NEXT_PUBLIC_COWORK_UI_TOKEN is configured."}
+        />
       </div>
     );
   }
@@ -172,7 +194,7 @@ export function RunDetailView({ runId: propRunId }: RunDetailViewProps) {
 
   const doneSteps = steps.filter((s) => s.done).length;
   const pct = steps.length === 0 ? 0 : Math.round((doneSteps / steps.length) * 100);
-  const duration = React.useMemo(() => computeDuration(task), [task]);
+  const duration = computeDuration(task);
 
   const hasStructuredResults =
     results.length > 0 ||

@@ -1,82 +1,21 @@
 /**
  * options/provider-config-ui.ts — provider metadata + connection-tab UI logic.
  *
- * Owns `redactKeyLeak` (key-leak masking), the provider-change handler that
- * updates the UI, the test-connection button, and the model-search UI.
+ * Reuses the shared `redactKeyLeak` primitive (from `@/extension/shared`) for
+ * the test-connection path, and owns the provider-change handler that updates
+ * the UI, the test-connection button, and the model-search UI.
  *
  * The provider catalog now comes from `./providers` (single source of truth) —
  * this module no longer keeps its own `PROVIDER_META` copy.
  */
 
-import { $, escapeHtml } from "@/extension/shared";
+import { $, escapeHtml, redactKeyLeak } from "@/extension/shared";
 import { PROVIDER_META, DEFAULT_PROVIDER_ID, catalogIdFor } from "./providers";
 
-/**
- * Mask common API-key prefixes that may leak into provider error text before
- * the message is shown in the UI. A provider error string can include the full
- * key (e.g. `401: Invalid API key: sk-ant-api03-...`), which must not be
- * surfaced verbatim. Non-key error text is returned unchanged.
- *
- * The allowlist is derived from the provider catalog (`PROVIDER_META`) so a new
- * or custom provider's key prefix is covered automatically (finding:
- * redactKeyLeak was a fixed allowlist not derived from PROVIDERS, so new/custom
- * provider keys could leak). Well-known global prefixes that aren't tied to a
- * single catalog entry (GitHub PATs, JWTs, AWS, Slack, GitLab, generic `sk-` /
- * `sk-ant-`) are kept as a base set.
- */
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/** Base key patterns not derivable from a single catalog placeholder. */
-const BASE_KEY_PATTERNS = [
-  "sk-ant-[A-Za-z0-9_-]+",
-  "sk-[A-Za-z0-9_-]+",
-  "AIza[A-Za-z0-9_-]+",
-  "ya29\\.[A-Za-z0-9_-]+",
-  "ghp_[A-Za-z0-9_-]+",
-  "gho_[A-Za-z0-9_-]+",
-  "ghu_[A-Za-z0-9_-]+",
-  "ghs_[A-Za-z0-9_-]+",
-  "ghr_[A-Za-z0-9_-]+",
-  "github_pat_[A-Za-z0-9_-]+",
-  "glpat-[A-Za-z0-9_-]+",
-  "gsk_[A-Za-z0-9_-]+",
-  "xoxb-[A-Za-z0-9_-]+",
-  "xoxp-[A-Za-z0-9_-]+",
-  "xoxa-[A-Za-z0-9_-]+",
-  "xoxs-[A-Za-z0-9_-]+",
-  "AKIA[0-9A-Z]{16}",
- // JWT: mask the ENTIRE token (header.payload.signature), not just the header.
-  "eyJ[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*",
-];
-
-/** Derive concrete key prefixes from provider placeholders (e.g. `sk-ant-api03-...` → `sk-ant-`). */
-function providerKeyPrefixes(): string[] {
-  const out = new Set<string>();
-  for (const p of Object.values(PROVIDER_META)) {
-    const ph = p.keyPlaceholder;
-    if (!ph || ph === "...") continue;
-    const m = /^[A-Za-z0-9_-]+/.exec(ph);
-    if (!m) continue;
-    const prefix = m[0];
- // Skip obviously non-secret placeholders (provider labels, not keys).
-    if (prefix === "ollama" || prefix === "your-opencode-key") continue;
-    out.add(escapeRegex(prefix) + "[A-Za-z0-9_-]+");
-  }
-  return [...out];
-}
-
-const KEY_RE = new RegExp("(" + [...providerKeyPrefixes(), ...BASE_KEY_PATTERNS].join("|") + ")", "g");
-
-export function redactKeyLeak(s: string): string {
-  KEY_RE.lastIndex = 0;
-  return s.replace(KEY_RE, (m) => {
-    const dash = m.indexOf("-");
-    const prefix = dash > 0 ? m.slice(0, dash + 1) : m.slice(0, 4);
-    return `${prefix}[REDACTED]`;
-  });
-}
+// Re-export the shared secret-masking primitive so callers (and tests) that
+// previously imported it from this module keep working after the move to
+// `@/extension/shared` (single source of truth).
+export { redactKeyLeak } from "@/extension/shared";
 
 // ─── Provider config display ───────────────────────────────────────────────
 
@@ -186,7 +125,9 @@ $("testConnection")?.addEventListener("click", async () => {
  // Redact BEFORE truncating so a key that appears past the first 100 chars is
  // still masked (previously the slice ran first and leaked it).
     const raw = e instanceof Error ? e.message : String(e);
-    testResult.textContent = `✗ ${redactKeyLeak(raw).slice(0, 240)}`;
+    let masked = redactKeyLeak(raw);
+    if (apiKey && apiKey.length >= 8) masked = masked.split(apiKey).join("[REDACTED]");
+    testResult.textContent = `✗ ${masked.slice(0, 240)}`;
   } finally {
     testBtn.disabled = false;
     testBtn.setAttribute("aria-busy", "false");

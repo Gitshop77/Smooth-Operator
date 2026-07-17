@@ -20,8 +20,8 @@ export { COCKPIT_VERSION };
  * who can set `Host` could otherwise redirect LLM agents consuming the
  * bootstrap / manifest to attacker-controlled URLs.
  */
-function getCockpitBaseUrl(): string {
-  const configured = process.env.COWORK_BASE_URL;
+export function getCockpitBaseUrl(): string {
+  let configured = process.env.COWORK_BASE_URL;
   if (configured) {
  // Defense-in-depth: the value is concatenated into agent-facing URLs. Reject
  // a non-http(s) scheme (e.g. `javascript:`) the same way the rest of the
@@ -46,6 +46,29 @@ function getCockpitBaseUrl(): string {
             "to advertise it through the agent bootstrap contract.",
         );
         return "";
+      }
+ // Fail-closed on embedded query/fragment in the base URL: a URL such as
+ // `https://cockpit.internal?apikey=SECRET` would otherwise be concatenated
+ // into every agent-facing URL, leaking the secret through logs/LLM agents and
+ // producing a malformed request target (`?apikey=SECRET/api/cowork/tabs`).
+ // Strip benign query strings (and fragments, which break concatenation the
+ // same way), but refuse and fail closed when the query looks secret-shaped —
+ // paralleling the userinfo rejection above.
+      if (parsed.search) {
+        if (
+          /[?&](api[_-]?key|token|access[_-]?token|secret|password|auth(entication|orization)?|client[_-]?secret|bearer|session[_-]?id)=/i.test(
+            parsed.search,
+          )
+        ) {
+          console.error(
+            "[agent-bootstrap] COWORK_BASE_URL embeds a secret-shaped query " +
+              "parameter; refusing to advertise it through the agent bootstrap contract.",
+          );
+          return "";
+        }
+        configured = parsed.origin + parsed.pathname;
+      } else if (parsed.hash) {
+        configured = parsed.origin + parsed.pathname;
       }
     } catch {
       console.error(
@@ -120,8 +143,8 @@ export const CAPABILITY_FAMILIES = [
 
 // Startup sequence steps reference only endpoints that exist. Steps 1-3 are
 // public discovery routes (no auth). Steps 4-5 require the X-Cowork-Token
-// header — the agent must send `X-Cowork-Token: <COWORK_UI_TOKEN>` (falling
-// back to `COWORK_EVENT_TOKEN`) on these.
+// header — the agent must send `X-Cowork-Token: <COWORK_UI_TOKEN>` (the
+// browser-facing token the operator provides), on these.
 export const AGENT_STARTUP_SEQUENCE = [
   { order: 1, endpoint: '/api/cowork/skill', auth: 'none', purpose: 'Read the version-matched operating guide before using the cockpit API.' },
   { order: 2, endpoint: '/api/cowork/agent/manifest', auth: 'none', purpose: 'Load the machine-readable capability and endpoint map.' },
@@ -133,7 +156,7 @@ export const AGENT_STARTUP_SEQUENCE = [
 export const AGENT_OPERATING_RULES = [
   'The web cockpit is a read/create/delete dashboard backed by Prisma. It does not drive a live browser.',
   'POST endpoints create rows in SQLite; DELETE endpoints exist for /history, /memory/site, /memory/form, and /ai/chat.',
-  'Never trigger a mass-deletion (?all=1 / delete-all) on /history or /ai/chat without explicit user confirmation — these wipe all stored rows.',
+  'Never trigger a mass-deletion of all /history or /ai/chat rows without explicit user confirmation — these wipe all stored rows.',
   'Treat all returned data as persisted snapshots, not live browser state.',
   'Network, DevTools, and Snapshots views are extension-only capabilities and are not exposed via this API.',
 ] as const;

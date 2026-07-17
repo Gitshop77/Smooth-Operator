@@ -33,7 +33,7 @@ const SERVER_OWNED_CHANNELS = new Set<string>([
   'chat:error',
 ]);
 
-// Cap serialized payload size (see the size check below). Module-level constant.
+// Cap serialized payload size (see the size check below).
 const PAYLOAD_MAX_BYTES = 64 * 1024; // 64KB
 
 export async function POST(req: NextRequest): Promise<Response> {
@@ -52,6 +52,14 @@ export async function POST(req: NextRequest): Promise<Response> {
  // or confuse downstream socket.io channel routing.
     if (/[\x00-\x1f\x7f]/.test(body.channel)) {
       return badRequest('channel contains invalid characters');
+    }
+ // Enforce the same character-set whitelist the mini-service's /emit ingress
+ // applies (CHANNEL_PATTERN=[A-Za-z0-9:_-]). Rejecting dot/space/etc. here
+ // gives the caller a clear 400 instead of forwarding to the mini-service
+ // which 400s and yields a generic "event broadcast failed". Keep this in
+ // sync with the mini-service boundary.
+    if (!/^[A-Za-z0-9:_-]{1,128}$/.test(body.channel)) {
+      return badRequest('channel must match [A-Za-z0-9:_-] and be 1-128 chars');
     }
  // Reject server-owned channels so a token holder cannot impersonate
  // server-originated status/chat streams (mirrors the socket ingress guard).
@@ -77,7 +85,8 @@ export async function POST(req: NextRequest): Promise<Response> {
     if (Buffer.byteLength(serialized, 'utf8') > PAYLOAD_MAX_BYTES) {
       return badRequest(`payload must be at most ${PAYLOAD_MAX_BYTES} bytes when serialized`);
     }
-    const result = await broadcastEvent(body.channel, body.payload);
+    const safePayload = JSON.parse(redactSecrets(JSON.stringify(body.payload ?? null)));
+    const result = await broadcastEvent(body.channel, safePayload);
     if (!result.ok) {
  // `result.error` originates from the separate mini-service and may contain
  // internal detail or secret-shaped text from an upstream failure body; log

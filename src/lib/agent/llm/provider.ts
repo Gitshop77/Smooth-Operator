@@ -22,6 +22,9 @@ export interface LLMRequest {
   temperature?: number;
   /** Max tokens (provider default if omitted). */
   maxTokens?: number;
+  /** Optional abort signal, honored by the underlying fetch so a run's STOP/cancel
+   * is respected mid-generation rather than only after the request completes. */
+  signal?: AbortSignal;
 }
 
 /** Token-usage + cost information returned by a provider. */
@@ -75,6 +78,8 @@ export interface LLMProvider {
   readonly supportsStructuredOutput: boolean;
   /** Whether this provider can accept image inputs (vision). */
   readonly supportsVision: boolean;
+  /** Whether the resolved model is a reasoning model (rejects `temperature`). */
+  readonly supportsReasoning?: boolean;
   /** Perform a single chat completion. */
   chat(req: LLMRequest): Promise<LLMResponse>;
   /** Stream a chat completion, yielding text chunks as they arrive. */

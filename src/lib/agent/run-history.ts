@@ -31,6 +31,8 @@ export interface RunRecord {
   totalCostUsd: number;
   /** Number of navigator steps executed. */
   stepCount: number;
+  /** Number of LogEvents dropped from `steps` once it exceeded the cap. */
+  overflowCount: number;
 }
 
 /** localStorage / chrome.storage key under which runs are persisted. */
@@ -41,6 +43,9 @@ const MAX_RUNS = 50;
 
 /** Length of the random suffix appended to run IDs. */
 const ID_SUFFIX_LENGTH = 6;
+
+/** Maximum number of LogEvents retained per run (oldest are dropped past this). */
+const MAX_STEPS = 2000;
 
 /**
  * Validate a single loaded history entry. A corrupt/partial record (written by
@@ -76,6 +81,7 @@ function normalizeRunRecord(r: RunRecord): RunRecord {
     totalTokensOut: r.totalTokensOut ?? 0,
     totalCostUsd: r.totalCostUsd ?? 0,
     stepCount: r.stepCount ?? 0,
+    overflowCount: r.overflowCount ?? 0,
     endedAt: r.endedAt ?? 0,
   };
 }
@@ -186,27 +192,58 @@ export async function saveRun(run: RunRecord): Promise<void> {
  * Returns a shallow-cloned run with sanitized steps. Called by saveRun before
  * persistence.
  */
+/**
+ * True only for plain data objects (`{}` / `Object.create(null)`), so recursion
+ * skips class instances, Maps, Dates, etc., whose enumerable-key rebuild could
+ * lose behavior.
+ */
+function isPlainObject(val: object): val is Record<string, unknown> {
+  const proto = Object.getPrototypeOf(val);
+  return proto === Object.prototype || proto === null;
+}
+
 async function redactRunSecrets(run: RunRecord): Promise<RunRecord> {
-  const { redactSecrets } = await import("./secrets");
- // Redact a single value: strings are scanned for secrets; string arrays
- // (e.g. planner `plan`) have each element scanned. Non-string/non-array
- // values are returned untouched.
-  const redactValue = async (val: unknown): Promise<unknown> => {
+  let redactSecrets: (text: string) => Promise<string>;
+  try {
+    ({ redactSecrets } = await import("./secrets"));
+  } catch (e) {
+ // If the secrets module fails to load, don't let the caller persist the run
+ // unredacted — fall back to masking every string value with the same marker
+ // redactSecrets uses when its own store read fails, so nothing reaches disk
+ // in cleartext.
+    console.warn("[run-history] secrets module failed to load; masking all text to avoid leak:", e);
+    redactSecrets = async (_text: string) => "[REDACTED: secret store unavailable]";
+  }
+ // Redact a single value: strings are scanned for secrets; arrays and plain
+ // objects are recursed into so a nested string field (e.g. `{data:{url}}`)
+ // is never persisted unredacted. Recursion is depth-bounded so a pathological
+ // deeply-nested structure cannot stall redaction. Non-string/non-container
+ // values (and anything beyond the depth bound) are returned untouched.
+  const MAX_REDACT_DEPTH = 6;
+  const redactValue = async (val: unknown, depth = 0): Promise<unknown> => {
     if (typeof val === "string") {
       return await redactSecrets(val);
     }
+    if (depth >= MAX_REDACT_DEPTH) return val;
     if (Array.isArray(val)) {
       let changed = false;
       const out = await Promise.all(
         val.map(async (v) => {
-          if (typeof v === "string") {
-            const r = await redactSecrets(v);
-            if (r !== v) changed = true;
-            return r;
-          }
-          return v;
+          const r = await redactValue(v, depth + 1);
+          if (r !== v) changed = true;
+          return r;
         }),
       );
+      return changed ? out : val;
+    }
+    if (val !== null && typeof val === "object" && isPlainObject(val)) {
+      let changed = false;
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(val)) {
+        const r = await redactValue(v, depth + 1);
+        if (r !== v) changed = true;
+        out[k] = r;
+      }
       return changed ? out : val;
     }
     return val;
@@ -233,6 +270,74 @@ async function redactRunSecrets(run: RunRecord): Promise<RunRecord> {
   const redactedResultText = typeof resultText === "string" ? await redactSecrets(resultText) : resultText;
   const task = typeof run.task === "string" ? await redactSecrets(run.task) : run.task;
   return { ...run, task, steps, result: result ? { success: result.success, text: redactedResultText } : null };
+}
+
+/**
+ * Replace the entire stored run list with `runs`, serialized through the same
+ * {@link saveChain} that {@link saveRun} uses so an options-page bulk write
+ * (import/clear) cannot race a concurrent `saveRun` read-modify-write against
+ * the shared `open_cowork_run_history` key and silently drop a run. Trims to
+ * {@link MAX_RUNS}. Writes through the same storage path so the in-page
+ * (localStorage) and extension (chrome.storage.local) behaviours stay aligned.
+ *
+ * Note: unlike `saveRun`, this does not redact — callers pass data that has
+ * already been validated/redacted (or first-party history), and the options
+ * import path historically persisted without redaction. Redaction of newly
+ * finished runs remains the sole responsibility of `saveRun`.
+ */
+export async function replaceAllRuns(runs: RunRecord[]): Promise<void> {
+  const writer = async (): Promise<void> => {
+    let list = runs;
+    if (list.length > MAX_RUNS) list = list.slice(0, MAX_RUNS);
+    if (isExtensionWithLocal()) {
+      try {
+        await chrome.storage.local.set({ [STORAGE_KEY]: list });
+      } catch (e) {
+        console.warn("[run-history] chrome.storage.local.set failed:", e);
+      }
+      return;
+    }
+    try {
+      writeLocalStorage(list);
+    } catch (e) {
+      console.warn("[run-history] localStorage.setItem failed:", e);
+    }
+  };
+  const thisSave = saveChain.then(writer, writer);
+  saveChain = thisSave.then(
+    () => undefined,
+    () => undefined,
+  );
+  return thisSave;
+}
+
+/**
+ * Remove all stored runs, serialized through {@link saveChain} so the clear
+ * cannot race a concurrent {@link saveRun}. Uses the same storage path as
+ * {@link saveRun}/{@link replaceAllRuns}.
+ */
+export async function clearAllRuns(): Promise<void> {
+  const writer = async (): Promise<void> => {
+    if (isExtensionWithLocal()) {
+      try {
+        await chrome.storage.local.remove(STORAGE_KEY);
+      } catch (e) {
+        console.warn("[run-history] chrome.storage.local.remove failed:", e);
+      }
+      return;
+    }
+    try {
+      writeLocalStorage([]);
+    } catch (e) {
+      console.warn("[run-history] localStorage.setItem failed:", e);
+    }
+  };
+  const thisSave = saveChain.then(writer, writer);
+  saveChain = thisSave.then(
+    () => undefined,
+    () => undefined,
+  );
+  return thisSave;
 }
 
 /**
@@ -292,6 +397,7 @@ export class RunBuilder {
       totalTokensOut: 0,
       totalCostUsd: 0,
       stepCount: 0,
+      overflowCount: 0,
     };
   }
 
@@ -305,6 +411,17 @@ export class RunBuilder {
  */
   addEvent(event: LogEvent): void {
     this.run.steps.push(event);
+    // Amortize the O(N) `shift()` reindex once past MAX_STEPS (MED finding):
+    // let the buffer grow to MAX_STEPS + OVERFLOW_BATCH, then drop a whole batch
+    // at once instead of reindexing on every event.
+    const OVERFLOW_BATCH = 256;
+    if (this.run.steps.length > MAX_STEPS + OVERFLOW_BATCH) {
+      this.run.steps.splice(0, OVERFLOW_BATCH);
+      this.run.overflowCount += OVERFLOW_BATCH;
+    } else if (this.run.steps.length > MAX_STEPS) {
+      this.run.steps.shift();
+      this.run.overflowCount++;
+    }
     if (event.type === "cost") {
       this.run.totalTokensIn += event.tokensIn;
       this.run.totalTokensOut += event.tokensOut;

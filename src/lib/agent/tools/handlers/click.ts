@@ -23,7 +23,7 @@ import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import { highlightElement } from "../../dom/overlay";
 import { moveCursorToElement } from "../../dom/phantom-cursor";
-import { TIMINGS, sleep } from "../constants";
+import { SW_RPC_TIMEOUT_MS, TIMINGS, sleep } from "../constants";
 import {
   domFingerprint,
   generateCssSelector,
@@ -34,16 +34,30 @@ import type { ActionContext } from "./types";
 
 type CdpClickResult = { ok?: boolean; error?: string } | undefined | null;
 
-/** Send a CDP_CLICK to the background SW and return the normalized result. */
+/** Send a CDP_CLICK to the background SW and return the normalized result.
+ *
+ * Races the round-trip against a timeout so a SW that accepts the message
+ * but never calls sendResponse can't hang the agent step indefinitely. The
+ * timeout timer is cleared in a finally block regardless of outcome. */
 async function sendCdpClick(
   rect: { x: number; y: number; width: number; height: number },
   visionIndex?: string,
 ): Promise<CdpClickResult> {
-  return (await chrome.runtime.sendMessage(
-    visionIndex !== undefined
-      ? { type: "CDP_CLICK", rect, visionIndex }
-      : { type: "CDP_CLICK", rect },
-  )) as CdpClickResult;
+  let t: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return (await Promise.race([
+      chrome.runtime.sendMessage(
+        visionIndex !== undefined
+          ? { type: "CDP_CLICK", rect, visionIndex }
+          : { type: "CDP_CLICK", rect },
+      ),
+      new Promise<never>((_, reject) => {
+        t = setTimeout(() => reject(new Error("CDP_CLICK timeout")), SW_RPC_TIMEOUT_MS);
+      }),
+    ])) as CdpClickResult;
+  } finally {
+    if (t) clearTimeout(t);
+  }
 }
 
 /** True when the page changed since the action started. */
@@ -110,7 +124,6 @@ export async function handleClick(
  // background script. Slower (~135-215ms, 100ms settle + debugger
  // attach + message round-trip) but produces `isTrusted: true` events
  // that hostile sites (Cloudflare Turnstile, anti-bot widgets) accept.
- // This is the production-grade interaction method.
  // 2. Native `el.click()` — the standard DOM click. Fires a
  // bubbling `MouseEvent` that React/jQuery/etc. listeners
  // handle correctly. Cheapest (~0ms), works for ~70% of sites.
@@ -155,14 +168,31 @@ export async function handleClick(
         errors.push("element became detached before CDP click");
       } else {
         const r = el.getBoundingClientRect();
-        const cdpResult = await sendCdpClick({ x: r.x, y: r.y, width: r.width, height: r.height });
-        if (cdpResult?.ok) {
-          clicked = true;
-          strategyUsed = "CDP";
-        } else if (cdpResult?.error) {
-          errors.push(`CDP click failed: ${cdpResult.error}`);
+ // Reject coordinates outside the visual viewport. CDP
+ // `Input.dispatchMouseEvent` does NOT error on out-of-bounds coordinates, so
+ // a click dispatched past a viewport edge would silently no-op (or hit a
+ // fixed overlay) while being reported ok:true — a silent misclick. Bounds
+ // are checked on the element CENTER; if it falls outside, skip CDP and let
+ // the native/selector fallbacks below handle it instead of firing blind.
+        const centerX = r.x + r.width / 2;
+        const centerY = r.y + r.height / 2;
+        if (
+          centerX < 0 || centerY < 0 ||
+          centerX > window.innerWidth || centerY > window.innerHeight
+        ) {
+          errors.push(
+            `element center (${Math.round(centerX)},${Math.round(centerY)}) is outside the viewport (${window.innerWidth}x${window.innerHeight}) — skipping CDP coordinate click`,
+          );
         } else {
-          errors.push("CDP click: no response from service worker");
+          const cdpResult = await sendCdpClick({ x: r.x, y: r.y, width: r.width, height: r.height });
+          if (cdpResult?.ok) {
+            clicked = true;
+            strategyUsed = "CDP";
+          } else if (cdpResult?.error) {
+            errors.push(`CDP click failed: ${cdpResult.error}`);
+          } else {
+            errors.push("CDP click: no response from service worker");
+          }
         }
       }
     } catch (e) {

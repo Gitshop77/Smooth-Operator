@@ -30,7 +30,7 @@
  * is benign".
  */
 
-import { htmlExactMatch, htmlMustInclude } from "./string-evaluator";
+import { htmlExactMatch, htmlMustInclude, splitOrAlternatives } from "./string-evaluator";
 
 /** Tag used by {@link HTMLContentEvaluator} when surfacing which check failed. */
 export const HTML_CONTENT_EVALUATOR_TAG = "program_html";
@@ -185,6 +185,16 @@ export class HTMLContentEvaluator {
   private readonly warnedLocators = new Map<string, true>();
 
   async evaluate(input: HTMLContentEvaluatorInput): Promise<HTMLContentEvaluatorResult> {
+ // Fail CLOSED on an empty target list: with no targets there is nothing to
+ // grade, so the default 1.0 would silently pass a task that was never
+ // checked. This mirrors the extraction-warning fail-closed path below.
+    if (input.targets.length === 0) {
+      return {
+        score: 0,
+        tag: HTML_CONTENT_EVALUATOR_TAG,
+        reason: "no HTML-content targets configured — failing closed",
+      };
+    }
     let score = 1.0;
     const reasons: string[] = [];
  // Parse the page HTML once when we are grading locators locally (no
@@ -271,6 +281,22 @@ export class HTMLContentEvaluator {
         if (cur === 0) reasons.push(`target[${i}].exact_match failed`);
       }
       if (hasInclude) {
+ // A `must_include` list that is empty ([]) or contains only blank /
+ // ` |OR| ` alternatives asserts nothing — every entry would be a no-op
+ // and the target would silently PASS at score 1.0. That is the exact
+ // zero-evidence false-pass the empty-targets guard (L191) was added to
+ // prevent, so fail CLOSED here when there is no exact_match either.
+        let effectiveAssertions = 0;
+        for (const content of rc.must_include!) {
+          effectiveAssertions += splitOrAlternatives(content).length;
+        }
+        if (effectiveAssertions === 0 && !hasExact) {
+          score *= 0;
+          reasons.push(
+            `target[${i}].must_include has no effective assertions — failing closed`,
+          );
+          break;
+        }
         for (const content of rc.must_include!) {
  // `htmlMustInclude` compares RAW (case-sensitive, quotes preserved)
  // and honors ` |OR| ` alternatives as a pass-if-any. An empty entry

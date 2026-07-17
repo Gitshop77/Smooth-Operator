@@ -119,23 +119,40 @@ export class EvaluatorComb {
  // no input is supplied at all, the product of the empty evaluator set is the
  // neutral default score of 1.0, so we return that rather than a false
  // failure.
-    if (this.kinds.length > 0 && results.length === 0) {
-      const hasAnyInput = !!(input.string || input.url || input.html);
-      if (!hasAnyInput) {
-        return { score: 1, results: [], reasons: [] };
-      }
-      const kinds = this.kinds.join(", ");
-      console.warn(
-        `[EvaluatorComb] No evaluator ran: configured kinds [${kinds}] ` +
-        `matched none of the provided inputs ` +
-        `(string=${!!input.string}, url=${!!input.url}, html=${!!input.html}). ` +
-        `Failing closed (score 0). Check eval_types vs expectedOutcomes.`
-      );
-      return {
-        score: 0,
-        results: [],
-        reasons: [`no configured evaluator (${kinds}) had a matching input`],
+    if (this.kinds.length > 0) {
+      const kindHasInput: Record<EvaluatorKind, boolean> = {
+        string_match: !!input.string,
+        url_match: !!input.url,
+        program_html: !!input.html,
       };
+      const missingKinds = this.kinds.filter((k) => !kindHasInput[k]);
+      const ranKinds = this.kinds.filter((k) => kindHasInput[k]);
+      const hasAnyInput = !!(input.string || input.url || input.html);
+
+      if (missingKinds.length > 0) {
+        if (!hasAnyInput) {
+          // No input supplied at all — the product of the empty evaluator set is
+          // the neutral default score of 1.0 (fail-open by design, not a false
+          // pass with zero evidence).
+          return { score: 1, results: [], reasons: [] };
+        }
+        // A configured evaluator had no matching input while at least one other
+        // configured evaluator ran (or some off-config input was supplied). The
+        // missing check therefore ran ZERO assertions; grading on the partial set
+        // would still read as a PASS, so fail CLOSED (score 0).
+        const missing = missingKinds.join(", ");
+        const ran = ranKinds.join(", ") || "(none)";
+        console.warn(
+          `[EvaluatorComb] Configured evaluator(s) [${missing}] had no matching ` +
+          `input while [${ran}] were supplied. Failing closed (score 0). ` +
+          `Check eval_types vs expectedOutcomes.`
+        );
+        return {
+          score: 0,
+          results,
+          reasons: [`configured evaluator(s) (${missing}) had no matching input`],
+        };
+      }
     }
 
     return { score, results, reasons };

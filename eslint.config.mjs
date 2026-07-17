@@ -83,6 +83,8 @@ export default [
       ".next/**",
       "out/**",
       "build/**",
+      "coverage/**",
+      ".audit/**",
       "chrome-extension/**",
       "cockpit/**",
       "mini-services/**",

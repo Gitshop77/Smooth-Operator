@@ -9,8 +9,8 @@
  * `fe80:/10`), unspecified `0.0.0.0/8` / `:`, and CGNAT `100.64.0.0/10`.
  */
 
-import { describe, test, expect } from "vitest";
-import { validateLlmBaseUrl, isAllowedLlmBaseUrl } from "../src/lib/agent/llm/route/ssrf";
+import { describe, test, expect, afterEach } from "vitest";
+import { validateLlmBaseUrl, isAllowedLlmBaseUrl, validateWebhookUrl, resolveAndValidateLlmBaseUrl } from "../src/lib/agent/llm/route/ssrf";
 
 function assertRejected(res: ReturnType<typeof validateLlmBaseUrl>, re: RegExp): void {
   expect(res.ok).toBe(false);
@@ -73,6 +73,114 @@ describe("validateLlmBaseUrl (SSRF guard)", () => {
     assertRejected(validateLlmBaseUrl("not a url"), /invalid URL/i);
     assertRejected(validateLlmBaseUrl(""), /non-empty string/i);
   });
+
+  test("NAT64 + IPv4-mapped cloud-metadata forms are rejected", () => {
+    // NAT64 (RFC 6052) `64:ff9b::/96`: the embedded IPv4 is reached through the
+    // NAT64 gateway, so `64:ff9b::169.254.169.254` reaches cloud metadata.
+    assertRejected(validateLlmBaseUrl("http://[64:ff9b::169.254.169.254]/"), /link-local|metadata/i);
+    // IPv4-mapped `::ffff:<ipv4>` to the metadata address.
+    assertRejected(validateLlmBaseUrl("http://[::ffff:169.254.169.254]/"), /link-local|metadata/i);
+  });
+
+  test("Teredo / 6to4 IPv6 forms embedding link-local cloud-metadata are rejected", () => {
+    // Teredo (RFC 4380) `2001::/32` with the embedded IPv4 in the last 32 bits.
+    assertRejected(validateLlmBaseUrl("http://[2001::a9fe:a9fe]/"), /link-local|metadata/i);
+    expect(isAllowedLlmBaseUrl("http://[2001::a9fe:a9fe]/")).toBe(false);
+    // 6to4 (RFC 3056) `2002::/16` with the embedded IPv4 in groups[1]:groups[2].
+    assertRejected(validateLlmBaseUrl("http://[2002:a9fe:a9fe::]/"), /link-local|metadata/i);
+    expect(isAllowedLlmBaseUrl("http://[2002:a9fe:a9fe::]/")).toBe(false);
+  });
+
+  test("zone-id IPv6 (fe80::1%eth0) is rejected", () => {
+    // A link-local address with a `%zone` suffix must still be rejected (as a
+    // link-local sink or an unparseable literal) — never allowed to fetch.
+    expect(validateLlmBaseUrl("http://[fe80::1%25eth0]/").ok).toBe(false);
+    expect(isAllowedLlmBaseUrl("http://[fe80::1%25eth0]/")).toBe(false);
+  });
+
+  test("rejects cloud-metadata / internal hostnames", () => {
+    assertRejected(validateLlmBaseUrl("http://metadata.google.internal/"), /internal|metadata/i);
+  });
+
+  test("deprecated IPv4-compatible form (::a.b.c.d) catches an embedded cloud-metadata IPv4", () => {
+   // The WHATWG URL parser canonicalizes the deprecated IPv4-compatible form
+   // `http://[::169.254.169.254]/` to the hex `::a9fe:a9fe`; the IPv6 classifier
+   // must still read the embedded IPv4 (169.254.169.254) off the last two groups
+   // and reject it as link-local cloud metadata — at BOTH the parse layer and
+   // the transport layer. This pins the branch so a future regression that
+   // drops the deprecated-form handling silently reopens the cloud-metadata SSRF
+   // path.
+    assertRejected(validateLlmBaseUrl("http://[::169.254.169.254]/"), /link-local|metadata/i);
+    expect(isAllowedLlmBaseUrl("http://[::169.254.169.254]/")).toBe(false);
+   // The same deprecated form embedding a *loopback* IPv4 (self-hosted infra) is
+   // NOT a sink, so the branch must allow it — confirming the check keys on the
+   // embedded IPv4 being genuinely dangerous rather than rejecting the whole
+   // `::a.b.c.d` shape.
+    expect(validateLlmBaseUrl("http://[::127.0.0.1]/").ok).toBe(true);
+    expect(isAllowedLlmBaseUrl("http://[::127.0.0.1]/")).toBe(true);
+  });
+
+  test("still allows a user-configured loopback local-provider URL", () => {
+    expect(validateLlmBaseUrl("http://localhost:11434/v1").ok).toBe(true);
+  });
+});
+
+// ─── Completion-webhook guard (loops back allowed, internal/single-label blocked) ───
+
+describe("validateWebhookUrl (webhook SSRF guard)", () => {
+  test("rejects single-label hostnames (can resolve to unexpected local targets)", () => {
+    assertRejected(validateWebhookUrl("http://router/"), /private\/metadata\/link-local/i);
+  });
+
+  test("rejects cloud-metadata / internal hostnames", () => {
+    assertRejected(validateWebhookUrl("http://metadata.google.internal/"), /private\/metadata\/link-local/i);
+  });
+
+  test("allows a loopback webhook relay (self-hosted dev notification)", () => {
+    expect(validateWebhookUrl("http://localhost:8080/hook").ok).toBe(true);
+  });
+
+  test("rejects IPv6 embedded-IPv4 cloud-metadata forms (NAT64 / mapped / Teredo / 6to4 / IPv4-compatible)", () => {
+    expect(validateWebhookUrl("http://[64:ff9b::169.254.169.254]/hook").ok).toBe(false);
+    expect(validateWebhookUrl("http://[2002:a9fe:a9fe::]/hook").ok).toBe(false);
+    expect(validateWebhookUrl("http://[2001::a9fe:a9fe]/hook").ok).toBe(false);
+    expect(validateWebhookUrl("http://[::ffff:169.254.169.254]/hook").ok).toBe(false);
+    expect(validateWebhookUrl("http://[::169.254.169.254]/hook").ok).toBe(false);
+  });
+
+  test("allows IPv6 loopback and a public IPv6 webhook", () => {
+    expect(validateWebhookUrl("http://[::1]:8080/hook").ok).toBe(true);
+    expect(validateWebhookUrl("http://[2606:4700:4700::1111]/hook").ok).toBe(true);
+  });
+});
+
+// ─── LLM/webhook SSRF parity ──────────────────────────────────────────────────
+//
+// Every embedded-IPv4 cloud-metadata form the LLM path blocks must ALSO be
+// blocked by the webhook path, so the two classifiers cannot silently diverge.
+
+describe("IPv6 embedded-IPv4 SSRF classifier parity (LLM vs webhook)", () => {
+  const metadataForms = [
+    "http://[64:ff9b::169.254.169.254]/",
+    "http://[2002:a9fe:a9fe::]/",
+    "http://[2001::a9fe:a9fe]/",
+    "http://[::ffff:169.254.169.254]/",
+    "http://[::169.254.169.254]/",
+  ];
+
+  test("every metadata form blocked by the LLM path is also blocked by the webhook path", () => {
+    for (const u of metadataForms) {
+      expect(validateLlmBaseUrl(u).ok).toBe(false);
+      expect(validateWebhookUrl(u).ok).toBe(false);
+    }
+  });
+
+  test("both paths allow IPv6 loopback and a public IPv6 address", () => {
+    for (const u of ["http://[::1]/", "http://[2606:4700:4700::1111]/"]) {
+      expect(validateLlmBaseUrl(u).ok).toBe(true);
+      expect(validateWebhookUrl(u).ok).toBe(true);
+    }
+  });
 });
 
 // ─── Transport-layer guard (the function actually invoked at fetch time) ───
@@ -132,5 +240,117 @@ describe("isAllowedLlmBaseUrl (transport-layer SSRF guard)", () => {
       expect(isAllowedLlmBaseUrl(u)).toBe(false);
       expect(isAllowedLlmBaseUrl(u, false)).toBe(false);
     }
+  });
+});
+
+// ─── DNS-resolution SSRF guard (closes the rebinding-to-metadata hole) ───
+//
+// `validateLlmBaseUrl` / `isAllowedLlmBaseUrl` inspect ONLY the parsed HOST, so
+// a public hostname that DNS-resolves to an internal/metadata IP is not caught
+// by the synchronous path. `resolveAndValidateLlmBaseUrl` resolves the hostname
+// (when a resolver is available) and rejects any resolution into the blocked
+// ranges. These tests pin that behavior so a future refactor that drops the DNS
+// step — or weakens the fail-closed `error`/`unavailable` paths — is caught.
+
+// Mock `chrome.dns.resolve` so the resolution is fully controlled (no real
+// network). The host argument is ignored; `cb` receives the canned IPs. The
+// `error` mode simulates `chrome.runtime.lastError` to exercise the
+// fail-closed path. With both `chrome` and `require` absent (the test runtime's
+// default), `dnsResolve` returns `unavailable`, which we use directly for the
+// unavailable-resolution cases.
+type DnsMode =
+  | { kind: "resolved"; addresses: string[] }
+  | { kind: "error" };
+
+function setMockDns(mode: DnsMode): void {
+  const chrome = globalThis as unknown as {
+    chrome?: { runtime?: { lastError?: { message: string } }; dns?: { resolve?: (h: string, cb: (r: { addresses?: string[] }) => void) => void } };
+  };
+  if (mode.kind === "error") {
+    chrome.chrome = {
+      runtime: {},
+      dns: { resolve: (_h: string, _cb: (r: { addresses?: string[] }) => void) => { throw new Error("dns failure"); } },
+    };
+    return;
+  }
+  chrome.chrome = {
+    runtime: {},
+    dns: { resolve: (_h: string, cb: (r: { addresses?: string[] }) => void) => cb({ addresses: mode.addresses }) },
+  };
+}
+
+function clearMockDns(): void {
+  (globalThis as unknown as { chrome?: unknown }).chrome = undefined;
+}
+
+describe("resolveAndValidateLlmBaseUrl (DNS-resolution SSRF guard)", () => {
+  afterEach(() => {
+    clearMockDns();
+  });
+
+  test("rejects a hostname that DNS-resolves to the cloud-metadata address", async () => {
+    setMockDns({ kind: "resolved", addresses: ["169.254.169.254"] });
+    const res = await resolveAndValidateLlmBaseUrl("http://metadata.example.attacker/v1");
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected rejection");
+    expect(res.reason).toMatch(/private\/loopback\/link-local/i);
+  });
+
+  test("hostname → loopback: rejected when allowLocalExemption=false, allowed when true", async () => {
+    setMockDns({ kind: "resolved", addresses: ["127.0.0.1"] });
+    const rejected = await resolveAndValidateLlmBaseUrl("http://ollama.example.attacker/v1", false);
+    expect(rejected.ok).toBe(false);
+    const allowed = await resolveAndValidateLlmBaseUrl("http://ollama.example.attacker/v1", true);
+    expect(allowed.ok).toBe(true);
+  });
+
+  test("error resolver: fail-closed for untrusted, degraded-pass for user-configured", async () => {
+    setMockDns({ kind: "error" });
+    const rejected = await resolveAndValidateLlmBaseUrl("http://example.attacker/v1", false);
+    expect(rejected.ok).toBe(false);
+    if (rejected.ok) throw new Error("expected rejection");
+    expect(rejected.reason).toMatch(/DNS resolution/i);
+    const allowed = await resolveAndValidateLlmBaseUrl("http://example.attacker/v1", true);
+    expect(allowed.ok).toBe(true);
+  });
+
+  test("unavailable resolver: fail-closed for untrusted, degraded-pass for user-configured", async () => {
+    clearMockDns(); // no chrome.dns, no require → resolveAndValidateLlmBaseUrl sees `unavailable`
+    const rejected = await resolveAndValidateLlmBaseUrl("http://example.attacker/v1", false);
+    expect(rejected.ok).toBe(false);
+    if (rejected.ok) throw new Error("expected rejection");
+    expect(rejected.reason).toMatch(/DNS resolver unavailable/i);
+    const allowed = await resolveAndValidateLlmBaseUrl("http://example.attacker/v1", true);
+    expect(allowed.ok).toBe(true);
+  });
+
+  test("still rejects a genuine IP-literal sink (no DNS needed)", async () => {
+    clearMockDns();
+    const res = await resolveAndValidateLlmBaseUrl("http://169.254.169.254/");
+    expect(res.ok).toBe(false);
+  });
+
+  test("rejects a hostname that DNS-resolves to an IPv6 link-local address", async () => {
+    setMockDns({ kind: "resolved", addresses: ["fe80::1"] });
+    const res = await resolveAndValidateLlmBaseUrl("http://meta6.example.attacker/v1");
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected rejection");
+    expect(res.reason).toMatch(/private\/loopback\/link-local/i);
+  });
+
+  test("rejects a hostname that DNS-resolves to an IPv4-mapped IPv6 metadata address", async () => {
+    setMockDns({ kind: "resolved", addresses: ["::ffff:169.254.169.254"] });
+    const res = await resolveAndValidateLlmBaseUrl("http://meta6.example.attacker/v1");
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected rejection");
+    expect(res.reason).toMatch(/private\/loopback\/link-local/i);
+  });
+
+  test("rejects when the resolver returns a mix of safe + blocked addresses (fail-closed)", async () => {
+    setMockDns({ kind: "resolved", addresses: ["1.2.3.4", "169.254.169.254"] });
+    const res = await resolveAndValidateLlmBaseUrl("http://mixed.example.attacker/v1");
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected rejection");
+    expect(res.reason).toMatch(/private\/loopback\/link-local/i);
   });
 });

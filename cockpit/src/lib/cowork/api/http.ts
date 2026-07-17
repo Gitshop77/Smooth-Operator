@@ -1,4 +1,6 @@
 import type { NextRequest } from 'next/server';
+import type { Prisma } from '@prisma/client';
+import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 
 /** App-authored, client-facing error.
@@ -25,31 +27,151 @@ export class ClientError extends Error {
  * chunks and reject oversize bodies with 413. */
 const MAX_BODY_BYTES = 256 * 1024;
 
+/** Hard ceiling on the number of stream chunks we will consume, independent of
+ * the byte cap. Bounds the iteration count so a connection that yields an
+ * unbounded number of (tiny) chunks cannot pin a worker via an infinite loop. */
+const MAX_BODY_CHUNKS = 1 << 20;
+
+/** Maximum number of consecutive/zero-length chunks before we abort. A
+ * zero-length `Uint8Array` is a truthy object with `byteLength === 0`, so it
+ * passes the `!value` guard, never advances `total`, and never hits the byte
+ * cap — an endless stream of empty chunks would loop forever. Bound them. */
+const MAX_BODY_EMPTY_CHUNKS = 1 << 16;
+
+/** Wall-clock deadline for the whole body read. A slow trickle of bytes keeps
+ * `await reader.read()` pending indefinitely, pinning a Next.js worker (slow
+ * loris / pool exhaustion). The byte cap alone does not bound wall time. */
+const MAX_BODY_READ_MS = 60_000;
+
 async function readCappedBody(req: NextRequest): Promise<string> {
   if (!req.body) return '';
   const reader = req.body.getReader();
   const decoder = new TextDecoder();
   let total = 0;
+  let chunksRead = 0;
+  let emptyReads = 0;
   const chunks: string[] = [];
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new ClientError('request read timeout', 408)), MAX_BODY_READ_MS);
+  });
+  try {
+    for (;;) {
+      if (++chunksRead > MAX_BODY_CHUNKS) {
+        throw new ClientError('request entity too large', 413);
+      }
+      let result: { done: boolean; value: Uint8Array | undefined };
+      try {
+        result = await Promise.race([reader.read(), timeout]);
+      } catch (err) {
+        // The wall-clock timeout won the race. Release the underlying body
+        // reader so the slow-loris socket is not left pinned open after the
+        // 408 — otherwise the reader keeps consuming (and the worker stays
+        // tied up) for the life of the connection.
+        await reader.cancel().catch(() => {});
+        throw err;
+      }
+      const { done, value } = result;
+      if (done) break;
  // A non-conformant stream can yield `value === undefined` with `done ===
- // false`; skip the empty chunk before accessing `value.byteLength`.
-    if (!value) continue;
+ // false`; skip the empty chunk before accessing `value.byteLength`. A
+ // zero-length `Uint8Array` also skips the byte cap, so count it toward a
+ // ceiling to prevent a true infinite loop of empty chunks.
+      if (!value || value.byteLength === 0) {
+        if (++emptyReads > MAX_BODY_EMPTY_CHUNKS) {
+          throw new ClientError('request entity too large', 413);
+        }
+        continue;
+      }
+      emptyReads = 0;
  // Reject BEFORE the chunk is appended to `chunks` so a single oversized
  // chunk (or a cumulative overflow) can never be buffered into memory.
-    if (total + value.byteLength > MAX_BODY_BYTES) {
+      if (total + value.byteLength > MAX_BODY_BYTES) {
  // Release the underlying body reader so the request socket/stream is not
  // left unconsumed (resource hygiene under a flood of oversize requests).
-      try { await reader.cancel(); } catch { /* ignore */ }
-      throw new ClientError('request entity too large', 413);
+        try { await reader.cancel(); } catch { /* ignore */ }
+        throw new ClientError('request entity too large', 413);
+      }
+      total += value.byteLength;
+      chunks.push(decoder.decode(value, { stream: true }));
     }
-    total += value.byteLength;
-    chunks.push(decoder.decode(value, { stream: true }));
+  } finally {
+    if (timer) clearTimeout(timer);
   }
   chunks.push(decoder.decode());
   return chunks.join('');
+}
+
+/** Maximum size of an upstream (mini-service) response body we will buffer
+ * (20 MiB). The inbound request is already capped by `bodyJson` (256KiB); this
+ * bounds the OUTBOUND direction. A misbehaving/compromised internal
+ * cowork-events service could otherwise return an arbitrarily large body and
+ * exhaust cockpit worker memory before any redaction/parse runs. */
+export const MAX_UPSTREAM_BYTES = 20 * 1024 * 1024;
+
+/** See `readCappedBody` for the rationale. These bounds mirror the inbound caps
+ * but apply to the OUTBOUND (upstream mini-service response) read path. */
+const MAX_UPSTREAM_CHUNKS = 1 << 20;
+const MAX_UPSTREAM_EMPTY_CHUNKS = 1 << 16;
+const MAX_UPSTREAM_READ_MS = 120_000;
+
+/** Read an upstream `Response` body as text, rejecting (via a `ClientError`,
+ * mapped to 502 by `withRouteError`) any payload larger than `maxBytes`. The
+ * body is streamed through a byte-counting reader so a single oversized chunk
+ * (or cumulative overflow) can never be buffered into memory. Mirrors the
+ * inbound `readCappedBody` cap but for responses we proxy from the
+ * mini-service. */
+export async function readCappedUpstream(
+  res: Response,
+  maxBytes: number = MAX_UPSTREAM_BYTES,
+): Promise<string> {
+  if (!res.body) return '';
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let chunksRead = 0;
+  let emptyReads = 0;
+  const chunks: string[] = [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new ClientError('upstream response read timeout', 504)), MAX_UPSTREAM_READ_MS);
+  });
+  try {
+    for (;;) {
+      if (++chunksRead > MAX_UPSTREAM_CHUNKS) {
+        throw new ClientError('upstream response too large', 502);
+      }
+      const { done, value } = await Promise.race([reader.read(), timeout]);
+      if (done) break;
+      if (!value || value.byteLength === 0) {
+        if (++emptyReads > MAX_UPSTREAM_EMPTY_CHUNKS) {
+          throw new ClientError('upstream response too large', 502);
+        }
+        continue;
+      }
+      emptyReads = 0;
+      if (total + value.byteLength > maxBytes) {
+        try { await reader.cancel(); } catch { /* ignore */ }
+        throw new ClientError('upstream response too large', 502);
+      }
+      total += value.byteLength;
+      chunks.push(decoder.decode(value, { stream: true }));
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  chunks.push(decoder.decode());
+  return chunks.join('');
+}
+
+/** Derive a non-secret, stable principal identifier from a token value for
+ * audit logging. Returns a truncated SHA-256 hex digest so the raw secret is
+ * never written to logs, while still letting operators attribute an action to
+ * the token holder that triggered it (AU-3). Stable across calls for a given
+ * token value. */
+export function tokenPrincipal(token: string): string {
+  const digest = createHash('sha256').update(token).digest('hex');
+  return `tok_${digest.slice(0, 16)}`;
 }
 
 /** Parse JSON request body.
@@ -93,7 +215,7 @@ export async function bodyJsonOptional(req: NextRequest): Promise<Record<string,
  // rather than silently disappearing (defense-in-depth observability).
     console.error(
       '[cowork] bodyJsonOptional swallowed non-ClientError:',
-      e instanceof Error ? e.message : String(e),
+      redactSecrets(e instanceof Error ? e.message : String(e)),
     );
     return {};
   }
@@ -194,6 +316,12 @@ export function isSsrfSafeUrl(url: string): boolean {
   if (host.endsWith('.')) host = host.slice(0, -1);
  // Bare loopback / unspecified addresses.
   if (host === 'localhost' || host === '::1' || host === '::' || host === '0.0.0.0') return false;
+ // A bare single-label host (no dot) resolves via the server's DNS search
+ // domain to an internal service, and a private/mDNS TLD (.local/.internal/
+ // .lan/.home) resolves via mDNS/LLMNR to one — both are classic SSRF
+ // targets, so reject them the same as a private IP.
+  if (!host.includes('.')) return false;
+  if (/\.(local|internal|lan|home)$/.test(host)) return false;
  // Any loopback / RFC1918 / link-local / CGNAT host (in resolved form) is unsafe.
   if (isRestrictedHost(host)) return false;
   return true;
@@ -209,6 +337,31 @@ function isRestrictedHost(host: string): boolean {
  // and be treated as a public/safe host. Zone-scoped link-local addresses are
  // still link-local — reject any `%` in the host outright.
   if (host.includes('%')) return true;
+ // NAT64 well-known prefix (64:ff9b::/96) embeds a 32-bit IPv4 address in the
+ // host's low 32 bits — e.g. 64:ff9b::a9fe:a9fe == 169.254.169.254 (cloud
+ // metadata) and 64:ff9b::7f00:1 == 127.0.0.1 (loopback). On a network with a
+ // NAT64 gateway a real HTTP client resolves these to the embedded private /
+ // metadata address, so they must be rejected the same as the plain IPv4.
+ // Caught here (independent of the isIP IPv6 branch) so both the two-hextet
+ // form (64:ff9b::WWXX:YYZZ) and the dotted form (64:ff9b::a.b.c.d) are blocked.
+ if (host.startsWith('64:ff9b:')) {
+   let rest = host.slice('64:ff9b:'.length);
+   if (rest.startsWith(':')) rest = rest.slice(1);
+   let dotted = rest;
+   if (!rest.includes('.')) {
+     const tailParts = rest.split(':');
+     if (tailParts.length >= 2) {
+       const hi = parseInt(tailParts[tailParts.length - 2], 16);
+       const lo = parseInt(tailParts[tailParts.length - 1], 16);
+       if (!Number.isNaN(hi) && !Number.isNaN(lo)) {
+         dotted = `${(hi >>> 8) & 0xff}.${hi & 0xff}.${(lo >>> 8) & 0xff}.${lo & 0xff}`;
+       }
+     }
+   } else if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(rest)) {
+     dotted = '';
+   }
+   if (dotted && isRestrictedHost(dotted)) return true;
+ }
  // IPv6 literal.
   if (isIP(host) === 6) {
  // IPv4-mapped IPv6 (`:ffff:a.b.c.d` or `::ffff:WWXX:YYZZ`) — classify the
@@ -307,9 +460,9 @@ function normalizeEncodedIpv4(host: string): string | null {
   }
   let value: number;
   if (nums.length === 1) value = nums[0];
-  else if (nums.length === 2) value = (nums[0] << 24) | (nums[1] & 0xffffff);
-  else if (nums.length === 3) value = (nums[0] << 24) | (nums[1] << 16) | (nums[2] & 0xffff);
-  else value = (nums[0] << 24) | (nums[1] << 16) | (nums[2] << 8) | nums[3];
+  else if (nums.length === 2) value = nums[0] * 0x1000000 + (nums[1] & 0xffffff);
+  else if (nums.length === 3) value = nums[0] * 0x1000000 + nums[1] * 0x10000 + (nums[2] & 0xffff);
+  else value = nums[0] * 0x1000000 + nums[1] * 0x10000 + nums[2] * 0x100 + nums[3];
   if (value < 0 || value > 0xffffffff) return null;
   return [
     (value >>> 24) & 0xff,
@@ -363,6 +516,15 @@ export function isPrismaRecordNotFound(e: unknown): boolean {
   return err.code === 'P2025' && err.name === 'PrismaClientKnownRequestError';
 }
 
+/** True when `e` is Prisma's foreign-key constraint (P2003) error — e.g. an
+ * attempt to delete a row still referenced by a child relation. Structured
+ * check (code + error name) — avoids fragile message-substring sniffing. */
+export function isPrismaForeignKeyConstraint(e: unknown): boolean {
+  if (!e || typeof e !== 'object') return false;
+  const err = e as { code?: unknown; name?: unknown };
+  return err.code === 'P2003' && err.name === 'PrismaClientKnownRequestError';
+}
+
 /** Parse and validate the optional `agentId` query param.
  *
  * Returns `undefined` when the param is absent or empty (the "no filter"
@@ -376,7 +538,7 @@ export function parseAgentId(req: NextRequest): string | undefined {
     /\s/.test(raw) ||
     [...raw].some((ch) => {
       const c = ch.charCodeAt(0);
-      return c <= 0x1f || c === 0x7f;
+      return c <= 0x1f || (c >= 0x7f && c <= 0x9f);
     });
   if (raw.length > 128 || hasBadChar) {
     throw new ClientError('Invalid agentId; must be 1-128 chars with no control/whitespace characters', 400);
@@ -449,20 +611,41 @@ function newCorrelationId(): string {
  * route) rather than maintaining a divergent copy. */
 export function redactSecrets(text: string): string {
   let out = text;
- // Credentials in URLs: http(s)://user:pass@host -> http(s)://***@host
-  out = out.replace(/(https?:\/\/)[^@\s/]+@/gi, "$1***@");
+ // Credentials in URLs: scheme://user:pass@host -> scheme://***@host.
+ // Any scheme (postgres://, mysql://, mongodb://, redis://, amqp://, …) is
+ // covered — not just http(s) — so DB connection-string secrets don't survive
+ // into server error logs. The capturing group preserves the scheme.
+  out = out.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/]+@/gi, "$1***@");
  // Secret-bearing key=value pairs in URLs / bodies / headers.
   out = out.replace(
-    /(password|passwd|token|secret|api[_-]?key|access[_-]?token|authorization|authorisation)=[^&\s"'<>]+/gi,
+    /(password|passwd|token|secret|api[_-]?key|access[_-]?token|authorization|authorisation|private[_-]?key|passphrase|cvv|otp|ssn|pin)=[^&\s"'<>]+/gi,
     "$1=***",
   );
- // JSON-shaped secrets: `"password": "secret"` / `"api_key": "..."`.
+ // JSON-shaped secrets: `"password": "secret"` / `"api_key": "..."`. A value
+  // shaped like `Bearer <token>` / `Basic <b64>` keeps its scheme word so the
+  // redacted form (`"Bearer ***"`) still signals the auth scheme without
+  // leaking the secret.
   out = out.replace(
-    /"(password|passwd|token|secret|api[_-]?key|access[_-]?token|authorization|authorisation)"\s*:\s*"[^"]*"/gi,
-    '"$1":"***"',
+    /"(password|passwd|token|secret|api[_-]?key|access[_-]?token|authorization|authorisation|private[_-]?key|passphrase|cvv|otp|ssn|pin)"\s*:\s*"([^"]*)"/gi,
+    (_m, key: string, val: string) => {
+      const scheme = /^(Bearer|Basic)\s+[A-Za-z0-9._-]+$/i.exec(val);
+      const inner = scheme ? `${scheme[1].trim()} ***` : "***";
+      return `"${key}":"${inner}"`;
+    },
   );
  // Bearer tokens.
   out = out.replace(/Bearer\s+[A-Za-z0-9._-]+/g, "Bearer ***");
+ // HTTP Basic credentials: `Authorization: Basic <base64>` (colon-space, no `=`).
+ // Short base64 (e.g. `dXNlcjpwA==`, ~11 chars) escapes the 20+ entropy
+ // fallback, so it is masked explicitly here.
+  out = out.replace(/Basic\s+[A-Za-z0-9+/=]+/g, "Basic ***");
+ // Well-known standalone credential literals that show up in logs without a
+ // key=/Bearer prefix: Groq (gsk-), Slack (xox[baprs]-), AWS (AKIA…), plus
+ // OpenAI/Anthropic keys, Google API keys, and JWTs.
+  out = out.replace(
+    /\b(gsk-[A-Za-z0-9_-]+|xox[baprs]-[A-Za-z0-9-]+|AKIA[0-9A-Z]{16}|sk-ant-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|glpat-[A-Za-z0-9_-]{20})\b/g,
+    "***",
+  );
  // The configured token value itself (avoid echoing the real secret).
   const configured = process.env.COWORK_EVENT_TOKEN;
   if (configured && configured.length > 0 && configured !== "dev-token") {
@@ -475,6 +658,15 @@ export function redactSecrets(text: string): string {
   if (uiToken && uiToken.length > 0 && uiToken !== "dev-token") {
     out = out.split(uiToken).join("***");
   }
+  // Additive, bounded fallback for bare high-entropy scalars (no key=/Bearer/
+  // provider-literal prefix) that would otherwise reach server error logs
+  // unredacted — the EchoLeak-class gap. The alphabet deliberately EXCLUDES `/`
+  // so a benign URL path such as `3000/api/cowork/tabs` is never mistaken for a
+  // secret.
+  out = out.replace(
+    /(?<![A-Za-z0-9+_-])[A-Za-z0-9+_-]{20,}(?![A-Za-z0-9+_-])(?!"\s*:)/g,
+    "***",
+  );
   return out;
 }
 
@@ -539,4 +731,30 @@ export async function withRouteError(
  // Fail-closed: internal errors never reach the client as raw text.
     return json({ error: 'internal_error', correlationId }, 500);
   }
+}
+
+/**
+ * Record a browsing-history visit, upserting on `url`. `HistoryEntry.url` is
+ * `@unique`, so a revisit MUST call `upsert` (not a raw `create`) or it throws
+ * P2002. This is the single shared write path the history route and the
+ * extension sync must use, so the P2002 regression can be guarded in one place.
+ */
+export async function upsertHistoryEntry(
+  prisma: {
+    historyEntry: {
+      upsert: (args: Prisma.HistoryEntryUpsertArgs) => Promise<unknown>;
+    };
+  },
+  url: string,
+  title: string,
+): Promise<unknown> {
+  return prisma.historyEntry.upsert({
+    where: { url },
+    create: { url, title },
+    update: {
+      title,
+      visitCount: { increment: 1 },
+      lastVisitedAt: new Date(),
+    },
+  });
 }

@@ -7,7 +7,7 @@
  * while non-sensitive attributes are returned verbatim.
  */
 
-import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from "vitest";
 import { handleFindElements } from "../src/lib/agent/tools/handlers/find-elements";
 import type { ActionContext } from "../src/lib/agent/tools/handlers/types";
 import { setSecret, deleteSecret } from "../src/lib/agent/secrets";
@@ -116,5 +116,51 @@ describe("find_elements sensitive-attribute redaction", () => {
       max_results: 50,
     });
     expect(res.extractedContent).toContain('"data-x":"meta-info"');
+  });
+});
+
+describe("find_elements link:<pseudo> locator", () => {
+  test("rewrites link:<pseudo> to a:<pseudo> so anchors are queried, not <link>", async () => {
+    const spy = vi.spyOn(document, "querySelectorAll");
+    try {
+      const res = await handleFindElements(DUMMY_CTX, {
+        type: "find_elements",
+        selector: "link:hover",
+        max_results: 50,
+      });
+      expect(spy).toHaveBeenCalledWith("a:hover");
+      expect(res.success).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("still uses link text for plain link locators (not diverted to CSS)", async () => {
+    document.body.innerHTML = `<a id="login" href="#login">Log in</a>`;
+    const res = await handleFindElements(DUMMY_CTX, {
+      type: "find_elements",
+      selector: "link:Log in",
+      max_results: 50,
+    });
+    expect(res.success).toBe(true);
+    expect(res.extractedContent).toContain("<a>");
+  });
+});
+
+describe("find_elements max_results truncation", () => {
+  test("caps returned element rows at max_results (token-safety bound)", async () => {
+    document.body.innerHTML = `
+      <div>a</div><div>b</div><div>c</div><div>d</div><div>e</div>
+    `;
+    const res = await handleFindElements(DUMMY_CTX, {
+      type: "find_elements",
+      selector: "div",
+      max_results: 2,
+    });
+    expect(res.success).toBe(true);
+    const rows = (res.extractedContent ?? "")
+      .split("\n")
+      .filter((l) => /^\d+:\s*</.test(l));
+    expect(rows).toHaveLength(2);
   });
 });

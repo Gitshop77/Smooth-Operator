@@ -122,7 +122,8 @@ export async function renderSchedule(): Promise<void> {
     const enableBtn = item.querySelector("button.toggle-enable") as HTMLButtonElement;
     const delBtn = item.querySelector("button.schedule-delete") as HTMLButtonElement;
     delBtn.addEventListener("click", async () => {
-      await withTaskMutation(async () => {
+      try {
+        await withTaskMutation(async () => {
  // Re-read the freshest list INSIDE the lock so two rapid deletes can't
  // each overwrite the other's write (task-resurrection race, finding
  // #10). Removing by id (not by a stale render snapshot) is safe even if
@@ -147,8 +148,16 @@ export async function renderSchedule(): Promise<void> {
         }
  // `maybeReleaseKeepAwake` internally checks whether any enabled task
  // remains armed before releasing the OS power lock.
-        void maybeReleaseKeepAwake();
+        maybeReleaseKeepAwake().catch((err) =>
+          console.warn("[options] keep-awake release failed:", err),
+        );
       });
+      } catch (err) {
+        await alertModal({
+          title: "Delete failed",
+          message: `Could not delete scheduled task: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
       await renderSchedule().catch((err) => console.warn("[options] renderSchedule failed:", err));
     });
     enableBtn.addEventListener("click", async () => {

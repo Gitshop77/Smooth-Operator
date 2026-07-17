@@ -13,32 +13,12 @@
 import { $ } from "@/extension/shared";
 import type { DownloadProgress, StatusCallback, VisionStatus } from "../vision-assistant";
 import {
+  ALL_MODEL_FILE_URLS,
   CACHE_NAME,
-  VISION_GRAPH_URL,
-  VISION_DATA_URL,
-  LANGUAGE_GRAPH_URL,
-  LANGUAGE_DATA_URL,
-  EMBED_PACKED_URL,
-  EMBED_SCALES_URL,
-  EMBED_META_URL,
+  MODEL_DOWNLOAD_SIZE_LABEL,
 } from "../vision-assistant";
 import { STATUS_DISPLAY } from "./status";
 import { confirmModal } from "./modal";
-
-/**
- * The 7 model artifacts that make up the Local Vision model. Mirrors the
- * private `ALL_FILES` set in `model-loader.ts`; kept in sync so the options
- * page can probe Cache Storage without triggering a download.
- */
-const MODEL_FILE_URLS = [
-  VISION_GRAPH_URL,
-  VISION_DATA_URL,
-  LANGUAGE_GRAPH_URL,
-  LANGUAGE_DATA_URL,
-  EMBED_PACKED_URL,
-  EMBED_SCALES_URL,
-  EMBED_META_URL,
-];
 
 /**
  * Probe Cache Storage to see whether the Local Vision model is already cached.
@@ -53,7 +33,7 @@ async function isModelCached(): Promise<boolean> {
   try {
     if (typeof caches === "undefined") return false;
     const cache = await caches.open(CACHE_NAME);
-    const hits = await Promise.all(MODEL_FILE_URLS.map((url) => cache.match(url)));
+    const hits = await Promise.all(ALL_MODEL_FILE_URLS.map((url) => cache.match(url)));
     return hits.every((response) => response !== undefined);
   } catch {
     return false;
@@ -119,6 +99,10 @@ async function ensureVisionAssistant(): Promise<void> {
       if (visionAbortRequested) return;
       updateBadge(status, message);
       updateProgress(status === "downloading");
+      // The unpinned-weights opt-in surfaces a persistent, hard-to-miss banner
+      // (the badge alone flips back to "compiling"/"ready" once the download
+      // finishes, so the console.warn replacement must be durable).
+      if (status === "warning") showUnpinnedWarningBanner();
     };
     va.onStatus(onStatus);
     if (await abortCleanup(va)) return;
@@ -176,7 +160,7 @@ document.querySelectorAll('input[name="visionMode"]').forEach((radio) => {
       const ok = await confirmModal({
         title: "Download Local Vision model",
         message:
-          "This will download a 2.1 GB model for Local Vision (cached for future use). Continue?",
+          `This will download a ${MODEL_DOWNLOAD_SIZE_LABEL} model for Local Vision (cached for future use). Continue?`,
         confirmLabel: "Download",
       });
       if (!ok) {
@@ -194,6 +178,44 @@ document.querySelectorAll('input[name="visionMode"]').forEach((radio) => {
 });
 
 // ─── On page load: if vision mode is enabled, kick off the preview init ─────
+
+/**
+ * Surface a VISIBLE banner when Local Vision is deliberately run with
+ * unverified, unpinned model weights (the `allowUnpinnedWeights()` opt-in
+ * escape hatch in model-loader.ts). The supply-chain guard stays fail-closed
+ * by default — this banner only appears on the deliberate opt-in path, and is
+ * the user-facing counterpart of the console.warn the loader emits. The badge
+ * already reflects the "warning" status; this banner makes it hard to miss.
+ */
+function showUnpinnedWarningBanner(): void {
+  const statusEl = $("localVisionStatus") as HTMLDivElement | null;
+  const fieldset = statusEl?.closest("fieldset") as HTMLElement | null;
+  if (!fieldset) return;
+  if (fieldset.querySelector("#visionUnpinnedWarning")) return; // de-dupe
+  const banner = document.createElement("div");
+  banner.id = "visionUnpinnedWarning";
+  banner.className = "vision-unpinned-warning";
+  banner.setAttribute("role", "alert");
+  // textContent (not innerHTML) — never interpolates untrusted data.
+  banner.textContent =
+    "Local Vision is running with UNVERIFIED, unpinned model weights: no SHA-256 " +
+    "is pinned in MODEL_FILE_HASHES, so the supply-chain guard is deliberately " +
+    "relaxed via the coworkAllowUnpinnedVision opt-in. Pin every hash before shipping.";
+  fieldset.appendChild(banner);
+}
+
+// Cross-context path: the service worker can opt into unpinned weights (agent
+// run with Local Vision) and send a message so an open options/UI surface
+// shows the warning. The in-page callback path already flips the badge to the
+// "warning" status when the download happens inside this page.
+if (typeof chrome !== "undefined" && chrome.runtime?.onMessage?.addListener) {
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg && (msg as { type?: string }).type === "vision-unpinned-warning") {
+      showUnpinnedWarningBanner();
+    }
+    return false;
+  });
+}
 
 (async () => {
   try {

@@ -38,8 +38,8 @@ export interface AnthropicBody {
   max_tokens: number;
   messages: Array<{ role: string; content: unknown }>;
   temperature?: number;
-  system?: Array<{ type: string; text: string; cache_control?: { type: string } }>;
-  tools?: Array<{ name: string; description: string; input_schema: unknown }>;
+  system?: Array<{ type: string; text: string; cache_control?: { type: string; ttl?: "1h" | "30m" } }>;
+  tools?: Array<{ name: string; description: string; input_schema: unknown; cache_control?: { type: string; ttl?: "1h" | "30m" } }>;
   tool_choice?: { type: string; name: string };
   stream: boolean;
 }
@@ -95,7 +95,7 @@ async function fromRequest(request: LLMRequest): Promise<AnthropicBody> {
     body.system = [{
       type: "text",
       text: systemMessages.map((m) => m.content).join("\n\n"),
-      cache_control: { type: "ephemeral" },
+      cache_control: { type: "ephemeral", ttl: "1h" },
     }];
   }
 
@@ -122,7 +122,7 @@ async function fromRequest(request: LLMRequest): Promise<AnthropicBody> {
           : err;
       }
     }
-    body.tools = [{ name: "return_json", description: "Return the structured output as JSON", input_schema: jsonSchema }];
+    body.tools = [{ name: "return_json", description: "Return the structured output as JSON", input_schema: jsonSchema, cache_control: { type: "ephemeral", ttl: "1h" } }];
     body.tool_choice = { type: "tool", name: "return_json" };
   }
 
@@ -132,6 +132,8 @@ async function fromRequest(request: LLMRequest): Promise<AnthropicBody> {
 export interface StreamState {
   content: string;
   toolInput: string;
+  /** Model id captured at stream start so usage attribution survives reduction. */
+  model?: string;
   /** Count of non-JSON SSE frames dropped this stream (see DROPPED_FRAME_WARN_THRESHOLD). */
   dropped?: number;
   usage?: { tokensIn: number; tokensOut: number; model: string; costUsd: number; cachedInputTokens?: number; cachedWriteInputTokens?: number; reasoningTokens?: number };
@@ -141,7 +143,7 @@ export const protocol: Protocol<AnthropicBody, string, { type: string; content?:
   id: ADAPTER,
   body: { from: fromRequest },
   stream: {
-    initial: () => ({ content: "", toolInput: "" }),
+    initial: (request: LLMRequest) => ({ content: "", toolInput: "", model: request.model.id }),
     step: (state: StreamState, frame: string) => {
       const events: Array<{ type: string; content?: string; usage?: StreamState["usage"] }> = [];
  // Parse the frame in an isolated try/catch. Only a JSON *parse* failure is
@@ -228,7 +230,7 @@ export const protocol: Protocol<AnthropicBody, string, { type: string; content?:
  // Extended-thinking reasoning tokens (Anthropic bills these at the
  // `out` rate). Surface them so consumers can attribute think-budget usage.
             reasoningTokens: u.output_tokens_details?.reasoning_tokens ?? prev?.reasoningTokens,
-            model: "",
+            model: state.model ?? "",
             costUsd: 0,
           };
         }
@@ -247,7 +249,7 @@ export const protocol: Protocol<AnthropicBody, string, { type: string; content?:
             cachedInputTokens: prev?.cachedInputTokens ?? 0,
             cachedWriteInputTokens: prev?.cachedWriteInputTokens ?? 0,
             reasoningTokens: data.usage.output_tokens_details?.reasoning_tokens ?? prev?.reasoningTokens,
-            model: "",
+            model: state.model ?? "",
             costUsd: 0,
           };
         }

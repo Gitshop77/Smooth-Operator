@@ -29,6 +29,9 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      major-deps:
+        update-types:
+          - "major"
 
   # Cockpit package — the Next.js dashboard
   - package-ecosystem: "npm"
@@ -51,6 +54,9 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      cockpit-major-deps:
+        update-types:
+          - "major"
 
   # Mini-service package — the cowork-events WebSocket service
   - package-ecosystem: "npm"
@@ -68,6 +74,9 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      events-major-deps:
+        update-types:
+          - "major"
 
   # GitHub Actions — keep action versions current
   - package-ecosystem: "github-actions"

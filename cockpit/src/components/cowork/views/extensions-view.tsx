@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { motion } from "framer-motion";
-import { Puzzle, FileJson } from "lucide-react";
+import { Puzzle, FileJson, AlertCircle, RotateCcw } from "lucide-react";
 
 import { useExtensions } from "@/hooks/use-cowork-query";
 import { Card } from "@/components/ui/card";
@@ -42,7 +42,7 @@ function permissionsOf(manifest: Record<string, unknown>): string[] {
 }
 
 export function ExtensionsView() {
-  const { data, isLoading } = useExtensions();
+  const { data, isLoading, isError, refetch } = useExtensions();
   const [manifestFor, setManifestFor] = React.useState<string | null>(null);
 
   const manifestExt = React.useMemo(
@@ -68,6 +68,17 @@ export function ExtensionsView() {
 
       {isLoading ? (
         <LoadingSkeleton variant="cards" cardCount={5} />
+      ) : isError ? (
+        <EmptyState
+          icon={<AlertCircle className="size-6" />}
+          title="Couldn't load extensions"
+          description="The extensions endpoint returned an error. Try again shortly."
+          action={
+            <Button size="sm" variant="outline" onClick={() => refetch()}>
+              <RotateCcw className="size-3.5 mr-1" /> Retry
+            </Button>
+          }
+        />
       ) : (data?.length ?? 0) === 0 ? (
         <EmptyState
           icon={<Puzzle className="size-6" />}

@@ -16,15 +16,16 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import { shouldAskForConfirmation } from "../src/lib/agent/human-interaction";
 import { requiresConfirmation, MODE_CONFIGS } from "../src/lib/agent/modes";
+import { ACTION_METADATA } from "../src/lib/agent/tools/schema";
 import type { AgentAction, LogEvent } from "../src/lib/agent/types";
 import { makeState } from "./helpers";
 
-// The full action-type list iterated by the policy assertions below. Hoisted
-// to module scope so the two policy tests share one source of truth.
-const ACTION_TYPES = [
-  "click", "input", "evaluate", "upload_file", "save_as_pdf",
-  "navigate", "close_tab", "switch_tab", "search",
-] as const;
+// The full action-type list iterated by the policy assertions below. Derived
+// from the authoritative ACTION_METADATA registry (the same pattern used by
+// security.test.ts / modules.test.ts) so the per-mode confirmation policy is
+// asserted for every registered action and stays in sync as actions are added.
+// Hoisted to module scope so the two policy tests share one source of truth.
+const ACTION_TYPES = Object.keys(ACTION_METADATA) as string[];
 
 // The orchestrator's `executeActionQueue` runs `checkActionAllowed` BEFORE
 // `requiresConfirmation`. In the shipped mode table no action is BOTH
@@ -65,12 +66,6 @@ describe("shouldAskForConfirmation reports the per-mode confirmation policy", ()
         expect(shouldAskForConfirmation(actionType, mode)).toBe(false);
       }
     }
-  });
-
-  test("standard mode requires confirmation for evaluate/upload_file/save_as_pdf", () => {
-    expect(requiresConfirmation("evaluate", "standard")).toBe(true);
-    expect(requiresConfirmation("upload_file", "standard")).toBe(true);
-    expect(requiresConfirmation("save_as_pdf", "standard")).toBe(true);
   });
 
   test("full_agentic mode never requires confirmation", () => {

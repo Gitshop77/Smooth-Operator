@@ -91,6 +91,42 @@ const VISION_PATTERNS: RegExp[] = [
   /\bgrok-2-vision\b/i,
 ];
 
+/**
+ * Name/id patterns for reasoning models. These models reject or ignore the
+ * `temperature` parameter and instead use `max_completion_tokens` for their
+ * thinking budget (e.g. OpenAI o1/o3/o4, xAI grok-4-reasoning). Sending
+ * `temperature` to them can produce an HTTP 400 or silently waste the
+ * parameter, so callers must omit temperature for them.
+ */
+const REASONING_PATTERNS: RegExp[] = [
+  /\bo1\b/i,
+  /\bo1-?mini\b/i,
+  /\bo3\b/i,
+  /\bo3-?mini\b/i,
+  /\bo4\b/i,
+  /\bo4-?mini\b/i,
+  /\bgrok-4-?reasoning\b/i,
+  /\bdeepseek-?reasoner\b/i,
+  /\bclaude-sonnet-5\b/i,
+  /\bclaude-opus-4-8\b/i,
+];
+
+/**
+ * Decide whether `modelId` is a reasoning model given the catalog models for
+ * its provider. Pure (no I/O); `REASONING_PATTERNS` is the final fallback
+ * whenever the catalog gives no conclusive signal (offline catalog, or a
+ * custom OpenAI-compatible endpoint absent from the catalog).
+ */
+export function resolveReasoningSupport(modelId: string, models: CatalogModel[]): boolean {
+  if (models.length > 0) {
+    const reqId = modelId.toLowerCase();
+    const exact = models.find((m) => m.id.toLowerCase() === reqId);
+    if (exact) return exact.reasoning === true;
+  }
+  const name = modelId.toLowerCase();
+  return REASONING_PATTERNS.some((re) => re.test(name));
+}
+
 interface CachedCatalog {
   data: Catalog;
   fetchedAt: number;
@@ -144,6 +180,23 @@ export function isValidCatalog(value: unknown): value is Catalog {
         ) return false;
         if (c.cache_read !== undefined && (typeof c.cache_read !== "number" || c.cache_read < 0)) return false;
         if (c.cache_write !== undefined && (typeof c.cache_write !== "number" || c.cache_write < 0)) return false;
+      }
+ // `attachment` is read as a truthy boolean by `resolveVisionSupport` to gate
+ // whether a `<screenshot>` image is attached to an LLM request; a non-boolean
+ // (e.g. a number like `1`) would coerce to truthy and treat a non-vision model
+ // as vision-capable, provoking a hard provider rejection. `limit.context` is
+ // rendered verbatim by `formatContext`; a non-number, or a context < 1, is
+ // malformed/compromised data that must not reach the picker. Validate both
+ // when present without changing the fallback behaviour for absent fields.
+      if (m.attachment !== undefined && typeof m.attachment !== "boolean") return false;
+      if (m.limit !== undefined) {
+        const lim = m.limit as Record<string, unknown>;
+        if (
+          typeof lim.context !== "number" ||
+          typeof lim.output !== "number" ||
+          lim.context < 1 ||
+          lim.output < 0
+        ) return false;
       }
     }
   }
@@ -425,46 +478,56 @@ export function formatContext(limit?: CatalogModel["limit"]): string {
  * up the catalog entry.
  * @returns `true` if the model supports image inputs, `false` otherwise.
  */
-export async function modelSupportsVision(modelId: string, providerId?: string): Promise<boolean> {
- // Primary: check the catalog's per-model `attachment` field.
-  if (providerId) {
-    try {
-      const models = await getModelsForProvider(providerId);
+/**
+ * Decide whether `modelId` supports vision given the catalog models for its
+ * provider. Pure (no I/O) so the trust-sensitive gating logic — which
+ * decides whether a `<screenshot>` image is attached to an LLM request — is
+ * unit-testable in isolation. The name-based `VISION_PATTERNS` heuristic is
+ * the final fallback whenever the catalog gives no conclusive signal (no
+ * provider models, an offline catalog, or an inconclusive match).
+ */
+export function resolveVisionSupport(modelId: string, models: CatalogModel[]): boolean {
+  if (models.length > 0) {
  // Try exact match first, then substring match (catalog IDs sometimes
  // differ from what the user typed — e.g. "gpt-4o" vs "gpt-4o-2024-08-06").
-      const exact = models.find((m) => m.id.toLowerCase() === modelId.toLowerCase());
+    const reqId = modelId.toLowerCase();
+    const reqBase = reqId.replace(/-?\d{4}-\d{2}-\d{2}$/, "");
+    const exact = models.find((m) => m.id.toLowerCase() === reqId);
  // An EXACT id match is conclusive: trust its `attachment`/`modalities`
  // signals directly (including an explicit `attachment: false`).
-      if (exact) {
+    if (exact) {
  // `attachment: true` means the model accepts file/image attachments.
-        if (exact.attachment) return true;
+      if (exact.attachment) return true;
  // Also check `modalities.input` for "image" — some providers declare
  // it there instead of via `attachment`.
-        if (exact.modalities?.input?.some((m) => m.toLowerCase().includes("image"))) return true;
+      if (exact.modalities?.input?.some((m) => m.toLowerCase().includes("image"))) return true;
  // If the catalog explicitly says `attachment: false`, trust it.
-        if (exact.attachment === false) return false;
-      }
- // Substring matches are ambiguous (e.g. "gpt-4" may match a non-vision
- // base variant before a vision variant, alphabetically). Don't
- // short-circuit on the first such match: if ANY substring match is
- // vision-capable we return true; otherwise we fall through to the
- // name-based heuristic instead of returning false — an inconclusive
- // substring match must not wrongly gate vision input.
-      const substringMatches = models.filter((m) =>
-        m.id.toLowerCase().includes(modelId.toLowerCase())
-      );
-      if (substringMatches.length > 0) {
-        const vision = substringMatches.find(
-          (m) =>
-            m.attachment ||
-            m.modalities?.input?.some((x) => x.toLowerCase().includes("image"))
-        );
-        if (vision) return true;
- // No vision-capable substring match and no conclusive exact match:
- // fall through to the heuristic below (do NOT return false).
-      }
-    } catch {
- // Catalog unavailable (offline, network error) — fall through to heuristic.
+      if (exact.attachment === false) return false;
+    }
+ // Substring matches are ambiguous. Only treat a substring match as
+ // conclusive for vision when the requested id IS that vision model
+ // itself (i.e. the catalog entry is the same model, at most a dated or
+ // versioned suffix of it) — NOT when the requested id merely happens to
+ // be a prefix of a different, longer vision model id (e.g. "gpt-4" is a
+ // prefix of "gpt-4-vision-preview", which would wrongly attach a
+ // screenshot to a non-vision base model and hard-fail the call). When
+ // the match is inconclusive, fall through to the name-based heuristic
+ // below instead of returning true — an inconclusive substring match must
+ // not wrongly gate vision input.
+    const substringMatches = models.filter((m) => m.id.toLowerCase().includes(reqId));
+    if (substringMatches.length > 0) {
+      const vision = substringMatches.find((m) => {
+        const id = m.id.toLowerCase();
+        const isVision =
+          m.attachment ||
+          m.modalities?.input?.some((x) => x.toLowerCase().includes("image"));
+        if (!isVision) return false;
+ // Conclusive only if the catalog id is the requested model (possibly a
+ // dated/versioned variant), not a longer id that merely contains it.
+        const idBase = id.replace(/-?\d{4}-\d{2}-\d{2}$/, "");
+        return id === reqId || idBase === reqBase;
+      });
+      if (vision) return true;
     }
   }
 
@@ -475,6 +538,32 @@ export async function modelSupportsVision(modelId: string, providerId?: string):
  // why `includes` was replaced).
   const name = modelId.toLowerCase();
   return VISION_PATTERNS.some((re) => re.test(name));
+}
+
+export async function modelSupportsVision(modelId: string, providerId?: string): Promise<boolean> {
+ // Primary: check the catalog's per-model `attachment` field.
+  if (providerId) {
+    try {
+      const models = await getModelsForProvider(providerId);
+      return resolveVisionSupport(modelId, models);
+    } catch {
+ // Catalog unavailable (offline, network error) — fall through to heuristic.
+    }
+  }
+  return resolveVisionSupport(modelId, []);
+}
+
+export async function modelSupportsReasoning(modelId: string, providerId?: string): Promise<boolean> {
+ // Primary: check the catalog's per-model `reasoning` field.
+  if (providerId) {
+    try {
+      const models = await getModelsForProvider(providerId);
+      return resolveReasoningSupport(modelId, models);
+    } catch {
+ // Catalog unavailable (offline, network error) — fall through to heuristic.
+    }
+  }
+  return resolveReasoningSupport(modelId, []);
 }
 
 /**

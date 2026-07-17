@@ -19,7 +19,7 @@ export type ErrorCategory =
   | "max_steps"     // reached max steps. FATAL.
   | "max_failures"  // too many consecutive failures. FATAL.
   | "programmer_error" // TypeError / ReferenceError / SyntaxError — FATAL (a bug).
-  | "unknown";      // anything else. TRANSIENT (retry once).
+  | "unknown";      // anything else. Bounded retry (at most once); repeats are fatal.
 
 /** Classified error with category + retry guidance. */
 export interface ClassifiedError {
@@ -84,8 +84,14 @@ const FIVE_XX_RE = /\b5\d\d\b/;
  * than as cancelled (non-retryable but non-fatal). Status-code matching uses
  * word-boundary regexes (e.g. `\b401\b`) so messages like "error 40123" don't
  * false-positive on the 401 check.
+ *
+ * The optional `attempt` argument is the number of prior consecutive failures
+ * already seen for this run. It is used only to bound "unknown" retries: the
+ * first unfamiliar error is retried once, but a repeated one is treated as
+ * fatal so a non-transient bug is not retried until `maxFailures` (which would
+ * only waste tokens masking the underlying fault).
  */
-export function classifyError(error: unknown): ClassifiedError {
+export function classifyError(error: unknown, attempt = 0): ClassifiedError {
   const originalMessage = error instanceof Error ? error.message : String(error);
   const lower = toLowerMessage(error);
 
@@ -238,7 +244,14 @@ export function classifyError(error: unknown): ClassifiedError {
     return mk("max_failures", true, false);
   }
 
- // Unknown — retry once.
+ // Unknown — bounded retry. An error that matches no other branch is treated
+ // as transient and retried once (attempt 0). A repeat occurrence (attempt >= 1)
+ // is fatal: a non-transient fault should not be retried indefinitely and burn
+ // tokens while masquerading as "transient". Network/5xx/429/parse keep their
+ // dedicated, always-retryable classifications above.
+  if (attempt >= 1) {
+    return mk("unknown", true, false);
+  }
   return mk("unknown", false, true);
 }
 

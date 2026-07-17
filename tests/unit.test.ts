@@ -10,7 +10,7 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import { extractJson, parseAgentOutput, parsePlannerOutput } from "../src/lib/agent/output-parser";
 import { LoopDetector } from "../src/lib/agent/loop/loop-detector";
-import { estimateCost, refreshPricingFromCatalog } from "../src/lib/agent/llm/pricing";
+import { estimateCost, refreshPricingFromCatalog, CONSERVATIVE_DEFAULT_PRICING } from "../src/lib/agent/llm/pricing";
 import type { Catalog } from "../src/lib/agent/llm/catalog";
 import { describeAction } from "../src/lib/agent/tools/executor";
 import { actionListForPrompt, ACTION_METADATA } from "../src/lib/agent/tools/schema";
@@ -21,9 +21,12 @@ import {
   renderHistoryForSummarization,
   sanitizeCompactedMemory,
 } from "../src/lib/agent/loop/compaction";
-import { extractPlaceholders, substituteSecrets } from "../src/lib/agent/secrets";
+import { extractPlaceholders, substituteSecrets, setSecret, deleteSecret } from "../src/lib/agent/secrets";
 import { evaluateUrl } from "../src/lib/agent/evaluators/url-evaluator";
+import { StringEvaluator } from "../src/lib/agent/evaluators/string-evaluator";
+import { HTMLContentEvaluator } from "../src/lib/agent/evaluators/html-content-evaluator";
 import type { AgentAction, HistoryItem } from "../src/lib/agent/types";
+import { installLocalStorageStub, restoreLocalStorageStub } from "./helpers";
 
 // ─── Output parser ───────────────────────────────────────────────────────────
 
@@ -483,6 +486,26 @@ describe("substituteSecrets", () => {
     const result = await substituteSecrets("hello %unknown_placeholder%");
     expect(result).toBe("hello %unknown_placeholder%");
   });
+
+  // Regression guard for the fail-closed `trusted:false` branch: when a secret
+  // substitution targets an UNTRUSTED sink (navigate URL, evaluate code,
+  // upload filename), the real value must never be injected — the placeholder
+  // is returned verbatim. A regression that ignored `trusted` would substitute
+  // the credential into an attacker-influenced tool arg.
+  test("trusted:false retains the placeholder even when a matching secret exists (fail-closed)", async () => {
+    installLocalStorageStub();
+    try {
+      await setSecret("password", "s3cr3t-real-value");
+      const trusted = await substituteSecrets("navigate to %password%", { trusted: true });
+      const untrusted = await substituteSecrets("navigate to %password%", { trusted: false });
+      expect(trusted).toBe("navigate to s3cr3t-real-value");
+      expect(untrusted).toBe("navigate to %password%");
+      expect(untrusted).not.toContain("s3cr3t-real-value");
+    } finally {
+      await deleteSecret("password");
+      restoreLocalStorageStub();
+    }
+  });
 });
 
 // ─── Compaction ─────────────────────────────────────────────────────────────
@@ -690,7 +713,10 @@ describe("estimateCost", () => {
   });
 
   test("unknown model → returns the conservative default (never free)", () => {
-    expect(estimateCost("some-unknown-model", 1_000_000, 1_000_000)).toBe(40);
+    expect(estimateCost("some-unknown-model", 1_000_000, 1_000_000)).toBeCloseTo(
+      CONSERVATIVE_DEFAULT_PRICING.in + CONSERVATIVE_DEFAULT_PRICING.out,
+      6,
+    );
   });
 
   test("zero tokens → returns 0", () => {
@@ -937,6 +963,83 @@ describe("evaluateUrl — lookalike-domain bypass", () => {
       referenceUrl: "https://example.com",
     });
     expect(result.score).toBe(0);
+  });
+});
+
+// ─── StringEvaluator — regex fail-closed gate ─────────────────────────────
+//
+// A regex reference of "" (or whitespace-only) compiles to `new RegExp("")`,
+// which matches ANY subject. The evaluator must fail CLOSED (score 0) so a
+// degenerate/mis-authored pattern can never silently grade a task complete.
+
+describe("StringEvaluator — regex fail-closed on empty/whitespace pattern", () => {
+  test("scores 0 for an empty regex reference", () => {
+    const result = new StringEvaluator().evaluate({
+      prediction: "anything at all",
+      referenceAnswers: [{ type: "regex", ref: "" }],
+    });
+    expect(result.score).toBe(0);
+  });
+
+  test("scores 0 for a whitespace-only regex reference", () => {
+    const result = new StringEvaluator().evaluate({
+      prediction: "anything at all",
+      referenceAnswers: [{ type: "regex", ref: "   " }],
+    });
+    expect(result.score).toBe(0);
+  });
+
+  test("scores 1 for a valid matching regex reference (sanity)", () => {
+    const result = new StringEvaluator().evaluate({
+      prediction: "hello world",
+      referenceAnswers: [{ type: "regex", ref: "^hello" }],
+    });
+    expect(result.score).toBe(1);
+  });
+});
+
+// ─── HTMLContentEvaluator — fail-closed gates ─────────────────────────────
+//
+// Two fail-closed guards: an empty target list (nothing was graded) and an
+// extraction-warned target (undextractable locator). Both must score 0 so a
+// broken selector / degenerate spec such as `exact_match: ""` cannot masquerade
+// as a pass. The extraction-warning gate is opt-out via
+// `failOpenOnExtractionWarning`.
+
+describe("HTMLContentEvaluator — fail-closed gates", () => {
+  test("scores 0 for an empty target list", async () => {
+    const result = await new HTMLContentEvaluator().evaluate({
+      pageHtml: "<html></html>",
+      targets: [],
+    });
+    expect(result.score).toBe(0);
+  });
+
+  test("scores 0 for an extraction-warned target with exact_match:'' (fail closed)", async () => {
+    const result = await new HTMLContentEvaluator().evaluate({
+      pageHtml: "<html></html>",
+      targets: [
+        {
+          locator: "document.querySelector('a')",
+          required_contents: { exact_match: "" },
+        },
+      ],
+    });
+    expect(result.score).toBe(0);
+  });
+
+  test("scores 1 for the same warned target only when failOpenOnExtractionWarning is set", async () => {
+    const result = await new HTMLContentEvaluator().evaluate({
+      pageHtml: "<html></html>",
+      failOpenOnExtractionWarning: true,
+      targets: [
+        {
+          locator: "document.querySelector('a')",
+          required_contents: { exact_match: "" },
+        },
+      ],
+    });
+    expect(result.score).toBe(1);
   });
 });
 

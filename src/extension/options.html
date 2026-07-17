@@ -146,6 +146,15 @@
             <input type="checkbox" id="enableScreenshots" checked />
             <span>Enable screenshots for vision models</span>
           </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="enableStealth" />
+            <span>
+              Enable MAIN-world stealth patches (anti-detection) —
+              <strong>off by default</strong>. Circumventing bot-detection may
+              violate a site's Terms of Service. Enable only for sites you are
+              authorized to automate.
+            </span>
+          </label>
         </details>
       </section>
 
@@ -157,7 +166,7 @@
         </div>
         <div class="secret-add">
           <input type="text" id="secretName" placeholder="name (e.g. email)" autocomplete="off" />
-          <input type="password" id="secretValue" placeholder="value" />
+          <input type="password" id="secretValue" placeholder="value" autocomplete="off" />
           <button type="button" id="addSecret" class="btn btn-ghost">Add</button>
         </div>
         <div id="secretsList"></div>
@@ -302,7 +311,7 @@
           <h2 class="view-title">About</h2>
           <p class="view-subtitle">Open-source agentic browser control.</p>
         </div>
-        <p><strong>Open Cowork v<span id="aboutVersion">0.3.1</span></strong> — bring your own LLM key. Your task data is sent only to the provider you choose.</p>
+        <p><strong>Open Cowork v<span id="aboutVersion"></span></strong> — bring your own LLM key. Your task data is sent only to the provider you choose.</p>
         <h3>Features</h3>
         <ul>
           <li>32 actions (click, input, select, scroll, navigate, evaluate, …)</li>
@@ -319,11 +328,20 @@
         </ul>
         <h3>Links</h3>
         <p>
-          <a href="https://github.com/wasd/open-cowork" target="_blank" rel="noopener noreferrer">GitHub</a> ·
-          <a href="https://github.com/wasd/open-cowork/issues" target="_blank" rel="noopener noreferrer">Report an issue</a>
+          <a href="https://github.com/Gitshop77/open-cowork-chrome-extension" target="_blank" rel="noopener noreferrer">GitHub</a> ·
+          <a href="https://github.com/Gitshop77/open-cowork-chrome-extension/issues" target="_blank" rel="noopener noreferrer">Report an issue</a>
         </p>
         <h3>License</h3>
         <p>Open-source under the MIT license.</p>
+        <p>This build also bundles third-party components under Apache-2.0 (HuggingFace Transformers) and MIT (onnxruntime-web); their license texts ship alongside this extension as LICENSE-APACHE and LICENSE-MIT.</p>
+        <h3>Permissions &amp; privacy</h3>
+        <p>This extension requests powerful permissions so it can act on whatever page you point it at:</p>
+        <ul>
+          <li><code>debugger</code> — can attach to any open tab (including incognito), read its DOM, and synthesize input as if you were clicking and typing.</li>
+          <li><code>scripting</code> — injects scripts to drive page automation.</li>
+          <li><code>tabs</code> + universal host access — read access to any origin the assistant operates on.</li>
+        </ul>
+        <p>For sensitive or authenticated sites, prefer a restricted host-permission scope rather than granting universal access.</p>
       </section>
 
       <div class="actions">

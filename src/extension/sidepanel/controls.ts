@@ -98,6 +98,18 @@ modelSwitchBtn?.addEventListener("click", () => {
   const newModel = modelSwitchInput?.value.trim();
   if (!newModel) return;
   chrome.storage.local.set({ model: newModel }, () => {
+    if (chrome.runtime.lastError) {
+      addLogRow(
+        {
+          type: "error",
+          step: 0,
+          message: `Model switch failed: ${chrome.runtime.lastError.message || "storage unavailable"}`,
+          recoverable: true,
+        },
+        ""
+      );
+      return;
+    }
     addLogRow({ type: "info", message: `Switched model to ${newModel} — takes effect next step.` }, "");
     if (modelSwitchInput) modelSwitchInput.value = "";
   });
@@ -190,6 +202,11 @@ stopBtn.addEventListener("click", () => {
       );
       clearTimeout(stopDebounceTimer ?? undefined);
       stopDebounceTimer = null;
+ // A sendMessage lastError for a message with a registered SW listener means
+ // the service worker is gone, so the run is actually dead. Reset to idle so
+ // the panel is usable (runBtn re-enabled, liveDot cleared) instead of being
+ // wedged in the 'running' state until reload.
+      setRunning(false);
       return;
     }
     addLogRow({ type: "info", message: "Stopping after current step…" }, "");

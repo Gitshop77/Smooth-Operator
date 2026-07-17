@@ -148,7 +148,8 @@ export async function runPlanner(
   deps: LoopDeps,
   args: PlannerCallArgs,
   dispatcher?: CallbackDispatcher,
-  ctx?: CallbackContext
+  ctx?: CallbackContext,
+  signal?: AbortSignal
 ): Promise<PlannerOutput> {
   const plannerRequest: PlannerStepRequest = {
     task: args.task,
@@ -159,6 +160,7 @@ export async function runPlanner(
     tabs: args.tabs,
     step: args.step,
     maxSteps: args.maxSteps,
+    compactedMemory: args.compactedMemory,
   };
   if (dispatcher && ctx) await dispatcher.llmStart(ctx, [plannerRequest]);
  // finally block guarantees `llmEnd` fires on every path after `llmStart`
@@ -168,7 +170,7 @@ export async function runPlanner(
   let usage: LLMUsageInfo | undefined;
   let raw = "";
   try {
-    const result = await deps.plannerCall(plannerRequest);
+    const result = await deps.plannerCall(plannerRequest, signal);
     raw = result.raw;
     const { tokensIn, tokensOut, reasoningTokens, cachedInputTokens, model, costUsd: precomputedCost } = result;
  // Read cache-write (creation) tokens when the caller threads them through.
@@ -219,7 +221,8 @@ export async function callNavigatorWithRetry(
   step: number,
   onCost: (usd: number, tokensIn?: number, tokensOut?: number) => void,
   dispatcher?: CallbackDispatcher,
-  ctx?: CallbackContext
+  ctx?: CallbackContext,
+  signal?: AbortSignal
 ): Promise<AgentOutput> {
   if (dispatcher && ctx) await dispatcher.llmStart(ctx, [navRequest]);
  // finally block guarantees `llmEnd` fires on every path after `llmStart`
@@ -249,7 +252,7 @@ export async function callNavigatorWithRetry(
   try {
     let lastError: string | undefined;
     for (let retry = 0; retry <= MAX_PARSE_RETRIES; retry++) {
-      const navResult = await deps.navigatorCall(request);
+      const navResult = await deps.navigatorCall(request, signal);
       const { raw, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, model, costUsd: precomputedCost } = navResult;
  // Read cache-write (creation) tokens when the caller threads them through
  // (billed at the higher cache-write rate; omitted, it under-reports
@@ -274,6 +277,7 @@ export async function callNavigatorWithRetry(
         usage = u;
       }
       lastUsage = usage;
+      if (usage) attemptUsages.push(usage);
       const parsed = parseAgentOutput(raw);
       if (parsed.ok && parsed.output) {
         if (dispatcher && ctx) {

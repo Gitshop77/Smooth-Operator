@@ -69,12 +69,6 @@
   --color-log-err: var(--log-err);
   --color-log-info: var(--log-info);
   --color-log-cost: var(--log-cost);
-
-  /* Signal Indigo radii as utilities: rounded-r / rounded-r-sm / rounded-r-lg / rounded-r-xl */
-  --radius-r: var(--r);
-  --radius-r-sm: var(--r-sm);
-  --radius-r-lg: var(--r-lg);
-  --radius-r-xl: var(--r-xl);
 }
 
 /* ─── Light palette (Signal Indigo) ───────────────────────────────────────── */
@@ -320,7 +314,6 @@
   }
   .cowork-glow {
     animation: none;
-    box-shadow: none;
   }
   *,
   *::before,

@@ -141,9 +141,9 @@ export function installViewportMock(values: {
   scrollHeight: number;
   scrollY: number;
 }): void {
-  viewportOriginals.innerHeight = window.innerHeight;
-  viewportOriginals.scrollHeight = document.documentElement.scrollHeight;
-  viewportOriginals.scrollY = window.scrollY;
+  if (viewportOriginals.innerHeight === undefined) viewportOriginals.innerHeight = window.innerHeight;
+  if (viewportOriginals.scrollHeight === undefined) viewportOriginals.scrollHeight = document.documentElement.scrollHeight;
+  if (viewportOriginals.scrollY === undefined) viewportOriginals.scrollY = window.scrollY;
   Object.defineProperty(window, "innerHeight", {
     configurable: true,
     writable: true,

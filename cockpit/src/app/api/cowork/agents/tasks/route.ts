@@ -1,6 +1,6 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
-import { json, withRouteError, parseLimit, badRequest, parseAgentId } from '@/lib/cowork/api/http';
+import { json, withRouteError, parseLimit, badRequest, parseAgentId, sanitizeRequestId } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
 // Mirrors the closed `status` enum documented on the `Task` model in
@@ -36,11 +36,8 @@ export async function GET(req: NextRequest): Promise<Response> {
         `Invalid status "${status}"; allowed values: ${ALLOWED_TASK_STATUSES.join(', ')}`,
       );
     }
- // AND-combine filters so `?status=running&agentId=agent-7`
- // returns tasks for agent-7 that are running (previously the exclusive
- // if/else if silently dropped `agentId` whenever `status` was present).
- // Building the `where` object conditionally keeps the empty-object case
- // (no filters) equivalent to `findMany({})` — same as the prior fallback.
+ // AND-combine filters so `?status=running&agentId=agent-7` returns running
+ // tasks for agent-7. An empty `where` (no filters) is equivalent to `findMany({})`.
     const where: { status?: TaskStatus; agentId?: string } = {};
     if (status) where.status = status as TaskStatus;
     if (agentId) where.agentId = agentId;
@@ -50,5 +47,5 @@ export async function GET(req: NextRequest): Promise<Response> {
       take: limit,
     });
     return json({ tasks });
-  });
+  }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
 }

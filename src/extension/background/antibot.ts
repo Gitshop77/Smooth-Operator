@@ -1,16 +1,12 @@
 /**
- * background/antibot.ts — anti-bot hook factory extracted from
- * `run-helpers.ts`.
+ * background/antibot.ts — anti-bot hook factory.
  *
- * The actual challenge detection / resolution logic lives in
- * `@/lib/agent/anti-bot`. This module only assembles the two orchestrator
- * callbacks that wire that logic to the CURRENT run's tab (read from
- * chrome.storage RunState via `getRunState`). It references NO module-local
- * state from `run-helpers.ts` — only external imports + `chrome.*` — so it
- * is safe to isolate. The signatures match `LoopDeps` exactly so the spread
- * into `buildLoopDeps`' return object is behavior-identical.
+ * The challenge detection / resolution logic lives in `@/lib/agent/anti-bot`.
+ * This module assembles the two orchestrator callbacks that wire that logic to
+ * the current run's tab (read from chrome.storage RunState via `getRunState`).
  */
 import { getRunState } from "./state-store";
+import { consumeRecentRateLimit } from "./rate-limit-tracker";
 import {
   detectChallengeResult,
   waitForChallengeResolution,
@@ -48,8 +44,7 @@ async function getActiveTabId(): Promise<number | null> {
  * to `runAgentLoop` by `buildLoopDeps`. Each reads the active run's current
  * tab id from RunState and delegates to the corresponding `anti-bot` helper.
  *
- * Both hooks are best-effort — they never throw (matching the inline behavior
- * that previously lived in `run-helpers.ts`) — but they distinguish a
+ * Both hooks are best-effort — they never throw — but they distinguish a
  * *failed* detection from a genuine "no challenge" so the orchestrator can
  * pause/retry on an unverified page instead of proceeding blindly.
  */
@@ -66,6 +61,17 @@ export function makeAntiBotHooks(): {
     detectChallenge: async () => {
       const tabId = await getActiveTabId();
       if (tabId === null) return null;
+ // Network-authoritative rate-limit signal (a real 429/503 main-frame
+ // response recorded by the webRequest listener). This is the ONLY source
+ // for a rate-limit — the DOM detector deliberately refuses to derive it
+ // from attacker-settable page content. Checked first so a throttled page is
+ // surfaced before the agent burns another step against it.
+      if (consumeRecentRateLimit(tabId)) {
+        return {
+          kind: "rate-limited",
+          message: "Server returned HTTP 429/503 (rate limited).",
+        };
+      }
  // Use `detectChallengeResult` (not the collapsed `detectChallenge`) so the
  // "error" outcome — a failed injection (tab closed, chrome:// URL, CSP, a
  // racing navigation) — is NOT treated as "all clear". We surface it as a

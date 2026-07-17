@@ -22,7 +22,12 @@ import { assertSafeUserBaseURL } from "./openai-compatible-profile";
 
 export const id = "google";
 
-export type Config = { baseURL?: string } & ProviderAuthOption<"optional">;
+export type Config = {
+  baseURL?: string;
+  // When true (user-configured provenance) the curated-local-provider loopback
+  // exemption is honored; otherwise loopback / RFC1918 / ULA are rejected.
+  allowLocalExemption?: boolean;
+} & ProviderAuthOption<"optional">;
 
 const auth = (options: ProviderAuthOption<"optional">) => {
   if ("auth" in options && options.auth) return options.auth;
@@ -36,8 +41,10 @@ const auth = (options: ProviderAuthOption<"optional">) => {
 export function configure(input: Config = {}) {
  // (SSRF guard): validate any user-supplied baseURL override before
  // building the route/endpoint. The trusted default (Gemini.ENDPOINT) is
- // exempt — only untrusted, user-controlled input is checked.
-  assertSafeUserBaseURL(input.baseURL, id);
+ // exempt — only untrusted, user-controlled input is checked. Forward the
+ // user-provenance exemption flag so the curated-local-origin exemption applies
+ // only for a user-configured baseURL.
+  assertSafeUserBaseURL(input.baseURL, id, input.allowLocalExemption);
   const baseURL = input.baseURL ?? Gemini.ENDPOINT;
  // These depend only on the fixed `baseURL`/`input` captured by `configure`,
  // so compute them once instead of re-parsing the URL and rebuilding the auth

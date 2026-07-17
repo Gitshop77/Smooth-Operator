@@ -10,8 +10,22 @@ import type { Action } from "../schema";
 import { highlightElement } from "../../dom/overlay";
 import { NoSuchElementException, ElementNotSelectableError } from "../../errors";
 import { TIMINGS, sleep } from "../constants";
-import { resolveElement, safeScrollIntoView, Select } from "../helpers";
+import { domFingerprint, resolveElement, safeScrollIntoView, Select } from "../helpers";
 import type { ActionContext } from "./types";
+
+// Control characters stripped from page-derived option text before it is
+// reflected into result/error messages, so untrusted DOM labels can't forge
+// log lines or inject fake history entries (mirrors sibling handlers).
+const CONTROL_CHARS_RE = /[\u0000-\u001F\u007F\u0085\u2028\u2029]/g;
+
+// Bound length and strip control characters from page-derived text that is
+// reflected into agent-facing messages. Display-only — selection logic and the
+// CSS-identifier guard are untouched.
+function sanitizeLabel(value: string): string {
+  let v = String(value);
+  if (v.length > 8192) v = v.slice(0, 8192);
+  return v.replace(CONTROL_CHARS_RE, "");
+}
 
 /**
  * Render the first `n` options as a compact `i:label` list for error/help
@@ -22,7 +36,7 @@ import type { ActionContext } from "./types";
 function formatOptionList(opts: Element[], n = 8): string {
   return opts
     .slice(0, n)
-    .map((o, i) => `${i}:${(o.textContent || "").trim() || (o as HTMLOptionElement).value || ""}`)
+    .map((o, i) => `${i}:${sanitizeLabel((o.textContent || "").trim() || (o as HTMLOptionElement).value || "")}`)
     .join(", ");
 }
 
@@ -211,7 +225,7 @@ export async function handleSelectDropdown(
           if (!match) {
             const available = formatOptionList(optionEls);
             throw new Error(
-              `custom-dropdown option "${want}" not found. Available: ${available}`,
+              `custom-dropdown option "${sanitizeLabel(want)}" not found. Available: ${available}`,
             );
           }
         }
@@ -229,11 +243,15 @@ export async function handleSelectDropdown(
         await sleep(TIMINGS.clickScrollIntoView);
         match.click();
         await sleep(TIMINGS.clickAfterSettle);
-        const selectedLabel = (match.textContent || "").trim();
+        const selectedLabel = sanitizeLabel((match.textContent || "").trim());
+        const pageChanged =
+          location.href !== ctx.beforeUrl ||
+          domFingerprint() !== ctx.beforeFingerprint;
         return {
           action,
           success: true,
           message: `Selected "${selectedLabel}" in custom dropdown [${action.index}]`,
+          pageChanged,
         };
       } catch (e) {
         throw new Error(
@@ -253,7 +271,7 @@ export async function handleSelectDropdown(
   // Resolve the displayed label for the selected option, falling back to the
   // supplied value (or an explicit fallback) when the option has no text.
   const labelOf = (opt: HTMLOptionElement | null, fallback: string): string =>
-    opt ? (opt.textContent?.trim() || opt.value) : fallback;
+    opt ? sanitizeLabel(opt.textContent?.trim() || opt.value) : fallback;
   let selectedLabel: string;
   try {
     if (want !== undefined && want !== "") {
@@ -295,9 +313,17 @@ export async function handleSelectDropdown(
     if (e instanceof NoSuchElementException || e instanceof ElementNotSelectableError) {
       const available = formatOptionList(select.getOptions());
       const reason = e instanceof ElementNotSelectableError ? " (option is disabled)" : "";
-      throw new Error(`option "${want ?? action.option_index}" not found${reason}. Available: ${available}`);
+      throw new Error(`option "${want !== undefined ? sanitizeLabel(want) : action.option_index}" not found${reason}. Available: ${available}`);
     }
     throw e;
   }
-  return { action, success: true, message: `Selected "${selectedLabel}" in [${action.index}]` };
+  const pageChanged =
+    location.href !== ctx.beforeUrl ||
+    domFingerprint() !== ctx.beforeFingerprint;
+  return {
+    action,
+    success: true,
+    message: `Selected "${selectedLabel}" in [${action.index}]`,
+    pageChanged,
+  };
 }

@@ -13,7 +13,7 @@
  * files at `{repo}/resolve/main/{path}`, which 302-redirects to the CDN.
  * The bare `/resolve/main` URL 404s in a browser, but appending a file path
  * (e.g. `/onnx/vision_mlp_int4.onnx`) yields a valid download. This is how the
- * model-loader fetches the 2.1 GB of ONNX weights.
+ * model-loader fetches the ~3.4 GB of ONNX weights.
  *
  * The original model is NVIDIA's LocateAnything-3B:
  * https://huggingface.co/nvidia/LocateAnything-3B
@@ -23,7 +23,7 @@ export const MODEL_REPO = "Reza2kn/LocateAnything-3B-ONNX-WebGPU-INT4";
 export const MODEL_REPO_URL = `https://huggingface.co/${MODEL_REPO}`;
 export const MODEL_BASE_URL = `${MODEL_REPO_URL}/resolve/main`;
 
-// Model file URLs (7 files, ~2.1 GB total)
+// Model file URLs (7 files, ~3.4 GB total)
 export const VISION_GRAPH_URL = `${MODEL_BASE_URL}/onnx/vision_mlp_int4.onnx`;
 export const VISION_DATA_URL = `${MODEL_BASE_URL}/onnx/vision_mlp_int4.onnx.data`;
 export const LANGUAGE_GRAPH_URL = `${MODEL_BASE_URL}/onnx/language_tail_kv_int4.onnx`;
@@ -37,10 +37,17 @@ export const EMBED_META_URL = `${MODEL_BASE_URL}/onnx/embed_tokens_int4_meta.jso
 // ---------------------------------------------------------------------------
 // SHA-256 (lowercase hex) of each model file. The model-loader computes the
 // SHA-256 of every downloaded file and refuses to cache it when it does not
-// match the pinned value. Populate these before shipping — until a hash is
-// pinned for a file, the loader emits a security warning but still caches the
-// (unverified) file so the extension keeps working during rollout.
-// To compute a hash: `sha256sum <file>` (or `openssl dgst -sha256 <file>`).
+// match the pinned value. Pin every hash here before shipping — with the
+// default fail-closed posture, a file whose hash is NOT pinned causes
+// `verifyIntegrity` to REFUSE (throw) instead of caching, so Local Vision
+// cannot initialize until all seven are pinned. Two dev-only escape hatches
+// exist while hashes are being rolled out (both default OFF in production):
+//   - env var COWORK_ALLOW_UNPINNED_VISION=1 (where process.env is injected)
+//   - a deliberate user opt-in in chrome.storage.local:
+//     coworkAllowUnpinnedVision === true
+// Setting either makes the loader SKIP (warn) rather than refuse, caching the
+// unverified weight only in dev. To compute a hash: `sha256sum <file>` (or
+// `openssl dgst -sha256 <file>`).
 export const MODEL_FILE_HASHES: Partial<Record<string, string>> = {
  // [VISION_GRAPH_URL]: "0000000000000000000000000000000000000000000000000000000000000000",
  // [VISION_DATA_URL]: "0000000000000000000000000000000000000000000000000000000000000000",
@@ -88,3 +95,8 @@ export const DOWNLOAD_STALL_MS = 30_000;
 
 // Cache Storage key
 export const CACHE_NAME = "locateanything-model";
+
+// Human-readable total download size of the model weights, shown in the UI
+// before a multi-GB download. Single source so the confirm dialog and any
+// other copy cannot drift apart.
+export const MODEL_DOWNLOAD_SIZE_LABEL = "~3.5 GB";

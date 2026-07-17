@@ -2,7 +2,7 @@
 import type { NextRequest } from 'next/server';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { json, withRouteError, bodyJson, badRequest, parseLimit } from '@/lib/cowork/api/http';
+import { json, withRouteError, bodyJson, badRequest, parseLimit, isPrismaRecordNotFound, sanitizeRequestId } from '@/lib/cowork/api/http';
 import { scheduleCronSchema, truncateTo, validateField } from '@/lib/cowork/api/validation';
 import { db } from '@/lib/db';
 
@@ -69,7 +69,7 @@ export async function GET(req: NextRequest): Promise<Response> {
     const last = workflows.length === limit ? workflows[workflows.length - 1] : undefined;
     const nextCursor = last && CURSOR_ID_RE.test(last.id) ? last.id : null;
     return json({ workflows: projected, total, nextCursor });
-  });
+  }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
 }
 
 export async function POST(req: NextRequest): Promise<Response> {
@@ -102,10 +102,8 @@ export async function POST(req: NextRequest): Promise<Response> {
       scheduleCron = cronResult.value;
     }
 
- // Populate the declared `variablesJson` column from the request so the
- // schema/contract no longer drifts (it was previously always NULL for
- // cockpit-created workflows). `variables` is an arbitrary JSON-serializable
- // value; we store its serialized form and bound its size.
+ // Populate the declared `variablesJson` column from the request. `variables`
+ // is an arbitrary JSON-serializable value; store its serialized form, bounded.
     let variablesJson: string | null = null;
     if (body.variables != null) {
       const serialized = JSON.stringify(body.variables);
@@ -126,5 +124,29 @@ export async function POST(req: NextRequest): Promise<Response> {
       },
     });
     return json({ workflow: wf }, 201);
-  });
+  }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
+}
+
+// DELETE /api/cowork/workflows?id=<workflowId>
+// Removes a single workflow row. Gated by the same X-Cowork-Token check as
+// every other /api/cowork/* data route (enforced in middleware.ts). Distinct
+// from the AU-3 `?all=1` confirm:true mass-delete gate; per-id deletes are
+// scoped erasure only.
+export async function DELETE(req: NextRequest): Promise<Response> {
+  return withRouteError(async () => {
+    const id = req.nextUrl.searchParams.get('id');
+    if (!id) return badRequest('id is required');
+    if (!CURSOR_ID_RE.test(id)) return badRequest('invalid id');
+    try {
+      await db.workflow.delete({ where: { id } });
+    } catch (e) {
+      if (isPrismaRecordNotFound(e)) {
+        return json({ error: 'not found' }, 404);
+      }
+      throw e;
+    }
+    const r = json({ ok: true });
+    r.headers.set('Cache-Control', 'no-store, private');
+    return r;
+  }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
 }

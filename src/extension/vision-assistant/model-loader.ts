@@ -1,7 +1,7 @@
 /**
  * Vision Assistant — model loader.
  *
- * Downloads the ~2.1 GB ONNX INT4 model in 48 MB chunks with retry.
+ * Downloads the ~3.4 GB ONNX INT4 model in 48 MB chunks with retry.
  * Caches in the browser Cache Storage API (persists across sessions).
  * Ported from Reza2kn's fetchBufProgress.
  *
@@ -32,6 +32,41 @@ import {
 import type { DownloadProgress } from "./types";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Whether an unpinned model file may be cached without a pinned SHA-256.
+ *
+ * Production must fail closed: shipping with an unpinned hash means the
+ * supply-chain guard only protects the first download, not the cache, so an
+ * unset pin refuses to download unverified weights instead of silently caching
+ * them. Two opt-in escape hatches exist for dev / staged rollout while hashes
+ * are being pinned:
+ *  - `COWORK_ALLOW_UNPINNED_VISION=1` (env var). Works wherever `process.env`
+ *    is injected, but NOT in the MV3 service worker where `process` is
+ *    undefined.
+ *  - an explicit user opt-in in `chrome.storage.local`
+ *    (`coworkAllowUnpinnedVision === true`). This works in the service worker
+ *    and is gated behind a deliberate user action, so production stays
+ *    fail-closed by default.
+ */
+async function allowUnpinnedWeights(): Promise<boolean> {
+  if (
+    typeof process !== "undefined" &&
+    !!process.env &&
+    process.env.COWORK_ALLOW_UNPINNED_VISION === "1"
+  ) {
+    return true;
+  }
+  if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+    try {
+      const stored = await chrome.storage.local.get("coworkAllowUnpinnedVision");
+      if (stored && stored.coworkAllowUnpinnedVision === true) return true;
+    } catch {
+      /* storage unavailable — fall through to the fail-closed default */
+    }
+  }
+  return false;
+}
 
 /** SHA-256 (lowercase hex) of a buffer, via the Web Crypto API. */
 async function sha256(buf: Uint8Array): Promise<string> {
@@ -76,17 +111,26 @@ async function fetchToBuffer(
       timer = setTimeout(() => ctrl.abort(), stallMs);
       const { done, value } = await reader.read();
       if (done) break;
-      chunks.push(value);
-      got += value.length;
- // `maxBytes` caps how much of the body we consume. Used by the probe:
- // if the server IGNORES the Range header and returns the whole multi-GB
- // file, we only keep the first `maxBytes` (the probe chunk) instead of
- // buffering the entire response in memory (finding: probe fetch buffers
- // the entire response even when the server ignores Range).
-      if (maxBytes !== undefined && got >= maxBytes) {
+ // `maxBytes` caps how much of the body we keep in memory. Used by the probe:
+ // if the server IGNORES the Range header and returns the whole (potentially
+ // multi-GB) file in a single read, we must not buffer the entire chunk. Bound
+ // the accumulation to the remaining budget and stop — keeping only the leading
+ // `maxBytes` bytes (or the whole chunk when it already fits) so memory stays
+ // capped rather than buffering the full response.
+      if (maxBytes !== undefined) {
+        const remaining = maxBytes - got;
+        if (remaining <= 0) {
+          try { await reader.cancel(); } catch { /* ignore */ }
+          break;
+        }
+        const keep = value.length > remaining ? value.slice(0, remaining) : value;
+        chunks.push(keep);
+        got += keep.length;
         try { await reader.cancel(); } catch { /* ignore */ }
         break;
       }
+      chunks.push(value);
+      got += value.length;
       if (onProgress && Number.isFinite(cl) && cl > 0) {
         const pct = Math.floor((got / cl) * 100);
         if (pct >= lastPct + 10) {
@@ -272,11 +316,44 @@ const ALL_FILES: Array<{ url: string; name: string }> = [
   { url: EMBED_META_URL, name: "embed meta" },
 ];
 
+/** URL-only view of `ALL_FILES`, for cache probes that don't need names. */
+export const ALL_MODEL_FILE_URLS = ALL_FILES.map((f) => f.url);
+
 /** Header we stamp on every cached Response with the computed SHA-256. */
 const DIGEST_HEADER = "x-model-sha256";
 
 export class ModelLoader {
   private cache: Cache | null = null;
+
+  /**
+   * Best-effort listener for non-fatal security warnings (currently only the
+   * deliberate unpinned-weights opt-in path). This NEVER affects the
+   * fail-closed default — it is purely a user-facing visibility hook so an
+   * operator relaxing the supply-chain guard sees an in-product warning
+   * rather than a silent `console.warn`. Wired by `VisionAssistant` to its
+   * status callback; in the service-worker context a `chrome.runtime`
+   * message is also sent so an open UI surface (options/sidepanel) can show
+   * a banner.
+   */
+  private warningCallback: ((message: string) => void) | null = null;
+
+  onWarning(cb: (message: string) => void): void {
+    this.warningCallback = cb;
+  }
+
+  /** Best-effort cross-context warning (service worker → open UI surface). */
+  private surfaceUnpinnedWarning(name: string, url: string): void {
+    if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) return;
+    try {
+      void chrome.runtime.sendMessage({
+        type: "vision-unpinned-warning",
+        name,
+        url,
+      });
+    } catch {
+      /* No listener in this context — the in-page callback / console.warn covers it. */
+    }
+  }
 
   async init(): Promise<void> {
     this.cache = await caches.open(CACHE_NAME);
@@ -324,7 +401,7 @@ export class ModelLoader {
         throw new Error(
           `[vision-assistant] Failed to persist model file "${name}" (${url}): ` +
             `${(e as Error).message}. Usually caused by insufficient storage ` +
-            `quota (the model is ~2.1 GB). Free space and retry; the downloaded ` +
+            `quota (the model is ~3.4 GB). Free space and retry; the downloaded ` +
             `bytes were not saved.`,
         );
       }
@@ -348,12 +425,26 @@ export class ModelLoader {
   ): Promise<string> {
     const expected = MODEL_FILE_HASHES[url];
     if (!expected) {
-      console.warn(
-        `[vision-assistant] Integrity check SKIPPED for "${name}" (${url}): ` +
-          `no pinned SHA-256 in MODEL_FILE_HASHES. Model weights are unverified ` +
-          `— pin the hash before shipping to guard against tampered weights.`,
+      if (await allowUnpinnedWeights()) {
+        const msg =
+          `[vision-assistant] Integrity check SKIPPED for "${name}" (${url}): ` +
+          `no pinned SHA-256 in MODEL_FILE_HASHES and the unpinned-weights opt-in is ` +
+          `set. Model weights are unverified (dev/rollout only) — pin the hash ` +
+          `before shipping to guard against tampered/poisoned weights.`;
+        console.warn(msg);
+        // Surface a VISIBLE in-product warning (fail-closed default is
+        // preserved; this only fires on the deliberate opt-in path).
+        this.warningCallback?.(msg);
+        this.surfaceUnpinnedWarning(name, url);
+        return await sha256(buf);
+      }
+      throw new Error(
+        `[vision-assistant] Integrity check REFUSED for "${name}" (${url}): ` +
+          `no pinned SHA-256 in MODEL_FILE_HASHES and unpinned weights are not ` +
+          `allowed. Pin every hash before shipping (or set ` +
+          `COWORK_ALLOW_UNPINNED_VISION=1 in dev) so tampered/poisoned weights ` +
+          `are never cached.`,
       );
-      return await sha256(buf);
     }
     const actual = await sha256(buf);
     if (actual !== expected.toLowerCase()) {

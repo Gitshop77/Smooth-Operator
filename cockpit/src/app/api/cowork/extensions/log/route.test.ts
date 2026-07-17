@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-import { POST } from '@/app/api/cowork/extensions/log/route';
+import { POST, GET } from '@/app/api/cowork/extensions/log/route';
 
 function fakeReq(body: unknown): any {
   const payload = new TextEncoder().encode(JSON.stringify(body));
@@ -54,6 +54,17 @@ describe('POST /api/cowork/extensions/log', () => {
     expect(arg.message.length).toBeLessThanOrEqual(4096);
   });
 
+  it('redacts secret-shaped strings before emitting (secret-leak defense)', async () => {
+    const secret =
+      'login password=supersecret123 with Bearer eyJabc.def.ghi and sk-ant-ABCD1234567890EFGHIJKLMN';
+    await POST(fakeReq({ source: 'SW', msg: secret }));
+    const arg = spy.mock.calls[0][1] as { message: string };
+    expect(arg.message).toContain('***');
+    expect(arg.message).not.toContain('password=supersecret123');
+    expect(arg.message).not.toContain('Bearer eyJabc');
+    expect(arg.message).not.toContain('sk-ant-ABCD1234567890EFGHIJKLMN');
+  });
+
   it('handles non-string fields without throwing', async () => {
     const res = await POST(fakeReq({ source: 123, msg: null, stack: { nested: true } }));
     expect(res.status).toBe(200);
@@ -77,5 +88,21 @@ describe('POST /api/cowork/extensions/log', () => {
     const arg = spy.mock.calls[0][1] as { source: string; message: string };
     expect(arg.source).toBe('SW');
     expect(arg.message).toBe('(no message)');
+  });
+});
+
+describe('GET /api/cowork/extensions/log (read-time redaction)', () => {
+  it('re-applies redaction to stored entries before returning them', async () => {
+    const secret = 'Bearer eyJabc.def.ghi token sk-ant-SECRET0123456789ABCDEF';
+    await POST(fakeReq({ source: 'SW', msg: secret }));
+    const res = await GET();
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(Array.isArray(body.logs)).toBe(true);
+    expect(body.logs.length).toBeGreaterThan(0);
+    const last = body.logs[body.logs.length - 1];
+    expect(last.message).toContain('***');
+    expect(last.message).not.toContain('sk-ant-SECRET0123456789ABCDEF');
+    expect(last.message).not.toContain('eyJabc');
   });
 });

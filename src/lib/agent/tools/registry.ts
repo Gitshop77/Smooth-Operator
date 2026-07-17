@@ -20,6 +20,7 @@ import { z } from "zod";
 import type { ZodType } from "zod";
 
 import { isExtensionWithLocal } from "../runtime";
+import { sanitizeUntrusted } from "../security";
 
 // ─── Format instructions (for non-structured-output providers) ───────────────
 //
@@ -150,6 +151,16 @@ export const CUSTOM_TOOL_NAME_REGEX = /^[a-z][a-z0-9_]{0,63}$/;
  * this are dropped on load (see {@link isValidCustomTool}).
  */
 export const MAX_CUSTOM_TOOL_CODE_LENGTH = 256 * 1024;
+
+/**
+ * Upper bound on the *substituted* result of {@link substituteCustomToolCalls}.
+ * Each custom-tool body is capped at {@link MAX_CUSTOM_TOOL_CODE_LENGTH}, but a
+ * single evaluate payload can reference many tools, so the substituted string is
+ * bounded separately at 2x that cap. Beyond this we abort substitution and
+ * return the original (already size-bounded) payload rather than materializing
+ * an unbounded string into the page-side eval.
+ */
+const MAX_SUBSTITUTION_RESULT_LENGTH = 2 * MAX_CUSTOM_TOOL_CODE_LENGTH;
 
 /** Maximum *rendered* length of a tool description in the `<custom_tools>` block. */
 const RENDERED_TOOL_DESCRIPTION_LENGTH = 200;
@@ -315,8 +326,13 @@ export async function formatCustomToolsBlock(): Promise<string> {
   const tools = await loadCustomTools();
   if (tools.length === 0) return "";
  // Sanitize each description — it's untrusted input placed in the trusted
- // system prompt (see {@link sanitizeToolDescription}).
-  const lines = tools.map((t) => `- ${t.name}: ${sanitizeToolDescription(t.description)}`);
+ // system prompt (see {@link sanitizeToolDescription}). `sanitizeUntrusted`
+ // folds homoglyphs + redacts injection-keyword patterns first (defeats a
+ // stored-XSS / malicious-extension `<custom_tools>` description channel), then
+ // `sanitizeToolDescription` strips any residual angle brackets and caps length.
+  const lines = tools.map(
+    (t) => `- ${t.name}: ${sanitizeToolDescription(sanitizeUntrusted(t.description))}`,
+  );
   return (
     "<custom_tools>\n" +
     "The following custom JavaScript tools are available. Use `evaluate` with " +
@@ -368,6 +384,12 @@ export async function substituteCustomToolCalls(
       const sub = byName.get(name);
       if (sub === undefined) return full; // unknown tool — leave for the page.
       changed = true;
+      if (result.length + sub.length > MAX_SUBSTITUTION_RESULT_LENGTH) {
+        // Fan-out would push the substituted string past the safe cap. Bail out
+        // of substitution entirely and hand back the original (size-bounded)
+        // payload rather than materializing an unbounded string for the page eval.
+        return full;
+      }
  // Wrap in an IIFE if the body has statement keywords OR a semicolon
  // (multi-statement or trailing-semicolon expression). Bare expressions
  // (e.g. `document.title`) are parenthesized so their value is returned.
@@ -376,21 +398,21 @@ export async function substituteCustomToolCalls(
  // `(()=>{document.title;})()` is valid (returns undefined, but that's
  // better than crashing).
       const needsIife = /\breturn\b/.test(sub) || /\b(const|let|var|if|for|while|throw|do|switch|try|function|class)\b/.test(sub) || /;/.test(sub);
- // Escape `$` before returning: a function replacer's return value is
- // re-parsed as a replacement string, so any `$&`/`$``/`$'`/`$n`/`$$`
- // sequence inside the user's tool code would be silently reinterpreted.
- // Doubling each `$` (`$` → `$$`) neutralises that interpretation, because
- // the re-parse turns `$$` back into a single `$` (this correctly preserves
- // literal `$1`, `$&`, `$'` etc. that appear in the tool code).
-      const escapedSub = sub.replace(/\$/g, "$$");
+ // A function replacer's return is inserted verbatim — it is NOT re-parsed
+ // for `$` replacement patterns (`$$`/`$&`/`$1`/etc.), so the tool code is
+ // substituted exactly as stored. No `$` escaping may be applied: it would
+ // silently double `$` in the body and corrupt template literals, regex
+ // literals, and `$` literals before the page-side eval runs them.
  // Guard against a trailing single-line `// comment` in the tool body:
  // without a trailing newline, the closing `)` / `})()` would land on the
  // same line and be swallowed by the comment, producing a SyntaxError when
  // the page evals the result. Appending a newline ends any line comment
  // first. (Block comments `/* */` are unaffected.)
-      const body = escapedSub.endsWith("\n") ? escapedSub : escapedSub + "\n";
+      const body = sub.endsWith("\n") ? sub : sub + "\n";
       return needsIife ? `(()=>{${body}})()` : `(${body})`;
     });
   }
+  // Final safety net: never hand an over-cap string to the page-side eval.
+  if (result.length > MAX_SUBSTITUTION_RESULT_LENGTH) return code;
   return result;
 }

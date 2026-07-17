@@ -228,7 +228,7 @@ export async function maybeJudgeAndFinalize(
         tabs: [],
         step,
         maxSteps: 0,
-      });
+      }, state.signal);
       captureJudgeUsage(res);
       return res.raw;
     };

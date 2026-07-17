@@ -16,6 +16,20 @@ dev.log
 
 # credentials
 .z-ai-config
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+id_rsa
+id_rsa.pub
+credentials.json
+service-account*.json
+*credentials*.json
+google-services.json
+firebase-config.json
+*.tfstate
+*.tfstate.backup
 
 # db
 db/

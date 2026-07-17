@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { motion } from "framer-motion";
-import { Wrench, ChevronRight } from "lucide-react";
+import { Wrench, ChevronRight, AlertCircle, RotateCcw } from "lucide-react";
 
 import { useMcpTools } from "@/hooks/use-cowork-query";
 import { Card } from "@/components/ui/card";
@@ -13,10 +13,11 @@ import {
 import { ViewHeader } from "@/components/cowork/shared/view-header";
 import { LoadingSkeleton } from "@/components/cowork/shared/loading-skeleton";
 import { EmptyState } from "@/components/cowork/shared/empty-state";
+import { Button } from "@/components/ui/button";
 import { SearchInput } from "@/components/cowork/shared/search-input";
 
 export function McpToolsView() {
-  const { data, isLoading } = useMcpTools();
+  const { data, isLoading, isError, refetch } = useMcpTools();
   const [filter, setFilter] = React.useState("");
   const [category, setCategory] = React.useState("all");
   const [selected, setSelected] = React.useState<string | null>(null);
@@ -42,7 +43,8 @@ export function McpToolsView() {
     });
   }, [data, filter, category, lowerHaystack]);
 
-  const selectedTool = filtered.find((t) => t.name === selected) ?? filtered[0];
+  const selectedTool =
+    (selected ? (data ?? []).find((t) => t.name === selected) : undefined) ?? filtered[0];
 
   return (
     <div className="space-y-4">
@@ -82,6 +84,17 @@ export function McpToolsView() {
 
       {isLoading ? (
         <LoadingSkeleton rows={8} />
+      ) : isError ? (
+        <EmptyState
+          icon={<AlertCircle className="size-6" />}
+          title="Couldn't load tools"
+          description="The MCP tools endpoint returned an error. Try again shortly."
+          action={
+            <Button size="sm" variant="outline" onClick={() => refetch()}>
+              <RotateCcw className="size-3.5 mr-1" /> Retry
+            </Button>
+          }
+        />
       ) : filtered.length === 0 ? (
         <EmptyState icon={<Wrench className="size-6" />} title="No tools match" description="Try a different search or category." />
       ) : (

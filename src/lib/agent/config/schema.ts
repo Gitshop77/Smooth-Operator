@@ -68,6 +68,18 @@ const StringMatchSchema = z
           path: ["ref"],
         });
       }
+ // Reject backreference patterns (e.g. (a)\1 or (?<n>a)\k<n>). These are not
+ // nested quantifiers, so `hasNestedQuantifier` above does not flag them, but a
+ // backreference against a large page-derived string can still drive
+ // catastrophic backtracking at evaluator runtime (ReDoS). Reject them at the
+ // boundary so the pattern is never compiled-and-run later.
+      if (new RegExp("\\\\" + "[1-9]").test(val.ref) || new RegExp("\\\\k<[^>]+>").test(val.ref)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "regex ref contains a backreference (catastrophic-backtracking risk)",
+          path: ["ref"],
+        });
+      }
     }
   });
 
@@ -160,6 +172,8 @@ const AgentConfigSchema = z.object({
   compactionCharThreshold: z.number().int().min(1000).max(5_000_000).default(30_000),
   /** Optional USD cost cap — aborts the run if exceeded. */
   costCapUsd: z.number().positive().optional(),
+  /** Per-call SLA (ms) for cloud LLM / compaction calls; 0 disables. */
+  llmCallTimeoutMs: z.number().int().min(0).optional(),
   /**
  * Whether to run the judge LLM after the planner reports task success.
  * Optional here (mirrors {@link AgentConfig}) — the orchestrator always merges

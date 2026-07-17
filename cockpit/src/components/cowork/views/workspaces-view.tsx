@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { motion } from "framer-motion";
-import { LayoutGrid } from "lucide-react";
+import { LayoutGrid, AlertCircle } from "lucide-react";
 
 import { useWorkspaces } from "@/hooks/use-cowork-query";
 import { Card } from "@/components/ui/card";
@@ -11,7 +11,7 @@ import { LoadingSkeleton } from "@/components/cowork/shared/loading-skeleton";
 import { EmptyState } from "@/components/cowork/shared/empty-state";
 
 export function WorkspacesView() {
-  const { data, isLoading } = useWorkspaces();
+  const { data, isLoading, isError, error } = useWorkspaces();
   const workspaces = data ?? [];
 
   return (
@@ -24,6 +24,12 @@ export function WorkspacesView() {
 
       {isLoading ? (
         <LoadingSkeleton variant="cards" cardCount={6} />
+      ) : isError ? (
+        <EmptyState
+          icon={<AlertCircle className="size-6" />}
+          title="Couldn't load workspaces"
+          description={error?.message ?? "The workspaces endpoint returned an error. Check that the backend is reachable and NEXT_PUBLIC_COWORK_UI_TOKEN is configured."}
+        />
       ) : workspaces.length === 0 ? (
         <EmptyState
           icon={<LayoutGrid className="size-6" />}

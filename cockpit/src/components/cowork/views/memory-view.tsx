@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { motion } from "framer-motion";
-import { Database, FormInput } from "lucide-react";
+import { Database, FormInput, AlertCircle, RotateCcw } from "lucide-react";
 
 import { useSiteMemory, useFormMemory } from "@/hooks/use-cowork-query";
 import { Card } from "@/components/ui/card";
@@ -10,10 +10,18 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ViewHeader } from "@/components/cowork/shared/view-header";
 import { LoadingSkeleton } from "@/components/cowork/shared/loading-skeleton";
 import { EmptyState } from "@/components/cowork/shared/empty-state";
+import { Button } from "@/components/ui/button";
 import { DataTable } from "@/components/cowork/shared/data-table";
 import { SearchInput } from "@/components/cowork/shared/search-input";
 import { timeAgo } from "@/lib/cowork-data/format";
 import type { SampleSiteMemoryEntry } from "@/lib/cowork-data/types";
+import {
+  SENSITIVE_FIELD,
+  maskValue,
+  looksLikeSecret,
+  parseSiteData,
+  parseFormEntries,
+} from "@/lib/cowork/memory-parse";
 
 // Prisma `SiteMemory` has `domain` + `dataJson` (JSON-encoded `SiteData`).
 // There are no `key`/`value` columns. The filter matches against `domain`
@@ -25,75 +33,12 @@ function matchesJson(domain: string | undefined, lowerJson: string, q: string): 
   return false;
 }
 
-// Form-field names that may carry secrets — their values are masked in the
-// UI so captured passwords/tokens/card numbers are never shown in plaintext.
-const SENSITIVE_FIELD = /pass|pwd|password|secret|cvv|card|ssn|token|otp|pin/i;
-const maskValue = (field: string, value: string): string =>
-  SENSITIVE_FIELD.test(field) ? "••••••" : value;
-
-/**
- * Parse `dataJson` defensively. Returns the parsed object on success,
- * or `null` on parse failure / empty string. Never throws.
- *
- * The Prisma `SiteMemory.dataJson` column holds a JSON-encoded `SiteData`
- * object (visits[], diffs[], stats). We parse the JSON and render a short
- * summary.
- */
-function parseSiteData(e: SampleSiteMemoryEntry): {
-  visitCount: number;
-  diffCount: number;
-  preview: string;
-} {
-  const empty = { visitCount: 0, diffCount: 0, preview: "" };
-  if (typeof e.dataJson !== "string" || e.dataJson.length === 0) return empty;
-  try {
-    const parsed = JSON.parse(e.dataJson) as Record<string, unknown>;
-    const visits = Array.isArray(parsed.visits) ? parsed.visits.length : 0;
-    const diffs = Array.isArray(parsed.diffs) ? parsed.diffs.length : 0;
- // Build a short preview from the JSON itself (capped at 120 chars).
-    const preview = e.dataJson.length > 120
-      ? e.dataJson.slice(0, 120) + "…"
-      : e.dataJson;
-    return { visitCount: visits, diffCount: diffs, preview };
-  } catch {
-    return { ...empty, preview: e.dataJson.slice(0, 120) };
-  }
-}
-
-/**
- * Parse `formDataJson` defensively into a list of `{ field, value }`
- * entries. The Prisma `FormMemory.formDataJson` column holds a JSON-encoded
- * `DomainFormData` object — we look for an `entries` array and fall back to
- * flattening top-level keys. Never throws.
- */
-function parseFormEntries(
-  e: { formDataJson: string },
-): Array<{ field: string; value: string }> {
-  if (typeof e.formDataJson !== "string" || e.formDataJson.length === 0) return [];
-  try {
-    const parsed = JSON.parse(e.formDataJson) as Record<string, unknown>;
- // Preferred shape: { entries: [{ field, value }] }
-    if (Array.isArray(parsed.entries)) {
-      return parsed.entries
-        .filter((x): x is { field: string; value: string } =>
-          x != null && typeof x === "object" &&
-          "field" in x && "value" in x &&
-          typeof (x as { field: unknown }).field === "string" &&
-          typeof (x as { value: unknown }).value === "string")
-        .map((x) => ({ field: x.field, value: x.value }));
-    }
- // Fallback: flatten top-level string keys.
-    return Object.entries(parsed)
-      .filter(([, v]) => typeof v === "string" || typeof v === "number")
-      .map(([k, v]) => ({ field: k, value: String(v) }));
-  } catch {
-    return [];
-  }
-}
+// Secret-masking + form/site parsing helpers now live in
+// `@/lib/cowork/memory-parse` (framework-free, unit-tested there).
 
 export function MemoryView() {
-  const { data: site, isLoading: siteLoading } = useSiteMemory();
-  const { data: form, isLoading: formLoading } = useFormMemory();
+  const { data: site, isLoading: siteLoading, isError: siteError, refetch: refetchSite } = useSiteMemory();
+  const { data: form, isLoading: formLoading, isError: formError, refetch: refetchForm } = useFormMemory();
   const [filter, setFilter] = React.useState("");
 
   const siteSummaries = React.useMemo(
@@ -159,10 +104,14 @@ export function MemoryView() {
  // No parsed entries — show a single row with the raw JSON so the
  // user sees that *something* is stored for this domain. Mask it if
  // it likely contains a secret.
+        const raw = typeof e.formDataJson === "string" ? e.formDataJson : "";
         rows.push({
           domain: e.domain,
           field: "(raw)",
-          value: SENSITIVE_FIELD.test(e.formDataJson) ? "••••••" : e.formDataJson.slice(0, 80) || "(empty)",
+          value:
+            SENSITIVE_FIELD.test(raw) || looksLikeSecret(raw)
+              ? "••••••"
+              : raw.slice(0, 80) || "(empty)",
           updatedAt: ts,
         });
       } else {
@@ -209,6 +158,17 @@ export function MemoryView() {
         <TabsContent value="site" className="mt-4">
           {siteLoading ? (
             <LoadingSkeleton variant="cards" cardCount={4} />
+          ) : siteError ? (
+            <EmptyState
+              icon={<AlertCircle className="size-6" />}
+              title="Couldn't load site memory"
+              description="The site memory endpoint returned an error. Try again shortly."
+              action={
+                <Button size="sm" variant="outline" onClick={() => refetchSite()}>
+                  <RotateCcw className="size-3.5 mr-1" /> Retry
+                </Button>
+              }
+            />
           ) : siteByDomain.length === 0 ? (
             <EmptyState icon={<Database className="size-6" />} title="No site memory" description="Browse a site to start storing structured memory." />
           ) : (
@@ -244,6 +204,17 @@ export function MemoryView() {
         <TabsContent value="form" className="mt-4">
           {formLoading ? (
             <LoadingSkeleton rows={6} />
+          ) : formError ? (
+            <EmptyState
+              icon={<AlertCircle className="size-6" />}
+              title="Couldn't load form memory"
+              description="The form memory endpoint returned an error. Try again shortly."
+              action={
+                <Button size="sm" variant="outline" onClick={() => refetchForm()}>
+                  <RotateCcw className="size-3.5 mr-1" /> Retry
+                </Button>
+              }
+            />
           ) : formFlattened.length === 0 ? (
             <EmptyState icon={<FormInput className="size-6" />} title="No form memory" description="Submit a form on any site to remember its values." />
           ) : (

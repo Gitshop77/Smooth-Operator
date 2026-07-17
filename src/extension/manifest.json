@@ -4,10 +4,10 @@
   "version": "0.3.1",
   "description": "Open-source agentic Chrome extension. Give it a prompt and it autonomously reads, reasons, clicks and types across any of your open tabs. Planner + Navigator multi-agent architecture.",
   "minimum_chrome_version": "116",
-  "permissions": ["sidePanel", "scripting", "tabs", "activeTab", "storage", "alarms", "debugger", "notifications", "downloads", "unlimitedStorage", "power"],
+  "permissions": ["sidePanel", "scripting", "tabs", "activeTab", "storage", "alarms", "debugger", "notifications", "downloads", "unlimitedStorage", "power", "webRequest"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; base-uri 'self'; frame-ancestors 'none';"
   },
   "action": {
     "default_title": "Open Cowork",

@@ -47,6 +47,19 @@ function jsonReq(body: unknown, headers: Record<string, string> = {}): any {
   };
 }
 
+// The route reads the upstream body via `readCappedUpstream`, which requires a
+// real `body` ReadableStream (it returns '' and then fails JSON.parse on a
+// body-less mock). Provide a streamed body so the success path parses the
+// upstream payload instead of 500ing with "non-JSON body".
+function streamBody(text: string): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(text));
+      controller.close();
+    },
+  });
+}
+
 beforeEach(() => {
   // `getCoworkEventsToken()` prefers COWORK_UI_TOKEN and only falls back to
   // COWORK_EVENT_TOKEN. Stub the UI token empty so the service-to-service token
@@ -66,6 +79,7 @@ describe('POST /api/cowork/ai/image', () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
       status: 200,
+      body: streamBody(JSON.stringify({ ok: true, base64: 'AAAA', prompt: 'a cat', size: '1024x1024', bytes: 3 })),
       json: async () => ({ ok: true, base64: 'AAAA', prompt: 'a cat', size: '1024x1024', bytes: 3 }),
     });
     const res = await POST(jsonReq({ prompt: 'a cat' }));
@@ -87,6 +101,20 @@ describe('POST /api/cowork/ai/image', () => {
     expect((await res.json()).error).toContain('prompt required');
   });
 
+  it('rejects a non-string prompt (fail-closed typeof guard)', async () => {
+    const numberRes = await POST(jsonReq({ prompt: 123 as never }));
+    expect(numberRes.status).toBe(400);
+    expect((await numberRes.json()).error).toContain('prompt required');
+
+    const objectRes = await POST(jsonReq({ prompt: { foo: 'bar' } as never }));
+    expect(objectRes.status).toBe(400);
+    expect((await objectRes.json()).error).toContain('prompt required');
+
+    const nullRes = await POST(jsonReq({ prompt: null as never }));
+    expect(nullRes.status).toBe(400);
+    expect((await nullRes.json()).error).toContain('prompt required');
+  });
+
   it('returns 400 when the prompt exceeds 4000 chars', async () => {
     const res = await POST(jsonReq({ prompt: 'x'.repeat(4001) }));
     expect(res.status).toBe(400);
@@ -103,6 +131,7 @@ describe('POST /api/cowork/ai/image', () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
       status: 200,
+      body: streamBody(JSON.stringify({ ok: true, base64: 'AAAA', prompt: 'a cat', size: '768x1344', bytes: 3 })),
       json: async () => ({ ok: true, base64: 'AAAA', prompt: 'a cat', size: '768x1344', bytes: 3 }),
     });
     const res = await POST(jsonReq({ prompt: 'a cat', size: '768x1344' }));
@@ -110,6 +139,20 @@ describe('POST /api/cowork/ai/image', () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toContain('/image');
     expect(JSON.parse(init.body).size).toBe('768x1344');
+  });
+
+  it('forwards x-request-id to the upstream', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      body: streamBody(JSON.stringify({ ok: true, base64: 'AAAA', prompt: 'a cat', size: '1024x1024', bytes: 3 })),
+      json: async () => ({ ok: true, base64: 'AAAA', prompt: 'a cat', size: '1024x1024', bytes: 3 }),
+    });
+    const res = await POST(jsonReq({ prompt: 'a cat' }, { 'x-request-id': 'req-img-123' }));
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers['x-request-id']).toBe('req-img-123');
   });
 
   it('returns a 500 error envelope on a non-OK upstream', async () => {
@@ -147,5 +190,18 @@ describe('GET /api/cowork/ai/image', () => {
     expect(body.route).toBe('/api/cowork/ai/image');
     expect(body.method).toBe('POST');
     expect(body.body.prompt).toBeDefined();
+  });
+
+  it('does not disclose the internal cowork-events URL (F9)', async () => {
+    const res = await GET();
+    const body = await res.json();
+    // The internal mini-service base URL (COWORK_EVENTS_BASE, e.g.
+    // http://localhost:3003) must never leak into the client metadata — it
+    // reveals internal infrastructure topology. The exposed `upstream` field
+    // is a fixed placeholder, not a real host/port.
+    expect(body.upstream).toBe('(internal cowork-events endpoint)');
+    expect(String(body.upstream)).not.toContain('3003');
+    expect(String(body.upstream)).not.toContain('localhost');
+    expect(String(JSON.stringify(body))).not.toContain('3003');
   });
 });

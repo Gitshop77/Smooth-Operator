@@ -9,19 +9,15 @@ const globalForPrisma = globalThis as unknown as {
 export const db =
   globalForPrisma.prisma ??
   new PrismaClient({
-    // Reduce production log noise/overhead (keep error + warn for diagnosability);
-    // surface query logs only in development.
-    log:
-      process.env.NODE_ENV === 'development'
-        ? ['query', 'error', 'warn']
-        : ['error', 'warn'],
+    // Keep error + warn for diagnosability in all environments. We deliberately
+    // do NOT log Prisma 'query' events: they echo bound parameter values
+    // (user-supplied URLs, form-memory values, tokens) unredacted, which would
+    // bypass the repo's redactSecrets contract that gates every other server
+    // log path.
+    log: ['error', 'warn'],
   })
 
-// Cache the singleton on globalThis in ALL environments so it survives
-// dev HMR reloads and warm serverless invocations (the canonical Next.js
-// pattern). The previous guard `!== 'production'` was effectively backwards
-// and would have spawned a fresh client per invocation, exhausting the
-// connection pool. Note: globalThis is per-process, so an actual cold start
-// (a fresh container/process) still recreates the client — the cache does not
-// persist across cold starts.
+// Cache the singleton on globalThis in ALL environments so it survives dev HMR
+// reloads and warm serverless invocations. globalThis is per-process, so a cold
+// start still recreates the client.
 globalForPrisma.prisma = db

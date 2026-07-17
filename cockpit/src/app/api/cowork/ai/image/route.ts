@@ -8,8 +8,8 @@
 // { ok: false, error } on failure.
 
 import type { NextRequest } from 'next/server';
-import { json, badRequest, serverError, withRouteError, bodyJson, redactSecrets, sanitizeRequestId } from '@/lib/cowork/api/http';
-import { COWORK_EVENTS_BASE, getCoworkEventsToken } from '@/lib/cowork/events/client';
+import { json, badRequest, serverError, withRouteError, bodyJson, redactSecrets, sanitizeRequestId, readCappedUpstream } from '@/lib/cowork/api/http';
+import { getCoworkEventsToken, getValidatedEventsBase } from '@/lib/cowork/events/client';
 
 const SUPPORTED_SIZES = [
   '1024x1024',
@@ -28,7 +28,7 @@ interface ImageProxyBody {
 }
 
 export async function POST(req: NextRequest): Promise<Response> {
-  const reqId = sanitizeRequestId(req.headers.get('x-request-id'));
+  const reqId = sanitizeRequestId(req.headers?.get('x-request-id'));
   return withRouteError(async () => {
  // `bodyJson` caps the raw body at MAX_BODY_BYTES (256KB) and rejects
  // oversize bodies with 413 *before* buffering — `req.json()` would read
@@ -52,10 +52,20 @@ export async function POST(req: NextRequest): Promise<Response> {
  // catch below as the misleading "cowork-events unreachable".
     const coworkToken = getCoworkEventsToken();
 
+ // Fail closed on a misconfigured relay target (mirrors `broadcastEvent`):
+ // never forward the S2S token to a non-http(s) / credentialed / secret-shaped
+ // base. The 60s route budget is unchanged.
+    const eventsBase = getValidatedEventsBase();
+    if (!eventsBase) {
+      return serverError('cowork-events relay base misconfigured');
+    }
+
     let upstream: Response;
     try {
-      upstream = await fetch(`${COWORK_EVENTS_BASE}/image`, {
+      upstream = await fetch(`${eventsBase}/image`, {
         method: 'POST',
+        signal: AbortSignal.timeout(60_000),
+        redirect: 'error',
         headers: {
           'Content-Type': 'application/json',
           'X-Cowork-Token': coworkToken,
@@ -70,7 +80,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     }
 
     if (!upstream.ok) {
-      const text = await upstream.text().catch(() => '');
+      const text = await readCappedUpstream(upstream, 25 * 1024 * 1024).catch(() => '');
  // Do not forward raw upstream error text to the client — log server-side
  // and return a generic message.
       console.error('[cowork] /image upstream failed', { status: upstream.status, body: redactSecrets(text.slice(0, 200)) });
@@ -79,10 +89,12 @@ export async function POST(req: NextRequest): Promise<Response> {
 
  // Parse the upstream JSON payload. A 200 with a non-JSON body (HTML error
  // page, truncated payload) is an upstream contract violation, not a generic
- // 500 — surface it as such.
+ // 500 — surface it as such. The success path is capped the same way as the
+ // error path (readCappedUpstream, 25 MiB) so a misbehaving/compromised
+ // mini-service cannot exhaust cockpit worker memory with an oversized body.
     let data: unknown;
     try {
-      data = await upstream.json();
+      data = JSON.parse(await readCappedUpstream(upstream, 25 * 1024 * 1024));
     } catch {
       return serverError('cowork-events /image returned a non-JSON body');
     }

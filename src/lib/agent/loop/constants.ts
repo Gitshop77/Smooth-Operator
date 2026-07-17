@@ -16,7 +16,7 @@ export const EXPLORATION_NUDGE_STEPS = 5;
 /** URL substrings that suggest a captcha is being shown. */
 export const CAPTCHA_URL_HINTS = ["recaptcha", "hcaptcha", "captcha", "cf-chl", "challenge"];
 /** URL substrings / file extensions that suggest a download is in progress. */
-export const DOWNLOAD_URL_HINTS = [".pdf", ".zip", ".tar", ".gz", ".docx", ".xlsx", ".csv", "download"];
+export const DOWNLOAD_URL_HINTS = [".pdf", ".zip", ".tar", ".gz", ".tgz", ".docx", ".xlsx", ".csv", "download"];
 /** Boundary-aware download-URL detector, derived from {@link DOWNLOAD_URL_HINTS}. */
 const DOWNLOAD_EXT = DOWNLOAD_URL_HINTS.map((e) => e.replace(/^\./, ""));
 export const DOWNLOAD_RE = new RegExp(`\\.(${DOWNLOAD_EXT.join("|")})(?:[?#/]|$)`, "i");

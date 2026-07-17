@@ -14,6 +14,7 @@ import { z } from "zod";
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import type { ActionContext } from "./types";
+import { rejectOnAbort } from "./abort";
 
 /**
  * Shape the background SW returns for a `TAB_ACTION` message. Validated rather
@@ -40,6 +41,7 @@ function fail(action: Action, msg: string): ActionResult {
 /** Delegate a tab-level action to the SW's `handleTabAction` via TAB_ACTION. */
 async function delegateTabAction(
   action: Extract<Action, { type: "switch_tab" | "close_tab" }>,
+  signal?: AbortSignal,
 ): Promise<ActionResult> {
   if (typeof chrome === "undefined" || !chrome.runtime?.id) {
     return {
@@ -50,14 +52,23 @@ async function delegateTabAction(
   }
   try {
     let timer: ReturnType<typeof setTimeout>;
-    const raw = await Promise.race([
-      chrome.runtime.sendMessage({ type: "TAB_ACTION", action }).finally(() =>
-        clearTimeout(timer),
-      ),
-      new Promise<undefined>((resolve) => {
-        timer = setTimeout(() => resolve(undefined), TAB_ACTION_TIMEOUT_MS);
-      }),
-    ]);
+ // Race the SW call against the timeout AND the step's abort signal so a user
+ // STOP is honored mid-step instead of waiting out the full 30s timeout.
+    const abort = rejectOnAbort(signal);
+    let raw: unknown;
+    try {
+      raw = await Promise.race([
+        chrome.runtime.sendMessage({ type: "TAB_ACTION", action }).finally(() =>
+          clearTimeout(timer),
+        ),
+        new Promise<undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), TAB_ACTION_TIMEOUT_MS);
+        }),
+        abort.promise,
+      ]);
+    } finally {
+      abort.cleanup();
+    }
  // `chrome.runtime.sendMessage` resolves `undefined` (not a rejection) when
  // there is no listener; the timeout above also resolves `undefined`, so
  // distinguish a missing/unresponsive handler from a malformed payload.
@@ -89,15 +100,15 @@ async function delegateTabAction(
 }
 
 export async function handleSwitchTab(
-  _ctx: ActionContext,
+  ctx: ActionContext,
   action: Extract<Action, { type: "switch_tab" }>,
 ): Promise<ActionResult> {
-  return delegateTabAction(action);
+  return delegateTabAction(action, ctx.signal);
 }
 
 export async function handleCloseTab(
-  _ctx: ActionContext,
+  ctx: ActionContext,
   action: Extract<Action, { type: "close_tab" }>,
 ): Promise<ActionResult> {
-  return delegateTabAction(action);
+  return delegateTabAction(action, ctx.signal);
 }

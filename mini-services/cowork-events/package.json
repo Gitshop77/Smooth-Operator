@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "socket.io": "^4.7.2",
-    "z-ai-web-dev-sdk": "^0.0.18"
+    "z-ai-web-dev-sdk": "0.0.18"
   },
   "devDependencies": {
     "tsx": "^4.23.1",

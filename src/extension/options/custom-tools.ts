@@ -59,7 +59,7 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-function validateCustomTools(raw: unknown): CustomToolEntry[] {
+export function validateCustomTools(raw: unknown): CustomToolEntry[] {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) {
     console.warn("[custom-tools] stored value is not an array; ignoring.", raw);
@@ -152,8 +152,20 @@ export async function renderTools(): Promise<void> {
         });
         if (!ok) return;
  // Delete by index, not by name, so a pre-existing duplicate name
- // cannot mass-delete sibling entries.
+ // cannot mass-delete sibling entries. The captured render-time index may be
+ // stale if another tab / external storage write mutated the list before this
+ // click, so re-verify identity before splicing and abort + re-render on
+ // mismatch.
         const current = await readCustomTools();
+        const target = current[index];
+        if (
+          !target ||
+          target.name !== t.name ||
+          (t.createdAt !== undefined && target.createdAt !== t.createdAt)
+        ) {
+          await renderTools();
+          return;
+        }
         current.splice(index, 1);
         try {
           await writeCustomTools(current);

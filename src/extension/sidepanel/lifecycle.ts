@@ -9,7 +9,7 @@
  * + progress UI.
  */
 
-import { escapeHtml } from "@/extension/shared";
+import { escapeHtml, redactKeyLeak } from "@/extension/shared";
 import { glyph, type GlyphName } from "./glyphs";
 import {
   statusIcon,
@@ -96,9 +96,9 @@ export function appendThinkingEntry(kind: "planner" | "navigator" | "error", hea
   if (empty) empty.remove();
   const entry = document.createElement("div");
   entry.className = `thinking-entry ${kind}`;
-  const escapedBody = escapeHtml(body).replace(/\n/g, "<br>");
+  const escapedBody = escapeHtml(redactKeyLeak(body)).replace(/\n/g, "<br>");
   entry.innerHTML =
-    `<div class="te-head">${escapeHtml(head)}</div>` +
+    `<div class="te-head">${escapeHtml(redactKeyLeak(head))}</div>` +
     `<div class="te-body">${escapedBody}</div>`;
   thinkingBody.appendChild(entry);
   while (thinkingBody.children.length > MAX_THINKING_ENTRIES) {

@@ -1,6 +1,6 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 
-const { findMany, del, deleteMany, PrismaClientKnownRequestError } = vi.hoisted(() => {
+const { findMany, del, deleteMany, upsert, historyStore, PrismaClientKnownRequestError } = vi.hoisted(() => {
   class PrismaClientKnownRequestError extends Error {
     code: string;
     constructor(message: string, code: string) {
@@ -9,10 +9,28 @@ const { findMany, del, deleteMany, PrismaClientKnownRequestError } = vi.hoisted(
       this.code = code;
     }
   }
+ // In-memory `historyEntry` table that enforces the url @unique contract: a
+ // revisit upserts (visitCount++) rather than inserting a second row. This is
+ // what the real Prisma upsert does, so the POST contract test below exercises
+ // the actual write path instead of a hand-rolled in-test simulation.
+  const historyStore = new Map<string, { id: string; url: string; title: string; visitCount: number }>();
+  const upsert = vi.fn(async ({ where, create, update }: any) => {
+    const existing = historyStore.get(where.url);
+    if (existing) {
+      existing.visitCount += 1;
+      existing.title = update.title;
+      return { ...existing };
+    }
+    const row = { id: String(historyStore.size + 1), url: create.url, title: create.title, visitCount: 1 };
+    historyStore.set(where.url, row);
+    return { ...row };
+  });
   return {
     findMany: vi.fn(),
     del: vi.fn(),
     deleteMany: vi.fn(),
+    upsert,
+    historyStore,
     PrismaClientKnownRequestError,
   };
 });
@@ -23,11 +41,16 @@ vi.mock('@prisma/client', () => ({
 
 vi.mock('@/lib/db', () => ({
   db: {
-    historyEntry: { findMany, delete: del, deleteMany },
+    historyEntry: { findMany, delete: del, deleteMany, upsert },
   },
 }));
 
-import { GET, DELETE } from '@/app/api/cowork/history/route';
+import { GET, POST, DELETE } from '@/app/api/cowork/history/route';
+
+afterEach(() => {
+  vi.clearAllMocks();
+  historyStore.clear();
+});
 
 function fakeReq(query = '', body?: unknown): any {
   const headers = new Headers();
@@ -71,6 +94,24 @@ describe('GET /api/cowork/history', () => {
     expect(findMany).toHaveBeenCalledWith(
       expect.objectContaining({ take: 200, orderBy: { lastVisitedAt: 'desc' } }),
     );
+  });
+
+  it('builds a bounded OR contains where-clause for a q search term', async () => {
+    findMany.mockResolvedValueOnce([]);
+    await GET(fakeReq('q=hello'));
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { OR: [{ url: { contains: 'hello' } }, { title: { contains: 'hello' } }] },
+      }),
+    );
+  });
+
+  it('truncates an over-256-char q before it reaches the query', async () => {
+    findMany.mockResolvedValueOnce([]);
+    const longQ = 'a'.repeat(500);
+    await GET(fakeReq(`q=${longQ}`));
+    const callArg = findMany.mock.calls[0][0] as { where: { OR: Array<{ url?: { contains: string } }> } };
+    expect(callArg.where.OR[0].url!.contains.length).toBe(256);
   });
 });
 
@@ -119,5 +160,106 @@ describe('DELETE /api/cowork/history', () => {
     const body = await res.json();
     expect(body.ok).toBe(true);
     expect(body.deleted).toBe(42);
+  });
+
+  it('logs the initiating principal (clientIp) for a ?all=1 confirm:true wipe (AU-3)', async () => {
+    deleteMany.mockResolvedValueOnce({ count: 3 });
+    const req = fakeReq('all=1', { confirm: true });
+    req.headers.set('x-forwarded-for', '203.0.113.7, 10.0.0.1');
+    const spy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      const res = await DELETE(req);
+      expect(res.status).toBe(200);
+      expect(spy).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ clientIp: '203.0.113.7', confirm: true }),
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('scopes a ?all=1 wipe to olderThan (lastVisitedAt.lt)', async () => {
+    deleteMany.mockResolvedValueOnce({ count: 7 });
+    const res = await DELETE(fakeReq('all=1', { confirm: true, olderThan: '2020-01-01T00:00:00Z' }));
+    expect(res.status).toBe(200);
+    expect(deleteMany).toHaveBeenCalledTimes(1);
+    const callArg = deleteMany.mock.calls[0][0] as { where: { lastVisitedAt?: { lt: Date } } };
+    expect(callArg.where.lastVisitedAt).toBeDefined();
+    expect(callArg.where.lastVisitedAt!.lt).toBeInstanceOf(Date);
+    expect(callArg.where.lastVisitedAt!.lt.toISOString()).toBe('2020-01-01T00:00:00.000Z');
+    const body = await res.json();
+    expect(body.deleted).toBe(7);
+  });
+
+  it('rejects a non-ISO olderThan with 400 (confirm still required)', async () => {
+    const res = await DELETE(fakeReq('all=1', { confirm: true, olderThan: 'not-a-date' }));
+    expect(res.status).toBe(400);
+    expect(deleteMany).not.toHaveBeenCalled();
+    const body = await res.json();
+    expect(body.error).toContain('olderThan must be an ISO-8601 timestamp');
+  });
+});
+
+// F22 write-contract (integration): exercising the REAL POST route so a
+// regression that swapped the upsert for a raw create (which would throw P2002
+// on the first revisit) is caught here, not against an in-test simulation.
+describe('POST /api/cowork/history — F22 upsert-on-url contract', () => {
+  it('revisiting a url updates the existing row (visitCount++) without creating a second', async () => {
+    const first = await POST(fakeReq('', { url: 'https://example.com', title: 'Example' }));
+    expect(first.status).toBe(201);
+    const firstBody = (await first.json()) as { entry: { visitCount: number } };
+    expect(firstBody.entry.visitCount).toBe(1);
+
+    const second = await POST(fakeReq('', { url: 'https://example.com', title: 'Example v2' }));
+    expect(second.status).toBe(201);
+    const secondBody = (await second.json()) as { entry: { visitCount: number; title: string } };
+    expect(historyStore.size).toBe(1);
+    expect(secondBody.entry.visitCount).toBe(2);
+    expect(secondBody.entry.title).toBe('Example v2');
+  });
+
+  it('creates distinct rows for distinct urls', async () => {
+    await POST(fakeReq('', { url: 'https://a.com' }));
+    await POST(fakeReq('', { url: 'https://b.com' }));
+    expect(historyStore.size).toBe(2);
+  });
+});
+
+// Regression guards for the POST scheme + title-type validation that prevent a
+// stored-XSS (`javascript:`) URL or a persisted `[object Object]` title from
+// reaching the browser. These exercise the real `validateHttpUrl` and
+// `boundedString` paths the route funnels through.
+describe('POST /api/cowork/history — scheme + title-type guards', () => {
+  it('rejects a non-http scheme (stored-XSS guard) with 400', async () => {
+    const res = await POST(fakeReq('', { url: 'javascript:alert(1)' }));
+    expect(res.status).toBe(400);
+    expect(upsert).not.toHaveBeenCalled();
+    const body = await res.json();
+    expect(body.error).toBe('URL must be http or https');
+  });
+
+  it('rejects a missing/empty url with 400', async () => {
+    const res = await POST(fakeReq('', { url: '' }));
+    expect(res.status).toBe(400);
+    expect(upsert).not.toHaveBeenCalled();
+    const body = await res.json();
+    expect(body.error).toBe('url required (non-empty string)');
+  });
+
+  it('rejects a non-string object title with 400', async () => {
+    const res = await POST(fakeReq('', { url: 'https://example.com', title: {} }));
+    expect(res.status).toBe(400);
+    expect(upsert).not.toHaveBeenCalled();
+    const body = await res.json();
+    expect(body.error).toBe('field must be a string');
+  });
+
+  it('rejects a non-string array title with 400', async () => {
+    const res = await POST(fakeReq('', { url: 'https://example.com', title: ['x'] }));
+    expect(res.status).toBe(400);
+    expect(upsert).not.toHaveBeenCalled();
+    const body = await res.json();
+    expect(body.error).toBe('field must be a string');
   });
 });

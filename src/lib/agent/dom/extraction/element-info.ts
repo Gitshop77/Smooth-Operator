@@ -32,7 +32,7 @@ export const DOM_CONFIG = {
     "aria-valuemax", "checked", "selected", "disabled", "required",
     "readonly", "href", "title", "alt", "for", "min", "max", "step",
     "pattern", "inputmode", "autocomplete", "contenteditable",
-    "data-state", "multiple", "target", "rel",
+    "data-state", "multiple", "target", "rel", "part",
   ],
   /** Tags whose subtrees we skip entirely. Canonical set lives in `../utils/classification`. */
   skipTags: SKIP_TAGS,
@@ -71,6 +71,84 @@ export const BOOLEAN_ATTRS: ReadonlySet<string> = new Set([
   "required", "checked", "selected", "disabled", "readonly",
   "multiple", "hidden", "autofocus", "formnovalidate",
 ]);
+
+// ─── URL token redaction ─────────────────────────────────────────────────────
+
+/**
+ * Whether a single URL path segment looks like a high-entropy secret (reset /
+ * confirmation / session token) rather than a human-readable route. Mirrors the
+ * conservative length + mixed-character-class heuristic used by the debug-log
+ * redactor so ordinary route words (`documentation`, `reset-password`) survive
+ * while opaque tokens are masked.
+ */
+export function looksLikeSecretSegment(seg: string): boolean {
+  if (seg.length < 16) return false;
+ // A segment carrying whitespace / quotes / angle-brackets is human-readable
+ // text or hostile markup (e.g. an injected attribute trying to forge a
+ // delimiter), not an opaque path token — never redact it.
+  if (/[\s"'<>]/.test(seg)) return false;
+  const hasLower = /[a-z]/.test(seg);
+  const hasUpper = /[A-Z]/.test(seg);
+  const hasDigit = /[0-9]/.test(seg);
+  const hasSpecial = /[^A-Za-z0-9]/.test(seg);
+  const classes = [hasLower, hasUpper, hasDigit, hasSpecial].filter(Boolean).length;
+ // Require genuine high entropy: a mix of at least three character classes
+ // (lower + upper + digit, etc.). This keeps real opaque tokens masked while
+ // not flagging single-class runs (e.g. a 5000-char repeated path) or ordinary
+ // hyphenated route words like `getting-started`.
+  if (classes >= 3) return true;
+  return false;
+}
+
+/**
+ * Redact high-entropy secret-bearing PATH segments (e.g. `/reset/<token>`)
+ * while preserving the rest of the path so the link stays navigable. Only
+ * individual opaque segments are replaced; the path structure is kept.
+ */
+export function redactPathSecrets(pathname: string): string {
+  return pathname
+    .split("/")
+    .map((seg) => (looksLikeSecretSegment(seg) ? "[redacted]" : seg))
+    .join("/");
+}
+
+/**
+ * Strip query-string and fragment tokens from a URL so secret-bearing tokens
+ * (reset/session/2FA, PII) aren't forwarded to the LLM. Keeps scheme + host +
+ * path so the link stays identifiable for navigation, but masks high-entropy
+ * secret path segments. Mirrors the iframe `src` redaction in `page-state.ts`.
+ * Falls back to a defensive `?…/#…` strip for relative / unparseable URLs.
+ */
+export function redactUrlTokens(url: string): string {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "http:" && u.protocol !== "https:") {
+      return "[non-http url redacted]";
+    }
+    u.search = "";
+    u.hash = "";
+    u.username = "";
+    u.password = "";
+    u.pathname = redactPathSecrets(u.pathname);
+    return u.toString();
+  } catch {
+    return redactPathSecrets(url.replace(/[?#].*$/, ""));
+  }
+}
+
+/**
+ * Bound a (non-sensitive) attribute value to the same 200-char cap the rendered
+ * DOM line already applies via `escapeAttr`, so the raw value the indexed tree
+ * forwards to the navigator LLM can't balloon the serialized payload. Mirrors
+ * {@link ./page-state} `MAX_ATTR_VALUE_LENGTH`.
+ */
+const MAX_ATTR_VALUE_LENGTH = 200;
+
+function capAttrValue(v: string): string {
+  return v.length > MAX_ATTR_VALUE_LENGTH
+    ? v.slice(0, MAX_ATTR_VALUE_LENGTH) + "..."
+    : v;
+}
 
 // ─── Attribute building ─────────────────────────────────────────────────────
 
@@ -119,11 +197,16 @@ export function buildAttrs(el: HTMLElement): Record<string, string> {
  // with the AX-tree extractor) redacts password, hidden (CSRF/session
  // tokens), and sensitive-autocomplete fields (credit-card, OTP).
  // Reading a non-sensitive `<select>`'s value is safe (chosen option).
-        if (!sensitive) val = el.value;
+        if (!sensitive) val = capAttrValue(el.value);
       } else {
         const a = el.getAttribute("value");
-        if (a !== null && !sensitive) val = a;
+        if (a !== null && !sensitive) val = capAttrValue(a);
       }
+    } else if (name === "href") {
+ // Strip query/fragment tokens (reset/session/2FA/PII) before the URL is
+ // forwarded to the LLM — mirrors the iframe `src` redaction in page-state.
+      const raw = el.getAttribute(name);
+      if (raw !== null) val = redactUrlTokens(raw);
     } else {
       val = el.getAttribute(name);
     }
@@ -204,8 +287,7 @@ function elementIdentity(el: HTMLElement, attrs?: Record<string, string>): strin
   let cur: Element | null = el;
   let depth = 0;
   while (cur && cur !== document.body && cur.parentElement && depth < DOM_CONFIG.maxBranchDepth) {
-    const siblings = Array.from(cur.parentElement.children).filter((c) => c.tagName === cur!.tagName);
-    const idx = siblings.indexOf(cur) + 1;
+    const idx = nthOfTypeIndex(cur);
     path.unshift(`${cur.tagName.toLowerCase()}[${idx}]`);
     cur = cur.parentElement;
     depth++;
@@ -225,6 +307,47 @@ function elementIdentity(el: HTMLElement, attrs?: Record<string, string>): strin
 // empty ancestor path (defensive against hash collisions — see `elementIdentity`).
 const uidMap = new WeakMap<HTMLElement, string>();
 let uidCounter = 0;
+
+/**
+ * Cache of per-element nth-of-type index (1-based position among same-tag
+ * siblings), keyed by the parent element. Built lazily on first use within a
+ * single `extractBrowserState` snapshot (see {@link resetHashCaches}) and
+ * therefore always reflects the current DOM.
+ *
+ * This replaces the previous per-element
+ * `Array.from(parent.children).filter(tag).indexOf(el) + 1`, which was
+ * O(#siblings) per element and therefore O(n^2) on pages with many same-tag
+ * siblings. A pathological page (e.g. thousands of <button>s) would make
+ * `extractBrowserState` — which runs on every agent step — do O(n^2) work and
+ * freeze the extension. The cache turns the per-parent work into a single
+ * O(#siblings) pass that every element under that parent then looks up in O(1),
+ * so the whole walk is O(n). Hash *values* are unchanged (same nth-of-type
+ * index as before), so `isNew` tracking is unaffected.
+ */
+let nthOfTypeCache: WeakMap<Element, Map<Element, number>> = new WeakMap();
+
+/** Reset the nth-of-type cache. Call at the start of each `extractBrowserState` so the cached indices reflect the current DOM snapshot. */
+export function resetHashCaches(): void {
+  nthOfTypeCache = new WeakMap();
+}
+
+function nthOfTypeIndex(el: Element): number {
+  const parent = el.parentElement;
+  if (!parent) return 1;
+  let perParent = nthOfTypeCache.get(parent);
+  if (!perParent) {
+    perParent = new Map<Element, number>();
+    const counts = new Map<string, number>();
+    for (const sib of Array.from(parent.children)) {
+      const tag = sib.tagName;
+      const next = (counts.get(tag) ?? 0) + 1;
+      counts.set(tag, next);
+      perParent.set(sib, next);
+    }
+    nthOfTypeCache.set(parent, perParent);
+  }
+  return perParent.get(el) ?? 1;
+}
 function collisionFreeId(el: HTMLElement): string {
   let id = uidMap.get(el);
   if (!id) {

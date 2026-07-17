@@ -252,6 +252,57 @@ describe("httpJson.frames — Retry-After + SSRF guard", () => {
     await expect(iter.next()).rejects.toThrow(/SSRF guard/i);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  test("frames() THROWS before calling fetch for IPv6-mapped metadata sinks", async () => {
+    // The transport guard's IPv6 classification must reject link-local /
+    // IPv4-mapped metadata forms before any network call leaves the service
+    // worker. A regression that dropped IPv6 handling at the transport guard
+    // would not be caught by the IPv4-metadata / DNS-rebind cases above.
+    const fetchMock = vi.fn(async () => {
+      throw new Error("fetch should never run for a blocked baseUrl");
+    });
+    globalThis.fetch = fetchMock as typeof globalThis.fetch;
+
+    const transport = httpJson({ framing: sse });
+    for (const url of [
+      "http://[::ffff:169.254.169.254]/",
+      "http://[fe80::1]/",
+      "http://[::ffff:0.0.0.0]/",
+    ]) {
+      const iter = transport
+        .frames(makePrepared(url))[Symbol.asyncIterator]();
+      await expect(iter.next()).rejects.toThrow(/SSRF guard/i);
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+  });
+
+  test("frames() THROWS before calling fetch when baseUrl is a hostname that DNS-rebinds to a metadata address", async () => {
+    // The transport guard now re-validates the REAL target at fetch time. A
+    // public hostname that DNS-resolves to the cloud-metadata address (a
+    // DNS-rebinding SSRF) must be rejected BEFORE any network call leaves the
+    // service worker — the synchronous isAllowedLlmBaseUrl host check alone
+    // would let it through. `fetch` must therefore never be invoked.
+    const chromeRef = globalThis as unknown as { chrome?: unknown };
+    chromeRef.chrome = {
+      runtime: {},
+      dns: { resolve: (_h: string, cb: (r: { addresses?: string[] }) => void) => cb({ addresses: ["169.254.169.254"] }) },
+    };
+    try {
+      const fetchMock = vi.fn(async () => {
+        throw new Error("fetch should never run for a DNS-rebound baseUrl");
+      });
+      globalThis.fetch = fetchMock as typeof globalThis.fetch;
+
+      const transport = httpJson({ framing: sse });
+      const iter = transport
+        .frames(makePrepared("http://metadata.example.attacker/v1"))[Symbol.asyncIterator]();
+
+      await expect(iter.next()).rejects.toThrow(/SSRF guard/i);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      chromeRef.chrome = undefined;
+    }
+  });
 });
 
 // ─── Per-chunk stream-stall timeout ──────────────────────────────────────────

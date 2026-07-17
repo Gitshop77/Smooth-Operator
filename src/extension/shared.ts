@@ -4,8 +4,12 @@
  * Keeping these in one module avoids two divergent copies and lets both pages
  * use the same `$` (throw on missing) + `escapeHtml` semantics. Also hosts
  * the cockpit URL configuration (used by the "Open Cowork Cockpit" button
- * in the side panel and the matching settings field in the options page).
+ * in the side panel and the matching settings field in the options page), and
+ * the `redactKeyLeak` secret-masking primitive used by both the options
+ * test-connection path and the live side-panel log / thinking renderers.
  */
+
+import { PROVIDER_META } from "./options/providers";
 
 /**
  * Get an element by id, throwing if missing (dev-time safety).
@@ -38,6 +42,123 @@ export function escapeHtml(s: unknown): string {
         "/": "&#47;",
       })[c]!,
   );
+}
+
+// ─── Secret redaction ─────────────────────────────────────────────────────
+//
+// A provider error string can embed the user's API key (e.g. `401: Invalid
+// API key: sk-ant-api03-...`). The same key-masking primitive is reused by the
+// options test-connection path AND the live side-panel log / thinking renderers
+// so a provider error surfaced through the agent loop is never shown verbatim.
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Base key patterns not derivable from a single catalog placeholder. */
+const BASE_KEY_PATTERNS = [
+  "sk-ant-[A-Za-z0-9_-]+",
+  "sk-[A-Za-z0-9_-]+",
+  "AIza[A-Za-z0-9_-]+",
+  "ya29\\.[A-Za-z0-9_-]+",
+  "ghp_[A-Za-z0-9_-]+",
+  "gho_[A-Za-z0-9_-]+",
+  "ghu_[A-Za-z0-9_-]+",
+  "ghs_[A-Za-z0-9_-]+",
+  "ghr_[A-Za-z0-9_-]+",
+  "github_pat_[A-Za-z0-9_-]+",
+  "glpat-[A-Za-z0-9_-]+",
+  "gsk_[A-Za-z0-9_-]+",
+  "xoxb-[A-Za-z0-9_-]+",
+  "xoxp-[A-Za-z0-9_-]+",
+  "xoxa-[A-Za-z0-9_-]+",
+  "xoxs-[A-Za-z0-9_-]+",
+  "AKIA[0-9A-Z]{16}",
+  // JWT: mask the ENTIRE token (header.payload.signature), not just the header.
+  "eyJ[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*",
+];
+
+/** Derive concrete key prefixes from provider placeholders (e.g. `sk-ant-api03-...` → `sk-ant-`). */
+function providerKeyPrefixes(): string[] {
+  const out = new Set<string>();
+  for (const p of Object.values(PROVIDER_META)) {
+    const ph = p.keyPlaceholder;
+    if (!ph || ph === "...") continue;
+    const m = /^[A-Za-z0-9_-]+/.exec(ph);
+    if (!m) continue;
+    const prefix = m[0];
+    // Skip obviously non-secret placeholders (provider labels, not keys).
+    if (prefix === "ollama" || prefix === "your-opencode-key") continue;
+    out.add(escapeRegex(prefix) + "[A-Za-z0-9_-]+");
+  }
+  return [...out];
+}
+
+/**
+ * Mask common API-key prefixes that may leak into provider error text before
+ * the message is shown in the UI. The allowlist is derived from the provider
+ * catalog (`PROVIDER_META`) so a new or custom provider's key prefix is covered
+ * automatically, plus a base set of well-known global prefixes. Non-key text is
+ * returned unchanged. Over-redaction in a debug log is safe; leaking the key is
+ * not.
+ */
+/**
+ * Heuristic: does a quoted/bare scalar look like a high-entropy secret rather
+ * than ordinary prose, a URL, or a short label? Additive mask only — it never
+ * weakens the prefix matchers above. Conservative on length and requires mixed
+ * character classes so normal words and structured text survive, while
+ * EchoLeak-class secrets with no known key prefix are still caught.
+ */
+function looksLikeSecret(v: string): boolean {
+  const t = v.trim();
+  if (t.length < 16 || t.length > 512) return false;
+  if (/\s/.test(t)) return false;
+  if (t.includes("://")) return false; // leave URLs intact
+  const hasLower = /[a-z]/.test(t);
+  const hasUpper = /[A-Z]/.test(t);
+  const hasDigit = /[0-9]/.test(t);
+  const hasSpecial = /[^A-Za-z0-9]/.test(t);
+  const classes = [hasLower, hasUpper, hasDigit, hasSpecial].filter(Boolean).length;
+  return classes >= 2;
+}
+
+export function redactKeyLeak(s: string): string {
+  // Build the matcher per-call so no shared mutable `lastIndex` survives between
+  // invocations (a module-level `g`-flag regex is a latent re-entrancy footgun
+  // for any concurrent call site).
+  const keyRe = new RegExp(
+    "(" + [...providerKeyPrefixes(), ...BASE_KEY_PATTERNS].join("|") + ")",
+    "g",
+  );
+  let out = s.replace(keyRe, (m) => {
+    const dash = m.indexOf("-");
+    const prefix = dash > 0 ? m.slice(0, dash + 1) : m.slice(0, 4);
+    return `${prefix}[REDACTED]`;
+  });
+
+  // Additive pass: mask `Bearer <token>` authorization headers a provider may
+  // echo back verbatim inside an error (these carry no key prefix to match).
+  out = out.replace(/\bBearer\s+[A-Za-z0-9._\-+/=]+/g, "Bearer [REDACTED]");
+
+  // Additive pass: mask the values of known JSON secret keys (e.g.
+  // `"password": "..."`, `"apiKey": "..."`), regardless of key prefix. Quote
+  // style of the value is preserved.
+  out = out.replace(
+    /("(?:password|passwd|api[_-]?key|apikey|secret|token|access[_-]?token|refresh[_-]?token|private[_-]?key|client[_-]?secret|auth[_-]?token)"\s*:\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/gi,
+    (_, keyPart: string, valPart: string) => {
+      const q = valPart[0];
+      return `${keyPart}${q}[REDACTED]${q}`;
+    },
+  );
+
+  // Additive pass: mask generic high-entropy quoted scalars (tool/page output,
+  // JSON blobs) that have no recognisable key prefix. Bounded and conservative
+  // — over-redaction in a debug log is safe; leakage is not.
+  out = out.replace(/"([^"]+)"/g, (full, inner: string) =>
+    looksLikeSecret(inner) ? `"[REDACTED]"` : full,
+  );
+
+  return out;
 }
 
 // ─── Cockpit URL ──────────────────────────────────────────────────────────

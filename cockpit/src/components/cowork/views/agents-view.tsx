@@ -3,7 +3,7 @@
 import * as React from "react";
 import { motion } from "framer-motion";
 import {
-  Bot, Check, AlertCircle, Clock, ListChecks,
+  Bot, Check, AlertCircle, Clock, ListChecks, RotateCcw,
 } from "lucide-react";
 
 import { useAgents, useAgentTasks } from "@/hooks/use-cowork-query";
@@ -13,6 +13,7 @@ import { Progress } from "@/components/ui/progress";
 import { ViewHeader } from "@/components/cowork/shared/view-header";
 import { LoadingSkeleton } from "@/components/cowork/shared/loading-skeleton";
 import { EmptyState } from "@/components/cowork/shared/empty-state";
+import { Button } from "@/components/ui/button";
 import { StatusPill, toneForStatus } from "@/components/cowork/shared/status-pill";
 import { timeAgo } from "@/lib/cowork-data/format";
 
@@ -22,8 +23,8 @@ import { timeAgo } from "@/lib/cowork-data/format";
 const TERMINAL = new Set(["done", "failed", "cancelled"]);
 
 export function AgentsView() {
-  const { data: agents, isLoading: agentsLoading } = useAgents();
-  const { data: tasks, isLoading: tasksLoading } = useAgentTasks();
+  const { data: agents, isLoading: agentsLoading, isError: agentsError, refetch: refetchAgents } = useAgents();
+  const { data: tasks, isLoading: tasksLoading, isError: tasksError, refetch: refetchTasks } = useAgentTasks();
 
   const list = tasks ?? [];
   const pending = list.filter((t) => !TERMINAL.has(t.status));
@@ -78,6 +79,17 @@ export function AgentsView() {
         <TabsContent value="agents" className="mt-4">
           {agentsLoading ? (
             <LoadingSkeleton variant="cards" cardCount={4} />
+          ) : agentsError ? (
+            <EmptyState
+              icon={<AlertCircle className="size-6" />}
+              title="Couldn't load agents"
+              description="The agents endpoint returned an error. Try again shortly."
+              action={
+                <Button size="sm" variant="outline" onClick={() => refetchAgents()}>
+                  <RotateCcw className="size-3.5 mr-1" /> Retry
+                </Button>
+              }
+            />
           ) : (agents ?? []).length === 0 ? (
             <EmptyState
               icon={<Bot className="size-6" />}
@@ -118,6 +130,17 @@ export function AgentsView() {
         <TabsContent value="tasks" className="mt-4">
           {tasksLoading ? (
             <LoadingSkeleton rows={5} />
+          ) : tasksError ? (
+            <EmptyState
+              icon={<AlertCircle className="size-6" />}
+              title="Couldn't load tasks"
+              description="The tasks endpoint returned an error. Try again shortly."
+              action={
+                <Button size="sm" variant="outline" onClick={() => refetchTasks()}>
+                  <RotateCcw className="size-3.5 mr-1" /> Retry
+                </Button>
+              }
+            />
           ) : recent.length === 0 ? (
             <EmptyState
               icon={<ListChecks className="size-6" />}

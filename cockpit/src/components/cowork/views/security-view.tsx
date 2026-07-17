@@ -58,7 +58,7 @@ const SEVERITY_META: Record<string, { tone: "error" | "warning" | "info"; border
 };
 
 export function SecurityView() {
-  const { data, isLoading } = useSecurityEvents();
+  const { data, isLoading, isError, error } = useSecurityEvents();
   const [typeFilter, setTypeFilter] = React.useState("all");
 
   const types = React.useMemo(() => {
@@ -128,6 +128,12 @@ export function SecurityView() {
 
       {isLoading ? (
         <LoadingSkeleton rows={6} />
+      ) : isError ? (
+        <EmptyState
+          icon={<ShieldAlert className="size-6" />}
+          title="Couldn't load security events"
+          description={error?.message ?? "The security event feed returned an error. Check that the backend is reachable and NEXT_PUBLIC_COWORK_UI_TOKEN is configured."}
+        />
       ) : rows.length === 0 ? (
         <EmptyState
           icon={<ShieldCheck className="size-6" />}

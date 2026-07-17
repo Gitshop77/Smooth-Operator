@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { motion } from "framer-motion";
-import { Bookmark, History, Pin, ExternalLink, Folder } from "lucide-react";
+import { Bookmark, History, Pin, ExternalLink, Folder, AlertCircle, RotateCcw } from "lucide-react";
 
 import { useBookmarks, useHistory, usePinboards } from "@/hooks/use-cowork-query";
 import { Card } from "@/components/ui/card";
@@ -13,6 +13,7 @@ import {
 import { ViewHeader } from "@/components/cowork/shared/view-header";
 import { LoadingSkeleton } from "@/components/cowork/shared/loading-skeleton";
 import { EmptyState } from "@/components/cowork/shared/empty-state";
+import { Button } from "@/components/ui/button";
 import { DataTable } from "@/components/cowork/shared/data-table";
 import { SearchInput } from "@/components/cowork/shared/search-input";
 import { timeAgo, hostnameOf, safeHref } from "@/lib/cowork-data/format";
@@ -59,9 +60,9 @@ function BookmarkNode({ node, depth }: { node: SampleBookmark; depth: number }) 
 }
 
 export function CollectionsView() {
-  const { data: bookmarks, isLoading: bmLoading } = useBookmarks();
-  const { data: history, isLoading: hLoading } = useHistory();
-  const { data: pinboards, isLoading: pbLoading } = usePinboards();
+  const { data: bookmarks, isLoading: bmLoading, isError: bmError, refetch: refetchBookmarks } = useBookmarks();
+  const { data: history, isLoading: hLoading, isError: hError, refetch: refetchHistory } = useHistory();
+  const { data: pinboards, isLoading: pbLoading, isError: pbError, refetch: refetchPinboards } = usePinboards();
   const [historyQuery, setHistoryQuery] = React.useState("");
 
   const enriched = React.useMemo(
@@ -110,6 +111,17 @@ export function CollectionsView() {
         <TabsContent value="bookmarks" className="mt-4">
           {bmLoading ? (
             <LoadingSkeleton rows={6} />
+          ) : bmError ? (
+            <EmptyState
+              icon={<AlertCircle className="size-6" />}
+              title="Couldn't load bookmarks"
+              description="The bookmarks endpoint returned an error. Try again shortly."
+              action={
+                <Button size="sm" variant="outline" onClick={() => refetchBookmarks()}>
+                  <RotateCcw className="size-3.5 mr-1" /> Retry
+                </Button>
+              }
+            />
           ) : (bookmarks?.length ?? 0) === 0 ? (
             <EmptyState
               icon={<Bookmark className="size-6" />}
@@ -142,6 +154,17 @@ export function CollectionsView() {
           </p>
           {hLoading ? (
             <LoadingSkeleton rows={8} />
+          ) : hError ? (
+            <EmptyState
+              icon={<AlertCircle className="size-6" />}
+              title="Couldn't load history"
+              description="The history endpoint returned an error. Try again shortly."
+              action={
+                <Button size="sm" variant="outline" onClick={() => refetchHistory()}>
+                  <RotateCcw className="size-3.5 mr-1" /> Retry
+                </Button>
+              }
+            />
           ) : historyFiltered.length === 0 ? (
             <EmptyState
               icon={<History className="size-6" />}
@@ -190,6 +213,17 @@ export function CollectionsView() {
         <TabsContent value="pinboards" className="mt-4">
           {pbLoading ? (
             <LoadingSkeleton variant="cards" cardCount={4} />
+          ) : pbError ? (
+            <EmptyState
+              icon={<AlertCircle className="size-6" />}
+              title="Couldn't load pinboards"
+              description="The pinboards endpoint returned an error. Try again shortly."
+              action={
+                <Button size="sm" variant="outline" onClick={() => refetchPinboards()}>
+                  <RotateCcw className="size-3.5 mr-1" /> Retry
+                </Button>
+              }
+            />
           ) : (pinboards?.length ?? 0) === 0 ? (
             <EmptyState
               icon={<Bookmark className="size-6" />}

@@ -20,15 +20,22 @@ import { assertSafeUserBaseURL } from "./openai-compatible-profile";
 
 export const id = "anthropic";
 
-export type Config = { baseURL?: string } & ProviderAuthOption<"optional">;
+export type Config = {
+  baseURL?: string;
+  // When true (user-configured provenance) the curated-local-provider loopback
+  // exemption is honored; otherwise loopback / RFC1918 / ULA are rejected.
+  allowLocalExemption?: boolean;
+} & ProviderAuthOption<"optional">;
 
 const auth = (options: ProviderAuthOption<"optional">) =>
   apiKeyAuth(options, "ANTHROPIC_API_KEY", "x-api-key");
 
 export function configure(input: Config = {}) {
  // (SSRF guard): validate any user-supplied baseURL override before
- // building the route/endpoint. The trusted default is exempt.
-  assertSafeUserBaseURL(input.baseURL, id);
+ // building the route/endpoint. The trusted default is exempt. Forward the
+ // user-provenance exemption flag so the curated-local-origin exemption applies
+ // only for a user-configured baseURL.
+  assertSafeUserBaseURL(input.baseURL, id, input.allowLocalExemption);
   const route = make({
     id: "anthropic-messages",
     provider: id,
@@ -42,6 +49,10 @@ export function configure(input: Config = {}) {
       "anthropic-version": AnthropicMessages.API_VERSION,
  // Lets browser contexts (extension service worker) call the API directly.
       "anthropic-dangerous-direct-browser-access": "true",
+ // Enables the 1-hour prompt-cache `ttl` emitted on system blocks by the
+ // anthropic-messages protocol; without this beta the API rejects the
+ // `ttl` field with a 400 invalid_request_error.
+      "anthropic-beta": "extended-cache-ttl-2025-04-11",
     },
   });
   return {

@@ -35,7 +35,7 @@ export default defineConfig({
       reporter: ['text', 'html'],
       // Scope coverage to shippable source so the first measured baseline
       // (once `--coverage` is run) isn't polluted by tests/config files.
-      include: ['src/**/*.ts'],
+      include: ['src/**/*.{ts,tsx}'],
       exclude: ['**/*.test.ts', '**/*.test.tsx', '**/*.config.ts', '**/*.config.mjs'],
     },
   },

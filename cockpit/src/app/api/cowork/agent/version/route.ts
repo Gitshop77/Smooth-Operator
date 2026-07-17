@@ -30,5 +30,5 @@ export async function GET(req: NextRequest): Promise<Response> {
     }, 200, {
       'cache-control': 'public, max-age=300',
     });
-  }, sanitizeRequestId(req.headers.get('x-request-id')));
+  }, sanitizeRequestId(req?.headers.get('x-request-id') ?? null));
 }

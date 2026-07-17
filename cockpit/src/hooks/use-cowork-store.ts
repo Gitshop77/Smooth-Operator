@@ -62,6 +62,19 @@ const ALL_VIEW_IDS: ReadonlySet<ViewId> = new Set<ViewId>([
   "chat", "security", "settings", "session-replay", "run-detail",
 ]);
 
+/**
+ * Resolve the view to restore on rehydrate. Clamps to `overview` any
+ * extension-only view (which is meaningless without the browser extension) or
+ * any drifted/unknown value, so a cold open never lands on an empty
+ * extension-only state or a broken view id.
+ */
+export function resolveInitialView(view: ViewId | null | undefined): ViewId {
+  if (view != null && !EXTENSION_ONLY_VIEWS.has(view) && ALL_VIEW_IDS.has(view)) {
+    return view;
+  }
+  return "overview";
+}
+
 interface CoworkState {
   /** Active dashboard view. */
   currentView: ViewId;
@@ -78,6 +91,10 @@ interface CoworkState {
   sidebarCollapsed: boolean;
   /** Whether the live event socket (port 3003) is connected. */
   socketConnected: boolean;
+  /** Connection lifecycle phase of the live event socket. Distinguishes the
+   * initial handshake window from a genuine outage so the UI does not alarm
+   * the user before the first connect resolves. */
+  socketStatus: "connecting" | "connected" | "disconnected";
   /** Last event received over the socket, shown in the footer. */
   lastEvent: string | null;
   /** Navigate to a view, optionally carrying context (e.g. a run id / session id). */
@@ -85,6 +102,7 @@ interface CoworkState {
   setSidebar: (open: boolean) => void;
   toggleSidebarCollapsed: () => void;
   setSocketConnected: (c: boolean) => void;
+  setSocketStatus: (s: "connecting" | "connected" | "disconnected") => void;
   setLastEvent: (e: string | null) => void;
 }
 
@@ -100,6 +118,7 @@ export const useCoworkStore = create<CoworkState>()(
       sidebarOpen: false,
       sidebarCollapsed: false,
       socketConnected: false,
+      socketStatus: "connecting",
       lastEvent: null,
       setView: (v, params) =>
         set({ currentView: v, viewParams: params ?? null, sidebarOpen: false }),
@@ -107,6 +126,7 @@ export const useCoworkStore = create<CoworkState>()(
       toggleSidebarCollapsed: () =>
         set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
       setSocketConnected: (c) => set({ socketConnected: c }),
+      setSocketStatus: (st) => set({ socketStatus: st }),
       setLastEvent: (e) => set({ lastEvent: e }),
     }),
     {
@@ -125,12 +145,16 @@ export const useCoworkStore = create<CoworkState>()(
       // a known, non-extension-only ViewId — closing the cold-open gap.
       merge: (persisted, current) => {
         const p = (persisted ?? {}) as Partial<CoworkState>;
-        const restored = p.currentView;
-        const safeView =
-          restored != null && !EXTENSION_ONLY_VIEWS.has(restored) && ALL_VIEW_IDS.has(restored)
-            ? restored
-            : "overview";
-        return { ...current, ...p, currentView: safeView } as CoworkState;
+        const safeView = resolveInitialView(p.currentView);
+        // Only restore the keys partialize actually writes (sidebarCollapsed +
+        // the clamped currentView). Fall back to the current (default) value
+        // when the persisted blob lacks a key, so a drifted/older `cowork-ui`
+        // blob can't overwrite the `false` default with `undefined`.
+        const restored = {
+          sidebarCollapsed: p.sidebarCollapsed ?? current.sidebarCollapsed,
+          currentView: safeView,
+        };
+        return { ...current, ...restored } as CoworkState;
       },
     },
   ),

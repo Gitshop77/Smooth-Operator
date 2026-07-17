@@ -124,8 +124,8 @@ model Bookmark {
 // WRITE CONTRACT: `url` is @unique. A re-insert of a revisited URL (e.g. the
 // same page visited twice) throws Prisma error P2002 (unique constraint
 // violation). Therefore every write path MUST use `upsert` (or `update`) keyed
-// on `url` — NEVER a raw `create`. The cockpit only GETs/DELETEs HistoryEntry;
-// the actual upsert write path lives in the extension. See
+// on `url` — NEVER a raw `create`. The cockpit owns the HistoryEntry upsert
+// write path (POST handler in history/route.ts:46-52); it also GETs/DELETEs. See
 // cockpit/src/lib/db.test.ts for the enforced contract test.
 
 model HistoryEntry {
@@ -372,6 +372,11 @@ model SiteMemory {
   id         String   @id @default(cuid())
   domain     String
  // JSON-encoded SiteData (visits[], diffs[], stats).
+ // REDACTION CONTRACT: dataJson may capture page content, form values, PII,
+ // credentials, tokens, or other secrets observed during visits. Write paths
+ // MUST redact sensitive values and truncate to a sane limit BEFORE persisting
+ // — never store raw captured data verbatim. Prefer storing only metadata when
+ // the sensitive payload is not required.
   dataJson   String
   version    Int      @default(1)
   capturedAt DateTime @default(now())
@@ -390,6 +395,11 @@ model FormMemory {
   id            String   @id @default(cuid())
   domain        String
  // JSON-encoded DomainFormData (entries[]).
+ // REDACTION CONTRACT: formDataJson holds the most sensitive autofill data
+ // (passwords, emails, OTPs, card numbers). Write paths MUST mask or HMAC
+ // high-sensitivity values BEFORE persisting — never store raw secrets
+ // verbatim. Values that need never be recovered (passwords, CVVs, OTPs)
+ // should not be persisted at all.
   formDataJson  String
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt

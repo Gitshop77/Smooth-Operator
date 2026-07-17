@@ -10,6 +10,7 @@ import type { Action } from "../schema";
 import { LIMITS } from "../constants";
 import type { ActionContext } from "./types";
 import { domFingerprint } from "../helpers";
+import { rejectOnAbort } from "./abort";
 import { checkUrlAllowed } from "../../security";
 import {
   getDomainConfig,
@@ -94,7 +95,17 @@ const DENY_EVAL = makeThrowingProxy("eval");
  * eval). The direct `Function`/`eval` identifiers are additionally shadowed as
  * throwing parameters on the generated function (see below).
  */
-const SANDBOX_DENIED_PROPS = new Set(["chrome", "Function", "eval"]);
+// `constructor` is also denied: a sandboxed script can reach the REAL
+// `Function` constructor through the prototype chain of any proxied global
+// (`window.constructor.constructor`, `globalThis.constructor.constructor`,
+// `self.constructor.constructor`) — those build a function in the live
+// content-script global where the free `chrome` identifier resolves to the
+// real extension global, re-opening the secret-exfil path. Denying
+// `constructor` on the hardened proxies closes that proxy-traversal escape.
+// (This does not cover `constructor` on real objects returned through the
+// proxy — e.g. `[].constructor.constructor` — which remains an architectural
+// gap owned outside this file; this is defense-in-depth, not a boundary.)
+const SANDBOX_DENIED_PROPS = new Set(["chrome", "Function", "eval", "constructor"]);
 
 /** A prop → lazy-value map. When a denied/redirected prop is accessed on a
  * hardened proxy, the getter is invoked and its result returned instead of the
@@ -259,7 +270,7 @@ function makeHardenedWindowLike(target: object, hardenedDoc: Document): object {
  * obfuscation only, not as a boundary.
  */
 const DOCUMENT_DENIED_PROPS = new Set([
-  "defaultView", "forms", "frames", "top", "parent", "opener", "window",
+  "defaultView", "forms", "frames", "top", "parent", "opener", "window", "constructor",
 ]);
 function makeHardenedDocument(target: Document): Document {
   return new Proxy(target, {
@@ -287,6 +298,77 @@ function makeHardenedDocument(target: Document): Document {
       return Reflect.getOwnPropertyDescriptor(t, prop);
     },
   }) as Document;
+}
+
+/**
+ * Run `code` in the hardened evaluate sandbox and return its synchronous
+ * result (or a pending Promise if the code returns one — callers must
+ * `await`/`Promise.race` as needed). The sandbox denies `chrome`,
+ * `Function`, `eval`, and the `window`/`globalThis`/`self`/`document`
+ * traversal paths to the real extension globals (see the traps above).
+ *
+ * Exported so the hardening can be regression-tested directly without the
+ * domain/registry/secret machinery of {@link handleEvaluate} — the test
+ * harness and this function share the exact same proxy construction, so a
+ * passing test proves the deny/throw paths hold.
+ */
+export function runSandboxedCode(code: string): unknown {
+ // `hardenedDocument` is created first so the window/global proxies can
+ // redirect `document` to it — this only obstructs the DIRECT traversal
+ // `window.document.defaultView.chrome`. It does NOT close the
+ // `document→chrome` path: `<anyNode>.ownerDocument.defaultView.chrome` and
+ // the `[].constructor.constructor` Function-constructor escape both still
+ // reach the real extension `chrome`. This is NOT a security boundary — the
+ // robust mitigation (secret store kept in the background service worker,
+ // `evaluate` run in a realm with no `chrome` binding, unconfirmed
+ // `evaluate` gated off untrusted origins) is architectural and owned
+ // outside this file.
+  const hardenedDocument = makeHardenedDocument(document);
+  const makeWindowProxy = (target: object): object =>
+    makeHardenedWindowLike(target, hardenedDocument);
+  const sandboxWindow = makeWindowProxy(
+    typeof window !== "undefined" ? (window as object) : (globalThis as object),
+  );
+  const sandboxGlobal = makeWindowProxy(globalThis as object);
+  const sandboxSelf = makeWindowProxy(
+    typeof self !== "undefined" ? (self as object) : (globalThis as object),
+  );
+ // Ensure the evaluated body never runs in strict mode: the generated
+ // function declares `eval`/`Function` as PARAMETERS, which are reserved
+ // names under strict mode and would make `new Function` throw
+ // `SyntaxError: Unexpected eval or arguments in strict mode` at creation
+ // time. Strip any leading directive and any leading comments (a strict
+ // snippet that begins with a comment would otherwise keep its directive
+ // and re-trigger the same SyntaxError).
+  const strippedCode = code
+    .replace(/^\s*(?:\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*\s*/, "")
+    .replace(/^\s*["']use strict["']\s*;?/, "");
+  const fn = new Function(
+    "chrome",
+    "window",
+    "document",
+    "globalThis",
+    "self",
+    "Function",
+    "eval",
+    strippedCode,
+  ) as (
+    c: unknown, w: unknown, d: unknown, g: unknown, s: unknown, f: unknown, ev: unknown,
+  ) => unknown;
+ // Bind `this` to the hardened window proxy so `this.chrome` /
+ // `this.Function` / `this.eval` cannot reach the real globals — `window`/
+ // `document`/`globalThis`/`self` remain readable on `this` through the
+ // denying/redirecting proxy.
+  return fn.call(
+    sandboxWindow,
+    DENY_CHROME,
+    sandboxWindow,
+    hardenedDocument,
+    sandboxGlobal,
+    sandboxSelf,
+    DENY_FUNCTION,
+    DENY_EVAL,
+  );
 }
 
 export async function handleEvaluate(
@@ -452,107 +534,7 @@ export async function handleEvaluate(
  // HIGH-185).
  // Do NOT rely on this handler for confidentiality; the mitigation is
  // architectural and owned elsewhere.
-    const denyChrome = DENY_CHROME;
- // `hardenedDocument` is created first so the window/global proxies can
- // redirect `document` to it — this only obstructs the DIRECT traversal
- // `window.document.defaultView.chrome`. It does NOT close the
- // `document→chrome` path: `<anyNode>.ownerDocument.defaultView.chrome` and
- // the `[].constructor.constructor` Function-constructor escape both still
- // reach the real extension `chrome` .
- // This is NOT a security boundary — the robust mitigation (secret store kept
- // in the background service worker, `evaluate` run in a realm with no
- // `chrome` binding, unconfirmed `evaluate` gated off untrusted origins) is
- // architectural and owned outside this file (see makeHardenedDocument). The
- // window/global/self proxies are recursively hardened so traversal
- // properties (`top`/`parent`/`opener`/`frames`/`self`) cannot expose the
- // real `chrome` either (finding: evaluate sandbox correctness depends on
- // content-script isolation semantics).
-    const hardenedDocument = makeHardenedDocument(document);
-    const makeWindowProxy = (target: object): object =>
-      makeHardenedWindowLike(target, hardenedDocument);
-    const sandboxWindow = makeWindowProxy(
-      typeof window !== "undefined" ? (window as object) : (globalThis as object),
-    );
-    const sandboxGlobal = makeWindowProxy(globalThis as object);
-    const sandboxSelf = makeWindowProxy(
-      typeof self !== "undefined" ? (self as object) : (globalThis as object),
-    );
- // We deliberately do NOT inject `"use strict";` into the wrapper body.
- // `eval`/`arguments` are reserved parameter names under strict mode, so a
- // strict function cannot declare an `eval` parameter — `new Function(...)`
- // throws `SyntaxError: Unexpected eval or arguments in strict mode` at
- // *creation* time, which previously broke EVERY `evaluate` call in
- // `full_agentic` mode (finding: evaluate handler broken by strict-mode eval
- // parameter). We instead run the wrapper in SLOPPY mode and neutralize the
- // `this` escape (sloppy-mode `this` would otherwise be the content-script
- // global, re-exposing the real `chrome`/`Function`/`eval`) by binding `this`
- // to the hardened window proxy in the `fn.call(...)` below. `Function` and
- // `eval` are still shadowed as throwing parameters, so direct
- // `new Function(...)` / `eval(...)` references inside the code are blocked.
- // Ensure the evaluated body never runs in strict mode. The generated
- // function declares `eval` (and `Function`) as PARAMETERS so bare
- // references resolve to our throwing stubs; under strict mode `eval`/
- // `arguments` are illegal parameter names and `new Function` would throw
- // `SyntaxError: Unexpected eval or arguments in strict mode` at creation
- // time, breaking EVERY evaluate call (finding: evaluate handler broken by
- // strict-mode eval parameter). We don't inject "use strict" ourselves, but
- // LLM/user code could place a "use strict" directive at the top of `code`,
- // which would re-trigger that same SyntaxError. Strip a leading directive
- // (after first removing any leading line/block comments — a strict snippet
- // that begins with a comment like `// generated\n"use strict";` would
- // otherwise keep its directive, the wrapper would become strict, and
- // `new Function` would throw `SyntaxError: Unexpected eval or arguments in
- // strict mode` because we declare `eval`/`Function` as parameters;
- // finding: incomplete "use strict" stripping breaks valid strict-mode code
- // with a leading comment) so the body stays sloppy and the `eval`/`Function`
- // parameter shadows stay valid (and keep blocking bare `new Function(...)`
- // / `eval(...)` escapes). We only remove the directive and any leading
- // comments. IMPORTANT: this silently DOWNGRADES strict-mode code to sloppy
- // mode. Removing `"use strict"` changes runtime semantics — `this` is no
- // longer `undefined` (it binds to the hardened window proxy via `fn.call`),
- // `with` is re-enabled, assignments to undeclared variables become allowed,
- // and some error/throw semantics differ. Strict-mode `evaluate` snippets
- // therefore run with DIFFERENT semantics than authored; this is a known,
- // documented limitation of the `eval`/`Function` parameter-shadow mechanism,
- // NOT a no-op transform (finding: evaluate silently strips "use strict",
- // contradicting the "logic unchanged" comment). The downgrade is required so
- // the wrapper can declare `eval`/`Function` as parameters without tripping
- // `SyntaxError: Unexpected eval or arguments in strict mode`. We keep the
- // `eval`/`Function` parameter names rather than renaming them, because they
- // are what shadow the bare `eval`/`Function` identifiers to throwing stubs
- // — renaming them would re-open the direct `eval(...)` escape.
-    const strippedCode = code
-      .replace(/^\s*(?:\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*\s*/, "")
-      .replace(/^\s*["']use strict["']\s*;?/, "");
-    const fn = new Function(
-      "chrome",
-      "window",
-      "document",
-      "globalThis",
-      "self",
-      "Function",
-      "eval",
-      strippedCode,
-    ) as (
-      c: unknown, w: unknown, d: unknown, g: unknown, s: unknown, f: unknown, ev: unknown,
-    ) => unknown;
- // `Function` and `eval` are shadowed as throwing parameter stubs so a direct
- // `new Function(...)` / `eval(...)` reference inside the code cannot escape
- // the sandbox by building a function in the global scope (finding: evaluate
- // sandbox is bypassable via new Function / indirect eval). We bind `this` to
- // the hardened window proxy so `this.chrome` / `this.Function` / `this.eval`
- // cannot reach the real globals — `window`/`document`/`globalThis`/`self`
- // remain readable on `this` through the denying/redirecting proxy.
-    const syncResult = fn.call(
-      sandboxWindow,
-      denyChrome,
-      sandboxWindow,
-      hardenedDocument,
-      sandboxGlobal,
-      sandboxSelf,
-      DENY_FUNCTION,
-      DENY_EVAL,
-    );
+    const syncResult = runSandboxedCode(code);
  // If the result is a Promise, race it against a timeout.
     let result: unknown = syncResult;
     if (syncResult instanceof Promise) {
@@ -560,10 +542,14 @@ export async function handleEvaluate(
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error(`evaluate timed out after ${LIMITS.evaluateTimeoutMs}ms`)), LIMITS.evaluateTimeoutMs);
       });
+ // Also race the step's abort signal so a user STOP is honored while async
+ // evaluated code is still pending, rather than waiting out the full timeout.
+      const abort = rejectOnAbort(ctx.signal);
       try {
-        result = await Promise.race([syncResult, timeout]);
+        result = await Promise.race([syncResult, timeout, abort.promise]);
       } finally {
         if (timer) clearTimeout(timer);
+        abort.cleanup();
       }
     }
  // Only report `pageChanged` when the page actually changed.

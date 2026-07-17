@@ -75,6 +75,21 @@ export interface LLMRequest {
   readonly generation?: GenerationOptions;
   readonly providerOptions?: Record<string, unknown>;
   readonly schema?: unknown;
+  /**
+   * When true, the provider handles a reasoning/thinking model that rejects
+   * `temperature` (and `frequency_penalty`) and expects `max_completion_tokens`
+   * instead of `max_tokens`. Protocols omit those params accordingly.
+   */
+  readonly reasoning?: boolean;
+  /**
+   * When true, request OpenAI "strict" JSON-schema structured output
+   * (`response_format: { type: "json_schema", strict: true }`). When false
+   * (or unset and the protocol defaults to non-strict), fall back to
+   * `response_format: { type: "json_object" }` and rely on the in-prompt
+   * schema contract — required for OpenAI-compatible providers that 400 on
+   * strict mode (DeepSeek, Ollama, Qwen, Fireworks, …).
+   */
+  readonly structuredOutputStrict?: boolean;
 }
 
 export interface LLMResponse {

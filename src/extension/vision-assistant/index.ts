@@ -4,5 +4,6 @@
 
 export { VisionAssistant } from "./inference";
 export { mergeDetections, renderMergedElementsText, type MergedElement } from "./merger";
+export { ALL_MODEL_FILE_URLS } from "./model-loader";
 export type { Detection, PixelDetection, VisionStatus, DownloadProgress, StatusCallback } from "./types";
 export * from "./constants";

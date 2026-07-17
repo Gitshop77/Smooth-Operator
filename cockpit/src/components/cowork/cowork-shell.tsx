@@ -5,6 +5,7 @@ import { AnimatePresence, MotionConfig, motion } from "framer-motion";
 
 import { useCoworkStore } from "@/hooks/use-cowork-store";
 import { useCoworkWebSocket } from "@/hooks/use-websocket";
+import { AppErrorBoundary } from "@/components/cowork/providers";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Header } from "@/components/layout/header";
 import { Footer } from "@/components/layout/footer";
@@ -102,11 +103,21 @@ const EXTENSION_ONLY_IDS = new Set<ViewId>([
 export function CoworkShell() {
   const currentView = useCoworkStore((s) => s.currentView);
   const socketConnected = useCoworkStore((s) => s.socketConnected);
+  const socketStatus = useCoworkStore((s) => s.socketStatus);
   useCoworkWebSocket();
+
+  const [bannerDismissed, setBannerDismissed] = React.useState(false);
+
+  // Re-arm the banner whenever the socket reconnects.
+  React.useEffect(() => {
+    if (socketConnected) setBannerDismissed(false);
+  }, [socketConnected]);
 
   const View = VIEWS[currentView] ?? TabsView;
   const isExtensionOnly = EXTENSION_ONLY_IDS.has(currentView);
   const meta = VIEW_META[currentView];
+
+  const showOfflineBanner = socketStatus === "disconnected" && !bannerDismissed;
 
   return (
     <MotionConfig reducedMotion="user">
@@ -126,6 +137,26 @@ export function CoworkShell() {
           {/* Main column */}
           <div className="flex-1 flex flex-col min-w-0">
             <Header />
+            {showOfflineBanner && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="flex items-center justify-between gap-3 border-b border-border bg-muted/40 px-4 py-2 text-sm text-muted-foreground"
+              >
+                <span>
+                  Connection to the Open Cowork service is down — data shown may
+                  be stale. Reconnect the extension or check the service, then
+                  reload.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setBannerDismissed(true)}
+                  className="shrink-0 rounded border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
             <main id="main-content" tabIndex={-1} className="flex-1 p-4 sm:p-6 cowork-scroll outline-none">
               <AnimatePresence mode="wait">
                 <motion.div
@@ -136,18 +167,20 @@ export function CoworkShell() {
                   transition={{ duration: 0.18, ease: "easeOut" }}
                   className="mx-auto max-w-7xl"
                 >
-                  {isExtensionOnly ? (
-                    socketConnected ? (
-                      <View />
+                  <AppErrorBoundary key={currentView}>
+                    {isExtensionOnly ? (
+                      socketConnected ? (
+                        <View />
+                      ) : (
+                        <ExtensionOnly
+                          title={`${meta?.label ?? "This view"} needs the extension`}
+                          description="This view reflects live data from the Open Cowork browser extension. Connect the extension to see it here."
+                        />
+                      )
                     ) : (
-                      <ExtensionOnly
-                        title={`${meta?.label ?? "This view"} needs the extension`}
-                        description="This view reflects live data from the Open Cowork browser extension. Connect the extension to see it here."
-                      />
-                    )
-                  ) : (
-                    <View />
-                  )}
+                      <View />
+                    )}
+                  </AppErrorBoundary>
                 </motion.div>
               </AnimatePresence>
             </main>

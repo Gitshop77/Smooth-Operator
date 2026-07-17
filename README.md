@@ -15,6 +15,9 @@ It runs entirely on your machine. Bring your own API key from whichever LLM prov
 > [!WARNING]
 > Automating another site is still subject to *that site's* Terms of Service — Open Cowork just gives you the tool. Whether a particular use is allowed is on you to check.
 
+> [!NOTE]
+> **Anti-detection / stealth patches are opt-in and OFF by default.** Open Cowork includes 13 MAIN-world "stealth" patches (spoofing `navigator.webdriver`, `window.chrome`, WebGL vendor/renderer, screen geometry, and more) that reduce bot-detection cues on the pages the agent visits. Circumventing a site's automation/bot-detection defenses can violate that site's Terms of Service — especially when the agent runs with real API keys and real money at stake. The patches are therefore **disabled unless you explicitly enable them** via the `stealthEnabled` option in the extension's Settings page. No flag, a `false` flag, or any non-`true` value leaves them off. Enable them only for sites you are authorized to automate, and accept the ToS responsibility yourself.
+
 ## Inspired by
 
 Open Cowork wouldn't exist without their work:
@@ -68,6 +71,14 @@ This builds the Chrome extension (esbuild, ~2s) and the Cockpit dashboard (Next.
 > [!TIP]
 > Only want the browser agent and don't need the dashboard? Run `npm run build:extension` instead — it skips the Cockpit build and finishes in ~2 seconds.
 
+### Load the extension
+
+In Chrome:
+1. Go to `chrome://extensions`
+2. Turn on **Developer mode**, top right corner
+3. Click **Load unpacked** and select the `chrome-extension/` folder
+4. Pin **Open Cowork** to your toolbar
+
 ### Start the Cockpit dashboard (optional)
 
 The Cockpit dashboard runs as a separate local web server. It does **not** start automatically when you load the extension — you need to start it manually:
@@ -78,18 +89,19 @@ npm run dev:cockpit
 
 This starts the Next.js dev server on `http://localhost:3000`. Keep this terminal window open while you use the dashboard. Click **Open cockpit dashboard** in the side panel to open it in a new tab.
 
+> [!IMPORTANT]
+> The Cockpit keeps its data in a local SQLite database that is **not** created by `npm run dev:cockpit` or `npm run build:cockpit` on their own. Before the dashboard works you must:
+> 1. Install the sub-package dependencies once with `npm run bootstrap` (the `npm install` at the top installs only the repo-root packages).
+> 2. Create the database schema once with `cd cockpit && npx prisma db push` (the CI pipeline runs this for you; a local first run does not).
+>
+> Skipping step 2 gives a dashboard that builds fine but returns 500 on every query because the tables don't exist yet.
+
 For production use (faster page loads, no hot-reload):
 
 ```bash
 npm run build:cockpit
 cd cockpit && npm start
 ```
-
-Then, in Chrome:
-1. Go to `chrome://extensions`
-2. Turn on **Developer mode**, top right corner
-3. Click **Load unpacked** and select the `chrome-extension/` folder
-4. Pin **Open Cowork** to your toolbar
 
 ### Connect a model
 
@@ -102,7 +114,7 @@ The extension talks to your LLM provider directly.
 5. On an OpenAI-compatible provider (DeepSeek, Qwen, Groq, Ollama, etc.), the **Base URL** fills itself in
 6. Click **Save**
 
-| Provider | Example models | Vision-capable models | Get a key |
+| Provider | Example model IDs (verify vs. your provider; the field auto-suggests live models) | Vision-capable models | Get a key |
 |---|---|---|---|
 | **Ollama** (local, free) | `llama3.3`, `qwen3-vl`, `phi4` | qwen3-vl, llama3.2-vision, minicpm-v | [ollama.com](https://ollama.com) |
 | **OpenCode** | any of 75+ routed models | varies by model | [opencode.ai/docs/providers](https://opencode.ai/docs/providers) |
@@ -192,6 +204,7 @@ Every action the agent has access to, grouped by what it's actually doing:
 | `notifications` | Shows a desktop notification when a run, or a scheduled task, finishes |
 | `unlimitedStorage` | Lifts the default 10 MB cap so run history has room to grow |
 | `power` | Keeps your computer awake while a scheduled task is waiting to fire |
+| `webRequest` | Observes network responses so the agent can detect anti-bot / challenge pages (Cloudflare, hCaptcha, reCAPTCHA) and back off |
 | `http://*/*` + `https://*/*` | Lets the extension call any LLM's API directly, without CORS issues, and inject its content script on any web page (narrower than `<all_urls>` — `file://` and `data:` URLs are blocked by design) |
 
 ## Security
@@ -209,16 +222,16 @@ API keys live in `chrome.storage.local` and persist across restarts. Your secret
 
 ```bash
 # One-command dev — starts everything at once (cross-platform: Windows / Linux / macOS)
-npm install && npm run dev
+npm install && npm run bootstrap && npm run dev
 #   └─ dev runs 3 processes in parallel via `concurrently`:
 #        [ext]      extension watch-build (esbuild --watch)
 #        [cockpit]  Next.js cockpit dashboard → http://localhost:3000
 #        [events]   cowork-events mini-service → http://localhost:3003
-#      The postinstall hook auto-installs the cockpit + mini-service sub-packages.
+#      `npm run bootstrap` installs the cockpit + mini-service sub-packages.
 #      Ctrl+C stops all three at once.
 
 npm run lint             # ESLint
-npm run test             # Vitest (778 tests)
+npm run test             # Vitest
 npm run test:watch       # Vitest watch mode
 npm run test:coverage    # Vitest with coverage
 npm run build:extension  # Build Chrome extension (esbuild, one-shot)
@@ -250,7 +263,7 @@ open-cowork-chrome-extension/
 ├── cockpit/                 Next.js 16 dashboard (Prisma/SQLite)
 ├── mini-services/
 │   └── cowork-events/       WebSocket + AI-proxy service (port 3003)
-├── tests/                   778 tests / 42 files (Vitest)
+├── tests/                   Vitest suites (root + cockpit + events)
 ├── .github/                 CI (npm) + Dependabot
 ├── docs/safety.md           12 trust-boundary rules
 └── package.json
@@ -269,7 +282,7 @@ open-cowork-chrome-extension/
 - [x] Scheduled tasks (interval / daily / weekly) with keep-awake support
 - [x] Run history with full transcripts and cost/token tracking
 - [x] Secret substitution (`%varName%` — the model never sees real values)
-- [x] Anti-detection (13 stealth patches: webdriver, plugins, WebGL, and more)
+- [x] Anti-detection (13 stealth patches: webdriver, plugins, WebGL, and more) — **opt-in, OFF by default** (see note below)
 - [x] Anti-bot challenge detection (Cloudflare, hCaptcha, reCAPTCHA)
 - [x] CDP pixel-perfect click fallback (5-strategy click)
 - [x] Loop detection (repeated actions, stagnant pages, goal-level stalls)
@@ -281,7 +294,7 @@ open-cowork-chrome-extension/
 - [x] Keyboard shortcut (`Ctrl+E` / `Cmd+E`)
 - [x] Local Vision Assistant (LocateAnything-3B via WebGPU, 2.1 GB, INT4)
 - [x] npm as the default runtime across CI, scripts, and docs
-- [x] 778 passing tests (Vitest)
+- [x] Vitest test suites passing (root + cockpit + events)
 
 ### Building now
 - [ ] Real-time tab/agent view in the Cockpit dashboard (currently read-mostly)
@@ -305,4 +318,4 @@ Issues and pull requests are welcome. If you're adding a new domain skill or LLM
 
 ## License
 
-MIT — do what you want with it. Third-party attributions and license terms (shadcn/ui, Radix UI, HuggingFace transformers, models.dev) are maintained in the repository.
+MIT — do what you want with it. Dependency licenses are governed by each package's own license (see `package.json`, `cockpit/package.json`, `mini-services/cowork-events/package.json`, and the installed `node_modules`).

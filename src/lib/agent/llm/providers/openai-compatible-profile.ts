@@ -45,7 +45,7 @@ export const profiles = {
  // but does NOT honor the full `json_schema` variant reliably across model
  // families. Default false so the in-prompt schema fallback fires.
   ollama: { provider: "ollama", baseURL: "http://localhost:11434/v1", supportsStructuredOutput: false },
-  opencode: { provider: "opencode", baseURL: "https://opencode.ai/api/v1", supportsStructuredOutput: true },
+  opencode: { provider: "opencode", baseURL: "https://opencode.ai/zen/v1", supportsStructuredOutput: true },
  // LiteLLM is a proxy — structured-output support depends on the upstream
  // model it routes to, which we can't know at config time. Default false so
  // the fallback fires; users whose upstream supports it can override.
@@ -111,15 +111,33 @@ function redactUrl(u: string): string {
 export const assertSafeUserBaseURL = (
   baseURL: string | undefined,
   provider?: string,
+  // `allowLocalExemption` is true only for a USER-configured `baseURL`
+  // (provenance === "user"). It re-enables the curated-local-provider loopback
+  // exemption so a user's own Ollama / LiteLLM keeps working. For any other
+  // provenance (injected / unknown) it stays `false`, so a loopback / RFC1918 /
+  // ULA `baseURL` smuggled through an arbitrary provider id (e.g. `deepseek`,
+  // `groq`) is rejected. Defaults to `false` so a direct call with no provenance
+  // is always strict.
+  allowLocalExemption: boolean = false,
 ): void => {
   if (!baseURL) return; // no user-supplied override → use the curated profile
   if (provider && LOCAL_PROVIDER_IDS.has(provider) && isCuratedLocalOrigin(baseURL)) {
+    // The curated-local exemption is scoped to the exact ollama/litellm origins
+    // and is the one path by which a local endpoint is ever re-allowed, so it is
+    // applied here regardless of provenance (see module TRADE-OFF note).
     if (!isAllowedLlmBaseUrl(baseURL)) {
       throw new UnsafeBaseUrlError(`Unsafe LLM baseUrl rejected (SSRF guard): ${redactUrl(baseURL)}`);
     }
     return;
   }
-  const res = validateLlmBaseUrl(baseURL);
+ // For every non-curated-local provider (or an unknown provenance) apply the
+ // policy selected by `allowLocalExemption`: when `false` (the default,
+ // including any injected / untrusted `baseURL`) a loopback / RFC1918 / ULA
+ // `baseURL` smuggled through an arbitrary provider id (e.g. `deepseek`,
+ // `groq`) is rejected; when `true` (user-configured) the curated-local
+ // exemption above is the only path that re-allows loopback, and only for the
+ // exact ollama/litellm origins.
+  const res = validateLlmBaseUrl(baseURL, allowLocalExemption);
   if (!res.ok) {
     throw new UnsafeBaseUrlError(`Unsafe LLM baseUrl rejected (SSRF guard): ${redactUrl(baseURL)} (${res.reason})`);
   }

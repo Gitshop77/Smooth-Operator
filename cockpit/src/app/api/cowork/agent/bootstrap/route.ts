@@ -14,7 +14,7 @@ import {
 export async function GET(req: NextRequest): Promise<Response> {
  // Thread the middleware-minted request id so a 500's correlationId matches
  // the `[cowork request]` log line and the response `x-request-id` header.
-  const requestId = sanitizeRequestId(req.headers.get('x-request-id'));
+  const requestId = sanitizeRequestId(req?.headers.get('x-request-id') ?? null);
   return withRouteError(async () => {
     const version = getVersion();
     const baseUrl = getBaseUrl();

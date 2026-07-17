@@ -17,6 +17,7 @@ import { classifyError, friendlyErrorMessage } from "../src/lib/agent/errors";
 import { checkActionAllowed, MODE_CONFIGS, requiresConfirmation } from "../src/lib/agent/modes";
 import { listSecrets, setSecret, deleteSecret, redactSecrets, substituteSecrets } from "../src/lib/agent/secrets";
 import { describeAction } from "../src/lib/agent/tools/executor";
+import { ACTION_METADATA } from "../src/lib/agent/tools/schema";
 import { RunBuilder, saveRun, loadRuns } from "../src/lib/agent/run-history";
 import type { AgentAction, LogEvent } from "../src/lib/agent/types";
 import { installLocalStorageStub, restoreLocalStorageStub } from "./helpers";
@@ -445,6 +446,9 @@ describe("checkUrlAllowed", () => {
     expect(result.reason).toBeDefined();
     expect(typeof result.reason).toBe("string");
     expect((result.reason ?? "").length).toBeGreaterThan(0);
+    // The reason must reference the blocking POLICY (not be an empty/placeholder
+    // string), so a regression returning a meaningless reason still fails.
+    expect(result.reason).toMatch(/block|deny|not allow|scheme/i);
   });
 
  // ─── scheme-floor URL policy (SECURITY-CRITICAL) ─────────────────────────
@@ -616,23 +620,11 @@ describe("checkActionAllowed + modes", () => {
   });
 
   test("full_agentic mode allows everything", () => {
- // Verify ALL 32 actions are allowed in full_agentic mode.
- // The list mirrors the action union in `src/lib/agent/tools/schema.ts`
- // (verified by tests/schema-sync.test.ts). Pre-fix this list silently
- // omitted 5 actions (press_and_hold + the 4 alert_* actions); those were
- // exactly the actions that the modes.ts `default` fail-closed branch was
- // blocking, so the omission hid the bug. The list is now exhaustive.
-    const allActions = [
-      "click", "input", "select_dropdown", "scroll", "send_keys",
-      "navigate", "switch_tab", "close_tab", "go_back", "wait",
-      "find_text", "extract", "done", "search", "upload_file",
-      "screenshot", "save_as_pdf", "dropdown_options", "search_page",
-      "find_elements", "evaluate", "hover", "press_and_hold",
-      "ask_human", "takeover", "verify", "load_skill",
-      "alert_accept", "alert_dismiss", "alert_get_text", "alert_send_keys",
-      "detect_visual",
-    ];
-    expect(allActions).toHaveLength(32);
+ // Walk the authoritative action registry so a newly-added action that the
+ // modes.ts `default` fail-closed branch blocks in full_agentic is caught
+ // here instead of being silently excluded from a hand-maintained literal.
+    const allActions = [...Object.keys(ACTION_METADATA)] as string[];
+    expect(allActions.length).toBeGreaterThan(0);
     for (const action of allActions) {
       expect(checkActionAllowed(action, "full_agentic").allowed).toBe(true);
     }
@@ -736,6 +728,37 @@ describe("redactSecrets", () => {
     const out = await redactSecrets("nothing to redact");
     expect(out).toBe("nothing to redact");
   });
+
+  test("redacts secret values containing regex metacharacters", async () => {
+    await setSecret("alt", "a|b");
+    await setSecret("dollar", "$$");
+    await setSecret("paren", "(");
+    const out = await redactSecrets("value a|b and $$ end (done)");
+    expect(out).not.toContain("a|b");
+    expect(out).not.toContain("$$");
+    expect(out).not.toContain("(");
+    expect(out).toContain("[REDACTED:alt]");
+    expect(out).toContain("[REDACTED:dollar]");
+    expect(out).toContain("[REDACTED:paren]");
+  });
+
+  test("redactSecrets escapes a fully-packed regex-metacharacter secret (ReDoS/throw guard)", async () => {
+    // `redactSecrets` escapes each secret before building its match pattern, so
+    // a value packed with every regex metacharacter (`.*+?^${}()|[]\`) is matched
+    // literally — never interpreted as a pattern. This pins the contract directly
+    // (the messages-redaction suite covers it via buildNavigatorUserMessage) and
+    // guards against both ReDoS and a runtime `RegExp`-construction throw. The
+    // `resolves` assertion proves the RegExp is built without throwing.
+    const secretValue = ".*+?^${}()|[]\\secret";
+    await setSecret("resex", secretValue);
+    try {
+      const out = await redactSecrets(`42: username ${secretValue}`);
+      expect(out).not.toContain(secretValue);
+      expect(out).toContain("[REDACTED:resex]");
+    } finally {
+      await deleteSecret("resex");
+    }
+  });
 });
 
 // ─── secret values must not leak into LLM context or persisted logs ──────────
@@ -822,5 +845,51 @@ describe("secret leak prevention", () => {
 
     const persisted = await loadRuns();
     expect((persisted[0].steps[0] as LogEvent & { message: string }).message).toBe("Clicked [5] <button>");
+  });
+
+  test("(run-history layer) saveRun redacts secret values across every string field (url, pageInfo, result.text, task)", async () => {
+    await setSecret("api_key", "sk-fieldwide-secret-777");
+    const SECRET = "sk-fieldwide-secret-777";
+
+    // Place the secret in four distinct string-bearing surfaces that
+    // redactRunSecrets walks: the run task, a state event's url + pageInfo,
+    // and the run result text. A regression that narrowed the field walk
+    // (e.g. only scanned `message`) would leak the secret into storage and
+    // this test would catch it.
+    const builder = new RunBuilder(`search for ${SECRET} in the docs`);
+    const stateEvent: LogEvent = {
+      type: "state",
+      step: 1,
+      url: `https://example.com/login?token=${SECRET}`,
+      elementCount: 3,
+      newElementCount: 0,
+      pageInfo: `scrolled near ${SECRET}`,
+    };
+    builder.addEvent(stateEvent);
+    const run = builder.finish({ success: true, text: `the answer is ${SECRET}` });
+
+    localStorage.removeItem("open_cowork_run_history");
+    await saveRun(run);
+
+    const persisted = await loadRuns();
+    expect(persisted).toHaveLength(1);
+    const rec = persisted[0];
+
+    // run.task
+    expect(rec.task).not.toContain(SECRET);
+    expect(rec.task).toContain("[REDACTED:api_key]");
+
+    // result.text
+    expect(rec.result).not.toBeNull();
+    expect(rec.result!.text).not.toContain(SECRET);
+    expect(rec.result!.text).toContain("[REDACTED:api_key]");
+
+    // state event: url + pageInfo
+    const persistedState = rec.steps[0] as LogEvent & { url: string; pageInfo: string };
+    expect(persistedState.type).toBe("state");
+    expect(persistedState.url).not.toContain(SECRET);
+    expect(persistedState.url).toContain("[REDACTED:api_key]");
+    expect(persistedState.pageInfo).not.toContain(SECRET);
+    expect(persistedState.pageInfo).toContain("[REDACTED:api_key]");
   });
 });

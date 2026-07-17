@@ -90,6 +90,9 @@ function installMinimalDomStubs(): void {
 
 function clearMinimalDomStubs(): void {
   clearDomainAllowlist();
+ // Also clear the enforcement flag so a test that sets it (and lets the
+ // config go absent) cannot leak fail-closed state into the next test.
+  delete (globalThis as Record<string, unknown>).__openCoworkDomainConfigEnforced;
  // Restore the real jsdom-provided globals so the next describe (which may
  // use real DOM APIs like `document.createElement`) sees a live document.
  // The originals were captured at module load before any stub was installed.
@@ -246,6 +249,24 @@ describe("executeAction — evaluate", () => {
     );
     expect(result.success).toBe(false);
     expect(result.message).toContain("BLOCKED evaluate");
+ // The JS must NOT have run (no result surfaced).
+    expect(result.extractedContent).toBeUndefined();
+  });
+
+  test("evaluate fails closed (BLOCKED) when a domain policy is enforced but the config is missing", async () => {
+ // Distinct from the no-allowlist test above: that path relies on
+ // `requireAllowlist` (no allowlist at all → BLOCKED). Here a policy WAS
+ // configured (enforcement flag set) but the config payload is absent — a
+ // silently-vanishing policy must still block `evaluate` rather than allow-all.
+    (globalThis as Record<string, unknown>).__openCoworkDomainConfigEnforced = true;
+    delete (globalThis as Record<string, unknown>).__openCoworkDomainConfig;
+    const result = await executeAction(
+      { type: "evaluate", code: "return 1 + 2" },
+      emptyState(),
+    );
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("BLOCKED");
+    expect(result.message).toContain("enforced");
  // The JS must NOT have run (no result surfaced).
     expect(result.extractedContent).toBeUndefined();
   });

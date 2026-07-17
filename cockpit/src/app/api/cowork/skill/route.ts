@@ -56,18 +56,16 @@ ${AGENT_OPERATING_RULES.map(rule => `- ${rule}`).join('\n')}
 - \`POST ${baseUrl}/api/cowork/workspaces\` — body \`{ name, icon?, color? }\`
 - \`POST ${baseUrl}/api/cowork/sessions\` — body \`{ name, partition?, isIncognito?, userAgent? }\`
 - \`POST ${baseUrl}/api/cowork/workflows\` — body \`{ name, description?, steps?, isRecurring?, scheduleCron? }\`
-- \`POST ${baseUrl}/api/cowork/bookmarks\` — body \`{ name, url, parentId? }\`
+- \`POST ${baseUrl}/api/cowork/bookmarks\` — body \`{ name, url?, parentId?, type?: "url" | "folder" }\`
 - \`POST ${baseUrl}/api/cowork/pinboards\` — body \`{ name, color? }\`
 
 ## Delete endpoints (DELETE)
 - \`DELETE ${baseUrl}/api/cowork/history?id=<historyEntryId>\` — erase one history entry
-- \`DELETE ${baseUrl}/api/cowork/history?all=1\` (body \`{ confirm: true }\`) — **wipe all** browsing history (requires explicit confirmation)
 - \`DELETE ${baseUrl}/api/cowork/memory/site?id=<id>\` — erase one per-site memory entry
 - \`DELETE ${baseUrl}/api/cowork/memory/form?id=<id>\` — erase one form-memory entry
 - \`DELETE ${baseUrl}/api/cowork/ai/chat?messageId=<id>\` or \`?sessionId=<id>\` — erase chat message(s)
-- \`DELETE ${baseUrl}/api/cowork/ai/chat?all=1\` (body \`{ confirm: true }\`) — **wipe all** chat messages (requires explicit confirmation)
 
-**Mass-deletion hazard:** \`?all=1\` on \`/history\` and \`/ai/chat\` wipes every stored row. Never trigger these without explicit user confirmation.
+**Mass-deletion hazard:** Bulk erasure of stored data requires explicit server-side confirmation; never autoconfirm a bulk erase.
 
 ## AI proxy
 - \`POST ${baseUrl}/api/cowork/ai/chat\` — body \`{ messages, sessionId }\`

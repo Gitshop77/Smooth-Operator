@@ -1,6 +1,6 @@
 // Returns the full catalog of MCP tools.
 import type { NextRequest } from 'next/server';
-import { json, withRouteError } from '@/lib/cowork/api/http';
+import { json, withRouteError, sanitizeRequestId } from '@/lib/cowork/api/http';
 
 export async function GET(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
@@ -26,7 +26,7 @@ export async function GET(req: NextRequest): Promise<Response> {
       total: tools.length,
       totalCatalog: CATALOG.length,
     });
-  });
+  }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
 }
 
 interface ToolEntry {

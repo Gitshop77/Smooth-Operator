@@ -45,14 +45,11 @@ export function nonEmptyString(max: number): z.ZodString {
  * • `*` (optionally followed by `/step`)
  * • a number (optionally `n/step`, `n-m`, or `n-m/step`)
  * • `?` (allowed for cron's day-of-month / day-of-week "no specific value")
- * This rejects the degenerate input the previous loose character class
- * permitted — bare `-` or `/`, leading/trailing/doubled separators, and token
- * soup such as `*,` or `5?`.
+ * Rejects bare `-`/`/`, leading/trailing/doubled separators, and forms like `5?`.
  */
-// One component of a cron field, factored out so the (ReDoS-safe, anchored)
-// grammar is defined exactly once and composed below. Kept disjoint so a `*` can
-// carry only a step (never a range) and a numeric can carry a range or a step
-// (never both) — this vetoes degenerate forms like `*-5` or `5/5-10`.
+// One component of a cron field. Disjoint so a `*` carries only a step (never a
+// range) and a numeric carries a range or a step (never both), vetoing degenerate
+// forms like `*-5` or `5/5-10`. Anchored/ReDoS-safe.
 const CRON_STAR = '\\*(?:\\/[1-9]\\d*)?';
 const CRON_NUM = '\\d+(?:-\\d+)?(?:\\/[1-9]\\d*)?';
 const CRON_COMP = '(?:' + CRON_STAR + '|' + CRON_NUM + ')';

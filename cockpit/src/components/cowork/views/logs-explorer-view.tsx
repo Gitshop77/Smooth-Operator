@@ -19,6 +19,7 @@ import { StatusPill } from "@/components/cowork/shared/status-pill";
 import { EmptyState } from "@/components/cowork/shared/empty-state";
 import { ExtensionOnly } from "@/components/cowork/shared/extension-only";
 import { Button } from "@/components/ui/button";
+import { useLogs, type CoworkLogRecord } from "@/hooks/use-cowork-query";
 import {
   Select,
   SelectContent,
@@ -30,15 +31,12 @@ import {
 /**
  * Logs Explorer — the debug/analysis log feed for the cockpit.
  *
- * ⚠️ UI-COMPLETE, BACKEND-PENDING.
- * There is currently NO GET endpoint for logs. The only log surface is
- * `POST /api/cowork/extensions/log`, which writes a single structured line to
- * the server `console.error('[SW]', …)` and never persists anything (see
- * `.audit/data.md` §3). This view is fully built against a `CoworkLogEntry`
- * contract and renders a polished, on-brand standby state until a backend
- * ring-buffer + `GET` feed exists. When that lands, wire a `useLogs()` hook
- * (mirroring the other `createQueryHook` list hooks) and feed `logs` below —
- * no other changes required. We never fabricate sample log rows.
+ * The backend serves the in-memory extension log ring via
+ * `GET /api/cowork/extensions/log` (written by `POST /api/cowork/extensions/log`).
+ * This view fetches that ring through the `useLogs()` hook and renders it
+ * against the `CoworkLogEntry` contract. The server redacts secrets on both
+ * write and read, so no sensitive material reaches the browser. We never
+ * fabricate sample log rows — an empty ring renders the standby state.
  */
 
 // ─── Contract (mirrors the eventual GET /api/cowork/extensions/log shape) ───
@@ -125,6 +123,39 @@ function formatTs(ts: number): string {
 function formatDate(ts: number): string {
   const d = new Date(ts);
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+const LEVEL_TO_KIND: Record<LogLevel, LogKind> = {
+  debug: "info",
+  info: "info",
+  warn: "observe",
+  error: "err",
+};
+
+/**
+ * Map a server ring-buffer record onto the view's `CoworkLogEntry` contract.
+ * The ring stores a free-form `source` string, an ISO timestamp, and no
+ * dedicated kind/agent fields, so we derive display-only values without
+ * fabricating data: kind is inferred from level, `source` is normalized to a
+ * known `LogSource` (unknowns become "tool"), and the raw source doubles as
+ * the agent label. `stack` becomes the expandable `meta` detail.
+ */
+function mapLogRecord(rec: CoworkLogRecord, i: number): CoworkLogEntry {
+  const parsed = Date.parse(rec.ts);
+  const ts = Number.isNaN(parsed) ? Date.now() : parsed;
+  const source: LogSource = (ALL_SOURCES as string[]).includes(rec.source)
+    ? (rec.source as LogSource)
+    : "tool";
+  return {
+    id: `${rec.ts}-${i}`,
+    ts,
+    level: rec.level,
+    kind: LEVEL_TO_KIND[rec.level] ?? "info",
+    source,
+    agent: rec.source || "extension",
+    message: rec.message,
+    meta: rec.stack || undefined,
+  };
 }
 
 // ─── Filter controls ─────────────────────────────────────────────────────────
@@ -226,9 +257,12 @@ function LogRow({ entry }: LogRowProps) {
 // ─── Main view ────────────────────────────────────────────────────────────────
 
 export function LogsExplorerView() {
- // Backend feed is not wired yet — this stays empty until a GET endpoint exists.
- // A `useLogs()` hook (like the other createQueryHook list hooks) would populate it.
-  const logs: CoworkLogEntry[] = [];
+ // Fetch the server-side extension log ring (secrets already redacted on read).
+  const { data: rawLogs } = useLogs();
+  const logs = React.useMemo<CoworkLogEntry[]>(
+    () => (rawLogs ?? []).map(mapLogRecord),
+    [rawLogs],
+  );
 
   const [query, setQuery] = React.useState("");
   const [debouncedQuery, setDebouncedQuery] = React.useState("");
@@ -300,7 +334,9 @@ export function LogsExplorerView() {
     const a = document.createElement("a");
     a.href = url;
     a.download = `cowork-logs-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.json`;
+    document.body.appendChild(a);
     a.click();
+    a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 0);
   }, [filtered]);
 

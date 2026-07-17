@@ -32,6 +32,10 @@ const HEX_LOOKUP: string[] = Array.from({ length: 256 }, (_, i) => i.toString(16
 const LOOP_WINDOW_SIZE = 20;
 /** Repetition counts that trigger a warning (escalating severity). */
 const WARN_THRESHOLDS: readonly number[] = [5, 8, 12];
+/** The most severe repetition count — at or above this the orchestrator hard-stops
+ * the run (not just warns). Exported so the orchestrator can use the same value
+ * the detector uses, keeping the two in lockstep. */
+export const LOOP_TOP_THRESHOLD = WARN_THRESHOLDS[WARN_THRESHOLDS.length - 1];
 /** Max page fingerprints kept in the rolling window. */
 const PAGE_FP_WINDOW_SIZE = 5;
 /** Threshold milestones for stagnant-page warnings. MUST stay in lockstep with
@@ -47,6 +51,14 @@ const STAGNANT_THRESHOLDS: readonly number[] = WARN_THRESHOLDS;
  * constant instead of hard-coding a divergent literal.
  */
 export const GOAL_WARN_THRESHOLD = 3;
+/**
+ * Goal-level loop hard-stop threshold. At or above this many repetitions of
+ * the same goal the planner terminates the run (not just warns). Mirrors
+ * {@link LOOP_TOP_THRESHOLD} so the goal detector terminates like the
+ * action-repetition and stagnant-page detectors. The warning milestone
+ * ({@link GOAL_WARN_THRESHOLD}) fires first; this is the escalating top.
+ */
+export const GOAL_TOP_THRESHOLD = 5;
 
 /** A single recorded action with its normalized hash. */
 interface ActionRecord {
@@ -127,15 +139,17 @@ function field(v: unknown): string {
   return v === undefined || v === null ? "" : String(v);
 }
 
-function normalizeAction(action: AgentAction): string {
+export function normalizeAction(action: AgentAction): string {
   const a = action as Record<string, unknown>;
   const parts: string[] = [a.type as string];
   switch (a.type) {
     case "click":
     case "hover":
     case "dropdown_options":
-    case "upload_file":
       parts.push(`idx=${field(a.index)}`);
+      break;
+    case "upload_file":
+      parts.push(`idx=${field(a.index)}`, `path=${field(a.path)}`);
       break;
     case "input":
       parts.push(`idx=${field(a.index)}`, `text=${field(a.text)}`);

@@ -10,9 +10,10 @@
  */
 
 import { getScheduledTask } from "@/lib/agent/scheduled-tasks";
-import { validateWebhookUrl } from "@/lib/agent/llm/route/ssrf";
-import { getRunState, requestKeepAwake } from "./state-store";
-import { isRunStarting, setRunStarting } from "./agent-bridge";
+import { resolveAndValidateWebhookUrl } from "@/lib/agent/llm/route/ssrf";
+import { redactSecrets } from "@/lib/agent/secrets";
+import { getRunState, requestKeepAwake, safeLog } from "./state-store";
+import { DEFAULT_MAX_STEPS, isRunStarting, setRunStarting } from "./agent-bridge";
 
 /** Truncate a string for display, adding an ellipsis only when actually truncated. */
 const clip = (s: string, n = 80): string => (s.length > n ? s.slice(0, n - 1) + "…" : s);
@@ -77,13 +78,15 @@ export async function handleScheduledTaskFire(taskId: string): Promise<void> {
  // Dynamic import breaks the circular dep with agent-bridge.ts (which calls
  // fireNotifications from its `finally` block).
     const { startRun } = await import("./agent-bridge");
-    await startRun({ task: task.task, maxSteps: 100, mode: "standard", isScheduledTaskRun: true });
+    await startRun({ task: task.task, maxSteps: DEFAULT_MAX_STEPS, mode: "standard", isScheduledTaskRun: true });
   } catch (e) {
- // Log the message only (not the raw Error object) to avoid leaking stack
- // traces / absolute filesystem paths into shared logs.
-    console.error(
+ // Route through safeLog so any secret-shaped values embedded in the error
+ // (task text, webhook URLs, run-derived strings) are redacted first — the
+ // same discipline used by the rest of background/.
+    void safeLog(
+      "error",
       "[scheduled-tasks] failed to handle alarm fire:",
-      e instanceof Error ? e.message : String(e),
+      e,
     );
  // release the synchronous RUN-guard flag on failure. The flag
  // was set at line 43 above (`setRunStarting(true)`) BEFORE `startRun`
@@ -121,18 +124,20 @@ export async function fireNotifications(task: string, success?: boolean): Promis
 
     if (webhookUrl) {
  // Only POST to an absolute http(s) URL that also passes the webhook
- // SSRF guard. `validateWebhookUrl` rejects relative/malformed values,
- // non-http(s) schemes (`javascript:`/`data:`/`file:`), and internal
+ // SSRF guard. `resolveAndValidateWebhookUrl` rejects relative/malformed
+ // values, non-http(s) schemes (`javascript:`/`data:`/`file:`), and internal
  // hosts — cloud-metadata / link-local (`169.254.0.0/16`, `fe80:/10`),
  // unspecified `0.0.0.0/8`, CGNAT `100.64.0.0/10`, and RFC1918/ULA private
- // ranges. A webhook is an external notification endpoint
- // (Slack/Discord/custom), so it must never be pointed at internal/metadata
- // hosts to exfiltrate task text or reach internal services. Loopback
- // (`localhost`, `127.0.0.0/8`) is permitted so a self-hosted relay in dev
- // keeps working. Invalid or unsafe URLs are logged + skipped (non-fatal).
+ // ranges — and additionally resolves the hostname (when DNS is available) to
+ // catch a public hostname that DNS-rebinds to an internal address at fetch
+ // time. A webhook is an external notification endpoint (Slack/Discord/custom),
+ // so it must never be pointed at internal/metadata hosts to exfiltrate task
+ // text or reach internal services. Loopback (`localhost`, `127.0.0.0/8`) is
+ // permitted so a self-hosted relay in dev keeps working. Invalid or unsafe
+ // URLs are logged + skipped (non-fatal).
       let safeUrl: string | null = null;
       let parsed: URL | null = null;
-      const ssrfCheck = validateWebhookUrl(webhookUrl);
+      const ssrfCheck = await resolveAndValidateWebhookUrl(webhookUrl);
       if (ssrfCheck.ok) {
         try {
           parsed = new URL(webhookUrl);
@@ -159,10 +164,13 @@ export async function fireNotifications(task: string, success?: boolean): Promis
             `endpoint that is not a loopback/private/cloud-metadata host: ${redactedHost}`,
         );
       } else {
+ // Mask any secret shapes embedded in the user's task text before it leaves
+ // the extension, so a third-party webhook can't receive leaked credentials.
+        const redactedTask = await redactSecrets(task);
         const payload = {
           success: success ?? false,
           text: success ? "Run succeeded." : "Run finished.",
-          task,
+          task: redactedTask,
           timestamp: Date.now(),
         };
  // Bound the request with a 5s timeout so a slow/hanging endpoint does
@@ -174,6 +182,10 @@ export async function fireNotifications(task: string, success?: boolean): Promis
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
           signal: controller.signal,
+ // Do NOT follow redirects: validateWebhookUrl only vets the initial
+ // URL, so a 30x Location could send this POST to an internal host the
+ // SSRF guard blocks. Treat any redirect as a delivery failure.
+          redirect: "manual",
         })
           .catch(() => { /* non-fatal */ })
           .finally(() => clearTimeout(timer));

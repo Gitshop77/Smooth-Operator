@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { Prisma } from '@prisma/client';
 
 const { findMany, del } = vi.hoisted(() => ({ findMany: vi.fn(), del: vi.fn() }));
 
@@ -19,7 +20,7 @@ describe('GET /api/cowork/memory/site', () => {
     findMany.mockResolvedValueOnce([]);
     await GET(fakeReq('limit=5&after=abc'));
     expect(findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ take: 5, orderBy: { createdAt: 'desc' }, cursor: { id: 'abc' }, skip: 1 }),
+      expect.objectContaining({ take: 5, orderBy: { createdAt: 'desc', id: 'desc' }, cursor: { id: 'abc' }, skip: 1 }),
     );
   });
 
@@ -32,7 +33,12 @@ describe('GET /api/cowork/memory/site', () => {
   it('returns the memories envelope', async () => {
     findMany.mockResolvedValueOnce([{ id: 's1', domain: 'example.com' }]);
     const res = await GET(fakeReq('limit=5'));
-    expect(await res.json()).toEqual({ memories: [{ id: 's1', domain: 'example.com' }] });
+    // The envelope now redacts `dataJson` at read time (security contract) and
+    // adds cursor pagination (`nextCursor`), so the shape is wider than before.
+    expect(await res.json()).toEqual({
+      memories: [{ id: 's1', domain: 'example.com', dataJson: '' }],
+      nextCursor: null,
+    });
   });
 });
 
@@ -44,6 +50,13 @@ describe('DELETE /api/cowork/memory/site', () => {
     expect(body.error).toBe('id is required');
   });
 
+  it('rejects a malformed id with 400', async () => {
+    const res = await DELETE(fakeReq('id=!!!bad'));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe('invalid id');
+  });
+
   it('deletes the site-memory entry by id', async () => {
     del.mockResolvedValueOnce({ id: 's1' });
     const res = await DELETE(fakeReq('id=s1'));
@@ -53,8 +66,26 @@ describe('DELETE /api/cowork/memory/site', () => {
     expect(body.ok).toBe(true);
   });
 
+  it('sets a no-store cache-control header on success', async () => {
+    del.mockResolvedValueOnce({ id: 's1' });
+    const res = await DELETE(fakeReq('id=s1'));
+    expect(res.headers.get('cache-control')).toContain('no-store');
+  });
+
   it('returns 404 when the entry does not exist', async () => {
     const err = new Error('Record to delete does not exist. (Prisma error P2025)');
+    del.mockRejectedValueOnce(err);
+    const res = await DELETE(fakeReq('id=missing'));
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toBe('not found');
+  });
+
+  it('returns 404 for a structured PrismaClientKnownRequestError P2025', async () => {
+    const err = new Prisma.PrismaClientKnownRequestError('Record to delete does not exist.', {
+      code: 'P2025',
+      clientVersion: 'x',
+    });
     del.mockRejectedValueOnce(err);
     const res = await DELETE(fakeReq('id=missing'));
     expect(res.status).toBe(404);

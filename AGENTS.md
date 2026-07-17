@@ -30,7 +30,7 @@ src/lib/                   Shared library root
   validations.ts            Shared validators (MAX_ACTIONS, MAX_ELEMENTS_CHARS, …)
 src/lib/agent/              Core agentic engine (framework-agnostic TypeScript)
   types.ts                  Type definitions + configuration
-  security.ts               Prompt-injection defense (10 detectors + 28 redaction patterns) + domain restrictions
+  security.ts               Prompt-injection defense (10 detectors + 8 redaction pattern sources) + domain restrictions
   errors.ts                 Typed error taxonomy (12 ErrorCategory values, 22 AgentError subclasses)
   callbacks.ts              15-hook callback system
   judge.ts                  Post-hoc LLM evaluation of task completion
@@ -149,7 +149,7 @@ src/extension/              Chrome extension (bundled via esbuild)
     constants.ts            Model URLs (MODEL_REPO_URL + MODEL_BASE_URL), token IDs, architecture
     types.ts                Vision types
 
-tests/                      Vitest test suite (778 test() calls across 42 files)
+tests/                      Vitest test suite (1,400+ test()/it() calls across 110+ files)
 
 cockpit/                    Next.js 16 dashboard (read + create + delete over Prisma/SQLite — includes POST create and DELETE erase endpoints for history, form memory, site memory, and chat)
   prisma/schema.prisma      SQLite schema (22 models: Tab, Workspace, Session, Task, AgentTrust, SecurityEvent, …)
@@ -203,16 +203,16 @@ All scripts use npm. A single `npm install && npm run dev` bootstraps and starts
 - `npm run dev:cockpit` — Next.js cockpit dev server on port 3000 (bound to `127.0.0.1`)
 - `npm run dev:events` — cowork-events mini-service on port 3003 (`tsx watch`)
 - `npm run lint` — ESLint (root)
-- `npm run test` — Vitest suite (778 test() calls across 42 files)
+- `npm run test` — Vitest suite (1,400+ test()/it() calls across 110+ files)
 - `npm run test:watch` — Vitest watch mode
 - `npm run test:coverage` — Vitest with coverage
 - `npm run build:extension` — esbuild → `chrome-extension/`
-- `npm run build:cockpit` — `npm run db:generate && next build` in `cockpit/` (auto-generates Prisma client)
+- `npm run build:cockpit` — `npm run db:generate && npm run db:apply && next build` in `cockpit/` (auto-generates Prisma client)
 - `npm run build:all` — extension + cockpit (works on fresh clone, no separate prisma generate needed)
 - `cd cockpit && npx tsc --noEmit` — type-check the cockpit
 - `cd cockpit && npm run lint` — ESLint (cockpit)
 
-The `postinstall` hook auto-installs `cockpit/` and `mini-services/cowork-events/` sub-package dependencies. Cockpit's install runs Prisma's own postinstall (engine download) so `db:generate` works locally; `build:cockpit` still runs `db:generate` explicitly.
+Sub-package dependencies are installed via `npm run bootstrap` (which runs `npm ci --prefix cockpit` and `npm ci --prefix mini-services/cowork-events`). On a fresh clone, run that before `build:all`/`build:cockpit`. Cockpit's install runs Prisma's own postinstall (engine download) so `db:generate` works locally; `build:cockpit` still runs `db:generate` explicitly.
 
 ## Agent Loop
 
@@ -237,7 +237,7 @@ The `postinstall` hook auto-installs `cockpit/` and `mini-services/cowork-events
 - **Dual-channel page state**: DOM tree (`[index]<tag>`) + accessibility tree (`ref_NNN`) + annotated screenshot (Set-of-Marks with numbered labels, JPEG q=85)
 - **Per-model vision detection**: `modelSupportsVision()` checks the models.dev catalog's `attachment` field + heuristic name-based fallback. `buildProvider()` is async, patches `supportsVision` per-model.
 - **Frontmatter-first skills**: Only skill name + description in context (~10 tokens/skill). Full body loaded on-demand via `load_skill` action.
-- **Injection classifier**: 10 `INJECTION_DETECTORS` across 6 labels (ignore-previous-instructions, role-impersonation, role-tag-impersonation, premature-done, tag-injection, new-instructions-preamble) + 27 `INJECTION_PATTERN_SOURCES` for redaction. Non-destructive — flags but doesn't redact (the redaction layer handles that).
+- **Injection classifier**: 10 `INJECTION_DETECTORS` across 6 labels (ignore-previous-instructions, role-impersonation, role-tag-impersonation, premature-done, tag-injection, new-instructions-preamble) + 8 `INJECTION_PATTERN_SOURCES` for redaction. Non-destructive — flags but doesn't redact (the redaction layer handles that).
 - **Error taxonomy**: 12 `ErrorCategory` values (auth, forbidden, bad_request, rate_limit, server_error, network, cancelled, parse, max_steps, max_failures, programmer_error, unknown) and 22 typed `AgentError` subclasses
 - **Mode enforcement**: Every action checked against restricted/standard/full_agentic mode before execution. `evaluate` requires `full_agentic`.
 - **Secret substitution**: `%varName%` placeholders substituted at execution time — the LLM never sees real values
@@ -246,11 +246,11 @@ The `postinstall` hook auto-installs `cockpit/` and `mini-services/cowork-events
 - **Custom tool plugins**: Users define JS tools in Options; agent invokes via `evaluate`
 - **Local Vision Assistant**: LocateAnything-3B (NVIDIA's original model, Reza2kn's ONNX INT4 WebGPU port) runs entirely in-browser via WebGPU. 2.1 GB one-time download, cached in Cache Storage API. Fire-and-forget init — doesn't block the first agent step.
 - **Cockpit auth**: `cockpit/src/middleware.ts` requires `X-Cowork-Token` on all `/api/cowork/*` routes except 5 public discovery endpoints (`agent/bootstrap`, `agent/manifest`, `agent`, `agent/version`, `skill`). Uses `constant-time token comparison`, fail-closed in production with `dev-token`.
-- **Mini-service hardening**: Bound to `127.0.0.1` (not `0.0.0.0`), `constant-time token comparison` token comparison, refuses `dev-token` in production, socket.io handshake auth, CORS allowlist.
+- **Mini-service hardening**: Bound to `127.0.0.1` (not `0.0.0.0`), constant-time token comparison, refuses `dev-token` in production, socket.io handshake auth, CORS allowlist.
 
 ## Testing
 
-Run `npm run test` to execute the Vitest test suite (778 test() calls across 42 files):
+Run `npm run test` to execute the Vitest test suite (1,400+ test()/it() calls across 110+ files):
 
 - `tests/unit.test.ts` — Output parser, loop detector, pricing, compaction, secrets, schema coercion
 - `tests/security.test.ts` — Sanitization, injection classifier, domain allowlist, error taxonomy, mode enforcement, secret-leak prevention

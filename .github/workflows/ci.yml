@@ -88,17 +88,18 @@ jobs:
           fi
 
       - name: Audit root dependencies
-        # Signal-only: `npm audit` reports the whole transitive tree including
-        # advisories with no fix, so a new upstream moderate advisory would
-        # otherwise fail every PR (even docs-only) independent of the change.
-        # PR-introduced vulnerabilities are gated by dependency-review.yml.
-        run: npm audit --audit-level=moderate || true
+        # High-severity advisories intentionally FAIL CI (no `|| true`), so
+        # vulnerable dependencies cannot merge green. Moderate stays covered by
+        # dependency-review.yml. This is a hard gate; do not append `|| true`.
+        # `npm audit signatures` additionally verifies registry signatures so a
+        # tampered package with no published advisory is still blocked.
+        run: npm audit --audit-level=high && npm audit signatures
 
       - name: Audit mini-services/cowork-events dependencies
         working-directory: mini-services/cowork-events
         # Signal-only (see "Audit root dependencies"); PR scope is gated by
         # dependency-review.yml.
-        run: npm ci && (npm audit --audit-level=moderate || true)
+        run: npm ci && npm audit --audit-level=high && npm audit signatures
 
       - name: Type-check mini-services/cowork-events
         # The WebSocket mini-service ships to production paths but previously
@@ -132,8 +133,9 @@ jobs:
 
       - name: Audit cockpit dependencies
         # Signal-only (see the root "Audit root dependencies" step); PR-introduced
-        # vulnerabilities are gated by dependency-review.yml.
-        run: npm audit --audit-level=moderate || true
+        # vulnerabilities are gated by dependency-review.yml. `npm audit
+        # signatures` verifies registry signatures as an additional hard gate.
+        run: npm audit --audit-level=high && npm audit signatures
 
       - name: Generate Prisma client
         run: npm run db:generate
@@ -178,7 +180,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@002191b3668e769a76cadbdb5cc75d0e1fba2a17 # PIN TO A VERIFIED SHA (was actions/checkout@v4)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # PIN TO A VERIFIED SHA (actions/checkout@v4 tag)
         with:
           fetch-depth: 0
 

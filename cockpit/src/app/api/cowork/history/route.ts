@@ -9,6 +9,8 @@ import {
   bodyJson,
   validateHttpUrl,
   boundedString,
+  upsertHistoryEntry,
+  sanitizeRequestId,
   MAX_URL_LEN,
   MAX_TITLE_LEN,
 } from '@/lib/cowork/api/http';
@@ -38,16 +40,14 @@ export async function GET(req: NextRequest): Promise<Response> {
       visitedAt: h.lastVisitedAt,
     }));
     return json({ history: projected });
-  }, req.headers.get('x-request-id') ?? undefined);
+  }, sanitizeRequestId(req.headers.get('x-request-id')) ?? undefined);
 }
 
 // POST /api/cowork/history — record a visit to a URL.
 // Honors the WRITE CONTRACT in prisma/schema.prisma: `HistoryEntry.url` is
 // @unique, so revisiting a URL MUST NOT raw-create (that throws P2002). We
 // upsert on `url`: a first visit inserts, a revisit increments `visitCount`
-// and refreshes `title`/`lastVisitedAt`. This is the upsert write path the
-// schema comment was referring to; previously the table was GET/DELETE-only
-// and any future naive `create` would 500 on the first revisit.
+// and refreshes `title`/`lastVisitedAt`.
 export async function POST(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
     const body = await bodyJson(req);
@@ -61,17 +61,9 @@ export async function POST(req: NextRequest): Promise<Response> {
     const urlErr = validateHttpUrl(url);
     if (urlErr) return urlErr;
     const title = boundedString(body.title, MAX_TITLE_LEN, '');
-    const entry = await db.historyEntry.upsert({
-      where: { url },
-      create: { url, title },
-      update: {
-        title,
-        visitCount: { increment: 1 },
-        lastVisitedAt: new Date(),
-      },
-    });
+    const entry = await upsertHistoryEntry(db, url, title);
     return json({ ok: true, entry }, 201);
-  }, req.headers.get('x-request-id') ?? undefined);
+  }, sanitizeRequestId(req.headers.get('x-request-id')) ?? undefined);
 }
 
 // DELETE /api/cowork/history?id=<historyEntryId> — erase a single history
@@ -109,8 +101,19 @@ export async function DELETE(req: NextRequest): Promise<Response> {
         where.lastVisitedAt = { lt: new Date(ts) };
       }
       const { count } = await db.historyEntry.deleteMany({ where });
- // Log the bulk delete so the action is observable server-side.
-      console.info('[cowork] bulk delete history', { deleted: count, scope: scope ?? 'all', route: '/api/cowork/history', reqId: req.headers.get('x-request-id') ?? 'n/a' });
+ // Log the bulk delete so the action is observable server-side. Record the
+ // initiating principal (client IP) so a mass erasure is attributable (AU-3).
+      const clientIp = (req.headers.get('x-forwarded-for')?.split(',')[0]?.trim())
+        || req.headers.get('x-real-ip')
+        || 'unknown';
+      console.info('[cowork] bulk delete history', {
+        deleted: count,
+        confirm: b.confirm === true,
+        scope: sanitizeRequestId(scope ?? null) ?? 'all',
+        route: '/api/cowork/history',
+        clientIp,
+        reqId: sanitizeRequestId(req.headers.get('x-request-id')) ?? 'n/a',
+      });
       return json({ ok: true, deleted: count });
     }
     const id = req.nextUrl.searchParams.get('id');
@@ -126,5 +129,5 @@ export async function DELETE(req: NextRequest): Promise<Response> {
       throw e;
     }
     return json({ ok: true });
-  }, req.headers.get('x-request-id') ?? undefined);
+  }, sanitizeRequestId(req.headers.get('x-request-id')) ?? undefined);
 }

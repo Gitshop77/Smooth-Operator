@@ -5,6 +5,7 @@ import { io, type Socket } from "socket.io-client";
 
 import { useCoworkStore } from "@/hooks/use-cowork-store";
 import { useInvalidateView } from "@/hooks/use-cowork-query";
+import { redactClientSecrets } from "@/lib/redact-client";
 
 // The mini-service requires the shared secret on every socket.io
 // connection. The cockpit dashboard is same-origin with the Next.js app, so
@@ -32,37 +33,47 @@ const WS_TOKEN = process.env.NEXT_PUBLIC_COWORK_UI_TOKEN;
 // must never reach production.
 const DEV_TOKEN_LITERALS = new Set(["dev-token", "dev", "test", "changeme"]);
 
-function assertTokenEnvironmentPairing(): void {
-  const isProd = process.env.NODE_ENV === "production";
-  if (!WS_TOKEN) {
- // Missing token: the handshake will be rejected. Warn so operators know to
- // configure NEXT_PUBLIC_COWORK_UI_TOKEN. Louder in production.
-    const msg =
-      "[cowork-ws] NEXT_PUBLIC_COWORK_UI_TOKEN is unset; realtime socket will be rejected.";
-    if (isProd) console.warn(msg);
-    else console.error(msg);
-    return;
+export function assertTokenEnvironmentPairing(
+  token: string | undefined,
+  nodeEnv: string,
+): string | null {
+  const isProd = nodeEnv === "production";
+  if (!token) {
+ // Missing token: the handshake will be rejected. The caller logs this louder
+ // in production.
+    return "[cowork-ws] NEXT_PUBLIC_COWORK_UI_TOKEN is unset; realtime socket will be rejected.";
   }
   const looksLikeDevToken =
-    DEV_TOKEN_LITERALS.has(WS_TOKEN) ||
-    /(^|[-_])(dev|test|local|staging)([-_]|$)/i.test(WS_TOKEN);
+    DEV_TOKEN_LITERALS.has(token) ||
+    /(^|[-_])(dev|test|local|staging)([-_]|$)/i.test(token);
   if (isProd && looksLikeDevToken) {
-    console.warn(
+    return (
       "[cowork-ws] NEXT_PUBLIC_COWORK_UI_TOKEN looks like a dev/placeholder " +
-        "token but NODE_ENV=production — verify prod is not shipping a dev token.",
-    );
-  } else if (!isProd && !looksLikeDevToken) {
- // A prod-looking token in a non-prod build can indicate the reverse
- // misconfiguration (prod secret leaking into a dev bundle).
-    console.warn(
-      "[cowork-ws] NEXT_PUBLIC_COWORK_UI_TOKEN does not look like a dev token " +
-        `but NODE_ENV=${process.env.NODE_ENV ?? "undefined"} — verify a prod ` +
-        "token is not being used outside production.",
+      "token but NODE_ENV=production — verify prod is not shipping a dev token."
     );
   }
+  if (!isProd && !looksLikeDevToken) {
+ // A prod-looking token in a non-prod build can indicate the reverse
+ // misconfiguration (prod secret leaking into a dev bundle).
+    return (
+      "[cowork-ws] NEXT_PUBLIC_COWORK_UI_TOKEN does not look like a dev token " +
+      `but NODE_ENV=${nodeEnv ?? "undefined"} — verify a prod ` +
+      "token is not being used outside production."
+    );
+  }
+  return null;
 }
 
-assertTokenEnvironmentPairing();
+// Module-load side effect: surface any token/environment mispairing so a dev
+// token can't silently ship to prod. A missing token is logged as an error
+// outside production (louder), and as a warning in production.
+{
+  const warning = assertTokenEnvironmentPairing(WS_TOKEN, process.env.NODE_ENV);
+  if (warning) {
+    if (process.env.NODE_ENV === "production") console.warn(warning);
+    else console.error(warning);
+  }
+}
 
 /**
  * useCoworkWebSocket — connects to the cowork-events mini-service on port
@@ -73,21 +84,23 @@ assertTokenEnvironmentPairing();
  * (the mini-service is the same-machine, always-on event source for the
  * cockpit). If it isn't running at page load, the socket keeps retrying and
  * the store's `socketConnected` flag stays false (the footer shows
- * "offline"); the dashboard still works because every view polls its
- * endpoint on mount + every 30s via TanStack Query. When the service comes
+ * "offline"); the dashboard still works because every view fetches once on
+ * mount and re-fetches only when this hook invalidates its query key (the
+ * refetch-on-window-focus behavior is disabled). When the service comes
  * back, the socket re-attaches automatically and realtime invalidation
  * resumes without a manual reload.
  */
 export function useCoworkWebSocket(): void {
   const setSocketConnected = useCoworkStore((s) => s.setSocketConnected);
+  const setSocketStatus = useCoworkStore((s) => s.setSocketStatus);
   const setLastEvent = useCoworkStore((s) => s.setLastEvent);
   const invalidate = useInvalidateView();
 
   // Keep the latest callbacks in a ref so the connection effect can run once
   // (with `[]` deps) regardless of how often these identities change. Today
   // they are stable, but this decouples socket lifecycle from callback identity.
-  const cbs = useRef({ setSocketConnected, setLastEvent, invalidate });
-  cbs.current = { setSocketConnected, setLastEvent, invalidate };
+  const cbs = useRef({ setSocketConnected, setSocketStatus, setLastEvent, invalidate });
+  cbs.current = { setSocketConnected, setSocketStatus, setLastEvent, invalidate };
 
   useEffect(() => {
     const { setSocketConnected, setLastEvent, invalidate } = cbs.current;
@@ -98,6 +111,7 @@ export function useCoworkWebSocket(): void {
 
     const connect = () => {
       if (disposed) return;
+      setSocketStatus("connecting");
       try {
         socket = io({
  // The mini-service's socket.io is attached with path '/'.
@@ -120,32 +134,32 @@ export function useCoworkWebSocket(): void {
           timeout: 4000,
         });
       } catch (err) {
- // `io()` does NOT throw synchronously for connection/misconfiguration
- // errors — those surface async via the `connect_error` handler below
- // (including a missing `NEXT_PUBLIC_COWORK_UI_TOKEN`, which is an async
- // auth rejection, not a construction throw). This guard only catches
- // genuinely invalid options passed to the factory, which is effectively
- // never; it is kept as a defensive belt-and-suspenders so a throw here
- // cannot take down the React effect. Log it (non-production only).
+ // `io()` does NOT throw synchronously for connection/auth errors — those
+ // surface async via `connect_error` below. This guard only catches invalid
+ // factory options, so a throw here can't take down the React effect.
         if (process.env.NODE_ENV !== "production") {
           console.error("[cowork-ws] socket construction failed:", err);
         }
         setSocketConnected(false);
+        setSocketStatus("disconnected");
         return;
       }
 
       socket.on("connect", () => {
         setSocketConnected(true);
+        setSocketStatus("connected");
         setLastEvent("connected");
       });
 
       socket.on("disconnect", () => {
         setSocketConnected(false);
+        setSocketStatus("disconnected");
         setLastEvent("disconnected");
       });
 
       socket.on("connect_error", (err: unknown) => {
         setSocketConnected(false);
+        setSocketStatus("disconnected");
  // Don't leave a stale "connected" footer: if we had connected once
  // (lastEvent === "connected") and then entered a reconnect loop, the
  // footer tooltip would keep claiming "connected" while the live socket
@@ -156,7 +170,7 @@ export function useCoworkWebSocket(): void {
  // production log at most a one-line message rather than the raw object.
         const message =
           err instanceof Error ? err.message : String(err ?? "unknown");
-        const safeMessage = message.replace(/(token[=:]\s*)\S+/gi, "$1***");
+        const safeMessage = redactClientSecrets(message).replace(/(token[=:]\s*)\S+/gi, "$1***");
         if (process.env.NODE_ENV !== "production") {
           console.error("[cowork-ws] connect_error:", safeMessage);
         } else {
@@ -175,18 +189,19 @@ export function useCoworkWebSocket(): void {
  // and `agent:task-updated` invalidates BOTH `["cowork","agents"]`
  // (useAgents) AND `["cowork","agents","tasks"]` (useAgentTasks).
  //
- // TanStack Query uses PREFIX matching, so a shorter key like
- // `["agents"]` would technically subsume `["agents","tasks"]`, but
- // we list both explicitly so the intent is self-documenting and
- // robust against future changes to TanStack's matching semantics.
+ // TanStack Query uses PREFIX matching, but we list both keys explicitly so
+ // the intent is self-documenting.
  // Coalesce rapid WS-driven invalidations so a burst of events in the
  // same frame yields at most one refetch per query key, instead of one
  // refetch per event. Pending keys are batched and flushed once on the
  // next animation frame (or macrotask where rAF is unavailable).
       const pendingKeys = new Map<string, string[]>();
+      // Latest footer label for the current flush window. Coalesced with the
+      // invalidation flush so a burst of high-frequency events updates the
+      // footer at most once per frame instead of forcing a re-render per event.
+      let lastEventLabel: string | null = null;
       let flushScheduled = false;
-      const scheduleInvalidate = (key: string[]) => {
-        pendingKeys.set(key.join(" "), key);
+      const scheduleFlush = () => {
         if (flushScheduled) return;
         flushScheduled = true;
         const flush = () => {
@@ -197,6 +212,10 @@ export function useCoworkWebSocket(): void {
           flushScheduled = false;
           rafId = null;
           timeoutId = null;
+          if (lastEventLabel !== null) {
+            setLastEvent(lastEventLabel);
+            lastEventLabel = null;
+          }
           const keys = Array.from(pendingKeys.values());
           pendingKeys.clear();
           for (const k of keys) {
@@ -226,11 +245,23 @@ export function useCoworkWebSocket(): void {
         }
       };
 
+      const scheduleInvalidate = (key: string[]) => {
+        pendingKeys.set(JSON.stringify(key), key);
+        scheduleFlush();
+      };
+
       const on = (event: string, invalidateKeys: string[][], label: string) => {
         socket?.on(event, (payload: unknown) => {
-          setLastEvent(label);
-          for (const key of invalidateKeys) {
-            scheduleInvalidate(key);
+          lastEventLabel = label;
+          // Events that invalidate no query (network:request, devtools:log,
+          // snapshot:captured) still drive the footer, but they have no keys to
+          // schedule a flush — so schedule one explicitly.
+          if (invalidateKeys.length === 0) {
+            scheduleFlush();
+          } else {
+            for (const key of invalidateKeys) {
+              scheduleInvalidate(key);
+            }
           }
  // Surface payload shape in dev tools for debugging.
           if (process.env.NODE_ENV !== "production") {
@@ -255,20 +286,12 @@ export function useCoworkWebSocket(): void {
  // when those views gain data.
       on("network:request", [], "network request");
       on("devtools:log", [], "console log");
- // `["security"]` prefix-matches `["cowork","security","events"]`
- // (useSecurityEvents). The old `["events"]` entry was dead —
- // `["cowork","events"]` matches no query (security uses the
- // `security,events` key, not bare `events`).
+ // `["security"]` prefix-matches `["cowork","security","events"]` (useSecurityEvents).
       on("security:event", [["security"]], "security event");
-      on("session:changed", [["sessions"]], "session changed");
-      on("extension:changed", [["extensions"]], "extension changed");
- // Invalidate `useFormMemory` (query key `["cowork","memory","form"]`)
- // alongside `useSiteMemory` (`["cowork","memory","site"]`) on memory
- // changes.
-      on("memory:changed", [["memory", "site"], ["memory", "form"]], "memory changed");
-      on("bookmark:changed", [["bookmarks"]], "bookmark changed");
-      on("history:changed", [["history"]], "history changed");
-      on("pinboard:changed", [["pinboards"]], "pinboard changed");
+ // No listeners for the session/extension/memory/bookmark/history/pinboard
+ // `*changed` channels: no producer emits them (cockpit write paths don't call
+ // `broadcastEvent`). To add cross-tab live updates later, emit those channels
+ // from the corresponding write paths and register listeners here.
  // The `chat:message` event is emitted by the cowork-events `/chat`
  // route to the per-`sessionId` socket.io room ONLY (never broadcast
  // globally), so the dashboard's socket — which does not join any chat

@@ -19,7 +19,8 @@
 
 import type { NextRequest } from 'next/server';
 import { io as ioClient, type Socket } from 'socket.io-client';
-import { COWORK_EVENTS_BASE, getCoworkEventsToken } from '@/lib/cowork/events/client';
+import { getCoworkEventsToken, getValidatedEventsBase } from '@/lib/cowork/events/client';
+import { redactSecrets } from '@/lib/cowork/api/http';
 
 interface BufferedEvent {
   id: number;
@@ -63,24 +64,98 @@ export const runtime = 'nodejs';
 // Disable static optimization — this is a streaming route.
 export const dynamic = 'force-dynamic';
 
+// Bound concurrent SSE streams so a single authenticated caller (or a stolen
+// token) cannot open an unbounded number of long-lived socket.io clients plus
+// 15s keep-alive timers, exhausting mini-service socket slots, cockpit memory,
+// and file descriptors. Mirrors the per-token concurrency cap (R014 F7).
+const MAX_CONCURRENT_STREAMS = 50;
+let activeStreams = 0;
+
 export async function GET(req: NextRequest): Promise<Response> {
   const sinceIdParam = req.nextUrl.searchParams.get('since_id');
   let sinceId = parseInt(sinceIdParam || '0', 10);
   if (!Number.isFinite(sinceId) || sinceId < 0) sinceId = 0;
 
+ // Fail closed on a misconfigured relay target. `getValidatedEventsBase`
+ // refuses non-http(s) / credentialed / secret-shaped bases and returns ''
+ // for them. A bad base would otherwise point the socket.io client at an
+ // unexpected host — refuse rather than leaking the handshake token there.
+  const eventsBase = getValidatedEventsBase();
+  if (!eventsBase) {
+    return new Response('event relay base misconfigured', {
+      status: 502,
+      headers: { 'Retry-After': '5' },
+    });
+  }
+
+  if (activeStreams >= MAX_CONCURRENT_STREAMS) {
+    return new Response('too many concurrent streams', {
+      status: 503,
+      headers: { 'Retry-After': '5' },
+    });
+  }
+  activeStreams += 1;
+
   const encoder = new TextEncoder();
 
  // Lift `closed` + `socket` + `pingInterval` to the outer scope so BOTH
- // `start()` and `cancel()` can reach them. Previously the poll `setInterval`
- // lived inside `start()`, which meant `cancel()` (fired when a consumer
- // explicitly cancels the ReadableStream) couldn't clear it — the 1s poll
- // leaked indefinitely. The same hazard applies to the socket.io client.
+ // `start()` and `cancel()` can reach them and tear the interval/socket down
+ // (otherwise a consumer-cancelled stream leaks the 1s poll and socket.io client).
   let closed = false;
+  let released = false;
   let socket: Socket | null = null;
   let pingInterval: ReturnType<typeof setInterval> | null = null;
+  let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
 
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
+  // Backpressure: when the SSE consumer reads slower than the upstream emits,
+  // hold chunks here and only flush them on `pull()`, instead of letting the
+  // stream's internal queue grow without bound. The buffer is bounded so a
+  // stalled consumer cannot grow cockpit memory without limit.
+  const MAX_PENDING_CHUNKS = 1024;
+  let pendingChunks: string[] = [];
+  let drainResolve: (() => void) | null = null;
+  let drainWaiter: Promise<void> | null = null;
+
+ // Release every long-lived resource this stream owns. Hoisted to the GET scope
+ // so BOTH `start()` and `cancel()` tear down identically. Also detaches the
+ // `req.signal` abort listener so it doesn't linger after teardown.
+  const teardown = (): void => {
+    if (released) return;
+    released = true;
+    activeStreams = Math.max(0, activeStreams - 1);
+    closed = true;
+    req.signal.removeEventListener('abort', onAbort);
+    if (socket) {
+      socket.removeAllListeners();
+      socket.disconnect();
+      socket = null;
+    }
+    if (pingInterval) {
+      clearInterval(pingInterval);
+      pingInterval = null;
+    }
+    if (drainResolve) {
+      const r = drainResolve;
+      drainResolve = null;
+      drainWaiter = null;
+      r();
+    }
+  };
+
+ // Client disconnect (or explicit cancel) handler.
+  const onAbort = (): void => {
+    teardown();
+    try {
+      controller?.close();
+    } catch {
+      /* already closed */
+    }
+  };
+
+  const stream = new ReadableStream<Uint8Array>(
+    {
+    async start(ctrl) {
+      controller = ctrl;
  // Resolve the server-side token WITHOUT letting a missing secret throw
  // out of `start()` (which would crash the whole stream before any bytes
  // are sent). If unset, `token` stays `''` and the connect attempt will
@@ -92,10 +167,37 @@ export async function GET(req: NextRequest): Promise<Response> {
         token = '';
       }
 
-      const safeEnqueue = (chunk: string): void => {
+      const safeEnqueue = async (chunk: string): Promise<void> => {
         if (closed) return;
+        const ctrl = controller;
+        if (ctrl && ctrl.desiredSize !== null && ctrl.desiredSize <= 0) {
+          // Consumer is behind: hold the chunk under backpressure rather than
+          // growing the stream's internal queue without bound, and wait for
+          // `pull()` to flush it.
+          pendingChunks.push(chunk);
+          if (pendingChunks.length > MAX_PENDING_CHUNKS) {
+            // Hard overflow — the consumer is not keeping up and the buffer
+            // would grow without limit. Terminate the stream; the client can
+            // reconnect with ?since_id= to resume the sequence.
+            closed = true;
+            teardown();
+            try {
+              ctrl.error(new Error('events/stream backpressure overflow'));
+            } catch {
+              /* already closed/errored */
+            }
+            return;
+          }
+          if (!drainResolve) {
+            drainWaiter = new Promise<void>((resolve) => {
+              drainResolve = resolve;
+            });
+          }
+          await drainWaiter;
+          return;
+        }
         try {
-          controller.enqueue(encoder.encode(chunk));
+          controller?.enqueue(encoder.encode(chunk));
         } catch {
  // Stream is broken — mark closed + release the socket + ping timer so
  // the socket.io client is torn down immediately (don't wait for
@@ -105,37 +207,15 @@ export async function GET(req: NextRequest): Promise<Response> {
           closed = true;
           teardown();
           try {
-            controller.error(new Error('events/stream broken transport'));
+            controller?.error(new Error('events/stream broken transport'));
           } catch {
             /* already closed/errored */
           }
         }
       };
 
- // Release every long-lived resource this stream owns.
-      const teardown = (): void => {
-        closed = true;
-        if (socket) {
-          socket.removeAllListeners();
-          socket.disconnect();
-          socket = null;
-        }
-        if (pingInterval) {
-          clearInterval(pingInterval);
-          pingInterval = null;
-        }
-      };
-
  // Register the abort listener BEFORE opening the socket so a client
  // disconnect is observed even if it happens during the (async) handshake.
-      const onAbort = () => {
-        teardown();
-        try {
-          controller.close();
-        } catch {
-          /* already closed */
-        }
-      };
       if (req.signal.aborted) {
         onAbort();
         return;
@@ -156,10 +236,11 @@ export async function GET(req: NextRequest): Promise<Response> {
         sinceId = evt.id;
         const sseId = String(evt.id);
         const sseEvent = String(evt.channel).replace(/[\r\n]/g, ' ');
+        const redactedPayload = JSON.parse(redactSecrets(JSON.stringify(evt.payload ?? null)));
         const sseData = JSON.stringify({
           id: evt.id,
           channel: evt.channel,
-          payload: evt.payload,
+          payload: redactedPayload,
           ts: typeof evt.ts === 'number' ? evt.ts : Date.now(),
         });
         safeEnqueue(`id: ${sseId}\nevent: ${sseEvent}\ndata: ${sseData}\n\n`);
@@ -183,7 +264,7 @@ export async function GET(req: NextRequest): Promise<Response> {
  // hardcoded socket.io path. socket.io auto-reconnects with exponential
  // backoff, which also satisfies the "back off before the next attempt"
  // guidance for a broken upstream.
-      socket = ioClient(COWORK_EVENTS_BASE, {
+      socket = ioClient(eventsBase, {
         path: '/',
         auth: { token },
         reconnection: true,
@@ -199,11 +280,11 @@ export async function GET(req: NextRequest): Promise<Response> {
       socket.on('connect_error', (err: Error) => {
  // Surface the failure: log server-side AND emit a comment so the client
  // can see the stream is unhealthy (misconfigured token, mini-service
- // down, etc.) instead of a perpetually-empty-but-"alive" stream.
-        console.error(
-          `[cowork] events/stream socket connect_error: ${err?.message || 'unknown'}`,
-        );
-        const msg = String(err?.message || 'unknown').replace(/[\r\n]/g, ' ');
+ // down, etc.) instead of a perpetually-empty-but-"alive" stream. Redact
+ // the upstream message so handshake/URL/secret-shaped text never lands in
+ // server logs or the client stream.
+        const msg = redactSecrets(String(err?.message || 'unknown')).replace(/[\r\n]/g, ' ');
+        console.error(`[cowork] events/stream socket connect_error: ${msg}`);
         safeEnqueue(`: upstream error ${new Date().toISOString()} ${msg}\n\n`);
       });
       socket.on('disconnect', (reason: string) => {
@@ -214,7 +295,7 @@ export async function GET(req: NextRequest): Promise<Response> {
         }
       });
       socket.on('error', (err: Error) => {
-        console.error(`[cowork] events/stream socket error: ${err?.message || 'unknown'}`);
+        console.error(`[cowork] events/stream socket error: ${redactSecrets(String(err?.message || 'unknown'))}`);
       });
 
  // Hydration batch.
@@ -245,28 +326,72 @@ export async function GET(req: NextRequest): Promise<Response> {
         safeEnqueue(`: ping ${new Date().toISOString()}\n\n`);
       }, PING_INTERVAL_MS);
     },
+    pull() {
+      // Consumer wants more data: flush anything buffered under backpressure,
+      // then release the waiters so their held chunks flow through.
+      if (pendingChunks.length > 0) {
+        const batch = pendingChunks;
+        pendingChunks = [];
+        for (const c of batch) {
+          if (closed) break;
+          try {
+            controller?.enqueue(encoder.encode(c));
+          } catch {
+            closed = true;
+            teardown();
+            try {
+              controller?.error(new Error('events/stream broken transport'));
+            } catch {
+              /* already closed/errored */
+            }
+            break;
+          }
+        }
+      }
+      if (drainResolve) {
+        const resolve = drainResolve;
+        drainResolve = null;
+        drainWaiter = null;
+        resolve();
+      }
+    },
     cancel() {
  // Consumer explicitly cancelled the stream. Tear down the socket.io client
  // + ping timer so no resource leaks after the consumer goes away.
-      closed = true;
-      if (socket) {
-        socket.removeAllListeners();
-        socket.disconnect();
-        socket = null;
-      }
-      if (pingInterval) {
-        clearInterval(pingInterval);
-        pingInterval = null;
-      }
+      teardown();
     },
-  });
+    },
+    // Allow a few chunks to buffer before applying backpressure, so a briefly
+    // slow consumer doesn't trip the overflow path on every burst.
+    { highWaterMark: 64 },
+  );
 
  // The cockpit dashboard is same-origin — it does not need a wildcard
  // `Access-Control-Allow-Origin: '*'` header. Cross-origin EventSource
  // connections could otherwise silently exfiltrate every cockpit event. If
  // a specific cross-origin client must be supported, set
  // `process.env.COWORK_BASE_URL` and reflect it here.
-  const allowOrigin = process.env.COWORK_BASE_URL || null;
+ //
+ // Only reflect a *real* origin: reject '*' (would widen the auth-gated
+ // stream cross-origin) and any non-origin URL. Restrict to https, while
+ // still permitting a plain http://localhost origin so local dev CORS keeps
+ // working without disabling CORS entirely. Anything else reflects `null`,
+ // so no `Access-Control-Allow-Origin` header is emitted.
+  const allowOrigin = (() => {
+    const v = process.env.COWORK_BASE_URL;
+    if (!v || v === '*') return null;
+    try {
+      const u = new URL(v);
+      const isLocalhost =
+        u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]';
+      if (u.protocol === 'https:' || (u.protocol === 'http:' && isLocalhost)) {
+        return u.origin;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  })();
 
   return new Response(stream, {
     status: 200,
@@ -275,6 +400,7 @@ export async function GET(req: NextRequest): Promise<Response> {
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no', // disable proxy buffering (nginx etc.)
+      'Vary': 'Origin',
       ...(allowOrigin ? { 'Access-Control-Allow-Origin': allowOrigin } : {}),
     },
   });

@@ -41,7 +41,7 @@ export function ConnectionStatus({ className, compact }: ConnectionStatusProps) 
           )}
         />
       </span>
-      <span className={cn(!compact && "hidden sm:inline", "sr-only")}>
+      <span className={cn(compact ? "sr-only" : "hidden sm:inline")}>
         {connected ? "Live" : "Offline"}
       </span>
     </div>

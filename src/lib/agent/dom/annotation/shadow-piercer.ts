@@ -69,6 +69,8 @@
  * shim in `dom/shadow-piercer.ts`.
  */
 
+import { redactUrlTokens } from "../extraction/element-info";
+
 // ─── Public types ───────────────────────────────────────────────────────────
 
 /** Options for {@link installShadowPiercer}. */
@@ -179,7 +181,7 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
           console.info(`${PIERCER_LOG_TAG} attachShadow`, {
             tag: this.tagName?.toLowerCase() ?? "",
             mode,
-            url: typeof location !== "undefined" ? location.href : "",
+            url: typeof location !== "undefined" ? redactUrlTokens(location.href) : "",
           });
         } catch {
           /* ignore */
@@ -251,7 +253,7 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
   if (newState.debug) {
     try {
       console.info(`${PIERCER_LOG_TAG} installed`, {
-        url: typeof location !== "undefined" ? location.href : "",
+        url: typeof location !== "undefined" ? redactUrlTokens(location.href) : "",
         readyState: typeof document !== "undefined" ? document.readyState : "",
       });
     } catch {
@@ -388,18 +390,20 @@ export function getShadowRoot(el: Element): ShadowRoot | null {
         if (root instanceof ShadowRoot) return root;
  // Cross-world / non-instanceof fallback: a genuine ShadowRoot is a
  // DOCUMENT_FRAGMENT_NODE that ALSO exposes a `host` (the element it is
- // attached to). Requiring `host` distinguishes a real ShadowRoot from a
- // fabricated `DocumentFragment`, which lacks `host` — otherwise an
- // attacker-supplied fake node (or a hostile page that overwrote the
- // backdoor) could be walked by the extractor as if it were a shadow
- // root (finding: backdoor validated too loosely / accepted any
- // nodeType-11 node incl. DocumentFragment; content script trusts the
- // page-controlled backdoor without validation).
+ // attached to) and a real, iterable `childNodes` collection. Requiring
+ // `host` distinguishes a real ShadowRoot from a fabricated
+ // `DocumentFragment` (which lacks `host`), and the iterable `childNodes`
+ // check rejects attacker-supplied fake nodes that only mimic the shape
+ // (e.g. `{nodeType:11, host:{}}`) — otherwise the extractor would try to
+ // walk them and throw on `Array.from(sr.childNodes)`.
+        const srChildNodes = (root as unknown as { childNodes?: unknown }).childNodes;
         if (
           typeof Node !== "undefined" &&
           root &&
           (root as Node).nodeType === (Node.DOCUMENT_FRAGMENT_NODE ?? 11) &&
-          (root as { host?: unknown }).host
+          (root as { host?: unknown }).host &&
+          srChildNodes != null &&
+          typeof (srChildNodes as { [Symbol.iterator]?: unknown })[Symbol.iterator] === "function"
         ) {
           return root as unknown as ShadowRoot;
         }

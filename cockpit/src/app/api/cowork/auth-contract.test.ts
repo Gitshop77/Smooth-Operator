@@ -3,11 +3,14 @@
  *
  * The cockpit enforces `X-Cowork-Token` (or, for the SSE stream, a `?token=`
  * query param) on every `/api/cowork/*` route via `middleware`. These thin
- * tests assert the contract holds for the previously-untested routes:
+ * tests assert the contract holds for the token-gated data routes:
  * - ai/image (proxy to the image-generation mini-service)
+ * - ai/chat (proxy to the chat mini-service)
  * - events/stream (SSE proxy — query-token path, and NEVER logs the raw secret)
  * - security/events (Prisma-backed security event list)
- * - tabs / bookmarks (CRUD) — 401 without token, 200 with token.
+ * - tabs / bookmarks / sessions / workflows / pinboards / workspaces (CRUD)
+ * - agents / agents/tasks / history / memory/site / memory/form
+ * - extensions / extensions/log
  *
  * Pattern mirrors `src/middleware.test.ts`.
  */
@@ -29,10 +32,22 @@ function fakeReq(pathname: string, search = '', headers: Record<string, string> 
 const REAL_TOKEN = 'contract-test-secret-token-xyz';
 const ROUTES = [
   '/api/cowork/ai/image',
+  '/api/cowork/ai/chat',
   '/api/cowork/events/stream',
   '/api/cowork/security/events',
   '/api/cowork/tabs',
   '/api/cowork/bookmarks',
+  '/api/cowork/sessions',
+  '/api/cowork/workflows',
+  '/api/cowork/agents',
+  '/api/cowork/agents/tasks',
+  '/api/cowork/history',
+  '/api/cowork/memory/site',
+  '/api/cowork/memory/form',
+  '/api/cowork/pinboards',
+  '/api/cowork/extensions',
+  '/api/cowork/extensions/log',
+  '/api/cowork/workspaces',
 ];
 const SSE = '/api/cowork/events/stream';
 
@@ -44,6 +59,12 @@ describe('cockpit route auth contract', () => {
     delete process.env.COWORK_UI_TOKEN;
     delete process.env.COWORK_ALLOW_DEV_TOKEN;
     process.env.COWORK_UI_TOKEN = REAL_TOKEN;
+    // Enable the opt-in structured request log (COWORK_REQUEST_LOG=1) so the
+    // "raw stream token is NEVER logged" contract test actually exercises a log
+    // sink (its sanity assertion requires at least one console call). The log
+    // line is path-only, so the token-bearing query string never reaches any
+    // console sink — the redaction guarantee is preserved.
+    process.env.COWORK_REQUEST_LOG = '1';
   });
   afterEach(() => {
     process.env = { ...ORIGINAL_ENV };
@@ -78,6 +99,11 @@ describe('cockpit route auth contract', () => {
     const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
     const res = middleware(fakeReq(SSE, `token=${REAL_TOKEN}`));
     expect(res.status).toBe(200);
+    // Guard against the token being reflected back into any response header,
+    // which would leak the secret to the caller even with clean console sinks.
+    for (const value of res.headers.values()) {
+      expect(value).not.toContain(REAL_TOKEN);
+    }
     // Inspect every argument of every console sink — the "never logged"
     // guarantee covers all console sinks, not just console.log.
     for (const spy of [logSpy, warnSpy, errorSpy, infoSpy, debugSpy]) {
@@ -87,7 +113,10 @@ describe('cockpit route auth contract', () => {
         }
       }
     }
-    // Sanity: the request log WAS emitted (so we actually exercised logging).
-    expect(logSpy).toHaveBeenCalled();
+    // Sanity: the request log WAS emitted through at least one console sink
+    // (so we actually exercised logging), without requiring a specific sink.
+    expect(
+      [logSpy, warnSpy, errorSpy, infoSpy, debugSpy].some((s) => s.mock.calls.length > 0),
+    ).toBe(true);
   });
 });

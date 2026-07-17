@@ -26,9 +26,11 @@ import {
   SUMMARIZE_PROMPT,
   renderHistoryForSummarization,
 } from "../compaction";
+import { redactHistoryForPrompt } from "../messages";
 import type { LoopDeps } from "../types";
 import type { CallbackDispatcher, CallbackContext, LLMUsageInfo } from "../../callbacks";
 import { estimateCost } from "../../llm/pricing";
+import { SECURITY_INSTRUCTION } from "../../security";
 
 /**
  * Report a compaction call's cost + tokens to the caller (`onCost`), emit a
@@ -117,19 +119,33 @@ export async function runCompaction(
   onCost?: (usd: number, tokensIn?: number, tokensOut?: number) => void,
   dispatcher?: CallbackDispatcher,
   ctx?: CallbackContext,
+  priorCompactedMemory?: string,
+  signal?: AbortSignal,
 ): Promise<{ keptRecent: HistoryItem[]; compactedMemory: string; compactedCount: number } | null> {
   const { toSummarize, toKeep } = partitionHistory(navigatorHistory);
   if (toSummarize.length === 0) return null;
+ // Value-based (stored-vault) secret redaction parity with the navigator/planner
+ // prompt paths: apply redactHistoryForPrompt (redactSecrets + redactKeyShapes)
+ // before this history crosses the network to the summarizer. A substituted
+ // vault value that round-tripped into extractedContent/message/memory has no
+ // matching key SHAPE, so renderHistoryForSummarization's redactKeyShapes alone
+ // would let it pass through — this closes that outbound gap.
+  const redactedToSummarize = await redactHistoryForPrompt(toSummarize);
+ // Chain successive compactions: prepend the prior compacted summary so the
+ // second+ pass carries forward earlier context instead of overwriting it. The
+ // prior summary was already sanitized when produced; the final output is
+ // re-sanitized via sanitizeCompactedMemory below.
+  const priorBlock = priorCompactedMemory
+    ? `Prior summary:\n${priorCompactedMemory}\n\n`
+    : "";
  // Inline the request build to avoid calling partitionHistory a second time
  // (buildCompactionRequest calls it internally).
- // Use the static import (line 31-36) instead of a dynamic import — same
- // module, no circular dependency, avoids a microtask for no benefit.
-  const request = `${SUMMARIZE_PROMPT}\n\n${renderHistoryForSummarization(toSummarize)}`;
+  const request = `${SUMMARIZE_PROMPT}\n\n${priorBlock}${renderHistoryForSummarization(redactedToSummarize)}`;
   try {
     let summary: string;
     if (deps.summarizeCall) {
       const res = await deps.summarizeCall({
-        systemPrompt: "You are summarizing agent history.",
+        systemPrompt: `${SECURITY_INSTRUCTION}\n\nYou are summarizing agent history.`,
         userPrompt: request,
       });
       summary = res.content;
@@ -141,15 +157,16 @@ export async function runCompaction(
       }
     } else {
       const res = await deps.plannerCall({
-        task: "Summarize the agent history below into a compacted memory block.",
-        history: toSummarize,
+        task: `${SECURITY_INSTRUCTION}\n\nSummarize the agent history below into a compacted memory block.${priorCompactedMemory ? `\n\nPrior summary to carry forward:\n${priorCompactedMemory}` : ""}`,
+        history: redactedToSummarize,
         plan: undefined,
         currentPlanItem: undefined,
         url: "",
         tabs: [],
         step,
         maxSteps: 0,
-      });
+      }, signal);
+
  // The planner returns JSON — extract the text field for a clean summary.
       try {
         const parsed = JSON.parse(res.raw);

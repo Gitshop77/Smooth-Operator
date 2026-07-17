@@ -12,8 +12,12 @@ const DOMAIN_CONFIG_KEY = "__openCoworkDomainConfig";
 
 /** Allowlist a single host (IP literal or hostname) for the evaluate sandbox. */
 export function allowDomain(host: string): void {
+  const existing = (globalThis as Record<string, unknown>)[DOMAIN_CONFIG_KEY] as
+    | { allowedDomains?: string[] }
+    | undefined;
+  const allowedDomains = [...(existing?.allowedDomains ?? []), host];
   (globalThis as Record<string, unknown>)[DOMAIN_CONFIG_KEY] = {
-    allowedDomains: [host],
+    allowedDomains,
   };
 }
 

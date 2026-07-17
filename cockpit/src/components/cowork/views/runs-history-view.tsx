@@ -3,7 +3,7 @@
 import * as React from "react";
 import { motion } from "framer-motion";
 import {
-  History, ListChecks, Filter, GitBranch, Clock, SearchX,
+  History, ListChecks, Filter, GitBranch, Clock, SearchX, AlertCircle,
 } from "lucide-react";
 
 import { useAgentTasks, useHistory } from "@/hooks/use-cowork-query";
@@ -64,8 +64,8 @@ const RANGE_MS: Record<string, number | null> = {
 // ─── View ───────────────────────────────────────────────────────────────────
 
 export function RunsHistoryView() {
-  const { data: tasks, isLoading: tasksLoading } = useAgentTasks();
-  const { data: history, isLoading: historyLoading } = useHistory();
+  const { data: tasks, isLoading: tasksLoading, isError: tasksError, error: tasksErr } = useAgentTasks();
+  const { data: history, isLoading: historyLoading, isError: historyError, error: historyErr } = useHistory();
 
   const setView = useCoworkStore((s) => s.setView);
 
@@ -122,11 +122,17 @@ export function RunsHistoryView() {
       (a, b) => +new Date(b.visitedAt) - +new Date(a.visitedAt),
     );
     const q = search.trim().toLowerCase();
-    if (!q) return all;
-    return all.filter((h) =>
-      `${h.title} ${h.url}`.toLowerCase().includes(q),
-    );
-  }, [history, search]);
+    const cutoff = RANGE_MS[dateRange];
+    const now = Date.now();
+    const searchFiltered = q
+      ? all.filter((h) => `${h.title} ${h.url}`.toLowerCase().includes(q))
+      : all;
+    if (cutoff == null) return searchFiltered;
+    return searchFiltered.filter((h) => {
+      const ts = +new Date(h.visitedAt);
+      return Number.isFinite(ts) && now - ts <= cutoff;
+    });
+  }, [history, search, dateRange]);
 
  // Runs summary stats (terminal-aware, like agents-view).
   const TERMINAL = new Set(["done", "failed", "cancelled"]);
@@ -227,6 +233,12 @@ export function RunsHistoryView() {
 
           {tasksLoading ? (
             <LoadingSkeleton rows={6} />
+          ) : tasksError ? (
+            <EmptyState
+              icon={<AlertCircle className="size-6" />}
+              title="Couldn't load runs"
+              description={tasksErr?.message ?? "The runs endpoint returned an error. Check that the backend is reachable and NEXT_PUBLIC_COWORK_UI_TOKEN is configured."}
+            />
           ) : filteredRuns.length === 0 ? (
             <EmptyState
               icon={<SearchX className="size-6" />}
@@ -290,6 +302,12 @@ export function RunsHistoryView() {
         <TabsContent value="history" className="mt-4 space-y-4">
           {historyLoading ? (
             <LoadingSkeleton rows={6} />
+          ) : historyError ? (
+            <EmptyState
+              icon={<AlertCircle className="size-6" />}
+              title="Couldn't load history"
+              description={historyErr?.message ?? "The history endpoint returned an error. Check that the backend is reachable and NEXT_PUBLIC_COWORK_UI_TOKEN is configured."}
+            />
           ) : filteredHistory.length === 0 ? (
             <EmptyState
               icon={<SearchX className="size-6" />}

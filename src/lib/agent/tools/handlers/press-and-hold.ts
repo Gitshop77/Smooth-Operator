@@ -44,6 +44,12 @@ export async function handlePressAndHold(
 
   const holdMs = action.hold_ms;
   const delayMs = action.delay_ms;
+ // The SW performs the full delay+hold BEFORE responding, so the race timeout
+ // must cover that work on top of the base RPC margin (otherwise a legitimate
+ // long anti-bot hold — up to 120s total — would spuriously reject while the
+ // hold is still running). Do NOT lower the schema caps; this only widens the
+ // wait for the press-and-hold RPC.
+  const cdpTimeoutMs = SW_RPC_TIMEOUT_MS + delayMs + holdMs;
 
  // Strategy 1: CDP press-and-hold via the background script's
  // CDP_PRESS_AND_HOLD message handler. ONLY reachable in an extension
@@ -57,6 +63,7 @@ export async function handlePressAndHold(
     try {
  // Race against a timeout so a SW that receives the message but never
  // responds (debugger attach race / hung SW) can't block the agent loop.
+      let timeoutId: ReturnType<typeof setTimeout>;
       const cdpResult = await Promise.race([
         chrome.runtime.sendMessage({
           type: "CDP_PRESS_AND_HOLD",
@@ -65,10 +72,13 @@ export async function handlePressAndHold(
           holdMs,
           delayMs,
         }),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("CDP_PRESS_AND_HOLD timeout")), SW_RPC_TIMEOUT_MS),
-        ),
-      ]);
+        new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(
+            () => reject(new Error("CDP_PRESS_AND_HOLD timeout")),
+            cdpTimeoutMs,
+          );
+        }),
+      ]).finally(() => clearTimeout(timeoutId));
       if (cdpResult?.ok) {
         const changed = location.href !== ctx.beforeUrl || domFingerprint() !== ctx.beforeFingerprint;
         return {

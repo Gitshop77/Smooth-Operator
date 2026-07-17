@@ -25,6 +25,7 @@ function raceResumeWithTimeout(
   signal: AbortSignal | undefined,
   timeoutMs: number,
   arm: (finish: (result: "resumed" | "timeout") => void) => void,
+  cleanup?: () => void,
 ): Promise<"resumed" | "timeout"> {
   return new Promise<"resumed" | "timeout">((resolve) => {
     let done = false;
@@ -38,6 +39,7 @@ function raceResumeWithTimeout(
         try { signal.removeEventListener("abort", abortListener); } catch { /* ignore */ }
         abortListener = null;
       }
+      cleanup?.();
       resolve(result);
     };
  // Arm the caller's distinct resume trigger first (push to the registry /
@@ -63,7 +65,7 @@ function raceResumeWithTimeout(
  * into a web page or from another extension. Without this check any sender
  * could un-pause the agent loop.
  */
-function isTrustedResumeSender(sender?: chrome.runtime.MessageSender): boolean {
+export function isTrustedResumeSender(sender?: chrome.runtime.MessageSender): boolean {
   return (
     !!sender &&
     sender.id === chrome.runtime.id &&
@@ -86,12 +88,19 @@ function isTrustedResumeSender(sender?: chrome.runtime.MessageSender): boolean {
  * all-resolve bug.)
  */
 const activeResumeFinishers: Array<(r: "resumed" | "timeout") => void> = [];
-let resumeListenerAttached = false;
+// Tracks the exact `chrome.runtime.onMessage` object we already attached our
+// shared listener to, so a *different* (re-installed) `onMessage` — e.g. a test
+// harness that swaps the global `chrome` between cases, or a genuine context
+// re-validation — re-attaches correctly instead of silently no-op'ing because a
+// stale boolean flag was still set. Falls back to at most one listener per
+// distinct `onMessage` instance.
+let attachedOnMessage: unknown = null;
 
 function attachResumeListener(): void {
-  if (resumeListenerAttached) return;
+  const om = chrome.runtime?.onMessage;
+  if (!om || attachedOnMessage === om) return;
   try {
-    chrome.runtime.onMessage.addListener(
+    om.addListener(
       (msg: unknown, sender?: chrome.runtime.MessageSender): void => {
         if (
           (msg as { type?: string } | null)?.type === "RESUME" &&
@@ -107,7 +116,7 @@ function attachResumeListener(): void {
  // throwing call (e.g. extension context invalidated) leaves the flag
  // false and the next wait retries — rather than silently breaking RESUME
  // for the whole session.
-    resumeListenerAttached = true;
+    attachedOnMessage = om;
   } catch {
     /* listener attachment failed — waits simply fall back to timeout */
   }
@@ -143,18 +152,23 @@ export async function waitForTakeoverResume(
   }
 
   if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
+    let removeFromRegistry: (() => void) | undefined;
     return raceResumeWithTimeout(deps.signal, TAKEOVER_TIMEOUT_MS, (finish) => {
  // The shared onMessage listener holds a reference to `finish`; remove it
- // from the registry on every resolution path so a resolved/expired pause
- // can't be released again by a later RESUME.
+ // from the registry on every resolution path (RESUME, timeout, or abort)
+ // so a resolved/expired pause can't be released again by a later RESUME
+ // and the registry can't grow without bound across the session.
       const finishWithRegistry = (result: "resumed" | "timeout"): void => {
+        removeFromRegistry?.();
+        finish(result);
+      };
+      removeFromRegistry = () => {
         const idx = activeResumeFinishers.indexOf(finishWithRegistry);
         if (idx >= 0) activeResumeFinishers.splice(idx, 1);
-        finish(result);
       };
       activeResumeFinishers.push(finishWithRegistry);
       attachResumeListener();
-    });
+    }, () => removeFromRegistry?.());
   }
 
   deps.onEvent({

@@ -14,6 +14,13 @@ export async function handleHover(
 ): Promise<ActionResult> {
   const { state } = ctx;
   const el = resolveElement(state, action.index);
+  if (!el || !el.isConnected) {
+    return {
+      action,
+      success: false,
+      message: `element [${action.index}] is detached (page may have changed — extract state again)`,
+    };
+  }
   highlightElement(el, `hover [${action.index}]`);
   // Scroll the element into view BEFORE moving the phantom cursor and computing
   // the rect, so the cursor targets the element's post-scroll viewport position

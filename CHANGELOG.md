@@ -2,11 +2,20 @@
 
 All notable changes to Open Cowork will be documented in this file.
 
-## [Unreleased]
+## [0.3.1] — 2026-07-11 — Signal Indigo on Deep-Ink UI Redesign + repository hygiene
 
-_No changes yet._
+### Security & correctness hardening
 
-## [0.3.1] — Terracotta on Warm Charcoal UI Redesign + repository hygiene
+- Full-scale security and correctness review (v3) plus a convergent
+  review/implement/verify pass (v4) across the extension, the agentic core, the
+  Cockpit dashboard, and the `cowork-events` service.
+- Security guards locked down: ReDoS-safe regexes, SSRF/IP and cloud-metadata
+  blocking, secret redaction, output/artifact provenance checks, constant-time
+  secret comparisons, and the Cockpit agent-manifest rule (only endpoints that
+  actually exist are advertised to external agents).
+- Test suites green across the root (`vitest`), the Cockpit, and the
+  `cowork-events` service.
+- Git hygiene clean — no stray tracked secrets or build artifacts.
 
 ### Repository Hygiene
 - **Committed 3.3 MB of build artifacts**: The `chrome-extension/chunks/`
@@ -20,14 +29,13 @@ _No changes yet._
   tracked — the CI sync-check still verifies they match `src/extension/`.
 - **Cockpit lint warnings reduced**: 13 → 0 (all warnings cleared).
   Removed 3 unused imports introduced by the UI redesign: `X` from `agents-view.tsx`,
-  `EmptyState` from `network-view.tsx`, `React` from `nav-config.tsx`. Subsequent
-  the cockpit now lints
-  clean under `next lint`.
+  `EmptyState` from `network-view.tsx`, `React` from `nav-config.tsx`. The cockpit
+  now lints clean under `next lint`.
 
 ### Visual Identity
-- **Design system: Terracotta on Warm Charcoal** — dark-first palette
-  (`#262624` void → `#30302E` surface → `#353330` raised) with a terracotta
-  (`#D97757`) accent. Semantic colors: muted green (success), muted warm red
+- **Design system: Signal Indigo on Deep-Ink** — dark-first palette
+  (`#14161C` void → `#1C1F27` surface → `#232732` raised) with a signal-indigo
+  (`#6C5CE7`) accent. Semantic colors: muted green (success), muted warm red
   (error), violet (planner), sky blue (navigator/step), teal (observe). System
   mono for telemetry/data in the extension; JetBrains Mono in the cockpit.
 - **Signature element: Monospace activity log** in the side panel — color-coded
@@ -234,10 +242,11 @@ order with logical subsections.
   removed `continue-on-error: true` from the lint step.
 
 ### Workflow / DX
-- **One-command dev**: `npm install && npm run dev` starts extension
-  watch-build + cockpit + events together via `concurrently` (cross-platform:
-  Windows / Linux / macOS). `postinstall` auto-installs sub-package deps.
-  `dev:ext` script added for extension-only watch.
+- **One-command dev**: `npm install && npm run bootstrap && npm run dev`
+  starts extension watch-build + cockpit + events together via `concurrently`
+  (cross-platform: Windows / Linux / macOS). Sub-package deps (cockpit +
+  mini-service) are installed explicitly by `npm run bootstrap` — there is
+  **no** `postinstall` hook. `dev:ext` script added for extension-only watch.
 - **Node engine bumped**: `>=18.18.0` → `>=20.9.0` (matches Next.js 16
   requirement). README prerequisite updated.
 - **CI hardened**: Added `prisma generate` step before cockpit type-check.
@@ -257,7 +266,7 @@ order with logical subsections.
 ### Documentation / Ops
 - Removed stale Prisma/SQLite/Zustand claims from docs (cockpit now uses
   Prisma/SQLite; Zustand is a cockpit dep).
-- Version sync (0.3.0 everywhere).
+- Version sync (0.3.1 everywhere).
 - CI workflow added (`.github/workflows/ci.yml`).
 - `.env.example` added.
 - Permissions documentation added to README.

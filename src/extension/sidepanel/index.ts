@@ -54,7 +54,7 @@ function persistTask(value: string): void {
 // open/closed state across panel close/reopen via chrome.storage.local
 // (keys cw-reasoning / cw-activity). Restored on load, then a `toggle`
 // listener persists every change. This is the side-panel equivalent of the
-// localStorage demo in preview.html, but uses chrome.storage so it survives
+// localStorage demo in docs/preview.html, but uses chrome.storage so it survives
 // the extension's isolated world.
 
 interface CollapseBinding {

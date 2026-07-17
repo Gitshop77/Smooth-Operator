@@ -1,6 +1,6 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
-import { json, withRouteError, bodyJson, badRequest, validateHttpUrl, parseLimit, boundedString, MAX_URL_LEN, MAX_TITLE_LEN, MAX_SOURCE_LEN, sanitizeRequestId } from '@/lib/cowork/api/http';
+import { json, withRouteError, bodyJson, badRequest, validateHttpUrl, parseLimit, boundedString, MAX_URL_LEN, MAX_TITLE_LEN, MAX_SOURCE_LEN, sanitizeRequestId, CURSOR_ID_RE, isPrismaRecordNotFound } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
 export async function GET(req: NextRequest): Promise<Response> {
@@ -32,8 +32,10 @@ export async function GET(req: NextRequest): Promise<Response> {
       pinned: t.isPinned,
       audiblyMuted: t.isMuted,
     }));
-    return json({ tabs: projected, total: count });
-  });
+    const r = json({ tabs: projected, total: count });
+    r.headers.set('Cache-Control', 'no-store, private');
+    return r;
+  }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
 }
 
 export async function POST(req: NextRequest): Promise<Response> {
@@ -51,8 +53,9 @@ export async function POST(req: NextRequest): Promise<Response> {
  // a developer's localhost/loopback bookmark (http://localhost:3000) must
  // remain valid. The SSRF guard is reserved for genuine server-side
  // outbound fetches/launches.
- // A bogus workspaceId would otherwise surface as a Prisma "not found"
- // 404 with a raw message. Validate the FK exists first and return 400.
+ // Validate the workspace FK exists before creating the tab, so a missing
+ // workspaceId surfaces as a clean 400 (does not reach create) instead of a
+ // dangling-FK 500.
     if (workspaceId) {
       const ws = await db.workspace.findUnique({ where: { id: workspaceId } });
       if (!ws) return badRequest('unknown workspaceId');
@@ -67,5 +70,37 @@ export async function POST(req: NextRequest): Promise<Response> {
       },
     });
     return json({ tab }, 201);
-  }, sanitizeRequestId(req.headers.get('x-request-id')));
+  }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
+}
+
+// DELETE /api/cowork/tabs?id=<tabId>
+// Removes a single tab row. Gated by the same X-Cowork-Token check as
+// every other /api/cowork/* data route (enforced in middleware.ts). Distinct
+// from the AU-3 `?all=1` confirm:true mass-delete gate; per-id deletes are
+// scoped erasure only.
+export async function DELETE(req: NextRequest): Promise<Response> {
+  return withRouteError(async () => {
+    const id = req.nextUrl.searchParams.get('id');
+    if (!id) return badRequest('id is required');
+    if (!CURSOR_ID_RE.test(id)) return badRequest('invalid id');
+    try {
+      await db.tab.delete({ where: { id } });
+    } catch (e) {
+ // Prisma throws P2025 (RecordNotFound) when the id does't exist. The
+ // code lives in `e.code`, but a caller / driver layer may surface a
+ // plain `Error` whose message still reports P2025; detect both so a
+ // missing tab is a precise 404 rather than a 500 (mirrors the
+ // history / memory/form delete handlers).
+      if (
+        isPrismaRecordNotFound(e) ||
+        (e instanceof Error && /P2025/.test(e.message))
+      ) {
+        return json({ error: 'not found' }, 404);
+      }
+      throw e;
+    }
+    const r = json({ ok: true });
+    r.headers.set('Cache-Control', 'no-store, private');
+    return r;
+  }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
 }

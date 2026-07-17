@@ -10,12 +10,8 @@
 // • The X-Cowork-Token header must match `process.env.COWORK_UI_TOKEN`
 // (preferred) or, as a fallback, `process.env.COWORK_EVENT_TOKEN`.
 //
-// Token resolution order is CANONICAL and MUST match the auth middleware
-// (`middleware.ts`), which also prefers `COWORK_UI_TOKEN` then falls back to
-// `COWORK_EVENT_TOKEN`. If the relay sent a different secret than the API
-// accepts, every event would authenticate with the wrong secret and fail
-// closed (events silently dropped / 500 on `/api/cowork/events/emit`). Keeping
-// the two modules in lock-step on this order is security-critical.
+// Token resolution order (see `getCoworkEventsToken`) MUST match the auth
+// middleware or every event authenticates with the wrong secret and fails closed.
 //
 // NOTE on the SSE stream: `/api/cowork/events/stream` additionally accepts the
 // token via a `?token=` query parameter (an `EventSource` cannot set headers).
@@ -27,6 +23,47 @@
 // from logged URLs. (Documented for manifest consumers in `agent-bootstrap.ts`.)
 
 const COWORK_EVENTS_BASE = process.env.COWORK_EVENTS_BASE_URL || 'http://localhost:3003';
+
+// Validate the relay target with the same fail-closed rules applied to
+// COWORK_BASE_URL in agent-bootstrap.ts: http(s) scheme only, no embedded
+// credentials, and no secret-shaped query. We deliberately do NOT apply
+// isSsrfSafeUrl here — the cowork-events mini-service legitimately runs on
+// http://localhost:3003, so SSRF-gating the base would break the relay. A
+// misconfigured (attacker-controlled) base fails closed to '' so broadcastEvent
+// refuses to relay the X-Cowork-Token to it, instead of leaking the
+// service-to-service secret to an unexpected host.
+const EVENTS_BASE_SECRET_QUERY_RE =
+  /[?&](api[_-]?key|token|access[_-]?token|secret|password|auth(entication|orization)?|client[_-]?secret|bearer|session[_-]?id)=/i;
+
+let warnedBadEventsBase = false;
+
+function getValidatedEventsBase(base: string = COWORK_EVENTS_BASE): string {
+  try {
+    const parsed = new URL(base);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error('non-http(s) scheme');
+    }
+    if (parsed.username || parsed.password) {
+      throw new Error('embedded credentials');
+    }
+    if (parsed.search && EVENTS_BASE_SECRET_QUERY_RE.test(parsed.search)) {
+      throw new Error('secret-shaped query');
+    }
+  } catch (err) {
+    if (!warnedBadEventsBase) {
+      warnedBadEventsBase = true;
+      console.error(
+        '[cowork] COWORK_EVENTS_BASE_URL is not a safe relay target (' +
+          `${err instanceof Error ? err.message : 'invalid'}) — refusing to relay ` +
+          'the X-Cowork-Token there. Set it to an http(s) origin without embedded ' +
+          'credentials or a secret-shaped query.',
+      );
+    }
+    return '';
+  }
+  return base;
+}
+
 
 // Emit the missing-event-token warning at most once per process so a burst of
 // broadcasts doesn't flood the logs with the identical message.
@@ -42,30 +79,18 @@ let warnedRelayFailure = false;
 // handler indefinitely and amplify into request-queue exhaustion.
 const BROADCAST_TIMEOUT_MS = 5000;
 
-// Fail closed. The cockpit must NOT silently authenticate to the
-// cowork-events mini-service with the well-known `dev-token` when the operator
-// forgot to set a real secret. If both COWORK_UI_TOKEN and COWORK_EVENT_TOKEN
-// are unset/empty we refuse to relay instead of sending `dev-token`. The
-// `dev-token` fallback is removed entirely.
-//
-// The check is deferred to CALL time (not module load) so that importing a
-// route that references this module — during `next build`, prerender, or a
-// unit test — does not crash the whole module graph. The throw fires only when
-// a relay is actually attempted.
-//
 // Resolution order (CANONICAL, must match `middleware.ts`): prefer
-// COWORK_UI_TOKEN, falling back to COWORK_EVENT_TOKEN. See the module header
-// for why the two must agree.
+// COWORK_UI_TOKEN, falling back to COWORK_EVENT_TOKEN. Resolved at CALL time (not
+// module load) so importing this module during build/prerender/tests can't crash
+// the module graph. No `dev-token` fallback: when neither secret is set the relay
+// sends an empty token and the upstream 401 surfaces as a 500 (see below).
 function getCoworkEventsToken(): string {
  // Preferred browser-facing secret (also what the API accepts first).
   const uiToken = process.env.COWORK_UI_TOKEN;
   if (uiToken && uiToken.length > 0) {
- // SECURITY WARNING: if COWORK_UI_TOKEN is mirrored into
- // NEXT_PUBLIC_COWORK_UI_TOKEN (as the auth middleware reads it from the
- // browser), this server-to-server relay would be using a secret that is
- // shipped in the client bundle. Surface that fact so operators notice the
- // unsafe default rather than it silently "working". We only warn when the
- // dedicated service-to-service token is not also configured.
+ // SECURITY WARNING: if COWORK_UI_TOKEN is also mirrored into
+ // NEXT_PUBLIC_COWORK_UI_TOKEN, this S2S relay uses a secret shipped in the
+ // client bundle. Warn only when the dedicated S2S token is not configured.
     if (!process.env.COWORK_EVENT_TOKEN) {
       if (!warnedMissingEventToken) {
         warnedMissingEventToken = true;
@@ -85,19 +110,15 @@ function getCoworkEventsToken(): string {
   if (token && token.length > 0) {
     return token;
   }
- // Neither secret is configured. Rather than fail-closed (which would turn a
- // missing-secret misconfiguration into a 500 for every caller), warn once so
- // the operator still sees the misconfiguration server-side, and let the relay
- // attempt proceed — the upstream rejects an empty/absent X-Cowork-Token with a
- // 401, which the route surfaces as a 500. This preserves the contract exercised
- // by the route tests (the token is supplied via env in real deployments).
+ // Neither secret is configured: warn once and let the relay proceed with an
+ // empty token. The upstream rejects it with 401, surfaced as a 500 by the route.
   if (!warnedMissingEventToken) {
     warnedMissingEventToken = true;
     console.warn(
-      '[cowork] COWORK_EVENT_TOKEN is unset — relaying to the cowork-events ' +
-        'mini-service with COWORK_UI_TOKEN. If COWORK_UI_TOKEN is also exposed via ' +
-        'NEXT_PUBLIC_COWORK_UI_TOKEN, the server-to-server secret is embedded in the ' +
-        'shipped browser bundle. Prefer setting COWORK_EVENT_TOKEN for relays.',
+      '[cowork] Neither COWORK_UI_TOKEN nor COWORK_EVENT_TOKEN is set — relaying ' +
+        'to the cowork-events mini-service with an empty X-Cowork-Token. The upstream ' +
+        'will reject it with 401 (surfaced as a 500 by the emitting route). Set ' +
+        'COWORK_UI_TOKEN (or COWORK_EVENT_TOKEN) to enable event relay.',
     );
   }
   return uiToken ?? '';
@@ -118,14 +139,10 @@ export interface BroadcastResult {
  * @param payload Arbitrary JSON-serializable payload.
  * @returns The mini-service's acknowledgement ({ ok, id, channel }).
  *
- * Fail-closed on a missing secret: `getCoworkEventsToken()` is read BEFORE the
- * try/catch so its throw escapes `broadcastEvent` (instead of being swallowed
- * into `{ ok: false }`). Callers that ignore the return value — e.g.
- * fire-and-forget emitters — therefore fail loud, and the
- * `/api/cowork/events/emit` route (which wraps `broadcastEvent` in
- * `withRouteError`) surfaces it as a 500, preserving end-to-end fail-closed
- * behavior. The fetch is bounded by an `AbortSignal.timeout`; a stalled relay
- * returns `{ ok: false, error: 'timeout' }` rather than blocking the route.
+ * The token and validated base are read BEFORE the try/catch so a
+ * misconfiguration fails closed rather than being swallowed into `{ ok: false }`.
+ * The fetch is bounded by an `AbortSignal.timeout`; a stalled relay returns
+ * `{ ok: false, error: 'timeout' }` rather than blocking the route.
  */
 export async function broadcastEvent(
   channel: string,
@@ -134,8 +151,12 @@ export async function broadcastEvent(
  // Read the token outside the try so an unset secret throws out (fail-closed)
  // rather than being silently converted to `{ ok: false }`.
   const token = getCoworkEventsToken();
+  const eventsBase = getValidatedEventsBase();
+  if (!eventsBase) {
+    return { ok: false, channel, error: 'misconfigured event relay base url' };
+  }
   try {
-    const res = await fetch(`${COWORK_EVENTS_BASE}/emit`, {
+    const res = await fetch(`${eventsBase}/emit`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -153,7 +174,15 @@ export async function broadcastEvent(
       }
       return { ok: false, channel, error: `HTTP ${res.status}: ${text.slice(0, 200)}` };
     }
-    const data = (await res.json()) as { ok?: boolean; id?: number; channel?: string };
+    let data: { ok?: boolean; id?: number; channel?: string } = {};
+    try {
+      data = (await res.json()) as { ok?: boolean; id?: number; channel?: string };
+    } catch {
+   // 200 with an unparseable/empty body — the upstream already accepted the
+   // event, so report success rather than letting the throw fall into the outer
+   // catch and surface a false `{ ok: false }`.
+      return { ok: true, channel };
+    }
     return {
       ok: Boolean(data.ok),
       id: typeof data.id === 'number' ? data.id : undefined,
@@ -174,4 +203,4 @@ export async function broadcastEvent(
   }
 }
 
-export { COWORK_EVENTS_BASE, getCoworkEventsToken };
+export { COWORK_EVENTS_BASE, getCoworkEventsToken, getValidatedEventsBase };

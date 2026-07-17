@@ -32,11 +32,12 @@ export function addTokens(state: LoopState, tokensIn: number | undefined, tokens
 }
 
 /**
- * Check the cost cap; if exceeded, emit `done` and return `true` so the caller
- * can `return` immediately.
+ * Check the cost cap; if exceeded, set the final result and return `true` so
+ * the caller can `return` immediately and emit the authoritative terminal
+ * `done` event (callers must not double-emit).
  */
 export function costCapExceeded(state: LoopState): boolean {
-  const { config, totalCostUsd, step, onEvent } = state;
+  const { config, totalCostUsd } = state;
   const exceeded =
     Number.isFinite(totalCostUsd) &&
     config.costCapUsd !== undefined &&
@@ -45,10 +46,9 @@ export function costCapExceeded(state: LoopState): boolean {
   if (exceeded) {
     const cap = config.costCapUsd ?? 0;
     const text = `Cost cap of $${cap.toFixed(2)} reached.`;
-    onEvent({ type: "done", step, success: false, text });
- // Set state.finalResult so buildRunResult returns the real text for the
- // runEnd callback (not ""). Without this, dispatcher.runEnd subscribers
- // get an empty string even though the SSE done event has the real text.
+    // Set state.finalResult so buildRunResult returns the real text for the
+    // runEnd callback (not ""). Without this, dispatcher.runEnd subscribers
+    // get an empty string even though the SSE done event has the real text.
     state.finalResult = { success: false, text };
     return true;
   }

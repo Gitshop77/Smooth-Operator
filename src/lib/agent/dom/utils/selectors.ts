@@ -236,7 +236,7 @@ export function escapeCss(css: string): string {
  * aren't masked as "no match" (see the notes in the `catch`/`default` below).
  */
 const isProd = (): boolean =>
-  typeof process !== "undefined" && process.env?.NODE_ENV === "production";
+  typeof process === "undefined" ? true : process.env?.NODE_ENV === "production";
 
 export function findByLocator(by: By): Element[] {
   try {
@@ -291,15 +291,29 @@ export function findByLocator(by: By): Element[] {
       }
       case "link text": {
         const want = by.value.trim().toLowerCase();
-        return Array.from(document.getElementsByTagName("a")).filter((a) =>
-          (a.textContent || "").trim().toLowerCase() === want,
-        );
+        const anchors = document.getElementsByTagName("a");
+        const out: Element[] = [];
+        for (let i = 0; i < anchors.length; i++) {
+          const a = anchors[i] as Element;
+          if ((a.textContent || "").trim().toLowerCase() === want) {
+            out.push(a);
+            if (out.length >= MAX_NODES) break;
+          }
+        }
+        return out;
       }
       case "partial link text": {
         const want = by.value.trim().toLowerCase();
-        return Array.from(document.getElementsByTagName("a")).filter((a) =>
-          (a.textContent || "").trim().toLowerCase().includes(want),
-        );
+        const anchors = document.getElementsByTagName("a");
+        const out: Element[] = [];
+        for (let i = 0; i < anchors.length; i++) {
+          const a = anchors[i] as Element;
+          if ((a.textContent || "").trim().toLowerCase().includes(want)) {
+            out.push(a);
+            if (out.length >= MAX_NODES) break;
+          }
+        }
+        return out;
       }
       case "tag name":
         return collectElements(document.getElementsByTagName(by.value));

@@ -25,14 +25,32 @@
  */
 
 import { parseAlarmName, initScheduledTasks } from "@/lib/agent/scheduled-tasks";
-import { getRunState, clearRunState, KEEPALIVE_ALARM, requestKeepAwake } from "./state-store";
+import { getRunState, clearRunState, KEEPALIVE_ALARM, requestKeepAwake, safeLog } from "./state-store";
 import { handleScheduledTaskFire } from "./task-queue";
+import { registerRateLimitListener } from "./rate-limit-tracker";
 // Importing `./message-routing` registers the `chrome.runtime.onMessage`
 // listener as a top-level side effect. The listener depends on `startRun`
 // (from `./agent-bridge`), which depends on `./tab-manager` + `./state-store`.
 // ES module evaluation order ensures every handler is wired before the SW
 // becomes ready to receive messages.
 import "./message-routing";
+
+// Register the network-authoritative 429/503 rate-limit listener. The DOM
+// challenge detector refuses to derive a rate-limit from attacker-settable page
+// content, so this listener supplies the authoritative signal the anti-bot
+// hooks surface as a `rate-limited` challenge kind.
+registerRateLimitListener();
+
+// Top-level safety net: rejections thrown outside any try/catch (e.g. an async
+// listener body or a late `import()` that rejects) are otherwise silently
+// dropped and never redacted. Route them through safeLog so any embedded
+// secrets are scrubbed before hitting the SW console.
+self.addEventListener("unhandledrejection", (e: PromiseRejectionEvent) => {
+  void safeLog("error", "[sw] unhandled rejection:", e.reason);
+});
+self.addEventListener("error", (e: ErrorEvent) => {
+  void safeLog("error", "[sw] uncaught error:", e.error ?? e.message);
+});
 
 // Warm the live models.dev catalog so cost tracking uses live rates.
 // pricing.ts no longer has a static table — rates come from the catalog.
@@ -43,7 +61,7 @@ import "./message-routing";
 function warmPricingCatalog(): void {
   void import("../../lib/agent/llm/pricing")
     .then((m) => m.refreshPricingFromCatalog())
-    .catch((e) => console.warn("[pricing] live catalog refresh failed:", e));
+    .catch((e) => void safeLog("warn", "[pricing] live catalog refresh failed:", e));
 }
 
 // ─── Side panel wiring ──────────────────────────────────────────────────────
@@ -138,6 +156,9 @@ chrome.runtime.onConnect.addListener((port) => {
  // to acknowledge the connection. The port will be torn down when the
  // side panel closes (or when the SW is killed — the side panel's
  // `onDisconnect` listener reconnects).
+    port.onDisconnect.addListener(() => {
+      // side panel closed; SW keeps running on the alarms keepalive fallback
+    });
   }
 });
 
@@ -145,26 +166,15 @@ chrome.runtime.onConnect.addListener((port) => {
 
 /**
  * On service worker startup, check whether a run was active when the previous
- * SW was killed. The async loop itself can't be resumed, but we notify the
- * side panel so it doesn't hang waiting for events. This MUST run AFTER the
- * `onMessage` listener is registered so a pending panel-open STATUS doesn't
- * race the startup logic.
- *
- * The body of this IIFE runs as a microtask after the synchronous module
- * evaluation finishes — by which point the `onMessage` listener (registered
- * by the `./message-routing` import above) is already in place.
+ * SW was killed (notify the side panel so it doesn't hang), re-arm
+ * scheduled-task alarms, and (re)acquire the keep-awake lock. Runs after the
+ * `onMessage` listener is registered (via the `./message-routing` import) so a
+ * pending panel-open STATUS doesn't race the startup logic. Each concern is
+ * wrapped in its own try/catch so a transient failure in one — e.g. a
+ * `getRunState()` rejection — does not block the others for the whole SW
+ * incarnation.
  */
-// On service worker startup, check whether a run was active when the previous
-// SW was killed, re-arm scheduled-task alarms, and (re)acquire the keep-awake
-// lock. Each concern is independent and wrapped in its own try/catch so a
-// transient failure in one does not block the others.
 async function onServiceWorkerStartup(): Promise<void> {
-// The run-state notification and the alarm/keep-awake arming are independent
-// concerns. A transient `getRunState()` rejection (quota exceeded, SW
-// mid-teardown, Chrome bug) must NOT block `initScheduledTasks` /
-// `requestKeepAwake` — otherwise scheduled-task alarms stay un-armed for this
-// entire SW incarnation (the SW only self-heals on its next restart). So each
-// concern is wrapped in its own try/catch.
   try {
     const state = await getRunState();
     if (state?.active) {
@@ -186,7 +196,7 @@ async function onServiceWorkerStartup(): Promise<void> {
       await clearRunState();
     }
   } catch (e) {
-    console.error("[sw-startup] run-state check failed (alarms still armed below):", e);
+    void safeLog("error", "[sw-startup] run-state check failed (alarms still armed below):", e);
   }
  // re-arm all enabled scheduled-task alarms on SW startup. Alarms
  // persist across SW restarts, but re-arming is idempotent and ensures any
@@ -195,7 +205,7 @@ async function onServiceWorkerStartup(): Promise<void> {
   try {
     await initScheduledTasks();
   } catch (e) {
-    console.error("[sw-startup] failed to arm scheduled tasks:", e);
+    void safeLog("error", "[sw-startup] failed to arm scheduled tasks:", e);
   }
  // (re)acquire the system keep-awake lock if any enabled scheduled
  // tasks exist. The lock doesn't persist across SW restarts (chrome.power
@@ -207,7 +217,7 @@ async function onServiceWorkerStartup(): Promise<void> {
   try {
     await requestKeepAwake();
   } catch (e) {
-    console.error("[sw-startup] failed to acquire keep-awake lock:", e);
+    void safeLog("error", "[sw-startup] failed to acquire keep-awake lock:", e);
   }
 }
 

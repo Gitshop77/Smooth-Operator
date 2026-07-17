@@ -21,8 +21,6 @@ import { AgentOutputSchema, PlannerOutputSchema } from "../lib/agent/tools/schem
 import { getFormatInstructions } from "../lib/agent/tools/registry";
 import type { AgentStepRequest, PlannerStepRequest } from "../lib/agent/types";
 import { buildProvider, readProviderConfig, type ProviderConfig } from "./provider-config";
-// Import the canonical constants from validations.ts instead of re-declaring
-// them as magic numbers — now they share the same source of truth.
 import { MAX_ACTIONS, MAX_ELEMENTS_CHARS } from "@/lib/validations";
 
 /** Cached provider instance + the config it was built from (rebuilt on config change). */
@@ -33,6 +31,11 @@ let cachedProviderConfig: ProviderConfig | null = null;
 /** In-flight build promises keyed by cache key — prevents double-building when
  * concurrent calls (even with different keys) race. */
 const pendingProviders = new Map<string, Promise<LLMProvider>>();
+/** Monotonic config epoch, bumped whenever a provider-config key changes. A
+ * build captures the epoch at start and only commits to the cache if it is
+ * still current, so a superseded in-flight build cannot resurrect a stale
+ * provider after an invalidation. */
+let configEpoch = 0;
 
 // Cached settings (invalidated on chrome.storage.onChanged via the listener
 // below). A single Map backs every cached setting so the per-key invalidation
@@ -41,7 +44,7 @@ const pendingProviders = new Map<string, Promise<LLMProvider>>();
 const settingCache = new Map<string, unknown>();
 
 /** Provider-config storage keys whose change must invalidate the cached provider. */
-const PROVIDER_CONFIG_KEYS = ["provider", "model", "baseUrl", "resourceName", "apiKey"];
+const PROVIDER_CONFIG_KEYS = ["provider", "model", "baseUrl", "resourceName", "apiKey", "provenance"];
 
 if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
   chrome.storage.onChanged.addListener((changes, _area) => {
@@ -49,11 +52,13 @@ if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
       cachedProvider = null;
       cachedConfigKey = null;
       cachedProviderConfig = null;
+      configEpoch++;
     }
     if (changes.customNavigatorPrompt) settingCache.delete("customNavigatorPrompt");
     if (changes.customPlannerPrompt) settingCache.delete("customPlannerPrompt");
     if (changes.visionMode || changes.enableLocalVision) settingCache.delete("visionMode");
     if (changes.enableScreenshots) settingCache.delete("enableScreenshots");
+    if (changes.agentMode) settingCache.delete("agentMode");
   });
 }
 
@@ -77,7 +82,7 @@ async function getCustomPlannerPrompt(): Promise<string | undefined> {
   return (customPlannerPrompt as string | undefined) ?? undefined;
 }
 
-async function getVisionMode(): Promise<"disabled" | "always" | "adaptive"> {
+export async function getVisionMode(): Promise<"disabled" | "always" | "adaptive"> {
   if (settingCache.has("visionMode")) {
     return settingCache.get("visionMode") as "disabled" | "always" | "adaptive";
   }
@@ -140,33 +145,34 @@ function extractUsage(r: {
  * an undefined mode.
  */
 const AGENT_MODES = new Set(["full_agentic", "standard", "restricted"]);
-async function getAgentMode(): Promise<string> {
+export async function getAgentMode(): Promise<string> {
+  if (settingCache.has("agentMode")) {
+    return settingCache.get("agentMode") as string;
+  }
   const { agentMode } = await chrome.storage.local.get(["agentMode"]);
   const mode = agentMode as string | undefined;
-  return mode && AGENT_MODES.has(mode) ? mode : "standard";
+  const resolved = mode && AGENT_MODES.has(mode) ? mode : "standard";
+  settingCache.set("agentMode", resolved);
+  return resolved;
 }
 
-/**
- * Resolve the LLM provider from the user's stored config. Caches the instance
- * until the config changes (so we don't rebuild on every step).
- *
- * Uses an in-flight promise to prevent double-building when two concurrent
- * calls (e.g. navigator + planner) race to build the same provider.
- *
- * @throws if no provider is configured or the API key is missing.
- */
 /**
  * Cheap, non-reversible digest of a secret (e.g. an API key) for use inside a
  * cache key. The key material is never persisted as plaintext — only this short
  * digest survives in the long-lived `cachedConfigKey` string — while cache
  * invalidation still fires whenever the secret changes.
  */
-function hashStr(s: string): string {
+export function hashStr(s: string): string {
   let h = 5381;
   for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
   return (h >>> 0).toString(36);
 }
 
+/**
+ * Resolve the LLM provider from stored config, caching the instance until the
+ * config changes. An in-flight promise prevents double-building when concurrent
+ * calls race. Throws if no provider is configured.
+ */
 async function getProvider(): Promise<LLMProvider> {
  // Hot path: reuse the cached provider WITHOUT a storage round-trip. The cache
  // is invalidated by the `chrome.storage.onChanged` listener above whenever a
@@ -204,10 +210,16 @@ async function getProvider(): Promise<LLMProvider> {
  // redundant rebuild) or overwrite the cache with A's stale key/provider
  // (finding: concurrent provider builds corrupt shared pendingProvider/
  // cachedProvider state).
+  const epochAtBuild = configEpoch;
   const p = buildProvider(config).then((provider) => {
-    cachedProvider = provider;
-    cachedConfigKey = key;
     pendingProviders.delete(key);
+   // Only commit if no config change happened while this build was in flight.
+   // A superseded build must not resurrect a stale provider/key.
+    if (configEpoch === epochAtBuild) {
+      cachedProvider = provider;
+      cachedConfigKey = key;
+      cachedProviderConfig = config;
+    }
     return provider;
   }).catch((e) => {
     pendingProviders.delete(key);
@@ -218,18 +230,26 @@ async function getProvider(): Promise<LLMProvider> {
 }
 
 /**
- * One navigator step — DIRECT call to the LLM provider (no localhost).
- *
- * Mirrors what the Next.js `/api/agent/navigator` route did, but runs entirely
- * in the extension's background worker.
- *
- * @returns `{ raw, tokensIn, tokensOut, model }` — same shape the orchestrator
- * expects from `navigatorCall`.
- * @throws on provider errors, parse failures (caller surfaces to the
- * orchestrator's parse-retry loop; transient HTTP errors are retried
- * inside `withLLMRetry` at the transport layer).
+ * Cap `text` to `max` characters, appending a marker so the model knows data
+ * was dropped. Guards `undefined` (treated as empty) so a missing field can
+ * never throw on `.length`. Used for both elementsText and axTree.
  */
-export async function navigatorCallDirect(req: AgentStepRequest): Promise<{
+export function capText(text: string | undefined, max: number): string {
+  const safe = text ?? "";
+  return safe.length > max
+    ? safe.slice(0, max) + `\n[... truncated at ${max} chars ...]`
+    : safe;
+}
+
+/**
+ * One navigator step — direct call to the LLM provider. Returns
+ * `{ raw, tokensIn, tokensOut, model, ... }` — the shape the orchestrator
+ * expects from `navigatorCall`.
+ */
+export async function navigatorCallDirect(
+  req: AgentStepRequest,
+  signal?: AbortSignal,
+): Promise<{
   raw: string;
   tokensIn?: number;
   tokensOut?: number;
@@ -239,11 +259,13 @@ export async function navigatorCallDirect(req: AgentStepRequest): Promise<{
   costUsd?: number;
 }> {
  // Cap elementsText (same abuse-prevention as the Next.js route).
-  const cappedElementsText =
-    req.browserState.elementsText.length > MAX_ELEMENTS_CHARS
-      ? req.browserState.elementsText.slice(0, MAX_ELEMENTS_CHARS) +
-        `\n[... truncated at ${MAX_ELEMENTS_CHARS} chars ...]`
-      : req.browserState.elementsText;
+  const cappedElementsText = capText(req.browserState.elementsText, MAX_ELEMENTS_CHARS);
+
+ // Cap axTree symmetrically to elementsText. On large pages the AX tree can be
+ // very large and is re-sent on every navigator step; leaving it uncapped both
+ // inflates per-step input tokens and risks message-size limits. The truncation
+ // marker tells the model data was dropped.
+  const cappedAxTree = capText(req.browserState.axTree, MAX_ELEMENTS_CHARS);
 
   const userMessage = await buildNavigatorUserMessage({
     task: req.task,
@@ -251,7 +273,7 @@ export async function navigatorCallDirect(req: AgentStepRequest): Promise<{
     currentGoal: req.currentGoal || req.task,
     plan: req.plan,
     currentPlanItem: req.currentPlanItem,
-    browserState: { ...req.browserState, elementsText: cappedElementsText, axTree: req.browserState.axTree },
+    browserState: { ...req.browserState, elementsText: cappedElementsText, axTree: cappedAxTree },
     step: req.step,
     maxSteps: req.maxSteps,
  // pass the compacted-memory block so it's rendered in the prompt.
@@ -281,6 +303,12 @@ export async function navigatorCallDirect(req: AgentStepRequest): Promise<{
  // sanitizer (which only inspects DOM/AX text) and must be treated as untrusted
  // page data, exactly like <untrusted_page_data>. The navigator prompt already
  // tells the model the screenshot is untrusted evidence, never an instruction.
+ //
+ // Each navigator step is a stateless, two-message call with no prior image
+ // retained in the outgoing messages, so the screenshot must be sent on every
+ // step. Eliding an unchanged screenshot would leave the vision model with zero
+ // pixels and a note referencing an image it was never shown. The screenshot
+ // stays inside the untrusted wrapper exactly as before.
   const fullUserContent = screenshot
     ? `${userMessage}\n\n<untrusted_page_data><screenshot>${screenshot}</screenshot></untrusted_page_data>`
     : userMessage;
@@ -303,8 +331,9 @@ export async function navigatorCallDirect(req: AgentStepRequest): Promise<{
 
   const response = await provider.chat({
     messages,
-    temperature: 0,
+    ...(provider.supportsReasoning ? {} : { temperature: 0 }),
     schema: provider.supportsStructuredOutput ? AgentOutputSchema : undefined,
+    ...(signal ? { signal } : {}),
   });
 
  // The orchestrator re-parses `raw` itself, so we just return the raw content.
@@ -317,15 +346,14 @@ export async function navigatorCallDirect(req: AgentStepRequest): Promise<{
 }
 
 /**
- * One planner step — DIRECT call to the LLM provider (no localhost).
- *
- * Mirrors what the Next.js `/api/agent/planner` route did, but runs entirely
- * in the extension's background worker.
- *
- * @returns `{ raw, tokensIn, tokensOut, model }` — same shape the orchestrator
+ * One planner step — direct call to the LLM provider. Returns
+ * `{ raw, tokensIn, tokensOut, model, ... }` — the shape the orchestrator
  * expects from `plannerCall`.
  */
-export async function plannerCallDirect(req: PlannerStepRequest): Promise<{
+export async function plannerCallDirect(
+  req: PlannerStepRequest,
+  signal?: AbortSignal,
+): Promise<{
   raw: string;
   tokensIn?: number;
   tokensOut?: number;
@@ -343,6 +371,7 @@ export async function plannerCallDirect(req: PlannerStepRequest): Promise<{
     tabs: req.tabs,
     step: req.step,
     maxSteps: req.maxSteps,
+    compactedMemory: req.compactedMemory,
   });
 
  // load custom planner prompt override (cached, invalidated on storage change).
@@ -369,8 +398,9 @@ export async function plannerCallDirect(req: PlannerStepRequest): Promise<{
 
   const response = await provider.chat({
     messages,
-    temperature: 0,
+    ...(provider.supportsReasoning ? {} : { temperature: 0 }),
     schema: provider.supportsStructuredOutput ? PlannerOutputSchema : undefined,
+    ...(signal ? { signal } : {}),
   });
 
  // Return cachedInputTokens + pre-computed costUsd (see navigatorCallDirect).

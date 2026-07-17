@@ -10,6 +10,9 @@ import {
   validateSchedule,
   computeNextFire,
   parseAlarmName,
+  saveScheduledTask,
+  initScheduledTasks,
+  type ScheduledTask,
 } from "../src/lib/agent/scheduled-tasks";
 import {
   saveMemory,
@@ -124,6 +127,121 @@ describe("scheduled-tasks — parseAlarmName", () => {
   test("returns null for non-scheduled alarm names", () => {
     expect(parseAlarmName("open_cowork_keepalive")).toBeNull();
     expect(parseAlarmName("some_other_alarm")).toBeNull();
+  });
+});
+
+// ─── scheduled-tasks.ts — chrome.alarms MV3 wiring (brief §3) ────────────────
+//
+// These are the side-effecting assertions the pure-helper tests above miss:
+// that an enabled task actually arms a chrome.alarm (the MV3-correct mechanism
+// — not a setInterval), that the alarm name carries the parseAlarmName prefix,
+// and that initScheduledTasks re-arms every persisted task on service-worker
+// start. A regression that silently reverted to setInterval, or dropped the
+// chrome.alarms.create call, would break MV3 teardown/restart semantics.
+
+type AlarmSpec = { name: string; spec?: chrome.alarms.AlarmCreateInfo };
+
+function installChromeAlarmsStub() {
+  const created: AlarmSpec[] = [];
+  const cleared: string[] = [];
+  const storageData: Record<string, unknown> = {};
+  const chromeStub = {
+    alarms: {
+      create: ((name: string, spec: chrome.alarms.AlarmCreateInfo) => {
+        created.push({ name, spec });
+      }) as unknown as typeof chrome.alarms.create,
+      clear: ((name: string) => {
+        cleared.push(name);
+        return Promise.resolve(true);
+      }) as unknown as typeof chrome.alarms.clear,
+      get: (() => Promise.resolve(undefined)) as unknown as typeof chrome.alarms.get,
+      getAll: (() => Promise.resolve([])) as unknown as typeof chrome.alarms.getAll,
+      onAlarm: { addListener: (() => {}) as typeof chrome.alarms.onAlarm.addListener },
+    },
+    storage: {
+      local: {
+        get: ((key: string) => Promise.resolve({ [key]: storageData[key] })) as typeof chrome.storage.local.get,
+        set: ((obj: Record<string, unknown>) => {
+          Object.assign(storageData, obj);
+          return Promise.resolve();
+        }) as typeof chrome.storage.local.set,
+        remove: ((key: string) => {
+          delete storageData[key];
+          return Promise.resolve();
+        }) as typeof chrome.storage.local.remove,
+      },
+    },
+    power: {
+      requestKeepAwake: (() => {}) as typeof chrome.power.requestKeepAwake,
+      releaseKeepAwake: (() => {}) as typeof chrome.power.releaseKeepAwake,
+    },
+  };
+  const prev = (globalThis as { chrome?: unknown }).chrome;
+  (globalThis as { chrome?: unknown }).chrome = chromeStub;
+  return {
+    created,
+    cleared,
+    storageData,
+    restore: () => {
+      (globalThis as { chrome?: unknown }).chrome = prev;
+    },
+  };
+}
+
+function makeTask(id: string, schedule: ScheduledTask["schedule"], enabled = true): ScheduledTask {
+  return {
+    id,
+    task: `prompt for ${id}`,
+    schedule,
+    enabled,
+    createdAt: 1_700_000_000_000,
+  };
+}
+
+describe("scheduled-tasks — chrome.alarms MV3 wiring", () => {
+  test("saveScheduledTask arms a chrome.alarm named by parseAlarmName prefix + id", async () => {
+    const stub = installChromeAlarmsStub();
+    try {
+      const task = makeTask("task-1", { type: "interval", intervalMinutes: 30 });
+      await saveScheduledTask(task);
+
+      // Name must carry the canonical prefix (so parseAlarmName round-trips).
+      const expectedName = `open_cowork_scheduled_${task.id}`;
+      const armed = stub.created.find((c) => c.name === expectedName);
+      expect(armed).toBeDefined();
+      // Interval schedules arm with periodInMinutes derived from the schedule.
+      expect(armed!.spec!.periodInMinutes).toBe(30);
+      // scheduleAlarm clears any prior alarm before arming (MV3 idempotency).
+      expect(stub.cleared).toContain(expectedName);
+    } finally {
+      stub.restore();
+    }
+  });
+
+  test("initScheduledTasks re-arms every persisted task on SW start (no setInterval)", async () => {
+    const stub = installChromeAlarmsStub();
+    try {
+      const enabled = makeTask("enabled-1", { type: "interval", intervalMinutes: 15 });
+      const disabled = makeTask("disabled-1", { type: "daily", hour: 9, minute: 0 }, false);
+      await saveScheduledTask(enabled);
+      await saveScheduledTask(disabled);
+
+      // Reset tracking, then simulate a service-worker cold start.
+      stub.created.length = 0;
+      stub.cleared.length = 0;
+      await initScheduledTasks();
+
+      // Every persisted task is reconciled: stale alarms are cleared for all,
+      // and only the enabled task gets a fresh alarm re-created.
+      expect(stub.cleared).toContain(`open_cowork_scheduled_${enabled.id}`);
+      expect(stub.cleared).toContain(`open_cowork_scheduled_${disabled.id}`);
+      const reCreated = stub.created.map((c) => c.name);
+      expect(reCreated).toContain(`open_cowork_scheduled_${enabled.id}`);
+      // A disabled task must NOT re-arm a firing alarm.
+      expect(reCreated).not.toContain(`open_cowork_scheduled_${disabled.id}`);
+    } finally {
+      stub.restore();
+    }
   });
 });
 

@@ -34,18 +34,30 @@ export async function handleNavigate(
       try {
  // Race against a timeout so a SW that receives the message but never calls
  // sendResponse (throws / is hung) can't block the agent loop forever.
-        const res = (await Promise.race([
-          chrome.runtime.sendMessage({ type: "TAB_ACTION", action }),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("TAB_ACTION timeout")), SW_RPC_TIMEOUT_MS),
-          ),
-        ])) as {
+        let t: ReturnType<typeof setTimeout> | undefined;
+        let res: {
           ok: boolean;
           success?: boolean;
           message?: string;
           pageChanged?: boolean;
           error?: string;
-        };
+        } | undefined | null;
+        try {
+          res = (await Promise.race([
+            chrome.runtime.sendMessage({ type: "TAB_ACTION", action }),
+            new Promise<never>((_, reject) => {
+              t = setTimeout(() => reject(new Error("TAB_ACTION timeout")), SW_RPC_TIMEOUT_MS);
+            }),
+          ])) as {
+            ok: boolean;
+            success?: boolean;
+            message?: string;
+            pageChanged?: boolean;
+            error?: string;
+          };
+        } finally {
+          if (t) clearTimeout(t);
+        }
         if (!res?.ok) {
           return { action, success: false, message: `navigate failed: ${res?.error || "no response"}` };
         }

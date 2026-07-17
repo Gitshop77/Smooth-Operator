@@ -17,8 +17,8 @@ import * as XAI from "../lib/agent/llm/providers/xai";
 import * as OpenRouter from "../lib/agent/llm/providers/openrouter";
 import * as Azure from "../lib/agent/llm/providers/azure";
 import * as OpenAICompatible from "../lib/agent/llm/providers/openai-compatible";
-import { resolveAndValidateLlmBaseUrl } from "../lib/agent/llm/route/ssrf";
-import { modelSupportsVision, getDefaultModelForProvider } from "../lib/agent/llm/catalog";
+import { resolveAndValidateLlmBaseUrl, validateLlmBaseUrl } from "../lib/agent/llm/route/ssrf";
+import { modelSupportsVision, modelSupportsReasoning, getDefaultModelForProvider } from "../lib/agent/llm/catalog";
 import { CATALOG_PROVIDER_ID_MAP } from "./provider-config-map";
 
 /** The user's provider configuration (stored in chrome.storage.local). */
@@ -144,6 +144,28 @@ export const DEFAULT_MODELS: Record<string, string> = {
 };
 
 /**
+ * Canonical host(s) an INJECTED provider config's `baseUrl` is allowed to point
+ * at. An injected (untrusted) config must not be able to redirect the user's
+ * API key (sent as a Bearer token) to an attacker-controlled public endpoint,
+ * so the forwarded baseUrl is confined to the provider's own host. Returns null
+ * when the provider has no well-known canonical host — callers then reject any
+ * injected `baseUrl` (fail safe). For Azure the host is per-resource, so a
+ * suffix match on `.openai.azure.com` is used instead of an exact host.
+ */
+function canonicalLlmHost(provider: string): { host: string; suffix?: boolean } | null {
+  const prof = byProvider[provider];
+  if (prof) return { host: new URL(prof.baseURL).host };
+  switch (provider) {
+    case "openai": return { host: "api.openai.com" };
+    case "anthropic": return { host: "api.anthropic.com" };
+    case "gemini": return { host: "generativelanguage.googleapis.com" };
+    case "google": return { host: "ai.googleapis.com" };
+    case "azure": return { host: ".openai.azure.com", suffix: true };
+    default: return null;
+  }
+}
+
+/**
  * Build an {@link LLMProvider} from the user's stored config. The provider calls
  * the LLM API directly via `fetch` — no localhost, no server, no env vars.
  *
@@ -191,6 +213,43 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
     }
   }
 
+ // Companion guard against API-key exfiltration (ADDITIVE — does not weaken
+ // the SSRF guard above). The SSRF guard only blocks private/loopback/metadata
+ // ranges, so a public attacker host still passes and would receive the user's
+ // API key as a Bearer token. The stored `provenance` flag is NOT a safe trust
+ // signal here: `chrome.storage.local` is attacker-writable (prompt injection,
+ // malicious settings-sync, crafted tool call), so a hostile write can stamp
+ // `provenance: "user"` on a public attacker host and — under the old behavior
+ // — skip this check and exfiltrate the key. The loopback exemption governed by
+ // the SSRF guard above only affects LOCAL endpoints (an injected loopback is
+ // rejected; a user loopback is the legitimate Ollama/LiteLLM case), so for any
+ // PUBLIC baseUrl we always confine the forwarded host to the provider's own
+ // canonical host. Local endpoints keep the curated exemption and are excluded
+ // from this check.
+  if (baseUrl && apiKey) {
+    // A local/loopback/RFC1918 endpoint is governed by the SSRF loopback
+    // exemption above (an injected loopback is rejected; a user loopback is the
+    // legitimate Ollama/LiteLLM case), so it is excluded from this check.
+    // When no API key is present (e.g. self-hosted Ollama on a remote host) there
+    // is no secret to exfiltrate, so host confinement is skipped; the SSRF guard
+    // above still blocks metadata/private/link-local targets.
+    const isLocalEndpoint = !validateLlmBaseUrl(baseUrl, false).ok;
+    if (!isLocalEndpoint) {
+      const canon = canonicalLlmHost(provider);
+      let host = "";
+      try { host = new URL(baseUrl).host; } catch { host = ""; }
+      const allowed =
+        canon !== null &&
+        (canon.suffix ? host.endsWith(canon.host) : host === canon.host);
+      if (!allowed) {
+        throw new Error(
+          `LLM baseUrl rejected: ${baseUrl} is not the canonical host for provider "${provider}". ` +
+            `To protect your API key from exfiltration, the baseUrl must target the provider's own host.`
+        );
+      }
+    }
+  }
+
   let result: LLMProvider;
   switch (provider) {
     case "openai":
@@ -199,22 +258,23 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
         apiKey,
         model: resolvedModel,
         ...(baseUrl ? { baseURL: baseUrl } : {}),
+        allowLocalExemption: provenance === "user",
       });
       break;
 
     case "anthropic":
       if (!apiKey) throw new Error("Anthropic requires an API key. Add one in Options.");
-      result = Anthropic.toLLMProvider({ apiKey, model: resolvedModel });
+      result = Anthropic.toLLMProvider({ apiKey, model: resolvedModel, allowLocalExemption: provenance === "user" });
       break;
 
     case "gemini":
       if (!apiKey) throw new Error("Gemini requires an API key. Add one in Options.");
-      result = Google.toLLMProvider({ apiKey, model: resolvedModel });
+      result = Google.toLLMProvider({ apiKey, model: resolvedModel, allowLocalExemption: provenance === "user" });
       break;
 
     case "xai":
       if (!apiKey) throw new Error("xAI requires an API key. Add one in Options.");
-      result = XAI.toLLMProvider({ apiKey, model: resolvedModel });
+      result = XAI.toLLMProvider({ apiKey, model: resolvedModel, allowLocalExemption: provenance === "user" });
       break;
 
     case "openrouter":
@@ -223,6 +283,7 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
         apiKey,
         model: resolvedModel,
         ...(baseUrl ? { baseURL: baseUrl } : {}),
+        allowLocalExemption: provenance === "user",
       });
       break;
 
@@ -233,6 +294,7 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
         model: resolvedModel,
         ...(baseUrl ? { baseURL: baseUrl } : {}),
         ...(resourceName ? { resourceName } : {}),
+        allowLocalExemption: provenance === "user",
       });
       break;
 
@@ -255,6 +317,7 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
         apiKey,
         model: resolvedModel,
         baseURL: resolvedBaseURL,
+        allowLocalExemption: provenance === "user",
       });
       break;
     }
@@ -285,6 +348,7 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
         apiKey: apiKey || undefined,
         model: resolvedModel,
         baseURL: resolvedBaseURL,
+        allowLocalExemption: provenance === "user",
       });
       break;
     }
@@ -331,6 +395,22 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
     result = { ...result, supportsVision: false };
   }
 
+ // Patch supportsReasoning based on per-MODEL detection. Reasoning models
+ // (OpenAI o1/o3/o4, xAI grok-4-reasoning) reject or ignore `temperature`
+ // and expect `max_completion_tokens`; sending temperature can yield HTTP 400
+ // or waste the parameter. The flag is computed from the catalog's per-model
+ // `reasoning` field with a name-pattern fallback. On catalog failure, do NOT
+ // assume reasoning (leave undefined) so callers default to sending temperature
+ // — the conservative choice for non-reasoning models.
+  try {
+    const reasoning = await modelSupportsReasoning(resolvedModel, catalogProviderId);
+    if (reasoning !== result.supportsReasoning) {
+      result = { ...result, supportsReasoning: reasoning };
+    }
+  } catch {
+    /* catalog/lookup failure — leave supportsReasoning unset (non-reasoning default) */
+  }
+
   return result;
 }
 
@@ -345,20 +425,21 @@ export async function readProviderConfig(): Promise<ProviderConfig | null> {
     "model",
     "baseUrl",
     "resourceName",
- // Legacy migration fallback only: the API key normally lives in
- // `chrome.storage.session`. Reading `apiKey` here lets upgraded installs
- // that still have the key in `local` (not yet migrated to session) work.
-    "apiKey",
+    "provenance",
   ]);
- // The API key is persisted in `chrome.storage.session` (in-memory, never on
- // disk) for safety. Read it from there; fall back to `local` only for
- // not-yet-migrated installs. Never console.log the value.
+ // The API key is persisted ONLY in `chrome.storage.session` (in-memory, never
+ // on disk) for safety. Read it from there and nowhere else — falling back to
+ // `chrome.storage.local` would persist the secret in plaintext at rest,
+ // contradicting the session-only design. If the session key is absent (e.g.
+ // an extension update wiped it, or a not-yet-migrated install), we return the
+ // provider without a key and let `buildProvider` hard-fail with a precise
+ // "requires an API key" message, prompting the user to re-paste it. Never
+ // console.log the value.
   let apiKey = "";
   if (chrome.storage?.session) {
     const sres = await chrome.storage.session.get(["apiKey"]);
     apiKey = (sres.apiKey as string) || "";
   }
-  if (!apiKey) apiKey = normalizeString(res.apiKey);
   const provider = normalizeString(res.provider);
   if (!provider) return null; // no provider set → unconfigured user
  // Defense-in-depth: a corrupted / injected `chrome.storage.local` payload
@@ -373,13 +454,19 @@ export async function readProviderConfig(): Promise<ProviderConfig | null> {
   const model = normalizeString(res.model);
   const baseUrl = normalizeString(res.baseUrl);
   const resourceName = normalizeString(res.resourceName);
+ // Provenance: fail-safe toward the stricter `"injected"` state. A stored
+ // `"user"` value is trusted (the Options save path stamps it); anything else
+ // — absent, malformed, or an attacker-injected write — is treated as
+ // `"injected"` so it is NOT exempted from the SSRF loopback guard.
+  const provenance: ProviderConfig["provenance"] =
+    res.provenance === "user" ? "user" : "injected";
   return {
     provider,
     apiKey,
     model,
     baseUrl: baseUrl || undefined,
     resourceName: resourceName || undefined,
-    provenance: "user",
+    provenance,
   };
 }
 
@@ -390,6 +477,6 @@ export async function readProviderConfig(): Promise<ProviderConfig | null> {
  * reach the provider constructors as the wrong type. Reject non-string values
  * explicitly (returning "") so downstream code always sees a real string.
  */
-function normalizeString(v: unknown): string {
+export function normalizeString(v: unknown): string {
   return typeof v === "string" ? v : "";
 }

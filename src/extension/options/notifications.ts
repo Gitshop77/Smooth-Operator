@@ -7,11 +7,14 @@
  */
 
 import { $ } from "@/extension/shared";
-import { STORAGE_KEYS, showSaved, isHttpUrl } from "./settings-sync";
+import { STORAGE_KEYS, showSaved } from "./settings-sync";
+import { resolveAndValidateWebhookUrl } from "@/lib/agent/llm/route/ssrf";
 import { alertModal } from "./modal";
 
-// `isHttpUrl` is imported from `settings-sync` (single shared definition) rather
-// than duplicated here, so validation stays consistent across the options pages.
+// `resolveAndValidateWebhookUrl` applies the same DNS-resolving SSRF guard the
+// canonical save path uses (settings-sync.ts), so the options UI rejects
+// private/metadata IPs (incl. DNS-rebinding hostnames) at input time rather than
+// letting them persist as "valid" only to fail later at POST.
 
 /**
  * Last successfully-persisted (valid) webhook URL. Used as the revert value when
@@ -62,6 +65,13 @@ function persist(key: string, value: string | boolean): void {
         title: "Save failed",
         message: `Failed to save setting: ${chrome.runtime.lastError?.message || "unknown error"}`,
       });
+      // Revert the toggle so the UI doesn't show a persisted-on state for a
+      // value that was never saved (the webhook handler and settings-sync.ts
+      // already revert on failure; this path was inconsistent).
+      if (typeof value === "boolean") {
+        const el = document.getElementById(key);
+        if (el instanceof HTMLInputElement) el.checked = !value;
+      }
       return;
     }
     showSaved();
@@ -84,17 +94,17 @@ for (const [id, key] of NOTIFICATION_TOGGLES) {
     persist(key, (e.target as HTMLInputElement).checked),
   );
 }
-document.getElementById("webhookUrl")?.addEventListener("change", (e) => {
- // Defense-in-depth: the consumer (`fireNotifications`) already rejects
- // non-http(s)/malformed URLs at POST time, but validate at the input too so
- // a stored value is always safe regardless of future consumers.
+document.getElementById("webhookUrl")?.addEventListener("change", async (e) => {
+ // Apply the SSRF guard at input time (same DNS-resolving guard used by the
+ // canonical save path in settings-sync.ts) so a stored value is always safe
+ // regardless of future consumers.
   const field = e.target as HTMLInputElement;
   const value = field.value.trim();
-  if (value !== "" && !isHttpUrl(value)) {
+  if (value !== "" && !(await resolveAndValidateWebhookUrl(value)).ok) {
     void alertModal({
       title: "Invalid webhook URL",
       message:
-        "The webhook URL must be an absolute http(s) URL. It was not saved; the previous value is kept.",
+        "The webhook URL must be a public absolute http(s) URL that does not resolve to a private/metadata address. It was not saved; the previous value is kept.",
     });
     field.setAttribute("aria-invalid", "true");
  // Revert to the last known-good value directly from cache. This is robust
@@ -104,8 +114,11 @@ document.getElementById("webhookUrl")?.addEventListener("change", (e) => {
     field.setAttribute("aria-invalid", "false");
     return;
   }
- // Only cache once we know the value is valid (and will be persisted).
+ // Only cache once we know the value is valid (and will be persisted). Clear the
+ // cache when the field is emptied so a later invalid edit can't resurrect a
+ // previously-cleared webhook URL.
   if (value !== "") lastKnownGoodWebhookUrl = value;
+  else lastKnownGoodWebhookUrl = "";
   field.setAttribute("aria-invalid", "false");
   persist(STORAGE_KEYS.webhookUrl, value);
 });

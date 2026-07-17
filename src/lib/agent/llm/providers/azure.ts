@@ -52,6 +52,9 @@ export type Config = {
   baseURL?: string;
   resourceName?: string;
   apiVersion?: string;
+  // When true (user-configured provenance) the curated-local-provider loopback
+  // exemption is honored; otherwise loopback / RFC1918 / ULA are rejected.
+  allowLocalExemption?: boolean;
 } & ProviderAuthOption<"optional">;
 
 const auth = (options: ProviderAuthOption<"optional">) =>
@@ -121,8 +124,10 @@ export function configure(input: Config = {}) {
 
  // Validate the FINAL baseURL (whether user-supplied OR resource-derived) so
  // the fetch URL is always checked, closing the gap where resource-derived
- // URLs previously bypassed the guard.
-  assertSafeUserBaseURL(baseURL, "azure");
+ // URLs previously bypassed the guard. Forward the user-provenance exemption
+ // flag so the curated-local-origin exemption applies only for a user-configured
+ // baseURL.
+  assertSafeUserBaseURL(baseURL, "azure", input.allowLocalExemption);
 
   return {
     id,

@@ -79,6 +79,26 @@ export const LOCAL_PROVIDER_BASE_URLS: readonly string[] = [
   "http://127.0.0.1:4000",
 ];
 
+/** Origins of the curated local providers (Ollama / LiteLLM), precomputed once. */
+const CURATED_LOCAL_ORIGINS: ReadonlySet<string> = new Set(
+  LOCAL_PROVIDER_BASE_URLS.flatMap((u) => {
+    try {
+      return [new URL(u).origin];
+    } catch {
+      return [];
+    }
+  }),
+);
+
+/** True iff `url`'s origin exactly matches a curated local-provider endpoint. */
+function isCuratedLocalOrigin(url: string): boolean {
+  try {
+    return CURATED_LOCAL_ORIGINS.has(new URL(url).origin);
+  } catch {
+    return false;
+  }
+}
+
 // ─── IP-literal classification ───────────────────────────────────────────────
 
 /**
@@ -180,6 +200,39 @@ function isLocalIpv6(host: string): boolean {
   if (emb !== null) return isLocalIpv4(emb);
   const groups = expandIPv6(host);
   if (!groups) return false;
+ // ::ffff:0:0/96 three-group mapped form — the last 32 bits are a native
+ // IPv4 address the stack reaches directly. The WHATWG URL parser
+ // canonicalizes `::ffff:0:<ipv4>` to this three-group form, which the
+ // 2-group parseMappedIpv4 above misses, so decompose it like
+ // isDangerousIpv6 and delegate the embedded IPv4 to isLocalIpv4.
+  if (groups[4] === 0xffff && groups[5] === 0) {
+    const embedded = groupsToIpv4(groups[6], groups[7]);
+    if (embedded && isLocalIpv4(embedded)) return true;
+  }
+ // NAT64 (RFC 6052) 64:ff9b::/96 — the last 32 bits embed an IPv4 address
+ // (e.g. 64:ff9b:192.168.1.1 reaches an RFC1918 host on NAT64 networks).
+  if (groups[0] === 0x0064 && groups[1] === 0xff9b &&
+      groups[2] === 0 && groups[3] === 0 && groups[4] === 0 && groups[5] === 0) {
+    const embedded = groupsToIpv4(groups[6], groups[7]);
+    if (embedded && isLocalIpv4(embedded)) return true;
+  }
+ // Teredo (RFC 4380) 2001::/32 — the last 32 bits embed an IPv4 address.
+  if (groups[0] === 0x2001 && groups[1] === 0x0000) {
+    const embedded = groupsToIpv4(groups[6], groups[7]);
+    if (embedded && isLocalIpv4(embedded)) return true;
+  }
+ // 6to4 (RFC 3056) 2002::/16 — groups[1]:groups[2] embed an IPv4 address.
+  if (groups[0] === 0x2002) {
+    const embedded = groupsToIpv4(groups[1], groups[2]);
+    if (embedded && isLocalIpv4(embedded)) return true;
+  }
+ // Deprecated IPv4-compatible ::a.b.c.d — all-zero prefix with the IPv4 in
+ // the last 32 bits (skip :: and :1, caught by loopback below).
+  if (groups[0] === 0 && groups[1] === 0 && groups[2] === 0 &&
+      groups[3] === 0 && groups[4] === 0 && groups[5] === 0) {
+    const embedded = groupsToIpv4(groups[6], groups[7]);
+    if (embedded && isLocalIpv4(embedded)) return true;
+  }
  //  1 loopback.
   if (groups[7] === 1 && groups.slice(0, 7).every((g) => g === 0)) return true;
  // ULA fc00:/7 (matches fc00:/8 and fd00:/8).
@@ -233,6 +286,21 @@ function isDangerousIpv6(host: string): boolean {
     const embedded = groupsToIpv4(groups[6], groups[7]);
     if (embedded && isDangerousIpv4(embedded)) return true;
   }
+  // Teredo (RFC 4380) 2001::/32 — the last 32 bits embed an IPv4 address (the
+  // Teredo client endpoint). 2001::a9fe:a9fe encodes 169.254.169.254 (link-local
+  // cloud-metadata), so block it like the other embedded forms. Pin both leading
+  // groups: 2001::/32 means groups[0]===0x2001 AND groups[1]===0x0000; matching
+  // only the /16 over-blocks legitimate global-unicast 2001:xxxx:: addresses.
+  if (groups[0] === 0x2001 && groups[1] === 0x0000) {
+    const embedded = groupsToIpv4(groups[6], groups[7]);
+    if (embedded && isDangerousIpv4(embedded)) return true;
+  }
+  // 6to4 (RFC 3056) 2002::/16 — groups[1]:groups[2] embed an IPv4 address.
+  // 2002:a9fe:a9fe:: encodes 169.254.169.254 and must be blocked.
+  if (groups[0] === 0x2002) {
+    const embedded = groupsToIpv4(groups[1], groups[2]);
+    if (embedded && isDangerousIpv4(embedded)) return true;
+  }
  // Deprecated IPv4-compatible `:a.b.c.d` — all-zero prefix with the IPv4 in
  // the last 32 bits. (Skip `:` / `:1`, which the unspecified/loopback
  // checks above already returned true for.)
@@ -280,6 +348,10 @@ function parseMappedIpv4(host: string): string | null {
 }
 
 function expandIPv6(host: string): number[] | null {
+  // Drop an IPv6 zone-id (`fe80::1%eth0`); the `%` and what follows are not part
+  // of the address and would otherwise make the literal unparseable.
+  const zoneIdx = host.indexOf("%");
+  if (zoneIdx !== -1) host = host.slice(0, zoneIdx);
   if (!/^[0-9a-fA-F:]+$/.test(host)) return null; // no dots/other chars allowed here
   const doubleColon = host.indexOf("::");
   let head: string[];
@@ -363,16 +435,31 @@ function expandIPv6(host: string): number[] | null {
  */
 export async function resolveAndValidateLlmBaseUrl(
   url: string,
-  allowLocalExemption = true,
+  allowLocalExemption = false,
 ): Promise<SsrfCheckResult> {
   const base = validateLlmBaseUrl(url, allowLocalExemption);
   if (!base.ok) return base;
 
- // Apply the curated-local exemption (used only for user-configured URLs).
-  if (allowLocalExemption && isAllowedLlmBaseUrl(url)) return { ok: true };
+ // Fast-path ONLY the curated local-provider origins we already trust
+ // (Ollama / LiteLLM loopback). Every other URL — including public hostnames —
+ // proceeds to DNS resolution below so a hostname that rebinds to a
+ // cloud-metadata / link-local / CGNAT address at fetch time is rejected. The
+ // previous short-circuit (`isAllowedLlmBaseUrl(url)`) returned early for ALL
+ // public hostnames, which skipped DNS entirely; narrowing it to the
+ // curated-local origins forces DNS validation for every other host.
+ //
+ // RESIDUAL RISK (DNS-rebinding TOCTOU): this validation resolves DNS
+ // independently of the subsequent `fetch`, which does its OWN lookup. An
+ // attacker controlling DNS (fast-flux) can answer with a safe IP here and an
+ // SSRF-sink IP at connect time, so this NARROWS but does not fully CLOSE the
+ // rebinding window. In a Node/mini-service runtime the address can be pinned
+ // via a fixed-lookup undici Dispatcher so `fetch` reuses the validated IP; in
+ // the extension service worker `fetch` cannot be pinned, so the per-fetch
+ // re-validation in transport-http.ts is defense-in-depth only, not a guarantee.
+  if (allowLocalExemption && isCuratedLocalOrigin(url)) return { ok: true };
 
   let host = baseUrlHost(url);
-  if (!host) return { ok: false, reason: `missing host in URL: ${url}` };
+  if (!host) return { ok: false, reason: `missing host in URL: ${redactUrl(url)}` };
   host = host.replace(/^\[|\]$/g, "");
 
  // IP-literal hosts are already classified by validateLlmBaseUrl above; only
@@ -394,26 +481,36 @@ export async function resolveAndValidateLlmBaseUrl(
     if (!allowLocalExemption) {
       return {
         ok: false,
-        reason: `DNS resolver unavailable; refusing untrusted ${url} (fail-closed SSRF guard).`,
+        reason: `DNS resolver unavailable; refusing untrusted ${redactUrl(url)} (fail-closed SSRF guard).`,
       };
     }
     console.warn(
-      `[ssrf] dnsResolve unavailable — degrading ${url} to the synchronous SSRF ` +
+      `[ssrf] dnsResolve unavailable — degrading ${redactUrl(url)} to the synchronous SSRF ` +
         `check (fail-open). Verify the transport-layer guard still blocks ` +
         `unauthorized targets; do not treat this as a successful validation.`,
     );
     return { ok: true };
   }
   if (outcome.kind === "error") {
- // A resolver was available but the lookup FAILED (e.g. DNS error / timeout).
- // For an untrusted `baseUrl` whose DNS we cannot verify, we FAIL CLOSED
- // rather than risk reaching an internal/metadata host. This is the
- // security-correct default for the SSRF guard — a transient resolver error
- // must not quietly downgrade the check to "allow".
-    return {
-      ok: false,
-      reason: `DNS resolution for ${host} failed; refusing ${url} (fail-closed SSRF guard).`,
-    };
+ // For an UNTRUSTED `baseUrl` (provenance NOT user-configured,
+ // allowLocalExemption=false) we FAIL CLOSED: without a verified target IP we
+ // must not risk reaching an internal/metadata host. For a user-configured
+ // (trusted) baseUrl the synchronous SSRF check already passed, so we degrade
+ // to ok:true (fail-open) with a warning so a transient DNS blip does not turn
+ // every request into a hard, non-retryable rejection of a legitimate public
+ // provider. The transport-layer guard still re-checks the literal URL.
+    if (!allowLocalExemption) {
+      return {
+        ok: false,
+        reason: `DNS resolution for ${host} failed; refusing ${redactUrl(url)} (fail-closed SSRF guard).`,
+      };
+    }
+    console.warn(
+      `[ssrf] dnsResolve errored for ${redactUrl(url)} — degrading to the synchronous SSRF ` +
+        `check (fail-open). Verify the transport-layer guard still blocks ` +
+        `unauthorized targets; do not treat this as a successful validation.`,
+    );
+    return { ok: true };
   }
   for (const ip of outcome.ips) {
     const alwaysBlocked = ip.includes(":") ? isDangerousIpv6(ip) : isDangerousIpv4(ip);
@@ -421,7 +518,7 @@ export async function resolveAndValidateLlmBaseUrl(
     if (alwaysBlocked || localUntrusted) {
       return {
         ok: false,
-        reason: `host ${host} resolves to a private/loopback/link-local address (${ip}): ${url}`,
+        reason: `host ${host} resolves to a private/loopback/link-local address (${ip}): ${redactUrl(url)}`,
       };
     }
   }
@@ -513,6 +610,17 @@ async function dnsResolve(hostname: string): Promise<DnsOutcome> {
  * the SSRF classification below still applies in full. Returns null for any URL
  * that cannot be parsed even after the repair attempt.
  */
+/**
+ * Redact credentials and trailing query/fragment from a URL string before it
+ * is embedded into a `reason`/`Error` message or log line. Mirrors the
+ * `redactUrl`/`redactUrlForLog` helpers used elsewhere in the LLM transport so
+ * the SSRF layer consistently avoids leaking an embedded `user:pass@` (or
+ * `?#`-borne secrets) into error output.
+ */
+function redactUrl(u: string): string {
+  return u.replace(/\/\/[^@/]*@/, "//").replace(/[?#].*$/, "");
+}
+
 function parseBaseUrl(url: string): URL | null {
   try {
     return new URL(url);
@@ -539,17 +647,17 @@ export function validateLlmBaseUrl(
   }
   const parsed = parseBaseUrl(url);
   if (!parsed) {
-    return { ok: false, reason: `invalid URL: ${url}` };
+    return { ok: false, reason: `invalid URL: ${redactUrl(url)}` };
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     return {
       ok: false,
-      reason: `scheme "${parsed.protocol}" is not allowed (only http/https): ${url}`,
+      reason: `scheme "${parsed.protocol}" is not allowed (only http/https): ${redactUrl(url)}`,
     };
   }
   const host = parsed.hostname;
   if (!host) {
-    return { ok: false, reason: `missing host in URL: ${url}` };
+    return { ok: false, reason: `missing host in URL: ${redactUrl(url)}` };
   }
  // URL.hostname already strips IPv6 brackets, but guard anyway.
   const normalizedHost = host.replace(/^\[|\]$/g, "");
@@ -565,7 +673,7 @@ export function validateLlmBaseUrl(
   if (normalizedHost.toLowerCase().replace(/\.$/, "").endsWith(".internal")) {
     return {
       ok: false,
-      reason: `host is a cloud-metadata/internal endpoint not allowed: ${url}`,
+      reason: `host is a cloud-metadata/internal endpoint not allowed: ${redactUrl(url)}`,
     };
   }
  // Provenance gate: when the baseUrl is NOT user-configured, also reject
@@ -578,7 +686,7 @@ export function validateLlmBaseUrl(
   ) {
     return {
       ok: false,
-      reason: `host "${normalizedHost}" is a local endpoint not allowed for a non-user-configured baseUrl: ${url}`,
+      reason: `host "${normalizedHost}" is a local endpoint not allowed for a non-user-configured baseUrl: ${redactUrl(url)}`,
     };
   }
   return { ok: true };
@@ -611,23 +719,94 @@ export function validateWebhookUrl(url: string): SsrfCheckResult {
   try {
     parsed = new URL(url);
   } catch {
-    return { ok: false, reason: `invalid URL: ${url}` };
+    return { ok: false, reason: `invalid URL: ${redactUrl(url)}` };
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     return {
       ok: false,
-      reason: `scheme "${parsed.protocol}" is not allowed (only http/https): ${url}`,
+      reason: `scheme "${parsed.protocol}" is not allowed (only http/https): ${redactUrl(url)}`,
     };
   }
   const host = parsed.hostname.replace(/^\[|\]$/g, "");
   if (!host) {
-    return { ok: false, reason: `missing host in URL: ${url}` };
+    return { ok: false, reason: `missing host in URL: ${redactUrl(url)}` };
   }
   if (isBlockedWebhookHost(host)) {
     return {
       ok: false,
       reason: `host resolves to a private/metadata/link-local address: ${host}`,
     };
+  }
+  return { ok: true };
+}
+
+/**
+ * Validate a webhook URL AND the IP it actually resolves to (DNS).
+ *
+ * `validateWebhookUrl` only inspects the parsed HOST — for a hostname that
+ * DNS-resolves to an internal IP (cloud metadata, RFC1918, loopback) it returns
+ * `ok:true`, which is a DNS-rebind SSRF exfil path: the webhook URL is settable
+ * through the (untrusted) settings-sync vector and is POSTed with task text by
+ * `task-queue.ts`. This async variant additionally resolves the hostname (when
+ * a DNS API is available) and rejects resolutions into the blocked ranges
+ * (cloud-metadata / link-local / unspecified / CGNAT / RFC1918 / IPv6 ULA).
+ *
+ * When no DNS resolver is available in the current runtime it degrades to the
+ * synchronous `validateWebhookUrl` check (fail-open with a warning) so a
+ * self-hosted relay webhook (e.g. `localhost`) keeps working where DNS
+ * resolution is unavailable. When a resolver IS available but the lookup fails
+ * (transient error / timeout) it FAILS CLOSED rather than risk reaching an
+ * internal / metadata host. The literal-host checks in `validateWebhookUrl`
+ * (incl. `isBlockedWebhookHost`) are never weakened.
+ */
+export async function resolveAndValidateWebhookUrl(
+  url: string,
+): Promise<SsrfCheckResult> {
+  const base = validateWebhookUrl(url);
+  if (!base.ok) return base;
+
+  let host: string;
+  try {
+    host = new URL(url).hostname.replace(/^\[|\]$/g, "");
+  } catch {
+    return { ok: false, reason: `invalid URL: ${redactUrl(url)}` };
+  }
+  if (!host) return { ok: false, reason: `missing host in URL: ${redactUrl(url)}` };
+
+  // IP-literal hosts are already classified by validateWebhookUrl above; only
+  // hostname-based hosts need DNS resolution to catch poisoned-hostname SSRF.
+  if (!isLikelyHostname(host)) return { ok: true };
+
+  const outcome = await dnsResolve(host);
+  if (outcome.kind === "unavailable") {
+    // No DNS resolver exists in this runtime (e.g. a Node context without the
+    // `dns` module). Degrade to the synchronous check so self-hosted relay
+    // webhooks keep working; the literal-host guard still blocks .internal /
+    // .local / single-label hostnames. In a Chrome extension service worker
+    // `chrome.dns.resolve` IS available, so this path is effectively
+    // unreachable in production.
+    console.warn(
+      `[ssrf] dnsResolve unavailable — degrading ${redactUrl(url)} to the synchronous ` +
+        `webhook SSRF check (fail-open). Verify a public hostname that rebinds to an ` +
+        `internal address cannot be reached in this runtime.`,
+    );
+    return base;
+  }
+  if (outcome.kind === "error") {
+    // A resolver was available but the lookup FAILED. FAIL CLOSED rather than
+    // risk reaching an internal / metadata host on an unverifiable webhook URL.
+    return {
+      ok: false,
+      reason: `DNS resolution for ${host} failed; refusing ${redactUrl(url)} (fail-closed SSRF guard).`,
+    };
+  }
+  for (const ip of outcome.ips) {
+    if (isBlockedWebhookHost(ip)) {
+      return {
+        ok: false,
+        reason: `host ${host} resolves to a private/loopback/link-local address (${ip}): ${redactUrl(url)}`,
+      };
+    }
   }
   return { ok: true };
 }
@@ -688,6 +867,21 @@ function isBlockedWebhookIpv6(host: string): boolean {
     const embedded = groupsToIpv4(groups[6], groups[7]);
     if (embedded && isBlockedWebhookIpv4(embedded)) return true;
   }
+  // Teredo (RFC 4380) 2001::/32 — the last 32 bits embed an IPv4 address (the
+  // Teredo client endpoint). 2001::a9fe:a9fe encodes 169.254.169.254 (link-local
+  // cloud-metadata), so block it like the other embedded forms. Pin both leading
+  // groups: 2001::/32 means groups[0]===0x2001 AND groups[1]===0x0000; matching
+  // only the /16 over-blocks legitimate global-unicast 2001:xxxx:: addresses.
+  if (groups[0] === 0x2001 && groups[1] === 0x0000) {
+    const embedded = groupsToIpv4(groups[6], groups[7]);
+    if (embedded && isBlockedWebhookIpv4(embedded)) return true;
+  }
+  // 6to4 (RFC 3056) 2002::/16 — groups[1]:groups[2] embed an IPv4 address.
+  // 2002:a9fe:a9fe:: encodes 169.254.169.254 and must be blocked.
+  if (groups[0] === 0x2002) {
+    const embedded = groupsToIpv4(groups[1], groups[2]);
+    if (embedded && isBlockedWebhookIpv4(embedded)) return true;
+  }
   return false;
 }
 
@@ -732,6 +926,24 @@ export function isAllowedLlmBaseUrl(url: string, allowLocalExemption = true): bo
     }
   } catch {
  // Invalid URL → not a curated local provider; leave it rejected.
+  }
+ // Allow the deprecated IPv4-compatible form (`::a.b.c.d`, canonicalized by
+ // the URL parser to the hex `::xxxx:xxxx`) ONLY when it embeds a loopback
+ // IPv4 (self-hosted infra). Native IPv6 loopback (::1), ULA (fc00::/7) and
+ // mapped forms stay rejected per the transport-layer parity contract (every
+ // IPv6 variant is rejected so an IPv6 SSRF sink can't slip through to
+ // `fetch`). Genuine sinks (cloud-metadata / link-local / CGNAT / unspecified)
+ // are never reached here because `validateLlmBaseUrl` already rejected them
+ // above.
+  try {
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
+    const groups = expandIPv6(host);
+    if (groups && groups.slice(0, 6).every((g) => g === 0)) {
+      const embedded = groupsToIpv4(groups[6], groups[7]);
+      if (embedded && /^127\./.test(embedded)) return true;
+    }
+  } catch {
+ // Invalid URL → leave it rejected.
   }
   return false;
 }

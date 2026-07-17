@@ -12,13 +12,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-// SSR-safe "are we mounted on the client?" detection without
-// setState-in-effect. `useSyncExternalStore` with a no-op subscribe + a
-// client snapshot of `true` + a server snapshot of `false` returns `false`
-// during SSR and the first client render, then `true` on the second client
-// render — exactly the old `useEffect(() => setMounted(true))` semantics,
-// without the cascading-render warning. The subscribe function never throws
-// and never actually subscribes (the value can never change).
+// SSR-safe "are we mounted on the client?" detection without setState-in-effect.
+// `useSyncExternalStore` with a no-op subscribe returns `false` during SSR and
+// the first client render, then `true` on the second — avoiding the
+// cascading-render warning from the `useEffect(setMounted)` pattern.
 function subscribeNoop() {
   return () => {};
 }

@@ -22,6 +22,7 @@
 
 import type { Catalog } from "./catalog";
 import { isValidCatalog } from "./catalog";
+import { validateLlmBaseUrl } from "./route/ssrf";
 
 export interface ModelPricing {
   /** Input (prompt) tokens — per 1M tokens, USD. */
@@ -272,14 +273,22 @@ export async function refreshPricingFromCatalog(): Promise<void> {
  // caught up-front by `isValidCatalog` below (its validation is shared
  // with the default path); failures surface via `lastPricingError` + a
  // non-production console.warn so misconfiguration is visible.
- // SSRF guard: only allow http/https catalog URLs. A value such as
- // `file:///etc/passwd` or the cloud-metadata endpoint (`http://169.254.169.254/`)
- // would otherwise be fetched (the response is rejected by isValidCatalog, but
- // the outbound request still fires). The env var is operator-controlled but
- // should never drive a non-HTTP fetch.
+ // SSRF guard: route the custom catalog URL through the shared SSRF guard so
+ // it can never reach a cloud-metadata, link-local, unspecified, CGNAT,
+ // loopback, RFC1918, or ULA target. The env var is operator-controlled, but a
+ // value such as `file:///etc/passwd`, the cloud-metadata endpoint
+ // (`http://169.254.169.254/`), `http://127.0.0.1:port/`, or a `.internal`
+ // hostname would otherwise be fetched (the response is rejected by
+ // isValidCatalog, but the outbound request still fires). The protocol
+ // pre-filter stays as a fast check; the shared guard is the authoritative
+ // egress check that every other outbound path in the codebase uses.
       const parsedUrl = new URL(url);
       if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
         throw new Error(`refusing to fetch non-HTTP catalog URL: ${parsedUrl.protocol}`);
+      }
+      const ssrf = validateLlmBaseUrl(url, false);
+      if (!ssrf.ok) {
+        throw new Error(`refusing to fetch catalog URL: ${ssrf.reason}`);
       }
       const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
       if (!res.ok) throw new Error(`catalog ${res.status}`);

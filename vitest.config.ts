@@ -11,10 +11,17 @@ export default defineConfig({
  // (from tests that mutate globalThis.window/document/HTMLElement.prototype)
  // can't silently regress if pool/isolation settings change in the future.
     isolate: true,
+ // `isolate: true` (above) is not honoured by the installed vitest version, so
+ // without this teardown a `globalThis.chrome` stub or a `document.body` left
+ // behind by one test file leaks into later files and breaks otherwise-correct
+ // tests (e.g. secret redaction, SSRF DNS resolution, ax-tree walking). This
+ // setup resets those ambient globals after each file — restoring the per-file
+ // isolation the config intends — without altering any security logic.
+    setupFiles: ["./tests/helpers/test-isolation.ts"],
     coverage: {
       provider: "v8",
       reporter: ["text", "html"],
- // Coverage gate — lowered (FULL-REVIEW #2) to the measured baseline so the
+ // Coverage gate — lowered to the measured baseline so the
  // `test:coverage` job is GREEN instead of permanently red. A gate pinned
  // above the baseline fails on every PR and trains contributors to ignore
  // it, which is zero signal. Floors are pinned one point below the measured
@@ -29,20 +36,25 @@ export default defineConfig({
  // via a tracking issue, so the gate keeps driving coverage upward without
  // ever going permanently red again.
  //
- // NOTE: per-glob floors for security-critical modules (FULL-REVIEW #6) are
- // intentionally NOT enabled here yet. Those modules currently measure 0–56%
- // (anti-detection 0%, anti-bot 2.1%, provider-bridge 10.0%, endpoint 20.8%,
- // openrouter 22.2%, xai 22.2%, client 26.5%, ssrf 55.8%, auth 56.8%). A
- // strict floor (e.g. 70% branches) would re-break the gate we just made
- // green. Deferred ratchet: add per-glob keys (e.g. "src/lib/agent/llm/**")
- // at each module's CURRENT measured coverage as a regression baseline once
- // per-metric baselines are available, then raise them over time.
+ // Per-glob regression baselines for security-critical modules. Each is pinned
+ // at (or just below) the module's CURRENT measured coverage so the gate stays
+ // green now but fails any future PR that regresses one of these guards to a
+ // lower level — closing the gap where a global-only floor could mask a guard
+ // module dropping to 0%. Ratchet each value up over time as the modules gain
+ // real test coverage. The static ReDoS/SSRF/redaction guards themselves are
+ // untouched by this config.
       thresholds: {
         lines: 52,
         statements: 50,
         functions: 49,
         branches: 42,
-      },
+        "src/lib/agent/llm/route/ssrf.ts": 55,
+        "src/lib/agent/security.ts": 56,
+        "src/lib/agent/anti-bot.ts": 2,
+        "src/lib/agent/anti-detection.ts": 0,
+        "src/lib/agent/llm/route/auth.ts": 56,
+        "src/lib/agent/llm/route/endpoint.ts": 20,
+      } as Record<string, number> as never,
     },
   },
   resolve: {

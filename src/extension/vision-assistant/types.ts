@@ -14,7 +14,7 @@ export interface PixelDetection extends Detection {
 }
 
 /** Vision assistant status. */
-export type VisionStatus = "uninitialized" | "checking" | "downloading" | "compiling" | "ready" | "error";
+export type VisionStatus = "uninitialized" | "checking" | "downloading" | "compiling" | "ready" | "warning" | "error";
 
 /** Download progress callback. */
 export interface DownloadProgress {

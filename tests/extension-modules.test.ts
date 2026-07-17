@@ -131,13 +131,19 @@ describe("provider-config: readProviderConfig", () => {
     expect(config!.apiKey).toBe("sk-session");
   });
 
-  test("falls back to the plaintext local key when no session key exists", async () => {
+  test("never trusts a plaintext local key when no session key exists", async () => {
     store.provider = "openai";
     store.model = "gpt-4o";
+    // A plaintext key left in chrome.storage.local is attacker-writable
+    // (prompt injection / crafted settings-sync) and must NEVER be trusted as
+    // the provider key — an attacker could plant it. The key lives ONLY in
+    // chrome.storage.session (in-memory), so a missing session key means there
+    // is no usable key, and `readProviderConfig` must not fall back to local.
     store.apiKey = "sk-local";
     const config = await readProviderConfig();
     expect(config).not.toBeNull();
-    expect(config!.apiKey).toBe("sk-local");
+    expect(config!.apiKey).not.toBe("sk-local");
+    expect(config!.apiKey).toBe("");
   });
 
   test("returns null when chrome.storage is unavailable", async () => {

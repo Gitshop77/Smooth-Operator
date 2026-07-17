@@ -8,10 +8,11 @@
  * perform (switching/closing/navigating tabs) are handled here.
  */
 
-import { injectAntiDetection } from "@/lib/agent/anti-detection";
+import { injectAntiDetection, isStealthEnabled } from "@/lib/agent/anti-detection";
 import { checkUrlAllowedWithDomainConfig } from "@/lib/agent/tools/helpers/domain-config";
 import { SEARCH_ENGINE_URLS } from "@/lib/agent/tools/constants";
-import type { AgentAction, BrowserState, LogEvent, TabInfo } from "@/lib/agent/types";
+import { substituteSecrets, redactSecrets } from "@/lib/agent/secrets";
+import type { ActionResult, AgentAction, BrowserState, LogEvent, TabInfo } from "@/lib/agent/types";
 import { getDomainConfig, saveRunState, type RunState } from "./state-store";
 
 /**
@@ -47,6 +48,25 @@ if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
  * acquirer and detached only when the last user releases it.
  */
 const debuggerRefCounts = new Map<number, number>();
+
+/**
+ * Clear a tab's refcount when something other than our own `releasePageDebugger`
+ * tears the session down: the agent tab is closed, or Chrome auto-detaches the
+ * debugger (target crash, tab backgrounded, SW teardown). Without this, a stale
+ * >0 entry lingers for a dead tab and a later `acquirePageDebugger` hits the
+ * "already attached" swallow — proceeding as if a live CDP session existed while
+ * in reality none does, so every subsequent screenshot / CDP click for that tab
+ * silently fails.
+ */
+if (typeof chrome !== "undefined") {
+  chrome.debugger?.onDetach?.addListener((source) => {
+    const tabId = (source as { tabId?: number }).tabId;
+    if (typeof tabId === "number") debuggerRefCounts.delete(tabId);
+  });
+  chrome.tabs?.onRemoved?.addListener((tabId: number) => {
+    debuggerRefCounts.delete(tabId);
+  });
+}
 
 export async function acquirePageDebugger<T>(
   tabId: number,
@@ -99,6 +119,22 @@ export async function releasePageDebugger<T>(
   }
 }
 
+/**
+ * Run `fn` with a refcounted page debugger attached for the duration of the
+ * call, guaranteeing a symmetric `releasePageDebugger` in a `finally` even if
+ * `fn` throws or returns early. Centralizes the acquire/release boilerplate so
+ * a forgotten detach can't leave a debugger session attached across CDP paths.
+ */
+export async function withPageDebugger<T>(tabId: number, fn: () => Promise<T>): Promise<T> {
+  const { attachDebugger, detachDebugger } = await import("@/lib/agent/cdp-controller");
+  await acquirePageDebugger(tabId, attachDebugger);
+  try {
+    return await fn();
+  } finally {
+    await releasePageDebugger(tabId, detachDebugger);
+  }
+}
+
 /** Read the user-configured screenshot JPEG quality (0-100). Cached. */
 export async function getScreenshotQuality(): Promise<number> {
   if (cachedScreenshotQuality !== null) return cachedScreenshotQuality;
@@ -135,32 +171,121 @@ export async function listTabs(): Promise<TabInfo[]> {
 }
 
 /**
+ * Bounded timeout (ms) for a content-script round-trip. A wedged content script
+ * would otherwise make `chrome.tabs.sendMessage` never resolve and deadlock the
+ * orchestrator's observe/act step until the service worker is killed.
+ */
+const CONTENT_SCRIPT_TIMEOUT_MS = 20_000;
+
+/**
+ * Timeout for the initial `PING` readiness check in {@link ensureContent}. A
+ * wedged-but-present content script would otherwise make the raw
+ * `chrome.tabs.sendMessage` never resolve and stall injection (and every
+ * subsequent observe/act step) until the service worker is killed.
+ */
+const PING_TIMEOUT_MS = 1_500;
+
+/**
+ * Per-attempt timeout for the post-injection readiness poll in
+ * {@link ensureContent}. Kept short so a wedged content script surfaces as a
+ * re-injection / failure quickly rather than hanging the poll loop.
+ */
+const PING_POLL_TIMEOUT_MS = 500;
+
+/**
+ * Send `message` to the content script in `tabId`, rejecting after
+ * `timeoutMs` if the content script never responds (renderer crash, a
+ * navigation racing the message, a tab frozen under memory pressure). This
+ * keeps the orchestrator's observe/act step retrying or failing cleanly
+ * instead of hanging. The timer is always cleared (no leak), and the
+ * underlying send's late rejection is swallowed so it never surfaces as an
+ * unhandled rejection after we've already moved on.
+ */
+export async function sendMessageWithTimeout<R = unknown>(
+  tabId: number,
+  message: unknown,
+  timeoutMs: number = CONTENT_SCRIPT_TIMEOUT_MS,
+): Promise<R> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const send = chrome.tabs.sendMessage<R>(tabId, message as never);
+  send.catch(() => {});
+  try {
+    return await Promise.race([
+      send,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("content script did not respond")),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
+ * Read the page's structural DOM fingerprint (see `domFingerprint` in the
+ * content script) for `tabId`. Used by the vision-cache staleness guard to
+ * detect an SPA re-render at the same URL between `detect_visual` and the
+ * click. Returns `""` on any failure (uninjected tab, timeout, closed tab) so
+ * callers treat "no fingerprint" as "can't confirm freshness" rather than
+ * throwing on the click path.
+ */
+export async function getPageFingerprint(tabId: number): Promise<string> {
+  try {
+    await ensureContent(tabId);
+    const res = await sendMessageWithTimeout<{ ok: boolean; fingerprint?: string }>(
+      tabId,
+      { type: "GET_DOM_FINGERPRINT" },
+    );
+    return res?.ok ? res.fingerprint ?? "" : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Ensure the content script is injected into the given tab. Pings first; if no
  * response, injects anti-detection scripts, then the content script, and polls
  * for readiness (replaces a fixed 150 ms sleep).
  */
 export async function ensureContent(tabId: number): Promise<void> {
   try {
-    const res = await chrome.tabs.sendMessage(tabId, { type: "PING" });
+    const res = await sendMessageWithTimeout<{ ok: boolean } | undefined>(
+      tabId,
+      { type: "PING" },
+      PING_TIMEOUT_MS,
+    );
     if (res?.ok) return;
   } catch {
     /* not injected yet — fall through to injection */
   }
   try {
  // Inject anti-detection scripts FIRST (before the content script) so they
- // apply to the page before any agent interaction.
-    await injectAntiDetection(tabId);
+ // apply to the page before any agent interaction. The MAIN-world stealth
+ // patches are OPT-IN and OFF by default (ToS/bot-detection-circumvention
+ // risk) — only inject when the user has explicitly enabled them.
+    if (await isStealthEnabled()) {
+      await injectAntiDetection(tabId);
+    } else {
+      console.debug("[tab-manager] stealth patches skipped (stealthEnabled is off)");
+    }
     await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 10; i++) {
       try {
-        const res = await chrome.tabs.sendMessage(tabId, { type: "PING" });
+        const res = await sendMessageWithTimeout<{ ok: boolean } | undefined>(
+          tabId,
+          { type: "PING" },
+          PING_POLL_TIMEOUT_MS,
+        );
         if (res?.ok) return;
       } catch {
         /* keep polling */
       }
       await new Promise((r) => setTimeout(r, 50));
     }
-    throw new Error("content script did not become ready after 1s");
+    throw new Error("content script did not become ready after injection");
   } catch (e) {
     throw new Error(`Cannot inject into tab ${tabId}: ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -187,7 +312,10 @@ export async function extractStateFromTab(
  // content script is already injected, so the per-step cost is one
  // round-trip only on the first observe of a new tab.
   await ensureContent(tabId);
-  const res = await chrome.tabs.sendMessage(tabId, { type: "EXTRACT_STATE", tabs });
+  const res = await sendMessageWithTimeout<{ ok: boolean; error?: string; state?: BrowserState }>(
+    tabId,
+    { type: "EXTRACT_STATE", tabs },
+  );
   if (!res?.ok) throw new Error(`extract failed: ${res?.error || "no response"}`);
  // The content script may respond `{ ok: true }` with no `state` (or a
  // non-object). Without this check, line below would throw inside the
@@ -212,23 +340,40 @@ export async function extractStateFromTab(
  // page (a correctness + privacy bug). CDP targets the exact agent tab,
  // mirroring the SCREENSHOT handler in message-routing.ts
  // (finding: per-step screenshot captures the user's visible tab).
-      const { attachDebugger, detachDebugger } = await import("@/lib/agent/cdp-controller");
- // Acquire a refcounted debugger session so a concurrent screenshot for
- // the same tab can't detach ours mid-capture (FULL-REVIEW finding 48).
-      await acquirePageDebugger(tabId, attachDebugger);
-      let dataUrl: string;
-      try {
-        const result = (await chrome.debugger.sendCommand(
-          { tabId },
-          "Page.captureScreenshot",
-          { format: "jpeg", quality: screenshotFormat, captureBeyondViewport: false },
-        )) as { data?: string };
+ // Route through the refcounted debugger helper so a concurrent screenshot for
+ // the same tab can't detach ours mid-capture (FULL-REVIEW finding 48), and the
+ // symmetric detach is guaranteed even on error.
+      const dataUrl = await withPageDebugger(tabId, async () => {
+        const result = await new Promise<{ data?: string }>((resolve, reject) => {
+          let settled = false;
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          (chrome.debugger.sendCommand(
+            { tabId },
+            "Page.captureScreenshot",
+            { format: "jpeg", quality: screenshotFormat, captureBeyondViewport: false },
+          ) as Promise<{ data?: string }>).then(
+            (r) => {
+              if (settled) return;
+              settled = true;
+              if (timer !== undefined) clearTimeout(timer);
+              resolve(r);
+            },
+            (e) => {
+              if (settled) return;
+              settled = true;
+              if (timer !== undefined) clearTimeout(timer);
+              reject(e);
+            },
+          );
+          timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            reject(new Error("captureScreenshot timed out after 10s"));
+          }, 10_000);
+        });
         if (!result?.data) throw new Error("Page.captureScreenshot returned no data");
-        dataUrl = `data:image/jpeg;base64,${result.data}`;
-      } finally {
- // Release our ref; only the LAST user detaches the actual session.
-        await releasePageDebugger(tabId, detachDebugger);
-      }
+        return `data:image/jpeg;base64,${result.data}`;
+      });
       res.state.screenshot = dataUrl;
 
  // Annotate the screenshot with numbered Set-of-Marks bounding boxes
@@ -289,11 +434,38 @@ export async function executeActionsInTab(
  // script always returns `{ allowed: true }` and the user's domain
  // allow/blocklist is silently bypassed.
   await ensureContent(tabId);
-  const res = await chrome.tabs.sendMessage(tabId, {
-    type: "EXECUTE_ACTIONS",
-    actions,
-    domainConfig: getDomainConfig(),
-  });
+
+  // F-1: resolve `%placeholder%` substitution in the SERVICE WORKER — the only
+  // context that can read `chrome.storage.session` (content scripts cannot; the
+  // extension never grants them session access, which would arm the
+  // `evaluate()` secret-exfil path). Substituting here means the content script
+  // receives the already-resolved text (no placeholder), so its own
+  // `substituteSecrets` call short-circuits without touching the store. Only
+  // `input` actions carry a `%placeholder%` payload; everything else is passed
+  // through untouched.
+  const inputResolvedText = new Map<number, string>();
+  const resolvedActions = await Promise.all(
+    actions.map(async (a, idx) => {
+      if (a.type === "input") {
+        const text = await substituteSecrets(a.text ?? "", { trusted: true });
+        inputResolvedText.set(idx, text);
+        return { ...a, text };
+      }
+      return a;
+    }),
+  );
+
+  const res = await sendMessageWithTimeout<{ ok: boolean; error?: string; results?: unknown }>(
+    tabId,
+    {
+      type: "EXECUTE_ACTIONS",
+      actions: resolvedActions,
+      domainConfig: getDomainConfig(),
+      // Tell the content script secrets are already resolved so its
+      // `substituteSecrets`/`redactSecrets` calls short-circuit (no store read).
+      secretsResolved: true,
+    },
+  );
   if (!res?.ok) throw new Error(`execute failed: ${res?.error || "no response"}`);
  // The content script may respond `{ ok: true }` without a `results` field (or
  // with a non-array) — without this check the spread in run-helpers.ts
@@ -302,7 +474,47 @@ export async function executeActionsInTab(
   if (!Array.isArray(res.results)) {
     throw new Error("execute failed: content script returned no results array");
   }
-  return res.results;
+  const results = res.results as ActionResult[];
+
+  // Post-process the returned results in the SW so the REAL secret value never
+  // reaches the LLM provider or the persisted run history:
+  //  1. input: the content script typed the resolved (real) value but must NOT
+  //     echo it. Restore the original `%placeholder%` text and a redacted
+  //     message so history only ever holds the placeholder.
+  //  2. extract / find_elements / dropdown_options: the content script could
+  //     not redact (it can't read the store), so it shipped RAW extracted text.
+  //     Redact it here, in the trusted SW, before it reaches the LLM.
+  // The result array is positionally aligned with `actions` (the content script
+  // returns one result per input action, possibly plus one extra trailing
+  // `wait` marker on early break — that trailing element has no matching
+  // original action and is passed through unchanged, preserving existing
+  // run-helpers alignment semantics).
+  return Promise.all(
+    results.map(async (r, i) => {
+      const orig = actions[i];
+      if (!orig) return r;
+      if (
+        orig.type === "input" &&
+        inputResolvedText.has(i) &&
+        (orig.text ?? "") !== inputResolvedText.get(i)
+      ) {
+        return {
+          ...r,
+          action: { ...r.action, text: orig.text },
+          message: `Typed [REDACTED — secret substituted] into [${orig.index}]`,
+        };
+      }
+      if (
+        orig.type === "extract" ||
+        orig.type === "find_elements" ||
+        orig.type === "dropdown_options"
+      ) {
+        const redacted = await redactSecrets(r.extractedContent ?? "");
+        return { ...r, extractedContent: redacted };
+      }
+      return r;
+    }),
+  );
 }
 
 /**
@@ -374,7 +586,7 @@ export async function handleTabAction(
       await chrome.tabs.update(tab.id, { active: true });
       await waitForTabLoad(tab.id, 3000);
       runState.currentTabId = tab.id;
-      await saveRunState(runState);
+      await saveRunState({ currentTabId: tab.id });
       return { handled: true, pageChanged: true, success: true, message: `Switched to tab ${action.tab_id}` };
     }
     case "close_tab": {
@@ -387,14 +599,14 @@ export async function handleTabAction(
         if (remaining[0]) {
           runState.currentTabId = remaining[0].id;
           await chrome.tabs.update(runState.currentTabId, { active: true });
-          await saveRunState(runState);
+          await saveRunState({ currentTabId: remaining[0].id });
         } else {
  // The closed tab was the last one — clear the pointer so we don't keep
  // referencing a now-closed tab (which would make the next navigate/
  // search act on a dead tab id). A 0 sentinel means "no active tab".
  // FULL-REVIEW finding 47.
           runState.currentTabId = 0;
-          await saveRunState(runState);
+          await saveRunState({ currentTabId: 0 });
         }
       }
       return { handled: true, pageChanged: true, success: true, message: `Closed tab ${action.tab_id}` };
@@ -430,7 +642,7 @@ export async function handleTabAction(
       if (action.new_tab) {
         const newTab = await chrome.tabs.create({ url: action.url, active: true });
         runState.currentTabId = newTab.id!;
-        await saveRunState(runState);
+        await saveRunState({ currentTabId: newTab.id! });
         await waitForTabLoad(newTab.id!);
         await ensureContent(newTab.id!);
       } else {

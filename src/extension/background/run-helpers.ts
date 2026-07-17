@@ -1,14 +1,13 @@
 /**
- * background/run-helpers.ts — helpers extracted from `startRun` so the
- * top-level run-lifecycle function stays readable.
+ * background/run-helpers.ts — run-lifecycle helpers for `startRun`.
  *
  * Five concerns live here:
  *
  * 1. Vision-assistant singleton state + lazy init (`ensureVisionAssistantInit`,
  * `getVisionElementRect`). Owned here so the SW has a single source of
  * truth for vision-init race handling.
- * 2. `extractStateForRun` — the 125-line callback passed to the orchestrator
- * as `extractState`. Hydrates the active tab + (optionally) merges local
+ * 2. `extractStateForRun` — the callback passed to the orchestrator as
+ * `extractState`. Hydrates the active tab + (optionally) merges local
  * vision detections into the DOM element list.
  * 3. `wireAbortController` — creates the AbortController used to cancel a
  * run + the storage-change listener that fires `controller.abort()` when
@@ -21,7 +20,7 @@
  * the run state.
  */
 
-import { runAgentLoop } from "@/lib/agent/loop/orchestrator";
+import type { LoopDeps } from "@/lib/agent/loop/types";
 import type { ActionResult, AgentAction, BrowserState, LogEvent, TabInfo } from "@/lib/agent/types";
 import type { AgentMode } from "@/lib/agent/modes";
 import { RunBuilder, saveRun } from "@/lib/agent/run-history";
@@ -36,6 +35,7 @@ import {
   startKeepalive,
   stopKeepalive,
   maybeReleaseKeepAwake,
+  safeLog,
   type RunState,
 } from "./state-store";
 import {
@@ -45,6 +45,8 @@ import {
   executeActionsInTab,
   waitForTabLoad,
   handleTabAction,
+  getPageFingerprint,
+  sendMessageWithTimeout,
 } from "./tab-manager";
 import { navigatorCallDirect, plannerCallDirect } from "../llm-direct";
 import type { VisionAssistant } from "../vision-assistant";
@@ -79,6 +81,50 @@ function loadCatalogRefs() {
 let visionAssistantMod: Promise<typeof import("../vision-assistant")> | null = null;
 function loadVisionAssistant(): Promise<typeof import("../vision-assistant")> {
   return (visionAssistantMod ??= import("../vision-assistant"));
+}
+
+// ─── Memoized vision settings (hot path: once per agent step) ──────────────
+//
+// `extractStateForRun` reads the five vision-related settings from
+// `chrome.storage.local` on EVERY step. Those values only change when the user
+// edits Options, so the repeated read is wasted work — the same class of
+// hot-path read that is already cached for `screenshotQuality` in
+// tab-manager.ts. Cache the resolved object once and invalidate it when any of
+// the five keys changes.
+
+interface VisionSettings {
+  model: unknown;
+  provider: unknown;
+  enableLocalVision: unknown;
+  enableScreenshots: unknown;
+  visionMode: unknown;
+}
+
+const VISION_SETTING_KEYS = [
+  "model", "provider", "enableLocalVision", "enableScreenshots", "visionMode",
+] as const;
+
+let cachedVisionSettings: VisionSettings | null = null;
+
+if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local") return;
+    if (VISION_SETTING_KEYS.some((k) => changes[k])) cachedVisionSettings = null;
+  });
+}
+
+/** Read the vision settings once, cached; invalidated on storage change. */
+async function getVisionSettings(): Promise<VisionSettings> {
+  if (cachedVisionSettings !== null) return cachedVisionSettings;
+  const s = await chrome.storage.local.get([...VISION_SETTING_KEYS]);
+  cachedVisionSettings = {
+    model: s.model,
+    provider: s.provider,
+    enableLocalVision: s.enableLocalVision,
+    enableScreenshots: s.enableScreenshots,
+    visionMode: s.visionMode,
+  };
+  return cachedVisionSettings;
 }
 
 /** Build a short, human-readable detail suffix for a confirmation prompt. */
@@ -116,12 +162,17 @@ function confirmationMessage(action: AgentAction): string {
 // gracefully to DOM-only extraction via `extractStateFromTab(...)`.
 // 2. The `visionInitPromise` is shared across concurrent `extractState`
 // calls so two near-simultaneous calls don't double-init (which would
-// download the 2.1 GB model twice and race on Cache Storage writes).
-// 3. `visionInitFailed` is a permanent flag — once init fails (WebGPU
-// unavailable, disk full, ONNX compile error, …), we stop retrying
-// every step. The user must toggle the `enableLocalVision` setting
-// off+on (or restart the SW) to retry. Without this flag, every step
-// would re-attempt the doomed download forever.
+// download the 2.1 GB model twice and race on Cache Storage writes). The
+// same shared promise carries any retry attempts, so retries never
+// double-init either.
+// 3. `visionInitFailed` is a permanent flag — once init fails for a
+// NON-transient reason (WebGPU/ONNX unavailable, model compile error, …) we
+// stop retrying for the rest of the session. TRANSIENT failures (network
+// blip during the multi-GB download, SW eviction mid-download, quota hiccup)
+// are retried with capped exponential backoff before giving up, so a
+// recoverable interruption doesn't silently disable Local Vision until the
+// next manual SW restart. The user must still restart the SW / toggle the
+// setting to retry a permanent failure.
 // 4. Mid-run inference failures are handled separately — `detect()` is
 // wrapped in `.catch(() => [])` so a single bad inference degrades
 // to "no vision detections this step" rather than killing the run.
@@ -131,9 +182,24 @@ let visionInitPromise: Promise<void> | null = null;
 let visionInitFailed = false;
 
 /**
+ * Heuristic classification of a vision-init failure. Transient causes
+ * (network/timeout/quota/SW-eviction during the long model download) are worth
+ * retrying; structural causes (WebGPU/ONNX unavailable, compile error) are not.
+ */
+function isTransientVisionError(e: unknown): boolean {
+  const msg = e instanceof Error ? `${e.name} ${e.message}` : String(e);
+  const m = msg.toLowerCase();
+  return /timeout|timed out|network|abort|econn|enotfound|etimedout|socket|fetch|quota|exceeded|terminated|evicted|disconnected|failed to fetch|download|interrupt/i.test(
+    m,
+  );
+}
+
+/**
  * Lazily initialize the vision assistant in the BACKGROUND. Idempotent —
- * concurrent calls share the same init promise. Permanently marks init as
- * failed on error so we don't retry a 2.1 GB download every step.
+ * concurrent calls share the same init promise (including any retries), so the
+ * 2.1 GB model is never downloaded twice. Transient init failures are retried
+ * with capped exponential backoff; only non-transient failures (or retries
+ * exhausted) permanently disable vision for the session.
  *
  * This function is INTENTIONALLY not awaited by `extractState` — it returns
  * immediately so the agent loop can continue with DOM-only state while the
@@ -141,45 +207,60 @@ let visionInitFailed = false;
  */
 function ensureVisionAssistantInit(): void {
   if (globalVisionAssistant || visionInitPromise || visionInitFailed) return;
+  const MAX_ATTEMPTS = 3;
+  const BASE_DELAY_MS = 1000;
+  const MAX_DELAY_MS = 8000;
   visionInitPromise = (async () => {
-    try {
-      const { VisionAssistant: VA } = await import("../vision-assistant");
-      const va = new VA();
-      await va.init();
-      globalVisionAssistant = va;
-    } catch (e) {
-      console.warn(
-        "[vision-assistant] init failed — disabling Local Vision for this session:",
-        e,
-      );
-      visionInitFailed = true;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const { VisionAssistant: VA } = await import("../vision-assistant");
+        const va = new VA();
+        await va.init();
+        globalVisionAssistant = va;
+        return;
+      } catch (e) {
+        const transient = isTransientVisionError(e);
+        const lastAttempt = attempt >= MAX_ATTEMPTS - 1;
+        if (transient && !lastAttempt) {
+          const delay = Math.min(BASE_DELAY_MS * 2 ** attempt, MAX_DELAY_MS);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          continue;
+        }
+        void safeLog(
+          "warn",
+          "[vision-assistant] init failed — disabling Local Vision for this session:",
+          e,
+        );
+        visionInitFailed = true;
  // Emit a one-time LogEvent so the side panel surfaces the failure to the
  // user. Without this, the only signal is a `console.warn` in the service
  // worker (invisible to the user) — the Options page's vision-status
  // badge shows "✓ Ready" because it lives in a SEPARATE context (Options
  // page has its own VisionAssistant instance). The user sees the LLM
  // degrading to text-only with no explanation.
-      try {
-        chrome.runtime
-          .sendMessage({
-            type: "AGENT_EVENT",
-            event: {
-              type: "info",
-              message:
-                "Local Vision init failed — vision detections disabled for this run.",
-            },
-            time: new Date().toLocaleTimeString("en-GB", { hour12: false }),
-          })
-          .catch(() => {
-            /* side panel may not be open — non-fatal */
-          });
-      } catch {
-        /* chrome.runtime may be unavailable during SW teardown — non-fatal */
+        try {
+          chrome.runtime
+            .sendMessage({
+              type: "AGENT_EVENT",
+              event: {
+                type: "info",
+                message:
+                  "Local Vision init failed — vision detections disabled for this run.",
+              },
+              time: new Date().toLocaleTimeString("en-GB", { hour12: false }),
+            })
+            .catch(() => {
+              /* side panel may not be open — non-fatal */
+            });
+        } catch {
+          /* chrome.runtime may be unavailable during SW teardown — non-fatal */
+        }
+        return;
       }
-    } finally {
-      visionInitPromise = null;
     }
-  })();
+  })().finally(() => {
+    visionInitPromise = null;
+  });
 }
 
 // Cache of vision-detected elements for the current step (visionId → pixel rect + label)
@@ -196,6 +277,16 @@ const visionElementsCache = new Map<string, { x: number; y: number; width: numbe
 // NEW page (could be a delete/payment button). `extractStateForRun` checks
 // this against `domState.url` and clears the cache on mismatch.
 let visionCacheUrl = "";
+
+// Structural DOM fingerprint captured alongside `visionCacheUrl` at cache
+// population time. A client-side re-render at the SAME url (SPA `pushState`
+// route change, live-feed insert that shifts layout, modal open/close) leaves
+// the cached CSS-pixel rects pointing at the OLD element; comparing this
+// fingerprint at click time lets `isVisionCacheFresh` invalidate the cache on
+// a layout change even when the url is unchanged. Empty string means "no
+// fingerprint captured" — callers then can't confirm freshness and fall back
+// to the url check alone.
+let visionCacheFingerprint = "";
 
 // Track the last known DPR for adaptive vision coordinate scaling.
 // Updated in extractStateForRun from domState.devicePixelRatio.
@@ -218,6 +309,46 @@ export function getVisionElementRect(
 }
 
 /**
+ * Confirm the vision elements cache still corresponds to the agent tab's
+ * CURRENT url before a cached-coordinate click is dispatched. Mirrors the
+ * staleness guard in `extractStateForRun`: a `detect_visual` populated the
+ * cache at one URL, and if the page navigated (a non-action redirect,
+ * `<meta http-equiv=refresh>`, or an SPA `history.pushState` that bypassed an
+ * agent action) before the click arrives, the cached pixel rects are for the
+ * OLD page. Returns false on any uncertainty (empty cache url, closed tab, or
+ * url mismatch) so the caller can re-detect instead of clicking stale
+ * coordinates. Fragment-only changes don't invalidate the cache, matching
+ * `extractStateForRun` (viewport layout is unchanged).
+ */
+export async function isVisionCacheFresh(tabId: number): Promise<boolean> {
+  if (!visionCacheUrl) return false;
+  let url: string | undefined;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    url = tab.url;
+  } catch {
+    return false;
+  }
+  if (!url) return false;
+  if (stripUrlFragment(url) !== stripUrlFragment(visionCacheUrl)) return false;
+ // A URL match alone isn't enough: an SPA re-render at the same url (pushState
+ // route, live-feed insert, modal toggle) shifts layout so the cached pixel
+ // rects point at the OLD element. When we have a captured fingerprint,
+ // invalidate the cache if the page's current fingerprint differs. If we can't
+ // read the page (tab closed, content script gone) treat it as stale rather
+ // than risking a silent misclick at stale coordinates.
+  if (visionCacheFingerprint) {
+    try {
+      const fp = await getPageFingerprint(tabId);
+      if (!fp || fp !== visionCacheFingerprint) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Reset the SW-side Vision init-failed flag at the start of each new run so
  * the next `ensureVisionAssistantInit()` call retries the (previously-failed)
  * init. The flag is set permanently on init failure to avoid re-attempting a
@@ -229,6 +360,8 @@ export function getVisionElementRect(
  */
 export function resetVisionInitFlagForNewRun(): void {
   if (!visionInitPromise) visionInitFailed = false;
+  adaptiveVisionLastUsedStep = -1;
+  adaptiveVisionCurrentStep = 0;
 }
 
 /**
@@ -241,6 +374,7 @@ export function resetVisionInitFlagForNewRun(): void {
 export function clearVisionElementsCacheForNewRun(): void {
   visionElementsCache.clear();
   visionCacheUrl = "";
+  visionCacheFingerprint = "";
 }
 
 /**
@@ -297,7 +431,7 @@ export function trackAdaptiveVisionStep(step: number): void {
     globalVisionAssistant = null;
     visionInitPromise = null;
     visionInitFailed = false;
-    void va.cleanup().catch((e) => console.warn("[vision] cleanup failed (VRAM may leak):", e));
+    void va.cleanup().catch((e) => void safeLog("warn", "[vision] cleanup failed (VRAM may leak):", e));
   }
 }
 
@@ -316,7 +450,8 @@ export async function handleDetectVisualRequest(query: string): Promise<{
   if (visionInitFailed) {
     return { ok: false, error: "Vision assistant failed to initialize — try restarting the extension or switching vision modes" };
   }
-  if (!globalVisionAssistant?.isReady) {
+  const va = globalVisionAssistant;
+  if (!va?.isReady) {
     return { ok: false, error: "Vision assistant is still loading — try again on the next step" };
   }
   try {
@@ -336,10 +471,11 @@ export async function handleDetectVisualRequest(query: string): Promise<{
       return { ok: false, error: "no active run — cannot determine agent tab for screenshot" };
     }
     const screenshotDataUrl = await captureTabScreenshot(tabId);
-    const visionDetections = await globalVisionAssistant.detect(screenshotDataUrl).catch((e: unknown) => { console.warn("[vision] detect failed (falling back to no detections):", e); return []; });
+    const visionDetections = await va.detect(screenshotDataUrl).catch((e: unknown) => { void safeLog("warn", "[vision] detect failed (falling back to no detections):", e); return []; });
  // Cache vision elements for the next step's extractStateForRun
     visionElementsCache.clear();
     visionCacheUrl = ""; // reset before re-population (in case tab get fails below)
+    visionCacheFingerprint = "";
     const { mergeDetections } = await loadVisionAssistant();
  // Use lastKnownDpr (updated by extractStateForRun) — vision detections
  // from captureVisibleTab are in device pixels; the merger divides by dpr
@@ -360,6 +496,10 @@ export async function handleDetectVisualRequest(query: string): Promise<{
     } catch {
       /* tab may have closed — leave visionCacheUrl as "" */
     }
+ // Capture the page's DOM fingerprint alongside the url so `isVisionCacheFresh`
+ // can invalidate on an SPA re-render at the same url (not just navigation).
+ // Best-effort: an empty result is tolerated (the url check still applies).
+    visionCacheFingerprint = await getPageFingerprint(tabId);
  // Build the description from the MERGED vision elements (not the raw
  // `visionDetections` array) so the `[vN]` index printed to the LLM exactly
  // matches the `visionId` key used to populate `visionElementsCache` below
@@ -397,14 +537,18 @@ export async function handleDetectVisualRequest(query: string): Promise<{
 export async function extractStateForRun(
   fallbackTabId: number,
   tabs: TabInfo[],
+  signal?: AbortSignal,
 ): Promise<BrowserState> {
   const s = await getRunState();
-  const tabId = s?.currentTabId ?? fallbackTabId;
+  const tabId = s?.currentTabId ? s.currentTabId : fallbackTabId;
  // Track adaptive vision step for idle-unload (no-op if not adaptive)
   if (s) trackAdaptiveVisionStep(s.step);
-  const { model, provider: providerId, enableLocalVision, enableScreenshots: storedEnableScreenshots, visionMode: storedVisionMode } = await chrome.storage.local.get([
-    "model", "provider", "enableLocalVision", "enableScreenshots", "visionMode",
-  ]);
+  const vs = await getVisionSettings();
+  const model = vs.model;
+  const providerId = vs.provider;
+  const enableLocalVision = vs.enableLocalVision;
+  const storedEnableScreenshots = vs.enableScreenshots;
+  const storedVisionMode = vs.visionMode;
 
  // Determine vision capability of the main LLM.
  //
@@ -430,9 +574,9 @@ export async function extractStateForRun(
       DEFAULT_MODELS[providerId as string] ||
       "";
     mainModelVision = await modelSupportsVision(resolvedModel, catId as string);
-  } catch (e) { console.warn("[vision] catalog/model load failed (vision disabled for this step):", e); }
+  } catch (e) { void safeLog("warn", "[vision] catalog/model load failed (vision disabled for this step):", e); }
 
-  const includeScreenshot = mainModelVision && (storedEnableScreenshots ?? true);
+  const includeScreenshot = mainModelVision && Boolean(storedEnableScreenshots ?? true);
 
  // Resolve the vision mode. Backward compat: if `visionMode` is unset but
  // `enableLocalVision` is true, treat as "always". Otherwise use the stored
@@ -461,11 +605,13 @@ export async function extractStateForRun(
  // through to DOM-only state instead. URL comparison is exact; a
  // fragment-only change (#anchor) doesn't invalidate the cache
  // because the viewport layout is unchanged.
-      if (visionCacheUrl && domState.url && stripUrlFragment(domState.url) !== stripUrlFragment(visionCacheUrl)) {
+      if (!visionCacheUrl || (domState.url && stripUrlFragment(domState.url) !== stripUrlFragment(visionCacheUrl))) {
         visionElementsCache.clear();
         visionCacheUrl = "";
+        visionCacheFingerprint = "";
       } else {
  // Merge cached vision elements into the DOM state
+        visionCacheFingerprint = (domState as { fingerprint?: string }).fingerprint ?? "";
         const { mergeDetections, renderMergedElementsText } = await loadVisionAssistant();
         const visionEntries = Array.from(visionElementsCache.entries()).map(([id, data]) => ({
           index: -1,
@@ -496,6 +642,7 @@ export async function extractStateForRun(
     if (useAdaptiveVision) {
       visionElementsCache.clear();
       visionCacheUrl = "";
+      visionCacheFingerprint = "";
     }
  // Read DPR even in the no-cache adaptive branch so `lastKnownDpr` is
  // correct for the FIRST step's detect_visual call. Without this, a
@@ -517,7 +664,8 @@ export async function extractStateForRun(
  // We pass `false` for `includeScreenshot` because this branch is only
  // reached when `useLocalVision` is true, which requires `!mainModelVision`
  // — i.e. the main model is text-only and can't consume a screenshot anyway.
-  if (!globalVisionAssistant?.isReady) {
+  const va = globalVisionAssistant;
+  if (!va?.isReady) {
     return extractStateFromTab(tabId, tabs, false);
   }
 
@@ -541,7 +689,7 @@ export async function extractStateForRun(
  // the whole extract — the merger then returns the DOM-only state unchanged.
     const [domState, visionDetections] = await Promise.all([
       extractStateFromTab(tabId, tabs, false),
-      globalVisionAssistant.detect(screenshotDataUrl).catch((e: unknown) => { console.warn("[vision] detect failed (falling back to no detections):", e); return []; }),
+      va.detect(screenshotDataUrl, signal).catch((e: unknown) => { void safeLog("warn", "[vision] detect failed (falling back to no detections):", e); return []; }),
     ]);
 
  // The content script stashes the tab's `devicePixelRatio` on the
@@ -579,6 +727,7 @@ export async function extractStateForRun(
  // to `Input.dispatchMouseEvent`.
     visionElementsCache.clear();
     visionCacheUrl = domState.url; // always-on re-detects every step; cache is always fresh
+    visionCacheFingerprint = (domState as { fingerprint?: string }).fingerprint ?? "";
     for (const m of merged) {
       if (m.source === "vision" && m.pixelRect && m.visionId) {
         visionElementsCache.set(m.visionId, { ...m.pixelRect, label: m.text });
@@ -588,7 +737,7 @@ export async function extractStateForRun(
     return domState;
   } catch (e) {
  // Vision assistant failed — graceful fallback to DOM-only
-    console.warn("[vision-assistant] failed, falling back to DOM-only:", e);
+    void safeLog("warn", "[vision-assistant] failed, falling back to DOM-only:", e);
     return extractStateFromTab(tabId, tabs, false);
   }
 }
@@ -644,7 +793,7 @@ export interface LoopDepsContext {
   task: string;
   mode: AgentMode;
   /** Optional metrics callback (Phase 8). */
-  callbacks?: NonNullable<Parameters<typeof runAgentLoop>[0]["callbacks"]>;
+  callbacks?: NonNullable<LoopDeps["callbacks"]>;
 }
 
 /**
@@ -653,7 +802,7 @@ export interface LoopDepsContext {
  * confirmation/challenge/pause hooks. Returns the object literal so `startRun`
  * stays a thin orchestrator.
  */
-export function buildLoopDeps(ctx: LoopDepsContext): Parameters<typeof runAgentLoop>[0] {
+export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
   const { tab, sendEvent, controller, config, task, mode, callbacks } = ctx;
   const fallbackTabId = tab.id!;
   return {
@@ -664,7 +813,7 @@ export function buildLoopDeps(ctx: LoopDepsContext): Parameters<typeof runAgentL
  // Wire extension-side extract/execute helpers into the orchestrator so it
  // doesn't try to call the in-page extractor (which needs DOM access the
  // service worker doesn't have).
-    extractState: async (tabs) => extractStateForRun(fallbackTabId, tabs),
+    extractState: async (tabs) => extractStateForRun(fallbackTabId, tabs, controller.signal),
  // CRITICAL: route action execution through the content script. The
  // orchestrator's built-in `executeActionQueue` calls `executeAction` in
  // the service worker context, where `document`, `window`, and `history`
@@ -675,7 +824,7 @@ export function buildLoopDeps(ctx: LoopDepsContext): Parameters<typeof runAgentL
  // call and DOM access for click/input/scroll/etc.
     executeActions: async (actions, _state): Promise<ActionResult[]> => {
       const s = await getRunState();
-      const tabId = s?.currentTabId ?? fallbackTabId;
+      const tabId = s?.currentTabId ? s.currentTabId : fallbackTabId;
       const agentMode = s?.mode ?? mode;
 
  // Enforce mode restrictions + confirmation gates BEFORE forwarding to
@@ -696,6 +845,14 @@ export function buildLoopDeps(ctx: LoopDepsContext): Parameters<typeof runAgentL
       let aborted = false;
       for (let i = 0; i < actions.length; i++) {
         const action = actions[i];
+        if (controller.signal.aborted) {
+          aborted = true;
+          results[i] = {
+            action, success: false,
+            message: "BLOCKED: run aborted by user",
+          };
+          continue;
+        }
         if (aborted) {
  // A prior action in the batch was blocked/declined — abort the rest
  // of the queue (the selectorMap context is invalidated) but still
@@ -753,10 +910,25 @@ export function buildLoopDeps(ctx: LoopDepsContext): Parameters<typeof runAgentL
  // Execute the filtered actions via the content script, then slot each
  // result back into its original input position so the returned
  // ActionResult[] matches the input action order in all cases.
-      const execResults = await executeActionsInTab(tabId, filtered.map((f) => f.action));
+      const execResults = (await executeActionsInTab(tabId, filtered.map((f) => f.action))) as ActionResult[];
       filtered.forEach((f, k) => {
-        results[f.i] = (execResults as ActionResult[])[k];
+        results[f.i] = execResults[k];
       });
+ // Defend the per-action alignment invariant: the orchestrator expects exactly
+ // one ActionResult per input action. If the content script returned a shorter
+ // or otherwise mismatched array (it coalesced/dropped a result, or wrapped the
+ // response), the slot loop above leaves `undefined` holes that would crash
+ // downstream history alignment / success-rate tally. Fill any gap with a
+ // BLOCKED result so every input action still maps to a result.
+      for (let i = 0; i < results.length; i++) {
+        if (!results[i]) {
+          results[i] = {
+            action: actions[i],
+            success: false,
+            message: "BLOCKED: missing result from content script",
+          };
+        }
+      }
       return results;
     },
     navigatorCall: navigatorCallDirect,
@@ -771,7 +943,7 @@ export function buildLoopDeps(ctx: LoopDepsContext): Parameters<typeof runAgentL
     },
     waitForNavigation: async () => {
       const s = await getRunState();
-      if (!s) return;
+      if (!s || !s.currentTabId) return;
       await waitForTabLoad(s.currentTabId);
       await ensureContent(s.currentTabId);
     },
@@ -814,8 +986,11 @@ export function buildLoopDeps(ctx: LoopDepsContext): Parameters<typeof runAgentL
     getPageHtml: async () => {
       try {
         const s = await getRunState();
-        if (!s) return "";
-        const res = await chrome.tabs.sendMessage(s.currentTabId, { type: "EXTRACT_HTML" });
+        if (!s || !s.currentTabId) return "";
+        const res = await sendMessageWithTimeout<{ ok: boolean; html?: string }>(
+          s.currentTabId,
+          { type: "EXTRACT_HTML" },
+        );
         if (res?.ok && typeof res.html === "string") return res.html;
         return "";
       } catch {
@@ -828,7 +1003,7 @@ export function buildLoopDeps(ctx: LoopDepsContext): Parameters<typeof runAgentL
     getCurrentUrl: async () => {
       try {
         const s = await getRunState();
-        if (!s) return "";
+        if (!s || !s.currentTabId) return "";
         const t = await chrome.tabs.get(s.currentTabId);
         return t.url ?? "";
       } catch {
@@ -949,6 +1124,7 @@ export async function cleanupRun(ctx: CleanupContext): Promise<void> {
  // populates the cache mid-run).
   visionElementsCache.clear();
   visionCacheUrl = "";
+  visionCacheFingerprint = "";
  // Clean up the vision assistant after a scheduled-task run OR an adaptive
  // vision run. In adaptive mode, vision unloads at run end (frees VRAM
  // between runs). In always-on mode, vision stays loaded for manual runs

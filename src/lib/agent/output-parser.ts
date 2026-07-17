@@ -35,6 +35,17 @@ const MAX_JSON_LENGTH = 1_000_000;
  */
 const MAX_CANDIDATES = 1000;
 
+/**
+ * Number of leading `{` candidates that {@link extractJson} will balanced-scan
+ * before the cumulative scan budget is enforced. The genuine payload is the
+ * first balanced object, so a handful of unbalanced `{` (e.g. from a thinking
+ * block containing code examples) may legitimately precede it; scanning the
+ * first N candidates unconditionally guarantees that object is reached instead
+ * of the scan falling through to the last-open/last-close fallback. Beyond N,
+ * the budget still bounds an adversarial all-`{` payload.
+ */
+const BUDGET_BYPASS_CANDIDATES = 128;
+
 /** Tagged-union result of a parse attempt. */
 export type ParseResult<T> =
   | { ok: true; output: T; error?: string; raw: string }
@@ -95,7 +106,10 @@ export function extractJson(raw: string): string {
   for (const start of candidates) {
     if (checked >= MAX_CANDIDATES) break;
     const span = s.length - start;
-    if (scanned + span > SCAN_BUDGET) break;
+    // The first N candidates are scanned unconditionally so the genuine (first
+    // balanced) object is always reached; for later candidates the budget still
+    // caps total work against adversarial input.
+    if (checked >= BUDGET_BYPASS_CANDIDATES && scanned + span > SCAN_BUDGET) break;
     scanned += span;
     checked++;
     const end = balancedEnd(s, start);

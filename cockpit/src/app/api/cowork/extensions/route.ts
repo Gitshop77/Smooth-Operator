@@ -9,11 +9,8 @@ export async function GET(req: NextRequest): Promise<Response> {
  // authenticated GET can't pull the entire extensions table in one shot.
     const limit = parseLimit(req);
     const enabled = req.nextUrl.searchParams.get('enabled');
- // Validate `enabled` against an explicit allowlist. Previously any non-null,
- // non-'true' value (e.g. `?enabled=1`, `?enabled=TRUE`, `?enabled=yes`)
- // made `enabled === 'true'` evaluate to `false`, silently filtering to
- // *disabled-only* extensions with no error. Non-canonical values now get a
- // 400. An absent param means "no filter".
+ // Validate `enabled` against an explicit allowlist: only 'true'/'false' are
+ // accepted, any other value gets a 400. An absent param means "no filter".
     let enabledFilter: boolean | undefined;
     if (enabled !== null) {
       if (enabled !== 'true' && enabled !== 'false') {

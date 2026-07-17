@@ -58,6 +58,36 @@ function withSecretLock<T>(fn: () => Promise<T>): Promise<T> {
 const PLACEHOLDER_PATTERN = /%([a-zA-Z][a-zA-Z0-9_]*)%/g;
 
 /**
+ * Non-global variant used only for the cheap "does this text contain any
+ * `%placeholder%`?" probe. A *separate, non-global* regex avoids the stateful
+ * `lastIndex` footgun of calling `.test()` on a `g`-flagged regex (which would
+ * alternate true/false across calls).
+ */
+const HAS_PLACEHOLDER = /%[a-zA-Z][a-zA-Z0-9_]*%/;
+
+/**
+ * Flag set by the content script when the trusted service worker has already
+ * resolved `%placeholder%` substitution + secret redaction on its behalf.
+ *
+ * In a content-script context `chrome.storage.session.get` throws
+ * "Access to storage is not allowed from this context" (session storage
+ * defaults to TRUSTED_CONTEXTS and the extension deliberately NEVER calls
+ * `chrome.storage.session.setAccessLevel` for content scripts — doing so would
+ * arm the `evaluate()` secret-exfiltration path). So the content script must
+ * not touch the secret store. The SW redacts the result after it returns, so
+ * the content-side `substituteSecrets`/`redactSecrets` calls become no-ops
+ * while this flag is set.
+ *
+ * The demo (non-extension, in-page) path never loads the content script, so
+ * the flag stays `false` there and substitution/redaction run normally against
+ * `localStorage` — preserving that guard. See finding F-1.
+ */
+let secretsResolvedExternally = false;
+export function setSecretsResolvedExternally(value: boolean): void {
+  secretsResolvedExternally = value;
+}
+
+/**
  * Minimum secret length eligible for redaction.
  *
  * Previously `4`, which silently SKIPPED short user-defined secrets
@@ -188,7 +218,26 @@ async function persist(secrets: SecretEntry[]): Promise<void> {
  * security caveat noted in {@link persist}. Returns an empty array if storage
  * is empty or unreadable.
  */
+/** In-memory cache of the last `listSecrets` result.
+ * `getRedactionArtifacts` already memoizes the compiled regex, but computing
+ * its cache key needs the FULL secret list, and `listSecrets` hits
+ * `chrome.storage.session.get` on EVERY call. `redactSecrets`/`substituteSecrets`
+ * are called dozens of times per navigator step, so without a read cache each
+ * call round-trips to storage (MED finding: uncached storage read per redact).
+ * Invalidated on every successful `setSecret`/`deleteSecret`. */
+let secretsCache: SecretEntry[] | null = null;
+
+/** Monotonic version of the stored secret set. Bumped on every successful
+ * set/delete so redaction caches keyed on (HistoryItem, secretVersion) can be
+ * invalidated when a NEW secret is registered mid-run (MED finding: the
+ * extractedContent redaction WeakMap never invalidated on secret-set change). */
+let secretSetVersion = 0;
+export function getSecretSetVersion(): number {
+  return secretSetVersion;
+}
+
 export async function listSecrets(): Promise<SecretEntry[]> {
+  if (secretsCache) return secretsCache;
   if (isExtensionWithSession()) {
     try {
       const res = await chrome.storage.session.get(STORAGE_KEY);
@@ -199,7 +248,8 @@ export async function listSecrets(): Promise<SecretEntry[]> {
  // safe-parse intent and only return a validated array of well-formed
  // entries (each must have string `name` + `value`).
       if (!Array.isArray(v)) return [];
-      return v.filter(isValidSecretEntry);
+      secretsCache = v.filter(isValidSecretEntry);
+      return secretsCache;
     } catch (e) {
  // A real storage error must NOT be silently treated as "no secrets" —
  // callers rely on the distinction (e.g. redactSecrets must not return
@@ -215,9 +265,11 @@ export async function listSecrets(): Promise<SecretEntry[]> {
  // (.findIndex / .map / .filter) would throw a TypeError. Only return a
  // validated array of well-formed entries (each must have string name+value).
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isValidSecretEntry);
+    secretsCache = parsed.filter(isValidSecretEntry);
+    return secretsCache;
   } catch {
-    return [];
+    secretsCache = [];
+    return secretsCache;
   }
 }
 
@@ -227,12 +279,19 @@ export async function listSecrets(): Promise<SecretEntry[]> {
  */
 export async function setSecret(name: string, value: string): Promise<void> {
   return withSecretLock(async () => {
-    const secrets = await listSecrets();
+    // `.slice()` so we never mutate the cached array in place (a throw during
+    // `persist` would otherwise leave the cache reflecting an unpersisted set).
+    const secrets = (await listSecrets()).slice();
     const idx = secrets.findIndex((s) => s.name === name);
     const entry: SecretEntry = { name, value, createdAt: Date.now() };
     if (idx >= 0) secrets[idx] = entry;
     else secrets.push(entry);
     await persist(secrets);
+    // Invalidate the read cache + bump the version so redaction caches keyed on
+    // the secret-set version are dropped (MED finding: cache never invalidated
+    // on secret-set change). Bumped only after a successful persist.
+    secretsCache = null;
+    secretSetVersion++;
   });
 }
 
@@ -241,6 +300,9 @@ export async function deleteSecret(name: string): Promise<void> {
   return withSecretLock(async () => {
     const secrets = (await listSecrets()).filter((s) => s.name !== name);
     await persist(secrets);
+    // Invalidate the read cache + bump the version (see setSecret).
+    secretsCache = null;
+    secretSetVersion++;
   });
 }
 
@@ -291,6 +353,16 @@ export async function substituteSecrets(
  // Untrusted sink: never inject real secret values. Return placeholders intact
  // so nothing sensitive can be redirected into an injection-controlled target.
   if (!trusted) return text;
+  // F-1 short-circuit: text with no `%placeholder%` has nothing to substitute,
+  // so skip the store read entirely. This is critical in a content-script
+  // context, where `chrome.storage.session.get` throws and would otherwise make
+  // EVERY placeholder-free input action fail closed. The SW resolves
+  // placeholders before dispatch, so a substituted input text also carries no
+  // placeholder here and likewise short-circuits.
+  if (!HAS_PLACEHOLDER.test(text)) return text;
+  // If the trusted SW already resolved secrets on our behalf, never read the
+  // (unreadable from a content script) session store — return unchanged.
+  if (secretsResolvedExternally) return text;
   let secrets: SecretEntry[];
   try {
     secrets = await listSecrets();
@@ -347,6 +419,14 @@ export function extractPlaceholders(text: string): string[] {
  * alternation would corrupt the regex).
  */
 export async function redactSecrets(text: string): Promise<string> {
+  // F-1: when the trusted SW has already resolved secrets on our behalf, the
+  // content script must NOT read `chrome.storage.session` (it throws
+  // "Access to storage is not allowed from this context" there). The SW redacts
+  // the returned result, so skip the store read and return the text unchanged.
+  // This keeps the content script from masking ALL extracted page text while
+  // still preserving the demo (non-extension) guard, where the flag is false and
+  // redaction runs normally against localStorage.
+  if (secretsResolvedExternally) return text;
   let secrets: SecretEntry[];
   try {
     secrets = await listSecrets();

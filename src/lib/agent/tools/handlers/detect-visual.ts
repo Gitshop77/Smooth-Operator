@@ -15,9 +15,10 @@
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import type { ActionContext } from "./types";
+import { rejectOnAbort } from "./abort";
 
 export async function handleDetectVisual(
-  _ctx: ActionContext,
+  ctx: ActionContext,
   action: Extract<Action, { type: "detect_visual" }>,
 ): Promise<ActionResult> {
   if (typeof chrome === "undefined" || !chrome.runtime?.id) {
@@ -37,6 +38,9 @@ export async function handleDetectVisual(
       | { ok?: boolean; count?: number; description?: string; error?: string }
       | undefined
       | null;
+ // Race the SW call against the timeout AND the step's abort signal so a user
+ // STOP is honored mid-step instead of waiting out the full 30s timeout.
+    const abort = rejectOnAbort(ctx.signal);
     try {
       res = (await Promise.race([
         chrome.runtime.sendMessage({
@@ -49,12 +53,14 @@ export async function handleDetectVisual(
             30000,
           );
         }),
+        abort.promise,
       ])) as
         | { ok?: boolean; count?: number; description?: string; error?: string }
         | undefined
         | null;
     } finally {
       if (t) clearTimeout(t);
+      abort.cleanup();
     }
     if (typeof res?.ok !== "boolean" || !res.ok) {
       const err =

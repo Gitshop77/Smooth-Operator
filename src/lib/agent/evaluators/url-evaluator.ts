@@ -132,6 +132,7 @@ export function evaluateUrl(input: URLEvaluatorInput): URLEvaluatorResult {
   const predHost = hostOf(predParsed.basePath);
   let hostOk = false;
   let pathOk = false;
+  const matchedRefs: ParsedUrl[] = [];
   for (const refParsed of refParsedList) {
     const refHost = hostOf(refParsed.basePath);
     if (refParsed.basePath === "" || !hostMatches(refHost, predHost)) continue;
@@ -140,8 +141,9 @@ export function evaluateUrl(input: URLEvaluatorInput): URLEvaluatorResult {
     const predPath = predParsed.basePath.slice(predHost.length); // "/path" or ""
  // Empty ref path matches anything; otherwise pred path must start with ref path.
     if (refPath === "" || refPath === "/") {
+      matchedRefs.push(refParsed);
       pathOk = true;
-      break;
+      continue;
     }
  // Require a path-segment boundary after the ref path prefix.
  // `startsWith` alone allows `/foo` to match `/foobar` (false positive).
@@ -149,8 +151,9 @@ export function evaluateUrl(input: URLEvaluatorInput): URLEvaluatorResult {
     if (!predPath.startsWith(refPath)) continue;
     const nextChar = predPath[refPath.length];
     if (nextChar === undefined || nextChar === "/" || nextChar === "?" || nextChar === "#") {
+      matchedRefs.push(refParsed);
       pathOk = true;
-      break;
+      continue;
     }
   }
   if (!hostOk) {
@@ -168,25 +171,42 @@ export function evaluateUrl(input: URLEvaluatorInput): URLEvaluatorResult {
     };
   }
 
- // Query-param check: every key in the union of reference queries must
- // have at least one matching value in the prediction.
-  const refQueries: Record<string, Set<string>> = {};
-  for (const parsed of refParsedList) {
-    for (const [k, vs] of Object.entries(parsed.query)) {
-      if (!refQueries[k]) refQueries[k] = new Set();
-      for (const v of vs) refQueries[k].add(v);
+ // Query-param check: the evaluator passes if ANY reference that matched
+ // host + path has all of its own query params satisfied in the prediction.
+ // Each matched reference is checked independently rather than unioning query
+ // params across all references, so landing on one acceptable alternative is
+ // not penalized for the other alternative's params being absent.
+  let queryOk = false;
+  for (const matched of matchedRefs) {
+    let refOk = true;
+    for (const [k, vs] of Object.entries(matched.query)) {
+      const predValues = predParsed.query[k] ?? [];
+      const hasMatch = vs.some((v) => predValues.includes(v));
+      if (!hasMatch) {
+        refOk = false;
+        break;
+      }
+    }
+    if (refOk) {
+      queryOk = true;
+      break;
     }
   }
-  for (const [k, acceptable] of Object.entries(refQueries)) {
-    const predValues = predParsed.query[k] ?? [];
-    const hasMatch = [...acceptable].some((v) => predValues.includes(v));
-    if (!hasMatch) {
-      return {
-        score: 0,
-        tag: URL_EVALUATOR_TAG,
-        reason: `missing query param "${k}" with any of: ${[...acceptable].join(", ")}`,
-      };
-    }
+  if (!queryOk) {
+    const first = matchedRefs[0];
+    const missing = first
+      ? Object.entries(first.query).find(([k, vs]) => {
+          const predValues = predParsed.query[k] ?? [];
+          return !vs.some((v) => predValues.includes(v));
+        })
+      : undefined;
+    return {
+      score: 0,
+      tag: URL_EVALUATOR_TAG,
+      reason: missing
+        ? `missing query param "${missing[0]}" with any of: ${missing[1].join(", ")}`
+        : `query params do not match any reference`,
+    };
   }
   return { score: 1, tag: URL_EVALUATOR_TAG, reason: "" };
 }

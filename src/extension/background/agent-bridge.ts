@@ -20,12 +20,13 @@ import { runAgentLoop } from "@/lib/agent/loop/orchestrator";
 import type { LogEvent } from "@/lib/agent/types";
 import type { AgentMode } from "@/lib/agent/modes";
 import { MODE_CONFIGS } from "@/lib/agent/modes";
-import { DEFAULT_MAX_ACTIONS } from "@/lib/validations";
+import { DEFAULT_MAX_ACTIONS, MAX_ACTIONS } from "@/lib/validations";
 import { RunBuilder } from "@/lib/agent/run-history";
 import {
   saveRunState,
   getRunState,
   clearRunState,
+  stopKeepalive,
   loadAndSetDomainConfig,
   type RunState,
 } from "./state-store";
@@ -38,18 +39,22 @@ import {
   teardownScheduledVision,
   wireAbortController,
   getVisionElementRect,
+  isVisionCacheFresh,
 } from "./run-helpers";
 
 // Re-export so existing importers (message-routing.ts dynamic import) keep
 // resolving. The implementation lives in run-helpers.ts.
-export { getVisionElementRect };
+export { getVisionElementRect, isVisionCacheFresh };
 
 export const DEFAULT_MAX_STEPS = 100;
 /** No-op catch for fire-and-forget `sendMessage` calls (side panel may be closed). */
 const SWALLOW_CLOSED_PORT = (): void => {};
 const DEFAULT_PLANNER_INTERVAL = 5;
 const DEFAULT_MAX_FAILURES = 5;
-const DEFAULT_COST_CAP = 0;
+// Default cost cap in USD. 0 is still a valid EXPLICIT opt-out (a stored value
+// of 0 is preserved by clampNumber); only the unset/undef case adopts this
+// default so a first-time user with REAL API keys gets a fail-safe cap.
+const DEFAULT_COST_CAP = 2;
 export const DEFAULT_MODE: AgentMode = "standard";
 
 /**
@@ -58,14 +63,14 @@ export const DEFAULT_MODE: AgentMode = "standard";
  * corrupted/NaN/negative/string storage value is normalized instead of being
  * passed straight into the loop config where it could cause degenerate behavior.
  */
-function clampInt(v: unknown, def: number, min: number, max: number): number {
+export function clampInt(v: unknown, def: number, min: number, max: number): number {
   const n = typeof v === "number" ? v : Number(v);
   if (!Number.isFinite(n)) return def;
   return Math.min(max, Math.max(min, Math.floor(n)));
 }
 
 /** Coerce an unknown stored/override value into a finite number >= min (unbounded above). */
-function clampNumber(v: unknown, def: number, min: number): number {
+export function clampNumber(v: unknown, def: number, min: number): number {
   const n = typeof v === "number" ? v : Number(v);
   if (!Number.isFinite(n)) return def;
   return Math.max(min, n);
@@ -101,23 +106,62 @@ export function setRunStarting(v: boolean): void {
 // run that began after any prior run kept `consent = true` and silently
 // skipped the `saveAs` confirmation).
 let fullAgenticDownloadConsent = false;
+// Set while a `saveAs` download is in flight. Reserving synchronously (rather
+// than permanently consuming up front) stops two concurrent
+// SAVE_AS_PDF/SCREENSHOT messages from both observing an unconsumed flag and
+// double-prompting, while still letting a failed/cancelled first download leave
+// consent unconsumed so the next attempt re-prompts instead of saving silently.
+let fullAgenticDownloadReserved = false;
 
 /** Reset the per-run download-consent flag (called at the start of every run). */
 export function resetDownloadConsent(): void {
   fullAgenticDownloadConsent = false;
+  fullAgenticDownloadReserved = false;
 }
 
 /**
- * Consume the one-time per-run download consent for the given run mode.
- * Returns `true` (meaning a `saveAs` confirmation is required) only for the
- * FIRST download of a `full_agentic` run; subsequent calls return `false`.
- * Consumed synchronously so two concurrent SAVE_AS_PDF/SCREENSHOT messages
- * can't both observe an unconsumed flag and double-prompt the user.
+ * Reserve the one-time per-run download consent for the given run mode and
+ * return whether a `saveAs` confirmation is required. Returns `true` only for
+ * the FIRST download of a `full_agentic` run that has neither already consumed
+ * nor reserved consent; concurrent (in-flight) calls see a reservation and
+ * return `false` so they don't double-prompt. Unlike a permanent consume this
+ * does NOT mark consent as used — callers must call
+ * `markDownloadConsentConsumed()` after a successful download or
+ * `releaseDownloadConsentReservation()` after a failed/cancelled one.
  */
 export function consumeDownloadConsentForMode(mode: string | undefined): boolean {
-  const requireSaveAs = mode === "full_agentic" && !fullAgenticDownloadConsent;
-  if (requireSaveAs) fullAgenticDownloadConsent = true;
+  const requireSaveAs = mode === "full_agentic" && !fullAgenticDownloadConsent && !fullAgenticDownloadReserved;
+  if (requireSaveAs) fullAgenticDownloadReserved = true;
   return requireSaveAs;
+}
+
+/**
+ * Non-consuming check of whether the given run mode still requires a `saveAs`
+ * confirmation for its next download. Unlike `consumeDownloadConsentForMode`
+ * this does NOT reserve the flag, so the caller can decide the `saveAs` param
+ * without burning consent before the download is confirmed to have succeeded.
+ */
+export function peekDownloadConsentRequiredForMode(mode: string | undefined): boolean {
+  return mode === "full_agentic" && !fullAgenticDownloadConsent && !fullAgenticDownloadReserved;
+}
+
+/**
+ * Mark the per-run download consent as consumed. Call this only after a
+ * download has actually succeeded so a failed/cancelled first download leaves
+ * the flag unconsumed and the next download re-prompts.
+ */
+export function markDownloadConsentConsumed(): void {
+  fullAgenticDownloadConsent = true;
+  fullAgenticDownloadReserved = false;
+}
+
+/**
+ * Release a previously reserved download consent (call after a download fails
+ * or is cancelled) so a subsequent download in the same run re-prompts instead
+ * of saving silently without confirmation.
+ */
+export function releaseDownloadConsentReservation(): void {
+  fullAgenticDownloadReserved = false;
 }
 
 interface StartRunArgs {
@@ -289,7 +333,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  // Validate / clamp run-time numeric overrides from storage (finding: run-time
  // numeric/string inputs are not validated). A corrupted value (negative, NaN,
  // non-numeric string) is coerced to a sane bound instead of reaching the loop.
-  const cfgMaxActions = clampInt(stored.maxActions, DEFAULT_MAX_ACTIONS, 1, 50);
+  const cfgMaxActions = clampInt(stored.maxActions, DEFAULT_MAX_ACTIONS, 1, MAX_ACTIONS);
   const cfgPlannerInterval = clampInt(stored.plannerInterval, DEFAULT_PLANNER_INTERVAL, 1, 100);
   const cfgMaxFailures = clampInt(stored.maxFailures, DEFAULT_MAX_FAILURES, 1, 100);
   const cfgCostCap = clampNumber(stored.costCap, DEFAULT_COST_CAP, 0);
@@ -356,6 +400,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     });
     runFinished = true;
     try { await clearRunState(); } catch { /* best-effort */ }
+    try { await stopKeepalive(); } catch { /* best-effort */ }
     releaseRunGuard();
     return;
   }

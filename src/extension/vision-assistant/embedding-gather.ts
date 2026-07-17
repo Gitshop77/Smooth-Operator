@@ -16,7 +16,7 @@ export function f16to32(h: number): number {
   const f = h & 0x03ff;
   if (e === 0) return (s ? -1 : 1) * Math.pow(2, -14) * (f / 1024);
   if (e === 0x1f) return f ? NaN : s ? -Infinity : Infinity;
-  const u = (s << 16) | ((e + 112) << 23) | (f << 13);
+  const u = (s << 31) | ((e + 112) << 23) | (f << 13);
   _u32[0] = u;
   return _f32[0];
 }

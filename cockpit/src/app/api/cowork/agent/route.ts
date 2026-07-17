@@ -70,13 +70,11 @@ mass-deletion caution below).
 
 ### Data you can delete (DELETE)
 - \`DELETE ${baseUrl}/api/cowork/history?id=<historyEntryId>\` — erase one history entry
-- \`DELETE ${baseUrl}/api/cowork/history?all=1\` (body \`{ confirm: true }\`) — **wipe all** browsing history (requires explicit server-side confirmation)
 - \`DELETE ${baseUrl}/api/cowork/memory/site?id=<id>\` — erase one per-site memory entry
 - \`DELETE ${baseUrl}/api/cowork/memory/form?id=<id>\` — erase one form-memory entry
 - \`DELETE ${baseUrl}/api/cowork/ai/chat?messageId=<id>\` or \`?sessionId=<id>\` — erase chat message(s)
-- \`DELETE ${baseUrl}/api/cowork/ai/chat?all=1\` (body \`{ confirm: true }\`) — **wipe all** chat messages (requires explicit server-side confirmation)
 
-**Mass-deletion hazard:** \`?all=1\` on \`/history\` and \`/ai/chat\` wipes every stored row. Never trigger these without explicit user confirmation — the agent must not autoconfirm a bulk erase.
+**Mass-deletion hazard:** Bulk erasure of stored data requires explicit server-side confirmation; the agent must never autoconfirm a bulk erase.
 
 ### AI proxy
 - \`POST ${baseUrl}/api/cowork/ai/chat\` — chat completion (proxied to cowork-events)

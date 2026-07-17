@@ -112,13 +112,18 @@ describe("evaluate pageChanged", () => {
     ).rejects.toThrow(/access denied by evaluate sandbox/);
   });
 
- // NOTE: a `Object.getOwnPropertyDescriptor(window,'chrome')?.get?.call(window)`
- // reflection vector is intentionally NOT asserted here — the current evaluate
- // sandbox proxy traps `get` but not `getOwnPropertyDescriptor`, so that vector
- // is NOT denied and exfiltrates the real `chrome` global. That is a genuine
- // sandbox hardening gap to fix at the SOURCE (trap getOwnPropertyDescriptor /
- // has), not a test defect; an asserting test would fail. Flagged for a separate
- // source-side fix rather than shipping a red test.
+ // The reflection vector through `getOwnPropertyDescriptor` is now denied: the
+ // hardened window proxy traps `getOwnPropertyDescriptor` and reports denied
+ // props (`chrome`) as absent, so the descriptor access cannot recover the real
+ // `chrome` global. Lock the hardening with a passing regression assertion.
+  test("getOwnPropertyDescriptor(window,'chrome') does not reveal real chrome", async () => {
+    const res = await handleEvaluate(ctx(), {
+      type: "evaluate",
+      code: "return Object.getOwnPropertyDescriptor(window, 'chrome') === undefined;",
+    });
+    expect(res.success).toBe(true);
+    expect(res.extractedContent).toBe("true");
+  });
 
   test("legitimate numeric/string computation still works in the sandbox", async () => {
     const res = await handleEvaluate(ctx(), { type: "evaluate", code: "return 2 + 2" });

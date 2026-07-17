@@ -8,11 +8,11 @@ import type { Endpoint } from "./endpoint";
 import type { Framing, Frame } from "./framing";
 import { buildURL } from "./endpoint";
 import { withLLMRetry } from "../retry";
-import { isAllowedLlmBaseUrl } from "./ssrf";
+import { isAllowedLlmBaseUrl, resolveAndValidateLlmBaseUrl } from "./ssrf";
 
-/** Strip query/fragment (possible secret-bearing tokens) from a URL for logs/errors. */
+/** Strip userinfo (`user:pass@`) and query/fragment (possible secret-bearing tokens) from a URL for logs/errors. */
 function redactUrlForLog(u: string): string {
-  return u.replace(/[?#].*$/, "[redacted-query]");
+  return u.replace(/\/\/[^@/]*@/, "//").replace(/[?#].*$/, "[redacted-query]");
 }
 
 /**
@@ -65,6 +65,17 @@ const REQUEST_TIMEOUT_MS = 60_000;
  * re-attempts the whole request.
  */
 const CHUNK_TIMEOUT_MS = 30_000;
+
+/**
+ * Upper bound on the total decoded bytes read from a single upstream response
+ * (availability/DoS). The per-chunk stall timer only fires when NO data arrives
+ * for `CHUNK_TIMEOUT_MS`; a runaway body that keeps trickling chunks inside that
+ * window would otherwise grow unbounded and exhaust service-worker memory. On
+ * exceed we cancel the reader and throw so the stream is treated as a failure
+ * (mirrors the stall-error path). 100 MB is far above any legitimate LLM
+ * completion stream while still bounding worst-case memory.
+ */
+const MAX_RESPONSE_BYTES = 100 * 1024 * 1024;
 
 /** Upper bound on a `Retry-After` delay (1 hour) so a malicious or exhausted
  * provider can't stall the agent for an unbounded duration (availability/DoS). */
@@ -120,7 +131,7 @@ export interface Transport<Body = unknown, Prepared = unknown, FrameType = Frame
  * proxies that rely on same-origin redirects should configure their endpoint
  * URL to the final destination instead.
  */
-function fetchWithTimeout(
+async function fetchWithTimeout(
   url: string,
   init: RequestInit,
   userSignal?: AbortSignal
@@ -134,6 +145,24 @@ function fetchWithTimeout(
  // than silently contacting the host) so a bad URL fails closed.
   if (!isAllowedLlmBaseUrl(url)) {
     throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${redactUrlForLog(url)}`);
+  }
+  // (SSRF guard, DNS-rebinding) — re-validate the real target at fetch time.
+  // `isAllowedLlmBaseUrl` above only inspects the parsed HOST, so a public
+  // hostname that DNS-rebinds to a cloud-metadata / link-local / unspecified /
+  // CGNAT address at fetch time would otherwise reach the internal address.
+  // `resolveAndValidateLlmBaseUrl` resolves the hostname and rejects any
+  // resolution into a genuine SSRF sink. `allowLocalExemption=true` keeps the
+  // curated Ollama/LiteLLM local endpoints reachable (no change to existing
+  // local behavior) while the DNS step still blocks the sinks. This is
+  // re-checked on every fetch (no cached IP) as defense-in-depth. NOTE: it
+  // does NOT fully close the DNS-rebinding hole — `fetch` performs its own
+  // independent DNS lookup that this validation cannot pin in a service worker,
+  // so a fast-flux attacker could still flip the address between validate and
+  // connect. It narrows the window; it is not a guarantee. Failures are thrown
+  // so a bad URL fails closed.
+  const dnsCheck = await resolveAndValidateLlmBaseUrl(url, true);
+  if (!dnsCheck.ok) {
+    throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${redactUrlForLog(url)} (${dnsCheck.reason})`);
   }
   const controller = new AbortController();
   let timedOut = false;
@@ -184,9 +213,15 @@ function fetchWithTimeout(
  // on the long-lived run-level abort signal.
     return fetch(url, { ...init, redirect: "manual", signal: controller.signal })
       .then(verifyNoRedirect)
+      .then((res) => {
+        // Stash a detach fn on the response so the stream consumer can remove
+        // the abort listener exactly when the body is done (not before).
+        (res as Response & { __detachAbortListener?: () => void }).__detachAbortListener = () =>
+          userSignal.removeEventListener("abort", onAbort);
+        return res;
+      })
       .finally(() => {
         clearTimeout(timer);
-        userSignal.removeEventListener("abort", onAbort);
       })
       .catch(wrapTimeoutError);
   }
@@ -250,10 +285,29 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: { framing: Fra
  // `withLLMRetry` only returns when the fetch succeeded (non-ok responses
  // throw inside the retry callback above), so `res.ok` is guaranteed true
  // here — no guard needed.
+    // Detach the user-abort listener (attached in fetchWithTimeout) once the
+    // stream is fully consumed — keeping it alive for the whole SSE body so a
+    // mid-stream Stop actually cancels the fetch (HIGH finding: user-Stop not
+    // honored mid-stream).
+    const detachAbortListener = (res as Response & { __detachAbortListener?: () => void }).__detachAbortListener;
+    try {
     if (!res.body) {
  // Non-streaming response — parse the full body through the framing so it
  // yields proper `FrameType` objects (consistent with the streaming path).
+ // Apply the same availability ceiling the streaming path enforces
+ // (MAX_RESPONSE_BYTES). This branch reads via `res.text()`, which buffers the
+ // whole body uncapped, so a non-chunked response from a custom baseURL could
+ // exhaust service-worker memory. Reject upfront on a declared `content-length`
+ // that exceeds the cap before buffering; fall back to a byte-length check on
+ // the decoded text to catch a spoofed/absent header.
+      const declaredLen = Number(res.headers.get("content-length"));
+      if (Number.isFinite(declaredLen) && declaredLen > MAX_RESPONSE_BYTES) {
+        throw new Error(`response too large: exceeded ${MAX_RESPONSE_BYTES} bytes`);
+      }
       const text = await res.text();
+      if (new TextEncoder().encode(text).length > MAX_RESPONSE_BYTES) {
+        throw new Error(`response too large: exceeded ${MAX_RESPONSE_BYTES} bytes`);
+      }
       const frames = opts.framing.parse(text);
       for (const frame of frames) yield frame;
       return;
@@ -261,6 +315,7 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: { framing: Fra
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let totalBytes = 0;
     const flushRemaining = function* (): Generator<FrameType> {
       if (buffer.trim()) {
         for (const frame of opts.framing.parse(buffer)) yield frame;
@@ -268,6 +323,13 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: { framing: Fra
     };
     try {
       while (true) {
+        // Honor a user Stop mid-stream: cancel the reader and abort the
+        // generator instead of letting the (now-orphaned) body keep draining
+        // in the background (HIGH finding: user-Stop not honored mid-stream).
+        if (signal?.aborted) {
+          await reader.cancel().catch(() => {});
+          throw new DOMException("Aborted", "AbortError");
+        }
  // race the read against a 30s timeout. If the provider
  // stalls mid-stream, cancel the reader and throw a retryable error
  // so `withLLMRetry` re-attempts the whole request. The timeout timer
@@ -284,6 +346,14 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: { framing: Fra
             }),
           ]);
           if (done) break;
+ // Enforce a cumulative response-size cap. A runaway body that keeps
+ // delivering chunks inside the per-chunk stall window would otherwise grow
+ // unbounded; cancel the reader and throw a failure (handled below like a
+ // stall) rather than exhaust memory.
+          totalBytes += value.byteLength;
+          if (totalBytes > MAX_RESPONSE_BYTES) {
+            throw new Error(`response too large: exceeded ${MAX_RESPONSE_BYTES} bytes`);
+          }
           buffer += decoder.decode(value, { stream: true });
  // SSE events are terminated by a blank line (`\n\n`). The framing's
  // SSE parser builds a FRESH accumulator on every `parse` call (it is
@@ -340,7 +410,15 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: { framing: Fra
  // Non-stall errors (real network failures, aborts, etc.) propagate.
       throw e;
     } finally {
+      try {
+        await reader.cancel();
+      } catch {
+        /* already closed */
+      }
       try { reader.releaseLock(); } catch { /* already released */ }
+    }
+    } finally {
+      detachAbortListener?.();
     }
   },
 });

@@ -26,15 +26,15 @@ The service lives inside the Open Cowork Chrome Extension repo at
 ## Install + run
 
 The mini-service has its own `package.json` (so its dependencies — `socket.io`,
-`z-ai-web-dev-sdk`, `tsx` — don't pollute the root). The root `package.json`
-has a `postinstall` hook that runs `npm install` inside
-`mini-services/cowork-events/`, so a single `npm install` at the repo root
-sets up everything.
+`z-ai-web-dev-sdk`, `tsx` — don't pollute the root). Its dependencies are
+installed by the root `bootstrap` script (`npm run bootstrap`, which runs
+`npm ci --prefix mini-services/cowork-events` alongside the cockpit install).
 
 ### From the repo root (recommended for development)
 
 ```bash
-npm install               # also installs mini-services/cowork-events deps via postinstall
+npm install               # root deps
+npm run bootstrap         # installs mini-services/cowork-events (+ cockpit) deps
 npm run dev:events        # → cd mini-services/cowork-events && npx tsx watch index.ts
 ```
 
@@ -56,10 +56,13 @@ npx tsx index.ts          # one-shot
 > `npx tsx watch index.ts` / `npx tsx index.ts` respectively. Both work; the
 > `npx tsx …` form is what the root `dev:events` script invokes.
 
-### Log file (when running in the background)
+### Logs
+
+The service logs to **stdout** — it performs no file logging of its own. Redirect
+stdout if you want a persistent log file:
 
 ```bash
-tail -f mini-services/cowork-events/service.log
+npx tsx index.ts >> mini-services/cowork-events/service.log 2>&1
 ```
 
 ---
@@ -228,9 +231,10 @@ even when auth failed — that has been fixed.)
   `content-length` header (cheap, pre-read) and inside the body reader
   (defensive — for clients that stream more bytes than declared). Oversized
   bodies return `413`.
-- **Per-IP rate limit** on `/chat` and `/image`: 10 requests / minute /
-  IP. Exceeding returns `429` with a `Retry-After` header. Tracked in-process
-  (no Redis) — resets on service restart.
+- **Per-IP rate limit** on `/emit`, `/chat` and `/image` (and the socket.io
+  emit message): 10 requests / minute / IP. Exceeding returns `429` with a
+  `Retry-After` header. Tracked in-process (no Redis) — resets on service
+  restart.
 
 ---
 
@@ -323,7 +327,7 @@ import { io } from 'socket.io-client';
 const socket = io('/?XTransformPort=3003', {
   transports: ['websocket', 'polling'],
   auth: {
-    token: process.env.NEXT_PUBLIC_COWORK_EVENT_TOKEN!, // shared secret
+    token: process.env.NEXT_PUBLIC_COWORK_UI_TOKEN!, // SOCKET_SECRET (see handshake)
   },
 });
 
@@ -332,17 +336,12 @@ socket.on('events:replay', (events) => console.log('replay', events.length));
 socket.on('tab:updated', (tab) => console.log('tab updated', tab));
 socket.on('system:status', (status) => console.log('status', status));
 
-// For streaming chat, join the session room before POSTing to /chat:
-const sessionId = 'my-chat-1';
-socket.emit('chat:join', sessionId);
-fetch('/chat?XTransformPort=3003', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'X-Cowork-Token': process.env.NEXT_PUBLIC_COWORK_EVENT_TOKEN!,
-  },
-  body: JSON.stringify({ messages: [...], sessionId }),
-});
+// For streaming chat, join the session room before POSTing to /chat. The
+// /chat HTTP route validates `X-Cowork-Token` against the SHARED_SECRET
+// (= COWORK_EVENT_TOKEN). That is a service-to-service secret — it must
+// only be used in SERVER-side code (e.g. a Next.js API route in the cockpit)
+// and must NEVER be embedded in the browser bundle. Browsers reach /chat
+// through the cockpit proxy, which injects the secret server-side.
 
 socket.on('chat:message', ({ sessionId, token }) => console.log(sessionId, token));
 socket.on('chat:done', ({ sessionId }) => console.log('chat done', sessionId));

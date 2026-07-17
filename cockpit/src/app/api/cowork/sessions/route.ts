@@ -1,13 +1,16 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
 import { Prisma } from '@prisma/client';
-import { json, withRouteError, bodyJson, badRequest, MAX_NAME_LEN, MAX_TITLE_LEN } from '@/lib/cowork/api/http';
+import { json, withRouteError, bodyJson, badRequest, parseLimit, MAX_NAME_LEN, MAX_TITLE_LEN, CURSOR_ID_RE, isPrismaRecordNotFound, sanitizeRequestId } from '@/lib/cowork/api/http';
 import { boundedString, validateField, truncateTo } from '@/lib/cowork/api/validation';
 import { db } from '@/lib/db';
 
-export async function GET(): Promise<Response> {
+export async function GET(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
-    const sessions = await db.session.findMany({ orderBy: { createdAt: 'desc' } });
+ // Cap `limit` to a hard max of 200 so a single response can't return the
+ // entire table. Default 100 (see parseLimit).
+    const limit = parseLimit(req);
+    const sessions = await db.session.findMany({ take: limit, orderBy: { createdAt: 'desc' } });
  // Project `isIncognito` → legacy `incognito` alias. The legacy
  // `cookieCount` field has no backing column on `Session` and no real value
  // to compute, so it is intentionally omitted rather than synthesized to a
@@ -16,9 +19,16 @@ export async function GET(): Promise<Response> {
     const projected = sessions.map((s) => ({
       ...s,
       incognito: s.isIncognito,
+ // `Session` has no cookie-count column, so there is no real value to
+ // compute; project a stable `0` to match the consumer type
+ // (`SampleSession.cookieCount`) and the view that renders it (rather than
+ // leaving the field undefined).
+      cookieCount: 0,
     }));
-    return json({ sessions: projected });
-  });
+    const r = json({ sessions: projected });
+    r.headers.set('Cache-Control', 'no-store, private');
+    return r;
+  }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
 }
 
 export async function POST(req: NextRequest): Promise<Response> {
@@ -68,5 +78,31 @@ export async function POST(req: NextRequest): Promise<Response> {
       }
       throw e;
     }
-  });
+  }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
+}
+
+// DELETE /api/cowork/sessions?id=<sessionId>
+// Removes a single session row. Gated by the same X-Cowork-Token check as
+// every other /api/cowork/* data route (enforced in middleware.ts). Distinct
+// from the AU-3 `?all=1` confirm:true mass-delete gate; per-id deletes are
+// scoped erasure only.
+export async function DELETE(req: NextRequest): Promise<Response> {
+  return withRouteError(async () => {
+    const id = req.nextUrl.searchParams.get('id');
+    if (!id) return badRequest('id is required');
+    if (!CURSOR_ID_RE.test(id)) return badRequest('invalid id');
+    try {
+      await db.session.delete({ where: { id } });
+    } catch (e) {
+ // A well-formed but non-existent id makes Prisma throw P2025
+ // (RecordNotFound); return a precise 404 instead of a generic 500.
+      if (isPrismaRecordNotFound(e)) {
+        return json({ error: 'not found' }, 404);
+      }
+      throw e;
+    }
+    const r = json({ ok: true });
+    r.headers.set('Cache-Control', 'no-store, private');
+    return r;
+  }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
 }

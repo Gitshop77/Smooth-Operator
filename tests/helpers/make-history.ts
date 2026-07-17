@@ -21,12 +21,13 @@ export function makeHistoryItem(
     overrides = step as Partial<HistoryItem>;
     step = 0;
   }
+  const resolvedStep = overrides.step ?? step;
   return {
-    step,
+    step: resolvedStep,
     agent: "navigator",
     evaluation: "Verdict: Success",
-    memory: `Step ${step} done`,
-    goal: `Goal ${step}`,
+    memory: `Step ${resolvedStep} done`,
+    goal: `Goal ${resolvedStep}`,
     results: [],
     ...overrides,
   };

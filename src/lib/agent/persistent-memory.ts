@@ -12,6 +12,7 @@
  */
 
 import { isExtensionWithLocal } from "./runtime";
+import { neutralizePromptTags } from "./security";
 
 /** One saved memory for a single root domain. */
 export interface SiteMemory {
@@ -199,7 +200,7 @@ export function formatMemories(memories: SiteMemory[]): string {
   if (memories.length === 0) return "";
   const lines = memories.map(
     (m) =>
-      `[${m.domain.replace(/<\/site_memory>/gi, "<\\/site_memory>")}]: ${m.notes.replace(/<\/site_memory>/gi, "<\\/site_memory>")}`,
+      `[${neutralizePromptTags(m.domain).replace(/<\/site_memory>/gi, "<\\/site_memory>")}]: ${neutralizePromptTags(m.notes).replace(/<\/site_memory>/gi, "<\\/site_memory>")}`,
   );
   return `<site_memory>\n${lines.join("\n")}\n</site_memory>`;
 }

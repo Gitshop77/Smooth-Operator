@@ -10,6 +10,23 @@ build/
 .DS_Store
 *.pem
 
+# secrets
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+service-account*.json
+*credentials*.json
+.npmrc
+.netrc
+.envrc
+.aws/
+id_rsa*
+id_dsa*
+id_ed25519*
+id_ecdsa*
+
 # debug
 npm-debug.log*
 yarn-debug.log*
@@ -47,3 +64,10 @@ test
 # prisma
 prisma/migrations/dev.db*
 prisma/db/
+
+# database
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal

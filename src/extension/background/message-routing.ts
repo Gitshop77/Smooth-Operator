@@ -12,7 +12,7 @@
 
 import type { AgentMode } from "@/lib/agent/modes";
 import { MODE_CONFIGS } from "@/lib/agent/modes";
-import type { AgentAction } from "@/lib/agent/types";
+import type { AgentAction, LogEvent } from "@/lib/agent/types";
 
 // Static set of valid run modes (O(1) lookup instead of rebuilding Object.keys per RUN).
 const KNOWN_MODES = new Set(Object.keys(MODE_CONFIGS) as AgentMode[]);
@@ -22,6 +22,8 @@ import {
   isRunStarting,
   setRunStarting,
   consumeDownloadConsentForMode,
+  markDownloadConsentConsumed,
+  releaseDownloadConsentReservation,
   DEFAULT_MAX_STEPS,
   DEFAULT_MODE,
 } from "./agent-bridge";
@@ -85,10 +87,16 @@ type IncomingMessage = RunMessage | StopMessage | StatusMessage | ClearLogMessag
 
 // ─── Per-run download consent ────────────────────────────────────────────────
 //
-// The per-run download-consent flag now lives in `agent-bridge.ts` (owned by
-// the single `startRun` entry point shared by both manual RUN and scheduled
-// runs) so it is reset for EVERY run. We consume it via
-// `consumeDownloadConsentForMode(mode)` — see that helper for the rationale.
+// The per-run download-consent flag lives in `agent-bridge.ts` (owned by the
+// single `startRun` entry point shared by both manual RUN and scheduled runs)
+// so it is reset for EVERY run. We reserve it synchronously via
+// `consumeDownloadConsentForMode(mode)` — which atomically reserves the flag
+// before the download starts so two concurrent SAVE_AS_PDF/SCREENSHOT messages
+// can't both observe an unconsumed flag and double-prompt — but we only mark it
+// permanently consumed (`markDownloadConsentConsumed`) AFTER the download
+// succeeds. A failed/cancelled first download releases the reservation
+// (`releaseDownloadConsentReservation`) so the next attempt still prompts.
+// Consent is per-run and reset at run start, so it can never leak across runs.
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -101,7 +109,7 @@ type IncomingMessage = RunMessage | StopMessage | StatusMessage | ClearLogMessag
  * truncating the base name. If there's no extension (or the extension itself
  * is longer than `maxLen`), falls back to a plain slice.
  */
-function truncateFilename(name: string, maxLen = 120): string {
+export function truncateFilename(name: string, maxLen = 120): string {
   if (name.length <= maxLen) return name;
   const extMatch = name.match(/\.([a-z0-9]{1,5})$/i);
   if (!extMatch) return name.slice(0, maxLen);
@@ -114,6 +122,22 @@ function truncateFilename(name: string, maxLen = 120): string {
     return ext.slice(0, maxLen);
   }
   return name.slice(0, baseMax) + ext;
+}
+
+/**
+ * Sanitize a resolved download filename before handing it to
+ * `chrome.downloads.download`. Strips any non-path-safe character (turning
+ * `/` and `\` into `_`) and collapses runs of two-or-more dots so a crafted
+ * `fileName` can't be misinterpreted as a parent-directory traversal by the
+ * downloads API, then caps length via `truncateFilename` while preserving the
+ * extension. The `[^\w.-]` strip already neutralizes `/` and `\`; the
+ * `\.{2,}` collapse removes the only surviving dot-run that could read as
+ * `..`. This is the path-traversal guard for the SAVE_AS_PDF / SCREENSHOT
+ * handlers and must keep this exact behavior.
+ */
+export function sanitizeDownloadName(rawName: string): string {
+  const baseName = rawName.replace(/[^\w.-]+/g, "_").replace(/\.{2,}/g, "_");
+  return truncateFilename(baseName, 120);
 }
 
 /**
@@ -154,7 +178,7 @@ function bindHandler(
  * broadens messaging, this check must be revisited (finding: sender gate
  * relies solely on sender.id).
  */
-function isPrivilegedSender(sender: chrome.runtime.MessageSender): boolean {
+export function isPrivilegedSender(sender: chrome.runtime.MessageSender): boolean {
   if (sender.id !== chrome.runtime.id) return false;
   const url = sender.url ?? "";
   if (url.startsWith(`chrome-extension://${chrome.runtime.id}`)) return true;
@@ -236,17 +260,14 @@ async function captureAndDownload(opts: {
   rawFileName: unknown;
   mode: string | undefined;
 }): Promise<void> {
-  const { attachDebugger, detachDebugger } = await import("@/lib/agent/cdp-controller");
-  await attachDebugger(opts.tabId);
-  let dataUrl: string;
-  try {
+  const { withPageDebugger } = await import("./tab-manager");
+ // Route through the refcounted per-tab session so a concurrent per-step
+ // screenshot (extractStateForRun) cannot detach this session mid-capture.
+  const dataUrl = await withPageDebugger(opts.tabId, async () => {
     const result = await opts.capture();
     if (!result?.data) throw new Error("capture returned no data");
-    dataUrl = `data:${opts.mime};base64,${result.data}`;
-  } finally {
- // always detach — even on throw (mirrors CDP_CLICK / CDP_PRESS_AND_HOLD).
-    detachDebugger(opts.tabId).catch(() => { /* tab may already be closed */ });
-  }
+    return `data:${opts.mime};base64,${result.data}`;
+  });
   let title: string;
   try {
     const tab = await chrome.tabs.get(opts.tabId);
@@ -260,24 +281,22 @@ async function captureAndDownload(opts: {
  // Coerce `rawFileName` to a STRING before sanitizing (finding: a non-string
  // `fileName`, e.g. a number, would survive the `||` fallback and then throw
  // on `.replace`, defeating the sanitization).
-  const rawName = typeof opts.rawFileName === "string" ? opts.rawFileName : `${title}.${opts.extension}`;
- // Sanitize then collapse any `..` segments (the `[^\w.-]` regex already turns
- // `/` and `\` into `_`, but `..` would survive as literal dots; collapse runs
- // of two-or-more dots so a crafted `fileName` can't be misinterpreted as a
- // parent-directory traversal by the downloads API).
-  const baseName = rawName.replace(/[^\w.-]+/g, "_").replace(/\.{2,}/g, "_");
- // use `truncateFilename` so the extension is preserved even when the base
- // name has to be truncated to fit the 120-char cap.
-  const filename = truncateFilename(baseName, 120);
+  const rawName = (typeof opts.rawFileName === "string" && opts.rawFileName.trim()) ? opts.rawFileName : `${title}.${opts.extension}`;
+ // Sanitize path separators + collapse `..` runs, then cap length while
+ // preserving the extension. See `sanitizeDownloadName`.
+  const filename = sanitizeDownloadName(rawName);
  // In `full_agentic` mode the first download of a run forces a `saveAs`
  // confirmation so it can't be silent. Consume the one-time-per-run consent
- // flag (owned by agent-bridge, reset for every run) — it is consumed
- // synchronously so two concurrent messages don't both prompt the user.
+ // flag synchronously (owned by agent-bridge, reset for every run) so two
+ // concurrent downloads can't both observe an unconsumed flag and prompt twice.
+ // Consent is per-run; resetDownloadConsent at run start re-arms it.
   const requireSaveAs = consumeDownloadConsentForMode(opts.mode);
   try {
     await chrome.downloads.download({ url: dataUrl, filename, saveAs: requireSaveAs });
+    markDownloadConsentConsumed();
     opts.sendResponse({ ok: true, filename });
   } catch (e) {
+    releaseDownloadConsentReservation();
     opts.sendResponse({ ok: false, error: e instanceof Error ? e.message : "download failed" });
   }
 }
@@ -372,9 +391,20 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
  // sendResponse — otherwise the side panel's `chrome.runtime.sendMessage`
  // promise hangs forever (the SW has no other way to signal back).
     return bindHandler(sendResponse, async () => {
+ // Only honor STOP while a run is genuinely in flight. A STOP that lands
+ // after a run already cleared its state (or before the next run's state
+ // is written) would otherwise persist an orphan `abortRequested:true`
+ // with no `active` field; `saveRunState` ORs that flag into the *next*
+ // run's state and the post-init re-check would silently abort every
+ // subsequent RUN until the SW restarts. `isRunStarting()` covers the
+ // narrow window between the RUN handler's active-check and the
+ // `initRunState` write, so a genuine during-init STOP is still caught.
+      const state = await getRunState();
+      if (state?.active || isRunStarting()) {
  // Use a partial update to avoid racing with concurrent step updates
  // from sendEvent (which does saveRunState({ step: N })).
-      await saveRunState({ abortRequested: true });
+        await saveRunState({ abortRequested: true });
+      }
       sendResponse({ ok: true });
     });
   }
@@ -402,15 +432,23 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
  // `msg` is already narrowed to `CdpClickMessage` by the type
  // discriminator — no cast needed (finding: redundant `as` casts hid the
  // union narrowing that already guarantees the shape).
-      const { attachDebugger, cdpClick, detachDebugger } = await import("@/lib/agent/cdp-controller");
-      await attachDebugger(tabId);
-      try {
+      const { withPageDebugger } = await import("./tab-manager");
+      await withPageDebugger(tabId, async () => {
  // If this is a vision-detected element, look up its pixel coordinates
  // from the vision elements cache (populated by agent-bridge.ts extractState)
+        const { cdpClick } = await import("@/lib/agent/cdp-controller");
         let cx: number, cy: number;
         if (msg.visionIndex) {
  // Import the vision elements cache from agent-bridge
-          const { getVisionElementRect } = await import("./agent-bridge");
+          const { getVisionElementRect, isVisionCacheFresh } = await import("./agent-bridge");
+ // Re-verify the cache is still for the agent tab's CURRENT url. A non-action
+ // navigation (redirect, meta-refresh, SPA route change) since detect_visual
+ // populated the cache leaves the rects stale; refuse to click and let the
+ // orchestrator re-detect instead of misclicking on the new page.
+          if (!(await isVisionCacheFresh(tabId))) {
+            sendResponse({ ok: false, error: "vision cache stale, re-detect" });
+            return;
+          }
           const rect = getVisionElementRect(msg.visionIndex);
           if (!rect) {
             sendResponse({ ok: false, error: `vision element ${msg.visionIndex} not found in cache` });
@@ -437,12 +475,7 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
 
         await cdpClick(tabId, cx, cy);
         sendResponse({ ok: true });
-      } finally {
- // always detach, even on the success path. A `setTimeout(() =>
- // detachDebugger(...), 500)` pattern that only ran on success would
- // leak the debugger session on throw.
-        detachDebugger(tabId).catch(() => { /* tab may already be closed */ });
-      }
+      });
     });
   }
  // Wire `cdpPressAndHold` (the CDP controller method) into the executor's
@@ -451,13 +484,13 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
  // "press and hold to verify" widgets).
   if (msg?.type === "CDP_PRESS_AND_HOLD") {
     return bindPrivilegedTabHandler(sendResponse, sender, async (tabId) => {
-      const { attachDebugger, cdpPressAndHold, detachDebugger } = await import("@/lib/agent/cdp-controller");
-      await attachDebugger(tabId);
-      try {
+      const { withPageDebugger } = await import("./tab-manager");
+      await withPageDebugger(tabId, async () => {
  // Validate the payload (finding: message payloads are otherwise
  // unvalidated). These values flow into a privileged CDP
  // Input.dispatchMouseEvent via cdpPressAndHold; non-numeric/undefined
  // values would throw with a cryptic error inside the CDP controller.
+        const { cdpPressAndHold } = await import("@/lib/agent/cdp-controller");
         if (
           typeof msg.x !== "number" || !Number.isFinite(msg.x) ||
           typeof msg.y !== "number" || !Number.isFinite(msg.y) ||
@@ -469,10 +502,7 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
         }
         await cdpPressAndHold(tabId, msg.x, msg.y, { holdMs: msg.holdMs, delay: msg.delayMs });
         sendResponse({ ok: true });
-      } finally {
- // always detach, even on the success path.
-        detachDebugger(tabId).catch(() => { /* tab may already be closed */ });
-      }
+      });
     });
   }
  // Save the current page as a PDF via CDP `Page.printToPDF`, then trigger a
@@ -554,7 +584,22 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
       const runState = await getRunState();
       if (!runState) { sendResponse({ ok: false, error: "no active run" }); return; }
       const { handleTabAction } = await import("./tab-manager");
-      const result = await handleTabAction(msg.action, runState);
+ // Mirror the `onTabAction`/`sendEvent` path used by the agentic loop: pass a
+ // `notify` callback so a BLOCKED navigate/search is surfaced as a side-panel
+ // AGENT_EVENT rather than only returning it to the caller (which is otherwise
+ // invisible in the side panel).
+      const notify = (event: LogEvent): void => {
+        chrome.runtime
+          .sendMessage({
+            type: "AGENT_EVENT",
+            event,
+            time: new Date().toLocaleTimeString("en-GB", { hour12: false }),
+          })
+          .catch(() => {
+            /* side panel may not be open — non-fatal */
+          });
+      };
+      const result = await handleTabAction(msg.action, runState, notify);
       sendResponse({
         ok: true,
         handled: result.handled,
@@ -581,6 +626,18 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
       const result = await handleDetectVisualRequest(query);
       sendResponse(result);
     });
+  }
+  // RESUME: the side panel's Resume button asks a (paused) orchestrator to
+  // continue after a human takeover. The actual un-pause happens in the
+  // orchestrator's own `chrome.runtime.onMessage` listener
+  // (`loop/helpers/takeover.ts`), which resolves the takeover-wait promise but
+  // returns `void` and never calls `sendResponse`. With no listener responding,
+  // Chrome reports a delivery failure to the side panel even though the resume
+  // succeeded. Acknowledge here so the side panel's RESUME callback sees
+  // `lastError === undefined` and clears the takeover banner.
+  if ((msg as { type?: string } | null)?.type === "RESUME") {
+    sendResponse({ ok: true });
+    return true;
   }
   return false;
 });

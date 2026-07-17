@@ -31,33 +31,30 @@ function buildBookmarkTree(rows: BookmarkRow[]): { tree: BookmarkRow[]; orphans:
       byParent.set(key, [row]);
     }
   }
- // Recursively attach `children` arrays. The cast is safe because we're
- // mutating the row objects in place to add the `children` property that
- // Prisma's `include: { children: true }` would have set. `ancestors` tracks
- // the chain of parent ids currently on the recursion stack so a cyclic /
- // self parent reference can't cause infinite recursion (which previously
- // turned `GET /api/cowork/bookmarks` into a stack-overflow 500). On a
- // back-edge we attach an empty `children` array — the node is rendered as a
- // leaf rather than crashing the request.
+ // Recursively attach `children` arrays. `ancestors` tracks the chain of parent
+ // ids on the recursion stack so a cyclic / self parent reference can't cause
+ // infinite recursion; on a back-edge we attach an empty `children` array so the
+ // node renders as a leaf rather than crashing the request.
   const visited = new Set<string>();
-  const attach = (parentId: string | null, ancestors: Set<string>): BookmarkRow[] => {
+  const MAX_DEPTH = 256;
+  const attach = (parentId: string | null, ancestors: Set<string>, depth: number): BookmarkRow[] => {
     const kids = byParent.get(parentId) ?? [];
     const result: BookmarkRow[] = [];
     for (const k of kids) {
       visited.add(k.id);
-      if (ancestors.has(k.id)) {
+      if (ancestors.has(k.id) || depth >= MAX_DEPTH) {
         (k as BookmarkRow & { children: BookmarkRow[] }).children = [];
         result.push(k);
         continue;
       }
       const next = new Set(ancestors);
       next.add(k.id);
-      (k as BookmarkRow & { children: BookmarkRow[] }).children = attach(k.id, next);
+      (k as BookmarkRow & { children: BookmarkRow[] }).children = attach(k.id, next, depth + 1);
       result.push(k);
     }
     return result;
   };
-  const tree = attach(null, new Set());
+  const tree = attach(null, new Set(), 0);
  // Any row not reachable from a root (dangling / broken `parentId`, or a
  // node orphaned by a cycle) is reported separately instead of being silently
  // dropped — surfacing broken references so they're observable rather than
@@ -92,7 +89,7 @@ async function createBookmark(
   });
 }
 
-export async function GET(): Promise<Response> {
+export async function GET(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
  // Single flat query — `findMany({})` returns every row, ordered by
  // `dateAdded` desc so siblings within the same parent appear in
@@ -112,22 +109,57 @@ export async function GET(): Promise<Response> {
  // Bounded by the total row count and converges once the connected component
  // is fully materialized.
     const known = new Map<string, BookmarkRow>(all.map((r) => [r.id, r]));
+ // Distinct non-null parent ids referenced by known rows. Maintained
+ // incrementally (not re-scanned from all `known` every pass) so the closure
+ // stays O(N) instead of O(N^2).
+    const parentIds = new Set<string>(
+      all.map((r) => r.parentId).filter((p): p is string => p !== null),
+    );
     const frontier: string[] = all.map((r) => r.id);
-    while (frontier.length > 0) {
+ // Hard budget so a deep folder tree on a large table can't pull the whole
+ // table into memory / issue unbounded sequential queries beyond the
+ // intended 5000-row cap.
+    const MAX_CLOSURE_ROWS = 20_000;
+    let guard = 0;
+    while (frontier.length > 0 && guard++ < 1000) {
+      if (known.size > MAX_CLOSURE_ROWS) {
+        console.warn('[cowork] bookmarks: closure cap hit');
+        break;
+      }
       const batch = frontier.splice(0, frontier.length);
+    // Fold the freshly-discovered batch's parent ids into the closure set so
+    // the upward closure converges without re-scanning every known row.
+      for (const id of batch) {
+        const p = known.get(id)?.parentId;
+        if (p) parentIds.add(p);
+      }
+    // Only re-query parents not already materialized. `parentIds` accumulates
+    // every parent id ever seen, so folding it into the WHERE unfiltered would
+    // re-select (and re-serialize) rows already in `known` each pass, growing
+    // the query linearly with tree depth. Restricting to the missing ids keeps
+    // every pass O(newly-discovered).
+      const missingParentIds = [...parentIds].filter((p) => !known.has(p));
       const related = await db.bookmark.findMany({
-        where: { OR: [{ id: { in: batch } }, { parentId: { in: batch } }] },
+        where: {
+          OR: [
+            { parentId: { in: batch } },
+            ...(missingParentIds.length ? [{ id: { in: missingParentIds } }] : []),
+          ],
+        },
       });
       for (const row of related) {
         if (!known.has(row.id)) {
           known.set(row.id, row);
           frontier.push(row.id);
+          if (row.parentId) parentIds.add(row.parentId);
         }
       }
     }
     const { tree, orphans } = buildBookmarkTree([...known.values()]);
-    return json({ bookmarks: tree, orphans });
-  });
+    const r = json({ bookmarks: tree, orphans });
+    r.headers.set('Cache-Control', 'no-store, private');
+    return r;
+  }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
 }
 
 export async function POST(req: NextRequest): Promise<Response> {
@@ -144,20 +176,12 @@ export async function POST(req: NextRequest): Promise<Response> {
  // relation-connect). A dangling parentId is rejected with 400 rather than
  // stored as an orphan reference.
  //
- // The existence check and the create must be ATOMIC: a bare
- // `findUnique` followed by a separate `create` lets a concurrent delete
- // remove the parent in between, producing exactly the dangling
- // `parentId` the check was meant to prevent . We therefore
- // re-validate the parent *inside* the same transaction as the create, so
- // both observe a consistent snapshot. A `null` result from the
- // transaction signals the parent was missing → 400.
- // Allow creating `type: 'folder'` bookmarks (folders have no
- // URL — they group child bookmarks in the tree). Previously the route
- // always required an http/https URL and always set `type: 'url'`, so
- // the "New Folder" affordance in collections-view could never persist
- // a folder. Now: if `body.type === 'folder'`, skip URL validation and
- // store `url: null, type: 'folder'`. For `type === 'url'` (or
- // unspecified), keep the stored-XSS guard (http/https only).
+ // The existence check and the create must be ATOMIC: re-validate the parent
+ // *inside* the same transaction as the create so a concurrent delete can't
+ // leave a dangling `parentId`. A `null` transaction result → parent missing → 400.
+ //
+ // `type: 'folder'` bookmarks have no URL (they group children); skip URL
+ // validation and store `url: null`. `type: 'url'` keeps the stored-XSS guard.
     const rawType = typeof body.type === 'string' ? body.type.toLowerCase() : 'url';
  // Reject unknown types instead of silently coercing them to `'url'`. An
  // unrecognized `type` is almost certainly a caller/contract bug, not a
@@ -184,5 +208,5 @@ export async function POST(req: NextRequest): Promise<Response> {
     const bm = await createBookmark('url', name, url, parentId);
     if (!bm) return badRequest('unknown parentId');
     return json({ bookmark: bm }, 201);
-  }, sanitizeRequestId(req.headers.get('x-request-id')));
+  }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
 }

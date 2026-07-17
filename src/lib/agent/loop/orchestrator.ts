@@ -15,10 +15,11 @@ import type {
   ActionResult,
   AgentOutput,
   PlannerOutput,
+  LogEvent,
 } from "../types";
 import { DEFAULT_CONFIG } from "../types";
 import { classifyError, friendlyErrorMessage } from "../errors";
-import { LoopDetector } from "./loop-detector";
+import { LoopDetector, LOOP_TOP_THRESHOLD } from "./loop-detector";
 import { earlyStop, DEFAULT_EARLY_STOP_THRESHOLDS } from "./early-stop";
 import { shouldCompact, renderHistoryForSummarization } from "./compaction";
 import { CallbackDispatcher } from "../callbacks";
@@ -55,6 +56,110 @@ import {
 
 /** Sleep helper. */
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Keepalive interval for in-loop awaits. An external watchdog (e.g. the cockpit
+ * SSE consumer) uses heartbeat absence to judge a run stale; emitting roughly
+ * twice per watchdog window lets it distinguish a busy run from a stalled one.
+ */
+const HEARTBEAT_INTERVAL_MS = 20_000;
+
+/**
+ * Wrap a long-running await (LLM call, compaction, action settle) so a
+ * `heartbeat` event is emitted on a fixed interval while it is in flight. The
+ * timer is cleared as soon as the wrapped promise settles, so the heartbeat is
+ * purely additive — no change to control flow, termination, or any
+ * security/injection boundary.
+ *
+ * The wrapped await is raced against `opts.signal` (a user-stop abort) and an
+ * optional `opts.timeoutMs` SLA. If the signal aborts or the SLA elapses
+ * while `fn()` is still pending, the race rejects with an AbortError
+ * (classified as "cancelled" by `classifyError`) so the surrounding call-site
+ * catch — which already mirrors the top-of-loop abort handling — finishes the
+ * run. This lets a Stop interrupt an in-flight LLM call that would otherwise
+ * hang the run until the provider (never) responds.
+ */
+function withHeartbeat<T>(
+  step: number,
+  onEvent: (e: LogEvent) => void,
+  fn: (signal?: AbortSignal) => Promise<T>,
+  opts?: { signal?: AbortSignal; timeoutMs?: number },
+): Promise<T> {
+  const timer = setInterval(() => {
+    onEvent({ type: "heartbeat", step, ts: Date.now() });
+  }, HEARTBEAT_INTERVAL_MS);
+
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  let abortHandler: (() => void) | undefined;
+  const cleanup = () => {
+    clearInterval(timer);
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+    if (abortHandler && opts?.signal) {
+      opts.signal.removeEventListener("abort", abortHandler);
+    }
+  };
+
+ // Aborting the in-flight LLM call is now done via an internal
+ // `AbortController` (declared just below): both the SLA-timeout and the
+ // user-abort signal abort `controller`, which is the signal threaded into
+ // `fn`. That cancels the underlying `fetch` so a timed-out/stopped step
+ // doesn't keep billing the provider in the background.
+  // Internal controller that links the user-abort signal AND the SLA timeout.
+  // Passing `controller.signal` (rather than the bare user signal) into `fn`
+  // means a SLA-timeout firing actually ABORTS the in-flight LLM call (and its
+  // underlying `fetch`) instead of leaving it orphaned in the background (HIGH
+  // finding: llmCallTimeoutMs SLA did not cancel the in-flight call).
+  const controller = new AbortController();
+  let timedOut = false;
+
+  // A deliberate abort (SLA timeout or user Stop) cancels the in-flight call via
+  // `controller.abort()`. That abort also rejects `fn`'s promise — but the
+  // AUTHORITATIVE race rejection should be the timeout/user-abort error (so the
+  // orchestrator's classifier sees a "timeout"/"cancelled" exactly as before),
+  // not a generic AbortError racing it. Swallow the abort-induced rejection so it
+  // cannot win the race; genuine (provider) rejections still propagate.
+  const fnPromise = fn(controller.signal);
+  const fnWrapped = fnPromise.catch((e: unknown) => {
+    if (timedOut || opts?.signal?.aborted) return new Promise<T>(() => {});
+    throw e;
+  });
+  const racers: Promise<T>[] = [fnWrapped];
+
+  const signal = opts?.signal;
+  if (signal) {
+    if (signal.aborted) {
+      controller.abort();
+      cleanup();
+      return Promise.reject(new DOMException("Aborted by user", "AbortError"));
+    }
+    let abortReject: (reason: unknown) => void = () => {};
+    const abortPromise = new Promise<T>((_, reject) => {
+      abortReject = reject;
+    });
+    abortHandler = () => {
+      controller.abort();
+      cleanup();
+      abortReject(new DOMException("Aborted by user", "AbortError"));
+    };
+    signal.addEventListener("abort", abortHandler, { once: true });
+    racers.push(abortPromise);
+  }
+
+  if (opts?.timeoutMs && opts.timeoutMs > 0) {
+    racers.push(
+      new Promise<T>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+          cleanup();
+          reject(new DOMException("Step SLA timeout exceeded", "TimeoutError"));
+        }, opts.timeoutMs);
+      }),
+    );
+  }
+
+  return Promise.race(racers).finally(cleanup);
+}
 
 /** Soft character cap for the rendered navigator history before compaction. */
 const CONTEXT_SOFT_CAP_CHARS = 400_000;
@@ -205,21 +310,23 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
   try {
     const initialTabs = await deps.getTabs();
     const initialUrl = initialTabs.find((t) => t.active)?.url ?? initialTabs[0]?.url ?? "";
-    plannerResult = await runPlanner(
+    plannerResult = await withHeartbeat(state.step, onEvent, (signal) => runPlanner(
       deps,
       {
         task, navigatorHistory: state.navigatorHistory, plan: state.plan,
         currentPlanItem: state.currentPlanItem,
         url: initialUrl, tabs: initialTabs, step: state.step,
         maxSteps: config.maxSteps,
+        compactedMemory: state.compactedMemory,
         onCost: (usd, tokensIn, tokensOut) => {
           addCost(state, usd);
           addTokens(state, tokensIn, tokensOut);
         },
       },
       dispatcher,
-      makeCtx(state)
-    );
+      makeCtx(state),
+      signal
+    ), { signal, timeoutMs: config.llmCallTimeoutMs ?? 0 });
   } catch (e) {
     const isAbort = deps.signal?.aborted || (e instanceof Error && (/abort/i.test(e.name) || /abort/i.test(e.message)));
     let doneText: string;
@@ -275,7 +382,16 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       makeCtx(state)
     );
     if (finalized) {
-      await finish(!!plannerResult.success, plannerResult.text || "");
+ // `maybeJudgeAndFinalize` already emitted the authoritative, judge-verified
+ // terminal `done` event (and recorded the real outcome in `state.finalResult`).
+ // Emitting another `done` here with `plannerResult.success` (the planner's
+ // optimistic value, which a judge may have overridden) would duplicate the
+ // terminal event and misreport success, so fire only `runEnd` from
+ // `state.finalResult` — mirroring the navigator-`done` and periodic-planner
+ // finalize sites.
+      await safeDispatch("runEnd", () =>
+        dispatcher!.runEnd(buildRunResult(state, state.finalResult?.success ?? false, state.finalResult?.text ?? "")),
+      );
       return;
     }
   }
@@ -324,11 +440,6 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
 
     if (state.step === budgetWarnStep) {
       onEvent({ type: "budget-warning", step: state.step, pct: Math.floor(BUDGET_WARNING_FRACTION * 100) });
- // Mark the budget warning as fired here so the `buildPreObserveNudges`
- // call below does NOT ALSO inject the duplicate budget-warning nudge into
- // the prompt — the inline `budget-warning` event is the single source of
- // truth for this warning. (Without this, both surfaces fire.)
-      state.budgetWarningFired = true;
     }
 
     const preObserveNudges = buildPreObserveNudges(state);
@@ -382,6 +493,11 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
             ? `${state.pendingLoopWarning}\n${LoopDetector.stagnantWarningText(stagnantCount)}`
             : LoopDetector.stagnantWarningText(stagnantCount);
           onEvent({ type: "loop-warning", step: state.step, count: stagnantCount });
+ // Hard-stop once the stagnant-page count reaches the top threshold.
+          if (config.enableEarlyStop && stagnantCount >= LOOP_TOP_THRESHOLD) {
+            await finish(false, `Loop detected: page state unchanged across ${stagnantCount} snapshots — aborting run.`);
+            return;
+          }
         }
       } catch (e) {
  // Page-fingerprint hashing is best-effort — never block the loop — but
@@ -399,8 +515,6 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       const screenshot = browserState.screenshot;
       await safeDispatch("screenshot", () => dispatcher!.screenshot(makeCtx(state), screenshot));
     }
-
-    appendPostObserveNudges(state, browserState);
 
  // Challenge detection + pause check
     const challengeResult = await runChallengeDetection(state);
@@ -437,6 +551,8 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       onEvent({ type: "info", message: `Anti-bot challenge cleared — resuming.` });
     }
 
+    appendPostObserveNudges(state, browserState);
+
     await runPauseCheck(state);
 
  // ── 2b. Reason: call navigator LLM (with parse retry) ──
@@ -444,13 +560,13 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
 
     let output: AgentOutput;
     try {
-      output = await callNavigatorWithRetry(
+      output = await withHeartbeat(state.step, onEvent, (signal) => callNavigatorWithRetry(
         deps, navRequest, state.step, (usd, tokensIn, tokensOut) => {
           addCost(state, usd);
           addTokens(state, tokensIn, tokensOut);
         },
-        dispatcher, makeCtx(state)
-      );
+        dispatcher, makeCtx(state), signal
+      ), { signal, timeoutMs: config.llmCallTimeoutMs ?? 0 });
       state.consecutiveParseFailures = 0;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -458,7 +574,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
         await finish(false, msg);
         return;
       }
-      const classified = classifyError(e);
+      const classified = classifyError(e, state.consecutiveFailures);
       const willExceed = (state.consecutiveFailures + 1) >= config.maxFailures;
       onEvent({
         type: "error",
@@ -546,7 +662,15 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
  // orchestrator, so `doneAction` is ALWAYS the sole action in the step.
       const result = await handleNavigatorDone(state, doneAction, output, browserState, tabs);
       if (result.finalized) {
-        await finish(false, "");
+ // `handleNavigatorDone` already emitted the terminal `done` event (via
+ // `maybeJudgeAndFinalize` / `callPlannerAndHandleError`; the cost-cap path in
+ // `handlePlannerDecision` emits it too) and recorded the real outcome in
+ // `state.finalResult`. Emitting another `done` here would duplicate the
+ // terminal event and let the last one clobber the genuine result, so fire
+ // only the `runEnd` callback.
+        await safeDispatch("runEnd", () =>
+          dispatcher!.runEnd(buildRunResult(state, state.finalResult?.success ?? false, state.finalResult?.text ?? "")),
+        );
         return;
       }
  // Fire stepEnd for the done step so metrics are accurate.
@@ -592,6 +716,13 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
             if (warnCount > 0) {
               onEvent({ type: "loop-warning", step: state.step, count: warnCount });
               await safeDispatch("loopWarning", () => dispatcher!.loopWarning(makeCtx(state), warnCount));
+ // Hard-stop once the action-repetition count reaches the top threshold. The
+ // detector only warns below this; sustained repetition would otherwise burn
+ // the full maxSteps budget before the hard cap ends the run.
+              if (config.enableEarlyStop && warnCount >= LOOP_TOP_THRESHOLD) {
+                await finish(false, `Loop detected: equivalent action repeated ${warnCount} times without progress — aborting run.`);
+                return;
+              }
             }
           }
         }
@@ -688,7 +819,6 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
           : (config.earlyStopThresholds?.repeatingAction ?? 3);
         onEvent({ type: "loop-warning", step: state.step, count: warnCount });
         await finish(false, doneText);
-        state.finalResult = { success: false, text: doneText };
         return;
       }
     }
@@ -696,7 +826,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
  // Settle & advance
     try {
       const jittered = settleDelay * (0.8 + Math.random() * 0.4);
-      await (deps.waitForSettled?.() ?? sleep(jittered));
+      await withHeartbeat(state.step, onEvent, () => (deps.waitForSettled?.() ?? sleep(jittered)));
     } catch (e) {
       const errMsg = `waitForSettled failed: ${e instanceof Error ? e.message : String(e)}`;
       onEvent({ type: "error", step: state.step, message: errMsg, recoverable: true });
@@ -713,9 +843,20 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
  // Rendering is O(N) per step (no worse than the old estimate) and gives
  // `shouldCompact` the real character count it documents it expects.
     if (config.enableCompaction) {
-      const historyLen = renderHistoryForSummarization(state.navigatorHistory).length;
-      const contextBudgetChars = CONTEXT_SOFT_CAP_CHARS;
-      const approachingContextLimit = historyLen > contextBudgetChars && (state.step - (state.lastCompactionStep ?? 0)) >= 3;
+      const stepGap = state.step - (state.lastCompactionStep ?? 0);
+      // Skip the O(N) full-history render on the majority of steps: both
+      // compaction gates require a minimum step gap (shouldCompact → interval,
+      // approachingContextLimit → 3), so a render is pointless until stepGap
+      // reaches min(interval, 3). The decision is unchanged because both gates
+      // fail below that gap (historyLen defaults to 0 → below every threshold).
+      const compactionGateReady = stepGap >= Math.min(config.compactionStepInterval, 3);
+      let historyLen = 0;
+      let approachingContextLimit = false;
+      if (compactionGateReady) {
+        historyLen = renderHistoryForSummarization(state.navigatorHistory).length;
+        const contextBudgetChars = CONTEXT_SOFT_CAP_CHARS;
+        approachingContextLimit = historyLen > contextBudgetChars && stepGap >= 3;
+      }
       if (approachingContextLimit) {
         onEvent({
           type: "info", message: `Context approaching limit (${(historyLen / 1000).toFixed(0)}K chars) — triggering early compaction.`,
@@ -730,7 +871,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       ) || approachingContextLimit) {
         let compacted: Awaited<ReturnType<typeof runCompaction>> | null = null;
         try {
-          compacted = await runCompaction(
+          compacted = await withHeartbeat(state.step, onEvent, (signal) => runCompaction(
             deps,
             state.navigatorHistory,
             state.step,
@@ -740,12 +881,13 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
             },
             dispatcher,
             makeCtx(state),
-          );
+            state.compactedMemory,
+            signal,
+          ), { signal, timeoutMs: config.llmCallTimeoutMs ?? 0 });
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           if (/^Budget exceeded:/i.test(msg)) {
             await finish(false, msg);
-            state.finalResult = { success: false, text: msg };
             return;
           }
  // `runCompaction` only re-throws Budget-exceeded errors; any other
@@ -776,7 +918,11 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
     if (state.navigatorStepsSincePlanner >= config.plannerInterval) {
       const result = await runPeriodicPlannerCheck(state, browserState);
       if (result.finalized) {
-        await finish(false, "");
+ // Same as the navigator-`done` finalize path: the terminal `done` was already
+ // emitted by the helpers, so fire only `runEnd` here to avoid a duplicate.
+        await safeDispatch("runEnd", () =>
+          dispatcher!.runEnd(buildRunResult(state, state.finalResult?.success ?? false, state.finalResult?.text ?? "")),
+        );
         return;
       }
     }

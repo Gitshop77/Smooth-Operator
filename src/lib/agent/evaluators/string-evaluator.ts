@@ -149,6 +149,17 @@ export class StringEvaluator {
   readonly tag = STRING_EVALUATOR_TAG;
 
   evaluate(input: StringEvaluatorInput): StringEvaluatorResult {
+ // Fail CLOSED on an empty reference-answer list: with no assertions there
+ // is nothing to grade, so the default 1.0 would silently pass a task that
+ // was never checked. Mirrors the HTML-content empty-targets guard and the
+ // evaluator-combination empty-kinds guard.
+    if (input.referenceAnswers.length === 0) {
+      return {
+        score: 0,
+        tag: STRING_EVALUATOR_TAG,
+        reason: "no reference answers configured — failing closed",
+      };
+    }
     let score = 1.0;
     const reasons: string[] = [];
     const cleanPred = cleanAnswer(input.prediction);
@@ -163,6 +174,13 @@ export class StringEvaluator {
           break;
         case "regex": {
  // Invalid regex pattern — treat as no match (don't crash).
+ // An empty/whitespace-only pattern compiles to `new RegExp("")` which matches
+ // ANY subject, so a degenerate reference would silently always pass. Fail
+ // CLOSED instead — a mis-authored pattern must never grade a task complete.
+          if (!ref.ref || !ref.ref.trim()) {
+            cur = 0;
+            break;
+          }
           try {
             const re = new RegExp(ref.ref, "i");
  // Bound the subject length to limit ReDoS exposure (see

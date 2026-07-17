@@ -16,7 +16,7 @@ import type {
 } from "../../types";
 import type { LoopState, CallPlannerResult, HandlePlannerDecisionResult, HandleNavigatorDoneResult, RunPeriodicPlannerCheckResult } from "../types";
 import { runPlanner, maybeJudgeAndFinalize, makeCtx, addCost, addTokens, costCapExceeded } from "../helpers";
-import { GOAL_WARN_THRESHOLD } from "../loop-detector";
+import { GOAL_WARN_THRESHOLD, GOAL_TOP_THRESHOLD } from "../loop-detector";
 import { classifyError, friendlyErrorMessage, type ClassifiedError } from "../../errors";
 
 /**
@@ -86,7 +86,8 @@ async function safeWaitForSettled(state: LoopState): Promise<void> {
  */
 export async function callPlannerAndHandleError(
   state: LoopState,
-  args: { url: string; tabs: TabInfo[] }
+  args: { url: string; tabs: TabInfo[] },
+  signal?: AbortSignal
 ): Promise<CallPlannerResult> {
   const { deps, task, plan, currentPlanItem, step, config, navigatorHistory, onEvent } = state;
   let plannerResult: PlannerOutput;
@@ -96,13 +97,15 @@ export async function callPlannerAndHandleError(
       {
         task, navigatorHistory, plan, currentPlanItem,
         url: args.url, tabs: args.tabs, step, maxSteps: config.maxSteps,
+        compactedMemory: state.compactedMemory,
         onCost: (usd, tokensIn, tokensOut) => {
           addCost(state, usd);
           addTokens(state, tokensIn, tokensOut);
         },
       },
       state.dispatcher,
-      makeCtx(state)
+      makeCtx(state),
+      signal
     );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -126,7 +129,7 @@ export async function callPlannerAndHandleError(
     let classified: ClassifiedError;
     let errorMessage: string;
     try {
-      classified = classifyError(e);
+      classified = classifyError(e, state.consecutiveFailures);
       errorMessage = friendlyErrorMessage(classified);
     } catch {
       classified = { category: "unknown", fatal: false, retryable: true, message: msg, originalError: e };
@@ -172,6 +175,7 @@ export async function handlePlannerDecision(
   const { config, step, onEvent, navigatorHistory } = state;
 
   if (costCapExceeded(state)) {
+    onEvent({ type: "done", step, success: false, text: "Cost cap exceeded" });
     state.finalResult = { success: false, text: "Cost cap exceeded" };
     return { status: "finalized" };
   }
@@ -201,11 +205,6 @@ export async function handlePlannerDecision(
       makeCtx(state)
     );
     if (finalized) {
- // Record the real outcome so `buildRunResult` (which prefers
- // `state.finalResult`) reports the genuine success/text instead of the
- // hardcoded `false`/`""` the orchestrator passes at the finalized-done
- // paths (finding: run result success/text lost on finalized-done paths).
-      state.finalResult = { success: !!plannerResult.success, text: plannerResult.text || opts.doneTextFallback || "" };
       return { status: "finalized" };
     }
     plannerResult = { ...plannerResult, decision: "continue" };
@@ -285,7 +284,7 @@ export async function handleNavigatorDone(
     }],
   });
 
-  const callResult = await callPlannerAndHandleError(state, { url: browserState.url, tabs });
+  const callResult = await callPlannerAndHandleError(state, { url: browserState.url, tabs }, state.signal);
   if (callResult.status === "abort") return { finalized: true };
   if (callResult.status === "continue") {
  // The planner verification call failed transiently (no decision produced).
@@ -340,7 +339,7 @@ export async function runPeriodicPlannerCheck(
 
   const periodicUrl = tabsNow.find((t) => t.active)?.url || tabsNow[0]?.url || browserState.url || "";
 
-  const callResult = await callPlannerAndHandleError(state, { url: periodicUrl, tabs: tabsNow });
+  const callResult = await callPlannerAndHandleError(state, { url: periodicUrl, tabs: tabsNow }, state.signal);
   if (callResult.status === "abort") return { finalized: true };
   if (callResult.status === "continue") {
     state.navigatorStepsSincePlanner = 0;
@@ -361,6 +360,12 @@ export async function runPeriodicPlannerCheck(
         type: "info",
         message: `Goal-level loop detected: "${state.currentGoal.slice(0, 80)}" has been the goal ${goalCount} times. The planner may be stuck.`,
       });
+      if (state.config.enableEarlyStop && goalCount >= GOAL_TOP_THRESHOLD) {
+        const doneText = `Loop detected: planner re-assigned goal "${state.currentGoal.slice(0, 80)}" ${goalCount} times — aborting run.`;
+        onEvent({ type: "done", step, success: false, text: doneText });
+        state.finalResult = { success: false, text: doneText };
+        return { finalized: true };
+      }
     }
   }
   onEvent({

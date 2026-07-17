@@ -52,29 +52,67 @@ const CONTENT_KEYS = new Set([
  */
 const NAMED_KEY_CODES: Record<string, number> = {
   Enter: 13,
+  Escape: 27,
+  Tab: 9,
   Backspace: 8,
   Delete: 46,
   ArrowLeft: 37,
   ArrowRight: 39,
+  ArrowUp: 38,
+  ArrowDown: 40,
   Home: 36,
   End: 35,
+  F1: 112,
+  F2: 113,
+  F3: 114,
+  F4: 115,
+  F5: 116,
+  F6: 117,
+  F7: 118,
+  F8: 119,
+  F9: 120,
+  F10: 121,
+  F11: 122,
+  F12: 123,
+};
+
+/**
+ * Map shifted-symbol / punctuation keys to their physical base `code` so the
+ * synthetic `KeyboardEvent` matches a real one. A bare `Shift+1` produces
+ * key `'!'`; emitting `code: '!'` (the old fallback) is a detectable automation
+ * anomaly — page shortcut handlers keyed on `event.code` misfire and bot
+ * detectors flag the event. The physical code for `!` is `Digit1`, for `@` is
+ * `Digit2`, etc. (Letters/digits keep their `Key*`/`Digit*` codes, mapped
+ * separately below.) Only covers the common printable symbols; anything
+ * unmapped still falls back to the literal character (unchanged behavior).
+ */
+const SYMBOL_TO_PHYSICAL_CODE: Record<string, string> = {
+  "!": "Digit1", "@": "Digit2", "#": "Digit3", "$": "Digit4", "%": "Digit5",
+  "^": "Digit6", "&": "Digit7", "*": "Digit8", "(": "Digit9", ")": "Digit0",
+  "_": "Minus", "+": "Equal", "{": "BracketLeft", "}": "BracketRight",
+  "|": "Backslash", ":": "Semicolon", "\"": "Quote", "<": "Comma",
+  ">": "Period", "?": "Slash", "~": "Backquote", "[": "BracketLeft",
+  "]": "BracketRight", "\\": "Backslash", ";": "Semicolon", "'": "Quote",
+  ",": "Comma", ".": "Period", "/": "Slash", "`": "Backquote",
+  "-": "Minus", "=": "Equal",
 };
 
 /** Resolve `keyCode`/`which`/`code` for a synthetic KeyboardEvent. */
-function keyEventCodes(key: string): { keyCode: number; which: number; code: string } {
+export function keyEventCodes(key: string): { keyCode: number; which: number; code: string } {
   if (key in NAMED_KEY_CODES) {
     const kc = NAMED_KEY_CODES[key];
     return { keyCode: kc, which: kc, code: key };
   }
   if (key.length === 1) {
-    const isLetter = key >= "a" && key <= "z";
-    const upper = isLetter ? key.toUpperCase() : key;
-    const keyCode = key >= "a" && key <= "z" ? upper.charCodeAt(0) : key.charCodeAt(0);
+    const lower = key.toLowerCase();
+    const isLetter = lower >= "a" && lower <= "z";
+    const upper = key.toUpperCase();
+    const keyCode = isLetter ? upper.charCodeAt(0) : key.charCodeAt(0);
     let code: string;
     if (key === " ") code = "Space";
     else if (isLetter) code = `Key${upper}`;
     else if (key >= "0" && key <= "9") code = `Digit${key}`;
-    else code = key;
+    else code = SYMBOL_TO_PHYSICAL_CODE[key] ?? key;
     return { keyCode, which: keyCode, code };
   }
   return { keyCode: 0, which: 0, code: "" };
@@ -336,7 +374,7 @@ export async function handleSendKeys(
     };
   }
 
-  if (parsed.main === "Enter") {
+  if (parsed.main === "Enter" && !parsed.shift && !parsed.ctrl && !parsed.alt && !parsed.meta) {
     const form = target.closest("form");
     if (form && typeof form.requestSubmit === "function") form.requestSubmit();
   }

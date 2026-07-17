@@ -36,6 +36,13 @@ export interface ModalOptions {
   actions: ModalAction[];
   /** Extra class on the dialog (e.g. "modal-wide" for the transcript viewer). */
   className?: string;
+  /**
+   * When set, the action button whose `value` equals `delayActionValue` starts
+   * disabled and is enabled after `confirmDelayMs`. Prevents an accidental
+   * Enter/space from approving a destructive state-modifying action.
+   */
+  delayActionValue?: string;
+  confirmDelayMs?: number;
 }
 
 let activeOverlay: HTMLDivElement | null = null;
@@ -106,6 +113,7 @@ function showModal(opts: ModalOptions): Promise<string | null> {
   footer.className = "modal-footer";
 
   return new Promise<string | null>((resolve) => {
+    const actionButtons = new Map<string, HTMLButtonElement>();
     for (const a of opts.actions) {
       const btn = document.createElement("button");
       btn.type = "button";
@@ -114,7 +122,19 @@ function showModal(opts: ModalOptions): Promise<string | null> {
         (a.variant === "primary" ? "btn-primary" : a.variant === "danger" ? "btn-danger" : "btn-ghost");
       btn.textContent = a.label;
       btn.addEventListener("click", () => close(a.value));
+      actionButtons.set(a.value, btn);
       footer.appendChild(btn);
+    }
+
+    // Anti-misclick: keep the primary/destructive action disabled briefly so a
+    // stray Enter/space can't approve it before the user reads the dialog.
+    // The Cancel/close path stays instant so the user can always abort.
+    if (opts.confirmDelayMs && opts.delayActionValue) {
+      const target = actionButtons.get(opts.delayActionValue);
+      if (target) {
+        target.disabled = true;
+        setTimeout(() => { target.disabled = false; }, opts.confirmDelayMs);
+      }
     }
 
     dialog.appendChild(header);
@@ -137,8 +157,6 @@ function showModal(opts: ModalOptions): Promise<string | null> {
       });
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    // Cache the focusable set once; the modal content is static.
-    const focusable = getFocusable(dialog);
 
     // Defined here (AFTER `inerted` / `prevOverflow` above are initialized) so
     // it closes over those already-assigned bindings rather than relying on the
@@ -159,12 +177,15 @@ function showModal(opts: ModalOptions): Promise<string | null> {
         e.preventDefault();
         close(null);
       } else if (e.key === "Tab") {
-        if (focusable.length === 0) {
+        // Recompute live so buttons enabled after confirmDelayMs (e.g. a danger
+        // confirm) are included in the trap rather than cached while disabled.
+        const current = getFocusable(dialog);
+        if (current.length === 0) {
           e.preventDefault();
           return;
         }
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
+        const first = current[0];
+        const last = current[current.length - 1];
         const active = document.activeElement as HTMLElement;
         if (e.shiftKey && active === first) {
           e.preventDefault();
@@ -216,6 +237,8 @@ export function confirmModal(opts: {
   return openModal({
     title: opts.title,
     body: opts.message,
+    delayActionValue: opts.danger ? "confirm" : undefined,
+    confirmDelayMs: opts.danger ? 200 : undefined,
     actions: [
       { label: opts.cancelLabel ?? "Cancel", value: "cancel", variant: "ghost", autofocus: true },
       {
@@ -235,6 +258,8 @@ export function alertModal(opts: {
   return openModal({
     title: opts.title,
     body: opts.message,
+    delayActionValue: "ok",
+    confirmDelayMs: 200,
     actions: [{ label: opts.okLabel ?? "OK", value: "ok", variant: "primary", autofocus: true }],
   }).then(() => undefined);
 }

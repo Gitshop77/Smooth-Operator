@@ -9,6 +9,12 @@
 import { Protocol, type LLMRequest } from "../route/client";
 import { zodToJsonSchema } from "../zod-json-schema";
 import { omitZero } from "../shared";
+import {
+  SCREENSHOT_PATTERN_G,
+  hasImageProvenance,
+  isValidBase64,
+  isZodSchema,
+} from "../shared-image";
 
 const ADAPTER = "openai-chat";
 export const DEFAULT_BASE_URL = "https://api.openai.com/v1";
@@ -38,6 +44,8 @@ export interface OpenAIChatBody {
         };
       };
   frequency_penalty?: number;
+  /** Reasoning models (o-series / grok-reasoning) need this instead of `max_tokens`. */
+  max_completion_tokens?: number;
 }
 
 export interface OpenAIChatChunk {
@@ -62,52 +70,9 @@ export interface OpenAIChatChunk {
  * we extract it into a proper `image_url` content part, mirroring the logic
  * already implemented in `anthropic-messages.ts` / `gemini.ts`.
  */
-/** Source pattern for screenshot markers — construct a fresh `/g` instance per use to avoid shared mutable state. */
-const SCREENSHOT_SOURCE = "<screenshot>(data:image\\/(png|jpeg|webp);base64,[^<]+)<\\/screenshot>";
-
-/**
- * Magic-byte signatures for the image media types we accept in `<screenshot>`
- * markers. The declared `media_type` must match the actual payload so injected
- * markers in scraped/tool content can't forward attacker-chosen bytes to the
- * model as an image block (a lightweight provenance check).
- */
-const IMAGE_SIGNATURES: Record<string, string[]> = {
- // PNG: 89 50 4E 47 0D 0A 1A 0A -> "iVBORw0KGgo"
-  png: ["iVBORw0KGgo"],
- // JPEG: FF D8 FF -> "/9j/"
-  jpeg: ["/9j/"],
- // WebP: "RIFF"....."WEBP" -> "UklGR"
-  webp: ["UklGR"],
-};
-
-/**
- * Provenance check for `<screenshot>` markers. Requiring the base64 payload's
- * magic bytes to match the declared media type rejects markers whose contents
- * are not a well-formed image of that type.
- */
-function hasImageProvenance(b64: string, mediaType: string): boolean {
-  const prefixes = IMAGE_SIGNATURES[mediaType];
-  if (!prefixes) return false;
-  return prefixes.some((p) => b64.startsWith(p));
-}
 
 /** Default max_tokens fallback when the caller doesn't set one. */
 const DEFAULT_MAX_TOKENS = 4096;
-
-/**
- * Validate that a string is well-formed base64 (no whitespace, correct
- * padding, only the legal alphabet). Used to reject malformed `<screenshot>`
- * markers locally instead of forwarding them to the provider for an opaque
- * `400`. Mirrors the `isValidBase64` guard in `anthropic-messages.ts`.
- */
-function isValidBase64(s: string): boolean {
- // Reject empty / whitespace / illegal-alphabet payloads locally instead of
- // forwarding them to the provider for an opaque 400. We intentionally do NOT
- // enforce a strict length-multiple-of-4 rule: a trailing `=` padding string
- // like `iVBOR==` is a perfectly usable image payload, and over-strict length
- // gating was a regression that rejected valid screenshots.
-  return s.length > 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(s);
-}
 
 /**
  * A converted JSON Schema must be a plain object, never a raw Zod schema
@@ -122,16 +87,6 @@ function isPlainJSONSchema(v: unknown): v is Record<string, unknown> {
   return true;
 }
 
-/** Heuristic: is this a Zod schema object (vs. an already-plain JSON Schema)? */
-function isZodSchema(value: unknown): boolean {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    (("safeParse" in value && typeof (value as { safeParse?: unknown }).safeParse === "function") ||
-      "_def" in value)
-  );
-}
-
 /**
  * Normalize a JSON Schema to OpenAI "strict" requirements so providers that
  * enforce `strict: true` (OpenAI, Azure, xAI, OpenRouter, + compatible) don't
@@ -144,7 +99,7 @@ function isZodSchema(value: unknown): boolean {
  * Recursion is depth-bounded to stay cheap on large schemas.
  */
 function normalizeStrictSchema(node: unknown, depth = 0): unknown {
-  if (depth > 24 || typeof node !== "object" || node === null) return node;
+  if (typeof node !== "object" || node === null) return node;
  // A `$ref` points at a definition we can't resolve here (no schema catalog
  // at this layer) — leave it untouched rather than dropping it, which would
  // lose the reference. Previously `$ref`/`$defs` were not descended into, so
@@ -193,20 +148,31 @@ function normalizeStrictSchema(node: unknown, depth = 0): unknown {
     delete obj.required;
   }
 
- // 3. Recurse into child schemas (now including `$defs`).
-  for (const key of ["properties", "items", "anyOf", "allOf", "oneOf", "not", "$defs"]) {
+ // 3. Recurse into child schemas.
+ // Bound only the descent, not the local object fixup above: even at the
+ // depth boundary the object normalization must still apply so deeply-nested
+ // object schemas remain strict-compliant (additionalProperties:false +
+ // full `required`) and don't trigger an OpenAI strict-mode 400.
+  if (depth >= 24) return obj;
+  for (const key of ["items", "anyOf", "allOf", "oneOf", "not"]) {
     const child = obj[key];
-    if (key === "$defs" && child && typeof child === "object" && !Array.isArray(child)) {
-      // `$defs` is a dict of named subschemas — descend into each *value* so
-      // referenced definitions also get strict-normalized (additionalProperties:
-      // false + required). Treating the dict as one node was a no-op, leaving
-      // referenced $refs un-normalized and OpenAI strict mode rejecting with 400.
-      const defs = child as Record<string, unknown>;
-      obj[key] = Object.fromEntries(
-        Object.entries(defs).map(([k, v]) => [k, normalizeStrictSchema(v, depth + 1)]),
-      );
-    } else if (Array.isArray(child)) obj[key] = child.map((c) => normalizeStrictSchema(c, depth + 1));
+    if (Array.isArray(child)) obj[key] = child.map((c) => normalizeStrictSchema(c, depth + 1));
     else if (child && typeof child === "object") obj[key] = normalizeStrictSchema(child, depth + 1);
+  }
+ // `properties` and `$defs` are dicts of name→subschema. Descend into each
+ // *value* so nested object properties and referenced definitions also get
+ // strict-normalized (additionalProperties:false + full required). Treating
+ // either dict as a single node was a no-op — a nested OBJECT property never
+ // received additionalProperties:false + required, so OpenAI strict mode
+ // rejected it with a 400.
+  for (const key of ["properties", "$defs"]) {
+    const child = obj[key];
+    if (child && typeof child === "object" && !Array.isArray(child)) {
+      const dict = child as Record<string, unknown>;
+      obj[key] = Object.fromEntries(
+        Object.entries(dict).map(([k, v]) => [k, normalizeStrictSchema(v, depth + 1)]),
+      );
+    }
   }
   return obj;
 }
@@ -229,13 +195,13 @@ async function fromRequest(request: LLMRequest): Promise<OpenAIChatBody> {
  // Extract EVERY screenshot marker (not just the first) into its own
  // `image_url` content part — a multi-screenshot turn must forward all
  // of them, matching the Anthropic protocol.
-      const matches = Array.from(m.content.matchAll(new RegExp(SCREENSHOT_SOURCE, "g")));
+      const matches = Array.from(m.content.matchAll(SCREENSHOT_PATTERN_G));
       if (matches.length > 0) {
  // Strip with the SAME pattern we match on, so the text we keep always
  // agrees with the screenshots we extract (the previous literal regex
  // `[^<]+` would also strip non-image `<screenshot>...</screenshot>`
  // markers — FULL-REVIEW finding 65).
-        const textContent = m.content.replace(new RegExp(SCREENSHOT_SOURCE, "g"), "").trim();
+        const textContent = m.content.replace(SCREENSHOT_PATTERN_G, "").trim();
         const parts: OpenAIContentPart[] = [];
         if (textContent) parts.push({ type: "text", text: textContent });
         for (const match of matches) {
@@ -263,13 +229,27 @@ async function fromRequest(request: LLMRequest): Promise<OpenAIChatBody> {
     messages,
     stream: true,
     stream_options: { include_usage: true },
-    temperature: request.generation?.temperature ?? 0,
   };
+ // Reasoning models (OpenAI o-series, Grok-reasoning) reject `temperature`
+ // and require `max_completion_tokens` instead of `max_tokens`; sending the
+ // unsupported params yields a provider 400. Gate on `request.reasoning`.
+  if (request.reasoning) {
+    body.max_completion_tokens = request.generation?.maxTokens ?? DEFAULT_MAX_TOKENS;
+  } else {
+    body.temperature = request.generation?.temperature ?? 0;
  // match Anthropic (4096) and Gemini (8192) by having a hardcoded
  // fallback so output length is governed for OpenAI-format providers too.
-  body.max_tokens = request.generation?.maxTokens ?? DEFAULT_MAX_TOKENS;
-  if (request.generation?.topP) body.top_p = request.generation.topP;
+    body.max_tokens = request.generation?.maxTokens ?? DEFAULT_MAX_TOKENS;
+    if (request.generation?.topP) body.top_p = request.generation.topP;
+  }
   if (request.schema) {
+ // `structuredOutputStrict` defaults to true for the openai-chat protocol
+ // (OpenAI/Azure/xAI/OpenRouter honor strict mode). OpenAI-compatible
+ // providers that 400 on strict mode must pass `structuredOutputStrict:
+ // false`, which falls back to `json_object` and lets the in-prompt schema
+ // contract (llm-direct) carry the structure instead.
+    const strict = request.structuredOutputStrict ?? true;
+    if (strict) {
  // Serialize the Zod schema into a JSON Schema object and send it via
  // `response_format: { type: "json_schema", … }` so OpenAI-format providers
  // (OpenAI, Azure, xAI, OpenRouter, + openai-compatible) honor the contract
@@ -287,24 +267,29 @@ async function fromRequest(request: LLMRequest): Promise<OpenAIChatBody> {
  // raw Zod object (opaque provider `400`). We also normalize to OpenAI
  // "strict" mode requirements (`additionalProperties: false`, all properties
  // `required`, no `nullable`) so `strict: true` is honored consistently.
-    let jsonSchema: unknown;
-    if (isZodSchema(request.schema)) {
-      jsonSchema = await zodToJsonSchema(request.schema);
+      let jsonSchema: unknown;
+      if (isZodSchema(request.schema)) {
+        jsonSchema = await zodToJsonSchema(request.schema);
+      } else {
+        jsonSchema = request.schema;
+      }
+      if (!isPlainJSONSchema(jsonSchema)) {
+        throw new Error("Response schema did not produce a serializable JSON Schema object");
+      }
+      jsonSchema = normalizeStrictSchema(jsonSchema);
+      body.response_format = {
+        type: "json_schema",
+        json_schema: {
+          name: "response",
+          schema: jsonSchema as Record<string, unknown>,
+          strict: true,
+        },
+      };
     } else {
-      jsonSchema = request.schema;
+ // Non-strict providers: ask for JSON mode only and rely on the in-prompt
+ // schema fallback (llm-direct) to convey the structure.
+      body.response_format = { type: "json_object" };
     }
-    if (!isPlainJSONSchema(jsonSchema)) {
-      throw new Error("Response schema did not produce a serializable JSON Schema object");
-    }
-    jsonSchema = normalizeStrictSchema(jsonSchema);
-    body.response_format = {
-      type: "json_schema",
-      json_schema: {
-        name: "response",
-        schema: jsonSchema as Record<string, unknown>,
-        strict: true,
-      },
-    };
   }
   return body;
 }

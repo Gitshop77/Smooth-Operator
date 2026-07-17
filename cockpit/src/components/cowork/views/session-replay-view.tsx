@@ -3,7 +3,7 @@
 import * as React from "react";
 import { motion } from "framer-motion";
 import {
-  ArrowLeft, Camera, CheckCircle2, ChevronLeft, ChevronRight,
+  AlertCircle, ArrowLeft, Camera, CheckCircle2, ChevronLeft, ChevronRight,
   Circle, Clock, ImageOff, PlayCircle,
 } from "lucide-react";
 
@@ -112,6 +112,8 @@ export function SessionReplayView() {
   const idx = Math.min(activeIndex, Math.max(0, total - 1));
   const current = steps[idx];
   const loading = sessions.isLoading || tasks.isLoading;
+  const hasError = sessions.isError || tasks.isError;
+  const errorMessage = sessions.error?.message ?? tasks.error?.message;
 
   const goTo = (next: number) =>
     setActiveIndex(Math.max(0, Math.min(total - 1, next)));
@@ -141,6 +143,12 @@ export function SessionReplayView() {
 
       {loading ? (
         <LoadingSkeleton variant="cards" cardCount={3} />
+      ) : hasError ? (
+        <EmptyState
+          icon={<AlertCircle className="size-6" />}
+          title="Couldn't load session replay"
+          description={errorMessage ?? "The sessions or tasks endpoint returned an error. Check that the backend is reachable and NEXT_PUBLIC_COWORK_UI_TOKEN is configured."}
+        />
       ) : sessionId && !session ? (
         <EmptyState
           icon={<PlayCircle className="size-6" />}

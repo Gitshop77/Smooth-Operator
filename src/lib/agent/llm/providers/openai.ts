@@ -23,7 +23,12 @@ import { toLLMProvider as toLLMProviderBridge } from "../provider-bridge";
 import { assertSafeUserBaseURL } from "./openai-compatible-profile";
 import type { Protocol } from "../route/client";
 
-export type Config = { baseURL?: string } & ProviderAuthOption<"optional">;
+export type Config = {
+  baseURL?: string;
+  // When true (user-configured provenance) the curated-local-provider loopback
+  // exemption is honored; otherwise loopback / RFC1918 / ULA are rejected.
+  allowLocalExemption?: boolean;
+} & ProviderAuthOption<"optional">;
 
 /** Definition for one OpenAI-compatible provider facade. */
 export interface OpenAIChatFacadeDef<P extends Protocol<any, any, any, any> = Protocol> {
@@ -59,8 +64,10 @@ export function makeOpenAIChatFacade<P extends Protocol<any, any, any, any> = Pr
 
   function configure(input: Config = {}): OpenAIChatFacadeConfigure {
  // (SSRF guard): validate any user-supplied baseURL override before
- // building the route/endpoint. The trusted default is exempt.
-    assertSafeUserBaseURL(input.baseURL, def.id);
+ // building the route/endpoint. The trusted default is exempt. Forward the
+ // user-provenance exemption flag so the curated-local-origin exemption applies
+ // only for a user-configured baseURL.
+    assertSafeUserBaseURL(input.baseURL, def.id, input.allowLocalExemption);
     // Split the (possibly path-prefixed) base URL into origin + path-prefix and
     // re-attach the prefix to `def.path` so `buildURL`'s `new URL(path, base)`
     // (which replaces the base path for a leading-slash path) doesn't drop a

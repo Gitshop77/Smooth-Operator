@@ -150,6 +150,25 @@ describe("action execution behavior", () => {
     expect(result.message).toContain("not supported");
   });
 
+  test("screenshot: routes via the extension runtime and reports success with the CDP marker", async () => {
+ // With chrome.runtime.id present the action forwards a SCREENSHOT message
+ // to the SW. A successful SW response must surface as success + the
+ // "Screenshot saved" CDP marker — this locks the sendMessage contract.
+    const sendMessage = vi.fn(async () => ({ ok: true, filename: "shot.png" }));
+    (globalThis as Record<string, unknown>).chrome = {
+      runtime: { id: "ext-id", sendMessage },
+    };
+    try {
+      const action = { type: "screenshot" } as AgentAction;
+      const result = await executeAction(action, makeState());
+      expect(result.success).toBe(true);
+      expect(result.message).toContain("Screenshot saved");
+      expect(sendMessage).toHaveBeenCalledWith({ type: "SCREENSHOT", fileName: undefined });
+    } finally {
+      delete (globalThis as Record<string, unknown>).chrome;
+    }
+  });
+
   test("save_as_pdf: returns an honest failure when not in extension context", async () => {
  // save_as_pdf routes through chrome.runtime.sendMessage to the background
  // SW (which uses CDP Page.printToPDF + chrome.downloads). In the jsdom
@@ -159,6 +178,25 @@ describe("action execution behavior", () => {
     const result = await executeAction(action, makeState());
     expect(result.success).toBe(false);
     expect(result.message).toContain("not supported");
+  });
+
+  test("save_as_pdf: routes via the extension runtime and reports success with the CDP marker", async () => {
+ // With chrome.runtime.id present the action forwards a SAVE_AS_PDF message
+ // to the SW. A successful SW response must surface as success + the
+ // "PDF saved" CDP marker — this locks the sendMessage contract.
+    const sendMessage = vi.fn(async () => ({ ok: true, filename: "page.pdf" }));
+    (globalThis as Record<string, unknown>).chrome = {
+      runtime: { id: "ext-id", sendMessage },
+    };
+    try {
+      const action = { type: "save_as_pdf" } as AgentAction;
+      const result = await executeAction(action, makeState());
+      expect(result.success).toBe(true);
+      expect(result.message).toContain("PDF saved");
+      expect(sendMessage).toHaveBeenCalledWith({ type: "SAVE_AS_PDF", fileName: undefined });
+    } finally {
+      delete (globalThis as Record<string, unknown>).chrome;
+    }
   });
 
   test("dropdown_options: throws for non-select element", async () => {
@@ -225,6 +263,20 @@ describe("action execution behavior", () => {
     expect(result.message).toContain("Invalid regex");
   });
 
+  test("search_page rejects nested-quantifier regex patterns (ReDoS static guard)", async () => {
+    const action = { type: "search_page", pattern: "(a+)+$", regex: true, case_sensitive: false } as AgentAction;
+    const result = await executeAction(action, makeState());
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("Regex pattern rejected");
+  });
+
+  test("search_page rejects backreference regex patterns (ReDoS static guard)", async () => {
+    const action = { type: "search_page", pattern: "(a)\\1", regex: true, case_sensitive: false } as AgentAction;
+    const result = await executeAction(action, makeState());
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("Regex pattern rejected");
+  });
+
   test("find_elements: finds elements by CSS selector", async () => {
     document.body.innerHTML = '<div><button class="btn">A</button><button class="btn">B</button></div>';
     const action = { type: "find_elements", selector: ".btn", max_results: 50 } as AgentAction;
@@ -254,6 +306,14 @@ describe("action execution behavior", () => {
 
   test("evaluate: a script that changes the URL reports pageChanged: true", async () => {
     const action = { type: "evaluate", code: "window.history.pushState({}, '', '/changed'); return 1;" } as AgentAction;
+    const result = await executeAction(action, makeState());
+    expect(result.success).toBe(true);
+    expect(result.pageChanged).toBe(true);
+  });
+
+  test("evaluate: a script that mutates the interactive DOM reports pageChanged: true", async () => {
+    document.body.innerHTML = '<button>before</button>';
+    const action = { type: "evaluate", code: "document.body.innerHTML = '<button>after</button>'; return 1;" } as AgentAction;
     const result = await executeAction(action, makeState());
     expect(result.success).toBe(true);
     expect(result.pageChanged).toBe(true);

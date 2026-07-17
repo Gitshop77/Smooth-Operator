@@ -27,7 +27,7 @@ import { addLogRow } from "./log-renderer";
  * the caller should treat the request as a no-op cancellation rather than
  * throwing.
  */
-function parseHumanRequest(msg: unknown): { mode: string; message: string } | null {
+export function parseHumanRequest(msg: unknown): { mode: string; message: string } | null {
   const request = (msg as { request?: unknown } | null)?.request;
   if (!request || typeof request !== "object") return null;
   const mode = (request as { mode?: unknown }).mode;

@@ -24,6 +24,73 @@ const AssistantAvatar = () => (
   </div>
 );
 
+// Collision-free message id. `Date.now()`-derived ids can collide when two
+// messages are appended in the same millisecond, producing duplicate React
+// keys. Prefer a UUID; fall back to a random string where unavailable.
+function newMessageId(prefix: string): string {
+  const uuid =
+    typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return `${prefix}${uuid}`;
+}
+
+/**
+ * Renders the assistant's reply with a typewriter effect. Owns its own
+ * per-tick state so the parent conversation list doesn't re-render on every
+ * animation frame. Calls `onComplete` once the full text has been typed.
+ */
+function StreamingMessage({
+  fullText,
+  onComplete,
+}: {
+  fullText: string;
+  onComplete: () => void;
+}) {
+  const [shown, setShown] = React.useState("");
+  const abortedRef = React.useRef(false);
+ // Track only the latest pending timer id — each tick overwrites it, so we
+ // hold at most one id for the whole typewriter run instead of an unbounded
+ // array that grows with message length.
+  const timeoutId = React.useRef<number | null>(null);
+  const onCompleteRef = React.useRef(onComplete);
+  onCompleteRef.current = onComplete;
+
+  React.useEffect(() => {
+    abortedRef.current = false;
+    setShown("");
+    let i = 0;
+    const tick = () => {
+      if (abortedRef.current) return;
+      i += Math.max(1, Math.round(Math.random() * 4));
+      setShown(fullText.slice(0, i));
+      if (i < fullText.length) {
+        timeoutId.current = window.setTimeout(tick, 18);
+      } else {
+        onCompleteRef.current?.();
+      }
+    };
+    timeoutId.current = window.setTimeout(tick, 250);
+    return () => {
+      abortedRef.current = true;
+      if (timeoutId.current !== null) clearTimeout(timeoutId.current);
+      timeoutId.current = null;
+    };
+  }, [fullText]);
+
+  return (
+    <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="flex gap-3">
+      <AssistantAvatar />
+      <div className="max-w-[80%] rounded-2xl px-4 py-2.5 text-sm bg-muted rounded-bl-sm">
+        <p className="whitespace-pre-wrap leading-relaxed">
+          {shown}
+          <span className="inline-block w-1.5 h-3.5 bg-foreground ml-0.5 cowork-pulse align-middle" />
+        </p>
+      </div>
+    </motion.div>
+  );
+}
+
 export function ChatView() {
   const sendChat = useSendChat();
   const { toast } = useToast();
@@ -39,34 +106,19 @@ export function ChatView() {
     },
   ]);
   const [input, setInput] = React.useState("");
-  const [streaming, setStreaming] = React.useState<string | null>(null);
+  const [streamingText, setStreamingText] = React.useState<string | null>(null);
   const scrollRef = React.useRef<HTMLDivElement>(null);
  // AbortController for the in-flight chat fetch, kept in a ref (not state)
  // so `.abort()` from the Clear handler doesn't trigger a re-render.
   const abortRef = React.useRef<AbortController | null>(null);
- // Track the typewriter setTimeout chain so `clearChat` can cancel it.
-  const typewriterTimeouts = React.useRef<number[]>([]);
- // Boolean flag checked at the top of every `tick`. Set by `clearChat` so
- // any tick already in the microtask queue returns immediately without
- // writing to state.
-  const typewriterAborted = React.useRef(false);
 
   React.useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    const behavior: ScrollBehavior = streaming !== null || reduce ? "auto" : "smooth";
+    const behavior: ScrollBehavior = streamingText !== null || reduce ? "auto" : "smooth";
     el.scrollTo({ top: el.scrollHeight, behavior });
-  }, [messages, streaming]);
-
- // On unmount, clear any pending typewriter timeouts so they don't fire
- // after the component is gone.
-  React.useEffect(() => {
-    return () => {
-      typewriterTimeouts.current.forEach((id) => clearTimeout(id));
-      typewriterTimeouts.current = [];
-    };
-  }, []);
+  }, [messages, streamingText]);
 
  // On unmount, abort any in-flight chat fetch. The `useSendChat` mutation's
  // `onError` callback fires the "Chat backend offline" toast — without
@@ -80,32 +132,24 @@ export function ChatView() {
     };
   }, []);
 
-  const finishAssistantReply = (text: string) => {
- // Reset the abort flag for this fresh reply. A previous Clear may have
- // set it true; we flip it back so ticks aren't no-ops.
-    typewriterAborted.current = false;
-    let i = 0;
-    setStreaming("");
-    const tick = () => {
- // If Clear was clicked between scheduling and firing, bail immediately.
-      if (typewriterAborted.current) return;
-      i += Math.max(1, Math.round(Math.random() * 4));
-      setStreaming(text.slice(0, i));
-      if (i < text.length) {
- // Track every scheduled timeout so `clearChat` can cancel the
- // whole chain in O(N).
-        const id = window.setTimeout(tick, 18);
-        typewriterTimeouts.current.push(id);
-      } else {
-        setMessages((m) => [
-          ...m,
-          { id: `m${Date.now()}`, role: "assistant", text, timestamp: Date.now() },
-        ]);
-        setStreaming(null);
-      }
+ // Append the completed reply to the message list and end the streaming
+ // indicator. Called once by <StreamingMessage> when it finishes typing.
+  const finishStreaming = (text: string) => {
+    const assistantMsg: ChatMessage = {
+      id: newMessageId("m"),
+      role: "assistant",
+      text,
+      timestamp: Date.now(),
     };
-    const id = window.setTimeout(tick, 250);
-    typewriterTimeouts.current.push(id);
+    setMessages((m) => [...m, assistantMsg].slice(-200));
+    setStreamingText(null);
+  };
+
+ // Begin streaming a reply. The full text is handed to <StreamingMessage>,
+ // which owns the per-tick typewriter state internally so the parent (and
+ // the rest of the conversation) doesn't re-render on every animation frame.
+  const finishAssistantReply = (text: string) => {
+    setStreamingText(text);
   };
 
  // `send` is defined in the render body, so the purity rule flags
@@ -115,14 +159,14 @@ export function ChatView() {
  // the same `ts` so they stay consistent.
   const send = (text: string, ts: number) => {
     const trimmed = text.trim();
-    if (!trimmed || streaming !== null) return;
+    if (!trimmed || streamingText !== null || sendChat.isPending) return;
     const userMsg: ChatMessage = {
-      id: `u${ts}`,
+      id: newMessageId("u"),
       role: "user",
       text: trimmed,
       timestamp: ts,
     };
-    setMessages((m) => [...m, userMsg]);
+    setMessages((m) => [...m, userMsg].slice(-200));
     setInput("");
 
  // Create a fresh AbortController for this run. Abort the previous
@@ -134,9 +178,13 @@ export function ChatView() {
 
  // Pass conversation history so the LLM has context for follow-up questions.
  // Filter out the greeting (id "m0") and error messages (id "e...") so the
- // LLM doesn't receive fabricated prior assistant replies as context.
+ // LLM doesn't receive fabricated prior assistant replies as context. Keep
+ // only the most recent turns so the outbound `messages[]` stays within the
+ // server's 100-message cap (the route hard-rejects more) and we don't
+ // re-pay the entire transcript over the wire on every send.
     const history = messages
       .filter((m) => m.id !== "m0" && m.id !== "m-cleared" && !m.id.startsWith("e"))
+      .slice(-98)
       .map((m) => ({ role: m.role, content: m.text }));
     sendChat.mutate(
       { text: trimmed, history, signal: controller.signal },
@@ -152,7 +200,7 @@ export function ChatView() {
             setMessages((m) => [
               ...m,
               {
-                id: `e${Date.now()}`,
+                id: newMessageId("e"),
                 role: "assistant",
                 text: `The wingman service returned an empty response. ${apiError}`,
                 timestamp: Date.now(),
@@ -177,7 +225,7 @@ export function ChatView() {
           setMessages((m) => [
             ...m,
             {
-              id: `e${Date.now()}`,
+              id: newMessageId("e"),
               role: "assistant",
               text: `Couldn't reach the wingman service (port 3003). ${msg}`,
               timestamp: Date.now(),
@@ -202,15 +250,10 @@ export function ChatView() {
       abortRef.current.abort();
       abortRef.current = null;
     }
- // 2. Cancel the typewriter setTimeout chain.
-    typewriterAborted.current = true;
-    typewriterTimeouts.current.forEach((id) => clearTimeout(id));
-    typewriterTimeouts.current = [];
- // 3. Reset the visible state. `setStreaming(null)` hides the typing
- // indicator; `setMessages([greeting])` resets the list. With the
- // timeouts cleared + the abort flag set, no pending tick can
- // re-populate either.
-    setStreaming(null);
+ // 2. End the streaming indicator. <StreamingMessage> unmounts and cancels
+ // its own typewriter timeouts in its effect cleanup, so no pending tick
+ // can re-populate the typing bubble.
+    setStreamingText(null);
     setMessages([
       {
         id: "m-cleared",
@@ -243,7 +286,7 @@ export function ChatView() {
         {/* Messages */}
         <div
           ref={scrollRef}
-          aria-busy={streaming !== null || sendChat.isPending}
+          aria-busy={streamingText !== null || sendChat.isPending}
           className="flex-1 overflow-auto cowork-scroll p-4 space-y-4"
         >
           <AnimatePresence initial={false}>
@@ -278,19 +321,15 @@ export function ChatView() {
             ))}
           </AnimatePresence>
 
-          {streaming !== null ? (
-            <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="flex gap-3">
-              <AssistantAvatar />
-              <div className="max-w-[80%] rounded-2xl px-4 py-2.5 text-sm bg-muted rounded-bl-sm">
-                <p className="whitespace-pre-wrap leading-relaxed">
-                  {streaming}
-                  <span className="inline-block w-1.5 h-3.5 bg-foreground ml-0.5 cowork-pulse align-middle" />
-                </p>
-              </div>
-            </motion.div>
+          {streamingText !== null ? (
+            <StreamingMessage
+              key={streamingText}
+              fullText={streamingText}
+              onComplete={() => finishStreaming(streamingText)}
+            />
           ) : null}
 
-          {sendChat.isPending && streaming === null ? (
+          {sendChat.isPending && streamingText === null ? (
             <div className="flex gap-3">
               <AssistantAvatar />
               <div className="rounded-2xl px-4 py-2.5 text-sm bg-muted rounded-bl-sm flex items-center gap-2 text-muted-foreground">
@@ -325,22 +364,22 @@ export function ChatView() {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
  // Guard Enter the same way the Send button is guarded
- // (`disabled={... || streaming !== null}`).
-                if (streaming !== null) return;
+ // (`disabled={... || streamingText !== null || sendChat.isPending}`).
+                if (streamingText !== null || sendChat.isPending) return;
                 send(input, Date.now());
               }
             }}
             placeholder="Message Wingman…"
             aria-label="Message Wingman"
             className="h-10"
-            disabled={streaming !== null}
+            disabled={streamingText !== null || sendChat.isPending}
           />
           <Button
             size="icon"
             className="size-10 shrink-0"
             type="button"
             onClick={() => send(input, Date.now())}
-            disabled={!input.trim() || streaming !== null}
+            disabled={!input.trim() || streamingText !== null || sendChat.isPending}
             aria-label="Send"
           >
             <Send className="size-4" />

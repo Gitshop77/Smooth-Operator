@@ -55,6 +55,11 @@ function getElementValue(el: Element): string {
       if (transientTextTypes.includes(el.type)) return "";
       if (el.type === "checkbox" || el.type === "radio") return el.checked ? "1" : "0";
     }
+ // A <textarea>'s value is just as transient as a text <input> — folding it
+ // into the signature would churn the fingerprint on every keystroke and trip
+ // spurious SPA-route-change detection. Treat it like the transient inputs
+ // (stateful <select> values are still meaningful and kept).
+    if (el instanceof HTMLTextAreaElement) return "";
     return el.value;
   }
   return "";

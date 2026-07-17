@@ -26,7 +26,7 @@ const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>(".tab"));
 
 // Lazily render dynamic tab content on first activation. Hoisted to module
 // scope so it is built once, not re-allocated on every tab switch.
-const renderers: Record<string, () => void> = {
+const renderers: Record<string, () => void | Promise<void>> = {
   secrets: renderSecrets,
   schedule: renderSchedule,
   tools: renderTools,
@@ -53,8 +53,12 @@ function activateTab(tab: HTMLButtonElement, focus = true): void {
     c.classList.toggle("active", isActive);
     c.hidden = !isActive;
   });
- // Lazily render dynamic tab content on first activation.
-  renderers[target]?.();
+ // Lazily render dynamic tab content on first activation. A renderer that
+ // reads chrome.storage.local can reject (quota/disabled/policy); catch it so
+ // a transient failure surfaces as a warning instead of an unhandled rejection.
+  Promise.resolve(renderers[target]?.()).catch((err) =>
+    console.warn("[options] tab renderer failed:", err),
+  );
 }
 
 tabs.forEach((tab) => {
@@ -98,7 +102,7 @@ try {
   const aboutVersion = document.getElementById("aboutVersion");
   if (aboutVersion) aboutVersion.textContent = chrome.runtime.getManifest().version;
 } catch {
-  /* manifest unavailable — version stays as the static fallback text */
+  /* manifest unavailable — version stays empty */
 }
 
 // Activate the default tab on load so inactive panels receive the `hidden`

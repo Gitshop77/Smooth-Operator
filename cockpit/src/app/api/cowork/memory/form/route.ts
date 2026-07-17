@@ -1,26 +1,32 @@
 // Wired to Prisma persistence layer.
 import type { NextRequest } from 'next/server';
 import { Prisma } from '@prisma/client';
-import { json, badRequest, withRouteError, parseLimit, isPrismaRecordNotFound } from '@/lib/cowork/api/http';
+import { json, badRequest, withRouteError, parseLimit, isPrismaRecordNotFound, CURSOR_ID_RE, sanitizeRequestId } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
-// ─── Response-only PII redaction (defense-in-depth, NOT at-rest protection) ───
+// ─── Form-memory PII: write-boundary DROP (at-rest) + read-time redaction ───
 //
-// IMPORTANT CONTRACT: this route NEVER redacts the stored `formDataJson`. The
-// raw autofill values (including passwords/emails) are persisted verbatim by
-// the write path; `redactFormMemory` masks sensitive *values* ONLY in the JSON
-// returned to the client. Any other reader — the extension, a DB dump, the
-// `/sync` path, other routes — still sees plaintext. Treat this masking purely
-// as defense-in-depth against accidental exposure in API responses; it is NOT
-// a safeguard for data at rest, and high-sensitivity values (passwords,
-// card numbers, OTPs) ideally should not be persisted at all.
+// IMPORTANT CONTRACT — AT REST: `scrubFormMemoryInput` MUST be invoked on any
+// incoming `formDataJson` BEFORE it is persisted. It removes, by field name,
+// every key that matches a high-sensitivity fragment (password, passwd, pwd,
+// card, cvv, otp, token, secret, ssn, email, … — see SENSITIVE_FIELD_RE),
+// INCLUDING the `{ name, value }` autofill-entry shape, so high-sensitivity PII
+// is NEVER stored as plaintext at rest. Non-sensitive fields persist verbatim.
+// Any future POST/PATCH write handler in this route (or any other code that
+// creates a `FormMemory`) must call `scrubFormMemoryInput` first; this is the
+// primary safeguard for data at rest, not the response masking below.
 //
-// Field *names* are preserved; only values are masked. Matching is
-// case-insensitive SUBSTRING against the fragment list below, so variants like
-// `login`, `fullname`, `e-mail`, `cc-number`, `phone_number` are caught
-// (the prior exact-anchor regex missed them all). We redact on suspicion: a
-// false positive costs one masked benign value, a false negative leaks a
-// secret, so we bias toward masking.
+// IMPORTANT CONTRACT — RESPONSE: `redactFormMemory` masks sensitive *values*
+// ONLY in the JSON returned to the client. It is defense-in-depth for records
+// that may already exist (prior/elsewhere writes); it is NOT a substitute for
+// the write-boundary drop and does NOT protect data at rest.
+//
+// Field *names* are preserved by `redactFormMemory`; only values are masked.
+// Matching is case-insensitive SUBSTRING against the fragment list below, so
+// variants like `login`, `fullname`, `e-mail`, `cc-number`, `phone_number`
+// are caught (the prior exact-anchor regex missed them all). We redact on
+// suspicion: a false positive costs one masked benign value, a false negative
+// leaks a secret, so we bias toward masking.
 const SENSITIVE_FIELD_RE = new RegExp(
   [
     'password', 'passwd', 'pwd',
@@ -43,9 +49,6 @@ const SENSITIVE_FIELD_RE = new RegExp(
 
 const REDACTED = '[redacted]';
 
-// Cursor id shape used for `after` pagination (table ids are cuid strings).
-const CURSOR_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
-
 // Heuristic: does a *scalar* value look like a secret worth masking? Used as a
 // fallback for bare scalars / unparseable JSON (where no field name is available
 // to match against), AND as a secondary heuristic on scalar string values inside
@@ -58,9 +61,21 @@ function looksLikeSecret(value: unknown): boolean {
  // Keyword match is NOT gated by the length floor — a short but clearly
  // secret-shaped scalar (e.g. "token", "secret") must still be masked.
   if (/(password|passwd|secret|token|api[_-]?key|access[_-]?token|cvv|otp|ssn|pin)/i.test(t)) return true;
+ // Common secret *shapes* that the generic charset branch below cannot catch
+ // because they contain '.' (JWT) or whitespace ('Bearer ' / 'Basic '):
+ //   • JSON Web Token:  eyJ…  .  payload  .  signature
+ //   • Authorization header value: "Bearer <jwt>" or "Basic <base64>"
+ // Mask these regardless of the field name they are stored under.
+  if (/^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/.test(t)) return true;
+  if (/^(Bearer|Basic)\s+/i.test(t)) return true;
  // Long base64 / hex / token-shaped value with no obvious structure. Only this
- // generic branch needs the length floor; the keyword branch above stands alone.
-  return t.length >= 20 && /^[A-Za-z0-9+/=_-]{20,}$/.test(t);
+ // generic branch needs a length floor; the keyword branch above stands alone.
+ // The floor is kept low (8) so short high-entropy tokens (e.g. 16-char base64)
+ // are still masked even under a non-sensitive key. To avoid masking ordinary
+ // dictionary words (e.g. "plainvalue"), require at least one digit or one
+ // uppercase letter — a benign lowercase-only word is not a secret, whereas a
+ // real token almost always mixes case or contains digits.
+  return /^[A-Za-z0-9+/=_-]{8,}$/.test(t) && (/[0-9]/.test(t) || /[A-Z]/.test(t));
 }
 
 // Redact an object that carries a `name` key (the `{ name, value }` entry shape).
@@ -98,7 +113,7 @@ function redactEntry(entry: unknown): unknown {
 // • primitive/scalar values → returned as-is.
 function redactNode(node: unknown): unknown {
   if (Array.isArray(node)) {
-    return node.map(redactNode);
+    return node.map((v) => (typeof v === 'string' && looksLikeSecret(v) ? REDACTED : redactNode(v)));
   }
   if (node && typeof node === 'object') {
     if ('name' in node) {
@@ -111,7 +126,8 @@ function redactNode(node: unknown): unknown {
       if (SENSITIVE_FIELD_RE.test(key)) {
         obj[key] = REDACTED;
       } else {
-        obj[key] = redactNode(obj[key]);
+        const v = obj[key];
+        obj[key] = (typeof v === 'string' && looksLikeSecret(v)) ? REDACTED : redactNode(v);
       }
     }
     return obj;
@@ -145,6 +161,66 @@ function redactFormMemory(formDataJson: string): string {
   return JSON.stringify(redactNode(parsed));
 }
 
+// ─── Write-boundary sensitive-field DROP (at-rest protection) ───
+//
+// Called on the *incoming* `formDataJson` BEFORE it is written to SQLite.
+// Removes entirely (field name AND value) any key matching SENSITIVE_FIELD_RE,
+// recursing into nested objects/arrays so a sensitive key is dropped at any
+// depth. The `{ name, value }` autofill-entry shape is handled specially: when
+// an entry's `name` matches a sensitive fragment the WHOLE entry is dropped,
+// since the secret lives under `value` while the field name is under `name`.
+// Non-sensitive fields are preserved verbatim. High-sensitivity PII is thus
+// never persisted as plaintext at rest. `redactFormMemory` remains as
+// defense-in-depth for any already-stored records.
+//
+// NOTE: exported so the (currently absent) write handler — or any other caller
+// that creates a `FormMemory` — can enforce the write-boundary drop. There is
+// no write handler in this route today, but the helper is ready so the write
+// path cannot accidentally persist verbatim secrets.
+export function scrubFormMemoryInput(formDataJson: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(formDataJson);
+  } catch {
+    // Unparseable input: cannot match by field name. If the bare value looks
+    // secret-shaped, drop it entirely (persist nothing) rather than risk a
+    // plaintext secret at rest; otherwise pass through unchanged.
+    return looksLikeSecret(formDataJson) ? '{}' : formDataJson;
+  }
+  if (parsed === null || typeof parsed !== 'object') {
+    return looksLikeSecret(parsed) ? '{}' : formDataJson;
+  }
+  const scrubbed = stripSensitiveKeys(parsed);
+  if (scrubbed === undefined) return '{}';
+  return JSON.stringify(scrubbed);
+}
+
+// Recursively remove any object key matching SENSITIVE_FIELD_RE and recurse
+// into remaining values. Returns `undefined` for an entry that is dropped so
+// the caller can omit it.
+function stripSensitiveKeys(node: unknown): unknown {
+  if (Array.isArray(node)) {
+    return node.map(stripSensitiveKeys).filter((v) => v !== undefined);
+  }
+  if (node && typeof node === 'object') {
+    const obj = node as Record<string, unknown>;
+    // `{ name, value }` entry shape: if the entry's field name is sensitive,
+    // drop the entire entry (name + value) so nothing about it is persisted.
+    if ('name' in obj && SENSITIVE_FIELD_RE.test(String(obj.name ?? ''))) {
+      return undefined;
+    }
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(obj)) {
+      if (SENSITIVE_FIELD_RE.test(key)) continue; // drop sensitive key entirely
+      const v = stripSensitiveKeys(obj[key]);
+      if (v === undefined) continue;
+      out[key] = v;
+    }
+    return out;
+  }
+  return node;
+}
+
 export async function GET(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
  // Cap the result set + cursor pagination, same as the site route.
@@ -155,7 +231,7 @@ export async function GET(req: NextRequest): Promise<Response> {
     }
     const args: Parameters<typeof db.formMemory.findMany>[0] = {
       take: limit,
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: 'desc', id: 'desc' },
     };
     if (after) {
       args.cursor = { id: after };
@@ -181,7 +257,7 @@ export async function GET(req: NextRequest): Promise<Response> {
  // Form-memory holds autofill PII; never let browsers/proxies/CDNs cache it.
     r.headers.set('Cache-Control', 'no-store, private');
     return r;
-  });
+  }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
 }
 
 // DELETE /api/cowork/memory/form?id=<formMemoryId>
@@ -197,6 +273,11 @@ export async function DELETE(req: NextRequest): Promise<Response> {
       r.headers.set('Cache-Control', 'no-store, private');
       return r;
     }
+    if (!CURSOR_ID_RE.test(id)) {
+      const r = badRequest('invalid id');
+      r.headers.set('Cache-Control', 'no-store, private');
+      return r;
+    }
     try {
       await db.formMemory.delete({ where: { id } });
     } catch (e) {
@@ -204,7 +285,10 @@ export async function DELETE(req: NextRequest): Promise<Response> {
  // code lives in `e.code`, but a caller may surface a plain Error whose
  // message still reports P2025 (e.g. certain driver/adapter layers);
  // detect both so a missing entry is a precise 404 rather than a 500.
-      if (isPrismaRecordNotFound(e)) {
+      if (
+        isPrismaRecordNotFound(e) ||
+        (e instanceof Error && /P2025/.test(e.message))
+      ) {
         const r = json({ error: 'not found' }, 404);
         r.headers.set('Cache-Control', 'no-store, private');
         return r;
@@ -214,5 +298,5 @@ export async function DELETE(req: NextRequest): Promise<Response> {
     const ok = json({ ok: true });
     ok.headers.set('Cache-Control', 'no-store, private');
     return ok;
-  });
+  }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
 }

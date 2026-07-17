@@ -233,11 +233,56 @@ const INVISIBLE_CHARS_SOURCE = "\\p{Default_Ignorable_Code_Point}|\u200b|\u200c|
 // resets `lastIndex` on each call, so sharing the global regex is safe.
 const MIDWORD_SEPARATOR_RE = /(\w)[\u2028\u2029](\w)/gu;
 
+// Curated homoglyph / confusable folding. NFKC does NOT canonicalize
+// letter-like symbols (Cyrillic, Greek, dotless-i) to ASCII, so an attacker can
+// spell injection keywords with lookalike codepoints that survive `normalize()`
+// verbatim into the prompt (e.g. `\u0131gnore` from U+0131, `\u03b5` U+03B5, `\u043e` U+043E).
+// We fold a curated set of ASCII-confusable letters to their ASCII counterparts
+// BEFORE the injection patterns run, closing the homoglyph-injection channel for
+// both `sanitizeUntrusted` and `scanForInjection`. Only codepoints that are
+// visually near-indistinguishable from an ASCII a\u2013z / A\u2013Z letter are folded;
+// this is a deliberate, narrow defense-in-depth map (not a full transliteration)
+// and has zero impact on ReDoS / SSRF / secret-redaction / provenance /
+// constant-time / AU-3 guards.
+const HOMOGLYPH_MAP: Record<string, string> = {
+  // Latin dotless-i / dotted-I
+  "\u0131": "i", "\u0130": "I",
+  // Cyrillic lookalikes
+  "\u0430": "a", "\u0410": "A",
+  "\u0435": "e", "\u0415": "E",
+  "\u043e": "o", "\u041e": "O",
+  "\u0441": "c", "\u0421": "C",
+  "\u0443": "y", "\u0423": "Y",
+  "\u0445": "x", "\u0425": "X",
+  "\u0440": "p", "\u0420": "P",
+  "\u0456": "i", "\u0406": "I",
+  "\u0455": "s", "\u0405": "S",
+  // Greek lookalikes
+  "\u03b1": "a", "\u0391": "A",
+  "\u03b2": "b", "\u0392": "B",
+  "\u03b5": "e", "\u0395": "E",
+  "\u03bf": "o", "\u039f": "O",
+  "\u03c1": "p", "\u03a1": "P",
+  "\u03c5": "y", "\u03a5": "Y",
+  "\u03c7": "x", "\u03a7": "X",
+  "\u03ba": "k", "\u039a": "K",
+  "\u03bd": "v", "\u039d": "N",
+  "\u03bc": "u", "\u039c": "M",
+  "\u03b9": "i", "\u0399": "I",
+  "\u03c4": "t", "\u03a4": "T",
+  "\u03b7": "n", "\u0397": "N",
+  "\u03c3": "s", "\u03a3": "S",
+  "\u03c2": "s",
+};
+const HOMOGLYPH_RE = new RegExp(`[${Object.keys(HOMOGLYPH_MAP).join("")}]`, "gu");
+
 function normalize(text: string): string {
- // Strip the invisible / format / Default-Ignorable set (see
- // INVISIBLE_CHARS_SOURCE). U+2028/U+2029 are NOT stripped here \u2014 they are
- // legitimate content separators and must be preserved.
-  const stripped = text
+ // Fold ASCII-confusable homoglyphs FIRST (closes the lookalike-injection
+ // channel), then NFKC-normalize + strip the invisible / format /
+ // Default-Ignorable set (see INVISIBLE_CHARS_SOURCE). U+2028/U+2029 are NOT
+ // stripped here \u2014 they are legitimate content separators and must be preserved.
+  const folded = text.replace(HOMOGLYPH_RE, (ch) => HOMOGLYPH_MAP[ch] ?? ch);
+  const stripped = folded
     .normalize("NFKC")
     .replace(INVISIBLE_CHARS_STRIP_RE, "");
  // A malicious page can smuggle an injection keyword through a MID-WORD
@@ -268,6 +313,29 @@ export function sanitizeUntrusted(text: string): string {
  */
 export function wrapUntrusted(text: string): string {
   return `<${UNTRUSTED_TAG}>\n${sanitizeUntrusted(text)}\n</${UNTRUSTED_TAG}>`;
+}
+
+/**
+ * Neutralize every prompt-level tag in `text` WITHOUT discarding the enclosed
+ * content: `<tag>`, `</tag>`, and `<tag …>` are rewritten as `[tag]` / `[/tag]`
+ * / `[tag …]` so the LLM cannot interpret them as trusted prompt blocks, while
+ * the surrounding text survives.
+ *
+ * Unlike {@link sanitizeUntrusted} (which REDACTS whole forged blocks), this is
+ * for content that flows into TRUSTED prompt context where redaction would be
+ * too lossy — custom-skill instructions and `<site_memory>` notes. Forging any
+ * of these tags inside such content (the same class of attack `sanitizeUntrusted`
+ * / `scanForInjection` defend against for page content) would otherwise be
+ * honored as a trusted block, so we break the tag markers. Derived from
+ * {@link PROMPT_TAGS} (single source of truth) so it stays in sync with every
+ * other tag-stripping sanitizer.
+ */
+const NEUTRALIZE_PROMPT_TAG_RE = new RegExp(
+  `<(\\/?\\s*(?:${INTERLEAVED_PROMPT_TAGS})\\b[^>]*)>`,
+  "gi",
+);
+export function neutralizePromptTags(text: string): string {
+  return normalize(text).replace(NEUTRALIZE_PROMPT_TAG_RE, "[$1]");
 }
 
 // ─── Injection classifier (heuristic pattern scanner) ───────────────────────
@@ -479,7 +547,7 @@ export function scanForInjection(text: string): InjectionScanResult {
  * separately below so FQDN `.example.com` / `example.com.` forms normalize).
  */
 function normalizeHost(h: string): string {
-  return h.replace(/^\[|\]$/g, "").toLowerCase();
+  return h.replace(/^\[|\]$/g, "").replace(/%[0-9a-z]+$/i, "").toLowerCase();
 }
 
 function hostnameMatches(hostname: string, domain: string): boolean {
@@ -586,6 +654,14 @@ export interface UrlPolicyConfig {
   allowedDomains?: string[];
   /** Optional blocklist — these domains (+ subdomains) are always rejected. */
   blockedDomains?: string[];
+  /**
+   * Optional additive phishing/reputation deny-gate. Called with the parsed
+   * hostname AFTER the static block/allow checks; a `true` result rejects the
+   * URL. It can ONLY add blocks — it is never consulted to grant access, so it
+   * cannot relax the allowlist. It fails open: if it throws (reputation source
+   * unavailable), the URL is treated as not-flagged rather than blocked.
+   */
+  reputationDeny?: (hostname: string) => boolean;
 }
 
 /** Result of a URL policy check. */
@@ -620,6 +696,19 @@ export function checkUrlAllowed(
   }
   if (isUrlBlocked(url, config.blockedDomains)) {
     return { allowed: false, reason: "URL domain is blocked" };
+  }
+ // Additive reputation deny-gate: can only reject, never grant. Fail open so an
+ // unavailable/throwing reputation source never blocks otherwise-allowed traffic.
+  if (config.reputationDeny) {
+    let flagged = false;
+    try {
+      flagged = config.reputationDeny(parsed.hostname);
+    } catch {
+      flagged = false;
+    }
+    if (flagged) {
+      return { allowed: false, reason: "URL flagged by reputation list" };
+    }
   }
   if (!isUrlAllowed(url, config.allowedDomains, requireAllowlist)) {
     return {

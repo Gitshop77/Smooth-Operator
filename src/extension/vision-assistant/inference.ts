@@ -76,12 +76,33 @@ export class VisionAssistant {
   private statusCallback: StatusCallback | null = null;
   /**
  * Re-entrancy guard for `init()`. Two concurrent `init()` callers would both
- * pass the `isReady` check (neither is ready yet) and duplicate the ~2.1 GB
+ * pass the `isReady` check (neither is ready yet) and duplicate the ~3.4 GB
  * download + leak a WebGPU session. We cache the in-flight promise and return
  * it; the promise is cleared on settle (success or failure) so a failed init
  * can be retried — mirroring the `tokenizerLoadPromise` pattern.
  */
   private initPromise: Promise<void> | null = null;
+  /**
+ * Re-entrancy guard for `detect()`. Two concurrent `detect()` calls would
+ * interleave `session.run(feeds)` on the shared vision/language ONNX sessions
+ * and clobber the KV-cache/prefill state, producing garbage detections or
+ * throwing mid-decode. We cache the in-flight promise and return it so a
+ * second concurrent caller awaits the same detection instead of racing the
+ * tensor feeds. Mirrors the `initPromise` pattern (cleared on settle so a
+ * failed detect can be retried).
+ */
+  private detectPromise: Promise<PixelDetection[]> | null = null;
+  /** The screenshot `detect()` is currently running on. Lets identical,
+   * re-entrant inputs share the in-flight run while a *different* concurrent
+   * screenshot is rejected instead of silently being served the wrong
+   * detections. */
+  private detectDataUrl: string | null = null;
+
+  constructor() {
+    // Surface the non-fatal supply-chain warning (unpinned-weights opt-in)
+    // as a visible status so the UI shows it instead of a silent console.warn.
+    this.loader.onWarning((msg) => this.setStatus("warning", msg));
+  }
 
   get status(): VisionStatus {
     return this._status;
@@ -354,11 +375,41 @@ export class VisionAssistant {
     }
   }
 
-  /** Run detection on a screenshot. Returns pixel-coordinate detections. */
-  async detect(screenshotDataUrl: string): Promise<PixelDetection[]> {
+  /** Run detection on a screenshot. Returns pixel-coordinate detections.
+ * An optional `signal` short-circuits the decode loop when the run is
+ * aborted, reclaiming the GPU/CPU that would otherwise be spent finishing
+ * an abandoned detection. */
+  async detect(screenshotDataUrl: string, signal?: AbortSignal): Promise<PixelDetection[]> {
+ // Re-entrancy guard over the shared ONNX sessions. Two concurrent `detect()`
+ // calls would interleave `session.run(feeds)` on the same vision/language
+ // sessions and clobber the KV-cache/prefill state, producing garbage
+ // detections or throwing mid-decode. We serialize to a single in-flight run.
+ // Identical inputs share the cached promise; a concurrent call with a
+ // DIFFERENT screenshot is rejected rather than silently served the first
+ // caller's detections (which would feed the wrong bounding boxes / click
+ // coordinates to a vision-guided action).
+    if (this.detectPromise) {
+      if (this.detectDataUrl === screenshotDataUrl) return this.detectPromise;
+      throw new Error(
+        "Vision detect() is already running on a different screenshot; " +
+          "concurrent detection on the shared ONNX sessions is not supported",
+      );
+    }
+    this.detectDataUrl = screenshotDataUrl;
+    this.detectPromise = this.doDetect(screenshotDataUrl, signal).finally(() => {
+      this.detectPromise = null;
+      this.detectDataUrl = null;
+    });
+    return this.detectPromise;
+  }
+
+  /** Core detection. See `detect()` for the re-entrancy wrapper. */
+  private async doDetect(screenshotDataUrl: string, signal?: AbortSignal): Promise<PixelDetection[]> {
     if (!this.isReady || !this.visionSession || !this.languageSession || !this.embMeta || !this.embPacked || !this.embScales) {
       throw new Error("Vision assistant not ready");
     }
+
+    if (signal?.aborted) throw new DOMException("Vision detect aborted", "AbortError");
 
     const H = this.embMeta.hidden;
 
@@ -469,6 +520,8 @@ export class VisionAssistant {
       ...mkEmptyPast(),
     };
 
+    if (signal?.aborted) throw new DOMException("Vision detect aborted", "AbortError");
+
     let res = await this.languageSession.run(feeds);
     let present = res as Record<string, ort.Tensor>;
     const logits = this.getLogits(res);
@@ -483,6 +536,10 @@ export class VisionAssistant {
     let pastLen = L;
     for (let step = 0; step < MAX_NEW_TOKENS - 1; step++) {
       if (next === IM_END_TOKEN) break;
+ // Short-circuit the decode loop when the run is aborted. `session.run`
+ // itself isn't interruptible, but skipping the remaining decode steps
+ // reclaims the GPU/CPU that would otherwise finish an abandoned result.
+      if (signal?.aborted) throw new DOMException("Vision detect aborted", "AbortError");
       const emb1 = new Float32Array(H);
       gatherEmbed(next, emb1, 0, this.embPacked, this.embScales, this.embMeta);
       const f: Record<string, ort.Tensor> = {

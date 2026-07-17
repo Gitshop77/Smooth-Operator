@@ -1,7 +1,6 @@
 import type { NextConfig } from "next";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
-import { randomBytes } from "node:crypto";
 
 /**
  * The cockpit is a self-contained Next.js app living inside a larger
@@ -15,6 +14,7 @@ const projectRoot = dirname(fileURLToPath(import.meta.url));
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  poweredByHeader: false,
  // Strict mode is intentionally ON. The double-invocation of effects in
  // development is the most effective built-in detector of missing effect
  // cleanups and stale-closure bugs. The realtime `useCoworkWebSocket` hook
@@ -29,63 +29,31 @@ const nextConfig: NextConfig = {
   },
   headers() {
     /**
- * Per-request CSP nonce.
+ * Baseline static security response headers applied to every response.
  *
- * Next.js's App Router emits required inline `<script>` (RSC flight
- * bootstrap, hydration) and inline `<style>` tags. A static
- * `script-src 'self'` (no nonce / no `'unsafe-inline'`) blocks those
- * inline tags and silently breaks client-side hydration in a real
- * production build. Next.js reads the nonce out of the response
- * `Content-Security-Policy` header and automatically applies the same
- * nonce to the inline scripts and styles it generates, so we can keep a
- * strict policy without `'unsafe-inline'` and still allow the framework's
- * own inline code to run.
+ * The Content-Security-Policy is intentionally NOT set here: `headers()` is
+ * evaluated ONCE at build/startup, so any nonce minted here would be a single
+ * static value baked into every response — providing no CSP protection and
+ * never applied to Next.js's own inline RSC/hydration scripts. The strict,
+ * per-request nonce'd CSP is set instead in `src/middleware.ts`, which runs on
+ * every request. See that file for the connect-src contract (kept in sync with
+ * src/hooks/use-websocket.ts: same-origin socket.io over `connect-src 'self'`).
  *
- * A fresh nonce is generated per request so it cannot be reused across
- * responses.
- */
-    const nonce = randomBytes(16).toString("base64");
-
-    /**
- * Baseline security response headers applied to every response (HSTS, noted
- * below, is production-only — see its conditional below).
- * • Content-Security-Policy — `frame-ancestors 'none'` blocks embedding;
- * strict `script-src`/`style-src` (self + per-request nonce) allow only
- * the framework's own inline code; `img-src 'self' data:` permits inline
- * data-URI images; `connect-src 'self'` permits same-origin fetches and
- * the realtime socket.io link.
- *
- * connect-src contract (cross-file — keep in sync with
- * src/hooks/use-websocket.ts): the socket is opened with `io()` and NO
- * URL, so socket.io-client targets `window.location.origin`, i.e. the
- * cockpit's own origin. The browser talks to the same gateway that served
- * this page; that gateway then forwards to the mini-service via the
- * `XTransformPort` query param, but the browser-level connection is still
- * same-origin. `connect-src 'self'` therefore covers BOTH the websocket
- * and the polling transports. If the socket is EVER pointed at a
- * different origin, this directive MUST be updated to allowlist it
- * (e.g. `connect-src 'self' wss://events.example.com`) or the realtime
- * link is silently blocked by CSP with only a console violation to show
- * for it.
  * • X-Frame-Options: DENY — legacy clickjacking guard.
  * • X-Content-Type-Options: nosniff — stops MIME sniffing.
  * • Strict-Transport-Security — enforces TLS (production only).
  */
     const securityHeaders = [
-      {
-        key: "Content-Security-Policy",
-        value: [
-          `default-src 'self'`,
-          `script-src 'self' 'nonce-${nonce}'`,
-          `style-src 'self' 'nonce-${nonce}'`,
-          `img-src 'self' data:`,
-          `connect-src 'self'`,
-          `frame-ancestors 'none'`,
-        ].join("; "),
-      },
       { key: "X-Frame-Options", value: "DENY" },
       { key: "X-Content-Type-Options", value: "nosniff" },
       { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+      {
+        key: "Permissions-Policy",
+        value:
+          "geolocation=(), camera=(), microphone=(), payment=(), usb=(), interest-cohort=()",
+      },
+      { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
+      { key: "Cross-Origin-Resource-Policy", value: "same-origin" },
  // Strict-Transport-Security is only meaningful over TLS. Emitting it on
  // plaintext `next dev` (http://127.0.0.1) is a no-op today, but if the dev
  // server is ever reached over a real hostname via a proxy it would cache an

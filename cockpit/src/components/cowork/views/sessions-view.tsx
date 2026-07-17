@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { motion, useReducedMotion } from "framer-motion";
-import { Boxes, Cookie, EyeOff, PlayCircle, Smartphone } from "lucide-react";
+import { Boxes, Cookie, EyeOff, PlayCircle, Smartphone, AlertCircle } from "lucide-react";
 
 import { useSessions } from "@/hooks/use-cowork-query";
 import { useCoworkStore } from "@/hooks/use-cowork-store";
@@ -27,7 +27,7 @@ import { timeAgo } from "@/lib/cowork-data/format";
  * `setView("session-replay", { sessionId })`.
  */
 export function SessionsView() {
-  const { data, isLoading } = useSessions();
+  const { data, isLoading, isError, error } = useSessions();
   const setView = useCoworkStore((s) => s.setView);
   const reduceMotion = useReducedMotion();
 
@@ -44,6 +44,12 @@ export function SessionsView() {
 
       {isLoading ? (
         <LoadingSkeleton variant="cards" cardCount={4} />
+      ) : isError ? (
+        <EmptyState
+          icon={<AlertCircle className="size-6" />}
+          title="Couldn't load sessions"
+          description={error?.message ?? "The sessions endpoint returned an error. Check that the backend is reachable and NEXT_PUBLIC_COWORK_UI_TOKEN is configured."}
+        />
       ) : sessions.length === 0 ? (
         <EmptyState
           icon={<Boxes className="size-6" />}

@@ -8,6 +8,7 @@
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import { getFullSkill } from "../../domain-skills";
+import { LIMITS } from "../constants";
 import type { ActionContext } from "./types";
 
 export async function handleLoadSkill(
@@ -42,10 +43,16 @@ export async function handleLoadSkill(
       message: `Skill "${safeName}" not found (not in <available_skills>?)`,
     };
   }
+  let skillBody = body;
+  let truncatedNote = "";
+  if (skillBody.length > LIMITS.loadSkillBodyChars) {
+    skillBody = skillBody.slice(0, LIMITS.loadSkillBodyChars);
+    truncatedNote = `\n\n…[skill truncated to ${LIMITS.loadSkillBodyChars} chars]`;
+  }
   return {
     action,
     success: true,
     message: `Loaded skill "${safeName}" (${body.length} chars)`,
-    extractedContent: `Skill: ${safeName}\n\n${body}`,
+    extractedContent: `Skill: ${safeName}\n\n${skillBody}${truncatedNote}`,
   };
 }

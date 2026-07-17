@@ -20,7 +20,7 @@ import { StatCard } from "@/components/cowork/shared/stat-card";
 import { timeAgo, hostnameOf, truncateMiddle, safeHref } from "@/lib/cowork-data/format";
 
 export function TabsView() {
-  const { data, isLoading, refetch, isFetching } = useTabs();
+  const { data, isLoading, refetch, isFetching, isError, error } = useTabs();
   const [filter, setFilter] = React.useState("");
 
   const tabs = React.useMemo(() => {
@@ -87,6 +87,12 @@ export function TabsView() {
 
       {isLoading ? (
         <LoadingSkeleton rows={6} />
+      ) : isError ? (
+        <EmptyState
+          icon={<AlertCircle className="size-6" />}
+          title="Couldn't load tabs"
+          description={error?.message ?? "The tabs endpoint returned an error. Check that the backend is reachable and NEXT_PUBLIC_COWORK_UI_TOKEN is configured."}
+        />
       ) : tabs.length === 0 ? (
         <EmptyState
           icon={<AppWindow className="size-5" />}

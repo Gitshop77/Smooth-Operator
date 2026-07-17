@@ -14,6 +14,8 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import {
   getDomainConfig,
+  setDomainConfig,
+  validateDomainConfig,
   isDomainPolicyEnforced,
   isDomainConfigMissingButEnforced,
   checkUrlAllowedWithDomainConfig,
@@ -85,6 +87,18 @@ describe("checkUrlAllowedWithDomainConfig (fail-closed)", () => {
     expect(result.reason ?? "").toMatch(/fail closed/i);
   });
 
+  test("throwing global accessor fails closed (blocked)", () => {
+    enforce();
+    Object.defineProperty(globalThis, CONFIG, {
+      configurable: true,
+      get() {
+        throw new Error("hostile accessor");
+      },
+    });
+    const result = checkUrlAllowedWithDomainConfig("https://evil.com");
+    expect(result.allowed).toBe(false);
+  });
+
   test("NOT enforced + config missing → allows (default allow-all preserved)", () => {
     const result = checkUrlAllowedWithDomainConfig("https://anything.com");
     expect(result.allowed).toBe(true);
@@ -108,6 +122,17 @@ describe("checkUrlAllowedWithDomainConfig (fail-closed)", () => {
     expect(result.allowed).toBe(false);
   });
 
+  test("scheme floor (javascript:/data:/file:) still applies under enforced config", () => {
+    // The enforced path delegates to checkUrlAllowed, which applies the scheme
+    // floor. A regression dropping the floor under enforcement would open a
+    // navigate-to-code-exec hole.
+    enforce();
+    setCfg({ allowedDomains: ["example.com"] });
+    expect(checkUrlAllowedWithDomainConfig("javascript:alert(1)").allowed).toBe(false);
+    expect(checkUrlAllowedWithDomainConfig("data:text/html,<script>").allowed).toBe(false);
+    expect(checkUrlAllowedWithDomainConfig("file:///etc/passwd").allowed).toBe(false);
+  });
+
   test("enforced=true + config present-but-empty {} delegates to allow-all (fail-open boundary)", () => {
     // A deliberately empty config ({}) is treated as PRESENT (not missing), so
     // it does NOT trigger the fail-closed path — it is allow-all by design.
@@ -117,5 +142,62 @@ describe("checkUrlAllowedWithDomainConfig (fail-closed)", () => {
     setCfg({});
     const result = checkUrlAllowedWithDomainConfig("https://anything.com");
     expect(result.allowed).toBe(true);
+  });
+});
+
+describe("getDomainConfig shape handling", () => {
+  test("returns {} (allow-all) for a malformed global shape", () => {
+    setCfg({ allowedDomains: "example.com" });
+    expect(getDomainConfig()).toEqual({});
+    setCfg(42);
+    expect(getDomainConfig()).toEqual({});
+  });
+
+  test("returns a frozen canonical object for a valid global", () => {
+    const cfg: DomainConfig = { allowedDomains: ["example.com"] };
+    setCfg(cfg);
+    const got = getDomainConfig();
+    expect(Object.isFrozen(got)).toBe(true);
+    expect(Object.isFrozen(got.allowedDomains)).toBe(true);
+  });
+});
+
+describe("validateDomainConfig shape checks", () => {
+  test("rejects malformed shapes", () => {
+    expect(validateDomainConfig(null)).toBeNull();
+    expect(validateDomainConfig(undefined)).toBeNull();
+    expect(validateDomainConfig(42)).toBeNull();
+    expect(validateDomainConfig([])).toBeNull();
+    expect(validateDomainConfig({ allowedDomains: "example.com" })).toBeNull();
+    expect(validateDomainConfig({ allowedDomains: ["ok"], blockedDomains: 5 })).toBeNull();
+    expect(validateDomainConfig({ allowedDomains: ["ok", 9] })).toBeNull();
+  });
+
+  test("accepts valid shapes", () => {
+    expect(validateDomainConfig({})).not.toBeNull();
+    expect(validateDomainConfig({ allowedDomains: ["a.com"] })).toEqual({ allowedDomains: ["a.com"] });
+    expect(validateDomainConfig({ blockedDomains: ["b.com"] })).toEqual({ blockedDomains: ["b.com"] });
+  });
+});
+
+describe("setDomainConfig retains last-known-good (never downgrades to allow-all)", () => {
+  test("invalid config keeps the previously installed allowlist", () => {
+    const good: DomainConfig = { allowedDomains: ["example.com"] };
+    setDomainConfig(good, true);
+    setDomainConfig({ allowedDomains: "example.com" } as unknown as DomainConfig, true);
+    expect(getDomainConfig()).toEqual({ allowedDomains: ["example.com"] });
+  });
+
+  test("undefined config keeps the previously installed blocklist", () => {
+    const good: DomainConfig = { blockedDomains: ["evil.com"] };
+    setDomainConfig(good, true);
+    setDomainConfig(undefined, true);
+    expect(getDomainConfig()).toEqual({ blockedDomains: ["evil.com"] });
+  });
+
+  test("valid config updates the active policy", () => {
+    setDomainConfig({ allowedDomains: ["a.com"] }, true);
+    expect(checkUrlAllowedWithDomainConfig("https://a.com").allowed).toBe(true);
+    expect(checkUrlAllowedWithDomainConfig("https://b.com").allowed).toBe(false);
   });
 });

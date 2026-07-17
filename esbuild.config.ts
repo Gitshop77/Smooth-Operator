@@ -11,9 +11,10 @@
  */
 
 import { build, context, type BuildOptions, type Plugin } from "esbuild";
-import { copyFile, mkdir, rm, readFile, readdir, stat } from "fs/promises";
-import { existsSync, readFileSync } from "fs";
+import { copyFile, mkdir, rm, readFile, writeFile } from "fs/promises";
+import { existsSync } from "fs";
 import path from "path";
+import { assertOnlyEnZodLocales, lintManifestPermissions, stripConsoleDebug } from "./build-utils";
 
 const watch = process.argv.includes("--watch");
 const OUT = path.resolve("chrome-extension");
@@ -74,7 +75,9 @@ const zodLocalesStubPlugin: Plugin = {
  * expression still evaluates but its result is discarded, so call-site
  * behavior (other than the dropped log) is unchanged. A zero-argument call
  * `console.log()` becomes `void 0;` (a valid statement) rather than the
- * invalid `void ()` a naive rewrite would produce.
+ * invalid `void ()` a naive rewrite would produce. A call whose first argument
+ * is a spread (e.g. `console.log(...args)`) is left untouched: rewriting it to
+ * `void (...args)` would be a SyntaxError, so the original call is preserved.
  *
  * The match is anchored with a negative lookbehind `(?<![\w.$])` so a member
  * expression like `window.console.log("x")` is NOT rewritten to
@@ -93,18 +96,18 @@ const zodLocalesStubPlugin: Plugin = {
  * (`arr.forEach(console.log)`, `const fn = console.log; fn("x")`) is not
  * rewritten and the log survives into the bundle. This is the lesser evil
  * versus a dangerous AST rewrite that could corrupt unrelated identifiers.
- * A full AST-aware transform (esbuild onTransform + parser) would close both;
- * until then these are accepted, documented trade-offs. String literals /
- * comments are NOT exempt: this is a blind textual regex (no parser awareness),
- * so a `console.log(` that appears inside a string literal (e.g.
- * `const s = "console.log(x)"`) or a `// console.log(x)` comment IS rewritten
- * to `void (x)` / `// void (x)`. Such literals will be altered — keep this
- * limitation accurate rather than implying literal/comment occurrences are left
- * intact.
+ * String literals and comments ARE now exempt: the rewrite walks the source
+ * tracking string/comment state (see `stripConsoleDebug`), so a `console.log(`
+ * that appears inside a string literal (e.g. `const s = "console.log(x)"`) or a
+ * `// console.log(x)` comment is left intact. The remaining trade-offs are the
+ * two scope cases above; closing them would require scope-aware binding
+ * resolution, which is intentionally not done to avoid corrupting unrelated
+ * identifiers.
  *
  * This plugin is only attached in production builds (see `sharedConfig`); dev
  * (`--watch`) builds keep the logs.
  */
+
 const stripConsoleDebugPlugin: Plugin = {
   name: "strip-console-debug",
   setup(b) {
@@ -113,13 +116,7 @@ const stripConsoleDebugPlugin: Plugin = {
       const inSource = abs.startsWith(SRC) || abs.startsWith(LIB_SRC);
       if (!inSource) return undefined;
       const original = await readFile(args.path, "utf8");
-      const contents = original
- // Zero-argument calls first → `void 0` (valid expression, no trailing
- // semicolon). Must run before the general rewrite so the result isn't
- // re-matched into `(void (0;)`.
-        .replace(/(?<![\w.$])console\.(debug|log)\(\)/g, "void 0")
- // All other calls → `void (…)`.
-        .replace(/(?<![\w.$])console\.(debug|log)\(/g, "void (");
+      const contents = stripConsoleDebug(original);
       const loader = args.path.endsWith(".tsx")
         ? "tsx"
         : args.path.endsWith(".ts")
@@ -213,68 +210,6 @@ const ENTRIES = [
   { entry: "options.ts", out: "options.js", config: iifeConfig },
 ] as const;
 
-/**
- * PERF-1 guard: fail the build (fail-closed) if any first-party source
- * requests a non-`en` zod locale. The stub plugin above redirects the zod
- * locales barrel to an `en`-only stub, so a direct import like
- * `zod/v4/locales/de.js` (or formatting an error in another locale) would
- * resolve to `undefined` and throw at runtime in the shipped extension. This
- * makes the "only en" assumption a checked invariant instead of a comment.
- */
-async function assertOnlyEnZodLocales(): Promise<void> {
-  const roots = [SRC, LIB_SRC];
-  const bad: string[] = [];
-  const walk = async (dir: string): Promise<void> => {
-    let entries: string[];
-    try {
-      entries = (await readdir(dir)).map((n) => path.join(dir, n));
-    } catch (e) {
- // Fail-closed guard must stay observable: a *missing* directory is a
- // normal stop condition (e.g. a root that doesn't exist), but any other
- // FS error (EACCES, broken symlink, transient I/O) must be surfaced so a
- // real non-`en` locale import in that subtree can't go undetected. We
- // THROW rather than warn-and-continue: a swallowed error would let the
- // guard silently skip a subtree, defeating the fail-closed contract.
-      if ((e as { code?: string }).code === "ENOENT") return;
-      throw new Error(
-        `[zod-locale-lint] readdir failed for ${dir} — cannot verify zod-locale ` +
-          `invariant, failing closed: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
-    for (const e of entries) {
-      let st: Awaited<ReturnType<typeof stat>>;
-      try {
-        st = await stat(e);
-      } catch (err) {
- // A vanished entry (race with a concurrent delete) is a benign skip;
- // any other stat error must be surfaced so the fail-closed guard can't
- // silently overlook a file it failed to inspect.
-        if ((err as { code?: string }).code === "ENOENT") continue;
-        throw new Error(
-          `[zod-locale-lint] stat failed for ${e} — cannot verify zod-locale ` +
-            `invariant, failing closed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      if (st.isDirectory()) {
-        if (path.basename(e) === "node_modules") continue;
-        await walk(e);
-      } else if (/\.(ts|tsx|js|jsx|mjs)$/.test(e)) {
-        const src = await readFile(e, "utf8");
- // Match zod locale imports that are NOT the `en` locale nor the barrel.
-        const m = src.match(/zod\/v4\/locales\/(?!en(-[A-Za-z]+)?\.js|index\.js)[a-zA-Z-]+\.js/g);
-        if (m) bad.push(`${e}: ${m.join(", ")}`);
-      }
-    }
-  };
-  for (const r of roots) await walk(r);
-  if (bad.length) {
-    throw new Error(
-      "Non-en zod locale import detected — the stub plugin only provides 'en', " +
-        "so this would resolve to undefined at runtime:\n" +
-        bad.join("\n")
-    );
-  }
-}
 
 /**
  * PERF-1 robustness: fail closed if the zod-locales stub file the redirect
@@ -290,141 +225,6 @@ function assertZodLocalesStub(): void {
   }
 }
 
-/**
- * SEC-1: surface high-risk manifest permissions during the build so silent
- * permission creep is visible in CI. The build copies the manifest verbatim
- * and performs no allowlist/review, and `debugger` + universal host access is
- * a large attack surface.
- *
- * Behavior after remediation:
- * - A MISSING or MALFORMED manifest is a hard build error — the SEC-1 guard
- * is worthless exactly when the manifest can't be read/parsed, so we fail
- * closed (Apache-2.0/extension validity requires a real manifest).
- * - `permissions` / `host_permissions` / `optional_permissions` are validated
- * to be arrays of strings; a bad merge (e.g. a nested object) no longer
- * silently slips through.
- * - High-risk permissions (debugger, scripting, nativeMessaging, management,
- * cookies, tabs, history, bookmarks, proxy) present in `permissions` OR
- * `optional_permissions`, plus universal host access, are surfaced as a
- * WARNING (the local fast-fail signal).
- * - To actually ENFORCE the "no new high-risk permission" intent in CI, set
- * `MANIFEST_LINT_FAIL_HIGH_RISK=1` in the build environment. That promotes
- * the warning to a hard build error. We keep the default as a warning so
- * legitimate, reviewed permissions don't break every local developer build
- * (the documented in-repo justification for `debugger` + universal host
- * access is referenced in FULL-REVIEW). The recommended companion gate is a
- * CI manifest-lint *diff* that only fails on *newly-added* high-risk perms.
- *
- * Why these permissions are requested (documented in-repo per FULL-REVIEW):
- * - `debugger`: drives the CDP "take over this page" click/automation path
- * (attach to a tab, synthesize input, inspect the DOM).
- * - `scripting`: injects `executeScript` for automation without a persistent
- * content-script manifest entry.
- * - universal `host_permissions` (the `<all_urls>`-equivalent http/https
- * wildcards): the assistant
- * operates on whatever arbitrary web page the user points it at, so it
- * needs read access to any origin.
- */
-function lintManifestPermissions(): void {
-  const manifestPath = path.join(SRC, "manifest.json");
-  if (!existsSync(manifestPath)) {
-    throw new Error(
-      `[manifest-lint] ${manifestPath} is missing — a manifest is required to build a valid extension.`,
-    );
-  }
-  let manifest: {
-    permissions?: unknown;
-    host_permissions?: unknown;
-    optional_permissions?: unknown;
-  };
-  try {
-    manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-  } catch (e) {
- // Fail closed: a malformed manifest must NOT be silently swallowed.
-    throw new Error(
-      `[manifest-lint] failed to read/parse ${manifestPath}: ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
-  const perms = assertStringArray(manifest.permissions, "permissions");
-  const host = assertStringArray(manifest.host_permissions, "host_permissions");
-  const optional = assertStringArray(
-    manifest.optional_permissions,
-    "optional_permissions",
-  );
-
- // Dangerous permissions that widen the extension's attack surface. Optional
- // permissions can escalate privilege at runtime, so they are checked too.
-  const HIGH_RISK = new Set([
-    "debugger",
-    "scripting",
-    "nativeMessaging",
-    "management",
-    "cookies",
-    "tabs",
-    "history",
-    "bookmarks",
-    "proxy",
-  ]);
-  const risky = perms.filter((p) => HIGH_RISK.has(p));
-  const riskyOptional = optional.filter((p) => HIGH_RISK.has(p));
-  const wideHost = host.some(
-    (h) => h === "<all_urls>" || h === "http://*/*" || h === "https://*/*"
-  );
-
- // Reviewed baseline: the high-risk permissions + universal host access already
- // present in the shipped manifest, each with an in-repo justification (see the
- // doc comment above: `debugger` drives CDP automation, `scripting` injects
- // automation scripts, `tabs` reads tab metadata, and universal host_permissions
- // lets the assistant operate on whatever page the user points it at).
- //
- // The lint is a *creep* guard, not a presence check: it only fires when a NEW
- // high-risk permission (or new universal-host entry) is added BEYOND this
- // baseline. That makes MANIFEST_LINT_FAIL_HIGH_RISK=1 safe to enable in CI —
- // it catches permission creep without failing the already-reviewed build. A
- // maintainer who intentionally adds a high-risk permission must also extend
- // this baseline (with a documented justification) so the addition is a
- // deliberate, reviewed change rather than silent creep.
-  const BASELINE_HIGH_RISK = new Set(["debugger", "scripting", "tabs"]);
-  const BASELINE_WIDE_HOST = true;
-
-  const newRisky = risky.filter((p) => !BASELINE_HIGH_RISK.has(p));
-  const newRiskyOptional = riskyOptional.filter((p) => !BASELINE_HIGH_RISK.has(p));
-  const newWideHost = wideHost && !BASELINE_WIDE_HOST;
-
-  if (newRisky.length || newRiskyOptional.length || newWideHost) {
-    const items = [
-      ...newRisky,
-      ...newRiskyOptional,
-      ...(newWideHost ? ["universal host_permissions"] : []),
-    ];
-    const msg =
-      "[manifest-lint] NEW high-risk permission(s) added beyond the reviewed " +
-      "baseline: " +
-      items.join(", ") +
-      " — confirm each is strictly necessary and has a documented justification (see FULL-REVIEW).";
- // Default: warn only. CI can promote this to a hard error via env flag so
- // local builds with reviewed permissions still work.
-    if (process.env.MANIFEST_LINT_FAIL_HIGH_RISK === "1") {
-      throw new Error(msg);
-    }
-    console.warn(msg);
-  }
-}
-
-/**
- * Validate a manifest field is an array of strings (or absent). A non-array or
- * array containing non-string entries (e.g. a nested object from a bad merge)
- * would be mis-filtered by the high-risk check, so we reject it loudly.
- */
-function assertStringArray(value: unknown, field: string): string[] {
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value) || !value.every((x) => typeof x === "string")) {
-    throw new Error(
-      `[manifest-lint] manifest.${field} must be an array of strings (got ${JSON.stringify(value)})`,
-    );
-  }
-  return value;
-}
 
 
 /**
@@ -436,18 +236,47 @@ function assertStringArray(value: unknown, field: string): string[] {
  * copyright/permission notice.
  *
  * We copy the full Apache-2.0 text shipped inside the transformers package
- * (best-effort). `onnxruntime-web` ships no `LICENSE` file in its package, but
- * its MIT attribution is recorded elsewhere alongside the other bundled
- * dependencies' licenses.
+ * (best-effort). `onnxruntime-web` ships no `LICENSE` file in its package, so
+ * its MIT copyright + permission notice is reproduced inline below and written
+ * to `LICENSE-MIT` in the shipped bundle.
  *
  * Note: referencing the third-party license text from the Options/About page
  * and `manifest.json` is tracked separately, outside this build file.
  */
 async function emitThirdPartyLicenses(): Promise<void> {
   const targets: Array<[string, string]> = [];
+ // The project's own MIT LICENSE (the Options/About page claims the extension
+ // is MIT-licensed, so its own license text must travel with the bundle).
+  const ownLicense = path.resolve("LICENSE");
+  if (existsSync(ownLicense)) targets.push([ownLicense, "LICENSE"]);
  // Full Apache-2.0 text from the transformers package (best-effort).
   const apache = path.resolve("node_modules/@huggingface/transformers/LICENSE");
   if (existsSync(apache)) targets.push([apache, "LICENSE-APACHE"]);
+ // MIT notice for `onnxruntime-web` (ships no LICENSE file in its package).
+  const ONX_MIT = [
+    "MIT License",
+    "",
+    "Copyright (c) Microsoft Corporation.",
+    "",
+    "Permission is hereby granted, free of charge, to any person obtaining a copy",
+    "of this software and associated documentation files (the \"Software\"), to deal",
+    "in the Software without restriction, including without limitation the rights",
+    "to use, copy, modify, merge, publish, distribute, sublicense, and/or sell",
+    "copies of the Software, and to permit persons to whom the Software is",
+    "furnished to do so, subject to the following conditions:",
+    "",
+    "The above copyright notice and this permission notice shall be included in all",
+    "copies or substantial portions of the Software.",
+    "",
+    "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR",
+    "IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,",
+    "FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE",
+    "AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER",
+    "LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,",
+    "OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE",
+    "SOFTWARE.",
+    "",
+  ].join("\n");
   for (const [src, out] of targets) {
     if (existsSync(src)) {
       await copyFile(src, path.join(OUT, out));
@@ -455,6 +284,7 @@ async function emitThirdPartyLicenses(): Promise<void> {
       console.warn(`[licenses] skipping missing license file: ${src}`);
     }
   }
+  await writeFile(path.join(OUT, "LICENSE-MIT"), ONX_MIT, "utf8");
 }
 
 /**

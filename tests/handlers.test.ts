@@ -253,6 +253,65 @@ describe("handleNavigate", () => {
  // The allowlist guard must run BEFORE the extension branch.
     expect(sendMessage).not.toHaveBeenCalled();
   });
+
+  test("blocks a javascript: scheme (XSS) without an extension runtime (new-tab)", async () => {
+    const openSpy = vi.spyOn(window, "open");
+    const res = await handleNavigate(emptyCtx(), {
+      type: "navigate",
+      url: "javascript:alert(document.cookie)",
+      new_tab: true,
+    });
+    expect(res.success).toBe(false);
+    expect(res.message).toContain("BLOCKED");
+    expect(openSpy).not.toHaveBeenCalled();
+    openSpy.mockRestore();
+  });
+
+  test("blocks a data: scheme without an extension runtime (new-tab)", async () => {
+    const openSpy = vi.spyOn(window, "open");
+    const res = await handleNavigate(emptyCtx(), {
+      type: "navigate",
+      url: "data:text/html,<script>alert(1)</script>",
+      new_tab: true,
+    });
+    expect(res.success).toBe(false);
+    expect(res.message).toContain("BLOCKED");
+    expect(openSpy).not.toHaveBeenCalled();
+    openSpy.mockRestore();
+  });
+
+  test("blocks a javascript: scheme via the extension runtime (new-tab)", async () => {
+    const sendMessage = vi.fn(async () => ({ ok: true, success: true, pageChanged: true }));
+    installExtensionMock(sendMessage);
+    const res = await handleNavigate(emptyCtx(), {
+      type: "navigate",
+      url: "javascript:alert(document.cookie)",
+      new_tab: true,
+    });
+    expect(res.success).toBe(false);
+    expect(res.message).toContain("BLOCKED");
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  test("blocks a data: scheme on both new-tab and same-tab paths", async () => {
+    const sendMessage = vi.fn(async () => ({ ok: true, success: true, pageChanged: true }));
+    installExtensionMock(sendMessage);
+    const newTab = await handleNavigate(emptyCtx(), {
+      type: "navigate",
+      url: "data:text/html,<script>alert(1)</script>",
+      new_tab: true,
+    });
+    expect(newTab.success).toBe(false);
+    expect(newTab.message).toContain("BLOCKED");
+    const sameTab = await handleNavigate(emptyCtx(), {
+      type: "navigate",
+      url: "data:text/html,<script>alert(1)</script>",
+      new_tab: false,
+    });
+    expect(sameTab.success).toBe(false);
+    expect(sameTab.message).toContain("BLOCKED");
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
 });
 
 // ─── upload-file ─────────────────────────────────────────────────────────────

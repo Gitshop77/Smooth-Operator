@@ -26,7 +26,7 @@ const { findMany, count, SAMPLE } = vi.hoisted(() => {
     },
   ];
   const findMany = vi.fn<(query: Record<string, unknown>) => Promise<typeof SAMPLE>>(async () => SAMPLE);
-  const count = vi.fn(async () => SAMPLE.length);
+  const count = vi.fn<(query: Record<string, unknown>) => Promise<number>>(async () => SAMPLE.length);
   return { findMany, count, SAMPLE };
 });
 
@@ -59,12 +59,22 @@ describe('GET /api/cowork/security/events', () => {
     expect(e.description).toBe('suspicious navigation');
  // The raw Prisma fields are still present (spread) + projected aliases.
     expect(e.severity).toBe('high');
+ // AU-3: the raw `details` field must survive the projection round-trip.
+    expect(e.details).toBe('suspicious navigation');
   });
 
   it('forwards a severity filter to the query', async () => {
     await GET(getReq('severity=high'));
     expect(findMany.mock.lastCall![0].where).toEqual({ severity: 'high' });
     expect(count).toHaveBeenCalledWith({ where: { severity: 'high' } });
+ // count must share findMany's where so `total` matches the filtered page.
+    expect(count.mock.lastCall![0].where).toEqual(findMany.mock.lastCall![0].where);
+  });
+
+  it('runs count with the same empty where as findMany on the unfiltered path', async () => {
+    await GET(getReq());
+    expect(count).toHaveBeenCalledWith({ where: {} });
+    expect(count.mock.lastCall![0].where).toEqual(findMany.mock.lastCall![0].where);
   });
 
   it('rejects an invalid severity with 400', async () => {
@@ -77,6 +87,8 @@ describe('GET /api/cowork/security/events', () => {
     const res = await GET(getReq());
     const e = (await res.json()).events[0];
     expect(e.description).toBe('');
+ // AU-3: null `details` round-trips as null while `description` falls back to ''.
+    expect(e.details).toBeNull();
   });
 
   it('caps limit at 200 (cannot dump the whole table at once)', async () => {
@@ -87,5 +99,42 @@ describe('GET /api/cowork/security/events', () => {
   it('defaults limit to 100 when omitted', async () => {
     await GET(getReq());
     expect(findMany.mock.lastCall![0].take).toBe(100);
+  });
+
+  it('clamps an over-large offset to 10000', async () => {
+    await GET(getReq('offset=999999999'));
+    expect(findMany.mock.lastCall![0].skip).toBe(10_000);
+  });
+
+  it('falls back to skip 0 for a non-numeric offset', async () => {
+    await GET(getReq('offset=abc'));
+    expect(findMany.mock.lastCall![0].skip).toBe(0);
+  });
+
+  it('preserves the payload field in the projected response', async () => {
+    const res = await GET(getReq());
+    const body = await res.json();
+    expect(body.events[0].payload).toEqual({ foo: 1 });
+  });
+
+  it('redacts secrets in details and sourceUrl on read', async () => {
+    findMany.mockResolvedValueOnce([
+      {
+        ...SAMPLE[0],
+        id: 3,
+        details: 'Bearer eyJabc.def.ghi',
+        sourceUrl: 'https://example.com/cb?token=supersecretvalue123',
+        domain: 'example.com',
+      } as unknown as typeof SAMPLE[0],
+    ]);
+    const res = await GET(getReq());
+    const e = (await res.json()).events[0];
+    // details/description must not contain the raw bearer token.
+    expect(JSON.stringify(e.description)).not.toContain('eyJabc');
+    expect(JSON.stringify(e.details)).not.toContain('eyJabc');
+    // sourceUrl/domain secrets must be redacted.
+    expect(e.sourceUrl).toContain('***');
+    expect(e.sourceUrl).not.toContain('supersecretvalue123');
+    expect(e.domain).toBe('example.com');
   });
 });

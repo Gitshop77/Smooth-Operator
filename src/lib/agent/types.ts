@@ -202,7 +202,8 @@ export type LogEvent =
   | { type: "error"; step: number; message: string; recoverable: boolean }
   | { type: "info"; message: string }
   | { type: "warn"; step?: number; message: string }
-  | { type: "cost"; step: number; tokensIn: number; tokensOut: number; costUsd: number; model: string };
+  | { type: "cost"; step: number; tokensIn: number; tokensOut: number; costUsd: number; model: string }
+  | { type: "heartbeat"; step: number; ts: number };
 
 // ─── API contracts ──────────────────────────────────────────────────────────
 
@@ -283,6 +284,9 @@ export interface PlannerStepRequest {
   url: string;
   /** Open tabs. */
   tabs: TabInfo[];
+  /** Compacted-memory block from history compaction, so the planner retains
+   * summarized older context after compaction (mirrors the navigator path). */
+  compactedMemory?: string;
 }
 
 // ─── Configuration ──────────────────────────────────────────────────────────
@@ -307,6 +311,13 @@ export interface AgentConfig {
   compactionCharThreshold: number;
   /** Optional USD cost cap — aborts the run if exceeded. */
   costCapUsd?: number;
+  /**
+   * Per-call SLA (milliseconds) for cloud LLM / compaction calls. When > 0, a
+   * still-pending provider call that exceeds this bound is aborted with a
+   * TimeoutError so a hung endpoint (one that accepts the request but never
+   * responds) cannot stall the run indefinitely. `0` disables the SLA.
+   */
+  llmCallTimeoutMs?: number;
   /** Whether to run the judge LLM after the planner reports task success.
  * Default true. When true, the judge double-checks the agent's self-reported
  * success against the action history; if it disagrees, the loop continues. */
@@ -374,12 +385,16 @@ export const DEFAULT_CONFIG: AgentConfig = {
   enableCompaction: true,
   compactionStepInterval: 20,
   compactionCharThreshold: 30_000,
+ // Bound each cloud LLM / compaction call so a provider that accepts the
+ // request but never responds can't hang the run forever (the only other
+ // interrupt is an explicit user Stop). Generous default; set 0 to disable.
+  llmCallTimeoutMs: 180_000,
   enableJudge: true,
- // Explicitly false by default so the documented "Default false" for
- // `enableEarlyStop` matches the actual resolved config (finding: the doc
- // claimed a default but the value was never set in DEFAULT_CONFIG, leaving
- // it implicitly `undefined`/falsy).
-  enableEarlyStop: false,
+ // ON by default — the repeating-action / parse-failure early-stop is the only
+ // hard-halt layer that actually terminates runaway loops (LoopDetector only
+ // warns). Safe thresholds (5/3) and the input/alert_send_keys exclusions keep
+ // it conservative, so enabling by default closes the infinite-loop gap.
+  enableEarlyStop: true,
  // ON by default — the HTML summarizer is the single biggest per-action cost
  // lever (the raw DOM is the largest part of the navigator request). See
  // `enableHtmlSummarizer` in config/schema.ts.

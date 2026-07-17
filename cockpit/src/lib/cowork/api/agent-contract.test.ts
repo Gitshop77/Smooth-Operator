@@ -45,6 +45,26 @@ describe('agent contract manifest (drift guard)', () => {
  // ?all=1 bulk-delete capability (defense-in-depth against exposing
  // destructive/internal endpoints).
     expect(historyDelete?.description).not.toContain('all=1');
+
+ // Token-agnostic backstop: renaming the bulk-delete param (e.g. `?all=true`,
+ // `?purge=1`) or rephrasing the description must not reintroduce the disclosure.
+ // Every DELETE endpoint's path and description is scanned (not only history), so
+ // a future bulk-delete wording added to ai/chat, memory/site, or memory/form
+ // also fails this guard. operatingRules are excluded so the required
+ // mass-deletion confirmation wording survives.
+    expect(historyDelete?.path ?? '').not.toContain('?');
+    const bulkKeywords = /all=|purge|wipe|bulk|reset|delete-all|mass-delet/i;
+    for (const e of flat.filter((e) => e.method === 'DELETE')) {
+      expect(bulkKeywords.test(e.path ?? '')).toBe(false);
+      expect(bulkKeywords.test(e.description ?? '')).toBe(false);
+    }
+
+ // The disclosure guard also applies to the operating rules, which are emitted
+ // verbatim into the manifest. Scan the full serialized manifest for the
+ // query-param-style mechanism tokens so any re-introduction fails this guard.
+    const serialized = JSON.stringify(manifest);
+    expect(serialized).not.toContain('all=1');
+    expect(serialized).not.toContain('delete-all');
   });
 
   it('forbids mass-deletion without confirmation in the operating rules', async () => {

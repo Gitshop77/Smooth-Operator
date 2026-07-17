@@ -15,6 +15,18 @@ import { SEARCH_ENGINE_URLS } from "../constants";
 import { checkUrlAllowedWithDomainConfig } from "../helpers/domain-config";
 import type { ActionContext } from "./types";
 
+// Control characters stripped from values reflected into logs/history so an
+// LLM / prompt-injection-supplied query can't forge log lines (CR/LF).
+const CONTROL_CHARS_RE = /[\u0000-\u001F\u007F\u0085\u2028\u2029]/g;
+
+// Reflect a value into the success message safely: bound length and strip
+// control characters. The navigation URL is still encoded separately.
+function sanitizeForLog(value: string): string {
+  let v = String(value);
+  if (v.length > 8192) v = v.slice(0, 8192);
+  return v.replace(CONTROL_CHARS_RE, "");
+}
+
 export async function handleSearch(
   _ctx: ActionContext,
   action: Extract<Action, { type: "search" }>,
@@ -49,5 +61,5 @@ export async function handleSearch(
  // Navigate the current tab to the search URL. The content script is
  // destroyed on navigation; the orchestrator recovers on the next step.
   location.href = searchUrl;
-  return { action, success: true, message: `Searching "${action.query}" on ${engine}`, pageChanged: true };
+  return { action, success: true, message: `Searching "${sanitizeForLog(action.query ?? "")}" on ${engine}`, pageChanged: true };
 }

@@ -16,8 +16,9 @@ The cockpit backend persists the following user-derived data via Prisma:
   and folder structure.
 - **Form-autofill memory** (`FormMemory.formDataJson`): captured form fields.
 - **Per-site memory** (`SiteMemory`): structured notes attached to origins.
-- **Network request/response metadata** (`NetworkRequest`): URLs, methods, and
-  optionally request/response bodies.
+- **Network request/response metadata** (`NetworkRequest`): the schema defines
+  this model, but the cockpit does **not** currently ingest network data — live
+  network requests stay in the extension only.
 - **LLM chat content** (`ChatMessage.content`): prompts and completions.
 - **Account identifier** (`User.email`): a direct personal identifier.
 - **Agent run logs**: structured error/stack/message text submitted by the
@@ -54,5 +55,7 @@ right to erasure / opt-out.
 
 ## Contact
 
-Refer to the repository and the Chrome Web Store listing for the data
-controller / operator contact details and the official privacy notice.
+For the data controller / operator contact details and the official privacy
+notice, email **security@opencowork.dev**. (The extension is distributed as
+an unpacked load from this repository — there is no Chrome Web Store listing
+yet — so no store-based contact or notice exists.)

@@ -55,6 +55,8 @@ export const LIMITS = {
   evaluateTimeoutMs: 10_000,
   /** Default chars to slice when truncating an action's text in describe.ts. */
   describeSliceDefault: 60,
+  /** Max chars of a `load_skill` body surfaced in extractedContent (context-window guard). */
+  loadSkillBodyChars: 16_000,
 } as const;
 
 /** Max elements scanned for the fingerprint (keeps the hash fast on huge pages). */

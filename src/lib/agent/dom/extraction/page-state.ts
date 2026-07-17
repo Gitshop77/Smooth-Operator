@@ -33,7 +33,7 @@ import {
   directText,
   isSensitive,
 } from "../utils";
-import { buildAttrs, hashElement, DOM_CONFIG } from "./element-info";
+import { buildAttrs, hashElement, DOM_CONFIG, redactUrlTokens, redactPathSecrets, resetHashCaches } from "./element-info";
 import { getShadowRoot, installShadowPiercer } from "../annotation/shadow-piercer";
 
 // ─── Backwards-compat re-exports ────────────────────────────────────────────
@@ -72,6 +72,41 @@ const MAX_ATTR_VALUE_LENGTH = 200;
  * deep subtrees are truncated — the cap is configurable.
  */
 const MAX_WALK_DEPTH = 100;
+
+/**
+ * Hard cap on the number of elements emitted (prevents runaway output on a
+ * pathological or adversarial page). Mirrors the AX-tree's `MAX_ELEMENTS`
+ * cap so the serialized `elements` array and `elementsText` payload can't
+ * grow unbounded across steps.
+ */
+const MAX_ELEMENTS = 10_000;
+
+/**
+ * Hard cap on the number of serialized tree lines emitted (text nodes, element
+ * lines, and structural markers combined). The element cap above only bounds
+ * interactive elements; a page with many non-interactive text-bearing nodes but
+ * few controls would still serialize an unbounded `elementsText`. This caps the
+ * actual output — mirroring the AX-tree builder, whose emitted count increments
+ * for every line — so `elementsText` can't grow without bound (content-script
+ * OOM / LLM token blowup).
+ */
+const MAX_LINES = 10_000;
+
+/**
+ * Push a serialized line, capping the total emitted output. Emits the
+ * truncation hint exactly once (shared via `acc.truncated`) when either this
+ * line cap or the interactive-element cap is hit first.
+ */
+function pushLine(acc: WalkAccumulator, line: string): void {
+  if (acc.lines.length >= MAX_LINES) {
+    if (!acc.truncated) {
+      acc.truncated = true;
+      acc.lines.push(`\t[truncated at ${MAX_LINES} lines — page is very large; focus on a more specific element]`);
+    }
+    return;
+  }
+  acc.lines.push(line);
+}
 
 /**
  * Sanitize + escape an attribute value for safe interpolation inside a quoted
@@ -120,6 +155,11 @@ interface WalkAccumulator {
   prevHashes: Set<string>;
   /** Count of elements that are new this step. */
   newElementCount: number;
+  /** Whether the element cap has been hit (so the hint is emitted once). */
+  truncated: boolean;
+  /** Whether the element-cap signal has been emitted (independent of the line
+   * cap, so it is never swallowed when both caps are reached simultaneously). */
+  elementTruncated: boolean;
 }
 
 // Cache of per-parent visibility results, keyed by the parent element. The
@@ -146,7 +186,7 @@ function serializeText(node: Text, depth: number, acc: WalkAccumulator): void {
 
   const t = (node.textContent || "").replace(/\s+/g, " ").trim();
   if (t.length >= DOM_CONFIG.minTextLength) {
-    acc.lines.push("\t".repeat(depth) + escapeAttr(t));
+    pushLine(acc, "\t".repeat(depth) + escapeAttr(t));
   }
 }
 
@@ -155,6 +195,20 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
  // Bail out past the depth cap so a pathologically deep / cyclic DOM can't
  // drive unbounded recursion (mirrors the AX-tree maxDepth guard).
   if (depth > MAX_WALK_DEPTH) return;
+ // Bail out once the element cap is reached so a pathological / adversarial
+ // DOM can't drive an unbounded `elements` array or `elementsText` payload.
+  if (acc.elements.length >= MAX_ELEMENTS) {
+   // Emit the element-cap signal directly (not via `pushLine`) so the line
+   // cap can never swallow it when both caps are reached on the same element
+   // (e.g. when `MAX_LINES === MAX_ELEMENTS` and the Nth line lands exactly on
+   // the cap). The signal must always be surfaced so a regression that stops
+   // clamping the `elements` array is caught.
+    if (!acc.elementTruncated) {
+      acc.elementTruncated = true;
+      acc.lines.push(`\t[truncated at ${MAX_ELEMENTS} elements — page is very large; focus on a more specific element]`);
+    }
+    return;
+  }
   const tag = el.tagName.toLowerCase();
 
  // LOW-1 check isLikelyHidden BEFORE the skipTags/iframe check so a
@@ -204,7 +258,8 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
     acc.selectorMap[idx] = el;
     acc.elements.push({ index: idx, tag, text, attributes: attrs, hash, rect: rect! });
     const prefix = isNew ? "*" : "";
-    acc.lines.push(
+    pushLine(
+      acc,
       "\t".repeat(depth) + `${prefix}[${idx}]<${tag}${attrString(attrs)} />`
     );
  // Compound controls (select, range, details, file input) get virtual
@@ -212,16 +267,23 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
  // options of a select). Emitted BEFORE descending into real children so
  // the virtual structure sits right under the parent's indexed line.
     serializeCompoundChildren(el, depth, acc);
+ // Sensitive <select> elements must not leak their real <option> text into
+ // elementsText. buildCompoundChildren already emits a redacted virtual
+ // <option>[value redacted]</option> line, so skip the real children / shadow
+ // DOM descent here — each visible <option> is itself interactive and would
+ // otherwise emit its secret text. Mirrors the AX-tree's sensitive-option guard.
+    if (!(el.tagName.toLowerCase() === "select" && isSensitive(el))) {
  // Descend into children (so nested text/elements render as children).
-    for (const child of Array.from(el.childNodes)) {
-      walkNode(child, depth + 1, acc);
-    }
+      for (const child of Array.from(el.childNodes)) {
+        walkNode(child, depth + 1, acc);
+      }
  // Descend into shadow DOM if present (pierces closed roots via the
  // shadow-piercer module when installed).
-    const sr = getShadowRoot(el);
-    if (sr) {
-      for (const child of Array.from(sr.childNodes)) {
-        walkNode(child, depth + 1, acc);
+      const sr = getShadowRoot(el);
+      if (sr) {
+        for (const child of Array.from(sr.childNodes)) {
+          walkNode(child, depth + 1, acc);
+        }
       }
     }
     return;
@@ -250,11 +312,17 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
 function redactIframeSrc(src: string): string {
   try {
     const u = new URL(src);
+    if (u.protocol !== "http:" && u.protocol !== "https:") {
+      return "[non-http url redacted]";
+    }
     u.search = "";
     u.hash = "";
+    u.username = "";
+    u.password = "";
+    u.pathname = redactPathSecrets(u.pathname);
     return u.toString();
   } catch {
-    return src.replace(/[?#].*$/, "");
+    return redactPathSecrets(src.replace(/[?#].*$/, ""));
   }
 }
 
@@ -268,10 +336,10 @@ function trySerializeIframe(iframe: HTMLIFrameElement, depth: number, acc: WalkA
  // Emit the marker in the null branch so the LLM is aware of cross-origin
  // iframes (ads, payment embeds, reCAPTCHA, etc.).
     if (!doc || !doc.body) {
-      acc.lines.push("\t".repeat(depth) + `|IFRAME src=${escapeAttr(redactIframeSrc(iframe.src || "(blank)"))} (cross-origin or not loaded)|`);
+      pushLine(acc, "\t".repeat(depth) + `|IFRAME src=${escapeAttr(redactIframeSrc(iframe.src || "(blank)"))} (cross-origin or not loaded)|`);
       return;
     }
-    acc.lines.push("\t".repeat(depth) + `|IFRAME src=${escapeAttr(redactIframeSrc(iframe.src || "same-origin"))}|`);
+    pushLine(acc, "\t".repeat(depth) + `|IFRAME src=${escapeAttr(redactIframeSrc(iframe.src || "same-origin"))}|`);
     try {
       for (const child of Array.from(doc.body.childNodes)) {
         walkNode(child, depth + 1, acc);
@@ -281,11 +349,11 @@ function trySerializeIframe(iframe: HTMLIFrameElement, depth: number, acc: WalkA
  // unusual custom element, or a detached-node race) must not abort the
  // whole page-state read — emit a marker and continue, matching the
  // cross-origin fallback style.
-      acc.lines.push("\t".repeat(depth) + `|IFRAME src=${escapeAttr(redactIframeSrc(iframe.src || "same-origin"))} (error reading contents)|`);
+      pushLine(acc, "\t".repeat(depth) + `|IFRAME src=${escapeAttr(redactIframeSrc(iframe.src || "same-origin"))} (error reading contents)|`);
     }
   } catch {
  // Cross-origin security exception — can't read contents. Surface the URL only.
-    acc.lines.push("\t".repeat(depth) + `|IFRAME src=${escapeAttr(redactIframeSrc(iframe.src))} (cross-origin)|`);
+    pushLine(acc, "\t".repeat(depth) + `|IFRAME src=${escapeAttr(redactIframeSrc(iframe.src))} (cross-origin)|`);
   }
 }
 
@@ -363,6 +431,10 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
  // is otherwise shared mutable state; reset it each read so visibility is
  // recomputed fresh and no stale result leaks hidden text or drops visible text.
   visibilityCache = new WeakMap<HTMLElement, boolean>();
+ // Reset the nth-of-type index cache so it reflects THIS snapshot's DOM
+ // (see `nthOfTypeIndex` in element-info.ts). The walk is otherwise O(n^2) on
+ // pages with many same-tag siblings.
+  resetHashCaches();
   const acc: WalkAccumulator = {
     index: 0,
     selectorMap: {},
@@ -370,6 +442,8 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
     lines: [],
     prevHashes: cachedHashes,
     newElementCount: 0,
+    truncated: false,
+    elementTruncated: false,
   };
 
   if (document.body) {
@@ -405,11 +479,13 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
   const elementsText = acc.lines.join("\n");
 
   return {
-    url: location.href,
+    url: redactUrlTokens(location.href),
     title: document.title,
     tabs,
     elements: acc.elements,
-    elementsText: elementsText.trim().length > 0 ? elementsText : "[empty page]",
+    elementsText: elementsText.trim().length > 0
+      ? `<untrusted_page_state>\n${elementsText}\n</untrusted_page_state>`
+      : "[empty page]",
     pageInfo: buildPageInfo(scrollTop, scrollHeight, vh),
     newElementCount: acc.newElementCount,
     scrollTop,
@@ -559,6 +635,6 @@ function serializeCompoundChildren(el: HTMLElement, depth: number, acc: WalkAccu
  // containing `<`, `>`, `&`, or a newline can't break the one-line-per-
  // element contract after the `/>` token.
     const safeText = vc.text ? " " + escapeAttr(vc.text) : "";
-    acc.lines.push(`${indent}<${vc.tag}${attrString(vc.attributes)} />${safeText}`);
+    pushLine(acc, `${indent}<${vc.tag}${attrString(vc.attributes)} />${safeText}`);
   }
 }

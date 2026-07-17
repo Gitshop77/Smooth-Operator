@@ -27,7 +27,8 @@ import {
 import { updateProviderUI, populateModelSuggestions } from "./provider-config-ui";
 import { PROVIDERS, PROVIDER_META, DEFAULT_PROVIDER_ID } from "./providers";
 import { alertModal } from "./modal";
-import { validateWebhookUrl } from "@/lib/agent/llm/route/ssrf";
+import { resolveAndValidateWebhookUrl } from "@/lib/agent/llm/route/ssrf";
+import { MAX_ACTIONS, DEFAULT_MAX_ACTIONS } from "@/lib/validations";
 
 // ─── Storage keys ──────────────────────────────────────────────────────────
 
@@ -102,6 +103,7 @@ chrome.storage.local.get(
     STORAGE_KEYS.defaultTask,
     "screenshotQuality",
     "enableScreenshots",
+    "stealthEnabled",
     "enableLocalVision",
     "visionMode",
     "allowedDomains",
@@ -160,6 +162,9 @@ chrome.storage.local.get(
     ($("defaultTask") as HTMLTextAreaElement).value = (res.defaultTask as string) ?? "";
     ($("screenshotQuality") as HTMLInputElement).value = String(res.screenshotQuality ?? 80);
     ($("enableScreenshots") as HTMLInputElement).checked = res.enableScreenshots !== false;
+ // Stealth patches are OPT-IN and OFF by default (ToS/bot-detection risk).
+ // Only check the box when the stored value is exactly the boolean `true`.
+    ($("enableStealth") as HTMLInputElement).checked = res.stealthEnabled === true;
     const visionMode = (res.visionMode as string) || (res.enableLocalVision === true ? "always" : "disabled");
  // Resolve the matching radio by comparing values (NOT by interpolating
  // `visionMode` into a `querySelector` string — a corrupt/attacker-influenced
@@ -189,7 +194,7 @@ chrome.storage.local.get(
 // ─── Save settings (auto-save entry point) ───────────────────────────────────
 
 /** Read a bounded integer field; on invalid input, reset to default + flag it. */
-function readInt(id: string, def: number, min: number, max: number, invalid: string[]): number {
+export function readInt(id: string, def: number, min: number, max: number, invalid: string[]): number {
   const el = $(id) as HTMLInputElement;
   const raw = el.value.trim();
   if (raw === "") return def;
@@ -224,7 +229,7 @@ function isIpv6Literal(candidate: string): boolean {
 }
 
 /** True if `value` is a bare hostname (optionally `*.` wildcard), no scheme/path/port. */
-function isHostname(value: string): boolean {
+export function isHostname(value: string): boolean {
   if (!value || value.includes("/") || value.includes(" ")) return false;
   const candidate = value.startsWith("*.") ? value.slice(2) : value;
   if (!candidate) return false;
@@ -282,7 +287,7 @@ export function saveSettings(): Promise<boolean> {
 async function doSaveSettings(): Promise<boolean> {
   const invalid: string[] = [];
   const maxSteps = readInt("maxSteps", 100, 1, 500, invalid);
-  const maxActions = readInt("maxActions", 10, 1, 20, invalid);
+  const maxActions = readInt("maxActions", DEFAULT_MAX_ACTIONS, 1, MAX_ACTIONS, invalid);
   const plannerInterval = readInt("plannerInterval", 5, 1, 20, invalid);
   const maxFailures = readInt("maxFailures", 5, 1, 10, invalid);
 
@@ -321,7 +326,7 @@ async function doSaveSettings(): Promise<boolean> {
     ($("baseUrl") as HTMLInputElement).value = "";
   }
   const webhookUrlRaw = ($("webhookUrl") as HTMLInputElement).value.trim();
-  const webhookCheck = webhookUrlRaw !== "" ? validateWebhookUrl(webhookUrlRaw) : null;
+  const webhookCheck = webhookUrlRaw !== "" ? await resolveAndValidateWebhookUrl(webhookUrlRaw) : null;
   if (webhookUrlRaw !== "" && webhookCheck && !webhookCheck.ok) {
     invalid.push("webhookUrl");
     ($("webhookUrl") as HTMLInputElement).value = "";
@@ -363,6 +368,12 @@ async function doSaveSettings(): Promise<boolean> {
  // never persisted in plaintext. Trade-off: the user must re-enter the key
  // after a browser/extension restart. Never console.log the value.
     model: ($("model") as HTMLInputElement).value,
+ // SECURITY: stamp the trusted `user` provenance on the baseUrl written from
+ // the Options page so the loopback/SSRF exemption in `buildProvider` keeps
+ // applying to legitimate user configs. A storage write that omits this stamp
+ // (injected baseUrl from prompt injection / malicious settings-sync) is
+ // treated as `"injected"` and denied the exemption — which is the defense.
+    provenance: "user",
     baseUrl: baseUrlRaw !== "" && isHttpUrl(baseUrlRaw) ? baseUrlRaw : "",
     maxSteps,
     maxActions,
@@ -372,6 +383,10 @@ async function doSaveSettings(): Promise<boolean> {
     defaultTask: ($("defaultTask") as HTMLTextAreaElement).value,
     screenshotQuality: sq,
     enableScreenshots: ($("enableScreenshots") as HTMLInputElement).checked,
+ // Persist the opt-in stealth flag as a strict boolean. isStealthEnabled()
+ // only honors exactly `true`, so writing the checkbox's boolean value is the
+ // correct shape (never a truthy-but-non-true value).
+    stealthEnabled: ($("enableStealth") as HTMLInputElement).checked === true,
  // `visionMode` is the single source of truth for the vision setting. The
  // legacy `enableLocalVision` key is intentionally NOT written here — every
  // reader (llm-direct, run-helpers, vision-status) already prefers
@@ -414,21 +429,16 @@ async function doSaveSettings(): Promise<boolean> {
           }
         });
       } else {
- // No session store available — fall back to local (less safe) rather
- // than silently discarding the key. Surface a clear warning so the user
- // knows their API key is being persisted to disk in PLAINTEXT
- // (finding: API key persisted as plaintext when session store is
- // unavailable). This is an accepted trade-off for environments without
- // `chrome.storage.session`; prefer a browser/profile that supports it.
-        console.warn(
-          "[options] SECURITY: chrome.storage.session unavailable — API key written " +
-            "to chrome.storage.local in PLAINTEXT (on disk). Use a browser/profile with " +
-            "session storage, or paste the key per session.",
-        );
-        chrome.storage.local.set({ [STORAGE_KEYS.apiKey]: apiKeyValue }, () => {
-          if (chrome.runtime.lastError) {
-            console.warn("[options] local API key fallback write failed:", chrome.runtime.lastError);
-          }
+ // No session store available — do NOT persist the key to local (plaintext
+ // on disk, synced to Google when extension sync is on). The secret-at-rest
+ // exposure must not happen even with a visible warning. Require the user to
+ // re-enter the key each session and surface a clear, non-persisting message.
+        void alertModal({
+          title: "API key not saved",
+          message:
+            "This browser/profile does not support in-memory session storage, so your provider " +
+            "API key is NOT saved. For security it is never written to disk in plaintext. " +
+            "Re-enter the key each session, or use a browser/profile that supports session storage.",
         });
       }
       showSaved();
@@ -445,11 +455,14 @@ async function doSaveSettings(): Promise<boolean> {
 
 /** Wire auto-save change listeners to every Connection/Agent field. */
 export function initAutoSave(): void {
+  // The Notify tab's webhook + toggle fields are owned by notifications.ts,
+  // which registers their `change` listeners (with SSRF-aware revert). Wiring
+  // them here too would register two competing handlers per input, producing
+  // conflicting double validation modals and order-dependent field state.
   const saveIds = [
     "cockpitUrl", "apiKey", "model", "baseUrl",
     "maxSteps", "maxActions", "plannerInterval", "maxFailures", "costCap",
-    "defaultTask", "screenshotQuality", "allowedDomains", "blockedDomains",
-    "webhookUrl", "notifyOnCompletion", "notifyOnError", "notifyOnTakeover",
+    "defaultTask", "screenshotQuality", "allowedDomains", "blockedDomains", "enableStealth",
   ];
   for (const id of saveIds) {
     document.getElementById(id)?.addEventListener("change", () => void saveSettings());
@@ -485,27 +498,37 @@ async function migrateSecretsFromLocalToSession(): Promise<void> {
     const localSecrets = localRes[STORAGE_KEYS.secrets] as StoredSecretEntry[] | undefined;
     if (!Array.isArray(localSecrets) || localSecrets.length === 0) return;
     const sessionSecrets = await listSecretsFromStore();
-    if (sessionSecrets.length > 0) {
-      const sessionNames = new Set(sessionSecrets.map((s) => s.name));
-      let anyFailed = false;
-      for (const s of localSecrets) {
-        if (s && typeof s.name === "string" && typeof s.value === "string" && !sessionNames.has(s.name)) {
-          try {
-            await setSecretInStore(s.name, s.value);
-          } catch {
-            anyFailed = true;
-          }
+    const sessionNames = new Set(sessionSecrets.map((s) => s.name));
+    const migrated = new Set<string>();
+    for (const s of localSecrets) {
+      if (!s || typeof s.name !== "string" || typeof s.value !== "string") continue;
+   // A secret already present in the session store, or one that was just
+   // copied there, no longer needs its plaintext local copy — remove it so no
+   // secret lingers on disk.
+      const alreadyInSession = sessionNames.has(s.name);
+      let ok = alreadyInSession;
+      if (!alreadyInSession) {
+        try {
+          await setSecretInStore(s.name, s.value);
+          ok = true;
+        } catch {
+   // Transient session-store failure: keep the plaintext locally so the secret
+   // is not lost, and let the next migration pass retry it.
+          ok = false;
         }
       }
-      if (!anyFailed) await chrome.storage.local.remove(STORAGE_KEYS.secrets);
-      return;
+      if (ok) migrated.add(s.name);
     }
-    for (const s of localSecrets) {
-      if (s && typeof s.name === "string" && typeof s.value === "string") {
-        await setSecretInStore(s.name, s.value);
-      }
+   // Remove only the secrets that were successfully migrated. A failed copy
+   // keeps its local plaintext (safe) and does not block removal of the rest.
+    const remaining = localSecrets.filter(
+      (s) => !(s && typeof s.name === "string" && migrated.has(s.name)),
+    );
+    if (remaining.length === 0) {
+      await chrome.storage.local.remove(STORAGE_KEYS.secrets);
+    } else {
+      await chrome.storage.local.set({ [STORAGE_KEYS.secrets]: remaining });
     }
-    await chrome.storage.local.remove(STORAGE_KEYS.secrets);
   } catch (e) {
     console.warn("[options] secrets migration failed:", e);
   }

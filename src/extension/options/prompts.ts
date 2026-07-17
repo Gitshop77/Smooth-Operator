@@ -10,6 +10,7 @@
 
 import { $ } from "@/extension/shared";
 import { STORAGE_KEYS, showSaved } from "./settings-sync";
+import { alertModal } from "./modal";
 
 interface QuickPrompt {
   name: string;
@@ -36,7 +37,7 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-function validateQuickPrompts(raw: unknown): QuickPrompt[] {
+export function validateQuickPrompts(raw: unknown): QuickPrompt[] {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) {
     console.warn("[prompts] stored quick-prompts value is not an array; ignoring.", raw);
@@ -76,13 +77,27 @@ export async function loadPrompts(): Promise<void> {
 // Save prompts on change (textareas fire `change` on blur).
 const navPromptEl = $("customNavigatorPrompt") as HTMLTextAreaElement;
 navPromptEl.addEventListener("change", () => {
-  chrome.storage.local.set({ customNavigatorPrompt: navPromptEl.value });
-  showSaved();
+  chrome.storage.local
+    .set({ customNavigatorPrompt: navPromptEl.value })
+    .then(() => showSaved())
+    .catch(async (err) => {
+      await alertModal({
+        title: "Save failed",
+        message: `Could not save navigator prompt: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    });
 });
 const planPromptEl = $("customPlannerPrompt") as HTMLTextAreaElement;
 planPromptEl.addEventListener("change", () => {
-  chrome.storage.local.set({ customPlannerPrompt: planPromptEl.value });
-  showSaved();
+  chrome.storage.local
+    .set({ customPlannerPrompt: planPromptEl.value })
+    .then(() => showSaved())
+    .catch(async (err) => {
+      await alertModal({
+        title: "Save failed",
+        message: `Could not save planner prompt: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    });
 });
 // NOTE: `defaultTask` persistence is owned by `settings-sync.ts` (its
 // `initAutoSave` writes the full settings snapshot, which already includes
@@ -137,12 +152,27 @@ function renderQuickPrompts(items: QuickPrompt[]): void {
     deleteBtn.addEventListener("click", () => {
       void serialize(async () => {
  // Delete by index, not by name, so a pre-existing duplicate name
- // cannot mass-delete sibling entries.
+ // cannot mass-delete sibling entries. The captured render-time index may be
+ // stale if another tab / external storage write mutated the list before this
+ // click, so re-verify identity before splicing and abort + re-render on
+ // mismatch.
         const current = await readQuickPrompts();
+        const target = current[index];
+        if (!target || target.name !== q.name) {
+          renderQuickPrompts(current);
+          return;
+        }
         current.splice(index, 1);
-        await chrome.storage.local.set({ [STORAGE_KEYS.quickPrompts]: current });
-        renderQuickPrompts(current);
-        showSaved();
+        try {
+          await chrome.storage.local.set({ [STORAGE_KEYS.quickPrompts]: current });
+          renderQuickPrompts(current);
+          showSaved();
+        } catch (err) {
+          await alertModal({
+            title: "Delete failed",
+            message: `Could not delete quick prompt: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        }
       });
     });
     item.append(nameSpan, textSpan, deleteBtn);
@@ -169,10 +199,17 @@ document.getElementById("addQuickPrompt")?.addEventListener("click", () => {
     const idx = items.findIndex((q) => q.name === name);
     if (idx >= 0) items[idx] = { name, text };
     else items.push({ name, text });
-    await chrome.storage.local.set({ [STORAGE_KEYS.quickPrompts]: items });
-    ($("quickPromptName") as HTMLInputElement).value = "";
-    ($("quickPromptText") as HTMLInputElement).value = "";
-    renderQuickPrompts(items);
-    showSaved();
+    try {
+      await chrome.storage.local.set({ [STORAGE_KEYS.quickPrompts]: items });
+      ($("quickPromptName") as HTMLInputElement).value = "";
+      ($("quickPromptText") as HTMLInputElement).value = "";
+      renderQuickPrompts(items);
+      showSaved();
+    } catch (err) {
+      await alertModal({
+        title: "Save failed",
+        message: `Could not save quick prompt: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
   });
 });

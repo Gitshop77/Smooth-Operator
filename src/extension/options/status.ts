@@ -18,6 +18,7 @@ export const STATUS_DISPLAY: Record<VisionStatus, { label: string; bg: string; c
   downloading:   { label: "Downloading model…",  bg: "var(--cw-accent-subtle)",  color: "var(--cw-accent)" },
   compiling:     { label: "Compiling ONNX…",     bg: "var(--cw-warn-subtle)",    color: "var(--cw-warn)" },
   ready:         { label: "✓ Ready",             bg: "var(--cw-success-subtle)", color: "var(--cw-success)" },
+  warning:       { label: "⚠ Unverified weights", bg: "var(--cw-warn-subtle)",  color: "var(--cw-warn)" },
   error:         { label: "✗ Error",             bg: "var(--cw-danger-subtle)",  color: "var(--cw-danger)" },
 };
 

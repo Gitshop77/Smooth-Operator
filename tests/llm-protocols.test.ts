@@ -12,6 +12,8 @@ import * as OpenAICompatibleChat from "../src/lib/agent/llm/protocols/openai-com
 import * as AnthropicMessages from "../src/lib/agent/llm/protocols/anthropic-messages";
 import * as Gemini from "../src/lib/agent/llm/protocols/gemini";
 import { encodeModelIdForUrl } from "../src/lib/agent/llm/modelId";
+import { hasImageProvenance } from "../src/lib/agent/llm/shared-image";
+import { isValidCatalog, resolveVisionSupport, type CatalogModel } from "../src/lib/agent/llm/catalog";
 import type { LLMRequest } from "../src/lib/agent/llm/route/client";
 
 /** Minimal structural shape of a protocol's stream reducer, used by `reduceFrames`. */
@@ -126,6 +128,20 @@ describe("OpenAIChat.protocol — body construction", () => {
     expect(serialized).toContain("image_url");
  // The data URL appears exactly once — inside the image_url part, not as text.
     expect((serialized.match(/data:image\/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==/g) || []).length).toBe(1);
+  });
+
+  test("rejects a <screenshot> marker whose payload fails the provenance check", async () => {
+    // Declared `png` but the base64 starts with JPEG magic bytes ("/9j/"):
+    // `hasImageProvenance` must reject it so injected bytes aren't forwarded.
+    const badPayload = "/9j/AAAA";
+    await expect(
+      OpenAIChat.protocol.body.from(makeRequest({
+        messages: [
+          { role: "system", content: "sys" },
+          { role: "user", content: `See: <screenshot>data:image/png;base64,${badPayload}</screenshot>` },
+        ],
+      }))
+    ).rejects.toThrow(/provenance check/);
   });
 
   test("a user message without a screenshot stays a plain string", async () => {
@@ -261,8 +277,8 @@ describe("AnthropicMessages.protocol — body construction", () => {
     expect(body.system).toBeDefined();
     expect(body.system).toHaveLength(1);
     expect(body.system![0].text).toBe("You are a test assistant.");
- // Prompt caching marker
-    expect(body.system![0].cache_control).toEqual({ type: "ephemeral" });
+ // Prompt caching marker (1h TTL keeps the prefix warm across long agentic loops)
+    expect(body.system![0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
   });
 
   test("omits system when no system message", async () => {
@@ -293,6 +309,18 @@ describe("AnthropicMessages.protocol — body construction", () => {
     expect(body.tools).toBeDefined();
     expect(body.tools![0].name).toBe("return_json");
     expect(body.tool_choice).toEqual({ type: "tool", name: "return_json" });
+  });
+
+  test("rejects a <screenshot> marker whose payload fails the provenance check", async () => {
+    const badPayload = "/9j/AAAA";
+    await expect(
+      AnthropicMessages.protocol.body.from(makeRequest({
+        messages: [
+          { role: "system", content: "sys" },
+          { role: "user", content: `See: <screenshot>data:image/png;base64,${badPayload}</screenshot>` },
+        ],
+      }))
+    ).rejects.toThrow(/provenance check/);
   });
 
   test("default max_tokens is 4096", async () => {
@@ -470,6 +498,18 @@ describe("Gemini.protocol — body construction", () => {
     expect(parts[1].inline_data).toEqual({ mime_type: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==" });
   });
 
+  test("rejects a <screenshot> marker whose payload fails the provenance check", async () => {
+    const badPayload = "/9j/AAAA";
+    await expect(
+      Gemini.protocol.body.from(makeRequest({
+        messages: [
+          { role: "system", content: "sys" },
+          { role: "user", content: `See: <screenshot>data:image/png;base64,${badPayload}</screenshot>` },
+        ],
+      }))
+    ).rejects.toThrow(/provenance check/);
+  });
+
   test("sets responseSchema when a schema is provided", async () => {
     const body = await Gemini.protocol.body.from(makeRequest({ schema: { type: "object" } } as Partial<LLMRequest>)) as Gemini.GeminiBody;
     expect(body.generationConfig.responseMimeType).toBe("application/json");
@@ -516,6 +556,105 @@ describe("encodeModelIdForUrl — safe URL encoding + validation", () => {
     expect(() => encodeModelIdForUrl("tab\tchar")).toThrow(/Invalid model id/);
     expect(() => encodeModelIdForUrl("")).toThrow(/Invalid model id/);
   });
+
+  test("rejects path-traversal ids ('..' / embedded '..') so the URL path can't be rewritten", () => {
+    // The `[\w.:-]+` allow-list PERMITS dots, so `..` passes the regex and is
+    // caught only by the explicit `model.includes("..")` guard. Assert it
+    // throws, and that a single dotted segment like "a.b" is still allowed.
+    expect(() => encodeModelIdForUrl("..")).toThrow(/Invalid model id/);
+    expect(() => encodeModelIdForUrl("a..b")).toThrow(/Invalid model id/);
+    expect(encodeModelIdForUrl("a.b")).toBe("a.b");
+  });
+
+  test("rejects traversal/control forms that slip past a naive allow-list", () => {
+    // Percent-encoded traversal ("..%2f") is NOT in the `[\w.:-]+` allow-list,
+    // so the regex rejects it (the URL path can't be rewritten via encoding).
+    expect(() => encodeModelIdForUrl("..%2f")).toThrow(/Invalid model id/);
+    // A literal segmented traversal.
+    expect(() => encodeModelIdForUrl("a/../b")).toThrow(/Invalid model id/);
+    // Backslash and null byte are outside the allow-list and must throw.
+    expect(() => encodeModelIdForUrl("a" + String.fromCharCode(92) + "b")).toThrow(/Invalid model id/);
+    expect(() => encodeModelIdForUrl("a" + String.fromCharCode(0) + "b")).toThrow(/Invalid model id/);
+  });
+});
+
+// ─── hasImageProvenance (screenshot-smuggling guard) ─────────────────────────
+
+describe("hasImageProvenance — screenshot provenance guard", () => {
+  test("accepts a payload whose magic bytes match the declared media type", () => {
+    expect(hasImageProvenance("iVBORw0KGgo", "png")).toBe(true);
+    expect(hasImageProvenance("/9j/AAAA", "jpeg")).toBe(true);
+    expect(hasImageProvenance("UklGR", "webp")).toBe(true);
+  });
+
+  test("rejects a payload whose magic bytes DON'T match the declared type", () => {
+    // Declared png but JPEG bytes: the guard must reject (this is the
+    // injection-smuggling defense).
+    expect(hasImageProvenance("/9j/AAAA", "png")).toBe(false);
+    // Declared jpeg but PNG bytes.
+    expect(hasImageProvenance("iVBORw0KGgo", "jpeg")).toBe(false);
+    // Random / non-image bytes.
+    expect(hasImageProvenance("notreallyanimage", "png")).toBe(false);
+  });
+
+  test("rejects an unknown/unsupported media type", () => {
+    expect(hasImageProvenance("iVBORw0KGgo", "gif")).toBe(false);
+  });
+});
+
+// ─── isValidCatalog (trust-boundary guard) ───────────────────────────────────
+
+describe("isValidCatalog — catalog trust-boundary guard", () => {
+  const validProvider = () => ({
+    id: "openai",
+    name: "OpenAI",
+    models: {
+      "gpt-4o": {
+        id: "gpt-4o",
+        name: "GPT-4o",
+        release_date: "2024-05-13",
+        attachment: false,
+        reasoning: false,
+        temperature: true,
+        tool_call: true,
+        cost: { input: 2.5, output: 10 },
+      },
+    },
+  });
+
+  test("accepts a well-formed minimal catalog entry", () => {
+    expect(isValidCatalog({ openai: validProvider() })).toBe(true);
+  });
+
+  test("rejects a negative input cost (would defeat the cost cap)", () => {
+    const c = validProvider();
+    (c.models["gpt-4o"] as { cost: { input: number; output: number } }).cost = { input: -1, output: 10 };
+    expect(isValidCatalog({ openai: c })).toBe(false);
+  });
+
+  test("accepts a zero cost (legitimate free-tier model, must not be mistaken for a negative/invalid cost)", () => {
+    const c = validProvider();
+    (c.models["gpt-4o"] as { cost: { input: number; output: number } }).cost = { input: 0, output: 0 };
+    expect(isValidCatalog({ openai: c })).toBe(true);
+  });
+
+  test("rejects a non-numeric cost", () => {
+    const c = validProvider();
+    (c.models["gpt-4o"] as { cost: { input: unknown; output: number } }).cost = { input: "x", output: 10 };
+    expect(isValidCatalog({ openai: c })).toBe(false);
+  });
+
+  test("rejects a missing/non-string release_date (would crash the picker)", () => {
+    const c = validProvider();
+    (c.models["gpt-4o"] as { release_date: unknown }).release_date = 20240101;
+    expect(isValidCatalog({ openai: c })).toBe(false);
+  });
+
+  test("rejects a missing/non-string id or name", () => {
+    const c = validProvider();
+    (c as { id: unknown }).id = 123;
+    expect(isValidCatalog({ openai: c })).toBe(false);
+  });
 });
 
 describe("Gemini.protocol — stream parsing", () => {
@@ -545,5 +684,74 @@ describe("Gemini.protocol — stream parsing", () => {
 
   test("terminal returns true on usageMetadata (fallback for older API versions)", async () => {
     expect(Gemini.protocol.stream.terminal?.(JSON.stringify({ usageMetadata: {} }))).toBe(true);
+  });
+});
+
+// ─── resolveVisionSupport (vision/screenshot gating) ────────────────────────
+
+describe("resolveVisionSupport — modelSupportsVision gating logic", () => {
+ // Build a minimal but well-formed CatalogModel. `attachment` defaults to
+ // false (the safe default) so each test opts a model INTO vision
+ // explicitly.
+  function model(overrides: Partial<CatalogModel> & { id: string }): CatalogModel {
+    const { id, ...rest } = overrides;
+    return {
+      name: id,
+      release_date: "2024-01-01",
+      attachment: false,
+      reasoning: false,
+      temperature: true,
+      tool_call: true,
+      cost: { input: 1, output: 1 },
+      ...rest,
+      id,
+    };
+  }
+
+  test("exact match with attachment:false reports NOT vision", () => {
+    const models = [model({ id: "gpt-4", attachment: false })];
+    expect(resolveVisionSupport("gpt-4", models)).toBe(false);
+  });
+
+  test("exact match with attachment:true reports vision", () => {
+    const models = [model({ id: "gpt-4o", attachment: true })];
+    expect(resolveVisionSupport("gpt-4o", models)).toBe(true);
+  });
+
+  test("exact match with modalities.input 'image' reports vision", () => {
+    const models = [model({ id: "claude-3-opus", modalities: { input: ["image"] } })];
+    expect(resolveVisionSupport("claude-3-opus", models)).toBe(true);
+  });
+
+  test("requested base id as substring of a vision-only variant is NOT treated as vision", () => {
+ // Regression lock-in for the False-Positive finding: 'gpt-4' is a prefix of
+ // 'gpt-4-vision-preview', but the base model is NOT a vision model, so the
+ // screenshot must NOT be attached (it would 400 on a non-vision model).
+    const models = [model({ id: "gpt-4-vision-preview", attachment: true })];
+    expect(resolveVisionSupport("gpt-4", models)).toBe(false);
+  });
+
+  test("dated variant of the same vision model IS treated as vision (substring still works)", () => {
+ // The case substring matching is supposed to serve: the user typed
+ // 'gpt-4o' but the catalog carries only the dated 'gpt-4o-2024-08-06'.
+    const models = [model({ id: "gpt-4o-2024-08-06", attachment: true })];
+    expect(resolveVisionSupport("gpt-4o", models)).toBe(true);
+  });
+
+  test("no catalog models falls back to the name heuristic (vision family)", () => {
+ // Catalog unavailable / provider-less: 'claude-3-opus' must still resolve
+ // to vision via VISION_PATTERNS, not throw or default to false.
+    expect(resolveVisionSupport("claude-3-opus", [])).toBe(true);
+  });
+
+  test("non-vision name with no catalog falls back to the heuristic (false)", () => {
+    expect(resolveVisionSupport("text-embedding-3-small", [])).toBe(false);
+  });
+
+  test("ambiguous substring that matches a non-vision base variant is not vision", () => {
+ // 'gpt-4' substring-matches a dated NON-vision base variant; since the base
+ // isn't vision, the heuristic (which doesn't cover 'gpt-4') yields false.
+    const models = [model({ id: "gpt-4-2024-01-01", attachment: false })];
+    expect(resolveVisionSupport("gpt-4", models)).toBe(false);
   });
 });

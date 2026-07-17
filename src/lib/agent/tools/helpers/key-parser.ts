@@ -94,8 +94,10 @@ export function parseKeys(keys: string): ParsedKeys {
  // special-case `keys.split("+")` yields an empty main token and we'd wrongly
  // reject a valid request to type a plus sign. The agent can also use the
  // `shift+=` form; both now work.
-  if (mainRaw === "" && rawParts.length >= 1) {
+  if (mainRaw === "" && rawParts.length > 1) {
     mainRaw = "+";
+  } else if (mainRaw.trim() === "") {
+    mainRaw = " ";
   }
 
  // Reject input that resolves to no real key: a bare modifier name

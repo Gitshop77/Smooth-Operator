@@ -10,9 +10,13 @@ import type { Action } from "../schema";
 import type { ActionContext } from "./types";
 import { validateFileName } from "./validate-file-name";
 import { swOkResponseSchema as saveAsPdfResponseSchema } from "./sw-response";
+import { rejectOnAbort } from "./abort";
+
+/** Give up on an unresponsive SW handler rather than hanging the agent loop. */
+const SAVE_AS_PDF_TIMEOUT_MS = 30_000;
 
 export async function handleSaveAsPdf(
-  _ctx: ActionContext,
+  ctx: ActionContext,
   action: Extract<Action, { type: "save_as_pdf" }>,
 ): Promise<ActionResult> {
  // Render the current page as a PDF via CDP `Page.printToPDF` (background
@@ -44,16 +48,35 @@ export async function handleSaveAsPdf(
     };
   }
   try {
-    const raw = await chrome.runtime.sendMessage({ type: "SAVE_AS_PDF", fileName: file_name });
  // `chrome.runtime.sendMessage` resolves `undefined` (not a rejection) when
  // there is no listener, so distinguish a missing/unreachable SW handler
  // from a malformed payload — both otherwise collapse to the same
- // "invalid response" string and hide the real cause.
+ // "invalid response" string and hide the real cause. Race a timeout so a
+ // live SW handler that keeps the channel open (async) but never responds
+ // cannot hang the orchestrator step indefinitely.
+    let timer: ReturnType<typeof setTimeout>;
+ // Race the SW call against the timeout AND the step's abort signal so a user
+ // STOP is honored mid-step instead of waiting out the full 30s timeout.
+    const abort = rejectOnAbort(ctx.signal);
+    let raw: unknown;
+    try {
+      raw = await Promise.race([
+        chrome.runtime
+          .sendMessage({ type: "SAVE_AS_PDF", fileName: file_name })
+          .finally(() => clearTimeout(timer)),
+        new Promise<undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), SAVE_AS_PDF_TIMEOUT_MS);
+        }),
+        abort.promise,
+      ]);
+    } finally {
+      abort.cleanup();
+    }
     if (typeof raw === "undefined") {
       return {
         action,
         success: false,
-        message: "save_as_pdf failed: no response from extension (background service worker unreachable)",
+        message: "save_as_pdf failed: no response from extension (timeout or unreachable service worker)",
       };
     }
     const parsed = saveAsPdfResponseSchema.safeParse(raw);

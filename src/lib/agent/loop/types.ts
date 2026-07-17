@@ -22,7 +22,7 @@ import type { LoopDetector } from "./loop-detector";
 // ─── LLM call signatures ────────────────────────────────────────────────────
 
 /** Shared return shape for an LLM call that yields raw text + optional usage. */
-export type LLMCall<Req> = (req: Req) => Promise<{
+export type LLMCall<Req> = (req: Req, signal?: AbortSignal) => Promise<{
   raw: string;
   tokensIn?: number;
   tokensOut?: number;
@@ -148,6 +148,9 @@ export interface PlannerCallArgs {
   tabs: TabInfo[];
   step: number;
   maxSteps: number;
+  /** Compacted-memory block from history compaction, forwarded to the planner
+   * prompt so completion/replan decisions retain summarized older context. */
+  compactedMemory?: string;
   /** Fired after each LLM call with the cost (USD) + optional token counts.
  * The token counts let the caller accumulate `totalTokensIn`/`totalTokensOut`
  * for the `runEnd` callback (without this, token totals were always 0). */

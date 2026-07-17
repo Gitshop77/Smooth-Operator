@@ -82,7 +82,14 @@ export function isVisible(el: HTMLElement): boolean {
 export function safeScrollIntoView(el: HTMLElement): void {
   if (typeof el.scrollIntoView === "function") {
     try {
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
+ // Use an INSTANT (non-animated) scroll so layout settles synchronously.
+ // The previous `behavior: "smooth"` started an async animated scroll;
+ // callers that read `getBoundingClientRect()` immediately after (click,
+ // press-and-hold, input, select-dropdown) would read mid-animation rects
+ // and dispatch CDP coordinate clicks at the element's pre-scroll position
+ // — a silent misclick reported as success. An instant scroll centers the
+ // element before the rect is read.
+      el.scrollIntoView({ block: "center" });
     } catch (e) {
  // Some environments implement scrollIntoView but reject the options
  // bag (older Edge / IE). Swallow — scrolling is best-effort — but

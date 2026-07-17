@@ -67,12 +67,12 @@ export const NAV_GROUPS: NavGroup[] = [
 ];
 
 /** Flat lookup of view id → {label, icon, description}. */
-export const VIEW_META: Record<ViewId, { label: string; icon: LucideIcon; description: string }> =
+export const VIEW_META: Partial<Record<ViewId, { label: string; icon: LucideIcon; description: string }>> =
   Object.fromEntries(
     NAV_GROUPS.flatMap((g) =>
       g.items.map((i) => [i.id, { label: i.label, icon: i.icon, description: i.description ?? "" }]),
     ),
-  ) as Record<ViewId, { label: string; icon: LucideIcon; description: string }>;
+  );
 
 // Dev-only completeness guard: every view wired into the nav must have a
 // VIEW_META entry. (Depth views like "session-replay"/"run-detail" are

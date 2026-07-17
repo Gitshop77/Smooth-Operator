@@ -26,6 +26,19 @@ export interface ProviderBridgeConfig {
   /** Whether this provider supports image inputs (vision). */
   supportsVision: boolean;
   /**
+   * Whether the resolved model is a reasoning model (rejects `temperature`
+   * / `frequency_penalty`, expects `max_completion_tokens`). Forwarded to the
+   * route-layer `LLMRequest.reasoning` so the protocol omits those params.
+   */
+  supportsReasoning?: boolean;
+  /**
+   * Whether to request OpenAI "strict" JSON-schema structured output.
+   * Forwarded to `LLMRequest.structuredOutputStrict`. OpenAI-compatible
+   * providers that 400 on strict mode should leave this unset (defaulting to
+   * non-strict `json_object` + in-prompt schema fallback).
+   */
+  structuredOutputStrict?: boolean;
+  /**
  * Whether this provider supports JSON-schema structured output natively.
  *
  * Per-provider (not hardcoded `true`), so the in-prompt schema fallback at
@@ -59,6 +72,7 @@ export function toLLMProvider(config: ProviderBridgeConfig): LLMProvider {
     displayName: `${config.providerDisplayName} ${config.model}`,
     supportsStructuredOutput: config.supportsStructuredOutput,
     supportsVision: config.supportsVision,
+    supportsReasoning: config.supportsReasoning ?? false,
  // NOTE: bridged providers implement `chat` only. `streamChat` is intentionally
  // NOT provided — it is optional on the `LLMProvider` interface, and no streaming
  // entry point exists in the route layer that the bridge could delegate to. Any
@@ -74,15 +88,20 @@ export function toLLMProvider(config: ProviderBridgeConfig): LLMProvider {
  // rather than surfacing far from its cause as a generic provider/auth problem.
       let response: Awaited<ReturnType<typeof generate>>;
       try {
-        response = await generate({
-          model: model as Parameters<typeof generate>[0]["model"],
-          messages: req.messages,
-          generation: {
-            ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
-            ...(req.maxTokens !== undefined ? { maxTokens: req.maxTokens } : {}),
+        response = await generate(
+          {
+            model: model as Parameters<typeof generate>[0]["model"],
+            messages: req.messages,
+            generation: {
+              ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+              ...(req.maxTokens !== undefined ? { maxTokens: req.maxTokens } : {}),
+            },
+            schema: req.schema,
+            ...(config.supportsReasoning ? { reasoning: true } : {}),
+            ...(config.structuredOutputStrict ? { structuredOutputStrict: true } : {}),
           },
-          schema: req.schema,
-        });
+          req.signal,
+        );
       } catch (err) {
         if (err instanceof Error && err.message.includes("No route registered")) {
           throw new Error(
@@ -107,7 +126,7 @@ export function toLLMProvider(config: ProviderBridgeConfig): LLMProvider {
               cachedInputTokens: omitZero(cachedInputTokens),
               cachedWriteInputTokens: omitZero(cachedWriteInputTokens),
               model: config.model,
-              costUsd: estimateCost(config.model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens),
+              costUsd: estimateCost(config.model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, undefined, config.providerId),
             }
           : undefined,
       };

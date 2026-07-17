@@ -116,7 +116,7 @@ export const ScrollSchema = z.object({
 /** Press a single key or a key combination (e.g. Enter, Ctrl+S). */
 export const SendKeysSchema = z.object({
   type: z.literal("send_keys").describe("Press a key or key combination (e.g. 'Enter', 'Escape', 'Tab')."),
-  keys: boundedText(MAX_SHORT_TEXT_CHARS).describe("The key name: Enter, Escape, Tab, Space, ArrowUp/Down/Left/Right, Backspace, or a printable character."),
+  keys: z.coerce.string().min(1).max(MAX_SHORT_TEXT_CHARS).describe("The key name: Enter, Escape, Tab, Space, ArrowUp/Down/Left/Right, Backspace, or a printable character."),
 });
 
 /** Navigate to a URL (optionally in a new tab). Page-changing — put LAST. */
@@ -615,10 +615,14 @@ export function isEquivalentAction(a: Action, b: Action): boolean {
         (a.case_sensitive ?? false) ===
           ((b as Extract<Action, { type: "search_page" }>).case_sensitive ?? false)
       );
-    case "find_elements":
+    case "find_elements": {
+      const bb = b as Extract<Action, { type: "find_elements" }>;
       return (
-        a.selector === (b as Extract<Action, { type: "find_elements" }>).selector
+        a.selector === bb.selector &&
+        JSON.stringify(a.attributes ?? []) === JSON.stringify(bb.attributes ?? []) &&
+        (a.max_results ?? 50) === (bb.max_results ?? 50)
       );
+    }
     case "evaluate":
       return a.code === (b as Extract<Action, { type: "evaluate" }>).code;
     case "ask_human": {

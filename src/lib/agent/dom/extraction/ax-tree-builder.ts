@@ -36,6 +36,7 @@ import {
   SKIP_TAGS,
   isSensitive,
 } from "../utils";
+import { redactUrlTokens } from "./element-info";
 import { getShadowRoot } from "../annotation/shadow-piercer";
 
 /**
@@ -80,6 +81,7 @@ export function initElementMap(): void {
 export function resolveRef(refId: string): HTMLElement | null {
   const map = elementMap;
   if (!map) return null;
+  if (!Object.hasOwn(map, refId)) return null;
   const ref = map[refId];
   if (!ref) return null;
   const el = ref.deref();
@@ -107,7 +109,16 @@ export function resolveRef(refId: string): HTMLElement | null {
  * never span or spoof a line.
  */
 function escapeAttributeValue(s: string): string {
-  return s.replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ").replace(/"/g, '\\"');
+  let out = s
+    .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
+    .replace(/"/g, '\\"');
+  if (out.length > MAX_ATTR_VALUE_LENGTH) {
+    out = out.slice(0, MAX_ATTR_VALUE_LENGTH) + "...";
+  }
+  return out
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 // ─── Role detection ─────────────────────────────────────────────────────────
@@ -215,14 +226,20 @@ function getName(el: HTMLElement, labelMap: Map<string, HTMLLabelElement>): stri
     if (t) return t;
   }
 
-  const placeholder = el.getAttribute("placeholder");
-  if (placeholder?.trim()) return placeholder.trim();
+ // Sensitive fields: skip placeholder/title/alt — these reveal what secret
+ // the field holds (matching buildAttrs parity, which omits placeholder for
+ // sensitive fields). The value itself stays redacted below; only non-secret
+ // `type` semantics survive via the input/textarea branches.
+  if (!sensitive) {
+    const placeholder = el.getAttribute("placeholder");
+    if (placeholder?.trim()) return placeholder.trim();
 
-  const title = el.getAttribute("title");
-  if (title?.trim()) return title.trim();
+    const title = el.getAttribute("title");
+    if (title?.trim()) return title.trim();
 
-  const alt = el.getAttribute("alt");
-  if (alt?.trim()) return alt.trim();
+    const alt = el.getAttribute("alt");
+    if (alt?.trim()) return alt.trim();
+  }
 
  // <label for="id">
   if (el.id) {
@@ -269,7 +286,7 @@ function getName(el: HTMLElement, labelMap: Map<string, HTMLLabelElement>): stri
  // Headings — text content (truncated).
   if (tag.match(/^h[1-6]$/)) {
     const text = el.textContent;
-    if (text?.trim()) return escapeAttributeValue(text.trim()).substring(0, NAME_MAX_LENGTH);
+    if (text?.trim()) return text.trim().substring(0, NAME_MAX_LENGTH);
   }
 
  // Images — no name (alt already checked).
@@ -347,6 +364,8 @@ function shouldInclude(
 
 /** Hard cap on the number of elements emitted (prevents runaway output). */
 const MAX_ELEMENTS = 10_000;
+/** Max length for a single attribute value rendered into the AX-tree (mirrors the indexed tree). */
+const MAX_ATTR_VALUE_LENGTH = 200;
 /** Default max tree depth (overridable by the caller). */
 const DEFAULT_MAX_DEPTH = 15;
 
@@ -402,7 +421,7 @@ function buildTree(
     const href = el.getAttribute("href");
     const type = el.getAttribute("type");
     const placeholder = el.getAttribute("placeholder");
-    if (href) line += ` href="${escapeAttributeValue(href)}"`;
+    if (href) line += ` href="${escapeAttributeValue(redactUrlTokens(href))}"`;
  // For sensitive fields (password, credit-card, OTP, hidden CSRF/session
  // tokens) the *value* is already redacted — but `type`/`placeholder` still
  // leak what secret the field holds. Suppress them so the field's semantics
@@ -516,6 +535,13 @@ export function generateAccessibilityTree(
 
     if (refId) {
  // Extract only the subtree for the given ref.
+      if (!Object.hasOwn(elementMap!, refId)) {
+        return {
+          error: `Element with ref_id '${refId}' not found. It may have been removed from the page. Use read_page without ref_id to get the current page state.`,
+          pageContent: "",
+          viewport: { width: window.innerWidth, height: window.innerHeight },
+        };
+      }
       const ref = elementMap![refId];
       if (!ref) {
         return {
@@ -562,8 +588,12 @@ export function generateAccessibilityTree(
       };
     }
 
+    const wrappedPageContent =
+      pageContent.length > 0
+        ? `<untrusted_page_state>\n${pageContent}\n</untrusted_page_state>`
+        : pageContent;
     return {
-      pageContent,
+      pageContent: wrappedPageContent,
       viewport: { width: window.innerWidth, height: window.innerHeight },
     };
   } catch (e) {

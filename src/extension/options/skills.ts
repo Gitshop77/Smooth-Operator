@@ -12,7 +12,7 @@
  */
 
 import { $, escapeHtml } from "@/extension/shared";
-import { showSaved } from "./settings-sync";
+import { showSaved, isHostname } from "./settings-sync";
 import { alertModal } from "./modal";
 
 const CUSTOM_SKILLS_KEY = "open_cowork_custom_skills";
@@ -33,24 +33,13 @@ const INSTRUCTIONS_MAX = 50_000;
 const NAME_RE = new RegExp("^[^\\n\\r\\t]{1," + NAME_MAX + "}$");
 
 /**
- * True if `value` is a bare hostname (optionally a `*.` wildcard prefix), with
- * no scheme, path, port, or space. Mirrors the validation applied to
- * `allowedDomains` / `blockedDomains` in `settings-sync.ts` so skill domains
- * match the same contract the domain-skills matcher relies on.
+ * `isHostname` is imported from `settings-sync` (single shared definition)
+ * rather than duplicated here, so skill-domain validation matches the exact
+ * contract the domain-skills matcher and `allowedDomains`/`blockedDomains`
+ * rely on — including IPv6 literals, which a naive `:`-rejecting check would
+ * silently fail.
  */
-function isBareHostname(value: string): boolean {
-  if (!value || value.includes("/") || value.includes(" ") || value.includes(":")) return false;
-  const candidate = value.startsWith("*.") ? value.slice(2) : value;
-  if (!candidate) return false;
-  try {
-    const u = new URL("http://" + candidate);
- // URL lower-cases the hostname; compare lowercased so legitimate UPPERCASE
- // / IDN hostnames aren't silently rejected.
-    return u.hostname.toLowerCase() === candidate.toLowerCase();
-  } catch {
-    return false;
-  }
-}
+
 
 // ─── Mutation serialization ──────────────────────────────────────────────────
 let mutationQueue: Promise<unknown> = Promise.resolve();
@@ -68,7 +57,7 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-function validateCustomSkills(raw: unknown): CustomSkill[] {
+export function validateCustomSkills(raw: unknown): CustomSkill[] {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) {
     console.warn("[skills] stored custom-skills value is not an array; ignoring.", raw);
@@ -133,9 +122,16 @@ export async function renderSkills(): Promise<void> {
  // (index-based filtering resurrects/removes the wrong skill).
         const current = await readCustomSkills();
         const filtered = current.filter((sk) => sk.name !== s.name);
-        await chrome.storage.local.set({ [CUSTOM_SKILLS_KEY]: filtered });
-        await renderSkills();
-        showSaved();
+        try {
+          await chrome.storage.local.set({ [CUSTOM_SKILLS_KEY]: filtered });
+          await renderSkills();
+          showSaved();
+        } catch (err) {
+          await alertModal({
+            title: "Delete failed",
+            message: `Could not delete skill: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        }
       });
     });
     list.appendChild(item);
@@ -157,7 +153,7 @@ $("addSkill")?.addEventListener("click", () => {
       });
       return;
     }
-    if (!isBareHostname(domain)) {
+    if (!isHostname(domain)) {
       await alertModal({
         title: "Invalid skill domain",
         message:
@@ -199,11 +195,18 @@ $("addSkill")?.addEventListener("click", () => {
     const entry: CustomSkill = { domains, name, frontmatter, instructions };
     if (idx >= 0) skills[idx] = entry;
     else skills.push(entry);
-    await chrome.storage.local.set({ [CUSTOM_SKILLS_KEY]: skills });
-    ($("skillDomain") as HTMLInputElement).value = "";
-    ($("skillName") as HTMLInputElement).value = "";
-    ($("skillInstructions") as HTMLTextAreaElement).value = "";
-    await renderSkills();
-    showSaved();
+    try {
+      await chrome.storage.local.set({ [CUSTOM_SKILLS_KEY]: skills });
+      ($("skillDomain") as HTMLInputElement).value = "";
+      ($("skillName") as HTMLInputElement).value = "";
+      ($("skillInstructions") as HTMLTextAreaElement).value = "";
+      await renderSkills();
+      showSaved();
+    } catch (err) {
+      await alertModal({
+        title: "Save failed",
+        message: `Could not save skill: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
   });
 });

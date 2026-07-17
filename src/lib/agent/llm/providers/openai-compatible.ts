@@ -47,7 +47,12 @@ class UnknownProviderError extends Error {
   }
 }
 
-export type Config = { baseURL?: string } & ProviderAuthOption<"optional">;
+export type Config = {
+  baseURL?: string;
+  // When true (user-configured provenance) the curated-local-provider loopback
+  // exemption is honored; otherwise loopback / RFC1918 / ULA are rejected.
+  allowLocalExemption?: boolean;
+} & ProviderAuthOption<"optional">;
 
 /**
  * Stable, short, URL-safe token derived from a baseURL so distinct endpoints
@@ -87,9 +92,10 @@ const auth = (options: ProviderAuthOption<"optional">) => {
  */
 function configure(profile: OpenAICompatibleProfile, input: Config = {}) {
  // (SSRF guard): validate any user-supplied baseURL override before
- // building the route/endpoint. Forward the provider id so the guard's
- // narrow curated-local-origin exemption (if ever enabled) can apply.
-  assertSafeUserBaseURL(input.baseURL, profile.provider);
+ // building the route/endpoint. Forward the provider id and the user-provenance
+ // exemption flag so the guard's narrow curated-local-origin exemption applies
+ // only for a user-configured baseURL.
+  assertSafeUserBaseURL(input.baseURL, profile.provider, input.allowLocalExemption);
   const baseURL = input.baseURL ?? profile.baseURL;
   const apiKey = "apiKey" in input ? input.apiKey : undefined;
   // Split the (possibly path-prefixed) base URL into origin + path-prefix and
@@ -119,15 +125,19 @@ function configure(profile: OpenAICompatibleProfile, input: Config = {}) {
  * Resolve a profile by provider id. Falls back to a synthesized profile when
  * the provider isn't in the table (caller must supply baseURL).
  */
-function resolveProfile(provider: string, baseURL?: string): OpenAICompatibleProfile {
+function resolveProfile(
+  provider: string,
+  baseURL?: string,
+  allowLocalExemption?: boolean,
+): OpenAICompatibleProfile {
  // (SSRF guard): validate ANY caller-supplied baseURL here — for a known
  // provider the baseURL override (if any) is still honored by `configure`, so
  // it must be checked at resolution time too, not only for unknown providers.
- // Forward the provider id so the guard's narrow exemption (if enabled) can
- // apply. `configure` re-validates as the single source of truth before
- // building a route, so the guard can never be silently dropped by a future
- // refactor.
-  assertSafeUserBaseURL(baseURL, provider);
+ // Forward the provider id and user-provenance exemption flag so the guard's
+ // narrow exemption applies only for a user-configured baseURL. `configure`
+ // re-validates as the single source of truth before building a route, so the
+ // guard can never be silently dropped by a future refactor.
+  assertSafeUserBaseURL(baseURL, provider, allowLocalExemption);
   const direct = byProvider[provider];
   if (direct) return direct;
  // Unknown provider — synthesize from the caller-supplied baseURL.
@@ -153,7 +163,11 @@ function resolveProfile(provider: string, baseURL?: string): OpenAICompatiblePro
 export function toLLMProvider(
   config: Config & { model: string; provider: string }
 ): LLMProvider {
-  const profile = resolveProfile(config.provider, config.baseURL);
+  const profile = resolveProfile(
+    config.provider,
+    config.baseURL,
+    config.allowLocalExemption,
+  );
   return toLLMProviderBridge({
     providerId: config.provider,
     providerDisplayName: config.provider,

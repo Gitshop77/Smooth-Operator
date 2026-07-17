@@ -219,6 +219,8 @@ export async function annotateScreenshot(
  // decode + canvas allocation and return the raw screenshot unchanged.
   const hasDrawable = elements.some(
     (el) =>
+      el != null &&
+      el.rect != null &&
       Number.isFinite(el.index) &&
       Number.isFinite(el.rect.x) &&
       Number.isFinite(el.rect.y) &&
@@ -247,6 +249,8 @@ export async function annotateScreenshot(
     return screenshotDataUrl;
   }
 
+  if (!img.width || !img.height) return screenshotDataUrl;
+
   try {
     canvas.width = img.width;
     canvas.height = img.height;
@@ -265,6 +269,7 @@ export async function annotateScreenshot(
     ctx.textBaseline = "top";
 
     for (const el of elements) {
+      if (el == null || el.rect == null) continue;
       const { x, y, width, height } = el.rect;
  // Skip malformed / non-finite rects — a NaN passes the `<= 0` checks but
  // would make `ctx.strokeRect(NaN, …)` draw nothing (silent drop), and a
@@ -318,7 +323,9 @@ export async function annotateScreenshot(
  // black/white by the label background's luminance so light palette colors
  // (amber/lime/cyan) don't yield unreadable white-on-light text.
       ctx.fillStyle =
-        typeof options?.textColor === "string" ? textColor : pickReadableTextColor(labelBg);
+        typeof options?.textColor === "string" && isHexColor(options.textColor.trim())
+          ? textColor
+          : pickReadableTextColor(labelBg);
       ctx.fillText(label, dx + 3 * scaleFactor, dy + 2 * scaleFactor);
     }
 
