@@ -91,16 +91,16 @@ export function shouldRefuseStart(
 //   1-128 chars — defeats arbitrary room-name abuse.
 // • A connection with a scoped `authorizedSessionId` (from the handshake auth
 //   payload) may ONLY join that exact session's room (strict ownership).
-// • A connection without one (legacy clients presenting only the shared token,
-//   e.g. the current cockpit) may join any room, flagged `permissive-legacy`.
-//   Per-session-HMAC ownership is future work; the deployment assumes a single
-//   trusted user on loopback.
+// • A connection WITHOUT one is rejected (fail-closed) — it may not join any
+//   room. Cross-session chat leakage is therefore not reachable even if the
+//   shared token leaks. Per-session-HMAC ownership remains future work; until
+//   then, scope via the handshake `auth.sessionId`.
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 export type ChatJoinDecision =
-  | { allowed: false; reason: 'invalid-session-id' | 'not-authorized-for-session' }
-  | { allowed: true; reason: 'ok' | 'permissive-legacy' };
+  | { allowed: false; reason: 'invalid-session-id' | 'not-authorized-for-session' | 'no-scoped-session-id' }
+  | { allowed: true; reason: 'ok' };
 
 /**
  * Pure decision helper for the socket.io `chat:join` handler.
@@ -115,11 +115,16 @@ export function evaluateChatJoin(
   if (typeof sessionId !== 'string' || !SESSION_ID_PATTERN.test(sessionId)) {
     return { allowed: false, reason: 'invalid-session-id' };
   }
-  if (authorizedSessionId !== undefined) {
-    if (sessionId === authorizedSessionId) {
-      return { allowed: true, reason: 'ok' };
-    }
-    return { allowed: false, reason: 'not-authorized-for-session' };
+  // A socket may only join the chat room for the session it proved ownership of
+  // at handshake time (`auth.sessionId`). A connection that presented no scoped
+  // sessionId is rejected (fail-closed) rather than permitted to join any room,
+  // so cross-session chat leakage is no longer reachable. Clients that need a
+  // session's chat stream must connect with a scoped `auth.sessionId`.
+  if (authorizedSessionId === undefined) {
+    return { allowed: false, reason: 'no-scoped-session-id' };
   }
-  return { allowed: true, reason: 'permissive-legacy' };
+  if (sessionId === authorizedSessionId) {
+    return { allowed: true, reason: 'ok' };
+  }
+  return { allowed: false, reason: 'not-authorized-for-session' };
 }

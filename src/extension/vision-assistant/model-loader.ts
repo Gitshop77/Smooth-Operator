@@ -501,8 +501,14 @@ export class ModelLoader {
  // model weights are binary; markup begins with '<', so reject it with a
  // descriptive error rather than a generic parse failure (finding: cached
  // file type/content not validated before parsing).
-    const stored = response.headers.get(DIGEST_HEADER);
-    if (buf.byteLength >= 1 && buf[0] === 0x3c /* '<' */ && !MODEL_FILE_HASHES[url] && !stored) {
+ // Defense-in-depth: a cached "model" that is actually an HTML/XML error
+ // page (e.g. from a bad CDN redirect) must never reach ONNX Runtime. Genuine
+ // model weights are binary; markup begins with '<', so reject it with a
+ // descriptive error rather than a generic parse failure. This check is
+ // unconditional: a self-reported x-model-sha256 digest (unpinned-weights
+ // mode) or a pinned hash must not let a markup payload through, since real
+ // weights never begin with '<'.
+    if (buf.byteLength >= 1 && buf[0] === 0x3c /* '<' */) {
       throw new Error(
         `[vision-assistant] Cached model file ${url} looks like markup (starts with '<'), ` +
           `not model weights; refusing to load. The cache entry is likely an error page.`,

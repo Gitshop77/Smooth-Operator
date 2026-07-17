@@ -287,9 +287,9 @@ describe("evaluateChatJoin", () => {
     expect(evaluateChatJoin(undefined, "a".repeat(129))).toEqual({ allowed: false, reason: "invalid-session-id" });
   });
 
-  test("legacy client (no scoped sessionId) may join any valid room — flagged permissive-legacy", () => {
-    expect(evaluateChatJoin(undefined, "my-chat-1")).toEqual({ allowed: true, reason: "permissive-legacy" });
-    expect(evaluateChatJoin(undefined, "sess-9")).toEqual({ allowed: true, reason: "permissive-legacy" });
+  test("connection without a scoped sessionId is rejected (fail-closed, no-scoped-session-id)", () => {
+    expect(evaluateChatJoin(undefined, "my-chat-1")).toEqual({ allowed: false, reason: "no-scoped-session-id" });
+    expect(evaluateChatJoin(undefined, "sess-9")).toEqual({ allowed: false, reason: "no-scoped-session-id" });
   });
 
   test("authorized socket CAN join its OWN session room", () => {
@@ -1161,7 +1161,7 @@ describe("cowork-events socket.io (integration)", () => {
     zaiStore.chatChunks = ["Hello", " ", "world"];
 
     const sessionId = "test-sess-stream";
-    const c = await connect({ token });
+    const c = await connect({ token, sessionId });
     c.emit("chat:join", sessionId);
 
  // Collect streamed tokens via socket.io BEFORE issuing the HTTP request,
@@ -1211,7 +1211,7 @@ describe("cowork-events socket.io (integration)", () => {
     zaiStore.failChat = true;
     try {
       const sessionId = "test-sess-err";
-      const c = await connect({ token });
+      const c = await connect({ token, sessionId });
       c.emit("chat:join", sessionId);
 
       let sawError = false;

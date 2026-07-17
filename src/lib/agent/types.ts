@@ -376,7 +376,12 @@ export interface ExpectedOutcomes {
 }
 
 /** Default agent configuration used when no override is provided. */
+// Fail-safe cost cap: the DEFAULT_COST_CAP invariant (cap = $2, 0 = opt-out)
+// must be enforced by the library default — not only by the extension's
+// agent-bridge clamp — so any direct core-library usage is still bounded.
+export const DEFAULT_COST_CAP = 2;
 export const DEFAULT_CONFIG: AgentConfig = {
+  costCapUsd: DEFAULT_COST_CAP,
   maxSteps: 100,
   maxActionsPerStep: 10,
   plannerInterval: 5,

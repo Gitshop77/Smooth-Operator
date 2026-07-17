@@ -1153,11 +1153,12 @@ io.on('connection', (socket: Socket) => {
  // Join a room named after sessionId to receive that session's streamed chat
  // tokens. Ownership is delegated to `evaluateChatJoin`:
  // • `sessionId` must match `/^[A-Za-z0-9_-]{1,128}$/`.
- // • A connection with a scoped `authorizedSessionId` may join only that room.
- // • Legacy clients (no scoped sessionId, e.g. the cockpit) may join any room,
- //   logged `permissive-legacy`.
- // Per-session-HMAC ownership is future work — the deployment assumes a single
- // trusted user on loopback.
+ // • A connection may only join the chat room for the `sessionId` it proved
+ //   ownership of at handshake (`auth.sessionId`). A connection that presented
+ //   no scoped sessionId is rejected (fail-closed) — cross-session chat
+ //   leakage is not reachable.
+ // Per-session-HMAC ownership is future work; until then, scope via handshake
+ // `auth.sessionId`.
   socket.on('chat:join', (sessionId: unknown) => {
     // Rate-limit chat:join (before the join, even if the sessionId is rejected)
     // so a client can't flood the room map. Keyed SEPARATELY from the proxy /
@@ -1189,13 +1190,8 @@ io.on('connection', (socket: Socket) => {
             `owned=${socket.data.authorizedSessionId} from ${socketClientIp(socket)}`,
         );
       }
- // 'invalid-session-id' → silently ignore (no join, no error).
+ // 'invalid-session-id' / 'no-scoped-session-id' → silently ignore (no join, no error).
       return;
-    }
-    if (decision.reason === 'permissive-legacy') {
-      console.warn(
-        `[cowork-events] chat:join PERMISSIVE (no scoped sessionId at handshake) room=${sessionId} from ${socketClientIp(socket)}`,
-      );
     }
     socket.join(sessionId as string);
   });
@@ -1296,13 +1292,13 @@ function main(): void {
     );
   });
 
- // Startup advisory: chat:join runs in permissive-legacy mode (the cockpit
- // presents no scoped sessionId), so any authenticated client can join any
- // session room. Safe only for the single-trusted-user-on-loopback model.
+ // Startup advisory: chat:join is fail-closed — a socket must present a scoped
+ // `auth.sessionId` at handshake to join any chat room, so cross-session chat
+ // leakage is not reachable.
   console.warn(
-    '[cowork-events] WARNING: chat:join is in permissive-legacy mode (no ' +
-      'per-session HMAC). Cross-session chat leakage is possible if exposed ' +
-      'beyond loopback — single-user-loopback deployment only.',
+    '[cowork-events] chat:join is fail-closed: a socket must present a scoped ' +
+      '`auth.sessionId` at handshake to join a chat room (cross-session ' +
+      'leakage not reachable).',
   );
 
  // Buffer-reset marker so reconnecting clients can tell "no events yet" apart
