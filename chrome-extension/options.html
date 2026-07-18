@@ -9,21 +9,24 @@
 </head>
 <body>
   <div class="container">
+    <!-- Left sidebar rail -->
     <nav class="tabs" role="tablist" aria-label="Settings sections" id="tablist">
-      <button type="button" class="tab active" data-tab="connection" role="tab" aria-selected="true" tabindex="0">Connection</button>
-      <button type="button" class="tab" data-tab="agent" role="tab" aria-selected="false" tabindex="-1">Agent</button>
-      <button type="button" class="tab" data-tab="secrets" role="tab" aria-selected="false" tabindex="-1">Secrets</button>
-      <button type="button" class="tab" data-tab="schedule" role="tab" aria-selected="false" tabindex="-1">Schedule</button>
-      <button type="button" class="tab" data-tab="tools" role="tab" aria-selected="false" tabindex="-1">Tools</button>
-      <button type="button" class="tab" data-tab="skills" role="tab" aria-selected="false" tabindex="-1">Skills</button>
-      <button type="button" class="tab" data-tab="prompts" role="tab" aria-selected="false" tabindex="-1">Prompts</button>
-      <button type="button" class="tab" data-tab="history" role="tab" aria-selected="false" tabindex="-1">History</button>
-      <button type="button" class="tab" data-tab="notify" role="tab" aria-selected="false" tabindex="-1">Notify</button>
-      <button type="button" class="tab" data-tab="about" role="tab" aria-selected="false" tabindex="-1">About</button>
+      <button type="button" class="tab active" data-tab="connection" id="tab-connection" role="tab" aria-selected="true" aria-controls="panel-connection" tabindex="0">Connection</button>
+      <button type="button" class="tab" data-tab="agent" id="tab-agent" role="tab" aria-selected="false" aria-controls="panel-agent" tabindex="-1">Agent</button>
+      <button type="button" class="tab" data-tab="secrets" id="tab-secrets" role="tab" aria-selected="false" aria-controls="panel-secrets" tabindex="-1">Secrets</button>
+      <button type="button" class="tab" data-tab="schedule" id="tab-schedule" role="tab" aria-selected="false" aria-controls="panel-schedule" tabindex="-1">Schedule</button>
+      <button type="button" class="tab" data-tab="tools" id="tab-tools" role="tab" aria-selected="false" aria-controls="panel-tools" tabindex="-1">Tools</button>
+      <button type="button" class="tab" data-tab="skills" id="tab-skills" role="tab" aria-selected="false" aria-controls="panel-skills" tabindex="-1">Skills</button>
+      <button type="button" class="tab" data-tab="prompts" id="tab-prompts" role="tab" aria-selected="false" aria-controls="panel-prompts" tabindex="-1">Prompts</button>
+      <button type="button" class="tab" data-tab="history" id="tab-history" role="tab" aria-selected="false" aria-controls="panel-history" tabindex="-1">History</button>
+      <button type="button" class="tab" data-tab="notify" id="tab-notify" role="tab" aria-selected="false" aria-controls="panel-notify" tabindex="-1">Notify</button>
+      <button type="button" class="tab" data-tab="about" id="tab-about" role="tab" aria-selected="false" aria-controls="panel-about" tabindex="-1">About</button>
     </nav>
 
+    <!-- Content area -->
     <div class="content-area">
-      <section class="tab-content active" data-tab="connection" role="tabpanel">
+      <!-- Connection tab -->
+      <section class="tab-content active" id="panel-connection" data-tab="connection" role="tabpanel" aria-labelledby="tab-connection" tabindex="0">
         <div class="view-header">
           <h2 class="view-title">Connection</h2>
           <p class="view-subtitle">Connect your LLM provider and the Cowork Cockpit. The extension calls your provider directly — no server required.</p>
@@ -59,7 +62,8 @@
         </div>
       </section>
 
-      <section class="tab-content" data-tab="agent" role="tabpanel">
+      <!-- Agent tab -->
+      <section class="tab-content" id="panel-agent" data-tab="agent" role="tabpanel" aria-labelledby="tab-agent" tabindex="-1">
         <div class="view-header">
           <h2 class="view-title">Agent</h2>
           <p class="view-subtitle">Tune how the navigator plans and acts: step budget, default model, vision, and domain limits.</p>
@@ -68,7 +72,7 @@
         <div class="row2">
           <label>
             <span>Max steps</span>
-            <input type="number" id="maxSteps" min="10" max="500" value="100" />
+            <input type="number" id="maxSteps" min="1" max="500" value="100" />
             <small>Maximum navigator steps before the agent gives up.</small>
           </label>
           <label>
@@ -120,7 +124,7 @@
           <summary>Advanced agent settings</summary>
           <label>
             <span>Max actions per step</span>
-            <input type="number" id="maxActions" min="1" max="20" value="10" />
+            <input type="number" id="maxActions" min="1" max="10" value="10" />
           </label>
           <label>
             <span>Planner interval (steps)</span>
@@ -154,7 +158,8 @@
         </details>
       </section>
 
-      <section class="tab-content" data-tab="secrets" role="tabpanel">
+      <!-- Secrets tab -->
+      <section class="tab-content" id="panel-secrets" data-tab="secrets" role="tabpanel" aria-labelledby="tab-secrets" tabindex="-1">
         <div class="view-header">
           <h2 class="view-title">Secrets</h2>
           <p class="view-subtitle">Store credentials locally. Use <code>%name%</code> in prompts — the LLM only sees the placeholder.</p>
@@ -167,7 +172,8 @@
         <div id="secretsList"></div>
       </section>
 
-      <section class="tab-content" data-tab="schedule" role="tabpanel">
+      <!-- Schedule tab -->
+      <section class="tab-content" id="panel-schedule" data-tab="schedule" role="tabpanel" aria-labelledby="tab-schedule" tabindex="-1">
         <div class="view-header">
           <h2 class="view-title">Schedule</h2>
           <p class="view-subtitle">Schedule recurring agent runs. Uses <code>chrome.alarms</code> (MV3-compliant).</p>
@@ -192,7 +198,8 @@
         <div id="scheduleList"></div>
       </section>
 
-      <section class="tab-content" data-tab="tools" role="tabpanel">
+      <!-- Custom Tools tab -->
+      <section class="tab-content" id="panel-tools" data-tab="tools" role="tabpanel" aria-labelledby="tab-tools" tabindex="-1">
         <div class="view-header">
           <h2 class="view-title">Custom tools</h2>
           <p class="view-subtitle">Define custom JavaScript tools the agent can invoke via the existing <code>evaluate</code> action.</p>
@@ -213,7 +220,8 @@
         <div id="toolsList"></div>
       </section>
 
-      <section class="tab-content" data-tab="skills" role="tabpanel">
+      <!-- Skills tab -->
+      <section class="tab-content" id="panel-skills" data-tab="skills" role="tabpanel" aria-labelledby="tab-skills" tabindex="-1">
         <div class="view-header">
           <h2 class="view-title">Skills</h2>
           <p class="view-subtitle">Define site-specific instruction packs loaded on-demand when the agent visits a matching domain.</p>
@@ -230,7 +238,8 @@
         <div id="skillsList"></div>
       </section>
 
-      <section class="tab-content" data-tab="prompts" role="tabpanel">
+      <!-- Prompts tab -->
+      <section class="tab-content" id="panel-prompts" data-tab="prompts" role="tabpanel" aria-labelledby="tab-prompts" tabindex="-1">
         <div class="view-header">
           <h2 class="view-title">Prompts</h2>
           <p class="view-subtitle">Override the default system prompts and save quick prompts. Changes save automatically.</p>
@@ -256,7 +265,8 @@
         <div id="quickPromptsList"></div>
       </section>
 
-      <section class="tab-content" data-tab="history" role="tabpanel">
+      <!-- History tab -->
+      <section class="tab-content" id="panel-history" data-tab="history" role="tabpanel" aria-labelledby="tab-history" tabindex="-1">
         <div class="view-header">
           <h2 class="view-title">Run history</h2>
           <p class="view-subtitle">Past agent runs. Click a row to view its full transcript in-page.</p>
@@ -270,7 +280,8 @@
         </div>
       </section>
 
-      <section class="tab-content" data-tab="notify" role="tabpanel">
+      <!-- Notifications tab -->
+      <section class="tab-content" id="panel-notify" data-tab="notify" role="tabpanel" aria-labelledby="tab-notify" tabindex="-1">
         <div class="view-header">
           <h2 class="view-title">Notify</h2>
           <p class="view-subtitle">Get notified when a run finishes, even if you&rsquo;ve switched tabs.</p>
@@ -294,7 +305,8 @@
         </label>
       </section>
 
-      <section class="tab-content" data-tab="about" role="tabpanel">
+      <!-- About tab -->
+      <section class="tab-content" id="panel-about" data-tab="about" role="tabpanel" aria-labelledby="tab-about" tabindex="-1">
         <div class="view-header">
           <h2 class="view-title">About</h2>
           <p class="view-subtitle">Open-source agentic browser control.</p>
@@ -316,8 +328,8 @@
         </ul>
         <h3>Links</h3>
         <p>
-          <a href="https://github.com/wasd/open-cowork" target="_blank" rel="noopener noreferrer">GitHub</a> ·
-          <a href="https://github.com/wasd/open-cowork/issues" target="_blank" rel="noopener noreferrer">Report an issue</a>
+          <a href="https://github.com/Gitshop77/open-cowork-chrome-extension" target="_blank" rel="noopener noreferrer">GitHub</a> ·
+          <a href="https://github.com/Gitshop77/open-cowork-chrome-extension/issues" target="_blank" rel="noopener noreferrer">Report an issue</a>
         </p>
         <h3>License</h3>
         <p>Open-source under the MIT license.</p>

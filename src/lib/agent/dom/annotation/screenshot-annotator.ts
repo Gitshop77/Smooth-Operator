@@ -94,7 +94,7 @@ function isHexColor(c: string): boolean {
  * malformed `boxColor`/`bgColor`/`textColor` silently produce wrong-colored
  * boxes/labels. Reject anything that isn't a well-formed `#rgb`/`#rgba`/
  * `#rrggbb`/`#rrggbbaa` value and fall back to `fallback` so annotation always
- * uses a real, valid color (FULL-REVIEW finding 105).
+ * uses a real, valid color .
  */
 function sanitizeColor(c: string | undefined, fallback: string): string {
   return typeof c === "string" && isHexColor(c.trim()) ? c.trim() : fallback;

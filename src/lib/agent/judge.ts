@@ -159,32 +159,45 @@ const TRUTHY_BOOLEANS = new Set<unknown>([
 
 /**
  * Coerce a parsed JSON value to a JudgementResult with lenient booleans.
- * Returns `null` (UNVERIFIED) when any required boolean field is absent
- * (`verdict`, `impossibleTask`, `reachedCaptcha`). A missing field must NOT
- * silently become `false` — that would manufacture a definitive, false-negative
- * verdict. Instead, a structurally-incomplete response is treated exactly like
- * an unparseable one: the caller routes it back to the planner (UNVERIFIED)
- * rather than failing the run open with `verdict: false`.
+ *
+ * `verdict` is the AUTHORITATIVE decision. Its presence (true/false) means the
+ * judge rendered a determination, so a missing/omitted `verdict` (or `null`)
+ * means the response was structurally incomplete and must route back to the
+ * planner (UNVERIFIED → `null`), exactly like an unparseable one. This preserves
+ * the fail-closed property: a missing `verdict` can NEVER become `verdict: false`.
+ *
+ * `impossibleTask` / `reachedCaptcha` are ADVISORY flags, not the verdict. If
+ * the judge omitted one of them we default it to `false` (the safe assumption:
+ * the task was not impossible and no CAPTCHA was hit) WITH a logged warning,
+ * rather than discarding the entire (valid) verdict. This avoids throwing
+ * away a useful `verdict: true` simply because the model skipped an optional
+ * field. The dangerous case — manufacturing a false-negative `verdict` — is
+ * still prevented, because only the optional flags fall back to `false`; the
+ * `verdict` itself is never invented.
  */
-function coerceJudgement(parsed: Record<string, unknown>): JudgementResult | null {
- // `== null` catches both `undefined` (omitted field) and `null` (the model
- // returned null), which the schema does not permit for these booleans — either
- // case means "not set", and must become UNVERIFIED, not `false`.
-  if (
-    parsed.verdict == null ||
-    parsed.impossibleTask == null ||
-    parsed.reachedCaptcha == null
-  ) {
+export function coerceJudgement(parsed: Record<string, unknown>): JudgementResult | null {
+ // `== null` catches both `undefined` (omitted field) and `null`. The verdict
+ // is required; without it the response is UNVERIFIED (route back to planner).
+  if (parsed.verdict == null) {
     return null;
   }
+ // Advised flags: default to `false` when omitted, but warn so a silent
+ // downgrade of an intentionally-set flag is observable (it isn't here — the
+ // judge simply skipped it).
+  const impossibleTask = parsed.impossibleTask == null
+    ? (console.warn("[judge] coerceJudgement: missing `impossibleTask`; defaulting to false."), false)
+    : TRUTHY_BOOLEANS.has(parsed.impossibleTask);
+  const reachedCaptcha = parsed.reachedCaptcha == null
+    ? (console.warn("[judge] coerceJudgement: missing `reachedCaptcha`; defaulting to false."), false)
+    : TRUTHY_BOOLEANS.has(parsed.reachedCaptcha);
   return {
     reasoning: typeof parsed.reasoning === "string" ? parsed.reasoning : null,
  // Loosen boolean coercion — LLMs sometimes emit "true" (string) or 1
  // (number) instead of a JSON `true`. Accept all the common variants.
     verdict: TRUTHY_BOOLEANS.has(parsed.verdict),
     failureReason: typeof parsed.failureReason === "string" ? parsed.failureReason : null,
-    impossibleTask: TRUTHY_BOOLEANS.has(parsed.impossibleTask),
-    reachedCaptcha: TRUTHY_BOOLEANS.has(parsed.reachedCaptcha),
+    impossibleTask,
+    reachedCaptcha,
   };
 }
 

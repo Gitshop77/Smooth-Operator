@@ -124,6 +124,30 @@ export async function clearRunState(): Promise<void> {
   });
 }
 
+/**
+ * Hard-reset the persisted `abortRequested` flag to `false`. Unlike
+ * `saveRunState` (which OR-s the existing value in so a `true` can never be
+ * silently lost), this unconditionally clears it. Used at run START so a stale
+ * `abortRequested: true` left behind by a previous run whose `clearRunState`
+ * failed (storage error) cannot block the next run from starting.
+ * A genuine STOP that arrives DURING this run's init re-sets the flag via
+ * `saveRunState` and is caught by the post-init re-check in `startRun`, so this
+ * reset cannot mask a real stop.
+ */
+export async function hardResetAbortRequested(): Promise<void> {
+  try {
+    const res = await chrome.storage.session.get(RUN_STATE_KEY);
+    const cur = res[RUN_STATE_KEY] as RunState | undefined;
+    if (cur) {
+      cur.abortRequested = false;
+      cachedRunState = cur;
+      await chrome.storage.session.set({ [RUN_STATE_KEY]: cur });
+    }
+  } catch {
+    /* storage unavailable — non-fatal; the run's own abort checks cover it */
+  }
+}
+
 // ─── Keepalive alarm (MV3 SW lifecycle workaround) ──────────────────────────
 
 export const KEEPALIVE_ALARM = "open_cowork_keepalive";

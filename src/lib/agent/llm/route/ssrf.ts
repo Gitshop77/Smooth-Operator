@@ -67,6 +67,17 @@ export type SsrfCheckResult =
   | { ok: false; reason: string };
 
 /**
+ * Origin provenance of an LLM `baseUrl`. Threaded through the SSRF validators so
+ * the curated-local (loopback) exemption is granted ONLY for a `baseUrl` the
+ * USER configured — never for one that arrived via an untrusted vector (prompt
+ * injection writing `chrome.storage.local`, a malicious settings-sync payload, a
+ * crafted tool call). When `provenance` is supplied it is AUTHORITATIVE over the
+ * `allowLocalExemption` boolean; when absent the boolean keeps its historical
+ * default (true) so existing callers stay behavior-compatible.
+ */
+export type SsrfProvenance = "user-configured" | "untrusted";
+
+/**
  * Curated local-provider base URLs EXEMPT from the strict transport-layer SSRF
  * check. These are the exact default endpoints for Ollama and LiteLLM — both
  * reachable via `localhost` and `127.0.0.1`. Any OTHER loopback / RFC1918 URL
@@ -436,8 +447,16 @@ function expandIPv6(host: string): number[] | null {
 export async function resolveAndValidateLlmBaseUrl(
   url: string,
   allowLocalExemption = false,
+  provenance?: SsrfProvenance,
 ): Promise<SsrfCheckResult> {
-  const base = validateLlmBaseUrl(url, allowLocalExemption);
+ // `provenance` is authoritative when present; otherwise the historical
+ // `allowLocalExemption` boolean is used.
+  const exempt = provenance === "untrusted"
+    ? false
+    : provenance === "user-configured"
+      ? true
+      : allowLocalExemption;
+  const base = validateLlmBaseUrl(url, exempt, provenance);
   if (!base.ok) return base;
 
  // Fast-path ONLY the curated local-provider origins we already trust
@@ -456,7 +475,7 @@ export async function resolveAndValidateLlmBaseUrl(
  // via a fixed-lookup undici Dispatcher so `fetch` reuses the validated IP; in
  // the extension service worker `fetch` cannot be pinned, so the per-fetch
  // re-validation in transport-http.ts is defense-in-depth only, not a guarantee.
-  if (allowLocalExemption && isCuratedLocalOrigin(url)) return { ok: true };
+  if (exempt && isCuratedLocalOrigin(url)) return { ok: true };
 
   let host = baseUrlHost(url);
   if (!host) return { ok: false, reason: `missing host in URL: ${redactUrl(url)}` };
@@ -478,7 +497,7 @@ export async function resolveAndValidateLlmBaseUrl(
  // transport layer re-checks the literal URL regardless. In a Chrome extension
  // service worker `chrome.dns.resolve` IS available, so this path is
  // effectively unreachable in production.
-    if (!allowLocalExemption) {
+    if (!exempt) {
       return {
         ok: false,
         reason: `DNS resolver unavailable; refusing untrusted ${redactUrl(url)} (fail-closed SSRF guard).`,
@@ -499,7 +518,7 @@ export async function resolveAndValidateLlmBaseUrl(
  // to ok:true (fail-open) with a warning so a transient DNS blip does not turn
  // every request into a hard, non-retryable rejection of a legitimate public
  // provider. The transport-layer guard still re-checks the literal URL.
-    if (!allowLocalExemption) {
+    if (!exempt) {
       return {
         ok: false,
         reason: `DNS resolution for ${host} failed; refusing ${redactUrl(url)} (fail-closed SSRF guard).`,
@@ -514,7 +533,7 @@ export async function resolveAndValidateLlmBaseUrl(
   }
   for (const ip of outcome.ips) {
     const alwaysBlocked = ip.includes(":") ? isDangerousIpv6(ip) : isDangerousIpv4(ip);
-    const localUntrusted = !allowLocalExemption && isUserLocalIp(ip);
+    const localUntrusted = !exempt && isUserLocalIp(ip);
     if (alwaysBlocked || localUntrusted) {
       return {
         ok: false,
@@ -641,7 +660,17 @@ function parseBaseUrl(url: string): URL | null {
 export function validateLlmBaseUrl(
   url: string,
   allowLocalExemption = true,
+  provenance?: SsrfProvenance,
 ): SsrfCheckResult {
+ // `provenance` is authoritative when present: an untrusted `baseUrl` (e.g.
+ // injected) may NEVER use the curated-local loopback exemption, while a
+ // user-configured one may. When absent we preserve the historical
+ // `allowLocalExemption` default (true).
+  const exempt = provenance === "untrusted"
+    ? false
+    : provenance === "user-configured"
+      ? true
+      : allowLocalExemption;
   if (typeof url !== "string" || url.length === 0) {
     return { ok: false, reason: "baseUrl must be a non-empty string" };
   }
@@ -681,7 +710,7 @@ export function validateLlmBaseUrl(
  // baseUrl (prompt injection, malicious settings-sync, crafted tool call)
  // cannot reach the user's own local model server.
   if (
-    !allowLocalExemption &&
+    !exempt &&
     (isLocalHostname(normalizedHost) || isUserLocalIp(normalizedHost))
   ) {
     return {
@@ -893,7 +922,18 @@ function isBlockedWebhookIpv6(host: string): boolean {
  *
  * @returns true if the URL is safe to fetch (or is a curated local endpoint).
  */
-export function isAllowedLlmBaseUrl(url: string, allowLocalExemption = true): boolean {
+export function isAllowedLlmBaseUrl(
+  url: string,
+  allowLocalExemption = true,
+  provenance?: SsrfProvenance,
+): boolean {
+ // `provenance` is authoritative when present; otherwise the historical
+ // `allowLocalExemption` boolean is used.
+  const exempt = provenance === "untrusted"
+    ? false
+    : provenance === "user-configured"
+      ? true
+      : allowLocalExemption;
  // Strict base check (provenance=false): rejects the genuine SSRF sinks AND
  // every user-local endpoint (localhost / loopback / RFC1918 / ULA). This is
  // what makes the provenance gate real — the curated-list exemption below is
@@ -901,7 +941,7 @@ export function isAllowedLlmBaseUrl(url: string, allowLocalExemption = true): bo
  // user-configured baseUrl.
   const res = validateLlmBaseUrl(url, false);
   if (res.ok) return true;
-  if (!allowLocalExemption) {
+  if (!exempt) {
  // A `baseUrl` whose provenance is NOT user-configured (e.g. injected via
  // prompt injection / malicious settings-sync) must NEVER be exempted from
  // the strict check — otherwise an injected `http://localhost:11434` would

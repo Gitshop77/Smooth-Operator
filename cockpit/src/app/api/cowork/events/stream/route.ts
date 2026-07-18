@@ -88,13 +88,17 @@ export async function GET(req: NextRequest): Promise<Response> {
     });
   }
 
-  if (activeStreams >= MAX_CONCURRENT_STREAMS) {
+  // Atomic check-then-increment: bump the counter first and reject (and roll
+  // back) only if we've exceeded the cap. This closes the TOCTOU window where a
+  // concurrent request could read `activeStreams` before our increment and both
+  // pass the `<` check. The matching decrement lives in `teardown()`.
+  if (++activeStreams > MAX_CONCURRENT_STREAMS) {
+    activeStreams -= 1;
     return new Response('too many concurrent streams', {
       status: 503,
       headers: { 'Retry-After': '5' },
     });
   }
-  activeStreams += 1;
 
   const encoder = new TextEncoder();
 

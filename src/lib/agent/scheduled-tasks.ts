@@ -79,7 +79,7 @@ function alarmName(taskId: string): string {
  *
  * `chrome.storage.local` has no transactions, so a read-modify-write of the
  * scheduled-task list can interleave with another mutation in the *same*
- * context and clobber it (lost-update race — see FULL-REVIEW finding 2). This
+ * context and clobber it (lost-update race — see ). This
  * mutex makes each mutation atomic *within* this context (e.g. two alarms
  * firing concurrently both call `saveScheduledTask`; each re-reads the list
  * under the lock so both `lastRunAt` updates survive).
@@ -133,7 +133,7 @@ export function validateSchedule(s: ScheduledTaskSchedule): string | null {
 }
 
 /** Type guard: a persisted entry is a usable {@link ScheduledTask} iff it's an
- * object whose `schedule` still validates (FULL-REVIEW finding 97). */
+ * object whose `schedule` still validates . */
 function isValidTaskEntry(t: unknown): t is ScheduledTask {
   return t != null && typeof t === "object" && validateSchedule((t as ScheduledTask).schedule) === null;
 }
@@ -147,8 +147,7 @@ export async function listScheduledTasks(): Promise<ScheduledTask[]> {
  // otherwise flow into `saveScheduledTask`/`initScheduledTasks`, where
  // `.findIndex`/`.map` throw a TypeError and break alarm init at SW startup).
  // Mirrors the `Array.isArray` guards used by `loadRuns`/`loadAllMemories`.
- // Also drop any persisted task whose schedule no longer validates (FULL-REVIEW
- // finding 97: schedule is validated on save but previously trusted on load).
+ // Also drop any persisted task whose schedule no longer validates .
   if (!Array.isArray(arr)) return [];
   return arr.filter(isValidTaskEntry);
 }
@@ -181,7 +180,7 @@ export async function saveScheduledTask(task: ScheduledTask): Promise<void> {
     idx >= 0 ? { ...tasks[idx], ...task, lastRunAt: task.lastRunAt ?? tasks[idx].lastRunAt } : task;
  // Populate `nextRunAt` (declared + documented on the interface) so the UI /
  // run-history can show when the task will next fire. Previously left
- // `undefined` (FULL-REVIEW finding 61). For interval schedules the next fire
+ // `undefined` . For interval schedules the next fire
  // is simply now + the interval; for daily/weekly we reuse `computeNextFire`.
   if (merged.enabled) {
     merged.nextRunAt =
@@ -209,8 +208,7 @@ export async function saveScheduledTask(task: ScheduledTask): Promise<void> {
     } catch (rbErr) {
  // Rollback failure is best-effort, but a silent swallow would hide a
  // real inconsistency (storage says "enabled" but no alarm armed, or
- // vice-versa). Surface it so the breakage is diagnosable (FULL-REVIEW
- // finding 4), then re-throw the original arming error.
+ // vice-versa). Surface it so the breakage is diagnosable , then re-throw the original arming error.
       console.error(
         `[scheduled-tasks] rollback of storage for task ${task.id} failed:`,
         rbErr instanceof Error ? rbErr.message : String(rbErr)
@@ -231,7 +229,7 @@ export async function saveScheduledTask(task: ScheduledTask): Promise<void> {
  * that created a layering inversion (`lib/agent` → `extension/background`)
  * and a hidden circular dependency. We now call `chrome.power` directly
  * (guarded for non-extension contexts), keeping this module free of any
- * `@/extension/*` import (see FULL-REVIEW finding 0 / 1).
+ * `@/extension/*` import (see / 1).
  */
 async function requestKeepAwakeLocal(): Promise<void> {
   try {

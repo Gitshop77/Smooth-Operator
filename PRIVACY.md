@@ -35,6 +35,27 @@ The cockpit backend persists the following user-derived data via Prisma:
   elsewhere except as configured above. Stored bookmark/tab URLs are opened
   client-side in the browser and are never fetched server-side.
 
+### Third-party model / asset fetches (no personal data)
+
+Two fetches go to third-party infrastructure that are **not** the user-configured
+LLM provider. Neither request carries personal data, page content, or your API key:
+
+- **Model catalog.** To power model-name suggestions, the extension fetches the
+  public `models.dev` catalog at runtime:
+  `https://models.dev/api.json`. This is a static metadata fetch (model names,
+  context windows, capabilities) used only for autocomplete; it sends no user
+  data.
+- **Local Vision model weights.** On first use of the optional **Local Vision**
+  feature, the extension downloads model weights from `huggingface.co` (exact
+  URLs are defined in `src/extension/vision-assistant/constants.ts`, pinned to
+  specific revisions for reproducibility). The weights run entirely on your
+  machine; only the download itself touches `huggingface.co`, and no personal
+  data is sent with it. After the first download the weights are cached locally.
+
+These fetches back the "private, on your own machine" design: the model
+catalog and vision weights are fetched from their upstream sources, while your
+page content and prompts still go only to the LLM provider you choose (above).
+
 ## Retention
 
 Data is retained until deleted by the user or via the erasure endpoints below.

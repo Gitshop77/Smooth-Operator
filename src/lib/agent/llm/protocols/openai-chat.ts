@@ -103,7 +103,7 @@ function normalizeStrictSchema(node: unknown, depth = 0): unknown {
  // A `$ref` points at a definition we can't resolve here (no schema catalog
  // at this layer) — leave it untouched rather than dropping it, which would
  // lose the reference. Previously `$ref`/`$defs` were not descended into, so
- // referenced subschemas escaped normalization (FULL-REVIEW finding 63).
+ // referenced subschemas escaped normalization .
   const refObj = node as Record<string, unknown>;
  // A `{ nullable: true, $ref: "..." }` node must be normalized BEFORE the
  // `$ref` early-return below, otherwise the forbidden `nullable` keyword
@@ -133,7 +133,7 @@ function normalizeStrictSchema(node: unknown, depth = 0): unknown {
  // strict-compliant (additionalProperties:false + required). Previously the
  // branch was built AFTER the object block had been skipped (type deleted),
  // producing a non-strict `anyOf` that OpenAI strict mode rejects
- // (FULL-REVIEW finding 64).
+ // .
   if (obj.nullable === true) {
     delete obj.nullable;
     const baseType = obj.type as string | string[] | undefined;
@@ -186,7 +186,7 @@ function normalizeStrictSchema(node: unknown, depth = 0): unknown {
 async function fromRequest(request: LLMRequest): Promise<OpenAIChatBody> {
  // Validate the model id up front — `request.model.id` flows into the request
  // body unchecked, and a missing/garbage id produces an opaque provider 400.
- // Surface it clearly instead (FULL-REVIEW finding 98).
+ // Surface it clearly instead .
   if (!request.model || typeof request.model.id !== "string" || request.model.id.length === 0) {
     throw new Error("OpenAI-format request is missing a valid model id");
   }
@@ -200,7 +200,7 @@ async function fromRequest(request: LLMRequest): Promise<OpenAIChatBody> {
  // Strip with the SAME pattern we match on, so the text we keep always
  // agrees with the screenshots we extract (the previous literal regex
  // `[^<]+` would also strip non-image `<screenshot>...</screenshot>`
- // markers — FULL-REVIEW finding 65).
+ // markers — ).
         const textContent = m.content.replace(SCREENSHOT_PATTERN_G, "").trim();
         const parts: OpenAIContentPart[] = [];
         if (textContent) parts.push({ type: "text", text: textContent });
@@ -350,7 +350,7 @@ export const protocol: Protocol<OpenAIChatBody, string, { type: string; content?
  // If we already streamed real content, a dropped frame mid-stream means
  // the assistant output may be silently truncated. Surface a non-PII
  // warning (frame contents are NOT logged) so the truncation is
- // observable rather than invisible (FULL-REVIEW finding 5 / 133).
+ // observable rather than invisible .
         if (state.content.length > 0) {
           console.warn(
             `[openai-chat] Dropped non-JSON SSE frame (${frame.length} bytes) after ${state.content.length} chars of content were already streamed — output may be truncated (${dropped} frame(s) dropped total).`

@@ -1,0 +1,10 @@
+This project bundles @huggingface/transformers (transformers.js), which is
+licensed under the Apache License, Version 2.0.
+
+  Copyright The HuggingFace Team and contributors.
+
+The full Apache-2.0 license text is available at:
+  https://www.apache.org/licenses/LICENSE-2.0
+
+Including this dependency does not change the project's own MIT license
+(see LICENSE in this directory).

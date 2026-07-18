@@ -40,7 +40,7 @@ export const LOOP_TOP_THRESHOLD = WARN_THRESHOLDS[WARN_THRESHOLDS.length - 1];
 const PAGE_FP_WINDOW_SIZE = 5;
 /** Threshold milestones for stagnant-page warnings. MUST stay in lockstep with
  * {@link WARN_THRESHOLDS} — derive it from the same source so the two can
- * never drift apart (FULL-REVIEW finding 134). */
+ * never drift apart . */
 const STAGNANT_THRESHOLDS: readonly number[] = WARN_THRESHOLDS;
 
 /**
@@ -132,8 +132,7 @@ class PageFingerprint {
  */
 /**
  * Render an action field for hashing, turning `undefined`/`null` into `""` so
- * we never emit the literal "undefined" into the signature (FULL-REVIEW
- * finding 103).
+ * we never emit the literal "undefined" into the signature .
  */
 function field(v: unknown): string {
   return v === undefined || v === null ? "" : String(v);
@@ -331,7 +330,7 @@ export class LoopDetector {
  // one (so the page has actually been unchanged for `count + 1` captures).
  // Wording it as "the last N consecutive snapshots" avoids an off-by-one
  // implication that exactly N actions produced N identical pages
- // (FULL-REVIEW finding 70).
+ // .
     return `<sys>STAGNANT PAGE: the page content has not changed across the last ${count} consecutive snapshots. Your actions might not be having the intended effect. Try a different element, scroll to find new content, or reconsider your approach.</sys>`;
   }
 

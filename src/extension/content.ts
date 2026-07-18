@@ -165,6 +165,14 @@ const log: (...args: unknown[]) => void = console.warn.bind(console, "[content]"
             const axTree = includeAxTree
               ? generateAccessibilityTree("all", depth, maxLength)
               : { pageContent: "", viewport: { width: window.innerWidth, height: window.innerHeight } };
+ // L9: the AX-tree builder exposes an `error` field when generation
+ // degraded (unknown ref, output truncated, page too large). Surface it
+ // instead of silently forwarding an empty `axTree` block to the LLM so
+ // the operator can see why page state came back empty. We keep
+ // `axTree: axTree.pageContent` working below.
+            if (includeAxTree && axTree.error) {
+              console.warn(`[content] AX tree generation warning: ${axTree.error}`);
+            }
  // Don't send the selectorMap (HTMLElement refs) over the wire.
             const { selectorMap: _sm, ...serializable } = state;
             void _sm; // selectorMap is intentionally dropped
@@ -215,7 +223,7 @@ const log: (...args: unknown[]) => void = console.warn.bind(console, "[content]"
               /* channel already closed — nothing more to do */
             }
           };
- // INVARIANT (documented — FULL-REVIEW finding 28 / 67): enforcement is
+ // INVARIANT (documented — / 67): enforcement is
  // UNSET until the FIRST valid `domainConfig` arrives. The service
  // worker is responsible for shipping a shape-valid policy on the first
  // `EXECUTE_ACTIONS` of every run; until then `getDomainConfig()`
@@ -229,8 +237,7 @@ const log: (...args: unknown[]) => void = console.warn.bind(console, "[content]"
  //
  // The domain-policy update is performed SYNCHRONOUSLY here (outside the
  // async body) so a concurrent `EXECUTE_ACTIONS` message cannot race the
- // async mutation of `lastDomainConfig` / the global (FULL-REVIEW
- // finding 46). The async closure below only reads the already-published
+ // async mutation of `lastDomainConfig` / the global . The async closure below only reads the already-published
  // policy.
           const incomingDomainConfig = msg.domainConfig;
           if (incomingDomainConfig !== undefined) {
@@ -259,7 +266,7 @@ const log: (...args: unknown[]) => void = console.warn.bind(console, "[content]"
           // short-circuit instead of reading the (unreadable-from-content-script)
           // `chrome.storage.session`. Set synchronously, before the async action
           // loop runs, so the handlers see it.
-          if (msg.secretsResolved) setSecretsResolvedExternally(true);
+          if (msg.secretsResolved !== undefined) setSecretsResolvedExternally(Boolean(msg.secretsResolved));
           (async () => {
             try {
               const actions: AgentAction[] = Array.isArray(msg.actions) ? msg.actions : [];
@@ -293,8 +300,38 @@ const log: (...args: unknown[]) => void = console.warn.bind(console, "[content]"
                     }
                   : extractBrowserState([]);
               const results: ActionResult[] = [];
+              const policyEnforced = isDomainPolicyEnforced();
               for (const action of actions) {
-                const result = await executeAction(action, state);
+ // Fail-closed URL allowlist: when NO domain policy is
+ // enforced (the SW did not ship an allow/blocklist on the first
+ // action), refuse cross-origin `navigate`/`search` actions unless the
+ // target is SAME-ORIGIN with the current task page. This closes the
+ // "fails open" gap without breaking the documented invariant that the
+ // SW always ships a policy on the first action of a run — when a policy
+ // IS enforced, the executor's own domain checks govern navigation, so
+ // we don't double-gate here.
+                let result: ActionResult | undefined;
+                if (!policyEnforced && (action.type === "navigate" || action.type === "search")) {
+                  let sameOrigin = false;
+                  if (action.type === "navigate") {
+                    try {
+                      sameOrigin = new URL(action.url, location.href).origin === location.origin;
+                    } catch {
+                      sameOrigin = false;
+                    }
+                  }
+                  if (!sameOrigin) {
+                    result = {
+                      action,
+                      success: false,
+                      message:
+                        "BLOCKED: no domain policy enforced — only same-origin navigation is permitted",
+                    };
+                  }
+                }
+                if (!result) {
+                  result = await executeAction(action, state);
+                }
                 results.push(result);
                 if (!result.success || result.pageChanged || result.isDone) {
                   const skipped = actions.length - results.length;

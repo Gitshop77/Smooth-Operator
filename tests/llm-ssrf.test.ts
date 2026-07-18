@@ -205,7 +205,7 @@ describe("isAllowedLlmBaseUrl (transport-layer SSRF guard)", () => {
     expect(isAllowedLlmBaseUrl("file:///etc/passwd")).toBe(false);
   });
 
-  test("curated loopback URLs are REJECTED when allowLocalExemption=false (HIGH-028: provenance flag closes the injected-loopback SSRF hole)", () => {
+  test("curated loopback URLs are REJECTED when allowLocalExemption=false", () => {
  // When `allowLocalExemption=false` (i.e. the baseUrl did NOT originate from
  // user configuration — e.g. injected via prompt injection / malicious
  // settings-sync), `isAllowedLlmBaseUrl` must apply the strict check and
@@ -352,5 +352,24 @@ describe("resolveAndValidateLlmBaseUrl (DNS-resolution SSRF guard)", () => {
     expect(res.ok).toBe(false);
     if (res.ok) throw new Error("expected rejection");
     expect(res.reason).toMatch(/private\/loopback\/link-local/i);
+  });
+});
+
+describe("SSRF provenance gate", () => {
+  test("an untrusted-origin loopback URL is rejected even for a curated local provider", () => {
+    // `http://localhost:11434` is Ollama's default — user-configured it is fine,
+    // but if it arrived via an untrusted vector (injection / settings-sync /
+    // crafted tool call) the curated-local exemption MUST NOT apply.
+    expect(isAllowedLlmBaseUrl("http://localhost:11434", undefined, "untrusted")).toBe(false);
+    expect(validateLlmBaseUrl("http://localhost:11434", undefined, "untrusted").ok).toBe(false);
+    expect(
+      validateLlmBaseUrl("http://127.0.0.1:4000", undefined, "untrusted").ok,
+    ).toBe(false);
+  });
+
+  test("user-configured / absent provenance still allows a curated local provider", () => {
+    expect(isAllowedLlmBaseUrl("http://localhost:11434", undefined, "user-configured")).toBe(true);
+    // absent provenance → historical default (allowLocalExemption=true) preserves behavior
+    expect(isAllowedLlmBaseUrl("http://localhost:11434")).toBe(true);
   });
 });

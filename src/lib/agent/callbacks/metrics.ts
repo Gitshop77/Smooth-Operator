@@ -326,7 +326,7 @@ export class AgentMetricsCallback implements AsyncCallbackHandler {
  // only the steps this callback captured (it equals the sum of
  // `actionsByType[*].total`). This avoids the overstatement in the earlier
  // "recovers when registered late" comment — step count IS recoverable,
- // action count is not (FULL-REVIEW finding 8 / 73).
+ // action count is not .
  // Cost has no per-phase split — the result is authoritative, overwrite.
     this.totalCostUsd = result.totalCostUsd;
  // Tokens: set the totals from the authoritative result, then attribute the

@@ -80,8 +80,7 @@ export function getFormatInstructions(schema: ZodType): string {
  // so the degradation is observable rather than silent: a model that relies
  // on these prompt-injected instructions (Ollama, local, OpenAI JSON mode)
  // would otherwise receive an effectively empty schema with zero field
- // information and could emit malformed output (FULL-REVIEW finding 13 / 54
- // / 141).
+ // information and could emit malformed output .
     console.warn(
       "[registry] getFormatInstructions: z.toJSONSchema unavailable; falling back to {type:\"object\"} (no field schema emitted)."
     );
@@ -106,11 +105,11 @@ export function getFormatInstructions(schema: ZodType): string {
  * wrapped in `__opencowork_custom_tool('<name>')`.
  *
  * Custom tools are NOT registered as Zod action types (that would require
- * modifying `tools/schema.ts`, owned by another agent). Instead:
+ * modifying `tools/schema.ts`, owned by another module). Instead:
  * 1. The navigator prompt lists them in a `<custom_tools>` block (built by
  * {@link formatCustomToolsBlock}).
  * 2. The `evaluate` action runs them via {@link substituteCustomToolCalls}
- * (called by the executor, owned by another agent — wiring documented in
+ * (called by the executor — wiring documented in
  * the sidepanel and background modules).
  *
  * TRUST BOUNDARY: `code` is arbitrary JavaScript executed on the page's
@@ -120,7 +119,16 @@ export function getFormatInstructions(schema: ZodType): string {
  * tool is effectively an explicit, user-opt-in RCE primitive. This module only
  * validates the *shape* of a tool on load (see {@link isValidCustomTool}); it
  * does not sandbox execution. Runtime confirmation of first use is the
- * executor's responsibility (owned by another agent).
+ * executor's responsibility.
+ *
+ * HARDENING REQUIREMENT: a custom tool's `code` MUST be executed
+ * ONLY through the hardened evaluate sandbox (`runSandboxedCode` in
+ * `tools/handlers/evaluate.ts`) — the realm that shadows `chrome`/`Function`/
+ * `eval` and denies the `ownerDocument`→`defaultView`→`chrome` traversal. It
+ * MUST NOT be passed to a bare `new Function`/`eval`, and it inherits whatever
+ * confirmation gate the executor applies to `evaluate` (independent of mode),
+ * so a custom tool is never silently auto-run. Keep {@link isValidCustomTool}
+ * as the sole shape validator; do not weaken it.
  */
 export interface CustomTool {
   /** Unique tool name (matches the regex below — used as a key). */
@@ -170,7 +178,7 @@ const RENDERED_TOOL_DESCRIPTION_LENGTH = 200;
  * that ends up in `chrome.storage.local` and in the prompt block; a tool whose
  * description exceeds this is dropped on load (see {@link isValidCustomTool}).
  * Kept generous so legitimate multi-sentence descriptions survive, while still
- * protecting the storage write + prompt size (FULL-REVIEW finding 109).
+ * protecting the storage write + prompt size .
  */
 export const MAX_CUSTOM_TOOL_DESCRIPTION_LENGTH = 2000;
 
@@ -225,7 +233,7 @@ function sanitizeToolDescription(description: string): string {
 function logLoadError(source: string, err: unknown): void {
  // Surface the failure (not just swallow it) so a dropped/malformed
  // custom-tools payload is diagnosable instead of silently vanishing
- // (FULL-REVIEW finding 138 / 142). `console.warn` keeps it visible without
+ // . `console.warn` keeps it visible without
  // being as noisy as `error`.
   if (typeof console !== "undefined" && typeof console.warn === "function") {
     console.warn(`[custom-tools] failed to load tools from ${source}:`, err);
@@ -266,7 +274,7 @@ export async function loadCustomTools(): Promise<CustomTool[]> {
  // A corrupted / injected payload could hold a non-array (e.g. a string or
  // number). Casting and calling `.filter` on a non-array would throw a
  // TypeError and drop ALL tools silently. Assert the shape first and
- // surface the anomaly (FULL-REVIEW finding 14).
+ // surface the anomaly .
       if (!Array.isArray(raw)) {
         if (raw !== undefined) {
           logLoadError(

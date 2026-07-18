@@ -116,6 +116,18 @@ function readCachedWriteTokens(u: unknown): number {
  * caller is responsible for the `onCost` / `onEvent` side-effects and for
  * pushing the usage into the per-phase aggregate.
  */
+/**
+ * Provider-independent floor cost (USD) accrued for an LLM call that omits token
+ * usage while a cost cap is active. When the provider reports no
+ * `tokensIn`/`tokensOut` we cannot measure real spend, so instead of silently
+ * never enforcing the cap we accrue this small floor. It is conservative (it
+ * over-counts unmeasurable steps) so a cost cap is still respected even when the
+ * provider does not report usage — `costCapExceeded` then trips once the floors
+ * accumulate past the cap. Kept tiny so a single omitted call never trips a
+ * sensibly-sized cap on its own.
+ */
+const MISSING_USAGE_FLOOR_USD = 0.01;
+
 function accountUsage(params: {
   precomputedCost?: number;
   model?: string;
@@ -124,9 +136,23 @@ function accountUsage(params: {
   reasoningTokens?: number;
   cachedInputTokens?: number;
   cachedWriteInputTokens?: number;
+  /** Active cost cap (if any). When > 0 and usage is omitted we accrue a floor. */
+  costCapUsd?: number;
 }): { cost: number | undefined; usage: LLMUsageInfo | undefined } | undefined {
-  const { precomputedCost, model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens } = params;
-  if (tokensIn === undefined || tokensOut === undefined) return undefined;
+  const { precomputedCost, model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, costCapUsd } = params;
+  if (tokensIn === undefined || tokensOut === undefined) {
+    // Provider omitted token usage. If a cost cap is in effect we cannot measure
+    // spend, so accrue a provider-independent floor rather than letting the
+    // cap become inert. When no cap is set, preserve the historical behavior
+    // (return undefined — cost for this call is simply not tracked).
+    if (costCapUsd !== undefined && costCapUsd > 0) {
+      return {
+        cost: MISSING_USAGE_FLOOR_USD,
+        usage: { model: model ?? "", tokensIn: 0, tokensOut: 0, costUsd: MISSING_USAGE_FLOOR_USD },
+      };
+    }
+    return undefined;
+  }
   const cost = precomputedCost ?? (model ? estimateCost(model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens) : undefined);
   const usage: LLMUsageInfo | undefined =
     typeof cost === "number" && Number.isFinite(cost)
@@ -149,7 +175,12 @@ export async function runPlanner(
   args: PlannerCallArgs,
   dispatcher?: CallbackDispatcher,
   ctx?: CallbackContext,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /** Active cost cap (if any) — enables the missing-usage floor. */
+  costCapUsd?: number,
+  /** Returns true when the run's cost cap is exceeded (C17) — checked right
+   * after cost accrues so a single overshoot call is caught immediately. */
+  costCapCheck?: () => boolean
 ): Promise<PlannerOutput> {
   const plannerRequest: PlannerStepRequest = {
     task: args.task,
@@ -179,7 +210,7 @@ export async function runPlanner(
  // read via a cast until the upstream result types (loop/types.ts) and
  // the loop-deps wiring (llm-direct.ts) propagate it end-to-end.
     const cachedWriteInputTokens = readCachedWriteTokens(result);
-    const accounted = accountUsage({ precomputedCost, model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens });
+    const accounted = accountUsage({ precomputedCost, model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, costCapUsd });
     if (accounted) {
       const { cost, usage: u } = accounted;
       if (typeof cost === "number" && u) {
@@ -199,6 +230,12 @@ export async function runPlanner(
       fired = true;
       await dispatcher.llmEnd(ctx, { content: raw, usage });
       if (usage) await dispatcher.cost(ctx, usage);
+    // C17: a single overshoot planner call must trip the cap immediately, not
+    // only at the next step boundary. Cost has already been accrued via onCost
+    // above, so `costCapCheck` (wired to `costCapExceeded(state)`) now reflects
+    // the true spend. Throw so the orchestrator finalizes the run as a cost-cap
+    // stop rather than looping again.
+      if (costCapCheck?.()) throw new Error("Budget exceeded: cost cap reached");
     }
     return parsed.output;
   } finally {
@@ -222,7 +259,12 @@ export async function callNavigatorWithRetry(
   onCost: (usd: number, tokensIn?: number, tokensOut?: number) => void,
   dispatcher?: CallbackDispatcher,
   ctx?: CallbackContext,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /** Active cost cap (if any) — enables the missing-usage floor. */
+  costCapUsd?: number,
+  /** Returns true when the run's cost cap is exceeded (C17) — checked right
+   * after cost accrues so a single overshoot call is caught immediately. */
+  costCapCheck?: () => boolean
 ): Promise<AgentOutput> {
   if (dispatcher && ctx) await dispatcher.llmStart(ctx, [navRequest]);
  // finally block guarantees `llmEnd` fires on every path after `llmStart`
@@ -265,7 +307,7 @@ export async function callNavigatorWithRetry(
  // cachedInputTokens AND cachedWriteInputTokens (billed at the higher
  // cache-write rate) passed through. When only a precomputed cost is
  // supplied (no `model`), report it regardless of model presence.
-      const accounted = accountUsage({ precomputedCost, model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens });
+      const accounted = accountUsage({ precomputedCost, model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, costCapUsd });
       if (accounted) {
         const { cost, usage: u } = accounted;
         if (typeof cost === "number" && u) {
@@ -294,6 +336,10 @@ export async function callNavigatorWithRetry(
             costFired = true;
             await dispatcher.cost(ctx, summed);
           }
+ // C17: catch a single overshoot navigator call (including mid-retry) the
+ // moment cost is accrued, rather than only at the step boundary. `costCapCheck`
+ // is wired to `costCapExceeded(state)` and the spend is already in `state`.
+          if (costCapCheck?.()) throw new Error("Budget exceeded: cost cap reached");
         }
         return parsed.output;
       }

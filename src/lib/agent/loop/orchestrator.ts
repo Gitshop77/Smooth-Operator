@@ -325,7 +325,9 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       },
       dispatcher,
       makeCtx(state),
-      signal
+      signal,
+      state.config.costCapUsd,
+      () => costCapExceeded(state)
     ), { signal, timeoutMs: config.llmCallTimeoutMs ?? 0 });
   } catch (e) {
     const isAbort = deps.signal?.aborted || (e instanceof Error && (/abort/i.test(e.name) || /abort/i.test(e.message)));
@@ -565,7 +567,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
           addCost(state, usd);
           addTokens(state, tokensIn, tokensOut);
         },
-        dispatcher, makeCtx(state), signal
+        dispatcher, makeCtx(state), signal, state.config.costCapUsd, () => costCapExceeded(state)
       ), { signal, timeoutMs: config.llmCallTimeoutMs ?? 0 });
       state.consecutiveParseFailures = 0;
     } catch (e) {

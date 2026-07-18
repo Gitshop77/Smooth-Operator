@@ -136,7 +136,11 @@ export function truncateFilename(name: string, maxLen = 120): string {
  * handlers and must keep this exact behavior.
  */
 export function sanitizeDownloadName(rawName: string): string {
-  const baseName = rawName.replace(/[^\w.-]+/g, "_").replace(/\.{2,}/g, "_");
+  // Unicode-aware: preserve letters/marks/numbers (\p{L}/\p{N}) plus the
+  // path-safe `.`, `_`, `-` so non-ASCII filenames (e.g. `café.pdf`) are no
+  // longer mangled. The `\.{2,}` collapse removes the only surviving dot-run
+  // that could read as `..` (path traversal). Keep this exact behavior.
+  const baseName = rawName.replace(/[^\p{L}\p{N}._-]+/gu, "_").replace(/\.{2,}/g, "_");
   return truncateFilename(baseName, 120);
 }
 
@@ -237,6 +241,43 @@ function bindPrivilegedTabHandler(
 }
 
 // ─── Listener ───────────────────────────────────────────────────────────────
+
+/**
+ * Wrap a `chrome.debugger.sendCommand` call in a 10s timeout so a wedged CDP
+ * session (crashed target, stalled transport) cannot hang the capture step or
+ * leak the per-tab debugger refcount owned by `tab-manager.ts` (debuggerRefCounts).
+ * Mirrors the guard already used by `background/screenshots.ts`. The `settled`
+ * flag guarantees the timer is always cleared and the losing branch's rejection
+ * is never orphaned (no unhandled rejection).
+ */
+function sendDebuggerCommandWithTimeout<T>(
+  tabId: number,
+  command: string,
+  params: Record<string, unknown>,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`${command} timed out after 10s`));
+    }, 10_000);
+    (chrome.debugger.sendCommand({ tabId }, command, params) as Promise<T>).then(
+      (r) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(r);
+      },
+      (e) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
 
 /**
  * Shared capture + download path for the `SAVE_AS_PDF` and `SCREENSHOT`
@@ -516,10 +557,10 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
         sendResponse,
         tabId,
         capture: () =>
-          chrome.debugger.sendCommand({ tabId }, "Page.printToPDF", {
+          sendDebuggerCommandWithTimeout<{ data?: string }>(tabId, "Page.printToPDF", {
             printBackground: true,
             preferCSSPageSize: true,
-          }) as Promise<{ data?: string }>,
+          }),
         mime: "application/pdf",
         extension: "pdf",
         fallbackTitle: "page",
@@ -550,10 +591,10 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
         sendResponse,
         tabId,
         capture: () =>
-          chrome.debugger.sendCommand({ tabId }, "Page.captureScreenshot", {
+          sendDebuggerCommandWithTimeout<{ data?: string }>(tabId, "Page.captureScreenshot", {
             format: "jpeg",
             quality: screenshotQuality,
-          }) as Promise<{ data?: string }>,
+          }),
         mime: "image/jpeg",
         extension: "jpg",
         fallbackTitle: "screenshot",
@@ -636,7 +677,19 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
   // succeeded. Acknowledge here so the side panel's RESUME callback sees
   // `lastError === undefined` and clears the takeover banner.
   if ((msg as { type?: string } | null)?.type === "RESUME") {
-    sendResponse({ ok: true });
+ // L25: tighten beyond the global `sender.id === chrome.runtime.id` gate
+ // (which any first-party context satisfies). RESUME is only ever sent by
+ // our own Options/Side-panel UI pages, so require `sender.url` to be one of
+ // our `chrome-extension://<id>/…` pages. A first-party content script (which
+ // carries `sender.tab` and no extension-page url) cannot legitimately
+ // resume, so we reject it here. This is defense-in-depth hardening only —
+ // the actual un-pause + re-check lives in the orchestrator's takeover
+ // listener; this handler just acknowledges so the side panel's RESUME
+ // callback resolves cleanly.
+    const fromExtensionPage = Boolean(
+      sender.url?.startsWith(`chrome-extension://${chrome.runtime.id}`),
+    );
+    sendResponse(fromExtensionPage ? { ok: true } : { ok: false, error: "unauthorized sender" });
     return true;
   }
   return false;

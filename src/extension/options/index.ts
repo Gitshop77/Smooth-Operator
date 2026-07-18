@@ -7,6 +7,9 @@
  *
  * Tabs switch via JS (no full reload). Each tab has its own ViewHeader-style
  * title + subtitle baked into options.html; switching just shows/hides panels.
+ *
+ * NOTE: i18n / localization of these UI strings is currently OUT OF SCOPE —
+ * all user-facing text is hardcoded English.
  */
 
 import { $ } from "@/extension/shared";
@@ -52,6 +55,8 @@ function activateTab(tab: HTMLButtonElement, focus = true): void {
     const isActive = c.dataset.tab === target;
     c.classList.toggle("active", isActive);
     c.hidden = !isActive;
+ // L12: only the active panel is in the tab order.
+    c.tabIndex = isActive ? 0 : -1;
   });
  // Lazily render dynamic tab content on first activation. A renderer that
  // reads chrome.storage.local can reject (quota/disabled/policy); catch it so

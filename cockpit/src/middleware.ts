@@ -433,6 +433,10 @@ function withRequestId(res: NextResponse, requestId: string): NextResponse {
 function withSecurityHeaders(res: NextResponse): NextResponse {
   res.headers.set('X-Content-Type-Options', 'nosniff');
   res.headers.set('Referrer-Policy', 'no-referrer');
+  // Success (and public-discovery passthrough) responses must never be cached:
+  // they can carry per-user data and authenticated session material, and the
+  // error path already sets no-store in `authenticate`.
+  res.headers.set('Cache-Control', 'no-store');
   return res;
 }
 

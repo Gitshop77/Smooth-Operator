@@ -76,12 +76,15 @@ export const ENUM_VALUES: Record<string, readonly string[]> = {
 
 export const HEX_COLOR = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 
-/** Coerce an unknown import value to a boolean, matching the prior inline rule. */
-export function coerceBool(v: unknown): boolean {
-  const s = typeof v === "string" ? v.toLowerCase() : v;
-  if (s === true || s === "true") return true;
-  if (s === false || s === "false") return false;
-  return Boolean(v);
+/** Coerce an unknown import value to a boolean. Accepts `true`/`"true"`/`false`/
+ * `"false"` and the case-insensitive aliases `"yes"`/`"no"`/`1`/`0`. Any other
+ * value falls back to `base` (the current setting) rather than being coerced via
+ * `Boolean(v)`, so an unexpected import value can never silently flip a boolean. */
+export function coerceBool(v: unknown, base = false): boolean {
+  const s = typeof v === "string" ? v.trim().toLowerCase() : v;
+  if (s === true || s === "true" || s === "yes" || s === 1 || s === "1") return true;
+  if (s === false || s === "false" || s === "no" || s === 0 || s === "0") return false;
+  return base;
 }
 
 /** Clamp the max-steps setting to a finite positive integer (1..100000). */
@@ -120,7 +123,7 @@ export function sanitizeSection<K extends keyof SettingsState>(
       if (!Number.isFinite(n)) continue;
       out[key] = key === "maxSteps" ? clampMaxSteps(n) : n;
     } else if (typeof ref === "boolean") {
-      out[key] = coerceBool(value);
+      out[key] = coerceBool(value, ref);
     } else if (typeof ref === "string") {
       const s = String(value);
       out[key] =

@@ -57,6 +57,23 @@ describe("coerceBool", () => {
     expect(coerceBool(1)).toBe(true);
     expect(coerceBool(0)).toBe(false);
   });
+
+  it("accepts yes/no/1/0 aliases case-insensitively", () => {
+    expect(coerceBool("yes")).toBe(true);
+    expect(coerceBool("YES")).toBe(true);
+    expect(coerceBool("No")).toBe(false);
+    expect(coerceBool("nO")).toBe(false);
+    expect(coerceBool("1")).toBe(true);
+    expect(coerceBool("0")).toBe(false);
+  });
+
+  it("falls back to base for unrecognized values", () => {
+    expect(coerceBool("maybe", true)).toBe(true);
+    expect(coerceBool("maybe", false)).toBe(false);
+    expect(coerceBool(5, true)).toBe(true);
+    expect(coerceBool(null, false)).toBe(false);
+    expect(coerceBool(undefined, true)).toBe(true);
+  });
 });
 
 describe("clampMaxSteps", () => {

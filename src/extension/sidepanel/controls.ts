@@ -5,6 +5,9 @@
  * timer, the pause flag, and the model-switch input/button. The STATUS check
  * (run on panel open) restores the run state + persisted totals via
  * `restoreTotalsFromStorage` (in `./log-renderer`).
+ *
+ * NOTE: i18n / localization of these UI strings is currently OUT OF SCOPE —
+ * all user-facing text is hardcoded English.
  */
 
 import {

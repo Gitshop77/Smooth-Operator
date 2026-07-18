@@ -646,6 +646,16 @@ button:focus-visible {
   margin-top: 8px;
   accent-color: var(--cw-accent);
 }
+.vision-unpinned-warning {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--cw-warn-subtle);
+  border: 1px solid var(--cw-warn-border);
+  color: var(--cw-warn);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
 
 /* ─── Empty-state hint (injected by JS into list containers) ─────────────── */
 .empty-hint {

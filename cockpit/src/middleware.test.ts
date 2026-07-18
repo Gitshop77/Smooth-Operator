@@ -603,3 +603,59 @@ describe('middleware brute-force throttle (checkRateLimit via the middleware pat
     expect(after.status).toBe(401); // allowed again, then fails on the token
   });
 });
+
+describe('public-discovery routes do not reflect secrets', () => {
+  // These 5 paths are intentionally exempt from the X-Cowork-Token gate so
+  // external LLM agents can discover the cockpit. They MUST NOT reflect any
+  // COWORK_* secret, DATABASE_URL, or per-user data in their responses. The
+  // route handlers themselves were manually reviewed and contain no references
+  // to process.env secrets or DATABASE_URL; this contract test pins the
+  // middleware passthrough so a future regression that injects secrets into the
+  // bypass response is caught.
+  const PUBLIC = [
+    '/api/cowork/agent/bootstrap',
+    '/api/cowork/agent/manifest',
+    '/api/cowork/agent',
+    '/api/cowork/agent/version',
+    '/api/cowork/skill',
+  ];
+  const SENTINEL_TOKEN = 'm11-sentinel-secret-do-not-leak';
+  const SENTINEL_DB = 'postgres://m11:supersecret@db.internal:5432/cockpit';
+
+  beforeEach(() => {
+    vi.resetModules();
+    delete process.env.COWORK_EVENT_TOKEN;
+    delete process.env.COWORK_UI_TOKEN;
+    delete process.env.COWORK_ALLOW_DEV_TOKEN;
+    // Stamp known secrets so a leak would be observable in the response.
+    process.env.COWORK_UI_TOKEN = SENTINEL_TOKEN;
+    process.env.COWORK_EVENT_TOKEN = SENTINEL_TOKEN;
+    process.env.DATABASE_URL = SENTINEL_DB;
+  });
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+  });
+
+  for (const path of PUBLIC) {
+    it(`bypasses auth on ${path} and reflects no COWORK_* secret or DATABASE_URL`, async () => {
+      const { middleware } = await import('@/middleware');
+      const res = middleware(fakeReq(path));
+      expect(res.status).toBe(200);
+      for (const value of res.headers.values()) {
+        expect(value).not.toContain(SENTINEL_TOKEN);
+        expect(value).not.toContain(SENTINEL_DB);
+      }
+      // The bypass must not echo a token back via an injected header.
+      expect(res.headers.get('x-cowork-token')).toBeNull();
+    });
+  }
+
+  it('keeps the singular /api/cowork/agent public but plural /api/cowork/agents protected', async () => {
+    const { middleware } = await import('@/middleware');
+    expect(middleware(fakeReq('/api/cowork/agent')).status).toBe(200);
+    expect(middleware(fakeReq('/api/cowork/agents')).status).toBe(401);
+    expect(
+      middleware(fakeReq('/api/cowork/agents', '', { 'x-cowork-token': SENTINEL_TOKEN })).status,
+    ).toBe(200);
+  });
+});

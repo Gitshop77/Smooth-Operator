@@ -141,8 +141,17 @@ export interface AsyncCallbackHandler {
  */
 export class CallbackDispatcher {
   private readonly handlers: AsyncCallbackHandler[] = [];
-  /** Tracks hook methods that have already logged a failure, to suppress repeat spam. */
-  private readonly warnedMethods = new Set<string>();
+  /**
+   * Tracks how many times each hook method has failed, so we can log the FIRST
+   * failure (as before) and then re-log on a throttle (see {@link WARN_THROTTLE})
+   * instead of suppressing every later error. A buggy handler that throws on
+   * every event across a long run would otherwise go silent after the first
+   * occurrence, hiding a persistent failure (and any secret-laden detail it
+   * carries) for the rest of the run.
+   */
+  private readonly warnCounts = new Map<string, number>();
+  /** Re-log a handler failure every Nth occurrence after the first (trailing-edge visibility). */
+  private static readonly WARN_THROTTLE = 10;
 
   /** Register a handler. Hooks the handler doesn't implement are no-ops. */
   register(handler: AsyncCallbackHandler): void {
@@ -180,8 +189,13 @@ export class CallbackDispatcher {
  // the (possibly secret-laden) error logging to the first failure per hook
  // method so the console stays readable. Successful dispatch is unaffected.
       const k = String(method);
-      if (this.warnedMethods.has(k)) return;
-      this.warnedMethods.add(k);
+      const count = (this.warnCounts.get(k) ?? 0) + 1;
+      this.warnCounts.set(k, count);
+      // Log the first failure (for an immediate signal) and then re-log every
+      // Nth occurrence so a handler that keeps throwing stays visible instead of
+      // going silent after the first error. The redaction + fallback below are
+      // unchanged.
+      if (count !== 1 && count % CallbackDispatcher.WARN_THROTTLE !== 0) return;
  // Redact any substituted secrets that leaked into the error string before
  // logging to the extension console (defense-in-depth; mirrors the cockpit
  // redaction path). `redactSecrets` is async, so log via `.then` and fall

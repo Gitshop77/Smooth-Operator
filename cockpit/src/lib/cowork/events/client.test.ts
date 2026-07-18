@@ -78,16 +78,16 @@ describe('getCoworkEventsToken (resolution order — must match middleware.ts)',
     vi.unstubAllEnvs();
   });
 
-  it('prefers COWORK_UI_TOKEN over COWORK_EVENT_TOKEN', () => {
+  it('prefers COWORK_EVENT_TOKEN (S2S) over COWORK_UI_TOKEN', () => {
     vi.stubEnv('COWORK_UI_TOKEN', 'ui-tok');
     vi.stubEnv('COWORK_EVENT_TOKEN', 'evt-tok');
-    expect(getCoworkEventsToken()).toBe('ui-tok');
+    expect(getCoworkEventsToken()).toBe('evt-tok');
   });
 
-  it('falls back to COWORK_EVENT_TOKEN when COWORK_UI_TOKEN is empty', () => {
-    vi.stubEnv('COWORK_UI_TOKEN', '');
-    vi.stubEnv('COWORK_EVENT_TOKEN', 'evt-tok');
-    expect(getCoworkEventsToken()).toBe('evt-tok');
+  it('falls back to COWORK_UI_TOKEN when COWORK_EVENT_TOKEN is empty', () => {
+    vi.stubEnv('COWORK_UI_TOKEN', 'ui-tok');
+    vi.stubEnv('COWORK_EVENT_TOKEN', '');
+    expect(getCoworkEventsToken()).toBe('ui-tok');
   });
 
   it('returns "" when both tokens are unset', () => {

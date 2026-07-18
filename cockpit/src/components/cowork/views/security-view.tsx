@@ -16,7 +16,7 @@ import { StatusPill } from "@/components/cowork/shared/status-pill";
 import { StatCard } from "@/components/cowork/shared/stat-card";
 import { timeAgo } from "@/lib/cowork-data/format";
 
-// The Cockpit app has no app-wide i18n layer yet (see FULL-REVIEW.md §21 —
+// The Cockpit app has no app-wide i18n layer yet (see .md §21 —
 // "Cockpit web app has no i18n layer; all user-facing strings are
 // hard-coded"). To make a future locale-catalog/`t()` migration cheap, this
 // view's user-facing strings are centralized here in a single English catalog

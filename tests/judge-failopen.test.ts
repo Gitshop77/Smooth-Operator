@@ -15,6 +15,7 @@
 
 import { describe, test, expect, vi } from "vitest";
 import { maybeJudgeAndFinalize } from "../src/lib/agent/loop/helpers/judges";
+import { coerceJudgement } from "../src/lib/agent/judge";
 import { CallbackDispatcher, type CallbackContext } from "../src/lib/agent/callbacks";
 import { LoopDetector } from "../src/lib/agent/loop/loop-detector";
 import { DEFAULT_CONFIG, type AgentConfig, type LogEvent } from "../src/lib/agent/types";
@@ -238,5 +239,27 @@ describe("non-budget judge error must NOT fail open", () => {
  // Budget cap is a real failure — preserved from the old behavior.
     expect(finalized).toBe(true);
     expect(state.finalResult?.success).toBe(false);
+  });
+});
+
+describe("coerceJudgement treats verdict as authoritative", () => {
+  test("verdict present with missing advisory flags defaults them to false (not null)", () => {
+    const r = coerceJudgement({ verdict: true });
+    expect(r).not.toBeNull();
+    expect(r!.verdict).toBe(true);
+    expect(r!.impossibleTask).toBe(false);
+    expect(r!.reachedCaptcha).toBe(false);
+  });
+
+  test("verdict:false with missing flags still coerces (not null)", () => {
+    const r = coerceJudgement({ verdict: false });
+    expect(r).not.toBeNull();
+    expect(r!.verdict).toBe(false);
+    expect(r!.impossibleTask).toBe(false);
+  });
+
+  test("missing verdict => null (UNVERIFIED, never manufactured verdict)", () => {
+    expect(coerceJudgement({ impossibleTask: false, reachedCaptcha: false })).toBeNull();
+    expect(coerceJudgement({})).toBeNull();
   });
 });

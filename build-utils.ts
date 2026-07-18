@@ -284,6 +284,8 @@ export function lintManifestPermissions(
     "history",
     "bookmarks",
     "proxy",
+    "webRequest",
+    "unlimitedStorage",
   ]);
   const risky = perms.filter((p) => HIGH_RISK.has(p));
   const riskyOptional = optional.filter((p) => HIGH_RISK.has(p));
@@ -296,7 +298,13 @@ export function lintManifestPermissions(
   // The lint is a *creep* guard, not a presence check: it only fires when a NEW
   // high-risk permission (or new universal-host entry) is added BEYOND this
   // baseline. That makes MANIFEST_LINT_FAIL_HIGH_RISK=1 safe to enable in CI.
-  const BASELINE_HIGH_RISK = new Set(["debugger", "scripting", "tabs"]);
+  const BASELINE_HIGH_RISK = new Set([
+    "debugger",
+    "scripting",
+    "tabs",
+    "webRequest",
+    "unlimitedStorage",
+  ]);
   const BASELINE_WIDE_HOST = true;
 
   const newRisky = risky.filter((p) => !BASELINE_HIGH_RISK.has(p));
@@ -313,7 +321,7 @@ export function lintManifestPermissions(
       "[manifest-lint] NEW high-risk permission(s) added beyond the reviewed " +
       "baseline: " +
       items.join(", ") +
-      " — confirm each is strictly necessary and has a documented justification (see FULL-REVIEW).";
+      " — confirm each is strictly necessary and has a documented justification.";
     // Default: warn only. CI can promote this to a hard error via env flag so
     // local builds with reviewed permissions still work.
     if (process.env.MANIFEST_LINT_FAIL_HIGH_RISK === "1") {

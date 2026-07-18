@@ -79,13 +79,21 @@ let warnedRelayFailure = false;
 // handler indefinitely and amplify into request-queue exhaustion.
 const BROADCAST_TIMEOUT_MS = 5000;
 
-// Resolution order (CANONICAL, must match `middleware.ts`): prefer
-// COWORK_UI_TOKEN, falling back to COWORK_EVENT_TOKEN. Resolved at CALL time (not
-// module load) so importing this module during build/prerender/tests can't crash
-// the module graph. No `dev-token` fallback: when neither secret is set the relay
-// sends an empty token and the upstream 401 surfaces as a 500 (see below).
+// Resolution order (CANONICAL, must match `middleware.ts`): the server-side
+// mini-service accepts EITHER COWORK_UI_TOKEN or COWORK_EVENT_TOKEN as its
+// SOCKET_SECRET, so for this service-to-service relay the dedicated S2S secret
+// (COWORK_EVENT_TOKEN) is preferred, falling back to COWORK_UI_TOKEN only when
+// the S2S secret is unset. Resolved at CALL time (not module load) so importing
+// this module during build/prerender/tests can't crash the module graph. No
+// `dev-token` fallback: when neither secret is set the relay sends an empty token
+// and the upstream 401 surfaces as a 500 (see below).
 function getCoworkEventsToken(): string {
- // Preferred browser-facing secret (also what the API accepts first).
+ // Preferred service-to-service secret (NEVER shipped in the client bundle).
+  const eventToken = process.env.COWORK_EVENT_TOKEN;
+  if (eventToken && eventToken.length > 0) {
+    return eventToken;
+  }
+ // Browser-facing fallback.
   const uiToken = process.env.COWORK_UI_TOKEN;
   if (uiToken && uiToken.length > 0) {
  // SECURITY WARNING: if COWORK_UI_TOKEN is also mirrored into
@@ -104,12 +112,9 @@ function getCoworkEventsToken(): string {
     }
     return uiToken;
   }
- // Service-to-server fallback. Operators that set only COWORK_EVENT_TOKEN
- // (legacy) still get end-to-end relay with a single configured secret.
-  const token = process.env.COWORK_EVENT_TOKEN;
-  if (token && token.length > 0) {
-    return token;
-  }
+ // (COWORK_EVENT_TOKEN is already returned above when set; when we reach here
+  // it is empty, so this branch is intentionally omitted to preserve the
+  // "neither secret configured" warning below.)
  // Neither secret is configured: warn once and let the relay proceed with an
  // empty token. The upstream rejects it with 401, surfaced as a 500 by the route.
   if (!warnedMissingEventToken) {

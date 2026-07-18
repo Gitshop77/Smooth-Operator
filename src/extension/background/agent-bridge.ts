@@ -28,6 +28,7 @@ import {
   clearRunState,
   stopKeepalive,
   loadAndSetDomainConfig,
+  hardResetAbortRequested,
   type RunState,
 } from "./state-store";
 import {
@@ -276,6 +277,28 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     releaseRunGuard();
     return;
   }
+ // L23: refuse to attach the agent to a PRIVILEGED tab — browser internals
+ // (`chrome://`), extension pages (`chrome-extension://`), the Chrome Web
+ // Store, or `about:` pages. The content script + debugger cannot operate
+ // there and driving them would be unsafe. Return like the other early
+ // paths (with `releaseRunGuard()`) so the guard flag is never left stuck.
+  const tabUrl = tab.url ?? "";
+  const isPrivileged =
+    /^chrome:\/\//i.test(tabUrl) ||
+    /^chrome-extension:\/\//i.test(tabUrl) ||
+    /^about:/i.test(tabUrl) ||
+    /chrome\.google\.com\/webstore/i.test(tabUrl) ||
+    /chromewebstore\.google\.com/i.test(tabUrl);
+  if (isPrivileged) {
+    sendEvent({
+      type: "error",
+      step: 0,
+      message: `Cannot run on a privileged page (${tabUrl}). Open a regular web page first.`,
+      recoverable: false,
+    });
+    releaseRunGuard();
+    return;
+  }
 
  // Read user-overridable run-time settings from local storage. Falls back to
  // defaults if not set or unreadable.
@@ -364,6 +387,16 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  // flag would stay `true` forever and every subsequent RUN message would
  // be rejected with "already starting". On throw, release the guard,
  // surface an error event, and bail out cleanly so the user can retry.
+ // L21: clear any stale `abortRequested` BEFORE persisting run state so a
+ // previous run whose `clearRunState` failed (storage error) can't leave
+ // `abortRequested: true` behind and block this run from starting. A genuine
+ // STOP that lands during this run's init re-sets the flag and is caught by
+ // the post-init re-check below, so this reset cannot mask a real stop.
+  try {
+    await hardResetAbortRequested();
+  } catch {
+    /* non-fatal — proceed; the run's own abort checks still apply */
+  }
   try {
     await initRunState(runState);
   } catch (e) {

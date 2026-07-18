@@ -898,6 +898,17 @@ export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
             continue;
           }
         }
+ // L20: re-check abort AFTER the (await) human prompt — a STOP may have
+ // arrived while the user was deciding. If so, treat the action as BLOCKED
+ // rather than forwarding it to the content script.
+        if (controller.signal.aborted || (await getRunState())?.abortRequested) {
+          results[i] = {
+            action, success: false,
+            message: `BLOCKED: run aborted during confirmation for ${action.type}`,
+          };
+          aborted = true;
+          continue;
+        }
         filtered.push({ action, i });
       }
 
@@ -959,6 +970,12 @@ export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
           mode: "confirm",
           message: confirmationMessage(action),
         });
+ // L20: re-check abort AFTER the (await) human prompt — a STOP may have
+ // arrived while the user was deciding. Treat as declined so the action is
+ // blocked rather than executed.
+        if (controller.signal.aborted || (await getRunState())?.abortRequested) {
+          return false;
+        }
         return resp.mode === "confirm" ? resp.confirmed : false;
       } catch {
         return false;

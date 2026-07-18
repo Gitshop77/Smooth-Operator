@@ -4,6 +4,12 @@
 // without loading the React/UI stack. The secret-masking guard here is a security
 // surface: it stops captured passwords/tokens/CVV/card numbers from rendering in
 // plaintext in the cockpit UI.
+//
+// NOTE: this is ONE of two intentionally-decoupled masking layers. The other
+// is `redactClientSecrets` in `src/lib/redact-client.ts` (used by
+// `hooks/use-websocket.ts` for live SSE payloads). They are kept separate on
+// purpose — this layer masks stored memory fields; the redact-client layer masks
+// arbitrary streamed text. Keep them in parity by intent, not by shared code.
 
 export const SENSITIVE_FIELD =
   /pass|pwd|password|secret|cvv|card|ssn|token|otp|pin/i;

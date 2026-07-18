@@ -1,7 +1,7 @@
 /**
  * Tests for `src/lib/agent/llm/route/endpoint.ts`.
  *
- * Focuses on the query-string construction paths the FULL-REVIEW audit flagged
+ * Focuses on the query-string construction paths the  audit flagged
  * as 0%-branch-covered: the malformed double-"?" guard and the relative-path
  * query merge.
  */

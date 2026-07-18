@@ -103,6 +103,10 @@ export function extractJson(raw: string): string {
  // comparisons before the fallback; bound total work so an adversarial input
  // aborts after a handful of scans instead of ~1e9 comparisons.
   const SCAN_BUDGET = MAX_JSON_LENGTH * 4;
+ // Collect EVERY balanced `{…}` span, not just the first. A prose
+ // fragment like `Let's retry { once }.` is balanced but is NOT valid JSON, so
+ // returning the first balanced span would hand `JSON.parse` the wrong blob.
+  const spans: Array<[number, number]> = [];
   for (const start of candidates) {
     if (checked >= MAX_CANDIDATES) break;
     const span = s.length - start;
@@ -113,7 +117,29 @@ export function extractJson(raw: string): string {
     scanned += span;
     checked++;
     const end = balancedEnd(s, start);
-    if (end !== -1) return s.slice(start, end + 1);
+    if (end !== -1) spans.push([start, end]);
+  }
+
+ // Prefer the first balanced span that is actually VALID JSON. This skips
+ // non-JSON balanced prose (e.g. `{ once }`) and selects the real payload. If
+ // no span parses (truncated/malformed output), fall back to the LARGEST
+ // (outermost) balanced span so a complete nested object still wins over a
+ // small inner fragment, and `JSON.parse` surfaces a useful syntax error.
+  for (const [start, end] of spans) {
+    const candidate = s.slice(start, end + 1);
+    try {
+      JSON.parse(candidate);
+      return candidate;
+    } catch {
+      // Not valid JSON — keep looking.
+    }
+  }
+  if (spans.length > 0) {
+    let best = spans[0];
+    for (const span of spans) {
+      if (span[1] - span[0] > best[1] - best[0]) best = span;
+    }
+    return s.slice(best[0], best[1] + 1);
   }
 
  // Fallback: unbalanced input — slice last `{` to last `}` so JSON.parse

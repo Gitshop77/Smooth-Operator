@@ -43,8 +43,7 @@ if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
  * SAME tab (e.g. parallel observers, or a retry that overlaps the in-flight
  * one). Each call previously did its own `attach`/`detach`, so one call's
  * `detach` could tear down a session another call was actively using — leaving
- * the second call without a debugger and dropping its screenshot (FULL-REVIEW
- * finding 48). We refcount per tab: the session is attached on the first
+ * the second call without a debugger and dropping its screenshot . We refcount per tab: the session is attached on the first
  * acquirer and detached only when the last user releases it.
  */
 const debuggerRefCounts = new Map<number, number>();
@@ -106,7 +105,7 @@ export async function releasePageDebugger<T>(
  // Never detach a session we don't own. After a genuine (non-"already
  // attached") attach failure, the caller's finally still calls this with no
  // tracked entry — without this guard we'd issue a detach that could tear down
- // a concurrent legitimate holder's CDP session (FULL-REVIEW-48 class of bug).
+ // a concurrent legitimate holder's CDP session .
   if ((debuggerRefCounts.get(tabId) ?? 0) <= 0) return;
   const n = (debuggerRefCounts.get(tabId) ?? 0) - 1;
   if (n <= 0) {
@@ -341,7 +340,7 @@ export async function extractStateFromTab(
  // mirroring the SCREENSHOT handler in message-routing.ts
  // (finding: per-step screenshot captures the user's visible tab).
  // Route through the refcounted debugger helper so a concurrent screenshot for
- // the same tab can't detach ours mid-capture (FULL-REVIEW finding 48), and the
+ // the same tab can't detach ours mid-capture , and the
  // symmetric detach is guaranteed even on error.
       const dataUrl = await withPageDebugger(tabId, async () => {
         const result = await new Promise<{ data?: string }>((resolve, reject) => {
@@ -602,8 +601,7 @@ export async function handleTabAction(
  // The closed tab was the last one — clear the pointer so we don't keep
  // referencing a now-closed tab (which would make the next navigate/
  // search act on a dead tab id). A 0 sentinel means "no active tab".
- // FULL-REVIEW finding 47.
-          runState.currentTabId = 0;
+ // runState.currentTabId = 0;
           await saveRunState({ currentTabId: 0 });
         }
       }
@@ -614,7 +612,7 @@ export async function handleTabAction(
  // `file:`, `about:`, …) BEFORE the domain-policy check. `checkUrlAllowed`
  // only inspects hostnames, so without this gate a `javascript:` URL would
  // slip through the allow/blocklist and execute in the page. The domain
- // policy alone cannot gate scheme (FULL-REVIEW finding 62).
+ // policy alone cannot gate scheme .
       if (!/^https?:\/\//i.test(String(action.url ?? ""))) {
         return {
           handled: true,
@@ -672,7 +670,7 @@ export async function handleTabAction(
       const baseUrl = SEARCH_ENGINE_URLS[resolvedEngine as keyof typeof SEARCH_ENGINE_URLS];
       const searchUrl = baseUrl + encodeURIComponent(query);
  // Apply the same domain policy + scheme gate as navigate. The engine base
- // URLs are constant http(s), but guard anyway (FULL-REVIEW finding 62).
+ // URLs are constant http(s), but guard anyway .
       if (!/^https?:\/\//i.test(searchUrl)) {
         return {
           handled: true,

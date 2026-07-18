@@ -372,7 +372,7 @@ async function handleVisionClick(
   const { beforeUrl, beforeFingerprint } = ctx;
  // The numeric-index path guards `chrome.runtime` presence; the vision path
  // must too — without it a missing extension context would throw a raw
- // ReferenceError instead of reporting a clean failure (FULL-REVIEW finding 79).
+ // ReferenceError instead of reporting a clean failure .
   if (typeof chrome === "undefined" || !chrome.runtime?.id) {
     return {
       action,
@@ -397,7 +397,7 @@ async function handleVisionClick(
  // Include the FULL result (not just `result?.error`, which may be undefined
  // for a malformed SW response) so a CDP hiccup is diagnosable. Unlike
  // numeric-index clicks, vision indices have no native/dispatch fallback
- // strategy, so a clear error is the only recourse (FULL-REVIEW finding 16).
+ // strategy, so a clear error is the only recourse .
     return {
       action,
       success: false,

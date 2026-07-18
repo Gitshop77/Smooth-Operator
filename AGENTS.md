@@ -208,7 +208,7 @@ All scripts use npm. A single `npm install && npm run dev` bootstraps and starts
 - `npm run test:coverage` — Vitest with coverage
 - `npm run build:extension` — esbuild → `chrome-extension/`
 - `npm run build:cockpit` — `npm run db:generate && npm run db:apply && next build` in `cockpit/` (auto-generates Prisma client)
-- `npm run build:all` — extension + cockpit (works on fresh clone, no separate prisma generate needed)
+- `npm run build:all` — extension + cockpit (requires `npm run bootstrap` first on a fresh clone; `build:all` runs `db:generate`/`db:apply` so no separate prisma step is needed)
 - `cd cockpit && npx tsc --noEmit` — type-check the cockpit
 - `cd cockpit && npm run lint` — ESLint (cockpit)
 

@@ -284,7 +284,7 @@ export class HTMLContentEvaluator {
  // A `must_include` list that is empty ([]) or contains only blank /
  // ` |OR| ` alternatives asserts nothing — every entry would be a no-op
  // and the target would silently PASS at score 1.0. That is the exact
- // zero-evidence false-pass the empty-targets guard (L191) was added to
+ // zero-evidence false-pass the empty-targets guard was added to
  // prevent, so fail CLOSED here when there is no exact_match either.
         let effectiveAssertions = 0;
         for (const content of rc.must_include!) {

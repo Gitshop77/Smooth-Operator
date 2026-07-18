@@ -280,25 +280,35 @@ async function redactRunSecrets(run: RunRecord): Promise<RunRecord> {
  * {@link MAX_RUNS}. Writes through the same storage path so the in-page
  * (localStorage) and extension (chrome.storage.local) behaviours stay aligned.
  *
- * Note: unlike `saveRun`, this does not redact — callers pass data that has
- * already been validated/redacted (or first-party history), and the options
- * import path historically persisted without redaction. Redaction of newly
- * finished runs remains the sole responsibility of `saveRun`.
+ * Redaction parity with {@link saveRun}: every run is passed through
+ * {@link redactRunSecrets} before it is written, so a bulk import/clear/write
+ * cannot persist a secret that reached storage via an imported run (the
+ * options-import path historically persisted WITHOUT redaction — see L7). The
+ * redaction is defense-in-depth: if it throws we fall back to persisting the
+ * original runs (mirroring `saveRun`) so the bulk write still completes rather
+ * than dropping the user's history.
  */
 export async function replaceAllRuns(runs: RunRecord[]): Promise<void> {
   const writer = async (): Promise<void> => {
     let list = runs;
     if (list.length > MAX_RUNS) list = list.slice(0, MAX_RUNS);
+    let safeList: RunRecord[];
+    try {
+      safeList = await Promise.all(list.map((r) => redactRunSecrets(r)));
+    } catch (e) {
+      console.warn("[run-history] redactRunSecrets failed for replaceAllRuns; persisting unredacted runs:", e);
+      safeList = list;
+    }
     if (isExtensionWithLocal()) {
       try {
-        await chrome.storage.local.set({ [STORAGE_KEY]: list });
+        await chrome.storage.local.set({ [STORAGE_KEY]: safeList });
       } catch (e) {
         console.warn("[run-history] chrome.storage.local.set failed:", e);
       }
       return;
     }
     try {
-      writeLocalStorage(list);
+      writeLocalStorage(safeList);
     } catch (e) {
       console.warn("[run-history] localStorage.setItem failed:", e);
     }

@@ -1,7 +1,7 @@
 /**
  * tab-manager.ts — debugger refcount acquire/release concurrency.
  *
- * Pins the core anti-race control (FULL-REVIEW-48): the refcount is bumped
+ * Pins the core anti-race control : the refcount is bumped
  * before await, a concurrent "already attached" error is swallowed, and only
  * the last releaser detaches. Also that a genuine attach failure rolls back
  * only its own refcount and that releasing a zero refcount is a no-op.

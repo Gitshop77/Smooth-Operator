@@ -1,6 +1,5 @@
 /**
- * Tests for `src/lib/agent/llm/providers/openrouter.ts` (FULL-REVIEW #18 — 0%
- * branch coverage). OpenRouter is built via `makeOpenAIChatFacade`, so this also
+ * Tests for `src/lib/agent/llm/providers/openrouter.ts` . OpenRouter is built via `makeOpenAIChatFacade`, so this also
  * exercises the shared facade's `configure`/`toLLMProvider` surface.
  */
 import { describe, test, expect } from "vitest";

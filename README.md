@@ -6,7 +6,7 @@
 [![Chrome 116+](https://img.shields.io/badge/chrome-116%2B-blue.svg)](https://www.google.com/chrome/)
 [![Node 20.9+](https://img.shields.io/badge/node-20.9%2B-blue.svg)](https://nodejs.org/)
 
-Open Cowork is a Chrome extension that turns your browser into an Agent you talk to instead of click through. Tell it *"fill out this form"* or *"summarize this page,"* and an the agent reads what's on screen, figures out the steps, and does them for you — across as many tabs as you have open.
+Open Cowork is a Chrome extension that turns your browser into an Agent you talk to instead of click through. Tell it *"fill out this form"* or *"summarize this page,"* and the agent reads what's on screen, figures out the steps, and does them for you — across as many tabs as you have open.
 
 It runs on your own machine and uses your own API key from whichever AI provider you like. There's an optional dashboard called the **Cockpit** for watching runs and tracking costs, but the extension works fine on its own.
 
@@ -58,6 +58,7 @@ It runs on your own machine and uses your own API key from whichever AI provider
 git clone https://github.com/Gitshop77/open-cowork-chrome-extension.git
 cd open-cowork-chrome-extension
 npm install
+npm run bootstrap                       # install the dashboard + events sub-package deps
 npm run build:all
 ```
 
@@ -122,3 +123,12 @@ Issues and pull requests are welcome. If you're adding a new model provider or a
 ## License
 
 MIT — do what you want with it.
+
+The Open Cowork project is distributed under the MIT License (see
+[`LICENSE`](LICENSE)). The shipped browser-extension **bundle** additionally
+includes Apache-2.0–licensed components — notably
+[`@huggingface/transformers`](https://github.com/huggingface/transformers)
+(used by the optional on-device Local Vision stack). Per Apache-2.0 §4(d),
+those bundled components retain their license and attribution, which is
+recorded in the extension's `NOTICE` file (and the full Apache-2.0 text in
+`LICENSE-APACHE`). No personal data is involved in that third-party code.

@@ -48,6 +48,9 @@ const ROUTES = [
   '/api/cowork/extensions',
   '/api/cowork/extensions/log',
   '/api/cowork/workspaces',
+  // Protected routes that previously had no auth-contract coverage.
+  '/api/cowork/mcp/tools',
+  '/api/cowork/events/emit',
 ];
 const SSE = '/api/cowork/events/stream';
 
@@ -71,16 +74,23 @@ describe('cockpit route auth contract', () => {
     vi.restoreAllMocks();
   });
 
-  for (const route of ROUTES) {
+  // Each route exercises the fail-closed gate with a UNIQUE client IP so the
+  // shared in-memory rate-limit bucket (keyed on 'unknown' when no
+  // X-Forwarded-For is present) is not exhausted by the aggregate no-token
+  // attempts and does not throttle the later SSE contract tests.
+  ROUTES.forEach((route, i) => {
+    const ip = { 'x-forwarded-for': `198.51.100.${i + 1}` };
     it(`401s on ${route} without a token (fail-closed)`, async () => {
-      expect(middleware(fakeReq(route)).status).toBe(401);
+      expect(middleware(fakeReq(route, '', ip)).status).toBe(401);
     });
 
     it(`200s on ${route} with a matching X-Cowork-Token header`, async () => {
-      const res = middleware(fakeReq(route, '', { 'x-cowork-token': REAL_TOKEN }));
+      const res = middleware(
+        fakeReq(route, '', { ...ip, 'x-cowork-token': REAL_TOKEN }),
+      );
       expect(res.status).toBe(200);
     });
-  }
+  });
 
   it('events/stream accepts a valid ?token= query param', async () => {
     expect(middleware(fakeReq(SSE, `token=${REAL_TOKEN}`)).status).toBe(200);

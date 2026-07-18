@@ -47,4 +47,13 @@ ${VALID_DONE}`;
       expect((result.output.action[0] as { type: string }).type).toBe("done");
     }
   });
+
+  test("prose with a balanced non-JSON brace before the real JSON parses the JSON", () => {
+    const raw = `Let's retry { once }. {"thinking":"...","action":[{"type":"done"}]}`;
+    const result = extractJson(raw);
+    // The first balanced `{ once }` is NOT valid JSON — the extractor must skip
+    // it and return the genuine payload instead of the prose fragment.
+    expect(result).toBe(`{"thinking":"...","action":[{"type":"done"}]}`);
+    expect(() => JSON.parse(result)).not.toThrow();
+  });
 });

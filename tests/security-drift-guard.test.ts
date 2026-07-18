@@ -34,10 +34,19 @@ describe("security guard drift-guard", () => {
   });
 
  // A behavioral regression test must exist so a ReDoS payload is rejected at
- // runtime, not merely that the guard text is present.
+ // runtime, not merely that the guard text is present. Assert the test file
+ // actually exercises the guards AND that it rejects a catastrophic pattern
+ // (guard returns true for danger) while accepting a safe one (false) — proving
+ // it distinguishes real ReDoS rather than always-rejecting.
   it("ships a behavioral ReDoS-rejection test", () => {
     const redos = readSrc("tests/search-page-redos.test.ts");
-    expect(redos).toMatch(/expect\(\s*.*\b(success|reject|false)\b/);
+    expect(redos).toMatch(/hasNestedQuantifier|hasBackreference/);
+    expect(redos).toMatch(
+      /expect\(\s*has(?:NestedQuantifier|Backreference)\([\s\S]*?\)\s*\)\s*\.toBe\(\s*true\s*\)/,
+    );
+    expect(redos).toMatch(
+      /expect\(\s*has(?:NestedQuantifier|Backreference)\([\s\S]*?\)\s*\)\s*\.toBe\(\s*false\s*\)/,
+    );
   });
 
   it("keeps the SSRF link-local / cloud-metadata block (169.254 and fe80)", () => {

@@ -111,6 +111,8 @@ export function resolveRef(refId: string): HTMLElement | null {
 function escapeAttributeValue(s: string): string {
   let out = s
     .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
     .replace(/"/g, '\\"');
   if (out.length > MAX_ATTR_VALUE_LENGTH) {
     out = out.slice(0, MAX_ATTR_VALUE_LENGTH) + "...";
@@ -595,6 +597,13 @@ export function generateAccessibilityTree(
     return {
       pageContent: wrappedPageContent,
       viewport: { width: window.innerWidth, height: window.innerHeight },
+      // `error` is left undefined on the success path but is always present in
+      // the `AXTreeResult` envelope, so a consumer that forwards the whole
+      // payload (e.g. the content script → orchestrator) can surface a
+      // truncation/ref error uniformly without special-casing. The `pageContent`
+      // shape is unchanged (still `""` when `error` is set) so existing readers
+      // that depend on `axTree.pageContent` keep working (see L9).
+      error: undefined,
     };
   } catch (e) {
  // Preserve the original error's type and stack; only prefix the message so

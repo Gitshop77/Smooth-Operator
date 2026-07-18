@@ -165,7 +165,7 @@ function setNativeValue(
  * `InvalidStateError` that `setSelectionRange` throws for input types that
  * don't support selection (e.g. `email`/`number`/`date`). Callers (the
  * imperative edit helpers) must not let that throw escape into the executor
- * loop as an unhandled exception (FULL-REVIEW finding 83).
+ * loop as an unhandled exception .
  */
 function safeSetSelectionRange(
   el: HTMLInputElement | HTMLTextAreaElement,
@@ -309,7 +309,7 @@ export async function handleSendKeys(
 ): Promise<ActionResult> {
  // `parseKeys` can throw on a malformed key combination. Convert that to a
  // structured failure instead of letting it propagate as an unhandled
- // exception in the executor loop (FULL-REVIEW finding 111).
+ // exception in the executor loop .
   let parsed: ParsedKeys;
   try {
     parsed = parseKeys(action.keys);
@@ -360,7 +360,7 @@ export async function handleSendKeys(
  // imperatively so the key actually takes effect. Guard this call: an
  // exception (e.g. `setSelectionRange` on a non-selectable input, or
  // `execCommand` throwing) must become a structured failure rather than an
- // unhandled exception in the executor loop (FULL-REVIEW finding 17 / 83).
+ // unhandled exception in the executor loop .
   let mutated = false;
   try {
     mutated = applyEditableMutation(target, parsed);
@@ -422,7 +422,7 @@ export async function handleSendKeys(
  // caret, and `mutateTextInput` intentionally does not claim a mutation for
  // them, so `mutated` is `false`. Report success (the key was dispatched) but
  // be honest that no caret movement was applied, rather than implying the
- // cursor moved (FULL-REVIEW finding 85).
+ // cursor moved .
   const isArrowUpDown = parsed.main === "ArrowUp" || parsed.main === "ArrowDown";
   const message = mutated
     ? `Sent keys: ${action.keys} (applied to editable field)`

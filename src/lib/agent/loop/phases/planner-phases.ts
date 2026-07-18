@@ -105,7 +105,9 @@ export async function callPlannerAndHandleError(
       },
       state.dispatcher,
       makeCtx(state),
-      signal
+      signal,
+      config.costCapUsd,
+      () => costCapExceeded(state)
     );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

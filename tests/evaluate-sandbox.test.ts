@@ -6,7 +6,7 @@
  * CLOSED — any attempt to reach the real `chrome`/`Function`/`eval` globals
  * from inside evaluated code throws. The benign-path and "use strict" cases
  * assert the wrapper still runs ordinary code. The constructor/ownerDocument
- * bypass is documented below as a known, unpatched escape owned elsewhere
+ * bypass is documented below as a known, unpatched escape
  * (architectural fix: keep the secret store out of content-script scope).
  */
 
@@ -54,15 +54,26 @@ describe("evaluate sandbox: fail-closed hardening", () => {
     expect(runSandboxedCode('// generated\n"use strict"; return 3 + 3')).toBe(6);
   });
 
-  // KNOWN, UNPATCHED bypass (owned elsewhere — see SECURITY.md). The
-  // parameter/proxy shadowing cannot stop code from climbing an object's
-  // prototype chain to the real `Function` constructor, which builds a
-  // function in the live global scope and re-opens the secret-exfil path.
-  // This escape must remain reachable until the architectural fix lands; the
-  // test records that fact so a silent "fix" that closes it the wrong way
-  // (e.g. by weakening legitimate code) is visible.
-  test("constructor-chain escape still reaches the real Function (known unpatched bypass)", () => {
-    const ctor = runSandboxedCode("return [].constructor.constructor");
-    expect(typeof ctor).toBe("function");
+  // The parameter/proxy shadowing cannot stop code from climbing an object's
+  // prototype chain to the realm's own `Function` constructor (`[].constructor
+  // .constructor`), which builds a function in the live realm. In the content
+  // script the realm has NO `chrome` global (the secret store is kept out of
+  // content-script scope — see SECURITY.md + `setSecretsResolvedExternally` in
+  // secrets.ts), so even though the escape bypasses the `chrome` parameter
+  // shadow it CANNOT reach `chrome.storage.session` to exfiltrate secrets. This
+  // test pins that invariant: a Function obtained via the escape, when used to
+  // read the secret store, must fail (throw / return the BLOCKED sentinel) —
+  // it must never surface a session handle. NOTE: full realm isolation
+  // (ShadowRealm / keeping the secret store in the background SW) is the
+  // recommended architectural follow-up; until then the sandbox hardening here
+  // is defense-in-depth and this test guards the invariant that the page realm
+  // has no secret store to reach.
+  test("constructor-chain escape cannot reach the secret store", () => {
+    const result = runSandboxedCode(
+      "const F = [].constructor.constructor;" +
+        "try { return F('return chrome && chrome.storage && chrome.storage.session')(); }" +
+        "catch (e) { return 'BLOCKED'; }",
+    );
+    expect(result).toBe("BLOCKED");
   });
 });

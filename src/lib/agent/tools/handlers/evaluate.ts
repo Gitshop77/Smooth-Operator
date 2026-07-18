@@ -198,7 +198,7 @@ function makeHardenedWindowLike(target: object, hardenedDoc: Document): object {
  // `ownerDocument` on any real DOM node returned through the proxy
  // (`<node>.ownerDocument.defaultView.chrome`) and via the Function-
  // constructor escape . Treat as obfuscation, not
- // a security boundary — the robust fix is architectural and owned elsewhere.
+ // a security boundary — the robust fix is architectural.
     document: () => hardenedDoc,
     defaultView: () => makeHardenedWindowLike(target, hardenedDoc),
     self: () => makeHardenedWindowLike(target, hardenedDoc),
@@ -259,7 +259,7 @@ function makeHardenedWindowLike(target: object, hardenedDoc: Document): object {
  * `hardenedDoc.body.ownerDocument.defaultView.chrome` — because the returned
  * node is the REAL element whose `.ownerDocument` is the REAL document, whose
  * `.defaultView` is the REAL window, whose `.chrome` is the REAL extension
- * global (finding / HIGH-185: `document`-hardening bypassable via
+ * global (`document`-hardening bypassable via
  * `ownerDocument` on any DOM node). Wrapping every returned node to trap
  * `ownerDocument` is not feasible without breaking `instanceof`, structural
  * DOM identity, and passing nodes back to real DOM APIs (i.e. without breaking
@@ -520,7 +520,7 @@ export async function handleEvaluate(
  // `evaluate` against untrusted origins. DO NOT treat this handler as a
  // security boundary. The real mitigation (keep the secret store in the
  // background SW + never enable unconfirmed `evaluate` on untrusted origins)
- // is owned elsewhere (executor mode checks, secrets.ts, background SW) and
+ // is handled in other modules (executor mode checks, secrets.ts, background SW) and
  // tracked in SECURITY.md. The proxy hardening below still raises the bar for
  // the simplest direct escapes (e.g. `window.chrome`,
  // `Object.getPrototypeOf(document).defaultView.chrome`), but it is NOT a
@@ -530,10 +530,9 @@ export async function handleEvaluate(
  // `(async function(){}).constructor` (the Function-constructor escape);
  // * `<anyNode>.ownerDocument.defaultView.chrome` — `ownerDocument` on any
  // DOM node returned through the hardened document proxy yields the REAL
- // document, whose `.defaultView` is the REAL window (finding /
- // HIGH-185).
+ // document, whose `.defaultView` is the REAL window.
  // Do NOT rely on this handler for confidentiality; the mitigation is
- // architectural and owned elsewhere.
+ // architectural.
     const syncResult = runSandboxedCode(code);
  // If the result is a Promise, race it against a timeout.
     let result: unknown = syncResult;

@@ -171,6 +171,13 @@ export async function populateModelSuggestions(): Promise<void> {
 $("model")?.addEventListener("input", () => {
   const query = ($("model") as HTMLInputElement).value.trim();
   const resultsDiv = $("model-search-results") as HTMLDivElement;
+ // L13: expose the search results as a listbox so assistive tech can
+ // announce + navigate them. The input owns the popup via aria-owns and
+ // reflects open state via aria-expanded.
+  resultsDiv.setAttribute("role", "listbox");
+  resultsDiv.setAttribute("aria-label", "Model search results");
+  const modelInput = $("model") as HTMLInputElement;
+  modelInput.setAttribute("aria-owns", "model-search-results");
   if (modelSearchTimer) clearTimeout(modelSearchTimer);
  // Refresh the placeholder when the field is emptied so it shows the current
  // provider's default model (the two concerns now live in one listener).
@@ -179,6 +186,8 @@ $("model")?.addEventListener("input", () => {
   }
   if (query.length < 2) {
     resultsDiv.classList.add("is-hidden");
+    modelInput.setAttribute("aria-expanded", "false");
+    modelInput.removeAttribute("aria-activedescendant");
     return;
   }
   const myToken = ++modelSearchToken;
@@ -190,19 +199,32 @@ $("model")?.addEventListener("input", () => {
       if (myToken !== modelSearchToken) return;
       if (results.length === 0) {
         resultsDiv.classList.add("is-hidden");
+        modelInput.setAttribute("aria-expanded", "false");
+        modelInput.removeAttribute("aria-activedescendant");
         return;
       }
       resultsDiv.innerHTML = "";
       resultsDiv.classList.remove("is-hidden");
+      modelInput.setAttribute("aria-expanded", "true");
+      let optIdx = 0;
       for (const r of results) {
         const item = document.createElement("button");
         item.type = "button";
         item.className = "model-search-result-item";
         item.setAttribute("aria-label", `Select model ${r.model.name} from ${r.providerName}`);
+        // L13: each result is a listbox option with a stable id so the
+        // input's aria-activedescendant can point at the focused/hovered one.
+        item.setAttribute("role", "option");
+        item.id = `model-search-opt-${optIdx++}`;
+        item.addEventListener("mouseenter", () => {
+          modelInput.setAttribute("aria-activedescendant", item.id);
+        });
         const visionTag = formatVision(r.model.attachment);
         item.innerHTML = `<strong>${escapeHtml(r.model.name)}</strong> <span class="provider-name">${escapeHtml(r.providerName)}</span> <span class="meta">${escapeHtml(formatCost(r.model.cost))} · ${escapeHtml(formatContext(r.model.limit))} ctx${visionTag ? " · " + escapeHtml(visionTag) : ""}</span>`;
         item.addEventListener("click", () => {
           ($("model") as HTMLInputElement).value = r.model.id;
+          modelInput.setAttribute("aria-activedescendant", item.id);
+          modelInput.setAttribute("aria-expanded", "false");
           resultsDiv.classList.add("is-hidden");
         });
         resultsDiv.appendChild(item);

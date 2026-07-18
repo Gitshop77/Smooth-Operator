@@ -39,7 +39,7 @@ export const PROMPT_TAGS = [
   "browser_state", "browser_summary", "step_info", "step_\\d+",
   "agent_history", "agent_state", "navigator_history",
   "action_set", "action_categories",
-  "untrusted_page_data", "accessibility_tree", "injection_warnings",
+  "untrusted_page_data", "untrusted_page_state", "accessibility_tree", "injection_warnings",
   "compacted_memory", "untrusted_injection_warning",
  // Trusted blocks (site_memory is the most critical — explicitly honored)
   "site_memory", "available_skills", "custom_tools",
@@ -81,7 +81,7 @@ const BARE_TAG_REDACTION_TAGS = [
   "user_request", "current_goal", "current_plan",
   "agent_history", "agent_state", "navigator_history",
   "action_categories",
-  "untrusted_page_data", "accessibility_tree", "injection_warnings",
+  "untrusted_page_data", "untrusted_page_state", "accessibility_tree", "injection_warnings",
   "compacted_memory", "untrusted_injection_warning",
   "system", "sys",
   "site_memory",
@@ -276,13 +276,33 @@ const HOMOGLYPH_MAP: Record<string, string> = {
 };
 const HOMOGLYPH_RE = new RegExp(`[${Object.keys(HOMOGLYPH_MAP).join("")}]`, "gu");
 
-function normalize(text: string): string {
- // Fold ASCII-confusable homoglyphs FIRST (closes the lookalike-injection
- // channel), then NFKC-normalize + strip the invisible / format /
- // Default-Ignorable set (see INVISIBLE_CHARS_SOURCE). U+2028/U+2029 are NOT
- // stripped here \u2014 they are legitimate content separators and must be preserved.
-  const folded = text.replace(HOMOGLYPH_RE, (ch) => HOMOGLYPH_MAP[ch] ?? ch);
-  const stripped = folded
+/**
+ * Fold ASCII-confusable homoglyphs (Cyrillic/Greek/dotless-i lookalikes) to
+ * their ASCII counterparts.
+ *
+ * SCOPED TO THE INJECTION-SCANNING PATH ONLY. This fold is deliberately NOT part
+ * of the generic {@link normalize} (which is also used for EXACT page-text
+ * matching \u2014 e.g. `click` matching a target string against a candidate). Folding
+ * homoglyphs in that path would corrupt legitimate non-English text and break
+ * exact-match lookups the agent relies on (e.g. `click` matching a target string
+ * against a candidate), so the fold is confined to the injection path. The fold is a defense-in-depth measure that only makes sense
+ * where we are hunting for *English* injection keywords in untrusted content, so
+ * it is applied exclusively by the security/injection callers below
+ * (`sanitizeUntrusted`, `neutralizePromptTags`, `scanForInjection`) \u2014 never to
+ * raw page text the agent must match verbatim.
+ */
+export function foldHomoglyphs(text: string): string {
+  return text.replace(HOMOGLYPH_RE, (ch) => HOMOGLYPH_MAP[ch] ?? ch);
+}
+
+export function normalize(text: string): string {
+ // NOTE: this does NOT fold homoglyphs (see {@link foldHomoglyphs}). Folding is
+ // scoped to the injection-scanning path so generic page-text normalization
+ // (used for exact matching) does not corrupt legitimate non-English text.
+ // NFKC-normalize + strip the invisible / format / Default-Ignorable set (see
+ // INVISIBLE_CHARS_SOURCE). U+2028/U+2029 are NOT stripped here \u2014 they are
+ // legitimate content separators and must be preserved.
+  const stripped = text
     .normalize("NFKC")
     .replace(INVISIBLE_CHARS_STRIP_RE, "");
  // A malicious page can smuggle an injection keyword through a MID-WORD
@@ -299,7 +319,7 @@ function normalize(text: string): string {
  * every injection-pattern match with `[redacted]`.
  */
 export function sanitizeUntrusted(text: string): string {
-  const normalized = normalize(text);
+  const normalized = foldHomoglyphs(normalize(text));
   let out = normalized;
   for (const pattern of INJECTION_PATTERNS) {
     out = out.replace(pattern, REDACTED_TOKEN);
@@ -335,7 +355,7 @@ const NEUTRALIZE_PROMPT_TAG_RE = new RegExp(
   "gi",
 );
 export function neutralizePromptTags(text: string): string {
-  return normalize(text).replace(NEUTRALIZE_PROMPT_TAG_RE, "[$1]");
+  return foldHomoglyphs(normalize(text)).replace(NEUTRALIZE_PROMPT_TAG_RE, "[$1]");
 }
 
 // ─── Injection classifier (heuristic pattern scanner) ───────────────────────
@@ -507,7 +527,7 @@ export function scanForInjection(text: string): InjectionScanResult {
  // collapse that sanitizeUntrusted's normalize() applies, so a keyword
  // smuggled through a line/paragraph separator (e.g. `ig\u2028nore`) is
  // detected here just as it is redacted there.
-  const normalized = text.normalize("NFKC").replace(MIDWORD_SEPARATOR_RE, "$1$2");
+  const normalized = foldHomoglyphs(text.normalize("NFKC").replace(MIDWORD_SEPARATOR_RE, "$1$2"));
 
   for (const det of COMPILED_DETECTORS) {
     det.regex.lastIndex = 0; // reset before each .test() — global flag is stateful

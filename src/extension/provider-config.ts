@@ -67,8 +67,7 @@ import { profiles, byProvider } from "../lib/agent/llm/providers/openai-compatib
  * spread below (they'd be dead entries that look like they back the dedicated
  * cases but don't). `google` is intentionally NOT in the profiles table, so
  * it is absent here and the `case "google"` branch requires an explicit
- * `baseUrl` from the user (FULL-REVIEW finding 124 corrects the prior comment
- * that omitted google from the list of map readers).
+ * `baseUrl` from the user .
  */
 const DEFAULT_BASE_URLS: Record<string, string> = {
  // Spread the profiles table entries (covers deepseek, groq, together, etc.)
@@ -327,7 +326,7 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
  // openai-compatible alias is genuinely unknown. Report that precisely
  // instead of masking it behind the API-key check (which would otherwise
  // throw "${provider} requires an API key" for an unrecognized id,
- // hiding the real problem — FULL-REVIEW finding 53).
+ // hiding the real problem — ).
       if (!KNOWN_PROVIDERS.has(provider)) {
         throw new Error(
           `Unknown provider "${provider}". Pick one of: ${[...KNOWN_PROVIDERS].join(", ")}.`
