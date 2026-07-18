@@ -40,6 +40,12 @@ export function stripConsoleDebug(source: string): string {
   let inBlockComment = false;
   let strChar: string | null = null; // '"' | "'" | "`"
   let templateDepth = 0; // `${ … }` nesting depth inside a template literal
+  // Paren depth while we are inside a `void (…)` grouping that replaced a
+  // `console.debug/log` call. Non-zero ⇒ the trailing-comma fix below is armed.
+  // (Nested `console.*` calls inside a rewritten call are not tracked — the
+  // first-party source contains none — but this still handles the common case
+  // and any nested *non-console* parens correctly.)
+  let voidCallDepth = 0;
   const isIdentChar = (c: string) => /[\w.$]/.test(c);
 
   while (i < n) {
@@ -105,6 +111,36 @@ export function stripConsoleDebug(source: string): string {
       continue;
     }
 
+    // While rewriting a `console.debug/log` call into `void (…)`, the closing
+    // `)` must drop any TRAILING COMMA. A function-call argument list
+    // (`console.debug(a, b,)`) allows a trailing comma; the `void` *grouping*
+    // expression we emit (`void (a, b,)`) does NOT — it is a SyntaxError
+    // ("Unexpected ')'"). Track paren depth (respecting strings/comments/templates
+    // via the scanner above) so we only fix the trailing comma at the void call's
+    // own closing `)`, not at nested `)` (e.g. `void ( foo(x), )`).
+    if (voidCallDepth > 0) {
+      if (c === "(") {
+        voidCallDepth++;
+        out.push(c);
+        i++;
+        continue;
+      }
+      if (c === ")") {
+        voidCallDepth--;
+        if (voidCallDepth === 0) {
+          // Strip a trailing comma (+ any surrounding whitespace) so
+          // `void (a, b,)` becomes the valid `void (a, b)`.
+          while (out.length && /\s/.test(out[out.length - 1])) out.pop();
+          if (out.length && out[out.length - 1] === ",") out.pop();
+          out.push(")");
+        } else {
+          out.push(")");
+        }
+        i++;
+        continue;
+      }
+    }
+
     // Bare `console.debug(` / `console.log(` call → rewrite.
     if (
       c === "c" &&
@@ -130,7 +166,8 @@ export function stripConsoleDebug(source: string): string {
           continue;
         }
         out.push("void (");
-        i = afterName + 1; // keep the '('
+        voidCallDepth = 1; // the `(` in `void (` is our depth-1 opening paren
+        i = afterName + 1; // skip the original '(' (already emitted by `void (`)
         continue;
       }
     }

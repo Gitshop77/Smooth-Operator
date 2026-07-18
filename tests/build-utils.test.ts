@@ -43,6 +43,25 @@ describe("stripConsoleDebug", () => {
     expect(out).toContain("void (a);");
     expect(out).toContain("const b = 2;");
   });
+
+  // Regression: a trailing comma is legal in a function-call argument list
+  // (`console.debug(a, b,)`) but ILLEGAL in the `void (…)` grouping expression
+  // we emit. It must be dropped, else the bundle is a SyntaxError
+  // ("Unexpected ')'") and the background script fails to build.
+  it("drops a trailing comma so the void(…) grouping stays valid", () => {
+    const out = stripConsoleDebug('console.debug(\n  "msg",\n  x instanceof Error ? x.message : "",\n);');
+    expect(out).toBe('void (\n  "msg",\n  x instanceof Error ? x.message : "");');
+  });
+
+  it("drops a trailing comma even with nested parens in the args", () => {
+    const out = stripConsoleDebug('console.log("x", foo(bar),);');
+    expect(out).toBe('void ("x", foo(bar));');
+  });
+
+  it("produces a parseable statement when the call had a trailing comma", () => {
+    const out = stripConsoleDebug('try {} catch (e) {\n  console.debug(\n    "m",\n    e.message,\n  );\n}');
+    expect(() => new Function(out)).not.toThrow();
+  });
 });
 
 describe("lintManifestPermissions", () => {
