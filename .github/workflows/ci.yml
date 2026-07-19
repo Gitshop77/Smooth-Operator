@@ -27,10 +27,23 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7.0.0 # actions/setup-node v7 (Node 24 runtime; dependabot PR #44)
         with:
-          node-version: '20.18.0'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies
+        run: npm ci
+
+      - name: Install mini-services/cowork-events dependencies
+        # The root type-check (npx tsc --noEmit) and the cowork-events
+        # test suite both import the mini-service source, which in turn imports
+        # socket.io / z-ai-web-dev-sdk resolved from
+        # mini-services/cowork-events/node_modules. Those deps must be
+        # installed BEFORE the root tsc and vitest steps, otherwise CI fails
+        # with "Cannot find module 'socket.io'" / "Cannot find module
+        # 'z-ai-web-dev-sdk'" even though it passes locally (where the deps
+        # are already present). This is why the install lives here and not
+        # only in the later audit step.
+        working-directory: mini-services/cowork-events
         run: npm ci
 
       - name: Run lint
@@ -97,9 +110,10 @@ jobs:
 
       - name: Audit mini-services/cowork-events dependencies
         working-directory: mini-services/cowork-events
-        # Signal-only (see "Audit root dependencies"); PR scope is gated by
-        # dependency-review.yml.
-        run: npm ci && npm audit --audit-level=high && npm audit signatures
+        # Deps installed in the earlier "Install mini-services/cowork-events
+        # dependencies" step; this is signal-only (see "Audit root
+        # dependencies"), PR scope is gated by dependency-review.yml.
+        run: npm audit --audit-level=high && npm audit signatures
 
       - name: Type-check mini-services/cowork-events
         # The WebSocket mini-service ships to production paths but previously
@@ -124,7 +138,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7.0.0 # actions/setup-node v7 (Node 24 runtime; dependabot PR #44)
         with:
-          node-version: '20.18.0'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: cockpit/package-lock.json
 

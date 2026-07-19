@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-brightgreen.svg)](https://opensource.org/licenses/MIT)
 [![Chrome 116+](https://img.shields.io/badge/chrome-116%2B-blue.svg)](https://www.google.com/chrome/)
-[![Node 20.9+](https://img.shields.io/badge/node-20.9%2B-blue.svg)](https://nodejs.org/)
+[![Node 22+](https://img.shields.io/badge/node-22%2B-blue.svg)](https://nodejs.org/)
 
 Open Cowork is a Chrome extension that turns your browser into an Agent you talk to instead of click through. Tell it *"fill out this form"* or *"summarize this page,"* and the agent reads what's on screen, figures out the steps, and does them for you — across as many tabs as you have open.
 
@@ -45,7 +45,7 @@ It runs on your own machine and uses your own API key from whichever AI provider
 
 ### You'll need
 
-- [Node.js](https://nodejs.org/) 20.9 or later (comes with npm)
+- [Node.js](https://nodejs.org/) 22 or later (comes with npm) — required by the cockpit's Prisma 7 dependency (`@prisma/streams-local` needs Node >= 22)
 - [Chrome](https://www.google.com/chrome/) 116 or later
 - An API key from any supported provider
 

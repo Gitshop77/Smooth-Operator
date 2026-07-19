@@ -38,7 +38,7 @@
   },
   "description": "Open-source agentic browser control Chrome extension",
   "engines": {
-    "node": ">=20.9.0"
+    "node": ">=22.0.0"
   },
   "overrides": {
     "flatted": "^3.4.2"
