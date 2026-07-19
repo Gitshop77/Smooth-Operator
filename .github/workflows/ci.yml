@@ -57,20 +57,20 @@ jobs:
         # in vitest.config.ts; a PR that drops coverage below the baseline fails CI.
         run: npx vitest run --coverage
 
-      - name: verify extension build is in sync (tracked static files only)
+      - name: verify extension build regenerates cleanly
         run: |
           # ------------------------------------------------------------------
           # ARTIFACT PROVENANCE
-          # chrome-extension/*.js and chrome-extension/chunks/ are gitignored
-          # (esbuild ESM code-split output). They are NOT committed to the repo.
-          # Published releases MUST therefore be rebuilt from the verified
-          # commit via `npm run build:extension` — never ship hand-edited or
-          # stale bundles. The checks below assert (a) the build succeeded and
-          # (b) the committed static files (manifest/html/css) are unchanged so
-          # the tracked inputs still match src/extension/.
+          # The entire chrome-extension/ output directory is gitignored (it is
+          # regenerated from src/extension/ by `npm run build:extension`). It is
+          # NOT committed to the repo. Published releases MUST therefore be
+          # rebuilt from the verified commit — never ship hand-edited or stale
+          # bundles. Because the output is fully gitignored, there is nothing to
+          # `git diff` against, so this step instead asserts that regeneration
+          # from the current source produces a COMPLETE, VALID extension bundle.
           # ------------------------------------------------------------------
-          # Always regenerate the bundles from src/extension/ so the comparison
-          # below reflects the current source, not a stale checkout.
+          # Always regenerate the bundles from src/extension/ so the checks
+          # below reflect the current source, not a stale checkout.
           npm run build:extension
 
           # The generated .js entry bundles and chunks/ are gitignored (esbuild
@@ -85,20 +85,22 @@ jobs:
             exit 1
           fi
 
-          # Diff the WHOLE tracked static set (manifest.json, *.html, *.css) at
-          # any nesting depth. `git add -A chrome-extension` stages new/deleted
-          # static files too (gitignored .js bundles and chunks/ are excluded by
-          # .gitignore, so they stay invisible by design), and `git diff
-          # --cached` with `**` globs then catches added/removed/modified paths.
-          git add -A chrome-extension
-          if ! git diff --cached --exit-code -- \
-              'chrome-extension/manifest.json' \
-              'chrome-extension/**/*.html' \
-              'chrome-extension/**/*.css'; then
-            echo "ERROR: chrome-extension/ static files are out of sync with src/extension/."
-            echo "Run 'npm run build:extension' and commit the result."
+          # Static assets (manifest, HTML, CSS, icons) are copied verbatim from
+          # src/extension/ by the build. Assert they exist in the regenerated
+          # output so a missing/misnamed source asset fails CI rather than
+          # shipping a broken extension. The manifest must also be valid JSON
+          # with a service_worker entry (MV3 background).
+          for f in manifest.json sidepanel.html sidepanel.css options.html options.css; do
+            if [ ! -f "chrome-extension/$f" ]; then
+              echo "ERROR: build:extension did not produce chrome-extension/$f."
+              exit 1
+            fi
+          done
+          if [ ! -f chrome-extension/icons/icon-128.png ]; then
+            echo "ERROR: build:extension did not produce chrome-extension/icons/icon-128.png."
             exit 1
           fi
+          node -e "const m=require('./chrome-extension/manifest.json'); if(!m.background||!m.background.service_worker) { console.error('ERROR: manifest.json missing background.service_worker'); process.exit(1); } console.log('manifest OK:', m.manifest_version, m.name);"
 
       - name: Audit root dependencies
         # High-severity advisories intentionally FAIL CI (no `|| true`), so
@@ -129,6 +131,16 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    # DATABASE_URL is supplied at JOB level (not per-step) so every cockpit step
+    # that imports `prisma.config.ts` — `db:generate`, `db:apply`, `tsc`, `lint`,
+    # `build`, and the `test` suite — has the datasource URL. Prisma 7 moved the
+    # connection URL out of `schema.prisma` into `prisma.config.ts`, which reads
+    # it eagerly via `env('DATABASE_URL')` at load time. Without it, `prisma
+    # generate` dies with "Cannot resolve environment variable: DATABASE_URL"
+    # before any command runs. The cockpit's `.env` is gitignored, so CI must
+    # inject this here. A throwaway SQLite file is fine for CI.
+    env:
+      DATABASE_URL: file:./db/cowork.db
     defaults:
       run:
         working-directory: cockpit
@@ -160,10 +172,8 @@ jobs:
         # for the cockpit tests below. A migration now lives under
         # cockpit/prisma/migrations/, so we use `prisma migrate deploy` (via
         # `npm run db:apply`) rather than the older `db push` drift approach.
-        # cockpit uses sqlite (DATABASE_URL=file:./db/cowork.db); no external DB
-        # service required.
-        env:
-          DATABASE_URL: file:./db/cowork.db
+        # cockpit uses sqlite (DATABASE_URL is set at the job level);
+        # no external DB service required.
         run: npm run db:apply
 
       - name: Type-check cockpit
@@ -175,10 +185,8 @@ jobs:
       - name: Run cockpit tests
         # Run the cockpit test suite (middleware.test.ts, route.test.ts, etc.)
         # after db:generate/db:apply (the Prisma client may be required by the
-        # tests) and before the production build. DATABASE_URL is supplied so
-        # tests that touch Prisma have a DB target.
-        env:
-          DATABASE_URL: file:./db/cowork.db
+        # tests) and before the production build. DATABASE_URL is set at the job
+        # level so tests that touch Prisma have a DB target.
         run: npm test
 
       - name: Build cockpit
