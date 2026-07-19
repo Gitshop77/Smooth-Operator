@@ -508,7 +508,7 @@ export async function handleEvaluate(
  // executor, `secrets.ts`, and the background page — outside this file's
  // ownership), treat the `chrome`-hardening here as defense-in-depth and rely
  // on the secret store being unreachable from content-script scope
- // (see SECURITY.md).
+ // (see AGENTS.md).
  //
  // CONSEQUENCE (findings: evaluate sandbox bypassable via the Function-
  // constructor escape; documented constructor/Function escape is real and
@@ -521,7 +521,7 @@ export async function handleEvaluate(
  // security boundary. The real mitigation (keep the secret store in the
  // background SW + never enable unconfirmed `evaluate` on untrusted origins)
  // is handled in other modules (executor mode checks, secrets.ts, background SW) and
- // tracked in SECURITY.md. The proxy hardening below still raises the bar for
+ // tracked in AGENTS.md. The proxy hardening below still raises the bar for
  // the simplest direct escapes (e.g. `window.chrome`,
  // `Object.getPrototypeOf(document).defaultView.chrome`), but it is NOT a
  // security boundary and does NOT close the document→chrome path. Known,

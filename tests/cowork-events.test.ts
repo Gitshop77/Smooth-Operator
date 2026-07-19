@@ -38,6 +38,71 @@ import {
   DEV_TOKEN,
 } from "../mini-services/cowork-events/security";
 
+// ─── Robust server/io teardown helper ─────────────────────────────────
+//
+// socket.io v4's `Server.close()` (called with no callback) returns a Promise
+// AND ALSO closes the underlying http.Server. So after awaiting
+// `io.close()`, calling `httpServer.close()` again throws
+// ERR_SERVER_NOT_RUNNING ("Server is not running"). We therefore:
+//   1. close socket.io FIRST (releasing its engine.io listeners/connections),
+//   2. destroy any lingering keep-alive connections, then
+//   3. close the http.Server ONLY IF it is still listening, swallowing the
+//      ERR_SERVER_NOT_RUNNING case (socket.io already closed it).
+// Both the callback and Promise return shapes are supported so the helper is
+// version-robust. This guarantees no open handle and no teardown error, and
+// does NOT rely on a setTimeout fallback.
+
+type CloseableIo = { close: (cb?: (err?: Error) => void) => void | Promise<void> };
+
+async function closeServerAndIo(
+  server: import("http").Server,
+  io: CloseableIo,
+): Promise<void> {
+  // 1. Close socket.io first. Support both the callback form (older socket.io)
+  //    and the Promise form (no-callback). The `settled` guard avoids double
+  //    resolve/reject if both fire.
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const done = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      err ? reject(err) : resolve();
+    };
+    const ret = io.close(done);
+    if (ret && typeof (ret as Promise<void>).then === "function") {
+      (ret as Promise<void>).then(resolve, reject);
+    }
+  }).catch(() => {
+    // A socket.io close error must not fail teardown; we still close the server.
+  });
+
+  // 2. Destroy lingering keep-alive connections so the http.Server can close.
+  const anyServer = server as unknown as { closeAllConnections?: () => void };
+  if (typeof anyServer.closeAllConnections === "function") {
+    try {
+      anyServer.closeAllConnections();
+    } catch {
+      /* ignore — already closed or unsupported */
+    }
+  }
+
+  // 3. Close the http.Server, but only if it is still listening (socket.io may
+  //    have already closed it). Swallow ERR_SERVER_NOT_RUNNING explicitly.
+  if ((server as unknown as { listening?: boolean }).listening) {
+    await new Promise<void>((resolve, reject) => {
+      server.close((err?: Error) => {
+        if (err && (err as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") {
+          reject(err);
+        } else {
+          resolve();
+        }
+      });
+    }).catch(() => {
+      /* swallow non-fatal close errors */
+    });
+  }
+}
+
 // ─── z-ai SDK mock ───────────────────────────────────────────────────
 //
 // The real mini-service calls `ZAI.create()` then
@@ -237,13 +302,23 @@ describe("shouldRefuseStart", () => {
     expect(shouldRefuseStart("test", DEV_TOKEN)).toBe(true);
   });
 
-  test("allows the dev-token in NON-production ONLY when COWORK_ALLOW_DEV_TOKEN=1 is explicitly set, and REFUSES in production", () => {
+  test("allows the dev-token ONLY when COWORK_ALLOW_DEV_TOKEN=1 is explicitly set AND NODE_ENV is a dev/local/test env, and REFUSES otherwise", () => {
     process.env.COWORK_ALLOW_DEV_TOKEN = "1";
  // Production always fails closed — the well-known dev-token must never
  // authenticate in prod, even with the opt-in (a real auth hole otherwise).
     expect(shouldRefuseStart("production", DEV_TOKEN)).toBe(true);
+ // A genuine dev/local/test NODE_ENV with the opt-in is allowed.
     expect(shouldRefuseStart("development", DEV_TOKEN)).toBe(false);
-    expect(shouldRefuseStart(undefined, DEV_TOKEN)).toBe(false);
+    expect(shouldRefuseStart("dev", DEV_TOKEN)).toBe(false);
+    expect(shouldRefuseStart("local", DEV_TOKEN)).toBe(false);
+    expect(shouldRefuseStart("test", DEV_TOKEN)).toBe(false);
+ // An unset NODE_ENV is NOT a dev env under the reject-list, so it is refused
+ // even with the opt-in (matches cockpit's DEV_ENV_RE: undefined is not
+ // development|dev|local|test).
+    expect(shouldRefuseStart(undefined, DEV_TOKEN)).toBe(true);
+ // A non-dev env like staging is also refused even with the opt-in — the
+ // dev-token requires a dev/local/test NODE_ENV, not merely "not production".
+    expect(shouldRefuseStart("staging", DEV_TOKEN)).toBe(true);
   });
 
   test("allows a real secret in any NODE_ENV without an opt-in", () => {
@@ -395,7 +470,7 @@ describe("redactSecrets", () => {
 
 describe("cowork-events HTTP server (integration)", () => {
   let server: import("http").Server;
-  let io: { close: (cb?: () => void) => void };
+  let io: { close: (cb?: (err?: Error) => void) => void | Promise<void> };
   let port: number;
   let token: string;
   let corsOrigin: string;
@@ -447,26 +522,12 @@ describe("cowork-events HTTP server (integration)", () => {
   });
 
   afterAll(async () => {
- // io.close() also closes the underlying httpServer.
-    await new Promise<void>((resolve) => {
-      io.close(() => resolve());
- // Fallback in case io.close never invokes its callback.
-      setTimeout(resolve, 2000).unref();
-    });
- // belt-and-suspenders: if httpServer is still listening, force it closed.
-    if (server.listening) {
- // Node 18.2+ — destroy keep-alive connections so close() resolves.
-      const anyServer = server as unknown as {
-        closeAllConnections?: () => void;
-      };
-      if (typeof anyServer.closeAllConnections === "function") {
-        anyServer.closeAllConnections();
-      }
-      await new Promise<void>((resolve) => {
-        server.close(() => resolve());
-        setTimeout(resolve, 2000).unref();
-      });
-    }
+ // Mirror the production graceful-shutdown order
+ // (`mini-services/cowork-events/index.ts` `shutdown()`): close socket.io FIRST
+ // (it releases engine.io's listeners on the httpServer), then close the
+ // httpServer. Both are awaited — no setTimeout fallback — so the test cannot
+ // hang on an un-fired callback and cannot leak an open handle.
+    await closeServerAndIo(server, io);
   });
 
  // ── /health ────────────────────────────────────────────────────────────
@@ -898,20 +959,9 @@ describe("cowork-events HTTP server (integration)", () => {
     });
 
     afterAll(async () => {
-      await new Promise<void>((resolve) => {
-        io2.close(() => resolve());
-        setTimeout(resolve, 2000).unref();
-      });
-      if (server.listening) {
-        const anyServer = server as unknown as { closeAllConnections?: () => void };
-        if (typeof anyServer.closeAllConnections === "function") {
-          anyServer.closeAllConnections();
-        }
-        await new Promise<void>((resolve) => {
-          server.close(() => resolve());
-          setTimeout(resolve, 2000).unref();
-        });
-      }
+      // Close socket.io + http server explicitly (guarded against
+      // ERR_SERVER_NOT_RUNNING and with no setTimeout-only fallback).
+      await closeServerAndIo(server, io2);
     });
 
     test("/chat 11 times in the same minute returns 429 on the 11th (rate limit)", async () => {
@@ -1085,20 +1135,9 @@ describe("cowork-events socket.io (integration)", () => {
   afterAll(async () => {
  // Restore the global WebSocket we hid in beforeAll.
     (globalThis as { WebSocket?: unknown }).WebSocket = savedWebSocket;
-    await new Promise<void>((resolve) => {
-      io.close(() => resolve());
-      setTimeout(resolve, 2000).unref();
-    });
-    if (server.listening) {
-      const anyServer = server as unknown as { closeAllConnections?: () => void };
-      if (typeof anyServer.closeAllConnections === "function") {
-        anyServer.closeAllConnections();
-      }
-      await new Promise<void>((resolve) => {
-        server.close(() => resolve());
-        setTimeout(resolve, 2000).unref();
-      });
-    }
+    // Close socket.io + http server explicitly (guarded against
+    // ERR_SERVER_NOT_RUNNING and with no setTimeout-only fallback).
+    await closeServerAndIo(server, io);
   });
 
  // ── events:replay + system:status on a successful handshake ───────────────

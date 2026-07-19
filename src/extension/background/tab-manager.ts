@@ -10,7 +10,7 @@
 
 import { injectAntiDetection, isStealthEnabled } from "@/lib/agent/anti-detection";
 import { checkUrlAllowedWithDomainConfig } from "@/lib/agent/tools/helpers/domain-config";
-import { SEARCH_ENGINE_URLS } from "@/lib/agent/tools/constants";
+import { SEARCH_ENGINE_URLS, getSearchEngineUrl } from "@/lib/agent/tools/constants";
 import { substituteSecrets, redactSecrets } from "@/lib/agent/secrets";
 import type { ActionResult, AgentAction, BrowserState, LogEvent, TabInfo } from "@/lib/agent/types";
 import { getDomainConfig, saveRunState, type RunState } from "./state-store";
@@ -667,7 +667,7 @@ export async function handleTabAction(
  // Validate the engine is a known key; otherwise fall back to the default.
  // (`SEARCH_ENGINE_URLS[engine]` is only consulted when `engine` is a real
  // key — the `|| duckduckgo` covers a malformed/unknown engine.)
-      const baseUrl = SEARCH_ENGINE_URLS[resolvedEngine as keyof typeof SEARCH_ENGINE_URLS];
+      const baseUrl = getSearchEngineUrl(resolvedEngine) ?? SEARCH_ENGINE_URLS.duckduckgo;
       const searchUrl = baseUrl + encodeURIComponent(query);
  // Apply the same domain policy + scheme gate as navigate. The engine base
  // URLs are constant http(s), but guard anyway .

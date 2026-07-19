@@ -66,17 +66,20 @@ export function installLocalStorageStub(): () => void {
  */
 export function restoreLocalStorageStub(): void {
   if (hadDescriptor && savedDescriptor) {
- // Re-apply the captured original (typically the jsdom-native getter). This
- // is idempotent: calling it after every test keeps `localStorage` present
- // rather than destroying it on the second call.
+ // If the captured original is jsdom's native `localStorage` getter (an
+ // accessor descriptor), re-applying it is harmful: under jsdom v29 / Node's
+ // built-in webstorage, merely *reading* it (a) emits a
+ // "--localstorage-file was provided without a valid path" warning on every
+ // access and (b) yields a store without `setItem`/`getItem`. The functional
+ // check below would just re-install the stub anyway, so install it directly
+ // — without ever touching the warning-emitting getter.
+    if (typeof savedDescriptor.get === "function" || typeof savedDescriptor.set === "function") {
+      installLocalStorageStub();
+      return;
+    }
+ // Otherwise (a previous working data-descriptor stub) re-apply it, then verify
+ // it is still functional before trusting it.
     Object.defineProperty(globalThis, "localStorage", savedDescriptor);
- // jsdom can surface a non-functional `localStorage` descriptor — when its
- // backing store isn't configured (the `--localstorage-file` warning case),
- // re-applying the descriptor yields an object WITHOUT `setItem`/`getItem`.
- // Restoring to that would silently break every module that falls back to
- // localStorage (secrets, run-history) after the very first test. If the
- // restored store isn't functional, keep the stub instead so dependent
- // tests retain a working `localStorage`.
     if (
       typeof (globalThis as GlobalWithLocalStorage).localStorage?.setItem !== "function" ||
       typeof (globalThis as GlobalWithLocalStorage).localStorage?.getItem !== "function"

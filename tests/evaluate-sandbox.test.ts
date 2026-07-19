@@ -58,7 +58,7 @@ describe("evaluate sandbox: fail-closed hardening", () => {
   // prototype chain to the realm's own `Function` constructor (`[].constructor
   // .constructor`), which builds a function in the live realm. In the content
   // script the realm has NO `chrome` global (the secret store is kept out of
-  // content-script scope — see SECURITY.md + `setSecretsResolvedExternally` in
+  // content-script scope — see AGENTS.md + `setSecretsResolvedExternally` in
   // secrets.ts), so even though the escape bypasses the `chrome` parameter
   // shadow it CANNOT reach `chrome.storage.session` to exfiltrate secrets. This
   // test pins that invariant: a Function obtained via the escape, when used to

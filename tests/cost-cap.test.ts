@@ -14,6 +14,7 @@ import { describe, test, expect, vi } from "vitest";
 import { costCapExceeded } from "../src/lib/agent/loop/helpers/state-helpers";
 import { runAgentLoop } from "../src/lib/agent/loop/orchestrator";
 import type { LoopDeps } from "../src/lib/agent/loop/types";
+import type { ActionResult, AgentAction } from "../src/lib/agent/types";
 import { makeState } from "./helpers";
 
 // Minimal LoopState-shaped object — costCapExceeded only reads config.costCapUsd
@@ -84,8 +85,8 @@ describe("orchestrator finalizes on cost cap when usage is omitted", () => {
         { id: 1, label: "1", url: "https://example.com", title: "t", active: true },
       ]),
       extractState: vi.fn(async () => makeState()),
-      executeActions: vi.fn(async (actions) =>
-        (actions as unknown[]).map((action) => ({ action, success: true, message: "ok" })),
+      executeActions: vi.fn(async (actions: AgentAction[]): Promise<ActionResult[]> =>
+        actions.map((action) => ({ action, success: true, message: "ok" })),
       ),
       onEvent: (e: unknown) => events.push(e),
       settleDelay: 0,

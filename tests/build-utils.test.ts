@@ -12,6 +12,24 @@ function tmpDir(): string {
   return mkdtempSync(path.join(tmpdir(), "build-utils-"));
 }
 
+// Robust cleanup: a transient FS error (file briefly locked right after a test
+// on some platforms, EMFILE, etc.) must not fail the run or leak a temp dir.
+// Retries a few times (with libuv's own retry on EBUSY) and is a no-op if the
+// dir is already gone. This never touches any assertion in the tests.
+function removeTmpDir(dir: string | undefined): void {
+  if (!dir) return;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 });
+      return;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
 describe("stripConsoleDebug", () => {
   it("leaves console.log( inside a string literal intact", () => {
     const out = stripConsoleDebug('const s = "console.log(x)";');
@@ -71,7 +89,7 @@ describe("lintManifestPermissions", () => {
     dir = tmpDir();
   });
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    removeTmpDir(dir);
     delete process.env.MANIFEST_LINT_FAIL_HIGH_RISK;
     vi.restoreAllMocks();
   });
@@ -135,7 +153,7 @@ describe("assertOnlyEnZodLocales", () => {
     dir = tmpDir();
   });
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    removeTmpDir(dir);
   });
 
   function writeSrc(name: string, contents: string): void {

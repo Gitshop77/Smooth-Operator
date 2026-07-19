@@ -87,9 +87,6 @@ export const SEARCH_ENGINE_URLS = {
   baidu: "https://www.baidu.com/s?wd=",
 } as const;
 
-/** The set of search-engine ids that have a known query URL. */
-export type SearchEngineId = keyof typeof SEARCH_ENGINE_URLS;
-
 /**
  * Resolve a search engine's query URL prefix, or `null` if the engine is
  * unknown. Callers should use this instead of indexing `SEARCH_ENGINE_URLS`

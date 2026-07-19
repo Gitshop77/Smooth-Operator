@@ -831,7 +831,7 @@ export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
  // the content script. The orchestrator's executeActionQueue does this
  // internally, but when deps.executeActions is provided (which it always
  // is in the extension), executeActionQueue is bypassed — so the gate
- // must be applied here to preserve the SECURITY.md trust model.
+ // must be applied here to preserve the AGENTS.md trust model.
       const { checkActionAllowed, requiresConfirmation } = await import("@/lib/agent/modes");
  // Build one ActionResult per input action so the orchestrator's history
  // alignment always holds (finding: executeActions returned a misaligned /

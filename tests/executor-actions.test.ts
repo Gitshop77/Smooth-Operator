@@ -53,6 +53,22 @@ describe("describeAction", () => {
       expect(desc.length).toBeGreaterThan(0);
     }
   });
+
+  test("describeAction includes the action's key details, not just non-empty text", () => {
+    expect(describeAction({ type: "click", index: 1 } as AgentAction)).toContain("click [1]");
+    expect(
+      describeAction({ type: "input", index: 2, text: "hello", clear: true } as AgentAction),
+    ).toContain("hello");
+    expect(
+      describeAction({ type: "navigate", url: "https://x.com", new_tab: false } as AgentAction),
+    ).toContain("x.com");
+    expect(
+      describeAction({ type: "done", text: "finished", success: true } as AgentAction),
+    ).toContain("success");
+    expect(
+      describeAction({ type: "search", query: "test", engine: "duckduckgo" } as AgentAction),
+    ).toContain("test");
+  });
 });
 
 // ─── describeAction (newer action types) ─────────────────────────────────

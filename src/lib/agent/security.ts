@@ -71,7 +71,7 @@ const PROMPT_TAG_PATTERN = PROMPT_TAGS.join("|");
  * High-collision tokens that commonly appear as LITERAL text in legitimate
  * pages or code samples are deliberately EXCLUDED: redacting them would silently
  * wipe real page content the agent needs. Those tokens (`input`, `output`,
- * `plan`, `sys`, `system`, `step_\d+`, `step_info`, `browser_state`,
+ * `plan`, `step_\d+`, `step_info`, `browser_state`,
  * `action_set`, `available_skills`, `custom_tools`) are still covered by the
  * paired open/close block-redaction pattern (which requires a matching close
  * tag — a much stronger forgery signal) and by the non-destructive
