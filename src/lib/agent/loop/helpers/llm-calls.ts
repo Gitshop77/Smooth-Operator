@@ -153,7 +153,17 @@ function accountUsage(params: {
     }
     return undefined;
   }
-  const cost = precomputedCost ?? (model ? estimateCost(model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens) : undefined);
+ // Production planner/navigator calls go through provider-bridge, which
+ // already supplies a provider-scoped `costUsd` (precomputedCost) AND passes
+ // its config.providerId into estimateCost — so this fallback only runs when a
+ // caller supplies a model without a precomputed cost. When that model id is
+ // provider-prefixed (e.g. "google/gemini-2.5-pro" from an OpenRouter-style
+ // provider), thread the prefix so pricing disambiguates the same bare id
+ // across providers. Bare ids (no "/") carry no provider context at the loop
+ // layer (AgentConfig doesn't hold providerId), so we leave it undefined and
+ // rely on the first-writer-wins bare-id resolution in pricing.ts.
+  const costModelProviderId = model?.includes("/") ? model.split("/")[0] : undefined;
+  const cost = precomputedCost ?? (model ? estimateCost(model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, undefined, costModelProviderId) : undefined);
   const usage: LLMUsageInfo | undefined =
     typeof cost === "number" && Number.isFinite(cost)
       ? buildUsage(model ?? "", tokensIn, tokensOut, cost, reasoningTokens, cachedInputTokens, cachedWriteInputTokens)

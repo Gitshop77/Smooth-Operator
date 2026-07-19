@@ -20,7 +20,7 @@ import * as OpenAICompatible from "../lib/agent/llm/providers/openai-compatible"
 import { makeOpenAIChatFacade } from "../lib/agent/llm/providers/openai";
 import * as OpenAICompatibleChat from "../lib/agent/llm/protocols/openai-compatible-chat";
 import { resolveAndValidateLlmBaseUrl, validateLlmBaseUrl } from "../lib/agent/llm/route/ssrf";
-import { modelSupportsVision, modelSupportsReasoning, getDefaultModelForProvider, fetchCatalog } from "../lib/agent/llm/catalog";
+import { modelSupportsVision, modelSupportsReasoning, getDefaultModelForProvider, resolveVisionSupport, fetchCatalog } from "../lib/agent/llm/catalog";
 import { CATALOG_PROVIDER_ID_MAP } from "./provider-config-map";
 
 /** The user's provider configuration (stored in chrome.storage.local). */
@@ -128,7 +128,7 @@ export const KNOWN_PROVIDERS: Set<string> = new Set<string>([
  * thought "vision" and tried to embed a non-existent screenshot. */
 // NOTE: keys are CATALOG provider ids (not UI provider ids), because
 // `buildProvider` resolves the model via the catalog id (see CATALOG_PROVIDER_ID_MAP).
-// e.g. qwen -> "dashscope", together -> "togetherai", gemini/google -> "google",
+// e.g. qwen -> "alibaba", together -> "togetherai", gemini/google -> "google",
 // azure -> "openai". gemini & azure have NO separate key here — they resolve through
 // the "google" / "openai" keys above.
 export const DEFAULT_MODELS: Record<string, string> = {
@@ -136,7 +136,7 @@ export const DEFAULT_MODELS: Record<string, string> = {
   anthropic: "claude-sonnet-5",
   google:    "gemini-3.5-flash",
   deepseek:  "deepseek-v4-flash",
-  dashscope: "qwen3.6-max",
+  alibaba: "qwen3.7-max",
   groq:      "llama-3.3-70b-versatile",
   togetherai:"meta-llama/Llama-3.3-70B-Instruct-Turbo",
   mistral:   "mistral-small-latest",
@@ -171,6 +171,27 @@ function canonicalLlmHost(provider: string): { host: string; suffix?: boolean } 
 }
 
 /**
+ * Resolve the effective model id for a provider config.
+ *
+ * Order (the SAME order `buildProvider` uses): explicit user choice (`model`)
+ * > curated offline `DEFAULT_MODELS` fallback (keyed by the CATALOG provider id)
+ * > live catalog default (`getDefaultModelForProvider`) > `""`.
+ *
+ * Centralised here so `extractStateForRun` (run-helpers.ts) can apply this exact
+ * resolution instead of re-deriving it with a DIFFERENT order — a mismatch that
+ * caused the screenshot-gating flip-flop bug (vision gating was computed against
+ * a different model than the one actually used).
+ *
+ * `catalogId` is the models.dev catalog provider id (e.g. "google" for gemini,
+ * "openai" for azure); pass it in when already computed. Otherwise `provider` is
+ * used as the fallback key.
+ */
+export function resolveModel(config: { provider?: string; model?: string; catalogId?: string }): string {
+  const pid = config.catalogId ?? config.provider ?? "";
+  return config.model || DEFAULT_MODELS[pid] || getDefaultModelForProvider(pid) || "";
+}
+
+/**
  * Build an {@link LLMProvider} from the user's stored config. The provider calls
  * the LLM API directly via `fetch` — no localhost, no server, no env vars.
  *
@@ -185,18 +206,13 @@ function canonicalLlmHost(provider: string): { host: string; suffix?: boolean } 
  */
 export async function buildProvider(config: ProviderConfig): Promise<LLMProvider> {
   const { provider, apiKey, model, baseUrl, resourceName, provenance = "user" } = config;
- // Resolve the model: explicit user choice > curated DEFAULT_MODELS override
- // (keyed by CATALOG provider id) > live catalog default >
- // "". `CATALOG_PROVIDER_ID_MAP` maps our provider id (e.g. "gemini") to the
- // models.dev catalog provider id (e.g. "google") so the DEFAULT_MODELS key and
- // `getDefaultModelForProvider` agree. Falls back to "" if everything is
- // unavailable.
+ // Resolve the model via the shared `resolveModel` helper so the order matches
+ // `extractStateForRun` exactly (no flip-flop). `CATALOG_PROVIDER_ID_MAP` maps
+ // our provider id (e.g. "gemini") to the models.dev catalog provider id
+ // (e.g. "google") so the DEFAULT_MODELS key and `getDefaultModelForProvider`
+ // agree; it is passed as `catalogId` to keep the helper's pid consistent.
   const catalogProviderId = CATALOG_PROVIDER_ID_MAP[provider] ?? provider;
-  const resolvedModel =
-    model ||
-    DEFAULT_MODELS[catalogProviderId] ||
-    (await getDefaultModelForProvider(catalogProviderId)) ||
-    "";
+  const resolvedModel = resolveModel({ provider, model, catalogId: catalogProviderId });
 
  // SSRF guard: reject a user-supplied `baseUrl` that points at a loopback /
  // private / link-local / cloud-metadata address. `baseUrl` is untrusted
@@ -247,7 +263,7 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
       const allowed =
         canon !== null &&
         (canon.suffix ? host.endsWith(canon.host) : host === canon.host);
-      if (!allowed) {
+      if (canon !== null && !allowed) {
         throw new Error(
           `LLM baseUrl rejected: ${baseUrl} is not the canonical host for provider "${provider}". ` +
             `To protect your API key from exfiltration, the baseUrl must target the provider's own host.`
@@ -312,7 +328,9 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
  // Options. Route through the OpenAICompatible facade once a baseUrl is
  // present.
       if (!apiKey) throw new Error("Google (Vertex AI) requires an API key. Add one in Options.");
-      const resolvedBaseURL = baseUrl || DEFAULT_BASE_URLS["google"];
+      // Vertex AI has no static default (the user must supply `baseUrl`); this
+      // is intentional — `google` is deliberately absent from `DEFAULT_BASE_URLS`.
+      const resolvedBaseURL = baseUrl;
       if (!resolvedBaseURL) {
         throw new Error(
           "Google (Vertex AI) requires a baseUrl. Enter your Vertex OpenAI-compatible endpoint in Options (e.g. https://ai.googleapis.com/v1beta1/projects/…/locations/…/endpoints/openai)."
@@ -339,6 +357,18 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
       const catalog = await fetchCatalog();
       const catEntry = catalog[provider];
       if (catEntry?.api) {
+        // A keyed catalog provider must still reject a missing key. The SSRF
+        // guard + canonical-host confinement above don't substitute for
+        // authentication, and silently building an unauthenticated facade for a
+        // remote keyed endpoint would let a keyless request reach an unintended
+        // host. This mirrors the dedicated-provider cases and the profile
+        // fallback below (which also throw "requires an API key").
+        const isLocal = provider === "ollama" || provider === "litellm" ||
+          !!catEntry.api?.match(/localhost|127\.0\.0\.1|\[::1\]/);
+        const needsKey = !isLocal && (catEntry.env == null || catEntry.env.length > 0);
+        if (needsKey && !apiKey) {
+          throw new Error(`${provider} requires an API key. Add one in Options.`);
+        }
         const facade = makeOpenAIChatFacade({
           id: provider,
           displayName: catEntry.name,
@@ -427,7 +457,13 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
         /* storage may be unavailable — non-fatal */
       }
     }
-    result = { ...result, supportsVision: false };
+ // FAIL-SAFE (SAFE): on catalog lookup failure, fall back to the pure,
+ // network-free name heuristic (`resolveVisionSupport(resolvedModel, [])`) —
+ // `[]` means no catalog models, so only the `VISION_PATTERNS` heuristic runs.
+ // An offline catalog error should NOT silently disable vision for well-known
+ // vision-capable models (e.g. gpt-4o): the heuristic restores vision for those
+ // while still returning `false` for models it doesn't recognise.
+    result = { ...result, supportsVision: resolveVisionSupport(resolvedModel, []) };
   }
 
  // Patch supportsReasoning based on per-MODEL detection. Reasoning models

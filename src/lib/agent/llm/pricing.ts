@@ -98,6 +98,17 @@ let pricingLoading = false;
 /** Most recent {@link refreshPricingFromCatalog} error (null = last refresh succeeded). */
 let lastPricingError: Error | null = null;
 
+/**
+ * Non-mutating read of {@link lastPricingError} — the most recent
+ * {@link refreshPricingFromCatalog} failure, or `null` when the last refresh
+ * succeeded. Exported so callers (e.g. the Options UI pricing-health line) can
+ * surface the failure reason WITHOUT resetting any module state. This is purely
+ * a getter: it never clears the override, memo, warned-set, or error.
+ */
+export function getLastPricingError(): Error | null {
+  return lastPricingError;
+}
+
 /** Timestamp (ms) of the last fire-and-forget refresh trigger, used for cooldown. */
 let lastRefreshAttempt = 0;
 
@@ -223,8 +234,23 @@ function convertCatalog(catalog: Catalog): Record<string, ModelPricing> {
         cacheRead: typeof cost.cache_read === "number" ? cost.cache_read : undefined,
         cacheWrite: typeof cost.cache_write === "number" ? cost.cache_write : undefined,
       };
-      table[id] = entry;
-      table[`${providerId.toLowerCase()}/${id}`] = entry;
+ // First-writer-wins for the BARE id: a shared bare id (e.g.
+ // `gemini-2.5-pro`) is declared by many providers (aggregators, mirrors,
+ // first-party). Under the previous last-writer-wins behavior the LAST
+ // provider in iteration order clobbered the bare-id entry, so a mis-billing
+ // aggregator (often charging more) won silently. Pinning the bare id on the
+ // FIRST writer makes resolution deterministic and stable across catalog
+ // loads — and because the bundled catalog's first provider to declare a
+ // given bare id is typically a faithful pass-through (e.g. 302ai reprices
+ // gemini-2.5-pro at Google's official 1.25/10), the bare-id fallback stays
+ // correct for same-named models across providers.
+ //
+ // The provider-scoped key is ALWAYS set so a caller that knows its provider
+ // (e.g. provider-bridge passing config.providerId) disambiguates via
+ // lookupPricing step 1 (`<providerId>/<modelId>`), which wins over the
+ // bare-id entry. This key must stay in sync with that lookup prefix.
+      if (table[id] === undefined) table[id] = entry; // bare id: first writer wins (deterministic)
+      table[`${providerId.toLowerCase()}/${id}`] = entry; // provider-scoped key always set
     }
   }
   return table;
@@ -313,7 +339,31 @@ export async function refreshPricingFromCatalog(): Promise<void> {
  // than a stale in-memory snapshot from a previous fetch. The cost here is
  // one extra network fetch at refresh time; the graceful offline/stale-cache
  // fallback inside fetchCatalog still applies if the network is down.
-      const catalog = await fetchCatalog(true);
+      // R2 §6: bounded retry/backoff for transient failures. A momentary network
+      // blip (briefly offline, models.dev momentarily unavailable) must NOT
+      // permanently strand pricing on the conservative default. Retry the LIVE
+      // fetch up to 2 extra times with a fixed 500ms backoff before giving up.
+      // On success the merge/clear below runs byte-for-byte as before; only the
+      // failure path changes (adding retries before the existing catch records
+      // `lastPricingError` + warns).
+      let catalog: Catalog | undefined;
+      let ok = false;
+      let lastFetchErr: unknown;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          catalog = await fetchCatalog(true);
+          ok = true;
+          break;
+        } catch (err) {
+          lastFetchErr = err;
+          if (attempt < 2) await new Promise((r) => setTimeout(r, 500));
+        }
+      }
+      if (!ok || !catalog) {
+        // Re-throw so the outer catch records lastPricingError + warns exactly as
+        // before (final-failure behavior is unchanged).
+        throw lastFetchErr instanceof Error ? lastFetchErr : new Error(String(lastFetchErr));
+      }
       table = convertCatalog(catalog);
     }
  // Merge so a prior override (e.g. from a previous explicit call) survives.
@@ -404,6 +454,23 @@ export function getPricingForModel(model: string, providerId?: string): ModelPri
   }
   setPricingCache(cacheKey, result);
   return result;
+}
+
+/**
+ * Test-only resetter: clears all mutable pricing module state so pricing
+ * tests are isolated from one another (stubbed catalog loads, the in-memory
+ * memo, the warned-model set, and refresh state). Exported ONLY for tests — do
+ * not call this from production code. Production relies on the module-singleton
+ * state surviving the service-worker lifetime; resetting it outside tests would
+ * wipe a freshly loaded live catalog.
+ */
+export function __resetPricingForTests(): void {
+  pricingOverride = {};
+  pricingCache.clear();
+  warnedUncataloguedModels.clear();
+  pricingLoading = false;
+  lastRefreshAttempt = 0;
+  lastPricingError = null;
 }
 
 /**

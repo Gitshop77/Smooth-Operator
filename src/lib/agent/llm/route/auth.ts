@@ -140,8 +140,8 @@ export function bearer(source: string | Credential): Auth {
   return (typeof source === "string" ? value(source) : source).bearer();
 }
 
-// Function overloads — `no-redeclare` doesn't understand TS overloads.
-/* eslint-disable no-redeclare */
+// Function overloads — the TS-aware `@typescript-eslint/no-redeclare` rule
+// (used for `.ts` files) understands overloads, so no disable directive needed.
 export function header(name: string): (source: string | Credential) => Auth;
 export function header(name: string, source: string | Credential): Auth;
 export function header(name: string, source?: string | Credential): Auth | ((source: string | Credential) => Auth) {

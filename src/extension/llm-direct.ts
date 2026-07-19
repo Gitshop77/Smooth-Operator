@@ -19,9 +19,14 @@ import { buildPlannerPrompt } from "../lib/agent/prompts/planner-prompt";
 import { buildNavigatorUserMessage, buildPlannerUserMessage } from "../lib/agent/loop/messages";
 import { AgentOutputSchema, PlannerOutputSchema } from "../lib/agent/tools/schema";
 import { getFormatInstructions } from "../lib/agent/tools/registry";
-import type { AgentStepRequest, PlannerStepRequest } from "../lib/agent/types";
+import type { AgentStepRequest, PlannerStepRequest, HistoryItem } from "../lib/agent/types";
 import { buildProvider, readProviderConfig, type ProviderConfig } from "./provider-config";
 import { MAX_ACTIONS, MAX_ELEMENTS_CHARS } from "@/lib/validations";
+// The same pattern the protocol adapters (anthropic-messages / gemini /
+// openai-chat) use to turn `<screenshot>` markers in message CONTENT into image
+// blocks. We reuse its source verbatim so our strip rule can never drift from
+// the attach rule.
+import { SCREENSHOT_PATTERN_G } from "@/lib/agent/llm/shared-image";
 
 /** Cached provider instance + the config it was built from (rebuilt on config change). */
 let cachedProvider: LLMProvider | null = null;
@@ -242,6 +247,58 @@ export function capText(text: string | undefined, max: number): string {
 }
 
 /**
+ * Strip any `<screenshot>data:image/...;base64,...</screenshot>` markers from
+ * UNTRUSTED page-derived text BEFORE it is composed into the model input.
+ *
+ * Why: the protocol adapters (anthropic-messages / gemini / openai-chat) scan
+ * every message's CONTENT for `SCREENSHOT_PATTERN_G` and turn each match into an
+ * image block that is forwarded to the model. A malicious page can embed a
+ * `<screenshot>` marker (with an attacker-chosen image) inside its AX tree,
+ * interactive-element text, or extracted/summarized history. Because the
+ * extension concatenates that untrusted text with its OWN trusted screenshot
+ * marker, the adapter would happily attach the attacker's image too. `shared
+ * -image.ts`'s `hasImageProvenance` only checks PNG magic bytes (trivially
+ * forgeable), so it does not stop this.
+ *
+ * Stripping the marker from untrusted inputs means the ONLY `<screenshot>` that
+ * survives into the content is the one `navigatorCallDirect` injects itself from
+ * `req.browserState.screenshot` (the real captured pixels). The legitimate
+ * screenshot feature is therefore untouched — we only remove markers that an
+ * untrusted page could have forged.
+ *
+ * We build a fresh `g` regex from the adapters' pattern *source* so the strip
+ * rule is guaranteed identical to the attach rule, and so we never share mutable
+ * `lastIndex` state with the shared global regex object.
+ */
+export function stripScreenshotMarkers(text: string): string {
+  if (!text) return text;
+  return text.replace(new RegExp(SCREENSHOT_PATTERN_G.source, "g"), "");
+}
+
+/**
+ * Strip screenshot markers from every page-derived string field of the agent's
+ * run history. History can carry page content (e.g. `extract`-captured text,
+ * evaluation/memory/goal summaries of a malicious page) that may contain an
+ * injected `<screenshot>` marker. Returns a stripped COPY; the caller's history
+ * array is never mutated.
+ */
+function stripHistoryScreenshotMarkers(history: HistoryItem[]): HistoryItem[] {
+  return history.map((h) => ({
+    ...h,
+    evaluation: stripScreenshotMarkers(h.evaluation),
+    memory: stripScreenshotMarkers(h.memory),
+    goal: stripScreenshotMarkers(h.goal),
+    results: h.results.map((r) => ({
+      ...r,
+      message: stripScreenshotMarkers(r.message),
+      extractedContent: r.extractedContent
+        ? stripScreenshotMarkers(r.extractedContent)
+        : r.extractedContent,
+    })),
+  }));
+}
+
+/**
  * One navigator step — direct call to the LLM provider. Returns
  * `{ raw, tokensIn, tokensOut, model, ... }` — the shape the orchestrator
  * expects from `navigatorCall`.
@@ -259,17 +316,29 @@ export async function navigatorCallDirect(
   costUsd?: number;
 }> {
  // Cap elementsText (same abuse-prevention as the Next.js route).
-  const cappedElementsText = capText(req.browserState.elementsText, MAX_ELEMENTS_CHARS);
+ // Strip any `<screenshot>…</screenshot>` markers from the UNTRUSTED page text
+ // BEFORE it is composed into the model input — see `stripScreenshotMarkers`.
+ // The real screenshot is injected later from `req.browserState.screenshot`, so
+ // this only removes forged markers a malicious page could have embedded.
+  const cappedElementsText = stripScreenshotMarkers(
+    capText(req.browserState.elementsText, MAX_ELEMENTS_CHARS),
+  );
 
  // Cap axTree symmetrically to elementsText. On large pages the AX tree can be
  // very large and is re-sent on every navigator step; leaving it uncapped both
  // inflates per-step input tokens and risks message-size limits. The truncation
- // marker tells the model data was dropped.
-  const cappedAxTree = capText(req.browserState.axTree, MAX_ELEMENTS_CHARS);
+ // marker tells the model data was dropped. Also strip forged screenshot markers.
+  const cappedAxTree = stripScreenshotMarkers(
+    capText(req.browserState.axTree, MAX_ELEMENTS_CHARS),
+  );
+
+ // History can carry page-derived content (extract results, summaries of a
+ // malicious page) — strip any injected `<screenshot>` markers before render.
+  const strippedHistory = stripHistoryScreenshotMarkers(req.history);
 
   const userMessage = await buildNavigatorUserMessage({
     task: req.task,
-    history: req.history,
+    history: strippedHistory,
     currentGoal: req.currentGoal || req.task,
     plan: req.plan,
     currentPlanItem: req.currentPlanItem,

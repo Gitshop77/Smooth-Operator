@@ -13,6 +13,15 @@ import { $, escapeHtml } from "@/extension/shared";
 import { PROVIDER_META, DEFAULT_PROVIDER_ID, catalogIdFor } from "./providers";
 import { testProviderConnection, type ConnectionTestResult } from "./connection-test";
 import type { CatalogModel } from "../../lib/agent/llm/catalog";
+import {
+  fetchCatalog,
+  getProviders,
+  getModelsForProvider,
+} from "@/lib/agent/llm/catalog";
+import {
+  refreshPricingFromCatalog,
+  getLastPricingError,
+} from "@/lib/agent/llm/pricing";
 
 // Re-export the shared secret-masking primitive so callers (and tests) that
 // previously imported it from this module keep working after the move to
@@ -39,7 +48,11 @@ function applyDefaultModelPlaceholder(): void {
  * than be silently replaced by the default here.
  */
 export function updateProviderUI(): void {
-  const provider = ($("provider") as HTMLSelectElement).value;
+  // Non-throwing getter: invoked at module-load time by settings-sync's
+  // import-time load callback, which may run with a partial DOM in tests.
+  const sel = document.getElementById("provider") as HTMLSelectElement | null;
+  if (!sel) return;
+  const provider = sel.value;
   const meta = PROVIDER_META[provider] || PROVIDER_META[DEFAULT_PROVIDER_ID];
  // A *real* provider change (vs. the initial call) is what may carry a stale
  // baseUrl from the previous provider. Track the last provider so we can tell
@@ -79,19 +92,19 @@ export function updateProviderUI(): void {
  // The Azure resource name is only relevant to Azure OpenAI. Show it only for
  // that provider; preserve any stored value otherwise (use providerChanged to
  // avoid clobbering a saved value on first paint, mirroring baseUrl above).
-  const resourceNameLabel = $("resourcename-label") as HTMLElement;
-  const resourceNameInput = $("resourceName") as HTMLInputElement;
+  const resourceNameLabel = document.getElementById("resourcename-label");
+  const resourceNameInput = document.getElementById("resourceName") as HTMLInputElement | null;
   if (provider === "azure") {
-    resourceNameLabel.classList.remove("is-hidden");
+    resourceNameLabel?.classList.remove("is-hidden");
   } else {
-    resourceNameLabel.classList.add("is-hidden");
-    if (providerChanged) resourceNameInput.value = "";
+    resourceNameLabel?.classList.add("is-hidden");
+    if (providerChanged && resourceNameInput) resourceNameInput.value = "";
   }
 }
 
 // ─── Provider health check ──────────────────────────────────────────────
 
-$("testConnection")?.addEventListener("click", async () => {
+document.getElementById("testConnection")?.addEventListener("click", async () => {
   const testBtn = $("testConnection") as HTMLButtonElement;
   const testResult = $("testResult") as HTMLSpanElement;
   testResult.setAttribute("aria-live", "polite");
@@ -106,11 +119,6 @@ $("testConnection")?.addEventListener("click", async () => {
  // store). Prefer OAuth where supported; never console.log it. Errors surfaced
  // below are redacted inside `testProviderConnection` (reuses `redactKeyLeak`).
   const apiKey = ($("apiKey") as HTMLInputElement).value;
- // The model field is no longer needed for the test — `testProviderConnection`
- // validates connectivity via the provider's models-list endpoint, not a chat
- // completion. We still read it (prefixed `_`) so the placeholder logic stays
- // coherent and the value isn't lost if the user later re-runs a chat-based path.
-  const _model = ($("model") as HTMLInputElement).value;
   const baseUrl = ($("baseUrl") as HTMLInputElement).value;
  // `resourceName` is only present for Azure; read it without the throwing `$`
  // helper so a missing field degrades to "" rather than crashing the handler.
@@ -231,7 +239,7 @@ function renderModelResultItem(
 }
 
 /** Show search results when the user types in the model field. */
-$("model")?.addEventListener("input", () => {
+document.getElementById("model")?.addEventListener("input", () => {
   const query = ($("model") as HTMLInputElement).value.trim();
   const resultsDiv = $("model-search-results") as HTMLDivElement;
  // L13: expose the search results as a listbox so assistive tech can
@@ -284,4 +292,64 @@ $("model")?.addEventListener("input", () => {
       resultsDiv.classList.add("is-hidden");
     }
   }, 300);
+});
+
+// ─── Refresh models from models.dev ────────────────────────────────────────
+
+/**
+ * Force a re-fetch of the live models.dev catalog and re-populate the model
+ * picker from the freshly-merged cache. Non-throwing: on any failure (offline,
+ * API error, shape-validation failure) we keep the existing (bundled) models in
+ * place and surface a warning instead of crashing the Options UI.
+ *
+ * Wired with the non-throwing `document.getElementById(id)?.addEventListener`
+ * pattern so a partial DOM (e.g. in tests) never throws at module load.
+ */
+document.getElementById("refreshModels")?.addEventListener("click", async () => {
+  const btn = document.getElementById("refreshModels") as HTMLButtonElement | null;
+  const status = document.getElementById("refreshModelsStatus") as HTMLSpanElement | null;
+  if (!btn) return;
+
+  btn.disabled = true;
+  btn.setAttribute("aria-busy", "true");
+  if (status) {
+    status.className = "test-result pending";
+    status.textContent = "Refreshing…";
+  }
+
+  // `baseText`/`baseClass` capture the model-catalog refresh result so the
+  // pricing-health line (below) can be appended to the SAME status area without
+  // clobbering the existing model-refresh messaging.
+  let baseText = "⚠ Could not reach models.dev — using bundled catalog";
+  let baseClass = "test-result failure";
+  try {
+    await fetchCatalog(true);
+    const total = getProviders().reduce(
+      (n, p) => n + Object.keys(getModelsForProvider(p.id)).length,
+      0,
+    );
+    // Re-populate the model datalist from the freshly-merged catalog (the same
+    // render the Options UI normally runs on load / provider change).
+    await populateModelSuggestions();
+    baseText = `✓ Loaded ${total} models from models.dev`;
+    baseClass = "test-result success";
+  } catch (e) {
+    // Defensive: fetchCatalog is internally non-throwing (falls back to the
+    // bundled snapshot), but if anything unexpected escapes we still degrade
+    // gracefully and leave the existing models in place.
+    console.warn("[options] refresh models failed:", e);
+  }
+
+  // R2 §6: also refresh live pricing and report its health on the SAME line.
+  // refreshPricingFromCatalog is internally non-throwing (records its failure
+  // via lastPricingError), so we read getLastPricingError() to label the result.
+  await refreshPricingFromCatalog();
+  const pricingErr = getLastPricingError();
+  if (status) {
+    status.className = baseClass;
+    status.textContent = `${baseText} · pricing: ${pricingErr ? pricingErr.message : "OK"}`;
+  }
+
+  btn.disabled = false;
+  btn.setAttribute("aria-busy", "false");
 });

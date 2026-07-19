@@ -37,7 +37,7 @@ export const CATALOG_PROVIDER_ID_MAP: Record<string, string> = {
   openrouter: "openrouter",
   xai: "xai",
   ollama: "ollama",
-  qwen: "dashscope",
+  qwen: "alibaba",
   opencode: "opencode",
   litellm: "litellm",
   azure: "openai", // Azure uses OpenAI models

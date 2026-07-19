@@ -114,7 +114,11 @@ function isCuratedLocalOrigin(url: string): boolean {
 
 /**
  * Returns true if `host` (a URL hostname: no port, no brackets) is an IP
- * literal in a loopback / private / link-local / CGNAT / unspecified range.
+ * literal in a DANGEROUS SSRF-sink range — unspecified `0.0.0.0/8`,
+ * link-local `169.254.0.0/16` (cloud metadata / IMDS), or CGNAT
+ * `100.64.0.0/10` (and their IPv6 equivalents). Loopback `127.0.0.0/8`,
+ * RFC1918 private ranges, and IPv6 ULA return false here — those are the
+ * user's own self-hosted model infra and are ALLOWED by the caller.
  * Hostname-based URLs (e.g. `api.openai.com`) are NOT IP literals, so they
  * return false here and are allowed by the caller (no DNS resolution).
  */

@@ -55,7 +55,10 @@
 
 import { redactKeyLeak } from "@/extension/shared";
 import { PROVIDER_META } from "./providers";
-import { resolveAndValidateLlmBaseUrl } from "../../lib/agent/llm/route/ssrf";
+import {
+  resolveAndValidateLlmBaseUrl,
+  validateLlmBaseUrl,
+} from "../../lib/agent/llm/route/ssrf";
 
 /** The result of a provider connection test. */
 export interface ConnectionTestResult {
@@ -108,9 +111,65 @@ const OPENAI_COMPAT_DEFAULT_BASE: Record<string, string> = {
 /** Azure OpenAI API version used for the deployments/models listing. */
 const AZURE_API_VERSION = "2024-02-15-preview";
 
-/** Families treated as OpenAI-compatible (Bearer auth + `/models`). */
-function isOpenAiCompatible(provider: string): boolean {
-  return provider in OPENAI_COMPAT_DEFAULT_BASE || provider === "google";
+/**
+ * Canonical host an INJECTED/user baseUrl may target for a given provider
+ * (mirrors `buildProvider`'s `canonicalLlmHost`). A public baseUrl must match
+ * the provider's own host so the user's API key (sent as `Bearer`) can't be
+ * exfiltrated to an attacker-controlled endpoint. Tail (catalog-derived)
+ * providers have no known canonical host → `null` (no confinement), exactly
+ * matching `buildProvider`. Local/loopback hosts are governed by the SSRF
+ * guard below, not by host confinement.
+ */
+function canonicalHost(provider: string): { host: string; suffix?: boolean } | null {
+  const fromBase = OPENAI_COMPAT_DEFAULT_BASE[provider];
+  if (fromBase) return { host: new URL(fromBase).host };
+  switch (provider) {
+    case "openai": return { host: "api.openai.com" };
+    case "anthropic": return { host: "api.anthropic.com" };
+    case "gemini": return { host: "generativelanguage.googleapis.com" };
+    case "google": return { host: "ai.googleapis.com" };
+    case "azure": return { host: ".openai.azure.com", suffix: true };
+    default:
+      // Tail / catalog-derived providers (e.g. OpenCode, or any dataset provider
+      // with a catalog `api` endpoint) have a known default base URL in
+      // PROVIDER_META. Confine their baseUrl to that host so the key can't be
+      // exfiltrated to an attacker-controlled host. Returning null here is only
+      // for truly-unknown providers (ollama/litellm are handled separately by
+      // the SSRF guard + loopback exemption), preserving the existing contract.
+      {
+        const metaUrl = PROVIDER_META[provider]?.defaultBaseUrl;
+        if (metaUrl) {
+          try {
+            return { host: new URL(metaUrl).host };
+          } catch {
+            return null;
+          }
+        }
+      }
+      return null;
+  }
+}
+
+/**
+ * Returns an error message if `url` is a PUBLIC, keyed endpoint that does NOT
+ * target the provider's canonical host (key-exfiltration guard). Returns `null`
+ * when confinement does not apply (no key, local/loopback endpoint, or an
+ * unknown/tail provider). Mirrors `buildProvider`'s canonical-host confinement.
+ */
+function checkCanonicalHost(provider: string, url: string, apiKey: string): string | null {
+  if (!apiKey) return null;
+  const canon = canonicalHost(provider);
+  if (canon === null) return null;
+  let host = "";
+  try { host = new URL(url).host; } catch { return null; }
+  // Local/loopback endpoints are exempt (legitimate Ollama/LiteLLM) and handled
+  // by the SSRF guard instead.
+  if (!validateLlmBaseUrl(url, false).ok) return null;
+  const allowed = canon.suffix ? host.endsWith(canon.host) : host === canon.host;
+  if (!allowed) {
+    return `baseUrl must target the canonical host for provider "${provider}" to protect your API key from exfiltration.`;
+  }
+  return null;
 }
 
 /**
@@ -161,11 +220,23 @@ async function assertSsrfSafe(url: string): Promise<void> {
  * message). The caller owns latency measurement + redaction of `apiKey`.
  */
 async function getJson(url: string, headers: Record<string, string>, apiKey: string): Promise<unknown> {
+  // `redirect: "manual"` mirrors transport-http.ts: a malicious baseUrl that
+  // answers a 30x would otherwise forward the Bearer/api-key to an attacker
+  // host (e.g. 169.254.169.254 / 127.0.0.1). We refuse to follow it instead of
+  // leaking the key. The original url is still validated by assertSsrfSafe
+  // before this fetch (see testProviderConnection).
   const res = await fetch(url, {
     method: "GET",
     headers,
+    redirect: "manual",
     signal: AbortSignal.timeout(10_000),
   });
+  // `redirect: "manual"` returns an opaque-redirect response (type
+  // "opaqueredirect", status 0, no body) when the server sends a 3xx. The key
+  // was NOT forwarded. Throw rather than treat it as success / follow it.
+  if (res.type === "opaqueredirect") {
+    throw new Error("redirect refused by Test Connection");
+  }
   if (!res.ok) {
     let detail = "";
     try {
@@ -224,6 +295,10 @@ export async function testProviderConnection(
       case "anthropic": {
         url = "https://api.anthropic.com/v1/models";
         headers = { "x-api-key": apiKey, "anthropic-version": "2023-06-01" };
+        // Canonical-host confinement (mirrors buildProvider) prevents the key
+        // from being sent to a non-Anthropic host.
+        const canonErr = checkCanonicalHost(provider, url, apiKey);
+        if (canonErr) return fail(canonErr);
         break;
       }
       case "gemini": {
@@ -252,6 +327,10 @@ export async function testProviderConnection(
         let lastErr: unknown = null;
         for (const c of candidates) {
           try {
+            // Canonical-host confinement (mirrors buildProvider): an Azure
+            // baseUrl must resolve to *.openai.azure.com.
+            const azCanon = checkCanonicalHost("azure", c.url, apiKey);
+            if (azCanon) { lastErr = new Error(azCanon); continue; }
             await assertSsrfSafe(c.url);
             const body = await getJson(c.url, c.headers, apiKey);
             count = parseModelCount(body);
@@ -271,9 +350,14 @@ export async function testProviderConnection(
         return fail(lastErr instanceof Error ? lastErr.message : String(lastErr));
       }
       default: {
-        if (!isOpenAiCompatible(provider)) {
+        // Accept ANY provider the Options dropdown can select (which now
+        // includes every catalog provider with an `api` endpoint), not just a
+        // hard-coded compat allow-list. `PROVIDER_META` maps the provider id to
+        // its default base URL (the catalog `api` for dataset providers), so the
+        // test exercises the exact endpoint `buildProvider` would use.
+        if (!PROVIDER_META[provider]) {
           return fail(
-            `Unknown provider "${provider}".`,
+            `Unknown provider "${provider}". Pick one from the provider list.`,
           );
         }
         const base =
@@ -289,6 +373,14 @@ export async function testProviderConnection(
         const root = base.replace(/\/+$/, "");
         url = `${root}/models`;
         headers = { Authorization: `Bearer ${apiKey}` };
+        // A catalog-derived provider may declare needsKey=false (e.g. a local
+        // or keyless gateway). Use the metadata rather than always requiring a
+        // key, so a keyless provider isn't wrongly rejected.
+        needsKey = PROVIDER_META[provider]?.needsKey ?? true;
+        // Canonical-host confinement (mirrors buildProvider) prevents the key
+        // from being exfiltrated to a non-canonical public host.
+        const canonErr = checkCanonicalHost(provider, url, apiKey);
+        if (canonErr) return fail(canonErr);
         break;
       }
     }
@@ -316,25 +408,10 @@ export async function testProviderConnection(
   }
 }
 
-/** Human label for a provider id in messages (kept short). */
+/**
+ * Human label for a provider id in messages. Derived from `PROVIDER_META`
+ * (which owns the canonical labels) so it can't drift from the dropdown.
+ */
 function providerLabel(provider: string): string {
-  const labels: Record<string, string> = {
-    openai: "OpenAI",
-    anthropic: "Anthropic",
-    gemini: "Gemini",
-    ollama: "Ollama",
-    azure: "Azure OpenAI",
-    google: "Google (Vertex AI)",
-    openrouter: "OpenRouter",
-    together: "Together AI",
-    mistral: "Mistral",
-    deepseek: "DeepSeek",
-    groq: "Groq",
-    cerebras: "Cerebras",
-    qwen: "Qwen",
-    opencode: "OpenCode",
-    litellm: "LiteLLM",
-    xai: "xAI",
-  };
-  return labels[provider] || provider;
+  return PROVIDER_META[provider]?.label ?? provider;
 }

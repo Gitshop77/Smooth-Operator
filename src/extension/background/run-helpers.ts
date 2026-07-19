@@ -50,8 +50,7 @@ import {
 } from "./tab-manager";
 import { navigatorCallDirect, plannerCallDirect } from "../llm-direct";
 import type { VisionAssistant } from "../vision-assistant";
-import { DEFAULT_MODELS } from "../provider-config";
-import { getDefaultModelForProvider } from "@/lib/agent/llm/catalog";
+import { resolveModel } from "../provider-config";
 
 // ─── Memoized dynamic imports (hot path: once per agent step) ───────────────
 //
@@ -552,8 +551,8 @@ export async function extractStateForRun(
 
  // Determine vision capability of the main LLM.
  //
- // IMPORTANT: apply the SAME default-model resolution that `buildProvider()`
- // (provider-config.ts) does — otherwise an empty `model` field would
+ // Apply the SAME default-model resolution as `buildProvider()` (provider-config.ts)
+ // via the shared `resolveModel` helper — otherwise an empty `model` field would
  // disagree with the LLM-side check in `navigatorCallDirect()` (which uses
  // `provider.supportsVision` after default resolution). That disagreement
  // caused the screenshot gating to flip-flop: extractState thought "no
@@ -565,14 +564,14 @@ export async function extractStateForRun(
   try {
     const { modelSupportsVision, CATALOG_PROVIDER_ID_MAP } = await loadCatalogRefs();
     const catId = CATALOG_PROVIDER_ID_MAP[providerId as string] ?? providerId;
- // Resolve the model: explicit user choice > live catalog default >
- // offline DEFAULT_MODELS fallback. `catId` maps the extension's provider id
- // to the models.dev catalog provider id (e.g. "gemini" -> "google").
-    const resolvedModel =
-      (model as string) ||
-      (await getDefaultModelForProvider(catId as string)) ||
-      DEFAULT_MODELS[catId as string] ||
-      "";
+ // Resolve the model through `resolveModel` — the exact same order
+ // `buildProvider` uses (explicit > DEFAULT_MODELS[catalogId] >
+ // getDefaultModelForProvider(catalogId) > "").
+    const resolvedModel = resolveModel({
+      provider: providerId as string,
+      model: model as string,
+      catalogId: catId as string,
+    });
     mainModelVision = await modelSupportsVision(resolvedModel, catId as string);
   } catch (e) { void safeLog("warn", "[vision] catalog/model load failed (vision disabled for this step):", e); }
 

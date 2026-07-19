@@ -259,8 +259,27 @@ Evaluate whether the task was actually completed.`;
       tokensIn = Math.ceil((JUDGE_PROMPT.length + userMessage.length) / 4);
       tokensOut = Math.ceil(raw.length / 4);
       const { estimateCost } = await import("./llm/pricing");
+      // When the cost model id is provider-prefixed (e.g. an OpenRouter-style
+      // "google/gemini-2.5-pro"), thread that provider so pricing disambiguates
+      // the same bare id across providers (lookupPricing's provider-prefixed
+      // key wins). Bare ids (no "/") have no provider context at the judge
+      // layer — the orchestrator's AgentConfig doesn't carry providerId — so we
+      // leave it undefined and rely on the first-writer-wins bare-id resolution
+      // in pricing.ts.
+      const judgeProviderId = modelForCost?.includes("/")
+        ? modelForCost.split("/")[0]
+        : undefined;
       costUsd = modelForCost
-        ? estimateCost(modelForCost, tokensIn, tokensOut)
+        ? estimateCost(
+            modelForCost,
+            tokensIn,
+            tokensOut,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            judgeProviderId,
+          )
         : 0;
     } catch (err) {
  // Pricing import / estimateCost failed — report zero cost (safe

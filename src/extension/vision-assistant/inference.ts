@@ -93,10 +93,22 @@ export class VisionAssistant {
  */
   private detectPromise: Promise<PixelDetection[]> | null = null;
   /** The screenshot `detect()` is currently running on. Lets identical,
-   * re-entrant inputs share the in-flight run while a *different* concurrent
-   * screenshot is rejected instead of silently being served the wrong
-   * detections. */
+   * re-entrant inputs share the in-flight run (see `detect()`) while a
+   * *different* concurrent screenshot is serialized behind the chain rather
+   * than silently being served the wrong detections. */
   private detectDataUrl: string | null = null;
+  /**
+ * Serialization tail for overlapping `detect()` calls. Two concurrent
+ * `detect()` calls on the shared vision/language ONNX sessions would clobber
+ * the KV-cache/prefill state. Instead of throwing (the previous behavior), a
+ * second call with a DIFFERENT screenshot appends to this chain and awaits the
+ * prior run(s), then executes its own `doDetect()` for its own input — so each
+ * caller resolves with its own correct detections. The tail is kept alive
+ * across rejections (swallowed to `undefined`) so queued calls still execute.
+ * Identical-input sharing against the *currently running* run is handled
+ * separately by `detectPromise`/`detectDataUrl` and is preserved unchanged.
+ */
+  private chain: Promise<unknown> | null = null;
 
   constructor() {
     // Surface the non-fatal supply-chain warning (unpinned-weights opt-in)
@@ -383,23 +395,51 @@ export class VisionAssistant {
  // Re-entrancy guard over the shared ONNX sessions. Two concurrent `detect()`
  // calls would interleave `session.run(feeds)` on the same vision/language
  // sessions and clobber the KV-cache/prefill state, producing garbage
- // detections or throwing mid-decode. We serialize to a single in-flight run.
- // Identical inputs share the cached promise; a concurrent call with a
- // DIFFERENT screenshot is rejected rather than silently served the first
- // caller's detections (which would feed the wrong bounding boxes / click
- // coordinates to a vision-guided action).
-    if (this.detectPromise) {
-      if (this.detectDataUrl === screenshotDataUrl) return this.detectPromise;
-      throw new Error(
-        "Vision detect() is already running on a different screenshot; " +
-          "concurrent detection on the shared ONNX sessions is not supported",
-      );
+ // detections or throwing mid-decode. We serialize so no two `doDetect()`
+ // runs ever overlap.
+
+ // (1) Identical-input sharing (preserved from the original): if the SAME
+ //     screenshot is currently running, return the cached promise instead of
+ //     queueing a duplicate run. This is checked synchronously against the
+ //     live run so two overlapping calls for the same input share one result.
+    if (this.detectPromise && this.detectDataUrl === screenshotDataUrl) {
+      return this.detectPromise;
     }
+
+ // (2) Serialize a DIFFERENT concurrent screenshot instead of throwing. Append
+ //     to the chain and await the prior run, then execute this input's own
+ //     `doDetect()`. Each caller resolves with its own correct detections.
+    if (this.detectPromise) {
+      const tail = this.chain ?? this.detectPromise;
+      const run = tail.then(() => this.runDetect(screenshotDataUrl, signal));
+ // Keep the chain alive across rejections so later queued calls still run.
+      this.chain = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return run;
+    }
+
+ // (3) No current run — start immediately (synchronous, so identical-input
+ //     sharing in a fresh burst still works).
+    return this.runDetect(screenshotDataUrl, signal);
+  }
+
+  /**
+ * Start a single serialized `detect()` run on the shared ONNX sessions. Sets
+ * the live-run bookkeeping (`detectPromise`/`detectDataUrl`) synchronously so
+ * that an overlapping identical-input call shares this promise, and records the
+ * tail of the serialization chain. Cleared on settle so a failed run can be
+ * retried.
+ */
+  private runDetect(screenshotDataUrl: string, signal?: AbortSignal): Promise<PixelDetection[]> {
     this.detectDataUrl = screenshotDataUrl;
     this.detectPromise = this.doDetect(screenshotDataUrl, signal).finally(() => {
       this.detectPromise = null;
       this.detectDataUrl = null;
     });
+ // The chain tail is the live run; queued calls append after it.
+    this.chain = this.detectPromise;
     return this.detectPromise;
   }
 

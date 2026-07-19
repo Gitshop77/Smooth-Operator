@@ -62,7 +62,7 @@ export const FEATURED_PROVIDERS: ProviderDef[] = [
   { id: "gemini",     label: "Google Gemini",   catalogId: CATALOG_PROVIDER_ID_MAP.gemini,     hint: "Google Gemini — Gemini 3.5 Flash / Pro (Google AI Studio).", defaultModel: "gemini-3.5-flash", needsKey: true, keyPlaceholder: "AIza...", keyUrl: "https://aistudio.google.com/apikey" },
   { id: "google",     label: "Google (Vertex)", catalogId: CATALOG_PROVIDER_ID_MAP.google,     hint: "Google Vertex AI — enterprise Gemini 3.5 Flash/Pro (Vertex AI).", defaultModel: "gemini-3.5-flash", needsKey: true, keyPlaceholder: "AIza...", keyUrl: "https://console.cloud.google.com/vertex-ai" },
   { id: "deepseek",   label: "DeepSeek",        catalogId: CATALOG_PROVIDER_ID_MAP.deepseek,   hint: "DeepSeek — V4 (chat + reasoner).", defaultModel: "deepseek-v4-flash", defaultBaseUrl: "https://api.deepseek.com/v1", needsKey: true, keyPlaceholder: "...", keyUrl: "https://platform.deepseek.com" },
-  { id: "qwen",       label: "Qwen / Alibaba",  catalogId: CATALOG_PROVIDER_ID_MAP.qwen,       hint: "Qwen / Alibaba — Qwen3.6 / Qwen3.7 (Max, Plus, Coder, VL).", defaultModel: "qwen3.6-max", defaultBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", needsKey: true, keyPlaceholder: "...", keyUrl: "https://dashscope.aliyuncs.com" },
+  { id: "qwen",       label: "Qwen / Alibaba",  catalogId: CATALOG_PROVIDER_ID_MAP.qwen,       hint: "Qwen / Alibaba — Qwen3.6 / Qwen3.7 (Max, Plus, Coder, VL).", defaultModel: "qwen3.7-max", defaultBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", needsKey: true, keyPlaceholder: "...", keyUrl: "https://dashscope.aliyuncs.com" },
   { id: "groq",       label: "Groq",            catalogId: CATALOG_PROVIDER_ID_MAP.groq,       hint: "Groq — ultra-fast Llama / open-model inference.", defaultModel: "llama-3.3-70b-versatile", defaultBaseUrl: "https://api.groq.com/openai/v1", needsKey: true, keyPlaceholder: "gsk_...", keyUrl: "https://console.groq.com" },
   { id: "together",   label: "Together AI",     catalogId: CATALOG_PROVIDER_ID_MAP.together,   hint: "Together AI — Llama, Qwen, DeepSeek and other open models.", defaultModel: "meta-llama/Llama-3.3-70B-Instruct-Turbo", defaultBaseUrl: "https://api.together.xyz/v1", needsKey: true, keyPlaceholder: "...", keyUrl: "https://api.together.xyz" },
   { id: "mistral",    label: "Mistral",         catalogId: CATALOG_PROVIDER_ID_MAP.mistral,    hint: "Mistral — Small/Medium, Codestral, Magistral, Pixtral.", defaultModel: "mistral-small-latest", defaultBaseUrl: "https://api.mistral.ai/v1", needsKey: true, keyPlaceholder: "...", keyUrl: "https://console.mistral.ai" },
@@ -81,15 +81,25 @@ export const FEATURED_PROVIDERS: ProviderDef[] = [
  * the ENTIRE dataset is selectable without a hard-coded case per provider.
  *
  * `coveredCatalogIds` dedupes featured providers that resolve to a catalog id
- * other than their own UI id (qwen→dashscope, together→togetherai,
+ * other than their own UI id (qwen→alibaba, together→togetherai,
  * gemini/google→google, azure→openai) so the same provider never appears twice.
  */
+const FEATURED_IDS = new Set(FEATURED_PROVIDERS.map((p) => p.id));
 const coveredCatalogIds = new Set(
   FEATURED_PROVIDERS.map((p) => p.catalogId).filter(Boolean) as string[],
 );
 
 const CATALOG_DERIVED_PROVIDERS: ProviderDef[] = getProviders()
-  .filter((p) => p.api && !coveredCatalogIds.has(p.id))
+  .filter(
+    (p) =>
+      p.api &&
+      // Skip providers already represented by a featured entry (matched by
+      // either their catalog id or their featured UI id), so the same provider
+      // never appears twice even if a future dataset adds an `api` to a provider
+      // whose id collides with a featured UI id (e.g. "azure", "google").
+      !coveredCatalogIds.has(p.id) &&
+      !FEATURED_IDS.has(p.id),
+  )
   .map((p) => ({
     id: p.id,
     label: p.name,
@@ -122,14 +132,25 @@ export const PROVIDER_META: Record<string, ProviderDef> = Object.fromEntries(
   PROVIDERS.map((p) => [p.id, p]),
 );
 
-// Dev guard: every provider in `PROVIDERS` must resolve to a catalog id —
-// either via `CATALOG_PROVIDER_ID_MAP` (featured providers whose UI id differs
-// from their catalog id) or by being a catalog id itself (the generated dataset
-// tail). Otherwise model search silently breaks for that provider. Catch the
-// drift at load instead of debugging a mysteriously empty model dropdown later.
+// Dev guard: every provider in `PROVIDERS` must resolve to a catalog id that
+// ACTUALLY exists in the bundle — via `CATALOG_PROVIDER_ID_MAP` (featured
+// providers whose UI id differs from their catalog id) or by being a catalog id
+// itself (the generated dataset tail). Checking the RESOLVED id (not just that
+// the UI id is present in the map) would have caught the old `qwen → "dashscope"`
+// mapping pointing at a non-existent provider. Catch this drift at load instead
+// of debugging a mysteriously empty model dropdown later.
+// Providers that are intentionally NOT in the models.dev catalog (local or
+// proxy facades). Their `catalogId` equals their own id, which is not a catalog
+// provider — that's expected, so the guard stays silent for them and only
+// flags a genuinely broken mapping (e.g. a `CATALOG_PROVIDER_ID_MAP` value that
+// points at a provider that doesn't exist).
+const INTENTIONAL_NON_CATALOG = new Set(["ollama", "litellm"]);
+
 for (const p of PROVIDERS) {
-  if (!(p.id in CATALOG_PROVIDER_ID_MAP) && !getProvider(p.id)) {
-    console.warn("[providers] no catalogId for", p.id);
+  if (INTENTIONAL_NON_CATALOG.has(p.id)) continue;
+  const resolved = CATALOG_PROVIDER_ID_MAP[p.id] ?? p.id;
+  if (!getProvider(resolved)) {
+    console.warn("[providers] provider", p.id, "resolves to unknown catalog id", resolved);
   }
 }
 
@@ -138,7 +159,7 @@ export const DEFAULT_PROVIDER_ID = "openai";
 
 /**
  * Look up a provider's catalog id for the model-search query. Resolves:
- *  - a featured UI id via `CATALOG_PROVIDER_ID_MAP` (qwen→dashscope, …);
+ *  - a featured UI id via `CATALOG_PROVIDER_ID_MAP` (qwen→alibaba, …);
  *  - a catalog-id provider (the generated dataset tail) to itself;
  *  - anything else to `undefined` (no model search for that provider).
  */

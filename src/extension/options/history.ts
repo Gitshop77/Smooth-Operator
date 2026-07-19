@@ -170,7 +170,7 @@ document.getElementById("clearHistory")?.addEventListener("click", async () => {
 
 // ─── A8: Run Export/Import ──────────────────────────────────────────────────
 
-$("exportHistory")?.addEventListener("click", async () => {
+document.getElementById("exportHistory")?.addEventListener("click", async () => {
   const runs = await (await import("@/lib/agent/run-history")).loadRuns();
   const blob = new Blob([JSON.stringify(runs, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -181,11 +181,11 @@ $("exportHistory")?.addEventListener("click", async () => {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 
-$("importHistory")?.addEventListener("click", () => {
+document.getElementById("importHistory")?.addEventListener("click", () => {
   ($("importHistoryFile") as HTMLInputElement).click();
 });
 
-($("importHistoryFile") as HTMLInputElement)?.addEventListener("change", async (e) => {
+document.getElementById("importHistoryFile")?.addEventListener("change", async (e) => {
   const file = (e.target as HTMLInputElement).files?.[0];
   if (!file) return;
  // Bound the upload size before reading it into memory (finding: unbounded

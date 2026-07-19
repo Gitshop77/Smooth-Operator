@@ -98,8 +98,16 @@ async function reportUsage(
   // default to 0 until the TokenUsage type propagates the field.
   const cw = cachedWriteInputTokens ?? 0;
   if (tokensIn === undefined || tokensOut === undefined || !model) return;
+ // Production compaction calls go through a provider bridge that supplies a
+ // provider-scoped costUsd when available. When only a bare model id is given,
+ // thread a provider-prefixed id (e.g. "google/gemini-2.5-pro") so pricing
+ // disambiguates the same bare id across providers. Bare ids (no "/") have no
+ // provider context at the compaction layer (AgentConfig doesn't hold
+ // providerId), so we leave it undefined and rely on the first-writer-wins
+ // bare-id resolution in pricing.ts.
+  const compactionProviderId = model.includes("/") ? model.split("/")[0] : undefined;
   const computedCost =
-    costUsd ?? estimateCost(model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cw);
+    costUsd ?? estimateCost(model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cw, undefined, compactionProviderId);
   const usage: LLMUsageInfo = {
     tokensIn,
     tokensOut,

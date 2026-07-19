@@ -692,7 +692,14 @@ describe("estimateCost", () => {
   test("estimateCost(key, 1M, 1M) === rate.in + rate.out for every known model", () => {
     for (const provider of Object.values(UNIT_CATALOG)) {
       for (const m of Object.values(provider.models)) {
-        const cost = estimateCost(m.id, 1_000_000, 1_000_000);
+        // Pass the provider id so the lookup resolves the provider-scoped key
+        // (`<provider>/<model>`), which disambiguates bare ids shared across
+        // providers. A bare-id lookup alone is ambiguous once the live catalog
+        // (merged with the bundled snapshot) carries the same model under many
+        // providers, and convertCatalog now pins the bare id on the FIRST writer
+        // (deterministic), so we must scope by provider to assert a specific
+        // provider's rate here.
+        const cost = estimateCost(m.id, 1_000_000, 1_000_000, undefined, undefined, undefined, undefined, provider.id);
         expect(cost).toBeCloseTo(m.cost!.input + m.cost!.output, 6);
       }
     }

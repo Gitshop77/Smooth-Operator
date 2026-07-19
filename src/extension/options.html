@@ -83,10 +83,14 @@
           </label>
           <label>
             <span>Default model</span>
-            <input type="text" id="model" placeholder="gpt-4o, claude-sonnet-4-5, gemini-2.5-flash" autocomplete="off" list="model-suggestions" />
+            <input type="text" id="model" placeholder="gpt-5.5, claude-sonnet-5, gemini-3.5-flash" autocomplete="off" list="model-suggestions" />
             <small>Any model your API key supports. Type to search the models.dev catalog.</small>
             <datalist id="model-suggestions"></datalist>
             <div id="model-search-results" class="model-search-results is-hidden"></div>
+            <div class="model-refresh">
+              <button type="button" id="refreshModels" class="btn btn-ghost">↻ Refresh models from models.dev</button>
+              <span id="refreshModelsStatus" class="test-result" role="status" aria-live="polite"></span>
+            </div>
           </label>
         </div>
 

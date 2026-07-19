@@ -92,6 +92,37 @@ let memoryCacheTime = 0;
 /** In-flight fetch promise, memoized to dedupe concurrent callers. */
 let inflight: Promise<Catalog> | null = null;
 
+/**
+ * Memoized lowercase search index. `searchModels` is keystroke-driven, so we
+ * precompute the lowercased id/name/family haystack for every model ONCE per
+ * catalog version (keyed by `memoryCacheTime`) instead of re-lowercasing the
+ * ~5500 models and re-sorting on every keystroke. Invalidated whenever the
+ * merged catalog is repopulated.
+ */
+let searchIndex: Array<{ providerId: string; providerName: string; lower: string; model: CatalogModel }> | null = null;
+let searchIndexTime = 0;
+
+/** Build (or return the cached) precomputed lowercase search index. */
+function getSearchIndex(): Array<{ providerId: string; providerName: string; lower: string; model: CatalogModel }> {
+  if (searchIndex && searchIndexTime === memoryCacheTime) return searchIndex;
+  const all: Array<{ providerId: string; providerName: string; lower: string; model: CatalogModel }> = [];
+  for (const [providerId, provider] of Object.entries(mergedCache)) {
+    if (!provider?.models) continue;
+    const providerName = provider.name;
+    for (const model of Object.values(provider.models)) {
+      all.push({
+        providerId,
+        providerName,
+        lower: `${model.id}\n${model.name}\n${model.family ?? ""}`.toLowerCase(),
+        model,
+      });
+    }
+  }
+  searchIndex = all;
+  searchIndexTime = memoryCacheTime;
+  return all;
+}
+
 /* ============================================================= *
  * Fallback heuristics (used only when the catalog is absent).  *
  * ============================================================= */
@@ -146,7 +177,15 @@ const REASONING_PATTERNS: RegExp[] = [
   /\bgrok-4-?reasoning\b/i,
   /\bdeepseek-?reasoner\b/i,
   /\bclaude-sonnet-5\b/i,
-  /\bclaude-opus-4-8\b/i,
+  // models.dev ids use DOTS between version segments (e.g. `claude-opus-4.8`),
+  // but some endpoints / resolved model ids surface the hyphenated form
+  // (`claude-opus-4-8`). A `[.-]` character class matches BOTH so the reasoning
+  // heuristic never misses a reasoning model and wrongly sends `temperature`
+  // (which produces an HTTP 400 on reasoning models). The provider-name hyphens
+  // (`claude-sonnet`, `claude-opus`) are intentionally left untouched.
+  /\bclaude-sonnet-4[.-]5\b/i,
+  /\bclaude-opus-4[.-]1\b/i,
+  /\bclaude-opus-4[.-]8\b/i,
 ];
 
 /* ============================================================= *
@@ -416,27 +455,29 @@ export function getProvider(id: string): CatalogProvider | undefined {
   return mergedCache[id];
 }
 
-/** The provider's base API URL (`provider.api`), or `undefined`. */
-export function getProviderApiUrl(id: string): string | undefined {
-  return mergedCache[id]?.api;
-}
-
-/** The provider's metadata used by the UI/config layer. */
-export function getProviderMeta(
-  id: string,
-): { name?: string; env?: string[]; doc?: string; npm?: string } | undefined {
-  const p = mergedCache[id];
-  if (!p) return undefined;
-  return { name: p.name, env: p.env, doc: p.doc, npm: p.npm };
-}
-
 /**
  * All models for a provider, sorted newest-first by `release_date` with
  * deprecated models last. Synchronous over the merged cache.
  */
-export function getModelsForProvider(id: string): CatalogModel[] {
+export function getModelsForProvider(id: string): CatalogModel[];
+/**
+ * A single model resolved by `modelId` (within `id`), WITHOUT sorting the full
+ * model list. Tolerates OpenRouter-style `provider/` prefixes via
+ * {@link catalogIdMatches}. Returns `undefined` if the provider/model is
+ * unknown. Synchronous over the merged cache.
+ */
+export function getModelsForProvider(id: string, modelId: string): CatalogModel | undefined;
+export function getModelsForProvider(
+  id: string,
+  modelId?: string,
+): CatalogModel[] | CatalogModel | undefined {
   const provider = mergedCache[id];
-  if (!provider || !provider.models) return [];
+  if (!provider || !provider.models) return modelId !== undefined ? undefined : [];
+  // Exact-id fast path: resolve a single model without sorting the whole list
+  // (~hundreds–thousands of models). Used by the per-request capability lookups.
+  if (modelId !== undefined) {
+    return Object.values(provider.models).find((m) => catalogIdMatches(modelId, m.id));
+  }
   return Object.values(provider.models).sort((a, b) => {
     const aDep = a.status === "deprecated" ? 1 : 0;
     const bDep = b.status === "deprecated" ? 1 : 0;
@@ -474,17 +515,14 @@ export function searchModels(
   limit = 10,
 ): Array<{ providerId: string; providerName: string; model: CatalogModel }> {
   const q = query.toLowerCase().trim();
+  const index = getSearchIndex();
   const all: Array<{ providerId: string; providerName: string; model: CatalogModel }> = [];
 
-  for (const [providerId, provider] of Object.entries(mergedCache)) {
-    if (!provider?.models) continue;
-    for (const model of Object.values(provider.models)) {
-      if (q === "") {
-        all.push({ providerId, providerName: provider.name, model });
-        continue;
-      }
-      const hay = `${model.id}\n${model.name}\n${model.family ?? ""}`.toLowerCase();
-      if (hay.includes(q)) all.push({ providerId, providerName: provider.name, model });
+  if (q === "") {
+    for (const e of index) all.push({ providerId: e.providerId, providerName: e.providerName, model: e.model });
+  } else {
+    for (const e of index) {
+      if (e.lower.includes(q)) all.push({ providerId: e.providerId, providerName: e.providerName, model: e.model });
     }
   }
 
@@ -502,6 +540,31 @@ export function searchModels(
  * ============================================================= */
 
 /**
+ * Compare a requested model id against a catalog model id, tolerating the
+ * OpenRouter-style `provider/` prefix. The catalog stores OpenRouter models as
+ * `anthropic/claude-opus-4.8` while a resolved model id may be the bare
+ * `claude-opus-4.8` (or vice versa). We strip any `provider/` prefix from BOTH
+ * sides and also accept `endsWith` / `includes` of `/<id>` so either form
+ * resolves to the same catalog entry instead of falling through to the (now
+ * fixed) heuristic. Provider-name hyphens are never altered.
+ */
+function catalogIdMatches(requested: string, catalogId: string): boolean {
+  const req = requested.toLowerCase();
+  const cat = catalogId.toLowerCase();
+  if (req === cat) return true;
+  const strip = (s: string) => {
+    const i = s.lastIndexOf("/");
+    return i >= 0 ? s.slice(i + 1) : s;
+  };
+  if (strip(req) === strip(cat)) return true;
+  if (req.endsWith("/" + cat)) return true;
+  if (req.includes("/" + cat)) return true;
+  if (cat.endsWith("/" + req)) return true;
+  if (cat.includes("/" + req)) return true;
+  return false;
+}
+
+/**
  * Decide whether `modelId` is a reasoning model given the catalog models for
  * its provider. Pure (no I/O); `REASONING_PATTERNS` is the final fallback
  * whenever the catalog gives no conclusive signal (offline catalog, or a
@@ -509,8 +572,7 @@ export function searchModels(
  */
 export function resolveReasoningSupport(modelId: string, models: CatalogModel[]): boolean {
   if (models.length > 0) {
-    const reqId = modelId.toLowerCase();
-    const exact = models.find((m) => m.id.toLowerCase() === reqId);
+    const exact = models.find((m) => catalogIdMatches(modelId, m.id));
     if (exact) return exact.reasoning === true;
   }
   const name = modelId.toLowerCase();
@@ -526,15 +588,20 @@ export function resolveReasoningSupport(modelId: string, models: CatalogModel[])
  * provider models, an offline catalog, or an inconclusive match).
  */
 export function resolveVisionSupport(modelId: string, models: CatalogModel[]): boolean {
+  const name = modelId.toLowerCase();
   if (models.length > 0) {
-    const reqId = modelId.toLowerCase();
+    const reqId = name;
     const reqBase = reqId.replace(/-?\d{4}-\d{2}-\d{2}$/, "");
-    const exact = models.find((m) => m.id.toLowerCase() === reqId);
+    const exact = models.find((m) => catalogIdMatches(modelId, m.id));
     // An EXACT id match is conclusive: trust its `attachment`/`modalities`.
     if (exact) {
       if (exact.attachment) return true;
       if (exact.modalities?.input?.some((m) => m.toLowerCase().includes("image"))) return true;
-      if (exact.attachment === false) return false; // explicit non-vision
+      // A wrong/negative catalog entry for a genuinely vision-capable model must
+      // not permanently disable screenshot attachment: only conclude `false`
+      // when the catalog is conclusive AND the name does NOT also match the
+      // vision heuristic (e.g. `gpt-4o`, `claude-3`, `gemini`…).
+      if (exact.attachment === false && !VISION_PATTERNS.some((re) => re.test(name))) return false;
     }
     // Substring matches are ambiguous — only treat as conclusive vision when
     // the requested id IS that vision model (possibly a dated/versioned
@@ -554,7 +621,6 @@ export function resolveVisionSupport(modelId: string, models: CatalogModel[]): b
     }
   }
   // Fallback: word-boundary heuristic for common vision-capable families.
-  const name = modelId.toLowerCase();
   return VISION_PATTERNS.some((re) => re.test(name));
 }
 
@@ -575,6 +641,13 @@ export function modelSupportsVision(
   providerId?: string,
 ): boolean | Promise<boolean> {
   if (typeof mOrId === "string") {
+    // Fast path: resolve the exact model without sorting the whole list. The
+    // exact match short-circuits, so the (rare) full-list sort below only runs
+    // when the model is absent from the resolved provider's catalog.
+    if (providerId) {
+      const exact = getModelsForProvider(providerId, mOrId);
+      if (exact) return Promise.resolve(resolveVisionSupport(mOrId, [exact]));
+    }
     const models = providerId ? getModelsForProvider(providerId) : [];
     return Promise.resolve(resolveVisionSupport(mOrId, models));
   }
@@ -599,6 +672,13 @@ export function modelSupportsReasoning(
   providerId?: string,
 ): boolean | Promise<boolean> {
   if (typeof mOrId === "string") {
+    // Fast path: resolve the exact model without sorting the whole list. The
+    // exact match short-circuits, so the (rare) full-list sort below only runs
+    // when the model is absent from the resolved provider's catalog.
+    if (providerId) {
+      const exact = getModelsForProvider(providerId, mOrId);
+      if (exact) return Promise.resolve(resolveReasoningSupport(mOrId, [exact]));
+    }
     const models = providerId ? getModelsForProvider(providerId) : [];
     return Promise.resolve(resolveReasoningSupport(mOrId, models));
   }

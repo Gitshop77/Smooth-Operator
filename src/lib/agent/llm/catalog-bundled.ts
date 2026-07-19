@@ -5903,7 +5903,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.08,
           "output": 0.51,
-          "cache_read": 0.01692
+          "cache_read": 0.01692,
+          "input_audio": 1.269
         }
       },
       "doubao-seed-2.0-mini-260428": {
@@ -5933,7 +5934,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.03,
           "output": 0.28,
-          "cache_read": 0.00564
+          "cache_read": 0.00564,
+          "input_audio": 0.423
         }
       },
       "doubao-seed-2.0-pro": {
@@ -5995,7 +5997,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.3,
           "output": 2.5,
-          "cache_read": 0.03
+          "cache_read": 0.03,
+          "input_audio": 1
         }
       },
       "gemini-2.5-pro": {
@@ -7204,7 +7207,9 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.27,
-          "output": 1.07
+          "output": 1.07,
+          "input_audio": 4.44,
+          "output_audio": 8.89
         }
       },
       "qwen-omni-turbo": {
@@ -7235,7 +7240,9 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.07,
-          "output": 0.27
+          "output": 0.27,
+          "input_audio": 4.44,
+          "output_audio": 8.89
         }
       },
       "qwen-plus-character-ja": {
@@ -7289,7 +7296,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.4,
-          "output": 1.2
+          "output": 1.2,
+          "reasoning": 4
         }
       },
       "qwen-turbo": {
@@ -7316,7 +7324,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.05,
-          "output": 0.2
+          "output": 0.2,
+          "reasoning": 0.5
         }
       },
       "qwen-vl-max": {
@@ -7539,7 +7548,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.1,
-          "output": 0.4
+          "output": 0.4,
+          "input_audio": 6.76
         }
       },
       "qwen2.5-vl-72b-instruct": {
@@ -7622,7 +7632,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.35,
-          "output": 1.4
+          "output": 1.4,
+          "reasoning": 4.2
         }
       },
       "qwen3.235b-a22b": {
@@ -7649,7 +7660,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.7,
-          "output": 2.8
+          "output": 2.8,
+          "reasoning": 8.4
         }
       },
       "qwen3.32b": {
@@ -7676,7 +7688,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.7,
-          "output": 2.8
+          "output": 2.8,
+          "reasoning": 8.4
         }
       },
       "qwen3-8b": {
@@ -7703,7 +7716,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.18,
-          "output": 0.7
+          "output": 0.7,
+          "reasoning": 2.1
         }
       },
       "qwen3-asr-flash": {
@@ -7869,7 +7883,9 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 10,
-          "output": 10
+          "output": 10,
+          "input_audio": 10,
+          "output_audio": 38
         }
       },
       "qwen3-max": {
@@ -7981,7 +7997,9 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.52,
-          "output": 1.99
+          "output": 1.99,
+          "input_audio": 4.57,
+          "output_audio": 18.13
         }
       },
       "qwen3-omni-flash": {
@@ -8012,7 +8030,9 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.43,
-          "output": 1.66
+          "output": 1.66,
+          "input_audio": 3.81,
+          "output_audio": 15.11
         }
       },
       "qwen3-vl-235b-a22b": {
@@ -8040,7 +8060,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.7,
-          "output": 2.8
+          "output": 2.8,
+          "reasoning": 8.4
         }
       },
       "qwen3-vl-30b-a3b": {
@@ -8068,7 +8089,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.2,
-          "output": 0.8
+          "output": 0.8,
+          "reasoning": 2.4
         }
       },
       "qwen3-vl-plus": {
@@ -8096,7 +8118,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.2,
-          "output": 1.6
+          "output": 1.6,
+          "reasoning": 4.8
         }
       },
       "qwen3.5.122b-a10b": {
@@ -8245,7 +8268,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.4,
-          "output": 2.4
+          "output": 2.4,
+          "reasoning": 2.4
         }
       },
       "qwen3.6.27b": {
@@ -9400,7 +9424,9 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.23,
-          "output": 0.918
+          "output": 0.918,
+          "input_audio": 3.584,
+          "output_audio": 7.168
         }
       },
       "qwen-omni-turbo": {
@@ -9431,7 +9457,9 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.058,
-          "output": 0.23
+          "output": 0.23,
+          "input_audio": 3.584,
+          "output_audio": 7.168
         }
       },
       "qwen-plus-character": {
@@ -9485,7 +9513,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.115,
-          "output": 0.287
+          "output": 0.287,
+          "reasoning": 1.147
         }
       },
       "qwen-turbo": {
@@ -9512,7 +9541,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.044,
-          "output": 0.087
+          "output": 0.087,
+          "reasoning": 0.431
         }
       },
       "qwen-vl-max": {
@@ -9843,7 +9873,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.087,
-          "output": 0.345
+          "output": 0.345,
+          "input_audio": 5.448
         }
       },
       "qwen2.5-vl-72b-instruct": {
@@ -9926,7 +9957,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.144,
-          "output": 0.574
+          "output": 0.574,
+          "reasoning": 1.434
         }
       },
       "qwen3.235b-a22b": {
@@ -9953,7 +9985,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.287,
-          "output": 1.147
+          "output": 1.147,
+          "reasoning": 2.868
         }
       },
       "qwen3.32b": {
@@ -9980,7 +10013,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.287,
-          "output": 1.147
+          "output": 1.147,
+          "reasoning": 2.868
         }
       },
       "qwen3-8b": {
@@ -10007,7 +10041,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.072,
-          "output": 0.287
+          "output": 0.287,
+          "reasoning": 0.717
         }
       },
       "qwen3-asr-flash": {
@@ -10253,7 +10288,9 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.23,
-          "output": 0.918
+          "output": 0.918,
+          "input_audio": 3.584,
+          "output_audio": 7.168
         }
       },
       "qwen3-omni-flash": {
@@ -10284,7 +10321,9 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.058,
-          "output": 0.23
+          "output": 0.23,
+          "input_audio": 3.584,
+          "output_audio": 7.168
         }
       },
       "qwen3-vl-235b-a22b": {
@@ -10312,7 +10351,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.286705,
-          "output": 1.14682
+          "output": 1.14682,
+          "reasoning": 2.867051
         }
       },
       "qwen3-vl-30b-a3b": {
@@ -10340,7 +10380,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.108,
-          "output": 0.431
+          "output": 0.431,
+          "reasoning": 1.076
         }
       },
       "qwen3-vl-plus": {
@@ -10368,7 +10409,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.143353,
-          "output": 1.433525
+          "output": 1.433525,
+          "reasoning": 4.300576
         }
       },
       "qwen3.5.397b-a17b": {
@@ -10397,7 +10439,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.43,
-          "output": 2.58
+          "output": 2.58,
+          "reasoning": 2.58
         }
       },
       "qwen3.5-flash": {
@@ -10426,7 +10469,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.172,
-          "output": 1.72
+          "output": 1.72,
+          "reasoning": 1.72
         }
       },
       "qwen3.5-plus": {
@@ -10455,7 +10499,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.573,
-          "output": 3.44
+          "output": 3.44,
+          "reasoning": 3.44
         }
       },
       "alibaba/qwen3.6-flash": {
@@ -18243,7 +18288,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.08,
-          "output": 0.32
+          "output": 0.32,
+          "input_audio": 4
         }
       },
       "phi-4-reasoning-plus": {
@@ -20758,7 +20804,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.08,
-          "output": 0.32
+          "output": 0.32,
+          "input_audio": 4
         }
       },
       "phi-4-reasoning-plus": {
@@ -28311,7 +28358,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.3,
           "output": 2.5,
-          "cache_read": 0.03
+          "cache_read": 0.03,
+          "input_audio": 1
         }
       },
       "google/gemini-2.5-pro": {
@@ -28339,7 +28387,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.25,
           "output": 1.5,
-          "cache_read": 0.025
+          "cache_read": 0.025,
+          "input_audio": 0.5
         }
       },
       "google/gemini-3.1-pro-preview-customtools": {
@@ -28367,7 +28416,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.5,
           "output": 3,
-          "cache_read": 0.05
+          "cache_read": 0.05,
+          "input_audio": 1
         }
       },
       "google/gemini-3-pro-preview": {
@@ -32837,7 +32887,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.0023,
-          "output": 0.0023
+          "output": 0.0023,
+          "output_audio": 2.3
         }
       },
       "Qwen/Qwen3-Embedding-8B": {
@@ -33042,7 +33093,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.0023,
-          "output": 0.0023
+          "output": 0.0023,
+          "output_audio": 2.3
         }
       },
       "moonshotai/kimi-k2.6": {
@@ -33108,7 +33160,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "tool_call": false,
         "cost": {
           "input": 0.0023,
-          "output": 0.0023
+          "output": 0.0023,
+          "output_audio": 2.3
         }
       },
       "openai/whisper-large-v3": {
@@ -33121,7 +33174,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "tool_call": false,
         "cost": {
           "input": 0.0023,
-          "output": 0.0023
+          "output": 0.0023,
+          "output_audio": 2.3
         }
       },
       "zhipuai/glm-5.2": {
@@ -35804,7 +35858,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.5,
           "output": 3,
-          "cache_read": 0.05
+          "cache_read": 0.05,
+          "input_audio": 1
         }
       },
       "google/gemini-3.1-pro-preview": {
@@ -35842,7 +35897,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 1.5,
           "output": 9,
-          "cache_read": 0.15
+          "cache_read": 0.15,
+          "input_audio": 1.5
         }
       },
       "openai/gpt-4.1": {
@@ -38537,7 +38593,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.1,
           "output": 0.4,
-          "cache_read": 0.01
+          "cache_read": 0.01,
+          "input_audio": 0.3
         }
       },
       "gemini-2.5-flash-preview-tts": {
@@ -38578,7 +38635,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.3,
           "output": 2.5,
-          "cache_read": 0.03
+          "cache_read": 0.03,
+          "input_audio": 1
         }
       },
       "gemini-2.5-pro-preview-tts": {
@@ -38651,7 +38709,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.5,
           "output": 3,
-          "cache_read": 0.05
+          "cache_read": 0.05,
+          "input_audio": 1
         }
       },
       "gemini-3-pro-image-preview": {
@@ -38759,7 +38818,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.25,
           "output": 1.5,
-          "cache_read": 0.025
+          "cache_read": 0.025,
+          "input_audio": 0.5
         },
         "status": "deprecated"
       },
@@ -38792,7 +38852,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.25,
           "output": 1.5,
-          "cache_read": 0.025
+          "cache_read": 0.025,
+          "input_audio": 0.5
         }
       },
       "gemini-3.1-pro-preview-customtools": {
@@ -38888,7 +38949,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 1.5,
           "output": 9,
-          "cache_read": 0.15
+          "cache_read": 0.15,
+          "input_audio": 1.5
         }
       },
       "gemini-embedding-001": {
@@ -38947,7 +39009,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 1.5,
           "output": 9,
-          "cache_read": 0.15
+          "cache_read": 0.15,
+          "input_audio": 1.5
         }
       },
       "gemini-flash-lite-latest": {
@@ -38979,7 +39042,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.25,
           "output": 1.5,
-          "cache_read": 0.025
+          "cache_read": 0.025,
+          "input_audio": 0.5
         }
       },
       "gemini-omni-flash-preview": {
@@ -39325,7 +39389,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.1,
           "output": 0.4,
-          "cache_read": 0.01
+          "cache_read": 0.01,
+          "input_audio": 0.3
         }
       },
       "google/gemini-2.5-flash-tts": {
@@ -39412,7 +39477,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.5,
           "output": 3,
-          "cache_read": 0.05
+          "cache_read": 0.05,
+          "input_audio": 1
         }
       },
       "google/gemini-3-pro-image": {
@@ -39452,7 +39518,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.25,
           "output": 1.5,
-          "cache_read": 0.025
+          "cache_read": 0.025,
+          "input_audio": 0.5
         },
         "status": "deprecated"
       },
@@ -39467,7 +39534,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.25,
           "output": 1.5,
-          "cache_read": 0.025
+          "cache_read": 0.025,
+          "input_audio": 0.5
         }
       },
       "google/gemini-3.1-pro-preview-customtools": {
@@ -39509,7 +39577,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 1.5,
           "output": 9,
-          "cache_read": 0.15
+          "cache_read": 0.15,
+          "input_audio": 1.5
         }
       },
       "google/gemini-embedding-001": {
@@ -39536,7 +39605,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 1.5,
           "output": 9,
-          "cache_read": 0.15
+          "cache_read": 0.15,
+          "input_audio": 1.5
         }
       },
       "google/gemini-flash-lite-latest": {
@@ -39550,7 +39620,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.25,
           "output": 1.5,
-          "cache_read": 0.025
+          "cache_read": 0.025,
+          "input_audio": 0.5
         }
       },
       "meta/llama-3.3.70b-instruct-maas": {
@@ -49479,7 +49550,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 0.1,
           "output": 0.4,
           "cache_read": 0.01,
-          "cache_write": 0.083333
+          "cache_write": 0.083333,
+          "reasoning": 0.4
         }
       },
       "google/gemini-2.5-flash-lite": {
@@ -49511,7 +49583,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 0.1,
           "output": 0.4,
           "cache_read": 0.01,
-          "cache_write": 0.083333
+          "cache_write": 0.083333,
+          "reasoning": 0.4
         }
       },
       "google/gemini-2.5-flash": {
@@ -49543,7 +49616,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 0.3,
           "output": 2.5,
           "cache_read": 0.03,
-          "cache_write": 0.083333
+          "cache_write": 0.083333,
+          "reasoning": 2.5
         }
       },
       "google/gemini-2.5-pro-preview-05.06": {
@@ -49575,7 +49649,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 1.25,
           "output": 10,
           "cache_read": 0.125,
-          "cache_write": 0.375
+          "cache_write": 0.375,
+          "reasoning": 10
         }
       },
       "google/gemini-2.5-pro-preview": {
@@ -49606,7 +49681,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 1.25,
           "output": 10,
           "cache_read": 0.125,
-          "cache_write": 0.375
+          "cache_write": 0.375,
+          "reasoning": 10
         }
       },
       "google/gemini-2.5-pro": {
@@ -49638,7 +49714,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 1.25,
           "output": 10,
           "cache_read": 0.125,
-          "cache_write": 0.375
+          "cache_write": 0.375,
+          "reasoning": 10
         }
       },
       "google/gemini-3-flash-preview": {
@@ -49670,7 +49747,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 0.5,
           "output": 3,
           "cache_read": 0.05,
-          "cache_write": 0.083333
+          "cache_write": 0.083333,
+          "reasoning": 3
         }
       },
       "google/gemini-3-pro-image-preview": {
@@ -49698,7 +49776,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 2,
-          "output": 12
+          "output": 12,
+          "reasoning": 12
         }
       },
       "google/gemini-3.1-flash-image-preview": {
@@ -49756,7 +49835,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.25,
-          "output": 1.5
+          "output": 1.5,
+          "reasoning": 1.5
         }
       },
       "google/gemini-3.1-flash-lite": {
@@ -49788,7 +49868,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 0.25,
           "output": 1.5,
           "cache_read": 0.025,
-          "cache_write": 0.08333
+          "cache_write": 0.08333,
+          "reasoning": 1.5
         }
       },
       "google/gemini-3.1-pro-preview-customtools": {
@@ -49818,7 +49899,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 2,
-          "output": 12
+          "output": 12,
+          "reasoning": 12
         }
       },
       "google/gemini-3.1-pro-preview": {
@@ -49848,7 +49930,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 2,
-          "output": 12
+          "output": 12,
+          "reasoning": 12
         }
       },
       "google/gemini-3.5-flash": {
@@ -49880,7 +49963,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 1.5,
           "output": 9,
           "cache_read": 0.15,
-          "cache_write": 0.08333
+          "cache_write": 0.08333,
+          "reasoning": 9
         }
       },
       "google/gemma-2.27b-it": {
@@ -59624,7 +59708,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 0.4,
           "output": 1.2,
           "cache_read": 0.08,
-          "cache_write": 0.5
+          "cache_write": 0.5,
+          "reasoning": 4
         }
       },
       "qwen2.5-vl-32b-instruct": {
@@ -59786,7 +59871,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "tool_call": false,
         "cost": {
           "input": 0.1,
-          "output": 0.3
+          "output": 0.3,
+          "reasoning": 8.4
         }
       },
       "alibaba/qwen3-coder-30b-a3b-instruct": {
@@ -60039,7 +60125,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 0.2,
           "output": 1.6,
           "cache_read": 0.04,
-          "cache_write": 0.25
+          "cache_write": 0.25,
+          "reasoning": 4.8
         }
       },
       "alibaba/qwen3.5-9b": {
@@ -60894,7 +60981,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.4,
-          "output": 2.4
+          "output": 2.4,
+          "reasoning": 2.4
         }
       },
       "XiaomiMiMo/MiMo-V2-Flash": {
@@ -61553,7 +61641,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.1,
           "output": 0.4,
-          "cache_read": 0.01
+          "cache_read": 0.01,
+          "input_audio": 0.3
         }
       },
       "google/gemini-2.5-flash": {
@@ -61567,7 +61656,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.3,
           "output": 2.5,
-          "cache_read": 0.03
+          "cache_read": 0.03,
+          "input_audio": 1
         }
       },
       "google/gemini-2.5-pro": {
@@ -61595,7 +61685,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.5,
           "output": 3,
-          "cache_read": 0.05
+          "cache_read": 0.05,
+          "input_audio": 1
         }
       },
       "google/gemini-3-pro-preview": {
@@ -61623,7 +61714,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.25,
           "output": 1.5,
-          "cache_read": 0.025
+          "cache_read": 0.025,
+          "input_audio": 0.5
         }
       },
       "google/gemini-3.1-flash-lite": {
@@ -61637,7 +61729,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.25,
           "output": 1.5,
-          "cache_read": 0.025
+          "cache_read": 0.025,
+          "input_audio": 0.5
         }
       },
       "google/gemini-3.1-pro-preview-customtools": {
@@ -61679,7 +61772,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 1.5,
           "output": 9,
-          "cache_read": 0.15
+          "cache_read": 0.15,
+          "input_audio": 1.5
         }
       },
       "google/gemini-flash-latest": {
@@ -61693,7 +61787,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 1.5,
           "output": 9,
-          "cache_read": 0.15
+          "cache_read": 0.15,
+          "input_audio": 1.5
         }
       },
       "google/gemini-flash-lite-latest": {
@@ -61707,7 +61802,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.25,
           "output": 1.5,
-          "cache_read": 0.025
+          "cache_read": 0.025,
+          "input_audio": 0.5
         }
       },
       "google/gemma-4.26b-a4b-it": {
@@ -82884,7 +82980,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.1,
           "output": 0.4,
-          "cache_read": 0.01
+          "cache_read": 0.01,
+          "input_audio": 0.3
         }
       },
       "google/gemini-2.5-flash": {
@@ -82898,7 +82995,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.3,
           "output": 2.5,
-          "cache_read": 0.03
+          "cache_read": 0.03,
+          "input_audio": 1
         }
       },
       "google/gemini-2.5-pro": {
@@ -82940,7 +83038,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.25,
           "output": 1.5,
-          "cache_read": 0.025
+          "cache_read": 0.025,
+          "input_audio": 0.5
         }
       },
       "google/gemini-3.5-flash": {
@@ -82954,7 +83053,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 1.5,
           "output": 9,
-          "cache_read": 0.15
+          "cache_read": 0.15,
+          "input_audio": 1.5
         }
       },
       "google/gemma-4.31b-it": {
@@ -83375,7 +83475,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 1,
           "output": 3,
           "cache_read": 0.1,
-          "cache_write": 1.25
+          "cache_write": 1.25,
+          "reasoning": 3
         }
       },
       "NousResearch/Hermes-4.70B": {
@@ -83404,7 +83505,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 0.13,
           "output": 0.4,
           "cache_read": 0.013,
-          "cache_write": 0.16
+          "cache_write": 0.16,
+          "reasoning": 0.4
         }
       },
       "PrimeIntellect/INTELLECT-3": {
@@ -83666,7 +83768,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 0.15,
           "output": 1.2,
           "cache_read": 0.015,
-          "cache_write": 0.18
+          "cache_write": 0.18,
+          "reasoning": 1.2
         }
       },
       "Qwen/Qwen3.5.397B-A17B-fast": {
@@ -83784,7 +83887,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 0.3,
           "output": 0.45,
           "cache_read": 0.03,
-          "cache_write": 0.375
+          "cache_write": 0.375,
+          "reasoning": 0.45
         },
         "status": "deprecated"
       },
@@ -83921,7 +84025,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 0.5,
           "output": 2.5,
           "cache_read": 0.05,
-          "cache_write": 0.625
+          "cache_write": 0.625,
+          "reasoning": 2.5
         },
         "status": "deprecated"
       },
@@ -84116,7 +84221,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 0.15,
           "output": 0.6,
           "cache_read": 0.015,
-          "cache_write": 0.18
+          "cache_write": 0.18,
+          "reasoning": 0.6
         }
       },
       "zhipuai/glm-5.2": {
@@ -84310,7 +84416,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.3,
           "output": 2.5,
-          "cache_read": 0.03
+          "cache_read": 0.03,
+          "input_audio": 1
         }
       },
       "google/gemini-2.5-pro": {
@@ -84338,7 +84445,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.25,
           "output": 1.5,
-          "cache_read": 0.025
+          "cache_read": 0.025,
+          "input_audio": 0.5
         }
       },
       "google/gemini-3.1-pro-preview-customtools": {
@@ -84366,7 +84474,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 1.5,
           "output": 9,
-          "cache_read": 0.15
+          "cache_read": 0.15,
+          "input_audio": 1.5
         }
       },
       "google/gemini-3-flash-preview": {
@@ -84380,7 +84489,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.5,
           "output": 3,
-          "cache_read": 0.05
+          "cache_read": 0.05,
+          "input_audio": 1
         }
       },
       "google/gemini-3-pro-preview": {
@@ -85376,7 +85486,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0,
-          "output": 0
+          "output": 0,
+          "reasoning": 0
         }
       },
       "nova-2-pro-v1": {
@@ -85406,7 +85517,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0,
-          "output": 0
+          "output": 0,
+          "reasoning": 0
         }
       }
     }
@@ -87435,7 +87547,9 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.25,
-          "output": 0.97
+          "output": 0.97,
+          "input_audio": 2.2,
+          "output_audio": 1.788
         }
       },
       "qwen/qwen3-omni-30b-a3b-thinking": {
@@ -87464,7 +87578,9 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 0.25,
-          "output": 0.97
+          "output": 0.97,
+          "input_audio": 2.2,
+          "output_audio": 1.788
         }
       },
       "qwen/qwen3-vl-235b-a22b-instruct": {
@@ -91894,7 +92010,9 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 4,
           "output": 24,
-          "cache_read": 0.4
+          "cache_read": 0.4,
+          "input_audio": 32,
+          "output_audio": 64
         }
       },
       "o1-pro": {
@@ -92742,7 +92860,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 1.5,
           "output": 9,
-          "cache_read": 0.15
+          "cache_read": 0.15,
+          "input_audio": 1.5
         }
       },
       "glm-4.6": {
@@ -96184,7 +96303,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 0.1,
           "output": 0.4,
           "cache_read": 0.01,
-          "cache_write": 0.083333
+          "cache_write": 0.083333,
+          "reasoning": 0.4
         }
       },
       "google/gemini-2.5-flash": {
@@ -96199,7 +96319,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 0.3,
           "output": 2.5,
           "cache_read": 0.03,
-          "cache_write": 0.083333
+          "cache_write": 0.083333,
+          "reasoning": 2.5
         }
       },
       "google/gemini-2.5-pro-preview-05.06": {
@@ -96232,7 +96353,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 1.25,
           "output": 10,
           "cache_read": 0.125,
-          "cache_write": 0.375
+          "cache_write": 0.375,
+          "reasoning": 10
         }
       },
       "google/gemini-2.5-pro-preview": {
@@ -96264,7 +96386,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 1.25,
           "output": 10,
           "cache_read": 0.125,
-          "cache_write": 0.375
+          "cache_write": 0.375,
+          "reasoning": 10
         }
       },
       "google/gemini-2.5-pro": {
@@ -96279,7 +96402,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 1.25,
           "output": 10,
           "cache_read": 0.125,
-          "cache_write": 0.375
+          "cache_write": 0.375,
+          "reasoning": 10
         }
       },
       "google/gemini-3-flash-preview": {
@@ -96294,7 +96418,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 0.5,
           "output": 3,
           "cache_read": 0.05,
-          "cache_write": 0.083333
+          "cache_write": 0.083333,
+          "reasoning": 3
         }
       },
       "google/gemini-3-pro-image-preview": {
@@ -96309,7 +96434,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 2,
           "output": 12,
           "cache_read": 0.2,
-          "cache_write": 0.375
+          "cache_write": 0.375,
+          "reasoning": 12
         }
       },
       "google/gemini-3-pro-image": {
@@ -96324,7 +96450,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 2,
           "output": 12,
           "cache_read": 0.2,
-          "cache_write": 0.375
+          "cache_write": 0.375,
+          "reasoning": 12
         }
       },
       "google/gemini-3.1-flash-image-preview": {
@@ -96410,7 +96537,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 0.25,
           "output": 1.5,
           "cache_read": 0.025,
-          "cache_write": 0.083333
+          "cache_write": 0.083333,
+          "reasoning": 1.5
         }
       },
       "google/gemini-3.1-flash-lite": {
@@ -96425,7 +96553,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 0.25,
           "output": 1.5,
           "cache_read": 0.025,
-          "cache_write": 0.083333
+          "cache_write": 0.083333,
+          "reasoning": 1.5
         }
       },
       "google/gemini-3.1-pro-preview-customtools": {
@@ -96440,7 +96569,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 2,
           "output": 12,
           "cache_read": 0.2,
-          "cache_write": 0.375
+          "cache_write": 0.375,
+          "reasoning": 12
         }
       },
       "google/gemini-3.1-pro-preview": {
@@ -96455,7 +96585,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 2,
           "output": 12,
           "cache_read": 0.2,
-          "cache_write": 0.375
+          "cache_write": 0.375,
+          "reasoning": 12
         }
       },
       "google/gemini-3.5-flash": {
@@ -96470,7 +96601,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 1.5,
           "output": 9,
           "cache_read": 0.15,
-          "cache_write": 0.083333
+          "cache_write": 0.083333,
+          "reasoning": 9
         }
       },
       "google/gemma-2.27b-it": {
@@ -99985,7 +100117,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 2,
-          "output": 8
+          "output": 8,
+          "reasoning": 3
         }
       },
       "perplexity/sonar-pro-search": {
@@ -102264,7 +102397,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 1.5,
           "output": 9,
           "cache_read": 0.15,
-          "cache_write": 0.083333
+          "cache_write": 0.083333,
+          "reasoning": 9
         }
       },
       "~google/gemini-pro-latest": {
@@ -102297,7 +102431,8 @@ export const BUNDLED_CATALOG: Catalog = {
           "input": 2,
           "output": 12,
           "cache_read": 0.2,
-          "cache_write": 0.375
+          "cache_write": 0.375,
+          "reasoning": 12
         }
       },
       "~moonshotai/kimi-latest": {
@@ -102634,7 +102769,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.1,
           "output": 0.4,
-          "cache_read": 0.01
+          "cache_read": 0.01,
+          "input_audio": 0.3
         }
       },
       "google/gemini-2.5-flash": {
@@ -102648,7 +102784,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.3,
           "output": 2.5,
-          "cache_read": 0.03
+          "cache_read": 0.03,
+          "input_audio": 1
         }
       },
       "google/gemini-2.5-pro": {
@@ -102676,7 +102813,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.5,
           "output": 3,
-          "cache_read": 0.05
+          "cache_read": 0.05,
+          "input_audio": 1
         }
       },
       "google/gemini-3-pro-preview": {
@@ -102704,7 +102842,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.25,
           "output": 1.5,
-          "cache_read": 0.025
+          "cache_read": 0.025,
+          "input_audio": 0.5
         }
       },
       "google/gemini-3.1-pro-preview-customtools": {
@@ -102746,7 +102885,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 1.5,
           "output": 9,
-          "cache_read": 0.15
+          "cache_read": 0.15,
+          "input_audio": 1.5
         }
       },
       "google/gemini-flash-lite-latest": {
@@ -102760,7 +102900,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.25,
           "output": 1.5,
-          "cache_read": 0.025
+          "cache_read": 0.025,
+          "input_audio": 0.5
         }
       },
       "google/gemma-4.26b-a4b-it": {
@@ -103421,7 +103562,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "tool_call": false,
         "cost": {
           "input": 0.115,
-          "output": 0.688
+          "output": 0.688,
+          "reasoning": 2.4
         }
       },
       "alibaba/qwen3.6.35b-a3b": {
@@ -103949,7 +104091,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 2,
-          "output": 8
+          "output": 8,
+          "reasoning": 3
         }
       },
       "sonar-pro": {
@@ -114296,7 +114439,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.1,
           "output": 0.4,
-          "cache_read": 0.01
+          "cache_read": 0.01,
+          "input_audio": 0.3
         }
       },
       "google/gemini-2.5-flash": {
@@ -114311,7 +114455,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.3,
           "output": 2.5,
-          "cache_read": 0.03
+          "cache_read": 0.03,
+          "input_audio": 1
         }
       },
       "google/gemini-2.5-pro": {
@@ -114341,7 +114486,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.25,
           "output": 1.5,
-          "cache_read": 0.025
+          "cache_read": 0.025,
+          "input_audio": 0.5
         }
       },
       "google/gemini-3.5-flash": {
@@ -114356,7 +114502,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 1.5,
           "output": 9,
-          "cache_read": 0.15
+          "cache_read": 0.15,
+          "input_audio": 1.5
         }
       },
       "openai/gpt-4.1-mini": {
@@ -114628,7 +114775,8 @@ export const BUNDLED_CATALOG: Catalog = {
         },
         "cost": {
           "input": 2,
-          "output": 8
+          "output": 8,
+          "reasoning": 3
         }
       },
       "perplexity/sonar-pro": {
@@ -114996,7 +115144,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "tool_call": false,
         "cost": {
           "input": 0.75,
-          "output": 2.25
+          "output": 2.25,
+          "reasoning": 8.4
         }
       },
       "alibaba/qwen3-coder-30b-a3b-instruct": {
@@ -125519,7 +125668,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 0.3,
           "output": 2.5,
-          "cache_read": 0.03
+          "cache_read": 0.03,
+          "input_audio": 1
         }
       },
       "google/gemini-2.5-pro": {
@@ -132746,7 +132896,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 3,
           "output": 18,
-          "cache_read": 0.3
+          "cache_read": 0.3,
+          "reasoning": 18
         }
       },
       "xpersona-frieren-coder": {
@@ -132774,7 +132925,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 1.5,
           "output": 6,
-          "cache_read": 0.15
+          "cache_read": 0.15,
+          "reasoning": 6
         }
       },
       "openai/gpt-5.5": {
@@ -132801,7 +132953,8 @@ export const BUNDLED_CATALOG: Catalog = {
         "cost": {
           "input": 3,
           "output": 18,
-          "cache_read": 0.3
+          "cache_read": 0.3,
+          "reasoning": 18
         }
       }
     }

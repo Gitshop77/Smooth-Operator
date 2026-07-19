@@ -61,7 +61,10 @@ export const STORAGE_KEYS = {
 
 /** Populate the provider dropdown from the single PROVIDERS catalog. */
 function populateProviderSelect(): void {
-  const sel = $("provider") as HTMLSelectElement;
+  // Non-throwing getter: at module load in a test/headless env the Options DOM
+  // may be absent — bail out instead of letting `$("provider")` throw.
+  const sel = document.getElementById("provider") as HTMLSelectElement | null;
+  if (!sel) return;
   sel.innerHTML = "";
   for (const p of PROVIDERS) {
     const opt = document.createElement("option");
@@ -90,109 +93,129 @@ export function showSaved(): void {
 
 // ─── Load settings ─────────────────────────────────────────────────────────
 
-chrome.storage.local.get(
-  [
-    STORAGE_KEYS.provider,
-    STORAGE_KEYS.apiKey,
-    STORAGE_KEYS.model,
-    STORAGE_KEYS.baseUrl,
-    STORAGE_KEYS.resourceName,
-    STORAGE_KEYS.maxSteps,
-    STORAGE_KEYS.maxActions,
-    STORAGE_KEYS.plannerInterval,
-    STORAGE_KEYS.maxFailures,
-    STORAGE_KEYS.costCap,
-    STORAGE_KEYS.defaultTask,
-    "screenshotQuality",
-    "enableScreenshots",
-    "stealthEnabled",
-    "enableLocalVision",
-    "visionMode",
-    "allowedDomains",
-    "blockedDomains",
-    COCKPIT_URL_STORAGE_KEY,
-    STORAGE_KEYS.notifyOnCompletion,
-    STORAGE_KEYS.notifyOnError,
-    STORAGE_KEYS.notifyOnTakeover,
-    STORAGE_KEYS.webhookUrl,
-  ],
-  (res) => {
-    if (chrome.runtime.lastError) {
-      console.warn("[options] storage.get failed:", chrome.runtime.lastError);
-      return;
-    }
- // Provider: select the SAVED value. Because populateProviderSelect() ran
- // first, every catalog provider is present as an <option>, so the saved id
- // (even xai/google) selects correctly instead of falling back to the first
- // option. As a safety net, if the saved id isn't in the list we append it.
-    const savedProvider = (res.provider as string) ?? DEFAULT_PROVIDER_ID;
-    const sel = $("provider") as HTMLSelectElement;
-    if (!PROVIDER_META[savedProvider]) {
-      const opt = document.createElement("option");
-      opt.value = savedProvider;
-      opt.textContent = savedProvider;
-      sel.appendChild(opt);
-    }
-    sel.value = savedProvider;
+// Guard the `chrome` global: in a test/headless env `chrome` may be entirely
+// absent. The Options page always provides it, so this is a no-op there.
+if (typeof chrome !== "undefined" && chrome.storage?.local) {
+  chrome.storage.local.get(
+    [
+      STORAGE_KEYS.provider,
+      STORAGE_KEYS.apiKey,
+      STORAGE_KEYS.model,
+      STORAGE_KEYS.baseUrl,
+      STORAGE_KEYS.resourceName,
+      STORAGE_KEYS.maxSteps,
+      STORAGE_KEYS.maxActions,
+      STORAGE_KEYS.plannerInterval,
+      STORAGE_KEYS.maxFailures,
+      STORAGE_KEYS.costCap,
+      STORAGE_KEYS.defaultTask,
+      "screenshotQuality",
+      "enableScreenshots",
+      "stealthEnabled",
+      "enableLocalVision",
+      "visionMode",
+      "allowedDomains",
+      "blockedDomains",
+      COCKPIT_URL_STORAGE_KEY,
+      STORAGE_KEYS.notifyOnCompletion,
+      STORAGE_KEYS.notifyOnError,
+      STORAGE_KEYS.notifyOnTakeover,
+      STORAGE_KEYS.webhookUrl,
+    ],
+    (res) => {
+      if (chrome.runtime.lastError) {
+        console.warn("[options] storage.get failed:", chrome.runtime.lastError);
+        return;
+      }
+   // Non-throwing field writers. On the real Options page every id exists, so
+   // these behave exactly as before. In a test/headless env with a *partial*
+   // DOM (some ids absent) they silently skip the missing ones instead of
+   // letting the throwing `$()` helper crash the whole import-time load.
+      const setVal = (id: string, value: string) => {
+        const el = document.getElementById(id);
+        if (el) (el as HTMLInputElement).value = value;
+      };
+      const setChecked = (id: string, value: boolean) => {
+        const el = document.getElementById(id);
+        if (el) (el as HTMLInputElement).checked = value;
+      };
 
- // SECURITY: the API key lives in `chrome.storage.session` (in-memory, never
- // on disk). Read it from there; fall back to `local` only for installs that
- // have not yet migrated. Never console.log the value.
-    if (typeof chrome !== "undefined" && chrome.storage?.session) {
-      chrome.storage.session.get([STORAGE_KEYS.apiKey], (sres) => {
-        if (chrome.runtime.lastError) {
- // Session store unavailable — fall back to any legacy local value
- // rather than leaving the field blank.
-          ($("apiKey") as HTMLInputElement).value = (res.apiKey as string) ?? "";
-          return;
-        }
-        const sessionKey = (sres[STORAGE_KEYS.apiKey] as string) ?? "";
-        ($("apiKey") as HTMLInputElement).value =
-          sessionKey || ((res.apiKey as string) ?? "");
-      });
-    } else {
-      ($("apiKey") as HTMLInputElement).value = (res.apiKey as string) ?? "";
-    }
-    ($("model") as HTMLInputElement).value = (res.model as string) ?? "";
-    ($("baseUrl") as HTMLInputElement).value = (res.baseUrl as string) ?? "";
-    ($("resourceName") as HTMLInputElement).value = (res.resourceName as string) ?? "";
-    ($("maxSteps") as HTMLInputElement).value = String(res.maxSteps ?? 100);
-    ($("maxActions") as HTMLInputElement).value = String(res.maxActions ?? 10);
-    ($("plannerInterval") as HTMLInputElement).value = String(res.plannerInterval ?? 5);
-    ($("maxFailures") as HTMLInputElement).value = String(res.maxFailures ?? 5);
-    const costCap = typeof res.costCap === "number" ? Math.max(0, res.costCap) : 0;
-    ($("costCap") as HTMLInputElement).value = String(costCap);
-    ($("defaultTask") as HTMLTextAreaElement).value = (res.defaultTask as string) ?? "";
-    ($("screenshotQuality") as HTMLInputElement).value = String(res.screenshotQuality ?? 80);
-    ($("enableScreenshots") as HTMLInputElement).checked = res.enableScreenshots !== false;
- // Stealth patches are OPT-IN and OFF by default (ToS/bot-detection risk).
- // Only check the box when the stored value is exactly the boolean `true`.
-    ($("enableStealth") as HTMLInputElement).checked = res.stealthEnabled === true;
-    const visionMode = (res.visionMode as string) || (res.enableLocalVision === true ? "always" : "disabled");
- // Resolve the matching radio by comparing values (NOT by interpolating
- // `visionMode` into a `querySelector` string — a corrupt/attacker-influenced
- // stored value could break out of the attribute selector). Iterate the
- // radio group and set `.checked` on an exact match only.
-    const visionRadio = Array.from(
-      document.querySelectorAll<HTMLInputElement>('input[name="visionMode"]'),
-    ).find((r) => r.value === visionMode) ?? null;
-    if (visionRadio) visionRadio.checked = true;
-    const allowedDomains = Array.isArray(res.allowedDomains) ? (res.allowedDomains as string[]).join("\n") : "";
-    const blockedDomains = Array.isArray(res.blockedDomains) ? (res.blockedDomains as string[]).join("\n") : "";
-    ($("allowedDomains") as HTMLTextAreaElement).value = allowedDomains;
-    ($("blockedDomains") as HTMLTextAreaElement).value = blockedDomains;
-    const storedCockpitUrl = res[COCKPIT_URL_STORAGE_KEY] as string | undefined;
-    ($("cockpitUrl") as HTMLInputElement).value =
-      typeof storedCockpitUrl === "string" && storedCockpitUrl.trim() ? storedCockpitUrl : DEFAULT_COCKPIT_URL;
- // Notify tab.
-    ($("notifyOnCompletion") as HTMLInputElement).checked = (res.notifyOnCompletion as boolean) || false;
-    ($("notifyOnError") as HTMLInputElement).checked = (res.notifyOnError as boolean) || false;
-    ($("notifyOnTakeover") as HTMLInputElement).checked = (res.notifyOnTakeover as boolean) || false;
-    ($("webhookUrl") as HTMLInputElement).value = (res.webhookUrl as string) ?? "";
- // Update hints/placeholders based on the loaded provider.
-    updateProviderUI();
-  }
-);
+   // Provider: select the SAVED value. Because populateProviderSelect() ran
+   // first, every catalog provider is present as an <option>, so the saved id
+   // (even xai/google) selects correctly instead of falling back to the first
+   // option. As a safety net, if the saved id isn't in the list we append it.
+   // If the provider <select> itself is absent (no DOM / test env), bail.
+      const sel = document.getElementById("provider") as HTMLSelectElement | null;
+      if (!sel) return;
+      const savedProvider = (res.provider as string) ?? DEFAULT_PROVIDER_ID;
+      if (!PROVIDER_META[savedProvider]) {
+        const opt = document.createElement("option");
+        opt.value = savedProvider;
+        opt.textContent = savedProvider;
+        sel.appendChild(opt);
+      }
+      sel.value = savedProvider;
+
+   // SECURITY: the API key lives in `chrome.storage.session` (in-memory, never
+   // on disk). Read it from there; fall back to `local` only for installs that
+   // have not yet migrated. Never console.log the value.
+      if (typeof chrome !== "undefined" && chrome.storage?.session) {
+        chrome.storage.session.get([STORAGE_KEYS.apiKey], (sres) => {
+          if (chrome.runtime.lastError) {
+     // Session store unavailable — fall back to any legacy local value
+     // rather than leaving the field blank.
+            setVal("apiKey", (res.apiKey as string) ?? "");
+            return;
+          }
+          const sessionKey = (sres[STORAGE_KEYS.apiKey] as string) ?? "";
+          setVal("apiKey", sessionKey || ((res.apiKey as string) ?? ""));
+        });
+      } else {
+        setVal("apiKey", (res.apiKey as string) ?? "");
+      }
+      setVal("model", (res.model as string) ?? "");
+      setVal("baseUrl", (res.baseUrl as string) ?? "");
+      setVal("resourceName", (res.resourceName as string) ?? "");
+      setVal("maxSteps", String(res.maxSteps ?? 100));
+      setVal("maxActions", String(res.maxActions ?? 10));
+      setVal("plannerInterval", String(res.plannerInterval ?? 5));
+      setVal("maxFailures", String(res.maxFailures ?? 5));
+      const costCap = typeof res.costCap === "number" ? Math.max(0, res.costCap) : 0;
+      setVal("costCap", String(costCap));
+      setVal("defaultTask", (res.defaultTask as string) ?? "");
+      setVal("screenshotQuality", String(res.screenshotQuality ?? 80));
+      setChecked("enableScreenshots", res.enableScreenshots !== false);
+   // Stealth patches are OPT-IN and OFF by default (ToS/bot-detection risk).
+   // Only check the box when the stored value is exactly the boolean `true`.
+      setChecked("enableStealth", res.stealthEnabled === true);
+      const visionMode = (res.visionMode as string) || (res.enableLocalVision === true ? "always" : "disabled");
+   // Resolve the matching radio by comparing values (NOT by interpolating
+   // `visionMode` into a `querySelector` string — a corrupt/attacker-influenced
+   // stored value could break out of the attribute selector). Iterate the
+   // radio group and set `.checked` on an exact match only.
+      const visionRadio = Array.from(
+        document.querySelectorAll<HTMLInputElement>('input[name="visionMode"]'),
+      ).find((r) => r.value === visionMode) ?? null;
+      if (visionRadio) visionRadio.checked = true;
+      const allowedDomains = Array.isArray(res.allowedDomains) ? (res.allowedDomains as string[]).join("\n") : "";
+      const blockedDomains = Array.isArray(res.blockedDomains) ? (res.blockedDomains as string[]).join("\n") : "";
+      setVal("allowedDomains", allowedDomains);
+      setVal("blockedDomains", blockedDomains);
+      const storedCockpitUrl = res[COCKPIT_URL_STORAGE_KEY] as string | undefined;
+      setVal(
+        "cockpitUrl",
+        typeof storedCockpitUrl === "string" && storedCockpitUrl.trim() ? storedCockpitUrl : DEFAULT_COCKPIT_URL,
+      );
+   // Notify tab.
+      setChecked("notifyOnCompletion", (res.notifyOnCompletion as boolean) || false);
+      setChecked("notifyOnError", (res.notifyOnError as boolean) || false);
+      setChecked("notifyOnTakeover", (res.notifyOnTakeover as boolean) || false);
+      setVal("webhookUrl", (res.webhookUrl as string) ?? "");
+   // Update hints/placeholders based on the loaded provider.
+      updateProviderUI();
+    },
+  );
+}
 
 // ─── Save settings (auto-save entry point) ───────────────────────────────────
 
@@ -378,7 +401,7 @@ async function doSaveSettings(): Promise<boolean> {
  // treated as `"injected"` and denied the exemption — which is the defense.
     provenance: "user",
     baseUrl: baseUrlRaw !== "" && isHttpUrl(baseUrlRaw) ? baseUrlRaw : "",
-    resourceName: ($("resourceName") as HTMLInputElement).value.trim(),
+    resourceName: (document.getElementById("resourceName") as HTMLInputElement | null)?.value.trim() ?? "",
     maxSteps,
     maxActions,
     plannerInterval,
@@ -563,7 +586,7 @@ export async function renderSecrets(): Promise<void> {
   }
 }
 
-$("addSecret")?.addEventListener("click", async () => {
+document.getElementById("addSecret")?.addEventListener("click", async () => {
   const name = ($("secretName") as HTMLInputElement).value.trim();
   const value = ($("secretValue") as HTMLInputElement).value.trim();
   if (!name) { ($("secretName") as HTMLInputElement).focus(); return; }

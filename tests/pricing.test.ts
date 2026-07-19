@@ -12,8 +12,17 @@ import {
   CONSERVATIVE_DEFAULT_PRICING,
   DEFAULT_UNKNOWN_MODEL_PRICE,
   refreshPricingFromCatalog,
+  getLastPricingError,
+  __resetPricingForTests,
 } from "../src/lib/agent/llm/pricing";
 import type { Catalog } from "../src/lib/agent/llm/catalog";
+
+// Reset all mutable pricing module state before each test so stubbed catalog
+// loads / memo / warned-set don't leak across tests (the live catalog is
+// hydrated into a module singleton).
+beforeEach(() => {
+  __resetPricingForTests();
+});
 
 describe("getPricingForModel — uncatalogued models are never free", () => {
  // Stub fetch to a benign empty catalog so the fire-and-forget catalog load
@@ -266,6 +275,43 @@ describe("Catalog-driven pricing accuracy (replaces static-table)", () => {
  // the output rate in estimateCost.
  // 1M in + 1M out (all reasoning) -> 2 + 8 = 10 (reasoning at output rate).
     expect(estimateCost("o3", 1_000_000, 1_000_000, 1_000_000)).toBeCloseTo(10, 6);
+  });
+});
+
+describe("getLastPricingError getter (R2 §6, non-mutating observability)", () => {
+  const ORIGINAL = process.env.COWORK_MODEL_CATALOG_URL;
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.COWORK_MODEL_CATALOG_URL;
+    else process.env.COWORK_MODEL_CATALOG_URL = ORIGINAL;
+    vi.unstubAllGlobals();
+  });
+
+  test("returns null after a successful refresh", async () => {
+    process.env.COWORK_MODEL_CATALOG_URL = "https://fake.test/ok.json";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, status: 200, json: async () => ({}) }))
+    );
+    await refreshPricingFromCatalog();
+    expect(getLastPricingError()).toBeNull();
+  });
+
+  test("exposes the last error without resetting module state", async () => {
+    process.env.COWORK_MODEL_CATALOG_URL = "https://fake.test/broken.json";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("network down");
+      })
+    );
+    await refreshPricingFromCatalog();
+    const err1 = getLastPricingError();
+    const err2 = getLastPricingError();
+    // It is a real Error and the getter is non-mutating (repeated reads agree
+    // and never clear the captured error).
+    expect(err1).toBeInstanceOf(Error);
+    expect(err1).toBe(err2);
+    expect((err1 as Error).message).toMatch(/network down/);
   });
 });
 
