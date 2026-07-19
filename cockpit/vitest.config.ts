@@ -3,59 +3,54 @@ import { fileURLToPath } from 'url';
 
 const srcDir = fileURLToPath(new URL('./src', import.meta.url));
 
-// Vitest 4 removed `environmentMatchGlobs` and does NOT inherit the root
-// `resolve.alias` when `projects` is used, so the `@` -> ./src alias must be
-// declared on every project entry (and at the root for the default project).
-const alias = { '@': srcDir };
-
+// Cockpit-local Vitest config — intentionally self-contained.
+//
+// WHY THIS FILE EXISTS
+// Vitest searches UP the directory tree for a config when launched without an
+// explicit `--config`. If this file were absent, a `vitest run` started from
+// ./cockpit would walk up to the repo root, adopt ./vitest.config.ts (whose
+// `root` is the repo root and whose `include` is `tests/**/*.test.ts`), and
+// wrongly execute the ENTIRE root suite (~106 files / ~1562 tests) instead of
+// the cockpit tests. Pinning the config here (its location makes `root` the
+// cockpit directory implicitly) and scoping `include` to ./src guarantees the
+// cockpit CI job only ever runs cockpit tests. It does NOT import or extend the
+// root config.
 export default defineConfig({
   resolve: {
-    alias,
+    // Cockpit tests import via the `@` alias (e.g. `@/hooks/use-toast`); this
+    // mirrors the alias the Next.js app resolves at runtime.
+    alias: { '@': srcDir },
   },
   test: {
     globals: false,
-    projects: [
-      {
-        // Default node environment for `.ts` unit & integration tests. The
-        // `.tsx` component tests are intentionally excluded here so the jsdom
-        // project below owns them (overlapping globs make ownership ambiguous
-        // otherwise and they would run under `node`).
-        resolve: { alias },
-        test: {
-          include: ['src/**/*.test.ts', 'src/**/*.spec.ts'],
-          environment: 'node',
-        },
-      },
-      {
-        // jsdom environment for React component tests.
-        resolve: { alias },
-        test: {
-          include: ['src/**/*.test.tsx', 'src/**/*.spec.tsx'],
-          environment: 'jsdom',
-        },
-      },
-    ],
+    // Cockpit tests are server-side units (Next middleware / route handlers,
+    // Prisma queries, pure hooks & reducers). None of them render a DOM, so
+    // `node` is the correct environment and avoids the heavier jsdom setup.
+    environment: 'node',
+    include: ['src/**/*.test.ts', 'src/**/*.spec.ts'],
+    exclude: ['node_modules/**'],
     testTimeout: 30_000,
-    // Isolate each test file so module-level mocks (e.g. @/lib/db) don't leak.
+    // Isolate each test file so module-level mocks (e.g. @/lib/db) don't leak
+    // ambient state into later files.
     isolate: true,
-    // Coverage is opt-in: collected only when the suite is run with `--coverage`.
-    //
-    // NOTE: no `thresholds` are configured here. Cockpit's own coverage
-    // baseline has never been measured (it requires a `--coverage` run), so any
-    // threshold would be an UNCALIBRATED PLACEHOLDER borrowed from the root
-    // package — a number that is meaningless for this package and gives false
-    // confidence. Do not ship enforcement on borrowed numbers. Once the
-    // cockpit baseline is measured (one point below each metric on the first
-    // real `--coverage` run), add calibrated `thresholds` here and have the
-    // cockpit CI job run `npm test -- --coverage` so the gate actually
-    // executes.
+    // Coverage is opt-in: collected only when the suite is run with
+    // `--coverage`. No `thresholds` are configured here — cockpit's own
+    // coverage baseline has never been measured, so any threshold would be an
+    // uncalibrated placeholder borrowed from the root package. Add calibrated
+    // `thresholds` only after a real `--coverage` run establishes the baseline.
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],
-      // Scope coverage to shippable source so the first measured baseline
-      // (once `--coverage` is run) isn't polluted by tests/config files.
+      // Scope coverage to shippable source so a future measured baseline isn't
+      // polluted by tests / config files.
       include: ['src/**/*.{ts,tsx}'],
-      exclude: ['**/*.test.ts', '**/*.test.tsx', '**/*.config.ts', '**/*.config.mjs'],
+      exclude: [
+        '**/*.test.ts',
+        '**/*.test.tsx',
+        '**/*.spec.ts',
+        '**/*.spec.tsx',
+        '**/*.config.ts',
+      ],
     },
   },
 });

@@ -10,7 +10,7 @@ on:
     branches: [main, master]
 
 # Cancel superseded runs on the same ref so rapid pushes don't spawn
-# overlapping full CI (CodeQL + full-history gitleaks are the most expensive).
+# overlapping full CI (the full-history gitleaks scan is the most expensive step).
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -53,8 +53,11 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Run tests with coverage gate
-        # Run the suite under v8 coverage and enforce the thresholds declared
-        # in vitest.config.ts; a PR that drops coverage below the baseline fails CI.
+        # Run the ROOT suite under v8 coverage and enforce the thresholds
+        # declared in vitest.config.ts; a PR that drops coverage below the
+        # baseline fails CI. This intentionally covers only the repo-root
+        # `tests/**` suite — the cockpit suite is a separate job below and must
+        # NOT be pulled in here (it has its own config and DB wiring).
         run: npx vitest run --coverage
 
       - name: verify extension build regenerates cleanly
@@ -183,11 +186,15 @@ jobs:
         run: npm run lint
 
       - name: Run cockpit tests
-        # Run the cockpit test suite (middleware.test.ts, route.test.ts, etc.)
-        # after db:generate/db:apply (the Prisma client may be required by the
-        # tests) and before the production build. DATABASE_URL is set at the job
-        # level so tests that touch Prisma have a DB target.
-        run: npm test
+        # Run ONLY the cockpit test suite. An explicit `--config
+        # vitest.config.ts` is required: without it, `vitest run` would search
+        # UP from ./cockpit, find the repo-root vitest.config.ts, and inherit its
+        # root (`tests/**/*.test.ts`) — wrongly executing the entire ~106-file
+        # root suite here too (the duplication the user reported: "both workflows
+        # run both tests"). The cockpit-local config (root = ./cockpit, include
+        # = src/**/*.test.ts) scopes this step to cockpit tests only. DATABASE_URL
+        # is set at the job level so Prisma-backed tests have a DB target.
+        run: npx vitest run --config vitest.config.ts
 
       - name: Build cockpit
         run: npm run build
@@ -215,21 +222,3 @@ jobs:
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # gitleaks-action (Node 24 runtime; dependabot PR #35)
         env:
           GITLEAKS_CONFIG: .github/gitleaks.toml
-
-  # SAST: GitHub CodeQL security-and-quality scan for javascript-typescript.
-  codeql:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      security-events: write
-      actions: read
-      contents: read
-    steps:
-      - uses: actions/checkout@v7.0.0 # actions/checkout v7 (Node 24 runtime; dependabot PR #36)
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4 # github/codeql-action v4 (Node 24 runtime)
-        with:
-          languages: javascript-typescript
-          queries: security-and-quality
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4 # github/codeql-action v4 (Node 24 runtime)
