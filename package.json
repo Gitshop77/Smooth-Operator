@@ -41,6 +41,7 @@
     "node": ">=22.0.0"
   },
   "overrides": {
-    "flatted": "^3.4.2"
+    "flatted": "^3.4.2",
+    "adm-zip": "0.6.0"
   }
 }
