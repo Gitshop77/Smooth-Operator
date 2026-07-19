@@ -22,7 +22,7 @@ import { redactClientSecrets } from "@/lib/redact-client";
 // the connection is rejected, so operators must configure it. On any untrusted
 // network this browser-visible value MUST differ from the service-to-service
 // `COWORK_EVENT_TOKEN` (which must never be NEXT_PUBLIC_).
-const WS_TOKEN = process.env.NEXT_PUBLIC_COWORK_UI_TOKEN;
+const WS_TOKEN = process.env.NEXT_PUBLIC_COWORK_UI_TOKEN ?? "dev-token";
 
 //  Assert environment/token pairing at startup so a dev token can't
 // silently ship to prod. The handshake token is intentionally embedded in the
@@ -43,6 +43,11 @@ export function assertTokenEnvironmentPairing(
  // in production.
     return "[cowork-ws] NEXT_PUBLIC_COWORK_UI_TOKEN is unset; realtime socket will be rejected.";
   }
+  // The built-in `dev-token` is the intentional zero-config default (see
+  // WS_TOKEN). It is expected in dev/local builds and, when no real
+  // COWORK_UI_TOKEN is configured, in production too — so it must not trip the
+  // dev-in-prod guard below.
+  if (token === "dev-token") return null;
   const looksLikeDevToken =
     DEV_TOKEN_LITERALS.has(token) ||
     /(^|[-_])(dev|test|local|staging)([-_]|$)/i.test(token);

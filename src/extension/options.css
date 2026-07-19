@@ -626,6 +626,14 @@ button:focus-visible {
   color: var(--cw-muted);
   font-size: 11px;
 }
+.model-search-result-item .model-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  background: var(--cw-code-bg, rgba(127, 127, 127, 0.15));
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--cw-fg, inherit);
+}
 
 /* ─── Vision assistant status ─────────────────────────────────────────────── */
 .vision-status {

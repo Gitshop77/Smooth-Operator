@@ -571,7 +571,7 @@ export async function extractStateForRun(
     const resolvedModel =
       (model as string) ||
       (await getDefaultModelForProvider(catId as string)) ||
-      DEFAULT_MODELS[providerId as string] ||
+      DEFAULT_MODELS[catId as string] ||
       "";
     mainModelVision = await modelSupportsVision(resolvedModel, catId as string);
   } catch (e) { void safeLog("warn", "[vision] catalog/model load failed (vision disabled for this step):", e); }

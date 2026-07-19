@@ -10,15 +10,16 @@
 // capabilities without first authenticating.
 //
 // Token rules:
-// • If neither `COWORK_UI_TOKEN` nor `COWORK_EVENT_TOKEN` is set: fail-closed
-// with 401 (no safe default). `COWORK_UI_TOKEN` is preferred; the
-// `COWORK_EVENT_TOKEN` fallback exists only for backward compatibility.
-// • If the resolved token equals the well-known `dev-token`: fail-closed
-// with 401 UNLESS `COWORK_ALLOW_DEV_TOKEN=1` is explicitly set AND the
-// deployment is not production (`NODE_ENV !== 'production'`). This keeps
-// the well-known default from ever authenticating the cockpit in prod.
-// • If the resolved token is set to a real secret: require the
-// `X-Cowork-Token` header to match using a constant-time comparison.
+// • If a real `COWORK_UI_TOKEN` is set: require the `X-Cowork-Token` header to
+// match it using a constant-time comparison. The well-known `dev-token` is then
+// only accepted when `COWORK_ALLOW_DEV_TOKEN=1` AND `NODE_ENV` is a dev
+// environment (see below) — it can never authenticate in production.
+// • Zero-config (no real `COWORK_UI_TOKEN` set): the token resolves to the
+// built-in `dev-token`, which is ACCEPTED with no opt-in so the cockpit runs on
+// localhost with NO environment variables. The legacy `COWORK_EVENT_TOKEN`
+// fallback is preserved for backward compatibility.
+// • In all cases the `X-Cowork-Token` header must match using a constant-time
+// comparison.
 //
 // The matcher (below) limits this middleware to `/api/cowork/:path*`. The
 // public-discovery routes are bypassed in the function body (not in the
@@ -279,7 +280,25 @@ function authenticate(req: NextRequest, normalizedPathname: string): NextRespons
  // unset, so a `COWORK_UI_TOKEN=` (empty) in an .env would otherwise blank
  // `token` and fail-closed on every request even when a real EVENT_TOKEN is
  // configured. `||` collapses both empty and undefined to the fallback.
-  const token = process.env.COWORK_UI_TOKEN || process.env.COWORK_EVENT_TOKEN || undefined;
+ //
+ // Zero-config localhost: when no real `COWORK_UI_TOKEN` is configured, the
+ // `token` resolves to the built-in `dev-token` so the cockpit runs with NO
+ // environment variables. This is the intentional default for a single-operator,
+ // loopback dev setup — NOT a production fallback. A real `COWORK_UI_TOKEN` (or,
+ // for backward compatibility, `COWORK_EVENT_TOKEN`) continues to work exactly
+ // as before, and when such a real token IS set the dev-token is still only
+ // accepted with the `COWORK_ALLOW_DEV_TOKEN=1` opt-in (see the gate below).
+  const uiToken =
+    process.env.COWORK_UI_TOKEN && process.env.COWORK_UI_TOKEN.length > 0
+      ? process.env.COWORK_UI_TOKEN
+      : undefined;
+  const eventToken =
+    process.env.COWORK_EVENT_TOKEN && process.env.COWORK_EVENT_TOKEN.length > 0
+      ? process.env.COWORK_EVENT_TOKEN
+      : undefined;
+  // No real browser-facing UI token configured → zero-config mode.
+  const zeroConfig = !uiToken;
+  const token = uiToken ?? eventToken ?? DEV_TOKEN;
 
  // Fail-closed when the browser-facing NEXT_PUBLIC_COWORK_UI_TOKEN equals the
  // service-to-service COWORK_EVENT_TOKEN: the S2S secret would be embedded in the
@@ -306,16 +325,22 @@ function authenticate(req: NextRequest, normalizedPathname: string): NextRespons
     );
   }
 
- // The well-known `dev-token` is honored ONLY with an explicit opt-in
- // (`COWORK_ALLOW_DEV_TOKEN=1`) AND when `NODE_ENV` matches a known development
- // environment. Any unrecognized/blank `NODE_ENV` fails closed, so the dev-token
- // can never authenticate in production even if the opt-in is mistakenly set.
+ // The well-known `dev-token` is honored in zero-config mode (no real
+ // COWORK_UI_TOKEN set) WITHOUT any opt-in, so the cockpit works with no env on
+ // localhost. When a real COWORK_UI_TOKEN IS set, the dev-token is still only
+ // accepted with the explicit opt-in (`COWORK_ALLOW_DEV_TOKEN=1`) AND a
+ // development `NODE_ENV` — so it can never authenticate in production even if
+ // the opt-in is mistakenly set.
   const nodeEnv = (process.env.NODE_ENV ?? '').trim();
   const allowDevToken =
     process.env.COWORK_ALLOW_DEV_TOKEN === '1' &&
     DEV_ENV_RE.test(nodeEnv);
 
-  if (!token || (token === DEV_TOKEN && !allowDevToken)) {
+  // In zero-config mode the built-in dev-token is always accepted (no env
+  // needed). Otherwise the existing opt-in rule applies: dev-token requires
+  // COWORK_ALLOW_DEV_TOKEN=1 in a non-production NODE_ENV.
+  const devTokenBlocked = token === DEV_TOKEN && !allowDevToken && !zeroConfig;
+  if (!token || devTokenBlocked) {
     warnOnce(
       'no-token',
       () =>
@@ -492,7 +517,7 @@ function pageWithCsp(req: NextRequest, requestId: string): NextResponse {
   return withSecurityHeaders(withRequestId(res, requestId));
 }
 
-export function middleware(req: NextRequest): NextResponse {
+export function proxy(req: NextRequest): NextResponse {
   const start = Date.now();
   const incoming = req.headers.get('x-request-id');
   const requestId = incoming && REQ_ID_RE.test(incoming) ? incoming : newRequestId();

@@ -50,7 +50,12 @@ const TQ = {
  * The `NEXT_PUBLIC_` prefix exposes this to the browser, so it must NEVER equal
  * the service-to-service `COWORK_EVENT_TOKEN` on any untrusted network.
  */
-const COWORK_TOKEN = process.env.NEXT_PUBLIC_COWORK_UI_TOKEN;
+// When `NEXT_PUBLIC_COWORK_UI_TOKEN` is unset (zero-config localhost) the
+// built-in `dev-token` is used so cockpit API calls authenticate with NO
+// environment variables. This MUST match the server-side secret resolved by
+// middleware.ts (which also defaults to `dev-token` when COWORK_UI_TOKEN is
+// unset). On any untrusted network set a real COWORK_UI_TOKEN + its mirror.
+const COWORK_TOKEN = process.env.NEXT_PUBLIC_COWORK_UI_TOKEN ?? "dev-token";
 
 // Fail loud on a missing UI token: warn at module load so the operator knows
 // to set `NEXT_PUBLIC_COWORK_UI_TOKEN` rather than hitting opaque auth failures.

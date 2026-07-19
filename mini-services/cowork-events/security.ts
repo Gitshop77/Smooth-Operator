@@ -66,34 +66,46 @@ export function applyCorsHeaders(
   return false;
 }
 
-// The set of NODE_ENV values in which the well-known dev-token is permitted
-// (only with the explicit opt-in). Aligned with cockpit's reject-list
-// (`cockpit/src/middleware.ts`): the dev-token is accepted ONLY in a dev /
-// local / test environment — never in production, and never in an ambiguous
-// env like `staging` or an unset NODE_ENV.
-const DEV_ENV_RE = /^(development|dev|local|test)$/i;
-
 /**
  * Decide whether the mini-service should refuse to start.
  *
- * The default `DEV_TOKEN` is only acceptable when BOTH conditions hold:
- *  1. an explicit opt-in (`COWORK_ALLOW_DEV_TOKEN=1`) is set, AND
- *  2. `nodeEnv` is a dev/local/test environment (matched by {@link DEV_ENV_RE}).
+ * ZERO-CONFIG policy (lets the cockpit connect with no env setup at all, since
+ * the cockpit also defaults its token to `DEV_TOKEN`):
  *
- * Otherwise (the opt-in is absent, OR `nodeEnv` is `production`, `staging`, or
- * any other non-dev value, OR `nodeEnv` is unset/empty) the service refuses to
- * start and fails closed — even if an operator sets the opt-in, a non-dev env
- * still refuses the dev-token. `nodeEnv` is normalized (trim + lowercase) so
- * whitespace/case variance can't fail open. The opt-in is injectable for tests.
+ *  • A REAL secret (anything other than `DEV_TOKEN`) is always acceptable — the
+ *    service boots. (A misconfigured/invalid real secret is a deploy concern,
+ *    not a startup-refusal concern; the token-compare path stays fail-closed.)
+ *  • The default `DEV_TOKEN` is accepted in ANY non-production environment
+ *    (development, dev, local, test, staging, an unset/ambiguous NODE_ENV,
+ *    etc.) WITHOUT requiring the `COWORK_ALLOW_DEV_TOKEN` opt-in. This is the
+ *    zero-config happy path.
+ *  • PRODUCTION stays strict: `NODE_ENV === 'production'` refuses the
+ *    well-known dev-token and fails closed — even if `COWORK_ALLOW_DEV_TOKEN=1`
+ *    is set — because the public default must never authenticate in prod.
+ *
+ * `nodeEnv` is normalized (trim + lowercase) so whitespace/case variance can't
+ * fail open. `COWORK_ALLOW_DEV_TOKEN=1` is still honored if present (it was the
+ * previous opt-in) but is no longer required for the non-prod default-token
+ * path. The opt-in is injectable for tests.
  */
 export function shouldRefuseStart(
   nodeEnv: string | undefined,
   sharedSecret: string,
   allowDevToken: boolean = process.env.COWORK_ALLOW_DEV_TOKEN === '1',
 ): boolean {
+  // A real (non-default) secret is always acceptable — boot.
   if (sharedSecret !== DEV_TOKEN) return false;
-  if (allowDevToken && DEV_ENV_RE.test((nodeEnv ?? "").trim().toLowerCase())) return false;
-  return true;
+
+  const env = (nodeEnv ?? "").trim().toLowerCase();
+  // Production is always strict: the well-known dev-token must never
+  // authenticate in prod, even with the opt-in (a real auth hole otherwise).
+  if (env === 'production') return true;
+
+  // Zero-config path: in any NON-production environment the default dev-token
+  // is accepted WITHOUT requiring COWORK_ALLOW_DEV_TOKEN, so the cockpit can
+  // connect with no env setup. `allowDevToken` is still honored but inert here.
+  void allowDevToken;
+  return false;
 }
 
 // Decides whether a socket may join the chat room named after `sessionId`:

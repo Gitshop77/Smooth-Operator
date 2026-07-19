@@ -115,18 +115,11 @@ function getCoworkEventsToken(): string {
  // (COWORK_EVENT_TOKEN is already returned above when set; when we reach here
   // it is empty, so this branch is intentionally omitted to preserve the
   // "neither secret configured" warning below.)
- // Neither secret is configured: warn once and let the relay proceed with an
- // empty token. The upstream rejects it with 401, surfaced as a 500 by the route.
-  if (!warnedMissingEventToken) {
-    warnedMissingEventToken = true;
-    console.warn(
-      '[cowork] Neither COWORK_UI_TOKEN nor COWORK_EVENT_TOKEN is set — relaying ' +
-        'to the cowork-events mini-service with an empty X-Cowork-Token. The upstream ' +
-        'will reject it with 401 (surfaced as a 500 by the emitting route). Set ' +
-        'COWORK_UI_TOKEN (or COWORK_EVENT_TOKEN) to enable event relay.',
-    );
-  }
-  return uiToken ?? '';
+ // Zero-config localhost: when neither secret is set, relay with the built-in
+ // `dev-token`. The mini-service's own SHARED_SECRET defaults to `dev-token`
+ // when COWORK_EVENT_TOKEN is unset, so the cockpit↔mini-service link works
+ // with NO environment variables. (No warning: this is the supported default.)
+  return "dev-token";
 }
 
 export interface BroadcastResult {

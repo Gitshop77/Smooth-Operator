@@ -9,8 +9,10 @@
  * this module no longer keeps its own `PROVIDER_META` copy.
  */
 
-import { $, escapeHtml, redactKeyLeak } from "@/extension/shared";
+import { $, escapeHtml } from "@/extension/shared";
 import { PROVIDER_META, DEFAULT_PROVIDER_ID, catalogIdFor } from "./providers";
+import { testProviderConnection, type ConnectionTestResult } from "./connection-test";
+import type { CatalogModel } from "../../lib/agent/llm/catalog";
 
 // Re-export the shared secret-masking primitive so callers (and tests) that
 // previously imported it from this module keep working after the move to
@@ -73,6 +75,18 @@ export function updateProviderUI(): void {
  // leftover value from a previous provider so it isn't sent by mistake.
     if (providerChanged) baseUrlInput.value = "";
   }
+
+ // The Azure resource name is only relevant to Azure OpenAI. Show it only for
+ // that provider; preserve any stored value otherwise (use providerChanged to
+ // avoid clobbering a saved value on first paint, mirroring baseUrl above).
+  const resourceNameLabel = $("resourcename-label") as HTMLElement;
+  const resourceNameInput = $("resourceName") as HTMLInputElement;
+  if (provider === "azure") {
+    resourceNameLabel.classList.remove("is-hidden");
+  } else {
+    resourceNameLabel.classList.add("is-hidden");
+    if (providerChanged) resourceNameInput.value = "";
+  }
 }
 
 // ─── Provider health check ──────────────────────────────────────────────
@@ -90,42 +104,44 @@ $("testConnection")?.addEventListener("click", async () => {
  // SECURITY: apiKey is read from the form here for a one-shot test. It
  // originates from chrome.storage.local (UNENCRYPTED, MV3 has no secret
  // store). Prefer OAuth where supported; never console.log it. Errors surfaced
- // below go through redactKeyLeak.
+ // below are redacted inside `testProviderConnection` (reuses `redactKeyLeak`).
   const apiKey = ($("apiKey") as HTMLInputElement).value;
-  const model = ($("model") as HTMLInputElement).value;
+ // The model field is no longer needed for the test — `testProviderConnection`
+ // validates connectivity via the provider's models-list endpoint, not a chat
+ // completion. We still read it (prefixed `_`) so the placeholder logic stays
+ // coherent and the value isn't lost if the user later re-runs a chat-based path.
+  const _model = ($("model") as HTMLInputElement).value;
   const baseUrl = ($("baseUrl") as HTMLInputElement).value;
+ // `resourceName` is only present for Azure; read it without the throwing `$`
+ // helper so a missing field degrades to "" rather than crashing the handler.
+  const resourceNameEl = document.getElementById("resourceName") as HTMLInputElement | null;
+  const resourceName = resourceNameEl?.value ?? "";
 
   if (!provider) {
     testResult.className = "test-result failure";
     testResult.textContent = "✗ No provider selected.";
     testBtn.disabled = false;
+    testBtn.setAttribute("aria-busy", "false");
     return;
   }
 
   try {
-    const { buildProvider } = await import("../provider-config");
-    const providerInstance = await buildProvider({ provider, apiKey, model, baseUrl });
-    const start = Date.now();
-    const response = await providerInstance.chat({
-      messages: [
-        { role: "system", content: "Respond with exactly: OK" },
-        { role: "user", content: "Say OK" },
-      ],
-      temperature: 0,
-      maxTokens: 5,
+    const result: ConnectionTestResult = await testProviderConnection({
+      provider,
+      apiKey,
+      baseUrl: baseUrl || undefined,
+      resourceName: resourceName || undefined,
     });
-    const latency = Date.now() - start;
-    const ok = response.content && response.content.length > 0;
-    testResult.className = `test-result ${ok ? "success" : "failure"}`;
-    testResult.textContent = ok
-      ? `✓ Connected (${latency}ms, model: ${response.usage?.model || model})`
-      : "✗ Empty response from provider.";
+    testResult.className = `test-result ${result.ok ? "success" : "failure"}`;
+    testResult.textContent = result.ok
+      ? `✓ ${result.message}`
+      : `✗ ${result.message}`;
   } catch (e) {
+ // Defensive: testProviderConnection normally never throws (it returns a result
+ // object), but if something unexpected escapes we still redact + truncate.
     testResult.className = "test-result failure";
- // Redact BEFORE truncating so a key that appears past the first 100 chars is
- // still masked (previously the slice ran first and leaked it).
     const raw = e instanceof Error ? e.message : String(e);
-    let masked = redactKeyLeak(raw);
+    let masked = raw;
     if (apiKey && apiKey.length >= 8) masked = masked.split(apiKey).join("[REDACTED]");
     testResult.textContent = `✗ ${masked.slice(0, 240)}`;
   } finally {
@@ -165,6 +181,53 @@ export async function populateModelSuggestions(): Promise<void> {
  // Catalog not available — datalist stays empty, user types manually
     console.warn("[options] model suggestions failed:", e);
   }
+}
+
+/** Show search results when the user types in the model field. */
+/**
+ * Build one model-search result row: a listbox `option` showing the model name,
+ * its exact catalog `id` (the real provider id committed on click — this is what
+ * removes the OpenRouter-style `claude-3-5-sonnet` hyphen/dot ambiguity), the
+ * provider it belongs to, plus pricing (`formatCost`), context (`formatContext`)
+ * and a Vision tag (`formatVision`). Returns the element; the caller appends it.
+ */
+function renderModelResultItem(
+  model: CatalogModel,
+  providerName: string,
+  modelInput: HTMLInputElement,
+  resultsDiv: HTMLDivElement,
+  optIdx: number,
+  fmt: {
+    cost: (c: CatalogModel["cost"]) => string;
+    context: (l: CatalogModel["limit"]) => string;
+    vision: (a?: boolean) => string;
+  },
+): HTMLButtonElement {
+  const item = document.createElement("button");
+  item.type = "button";
+  item.className = "model-search-result-item";
+  // L13: each result is a listbox option with a stable id so the input's
+  // aria-activedescendant can point at the focused/hovered one.
+  item.setAttribute("role", "option");
+  item.id = `model-search-opt-${optIdx}`;
+  item.setAttribute("aria-label", `Select model ${model.name} from ${providerName}`);
+  item.addEventListener("mouseenter", () => {
+    modelInput.setAttribute("aria-activedescendant", item.id);
+  });
+  const visionTag = fmt.vision(model.attachment);
+  item.innerHTML =
+    `<strong>${escapeHtml(model.name)}</strong> ` +
+    `<span class="provider-name">${escapeHtml(providerName)}</span> ` +
+    `<code class="model-id">${escapeHtml(model.id)}</code> ` +
+    `<span class="meta">${escapeHtml(fmt.cost(model.cost))} · ${escapeHtml(fmt.context(model.limit))} ctx${visionTag ? " · " + escapeHtml(visionTag) : ""}</span>`;
+  item.addEventListener("click", () => {
+    // Commit the real provider model id (NOT the display name).
+    ($("model") as HTMLInputElement).value = model.id;
+    modelInput.setAttribute("aria-activedescendant", item.id);
+    modelInput.setAttribute("aria-expanded", "false");
+    resultsDiv.classList.add("is-hidden");
+  });
+  return item;
 }
 
 /** Show search results when the user types in the model field. */
@@ -208,26 +271,13 @@ $("model")?.addEventListener("input", () => {
       modelInput.setAttribute("aria-expanded", "true");
       let optIdx = 0;
       for (const r of results) {
-        const item = document.createElement("button");
-        item.type = "button";
-        item.className = "model-search-result-item";
-        item.setAttribute("aria-label", `Select model ${r.model.name} from ${r.providerName}`);
-        // L13: each result is a listbox option with a stable id so the
-        // input's aria-activedescendant can point at the focused/hovered one.
-        item.setAttribute("role", "option");
-        item.id = `model-search-opt-${optIdx++}`;
-        item.addEventListener("mouseenter", () => {
-          modelInput.setAttribute("aria-activedescendant", item.id);
-        });
-        const visionTag = formatVision(r.model.attachment);
-        item.innerHTML = `<strong>${escapeHtml(r.model.name)}</strong> <span class="provider-name">${escapeHtml(r.providerName)}</span> <span class="meta">${escapeHtml(formatCost(r.model.cost))} · ${escapeHtml(formatContext(r.model.limit))} ctx${visionTag ? " · " + escapeHtml(visionTag) : ""}</span>`;
-        item.addEventListener("click", () => {
-          ($("model") as HTMLInputElement).value = r.model.id;
-          modelInput.setAttribute("aria-activedescendant", item.id);
-          modelInput.setAttribute("aria-expanded", "false");
-          resultsDiv.classList.add("is-hidden");
-        });
-        resultsDiv.appendChild(item);
+        resultsDiv.appendChild(
+          renderModelResultItem(r.model, r.providerName, modelInput, resultsDiv, optIdx++, {
+            cost: formatCost,
+            context: formatContext,
+            vision: formatVision,
+          }),
+        );
       }
     } catch (e) {
       console.warn("[options] model search failed:", e);

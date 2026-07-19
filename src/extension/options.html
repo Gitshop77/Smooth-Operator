@@ -56,6 +56,12 @@
           <small>For OpenAI-compatible providers. Auto-filled with the provider default.</small>
         </label>
 
+        <label id="resourcename-label" class="is-hidden">
+          <span>Azure resource name</span>
+          <input type="text" id="resourceName" placeholder="your-resource" autocomplete="off" />
+          <small>Used to build <code>https://{resource}.openai.azure.com</code> when no Base URL is set. Optional if you supply a full Base URL.</small>
+        </label>
+
         <div class="test-connection">
           <button type="button" id="testConnection" class="btn btn-ghost">Test connection</button>
           <span id="testResult" class="test-result" role="status" aria-live="polite"></span>
@@ -77,7 +83,7 @@
           </label>
           <label>
             <span>Default model</span>
-            <input type="text" id="model" placeholder="gpt-4o, claude-3-5-sonnet, gemini-2.0-flash" autocomplete="off" list="model-suggestions" />
+            <input type="text" id="model" placeholder="gpt-4o, claude-sonnet-4-5, gemini-2.5-flash" autocomplete="off" list="model-suggestions" />
             <small>Any model your API key supports. Type to search the models.dev catalog.</small>
             <datalist id="model-suggestions"></datalist>
             <div id="model-search-results" class="model-search-results is-hidden"></div>

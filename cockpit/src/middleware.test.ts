@@ -50,60 +50,60 @@ describe('middleware token enforcement', () => {
   });
 
   it('fails closed (401) when COWORK_EVENT_TOKEN is unset', async () => {
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED));
     expect(res.status).toBe(401);
   });
 
   it('fails closed (401) on the well-known dev-token without explicit opt-in', async () => {
     process.env.COWORK_EVENT_TOKEN = 'dev-token';
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED));
     expect(res.status).toBe(401);
   });
 
   it('allows the dev-token ONLY when COWORK_ALLOW_DEV_TOKEN=1', async () => {
     process.env.COWORK_EVENT_TOKEN = 'dev-token';
     process.env.COWORK_ALLOW_DEV_TOKEN = '1';
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED));
     expect(res.status).toBe(200);
   });
 
   it('fails closed (401) when COWORK_ALLOW_DEV_TOKEN is "true" (not exact "1")', async () => {
     process.env.COWORK_EVENT_TOKEN = 'dev-token';
     process.env.COWORK_ALLOW_DEV_TOKEN = 'true';
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED));
     expect(res.status).toBe(401);
   });
 
   it('fails closed (401) when COWORK_ALLOW_DEV_TOKEN is "yes" (not exact "1")', async () => {
     process.env.COWORK_EVENT_TOKEN = 'dev-token';
     process.env.COWORK_ALLOW_DEV_TOKEN = 'yes';
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED));
     expect(res.status).toBe(401);
   });
 
   it('returns 401 when a real token is set but no header is presented', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED));
     expect(res.status).toBe(401);
   });
 
   it('returns 200 when the X-Cowork-Token header matches (constant-time path)', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED, '', { 'x-cowork-token': REAL_TOKEN }));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED, '', { 'x-cowork-token': REAL_TOKEN }));
     expect(res.status).toBe(200);
   });
 
   it('returns 401 when the presented token is wrong', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED, '', { 'x-cowork-token': 'wrong-token' }));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED, '', { 'x-cowork-token': 'wrong-token' }));
     expect(res.status).toBe(401);
   });
 
@@ -111,9 +111,9 @@ describe('middleware token enforcement', () => {
  // A shorter received value that byte-matches the start of the secret must
  // still fail: the constant-time compare folds the length mismatch in.
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
+    const { proxy } = await import('@/proxy');
     const prefix = REAL_TOKEN.slice(0, REAL_TOKEN.length - 1);
-    const res = middleware(fakeReq(PROTECTED, '', { 'x-cowork-token': prefix }));
+    const res = proxy(fakeReq(PROTECTED, '', { 'x-cowork-token': prefix }));
     expect(res.status).toBe(401);
   });
 
@@ -122,18 +122,18 @@ describe('middleware token enforcement', () => {
  // must still fail — the extra bytes beyond the secret length are not
  // silently ignored into a false match.
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
+    const { proxy } = await import('@/proxy');
     const overLength = `${REAL_TOKEN}extra`;
-    const res = middleware(fakeReq(PROTECTED, '', { 'x-cowork-token': overLength }));
+    const res = proxy(fakeReq(PROTECTED, '', { 'x-cowork-token': overLength }));
     expect(res.status).toBe(401);
   });
 
   it('rejects an over-length token (beyond the fixed cap) before the constant-time compare', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
+    const { proxy } = await import('@/proxy');
     const tooLong = `${REAL_TOKEN}${'x'.repeat(9000)}`;
     expect(tooLong.length).toBeGreaterThan(8192);
-    const res = middleware(fakeReq(PROTECTED, '', { 'x-cowork-token': tooLong }));
+    const res = proxy(fakeReq(PROTECTED, '', { 'x-cowork-token': tooLong }));
     expect(res.status).toBe(401);
   });
 
@@ -145,15 +145,15 @@ describe('middleware token enforcement', () => {
     expect(longSecret.length).toBeGreaterThan(1024);
     expect(longSecret.length).toBeLessThanOrEqual(8192);
     process.env.COWORK_EVENT_TOKEN = longSecret;
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED, '', { 'x-cowork-token': longSecret }));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED, '', { 'x-cowork-token': longSecret }));
     expect(res.status).toBe(200);
   });
 
   it('returns 401 when the presented token is an empty string', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED, '', { 'x-cowork-token': '' }));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED, '', { 'x-cowork-token': '' }));
     expect(res.status).toBe(401);
   });
 
@@ -163,8 +163,8 @@ describe('middleware token enforcement', () => {
     process.env.COWORK_EVENT_TOKEN = 'dev-token';
     process.env.COWORK_ALLOW_DEV_TOKEN = '1';
     (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED));
     expect(res.status).toBe(401);
   });
 
@@ -174,8 +174,8 @@ describe('middleware token enforcement', () => {
     process.env.COWORK_EVENT_TOKEN = 'dev-token';
     process.env.COWORK_ALLOW_DEV_TOKEN = '1';
     delete (process.env as Record<string, string | undefined>).NODE_ENV;
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED));
     expect(res.status).toBe(401);
   });
 
@@ -186,8 +186,8 @@ describe('middleware token enforcement', () => {
     process.env.COWORK_EVENT_TOKEN = 'dev-token';
     process.env.COWORK_ALLOW_DEV_TOKEN = '1';
     (process.env as Record<string, string | undefined>).NODE_ENV = 'staging';
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED));
     expect(res.status).toBe(401);
   });
 
@@ -196,14 +196,14 @@ describe('middleware token enforcement', () => {
  // legacy COWORK_EVENT_TOKEN must still authenticate (backward compat).
     process.env.COWORK_UI_TOKEN = '';
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED, '', { 'x-cowork-token': REAL_TOKEN }));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED, '', { 'x-cowork-token': REAL_TOKEN }));
     expect(res.status).toBe(200);
   });
 
   it('enforces the token on non-GET protected routes (POST with valid token → 200)', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
+    const { proxy } = await import('@/proxy');
     const res = middleware(
       fakeReq(PROTECTED, '', { 'x-cowork-token': REAL_TOKEN }, 'POST'),
     );
@@ -212,74 +212,74 @@ describe('middleware token enforcement', () => {
 
   it('enforces the token on non-GET protected routes (DELETE without token → 401)', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED, '', {}, 'DELETE'));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED, '', {}, 'DELETE'));
     expect(res.status).toBe(401);
   });
 
   it('bypasses auth for public-discovery routes regardless of token', async () => {
     delete process.env.COWORK_EVENT_TOKEN;
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PUBLIC));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PUBLIC));
     expect(res.status).toBe(200);
   });
 
   it('bypasses auth for public-discovery routes with a trailing slash (normalized)', async () => {
     delete process.env.COWORK_EVENT_TOKEN;
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PUBLIC + '/'));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PUBLIC + '/'));
     expect(res.status).toBe(200);
   });
 
   it('still 401s unknown paths that merely resemble discovery routes', async () => {
     delete process.env.COWORK_EVENT_TOKEN;
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PUBLIC + '/sub'));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PUBLIC + '/sub'));
     expect(res.status).toBe(401);
   });
 
   it('fails closed (401) on uppercase-spoofed public-discovery paths', async () => {
     delete process.env.COWORK_EVENT_TOKEN;
-    const { middleware } = await import('@/middleware');
-    expect(middleware(fakeReq('/api/cowork/AGENT/manifest')).status).toBe(401);
-    expect(middleware(fakeReq('/api/cowork/Agent/Manifest')).status).toBe(401);
+    const { proxy } = await import('@/proxy');
+    expect(proxy(fakeReq('/api/cowork/AGENT/manifest')).status).toBe(401);
+    expect(proxy(fakeReq('/api/cowork/Agent/Manifest')).status).toBe(401);
   });
 
   it('SSE stream 401s from a browser EventSource (no header, no query token)', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(SSE));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(SSE));
     expect(res.status).toBe(401);
   });
 
   it('SSE stream accepts a valid `token` query param and keeps the header path working', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
+    const { proxy } = await import('@/proxy');
  // query-param path
-    const viaQuery = middleware(fakeReq(SSE, `token=${REAL_TOKEN}`));
+    const viaQuery = proxy(fakeReq(SSE, `token=${REAL_TOKEN}`));
     expect(viaQuery.status).toBe(200);
  // header path still works for SSE
-    const viaHeader = middleware(fakeReq(SSE, '', { 'x-cowork-token': REAL_TOKEN }));
+    const viaHeader = proxy(fakeReq(SSE, '', { 'x-cowork-token': REAL_TOKEN }));
     expect(viaHeader.status).toBe(200);
  // wrong query token → 401
-    const badQuery = middleware(fakeReq(SSE, 'token=nope'));
+    const badQuery = proxy(fakeReq(SSE, 'token=nope'));
     expect(badQuery.status).toBe(401);
   });
 
   it('SSE stream honors a trailing-slash normalized path with ?token=', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
+    const { proxy } = await import('@/proxy');
  // trailing slash appended by a proxy/base-path must not break ?token= auth
-    const ok = middleware(fakeReq(SSE + '/', `token=${REAL_TOKEN}`));
+    const ok = proxy(fakeReq(SSE + '/', `token=${REAL_TOKEN}`));
     expect(ok.status).toBe(200);
-    const bad = middleware(fakeReq(SSE + '/', 'token=nope'));
+    const bad = proxy(fakeReq(SSE + '/', 'token=nope'));
     expect(bad.status).toBe(401);
   });
 
   it('does NOT honor the query-token path on non-SSE protected routes', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED, `token=${REAL_TOKEN}`));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED, `token=${REAL_TOKEN}`));
     expect(res.status).toBe(401);
   });
 });
@@ -304,10 +304,10 @@ describe('middleware request logging never leaks the SSE bearer token', () => {
 
   it('never writes the ?token= bearer secret to the request log for an authorized SSE request', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
+    const { proxy } = await import('@/proxy');
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      const res = middleware(fakeReq(SSE, `token=${REAL_TOKEN}`));
+      const res = proxy(fakeReq(SSE, `token=${REAL_TOKEN}`));
       expect(res.status).toBe(200);
       const logged = spy.mock.calls.map((c) => c.join(' ')).join('\n');
       expect(logged).not.toContain(REAL_TOKEN);
@@ -319,10 +319,10 @@ describe('middleware request logging never leaks the SSE bearer token', () => {
 
   it('logs only the pathname (not the query string) for a protected request carrying ?token=', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
+    const { proxy } = await import('@/proxy');
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      middleware(fakeReq(PROTECTED, `token=${REAL_TOKEN}`));
+      proxy(fakeReq(PROTECTED, `token=${REAL_TOKEN}`));
       const logged = spy.mock.calls.map((c) => c.join(' ')).join('\n');
       expect(logged).not.toContain(REAL_TOKEN);
       expect(logged).toContain(PROTECTED);
@@ -346,7 +346,7 @@ describe('middleware x-request-id reflection and sanitization', () => {
 
   it('echoes a valid inbound x-request-id back on an authorized response', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
+    const { proxy } = await import('@/proxy');
     const res = middleware(
       fakeReq(PROTECTED, '', { 'x-cowork-token': REAL_TOKEN, 'x-request-id': 'abc-123' }),
     );
@@ -355,7 +355,7 @@ describe('middleware x-request-id reflection and sanitization', () => {
 
   it('replaces a malicious inbound x-request-id with a freshly minted id', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
+    const { proxy } = await import('@/proxy');
  // Header value with spaces (rejected by the correlation-id allowlist) — not
  // raw CRLF, which the test's own Headers.set would throw on.
     const malicious = 'bad injected value';
@@ -369,7 +369,7 @@ describe('middleware x-request-id reflection and sanitization', () => {
 
   it('replaces an over-length inbound x-request-id with a freshly minted id', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
+    const { proxy } = await import('@/proxy');
     const tooLong = 'a'.repeat(200);
     const res = middleware(
       fakeReq(PROTECTED, '', { 'x-cowork-token': REAL_TOKEN, 'x-request-id': tooLong }),
@@ -395,34 +395,34 @@ describe('middleware UI token: COWORK_UI_TOKEN is preferred and independent', ()
   });
 
   it('fails closed (401) when only COWORK_UI_TOKEN is unset', async () => {
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED));
     expect(res.status).toBe(401);
   });
 
   it('accepts a matching X-Cowork-Token when COWORK_UI_TOKEN is set (COWORK_EVENT_TOKEN unset)', async () => {
     process.env.COWORK_UI_TOKEN = UI_TOKEN;
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED, '', { 'x-cowork-token': UI_TOKEN }));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED, '', { 'x-cowork-token': UI_TOKEN }));
     expect(res.status).toBe(200);
   });
 
   it('rejects a wrong header when COWORK_UI_TOKEN is set', async () => {
     process.env.COWORK_UI_TOKEN = UI_TOKEN;
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED, '', { 'x-cowork-token': 'wrong' }));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED, '', { 'x-cowork-token': 'wrong' }));
     expect(res.status).toBe(401);
   });
 
   it('treats a leaked COWORK_EVENT_TOKEN as useless when COWORK_UI_TOKEN is set (independence)', async () => {
     process.env.COWORK_UI_TOKEN = UI_TOKEN;
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN; // a leaked S2S token
-    const { middleware } = await import('@/middleware');
+    const { proxy } = await import('@/proxy');
  // Presenting the service-to-service token on the UI surface must NOT auth.
-    const res = middleware(fakeReq(PROTECTED, '', { 'x-cowork-token': REAL_TOKEN }));
+    const res = proxy(fakeReq(PROTECTED, '', { 'x-cowork-token': REAL_TOKEN }));
     expect(res.status).toBe(401);
  // The real UI token still works.
-    const ok = middleware(fakeReq(PROTECTED, '', { 'x-cowork-token': UI_TOKEN }));
+    const ok = proxy(fakeReq(PROTECTED, '', { 'x-cowork-token': UI_TOKEN }));
     expect(ok.status).toBe(200);
   });
 
@@ -430,31 +430,31 @@ describe('middleware UI token: COWORK_UI_TOKEN is preferred and independent', ()
     process.env.COWORK_UI_TOKEN = REAL_TOKEN;
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
     process.env.NEXT_PUBLIC_COWORK_UI_TOKEN = REAL_TOKEN;
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED, '', { 'x-cowork-token': REAL_TOKEN }));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED, '', { 'x-cowork-token': REAL_TOKEN }));
     expect(res.status).toBe(401);
-    const sse = middleware(fakeReq(SSE, `token=${REAL_TOKEN}`));
+    const sse = proxy(fakeReq(SSE, `token=${REAL_TOKEN}`));
     expect(sse.status).toBe(401);
   });
 
   it('SSE stream honors COWORK_UI_TOKEN via header and ?token= query param', async () => {
     process.env.COWORK_UI_TOKEN = UI_TOKEN;
-    const { middleware } = await import('@/middleware');
+    const { proxy } = await import('@/proxy');
  // header path
-    const viaHeader = middleware(fakeReq(SSE, '', { 'x-cowork-token': UI_TOKEN }));
+    const viaHeader = proxy(fakeReq(SSE, '', { 'x-cowork-token': UI_TOKEN }));
     expect(viaHeader.status).toBe(200);
  // query-param path (browser EventSource cannot send headers)
-    const viaQuery = middleware(fakeReq(SSE, `token=${UI_TOKEN}`));
+    const viaQuery = proxy(fakeReq(SSE, `token=${UI_TOKEN}`));
     expect(viaQuery.status).toBe(200);
  // wrong query token → 401
-    const badQuery = middleware(fakeReq(SSE, 'token=nope'));
+    const badQuery = proxy(fakeReq(SSE, 'token=nope'));
     expect(badQuery.status).toBe(401);
   });
 });
 
 describe('tokensMatch constant-time cap invariant', () => {
   it('gates rejection only on the fixed cap, never on the secret length', async () => {
-    const { tokensMatch, MAX_TOKEN_CHARS } = await import('@/middleware');
+    const { tokensMatch, MAX_TOKEN_CHARS } = await import('@/proxy');
     // Pin the cap so the no-secret-length-early-return fix cannot be silently
     // reverted to a secret-dependent branch.
     expect(MAX_TOKEN_CHARS).toBe(8192);
@@ -498,8 +498,8 @@ describe('middleware per-request CSP nonce on HTML page responses (G10 guard)', 
   });
 
   it('emits a per-request content-security-policy with a nonce and connect-src self on a page response', async () => {
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq('/some-page'));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq('/some-page'));
     const csp = res.headers.get('content-security-policy');
     expect(csp).toBeTruthy();
     expect(csp).toContain('nonce-');
@@ -507,9 +507,9 @@ describe('middleware per-request CSP nonce on HTML page responses (G10 guard)', 
   });
 
   it('mints a fresh nonce per page response (no nonce reuse across requests)', async () => {
-    const { middleware } = await import('@/middleware');
-    const first = middleware(fakeReq('/some-page')).headers.get('content-security-policy') ?? '';
-    const second = middleware(fakeReq('/some-page')).headers.get('content-security-policy') ?? '';
+    const { proxy } = await import('@/proxy');
+    const first = proxy(fakeReq('/some-page')).headers.get('content-security-policy') ?? '';
+    const second = proxy(fakeReq('/some-page')).headers.get('content-security-policy') ?? '';
     const firstNonce = (first.match(/nonce-([a-f0-9-]+)/) || [])[1];
     const secondNonce = (second.match(/nonce-([a-f0-9-]+)/) || [])[1];
     expect(firstNonce).toBeTruthy();
@@ -531,16 +531,16 @@ describe('middleware baseline security response headers', () => {
   });
 
   it('includes nosniff and no-referrer on a 401 response', async () => {
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq(PROTECTED));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq(PROTECTED));
     expect(res.status).toBe(401);
     expect(res.headers.get('x-content-type-options')).toBe('nosniff');
     expect(res.headers.get('referrer-policy')).toBe('no-referrer');
   });
 
   it('includes nosniff and no-referrer on a page response', async () => {
-    const { middleware } = await import('@/middleware');
-    const res = middleware(fakeReq('/some-page'));
+    const { proxy } = await import('@/proxy');
+    const res = proxy(fakeReq('/some-page'));
     expect(res.headers.get('x-content-type-options')).toBe('nosniff');
     expect(res.headers.get('referrer-policy')).toBe('no-referrer');
   });
@@ -568,15 +568,15 @@ describe('middleware brute-force throttle (checkRateLimit via the middleware pat
   });
 
   it('returns 429 only after RATE_LIMIT_MAX failed attempts from one IP, and still serves a different IP', async () => {
-    const { middleware, RATE_LIMIT_MAX } = await import('@/middleware');
+    const { middleware, RATE_LIMIT_MAX } = await import('@/proxy');
     const ip = '203.0.113.9'; // TEST-NET-3 — deterministic, does not collide with other tests
     const headers = { 'x-cowork-token': 'wrong', 'x-forwarded-for': ip };
     for (let i = 0; i < RATE_LIMIT_MAX; i++) {
-      const res = middleware(fakeReq(PROTECTED, '', headers));
+      const res = proxy(fakeReq(PROTECTED, '', headers));
       expect(res.status).toBe(401); // allowed through the throttle, rejected on the token
     }
     // The (MAX+1)-th failed attempt from the SAME ip is throttled.
-    const throttled = middleware(fakeReq(PROTECTED, '', headers));
+    const throttled = proxy(fakeReq(PROTECTED, '', headers));
     expect(throttled.status).toBe(429);
     expect(throttled.headers.get('retry-after')).toBeTruthy();
     // A distinct IP gets its own bucket and is NOT throttled (fails only on token).
@@ -587,19 +587,19 @@ describe('middleware brute-force throttle (checkRateLimit via the middleware pat
   });
 
   it('resets the failure window after RATE_LIMIT_WINDOW_MS so the throttle is not permanent', async () => {
-    const { middleware, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS } = await import('@/middleware');
+    const { middleware, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS } = await import('@/proxy');
     const ip = '203.0.113.10';
     const headers = { 'x-cowork-token': 'wrong', 'x-forwarded-for': ip };
     vi.useFakeTimers();
     const t0 = new Date('2026-01-01T00:00:00.000Z');
     vi.setSystemTime(t0);
     for (let i = 0; i < RATE_LIMIT_MAX; i++) {
-      middleware(fakeReq(PROTECTED, '', headers));
+      proxy(fakeReq(PROTECTED, '', headers));
     }
-    expect(middleware(fakeReq(PROTECTED, '', headers)).status).toBe(429);
+    expect(proxy(fakeReq(PROTECTED, '', headers)).status).toBe(429);
     // Advance past the fixed window; the bucket must reset to a fresh window.
     vi.setSystemTime(new Date(t0.getTime() + RATE_LIMIT_WINDOW_MS + 1000));
-    const after = middleware(fakeReq(PROTECTED, '', headers));
+    const after = proxy(fakeReq(PROTECTED, '', headers));
     expect(after.status).toBe(401); // allowed again, then fails on the token
   });
 });
@@ -638,8 +638,8 @@ describe('public-discovery routes do not reflect secrets', () => {
 
   for (const path of PUBLIC) {
     it(`bypasses auth on ${path} and reflects no COWORK_* secret or DATABASE_URL`, async () => {
-      const { middleware } = await import('@/middleware');
-      const res = middleware(fakeReq(path));
+      const { proxy } = await import('@/proxy');
+      const res = proxy(fakeReq(path));
       expect(res.status).toBe(200);
       for (const value of res.headers.values()) {
         expect(value).not.toContain(SENTINEL_TOKEN);
@@ -651,11 +651,11 @@ describe('public-discovery routes do not reflect secrets', () => {
   }
 
   it('keeps the singular /api/cowork/agent public but plural /api/cowork/agents protected', async () => {
-    const { middleware } = await import('@/middleware');
-    expect(middleware(fakeReq('/api/cowork/agent')).status).toBe(200);
-    expect(middleware(fakeReq('/api/cowork/agents')).status).toBe(401);
+    const { proxy } = await import('@/proxy');
+    expect(proxy(fakeReq('/api/cowork/agent')).status).toBe(200);
+    expect(proxy(fakeReq('/api/cowork/agents')).status).toBe(401);
     expect(
-      middleware(fakeReq('/api/cowork/agents', '', { 'x-cowork-token': SENTINEL_TOKEN })).status,
+      proxy(fakeReq('/api/cowork/agents', '', { 'x-cowork-token': SENTINEL_TOKEN })).status,
     ).toBe(200);
   });
 });

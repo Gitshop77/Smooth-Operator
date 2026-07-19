@@ -15,6 +15,16 @@ const projectRoot = dirname(fileURLToPath(import.meta.url));
 const nextConfig: NextConfig = {
   output: "standalone",
   poweredByHeader: false,
+  // Zero-config defaults, inlined into both the server and client bundles so the
+  // cockpit builds AND runs with NO environment variables. A real value supplied
+  // via the actual process environment takes precedence (the `??` fallback), so
+  // production deploys that set NEXT_PUBLIC_SITE_URL are unaffected.
+  env: {
+    // Silences the "NEXT_PUBLIC_SITE_URL is not set; metadata URLs will default
+    // to http://localhost:3000" build message and points metadata at the
+    // localhost dev origin by default.
+    NEXT_PUBLIC_SITE_URL: process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000",
+  },
   // Prisma 7's better-sqlite3 driver adapter is a native Node addon. Keep it
   // (and the generated client) external to the server bundle so the standalone
   // build does not try to inline the .node binding and fail at build/runtime.

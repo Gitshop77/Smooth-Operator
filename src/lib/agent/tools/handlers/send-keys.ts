@@ -137,22 +137,31 @@ function isEditableTarget(el: EventTarget | null): boolean {
   return isTextInput(el) || (el instanceof HTMLElement && el.isContentEditable);
 }
 
- // Resolve the native prototype `value` setters once at module load instead
- // of re-deriving the descriptor on every keystroke inside a `send_keys` loop.
-const INPUT_VALUE_SETTER = Object.getOwnPropertyDescriptor(
-  HTMLInputElement.prototype,
-  "value",
-)?.set;
-const TEXTAREA_VALUE_SETTER = Object.getOwnPropertyDescriptor(
-  HTMLTextAreaElement.prototype,
-  "value",
-)?.set;
+ // The native prototype `value` setters are resolved lazily on first use
+ // rather than at module load. This module is also imported by the MV3
+ // background service worker (to enumerate/validate tool schemas), and a
+ // service worker has no DOM — so touching `HTMLInputElement.prototype` at
+ // module top-level throws `ReferenceError: HTMLInputElement is not defined`
+ // and aborts service-worker registration. The setters are only ever needed
+ // inside `setNativeValue`, which runs in a real DOM context (content script).
+let INPUT_VALUE_SETTER: ((v: string) => void) | undefined;
+let TEXTAREA_VALUE_SETTER: ((v: string) => void) | undefined;
 
 function setNativeValue(
   el: HTMLInputElement | HTMLTextAreaElement,
   value: string,
 ): void {
  // Use the native prototype setter so React-controlled inputs sync state.
+  if (INPUT_VALUE_SETTER === undefined) {
+    INPUT_VALUE_SETTER = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    TEXTAREA_VALUE_SETTER = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      "value",
+    )?.set;
+  }
   const setter = el instanceof HTMLTextAreaElement
     ? TEXTAREA_VALUE_SETTER
     : INPUT_VALUE_SETTER;

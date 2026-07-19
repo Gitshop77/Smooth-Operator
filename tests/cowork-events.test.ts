@@ -282,43 +282,43 @@ describe("applyCorsHeaders", () => {
 // ─── Pure function tests: shouldRefuseStart ────────────────────────────────
 
 describe("shouldRefuseStart", () => {
- // the dev-token is only accepted with an EXPLICIT opt-in
- // (COWORK_ALLOW_DEV_TOKEN=1). NODE_ENV is no longer a safety net, so a
- // misconfigured deploy (e.g. `npx tsx index.ts` with no NODE_ENV) must NOT
- // silently accept the public default.
+ // ZERO-CONFIG policy: the dev-token is accepted in ANY non-production
+ // environment (development / dev / local / test / staging / unset NODE_ENV)
+ // WITHOUT requiring COWORK_ALLOW_DEV_TOKEN, so the cockpit (which also
+ // defaults to dev-token) can connect with no env setup. PRODUCTION stays
+ // strict: the well-known dev-token always fails closed there.
   const orig = process.env.COWORK_ALLOW_DEV_TOKEN;
   afterEach(() => {
     if (orig === undefined) delete process.env.COWORK_ALLOW_DEV_TOKEN;
     else process.env.COWORK_ALLOW_DEV_TOKEN = orig;
   });
 
-  test("refuses the dev-token regardless of NODE_ENV when opt-in is absent", () => {
+  test("refuses the dev-token ONLY in production; boots zero-config in every non-prod env when opt-in is absent", () => {
     delete process.env.COWORK_ALLOW_DEV_TOKEN;
- // The old behavior allowed dev-token in development / unset NODE_ENV.
- // Now it refuses in ALL of those cases unless explicitly opted in.
+    // Production always fails closed.
     expect(shouldRefuseStart("production", DEV_TOKEN)).toBe(true);
-    expect(shouldRefuseStart("development", DEV_TOKEN)).toBe(true);
-    expect(shouldRefuseStart(undefined, DEV_TOKEN)).toBe(true);
-    expect(shouldRefuseStart("test", DEV_TOKEN)).toBe(true);
-  });
-
-  test("allows the dev-token ONLY when COWORK_ALLOW_DEV_TOKEN=1 is explicitly set AND NODE_ENV is a dev/local/test env, and REFUSES otherwise", () => {
-    process.env.COWORK_ALLOW_DEV_TOKEN = "1";
- // Production always fails closed — the well-known dev-token must never
- // authenticate in prod, even with the opt-in (a real auth hole otherwise).
-    expect(shouldRefuseStart("production", DEV_TOKEN)).toBe(true);
- // A genuine dev/local/test NODE_ENV with the opt-in is allowed.
+    // Zero-config: no opt-in, no env — the default dev-token is accepted in
+    // dev/local/test and even in an unset/ambiguous NODE_ENV so the cockpit
+    // connects with no setup whatsoever.
+    expect(shouldRefuseStart(undefined, DEV_TOKEN)).toBe(false);
     expect(shouldRefuseStart("development", DEV_TOKEN)).toBe(false);
     expect(shouldRefuseStart("dev", DEV_TOKEN)).toBe(false);
     expect(shouldRefuseStart("local", DEV_TOKEN)).toBe(false);
     expect(shouldRefuseStart("test", DEV_TOKEN)).toBe(false);
- // An unset NODE_ENV is NOT a dev env under the reject-list, so it is refused
- // even with the opt-in (matches cockpit's DEV_ENV_RE: undefined is not
- // development|dev|local|test).
-    expect(shouldRefuseStart(undefined, DEV_TOKEN)).toBe(true);
- // A non-dev env like staging is also refused even with the opt-in — the
- // dev-token requires a dev/local/test NODE_ENV, not merely "not production".
-    expect(shouldRefuseStart("staging", DEV_TOKEN)).toBe(true);
+    expect(shouldRefuseStart("staging", DEV_TOKEN)).toBe(false);
+  });
+
+  test("COWORK_ALLOW_DEV_TOKEN opt-in is still honored but no longer required in non-prod", () => {
+    process.env.COWORK_ALLOW_DEV_TOKEN = "1";
+    // Production stays strict even with the opt-in (a real auth hole otherwise).
+    expect(shouldRefuseStart("production", DEV_TOKEN)).toBe(true);
+    // Non-prod with the opt-in still boots (and would have booted without it).
+    expect(shouldRefuseStart("development", DEV_TOKEN)).toBe(false);
+    expect(shouldRefuseStart("dev", DEV_TOKEN)).toBe(false);
+    expect(shouldRefuseStart("local", DEV_TOKEN)).toBe(false);
+    expect(shouldRefuseStart("test", DEV_TOKEN)).toBe(false);
+    expect(shouldRefuseStart(undefined, DEV_TOKEN)).toBe(false);
+    expect(shouldRefuseStart("staging", DEV_TOKEN)).toBe(false);
   });
 
   test("allows a real secret in any NODE_ENV without an opt-in", () => {
@@ -333,7 +333,9 @@ describe("shouldRefuseStart", () => {
  // exact well-known default does.
     delete process.env.COWORK_ALLOW_DEV_TOKEN;
     expect(shouldRefuseStart("production", "dev-token-extra")).toBe(false);
+    expect(shouldRefuseStart("development", "dev-token-extra")).toBe(false);
     expect(shouldRefuseStart("production", "DEV-TOKEN")).toBe(false); // case-sensitive
+    expect(shouldRefuseStart("development", "DEV-TOKEN")).toBe(false);
   });
 });
 

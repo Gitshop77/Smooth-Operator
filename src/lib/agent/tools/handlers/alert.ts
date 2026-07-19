@@ -19,10 +19,20 @@ const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(
 
 type PopupHandler = typeof import("../../dom/popup-handler");
 
-// Hoist a single module-level promise for the popup-handler module so the
-// repeated dynamic imports across the handlers resolve the same cached module
-// instead of re-issuing the import resolution on every call.
-const popupHandlerMod = import("../../dom/popup-handler");
+// Lazily resolve the popup-handler module. The dynamic `import()` MUST NOT run
+// at module top level: this module is also loaded by the MV3 background service
+// worker (to enumerate/validate tool schemas), and `import()` is forbidden in
+// ServiceWorkerGlobalScope — evaluating it during module load throws and aborts
+// SW registration. We cache the promise so all handlers share one resolution,
+// but only trigger the import on first call (always inside an async handler, a
+// valid SW/DOM context where runtime dynamic import is allowed).
+let popupHandlerModPromise: Promise<PopupHandler> | undefined;
+function getPopupHandlerMod(): Promise<PopupHandler> {
+  if (!popupHandlerModPromise) {
+    popupHandlerModPromise = import("../../dom/popup-handler");
+  }
+  return popupHandlerModPromise;
+}
 
 /**
  * Shared body for `alert_accept` / `alert_dismiss`. Opens the pending JS
@@ -36,7 +46,7 @@ async function acceptOrDismiss(
   pastTense: string,
 ): Promise<ActionResult> {
   try {
-    const mod = await popupHandlerMod;
+    const mod = await getPopupHandlerMod();
     const text = mod.getPendingAlertText();
     if (text === null) {
       return {
@@ -89,7 +99,7 @@ export async function handleAlertGetText(
  // content (success: true) if no dialog is open — the LLM can branch
  // on the extractedContent length.
   try {
-    const mod = await popupHandlerMod;
+    const mod = await getPopupHandlerMod();
     const text = mod.getPendingAlertText();
     if (text === null) {
       return {
@@ -132,7 +142,7 @@ export async function handleAlertSendKeys(
  // text is staged (success); returns failure for non-prompt dialogs
  // (`alert`/`confirm`).
   try {
-    const mod = await popupHandlerMod;
+    const mod = await getPopupHandlerMod();
     const kind = mod.getPendingAlertKind();
     if (kind === null) {
  // No dialog currently open — stage the text for the NEXT prompt.

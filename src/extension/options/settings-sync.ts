@@ -37,6 +37,7 @@ export const STORAGE_KEYS = {
   apiKey: "apiKey",
   model: "model",
   baseUrl: "baseUrl",
+  resourceName: "resourceName",
   maxSteps: "maxSteps",
   maxActions: "maxActions",
   plannerInterval: "plannerInterval",
@@ -95,6 +96,7 @@ chrome.storage.local.get(
     STORAGE_KEYS.apiKey,
     STORAGE_KEYS.model,
     STORAGE_KEYS.baseUrl,
+    STORAGE_KEYS.resourceName,
     STORAGE_KEYS.maxSteps,
     STORAGE_KEYS.maxActions,
     STORAGE_KEYS.plannerInterval,
@@ -153,6 +155,7 @@ chrome.storage.local.get(
     }
     ($("model") as HTMLInputElement).value = (res.model as string) ?? "";
     ($("baseUrl") as HTMLInputElement).value = (res.baseUrl as string) ?? "";
+    ($("resourceName") as HTMLInputElement).value = (res.resourceName as string) ?? "";
     ($("maxSteps") as HTMLInputElement).value = String(res.maxSteps ?? 100);
     ($("maxActions") as HTMLInputElement).value = String(res.maxActions ?? 10);
     ($("plannerInterval") as HTMLInputElement).value = String(res.plannerInterval ?? 5);
@@ -375,6 +378,7 @@ async function doSaveSettings(): Promise<boolean> {
  // treated as `"injected"` and denied the exemption — which is the defense.
     provenance: "user",
     baseUrl: baseUrlRaw !== "" && isHttpUrl(baseUrlRaw) ? baseUrlRaw : "",
+    resourceName: ($("resourceName") as HTMLInputElement).value.trim(),
     maxSteps,
     maxActions,
     plannerInterval,
@@ -460,7 +464,7 @@ export function initAutoSave(): void {
   // them here too would register two competing handlers per input, producing
   // conflicting double validation modals and order-dependent field state.
   const saveIds = [
-    "cockpitUrl", "apiKey", "model", "baseUrl",
+    "cockpitUrl", "apiKey", "model", "baseUrl", "resourceName",
     "maxSteps", "maxActions", "plannerInterval", "maxFailures", "costCap",
     "defaultTask", "screenshotQuality", "allowedDomains", "blockedDomains", "enableStealth",
   ];

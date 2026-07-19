@@ -134,6 +134,68 @@ anything high-stakes, use **Restricted** mode. Page content is never trusted bli
 
 ---
 
+## Model catalog
+
+Open Cowork ships with the **full models.dev database bundled offline** — every
+provider, every model, every `api` base URL, and full pricing — so the provider
+dropdown, model autocomplete, pricing, context-window info, and vision detection
+all work with no network.
+
+- **Bundled full dataset (offline-first).** `scripts/build-models-catalog.ts`
+  parses the downloaded [models.dev](https://models.dev) dataset and generates
+  `src/lib/agent/llm/catalog-bundled.json` + `catalog-bundled.ts` (committed).
+  This is the entire catalog — all 168 providers, every model, every `api`
+  endpoint, and complete `cost` (input/output/cache_read/cache_write) data.
+- **Live refresh (merge layer).** On startup and whenever your provider / API key
+  / model settings change, the extension fetches `https://models.dev/api.json`
+  and merges any newer entries on top of the bundled snapshot. The merge is
+  additive and cached for 5 minutes, so new providers/models/pricing appear
+  automatically without a release. A failed refresh just falls back to the
+  bundled snapshot.
+- **The provider dropdown is generated from the catalog.** Options no longer
+  hardcodes a fixed list. Every provider in the bundled catalog that exposes an
+  `api` endpoint (plus any provider in the known facade/profile set) is listed
+  automatically, each with its catalog `api` base URL, key env name, and docs
+  link. `src/extension/options/providers.ts` still defines the recognized
+  facades/profiles, but the visible dropdown is built from the catalog.
+- **`buildProvider` is generic.** It has dedicated facades for
+  `anthropic` / `google` / `azure` / `openai` / `openrouter` / `xai`. For any
+  other provider that has a catalog `api` URL, it builds an OpenAI-compatible
+  client against that URL; known OpenAI-compatible providers without an `api`
+  field fall back to the `profiles` table.
+- **Defaults self-update.** `getDefaultModelForProvider` derives the newest
+  non-deprecated model from the catalog, so the default model for a provider
+  updates on its own as the dataset changes.
+
+### Test connection
+
+The **Test connection** button in Settings validates your API key by calling the
+provider's **`/models`** endpoint (provider-aware — e.g. OpenAI `/v1/models`,
+Anthropic `/v1/models`, OpenRouter `/api/v1/models`). It does **not** send a chat
+completion, so it never fails with a `404` when the configured default model id
+is wrong or unavailable — it only checks that the key is accepted. OpenRouter
+model ids use dots (`anthropic/claude-3.5-sonnet`), not hyphens.
+
+### Regenerating the catalog
+
+To refresh the bundled snapshot against the latest models.dev dataset, run:
+
+```bash
+npx tsx scripts/build-models-catalog.ts
+```
+
+It parses the local dataset (falling back to fetching `api.json` if needed) and
+rewrites `src/lib/agent/llm/catalog-bundled.json` + `catalog-bundled.ts`. Commit
+the result.
+
+### Model id format tip
+
+Provider/model ids are exact strings. On **OpenRouter** the correct form uses
+dots — `anthropic/claude-3.5-sonnet` — not hyphens (`claude-3-5-sonnet`, which
+is the Anthropic-direct id). The model picker shows the exact id to copy.
+
+---
+
 ## Contributing
 
 Issues and pull requests are welcome. If you're adding a new model provider or a

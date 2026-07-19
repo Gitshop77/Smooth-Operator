@@ -17,8 +17,10 @@ import * as XAI from "../lib/agent/llm/providers/xai";
 import * as OpenRouter from "../lib/agent/llm/providers/openrouter";
 import * as Azure from "../lib/agent/llm/providers/azure";
 import * as OpenAICompatible from "../lib/agent/llm/providers/openai-compatible";
+import { makeOpenAIChatFacade } from "../lib/agent/llm/providers/openai";
+import * as OpenAICompatibleChat from "../lib/agent/llm/protocols/openai-compatible-chat";
 import { resolveAndValidateLlmBaseUrl, validateLlmBaseUrl } from "../lib/agent/llm/route/ssrf";
-import { modelSupportsVision, modelSupportsReasoning, getDefaultModelForProvider } from "../lib/agent/llm/catalog";
+import { modelSupportsVision, modelSupportsReasoning, getDefaultModelForProvider, fetchCatalog } from "../lib/agent/llm/catalog";
 import { CATALOG_PROVIDER_ID_MAP } from "./provider-config-map";
 
 /** The user's provider configuration (stored in chrome.storage.local). */
@@ -27,7 +29,7 @@ export interface ProviderConfig {
   provider: string;
   /** API key (the user's own — never hardcoded). */
   apiKey: string;
-  /** Model name (e.g. "gpt-4o", "claude-3-5-sonnet", "gemini-2.0-flash"). */
+  /** Model name (e.g. "gpt-5.5", "anthropic/claude-sonnet-5", "gemini-3.5-flash"). */
   model: string;
   /** Base URL for OpenAI-compatible providers (DeepSeek, Qwen, Groq, Ollama, etc.). */
   baseUrl?: string;
@@ -124,22 +126,26 @@ export const KNOWN_PROVIDERS: Set<string> = new Set<string>([
  * That disagreement caused the screenshot gating to flip-flop: extractState
  * thought "no vision" and skipped `captureVisibleTab`, while navigatorCallDirect
  * thought "vision" and tried to embed a non-existent screenshot. */
+// NOTE: keys are CATALOG provider ids (not UI provider ids), because
+// `buildProvider` resolves the model via the catalog id (see CATALOG_PROVIDER_ID_MAP).
+// e.g. qwen -> "dashscope", together -> "togetherai", gemini/google -> "google",
+// azure -> "openai". gemini & azure have NO separate key here — they resolve through
+// the "google" / "openai" keys above.
 export const DEFAULT_MODELS: Record<string, string> = {
-  openai: "gpt-4o",
-  anthropic: "claude-3-5-sonnet",
-  gemini: "gemini-2.0-flash",
-  deepseek: "deepseek-chat",
-  qwen: "qwen-2.5-72b-instruct",
-  groq: "llama-3.3-70b-versatile",
-  together: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-  mistral: "mistral-large-latest",
-  cerebras: "llama3.1-70b",
-  openrouter: "anthropic/claude-3-5-sonnet",
-  ollama: "llama3.3",
-  opencode: "",
-  litellm: "gpt-4o",
-  azure: "gpt-4o",
-  xai: "grok-2",
+  openai:    "gpt-5.5",
+  anthropic: "claude-sonnet-5",
+  google:    "gemini-3.5-flash",
+  deepseek:  "deepseek-v4-flash",
+  dashscope: "qwen3.6-max",
+  groq:      "llama-3.3-70b-versatile",
+  togetherai:"meta-llama/Llama-3.3-70B-Instruct-Turbo",
+  mistral:   "mistral-small-latest",
+  cerebras:  "gpt-oss-120b",
+  openrouter:"anthropic/claude-sonnet-5",
+  ollama:    "llama3.3",
+  opencode:  "",
+  litellm:   "gpt-5.5",
+  xai:       "grok-4.3",
 };
 
 /**
@@ -179,16 +185,17 @@ function canonicalLlmHost(provider: string): { host: string; suffix?: boolean } 
  */
 export async function buildProvider(config: ProviderConfig): Promise<LLMProvider> {
   const { provider, apiKey, model, baseUrl, resourceName, provenance = "user" } = config;
- // Resolve the model: explicit user choice > live catalog default >
- // offline DEFAULT_MODELS fallback. `CATALOG_PROVIDER_ID_MAP` maps our
- // provider id (e.g. "gemini") to the models.dev catalog provider id
- // (e.g. "google") so `getDefaultModelForProvider` can find the newest
- // non-deprecated model. Falls back to "" if everything is unavailable.
+ // Resolve the model: explicit user choice > curated DEFAULT_MODELS override
+ // (keyed by CATALOG provider id) > live catalog default >
+ // "". `CATALOG_PROVIDER_ID_MAP` maps our provider id (e.g. "gemini") to the
+ // models.dev catalog provider id (e.g. "google") so the DEFAULT_MODELS key and
+ // `getDefaultModelForProvider` agree. Falls back to "" if everything is
+ // unavailable.
   const catalogProviderId = CATALOG_PROVIDER_ID_MAP[provider] ?? provider;
   const resolvedModel =
     model ||
+    DEFAULT_MODELS[catalogProviderId] ||
     (await getDefaultModelForProvider(catalogProviderId)) ||
-    DEFAULT_MODELS[provider] ||
     "";
 
  // SSRF guard: reject a user-supplied `baseUrl` that points at a loopback /
@@ -322,11 +329,40 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
     }
 
     default: {
- // A provider that isn't in `KNOWN_PROVIDERS` and isn't a recognized
- // openai-compatible alias is genuinely unknown. Report that precisely
- // instead of masking it behind the API-key check (which would otherwise
- // throw "${provider} requires an API key" for an unrecognized id,
- // hiding the real problem — ).
+ // Generic OpenAI-compatible fallback (resolution step 2): ANY catalog
+ // provider that exposes an `api` base URL gets a runtime facade built via
+ // `makeOpenAIChatFacade` — this is what makes ALL dataset providers work
+ // without a hard-coded case. `fetchCatalog` is memoized/cached, so this is a
+ // single short-circuited lookup after the first call. The user-supplied
+ // `baseUrl` (if any) has already been vetted by the SSRF guard + canonical
+ // host confinement above, exactly as for every other branch.
+      const catalog = await fetchCatalog();
+      const catEntry = catalog[provider];
+      if (catEntry?.api) {
+        const facade = makeOpenAIChatFacade({
+          id: provider,
+          displayName: catEntry.name,
+          envKey: catEntry.env?.[0] ?? "API_KEY",
+          routeId: "openai-compatible-chat",
+          protocol: OpenAICompatibleChat.protocol,
+          path: OpenAICompatibleChat.PATH,
+          defaultBaseURL: catEntry.api,
+        });
+        result = facade.toLLMProvider({
+          apiKey,
+          model: resolvedModel,
+          ...(baseUrl ? { baseURL: baseUrl } : {}),
+          allowLocalExemption: provenance === "user",
+        });
+        break;
+      }
+
+ // Step 3: recognized openai-compatible profile (groq, together, cerebras,
+ // deepseek, mistral, qwen, baseten, fireworks, deepinfra, …). Step 4: a
+ // provider that isn't in `KNOWN_PROVIDERS` AND isn't a catalog/`api` provider
+ // is genuinely unknown — report that precisely instead of masking it behind
+ // the API-key check (which would otherwise throw "${provider} requires an
+ // API key" for an unrecognized id, hiding the real problem — ).
       if (!KNOWN_PROVIDERS.has(provider)) {
         throw new Error(
           `Unknown provider "${provider}". Pick one of: ${[...KNOWN_PROVIDERS].join(", ")}.`
