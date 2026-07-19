@@ -66,14 +66,25 @@ export function applyCorsHeaders(
   return false;
 }
 
+// The set of NODE_ENV values in which the well-known dev-token is permitted
+// (only with the explicit opt-in). Aligned with cockpit's reject-list
+// (`cockpit/src/middleware.ts`): the dev-token is accepted ONLY in a dev /
+// local / test environment — never in production, and never in an ambiguous
+// env like `staging` or an unset NODE_ENV.
+const DEV_ENV_RE = /^(development|dev|local|test)$/i;
+
 /**
  * Decide whether the mini-service should refuse to start.
  *
- * The default `DEV_TOKEN` is only acceptable with an explicit opt-in
- * (`COWORK_ALLOW_DEV_TOKEN=1`) AND outside production — even if an operator sets
- * the opt-in in production, the dev-token still fails closed. `nodeEnv` is
- * normalized (trim + lowercase) so whitespace/case variance can't fail open.
- * The opt-in is injectable for tests.
+ * The default `DEV_TOKEN` is only acceptable when BOTH conditions hold:
+ *  1. an explicit opt-in (`COWORK_ALLOW_DEV_TOKEN=1`) is set, AND
+ *  2. `nodeEnv` is a dev/local/test environment (matched by {@link DEV_ENV_RE}).
+ *
+ * Otherwise (the opt-in is absent, OR `nodeEnv` is `production`, `staging`, or
+ * any other non-dev value, OR `nodeEnv` is unset/empty) the service refuses to
+ * start and fails closed — even if an operator sets the opt-in, a non-dev env
+ * still refuses the dev-token. `nodeEnv` is normalized (trim + lowercase) so
+ * whitespace/case variance can't fail open. The opt-in is injectable for tests.
  */
 export function shouldRefuseStart(
   nodeEnv: string | undefined,
@@ -81,8 +92,7 @@ export function shouldRefuseStart(
   allowDevToken: boolean = process.env.COWORK_ALLOW_DEV_TOKEN === '1',
 ): boolean {
   if (sharedSecret !== DEV_TOKEN) return false;
-  const isProduction = nodeEnv?.trim().toLowerCase() === 'production';
-  if (allowDevToken && !isProduction) return false;
+  if (allowDevToken && DEV_ENV_RE.test((nodeEnv ?? "").trim().toLowerCase())) return false;
   return true;
 }
 

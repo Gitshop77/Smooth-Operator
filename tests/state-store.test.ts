@@ -19,8 +19,13 @@ import {
 import { initRunState } from "../src/extension/background/run-helpers";
 import { checkUrlAllowedWithDomainConfig } from "../src/lib/agent/tools/helpers/domain-config";
 
-function delay(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+// Deterministic async yield instead of a real `setTimeout`. The real timer made
+// the suite timing-dependent (and could surface as open-handle / teardown
+// flakiness). `saveRunState`'s `writeChain` already serializes the
+// read-modify-write regardless of delay, so the async storage-I/O boundary is
+// still exercised — just without a real clock dependency.
+function delay(_ms: number): Promise<void> {
+  return Promise.resolve();
 }
 
 function installSessionStub() {

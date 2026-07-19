@@ -54,7 +54,7 @@ export default defineConfig({
         "src/lib/agent/anti-detection.ts": { lines: 2, statements: 2, functions: 1, branches: 0 },
         "src/lib/agent/llm/route/auth.ts": 56,
         "src/lib/agent/llm/route/endpoint.ts": 20,
-      } as Record<string, number> as never,
+      } as unknown as never,
     },
   },
   resolve: {

@@ -240,6 +240,13 @@ function assertZodLocalesStub(): void {
  * its MIT copyright + permission notice is reproduced inline below and written
  * to `LICENSE-MIT` in the shipped bundle.
  *
+ * Apache-2.0 (S)4(d) additionally requires that any NOTICE distributed with the
+ * work travel with every redistribution. Since `buildAll()` wipes and recreates
+ * the whole `chrome-extension/` output directory on every build, the NOTICE is
+ * (re)written here inline rather than left as a static tracked file — otherwise
+ * each build would silently delete it, leaving the shipped bundle out of
+ * Apache-2.0 compliance and the working tree perpetually dirty.
+ *
  * Note: referencing the third-party license text from the Options/About page
  * and `manifest.json` is tracked separately, outside this build file.
  */
@@ -285,6 +292,24 @@ async function emitThirdPartyLicenses(): Promise<void> {
     }
   }
   await writeFile(path.join(OUT, "LICENSE-MIT"), ONX_MIT, "utf8");
+ // Apache-2.0 §4(d): ship the NOTICE describing the bundled transformers.js
+ // dependency. Written inline (not copied from a tracked source file) because
+ // buildAll() clears the OUT dir every build — a copy-from-OUT source would be
+ // deleted before this runs.
+  const NOTICE = [
+    "This project bundles @huggingface/transformers (transformers.js), which is",
+    "licensed under the Apache License, Version 2.0.",
+    "",
+    "  Copyright The HuggingFace Team and contributors.",
+    "",
+    "The full Apache-2.0 license text is available at:",
+    "  https://www.apache.org/licenses/LICENSE-2.0",
+    "",
+    "Including this dependency does not change the project's own MIT license",
+    "(see LICENSE in this directory).",
+    "",
+  ].join("\n");
+  await writeFile(path.join(OUT, "NOTICE"), NOTICE, "utf8");
 }
 
 /**

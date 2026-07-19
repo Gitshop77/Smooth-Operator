@@ -97,6 +97,9 @@ npm run bootstrap                        # install the dashboard's dependencies 
 cd cockpit && npx prisma db push         # create its local database once
 ```
 
+> [!NOTE]
+> `npm run build:cockpit` already applies the committed Prisma migration via `db:apply` (`prisma migrate deploy`), so the `db push` step above is essentially an alternative for standing up a fresh local database from scratch. Either approach is fine — the dashboard's tables just need to exist before it runs.
+
 Then start it:
 
 ```bash
@@ -119,6 +122,8 @@ Open Cowork is built to be safe first. Your API key stays local, secrets are swa
 ## Contributing
 
 Issues and pull requests are welcome. If you're adding a new model provider or a site-specific skill, the existing ones under `src/lib/agent/` are the best examples to copy from.
+
+For the full contribution, security, and privacy guidance, see [`AGENTS.md`](AGENTS.md) — it is the consolidated source of truth for this repo (it replaced `SECURITY.md`, `CONTRIBUTING.md`, and `PRIVACY.md`).
 
 ## License
 

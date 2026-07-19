@@ -17,6 +17,47 @@
 
 import { afterAll } from "vitest";
 
+// Install a functional Map-backed `localStorage` stub for the entire test file.
+//
+// Under jsdom v29 on Node ≥22, the native `localStorage` getter delegates to
+// Node's built-in webstorage, which (a) emits a benign-but-noisy
+// "--localstorage-file was provided without a valid path" warning on EVERY
+// access and (b) returns a store without `setItem`/`getItem`. Replacing the
+// getter with a working stub silences that warning everywhere — this file's
+// reset below, the `local-storage-stub` helper, and any module under test that
+// falls back to `localStorage` (secrets, persistent-memory) — and gives those
+// modules a real store. We DEFINE the property rather than reading the old one
+// first, so we never invoke the warning-emitting getter. Isolating the stub
+// per file (vitest `isolate: true`) keeps it from leaking across files.
+(function installGlobalLocalStorageStub() {
+  const store = new Map<string, string>();
+  const stub = {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => void store.set(k, String(v)),
+    removeItem: (k: string) => void store.delete(k),
+    clear: () => store.clear(),
+    key: (i: number) => Array.from(store.keys())[i] ?? null,
+    get length() {
+      return store.size;
+    },
+  };
+  Object.defineProperty(globalThis, "localStorage", {
+    value: stub,
+    configurable: true,
+    writable: true,
+    enumerable: true,
+  });
+  const w = (globalThis as { window?: { localStorage?: unknown } }).window;
+  if (w) {
+    Object.defineProperty(w, "localStorage", {
+      value: stub,
+      configurable: true,
+      writable: true,
+      enumerable: true,
+    });
+  }
+})();
+
 // Capture the ambient `fetch` once (per test file) so we can restore it after
 // the file runs. Some test files install a `globalThis.fetch` mock; if they
 // don't fully clean it up, the mock leaks into later files and breaks otherwise

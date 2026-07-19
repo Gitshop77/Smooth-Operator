@@ -10,6 +10,10 @@
  */
 
 import { PROVIDER_META } from "./options/providers";
+// Canonical key-shape redactor (agent pipeline). `redactKeyLeak` reuses it as its
+// final pass so a single shape-detection source backs both the agent pipeline
+// and the UI surfaces — see `redactKeyLeak` below.
+import { redactKeyShapes } from "../lib/agent/key-shape-redact";
 
 /**
  * Get an element by id, throwing if missing (dev-time safety).
@@ -158,7 +162,15 @@ export function redactKeyLeak(s: string): string {
     looksLikeSecret(inner) ? `"[REDACTED]"` : full,
   );
 
-  return out;
+  // Final pass: delegate to the canonical key-shape redactor
+  // (`redactKeyShapes`, src/lib/agent/key-shape-redact.ts). It is the single
+  // shape-detection source shared with the agent pipeline, so UI surfaces gain
+  // any shape it covers that this prefix/JSON/high-entropy logic does not (e.g.
+  // `postgres://user:pass@` DB connection strings). `redactKeyShapes` is a
+  // no-op on already-masked `[REDACTED]` text (its markers/charset don't match
+  // what this function emits), so this is idempotent with respect to the passes
+  // above and never un-masks anything.
+  return redactKeyShapes(out);
 }
 
 // ─── Cockpit URL ──────────────────────────────────────────────────────────

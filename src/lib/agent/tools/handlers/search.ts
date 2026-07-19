@@ -11,7 +11,7 @@
 
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
-import { SEARCH_ENGINE_URLS } from "../constants";
+import { getSearchEngineUrl } from "../constants";
 import { checkUrlAllowedWithDomainConfig } from "../helpers/domain-config";
 import type { ActionContext } from "./types";
 
@@ -32,7 +32,7 @@ export async function handleSearch(
   action: Extract<Action, { type: "search" }>,
 ): Promise<ActionResult> {
   const engine = action.engine;
-  const baseUrl = SEARCH_ENGINE_URLS[engine];
+  const baseUrl = getSearchEngineUrl(engine);
   if (!baseUrl) {
  // `engine` is a Zod enum so this is unreachable in normal validation, but
  // guard anyway and report the *actual* requested engine rather than a

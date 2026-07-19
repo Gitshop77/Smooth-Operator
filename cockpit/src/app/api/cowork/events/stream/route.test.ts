@@ -32,6 +32,19 @@ interface FakeSocket {
 
 let lastSocket: FakeSocket | null = null;
 
+// Track every stream the test opens so `afterEach` can guarantee teardown even
+// if a test returns before calling `ac.abort()`/`reader.cancel()`. This closes
+// the SSE response + its underlying socket.io client + 15s keep-alive interval
+// so no real handle is left open (the root cause of the open-handle warnings).
+const openAcs: AbortController[] = [];
+const openReaders: ReadableStreamDefaultReader<Uint8Array>[] = [];
+
+function makeAc(): AbortController {
+  const ac = new AbortController();
+  openAcs.push(ac);
+  return ac;
+}
+
 // `vi.mock` factories are hoisted above ALL other module-level statements, so a
 // factory that closes over a `const ioMock` declared later would hit a temporal
 // dead zone (`Cannot access 'ioMock' before initialization`). `vi.hoisted`
@@ -91,7 +104,9 @@ function readWithTimeout(
 // assertion, throwing a clear message if the invariant is somehow violated.
 function bodyReader(res: Response): ReadableStreamDefaultReader<Uint8Array> {
   if (!res.body) throw new Error('expected a streaming response body');
-  return res.body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+  const reader = res.body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+  openReaders.push(reader);
+  return reader;
 }
 function requireSocket(): FakeSocket {
   if (!lastSocket) throw new Error('expected socket.io client to have been opened');
@@ -99,17 +114,35 @@ function requireSocket(): FakeSocket {
 }
 
 beforeEach(() => {
+  // Fake the clock so the route's 15s keep-alive `setInterval` (and the test's
+  // own 2s `readWithTimeout` timer) become fake timers — no real handles that
+  // could leak between tests. `Date` is intentionally left real so timestamp
+  // assertions in the SSE output still work.
+  vi.useFakeTimers({
+    toFake: ['setTimeout', 'setInterval', 'setImmediate', 'clearTimeout', 'clearInterval', 'clearImmediate'],
+  });
   ioMock.mockClear();
   lastSocket = null;
+  openAcs.length = 0;
+  openReaders.length = 0;
 });
 afterEach(() => {
+  // Close any stream/response the test didn't already tear down, so no real
+  // socket.io client or 15s keep-alive interval is left open. Order: cancel the
+  // reader (drains/errors the stream → teardown) then abort the request signal.
+  for (const r of openReaders) void r.cancel().catch(() => {});
+  for (const ac of openAcs) ac.abort();
+  openReaders.length = 0;
+  openAcs.length = 0;
   ioMock.mockClear();
   lastSocket = null;
+  // Discard any pending fake timers; restore the real clock for the next test.
+  vi.useRealTimers();
 });
 
 describe('GET /api/cowork/events/stream', () => {
   it('returns a 200 text/event-stream response and emits the open comment', async () => {
-    const ac = new AbortController();
+    const ac = makeAc();
     const res = await GET(streamReq(ac.signal));
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/event-stream');
@@ -126,7 +159,7 @@ describe('GET /api/cowork/events/stream', () => {
   });
 
   it('surfaces an upstream socket.io connect error as an observable comment', async () => {
-    const ac = new AbortController();
+    const ac = makeAc();
     const res = await GET(streamReq(ac.signal));
     expect(res.status).toBe(200);
 
@@ -155,7 +188,7 @@ describe('GET /api/cowork/events/stream', () => {
   });
 
   it('returns 200 and emits nothing when the request is already aborted', async () => {
-    const ac = new AbortController();
+    const ac = makeAc();
     ac.abort();
     const res = await GET(streamReq(ac.signal));
     expect(res.status).toBe(200);
@@ -169,7 +202,7 @@ describe('GET /api/cowork/events/stream', () => {
   });
 
   it('drops replayed events at/below since_id and forwards those strictly above', async () => {
-    const ac = new AbortController();
+    const ac = makeAc();
     const res = await GET(streamReq(ac.signal, '10'));
     expect(res.status).toBe(200);
     expect(ioMock).toHaveBeenCalledTimes(1);
@@ -199,7 +232,7 @@ describe('GET /api/cowork/events/stream', () => {
   });
 
   it('treats a non-numeric since_id as 0 and forwards id 1', async () => {
-    const ac = new AbortController();
+    const ac = makeAc();
     const res = await GET(streamReq(ac.signal, 'abc'));
     expect(res.status).toBe(200);
 
@@ -221,7 +254,7 @@ describe('GET /api/cowork/events/stream', () => {
   });
 
   it('redacts secret-shaped payloads on live-forwarded events', async () => {
-    const ac = new AbortController();
+    const ac = makeAc();
     const res = await GET(streamReq(ac.signal));
     expect(res.status).toBe(200);
     expect(lastSocket).not.toBeNull();
@@ -251,7 +284,7 @@ describe('GET /api/cowork/events/stream', () => {
     const controllers: AbortController[] = [];
     const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
     for (let i = 0; i < MAX; i += 1) {
-      const ac = new AbortController();
+      const ac = makeAc();
       controllers.push(ac);
       const res = await GET(streamReq(ac.signal));
       expect(res.status).toBe(200);
@@ -259,7 +292,7 @@ describe('GET /api/cowork/events/stream', () => {
     }
 
     // The next stream is over the cap: rejected without opening a socket.
-    const overAc = new AbortController();
+    const overAc = makeAc();
     const over = await GET(streamReq(overAc.signal));
     expect(over.status).toBe(503);
     expect(over.headers.get('Retry-After')).toBe('5');
@@ -270,7 +303,7 @@ describe('GET /api/cowork/events/stream', () => {
   });
 
   it('errors the stream when the backpressure buffer overflows', async () => {
-    const ac = new AbortController();
+    const ac = makeAc();
     const res = await GET(streamReq(ac.signal));
     expect(res.status).toBe(200);
     expect(lastSocket).not.toBeNull();

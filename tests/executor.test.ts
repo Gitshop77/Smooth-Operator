@@ -478,3 +478,17 @@ describe("executeAction — DOM-requiring actions (Task 5C: enabled under jsdom)
     expect(entered).toBe(true);
   });
 });
+
+describe("executeAction: unhandled action type", () => {
+  test("throws UnhandledActionError (fail-loud) for an unknown action type, not a soft failure", async () => {
+    const err = await executeAction(
+      { type: "definitely_not_a_real_action" } as unknown as Parameters<typeof executeAction>[0],
+      emptyState(),
+    ).then(
+      () => null,
+      (e) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).name).toBe("UnhandledActionError");
+  });
+});

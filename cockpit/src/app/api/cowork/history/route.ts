@@ -70,7 +70,7 @@ export async function POST(req: NextRequest): Promise<Response> {
 // entry. DELETE /api/cowork/history?all=1 — erase all browsing history.
 // Gated by the same X-Cowork-Token check as every other /api/cowork/* data
 // route (enforced in middleware.ts). Representative PII-erasure endpoint
-// (GDPR-style "right to erasure" for stored browsing history). See PRIVACY.md
+// (GDPR-style "right to erasure" for stored browsing history). See AGENTS.md
 // in the repo root for the full data-flow / retention / deletion disclosure
 // that this endpoint backs.
 // NOTE: history erasure uses Prisma directly (the cockpit owns this

@@ -12,6 +12,24 @@ function tmpDir(): string {
   return mkdtempSync(path.join(tmpdir(), "build-utils-"));
 }
 
+// Robust cleanup: a transient FS error (file briefly locked right after a test
+// on some platforms, EMFILE, etc.) must not fail the run or leak a temp dir.
+// Retries a few times (with libuv's own retry on EBUSY) and is a no-op if the
+// dir is already gone. This never touches any assertion in the tests.
+function removeTmpDir(dir: string | undefined): void {
+  if (!dir) return;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 });
+      return;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
 describe("stripConsoleDebug", () => {
   it("leaves console.log( inside a string literal intact", () => {
     const out = stripConsoleDebug('const s = "console.log(x)";');
@@ -43,6 +61,25 @@ describe("stripConsoleDebug", () => {
     expect(out).toContain("void (a);");
     expect(out).toContain("const b = 2;");
   });
+
+  // Regression: a trailing comma is legal in a function-call argument list
+  // (`console.debug(a, b,)`) but ILLEGAL in the `void (…)` grouping expression
+  // we emit. It must be dropped, else the bundle is a SyntaxError
+  // ("Unexpected ')'") and the background script fails to build.
+  it("drops a trailing comma so the void(…) grouping stays valid", () => {
+    const out = stripConsoleDebug('console.debug(\n  "msg",\n  x instanceof Error ? x.message : "",\n);');
+    expect(out).toBe('void (\n  "msg",\n  x instanceof Error ? x.message : "");');
+  });
+
+  it("drops a trailing comma even with nested parens in the args", () => {
+    const out = stripConsoleDebug('console.log("x", foo(bar),);');
+    expect(out).toBe('void ("x", foo(bar));');
+  });
+
+  it("produces a parseable statement when the call had a trailing comma", () => {
+    const out = stripConsoleDebug('try {} catch (e) {\n  console.debug(\n    "m",\n    e.message,\n  );\n}');
+    expect(() => new Function(out)).not.toThrow();
+  });
 });
 
 describe("lintManifestPermissions", () => {
@@ -52,7 +89,7 @@ describe("lintManifestPermissions", () => {
     dir = tmpDir();
   });
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    removeTmpDir(dir);
     delete process.env.MANIFEST_LINT_FAIL_HIGH_RISK;
     vi.restoreAllMocks();
   });
@@ -116,7 +153,7 @@ describe("assertOnlyEnZodLocales", () => {
     dir = tmpDir();
   });
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    removeTmpDir(dir);
   });
 
   function writeSrc(name: string, contents: string): void {

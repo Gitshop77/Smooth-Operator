@@ -141,17 +141,16 @@ jobs:
         run: npm run db:generate
 
       - name: Apply database schema (verify it applies)
-        # Push the Prisma schema to a throwaway local SQLite DB so a schema that
-        # fails to apply is caught in CI AND the tables actually exist for the
-        # cockpit tests below. `prisma db push` is used deliberately: there are
-        # no migrations under cockpit/prisma/migrations/, so `prisma migrate
-        # deploy` would print "No migration found" and exit 0 WITHOUT creating
-        # any tables. `db push` diffs the schema against the DB and creates them.
+        # Apply the committed Prisma migration to a throwaway local SQLite DB so a
+        # schema that fails to apply is caught in CI AND the tables actually exist
+        # for the cockpit tests below. A migration now lives under
+        # cockpit/prisma/migrations/, so we use `prisma migrate deploy` (via
+        # `npm run db:apply`) rather than the older `db push` drift approach.
         # cockpit uses sqlite (DATABASE_URL=file:./db/cowork.db); no external DB
-        # service required. --skip-generate: the client was already generated above.
+        # service required.
         env:
           DATABASE_URL: file:./db/cowork.db
-        run: npx prisma db push --skip-generate
+        run: npm run db:apply
 
       - name: Type-check cockpit
         run: npx tsc --noEmit

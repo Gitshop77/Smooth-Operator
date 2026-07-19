@@ -1,17 +1,28 @@
 /**
  * Client-safe secret redactor for cockpit browser surfaces.
  *
- * This is a faithful, client-safe copy of the server-side `redactSecrets`
- * (in `@/lib/cowork/api/http`) — it MUST produce identical output on the same
- * input so the two redactors stay in parity (see `redact-client.test.ts`).
+ * This is a deliberate, client-safe MIRROR of the server-side `redactSecrets`
+ * (in `@/lib/cowork/api/http`) — the canonical implementation lives there, and
+ * this file MUST stay byte-for-byte aligned with it on every regex so the two
+ * redactors produce identical output (proven in `redact-client.test.ts`).
+ *
+ * WHY THIS CANNOT SIMPLY RE-EXPORT `redactSecrets` FROM `@/lib/cowork/api/http`:
+ * that module is a server-only module. Its top-level import `node:crypto`
+ * (`createHash`, used by `tokenPrincipal`) is a Node builtin unavailable in the
+ * browser, and `redactSecrets` itself reads `process.env.COWORK_EVENT_TOKEN` /
+ * `COWORK_UI_TOKEN` to mask the configured service/UI secrets. Bundling
+ * `http.ts` into a client component would pull `node:crypto` into the browser
+ * bundle and break the cockpit client build. Hence this faithful, standalone
+ * copy — its masking rules are kept in lock-step with `redactSecrets` by the
+ * parity test.
+ *
  * It covers the same secret shapes: URL credentials, key=value secrets,
  * JSON-shaped secrets (preserving a `Bearer `/`Basic ` scheme prefix),
  * Bearer / Basic credentials, well-known provider key literals, and a bounded
- * additive fallback for bare high-entropy scalars.
- *
- * It deliberately does NOT reference `node:net`, `@prisma/client`, or
- * `process.env` (which the server guard uses to mask the configured COWORK
- * tokens), so it is safe to run in the browser bundle.
+ * additive fallback for bare high-entropy scalars. The one intentional
+ * difference from the server guard is that it cannot mask the configured
+ * COWORK_* token values (no `process.env` in the browser); the parity corpus
+ * uses no such token, so outputs still match.
  */
 export function redactClientSecrets(text: string): string {
   let out = text;
@@ -52,9 +63,12 @@ export function redactClientSecrets(text: string): string {
   // provider-literal prefix) that would otherwise reach server error logs
   // unredacted — the EchoLeak-class gap. The alphabet deliberately EXCLUDES
   // `/` so a benign URL path such as `3000/api/cowork/tabs` is never mistaken
-  // for a secret (matches the canonical `redactSecrets`).
+  // for a secret (matches the canonical `redactSecrets`). The trailing
+  // `(?!"\s*:)` negative lookahead mirrors `redactSecrets` exactly: it prevents
+  // a long JSON key name (e.g. `"aVeryLongKeyName":`) from being mistaken for a
+  // bare secret value, keeping the two redactors byte-identical.
   out = out.replace(
-    /(?<![A-Za-z0-9+_-])[A-Za-z0-9+_-]{20,}(?![A-Za-z0-9+_-])/g,
+    /(?<![A-Za-z0-9+_-])[A-Za-z0-9+_-]{20,}(?![A-Za-z0-9+_-])(?!"\s*:)/g,
     "***",
   );
   return out;

@@ -2,7 +2,7 @@
  * Tests for the supporting modules: callbacks, judge, domain-skills, modes, errors.
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect, vi } from "vitest";
 import {
   CallbackDispatcher,
 } from "../src/lib/agent/callbacks";
@@ -45,19 +45,27 @@ describe("CallbackDispatcher", () => {
   });
 
   test("awaits async handlers in order", async () => {
-    const calls: string[] = [];
-    const dispatcher = new CallbackDispatcher();
-    dispatcher.register({
-      onRunStart: async () => {
-        await new Promise((r) => setTimeout(r, 10));
-        calls.push("slow");
-      },
-    });
-    dispatcher.register({
-      onRunStart: () => { calls.push("fast"); },
-    });
-    await dispatcher.runStart({ task: "test", step: 0, history: [] });
-    expect(calls).toEqual(["slow", "fast"]);
+    // Control the async handler's delay with fake timers + a controlled advance
+    // instead of a raw `setTimeout`, so the "slow" handler's ordering is fully
+    // deterministic (no real-clock dependency).
+    vi.useFakeTimers();
+    try {
+      const calls: string[] = [];
+      const dispatcher = new CallbackDispatcher();
+      dispatcher.register({
+        onRunStart: async () => {
+          await vi.advanceTimersByTimeAsync(10);
+          calls.push("slow");
+        },
+      });
+      dispatcher.register({
+        onRunStart: () => { calls.push("fast"); },
+      });
+      await dispatcher.runStart({ task: "test", step: 0, history: [] });
+      expect(calls).toEqual(["slow", "fast"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

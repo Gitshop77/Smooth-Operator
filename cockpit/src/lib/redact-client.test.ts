@@ -25,6 +25,12 @@ const CORPUS = [
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
   "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
   "plain text with no secrets",
+  // Non-secret-shaped inputs the corpus must also agree on (parity of
+  // NON-masking): an email and a URL carrying a token in the query string.
+  // Both redactors leave the email untouched and rewrite the credential /
+  // `token=` half of the URL identically.
+  "alice@example.com",
+  "https://user:pass@api.example.com/v1?token=abcdef123456",
 ];
 
 describe("redactClientSecrets parity with server redactSecrets", () => {

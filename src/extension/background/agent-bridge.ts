@@ -137,16 +137,6 @@ export function consumeDownloadConsentForMode(mode: string | undefined): boolean
 }
 
 /**
- * Non-consuming check of whether the given run mode still requires a `saveAs`
- * confirmation for its next download. Unlike `consumeDownloadConsentForMode`
- * this does NOT reserve the flag, so the caller can decide the `saveAs` param
- * without burning consent before the download is confirmed to have succeeded.
- */
-export function peekDownloadConsentRequiredForMode(mode: string | undefined): boolean {
-  return mode === "full_agentic" && !fullAgenticDownloadConsent && !fullAgenticDownloadReserved;
-}
-
-/**
  * Mark the per-run download consent as consumed. Call this only after a
  * download has actually succeeded so a failed/cancelled first download leaves
  * the flag unconsumed and the next download re-prompts.
