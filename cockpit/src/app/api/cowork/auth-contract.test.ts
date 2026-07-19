@@ -17,7 +17,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { NextRequest } from 'next/server';
-import { middleware } from '@/middleware';
+import { proxy } from '@/proxy';
 
 function fakeReq(pathname: string, search = '', headers: Record<string, string> = {}): NextRequest {
   const h = new Headers();
@@ -81,11 +81,11 @@ describe('cockpit route auth contract', () => {
   ROUTES.forEach((route, i) => {
     const ip = { 'x-forwarded-for': `198.51.100.${i + 1}` };
     it(`401s on ${route} without a token (fail-closed)`, async () => {
-      expect(middleware(fakeReq(route, '', ip)).status).toBe(401);
+      expect(proxy(fakeReq(route, '', ip)).status).toBe(401);
     });
 
     it(`200s on ${route} with a matching X-Cowork-Token header`, async () => {
-      const res = middleware(
+      const res = proxy(
         fakeReq(route, '', { ...ip, 'x-cowork-token': REAL_TOKEN }),
       );
       expect(res.status).toBe(200);
@@ -93,11 +93,11 @@ describe('cockpit route auth contract', () => {
   });
 
   it('events/stream accepts a valid ?token= query param', async () => {
-    expect(middleware(fakeReq(SSE, `token=${REAL_TOKEN}`)).status).toBe(200);
+    expect(proxy(fakeReq(SSE, `token=${REAL_TOKEN}`)).status).toBe(200);
   });
 
   it('events/stream 401s on a wrong ?token= query param', async () => {
-    expect(middleware(fakeReq(SSE, 'token=wrong')).status).toBe(401);
+    expect(proxy(fakeReq(SSE, 'token=wrong')).status).toBe(401);
   });
 
   it('the raw stream token is NEVER logged in cleartext (redacted at log time)', async () => {
@@ -107,7 +107,7 @@ describe('cockpit route auth contract', () => {
     // Cover all console sinks so a leak through info/debug is also caught.
     const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
     const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
-    const res = middleware(fakeReq(SSE, `token=${REAL_TOKEN}`));
+    const res = proxy(fakeReq(SSE, `token=${REAL_TOKEN}`));
     expect(res.status).toBe(200);
     // Guard against the token being reflected back into any response header,
     // which would leak the secret to the caller even with clean console sinks.

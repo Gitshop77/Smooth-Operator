@@ -204,7 +204,7 @@ describe('middleware token enforcement', () => {
   it('enforces the token on non-GET protected routes (POST with valid token → 200)', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
     const { proxy } = await import('@/proxy');
-    const res = middleware(
+    const res = proxy(
       fakeReq(PROTECTED, '', { 'x-cowork-token': REAL_TOKEN }, 'POST'),
     );
     expect(res.status).toBe(200);
@@ -347,7 +347,7 @@ describe('middleware x-request-id reflection and sanitization', () => {
   it('echoes a valid inbound x-request-id back on an authorized response', async () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
     const { proxy } = await import('@/proxy');
-    const res = middleware(
+    const res = proxy(
       fakeReq(PROTECTED, '', { 'x-cowork-token': REAL_TOKEN, 'x-request-id': 'abc-123' }),
     );
     expect(res.headers.get('x-request-id')).toBe('abc-123');
@@ -359,7 +359,7 @@ describe('middleware x-request-id reflection and sanitization', () => {
  // Header value with spaces (rejected by the correlation-id allowlist) — not
  // raw CRLF, which the test's own Headers.set would throw on.
     const malicious = 'bad injected value';
-    const res = middleware(
+    const res = proxy(
       fakeReq(PROTECTED, '', { 'x-cowork-token': REAL_TOKEN, 'x-request-id': malicious }),
     );
     const reflected = res.headers.get('x-request-id');
@@ -371,7 +371,7 @@ describe('middleware x-request-id reflection and sanitization', () => {
     process.env.COWORK_EVENT_TOKEN = REAL_TOKEN;
     const { proxy } = await import('@/proxy');
     const tooLong = 'a'.repeat(200);
-    const res = middleware(
+    const res = proxy(
       fakeReq(PROTECTED, '', { 'x-cowork-token': REAL_TOKEN, 'x-request-id': tooLong }),
     );
     expect(res.headers.get('x-request-id')).not.toBe(tooLong);
@@ -568,7 +568,7 @@ describe('middleware brute-force throttle (checkRateLimit via the middleware pat
   });
 
   it('returns 429 only after RATE_LIMIT_MAX failed attempts from one IP, and still serves a different IP', async () => {
-    const { middleware, RATE_LIMIT_MAX } = await import('@/proxy');
+    const { proxy, RATE_LIMIT_MAX } = await import('@/proxy');
     const ip = '203.0.113.9'; // TEST-NET-3 — deterministic, does not collide with other tests
     const headers = { 'x-cowork-token': 'wrong', 'x-forwarded-for': ip };
     for (let i = 0; i < RATE_LIMIT_MAX; i++) {
@@ -580,14 +580,14 @@ describe('middleware brute-force throttle (checkRateLimit via the middleware pat
     expect(throttled.status).toBe(429);
     expect(throttled.headers.get('retry-after')).toBeTruthy();
     // A distinct IP gets its own bucket and is NOT throttled (fails only on token).
-    const other = middleware(
+    const other = proxy(
       fakeReq(PROTECTED, '', { 'x-cowork-token': 'wrong', 'x-forwarded-for': '198.51.100.7' }),
     );
     expect(other.status).toBe(401);
   });
 
   it('resets the failure window after RATE_LIMIT_WINDOW_MS so the throttle is not permanent', async () => {
-    const { middleware, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS } = await import('@/proxy');
+    const { proxy, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS } = await import('@/proxy');
     const ip = '203.0.113.10';
     const headers = { 'x-cowork-token': 'wrong', 'x-forwarded-for': ip };
     vi.useFakeTimers();
