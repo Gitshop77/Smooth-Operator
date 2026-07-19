@@ -102,12 +102,19 @@ export function isVisibleFull(el: HTMLElement, rect?: DOMRect): boolean {
  // from the accessibility tree while keeping it visible. An element inside such
  // a subtree is not a legitimate interaction target for an AT-driven agent, so
  // walk the ancestor chain and treat it as hidden if any ancestor is aria-hidden.
- // `clip: rect(0, 0, 0, 0)` (legacy) and `clip-path: inset(100%)` (modern)
- // are both common techniques to hide an element while keeping it in the
- // accessibility tree. Treat them as hidden — they're invisible to the user
- // even though `display`, `visibility`, and `opacity` all report visible.
-  if (style.clip === "rect(0px, 0px, 0px, 0px)" || style.clip === "rect(0,0,0,0)") return false;
+ // `clip: rect(...)` (legacy) and `clip-path: ...` (modern) are both common
+ // techniques to hide an element while keeping it in the accessibility tree.
+ // Any non-default clip value collapses the visible region (often to zero),
+ // so treat every clip / clip-path other than `auto` / `none` as hidden.
+ // This generalizes the prior hard-coded list (`inset(100%)`, `rect(0,0,0,0)`,
+ // …) to catch other hide forms such as `inset(50%)`, `inset(0 0 0 100%)`,
+ // `circle(0)`, `ellipse(0,0)`, etc. — all of which otherwise read as visible
+ // and become phantom click targets. The legacy `clip` computed value is
+ // `auto` when unset; `clip-path` is `none` when unset, so those are the only
+ // "not hiding" values we allow through.
+  const clip = style.clip;
+  if (clip && clip !== "auto") return false;
   const clipPath = style.clipPath;
-  if (clipPath && (clipPath === "inset(100%)" || clipPath === "inset(100% 100% 100% 100%)")) return false;
+  if (clipPath && clipPath !== "none" && clipPath !== "auto") return false;
   return true;
 }

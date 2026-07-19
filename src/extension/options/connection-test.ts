@@ -199,7 +199,9 @@ function parseModelCount(payload: unknown): number | undefined {
  */
 function redact(message: string, apiKey: string): string {
   let out = redactKeyLeak(message);
-  if (apiKey && apiKey.length >= 8) {
+  // Always strip the raw key substring regardless of length — short keys
+  // (<8 chars) were previously left exposed in surfaced error messages.
+  if (apiKey) {
     out = out.split(apiKey).join("[REDACTED]");
   }
   return out.slice(0, 240);
@@ -293,7 +295,10 @@ export async function testProviderConnection(
 
     switch (provider) {
       case "anthropic": {
-        url = "https://api.anthropic.com/v1/models";
+        // Honor a user-supplied baseUrl (e.g. a proxy) but keep it confined to
+        // the canonical Anthropic host so the key can't be exfiltrated.
+        const root = baseUrl ? baseUrl.replace(/\/+$/, "") : "https://api.anthropic.com/v1";
+        url = `${root}/models`;
         headers = { "x-api-key": apiKey, "anthropic-version": "2023-06-01" };
         // Canonical-host confinement (mirrors buildProvider) prevents the key
         // from being sent to a non-Anthropic host.
@@ -303,12 +308,24 @@ export async function testProviderConnection(
       }
       case "gemini": {
         // Key rides the query string (Gemini's design). No Authorization header.
-        url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`;
+        // Honor a user-supplied baseUrl (under canonical-host confinement below).
+        const root = baseUrl
+          ? baseUrl.replace(/\/+$/, "")
+          : "https://generativelanguage.googleapis.com/v1beta";
+        url = `${root}/models?key=${encodeURIComponent(apiKey)}`;
         needsKey = false;
+        // Canonical-host confinement prevents the key from being sent to a
+        // non-Gemini host when a custom baseUrl is supplied.
+        const canonErr = checkCanonicalHost(provider, url, apiKey);
+        if (canonErr) return fail(canonErr);
         break;
       }
       case "ollama": {
-        url = "http://localhost:11434/api/tags";
+        // Honor a user-supplied baseUrl (e.g. a non-default Ollama port/host);
+        // no key, so no canonical-host confinement — the SSRF guard below still
+        // applies (localhost is exempt there).
+        const root = baseUrl ? baseUrl.replace(/\/+$/, "") : "http://localhost:11434";
+        url = `${root}/api/tags`;
         needsKey = false;
         break;
       }

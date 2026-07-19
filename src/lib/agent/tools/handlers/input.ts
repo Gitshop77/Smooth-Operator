@@ -35,9 +35,14 @@ export async function handleInput(
  // have its focus stolen and be scrolled into view and highlighted, only for
  // the handler to throw afterwards — leaving the executor to recover from an
  // unexpected page state.
+ // Feature-detect the DOM element globals so this handler can never throw
+ // `ReferenceError: HTMLInputElement is not defined` if it is ever invoked in a
+ // non-DOM context (e.g. the MV3 service worker, which has no `HTMLInputElement`
+ // global). In a real DOM these globals are always present, so page-side
+ // behavior is unchanged.
   if (
-    !(el instanceof HTMLInputElement) &&
-    !(el instanceof HTMLTextAreaElement) &&
+    !((typeof HTMLInputElement !== "undefined" && el instanceof HTMLInputElement) ||
+      (typeof HTMLTextAreaElement !== "undefined" && el instanceof HTMLTextAreaElement)) &&
     !el.isContentEditable
   ) {
     throw new Error(`element [${action.index}] is not a text input`);
@@ -52,16 +57,21 @@ export async function handleInput(
  // of the schema to an optional text can never silently append the literal
  // "undefined" to a field via the `clear:false` append path below.
   const text = await substituteSecrets(action.text ?? "");
-  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+  if (
+    (typeof HTMLInputElement !== "undefined" && el instanceof HTMLInputElement) ||
+    (typeof HTMLTextAreaElement !== "undefined" && el instanceof HTMLTextAreaElement)
+  ) {
  // Use the native value setter so React-controlled inputs sync their
  // state. Directly assigning `el.value = text` works for uncontrolled
  // inputs but React tracks the last-known value internally and may
  // reset it on the next render. The native prototype setter bypasses
  // React's tracking, then the `input` event lets React pick up the
  // new value.
-    const proto = el instanceof HTMLTextAreaElement
-      ? window.HTMLTextAreaElement.prototype
-      : window.HTMLInputElement.prototype;
+    const useTextareaProto =
+      typeof HTMLTextAreaElement !== "undefined" && el instanceof HTMLTextAreaElement;
+    const proto = useTextareaProto
+      ? (typeof HTMLTextAreaElement !== "undefined" ? window.HTMLTextAreaElement.prototype : undefined)
+      : (typeof HTMLInputElement !== "undefined" ? window.HTMLInputElement.prototype : undefined);
     const nativeSetter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
     if (action.clear !== false) {
       if (nativeSetter) nativeSetter.call(el, text);

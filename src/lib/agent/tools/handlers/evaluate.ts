@@ -72,6 +72,85 @@ const DENY_FUNCTION = makeThrowingProxy("Function");
 const DENY_EVAL = makeThrowingProxy("eval");
 
 /**
+ * Hardened forwarding proxy for a REAL built-in constructor/object (e.g.
+ * `Object`, `Array`, `String`, `Promise`, `Map`, …) passed as a PARAMETER to
+ * the generated function. It forwards every access to the real builtin so
+ * legitimate evaluate code keeps working (`Object.keys`, `Array.from`,
+ * `JSON.parse`, `x instanceof Array`, `typeof Object === "function"`, …) while
+ * denying the *escape* properties `constructor` and `chrome`.
+ *
+ * WHY: `evaluate` runs in the content-script realm, so the free identifiers
+ * `Object`/`Array`/`Function`/… resolve to the REAL realm globals. The documented
+ * secret-exfil escape reaches the real `chrome` through the prototype chain of
+ * those globals — e.g. `Object.constructor` (→ real `Function`) or
+ * `Object.prototype.constructor`. Shadowing the globals with this proxy closes
+ * the *direct* `Object.constructor` / `Array.constructor` / … reference form
+ * (those now throw `access denied by evaluate sandbox`), while `instanceof` and
+ * normal method usage still resolve through the (allowed) `prototype` property.
+ *
+ * RESIDUAL RISK (NOT closed here): the escape via a *literal* object's
+ * prototype chain — `[].constructor.constructor` or `({}).constructor` — is
+ * unaffected, because `[]`/`{}` are real realm objects whose `.constructor`
+ * still leads to the real `Function`. Closing that requires running `evaluate`
+ * in a realm with no `chrome` binding (architectural fix owned outside this
+ * file). This proxy is defense-in-depth that widens the set of blocked
+ * constructor-escape entry points without changing legitimate behavior.
+ */
+const BUILTIN_DENIED_PROPS = new Set(["constructor", "chrome"]);
+function makeHardenedBuiltin(real: object): object {
+  const deny = (prop: PropertyKey): never => {
+    throw new Error(`access denied by evaluate sandbox: ${String(prop)}`);
+  };
+  return new Proxy(real, {
+    get: (t, prop, recv) => {
+      if (typeof prop === "string" && BUILTIN_DENIED_PROPS.has(prop)) deny(prop);
+      return Reflect.get(t, prop, recv);
+    },
+    has: (t, prop) => {
+      if (typeof prop === "string" && BUILTIN_DENIED_PROPS.has(prop)) return false;
+      return Reflect.has(t, prop);
+    },
+    set: (t, prop, value, recv) => {
+      if (typeof prop === "string" && BUILTIN_DENIED_PROPS.has(prop)) deny(prop);
+      return Reflect.set(t, prop, value, recv);
+    },
+ // `apply`/`construct` forward to the real builtin so `new Array()` /
+ // `Object.assign()` / `Promise.resolve()` / `Reflect.construct()` keep working.
+ // (`Function`/`eval` are handled separately by the fully-throwing stubs above,
+ // since calling/constructing them IS the escape and must be denied outright.)
+    apply: (t, thisArg, args) =>
+      Reflect.apply(t as (...a: unknown[]) => unknown, thisArg, args),
+    construct: (t, args, newTarget) =>
+      Reflect.construct(t as new (...a: unknown[]) => object, args, newTarget),
+  });
+}
+
+// Built once at module load (identical on every call). Each shadows the
+// corresponding global so evaluated code cannot use it to climb to the real
+// `Function`/real `chrome` via the direct `X.constructor` form.
+const HARDENED_BUILTINS = {
+  Object: makeHardenedBuiltin(Object),
+  Array: makeHardenedBuiltin(Array),
+  String: makeHardenedBuiltin(String),
+  Number: makeHardenedBuiltin(Number),
+  Boolean: makeHardenedBuiltin(Boolean),
+  Symbol: makeHardenedBuiltin(Symbol),
+  Proxy: makeHardenedBuiltin(Proxy),
+  Reflect: makeHardenedBuiltin(Reflect),
+  Promise: makeHardenedBuiltin(Promise),
+  Map: makeHardenedBuiltin(Map),
+  Set: makeHardenedBuiltin(Set),
+  WeakMap: makeHardenedBuiltin(WeakMap),
+  WeakSet: makeHardenedBuiltin(WeakSet),
+  Date: makeHardenedBuiltin(Date),
+  RegExp: makeHardenedBuiltin(RegExp),
+  Error: makeHardenedBuiltin(Error),
+  Math: makeHardenedBuiltin(Math),
+  JSON: makeHardenedBuiltin(JSON),
+  BigInt: makeHardenedBuiltin(BigInt),
+} as const;
+
+/**
  * A Proxy that FORWARDS to a real global object (`window`,
  * `globalThis`, `self`, ...) for every property EXCEPT a small deny-list of
  * dangerous properties, which it denies with the sandbox error.
@@ -351,14 +430,33 @@ export function runSandboxedCode(code: string): unknown {
     "self",
     "Function",
     "eval",
+    "Object",
+    "Array",
+    "String",
+    "Number",
+    "Boolean",
+    "Symbol",
+    "Proxy",
+    "Reflect",
+    "Promise",
+    "Map",
+    "Set",
+    "WeakMap",
+    "WeakSet",
+    "Date",
+    "RegExp",
+    "Error",
+    "Math",
+    "JSON",
+    "BigInt",
     strippedCode,
-  ) as (
-    c: unknown, w: unknown, d: unknown, g: unknown, s: unknown, f: unknown, ev: unknown,
-  ) => unknown;
+  ) as (...args: unknown[]) => unknown;
  // Bind `this` to the hardened window proxy so `this.chrome` /
  // `this.Function` / `this.eval` cannot reach the real globals — `window`/
  // `document`/`globalThis`/`self` remain readable on `this` through the
- // denying/redirecting proxy.
+ // denying/redirecting proxy. The hardened builtins (`Object`, `Array`, …)
+ // shadow their realm globals so the `X.constructor` escape form can't reach
+ // the real `Function`/real `chrome` (see {@link makeHardenedBuiltin}).
   return fn.call(
     sandboxWindow,
     DENY_CHROME,
@@ -368,6 +466,25 @@ export function runSandboxedCode(code: string): unknown {
     sandboxSelf,
     DENY_FUNCTION,
     DENY_EVAL,
+    HARDENED_BUILTINS.Object,
+    HARDENED_BUILTINS.Array,
+    HARDENED_BUILTINS.String,
+    HARDENED_BUILTINS.Number,
+    HARDENED_BUILTINS.Boolean,
+    HARDENED_BUILTINS.Symbol,
+    HARDENED_BUILTINS.Proxy,
+    HARDENED_BUILTINS.Reflect,
+    HARDENED_BUILTINS.Promise,
+    HARDENED_BUILTINS.Map,
+    HARDENED_BUILTINS.Set,
+    HARDENED_BUILTINS.WeakMap,
+    HARDENED_BUILTINS.WeakSet,
+    HARDENED_BUILTINS.Date,
+    HARDENED_BUILTINS.RegExp,
+    HARDENED_BUILTINS.Error,
+    HARDENED_BUILTINS.Math,
+    HARDENED_BUILTINS.JSON,
+    HARDENED_BUILTINS.BigInt,
   );
 }
 
@@ -422,7 +539,7 @@ export async function handleEvaluate(
  // logged a warning and then ran the unmodified code, which was
  // contradictory and unsafe — finding: substituteCustomToolCalls import
  // failure runs UNMODIFIED code despite contradictory comment.)
-      console.error("[executor] substituteCustomToolCalls import failed:", e);
+      console.error("[evaluate] substituteCustomToolCalls import failed:", e);
       return {
         action,
         success: false,

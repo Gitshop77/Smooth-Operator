@@ -75,9 +75,11 @@ const FIVE_XX_RE = /\b5\d\d\b/;
  * response whose body mentions "rate limit" stays a `server_error`. The
  * structured `status` code (when present on the error object) overrides the
  * substring guesses that follow. The `programmer_error` instanceof check sits
- * AFTER `network` but BEFORE `parse`: a real browser `fetch` failure is a
- * `TypeError` ("Failed to fetch") and must remain a retried `network` error,
- * while a `JSON.parse` SyntaxError (message contains "json") must be FATAL.
+ * AFTER `network`. A `SyntaxError` whose message signals a JSON/parse failure
+ * (unparseable LLM output) is reclassified as transient `parse` BEFORE the
+ * `programmer_error` check, so it is retried with a nudge rather than treated
+ * as fatal; all other TypeError/ReferenceError/SyntaxError remain FATAL
+ * `programmer_error`.
  *
  * Auth/forbidden/bad_request are checked BEFORE cancelled because a 401/403/400
  * response from an aborted fetch is more usefully classified as auth (fatal)
@@ -153,22 +155,18 @@ export function classifyError(error: unknown, attempt = 0): ClassifiedError {
     return mk("network", false, true);
   }
 
- // Broad network substring match. This is intentionally restricted to values
- // that are NOT a TypeError/ReferenceError/SyntaxError: a genuine code bug
- // whose message coincidentally mentions a transport word (e.g.
- // `TypeError: Cannot read property 'network' of undefined`, or
- // `Error("fetch() config is invalid")` thrown as a plain Error) must be
- // classified as a FATAL `programmer_error` (below), not retried as if it were
- // a transient network hiccup. Only the fetch-failure TypeError form above is
- // treated as transient network.
- // A truncated/mid-stream stall ("stream stall: no data for 30000ms") is a
- // transient transport interruption, not an unexpected `unknown`. Include
- // `stall` (and the `stream` token it carries) so it classifies as `network`
- // and gets retried with the friendly "Network error" message rather than
- // surfacing the raw, internally-coupled stall string to the user.
+ // Narrow network substring match for plain (non-Type/Reference/Syntax)
+ // Errors. Only unambiguous, OS/transport-level tokens are considered here so a
+ // genuine code bug whose message merely mentions a generic word like
+ // "network" / "timeout" / "stall" / "stream" (e.g. `Error("invalid network
+ // config")`, `Error("operation timeout")`) falls through to the FATAL
+ // `programmer_error` check below instead of being retried as a transient
+ // network hiccup. The fetch-failure TypeError form is handled by the branch
+ // above; the OS-level tokens below cannot appear in ordinary code Error
+ // messages, so they remain safe to treat as transient network.
   if (
     !(error instanceof TypeError || error instanceof ReferenceError || error instanceof SyntaxError) &&
-    containsAny(lower, ["fetch failed", "network", "econnreset", "econnrefused", "timeout", "etimedout", "stall", "stream"])
+    containsAny(lower, ["fetch failed", "econnreset", "econnrefused", "etimedout"])
   ) {
     return mk("network", false, true);
   }
@@ -199,6 +197,17 @@ export function classifyError(error: unknown, attempt = 0): ClassifiedError {
     if (status >= 500 && status < 600) {
       return mk("server_error", false, true);
     }
+  }
+
+ // Unparseable LLM output (a `JSON.parse` SyntaxError) is transient — it must
+ // be retried with a nudge, NOT classified as a FATAL `programmer_error`. This
+ // is checked BEFORE the generic `programmer_error` instanceof catch-all below,
+ // which would otherwise swallow every parse failure as fatal and defeat the
+ // `parse` retry path. Only SyntaxErrors whose message signals a JSON/parse
+ // failure are reclassified here; other (genuine code) SyntaxErrors still fall
+ // through to `programmer_error`.
+  if (error instanceof SyntaxError && containsAny(lower, ["json", "parse"])) {
+    return mk("parse", false, true);
   }
 
  // Programmer errors (TypeError / ReferenceError / SyntaxError) — fatal, no

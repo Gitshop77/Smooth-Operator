@@ -72,6 +72,13 @@ function persist(key: string, value: string | boolean): void {
         const el = document.getElementById(key);
         if (el instanceof HTMLInputElement) el.checked = !value;
       }
+      // The webhook input is text, not a boolean toggle — revert it to the
+      // last-known-good value so it doesn't show an unsaved (possibly invalid)
+      // URL as if it had been accepted.
+      if (key === STORAGE_KEYS.webhookUrl) {
+        const wf = document.getElementById("webhookUrl") as HTMLInputElement | null;
+        if (wf) wf.value = lastKnownGoodWebhookUrl;
+      }
       return;
     }
     showSaved();

@@ -8,7 +8,12 @@ import type { Endpoint } from "./endpoint";
 import type { Framing, Frame } from "./framing";
 import { buildURL } from "./endpoint";
 import { withLLMRetry } from "../retry";
-import { isAllowedLlmBaseUrl, resolveAndValidateLlmBaseUrl } from "./ssrf";
+import {
+  type SsrfProvenance,
+  isAllowedLlmBaseUrl,
+  isCuratedLocalOrigin,
+  resolveAndValidateLlmBaseUrl,
+} from "./ssrf";
 
 /** Strip userinfo (`user:pass@`) and query/fragment (possible secret-bearing tokens) from a URL for logs/errors. */
 function redactUrlForLog(u: string): string {
@@ -134,16 +139,29 @@ export interface Transport<Body = unknown, Prepared = unknown, FrameType = Frame
 async function fetchWithTimeout(
   url: string,
   init: RequestInit,
-  userSignal?: AbortSignal
+  userSignal: AbortSignal | undefined,
+  provenance: SsrfProvenance
 ): Promise<Response> {
  // (SSRF guard) — defense-in-depth: refuse to fetch an LLM endpoint that
  // resolves to a loopback / private / link-local / cloud-metadata address.
  // `redirect: "manual"` already prevents body-forwarding via 3xx, but this
  // stops the request from ever leaving the service worker in the first place.
- // `isAllowedLlmBaseUrl` applies the same range checks as `validateLlmBaseUrl`
- // while exempting the curated Ollama/LiteLLM local endpoints. We throw (rather
- // than silently contacting the host) so a bad URL fails closed.
-  if (!isAllowedLlmBaseUrl(url)) {
+ //
+ // Provenance: a curated local-provider origin (Ollama / LiteLLM loopback) is
+ // the user's OWN self-hosted model server, so we treat it as
+ // `user-configured` and keep it reachable. EVERY other URL — a public
+ // hostname OR an injected / non-user URL — is treated per the supplied
+ // `provenance` (default `untrusted`), so the SSRF guards FAIL CLOSED on it and
+ // an injected `baseUrl` can never reach a local model server or an internal
+ // host. `isAllowedLlmBaseUrl` applies the same range checks as
+ // `validateLlmBaseUrl` while exempting the curated Ollama/LiteLLM local
+ // endpoints. We throw (rather than silently contacting the host) so a bad URL
+ // fails closed.
+  const effectiveProvenance: SsrfProvenance = isCuratedLocalOrigin(url)
+    ? "user-configured"
+    : provenance;
+  const exempt = effectiveProvenance === "user-configured";
+  if (!isAllowedLlmBaseUrl(url, exempt, effectiveProvenance)) {
     throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${redactUrlForLog(url)}`);
   }
   // (SSRF guard, DNS-rebinding) — re-validate the real target at fetch time.
@@ -151,16 +169,17 @@ async function fetchWithTimeout(
   // hostname that DNS-rebinds to a cloud-metadata / link-local / unspecified /
   // CGNAT address at fetch time would otherwise reach the internal address.
   // `resolveAndValidateLlmBaseUrl` resolves the hostname and rejects any
-  // resolution into a genuine SSRF sink. `allowLocalExemption=true` keeps the
-  // curated Ollama/LiteLLM local endpoints reachable (no change to existing
-  // local behavior) while the DNS step still blocks the sinks. This is
-  // re-checked on every fetch (no cached IP) as defense-in-depth. NOTE: it
-  // does NOT fully close the DNS-rebinding hole — `fetch` performs its own
-  // independent DNS lookup that this validation cannot pin in a service worker,
-  // so a fast-flux attacker could still flip the address between validate and
-  // connect. It narrows the window; it is not a guarantee. Failures are thrown
-  // so a bad URL fails closed.
-  const dnsCheck = await resolveAndValidateLlmBaseUrl(url, true);
+  // resolution into a genuine SSRF sink. The curated Ollama/LiteLLM local
+  // endpoints are exempted (so they stay reachable) while the DNS step still
+  // blocks the sinks for every other host. This is re-checked on every fetch
+  // (no cached IP) as defense-in-depth. NOTE: it does NOT fully close the
+  // DNS-rebinding hole — `fetch` performs its own independent DNS lookup that
+  // this validation cannot pin in a service worker, so a fast-flux attacker
+  // could still flip the address between validate and connect. It narrows the
+  // window; it is not a guarantee. Failures are thrown so a bad URL fails
+  // closed. An unverifiable DNS result (unavailable / error) FAILS CLOSED
+  // regardless of `exempt`.
+  const dnsCheck = await resolveAndValidateLlmBaseUrl(url, exempt, effectiveProvenance);
   if (!dnsCheck.ok) {
     throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${redactUrlForLog(url)} (${dnsCheck.reason})`);
   }
@@ -233,7 +252,17 @@ async function fetchWithTimeout(
 }
 
 /** Create an HTTP transport that sends JSON + reads SSE/JSON-line streams. */
-export const httpJson = <Body = unknown, FrameType = Frame>(opts: { framing: Framing<FrameType> }): Transport<Body, HttpPrepared<FrameType>, FrameType> => ({
+export const httpJson = <Body = unknown, FrameType = Frame>(opts: {
+  framing: Framing<FrameType>;
+  /**
+   * Provenance of the `baseUrl` this transport will fetch. Threaded into the
+   * SSRF guards so an injected / non-user URL FAILS CLOSED. Defaults to
+   * `"untrusted"`; pass `"user-configured"` only for a URL the user explicitly
+   * configured (the curated Ollama / LiteLLM loopback origins are always
+   * treated as `user-configured` regardless).
+   */
+  provenance?: SsrfProvenance;
+}): Transport<Body, HttpPrepared<FrameType>, FrameType> => ({
   prepare: (input: TransportPrepareInput<Body>): HttpPrepared<FrameType> => {
     const bodyStr = input.encodeBody(input.body);
     const url = buildURL(input.endpoint, input.body);
@@ -255,7 +284,7 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: { framing: Fra
         method: "POST",
         headers: prepared.headers,
         body: prepared.body,
-      }, signal);
+      }, signal, opts.provenance ?? "untrusted");
       if (!r.ok) {
         const txt = await r.text().catch(() => "");
         const err = new Error(`LLM API ${r.status}: ${txt.slice(0, 300)}`);

@@ -780,7 +780,7 @@ describe("secret leak prevention", () => {
 
   test("substituteSecrets replaces a placeholder with the real value", async () => {
     await setSecret("password", "hunter2hunter2");
-    const out = await substituteSecrets("Login with %password%");
+    const out = await substituteSecrets("Login with %password%", { trusted: true });
     expect(out).toBe("Login with hunter2hunter2");
  // The placeholder is gone, the real value is in.
     expect(out).not.toContain("%password%");

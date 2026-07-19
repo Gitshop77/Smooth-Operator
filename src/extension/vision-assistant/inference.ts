@@ -392,6 +392,17 @@ export class VisionAssistant {
  * aborted, reclaiming the GPU/CPU that would otherwise be spent finishing
  * an abandoned detection. */
   async detect(screenshotDataUrl: string, signal?: AbortSignal): Promise<PixelDetection[]> {
+ // MV3 service workers have no `navigator` / `navigator.gpu`, so WebGPU is
+ // unavailable there. Fail with a clear, descriptive error instead of letting
+ // the call surface an opaque "WebGPU not available" as an unhandled rejection
+ // when Local Vision is invoked from the SW context. (Vision stays bundled in
+ // the SW; it just degrades gracefully when WebGPU is absent.)
+    if (!VisionAssistant.isWebGPUAvailable()) {
+      throw new Error(
+        "WebGPU not available; Local Vision requires WebGPU (Chrome/Edge 121+). " +
+          "It cannot run in a context without navigator.gpu.",
+      );
+    }
  // Re-entrancy guard over the shared ONNX sessions. Two concurrent `detect()`
  // calls would interleave `session.run(feeds)` on the same vision/language
  // sessions and clobber the KV-cache/prefill state, producing garbage

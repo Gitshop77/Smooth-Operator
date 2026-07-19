@@ -35,10 +35,13 @@ describe("assertSafeUserBaseURL (openai-compatible SSRF guard)", () => {
     );
   });
 
-  test("ollama with the exact curated loopback origin passes", () => {
-    expect(() => assertSafeUserBaseURL("http://localhost:11434", "ollama")).not.toThrow();
-    expect(() => assertSafeUserBaseURL("http://localhost:11434/v1", "ollama")).not.toThrow();
-    expect(() => assertSafeUserBaseURL("http://127.0.0.1:11434", "ollama")).not.toThrow();
+  test("ollama with the exact curated loopback origin passes (user-configured exemption)", () => {
+    // The curated loopback exemption only applies for a USER-configured
+    // `baseURL` (allowLocalExemption === true). An untrusted/injected baseUrl is
+    // never exempted, so the explicit `true` third argument is required.
+    expect(() => assertSafeUserBaseURL("http://localhost:11434", "ollama", true)).not.toThrow();
+    expect(() => assertSafeUserBaseURL("http://localhost:11434/v1", "ollama", true)).not.toThrow();
+    expect(() => assertSafeUserBaseURL("http://127.0.0.1:11434", "ollama", true)).not.toThrow();
   });
 
   test("ollama exemption is scoped to the curated origin — a cloud-metadata sink still rejects", () => {

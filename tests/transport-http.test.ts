@@ -73,6 +73,35 @@ afterEach(() => {
   globalThis.fetch = savedFetch;
 });
 
+// ─── SSRF-guard DNS shim ────────────────────────────────────────────────────
+//
+// In the Node/vitest runtime there is no `chrome.dns` and no `require("dns")`,
+// so the async SSRF guard (`resolveAndValidateLlmBaseUrl`, invoked by
+// `fetchWithTimeout`) FAILS CLOSED for every hostname URL (e.g.
+// `https://api.example.com`). Mock a resolver that returns a public IP for ANY
+// host so legitimate public-hostname transports pass the guard. The dedicated
+// SSRF-blocking tests in this file still assert rejection: IP-literal /
+// link-local URLs are rejected at the synchronous IP-classification layer, and
+// the DNS-rebinding test installs its OWN `chrome.dns` stub that returns a
+// metadata address (then restores to `undefined`). We restore the prior
+// `chrome` global after each test so the DNS-rebinding test's local override
+// never leaks.
+
+const dnsShimChrome: { v: unknown } = { v: undefined };
+beforeEach(() => {
+  dnsShimChrome.v = (globalThis as unknown as { chrome?: unknown }).chrome;
+  (globalThis as unknown as { chrome?: unknown }).chrome = {
+    runtime: { lastError: undefined },
+    dns: {
+      resolve: (_h: string, cb: (r: { addresses?: string[] }) => void) =>
+        cb({ addresses: ["93.184.216.34"] }),
+    },
+  };
+});
+afterEach(() => {
+  (globalThis as unknown as { chrome?: unknown }).chrome = dnsShimChrome.v;
+});
+
 describe("httpJson.frames — opaqueredirect security", () => {
   test("THROWS when fetch resolves with type:'opaqueredirect' (refuses to follow redirect)", async () => {
  // `redirect: "manual"` makes fetch resolve with an opaque-redirect response

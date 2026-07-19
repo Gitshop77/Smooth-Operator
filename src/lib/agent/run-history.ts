@@ -8,6 +8,7 @@
 
 import type { LogEvent } from "./types";
 import { isExtensionWithLocal } from "./runtime";
+import { redactSecrets } from "./secrets";
 
 /** Persistent record of one completed (or aborted) agent run. */
 export interface RunRecord {
@@ -203,17 +204,9 @@ function isPlainObject(val: object): val is Record<string, unknown> {
 }
 
 async function redactRunSecrets(run: RunRecord): Promise<RunRecord> {
-  let redactSecrets: (text: string) => Promise<string>;
-  try {
-    ({ redactSecrets } = await import("./secrets"));
-  } catch (e) {
- // If the secrets module fails to load, don't let the caller persist the run
- // unredacted — fall back to masking every string value with the same marker
- // redactSecrets uses when its own store read fails, so nothing reaches disk
- // in cleartext.
-    console.warn("[run-history] secrets module failed to load; masking all text to avoid leak:", e);
-    redactSecrets = async (_text: string) => "[REDACTED: secret store unavailable]";
-  }
+ // `redactSecrets` is a static import (sibling module), so it is bundled into
+ // the service worker with `splitting:false` and is always available on the SW
+ // save path — no dynamic chunk load that could silently degrade redaction.
  // Redact a single value: strings are scanned for secrets; arrays and plain
  // objects are recursed into so a nested string field (e.g. `{data:{url}}`)
  // is never persisted unredacted. Recursion is depth-bounded so a pathological

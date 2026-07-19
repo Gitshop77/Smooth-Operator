@@ -67,7 +67,7 @@ const MINUTES_PER_DAY = 24 * 60;
 const MINUTES_PER_WEEK = 7 * MINUTES_PER_DAY;
 /** Minimum delay (ms) for the next fire — guards against scheduling in the
  * immediate past when `now` ticks forward between compute + alarm create. */
-const MIN_FIRE_DELAY_MS = 60_000;
+export const MIN_FIRE_DELAY_MS = 60_000;
 
 /** Build the chrome.alarms name for a given task id. */
 function alarmName(taskId: string): string {

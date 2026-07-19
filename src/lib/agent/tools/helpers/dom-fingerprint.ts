@@ -23,7 +23,10 @@ import { FINGERPRINT_MAX_ELEMENTS, FNV_OFFSET_BASIS, FNV_PRIME } from "../consta
 function elementSignature(el: Element): string {
   const type = el.getAttribute("type") || "";
   const ariaLabel = el.getAttribute("aria-label") || "";
-  const href = el instanceof HTMLAnchorElement ? el.getAttribute("href") || "" : "";
+  const href =
+    typeof HTMLAnchorElement !== "undefined" && el instanceof HTMLAnchorElement
+      ? el.getAttribute("href") || ""
+      : "";
   const value = getElementValue(el);
  // Bound the hashed `text` length. `.slice(0, 256)` limits how many
  // characters of `text` enter the FNV hash (keeping the signature compact
@@ -36,16 +39,20 @@ function elementSignature(el: Element): string {
 }
 
 function getElementValue(el: Element): string {
+ // Feature-detect the DOM element globals so this helper can't throw
+ // `ReferenceError: HTMLInputElement is not defined` if it is ever invoked in a
+ // non-DOM context (e.g. the MV3 service worker). In a real page these globals
+ // are always present, so page-side behavior is unchanged.
   if (
-    el instanceof HTMLInputElement ||
-    el instanceof HTMLSelectElement ||
-    el instanceof HTMLTextAreaElement
+    (typeof HTMLInputElement !== "undefined" && el instanceof HTMLInputElement) ||
+    (typeof HTMLSelectElement !== "undefined" && el instanceof HTMLSelectElement) ||
+    (typeof HTMLTextAreaElement !== "undefined" && el instanceof HTMLTextAreaElement)
   ) {
  // Never fold a password field's value into the signature. Doing so would
  // leak secrets if the fingerprint is externalized, and would otherwise flip
  // the fingerprint on every keystroke inside a login form. `el.type` is
  // normalized to lowercase by the DOM, so a direct equality check suffices.
-    if (el instanceof HTMLInputElement) {
+    if (typeof HTMLInputElement !== "undefined" && el instanceof HTMLInputElement) {
       // Skip `value` for transient inputs: typing in them would churn the
       // fingerprint and trigger spurious SPA-route-change detection (the
       // module's purpose is to ignore transient input, exactly as it already
@@ -59,7 +66,7 @@ function getElementValue(el: Element): string {
  // into the signature would churn the fingerprint on every keystroke and trip
  // spurious SPA-route-change detection. Treat it like the transient inputs
  // (stateful <select> values are still meaningful and kept).
-    if (el instanceof HTMLTextAreaElement) return "";
+    if (typeof HTMLTextAreaElement !== "undefined" && el instanceof HTMLTextAreaElement) return "";
     return el.value;
   }
   return "";

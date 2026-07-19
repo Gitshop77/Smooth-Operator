@@ -318,10 +318,11 @@ export interface SubstituteSecretsOptions {
  * cannot redirect a real credential into an attacker-chosen field or target
  * .
  *
- * Defaults to `true` to preserve the behavior of the sole legitimate caller
- * (the `input` executor, which types into a user-requested field). Any caller
- * that substitutes into an attacker- or LLM-controlled action target MUST pass
- * `{ trusted: false }`.
+ * Defaults to `false` (opt-in). Callers substituting into a user-requested,
+ * injection-safe sink (e.g. the `input` executor typing into a
+ * user-requested field) MUST pass `{ trusted: true }`. Any caller that
+ * substitutes into an attacker- or LLM-controlled action target must NOT opt
+ * in, so the default of `false` keeps real credentials out of forged fields.
  */
   trusted?: boolean;
 }
@@ -349,7 +350,7 @@ export async function substituteSecrets(
   text: string,
   options: SubstituteSecretsOptions = {},
 ): Promise<string> {
-  const { trusted = true } = options;
+  const { trusted = false } = options;
  // Untrusted sink: never inject real secret values. Return placeholders intact
  // so nothing sensitive can be redirected into an injection-controlled target.
   if (!trusted) return text;

@@ -164,7 +164,8 @@ document.querySelectorAll('input[name="visionMode"]').forEach((radio) => {
         confirmLabel: "Download",
       });
       if (!ok) {
-        ($("visionMode_disabled") as HTMLInputElement).checked = true;
+        const disabledRadio = document.getElementById("visionMode_disabled") as HTMLInputElement | null;
+        if (disabledRadio) disabledRadio.checked = true;
  // Persist the reverted (disabled) state so the radio UI and stored
  // config stay consistent — otherwise the UI would show "disabled"
  // while storage still held the previously-selected mode.
@@ -173,7 +174,14 @@ document.querySelectorAll('input[name="visionMode"]').forEach((radio) => {
         return;
       }
     }
-    await ensureVisionAssistant();
+    try {
+      await ensureVisionAssistant();
+    } catch (e) {
+ // A failed init/download must not become an unhandled rejection. Surface a
+ // clear error badge so the user can diagnose (e.g. storage quota / network).
+      updateBadge("error", e instanceof Error ? e.message : String(e));
+      updateProgress(false);
+    }
   });
 });
 

@@ -32,7 +32,10 @@ export async function safeLog(
     const redacted = await redactSecrets(raw);
     console[level](redacted);
   } catch {
-    console[level](msg, err);
+    // Redaction itself failed — never emit the raw (untrusted, possibly
+    // secret-bearing) message/error. Suppress with a generic, opaque line so
+    // no secret can reach the console via this fallback path.
+    console[level]("[redacted log suppressed]");
   }
 }
 

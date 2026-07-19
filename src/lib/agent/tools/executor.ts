@@ -108,7 +108,8 @@ class UnhandledActionError extends Error {
  */
 export async function executeAction(
   action: AgentAction,
-  state: BrowserState
+  state: BrowserState,
+  signal?: AbortSignal,
 ): Promise<ActionResult> {
   try {
  // Capture before-state once at the top — used by the click, go_back,
@@ -117,6 +118,7 @@ export async function executeAction(
       state,
       beforeUrl: location.href,
       beforeFingerprint: domFingerprint(),
+      signal,
     };
 
     switch (action.type) {

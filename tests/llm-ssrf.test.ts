@@ -304,24 +304,32 @@ describe("resolveAndValidateLlmBaseUrl (DNS-resolution SSRF guard)", () => {
     expect(allowed.ok).toBe(true);
   });
 
-  test("error resolver: fail-closed for untrusted, degraded-pass for user-configured", async () => {
+  test("error resolver: fail-closed for untrusted AND user-configured (unverifiable target)", async () => {
     setMockDns({ kind: "error" });
     const rejected = await resolveAndValidateLlmBaseUrl("http://example.attacker/v1", false);
     expect(rejected.ok).toBe(false);
     if (rejected.ok) throw new Error("expected rejection");
     expect(rejected.reason).toMatch(/DNS resolution/i);
-    const allowed = await resolveAndValidateLlmBaseUrl("http://example.attacker/v1", true);
-    expect(allowed.ok).toBe(true);
+    // A resolver error FAILS CLOSED regardless of provenance — a user-configured
+    // origin whose target IP cannot be verified must not be trusted either.
+    const alsoRejected = await resolveAndValidateLlmBaseUrl("http://example.attacker/v1", true);
+    expect(alsoRejected.ok).toBe(false);
+    if (alsoRejected.ok) throw new Error("expected rejection");
+    expect(alsoRejected.reason).toMatch(/DNS resolution/i);
   });
 
-  test("unavailable resolver: fail-closed for untrusted, degraded-pass for user-configured", async () => {
+  test("unavailable resolver: fail-closed for untrusted AND user-configured", async () => {
     clearMockDns(); // no chrome.dns, no require → resolveAndValidateLlmBaseUrl sees `unavailable`
     const rejected = await resolveAndValidateLlmBaseUrl("http://example.attacker/v1", false);
     expect(rejected.ok).toBe(false);
     if (rejected.ok) throw new Error("expected rejection");
     expect(rejected.reason).toMatch(/DNS resolver unavailable/i);
-    const allowed = await resolveAndValidateLlmBaseUrl("http://example.attacker/v1", true);
-    expect(allowed.ok).toBe(true);
+    // No resolver available FAILS CLOSED regardless of provenance — when the
+    // real target IP cannot be verified we must never trust the URL.
+    const alsoRejected = await resolveAndValidateLlmBaseUrl("http://example.attacker/v1", true);
+    expect(alsoRejected.ok).toBe(false);
+    if (alsoRejected.ok) throw new Error("expected rejection");
+    expect(alsoRejected.reason).toMatch(/DNS resolver unavailable/i);
   });
 
   test("still rejects a genuine IP-literal sink (no DNS needed)", async () => {

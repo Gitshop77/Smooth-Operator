@@ -115,13 +115,18 @@ describe("resolveAndValidateLlmBaseUrl DNS outcome branches", () => {
     }
   });
 
-  test("no resolver + local-exempt provenance → fail OPEN with warning", async () => {
+  test("no resolver + local-exempt provenance → fail CLOSED (guard never weakens for an unverifiable target)", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const savedRequire = g.require;
     delete g.require;
     try {
       const res = await resolveAndValidateLlmBaseUrl("http://api.example.com", true);
-      expect(res.ok).toBe(true);
+      // No DNS resolver is available in this runtime, so the guard FAILS CLOSED
+      // (with a warning) even for a user-configured provenance — an unverifiable
+      // target IP must never be trusted.
+      expect(res.ok).toBe(false);
+      if (res.ok) throw new Error("expected rejection");
+      expect(res.reason).toMatch(/DNS resolver unavailable/i);
       expect(warn).toHaveBeenCalled();
     } finally {
       if (savedRequire !== undefined) g.require = savedRequire;

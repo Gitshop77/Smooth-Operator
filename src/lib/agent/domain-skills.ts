@@ -167,8 +167,18 @@ function hostnameMatches(hostname: string, domain: string): boolean {
   // (e.g. "GitHub.com") still matches the URL parser's lowercased hostname
   // (e.g. "github.com"). Custom domains are not normalized for case by
   // `normalizeCustomSkill`, so the comparison must be case-insensitive.
+  // Mirror `security.ts`'s `hostnameMatches`: a stored FQDN form
+  // (e.g. "example.com.") or a domain with a stray path (e.g. "example.com/x")
+  // would otherwise never match the lowercased bare hostname — silently
+  // dropping the skill. Strip scheme, leading/trailing dots, and any path
+  // before comparison so those forms resolve as intended.
   const h = hostname.toLowerCase();
-  const d = domain.toLowerCase();
+  let d = domain.toLowerCase().trim();
+  d = d.replace(/^https?:\/\//i, "");
+  d = d.replace(/\/.*$/, ""); // strip any path component
+  d = d.replace(/^\.+/, ""); // accept ".example.com" as subdomains of example.com
+  d = d.replace(/\.+$/, ""); // strip FQDN trailing dot
+  if (!d) return false;
   return h === d || h.endsWith(`.${d}`);
 }
 

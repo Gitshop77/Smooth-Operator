@@ -26,12 +26,36 @@ function makeStorageGet(store: Record<string, unknown>) {
   };
 }
 
+// SSRF-guard DNS shim. `buildProvider` runs `resolveAndValidateLlmBaseUrl` on a
+// user-supplied `baseUrl`; in the Node/vitest runtime there is no `chrome.dns`
+// and no `require("dns")`, so the guard FAILS CLOSED for any hostname URL. Mock
+// a resolver returning a public IP for ANY host so legitimate public-hostname
+// configs pass the guard (the curated-local / metadata / RFC1918 cases in this
+// file are rejected synchronously before any DNS lookup and are unaffected).
+const dnsShimChrome: { v: unknown } = { v: undefined };
+function installPublicDns(): void {
+  dnsShimChrome.v = (globalThis as unknown as { chrome?: unknown }).chrome;
+  (globalThis as unknown as { chrome?: unknown }).chrome = {
+    runtime: { lastError: undefined },
+    dns: {
+      resolve: (_h: string, cb: (r: { addresses?: string[] }) => void) =>
+        cb({ addresses: ["93.184.216.34"] }),
+    },
+  };
+}
+function restoreChrome(): void {
+  (globalThis as unknown as { chrome?: unknown }).chrome = dnsShimChrome.v;
+}
+
 /**
  * (a) An attacker-controlled storage write that stamps provenance:"user" on a
  * PUBLIC attacker host must NOT be trusted. The canonical-host guard must still
  * reject the baseUrl so the user's API key is never forwarded to it.
  */
 describe("canonical-host exfil guard rejects public attacker hosts regardless of provenance", () => {
+  beforeEach(installPublicDns);
+  afterEach(restoreChrome);
+
   test("provenance 'user' + public attacker host is rejected", async () => {
     await expect(
       buildProvider({
@@ -118,6 +142,9 @@ describe("injected provenance: loopback and cloud-metadata are rejected", () => 
  * config or reach an unintended endpoint.
  */
 describe("keyless remote provider is blocked", () => {
+  beforeEach(installPublicDns);
+  afterEach(restoreChrome);
+
   test("openai-compatible remote provider without an apiKey throws", async () => {
     await expect(
       buildProvider({

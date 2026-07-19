@@ -21,11 +21,13 @@ describe("classifyError — network vs programmer_error", () => {
     expect(c.fatal).toBe(false);
   });
 
-  test("JSON.parse SyntaxError → programmer_error / fatal (not transient parse)", () => {
+  test("JSON.parse SyntaxError → transient parse / retryable (not fatal programmer_error)", () => {
+    // An unparseable LLM response (a `JSON.parse` SyntaxError) is a transient
+    // `parse` error that is retried with a nudge — NOT a fatal `programmer_error`.
     const c = classifyError(new SyntaxError("Unexpected token < in JSON at position 0"));
-    expect(c.category).toBe("programmer_error");
-    expect(c.fatal).toBe(true);
-    expect(c.retryable).toBe(false);
+    expect(c.category).toBe("parse");
+    expect(c.fatal).toBe(false);
+    expect(c.retryable).toBe(true);
   });
 });
 

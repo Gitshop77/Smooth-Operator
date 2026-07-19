@@ -443,23 +443,36 @@ describe("model-loader integrity", () => {
     }
   });
 
-  test("getBuffer rejects a cached buffer that begins with '<' when it is unverified", async () => {
+  test("getBuffer rejects a cached buffer whose digest does not match its pinned hash (poisoned/unexpected payload)", async () => {
     delete process.env.COWORK_ALLOW_UNPINNED_VISION;
     const realCaches = (globalThis as { caches?: unknown }).caches;
-    const buf = new Uint8Array([0x3c, 0x68, 0x74, 0x6d]); // "<htm"
+    const url = "https://example.com/m.bin";
+    const buf = new Uint8Array([0x3c, 0x68, 0x74, 0x6d]); // "<htm" — a non-weights payload
     const response = new Response(buf.slice().buffer); // no x-model-sha256 header
+    // Pin a hash the '<'-prefixed buffer can never satisfy. The first-byte
+    // markup heuristic was intentionally removed (it false-positived on valid
+    // ONNX weights); integrity is enforced solely by the SHA-256 digest check,
+    // which also catches error pages / partial payloads. A mismatched digest
+    // makes `getBuffer` reject and auto-delete the poisoned cache entry.
+    MODEL_FILE_HASHES[url] = "0000000000000000000000000000000000000000000000000000000000000000";
+    let deleted = false;
     try {
       (globalThis as { caches?: unknown }).caches = {
         open: async () => ({
           match: async () => response,
-          delete: async () => true,
+          delete: async () => {
+            deleted = true;
+            return true;
+          },
         }),
       };
       const loader = new ModelLoader();
       await expect(
-        loader.getBuffer("https://example.com/m.bin"),
-      ).rejects.toThrow(/markup/);
+        loader.getBuffer(url),
+      ).rejects.toThrow(/does not match its pinned/i);
+      expect(deleted).toBe(true);
     } finally {
+      delete MODEL_FILE_HASHES[url];
       (globalThis as { caches?: unknown }).caches = realCaches;
     }
   });

@@ -52,7 +52,7 @@ export async function handleLoadSkill(
   return {
     action,
     success: true,
-    message: `Loaded skill "${safeName}" (${body.length} chars)`,
+    message: `Loaded skill "${safeName}" (${skillBody.length} chars)`,
     extractedContent: `Skill: ${safeName}\n\n${skillBody}${truncatedNote}`,
   };
 }

@@ -496,24 +496,12 @@ export class ModelLoader {
     if (buf.byteLength === 0) {
       throw new Error(`[vision-assistant] Cached model file ${url} is empty; refusing to load.`);
     }
- // Defense-in-depth: a cached "model" that is actually an HTML/XML error
- // page (e.g. from a bad CDN redirect) must never reach ONNX Runtime. Genuine
- // model weights are binary; markup begins with '<', so reject it with a
- // descriptive error rather than a generic parse failure (finding: cached
- // file type/content not validated before parsing).
- // Defense-in-depth: a cached "model" that is actually an HTML/XML error
- // page (e.g. from a bad CDN redirect) must never reach ONNX Runtime. Genuine
- // model weights are binary; markup begins with '<', so reject it with a
- // descriptive error rather than a generic parse failure. This check is
- // unconditional: a self-reported x-model-sha256 digest (unpinned-weights
- // mode) or a pinned hash must not let a markup payload through, since real
- // weights never begin with '<'.
-    if (buf.byteLength >= 1 && buf[0] === 0x3c /* '<' */) {
-      throw new Error(
-        `[vision-assistant] Cached model file ${url} looks like markup (starts with '<'), ` +
-          `not model weights; refusing to load. The cache entry is likely an error page.`,
-      );
-    }
+ // Integrity is enforced solely by the SHA-256 re-verification below. Binary
+ // weights (including ONNX protobufs) can legitimately begin with 0x3c ('<'),
+ // so a first-byte markup heuristic must NOT reject valid caches — doing so
+ // caused Local Vision to delete and re-download a good entry. A genuine
+ // markup error page will fail the digest check against its pinned/stored
+ // SHA-256 instead.
     try {
       await this.reverifyIntegrity(url, buf, response);
     } catch (e) {

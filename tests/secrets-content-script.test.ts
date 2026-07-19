@@ -87,7 +87,7 @@ describe("F-1: content-script context must not fail on placeholder-free input", 
 
   test("substituteSecrets still fails closed (throws) for a real placeholder when the store is unreadable", async () => {
     installThrowingSessionStub();
-    await expect(substituteSecrets("email is %email%")).rejects.toThrow(CONTENT_SCRIPT_ERROR);
+    await expect(substituteSecrets("email is %email%", { trusted: true })).rejects.toThrow(CONTENT_SCRIPT_ERROR);
   });
 
   test("redactSecrets is a no-op (no throw) once the SW resolved secrets, even though session.get throws", async () => {
@@ -101,7 +101,7 @@ describe("F-1: content-script context must not fail on placeholder-free input", 
 describe("F-1: service-worker context (readable session) substitutes + redacts", () => {
   test("substituteSecrets resolves a placeholder from session storage", async () => {
     installReadableSessionStub();
-    const out = await substituteSecrets("email is %email%");
+    const out = await substituteSecrets("email is %email%", { trusted: true });
     expect(out).toBe("email is user@example.com");
   });
 
@@ -127,7 +127,7 @@ describe("F-1: demo / non-extension path (localStorage) is unaffected", () => {
       "open_cowork_secrets",
       JSON.stringify([{ name: "email", value: "user@example.com", createdAt: Date.now() }]),
     );
-    const out = await substituteSecrets("email is %email%");
+    const out = await substituteSecrets("email is %email%", { trusted: true });
     expect(out).toBe("email is user@example.com");
   });
 

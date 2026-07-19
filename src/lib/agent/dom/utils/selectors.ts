@@ -57,9 +57,7 @@ export type LocatorUsing =
   | "link text"
   | "partial link text"
   | "tag name"
-  | "class name"
-  | "name"
-  | "id";
+  | "class name";
 
 /**
  * A W3C-style locator: a `(using, value)` pair. Built via the {@link By}
@@ -227,7 +225,12 @@ export function escapeCss(css: string): string {
  * - `link text` / `partial link text` → walk all `<a>` elements comparing trimmed text
  * - `tag name` → `document.getElementsByTagName(by.value)`
  * - `class name` → `document.getElementsByClassName(by.value)`
- * - `name` / `id` → resolved at factory time to a CSS selector (delegates to CSS path)
+ *
+ * Note: `By.id` / `By.byName` resolve to a `css selector` factory-time (via
+ * `escapeCss`), so `id` / `name` never arrive here as a strategy — they are
+ * intentionally absent from {@link LocatorUsing} to make a hand-built
+ * `new By("id", …)` a compile-time error rather than a runtime "unknown
+ * strategy" miss.
  *
  * Returns an empty array on any error (e.g. invalid XPath) so callers can
  * branch on `.length` without try/catch. **This function never throws**, even
@@ -235,8 +238,16 @@ export function escapeCss(css: string): string {
  * handler. Failures are nonetheless surfaced to the console so genuine bugs
  * aren't masked as "no match" (see the notes in the `catch`/`default` below).
  */
+// Diagnostics should be suppressed ONLY in a real production Node build. In a
+// browser content script `process` is undefined, so the previous
+// `typeof process === "undefined" ? true` branch wrongly treated every
+// in-browser run as production and silenced oversized-locator / invalid-
+// selector diagnostics as "no match". With no build-time DEV constant
+// available, drive the check off `process.env.NODE_ENV` safely: it is true
+// only when `process` exists AND is explicitly set to "production", so the
+// browser path (process undefined) keeps diagnostics enabled.
 const isProd = (): boolean =>
-  typeof process === "undefined" ? true : process.env?.NODE_ENV === "production";
+  typeof process !== "undefined" && process.env?.NODE_ENV === "production";
 
 export function findByLocator(by: By): Element[] {
   try {

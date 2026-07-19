@@ -102,7 +102,7 @@ const CURATED_LOCAL_ORIGINS: ReadonlySet<string> = new Set(
 );
 
 /** True iff `url`'s origin exactly matches a curated local-provider endpoint. */
-function isCuratedLocalOrigin(url: string): boolean {
+export function isCuratedLocalOrigin(url: string): boolean {
   try {
     return CURATED_LOCAL_ORIGINS.has(new URL(url).origin);
   } catch {
@@ -492,48 +492,40 @@ export async function resolveAndValidateLlmBaseUrl(
   const outcome = await dnsResolve(host);
   if (outcome.kind === "unavailable") {
  // No DNS resolver exists in this runtime (e.g. a Node context without the
- // `dns` module). For an UNTRUSTED baseUrl (provenance NOT user-configured,
- // allowLocalExemption=false) we FAIL CLOSED: without a resolver we cannot
- // verify the real target IP, so a hostname that resolves to a cloud-metadata /
- // internal address would be a live SSRF exfil path. Only a user-configured
- // baseUrl (allowLocalExemption=true) degrades to the synchronous check's pass
- // (fail-open) so legit self-hosted endpoints keep working in odd runtimes; the
- // transport layer re-checks the literal URL regardless. In a Chrome extension
- // service worker `chrome.dns.resolve` IS available, so this path is
- // effectively unreachable in production.
-    if (!exempt) {
-      return {
-        ok: false,
-        reason: `DNS resolver unavailable; refusing untrusted ${redactUrl(url)} (fail-closed SSRF guard).`,
-      };
-    }
+ // `dns` module). FAIL CLOSED unconditionally, regardless of `exempt`: without
+ // a resolver we cannot verify the real target IP, so a hostname that resolves
+ // to a cloud-metadata / internal address would be a live SSRF exfil path. The
+ // curated local-provider origins (Ollama / LiteLLM loopback) already
+ // short-circuit earlier (see `isCuratedLocalOrigin` above) and are unaffected
+ // by this change — only outside a Chrome extension service worker (which
+ // always has `chrome.dns.resolve`) is this path reachable, and there refusing
+ // is the safe default. The transport-layer guard still re-checks the literal
+ // URL.
     console.warn(
-      `[ssrf] dnsResolve unavailable — degrading ${redactUrl(url)} to the synchronous SSRF ` +
-        `check (fail-open). Verify the transport-layer guard still blocks ` +
-        `unauthorized targets; do not treat this as a successful validation.`,
+      `[ssrf] dnsResolve unavailable — refusing ${redactUrl(url)} (fail-closed SSRF ` +
+        `guard). Without a resolver we cannot verify the real target IP; a ` +
+        `hostname that resolves to a cloud-metadata / internal address would be a ` +
+        `live SSRF exfil path.`,
     );
-    return { ok: true };
+    return {
+      ok: false,
+      reason: `DNS resolver unavailable; refusing ${redactUrl(url)} (fail-closed SSRF guard).`,
+    };
   }
   if (outcome.kind === "error") {
- // For an UNTRUSTED `baseUrl` (provenance NOT user-configured,
- // allowLocalExemption=false) we FAIL CLOSED: without a verified target IP we
- // must not risk reaching an internal/metadata host. For a user-configured
- // (trusted) baseUrl the synchronous SSRF check already passed, so we degrade
- // to ok:true (fail-open) with a warning so a transient DNS blip does not turn
- // every request into a hard, non-retryable rejection of a legitimate public
- // provider. The transport-layer guard still re-checks the literal URL.
-    if (!exempt) {
-      return {
-        ok: false,
-        reason: `DNS resolution for ${host} failed; refusing ${redactUrl(url)} (fail-closed SSRF guard).`,
-      };
-    }
+ // A resolver was available but the lookup FAILED. FAIL CLOSED unconditionally,
+ // regardless of `exempt` — without a verified target IP we must not risk
+ // reaching an internal / metadata host on an unverifiable URL. The curated
+ // local-provider origins short-circuit earlier and are unaffected. The
+ // transport-layer guard still re-checks the literal URL.
     console.warn(
-      `[ssrf] dnsResolve errored for ${redactUrl(url)} — degrading to the synchronous SSRF ` +
-        `check (fail-open). Verify the transport-layer guard still blocks ` +
-        `unauthorized targets; do not treat this as a successful validation.`,
+      `[ssrf] dnsResolve errored for ${redactUrl(url)} — refusing (fail-closed SSRF ` +
+        `guard). Verify the transport-layer guard still blocks unauthorized targets.`,
     );
-    return { ok: true };
+    return {
+      ok: false,
+      reason: `DNS resolution for ${host} failed; refusing ${redactUrl(url)} (fail-closed SSRF guard).`,
+    };
   }
   for (const ip of outcome.ips) {
     const alwaysBlocked = ip.includes(":") ? isDangerousIpv6(ip) : isDangerousIpv4(ip);
@@ -813,17 +805,23 @@ export async function resolveAndValidateWebhookUrl(
   const outcome = await dnsResolve(host);
   if (outcome.kind === "unavailable") {
     // No DNS resolver exists in this runtime (e.g. a Node context without the
-    // `dns` module). Degrade to the synchronous check so self-hosted relay
-    // webhooks keep working; the literal-host guard still blocks .internal /
-    // .local / single-label hostnames. In a Chrome extension service worker
-    // `chrome.dns.resolve` IS available, so this path is effectively
-    // unreachable in production.
+    // `dns` module). FAIL CLOSED: a webhook URL is settable through an
+    // (untrusted) settings-sync vector and POSTed with task text by
+    // task-queue.ts, so degrading to the synchronous check here is a genuine
+    // exfil path — a public hostname that rebinds to an internal address at
+    // fetch time would otherwise be reachable. In a Chrome extension service
+    // worker `chrome.dns.resolve` IS available, so this path is effectively
+    // unreachable in production; the literal-host guard (isBlockedWebhookHost)
+    // still blocks .internal / .local / single-label hostnames.
     console.warn(
-      `[ssrf] dnsResolve unavailable — degrading ${redactUrl(url)} to the synchronous ` +
-        `webhook SSRF check (fail-open). Verify a public hostname that rebinds to an ` +
-        `internal address cannot be reached in this runtime.`,
+      `[ssrf] dnsResolve unavailable — refusing ${redactUrl(url)} webhook (fail-closed ` +
+        `SSRF guard). A hostname that rebinds to an internal address would be a ` +
+        `live exfil path.`,
     );
-    return base;
+    return {
+      ok: false,
+      reason: `DNS resolver unavailable; refusing ${redactUrl(url)} webhook (fail-closed SSRF guard).`,
+    };
   }
   if (outcome.kind === "error") {
     // A resolver was available but the lookup FAILED. FAIL CLOSED rather than

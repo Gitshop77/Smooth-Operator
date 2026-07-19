@@ -26,6 +26,10 @@ import type { AgentAction, ActionResult, HistoryItem } from "./types";
 // extension console (see finding [28]). It is async (loads the secret map), so
 // we log via a fire-and-forget `.then`.
 import { redactSecrets } from "./secrets";
+// `redactKeyLeak` (from the extension shared module) is the canonical
+// API-key masker — used as a defense-in-depth safety net on every log line
+// (including the redaction-failure fallback) so a key can never be echoed.
+import { redactKeyLeak } from "@/extension/shared";
 // Note: `getPricingForModel` is intentionally not imported here. Cost
 // computation lives in `pricing.ts` (`estimateCost`) and is invoked from the
 // protocol/provider-bridge layer, not from this module.
@@ -198,11 +202,19 @@ export class CallbackDispatcher {
       if (count !== 1 && count % CallbackDispatcher.WARN_THROTTLE !== 0) return;
  // Redact any substituted secrets that leaked into the error string before
  // logging to the extension console (defense-in-depth; mirrors the cockpit
- // redaction path). `redactSecrets` is async, so log via `.then` and fall
- // back to the raw error if redaction itself fails.
-      void redactSecrets(String(e))
-        .then((safe) => console.error(`[callbacks] ${String(method)} handler failed:`, safe))
-        .catch(() => console.error(`[callbacks] ${String(method)} handler failed (secret redaction unavailable)`));
+ // redaction path). Await the redaction so the secret-laden raw error string
+ // never reaches the console ahead of masking, and wrap it in try/catch so a
+ // redaction failure can NEVER echo secrets: the fallback masks any API keys
+ // in the raw error before logging it.
+      try {
+        const safe = await redactSecrets(String(e));
+        console.error(`[callbacks] ${String(method)} handler failed:`, redactKeyLeak(safe));
+      } catch {
+        console.error(
+          `[callbacks] ${String(method)} handler failed (secret redaction unavailable):`,
+          redactKeyLeak(String(e)),
+        );
+      }
     }
   }
 

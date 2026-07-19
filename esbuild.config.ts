@@ -157,34 +157,38 @@ const sharedConfig: BuildOptions = {
 
 /**
  * PERF-1: background.js is loaded as an ES module (the manifest declares
- * `"background": { "service_worker": "background.js", "type": "module" }`),
- * so we can use `format: "esm"` + `splitting: true`. This lets esbuild emit
- * the dynamically-imported `await import("../vision-assistant")` call in
- * `agent-bridge.ts` as a SEPARATE chunk file — the 2.6 MB vision stack
- * (`@huggingface/transformers` + `onnxruntime-web`) only loads when the user
- * actually enables Local Vision, instead of being parsed on every service
- * worker cold start.
+ * `"background": { "service_worker": "background.js", "type": "module" }`).
+ *
+ * `splitting` is intentionally `false`. MV3 service workers run in
+ * `ServiceWorkerGlobalScope`, where the HTML spec DISALLOWS native
+ * `import()` ("import() is disallowed on ServiceWorkerGlobalScope"). Any
+ * code-splitting (static OR dynamic) under `format: "esm"` makes esbuild emit
+ * native `import()` calls to load the chunks — which throw at runtime and take
+ * the whole worker down. With `splitting: false`, esbuild INLINES every import
+ * (including the `await import("../vision-assistant")` in `agent-bridge.ts`)
+ * into a single self-contained `background.js`, so no native `import()` is ever
+ * emitted. Dynamic imports still resolve lazily (esbuild wraps them in a
+ * `Promise`), they just aren't separate files.
+ *
+ * Trade-off: the 2.6 MB vision stack (`@huggingface/transformers` +
+ * `onnxruntime-web`) is now parsed as part of the SW bundle instead of loaded
+ * on demand. Correctness (no SW crash) beats the startup win; Local Vision only
+ * runs where WebGPU exists (a DOM context), so the inlined vision code is
+ * effectively dead weight in the SW and is never executed there.
  *
  * Why not `external: ["@huggingface/transformers", "onnxruntime-web"]`?
  * Marking these packages external tells esbuild NOT to bundle them — the
  * bundle would then contain runtime `import("onnxruntime-web")` calls. But
  * the extension does NOT ship `node_modules/`, so the bare specifier would
- * fail to resolve at runtime (no import map, no node resolution). ESM
- * code-splitting achieves the same SW-startup win without breaking vision:
- * the heavy deps live in a lazy-loaded chunk that resolves via relative path.
- *
- * Result: background.js drops from 3.9 MB (single IIFE) → ~10 KB + ~600 KB
- * of small shared chunks loaded eagerly. The 2.6 MB vision chunk loads only
- * when vision is enabled.
+ * fail to resolve at runtime (no import map, no node resolution).
  */
 const backgroundConfig: BuildOptions = {
   ...sharedConfig,
   format: "esm",
-  splitting: true,
-  chunkNames: "chunks/[name]-[hash]",
- // `entryNames` preserves the output filename as `background.js` (no hash)
- // so the manifest's `"service_worker": "background.js"` reference stays
- // valid. Chunk files get hashed names via `chunkNames`.
+  splitting: false,
+  // `entryNames` preserves the output filename as `background.js` (no hash)
+  // so the manifest's `"service_worker": "background.js"` reference stays
+  // valid. With splitting disabled there are no chunk files.
   entryNames: "[name]",
 };
 

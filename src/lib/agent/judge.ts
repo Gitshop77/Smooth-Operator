@@ -14,6 +14,9 @@ import { wrapUntrusted } from "./security";
 // use the shared balanced-brace JSON extractor from output-parser
 // instead of a duplicate implementation.
 import { extractJson } from "./output-parser";
+// Static import — bundled into the service worker (splitting:false) so the
+// judge cost path never depends on a runtime chunk load.
+import { estimateCost } from "./llm/pricing";
 
 /** Maximum characters of `extractedContent` to include per history entry. */
 const MAX_EXTRACT_SNIPPET = 200;
@@ -258,7 +261,6 @@ Evaluate whether the task was actually completed.`;
     try {
       tokensIn = Math.ceil((JUDGE_PROMPT.length + userMessage.length) / 4);
       tokensOut = Math.ceil(raw.length / 4);
-      const { estimateCost } = await import("./llm/pricing");
       // When the cost model id is provider-prefixed (e.g. an OpenRouter-style
       // "google/gemini-2.5-pro"), thread that provider so pricing disambiguates
       // the same bare id across providers (lookupPricing's provider-prefixed

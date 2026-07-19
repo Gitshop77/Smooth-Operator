@@ -121,11 +121,16 @@ export const assertSafeUserBaseURL = (
   allowLocalExemption: boolean = false,
 ): void => {
   if (!baseURL) return; // no user-supplied override → use the curated profile
-  if (provider && LOCAL_PROVIDER_IDS.has(provider) && isCuratedLocalOrigin(baseURL)) {
+  if (allowLocalExemption && provider && LOCAL_PROVIDER_IDS.has(provider) && isCuratedLocalOrigin(baseURL)) {
     // The curated-local exemption is scoped to the exact ollama/litellm origins
-    // and is the one path by which a local endpoint is ever re-allowed, so it is
-    // applied here regardless of provenance (see module TRADE-OFF note).
-    if (!isAllowedLlmBaseUrl(baseURL)) {
+    // and to a USER-configured `baseURL` (provenance === "user", i.e.
+    // `allowLocalExemption === true`). An injected / untrusted `baseURL` must
+    // NEVER reach this branch — `allowLocalExemption` is false for it, so it
+    // falls through to the strict `validateLlmBaseUrl` below and a smuggled
+    // loopback / RFC1918 `baseURL` is rejected. Thread `allowLocalExemption`
+    // through so `isAllowedLlmBaseUrl` cannot re-grant the exemption for an
+    // untrusted origin.
+    if (!isAllowedLlmBaseUrl(baseURL, allowLocalExemption)) {
       throw new UnsafeBaseUrlError(`Unsafe LLM baseUrl rejected (SSRF guard): ${redactUrl(baseURL)}`);
     }
     return;

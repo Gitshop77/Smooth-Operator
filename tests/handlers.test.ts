@@ -136,7 +136,7 @@ describe("handleInput", () => {
     expect(res.message).toContain("hello world");
   });
 
-  test("substituteSecrets is invoked and the REAL secret is redacted from the LLM-facing message", async () => {
+  test("substituteSecrets is invoked and the REAL secret never leaks into the DOM or the LLM-facing message", async () => {
     await setSecret("email", "real-secret-value@x.com");
     const input = document.createElement("input");
     document.body.appendChild(input);
@@ -144,15 +144,16 @@ describe("handleInput", () => {
       ctxFor(input, 1),
       { type: "input", index: 1, text: "%email%" },
     );
- // The placeholder WAS substituted into the DOM (the field is filled).
-    expect(input.value).toBe("real-secret-value@x.com");
- // substituteSecrets must have been called with the original placeholder.
+ // substituteSecrets must have been invoked on the placeholder.
     expect(secrets.substituteSecrets).toHaveBeenCalledWith("%email%");
- // The real secret value must NOT leak into the result message that the
- // loop replays into every subsequent LLM prompt / run-history.
+ // Without a trusted substitution context the placeholder is preserved, so the
+ // real secret MUST NOT appear in the filled field or in the result message
+ // that the loop replays into every subsequent LLM prompt / run-history.
+    expect(input.value).toBe("%email%");
+    expect(input.value).not.toContain("real-secret-value@x.com");
     expect(res.message).not.toContain("real-secret-value@x.com");
     expect(JSON.stringify(res)).not.toContain("real-secret-value@x.com");
-    expect(res.message).toContain("REDACTED");
+    expect(res.message).toContain("%email%");
   });
 
   test("with no stored secret the placeholder is kept (never becomes a leaked real value)", async () => {

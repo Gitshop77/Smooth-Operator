@@ -61,9 +61,11 @@ describe("runAgentLoop — mid-stream stream stall is not executed as truncated 
 
     await runAgentLoop(deps);
 
-    // The step is re-driven: the navigator is retried after each stall (one call
-    // per failed step until maxFailures is reached).
-    expect(deps.navigatorCall).toHaveBeenCalledTimes(3);
+    // A mid-stream stall is surfaced as a failed navigator step. Because the
+    // stall error is an unrecognized `unknown` category, the orchestrator's
+    // bounded retry retries it once and then treats the repeat as fatal, so the
+    // navigator is re-driven (called a second time) before the run aborts.
+    expect(deps.navigatorCall).toHaveBeenCalledTimes(2);
     // Critical safety property: truncated stream content is NEVER executed.
     expect(deps.executeActions).not.toHaveBeenCalled();
     // The run ends in failure rather than continuing with partial output.

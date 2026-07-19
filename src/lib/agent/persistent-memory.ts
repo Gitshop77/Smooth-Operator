@@ -200,7 +200,7 @@ export function formatMemories(memories: SiteMemory[]): string {
   if (memories.length === 0) return "";
   const lines = memories.map(
     (m) =>
-      `[${neutralizePromptTags(m.domain).replace(/<\/site_memory>/gi, "<\\/site_memory>")}]: ${neutralizePromptTags(m.notes).replace(/<\/site_memory>/gi, "<\\/site_memory>")}`,
+      `[${neutralizePromptTags(m.domain)}]: ${neutralizePromptTags(m.notes)}`,
   );
   return `<site_memory>\n${lines.join("\n")}\n</site_memory>`;
 }

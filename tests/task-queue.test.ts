@@ -27,6 +27,17 @@ function stubChrome(webhookUrl: string | undefined, notify: boolean) {
         /* non-fatal */
       }),
     },
+    // SSRF-guard DNS shim: `resolveAndValidateWebhookUrl` resolves the webhook
+    // hostname. With no resolver the guard FAILS CLOSED for any hostname URL, so
+    // a valid webhook would never be POSTed. Return a public IP for ANY host so
+    // legitimate webhook URLs pass; the blocked-URL tests (IP-literal /
+    // javascript:/data:/relative) are rejected synchronously before any DNS
+    // lookup and remain unaffected.
+    runtime: { lastError: undefined },
+    dns: {
+      resolve: (_h: string, cb: (r: { addresses?: string[] }) => void) =>
+        cb({ addresses: ["93.184.216.34"] }),
+    },
   };
   (globalThis as Record<string, unknown>).chrome = chrome;
   return chrome;

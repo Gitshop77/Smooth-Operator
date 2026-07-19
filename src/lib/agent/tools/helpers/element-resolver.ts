@@ -30,12 +30,23 @@ export function resolveElement(state: BrowserState, index: number): HTMLElement 
       `element [${index}] not found (page may have changed — extract state again)`,
     );
   }
-  if (!(el instanceof HTMLElement)) {
-    throw new NoSuchElementException(
-      `element [${index}] is not an HTMLElement (got ${el.constructor.name})`,
-    );
+ // Feature-detect the DOM global so this helper can't throw
+ // `ReferenceError: HTMLElement is not defined` if it is ever invoked in a
+ // non-DOM context (e.g. the MV3 service worker). In a real page `HTMLElement`
+ // is always present, so page-side behavior is unchanged.
+  if (typeof HTMLElement !== "undefined") {
+    if (!(el instanceof HTMLElement)) {
+      throw new NoSuchElementException(
+        `element [${index}] is not an HTMLElement (got ${(el as object).constructor.name})`,
+      );
+    }
+    return el;
   }
-  return el;
+  // Non-DOM context (e.g. the MV3 service worker): this helper is only ever
+  // invoked from a DOM context at runtime, so the element type can't be
+  // validated here — return it as-is (the cast is safe because callers only
+  // run this in a real page).
+  return el as HTMLElement;
 }
 
 /** Local visibility check used by `find_text` and `search_page`. */

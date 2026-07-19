@@ -16,6 +16,12 @@
  * linked page — can plant executable JavaScript. There is deliberately no
  * source allow-list, signature, or sandbox here; treat the custom-tools store
  * as a high-trust, developer-only surface, not end-user-friendly storage.
+ *
+ * EXECUTION-CONFIRMATION GATE: because a custom tool's `code` runs with full
+ * extension privileges (RCE / data-exfil surface), saving one requires an
+ * explicit user confirmation (see the `confirmModal` gate in `addTool`). This
+ * makes it impossible to plant a tool silently and forces the operator to
+ * acknowledge the trust boundary before the snippet is persisted.
  */
 
 import { $, escapeHtml } from "@/extension/shared";
@@ -233,6 +239,21 @@ $("addTool").addEventListener("click", () => {
       });
       return;
     }
+    // EXECUTION-CONFIRMATION GATE: the tool's `code` executes with full
+    // extension privileges. Require an explicit acknowledgement so a tool
+    // cannot be planted silently (RCE / data-exfil surface). Aborting leaves
+    // storage unchanged and the form populated so the user can revise.
+    const ack = await confirmModal({
+      title: "Confirm custom tool",
+      message:
+        "This tool's JavaScript runs with the extension's full privileges " +
+        "(it is executed via the agent's evaluate action). Only save code you " +
+        "trust. Continue?",
+      confirmLabel: "Save tool",
+      danger: true,
+    });
+    if (!ack) return;
+
     const tools = await readCustomTools();
  // Enforce name uniqueness: overwrite the existing entry instead of adding a
  // second one, so delete-by-name (and delete-by-index) stays safe.

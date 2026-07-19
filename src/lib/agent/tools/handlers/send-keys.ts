@@ -130,11 +130,21 @@ function isPrintableKey(parsed: ParsedKeys): boolean {
 function isTextInput(
   el: EventTarget | null,
 ): el is HTMLInputElement | HTMLTextAreaElement {
-  return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+ // Guard the `instanceof` checks with a DOM-global feature-detection so this
+ // helper can't throw `ReferenceError: HTMLInputElement is not defined` if it
+ // ever runs outside a DOM (e.g. the MV3 service worker). In a real page these
+ // globals are always present, so page-side behavior is unchanged.
+  return (
+    (typeof HTMLInputElement !== "undefined" && el instanceof HTMLInputElement) ||
+    (typeof HTMLTextAreaElement !== "undefined" && el instanceof HTMLTextAreaElement)
+  );
 }
 
 function isEditableTarget(el: EventTarget | null): boolean {
-  return isTextInput(el) || (el instanceof HTMLElement && el.isContentEditable);
+  return (
+    isTextInput(el) ||
+    (typeof HTMLElement !== "undefined" && el instanceof HTMLElement && el.isContentEditable)
+  );
 }
 
  // The native prototype `value` setters are resolved lazily on first use
@@ -153,14 +163,17 @@ function setNativeValue(
 ): void {
  // Use the native prototype setter so React-controlled inputs sync state.
   if (INPUT_VALUE_SETTER === undefined) {
-    INPUT_VALUE_SETTER = Object.getOwnPropertyDescriptor(
-      HTMLInputElement.prototype,
-      "value",
-    )?.set;
-    TEXTAREA_VALUE_SETTER = Object.getOwnPropertyDescriptor(
-      HTMLTextAreaElement.prototype,
-      "value",
-    )?.set;
+ // Feature-detect the DOM element prototypes: the MV3 service worker has no
+ // `HTMLInputElement` global, so reading `.prototype` there throws
+ // `ReferenceError: HTMLInputElement is not defined`. Guarding each access keeps
+ // this lazily-initialized setter safe in a non-DOM context (it is only ever
+ // needed inside a real DOM, so it is never reached in the SW anyway).
+    INPUT_VALUE_SETTER = typeof HTMLInputElement !== "undefined"
+      ? Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set
+      : undefined;
+    TEXTAREA_VALUE_SETTER = typeof HTMLTextAreaElement !== "undefined"
+      ? Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set
+      : undefined;
   }
   const setter = el instanceof HTMLTextAreaElement
     ? TEXTAREA_VALUE_SETTER

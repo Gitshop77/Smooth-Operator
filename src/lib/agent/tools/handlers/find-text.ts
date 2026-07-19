@@ -55,10 +55,14 @@ export async function handleFindText(
       }
     }
   }
- // If we bailed out at the node-visit cap, say so explicitly: the text may
- // genuinely exist beyond the 5000-node budget, and the agent can retry via
- // `search_page` (which is regex-capable) instead of giving up.
-  if (visits >= LIMITS.searchPageMaxNodeVisits) {
+ // Distinguish a *genuine* exhaustion (the TreeWalker returned `null`) from
+ // hitting the node-visit cap while more text nodes remain. `node` is
+ // reassigned on every iteration; if the loop exited because `walker.nextNode()`
+ // returned `null`, `node` is `null` and the walk was exhaustive — report a
+ // plain "not found". Only when `node` is still truthy did we stop at the cap
+ // with nodes left unscanned, and "truncated" is the honest message (the text
+ // may exist beyond the budget; `search_page` is regex-capable and can retry).
+  if (node !== null) {
     return {
       action,
       success: false,
