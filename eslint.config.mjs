@@ -55,6 +55,13 @@ export default [
     plugins: { "@typescript-eslint": tsPlugin },
     rules: {
       ...sharedRules,
+      // Use the TypeScript-aware `no-redeclare` for `.ts` files: the base ESLint
+      // rule does not understand TS function overloads (multiple `export function
+      // foo()` declarations) and false-positives on them. The TS rule treats
+      // overloads as a single declaration and only flags genuine redeclarations
+      // (tsc would also catch those, so this stays defense-in-depth).
+      "no-redeclare": "off",
+      "@typescript-eslint/no-redeclare": "error",
       "no-unused-vars": "off",
       "@typescript-eslint/no-unused-vars": [
         "warn",

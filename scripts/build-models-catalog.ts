@@ -45,7 +45,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "smol-toml";
 
-const DATASET_ROOT = "/Users/wasd/Downloads/models.dev-dev";
+const DATASET_ROOT = process.env.MODELS_DEV_ROOT ?? "/Users/wasd/Downloads/models.dev-dev";
 const PROVIDERS_DIR = join(DATASET_ROOT, "providers");
 
 const HEADER =
@@ -274,7 +274,15 @@ function buildModel(m: RawModel, dateBySlug: Map<string, { release_date?: string
     const ci = parseNum(t.cost.input);
     const co = parseNum(t.cost.output);
     if (ci !== undefined && co !== undefined) {
-      const cost: { input: number; output: number; cache_read?: number; cache_write?: number } = {
+      const cost: {
+        input: number;
+        output: number;
+        cache_read?: number;
+        cache_write?: number;
+        reasoning?: number;
+        input_audio?: number;
+        output_audio?: number;
+      } = {
         input: ci,
         output: co,
       };
@@ -282,6 +290,14 @@ function buildModel(m: RawModel, dateBySlug: Map<string, { release_date?: string
       if (cr !== undefined) cost.cache_read = cr;
       const cw = parseNum(t.cost.cache_write);
       if (cw !== undefined) cost.cache_write = cw;
+      // Optional rate fields (reasoning tokens, audio I/O) — present on some
+      // providers; omitted when the dataset doesn't specify them.
+      const crsn = parseNum(t.cost.reasoning);
+      if (crsn !== undefined) cost.reasoning = crsn;
+      const cia = parseNum(t.cost.input_audio);
+      if (cia !== undefined) cost.input_audio = cia;
+      const coa = parseNum(t.cost.output_audio);
+      if (coa !== undefined) cost.output_audio = coa;
       out.cost = cost;
     }
   }
