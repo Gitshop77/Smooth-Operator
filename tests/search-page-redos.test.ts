@@ -9,7 +9,9 @@
  */
 
 import { describe, test, expect } from "vitest";
-import { hasNestedQuantifier, hasBackreference } from "../src/lib/agent/tools/handlers/search-page";
+import { hasNestedQuantifier, hasBackreference, handleSearchPage } from "../src/lib/agent/tools/handlers/search-page";
+import type { ActionContext } from "../src/lib/agent/tools/handlers/types";
+import type { BrowserState } from "../src/lib/agent/types";
 import { LIMITS } from "../src/lib/agent/tools/constants";
 
 describe("search_page ReDoS static guards", () => {
@@ -58,18 +60,37 @@ describe("search_page ReDoS static guards", () => {
   });
 
   describe("searchPageMaxRegexPattern length cap", () => {
+    const ctx = {
+      state: {} as BrowserState,
+      beforeUrl: "",
+      beforeFingerprint: "",
+    } as ActionContext;
+
     test("matches the expected bound", () => {
       expect(LIMITS.searchPageMaxRegexPattern).toBeGreaterThan(0);
     });
 
-    test("guard rejects patterns exceeding the cap", () => {
+    test("guard rejects patterns exceeding the cap", async () => {
       const long = "a".repeat(LIMITS.searchPageMaxRegexPattern + 1);
-      expect(long.length).toBeGreaterThan(LIMITS.searchPageMaxRegexPattern);
+      const res = await handleSearchPage(ctx, {
+        type: "search_page",
+        pattern: long,
+        regex: true,
+        case_sensitive: false,
+      });
+      expect(res.success).toBe(false);
+      expect(res.message).toMatch(/too long/i);
     });
 
-    test("guard accepts patterns within the cap", () => {
+    test("guard accepts patterns within the cap", async () => {
       const ok = "a".repeat(LIMITS.searchPageMaxRegexPattern);
-      expect(ok.length).toBeLessThanOrEqual(LIMITS.searchPageMaxRegexPattern);
+      const res = await handleSearchPage(ctx, {
+        type: "search_page",
+        pattern: ok,
+        regex: true,
+        case_sensitive: false,
+      });
+      expect(res.success).toBe(true);
     });
   });
 });

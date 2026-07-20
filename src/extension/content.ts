@@ -239,8 +239,9 @@ const log: (...args: unknown[]) => void = console.warn.bind(console, "[content]"
  // async body) so a concurrent `EXECUTE_ACTIONS` message cannot race the
  // async mutation of `lastDomainConfig` / the global . The async closure below only reads the already-published
  // policy.
-          const incomingDomainConfig = msg.domainConfig;
-          if (incomingDomainConfig !== undefined) {
+          try {
+            const incomingDomainConfig = msg.domainConfig;
+            if (incomingDomainConfig !== undefined) {
  // SECURITY: only install a REAL, shape-valid policy. The shared
  // `validateDomainConfig` recognizes the canonical
  // { allowedDomains, blockedDomains } shape shipped by the service
@@ -250,23 +251,29 @@ const log: (...args: unknown[]) => void = console.warn.bind(console, "[content]"
  // when the payload is absent or malformed, so we never silently
  // downgrade to allow-all, and sets the `__openCoworkDomainConfigEnforced`
  // flag only when a list is actually configured.
-            const v = validateDomainConfig(incomingDomainConfig);
-            if (v) {
-              setDomainConfig(
-                v,
-                Boolean(v.allowedDomains?.length || v.blockedDomains?.length),
-              );
+              const v = validateDomainConfig(incomingDomainConfig);
+              if (v) {
+                setDomainConfig(
+                  v,
+                  Boolean(v.allowedDomains?.length || v.blockedDomains?.length),
+                );
+              }
             }
+            if (!isDomainPolicyEnforced()) {
+              console.warn("[content] executing actions with NO URL policy enforced");
+            }
+            // F-1: when the SW resolved secrets on our behalf, mark the shared
+            // handlers so their `substituteSecrets`/`redactSecrets` calls
+            // short-circuit instead of reading the (unreadable-from-content-script)
+            // `chrome.storage.session`. Set synchronously, before the async action
+            // loop runs, so the handlers see it.
+            if (msg.secretsResolved !== undefined) setSecretsResolvedExternally(Boolean(msg.secretsResolved));
+          } catch (e) {
+            // A throw in the synchronous prelude must not strand the sender:
+            // respond once and stop here so the async IIFE below never runs.
+            safeRespond({ ok: false, error: e instanceof Error ? e.message : String(e) });
+            return false;
           }
-          if (!isDomainPolicyEnforced()) {
-            console.warn("[content] executing actions with NO URL policy enforced");
-          }
-          // F-1: when the SW resolved secrets on our behalf, mark the shared
-          // handlers so their `substituteSecrets`/`redactSecrets` calls
-          // short-circuit instead of reading the (unreadable-from-content-script)
-          // `chrome.storage.session`. Set synchronously, before the async action
-          // loop runs, so the handlers see it.
-          if (msg.secretsResolved !== undefined) setSecretsResolvedExternally(Boolean(msg.secretsResolved));
           (async () => {
             try {
               const actions: AgentAction[] = Array.isArray(msg.actions) ? msg.actions : [];
@@ -311,7 +318,7 @@ const log: (...args: unknown[]) => void = console.warn.bind(console, "[content]"
  // IS enforced, the executor's own domain checks govern navigation, so
  // we don't double-gate here.
                 let result: ActionResult | undefined;
-                if (!policyEnforced && (action.type === "navigate" || action.type === "search")) {
+                if (!policyEnforced && action.type === "navigate") {
                   let sameOrigin = false;
                   if (action.type === "navigate") {
                     try {

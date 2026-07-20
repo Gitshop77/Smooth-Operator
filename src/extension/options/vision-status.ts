@@ -156,13 +156,20 @@ document.querySelectorAll('input[name="visionMode"]').forEach((radio) => {
       await teardownVisionAssistant();
       return;
     }
-    if (!visionAssistant && !visionInitInProgress) {
-      const ok = await confirmModal({
-        title: "Download Local Vision model",
-        message:
-          `This will download a ${MODEL_DOWNLOAD_SIZE_LABEL} model for Local Vision (cached for future use). Continue?`,
-        confirmLabel: "Download",
-      });
+    if (!visionAssistant && !visionInitInProgress && !(await isModelCached())) {
+      let ok = false;
+      try {
+        ok = await confirmModal({
+          title: "Download Local Vision model",
+          message:
+            `This will download a ${MODEL_DOWNLOAD_SIZE_LABEL} model for Local Vision (cached for future use). Continue?`,
+          confirmLabel: "Download",
+        });
+      } catch {
+       // A rejected modal promise must not become an unhandled rejection in this
+       // change listener — treat it as a cancel.
+        ok = false;
+      }
       if (!ok) {
         const disabledRadio = document.getElementById("visionMode_disabled") as HTMLInputElement | null;
         if (disabledRadio) disabledRadio.checked = true;

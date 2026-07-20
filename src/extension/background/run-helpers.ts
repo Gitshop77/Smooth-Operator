@@ -498,7 +498,14 @@ export async function handleDetectVisualRequest(query: string): Promise<{
  // Capture the page's DOM fingerprint alongside the url so `isVisionCacheFresh`
  // can invalidate on an SPA re-render at the same url (not just navigation).
  // Best-effort: an empty result is tolerated (the url check still applies).
-    visionCacheFingerprint = await getPageFingerprint(tabId);
+ // A fingerprint read failure must NOT propagate (this is a best-effort
+ // enrichment) — wrap it and fall back to "" so a thrown error doesn't
+ // abort an otherwise-successful detect_visual.
+    try {
+      visionCacheFingerprint = await getPageFingerprint(tabId);
+    } catch {
+      visionCacheFingerprint = ""; // tolerate fingerprint read failure
+    }
  // Build the description from the MERGED vision elements (not the raw
  // `visionDetections` array) so the `[vN]` index printed to the LLM exactly
  // matches the `visionId` key used to populate `visionElementsCache` below

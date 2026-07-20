@@ -40,6 +40,7 @@ jobs:
 
       - name: Clone models.dev dataset
         run: |
+          rm -rf /tmp/models.dev
           if ! git clone --depth 1 "$MODELS_DEV_REPO" /tmp/models.dev; then
             echo "clone failed, skipping"
             echo "CLONE_OK=false" >> "$GITHUB_ENV"

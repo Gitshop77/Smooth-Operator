@@ -44,10 +44,17 @@ export function assertTokenEnvironmentPairing(
     return "[cowork-ws] NEXT_PUBLIC_COWORK_UI_TOKEN is unset; realtime socket will be rejected.";
   }
   // The built-in `dev-token` is the intentional zero-config default (see
-  // WS_TOKEN). It is expected in dev/local builds and, when no real
-  // COWORK_UI_TOKEN is configured, in production too — so it must not trip the
-  // dev-in-prod guard below.
-  if (token === "dev-token") return null;
+  // WS_TOKEN) for dev/local builds. Shipping it to production is a misconfiguration
+  // (a publicly-known shared secret), so it must trip the dev-in-prod guard there.
+  if (token === "dev-token") {
+    if (isProd) {
+      return (
+        "[cowork-ws] NEXT_PUBLIC_COWORK_UI_TOKEN is the built-in 'dev-token' default " +
+        "but NODE_ENV=production — verify prod is not shipping the dev token."
+      );
+    }
+    return null;
+  }
   const looksLikeDevToken =
     DEV_TOKEN_LITERALS.has(token) ||
     /(^|[-_])(dev|test|local|staging)([-_]|$)/i.test(token);
@@ -112,7 +119,9 @@ export function useCoworkWebSocket(): void {
   });
 
   useEffect(() => {
-    const { setSocketConnected, setSocketStatus, setLastEvent, invalidate } = cbs.current;
+    // Read the latest callbacks from cbs.current inside each handler (below)
+    // rather than capturing them once here, so the long-lived socket uses the
+    // most recent identities if the store callbacks change.
     let socket: Socket | null = null;
     let disposed = false;
     let rafId: number | null = null;
@@ -120,7 +129,7 @@ export function useCoworkWebSocket(): void {
 
     const connect = () => {
       if (disposed) return;
-      setSocketStatus("connecting");
+      cbs.current.setSocketStatus("connecting");
       try {
         socket = io({
  // The mini-service's socket.io is attached with path '/'.
@@ -149,31 +158,31 @@ export function useCoworkWebSocket(): void {
         if (process.env.NODE_ENV !== "production") {
           console.error("[cowork-ws] socket construction failed:", err);
         }
-        setSocketConnected(false);
-        setSocketStatus("disconnected");
+        cbs.current.setSocketConnected(false);
+        cbs.current.setSocketStatus("disconnected");
         return;
       }
 
       socket.on("connect", () => {
-        setSocketConnected(true);
-        setSocketStatus("connected");
-        setLastEvent("connected");
+        cbs.current.setSocketConnected(true);
+        cbs.current.setSocketStatus("connected");
+        cbs.current.setLastEvent("connected");
       });
 
       socket.on("disconnect", () => {
-        setSocketConnected(false);
-        setSocketStatus("disconnected");
-        setLastEvent("disconnected");
+        cbs.current.setSocketConnected(false);
+        cbs.current.setSocketStatus("disconnected");
+        cbs.current.setLastEvent("disconnected");
       });
 
       socket.on("connect_error", (err: unknown) => {
-        setSocketConnected(false);
-        setSocketStatus("disconnected");
+        cbs.current.setSocketConnected(false);
+        cbs.current.setSocketStatus("disconnected");
  // Don't leave a stale "connected" footer: if we had connected once
  // (lastEvent === "connected") and then entered a reconnect loop, the
  // footer tooltip would keep claiming "connected" while the live socket
  // is actually down. Reflect the real state.
-        setLastEvent("connect error");
+        cbs.current.setLastEvent("connect error");
  // Surface the rejection reason (auth failure, 4xx handshake, gateway
  // down) so field diagnosis is possible. Throttle-free in dev; in
  // production log at most a one-line message rather than the raw object.
@@ -222,13 +231,13 @@ export function useCoworkWebSocket(): void {
           rafId = null;
           timeoutId = null;
           if (lastEventLabel !== null) {
-            setLastEvent(lastEventLabel);
+            cbs.current.setLastEvent(lastEventLabel);
             lastEventLabel = null;
           }
           const keys = Array.from(pendingKeys.values());
           pendingKeys.clear();
           for (const k of keys) {
-            invalidate(k);
+            cbs.current.invalidate(k);
           }
         };
         if (typeof requestAnimationFrame === "function") {

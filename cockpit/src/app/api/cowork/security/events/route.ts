@@ -54,7 +54,7 @@ export async function GET(req: NextRequest): Promise<Response> {
       ...e,
       details: redactValue(e.details),
       timestamp: e.createdAt,
-      description: redactSecrets(e.details ?? ''),
+      description: redactValue(e.details),
       sourceUrl: e.sourceUrl ? redactSecrets(e.sourceUrl) : e.sourceUrl,
       domain: e.domain ? redactSecrets(e.domain) : e.domain,
     }));

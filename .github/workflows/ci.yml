@@ -22,10 +22,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7.0.0 # actions/checkout v7 (Node 24 runtime; dependabot PR #36)
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0 (full commit SHA pin)
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7.0.0 # actions/setup-node v7 (Node 24 runtime; dependabot PR #44)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # actions/setup-node v7.0.0 (full commit SHA pin)
         with:
           node-version: '22'
           cache: 'npm'
@@ -148,10 +148,10 @@ jobs:
       run:
         working-directory: cockpit
     steps:
-      - uses: actions/checkout@v7.0.0 # actions/checkout v7 (Node 24 runtime; dependabot PR #36)
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0 (full commit SHA pin)
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7.0.0 # actions/setup-node v7 (Node 24 runtime; dependabot PR #44)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # actions/setup-node v7.0.0 (full commit SHA pin)
         with:
           node-version: '22'
           cache: 'npm'

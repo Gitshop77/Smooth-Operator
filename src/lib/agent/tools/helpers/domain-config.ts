@@ -134,6 +134,11 @@ export function setDomainConfig(config?: DomainConfig, enforced?: boolean): void
   if (validated) {
     lastKnownGood = validated;
     writeGlobal(DOMAIN_CONFIG_KEY, validated);
+  } else if (enforced === false) {
+ // Explicitly disabling enforcement means allow-all: clear any prior
+ // allow/block list rather than retaining lastKnownGood, so enforced=false
+ // actually drops URL filtering (matching the documented contract).
+    writeGlobal(DOMAIN_CONFIG_KEY, EMPTY_CONFIG);
   } else {
  // Missing or malformed config → retain the last-known-good policy rather
  // than overwriting with `undefined` (which `getDomainConfig` would treat

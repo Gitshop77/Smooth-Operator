@@ -82,6 +82,57 @@ export function isLikelyHidden(el: HTMLElement): boolean {
  * @param rect optional pre-computed bounding rect; if omitted, a fresh
  * `getBoundingClientRect()` is called.
  */
+/**
+ * Returns true when a `clip` / `clip-path` value provably collapses the element
+ * to zero visible area (so it should be treated as hidden). Shape clips that
+ * still leave the element visible (`circle(50%)`, `ellipse(...)`, `inset(0)`,
+ * `polygon(...)`, …) return false so they are NOT pruned as phantom/hidden.
+ */
+function clipCollapsesToZero(value: string): boolean {
+  const v = value.trim().toLowerCase();
+  // legacy: rect(top right bottom left)
+  const rectM = v.match(/^rect\(\s*([-\d.]+)px\s*,\s*([-\d.]+)px\s*,\s*([-\d.]+)px\s*,\s*([-\d.]+)px\s*\)$/);
+  if (rectM) {
+    const top = parseFloat(rectM[1]);
+    const right = parseFloat(rectM[2]);
+    const bottom = parseFloat(rectM[3]);
+    const left = parseFloat(rectM[4]);
+    return right <= left || bottom <= top;
+  }
+  if (v.startsWith("inset(")) {
+    const geo = v.slice(5, -1).split(/round/)[0].trim();
+    const parts = geo.length ? geo.split(/\s+/) : ["0px"];
+    const pct = (tok: string): number => {
+      const t = tok.trim();
+      return t.endsWith("%") ? parseFloat(t) : 0;
+    };
+    const top = pct(parts[0] ?? "0px");
+    const right = pct(parts[1] ?? parts[0] ?? "0px");
+    const bottom = pct(parts[2] ?? parts[0] ?? "0px");
+    const left = pct(parts[3] ?? parts[1] ?? parts[0] ?? "0px");
+    return top + bottom >= 100 || left + right >= 100;
+  }
+  if (v.startsWith("circle(")) {
+    const size = v.slice(7, -1).trim().split(/\s+at\s+/)[0].trim();
+    return isZeroSize(size);
+  }
+  if (v.startsWith("ellipse(")) {
+    const inner = v.slice(8, -1).trim().split(/\s+at\s+/)[0].trim();
+    const [rx, ry] = inner.split(/\s+/);
+    return isZeroSize(rx ?? "0") || isZeroSize(ry ?? "0");
+  }
+  // polygon(...), path(...), url(...), etc. — can't prove they collapse; keep visible.
+  return false;
+}
+
+/** True when a clip size token is exactly zero (e.g. `0`, `0px`, `0%`). */
+function isZeroSize(token: string): boolean {
+  const t = token.trim();
+  if (!t || t === "0" || t === "0px") return true;
+  if (t.endsWith("%")) return parseFloat(t) === 0;
+  return false;
+}
+
 export function isVisibleFull(el: HTMLElement, rect?: DOMRect): boolean {
   const style = window.getComputedStyle(el);
   if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return false;
@@ -104,17 +155,15 @@ export function isVisibleFull(el: HTMLElement, rect?: DOMRect): boolean {
  // walk the ancestor chain and treat it as hidden if any ancestor is aria-hidden.
  // `clip: rect(...)` (legacy) and `clip-path: ...` (modern) are both common
  // techniques to hide an element while keeping it in the accessibility tree.
- // Any non-default clip value collapses the visible region (often to zero),
- // so treat every clip / clip-path other than `auto` / `none` as hidden.
- // This generalizes the prior hard-coded list (`inset(100%)`, `rect(0,0,0,0)`,
- // …) to catch other hide forms such as `inset(50%)`, `inset(0 0 0 100%)`,
- // `circle(0)`, `ellipse(0,0)`, etc. — all of which otherwise read as visible
- // and become phantom click targets. The legacy `clip` computed value is
- // `auto` when unset; `clip-path` is `none` when unset, so those are the only
- // "not hiding" values we allow through.
+ // A clip only HIDES the element when it provably collapses the visible region
+ // to zero area — e.g. `rect(0,0,0,0)`, `inset(100%)`, `circle(0)`. A shape clip
+ // that still leaves the element visible (`circle(50%)`, `ellipse(...)`,
+ // `inset(0)`, `polygon(...)`) must NOT be treated as hidden, or legitimately
+ // visible, clickable elements are wrongly pruned and become phantom/missing
+ // targets. So we only fail closed on clips that collapse to zero area.
   const clip = style.clip;
-  if (clip && clip !== "auto") return false;
+  if (clip && clip !== "auto" && clipCollapsesToZero(clip)) return false;
   const clipPath = style.clipPath;
-  if (clipPath && clipPath !== "none" && clipPath !== "auto") return false;
+  if (clipPath && clipPath !== "none" && clipPath !== "auto" && clipCollapsesToZero(clipPath)) return false;
   return true;
 }

@@ -69,26 +69,44 @@ export function stripConsoleDebug(source: string): string {
       i++;
       continue;
     }
+    // Track template-literal `${ … }` nesting. This must run for backtick
+    // strings whether we are in plain template text or inside a `${}`
+    // interpolation, so the closing backtick is located correctly and the
+    // interior of an interpolation is scanned as ordinary code below.
+    if (strChar === "`") {
+      if (c === "{") { templateDepth++; out.push(c); i++; continue; }
+      if (c === "}" && templateDepth > 0) { templateDepth--; out.push(c); i++; continue; }
+      if (c === "`" && templateDepth === 0) { strChar = null; out.push(c); i++; continue; }
+    }
+
     if (strChar !== null) {
-      out.push(c);
-      if (c === "\\") {
-        if (i + 1 < n) {
-          out.push(source[i + 1]);
-          i += 2;
+      // Inside a template interpolation `${ … }` we scan the interior as
+      // ordinary code so console.debug/log calls there are still rewritten.
+      // The template-boundary chars were already handled above, so fall
+      // through to the normal code-scanning path for everything else.
+      if (strChar === "`" && templateDepth > 0) {
+        // fall through
+      } else {
+        out.push(c);
+        if (c === "\\") {
+          if (i + 1 < n) {
+            out.push(source[i + 1]);
+            i += 2;
+            continue;
+          }
+          i++;
           continue;
+        }
+        if (strChar === "`") {
+          if (c === "{") templateDepth++;
+          else if (c === "}" && templateDepth > 0) templateDepth--;
+          else if (c === "`" && templateDepth === 0) strChar = null;
+        } else if (c === strChar) {
+          strChar = null;
         }
         i++;
         continue;
       }
-      if (strChar === "`") {
-        if (c === "{") templateDepth++;
-        else if (c === "}" && templateDepth > 0) templateDepth--;
-        else if (c === "`" && templateDepth === 0) strChar = null;
-      } else if (c === strChar) {
-        strChar = null;
-      }
-      i++;
-      continue;
     }
 
     // Not inside a string or comment.
@@ -142,14 +160,18 @@ export function stripConsoleDebug(source: string): string {
     }
 
     // Bare `console.debug(` / `console.log(` call → rewrite.
-    if (
-      c === "c" &&
-      !isIdentChar(prev) &&
-      source.startsWith("console.", i) &&
-      (source[i + 8] === "d" || source[i + 8] === "l")
-    ) {
-      const name = source[i + 8] === "d" ? "debug" : "log";
-      const afterName = i + 8 + name.length; // index of '('
+    // Also match optional-chained `console?.debug(` / `console?.log(`.
+    if (c === "c" && !isIdentChar(prev) && source.startsWith("console.", i)) {
+      let nameOff = i + 8; // index of the char after "console."
+      if (source[nameOff] === "?") nameOff++; // optional chaining `?.`
+      const name =
+        source[nameOff] === "d"
+          ? "debug"
+          : source[nameOff] === "l"
+            ? "log"
+            : null;
+      if (name !== null) {
+      const afterName = nameOff + name.length; // index of '('
       if (source[afterName] === "(") {
         if (source[afterName + 1] === ")") {
           out.push("void 0");
@@ -170,6 +192,7 @@ export function stripConsoleDebug(source: string): string {
         i = afterName + 1; // skip the original '(' (already emitted by `void (`)
         continue;
       }
+    }
     }
 
     out.push(c);
@@ -229,7 +252,7 @@ export async function assertOnlyEnZodLocales(
       } else if (/\.(ts|tsx|js|jsx|mjs)$/.test(e)) {
         const src = await readFile(e, "utf8");
         // Match zod locale imports that are NOT the `en` locale nor the barrel.
-        const m = src.match(/zod\/v4\/locales\/(?!en(-[A-Za-z]+)?\.js|index\.js)[a-zA-Z-]+\.js/g);
+        const m = src.match(/zod\/v4\/locales\/(?!en(-[A-Za-z]+)?(\.js)?|index(\.js)?)[a-zA-Z-]+(\.js)?/g);
         if (m) bad.push(`${e}: ${m.join(", ")}`);
         // Reject the barrel import (`zod/v4/locales` or its `index.js`) entirely.
         // A namespace/`* as` import of the barrel resolves to the `en`-only stub

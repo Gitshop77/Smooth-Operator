@@ -181,8 +181,14 @@ export class Select {
         throw new ElementNotSelectableError(this.disabledOptionMessage(opts[index]));
       }
       for (const o of opts) o.selected = false;
+      this.setSelected(opts[index]);
+    } else {
+      // Route the single-index selection through selectMultiple so multi-selects
+      // emit exactly one batched `change` event (matching the multi-index path)
+      // instead of a per-option event, keeping framework listeners from seeing
+      // intermediate states.
+      this.selectMultiple([opts[index]]);
     }
-    this.setSelected(opts[index]);
   }
 
   /**

@@ -217,7 +217,12 @@ async function fetchBufProgress(
  // file) or it omitted a usable total. If a positive Content-Length is
  // present and larger than what we already have, fetch the whole file once.
   const cl = Number(first.headers.get("content-length"));
-  if (Number.isFinite(cl) && cl > 0 && cl > first.buf.length) {
+  if (Number.isFinite(cl) && cl > 0) {
+    if (cl <= first.buf.length) {
+      // Server returned the entire file in the probe (small unranged file such
+      // as meta.json). Re-downloading it would just fetch the same bytes again.
+      return first.buf;
+    }
     return (
       await fetchToBuffer(url, {}, (d, t) =>
         onProgress?.({ file: label, downloaded: d, total: t, percent: t ? Math.floor((d / t) * 100) : 0 }),

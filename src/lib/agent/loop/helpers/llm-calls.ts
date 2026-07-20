@@ -141,6 +141,15 @@ function accountUsage(params: {
 }): { cost: number | undefined; usage: LLMUsageInfo | undefined } | undefined {
   const { precomputedCost, model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, costCapUsd } = params;
   if (tokensIn === undefined || tokensOut === undefined) {
+    // Provider omitted token usage but supplied a precomputed cost — count that
+    // known spend rather than discarding it (otherwise a real LLM cost is
+    // silently dropped from the run total / UI).
+    if (typeof precomputedCost === "number" && Number.isFinite(precomputedCost)) {
+      return {
+        cost: precomputedCost,
+        usage: { model: model ?? "", tokensIn: 0, tokensOut: 0, costUsd: precomputedCost },
+      };
+    }
     // Provider omitted token usage. If a cost cap is in effect we cannot measure
     // spend, so accrue a provider-independent floor rather than letting the
     // cap become inert. When no cap is set, preserve the historical behavior
@@ -229,6 +238,14 @@ export async function runPlanner(
       }
       usage = u;
     }
+    // C17: a single overshoot planner call must trip the cost cap immediately,
+    // right after cost is accrued — NOT only at the next step boundary and NOT
+    // only when a dispatcher is wired. Hoisted out of the `if (dispatcher &&
+    // ctx)` block so the cap also trips on the parse-failure path and when no
+    // dispatcher is present. `costCapCheck` (wired to `costCapExceeded(state)`)
+    // now reflects the true spend, so throw and let the orchestrator finalize
+    // the run as a cost-cap stop rather than looping again.
+    if (costCapCheck?.()) throw new Error("Budget exceeded: cost cap reached");
     const parsed = parsePlannerOutput(raw);
     if (!parsed.ok || !parsed.output) {
       throw new Error(`Planner output parse failed: ${parsed.error}`);
@@ -240,12 +257,6 @@ export async function runPlanner(
       fired = true;
       await dispatcher.llmEnd(ctx, { content: raw, usage });
       if (usage) await dispatcher.cost(ctx, usage);
-    // C17: a single overshoot planner call must trip the cap immediately, not
-    // only at the next step boundary. Cost has already been accrued via onCost
-    // above, so `costCapCheck` (wired to `costCapExceeded(state)`) now reflects
-    // the true spend. Throw so the orchestrator finalizes the run as a cost-cap
-    // stop rather than looping again.
-      if (costCapCheck?.()) throw new Error("Budget exceeded: cost cap reached");
     }
     return parsed.output;
   } finally {
@@ -330,6 +341,11 @@ export async function callNavigatorWithRetry(
       }
       lastUsage = usage;
       if (usage) attemptUsages.push(usage);
+      // C17: a single overshoot navigator call must trip the cost cap the
+      // moment cost is accrued, regardless of whether a dispatcher is wired and
+      // even on a parse-failure retry attempt. Hoisted out of the
+      // `if (dispatcher && ctx)` block below so the cap cannot be skipped.
+      if (costCapCheck?.()) throw new Error("Budget exceeded: cost cap reached");
       const parsed = parseAgentOutput(raw);
       if (parsed.ok && parsed.output) {
         if (dispatcher && ctx) {
@@ -346,10 +362,6 @@ export async function callNavigatorWithRetry(
             costFired = true;
             await dispatcher.cost(ctx, summed);
           }
- // C17: catch a single overshoot navigator call (including mid-retry) the
- // moment cost is accrued, rather than only at the step boundary. `costCapCheck`
- // is wired to `costCapExceeded(state)` and the spend is already in `state`.
-          if (costCapCheck?.()) throw new Error("Budget exceeded: cost cap reached");
         }
         return parsed.output;
       }

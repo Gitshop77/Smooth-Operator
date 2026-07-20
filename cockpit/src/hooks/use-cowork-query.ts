@@ -50,12 +50,14 @@ const TQ = {
  * The `NEXT_PUBLIC_` prefix exposes this to the browser, so it must NEVER equal
  * the service-to-service `COWORK_EVENT_TOKEN` on any untrusted network.
  */
-// When `NEXT_PUBLIC_COWORK_UI_TOKEN` is unset (zero-config localhost) the
-// built-in `dev-token` is used so cockpit API calls authenticate with NO
-// environment variables. This MUST match the server-side secret resolved by
-// middleware.ts (which also defaults to `dev-token` when COWORK_UI_TOKEN is
-// unset). On any untrusted network set a real COWORK_UI_TOKEN + its mirror.
-const COWORK_TOKEN = process.env.NEXT_PUBLIC_COWORK_UI_TOKEN ?? "dev-token";
+// When `NEXT_PUBLIC_COWORK_UI_TOKEN` is unset, fall back to the built-in
+// `dev-token` ONLY in non-production (zero-config localhost dev). In production
+// builds the fallback is omitted so a missing token fails closed — no
+// well-known shared secret is shipped to clients or sent on untrusted networks.
+// This MUST match the server-side secret resolved by middleware.ts.
+const COWORK_TOKEN =
+  process.env.NEXT_PUBLIC_COWORK_UI_TOKEN ??
+  (process.env.NODE_ENV === "production" ? undefined : "dev-token");
 
 // Fail loud on a missing UI token: warn at module load so the operator knows
 // to set `NEXT_PUBLIC_COWORK_UI_TOKEN` rather than hitting opaque auth failures.
@@ -103,19 +105,19 @@ export function redactErrorSnippet(text: string): string {
   // Bearer / Basic credentials.
   out = out.replace(/Bearer\s+[A-Za-z0-9._-]+/g, "Bearer ***");
   out = out.replace(/Basic\s+[A-Za-z0-9+/=]+/g, "Basic ***");
-  // key=value secrets.
+  // key=value secrets (also matches single-quoted / unquoted values).
   out = out.replace(
-    /(password|passwd|token|secret|api[_-]?key|access[_-]?token|authorization|authorisation|private[_-]?key|passphrase|cvv|otp|ssn|pin)=[^&\s"'<>]+/gi,
+    /(password|passwd|token|secret|api[_-]?key|access[_-]?token|authorization|authorisation|private[_-]?key|passphrase|cvv|otp|ssn|pin)=(?:'[^']*'|"[^"]*"|[^&\s"'<>]+)/gi,
     "$1=***",
   );
-  // "key": "value" JSON-shaped secrets (value fully redacted).
+  // "key": "value" JSON-shaped secrets (value fully redacted; also single-quoted).
   out = out.replace(
-    /"(password|passwd|token|secret|api[_-]?key|access[_-]?token|authorization|authorisation|private[_-]?key|passphrase|cvv|otp|ssn|pin)"\s*:\s*"[^"]*"/gi,
+    /"(password|passwd|token|secret|api[_-]?key|access[_-]?token|authorization|authorisation|private[_-]?key|passphrase|cvv|otp|ssn|pin)"\s*:\s*(?:"[^"]*"|'[^']*')/gi,
     '"$1":"***"',
   );
-  // key: "value" (colon form) secrets — e.g. token: "x".
+  // key: "value" (colon form) secrets — e.g. token: "x" (also single-quoted).
   out = out.replace(
-    /(password|passwd|token|secret|api[_-]?key|access[_-]?token|authorization|authorisation|private[_-]?key|passphrase|cvv|otp|ssn|pin)\s*:\s*"[^"]*"/gi,
+    /(password|passwd|token|secret|api[_-]?key|access[_-]?token|authorization|authorisation|private[_-]?key|passphrase|cvv|otp|ssn|pin)\s*:\s*(?:"[^"]*"|'[^']*')/gi,
     '$1: "***"',
   );
   // Well-known standalone credential literals.

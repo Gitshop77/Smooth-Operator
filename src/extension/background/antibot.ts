@@ -59,6 +59,7 @@ export function makeAntiBotHooks(): {
  // need user takeover, which `waitForTakeoverResume` handles in the
  // orchestrator).
     detectChallenge: async () => {
+      try {
       const tabId = await getActiveTabId();
       if (tabId === null) return null;
  // Network-authoritative rate-limit signal (a real 429/503 main-frame
@@ -94,6 +95,10 @@ export function makeAntiBotHooks(): {
         };
       }
       return null;
+      } catch (err) {
+        console.warn("[antibot] detectChallenge threw — skipping challenge hook.", err);
+        return null;
+      }
     },
  // Poll for the challenge to clear on its own. Wraps
  // `waitForChallengeResolution` from `anti-bot.ts` against the run's
@@ -102,6 +107,7 @@ export function makeAntiBotHooks(): {
  // a transient detection failure surfaces as "still present" rather than
  // "cleared".
     waitForChallengeResolution: async () => {
+      try {
       const tabId = await getActiveTabId();
       if (tabId === null) return false;
       const result = await waitForChallengeResolution(tabId, {
@@ -111,6 +117,10 @@ export function makeAntiBotHooks(): {
         pollMs: 500 + Math.floor(Math.random() * 100),
       });
       return result.resolved;
+      } catch (err) {
+        console.warn("[antibot] waitForChallengeResolution threw — treating as unresolved.", err);
+        return false;
+      }
     },
   };
 }

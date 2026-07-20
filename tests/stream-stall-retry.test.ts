@@ -18,7 +18,7 @@ const BASE_CONFIG = {
   maxActionsPerStep: 10,
   plannerInterval: 100,
   maxFailures: 3,
-  enableLoopDetection: true,
+  enableLoopDetection: false,
   enableCompaction: false,
   compactionStepInterval: 1000,
   compactionCharThreshold: 1_000_000,

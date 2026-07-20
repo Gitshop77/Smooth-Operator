@@ -83,22 +83,22 @@ function assertConsistent(
 
 describe("DOM re-export shim consistency", () => {
   const simpleCases: Array<
-    [string, Record<string, unknown>, Record<string, unknown>, Relation]
+    [string, Record<string, unknown>, Record<string, unknown>, string, Relation]
   > = [
-    ["overlay", overlayShim, overlayCanonical, "subset"],
-    ["shadow-piercer", shadowPiercerShim, shadowPiercerCanonical, "exact"],
-    ["screenshot-annotator", screenshotAnnotatorShim, screenshotAnnotatorCanonical, "exact"],
-    ["phantom-cursor", phantomCursorShim, phantomCursorCanonical, "subset"],
-    ["popup-handler", popupHandlerShim, popupHandlerCanonical, "subset"],
+    ["overlay", overlayShim, overlayCanonical, "@/lib/agent/dom/annotation/overlay-renderer", "subset"],
+    ["shadow-piercer", shadowPiercerShim, shadowPiercerCanonical, "@/lib/agent/dom/annotation/shadow-piercer", "exact"],
+    ["screenshot-annotator", screenshotAnnotatorShim, screenshotAnnotatorCanonical, "@/lib/agent/dom/annotation/screenshot-annotator", "exact"],
+    ["phantom-cursor", phantomCursorShim, phantomCursorCanonical, "@/lib/agent/dom/interaction/hover", "subset"],
+    ["popup-handler", popupHandlerShim, popupHandlerCanonical, "@/lib/agent/dom/navigation/popup-handler", "subset"],
   ];
 
   it.each(simpleCases)(
     "%s shim mirrors its canonical",
-    (name, shim, canonical, relation) => {
+    (name, shim, canonical, canonicalPath, relation) => {
       assertConsistent(
         "@/lib/agent/dom/" + name,
         sortedKeys(shim),
-        "@/lib/agent/dom/" + name,
+        canonicalPath,
         sortedKeys(canonical),
         relation,
       );

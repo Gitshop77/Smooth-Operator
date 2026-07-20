@@ -254,7 +254,16 @@ $("addTool").addEventListener("click", () => {
     });
     if (!ack) return;
 
-    const tools = await readCustomTools();
+    let tools: CustomToolEntry[];
+    try {
+      tools = await readCustomTools();
+    } catch (e) {
+      await alertModal({
+        title: "Save failed",
+        message: `Could not read existing tools: ${e instanceof Error ? e.message : String(e)}`,
+      });
+      return;
+    }
  // Enforce name uniqueness: overwrite the existing entry instead of adding a
  // second one, so delete-by-name (and delete-by-index) stays safe.
     const idx = tools.findIndex((t) => t.name === name);

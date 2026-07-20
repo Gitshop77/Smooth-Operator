@@ -39,7 +39,15 @@ export function stripControlChars(s: string): string {
  * the enclosed text is attacker-influenceable page content, not instructions.
  */
 export function sanitizeDomText(s: string): string {
-  return `<untrusted_dom>${stripControlChars(s)}</untrusted_dom>`;
+  const cleaned = stripControlChars(s);
+ // Escape the page-controlled text before wrapping it in the XML marker so a
+ // hostile value cannot forge the closing `</untrusted_dom>` delimiter (or
+ // smuggle `<`, `>`, `&`) and break out of the untrusted block.
+  const escaped = cleaned
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  return `<untrusted_dom>${escaped}</untrusted_dom>`;
 }
 
 export function directText(el: Element): string {

@@ -193,7 +193,21 @@ function hostnameMatches(hostname: string, domain: string): boolean {
  * passes.
  */
 const LOCAL_SINGLE_LABEL_HOSTS = new Set(["localhost"]);
+// Curated subset of multi-label public suffixes. A custom-skill domain that
+// IS itself a public suffix (not a specific host under it) would, via
+// `hostnameMatches`, match *every* site on that suffix — e.g. a skill scoped
+// to `co.uk` injects instructions on all of `evil.co.uk`, `bank.co.uk`, …
+// `isValidSkillDomain` therefore rejects domains that are exactly a known
+// public suffix. (A full PSL is overkill here; this blocks the dangerous
+// shared-suffix cases a custom skill could abuse.)
+const PUBLIC_SUFFIX_DOMAINS = new Set([
+  "co.uk", "org.uk", "gov.uk", "ac.uk", "github.io", "gitlab.io",
+  "netlify.app", "vercel.app", "pages.dev", "workers.dev",
+  "herokuapp.com", "amazonaws.com", "azurewebsites.net", "googleapis.com",
+  "appspot.com", "firebaseapp.com", "blogspot.com", "wordpress.com",
+]);
 function isValidSkillDomain(domain: string): boolean {
+  if (PUBLIC_SUFFIX_DOMAINS.has(domain.toLowerCase())) return false;
   return domain.includes(".") || LOCAL_SINGLE_LABEL_HOSTS.has(domain);
 }
 
@@ -263,7 +277,10 @@ export function sanitizeSkillText(value: string, maxLen: number): string {
  // block (<user_request>/<plan>/<security_rules>/<site_memory>/\u2026) inside the
  // trusted system prompt it is injected into.
   const neutralized = neutralizePromptTags(cleaned);
-  return neutralized.length > maxLen ? neutralized.slice(0, maxLen) : neutralized;
+  // Truncate on code POINTS (not UTF-16 code units) so a maxLen that
+  // lands inside a surrogate pair / emoji doesn't split it into garbage.
+  const cps = Array.from(neutralized);
+  return cps.length > maxLen ? cps.slice(0, maxLen).join("") : neutralized;
 }
 
 /**

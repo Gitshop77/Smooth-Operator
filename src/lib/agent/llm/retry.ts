@@ -23,6 +23,8 @@ const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1_500;
 /** Max jitter added to each backoff delay (ms). */
 const BACKOFF_JITTER_MS = 500;
+/** Ceiling (ms) for a `Retry-After` header so a hostile/buggy 429 can't freeze the run. */
+const MAX_RETRY_AFTER_MS = 30_000;
 /** Chunk size (ms) for the abort-aware sleep loop. */
 const SLEEP_CHUNK_MS = 100;
 
@@ -103,6 +105,12 @@ export async function withLLMRetry<T>(
       return await fn();
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
+      // Preserve the original error name when wrapping a non-Error throw
+      // (e.g. a browser DOMException) so callers that classify by `e.name`
+      // (AbortError/TimeoutError) still recognize it.
+      if (!(e instanceof Error) && typeof (e as { name?: unknown })?.name === "string") {
+        err.name = (e as { name: string }).name;
+      }
       const msg = err.message;
       const status = (e as Error & { status?: number }).status;
  // Cancelled/aborted — propagate immediately, no retry. Check BOTH the
@@ -126,7 +134,10 @@ export async function withLLMRetry<T>(
  // decide retry instead — a genuine retryable 429/5xx whose provider body text
  // happens to mention "cancelled" must still be retried.
       const hasStatus = typeof status === "number";
-      if (!hasStatus && ABORT_NAME_RE.test(msg)) throw e;
+      // A message that mentions abort/cancel is only a deliberate-abort signal
+      // when it is NOT also a network/recoverable error (e.g. a dropped
+      // connection whose text says "canceled" must still be retried).
+      if (!hasStatus && ABORT_NAME_RE.test(msg) && !NETWORK_RE.test(msg)) throw e;
  // Prefer the numeric HTTP status carried on the error (set by the HTTP
  // transport) for classifying retryable transients. Fall back to scanning
  // the message body if the status isn't available (e.g. non-transport errors).
@@ -168,8 +179,9 @@ export async function withLLMRetry<T>(
       const retryAfterMs = (e as Error & { retryAfter?: number }).retryAfter;
       let delay: number;
       if (typeof retryAfterMs === "number" && retryAfterMs >= 0) {
-        delay = retryAfterMs > 0
-          ? retryAfterMs + Math.random() * BACKOFF_JITTER_MS
+        const capped = Math.min(retryAfterMs, MAX_RETRY_AFTER_MS);
+        delay = capped > 0
+          ? capped + Math.random() * BACKOFF_JITTER_MS
           : 0;
       } else {
         delay = BASE_DELAY_MS * Math.pow(2, attempt) + Math.random() * BACKOFF_JITTER_MS;

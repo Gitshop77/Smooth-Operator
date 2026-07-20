@@ -85,6 +85,15 @@ describe("human-interact parseHumanRequest", () => {
 });
 
 describe("HUMAN_INTERACT listener trust boundary", () => {
+  beforeAll(async () => {
+    // Self-contained setup: re-import the module against a fresh chrome stub so
+    // this describe block does not silently depend on the parseHumanRequest
+    // describe's beforeAll having run first.
+    vi.resetModules();
+    setupGlobals();
+    await import("../src/extension/sidepanel/human-interact");
+  });
+
   test("rejects a sender whose id is not the extension id", () => {
     const sendResponse = vi.fn();
     const ret = listener!(

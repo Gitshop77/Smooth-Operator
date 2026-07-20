@@ -57,6 +57,9 @@ async function readCappedBody(req: NextRequest): Promise<string> {
   try {
     for (;;) {
       if (++chunksRead > MAX_BODY_CHUNKS) {
+ // Release the underlying body reader so the request socket is not left
+ // pinned open (resource hygiene under a flood of oversize requests).
+        await reader.cancel().catch(() => {});
         throw new ClientError('request entity too large', 413);
       }
       let result: { done: boolean; value: Uint8Array | undefined };
@@ -78,6 +81,9 @@ async function readCappedBody(req: NextRequest): Promise<string> {
  // ceiling to prevent a true infinite loop of empty chunks.
       if (!value || value.byteLength === 0) {
         if (++emptyReads > MAX_BODY_EMPTY_CHUNKS) {
+ // Release the underlying body reader so an endless stream of empty chunks
+ // does not leave the request socket pinned open.
+          await reader.cancel().catch(() => {});
           throw new ClientError('request entity too large', 413);
         }
         continue;
@@ -138,12 +144,25 @@ export async function readCappedUpstream(
   try {
     for (;;) {
       if (++chunksRead > MAX_UPSTREAM_CHUNKS) {
+ // Release the upstream reader so a slow/compromised mini-service cannot
+ // pin the connection after a 502.
+        await reader.cancel().catch(() => {});
         throw new ClientError('upstream response too large', 502);
       }
-      const { done, value } = await Promise.race([reader.read(), timeout]);
+      let result: { done: boolean; value: Uint8Array | undefined };
+      try {
+        result = await Promise.race([reader.read(), timeout]);
+      } catch (err) {
+ // The wall-clock timeout won the race. Release the underlying upstream
+ // reader so the connection is not left pinned open after the 504.
+        await reader.cancel().catch(() => {});
+        throw err;
+      }
+      const { done, value } = result;
       if (done) break;
       if (!value || value.byteLength === 0) {
         if (++emptyReads > MAX_UPSTREAM_EMPTY_CHUNKS) {
+          await reader.cancel().catch(() => {});
           throw new ClientError('upstream response too large', 502);
         }
         continue;

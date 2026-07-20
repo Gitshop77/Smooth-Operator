@@ -149,7 +149,9 @@ const sharedConfig: BuildOptions = {
   // actionable, and only add noise to `npm run build:all`. Other warnings
   // (syntax, resolution, type) are unaffected and still surface.
   // (per-file bundle-size notices are suppressed by logLevel: "warning" above)
-  define: isProd ? { "process.env.NODE_ENV": '"production"' } : {},
+  define: isProd
+    ? { "process.env.NODE_ENV": '"production"' }
+    : { "process.env.NODE_ENV": '"development"' },
   plugins: isProd
     ? [zodLocalesStubPlugin, stripConsoleDebugPlugin]
     : [zodLocalesStubPlugin],

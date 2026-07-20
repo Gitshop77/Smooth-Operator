@@ -1,9 +1,55 @@
 // Wired to Prisma persistence layer.
-import type { NextRequest } from 'next/server';
+import { timingSafeEqual } from 'node:crypto';
+import type { NextRequest, NextResponse } from 'next/server';
 import { json, withRouteError, parseLimit, badRequest } from '@/lib/cowork/api/http';
 import { db } from '@/lib/db';
 
+const DEV_TOKEN = 'dev-token';
+
+/** Constant-time string compare (avoids timing oracles on the token). */
+function tokensMatch(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
+/**
+ * Require a valid `X-Cowork-Token` header (mirrors the token resolution in
+ * `proxy.ts`). Zero-config (no real `COWORK_UI_TOKEN`) honors the well-known
+ * `dev-token` so localhost works with no env; once a real UI token is set the
+ * dev-token is rejected. Returns `null` when authorized, or a 401 Response.
+ */
+function requireCoworkToken(req: NextRequest): NextResponse | null {
+  const uiToken =
+    process.env.COWORK_UI_TOKEN && process.env.COWORK_UI_TOKEN.length > 0
+      ? process.env.COWORK_UI_TOKEN
+      : undefined;
+  const eventToken =
+    process.env.COWORK_EVENT_TOKEN && process.env.COWORK_EVENT_TOKEN.length > 0
+      ? process.env.COWORK_EVENT_TOKEN
+      : undefined;
+  const zeroConfig = !uiToken;
+  const token = uiToken ?? eventToken ?? DEV_TOKEN;
+  const received = req.headers.get('x-cowork-token') ?? undefined;
+  if (!received || (token === DEV_TOKEN && !zeroConfig)) {
+    return NextResponse.json(
+      { error: 'Unauthorized' },
+      { status: 401, headers: { 'Cache-Control': 'no-store', 'WWW-Authenticate': 'Bearer realm="cowork"' } },
+    );
+  }
+  if (!tokensMatch(received, token)) {
+    return NextResponse.json(
+      { error: 'Unauthorized' },
+      { status: 401, headers: { 'Cache-Control': 'no-store', 'WWW-Authenticate': 'Bearer realm="cowork"' } },
+    );
+  }
+  return null;
+}
+
 export async function GET(req: NextRequest): Promise<Response> {
+  const authErr = requireCoworkToken(req);
+  if (authErr) return authErr;
   return withRouteError(async () => {
  // Cap `limit` to a hard max (parseLimit default 100, max 200) so a single
  // authenticated GET can't pull the entire extensions table in one shot.

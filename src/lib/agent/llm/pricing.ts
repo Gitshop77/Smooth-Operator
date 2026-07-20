@@ -179,13 +179,13 @@ function lookupPricing(
   let best: { key: string; rate: ModelPricing } | undefined;
   for (const [key, rate] of Object.entries(table)) {
     if (!m.includes(key)) continue;
-    if (best) {
-      const keyIsPreferred = prefix !== undefined && key.startsWith(`${prefix}/`);
-      const bestIsPreferred = prefix !== undefined && best.key.startsWith(`${prefix}/`);
-      const better = key.length > best.key.length || (keyIsPreferred && !bestIsPreferred);
-      if (!better) continue;
+    // The longest matching key wins (most-specific catalog entry). The
+    // provider-prefixed keys cannot match `m.includes(key)` here because `m`
+    // is a bare model id (no slash), so a provider-preference branch would be
+    // dead code — drop it and pick purely by descending key length.
+    if (!best || key.length > best.key.length) {
+      best = { key, rate };
     }
-    best = { key, rate };
   }
   return best?.rate;
 }
@@ -288,7 +288,11 @@ export async function refreshPricingFromCatalog(): Promise<void> {
  // TRUST ASSUMPTION: whoever controls `COWORK_MODEL_CATALOG_URL` (an
  // operator-injected env var, by design) controls the rates that feed
  // cost-cap enforcement. This is an intentional operator knob — a
- // self-hosted mirror legitimately reprices private models. We still
+ // SELF-HOSTED MIRROR on a PUBLICLY-REACHABLE, non-restricted host
+ // legitimately reprices models. The mirror URL MUST still pass the SSRF
+ // guard below: loopback / RFC1918 / link-local / CGNAT / unspecified /
+ // .internal targets are correctly REJECTED (not a supported topology), so
+ // only a genuinely public mirror is fetched. We still
  // reject non-positive rates (0 AND negative) in `convertCatalog`, which
  // both this path and the default path flow through: a 0 rate would make
  // `estimateCost` multiply token counts by zero and never trip the cap, a

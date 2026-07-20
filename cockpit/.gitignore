@@ -59,7 +59,7 @@ local-*
 .claude
 .z-ai-config
 prompt
-test
+/test
 
 # prisma
 prisma/migrations/dev.db*

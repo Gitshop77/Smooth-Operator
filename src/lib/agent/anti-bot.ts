@@ -129,41 +129,36 @@ export function detectChallengeInPage(): ChallengeInfo | null {
   };
 
  // Cloudflare JS challenge.
- // SECURITY: document.title is attacker-controllable, so a hostile page
- // could set its title to "Just a moment..." to force the agent into a
- // Cloudflare-JS auto-wait stall (false-positive availability vector).
- // A genuine IUAM / "Checking your browser" page carries a real CF JS
- // selector — treat the selector as the authoritative signal. A title
- // match alone is NEVER sufficient: it must be corroborated by that
- // selector OR by a *short interstitial-style body AND* the page actually
- // loading the challenge script, never by body length alone (a short
- // attacker page would otherwise trivially false-positive).
-  const cfJsTitle =
-    title === "just a moment..." ||
-    title.indexOf("checking your browser") !== -1;
-  const cfJsSelector = document.querySelector(
-    "#challenge-running, #cf-please-wait, #challenge-form, #cf-chl-wrapper",
-  );
+ // SECURITY: document.title and same-origin IDs/paths are attacker-controllable,
+ // so a hostile page could set its title to "Just a moment…" or inject
+ // #cf-chl-wrapper to force the agent into a Cloudflare-JS auto-wait stall
+ // (false-positive availability vector). A genuine IUAM / "Checking your browser"
+ // page loads Cloudflare's challenge script from a Cloudflare-owned origin — that
+ // cross-origin script src is the ONLY signal we trust (see below). A title match
+ // alone (or any same-origin marker) is NEVER sufficient.
  // The interstitial *must* contain a script tag pointing at Cloudflare's
- // challenge JS — a far stronger corroborator than a short body.
+ // challenge JS hosted on a Cloudflare-owned origin. Trust ONLY that
+ // cross-origin signal: the #cf-chl-wrapper / #challenge-running IDs and the
+ // /cdn-cgi/ path are attacker-settable in the page's own origin, so a hostile
+ // page could inject them to force a false cloudflare-js stall. The title alone
+ // is also never sufficient. cfJsSelector (same-origin IDs) is intentionally not
+ // used as a trigger.
   const cfJsScript = document.querySelector(
-    'script[src^="https://challenges.cloudflare.com/"], script[src*="/cdn-cgi/"]',
+    'script[src^="https://challenges.cloudflare.com/"]',
   );
-  if (
-    cfJsSelector !== null ||
-    (cfJsTitle && cfJsScript !== null)
-  ) {
+  if (cfJsScript !== null) {
     return { kind: "cloudflare-js", message: "Cloudflare JS challenge" };
   }
 
- // Cloudflare block page — require the CF error block selector OR both a
- // title mentioning "attention required" AND the word "blocked" in the
- // body. A title-only match is spoofable and is no longer accepted.
-  const cfBlockSelector = document.querySelector(".cf-error-details");
+ // Cloudflare block page — require genuine corroboration, NOT the attacker-
+ // settable `.cf-error-details` CSS class (a hostile page can add that class to
+ // force a false stall). Require the "attention required" title AND the word
+ // "blocked" in the body; the authoritative network-layer status is checked
+ // upstream, but this content check at least forces the attacker to control
+ // both title and body rather than just a single CSS class.
   const b = getBody();
   if (
-    cfBlockSelector !== null ||
-    (title.indexOf("attention required") !== -1 && b.indexOf("blocked") !== -1)
+    title.indexOf("attention required") !== -1 && b.indexOf("blocked") !== -1
   ) {
     return { kind: "cloudflare-block", message: "Cloudflare block page" };
   }
@@ -246,21 +241,14 @@ export function detectAuthWallInPage(): ChallengeInfo | null {
         'script[src*="okta.com"], a[href*="login.microsoftonline.com"]',
     ) !== null;
 
-  const submit = form
-    ? (form.querySelector(
-        'button[type="submit"], input[type="submit"]',
-      ) as HTMLInputElement | HTMLButtonElement | null)
-    : null;
-  const submitLabel = (
-    (submit && submit.textContent) ||
-    (submit && (submit as HTMLInputElement).value) ||
-    ""
-  ).toLowerCase();
-  const submitLogin = /(sign in|signin|log in|login|continue|authorize|verify)/.test(
-    submitLabel,
-  );
-
-  if (loginUrl || loginFormAction || idpMarker || submitLogin) {
+ // Auth wall requires an authoritative login signal: a login/sign-in/SSO URL,
+ // a form `action` pointing at a login endpoint, or an identity-provider
+ // iframe/script. A bare password field plus a submit label of "continue"/
+ // "verify" is NOT sufficient — arbitrary password+continue forms (account
+ // recovery, newsletter signup) would otherwise force an unnecessary
+ // human-takeover pause. submitLabel/submitLogin corroboration is intentionally
+ // dropped.
+  if (loginUrl || loginFormAction || idpMarker) {
     return { kind: "auth-wall", message: "Authentication required (login page)" };
   }
   return null;

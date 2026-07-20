@@ -56,13 +56,19 @@ function extractChannels(file: string): string[] {
   expect(m, `could not find SERVER_OWNED_CHANNELS in ${file}`).not.toBeNull();
   if (!m) throw new Error(`could not find SERVER_OWNED_CHANNELS in ${file}`);
   const body = m[1];
-  return [...body.matchAll(/'([^']+)'/g)].map((x) => x[1]).sort();
+  return [...body.matchAll(/['"`]([^'"`]+)['"`]/g)].map((x) => x[1]).sort();
 }
 
 describe('SERVER_OWNED_CHANNELS stays in sync with the mini-service', () => {
   it('cockpit emit deny-list matches the mini-service deny-list', () => {
     const cockpit = extractChannels(cockpitEmitRoute);
     const mini = extractChannels(miniService);
+    // Guard against a vacuous pass: if a refactor switched the channel
+    // literals to double-quoted / template-string syntax, the old single-quote
+    // extractor would return [] and the equality check above would pass with
+    // [] === [] while the two deny-lists had silently drifted.
+    expect(cockpit.length).toBeGreaterThan(0);
+    expect(mini.length).toBeGreaterThan(0);
     expect(cockpit).toEqual(mini);
   });
 });

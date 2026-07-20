@@ -401,7 +401,7 @@ export function getShadowRoot(el: Element): ShadowRoot | null {
           typeof Node !== "undefined" &&
           root &&
           (root as Node).nodeType === (Node.DOCUMENT_FRAGMENT_NODE ?? 11) &&
-          (root as { host?: unknown }).host &&
+          (root as { host?: unknown }).host === el &&
           srChildNodes != null &&
           typeof (srChildNodes as { [Symbol.iterator]?: unknown })[Symbol.iterator] === "function"
         ) {
@@ -507,7 +507,6 @@ export function pierceShadowRoots(root: Element | Document | ShadowRoot): Elemen
  * the piercer on a fresh document; production code should never call this.
  */
 export function _resetShadowPiercerForTests(): void {
-  state = null;
   if (typeof window !== "undefined") {
     try {
       clearBackdoorKeys();
@@ -515,4 +514,17 @@ export function _resetShadowPiercerForTests(): void {
       /* ignore */
     }
   }
+  // Clear the idempotency sentinel so the next installShadowPiercer does NOT
+  // short-circuit on the still-patched prototype closure (which would write to
+  // the orphaned old WeakMap). Deleting the sentinel forces a fresh patch and a
+  // fresh `state` on the next install, so tests don't leak captured roots across
+  // re-installs.
+  if (ELEMENT_CTOR) {
+    try {
+      delete (ELEMENT_CTOR.prototype.attachShadow as unknown as Record<string, unknown>)[PIERCER_PATCHED_KEY];
+    } catch {
+      /* ignore */
+    }
+  }
+  state = null;
 }

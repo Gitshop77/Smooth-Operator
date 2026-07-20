@@ -136,7 +136,11 @@ export function movePhantomCursor(x: number, y: number): Promise<void> {
       settle();
     };
     activeMoveFinish = onTransitionEnd;
-    target.addEventListener("transitionend", onTransitionEnd, { once: true });
+ // Do NOT pass `{ once: true }`: the listener is removed manually in `settle()`,
+ // and a non-transform `transitionend` would otherwise consume the listener
+ // (returning early without settling) and force the move to resolve only via the
+ // safety timeout. Keeping it registered lets the transform transition still fire.
+    target.addEventListener("transitionend", onTransitionEnd);
     const safetyTimer = setTimeout(settle, CURSOR_MOVE_TIMEOUT_MS);
   });
 }

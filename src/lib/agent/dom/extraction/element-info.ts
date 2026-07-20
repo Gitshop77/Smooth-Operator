@@ -82,21 +82,30 @@ export const BOOLEAN_ATTRS: ReadonlySet<string> = new Set([
  * while opaque tokens are masked.
  */
 export function looksLikeSecretSegment(seg: string): boolean {
-  if (seg.length < 16) return false;
+  if (seg.length < 12) return false;
  // A segment carrying whitespace / quotes / angle-brackets is human-readable
  // text or hostile markup (e.g. an injected attribute trying to forge a
  // delimiter), not an opaque path token — never redact it.
   if (/[\s"'<>]/.test(seg)) return false;
+ // Dotted version / filename paths (e.g. `v1.2`, `report.2024.final.pdf`) are
+ // legitimate navigation segments — don't mask them as secrets.
+  if (/^[A-Za-z0-9]+(\.[A-Za-z0-9]+)+$/.test(seg) && /[0-9]/.test(seg) && seg.length <= 48) {
+    return false;
+  }
   const hasLower = /[a-z]/.test(seg);
   const hasUpper = /[A-Z]/.test(seg);
   const hasDigit = /[0-9]/.test(seg);
   const hasSpecial = /[^A-Za-z0-9]/.test(seg);
   const classes = [hasLower, hasUpper, hasDigit, hasSpecial].filter(Boolean).length;
- // Require genuine high entropy: a mix of at least three character classes
- // (lower + upper + digit, etc.). This keeps real opaque tokens masked while
- // not flagging single-class runs (e.g. a 5000-char repeated path) or ordinary
- // hyphenated route words like `getting-started`.
-  if (classes >= 3) return true;
+ // Long pure-numeric runs (e.g. an opaque id) are tokens.
+  if (classes === 1 && hasDigit && seg.length >= 24) return true;
+ // Two-character-class runs with no special char (hex / base62 / lower+digit)
+ // are high-entropy opaque tokens — redact at a longer length so hyphenated
+ // route words (which carry a special char) are not falsely flagged.
+  if (classes >= 2 && !hasSpecial && seg.length >= 16) return true;
+ // Three+ character classes (the original rule, lowered length threshold)
+ // catches shorter mixed tokens (e.g. 12-char mixed ids).
+  if (classes >= 3 && seg.length >= 12) return true;
   return false;
 }
 
@@ -129,6 +138,14 @@ export function redactUrlTokens(url: string): string {
     u.hash = "";
     u.username = "";
     u.password = "";
+ // Mask high-entropy subdomain labels (e.g. a secret-bearing label in a
+ // dynamic / wildcard host) the same way path segments are masked, so an
+ // opaque token in the hostname is not forwarded to the LLM.
+    const labels = u.hostname.split(".");
+    const redactedHost = labels
+      .map((lab) => (looksLikeSecretSegment(lab) ? "[redacted]" : lab))
+      .join(".");
+    u.hostname = redactedHost;
     u.pathname = redactPathSecrets(u.pathname);
     return u.toString();
   } catch {

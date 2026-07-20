@@ -131,10 +131,10 @@ export class EvaluatorComb {
 
       if (missingKinds.length > 0) {
         if (!hasAnyInput) {
-          // No input supplied at all — the product of the empty evaluator set is
-          // the neutral default score of 1.0 (fail-open by design, not a false
-          // pass with zero evidence).
-          return { score: 1, results: [], reasons: [] };
+          // Configured evaluators but no input supplied at all — a missing
+          // evaluation is not evidence of success, so fail closed (score 0)
+          // rather than reporting a false pass with zero evidence.
+          return { score: 0, results: [], reasons: ["no evaluator input supplied"] };
         }
         // A configured evaluator had no matching input while at least one other
         // configured evaluator ran (or some off-config input was supplied). The

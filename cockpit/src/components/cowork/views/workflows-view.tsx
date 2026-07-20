@@ -15,11 +15,19 @@ import { timeAgo } from "@/lib/cowork-data/format";
 type WorkflowStep = { name?: string; action?: string };
 
 function parseStepsJson(raw: unknown): WorkflowStep[] {
-  if (Array.isArray(raw)) return raw as WorkflowStep[];
+  if (Array.isArray(raw)) {
+    return (raw as unknown[]).filter(
+      (x) => x != null && (typeof x === "object" || typeof x === "string"),
+    ) as WorkflowStep[];
+  }
   if (typeof raw !== "string") return [];
   try {
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as WorkflowStep[]) : [];
+    return Array.isArray(parsed)
+      ? ((parsed as unknown[]).filter(
+          (x) => x != null && (typeof x === "object" || typeof x === "string"),
+        ) as WorkflowStep[])
+      : [];
   } catch {
     return [];
   }

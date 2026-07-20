@@ -54,8 +54,23 @@ import {
   runPauseCheck,
 } from "./phases/navigator";
 
-/** Sleep helper. */
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+/** Sleep helper. Aborts early if the optional signal fires. */
+const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 
 /**
  * Keepalive interval for in-loop awaits. An external watchdog (e.g. the cockpit
@@ -163,6 +178,12 @@ function withHeartbeat<T>(
 
 /** Soft character cap for the rendered navigator history before compaction. */
 const CONTEXT_SOFT_CAP_CHARS = 400_000;
+
+// Bounded SLA for the per-step settle wait. A hung `waitForSettled`
+// (or a very long jitter-delayed sleep) would otherwise block the loop until
+// it naturally resolves; this caps it and lets a user Stop (deps.signal)
+// interrupt the settle via withHeartbeat's abort race.
+const SETTLE_SLA_MS = 30_000;
 
 // ─── The orchestrator ────────────────────────────────────────────────────────
 
@@ -828,7 +849,20 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
  // Settle & advance
     try {
       const jittered = settleDelay * (0.8 + Math.random() * 0.4);
-      await withHeartbeat(state.step, onEvent, () => (deps.waitForSettled?.() ?? sleep(jittered)));
+      await withHeartbeat(
+        state.step,
+        onEvent,
+        async (signal?: AbortSignal) => {
+          if (deps.waitForSettled) {
+            // `waitForSettled` has no signal param; withHeartbeat's abort
+            // race still interrupts the settle on user Stop / SLA timeout.
+            await deps.waitForSettled();
+          } else {
+            await sleep(jittered, signal);
+          }
+        },
+        { signal: deps.signal, timeoutMs: SETTLE_SLA_MS },
+      );
     } catch (e) {
       const errMsg = `waitForSettled failed: ${e instanceof Error ? e.message : String(e)}`;
       onEvent({ type: "error", step: state.step, message: errMsg, recoverable: true });

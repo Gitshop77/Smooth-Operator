@@ -72,7 +72,7 @@ export function createCompatibleCanvas(): CompatibleCanvas | null {
  * surface for a screenshot annotator that should only handle raster captures).
  */
 function assertDataUrl(url: string, label: string): void {
-  if (typeof url !== "string" || !/^data:image\/(?!svg\+xml)[a-zA-Z0-9.+-]+;/i.test(url)) {
+  if (typeof url !== "string" || !/^data:image\/(?!svg\+xml)[a-zA-Z0-9.+-]+(?:;[^,]*)*,/i.test(url)) {
     throw new Error(`${label}: expected a raster data:image URL`);
   }
 }

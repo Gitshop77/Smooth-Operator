@@ -20,7 +20,9 @@ import { redactSecrets } from "@/lib/agent/secrets";
  * Error objects (and the messages around them) can carry untrusted URLs, host
  * strings, or storage values, so the error is stringified and run through
  * `redactSecrets`. The call is fire-and-forget: if redaction itself fails we
- * fall back to the original (already-escaped) log line rather than losing it.
+ * suppress the line with a generic, opaque message rather than emitting the
+ * raw (untrusted, possibly secret-bearing) log, so no secret can reach the
+ * console via the fallback path.
  */
 export async function safeLog(
   level: "error" | "warn",
@@ -212,7 +214,20 @@ export async function loadAndSetDomainConfig(): Promise<UrlPolicyConfig> {
 
 /** Synchronous read of the domain config (set by {@link loadAndSetDomainConfig}). */
 export function getDomainConfig(): UrlPolicyConfig {
-  return getDomainConfigGlobal() ?? {};
+  const cfg = getDomainConfigGlobal();
+  // Fail-closed: when a policy is EXPECTED (enforced) but its config payload is
+  // absent/unavailable (e.g. storage read failed and {@link loadAndSetDomainConfig}
+  // cleared it), never return an empty `{}` — `checkUrlAllowed` would treat that
+  // as allow-all and silently degrade the posture. Return a deny-all sentinel
+  // instead, so any consumer that uses this value blocks navigation until a
+  // valid policy is (re)loaded. When no policy is configured (not enforced) the
+  // historical allow-all default is preserved.
+  const enforced =
+    (globalThis as { __openCoworkDomainConfigEnforced?: boolean }).__openCoworkDomainConfigEnforced === true;
+  if (enforced && cfg === undefined) {
+    return { allowedDomains: ["__fail_closed__"] };
+  }
+  return cfg ?? {};
 }
 
 // ─── System keep-awake (chrome.power) ────────────────────────────────────────

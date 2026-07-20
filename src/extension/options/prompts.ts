@@ -156,7 +156,16 @@ function renderQuickPrompts(items: QuickPrompt[]): void {
  // stale if another tab / external storage write mutated the list before this
  // click, so re-verify identity before splicing and abort + re-render on
  // mismatch.
-        const current = await readQuickPrompts();
+        let current: QuickPrompt[];
+        try {
+          current = await readQuickPrompts();
+        } catch (err) {
+          await alertModal({
+            title: "Delete failed",
+            message: `Could not read quick prompts: ${err instanceof Error ? err.message : String(err)}`,
+          });
+          return;
+        }
         const target = current[index];
         if (!target || target.name !== q.name) {
           renderQuickPrompts(current);
@@ -193,7 +202,16 @@ document.getElementById("addQuickPrompt")?.addEventListener("click", () => {
       flashFieldError(`Quick-prompt text must be at most ${TEXT_MAX} characters.`);
       return;
     }
-    const items = await readQuickPrompts();
+    let items: QuickPrompt[];
+    try {
+      items = await readQuickPrompts();
+    } catch (err) {
+      await alertModal({
+        title: "Save failed",
+        message: `Could not read quick prompts: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
  // Enforce name uniqueness: overwrite the existing entry instead of adding a
  // second one, so delete-by-name (and delete-by-index) stays safe.
     const idx = items.findIndex((q) => q.name === name);

@@ -111,7 +111,7 @@ export function installPopupHandler(): void {
 
  // Override window.prompt — return any agent-queued text (set via
  // sendAlertText), else empty string (treated as dismiss).
-  window.prompt = function (message?: string, defaultValue?: string): string | null {
+  window.prompt = function (message?: string, defaultValue?: string): string {
     captureDialog("prompt", message);
     if (nextPromptValue !== null) {
       const v = nextPromptValue;
@@ -220,12 +220,13 @@ export function dismissAlert(): boolean {
  * Returns `true` if the text was staged, `false` if no prompt was open.
  */
 export function sendAlertText(text: string): boolean {
-  // Staging is only valid for the NEXT prompt. The currently-open prompt
-  // already received the auto-dismiss override's empty-string return, so we
-  // cannot retroactively fill it. Only stage when the pending dialog is a
-  // prompt; for alert/confirm we must NOT stage, otherwise the text would
-  // silently contaminate the next real prompt.
-  if (!pendingAlert || pendingAlert.kind !== "prompt") return false;
+  // When a dialog is already open, only stage if it's a prompt — staging for a
+  // pending alert/confirm would contaminate the next real prompt. When no
+  // dialog is open (or the pending one is a prompt) we stage the text so it is
+  // returned by the next window.prompt() call, matching the documented
+  // "alert_send_keys before opening prompt" contract (the old guard returned
+  // false whenever no dialog was open, defeating pre-staging).
+  if (pendingAlert && pendingAlert.kind !== "prompt") return false;
   stagePromptText(text);
   return true;
 }

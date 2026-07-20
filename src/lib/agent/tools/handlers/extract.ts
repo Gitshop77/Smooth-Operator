@@ -15,12 +15,16 @@ export async function handleExtract(
   action: Extract<Action, { type: "extract" }>,
 ): Promise<ActionResult> {
   await sleep(TIMINGS.extractWait);
-  const bodyText = (await redactSecrets(document.body?.innerText || "")).slice(0, LIMITS.extractBodyChars);
+  const rawText = document.body?.innerText || "";
+  // Slice BEFORE redaction so the [truncated] marker reflects the true
+  // source size (redaction can shrink/grow the text and mask the cutoff).
+  const bodyText = rawText.slice(0, LIMITS.extractBodyChars);
   const truncated =
-    bodyText.length >= LIMITS.extractBodyChars
+    rawText.length >= LIMITS.extractBodyChars
       ? `\n\n[truncated: page content exceeded ${LIMITS.extractBodyChars} chars]`
       : "";
-  const tagged = `Query: ${action.query}\n\nPage content:\n${bodyText}${truncated}`;
+  const redacted = await redactSecrets(bodyText);
+  const tagged = `Query: ${action.query}\n\nPage content:\n${redacted}${truncated}`;
   const scan = scanForInjection(tagged);
   const injectionWarnings =
     scan.safe

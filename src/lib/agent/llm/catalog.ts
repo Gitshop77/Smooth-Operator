@@ -234,11 +234,15 @@ export function isValidCatalog(value: unknown): value is Catalog {
         // Reject non-numeric OR negative cost rates (see header note on the
         // cost-cap). `cache_read`/`cache_write`/`reasoning`/audio rates follow
         // the same rule when present.
+        const inputRate = c.input;
+        const outputRate = c.output;
         if (
-          typeof c.input !== "number" ||
-          typeof c.output !== "number" ||
-          c.input < 0 ||
-          c.output < 0
+          typeof inputRate !== "number" ||
+          !Number.isFinite(inputRate) ||
+          inputRate < 0 ||
+          typeof outputRate !== "number" ||
+          !Number.isFinite(outputRate) ||
+          outputRate < 0
         ) return false;
         const rateOk = (v: unknown) =>
           v === undefined || (typeof v === "number" && v >= 0);
@@ -258,11 +262,15 @@ export function isValidCatalog(value: unknown): value is Catalog {
       if (m.attachment !== undefined && typeof m.attachment !== "boolean") return false;
       if (m.limit !== undefined) {
         const lim = m.limit as Record<string, unknown>;
+        const ctxLimit = lim.context;
+        const outLimit = lim.output;
         if (
-          typeof lim.context !== "number" ||
-          typeof lim.output !== "number" ||
-          lim.context < 1 ||
-          lim.output < 0
+          typeof ctxLimit !== "number" ||
+          !Number.isFinite(ctxLimit) ||
+          ctxLimit < 1 ||
+          typeof outLimit !== "number" ||
+          !Number.isFinite(outLimit) ||
+          outLimit < 0
         ) return false;
       }
     }
@@ -500,7 +508,7 @@ export function getDefaultModelForProvider(id: string): string {
   if (!provider || !provider.models) return "";
   const usable = Object.values(provider.models).filter((m) => m.status !== "deprecated");
   if (usable.length === 0) return "";
-  usable.sort((a, b) => b.release_date.localeCompare(a.release_date)); // newest first
+  usable.sort((a, b) => String(b.release_date ?? "").localeCompare(String(a.release_date ?? ""))); // newest first
   const stable = usable.filter((m) => m.status !== "alpha" && m.status !== "beta");
   return (stable.length > 0 ? stable : usable)[0].id;
 }
@@ -530,7 +538,7 @@ export function searchModels(
   const nonDeprecated = all.filter((x) => x.model.status !== "deprecated");
   const pool = nonDeprecated.length > 0 ? nonDeprecated : all;
 
-  pool.sort((a, b) => b.model.release_date.localeCompare(a.model.release_date));
+  pool.sort((a, b) => String(b.model.release_date ?? "").localeCompare(String(a.model.release_date ?? "")));
   return pool.slice(0, limit);
 }
 

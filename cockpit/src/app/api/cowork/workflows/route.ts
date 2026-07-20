@@ -33,7 +33,10 @@ export async function GET(req: NextRequest): Promise<Response> {
       return badRequest('invalid after cursor');
     }
     const args: Parameters<typeof db.workflow.findMany>[0] = {
-      take: limit,
+ // Fetch one extra record beyond `limit` so we can tell definitively whether
+ // another page exists, instead of inferring it from `length === limit` (which
+ // yields a spurious cursor when the table size is an exact multiple of `limit`).
+      take: limit + 1,
  // `id` as a deterministic tiebreaker keeps the order a strict total order
  // (two workflows can share a `createdAt`), so cursor pagination is correct.
       orderBy: { createdAt: 'desc', id: 'desc' },
@@ -59,15 +62,21 @@ export async function GET(req: NextRequest): Promise<Response> {
  // shape the view expects: `isRecurring` → `enabled`, `lastRunAt` →
  // `lastRun`. The legacy `runs` field has no backing column and no consumer,
  // so it is intentionally omitted rather than synthesized to a misleading 0.
-    const projected = workflows.map((wf) => ({
+ // We operate on `pageItems` (the trimmed page) so the projected payload never
+ // includes the extra look-ahead record fetched to detect the next page.
+ // Signal whether more pages exist. Because we fetched `limit + 1` records, a
+ // full page (`workflows.length > limit`) means at least one more record exists
+ // past this page; otherwise this is the last page (no spurious nextCursor on an
+ // exact multiple of `limit`).
+    const hasMore = workflows.length > limit;
+    const pageItems = hasMore ? workflows.slice(0, limit) : workflows;
+    const projected = pageItems.map((wf) => ({
       ...wf,
       enabled: wf.isRecurring,
       lastRun: wf.lastRunAt,
     }));
- // Signal whether more pages exist (only when a full page was returned and the
- // cursor id is well-formed) so the UI can drive cursor-based "load more".
-    const last = workflows.length === limit ? workflows[workflows.length - 1] : undefined;
-    const nextCursor = last && CURSOR_ID_RE.test(last.id) ? last.id : null;
+    const last = pageItems.length ? pageItems[pageItems.length - 1] : undefined;
+    const nextCursor = hasMore && last && CURSOR_ID_RE.test(last.id) ? last.id : null;
     return json({ workflows: projected, total, nextCursor });
   }, sanitizeRequestId(req.headers?.get('x-request-id') ?? null));
 }

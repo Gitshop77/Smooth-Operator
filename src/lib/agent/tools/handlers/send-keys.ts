@@ -97,6 +97,21 @@ const SYMBOL_TO_PHYSICAL_CODE: Record<string, string> = {
   "-": "Minus", "=": "Equal",
 };
 
+/**
+ * Legacy `keyCode`/`which` for the physical base keys that the symbol map
+ * resolves to. Synthetic events emitted without these set `keyCode === 0`,
+ * which bot/automation detectors flag. Shifted symbols ('!', '@', …) must
+ * report the base key's code (Digit1 → 49, Equal → 187), not the literal
+ * character's char code, so a real `Shift+1` is indistinguishable from ours.
+ */
+const PHYSICAL_CODE_TO_KEYCODE: Record<string, number> = {
+  Digit1: 49, Digit2: 50, Digit3: 51, Digit4: 52, Digit5: 53,
+  Digit6: 54, Digit7: 55, Digit8: 56, Digit9: 57, Digit0: 48,
+  Minus: 189, Equal: 187, BracketLeft: 219, BracketRight: 221,
+  Backslash: 220, Semicolon: 186, Quote: 222, Comma: 188,
+  Period: 190, Slash: 191, Backquote: 192,
+};
+
 /** Resolve `keyCode`/`which`/`code` for a synthetic KeyboardEvent. */
 export function keyEventCodes(key: string): { keyCode: number; which: number; code: string } {
   if (key in NAMED_KEY_CODES) {
@@ -107,12 +122,26 @@ export function keyEventCodes(key: string): { keyCode: number; which: number; co
     const lower = key.toLowerCase();
     const isLetter = lower >= "a" && lower <= "z";
     const upper = key.toUpperCase();
-    const keyCode = isLetter ? upper.charCodeAt(0) : key.charCodeAt(0);
     let code: string;
-    if (key === " ") code = "Space";
-    else if (isLetter) code = `Key${upper}`;
-    else if (key >= "0" && key <= "9") code = `Digit${key}`;
-    else code = SYMBOL_TO_PHYSICAL_CODE[key] ?? key;
+    let keyCode: number;
+    if (key === " ") {
+      code = "Space";
+      keyCode = 32;
+    } else if (isLetter) {
+      code = `Key${upper}`;
+      keyCode = upper.charCodeAt(0);
+    } else if (key >= "0" && key <= "9") {
+      code = `Digit${key}`;
+      keyCode = key.charCodeAt(0);
+    } else {
+      const phys = SYMBOL_TO_PHYSICAL_CODE[key];
+      code = phys ?? key;
+      // Derive the legacy keyCode from the resolved PHYSICAL code, not the
+      // literal symbol char code — '!' must report 49 (Digit1), not 33.
+      keyCode = phys
+        ? PHYSICAL_CODE_TO_KEYCODE[phys] ?? key.charCodeAt(0)
+        : key.charCodeAt(0);
+    }
     return { keyCode, which: keyCode, code };
   }
   return { keyCode: 0, which: 0, code: "" };

@@ -25,8 +25,17 @@ export async function GET(req: NextRequest): Promise<Response> {
  // - status → 'idle' (no live run-state in the cockpit DB)
  // - lastActive → grantedAt (best proxy for last activity)
  // - tasksCompleted → 0 (the dashboard is read-only)
+ // Project only the safe, intentionally-exposed fields. Spreading the raw
+ // `AgentTrust` row (`{...a}`) would leak any future column (e.g. internal
+ // audit/token material) into the API response, so list fields explicitly.
     const projected = agents.map((a) => ({
-      ...a,
+      id: a.id,
+      agentId: a.agentId,
+      name: a.name,
+      trustLevel: a.trustLevel,
+      scope: a.scope,
+      grantedAt: a.grantedAt,
+      lastUsedAt: a.lastUsedAt,
       type: 'browser-extension',
       status: 'idle',
       currentTask: null,

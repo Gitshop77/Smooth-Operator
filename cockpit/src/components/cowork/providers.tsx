@@ -35,7 +35,7 @@ export class AppErrorBoundary extends React.Component<
     console.error(
       "[AppErrorBoundary] view render failure:",
       redactSecrets(error?.message ?? ""),
-      info?.componentStack,
+      redactSecrets(info?.componentStack ?? ""),
     );
   }
 

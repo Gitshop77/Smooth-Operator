@@ -266,7 +266,13 @@ export async function ensureContent(tabId: number): Promise<void> {
  // patches are OPT-IN and OFF by default (ToS/bot-detection-circumvention
  // risk) — only inject when the user has explicitly enabled them.
     if (await isStealthEnabled()) {
-      await injectAntiDetection(tabId);
+      try {
+        await injectAntiDetection(tabId);
+      } catch (e) {
+        console.warn(
+          `[tab-manager] stealth injection failed; continuing with content script only: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
     } else {
       console.debug("[tab-manager] stealth patches skipped (stealthEnabled is off)");
     }
@@ -502,13 +508,27 @@ export async function executeActionsInTab(
           message: `Typed [REDACTED — secret substituted] into [${orig.index}]`,
         };
       }
-      if (
-        orig.type === "extract" ||
-        orig.type === "find_elements" ||
-        orig.type === "dropdown_options"
-      ) {
-        const redacted = await redactSecrets(r.extractedContent ?? "");
-        return { ...r, extractedContent: redacted };
+      const readActionTypes = new Set([
+        "extract",
+        "find_elements",
+        "dropdown_options",
+        "find_text",
+        "evaluate",
+        "search_page",
+      ]);
+      if (readActionTypes.has(orig.type)) {
+        const patch: Record<string, unknown> = {};
+        if (typeof r.extractedContent === "string") {
+          patch.extractedContent = await redactSecrets(r.extractedContent);
+        }
+        const rAny = r as unknown as Record<string, unknown>;
+        if (typeof rAny.value === "string") {
+          patch.value = await redactSecrets(rAny.value);
+        }
+        if (typeof rAny.text === "string") {
+          patch.text = await redactSecrets(rAny.text);
+        }
+        return { ...r, ...patch };
       }
       return r;
     }),
@@ -575,7 +595,8 @@ export async function handleTabAction(
   runState: RunState,
   notify?: (event: LogEvent) => void
 ): Promise<TabActionResult> {
-  switch (action.type) {
+  try {
+    switch (action.type) {
     case "switch_tab": {
       const tabs = await listTabs();
       const tab = tabs.find((t) => t.id === action.tab_id);
@@ -700,5 +721,13 @@ export async function handleTabAction(
     }
     default:
       return { handled: false, pageChanged: false, success: false, message: "" };
+    }
+  } catch (e) {
+    return {
+      handled: true,
+      pageChanged: false,
+      success: false,
+      message: `tab action failed: ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
 }

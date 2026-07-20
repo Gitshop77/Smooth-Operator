@@ -183,8 +183,11 @@ export async function redactHistoryForPrompt(history: HistoryItem[]): Promise<Hi
 
 /** Format a single tab as a one-line summary for the LLM. */
 function formatTab(t: TabInfo): string {
-  const title = t.title.length > 40 ? t.title.slice(0, 40) + "…" : t.title;
-  return `Tab ${t.id} (${t.label}): ${t.url} - ${title}`;
+  const rawTitle = t.title ?? "";
+  const title = rawTitle.length > 40 ? rawTitle.slice(0, 40) + "…" : rawTitle;
+  const label = t.label ?? "";
+  const url = t.url ?? "";
+  return `Tab ${t.id} (${label}): ${url} - ${title}`;
 }
 
 /** Render the plan as a checklist with `[>]` for the current item. */

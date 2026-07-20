@@ -27,7 +27,10 @@ export async function GET(req: NextRequest): Promise<Response> {
     } catch (e) {
  // A well-formed but stale/unknown cursor id makes Prisma throw P2025
  // (RecordNotFound); return a precise 400 instead of a generic 500.
-      if (isPrismaRecordNotFound(e)) {
+      if (
+        isPrismaRecordNotFound(e) ||
+        (e instanceof Error && /P2025/.test(e.message))
+      ) {
         return badRequest('invalid after cursor');
       }
       throw e;

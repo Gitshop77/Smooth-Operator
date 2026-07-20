@@ -140,11 +140,14 @@ export function deriveCostAnalytics(
   cursor.setHours(0, 0, 0, 0);
   const endDay = new Date(endMs);
   endDay.setHours(23, 59, 59, 999);
-  let cur = cursor.getTime();
-  while (cur <= endDay.getTime()) {
+ // Advance by calendar day (not fixed DAY_MS) so the bucket keys stay aligned
+ // with local midnight across DST transitions (a fixed +86_400_000 step would
+ // drift off midnight on the day DST starts/ends).
+  while (cursor.getTime() <= endDay.getTime()) {
+    const cur = cursor.getTime();
     days.push({ date: isoDay(new Date(cur)), ms: cur, cost: 0, tokens: 0 });
     byDay.set(cur, { cost: 0, tokens: 0 });
-    cur += DAY_MS;
+    cursor.setDate(cursor.getDate() + 1);
   }
 
   let totalCost = 0;

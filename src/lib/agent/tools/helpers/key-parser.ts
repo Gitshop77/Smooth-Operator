@@ -60,6 +60,12 @@ const MODIFIER_ALIASES: Record<string, string> = {
   command: "meta",
 };
 
+/** Every raw token that may appear as a modifier (canonical names + aliases). */
+const KNOWN_MODIFIERS = new Set<string>([
+  ...MODIFIER_NAMES,
+  ...Object.keys(MODIFIER_ALIASES),
+]);
+
 /** Parsed key combination: the main key + active modifiers. */
 export interface ParsedKeys {
   main: string;
@@ -86,6 +92,14 @@ export function parseKeys(keys: string): ParsedKeys {
  // Modifier tokens are lowercased for case-insensitive matching, then
  // normalized through the alias table (e.g. `control` → `ctrl`, `cmd` → `meta`).
   const modifiers = rawParts.slice(0, -1).map((p) => p.toLowerCase());
+  for (const m of modifiers) {
+    if (!KNOWN_MODIFIERS.has(m)) {
+      throw new Error(
+        `parseKeys: unknown modifier "${m}" in "${keys}" — valid modifiers are ` +
+          `ctrl/shift/alt/meta (and aliases control/cmd/command)`,
+      );
+    }
+  }
   const modifierSet = new Set(modifiers.map((m) => MODIFIER_ALIASES[m] ?? m));
  // The main key is kept at its original case.
   let mainRaw = rawParts[rawParts.length - 1] ?? "";

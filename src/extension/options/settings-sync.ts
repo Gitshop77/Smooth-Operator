@@ -259,6 +259,9 @@ export function isHostname(value: string): boolean {
   if (!value || value.includes("/") || value.includes(" ")) return false;
   const candidate = value.startsWith("*.") ? value.slice(2) : value;
   if (!candidate) return false;
+ // Reject candidates that are solely digits (e.g. '1234') so they are not
+ // treated as valid bare hostnames for allowed/blocked/skill domains.
+  if (/^\d+$/.test(candidate)) return false;
  // IPv6 literals legitimately contain ':' (e.g. `2001:db8:1`) — accept them
  // as bare hosts. Only a GENUINE IPv6 literal is allowed through the ':' fast
  // path; a `host:port` form (e.g. `evil.com:9999`) is NOT a valid IPv6 and

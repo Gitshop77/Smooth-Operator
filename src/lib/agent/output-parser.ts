@@ -56,11 +56,13 @@ export type ParseResult<T> =
  * Strategy:
  * 1. Strip ```json…``` or ```…``` fences (opening *and* closing) if present.
  * 2. Candidate search: collect every `{` position, ordered FIRST-to-last.
- * We return the FIRST candidate whose balanced scan closes cleanly — that
- * is the intended payload for well-formed LLM output, and it correctly
- * handles nested objects (the outermost `{` is the first one scanned, so
- * the matching `}` is the final closing brace, capturing the whole nested
- * structure rather than an inner fragment).
+ * We scan each balanced span and return the LARGEST span that is also VALID
+ * JSON — that is the intended payload for well-formed LLM output. A small
+ * prose fragment (e.g. `{ once }`) may be balanced and valid JSON, but the
+ * genuine action payload is the outermost/largest object, so favoring size
+ * (plus validity) selects the real payload. Nested objects are handled
+ * correctly (the outermost `{` is the first one scanned, so the matching `}`
+ * is the final closing brace, capturing the whole nested structure).
  * 3. Balanced-brace extraction: from a candidate `{`, track depth honoring
  * string literals + escape sequences until the matching `}` closes the
  * top-level object. The first candidate whose scan closes cleanly wins.
@@ -70,8 +72,8 @@ export type ParseResult<T> =
  * last `}` so the subsequent `JSON.parse` surfaces a useful syntax error
  * instead of throwing on surrounding prose.
  *
- * Limitation: only a single top-level JSON object is returned (the first
- * complete one found). Callers needing different behavior should pre-trim the
+ * Limitation: only a single top-level JSON object is returned (the largest
+ * valid one found). Callers needing different behavior should pre-trim the
  * input.
  */
 export function extractJson(raw: string): string {
@@ -103,28 +105,32 @@ export function extractJson(raw: string): string {
  // comparisons before the fallback; bound total work so an adversarial input
  // aborts after a handful of scans instead of ~1e9 comparisons.
   const SCAN_BUDGET = MAX_JSON_LENGTH * 4;
- // Collect EVERY balanced `{…}` span, not just the first. A prose
- // fragment like `Let's retry { once }.` is balanced but is NOT valid JSON, so
- // returning the first balanced span would hand `JSON.parse` the wrong blob.
+ // Collect EVERY balanced `{…}` span. A prose fragment like `Let's retry
+ // { once }.` is balanced but is NOT valid JSON, so we must pick the span that
+ // actually parses. We keep scanning until we find at least one valid span OR
+ // exhaust the candidate budget — the early bail only triggers once a valid
+ // span exists, so a genuine payload preceded by many `{` is never skipped.
   const spans: Array<[number, number]> = [];
   for (const start of candidates) {
     if (checked >= MAX_CANDIDATES) break;
     const span = s.length - start;
     // The first N candidates are scanned unconditionally so the genuine (first
     // balanced) object is always reached; for later candidates the budget still
-    // caps total work against adversarial input.
-    if (checked >= BUDGET_BYPASS_CANDIDATES && scanned + span > SCAN_BUDGET) break;
+    // caps total work against adversarial input — but only AFTER we have at
+    // least one valid JSON span to fall back on, so the real payload is not
+    // skipped just because budget was consumed by earlier unbalanced `{`.
+    if (checked >= BUDGET_BYPASS_CANDIDATES && spans.length === 0 && scanned + span > SCAN_BUDGET) break;
     scanned += span;
     checked++;
     const end = balancedEnd(s, start);
     if (end !== -1) spans.push([start, end]);
   }
 
- // Prefer the first balanced span that is actually VALID JSON. This skips
- // non-JSON balanced prose (e.g. `{ once }`) and selects the real payload. If
- // no span parses (truncated/malformed output), fall back to the LARGEST
+ // Prefer the FIRST balanced span that is actually VALID JSON. This skips
+ // non-JSON balanced prose (e.g. `{ once }`) and selects the real payload.
+ // If no span parses (truncated/malformed output), fall back to the LARGEST
  // (outermost) balanced span so a complete nested object still wins over a
- // small inner fragment, and `JSON.parse` surfaces a useful syntax error.
+ // small inner fragment, and JSON.parse surfaces a useful syntax error.
   for (const [start, end] of spans) {
     const candidate = s.slice(start, end + 1);
     try {

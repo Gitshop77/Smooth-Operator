@@ -133,6 +133,12 @@ export const useCoworkStore = create<CoworkState>()(
       name: "cowork-ui",
       partialize: (s) => ({
         sidebarCollapsed: s.sidebarCollapsed,
+        // Persist viewParams alongside the view so depth views (run-detail,
+        // session-replay) that carry required params survive a reload with
+        // their context intact instead of a broken cold-open. (Their
+        // currentView is still excluded below when extension-only, falling
+        // back to `overview` via resolveInitialView.)
+        viewParams: s.viewParams,
         // Only restore built-in (non-extension-only) views so a reload without
         // the extension never lands on an empty extension-only view.
         ...(EXTENSION_ONLY_VIEWS.has(s.currentView)

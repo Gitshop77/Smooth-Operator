@@ -11,13 +11,15 @@ import { withLLMRetry } from "../retry";
 import {
   type SsrfProvenance,
   isAllowedLlmBaseUrl,
-  isCuratedLocalOrigin,
   resolveAndValidateLlmBaseUrl,
 } from "./ssrf";
 
 /** Strip userinfo (`user:pass@`) and query/fragment (possible secret-bearing tokens) from a URL for logs/errors. */
 function redactUrlForLog(u: string): string {
-  return u.replace(/\/\/[^@/]*@/, "//").replace(/[?#].*$/, "[redacted-query]");
+ // Anchor the userinfo strip to the authority component: `[^/@]*` cannot cross
+ // the first `/`, so a legitimate `@` inside the path (e.g. `…/@user/repo`) is
+ // preserved instead of being mistaken for credentials.
+  return u.replace(/\/\/[^/@]*@/, "//").replace(/[?#].*$/, "[redacted-query]");
 }
 
 /**
@@ -148,18 +150,15 @@ async function fetchWithTimeout(
  // stops the request from ever leaving the service worker in the first place.
  //
  // Provenance: a curated local-provider origin (Ollama / LiteLLM loopback) is
- // the user's OWN self-hosted model server, so we treat it as
- // `user-configured` and keep it reachable. EVERY other URL — a public
- // hostname OR an injected / non-user URL — is treated per the supplied
- // `provenance` (default `untrusted`), so the SSRF guards FAIL CLOSED on it and
- // an injected `baseUrl` can never reach a local model server or an internal
- // host. `isAllowedLlmBaseUrl` applies the same range checks as
- // `validateLlmBaseUrl` while exempting the curated Ollama/LiteLLM local
- // endpoints. We throw (rather than silently contacting the host) so a bad URL
- // fails closed.
-  const effectiveProvenance: SsrfProvenance = isCuratedLocalOrigin(url)
-    ? "user-configured"
-    : provenance;
+ // the user's OWN self-hosted model server and may be exempted from the SSRF
+ // range check — BUT ONLY when the caller already established that the baseUrl
+ // was explicitly user-configured. We must NOT upgrade an `untrusted` provenance
+ // (e.g. a page-injected `baseUrl`) to `user-configured` merely because it
+ // points at a curated local origin, or an injected URL could reach the user's
+ // local model server / loopback while bypassing the SSRF fail-closed. So the
+ // curated-local exemption is gated on the supplied `provenance` staying
+ // `user-configured`; for every other URL the SSRF guards FAIL CLOSED.
+  const effectiveProvenance: SsrfProvenance = provenance;
   const exempt = effectiveProvenance === "user-configured";
   if (!isAllowedLlmBaseUrl(url, exempt, effectiveProvenance)) {
     throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${redactUrlForLog(url)}`);
@@ -321,14 +320,9 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: {
     const detachAbortListener = (res as Response & { __detachAbortListener?: () => void }).__detachAbortListener;
     try {
     if (!res.body) {
- // Non-streaming response — parse the full body through the framing so it
- // yields proper `FrameType` objects (consistent with the streaming path).
- // Apply the same availability ceiling the streaming path enforces
- // (MAX_RESPONSE_BYTES). This branch reads via `res.text()`, which buffers the
- // whole body uncapped, so a non-chunked response from a custom baseURL could
- // exhaust service-worker memory. Reject upfront on a declared `content-length`
- // that exceeds the cap before buffering; fall back to a byte-length check on
- // the decoded text to catch a spoofed/absent header.
+      // No ReadableStream exposed (body-less response). Reject on a declared
+      // content-length over the cap; the byte-length check below still bounds
+      // the buffered text if the header is absent/forged.
       const declaredLen = Number(res.headers.get("content-length"));
       if (Number.isFinite(declaredLen) && declaredLen > MAX_RESPONSE_BYTES) {
         throw new Error(`response too large: exceeded ${MAX_RESPONSE_BYTES} bytes`);
@@ -345,28 +339,33 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: {
     const decoder = new TextDecoder();
     let buffer = "";
     let totalBytes = 0;
+    let currentRead: Promise<ReadableStreamReadResult<Uint8Array>> | null = null;
     const flushRemaining = function* (): Generator<FrameType> {
       if (buffer.trim()) {
         for (const frame of opts.framing.parse(buffer)) yield frame;
       }
     };
+    // SSE streams are delimited by a blank line; non-SSE (JSON) bodies must be
+    // parsed as a whole, not split on "\n\n". Choose the parse strategy by
+    // content type. BOTH paths read in bounded chunks and enforce
+    // MAX_RESPONSE_BYTES as bytes arrive, instead of buffering the entire body
+    // up front (memory-exhaustion DoS for the non-streaming path).
+    const isSse = (res.headers.get("content-type") || "").includes("text/event-stream");
     try {
       while (true) {
         // Honor a user Stop mid-stream: cancel the reader and abort the
         // generator instead of letting the (now-orphaned) body keep draining
         // in the background (HIGH finding: user-Stop not honored mid-stream).
         if (signal?.aborted) {
+          currentRead?.catch(() => {});
           await reader.cancel().catch(() => {});
           throw new DOMException("Aborted", "AbortError");
         }
- // race the read against a 30s timeout. If the provider
- // stalls mid-stream, cancel the reader and throw a retryable error
- // so `withLLMRetry` re-attempts the whole request. The timeout timer
- // is cleared as soon as the chunk arrives (or as soon as we throw).
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
+          currentRead = reader.read();
           const { done, value } = await Promise.race([
-            reader.read(),
+            currentRead,
             new Promise<never>((_, reject) => {
               timer = setTimeout(
                 () => reject(new Error(`stream stall: no data for ${CHUNK_TIMEOUT_MS}ms`)),
@@ -375,72 +374,59 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: {
             }),
           ]);
           if (done) break;
- // Enforce a cumulative response-size cap. A runaway body that keeps
- // delivering chunks inside the per-chunk stall window would otherwise grow
- // unbounded; cancel the reader and throw a failure (handled below like a
- // stall) rather than exhaust memory.
+          // Enforce a cumulative response-size cap. A runaway body that keeps
+          // delivering chunks inside the per-chunk stall window would otherwise
+          // grow unbounded; cancel the reader and throw a failure rather than
+          // exhaust memory.
           totalBytes += value.byteLength;
           if (totalBytes > MAX_RESPONSE_BYTES) {
             throw new Error(`response too large: exceeded ${MAX_RESPONSE_BYTES} bytes`);
           }
           buffer += decoder.decode(value, { stream: true });
- // SSE events are terminated by a blank line (`\n\n`). The framing's
- // SSE parser builds a FRESH accumulator on every `parse` call (it is
- // stateless across calls), so we must feed it COMPLETE events — not
- // individual lines — otherwise a `data:` line and its terminating
- // blank line land in two separate stateless parses, the accumulator
- // is reset before the event flushes, and we yield 0 frames (the
- // regression this block restores). Split on the event boundary and
- // keep the trailing partial event (everything after the last `\n\n`)
- // buffered for the next chunk. Real streaming is preserved: a partial
- // event that has not yet received its terminating blank line stays
- // buffered until more bytes arrive or the stream ends.
-          const normalized = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-          const events = normalized.split("\n\n");
- // The segment after the final `\n\n` is an incomplete event; keep it.
- // It stays LF-normalized, so a split event completes correctly on the next
- // chunk.
-          buffer = events.pop() ?? "";
-          for (const event of events) {
-            if (event === "") continue;
-            const frames = opts.framing.parse(event + "\n\n");
-            for (const frame of frames) yield frame;
+          if (isSse) {
+            // Split on the SSE event boundary and keep the trailing partial
+            // event buffered for the next chunk.
+            const normalized = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+            const events = normalized.split("\n\n");
+            buffer = events.pop() ?? "";
+            for (const event of events) {
+              if (event === "") continue;
+              const frames = opts.framing.parse(event + "\n\n");
+              for (const frame of frames) yield frame;
+            }
           }
         } finally {
           if (timer) clearTimeout(timer);
         }
       }
- // Flush remaining buffer
-      yield* flushRemaining();
+      if (isSse) {
+        yield* flushRemaining();
+      } else {
+        // Non-streaming body fully buffered in bounded chunks — parse the whole
+        // thing once (no res.text() up-front buffer, so no uncapped memory).
+        buffer += decoder.decode();
+        const frames = opts.framing.parse(buffer);
+        for (const frame of frames) yield frame;
+      }
     } catch (e) {
- // On per-chunk timeout (stream stall) cancel the reader to release the
- // underlying network resources. A stalled mid-stream response is NOT a
- // successful completion: we flush any buffered partial frames (so the
- // consumer still sees them) and then RE-THROW below so the consumer (and
- // the orchestrator's retry loop) treats the truncated stream as a failure
- // rather than silently executing truncated content and under-reporting
- // usage/cost. `withLLMRetry` only wraps the INITIAL fetch, so a
- // mid-stream stall cannot be transparently retried here.
+      // `reader.cancel()` rejects the pending `reader.read()` promise; attach a
+      // no-op catch so it does not surface as an unhandled rejection.
+      currentRead?.catch(() => {});
       try {
-        await reader.cancel();
+        await reader.cancel().catch(() => {});
       } catch {
- // `cancel` can throw if the reader is already closed — ignore.
+        /* already closed */
       }
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.startsWith("stream stall:")) {
- // Flush any buffered partial frames first so the consumer sees them.
-        yield* flushRemaining();
- // A stalled mid-stream response is NOT a successful completion: re-throw
- // so the consumer (and the orchestrator's retry loop) treats the truncated
- // stream as a failure rather than silently executing truncated content and
- // under-reporting usage/cost.
+        if (isSse) yield* flushRemaining();
         throw e;
       }
- // Non-stall errors (real network failures, aborts, etc.) propagate.
+      // Non-stall errors (real network failures, aborts, etc.) propagate.
       throw e;
     } finally {
       try {
-        await reader.cancel();
+        await reader.cancel().catch(() => {});
       } catch {
         /* already closed */
       }

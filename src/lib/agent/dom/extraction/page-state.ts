@@ -33,7 +33,7 @@ import {
   directText,
   isSensitive,
 } from "../utils";
-import { buildAttrs, hashElement, DOM_CONFIG, redactUrlTokens, redactPathSecrets, resetHashCaches } from "./element-info";
+import { buildAttrs, hashElement, DOM_CONFIG, redactUrlTokens, redactPathSecrets, looksLikeSecretSegment, resetHashCaches } from "./element-info";
 import { getShadowRoot, installShadowPiercer } from "../annotation/shadow-piercer";
 
 // ─── Backwards-compat re-exports ────────────────────────────────────────────
@@ -272,7 +272,20 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
  // <option>[value redacted]</option> line, so skip the real children / shadow
  // DOM descent here — each visible <option> is itself interactive and would
  // otherwise emit its secret text. Mirrors the AX-tree's sensitive-option guard.
-    if (!(el.tagName.toLowerCase() === "select" && isSensitive(el))) {
+ // Compound controls that emit virtual children via serializeCompoundChildren
+ // must not also re-emit their real DOM children as raw, unindexed lines.
+ // <select> is made opaque (like sensitive selects) so its <option>s aren't
+ // duplicated. <details> still walks its body, but skips the <summary>
+ // element — that is already surfaced as the virtual summary line above.
+    if (tag === "select") {
+      return;
+    }
+    if (tag === "details") {
+      for (const child of Array.from(el.childNodes)) {
+        if ((child as HTMLElement)?.tagName?.toLowerCase?.() === "summary") continue;
+        walkNode(child, depth + 1, acc);
+      }
+    } else {
  // Descend into children (so nested text/elements render as children).
       for (const child of Array.from(el.childNodes)) {
         walkNode(child, depth + 1, acc);
@@ -320,6 +333,13 @@ function redactIframeSrc(src: string): string {
     u.username = "";
     u.password = "";
     u.pathname = redactPathSecrets(u.pathname);
+ // Redact secret-looking (high-entropy) host labels — e.g. a random
+ // subdomain carrying an embedded token — before forwarding the src to the
+ // LLM, mirroring the host-label coverage applied to other URLs.
+    u.hostname = u.hostname
+      .split(".")
+      .map((label) => (looksLikeSecretSegment(label) ? "[redacted]" : label))
+      .join(".");
     return u.toString();
   } catch {
     return redactPathSecrets(src.replace(/[?#].*$/, ""));

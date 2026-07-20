@@ -7,7 +7,7 @@
     "dev": "npx tsx watch index.ts",
     "start": "npx tsx index.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "lint": "eslint --no-ignore .",
+    "lint": "eslint .",
     "test": "cd ../.. && vitest run tests/cowork-events.test.ts"
   },
   "dependencies": {

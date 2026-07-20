@@ -54,7 +54,10 @@ const STATUS_RES = new Map<string, RegExp>();
 function containsStatus(haystack: string, code: string): boolean {
   let re = STATUS_RES.get(code);
   if (!re) {
-    re = new RegExp(`\\b${code}\\b`);
+    // Negative lookbehind ensures the code is not merely a substring of a larger
+    // number (e.g. "0.401" or "1401") — only a standalone/whitespace-delimited
+    // status code should match.
+    re = new RegExp(`(?<![\\d.])${code}\\b`);
     STATUS_RES.set(code, re);
   }
   return re.test(haystack);
@@ -124,8 +127,39 @@ export function classifyError(error: unknown, attempt = 0): ClassifiedError {
     return mk("bad_request", true, false);
   }
 
- // Cancelled (AbortError) — never retry. Checked AFTER auth/forbidden so an
- // aborted 401 fetch still classifies as auth (which is the more useful label).
+ // Structured status code (carried by the HTTP transport on the error object)
+ // takes priority over the generic substring matches below — including the
+ // "abort"/"cancelled" check — so a status-coded error is classified by its
+ // HTTP status, not by a substring like "abort". A provider 400 whose body
+ // merely contains "validation" must NOT be mislabeled as a transient `parse`
+ // error; 401/403 → auth/forbidden (fatal); other 4xx (except 429) →
+ // bad_request (fatal); 429 → rate_limit; 5xx → server_error.
+  const status = (error as { status?: number }).status;
+  if (typeof status === "number") {
+    if (status === 401) {
+      return mk("auth", true, false);
+    }
+    if (status === 403) {
+      return mk("forbidden", true, false);
+    }
+    if (status === 400 || (status >= 400 && status < 500 && status !== 429 && status !== 408 && status !== 425)) {
+      return mk("bad_request", true, false);
+    }
+    if (status === 408 || status === 425) {
+      return mk("network", false, true);
+    }
+    if (status === 429) {
+      return mk("rate_limit", false, true);
+    }
+    if (status >= 500 && status < 600) {
+      return mk("server_error", false, true);
+    }
+  }
+
+ // Cancelled (AbortError) — never retry. Checked AFTER auth/forbidden/bad_request
+ // AND after the structured-status block above, so a status-coded error whose
+ // message mentions "abort" is still classified by its HTTP status (the more
+ // useful / authoritative label).
   if (containsAny(lower, ["abort", "cancelled", "canceled"])) {
     return mk("cancelled", false, false);
   }
@@ -171,33 +205,10 @@ export function classifyError(error: unknown, attempt = 0): ClassifiedError {
     return mk("network", false, true);
   }
 
- // Structured status code (carried by the HTTP transport on the error object)
- // takes priority over the generic substring matches below. A provider 400
- // whose body merely contains "validation" must NOT be mislabeled as a
- // transient `parse` error (which would trigger needless retries of an
- // unfixable request). 401/403 map to their fatal categories; other 4xx
- // (except 429) → bad_request (fatal); 429 → rate_limit; 5xx → server_error.
-  const status = (error as { status?: number }).status;
-  if (typeof status === "number") {
-    if (status === 401) {
-      return mk("auth", true, false);
-    }
-    if (status === 403) {
-      return mk("forbidden", true, false);
-    }
-    if (status === 400 || (status >= 400 && status < 500 && status !== 429 && status !== 408 && status !== 425)) {
-      return mk("bad_request", true, false);
-    }
-    if (status === 408 || status === 425) {
-      return mk("network", false, true);
-    }
-    if (status === 429) {
-      return mk("rate_limit", false, true);
-    }
-    if (status >= 500 && status < 600) {
-      return mk("server_error", false, true);
-    }
-  }
+ // (The structured-status block was relocated to earlier in the classifier,
+ // immediately after the bad_request substring check and before the
+ // "abort"/cancelled check, so a status-coded error is never misclassified as
+ // cancelled by a substring match.)
 
  // Unparseable LLM output (a `JSON.parse` SyntaxError) is transient — it must
  // be retried with a nudge, NOT classified as a FATAL `programmer_error`. This
@@ -212,12 +223,12 @@ export function classifyError(error: unknown, attempt = 0): ClassifiedError {
 
  // Programmer errors (TypeError / ReferenceError / SyntaxError) — fatal, no
  // retry. These are bugs in our code; retrying would just waste budget.
- // This check is placed BEFORE the `parse` substring branch so that genuine
- // code bugs — e.g. a `JSON.parse` failure, whose SyntaxError message contains
- // "json" — are treated as FATAL rather than being silently retried as a
- // transient `parse` error. It stays AFTER the `network` branch (above) so a
- // browser `fetch` network failure (a `TypeError: Failed to fetch`) is still
- // classified as a transient `network` error and retried.
+ // This check is placed AFTER the `parse` substring branch (above) so a
+ // `JSON.parse` SyntaxError is retried as `parse` rather than treated as FATAL
+ // `programmer_error`; genuine code TypeError/ReferenceError/SyntaxError (non-
+ // parse) still fall through to this FATAL bucket. It sits AFTER the `network`
+ // branch (above) so a browser `fetch` network failure (a `TypeError: Failed
+ // to fetch`) is still classified as a transient `network` error and retried.
   if (error instanceof TypeError || error instanceof ReferenceError || error instanceof SyntaxError) {
     return mk("programmer_error", true, false);
   }

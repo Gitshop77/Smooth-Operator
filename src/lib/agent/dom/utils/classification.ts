@@ -102,7 +102,9 @@ export function isInteractive(el: HTMLElement): boolean {
   if (contenteditable !== null && contenteditable !== "false") return true;
   if (el.getAttribute("onclick") !== null) return true;
   const tabindex = el.getAttribute("tabindex");
-  if (tabindex !== null && parseInt(tabindex, 10) >= 0) return true;
+  // tabindex=-1 elements are still focusable/clickable (e.g. menu items,
+  // custom widgets), so treat any explicit tabindex (incl. -1) as interactive.
+  if (tabindex !== null && parseInt(tabindex, 10) >= -1) return true;
  // Only treat `draggable` as a signal of interactivity when it is explicitly
  // set to "true". `HTMLElement.draggable` defaults to `true` for `<img>` and
  // `<a href>` (the HTML "auto" default), so reading the property would
@@ -223,10 +225,15 @@ export function isContained(child: Element, parent: Element, threshold: number =
  * ancestor).
  */
 export function nearestPropagatingAncestor(el: Element): Element | null {
-  let cur: Element | null = el.parentElement;
+  let cur: Node | null = el.parentElement;
   while (cur) {
-    if (isPropagatingElement(cur)) return cur;
-    cur = cur.parentElement;
+    if (cur instanceof Element && isPropagatingElement(cur)) return cur;
+    // Cross shadow-DOM boundaries: a parenting shadow root's `.host` is the
+    // light-DOM element on the other side, so containment suppression also
+    // applies to nodes nested inside shadow trees.
+    const parent = cur.parentNode;
+    if (parent instanceof ShadowRoot) cur = parent.host;
+    else cur = parent instanceof Element ? parent : null;
   }
   return null;
 }
@@ -252,7 +259,10 @@ export function shouldExcludeAsContained(child: Element): boolean {
  // Form elements are never excluded — they have independent interaction.
   if (tag === "input" || tag === "select" || tag === "textarea") return false;
  // Elements with an explicit aria-label carry independent information.
-  if (child.hasAttribute("aria-label")) return false;
+  // A blank aria-label="" is NOT independent info and must not keep a
+  // duplicate click target from being suppressed; only a non-empty label counts.
+  const ariaLabel = child.getAttribute("aria-label");
+  if (ariaLabel !== null && ariaLabel.trim() !== "") return false;
  // Elements with an independent interactive role are not redundant.
   const role = getRole(child);
   if (role && INTERACTIVE_ROLES.has(role)) return false;

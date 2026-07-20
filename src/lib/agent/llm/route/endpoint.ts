@@ -53,13 +53,33 @@ export const buildURL = <Body>(endpoint: Endpoint<Body>, body: Body): string => 
  // `new URL(p, base)` would otherwise DROP the base's query (and vice-versa)
  // because a relative reference's query overrides the base's — producing a
  // lost `?x=1` or a malformed double "?". Build one merged params object.
-  const baseUrl = new URL(base);
+  let baseUrl: URL;
+  try {
+    baseUrl = new URL(base);
+  } catch {
+    // `base` is not a valid absolute URL (e.g. a host-only string like
+    // "example.com") — treat it as relative and fall back to the path branch
+    // rather than throwing (finding: scheme-less/relative baseURL crashed buildURL).
+    return mergeQueryIntoPath(p, endpoint.query);
+  }
+
+  const pIsAbsolute = /^https?:\/\//i.test(p);
   const url = new URL(p, base);
-  const params = new URLSearchParams(baseUrl.search);
- // Fold any query already present in the path (e.g. "/chat?foo=1").
-  const pQueryIndex = p.indexOf("?");
+
+  const params = new URLSearchParams();
+  // Only fold the base URL's query when the path is NOT itself an absolute
+  // URL — otherwise the base's query (which may carry secrets) would be
+  // appended to an unrelated origin (finding: base-URL secret query leaked
+  // into an absolute-path URL).
+  if (!pIsAbsolute) {
+    for (const [k, v] of new URLSearchParams(baseUrl.search)) params.set(k, v);
+  }
+  // Strip any URL fragment before extracting the path query, so a '#…' is not
+  // folded into a query value (finding: fragment absorbed into query param).
+  const pNoFrag = p.replace(/#.*$/, "");
+  const pQueryIndex = pNoFrag.indexOf("?");
   if (pQueryIndex !== -1) {
-    const pQuery = new URLSearchParams(p.slice(pQueryIndex + 1));
+    const pQuery = new URLSearchParams(pNoFrag.slice(pQueryIndex + 1));
     for (const [k, v] of pQuery) params.set(k, v);
   }
   for (const [k, v] of Object.entries(endpoint.query)) params.set(k, v);

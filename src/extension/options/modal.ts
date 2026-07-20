@@ -61,7 +61,7 @@ function getFocusable(container: HTMLElement): HTMLElement[] {
     "input:not([disabled])", "select:not([disabled])", "[tabindex]:not([tabindex='-1'])",
   ].join(",");
   return Array.from(container.querySelectorAll<HTMLElement>(sel)).filter(
-    (el) => el.offsetParent !== null,
+    (el) => el.getClientRects().length > 0,
   );
 }
 
@@ -203,8 +203,15 @@ function showModal(opts: ModalOptions): Promise<string | null> {
 
  // Move focus into the dialog (prefer the autofocus button, else the last).
     const autoIndex = opts.actions.findIndex((a) => a.autofocus);
-    const target =
+    let target =
       autoIndex >= 0 ? (footer.children[autoIndex] as HTMLElement) : (footer.lastElementChild as HTMLElement);
+    // A disabled autofocus target (e.g. the OK button during the confirmDelayMs
+    // anti-misclick window) cannot receive focus, so keyboard focus would never
+    // enter the dialog and the overlay's Esc-to-close handler would not fire.
+    // Fall back to the dialog node (tabIndex=-1) so focus lands inside the modal.
+    if (target instanceof HTMLElement && target.hasAttribute("disabled")) {
+      target = dialog;
+    }
     (target ?? dialog).focus();
   });
 }

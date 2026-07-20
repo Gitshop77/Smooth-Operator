@@ -16,11 +16,16 @@ export function validateFileName(fileName: unknown): string | null {
   if (typeof fileName !== "string" || fileName.length === 0) {
     return "file_name must be a non-empty string";
   }
-  if (/[\x00-\x1f\x7f]/.test(fileName)) {
+  if (/[\x00-\x1f\x7f\x80-\x9f]/.test(fileName)) {
     return "file_name contains invalid control characters";
   }
-  if (/[\\/]/.test(fileName) || fileName.includes("..")) {
-    return "file_name must be a bare filename (no path separators or '..')";
+  if (/[\\/]/.test(fileName)) {
+    return "file_name must be a bare filename (no path separators)";
+  }
+  // Reject '..' only as a complete path segment (e.g. "a/../b", "foo/.."), not as
+  // a substring — a legitimate filename like "my..file.png" is fine.
+  if (fileName.split(/[\\/]/).some((seg) => seg === "..")) {
+    return "file_name must be a bare filename (no '..' path segment)";
   }
   return null;
 }

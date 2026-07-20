@@ -82,6 +82,11 @@ function persist(key: string, value: string | boolean): void {
       return;
     }
     showSaved();
+    // Update the webhook revert cache only on a successful write, so the
+    // failure path restores the previous last-good URL (not the unsaved value).
+    if (key === STORAGE_KEYS.webhookUrl && typeof value === "string") {
+      lastKnownGoodWebhookUrl = value;
+    }
   });
 }
 
@@ -118,14 +123,11 @@ document.getElementById("webhookUrl")?.addEventListener("change", async (e) => {
  // even if the storage re-read in `loadNotifications()` were to fail (quota/
  // disabled storage), which would otherwise leave the rejected URL on screen.
     field.value = lastKnownGoodWebhookUrl;
-    field.setAttribute("aria-invalid", "false");
     return;
   }
- // Only cache once we know the value is valid (and will be persisted). Clear the
- // cache when the field is emptied so a later invalid edit can't resurrect a
- // previously-cleared webhook URL.
-  if (value !== "") lastKnownGoodWebhookUrl = value;
-  else lastKnownGoodWebhookUrl = "";
+ // The last-known-good cache is updated only after a successful persist
+ // (see persist()'s success branch), so a failed write reverts the field
+ // to the genuinely last-good URL rather than the unsaved one.
   field.setAttribute("aria-invalid", "false");
   persist(STORAGE_KEYS.webhookUrl, value);
 });

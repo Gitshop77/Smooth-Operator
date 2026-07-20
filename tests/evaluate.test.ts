@@ -92,7 +92,7 @@ describe("evaluate pageChanged", () => {
         type: "evaluate",
         code: "Function('return chrome')()",
       }),
-    ).rejects.toThrow(/access denied by evaluate sandbox|JS evaluation failed/);
+    ).rejects.toThrow(/access denied by evaluate sandbox/);
   });
 
   test("eval('chrome') indirect access is also denied", async () => {
@@ -101,7 +101,7 @@ describe("evaluate pageChanged", () => {
         type: "evaluate",
         code: "eval('chrome')",
       }),
-    ).rejects.toThrow(/access denied by evaluate sandbox|JS evaluation failed/);
+    ).rejects.toThrow(/access denied by evaluate sandbox/);
   });
 
   test("reflection-based Reflect.get(globalThis, 'chrome') access denied", async () => {

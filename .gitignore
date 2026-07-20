@@ -54,3 +54,6 @@ Thumbs.db
 
 # ai
 .claude
+
+# review scaffolding (never commit)
+.review/

@@ -4,7 +4,7 @@
  *
  * The agent loop's retry budget depends on subtle control flow: 5xx is checked
  * before rate_limit, a `fetch` TypeError is transient `network` while a
- * `JSON.parse` SyntaxError is a FATAL `programmer_error`, a structured `status`
+ * `JSON.parse` SyntaxError is a transient `parse` (retryable), a structured `status`
  * overrides substring guesses, and an `unknown` error is retried exactly once
  * (attempt 0) then becomes fatal (attempt >= 1). A regression here silently
  * over-retries fatal errors or fails-open transient ones, so these tests pin

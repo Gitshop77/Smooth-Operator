@@ -60,14 +60,15 @@ export async function POST(req: NextRequest): Promise<Response> {
     const body = await bodyJson(req);
  // F17-val: validate/normalize color and name.
     let name: string;
-    if (body.name == null || body.name === '') {
+    const trimmedName = typeof body.name === 'string' ? body.name.trim() : body.name;
+    if (body.name == null || trimmedName === '') {
       name = 'Untitled Pinboard';
     } else if (typeof body.name !== 'string') {
       return badRequest('name must be a string');
-    } else if (body.name.length > 64) {
+    } else if (trimmedName.length > 64) {
       return badRequest('name must be at most 64 characters');
     } else {
-      name = body.name;
+      name = trimmedName;
     }
     const rawColor = typeof body.color === 'string' ? body.color : '';
     const color = COLOR_RE.test(rawColor) ? rawColor : '#4285f4';

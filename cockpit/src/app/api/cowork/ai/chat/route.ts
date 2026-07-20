@@ -394,23 +394,29 @@ export async function DELETE(req: NextRequest): Promise<Response> {
  // operator security-event feed (GET /api/cowork/security/events reads only
  // from db.securityEvent). This strengthens AU-3 attribution beyond ephemeral
  // stdout. The principal is a one-way hash of the token, never the raw secret.
-      await db.securityEvent.create({
-        data: {
-          type: 'behavior-critical',
-          severity: 'critical',
-          category: 'behavior',
-          action: 'logged',
-          sourceUrl: null,
-          details: JSON.stringify({
-            action: 'bulk-delete-ai-chat',
-            route: '/api/cowork/ai/chat',
-            deleted,
-            confirm: true,
-            principal: tokenPrincipal(getCoworkEventsToken()),
-            reqId,
-          }),
-        },
-      });
+      try {
+        await db.securityEvent.create({
+          data: {
+            type: 'behavior-critical',
+            severity: 'critical',
+            category: 'behavior',
+            action: 'logged',
+            sourceUrl: null,
+            details: JSON.stringify({
+              action: 'bulk-delete-ai-chat',
+              route: '/api/cowork/ai/chat',
+              deleted,
+              confirm: true,
+              principal: tokenPrincipal(getCoworkEventsToken()),
+              reqId,
+            }),
+          },
+        });
+      } catch (auditErr) {
+        // Best-effort attribution only: a telemetry failure must not convert a
+        // successful upstream bulk delete into a 500 misreported to the client.
+        console.error('[cowork] bulk-delete audit write failed (non-fatal):', auditErr);
+      }
     }
     return json(body, status);
   }, reqId);

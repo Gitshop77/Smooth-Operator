@@ -115,7 +115,7 @@ function providerKeyPrefixes(): string[] {
  */
 function looksLikeSecret(v: string): boolean {
   const t = v.trim();
-  if (t.length < 16 || t.length > 512) return false;
+  if (t.length < 16) return false;
   if (/\s/.test(t)) return false;
   if (t.includes("://")) return false; // leave URLs intact
   const hasLower = /[a-z]/.test(t);
@@ -123,7 +123,15 @@ function looksLikeSecret(v: string): boolean {
   const hasDigit = /[0-9]/.test(t);
   const hasSpecial = /[^A-Za-z0-9]/.test(t);
   const classes = [hasLower, hasUpper, hasDigit, hasSpecial].filter(Boolean).length;
-  return classes >= 2;
+  // Very long (single-class or otherwise) scalars are masked even past the old
+  // 512-char ceiling — closing the oversized-token EchoLeak gap.
+  if (t.length > 512) return true;
+  // Ordinary multi-class secrets (e.g. a base64 blob).
+  if (classes >= 2) return true;
+  // High-entropy single-class secrets (pure-numeric / pure-alpha / pure-special
+  // tokens of 32+ chars) — the prior heuristic missed these entirely.
+  if (classes === 1 && t.length >= 32) return true;
+  return false;
 }
 
 export function redactKeyLeak(s: string): string {

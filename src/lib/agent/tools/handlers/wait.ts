@@ -16,8 +16,13 @@ export async function handleWait(
  // this, a negative/NaN value would fire a near-instant setTimeout(0) and an
  // unbounded value would hang the orchestrator, which awaits this handler.
   const raw = Number(action.seconds);
-  const s = Number.isFinite(raw) ? Math.min(Math.max(0, raw), 300) : 3;
+  const valid = Number.isFinite(raw);
+  const s = valid ? Math.min(Math.max(0, raw), 300) : 3;
   await sleep(s * 1000, _ctx.signal);
-  const message = raw !== s ? `Waited ${s}s (requested ${String(raw)})` : `Waited ${s}s`;
+  const message = !valid
+    ? `Waited ${s}s`
+    : raw !== s
+      ? `Waited ${s}s (requested ${String(raw)})`
+      : `Waited ${s}s`;
   return { action, success: true, message };
 }

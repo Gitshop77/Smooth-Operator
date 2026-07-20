@@ -77,9 +77,11 @@ resumeBtn?.addEventListener("click", () => {
  // (the pause flag is polled by the orchestrator's runPauseCheck at the next
  // step boundary — without clearing it here, the agent would resume from the
  // takeover wait only to immediately re-pause on the next step).
-  chrome.storage.session.set({ open_cowork_paused: false }).catch(() => {
-    /* best-effort — storage may be unavailable */
-  });
+  if (chrome.storage?.session) {
+    chrome.storage.session.set({ open_cowork_paused: false }).catch(() => {
+      /* best-effort — storage may be unavailable */
+    });
+  }
   hideTakeoverBanner();
   addLogRow({ type: "info", message: "Resuming agent…" }, "");
 });

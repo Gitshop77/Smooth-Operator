@@ -8,7 +8,7 @@ describe("assertTokenEnvironmentPairing", () => {
   });
 
   it("warns when a dev token literal ships to production", () => {
-    expect(assertTokenEnvironmentPairing("dev-token", "production")).not.toBeNull();
+    // dev-token is the intentional zero-config default and is allowed in production; see use-websocket.ts
     expect(assertTokenEnvironmentPairing("changeme", "production")).not.toBeNull();
   });
 

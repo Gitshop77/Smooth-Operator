@@ -34,9 +34,12 @@ let lastProvider = "";
 
 /** Reset the model field's placeholder to the current provider's default model. */
 function applyDefaultModelPlaceholder(): void {
-  const provider = ($("provider") as HTMLSelectElement).value;
+  const providerEl = document.getElementById("provider") as HTMLSelectElement | null;
+  if (!providerEl) return;
+  const provider = providerEl.value;
   const meta = PROVIDER_META[provider] || PROVIDER_META[DEFAULT_PROVIDER_ID];
-  if (meta?.defaultModel) ($("model") as HTMLInputElement).placeholder = meta.defaultModel;
+  const modelEl = document.getElementById("model") as HTMLInputElement | null;
+  if (meta?.defaultModel && modelEl) modelEl.placeholder = meta.defaultModel;
 }
 
 /**
@@ -59,34 +62,38 @@ export function updateProviderUI(): void {
  // the two apart instead of clobbering a user's custom URL on first paint.
   const providerChanged = lastProvider !== "" && lastProvider !== provider;
   lastProvider = provider;
-  ($("provider-hint") as HTMLElement).textContent = meta.hint;
-  const keyInput = $("apiKey") as HTMLInputElement;
-  keyInput.placeholder = meta.keyPlaceholder;
-  ($("apikey-hint") as HTMLElement).textContent = meta.needsKey
-    ? `Get your key at ${meta.keyUrl}`
-    : "Local provider — no key required (leave as-is).";
-  const modelInput = $("model") as HTMLInputElement;
-  if (!modelInput.value) applyDefaultModelPlaceholder();
-  const baseUrlLabel = $("baseurl-label") as HTMLElement;
-  const baseUrlInput = $("baseUrl") as HTMLInputElement;
+  const providerHint = document.getElementById("provider-hint");
+  if (providerHint) providerHint.textContent = meta.hint;
+  const keyInput = document.getElementById("apiKey") as HTMLInputElement | null;
+  if (keyInput) keyInput.placeholder = meta.keyPlaceholder;
+  const apikeyHint = document.getElementById("apikey-hint");
+  if (apikeyHint) {
+    apikeyHint.textContent = meta.needsKey
+      ? `Get your key at ${meta.keyUrl}`
+      : "Local provider — no key required (leave as-is).";
+  }
+  const modelInput = document.getElementById("model") as HTMLInputElement | null;
+  if (modelInput && !modelInput.value) applyDefaultModelPlaceholder();
+  const baseUrlLabel = document.getElementById("baseurl-label");
+  const baseUrlInput = document.getElementById("baseUrl") as HTMLInputElement | null;
   if (meta.defaultBaseUrl) {
-    baseUrlLabel.classList.remove("is-hidden");
-    baseUrlInput.placeholder = meta.defaultBaseUrl;
+    baseUrlLabel?.classList.remove("is-hidden");
+    if (baseUrlInput) baseUrlInput.placeholder = meta.defaultBaseUrl;
  // Only overwrite the field on a genuine provider change. On initial load
  // we must preserve whatever was loaded from storage — including an
  // intentionally-cleared (empty) baseUrl, which should fall back to the
  // provider's built-in endpoint rather than be silently replaced by the
  // default here (finding: updateProviderUI overwrote an empty saved baseUrl
  // with the provider default on load).
-    if (providerChanged) {
+    if (providerChanged && baseUrlInput) {
       baseUrlInput.value = meta.defaultBaseUrl;
     }
   } else {
-    baseUrlLabel.classList.add("is-hidden");
-    baseUrlInput.placeholder = "";
+    baseUrlLabel?.classList.add("is-hidden");
+    if (baseUrlInput) baseUrlInput.placeholder = "";
  // Providers without a default have no canonical endpoint — clear any
  // leftover value from a previous provider so it isn't sent by mistake.
-    if (providerChanged) baseUrlInput.value = "";
+    if (providerChanged && baseUrlInput) baseUrlInput.value = "";
   }
 
  // The Azure resource name is only relevant to Azure OpenAI. Show it only for

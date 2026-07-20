@@ -503,11 +503,11 @@ export function restoreTotalsFromStorage(): void {
  // Restore counters / log history from storage (kept fresh on every event).
   chrome.storage.local.get([STORAGE_KEYS.costUsd, STORAGE_KEYS.tokens, STORAGE_KEYS.log], (s) => {
     if (chrome.runtime.lastError) return;
-    if (typeof s[STORAGE_KEYS.costUsd] === "number" && totalCost === 0) {
+    if (Number.isFinite(s[STORAGE_KEYS.costUsd]) && totalCost === 0) {
       totalCost = s[STORAGE_KEYS.costUsd] as number;
       costLabel.textContent = `$${totalCost.toFixed(4)}`;
     }
-    if (typeof s[STORAGE_KEYS.tokens] === "number" && totalTokens === 0) {
+    if (Number.isFinite(s[STORAGE_KEYS.tokens]) && totalTokens === 0) {
       totalTokens = s[STORAGE_KEYS.tokens] as number;
       tokenLabel.textContent = formatTokens(totalTokens);
     }

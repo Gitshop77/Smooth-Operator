@@ -183,6 +183,24 @@ function splitTopLevelAlternation(content: string): string[] | null {
   return branches.length >= 2 ? branches : null;
 }
 
+// Strip a leading non-capturing / named / atomic group prefix from a group's
+// inner content so the ReDoS analyzer sees the real alternation instead of the
+// prefix characters (e.g. `(?:a|a)` → `a|a`). Returns the content unchanged when
+// there is no such prefix. Without this, `(?:a|a)+` and similar shapes slip past
+// the ambiguous-alternation check because the `?:` prefix hides the inner
+// first-character overlap.
+function stripGroupPrefix(content: string): string {
+  if (content.length < 2 || content[0] !== "?") return content;
+  if (content[1] === ":") return content.slice(2);
+  if (content[1] === ">") return content.slice(2);
+  if (content[1] === "<") {
+    const gt = content.indexOf(">", 2);
+    if (gt < 0) return content;
+    return content.slice(gt + 1);
+  }
+  return content;
+}
+
 // The set of characters a branch can start with, or the sentinel "ANY" meaning
 // it can start with (almost) any character. Used to judge whether two
 // alternatives of an alternation can match overlapping input.
@@ -288,9 +306,22 @@ function charSetsOverlap(a: CharSet, b: CharSet): boolean {
 // being a prefix of another. Disjoint alternatives (e.g. `(abc|def)+`) and
 // non-overlapping single chars (e.g. `(a|b|c)+`) are treated as safe.
 function groupHasAmbiguousAlternation(src: string, openIdx: number, closeIdx: number): boolean {
-  const content = src.slice(openIdx + 1, closeIdx);
+  let content = src.slice(openIdx + 1, closeIdx);
+  // Strip a leading group prefix so patterns like `(?:a|a)+` are analyzed
+  // against their real inner alternation rather than the prefix characters.
+  content = stripGroupPrefix(content);
   const branches = splitTopLevelAlternation(content);
-  if (!branches) return false;
+  if (!branches) {
+    // A single wrapping group (e.g. `((a|a))+` or `(?:a|a)+`) — recurse into it
+    // so a nested ambiguous alternation inside the wrapper is still caught.
+    if (content.length > 0 && content[0] === "(") {
+      const innerClose = findGroupClose(content, 0);
+      if (innerClose > 0 && innerClose === content.length - 1) {
+        return groupHasAmbiguousAlternation(content, 0, innerClose);
+      }
+    }
+    return false;
+  }
   if (branches.some((b) => b === "")) return true; // empty alternative ⇒ ambiguity
   const sets = branches.map(firstCharSet);
   for (let x = 0; x < sets.length; x++) {
@@ -417,12 +448,26 @@ function locateMatch(
     const idx = text.indexOf(pattern);
     return idx >= 0 ? { idx, len: pattern.length } : null;
   }
-  const idx = text.toLowerCase().indexOf(needle);
-  return idx >= 0 ? { idx, len: needle.length } : null;
+  const lower = text.toLowerCase();
+  const idx = lower.indexOf(needle);
+  if (idx < 0) return null;
+  // Lowercasing can change string length for some scripts (e.g. "ß" → "ss"),
+  // which would make the lowercased `idx`/`len` point at the wrong place in the
+  // ORIGINAL `text`. When the length is preserved the offset is valid; otherwise
+  // walk the original text case-insensitively to recover the real start index.
+  if (lower.length === text.length) {
+    return { idx, len: needle.length };
+  }
+  for (let i = 0; i + needle.length <= text.length; i++) {
+    if (text.slice(i, i + needle.length).toLowerCase() === needle) {
+      return { idx: i, len: needle.length };
+    }
+  }
+  return null;
 }
 
 export async function handleSearchPage(
-  _ctx: ActionContext,
+  ctx: ActionContext,
   action: Extract<Action, { type: "search_page" }>,
 ): Promise<ActionResult> {
   const pattern = action.pattern;
@@ -487,6 +532,10 @@ export async function handleSearchPage(
  // slow-but-not-statically-rejected pattern can't stall the tab indefinitely
  // across many nodes. Results found so far are still returned.
     if (Date.now() > deadline) break;
+ // Honor an abort signal (user STOP / run cancel): bail out of the walk and
+ // return whatever results were found so far instead of blocking until the
+ // budget or visit cap is hit.
+    if (ctx.signal?.aborted) break;
     visits++;
     let text = node.textContent || "";
  // Skip text inside <script>/<style> — it is not user-visible and only adds

@@ -192,6 +192,13 @@ export async function preprocessScreenshot(screenshotDataUrl: string): Promise<P
     throw new Error("preprocessScreenshot: screenshot data URL exceeds the maximum allowed size");
   }
   const img = await loadImage(screenshotDataUrl);
+ // Reject zero-dimension source screenshots: a 0×N or N×0 image would make
+ // `originalWidth`/`originalHeight` zero, collapsing every downstream
+ // toPixelCoords computation (clamp bound `cw-1` becomes -1) into
+ // {x:0,y:0,w:1,h:1} garbage coordinates.
+  if (img.width <= 0 || img.height <= 0) {
+    throw new Error("preprocessScreenshot: screenshot image has zero width or height");
+  }
  // Original screenshot pixel dimensions (BEFORE any rescale/pad). Used
  // downstream by `toPixelCoords` to map the model's 0-1000 normalized box
  // coordinates back to actual screenshot pixels.

@@ -58,12 +58,22 @@ import { afterAll } from "vitest";
   }
 })();
 
-// Capture the ambient `fetch` once (per test file) so we can restore it after
-// the file runs. Some test files install a `globalThis.fetch` mock; if they
-// don't fully clean it up, the mock leaks into later files and breaks otherwise
-// correct tests (e.g. the per-IP /chat rate-limit integration test, which makes
-// real `fetch()` calls against its own server).
-const originalFetch = (globalThis as { fetch?: unknown }).fetch;
+// Capture the ambient `fetch` once, from a PRISTINE source, so we can
+// restore it after the file runs. Some test files install a `globalThis.fetch`
+// mock; if they don't fully clean it up, the mock leaks into later files and
+// breaks otherwise-correct tests (e.g. the per-IP /chat rate-limit integration
+// test, which makes real `fetch()` calls against its own server).
+//
+// vitest may re-execute this setup file per test file, so a naive per-file
+// capture would snapshot a mock leaked by an EARLIER file and re-leak it. We
+// therefore capture the genuine `fetch` exactly once (on the first import, before
+// any mock can be installed) and keep it on a persistent global, so every
+// later file's restore returns the real implementation, not a leaked mock.
+const g = globalThis as { fetch?: unknown; __OC_ORIG_FETCH__?: unknown };
+if (g.__OC_ORIG_FETCH__ === undefined) {
+  g.__OC_ORIG_FETCH__ = g.fetch;
+}
+const originalFetch = g.__OC_ORIG_FETCH__;
 
 afterAll(() => {
   // Drop any `globalThis.chrome` left behind by a test file that installed it

@@ -11,6 +11,7 @@ import { moveCursorToElement } from "../../dom/phantom-cursor";
 import { TIMINGS, sleep, SW_RPC_TIMEOUT_MS } from "../constants";
 import { domFingerprint, resolveElement, safeScrollIntoView } from "../helpers";
 import { type ActionContext, isExtensionContext } from "./types";
+import { rejectOnAbort } from "./abort";
 
 export async function handlePressAndHold(
   ctx: ActionContext,
@@ -64,6 +65,7 @@ export async function handlePressAndHold(
  // Race against a timeout so a SW that receives the message but never
  // responds (debugger attach race / hung SW) can't block the agent loop.
       let timeoutId: ReturnType<typeof setTimeout>;
+      const abort = rejectOnAbort(ctx.signal);
       const cdpResult = await Promise.race([
         chrome.runtime.sendMessage({
           type: "CDP_PRESS_AND_HOLD",
@@ -78,7 +80,11 @@ export async function handlePressAndHold(
             cdpTimeoutMs,
           );
         }),
-      ]).finally(() => clearTimeout(timeoutId));
+        abort.promise,
+      ]).finally(() => {
+        clearTimeout(timeoutId);
+        abort.cleanup();
+      });
       if (cdpResult?.ok) {
         const changed = location.href !== ctx.beforeUrl || domFingerprint() !== ctx.beforeFingerprint;
         return {

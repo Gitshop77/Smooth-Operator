@@ -74,7 +74,12 @@ export function restoreLocalStorageStub(): void {
  // check below would just re-install the stub anyway, so install it directly
  // — without ever touching the warning-emitting getter.
     if (typeof savedDescriptor.get === "function" || typeof savedDescriptor.set === "function") {
-      installLocalStorageStub();
+      // Restore the original accessor (e.g. jsdom's native localStorage getter)
+      // so absence-dependent tests see the genuine global rather than a leaked
+      // stub. Re-defining the captured accessor honors the "put the original
+      // global back" contract; the cosmetic jsdom "no path" warning on access
+      // is acceptable versus masking the real global across test files.
+      Object.defineProperty(globalThis, "localStorage", savedDescriptor);
       return;
     }
  // Otherwise (a previous working data-descriptor stub) re-apply it, then verify

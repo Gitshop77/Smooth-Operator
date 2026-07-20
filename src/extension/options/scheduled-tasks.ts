@@ -221,7 +221,7 @@ $("addSchedule").addEventListener("click", async () => {
     }
   }
   const scheduledTask: ScheduledTask = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id: crypto.randomUUID(),
     task,
     schedule,
     enabled: true,

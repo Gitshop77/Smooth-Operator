@@ -114,12 +114,14 @@ function requireSocket(): FakeSocket {
 }
 
 beforeEach(() => {
-  // Fake the clock so the route's 15s keep-alive `setInterval` (and the test's
-  // own 2s `readWithTimeout` timer) become fake timers — no real handles that
-  // could leak between tests. `Date` is intentionally left real so timestamp
-  // assertions in the SSE output still work.
+  // Fake the clock so the route's 15s keep-alive `setInterval` becomes a fake
+  // timer — no real handles that could leak between tests. `setTimeout` /
+  // `clearTimeout` are intentionally LEFT REAL (excluded from `toFake`) so the
+  // test's own 2s `readWithTimeout` safety timer can actually fire and surface a
+  // clear failure instead of being frozen by the fake clock. `Date` is
+  // intentionally left real so timestamp assertions in the SSE output still work.
   vi.useFakeTimers({
-    toFake: ['setTimeout', 'setInterval', 'setImmediate', 'clearTimeout', 'clearInterval', 'clearImmediate'],
+    toFake: ['setInterval', 'setImmediate', 'clearInterval', 'clearImmediate'],
   });
   ioMock.mockClear();
   lastSocket = null;

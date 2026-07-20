@@ -84,6 +84,15 @@ function normalizeRunRecord(r: RunRecord): RunRecord {
     stepCount: r.stepCount ?? 0,
     overflowCount: r.overflowCount ?? 0,
     endedAt: r.endedAt ?? 0,
+ // Coerce a corrupt/non-conforming `result` to null so a truthy but
+ // partial value can't propagate `success: undefined` to the History UI.
+    result:
+      r.result &&
+      typeof r.result === "object" &&
+      "success" in r.result &&
+      "text" in r.result
+        ? r.result
+        : null,
   };
 }
 
@@ -418,12 +427,12 @@ export class RunBuilder {
     // let the buffer grow to MAX_STEPS + OVERFLOW_BATCH, then drop a whole batch
     // at once instead of reindexing on every event.
     const OVERFLOW_BATCH = 256;
+    // Let the buffer grow to MAX_STEPS + OVERFLOW_BATCH, then splice a whole
+    // batch at once instead of reindexing (shift) on every event — this
+    // amortizes the O(N) reindex so long runs stay near O(1) per event.
     if (this.run.steps.length > MAX_STEPS + OVERFLOW_BATCH) {
       this.run.steps.splice(0, OVERFLOW_BATCH);
       this.run.overflowCount += OVERFLOW_BATCH;
-    } else if (this.run.steps.length > MAX_STEPS) {
-      this.run.steps.shift();
-      this.run.overflowCount++;
     }
     if (event.type === "cost") {
       this.run.totalTokensIn += event.tokensIn;

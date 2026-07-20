@@ -243,7 +243,12 @@ export async function GET(req: NextRequest): Promise<Response> {
     } catch (e) {
  // A well-formed but stale/unknown cursor id makes Prisma throw P2025
  // (RecordNotFound); return a precise 400 instead of a generic 500.
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+ // A plain Error whose message still reports P2025 (certain driver/adapter
+ // layers) is handled too, matching the DELETE route's dual guard.
+      if (
+        (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') ||
+        (e instanceof Error && /P2025/.test(e.message))
+      ) {
         return badRequest('invalid after cursor');
       }
       throw e;

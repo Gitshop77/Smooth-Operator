@@ -32,7 +32,7 @@ export function Toaster() {
               )}
             </div>
             {action}
-            <ToastClose aria-label={title ? `Close: ${title}` : "Close notification"} />
+            <ToastClose aria-label={typeof title === "string" ? `Close: ${title}` : "Close notification"} />
           </Toast>
         )
       })}

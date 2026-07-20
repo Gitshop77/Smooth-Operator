@@ -73,6 +73,27 @@ function routeKey(baseURL: string | undefined): string {
   return (h >>> 0).toString(36);
 }
 
+// Stable per-instance id for an explicit `auth` override so distinct
+// caller-supplied auth objects don't clobber each other's route entry in the
+// global registry (the route id otherwise folds only baseURL + apiKey, so two
+// `configure()` calls with the same baseURL/apiKey but different `auth`
+// would share a routeId and the last writer wins). The map is scoped to this
+// module / process — matching the lifetime of the in-memory route registry.
+const authIdMap = new WeakMap<object, string>();
+let authIdCounter = 0;
+function authKey(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value !== "object" && typeof value !== "function") {
+    return String(value);
+  }
+  let id = authIdMap.get(value as object);
+  if (!id) {
+    id = `a${authIdCounter++}`;
+    authIdMap.set(value as object, id);
+  }
+  return id;
+}
+
 const auth = (options: ProviderAuthOption<"optional">) => {
   if ("auth" in options && options.auth) return options.auth;
   const apiKey = "apiKey" in options ? options.apiKey : undefined;
@@ -107,7 +128,7 @@ function configure(profile: OpenAICompatibleProfile, input: Config = {}) {
   const route = make({
  // Fold the (effective) baseURL AND credentials into the route id so distinct
  // endpoints/credentials don't clobber each other in the global route registry.
-    id: `openai-compatible:${profile.provider}:${routeKey(`${baseURL}::${apiKey ?? ""}`)}`,
+    id: `openai-compatible:${profile.provider}:${routeKey(`${baseURL}::${apiKey ?? ""}::${authKey((input as { auth?: unknown }).auth)}`)}`,
     provider: profile.provider,
     protocol: OpenAICompatibleChat.protocol,
     endpoint: Endpoint.path(`${prefix}${PATH}`, { baseURL: url.origin }),

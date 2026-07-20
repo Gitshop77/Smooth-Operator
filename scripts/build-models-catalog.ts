@@ -40,12 +40,18 @@ import {
   statSync,
   writeFileSync,
   mkdirSync,
+  existsSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "smol-toml";
 
-const DATASET_ROOT = process.env.MODELS_DEV_ROOT ?? "/Users/wasd/Downloads/models.dev-dev";
+// Default to a repo-relative dataset directory so the build is portable and
+// does not depend on a personal absolute path. Operators can still override via
+// MODELS_DEV_ROOT (a clear, documented knob) when their dataset lives elsewhere.
+const DATASET_ROOT =
+  process.env.MODELS_DEV_ROOT ??
+  join(dirname(fileURLToPath(import.meta.url)), "..", "models.dev");
 const PROVIDERS_DIR = join(DATASET_ROOT, "providers");
 
 const HEADER =
@@ -110,9 +116,12 @@ function stripTrailingDate(s: string): string {
 }
 
 /** Dotify a standalone `X-Y` version number (e.g. `3-5` -> `3.5`), but NOT a
- *  size suffix like `8b` (guarded by the negative lookahead for a letter). */
+ *  size suffix like `8b` (guarded by the negative lookahead for a letter).
+ *  Each side is limited to 1-2 digits so a date/snapshot segment
+ *  (e.g. `-20241022`, `-2024`, `-08-06`) is never mistaken for a version and
+ *  mangled into a false dotted number. */
 function dotifyVersion(s: string): string {
-  return s.replace(/(\d+)-(\d+)(?![a-zA-Z])/g, "$1.$2");
+  return s.replace(/(\d{1,2})-(\d{1,2})(?![a-zA-Z])/g, "$1.$2");
 }
 
 /** Bare slug used for cross-provider date lookup: strip namespace + trailing date. */
@@ -125,8 +134,12 @@ function bareSlugForDate(rawId: string): string {
 function deriveId(providerId: string, baseModel: string | undefined, pathId: string): string {
   const raw = baseModel ?? pathId;
   const slash = raw.indexOf("/");
-  const ns = slash >= 0 ? raw.slice(0, slash) : "";
-  if (ns && ns === providerId) {
+  // No namespace → first-party bare slug, returned unchanged (matches the real
+  // provider API + DEFAULT_MODELS). Previously this fell through to the
+  // aggregator branch and was wrongly dotified/strip-dated.
+  if (slash < 0) return raw;
+  const ns = raw.slice(0, slash);
+  if (ns === providerId) {
     // First-party model: bare slug, kept exactly as the source (hyphenated,
     // dated ids preserved — matches the real provider API + DEFAULT_MODELS).
     return raw.slice(slash + 1);
@@ -176,6 +189,13 @@ function collectModels(): { raw: RawModel[]; dateBySlug: Map<string, { release_d
   const raw: RawModel[] = [];
   const dateBySlug = new Map<string, { release_date?: string; last_updated?: string }>();
 
+  if (!existsSync(PROVIDERS_DIR)) {
+    throw new Error(
+      `Dataset providers directory not found at ${PROVIDERS_DIR}. ` +
+        `Set MODELS_DEV_ROOT to the models.dev dataset root, or run the ` +
+        `models.dev download step before building the catalog.`,
+    );
+  }
   const providerDirs = readdirSync(PROVIDERS_DIR).filter((d) =>
     statSync(join(PROVIDERS_DIR, d)).isDirectory(),
   );
@@ -198,17 +218,18 @@ function collectModels(): { raw: RawModel[]; dateBySlug: Map<string, { release_d
       raw.push({ providerId: pid, candidateId, dateLookupKey, baseModel, pathId, toml });
 
       // Populate cross-provider date lookup from any file that carries a date.
+      // Per-field last-writer-wins: always take the current file's release_date /
+      // last_updated so a newer entry is never dropped once an earlier file already
+      // set one of the fields.
       const rd = toml.release_date;
       const lu = toml.last_updated;
       if (rd || lu) {
-        const existing = dateBySlug.get(dateLookupKey);
-        // Prefer an entry that has release_date; otherwise keep whatever we have.
-        if (!existing || (rd && !existing.release_date)) {
-          dateBySlug.set(dateLookupKey, {
-            release_date: rd ? normalizeDate(rd) : existing?.release_date,
-            last_updated: lu ? normalizeDate(lu) : existing?.last_updated,
-          });
-        }
+        const existing =
+          dateBySlug.get(dateLookupKey) ??
+          { release_date: undefined, last_updated: undefined };
+        if (rd) existing.release_date = normalizeDate(rd);
+        if (lu) existing.last_updated = normalizeDate(lu);
+        dateBySlug.set(dateLookupKey, existing);
       }
     }
   }

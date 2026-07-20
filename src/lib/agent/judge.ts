@@ -138,7 +138,8 @@ function renderHistoryItem(h: HistoryItem): string {
  // content (e.g. "typed '<extracted text>' into the search box"). Both are
  // untrusted per this module's trust model and must be wrapped so they
  // can't prompt-inject the judge LLM.
-      s += `    - ${wrapUntrusted(r.action.type)}: ${wrapUntrusted(r.message)}${r.success ? "" : " (FAILED)"}\n`;
+      const actionType = r.action?.type ?? "(unknown action)";
+      s += `    - ${wrapUntrusted(actionType)}: ${wrapUntrusted(r.message)}${r.success ? "" : " (FAILED)"}\n`;
       if (r.extractedContent) {
  // Truncate AND add an ellipsis when truncated so the judge can tell
  // the snippet was cut short (otherwise it might infer the task
@@ -193,12 +194,15 @@ export function coerceJudgement(parsed: Record<string, unknown>): JudgementResul
   const reachedCaptcha = parsed.reachedCaptcha == null
     ? (console.warn("[judge] coerceJudgement: missing `reachedCaptcha`; defaulting to false."), false)
     : TRUTHY_BOOLEANS.has(parsed.reachedCaptcha);
+  const verdict = TRUTHY_BOOLEANS.has(parsed.verdict);
   return {
     reasoning: typeof parsed.reasoning === "string" ? parsed.reasoning : null,
  // Loosen boolean coercion — LLMs sometimes emit "true" (string) or 1
  // (number) instead of a JSON `true`. Accept all the common variants.
-    verdict: TRUTHY_BOOLEANS.has(parsed.verdict),
-    failureReason: typeof parsed.failureReason === "string" ? parsed.failureReason : null,
+    verdict,
+ // Null out failureReason when the verdict is truthy — documented contract:
+ // a passing verdict must never carry a (stale/false) failure reason.
+    failureReason: verdict ? null : (typeof parsed.failureReason === "string" ? parsed.failureReason : null),
     impossibleTask,
     reachedCaptcha,
   };

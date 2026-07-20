@@ -19,6 +19,10 @@ import { SearchInput } from "@/components/cowork/shared/search-input";
 import { timeAgo, hostnameOf, safeHref } from "@/lib/cowork-data/format";
 import type { SampleBookmark } from "@/lib/cowork-data/types";
 
+// Cap render recursion so a cyclic / pathologically-deep bookmark tree from a
+// malformed server response cannot trigger unbounded recursion / stack overflow.
+const MAX_BOOKMARK_DEPTH = 50;
+
 function BookmarkNode({ node, depth }: { node: SampleBookmark; depth: number }) {
   const isFolder = !node.url;
   return (
@@ -33,9 +37,15 @@ function BookmarkNode({ node, depth }: { node: SampleBookmark; depth: number }) 
               </span>
             </AccordionTrigger>
             <AccordionContent className="pb-1">
-              {node.children?.map((c) => (
-                <BookmarkNode key={c.id} node={c} depth={depth + 1} />
-              ))}
+              {depth < MAX_BOOKMARK_DEPTH ? (
+                node.children?.map((c) => (
+                  <BookmarkNode key={c.id} node={c} depth={depth + 1} />
+                ))
+              ) : (
+                <div className="py-1.5 text-xs text-muted-foreground px-2">
+                  Folder nesting too deep to display
+                </div>
+              )}
             </AccordionContent>
           </AccordionItem>
         </Accordion>

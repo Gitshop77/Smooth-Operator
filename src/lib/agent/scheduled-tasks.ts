@@ -190,6 +190,10 @@ export async function saveScheduledTask(task: ScheduledTask): Promise<void> {
   } else {
     merged.nextRunAt = undefined;
   }
+ // Capture the pre-update entry (before mutation) so that, if (re)arming fails,
+ // we can re-arm the previous alarm instead of leaving an enabled task without a
+ // live alarm.
+  const prior = idx >= 0 ? { ...tasks[idx] } : null;
   if (idx >= 0) tasks[idx] = merged;
   else tasks.push(merged);
 
@@ -213,6 +217,19 @@ export async function saveScheduledTask(task: ScheduledTask): Promise<void> {
         `[scheduled-tasks] rollback of storage for task ${task.id} failed:`,
         rbErr instanceof Error ? rbErr.message : String(rbErr)
       );
+    }
+    // Re-arm the previous alarm (best-effort) so an enabled task isn't left
+    // without a live alarm until the next SW restart. The prior entry exists
+    // only when updating an already-stored task.
+    if (prior && prior.enabled) {
+      try {
+        await scheduleAlarm(prior);
+      } catch (armErr) {
+        console.error(
+          `[scheduled-tasks] re-arming previous alarm for task ${prior.id} failed:`,
+          armErr instanceof Error ? armErr.message : String(armErr)
+        );
+      }
     }
     throw new Error(
       `Failed to arm alarm for task ${task.id}: ${e instanceof Error ? e.message : String(e)}`,

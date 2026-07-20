@@ -122,7 +122,7 @@ export function isCuratedLocalOrigin(url: string): boolean {
  * Hostname-based URLs (e.g. `api.openai.com`) are NOT IP literals, so they
  * return false here and are allowed by the caller (no DNS resolution).
  */
-function isPrivateOrLoopbackIp(host: string): boolean {
+function isDangerousSinkIp(host: string): boolean {
   if (!host) return false;
   if (host.includes(":")) {
  // IPv6 literal (or IPv4-mapped IPv6).
@@ -185,7 +185,9 @@ function isDangerousIpv4(host: string): boolean {
  * non-user-configured `baseUrl` cannot reach a local model server by name.
  */
 function isLocalHostname(host: string): boolean {
-  const h = host.toLowerCase();
+  // Strip a trailing dot so a `localhost.` FQDN cannot bypass the strict
+  // provenance gate (which only allows a user-configured `localhost`).
+  const h = host.toLowerCase().replace(/\.$/, "");
   return h === "localhost" || h.endsWith(".localhost");
 }
 
@@ -591,22 +593,19 @@ async function dnsResolve(hostname: string): Promise<DnsOutcome> {
       }
     });
   }
- // Node.js context (mini-services / tests): dns.promises.lookup with ALL.
-  const nodeDns = (globalThis as { require?: (m: string) => unknown }).require;
-  if (nodeDns) {
-    try {
-      const dnsMod = nodeDns("dns") as { promises?: { lookup?: (h: string, opts: unknown) => Promise<{ address: string } | { address: string }[]> } };
-      const lookup = dnsMod?.promises?.lookup;
-      if (lookup) {
-        const r = await lookup(hostname, { all: true });
-        const arr = Array.isArray(r) ? r : [r];
-        return { kind: "resolved", ips: arr.map((x) => x.address) };
-      }
-    } catch {
-      return { kind: "error" };
-    }
+ // Node.js context (mini-services / tests): resolve via dynamic import so DNS
+ // resolution works in ESM runtimes. `globalThis.require` is undefined in ESM,
+ // which previously made the require-based branch unreachable and force-failed
+ // every hostname URL — switching to `import("node:dns/promises")` restores
+ // real resolution while still failing closed (error) on any lookup failure.
+  try {
+    const dns = await import("node:dns/promises");
+    const r = await dns.lookup(hostname, { all: true });
+    const arr = Array.isArray(r) ? r : [r];
+    return { kind: "resolved", ips: arr.map((x) => x.address) };
+  } catch {
+    return { kind: "error" };
   }
-  return { kind: "unavailable" };
 }
 
 /**
@@ -686,7 +685,7 @@ export function validateLlmBaseUrl(
   }
  // URL.hostname already strips IPv6 brackets, but guard anyway.
   const normalizedHost = host.replace(/^\[|\]$/g, "");
-  if (isPrivateOrLoopbackIp(normalizedHost)) {
+  if (isDangerousSinkIp(normalizedHost)) {
     return {
       ok: false,
       reason: `host resolves to a private/loopback/link-local address: ${normalizedHost}`,

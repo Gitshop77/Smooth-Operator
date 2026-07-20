@@ -24,14 +24,19 @@
 
 const COWORK_EVENTS_BASE = process.env.COWORK_EVENTS_BASE_URL || 'http://localhost:3003';
 
-// Validate the relay target with the same fail-closed rules applied to
+// Validate the relay target with the same rules applied to
 // COWORK_BASE_URL in agent-bootstrap.ts: http(s) scheme only, no embedded
 // credentials, and no secret-shaped query. We deliberately do NOT apply
 // isSsrfSafeUrl here — the cowork-events mini-service legitimately runs on
-// http://localhost:3003, so SSRF-gating the base would break the relay. A
-// misconfigured (attacker-controlled) base fails closed to '' so broadcastEvent
-// refuses to relay the X-Cowork-Token to it, instead of leaking the
-// service-to-service secret to an unexpected host.
+// http://localhost:3003, so SSRF-gating the base would break the relay.
+// IMPORTANT: this validation only fails closed on a bad scheme, embedded
+// credentials, or a secret-shaped query. A well-formed http(s) base — even one
+// pointing at an attacker-controlled host (e.g. http://attacker.example.com) —
+// PASSES validation and the X-Cowork-Token IS relayed to it. The relay is only
+// safe because COWORK_EVENTS_BASE_URL is an operator-controlled deployment
+// setting, not attacker-influenced page data. Do not describe an attacker-
+// controlled base as "failing closed" — only genuinely misconfigured
+// (bad-scheme / embedded-creds / secret-query) bases refuse to relay the token.
 const EVENTS_BASE_SECRET_QUERY_RE =
   /[?&](api[_-]?key|token|access[_-]?token|secret|password|auth(entication|orization)?|client[_-]?secret|bearer|session[_-]?id)=/i;
 
@@ -84,9 +89,11 @@ const BROADCAST_TIMEOUT_MS = 5000;
 // SOCKET_SECRET, so for this service-to-service relay the dedicated S2S secret
 // (COWORK_EVENT_TOKEN) is preferred, falling back to COWORK_UI_TOKEN only when
 // the S2S secret is unset. Resolved at CALL time (not module load) so importing
-// this module during build/prerender/tests can't crash the module graph. No
-// `dev-token` fallback: when neither secret is set the relay sends an empty token
-// and the upstream 401 surfaces as a 500 (see below).
+// this module during build/prerender/tests can't crash the module graph. When
+// neither secret is set, the relay falls back to the built-in `dev-token`
+// (see the zero-config default below) rather than sending an empty token, so the
+// documented "401 → 500" fail-closed path only applies if the mini-service's
+// SHARED_SECRET differs from `dev-token`.
 function getCoworkEventsToken(): string {
  // Preferred service-to-service secret (NEVER shipped in the client bundle).
   const eventToken = process.env.COWORK_EVENT_TOKEN;

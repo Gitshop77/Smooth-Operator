@@ -90,7 +90,5 @@ describe("evaluate fail-closed gates", () => {
     expect(res.message).toContain("custom-tool substitution unavailable");
     // Critical: the unmodified LLM-authored code must never be executed.
     expect((globalThis as Record<string, unknown>).openCowork_secret_probe).toBeUndefined();
-    // Restore any mock created in this scope.
-    vi.restoreAllMocks();
   });
 });

@@ -51,7 +51,7 @@ async function delegateTabAction(
     };
   }
   try {
-    let timer: ReturnType<typeof setTimeout>;
+    let timer: ReturnType<typeof setTimeout> | undefined;
  // Race the SW call against the timeout AND the step's abort signal so a user
  // STOP is honored mid-step instead of waiting out the full 30s timeout.
     const abort = rejectOnAbort(signal);
@@ -67,6 +67,11 @@ async function delegateTabAction(
         abort.promise,
       ]);
     } finally {
+      // Always clear the 30s fallback timer. When the abort signal wins the
+      // race, the sendMessage promise is still pending so its `.finally` (which
+      // also clears the timer) has not run — without this the timer leaks until
+      // TAB_ACTION_TIMEOUT_MS elapses.
+      clearTimeout(timer);
       abort.cleanup();
     }
  // `chrome.runtime.sendMessage` resolves `undefined` (not a rejection) when

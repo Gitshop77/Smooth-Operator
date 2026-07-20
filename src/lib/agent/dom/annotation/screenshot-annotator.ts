@@ -249,7 +249,10 @@ export async function annotateScreenshot(
     return screenshotDataUrl;
   }
 
-  if (!img.width || !img.height) return screenshotDataUrl;
+  if (!img.width || !img.height) {
+    img.cleanup?.();
+    return screenshotDataUrl;
+  }
 
   try {
     canvas.width = img.width;
@@ -296,8 +299,11 @@ export async function annotateScreenshot(
  // the label background so the label contrasts with the box outline.
  // Use a non-negative modulo so a negative `el.index` still indexes a
  // valid palette slot instead of yielding `undefined`.
+ // Floor the index so a fractional `el.index` (e.g. 2.5) maps to a
+      // valid palette slot instead of `palette[2.5]` → `undefined`.
+      const idx = Math.trunc(el.index);
       const color = palette
-        ? palette[((el.index % palette.length) + palette.length) % palette.length]
+        ? palette[((idx % palette.length) + palette.length) % palette.length]
         : singleBoxColor;
       const labelBg = palette ? color : singleBgColor;
 

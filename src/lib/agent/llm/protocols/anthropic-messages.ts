@@ -45,6 +45,12 @@ export interface AnthropicBody {
 }
 
 async function fromRequest(request: LLMRequest): Promise<AnthropicBody> {
+ // Reject a missing/empty model id up front (mirrors the openai-chat guard) so
+ // we don't silently build a body with `model: undefined` that would 400
+ // opaquely at request time.
+  if (!request.model || typeof request.model.id !== "string" || request.model.id.length === 0) {
+    throw new Error("request.model.id is required and must be a non-empty string");
+  }
   const systemMessages = request.messages.filter((m) => m.role === "system");
   const userMessages = request.messages.filter((m) => m.role !== "system");
 
@@ -132,6 +138,8 @@ async function fromRequest(request: LLMRequest): Promise<AnthropicBody> {
 export interface StreamState {
   content: string;
   toolInput: string;
+  /** Accumulated extended-thinking text (Anthropic thinking models). */
+  thinking?: string;
   /** Model id captured at stream start so usage attribution survives reduction. */
   model?: string;
   /** Count of non-JSON SSE frames dropped this stream (see DROPPED_FRAME_WARN_THRESHOLD). */
@@ -185,6 +193,9 @@ export const protocol: Protocol<AnthropicBody, string, { type: string; content?:
         if (data.type === "content_block_delta" && data.delta?.text) {
           state.content += data.delta.text;
           events.push({ type: "text", content: data.delta.text });
+        }
+        if (data.type === "content_block_delta" && data.delta?.type === "thinking" && data.delta?.thinking) {
+          state.thinking = (state.thinking ?? "") + data.delta.thinking;
         }
         if (data.type === "content_block_delta" && data.delta?.type === "input_json_delta" && data.delta?.partial_json) {
           state.toolInput += data.delta.partial_json;

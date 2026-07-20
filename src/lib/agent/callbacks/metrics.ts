@@ -317,7 +317,11 @@ export class AgentMetricsCallback implements AsyncCallbackHandler {
  // per-phase attribution we *did* capture and drop the remainder into the
  // `unattributed` bucket so the `total == sum(llmByPhase.*)` invariant
  // always holds — neither silently undercounting nor corrupting attribution.
-    if (this.totalSteps === 0 && result.stepCount > 0) {
+ // Reconcile step count with the authoritative result. We keep whatever
+    // per-phase attribution we *did* capture, but the reported total must never
+    // undercount a run that registered this callback late: take the max so a
+    // partially-missed run is reconciled to the true step count.
+    if (result.stepCount > this.totalSteps) {
       this.totalSteps = result.stepCount;
     }
  // `totalActions` is intentionally NOT reconciled here: `AgentRunResult`

@@ -12,7 +12,7 @@
 // arbitrary streamed text. Keep them in parity by intent, not by shared code.
 
 export const SENSITIVE_FIELD =
-  /pass|pwd|password|secret|cvv|card|ssn|token|otp|pin/i;
+  /(password|secret|cvv|ssn|token|otp|pwd)\b|(^|[^a-z])(pass|card|pin)([^a-z]|$)/i;
 
 export const maskValue = (field: string, value: string): string =>
   SENSITIVE_FIELD.test(field) ? "••••••" : value;
@@ -26,7 +26,7 @@ export const maskValue = (field: string, value: string): string =>
 export function looksLikeSecret(value: unknown): boolean {
   if (typeof value !== "string") return false;
   const t = value.trim();
-  if (/(password|passwd|secret|token|api[_-]?key|access[_-]?token|cvv|otp|ssn|pin)/i.test(t))
+  if (/(password|passwd|secret|token|api[_-]?key|access[_-]?token|cvv|otp|ssn|(?:^|[^a-z])pin(?:[^a-z]|$))/i.test(t))
     return true;
   return t.length >= 20 && /^[A-Za-z0-9+/=_-]{20,}$/.test(t);
 }

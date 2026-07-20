@@ -117,7 +117,7 @@ export async function handleInput(
  // too aggressively caused the agent to think long fields (e.g. a cover
  // letter) were only partially filled, leading to infinite "complete the
  // text" loops.
-  if (text !== action.text) {
+  if (text !== (action.text ?? "")) {
     return {
       action: { ...action, clear: action.clear !== false },
       success: true,

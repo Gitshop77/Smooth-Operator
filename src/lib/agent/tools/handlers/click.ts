@@ -150,6 +150,11 @@ export async function handleClick(
  // `press-and-hold.ts`.
   const errors: string[] = [];
   let clicked = false;
+  // Set when a CDP click is dispatched but its outcome is unknown (SW timeout
+  // or no response). The in-flight SW click may still land after the JS-side
+  // timeout, so we must NOT fall through to the native/dispatch fallbacks —
+  // doing so would double-click the target.
+  let cdpUncertain = false;
  // Every path that sets `clicked = true` also assigns `strategyUsed`, so the
  // only value that can reach the success message is one of those. Initialize
  // to an empty sentinel to make that invariant explicit (the previous
@@ -192,16 +197,19 @@ export async function handleClick(
             errors.push(`CDP click failed: ${cdpResult.error}`);
           } else {
             errors.push("CDP click: no response from service worker");
+            cdpUncertain = true;
           }
         }
       }
     } catch (e) {
-      errors.push(`CDP click failed: ${(e as Error).message}`);
+      const msg = (e as Error).message;
+      errors.push(`CDP click failed: ${msg}`);
+      if (msg.includes("CDP_CLICK timeout")) cdpUncertain = true;
     }
   }
 
  // Strategy 2: Native el.click() — the standard DOM click.
-  if (!clicked) {
+  if (!clicked && !cdpUncertain) {
     try {
       if (el.isConnected) {
         el.click();
@@ -224,7 +232,7 @@ export async function handleClick(
  // resolves to exactly ONE element in the document — that single match is
  // guaranteed to be the intended target (whether it's the element we already
  // hold or, in the stale-node case, the live element that replaced it).
-  if (!clicked) {
+  if (!clicked && !cdpUncertain) {
     const css = generateCssSelector(el);
     if (css) {
       try {
@@ -263,9 +271,12 @@ export async function handleClick(
  // first document-order match. The unique match is clicked only when it is
  // a different node (the stale-element replacement); if it's the element we
  // already hold, a re-click would double-fire, so we skip.
-  if (!clicked) {
+  if (!clicked && !cdpUncertain) {
     try {
-      const inputEl = el as HTMLInputElement;
+      if (!el.isConnected) {
+        errors.push("element became detached before JS text search click");
+      } else {
+        const inputEl = el as HTMLInputElement;
       const targetText = (
         el.textContent ||
         inputEl.value ||
@@ -311,6 +322,7 @@ export async function handleClick(
           );
         }
       }
+      }
     } catch (e) {
       errors.push(`JS text search click failed: ${(e as Error).message}`);
     }
@@ -326,27 +338,42 @@ export async function handleClick(
  // fires the click listener (the `view` property is rarely read by
  // application code; it's mostly used by frameworks that already
  // fell back to `isTrusted`).
-  if (!clicked) {
+  if (!clicked && !cdpUncertain) {
     try {
-      let ev: MouseEvent;
-      try {
-        ev = new MouseEvent("click", {
-          view: window,
-          bubbles: true,
-          cancelable: true,
-        });
-      } catch {
-        ev = new MouseEvent("click", { bubbles: true, cancelable: true });
+      if (!el.isConnected) {
+        errors.push("element became detached before dispatched-event click");
+      } else {
+        let ev: MouseEvent;
+        try {
+          ev = new MouseEvent("click", {
+            view: window,
+            bubbles: true,
+            cancelable: true,
+          });
+        } catch {
+          ev = new MouseEvent("click", { bubbles: true, cancelable: true });
+        }
+        el.dispatchEvent(ev);
+        clicked = true;
+        strategyUsed = "dispatched-event";
       }
-      el.dispatchEvent(ev);
-      clicked = true;
-      strategyUsed = "dispatched-event";
     } catch (e) {
       errors.push(`dispatched event click failed: ${(e as Error).message}`);
     }
   }
 
   await sleep(TIMINGS.clickAfterSettle);
+  // If the CDP click is still in flight (timed out / no SW response) we did not
+  // fall through to the other strategies, so report the uncertain state instead
+  // of a misleading "failed after 5 strategies" (which would under-count a
+  // click that may yet land).
+  if (!clicked && cdpUncertain) {
+    return {
+      action,
+      success: false,
+      message: `CDP click for [${numericIndex}] is still in flight (timed out / no response from service worker) — not falling back to other strategies to avoid a double click`,
+    };
+  }
   const changed = pageChanged(ctx.beforeUrl, ctx.beforeFingerprint);
   if (!clicked) {
     return {

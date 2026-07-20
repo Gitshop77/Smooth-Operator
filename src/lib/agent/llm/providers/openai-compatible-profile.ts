@@ -103,9 +103,11 @@ function isCuratedLocalOrigin(url: string): boolean {
   }
 }
 
-/** Strip embedded `user:pass@` credentials from a URL before it reaches logs/UI. */
+/** Strip embedded `user:pass@` credentials AND any query/fragment from a URL
+ * before it reaches logs/UI, so secrets passed as query params are not leaked
+ * in SSRF error messages. Mirrors the sibling redactor in `ssrf.ts`. */
 function redactUrl(u: string): string {
-  return u.replace(/\/\/[^@/]*@/, "//");
+  return u.replace(/\/\/[^@/]*@/, "//").replace(/[?#].*$/, "");
 }
 
 export const assertSafeUserBaseURL = (

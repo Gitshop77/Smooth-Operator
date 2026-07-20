@@ -76,6 +76,16 @@ export const ENUM_VALUES: Record<string, readonly string[]> = {
 
 export const HEX_COLOR = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 
+/** True iff `s` is a parseable `http:`/`https:` URL (no dangerous schemes). */
+function isHttpUrl(s: string): boolean {
+  try {
+    const u = new URL(s);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 /** Coerce an unknown import value to a boolean. Accepts `true`/`"true"`/`false`/
  * `"false"` and the case-insensitive aliases `"yes"`/`"no"`/`1`/`0`. Any other
  * value falls back to `base` (the current setting) rather than being coerced via
@@ -113,25 +123,32 @@ export function sanitizeSection<K extends keyof SettingsState>(
 
     const enumSet = ENUM_VALUES[`${section}.${key}`];
     if (enumSet) {
-      out[key] = enumSet.includes(String(value)) ? value : fallback[key];
+      out[key] = enumSet.includes(String(value)) ? String(value) : fallback[key];
       continue;
     }
 
     const ref = fallback[key];
     if (typeof ref === "number") {
+      // Reject non-real numbers (null/[]/'' coerce to 0 / finite via Number()) so
+      // an untrusted import cannot silently overwrite a numeric setting with an
+      // attacker-chosen finite value. The seeded `out` keeps the current value.
+      if (typeof value !== "number" || value === null) continue;
       const n = Number(value);
       if (!Number.isFinite(n)) continue;
       out[key] = key === "maxSteps" ? clampMaxSteps(n) : n;
     } else if (typeof ref === "boolean") {
       out[key] = coerceBool(value, ref);
     } else if (typeof ref === "string") {
+      if (value == null) continue;
       const s = String(value);
       out[key] =
         key === "accent" && !HEX_COLOR.test(s)
           ? ref
           : key === "apiKey"
             ? s.slice(0, 512)
-            : s;
+            : key === "cockpitUrl"
+              ? (isHttpUrl(s) ? s : ref)
+              : s;
     } else if (Array.isArray(ref)) {
       out[key] = Array.isArray(value)
         ? value.filter((x) => typeof x === "string")

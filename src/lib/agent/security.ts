@@ -562,12 +562,16 @@ export function scanForInjection(text: string): InjectionScanResult {
  * bare IPv6 address in the allow/block list (`":1"`).
  */
 /**
- * Strip surrounding `[`/`]` (IPv6 brackets) and lowercase a host — for use in
- * hostname comparison. Does NOT strip leading/trailing dots (those are handled
- * separately below so FQDN `.example.com` / `example.com.` forms normalize).
+ * Strip surrounding `[`/`]` (IPv6 brackets), trailing dots (so a FQDN
+ * `example.com.` can't bypass an `example.com` allow/block entry), and
+ * lowercase a host — for use in hostname comparison.
  */
 function normalizeHost(h: string): string {
-  return h.replace(/^\[|\]$/g, "").replace(/%[0-9a-z]+$/i, "").toLowerCase();
+  return h
+    .replace(/^\[|\]$/g, "")
+    .replace(/%[0-9a-z]+$/i, "")
+    .replace(/\.+$/, "")
+    .toLowerCase();
 }
 
 function hostnameMatches(hostname: string, domain: string): boolean {

@@ -165,7 +165,10 @@ function clientIp(req: NextRequest): string {
         for (let i = hops.length - 1; i >= 0; i--) {
           if (!trusted.has(hops[i])) return hops[i];
         }
-        return hops[hops.length - 1];
+        // No untrusted hop found — every hop is a trusted proxy. Falling back
+        // to the rightmost (trusted) hop would collapse all clients into one
+        // rate-limit bucket, so use the real client IP header or 'unknown'.
+        return req.headers.get('x-real-ip') ?? 'unknown';
       }
       return hops[0];
     }

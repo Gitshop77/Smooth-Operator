@@ -13,6 +13,7 @@
 import type { NextRequest } from 'next/server';
 import { json, badRequest, serverError, withRouteError, bodyJson, redactSecrets } from '@/lib/cowork/api/http';
 import { broadcastEvent } from '@/lib/cowork/events/client';
+import { tokensMatch } from '@/proxy';
 
 interface EmitBody {
   channel?: string;
@@ -36,8 +37,39 @@ const SERVER_OWNED_CHANNELS = new Set<string>([
 // Cap serialized payload size (see the size check below).
 const PAYLOAD_MAX_BYTES = 64 * 1024; // 64KB
 
+/**
+ * Require a valid `X-Cowork-Token` header. This route previously relied on a
+ * middleware that does not exist, so any caller could broadcast events. Resolve
+ * the expected secret the same way the shared cockpit auth does:
+ * COWORK_UI_TOKEN (preferred) → COWORK_EVENT_TOKEN → the well-known `dev-token`
+ * in zero-config mode. Uses the constant-time `tokensMatch` compare.
+ */
+function requireCoworkToken(req: NextRequest): Response | null {
+  const header = req.headers.get("X-Cowork-Token") ?? undefined;
+  const uiToken =
+    process.env.COWORK_UI_TOKEN && process.env.COWORK_UI_TOKEN.length > 0
+      ? process.env.COWORK_UI_TOKEN
+      : undefined;
+  const eventToken =
+    process.env.COWORK_EVENT_TOKEN && process.env.COWORK_EVENT_TOKEN.length > 0
+      ? process.env.COWORK_EVENT_TOKEN
+      : undefined;
+  const expected = uiToken ?? eventToken ?? "dev-token";
+  if (!tokensMatch(header, expected)) {
+    return json(
+      { error: "Unauthorized" },
+      401,
+      { "WWW-Authenticate": 'Bearer realm="cowork"' },
+    );
+  }
+  return null;
+}
+
 export async function POST(req: NextRequest): Promise<Response> {
   return withRouteError(async () => {
+ // Authenticate before doing any work (this route previously had no auth).
+    const authFailure = requireCoworkToken(req);
+    if (authFailure) return authFailure;
  // `bodyJson` caps the raw body at MAX_BODY_BYTES (256KB) and rejects
  // oversize bodies with 413 *before* buffering — `req.json()` would read
  // the entire body into memory unbounded (memory-exhaustion DoS).
@@ -85,7 +117,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     if (Buffer.byteLength(serialized, 'utf8') > PAYLOAD_MAX_BYTES) {
       return badRequest(`payload must be at most ${PAYLOAD_MAX_BYTES} bytes when serialized`);
     }
-    const safePayload = JSON.parse(redactSecrets(JSON.stringify(body.payload ?? null)));
+    const safePayload = JSON.parse(redactSecrets(serialized));
     const result = await broadcastEvent(body.channel, safePayload);
     if (!result.ok) {
  // `result.error` originates from the separate mini-service and may contain

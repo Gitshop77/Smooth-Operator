@@ -290,7 +290,7 @@ export function renderElementsText(keptElements: ExtractedElement[]): string {
   for (const el of keptElements) {
     const attrs = el.attributes
       ? Object.entries(el.attributes)
-          .map(([k, v]) => `${escapeAttr(k)}="${escapeAttr(stripNewlines(v))}"`)
+          .map(([k, v]) => `${escapeAttr(k)}="${escapeAttr(stripNewlines(v)).slice(0, 80)}"`)
           .join(" ")
       : "";
     const attrStr = attrs ? ` ${attrs}` : "";

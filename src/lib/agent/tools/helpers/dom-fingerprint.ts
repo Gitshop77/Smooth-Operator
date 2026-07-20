@@ -97,13 +97,28 @@ export function domFingerprint(): string {
  // route changes that would otherwise sit entirely beyond the leading window.
  // Iterate only the two windows (not every element) so we don't scan the full
  // list performing a branch per element on large DOMs.
+ //
+ // When the element list fits within two windows the leading + trailing windows
+ // together cover every element, so we hash exactly those two windows. Once
+ // the list is longer than two windows, their union leaves a contiguous
+ // MIDDLE band unsampled (a SPA route change confined there would be
+ // invisible), so we fall back to a strided full-list sample that still bounds
+ // the cost to ~2*limit elements while covering the entire list.
   const limit = FINGERPRINT_MAX_ELEMENTS;
-  const lastStart = Math.max(0, els.length - limit);
-  for (let i = 0; i < limit && i < els.length; i++) {
-    h = hashString(h, elementSignature(els[i]));
-  }
-  for (let i = lastStart; i < els.length; i++) {
-    h = hashString(h, elementSignature(els[i]));
+  const n = els.length;
+  if (n <= limit * 2) {
+    for (let i = 0; i < limit && i < n; i++) {
+      h = hashString(h, elementSignature(els[i]));
+    }
+    const lastStart = Math.max(0, n - limit);
+    for (let i = lastStart; i < n; i++) {
+      h = hashString(h, elementSignature(els[i]));
+    }
+  } else {
+    const step = Math.max(1, Math.ceil(n / (limit * 2)));
+    for (let i = 0; i < n; i += step) {
+      h = hashString(h, elementSignature(els[i]));
+    }
   }
   return (h >>> 0).toString(16);
 }

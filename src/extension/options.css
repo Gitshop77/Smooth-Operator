@@ -629,10 +629,10 @@ button:focus-visible {
 .model-search-result-item .model-id {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11px;
-  background: var(--cw-code-bg, rgba(127, 127, 127, 0.15));
+  background: var(--cw-raised, rgba(127, 127, 127, 0.15));
   padding: 1px 5px;
   border-radius: 4px;
-  color: var(--cw-fg, inherit);
+  color: var(--cw-text, inherit);
 }
 
 /* ─── Vision assistant status ─────────────────────────────────────────────── */

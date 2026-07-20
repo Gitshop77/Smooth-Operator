@@ -7,10 +7,10 @@ import { PrismaBetterSqlite3 } from '@prisma/adapter-better-sqlite3'
 // connection URL is sourced from the environment (DATABASE_URL), which is
 // declared in prisma.config.ts and loaded via dotenv at config/build time.
 // We never log the URL or any connection string here.
-const connectionString = process.env.DATABASE_URL
+const connectionString = process.env.DATABASE_URL || 'file:./db/cowork.db'
 
 const adapter = new PrismaBetterSqlite3({
-  url: connectionString ?? 'file:./db/cowork.db',
+  url: connectionString,
 })
 
 const globalForPrisma = globalThis as unknown as {

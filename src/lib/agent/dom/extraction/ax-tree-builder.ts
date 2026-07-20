@@ -394,7 +394,7 @@ function buildTree(
 
   if (included) {
     const role = getRole(el);
-    const displayName = escapeAttributeValue(name).substring(0, NAME_MAX_LENGTH);
+    const displayName = escapeAttributeValue(name.substring(0, NAME_MAX_LENGTH));
     const indent = " ".repeat(depth);
 
  // Get or assign ref ID (with WeakRef + reverse WeakMap for dedup).

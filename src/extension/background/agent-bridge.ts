@@ -66,7 +66,7 @@ export const DEFAULT_MODE: AgentMode = "standard";
  */
 export function clampInt(v: unknown, def: number, min: number, max: number): number {
   const n = typeof v === "number" ? v : Number(v);
-  if (!Number.isFinite(n)) return def;
+  if (!Number.isFinite(n)) return Math.min(max, Math.max(min, Math.floor(def)));
   return Math.min(max, Math.max(min, Math.floor(n)));
 }
 
@@ -173,6 +173,12 @@ interface StartRunArgs {
  * thin orchestrator — ~80 lines of setup + delegation.
  */
 export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = false }: StartRunArgs): Promise<void> {
+ // Set the synchronous concurrent-run guard at the very top (before any await)
+ // so BOTH the manual RUN path and the scheduled-task path are protected
+ // against the two-concurrent-loops TOCTOU window. Previously only the manual
+ // RUN handler set this flag, so a scheduled-task run left it false and could
+ // start a second loop alongside a manual one.
+  runStarting = true;
  // Local helper to extract a human-readable message from an unknown error,
  // used in every catch site below. Centralized so the two branches can never
  // drift apart if one copy is edited.

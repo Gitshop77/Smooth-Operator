@@ -21,7 +21,11 @@ export function isZodSchema(value: unknown): boolean {
 
 /** Validate a base64 image payload before forwarding it to the API. */
 export function isValidBase64(value: string): boolean {
-  return value.length > 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(value);
+  // Require a canonical base64 length (multiple of 4) and trailing-only
+  // padding (0–2 '='), never embedded/standalone padding. The looser
+  // `*{0,2}` pattern previously accepted wrong lengths and misplaced padding.
+  if (value.length === 0 || value.length % 4 !== 0) return false;
+  return /^[A-Za-z0-9+/]+(?:={1,2})?$/.test(value);
 }
 
 /**

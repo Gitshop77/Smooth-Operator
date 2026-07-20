@@ -135,7 +135,13 @@ chrome.storage.local.get(
       setCurrentMode(mode);
       syncModeDropdown();
     }
-    if (typeof res.maxSteps === "number") setMaxSteps(res.maxSteps);
+    if (
+      typeof res.maxSteps === "number" &&
+      Number.isFinite(res.maxSteps) &&
+      res.maxSteps > 0
+    ) {
+      setMaxSteps(res.maxSteps);
+    }
   },
 );
 
@@ -147,7 +153,7 @@ function syncModeDropdown(): void {
 
 modeSelect?.addEventListener("change", () => {
   const mode = modeSelect?.value as AgentMode | undefined;
-  if (!mode) return;
+  if (!mode || !ALLOWED_MODES.has(mode)) return;
   setCurrentMode(mode);
   chrome.storage.local.set({ [STORAGE_KEYS.agentMode]: mode }, () => {
     if (chrome.runtime.lastError) console.warn("[sidepanel] set agentMode failed:", chrome.runtime.lastError);

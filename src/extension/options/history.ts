@@ -27,7 +27,7 @@ interface RunHistoryEntry {
   endedAt: number;
   stepCount: number;
   totalCostUsd: number;
-  result?: { success: boolean };
+  result?: { success: boolean; text: string } | null;
   transcript?: unknown;
 }
 
@@ -128,8 +128,10 @@ export async function renderHistory(): Promise<void> {
         : "—";
     const steps = Number.isFinite(r.stepCount) ? String(r.stepCount) : "—";
     const cost = Number.isFinite(r.totalCostUsd) ? r.totalCostUsd.toFixed(4) : "—";
-    const status = r.result?.success ? "success" : "failure";
-    const badge = runBadge(status, r.result?.success ? "✓ success" : "✗ failed");
+    const result = r.result;
+    const badge = result !== null && result !== undefined
+      ? runBadge(result.success ? "success" : "failure", result.success ? "✓ success" : "✗ failed")
+      : '<span class="badge">— unknown</span>';
     item.innerHTML =
       `<span class="task">${escapeHtml(String((r.task ?? "").slice(0, 60)))}</span>` +
       `<span class="meta">${escapeHtml(date)} · ${escapeHtml(String(duration))}s · ${escapeHtml(steps)} steps · $${escapeHtml(cost)}</span>` +
@@ -212,13 +214,23 @@ document.getElementById("importHistoryFile")?.addEventListener("change", async (
  // per-entry size). Oversized entries are dropped (and counted as skipped)
  // rather than aborting the whole import.
     const MAX_ENTRY_BYTES = MAX_RUN_ENTRY_BYTES; // 2 MiB per entry
+ // Cumulative budget across the whole import. N individual 2 MiB entries can
+ // still overflow the ~5 MB chrome.storage.local quota at replaceAllRuns time,
+ // so we also cap the aggregate serialized size well under the quota.
+    const CUMULATIVE_BUDGET_BYTES = 4 * 1024 * 1024; // 4 MiB total
+    let cumulativeBytes = 0;
     const valid = imported.filter((e) => {
       if (!isRunHistoryEntry(e)) return false;
+      let size = 0;
       try {
-        return JSON.stringify(e).length <= MAX_ENTRY_BYTES;
+        size = JSON.stringify(e).length;
       } catch {
         return false;
       }
+      if (size > MAX_ENTRY_BYTES) return false;
+      if (cumulativeBytes + size > CUMULATIVE_BUDGET_BYTES) return false;
+      cumulativeBytes += size;
+      return true;
     });
     const rh = await import("@/lib/agent/run-history");
     const existing = await rh.loadRuns();
@@ -264,10 +276,16 @@ document.getElementById("importHistoryFile")?.addEventListener("change", async (
     await renderHistory();
     showSaved();
     const skipped = imported.length - valid.length;
+ // Some valid entries may be dropped by the 50-run cap (after dedup/sort), so
+ // the count actually stored is `validKept`, not `valid.length`. Report the
+ // real number and warn about the silently-dropped valid runs.
+    const validKept = merged.filter((r) => valid.includes(r as (typeof valid)[number])).length;
+    const validDropped = valid.length - validKept;
     await alertModal({
       title: "Import complete",
-      message: `Imported ${valid.length} run(s).` +
+      message: `Imported ${validKept} run(s).` +
         (skipped > 0 ? ` Skipped ${skipped} malformed/invalid entr${skipped === 1 ? "y" : "ies"}.` : "") +
+        (validDropped > 0 ? ` ${validDropped} valid run(s) dropped to stay within the 50-run limit.` : "") +
         (existingDropped > 0
           ? ` ${existingDropped} older stored run(s) dropped to stay within the 50-run limit.`
           : ""),

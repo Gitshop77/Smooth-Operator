@@ -523,7 +523,7 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
  // Validate sessionId against the SAME pattern chat:join enforces, so we never
  // emit to a room the client could never join.
       if (body.sessionId !== undefined && !SESSION_ID_PATTERN.test(body.sessionId)) {
-        sendJson(res, 400, { error: 'Invalid sessionId (allowed: A-Za-z0-9_- , 1-128 chars)' });
+        sendJson(res, 400, { error: 'Invalid sessionId (allowed: A-Za-z0-9_- 1-128 chars)' });
         return;
       }
       const sessionId = body.sessionId || `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -728,7 +728,7 @@ async function httpRequestHandler(req: IncomingMessage, res: ServerResponse): Pr
  // Validate against the chat:join pattern; room-scoped chat:done only (never a
  // global io.emit that would leak sessionId to other sessions).
         if (!SESSION_ID_PATTERN.test(body.sessionId)) {
-          sendJson(res, 400, { error: 'Invalid sessionId (allowed: A-Za-z0-9_- , 1-128 chars)' });
+          sendJson(res, 400, { error: 'Invalid sessionId (allowed: A-Za-z0-9_- 1-128 chars)' });
           return;
         }
         io.to(body.sessionId).emit('chat:done', { sessionId: body.sessionId, ts: Date.now() });

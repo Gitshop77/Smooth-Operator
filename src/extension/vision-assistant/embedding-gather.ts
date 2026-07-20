@@ -34,11 +34,11 @@ export interface EmbeddingMeta {
  * skips the immutable meta-level shape checks on every (hot-path) call, keeping
  * only the per-token range check + the cheap per-call buffer-bounds asserts.
  */
-let metaValidated = false;
+let validatedMeta: EmbeddingMeta | null = null;
 
 /** Call once after the embedding meta/packed/scales shape validation succeeds. */
-export function markEmbeddingMetaValidated(): void {
-  metaValidated = true;
+export function markEmbeddingMetaValidated(meta?: EmbeddingMeta): void {
+  validatedMeta = meta ?? null;
 }
 
 /**
@@ -69,7 +69,7 @@ export function gatherEmbed(
  // These meta-level invariants are validated once at init; once
  // `metaValidated` is set they are skipped in this hot path (the per-token
  // `tokenId` range check + buffer-bounds asserts below still run every call).
-  if (!metaValidated) {
+  if (validatedMeta !== meta) {
     if (!Number.isInteger(H) || H <= 0 || H % 2 !== 0) {
       throw new Error(`gatherEmbed: meta.hidden=${H} must be a positive even integer`);
     }
@@ -86,9 +86,16 @@ export function gatherEmbed(
         `gatherEmbed: block_size=${B} / n_groups=${NG} disagree with hidden=${H}`,
       );
     }
+    validatedMeta = meta;
   }
   if (!Number.isInteger(tokenId) || tokenId < 0 || tokenId >= meta.vocab) {
     throw new Error(`gatherEmbed: token id ${tokenId} out of vocab range [0, ${meta.vocab})`);
+  }
+
+ // Bounds/type-check the destination offset so a corrupt/partial cache or a
+ // bad caller cannot write past `dst` and clobber adjacent heap memory.
+  if (!Number.isInteger(off) || off < 0 || off + H > dst.length) {
+    throw new Error(`gatherEmbed: dst too small / bad off for token ${tokenId}`);
   }
 
   const packedRow = tokenId * (H / 2);

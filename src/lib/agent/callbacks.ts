@@ -156,11 +156,18 @@ export class CallbackDispatcher {
   private readonly warnCounts = new Map<string, number>();
   /** Re-log a handler failure every Nth occurrence after the first (trailing-edge visibility). */
   private static readonly WARN_THROTTLE = 10;
+  /** Stable per-instance identity so one handler's failures don't suppress another's. */
+  private readonly handlerIds = new WeakMap<object, string>();
+  private handlerSeq = 0;
 
   /** Register a handler. Hooks the handler doesn't implement are no-ops. */
   register(handler: AsyncCallbackHandler): void {
     if (this.handlers.includes(handler)) return;
     this.handlers.push(handler);
+    if (!this.handlerIds.has(handler)) {
+      const name = (handler as { constructor?: { name?: string } }).constructor?.name ?? "handler";
+      this.handlerIds.set(handler, `${name}#${++this.handlerSeq}`);
+    }
   }
 
   /** Remove all registered handlers. */
@@ -192,7 +199,8 @@ export class CallbackDispatcher {
  // A single buggy handler can throw on every event across a long run; throttle
  // the (possibly secret-laden) error logging to the first failure per hook
  // method so the console stays readable. Successful dispatch is unaffected.
-      const k = String(method);
+      const hid = this.handlerIds.get(handler) ?? "handler";
+      const k = `${hid}:${String(method)}`;
       const count = (this.warnCounts.get(k) ?? 0) + 1;
       this.warnCounts.set(k, count);
       // Log the first failure (for an immediate signal) and then re-log every

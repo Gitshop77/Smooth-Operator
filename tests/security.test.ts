@@ -4,7 +4,7 @@
  * These are CRITICAL tests — the security code had zero coverage before.
  */
 
-import { describe, test, expect, beforeEach, afterEach, beforeAll } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, afterAll, beforeAll } from "vitest";
 import {
   sanitizeUntrusted,
   wrapUntrusted,
@@ -32,9 +32,11 @@ beforeAll(() => {
   installLocalStorageStub();
 });
 
-// Restore the original global `localStorage` so the stub doesn't leak into
-// other test files in the same worker.
-afterEach(() => {
+// Restore the original global `localStorage` after all tests in this file so
+// the stub persists across the file (matching the beforeAll install) instead
+// of being torn down between tests, which would leave later tests in this file
+// without the stub they rely on.
+afterAll(() => {
   restoreLocalStorageStub();
 });
 

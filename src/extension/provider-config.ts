@@ -263,7 +263,7 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
       const allowed =
         canon !== null &&
         (canon.suffix ? host.endsWith(canon.host) : host === canon.host);
-      if (canon !== null && !allowed) {
+      if (!allowed) {
         throw new Error(
           `LLM baseUrl rejected: ${baseUrl} is not the canonical host for provider "${provider}". ` +
             `To protect your API key from exfiltration, the baseUrl must target the provider's own host.`

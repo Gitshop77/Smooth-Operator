@@ -29,9 +29,9 @@ export function TabsView() {
     const q = filter.toLowerCase();
     return all.filter(
       (t) =>
-        t.title?.toLowerCase().includes(q) ||
-        t.url?.toLowerCase().includes(q) ||
-        t.workspaceName?.toLowerCase().includes(q),
+        t.title?.toLowerCase()?.includes(q) ||
+        t.url?.toLowerCase()?.includes(q) ||
+        t.workspaceName?.toLowerCase()?.includes(q),
     );
   }, [data, filter]);
 

@@ -73,7 +73,15 @@ const StringMatchSchema = z
  // backreference against a large page-derived string can still drive
  // catastrophic backtracking at evaluator runtime (ReDoS). Reject them at the
  // boundary so the pattern is never compiled-and-run later.
-      if (new RegExp("\\\\" + "[1-9]").test(val.ref) || new RegExp("\\\\k<[^>]+>").test(val.ref)) {
+      if (
+        new RegExp("\\\\" + "[1-9]").test(val.ref) ||
+        new RegExp("\\\\k<[^>]+>").test(val.ref) ||
+        // Named/numeric `\g<>` / `\g{}` backreferences (e.g. `\g<name>`, `\g{1}`)
+        // drive the same catastrophic backtracking as `\1` / `\k<n>` but were
+        // not covered by the checks above — reject them too.
+        new RegExp("\\\\g<[^>]+>").test(val.ref) ||
+        new RegExp("\\\\g\\{[0-9]+\\}").test(val.ref)
+      ) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: "regex ref contains a backreference (catastrophic-backtracking risk)",

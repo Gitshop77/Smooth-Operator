@@ -196,9 +196,14 @@ async function getProvider(): Promise<LLMProvider> {
  // than reusing a stale cached instance bound to the old resource. Use a
  // JSON-encoded tuple so user-controlled fields containing the `|` separator
  // cannot collide and produce a wrong-provider key.
+ // Use the raw apiKey (not a 32-bit djb2 hash) in the cache key. A non-crypto
+ // hash can collide for distinct keys, silently reusing a stale provider and
+ // leaking one tenant's credentials/config into another's request. The JSON
+ // tuple already quoted user-controlled fields so the `|` separator can't
+ // collide, so the raw key is safe here.
   const key = JSON.stringify([
     config.provider,
-    hashStr(config.apiKey ?? ""),
+    config.apiKey ?? null,
     config.model,
     config.baseUrl ?? null,
     config.resourceName ?? null,
@@ -431,9 +436,13 @@ export async function plannerCallDirect(
   model?: string;
   costUsd?: number;
 }> {
+ // History can carry page-derived content (extract results, summaries of a
+ // malicious page) — strip any injected `<screenshot>` markers before render,
+ // mirroring the navigator path's defense against page-injected image attachment.
+  const strippedHistory = stripHistoryScreenshotMarkers(req.history);
   const userMessage = await buildPlannerUserMessage({
     task: req.task,
-    navigatorHistory: req.history,
+    navigatorHistory: strippedHistory,
     plan: req.plan,
     currentPlanItem: req.currentPlanItem,
     url: req.url,

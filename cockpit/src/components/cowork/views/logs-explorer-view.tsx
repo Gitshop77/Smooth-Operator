@@ -149,7 +149,7 @@ function mapLogRecord(rec: CoworkLogRecord, i: number): CoworkLogEntry {
   return {
     id: `${rec.ts}-${i}`,
     ts,
-    level: rec.level,
+    level: ALL_LEVELS.includes(rec.level) ? rec.level : "info",
     kind: LEVEL_TO_KIND[rec.level] ?? "info",
     source,
     agent: rec.source || "extension",

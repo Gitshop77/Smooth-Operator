@@ -79,9 +79,21 @@ async function withMemoryMutation<T>(fn: () => Promise<T>): Promise<T> {
  * non-array object.
  */
 function normalizeMemoryMap(raw: unknown): Record<string, SiteMemory> {
-  return raw && typeof raw === "object" && !Array.isArray(raw)
-    ? (raw as Record<string, SiteMemory>)
-    : {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, SiteMemory> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (!value || typeof value !== "object") continue;
+    const v = value as Record<string, unknown>;
+    const domain = typeof v.domain === "string" && v.domain.length > 0 ? v.domain : key;
+    if (typeof domain !== "string" || domain.length === 0) continue;
+    const notes = typeof v.notes === "string" ? v.notes : "";
+    const updatedAt =
+      typeof v.updatedAt === "number" && Number.isFinite(v.updatedAt)
+        ? v.updatedAt
+        : Date.now();
+    out[key] = { domain, notes, updatedAt };
+  }
+  return out;
 }
 
 /**

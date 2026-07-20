@@ -51,8 +51,12 @@ function makeThrowingProxy(name: string): unknown {
   const deny = (op: string, prop: PropertyKey): never => {
     throw new Error(`access denied by evaluate sandbox: ${name}.${op} ${String(prop)}`);
   };
+  // The target MUST be a function so the proxy is callable; otherwise a call
+  // like `DENY_FUNCTION(...)` throws `X is not a function` *before* the
+  // `apply`/`construct` traps can fire, and the denial message is never seen
+  // (it instead surfaces as a generic "JS evaluation failed").
   return new Proxy(
-    {},
+    function () {},
     {
       get: (_t, prop) => deny("get", prop),
       set: (_t, prop) => deny("set", prop),

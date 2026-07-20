@@ -21,14 +21,35 @@ import * as OpenAIChat from "../protocols/openai-chat";
 import type { LLMProvider } from "../provider";
 import { toLLMProvider as toLLMProviderBridge } from "../provider-bridge";
 import { assertSafeUserBaseURL } from "./openai-compatible-profile";
+import { LOCAL_PROVIDER_BASE_URLS } from "../route/ssrf";
 import type { Protocol } from "../route/client";
 
 export type Config = {
   baseURL?: string;
   // When true (user-configured provenance) the curated-local-provider loopback
-  // exemption is honored; otherwise loopback / RFC1918 / ULA are rejected.
+  // exemption MAY be honored — but only for a baseURL that exactly matches a
+  // curated local origin (Ollama / LiteLLM). For any other baseURL the SSRF
+  // guard stays strict, so this is NOT a blanket toggle that relaxes the guard
+  // for every provider.
   allowLocalExemption?: boolean;
 } & ProviderAuthOption<"optional">;
+
+/** True iff `url` exactly matches a curated local-provider origin (Ollama / LiteLLM). */
+function isCuratedLocalOriginUrl(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const origin = new URL(url).origin;
+    return LOCAL_PROVIDER_BASE_URLS.some((u) => {
+      try {
+        return new URL(u).origin === origin;
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return false;
+  }
+}
 
 /** Definition for one OpenAI-compatible provider facade. */
 export interface OpenAIChatFacadeDef<P extends Protocol<any, any, any, any> = Protocol> {
@@ -64,10 +85,13 @@ export function makeOpenAIChatFacade<P extends Protocol<any, any, any, any> = Pr
 
   function configure(input: Config = {}): OpenAIChatFacadeConfigure {
  // (SSRF guard): validate any user-supplied baseURL override before
- // building the route/endpoint. The trusted default is exempt. Forward the
- // user-provenance exemption flag so the curated-local-origin exemption applies
- // only for a user-configured baseURL.
-    assertSafeUserBaseURL(input.baseURL, def.id, input.allowLocalExemption);
+ // building the route/endpoint. The trusted default is exempt. The curated-
+ // local-provider loopback exemption is honored ONLY when the baseURL exactly
+ // matches a curated local origin (Ollama / LiteLLM) AND the user opted in; it
+ // is NOT a blanket toggle, so an arbitrary (non-curated) loopback / RFC1918
+ // baseUrl for any provider is always rejected by the guard.
+    const exemption = !!input.allowLocalExemption && isCuratedLocalOriginUrl(input.baseURL);
+    assertSafeUserBaseURL(input.baseURL, def.id, exemption);
     // Split the (possibly path-prefixed) base URL into origin + path-prefix and
     // re-attach the prefix to `def.path` so `buildURL`'s `new URL(path, base)`
     // (which replaces the base path for a leading-slash path) doesn't drop a

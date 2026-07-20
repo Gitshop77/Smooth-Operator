@@ -17,9 +17,6 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-beforeEach(() => {
-  process.stderr.write("PROBE_TEST: " + (expect.getState().currentTestName ?? "?") + "\n");
-});
 import {
   extractBrowserState,
   resetDomBaseline,
