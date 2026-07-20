@@ -100,9 +100,25 @@ function findGroupClose(src: string, openIdx: number): number {
       continue;
     }
     if (c === "[") {
-      const close = src.indexOf("]", j + 1);
-      if (close < 0) return -1;
-      j = close;
+     // Scan to the REAL class close, honoring backslash escapes. A naive
+     // `src.indexOf("]", j)` would stop at an escaped `]` (e.g. the `\]` in
+     // `([x\]]+)`, where the first `]` is escaped), making it treat the escaped
+     // bracket as the class terminator and the real terminator as a top-level
+     // `)` at depth 0 — so `findGroupClose` returns a wrong/early close and the
+     // nested-quantifier / ambiguous-alternation ReDoS check can miss a
+     // catastrophic pattern. `firstCharSet` already honors escapes; this must
+     // match it (finding: char-class skip inside-group boundary).
+      let k = j + 1;
+      while (k < src.length) {
+        if (src[k] === "\\") {
+          k += 2;
+          continue;
+        }
+        if (src[k] === "]") break;
+        k++;
+      }
+      if (k >= src.length) return -1;
+      j = k;
       continue;
     }
     if (c === "(") {
@@ -350,9 +366,19 @@ function groupHasDangerousNestedQuantifier(src: string, openIdx: number, closeId
       continue;
     }
     if (c === "[") {
-      const close = src.indexOf("]", j + 1);
-      if (close < 0 || close > closeIdx) break;
-      j = close;
+     // Honor escapes when locating the class close (mirrors `findGroupClose`):
+     // an escaped `]` inside the class must not be treated as the terminator.
+      let k = j + 1;
+      while (k < src.length) {
+        if (src[k] === "\\") {
+          k += 2;
+          continue;
+        }
+        if (src[k] === "]") break;
+        k++;
+      }
+      if (k >= src.length || k > closeIdx) break;
+      j = k;
       continue;
     }
     if (c === "(") {
@@ -392,8 +418,15 @@ export function hasBackreference(pattern: string): boolean {
   for (let i = 0; i < pattern.length - 1; i++) {
     if (pattern[i] === "\\") {
       const d = pattern.charCodeAt(i + 1);
-      if (d >= 49 && d <= 57) return true; // '1'..'9'
-      if (d === 107 && pattern[i + 2] === "<") return true; // '\k<' named backreference
+      if (d >= 49 && d <= 57) return true; // '1'..'9' numeric backreference
+     // Named backreferences come in three JS-accepted forms: `\k<name>`,
+     // `\k{name}`, and `\k'name'`. Detect all three so the static ReDoS guard's
+     // coverage is consistent (the RegExp constructor would reject the `{`/`'`
+     // variants anyway, but we want to catch them before we ever call it).
+      if (d === 107) {
+        const c2 = pattern[i + 2];
+        if (c2 === "<" || c2 === "{" || c2 === "'") return true;
+      }
       i++;
     }
   }
@@ -561,13 +594,19 @@ export async function handleSearchPage(
  // redaction calls (one per matched node), never per visited node.
       const safeText = await redactSecrets(text);
  // Re-locate the match in the redacted text so the snippet stays centered on
- // the match even if redaction shifted offsets; fall back to the original
- // offsets if the match no longer resolves after redaction.
-      const safeLoc = locateMatch(safeText, regex, pattern, needle, action.case_sensitive) ?? loc;
+ // the match even if redaction shifted offsets. If the match no longer
+ // resolves after redaction, the pre-redaction `loc` offsets are STALE — they
+ // index into the original `text`, whose length differs from `safeText` once
+ // secrets are replaced by atomic markers — so reusing them would slice the
+ // snippet at the wrong position (and could even go out of bounds). In that
+ // case, center the window on the node start (idx 0) instead of the lost
+ // match position.
+      const redactedLoc = locateMatch(safeText, regex, pattern, needle, action.case_sensitive);
+      const sliceLoc = redactedLoc ?? { idx: 0, len: safeText.length };
  // Center the returned snippet on the actual match (not the node start) so the
  // LLM sees the relevant region even when the match sits mid-node.
-      const start = Math.max(0, safeLoc.idx - 40);
-      const end = safeLoc.idx + safeLoc.len + 40;
+      const start = Math.max(0, sliceLoc.idx - 40);
+      const end = sliceLoc.idx + sliceLoc.len + 40;
       const ctx = safeText.slice(start, end).trim().slice(0, LIMITS.searchPageContextChars);
       results.push(`- ${ctx.replace(CONTROL_CHARS_RE, "")}`);
       count++;

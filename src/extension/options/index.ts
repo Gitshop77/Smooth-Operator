@@ -71,8 +71,11 @@ tabs.forEach((tab) => {
 });
 
 // ARIA tablist keyboard navigation (Left/Right/Up/Down/Home/End).
-const tablist = $("tablist") as HTMLElement;
-tablist.addEventListener("keydown", (e) => {
+// Null-guard: if #tablist is absent from the markup, skip wiring rather than
+// throwing at module-eval and aborting the rest of options init (auto-save
+// wiring, tab renderers, about-version).
+const tablist = $("tablist") as HTMLElement | null;
+if (tablist) tablist.addEventListener("keydown", (e) => {
   const idx = tabs.indexOf(document.activeElement as HTMLButtonElement);
   if (idx === -1) return;
   let next = -1;

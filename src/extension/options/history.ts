@@ -207,6 +207,13 @@ document.getElementById("importHistoryFile")?.addEventListener("change", async (
       await alertModal({ title: "Invalid file", message: "Invalid file: expected an array of runs." });
       return;
     }
+ // Load existing runs up-front so their serialized sizes can seed the
+ // cumulative import budget below — otherwise an existing + imported total
+ // can exceed the ~5 MB chrome.storage.local quota and make replaceAllRuns
+ // throw a generic QuotaExceededError (finding: import cap ignored existing
+ // run sizes).
+    const rh = await import("@/lib/agent/run-history");
+    const existing = await rh.loadRuns();
  // Validate every entry against the RunHistoryEntry shape; reject
  // non-conforming rows instead of storing garbage. Also bound each entry's
  // serialized size so a single multi-MB transcript can't blow the
@@ -218,7 +225,16 @@ document.getElementById("importHistoryFile")?.addEventListener("change", async (
  // still overflow the ~5 MB chrome.storage.local quota at replaceAllRuns time,
  // so we also cap the aggregate serialized size well under the quota.
     const CUMULATIVE_BUDGET_BYTES = 4 * 1024 * 1024; // 4 MiB total
-    let cumulativeBytes = 0;
+ // Seed the budget with the serialized size of the EXISTING runs, since they
+ // are always re-persisted as part of `merged` — valid entries are only added
+ // while the running total (existing + accepted imports) stays under the cap.
+    let cumulativeBytes = existing.reduce((sum, r) => {
+      try {
+        return sum + JSON.stringify(r).length;
+      } catch {
+        return sum;
+      }
+    }, 0);
     const valid = imported.filter((e) => {
       if (!isRunHistoryEntry(e)) return false;
       let size = 0;
@@ -232,8 +248,6 @@ document.getElementById("importHistoryFile")?.addEventListener("change", async (
       cumulativeBytes += size;
       return true;
     });
-    const rh = await import("@/lib/agent/run-history");
-    const existing = await rh.loadRuns();
  // Keep the 50 most-recent runs across BOTH the import and existing history
  // (sorted by startedAt desc) so importing a full file never silently wipes
  // prior runs (finding: import discards all existing history when valid>=50).
@@ -279,7 +293,13 @@ document.getElementById("importHistoryFile")?.addEventListener("change", async (
  // Some valid entries may be dropped by the 50-run cap (after dedup/sort), so
  // the count actually stored is `validKept`, not `valid.length`. Report the
  // real number and warn about the silently-dropped valid runs.
-    const validKept = merged.filter((r) => valid.includes(r as (typeof valid)[number])).length;
+ // Count valid entries that survived into `merged` BY KEY (startedAt|task),
+ // not by reference identity. A re-imported run that duplicates an existing
+ // entry is kept in `merged` as the EXISTING object reference, so a
+ // reference-identity `valid.includes(r)` check would wrongly report it as a
+ // dropped valid run (finding: validKept/validDropped miscount on duplicates).
+    const mergedKeys = new Set(merged.map((r) => keyOf(r)));
+    const validKept = valid.filter((r) => mergedKeys.has(keyOf(r))).length;
     const validDropped = valid.length - validKept;
     await alertModal({
       title: "Import complete",

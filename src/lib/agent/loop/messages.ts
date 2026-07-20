@@ -77,7 +77,12 @@ const REDACTION_FAILED = "[REDACTED: redaction failed]";
  * runs (and `redactKeyShapes` itself masks on throw).
  */
 async function redactBoth(s: string): Promise<string> {
-  const stored = await redactSecrets(s).catch(() => REDACTION_FAILED);
+ // Coerce defensively: history items can carry `message: undefined` (the
+ // `redactHistoryForPrompt` guard anticipates this). Passing `undefined` to
+ // `redactSecrets` can throw synchronously, which `.catch` would NOT capture,
+ // aborting the whole prompt build — so normalize to a string first.
+  const str = typeof s === "string" ? s : "";
+  const stored = await redactSecrets(str).catch(() => REDACTION_FAILED);
   return redactKeyShapes(stored);
 }
 
@@ -325,12 +330,15 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
     elementsText = elementsText.slice(0, ELEMENTS_TEXT_CHAR_CAP) +
       `\n…[truncated ${dropped} chars of interactive elements]`;
   }
-  const redactedElementsText = await redactBoth(elementsText);
-  const redactedTitle = await redactBoth(browserState.title);
-  const redactedUrl = await redactBoth(browserState.url);
-  const redactedTabsBlock = await redactBoth(tabsBlock);
-  const redactedAxTree = browserState.axTree ? await redactBoth(browserState.axTree) : undefined;
-  const redactedPageInfo = await redactBoth(browserState.pageInfo);
+ // Fail CLOSED like `redactHistoryForPrompt`: a key-shape redaction throw must
+ // not abort the whole navigator message build. Each redaction degrades to the
+ // `REDACTION_FAILED` placeholder rather than emitting unredacted content.
+  const redactedElementsText = await redactBoth(elementsText).catch(() => REDACTION_FAILED);
+  const redactedTitle = await redactBoth(browserState.title).catch(() => REDACTION_FAILED);
+  const redactedUrl = await redactBoth(browserState.url).catch(() => REDACTION_FAILED);
+  const redactedTabsBlock = await redactBoth(tabsBlock).catch(() => REDACTION_FAILED);
+  const redactedAxTree = browserState.axTree ? await redactBoth(browserState.axTree).catch(() => REDACTION_FAILED) : undefined;
+  const redactedPageInfo = await redactBoth(browserState.pageInfo).catch(() => REDACTION_FAILED);
 
  // Redact secret values from any history-extracted content the agent captured
  // in a previous step (e.g. via the `extract` action) before it is wrapped and
@@ -387,7 +395,7 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
  // a redacted secret could leak straight back to the provider (finding:
  // secrets leak through the compaction summarization path).
   const redactedCompacted = args.compactedMemory
-    ? await redactBoth(args.compactedMemory)
+    ? await redactBoth(args.compactedMemory).catch(() => REDACTION_FAILED)
     : undefined;
   const compactedMemoryBlock = redactedCompacted
     ? `\n<compacted_memory>\n${wrapUntrusted(redactedCompacted)}\n</compacted_memory>`
@@ -481,8 +489,8 @@ export async function buildPlannerUserMessage(args: PlannerMessageArgs): Promise
  // wrapped and sent to the planner provider. The navigator path redacts these
  // same values via `redactSecrets`; the planner must stay symmetric so secret
  // URLs (token/basic-auth) never cross the network.
-  const redactedUrl = await redactBoth(url);
-  const redactedTabsBlock = await redactBoth(tabsBlock);
+  const redactedUrl = await redactBoth(url).catch(() => REDACTION_FAILED);
+  const redactedTabsBlock = await redactBoth(tabsBlock).catch(() => REDACTION_FAILED);
 
  // Pass the FULL redacted navigator history to renderHistory — it slices to
  // the last PLANNER_HISTORY_LIMIT items AND emits a `<sys>[N previous steps
@@ -507,7 +515,7 @@ export async function buildPlannerUserMessage(args: PlannerMessageArgs): Promise
  // the summary before it reaches the provider (the compaction path summarizes
  // raw extracted content that may carry round-tripped secrets).
   const redactedCompacted = args.compactedMemory
-    ? await redactBoth(args.compactedMemory)
+    ? await redactBoth(args.compactedMemory).catch(() => REDACTION_FAILED)
     : undefined;
   const compactedMemoryBlock = redactedCompacted
     ? `\n<compacted_memory>\n${wrapUntrusted(redactedCompacted)}\n</compacted_memory>`
@@ -563,7 +571,7 @@ function renderHistory(history: HistoryItem[], limit: number, total = history.le
       for (const r of h.results) {
  // `r.message` can carry page-derived content (e.g. a `navigate`-result
  // URL or an `extract`-style message) — wrap it as untrusted data.
-        out += `- ${r.action.type}: ${wrapUntrusted(r.message)}${r.success ? "" : " (FAILED)"}\n`;
+        out += `- ${r.action.type}: ${wrapUntrusted(r.message ?? "")}${r.success ? "" : " (FAILED)"}\n`;
         if (r.extractedContent) {
  // Surface extracted content so the LLM can use it next step.
  // Page-derived extracted content (e.g. from the `extract` action) is

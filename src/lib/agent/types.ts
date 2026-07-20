@@ -326,8 +326,8 @@ export interface AgentConfig {
  * Whether to enable early-stop detection. When true, the orchestrator
  * calls {@link earlyStop} after each step and stops the run if the agent
  * is clearly stuck (N consecutive parse failures OR N consecutive
- * equivalent actions). Default `false` — existing behavior is preserved
- * when the flag is omitted.
+ * equivalent actions). Default `true` (matches `DEFAULT_CONFIG.enableEarlyStop`)
+ * — early-stop detection is on unless explicitly disabled.
  */
   enableEarlyStop?: boolean;
   /**

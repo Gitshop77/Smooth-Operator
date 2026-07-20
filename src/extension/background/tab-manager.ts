@@ -528,6 +528,9 @@ export async function executeActionsInTab(
         if (typeof rAny.text === "string") {
           patch.text = await redactSecrets(rAny.text);
         }
+        if (typeof r.message === "string") {
+          patch.message = await redactSecrets(r.message);
+        }
         return { ...r, ...patch };
       }
       return r;
@@ -622,7 +625,7 @@ export async function handleTabAction(
  // The closed tab was the last one — clear the pointer so we don't keep
  // referencing a now-closed tab (which would make the next navigate/
  // search act on a dead tab id). A 0 sentinel means "no active tab".
- // runState.currentTabId = 0;
+          runState.currentTabId = 0;
           await saveRunState({ currentTabId: 0 });
         }
       }

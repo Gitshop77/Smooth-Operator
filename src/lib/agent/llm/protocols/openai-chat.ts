@@ -116,9 +116,55 @@ function normalizeStrictSchema(node: unknown, depth = 0): unknown {
   if ("$ref" in refObj) return node;
   const obj: Record<string, unknown> = { ...refObj };
 
- // 1. Object schemas: enforce `additionalProperties: false` + full `required`
- // FIRST, so a later nullable wrap captures an already-strict object.
-  if (obj.type === "object" && obj.properties && typeof obj.properties === "object") {
+ // 1+2. Object strictness + nullable rewrite.
+ // A node is "nullable" either via the forbidden `nullable: true` keyword OR
+ // via a `type: [..., "null"]` union form — both must be rewritten to a
+ // strict-compliant `anyOf: [<non-null branch>, { type: "null" }]`. The
+ // non-null branch must itself be strict: only an OBJECT branch carries
+ // `properties`/`additionalProperties`/`required`, so a string/number branch
+ // never gets object keywords (which would make OpenAI strict mode reject the
+ // schema with a 400). The top-level node must NOT keep object keywords as
+ // siblings of `anyOf` either.
+  const isNullable =
+    obj.nullable === true || (Array.isArray(obj.type) && (obj.type as string[]).includes("null"));
+  const isObjectNode =
+    obj.type === "object" || (Array.isArray(obj.type) && (obj.type as string[]).includes("object"));
+
+  if (isNullable) {
+    const baseType = obj.type as string | string[] | undefined;
+    let nonNullTypes: string[];
+    if (Array.isArray(baseType)) nonNullTypes = baseType.filter((t) => t !== "null");
+    else if (typeof baseType === "string") nonNullTypes = [baseType];
+    else nonNullTypes = []; // untyped — treat the branch as object-shaped
+
+    const branch: Record<string, unknown> = { ...obj };
+    delete branch.nullable;
+    delete branch.type;
+    delete branch.properties;
+    delete branch.additionalProperties;
+    delete branch.required;
+
+   // Apply object strictness ONLY to the object branch, not to scalar branches.
+    const branchIsObject = nonNullTypes.includes("object") || nonNullTypes.length === 0;
+    if (branchIsObject && obj.properties && typeof obj.properties === "object") {
+      const props = obj.properties as Record<string, unknown>;
+      branch.additionalProperties = false;
+      const required = Array.isArray(obj.required) ? [...(obj.required as string[])] : [];
+      for (const key of Object.keys(props)) {
+        if (!required.includes(key)) required.push(key);
+      }
+      branch.properties = obj.properties;
+      branch.required = required;
+    }
+
+    obj.anyOf = [branch, { type: "null" }];
+    delete obj.nullable;
+    delete obj.type;
+    delete obj.properties;
+    delete obj.additionalProperties;
+    delete obj.required;
+  } else if (isObjectNode && obj.properties && typeof obj.properties === "object") {
+   // Non-nullable object: enforce `additionalProperties: false` + full `required`.
     const props = obj.properties as Record<string, unknown>;
     obj.additionalProperties = false;
     const required = Array.isArray(obj.required) ? [...(obj.required as string[])] : [];
@@ -128,32 +174,12 @@ function normalizeStrictSchema(node: unknown, depth = 0): unknown {
     obj.required = required;
   }
 
- // 2. Nullable: rewrite to `anyOf: [<non-null branch>, { type: "null" }]`.
- // The non-null branch is the (already-normalized) object above, so it is
- // strict-compliant (additionalProperties:false + required). Previously the
- // branch was built AFTER the object block had been skipped (type deleted),
- // producing a non-strict `anyOf` that OpenAI strict mode rejects
- // .
-  if (obj.nullable === true) {
-    delete obj.nullable;
-    const baseType = obj.type as string | string[] | undefined;
-    const nonNullType = Array.isArray(baseType) ? baseType : (baseType ?? "string");
-    obj.anyOf = [{ ...obj, type: nonNullType }, { type: "null" }];
-    delete obj.type;
-   // The non-null branch (anyOf[0]) already carries these via the spread
-   // above; leaving them as siblings of `anyOf` violates OpenAI strict-mode
-   // schema rules (object keywords alongside a union keyword).
-    delete obj.properties;
-    delete obj.additionalProperties;
-    delete obj.required;
-  }
-
  // 3. Recurse into child schemas.
  // Bound only the descent, not the local object fixup above: even at the
  // depth boundary the object normalization must still apply so deeply-nested
  // object schemas remain strict-compliant (additionalProperties:false +
  // full `required`) and don't trigger an OpenAI strict-mode 400.
-  if (depth >= 24) return obj;
+  if (depth >= 64) return obj;
   for (const key of ["items", "anyOf", "allOf", "oneOf", "not"]) {
     const child = obj[key];
     if (Array.isArray(child)) obj[key] = child.map((c) => normalizeStrictSchema(c, depth + 1));

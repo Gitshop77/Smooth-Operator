@@ -71,7 +71,10 @@ function modifierBitmask(keys: string): number {
 
 /** True when the error indicates the debugger is already attached. */
 function isAlreadyAttachedError(e: unknown): boolean {
-  return e instanceof Error && /already/i.test(e.message);
+ // Match `already attached` specifically, not any `already`-containing string.
+ // A loosely-scoped `/already/i` would also classify `Target already closed`
+ // or `already detached` as "attach succeeded", masking a real failure.
+  return e instanceof Error && /already attached/i.test(e.message);
 }
 
 /** CDP mouse-event `type` values accepted by `Input.dispatchMouseEvent`. */
@@ -105,8 +108,15 @@ export async function attachDebugger(tabId: number): Promise<boolean> {
 export async function detachDebugger(tabId: number): Promise<void> {
   try {
     await chrome.debugger.detach({ tabId });
-  } catch {
- // Already detached — fine.
+  } catch (e: unknown) {
+ // Already detached is benign — the target was gone before we tried.
+    if (e instanceof Error && /already detached/i.test(e.message)) return;
+ // Any other detach failure is unexpected (e.g. the tab still exists but the
+ // debugger session errored). Surface it for observability rather than
+ // swallowing everything — but do NOT rethrow from this cleanup path, since
+ // `detachDebugger` is typically called from a `finally` block and rethrowing
+ // would mask the original error that sent us into cleanup.
+    console.warn(`[cdp-controller] detachDebugger(${tabId}) failed:`, e);
   }
 }
 

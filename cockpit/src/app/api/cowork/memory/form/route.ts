@@ -156,7 +156,11 @@ function redactFormMemory(formDataJson: string): string {
   }
   if (parsed === null || typeof parsed !== 'object') {
  // Scalar (string/number/boolean) or null: no field name to match against.
-    return looksLikeSecret(parsed) ? REDACTED : JSON.stringify(parsed);
+ // Coerce to a string before the shape check — `looksLikeSecret` only
+ // inspects strings, so a bare NUMERIC secret (a stored PIN / OTP / numeric
+ // auth code) would otherwise pass through unmasked (finding: bare numeric
+ // scalar secret not masked in the response copy).
+    return looksLikeSecret(String(parsed)) ? REDACTED : JSON.stringify(parsed);
   }
   return JSON.stringify(redactNode(parsed));
 }
@@ -188,7 +192,10 @@ export function scrubFormMemoryInput(formDataJson: string): string {
     return looksLikeSecret(formDataJson) ? '{}' : formDataJson;
   }
   if (parsed === null || typeof parsed !== 'object') {
-    return looksLikeSecret(parsed) ? '{}' : formDataJson;
+ // Coerce to a string before the shape check: `looksLikeSecret` only inspects
+ // strings, so a bare numeric secret at the top level would otherwise be
+ // persisted verbatim (finding: numeric scalars not dropped at write time).
+    return looksLikeSecret(String(parsed)) ? '{}' : formDataJson;
   }
   const scrubbed = stripSensitiveKeys(parsed);
   if (scrubbed === undefined) return '{}';
@@ -212,9 +219,21 @@ function stripSensitiveKeys(node: unknown): unknown {
     const out: Record<string, unknown> = {};
     for (const key of Object.keys(obj)) {
       if (SENSITIVE_FIELD_RE.test(key)) continue; // drop sensitive key entirely
-      const v = stripSensitiveKeys(obj[key]);
-      if (v === undefined) continue;
-      out[key] = v;
+      const v = obj[key];
+     // The field name didn't match, but a secret-SHAPED *value* under a
+     // non-listed key (e.g. `sessionId`, `auth`, `apikeyfield`) would still
+     // persist as plaintext at rest. Mirror `redactNode` and mask string values
+     // that `looksLikeSecret` flags rather than recursing into them (finding:
+     // at-rest scrub only dropped by field name, so secret values under
+     // non-listed keys persisted). Bias toward masking — a false positive costs
+     // one masked benign value, a false negative leaks a secret.
+      if (typeof v === 'string' && looksLikeSecret(v)) {
+        out[key] = REDACTED;
+        continue;
+      }
+      const sv = stripSensitiveKeys(v);
+      if (sv === undefined) continue;
+      out[key] = sv;
     }
     return out;
   }

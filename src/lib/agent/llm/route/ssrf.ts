@@ -560,9 +560,12 @@ function isLikelyHostname(host: string): boolean {
  * - `resolved` : a resolver answered (possibly with an empty IP list).
  * - `error` : a resolver existed but the lookup threw / returned an error
  * (fail CLOSED on this — see the caller).
- * - `unavailable`: no DNS resolver API exists in this runtime at all (degrade
- * to fail-open with a warning — only reachable outside a
- * Chrome extension SW, which always has `chrome.dns`).
+ * - `unavailable`: no DNS resolver API exists in this runtime at all. This is
+ * treated as FAIL CLOSED (the caller refuses the URL), NOT fail-open — without
+ * a resolver we cannot verify the real target IP, so a hostname resolving to a
+ * cloud-metadata / internal address would be a live SSRF exfil path. Only
+ * reachable outside a Chrome extension SW (which always has `chrome.dns`), and
+ * there refusing is the safe default. Do not "align" this to fail-open.
  */
 type DnsOutcome =
   | { kind: "resolved"; ips: string[] }
@@ -775,12 +778,18 @@ export function validateWebhookUrl(url: string): SsrfCheckResult {
  * a DNS API is available) and rejects resolutions into the blocked ranges
  * (cloud-metadata / link-local / unspecified / CGNAT / RFC1918 / IPv6 ULA).
  *
- * When no DNS resolver is available in the current runtime it degrades to the
- * synchronous `validateWebhookUrl` check (fail-open with a warning) so a
- * self-hosted relay webhook (e.g. `localhost`) keeps working where DNS
- * resolution is unavailable. When a resolver IS available but the lookup fails
- * (transient error / timeout) it FAILS CLOSED rather than risk reaching an
- * internal / metadata host. The literal-host checks in `validateWebhookUrl`
+ * When no DNS resolver is available in the current runtime it FAILS CLOSED
+ * (the caller refuses the webhook URL), NOT fail-open — a webhook URL is
+ * settable through an (untrusted) settings-sync vector and POSTed with task
+ * text by `task-queue.ts`, so degrading to the synchronous check would be a
+ * genuine exfil path (a public hostname that rebinds to an internal address at
+ * fetch time would be reachable). In a Chrome extension service worker
+ * `chrome.dns.resolve` IS available, so this path is effectively unreachable in
+ * production; the literal-host guard (isBlockedWebhookHost) still blocks
+ * .internal / .local / single-label hostnames. When a resolver IS available but
+ * the lookup fails (transient error / timeout) it likewise FAILS CLOSED rather
+ * than risk reaching an internal / metadata host. The literal-host checks in
+ * `validateWebhookUrl`
  * (incl. `isBlockedWebhookHost`) are never weakened.
  */
 export async function resolveAndValidateWebhookUrl(

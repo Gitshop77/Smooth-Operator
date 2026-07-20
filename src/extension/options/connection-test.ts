@@ -125,9 +125,16 @@ function canonicalHost(provider: string): { host: string; suffix?: boolean } | n
   if (fromBase) return { host: new URL(fromBase).host };
   switch (provider) {
     case "openai": return { host: "api.openai.com" };
-    case "anthropic": return { host: "api.anthropic.com" };
+   // Suffix match so legitimate regional subdomains (e.g. `eu.api.anthropic.com`)
+   // are accepted, not just the exact `api.anthropic.com` host (finding:
+   // canonical-host confinement rejected the EU endpoint).
+    case "anthropic": return { host: "anthropic.com", suffix: true };
     case "gemini": return { host: "generativelanguage.googleapis.com" };
-    case "google": return { host: "ai.googleapis.com" };
+   // Suffix match on `googleapis.com` so both the standard `ai.googleapis.com`
+   // and the regional Vertex AI endpoints (`<region>-aiplatform.googleapis.com`)
+   // are accepted (finding: canonical-host confinement rejected regional
+   // Vertex AI endpoints).
+    case "google": return { host: "googleapis.com", suffix: true };
     case "azure": return { host: ".openai.azure.com", suffix: true };
     default:
       // Tail / catalog-derived providers (e.g. OpenCode, or any dataset provider
@@ -389,7 +396,10 @@ export async function testProviderConnection(
         }
         const root = base.replace(/\/+$/, "");
         url = `${root}/models`;
-        headers = { Authorization: `Bearer ${apiKey}` };
+       // Only attach a Bearer credential when a key is actually present. A
+       // keyless catalog provider would otherwise be sent a malformed empty
+       // `Bearer ` header (finding: empty Bearer header for keyless providers).
+        headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
         // A catalog-derived provider may declare needsKey=false (e.g. a local
         // or keyless gateway). Use the metadata rather than always requiring a
         // key, so a keyless provider isn't wrongly rejected.

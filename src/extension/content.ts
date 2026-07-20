@@ -318,7 +318,7 @@ const log: (...args: unknown[]) => void = console.warn.bind(console, "[content]"
  // IS enforced, the executor's own domain checks govern navigation, so
  // we don't double-gate here.
                 let result: ActionResult | undefined;
-                if (!policyEnforced && action.type === "navigate") {
+                if (!policyEnforced && (action.type === "navigate" || action.type === "search")) {
                   let sameOrigin = false;
                   if (action.type === "navigate") {
                     try {
@@ -327,6 +327,8 @@ const log: (...args: unknown[]) => void = console.warn.bind(console, "[content]"
                       sameOrigin = false;
                     }
                   }
+                  // `search` always targets a cross-origin engine, so sameOrigin
+                  // stays false and it is refused under the no-policy fail-closed gate.
                   if (!sameOrigin) {
                     result = {
                       action,

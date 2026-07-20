@@ -59,9 +59,10 @@ import { profiles, byProvider } from "../lib/agent/llm/providers/openai-compatib
  * - the `default` (OpenAI-compatible) branch in `buildProvider`, which
  * synthesizes a profile for providers without a dedicated `case`
  * (deepseek, qwen, groq, ollama, ...);
- * - the dedicated `case "google"` branch (Vertex AI), which has no static
- * default URL and falls back to `DEFAULT_BASE_URLS["google"]` when the
- * user supplies no `baseUrl`.
+ * - the dedicated `case "google"` branch (Vertex AI), which requires an
+ * explicit `baseUrl` from the user and THROWS if none is supplied (it does
+ * NOT fall back to this map; `google` is intentionally absent here, matching
+ * the `google`/Vertex facade which has no static default URL).
  *
  * Providers that have their OWN dedicated `case` AND a static default in their
  * facade (`openai`, `anthropic`, `gemini`, `xai`, `openrouter`, `azure`) never

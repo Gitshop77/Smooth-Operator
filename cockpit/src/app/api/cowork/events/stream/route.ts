@@ -235,19 +235,28 @@ export async function GET(req: NextRequest): Promise<Response> {
  // events: without the guard, the same event would be re-emitted on every
  // hydration and surface as duplicate SSE messages to consumers.
       const emitEvent = (evt: BufferedEvent): void => {
-        if (typeof evt?.id !== 'number' || !Number.isFinite(evt.id)) return;
-        if (evt.id <= sinceId) return;
-        sinceId = evt.id;
-        const sseId = String(evt.id);
-        const sseEvent = String(evt.channel).replace(/[\r\n]/g, ' ');
-        const redactedPayload = JSON.parse(redactSecrets(JSON.stringify(evt.payload ?? null)));
-        const sseData = JSON.stringify({
-          id: evt.id,
-          channel: evt.channel,
-          payload: redactedPayload,
-          ts: typeof evt.ts === 'number' ? evt.ts : Date.now(),
-        });
-        safeEnqueue(`id: ${sseId}\nevent: ${sseEvent}\ndata: ${sseData}\n\n`);
+        try {
+          if (typeof evt?.id !== 'number' || !Number.isFinite(evt.id)) return;
+          if (evt.id <= sinceId) return;
+          sinceId = evt.id;
+          const sseId = String(evt.id);
+          const sseEvent = String(evt.channel).replace(/[\r\n]/g, ' ');
+         // `redactSecrets` is synchronous; `JSON.parse` over its output is the
+         // only throw risk here. A malformed upstream payload must NOT surface
+         // as an unhandled exception inside the socket.io callback (which would
+         // tear down the whole SSE stream) — skip the bad event and keep
+         // streaming (finding: emitEvent could throw and break the stream).
+          const redactedPayload = JSON.parse(redactSecrets(JSON.stringify(evt.payload ?? null)));
+          const sseData = JSON.stringify({
+            id: evt.id,
+            channel: evt.channel,
+            payload: redactedPayload,
+            ts: typeof evt.ts === 'number' ? evt.ts : Date.now(),
+          });
+          safeEnqueue(`id: ${sseId}\nevent: ${sseEvent}\ndata: ${sseData}\n\n`);
+        } catch (err) {
+          console.warn('[cowork] events/stream emitEvent failed; skipping event', err);
+        }
       };
 
  // Hydration: the mini-service sends the last 50 buffered events as a

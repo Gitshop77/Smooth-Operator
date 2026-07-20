@@ -119,27 +119,36 @@ export function extractJson(raw: string): string {
     // caps total work against adversarial input — but only AFTER we have at
     // least one valid JSON span to fall back on, so the real payload is not
     // skipped just because budget was consumed by earlier unbalanced `{`.
-    if (checked >= BUDGET_BYPASS_CANDIDATES && spans.length === 0 && scanned + span > SCAN_BUDGET) break;
+    if (checked >= BUDGET_BYPASS_CANDIDATES && scanned + span > SCAN_BUDGET) break;
     scanned += span;
     checked++;
     const end = balancedEnd(s, start);
     if (end !== -1) spans.push([start, end]);
   }
 
- // Prefer the FIRST balanced span that is actually VALID JSON. This skips
- // non-JSON balanced prose (e.g. `{ once }`) and selects the real payload.
- // If no span parses (truncated/malformed output), fall back to the LARGEST
- // (outermost) balanced span so a complete nested object still wins over a
- // small inner fragment, and JSON.parse surfaces a useful syntax error.
+ // Pick the LARGEST valid (parseable) span. The docstring promises the
+ // LARGEST valid JSON object, not the first — a small valid fragment emitted
+ // in prose before the real payload (e.g. `{ "ok": true }`) must not shadow
+ // the genuine (larger) action payload. If no span parses (truncated/malformed
+ // output), fall back to the LARGEST (outermost) balanced span so a complete
+ // nested object still wins over a small inner fragment, and JSON.parse
+ // surfaces a useful syntax error.
+  let bestValid: [number, number] | null = null;
+  let bestValidLen = -1;
   for (const [start, end] of spans) {
     const candidate = s.slice(start, end + 1);
     try {
       JSON.parse(candidate);
-      return candidate;
+      const len = end - start;
+      if (len > bestValidLen) {
+        bestValidLen = len;
+        bestValid = [start, end];
+      }
     } catch {
-      // Not valid JSON — keep looking.
+      // Not valid JSON — keep looking for a larger valid span.
     }
   }
+  if (bestValid) return s.slice(bestValid[0], bestValid[1] + 1);
   if (spans.length > 0) {
     let best = spans[0];
     for (const span of spans) {

@@ -288,13 +288,34 @@ export async function handleClick(
       if (targetText) {
         const normalize = (s: string) => s.replace(/\s+/g, " ").trim();
         const needle = normalize(targetText);
+       // Mirror how `targetText` is derived from `el`: for value-bearing form
+       // controls (input/textarea/select) the visible label lives in `value` /
+       // `placeholder` / `aria-label`, NOT `textContent` (which is empty for an
+       // <input>). Comparing candidates by `textContent` alone would never
+       // match a target chosen by its value, so derive the candidate's
+       // comparable text the same way (finding: text-search fallback never
+       // matched value-bearing form controls).
+        const candidateText = (c: Element): string => {
+          const t = c.tagName.toLowerCase();
+          const ce = c as HTMLInputElement;
+          if (t === "input" || t === "textarea" || t === "select") {
+            return (
+              ce.value ||
+              ce.getAttribute("placeholder") ||
+              ce.getAttribute("aria-label") ||
+              ce.textContent ||
+              ""
+            ).trim();
+          }
+          return (c.textContent || "").trim();
+        };
         const all = document.querySelectorAll("*");
         let count = 0;
         let firstMatch: Element | null = null;
         for (let i = 0; i < all.length; i++) {
           const cand = all[i];
           const candTag = cand.tagName.toLowerCase();
-          const candText = cand.textContent || "";
+          const candText = candidateText(cand);
           if (
             candTag === targetType &&
             typeof (cand as HTMLElement).click === "function" &&

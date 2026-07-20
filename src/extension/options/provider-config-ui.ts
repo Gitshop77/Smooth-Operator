@@ -9,7 +9,7 @@
  * this module no longer keeps its own `PROVIDER_META` copy.
  */
 
-import { $, escapeHtml } from "@/extension/shared";
+import { $, escapeHtml, redactKeyLeak } from "@/extension/shared";
 import { PROVIDER_META, DEFAULT_PROVIDER_ID, catalogIdFor } from "./providers";
 import { testProviderConnection, type ConnectionTestResult } from "./connection-test";
 import type { CatalogModel } from "../../lib/agent/llm/catalog";
@@ -158,6 +158,7 @@ document.getElementById("testConnection")?.addEventListener("click", async () =>
     const raw = e instanceof Error ? e.message : String(e);
     let masked = raw;
     if (apiKey && apiKey.length >= 8) masked = masked.split(apiKey).join("[REDACTED]");
+    masked = redactKeyLeak(masked);
     testResult.textContent = `✗ ${masked.slice(0, 240)}`;
   } finally {
     testBtn.disabled = false;

@@ -18,7 +18,7 @@
  */
 
 /** Secret-detection patterns, compiled once at module scope (hot path). */
-const SECRET_SK_RE = /\bsk-[A-Za-z0-9]{20,}\b/g;
+const SECRET_SK_RE = /\bsk-[A-Za-z0-9_-]{20,}\b/g;
 const SECRET_AKIA_RE = /\bAKIA[0-9A-Z]{16}\b/g;
 const SECRET_XOX_RE = /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/gi;
 const SECRET_AIZA_RE = /\bAIza[0-9A-Za-z_-]{35}\b/g;
@@ -26,7 +26,7 @@ const SECRET_GSK_RE = /\bgsk-[A-Za-z0-9]{20,}\b/gi;
 const SECRET_GHP_RE = /\bghp_[A-Za-z0-9]{36}\b/g;
 const SECRET_GLPAT_RE = /\bglpat-[A-Za-z0-9_-]{20,}\b/g;
 const SECRET_DBURL_RE =
-  /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|rediss?|amqps?):\/\/[^\s:@/]+:[^\s:@/]+@[^\\s:@/]+(?::\d+)?(?:\/[^\\s]*)?/gi;
+  /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|rediss?|amqps?):\/\/[^\s:@/]+:[^\s/]+@([^\s:@/]+)(?::\d+)?(?:\/([^\s]*))?/gi;
 const SECRET_BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b/gi;
 const SECRET_JWT_RE =
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;

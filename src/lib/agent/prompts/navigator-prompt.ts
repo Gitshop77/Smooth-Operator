@@ -144,12 +144,23 @@ Set \`success\` to true ONLY if the entire request is complete. Otherwise false 
 Before calling done with success=true, re-read the user request and verify every part is done.`;
 
 /** JavaScript-execution guidance — shared by both prompt branches. */
-function evaluateGuidance(): string {
+function evaluateGuidance(mode: string): string {
+ // The run's mode governs whether `evaluate` may execute; the prompt must
+ // reflect the ACTUAL mode (the `mode` argument is threaded through from
+ // buildNavigatorPrompt) rather than a fixed "standard/restricted" sentence,
+ // so the model isn't told it is confirmation-gated in **restricted** mode
+ // where evaluate is actually blocked (finding: unused `mode` parameter).
+  const gate =
+    mode === "full_agentic"
+      ? "In **full_agentic** mode it runs freely when no other action works."
+      : mode === "restricted"
+        ? "In **restricted** mode it is **blocked** — emitting it is rejected by the executor, not merely prompted."
+        : "In **standard** mode it is **confirmation-gated** — emitting it triggers a user prompt rather than executing silently.";
   return `# JavaScript Execution (\`evaluate\`)
 
 \`evaluate\` runs JavaScript in the page and is always listed in the action set. Its availability is gated by the run's mode, NOT by this prompt:
-- In **full_agentic** mode it runs freely when no other action works.
-- In **standard** / **restricted** modes it is always **confirmation-gated** — emitting it triggers a user prompt (or is blocked) rather than executing silently. Use it sparingly and only when truly necessary; prefer the dedicated actions (\`click\`, \`input\`, \`extract\`, \`select_dropdown\`, \`search_page\`, …) whenever they suffice.`;
+- ${gate}
+Use it sparingly and only when truly necessary; prefer the dedicated actions (\`click\`, \`input\`, \`extract\`, \`select_dropdown\`, \`search_page\`, …) whenever they suffice.`;
 }
 
 export function buildNavigatorPrompt(
@@ -183,7 +194,7 @@ ${actionListForPrompt(safeMax, visionMode)}
 
 ${OUTPUT_FORMAT_BLOCK}
 
-${evaluateGuidance()}`;
+${evaluateGuidance(mode)}`;
   }
   return `You are Open Cowork — an autonomous browser agent that controls a real Chrome tab to accomplish the user's task. You operate in an iterative observe-reason-act loop. You can read pages, click elements, type text, scroll, navigate between websites, open and switch tabs, extract information, and submit forms — just like a human user.
 
@@ -304,7 +315,7 @@ ${ACTION_STEERING_BLOCK}
 
 ${OUTPUT_FORMAT_BLOCK}
 
-${evaluateGuidance()}
+${evaluateGuidance(mode)}
 
 # Worked Examples
 

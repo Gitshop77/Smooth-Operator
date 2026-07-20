@@ -20,7 +20,7 @@ export async function handleExtract(
   // source size (redaction can shrink/grow the text and mask the cutoff).
   const bodyText = rawText.slice(0, LIMITS.extractBodyChars);
   const truncated =
-    rawText.length >= LIMITS.extractBodyChars
+    rawText.length > LIMITS.extractBodyChars
       ? `\n\n[truncated: page content exceeded ${LIMITS.extractBodyChars} chars]`
       : "";
   const redacted = await redactSecrets(bodyText);

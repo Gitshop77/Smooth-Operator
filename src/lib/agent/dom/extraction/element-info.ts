@@ -102,7 +102,13 @@ export function looksLikeSecretSegment(seg: string): boolean {
  // Two-character-class runs with no special char (hex / base62 / lower+digit)
  // are high-entropy opaque tokens — redact at a longer length so hyphenated
  // route words (which carry a special char) are not falsely flagged.
-  if (classes >= 2 && !hasSpecial && seg.length >= 16) return true;
+ // Two-character-class runs with no special char (hex / base62 / lower+digit)
+ // are high-entropy opaque tokens — redact at >= 12 (a 12-char base36 token is
+ // ~62 bits of entropy; e.g. a `/reset/a1b2c3d4e5f6` token) so short opaque
+ // secrets are masked instead of forwarded to the LLM / run-history (finding:
+ // short alphanumeric secret segments were left unredacted). The dotted
+ // version/filename guard above keeps legitimate routes (e.g. `v1.2`) out.
+  if (classes >= 2 && !hasSpecial && seg.length >= 12) return true;
  // Three+ character classes (the original rule, lowered length threshold)
  // catches shorter mixed tokens (e.g. 12-char mixed ids).
   if (classes >= 3 && seg.length >= 12) return true;

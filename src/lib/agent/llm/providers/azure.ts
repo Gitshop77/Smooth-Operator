@@ -26,6 +26,7 @@ import type { LLMProvider } from "../provider";
 import { toLLMProvider as toLLMProviderBridge } from "../provider-bridge";
 import { encodeModelIdForUrl } from "../modelId";
 import { assertSafeUserBaseURL } from "./openai-compatible-profile";
+import { isCuratedLocalOriginUrl } from "./openai";
 
 export const id = "azure";
 
@@ -124,10 +125,12 @@ export function configure(input: Config = {}) {
 
  // Validate the FINAL baseURL (whether user-supplied OR resource-derived) so
  // the fetch URL is always checked, closing the gap where resource-derived
- // URLs previously bypassed the guard. Forward the user-provenance exemption
- // flag so the curated-local-origin exemption applies only for a user-configured
- // baseURL.
-  assertSafeUserBaseURL(baseURL, "azure", input.allowLocalExemption);
+ // URLs previously bypassed the guard. Forward the curated-local exemption flag
+ // (only true for a user-configured baseURL that exactly matches a curated
+ // local origin) so the loopback/RFC1918 exemption can never widen trust for a
+ // non-curated Azure baseURL — mirroring the openai.ts facade.
+  const exemption = !!input.allowLocalExemption && isCuratedLocalOriginUrl(baseURL);
+  assertSafeUserBaseURL(baseURL, "azure", exemption);
 
   return {
     id,

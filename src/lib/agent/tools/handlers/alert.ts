@@ -167,12 +167,12 @@ export async function handleAlertSendKeys(
         message: `Cannot type into a ${kind} dialog (only prompt accepts text)`,
       };
     }
-    mod.sendAlertText(action.text);
+    mod.sendAlertText(action.text ?? "");
     return {
       action,
       success: true,
       message:
-        `Queued ${action.text.length} chars for the next window.prompt() call ` +
+        `Queued ${(action.text ?? "").length} chars for the next window.prompt() call ` +
         `(the current dialog was already auto-dismissed with "")`,
     };
   } catch (e) {

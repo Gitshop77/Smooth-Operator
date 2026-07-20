@@ -129,8 +129,9 @@ function looksLikeSecret(v: string): boolean {
   // Ordinary multi-class secrets (e.g. a base64 blob).
   if (classes >= 2) return true;
   // High-entropy single-class secrets (pure-numeric / pure-alpha / pure-special
-  // tokens of 32+ chars) — the prior heuristic missed these entirely.
-  if (classes === 1 && t.length >= 32) return true;
+  // tokens of 16+ chars) — prefix-less EchoLeak-class tokens that the prior
+  // 32-char floor let through.
+  if (classes === 1 && t.length >= 16) return true;
   return false;
 }
 

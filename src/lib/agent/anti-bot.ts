@@ -158,7 +158,7 @@ export function detectChallengeInPage(): ChallengeInfo | null {
  // both title and body rather than just a single CSS class.
   const b = getBody();
   if (
-    title.indexOf("attention required") !== -1 && b.indexOf("blocked") !== -1
+    title.indexOf("attention required") !== -1 && b.toLowerCase().indexOf("blocked") !== -1
   ) {
     return { kind: "cloudflare-block", message: "Cloudflare block page" };
   }

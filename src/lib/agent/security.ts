@@ -585,10 +585,18 @@ function hostnameMatches(hostname: string, domain: string): boolean {
  // A leading-dot (`.example.com`) is a common "match subdomains of" convention
  // — strip it so it behaves as `example.com` (which already matches subdomains
  // via the `h.endsWith(".${d}")` check below) instead of being silently
- // discarded as malformed. A trailing dot (FQDN form, e.g. `example.com.`) is
- // normalized to the bare host so it still matches as intended.
+ // discarded as malformed. A leading-wildcard (`*.example.com`) is the same
+ // convention expressed as a glob — normalize it to `example.com` so the
+ // subdomain rule applies (mid-string wildcards like `a*.example.com` still
+ // have no defined meaning and are rejected below). A trailing dot (FQDN form,
+ // e.g. `example.com.`) is normalized to the bare host so it still matches.
+ // A trailing `:port` (e.g. `127.0.0.1:8080`, `example.com:3000`) is dropped so
+ // a "host:port" entry matches the bare host the way `URL.hostname` reports it
+ // (comparison here is host-only and never considers the port anyway).
   if (!d) return false;
   d = d.replace(/^\.+/, ""); // accept ".example.com" as "subdomains of example.com"
+  d = d.replace(/^\*\./, ""); // accept "*.example.com" as a subdomain wildcard
+  d = d.replace(/:\d+$/, ""); // drop a trailing :port so "host:port" entries match the host
   if (!d || d.includes('*') || /\s/.test(d)) return false;
   d = d.replace(/\.+$/, '');
   if (!d) return false;

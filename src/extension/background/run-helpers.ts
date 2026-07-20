@@ -129,15 +129,15 @@ async function getVisionSettings(): Promise<VisionSettings> {
 /** Build a short, human-readable detail suffix for a confirmation prompt. */
 function confirmationDetail(action: AgentAction): string {
   const a = action as unknown as {
-    type: string; text?: string; index?: number | string; indexStr?: string;
+    type: string; text?: string; keys?: string; index?: number | string; indexStr?: string;
   };
   switch (a.type) {
-    case "input_text":
+    case "input":
       return ` value "${a.text ?? ""}"`;
     case "click":
       return ` on element ${a.index ?? a.indexStr ?? ""}`;
-    case "type":
-      return ` text "${a.text ?? ""}"`;
+    case "send_keys":
+      return ` keys "${a.keys ?? ""}"`;
     default:
       return "";
   }

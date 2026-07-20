@@ -58,7 +58,7 @@ function getElementValue(el: Element): string {
       // module's purpose is to ignore transient input, exactly as it already
       // does for passwords). For stateful checkbox/radio controls we fold in
       // `checked` instead so meaningful state is still captured.
-      const transientTextTypes = ["password", "text", "email", "search", "tel", "url", "number"];
+      const transientTextTypes = ["password", "hidden", "text", "email", "search", "tel", "url", "number"];
       if (transientTextTypes.includes(el.type)) return "";
       if (el.type === "checkbox" || el.type === "radio") return el.checked ? "1" : "0";
     }

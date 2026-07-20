@@ -315,6 +315,9 @@ export function normalizeCustomSkill(raw: unknown): DomainSkill | null {
       sanitizeSkillText(d, SKILL_LIMITS.domain)
         .trim()
         .replace(/^https?:\/\//i, "")
+        .split(/[?#]/)[0]
+        .split("/")[0]
+        .replace(/:[0-9]+$/, "")
         .replace(/^\./, "")
         .replace(/^\*\./, "")
         .replace(/\/+$/, ""),

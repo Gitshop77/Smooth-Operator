@@ -54,7 +54,7 @@ export async function handleSaveAsPdf(
  // "invalid response" string and hide the real cause. Race a timeout so a
  // live SW handler that keeps the channel open (async) but never responds
  // cannot hang the orchestrator step indefinitely.
-    let timer: ReturnType<typeof setTimeout>;
+    let timer: ReturnType<typeof setTimeout> | undefined;
  // Race the SW call against the timeout AND the step's abort signal so a user
  // STOP is honored mid-step instead of waiting out the full 30s timeout.
     const abort = rejectOnAbort(ctx.signal);
@@ -71,6 +71,7 @@ export async function handleSaveAsPdf(
         abort.promise,
       ]);
     } finally {
+      if (timer) clearTimeout(timer);
       abort.cleanup();
     }
     if (typeof raw === "undefined") {

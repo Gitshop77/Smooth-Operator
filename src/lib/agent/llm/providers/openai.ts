@@ -35,7 +35,7 @@ export type Config = {
 } & ProviderAuthOption<"optional">;
 
 /** True iff `url` exactly matches a curated local-provider origin (Ollama / LiteLLM). */
-function isCuratedLocalOriginUrl(url: string | undefined): boolean {
+export function isCuratedLocalOriginUrl(url: string | undefined): boolean {
   if (!url) return false;
   try {
     const origin = new URL(url).origin;

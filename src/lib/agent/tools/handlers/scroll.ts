@@ -52,7 +52,7 @@ export async function handleScroll(
   action: Extract<Action, { type: "scroll" }>,
 ): Promise<ActionResult> {
   const down = action.down !== false;
-  const pages = action.pages;
+  const pages = action.pages ?? 1;
  // ~0.85 of a viewport height matches a typical "page down" feel; perturb the
  // per-page factor by a few percent so the scroll distance is not a perfectly
  // deterministic, repeatable fingerprint (humans vary per page too).

@@ -536,15 +536,18 @@ export function generateAccessibilityTree(
     }
 
     if (refId) {
- // Extract only the subtree for the given ref.
-      if (!Object.hasOwn(elementMap!, refId)) {
+ // Extract only the subtree for the given ref. Guard a null `elementMap`
+ // (e.g. a fresh page where init hasn't populated refs yet) so we return the
+ // graceful "not found" error instead of dereferencing a null map and throwing
+ // a TypeError (finding: refId path dereferenced potentially-null elementMap).
+      if (!elementMap || !Object.hasOwn(elementMap, refId)) {
         return {
           error: `Element with ref_id '${refId}' not found. It may have been removed from the page. Use read_page without ref_id to get the current page state.`,
           pageContent: "",
           viewport: { width: window.innerWidth, height: window.innerHeight },
         };
       }
-      const ref = elementMap![refId];
+      const ref = elementMap[refId];
       if (!ref) {
         return {
           error: `Element with ref_id '${refId}' not found. It may have been removed from the page. Use read_page without ref_id to get the current page state.`,

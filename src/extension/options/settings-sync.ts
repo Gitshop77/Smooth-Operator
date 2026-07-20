@@ -248,10 +248,16 @@ export function isHttpUrl(value: string): boolean {
 
 /** True if `candidate` is a valid IPv6 address literal (no brackets/port). */
 function isIpv6Literal(candidate: string): boolean {
-  if (!/^[0-9a-fA-F:]+$/.test(candidate)) return false;
-  if (candidate.includes("::")) return true; // compressed form
-  const groups = candidate.split(":");
-  return groups.length === 8 && groups.every((g) => /^[0-9a-fA-F]{1,4}$/.test(g));
+  if (!candidate) return false;
+  // Validate via the canonical URL parser so malformed inputs like "::",
+  // "::::", or "foo::bar" are rejected, while real explicit/compressed
+  // addresses (e.g. "::1", "2001:db8::1") are accepted.
+  try {
+    const u = new URL(`http://[${candidate}]`);
+    return u.hostname === candidate;
+  } catch {
+    return false;
+  }
 }
 
 /** True if `value` is a bare hostname (optionally `*.` wildcard), no scheme/path/port. */

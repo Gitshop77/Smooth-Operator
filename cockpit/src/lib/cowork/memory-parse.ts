@@ -12,7 +12,7 @@
 // arbitrary streamed text. Keep them in parity by intent, not by shared code.
 
 export const SENSITIVE_FIELD =
-  /(password|secret|cvv|ssn|token|otp|pwd)\b|(^|[^a-z])(pass|card|pin)([^a-z]|$)/i;
+  /(?:^|[^a-z])(password|secret|cvv|ssn|token|otp|pwd|pass|card|pin)/i;
 
 export const maskValue = (field: string, value: string): string =>
   SENSITIVE_FIELD.test(field) ? "••••••" : value;

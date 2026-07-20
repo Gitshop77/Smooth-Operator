@@ -72,7 +72,23 @@ export function createCompatibleCanvas(): CompatibleCanvas | null {
  * surface for a screenshot annotator that should only handle raster captures).
  */
 function assertDataUrl(url: string, label: string): void {
-  if (typeof url !== "string" || !/^data:image\/(?!svg\+xml)[a-zA-Z0-9.+-]+(?:;[^,]*)*,/i.test(url)) {
+  if (typeof url !== "string") throw new Error(`${label}: expected a raster data:image URL`);
+ // Parse out the media type (everything before the first comma) and
+ // PERCENT-DECODE it before classifying. The previous negative lookahead
+ // `/(?!svg\+xml)/` could be bypassed by an encoded media subtype such as
+ // `image/svg%2Bxml` (the literal `%2B` survives the regex check and is only
+ // decoded later by the decoder), silently letting an SVG payload through to
+ // be rasterized. Decoding first closes that gap.
+  const comma = url.indexOf(",");
+  if (comma < 0) throw new Error(`${label}: expected a raster data:image URL`);
+  const rawMedia = url.slice(0, comma).toLowerCase();
+  let media: string;
+  try {
+    media = decodeURIComponent(rawMedia);
+  } catch {
+    media = rawMedia; // leave undecoded; the checks below still reject it
+  }
+  if (!media.startsWith("data:image/") || media.includes("svg")) {
     throw new Error(`${label}: expected a raster data:image URL`);
   }
 }

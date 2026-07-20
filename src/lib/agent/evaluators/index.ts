@@ -116,9 +116,9 @@ export class EvaluatorComb {
  // as a PASS with zero evaluation evidence. This is only a real concern when
  // the caller SUPPLIED some input that matched none of the configured kinds
  // (e.g. `kinds=["url_match"]` while only a `string` input is supplied). When
- // no input is supplied at all, the product of the empty evaluator set is the
- // neutral default score of 1.0, so we return that rather than a false
- // failure.
+ // no input is supplied at all, the product of the empty evaluator set would
+ // be the neutral default score of 1.0 — but a missing evaluation is not
+ // evidence of success, so we fail CLOSED (score 0) rather than a false pass.
     if (this.kinds.length > 0) {
       const kindHasInput: Record<EvaluatorKind, boolean> = {
         string_match: !!input.string,

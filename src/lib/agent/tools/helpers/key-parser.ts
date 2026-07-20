@@ -91,7 +91,10 @@ export function parseKeys(keys: string): ParsedKeys {
   const rawParts = keys.split("+").map((p) => p.trim());
  // Modifier tokens are lowercased for case-insensitive matching, then
  // normalized through the alias table (e.g. `control` → `ctrl`, `cmd` → `meta`).
-  const modifiers = rawParts.slice(0, -1).map((p) => p.toLowerCase());
+  const modifiers = rawParts
+    .slice(0, -1)
+    .map((p) => p.toLowerCase())
+    .filter((p) => p.length > 0);
   for (const m of modifiers) {
     if (!KNOWN_MODIFIERS.has(m)) {
       throw new Error(

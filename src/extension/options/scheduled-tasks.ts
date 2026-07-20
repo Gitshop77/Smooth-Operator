@@ -130,22 +130,34 @@ export async function renderSchedule(): Promise<void> {
  // another context mutated the list between renders.
         const current = await listScheduledTasks();
         const filtered = current.filter((x) => x.id !== t.id);
-        await writeScheduledTasks(filtered);
- // Clear the alarm. If the storage write succeeded but `clear` fails, the
- // alarm would otherwise linger (orphaned) and fire for a deleted task,
- // so retry once before giving up (finding: delete storage-write success
- // not matched by alarm-clear success). A canonical `deleteScheduledTask`
- // in the lib would make this transactional.
+ // Make the delete transactional: clear the alarm BEFORE committing the
+ // storage write. If the alarm cannot be cleared we roll the storage write
+ // BACK (re-persist the original list) rather than leaving a
+ // storage-less-but-still-armed chrome.alarm that could fire for a deleted
+ // task (finding #78 — delete storage-write success was not matched by
+ // alarm-clear success, so a deleted task's orphaned alarm could still fire).
+ // `chrome.alarms.clear` resolves (not throws) when the alarm is already gone,
+ // so `cleared` is only false after a genuine error.
+        let cleared = false;
         try {
           await chrome.alarms.clear(`${ALARM_PREFIX}${t.id}`);
+          cleared = true;
         } catch (e) {
           console.warn("[options] alarms.clear failed, retrying:", e);
           try {
             await chrome.alarms.clear(`${ALARM_PREFIX}${t.id}`);
+            cleared = true;
           } catch (e2) {
-            console.warn("[options] alarms.clear retry failed (alarm may be orphaned):", e2);
+            console.warn("[options] alarms.clear retry failed (keeping task armed):", e2);
           }
         }
+        if (!cleared) {
+         // Roll back: keep the task armed + in storage instead of deleting it
+         // from storage while its alarm could still fire.
+          await writeScheduledTasks(current);
+          throw new Error("failed to clear the task alarm; the task was kept");
+        }
+        await writeScheduledTasks(filtered);
  // `maybeReleaseKeepAwake` internally checks whether any enabled task
  // remains armed before releasing the OS power lock.
         maybeReleaseKeepAwake().catch((err) =>

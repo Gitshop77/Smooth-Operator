@@ -398,6 +398,14 @@ export async function handleSendKeys(
     altKey: parsed.alt,
     metaKey: parsed.meta,
   };
+ // Capture the field value BEFORE dispatching so we can detect a page that
+ // mutates the field from its own keydown listener (synthetic events don't
+ // auto-apply default actions, but a page-side keydown handler can). If such a
+ // handler already changed the value, our imperative edit below would insert
+ // the same character twice (finding: send_keys double-inserts a character
+ // when the page's keydown handler also mutates the field value).
+  const textTarget = isTextInput(target) ? target : null;
+  const valueBefore = textTarget ? textTarget.value : undefined;
   target.dispatchEvent(new KeyboardEvent("keydown", opts));
  // Native typing order is keydown → keypress → input → keyup. A `keypress`
  // fires for printable characters and for Enter (the only non-printable key
@@ -407,22 +415,32 @@ export async function handleSendKeys(
   }
   target.dispatchEvent(new KeyboardEvent("keyup", opts));
 
+ // A page-side keydown handler may have mutated the field during the dispatch
+ // above; if so, skip the imperative edit to avoid duplicating the input.
+  const pageMutated = textTarget !== null && textTarget.value !== valueBefore;
+
  // Synthetic events never apply default actions — mutate editable fields
  // imperatively so the key actually takes effect. Guard this call: an
  // exception (e.g. `setSelectionRange` on a non-selectable input, or
  // `execCommand` throwing) must become a structured failure rather than an
- // unhandled exception in the executor loop .
+ // unhandled exception in the executor loop . If the page already applied the
+ // edit (pageMutated), we treat the field as mutated and skip our imperative
+ // write so we don't insert the character twice.
   let mutated = false;
-  try {
-    mutated = applyEditableMutation(target, parsed);
-  } catch (e) {
-    return {
-      action,
-      success: false,
-      message: `Sent keys: ${action.keys} — edit application failed: ${
-        e instanceof Error ? e.message : String(e)
-      }`,
-    };
+  if (pageMutated) {
+    mutated = true;
+  } else {
+    try {
+      mutated = applyEditableMutation(target, parsed);
+    } catch (e) {
+      return {
+        action,
+        success: false,
+        message: `Sent keys: ${action.keys} — edit application failed: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      };
+    }
   }
 
   if (parsed.main === "Enter" && !parsed.shift && !parsed.ctrl && !parsed.alt && !parsed.meta) {
