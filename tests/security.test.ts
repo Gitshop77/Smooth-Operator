@@ -936,6 +936,57 @@ describe("untrusted_page_state is a protected prompt tag", () => {
   });
 });
 
+describe("run-history TTL filter", () => {
+  beforeEach(() => {
+    localStorage.removeItem("open_cowork_run_history");
+  });
+
+  const makeRun = (id: string, startedAt: number) => ({
+    id,
+    task: `task-${id}`,
+    startedAt,
+    endedAt: startedAt + 1000,
+    steps: [],
+    result: { success: true, text: "done" },
+    totalTokensIn: 0,
+    totalTokensOut: 0,
+    totalCostUsd: 0,
+    stepCount: 0,
+    overflowCount: 0,
+  });
+
+  test("filters out runs older than 30 days", async () => {
+    const now = Date.now();
+    const thirtyOneDaysMs = 31 * 24 * 60 * 60 * 1000;
+    const oldRun = makeRun("old", now - thirtyOneDaysMs);
+    const recentRun = makeRun("recent", now - 1000);
+    localStorage.setItem("open_cowork_run_history", JSON.stringify([recentRun, oldRun]));
+
+    const runs = await loadRuns();
+    expect(runs).toHaveLength(1);
+    expect(runs[0].id).toBe("recent");
+  });
+
+  test("returns runs within 30 days", async () => {
+    const now = Date.now();
+    const recentRun = makeRun("fresh", now - 5000);
+    localStorage.setItem("open_cowork_run_history", JSON.stringify([recentRun]));
+
+    const runs = await loadRuns();
+    expect(runs).toHaveLength(1);
+    expect(runs[0].id).toBe("fresh");
+  });
+
+  test("survives runs with startedAt === 0", async () => {
+    const epochRun = makeRun("epoch", 0);
+    localStorage.setItem("open_cowork_run_history", JSON.stringify([epochRun]));
+
+    const runs = await loadRuns();
+    expect(runs).toHaveLength(1);
+    expect(runs[0].id).toBe("epoch");
+  });
+});
+
 describe("neutralizePromptTags", () => {
   test("neutralizes a trusted prompt tag's opening and closing delimiters", () => {
     expect(neutralizePromptTags("<site_memory>secret</site_memory>")).toBe(
