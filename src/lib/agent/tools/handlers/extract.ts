@@ -11,9 +11,10 @@ import { scanForInjection } from "../../security";
 import { redactSecrets } from "../../secrets";
 
 export async function handleExtract(
-  _ctx: ActionContext,
+  ctx: ActionContext,
   action: Extract<Action, { type: "extract" }>,
 ): Promise<ActionResult> {
+  if (ctx.signal?.aborted) return { action, success: false, message: "extract: aborted" };
   await sleep(TIMINGS.extractWait);
   const rawText = document.body?.innerText || "";
   // Slice BEFORE redaction so the [truncated] marker reflects the true
@@ -25,7 +26,7 @@ export async function handleExtract(
       : "";
   const redacted = await redactSecrets(bodyText);
   const tagged = `Query: ${action.query}\n\nPage content:\n${redacted}${truncated}`;
-  const scan = scanForInjection(tagged);
+  const scan = scanForInjection(redacted);
   const injectionWarnings =
     scan.safe
       ? ""

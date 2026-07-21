@@ -159,6 +159,7 @@ export const useCoworkStore = create<CoworkState>()(
         const restored = {
           sidebarCollapsed: p.sidebarCollapsed ?? current.sidebarCollapsed,
           currentView: safeView,
+          viewParams: p.viewParams ?? current.viewParams,
         };
         return { ...current, ...restored } as CoworkState;
       },

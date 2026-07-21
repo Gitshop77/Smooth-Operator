@@ -22,6 +22,9 @@ import { redactClientSecrets } from "@/lib/redact-client";
 // the connection is rejected, so operators must configure it. On any untrusted
 // network this browser-visible value MUST differ from the service-to-service
 // `COWORK_EVENT_TOKEN` (which must never be NEXT_PUBLIC_).
+// TODO: In production, fail loudly instead of falling back to dev-token.
+// The server already rejects dev-token in prod (fail-closed), but this
+// silent fallback makes misconfiguration hard to diagnose.
 const WS_TOKEN = process.env.NEXT_PUBLIC_COWORK_UI_TOKEN ?? "dev-token";
 
 //  Assert environment/token pairing at startup so a dev token can't

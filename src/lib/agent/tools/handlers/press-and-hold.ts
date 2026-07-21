@@ -39,6 +39,15 @@ export async function handlePressAndHold(
   safeScrollIntoView(el);
   await sleep(TIMINGS.clickScrollIntoView);
   const rect = el.getBoundingClientRect();
+  const vw = window.innerWidth || document.documentElement.clientWidth;
+  const vh = window.innerHeight || document.documentElement.clientHeight;
+  if (rect.bottom < 0 || rect.top > vh || rect.right < 0 || rect.left > vw) {
+    return {
+      action,
+      success: false,
+      message: `press_and_hold: element [${action.index}] is not visible in the viewport after scroll`,
+    };
+  }
   await moveCursorToElement(el);
   const cx = rect.x + rect.width / 2;
   const cy = rect.y + rect.height / 2;

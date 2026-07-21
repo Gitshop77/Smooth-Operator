@@ -171,9 +171,7 @@ export async function handleAlertSendKeys(
     return {
       action,
       success: true,
-      message:
-        `Queued ${(action.text ?? "").length} chars for the next window.prompt() call ` +
-        `(the current dialog was already auto-dismissed with "")`,
+      message: `Queued text for next prompt dialog (redacted)`,
     };
   } catch (e) {
     return {

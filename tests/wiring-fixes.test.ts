@@ -227,11 +227,9 @@ describe("ask_human password mode", () => {
  // The real value must NOT appear in either LLM-bound field.
     expect(result.message).not.toContain("super-secret-api-key");
     expect(result.extractedContent).not.toContain("super-secret-api-key");
- // Both should mention "REDACTED" so the LLM knows a value was provided.
+// Both should mention "REDACTED" so the LLM knows a value was provided.
     expect(result.message).toContain("redacted");
     expect(result.extractedContent).toContain("REDACTED");
- // "super-secret-api-key" is 20 chars (s-u-p-e-r + - + s-e-c-r-e-t + - + a-p-i + - + k-e-y = 5+1+6+1+3+1+3 = 20).
-    expect(result.extractedContent).toContain("20 chars");
   });
 
   test("default mode (input) returns the visible answer", async () => {

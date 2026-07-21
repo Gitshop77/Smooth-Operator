@@ -57,25 +57,20 @@ export async function handleAskHuman(
  // The password VALUE must never reach the LLM: both `message` and
  // `extractedContent` are replayed into subsequent prompts and persisted
  // to disk via run-history.ts, so the raw secret stays fully redacted.
- // We surface ONLY the character length (sanctioned by the wiring test and
- // the verify/fix contract) so the agent knows a value was captured — the
- // actual characters are never included.
- // We surface ONLY the character length — never the value itself — so the
- // agent knows a (non-empty) secret was captured without leaking the
- // credential. The raw value stays fully redacted in both LLM-bound fields.
-      const length = "value" in response ? String(response.value.length) : "0";
+ // Password mode: return a generic redacted message with no character count
+ // to prevent the length from leaking into LLM context or run-history.
       return {
         action,
         success: true,
         message: `User provided a password (redacted)`,
-        extractedContent: `[REDACTED password response (${length} chars)]`,
+        extractedContent: `[REDACTED password response]`,
       };
     }
     return {
       action,
       success: true,
       message: `User answered: ${answer.slice(0, LIMITS.askHumanAnswerChars)}`,
-      extractedContent: `User's answer to "${questionPreview}": ${answer}`,
+      extractedContent: `User's answer to "${questionPreview}": ${answer.slice(0, LIMITS.askHumanAnswerChars)}`,
     };
   } catch (e) {
     return {

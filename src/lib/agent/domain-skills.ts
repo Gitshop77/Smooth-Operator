@@ -176,6 +176,7 @@ function hostnameMatches(hostname: string, domain: string): boolean {
   let d = domain.toLowerCase().trim();
   d = d.replace(/^https?:\/\//i, "");
   d = d.replace(/\/.*$/, ""); // strip any path component
+  d = d.replace(/:\d+$/, ""); // strip trailing port (e.g. "example.com:3000")
   d = d.replace(/^\.+/, ""); // accept ".example.com" as subdomains of example.com
   d = d.replace(/\.+$/, ""); // strip FQDN trailing dot
   if (!d) return false;

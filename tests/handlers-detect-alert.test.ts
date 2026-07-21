@@ -188,7 +188,7 @@ describe("handleAskHuman password-mode redaction", () => {
       mode: "password",
     });
     expect(res.success).toBe(true);
-    expect(res.extractedContent).toContain("[REDACTED password response (");
+    expect(res.extractedContent).toContain("[REDACTED password response]");
     expect(res.extractedContent).not.toContain("supersecretpw123");
     expect(res.message).not.toContain("supersecretpw123");
     expect(JSON.stringify(res)).not.toContain("supersecretpw123");

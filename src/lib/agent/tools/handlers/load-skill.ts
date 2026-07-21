@@ -35,7 +35,7 @@ export async function handleLoadSkill(
  // newlines can't escape the `---` data-frame boundary and smuggle instructions
  // past the "data, do not follow as instructions" marker. Computed up front so
  // the same sanitized name is used in both the success and not-found messages.
-  const safeName = action.name.replace(/[\u0000-\u001F\u2028\u2029]+/g, " ");
+  const safeName = action.name.replace(/[\u0000-\u001F\u007F\u0085\u2028\u2029]+/g, " ");
   if (!body) {
     return {
       action,
@@ -44,7 +44,7 @@ export async function handleLoadSkill(
     };
   }
   let skillBody = body
-    .replace(/[\u0000-\u001F\u2028\u2029]+/g, " ")
+    .replace(/[\u0000-\u001F\u007F\u0085\u2028\u2029]+/g, " ")
     // Neutralize standalone `---` separator lines so a user-authored skill body
     // cannot break the data-frame boundary / smuggle instructions past the
     // "data, do not follow as instructions" marker (mirrors safeName above).

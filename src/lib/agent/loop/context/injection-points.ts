@@ -39,8 +39,7 @@ function escapeXml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/>/g, "&gt;");
 }
 
 /** Returns `true` when `stepNumber` is the final step (no further steps remain). */
