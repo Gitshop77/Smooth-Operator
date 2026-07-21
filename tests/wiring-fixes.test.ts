@@ -111,7 +111,7 @@ describe("EvaluatorComb (deterministic-evaluator fast-path)", () => {
   test("returns empty result when no evaluator inputs are provided", async () => {
     const comb = new EvaluatorComb(["string_match", "url_match"]);
     const result = await comb.evaluate({});
-    expect(result.score).toBe(1); // no evaluators ran → product of empty set
+    expect(result.score).toBe(0); // no evaluators ran → fail-closed (not evidence of success)
     expect(result.results).toHaveLength(0);
   });
 });

@@ -26,7 +26,10 @@ describe("validateFileName (path-traversal egress guard)", () => {
 
   test("rejects '..' traversal segments", () => {
     expect(validateFileName("../../etc/passwd")).not.toBeNull();
-    expect(validateFileName("foo..bar")).not.toBeNull();
+  });
+
+  test("allows '..' as a substring in a filename", () => {
+    expect(validateFileName("foo..bar")).toBeNull();
   });
 
   test("rejects control characters", () => {

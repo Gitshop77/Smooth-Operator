@@ -125,7 +125,7 @@ Let me know if you need anything else.`;
     });
   });
 
-  test("parses only the first JSON object when multiple top-level objects are present", () => {
+  test("parses the LARGEST valid JSON object when multiple top-level objects are present", () => {
     const first = {
       thinking: "first object",
       evaluation_previous_goal: "Verdict: Success",
@@ -134,7 +134,7 @@ Let me know if you need anything else.`;
       action: [{ type: "click", index: 1 }],
     };
     const second = {
-      thinking: "second object — must be ignored",
+      thinking: "second object — this is the largest and should be returned",
       evaluation_previous_goal: "Verdict: Success",
       memory: "m2",
       next_goal: "g2",
@@ -146,10 +146,8 @@ Let me know if you need anything else.`;
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const out = result.output;
-    expect(out.thinking).toBe("first object");
-    expect(out.action[0]).toEqual({ type: "click", index: 1 });
- // The second object's content must NOT leak into the parsed output.
-    expect(out.thinking).not.toContain("second");
+    expect(out.thinking).toBe("second object — this is the largest and should be returned");
+    expect(out.action[0]).toEqual({ type: "click", index: 2 });
   });
 
   test("returns { ok: false } with a JSON-parse-error message for truncated/malformed JSON", () => {

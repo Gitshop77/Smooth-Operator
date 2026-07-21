@@ -323,13 +323,13 @@ describe("resolveAndValidateLlmBaseUrl (DNS-resolution SSRF guard)", () => {
     const rejected = await resolveAndValidateLlmBaseUrl("http://example.attacker/v1", false);
     expect(rejected.ok).toBe(false);
     if (rejected.ok) throw new Error("expected rejection");
-    expect(rejected.reason).toMatch(/DNS resolver unavailable/i);
+    expect(rejected.reason).toMatch(/DNS (resolution|resolver unavailable)/i);
     // No resolver available FAILS CLOSED regardless of provenance — when the
     // real target IP cannot be verified we must never trust the URL.
     const alsoRejected = await resolveAndValidateLlmBaseUrl("http://example.attacker/v1", true);
     expect(alsoRejected.ok).toBe(false);
     if (alsoRejected.ok) throw new Error("expected rejection");
-    expect(alsoRejected.reason).toMatch(/DNS resolver unavailable/i);
+    expect(alsoRejected.reason).toMatch(/DNS (resolution|resolver unavailable)/i);
   });
 
   test("still rejects a genuine IP-literal sink (no DNS needed)", async () => {

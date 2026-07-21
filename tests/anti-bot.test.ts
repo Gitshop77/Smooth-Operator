@@ -45,8 +45,10 @@ describe("detectChallengeInPage — Cloudflare JS corroboration", () => {
     });
   });
 
-  test("authoritative CF JS selector alone (no title) → cloudflare-js", () => {
-    document.body.innerHTML = '<div id="challenge-running"></div>';
+  test("authoritative CF JS script tag alone (no title) → cloudflare-js", () => {
+    const s = document.createElement("script");
+    s.src = "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/scripts/jsd/turnstile_0/flash/main.js";
+    document.head.appendChild(s);
     expect(detectChallengeInPage()).toEqual({
       kind: "cloudflare-js",
       message: "Cloudflare JS challenge",
@@ -76,8 +78,11 @@ describe("detectChallengeInPage — block page AND-corroboration", () => {
     expect(detectChallengeInPage()).toBeNull();
   });
 
-  test(".cf-error-details selector alone → cloudflare-block", () => {
-    document.body.innerHTML = '<div class="cf-error-details"></div>';
+  test("title 'attention required' + body 'blocked' → cloudflare-block via AND-corroboration", () => {
+  // The source removed .cf-error-details as a standalone trigger (attacker-settable).
+  // The current detection requires title "attention required" AND body "blocked".
+    document.title = "Attention Required! | Cloudflare";
+    document.body.innerHTML = '<div class="cf-error-details"></div><p>Sorry, you have been blocked</p>';
     expect(detectChallengeInPage()).toEqual({
       kind: "cloudflare-block",
       message: "Cloudflare block page",

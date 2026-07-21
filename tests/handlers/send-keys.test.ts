@@ -25,11 +25,11 @@ describe("keyEventCodes fidelity", () => {
   test("shifted symbol maps to its physical base code (not the literal char)", () => {
     // A real Shift+1 KeyboardEvent has code "Digit1", NOT "!". Emitting
     // code:"!" is a detectable automation anomaly. keyCode/which stay
-    // realistic (33 for "!").
-    expect(keyEventCodes("!")).toEqual({ keyCode: 33, which: 33, code: "Digit1" });
-    expect(keyEventCodes("@")).toEqual({ keyCode: 64, which: 64, code: "Digit2" });
-    expect(keyEventCodes("#")).toEqual({ keyCode: 35, which: 35, code: "Digit3" });
-    expect(keyEventCodes("=")).toEqual({ keyCode: 61, which: 61, code: "Equal" });
+    // realistic (the physical key's code, not the literal char code).
+    expect(keyEventCodes("!")).toEqual({ keyCode: 49, which: 49, code: "Digit1" });
+    expect(keyEventCodes("@")).toEqual({ keyCode: 50, which: 50, code: "Digit2" });
+    expect(keyEventCodes("#")).toEqual({ keyCode: 51, which: 51, code: "Digit3" });
+    expect(keyEventCodes("=")).toEqual({ keyCode: 187, which: 187, code: "Equal" });
   });
 
   test("space maps to code 'Space' with keyCode 32", () => {

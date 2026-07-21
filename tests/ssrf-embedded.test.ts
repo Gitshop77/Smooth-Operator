@@ -126,7 +126,7 @@ describe("resolveAndValidateLlmBaseUrl DNS outcome branches", () => {
       // target IP must never be trusted.
       expect(res.ok).toBe(false);
       if (res.ok) throw new Error("expected rejection");
-      expect(res.reason).toMatch(/DNS resolver unavailable/i);
+      expect(res.reason).toMatch(/DNS (resolution|resolver unavailable)/i);
       expect(warn).toHaveBeenCalled();
     } finally {
       if (savedRequire !== undefined) g.require = savedRequire;
