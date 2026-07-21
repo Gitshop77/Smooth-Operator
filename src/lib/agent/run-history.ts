@@ -42,6 +42,9 @@ const STORAGE_KEY = "open_cowork_run_history";
 /** Cap on the number of runs retained (newest first). */
 const MAX_RUNS = 50;
 
+/** Run entries older than this are silently dropped on load. */
+const RUN_HISTORY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
 /** Length of the random suffix appended to run IDs. */
 const ID_SUFFIX_LENGTH = 6;
 
@@ -357,6 +360,7 @@ export async function clearAllRuns(): Promise<void> {
  * Returns an empty array if storage is empty or unreadable.
  */
 export async function loadRuns(): Promise<RunRecord[]> {
+  const cutoff = Date.now() - RUN_HISTORY_MAX_AGE_MS;
   if (isExtensionWithLocal()) {
     const res = await chrome.storage.local.get(STORAGE_KEY);
     const arr = res[STORAGE_KEY];
@@ -366,12 +370,20 @@ export async function loadRuns(): Promise<RunRecord[]> {
  // drop any partial/corrupt record rather than letting a bad `steps` value
  // propagate into the UI / replay.
     if (!Array.isArray(arr)) return [];
-    return (arr as unknown[]).filter(isValidRunRecord).map(normalizeRunRecord);
+    return (arr as unknown[])
+      .filter(isValidRunRecord)
+      .map(normalizeRunRecord)
+      .filter((r) => !r.startedAt || r.startedAt >= cutoff);
   }
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? (parsed as unknown[]).filter(isValidRunRecord).map(normalizeRunRecord) : [];
+    return Array.isArray(parsed)
+      ? (parsed as unknown[])
+          .filter(isValidRunRecord)
+          .map(normalizeRunRecord)
+          .filter((r) => !r.startedAt || r.startedAt >= cutoff)
+      : [];
   } catch {
     return [];
   }
