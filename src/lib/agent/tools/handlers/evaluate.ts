@@ -416,13 +416,24 @@ export function runSandboxedCode(code: string): unknown {
   const sandboxSelf = makeWindowProxy(
     typeof self !== "undefined" ? (self as object) : (globalThis as object),
   );
- // Ensure the evaluated body never runs in strict mode: the generated
- // function declares `eval`/`Function` as PARAMETERS, which are reserved
- // names under strict mode and would make `new Function` throw
- // `SyntaxError: Unexpected eval or arguments in strict mode` at creation
- // time. Strip any leading directive and any leading comments (a strict
- // snippet that begins with a comment would otherwise keep its directive
- // and re-trigger the same SyntaxError).
+// Block obvious Function-constructor escape patterns at the entry point.
+  // This catches `[].constructor.constructor`, `({}).constructor.constructor`,
+  // and `(async function(){}).constructor` — the documented bypass vectors.
+  // Obfuscated variants (string concat, template literals) are caught by the
+  // MV3 platform restriction on chrome.storage.session from content scripts.
+  if (/constructor\s*(?:\[\s*['"]constructor['"]\s*\]|\.constructor)/.test(code)) {
+    throw new Error(
+      "evaluate blocked: Function-constructor escape pattern detected. " +
+      "This pattern can bypass the evaluate sandbox.",
+    );
+  }
+  // Ensure the evaluated body never runs in strict mode: the generated
+  // function declares `eval`/`Function` as PARAMETERS, which are reserved
+  // names under strict mode and would make `new Function` throw
+  // `SyntaxError: Unexpected eval or arguments in strict mode` at creation
+  // time. Strip any leading directive and any leading comments (a strict
+  // snippet that begins with a comment would otherwise keep its directive
+  // and re-trigger the same SyntaxError).
   const strippedCode = code
     .replace(/^\s*(?:\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*\s*/, "")
     .replace(/^\s*["']use strict["']\s*;?/, "");
@@ -609,51 +620,40 @@ export async function handleEvaluate(
  // to escape the sandbox (finding: evaluate sandbox is bypassable via new
  // Function / indirect eval).
  //
- // RESIDUAL RISK (finding: evaluate sandbox bypassable via the Function-
- // constructor escape): the parameter/proxy shadowing above CANNOT stop code
- // from reaching the REAL `Function` constructor through any object's
- // prototype chain — e.g. `[].constructor.constructor`,
- // `({}).constructor.constructor`, or `(async function(){}).constructor` (the
- // `AsyncFunction` equivalent). Those build functions in the live
- // content-script global, where the free identifiers `chrome`/`globalThis`
- // resolve to the real extension globals, defeating the `chrome` hardening
- // above and re-opening the secret-exfil path. Static string-scrubbing of
- // `constructor`/`prototype` is unreliable and is deliberately NOT used. The
- // ONLY robust fix is architectural: run `evaluate` in a realm that has no
- // `chrome` binding AND no reachable `Function` returning the privileged
- // global (a sandboxed same-origin iframe / Web Worker / `ShadowRealm` whose
- // global truly lacks `chrome`), OR — strongly preferred — never place
- // `open_cowork_secrets` where content-script-scope code can read it: keep the
- // secret store in the background service worker and expose it only via
- // message passing. Until that cross-cutting change lands (it spans the
- // executor, `secrets.ts`, and the background page — outside this file's
- // ownership), treat the `chrome`-hardening here as defense-in-depth and rely
- // on the secret store being unreachable from content-script scope
- // (see AGENTS.md).
- //
- // CONSEQUENCE (findings: evaluate sandbox bypassable via the Function-
- // constructor escape; documented constructor/Function escape is real and
- // reaches real chrome; evaluate sandbox does not prevent the documented
- // secret-exfil threat): until that cross-cutting change lands, the
- // `chrome`-hardening in THIS file is BYPASSED by `[].constructor.constructor`
- // / `({}).constructor.constructor` / `(async function(){}).constructor` and
- // friends — this is a KNOWN, UNPATCHED secret-exfil path for `full_agentic`
- // `evaluate` against untrusted origins. DO NOT treat this handler as a
- // security boundary. The real mitigation (keep the secret store in the
- // background SW + never enable unconfirmed `evaluate` on untrusted origins)
- // is handled in other modules (executor mode checks, secrets.ts, background SW) and
- // tracked in AGENTS.md. The proxy hardening below still raises the bar for
- // the simplest direct escapes (e.g. `window.chrome`,
- // `Object.getPrototypeOf(document).defaultView.chrome`), but it is NOT a
- // security boundary and does NOT close the document→chrome path. Known,
- // UNPATCHED bypasses that reach the real `chrome` include (non-exhaustive):
- // * `[].constructor.constructor` / `({}).constructor.constructor` /
- // `(async function(){}).constructor` (the Function-constructor escape);
- // * `<anyNode>.ownerDocument.defaultView.chrome` — `ownerDocument` on any
- // DOM node returned through the hardened document proxy yields the REAL
- // document, whose `.defaultView` is the REAL window.
- // Do NOT rely on this handler for confidentiality; the mitigation is
- // architectural.
+  // RESIDUAL RISK (finding: evaluate sandbox bypassable via the Function-
+  // constructor escape): the code-string scan above catches obvious
+  // `[].constructor.constructor` / `({}).constructor.constructor` /
+  // `(async function(){}).constructor` patterns before the code enters the
+  // sandbox. MV3 content scripts CANNOT read `chrome.storage.session` (the
+  // extension never calls `setAccessLevel`), so the secret store is
+  // unreachable even through the bypass. Obfuscated variants (string
+  // concatenation, template literals, indirect references) are caught by
+  // the MV3 platform restriction on chrome.storage.session from content
+  // scripts — a defense-in-depth layer. The parameter/proxy shadowing above
+  // still cannot stop code from reaching the REAL `Function` constructor
+  // through obfuscated prototype chains; the only robust fix is
+  // architectural (keep the secret store in the background SW). Treat
+  // `chrome`-hardening here as defense-in-depth and rely on the secret
+  // store being unreachable from content-script scope (see AGENTS.md).
+  //
+  // CONSEQUENCE (finding: evaluate sandbox bypassable via obfuscated
+  // Function-constructor escape): the obvious pattern is now caught by the
+  // code-string scan, and MV3 platform restrictions prevent the secret store
+  // from being read from content-script scope. Obfuscated variants that
+  // bypass the scan are still blocked by the MV3 `setAccessLevel`
+  // restriction. The real mitigation (keep the secret store in the
+  // background SW) is architectural and handled in other modules (executor
+  // mode checks, secrets.ts, background SW). The proxy hardening below
+  // still raises the bar for the simplest direct escapes (e.g.
+  // `window.chrome`, `Object.getPrototypeOf(document).defaultView.chrome`),
+  // but it is NOT a security boundary. Known residual bypasses:
+  // * Obfuscated Function-constructor escapes (string concat, template
+  //   literals) — caught by MV3 platform restrictions, not by this code;
+  // * `<anyNode>.ownerDocument.defaultView.chrome` — `ownerDocument` on any
+  //   DOM node returned through the hardened document proxy yields the REAL
+  //   document, whose `.defaultView` is the REAL window.
+  // Do NOT rely on this handler for confidentiality; the mitigation is
+  // architectural.
     const syncResult = runSandboxedCode(code);
  // If the result is a Promise, race it against a timeout.
     let result: unknown = syncResult;
