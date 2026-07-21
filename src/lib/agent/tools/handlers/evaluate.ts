@@ -421,7 +421,7 @@ export function runSandboxedCode(code: string): unknown {
   // and `(async function(){}).constructor` — the documented bypass vectors.
   // Obfuscated variants (string concat, template literals) are caught by the
   // MV3 platform restriction on chrome.storage.session from content scripts.
-  if (/constructor\s*(?:\[\s*['"]constructor['"]\s*\]|\.constructor)/.test(code)) {
+  if (/\.\s*constructor\s*(?:\[\s*['"]constructor['"]\s*\]|\.constructor)?/.test(code)) {
     throw new Error(
       "evaluate blocked: Function-constructor escape pattern detected. " +
       "This pattern can bypass the evaluate sandbox.",

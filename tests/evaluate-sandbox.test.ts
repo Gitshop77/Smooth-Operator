@@ -6,7 +6,7 @@
  * CLOSED — any attempt to reach the real `chrome`/`Function`/`eval` globals
  * from inside evaluated code throws. The benign-path and "use strict" cases
  * assert the wrapper still runs ordinary code. The constructor/ownerDocument
- * bypass is documented below as a known, unpatched escape
+ * bypass is documented below as a partially patched escape
  * (architectural fix: keep the secret store out of content-script scope).
  */
 
@@ -76,6 +76,12 @@ describe("evaluate sandbox: fail-closed hardening", () => {
     ).toThrow(/Function-constructor escape pattern detected/);
     expect(() =>
       runSandboxedCode("({}).constructor.constructor('return 1')()")
+    ).toThrow(/Function-constructor escape pattern detected/);
+  });
+
+  test("async function constructor escape is blocked at entry", () => {
+    expect(() =>
+      runSandboxedCode("(async function(){}).constructor('return 1')()")
     ).toThrow(/Function-constructor escape pattern detected/);
   });
 });
