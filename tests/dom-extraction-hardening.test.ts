@@ -44,7 +44,7 @@ describe("shadow-piercer backdoor hardening", () => {
     // A hostile page overwrites the cross-world backdoor to return a node
     // that only mimics a ShadowRoot (real ShadowRoots expose an iterable
     // `childNodes`).
-    (window as unknown as Record<string, unknown>).__oc_bd__ = {
+    (window as any)[Symbol.for("__open_cowork_piercer_bd__")] = {
       getShadowRoot: () => ({ nodeType: 11, host: {} }),
       hasShadowRoot: () => false,
       stats: () => ({ installed: true, open: 0, closed: 0 }),

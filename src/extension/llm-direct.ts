@@ -208,7 +208,6 @@ async function getProvider(): Promise<LLMProvider> {
     config.baseUrl ?? null,
     config.resourceName ?? null,
   ]);
-  cachedProviderConfig = config;
   if (cachedProvider && key === cachedConfigKey) return cachedProvider;
  // If a build is already in-flight for THIS key, await it instead of
  // starting a second concurrent buildProvider() call.

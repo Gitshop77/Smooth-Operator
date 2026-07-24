@@ -47,6 +47,10 @@ export interface ScheduledTask {
   lastRunAt?: number;
   /** Unix ms timestamp of the next scheduled run (or undefined if disabled). */
   nextRunAt?: number;
+  /** Agent mode for this task. Defaults to "standard" if not set. */
+  mode?: "restricted" | "standard";
+  // NOTE: "full_agentic" is intentionally excluded — scheduled tasks
+  // run unattended and must not allow unsupervised JS execution.
 }
 
 /** localStorage / chrome.storage key under which scheduled tasks are persisted. */

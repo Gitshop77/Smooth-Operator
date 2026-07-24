@@ -73,9 +73,9 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
   });
 
 /**
- * Keepalive interval for in-loop awaits. An external watchdog (e.g. the cockpit
- * SSE consumer) uses heartbeat absence to judge a run stale; emitting roughly
- * twice per watchdog window lets it distinguish a busy run from a stalled one.
+ * Keepalive interval for in-loop awaits. An external watchdog uses heartbeat
+ * absence to judge a run stale; emitting roughly twice per watchdog window
+ * lets it distinguish a busy run from a stalled one.
  */
 const HEARTBEAT_INTERVAL_MS = 20_000;
 
@@ -383,8 +383,34 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
 
   if (plannerResult.decision === "web_task") {
     const text = plannerResult.text || "";
-    await finish(true, text);
-    return;
+    const finalized = await maybeJudgeAndFinalize(
+      deps,
+      config,
+      {
+        step: 0,
+        success: true,
+        text,
+        navigatorHistory: state.navigatorHistory,
+        onCost: (usd, tokensIn, tokensOut) => {
+          addCost(state, usd);
+          addTokens(state, tokensIn, tokensOut);
+        },
+      },
+      state,
+      dispatcher,
+      makeCtx(state)
+    );
+    if (finalized) {
+      await safeDispatch("runEnd", () =>
+        dispatcher!.runEnd(buildRunResult(state, state.finalResult?.success ?? false, state.finalResult?.text ?? "")),
+      );
+      return;
+    }
+    onEvent({
+      type: "info",
+      message: "Judge disagreed with web_task result — continuing the run.",
+    });
+    plannerResult = { ...plannerResult, decision: "continue" };
   }
   if (plannerResult.decision === "done") {
     const finalized = await maybeJudgeAndFinalize(
@@ -750,8 +776,15 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
           }
         }
         results = await deps.executeActions(actions, browserState);
- // Reset the action-repetition window if any action in the batch
- // changed the page — matches action-queue.ts:151-153 semantics.
+// Check cost cap after the batch — a multi-action step could push the
+// total past the cap even if each individual action was cheap.
+        if (costCapExceeded(state)) {
+          onEvent({ type: "info", message: "Cost cap exceeded mid-step. Stopping." });
+          await finish(false, `Cost cap of $${config.costCapUsd} reached.`);
+          return;
+        }
+// Reset the action-repetition window if any action in the batch
+// changed the page — matches action-queue.ts:151-153 semantics.
         if (config.enableLoopDetection && results.some((r) => r.pageChanged)) {
           state.loopDetector.reset();
         }
@@ -772,7 +805,8 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
       try {
         const queueResult = await executeActionQueue(
           deps, actions, browserState, state.step, agentMode,
-          state.loopDetector, config, dispatcher, makeCtx(state)
+          state.loopDetector, config, dispatcher, makeCtx(state),
+          () => costCapExceeded(state)
         );
         results = queueResult.results;
       } catch (e) {

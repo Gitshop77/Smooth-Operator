@@ -22,10 +22,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: "npm"
@@ -51,6 +51,14 @@ jobs:
       - name: Regenerate catalog
         if: env.CLONE_OK == 'true'
         run: MODELS_DEV_ROOT=/tmp/models.dev npx tsx scripts/build-models-catalog.ts
+
+      - name: Type-check regenerated catalog
+        if: env.CLONE_OK == 'true'
+        run: npx tsc --noEmit
+
+      - name: Run tests
+        if: env.CLONE_OK == 'true'
+        run: npx vitest run
 
       - name: Check diff and open PR if changed
         if: env.CLONE_OK == 'true'

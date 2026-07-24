@@ -28,6 +28,34 @@ export const STRING_EVALUATOR_TAG = "string_match";
  */
 const MAX_REGEX_INPUT_CHARS = 200_000;
 
+/** Maximum allowed regex pattern length. */
+const MAX_REGEX_PATTERN_LENGTH = 500;
+
+/**
+ * Check whether a regex pattern is safe to compile and execute without risk of
+ * catastrophic backtracking (ReDoS).
+ *
+ * Returns `false` for:
+ * - Patterns exceeding {@link MAX_REGEX_PATTERN_LENGTH}
+ * - Patterns containing nested quantifiers (e.g. `(a+)+`, `(a*){2,}`)
+ * - Patterns that fail to compile
+ *
+ * When `false`, callers should fall back to literal string matching instead of
+ * using the pattern as a regular expression.
+ */
+export function isSafeRegex(pattern: string): boolean {
+  if (pattern.length > MAX_REGEX_PATTERN_LENGTH) return false;
+  // Nested quantifiers: a quantifier character (+, *, {) immediately preceded
+  // (possibly with whitespace) by another quantifier character.
+  if (/(\+|\*|\{)\s*(\+|\*|\{)/.test(pattern)) return false;
+  try {
+    new RegExp(pattern);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** A single reference-answer entry — one of three matching modes. */
 export interface StringReferenceAnswer {
   /** Discriminator for which match strategy to use. */
@@ -179,6 +207,13 @@ export class StringEvaluator {
  // CLOSED instead — a mis-authored pattern must never grade a task complete.
           if (!ref.ref || !ref.ref.trim()) {
             cur = 0;
+            break;
+          }
+ // Reject patterns that could cause catastrophic backtracking (ReDoS)
+ // or are otherwise unsafe to compile. Fall back to literal substring
+ // matching so the reference is still usable.
+          if (!isSafeRegex(ref.ref)) {
+            cur = cleanPred.includes(cleanAnswer(ref.ref)) ? 1 : 0;
             break;
           }
           try {

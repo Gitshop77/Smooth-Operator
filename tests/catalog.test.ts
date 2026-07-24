@@ -12,6 +12,7 @@ import {
   getModelsForProvider,
   getDefaultModelForProvider,
   isValidCatalog,
+  catalogIdMatches,
 } from "../src/lib/agent/llm/catalog";
 import { BUNDLED_CATALOG } from "../src/lib/agent/llm/catalog-bundled";
 import { DEFAULT_MODELS } from "../src/extension/provider-config";
@@ -539,7 +540,6 @@ describe("every model has numeric cost (documents known gaps)", () => {
     if (missing.length !== KNOWN_MISSING_COST.length) {
       const added = missing.filter((x) => !KNOWN_MISSING_COST.includes(x));
       const removed = KNOWN_MISSING_COST.filter((x) => !missing.includes(x));
-      // eslint-disable-next-line no-console
       console.warn(
         `[catalog] cost-less models diverged from baseline. added=${added.length} removed=${removed.length}`,
       );
@@ -664,5 +664,48 @@ describe("testProviderConnection shape (mocked fetch)", () => {
     expect(url).toContain("api-version=");
     expect(init.headers?.["api-key"]).toBe("azure-key");
     expect(init.headers?.Authorization).toBeUndefined();
+  });
+});
+
+describe("catalogIdMatches", () => {
+  test("exact match", () => {
+    expect(catalogIdMatches("gpt-4o", "gpt-4o")).toBe(true);
+  });
+
+  test("provider prefix stripped from both sides", () => {
+    expect(catalogIdMatches("openai/gpt-4o", "gpt-4o")).toBe(true);
+    expect(catalogIdMatches("gpt-4o", "openai/gpt-4o")).toBe(true);
+  });
+
+  test("same model with different provider prefix", () => {
+    expect(catalogIdMatches("openai/gpt-4o", "openai/gpt-4o")).toBe(true);
+  });
+
+  test("case-insensitive", () => {
+    expect(catalogIdMatches("OpenAI/GPT-4o", "openai/gpt-4o")).toBe(true);
+  });
+
+  test("no false positive: gpt-4o does not match gpt-4o-mini", () => {
+    expect(catalogIdMatches("gpt-4o", "gpt-4o-mini")).toBe(false);
+    expect(catalogIdMatches("gpt-4o-mini", "gpt-4o")).toBe(false);
+  });
+
+  test("no false positive: gpt-4o does not match gpt-4o-2024-08-06", () => {
+    expect(catalogIdMatches("gpt-4o", "gpt-4o-2024-08-06")).toBe(false);
+    expect(catalogIdMatches("gpt-4o-2024-08-06", "gpt-4o")).toBe(false);
+  });
+
+  test("no false positive: partial substring does not match", () => {
+    expect(catalogIdMatches("claude", "claude-opus-4")).toBe(false);
+    expect(catalogIdMatches("gpt", "gpt-4o")).toBe(false);
+  });
+
+  test("provider/ prefix with suffix model matches exactly", () => {
+    expect(catalogIdMatches("openai/gpt-4o", "openai/gpt-4o")).toBe(true);
+    expect(catalogIdMatches("anthropic/claude-opus-4", "claude-opus-4")).toBe(true);
+  });
+
+  test("no false positive: openai/gpt-4 does not match provider/openai/gpt-4o", () => {
+    expect(catalogIdMatches("openai/gpt-4", "provider/openai/gpt-4o")).toBe(false);
   });
 });

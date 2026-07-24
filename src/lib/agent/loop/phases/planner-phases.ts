@@ -216,9 +216,31 @@ export async function handlePlannerDecision(
     });
   }
   if (plannerResult.decision === "web_task") {
-    onEvent({ type: "done", step, success: true, text: plannerResult.text || "" });
-    state.finalResult = { success: true, text: plannerResult.text || "" };
-    return { status: "finalized" };
+    const finalized = await maybeJudgeAndFinalize(
+      state.deps,
+      config,
+      {
+        step,
+        success: true,
+        text: plannerResult.text || "",
+        navigatorHistory,
+        onCost: (usd, tokensIn, tokensOut) => {
+          addCost(state, usd);
+          addTokens(state, tokensIn, tokensOut);
+        },
+      },
+      state,
+      state.dispatcher,
+      makeCtx(state)
+    );
+    if (finalized) {
+      return { status: "finalized" };
+    }
+    onEvent({
+      type: "info",
+      message: "Judge disagreed with web_task result — continuing the run.",
+    });
+    plannerResult = { ...plannerResult, decision: "continue" };
   }
   if (plannerResult.plan) state.plan = plannerResult.plan;
  // Validate + clamp `current_plan_item` against the plan actually in effect.

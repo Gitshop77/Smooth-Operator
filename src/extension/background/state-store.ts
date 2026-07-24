@@ -96,17 +96,17 @@ function enqueueWrite<T>(task: () => Promise<T>): Promise<T> {
 }
 
 export async function saveRunState(state: Partial<RunState>): Promise<void> {
-  // Invalidate the cache before the (async) write so any concurrent read during
-  // the write re-reads storage rather than serving a pre-write value. Refreshed
-  // to the merged value once the write lands (below).
-  cachedRunState = undefined;
   return enqueueWrite(async () => {
-    const cur = (await getRunState()) ?? ({} as RunState);
-    const next: RunState = { ...cur, ...state };
+    // Invalidate cache at execution time (not enqueue time) so concurrent reads
+    // during the queue-wait see the last-known cached value rather than falling
+    // through to potentially stale storage.
+    cachedRunState = undefined;
+    const cur = (await getRunState()) ?? {};
+    const next = { ...cur, ...state } as RunState;
  // Write-safe abort merge: never trust only an equality check on this read.
  // OR-ing the stored + incoming values makes the STOP flag durable against a
  // concurrent step-update (or any other) partial write.
-    next.abortRequested = Boolean(cur.abortRequested) || Boolean(state.abortRequested);
+    next.abortRequested = Boolean((cur as RunState).abortRequested) || Boolean(state.abortRequested);
     cachedRunState = next;
     await chrome.storage.session.set({ [RUN_STATE_KEY]: next });
   });
@@ -116,15 +116,16 @@ export async function saveRunState(state: Partial<RunState>): Promise<void> {
 export async function getRunState(): Promise<RunState | null> {
   if (cachedRunState !== undefined) return cachedRunState;
   const res = await chrome.storage.session.get(RUN_STATE_KEY);
-  const state = (res[RUN_STATE_KEY] as RunState) || null;
+  const raw = res[RUN_STATE_KEY];
+  const state = (raw && typeof raw === "object" && "active" in raw && "task" in raw) ? raw as RunState : null;
   cachedRunState = state;
   return state;
 }
 
 /** Remove the persisted run state (called at the end of every run). */
 export async function clearRunState(): Promise<void> {
-  cachedRunState = undefined;
   return enqueueWrite(async () => {
+    cachedRunState = undefined;
     await chrome.storage.session.remove(RUN_STATE_KEY);
   });
 }
@@ -140,17 +141,20 @@ export async function clearRunState(): Promise<void> {
  * reset cannot mask a real stop.
  */
 export async function hardResetAbortRequested(): Promise<void> {
-  try {
-    const res = await chrome.storage.session.get(RUN_STATE_KEY);
-    const cur = res[RUN_STATE_KEY] as RunState | undefined;
-    if (cur) {
-      cur.abortRequested = false;
-      cachedRunState = cur;
-      await chrome.storage.session.set({ [RUN_STATE_KEY]: cur });
+  await enqueueWrite(async () => {
+    try {
+      const res = await chrome.storage.session.get(RUN_STATE_KEY);
+      const cur = res[RUN_STATE_KEY] as RunState | undefined;
+      if (cur) {
+        cur.abortRequested = false;
+        cachedRunState = cur;
+        await chrome.storage.session.set({ [RUN_STATE_KEY]: cur });
+      }
+    } catch (e) {
+      console.error("[state-store] hardResetAbortRequested failed:", e);
+      /* storage unavailable — non-fatal; the run's own abort checks cover it */
     }
-  } catch {
-    /* storage unavailable — non-fatal; the run's own abort checks cover it */
-  }
+  });
 }
 
 // ─── Keepalive alarm (MV3 SW lifecycle workaround) ──────────────────────────

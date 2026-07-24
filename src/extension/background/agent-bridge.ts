@@ -390,8 +390,10 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  // the post-init re-check below, so this reset cannot mask a real stop.
   try {
     await hardResetAbortRequested();
-  } catch {
-    /* non-fatal — proceed; the run's own abort checks still apply */
+  } catch (e) {
+    console.error("[agent-bridge] hardResetAbortRequested failed during startRun:", e);
+    // Last-resort: nuke the entire run state to prevent stale flag
+    try { await chrome.storage.session.remove("open_cowork_run_state"); } catch { /* best-effort */ }
   }
   try {
     await initRunState(runState);

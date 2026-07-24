@@ -30,7 +30,7 @@ import { redactHistoryForPrompt } from "../messages";
 import type { LoopDeps } from "../types";
 import type { CallbackDispatcher, CallbackContext, LLMUsageInfo } from "../../callbacks";
 import { estimateCost } from "../../llm/pricing";
-import { SECURITY_INSTRUCTION } from "../../security";
+import { SECURITY_INSTRUCTION, wrapUntrusted } from "../../security";
 
 /**
  * Report a compaction call's cost + tokens to the caller (`onCost`), emit a
@@ -144,7 +144,7 @@ export async function runCompaction(
  // prior summary was already sanitized when produced; the final output is
  // re-sanitized via sanitizeCompactedMemory below.
   const priorBlock = priorCompactedMemory
-    ? `Prior summary:\n${priorCompactedMemory}\n\n`
+    ? `Prior summary:\n${wrapUntrusted(priorCompactedMemory)}\n\n`
     : "";
  // Inline the request build to avoid calling partitionHistory a second time
  // (buildCompactionRequest calls it internally).
@@ -165,7 +165,7 @@ export async function runCompaction(
       }
     } else {
       const res = await deps.plannerCall({
-        task: `${SECURITY_INSTRUCTION}\n\nSummarize the agent history below into a compacted memory block.${priorCompactedMemory ? `\n\nPrior summary to carry forward:\n${priorCompactedMemory}` : ""}`,
+        task: `${SECURITY_INSTRUCTION}\n\nSummarize the agent history below into a compacted memory block.${priorCompactedMemory ? `\n\nPrior summary to carry forward:\n${wrapUntrusted(priorCompactedMemory)}` : ""}`,
         history: redactedToSummarize,
         plan: undefined,
         currentPlanItem: undefined,

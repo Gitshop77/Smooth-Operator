@@ -100,7 +100,7 @@ const DENY_EVAL = makeThrowingProxy("eval");
  * file). This proxy is defense-in-depth that widens the set of blocked
  * constructor-escape entry points without changing legitimate behavior.
  */
-const BUILTIN_DENIED_PROPS = new Set(["constructor", "chrome"]);
+const BUILTIN_DENIED_PROPS = new Set(["constructor", "chrome", "__proto__"]);
 function makeHardenedBuiltin(real: object): object {
   const deny = (prop: PropertyKey): never => {
     throw new Error(`access denied by evaluate sandbox: ${String(prop)}`);
@@ -126,6 +126,10 @@ function makeHardenedBuiltin(real: object): object {
       Reflect.apply(t as (...a: unknown[]) => unknown, thisArg, args),
     construct: (t, args, newTarget) =>
       Reflect.construct(t as new (...a: unknown[]) => object, args, newTarget),
+    getPrototypeOf: (t) => {
+      const proto = Object.getPrototypeOf(t);
+      return proto === null ? null : makeHardenedBuiltin(proto);
+    },
   });
 }
 
@@ -188,7 +192,7 @@ const HARDENED_BUILTINS = {
 // (This does not cover `constructor` on real objects returned through the
 // proxy — e.g. `[].constructor.constructor` — which remains an architectural
 // gap owned outside this file; this is defense-in-depth, not a boundary.)
-const SANDBOX_DENIED_PROPS = new Set(["chrome", "Function", "eval", "constructor"]);
+const SANDBOX_DENIED_PROPS = new Set(["chrome", "Function", "eval", "constructor", "__proto__"]);
 
 /** A prop → lazy-value map. When a denied/redirected prop is accessed on a
  * hardened proxy, the getter is invoked and its result returned instead of the
@@ -426,6 +430,23 @@ export function runSandboxedCode(code: string): unknown {
       "evaluate blocked: Function-constructor escape pattern detected. " +
       "This pattern can bypass the evaluate sandbox.",
     );
+  }
+  // Detect prototype-chain and bracket-notation constructor escapes that
+  // bypass the .constructor.constructor scan above (e.g. __proto__,
+  // getPrototypeOf, ['constructor'] without a preceding dot-constructor).
+  const ESCAPE_PATTERNS = [
+    /__proto__/i,
+    /\[\s*['"`]constructor['"`]\s*\]/,
+    /\[\s*['"`]__proto__['"`]\s*\]/,
+    /getPrototypeOf/,
+    /\.\s*constructor\s*\.\s*constructor/,
+  ];
+  for (const pat of ESCAPE_PATTERNS) {
+    if (pat.test(code)) {
+      throw new Error(
+        `evaluate blocked: code contains sandbox escape pattern: ${pat.source}`,
+      );
+    }
   }
   // Ensure the evaluated body never runs in strict mode: the generated
   // function declares `eval`/`Function` as PARAMETERS, which are reserved

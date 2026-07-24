@@ -552,11 +552,14 @@ export function searchModels(
  * OpenRouter-style `provider/` prefix. The catalog stores OpenRouter models as
  * `anthropic/claude-opus-4.8` while a resolved model id may be the bare
  * `claude-opus-4.8` (or vice versa). We strip any `provider/` prefix from BOTH
- * sides and also accept `endsWith` / `includes` of `/<id>` so either form
- * resolves to the same catalog entry instead of falling through to the (now
- * fixed) heuristic. Provider-name hyphens are never altered.
+ * sides and also accept `endsWith` of `/<id>` so either form resolves to the
+ * same catalog entry instead of falling through to the (now fixed) heuristic.
+ * Provider-name hyphens are never altered.
+ *
+ * Uses exact segment matching (not substring) to avoid false positives
+ * (e.g. `gpt-4o` must NOT match `gpt-4o-mini`).
  */
-function catalogIdMatches(requested: string, catalogId: string): boolean {
+export function catalogIdMatches(requested: string, catalogId: string): boolean {
   const req = requested.toLowerCase();
   const cat = catalogId.toLowerCase();
   if (req === cat) return true;
@@ -566,9 +569,7 @@ function catalogIdMatches(requested: string, catalogId: string): boolean {
   };
   if (strip(req) === strip(cat)) return true;
   if (req.endsWith("/" + cat)) return true;
-  if (req.includes("/" + cat)) return true;
   if (cat.endsWith("/" + req)) return true;
-  if (cat.includes("/" + req)) return true;
   return false;
 }
 

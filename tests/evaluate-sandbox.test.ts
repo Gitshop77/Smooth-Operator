@@ -84,4 +84,62 @@ describe("evaluate sandbox: fail-closed hardening", () => {
       runSandboxedCode("(async function(){}).constructor('return 1')()")
     ).toThrow(/Function-constructor escape pattern detected/);
   });
+
+  // ─── __proto__ prototype-chain escape hardening ───
+
+  test("[].__proto__.constructor.constructor escape is blocked", () => {
+    expect(() =>
+      runSandboxedCode(
+        "return [].__proto__.constructor.constructor('return chrome')()",
+      ),
+    ).toThrow();
+  });
+
+  test("({}).__proto__.constructor escape is blocked", () => {
+    expect(() =>
+      runSandboxedCode("return ({}).__proto__.constructor"),
+    ).toThrow();
+  });
+
+  test("bracket-notation ['constructor'] access is blocked by scan", () => {
+    expect(() =>
+      runSandboxedCode("return {}['constructor']"),
+    ).toThrow(/sandbox escape pattern/);
+  });
+
+  test("Object.getPrototypeOf(Array).constructor is blocked on hardened builtins", () => {
+    expect(() =>
+      runSandboxedCode("return Object.getPrototypeOf(Array).constructor"),
+    ).toThrow();
+  });
+
+  test("__proto__ access on hardened Object proxy is denied", () => {
+    expect(() =>
+      runSandboxedCode("return Object.__proto__"),
+    ).toThrow(/sandbox escape pattern/);
+  });
+
+  test("bracket-notation __proto__ access is blocked by scan", () => {
+    expect(() =>
+      runSandboxedCode("return Object['__proto__']"),
+    ).toThrow(/sandbox escape pattern/);
+  });
+
+  test("getPrototypeOf in code string is blocked by scan", () => {
+    expect(() =>
+      runSandboxedCode("return Object.getPrototypeOf({})"),
+    ).toThrow(/sandbox escape pattern/);
+  });
+
+  // ─── benign-path: normal operations still work ───
+
+  test("normal array operations still work in sandbox", () => {
+    expect(runSandboxedCode("return [1, 2, 3].length")).toBe(3);
+    expect(runSandboxedCode("return Array.from([1, 2, 3])")).toEqual([1, 2, 3]);
+  });
+
+  test("normal object operations still work in sandbox", () => {
+    expect(runSandboxedCode("return Object.keys({a: 1})")).toEqual(["a"]);
+    expect(runSandboxedCode("return typeof Object")).toBe("function");
+  });
 });

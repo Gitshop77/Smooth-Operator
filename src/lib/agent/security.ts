@@ -568,7 +568,8 @@ export function scanForInjection(text: string): InjectionScanResult {
  */
 function normalizeHost(h: string): string {
   return h
-    .replace(/^\[|\]$/g, "")
+    .replace(/^\[/, "")
+    .replace(/\](?::\d+)?$/, "")
     .replace(/%[0-9a-z]+$/i, "")
     .replace(/\.+$/, "")
     .toLowerCase();
@@ -596,7 +597,16 @@ function hostnameMatches(hostname: string, domain: string): boolean {
   if (!d) return false;
   d = d.replace(/^\.+/, ""); // accept ".example.com" as "subdomains of example.com"
   d = d.replace(/^\*\./, ""); // accept "*.example.com" as a subdomain wildcard
-  d = d.replace(/:\d+$/, ""); // drop a trailing :port so "host:port" entries match the host
+  // Strip trailing :port only for non-IPv6 addresses. IPv6 addresses contain
+  // multiple colons, so naively stripping :\d+$ would remove the last hex group.
+  if (!d.includes(":") || d.includes("]:")) {
+    // Not IPv6, or bracketed IPv6 with port like [::1]:8080
+    d = d.replace(/:\d+$/, "");
+  } else if (d.startsWith("[") && d.includes("]:")) {
+    // Bracketed IPv6 with port: [2001:db8::1]:8080 → 2001:db8::1
+    d = d.replace(/^\[(.+)\]:\d+$/, "$1");
+  }
+  // Bare IPv6 (2001:db8::1) — no port to strip, leave as-is
   if (!d || d.includes('*') || /\s/.test(d)) return false;
   d = d.replace(/\.+$/, '');
   if (!d) return false;

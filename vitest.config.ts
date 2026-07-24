@@ -28,8 +28,8 @@ export default defineConfig({
  // value so the current suite passes while still failing on any drop below
  // baseline.
  //
- // Measured baseline (this run): lines 53.12%, statements 51.06%,
- // functions 50.81%, branches 43.27%.
+ // Measured baseline (this run): lines 61.57%, statements 59.56%,
+ // functions 61.05%, branches 53.58%.
  //
  // Ratchet plan: once green, raise these toward the real targets
  // (lines 70 / statements 70 / functions 70 / branches 60) green-by-green
@@ -44,10 +44,10 @@ export default defineConfig({
  // real test coverage. The static ReDoS/SSRF/redaction guards themselves are
  // untouched by this config.
       thresholds: {
-        lines: 52,
-        statements: 50,
-        functions: 49,
-        branches: 42,
+        lines: 57,
+        statements: 55,
+        functions: 54,
+        branches: 47,
         "src/lib/agent/llm/route/ssrf.ts": 55,
         "src/lib/agent/security.ts": 56,
         "src/lib/agent/anti-bot.ts": 2,

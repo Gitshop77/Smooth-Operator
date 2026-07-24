@@ -232,12 +232,14 @@ $("addSchedule").addEventListener("click", async () => {
       schedule.dayOfWeek = dayOfWeek;
     }
   }
+  const mode = ($("scheduleMode") as HTMLSelectElement).value as ScheduledTask["mode"];
   const scheduledTask: ScheduledTask = {
     id: crypto.randomUUID(),
     task,
     schedule,
     enabled: true,
     createdAt: Date.now(),
+    ...(mode && { mode }),
   };
  // Persist + arm via the canonical `saveScheduledTask` (single source of truth
  // for arming). It validates the schedule, writes storage, and arms the alarm
@@ -260,6 +262,7 @@ $("addSchedule").addEventListener("click", async () => {
   ($("scheduleInterval") as HTMLInputElement).value = "";
   ($("scheduleTime") as HTMLInputElement).value = "";
   ($("scheduleDay") as HTMLSelectElement).value = String(DEFAULT_DAY_OF_WEEK);
+  ($("scheduleMode") as HTMLSelectElement).value = "standard";
  // Re-sync the visible schedule sections to the now-reset form.
   ($("scheduleType") as HTMLSelectElement).dispatchEvent(new Event("change"));
   await renderSchedule();

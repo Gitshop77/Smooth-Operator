@@ -2,7 +2,7 @@
  * background/message-routing.ts — side panel → background message handlers.
  *
  * Registers `chrome.runtime.onMessage` and dispatches on `msg.type`:
- * - RUN / STOP / STATUS / CLEAR_LOG — run-lifecycle messages from the side
+ * - RUN / STOP / STATUS — run-lifecycle messages from the side
  * panel
  * - CDP_CLICK / CDP_PRESS_AND_HOLD — content-script fallbacks that need the
  * chrome.debugger API (only available in the service worker)
@@ -42,9 +42,6 @@ interface StopMessage {
 interface StatusMessage {
   type: "STATUS";
 }
-interface ClearLogMessage {
-  type: "CLEAR_LOG";
-}
 interface CdpClickMessage {
   type: "CDP_CLICK";
   rect: { x: number; y: number; width: number; height: number };
@@ -83,7 +80,7 @@ interface DetectVisualMessage {
 interface ClearVisionCacheMessage {
   type: "CLEAR_VISION_CACHE";
 }
-type IncomingMessage = RunMessage | StopMessage | StatusMessage | ClearLogMessage | CdpClickMessage | CdpPressAndHoldMessage | SaveAsPdfMessage | ScreenshotMessage | TabActionMessage | DetectVisualMessage | ClearVisionCacheMessage;
+type IncomingMessage = RunMessage | StopMessage | StatusMessage | CdpClickMessage | CdpPressAndHoldMessage | SaveAsPdfMessage | ScreenshotMessage | TabActionMessage | DetectVisualMessage | ClearVisionCacheMessage;
 
 // ─── Per-run download consent ────────────────────────────────────────────────
 //
@@ -387,6 +384,13 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
           responded = true;
           return;
         }
+        const MAX_TASK_LENGTH = 10_000;
+        if (msg.task.length > MAX_TASK_LENGTH) {
+          setRunStarting(false);
+          sendResponse({ ok: false, error: `Task too long (${msg.task.length} chars, max ${MAX_TASK_LENGTH})` });
+          responded = true;
+          return;
+        }
         const existing = await getRunState();
         if (existing?.active) {
           setRunStarting(false);
@@ -456,15 +460,6 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
       sendResponse({ running: !!state?.active, state });
     });
   }
-  if (msg?.type === "CLEAR_LOG") {
- // Intentional no-op: the side panel clears its own log DOM locally on
- // receipt of the user's "clear log" click. This handler just acknowledges
- // the message so the side panel's `chrome.runtime.sendMessage` promise
- // resolves cleanly (and so the message doesn't fall through to the
- // unknown-type branch below).
-    sendResponse({ ok: true });
-    return false;
-  }
  // CDP click fallback — the content script's el.click() didn't cause a
  // page change. Try a CDP-level Input.dispatchMouseEvent at the element's
  // center coordinates.
@@ -504,8 +499,10 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
  // malformed/non-numeric rect would throw with a cryptic error.
           if (
             !rect ||
-            typeof rect.x !== "number" || typeof rect.y !== "number" ||
-            typeof rect.width !== "number" || typeof rect.height !== "number"
+            typeof rect.x !== "number" || !Number.isFinite(rect.x) ||
+            typeof rect.y !== "number" || !Number.isFinite(rect.y) ||
+            typeof rect.width !== "number" || !Number.isFinite(rect.width) ||
+            typeof rect.height !== "number" || !Number.isFinite(rect.height)
           ) {
             sendResponse({ ok: false, error: "invalid CDP_CLICK rect payload" });
             return;
@@ -686,11 +683,17 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
  // the actual un-pause + re-check lives in the orchestrator's takeover
  // listener; this handler just acknowledges so the side panel's RESUME
  // callback resolves cleanly.
+ //
+ // Return `false` (not `true`) so the message ALSO propagates to the
+ // takeover listener in lib/agent/loop/helpers/takeover.ts, which resolves
+ // the paused promise. Calling sendResponse synchronously before returning
+ // false keeps the sidepanel's callback happy while letting the real
+ // handler receive the message.
     const fromExtensionPage = Boolean(
       sender.url?.startsWith(`chrome-extension://${chrome.runtime.id}`),
     );
     sendResponse(fromExtensionPage ? { ok: true } : { ok: false, error: "unauthorized sender" });
-    return true;
+    return false;
   }
   return false;
 });

@@ -1,4 +1,4 @@
-# CI workflow — runs lint, tests, extension build, and cockpit type-check on every PR.
+# CI workflow — runs lint, tests, and extension build on every PR.
 #
 # Uses npm as the default package manager. All scripts work with `npm run`.
 name: CI
@@ -33,19 +33,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install mini-services/cowork-events dependencies
-        # The root type-check (npx tsc --noEmit) and the cowork-events
-        # test suite both import the mini-service source, which in turn imports
-        # socket.io / z-ai-web-dev-sdk resolved from
-        # mini-services/cowork-events/node_modules. Those deps must be
-        # installed BEFORE the root tsc and vitest steps, otherwise CI fails
-        # with "Cannot find module 'socket.io'" / "Cannot find module
-        # 'z-ai-web-dev-sdk'" even though it passes locally (where the deps
-        # are already present). This is why the install lives here and not
-        # only in the later audit step.
-        working-directory: mini-services/cowork-events
-        run: npm ci
-
       - name: Run lint
         run: npm run lint
 
@@ -53,11 +40,9 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Run tests with coverage gate
-        # Run the ROOT suite under v8 coverage and enforce the thresholds
+        # Run the test suite under v8 coverage and enforce the thresholds
         # declared in vitest.config.ts; a PR that drops coverage below the
-        # baseline fails CI. This intentionally covers only the repo-root
-        # `tests/**` suite — the cockpit suite is a separate job below and must
-        # NOT be pulled in here (it has its own config and DB wiring).
+        # baseline fails CI.
         run: npx vitest run --coverage
 
       - name: verify extension build regenerates cleanly
@@ -113,92 +98,6 @@ jobs:
         # tampered package with no published advisory is still blocked.
         run: npm audit --audit-level=high && npm audit signatures
 
-      - name: Audit mini-services/cowork-events dependencies
-        working-directory: mini-services/cowork-events
-        # Deps installed in the earlier "Install mini-services/cowork-events
-        # dependencies" step; this is signal-only (see "Audit root
-        # dependencies"), PR scope is gated by dependency-review.yml.
-        run: npm audit --audit-level=high && npm audit signatures
-
-      - name: Type-check mini-services/cowork-events
-        # The WebSocket mini-service ships to production paths but previously
-        # had no static analysis in CI. Type-check it from the repo root (where
-        # typescript is installed) against its own tsconfig so type errors are
-        # caught on every PR. NOTE: lint/test/build coverage for this service
-        # still requires scripts in mini-services/cowork-events/package.json
-        # (owned outside this batch).
-        run: npx tsc --noEmit -p mini-services/cowork-events/tsconfig.json
-
-  cockpit:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    # DATABASE_URL is supplied at JOB level (not per-step) so every cockpit step
-    # that imports `prisma.config.ts` — `db:generate`, `db:apply`, `tsc`, `lint`,
-    # `build`, and the `test` suite — has the datasource URL. Prisma 7 moved the
-    # connection URL out of `schema.prisma` into `prisma.config.ts`, which reads
-    # it eagerly via `env('DATABASE_URL')` at load time. Without it, `prisma
-    # generate` dies with "Cannot resolve environment variable: DATABASE_URL"
-    # before any command runs. The cockpit's `.env` is gitignored, so CI must
-    # inject this here. A throwaway SQLite file is fine for CI.
-    env:
-      DATABASE_URL: file:./db/cowork.db
-    defaults:
-      run:
-        working-directory: cockpit
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0 (full commit SHA pin)
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # actions/setup-node v7.0.0 (full commit SHA pin)
-        with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: cockpit/package-lock.json
-
-      - name: Install cockpit dependencies
-        run: npm ci
-
-      - name: Audit cockpit dependencies
-        # Signal-only (see the root "Audit root dependencies" step); PR-introduced
-        # vulnerabilities are gated by dependency-review.yml. `npm audit
-        # signatures` verifies registry signatures as an additional hard gate.
-        run: npm audit --audit-level=high && npm audit signatures
-
-      - name: Generate Prisma client
-        run: npm run db:generate
-
-      - name: Apply database schema (verify it applies)
-        # Apply the committed Prisma migration to a throwaway local SQLite DB so a
-        # schema that fails to apply is caught in CI AND the tables actually exist
-        # for the cockpit tests below. A migration now lives under
-        # cockpit/prisma/migrations/, so we use `prisma migrate deploy` (via
-        # `npm run db:apply`) rather than the older `db push` drift approach.
-        # cockpit uses sqlite (DATABASE_URL is set at the job level);
-        # no external DB service required.
-        run: npm run db:apply
-
-      - name: Type-check cockpit
-        run: npx tsc --noEmit
-
-      - name: Lint cockpit
-        run: npm run lint
-
-      - name: Run cockpit tests
-        # Run ONLY the cockpit test suite. An explicit `--config
-        # vitest.config.ts` is required: without it, `vitest run` would search
-        # UP from ./cockpit, find the repo-root vitest.config.ts, and inherit its
-        # root (`tests/**/*.test.ts`) — wrongly executing the entire ~106-file
-        # root suite here too (the duplication the user reported: "both workflows
-        # run both tests"). The cockpit-local config (root = ./cockpit, include
-        # = src/**/*.test.ts) scopes this step to cockpit tests only. DATABASE_URL
-        # is set at the job level so Prisma-backed tests have a DB target.
-        run: npx vitest run --config vitest.config.ts
-
-      - name: Build cockpit
-        run: npm run build
-
   # Secret scanning — fail the build if a real secret is committed.
   # Runs gitleaks against the full git history on every PR and push.
   secret-scan:
@@ -208,7 +107,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7.0.0 # actions/checkout v7 (Node 24 runtime; dependabot PR #36)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
         with:
           fetch-depth: 0
 

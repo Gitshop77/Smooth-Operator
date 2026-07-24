@@ -40,7 +40,8 @@ export async function executeActionQueue(
   loopDetector: LoopDetector,
   config: import("../../types").AgentConfig,
   dispatcher?: CallbackDispatcher,
-  ctx?: CallbackContext
+  ctx?: CallbackContext,
+  costCapExceeded?: () => boolean
 ): Promise<ActionQueueResult> {
   const results: ActionResult[] = [];
   let aborted = false;
@@ -148,6 +149,18 @@ export async function executeActionQueue(
         deps.onEvent({ type: "loop-warning", step, count: warnCount });
         if (dispatcher && ctx) await dispatcher.loopWarning(ctx, warnCount);
       }
+    }
+
+    if (costCapExceeded?.()) {
+      deps.onEvent({ type: "info", message: "Cost cap exceeded mid-step. Stopping." });
+      results.push({
+        action,
+        success: false,
+        message: "BLOCKED: cost cap exceeded",
+      });
+      aborted = true;
+      padRemaining(i);
+      break;
     }
 
     let result: ActionResult;

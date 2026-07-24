@@ -28,13 +28,14 @@
  * In the Chrome extension, the piercer is injected as a separate
  * `shadow-piercer.js` entry point in the MAIN world (before the content
  * script). The MAIN-world instance patches the REAL page's
- * `Element.prototype.attachShadow` and exposes a backdoor on `window` —
- * `window.__oc_bd__` — that the content script (isolated world)
- * can read via the shared DOM element wrappers. When the module is loaded
- * directly in the content script's isolated world (e.g. during tests or
- * in-page demo mode), the patch is installed locally and the backdoor is
- * set on the content script's own `window`. Both paths produce the same
- * public API: {@link getShadowRoot} and {@link pierceShadowRoots}.
+ * `Element.prototype.attachShadow` and exposes a backdoor on `window` via
+ * a Symbol key — `window[Symbol.for("__open_cowork_piercer_bd__")]` — that
+ * the content script (isolated world) can read via the shared DOM element
+ * wrappers. When the module is loaded directly in the content script's
+ * isolated world (e.g. during tests or in-page demo mode), the patch is
+ * installed locally and the backdoor is set on the content script's own
+ * `window`. Both paths produce the same public API: {@link getShadowRoot}
+ * and {@link pierceShadowRoots}.
  *
  * ## Idempotency
  *
@@ -54,11 +55,11 @@
  * - `Object.defineProperty` is used with `configurable: true, writable: true`
  * so a page that detects the patch can still override it (the piercer is
  * best-effort, not a security boundary).
- * - The cross-world backdoor `window.__oc_bd__` is written to the
- * SHARED `window` (see "Worlds" above). Because it lives on the page's
- * `window`, the page's own MAIN-world scripts can also read it — including
- * any closed shadow roots the page author attached (the page only learns its
- * OWN closed roots, never another origin's). This is a deliberate,
+ * - The cross-world backdoor `window[Symbol.for("__open_cowork_piercer_bd__")]`
+ * is written to the SHARED `window` (see "Worlds" above). Because it lives on
+ * the page's `window`, the page's own MAIN-world scripts can also read it —
+ * including any closed shadow roots the page author attached (the page only
+ * learns its OWN closed roots, never another origin's). This is a deliberate,
  * low-impact trade-off: the backdoor exists so the isolated-world content
  * script can reach roots captured by the MAIN-world injection. It is NOT a
  * secret channel; treat it as read-only page introspection support, not a
@@ -81,7 +82,7 @@ export interface ShadowPiercerOptions {
   debug?: boolean;
 }
 
-/** Backdoor exposed on `window.__oc_bd__` for cross-world access. */
+/** Backdoor exposed on `window[Symbol.for("__open_cowork_piercer_bd__")]` for cross-world access. */
 export interface ShadowPiercerBackdoor {
   /** Get the closed (or open) shadow root captured for `host`, if any. */
   getShadowRoot(host: Element): ShadowRoot | null;
@@ -112,7 +113,11 @@ let state: PiercerState | null = null;
 // `window`.
 const PIERCER_PATCHED_KEY = "__oc_p__";
 const PIERCER_STATE_KEY = "__oc_s__";
-const PIERCER_BACKDOOR_KEY = "__oc_bd__";
+// Use a Symbol so page scripts cannot enumerate or access the backdoor via
+// Object.keys / for-in / JSON.stringify. Symbol.for is globally shared across
+// all contexts in the same V8 isolate, so the content script (isolated world)
+// and the MAIN-world injection both resolve the same Symbol.
+const PIERCER_BACKDOOR_KEY = Symbol.for("__open_cowork_piercer_bd__");
 const PIERCER_INJECTED_KEY = "__oc_in__";
 // Neutral, opaque console prefix for debug-only logs — never embeds the
 // product name, so the page console can't be fingerprinted by that string.
@@ -140,8 +145,8 @@ const ELEMENT_CTOR: typeof Element | undefined =
  * After install, {@link getShadowRoot} returns the captured root for any
  * host, and {@link pierceShadowRoots} walks both open and closed shadow
  * trees. Also exposes the {@link ShadowPiercerBackdoor} on
- * `window.__oc_bd__` so the content script can read roots
- * captured by a MAIN-world injection of this same module.
+ * `window[Symbol.for("__open_cowork_piercer_bd__")]` so the content script
+ * can read roots captured by a MAIN-world injection of this same module.
  */
 export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
   if (!ELEMENT_CTOR) return; // non-DOM environment — nothing to pierce.
@@ -268,7 +273,7 @@ type TaggedBackdoor = ShadowPiercerBackdoor & { [PIERCER_STATE_KEY]?: PiercerSta
 /** Read the cross-world backdoor, if present, as a {@link TaggedBackdoor}. */
 function readTaggedBackdoor(): TaggedBackdoor | undefined {
   if (typeof window === "undefined") return undefined;
-  return (window as unknown as Record<string, TaggedBackdoor | undefined>)[PIERCER_BACKDOOR_KEY];
+  return (window as any)[PIERCER_BACKDOOR_KEY] as TaggedBackdoor | undefined;
 }
 
 /** Read the cross-world backdoor, if present, as a {@link ShadowPiercerBackdoor}. */
@@ -286,7 +291,7 @@ let cachedBackdoor: TaggedBackdoor | undefined;
 /** Publish the cross-world backdoor on `window` (best-effort). */
 function writeBackdoor(b: TaggedBackdoor): void {
   try {
-    (window as unknown as Record<string, unknown>)[PIERCER_BACKDOOR_KEY] = b;
+    (window as any)[PIERCER_BACKDOOR_KEY] = b;
   } catch {
     /* window may be non-writable in some sandboxes — ignore */
   }
@@ -305,7 +310,7 @@ function markInjected(): void {
 function clearBackdoorKeys(): void {
   cachedBackdoor = undefined;
   try {
-    delete (window as unknown as Record<string, unknown>)[PIERCER_BACKDOOR_KEY];
+    delete (window as any)[PIERCER_BACKDOOR_KEY];
     delete (window as unknown as Record<string, unknown>)[PIERCER_INJECTED_KEY];
   } catch {
     /* ignore */
@@ -359,8 +364,8 @@ function bindBackdoor(s: PiercerState): void {
  * Resolution order:
  * 1. `el.shadowRoot` — the open root (always accessible from the host).
  * 2. The module-local piercer state (if installed in this world).
- * 3. The cross-world backdoor `window.__oc_bd__` (set by a
- * MAIN-world injection of this same module).
+ * 3. The cross-world backdoor `window[Symbol.for("__open_cowork_piercer_bd__")]`
+ * (set by a MAIN-world injection of this same module).
  *
  * Returns `null` if no shadow root exists (or the piercer isn't installed
  * and the root is closed).

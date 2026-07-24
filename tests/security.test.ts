@@ -400,13 +400,10 @@ describe("isUrlAllowed", () => {
 
   test("handles IPv6 hosts", () => {
   // IPv6 hosts in URLs are wrapped in brackets — the matcher strips brackets
-  // via normalizeHost. However, hostnameMatches has a known source bug:
-  // d.replace(/:\\d+$/, '') strips trailing IPv6 groups that look like ports
-  // (e.g. "::1" → ":"), so IPv6 entries never match in the allowlist.
-  // These tests document the current (broken) behavior. Once the regex is
-  // fixed (e.g. only strip port for non-IPv6 hosts), these should be updated.
-    expect(isUrlAllowed("https://[::1]:8080/path", ["::1"])).toBe(false); // known bug
-    expect(isUrlAllowed("https://[2001:db8::1]/foo", ["2001:db8::1"])).toBe(false); // known bug
+  // via normalizeHost. Bare IPv6 addresses must match without port-stripping
+  // clobbering the last hex group.
+    expect(isUrlAllowed("https://[::1]:8080/path", ["::1"])).toBe(true);
+    expect(isUrlAllowed("https://[2001:db8::1]/foo", ["2001:db8::1"])).toBe(true);
     expect(isUrlAllowed("https://[::1]/", ["evil.com"])).toBe(false);
   });
 });
@@ -511,6 +508,33 @@ describe("checkUrlAllowed", () => {
  // wouldn't match anyway — but the scheme floor catches it FIRST.
     expect(checkUrlAllowed("javascript:alert(1)", { allowedDomains: ["javascript"] }).allowed).toBe(false);
     expect(checkUrlAllowed("data:text/html,x", { allowedDomains: ["data"] }).allowed).toBe(false);
+  });
+
+  // ─── IPv6 hostname matching ──────────────────────────────────────────────────
+  //
+  // The port-stripping regex :\d+$ used to clobber the last hex group of bare
+  // IPv6 addresses (e.g. "2001:db8::1" → "2001:db8::"). These tests pin the
+  // fix: bare IPv6 is left untouched, bracketed IPv6-with-port is unwrapped
+  // correctly, and plain hostname:port still strips the port.
+
+  test("IPv6 bare address matches itself (no port stripping)", () => {
+    expect(checkUrlAllowed("http://[2001:db8::1]/", { allowedDomains: ["2001:db8::1"] }).allowed).toBe(true);
+  });
+
+  test("IPv6 loopback matches itself", () => {
+    expect(checkUrlAllowed("http://[::1]/", { allowedDomains: ["::1"] }).allowed).toBe(true);
+  });
+
+  test("bracketed IPv6 with port matches bare IPv6", () => {
+    expect(checkUrlAllowed("http://[::1]:8080/", { allowedDomains: ["::1"] }).allowed).toBe(true);
+  });
+
+  test("hostname:port entry matches bare hostname", () => {
+    expect(checkUrlAllowed("https://example.com:443/", { allowedDomains: ["example.com"] }).allowed).toBe(true);
+  });
+
+  test("IPv6 address with port in allowlist matches URL", () => {
+    expect(checkUrlAllowed("http://[2001:db8::1]/", { allowedDomains: ["[2001:db8::1]:8080"] }).allowed).toBe(true);
   });
 });
 

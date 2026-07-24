@@ -78,7 +78,7 @@ export async function handleScheduledTaskFire(taskId: string): Promise<void> {
  // Dynamic import breaks the circular dep with agent-bridge.ts (which calls
  // fireNotifications from its `finally` block).
     const { startRun } = await import("./agent-bridge");
-    await startRun({ task: task.task, maxSteps: DEFAULT_MAX_STEPS, mode: "standard", isScheduledTaskRun: true });
+    await startRun({ task: task.task, maxSteps: DEFAULT_MAX_STEPS, mode: task.mode ?? "standard", isScheduledTaskRun: true });
   } catch (e) {
  // Route through safeLog so any secret-shaped values embedded in the error
  // (task text, webhook URLs, run-derived strings) are redacted first — the
@@ -108,11 +108,17 @@ export async function handleScheduledTaskFire(taskId: string): Promise<void> {
  */
 export async function fireNotifications(task: string, success?: boolean): Promise<void> {
   try {
-    const res = await chrome.storage.local.get(["notifyOnCompletion", "webhookUrl"]);
+    const res = await chrome.storage.local.get([
+      "notifyOnCompletion", "notifyOnError", "notifyOnTakeover", "webhookUrl",
+    ]);
     const notify = res.notifyOnCompletion as boolean;
+    const notifyOnError = res.notifyOnError as boolean;
+    // notifyOnTakeover is wired in Options UI but requires takeover-event
+    // threading through the notification system — reserved for future work.
+    void (res.notifyOnTakeover as boolean);
     const webhookUrl = res.webhookUrl as string;
 
-    if (notify) {
+    if (notify || (notifyOnError && !success)) {
       chrome.notifications.create({
         type: "basic",
         iconUrl: "icons/icon.png",

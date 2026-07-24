@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="dark light" />
   <title>Open Cowork — Settings</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src https://*;">
   <link rel="stylesheet" href="options.css" />
 </head>
 <body>
@@ -13,103 +14,117 @@
     <nav class="tabs" role="tablist" aria-label="Settings sections" id="tablist">
       <button type="button" class="tab active" data-tab="connection" id="tab-connection" role="tab" aria-selected="true" aria-controls="panel-connection" tabindex="0">Connection</button>
       <button type="button" class="tab" data-tab="agent" id="tab-agent" role="tab" aria-selected="false" aria-controls="panel-agent" tabindex="-1">Agent</button>
-      <button type="button" class="tab" data-tab="secrets" id="tab-secrets" role="tab" aria-selected="false" aria-controls="panel-secrets" tabindex="-1">Secrets</button>
-      <button type="button" class="tab" data-tab="schedule" id="tab-schedule" role="tab" aria-selected="false" aria-controls="panel-schedule" tabindex="-1">Schedule</button>
-      <button type="button" class="tab" data-tab="tools" id="tab-tools" role="tab" aria-selected="false" aria-controls="panel-tools" tabindex="-1">Tools</button>
-      <button type="button" class="tab" data-tab="skills" id="tab-skills" role="tab" aria-selected="false" aria-controls="panel-skills" tabindex="-1">Skills</button>
-      <button type="button" class="tab" data-tab="prompts" id="tab-prompts" role="tab" aria-selected="false" aria-controls="panel-prompts" tabindex="-1">Prompts</button>
+      <button type="button" class="tab" data-tab="storage" id="tab-storage" role="tab" aria-selected="false" aria-controls="panel-storage" tabindex="-1">Storage</button>
+      <button type="button" class="tab" data-tab="automation" id="tab-automation" role="tab" aria-selected="false" aria-controls="panel-automation" tabindex="-1">Automation</button>
       <button type="button" class="tab" data-tab="history" id="tab-history" role="tab" aria-selected="false" aria-controls="panel-history" tabindex="-1">History</button>
-      <button type="button" class="tab" data-tab="notify" id="tab-notify" role="tab" aria-selected="false" aria-controls="panel-notify" tabindex="-1">Notify</button>
-      <button type="button" class="tab" data-tab="about" id="tab-about" role="tab" aria-selected="false" aria-controls="panel-about" tabindex="-1">About</button>
     </nav>
 
     <!-- Content area -->
     <div class="content-area">
-      <!-- Connection tab -->
+
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <!-- CONNECTION TAB                                                     -->
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
       <section class="tab-content active" id="panel-connection" data-tab="connection" role="tabpanel" aria-labelledby="tab-connection" tabindex="0">
         <div class="view-header">
           <h2 class="view-title">Connection</h2>
-          <p class="view-subtitle">Connect your LLM provider and the Cowork Cockpit. The extension calls your provider directly — no server required.</p>
+          <p class="view-subtitle">Connect your LLM provider. The extension calls your provider directly — no server required.</p>
         </div>
 
-        <label>
-          <span>Cockpit URL</span>
-          <input type="text" id="cockpitUrl" placeholder="http://localhost:3000" autocomplete="off" />
-          <small>Override where the Cowork Cockpit dashboard runs (dev: http://localhost:3000). The side-panel button opens this URL.</small>
-        </label>
+        <div class="section-group">
+          <label>
+            <span>Provider</span>
+            <select id="provider"></select>
+            <small id="provider-hint">Choose your provider.</small>
+          </label>
 
-        <label>
-          <span>Provider</span>
-          <select id="provider"></select>
-          <small id="provider-hint">Choose your provider.</small>
-        </label>
+          <label>
+            <span>API key</span>
+            <input type="password" id="apiKey" placeholder="sk-…" autocomplete="new-password" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" />
+            <small id="apikey-hint">Your API key — stored locally in your browser profile. Only sent to the provider you choose.</small>
+          </label>
 
-        <label>
-          <span>API key</span>
-          <input type="password" id="apiKey" placeholder="sk-…" autocomplete="new-password" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" />
-          <small id="apikey-hint">Your API key — stored locally in your browser profile. Only sent to the provider you choose.</small>
-        </label>
+          <label id="baseurl-label">
+            <span>Base URL</span>
+            <input type="text" id="baseUrl" placeholder="https://api.openai.com/v1" autocomplete="off" />
+            <small>For OpenAI-compatible providers. Auto-filled with the provider default.</small>
+          </label>
 
-        <label id="baseurl-label">
-          <span>Base URL</span>
-          <input type="text" id="baseUrl" placeholder="https://api.openai.com/v1" autocomplete="off" />
-          <small>For OpenAI-compatible providers. Auto-filled with the provider default.</small>
-        </label>
+          <label id="resourcename-label" class="is-hidden">
+            <span>Azure resource name</span>
+            <input type="text" id="resourceName" placeholder="your-resource" autocomplete="off" />
+            <small>Used to build <code>https://{resource}.openai.azure.com</code> when no Base URL is set. Optional if you supply a full Base URL.</small>
+          </label>
 
-        <label id="resourcename-label" class="is-hidden">
-          <span>Azure resource name</span>
-          <input type="text" id="resourceName" placeholder="your-resource" autocomplete="off" />
-          <small>Used to build <code>https://{resource}.openai.azure.com</code> when no Base URL is set. Optional if you supply a full Base URL.</small>
-        </label>
-
-        <div class="test-connection">
-          <button type="button" id="testConnection" class="btn btn-ghost">Test connection</button>
-          <span id="testResult" class="test-result" role="status" aria-live="polite"></span>
+          <div class="test-connection">
+            <button type="button" id="testConnection" class="btn btn-ghost">Test connection</button>
+            <span id="testResult" class="test-result" role="status" aria-live="polite"></span>
+          </div>
         </div>
       </section>
 
-      <!-- Agent tab -->
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <!-- AGENT TAB                                                          -->
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
       <section class="tab-content" id="panel-agent" data-tab="agent" role="tabpanel" aria-labelledby="tab-agent" tabindex="-1">
         <div class="view-header">
           <h2 class="view-title">Agent</h2>
           <p class="view-subtitle">Tune how the navigator plans and acts: step budget, default model, vision, and domain limits.</p>
         </div>
 
-        <div class="row2">
-          <label>
-            <span>Max steps</span>
-            <input type="number" id="maxSteps" min="1" max="500" value="100" />
-            <small>Maximum navigator steps before the agent gives up.</small>
-          </label>
-          <label>
-            <span>Default model</span>
-            <input type="text" id="model" placeholder="gpt-5.5, claude-sonnet-5, gemini-3.5-flash" autocomplete="off" list="model-suggestions" />
-            <small>Any model your API key supports. Type to search the models.dev catalog.</small>
-            <datalist id="model-suggestions"></datalist>
-            <div id="model-search-results" class="model-search-results is-hidden"></div>
-            <div class="model-refresh">
-              <button type="button" id="refreshModels" class="btn btn-ghost">↻ Refresh models from models.dev</button>
-              <span id="refreshModelsStatus" class="test-result" role="status" aria-live="polite"></span>
-            </div>
-          </label>
+        <!-- Model & Steps -->
+        <div class="section-group">
+          <div class="row2">
+            <label>
+              <span>Agent mode</span>
+              <select id="agentMode">
+                <option value="restricted">Restricted — current tab only, no navigate</option>
+                <option value="standard" selected>Standard — navigate, open tabs (default)</option>
+                <option value="full_agentic">Full agentic — JS execution, upload, download</option>
+              </select>
+              <small>Controls what the agent is allowed to do. Restricted is safest for form-filling; full agentic enables evaluate/upload/download.</small>
+            </label>
+            <label>
+              <span>Max steps</span>
+              <input type="number" id="maxSteps" min="1" max="500" value="100" />
+              <small>Maximum navigator steps before the agent gives up.</small>
+            </label>
+          </div>
         </div>
 
-        <fieldset class="callout">
-          <legend class="callout-legend">Local Vision Assistant (WebGPU)</legend>
-          <p class="callout-body">
+        <div class="section-group">
+          <div class="row2">
+            <label>
+              <span>Default model</span>
+              <input type="text" id="model" placeholder="gpt-5.5, claude-sonnet-5, gemini-3.5-flash" autocomplete="off" list="model-suggestions" />
+              <small>Any model your API key supports. Type to search the models.dev catalog.</small>
+              <datalist id="model-suggestions"></datalist>
+              <div id="model-search-results" class="model-search-results is-hidden"></div>
+              <div class="model-refresh">
+                <button type="button" id="refreshModels" class="btn btn-ghost">↻ Refresh models from models.dev</button>
+                <span id="refreshModelsStatus" class="test-result" role="status" aria-live="polite"></span>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <!-- Vision Assistant -->
+        <div class="section-group">
+          <h3 class="section-title">Local Vision Assistant (WebGPU)</h3>
+          <p class="section-desc">
             Runs a vision model entirely in your browser via WebGPU — zero API cost, fully private.
             It uses ~2.5&nbsp;GB of memory and is recommended for text-only LLMs (DeepSeek, Llama, Qwen, etc.);
             it adds visual element detection the DOM can&rsquo;t see (Canvas, WebGL, visual layout).
           </p>
-          <label>
+          <label class="radio-row">
             <input type="radio" name="visionMode" id="visionMode_disabled" value="disabled" checked />
             <span>Off — text-only LLMs only (no local vision)</span>
           </label>
-          <label>
+          <label class="radio-row">
             <input type="radio" name="visionMode" id="visionMode_always" value="always" />
             <span>On — always running (~2.5&nbsp;GB of memory, best for Canvas/WebGL pages)</span>
           </label>
-          <label>
+          <label class="radio-row">
             <input type="radio" name="visionMode" id="visionMode_adaptive" value="adaptive" />
             <span>Local — adaptive, the LLM calls vision on-demand (saves memory + inference time)</span>
           </label>
@@ -117,243 +132,274 @@
             <span id="localVisionBadge" class="vision-badge">Not loaded</span>
             <progress id="localVisionProgress" class="vision-progress is-hidden" value="0" max="100"></progress>
           </div>
-        </fieldset>
+        </div>
 
-        <label>
-          <span>Allowed domains (one per line)</span>
-          <textarea id="allowedDomains" rows="3" placeholder="example.com&#10;github.com"></textarea>
-          <small>If set, the agent can only navigate to these domains (+ subdomains). Leave empty to allow all.</small>
-        </label>
-        <label>
-          <span>Blocked domains (one per line)</span>
-          <textarea id="blockedDomains" rows="3" placeholder="evil.com&#10;malicious.example.org"></textarea>
-          <small>The agent will never navigate to these domains. Takes precedence over the allowlist.</small>
-        </label>
+        <!-- Domain Limits -->
+        <div class="section-group">
+          <h3 class="section-title">Domain limits</h3>
+          <label>
+            <span>Allowed domains (one per line)</span>
+            <textarea id="allowedDomains" rows="3" placeholder="example.com&#10;github.com"></textarea>
+            <small>If set, the agent can only navigate to these domains (+ subdomains). Leave empty to allow all.</small>
+          </label>
+          <label>
+            <span>Blocked domains (one per line)</span>
+            <textarea id="blockedDomains" rows="3" placeholder="evil.com&#10;malicious.example.org"></textarea>
+            <small>The agent will never navigate to these domains. Takes precedence over the allowlist.</small>
+          </label>
+        </div>
 
-        <details class="adv">
-          <summary>Advanced agent settings</summary>
+        <!-- Advanced Settings -->
+        <div class="section-group">
+          <details class="adv">
+            <summary>Advanced agent settings</summary>
+            <div class="adv-body">
+              <label>
+                <span>Max actions per step</span>
+                <input type="number" id="maxActions" min="1" max="10" value="10" />
+              </label>
+              <label>
+                <span>Planner interval (steps)</span>
+                <input type="number" id="plannerInterval" min="1" max="20" value="5" />
+              </label>
+              <label>
+                <span>Max consecutive failures</span>
+                <input type="number" id="maxFailures" min="1" max="10" value="5" />
+              </label>
+              <label>
+                <span>Cost cap (USD, 0 = no cap)</span>
+                <input type="number" id="costCap" min="0" step="0.01" value="0" />
+              </label>
+              <label>
+                <span>Screenshot quality (JPEG, 50–100)</span>
+                <input type="number" id="screenshotQuality" min="50" max="100" value="80" />
+              </label>
+              <label class="checkbox-row">
+                <input type="checkbox" id="enableScreenshots" checked />
+                <span>Enable screenshots for vision models</span>
+              </label>
+              <label class="checkbox-row">
+                <input type="checkbox" id="enableStealth" />
+                <span>
+                  Enable MAIN-world stealth patches (anti-detection) —
+                  <strong>off by default</strong>. Circumventing bot-detection may
+                  violate a site's Terms of Service. Enable only for sites you are
+                  authorized to automate.
+                </span>
+              </label>
+            </div>
+          </details>
+        </div>
+
+        <!-- Prompts -->
+        <div class="section-group">
+          <h3 class="section-title">Prompts</h3>
+          <p class="section-desc">Override the default system prompts. Changes save automatically.</p>
           <label>
-            <span>Max actions per step</span>
-            <input type="number" id="maxActions" min="1" max="10" value="10" />
+            <span>Default system prompt</span>
+            <textarea id="defaultTask" rows="3" placeholder="Solve all questions on this page and submit…"></textarea>
           </label>
           <label>
-            <span>Planner interval (steps)</span>
-            <input type="number" id="plannerInterval" min="1" max="20" value="5" />
+            <span>Navigator system prompt override</span>
+            <textarea id="customNavigatorPrompt" rows="6" placeholder="Leave empty to use the built-in navigator prompt…"></textarea>
           </label>
           <label>
-            <span>Max consecutive failures</span>
-            <input type="number" id="maxFailures" min="1" max="10" value="5" />
+            <span>Planner system prompt override</span>
+            <textarea id="customPlannerPrompt" rows="6" placeholder="Leave empty to use the built-in planner prompt…"></textarea>
           </label>
-          <label>
-            <span>Cost cap (USD, 0 = no cap)</span>
-            <input type="number" id="costCap" min="0" step="0.01" value="0" />
-          </label>
-          <label>
-            <span>Screenshot quality (JPEG, 50–100)</span>
-            <input type="number" id="screenshotQuality" min="50" max="100" value="80" />
-          </label>
-          <label class="checkbox-row">
-            <input type="checkbox" id="enableScreenshots" checked />
-            <span>Enable screenshots for vision models</span>
-          </label>
-          <label class="checkbox-row">
-            <input type="checkbox" id="enableStealth" />
-            <span>
-              Enable MAIN-world stealth patches (anti-detection) —
-              <strong>off by default</strong>. Circumventing bot-detection may
-              violate a site's Terms of Service. Enable only for sites you are
-              authorized to automate.
-            </span>
-          </label>
-        </details>
+
+          <h4 class="subsection-title">Quick prompts</h4>
+          <div class="crud-row">
+            <input type="text" id="quickPromptName" placeholder="Name (e.g. Summarize)" autocomplete="off" />
+            <input type="text" id="quickPromptText" placeholder="Prompt text" autocomplete="off" />
+            <button type="button" id="addQuickPrompt" class="btn btn-ghost">Add</button>
+          </div>
+          <div id="quickPromptsList"></div>
+        </div>
       </section>
 
-      <!-- Secrets tab -->
-      <section class="tab-content" id="panel-secrets" data-tab="secrets" role="tabpanel" aria-labelledby="tab-secrets" tabindex="-1">
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <!-- STORAGE TAB                                                        -->
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="tab-content" id="panel-storage" data-tab="storage" role="tabpanel" aria-labelledby="tab-storage" tabindex="-1">
         <div class="view-header">
-          <h2 class="view-title">Secrets</h2>
+          <h2 class="view-title">Storage</h2>
           <p class="view-subtitle">Store credentials locally. Use <code>%name%</code> in prompts — the LLM only sees the placeholder.</p>
         </div>
-        <div class="secret-add">
-          <input type="text" id="secretName" placeholder="name (e.g. email)" autocomplete="off" />
-          <input type="password" id="secretValue" placeholder="value" autocomplete="new-password" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" />
-          <button type="button" id="addSecret" class="btn btn-ghost">Add</button>
+
+        <div class="section-group">
+          <h3 class="section-title">Secrets</h3>
+          <p class="section-desc">Store passwords, API keys, or tokens. Use <code>%name%</code> placeholders in prompts.</p>
+          <div class="crud-row">
+            <input type="text" id="secretName" placeholder="name (e.g. email)" autocomplete="off" />
+            <input type="password" id="secretValue" placeholder="value" autocomplete="new-password" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" />
+            <button type="button" id="addSecret" class="btn btn-ghost">Add</button>
+          </div>
+          <div id="secretsList"></div>
         </div>
-        <div id="secretsList"></div>
+
+        <div class="section-group placeholder-section">
+          <h3 class="section-title">Per-site memory</h3>
+          <p class="section-desc">Per-domain notes injected as trusted context into agent runs. Managed from the side panel.</p>
+          <p class="empty-hint">Configure per-site memory from the side panel's memory controls.</p>
+        </div>
       </section>
 
-      <!-- Schedule tab -->
-      <section class="tab-content" id="panel-schedule" data-tab="schedule" role="tabpanel" aria-labelledby="tab-schedule" tabindex="-1">
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <!-- AUTOMATION TAB                                                     -->
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <section class="tab-content" id="panel-automation" data-tab="automation" role="tabpanel" aria-labelledby="tab-automation" tabindex="-1">
         <div class="view-header">
-          <h2 class="view-title">Schedule</h2>
-          <p class="view-subtitle">Schedule recurring agent runs. Uses <code>chrome.alarms</code> (MV3-compliant).</p>
+          <h2 class="view-title">Automation</h2>
+          <p class="view-subtitle">Schedule recurring runs, define custom tools, and set up domain skills.</p>
         </div>
-        <div class="schedule-add">
-          <input type="text" id="scheduleTask" placeholder="Task prompt" autocomplete="off" />
-          <select id="scheduleType">
-            <option value="interval">Every N minutes</option>
-            <option value="daily">Daily at time</option>
-            <option value="weekly">Weekly</option>
-          </select>
-          <input type="number" id="scheduleInterval" placeholder="min" value="60" />
-          <input type="time" id="scheduleTime" value="09:00" class="is-hidden" />
-          <select id="scheduleDay" class="is-hidden">
-            <option value="0">Sunday</option><option value="1">Monday</option>
-            <option value="2">Tuesday</option><option value="3">Wednesday</option>
-            <option value="4">Thursday</option><option value="5">Friday</option>
-            <option value="6">Saturday</option>
-          </select>
-          <button type="button" id="addSchedule" class="btn btn-ghost">Schedule</button>
+
+        <!-- Scheduled Tasks -->
+        <div class="section-group">
+          <h3 class="section-title">Scheduled tasks</h3>
+          <p class="section-desc">Schedule recurring agent runs. Uses <code>chrome.alarms</code> (MV3-compliant).</p>
+          <div class="crud-row">
+            <input type="text" id="scheduleTask" placeholder="Task prompt" autocomplete="off" />
+            <select id="scheduleType">
+              <option value="interval">Every N minutes</option>
+              <option value="daily">Daily at time</option>
+              <option value="weekly">Weekly</option>
+            </select>
+            <input type="number" id="scheduleInterval" placeholder="min" value="60" />
+            <input type="time" id="scheduleTime" value="09:00" class="is-hidden" />
+            <select id="scheduleDay" class="is-hidden">
+              <option value="0">Sunday</option><option value="1">Monday</option>
+              <option value="2">Tuesday</option><option value="3">Wednesday</option>
+              <option value="4">Thursday</option><option value="5">Friday</option>
+              <option value="6">Saturday</option>
+            </select>
+            <select id="scheduleMode">
+              <option value="standard" selected>Standard mode</option>
+              <option value="restricted">Restricted mode</option>
+            </select>
+            <button type="button" id="addSchedule" class="btn btn-ghost">Schedule</button>
+          </div>
+          <div id="scheduleList"></div>
         </div>
-        <div id="scheduleList"></div>
+
+        <!-- Custom Tools -->
+        <div class="section-group">
+          <h3 class="section-title">Custom tools</h3>
+          <p class="section-desc">Define custom JavaScript tools the agent can invoke via the existing <code>evaluate</code> action.</p>
+          <div class="crud-row">
+            <input type="text" id="toolName" placeholder="Tool name (e.g. scrape_table)" autocomplete="off" />
+            <input type="text" id="toolDesc" placeholder="Description" autocomplete="off" />
+          </div>
+          <label class="tool-code-label">
+            <span>JavaScript code (tool implementation)</span>
+            <textarea id="toolCode" rows="5" placeholder="// Return a string or object — runs with the page's window/document in scope.&#10;return document.querySelector('table')?.innerText || 'No table found';"></textarea>
+          </label>
+          <div class="warning" role="note">
+            <span class="warning-icon">⚠</span>
+            <span>Custom-tool code runs in the extension's privileged context. Only add code you trust — never paste untrusted or third-party snippets, as they execute with extension privileges.</span>
+          </div>
+          <button type="button" id="addTool" class="btn btn-ghost">Add tool</button>
+          <div class="tool-permissions" id="toolPermissions"></div>
+          <div id="toolsList"></div>
+        </div>
+
+        <!-- Domain Skills -->
+        <div class="section-group">
+          <h3 class="section-title">Domain skills</h3>
+          <p class="section-desc">Define site-specific instruction packs loaded on-demand when the agent visits a matching domain.</p>
+          <div class="crud-row">
+            <input type="text" id="skillDomain" placeholder="Domain (e.g. mysite.com)" autocomplete="off" />
+            <input type="text" id="skillName" placeholder="Skill name (e.g. MySite)" autocomplete="off" />
+          </div>
+          <label class="skill-instructions-label">
+            <span>Instructions (tips, shortcuts, dangerous actions)</span>
+            <textarea id="skillInstructions" rows="5" placeholder="Tips for this site:&#10;- To do X: click Y&#10;- Dangerous actions: …"></textarea>
+          </label>
+          <button type="button" id="addSkill" class="btn btn-ghost">Add skill</button>
+          <div id="skillsList"></div>
+        </div>
+
+        <!-- Notifications -->
+        <div class="section-group">
+          <h3 class="section-title">Notifications</h3>
+          <p class="section-desc">Get notified when a run finishes, even if you&rsquo;ve switched tabs.</p>
+          <label class="checkbox-row">
+            <input type="checkbox" id="notifyOnCompletion" />
+            <span>Notify on run complete</span>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="notifyOnError" />
+            <span>Notify on run error</span>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="notifyOnTakeover" />
+            <span>Notify on human takeover</span>
+          </label>
+          <label>
+            <span>Webhook URL (optional)</span>
+            <input type="text" id="webhookUrl" placeholder="https://hooks.slack.com/services/…" autocomplete="off" />
+            <small>Receives a POST with the run result when the agent finishes.</small>
+          </label>
+        </div>
       </section>
 
-      <!-- Custom Tools tab -->
-      <section class="tab-content" id="panel-tools" data-tab="tools" role="tabpanel" aria-labelledby="tab-tools" tabindex="-1">
-        <div class="view-header">
-          <h2 class="view-title">Custom tools</h2>
-          <p class="view-subtitle">Define custom JavaScript tools the agent can invoke via the existing <code>evaluate</code> action.</p>
-        </div>
-        <div class="tool-add">
-          <input type="text" id="toolName" placeholder="Tool name (e.g. scrape_table)" autocomplete="off" />
-          <input type="text" id="toolDesc" placeholder="Description" autocomplete="off" />
-        </div>
-        <label class="tool-code-label">
-          <span>JavaScript code (tool implementation)</span>
-          <textarea id="toolCode" rows="5" placeholder="// Return a string or object — runs with the page's window/document in scope.&#10;return document.querySelector('table')?.innerText || 'No table found';"></textarea>
-        </label>
-        <p class="warning" role="note">
-          Warning: custom-tool code runs in the extension's privileged context. Only add code you trust — never paste untrusted or third-party snippets, as they execute with extension privileges.
-        </p>
-        <button type="button" id="addTool" class="btn btn-ghost">Add tool</button>
-        <div class="tool-permissions" id="toolPermissions"></div>
-        <div id="toolsList"></div>
-      </section>
-
-      <!-- Skills tab -->
-      <section class="tab-content" id="panel-skills" data-tab="skills" role="tabpanel" aria-labelledby="tab-skills" tabindex="-1">
-        <div class="view-header">
-          <h2 class="view-title">Skills</h2>
-          <p class="view-subtitle">Define site-specific instruction packs loaded on-demand when the agent visits a matching domain.</p>
-        </div>
-        <div class="skill-add">
-          <input type="text" id="skillDomain" placeholder="Domain (e.g. mysite.com)" autocomplete="off" />
-          <input type="text" id="skillName" placeholder="Skill name (e.g. MySite)" autocomplete="off" />
-        </div>
-        <label class="skill-instructions-label">
-          <span>Instructions (tips, shortcuts, dangerous actions)</span>
-          <textarea id="skillInstructions" rows="5" placeholder="Tips for this site:&#10;- To do X: click Y&#10;- Dangerous actions: …"></textarea>
-        </label>
-        <button type="button" id="addSkill" class="btn btn-ghost">Add skill</button>
-        <div id="skillsList"></div>
-      </section>
-
-      <!-- Prompts tab -->
-      <section class="tab-content" id="panel-prompts" data-tab="prompts" role="tabpanel" aria-labelledby="tab-prompts" tabindex="-1">
-        <div class="view-header">
-          <h2 class="view-title">Prompts</h2>
-          <p class="view-subtitle">Override the default system prompts and save quick prompts. Changes save automatically.</p>
-        </div>
-        <label>
-          <span>Default system prompt</span>
-          <textarea id="defaultTask" rows="3" placeholder="Solve all questions on this page and submit…"></textarea>
-        </label>
-        <label>
-          <span>Navigator system prompt override</span>
-          <textarea id="customNavigatorPrompt" rows="6" placeholder="Leave empty to use the built-in navigator prompt…"></textarea>
-        </label>
-        <label>
-          <span>Planner system prompt override</span>
-          <textarea id="customPlannerPrompt" rows="6" placeholder="Leave empty to use the built-in planner prompt…"></textarea>
-        </label>
-        <h3>Quick prompts</h3>
-        <div class="secret-add">
-          <input type="text" id="quickPromptName" placeholder="Name (e.g. Summarize)" autocomplete="off" />
-          <input type="text" id="quickPromptText" placeholder="Prompt text" autocomplete="off" />
-          <button type="button" id="addQuickPrompt" class="btn btn-ghost">Add</button>
-        </div>
-        <div id="quickPromptsList"></div>
-      </section>
-
-      <!-- History tab -->
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
+      <!-- HISTORY TAB                                                        -->
+      <!-- ═══════════════════════════════════════════════════════════════════ -->
       <section class="tab-content" id="panel-history" data-tab="history" role="tabpanel" aria-labelledby="tab-history" tabindex="-1">
         <div class="view-header">
           <h2 class="view-title">Run history</h2>
           <p class="view-subtitle">Past agent runs. Click a row to view its full transcript in-page.</p>
         </div>
-        <div id="historyList"></div>
-        <div class="history-actions">
-          <button type="button" id="clearHistory" class="btn btn-danger">Clear all history</button>
-          <button type="button" id="exportHistory" class="btn btn-ghost">Export all runs (JSON)</button>
-          <button type="button" id="importHistory" class="btn btn-ghost">Import run (JSON)</button>
-          <input type="file" id="importHistoryFile" accept=".json" class="is-hidden" />
+
+        <div class="section-group">
+          <div id="historyList"></div>
+          <div class="history-actions">
+            <button type="button" id="clearHistory" class="btn btn-danger">Clear all history</button>
+            <button type="button" id="exportHistory" class="btn btn-ghost">Export all runs (JSON)</button>
+            <button type="button" id="importHistory" class="btn btn-ghost">Import run (JSON)</button>
+            <input type="file" id="importHistoryFile" accept=".json" class="is-hidden" />
+          </div>
+        </div>
+
+        <!-- About -->
+        <div class="section-group">
+          <h3 class="section-title">About</h3>
+          <p><strong>Open Cowork v<span id="aboutVersion"></span></strong> — bring your own LLM key. Your task data is sent only to the provider you choose.</p>
+          <h4 class="subsection-title">Features</h4>
+          <ul>
+            <li>32 actions (click, input, select, scroll, navigate, evaluate, …)</li>
+            <li>16+ LLM providers (Ollama, OpenCode, OpenAI, Anthropic, Gemini, …)</li>
+            <li>Vision support (dual-channel DOM + screenshot)</li>
+            <li>Streaming (SSE — real-time reasoning display)</li>
+            <li>Loop detection + context compaction</li>
+            <li>Prompt-injection defense</li>
+            <li>Run history + transcript replay</li>
+            <li>Scheduled tasks (chrome.alarms)</li>
+            <li>Secret management (%var% substitution)</li>
+            <li>Cost tracking + budget caps</li>
+            <li>MV3 lifecycle resilience</li>
+          </ul>
+          <h4 class="subsection-title">Links</h4>
+          <p>
+            <a href="https://github.com/Gitshop77/open-cowork-chrome-extension" target="_blank" rel="noopener noreferrer">GitHub</a> ·
+            <a href="https://github.com/Gitshop77/open-cowork-chrome-extension/issues" target="_blank" rel="noopener noreferrer">Report an issue</a>
+          </p>
+          <h4 class="subsection-title">License</h4>
+          <p>Open-source under the MIT license.</p>
+          <p>This build also bundles third-party components under Apache-2.0 (HuggingFace Transformers) and MIT (onnxruntime-web); their license texts ship alongside this extension as LICENSE-APACHE and LICENSE-MIT.</p>
+          <h4 class="subsection-title">Permissions &amp; privacy</h4>
+          <p>This extension requests powerful permissions so it can act on whatever page you point it at:</p>
+          <ul>
+            <li><code>debugger</code> — can attach to any open tab (including incognito), read its DOM, and synthesize input as if you were clicking and typing.</li>
+            <li><code>scripting</code> — injects scripts to drive page automation.</li>
+            <li><code>tabs</code> + universal host access — read access to any origin the assistant operates on.</li>
+          </ul>
+          <p>For sensitive or authenticated sites, prefer a restricted host-permission scope rather than granting universal access.</p>
         </div>
       </section>
 
-      <!-- Notifications tab -->
-      <section class="tab-content" id="panel-notify" data-tab="notify" role="tabpanel" aria-labelledby="tab-notify" tabindex="-1">
-        <div class="view-header">
-          <h2 class="view-title">Notify</h2>
-          <p class="view-subtitle">Get notified when a run finishes, even if you&rsquo;ve switched tabs.</p>
-        </div>
-        <label class="checkbox-row">
-          <input type="checkbox" id="notifyOnCompletion" />
-          <span>Notify on run complete</span>
-        </label>
-        <label class="checkbox-row">
-          <input type="checkbox" id="notifyOnError" />
-          <span>Notify on run error</span>
-        </label>
-        <label class="checkbox-row">
-          <input type="checkbox" id="notifyOnTakeover" />
-          <span>Notify on human takeover</span>
-        </label>
-        <label>
-          <span>Webhook URL (optional)</span>
-          <input type="text" id="webhookUrl" placeholder="https://hooks.slack.com/services/…" autocomplete="off" />
-          <small>Receives a POST with the run result when the agent finishes.</small>
-        </label>
-      </section>
-
-      <!-- About tab -->
-      <section class="tab-content" id="panel-about" data-tab="about" role="tabpanel" aria-labelledby="tab-about" tabindex="-1">
-        <div class="view-header">
-          <h2 class="view-title">About</h2>
-          <p class="view-subtitle">Open-source agentic browser control.</p>
-        </div>
-        <p><strong>Open Cowork v<span id="aboutVersion"></span></strong> — bring your own LLM key. Your task data is sent only to the provider you choose.</p>
-        <h3>Features</h3>
-        <ul>
-          <li>32 actions (click, input, select, scroll, navigate, evaluate, …)</li>
-          <li>16 LLM providers (Ollama, OpenCode, OpenAI, Anthropic, Gemini, …)</li>
-          <li>Vision support (dual-channel DOM + screenshot)</li>
-          <li>Streaming (SSE — real-time reasoning display)</li>
-          <li>Loop detection + context compaction</li>
-          <li>Prompt-injection defense</li>
-          <li>Run history + transcript replay</li>
-          <li>Scheduled tasks (chrome.alarms)</li>
-          <li>Secret management (%var% substitution)</li>
-          <li>Cost tracking + budget caps</li>
-          <li>MV3 lifecycle resilience</li>
-        </ul>
-        <h3>Links</h3>
-        <p>
-          <a href="https://github.com/Gitshop77/open-cowork-chrome-extension" target="_blank" rel="noopener noreferrer">GitHub</a> ·
-          <a href="https://github.com/Gitshop77/open-cowork-chrome-extension/issues" target="_blank" rel="noopener noreferrer">Report an issue</a>
-        </p>
-        <h3>License</h3>
-        <p>Open-source under the MIT license.</p>
-        <p>This build also bundles third-party components under Apache-2.0 (HuggingFace Transformers) and MIT (onnxruntime-web); their license texts ship alongside this extension as LICENSE-APACHE and LICENSE-MIT.</p>
-        <h3>Permissions &amp; privacy</h3>
-        <p>This extension requests powerful permissions so it can act on whatever page you point it at:</p>
-        <ul>
-          <li><code>debugger</code> — can attach to any open tab (including incognito), read its DOM, and synthesize input as if you were clicking and typing.</li>
-          <li><code>scripting</code> — injects scripts to drive page automation.</li>
-          <li><code>tabs</code> + universal host access — read access to any origin the assistant operates on.</li>
-        </ul>
-        <p>For sensitive or authenticated sites, prefer a restricted host-permission scope rather than granting universal access.</p>
-      </section>
-
+      <!-- Save status cue -->
       <div class="actions">
         <span id="saved" class="saved" role="status" aria-live="polite">Saved!</span>
       </div>
