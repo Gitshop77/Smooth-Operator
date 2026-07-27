@@ -8,7 +8,7 @@
  * consistently").
  */
 
-import { $ } from "@/extension/shared";
+import { $, isRecord } from "@/extension/shared";
 import { STORAGE_KEYS, showSaved } from "./settings-sync";
 import { alertModal } from "./modal";
 
@@ -30,11 +30,6 @@ function serialize<T>(task: () => Promise<T>): Promise<T> {
     () => undefined,
   );
   return run;
-}
-
-// ─── Defensive storage parsing ───────────────────────────────────────────────
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 export function validateQuickPrompts(raw: unknown): QuickPrompt[] {

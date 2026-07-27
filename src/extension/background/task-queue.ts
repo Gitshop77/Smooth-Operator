@@ -65,9 +65,9 @@ export async function handleScheduledTaskFire(taskId: string): Promise<void> {
     try {
       await chrome.sidePanel.open({ windowId: chrome.windows.WINDOW_ID_CURRENT });
     } catch {
-      chrome.action.setBadgeText({ text: "▶" });
-      chrome.action.setBadgeBackgroundColor({ color: "#22c55e" });
-      chrome.notifications.create({
+      void chrome.action.setBadgeText({ text: "▶" });
+      void chrome.action.setBadgeBackgroundColor({ color: "#22c55e" });
+      void chrome.notifications.create({
         type: "basic",
         iconUrl: "icons/icon.png",
         title: "Open Cowork — Scheduled Task",
@@ -119,7 +119,7 @@ export async function fireNotifications(task: string, success?: boolean): Promis
     const webhookUrl = res.webhookUrl as string;
 
     if (notify || (notifyOnError && !success)) {
-      chrome.notifications.create({
+      void chrome.notifications.create({
         type: "basic",
         iconUrl: "icons/icon.png",
         title: success ? "Open Cowork — Run Succeeded" : "Open Cowork — Run Finished",

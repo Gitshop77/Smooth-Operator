@@ -11,7 +11,7 @@
  * here, but it must stay in the stored shape, so it is intentionally retained.
  */
 
-import { $, escapeHtml } from "@/extension/shared";
+import { $, escapeHtml, isRecord } from "@/extension/shared";
 import { showSaved, isHostname } from "./settings-sync";
 import { alertModal } from "./modal";
 
@@ -50,11 +50,6 @@ function serialize<T>(task: () => Promise<T>): Promise<T> {
     () => undefined,
   );
   return run;
-}
-
-// ─── Defensive storage parsing ───────────────────────────────────────────────
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 export function validateCustomSkills(raw: unknown): CustomSkill[] {

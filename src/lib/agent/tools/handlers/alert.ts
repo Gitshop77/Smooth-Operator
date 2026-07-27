@@ -60,7 +60,7 @@ async function acceptOrDismiss(
       action,
       success: true,
  // Redact the dialog text — it may contain OTP/2FA codes, PII, or session
- // tokens, and this message is echoed into service-worker / cockpit logs.
+ // tokens, and this message is echoed into service-worker logs.
       message: `${pastTense} JS dialog: ${redactDialogText(text)}`,
     };
   } catch (e) {
@@ -171,7 +171,7 @@ export async function handleAlertSendKeys(
     return {
       action,
       success: true,
-      message: `Queued text for next prompt dialog (redacted)`,
+      message: `Text staged for next prompt (current prompt already resolved)`,
     };
   } catch (e) {
     return {

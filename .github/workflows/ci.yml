@@ -45,50 +45,35 @@ jobs:
         # baseline fails CI.
         run: npx vitest run --coverage
 
-      - name: verify extension build regenerates cleanly
+      - name: Build extension
+        run: npm run build:extension
+
+      - name: Verify build output
         run: |
-          # ------------------------------------------------------------------
-          # ARTIFACT PROVENANCE
-          # The entire chrome-extension/ output directory is gitignored (it is
-          # regenerated from src/extension/ by `npm run build:extension`). It is
-          # NOT committed to the repo. Published releases MUST therefore be
-          # rebuilt from the verified commit — never ship hand-edited or stale
-          # bundles. Because the output is fully gitignored, there is nothing to
-          # `git diff` against, so this step instead asserts that regeneration
-          # from the current source produces a COMPLETE, VALID extension bundle.
-          # ------------------------------------------------------------------
-          # Always regenerate the bundles from src/extension/ so the checks
-          # below reflect the current source, not a stale checkout.
-          npm run build:extension
-
-          # The generated .js entry bundles and chunks/ are gitignored (esbuild
-          # ESM code-split output). We cannot diff them, but we DO assert they
-          # were produced so the build didn't silently no-op.
-          if [ -z "$(ls chrome-extension/*.js 2>/dev/null)" ]; then
-            echo "ERROR: build:extension produced no chrome-extension/*.js bundles."
-            exit 1
-          fi
-          if [ ! -d chrome-extension/chunks ]; then
-            echo "ERROR: build:extension produced no chrome-extension/chunks/ directory."
-            exit 1
-          fi
-
-          # Static assets (manifest, HTML, CSS, icons) are copied verbatim from
-          # src/extension/ by the build. Assert they exist in the regenerated
-          # output so a missing/misnamed source asset fails CI rather than
-          # shipping a broken extension. The manifest must also be valid JSON
-          # with a service_worker entry (MV3 background).
-          for f in manifest.json sidepanel.html sidepanel.css options.html options.css; do
-            if [ ! -f "chrome-extension/$f" ]; then
-              echo "ERROR: build:extension did not produce chrome-extension/$f."
-              exit 1
-            fi
+          cd chrome-extension
+          # JS entry bundles
+          for f in background.js content.js sidepanel.js options.js; do
+            [ ! -s "$f" ] && echo "ERROR: $f missing or empty" && exit 1
           done
-          if [ ! -f chrome-extension/icons/icon-128.png ]; then
-            echo "ERROR: build:extension did not produce chrome-extension/icons/icon-128.png."
+          # Chunks directory (code-split vision stack MUST be present and non-empty)
+          if [ ! -d chunks ] || [ -z "$(ls -A chunks 2>/dev/null)" ]; then
+            echo "ERROR: chunks/ directory missing or empty"
             exit 1
           fi
-          node -e "const m=require('./chrome-extension/manifest.json'); if(!m.background||!m.background.service_worker) { console.error('ERROR: manifest.json missing background.service_worker'); process.exit(1); } console.log('manifest OK:', m.manifest_version, m.name);"
+          # Static assets
+          for f in manifest.json sidepanel.html sidepanel.css options.html options.css; do
+            [ ! -s "$f" ] && echo "ERROR: $f missing or empty" && exit 1
+          done
+          # Icons
+          for s in 16 32 48 128; do
+            [ ! -s "icons/icon-${s}.png" ] && echo "ERROR: icons/icon-${s}.png missing or empty" && exit 1
+          done
+          # License files
+          for f in LICENSE LICENSE-APACHE LICENSE-MIT NOTICE; do
+            [ ! -s "$f" ] && echo "ERROR: $f missing or empty" && exit 1
+          done
+          # Manifest validity
+          node -e "const m=require('./manifest.json'); if(!m.background?.service_worker) process.exit(1)"
 
       - name: Audit root dependencies
         # High-severity advisories intentionally FAIL CI (no `|| true`), so

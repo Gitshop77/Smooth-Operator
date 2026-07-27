@@ -125,8 +125,8 @@ describe("confirmation gate in executeActionQueue", () => {
       allowedDomains: ["app.example.com"],
     };
  // The executor's `evaluate` gate reads the global `location.href`. jsdom's
- // default origin is `http://localhost:3000/` whose single-label host is
- // rejected by the hardened matcher above, so point `location` at a dotted
+ // default origin is `http://test.example.com/` whose dotted host is
+ // accepted by the hardened matcher above, so point `location` at a dotted
  // host the allowlist permits. This exercises the REAL executor path
  // end-to-end (domain allowlist → confirmation → execution) without
  // weakening the single-label hardening.

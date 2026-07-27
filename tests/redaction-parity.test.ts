@@ -28,10 +28,6 @@
  *   - redactKeyLeak's UI-only extras (JSON values, high-entropy scalars, short
  *     keys) are documented as intentionally NOT in the conservative agent
  *     redactor.
- *
- * The cockpit pair `redactSecrets` / `redactClientSecrets` (both emit `***`) is
- * proven BYTE-IDENTICAL in `cockpit/src/lib/redact-client.test.ts`, since those
- * two share a marker and redact-client.ts is a lock-step mirror of http.ts.
  */
 
 import { describe, test, expect } from "vitest";
@@ -111,7 +107,7 @@ describe("redactKeyShapes and redactKeyLeak preserve identical non-secret input"
     { name: "email (unquoted)", input: "contact alice@example.com today" },
     {
       // The extension redactors intentionally do NOT mask generic `token=`
-      // query params or https userinfo (that is the cockpit `redactSecrets`
+      // query params or https userinfo (that is the redactSecrets
       // job). Both must therefore leave this untouched — identical passthrough.
       name: "url with token",
       input: "https://user:pass@api.example.com/v1?token=abcdef123456",

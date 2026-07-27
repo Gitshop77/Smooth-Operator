@@ -27,6 +27,7 @@ import {
   type OpenAICompatibleProfile,
   assertSafeUserBaseURL,
 } from "./openai-compatible-profile";
+import type { SsrfProvenance } from "../route/ssrf";
 
 // NOTE: this facade intentionally does NOT export a module-level `id`. The
 // runtime provider identifier is always `config.provider` (e.g. "groq",
@@ -125,6 +126,11 @@ function configure(profile: OpenAICompatibleProfile, input: Config = {}) {
   // segment like `/v1` (would yield a 404/401 on every curated profile).
   const url = new URL(baseURL);
   const prefix = url.pathname.replace(/\/+$/, "");
+  // Derive SSRF provenance from allowLocalExemption: when the user explicitly
+  // configured this provider (allowLocalExemption=true), provenance is
+  // "user-configured"; otherwise "untrusted". This ensures the async DNS
+  // validation in transport-http.ts uses the correct trust level.
+  const provenance: SsrfProvenance = input.allowLocalExemption ? "user-configured" : "untrusted";
   const route = make({
  // Fold the (effective) baseURL AND credentials into the route id so distinct
  // endpoints/credentials don't clobber each other in the global route registry.
@@ -134,6 +140,7 @@ function configure(profile: OpenAICompatibleProfile, input: Config = {}) {
     endpoint: Endpoint.path(`${prefix}${PATH}`, { baseURL: url.origin }),
     auth: auth(input),
     framing: Framing.sse,
+    provenance,
   });
   return {
     id: profile.provider,

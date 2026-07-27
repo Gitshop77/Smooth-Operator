@@ -282,6 +282,11 @@ export class VisionAssistant {
         `Embedding meta mismatch: n_groups(${n_groups}) * block_size(${block_size}) !== hidden(${hidden})`,
       );
     }
+    if (!Number.isInteger(meta.zero_point) || meta.zero_point < 0 || meta.zero_point > 15) {
+      throw new Error(
+        `Embedding meta.zero_point=${meta.zero_point} must be an integer in [0, 15] (INT4 range)`,
+      );
+    }
     const expectedPacked = vocab * (hidden / 2);
     if (packed.length !== expectedPacked) {
       throw new Error(

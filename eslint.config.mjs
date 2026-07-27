@@ -2,26 +2,26 @@
  * ESLint config — minimal, no framework dependency.
  *
  * NOTE: type-safety is provided by `npx tsc --noEmit`, which CI runs directly
- * (see `.github/workflows/ci.yml` — the `Type-check root TypeScript` step and
- * the cockpit type-check step both invoke it). It uses the root tsconfig.json,
- * which includes .ts / .tsx through the ** glob and excludes `cockpit`,
- * `mini-services`, and `chrome-extension` (those have their own CI type-checks
- * via their own tsconfigs). The `compilerOptions.types: ["chrome"]` setting
- * does NOT break this: explicitly-imported Node modules (`path`, `fs`,
- * `process`) still resolve through `@types/node`, which is present in
- * node_modules, so `npx tsc --noEmit` exits 0 (clean). package.json defines no
+ * (see `.github/workflows/ci.yml` — the `Type-check root TypeScript` step).
+ * It uses the root tsconfig.json, which includes .ts / .tsx through the **
+ * glob and excludes `chrome-extension` (which has its own CI type-check via
+ * its own tsconfig). The `compilerOptions.types: ["chrome"]` setting does NOT
+ * break this: explicitly-imported Node modules (`path`, `fs`, `process`) still
+ * resolve through `@types/node`, which is present in node_modules, so
+ * `npx tsc --noEmit` exits 0 (clean). package.json defines no
  * `tsc`/`typecheck` *script* — CI invokes `tsc` directly — so there is no
  * `npm run typecheck`, but the type-check gate itself is real and passing.
  * ESLint remains the automated static check for the runtime-correctness rules
  * that tsc does not cover: unused variables, prefer-const, no-fallthrough,
  * no-dupe-keys, and others configured below.
  *
- * `.ts` files use the `@typescript-eslint/parser` + `@typescript-eslint/no-unused-vars`
- * rule. Without the parser, ESLint v9+ flat config only lints `.js`/`.mjs`
- * files — `.ts` files were silently skipped, making `npm run lint` a no-op
- * for the entire extension + agent library. The TS-aware `no-unused-vars`
- * avoids the core rule's false-positives on enum members, generic params,
- * and `declare global` augmentations.
+ * `.ts` files use the `@typescript-eslint/parser` +
+ * `@typescript-eslint/no-unused-vars` rule. Without the parser, ESLint v9+
+ * flat config only lints `.js`/`.mjs` files — `.ts` files were silently
+ * skipped, making `npm run lint` a no-op for the entire extension + agent
+ * library. The TS-aware `no-unused-vars` avoids the core rule's
+ * false-positives on enum members, generic params, and `declare global`
+ * augmentations.
  */
 import tsParser from "@typescript-eslint/parser";
 import tsPlugin from "@typescript-eslint/eslint-plugin";
@@ -51,6 +51,10 @@ export default [
     files: ["**/*.ts", "**/*.tsx"],
     languageOptions: {
       parser: tsParser,
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
     },
     plugins: { "@typescript-eslint": tsPlugin },
     rules: {
@@ -62,6 +66,7 @@ export default [
       // (tsc would also catch those, so this stays defense-in-depth).
       "no-redeclare": "off",
       "@typescript-eslint/no-redeclare": "error",
+      "@typescript-eslint/no-floating-promises": ["warn", { "ignoreIIFE": true }],
       "no-unused-vars": "off",
       "@typescript-eslint/no-unused-vars": [
         "warn",
@@ -93,8 +98,6 @@ export default [
       "coverage/**",
       ".audit/**",
       "chrome-extension/**",
-      "cockpit/**",
-      "mini-services/**",
     ],
   },
 ];

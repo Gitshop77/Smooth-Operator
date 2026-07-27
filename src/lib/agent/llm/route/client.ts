@@ -11,6 +11,7 @@ import { Auth, type Auth as AuthDef } from "./auth";
 import { type Endpoint } from "./endpoint";
 import { type Framing } from "./framing";
 import { type Transport, httpJson, type HttpPrepared } from "./transport-http";
+import type { SsrfProvenance } from "./ssrf";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -116,12 +117,20 @@ export interface MakeRouteInput<Body, FrameType, EventType, State> {
   readonly auth?: AuthDef;
   readonly framing: Framing<FrameType>;
   readonly headers?: Record<string, string>;
+  /**
+   * Provenance of the base URL this route will fetch. Threaded into the SSRF
+   * guards so an injected / non-user URL FAILS CLOSED. Defaults to
+   * `"untrusted"`; pass `"user-configured"` only for a URL the user explicitly
+   * configured (the curated Ollama / LiteLLM loopback origins are always
+   * treated as `user-configured` regardless).
+   */
+  readonly provenance?: SsrfProvenance;
 }
 
 export function make<Body, FrameType, EventType, State>(
   input: MakeRouteInput<Body, FrameType, EventType, State>
 ): Route<Body, HttpPrepared<FrameType>> {
-  const transport = httpJson<Body, FrameType>({ framing: input.framing });
+  const transport = httpJson<Body, FrameType>({ framing: input.framing, provenance: input.provenance });
   return makeFromTransport({
     ...input,
     transport,

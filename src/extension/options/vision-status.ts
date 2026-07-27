@@ -204,7 +204,7 @@ document.querySelectorAll('input[name="visionMode"]').forEach((radio) => {
  */
 function showUnpinnedWarningBanner(): void {
   const statusEl = $("localVisionStatus") as HTMLDivElement | null;
-  const fieldset = statusEl?.closest("fieldset") as HTMLElement | null;
+  const fieldset = statusEl?.closest(".section-group") as HTMLElement | null;
   if (!fieldset) return;
   if (fieldset.querySelector("#visionUnpinnedWarning")) return; // de-dupe
   const banner = document.createElement("div");

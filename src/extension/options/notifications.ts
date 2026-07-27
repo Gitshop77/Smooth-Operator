@@ -128,6 +128,6 @@ document.getElementById("webhookUrl")?.addEventListener("change", async (e) => {
  // The last-known-good cache is updated only after a successful persist
  // (see persist()'s success branch), so a failed write reverts the field
  // to the genuinely last-good URL rather than the unsaved one.
-  field.setAttribute("aria-invalid", "false");
+  field.removeAttribute("aria-invalid");
   persist(STORAGE_KEYS.webhookUrl, value);
 });

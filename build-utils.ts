@@ -346,6 +346,7 @@ export function lintManifestPermissions(
     "proxy",
     "webRequest",
     "unlimitedStorage",
+    "dns",
   ]);
   const risky = perms.filter((p) => HIGH_RISK.has(p));
   const riskyOptional = optional.filter((p) => HIGH_RISK.has(p));
@@ -364,6 +365,7 @@ export function lintManifestPermissions(
     "tabs",
     "webRequest",
     "unlimitedStorage",
+    "dns",
   ]);
   const BASELINE_WIDE_HOST = true;
 

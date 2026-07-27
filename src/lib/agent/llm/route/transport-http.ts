@@ -8,6 +8,7 @@ import type { Endpoint } from "./endpoint";
 import type { Framing, Frame } from "./framing";
 import { buildURL } from "./endpoint";
 import { withLLMRetry } from "../retry";
+import { redactKeyShapes } from "../../key-shape-redact";
 import {
   type SsrfProvenance,
   isAllowedLlmBaseUrl,
@@ -228,20 +229,27 @@ async function fetchWithTimeout(
     };
     userSignal.addEventListener("abort", onAbort, { once: true });
  // Clean up the listener on completion so it doesn't accumulate
- // on the long-lived run-level abort signal.
+ // on the long-lived run-level abort signal. A local detach fn ensures
+ // cleanup on BOTH the success path (stashed on the response for the
+ // stream consumer) AND the error path (called in .catch before
+ // re-throwing). Previously, if verifyNoRedirect threw (redirect
+ // detected), the .then() that stashed __detachAbortListener was
+ // skipped, leaking the listener on the long-lived run signal.
+    const detachAbortListener = () =>
+      userSignal.removeEventListener("abort", onAbort);
     return fetch(url, { ...init, redirect: "manual", signal: controller.signal })
       .then(verifyNoRedirect)
       .then((res) => {
-        // Stash a detach fn on the response so the stream consumer can remove
-        // the abort listener exactly when the body is done (not before).
-        (res as Response & { __detachAbortListener?: () => void }).__detachAbortListener = () =>
-          userSignal.removeEventListener("abort", onAbort);
+        (res as Response & { __detachAbortListener?: () => void }).__detachAbortListener = detachAbortListener;
         return res;
       })
       .finally(() => {
         clearTimeout(timer);
       })
-      .catch(wrapTimeoutError);
+      .catch((e) => {
+        detachAbortListener();
+        return wrapTimeoutError(e);
+      });
   }
 
   return fetch(url, { ...init, redirect: "manual", signal: controller.signal })
@@ -286,7 +294,7 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: {
       }, signal, opts.provenance ?? "untrusted");
       if (!r.ok) {
         const txt = await r.text().catch(() => "");
-        const err = new Error(`LLM API ${r.status}: ${txt.slice(0, 300)}`);
+        const err = new Error(`LLM API ${r.status}: ${redactKeyShapes(txt.slice(0, 300))}`);
  // Carry the numeric HTTP status so withLLMRetry can classify retryable
  // errors from the status code (429 / 5xx) instead of string-matching
  // the response body — which is fragile and language-dependent.

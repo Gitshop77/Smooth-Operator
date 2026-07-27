@@ -1,4 +1,4 @@
-// @vitest-environment-options {"url":"http://127.0.0.1:3000/"}
+// @vitest-environment-options {"url":"http://test.example.com/"}
 
 /**
  * Regression coverage for the two fail-closed security gates in `handleEvaluate`
@@ -76,7 +76,7 @@ describe("evaluate fail-closed gates", () => {
   test("evaluate is BLOCKED (and code NOT run) when registry import fails", async () => {
     // Allowlist the origin so the only gate that can fire is the import failure.
     (globalThis as Record<string, unknown>)[DOMAIN_CONFIG_KEY] = {
-      allowedDomains: ["127.0.0.1"],
+      allowedDomains: ["test.example.com"],
     };
 
     const res = await handleEvaluate(ctx(), {

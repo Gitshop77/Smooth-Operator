@@ -1,7 +1,7 @@
 /**
  * HUMAN_INTERACT payload validator in `sidepanel/human-interact.ts`.
  *
- * `human-interact.ts` imports `log-renderer` (which pulls the side-panel
+ * `human-interact.ts` imports `chat-renderer` (which pulls the side-panel
  * element refs via `elements.ts`) and registers a `chrome.runtime.onMessage`
  * listener at import time, so we stub `chrome` and create the required ids
  * before the dynamic import.
@@ -37,16 +37,17 @@ function setupGlobals(): void {
   };
 
   document.body.innerHTML = `
-    <textarea id="task"></textarea>
-    <button id="runBtn"></button>
+    <div id="chatMessages"></div>
+    <input id="messageInput" />
+    <button id="sendBtn"></button>
     <button id="stopBtn"></button>
-    <div id="log"></div>
-    <span id="stepLabel"></span>
-    <span id="countLabel"></span>
-    <span id="barFill"></span>
-    <span id="liveDot"></span>
-    <span id="costLabel"></span>
-    <span id="tokenLabel"></span>
+    <span id="costLabel">$0.0000</span>
+    <span id="tokenLabel">0 tokens</span>
+    <span id="statusDot" data-status="idle"></span>
+    <span id="statusLabel">idle</span>
+    <div id="takeoverBanner" hidden></div>
+    <div id="takeoverReason"></div>
+    <button id="resumeBtn"></button>
   `;
 }
 

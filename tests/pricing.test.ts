@@ -270,10 +270,9 @@ describe("Catalog-driven pricing accuracy (replaces static-table)", () => {
     expect(rate.out).toBe(8);
   });
 
-  test("catalog does NOT set a reasoning rate (falls back to out)", () => {
- // models.dev has no reasoning-cost field, so reasoning tokens fall back to
- // the output rate in estimateCost.
- // 1M in + 1M out (all reasoning) -> 2 + 8 = 10 (reasoning at output rate).
+  test("catalog sets reasoning rate from the catalog (falls back to out when absent)", () => {
+ // 1M in + 1M out (all reasoning) -> 2 + 8 = 10 (o3 has no reasoning rate in the
+ // catalog, so reasoning tokens fall back to the output rate in estimateCost).
     expect(estimateCost("o3", 1_000_000, 1_000_000, 1_000_000)).toBeCloseTo(10, 6);
   });
 });

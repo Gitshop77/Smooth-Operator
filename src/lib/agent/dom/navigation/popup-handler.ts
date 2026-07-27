@@ -26,7 +26,7 @@ const LOG_PREFIX = "[Open Cowork]";
  * surface only its length as a metadata hint for debugging.
  *
  * Exported so the `alert_*` handlers can redact dialog text in their result
- * messages (which otherwise end up in cockpit / service-worker logs).
+ * messages (which otherwise end up in service-worker logs).
  */
 export function redactDialogText(text: string): string {
   return `${text.length} char(s) (redacted)`;
@@ -159,7 +159,7 @@ export function getPendingAlertText(): string | null {
 /**
  * Get the redacted text of the currently-open dialog, or `null` if none is
  * open. The raw dialog text (OTP/2FA/PII/tokens) is replaced by a length-only
- * hint so it is safe to log or forward to a cockpit/LLM channel. Use this
+ * hint so it is safe to log or forward to an LLM channel. Use this
  * instead of {@link getPendingAlertText} whenever the value leaves the page.
  */
 export function getPendingAlertTextRedacted(): string | null {

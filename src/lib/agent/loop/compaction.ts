@@ -15,7 +15,7 @@
  */
 
 import type { HistoryItem } from "../types";
-import { wrapUntrusted, sanitizeUntrusted, scanForInjection, PROMPT_TAGS } from "../security";
+import { wrapUntrusted, sanitizeUntrusted, scanForInjection, INTERLEAVED_PROMPT_TAGS } from "../security";
 import { redactKeyShapes } from "../key-shape-redact";
 
 /** Number of recent steps to keep intact (not summarized). */
@@ -186,12 +186,12 @@ export function buildCompactionRequest(history: HistoryItem[]): string {
  * We also run `redactKeyShapes` so a real key/JWT the summarizer echoed from
  * page content is never handed back to the navigator via `<compacted_memory>`.
  *
- * Uses the shared `PROMPT_TAGS` constant from security.ts (single source of
- * truth) so both sanitizers stay in sync.
+ * Uses the shared `INTERLEAVED_PROMPT_TAGS` constant from security.ts (single
+ * source of truth) so both sanitizers stay in sync.
  */
 /** Prompt-tag marker stripper, compiled once at module scope (hot path). */
 const PROMPT_TAG_STRIP_RE = new RegExp(
-  `<\\/?(?:${PROMPT_TAGS.join("|")})[^>]*>`,
+  `<\\/?(?:${INTERLEAVED_PROMPT_TAGS})[^>]*>`,
   "g",
 );
 

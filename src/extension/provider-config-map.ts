@@ -39,6 +39,7 @@ export const CATALOG_PROVIDER_ID_MAP: Record<string, string> = {
   ollama: "ollama",
   qwen: "alibaba",
   opencode: "opencode",
+  "opencode-go": "opencode-go",
   litellm: "litellm",
   azure: "openai", // Azure uses OpenAI models
 };

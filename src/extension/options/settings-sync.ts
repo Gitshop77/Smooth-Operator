@@ -17,7 +17,7 @@
  * - Validation errors use the styled modal instead of native `alert()`.
  */
 
-import { $, DEFAULT_COCKPIT_URL, COCKPIT_URL_STORAGE_KEY, escapeHtml } from "@/extension/shared";
+import { $, escapeHtml } from "@/extension/shared";
 import {
   listSecrets as listSecretsFromStore,
   setSecret as setSecretInStore,
@@ -84,8 +84,6 @@ let savedTimer: ReturnType<typeof setTimeout> | null = null;
 /** Flash the shared "Saved" cue. Used by every auto-save path. */
 export function showSaved(): void {
   const saved = $("saved");
-  saved.setAttribute("role", "status");
-  saved.setAttribute("aria-live", "polite");
   saved.classList.add("show");
   if (savedTimer) clearTimeout(savedTimer);
   savedTimer = setTimeout(() => saved.classList.remove("show"), 1500);
@@ -116,11 +114,11 @@ if (typeof chrome !== "undefined" && chrome.storage?.local) {
       "visionMode",
       "allowedDomains",
       "blockedDomains",
-      COCKPIT_URL_STORAGE_KEY,
       STORAGE_KEYS.notifyOnCompletion,
       STORAGE_KEYS.notifyOnError,
       STORAGE_KEYS.notifyOnTakeover,
       STORAGE_KEYS.webhookUrl,
+      "agentMode",
     ],
     (res) => {
       if (chrome.runtime.lastError) {
@@ -177,6 +175,7 @@ if (typeof chrome !== "undefined" && chrome.storage?.local) {
       setVal("baseUrl", (res.baseUrl as string) ?? "");
       setVal("resourceName", (res.resourceName as string) ?? "");
       setVal("maxSteps", String(res.maxSteps ?? 100));
+      setVal("agentMode", (res.agentMode as string) ?? "standard");
       setVal("maxActions", String(res.maxActions ?? 10));
       setVal("plannerInterval", String(res.plannerInterval ?? 5));
       setVal("maxFailures", String(res.maxFailures ?? 5));
@@ -201,11 +200,6 @@ if (typeof chrome !== "undefined" && chrome.storage?.local) {
       const blockedDomains = Array.isArray(res.blockedDomains) ? (res.blockedDomains as string[]).join("\n") : "";
       setVal("allowedDomains", allowedDomains);
       setVal("blockedDomains", blockedDomains);
-      const storedCockpitUrl = res[COCKPIT_URL_STORAGE_KEY] as string | undefined;
-      setVal(
-        "cockpitUrl",
-        typeof storedCockpitUrl === "string" && storedCockpitUrl.trim() ? storedCockpitUrl : DEFAULT_COCKPIT_URL,
-      );
    // Notify tab.
       setChecked("notifyOnCompletion", (res.notifyOnCompletion as boolean) || false);
       setChecked("notifyOnError", (res.notifyOnError as boolean) || false);
@@ -347,14 +341,8 @@ async function doSaveSettings(): Promise<boolean> {
     }
   }
 
- // Validate cockpitUrl / baseUrl are absolute http(s) URLs (or empty). A
- // non-http(s) value could later be opened as a tab (cockpitUrl) or used to
- // build requests (baseUrl), so reject it at save time.
-  const cockpitUrlRaw = ($("cockpitUrl") as HTMLInputElement).value.trim();
-  if (cockpitUrlRaw !== "" && !isHttpUrl(cockpitUrlRaw)) {
-    invalid.push("cockpitUrl");
-    ($("cockpitUrl") as HTMLInputElement).value = DEFAULT_COCKPIT_URL;
-  }
+ // Validate baseUrl is an absolute http(s) URL (or empty). A non-http(s)
+ // value could be used to build requests, so reject it at save time.
   const baseUrlRaw = ($("baseUrl") as HTMLInputElement).value.trim();
   if (baseUrlRaw !== "" && !isHttpUrl(baseUrlRaw)) {
     invalid.push("baseUrl");
@@ -432,7 +420,7 @@ async function doSaveSettings(): Promise<boolean> {
     visionMode: (document.querySelector('input[name="visionMode"]:checked') as HTMLInputElement | null)?.value || "disabled",
     allowedDomains: parseDomains(($("allowedDomains") as HTMLTextAreaElement).value),
     blockedDomains: parseDomains(($("blockedDomains") as HTMLTextAreaElement).value),
-    [COCKPIT_URL_STORAGE_KEY]: (cockpitUrlRaw !== "" && isHttpUrl(cockpitUrlRaw) ? cockpitUrlRaw : DEFAULT_COCKPIT_URL),
+    agentMode: (document.getElementById("agentMode") as HTMLSelectElement | null)?.value || "standard",
     [STORAGE_KEYS.webhookUrl]: webhookUrlRaw !== "" && webhookCheck?.ok ? webhookUrlRaw : "",
     [STORAGE_KEYS.notifyOnCompletion]: ($("notifyOnCompletion") as HTMLInputElement).checked,
     [STORAGE_KEYS.notifyOnError]: ($("notifyOnError") as HTMLInputElement).checked,
@@ -461,8 +449,16 @@ async function doSaveSettings(): Promise<boolean> {
           } else {
  // Remove any legacy plaintext copy from local storage only when the
  // session write succeeded; on failure keep the legacy local copy.
-            chrome.storage.local.remove(STORAGE_KEYS.apiKey);
+            void chrome.storage.local.remove(STORAGE_KEYS.apiKey);
           }
+          showSaved();
+          if (droppedDomains.length) {
+            void alertModal({
+              title: "Invalid domain entries ignored",
+              message: "The following domain lines were not valid bare hostnames and were dropped:\n" + droppedDomains.join("\n"),
+            });
+          }
+          resolve(true);
         });
       } else {
  // No session store available — do NOT persist the key to local (plaintext
@@ -476,15 +472,15 @@ async function doSaveSettings(): Promise<boolean> {
             "API key is NOT saved. For security it is never written to disk in plaintext. " +
             "Re-enter the key each session, or use a browser/profile that supports session storage.",
         });
+        showSaved();
+        if (droppedDomains.length) {
+          void alertModal({
+            title: "Invalid domain entries ignored",
+            message: "The following domain lines were not valid bare hostnames and were dropped:\n" + droppedDomains.join("\n"),
+          });
+        }
+        resolve(true);
       }
-      showSaved();
-      if (droppedDomains.length) {
-        void alertModal({
-          title: "Invalid domain entries ignored",
-          message: "The following domain lines were not valid bare hostnames and were dropped:\n" + droppedDomains.join("\n"),
-        });
-      }
-      resolve(true);
     });
   });
 }
@@ -496,12 +492,29 @@ export function initAutoSave(): void {
   // them here too would register two competing handlers per input, producing
   // conflicting double validation modals and order-dependent field state.
   const saveIds = [
-    "cockpitUrl", "apiKey", "model", "baseUrl", "resourceName",
+    "apiKey", "model", "baseUrl", "resourceName",
     "maxSteps", "maxActions", "plannerInterval", "maxFailures", "costCap",
     "defaultTask", "screenshotQuality", "allowedDomains", "blockedDomains", "enableStealth",
+    "agentMode",
   ];
+
+  // Debounced save: `input` fires on every keystroke, so debounce to avoid
+  // excessive writes. `change` fires on blur (text inputs) or toggle
+  // (checkboxes/radios) and serves as the immediate commit signal.
+  let saveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  const debouncedSave = (): void => {
+    if (saveDebounceTimer) clearTimeout(saveDebounceTimer);
+    saveDebounceTimer = setTimeout(() => void saveSettings(), 300);
+  };
+
   for (const id of saveIds) {
-    document.getElementById(id)?.addEventListener("change", () => void saveSettings());
+    const el = document.getElementById(id);
+    if (!el) continue;
+    // `input` fires on every keystroke — debounced save so typing + immediate
+    // close still persists without requiring a blur/Enter first.
+    el.addEventListener("input", debouncedSave);
+    // `change` fires on blur (text) or toggle (checkbox/radio) — immediate save.
+    el.addEventListener("change", () => void saveSettings());
   }
   $("enableScreenshots")?.addEventListener("change", () => void saveSettings());
   document.querySelectorAll<HTMLInputElement>('input[name="visionMode"]').forEach((radio) => {

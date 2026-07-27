@@ -16,8 +16,7 @@
  * models.dev catalog (see {@link refreshPricingFromCatalog}) is the source of
  * truth and may override any rate at runtime. Models with reasoning tokens
  * bill those tokens at the `reasoning` rate when present, otherwise falling
- * back to `out` (models.dev has no reasoning-cost field, so the catalog never
- * sets `reasoning`).
+ * back to `out`.
  */
 
 import type { Catalog } from "./catalog";
@@ -231,6 +230,7 @@ function convertCatalog(catalog: Catalog): Record<string, ModelPricing> {
       const entry: ModelPricing = {
         in: cost.input,
         out: cost.output,
+        reasoning: typeof cost.reasoning === "number" ? cost.reasoning : undefined,
         cacheRead: typeof cost.cache_read === "number" ? cost.cache_read : undefined,
         cacheWrite: typeof cost.cache_write === "number" ? cost.cache_write : undefined,
       };

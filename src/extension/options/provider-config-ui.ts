@@ -32,6 +32,25 @@ export { redactKeyLeak } from "@/extension/shared";
 
 let lastProvider = "";
 
+/**
+ * OpenCode Zen/Go endpoint hint — the server routes all model families through
+ * /chat/completions, so the client always uses the same path regardless of
+ * model type. This function shows a static hint and auto-fills the baseUrl.
+ */
+function updateOpencodeEndpointHint(tier: "zen" | "go"): void {
+  const endpointHint = document.getElementById("opencode-endpoint-hint");
+  const baseUrlInput = document.getElementById("baseUrl") as HTMLInputElement | null;
+  if (!endpointHint || !baseUrlInput) return;
+
+  const base = tier === "zen" ? "https://opencode.ai/zen/v1" : "https://opencode.ai/zen/go/v1";
+  const endpoint = `${base}/chat/completions`;
+  endpointHint.innerHTML = `Server routes all models via <code>${escapeHtml(endpoint)}</code>`;
+  // Auto-fill the baseUrl field if empty.
+  if (!baseUrlInput.value) {
+    baseUrlInput.value = endpoint;
+  }
+}
+
 /** Reset the model field's placeholder to the current provider's default model. */
 function applyDefaultModelPlaceholder(): void {
   const providerEl = document.getElementById("provider") as HTMLSelectElement | null;
@@ -107,6 +126,22 @@ export function updateProviderUI(): void {
     resourceNameLabel?.classList.add("is-hidden");
     if (providerChanged && resourceNameInput) resourceNameInput.value = "";
   }
+
+ // OpenCode Zen / Go: show dynamic endpoint hint based on model type.
+ // These providers use different API paths per model family, so the user
+ // must set the base URL to match their chosen model.
+  const endpointHint = document.getElementById("opencode-endpoint-hint");
+  if (endpointHint) {
+    if (provider === "opencode") {
+      endpointHint.classList.remove("is-hidden");
+      updateOpencodeEndpointHint("zen");
+    } else if (provider === "opencode-go") {
+      endpointHint.classList.remove("is-hidden");
+      updateOpencodeEndpointHint("go");
+    } else {
+      endpointHint.classList.add("is-hidden");
+    }
+  }
 }
 
 // ─── Provider health check ──────────────────────────────────────────────
@@ -174,6 +209,8 @@ let modelSearchTimer: ReturnType<typeof setTimeout> | null = null;
 // already fired, we discard the stale result so the dropdown only ever shows
 // matches for the CURRENT text-box contents.
 let modelSearchToken = 0;
+// Active index for keyboard navigation of model search results (ArrowUp/Down).
+let activeResultIdx = -1;
 
 /** Populate the model datalist from the models.dev catalog. */
 export async function populateModelSuggestions(): Promise<void> {
@@ -267,9 +304,11 @@ document.getElementById("model")?.addEventListener("input", () => {
     resultsDiv.classList.add("is-hidden");
     modelInput.setAttribute("aria-expanded", "false");
     modelInput.removeAttribute("aria-activedescendant");
+    activeResultIdx = -1;
     return;
   }
   const myToken = ++modelSearchToken;
+  activeResultIdx = -1;
   modelSearchTimer = setTimeout(async () => {
     try {
       const { searchModels, formatCost, formatContext, formatVision } = await import("../../lib/agent/llm/catalog");
@@ -300,6 +339,35 @@ document.getElementById("model")?.addEventListener("input", () => {
       resultsDiv.classList.add("is-hidden");
     }
   }, 300);
+});
+
+// ─── Keyboard navigation for model search results ──────────────────────────
+
+document.getElementById("model")?.addEventListener("keydown", (e) => {
+  const resultsDiv = $("model-search-results") as HTMLDivElement | null;
+  if (!resultsDiv || resultsDiv.classList.contains("is-hidden")) return;
+  const items = Array.from(resultsDiv.querySelectorAll<HTMLButtonElement>(".model-search-result-item"));
+  if (items.length === 0) return;
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    activeResultIdx = Math.min(activeResultIdx + 1, items.length - 1);
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    activeResultIdx = Math.max(activeResultIdx - 1, 0);
+  } else if (e.key === "Escape") {
+    resultsDiv.classList.add("is-hidden");
+    ($("model") as HTMLInputElement).setAttribute("aria-expanded", "false");
+    activeResultIdx = -1;
+    return;
+  } else if (e.key === "Enter" && activeResultIdx >= 0) {
+    e.preventDefault();
+    items[activeResultIdx].click();
+    return;
+  } else {
+    return;
+  }
+  items.forEach((el, i) => el.setAttribute("aria-selected", String(i === activeResultIdx)));
+  ($("model") as HTMLInputElement).setAttribute("aria-activedescendant", items[activeResultIdx].id);
 });
 
 // ─── Refresh models from models.dev ────────────────────────────────────────
@@ -360,4 +428,19 @@ document.getElementById("refreshModels")?.addEventListener("click", async () => 
 
   btn.disabled = false;
   btn.setAttribute("aria-busy", "false");
+});
+
+// ─── OpenCode endpoint hint — update on model input ─────────────────────────
+// When the user selects OpenCode Zen or OpenCode Go, the endpoint hint updates
+// dynamically as they type a model name, showing the correct base URL for that
+// model family.
+
+// OpenCode Zen/Go: refresh the endpoint hint when the model changes.
+document.getElementById("model")?.addEventListener("input", () => {
+  const sel = document.getElementById("provider") as HTMLSelectElement | null;
+  if (!sel) return;
+  const provider = sel.value;
+  if (provider === "opencode" || provider === "opencode-go") {
+    updateOpencodeEndpointHint(provider === "opencode" ? "zen" : "go");
+  }
 });

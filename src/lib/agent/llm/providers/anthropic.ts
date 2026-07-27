@@ -17,6 +17,7 @@ import * as AnthropicMessages from "../protocols/anthropic-messages";
 import type { LLMProvider } from "../provider";
 import { toLLMProvider as toLLMProviderBridge } from "../provider-bridge";
 import { assertSafeUserBaseURL } from "./openai-compatible-profile";
+import type { SsrfProvenance } from "../route/ssrf";
 
 export const id = "anthropic";
 
@@ -36,6 +37,11 @@ export function configure(input: Config = {}) {
  // user-provenance exemption flag so the curated-local-origin exemption applies
  // only for a user-configured baseURL.
   assertSafeUserBaseURL(input.baseURL, id, input.allowLocalExemption);
+  // Derive SSRF provenance from allowLocalExemption: when the user explicitly
+  // configured this provider (allowLocalExemption=true), provenance is
+  // "user-configured"; otherwise "untrusted". This ensures the async DNS
+  // validation in transport-http.ts uses the correct trust level.
+  const provenance: SsrfProvenance = input.allowLocalExemption ? "user-configured" : "untrusted";
   const route = make({
     id: "anthropic-messages",
     provider: id,
@@ -45,6 +51,7 @@ export function configure(input: Config = {}) {
     }),
     auth: auth(input),
     framing: Framing.sse,
+    provenance,
     headers: {
       "anthropic-version": AnthropicMessages.API_VERSION,
  // Lets browser contexts (extension service worker) call the API directly.

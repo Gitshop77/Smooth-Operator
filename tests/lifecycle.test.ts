@@ -1,82 +1,59 @@
 /**
- * `appendThinkingEntry` must HTML-escape `body` before interpolating it
- * into `innerHTML`, so a future unescaped LLM/page string can never XSS the
- * side panel. Callers pass RAW (unescaped) text; newlines render as `<br>`.
- *
- * `lifecycle.ts` imports `elements.ts`, which reads several element ids at
- * module load via the throwing `$()` helper — so those ids must exist before
- * the dynamic import.
+ * lifecycle.ts tests — status dot + lifecycle label updates.
  */
 
-import { describe, test, expect, beforeAll, beforeEach } from "vitest";
+import { describe, test, expect, beforeAll } from "vitest";
 
 function setupDom(): void {
   document.body.innerHTML = `
-    <textarea id="task"></textarea>
-    <button id="runBtn"></button>
+    <div id="chatMessages"></div>
+    <input id="messageInput" />
+    <button id="sendBtn"></button>
     <button id="stopBtn"></button>
-    <div id="log"></div>
-    <span id="stepLabel"></span>
-    <span id="countLabel"></span>
-    <span id="barFill"></span>
-    <span id="liveDot"></span>
-    <span id="costLabel"></span>
-    <span id="tokenLabel"></span>
-    <div id="thinkingBody"></div>
+    <span id="costLabel">$0.0000</span>
+    <span id="tokenLabel">0 tokens</span>
+    <span id="statusDot" data-status="idle"></span>
+    <span id="statusLabel">idle</span>
+    <div id="takeoverBanner" hidden></div>
+    <div id="takeoverReason"></div>
+    <button id="resumeBtn"></button>
   `;
 }
 
-describe("appendThinkingEntry body escaping", () => {
-  let appendThinkingEntry: (
-    kind: "planner" | "navigator" | "error",
-    head: string,
-    body: string,
-  ) => void;
-  let thinkingBody: HTMLElement;
+describe("lifecycle status updates", () => {
+  let setLifecycle: (state: "idle" | "thinking" | "acting" | "waiting" | "done" | "error") => void;
 
   beforeAll(async () => {
     setupDom();
     const mod = await import("../src/extension/sidepanel/lifecycle");
-    appendThinkingEntry = mod.appendThinkingEntry;
-    thinkingBody = document.getElementById("thinkingBody") as HTMLElement;
+    setLifecycle = mod.setLifecycle;
   });
 
-  beforeEach(() => {
- // Each test appends a new entry; clear so querySelector finds THIS test's
- // entry rather than the first one ever appended.
-    thinkingBody.innerHTML = "";
+  test("sets status dot data-status attribute", () => {
+    setLifecycle("thinking");
+    const dot = document.getElementById("statusDot") as HTMLElement;
+    expect(dot.dataset.status).toBe("thinking");
   });
 
-  test("escapes an HTML-injection payload in body (no live element)", () => {
-    appendThinkingEntry("navigator", "Step 1", `<img src=x onerror=alert(1)>`);
-    const entry = thinkingBody.querySelector(".te-body") as HTMLElement;
-    expect(entry).not.toBeNull();
- // The raw tag is escaped — no <img> element was actually created.
-    expect(entry.querySelector("img")).toBeNull();
-    expect(entry.innerHTML).toContain("&lt;img");
-    expect(entry.innerHTML).not.toContain("<img");
+  test("sets status label text", () => {
+    setLifecycle("acting");
+    const label = document.getElementById("statusLabel") as HTMLElement;
+    expect(label.textContent).toBe("acting");
   });
 
-  test("escapes script payloads in body", () => {
-    appendThinkingEntry("error", "Step 2", `<script>alert('xss')</script>`);
-    const entry = thinkingBody.querySelector(".te-body") as HTMLElement;
-    expect(entry.querySelector("script")).toBeNull();
-    expect(entry.innerHTML).toContain("&lt;script&gt;");
+  test("sets idle state", () => {
+    setLifecycle("idle");
+    const dot = document.getElementById("statusDot") as HTMLElement;
+    const label = document.getElementById("statusLabel") as HTMLElement;
+    expect(dot.dataset.status).toBe("idle");
+    expect(label.textContent).toBe("idle");
   });
 
-  test("renders newlines as <br> and escapes each line", () => {
-    appendThinkingEntry("planner", "Step 3", "line one\nline <b>two</b>");
-    const entry = thinkingBody.querySelector(".te-body") as HTMLElement;
-    expect(entry.innerHTML).toContain("<br>");
-    expect(entry.innerHTML).toContain("line one");
-    expect(entry.innerHTML).toContain("line &lt;b&gt;two&lt;/b&gt;");
-    expect(entry.querySelector("b")).toBeNull();
-  });
-
-  test("escapes the head too", () => {
-    appendThinkingEntry("navigator", "<b>head</b>", "plain body");
-    const head = thinkingBody.querySelector(".te-head") as HTMLElement;
-    expect(head.innerHTML).toContain("&lt;b&gt;head&lt;/b&gt;");
-    expect(head.querySelector("b")).toBeNull();
+  test("sets error state", () => {
+    setLifecycle("error");
+    const dot = document.getElementById("statusDot") as HTMLElement;
+    const label = document.getElementById("statusLabel") as HTMLElement;
+    expect(dot.dataset.status).toBe("error");
+    expect(label.textContent).toBe("error");
   });
 });

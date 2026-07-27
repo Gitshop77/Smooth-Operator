@@ -61,7 +61,6 @@ function setupGlobals(): void {
     <input type="checkbox" id="enableStealth" />
     <textarea id="allowedDomains"></textarea>
     <textarea id="blockedDomains"></textarea>
-    <input id="cockpitUrl">
     <input id="notifyOnCompletion">
     <input id="notifyOnError">
     <input id="notifyOnTakeover">

@@ -24,7 +24,7 @@
  * acknowledge the trust boundary before the snippet is persisted.
  */
 
-import { $, escapeHtml } from "@/extension/shared";
+import { $, escapeHtml, isRecord } from "@/extension/shared";
 import { CUSTOM_TOOL_NAME_REGEX } from "@/lib/agent/tools/registry";
 import { STORAGE_KEYS, showSaved } from "./settings-sync";
 import { confirmModal, alertModal } from "./modal";
@@ -56,13 +56,6 @@ function serialize<T>(task: () => Promise<T>): Promise<T> {
     () => undefined,
   );
   return run;
-}
-
-// ─── Defensive storage parsing ───────────────────────────────────────────────
-// Malformed / legacy storage must degrade gracefully (warn + drop bad entries)
-// instead of throwing while the Tools tab renders.
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 export function validateCustomTools(raw: unknown): CustomToolEntry[] {

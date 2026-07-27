@@ -229,7 +229,7 @@ export function openModal(opts: ModalOptions): Promise<string | null> {
   }
   return new Promise<string | null>((resolve) => {
     pendingQueue.push(() => {
-      showModal(opts).then(resolve);
+      void showModal(opts).then(resolve);
     });
   });
 }

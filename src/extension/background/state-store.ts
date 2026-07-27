@@ -152,7 +152,19 @@ export async function hardResetAbortRequested(): Promise<void> {
       }
     } catch (e) {
       console.error("[state-store] hardResetAbortRequested failed:", e);
-      /* storage unavailable — non-fatal; the run's own abort checks cover it */
+      // Last-resort: drop the entire run state so a stale abortRequested
+      // flag can't block the next startRun. Mirrors the fallback already
+      // used in agent-bridge.ts:396 (startRun wrapper). Uses the
+      // RUN_STATE_KEY const (not the string literal) so the key stays
+      // in lockstep with clearRunState/saveRunState.
+      cachedRunState = undefined;
+      try {
+        await chrome.storage.session.remove(RUN_STATE_KEY);
+      } catch {
+        /* best-effort: if even the nuke fails, the next startRun's own
+           storage.session.remove fallback in agent-bridge.ts:396 is the
+           final backstop. */
+      }
     }
   });
 }
@@ -268,7 +280,7 @@ export async function requestKeepAwake(): Promise<void> {
   try {
     const tasks = await listScheduledTasks();
     if (!tasks.some((t) => t.enabled)) return; // no pending scheduled tasks
-    chrome.power.requestKeepAwake("system");
+    void chrome.power.requestKeepAwake("system");
   } catch {
     /* `chrome.power` unavailable (no `power` permission) or non-extension
  * context — non-fatal, scheduled-task reliability degrades gracefully. */
@@ -297,7 +309,7 @@ export async function maybeReleaseKeepAwake(): Promise<void> {
   try {
     const tasks = await listScheduledTasks();
     if (tasks.some((t) => t.enabled)) return; // other scheduled tasks still pending
-    chrome.power.releaseKeepAwake();
+    void chrome.power.releaseKeepAwake();
   } catch {
     /* `chrome.power` unavailable or storage read failed — non-fatal. */
   }

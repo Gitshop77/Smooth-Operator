@@ -21,7 +21,7 @@ import * as OpenAIChat from "../protocols/openai-chat";
 import type { LLMProvider } from "../provider";
 import { toLLMProvider as toLLMProviderBridge } from "../provider-bridge";
 import { assertSafeUserBaseURL } from "./openai-compatible-profile";
-import { LOCAL_PROVIDER_BASE_URLS } from "../route/ssrf";
+import { LOCAL_PROVIDER_BASE_URLS, type SsrfProvenance } from "../route/ssrf";
 import type { Protocol } from "../route/client";
 
 export type Config = {
@@ -98,6 +98,11 @@ export function makeOpenAIChatFacade<P extends Protocol<any, any, any, any> = Pr
     // required segment like `/v1` (would yield a 404/401).
     const url = new URL(input.baseURL ?? def.defaultBaseURL);
     const prefix = url.pathname.replace(/\/+$/, "");
+    // Derive SSRF provenance from allowLocalExemption: when the user explicitly
+    // configured this provider (allowLocalExemption=true), provenance is
+    // "user-configured"; otherwise "untrusted". This ensures the async DNS
+    // validation in transport-http.ts uses the correct trust level.
+    const provenance: SsrfProvenance = input.allowLocalExemption ? "user-configured" : "untrusted";
     const route = make({
       id: def.routeId,
       provider: def.id,
@@ -105,6 +110,7 @@ export function makeOpenAIChatFacade<P extends Protocol<any, any, any, any> = Pr
       endpoint: Endpoint.path(`${prefix}${def.path}`, { baseURL: url.origin }),
       auth: auth(input),
       framing: Framing.sse,
+      provenance,
     });
     return {
       id: def.id,

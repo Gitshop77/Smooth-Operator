@@ -30,8 +30,6 @@
   ],
   "exclude": [
     "node_modules",
-    "cockpit",
-    "mini-services",
     "chrome-extension"
   ]
 }

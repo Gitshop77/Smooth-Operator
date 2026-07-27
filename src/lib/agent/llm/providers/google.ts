@@ -19,6 +19,7 @@ import * as Gemini from "../protocols/gemini";
 import type { LLMProvider } from "../provider";
 import { toLLMProvider as toLLMProviderBridge } from "../provider-bridge";
 import { assertSafeUserBaseURL } from "./openai-compatible-profile";
+import type { SsrfProvenance } from "../route/ssrf";
 
 export const id = "google";
 
@@ -52,6 +53,11 @@ export function configure(input: Config = {}) {
   const parsed = new URL(baseURL);
   const basePath = parsed.pathname.replace(/\/+$/, "");
   const builtAuth = auth(input);
+  // Derive SSRF provenance from allowLocalExemption: when the user explicitly
+  // configured this provider (allowLocalExemption=true), provenance is
+  // "user-configured"; otherwise "untrusted". This ensures the async DNS
+  // validation in transport-http.ts uses the correct trust level.
+  const provenance: SsrfProvenance = input.allowLocalExemption ? "user-configured" : "untrusted";
   return {
     id,
     model: (modelID: string) => {
@@ -76,6 +82,7 @@ export function configure(input: Config = {}) {
         endpoint: Endpoint.path(fullPath, { baseURL: parsed.origin, query: { alt: "sse" } }),
         auth: builtAuth,
         framing: Framing.sse,
+        provenance,
       });
       return route.model({ id: modelID });
     },

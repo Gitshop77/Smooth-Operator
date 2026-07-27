@@ -27,6 +27,7 @@ import { toLLMProvider as toLLMProviderBridge } from "../provider-bridge";
 import { encodeModelIdForUrl } from "../modelId";
 import { assertSafeUserBaseURL } from "./openai-compatible-profile";
 import { isCuratedLocalOriginUrl } from "./openai";
+import type { SsrfProvenance } from "../route/ssrf";
 
 export const id = "azure";
 
@@ -131,6 +132,11 @@ export function configure(input: Config = {}) {
  // non-curated Azure baseURL — mirroring the openai.ts facade.
   const exemption = !!input.allowLocalExemption && isCuratedLocalOriginUrl(baseURL);
   assertSafeUserBaseURL(baseURL, "azure", exemption);
+  // Derive SSRF provenance from allowLocalExemption: when the user explicitly
+  // configured this provider (allowLocalExemption=true), provenance is
+  // "user-configured"; otherwise "untrusted". This ensures the async DNS
+  // validation in transport-http.ts uses the correct trust level.
+  const provenance: SsrfProvenance = input.allowLocalExemption ? "user-configured" : "untrusted";
 
   return {
     id,
@@ -149,6 +155,7 @@ export function configure(input: Config = {}) {
         }),
         auth: auth(input),
         framing: Framing.sse,
+        provenance,
       });
       return route.model({ id: modelID });
     },

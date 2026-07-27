@@ -1098,7 +1098,7 @@ export async function cleanupRun(ctx: CleanupContext): Promise<void> {
  // (started from the side panel) don't set the badge, so clearing it is a
  // no-op there.
   try {
-    chrome.action.setBadgeText({ text: "" });
+    void chrome.action.setBadgeText({ text: "" });
   } catch {
     /* chrome.action may be unavailable in some test contexts */
   }
@@ -1123,9 +1123,16 @@ export async function cleanupRun(ctx: CleanupContext): Promise<void> {
  // both paths agree.
   try {
     const record = runBuilder.finish({ success: runSucceeded, text: "Run ended." });
-    void saveRun(record).catch(() => {
-      /* best-effort persistence — storage may be unavailable */
-    });
+    try {
+      await saveRun(record);
+    } catch {
+      // Retry once on transient storage failure (quota, SW teardown).
+      try {
+        await saveRun(record);
+      } catch {
+        /* best-effort persistence — give up after retry */
+      }
+    }
   } catch {
     /* saveRun is best-effort; never crash the run cleanup */
   }

@@ -24,8 +24,6 @@ Tell it what you need in plain language, and it reads the page, plans the steps,
 - [Local Vision Assistant](#local-vision-assistant)
 - [Security and trust](#security-and-trust)
 - [Privacy and your data](#privacy-and-your-data)
-- [Cockpit dashboard (optional)](#cockpit-dashboard-optional)
-- [cowork-events service (optional)](#cowork-events-service-optional)
 - [Development](#development)
 - [Technology](#technology)
 - [Contributing](#contributing)
@@ -63,9 +61,8 @@ git clone https://github.com/Gitshop77/open-cowork-chrome-extension.git
 cd open-cowork-chrome-extension
 
 npm install
-npm run bootstrap      # sets up the companion pieces
 
-npm run build:all      # builds the extension + Cockpit dashboard
+npm run build:all      # builds the extension
 ```
 
 **2. Load it into Chrome**
@@ -117,8 +114,6 @@ flowchart LR
     SW --> CS
     CS -->|page state: structure, text, screenshot| SW
     SW <-->|prompt in, actions out| LLM
-    SW -->|optional live events| EV[(cowork-events<br/>port 3003)]
-    EV --> CP[Cockpit dashboard<br/>port 3000]
 ```
 
 | Piece | Role |
@@ -384,64 +379,17 @@ Report a vulnerability via a GitHub issue tagged `security`, a GitHub Security A
 
 ## Privacy and your data
 
-- **What leaves your machine.** Page content, page structure, and chat prompts go only to the provider you configure. If you set a webhook, chosen events go to the URL you gave. The Cockpit never sends stored data anywhere else unless you configure it to.
+- **What leaves your machine.** Page content, page structure, and chat prompts go only to the provider you configure. If you set a webhook, chosen events go to the URL you gave.
 - **No personal data in the catalog.** The models.dev catalog is stored offline and used first; the live fetch is static metadata with no user data. **Test connection** never sends chat or page content. The vision model comes from `huggingface.co`, runs entirely on your device, and carries no personal data.
-- **Cockpit data, if you run it.** Browsing history, bookmarks, tab snapshots, saved form fields, per-site memory, chat content, and run logs are stored locally in SQLite.
 - **Retention.** Data stays until you delete it — there's no automatic expiry yet, so clear run history in **Options** when you want it gone.
-- **Deletion endpoints (Cockpit):**
-  - `DELETE /api/cowork/history?id=<id>` or `?all=1` — history
-  - `DELETE /api/cowork/memory/site?id=<id>` — per-site memory
-  - `DELETE /api/cowork/memory/form?id=<id>` — form memory
-  - `DELETE /api/cowork/ai/chat?messageId=<id>` or `?sessionId=<id>` — chat messages
 
 Privacy questions: **security@opencowork.dev**.
-
-## Cockpit dashboard (optional)
-
-A Next.js dashboard showing the extension's activity in real time — run history, logs, cost, sessions, tabs, workspaces, network requests, snapshots, DevTools logs, agents, workflows, tool calls, skills, prompts, memory, collections, extensions, chat, and a security view. It receives events from the `cowork-events` service over HTTP and WebSocket.
-
-- **Auth.** Every `/api/cowork/*` route requires an `X-Cowork-Token`, except five public discovery routes (`agent/bootstrap`, `agent/manifest`, `agent`, `agent/version`, `skill`). The token check uses constant-time comparison and fails closed in production.
-- **Storage.** Prisma with SQLite, 22 data models.
-
-> [!WARNING]
-> The Cockpit token is embedded in the browser bundle. Don't expose the Cockpit past your own machine or a trusted network while that token is in use. For any public deploy, put a trusted proxy in front that adds the token server-side, or switch to per-user auth.
-
-## cowork-events service (optional)
-
-A WebSocket + REST service on port 3003, bound to `127.0.0.1`. It's the line between the Cockpit (in your browser) and the outside world: it streams browser and agent events, keeps the last 1000 events for reconnect replay, accepts `POST /emit` from the Next.js app, and proxies chat and image generation to the Z-AI SDK so the browser never sees that upstream token.
-
-**Environment variables**
-
-| Variable | Needed? | Default | Notes |
-| --- | --- | --- | --- |
-| `COWORK_EVENT_TOKEN` | Yes, in production | `dev-token` | Shared secret between services — refused unless dev mode is on |
-| `COWORK_ALLOW_DEV_TOKEN` | No (dev only) | unset | Lets `dev-token` work — never set this in production |
-| `COWORK_CORS_ORIGIN` | No | `http://localhost:3000` | Allowed web origins |
-| `COWORK_UI_TOKEN` | No | falls back to event token | Browser-facing secret — must differ from the event token off your machine |
-| `NODE_ENV` | Yes, off your machine | none | Must be `production` for any reachable deploy |
-
-**REST endpoints**
-
-| Method | Path | Auth | What it does |
-| --- | --- | --- | --- |
-| `GET` | `/health` | none | Returns `{ ok: true }` |
-| `GET` | `/` | shared secret | Service info and channels |
-| `GET` | `/events` | shared secret | Replay of buffered events |
-| `POST` | `/emit` | shared secret | Broadcast an event |
-| `POST` | `/chat` | shared secret | Proxy to Z-AI chat |
-| `POST` | `/image` | shared secret | Proxy to Z-AI image generation |
-| `DELETE` | `/chat` | shared secret | Delete chat data |
-
-Safety limits: request bodies capped at 1 MiB, 10 requests per minute per IP on the busy routes, and a 1000-event replay buffer.
-
-> [!WARNING]
-> Bind everything to `127.0.0.1` or a network you control — never expose it on `0.0.0.0` of a public host. Rotate tokens with `openssl rand -hex 32`, restart the events service before the Cockpit, and rotate on a schedule (about every 90 days) or immediately after a suspected leak.
 
 ## Development
 
 ### Prerequisites
 
-- Node.js 22+ (required by the Cockpit's database layer)
+- Node.js 22+
 - npm
 - Chrome 116+ (to load the extension)
 
@@ -449,7 +397,6 @@ Safety limits: request bodies capped at 1 MiB, 10 requests per minute per IP on 
 
 ```bash
 npm install
-npm run bootstrap
 npm run build:all
 ```
 
@@ -460,15 +407,9 @@ Then load `chrome-extension/` through `chrome://extensions` as described above.
 | Script | What it does |
 | --- | --- |
 | `npm run build:extension` | Bundle the extension with esbuild into `chrome-extension/` |
-| `npm run build:cockpit` | Prepare and build the Cockpit (Next.js) |
-| `npm run build:all` | Build both |
-| `npm run dev` | Watch-build the extension, run the Cockpit, and run the events service together |
+| `npm run build:all` | Build the extension |
+| `npm run dev` | Watch-build the extension |
 | `npm run dev:ext` | Watch-build the extension only |
-| `npm run dev:cockpit` | Run the Cockpit dev server on `127.0.0.1:3000` |
-| `npm run dev:events` | Run the events service on port 3003 |
-
-> [!NOTE]
-> Set up the Cockpit's database once with `cd cockpit && npx prisma db push` (or let `build:cockpit` apply migrations). A `cockpit/.env` with `DATABASE_URL` is required — without it, every database call fails.
 
 ### Run locally
 
@@ -476,7 +417,7 @@ Then load `chrome-extension/` through `chrome://extensions` as described above.
 npm run dev
 ```
 
-Load `chrome-extension/` unpacked, and point the extension's Cockpit URL at `http://127.0.0.1:3000` in **Options**.
+Load `chrome-extension/` unpacked in Chrome.
 
 ### Tests and linting
 
@@ -485,10 +426,9 @@ npm run lint                                    # ESLint at the root
 npm run test                                     # Vitest suite at the root
 npm run test:watch                               # Vitest, watch mode
 npm run test:coverage                            # Vitest with coverage
-cd cockpit && npm run lint && npx tsc --noEmit   # Cockpit type-check and lint
 ```
 
-The root suite covers parsing, the loop detector, pricing, compaction, secrets, schema checks, sanitization, injection scanning, domain lists, mode enforcement, secret-leak prevention, the accessibility tree, the action executor, LLM protocols, judge retries, takeover resume, and the events service.
+The root suite covers parsing, the loop detector, pricing, compaction, secrets, schema checks, sanitization, injection scanning, domain lists, mode enforcement, secret-leak prevention, the accessibility tree, the action executor, LLM protocols, judge retries, and takeover resume.
 
 ### Project layout
 
@@ -506,18 +446,15 @@ src/lib/agent/             The agent engine, independent of the browser
   dom/                     Reading and marking the page
   security.ts              Injection defense and domain rules
 chrome-extension/          Build output (gitignored, regenerated on build)
-cockpit/                   Next.js dashboard (Prisma and SQLite)
-mini-services/cowork-events/   WebSocket and REST service (port 3003)
 tests/                     Vitest suite
 scripts/                   Catalog build and other scripts
 ```
 
 ### Continuous integration
 
-`.github/workflows/ci.yml` runs three jobs on Node 22:
+`.github/workflows/ci.yml` runs two jobs on Node 22:
 
-- **test** (root) — install, lint, type-check, run the coverage suite, confirm the extension builds cleanly, audit dependencies, and type-check the events service.
-- **cockpit** — install, audit, prepare the database, type-check, lint, run the Cockpit tests, and build it.
+- **test** (root) — install, lint, type-check, run the coverage suite, confirm the extension builds cleanly, and audit dependencies.
 - **secret-scan** — a full-history secret scan that fails the build if a real secret is committed.
 
 `.github/dependabot.yml` updates dependencies weekly. `.github/workflows/refresh-catalog.yml` rebuilds the bundled catalog weekly and opens a pull request if it changed.
@@ -529,24 +466,20 @@ scripts/                   Catalog build and other scripts
 - Chrome 116+
 - esbuild (ESM with code splitting for the service worker)
 - `chrome.storage.local` / `chrome.storage.session` for extension storage
-- Next.js 16, React 19, Prisma 7 + SQLite, Tailwind 4, Radix UI, TanStack Query, Zustand, socket.io-client (Cockpit)
-- socket.io + TypeScript (events service)
 - Zod 4 for validation
 - `@huggingface/transformers` and `onnxruntime-web` for on-device vision
 
 ## Contributing
 
 1. Fork the repo and create a feature branch.
-2. Run `npm run bootstrap` on a fresh clone before building.
-3. Add tests with your change, and keep each pull request focused on one thing.
-4. Run `npm run lint` and `npm run test` before opening the PR. For Cockpit changes, also run `cd cockpit && npx tsc --noEmit`.
-5. Open a pull request explaining what changed and why.
+2. Add tests with your change, and keep each pull request focused on one thing.
+3. Run `npm run lint` and `npm run test` before opening the PR.
+4. Open a pull request explaining what changed and why.
 
 Don't commit secrets or build output — `.env*`, `.z-ai-config`, `db/`, `chrome-extension/*.js`, `chrome-extension/chunks/`, `node_modules/`, and `.next/` are gitignored. `chrome-extension/` assets and license files are regenerated by `npm run build:extension`.
 
 ## Known limitations
 
-- The Cockpit interface is English-only, with no translation system yet.
 - The `evaluate` sandbox is a second layer of defense, not a hard wall — use Full Agentic mode only on sites you trust.
 - Run history has no automatic expiry — clear it yourself in **Options**.
 - The bundled catalog file is large and is deliberately kept out of agent contexts.

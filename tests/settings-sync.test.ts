@@ -1,5 +1,5 @@
 /**
- * Domain / cockpit-URL validators in `options/settings-sync.ts`.
+ * Domain validators in `options/settings-sync.ts`.
  *
  * `settings-sync.ts` runs storage + DOM side-effects at import time (it builds
  * the provider <select> and wires load handlers), so we stub `chrome` and set
@@ -55,7 +55,6 @@ function setupGlobals(): void {
     <input type="checkbox" id="enableStealth" />
     <textarea id="allowedDomains"></textarea>
     <textarea id="blockedDomains"></textarea>
-    <input id="cockpitUrl">
     <input id="notifyOnCompletion">
     <input id="notifyOnError">
     <input id="notifyOnTakeover">

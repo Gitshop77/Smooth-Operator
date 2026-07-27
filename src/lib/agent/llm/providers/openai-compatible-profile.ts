@@ -33,19 +33,20 @@ export const profiles = {
   baseten: { provider: "baseten", baseURL: "https://inference.baseten.co/v1", supportsStructuredOutput: true },
   cerebras: { provider: "cerebras", baseURL: "https://api.cerebras.ai/v1", supportsStructuredOutput: true },
   deepinfra: { provider: "deepinfra", baseURL: "https://api.deepinfra.com/v1/openai", supportsStructuredOutput: true },
-  deepseek: { provider: "deepseek", baseURL: "https://api.deepseek.com/v1", supportsStructuredOutput: true },
+  deepseek: { provider: "deepseek", baseURL: "https://api.deepseek.com", supportsStructuredOutput: true },
   fireworks: { provider: "fireworks", baseURL: "https://api.fireworks.ai/inference/v1", supportsStructuredOutput: true },
   groq: { provider: "groq", baseURL: "https://api.groq.com/openai/v1", supportsStructuredOutput: true },
   qwen: { provider: "qwen", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", supportsStructuredOutput: true },
   mistral: { provider: "mistral", baseURL: "https://api.mistral.ai/v1", supportsStructuredOutput: true },
   openrouter: { provider: "openrouter", baseURL: "https://openrouter.ai/api/v1", supportsStructuredOutput: true },
-  together: { provider: "together", baseURL: "https://api.together.xyz/v1", supportsStructuredOutput: true },
+  together: { provider: "together", baseURL: "https://api.together.ai/v1", supportsStructuredOutput: true },
   xai: { provider: "xai", baseURL: "https://api.x.ai/v1", supportsStructuredOutput: true },
  // Ollama's OpenAI-compatible shim accepts `response_format: { type: "json_object" }`
  // but does NOT honor the full `json_schema` variant reliably across model
  // families. Default false so the in-prompt schema fallback fires.
   ollama: { provider: "ollama", baseURL: "http://localhost:11434/v1", supportsStructuredOutput: false },
   opencode: { provider: "opencode", baseURL: "https://opencode.ai/zen/v1", supportsStructuredOutput: true },
+  "opencode-go": { provider: "opencode-go", baseURL: "https://opencode.ai/zen/go/v1", supportsStructuredOutput: true },
  // LiteLLM is a proxy — structured-output support depends on the upstream
  // model it routes to, which we can't know at config time. Default false so
  // the fallback fires; users whose upstream supports it can override.

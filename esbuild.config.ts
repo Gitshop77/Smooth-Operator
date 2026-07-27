@@ -146,7 +146,7 @@ const sharedConfig: BuildOptions = {
  // Silence esbuild's bundle-size advisories. The extension legitimately
   // bundles an LLM/transformers stack (options.js, sidepanel.js, the
   // transformers web chunk), so these "X mb ⚠️" notices are inherent, not
-  // actionable, and only add noise to `npm run build:all`. Other warnings
+  // actionable, and only add noise to `npm run build:extension`. Other warnings
   // (syntax, resolution, type) are unaffected and still surface.
   // (per-file bundle-size notices are suppressed by logLevel: "warning" above)
   define: isProd

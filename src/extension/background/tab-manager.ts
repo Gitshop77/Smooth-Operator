@@ -618,9 +618,9 @@ export async function handleTabAction(
       if (tab.id === runState.currentTabId) {
         const remaining = await listTabs();
         if (remaining[0]) {
-          runState.currentTabId = remaining[0].id;
-          await chrome.tabs.update(runState.currentTabId, { active: true });
-          await saveRunState({ currentTabId: remaining[0].id });
+          await chrome.tabs.update(remaining[0].id!, { active: true });
+          runState.currentTabId = remaining[0].id!;
+          await saveRunState({ currentTabId: remaining[0].id! });
         } else {
  // The closed tab was the last one — clear the pointer so we don't keep
  // referencing a now-closed tab (which would make the next navigate/

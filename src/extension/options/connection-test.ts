@@ -95,9 +95,9 @@ export interface ConnectionTestConfig {
 const OPENAI_COMPAT_DEFAULT_BASE: Record<string, string> = {
   openai: "https://api.openai.com/v1",
   openrouter: "https://openrouter.ai/api/v1",
-  together: "https://api.together.xyz/v1",
+  together: "https://api.together.ai/v1",
   mistral: "https://api.mistral.ai/v1",
-  deepseek: "https://api.deepseek.com/v1",
+  deepseek: "https://api.deepseek.com",
   groq: "https://api.groq.com/openai/v1",
   cerebras: "https://api.cerebras.ai/v1",
   qwen: "https://dashscope.aliyuncs.com/compatible-mode/v1",

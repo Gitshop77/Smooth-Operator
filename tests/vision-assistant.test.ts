@@ -166,13 +166,13 @@ describe("merger", () => {
 });
 
 describe("preprocessor", () => {
-  test("preprocessScreenshot rejects non-image / malformed data URLs", () => {
-    expect(preprocessScreenshot("not a data url")).rejects.toThrow();
-    expect(
+  test("preprocessScreenshot rejects non-image / malformed data URLs", async () => {
+    await expect(preprocessScreenshot("not a data url")).rejects.toThrow();
+    await expect(
       preprocessScreenshot("data:text/plain;base64,abc"),
     ).rejects.toThrow(/data:image|malformed|non-image/);
-    expect(preprocessScreenshot("data:image/png;base64,!!")).rejects.toThrow();
-    expect(preprocessScreenshot("data:image/png;base64,")).rejects.toThrow();
+    await expect(preprocessScreenshot("data:image/png;base64,!!")).rejects.toThrow();
+    await expect(preprocessScreenshot("data:image/png;base64,")).rejects.toThrow();
   });
 });
 

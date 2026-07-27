@@ -15,7 +15,6 @@ dev.log
 !.env.example
 
 # credentials
-.z-ai-config
 *.pem
 *.key
 *.p12

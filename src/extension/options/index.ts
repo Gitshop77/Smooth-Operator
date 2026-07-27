@@ -29,14 +29,27 @@ const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>(".tab"));
 
 // Lazily render dynamic tab content on first activation. Hoisted to module
 // scope so it is built once, not re-allocated on every tab switch.
+//
+// The 5-tab consolidation maps old renderers into parent tabs:
+// - "agent" sub-tabs: prompts → loadPrompts
+// - "storage" sub-tabs: secrets → renderSecrets
+// - "automation" sub-tabs: schedule → renderSchedule, tools → renderTools,
+//   skills → renderSkills, notify → loadNotifications
+// - "history" sub-tabs: history → renderHistory
+const rendered = new Set<string>();
+
 const renderers: Record<string, () => void | Promise<void>> = {
-  secrets: renderSecrets,
-  schedule: renderSchedule,
-  tools: renderTools,
-  skills: renderSkills,
+  agent: loadPrompts,
+  storage: renderSecrets,
+  automation: async () => {
+    await Promise.all([
+      renderSchedule(),
+      renderTools(),
+      renderSkills(),
+      loadNotifications(),
+    ]);
+  },
   history: renderHistory,
-  prompts: loadPrompts,
-  notify: loadNotifications,
 };
 
 function activateTab(tab: HTMLButtonElement, focus = true): void {
@@ -61,9 +74,13 @@ function activateTab(tab: HTMLButtonElement, focus = true): void {
  // Lazily render dynamic tab content on first activation. A renderer that
  // reads chrome.storage.local can reject (quota/disabled/policy); catch it so
  // a transient failure surfaces as a warning instead of an unhandled rejection.
-  Promise.resolve(renderers[target]?.()).catch((err) =>
-    console.warn("[options] tab renderer failed:", err),
-  );
+  if (!rendered.has(target) && renderers[target]) {
+    rendered.add(target);
+    Promise.resolve(renderers[target]()).catch((err) => {
+      rendered.delete(target);
+      console.warn("[options] tab renderer failed:", err);
+    });
+  }
 }
 
 tabs.forEach((tab) => {

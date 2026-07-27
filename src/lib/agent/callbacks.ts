@@ -209,8 +209,7 @@ export class CallbackDispatcher {
       // unchanged.
       if (count !== 1 && count % CallbackDispatcher.WARN_THROTTLE !== 0) return;
  // Redact any substituted secrets that leaked into the error string before
- // logging to the extension console (defense-in-depth; mirrors the cockpit
- // redaction path). Await the redaction so the secret-laden raw error string
+ // logging to the extension console (defense-in-depth). Await the redaction so the secret-laden raw error string
  // never reaches the console ahead of masking, and wrap it in try/catch so a
  // redaction failure can NEVER echo secrets: the fallback masks any API keys
  // in the raw error before logging it.

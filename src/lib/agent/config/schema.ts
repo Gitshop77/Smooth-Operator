@@ -178,8 +178,8 @@ const AgentConfigSchema = z.object({
   compactionStepInterval: z.number().int().min(1).default(20),
   /** Minimum history character length before compaction triggers (>=1000). */
   compactionCharThreshold: z.number().int().min(1000).max(5_000_000).default(30_000),
-  /** Optional USD cost cap — aborts the run if exceeded. */
-  costCapUsd: z.number().positive().optional(),
+  /** Optional USD cost cap — aborts the run if exceeded. 0 disables the cap. */
+  costCapUsd: z.number().min(0).optional(),
   /** Per-call SLA (ms) for cloud LLM / compaction calls; 0 disables. */
   llmCallTimeoutMs: z.number().int().min(0).optional(),
   /**

@@ -101,6 +101,9 @@ const CURATED_LOCAL_ORIGINS: ReadonlySet<string> = new Set(
   }),
 );
 
+/** Internal TLD suffixes that should never be LLM endpoints. */
+const INTERNAL_TLD_SUFFIXES = [".internal", ".local", ".lan", ".home"];
+
 /** True iff `url`'s origin exactly matches a curated local-provider endpoint. */
 export function isCuratedLocalOrigin(url: string): boolean {
   try {
@@ -491,18 +494,23 @@ export async function resolveAndValidateLlmBaseUrl(
  // hostname-based hosts need DNS resolution to catch poisoned-hostname SSRF.
   if (!isLikelyHostname(host)) return { ok: true };
 
-  const outcome = await dnsResolve(host);
+const outcome = await dnsResolve(host);
   if (outcome.kind === "unavailable") {
- // No DNS resolver exists in this runtime (e.g. a Node context without the
- // `dns` module). FAIL CLOSED unconditionally, regardless of `exempt`: without
- // a resolver we cannot verify the real target IP, so a hostname that resolves
- // to a cloud-metadata / internal address would be a live SSRF exfil path. The
- // curated local-provider origins (Ollama / LiteLLM loopback) already
- // short-circuit earlier (see `isCuratedLocalOrigin` above) and are unaffected
- // by this change — only outside a Chrome extension service worker (which
- // always has `chrome.dns.resolve`) is this path reachable, and there refusing
- // is the safe default. The transport-layer guard still re-checks the literal
- // URL.
+  // No DNS resolver exists in this runtime (e.g. Chrome stable without the
+  // "dns" permission, or a Node context without the `dns` module).
+  // For user-configured URLs (provenance === "user-configured"), allow with a
+  // warning instead of failing closed — the user explicitly chose this endpoint,
+  // the synchronous validateLlmBaseUrl already rejected literal IPs in blocked
+  // ranges, and the transport-layer guard in transport-http.ts will still do its
+  // own per-fetch SSRF check. For untrusted/injected URLs, keep failing closed.
+  if (provenance === "user-configured") {
+      console.warn(
+        `[ssrf] dnsResolve unavailable — allowing user-configured ${redactUrl(url)} ` +
+          `(best-effort SSRF guard). Install the "dns" permission (dev channel) for full validation.`,
+      );
+      return { ok: true };
+    }
+  // Untrusted / injected URLs: fail closed without a resolver.
     console.warn(
       `[ssrf] dnsResolve unavailable — refusing ${redactUrl(url)} (fail-closed SSRF ` +
         `guard). Without a resolver we cannot verify the real target IP; a ` +
@@ -514,21 +522,27 @@ export async function resolveAndValidateLlmBaseUrl(
       reason: `DNS resolver unavailable; refusing ${redactUrl(url)} (fail-closed SSRF guard).`,
     };
   }
-  if (outcome.kind === "error") {
- // A resolver was available but the lookup FAILED. FAIL CLOSED unconditionally,
- // regardless of `exempt` — without a verified target IP we must not risk
- // reaching an internal / metadata host on an unverifiable URL. The curated
- // local-provider origins short-circuit earlier and are unaffected. The
- // transport-layer guard still re-checks the literal URL.
+if (outcome.kind === "error") {
+  // A resolver was available but the lookup FAILED. For user-configured URLs,
+  // allow with a warning (transient network issue) rather than failing closed.
+  // For untrusted/injected URLs, keep failing closed.
+  if (provenance === "user-configured") {
     console.warn(
-      `[ssrf] dnsResolve errored for ${redactUrl(url)} — refusing (fail-closed SSRF ` +
-        `guard). Verify the transport-layer guard still blocks unauthorized targets.`,
+      `[ssrf] dnsResolve errored for ${redactUrl(url)} — allowing user-configured ` +
+        `(best-effort SSRF guard). Transient DNS failure; transport-layer guard will re-check.`,
     );
-    return {
-      ok: false,
-      reason: `DNS resolution for ${host} failed; refusing ${redactUrl(url)} (fail-closed SSRF guard).`,
-    };
+    return { ok: true };
   }
+  // Untrusted / injected URLs: fail closed.
+  console.warn(
+    `[ssrf] dnsResolve errored for ${redactUrl(url)} — refusing (fail-closed SSRF ` +
+      `guard). Verify the transport-layer guard still blocks unauthorized targets.`,
+  );
+  return {
+    ok: false,
+    reason: `DNS resolution for ${host} failed; refusing ${redactUrl(url)} (fail-closed SSRF guard).`,
+  };
+}
   for (const ip of outcome.ips) {
     const alwaysBlocked = ip.includes(":") ? isDangerousIpv6(ip) : isDangerousIpv4(ip);
     const localUntrusted = !exempt && isUserLocalIp(ip);
@@ -579,7 +593,7 @@ type DnsOutcome =
  * degrading (with a warning) when no resolver exists at all.
  */
 async function dnsResolve(hostname: string): Promise<DnsOutcome> {
- // Chrome extension service worker: chrome.dns.resolve.
+  // Chrome extension service worker: chrome.dns.resolve.
   const dnsResolveFn = (globalThis as { chrome?: { dns?: { resolve?: (h: string, cb: (r: { addresses?: string[] }) => void) => void } } }).chrome?.dns?.resolve;
   if (dnsResolveFn) {
     return await new Promise<DnsOutcome>((resolve) => {
@@ -596,19 +610,12 @@ async function dnsResolve(hostname: string): Promise<DnsOutcome> {
       }
     });
   }
- // Node.js context (mini-services / tests): resolve via dynamic import so DNS
- // resolution works in ESM runtimes. `globalThis.require` is undefined in ESM,
- // which previously made the require-based branch unreachable and force-failed
- // every hostname URL — switching to `import("node:dns/promises")` restores
- // real resolution while still failing closed (error) on any lookup failure.
-  try {
-    const dns = await import("node:dns/promises");
-    const r = await dns.lookup(hostname, { all: true });
-    const arr = Array.isArray(r) ? r : [r];
-    return { kind: "resolved", ips: arr.map((x) => x.address) };
-  } catch {
-    return { kind: "error" };
-  }
+  // No DNS resolver available in this runtime (e.g. no `chrome.dns` permission,
+  // or running in a context without a DNS API). Return "unavailable" so the caller
+  // can FAIL CLOSED per its policy — this is the correct fail-closed behavior
+  // when the real target IP cannot be verified. Do NOT attempt a Node import
+  // (which would violate CSP in a browser service worker) or any other fallback.
+  return { kind: "unavailable" };
 }
 
 /**
@@ -697,7 +704,8 @@ export function validateLlmBaseUrl(
  // Cloud-metadata / internal hostnames (e.g. `metadata.google.internal`, which
  // resolves to 169.254.169.254) are never legitimate LLM endpoints and are not
  // caught by the IP-literal checks above. Reject them unconditionally.
-  if (normalizedHost.toLowerCase().replace(/\.$/, "").endsWith(".internal")) {
+  const h = normalizedHost.toLowerCase().replace(/\.$/, "");
+  if (INTERNAL_TLD_SUFFIXES.some((s) => h.endsWith(s))) {
     return {
       ok: false,
       reason: `host is a cloud-metadata/internal endpoint not allowed: ${redactUrl(url)}`,

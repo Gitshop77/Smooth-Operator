@@ -44811,7 +44811,7 @@ export const BUNDLED_CATALOG: Catalog = {
       "INFERENCE_API_KEY"
     ],
     "npm": "@ai-sdk/openai-compatible",
-    "api": "https://inference.net/v1",
+    "api": "https://api.inference.net/v1",
     "doc": "https://inference.net/models",
     "id": "inference",
     "models": {
@@ -60842,7 +60842,7 @@ export const BUNDLED_CATALOG: Catalog = {
       "MEGANOVA_API_KEY"
     ],
     "npm": "@ai-sdk/openai-compatible",
-    "api": "https://api.meganova.ai/v1",
+    "api": "https://inference.meganova.ai/v1",
     "doc": "https://docs.meganova.ai",
     "id": "meganova",
     "models": {

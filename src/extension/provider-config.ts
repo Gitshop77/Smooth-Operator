@@ -19,7 +19,7 @@ import * as Azure from "../lib/agent/llm/providers/azure";
 import * as OpenAICompatible from "../lib/agent/llm/providers/openai-compatible";
 import { makeOpenAIChatFacade } from "../lib/agent/llm/providers/openai";
 import * as OpenAICompatibleChat from "../lib/agent/llm/protocols/openai-compatible-chat";
-import { resolveAndValidateLlmBaseUrl, validateLlmBaseUrl } from "../lib/agent/llm/route/ssrf";
+import { resolveAndValidateLlmBaseUrl, validateLlmBaseUrl, type SsrfProvenance } from "../lib/agent/llm/route/ssrf";
 import { modelSupportsVision, modelSupportsReasoning, getDefaultModelForProvider, resolveVisionSupport, fetchCatalog } from "../lib/agent/llm/catalog";
 import { CATALOG_PROVIDER_ID_MAP } from "./provider-config-map";
 
@@ -230,7 +230,10 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
  // variant also DNS-resolves hostnames so poisoned-hostname SSRF is caught.
   if (baseUrl) {
     const allowLocalExemption = provenance === "user";
-    const ssrf = await resolveAndValidateLlmBaseUrl(baseUrl, allowLocalExemption);
+    // Map ProviderConfig provenance ("user" | "injected") to SSRF provenance
+    // ("user-configured" | "untrusted") so the DNS-unavailable allow path triggers.
+    const ssrfProvenance: SsrfProvenance = provenance === "user" ? "user-configured" : "untrusted";
+    const ssrf = await resolveAndValidateLlmBaseUrl(baseUrl, allowLocalExemption, ssrfProvenance);
     if (!ssrf.ok) {
       throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${baseUrl} (${ssrf.reason})`);
     }

@@ -116,7 +116,7 @@ function interleaveTagName(name: string): string {
   }
   return out;
 }
-const INTERLEAVED_PROMPT_TAGS = PROMPT_TAG_PATTERN.split("|").map(interleaveTagName).join("|");
+export const INTERLEAVED_PROMPT_TAGS = PROMPT_TAG_PATTERN.split("|").map(interleaveTagName).join("|");
 const INTERLEAVED_BARE_TAGS = BARE_TAG_PATTERN.split("|").map(interleaveTagName).join("|");
 
 /**

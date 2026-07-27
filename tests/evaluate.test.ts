@@ -1,4 +1,4 @@
-// @vitest-environment-options {"url":"http://127.0.0.1:3000/"}
+// @vitest-environment-options {"url":"http://test.example.com/"}
 
 /**
  * `evaluate` must only report `pageChanged: true` when the page actually
@@ -17,11 +17,9 @@ describe("evaluate pageChanged", () => {
   beforeEach(() => {
     document.body.innerHTML = "";
  // `evaluate` fails closed without an explicit domain allowlist.
- // The jsdom env runs at http://127.0.0.1:3000, so allowlist "127.0.0.1"
- // (an IP literal — the hardened hostname matcher rejects single-label
- // hosts like "localhost" to block TLD-wide matches, so we use a dotted/IP
- // host that it accepts).
-    allowDomain("127.0.0.1");
+ // The jsdom env runs at http://test.example.com, so allowlist "test.example.com"
+ // (a dotted host the hardened matcher accepts).
+    allowDomain("test.example.com");
   });
   afterEach(() => {
     clearDomainAllowlist();
