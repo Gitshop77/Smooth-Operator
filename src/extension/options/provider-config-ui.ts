@@ -244,6 +244,13 @@ export async function populateModelSuggestions(): Promise<void> {
  * provider it belongs to, plus pricing (`formatCost`), context (`formatContext`)
  * and a Vision tag (`formatVision`). Returns the element; the caller appends it.
  */
+function highlightMatch(text: string, query: string): string {
+  if (!query) return escapeHtml(text);
+  const escaped = escapeHtml(text);
+  const regex = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi");
+  return escaped.replace(regex, '<mark class="model-highlight">$1</mark>');
+}
+
 function renderModelResultItem(
   model: CatalogModel,
   providerName: string,
@@ -269,10 +276,15 @@ function renderModelResultItem(
   });
   const visionTag = fmt.vision(model.attachment);
   item.innerHTML =
-    `<strong>${escapeHtml(model.name)}</strong> ` +
-    `<span class="provider-name">${escapeHtml(providerName)}</span> ` +
-    `<code class="model-id">${escapeHtml(model.id)}</code> ` +
-    `<span class="meta">${escapeHtml(fmt.cost(model.cost))} · ${escapeHtml(fmt.context(model.limit))} ctx${visionTag ? " · " + escapeHtml(visionTag) : ""}</span>`;
+    `<div class="result-primary">` +
+      `<strong>${highlightMatch(model.name, ($("model") as HTMLInputElement).value.trim())}</strong> ` +
+      `<span class="provider-name">${escapeHtml(providerName)}</span> ` +
+      (visionTag ? `<span class="vision-tag">${escapeHtml(visionTag)}</span>` : "") +
+    `</div>` +
+    `<div class="result-secondary">` +
+      `<code class="model-id">${escapeHtml(model.id)}</code> ` +
+      `<span class="meta">${escapeHtml(fmt.cost(model.cost))} · ${escapeHtml(fmt.context(model.limit))} ctx</span>` +
+    `</div>`;
   item.addEventListener("click", () => {
     // Commit the real provider model id (NOT the display name).
     ($("model") as HTMLInputElement).value = model.id;
@@ -280,6 +292,10 @@ function renderModelResultItem(
     modelInput.setAttribute("aria-expanded", "false");
     resultsDiv.classList.add("is-hidden");
   });
+  const currentValue = ($("model") as HTMLInputElement).value.trim();
+  if (currentValue && model.id === currentValue) {
+    item.classList.add("is-selected");
+  }
   return item;
 }
 
@@ -293,7 +309,7 @@ document.getElementById("model")?.addEventListener("input", () => {
   resultsDiv.setAttribute("role", "listbox");
   resultsDiv.setAttribute("aria-label", "Model search results");
   const modelInput = $("model") as HTMLInputElement;
-  modelInput.setAttribute("aria-owns", "model-search-results");
+  modelInput.setAttribute("aria-controls", "model-search-results");
   if (modelSearchTimer) clearTimeout(modelSearchTimer);
  // Refresh the placeholder when the field is emptied so it shows the current
  // provider's default model (the two concerns now live in one listener).
@@ -309,6 +325,10 @@ document.getElementById("model")?.addEventListener("input", () => {
   }
   const myToken = ++modelSearchToken;
   activeResultIdx = -1;
+  // Show loading state while searching
+  resultsDiv.innerHTML = `<div class="model-search-loading">Searching\u2026</div>`;
+  resultsDiv.classList.remove("is-hidden");
+  modelInput.setAttribute("aria-expanded", "true");
   modelSearchTimer = setTimeout(async () => {
     try {
       const { searchModels, formatCost, formatContext, formatVision } = await import("../../lib/agent/llm/catalog");
@@ -316,29 +336,49 @@ document.getElementById("model")?.addEventListener("input", () => {
  // A newer keystroke has superseded this search — drop the stale result.
       if (myToken !== modelSearchToken) return;
       if (results.length === 0) {
-        resultsDiv.classList.add("is-hidden");
-        modelInput.setAttribute("aria-expanded", "false");
+        resultsDiv.innerHTML = `<div class="model-search-empty">No models match \u201c${escapeHtml(query)}\u201d</div>`;
+        resultsDiv.classList.remove("is-hidden");
+        modelInput.setAttribute("aria-expanded", "true");
         modelInput.removeAttribute("aria-activedescendant");
+        activeResultIdx = -1;
         return;
       }
       resultsDiv.innerHTML = "";
       resultsDiv.classList.remove("is-hidden");
       modelInput.setAttribute("aria-expanded", "true");
-      let optIdx = 0;
+
+      // Group results by provider
+      const grouped = new Map<string, typeof results>();
       for (const r of results) {
-        resultsDiv.appendChild(
-          renderModelResultItem(r.model, r.providerName, modelInput, resultsDiv, optIdx++, {
-            cost: formatCost,
-            context: formatContext,
-            vision: formatVision,
-          }),
-        );
+        const key = r.providerName;
+        if (!grouped.has(key)) grouped.set(key, []);
+        grouped.get(key)!.push(r);
+      }
+
+      let optIdx = 0;
+
+      for (const [providerName, models] of grouped) {
+        // Provider section header
+        const header = document.createElement("div");
+        header.className = "model-search-group-header";
+        header.textContent = `${providerName} \u00b7 ${models.length} model${models.length > 1 ? "s" : ""}`;
+        resultsDiv.appendChild(header);
+
+        for (const r of models) {
+          resultsDiv.appendChild(
+            renderModelResultItem(r.model, r.providerName, modelInput, resultsDiv, optIdx++, {
+              cost: formatCost,
+              context: formatContext,
+              vision: formatVision,
+            }),
+          );
+        }
       }
     } catch (e) {
       console.warn("[options] model search failed:", e);
       resultsDiv.classList.add("is-hidden");
     }
-  }, 300);
+  }, 150);
 });
 
 // ─── Keyboard navigation for model search results ──────────────────────────
@@ -368,6 +408,23 @@ document.getElementById("model")?.addEventListener("keydown", (e) => {
   }
   items.forEach((el, i) => el.setAttribute("aria-selected", String(i === activeResultIdx)));
   ($("model") as HTMLInputElement).setAttribute("aria-activedescendant", items[activeResultIdx].id);
+});
+
+// Outside-click dismiss for model search dropdown
+document.addEventListener("mousedown", (e) => {
+  const resultsDiv = $("model-search-results") as HTMLDivElement | null;
+  const modelInput = $("model") as HTMLInputElement | null;
+  if (!resultsDiv || resultsDiv.classList.contains("is-hidden")) return;
+  if (!modelInput) return;
+  if (
+    !resultsDiv.contains(e.target as Node) &&
+    e.target !== modelInput
+  ) {
+    resultsDiv.classList.add("is-hidden");
+    modelInput.setAttribute("aria-expanded", "false");
+    modelInput.removeAttribute("aria-activedescendant");
+    activeResultIdx = -1;
+  }
 });
 
 // ─── Refresh models from models.dev ────────────────────────────────────────

@@ -13,12 +13,12 @@ export type TaskStatus = "idle" | "thinking" | "acting" | "waiting" | "done" | "
 
 /** Human-readable label for each lifecycle state. */
 const LIFECYCLE_LABELS: Record<TaskStatus, string> = {
-  idle: "idle",
-  thinking: "thinking",
-  acting: "acting",
-  waiting: "waiting",
-  done: "done",
-  error: "error",
+  idle: "Ready",
+  thinking: "Thinking…",
+  acting: "Acting…",
+  waiting: "Waiting…",
+  done: "Done ✓",
+  error: "Error",
 };
 
 /** Update the status dot + label in the status bar. */

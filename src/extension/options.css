@@ -203,9 +203,9 @@ h3 {
   letter-spacing: 0;
 }
 h4 {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
-  color: var(--cw-text);
+  color: var(--cw-muted);
   margin: 20px 0 8px;
   font-family: inherit;
   text-transform: none;
@@ -459,6 +459,13 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
   border-color: var(--cw-accent-hover);
 }
 
+.btn:active:not(:disabled),
+.btn-ghost:active:not(:disabled),
+.btn-primary:active:not(:disabled),
+.btn-danger:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
 /* ─── Saved cue ───────────────────────────────────────────────────────────── */
 .saved {
   color: var(--cw-success);
@@ -605,14 +612,16 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 /* ─── Model search results dropdown ───────────────────────────────────────── */
 .model-search-results {
   margin-top: 6px;
-  max-height: 200px;
+  max-height: 320px;
   overflow-y: auto;
   border: 1px solid var(--cw-border);
   border-radius: var(--cw-radius);
   background: var(--cw-input);
+  position: relative;
+  z-index: 10;
 }
 .model-search-result-item {
-  padding: 6px 10px;
+  padding: 8px 12px;
   cursor: pointer;
   border-bottom: 1px solid var(--cw-border);
   font-size: 13px;
@@ -620,8 +629,22 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 .model-search-result-item:last-child {
   border-bottom: none;
 }
+.model-search-result-item:hover {
+  background: var(--cw-raised);
+}
+.model-search-result-item[aria-selected="true"],
+.model-search-result-item:focus-visible {
+  background: var(--cw-accent-subtle);
+  outline: none;
+}
+
+.model-search-results .model-search-result-item:focus-visible {
+  outline: none;
+}
 .model-search-result-item .provider-name {
-  color: var(--cw-muted);
+  color: #B0B5C0;
+  font-size: 12px;
+  font-weight: 500;
 }
 .model-search-result-item .meta {
   color: var(--cw-muted);
@@ -636,12 +659,86 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
   color: var(--cw-text);
 }
 
+.model-search-empty {
+  padding: 16px 12px;
+  text-align: center;
+  color: var(--cw-dim);
+  font-size: 13px;
+}
+
+.model-search-loading {
+  padding: 12px;
+  text-align: center;
+  color: var(--cw-dim);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.model-search-result-item.is-selected::before {
+  content: "\2713";
+  color: var(--cw-accent);
+  font-weight: 600;
+  margin-right: 4px;
+  flex-shrink: 0;
+}
+
+.model-highlight {
+  background: var(--cw-accent-subtle);
+  color: var(--cw-text);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.model-search-result-item .result-primary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.model-search-result-item .result-secondary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.model-search-result-item .vision-tag {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--cw-info);
+  background: rgba(96, 165, 250, 0.12);
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+
+.model-search-group-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--cw-surface);
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--cw-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-bottom: 1px solid var(--cw-border);
+}
+
 /* ─── Model refresh row ───────────────────────────────────────────────────── */
 .model-refresh {
   display: flex;
   align-items: center;
   gap: 10px;
   margin-top: 8px;
+}
+
+.endpoint-hint {
+  margin-top: 0.5rem;
+  padding: 0.5rem;
+  background: var(--cw-surface);
+  border-radius: 4px;
+  font-size: 0.85em;
+  color: var(--cw-muted);
 }
 
 /* ─── Vision assistant status ─────────────────────────────────────────────── */
@@ -1068,11 +1165,15 @@ p strong { color: var(--cw-text); }
 
   /* Light-mode model search dropdown */
   .model-search-results {
-    background: #F0F1F5;
-    border-color: #E2E5EC;
+    background: var(--cw-input);
+    border-color: var(--cw-border);
   }
   .model-search-result-item {
-    border-color: #E2E5EC;
+    border-color: var(--cw-border);
+  }
+  .model-search-group-header {
+    background: var(--cw-surface);
+    border-color: var(--cw-border);
   }
 
   /* Light-mode code blocks */

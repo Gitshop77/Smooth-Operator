@@ -87,28 +87,24 @@ body {
   scrollbar-width: thin;
   scrollbar-color: var(--cw-border-hover) transparent;
 }
-.chat-messages::-webkit-scrollbar,
-.password-prompt-box::-webkit-scrollbar {
+.chat-messages::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
-.chat-messages::-webkit-scrollbar-track,
-.password-prompt-box::-webkit-scrollbar-track {
+.chat-messages::-webkit-scrollbar-track {
   background: transparent;
 }
-.chat-messages::-webkit-scrollbar-thumb,
-.password-prompt-box::-webkit-scrollbar-thumb {
+.chat-messages::-webkit-scrollbar-thumb {
   background: var(--cw-border-hover);
   border-radius: 999px;
 }
-.chat-messages::-webkit-scrollbar-thumb:hover,
-.password-prompt-box::-webkit-scrollbar-thumb:hover {
+.chat-messages::-webkit-scrollbar-thumb:hover {
   background: var(--cw-muted);
 }
 
 /* ─── Header ──────────────────────────────────────────────────────────────── */
 header {
-  padding: var(--pad-card);
+  padding: 10px 16px;
   border-bottom: 1px solid var(--cw-border);
   background: var(--cw-void);
   flex-shrink: 0;
@@ -136,13 +132,6 @@ header h1 {
   font-weight: 600;
   color: var(--cw-text);
   letter-spacing: -0.01em;
-}
-header p {
-  font-size: 11px;
-  color: var(--cw-muted);
-  margin-top: 2px;
-  letter-spacing: 0;
-  text-transform: none;
 }
 
 .btn-settings {
@@ -172,6 +161,7 @@ header p {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  position: relative;
 }
 
 .empty-state {
@@ -225,30 +215,130 @@ header p {
   flex-shrink: 0;
   font-size: 12px;
 }
+.msg-system.msg-error {
+  border-left: 2px solid var(--cw-danger);
+  background: var(--cw-danger-subtle);
+}
+.msg-system.msg-warning {
+  border-left: 2px solid var(--cw-warn);
+  background: var(--cw-warn-subtle);
+}
+
+/* ─── Scroll-to-bottom FAB ─────────────────────────────────────────────── */
+.scroll-bottom-btn {
+  position: absolute;
+  bottom: 8px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid var(--cw-border);
+  background: var(--cw-surface);
+  color: var(--cw-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--cw-ease), background var(--cw-ease), color var(--cw-ease);
+  z-index: 10;
+  box-shadow: var(--cw-shadow-md);
+  padding: 0;
+  font: inherit;
+}
+.scroll-bottom-btn.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+.scroll-bottom-btn:hover {
+  background: var(--cw-raised);
+  color: var(--cw-text);
+}
+.scroll-bottom-btn:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--cw-ring);
+  outline-offset: 2px;
+}
+
+/* ─── Message copy button ──────────────────────────────────────────────── */
+.msg-user,
+.msg-system {
+  position: relative;
+}
+
+.msg-copy-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: var(--cw-radius-sm);
+  background: transparent;
+  color: var(--cw-dim);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity var(--cw-ease), background var(--cw-ease), color var(--cw-ease);
+  padding: 0;
+  font: inherit;
+}
+.msg-user:hover .msg-copy-btn,
+.msg-system:hover .msg-copy-btn {
+  opacity: 1;
+}
+.msg-copy-btn:hover {
+  background: var(--cw-raised);
+  color: var(--cw-text);
+}
+.msg-copy-btn:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--cw-ring);
+  outline-offset: 1px;
+}
+
+/* ─── System message timestamp ─────────────────────────────────────────── */
+.msg-time {
+  font-size: 10px;
+  color: var(--cw-dim);
+  margin-left: auto;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
 
 /* ─── Input bar ───────────────────────────────────────────────────────────── */
 .input-bar {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 8px;
   padding: 8px 12px;
   border-top: 1px solid var(--cw-border);
   background: var(--cw-void);
   flex-shrink: 0;
-  height: 56px;
+  min-height: 56px;
+  height: auto;
 }
 
 .message-input {
   flex: 1;
-  height: 40px;
+  field-sizing: content;
+  min-height: 40px;
+  max-height: 120px;
   border: 1px solid var(--cw-border);
   border-radius: var(--cw-radius);
-  padding: 0 12px;
+  padding: 8px 12px;
   font: inherit;
   font-size: 13px;
   color: var(--cw-text);
   background: var(--cw-surface);
   transition: border-color var(--cw-ease);
+  resize: none;
+  overflow-y: auto;
+  line-height: 1.55;
+  width: 100%;
 }
 .message-input::placeholder { color: var(--cw-dim); }
 .message-input:hover { border-color: var(--cw-border-hover); }
@@ -259,6 +349,15 @@ header p {
 .message-input:focus-visible {
   outline: 2px solid var(--cw-ring);
   outline-offset: 1px;
+}
+.message-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.message-input:disabled:focus,
+.message-input:disabled:focus-visible {
+  outline: none;
+  border-color: var(--cw-border);
 }
 
 .btn-send {
@@ -285,6 +384,12 @@ header p {
   outline: 2px solid var(--cw-ring);
   outline-offset: 2px;
 }
+.btn-send:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  pointer-events: none;
+  background: var(--cw-dim);
+}
 
 /* ─── Status bar ──────────────────────────────────────────────────────────── */
 .status-bar {
@@ -307,8 +412,8 @@ header p {
 }
 
 .status-dot {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: var(--cw-border-hover);
   transition: background var(--cw-ease);
@@ -341,7 +446,7 @@ header p {
 }
 
 .telemetry {
-  color: var(--cw-dim);
+  color: var(--cw-muted);
   font-variant-numeric: tabular-nums;
 }
 
@@ -403,6 +508,7 @@ header p {
   border: 1px solid var(--cw-warn-border);
   border-radius: var(--cw-radius-lg);
   margin: 8px 12px;
+  animation: takeover-in 200ms ease-out;
 }
 .takeover-banner[hidden] { display: none; }
 .takeover-body { flex: 1; min-width: 0; }
@@ -429,8 +535,7 @@ header p {
 }
 
 /* ─── Button system ───────────────────────────────────────────────────────── */
-.btn,
-button {
+.btn {
   font: inherit;
   font-weight: 600;
   font-size: 13px;
@@ -446,15 +551,26 @@ button {
               color var(--cw-ease), opacity var(--cw-ease),
               box-shadow var(--cw-ease), transform 0.1s ease;
 }
-.btn:focus-visible,
-button:focus-visible {
+.btn:focus-visible {
   outline: 2px solid var(--cw-ring);
   outline-offset: 2px;
 }
-.btn:disabled,
-button:disabled { opacity: 0.4; cursor: not-allowed; }
-.btn:active:not(:disabled),
-button:active:not(:disabled) { transform: translateY(1px); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+
+/* Non-class buttons get base styling without forced bold */
+button:not(.btn) {
+  font: inherit;
+  font-size: 13px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0;
+}
+button:not(.btn):focus-visible {
+  outline: 2px solid var(--cw-ring);
+  outline-offset: 2px;
+}
 
 /* Primary — indigo, glow on hover */
 .btn-primary,
@@ -553,6 +669,16 @@ button:active:not(:disabled) { transform: translateY(1px); }
 
 /* ─── Reduced motion ──────────────────────────────────────────────────────── */
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@keyframes takeover-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
 
 @media (prefers-reduced-motion: reduce) {
   .status-dot[data-status="thinking"],

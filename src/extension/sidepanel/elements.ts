@@ -21,7 +21,7 @@ import { $ } from "@/extension/shared";
 // without updating every consumer.
 
 export const chatMessages = $<HTMLDivElement>("chatMessages");
-export const messageInput = $<HTMLInputElement>("messageInput");
+export const messageInput = $<HTMLTextAreaElement>("messageInput");
 export const sendBtn = $<HTMLButtonElement>("sendBtn");
 export const stopBtn = $<HTMLButtonElement>("stopBtn");
 export const costLabel = $<HTMLSpanElement>("costLabel");

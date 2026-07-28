@@ -32,7 +32,6 @@
       </svg>
       <div>
         <h1>Open Cowork</h1>
-        <p>Planner + navigator</p>
       </div>
     </div>
   </header>
@@ -45,8 +44,8 @@
   </main>
 
   <div class="input-bar">
-    <input type="text" id="messageInput" class="message-input" placeholder="Type a message..." autocomplete="off" aria-label="Message input" />
-    <button type="button" id="sendBtn" class="btn-send" aria-label="Send message">
+    <textarea id="messageInput" class="message-input" placeholder="Type a message... (Shift+Enter for newline)" rows="1" autocomplete="off" aria-label="Message input"></textarea>
+    <button type="button" id="sendBtn" class="btn-send" disabled aria-label="Send message">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <line x1="22" y1="2" x2="11" y2="13"/>
         <polygon points="22 2 15 22 11 13 2 9 22 2"/>
@@ -54,7 +53,7 @@
     </button>
   </div>
 
-  <div class="status-bar">
+  <div class="status-bar" role="status" aria-label="Agent status">
     <div class="status-left">
       <span class="status-dot" id="statusDot" data-status="idle" aria-hidden="true"></span>
       <span class="status-label" id="statusLabel" aria-live="polite">idle</span>
@@ -65,7 +64,7 @@
         <option value="full_agentic">🤖 Full agentic</option>
       </select>
     </div>
-    <div class="status-center">
+    <div class="status-center" id="statusCenter" hidden>
       <span id="costLabel" class="telemetry">$0.0000</span>
       <span class="telemetry-sep">·</span>
       <span id="tokenLabel" class="telemetry">0 tokens</span>

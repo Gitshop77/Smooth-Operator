@@ -67,59 +67,61 @@ export function addLogRow(event: LogEvent, time: string): void {
     case "run-start":
       setLifecycle("thinking");
       clearRunTotals();
-      addSystemMessage("▶", `Task: ${event.task}`);
+      addSystemMessage("▶", `Task: ${event.task}`, undefined, time);
       break;
     case "planner-step":
       setLifecycle("thinking");
       body = event.decision + (event.goal ? " → " + event.goal : "");
-      addSystemMessage("🧭", body);
+      addSystemMessage("🧭", body, undefined, time);
       break;
     case "navigator-step-start":
       setLifecycle("thinking");
-      addSystemMessage("→", `Step ${event.step}`);
+      addSystemMessage("→", `Step ${event.step}`, undefined, time);
       break;
     case "state":
       setLifecycle("thinking");
       body = `${event.elementCount} elements · ${event.pageInfo}`;
-      addSystemMessage("👁", body);
+      addSystemMessage("👁", body, undefined, time);
       break;
     case "thinking":
       setLifecycle("thinking");
       body = event.nextGoal || event.text || "";
-      if (body) addSystemMessage("✦", body);
+      if (body) addSystemMessage("✦", body, undefined, time);
       break;
     case "action":
       setLifecycle("acting");
       body = event.description || "";
-      addSystemMessage("🖱", `Action ${event.index}/${event.total}: ${body}`);
+      addSystemMessage("🖱", `Action ${event.index}/${event.total}: ${body}`, undefined, time);
       break;
     case "action-result":
       setLifecycle(event.success ? "acting" : "error");
       body = event.message || "";
-      addSystemMessage(event.success ? "✓" : "✗", `${event.name}: ${body}`);
+      addSystemMessage(event.success ? "✓" : "✗", `${event.name}: ${body}`, undefined, time);
       break;
     case "budget-warning":
-      addSystemMessage("⚠", `${event.pct}% of steps used`);
+      addSystemMessage("⚠", `${event.pct}% of steps used`, "warning", time);
       break;
     case "loop-warning":
-      addSystemMessage("⚠", `Loop detected: repeated ${event.count}x`);
+      addSystemMessage("⚠", `Loop detected: repeated ${event.count}x`, "warning", time);
       break;
     case "done":
       setRunning(false);
       setLifecycle(event.success ? "done" : "error");
       addSystemMessage(
         event.success ? "✅" : "❌",
-        event.success ? "Task completed!" : `Task failed: ${event.text}`
+        event.success ? "Task completed!" : `Task failed: ${event.text}`,
+        event.success ? undefined : "error",
+        time,
       );
       break;
     case "error":
       if (!event.recoverable) {
         setRunning(false);
         setLifecycle("error");
-        addSystemMessage("❌", event.message);
+        addSystemMessage("❌", event.message, "error", time);
       } else {
         setLifecycle("error");
-        addSystemMessage("⚠", event.message);
+        addSystemMessage("⚠", event.message, "warning", time);
       }
       break;
     case "cost": {
@@ -141,16 +143,19 @@ export function addLogRow(event: LogEvent, time: string): void {
           [STORAGE_KEYS.tokens]: totalTokens,
         });
       }
+      // Reveal telemetry on first cost event
+      const center = document.getElementById("statusCenter");
+      if (center) center.hidden = false;
       break;
     }
     case "info":
-      addSystemMessage("ℹ", event.message || "");
+      addSystemMessage("ℹ", event.message || "", undefined, time);
       break;
     case "warn":
-      addSystemMessage("⚠", event.message || "");
+      addSystemMessage("⚠", event.message || "", undefined, time);
       break;
     case "compaction":
-      addSystemMessage("↻", `Compacted ${event.compactedCount} steps`);
+      addSystemMessage("↻", `Compacted ${event.compactedCount} steps`, undefined, time);
       break;
     case "challenge_detected":
       setLifecycle("waiting");
@@ -158,11 +163,11 @@ export function addLogRow(event: LogEvent, time: string): void {
       break;
     case "paused":
       setLifecycle("waiting");
-      addSystemMessage("⏸", "Agent paused by user");
+      addSystemMessage("⏸", "Agent paused by user", undefined, time);
       break;
     case "resumed":
       setLifecycle("thinking");
-      addSystemMessage("▶", "Agent resumed");
+      addSystemMessage("▶", "Agent resumed", undefined, time);
       hideTakeoverBanner();
       break;
     case "heartbeat":
@@ -177,7 +182,7 @@ export function addLogRow(event: LogEvent, time: string): void {
       } catch {
         body = "[unserializable event]";
       }
-      addSystemMessage("·", body);
+      addSystemMessage("·", body, undefined, time);
       break;
     }
   }
@@ -233,6 +238,10 @@ export function restoreTotalsFromStorage(): void {
     if (Number.isFinite(storedTokens)) {
       totalTokens = Math.max(totalTokens, storedTokens as number);
       tokenLabel.textContent = formatTokens(totalTokens);
+    }
+    if (Number.isFinite(storedCost) || Number.isFinite(storedTokens)) {
+      const center = document.getElementById("statusCenter");
+      if (center) center.hidden = false;
     }
   });
 }

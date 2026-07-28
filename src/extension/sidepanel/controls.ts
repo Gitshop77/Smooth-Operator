@@ -128,6 +128,19 @@ messageInput.addEventListener("keydown", (e: KeyboardEvent) => {
   }
 });
 
+messageInput.addEventListener("input", () => {
+  sendBtn.disabled = !messageInput.value.trim() || running;
+});
+
+// ─── / keyboard shortcut to focus input ──────────────────────────────────
+
+document.addEventListener("keydown", (e: KeyboardEvent) => {
+  if (e.key === "/" && document.activeElement !== messageInput && !e.ctrlKey && !e.metaKey) {
+    e.preventDefault();
+    messageInput.focus();
+  }
+});
+
 // ─── Stop button ─────────────────────────────────────────────────────────
 
 stopBtn.addEventListener("click", () => {
