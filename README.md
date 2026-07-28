@@ -2,12 +2,9 @@
 
 <h3 align="center">Turn your browser into an assistant you can just talk to.</h3>
 
-```bash
-git clone https://github.com/Gitshop77/open-cowork-chrome-extension.git
-cd open-cowork-chrome-extension
-npm install
-npm run build:all
-```
+<p align="center">
+  <img src="assets/terminal.svg" alt="Installation" />
+</p>
 
 ---
 
