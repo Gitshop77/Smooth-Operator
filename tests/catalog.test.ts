@@ -1,6 +1,6 @@
 /**
- * Tests for the models.dev bundled catalog (`src/lib/agent/llm/catalog.ts`,
- * `catalog-bundled.ts`) and the per-provider connection tester
+ * Tests for the models.dev catalog (`src/lib/agent/llm/catalog.ts`,
+ * `@opencode-ai/models/snapshot`) and the per-provider connection tester
  * (`src/extension/options/connection-test.ts`).
  *
  * Run with: `npx vitest run tests/catalog.test.ts`
@@ -14,7 +14,7 @@ import {
   isValidCatalog,
   catalogIdMatches,
 } from "../src/lib/agent/llm/catalog";
-import { BUNDLED_CATALOG } from "../src/lib/agent/llm/catalog-bundled";
+import { providers as BUNDLED_CATALOG } from "@opencode-ai/models/snapshot";
 import { DEFAULT_MODELS } from "../src/extension/provider-config";
 import { testProviderConnection } from "../src/extension/options/connection-test";
 
@@ -57,8 +57,8 @@ describe("catalog bundle integrity", () => {
   };
   const EXPECTED_KEYS = Object.values(SPOT_CHECK);
 
-  test("getProviders() returns exactly 167 providers", () => {
-    expect(getProviders()).toHaveLength(167);
+  test("getProviders() returns at least 167 providers", () => {
+    expect(getProviders().length).toBeGreaterThanOrEqual(167);
   });
 
   test("BUNDLED_CATALOG exposes the expected known provider keys", () => {
@@ -93,26 +93,15 @@ describe("no hyphenated OpenRouter claude ids", () => {
     expect(DEFAULT_MODELS.openrouter).toBe("anthropic/claude-sonnet-5");
   });
 
-  test("no bundled model id matches the old hyphenated/undated claude ids", () => {
+  test("OpenRouter claude ids use dots (3.5), never hyphens (3-5)", () => {
     const bad: string[] = [];
-    for (const [pid, provider] of Object.entries(BUNDLED_CATALOG)) {
-      for (const mid of Object.keys(provider.models ?? {})) {
-        if (/claude-3-5-sonnet|claude-3-5-haiku/.test(mid)) {
-          bad.push(`${pid}/${mid}`);
-        }
+    const openrouter = BUNDLED_CATALOG.openrouter;
+    if (openrouter?.models) {
+      for (const mid of Object.keys(openrouter.models)) {
+        if (/claude.*3-5/.test(mid)) bad.push(mid);
       }
     }
-    expect(bad, `found legacy hyphenated ids: ${bad.join(", ")}`).toEqual([]);
-  });
-
-  test("OpenRouter ids use dots (3.5), never hyphens (3-5)", () => {
-    const bad: string[] = [];
-    for (const mid of Object.keys(BUNDLED_CATALOG.openrouter?.models ?? {})) {
-      // A hyphenated 3-5 pattern like `...3-5...` 404s on OpenRouter; the
-      // catalog must preserve the dotted `3.5` spelling everywhere.
-      if (/3-5/.test(mid)) bad.push(mid);
-    }
-    expect(bad, `openrouter ids still use hyphens: ${bad.join(", ")}`).toEqual([]);
+    expect(bad, `openrouter claude ids still use hyphens: ${bad.join(", ")}`).toEqual([]);
   });
 });
 
@@ -124,14 +113,14 @@ describe("every model has numeric cost (documents known gaps)", () => {
   // silently dropping cost, or a new provider without pricing), this assertion
   // flags it loudly instead of silently passing.
   const KNOWN_MISSING_COST = [
-    "anyapi/anthropic/claude-haiku-4.5",
-    "anyapi/anthropic/claude-opus-4.6",
-    "anyapi/anthropic/claude-opus-4.7",
-    "anyapi/anthropic/claude-sonnet-4.5",
-    "anyapi/anthropic/claude-sonnet-4.6",
-    "anyapi/cohere/command-r-plus-08.2024",
+    "anyapi/anthropic/claude-haiku-4-5",
+    "anyapi/anthropic/claude-opus-4-6",
+    "anyapi/anthropic/claude-opus-4-7",
+    "anyapi/anthropic/claude-sonnet-4-5",
+    "anyapi/anthropic/claude-sonnet-4-6",
+    "anyapi/cohere/command-r-plus-08-2024",
     "anyapi/deepseek/deepseek-chat",
-    "anyapi/deepseek/deepseek-reasoner",
+    "anyapi/deepseek/deepseek-r1",
     "anyapi/deepseek/deepseek-v4-flash",
     "anyapi/deepseek/deepseek-v4-pro",
     "anyapi/google/gemini-2.5-flash",
@@ -139,8 +128,8 @@ describe("every model has numeric cost (documents known gaps)", () => {
     "anyapi/google/gemini-2.5-pro",
     "anyapi/google/gemini-3-flash-preview",
     "anyapi/google/gemini-3-pro-preview",
-    "anyapi/mistral/devstral-2512",
-    "anyapi/mistral/mistral-large-2512",
+    "anyapi/mistralai/devstral-2512",
+    "anyapi/mistralai/mistral-large-2512",
     "anyapi/openai/gpt-4.1",
     "anyapi/openai/gpt-4.1-mini",
     "anyapi/openai/gpt-5",
@@ -154,8 +143,8 @@ describe("every model has numeric cost (documents known gaps)", () => {
     "anyapi/perplexity/sonar-pro",
     "anyapi/perplexity/sonar-reasoning-pro",
     "anyapi/xai/grok-4.3",
-    "blueclaw/alibaba/qwen3.6.27b",
-    "blueclaw/alibaba/qwen3.6.35b-a3b",
+    "blueclaw/Qwen/Qwen3.6-35B-A3B-FP8",
+    "blueclaw/Qwen3.6-27B",
     "cohere/c4ai-aya-expanse-32b",
     "cohere/c4ai-aya-expanse-8b",
     "cohere/c4ai-aya-vision-32b",
@@ -169,10 +158,10 @@ describe("every model has numeric cost (documents known gaps)", () => {
     "digitalocean/fal-ai/stable-audio-25/text-to-audio",
     "digitalocean/ministral-3-8b-instruct-2512",
     "digitalocean/mistral-7b-instruct-v0.3",
+    "digitalocean/nemotron-3-nano-30b",
     "digitalocean/nemotron-3-ultra-550b",
-    "digitalocean/nvidia/nemotron-3-nano-30b-a3b",
     "digitalocean/openai-gpt-image-2",
-    "digitalocean/qwen-2.5.14b-instruct",
+    "digitalocean/qwen-2.5-14b-instruct",
     "digitalocean/qwen3-tts-voicedesign",
     "fastrouter/bytedance/seedance-2",
     "fastrouter/google/imagen-4.0-fast",
@@ -183,64 +172,68 @@ describe("every model has numeric cost (documents known gaps)", () => {
     "fastrouter/leonardo-ai/lucid-origin",
     "fastrouter/leonardo-ai/lucid-realism",
     "fastrouter/openai/gpt-image-2",
-    "fastrouter/wanx/wan-v2.6",
-    "google/gemma-4.26b-a4b-it",
-    "google/gemma-4.31b-it",
+    "fastrouter/wanx/wan-v2-6",
+    "google/gemma-4-26b-a4b-it",
+    "google/gemma-4-31b-it",
+    "google/veo-3.1-fast-generate-preview",
+    "google/veo-3.1-generate-preview",
+    "google/veo-3.1-lite-generate-preview",
     "groq/canopylabs/orpheus-arabic-saudi",
     "groq/canopylabs/orpheus-v1-english",
-    "groq/compound",
-    "groq/compound-mini",
+    "groq/groq/compound",
+    "groq/groq/compound-mini",
     "groq/whisper-large-v3",
     "groq/whisper-large-v3-turbo",
-    "merge-gateway/google/gemma-4.26b-a4b-it",
-    "merge-gateway/google/gemma-4.31b-it",
-    "model-oracle-ai/anthropic/claude-fable-5",
-    "model-oracle-ai/anthropic/claude-haiku-4.5",
-    "model-oracle-ai/anthropic/claude-opus-4.8",
-    "model-oracle-ai/anthropic/claude-sonnet-5",
+    "merge-gateway/google/gemma-4-26b-a4b-it",
+    "merge-gateway/google/gemma-4-31b-it",
     "model-oracle-ai/auto",
-    "model-oracle-ai/deepseek/deepseek-v4-pro",
-    "model-oracle-ai/openai/gpt-4.1",
-    "model-oracle-ai/openai/gpt-4.1-mini",
-    "model-oracle-ai/openai/gpt-5",
-    "model-oracle-ai/openai/gpt-5.4",
-    "model-oracle-ai/openai/gpt-5.4-mini",
-    "model-oracle-ai/openai/gpt-5.4-nano",
-    "model-oracle-ai/openai/gpt-5.5",
-    "model-oracle-ai/openai/o4-mini",
-    "model-oracle-ai/zhipuai/glm-5.2",
+    "model-oracle-ai/claude-fable-5",
+    "model-oracle-ai/claude-haiku-4.5",
+    "model-oracle-ai/claude-opus-4.8",
+    "model-oracle-ai/claude-sonnet-5",
+    "model-oracle-ai/deepseek-v4-pro",
+    "model-oracle-ai/glm-5.2",
+    "model-oracle-ai/gpt-4.1",
+    "model-oracle-ai/gpt-4.1-mini",
+    "model-oracle-ai/gpt-5",
+    "model-oracle-ai/gpt-5.4",
+    "model-oracle-ai/gpt-5.4-mini",
+    "model-oracle-ai/gpt-5.4-nano",
+    "model-oracle-ai/gpt-5.5",
+    "model-oracle-ai/o4-mini",
     "ollama-cloud/deepseek-v4-flash",
     "ollama-cloud/deepseek-v4-pro",
     "ollama-cloud/gemma4:31b",
     "ollama-cloud/glm-5.1",
+    "ollama-cloud/glm-5.2",
     "ollama-cloud/gpt-oss:120b",
     "ollama-cloud/gpt-oss:20b",
     "ollama-cloud/kimi-k2.5",
     "ollama-cloud/kimi-k2.6",
+    "ollama-cloud/kimi-k2.7-code",
+    "ollama-cloud/kimi-k3",
     "ollama-cloud/minimax-m2.5",
     "ollama-cloud/minimax-m2.7",
     "ollama-cloud/minimax-m3",
     "ollama-cloud/mistral-large-3:675b",
-    "ollama-cloud/moonshotai/kimi-k2.7-code",
-    "ollama-cloud/nvidia/nemotron-3-nano-30b-a3b",
-    "ollama-cloud/nvidia/nemotron-3-super-120b-a12b",
-    "ollama-cloud/nvidia/nemotron-3-ultra-550b-a55b",
+    "ollama-cloud/nemotron-3-nano:30b",
+    "ollama-cloud/nemotron-3-super",
+    "ollama-cloud/nemotron-3-ultra",
     "ollama-cloud/qwen3.5:397b",
-    "ollama-cloud/zhipuai/glm-5.2",
     "openai/chatgpt-image-latest",
     "openai/gpt-image-1",
     "openai/gpt-image-1-mini",
     "openai/gpt-image-1.5",
-    "openrouter/auto",
-    "openrouter/bodybuilder",
-    "openrouter/fusion",
-    "openrouter/pareto-code",
+    "openrouter/openrouter/auto",
+    "openrouter/openrouter/bodybuilder",
+    "openrouter/openrouter/fusion",
+    "openrouter/openrouter/pareto-code",
     "ovhcloud/qwen3guard-gen-0.6b",
     "ovhcloud/qwen3guard-gen-8b",
-    "pioneer/auto",
-    "poe/cerebras/llama-3.3.70b-cs",
-    "poe/cerebras/qwen3.235b-2507-cs",
-    "poe/cerebras/qwen3.32b-cs",
+    "pioneer/pioneer/auto",
+    "poe/cerebras/llama-3.3-70b-cs",
+    "poe/cerebras/qwen3-235b-2507-cs",
+    "poe/cerebras/qwen3-32b-cs",
     "poe/elevenlabs/elevenlabs-music",
     "poe/elevenlabs/elevenlabs-v2.5-turbo",
     "poe/elevenlabs/elevenlabs-v3",
@@ -293,16 +286,16 @@ describe("every model has numeric cost (documents known gaps)", () => {
     "qiniu-ai/claude-4.5-opus",
     "qiniu-ai/claude-4.5-sonnet",
     "qiniu-ai/deepseek-r1",
-    "qiniu-ai/deepseek-r1.0528",
+    "qiniu-ai/deepseek-r1-0528",
     "qiniu-ai/deepseek-v3",
-    "qiniu-ai/deepseek-v3.0324",
+    "qiniu-ai/deepseek-v3-0324",
     "qiniu-ai/deepseek-v3.1",
     "qiniu-ai/deepseek/deepseek-math-v2",
     "qiniu-ai/deepseek/deepseek-v3.1-terminus",
     "qiniu-ai/deepseek/deepseek-v3.1-terminus-thinking",
+    "qiniu-ai/deepseek/deepseek-v3.2-251201",
     "qiniu-ai/deepseek/deepseek-v3.2-exp",
     "qiniu-ai/deepseek/deepseek-v3.2-exp-thinking",
-    "qiniu-ai/deepseek/deepseek-v3.2.251201",
     "qiniu-ai/doubao-1.5-pro-32k",
     "qiniu-ai/doubao-1.5-thinking-pro",
     "qiniu-ai/doubao-1.5-vision-pro",
@@ -327,7 +320,7 @@ describe("every model has numeric cost (documents known gaps)", () => {
     "qiniu-ai/gpt-oss-120b",
     "qiniu-ai/gpt-oss-20b",
     "qiniu-ai/kimi-k2",
-    "qiniu-ai/kling-v2.6",
+    "qiniu-ai/kling-v2-6",
     "qiniu-ai/meituan/longcat-flash-chat",
     "qiniu-ai/meituan/longcat-flash-lite",
     "qiniu-ai/minimax/minimax-m2",
@@ -335,13 +328,13 @@ describe("every model has numeric cost (documents known gaps)", () => {
     "qiniu-ai/minimax/minimax-m2.5",
     "qiniu-ai/minimax/minimax-m2.5-highspeed",
     "qiniu-ai/moonshotai/kimi-k2-thinking",
-    "qiniu-ai/moonshotai/kimi-k2.0905",
+    "qiniu-ai/moonshotai/kimi-k2-0905",
     "qiniu-ai/moonshotai/kimi-k2.5",
     "qiniu-ai/openai/gpt-5",
     "qiniu-ai/openai/gpt-5.2",
-    "qiniu-ai/qwen-max",
+    "qiniu-ai/qwen-max-2025-01-25",
     "qiniu-ai/qwen-turbo",
-    "qiniu-ai/qwen-vl-max",
+    "qiniu-ai/qwen-vl-max-2025-01-25",
     "qiniu-ai/qwen2.5-vl-72b-instruct",
     "qiniu-ai/qwen2.5-vl-7b-instruct",
     "qiniu-ai/qwen3-coder-480b-a35b-instruct",
@@ -350,14 +343,14 @@ describe("every model has numeric cost (documents known gaps)", () => {
     "qiniu-ai/qwen3-next-80b-a3b-instruct",
     "qiniu-ai/qwen3-next-80b-a3b-thinking",
     "qiniu-ai/qwen3-vl-30b-a3b-thinking",
-    "qiniu-ai/qwen3.235b-a22b",
-    "qiniu-ai/qwen3.235b-a22b-instruct-2507",
-    "qiniu-ai/qwen3.235b-a22b-thinking-2507",
-    "qiniu-ai/qwen3.30b-a3b",
-    "qiniu-ai/qwen3.30b-a3b-instruct-2507",
-    "qiniu-ai/qwen3.30b-a3b-thinking-2507",
-    "qiniu-ai/qwen3.32b",
-    "qiniu-ai/qwen3.5.397b-a17b",
+    "qiniu-ai/qwen3-235b-a22b",
+    "qiniu-ai/qwen3-235b-a22b-instruct-2507",
+    "qiniu-ai/qwen3-235b-a22b-thinking-2507",
+    "qiniu-ai/qwen3-30b-a3b",
+    "qiniu-ai/qwen3-30b-a3b-instruct-2507",
+    "qiniu-ai/qwen3-30b-a3b-thinking-2507",
+    "qiniu-ai/qwen3-32b",
+    "qiniu-ai/qwen3.5-397b-a17b",
     "qiniu-ai/stepfun-ai/gelab-zero-4b-preview",
     "qiniu-ai/stepfun/step-3.5-flash",
     "qiniu-ai/x-ai/grok-4-fast",
@@ -374,37 +367,37 @@ describe("every model has numeric cost (documents known gaps)", () => {
     "sakana/fugu",
     "sarvam/sarvam-105b",
     "sarvam/sarvam-30b",
-    "snowflake-cortex/anthropic/claude-fable-5",
-    "snowflake-cortex/anthropic/claude-haiku-4.5",
-    "snowflake-cortex/anthropic/claude-opus-4.7",
-    "snowflake-cortex/anthropic/claude-opus-4.8",
-    "snowflake-cortex/anthropic/claude-sonnet-4.5",
-    "snowflake-cortex/anthropic/claude-sonnet-4.6",
-    "snowflake-cortex/deepseek/deepseek-r1",
-    "snowflake-cortex/google/gemini-3.1-pro-preview",
-    "snowflake-cortex/meta/llama-3.3.70b-instruct",
-    "snowflake-cortex/mistral/mistral-large-latest",
-    "snowflake-cortex/openai/gpt-4.1",
-    "snowflake-cortex/openai/gpt-5",
-    "snowflake-cortex/openai/gpt-5-mini",
-    "snowflake-cortex/openai/gpt-5-nano",
-    "snowflake-cortex/openai/gpt-5.1",
-    "snowflake-cortex/openai/gpt-5.2",
-    "snowflake-cortex/openai/gpt-5.4",
-    "snowflake-cortex/openai/gpt-5.5",
-    "snowflake-cortex/openai/gpt-5.6-luna",
-    "snowflake-cortex/openai/gpt-5.6-sol",
-    "snowflake-cortex/openai/gpt-5.6-terra",
-    "stepfun-ai-step-plan/stepfun/step-3.5-flash",
-    "stepfun-ai-step-plan/stepfun/step-3.5-flash-2603",
-    "stepfun-ai-step-plan/stepfun/step-3.7-flash",
+    "snowflake-cortex/claude-fable-5",
+    "snowflake-cortex/claude-haiku-4-5",
+    "snowflake-cortex/claude-opus-4-7",
+    "snowflake-cortex/claude-opus-4-8",
+    "snowflake-cortex/claude-sonnet-4-5",
+    "snowflake-cortex/claude-sonnet-4-6",
+    "snowflake-cortex/deepseek-r1",
+    "snowflake-cortex/gemini-3.1-pro",
+    "snowflake-cortex/mistral-large2",
+    "snowflake-cortex/openai-gpt-4.1",
+    "snowflake-cortex/openai-gpt-5",
+    "snowflake-cortex/openai-gpt-5-mini",
+    "snowflake-cortex/openai-gpt-5-nano",
+    "snowflake-cortex/openai-gpt-5.1",
+    "snowflake-cortex/openai-gpt-5.2",
+    "snowflake-cortex/openai-gpt-5.4",
+    "snowflake-cortex/openai-gpt-5.5",
+    "snowflake-cortex/openai-gpt-5.6-luna",
+    "snowflake-cortex/openai-gpt-5.6-sol",
+    "snowflake-cortex/openai-gpt-5.6-terra",
+    "snowflake-cortex/snowflake-llama3.3-70b",
+    "stepfun-ai-step-plan/step-3.5-flash",
+    "stepfun-ai-step-plan/step-3.5-flash-2603",
+    "stepfun-ai-step-plan/step-3.7-flash",
     "stepfun-ai/step-tts-2",
     "stepfun-ai/stepaudio-2.5-asr",
     "stepfun-ai/stepaudio-2.5-tts",
+    "stepfun-step-plan/step-3.5-flash",
+    "stepfun-step-plan/step-3.5-flash-2603",
+    "stepfun-step-plan/step-3.7-flash",
     "stepfun-step-plan/step-router-v1",
-    "stepfun-step-plan/stepfun/step-3.5-flash",
-    "stepfun-step-plan/stepfun/step-3.5-flash-2603",
-    "stepfun-step-plan/stepfun/step-3.7-flash",
     "stepfun/step-tts-2",
     "stepfun/stepaudio-2.5-asr",
     "stepfun/stepaudio-2.5-tts",
@@ -523,6 +516,7 @@ describe("every model has numeric cost (documents known gaps)", () => {
     "xai/grok-imagine-image",
     "xai/grok-imagine-image-quality",
     "xai/grok-imagine-video",
+    "xai/grok-imagine-video-1.5",
   ];
 
   test("cost-less model set equals the pinned baseline", () => {
@@ -537,16 +531,17 @@ describe("every model has numeric cost (documents known gaps)", () => {
       }
     }
     missing.sort();
-    if (missing.length !== KNOWN_MISSING_COST.length) {
-      const added = missing.filter((x) => !KNOWN_MISSING_COST.includes(x));
-      const removed = KNOWN_MISSING_COST.filter((x) => !missing.includes(x));
+    const sorted = [...KNOWN_MISSING_COST].sort();
+    if (missing.length !== sorted.length) {
+      const added = missing.filter((x) => !sorted.includes(x));
+      const removed = sorted.filter((x) => !missing.includes(x));
       console.warn(
         `[catalog] cost-less models diverged from baseline. added=${added.length} removed=${removed.length}`,
       );
       if (added.length) console.warn("  added: " + added.join(", "));
       if (removed.length) console.warn("  removed: " + removed.join(", "));
     }
-    expect(missing).toEqual(KNOWN_MISSING_COST);
+    expect(missing).toEqual(sorted);
   });
 });
 

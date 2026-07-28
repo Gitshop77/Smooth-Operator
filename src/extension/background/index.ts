@@ -52,12 +52,11 @@ self.addEventListener("error", (e: ErrorEvent) => {
   void safeLog("error", "[sw] uncaught error:", e.error ?? e.message);
 });
 
-// Warm the models.dev catalog (bundled snapshot + live /api.json refresh) so
+// Warm the models.dev catalog (SDK snapshot + live /api.json refresh) so
 // cost tracking uses current rates. pricing.ts no longer has a static table —
 // rates come from the catalog. Lazy import keeps the (large) pricing module out
 // of the critical path.
-// NOTE: the catalog is BUNDLED (src/lib/agent/llm/catalog-bundled.ts, generated
-// by scripts/build-models-catalog.ts) and used
+// NOTE: the catalog is sourced from @opencode-ai/models/snapshot and used
 // offline-first; the live https://models.dev/api.json fetch is only a
 // refresh/merge layer, so there is no runtime redistribution concern.
 function warmPricingCatalog(): void {

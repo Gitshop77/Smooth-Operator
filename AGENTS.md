@@ -35,7 +35,7 @@ Build first, then load `chrome-extension/` as an unpacked extension at `chrome:/
 - Third-party licenses (`LICENSE-APACHE` for `@huggingface/transformers`, inline `LICENSE-MIT` for `onnxruntime-web`, `NOTICE`) are emitted by the build into `chrome-extension/` — see LIC-1 in `esbuild.config.ts`.
 - **Path alias**: `@/*` → `./src/*` (tsconfig + vitest resolve alias).
 - **`src/extension/manifest.json`** is the source of truth; it's copied to `chrome-extension/` by the build. Don't edit `chrome-extension/manifest.json` directly.
-- The **bundled model catalog** (`src/lib/agent/llm/catalog-bundled.ts`) is a pre-generated snapshot from models.dev listing **167+ providers** with thousands of models; refreshed weekly by CI (`refresh-catalog.yml`). It's large and intentionally kept out of agent contexts.
+- The **model catalog** is sourced from the `@opencode-ai/models` SDK's snapshot entrypoint, which contains **167+ providers** with thousands of models. Updated automatically via `npm update`.
 
 ## Testing
 
@@ -50,8 +50,6 @@ Build first, then load `chrome-extension/` as an unpacked extension at `chrome:/
 2. `secret-scan` job runs gitleaks against full history using `.github/gitleaks.toml` (allows fake secret fixtures in 4 test files).
 
 `.github/workflows/dependency-review.yml` blocks PRs with moderate+ vulnerability advisories or GPL-3.0/AGPL-3.0 licenses.
-
-`refresh-catalog.yml` runs weekly to update the bundled models.dev catalog and opens a PR if it changed.
 
 ## LLM providers
 

@@ -455,7 +455,7 @@ scripts/                   Catalog build and other scripts
 - **test** (root) — install, lint, type-check, run the coverage suite, confirm the extension builds cleanly, and audit dependencies.
 - **secret-scan** — a full-history secret scan that fails the build if a real secret is committed.
 
-`.github/dependabot.yml` updates dependencies weekly. `.github/workflows/refresh-catalog.yml` rebuilds the bundled catalog weekly and opens a pull request if it changed.
+`.github/dependabot.yml` updates dependencies weekly.
 
 ## Technology
 
