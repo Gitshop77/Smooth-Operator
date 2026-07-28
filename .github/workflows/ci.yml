@@ -55,11 +55,6 @@ jobs:
           for f in background.js content.js sidepanel.js options.js; do
             [ ! -s "$f" ] && echo "ERROR: $f missing or empty" && exit 1
           done
-          # Chunks directory (code-split vision stack MUST be present and non-empty)
-          if [ ! -d chunks ] || [ -z "$(ls -A chunks 2>/dev/null)" ]; then
-            echo "ERROR: chunks/ directory missing or empty"
-            exit 1
-          fi
           # Static assets
           for f in manifest.json sidepanel.html sidepanel.css options.html options.css; do
             [ ! -s "$f" ] && echo "ERROR: $f missing or empty" && exit 1

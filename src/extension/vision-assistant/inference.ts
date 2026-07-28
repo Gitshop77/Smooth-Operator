@@ -76,7 +76,7 @@ export class VisionAssistant {
   private statusCallback: StatusCallback | null = null;
   /**
  * Re-entrancy guard for `init()`. Two concurrent `init()` callers would both
- * pass the `isReady` check (neither is ready yet) and duplicate the ~3.4 GB
+   * pass the `isReady` check (neither is ready yet) and duplicate the ~2 GB
  * download + leak a WebGPU session. We cache the in-flight promise and return
  * it; the promise is cleared on settle (success or failure) so a failed init
  * can be retried — mirroring the `tokenizerLoadPromise` pattern.

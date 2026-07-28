@@ -13,7 +13,7 @@
  * files at `{repo}/resolve/main/{path}`, which 302-redirects to the CDN.
  * The bare `/resolve/main` URL 404s in a browser, but appending a file path
  * (e.g. `/onnx/vision_mlp_int4.onnx`) yields a valid download. This is how the
- * model-loader fetches the ~3.4 GB of ONNX weights.
+ * model-loader fetches the ~2 GB of ONNX weights.
  *
  * The original model is NVIDIA's LocateAnything-3B:
  * https://huggingface.co/nvidia/LocateAnything-3B
@@ -23,7 +23,7 @@ export const MODEL_REPO = "Reza2kn/LocateAnything-3B-ONNX-WebGPU-INT4";
 export const MODEL_REPO_URL = `https://huggingface.co/${MODEL_REPO}`;
 export const MODEL_BASE_URL = `${MODEL_REPO_URL}/resolve/main`;
 
-// Model file URLs (7 files, ~3.4 GB total)
+// Model file URLs (7 files, ~2 GB total)
 export const VISION_GRAPH_URL = `${MODEL_BASE_URL}/onnx/vision_mlp_int4.onnx`;
 export const VISION_DATA_URL = `${MODEL_BASE_URL}/onnx/vision_mlp_int4.onnx.data`;
 export const LANGUAGE_GRAPH_URL = `${MODEL_BASE_URL}/onnx/language_tail_kv_int4.onnx`;
@@ -99,4 +99,4 @@ export const CACHE_NAME = "locateanything-model";
 // Human-readable total download size of the model weights, shown in the UI
 // before a multi-GB download. Single source so the confirm dialog and any
 // other copy cannot drift apart.
-export const MODEL_DOWNLOAD_SIZE_LABEL = "~3.5 GB";
+export const MODEL_DOWNLOAD_SIZE_LABEL = "~2 GB";

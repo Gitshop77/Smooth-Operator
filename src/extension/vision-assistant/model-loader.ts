@@ -1,7 +1,7 @@
 /**
  * Vision Assistant — model loader.
  *
- * Downloads the ~3.4 GB ONNX INT4 model in 48 MB chunks with retry.
+ * Downloads the ~2 GB ONNX INT4 model in 48 MB chunks with retry.
  * Caches in the browser Cache Storage API (persists across sessions).
  * Ported from Reza2kn's fetchBufProgress.
  *
@@ -406,7 +406,7 @@ export class ModelLoader {
         throw new Error(
           `[vision-assistant] Failed to persist model file "${name}" (${url}): ` +
             `${(e as Error).message}. Usually caused by insufficient storage ` +
-            `quota (the model is ~3.4 GB). Free space and retry; the downloaded ` +
+            `quota (the model is ~2 GB). Free space and retry; the downloaded ` +
             `bytes were not saved.`,
         );
       }
