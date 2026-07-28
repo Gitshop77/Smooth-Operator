@@ -68,7 +68,6 @@
     </g>
     <g class="line l1o">
       <text x="20" y="98" class="output">Cloning into 'open-cowork-chrome-extension'...</text>
-      <text x="20" y="114" class="output">remote: Total 5436 (delta 2319), reused 4102 (delta 1987)</text>
     </g>
 
     <!-- 2: cd -->
