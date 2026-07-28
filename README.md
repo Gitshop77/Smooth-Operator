@@ -1,7 +1,7 @@
 <table width="100%">
   <tr>
-    <td width="128"><img src="src/extension/icons/icon.png" alt="Open Cowork" width="128"></td>
-    <td><h1>Open Cowork</h1></td>
+    <td width="128" align="center"><img src="src/extension/icons/icon.png" alt="Open Cowork" width="128"></td>
+    <td align="center"><h1>Open Cowork</h1></td>
   </tr>
 </table>
 
