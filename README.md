@@ -2,6 +2,8 @@
 
 <h3 align="center">Turn your browser into an assistant you can just talk to.</h3>
 
+<br/>
+
 <p align="center">
   <img src="assets/terminal.svg" alt="Installation" />
 </p>
