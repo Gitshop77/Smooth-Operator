@@ -1,20 +1,22 @@
 <p align="center">
-  <img src="src/extension/icons/icon.png" alt="Open Cowork" width="48" /> <h1 style="display:inline;">Open Cowork</h1>
+  <img src="src/extension/icons/icon.png" alt="Open Cowork" width="128" />
 </p>
+
+<h1 align="center">Open Cowork</h1>
 
 <h3 align="center">Turn your browser into an assistant you can just talk to.</h3>
 
 <p align="center">
-  Tell it what you need in plain language, and it reads the page, plans the steps, and carries them out across your open tabs — clicking, typing, scrolling, and navigating just like you would.
+  <a href="#getting-started"><img src="https://img.shields.io/badge/Getting_Started-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Getting Started" /></a>
 </p>
 
+---
+
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Gitshop77/open-cowork-chrome-extension?style=flat" alt="License" /></a>
-  <img src="https://img.shields.io/badge/Manifest-V3-4285F4?style=flat&logo=googlechrome&logoColor=white" alt="Manifest V3" />
-  <img src="https://img.shields.io/badge/Chrome-116%2B-4285F4?style=flat&logo=googlechrome&logoColor=white" alt="Chrome 116+" />
-  <img src="https://img.shields.io/badge/Node-%3E%3D%2022-339933?style=flat&logo=nodedotjs&logoColor=white" alt="Node 22+" />
-  <img src="https://img.shields.io/badge/TypeScript-5-3178C6?style=flat&logo=typescript&logoColor=white" alt="TypeScript 5" />
-  <a href="https://github.com/Gitshop77/open-cowork-chrome-extension/actions"><img src="https://img.shields.io/github/actions/workflow/status/Gitshop77/open-cowork-chrome-extension/.github/workflows/ci.yml?style=flat" alt="CI" /></a>
+  <a href="https://github.com/Gitshop77/open-cowork-chrome-extension/stargazers"><img src="https://img.shields.io/github/stars/Gitshop77/open-cowork-chrome-extension?style=flat&label=Stars&logo=github" alt="GitHub Stars" /></a>
+  <a href="https://github.com/Gitshop77/open-cowork-chrome-extension/actions"><img src="https://img.shields.io/github/actions/workflow/status/Gitshop77/open-cowork-chrome-extension/.github/workflows/ci.yml?style=flat&label=CI&logo=githubactions&logoColor=white" alt="CI" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Gitshop77/open-cowork-chrome-extension?style=flat&label=License&logo=opensourceinitiative&logoColor=white" alt="License" /></a>
+  <a href="https://github.com/Gitshop77/open-cowork-chrome-extension"><img src="https://img.shields.io/badge/Manifest-V3-4285F4?style=flat&logo=googlechrome&logoColor=white" alt="Manifest V3" /></a>
 </p>
 
 ## Contents
