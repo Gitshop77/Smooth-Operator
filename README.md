@@ -1,11 +1,11 @@
-<p align="center">
-  <img src="src/extension/icons/icon.png" alt="Open Cowork" width="full">
-</p>
+<picture>
+  <img alt="Open Cowork" src="src/extension/icons/icon.png" width="full">
+</picture>
 
 <div align="center">
-  <h1>Open Cowork</h1>
-  <h3>Turn your browser into an assistant you can just talk to.</h3>
-  <a href="#getting-started"><img src="https://img.shields.io/badge/Getting_Started-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white" height="48" alt="Getting Started" /></a>
+    <h1>Open Cowork</h1>
+    <h3>Turn your browser into an assistant you can just talk to.</h3>
+    <a href="#getting-started"><img src="https://img.shields.io/badge/Getting_Started-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white" height="48" alt="Getting Started" /></a>
 </div>
 
 ---
