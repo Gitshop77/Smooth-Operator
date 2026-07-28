@@ -1,9 +1,6 @@
-<table width="100%">
-  <tr>
-    <td width="128" align="center"><img src="src/extension/icons/icon.png" alt="Open Cowork" width="128"></td>
-    <td align="center"><h1>Open Cowork</h1></td>
-  </tr>
-</table>
+<p align="center">
+  <img src="src/extension/icons/icon.png" alt="Open Cowork" width="128" /> &nbsp; <h1 style="display:inline;">Open Cowork</h1>
+</p>
 
 <div align="center">
     <h3>Turn your browser into an assistant you can just talk to.</h3>
