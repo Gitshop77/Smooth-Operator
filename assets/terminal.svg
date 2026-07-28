@@ -1,102 +1,108 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 740 300" width="740" height="300">
   <defs>
-    <filter id="shadow" x="-5%" y="-5%" width="110%" height="115%">
-      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000" flood-opacity="0.5"/>
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="120%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000" flood-opacity="0.45"/>
     </filter>
+    <linearGradient id="titlebar" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1c2129"/>
+      <stop offset="100%" stop-color="#161b22"/>
+    </linearGradient>
   </defs>
 
   <style>
-    .prompt { fill: #27c93f; font: bold 13.5px 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace; }
-    .cmd { fill: #e6edf3; font: 13.5px 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace; }
-    .output { fill: #7d8590; font: 13px 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace; }
-    .success { fill: #27c93f; font: 13px 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace; }
+    .mono { font-family: 'SF Mono', 'Menlo', 'Monaco', 'Cascadia Code', 'Courier New', monospace; }
+    .prompt { fill: #27c93f; font: 600 13.5px/1.4 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace; }
+    .path   { fill: #58a6ff; font: 13.5px 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace; }
+    .cmd    { fill: #e6edf3; font: 13.5px 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace; }
+    .output { fill: #7d8590; font: 12.5px 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace; }
+    .success{ fill: #3fb950; font: 12.5px 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace; }
     .cursor { fill: #27c93f; }
+    .titletext { fill: #8b949e; font: 12px 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace; letter-spacing: 0.3px; }
 
-    .line1, .line1-out, .line2, .line3, .line3-out, .line4, .line4-out1, .line4-out2, .line5, .line5-cursor {
-      opacity: 0;
+    g.line { opacity: 0; }
+
+    @keyframes appear {
+      0%   { opacity: 0; }
+      2%   { opacity: 1; }
+      95%  { opacity: 1; }
+      97%  { opacity: 0; }
+      100% { opacity: 0; }
     }
 
-    .line1 { animation: show 0s 0.6s forwards; }
-    .line1-out { animation: show 0s 1.4s forwards; }
-    .line2 { animation: show 0s 2.2s forwards; }
-    .line3 { animation: show 0s 3.0s forwards; }
-    .line3-out { animation: show 0s 5.0s forwards; }
-    .line4 { animation: show 0s 6.0s forwards; }
-    .line4-out1 { animation: show 0s 8.5s forwards; }
-    .line4-out2 { animation: show 0s 9.2s forwards; }
-    .line5 { animation: show 0s 10.0s forwards; }
-    .line5-cursor { animation: show 0s 10.0s forwards; }
+    .l1  { animation: appear 14s ease-out infinite; animation-delay: 0.00s; }
+    .l1o { animation: appear 14s ease-out infinite; animation-delay: 0.55s; }
+    .l2  { animation: appear 14s ease-out infinite; animation-delay: 1.35s; }
+    .l3  { animation: appear 14s ease-out infinite; animation-delay: 2.10s; }
+    .l3o { animation: appear 14s ease-out infinite; animation-delay: 3.35s; }
+    .l4  { animation: appear 14s ease-out infinite; animation-delay: 4.55s; }
+    .l4o1{ animation: appear 14s ease-out infinite; animation-delay: 6.20s; }
+    .l4o2{ animation: appear 14s ease-out infinite; animation-delay: 6.85s; }
+    .l5  { animation: appear 14s ease-out infinite; animation-delay: 7.65s; }
 
-    @keyframes show {
-      from { opacity: 0; }
-      to { opacity: 1; }
-    }
-
-    .cursor-blink {
-      animation: blink 1s step-end 0.6s infinite;
-    }
+    .cursor-blink { animation: blink 1s step-end 7.65s infinite; }
     @keyframes blink {
       0%, 100% { opacity: 1; }
       50% { opacity: 0; }
     }
   </style>
 
-  <!-- Terminal window with shadow -->
+  <!-- Terminal window -->
   <g filter="url(#shadow)">
-    <rect width="740" height="300" rx="10" fill="#0d1117"/>
+    <rect width="740" height="300" rx="12" fill="#0d1117"/>
+    <rect width="740" height="36" rx="12" fill="url(#titlebar)"/>
+    <rect y="12" width="740" height="24" fill="url(#titlebar)"/>
+    <rect width="740" height="1" y="35.5" fill="#000" opacity="0.25"/>
 
-    <!-- Title bar -->
-    <rect width="740" height="34" rx="10" fill="#161b22"/>
-    <rect y="10" width="740" height="24" fill="#161b22"/>
-    <circle cx="18" cy="17" r="5.5" fill="#ff5f56"/>
-    <circle cx="38" cy="17" r="5.5" fill="#ffbd2e"/>
-    <circle cx="58" cy="17" r="5.5" fill="#27c93f"/>
-    <text x="370" y="21" text-anchor="middle" fill="#8b949e" font="12px 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace">Terminal</text>
-  </g>
-
-  <!-- Line 1: git clone -->
-  <g class="line1">
-    <text x="20" y="76" class="prompt">$ </text>
-    <text x="40" y="76" class="cmd">git clone https://github.com/Gitshop77/open-cowork-chrome-extension.git</text>
-  </g>
-  <g class="line1-out">
-    <text x="20" y="96" class="output">Cloning into 'open-cowork-chrome-extension'...</text>
-    <text x="20" y="112" class="output">remote: Enumerating objects: 4217, done.</text>
+    <circle cx="20" cy="18" r="6" fill="#ff5f56"/>
+    <circle cx="41" cy="18" r="6" fill="#ffbd2e"/>
+    <circle cx="62" cy="18" r="6" fill="#27c93f"/>
+    <text x="370" y="22.5" text-anchor="middle" class="titletext">bash — open-cowork-chrome-extension</text>
   </g>
 
-  <!-- Line 2: cd -->
-  <g class="line2">
-    <text x="20" y="140" class="prompt">$ </text>
-    <text x="40" y="140" class="cmd">cd open-cowork-chrome-extension</text>
-  </g>
+  <!-- transcript -->
+  <g class="mono">
+    <!-- 1: clone -->
+    <g class="line l1">
+      <text x="20" y="78" class="prompt">$</text>
+      <text x="38" y="78" class="cmd">git clone https://github.com/Gitshop77/open-cowork-chrome-extension.git</text>
+    </g>
+    <g class="line l1o">
+      <text x="20" y="98" class="output">Cloning into 'open-cowork-chrome-extension'...</text>
+      <text x="20" y="114" class="output">remote: Enumerating objects: 4217, done.</text>
+    </g>
 
-  <!-- Line 3: npm install -->
-  <g class="line3">
-    <text x="20" y="170" class="prompt">$ </text>
-    <text x="40" y="170" class="cmd">npm install</text>
-  </g>
-  <g class="line3-out">
-    <text x="20" y="190" class="output">npm warn deprecated inflight@1.0.6: ...</text>
-    <text x="20" y="206" class="success">added 450 packages in 12s</text>
-  </g>
+    <!-- 2: cd -->
+    <g class="line l2">
+      <text x="20" y="142" class="prompt">$</text>
+      <text x="38" y="142" class="cmd">cd open-cowork-chrome-extension</text>
+    </g>
 
-  <!-- Line 4: npm run build:all -->
-  <g class="line4">
-    <text x="20" y="234" class="prompt">$ </text>
-    <text x="40" y="234" class="cmd">npm run build:all</text>
-  </g>
-  <g class="line4-out1">
-    <text x="20" y="254" class="output">Building extension with esbuild...</text>
-  </g>
-  <g class="line4-out2">
-    <text x="20" y="270" class="success">  Done in 3.2s.</text>
-  </g>
+    <!-- 3: npm install -->
+    <g class="line l3">
+      <text x="20" y="172" class="prompt">$</text>
+      <text x="38" y="172" class="cmd">npm install</text>
+    </g>
+    <g class="line l3o">
+      <text x="20" y="192" class="output">npm warn deprecated inflight@1.0.6: this module is not supported</text>
+      <text x="20" y="208" class="success">✓ added 450 packages in 12s</text>
+    </g>
 
-  <!-- Line 5: final prompt with blinking cursor -->
-  <g class="line5">
-    <text x="20" y="296" class="prompt">$ </text>
-  </g>
-  <g class="line5-cursor">
-    <rect x="40" y="282" width="8" height="16" rx="1" class="cursor cursor-blink"/>
+    <!-- 4: build -->
+    <g class="line l4">
+      <text x="20" y="236" class="prompt">$</text>
+      <text x="38" y="236" class="cmd">npm run build:all</text>
+    </g>
+    <g class="line l4o1">
+      <text x="20" y="256" class="output">Building extension with esbuild...</text>
+    </g>
+    <g class="line l4o2">
+      <text x="20" y="272" class="success">✓ Done in 3.2s</text>
+    </g>
+
+    <!-- 5: final prompt -->
+    <g class="line l5">
+      <text x="20" y="296" class="prompt">$</text>
+      <rect x="38" y="282" width="8" height="16" rx="1.5" class="cursor cursor-blink"/>
+    </g>
   </g>
 </svg>
