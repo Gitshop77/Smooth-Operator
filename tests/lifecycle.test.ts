@@ -38,7 +38,7 @@ describe("lifecycle status updates", () => {
   test("sets status label text", () => {
     setLifecycle("acting");
     const label = document.getElementById("statusLabel") as HTMLElement;
-    expect(label.textContent).toBe("acting");
+    expect(label.textContent).toBe("Acting…");
   });
 
   test("sets idle state", () => {
@@ -46,7 +46,7 @@ describe("lifecycle status updates", () => {
     const dot = document.getElementById("statusDot") as HTMLElement;
     const label = document.getElementById("statusLabel") as HTMLElement;
     expect(dot.dataset.status).toBe("idle");
-    expect(label.textContent).toBe("idle");
+    expect(label.textContent).toBe("Ready");
   });
 
   test("sets error state", () => {
@@ -54,6 +54,6 @@ describe("lifecycle status updates", () => {
     const dot = document.getElementById("statusDot") as HTMLElement;
     const label = document.getElementById("statusLabel") as HTMLElement;
     expect(dot.dataset.status).toBe("error");
-    expect(label.textContent).toBe("error");
+    expect(label.textContent).toBe("Error");
   });
 });
