@@ -1,10 +1,9 @@
 <p align="center">
-  <img src="src/extension/icons/icon.png" alt="Open Cowork" width="128" /> &nbsp; <h1 style="display:inline;">Open Cowork</h1>
+  <img src="src/extension/icons/icon.png" alt="Open Cowork" width="128">
+  <br>
+  <h1>Open Cowork</h1>
+  <h3>Turn your browser into an assistant you can just talk to.</h3>
 </p>
-
-<div align="center">
-    <h3>Turn your browser into an assistant you can just talk to.</h3>
-</div>
 
 ---
 
