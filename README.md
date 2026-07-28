@@ -1,28 +1,20 @@
-<table>
-  <tr>
-    <td width="140" align="center">
-      <img src="src/extension/icons/icon.png" alt="Open Cowork" width="128" />
-    </td>
-    <td>
-      <h1>Open Cowork</h1>
-      <p><b>Turn your browser into an assistant you can just talk to.</b><br/>
-      Tell it what you need in plain language, and it reads the page, plans the steps, and carries them out across your open tabs — clicking, typing, scrolling, and navigating just like you would.</p>
-      <p>
-        <a href="LICENSE"><img src="https://img.shields.io/github/license/Gitshop77/open-cowork-chrome-extension?style=flat" alt="License" /></a>
-        <img src="https://img.shields.io/badge/Manifest-V3-4285F4?style=flat&logo=googlechrome&logoColor=white" alt="Manifest V3" />
-        <img src="https://img.shields.io/badge/Chrome-116%2B-4285F4?style=flat&logo=googlechrome&logoColor=white" alt="Chrome 116+" />
-        <img src="https://img.shields.io/badge/Node-%3E%3D%2022-339933?style=flat&logo=nodedotjs&logoColor=white" alt="Node 22+" />
-        <img src="https://img.shields.io/badge/TypeScript-5-3178C6?style=flat&logo=typescript&logoColor=white" alt="TypeScript 5" />
-        <a href="https://github.com/Gitshop77/open-cowork-chrome-extension/actions"><img src="https://img.shields.io/github/actions/workflow/status/Gitshop77/open-cowork-chrome-extension/.github/workflows/ci.yml?style=flat" alt="CI" /></a>
-      </p>
-    </td>
-  </tr>
-</table>
+<p align="center">
+  <img src="src/extension/icons/icon.png" alt="Open Cowork" width="48" /> <h1 style="display:inline;">Open Cowork</h1>
+</p>
+
+<h3 align="center">Turn your browser into an assistant you can just talk to.</h3>
 
 <p align="center">
-  <i>Inspired by</i>
-  <a href="https://github.com/browser-use/browser-use"><img src="https://img.shields.io/badge/browser--use-107k%20%E2%AD%90-1a1a2e?style=flat&labelColor=1a1a2e&color=4285F4" alt="browser-use stars" /></a>
-  <a href="https://github.com/nanobrowser/nanobrowser"><img src="https://img.shields.io/badge/nanobrowser-13.5k%20%E2%AD%90-1a1a2e?style=flat&labelColor=1a1a2e&color=4285F4" alt="nanobrowser stars" /></a>
+  Tell it what you need in plain language, and it reads the page, plans the steps, and carries them out across your open tabs — clicking, typing, scrolling, and navigating just like you would.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Gitshop77/open-cowork-chrome-extension?style=flat" alt="License" /></a>
+  <img src="https://img.shields.io/badge/Manifest-V3-4285F4?style=flat&logo=googlechrome&logoColor=white" alt="Manifest V3" />
+  <img src="https://img.shields.io/badge/Chrome-116%2B-4285F4?style=flat&logo=googlechrome&logoColor=white" alt="Chrome 116+" />
+  <img src="https://img.shields.io/badge/Node-%3E%3D%2022-339933?style=flat&logo=nodedotjs&logoColor=white" alt="Node 22+" />
+  <img src="https://img.shields.io/badge/TypeScript-5-3178C6?style=flat&logo=typescript&logoColor=white" alt="TypeScript 5" />
+  <a href="https://github.com/Gitshop77/open-cowork-chrome-extension/actions"><img src="https://img.shields.io/github/actions/workflow/status/Gitshop77/open-cowork-chrome-extension/.github/workflows/ci.yml?style=flat" alt="CI" /></a>
 </p>
 
 ## Contents
