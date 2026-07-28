@@ -68,7 +68,7 @@
     </g>
     <g class="line l1o">
       <text x="20" y="98" class="output">Cloning into 'open-cowork-chrome-extension'...</text>
-      <text x="20" y="114" class="output">remote: Enumerating objects: 4217, done.</text>
+      <text x="20" y="114" class="output">remote: Total 5436 (delta 2319), reused 4102 (delta 1987)</text>
     </g>
 
     <!-- 2: cd -->
@@ -83,8 +83,7 @@
       <text x="38" y="172" class="cmd">npm install</text>
     </g>
     <g class="line l3o">
-      <text x="20" y="192" class="output">npm warn deprecated inflight@1.0.6: this module is not supported</text>
-      <text x="20" y="208" class="success">✓ added 450 packages in 12s</text>
+      <text x="20" y="192" class="output">up to date, audited 249 packages in 1s</text>
     </g>
 
     <!-- 4: build -->
@@ -93,10 +92,10 @@
       <text x="38" y="236" class="cmd">npm run build:all</text>
     </g>
     <g class="line l4o1">
-      <text x="20" y="256" class="output">Building extension with esbuild...</text>
+      <text x="20" y="256" class="output">&gt; tsx esbuild.config.ts</text>
     </g>
     <g class="line l4o2">
-      <text x="20" y="272" class="success">✓ Done in 3.2s</text>
+      <text x="20" y="272" class="success">✓ Extension built to chrome-extension/</text>
     </g>
 
     <!-- 5: final prompt -->
