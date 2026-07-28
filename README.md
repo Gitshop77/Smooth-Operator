@@ -1,7 +1,7 @@
 # Open Cowork
 
 <p align="center">
-  <img src="src/extension/icons/icon.png" alt="Open Cowork" width="256" height="256" />
+  <img src="src/extension/icons/icon.png" alt="Open Cowork" />
 </p>
 
 **Turn your browser into an assistant you can just talk to.**
