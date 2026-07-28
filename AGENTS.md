@@ -35,7 +35,7 @@ Build first, then load `chrome-extension/` as an unpacked extension at `chrome:/
 - Third-party licenses (`LICENSE-APACHE` for `@huggingface/transformers`, inline `LICENSE-MIT` for `onnxruntime-web`, `NOTICE`) are emitted by the build into `chrome-extension/` — see LIC-1 in `esbuild.config.ts`.
 - **Path alias**: `@/*` → `./src/*` (tsconfig + vitest resolve alias).
 - **`src/extension/manifest.json`** is the source of truth; it's copied to `chrome-extension/` by the build. Don't edit `chrome-extension/manifest.json` directly.
-- The **model catalog** is sourced from the `@opencode-ai/models` SDK's snapshot entrypoint, which contains **167+ providers** with thousands of models. Updated automatically via `npm update`.
+- The **model catalog** is sourced from the `@opencode-ai/models` SDK's snapshot entrypoint, which contains **173+ providers** with thousands of models. Updated automatically via `npm update`.
 
 ## Testing
 
@@ -53,7 +53,7 @@ Build first, then load `chrome-extension/` as an unpacked extension at `chrome:/
 
 ## LLM providers
 
-7 dedicated wrappers in `src/lib/agent/llm/providers/`: `anthropic.ts`, `azure.ts`, `google.ts`, `openai.ts`, `openai-compatible.ts`, `openrouter.ts`, `xai.ts`. 14 more OpenAI-compatible services use a shared profile table (`openai-compatible-profile.ts`). Protocols in `src/lib/agent/llm/protocols/`.
+7 dedicated wrappers in `src/lib/agent/llm/providers/`: `anthropic.ts`, `azure.ts`, `google.ts`, `openai.ts`, `openai-compatible.ts`, `openrouter.ts`, `xai.ts`. 13 more OpenAI-compatible services use a shared profile table (`openai-compatible-profile.ts`). Protocols in `src/lib/agent/llm/protocols/`.
 
 ## Gotchas
 

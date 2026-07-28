@@ -45,7 +45,7 @@ It works across all your open tabs and shows a live activity log while it runs. 
 
 - **Local-first.** Your provider API key lives in your browser. The extension talks directly to your model provider's API — no Open Cowork server, no account, no cloud in between.
 - **Private by default.** Page content only ever goes to the provider you choose. Nothing goes anywhere else unless you set up a webhook yourself.
-- **Works offline for model picking.** The full [models.dev](https://models.dev) catalog — 167 providers, 5,578 models — ships inside the extension, so browsing models and prices needs no network connection.
+- **Works offline for model picking.** The full [models.dev](https://models.dev) catalog — 173 providers, 5,802 models — ships inside the extension, so browsing models and prices needs no network connection.
 - **Transparent and checkable.** MIT licensed, fully open source. Every run is saved so you can read it back, export it, or replay it.
 - **Safe by default.** Page content is treated as untrusted input, never as instructions. Prompt-injection defenses, domain allow/block lists, and three escalating operating modes keep risky runs contained.
 
@@ -104,15 +104,19 @@ A Chrome extension is really several small programs talking to each other. Open 
 ```mermaid
 flowchart LR
     subgraph Browser
-        SP[Side panel<br/>your control console]
-        SW[Background service worker<br/>runs the agent]
-        CS[Content script<br/>reads and acts on the page]
+        SP[Side panel<br/>your control console]:::ui
+        SW[Background service worker<br/>runs the agent]:::core
+        CS[Content script<br/>reads and acts on the page]:::core
     end
-    LLM[Your LLM provider<br/>for example OpenAI or Anthropic]
+    LLM[Your LLM provider<br/>for example OpenAI or Anthropic]:::external
     SP --> SW
     SW --> CS
     CS -->|page state: structure, text, screenshot| SW
     SW <-->|prompt in, actions out| LLM
+
+    classDef ui fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
+    classDef core fill:#e0e7ff,stroke:#6366f1,color:#1e1b4b
+    classDef external fill:#f3e8ff,stroke:#a855f7,color:#3b0764
 ```
 
 | Piece | Role |
@@ -126,18 +130,25 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    Start[You type a task] --> Plan[Planner splits it into steps]
-    Plan --> Observe[Navigator looks at the page]
-    Observe --> Think[Navigator reasons with the LLM]
-    Think --> Act[Navigator acts: click, type, and so on]
-    Act --> Changed{page changed on its own?}
+    Start[You type a task]:::user --> Plan[Planner splits it into steps]:::planner
+    Plan --> Observe[Navigator looks at the page]:::navigator
+    Observe --> Think[Navigator reasons with the LLM]:::navigator
+    Think --> Act[Navigator acts: click, type, and so on]:::navigator
+    Act --> Changed{page changed on its own?}:::decision
     Changed -- yes --> Observe
-    Changed -- no --> Steps{5 steps since last plan?}
+    Changed -- no --> Steps{5 steps since last plan?}:::decision
     Steps -- yes --> Plan
     Steps -- no --> Observe
-    Act --> Done[Planner ends the task]
-    Done --> Judge[Optional judge checks it worked]
-    Judge --> End([Task complete])
+    Act --> Done[Planner ends the task]:::planner
+    Done --> Judge[Optional judge checks it worked]:::judge
+    Judge --> End([Task complete]):::complete
+
+    classDef user fill:#dcfce7,stroke:#22c55e,color:#14532d
+    classDef planner fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
+    classDef navigator fill:#e0e7ff,stroke:#6366f1,color:#1e1b4b
+    classDef decision fill:#fef3c7,stroke:#f59e0b,color:#78350f
+    classDef judge fill:#f3e8ff,stroke:#a855f7,color:#3b0764
+    classDef complete fill:#dcfce7,stroke:#22c55e,color:#14532d
 ```
 
 Three roles share the work:
@@ -150,7 +161,7 @@ Three roles share the work:
 
 Adding a new LLM provider is meant to be easy. The layer is split into a **route** (auth and transport), a **protocol** (formats requests for OpenAI-, Anthropic-, or Gemini-style APIs), and a thin **provider** wrapper on top.
 
-- **7 providers have dedicated wrappers:** OpenAI, Anthropic, Google Gemini, xAI Grok, Azure OpenAI, OpenRouter, and a generic OpenAI-compatible option. 15 more OpenAI-compatible services (DeepSeek, Groq, Ollama, Qwen, Mistral, Together, and others) work through a shared profile table — adding another is a single line.
+- **7 providers have dedicated wrappers:** OpenAI, Anthropic, Google Gemini, xAI Grok, Azure OpenAI, OpenRouter, and a generic OpenAI-compatible option. 13 more OpenAI-compatible services (DeepSeek, Groq, Ollama, Qwen, Mistral, Together, and others) work through a shared profile table — adding another is a single line.
 
 ### How the agent "sees" a page
 
@@ -199,7 +210,7 @@ On top of these hard gates, the model is also instructed to treat sensitive step
 
 ### Providers and models
 
-The provider list and model picker come straight from the bundled [models.dev](https://models.dev) catalog — 167 providers, 5,578 models, no hardcoded lists.
+The provider list and model picker come straight from the bundled [models.dev](https://models.dev) catalog — 173 providers, 5,802 models, no hardcoded lists.
 
 - **Offline-first, refreshed live.** The catalog ships with the extension, so picking a model and seeing its price needs no network. On startup, and whenever you change provider, key, or model, it fetches `https://models.dev/api.json` and merges in anything newer (cached 5 minutes). If the fetch fails, it quietly falls back to the saved catalog. **Settings → Refresh models from models.dev** forces this on demand.
 - **Vision detection per model.** Capabilities come straight from the catalog, so vision-capable models automatically get sent images.
@@ -405,7 +416,7 @@ Then load `chrome-extension/` through `chrome://extensions` as described above.
 | Script | What it does |
 | --- | --- |
 | `npm run build:extension` | Bundle the extension with esbuild into `chrome-extension/` |
-| `npm run build:all` | Build the extension |
+| `npm run build:all` | Alias for `build:extension` |
 | `npm run dev` | Watch-build the extension |
 | `npm run dev:ext` | Watch-build the extension only |
 
@@ -421,12 +432,13 @@ Load `chrome-extension/` unpacked in Chrome.
 
 ```bash
 npm run lint                                    # ESLint at the root
+npx tsc --noEmit                                # Type-check (no npm script — CI runs it directly)
 npm run test                                     # Vitest suite at the root
 npm run test:watch                               # Vitest, watch mode
-npm run test:coverage                            # Vitest with coverage
+npm run test:coverage                            # Vitest with coverage gate
 ```
 
-The root suite covers parsing, the loop detector, pricing, compaction, secrets, schema checks, sanitization, injection scanning, domain lists, mode enforcement, secret-leak prevention, the accessibility tree, the action executor, LLM protocols, judge retries, and takeover resume.
+Coverage thresholds are pinned in `vitest.config.ts` with per-glob overrides for security-critical modules (`security.ts`, `ssrf.ts`, `endpoint.ts`, `auth.ts`, `anti-bot.ts`, `anti-detection.ts`). A PR that drops coverage below the baseline fails CI. If you see a coverage failure, check `vitest.config.ts` for the current thresholds — they are ratcheted upward over time, never downward.
 
 ### Project layout
 
@@ -452,8 +464,10 @@ scripts/                   Catalog build and other scripts
 
 `.github/workflows/ci.yml` runs two jobs on Node 22:
 
-- **test** (root) — install, lint, type-check, run the coverage suite, confirm the extension builds cleanly, and audit dependencies.
+- **test** — install, lint, type-check, run the coverage suite, confirm the extension builds cleanly, and audit dependencies.
 - **secret-scan** — a full-history secret scan that fails the build if a real secret is committed.
+
+`.github/workflows/dependency-review.yml` blocks PRs that introduce dependencies with moderate+ vulnerability advisories or disallowed licenses (GPL-3.0, AGPL-3.0).
 
 `.github/dependabot.yml` updates dependencies weekly.
 
@@ -480,7 +494,6 @@ Don't commit secrets or build output — `.env*`, `.z-ai-config`, `db/`, `chrome
 
 - The `evaluate` sandbox is a second layer of defense, not a hard wall — use Full Agentic mode only on sites you trust.
 - Run history has no automatic expiry — clear it yourself in **Options**.
-- The bundled catalog file is large and is deliberately kept out of agent contexts.
 
 ## License
 
