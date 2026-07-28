@@ -174,3 +174,84 @@ describe("startRun lifecycle", () => {
     ).toBe(true);
   });
 });
+
+// ── privileged active tab → auto-open a fresh tab (regression) ──────────────
+//
+// Bug surfaced by the user: when the active tab is a privileged page
+// (chrome://newtab, chrome-extension://options.html, etc.) startRun
+// hard-failed with `recoverable: false`, which made the extension unusable
+// from the new-tab page ("agent ai extension" UX). The fix: open a fresh
+// `about:blank` tab and proceed with the run on it — the agent then uses
+// its `navigate` action to go to the target site.
+
+describe("startRun privileged active tab handling", () => {
+  let chromeAny: {
+    tabs: { query: ReturnType<typeof vi.fn>; create: ReturnType<typeof vi.fn> };
+  };
+
+  beforeEach(() => {
+    // Re-stub chrome with overridable per-test tabs.create.
+    chromeAny = {
+      tabs: {
+        query: vi.fn(async () => [{ id: 1, url: "chrome://newtab/" }]),
+        create: vi.fn(async () => ({ id: 99, url: "about:blank" })),
+      },
+    };
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: chromeAny.tabs,
+      storage: {
+        local: {
+          get: vi.fn(async () => ({
+            maxActions: undefined, plannerInterval: undefined, maxFailures: undefined,
+            costCap: undefined, maxSteps: undefined,
+            allowedDomains: undefined, blockedDomains: undefined,
+          })),
+        },
+      },
+      runtime: {
+        sendMessage: vi.fn((msg: { event?: { type: string; message?: string } }) => {
+          if (msg?.event) sentEvents.push(msg.event);
+          return Promise.resolve();
+        }),
+      },
+    };
+  });
+
+  test("auto-opens a fresh tab when active tab is chrome://newtab and proceeds (does not hard-fail)", async () => {
+    await startRun({ task: "go to example.com", maxSteps: 10, mode: "standard" });
+
+    // Verify chrome.tabs.create was called with active:true (opens about:blank
+    // by default — Chrome's standard canvas for content scripts).
+    expect(chromeAny.tabs.create).toHaveBeenCalledWith({ active: true });
+
+    // The run MUST proceed — runAgentLoop was called (no hard-fail).
+    expect(runAgentLoop).toHaveBeenCalledTimes(1);
+
+    // An info event surfaces so the user sees what happened (not a silent
+    // redirect).
+    expect(
+      sentEvents.some(
+        (e) => e.type === "info" && /privileged|opened a new tab/i.test(e.message ?? ""),
+      ),
+    ).toBe(true);
+
+    // No recoverable:false error event was emitted for the privileged-page
+    // condition.
+    expect(
+      sentEvents.some(
+        (e) => e.type === "error" && /Cannot run on a privileged page/i.test(e.message ?? ""),
+      ),
+    ).toBe(false);
+  });
+
+  test("still hard-fails on query error (not masking real errors)", async () => {
+    chromeAny.tabs.query.mockRejectedValueOnce(new Error("disconnected"));
+    await startRun({ task: "do something", maxSteps: 10, mode: "standard" });
+    expect(runAgentLoop).not.toHaveBeenCalled();
+    expect(
+      sentEvents.some((e) => e.type === "error" && /Tab query failed/i.test(e.message ?? "")),
+    ).toBe(true);
+    // The recoverable:false tab-query path did NOT accidentally open a new tab.
+    expect(chromeAny.tabs.create).not.toHaveBeenCalled();
+  });
+});

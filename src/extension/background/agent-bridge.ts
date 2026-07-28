@@ -276,25 +276,70 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  // L23: refuse to attach the agent to a PRIVILEGED tab — browser internals
  // (`chrome://`), extension pages (`chrome-extension://`), the Chrome Web
  // Store, or `about:` pages. The content script + debugger cannot operate
- // there and driving them would be unsafe. Return like the other early
- // paths (with `releaseRunGuard()`) so the guard flag is never left stuck.
-  const tabUrl = tab.url ?? "";
-  const isPrivileged =
-    /^chrome:\/\//i.test(tabUrl) ||
-    /^chrome-extension:\/\//i.test(tabUrl) ||
-    /^about:/i.test(tabUrl) ||
-    /chrome\.google\.com\/webstore/i.test(tabUrl) ||
-    /chromewebstore\.google\.com/i.test(tabUrl);
-  if (isPrivileged) {
-    sendEvent({
-      type: "error",
-      step: 0,
-      message: `Cannot run on a privileged page (${tabUrl}). Open a regular web page first.`,
-      recoverable: false,
-    });
-    releaseRunGuard();
-    return;
-  }
+ // there and driving them would be unsafe.
+ //
+ // Rather than hard-failing the run (which made the extension unusable from
+ // the new-tab page — a common "agent ai extension" entry point), AUTO-OPEN
+ // a fresh `about:blank` tab and proceed on it. `about:blank` is the one URL
+ // Chrome universally permits for content scripts across versions, and the
+ // agent's `navigate` action can then go to whatever target the user asked
+ // for. Surfaces an info event so the user understands what happened. The
+ // `chrome://newtab/` "home page" case (the most common miss) is covered by
+ // this branch — `chrome://newtab/` matches the `chrome://` rule below.
+   const tabUrl = tab.url ?? "";
+   const isPrivileged =
+     /^chrome:\/\//i.test(tabUrl) ||
+     /^chrome-extension:\/\//i.test(tabUrl) ||
+     /^about:/i.test(tabUrl) ||
+     /chrome\.google\.com\/webstore/i.test(tabUrl) ||
+     /chromewebstore\.google\.com/i.test(tabUrl);
+   if (isPrivileged) {
+     try {
+       const newTab = await chrome.tabs.create({ active: true });
+       if (newTab?.id) {
+         tab = newTab;
+         sendEvent({
+           type: "info",
+           message: `Active tab was a privileged page (${tabUrl}); opened a new tab to run on. The agent can navigate from here.`,
+         });
+       } else {
+         // `tabs.create` returned a tab without an id — extremely unusual
+         // (Chrome always assigns one). Fall back to the original hard-fail
+         // so we don't proceed on a tab we can't address.
+         sendEvent({
+           type: "error",
+           step: 0,
+           message: `Cannot run on a privileged page (${tabUrl}) and opening a new tab failed. Open a regular web page first.`,
+           recoverable: false,
+         });
+         releaseRunGuard();
+         return;
+       }
+     } catch (e) {
+       sendEvent({
+         type: "error",
+         step: 0,
+         message: `Cannot run on a privileged page (${tabUrl}); opening a new tab failed: ${errMsg(e)}. Open a regular web page first.`,
+         recoverable: false,
+       });
+       releaseRunGuard();
+       return;
+     }
+   }
+  // Re-narrow tab.id after the privileged-page branch — `tab = newTab` above
+  // widened the type to `number | undefined` (chrome.tabs.Tab's id is
+  // optional in the type defs). The early `if (!tab?.id) return` at line 271
+  // is too far above for TS to carry the narrowing across all the intervening
+  // awaits and the reassignment. Localize the validated id here so the
+  // `startTabId`/`currentTabId` assignments below type-check; the runtime
+  // invariant (every path that reaches here has a real tab.id) is preserved
+  // by the guards in the privileged-page branch + the early return above.
+   const startTabId = tab.id;
+   if (startTabId === undefined) {
+     sendEvent({ type: "error", step: 0, message: "No active tab", recoverable: false });
+     releaseRunGuard();
+     return;
+   }
 
  // Read user-overridable run-time settings from local storage. Falls back to
  // defaults if not set or unreadable.
@@ -371,8 +416,8 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     task,
     maxSteps: cfgMaxSteps,
     mode: effectiveMode,
-    startTabId: tab.id,
-    currentTabId: tab.id,
+    startTabId,
+    currentTabId: startTabId,
     step: 0,
     active: true,
     abortRequested: false,
