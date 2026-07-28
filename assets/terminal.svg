@@ -1,51 +1,93 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 220" width="680" height="220">
-  <defs>
-    <clipPath id="screen">
-      <rect x="0" y="0" width="680" height="220" rx="10"/>
-    </clipPath>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 260" width="700" height="260">
+  <style>
+    .terminal-bg { fill: #0d1117; }
+    .title-bar { fill: #161b22; }
+    .dot-red { fill: #ff5f56; }
+    .dot-yellow { fill: #ffbd2e; }
+    .dot-green { fill: #27c93f; }
+    .title-text { fill: #8b949e; font: 12px 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace; }
+    .prompt { fill: #27c93f; font: bold 13px 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace; }
+    .cmd { fill: #e6edf3; font: 13px 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace; }
+    .output { fill: #8b949e; font: 13px 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace; }
+    .cursor { fill: #27c93f; }
 
-  <g clip-path="url(#screen)">
-    <!-- Terminal background -->
-    <rect width="680" height="220" rx="10" fill="#1a1a2e"/>
+    .line1, .line1-output, .line2, .line3, .line3-output, .line4, .line4-output, .line5, .line5-output {
+      opacity: 0;
+    }
 
-    <!-- Title bar -->
-    <rect width="680" height="36" rx="10" fill="#16213e"/>
-    <rect y="10" width="680" height="26" fill="#16213e"/>
-    <circle cx="20" cy="18" r="6" fill="#ff5f57"/>
-    <circle cx="40" cy="18" r="6" fill="#ffbd2e"/>
-    <circle cx="60" cy="18" r="6" fill="#28ca41"/>
-    <text x="340" y="22" text-anchor="middle" font-family="monospace" font-size="12" fill="#8892b0">Terminal</text>
+    .line1 { animation: show 0.01s 0.5s forwards; }
+    .line1-output { animation: show 0.01s 1.2s forwards; }
+    .line2 { animation: show 0.01s 2.0s forwards; }
+    .line3 { animation: show 0.01s 2.8s forwards; }
+    .line3-output { animation: show 0.01s 4.5s forwards; }
+    .line4 { animation: show 0.01s 5.5s forwards; }
+    .line4-output { animation: show 0.01s 8.0s forwards; }
+    .line5 { animation: show 0.01s 9.0s forwards; }
+    .line5-output { animation: show 0.01s 10.5s forwards; }
 
-    <!-- Command 1: git clone -->
-    <text x="20" y="72" font-family="'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace" font-size="14" fill="#28ca41">
-      $
-      <animate attributeName="opacity" values="1;1;0;1" dur="1.2s" repeatCount="indefinite"/>
-    </text>
-    <text x="40" y="72" font-family="'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace" font-size="14" fill="#e6e6e6">
-      git clone https://github.com/Gitshop77/open-cowork-chrome-extension.git
-      <animate attributeName="opacity" values="0;1" dur="0.01s" fill="freeze"/>
-      <animate attributeName="opacity" values="0;1" keyTimes="0;1" dur="0.01s" fill="freeze"/>
-    </text>
+    @keyframes show {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
 
-    <!-- Command 2: cd -->
-    <text x="20" y="102" font-family="'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace" font-size="14" fill="#28ca41">$</text>
-    <text x="40" y="102" font-family="'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace" font-size="14" fill="#e6e6e6">cd open-cowork-chrome-extension</text>
+    .cursor-blink {
+      animation: blink 1s step-end infinite;
+    }
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+  </style>
 
-    <!-- Command 3: npm install -->
-    <text x="20" y="132" font-family="'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace" font-size="14" fill="#28ca41">$</text>
-    <text x="40" y="132" font-family="'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace" font-size="14" fill="#e6e6e6">npm install</text>
+  <!-- Background -->
+  <rect width="700" height="260" rx="8" class="terminal-bg"/>
 
-    <!-- Command 4: npm run build -->
-    <text x="20" y="162" font-family="'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace" font-size="14" fill="#28ca41">$</text>
-    <text x="40" y="162" font-family="'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace" font-size="14" fill="#e6e6e6">npm run build:all</text>
+  <!-- Title bar -->
+  <rect width="700" height="32" rx="8" class="title-bar"/>
+  <rect y="8" width="700" height="24" class="title-bar"/>
+  <circle cx="16" cy="16" r="5" class="dot-red"/>
+  <circle cx="34" cy="16" r="5" class="dot-yellow"/>
+  <circle cx="52" cy="16" r="5" class="dot-green"/>
+  <text x="350" y="20" text-anchor="middle" class="title-text">Terminal</text>
 
-    <!-- Blinking cursor -->
-    <rect x="215" y="148" width="8" height="16" fill="#28ca41">
-      <animate attributeName="opacity" values="1;0;1" dur="1s" repeatCount="indefinite"/>
-    </rect>
+  <!-- Line 1: git clone -->
+  <g class="line1">
+    <text x="16" y="68" class="prompt">$ </text>
+    <text x="34" y="68" class="cmd">git clone https://github.com/Gitshop77/open-cowork-chrome-extension.git</text>
+  </g>
+  <g class="line1-output">
+    <text x="16" y="88" class="output">Cloning into 'open-cowork-chrome-extension'...</text>
+  </g>
 
-    <!-- Comment -->
-    <text x="232" y="162" font-family="'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace" font-size="14" fill="#8892b0"># builds the extension</text>
+  <!-- Line 2: cd -->
+  <g class="line2">
+    <text x="16" y="118" class="prompt">$ </text>
+    <text x="34" y="118" class="cmd">cd open-cowork-chrome-extension</text>
+  </g>
+
+  <!-- Line 3: npm install -->
+  <g class="line3">
+    <text x="16" y="148" class="prompt">$ </text>
+    <text x="34" y="148" class="cmd">npm install</text>
+  </g>
+  <g class="line3-output">
+    <text x="16" y="168" class="output">added 450 packages in 12s</text>
+  </g>
+
+  <!-- Line 4: npm run build:all -->
+  <g class="line4">
+    <text x="16" y="198" class="prompt">$ </text>
+    <text x="34" y="198" class="cmd">npm run build:all</text>
+  </g>
+  <g class="line4-output">
+    <text x="16" y="218" class="output">Building extension... done.</text>
+  </g>
+
+  <!-- Line 5: final prompt with cursor -->
+  <g class="line5">
+    <text x="16" y="248" class="prompt">$ </text>
+  </g>
+  <g class="line5-output">
+    <rect x="34" y="234" width="8" height="16" class="cursor cursor-blink"/>
   </g>
 </svg>
