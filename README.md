@@ -1,32 +1,13 @@
-<table>
-  <tr>
-    <td width="128"><img src="src/extension/icons/icon.png" alt="Open Cowork" width="128"></td>
-    <td><h1>Open Cowork</h1></td>
-  </tr>
-</table>
+<p align="center">
+  <img src="src/extension/icons/icon.png" alt="Open Cowork" width="full">
+</p>
 
 <div align="center">
+    <h1>Open Cowork</h1>
     <h3>Turn your browser into an assistant you can just talk to.</h3>
-    <a href="#getting-started"><img src="https://img.shields.io/badge/Chrome_Extension-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white" height="48" alt="Chrome Extension" /></a>
 </div>
 
 ---
-
-<div align="center">
-  <a href="#what-open-cowork-does"><img src="https://img.shields.io/badge/Features-4285F4?style=flat&logo=googlechrome&logoColor=white" alt="Features" /></a>
-  <img width="16" height="1" alt="">
-  <a href="#getting-started"><img src="https://img.shields.io/badge/Get_Started-339933?style=flat&logo=node.js&logoColor=white" alt="Get Started" /></a>
-  <img width="16" height="1" alt="">
-  <a href="#configuration"><img src="https://img.shields.io/badge/Configuration-3178C6?style=flat&logo=typescript&logoColor=white" alt="Configuration" /></a>
-  <img width="16" height="1" alt="">
-  <a href="#development"><img src="https://img.shields.io/badge/Development-555555?style=flat&logo=github&logoColor=white" alt="Development" /></a>
-  <img width="100" height="1" alt="">
-  <a href="https://github.com/Gitshop77/open-cowork-chrome-extension/stargazers"><img src="https://img.shields.io/github/stars/Gitshop77/open-cowork-chrome-extension?style=flat&label=Stars&logo=github" alt="GitHub Stars" /></a>
-  <img width="4" height="1" alt="">
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Gitshop77/open-cowork-chrome-extension?style=flat&label=License" alt="License" /></a>
-  <img width="4" height="1" alt="">
-  <a href="https://github.com/Gitshop77/open-cowork-chrome-extension/actions"><img src="https://img.shields.io/github/actions/workflow/status/Gitshop77/open-cowork-chrome-extension/.github/workflows/ci.yml?style=flat&label=CI" alt="CI" /></a>
-</div>
 
 ## Contents
 
