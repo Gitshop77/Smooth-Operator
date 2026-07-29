@@ -171,28 +171,28 @@ export function stripConsoleDebug(source: string): string {
             ? "log"
             : null;
       if (name !== null) {
-      const afterName = nameOff + name.length; // index of '('
-      if (source[afterName] === "(") {
-        if (source[afterName + 1] === ")") {
-          out.push("void 0");
-          i = afterName + 2;
+        const afterName = nameOff + name.length; // index of '('
+        if (source[afterName] === "(") {
+          if (source[afterName + 1] === ")") {
+            out.push("void 0");
+            i = afterName + 2;
+            continue;
+          }
+          // A leading spread argument (e.g. `console.log(...args)`) would become
+          // `void (...args)`, which is a SyntaxError: a leading spread is only valid
+          // inside an array literal or a call argument list, not a parenthesized
+          // expression. Skip the rewrite so the original call stays valid JS.
+          if (/^\s*\.\.\./.test(source.slice(afterName + 1))) {
+            out.push(c);
+            i++;
+            continue;
+          }
+          out.push("void (");
+          voidCallDepth = 1; // the `(` in `void (` is our depth-1 opening paren
+          i = afterName + 1; // skip the original '(' (already emitted by `void (`)
           continue;
         }
-        // A leading spread argument (e.g. `console.log(...args)`) would become
-        // `void (...args)`, which is a SyntaxError: a leading spread is only valid
-        // inside an array literal or a call argument list, not a parenthesized
-        // expression. Skip the rewrite so the original call stays valid JS.
-        if (/^\s*\.\.\./.test(source.slice(afterName + 1))) {
-          out.push(c);
-          i++;
-          continue;
-        }
-        out.push("void (");
-        voidCallDepth = 1; // the `(` in `void (` is our depth-1 opening paren
-        i = afterName + 1; // skip the original '(' (already emitted by `void (`)
-        continue;
       }
-    }
     }
 
     out.push(c);
