@@ -139,6 +139,8 @@ export interface CustomTool {
   code: string;
   /** Unix ms timestamp when this tool was created (set by the options page). */
   createdAt?: number;
+  /** Truncated SHA-256 hex of `code` — operator-visible integrity fingerprint. */
+  codeHash?: string;
 }
 
 /** Storage key under which the custom-tools array is persisted. */

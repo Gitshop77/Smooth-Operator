@@ -20,7 +20,7 @@
   /* Text */
   --cw-text:  #E7E9F0;  /* primary */
   --cw-muted: #9AA0B0;  /* secondary */
-  --cw-dim:   #5A6173;  /* tertiary / timestamps */
+  --cw-dim:   #585F71;  /* tertiary / timestamps */
 
   /* Accent — electric indigo, used purposefully */
   --cw-accent:         #6C5CE7;
@@ -571,6 +571,14 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
   margin: 0;
   white-space: pre-wrap;
 }
+.tool-hash {
+  display: block;
+  font-size: 10px;
+  color: var(--cw-muted);
+  font-family: monospace;
+  margin-top: 4px;
+  user-select: all;
+}
 .history-item {
   cursor: pointer;
   font: inherit;
@@ -888,7 +896,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
   color: var(--cw-danger);
   cursor: pointer;
   font-size: 12px;
-  padding: 4px 8px;
+  padding: 10px 12px;
+  min-height: 44px;
+  min-width: 44px;
   opacity: 0.7;
   font-family: inherit;
 }

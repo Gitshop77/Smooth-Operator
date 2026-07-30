@@ -29,12 +29,28 @@ import { CUSTOM_TOOL_NAME_REGEX } from "@/lib/agent/tools/registry";
 import { STORAGE_KEYS, showSaved } from "./settings-sync";
 import { confirmModal, alertModal } from "./modal";
 
+/**
+ * Compute a truncated SHA-256 hex digest of `input` (first 16 hex chars ≈
+ * 64 bits). Used to give operators a per-tool code-integrity fingerprint so
+ * they can spot tampering at a glance.
+ */
+async function computeCodeHash(input: string): Promise<string> {
+  const data = new TextEncoder().encode(input);
+  const buf = await crypto.subtle.digest("SHA-256", data);
+  const bytes = new Uint8Array(buf);
+  let hex = "";
+  for (let i = 0; i < 16; i++) hex += bytes[i].toString(16).padStart(2, "0");
+  return hex;
+}
+
 /** A user-defined custom tool. */
 interface CustomToolEntry {
   name: string;
   description: string;
   code: string;
   createdAt?: number;
+  /** Truncated SHA-256 hex of `code` — operator-visible integrity fingerprint. */
+  codeHash?: string;
 }
 
 // ─── Field constraints ───────────────────────────────────────────────────────
@@ -76,7 +92,8 @@ export function validateCustomTools(raw: unknown): CustomToolEntry[] {
       return;
     }
     const createdAt = typeof entry.createdAt === "number" ? entry.createdAt : undefined;
-    out.push({ name: entry.name, description: entry.description, code: entry.code, createdAt });
+    const codeHash = typeof entry.codeHash === "string" ? entry.codeHash : undefined;
+    out.push({ name: entry.name, description: entry.description, code: entry.code, createdAt, codeHash });
   });
   return out;
 }
@@ -176,7 +193,7 @@ export async function renderTools(): Promise<void> {
             message: `Could not delete tool: ${e instanceof Error ? e.message : String(e)}`,
           });
         }
-      });
+      }).catch((e) => console.warn("[custom-tools] storage mutation failed:", e));
     });
     header.appendChild(nameSpan);
     header.appendChild(descSpan);
@@ -185,6 +202,13 @@ export async function renderTools(): Promise<void> {
     code.textContent = t.code;
     item.appendChild(header);
     item.appendChild(code);
+    if (t.codeHash) {
+      const hashEl = document.createElement("span");
+      hashEl.className = "tool-hash";
+      hashEl.textContent = `sha256:${t.codeHash}`;
+      hashEl.title = "Truncated SHA-256 fingerprint of the tool code";
+      item.appendChild(hashEl);
+    }
     frag.appendChild(item);
   });
   list.appendChild(frag);
@@ -247,6 +271,30 @@ $("addTool").addEventListener("click", () => {
     });
     if (!ack) return;
 
+    // Static analysis: warn (don't block) on patterns that could exfiltrate
+    // data or modify extension state when the code runs with full privileges.
+    const DANGEROUS_PATTERNS: [RegExp, string][] = [
+      [/fetch\s*\(/, "network fetch() — could exfiltrate data"],
+      [/XMLHttpRequest/, "XMLHttpRequest — could exfiltrate data"],
+      [/chrome\.\s*(runtime|tabs|storage|permissions)/, "chrome.* API — could modify extension state"],
+      [/\bimport\s*\(/, "dynamic import() — could load external modules"],
+    ];
+    const warnings = DANGEROUS_PATTERNS
+      .filter(([re]) => re.test(code))
+      .map(([, desc]) => `  - ${desc}`);
+    if (warnings.length > 0) {
+      const proceed = await confirmModal({
+        title: "Potentially dangerous code detected",
+        message:
+          "This tool's code contains patterns that may be risky:\n" +
+          warnings.join("\n") +
+          "\n\nThese can run with full extension privileges. Continue?",
+        confirmLabel: "Save anyway",
+        danger: true,
+      });
+      if (!proceed) return;
+    }
+
     let tools: CustomToolEntry[];
     try {
       tools = await readCustomTools();
@@ -257,10 +305,11 @@ $("addTool").addEventListener("click", () => {
       });
       return;
     }
+    const codeHash = await computeCodeHash(code);
  // Enforce name uniqueness: overwrite the existing entry instead of adding a
  // second one, so delete-by-name (and delete-by-index) stays safe.
     const idx = tools.findIndex((t) => t.name === name);
-    const entry: CustomToolEntry = { name, description, code, createdAt: Date.now() };
+    const entry: CustomToolEntry = { name, description, code, createdAt: Date.now(), codeHash };
     if (idx >= 0) {
       entry.createdAt = tools[idx].createdAt;
       tools[idx] = entry;
@@ -280,7 +329,7 @@ $("addTool").addEventListener("click", () => {
         message: `Could not save tool: ${e instanceof Error ? e.message : String(e)}`,
       });
     }
-  });
+  }).catch((e) => console.warn("[custom-tools] storage mutation failed:", e));
 });
 
 void renderToolPermissions();

@@ -5,6 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="dark light" />
   <title>Open Cowork — Settings</title>
+  <!--
+    CSP ACCEPTED RISK (W02-Security-B02 Finding 1):
+    connect-src allows HTTPS to any host because the Options page makes direct
+    fetch() calls to user-configured LLM provider URLs. The SSRF guard
+    (resolveAndValidateLlmBaseUrl with "user-configured" provenance) and
+    canonical-host confinement are the authoritative defenses against key
+    exfiltration. CSP is defense-in-depth only; if the Options page's network
+    calls can be routed through the background worker in a future refactor,
+    restrict connect-src to 'self'.
+  -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src https://*;">
   <link rel="stylesheet" href="options.css" />
 </head>
@@ -415,6 +425,7 @@
             <li><code>tabs</code> + universal host access — read access to any origin the assistant operates on.</li>
           </ul>
           <p>For sensitive or authenticated sites, prefer a restricted host-permission scope rather than granting universal access.</p>
+          <p class="note">A supply-chain compromise (malicious update, compromised dependency) would gain unrestricted access to all user data across all sites. This is inherent to the browser-automation model. See <a href="https://github.com/Gitshop77/open-cowork-chrome-extension#security-and-trust" target="_blank" rel="noopener noreferrer">Security and trust<span class="visually-hidden"> (opens in new tab)</span></a> for mitigations.</p>
         </div>
       </section>
 

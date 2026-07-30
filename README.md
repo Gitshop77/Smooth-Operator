@@ -1,11 +1,11 @@
 # Open Cowork
 
-<h3 align="center">Turn your browser into an assistant you can just talk to.</h3>
+<h3 style="text-align: center">Turn your browser into an assistant you can just talk to.</h3>
 
 <br/>
 
 <p align="center">
-  <img src="assets/terminal.svg" alt="Installation" />
+  <img src="assets/terminal.svg" alt="Animated terminal showing: git clone, cd, npm install, and npm run build:all completing successfully" />
 </p>
 
 ---
@@ -119,6 +119,14 @@ flowchart LR
     classDef external fill:#f3e8ff,stroke:#a855f7,color:#3b0764
 ```
 
+**Architecture in plain text:**
+
+1. The Side panel is your control console — you type tasks and read the log here.
+2. The Background service worker runs the agent and calls the LLM.
+3. The Content script lives in each page, reads its state, and performs actions.
+4. Page state (structure, text, screenshot) flows from Content script → Service worker.
+5. Prompts and actions flow between Service worker and your LLM provider.
+
 | Piece | Role |
 | --- | --- |
 | **Side panel** | What you see and type into — run controls and the live log |
@@ -150,6 +158,18 @@ flowchart TD
     classDef judge fill:#f3e8ff,stroke:#a855f7,color:#3b0764
     classDef complete fill:#dcfce7,stroke:#22c55e,color:#14532d
 ```
+
+**Agent loop in plain text:**
+
+1. You type a task.
+2. The Planner splits it into steps.
+3. The Navigator looks at the current page.
+4. The Navigator reasons with the LLM.
+5. The Navigator acts (click, type, navigate, etc.).
+6. If the page changed on its own, return to step 3.
+7. Every 5 steps, return to step 2 (re-plan).
+8. When the task is done, the Planner signals completion.
+9. The optional Judge independently verifies the result.
 
 Three roles share the work:
 
@@ -362,6 +382,9 @@ Other code-level backstops: a fail-closed domain list blocks navigation to attac
 
 > [!CAUTION]
 > `evaluate` and custom tools run JavaScript through `new Function()` inside the page's isolated world — where the secret store also lives. Before any code runs, three gates apply: the mode must be Full Agentic, the target domain must pass a fail-closed allow list, and the code runs with `chrome`, `window`, `globalThis`, `self`, `Function`, and `eval` stubbed out to throw or deny. This sandbox is a second layer of defense, not a hard wall — known ways exist to escape it from untrusted pages. Use Full Agentic only on sites you trust, set a strict allowed-domain list, and rotate your API key if you suspect a Full Agentic run was compromised.
+
+> [!NOTE]
+> The manifest declares `host_permissions: ["<all_urls>"]` plus `debugger`, `scripting`, `webRequest`, and `dns` permissions. A supply-chain compromise (malicious update, compromised build artifact, or a third-party dependency that gains service-worker execution) would have unrestricted access to every origin. This is inherent to the browser-automation model. The domain allow/block list and mode gating limit what the agent does at runtime, but cannot prevent a compromised extension from using its manifest permissions directly. See [PERMISSIONS.md](PERMISSIONS.md) for the full list.
 
 ### How keys and secrets are stored
 
