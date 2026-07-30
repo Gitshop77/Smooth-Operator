@@ -29,7 +29,10 @@ type PopupHandler = typeof import("../../dom/popup-handler");
 let popupHandlerModPromise: Promise<PopupHandler> | undefined;
 function getPopupHandlerMod(): Promise<PopupHandler> {
   if (!popupHandlerModPromise) {
-    popupHandlerModPromise = import("../../dom/popup-handler");
+    popupHandlerModPromise = import("../../dom/popup-handler").catch((err) => {
+      popupHandlerModPromise = undefined;
+      throw err;
+    });
   }
   return popupHandlerModPromise;
 }

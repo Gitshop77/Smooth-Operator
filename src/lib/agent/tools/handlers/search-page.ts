@@ -32,9 +32,9 @@
 
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
-import { LIMITS } from "../constants";
+import { LIMITS, CONTROL_CHARS_RE } from "../constants";
 import type { ActionContext } from "./types";
-import { CONTROL_CHARS_RE, formatInjectionWarnings, scanForInjection } from "../../security";
+import { scanForInjection } from "../../security";
 import { redactSecrets } from "../../secrets";
 
 // Per-node text length handed to the regex. Catastrophic-backtracking cost
@@ -529,7 +529,8 @@ export async function handleSearchPage(
  // structural root cause of exponential backtracking; a short pattern of this
  // shape run against one large text node would otherwise block the main
  // thread inside a single `test()` call that cannot be interrupted.
-    if (hasNestedQuantifier(pattern)) {
+    const redosCheck = checkRedos(pattern);
+    if (redosCheck.nested) {
       return {
         action,
         success: false,
@@ -541,7 +542,7 @@ export async function handleSearchPage(
  // above does not model. A backreference against one large text node would
  // otherwise block the main thread inside a single `test()` call that cannot
  // be interrupted. Legitimate page-text searches rarely need backreferences.
-    if (hasBackreference(pattern)) {
+    if (redosCheck.backref) {
       return {
         action,
         success: false,

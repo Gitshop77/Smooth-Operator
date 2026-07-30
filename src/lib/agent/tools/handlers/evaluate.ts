@@ -9,6 +9,7 @@ import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import { LIMITS } from "../constants";
 import type { ActionContext } from "./types";
+import { hasPageChanged } from "./types";
 import { domFingerprint } from "../helpers";
 import { rejectOnAbort } from "./abort";
 import { checkUrlAllowed } from "../../security";
@@ -399,27 +400,39 @@ function makeHardenedDocument(target: Document): Document {
  * harness and this function share the exact same proxy construction, so a
  * passing test proves the deny/throw paths hold.
  */
+/**
+ * Cached hardened sandbox objects per page. Invalidated when the DOM fingerprint
+ * changes (page navigation / major DOM mutation). The proxies are stateless
+ * wrappers around the real objects — caching them across evaluate calls on the
+ * same page is safe and eliminates repeated construction overhead.
+ */
+let cachedFingerprint: string | null = null;
+let cachedSandbox: {
+  hardenedDocument: Document;
+  sandboxWindow: object;
+  sandboxGlobal: object;
+  sandboxSelf: object;
+} | null = null;
+
 export function runSandboxedCode(code: string): unknown {
- // `hardenedDocument` is created first so the window/global proxies can
- // redirect `document` to it — this only obstructs the DIRECT traversal
- // `window.document.defaultView.chrome`. It does NOT close the
- // `document→chrome` path: `<anyNode>.ownerDocument.defaultView.chrome` and
- // the `[].constructor.constructor` Function-constructor escape both still
- // reach the real extension `chrome`. This is NOT a security boundary — the
- // robust mitigation (secret store kept in the background service worker,
- // `evaluate` run in a realm with no `chrome` binding, unconfirmed
- // `evaluate` gated off untrusted origins) is architectural and owned
- // outside this file.
-  const hardenedDocument = makeHardenedDocument(document);
-  const makeWindowProxy = (target: object): object =>
-    makeHardenedWindowLike(target, hardenedDocument);
-  const sandboxWindow = makeWindowProxy(
-    typeof window !== "undefined" ? (window as object) : (globalThis as object),
-  );
-  const sandboxGlobal = makeWindowProxy(globalThis as object);
-  const sandboxSelf = makeWindowProxy(
-    typeof self !== "undefined" ? (self as object) : (globalThis as object),
-  );
+  const fp = domFingerprint();
+  if (cachedFingerprint !== fp || !cachedSandbox) {
+    const hardenedDocument = makeHardenedDocument(document);
+    const makeWindowProxy = (target: object): object =>
+      makeHardenedWindowLike(target, hardenedDocument);
+    cachedSandbox = {
+      hardenedDocument,
+      sandboxWindow: makeWindowProxy(
+        typeof window !== "undefined" ? (window as object) : (globalThis as object),
+      ),
+      sandboxGlobal: makeWindowProxy(globalThis as object),
+      sandboxSelf: makeWindowProxy(
+        typeof self !== "undefined" ? (self as object) : (globalThis as object),
+      ),
+    };
+    cachedFingerprint = fp;
+  }
+  const { hardenedDocument, sandboxWindow, sandboxGlobal, sandboxSelf } = cachedSandbox;
 // Block obvious Function-constructor escape patterns at the entry point.
   // This catches `[].constructor.constructor`, `({}).constructor.constructor`,
   // and `(async function(){}).constructor` — the documented bypass vectors.
@@ -434,17 +447,16 @@ export function runSandboxedCode(code: string): unknown {
   // Detect prototype-chain and bracket-notation constructor escapes that
   // bypass the .constructor.constructor scan above (e.g. __proto__,
   // getPrototypeOf, ['constructor'] without a preceding dot-constructor).
-  const ESCAPE_PATTERNS = [
-    /__proto__/i,
-    /\[\s*['"`]constructor['"`]\s*\]/,
-    /\[\s*['"`]__proto__['"`]\s*\]/,
-    /getPrototypeOf/,
-    /\.\s*constructor\s*\.\s*constructor/,
+  const ESCAPE_PATTERNS: { pattern: RegExp; name: string }[] = [
+    { pattern: /__proto__/i, name: "__proto__ reference" },
+    { pattern: /\[\s*['"`]constructor['"`]\s*\]/, name: "bracket-notation constructor access" },
+    { pattern: /\[\s*['"`]__proto__['"`]\s*\]/, name: "bracket-notation __proto__ access" },
+    { pattern: /getPrototypeOf/, name: "Object.getPrototypeOf call" },
   ];
-  for (const pat of ESCAPE_PATTERNS) {
-    if (pat.test(code)) {
+  for (const { pattern, name } of ESCAPE_PATTERNS) {
+    if (pattern.test(code)) {
       throw new Error(
-        `evaluate blocked: code contains sandbox escape pattern: ${pat.source}`,
+        `evaluate blocked: sandbox escape pattern detected (${name})`,
       );
     }
   }
@@ -701,16 +713,7 @@ export async function handleEvaluate(
  // fingerprint against what the executor captured in `ctx` BEFORE this
  // handler ran. Wrapped in try/catch so a fingerprint failure can't
  // mask a successful evaluation.
-    let pageChanged = false;
-    try {
-      pageChanged =
-        location.href !== ctx.beforeUrl ||
-        domFingerprint() !== ctx.beforeFingerprint;
-    } catch {
- // If we can't compute the fingerprint, don't claim a page change —
- // better to skip the reset than to lie about it.
-      pageChanged = false;
-    }
+    const pageChanged = hasPageChanged(ctx);
     return {
       action,
       success: true,

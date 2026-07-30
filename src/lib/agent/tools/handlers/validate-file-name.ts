@@ -11,10 +11,15 @@
  * `null`, in which case the SW falls back to a title-derived default name), or
  * a human-readable reason string when it must be rejected.
  */
+const MAX_FILENAME_LENGTH = 120;
+
 export function validateFileName(fileName: unknown): string | null {
   if (fileName === undefined || fileName === null) return null;
   if (typeof fileName !== "string" || fileName.length === 0) {
     return "file_name must be a non-empty string";
+  }
+  if (fileName.length > MAX_FILENAME_LENGTH) {
+    return `file_name exceeds ${MAX_FILENAME_LENGTH} characters`;
   }
   if (/[\x00-\x1f\x7f\x80-\x9f]/.test(fileName)) {
     return "file_name contains invalid control characters";

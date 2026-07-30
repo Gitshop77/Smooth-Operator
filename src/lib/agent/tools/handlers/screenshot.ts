@@ -40,6 +40,12 @@ export async function handleScreenshot(
       message: `screenshot failed: invalid file_name — ${fileNameError}`,
     };
   }
+ // Enforce .png extension: screenshots are always PNG images. Strip any
+ // existing extension and append .png so a misleading "report.pdf" becomes
+ // "report.png". When no filename is provided, the SW generates a default.
+  const safeFileName = fileName
+    ? fileName.replace(/\.[^.]*$/, "") + ".png"
+    : undefined;
   if (typeof chrome === "undefined" || !chrome.runtime?.id) {
     return {
       action,
@@ -53,22 +59,22 @@ export async function handleScreenshot(
  // before formatting the success message. Race a timeout so a live SW
  // handler that keeps the channel open (async) but never responds cannot
  // hang the orchestrator step indefinitely.
-    let timer: ReturnType<typeof setTimeout>;
+    let timer: ReturnType<typeof setTimeout> | undefined;
  // Race the SW call against the timeout AND the step's abort signal so a user
  // STOP is honored mid-step instead of waiting out the full 30s timeout.
     const abort = rejectOnAbort(ctx.signal);
     let raw: unknown;
     try {
+      const timeout = new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), SCREENSHOT_TIMEOUT_MS);
+      });
       raw = await Promise.race([
-        chrome.runtime
-          .sendMessage({ type: "SCREENSHOT", fileName })
-          .finally(() => clearTimeout(timer)),
-        new Promise<undefined>((resolve) => {
-          timer = setTimeout(() => resolve(undefined), SCREENSHOT_TIMEOUT_MS);
-        }),
+        chrome.runtime.sendMessage({ type: "SCREENSHOT", fileName: safeFileName }),
+        timeout,
         abort.promise,
       ]);
     } finally {
+      if (timer !== undefined) clearTimeout(timer);
       abort.cleanup();
     }
     if (typeof raw === "undefined") {

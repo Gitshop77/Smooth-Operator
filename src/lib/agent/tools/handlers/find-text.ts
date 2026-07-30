@@ -28,12 +28,13 @@ export async function handleFindText(
     return { action, success: false, message: "find_text: page has no body" };
   }
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
- // Skip text inside non-rendered containers (script/style/noscript/template):
- // those text nodes are not user-visible but would otherwise pass the
- // visibility gate (their computed `display` is not `none`).
     acceptNode(node) {
       const p = node.parentElement;
       if (p && NON_RENDERED_TAGS.has(p.tagName)) return NodeFilter.FILTER_REJECT;
+      if (p) {
+        const s = getComputedStyle(p);
+        if (s.display === "none" || s.visibility === "hidden") return NodeFilter.FILTER_REJECT;
+      }
       return NodeFilter.FILTER_ACCEPT;
     },
   });

@@ -30,6 +30,7 @@ import {
   safeScrollIntoView,
 } from "../helpers";
 import type { ActionContext } from "./types";
+import { hasPageChanged } from "./types";
 
 type CdpClickResult = { ok?: boolean; error?: string } | undefined | null;
 
@@ -57,11 +58,6 @@ async function sendCdpClick(
   } finally {
     if (t) clearTimeout(t);
   }
-}
-
-/** True when the page changed since the action started. */
-function pageChanged(beforeUrl: string, beforeFingerprint: string): boolean {
-  return location.href !== beforeUrl || domFingerprint() !== beforeFingerprint;
 }
 
 export async function handleClick(
@@ -168,9 +164,7 @@ export async function handleClick(
  // serializes to `{}` and the background rejects it (rect.x !== "number").
  // Send a plain object with the coordinates copied out (mirrors
  // `press-and-hold.ts`).
-      if (!el.isConnected) {
-        errors.push("element became detached before CDP click");
-      } else {
+      {
         const r = el.getBoundingClientRect();
  // Reject coordinates outside the visual viewport. CDP
  // `Input.dispatchMouseEvent` does NOT error on out-of-bounds coordinates, so
@@ -394,7 +388,7 @@ export async function handleClick(
       message: `CDP click for [${numericIndex}] is still in flight (timed out / no response from service worker) — not falling back to other strategies to avoid a double click`,
     };
   }
-  const changed = pageChanged(ctx.beforeUrl, ctx.beforeFingerprint);
+  const changed = hasPageChanged(ctx);
   if (!clicked) {
     return {
       action,
@@ -416,8 +410,7 @@ async function handleVisionClick(
   action: Extract<Action, { type: "click" }>,
   indexStr: string,
 ): Promise<ActionResult> {
-  const { beforeUrl, beforeFingerprint } = ctx;
- // The numeric-index path guards `chrome.runtime` presence; the vision path
+  // The numeric-index path guards `chrome.runtime` presence; the vision path
  // must too — without it a missing extension context would throw a raw
  // ReferenceError instead of reporting a clean failure .
   if (typeof chrome === "undefined" || !chrome.runtime?.id) {
@@ -433,7 +426,7 @@ async function handleVisionClick(
     const result = await sendCdpClick({ x: 0, y: 0, width: 1, height: 1 }, indexStr);
     if (result?.ok) {
       await sleep(TIMINGS.clickAfterSettle);
-      const changed = pageChanged(beforeUrl, beforeFingerprint);
+      const changed = hasPageChanged(ctx);
       return {
         action,
         success: true,

@@ -11,7 +11,7 @@ import { SearchSchema } from "./schema";
 /** Control characters (CR/LF, Unicode line/para separators) stripped from
  *  page-derived text before it is reflected into log lines / agent messages,
  *  so untrusted DOM content can't forge log lines or inject fake history. */
-export const CONTROL_CHARS_RE = /[\u0000-\u001F\u007F\u0085\u2028\u2029]/g;
+export const CONTROL_CHARS_RE = /[\u0000-\u001F\u007F\u0085\u00A0\u00AD\u2028\u2029]/g;
 
 /** Bound length and strip control characters from page-derived text that is
  *  reflected into agent-facing messages. Display-only — selection logic and

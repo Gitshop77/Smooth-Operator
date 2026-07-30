@@ -97,8 +97,5 @@ async function waitForPageSettle(ctx: ActionContext): Promise<boolean> {
     prevUrl = url;
     prevFp = fp;
   }
-  // `TIMINGS.navigationBack` (500ms) > `TIMINGS.extractWait` (100ms), so the
-  // poll loop above always executes at least one read — `prevFp` is therefore
-  // always assigned here and the `?? domFingerprint()` branch was unreachable.
-  return (prevUrl !== null && prevUrl !== ctx.beforeUrl) || prevFp !== ctx.beforeFingerprint;
+  return prevUrl !== ctx.beforeUrl || prevFp !== ctx.beforeFingerprint;
 }
