@@ -71,7 +71,7 @@ export async function handleDetectVisual(
         message: `detect_visual failed: ${err}`,
       };
     }
-    const count = typeof res.count === "number" ? res.count : 0;
+    const count = Number.isFinite(res.count) ? res.count : 0;
     const description =
       typeof res.description === "string" && res.description
         ? res.description

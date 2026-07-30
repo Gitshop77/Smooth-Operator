@@ -25,7 +25,6 @@ import { highlightElement } from "../../dom/overlay";
 import { moveCursorToElement } from "../../dom/phantom-cursor";
 import { SW_RPC_TIMEOUT_MS, TIMINGS, sleep } from "../constants";
 import {
-  domFingerprint,
   generateCssSelector,
   resolveElement,
   safeScrollIntoView,
@@ -400,7 +399,7 @@ export async function handleClick(
     return {
       action,
       success: false,
-      message: `Failed to click [${numericIndex}] after 5 strategies: ${errors.join("; ")}`,
+      message: `Failed to click [${numericIndex}] after 5 strategies: ${errors.slice(-3).join("; ")}`,
     };
   }
   return {
