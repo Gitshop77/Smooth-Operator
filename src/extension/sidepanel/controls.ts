@@ -31,6 +31,23 @@ let running = false;
 let stopDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let sendDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
+// ─── lastError sanitization ──────────────────────────────────────────────
+// Map known chrome.runtime.lastError messages to user-friendly strings
+// so internal extension details aren't leaked in the UI.
+const KNOWN_RUNTIME_ERRORS: Record<string, string> = {
+  "Could not establish connection. Receiving end does not exist.":
+    "Background service unavailable",
+  "The message port closed before a response was received.":
+    "Background service unavailable",
+  "Extension context invalidated.":
+    "Extension context invalidated",
+};
+
+function sanitizeLastError(raw: string | undefined): string {
+  if (!raw) return "Failed to start";
+  return KNOWN_RUNTIME_ERRORS[raw] ?? "Failed to start";
+}
+
 // ─── Run/Stop UI ─────────────────────────────────────────────────────────
 
 /** Toggle run/stop button state. */
@@ -89,10 +106,14 @@ async function sendMessage(): Promise<void> {
     }
 
     // Guard: check that an API key is configured before sending.
-    const localRes = await storageGet(["provider"], "local") as Record<string, unknown>;
+    // Batch provider + common key names into a single storage read.
+    const localRes = await storageGet(
+      ["provider", "apiKey", "apiKey_openai", "apiKey_anthropic", "apiKey_google", "apiKey_xai", "apiKey_azure", "apiKey_openrouter"],
+      "local",
+    ) as Record<string, unknown>;
     const provider = (localRes?.provider as string) || "";
     const key = provider ? `apiKey_${provider}` : "apiKey";
-    const s = await storageGet([key], "local") as Record<string, unknown>;
+    const s = { [key]: localRes?.[key] ?? localRes?.apiKey } as Record<string, unknown>;
     if (chrome.runtime.lastError || !s?.[key]) {
       if (sendDebounceTimer) { clearTimeout(sendDebounceTimer); sendDebounceTimer = null; }
       addSystemMessage(
@@ -136,7 +157,7 @@ async function sendMessage(): Promise<void> {
     if (chrome.runtime.lastError) {
       if (sendDebounceTimer) { clearTimeout(sendDebounceTimer); sendDebounceTimer = null; }
       const errMsg = (chrome.runtime as { lastError?: { message?: string } }).lastError?.message;
-      addSystemMessage("❌", errMsg || "Failed to start");
+      addSystemMessage("❌", sanitizeLastError(errMsg));
       return;
     }
     if (!res?.ok) {
@@ -186,7 +207,7 @@ stopBtn.addEventListener("click", () => {
       stopBtn.disabled = false;
       addSystemMessage(
         "❌",
-        `Stop failed: ${chrome.runtime.lastError.message || "extension context unavailable"}`
+        `Stop failed: ${sanitizeLastError((chrome.runtime as { lastError?: { message?: string } }).lastError?.message)}`
       );
       // The service worker is gone, so the run is actually dead. Reset to idle.
       setRunning(false);

@@ -44,7 +44,8 @@ function runInteract<T>(
     .then(onResolve)
     .catch((err: unknown) => {
       const detail = err instanceof Error ? err.message : String(err);
-      addSystemMessage("❌", `${label} failed: ${detail}`);
+      console.warn(`[sidepanel] ${label} failed:`, detail);
+      addSystemMessage("❌", `${label} failed`);
       sendResponse({ mode: "cancelled" });
     });
   return true;
