@@ -34,18 +34,13 @@ import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import { LIMITS } from "../constants";
 import type { ActionContext } from "./types";
-import { scanForInjection } from "../../security";
+import { CONTROL_CHARS_RE, formatInjectionWarnings, scanForInjection } from "../../security";
 import { redactSecrets } from "../../secrets";
 
 // Per-node text length handed to the regex. Catastrophic-backtracking cost
 // scales with input length, so capping each text node bounds the worst case for
 // any pattern that slips past the static ReDoS check.
-const SEARCH_PAGE_NODE_TEXT_CAP = 4096;
-
-// Control characters (incl. CR/LF and Unicode line/para separators) reflected
-// from page text into matched snippets must be stripped so untrusted page
-// content cannot forge log lines or disrupt prompt parsing.
-const CONTROL_CHARS_RE = /[\u0000-\u001F\u007F\u0085\u2028\u2029]/g;
+const SEARCH_PAGE_NODE_TEXT_CAP = 1024;
 
 // Hard wall-clock budget for the whole search. A pattern that slips past the
 // static ReDoS check can still spend real time backtracking; capping total
@@ -499,6 +494,19 @@ function locateMatch(
   return null;
 }
 
+// Cache ReDoS check results per pattern string to skip re-analysis on repeated searches.
+const redosCheckCache = new Map<string, { nested: boolean; backref: boolean }>();
+
+function checkRedos(pattern: string): { nested: boolean; backref: boolean } {
+  let cached = redosCheckCache.get(pattern);
+  if (!cached) {
+    cached = { nested: hasNestedQuantifier(pattern), backref: hasBackreference(pattern) };
+    if (redosCheckCache.size > 256) redosCheckCache.clear();
+    redosCheckCache.set(pattern, cached);
+  }
+  return cached;
+}
+
 export async function handleSearchPage(
   ctx: ActionContext,
   action: Extract<Action, { type: "search_page" }>,
@@ -557,60 +565,42 @@ export async function handleSearchPage(
   }
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   let node: Node | null;
-  let count = 0;
   let visits = 0;
   const deadline = Date.now() + SEARCH_PAGE_TIME_BUDGET_MS;
-  while ((node = walker.nextNode()) && count < LIMITS.searchPageMaxMatches && visits < LIMITS.searchPageMaxNodeVisits) {
- // Hard wall-clock cap: stop searching once the budget is exhausted so a
- // slow-but-not-statically-rejected pattern can't stall the tab indefinitely
- // across many nodes. Results found so far are still returned.
+  const matchedTexts: string[] = [];
+  while ((node = walker.nextNode()) && matchedTexts.length < LIMITS.searchPageMaxMatches && visits < LIMITS.searchPageMaxNodeVisits) {
     if (Date.now() > deadline) break;
- // Honor an abort signal (user STOP / run cancel): bail out of the walk and
- // return whatever results were found so far instead of blocking until the
- // budget or visit cap is hit.
     if (ctx.signal?.aborted) break;
     visits++;
     let text = node.textContent || "";
- // Skip text inside <script>/<style> — it is not user-visible and only adds
- // noise (e.g. matches against code/CSS) and wasted visits on large inline
- // scripts. Still counted toward the visit cap above so the budget is preserved.
     const parentTag = (node.parentElement as HTMLElement | null)?.tagName;
     if (parentTag === "SCRIPT" || parentTag === "STYLE") continue;
- // Cap the per-node text handed to the regex so any pattern we didn't
- // statically reject still operates on bounded input (backtracking cost
- // grows with input length). Substring search is linear and needs no cap.
     if (regex && text.length > SEARCH_PAGE_NODE_TEXT_CAP) {
       text = text.slice(0, SEARCH_PAGE_NODE_TEXT_CAP);
     }
- // Compute only the form each branch actually needs, so we never lowercased
- // an entire (capped-at-4096-char) text node when a case-sensitive or regex
- // match is being performed (the ReDoS-guarded regex path handles case itself).
+    if (ctx.signal?.aborted) break;
     const loc = locateMatch(text, regex, pattern, needle, action.case_sensitive);
     if (loc) {
- // Redact known secret values from the FULL node text BEFORE slicing the
- // context window, so a secret straddling the 40-char boundary can never leak
- // partially into the snippet (redactSecrets replaces the whole value with an
- // atomic [REDACTED:name] marker). Bounded to at most searchPageMaxMatches
- // redaction calls (one per matched node), never per visited node.
-      const safeText = await redactSecrets(text);
- // Re-locate the match in the redacted text so the snippet stays centered on
- // the match even if redaction shifted offsets. If the match no longer
- // resolves after redaction, the pre-redaction `loc` offsets are STALE — they
- // index into the original `text`, whose length differs from `safeText` once
- // secrets are replaced by atomic markers — so reusing them would slice the
- // snippet at the wrong position (and could even go out of bounds). In that
- // case, center the window on the node start (idx 0) instead of the lost
- // match position.
-      const redactedLoc = locateMatch(safeText, regex, pattern, needle, action.case_sensitive);
-      const sliceLoc = redactedLoc ?? { idx: 0, len: safeText.length };
- // Center the returned snippet on the actual match (not the node start) so the
- // LLM sees the relevant region even when the match sits mid-node.
-      const start = Math.max(0, sliceLoc.idx - 40);
-      const end = sliceLoc.idx + sliceLoc.len + 40;
-      const ctx = safeText.slice(start, end).trim().slice(0, LIMITS.searchPageContextChars);
-      results.push(`- ${ctx.replace(CONTROL_CHARS_RE, "")}`);
-      count++;
+      matchedTexts.push(text);
     }
+  }
+  const BATCH_DELIM = "\x00";
+  let redactedTexts: string[];
+  if (matchedTexts.length > 0) {
+    const concatenated = matchedTexts.join(BATCH_DELIM);
+    const redacted = await redactSecrets(concatenated);
+    redactedTexts = redacted.split(BATCH_DELIM);
+  } else {
+    redactedTexts = [];
+  }
+  for (let i = 0; i < matchedTexts.length; i++) {
+    const safeText = redactedTexts[i] ?? matchedTexts[i];
+    const redactedLoc = locateMatch(safeText, regex, pattern, needle, action.case_sensitive);
+    const sliceLoc = redactedLoc ?? { idx: 0, len: safeText.length };
+    const start = Math.max(0, sliceLoc.idx - 40);
+    const end = sliceLoc.idx + sliceLoc.len + 40;
+    const snippet = safeText.slice(start, end).trim().slice(0, LIMITS.searchPageContextChars);
+    results.push(`- ${snippet.replace(CONTROL_CHARS_RE, "")}`);
   }
   const extractedContent =
     results.length > 0

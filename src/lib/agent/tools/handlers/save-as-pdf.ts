@@ -64,7 +64,7 @@ export async function handleSaveAsPdf(
         chrome.runtime
           .sendMessage({ type: "SAVE_AS_PDF", fileName: file_name })
           .finally(() => clearTimeout(timer))
-          .catch(() => {}),
+          .catch((e) => { console.debug("[save_as_pdf] SW rejected:", e); return undefined; }),
         new Promise<undefined>((resolve) => {
           timer = setTimeout(() => resolve(undefined), SAVE_AS_PDF_TIMEOUT_MS);
         }),
