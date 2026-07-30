@@ -33,6 +33,9 @@ export const openOptionsLink = document.getElementById("openOptions") as HTMLBut
 export const takeoverBanner = document.getElementById("takeoverBanner") as HTMLDivElement | null;
 export const takeoverReason = document.getElementById("takeoverReason") as HTMLDivElement | null;
 export const resumeBtn = document.getElementById("resumeBtn") as HTMLButtonElement | null;
+export const statusCenter = document.getElementById("statusCenter") as HTMLDivElement | null;
+
+sendBtn.disabled = true;
 
 export const STORAGE_KEYS = {
   task: "task",
@@ -51,6 +54,9 @@ export const STORAGE_KEYS = {
 // Mutable shared state (live bindings — sibling modules read/write these)
 export let currentMode = "standard" as string;
 export let maxSteps = 100 as number;
+/** Set to true once chrome.storage has loaded persisted settings. Controls
+ *  whether the send button is enabled before storage syncs. */
+export let storageReady = false;
 
 /** Update the agent mode + persist to chrome.storage. */
 export function setCurrentMode(v: string): void {
@@ -70,6 +76,8 @@ if (typeof chrome !== "undefined" && chrome.storage?.local) {
     if (typeof s?.[STORAGE_KEYS.maxSteps] === "number") {
       maxSteps = s[STORAGE_KEYS.maxSteps] as number;
     }
+    storageReady = true;
+    sendBtn.disabled = false;
   });
 
   // Sync when settings change in another tab (e.g. Options page).

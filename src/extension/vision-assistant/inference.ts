@@ -47,6 +47,18 @@ const presentKeyNames = Array.from({ length: N_LAYERS }, (_, i) => `present_key_
 const pastValueNames = Array.from({ length: N_LAYERS }, (_, i) => `past_value_${i}`);
 const presentValueNames = Array.from({ length: N_LAYERS }, (_, i) => `present_value_${i}`);
 
+// Pre-allocated zero-length KV-cache tensors for the prefill phase.
+// These are immutable sentinels — creating them once avoids 72 tensor
+// allocations per detect() call.
+const EMPTY_PAST: Record<string, ort.Tensor> = (() => {
+  const f: Record<string, ort.Tensor> = {};
+  for (let i = 0; i < N_LAYERS; i++) {
+    f[pastKeyNames[i]] = new ort.Tensor("float32", new Float32Array(0), [1, KV_HEADS, 0, HEAD_DIM]);
+    f[pastValueNames[i]] = new ort.Tensor("float32", new Float32Array(0), [1, KV_HEADS, 0, HEAD_DIM]);
+  }
+  return f;
+})();
+
 // Lazy-load transformers.js only when needed (keeps the extension bundle small).
 // Reset the cached promise on rejection so a transient fetch failure (network
 // drop, HuggingFace outage, auth issue) doesn't permanently disable Local
@@ -453,6 +465,7 @@ export class VisionAssistant {
     this.detectPromise = this.doDetect(screenshotDataUrl, signal).finally(() => {
       this.detectPromise = null;
       this.detectDataUrl = null;
+      this.chain = null;
     });
  // The chain tail is the live run; queued calls append after it.
     this.chain = this.detectPromise;
@@ -524,16 +537,22 @@ export class VisionAssistant {
  // signature instead.
     const tokenizer = this.tokenizer as TokenizeFn;
     const enc = await tokenizer(promptStr, { add_special_tokens: false });
-    const ids = Array.from(enc.input_ids.data, (x: unknown) => Number(x));
+// Build ids array and count IMG_CONTEXT tokens in a single pass.
+    const ids: number[] = [];
+    let ctxCount = 0;
+    for (const x of enc.input_ids.data) {
+      const id = Number(x);
+      ids.push(id);
+      if (id === IMG_CONTEXT_TOKEN) ctxCount++;
+    }
 
- // The tokenizer must emit exactly N <IMG_CONTEXT> tokens to match the N
- // placeholders injected into the prompt and the N rows of `visual_features`.
- // If it emits a different count (e.g. it splits/merges the token for this
- // model/input), splicing by occurrence would run `visIdx` past `vdata`
- // (length N*H); `subarray` would then clamp to an empty slice that
- // `embeds.set` silently writes as a zeroed embedding, degrading detection
- // without raising an error. Detect and bail out rather than mis-embed.
-    const ctxCount = ids.reduce((acc: number, id: number) => acc + (id === IMG_CONTEXT_TOKEN ? 1 : 0), 0);
+// The tokenizer must emit exactly N <IMG_CONTEXT> tokens to match the N
+// placeholders injected into the prompt and the N rows of `visual_features`.
+// If it emits a different count (e.g. it splits/merges the token for this
+// model/input), splicing by occurrence would run `visIdx` past `vdata`
+// (length N*H); `subarray` would then clamp to an empty slice that
+// `embeds.set` silently writes as a zeroed embedding, degrading detection
+// without raising an error. Detect and bail out rather than mis-embed.
     if (ctxCount !== N) {
       const msg = `Vision detect(): tokenizer emitted ${ctxCount} <IMG_CONTEXT> tokens but ${N} were injected; aborting to avoid mis-embedding.`;
       console.warn(msg);
@@ -556,15 +575,9 @@ export class VisionAssistant {
 
  // 5. KV-cache prefill
     const idsBig = BigInt64Array.from(ids);
-    const mkEmptyPast = (): Record<string, ort.Tensor> => {
-      const f: Record<string, ort.Tensor> = {};
-      for (let i = 0; i < N_LAYERS; i++) {
-        f[pastKeyNames[i]] = new ort.Tensor("float32", new Float32Array(0), [1, KV_HEADS, 0, HEAD_DIM]);
-        f[pastValueNames[i]] = new ort.Tensor("float32", new Float32Array(0), [1, KV_HEADS, 0, HEAD_DIM]);
-      }
-      return f;
-    };
 
+// Module-level empty past tensors — immutable zero-length sentinels reused
+// across every detect() call to avoid re-allocating 72 tensors per detection.
     const attnMaskBuf = new BigInt64Array(L + MAX_NEW_TOKENS);
     attnMaskBuf.fill(BigInt(1));
 
@@ -572,8 +585,8 @@ export class VisionAssistant {
       input_ids: new ort.Tensor("int64", idsBig, [1, L]),
       inputs_embeds: new ort.Tensor("float32", embeds, [1, L, H]),
       attention_mask: new ort.Tensor("int64", attnMaskBuf.subarray(0, L), [1, L]),
-      position_ids: new ort.Tensor("int64", BigInt64Array.from(ids.map((_: number, i: number) => BigInt(i))), [1, L]),
-      ...mkEmptyPast(),
+      position_ids: new ort.Tensor("int64", BigInt64Array.from({ length: L }, (_, i) => BigInt(i)), [1, L]),
+      ...EMPTY_PAST,
     };
 
     if (signal?.aborted) throw new DOMException("Vision detect aborted", "AbortError");
@@ -588,15 +601,16 @@ export class VisionAssistant {
     let next = argmaxLast(logits.data as Float32Array, V);
     const gen: number[] = [next];
 
- // 6. Decode loop with KV cache
+// 6. Decode loop with KV cache
     let pastLen = L;
+    const emb1 = new Float32Array(H);
     for (let step = 0; step < MAX_NEW_TOKENS - 1; step++) {
       if (next === IM_END_TOKEN) break;
- // Short-circuit the decode loop when the run is aborted. `session.run`
- // itself isn't interruptible, but skipping the remaining decode steps
- // reclaims the GPU/CPU that would otherwise finish an abandoned result.
+// Short-circuit the decode loop when the run is aborted. `session.run`
+// itself isn't interruptible, but skipping the remaining decode steps
+// reclaims the GPU/CPU that would otherwise finish an abandoned result.
       if (signal?.aborted) throw new DOMException("Vision detect aborted", "AbortError");
-      const emb1 = new Float32Array(H);
+      emb1.fill(0);
       gatherEmbed(next, emb1, 0, this.embPacked, this.embScales, this.embMeta);
       const f: Record<string, ort.Tensor> = {
         input_ids: new ort.Tensor("int64", BigInt64Array.from([BigInt(next)]), [1, 1]),

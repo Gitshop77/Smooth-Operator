@@ -33,6 +33,9 @@ import type { DownloadProgress } from "./types";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+// Pre-allocated hex lookup table — avoids per-byte string allocation in sha256().
+const HEX = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, "0"));
+
 /**
  * Whether an unpinned model file may be cached without a pinned SHA-256.
  *
@@ -71,9 +74,7 @@ async function allowUnpinnedWeights(): Promise<boolean> {
 /** SHA-256 (lowercase hex) of a buffer, via the Web Crypto API. */
 async function sha256(buf: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", buf as BufferSource);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  return Array.from(new Uint8Array(digest), (b) => HEX[b]).join("");
 }
 
 /**
@@ -170,7 +171,7 @@ async function fetchBufProgress(
       break;
     } catch (e) {
       if (tr >= DOWNLOAD_MAX_RETRIES - 1) throw e;
-      await sleep(1200);
+      await sleep(Math.min(1000 * 2 ** tr, 30_000) + Math.random() * 1000);
     }
   }
 
@@ -223,8 +224,7 @@ async function fetchBufProgress(
  // No usable size information from either Content-Range or Content-Length —
  // we cannot trust the probe chunk as the whole file. Force a full-file GET
  // (no Range) so we download everything rather than silently caching a
- // truncated partial
- // download with an unknown total was cached as complete). The integrity
+ // truncated partial download with an unknown total was cached as complete). The integrity
  // check still runs afterwards.
   return (
     await fetchToBuffer(url, {}, (d, t) =>
@@ -262,7 +262,7 @@ async function downloadChunks(
         ok = true;
       } catch (e) {
         if (tr === DOWNLOAD_MAX_RETRIES - 1) throw e;
-        await sleep(1000);
+        await sleep(Math.min(1000 * 2 ** tr, 30_000) + Math.random() * 1000);
       }
     }
     if (part === null) {
@@ -319,6 +319,10 @@ const DIGEST_HEADER = "x-model-sha256";
 
 export class ModelLoader {
   private cache: Cache | null = null;
+  // Decoded buffer cache — avoids full ArrayBuffer copy on repeated getBuffer()
+  // calls for the same URL (the Cache API's response.arrayBuffer() clones the
+  // body each time). Populated on first read, cleared on cache invalidation.
+  private bufferCache = new Map<string, Uint8Array>();
 
   /**
    * Best-effort listener for non-fatal security warnings (currently only the
@@ -378,29 +382,50 @@ export class ModelLoader {
 
   async downloadAll(onProgress?: (p: DownloadProgress) => void): Promise<void> {
     if (!this.cache) await this.init();
-    for (const { url, name } of ALL_FILES) {
-      const existing = await this.cache!.match(url);
-      if (existing) continue; // Already cached
-      const buf = await fetchBufProgress(url, name, onProgress);
-      const digest = await this.verifyIntegrity(url, name, buf);
-      const response = new Response(buf as unknown as ArrayBuffer, {
-        headers: { [DIGEST_HEADER]: digest },
-      });
-      try {
-        await this.cache!.put(url, response);
-      } catch (e) {
- // Caching failed (quota / SW eviction). We deliberately throw instead
- // of swallowing — the already-downloaded buffer is large and we must not
- // silently loop re-downloading it on every call. Surface the cause so
- // the UI can tell the user to free storage.
-        throw new Error(
-          `[vision-assistant] Failed to persist model file "${name}" (${url}): ` +
-            `${(e as Error).message}. Usually caused by insufficient storage ` +
-            `quota (the model is ~2 GB). Free space and retry; the downloaded ` +
-            `bytes were not saved.`,
-        );
+// Filter to only uncached files (must await each match).
+// Also verify integrity of cached entries — a corrupted/partially-written
+// cache entry (from a previous interrupted download, browser crash, or cache
+// rollback) would otherwise pass the match check and fail later in getBuffer.
+    const pending: Array<{ url: string; name: string }> = [];
+    for (const file of ALL_FILES) {
+      const existing = await this.cache!.match(file.url);
+      if (existing) {
+        const buf = new Uint8Array(await existing.arrayBuffer());
+        try {
+          await this.reverifyIntegrity(file.url, buf, existing);
+          continue;
+        } catch {
+          await this.cache!.delete(file.url);
+        }
       }
+      pending.push(file);
     }
+    if (pending.length === 0) return;
+// Download in parallel with a concurrency cap to avoid browser throttling.
+    const CONCURRENCY = 3;
+    let idx = 0;
+    const next = async (): Promise<void> => {
+      while (idx < pending.length) {
+        const i = idx++;
+        const { url, name } = pending[i];
+        const buf = await fetchBufProgress(url, name, onProgress);
+        const digest = await this.verifyIntegrity(url, name, buf);
+        const response = new Response(buf as unknown as ArrayBuffer, {
+          headers: { [DIGEST_HEADER]: digest },
+        });
+        try {
+          await this.cache!.put(url, response);
+        } catch (e) {
+          throw new Error(
+            `[vision-assistant] Failed to persist model file "${name}" (${url}): ` +
+              `${(e as Error).message}. Usually caused by insufficient storage ` +
+              `quota (the model is ~2 GB). Free space and retry; the downloaded ` +
+              `bytes were not saved.`,
+          );
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, pending.length) }, next));
   }
 
   /**
@@ -453,10 +478,10 @@ export class ModelLoader {
   }
 
   /**
- * Re-verify a cached buffer against the digest stored when it was written
- * (catches cache corruption / rollback / poisoning) and, when a hash is
- * pinned, against that pinned value (catches tampering with the cache).
- */
+   * Re-verify a cached buffer against the digest stored when it was written
+   * (catches cache corruption / rollback / poisoning) and, when a hash is
+   * pinned, against that pinned value (catches tampering with the cache).
+   */
   private async reverifyIntegrity(
     url: string,
     buf: Uint8Array,
@@ -484,6 +509,10 @@ export class ModelLoader {
   }
 
   async getBuffer(url: string): Promise<Uint8Array> {
+// Return cached buffer if available (avoids ArrayBuffer copy from Cache API).
+    const cached = this.bufferCache.get(url);
+    if (cached) return cached;
+
     if (!this.cache) await this.init();
     const response = await this.cache!.match(url);
     if (!response) throw new Error(`Model file not cached: ${url}`);
@@ -502,11 +531,11 @@ export class ModelLoader {
     } catch (e) {
  // Auto-recover: delete the poisoned / rolled-back / tampered entry so the
  // next load re-downloads a clean copy instead of repeatedly failing
- //
- // cache entry).
+ // (hitting the poisoned cache entry).
       try { await this.cache!.delete(url); } catch { /* best-effort */ }
       throw e;
     }
+    this.bufferCache.set(url, buf);
     return buf;
   }
 
@@ -537,7 +566,7 @@ export class ModelLoader {
     } catch (e) {
  // Auto-recover: delete the poisoned / rolled-back entry so the next load
  // re-downloads a clean copy
- // auto-recover the poisoned cache entry).
+ // (to auto-recover the poisoned cache entry).
       try { await this.cache!.delete(url); } catch { /* best-effort */ }
       throw e;
     }
@@ -547,5 +576,6 @@ export class ModelLoader {
   async clearCache(): Promise<void> {
     await caches.delete(CACHE_NAME);
     this.cache = null;
+    this.bufferCache.clear();
   }
 }

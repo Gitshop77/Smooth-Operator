@@ -17,6 +17,7 @@ import {
   currentMode,
   maxSteps,
   setCurrentMode,
+  storageReady,
 } from "./elements";
 import { setLifecycle } from "./lifecycle";
 import { hideTakeoverBanner } from "./takeover";
@@ -183,7 +184,7 @@ messageInput.addEventListener("keydown", (e: KeyboardEvent) => {
 });
 
 messageInput.addEventListener("input", () => {
-  sendBtn.disabled = !messageInput.value.trim() || running;
+  sendBtn.disabled = !storageReady || !messageInput.value.trim() || running;
 });
 
 // ─── / keyboard shortcut to focus input ──────────────────────────────────
@@ -204,6 +205,7 @@ stopBtn.addEventListener("click", () => {
   stopBtn.disabled = true;
   chrome.runtime.sendMessage({ type: "STOP" }, () => {
     if (chrome.runtime.lastError) {
+      stopDebounceTimer = setTimeout(() => { stopDebounceTimer = null; }, 1000);
       stopBtn.disabled = false;
       addSystemMessage(
         "❌",
@@ -216,7 +218,11 @@ stopBtn.addEventListener("click", () => {
     if (stopDebounceTimer) { clearTimeout(stopDebounceTimer); stopDebounceTimer = null; }
     addSystemMessage("⏹", "Stopping after current step…");
     // Re-enable stop so the user can force-stop if the first was ignored.
-    if (running) stopBtn.disabled = false;
+    // Re-arm the debounce timer so rapid re-clicks are still throttled.
+    if (running) {
+      stopDebounceTimer = setTimeout(() => { stopDebounceTimer = null; }, 1000);
+      stopBtn.disabled = false;
+    }
   });
 });
 

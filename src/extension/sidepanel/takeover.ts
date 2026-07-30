@@ -91,7 +91,7 @@ resumeBtn?.addEventListener("click", () => {
 function buildDialogOverlay(message: string, okLabel = "OK") {
   // Clean up any existing dialog overlay to prevent zombie dialogs
   // when a second takeover event fires while a dialog is already open.
-  if (activeFinish) { activeFinish(null); activeFinish = null; }
+  if (activeFinish) { activeFinish(null as unknown); activeFinish = null; }
   removeActiveOverlay();
   const trigger = (document.activeElement as HTMLElement | null) ?? null;
   const uid = globalThis.crypto?.randomUUID?.() ?? `d${Math.random().toString(36).slice(2)}`;
