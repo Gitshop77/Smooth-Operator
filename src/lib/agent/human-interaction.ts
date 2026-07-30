@@ -210,32 +210,33 @@ export async function askHumanExtension(
   });
 }
 
+/** True when running outside the Chrome extension (tests, in-page demo). */
+const IS_DEMO = typeof chrome === "undefined" || !chrome.runtime?.id;
+
 /**
  * Unified `askHuman` — dispatches to {@link askHumanExtension} when running
  * inside a Chrome extension context. Falls back to `window.confirm`/`window.prompt`
  * for test/non-extension contexts.
  */
 export async function askHuman(req: HumanInteractionRequest): Promise<HumanInteractionResponse> {
-  const isExtension = typeof chrome !== "undefined" && !!chrome.runtime?.id;
-  if (isExtension) {
+  if (!IS_DEMO) {
     return askHumanExtension(req, resolveTimeoutMs(req.timeoutMs));
   }
- // Non-extension fallback (tests, non-Chrome contexts).
+  // Non-extension fallback (tests, non-Chrome contexts).
   if (req.mode === "confirm") {
     return { mode: "confirm", confirmed: window.confirm(req.message) };
   }
   if (req.mode === "input" || req.mode === "password") {
- // For non-extension password prompts, fall back to window.prompt (jsdom
- // and tests don't have a native password input). The value still flows
- // through `substituteSecrets` at the executor when the agent used a
- // `%secret_name%` placeholder, so the cleartext never reaches the LLM.
- // The extension side-panel path (askHumanExtension) uses a real masked
- // <input type="password"> for genuine password UX.
- //
- // Never pre-fill a secret: for `password` mode we pass no default so the
- // cleartext isn't surfaced in the prompt UI. Only plain `input` mode uses
- // `defaultValue`.
     const isSecret = req.mode === "password";
+    if (isSecret) {
+      if (!IS_DEMO) {
+        throw new Error(
+          "password mode requires the Chrome extension side panel; " +
+          "window.prompt exposes secrets in plain text"
+        );
+      }
+      console.warn("[human-interaction] password mode falling back to window.prompt — secrets visible in browser UI");
+    }
     const def = isSecret ? "" : (req.defaultValue ?? "");
     const value = window.prompt(req.message, def);
     return value === null ? { mode: "cancelled" } : { mode: "input", value };
