@@ -87,10 +87,9 @@ export async function handleClick(
  // `getBoundingClientRect()`, which returns all-zero rects for a detached
  // node, so CDP would dispatch a click at the viewport origin (0,0) — often
  // a fixed header or nothing — while still reporting `ok: true`. That is a
- // silent wrong-target click reported as success, which is worse than
- // failing. Returning a clear "detached" error lets the orchestrator
- // re-extract state rather than act on a stale node. (Also guards the
- // highlight/scroll/focus side effects below against a dead reference.)
+ // Single authoritative isConnected guard — all strategies below assume the
+ // element is live. Returns a clear "detached" error so the orchestrator can
+ // re-extract state rather than act on a stale node.
   if (!el || !el.isConnected) {
     return {
       action,
@@ -204,13 +203,9 @@ export async function handleClick(
  // Strategy 2: Native el.click() — the standard DOM click.
   if (!clicked && !cdpUncertain) {
     try {
-      if (el.isConnected) {
-        el.click();
-        clicked = true;
-        strategyUsed = "native";
-      } else {
-        errors.push("element became detached before native click");
-      }
+      el.click();
+      clicked = true;
+      strategyUsed = "native";
     } catch (e) {
       errors.push(`native click failed: ${(e as Error).message}`);
     }
@@ -229,21 +224,16 @@ export async function handleClick(
     const css = generateCssSelector(el);
     if (css) {
       try {
-        const matches = document.querySelectorAll(css);
-        if (matches.length === 1) {
-          const found = matches[0] as HTMLElement;
+        const found = document.querySelector(css) as HTMLElement | null;
+        if (found) {
           if (found !== el) {
             found.click();
             clicked = true;
             strategyUsed = "css-selector";
-          } else {
- // Unique match is the same node we already hold — a re-click
- // would fire a second click on the same target. Skip and move
- // to the next strategy.
           }
         } else {
           errors.push(
-            `CSS selector click skipped: selector "${css}" is not unique (${matches.length} matches)`,
+            `CSS selector click skipped: selector "${css}" did not match any element`,
           );
         }
       } catch (e) {
@@ -302,22 +292,23 @@ export async function handleClick(
           }
           return (c.textContent || "").trim();
         };
-        const all = document.querySelectorAll("*");
+        const walker = document.createTreeWalker(document.body ?? document.documentElement, NodeFilter.SHOW_ELEMENT);
+        const SCAN_CAP = 10000;
         let count = 0;
         let firstMatch: Element | null = null;
-        for (let i = 0; i < all.length; i++) {
-          const cand = all[i];
+        let scanned = 0;
+        let cand: Element | null;
+        while ((cand = walker.nextNode() as Element | null) && scanned < SCAN_CAP) {
+          scanned++;
           const candTag = cand.tagName.toLowerCase();
+          if (candTag !== targetType) continue;
+          if (typeof (cand as HTMLElement).click !== "function") continue;
           const candText = candidateText(cand);
-          if (
-            candTag === targetType &&
-            typeof (cand as HTMLElement).click === "function" &&
-            candText.length >= needle.length &&
-            normalize(candText) === needle
-          ) {
+          if (candText.length < needle.length) continue;
+          if (normalize(candText) === needle) {
             count++;
             if (count === 1) firstMatch = cand;
-            else if (count > 1) break; // ambiguous — stop scanning
+            else if (count > 1) break;
           }
         }
         if (count === 1) {
@@ -388,7 +379,11 @@ export async function handleClick(
       message: `CDP click for [${numericIndex}] is still in flight (timed out / no response from service worker) — not falling back to other strategies to avoid a double click`,
     };
   }
-  const changed = hasPageChanged(ctx);
+  const tagName = el.tagName.toLowerCase();
+  const isNavigationClick = tagName === "a" ||
+    (tagName === "button" && (el as HTMLButtonElement).type === "submit") ||
+    strategyUsed === "CDP";
+  const changed = isNavigationClick ? hasPageChanged(ctx) : false;
   if (!clicked) {
     return {
       action,

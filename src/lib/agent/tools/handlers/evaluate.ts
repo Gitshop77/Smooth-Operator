@@ -69,6 +69,21 @@ function makeThrowingProxy(name: string): unknown {
   );
 }
 
+/**
+ * Decode `\uXXXX` and `\u{XXXXX}` escape sequences in source code to their
+ * actual characters. This must run BEFORE the code-string escape scanner so
+ * that encoded patterns like `\u002econstructor` (→ `.constructor`) or
+ * `\u005f\u005fproto\u005f\u005f` (→ `__proto__`) are visible to the regex
+ * checks that only look for literal substrings.
+ */
+function normalizeUnicodeEscapes(src: string): string {
+  return src.replace(
+    /\\u\{([0-9a-fA-F]+)\}|\\u([0-9a-fA-F]{4})/g,
+    (_, hex1: string | undefined, hex2: string | undefined) =>
+      String.fromCodePoint(parseInt(hex1 ?? hex2, 16)),
+  );
+}
+
 // Stateless throwing stubs for the dangerous globals passed as parameters to
 // the generated function. These are identical on every `handleEvaluate` call,
 // so build them once at module load instead of re-creating them per invocation.
@@ -433,12 +448,15 @@ export function runSandboxedCode(code: string): unknown {
     cachedFingerprint = fp;
   }
   const { hardenedDocument, sandboxWindow, sandboxGlobal, sandboxSelf } = cachedSandbox;
+// Normalize Unicode escape sequences before scanning so encoded patterns
+  // like \u002econstructor (→ .constructor) are visible to the regex checks.
+  const normalizedCode = normalizeUnicodeEscapes(code);
 // Block obvious Function-constructor escape patterns at the entry point.
   // This catches `[].constructor.constructor`, `({}).constructor.constructor`,
   // and `(async function(){}).constructor` — the documented bypass vectors.
   // Obfuscated variants (string concat, template literals) are caught by the
   // MV3 platform restriction on chrome.storage.session from content scripts.
-  if (/\.\s*constructor\s*(?:\[\s*['"]constructor['"]\s*\]|\.constructor)?/.test(code)) {
+  if (/\.\s*constructor\s*(?:\[\s*['"]constructor['"]\s*\]|\.constructor)?/.test(normalizedCode)) {
     throw new Error(
       "evaluate blocked: Function-constructor escape pattern detected. " +
       "This pattern can bypass the evaluate sandbox.",
@@ -454,7 +472,7 @@ export function runSandboxedCode(code: string): unknown {
     { pattern: /getPrototypeOf/, name: "Object.getPrototypeOf call" },
   ];
   for (const { pattern, name } of ESCAPE_PATTERNS) {
-    if (pattern.test(code)) {
+    if (pattern.test(normalizedCode)) {
       throw new Error(
         `evaluate blocked: sandbox escape pattern detected (${name})`,
       );
@@ -467,6 +485,12 @@ export function runSandboxedCode(code: string): unknown {
   // time. Strip any leading directive and any leading comments (a strict
   // snippet that begins with a comment would otherwise keep its directive
   // and re-trigger the same SyntaxError).
+  //
+  // CONSEQUENCE: evaluated code runs in sloppy mode. Semantic differences
+  // from strict mode: `this` in functions defaults to `window` (not
+  // `undefined`), missing variables create globals instead of throwing
+  // `ReferenceError`, and duplicate parameter names are silently allowed.
+  // This matches the real-browser behavior most page JS expects.
   const strippedCode = code
     .replace(/^\s*(?:\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*\s*/, "")
     .replace(/^\s*["']use strict["']\s*;?/, "");
