@@ -90,6 +90,8 @@ let mergedCache: Catalog = { ...BUNDLED_CATALOG };
 let memoryCacheTime = 0;
 /** In-flight fetch promise, memoized to dedupe concurrent callers. */
 let inflight: Promise<Catalog> | null = null;
+/** AbortController for the in-flight fetch — aborted when force=true supersedes it. */
+let inflightController: AbortController | null = null;
 
 /**
  * Memoized lowercase search index. `searchModels` is keystroke-driven, so we
@@ -307,7 +309,7 @@ function mergeCatalogs(base: Catalog, live: Catalog): Catalog {
     }
     out[pid] = merged;
   }
-  return out;
+  return Object.freeze(out);
 }
 
 /** Storage area to use for the 5-min cache: `session` if present, else `local`. */
@@ -348,7 +350,7 @@ async function readCachedCatalog(): Promise<CachedCatalog | null> {
  * Never throws: on any network/validation failure it falls back to the stale
  * persistent cache, and finally returns the bundled snapshot.
  */
-async function loadCatalog(force: boolean): Promise<Catalog> {
+async function loadCatalog(force: boolean, signal?: AbortSignal): Promise<Catalog> {
   // Check persistent cache first (unless forced).
   if (!force) {
     const cached = await readCachedCatalog();
@@ -361,7 +363,11 @@ async function loadCatalog(force: boolean): Promise<Catalog> {
 
   // Fetch + merge the live catalog OVER the bundled snapshot.
   try {
-    const res = await fetch(CATALOG_URL, { signal: AbortSignal.timeout(10_000) });
+    const timeoutSignal = AbortSignal.timeout(10_000);
+    const fetchSignal = signal
+      ? AbortSignal.any([signal, timeoutSignal])
+      : timeoutSignal;
+    const res = await fetch(CATALOG_URL, { signal: fetchSignal, credentials: "omit" });
     if (!res.ok) throw new Error(`models.dev API ${res.status}`);
     const raw = await res.json();
     if (!isValidCatalog(raw)) {
@@ -382,14 +388,8 @@ async function loadCatalog(force: boolean): Promise<Catalog> {
     return merged;
   } catch (err) {
     // Network/validation failure — try a stale cache, then bundled snapshot.
-    if (
-      typeof process !== "undefined" &&
-      process.env &&
-      process.env.NODE_ENV !== "production"
-    ) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn("[catalog] fetchCatalog failed, using bundled:", msg);
-    }
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn("[catalog] fetchCatalog failed, using bundled:", msg);
     const cached = await readCachedCatalog();
     if (cached) {
       mergedCache = cached.data;
@@ -425,6 +425,14 @@ export async function fetchCatalog(
     return mergedCache;
   }
 
+  // Abort the previous in-flight fetch when superseded by a forced refresh.
+  if (force && inflightController) {
+    inflightController.abort();
+  }
+
+  const controller = new AbortController();
+  inflightController = controller;
+
   let resolveFn!: (value: Catalog) => void;
   let rejectFn!: (reason: unknown) => void;
   const promise = new Promise<Catalog>((resolve, reject) => {
@@ -435,13 +443,16 @@ export async function fetchCatalog(
 
   (async () => {
     try {
-      resolveFn(await loadCatalog(force));
+      resolveFn(await loadCatalog(force, controller.signal));
     } catch (err) {
       rejectFn(err);
     } finally {
       // Only clear the shared slot if it still points at THIS promise (a newer
       // concurrent fetch may have overwritten `inflight` while we awaited).
-      if (inflight === promise) inflight = null;
+      if (inflight === promise) {
+        inflight = null;
+        inflightController = null;
+      }
     }
   })();
 

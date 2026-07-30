@@ -26,8 +26,9 @@ describe("openrouter facade", () => {
     expect(provider.supportsVision).toBe(true);
     expect(provider.supportsStructuredOutput).toBe(true);
     expect(typeof provider.chat).toBe("function");
- // Bridged providers intentionally do not implement streamChat (optional).
-    expect(provider.streamChat).toBeUndefined();
+  // Bridged providers implement a streamChat stub that throws a clear error.
+    expect(typeof provider.streamChat).toBe("function");
+    expect(() => provider.streamChat!({} as any)).toThrow("streamChat not supported by bridged providers");
   });
 
   test("a user-supplied baseURL must pass the SSRF guard (invalid throws)", () => {

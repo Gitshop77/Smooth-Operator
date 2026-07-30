@@ -73,11 +73,12 @@ export function toLLMProvider(config: ProviderBridgeConfig): LLMProvider {
     supportsStructuredOutput: config.supportsStructuredOutput,
     supportsVision: config.supportsVision,
     supportsReasoning: config.supportsReasoning ?? false,
- // NOTE: bridged providers implement `chat` only. `streamChat` is intentionally
- // NOT provided — it is optional on the `LLMProvider` interface, and no streaming
- // entry point exists in the route layer that the bridge could delegate to. Any
- // consumer needing streaming must null-check `provider.streamChat` before calling
- // it; invoking it unguarded on a bridged provider would be a contract violation.
+// NOTE: bridged providers implement `chat` only. `streamChat` is intentionally
+// stubbed to throw a clear error — no streaming entry point exists in the route
+// layer that the bridge could delegate to.
+    streamChat(): AsyncIterable<never> {
+      throw new Error("streamChat not supported by bridged providers");
+    },
     async chat(req: LLMRequest): Promise<LLMResponse> {
       const model = config.configureResult.model(config.model);
       const { generate } = await import("./route/client");
@@ -126,7 +127,7 @@ export function toLLMProvider(config: ProviderBridgeConfig): LLMProvider {
               cachedInputTokens: omitZero(cachedInputTokens),
               cachedWriteInputTokens: omitZero(cachedWriteInputTokens),
               model: config.model,
-              costUsd: estimateCost(config.model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, undefined, config.providerId),
+              costUsd: estimateCost({ model: config.model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, providerId: config.providerId }),
             }
           : undefined,
       };

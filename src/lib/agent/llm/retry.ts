@@ -25,6 +25,8 @@ const BASE_DELAY_MS = 1_500;
 const BACKOFF_JITTER_MS = 500;
 /** Ceiling (ms) for a `Retry-After` header so a hostile/buggy 429 can't freeze the run. */
 const MAX_RETRY_AFTER_MS = 30_000;
+/** Absolute ceiling (ms) on cumulative retry delay — breaks the loop even if individual retries haven't exhausted MAX_RETRIES. */
+const MAX_RETRY_TOTAL_MS = 60_000;
 /** Chunk size (ms) for the abort-aware sleep loop. */
 const SLEEP_CHUNK_MS = 100;
 
@@ -90,6 +92,7 @@ export async function withLLMRetry<T>(
   signal?: AbortSignal,
   runId?: string
 ): Promise<T> {
+  let totalDelay = 0;
   for (let attempt = 0; ; attempt++) {
  // Honor abort before every attempt (including the first). Throw an
  // `AbortError`-named error (not a plain `Error`) so callers that classify
@@ -134,10 +137,6 @@ export async function withLLMRetry<T>(
  // decide retry instead — a genuine retryable 429/5xx whose provider body text
  // happens to mention "cancelled" must still be retried.
       const hasStatus = typeof status === "number";
-      // A message that mentions abort/cancel is only a deliberate-abort signal
-      // when it is NOT also a network/recoverable error (e.g. a dropped
-      // connection whose text says "canceled" must still be retried).
-      if (!hasStatus && ABORT_NAME_RE.test(msg) && !NETWORK_RE.test(msg)) throw e;
  // Prefer the numeric HTTP status carried on the error (set by the HTTP
  // transport) for classifying retryable transients. Fall back to scanning
  // the message body if the status isn't available (e.g. non-transport errors).
@@ -198,6 +197,8 @@ export async function withLLMRetry<T>(
         `${attempt + 1}/${MAX_RETRIES + 1} failed (${statusStr}); ` +
         `retryable=${retryable}; delay=${Math.round(delay)}ms${retryAfterStr}`
       );
+      totalDelay += delay;
+      if (totalDelay >= MAX_RETRY_TOTAL_MS) throw e;
       await abortAwareSleep(delay, signal);
     }
   }

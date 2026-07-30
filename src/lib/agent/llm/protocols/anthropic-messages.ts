@@ -93,7 +93,7 @@ async function fromRequest(request: LLMRequest): Promise<AnthropicBody> {
     model: request.model.id,
     max_tokens: request.generation?.maxTokens ?? 4096,
     messages,
-    temperature: request.generation?.temperature ?? 0,
+    temperature: request.reasoning ? undefined : (request.generation?.temperature ?? 0),
     stream: true,
   };
 
@@ -267,14 +267,8 @@ export const protocol: Protocol<AnthropicBody, string, { type: string; content?:
       }
       return { state, events };
     },
-    terminal: (frame: string): boolean => {
-      try {
-        return JSON.parse(frame).type === "message_stop";
-      } catch {
- // Non-JSON frame — not a terminal marker; log for debugging (length only).
-        console.warn(`[anthropic-messages] Terminal check on non-JSON SSE frame (${frame.length} bytes)`);
-        return false;
-      }
+    terminal: (frame: string, state?: StreamState): boolean => {
+      return state?.lastFrameType === "message_stop";
     },
   },
 };

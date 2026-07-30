@@ -315,7 +315,16 @@ export async function replaceAllRuns(runs: RunRecord[]): Promise<void> {
     try {
       writeLocalStorage(safeList);
     } catch (e) {
-      console.warn("[run-history] localStorage.setItem failed:", e);
+      if (e instanceof DOMException && e.name === "QuotaExceededError") {
+        safeList.pop();
+        try {
+          writeLocalStorage(safeList);
+        } catch (e2) {
+          console.warn("[run-history] localStorage quota exhausted even after trim:", e2);
+        }
+      } else {
+        console.warn("[run-history] localStorage.setItem failed:", e);
+      }
     }
   };
   const thisSave = saveChain.then(writer, writer);
