@@ -12,6 +12,23 @@ import { LIMITS, TIMINGS, sleep } from "../constants";
 import { resolveElement, safeScrollIntoView } from "../helpers";
 import type { ActionContext } from "./types";
 
+// Cache native value setters at module scope (mirrors send-keys.ts pattern).
+// Lazy-initialized on first input call to avoid touching HTMLInputElement
+// prototype in non-DOM contexts (service worker).
+let cachedInputSetter: ((v: string) => void) | undefined;
+let cachedTextareaSetter: ((v: string) => void) | undefined;
+
+function resolveSetters(): void {
+  if (cachedInputSetter === undefined) {
+    cachedInputSetter = typeof HTMLInputElement !== "undefined"
+      ? Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set
+      : undefined;
+    cachedTextareaSetter = typeof HTMLTextAreaElement !== "undefined"
+      ? Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set
+      : undefined;
+  }
+}
+
 /**
  * Parameter type for the `input` action. Mirrors the parsed {@link Action}
  * shape exactly, except `clear` is made optional: it carries a `.default(true)`
@@ -67,12 +84,10 @@ export async function handleInput(
  // reset it on the next render. The native prototype setter bypasses
  // React's tracking, then the `input` event lets React pick up the
  // new value.
-    const useTextareaProto =
-      typeof HTMLTextAreaElement !== "undefined" && el instanceof HTMLTextAreaElement;
-    const proto = useTextareaProto
-      ? (typeof HTMLTextAreaElement !== "undefined" ? window.HTMLTextAreaElement.prototype : undefined)
-      : (typeof HTMLInputElement !== "undefined" ? window.HTMLInputElement.prototype : undefined);
-    const nativeSetter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+    resolveSetters();
+    const nativeSetter = typeof HTMLTextAreaElement !== "undefined" && el instanceof HTMLTextAreaElement
+      ? cachedTextareaSetter
+      : cachedInputSetter;
     if (action.clear !== false) {
       if (nativeSetter) nativeSetter.call(el, text);
       else el.value = text;

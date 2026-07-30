@@ -12,6 +12,10 @@ import { isSensitive } from "../../dom/utils/classification";
 import { redactSecrets } from "../../secrets";
 import { scanForInjection } from "../../security";
 
+// Cache the dynamic import promise at module scope so repeated locator-based
+// find_elements calls skip the per-call module resolution check.
+const domUtilsPromise = import("../../dom/dom-utils");
+
 /**
  * Attempt `document.querySelectorAll` and return a structured result instead of
  * letting an invalid selector throw. LLM- or prompt-supplied selectors are
@@ -127,7 +131,7 @@ export async function handleFindElements(
   if (useLocator) {
     let importOk = false;
     try {
-      const { By, findByLocator } = await import("../../dom/dom-utils");
+      const { By, findByLocator } = await domUtilsPromise;
       importOk = true;
       let by: InstanceType<typeof By> | null = null;
       switch (kind) {
@@ -171,48 +175,63 @@ export async function handleFindElements(
   const cap = Math.min(Math.max(Math.floor(raw), 0), 200);
   const els = matchedEls.slice(0, cap);
   const attrs = action.attributes;
-  const results = await Promise.all(els.map(async (el, i) => {
- // Treat an explicitly-empty `attributes: []` the same as an omitted
- // `attributes` so it falls through to the text-content branch instead of
- // emitting an uninformative `i: {}` for every match.
-    if (attrs && attrs.length > 0) {
-      const picked: Record<string, string> = {};
+  const BATCH_DELIM = "\x00";
+  const results: string[] = [];
+  if (attrs && attrs.length > 0) {
+    const rawValues: string[][] = [];
+    const sensitiveFlags: boolean[][] = [];
+    const allRaw: string[] = [];
+    for (const el of els) {
+      const elRaw: string[] = [];
+      const elSensitive: boolean[] = [];
       for (const a of attrs) {
         const raw = el.getAttribute(a) || "";
+        elRaw.push(raw);
+        elSensitive.push(a === "value" && isSensitive(el as HTMLElement));
+        if (raw) allRaw.push(raw);
+      }
+      rawValues.push(elRaw);
+      sensitiveFlags.push(elSensitive);
+    }
+    const redactedMap = new Map<string, string>();
+    if (allRaw.length > 0) {
+      const concatenated = allRaw.join(BATCH_DELIM);
+      const redacted = await redactSecrets(concatenated);
+      const parts = redacted.split(BATCH_DELIM);
+      let idx = 0;
+      for (const raw of allRaw) {
+        redactedMap.set(raw, parts[idx] ?? raw);
+        idx++;
+      }
+    }
+    for (let i = 0; i < els.length; i++) {
+      const picked: Record<string, string> = {};
+      for (let j = 0; j < attrs.length; j++) {
+        const a = attrs[j];
+        const raw = rawValues[i][j];
         let v: string;
- // Never return a raw sensitive value (password / OTP / credit-card /
- // hidden token) — a page could be probed for secret-laden attributes,
- // and `isSensitive` mirrors the DOM extractor's sensitivity check.
-        if (a === "value" && isSensitive(el as HTMLElement)) {
+        if (sensitiveFlags[i][j]) {
           v = "[value redacted]";
         } else if (raw) {
- // Route attribute values through the same secret redactor used
- // elsewhere, so a stored secret that happens to appear in an
- // attribute (e.g. a `value="%email%"`-substituted field) is not
- // leaked back to the LLM. CRITICAL: redact the *untruncated* value
- // first — slicing before redaction would cut a long secret
- // mid-value and let `redactSecrets` (longest-first alternation)
- // fail to match, leaking a partial secret into the LLM context and
- // the persisted run history.
-          v = await redactSecrets(raw);
+          v = redactedMap.get(raw) ?? raw;
         } else {
           v = "";
         }
- // Truncate only AFTER redaction so redaction always sees the full
- // value and cannot be defeated by truncation.
         picked[a] = v.slice(0, LIMITS.findElementsTextChars);
       }
-      return `${i}: ${JSON.stringify(picked)}`;
+      results.push(`${i}: ${JSON.stringify(picked)}`);
     }
- // Default branch: surface the element's visible text content. The text may
- // contain a substituted secret (e.g. a contentEditable field whose value
- // was written by the `input` action), so redact it before it reaches the
- // LLM context / persisted run history. Redact the full text first, then
- // slice, so a secret straddling the truncation boundary is never partially
- // exposed.
-    const text = await redactSecrets((el.textContent || "").trim());
-    return `${i}: <${el.tagName.toLowerCase()}> ${text.slice(0, LIMITS.findElementsTextChars)}`;
-  }));
+  } else {
+    const textValues: string[] = els.map((el) => (el.textContent || "").trim());
+    const concatenated = textValues.join(BATCH_DELIM);
+    const redacted = await redactSecrets(concatenated);
+    const redactedTexts = redacted.split(BATCH_DELIM);
+    for (let i = 0; i < els.length; i++) {
+      const el = els[i];
+      const safeText = redactedTexts[i] ?? textValues[i];
+      results.push(`${i}: <${el.tagName.toLowerCase()}> ${safeText.slice(0, LIMITS.findElementsTextChars)}`);
+    }
+  }
   const extractedContent = results.length > 0 ? `Elements:\n${results.join("\n")}` : "No elements found";
   const scan = scanForInjection(extractedContent);
   const injectionWarnings =

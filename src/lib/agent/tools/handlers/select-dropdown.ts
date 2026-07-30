@@ -9,23 +9,14 @@ import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import { highlightElement } from "../../dom/overlay";
 import { NoSuchElementException, ElementNotSelectableError } from "../../errors";
-import { TIMINGS, sleep } from "../constants";
+import { TIMINGS, sleep, sanitizeForLog } from "../constants";
 import { domFingerprint, resolveElement, safeScrollIntoView, Select } from "../helpers";
 import type { ActionContext } from "./types";
 
-// Control characters stripped from page-derived option text before it is
-// reflected into result/error messages, so untrusted DOM labels can't forge
-// log lines or inject fake history entries (mirrors sibling handlers).
-const CONTROL_CHARS_RE = /[\u0000-\u001F\u007F\u0085\u2028\u2029]/g;
-
-// Bound length and strip control characters from page-derived text that is
-// reflected into agent-facing messages. Display-only — selection logic and the
-// CSS-identifier guard are untouched.
-function sanitizeLabel(value: string): string {
-  let v = String(value);
-  if (v.length > 8192) v = v.slice(0, 8192);
-  return v.replace(CONTROL_CHARS_RE, "");
-}
+/** Bound length and strip control characters from page-derived text that is
+ *  reflected into agent-facing messages. Display-only — selection logic and the
+ *  CSS-identifier guard are untouched. */
+const sanitizeLabel = sanitizeForLog;
 
 /**
  * Render the first `n` options as a compact `i:label` list for error/help
@@ -100,7 +91,7 @@ function collectDropdownOptions(trigger: Element): HTMLElement[] {
   }
 
  // 4. Last resort — see note above.
-  return visible(document.querySelectorAll('[role="option"]'));
+  return visible(document.querySelectorAll('[role="option"]')).slice(0, 100);
 }
 
 /**
@@ -119,23 +110,23 @@ function collectDropdownOptions(trigger: Element): HTMLElement[] {
 let _layoutEnginePresent: boolean | null = null;
 function layoutEnginePresent(): boolean {
   if (_layoutEnginePresent === null) {
- // Probe the root element: in jsdom neither the documentElement nor the
- // body is laid out, so their rects are all zeros. If the root reports a
- // non-zero rect, a real layout engine is active.
-    const root = document.documentElement;
-    const r = root.getBoundingClientRect();
-    _layoutEnginePresent = r.width > 0 || r.height > 0;
+    if (typeof document === "undefined") {
+      _layoutEnginePresent = false;
+    } else {
+      const root = document.documentElement;
+      const r = root.getBoundingClientRect();
+      _layoutEnginePresent = r.width > 0 || r.height > 0;
+    }
   }
   return _layoutEnginePresent;
 }
 
 function isVisible(el: Element): boolean {
+  if (typeof getComputedStyle !== "function") return true;
   const style = getComputedStyle(el);
   if (style.display === "none" || style.visibility === "hidden") return false;
   const rect = el.getBoundingClientRect();
   if (rect.width > 0 && rect.height > 0) return true;
- // Zero-size rect: hidden in a real browser, but inconclusive without a
- // layout engine — treat as visible so non-layout envs still resolve options.
   return !layoutEnginePresent();
 }
 
@@ -246,7 +237,7 @@ export async function handleSelectDropdown(
         const selectedLabel = sanitizeLabel((match.textContent || "").trim());
         const pageChanged =
           location.href !== ctx.beforeUrl ||
-          domFingerprint() !== ctx.beforeFingerprint;
+          domFingerprint() !== (ctx.beforeFingerprint ?? domFingerprint());
         return {
           action,
           success: true,
@@ -319,7 +310,7 @@ export async function handleSelectDropdown(
   }
   const pageChanged =
     location.href !== ctx.beforeUrl ||
-    domFingerprint() !== ctx.beforeFingerprint;
+    domFingerprint() !== (ctx.beforeFingerprint ?? domFingerprint());
   return {
     action,
     success: true,
