@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="dark light" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'" />
   <title>Open Cowork</title>
   <link rel="stylesheet" href="sidepanel.css" />
 </head>
@@ -53,7 +54,8 @@
   </main>
 
   <div class="input-bar">
-    <textarea id="messageInput" class="message-input" placeholder="Type a message... (Shift+Enter for newline)" rows="1" autocomplete="off" aria-label="Message input"></textarea>
+    <textarea id="messageInput" class="message-input" placeholder="Type a message... (Shift+Enter for newline)" rows="1" autocomplete="off" aria-label="Message input" aria-describedby="input-hint"></textarea>
+    <span id="input-hint" class="sr-only">Press Shift+Enter for newline</span>
     <button type="button" id="sendBtn" class="btn-send" disabled aria-label="Send message">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <line x1="22" y1="2" x2="11" y2="13"/>

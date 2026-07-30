@@ -240,3 +240,65 @@ describe("readProviderConfig provenance fail-safe", () => {
     await expect(buildProvider(config!)).rejects.toThrow(/Unsafe LLM baseUrl rejected/);
   });
 });
+
+/**
+ * (e) readProviderConfig must fall back to the default provider ("openai") when
+ * the stored value is not in KNOWN_PROVIDERS. This prevents a corrupted or
+ * attacker-injected provider id from locking the user out of all LLM calls
+ * until manual reconfiguration.
+ */
+describe("readProviderConfig unknown provider fallback", () => {
+  let store: Record<string, unknown>;
+
+  beforeEach(() => {
+    store = {};
+    (globalThis as unknown as { chrome: unknown }).chrome = {
+      storage: {
+        local: {
+          get: (keys: string | string[] | null): Promise<Record<string, unknown>> => {
+            const result: Record<string, unknown> = {};
+            const arr = keys == null ? Object.keys(store) : Array.isArray(keys) ? keys : [keys];
+            for (const k of arr) if (k in store) result[k] = store[k];
+            return Promise.resolve(result);
+          },
+          set: (items: Record<string, unknown>): Promise<void> => {
+            Object.assign(store, items);
+            return Promise.resolve();
+          },
+        },
+      },
+    };
+  });
+
+  afterEach(() => {
+    delete (globalThis as unknown as { chrome?: unknown }).chrome;
+  });
+
+  test("unknown provider falls back to 'openai'", async () => {
+    store.provider = "totally-fake-provider";
+    store.model = "some-model";
+    store.apiKey_totally_fake_provider = "sk-test";
+
+    const config = await readProviderConfig();
+    expect(config).not.toBeNull();
+    expect(config!.provider).toBe("openai");
+  });
+
+  test("writes provider_reset_warning flag when falling back", async () => {
+    store.provider = "totally-fake-provider";
+    store.model = "some-model";
+
+    await readProviderConfig();
+    expect(store.provider_reset_warning).toBe(true);
+  });
+
+  test("known provider is NOT overridden", async () => {
+    store.provider = "anthropic";
+    store.model = "claude-sonnet-5";
+    store.apiKey_anthropic = "sk-test";
+
+    const config = await readProviderConfig();
+    expect(config!.provider).toBe("anthropic");
+    expect(store.provider_reset_warning).toBeUndefined();
+  });
+});

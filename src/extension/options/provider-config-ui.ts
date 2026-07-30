@@ -28,9 +28,33 @@ import {
 // `@/extension/shared` (single source of truth).
 export { redactKeyLeak } from "@/extension/shared";
 
+let catalogModule: typeof import("../../lib/agent/llm/catalog") | null = null;
+async function getCatalogModule() {
+  return (catalogModule ??= await import("../../lib/agent/llm/catalog"));
+}
+
 // ─── Provider config display ───────────────────────────────────────────────
 
 let lastProvider = "";
+
+// One-time warning when readProviderConfig fell back from an unrecognized
+// provider to the default. The flag is written by readProviderConfig and
+// consumed (cleared) here on first render.
+if (typeof chrome !== "undefined" && chrome.storage?.local) {
+  void chrome.storage.local.get(["provider_reset_warning"]).then((res) => {
+    if (res?.provider_reset_warning) {
+      void chrome.storage.local.remove("provider_reset_warning");
+      const sel = document.getElementById("provider") as HTMLSelectElement | null;
+      const host = sel?.parentElement ?? document.body;
+      const el = document.createElement("div");
+      el.className = "qp-field-error";
+      el.setAttribute("role", "alert");
+      el.textContent = "Your provider was reset to OpenAI because the stored value was unrecognized. Re-select your provider in Options.";
+      host.appendChild(el);
+      setTimeout(() => el.remove(), 6000);
+    }
+  });
+}
 
 /**
  * OpenCode Zen/Go endpoint hint — the server routes all model families through
@@ -102,7 +126,7 @@ export function updateProviderUI(): void {
  // we must preserve whatever was loaded from storage — including an
  // intentionally-cleared (empty) baseUrl, which should fall back to the
  // provider's built-in endpoint rather than be silently replaced by the
- // default here (finding: updateProviderUI overwrote an empty saved baseUrl
+ // default here
  // with the provider default on load).
     if (providerChanged && baseUrlInput) {
       baseUrlInput.value = meta.defaultBaseUrl;
@@ -192,7 +216,7 @@ document.getElementById("testConnection")?.addEventListener("click", async () =>
     testResult.className = "test-result failure";
     const raw = e instanceof Error ? e.message : String(e);
     let masked = raw;
-    if (apiKey && apiKey.length >= 8) masked = masked.split(apiKey).join("[REDACTED]");
+    if (apiKey) masked = masked.split(apiKey).join("[REDACTED]");
     masked = redactKeyLeak(masked);
     testResult.textContent = `✗ ${masked.slice(0, 240)}`;
   } finally {
@@ -215,7 +239,7 @@ let activeResultIdx = -1;
 /** Populate the model datalist from the models.dev catalog. */
 export async function populateModelSuggestions(): Promise<void> {
   try {
-    const { getModelsForProvider, formatCost, formatContext, formatVision } = await import("../../lib/agent/llm/catalog");
+    const { getModelsForProvider, formatCost, formatContext, formatVision } = await getCatalogModule();
     const provider = ($("provider") as HTMLSelectElement).value;
     const catId = catalogIdFor(provider);
     if (catId) {
@@ -244,11 +268,10 @@ export async function populateModelSuggestions(): Promise<void> {
  * provider it belongs to, plus pricing (`formatCost`), context (`formatContext`)
  * and a Vision tag (`formatVision`). Returns the element; the caller appends it.
  */
-function highlightMatch(text: string, query: string): string {
-  if (!query) return escapeHtml(text);
+function highlightMatch(text: string, searchRe: RegExp | null): string {
   const escaped = escapeHtml(text);
-  const regex = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi");
-  return escaped.replace(regex, '<mark class="model-highlight">$1</mark>');
+  if (!searchRe) return escaped;
+  return escaped.replace(searchRe, '<mark class="model-highlight">$1</mark>');
 }
 
 function renderModelResultItem(
@@ -262,22 +285,24 @@ function renderModelResultItem(
     context: (l: CatalogModel["limit"]) => string;
     vision: (a?: boolean) => string;
   },
-): HTMLButtonElement {
-  const item = document.createElement("button");
-  item.type = "button";
+  searchRe: RegExp | null,
+): HTMLDivElement {
+  const item = document.createElement("div");
   item.className = "model-search-result-item";
+  item.tabIndex = -1;
   // L13: each result is a listbox option with a stable id so the input's
   // aria-activedescendant can point at the focused/hovered one.
   item.setAttribute("role", "option");
   item.id = `model-search-opt-${optIdx}`;
   item.setAttribute("aria-label", `Select model ${model.name} from ${providerName}`);
+  item.dataset.modelId = model.id;
   item.addEventListener("mouseenter", () => {
     modelInput.setAttribute("aria-activedescendant", item.id);
   });
   const visionTag = fmt.vision(model.attachment);
   item.innerHTML =
     `<div class="result-primary">` +
-      `<strong>${highlightMatch(model.name, ($("model") as HTMLInputElement).value.trim())}</strong> ` +
+      `<strong>${highlightMatch(model.name, searchRe)}</strong> ` +
       `<span class="provider-name">${escapeHtml(providerName)}</span> ` +
       (visionTag ? `<span class="vision-tag">${escapeHtml(visionTag)}</span>` : "") +
     `</div>` +
@@ -285,13 +310,6 @@ function renderModelResultItem(
       `<code class="model-id">${escapeHtml(model.id)}</code> ` +
       `<span class="meta">${escapeHtml(fmt.cost(model.cost))} · ${escapeHtml(fmt.context(model.limit))} ctx</span>` +
     `</div>`;
-  item.addEventListener("click", () => {
-    // Commit the real provider model id (NOT the display name).
-    ($("model") as HTMLInputElement).value = model.id;
-    modelInput.setAttribute("aria-activedescendant", item.id);
-    modelInput.setAttribute("aria-expanded", "false");
-    resultsDiv.classList.add("is-hidden");
-  });
   const currentValue = ($("model") as HTMLInputElement).value.trim();
   if (currentValue && model.id === currentValue) {
     item.classList.add("is-selected");
@@ -310,6 +328,10 @@ document.getElementById("model")?.addEventListener("input", () => {
   resultsDiv.setAttribute("aria-label", "Model search results");
   const modelInput = $("model") as HTMLInputElement;
   modelInput.setAttribute("aria-controls", "model-search-results");
+  const provider = ($("provider") as HTMLSelectElement).value;
+  if (provider === "opencode" || provider === "opencode-go") {
+    updateOpencodeEndpointHint(provider === "opencode" ? "zen" : "go");
+  }
   if (modelSearchTimer) clearTimeout(modelSearchTimer);
  // Refresh the placeholder when the field is emptied so it shows the current
  // provider's default model (the two concerns now live in one listener).
@@ -331,7 +353,7 @@ document.getElementById("model")?.addEventListener("input", () => {
   modelInput.setAttribute("aria-expanded", "true");
   modelSearchTimer = setTimeout(async () => {
     try {
-      const { searchModels, formatCost, formatContext, formatVision } = await import("../../lib/agent/llm/catalog");
+      const { searchModels, formatCost, formatContext, formatVision } = await getCatalogModule();
       const results = await searchModels(query, 10);
  // A newer keystroke has superseded this search — drop the stale result.
       if (myToken !== modelSearchToken) return;
@@ -346,6 +368,9 @@ document.getElementById("model")?.addEventListener("input", () => {
       resultsDiv.innerHTML = "";
       resultsDiv.classList.remove("is-hidden");
       modelInput.setAttribute("aria-expanded", "true");
+
+      const escapedQuery = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const searchRe = new RegExp(`(${escapedQuery})`, "gi");
 
       // Group results by provider
       const grouped = new Map<string, typeof results>();
@@ -370,9 +395,16 @@ document.getElementById("model")?.addEventListener("input", () => {
               cost: formatCost,
               context: formatContext,
               vision: formatVision,
-            }),
+            }, searchRe),
           );
         }
+      }
+
+      const firstItem = resultsDiv.querySelector<HTMLDivElement>(".model-search-result-item");
+      if (firstItem) {
+        activeResultIdx = 0;
+        modelInput.setAttribute("aria-activedescendant", firstItem.id);
+        firstItem.setAttribute("aria-selected", "true");
       }
     } catch (e) {
       console.warn("[options] model search failed:", e);
@@ -381,12 +413,25 @@ document.getElementById("model")?.addEventListener("input", () => {
   }, 150);
 });
 
+// ─── Delegated click handler for model search results ───────────────────────
+
+document.getElementById("model-search-results")?.addEventListener("click", (e) => {
+  const target = (e.target as HTMLElement).closest<HTMLDivElement>(".model-search-result-item");
+  if (!target?.dataset.modelId) return;
+  const modelInput = $("model") as HTMLInputElement;
+  modelInput.value = target.dataset.modelId;
+  modelInput.setAttribute("aria-activedescendant", target.id);
+  modelInput.setAttribute("aria-expanded", "false");
+  const resultsDiv = $("model-search-results") as HTMLDivElement;
+  resultsDiv.classList.add("is-hidden");
+});
+
 // ─── Keyboard navigation for model search results ──────────────────────────
 
 document.getElementById("model")?.addEventListener("keydown", (e) => {
   const resultsDiv = $("model-search-results") as HTMLDivElement | null;
   if (!resultsDiv || resultsDiv.classList.contains("is-hidden")) return;
-  const items = Array.from(resultsDiv.querySelectorAll<HTMLButtonElement>(".model-search-result-item"));
+  const items = Array.from(resultsDiv.querySelectorAll<HTMLDivElement>(".model-search-result-item"));
   if (items.length === 0) return;
   if (e.key === "ArrowDown") {
     e.preventDefault();
@@ -485,19 +530,4 @@ document.getElementById("refreshModels")?.addEventListener("click", async () => 
 
   btn.disabled = false;
   btn.setAttribute("aria-busy", "false");
-});
-
-// ─── OpenCode endpoint hint — update on model input ─────────────────────────
-// When the user selects OpenCode Zen or OpenCode Go, the endpoint hint updates
-// dynamically as they type a model name, showing the correct base URL for that
-// model family.
-
-// OpenCode Zen/Go: refresh the endpoint hint when the model changes.
-document.getElementById("model")?.addEventListener("input", () => {
-  const sel = document.getElementById("provider") as HTMLSelectElement | null;
-  if (!sel) return;
-  const provider = sel.value;
-  if (provider === "opencode" || provider === "opencode-go") {
-    updateOpencodeEndpointHint(provider === "opencode" ? "zen" : "go");
-  }
 });

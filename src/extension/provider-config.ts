@@ -19,7 +19,7 @@ import * as Azure from "../lib/agent/llm/providers/azure";
 import * as OpenAICompatible from "../lib/agent/llm/providers/openai-compatible";
 import { makeOpenAIChatFacade } from "../lib/agent/llm/providers/openai";
 import * as OpenAICompatibleChat from "../lib/agent/llm/protocols/openai-compatible-chat";
-import { resolveAndValidateLlmBaseUrl, validateLlmBaseUrl, type SsrfProvenance } from "../lib/agent/llm/route/ssrf";
+import { resolveAndValidateLlmBaseUrl, type SsrfProvenance } from "../lib/agent/llm/route/ssrf";
 import { modelSupportsVision, modelSupportsReasoning, getDefaultModelForProvider, resolveVisionSupport, fetchCatalog } from "../lib/agent/llm/catalog";
 import { CATALOG_PROVIDER_ID_MAP } from "./provider-config-map";
 
@@ -163,9 +163,9 @@ function canonicalLlmHost(provider: string): { host: string; suffix?: boolean } 
   if (prof) return { host: new URL(prof.baseURL).host };
   switch (provider) {
     case "openai": return { host: "api.openai.com" };
-    case "anthropic": return { host: "api.anthropic.com" };
+    case "anthropic": return { host: "anthropic.com", suffix: true };
     case "gemini": return { host: "generativelanguage.googleapis.com" };
-    case "google": return { host: "ai.googleapis.com" };
+    case "google": return { host: "googleapis.com", suffix: true };
     case "azure": return { host: ".openai.azure.com", suffix: true };
     default: return null;
   }
@@ -190,6 +190,31 @@ function canonicalLlmHost(provider: string): { host: string; suffix?: boolean } 
 export function resolveModel(config: { provider?: string; model?: string; catalogId?: string }): string {
   const pid = config.catalogId ?? config.provider ?? "";
   return config.model || DEFAULT_MODELS[pid] || getDefaultModelForProvider(pid) || "";
+}
+
+/** Positive check: true if `url` targets a local endpoint (loopback, RFC1918, or localhost). */
+function isLocalUrl(url: string): boolean {
+  try {
+    const { hostname } = new URL(url);
+    const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    if (h === "localhost" || h.endsWith(".localhost")) return true;
+    if (h.includes(":")) {
+      // IPv6 — simplified check for loopback (::1) and ULA (fc00::/7)
+      return h === "::1" || h === "0:0:0:0:0:0:0:1" || h.startsWith("fc") || h.startsWith("fd");
+    }
+    // IPv4 — check for loopback (127.0.0.0/8) and RFC1918 (10/8, 172.16/12, 192.168/16)
+    const parts = h.split(".");
+    if (parts.length !== 4) return false;
+    const a = Number(parts[0]);
+    const b = Number(parts[1]);
+    if (a === 127) return true;
+    if (a === 10) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -259,7 +284,7 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
     // When no API key is present (e.g. self-hosted Ollama on a remote host) there
     // is no secret to exfiltrate, so host confinement is skipped; the SSRF guard
     // above still blocks metadata/private/link-local targets.
-    const isLocalEndpoint = !validateLlmBaseUrl(baseUrl, false).ok;
+    const isLocalEndpoint = isLocalUrl(baseUrl);
     if (!isLocalEndpoint) {
       const canon = canonicalLlmHost(provider);
       let host = "";
@@ -434,9 +459,6 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
  // per-provider flag — that flag is the unreliable value that caused the
  // screenshot-gating flip-flop bug (extractState skipped captureVisibleTab
  // while navigatorCallDirect tried to embed a non-existent screenshot).
- // We also persist a debug marker to `chrome.storage.local` so the failure
- // survives the production build (console.* is stripped), giving operators a
- // signal instead of an invisible revert to the unreliable flag.
   try {
     const visionCapable = await modelSupportsVision(resolvedModel, catalogProviderId);
     if (visionCapable !== result.supportsVision) {
@@ -445,22 +467,7 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
         supportsVision: visionCapable,
       };
     }
-  } catch (catErr) {
-    const reason = catErr instanceof Error ? catErr.message : String(catErr);
-    if (typeof chrome !== "undefined" && chrome.storage?.local) {
-      try {
-        await chrome.storage.local.set({
-          lastVisionCatalogFailure: {
-            provider,
-            model: resolvedModel,
-            reason,
-            at: Date.now(),
-          },
-        });
-      } catch {
-        /* storage may be unavailable — non-fatal */
-      }
-    }
+  } catch {
  // FAIL-SAFE (SAFE): on catalog lookup failure, fall back to the pure,
  // network-free name heuristic (`resolveVisionSupport(resolvedModel, [])`) —
  // `[]` means no catalog models, so only the `VISION_PATTERNS` heuristic runs.
@@ -502,29 +509,38 @@ export async function readProviderConfig(): Promise<ProviderConfig | null> {
     "resourceName",
     "provenance",
   ]);
- // The API key is persisted ONLY in `chrome.storage.session` (in-memory, never
- // on disk) for safety. Read it from there and nowhere else — falling back to
- // `chrome.storage.local` would persist the secret in plaintext at rest,
- // contradicting the session-only design. If the session key is absent (e.g.
- // an extension update wiped it, or a not-yet-migrated install), we return the
- // provider without a key and let `buildProvider` hard-fail with a precise
- // "requires an API key" message, prompting the user to re-paste it. Never
- // console.log the value.
-  let apiKey = "";
-  if (chrome.storage?.session) {
-    const sres = await chrome.storage.session.get(["apiKey"]);
-    apiKey = (sres.apiKey as string) || "";
-  }
+  // API keys are stored in `chrome.storage.local` with per-provider
+  // namespacing (`apiKey_${provider}`). A prior design used session-only
+  // storage, but that was lost on extension updates; keys now live in local
+  // storage so they persist. The migration in settings-sync.ts handles the
+  // session-to-local move. Never console.log the value.
   const provider = normalizeString(res.provider);
+  let apiKey = "";
+  if (chrome.storage?.local) {
+    const key = `apiKey_${provider}`;
+    const sres = await chrome.storage.local.get([key]);
+    apiKey = (sres[key] as string) || "";
+  }
   if (!provider) return null; // no provider set → unconfigured user
  // Defense-in-depth: a corrupted / injected `chrome.storage.local` payload
- // could carry an arbitrary provider id. We still return it so `buildProvider`
- // throws its precise "Unknown provider" error (the actionable message the UI
- // surfaces), but we log a warning here so the anomaly is observable in dev.
+ // could carry an arbitrary provider id. Fall back to the default so the
+ // agent can still make LLM calls instead of being locked out until manual
+ // reconfiguration. Write a one-time flag so the Options UI can surface a
+ // warning.
+  let resolvedProvider = provider;
   if (!KNOWN_PROVIDERS.has(provider)) {
     console.warn(
-      `[provider-config] Unknown provider "${provider}" read from storage; buildProvider will reject it.`
+      `[provider-config] Unknown provider "${provider}" read from storage; falling back to default.`
     );
+    resolvedProvider = "openai";
+    if (chrome.storage?.local) {
+      try {
+        await chrome.storage.local.set({ provider_reset_warning: true });
+      } catch { /* non-fatal */ }
+    }
+    const fallbackKey = `apiKey_openai`;
+    const sresFallback = await chrome.storage.local.get([fallbackKey]);
+    apiKey = (sresFallback[fallbackKey] as string) || "";
   }
   const model = normalizeString(res.model);
   const baseUrl = normalizeString(res.baseUrl);
@@ -536,7 +552,7 @@ export async function readProviderConfig(): Promise<ProviderConfig | null> {
   const provenance: ProviderConfig["provenance"] =
     res.provenance === "user" ? "user" : "injected";
   return {
-    provider,
+    provider: resolvedProvider,
     apiKey,
     model,
     baseUrl: baseUrl || undefined,

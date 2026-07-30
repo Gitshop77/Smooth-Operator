@@ -39,6 +39,17 @@ describe("escapeHtml", () => {
     expect(escapeHtml(null)).toBe("");
     expect(escapeHtml(undefined)).toBe("");
   });
+
+  test("strips null bytes", () => {
+    expect(escapeHtml("hello\u0000world")).toBe("helloworld");
+  });
+
+  test("neutralizes Unicode bidi override characters", () => {
+    // LTR override, RTL override, LTR embedding, RTL embedding,
+    // LTR isolate, RTL isolate, LTR closing, RTL closing
+    const bidiChars = "\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069";
+    expect(escapeHtml(`safe${bidiChars}text`)).toBe("safetext");
+  });
 });
 
 // ─── redactKeyLeak secret masking ─────────────────────────────────────

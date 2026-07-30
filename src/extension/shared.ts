@@ -23,6 +23,13 @@ export function $<T extends HTMLElement = HTMLElement>(id: string): T {
   return el as T;
 }
 
+/** True if `v` is a non-null, non-array object. */
+export function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+const ESCAPE_RE = /[&<>"'/]/g;
+
 /**
  * Escape user-supplied text for safe interpolation inside `innerHTML`.
  * Replaces the five significant XML characters: & < > " ', plus `/` (so the
@@ -30,25 +37,23 @@ export function $<T extends HTMLElement = HTMLElement>(id: string): T {
  * `/` is harmless in normal text — it renders identically — but closes a
  * latent cross-context injection hole.
  */
-/** True if `v` is a non-null, non-array object. */
-export function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
 export function escapeHtml(s: unknown): string {
   if (s == null) return "";
-  return String(s).replace(
-    /[&<>"'/]/g,
-    (c) =>
-      ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;",
-        "/": "&#47;",
-      })[c]!,
-  );
+  return String(s)
+    .replace(/[\u0000]/g, "")
+    .replace(/[\u202A-\u202E\u2066-\u2069]/g, "")
+    .replace(
+      ESCAPE_RE,
+      (c) =>
+        ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+          "/": "&#47;",
+        })[c]!,
+    );
 }
 
 // ─── Secret redaction ─────────────────────────────────────────────────────
@@ -101,14 +106,19 @@ function providerKeyPrefixes(): string[] {
   return [...out];
 }
 
-/**
- * Mask common API-key prefixes that may leak into provider error text before
- * the message is shown in the UI. The allowlist is derived from the provider
- * catalog (`PROVIDER_META`) so a new or custom provider's key prefix is covered
- * automatically, plus a base set of well-known global prefixes. Non-key text is
- * returned unchanged. Over-redaction in a debug log is safe; leaking the key is
- * not.
- */
+/** Lazy-compiled key regex (provider prefixes + base patterns). Built once on first use. */
+let KEY_RE: RegExp | null = null;
+
+/** Bearer token redaction — used only with `.replace()`, safe to hoist. */
+const BEARER_RE = /\bBearer\s+[A-Za-z0-9._\-+/=]+/g;
+
+/** JSON secret-key value redaction — used only with `.replace()`, safe to hoist. */
+const JSON_SECRET_RE =
+  /("(?:password|passwd|api[_-]?key|apikey|secret|token|access[_-]?token|refresh[_-]?token|private[_-]?key|client[_-]?secret|auth[_-]?token)"\s*:\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/gi;
+
+/** Generic high-entropy quoted scalar redaction — used only with `.replace()`, safe to hoist. */
+const HIGH_ENTROPY_RE = /"([^"]+)"/g;
+
 /**
  * Heuristic: does a quoted/bare scalar look like a high-entropy secret rather
  * than ordinary prose, a URL, or a short label? Additive mask only — it never
@@ -138,49 +148,40 @@ function looksLikeSecret(v: string): boolean {
   return false;
 }
 
+/**
+ * Mask common API-key prefixes that may leak into provider error text before
+ * the message is shown in the UI. The allowlist is derived from the provider
+ * catalog (`PROVIDER_META`) so a new or custom provider's key prefix is covered
+ * automatically, plus a base set of well-known global prefixes. Non-key text is
+ * returned unchanged. Over-redaction in a debug log is safe; leaking the key is
+ * not.
+ */
 export function redactKeyLeak(s: string): string {
-  // Build the matcher per-call so no shared mutable `lastIndex` survives between
-  // invocations (a module-level `g`-flag regex is a latent re-entrancy footgun
-  // for any concurrent call site).
-  const keyRe = new RegExp(
-    "(" + [...providerKeyPrefixes(), ...BASE_KEY_PATTERNS].join("|") + ")",
-    "g",
-  );
-  let out = s.replace(keyRe, (m) => {
+  if (!KEY_RE) {
+    KEY_RE = new RegExp(
+      "(" + [...providerKeyPrefixes(), ...BASE_KEY_PATTERNS].join("|") + ")",
+      "g",
+    );
+  }
+  let out = s.replace(KEY_RE, (m) => {
     const dash = m.indexOf("-");
     const prefix = dash > 0 ? m.slice(0, dash + 1) : m.slice(0, 4);
     return `${prefix}[REDACTED]`;
   });
 
-  // Additive pass: mask `Bearer <token>` authorization headers a provider may
-  // echo back verbatim inside an error (these carry no key prefix to match).
-  out = out.replace(/\bBearer\s+[A-Za-z0-9._\-+/=]+/g, "Bearer [REDACTED]");
+  out = out.replace(BEARER_RE, "Bearer [REDACTED]");
 
-  // Additive pass: mask the values of known JSON secret keys (e.g.
-  // `"password": "..."`, `"apiKey": "..."`), regardless of key prefix. Quote
-  // style of the value is preserved.
   out = out.replace(
-    /("(?:password|passwd|api[_-]?key|apikey|secret|token|access[_-]?token|refresh[_-]?token|private[_-]?key|client[_-]?secret|auth[_-]?token)"\s*:\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/gi,
+    JSON_SECRET_RE,
     (_, keyPart: string, valPart: string) => {
       const q = valPart[0];
       return `${keyPart}${q}[REDACTED]${q}`;
     },
   );
 
-  // Additive pass: mask generic high-entropy quoted scalars (tool/page output,
-  // JSON blobs) that have no recognisable key prefix. Bounded and conservative
-  // — over-redaction in a debug log is safe; leakage is not.
-  out = out.replace(/"([^"]+)"/g, (full, inner: string) =>
+  out = out.replace(HIGH_ENTROPY_RE, (full, inner: string) =>
     looksLikeSecret(inner) ? `"[REDACTED]"` : full,
   );
 
-  // Final pass: delegate to the canonical key-shape redactor
-  // (`redactKeyShapes`, src/lib/agent/key-shape-redact.ts). It is the single
-  // shape-detection source shared with the agent pipeline, so UI surfaces gain
-  // any shape it covers that this prefix/JSON/high-entropy logic does not (e.g.
-  // `postgres://user:pass@` DB connection strings). `redactKeyShapes` is a
-  // no-op on already-masked `[REDACTED]` text (its markers/charset don't match
-  // what this function emits), so this is idempotent with respect to the passes
-  // above and never un-masks anything.
   return redactKeyShapes(out);
 }
