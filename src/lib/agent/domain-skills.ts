@@ -609,6 +609,34 @@ Navigation tips:
 ] as const;
 
 /**
+ * Pre-normalized domain cache. Domains are normalized once at load time (for
+ * built-ins) or at custom-skill normalization time, then reused on every
+ * `hostnameMatches` call. This avoids re-running toLowerCase + 4 replace
+ * calls per domain per navigation step.
+ */
+const normalizedDomainCache = new Map<string, string>();
+
+function normalizeDomainForMatch(domain: string): string {
+  const cached = normalizedDomainCache.get(domain);
+  if (cached !== undefined) return cached;
+  let d = domain.toLowerCase().trim();
+  d = d.replace(/^https?:\/\//i, "");
+  d = d.replace(/\/.*$/, "");
+  d = d.replace(/:\d+$/, "");
+  d = d.replace(/^\.+/, "");
+  d = d.replace(/\.+$/, "");
+  normalizedDomainCache.set(domain, d);
+  return d;
+}
+
+// Pre-normalize built-in skill domains at module load.
+for (const skill of BUILT_IN_SKILLS) {
+  for (const domain of skill.domains) {
+    normalizeDomainForMatch(domain);
+  }
+}
+
+/**
  * Names of all built-in skills. A custom skill that reuses one of these names is
  * unreachable: `getFullSkill` resolves built-ins first by exact name, so the
  * custom body would be silently dead while the agent receives the bundled
@@ -619,25 +647,37 @@ Navigation tips:
 const BUILT_IN_SKILL_NAMES = new Set(BUILT_IN_SKILLS.map((s) => s.name));
 
 /**
+ * Non-XML boundary delimiter for custom-skill content. Custom skills are
+ * attacker-influenced data that flows into the TRUSTED system prompt. The
+ * primary defense is {@link neutralizePromptTags} (derived from PROMPT_TAGS),
+ * which rewrites every prompt-level XML tag. This delimiter adds a SECOND
+ * layer: it uses plain ASCII (`===`) that is not an XML tag, so
+ * neutralizePromptTags cannot accidentally break it and an attacker cannot
+ * forge it as an XML boundary. The message builder should strip this
+ * delimiter before injecting the content; if it doesn't, the delimiter is
+ * harmless visible text that the LLM ignores.
+ */
+const SKILL_BOUNDARY = "=== SKILL START ===\n";
+const SKILL_BOUNDARY_END = "\n=== SKILL END ===";
+
+/**
  * Test whether `hostname` matches `domain` (exact match or subdomain).
+ *
+ * NOTE: suffix matching (`h.endsWith("." + d)`) means a skill scoped to
+ * "github.com" will also fire on gist.github.com, api.github.com, etc.
+ * This is intentional for built-in skills (multi-domain sites like
+ * twitter.com/x.com need subdomain coverage), but for CUSTOM skills it
+ * means site-specific instructions designed for one subdomain are injected
+ * on ALL subdomains of the same root domain — potentially leaking
+ * site-specific guidance to attacker-controlled hosts under the same root.
+ * The PUBLIC_SUFFIX_DOMAINS blocklist mitigates the worst shared-suffix
+ * cases (co.uk, github.io) but does not cover every possible multi-tenant
+ * domain. Users should be aware that a custom skill targeting "example.com"
+ * will also fire on any subdomain of example.com.
  */
 function hostnameMatches(hostname: string, domain: string): boolean {
-  // Lowercase both sides so a custom-skill domain configured with mixed case
-  // (e.g. "GitHub.com") still matches the URL parser's lowercased hostname
-  // (e.g. "github.com"). Custom domains are not normalized for case by
-  // `normalizeCustomSkill`, so the comparison must be case-insensitive.
-  // Mirror `security.ts`'s `hostnameMatches`: a stored FQDN form
-  // (e.g. "example.com.") or a domain with a stray path (e.g. "example.com/x")
-  // would otherwise never match the lowercased bare hostname — silently
-  // dropping the skill. Strip scheme, leading/trailing dots, and any path
-  // before comparison so those forms resolve as intended.
   const h = hostname.toLowerCase();
-  let d = domain.toLowerCase().trim();
-  d = d.replace(/^https?:\/\//i, "");
-  d = d.replace(/\/.*$/, ""); // strip any path component
-  d = d.replace(/:\d+$/, ""); // strip trailing port (e.g. "example.com:3000")
-  d = d.replace(/^\.+/, ""); // accept ".example.com" as subdomains of example.com
-  d = d.replace(/\.+$/, ""); // strip FQDN trailing dot
+  const d = normalizeDomainForMatch(domain);
   if (!d) return false;
   return h === d || h.endsWith(`.${d}`);
 }
@@ -739,8 +779,74 @@ export function sanitizeSkillText(value: string, maxLen: number): string {
   const neutralized = neutralizePromptTags(cleaned);
   // Truncate on code POINTS (not UTF-16 code units) so a maxLen that
   // lands inside a surrogate pair / emoji doesn't split it into garbage.
-  const cps = Array.from(neutralized);
-  return cps.length > maxLen ? cps.slice(0, maxLen).join("") : neutralized;
+  // Use a for...of loop to count code points without allocating an array
+  // upfront — only build the array if truncation is actually needed.
+  let codePointCount = 0;
+  for (const _ of neutralized) codePointCount++;
+  if (codePointCount <= maxLen) return neutralized;
+  const cps: string[] = [];
+  for (const cp of neutralized) {
+    cps.push(cp);
+    if (cps.length >= maxLen) break;
+  }
+  return cps.join("");
+}
+
+/**
+ * Sanitize a single domain input string: strip scheme, path, port, leading dots,
+ * wildcard prefix, and trailing slashes.
+ */
+function sanitizeDomainInput(raw: string): string {
+  return sanitizeSkillText(raw, SKILL_LIMITS.domain)
+    .trim()
+    .replace(/^https?:\/\//i, "")
+    .split(/[?#]/)[0]
+    .split("/")[0]
+    .replace(/:[0-9]+$/, "")
+    .replace(/^\./, "")
+    .replace(/^\*\./, "")
+    .replace(/\/+$/, "");
+}
+
+/**
+ * Normalize a raw custom-skill's `domains` (or legacy `domain`) into a
+ * validated string array. Returns `[]` if no valid domains remain.
+ */
+function normalizeDomains(s: Record<string, unknown>): string[] {
+  const raw: string[] = (
+    Array.isArray(s.domains)
+      ? s.domains.filter((d): d is string => typeof d === "string" && d.length > 0)
+      : typeof s.domain === "string"
+        ? [s.domain]
+        : []
+  );
+  return raw
+    .map(sanitizeDomainInput)
+    .filter((d) => d.length > 0 && isValidSkillDomain(d))
+    .slice(0, SKILL_LIMITS.domains);
+}
+
+/**
+ * Normalize a raw custom-skill's `shortcuts` into a validated Record.
+ * Returns `undefined` if no valid shortcuts remain.
+ */
+function normalizeShortcuts(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const entries = (
+    Object.entries(raw as Record<string, unknown>).filter(
+      ([k, v]) => typeof k === "string" && typeof v === "string",
+    ) as Array<[string, string]>
+  )
+    .slice(0, SKILL_LIMITS.shortcuts)
+    .map(
+      ([k, v]) =>
+        [
+          sanitizeSkillText(k, SKILL_LIMITS.shortcutField),
+          sanitizeSkillText(v, SKILL_LIMITS.shortcutField),
+        ] as [string, string],
+    )
+    .filter(([k]) => k.length > 0);
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 /**
@@ -764,26 +870,9 @@ export function normalizeCustomSkill(raw: unknown): DomainSkill | null {
   if (!name) return null; // name collapsed to empty after sanitization
   if (BUILT_IN_SKILL_NAMES.has(name)) return null; // built-in name collision — unreachable custom skill
 
-  const domains: string[] = (
-    Array.isArray(s.domains)
-      ? s.domains.filter((d): d is string => typeof d === "string" && d.length > 0)
-      : typeof s.domain === "string"
-        ? [s.domain]
-        : []
-  )
-    .map((d) =>
-      sanitizeSkillText(d, SKILL_LIMITS.domain)
-        .trim()
-        .replace(/^https?:\/\//i, "")
-        .split(/[?#]/)[0]
-        .split("/")[0]
-        .replace(/:[0-9]+$/, "")
-        .replace(/^\./, "")
-        .replace(/^\*\./, "")
-        .replace(/\/+$/, ""),
-    )
-    .filter((d) => d.length > 0 && isValidSkillDomain(d))
-    .slice(0, SKILL_LIMITS.domains);
+  const domains = normalizeDomains(s);
+  for (const d of domains) normalizeDomainForMatch(d);
+
   if (domains.length === 0) return null; // a skill with no domain can never match
 
   const frontmatter =
@@ -801,25 +890,7 @@ export function normalizeCustomSkill(raw: unknown): DomainSkill | null {
         .filter((d) => d.length > 0)
         .slice(0, SKILL_LIMITS.dangerousActions)
     : undefined;
-  const shortcuts =
-    s.shortcuts && typeof s.shortcuts === "object"
-      ? Object.fromEntries(
-          (
-            Object.entries(s.shortcuts as Record<string, unknown>).filter(
-              ([k, v]) => typeof k === "string" && typeof v === "string",
-            ) as Array<[string, string]>
-          )
-            .slice(0, SKILL_LIMITS.shortcuts)
-            .map(
-              ([k, v]) =>
-                [
-                  sanitizeSkillText(k, SKILL_LIMITS.shortcutField),
-                  sanitizeSkillText(v, SKILL_LIMITS.shortcutField),
-                ] as [string, string],
-            )
-            .filter(([k]) => k.length > 0),
-        )
-      : undefined;
+  const shortcuts = normalizeShortcuts(s.shortcuts);
 
   return {
     domains,
@@ -931,7 +1002,11 @@ export async function getFullSkill(name: string): Promise<string> {
   const custom = await loadCustomDomainSkills();
   for (const skill of custom) {
     if (skill?.name === name) {
-      return appendSkillMeta(skill.instructions ?? "", skill);
+      const body = skill.instructions ?? "";
+      return appendSkillMeta(
+        `${SKILL_BOUNDARY}${body}${SKILL_BOUNDARY_END}`,
+        skill,
+      );
     }
   }
   return "";

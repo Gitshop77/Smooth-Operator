@@ -100,13 +100,19 @@ let inflightController: AbortController | null = null;
  * ~5500 models and re-sorting on every keystroke. Invalidated whenever the
  * merged catalog is repopulated.
  */
-let searchIndex: Array<{ providerId: string; providerName: string; lower: string; model: CatalogModel }> | null = null;
+interface SearchIndexEntry {
+  providerId: string;
+  providerName: string;
+  lower: string;
+  model: CatalogModel;
+}
+let searchIndex: SearchIndexEntry[] | null = null;
 let searchIndexTime = 0;
 
 /** Build (or return the cached) precomputed lowercase search index. */
-function getSearchIndex(): Array<{ providerId: string; providerName: string; lower: string; model: CatalogModel }> {
+function getSearchIndex(): SearchIndexEntry[] {
   if (searchIndex && searchIndexTime === memoryCacheTime) return searchIndex;
-  const all: Array<{ providerId: string; providerName: string; lower: string; model: CatalogModel }> = [];
+  const all: SearchIndexEntry[] = [];
   for (const [providerId, provider] of Object.entries(mergedCache)) {
     if (!provider?.models) continue;
     const providerName = provider.name;
@@ -198,6 +204,66 @@ interface CachedCatalog {
   fetchedAt: number;
 }
 
+/** Validate a single provider entry within a catalog. */
+function isValidProvider(entry: unknown): entry is CatalogProvider {
+  if (!entry || typeof entry !== "object") return false;
+  const provider = entry as Record<string, unknown>;
+  if (typeof provider.id !== "string" || typeof provider.name !== "string") return false;
+  if (!provider.models || typeof provider.models !== "object") return false;
+  for (const model of Object.values(provider.models as Record<string, unknown>)) {
+    if (!isValidModel(model)) return false;
+  }
+  return true;
+}
+
+/** Validate a single model entry within a provider. */
+function isValidModel(model: unknown): model is CatalogModel {
+  if (!model || typeof model !== "object") return false;
+  const m = model as Record<string, unknown>;
+  if (
+    typeof m.id !== "string" ||
+    typeof m.name !== "string" ||
+    typeof m.release_date !== "string"
+  ) return false;
+  if (m.cost !== undefined) {
+    const c = m.cost as Record<string, unknown>;
+    const inputRate = c.input;
+    const outputRate = c.output;
+    if (
+      typeof inputRate !== "number" ||
+      !Number.isFinite(inputRate) ||
+      inputRate < 0 ||
+      typeof outputRate !== "number" ||
+      !Number.isFinite(outputRate) ||
+      outputRate < 0
+    ) return false;
+    const rateOk = (v: unknown) =>
+      v === undefined || (typeof v === "number" && v >= 0);
+    if (
+      !rateOk(c.cache_read) ||
+      !rateOk(c.cache_write) ||
+      !rateOk(c.reasoning) ||
+      !rateOk(c.input_audio) ||
+      !rateOk(c.output_audio)
+    ) return false;
+  }
+  if (m.attachment !== undefined && typeof m.attachment !== "boolean") return false;
+  if (m.limit !== undefined) {
+    const lim = m.limit as Record<string, unknown>;
+    const ctxLimit = lim.context;
+    const outLimit = lim.output;
+    if (
+      typeof ctxLimit !== "number" ||
+      !Number.isFinite(ctxLimit) ||
+      ctxLimit < 1 ||
+      typeof outLimit !== "number" ||
+      !Number.isFinite(outLimit) ||
+      outLimit < 0
+    ) return false;
+  }
+  return true;
+}
+
 /**
  * Minimal structural validation of a parsed models.dev catalog. Rejects
  * obviously-wrong shapes (non-object, missing provider entries, `models`
@@ -215,66 +281,7 @@ interface CachedCatalog {
 export function isValidCatalog(value: unknown): value is Catalog {
   if (!value || typeof value !== "object") return false;
   for (const entry of Object.values(value as Record<string, unknown>)) {
-    if (!entry || typeof entry !== "object") return false;
-    const provider = entry as Record<string, unknown>;
-    if (typeof provider.id !== "string" || typeof provider.name !== "string") return false;
-    if (!provider.models || typeof provider.models !== "object") return false;
-    for (const model of Object.values(provider.models as Record<string, unknown>)) {
-      if (!model || typeof model !== "object") return false;
-      const m = model as Record<string, unknown>;
-      // `release_date` and `name` are dereferenced via `.localeCompare` /
-      // `.toLowerCase()` by callers; a non-string here would throw and crash
-      // the picker, so reject it.
-      if (
-        typeof m.id !== "string" ||
-        typeof m.name !== "string" ||
-        typeof m.release_date !== "string"
-      ) return false;
-      if (m.cost !== undefined) {
-        const c = m.cost as Record<string, unknown>;
-        // Reject non-numeric OR negative cost rates (see header note on the
-        // cost-cap). `cache_read`/`cache_write`/`reasoning`/audio rates follow
-        // the same rule when present.
-        const inputRate = c.input;
-        const outputRate = c.output;
-        if (
-          typeof inputRate !== "number" ||
-          !Number.isFinite(inputRate) ||
-          inputRate < 0 ||
-          typeof outputRate !== "number" ||
-          !Number.isFinite(outputRate) ||
-          outputRate < 0
-        ) return false;
-        const rateOk = (v: unknown) =>
-          v === undefined || (typeof v === "number" && v >= 0);
-        if (
-          !rateOk(c.cache_read) ||
-          !rateOk(c.cache_write) ||
-          !rateOk(c.reasoning) ||
-          !rateOk(c.input_audio) ||
-          !rateOk(c.output_audio)
-        ) return false;
-      }
-      // `attachment` is read as a truthy boolean to gate whether a
-      // `<screenshot>` image is attached; a non-boolean would coerce to truthy
-      // and treat a non-vision model as vision-capable. `limit.context` is
-      // rendered verbatim by `formatContext`; a non-number, or context < 1, is
-      // malformed/compromised data that must not reach the picker.
-      if (m.attachment !== undefined && typeof m.attachment !== "boolean") return false;
-      if (m.limit !== undefined) {
-        const lim = m.limit as Record<string, unknown>;
-        const ctxLimit = lim.context;
-        const outLimit = lim.output;
-        if (
-          typeof ctxLimit !== "number" ||
-          !Number.isFinite(ctxLimit) ||
-          ctxLimit < 1 ||
-          typeof outLimit !== "number" ||
-          !Number.isFinite(outLimit) ||
-          outLimit < 0
-        ) return false;
-      }
-    }
+    if (!isValidProvider(entry)) return false;
   }
   return true;
 }
@@ -660,15 +667,7 @@ export function modelSupportsVision(
   providerId?: string,
 ): boolean | Promise<boolean> {
   if (typeof mOrId === "string") {
-    // Fast path: resolve the exact model without sorting the whole list. The
-    // exact match short-circuits, so the (rare) full-list sort below only runs
-    // when the model is absent from the resolved provider's catalog.
-    if (providerId) {
-      const exact = getModelsForProvider(providerId, mOrId);
-      if (exact) return Promise.resolve(resolveVisionSupport(mOrId, [exact]));
-    }
-    const models = providerId ? getModelsForProvider(providerId) : [];
-    return Promise.resolve(resolveVisionSupport(mOrId, models));
+    return resolveCapability(mOrId, providerId, resolveVisionSupport);
   }
   if (mOrId.attachment) return true;
   if (mOrId.modalities?.input?.some((x) => x.toLowerCase().includes("image"))) return true;
@@ -691,18 +690,29 @@ export function modelSupportsReasoning(
   providerId?: string,
 ): boolean | Promise<boolean> {
   if (typeof mOrId === "string") {
-    // Fast path: resolve the exact model without sorting the whole list. The
-    // exact match short-circuits, so the (rare) full-list sort below only runs
-    // when the model is absent from the resolved provider's catalog.
-    if (providerId) {
-      const exact = getModelsForProvider(providerId, mOrId);
-      if (exact) return Promise.resolve(resolveReasoningSupport(mOrId, [exact]));
-    }
-    const models = providerId ? getModelsForProvider(providerId) : [];
-    return Promise.resolve(resolveReasoningSupport(mOrId, models));
+    return resolveCapability(mOrId, providerId, resolveReasoningSupport);
   }
   if (mOrId.reasoning) return true;
   return resolveReasoningSupport(mOrId.id, []);
+}
+
+/**
+ * Common "resolve model from provider, then delegate" pattern shared by
+ * modelSupportsVision and modelSupportsReasoning. Resolves the exact model
+ * via the fast path, falls back to the full provider model list, then
+ * delegates to the provided resolver function.
+ */
+function resolveCapability(
+  modelId: string,
+  providerId: string | undefined,
+  resolver: (modelId: string, models: CatalogModel[]) => boolean,
+): Promise<boolean> {
+  if (providerId) {
+    const exact = getModelsForProvider(providerId, modelId);
+    if (exact) return Promise.resolve(resolver(modelId, [exact]));
+  }
+  const models = providerId ? getModelsForProvider(providerId) : [];
+  return Promise.resolve(resolver(modelId, models));
 }
 
 /* ============================================================= *

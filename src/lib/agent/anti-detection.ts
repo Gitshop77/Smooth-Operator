@@ -137,7 +137,7 @@ export function stealthScriptBody(): void {
       }
     }
 
- // ── 1. navigator.webdriver → undefined ──
+ // ── 1. navigator.webdriver → false ──
     p(function () {
       Object.defineProperty(navigator, "webdriver", {
         get: function () {
