@@ -49,7 +49,23 @@ export function setRunning(v: boolean): void {
 
 // ─── Message input ───────────────────────────────────────────────────────
 
-function sendMessage(): void {
+function storageGet(keys: string | string[], area: "session" | "local"): Promise<Record<string, unknown>> {
+  return new Promise((resolve) => {
+    (chrome.storage[area] as { get: (k: string | string[], cb: (r: Record<string, unknown>) => void) => void }).get(keys, resolve);
+  });
+}
+
+function storageSet(items: Record<string, unknown>, area: "session" | "local"): Promise<void> {
+  return new Promise((resolve) => {
+    (chrome.storage[area] as { set: (v: Record<string, unknown>, cb: () => void) => void }).set(items, () => resolve());
+  });
+}
+
+function runtimeSendMessage(msg: unknown): Promise<unknown> {
+  return new Promise((resolve) => chrome.runtime.sendMessage(msg, resolve));
+}
+
+async function sendMessage(): Promise<void> {
   const text = messageInput.value.trim();
   if (!text || running) return;
 
@@ -57,9 +73,27 @@ function sendMessage(): void {
   if (sendDebounceTimer) return;
   sendDebounceTimer = setTimeout(() => { sendDebounceTimer = null; }, 500);
 
-  // Guard: check that an API key is configured before sending.
-  chrome.storage.session.get("apiKey", (s) => {
-    if (chrome.runtime.lastError || !s?.apiKey) {
+  try {
+    // Check if we're in a clarify state — if so, send a CLARIFY message instead.
+    const clarifyRes = await storageGet(["open_cowork_clarify"], "session") as Record<string, unknown>;
+    const isClarifying = !!clarifyRes?.open_cowork_clarify;
+
+    if (isClarifying) {
+      await storageSet({ open_cowork_clarify_response: text }, "session");
+      if (sendDebounceTimer) { clearTimeout(sendDebounceTimer); sendDebounceTimer = null; }
+      addUserMessage(text);
+      messageInput.value = "";
+      setLifecycle("thinking");
+      addSystemMessage("💬", "Clarification received, resuming task…", undefined);
+      return;
+    }
+
+    // Guard: check that an API key is configured before sending.
+    const localRes = await storageGet(["provider"], "local") as Record<string, unknown>;
+    const provider = (localRes?.provider as string) || "";
+    const key = provider ? `apiKey_${provider}` : "apiKey";
+    const s = await storageGet([key], "local") as Record<string, unknown>;
+    if (chrome.runtime.lastError || !s?.[key]) {
       if (sendDebounceTimer) { clearTimeout(sendDebounceTimer); sendDebounceTimer = null; }
       addSystemMessage(
         "⚠",
@@ -90,33 +124,32 @@ function sendMessage(): void {
     }, 10_000);
 
     // Send the task to the background service worker.
-    chrome.runtime.sendMessage(
-      {
-        type: "RUN",
-        task: text,
-        maxSteps,
-        mode: currentMode,
-      },
-      (res: { ok?: boolean; error?: string }) => {
-        if (responded) return;
-        responded = true;
-        clearTimeout(timeout);
-        if (chrome.runtime.lastError) {
-          if (sendDebounceTimer) { clearTimeout(sendDebounceTimer); sendDebounceTimer = null; }
-          addSystemMessage("❌", chrome.runtime.lastError.message || "Failed to start");
-          return;
-        }
-        if (!res?.ok) {
-          if (sendDebounceTimer) { clearTimeout(sendDebounceTimer); sendDebounceTimer = null; }
-          addSystemMessage("❌", res?.error || "Failed to start");
-          return;
-        }
-        setRunning(true);
-        clearRunTotals();
-        if (sendDebounceTimer) { clearTimeout(sendDebounceTimer); sendDebounceTimer = null; }
-      }
-    );
-  });
+    const res = await runtimeSendMessage({
+      type: "RUN",
+      task: text,
+      maxSteps,
+      mode: currentMode,
+    }) as { ok?: boolean; error?: string } | undefined;
+    if (responded) return;
+    responded = true;
+    clearTimeout(timeout);
+    if (chrome.runtime.lastError) {
+      if (sendDebounceTimer) { clearTimeout(sendDebounceTimer); sendDebounceTimer = null; }
+      const errMsg = (chrome.runtime as { lastError?: { message?: string } }).lastError?.message;
+      addSystemMessage("❌", errMsg || "Failed to start");
+      return;
+    }
+    if (!res?.ok) {
+      if (sendDebounceTimer) { clearTimeout(sendDebounceTimer); sendDebounceTimer = null; }
+      addSystemMessage("❌", res?.error || "Failed to start");
+      return;
+    }
+    setRunning(true);
+    clearRunTotals();
+    if (sendDebounceTimer) { clearTimeout(sendDebounceTimer); sendDebounceTimer = null; }
+  } catch {
+    if (sendDebounceTimer) { clearTimeout(sendDebounceTimer); sendDebounceTimer = null; }
+  }
 }
 
 sendBtn.addEventListener("click", sendMessage);
@@ -124,7 +157,7 @@ sendBtn.addEventListener("click", sendMessage);
 messageInput.addEventListener("keydown", (e: KeyboardEvent) => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
-    sendMessage();
+    void sendMessage();
   }
 });
 

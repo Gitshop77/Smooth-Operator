@@ -96,27 +96,20 @@ async function fetchToBuffer(
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     timer = setTimeout(() => ctrl.abort(), stallMs);
-  const r = await fetch(url, { ...opts, signal: ctrl.signal });
-  if (!(r.status === 200 || r.status === 206)) throw new Error(`status ${r.status}`);
-  if (!r.body) throw new Error(`empty response body for ${url}`);
-  const reader = r.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let got = 0;
-  const clHeader = r.headers.get("content-length");
-  const cl = clHeader ? Number(clHeader) : NaN;
-  let lastPct = -1;
-  try {
+    const r = await fetch(url, { ...opts, signal: ctrl.signal });
+    if (!(r.status === 200 || r.status === 206)) throw new Error(`status ${r.status}`);
+    if (!r.body) throw new Error(`empty response body for ${url}`);
+    const reader = r.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let got = 0;
+    const clHeader = r.headers.get("content-length");
+    const cl = clHeader ? Number(clHeader) : NaN;
+    let lastPct = -1;
     for (;;) {
       clearTimeout(timer);
       timer = setTimeout(() => ctrl.abort(), stallMs);
       const { done, value } = await reader.read();
       if (done) break;
- // `maxBytes` caps how much of the body we keep in memory. Used by the probe:
- // if the server IGNORES the Range header and returns the whole (potentially
- // multi-GB) file in a single read, we must not buffer the entire chunk. Bound
- // the accumulation to the remaining budget and stop — keeping only the leading
- // `maxBytes` bytes (or the whole chunk when it already fits) so memory stays
- // capped rather than buffering the full response.
       if (maxBytes !== undefined) {
         const remaining = maxBytes - got;
         if (remaining <= 0) {
@@ -139,15 +132,12 @@ async function fetchToBuffer(
         }
       }
     }
-  } finally {
-    clearTimeout(timer);
-  }
-  const buf = new Uint8Array(got);
-  let o = 0;
-  for (const c of chunks) {
-    buf.set(c, o);
-    o += c.length;
-  }
+    const buf = new Uint8Array(got);
+    let o = 0;
+    for (const c of chunks) {
+      buf.set(c, o);
+      o += c.length;
+    }
     return { buf, headers: r.headers, status: r.status };
   } finally {
     if (timer) clearTimeout(timer);
@@ -233,7 +223,7 @@ async function fetchBufProgress(
  // No usable size information from either Content-Range or Content-Length —
  // we cannot trust the probe chunk as the whole file. Force a full-file GET
  // (no Range) so we download everything rather than silently caching a
- // truncated partial (finding: truncated download cached without error / a
+ // truncated partial
  // download with an unknown total was cached as complete). The integrity
  // check still runs afterwards.
   return (
@@ -512,7 +502,7 @@ export class ModelLoader {
     } catch (e) {
  // Auto-recover: delete the poisoned / rolled-back / tampered entry so the
  // next load re-downloads a clean copy instead of repeatedly failing
- // (finding: integrity re-verify failure does not auto-recover the poisoned
+ //
  // cache entry).
       try { await this.cache!.delete(url); } catch { /* best-effort */ }
       throw e;
@@ -546,7 +536,7 @@ export class ModelLoader {
       await this.reverifyIntegrity(url, rawBuf, response);
     } catch (e) {
  // Auto-recover: delete the poisoned / rolled-back entry so the next load
- // re-downloads a clean copy (finding: integrity re-verify failure does not
+ // re-downloads a clean copy
  // auto-recover the poisoned cache entry).
       try { await this.cache!.delete(url); } catch { /* best-effort */ }
       throw e;

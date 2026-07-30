@@ -229,7 +229,7 @@ export class VisionAssistant {
  // emits silently-garbage embeddings. (Further per-call guards live in
  // `gatherEmbed`.)
       this.validateEmbeddingShapes(scalesBytes);
-      markEmbeddingMetaValidated();
+      markEmbeddingMetaValidated(this.embMeta!);
 
       const sv = new DataView(scalesBytes.buffer, scalesBytes.byteOffset, scalesBytes.byteLength);
       this.embScales = new Float32Array(scalesBytes.length >> 1);
