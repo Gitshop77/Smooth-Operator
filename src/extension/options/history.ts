@@ -114,13 +114,12 @@ export async function renderHistory(): Promise<void> {
   }
   const frag = document.createDocumentFragment();
   for (const r of runs) {
-    const item = document.createElement("div");
+    const item = document.createElement("button");
+    item.type = "button";
     item.className = "history-item";
  // Safe formatting: stored/typed as numbers, but coerce defensively so a
  // malformed row renders as "—" rather than NaN/Invalid Date.
     const date = Number.isFinite(r.startedAt) ? new Date(r.startedAt).toLocaleString() : "—";
-    item.tabIndex = 0;
-    item.setAttribute("role", "button");
     item.setAttribute("aria-label", `View transcript of run starting ${date}`);
     const duration =
       Number.isFinite(r.endedAt) && Number.isFinite(r.startedAt)
@@ -137,12 +136,6 @@ export async function renderHistory(): Promise<void> {
       `<span class="meta">${escapeHtml(date)} · ${escapeHtml(String(duration))}s · ${escapeHtml(steps)} steps · $${escapeHtml(cost)}</span>` +
       badge;
     item.addEventListener("click", () => showTranscript(r));
-    item.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter" || ev.key === " ") {
-        ev.preventDefault();
-        showTranscript(r);
-      }
-    });
     frag.appendChild(item);
   }
   list.appendChild(frag);

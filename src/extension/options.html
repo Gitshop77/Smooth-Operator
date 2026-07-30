@@ -9,7 +9,9 @@
   <link rel="stylesheet" href="options.css" />
 </head>
 <body>
+  <a href="#panel-connection" class="skip-link">Skip to content</a>
   <div class="container">
+    <h1 class="visually-hidden">Open Cowork Settings</h1>
     <!-- Left sidebar rail -->
     <nav class="tabs" role="tablist" aria-label="Settings sections" id="tablist">
       <button type="button" class="tab active" data-tab="connection" id="tab-connection" role="tab" aria-selected="true" aria-controls="panel-connection" tabindex="0">Connection</button>
@@ -32,19 +34,19 @@
         </div>
 
         <div class="section-group">
-          <label>
+          <label for="provider">
             <span>Provider</span>
             <select id="provider"></select>
             <small id="provider-hint">Choose your provider.</small>
           </label>
 
-          <label>
+          <label for="apiKey">
             <span>API key</span>
             <input type="password" id="apiKey" placeholder="sk-…" autocomplete="new-password" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" />
             <small id="apikey-hint">Your API key — stored locally in your browser profile. Only sent to the provider you choose.</small>
           </label>
 
-          <label id="baseurl-label">
+          <label id="baseurl-label" for="baseUrl">
             <span>Base URL</span>
             <input type="text" id="baseUrl" placeholder="https://api.openai.com/v1" autocomplete="off" />
             <small>For OpenAI-compatible providers. Auto-filled with the provider default.</small>
@@ -53,7 +55,7 @@
           <div id="opencode-endpoint-hint" class="is-hidden endpoint-hint">
           </div>
 
-          <label id="resourcename-label" class="is-hidden">
+          <label id="resourcename-label" class="is-hidden" for="resourceName">
             <span>Azure resource name</span>
             <input type="text" id="resourceName" placeholder="your-resource" autocomplete="off" />
             <small>Used to build <code>https://{resource}.openai.azure.com</code> when no Base URL is set. Optional if you supply a full Base URL.</small>
@@ -213,7 +215,9 @@
 
           <h4 class="subsection-title">Quick prompts</h4>
           <div class="crud-row">
+            <label for="quickPromptName" class="visually-hidden">Quick prompt name</label>
             <input type="text" id="quickPromptName" placeholder="Name (e.g. Summarize)" autocomplete="off" />
+            <label for="quickPromptText" class="visually-hidden">Quick prompt text</label>
             <input type="text" id="quickPromptText" placeholder="Prompt text" autocomplete="off" />
             <button type="button" id="addQuickPrompt" class="btn btn-ghost">Add</button>
           </div>
@@ -234,7 +238,9 @@
           <h3 class="section-title">Secrets</h3>
           <p class="section-desc">Store passwords, API keys, or tokens. Use <code>%name%</code> placeholders in prompts.</p>
           <div class="crud-row">
+            <label for="secretName" class="visually-hidden">Secret name</label>
             <input type="text" id="secretName" placeholder="name (e.g. email)" autocomplete="off" />
+            <label for="secretValue" class="visually-hidden">Secret value</label>
             <input type="password" id="secretValue" placeholder="value" autocomplete="new-password" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" />
             <button type="button" id="addSecret" class="btn btn-ghost">Add</button>
           </div>
@@ -262,20 +268,26 @@
           <h3 class="section-title">Scheduled tasks</h3>
           <p class="section-desc">Schedule recurring agent runs. Uses <code>chrome.alarms</code> (MV3-compliant).</p>
           <div class="crud-row">
+            <label for="scheduleTask" class="visually-hidden">Task prompt</label>
             <input type="text" id="scheduleTask" placeholder="Task prompt" autocomplete="off" />
+            <label for="scheduleType" class="visually-hidden">Schedule type</label>
             <select id="scheduleType">
               <option value="interval">Every N minutes</option>
               <option value="daily">Daily at time</option>
               <option value="weekly">Weekly</option>
             </select>
+            <label for="scheduleInterval" class="visually-hidden">Interval in minutes</label>
             <input type="number" id="scheduleInterval" placeholder="min" value="60" />
+            <label for="scheduleTime" class="visually-hidden">Time of day</label>
             <input type="time" id="scheduleTime" value="09:00" class="is-hidden" />
+            <label for="scheduleDay" class="visually-hidden">Day of week</label>
             <select id="scheduleDay" class="is-hidden">
               <option value="0">Sunday</option><option value="1">Monday</option>
               <option value="2">Tuesday</option><option value="3">Wednesday</option>
               <option value="4">Thursday</option><option value="5">Friday</option>
               <option value="6">Saturday</option>
             </select>
+            <label for="scheduleMode" class="visually-hidden">Agent mode</label>
             <select id="scheduleMode">
               <option value="standard" selected>Standard mode</option>
               <option value="restricted">Restricted mode</option>
@@ -290,7 +302,9 @@
           <h3 class="section-title">Custom tools</h3>
           <p class="section-desc">Define custom JavaScript tools the agent can invoke via the existing <code>evaluate</code> action.</p>
           <div class="crud-row">
+            <label for="toolName" class="visually-hidden">Tool name</label>
             <input type="text" id="toolName" placeholder="Tool name (e.g. scrape_table)" autocomplete="off" />
+            <label for="toolDesc" class="visually-hidden">Tool description</label>
             <input type="text" id="toolDesc" placeholder="Description" autocomplete="off" />
           </div>
           <label class="tool-code-label">
@@ -311,7 +325,9 @@
           <h3 class="section-title">Domain skills</h3>
           <p class="section-desc">Define site-specific instruction packs loaded on-demand when the agent visits a matching domain.</p>
           <div class="crud-row">
+            <label for="skillDomain" class="visually-hidden">Domain</label>
             <input type="text" id="skillDomain" placeholder="Domain (e.g. mysite.com)" autocomplete="off" />
+            <label for="skillName" class="visually-hidden">Skill name</label>
             <input type="text" id="skillName" placeholder="Skill name (e.g. MySite)" autocomplete="off" />
           </div>
           <label class="skill-instructions-label">
@@ -385,8 +401,8 @@
           </ul>
           <h4 class="subsection-title">Links</h4>
           <p>
-            <a href="https://github.com/Gitshop77/open-cowork-chrome-extension" target="_blank" rel="noopener noreferrer">GitHub</a> ·
-            <a href="https://github.com/Gitshop77/open-cowork-chrome-extension/issues" target="_blank" rel="noopener noreferrer">Report an issue</a>
+            <a href="https://github.com/Gitshop77/open-cowork-chrome-extension" target="_blank" rel="noopener noreferrer" aria-label="GitHub (opens in new tab)">GitHub<span class="visually-hidden"> (opens in new tab)</span></a> ·
+            <a href="https://github.com/Gitshop77/open-cowork-chrome-extension/issues" target="_blank" rel="noopener noreferrer" aria-label="Report an issue (opens in new tab)">Report an issue<span class="visually-hidden"> (opens in new tab)</span></a>
           </p>
           <h4 class="subsection-title">License</h4>
           <p>Open-source under the MIT license.</p>
