@@ -276,16 +276,12 @@ Evaluate whether the task was actually completed.`;
         ? modelForCost.split("/")[0]
         : undefined;
       costUsd = modelForCost
-        ? estimateCost(
-            modelForCost,
+        ? estimateCost({
+            model: modelForCost,
             tokensIn,
             tokensOut,
-            undefined,
-            undefined,
-            undefined,
-            undefined,
-            judgeProviderId,
-          )
+            providerId: judgeProviderId,
+          })
         : 0;
     } catch (err) {
  // Pricing import / estimateCost failed — report zero cost (safe

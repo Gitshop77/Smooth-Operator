@@ -16,6 +16,7 @@
  */
 
 import { isExtensionWithAlarms } from "./runtime";
+import { createMutex } from "./mutex";
 
 /** Schedule spec for a recurring task. */
 export interface ScheduledTaskSchedule {
@@ -78,32 +79,7 @@ function alarmName(taskId: string): string {
   return `${ALARM_PREFIX}${taskId}`;
 }
 
-/**
- * Serialize scheduled-task storage mutations within a single JS context.
- *
- * `chrome.storage.local` has no transactions, so a read-modify-write of the
- * scheduled-task list can interleave with another mutation in the *same*
- * context and clobber it (lost-update race — see ). This
- * mutex makes each mutation atomic *within* this context (e.g. two alarms
- * firing concurrently both call `saveScheduledTask`; each re-reads the list
- * under the lock so both `lastRunAt` updates survive).
- *
- * It cannot prevent a race with the Options page (a separate JS context) —
- * fixing that requires per-task storage keys, which also needs the Options
- * page (`src/extension/options/scheduled-tasks.ts`) to adopt the same scheme.
- */
-let taskMutationLock: Promise<void> = Promise.resolve();
-async function withTaskMutation<T>(fn: () => Promise<T>): Promise<T> {
-  const prev = taskMutationLock;
-  let release!: () => void;
-  taskMutationLock = new Promise<void>((r) => (release = r));
-  await prev;
-  try {
-    return await fn();
-  } finally {
-    release();
-  }
-}
+const withTaskMutation = createMutex();
 
 /**
  * Validate a schedule spec.
@@ -134,6 +110,46 @@ export function validateSchedule(s: ScheduledTaskSchedule): string | null {
     return null;
   }
   return `unknown schedule type: ${s.type as string}`;
+}
+
+/**
+ * Roll back the storage write to the previous state. If `previousTasks` was
+ * undefined we remove the key entirely.
+ */
+async function rollbackStorage(
+  previousTasks: unknown,
+  taskId: string,
+  _rbErr: unknown,
+): Promise<void> {
+  try {
+    if (previousTasks) {
+      await chrome.storage.local.set({ [STORAGE_KEY]: previousTasks });
+    } else {
+      await chrome.storage.local.remove(STORAGE_KEY);
+    }
+  } catch (rbErr2) {
+    console.error(
+      `[scheduled-tasks] rollback of storage for task ${taskId} failed:`,
+      rbErr2 instanceof Error ? rbErr2.message : String(rbErr2)
+    );
+  }
+}
+
+/**
+ * Re-arm the previous alarm (best-effort) so an enabled task isn't left
+ * without a live alarm until the next SW restart.
+ */
+async function reArmPriorAlarm(prior: ScheduledTask | null): Promise<void> {
+  if (prior && prior.enabled) {
+    try {
+      await scheduleAlarm(prior);
+    } catch (armErr) {
+      console.error(
+        `[scheduled-tasks] re-arming previous alarm for task ${prior.id} failed:`,
+        armErr instanceof Error ? armErr.message : String(armErr)
+      );
+    }
+  }
 }
 
 /** Type guard: a persisted entry is a usable {@link ScheduledTask} iff it's an
@@ -205,36 +221,8 @@ export async function saveScheduledTask(task: ScheduledTask): Promise<void> {
   try {
     await scheduleAlarm(merged);
   } catch (e) {
- // Roll back storage to the previous state. If `previousTasks` was
- // undefined we remove the key entirely.
-    try {
-      if (previousTasks) {
-        await chrome.storage.local.set({ [STORAGE_KEY]: previousTasks });
-      } else {
-        await chrome.storage.local.remove(STORAGE_KEY);
-      }
-    } catch (rbErr) {
- // Rollback failure is best-effort, but a silent swallow would hide a
- // real inconsistency (storage says "enabled" but no alarm armed, or
- // vice-versa). Surface it so the breakage is diagnosable , then re-throw the original arming error.
-      console.error(
-        `[scheduled-tasks] rollback of storage for task ${task.id} failed:`,
-        rbErr instanceof Error ? rbErr.message : String(rbErr)
-      );
-    }
-    // Re-arm the previous alarm (best-effort) so an enabled task isn't left
-    // without a live alarm until the next SW restart. The prior entry exists
-    // only when updating an already-stored task.
-    if (prior && prior.enabled) {
-      try {
-        await scheduleAlarm(prior);
-      } catch (armErr) {
-        console.error(
-          `[scheduled-tasks] re-arming previous alarm for task ${prior.id} failed:`,
-          armErr instanceof Error ? armErr.message : String(armErr)
-        );
-      }
-    }
+    await rollbackStorage(previousTasks, task.id, e);
+    await reArmPriorAlarm(prior);
     throw new Error(
       `Failed to arm alarm for task ${task.id}: ${e instanceof Error ? e.message : String(e)}`,
       { cause: e }

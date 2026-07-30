@@ -107,7 +107,7 @@ async function reportUsage(
  // bare-id resolution in pricing.ts.
   const compactionProviderId = model.includes("/") ? model.split("/")[0] : undefined;
   const computedCost =
-    costUsd ?? estimateCost(model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cw, undefined, compactionProviderId);
+    costUsd ?? estimateCost({ model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens: cw, providerId: compactionProviderId });
   const usage: LLMUsageInfo = {
     tokensIn,
     tokensOut,

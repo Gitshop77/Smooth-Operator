@@ -94,6 +94,9 @@ const warnedUncataloguedModels = new Set<string>();
 /** True while a background {@link refreshPricingFromCatalog} is in flight. */
 let pricingLoading = false;
 
+/** True once the pricing override table has been populated at least once. */
+let pricingLoaded = false;
+
 /** Most recent {@link refreshPricingFromCatalog} error (null = last refresh succeeded). */
 let lastPricingError: Error | null = null;
 
@@ -164,24 +167,38 @@ function lookupPricing(
 ): ModelPricing | undefined {
   const m = model.toLowerCase();
   const prefix = providerId ? providerId.toLowerCase() : undefined;
- // 1. When the caller knows its provider, a provider-prefixed key
- // (`openai/gpt-4o`) disambiguates same-named models across providers and
- // wins over any bare-id entry (which may belong to a different provider).
-  if (prefix && table[`${prefix}/${m}`]) return table[`${prefix}/${m}`];
- // 2. An EXACT bare id match wins immediately (the common, correct case).
-  if (table[m]) return table[m];
- // 3. Otherwise the LONGEST matching key wins, preferring the caller's provider
- // prefix so a same-named model from a different provider isn't billed at the
- // wrong rate. The original implementation returned the first substring match,
- // which over-bills when a shorter model id is a prefix of a longer one and
- // happens to be enumerated earlier.
+
+  return lookupByProviderPrefix(table, m, prefix)
+    ?? lookupExact(table, m)
+    ?? lookupBySubstring(table, m);
+}
+
+/** Try a provider-prefixed key (e.g. `openai/gpt-4o`). */
+function lookupByProviderPrefix(
+  table: Record<string, ModelPricing>,
+  model: string,
+  prefix: string | undefined,
+): ModelPricing | undefined {
+  if (!prefix) return undefined;
+  return table[`${prefix}/${model}`];
+}
+
+/** Try an exact bare id match. */
+function lookupExact(
+  table: Record<string, ModelPricing>,
+  model: string,
+): ModelPricing | undefined {
+  return table[model];
+}
+
+/** Find the longest matching key via substring match. */
+function lookupBySubstring(
+  table: Record<string, ModelPricing>,
+  model: string,
+): ModelPricing | undefined {
   let best: { key: string; rate: ModelPricing } | undefined;
   for (const [key, rate] of Object.entries(table)) {
-    if (!m.includes(key)) continue;
-    // The longest matching key wins (most-specific catalog entry). The
-    // provider-prefixed keys cannot match `m.includes(key)` here because `m`
-    // is a bare model id (no slash), so a provider-preference branch would be
-    // dead code — drop it and pick purely by descending key length.
+    if (!model.includes(key)) continue;
     if (!best || key.length > best.key.length) {
       best = { key, rate };
     }
@@ -257,6 +274,45 @@ function convertCatalog(catalog: Catalog): Record<string, ModelPricing> {
 }
 
 /**
+ * Fetch with bounded retry/backoff for transient failures. Returns the
+ * parsed JSON on success, throws on final failure.
+ */
+async function fetchWithRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
+/**
+ * Fetch and validate a custom catalog from a user-specified URL.
+ * Returns the converted pricing table.
+ */
+async function fetchCustomCatalog(url: string): Promise<Record<string, ModelPricing>> {
+  const parsedUrl = new URL(url);
+  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+    throw new Error(`refusing to fetch non-HTTP catalog URL: ${parsedUrl.protocol}`);
+  }
+  const ssrf = validateLlmBaseUrl(url, false);
+  if (!ssrf.ok) {
+    throw new Error(`refusing to fetch catalog URL: ${ssrf.reason}`);
+  }
+  const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+  if (!res.ok) throw new Error(`catalog ${res.status}`);
+  const raw = await res.json();
+  if (!isValidCatalog(raw)) {
+    throw new Error("custom catalog failed shape validation");
+  }
+  return convertCatalog(raw);
+}
+
+/**
  * Hydrate {@link pricingOverride} from the live models.dev catalog (F-02b).
  *
  * Resolution (best-effort — any failure leaves the current override in place
@@ -283,95 +339,15 @@ export async function refreshPricingFromCatalog(): Promise<void> {
     const url = typeof process !== "undefined" ? process.env?.COWORK_MODEL_CATALOG_URL : undefined;
     let table: Record<string, ModelPricing> = {};
     if (url) {
- // Custom catalog URL override (e.g. a self-hosted models.dev mirror).
- //
- // TRUST ASSUMPTION: whoever controls `COWORK_MODEL_CATALOG_URL` (an
- // operator-injected env var, by design) controls the rates that feed
- // cost-cap enforcement. This is an intentional operator knob — a
- // SELF-HOSTED MIRROR on a PUBLICLY-REACHABLE, non-restricted host
- // legitimately reprices models. The mirror URL MUST still pass the SSRF
- // guard below: loopback / RFC1918 / link-local / CGNAT / unspecified /
- // .internal targets are correctly REJECTED (not a supported topology), so
- // only a genuinely public mirror is fetched. We still
- // reject non-positive rates (0 AND negative) in `convertCatalog`, which
- // both this path and the default path flow through: a 0 rate would make
- // `estimateCost` multiply token counts by zero and never trip the cap, a
- // negative rate would subtract from spend — and no legitimate repricing
- // produces either. A non-positive entry is simply dropped and falls back
- // to DEFAULT_UNKNOWN_MODEL_PRICE (expensive) so the cap holds regardless
- // of the mirror's contents. Strictly-negative rates are additionally
- // caught up-front by `isValidCatalog` below (its validation is shared
- // with the default path); failures surface via `lastPricingError` + a
- // non-production console.warn so misconfiguration is visible.
- // SSRF guard: route the custom catalog URL through the shared SSRF guard so
- // it can never reach a cloud-metadata, link-local, unspecified, CGNAT,
- // loopback, RFC1918, or ULA target. The env var is operator-controlled, but a
- // value such as `file:///etc/passwd`, the cloud-metadata endpoint
- // (`http://169.254.169.254/`), `http://127.0.0.1:port/`, or a `.internal`
- // hostname would otherwise be fetched (the response is rejected by
- // isValidCatalog, but the outbound request still fires). The protocol
- // pre-filter stays as a fast check; the shared guard is the authoritative
- // egress check that every other outbound path in the codebase uses.
-      const parsedUrl = new URL(url);
-      if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-        throw new Error(`refusing to fetch non-HTTP catalog URL: ${parsedUrl.protocol}`);
-      }
-      const ssrf = validateLlmBaseUrl(url, false);
-      if (!ssrf.ok) {
-        throw new Error(`refusing to fetch catalog URL: ${ssrf.reason}`);
-      }
-      const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-      if (!res.ok) throw new Error(`catalog ${res.status}`);
-      const raw = await res.json();
- // Trust-boundary guard: the custom-URL path bypasses the validation that
- // fetchCatalog() performs on the default path, so validate the shape here
- // using the SAME guard catalog.ts uses (single shared rule, no drift). A
- // malformed/compromised response would otherwise flow into convertCatalog
- // and feed non-numeric rates to estimateCost (producing NaN that silently
- // defeats the cost cap). Drop the response rather than merge it.
-      if (!isValidCatalog(raw)) {
-        throw new Error("custom catalog failed shape validation");
-      }
-      table = convertCatalog(raw);
+      table = await fetchCustomCatalog(url);
     } else {
- // Default: the live models.dev catalog (with its own cache + offline fallback).
       const { fetchCatalog } = await import("./catalog");
- // Pass `force = true` so we bypass catalog.ts's module-level memoryCache
- // and always re-read the LIVE catalog on refresh. refreshPricingFromCatalog
- // is the deliberate hydration entry point (called at app startup / on an
- // explicit pricing refresh), so it must reflect the current catalog rather
- // than a stale in-memory snapshot from a previous fetch. The cost here is
- // one extra network fetch at refresh time; the graceful offline/stale-cache
- // fallback inside fetchCatalog still applies if the network is down.
-      // R2 §6: bounded retry/backoff for transient failures. A momentary network
-      // blip (briefly offline, models.dev momentarily unavailable) must NOT
-      // permanently strand pricing on the conservative default. Retry the LIVE
-      // fetch up to 2 extra times with a fixed 500ms backoff before giving up.
-      // On success the merge/clear below runs byte-for-byte as before; only the
-      // failure path changes (adding retries before the existing catch records
-      // `lastPricingError` + warns).
-      let catalog: Catalog | undefined;
-      let ok = false;
-      let lastFetchErr: unknown;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          catalog = await fetchCatalog(true);
-          ok = true;
-          break;
-        } catch (err) {
-          lastFetchErr = err;
-          if (attempt < 2) await new Promise((r) => setTimeout(r, 500));
-        }
-      }
-      if (!ok || !catalog) {
-        // Re-throw so the outer catch records lastPricingError + warns exactly as
-        // before (final-failure behavior is unchanged).
-        throw lastFetchErr instanceof Error ? lastFetchErr : new Error(String(lastFetchErr));
-      }
+      const catalog = await fetchWithRetry(() => fetchCatalog(true));
       table = convertCatalog(catalog);
     }
  // Merge so a prior override (e.g. from a previous explicit call) survives.
     pricingOverride = { ...pricingOverride, ...table };
+    pricingLoaded = true;
  // Invalidate the pricing lookup memo so the freshly-fetched catalog rates
  // take effect immediately for subsequent cost estimates.
     pricingCache.clear();
@@ -428,7 +404,7 @@ export function getPricingForModel(model: string, providerId?: string): ModelPri
  // kick off a fire-and-forget refresh so subsequent calls use live rates. We
  // still return the conservative default now (cost cap still trips).
   if (
-    Object.keys(pricingOverride).length === 0 &&
+    !pricingLoaded &&
     !pricingLoading &&
     Date.now() - lastRefreshAttempt > REFRESH_COOLDOWN_MS
   ) {
@@ -449,8 +425,11 @@ export function getPricingForModel(model: string, providerId?: string): ModelPri
   if (!warnedUncataloguedModels.has(model)) {
     maybeClearWarnedModels();
     warnedUncataloguedModels.add(model);
+  // Truncate the model name to 60 chars to avoid leaking custom endpoint
+  // URLs or deployment tokens that might be embedded in the model identifier.
+    const displayName = model.length > 60 ? model.slice(0, 57) + "..." : model;
     console.warn(
-      `[pricing] No catalogued price for model "${model}". Falling back to ` +
+      `[pricing] No catalogued price for model "${displayName}". Falling back to ` +
         `DEFAULT_UNKNOWN_MODEL_PRICE ($${DEFAULT_UNKNOWN_MODEL_PRICE.in}/` +
         `$${DEFAULT_UNKNOWN_MODEL_PRICE.out} per 1M tokens, flagged uncatalogued). ` +
         `The cost cap still applies, but consider adding this model to the catalog.`
@@ -470,6 +449,7 @@ export function getPricingForModel(model: string, providerId?: string): ModelPri
  */
 export function __resetPricingForTests(): void {
   pricingOverride = {};
+  pricingLoaded = false;
   pricingCache.clear();
   warnedUncataloguedModels.clear();
   pricingLoading = false;
@@ -509,6 +489,17 @@ export function __resetPricingForTests(): void {
  * prefer that provider's rate for same-named models that appear under multiple
  * providers (disambiguating cost-cap accounting across providers).
  */
+export interface EstimateCostOptions {
+  model: string;
+  tokensIn: number;
+  tokensOut: number;
+  reasoningTokens?: number;
+  cachedInputTokens?: number;
+  cachedWriteInputTokens?: number;
+  completionTokens?: number;
+  providerId?: string;
+}
+
 /** Clamp a (possibly malformed) token count to a finite, non-negative integer. */
 function tokenCount(v: number | undefined): number {
   return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
@@ -520,16 +511,30 @@ function finite(v: number | undefined, fallback: number): number {
 }
 
 export function estimateCost(
-  model: string,
-  tokensIn: number,
-  tokensOut: number,
-  reasoningTokens: number = 0,
-  cachedInputTokens: number = 0,
-  cachedWriteInputTokens: number = 0,
+  modelOrOpts: string | EstimateCostOptions,
+  tokensIn?: number,
+  tokensOut?: number,
+  reasoningTokens?: number,
+  cachedInputTokens?: number,
+  cachedWriteInputTokens?: number,
   completionTokens?: number,
   providerId?: string
 ): number {
-  const rate = getPricingForModel(model, providerId);
+  const opts: EstimateCostOptions =
+    typeof modelOrOpts === "string"
+      ? {
+          model: modelOrOpts,
+          tokensIn: tokensIn ?? 0,
+          tokensOut: tokensOut ?? 0,
+          reasoningTokens,
+          cachedInputTokens,
+          cachedWriteInputTokens,
+          completionTokens,
+          providerId,
+        }
+      : modelOrOpts;
+  const { model, providerId: pid } = opts;
+  const rate = getPricingForModel(model, pid);
 
  // Token-count guards: malformed usage (NaN/Infinity/negative token counts)
  // would otherwise flow straight into the summation and silently defeat the
@@ -537,30 +542,30 @@ export function estimateCost(
  // negative count subtracts from accumulated spend. Clamp every count to a
  // finite, non-negative integer BEFORE any arithmetic. `completionTokens` is
  // sanitized only when supplied so the "omitted" branch below still applies.
-  tokensIn = tokenCount(tokensIn);
-  tokensOut = tokenCount(tokensOut);
-  reasoningTokens = tokenCount(reasoningTokens);
-  cachedInputTokens = tokenCount(cachedInputTokens);
-  cachedWriteInputTokens = tokenCount(cachedWriteInputTokens);
-  if (completionTokens !== undefined) completionTokens = tokenCount(completionTokens);
+  const tIn = tokenCount(opts.tokensIn);
+  const tOut = tokenCount(opts.tokensOut);
+  const rTokens = tokenCount(opts.reasoningTokens);
+  const cRead = tokenCount(opts.cachedInputTokens);
+  const cWrite = tokenCount(opts.cachedWriteInputTokens);
+  const compTokens = opts.completionTokens !== undefined ? tokenCount(opts.completionTokens) : undefined;
 
  // Cache writes are disjoint from (and typically exceed) cache reads. The
  // fresh/cached split: reads first, then writes, then fresh input.
-  const cachedRead = Math.min(cachedInputTokens, tokensIn);
+  const cachedRead = Math.min(cRead, tIn);
   const cachedWrite = Math.min(
-    cachedWriteInputTokens,
-    Math.max(0, tokensIn - cachedRead),
+    cWrite,
+    Math.max(0, tIn - cachedRead),
   );
-  const freshInput = Math.max(0, tokensIn - cachedRead - cachedWrite);
+  const freshInput = Math.max(0, tIn - cachedRead - cachedWrite);
 
  // Visible (non-reasoning) output tokens billed at `out`.
  // When the caller separately reports completionTokens (reasoning tokens live
  // OUTSIDE tokensOut), use that directly; otherwise assume the OpenAI-style
  // contract that tokensOut INCLUDES reasoning tokens.
   const visibleOut =
-    completionTokens !== undefined
-      ? Math.max(0, completionTokens)
-      : Math.max(0, tokensOut - reasoningTokens);
+    compTokens !== undefined
+      ? Math.max(0, compTokens)
+      : Math.max(0, tOut - rTokens);
  // Finite-rate guards: a non-numeric rate (e.g. from a malformed custom
  // catalog that slipped past validation) would make the whole estimate NaN,
  // which silently defeats the cost cap. Fall back to the conservative default
@@ -577,6 +582,6 @@ export function estimateCost(
     (cachedRead / 1_000_000) * cacheReadRate +
     (cachedWrite / 1_000_000) * cacheWriteRate +
     (visibleOut / 1_000_000) * outRate +
-    (reasoningTokens / 1_000_000) * reasoningRate
+    (rTokens / 1_000_000) * reasoningRate
   );
 }

@@ -14,7 +14,7 @@
  */
 import { estimateCost } from "./pricing";
 import { omitZero } from "./shared";
-import type { LLMProvider, LLMRequest, LLMResponse } from "./provider";
+import type { LLMProvider, LLMRequest, LLMResponse, LLMUsage } from "./provider";
 
 export interface ProviderBridgeConfig {
   /** Provider id prefix (e.g. "openai", "anthropic"). Combined with model name for the LLMProvider id. */
@@ -56,15 +56,37 @@ export interface ProviderBridgeConfig {
   };
 }
 
+function buildUsage(
+  response: { usage?: LLMUsage },
+  model: string,
+  providerId: string,
+): LLMUsage | undefined {
+  if (!response.usage) return undefined;
+  const tokensIn = response.usage.tokensIn ?? 0;
+  const tokensOut = response.usage.tokensOut ?? 0;
+  const reasoningTokens = response.usage.reasoningTokens ?? 0;
+  const cachedInputTokens = response.usage.cachedInputTokens ?? 0;
+  const cachedWriteInputTokens = response.usage.cachedWriteInputTokens ?? 0;
+  return {
+    tokensIn,
+    tokensOut,
+    reasoningTokens: omitZero(reasoningTokens),
+    cachedInputTokens: omitZero(cachedInputTokens),
+    cachedWriteInputTokens: omitZero(cachedWriteInputTokens),
+    model,
+    costUsd: estimateCost({ model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, providerId }),
+  };
+}
+
 /**
  * Build an `LLMProvider` from a configured provider facade.
  *
  * Returns an `LLMProvider` whose `chat()` method:
  * - Builds a model handle via `configureResult.model(model)`.
  * - Dynamically imports `generate` from `./route/client` (preserves the
- * existing lazy-import pattern).
+ *   existing lazy-import pattern).
  * - Re-computes `usage.costUsd` from the live catalog-backed pricing module (the
- * protocol returns `costUsd: 0`; we override it here).
+ *   protocol returns `costUsd: 0`; we override it here).
  */
 export function toLLMProvider(config: ProviderBridgeConfig): LLMProvider {
   return {
@@ -112,24 +134,9 @@ export function toLLMProvider(config: ProviderBridgeConfig): LLMProvider {
         }
         throw err;
       }
-      const tokensIn = response.usage?.tokensIn ?? 0;
-      const tokensOut = response.usage?.tokensOut ?? 0;
-      const reasoningTokens = response.usage?.reasoningTokens ?? 0;
-      const cachedInputTokens = response.usage?.cachedInputTokens ?? 0;
-      const cachedWriteInputTokens = response.usage?.cachedWriteInputTokens ?? 0;
       return {
         content: response.content,
-        usage: response.usage
-          ? {
-              tokensIn,
-              tokensOut,
-              reasoningTokens: omitZero(reasoningTokens),
-              cachedInputTokens: omitZero(cachedInputTokens),
-              cachedWriteInputTokens: omitZero(cachedWriteInputTokens),
-              model: config.model,
-              costUsd: estimateCost({ model: config.model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, providerId: config.providerId }),
-            }
-          : undefined,
+        usage: buildUsage(response, config.model, config.providerId),
       };
     },
   };

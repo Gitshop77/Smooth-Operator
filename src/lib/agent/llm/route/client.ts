@@ -26,7 +26,7 @@ export interface Protocol<Body = unknown, FrameType = string, EventType = unknow
   readonly stream: {
     readonly initial: (request: LLMRequest) => State;
     readonly step: (state: State, frame: FrameType) => { state: State; events: EventType[] };
-    readonly terminal?: (frame: FrameType) => boolean;
+    readonly terminal?: (frame: FrameType, state?: State) => boolean;
   };
 }
 
@@ -171,7 +171,7 @@ function makeFromTransport<Body, Prepared, FrameType, EventType, State>(
           if ((event as { type?: string }).type === "finish") emittedFinish = true;
           yield event;
         }
-        if (protocol.stream.terminal?.(frame as FrameType)) {
+        if (protocol.stream.terminal?.(frame as FrameType, state)) {
           break;
         }
       }

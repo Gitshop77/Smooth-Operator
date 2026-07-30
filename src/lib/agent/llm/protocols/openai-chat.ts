@@ -10,10 +10,8 @@ import { Protocol, type LLMRequest } from "../route/client";
 import { zodToJsonSchema } from "../zod-json-schema";
 import { omitZero } from "../shared";
 import {
-  SCREENSHOT_PATTERN_G,
-  hasImageProvenance,
-  isValidBase64,
   isZodSchema,
+  extractScreenshots,
 } from "../shared-image";
 
 const ADAPTER = "openai-chat";
@@ -88,109 +86,94 @@ function isPlainJSONSchema(v: unknown): v is Record<string, unknown> {
 }
 
 /**
+ * Rewrite a nullable schema node to strict-compliant `anyOf` union form.
+ * Handles both `nullable: true` and `type: [..., "null"]` forms.
+ */
+function rewriteNullable(obj: Record<string, unknown>): Record<string, unknown> {
+  const baseType = obj.type as string | string[] | undefined;
+  let nonNullTypes: string[];
+  if (Array.isArray(baseType)) nonNullTypes = baseType.filter((t) => t !== "null");
+  else if (typeof baseType === "string") nonNullTypes = [baseType];
+  else nonNullTypes = [];
+
+  const branch: Record<string, unknown> = { ...obj };
+  delete branch.nullable;
+  delete branch.type;
+  delete branch.properties;
+  delete branch.additionalProperties;
+  delete branch.required;
+
+  const branchIsObject = nonNullTypes.includes("object") || nonNullTypes.length === 0;
+  if (branchIsObject && obj.properties && typeof obj.properties === "object") {
+    enforceObjectStrictness(branch, obj.properties as Record<string, unknown>, obj.required);
+  }
+
+  const result: Record<string, unknown> = { anyOf: [branch, { type: "null" }] };
+  delete result.nullable;
+  delete result.type;
+  delete result.properties;
+  delete result.additionalProperties;
+  delete result.required;
+  return result;
+}
+
+/**
+ * Enforce OpenAI strict-mode requirements on an object schema: set
+ * `additionalProperties: false` and ensure all properties are listed in
+ * `required`.
+ */
+function enforceObjectStrictness(
+  obj: Record<string, unknown>,
+  props: Record<string, unknown>,
+  existingRequired?: unknown,
+): void {
+  obj.additionalProperties = false;
+  const required = Array.isArray(existingRequired) ? [...(existingRequired as string[])] : [];
+  for (const key of Object.keys(props)) {
+    if (!required.includes(key)) required.push(key);
+  }
+  obj.properties = props;
+  obj.required = required;
+}
+
+/**
  * Normalize a JSON Schema to OpenAI "strict" requirements so providers that
- * enforce `strict: true` (OpenAI, Azure, xAI, OpenRouter, + compatible) don't
- * reject it with a `400`:
- * - every object schema gets `additionalProperties: false`;
- * - every property is listed in `required`;
- * - `nullable: true` is rewritten to `anyOf: [<schema>, { type: "null" }]`
- * (OpenAI strict mode forbids the `nullable` keyword).
+ * enforce `strict: true` don't reject it with a `400`.
  *
  * Recursion is depth-bounded to stay cheap on large schemas.
  */
 function normalizeStrictSchema(node: unknown, depth = 0): unknown {
   if (typeof node !== "object" || node === null) return node;
- // A `$ref` points at a definition we can't resolve here (no schema catalog
- // at this layer) — leave it untouched rather than dropping it, which would
- // lose the reference. Previously `$ref`/`$defs` were not descended into, so
- // referenced subschemas escaped normalization .
   const refObj = node as Record<string, unknown>;
- // A `{ nullable: true, $ref: "..." }` node must be normalized BEFORE the
- // `$ref` early-return below, otherwise the forbidden `nullable` keyword
- // survives and OpenAI strict mode rejects the request with a 400. Rewrite it
- // to a strict-compliant `anyOf` union of the reference and a `null` branch,
- // dropping `nullable` (the `$ref` still points at the unresolved definition).
   if (refObj.nullable === true && "$ref" in refObj) {
     return { anyOf: [{ $ref: refObj["$ref"] }, { type: "null" }] };
   }
   if ("$ref" in refObj) return node;
   const obj: Record<string, unknown> = { ...refObj };
 
- // 1+2. Object strictness + nullable rewrite.
- // A node is "nullable" either via the forbidden `nullable: true` keyword OR
- // via a `type: [..., "null"]` union form — both must be rewritten to a
- // strict-compliant `anyOf: [<non-null branch>, { type: "null" }]`. The
- // non-null branch must itself be strict: only an OBJECT branch carries
- // `properties`/`additionalProperties`/`required`, so a string/number branch
- // never gets object keywords (which would make OpenAI strict mode reject the
- // schema with a 400). The top-level node must NOT keep object keywords as
- // siblings of `anyOf` either.
   const isNullable =
     obj.nullable === true || (Array.isArray(obj.type) && (obj.type as string[]).includes("null"));
   const isObjectNode =
     obj.type === "object" || (Array.isArray(obj.type) && (obj.type as string[]).includes("object"));
 
   if (isNullable) {
-    const baseType = obj.type as string | string[] | undefined;
-    let nonNullTypes: string[];
-    if (Array.isArray(baseType)) nonNullTypes = baseType.filter((t) => t !== "null");
-    else if (typeof baseType === "string") nonNullTypes = [baseType];
-    else nonNullTypes = []; // untyped — treat the branch as object-shaped
-
-    const branch: Record<string, unknown> = { ...obj };
-    delete branch.nullable;
-    delete branch.type;
-    delete branch.properties;
-    delete branch.additionalProperties;
-    delete branch.required;
-
-   // Apply object strictness ONLY to the object branch, not to scalar branches.
-    const branchIsObject = nonNullTypes.includes("object") || nonNullTypes.length === 0;
-    if (branchIsObject && obj.properties && typeof obj.properties === "object") {
-      const props = obj.properties as Record<string, unknown>;
-      branch.additionalProperties = false;
-      const required = Array.isArray(obj.required) ? [...(obj.required as string[])] : [];
-      for (const key of Object.keys(props)) {
-        if (!required.includes(key)) required.push(key);
-      }
-      branch.properties = obj.properties;
-      branch.required = required;
-    }
-
-    obj.anyOf = [branch, { type: "null" }];
+    const rewritten = rewriteNullable(obj);
+    Object.assign(obj, rewritten);
     delete obj.nullable;
     delete obj.type;
     delete obj.properties;
     delete obj.additionalProperties;
     delete obj.required;
   } else if (isObjectNode && obj.properties && typeof obj.properties === "object") {
-   // Non-nullable object: enforce `additionalProperties: false` + full `required`.
-    const props = obj.properties as Record<string, unknown>;
-    obj.additionalProperties = false;
-    const required = Array.isArray(obj.required) ? [...(obj.required as string[])] : [];
-    for (const key of Object.keys(props)) {
-      if (!required.includes(key)) required.push(key);
-    }
-    obj.required = required;
+    enforceObjectStrictness(obj, obj.properties as Record<string, unknown>, obj.required);
   }
 
- // 3. Recurse into child schemas.
- // Bound only the descent, not the local object fixup above: even at the
- // depth boundary the object normalization must still apply so deeply-nested
- // object schemas remain strict-compliant (additionalProperties:false +
- // full `required`) and don't trigger an OpenAI strict-mode 400.
   if (depth >= 64) return obj;
   for (const key of ["items", "anyOf", "allOf", "oneOf", "not"]) {
     const child = obj[key];
     if (Array.isArray(child)) obj[key] = child.map((c) => normalizeStrictSchema(c, depth + 1));
     else if (child && typeof child === "object") obj[key] = normalizeStrictSchema(child, depth + 1);
   }
- // `properties` and `$defs` are dicts of name→subschema. Descend into each
- // *value* so nested object properties and referenced definitions also get
- // strict-normalized (additionalProperties:false + full required). Treating
- // either dict as a single node was a no-op — a nested OBJECT property never
- // received additionalProperties:false + required, so OpenAI strict mode
- // rejected it with a 400.
   for (const key of ["properties", "$defs"]) {
     const child = obj[key];
     if (child && typeof child === "object" && !Array.isArray(child)) {
@@ -218,31 +201,11 @@ async function fromRequest(request: LLMRequest): Promise<OpenAIChatBody> {
   }
   const messages = request.messages.map((m) => {
     if (m.role === "user") {
- // Extract EVERY screenshot marker (not just the first) into its own
- // `image_url` content part — a multi-screenshot turn must forward all
- // of them, matching the Anthropic protocol.
-      const matches = Array.from(m.content.matchAll(SCREENSHOT_PATTERN_G));
-      if (matches.length > 0) {
- // Strip with the SAME pattern we match on, so the text we keep always
- // agrees with the screenshots we extract (the previous literal regex
- // `[^<]+` would also strip non-image `<screenshot>...</screenshot>`
- // markers — ).
-        const textContent = m.content.replace(SCREENSHOT_PATTERN_G, "").trim();
+      const { text: textContent, dataUris } = extractScreenshots(m.content);
+      if (dataUris.length > 0) {
         const parts: OpenAIContentPart[] = [];
         if (textContent) parts.push({ type: "text", text: textContent });
-        for (const match of matches) {
-          const dataUri = match[1];
-          const b64 = dataUri.split(",")[1];
-          if (!isValidBase64(b64 ?? "")) {
-            throw new Error("Invalid base64 screenshot payload in user message");
-          }
- // Provenance: reject markers whose payload does not actually decode to
- // an image of the declared type (see hasImageProvenance). Prevents
- // injected <screenshot> markers in scraped/tool content from
- // forwarding attacker-chosen bytes to the model as an image block.
-          if (!hasImageProvenance(b64 ?? "", match[2])) {
-            throw new Error("<screenshot> marker failed provenance check: base64 payload does not match its declared image type.");
-          }
+        for (const dataUri of dataUris) {
           parts.push({ type: "image_url", image_url: { url: dataUri } });
         }
         return { role: m.role, content: parts };

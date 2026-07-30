@@ -172,7 +172,7 @@ function accountUsage(params: {
  // layer (AgentConfig doesn't hold providerId), so we leave it undefined and
  // rely on the first-writer-wins bare-id resolution in pricing.ts.
   const costModelProviderId = model?.includes("/") ? model.split("/")[0] : undefined;
-  const cost = precomputedCost ?? (model ? estimateCost(model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, undefined, costModelProviderId) : undefined);
+  const cost = precomputedCost ?? (model ? estimateCost({ model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, providerId: costModelProviderId }) : undefined);
   const usage: LLMUsageInfo | undefined =
     typeof cost === "number" && Number.isFinite(cost)
       ? buildUsage(model ?? "", tokensIn, tokensOut, cost, reasoningTokens, cachedInputTokens, cachedWriteInputTokens)

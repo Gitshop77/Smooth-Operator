@@ -13,10 +13,8 @@
 import { Protocol, type LLMRequest } from "../route/client";
 import { zodToJsonSchema } from "../zod-json-schema";
 import {
-  SCREENSHOT_PATTERN_G,
   isZodSchema,
-  isValidBase64,
-  hasImageProvenance,
+  extractScreenshots,
 } from "../shared-image";
 
 const ADAPTER = "anthropic-messages";
@@ -60,24 +58,14 @@ async function fromRequest(request: LLMRequest): Promise<AnthropicBody> {
  // across turns in a multi-turn conversation.
   const messages = userMessages.map((m) => {
     if (m.role === "user") {
-      const matches = Array.from(m.content.matchAll(SCREENSHOT_PATTERN_G));
-      if (matches.length) {
-        const textContent = m.content.replace(SCREENSHOT_PATTERN_G, "").trim();
-        const imageBlocks = matches.map((match) => {
-          const b64 = match[1].split(",")[1];
-          if (!isValidBase64(b64)) {
-            throw new Error("Invalid base64 payload inside <screenshot> marker (expected png/jpeg/webp base64).");
-          }
- // Provenance: reject markers whose payload does not actually decode to
- // an image of the declared type (see hasImageProvenance). Prevents
- // injected <screenshot> markers in scraped/tool content from
- // forwarding attacker-chosen bytes to the model as an image block.
-          if (!hasImageProvenance(b64, match[2])) {
-            throw new Error("<screenshot> marker failed provenance check: base64 payload does not match its declared image type.");
-          }
+      const { text: textContent, dataUris } = extractScreenshots(m.content);
+      if (dataUris.length > 0) {
+        const imageBlocks = dataUris.map((dataUri) => {
+          const b64 = dataUri.split(",")[1];
+          const mediaType = dataUri.match(/data:image\/(png|jpeg|webp)/)?.[1] ?? "png";
           return {
             type: "image",
-            source: { type: "base64", media_type: `image/${match[2]}`, data: b64 },
+            source: { type: "base64", media_type: `image/${mediaType}`, data: b64 },
           };
         });
         return {
@@ -144,6 +132,8 @@ export interface StreamState {
   model?: string;
   /** Count of non-JSON SSE frames dropped this stream (see DROPPED_FRAME_WARN_THRESHOLD). */
   dropped?: number;
+  /** Type of the most recently parsed SSE frame (avoids re-parsing in terminal()). */
+  lastFrameType?: string;
   usage?: { tokensIn: number; tokensOut: number; model: string; costUsd: number; cachedInputTokens?: number; cachedWriteInputTokens?: number; reasoningTokens?: number };
 }
 
@@ -179,6 +169,7 @@ export const protocol: Protocol<AnthropicBody, string, { type: string; content?:
         }
         return { state, events };
       }
+      state.lastFrameType = data.type;
       {
         if (data.type === "error") {
  // Anthropic error payloads (`{"type":"error","error":{...}}`) are
@@ -268,7 +259,15 @@ export const protocol: Protocol<AnthropicBody, string, { type: string; content?:
       return { state, events };
     },
     terminal: (frame: string, state?: StreamState): boolean => {
-      return state?.lastFrameType === "message_stop";
+      if (state?.lastFrameType !== undefined) {
+        return state.lastFrameType === "message_stop";
+      }
+      // Fallback: parse the frame when state is not provided (e.g. direct test calls).
+      try {
+        return JSON.parse(frame).type === "message_stop";
+      } catch {
+        return false;
+      }
     },
   },
 };

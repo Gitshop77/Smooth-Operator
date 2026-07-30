@@ -605,13 +605,16 @@ export function resolveReasoningSupport(modelId: string, models: CatalogModel[])
   return REASONING_PATTERNS.some((re) => re.test(name));
 }
 
+/** Check if a model supports vision based on its boolean/modalities fields. */
+function isVisionModel(m: CatalogModel): boolean {
+  if (m.attachment) return true;
+  if (m.modalities?.input?.some((x) => x.toLowerCase().includes("image"))) return true;
+  return false;
+}
+
 /**
  * Decide whether `modelId` supports vision given the catalog models for its
- * provider. Pure (no I/O) so the trust-sensitive gating logic — which decides
- * whether a `<screenshot>` image is attached to an LLM request — is
- * unit-testable in isolation. The name-based `VISION_PATTERNS` heuristic is
- * the final fallback whenever the catalog gives no conclusive signal (no
- * provider models, an offline catalog, or an inconclusive match).
+ * provider. Pure (no I/O).
  */
 export function resolveVisionSupport(modelId: string, models: CatalogModel[]): boolean {
   const name = modelId.toLowerCase();
@@ -619,34 +622,21 @@ export function resolveVisionSupport(modelId: string, models: CatalogModel[]): b
     const reqId = name;
     const reqBase = reqId.replace(/-?\d{4}-\d{2}-\d{2}$/, "");
     const exact = models.find((m) => catalogIdMatches(modelId, m.id));
-    // An EXACT id match is conclusive: trust its `attachment`/`modalities`.
     if (exact) {
-      if (exact.attachment) return true;
-      if (exact.modalities?.input?.some((m) => m.toLowerCase().includes("image"))) return true;
-      // A wrong/negative catalog entry for a genuinely vision-capable model must
-      // not permanently disable screenshot attachment: only conclude `false`
-      // when the catalog is conclusive AND the name does NOT also match the
-      // vision heuristic (e.g. `gpt-4o`, `claude-3`, `gemini`…).
+      if (isVisionModel(exact)) return true;
       if (exact.attachment === false && !VISION_PATTERNS.some((re) => re.test(name))) return false;
     }
-    // Substring matches are ambiguous — only treat as conclusive vision when
-    // the requested id IS that vision model (possibly a dated/versioned
-    // variant), not a longer id that merely contains it.
     const substringMatches = models.filter((m) => m.id.toLowerCase().includes(reqId));
     if (substringMatches.length > 0) {
       const vision = substringMatches.find((m) => {
+        if (!isVisionModel(m)) return false;
         const id = m.id.toLowerCase();
-        const isVision =
-          m.attachment ||
-          m.modalities?.input?.some((x) => x.toLowerCase().includes("image"));
-        if (!isVision) return false;
         const idBase = id.replace(/-?\d{4}-\d{2}-\d{2}$/, "");
         return id === reqId || idBase === reqBase;
       });
       if (vision) return true;
     }
   }
-  // Fallback: word-boundary heuristic for common vision-capable families.
   return VISION_PATTERNS.some((re) => re.test(name));
 }
 
@@ -669,8 +659,7 @@ export function modelSupportsVision(
   if (typeof mOrId === "string") {
     return resolveCapability(mOrId, providerId, resolveVisionSupport);
   }
-  if (mOrId.attachment) return true;
-  if (mOrId.modalities?.input?.some((x) => x.toLowerCase().includes("image"))) return true;
+  if (isVisionModel(mOrId)) return true;
   return resolveVisionSupport(mOrId.id, []);
 }
 

@@ -253,16 +253,15 @@ export async function maybeJudgeAndFinalize(
  // judgeCachedWriteInputTokens (captured as side effects of
  // judgeLlmCall) so the recompute applies the reasoning rate, the
  // cacheRead discount, AND the (higher) cacheWrite rate.
-          ? estimateCost(
-              judgeModel,
-              usage.tokensIn,
-              usage.tokensOut,
-              judgeReasoningTokens,
-              judgeCachedInputTokens,
-              judgeCachedWriteInputTokens,
-              undefined,
-              judgeModel.includes("/") ? judgeModel.split("/")[0] : undefined,
-            )
+          ? estimateCost({
+              model: judgeModel,
+              tokensIn: usage.tokensIn,
+              tokensOut: usage.tokensOut,
+              reasoningTokens: judgeReasoningTokens,
+              cachedInputTokens: judgeCachedInputTokens,
+              cachedWriteInputTokens: judgeCachedWriteInputTokens,
+              providerId: judgeModel.includes("/") ? judgeModel.split("/")[0] : undefined,
+            })
           : usage.costUsd;
         deps.onEvent({
           type: "cost", step,

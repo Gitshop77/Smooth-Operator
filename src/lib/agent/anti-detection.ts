@@ -36,6 +36,9 @@
  * `STEALTH_SCRIPT` constant) would throw "X is not defined" at injection time.
  */
 
+/** Regex for detecting blocked-page errors from chrome.scripting injection. */
+const BLOCKED_PAGE_RE = /cannot access|can'?t access|chrome:\/\/|about:|edge:\/\/|not allowed|not permitted|forbidden/i;
+
 /**
  * Opt-in gate for the MAIN-world stealth patches.
  *
@@ -100,16 +103,15 @@ export async function injectAntiDetection(tabId: number): Promise<void> {
     const msg = e instanceof Error ? e.message : String(e);
  // Pages like chrome://, about:, edge:// and other extension pages block
  // script injection by design — expected and non-fatal.
-    const isBlockedPage =
-      /cannot access|can'?t access|chrome:\/\/|about:|edge:\/\/|not allowed|not permitted|forbidden/i.test(
-        msg,
-      );
+    const isBlockedPage = BLOCKED_PAGE_RE.test(msg);
     if (isBlockedPage) {
-      console.debug("[anti-detection] injection skipped (blocked page):", msg);
+      console.debug("[anti-detection] injection skipped (blocked page)");
     } else {
- // Unexpected failure — surface so the orchestrator/user knows stealth
- // was not applied to this tab (rather than failing silently).
-      console.warn("[anti-detection] injection failed unexpectedly:", msg);
+  // Unexpected failure — surface so the orchestrator/user knows stealth
+  // was not applied to this tab (rather than failing silently). Log only
+  // the error category, not the full message, to avoid leaking tab URLs
+  // or page metadata into the extension console log.
+      console.warn("[anti-detection] injection failed unexpectedly");
     }
   }
 }
@@ -125,9 +127,6 @@ export async function injectAntiDetection(tabId: number): Promise<void> {
  */
 export function stealthScriptBody(): void {
   (function () {
- // "use strict" is required here — this function is serialized and injected
- // into the page's MAIN world via chrome.scripting, where it runs as a
- // classic script (not an ES module). Strict mode is NOT implicit there.
     "use strict";
     function p(fn: () => void) {
       try {
@@ -137,18 +136,16 @@ export function stealthScriptBody(): void {
       }
     }
 
- // ── 1. navigator.webdriver → false ──
-    p(function () {
+    function patchWebdriver() {
       Object.defineProperty(navigator, "webdriver", {
         get: function () {
           return false;
         },
         configurable: true,
       });
-    });
+    }
 
- // ── 2. navigator.plugins + mimeTypes (only if empty — Chrome 92+ populates them natively) ──
-    p(function () {
+    function patchPlugins() {
       const nav = navigator as Navigator & { plugins: PluginArray; mimeTypes: MimeTypeArray };
       if (nav.plugins && nav.plugins.length > 0) return;
 
@@ -283,10 +280,9 @@ export function stealthScriptBody(): void {
           return ma;
         },
       });
-    });
+    }
 
- // ── 3. navigator.languages (cached + frozen so identity check passes) ──
-    p(function () {
+    function patchLanguages() {
       const nav = navigator as Navigator & { languages?: readonly string[]; language?: string };
       if (!nav.languages || nav.languages.length === 0) {
         const langs = Object.freeze(["en-US", "en"]);
@@ -302,13 +298,9 @@ export function stealthScriptBody(): void {
           configurable: true,
         });
       }
-    });
+    }
 
- // ── 4. window.chrome.runtime stub ──
- // Only applied when the real chrome.runtime.connect is absent (headless/CDP mode).
- // The stubs are intentionally non-functional — they exist solely to pass
- // presence checks that detection scripts probe for.
-    p(function () {
+    function patchChromeRuntime() {
       const w = window as unknown as {
         chrome?: {
           runtime?: { connect?: unknown; onMessage?: unknown; onConnect?: unknown; sendMessage?: unknown; id?: unknown };
@@ -376,10 +368,9 @@ export function stealthScriptBody(): void {
           configurable: false,
         });
       }
-    });
+    }
 
- // ── 5. Permissions API consistency ──
-    p(function () {
+    function patchPermissions() {
       const nav = navigator as Navigator & {
         permissions: Permissions & { query: (p: { name: string }) => Promise<PermissionStatus> };
       };
@@ -405,14 +396,9 @@ export function stealthScriptBody(): void {
         return "function query() { [native code] }";
       };
       nav.permissions.query = q as typeof nav.permissions.query;
-    });
+    }
 
- // ── 6. WebGL vendor / renderer ──
- // Hardcoded to Intel Iris — the most common discrete GPU on macOS. A
- // randomized-per-session approach is more sophisticated, but static
- // values are sufficient to avoid the default "Google SwiftShader"
- // headless signal that fingerprinters detect instantly.
-    p(function () {
+    function patchWebGL() {
       const handler = {
         apply: function (
           target: (this: unknown, p: number) => unknown,
@@ -437,10 +423,9 @@ export function stealthScriptBody(): void {
           handler,
         ) as typeof WebGL2RenderingContext.prototype.getParameter;
       }
-    });
+    }
 
- // ── 7. Notification.permission ──
-    p(function () {
+    function patchNotification() {
       if (typeof Notification !== "undefined" && Notification.permission === "denied") {
         Object.defineProperty(Notification, "permission", {
           get: function () {
@@ -449,10 +434,9 @@ export function stealthScriptBody(): void {
           configurable: true,
         });
       }
-    });
+    }
 
- // ── 8. navigator.connection (cached so identity check passes) ──
-    p(function () {
+    function patchConnection() {
       const nav = navigator as Navigator & { connection?: unknown };
       if (nav.connection) return;
       const conn = {
@@ -472,17 +456,9 @@ export function stealthScriptBody(): void {
           return conn;
         },
       });
-    });
+    }
 
- // ── 9. Iframe contentWindow.chrome ──
- // Covered by patch 4 — the chrome stub is set on the top window's realm only.
- // Each same-origin iframe has its own realm/global, so there is NO
- // prototype-chain propagation into child frames: the stub reaches an iframe
- // only when this script is independently injected into that frame's realm
- // (which requires allFrames:true).
-
- // ── 10. console method toString ──
-    p(function () {
+    function patchConsole() {
       ["log", "info", "warn", "error", "debug", "table", "trace"].forEach(function (n) {
         const c = console as unknown as Record<string, { toString?: () => string }>;
         if (c[n]) {
@@ -491,10 +467,9 @@ export function stealthScriptBody(): void {
           };
         }
       });
-    });
+    }
 
- // ── 11. Headless-mode window / screen fixes ──
-    p(function () {
+    function patchWindowScreen() {
       if (window.outerWidth === 0)
         Object.defineProperty(window, "outerWidth", {
           get: function () {
@@ -507,9 +482,9 @@ export function stealthScriptBody(): void {
             return (window.innerHeight || 1080) + 85;
           },
         });
-    });
+    }
 
-    p(function () {
+    function patchColorDepth() {
       if (screen.colorDepth === 0) {
         Object.defineProperty(screen, "colorDepth", {
           get: function () {
@@ -522,10 +497,9 @@ export function stealthScriptBody(): void {
           },
         });
       }
-    });
+    }
 
- // ── 12. navigator.hardwareConcurrency ──
-    p(function () {
+    function patchHardwareConcurrency() {
       const nav = navigator as Navigator & { hardwareConcurrency?: number };
       if (!nav.hardwareConcurrency)
         Object.defineProperty(navigator, "hardwareConcurrency", {
@@ -533,10 +507,9 @@ export function stealthScriptBody(): void {
             return 4;
           },
         });
-    });
+    }
 
- // ── 13. navigator.deviceMemory ──
-    p(function () {
+    function patchDeviceMemory() {
       const nav = navigator as Navigator & { deviceMemory?: number };
       if (!nav.deviceMemory)
         Object.defineProperty(navigator, "deviceMemory", {
@@ -544,6 +517,20 @@ export function stealthScriptBody(): void {
             return 8;
           },
         });
-    });
+    }
+
+    p(patchWebdriver);
+    p(patchPlugins);
+    p(patchLanguages);
+    p(patchChromeRuntime);
+    p(patchPermissions);
+    p(patchWebGL);
+    p(patchNotification);
+    p(patchConnection);
+    p(patchConsole);
+    p(patchWindowScreen);
+    p(patchColorDepth);
+    p(patchHardwareConcurrency);
+    p(patchDeviceMemory);
   })();
 }

@@ -45,9 +45,6 @@ const MAX_RUNS = 50;
 /** Run entries older than this are silently dropped on load. */
 const RUN_HISTORY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
-/** Length of the random suffix appended to run IDs. */
-const ID_SUFFIX_LENGTH = 6;
-
 /** Maximum number of LogEvents retained per run (oldest are dropped past this). */
 const MAX_STEPS = 2000;
 
@@ -71,6 +68,28 @@ function isValidRunRecord(v: unknown): v is RunRecord {
 /** Persist the run list to localStorage as a single JSON string. */
 function writeLocalStorage(runs: RunRecord[]): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(runs));
+}
+
+/**
+ * Write runs to localStorage with automatic trimming on QuotaExceededError.
+ * If the initial write fails due to quota, the oldest entry is dropped and
+ * the write is retried once. Other errors are logged and swallowed.
+ */
+function writeToLocalStorageWithRetry(runs: RunRecord[]): void {
+  try {
+    writeLocalStorage(runs);
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "QuotaExceededError") {
+      runs.pop();
+      try {
+        writeLocalStorage(runs);
+      } catch (e2) {
+        console.warn("[run-history] localStorage quota exhausted even after trim:", e2);
+      }
+    } else {
+      console.warn("[run-history] localStorage.setItem failed:", e);
+    }
+  }
 }
 
 /**
@@ -156,28 +175,11 @@ export async function saveRun(run: RunRecord): Promise<void> {
       try {
         await chrome.storage.local.set({ [STORAGE_KEY]: runs });
       } catch (e) {
- // surface storage-write failures so the user knows their run
- // wasn't saved, rather than silently dropping it.
         console.warn("[run-history] chrome.storage.local.set failed:", e);
       }
       return;
     }
- // localStorage path — may throw QuotaExceededError.
-    try {
-      writeLocalStorage(runs);
-    } catch (e) {
-      if (e instanceof DOMException && e.name === "QuotaExceededError") {
- // Trim oldest (last) entry and retry once. If it still fails, log + give up.
-        runs.pop();
-        try {
-          writeLocalStorage(runs);
-        } catch (e2) {
-          console.warn("[run-history] localStorage quota exhausted even after trim:", e2);
-        }
-      } else {
-        console.warn("[run-history] localStorage.setItem failed:", e);
-      }
-    }
+    writeToLocalStorageWithRetry(runs);
   };
 
  // Chain onto the in-flight save sequence so writes are serialized. `thisSave`
@@ -215,50 +217,50 @@ function isPlainObject(val: object): val is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
-async function redactRunSecrets(run: RunRecord): Promise<RunRecord> {
- // `redactSecrets` is a static import (sibling module), so it is bundled into
- // the service worker with `splitting:false` and is always available on the SW
- // save path — no dynamic chunk load that could silently degrade redaction.
- // Redact a single value: strings are scanned for secrets; arrays and plain
- // objects are recursed into so a nested string field (e.g. `{data:{url}}`)
- // is never persisted unredacted. Recursion is depth-bounded so a pathological
- // deeply-nested structure cannot stall redaction. Non-string/non-container
- // values (and anything beyond the depth bound) are returned untouched.
-  const MAX_REDACT_DEPTH = 6;
-  const redactValue = async (val: unknown, depth = 0): Promise<unknown> => {
-    if (typeof val === "string") {
-      return await redactSecrets(val);
-    }
-    if (depth >= MAX_REDACT_DEPTH) return val;
-    if (Array.isArray(val)) {
-      let changed = false;
-      const out = await Promise.all(
-        val.map(async (v) => {
-          const r = await redactValue(v, depth + 1);
-          if (r !== v) changed = true;
-          return r;
-        }),
-      );
-      return changed ? out : val;
-    }
-    if (val !== null && typeof val === "object" && isPlainObject(val)) {
-      let changed = false;
-      const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(val)) {
+/**
+ * Redact a single value: strings are scanned for secrets; arrays and plain
+ * objects are recursed into so a nested string field is never persisted
+ * unredacted. Recursion is depth-bounded so a pathological deeply-nested
+ * structure cannot stall redaction.
+ */
+const MAX_REDACT_DEPTH = 6;
+const redactCache = new Map<string, string>();
+const redactValue = async (val: unknown, depth = 0): Promise<unknown> => {
+  if (typeof val === "string") {
+    const cached = redactCache.get(val);
+    if (cached !== undefined) return cached;
+    const result = await redactSecrets(val);
+    redactCache.set(val, result);
+    return result;
+  }
+  if (depth >= MAX_REDACT_DEPTH) return val;
+  if (Array.isArray(val)) {
+    let changed = false;
+    const out = await Promise.all(
+      val.map(async (v) => {
         const r = await redactValue(v, depth + 1);
         if (r !== v) changed = true;
-        out[k] = r;
-      }
-      return changed ? out : val;
+        return r;
+      }),
+    );
+    return changed ? out : val;
+  }
+  if (val !== null && typeof val === "object" && isPlainObject(val)) {
+    let changed = false;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(val)) {
+      const r = await redactValue(v, depth + 1);
+      if (r !== v) changed = true;
+      out[k] = r;
     }
-    return val;
-  };
+    return changed ? out : val;
+  }
+  return val;
+};
+
+async function redactRunSecrets(run: RunRecord): Promise<RunRecord> {
   const steps = await Promise.all(
     run.steps.map(async (event) => {
- // A corrupt / non-object step would make `Object.entries(event)` throw
- // and defeat redaction for the WHOLE run (the secret would then be
- // persisted unredacted). Skip such entries rather than letting one bad
- // step take down redaction for every other step.
       if (typeof event !== "object" || event === null) return event;
       let patched = event;
       for (const [key, val] of Object.entries(event)) {
@@ -312,20 +314,7 @@ export async function replaceAllRuns(runs: RunRecord[]): Promise<void> {
       }
       return;
     }
-    try {
-      writeLocalStorage(safeList);
-    } catch (e) {
-      if (e instanceof DOMException && e.name === "QuotaExceededError") {
-        safeList.pop();
-        try {
-          writeLocalStorage(safeList);
-        } catch (e2) {
-          console.warn("[run-history] localStorage quota exhausted even after trim:", e2);
-        }
-      } else {
-        console.warn("[run-history] localStorage.setItem failed:", e);
-      }
-    }
+    writeToLocalStorageWithRetry(safeList);
   };
   const thisSave = saveChain.then(writer, writer);
   saveChain = thisSave.then(
@@ -414,13 +403,8 @@ export class RunBuilder {
  * @param task Original user task (used as the run's title).
  */
   constructor(task: string) {
- // Pad the random suffix to ID_SUFFIX_LENGTH chars — `Math.random().toString(36)`
- // can produce a leading `0.` segment shorter than ID_SUFFIX_LENGTH when the
- // mantissa happens to end in zeros, which would yield a run id like
- // `1719…-0` (1-char suffix) and risk collisions.
-    const rand = Math.random().toString(36).slice(2, 2 + ID_SUFFIX_LENGTH).padEnd(ID_SUFFIX_LENGTH, "0");
     this.run = {
-      id: `${Date.now()}-${rand}`,
+      id: crypto.randomUUID(),
       task,
       startedAt: Date.now(),
       endedAt: 0,
@@ -444,17 +428,7 @@ export class RunBuilder {
  */
   addEvent(event: LogEvent): void {
     this.run.steps.push(event);
-    // Amortize the O(N) `shift()` reindex once past MAX_STEPS (MED finding):
-    // let the buffer grow to MAX_STEPS + OVERFLOW_BATCH, then drop a whole batch
-    // at once instead of reindexing on every event.
-    const OVERFLOW_BATCH = 256;
-    // Let the buffer grow to MAX_STEPS + OVERFLOW_BATCH, then splice a whole
-    // batch at once instead of reindexing (shift) on every event — this
-    // amortizes the O(N) reindex so long runs stay near O(1) per event.
-    if (this.run.steps.length > MAX_STEPS + OVERFLOW_BATCH) {
-      this.run.steps.splice(0, OVERFLOW_BATCH);
-      this.run.overflowCount += OVERFLOW_BATCH;
-    }
+    this.trimSteps();
     if (event.type === "cost") {
       this.run.totalTokensIn += event.tokensIn;
       this.run.totalTokensOut += event.tokensOut;
@@ -463,12 +437,16 @@ export class RunBuilder {
     if (event.type === "navigator-step-start") {
       this.run.stepCount = Math.max(this.run.stepCount, event.step + 1);
     }
- // Capture the last `done` event so finish() can use the real result
- // instead of a hardcoded default. Without this, every run shows as
- // "failed" in the History tab because agent-bridge.ts passes a
- // conservative default to finish().
     if (event.type === "done") {
       this.capturedResult = { success: event.success, text: event.text };
+    }
+  }
+
+  private trimSteps(): void {
+    const OVERFLOW_BATCH = 256;
+    if (this.run.steps.length > MAX_STEPS + OVERFLOW_BATCH) {
+      this.run.steps.splice(0, OVERFLOW_BATCH);
+      this.run.overflowCount += OVERFLOW_BATCH;
     }
   }
 

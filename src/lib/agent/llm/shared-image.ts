@@ -19,12 +19,20 @@ export function isZodSchema(value: unknown): boolean {
   );
 }
 
+/**
+ * Max base64 payload length (~20MB decoded). Rejects absurdly large payloads
+ * at the boundary to prevent excessive API costs or memory pressure.
+ * 20MB = 20 * 1024 * 1024 bytes; base64 ratio is 4/3, so ≈ 28M chars.
+ */
+const MAX_BASE64_LENGTH = 28_000_000;
+
 /** Validate a base64 image payload before forwarding it to the API. */
 export function isValidBase64(value: string): boolean {
+  if (value.length === 0 || value.length > MAX_BASE64_LENGTH) return false;
   // Require a canonical base64 length (multiple of 4) and trailing-only
   // padding (0–2 '='), never embedded/standalone padding. The looser
   // `*{0,2}` pattern previously accepted wrong lengths and misplaced padding.
-  if (value.length === 0 || value.length % 4 !== 0) return false;
+  if (value.length % 4 !== 0) return false;
   return /^[A-Za-z0-9+/]+(?:={1,2})?$/.test(value);
 }
 
@@ -43,16 +51,44 @@ export const IMAGE_SIGNATURES: Record<string, string[]> = {
   webp: ["UklGR"],
 };
 
-/**
- * Provenance check for `<screenshot>` markers. Markers can be injected into
- * scraped page text or tool output by an untrusted source; treating any such
- * marker as a genuine image would let injected content smuggle attacker-chosen
- * images (or arbitrary bytes) to the model. Requiring the base64 payload's
- * magic bytes to match the declared media type rejects markers whose contents
- * are not a well-formed image of that type.
- */
+/** Provenance check for `<screenshot>` markers. */
 export function hasImageProvenance(b64: string, mediaType: string): boolean {
   const prefixes = IMAGE_SIGNATURES[mediaType];
   if (!prefixes) return false;
   return prefixes.some((p) => b64.startsWith(p));
+}
+
+/** Result of extracting screenshots from message content. */
+export interface ScreenshotExtraction {
+  /** Message content with all <screenshot> markers stripped. */
+  text: string;
+  /** Extracted screenshot data URIs (data:image/...;base64,...). */
+  dataUris: string[];
+}
+
+/**
+ * Extract all `<screenshot>` markers from message content, validating each
+ * payload's base64 encoding and provenance. Returns the cleaned text and
+ * an array of validated data URIs. Throws if any marker has invalid base64
+ * or fails the provenance check.
+ */
+export function extractScreenshots(content: string): ScreenshotExtraction {
+  const matches = Array.from(content.matchAll(SCREENSHOT_PATTERN_G));
+  if (matches.length === 0) {
+    return { text: content, dataUris: [] };
+  }
+  const text = content.replace(SCREENSHOT_PATTERN_G, "").trim();
+  const dataUris: string[] = [];
+  for (const match of matches) {
+    const dataUri = match[1];
+    const b64 = dataUri.split(",")[1];
+    if (!isValidBase64(b64 ?? "")) {
+      throw new Error("Invalid base64 screenshot payload in user message");
+    }
+    if (!hasImageProvenance(b64 ?? "", match[2])) {
+      throw new Error("<screenshot> marker failed provenance check: base64 payload does not match its declared image type.");
+    }
+    dataUris.push(dataUri);
+  }
+  return { text, dataUris };
 }

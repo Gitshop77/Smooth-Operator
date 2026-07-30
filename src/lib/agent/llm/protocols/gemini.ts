@@ -11,10 +11,8 @@ import { Protocol, type LLMRequest } from "../route/client";
 import { encodeModelIdForUrl } from "../modelId";
 import { zodToJsonSchema } from "../zod-json-schema";
 import {
-  SCREENSHOT_PATTERN_G,
-  isValidBase64,
-  hasImageProvenance,
   isZodSchema,
+  extractScreenshots,
 } from "../shared-image";
 
 const ADAPTER = "gemini";
@@ -42,16 +40,6 @@ function isPlainJSONSchema(v: unknown): v is Record<string, unknown> {
   return true;
 }
 
-/**
- * Separate instance of the screenshot marker pattern used only for the
- * plain `.replace(...)` strip. It is global so EVERY marker is removed from
- * the text (a multi-screenshot turn would otherwise leave the 2nd+ raw
- * base64 in the prompt), while `matchAll` over the shared `/g` pattern
- * extracts each marker into its own `inline_data` part.
- */
-const SCREENSHOT_STRIP_RE =
-  /<screenshot>(data:image\/(png|jpeg|webp);base64,[^<]+)<\/screenshot>/g;
-
 export interface GeminiBody {
   contents: Array<{ role: string; parts: Array<Record<string, unknown>> }>;
   generationConfig: {
@@ -72,38 +60,19 @@ async function fromRequest(request: LLMRequest): Promise<GeminiBody> {
  // marker — not every user message. Mirrors the OpenAI + Anthropic protocols.
   const contents = userMessages.map((m) => {
     if (m.role === "user") {
- // Only strip + extract <screenshot> markers from USER messages, mirroring
- // the Anthropic protocol. Non-user (assistant/model) messages keep their
- // literal text intact — an assistant message whose generated text happens
- // to contain the characters "<screenshot>...</screenshot>" must not have
- // that text deleted before being sent to Gemini.
-      const textContent = m.content.replace(SCREENSHOT_STRIP_RE, "").trim();
- // Extract EVERY screenshot marker (not just the first) into its own
- // `inline_data` part — a multi-screenshot turn must forward all of them.
-      const matches = Array.from(m.content.matchAll(SCREENSHOT_PATTERN_G));
-      if (matches.length > 0) {
+      const { text: textContent, dataUris } = extractScreenshots(m.content);
+      if (dataUris.length > 0) {
         const parts: Record<string, unknown>[] = [];
         if (textContent) parts.push({ text: textContent });
-        for (const match of matches) {
-          const dataUri = match[1];
+        for (const dataUri of dataUris) {
           const b64 = dataUri.split(",")[1];
-          if (!isValidBase64(b64 ?? "")) {
-            throw new Error("Invalid base64 screenshot payload in user message");
-          }
- // Provenance: reject markers whose payload does not actually decode to
- // an image of the declared type (see hasImageProvenance). Prevents
- // injected <screenshot> markers in scraped/tool content from
- // forwarding attacker-chosen bytes to the model as an image part.
-          if (!hasImageProvenance(b64 ?? "", match[2])) {
-            throw new Error("<screenshot> marker failed provenance check: base64 payload does not match its declared image type.");
-          }
-          parts.push({ inline_data: { mime_type: `image/${match[2]}`, data: b64 } });
+          const mediaType = dataUri.match(/data:image\/(png|jpeg|webp)/)?.[1] ?? "png";
+          parts.push({ inline_data: { mime_type: `image/${mediaType}`, data: b64 } });
         }
         return { role: "user", parts };
       }
       return { role: "user", parts: [{ text: textContent }] };
     }
- // Non-user message: preserve as-is (no screenshot processing).
     return { role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content.trim() }] };
   });
 

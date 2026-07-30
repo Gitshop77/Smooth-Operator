@@ -13,6 +13,28 @@
 
 import { isExtensionWithLocal } from "./runtime";
 import { neutralizePromptTags } from "./security";
+import { createMutex } from "./mutex";
+
+/**
+ * Sanitize user-authored memory text before injecting it into the trusted
+ * system prompt. Applies the same dual-layer defense as `sanitizeSkillText`
+ * in domain-skills.ts:
+ * 1. Strip control characters (obfuscation / rendering corruption).
+ * 2. Neutralize forged `<system-reminder>` tags (explicit boundary defense).
+ * 3. Neutralize ALL prompt-level tags via `neutralizePromptTags` (derived from
+ *    PROMPT_TAGS — the single source of truth).
+ *
+ * This provides defense-in-depth: if `neutralizePromptTags` has a gap,
+ * layers 1–2 still block the most common injection vectors.
+ */
+function sanitizeMemoryText(value: string): string {
+  const cleaned = value
+    // Strip C0/C1 control chars except tab, newline, carriage return.
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\u00ad\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "")
+    // Neutralize forged system-reminder open/close tags.
+    .replace(/<(\/?\s*system-reminder\b[^>]*)>/gi, "[$1]");
+  return neutralizePromptTags(cleaned);
+}
 
 /** One saved memory for a single root domain. */
 export interface SiteMemory {
@@ -32,10 +54,16 @@ const STORAGE_KEY = "__opencowork_site_memories";
 // Invalidated by `chrome.storage.onChanged` + every write.
 let memoriesCache: Record<string, SiteMemory> | null = null;
 
+// Hostname-level cache for `getMemoriesForUrl`. Maps hostname → matching
+// memories so repeated steps on the same site skip the full linear scan.
+// Invalidated whenever the raw memories cache changes.
+let hostnameMemoriesCache: { hostname: string; memories: SiteMemory[] } | null = null;
+
 if (isExtensionWithLocal() && typeof chrome !== "undefined" && chrome.storage?.onChanged) {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && changes[STORAGE_KEY]) {
       memoriesCache = null;
+      hostnameMemoriesCache = null;
     }
   });
 }
@@ -43,33 +71,10 @@ if (isExtensionWithLocal() && typeof chrome !== "undefined" && chrome.storage?.o
 /** Test-only: clear the in-memory cache so the next read goes back to storage. */
 export function __resetMemoryCacheForTests(): void {
   memoriesCache = null;
+  hostnameMemoriesCache = null;
 }
 
-/**
- * Per-context mutex mirroring `withTaskMutation` in `scheduled-tasks.ts`.
- *
- * `chrome.storage.local` has no transactions, so a read-modify-write of the
- * memory map can interleave with another mutation in the *same* context and
- * clobber it (lost-update race — see audit batch b026). On a cold cache two
- * concurrent `saveMemory`/`deleteMemory` calls can both read the same stored
- * map, mutate independent copies, and the last writer silently wins — a user
- * memory edit is lost. This serializes each mutation's load→mutate→write.
- *
- * It cannot prevent a race with a separate JS context (e.g. the Options page);
- * fixing that would require per-domain storage keys, which is out of scope here.
- */
-let memoryMutationLock: Promise<void> = Promise.resolve();
-async function withMemoryMutation<T>(fn: () => Promise<T>): Promise<T> {
-  const prev = memoryMutationLock;
-  let release!: () => void;
-  memoryMutationLock = new Promise<void>((r) => (release = r));
-  await prev;
-  try {
-    return await fn();
-  } finally {
-    release();
-  }
-}
+const withMemoryMutation = createMutex();
 
 /**
  * Normalize a stored value into a `{ domain -> SiteMemory }` map. Guards
@@ -127,6 +132,7 @@ export async function loadAllMemories(): Promise<Record<string, SiteMemory>> {
 /** Internal: persist the full memory map back to storage + invalidate cache. */
 async function writeAllMemories(all: Record<string, SiteMemory>): Promise<void> {
   memoriesCache = null;
+  hostnameMemoriesCache = null;
   if (isExtensionWithLocal()) {
     try {
       await chrome.storage.local.set({ [STORAGE_KEY]: all });
@@ -187,6 +193,10 @@ export async function getMemoriesForUrl(url: string): Promise<SiteMemory[]> {
     return [];
   }
   if (!hostname) return [];
+  // Return cached result if the same hostname was queried recently.
+  if (hostnameMemoriesCache?.hostname === hostname) {
+    return hostnameMemoriesCache.memories;
+  }
   const matches: SiteMemory[] = [];
   for (const memory of Object.values(all)) {
     const d = memory.domain.toLowerCase();
@@ -200,6 +210,7 @@ export async function getMemoriesForUrl(url: string): Promise<SiteMemory[]> {
     }
   }
   matches.sort((a, b) => a.domain.localeCompare(b.domain));
+  hostnameMemoriesCache = { hostname, memories: matches };
   return matches;
 }
 
@@ -212,7 +223,7 @@ export function formatMemories(memories: SiteMemory[]): string {
   if (memories.length === 0) return "";
   const lines = memories.map(
     (m) =>
-      `[${neutralizePromptTags(m.domain)}]: ${neutralizePromptTags(m.notes)}`,
+      `[${sanitizeMemoryText(m.domain)}]: ${sanitizeMemoryText(m.notes)}`,
   );
   return `<site_memory>\n${lines.join("\n")}\n</site_memory>`;
 }
