@@ -701,10 +701,33 @@ const LOCAL_SINGLE_LABEL_HOSTS = new Set(["localhost"]);
 // public suffix. (A full PSL is overkill here; this blocks the dangerous
 // shared-suffix cases a custom skill could abuse.)
 const PUBLIC_SUFFIX_DOMAINS = new Set([
-  "co.uk", "org.uk", "gov.uk", "ac.uk", "github.io", "gitlab.io",
-  "netlify.app", "vercel.app", "pages.dev", "workers.dev",
-  "herokuapp.com", "amazonaws.com", "azurewebsites.net", "googleapis.com",
-  "appspot.com", "firebaseapp.com", "blogspot.com", "wordpress.com",
+  // UK
+  "co.uk", "org.uk", "gov.uk", "ac.uk",
+  // Japan
+  "co.jp", "or.jp", "ne.jp", "go.jp",
+  // Australia
+  "com.au", "org.au", "net.au", "edu.au", "gov.au",
+  // India
+  "co.in", "org.in", "net.in", "res.in",
+  // Brazil
+  "com.br", "org.br", "net.br",
+  // South Korea
+  "co.kr", "or.kr", "ne.kr",
+  // New Zealand
+  "co.nz", "org.nz", "net.nz",
+  // Canada
+  "co.ca",
+  // China
+  "com.cn", "net.cn", "org.cn",
+  // France
+  "com.fr",
+  // Germany
+  "co.de",
+  // Hosting / PaaS
+  "github.io", "gitlab.io", "netlify.app", "vercel.app",
+  "pages.dev", "workers.dev", "herokuapp.com", "amazonaws.com",
+  "azurewebsites.net", "googleapis.com", "appspot.com",
+  "firebaseapp.com", "blogspot.com", "wordpress.com",
 ]);
 function isValidSkillDomain(domain: string): boolean {
   if (PUBLIC_SUFFIX_DOMAINS.has(domain.toLowerCase())) return false;

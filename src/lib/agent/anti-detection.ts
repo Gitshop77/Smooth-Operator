@@ -16,7 +16,7 @@
  *
  * 13 patches are applied (each wrapped in try/catch so a single failure
  * never breaks the rest):
- * 1. navigator.webdriver → undefined (the #1 automation tell)
+ * 1. navigator.webdriver → false (the #1 automation tell)
  * 2. navigator.plugins/mimeTypes → FakePlugin array (headless leaves empty)
  * 3. navigator.languages → ['en-US','en'] frozen (headless leaves empty)
  * 4. window.chrome.runtime → stub (headless leaves undefined)
