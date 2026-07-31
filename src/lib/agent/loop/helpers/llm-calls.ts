@@ -44,34 +44,22 @@ function sumUsages(usages: LLMUsageInfo[]): LLMUsageInfo | undefined {
   let reasoningTokens = 0;
   let cachedInputTokens = 0;
   let cachedWriteInputTokens = 0;
-  let hasReasoning = false;
-  let hasCached = false;
-  let hasWriteCached = false;
   for (const u of usages) {
     tokensIn += u.tokensIn;
     tokensOut += u.tokensOut;
     costUsd += u.costUsd;
-    if (u.reasoningTokens) {
-      reasoningTokens += u.reasoningTokens;
-      hasReasoning = true;
-    }
-    if (u.cachedInputTokens) {
-      cachedInputTokens += u.cachedInputTokens;
-      hasCached = true;
-    }
-    if (u.cachedWriteInputTokens) {
-      cachedWriteInputTokens += u.cachedWriteInputTokens;
-      hasWriteCached = true;
-    }
+    if (u.reasoningTokens) reasoningTokens += u.reasoningTokens;
+    if (u.cachedInputTokens) cachedInputTokens += u.cachedInputTokens;
+    if (u.cachedWriteInputTokens) cachedWriteInputTokens += u.cachedWriteInputTokens;
   }
   return {
     tokensIn,
     tokensOut,
     model,
     costUsd,
-    ...(hasReasoning ? { reasoningTokens } : {}),
-    ...(hasCached ? { cachedInputTokens } : {}),
-    ...(hasWriteCached ? { cachedWriteInputTokens } : {}),
+    ...(reasoningTokens ? { reasoningTokens } : {}),
+    ...(cachedInputTokens ? { cachedInputTokens } : {}),
+    ...(cachedWriteInputTokens ? { cachedWriteInputTokens } : {}),
   };
 }
 
@@ -97,15 +85,6 @@ function buildUsage(
     cachedInputTokens,
     cachedWriteInputTokens,
   };
-}
-
-/**
- * Read cache-write (creation) tokens off an LLM result via a cast. The
- * upstream result types do not yet carry the field natively, so it is read
- * defensively and defaults to 0 when absent.
- */
-function readCachedWriteTokens(u: unknown): number {
-  return (u as { cachedWriteInputTokens?: number } | undefined)?.cachedWriteInputTokens ?? 0;
 }
 
 /**
@@ -225,10 +204,8 @@ export async function runPlanner(
     const { tokensIn, tokensOut, reasoningTokens, cachedInputTokens, model, costUsd: precomputedCost } = result;
  // Read cache-write (creation) tokens when the caller threads them through.
  // `cachedWriteInputTokens` is billed at the (higher) cache-write rate, so
- // omitting it under-reports Anthropic cache-creation cost. The field is
- // read via a cast until the upstream result types (loop/types.ts) and
- // the loop-deps wiring (llm-direct.ts) propagate it end-to-end.
-    const cachedWriteInputTokens = readCachedWriteTokens(result);
+ // omitting it under-reports Anthropic cache-creation cost.
+    const cachedWriteInputTokens = result.cachedWriteInputTokens ?? 0;
     const accounted = accountUsage({ precomputedCost, model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, costCapUsd });
     if (accounted) {
       const { cost, usage: u } = accounted;
@@ -319,9 +296,8 @@ export async function callNavigatorWithRetry(
       const { raw, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, model, costUsd: precomputedCost } = navResult;
  // Read cache-write (creation) tokens when the caller threads them through
  // (billed at the higher cache-write rate; omitted, it under-reports
- // Anthropic cache-creation cost). Cast until upstream types/loop-deps
- // wiring propagate it end-to-end.
-      const cachedWriteInputTokens = readCachedWriteTokens(navResult);
+ // Anthropic cache-creation cost).
+      const cachedWriteInputTokens = navResult.cachedWriteInputTokens ?? 0;
       lastRaw = raw;
       let usage: LLMUsageInfo | undefined;
  // Prefer pre-computed costUsd; fall back to estimateCost with

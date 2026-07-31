@@ -27,20 +27,7 @@ import {
   CAPTCHA_URL_HINTS,
   DOWNLOAD_RE,
 } from "../constants";
-
-/**
- * Minimal XML escaping for attacker-controlled text (page URL/title) that is
- * interpolated into the `<sys>` nudge block. Prevents a hostile page from
- * forging `</sys>` / prompt-like structure inside the injected context (see
- * finding [33]). Only the markup-significant characters are escaped; the text
- * is otherwise preserved so the nudge stays useful.
- */
-function escapeXml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
+import { escapeXml } from "../xml-escape";
 
 /** Returns `true` when `stepNumber` is the final step (no further steps remain). */
 export function isLastStep(stepInfo: StepInfo): boolean {

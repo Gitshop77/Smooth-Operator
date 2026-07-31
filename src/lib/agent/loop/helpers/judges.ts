@@ -11,7 +11,6 @@
 import type { AgentConfig, HistoryItem } from "../../types";
 import { judgeTask } from "../../judge";
 import { EvaluatorComb, type EvaluatorKind } from "../../evaluators";
-import { estimateCost } from "../../llm/pricing";
 import {
   CallbackDispatcher,
   type CallbackContext,
@@ -190,34 +189,10 @@ export async function maybeJudgeAndFinalize(
   }
 
   try {
- // Capture the model name + reasoning-token count + cached-token count from
- // the LLM call so the judge's cost estimate accounts for reasoning models
- // (o1/o3 bill reasoning tokens at their own rate) AND prompt-cache discounts
- // (Anthropic cache_read billed at 0.1× input). Without these, `estimateCost`
- // undercounts the judge's true cost and delays cost-cap enforcement.
-    let judgeModel = "";
-    let judgeReasoningTokens = 0;
-    let judgeCachedInputTokens = 0;
-    let judgeCachedWriteInputTokens = 0;
- // Capture model + reasoning/cached/cache-write token counts from an LLM
- // result into the closure vars so the judge's cost recompute can apply the
- // reasoning rate, the cacheRead discount, and the (higher) cacheWrite rate.
- // Shared by the summarizeCall and planner-fallback branches to avoid drift.
-    const captureJudgeUsage = (
-      u: { model?: string; reasoningTokens?: number; cachedInputTokens?: number } | null | undefined,
-    ): void => {
-      if (!u) return;
-      if (u.model) judgeModel = u.model;
-      if (u.reasoningTokens) judgeReasoningTokens = u.reasoningTokens;
-      if (u.cachedInputTokens) judgeCachedInputTokens = u.cachedInputTokens;
-      const cw = (u as { cachedWriteInputTokens?: number }).cachedWriteInputTokens;
-      if (cw) judgeCachedWriteInputTokens = cw;
-    };
-    const judgeLlmCall = async (systemPrompt: string, userMessage: string): Promise<string> => {
+    const judgeLlmCall = async (systemPrompt: string, userMessage: string) => {
       if (deps.summarizeCall) {
         const res = await deps.summarizeCall({ systemPrompt, userPrompt: userMessage });
-        captureJudgeUsage(res.usage);
-        return res.content;
+        return { content: res.content, usage: res.usage };
       }
       const res = await deps.plannerCall({
         task: `${systemPrompt}\n\n${userMessage}`,
@@ -229,8 +204,17 @@ export async function maybeJudgeAndFinalize(
         step,
         maxSteps: 0,
       }, state.signal);
-      captureJudgeUsage(res);
-      return res.raw;
+      return {
+        content: res.raw,
+        usage: {
+          model: res.model,
+          tokensIn: res.tokensIn,
+          tokensOut: res.tokensOut,
+          reasoningTokens: res.reasoningTokens,
+          cachedInputTokens: res.cachedInputTokens,
+          cachedWriteInputTokens: res.cachedWriteInputTokens,
+        },
+      };
     };
 
     const verdict = await judgeTask({
@@ -238,48 +222,23 @@ export async function maybeJudgeAndFinalize(
       history: navigatorHistory,
       agentResult: { success, text },
       llmCall: judgeLlmCall,
- // `onCost` is async so cost tracking + dispatcher fire after the judge
- // LLM call completes. The dispatcher's cost() method internally
- // try/catches handler errors, so no throw propagates — cost-cap
- // enforcement is via the orchestrator's `costCapExceeded(state)` check.
+      modelForCost: undefined,
       onCost: async (usage) => {
- // The judge's internal cost estimate uses modelForCost (which is ""
- // because the model name is only known AFTER llmCall returns, and
- // judgeLlmCall sets judgeModel as a side effect). Recompute the cost
- // here with the real model name so the budget tracker gets an
- // accurate number.
-        const realCost = judgeModel
- // Pass judgeReasoningTokens + judgeCachedInputTokens +
- // judgeCachedWriteInputTokens (captured as side effects of
- // judgeLlmCall) so the recompute applies the reasoning rate, the
- // cacheRead discount, AND the (higher) cacheWrite rate.
-          ? estimateCost({
-              model: judgeModel,
-              tokensIn: usage.tokensIn,
-              tokensOut: usage.tokensOut,
-              reasoningTokens: judgeReasoningTokens,
-              cachedInputTokens: judgeCachedInputTokens,
-              cachedWriteInputTokens: judgeCachedWriteInputTokens,
-              providerId: judgeModel.includes("/") ? judgeModel.split("/")[0] : undefined,
-            })
-          : usage.costUsd;
         deps.onEvent({
           type: "cost", step,
           tokensIn: usage.tokensIn, tokensOut: usage.tokensOut,
-          costUsd: realCost, model: judgeModel || usage.model,
+          costUsd: usage.costUsd, model: usage.model,
         });
-        onCost(realCost, usage.tokensIn, usage.tokensOut);
+        onCost(usage.costUsd, usage.tokensIn, usage.tokensOut);
         if (dispatcher && ctx) {
- // Include reasoningTokens + cachedInputTokens for
- // AgentMetricsCallback per-phase breakdown.
           await dispatcher.cost(ctx, {
             tokensIn: usage.tokensIn,
             tokensOut: usage.tokensOut,
-            model: judgeModel || usage.model,
-            costUsd: realCost,
-            reasoningTokens: judgeReasoningTokens > 0 ? judgeReasoningTokens : undefined,
-            cachedInputTokens: judgeCachedInputTokens > 0 ? judgeCachedInputTokens : undefined,
-            cachedWriteInputTokens: judgeCachedWriteInputTokens > 0 ? judgeCachedWriteInputTokens : undefined,
+            model: usage.model,
+            costUsd: usage.costUsd,
+            reasoningTokens: usage.reasoningTokens,
+            cachedInputTokens: usage.cachedInputTokens,
+            cachedWriteInputTokens: usage.cachedWriteInputTokens,
           });
         }
       },

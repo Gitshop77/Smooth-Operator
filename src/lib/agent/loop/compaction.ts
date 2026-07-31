@@ -17,6 +17,7 @@
 import type { HistoryItem } from "../types";
 import { wrapUntrusted, sanitizeUntrusted, scanForInjection, INTERLEAVED_PROMPT_TAGS } from "../security";
 import { redactKeyShapes } from "../key-shape-redact";
+import { escapeXml } from "./xml-escape";
 
 /** Number of recent steps to keep intact (not summarized). */
 const KEEP_RECENT = 6;
@@ -84,24 +85,6 @@ export function partitionHistory(history: HistoryItem[]): {
   const recent = history.slice(-KEEP_RECENT);
   const middle = history.slice(1, -KEEP_RECENT);
   return { toSummarize: [first, ...middle], toKeep: recent };
-}
-
-// ─── XML escaping ─────────────────────────────────────────────────────────────
-// The rendered history is handed to the summarizer LLM as plain text, but it is
-// shaped like XML (`<step_N agent="...">` ... `</step_N>`). Interpolating
-// page-derived values without escaping would let a malicious page forge
-// `<step_N>` / prompt-like structure inside the summarization request. Escape
-// both attribute and text contexts so injected markup stays inert.
-
-/**
- * XML-escape untrusted text. Escapes `&`, `<`, `>` always, and `"` in
- * attribute context (`attr = true`). A single-pass helper keeps the attribute
- * and text variants from drifting apart.
- */
-function escapeXml(s: string, attr = false): string {
-  let out = s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  if (attr) out = out.replace(/"/g, "&quot;");
-  return out;
 }
 
 // ─── Secret redaction ─────────────────────────────────────────────────────────

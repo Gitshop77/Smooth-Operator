@@ -27,15 +27,15 @@ describe("judgeTask", () => {
   });
 
   test("returns verdict=true when the judge agrees with success", async () => {
-    const mockLlmCall = vi.fn().mockResolvedValue(
-      JSON.stringify({
+    const mockLlmCall = vi.fn().mockResolvedValue({
+      content: JSON.stringify({
         reasoning: "The action history shows a submit click followed by a success message.",
         verdict: true,
         failureReason: null,
         impossibleTask: false,
         reachedCaptcha: false,
-      })
-    );
+      }),
+    });
     const result = await judgeTask({
       task: "Submit the form",
       history: [makeHistoryItem(0)],
@@ -49,15 +49,15 @@ describe("judgeTask", () => {
   });
 
   test("returns verdict=false when the judge disagrees", async () => {
-    const mockLlmCall = vi.fn().mockResolvedValue(
-      JSON.stringify({
+    const mockLlmCall = vi.fn().mockResolvedValue({
+      content: JSON.stringify({
         reasoning: "No submit action was taken despite the agent claiming success.",
         verdict: false,
         failureReason: "No submit button click found in history.",
         impossibleTask: false,
         reachedCaptcha: false,
-      })
-    );
+      }),
+    });
     const result = await judgeTask({
       task: "Submit the form",
       history: [makeHistoryItem(0)],
@@ -69,7 +69,7 @@ describe("judgeTask", () => {
   });
 
   test("returns null when the LLM returns non-JSON", async () => {
-    const mockLlmCall = vi.fn().mockResolvedValue("This is not JSON.");
+    const mockLlmCall = vi.fn().mockResolvedValue({ content: "This is not JSON." });
     const result = await judgeTask({
       task: "Submit the form",
       history: [],
@@ -91,15 +91,15 @@ describe("judgeTask", () => {
   });
 
   test("coerces lenient boolean values (string 'true', number 1)", async () => {
-    const mockLlmCall = vi.fn().mockResolvedValue(
-      JSON.stringify({
+    const mockLlmCall = vi.fn().mockResolvedValue({
+      content: JSON.stringify({
         reasoning: "x",
         verdict: 1, // number instead of boolean
         failureReason: null,
         impossibleTask: "true", // string instead of boolean
         reachedCaptcha: false,
-      })
-    );
+      }),
+    });
     const result = await judgeTask({
       task: "x",
       history: [],
@@ -111,9 +111,9 @@ describe("judgeTask", () => {
   });
 
   test("wraps extracted content in untrusted tags in the history", async () => {
-    const mockLlmCall = vi.fn().mockResolvedValue(
-      JSON.stringify({ reasoning: "x", verdict: true, failureReason: null, impossibleTask: false, reachedCaptcha: false })
-    );
+    const mockLlmCall = vi.fn().mockResolvedValue({
+      content: JSON.stringify({ reasoning: "x", verdict: true, failureReason: null, impossibleTask: false, reachedCaptcha: false }),
+    });
     await judgeTask({
       task: "x",
       history: [{

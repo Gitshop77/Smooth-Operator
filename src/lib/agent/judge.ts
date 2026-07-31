@@ -52,8 +52,18 @@ export interface JudgeTaskArgs {
   history: HistoryItem[];
   /** The agent's self-reported final result. */
   agentResult: { success: boolean; text: string };
-  /** Low-level LLM call function (systemPrompt, userMessage) → raw response. */
-  llmCall: (systemPrompt: string, userMessage: string) => Promise<string>;
+  /** Low-level LLM call function (systemPrompt, userMessage) → raw response + optional usage. */
+  llmCall: (systemPrompt: string, userMessage: string) => Promise<{
+    content: string;
+    usage?: {
+      model?: string;
+      tokensIn?: number;
+      tokensOut?: number;
+      reasoningTokens?: number;
+      cachedInputTokens?: number;
+      cachedWriteInputTokens?: number;
+    };
+  }>;
   /** Optional cost callback fired once per judge LLM call. Lets the agent
  * loop accrue judge cost into the same budget tracker used for the
  * navigator + planner.
@@ -70,6 +80,9 @@ export interface JudgeTaskArgs {
  * `modelForCost` was not supplied. */
     model: string;
     costUsd: number;
+    reasoningTokens?: number;
+    cachedInputTokens?: number;
+    cachedWriteInputTokens?: number;
   }) => void | Promise<void>;
   /**
  * Optional model name for cost estimation. The judge's `llmCall` wrapper
@@ -240,8 +253,11 @@ Evaluate whether the task was actually completed.`;
  // propagates UP to `maybeJudgeAndFinalize`'s catch — which finalizes the
  // run as FAILURE.
   let raw: string;
+  let llmUsage: { model?: string; tokensIn?: number; tokensOut?: number; reasoningTokens?: number; cachedInputTokens?: number; cachedWriteInputTokens?: number } | undefined;
   try {
-    raw = await llmCall(JUDGE_PROMPT, userMessage);
+    const res = await llmCall(JUDGE_PROMPT, userMessage);
+    raw = res.content;
+    llmUsage = res.usage;
   } catch {
  // Judge LLM failure — don't crash the run. Return null (UNVERIFIED). The
  // caller (`maybeJudgeAndFinalize`) routes a null verdict back to the
@@ -259,27 +275,23 @@ Evaluate whether the task was actually completed.`;
  // throw propagates to `maybeJudgeAndFinalize`'s catch (which finalizes
  // the run as FAILURE when the budget is exceeded).
   if (onCost) {
-    let tokensIn = 0;
-    let tokensOut = 0;
+    const tokensIn = llmUsage?.tokensIn ?? Math.ceil((JUDGE_PROMPT.length + userMessage.length) / 4);
+    const tokensOut = llmUsage?.tokensOut ?? Math.ceil(raw.length / 4);
     let costUsd = 0;
     try {
-      tokensIn = Math.ceil((JUDGE_PROMPT.length + userMessage.length) / 4);
-      tokensOut = Math.ceil(raw.length / 4);
-      // When the cost model id is provider-prefixed (e.g. an OpenRouter-style
-      // "google/gemini-2.5-pro"), thread that provider so pricing disambiguates
-      // the same bare id across providers (lookupPricing's provider-prefixed
-      // key wins). Bare ids (no "/") have no provider context at the judge
-      // layer — the orchestrator's AgentConfig doesn't carry providerId — so we
-      // leave it undefined and rely on the first-writer-wins bare-id resolution
-      // in pricing.ts.
-      const judgeProviderId = modelForCost?.includes("/")
-        ? modelForCost.split("/")[0]
+      // Prefer the real model from llmCall; fall back to args.modelForCost.
+      const resolvedModel = llmUsage?.model || modelForCost;
+      const judgeProviderId = resolvedModel?.includes("/")
+        ? resolvedModel.split("/")[0]
         : undefined;
-      costUsd = modelForCost
+      costUsd = resolvedModel
         ? estimateCost({
-            model: modelForCost,
+            model: resolvedModel,
             tokensIn,
             tokensOut,
+            reasoningTokens: llmUsage?.reasoningTokens,
+            cachedInputTokens: llmUsage?.cachedInputTokens,
+            cachedWriteInputTokens: llmUsage?.cachedWriteInputTokens,
             providerId: judgeProviderId,
           })
         : 0;
@@ -296,7 +308,16 @@ Evaluate whether the task was actually completed.`;
  // Propagates budget-exceeded throws to the caller.
  // Report the real model (when known) rather than a generic "judge" label,
  // so per-model cost accounting buckets judge spend under the correct model.
-    await onCost({ tokensIn, tokensOut, model: modelForCost ?? "judge", costUsd });
+    const resolvedModel = llmUsage?.model || modelForCost;
+    await onCost({
+      tokensIn,
+      tokensOut,
+      model: resolvedModel ?? "judge",
+      costUsd,
+      reasoningTokens: llmUsage?.reasoningTokens,
+      cachedInputTokens: llmUsage?.cachedInputTokens,
+      cachedWriteInputTokens: llmUsage?.cachedWriteInputTokens,
+    });
   }
 
  // use the shared extractJson from output-parser (handles markdown

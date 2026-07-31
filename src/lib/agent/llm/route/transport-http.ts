@@ -9,6 +9,8 @@ import type { Framing, Frame } from "./framing";
 import { buildURL } from "./endpoint";
 import { withLLMRetry } from "../retry";
 import { redactKeyShapes } from "../../key-shape-redact";
+import { MAX_RETRY_AFTER_MS } from "../constants";
+import { redactUrl as redactUrlBase } from "./url-redact";
 import {
   type SsrfProvenance,
   isAllowedLlmBaseUrl,
@@ -17,10 +19,7 @@ import {
 
 /** Strip userinfo (`user:pass@`) and query/fragment (possible secret-bearing tokens) from a URL for logs/errors. */
 function redactUrlForLog(u: string): string {
- // Anchor the userinfo strip to the authority component: `[^/@]*` cannot cross
- // the first `/`, so a legitimate `@` inside the path (e.g. `…/@user/repo`) is
- // preserved instead of being mistaken for credentials.
-  return u.replace(/\/\/[^/@]*@/, "//").replace(/[?#].*$/, "[redacted-query]");
+  return redactUrlBase(u, false);
 }
 
 /**
@@ -58,6 +57,8 @@ export function parseRetryAfterHeader(value: string): number | undefined {
  * other way to interrupt it. 60s matches the SSE route's documented maxDuration. */
 const REQUEST_TIMEOUT_MS = 60_000;
 
+const TEXT_ENCODER = new TextEncoder();
+
 /**
  * Per-chunk timeout for SSE stream reading (ms). `fetchWithTimeout`
  * below only guards the INITIAL fetch (connection + response headers) — its
@@ -85,9 +86,8 @@ const CHUNK_TIMEOUT_MS = 30_000;
  */
 const MAX_RESPONSE_BYTES = 100 * 1024 * 1024;
 
-/** Upper bound on a `Retry-After` delay (1 hour) so a malicious or exhausted
- * provider can't stall the agent for an unbounded duration (availability/DoS). */
-const MAX_RETRY_AFTER_MS = 3_600_000;
+/** Upper bound on a `Retry-After` delay — shared with retry.ts via constants.ts
+ * so the transport and retry layers agree on the same ceiling. */
 
 export interface TransportPrepareInput<Body> {
   readonly body: Body;
@@ -238,7 +238,7 @@ async function fetchWithTimeout(
     const detachAbortListener = () =>
       userSignal.removeEventListener("abort", onAbort);
     return fetch(url, { ...init, redirect: "manual", signal: controller.signal })
-      .then(verifyNoRedirect)
+      .then((r) => verifyNoRedirect(r))
       .then((res) => {
         (res as Response & { __detachAbortListener?: () => void }).__detachAbortListener = detachAbortListener;
         return res;
@@ -253,7 +253,7 @@ async function fetchWithTimeout(
   }
 
   return fetch(url, { ...init, redirect: "manual", signal: controller.signal })
-    .then(verifyNoRedirect)
+    .then((r) => verifyNoRedirect(r))
     .finally(() => clearTimeout(timer))
     .catch(wrapTimeoutError);
 }
@@ -294,7 +294,7 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: {
       }, signal, opts.provenance ?? "untrusted");
       if (!r.ok) {
         const txt = await r.text().catch(() => "");
-        const err = new Error(`LLM API ${r.status}: ${redactKeyShapes(txt.slice(0, 300))}`);
+        const err = new Error(`LLM API ${r.status}: ${redactKeyShapes(txt.slice(0, 100))}`);
  // Carry the numeric HTTP status so withLLMRetry can classify retryable
  // errors from the status code (429 / 5xx) instead of string-matching
  // the response body — which is fragile and language-dependent.
@@ -336,7 +336,7 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: {
         throw new Error(`response too large: exceeded ${MAX_RESPONSE_BYTES} bytes`);
       }
       const text = await res.text();
-      if (new TextEncoder().encode(text).length > MAX_RESPONSE_BYTES) {
+      if (TEXT_ENCODER.encode(text).length > MAX_RESPONSE_BYTES) {
         throw new Error(`response too large: exceeded ${MAX_RESPONSE_BYTES} bytes`);
       }
       const frames = opts.framing.parse(text);
@@ -446,4 +446,4 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: {
   },
 });
 
-export * as HttpTransport from "./transport-http";
+

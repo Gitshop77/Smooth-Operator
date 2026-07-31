@@ -30,6 +30,8 @@ export type LLMCall<Req> = (req: Req, signal?: AbortSignal) => Promise<{
   reasoningTokens?: number;
   /** Cached input tokens (Anthropic cache_read+cache_creation, OpenAI cached_tokens). */
   cachedInputTokens?: number;
+  /** Cache-write (creation) tokens (Anthropic cache_creation, billed at the higher cache-write rate). */
+  cachedWriteInputTokens?: number;
   model?: string;
   /** Pre-computed cost in USD (from provider-bridge, includes cachedInputTokens).
  * When present, callers SHOULD use this instead of recomputing via estimateCost
@@ -284,6 +286,18 @@ export interface StepInfo {
   stepNumber: number;
   /** Maximum number of steps allowed for the run. */
   maxSteps: number;
+}
+
+// ─── Shared helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Append text to the pending loop warning, concatenating with a newline
+ * when a prior warning exists, or setting it directly when empty.
+ */
+export function appendToPendingWarning(state: LoopState, text: string): void {
+  state.pendingLoopWarning = state.pendingLoopWarning
+    ? `${state.pendingLoopWarning}\n${text}`
+    : text;
 }
 
 // ─── Re-exports for convenience ─────────────────────────────────────────────

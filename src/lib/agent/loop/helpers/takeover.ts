@@ -94,6 +94,10 @@ export function isTrustedResumeSender(sender?: chrome.runtime.MessageSender): bo
  * all-resolve bug.)
  */
 const activeResumeFinishers: Array<(r: "resumed" | "timeout") => void> = [];
+/** Safety bound: if more than this many pauses accumulate without resolution
+ * (e.g. extension context invalidation mid-pause), clear stale entries to
+ * prevent unbounded memory growth within a service-worker session. */
+const MAX_ACTIVE_RESUME_FINISHERS = 10;
 // Tracks the exact `chrome.runtime.onMessage` object we already attached our
 // shared listener to, so a *different* (re-installed) `onMessage` — e.g. a test
 // harness that swaps the global `chrome` between cases, or a genuine context
@@ -172,6 +176,12 @@ export async function waitForTakeoverResume(
         const idx = activeResumeFinishers.indexOf(finishWithRegistry);
         if (idx >= 0) activeResumeFinishers.splice(idx, 1);
       };
+      if (activeResumeFinishers.length >= MAX_ACTIVE_RESUME_FINISHERS) {
+        console.warn(
+          `[takeover] activeResumeFinishers exceeded ${MAX_ACTIVE_RESUME_FINISHERS} — clearing stale entries`,
+        );
+        activeResumeFinishers.length = 0;
+      }
       activeResumeFinishers.push(finishWithRegistry);
       attachResumeListener();
     }, () => removeFromRegistry?.());
