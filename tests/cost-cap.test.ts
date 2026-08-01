@@ -105,3 +105,65 @@ describe("orchestrator finalizes on cost cap when usage is omitted", () => {
     expect(doneEvent!.text).toMatch(/cost cap|Budget exceeded/i);
   });
 });
+
+describe("executeActionQueue Budget-exceeded propagation", () => {
+  test("a Budget-exceeded throw from the action queue finalizes the run (mirrors the navigator catch)", async () => {
+    // No cost cap configured — the throw comes from a handler INSIDE the
+    // action queue (e.g. a budget-enforcing deps.onEvent/onTabAction), which
+    // propagates out of executeActionQueue. The catch must finalize the run
+    // instead of treating the budget stop as a recoverable failure and
+    // looping until maxSteps.
+    const events: unknown[] = [];
+    const deps: LoopDeps = {
+      task: "test task",
+      plannerCall: vi.fn(async () => ({
+        raw: JSON.stringify({ thinking: "x", decision: "continue", plan: ["a"], next_goal: "g" }),
+        model: "test",
+      })),
+      navigatorCall: vi.fn(async () => ({
+        raw: JSON.stringify({
+          thinking: "x",
+          evaluation_previous_goal: "",
+          memory: "",
+          next_goal: "g",
+          action: [{ type: "click", index: 1 }],
+        }),
+        model: "test",
+      })),
+      getTabs: vi.fn(async () => [
+        { id: 1, label: "1", url: "https://example.com", title: "t", active: true },
+      ]),
+      extractState: vi.fn(async () => makeState()),
+      onEvent: (e: unknown) => {
+        events.push(e);
+        // The queue emits `action` per action; simulate a budget-enforcing
+        // handler that throws on the FIRST action execution.
+        if ((e as { type: string }).type === "action") {
+          throw new Error("Budget exceeded: cost cap reached");
+        }
+      },
+      settleDelay: 0,
+      config: {
+        maxSteps: 10,
+        maxActionsPerStep: 10,
+        plannerInterval: 100,
+        maxFailures: 3,
+        enableLoopDetection: false,
+        enableCompaction: false,
+        compactionStepInterval: 1000,
+        compactionCharThreshold: 1_000_000,
+        enableJudge: false,
+        enableEarlyStop: false,
+        costCapUsd: undefined,
+      },
+    };
+
+    await runAgentLoop(deps);
+
+    const doneEvents = events.filter((e) => (e as { type: string }).type === "done");
+    expect(doneEvents).toHaveLength(1);
+    expect((doneEvents[0] as { text: string }).text).toBe("Budget exceeded: cost cap reached");
+    // The queue must not have been retried as a "recoverable failure".
+    expect(deps.navigatorCall).toHaveBeenCalledTimes(1);
+  });
+});

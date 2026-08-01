@@ -25,7 +25,7 @@
  */
 
 import { parseAlarmName, initScheduledTasks } from "@/lib/agent/scheduled-tasks";
-import { getRunState, clearRunState, KEEPALIVE_ALARM, requestKeepAwake, safeLog } from "./state-store";
+import { getRunState, clearRunState, stopKeepalive, KEEPALIVE_ALARM, requestKeepAwake, safeLog } from "./state-store";
 import { handleScheduledTaskFire } from "./task-queue";
 import { registerRateLimitListener } from "./rate-limit-tracker";
 // Importing `./message-routing` registers the `chrome.runtime.onMessage`
@@ -124,6 +124,22 @@ chrome.commands?.onCommand.addListener(async (command) => {
   }
 });
 
+// ─── Toolbar action / _execute_action shortcut: open side panel ─────────────
+// The manifest declares `_execute_action` (Ctrl+Shift+O / Cmd+Shift+O), which
+// fires `chrome.action.onClicked` (not `chrome.commands.onCommand`).
+// `openPanelOnActionClick` covers plain toolbar clicks, but the `_execute_action`
+// keyboard-shortcut path does not reliably open the panel on its own — mirror
+// the toggle-side-panel behavior above so the shortcut works too.
+chrome.action?.onClicked.addListener(async () => {
+  try {
+    await chrome.sidePanel.open({ windowId: chrome.windows.WINDOW_ID_CURRENT });
+  } catch {
+ // sidePanel.open requires a user gesture in some Chrome versions — an
+ // action click IS a user gesture, so this should work. If it doesn't
+ // (older Chrome), the keyboard shortcut still counts as a gesture.
+  }
+});
+
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === KEEPALIVE_ALARM) {
  // Touching the SW keeps it alive. The loop's async work does the rest.
@@ -180,14 +196,15 @@ async function onServiceWorkerStartup(): Promise<void> {
   try {
     const state = await getRunState();
     if (state?.active) {
+      const interruptedMessage =
+        "Service worker was restarted mid-run. The previous run cannot be resumed — please start a new one.";
       chrome.runtime
         .sendMessage({
           type: "AGENT_EVENT",
           event: {
             type: "error",
             step: state.step,
-            message:
-              "Service worker was restarted mid-run. The previous run cannot be resumed — please start a new one.",
+            message: interruptedMessage,
             recoverable: false,
           },
           time: new Date().toLocaleTimeString("en-GB", { hour12: false }),
@@ -195,10 +212,34 @@ async function onServiceWorkerStartup(): Promise<void> {
         .catch(() => {
           /* side panel may not be open — non-fatal */
         });
+      // Persist the notice for a panel that was closed during the restart:
+      // the broadcast above is silently dropped when no panel is listening,
+      // so the first log line after the restart would otherwise be lost. The
+      // side panel renders + removes it on its next STATUS check;
+      // `startRun` clears it for per-run isolation.
+      try {
+        await chrome.storage.session.set({ open_cowork_interrupted_notice: interruptedMessage });
+      } catch {
+        /* best-effort — the live broadcast still fires */
+      }
       await clearRunState();
     }
   } catch (e) {
     void safeLog("error", "[sw-startup] run-state check failed (alarms still armed below):", e);
+  }
+ // A keepalive alarm leaks when the SW dies mid-run: it is armed by
+ // `initRunState` but only stopped by the run stop/cleanup paths, which an
+ // interrupted run never reaches. chrome.alarms outlive the SW, so the leaked
+ // alarm would keep firing (and keep the SW alive) forever. Every startup
+ // implies any previous run is dead (its state was cleared above if it was
+ // active), so clear the alarm unconditionally; `startRun` re-arms it for the
+ // next run. A startRun racing this cleanup re-creates the alarm via
+ // `chrome.alarms.create` (last-write-wins), mirroring the existing
+ // clearRunState-on-startup pattern.
+  try {
+    await stopKeepalive();
+  } catch (e) {
+    void safeLog("error", "[sw-startup] failed to stop keepalive alarm:", e);
   }
  // re-arm all enabled scheduled-task alarms on SW startup. Alarms
  // persist across SW restarts, but re-arming is idempotent and ensures any

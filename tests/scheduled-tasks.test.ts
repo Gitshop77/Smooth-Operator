@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeNextFire, MIN_FIRE_DELAY_MS } from "./scheduled-tasks";
+import { computeNextFire, MIN_FIRE_DELAY_MS } from "../src/lib/agent/scheduled-tasks";
 
 describe("computeNextFire", () => {
   it("rolls weekly schedule to the next occurrence of dayOfWeek", () => {

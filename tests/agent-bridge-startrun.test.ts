@@ -56,8 +56,8 @@ vi.mock("../src/extension/background/run-helpers", () => ({
     controller: { signal: { aborted: false } },
     onStorageChanged: vi.fn(),
   })),
-  loadAndSetDomainConfig: vi.fn(async () => {}),
   getVisionElementRect: vi.fn(),
+  isVisionCacheFresh: vi.fn(),
 }));
 
 vi.mock("../src/extension/background/state-store", () => ({
@@ -65,6 +65,8 @@ vi.mock("../src/extension/background/state-store", () => ({
   getRunState: vi.fn(async () => undefined),
   clearRunState: vi.fn(async () => {}),
   loadAndSetDomainConfig: vi.fn(async () => {}),
+  hardResetAbortRequested: vi.fn(async () => {}),
+  stopKeepalive: vi.fn(async () => {}),
 }));
 
 // ── Imports AFTER mocks ─────────────────────────────────────────────────────
@@ -78,9 +80,10 @@ const stateStore = await import("../src/extension/background/state-store");
 const runAgentLoop = orchestrator.runAgentLoop as ReturnType<typeof vi.fn>;
 const initRunState = runHelpers.initRunState as ReturnType<typeof vi.fn>;
 const wireAbortController = runHelpers.wireAbortController as ReturnType<typeof vi.fn>;
+const cleanupRun = runHelpers.cleanupRun as ReturnType<typeof vi.fn>;
 const clearRunState = stateStore.clearRunState as ReturnType<typeof vi.fn>;
 
-let sentEvents: Array<{ type: string; message?: string }>;
+let sentEvents: Array<{ type: string; message?: string; success?: boolean }>;
 
 function stubChrome(): void {
   (globalThis as Record<string, unknown>).chrome = {
@@ -129,12 +132,12 @@ afterEach(() => {
 
 describe("startRun lifecycle", () => {
   test("(a) resetDownloadConsent runs for every run (per-run consent isolation)", async () => {
- // Drive the internal flag true, then confirm it is reset by startRun.
+    // Drive the internal flag true, then confirm it is reset by startRun.
     expect(consumeDownloadConsentForMode("full_agentic")).toBe(true);
     expect(consumeDownloadConsentForMode("full_agentic")).toBe(false);
     await startRun({ task: "do something", maxSteps: 10, mode: "standard" });
     expect(runAgentLoop).toHaveBeenCalledTimes(1);
- // After resetDownloadConsent, a fresh full_agentic consume must succeed again.
+    // After resetDownloadConsent, a fresh full_agentic consume must succeed again.
     expect(consumeDownloadConsentForMode("full_agentic")).toBe(true);
   });
 
@@ -143,7 +146,7 @@ describe("startRun lifecycle", () => {
     expect(runAgentLoop).toHaveBeenCalledTimes(1);
     const deps = runAgentLoop.mock.calls[0][0] as { mode?: string };
     expect(deps.mode).toBe("standard");
- // The fallback is surfaced to the side panel (not silently swallowed).
+    // The fallback is surfaced to the side panel (not silently swallowed).
     expect(
       sentEvents.some((e) => e.type === "info" && /Invalid mode/.test(e.message ?? "")),
     ).toBe(true);
@@ -172,6 +175,30 @@ describe("startRun lifecycle", () => {
     expect(
       sentEvents.some((e) => e.type === "info" && /Run metrics/.test(e.message ?? "")),
     ).toBe(true);
+  });
+
+  test("(e) never clears abortRequested during init (STOP during init must survive)", async () => {
+    // a STOP that lands while startRun is still initializing must not
+    // be wiped by a stale-flag reset — the post-wire re-check + storage
+    // listener depend on the flag surviving. The ONLY places that clear run
+    // state are cleanupRun (normal run end) and onServiceWorkerStartup
+    // (interrupted-run SW restart), never startRun's init path.
+    const hardResetAbortRequested = stateStore.hardResetAbortRequested as ReturnType<typeof vi.fn>;
+    await startRun({ task: "do something", maxSteps: 10, mode: "standard" });
+    expect(hardResetAbortRequested).not.toHaveBeenCalled();
+  });
+
+  test("(f) a STOP persisted during init aborts the run at the post-wire re-check", async () => {
+    // Simulate: handleStop's saveRunState({abortRequested:true}) lands during
+    // init; the re-check after wireAbortController must see it, emit the
+    // stop events, and clean up WITHOUT starting the loop.
+    const getRunState = stateStore.getRunState as ReturnType<typeof vi.fn>;
+    getRunState.mockResolvedValueOnce({ abortRequested: true });
+    await startRun({ task: "do something", maxSteps: 10, mode: "standard" });
+    expect(sentEvents.some((e) => e.type === "info" && /Agent stopped by user/.test(e.message ?? ""))).toBe(true);
+    expect(sentEvents.some((e) => e.type === "done" && e.success === false)).toBe(true);
+    expect(runAgentLoop).not.toHaveBeenCalled();
+    expect(cleanupRun).toHaveBeenCalled();
   });
 });
 

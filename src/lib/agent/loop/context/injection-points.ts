@@ -30,7 +30,7 @@ import {
 import { escapeXml } from "../xml-escape";
 
 /** Returns `true` when `stepNumber` is the final step (no further steps remain). */
-export function isLastStep(stepInfo: StepInfo): boolean {
+function isLastStep(stepInfo: StepInfo): boolean {
   return stepInfo.stepNumber >= stepInfo.maxSteps - 1;
 }
 
@@ -38,7 +38,7 @@ export function isLastStep(stepInfo: StepInfo): boolean {
  * 1. Budget warning — fires once when the step count crosses 75% of the
  * budget. Returns the warning text (or `null` when below the threshold).
  */
-export function injectBudgetWarning(stepInfo: StepInfo): string | null {
+function injectBudgetWarning(stepInfo: StepInfo): string | null {
   const stepsUsed = stepInfo.stepNumber + 1;
   const ratio = stepsUsed / stepInfo.maxSteps;
   if (ratio < BUDGET_WARNING_FRACTION) return null;
@@ -84,7 +84,7 @@ export function injectCostBudgetWarning(
  * 2. Replan nudge — fires when `consecutiveFailures` reaches the threshold
  * (default 3) AND a plan exists.
  */
-export function injectReplanNudge(
+function injectReplanNudge(
   consecutiveFailures: number,
   hasPlan: boolean,
   threshold: number = REPLAN_NUDGE_FAILURES
@@ -102,7 +102,7 @@ export function injectReplanNudge(
  * 3. Exploration nudge — fires when the step count reaches the threshold
  * (default 5) AND no plan exists yet.
  */
-export function injectExplorationNudge(
+function injectExplorationNudge(
   step: number,
   hasPlan: boolean,
   threshold: number = EXPLORATION_NUDGE_STEPS
@@ -120,7 +120,7 @@ export function injectExplorationNudge(
 /**
  * 4. Loop-detection nudge — wraps {@link LoopDetector.shouldWarn}.
  */
-export function injectLoopDetectionNudge(detector: LoopDetector): string | null {
+function injectLoopDetectionNudge(detector: LoopDetector): string | null {
   const count = detector.shouldWarn();
   if (count === 0) return null;
   return LoopDetector.warningText(count);
@@ -130,7 +130,7 @@ export function injectLoopDetectionNudge(detector: LoopDetector): string | null 
  * 5. Force-done after last step — returns the force-done message when
  * `stepInfo` is the final step, else `null`.
  */
-export function forceDoneAfterLastStep(stepInfo: StepInfo): string | null {
+function forceDoneAfterLastStep(stepInfo: StepInfo): string | null {
   if (!isLastStep(stepInfo)) return null;
   return (
     `You reached max_steps - this is your last step. Your only tool available is the "done" tool. ` +
@@ -144,7 +144,7 @@ export function forceDoneAfterLastStep(stepInfo: StepInfo): string | null {
  * 6. Force-done after failure — returns the force-done message when
  * `consecutiveFailures` reaches `maxFailures`, else `null`.
  */
-export function forceDoneAfterFailure(
+function forceDoneAfterFailure(
   consecutiveFailures: number,
   maxFailures: number
 ): string | null {
@@ -161,7 +161,7 @@ export function forceDoneAfterFailure(
  * 7. Captcha-wait nudge — returns a nudge string when the page URL or title
  * suggests a captcha is being shown.
  */
-export function injectCaptchaWaitNudge(url: string, title: string = ""): string | null {
+function injectCaptchaWaitNudge(url: string, title: string = ""): string | null {
   const hay = `${url}\n${title}`.toLowerCase();
   if (!CAPTCHA_URL_HINTS.some((h) => hay.includes(h))) return null;
   return (
@@ -178,11 +178,11 @@ export function injectCaptchaWaitNudge(url: string, title: string = ""): string 
 /** Boundary-aware download-URL detector (avoids substring false positives
  * like `.target` matching `.tar`, `.gzip` matching `.gz`, `.pdfx` matching
  * `.pdf`). Derived from `DOWNLOAD_URL_HINTS` in `../constants`. */
-export function injectDownloadsCheckNudge(url: string): string | null {
+function injectDownloadsCheckNudge(url: string): string | null {
   if (!DOWNLOAD_RE.test(url)) return null;
- // Escape the page-controlled URL before embedding it in the `<sys>` block so
- // a hostile page can't forge tag structure (finding [33]). Truncate BEFORE
- // escaping so a trailing entity (e.g. `&am`) can never be split mid-escape.
+  // Escape the page-controlled URL before embedding it in the `<sys>` block so
+  // a hostile page can't forge tag structure. Truncate BEFORE
+  // escaping so a trailing entity (e.g. `&am`) can never be split mid-escape.
   const display = url.length > 40 ? "…" + url.slice(-40) : url;
   const safeUrl = escapeXml(display);
   return (
@@ -199,9 +199,9 @@ export function injectDownloadsCheckNudge(url: string): string | null {
 export function buildPreObserveNudges(state: LoopState): string | null {
   const stepInfo: StepInfo = { stepNumber: state.step, maxSteps: state.config.maxSteps };
   const nudges: string[] = [];
- // Fire the budget warnings only ONCE per run (not every step from 75% to
- // maxSteps-2). Re-injecting on every step would bloat the context window
- // with ~60 lines of repeated warnings over a 50-step run.
+  // Fire the budget warnings only ONCE per run (not every step from 75% to
+  // maxSteps-2). Re-injecting on every step would bloat the context window
+  // with ~60 lines of repeated warnings over a 50-step run.
   if (!state.budgetWarningFired) {
     const budget = injectBudgetWarning(stepInfo);
     if (budget) {
@@ -222,9 +222,9 @@ export function buildPreObserveNudges(state: LoopState): string | null {
   if (exploration) nudges.push(exploration);
   const loop = injectLoopDetectionNudge(state.loopDetector);
   if (loop) nudges.push(loop);
- // Only ONE force-done nudge may fire per step. Both messages say "your only
- // tool available is done"; emitting both produces a duplicate/confusing UI
- // . Prefer the last-step message when both would apply.
+  // Only ONE force-done nudge may fire per step. Both messages say "your only
+  // tool available is done"; emitting both produces a duplicate/confusing UI.
+  // Prefer the last-step message when both would apply.
   const lastStep = forceDoneAfterLastStep(stepInfo);
   if (lastStep) {
     nudges.push(lastStep);
@@ -248,4 +248,15 @@ export function buildPostObserveNudges(url: string, title: string): string | nul
   if (downloads) nudges.push(downloads);
   if (nudges.length === 0) return null;
   return `<sys>\n${nudges.join("\n")}\n</sys>`;
+}
+
+/**
+ * Append a nudge string to `state.pendingLoopWarning`, joining with a newline
+ * when a warning is already pending. Used by the pre/post-observe injection
+ * points so the navigator request receives one combined warning block.
+ */
+export function appendPendingLoopWarning(state: LoopState, warning: string): void {
+  state.pendingLoopWarning = state.pendingLoopWarning
+    ? `${state.pendingLoopWarning}\n${warning}`
+    : warning;
 }

@@ -27,26 +27,23 @@ import {
   removeEmptyState,
 } from "./chat-renderer";
 import { restoreTotalsFromStorage, clearRunTotals } from "./log-renderer";
+import {
+  sanitizeLastError,
+  storageGet,
+  storageSet,
+  runtimeSendMessage,
+} from "./controls-utils";
+import { ensureApiKeyInSession } from "../api-key-storage";
 
 let running = false;
 let stopDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let sendDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-// ─── lastError sanitization ──────────────────────────────────────────────
-// Map known chrome.runtime.lastError messages to user-friendly strings
-// so internal extension details aren't leaked in the UI.
-const KNOWN_RUNTIME_ERRORS: Record<string, string> = {
-  "Could not establish connection. Receiving end does not exist.":
-    "Background service unavailable",
-  "The message port closed before a response was received.":
-    "Background service unavailable",
-  "Extension context invalidated.":
-    "Extension context invalidated",
-};
-
-function sanitizeLastError(raw: string | undefined): string {
-  if (!raw) return "Failed to start";
-  return KNOWN_RUNTIME_ERRORS[raw] ?? "Failed to start";
+function clearSendDebounce(): void {
+  if (sendDebounceTimer) {
+    clearTimeout(sendDebounceTimer);
+    sendDebounceTimer = null;
+  }
 }
 
 // ─── Run/Stop UI ─────────────────────────────────────────────────────────
@@ -67,22 +64,6 @@ export function setRunning(v: boolean): void {
 
 // ─── Message input ───────────────────────────────────────────────────────
 
-function storageGet(keys: string | string[], area: "session" | "local"): Promise<Record<string, unknown>> {
-  return new Promise((resolve) => {
-    (chrome.storage[area] as { get: (k: string | string[], cb: (r: Record<string, unknown>) => void) => void }).get(keys, resolve);
-  });
-}
-
-function storageSet(items: Record<string, unknown>, area: "session" | "local"): Promise<void> {
-  return new Promise((resolve) => {
-    (chrome.storage[area] as { set: (v: Record<string, unknown>, cb: () => void) => void }).set(items, () => resolve());
-  });
-}
-
-function runtimeSendMessage(msg: unknown): Promise<unknown> {
-  return new Promise((resolve) => chrome.runtime.sendMessage(msg, resolve));
-}
-
 async function sendMessage(): Promise<void> {
   const text = messageInput.value.trim();
   if (!text || running) return;
@@ -98,25 +79,23 @@ async function sendMessage(): Promise<void> {
 
     if (isClarifying) {
       await storageSet({ open_cowork_clarify_response: text }, "session");
-      if (sendDebounceTimer) { clearTimeout(sendDebounceTimer); sendDebounceTimer = null; }
+      clearSendDebounce();
       addUserMessage(text);
       messageInput.value = "";
       setLifecycle("thinking");
-      addSystemMessage("💬", "Clarification received, resuming task…", undefined);
+      addSystemMessage("💬", "Clarification received, resuming task…");
       return;
     }
 
-    // Guard: check that an API key is configured before sending.
-    // Batch provider + common key names into a single storage read.
-    const localRes = await storageGet(
-      ["provider", "apiKey", "apiKey_openai", "apiKey_anthropic", "apiKey_google", "apiKey_xai", "apiKey_azure", "apiKey_openrouter"],
-      "local",
-    ) as Record<string, unknown>;
+    // Guard: check that an API key is configured before sending. The provider
+    // is saved to LOCAL storage; the API key lives in SESSION storage
+    // (in-memory — never written to disk unless the user opted into
+    // "remember on this device", in which case it is re-hydrated here).
+    const localRes = await storageGet(["provider"], "local");
     const provider = (localRes?.provider as string) || "";
-    const key = provider ? `apiKey_${provider}` : "apiKey";
-    const s = { [key]: localRes?.[key] ?? localRes?.apiKey } as Record<string, unknown>;
-    if (chrome.runtime.lastError || !s?.[key]) {
-      if (sendDebounceTimer) { clearTimeout(sendDebounceTimer); sendDebounceTimer = null; }
+    const apiKeyValue = await ensureApiKeyInSession();
+    if (!provider || !apiKeyValue) {
+      clearSendDebounce();
       addSystemMessage(
         "⚠",
         "No API key configured. Open Settings to add your provider key."
@@ -127,7 +106,7 @@ async function sendMessage(): Promise<void> {
     // Re-check running guard — a STATUS response may have set running=true
     // while the async storage.get was in flight.
     if (running) {
-      if (sendDebounceTimer) { clearTimeout(sendDebounceTimer); sendDebounceTimer = null; }
+      clearSendDebounce();
       return;
     }
 
@@ -140,7 +119,7 @@ async function sendMessage(): Promise<void> {
     const timeout = setTimeout(() => {
       if (responded) return;
       responded = true;
-      if (sendDebounceTimer) { clearTimeout(sendDebounceTimer); sendDebounceTimer = null; }
+      clearSendDebounce();
       addSystemMessage("❌", "No response from background — try reloading the extension");
       setRunning(false);
     }, 10_000);
@@ -155,22 +134,16 @@ async function sendMessage(): Promise<void> {
     if (responded) return;
     responded = true;
     clearTimeout(timeout);
-    if (chrome.runtime.lastError) {
-      if (sendDebounceTimer) { clearTimeout(sendDebounceTimer); sendDebounceTimer = null; }
-      const errMsg = (chrome.runtime as { lastError?: { message?: string } }).lastError?.message;
-      addSystemMessage("❌", sanitizeLastError(errMsg));
-      return;
-    }
     if (!res?.ok) {
-      if (sendDebounceTimer) { clearTimeout(sendDebounceTimer); sendDebounceTimer = null; }
+      clearSendDebounce();
       addSystemMessage("❌", res?.error || "Failed to start");
       return;
     }
     setRunning(true);
     clearRunTotals();
-    if (sendDebounceTimer) { clearTimeout(sendDebounceTimer); sendDebounceTimer = null; }
+    clearSendDebounce();
   } catch {
-    if (sendDebounceTimer) { clearTimeout(sendDebounceTimer); sendDebounceTimer = null; }
+    clearSendDebounce();
   }
 }
 
@@ -229,6 +202,8 @@ stopBtn.addEventListener("click", () => {
 // ─── Mode selector ──────────────────────────────────────────────────────
 
 modeSelect?.addEventListener("change", () => {
+  // Guard required: narrowing of the imported binding does not flow into the
+  // callback closure, so modeSelect is still typed `HTMLSelectElement | null`.
   if (modeSelect) setCurrentMode(modeSelect.value);
 });
 
@@ -236,7 +211,6 @@ modeSelect?.addEventListener("change", () => {
 
 interface StatusResponse {
   running?: boolean;
-  state?: unknown;
 }
 
 let staleCheckTimer: ReturnType<typeof setTimeout> | null = null;
@@ -249,14 +223,43 @@ export function onAgentEvent(): void {
   }
 }
 
+/**
+ * Render + remove the persisted interrupted-run notice (written by the
+ * service worker's startup handler when it restarted mid-run and the panel
+ * was closed, so the live broadcast was dropped). Consumed exactly once —
+ * removed from session storage after rendering so it can't resurface.
+ */
+async function renderInterruptedRunNotice(): Promise<void> {
+  try {
+    const res = await storageGet(["open_cowork_interrupted_notice"], "session");
+    const notice = res?.open_cowork_interrupted_notice;
+    if (typeof notice !== "string" || !notice) return;
+    addSystemMessage("⚠", notice, "error");
+    if (chrome.storage?.session) {
+      await chrome.storage.session.remove("open_cowork_interrupted_notice");
+    }
+  } catch {
+    /* storage unavailable — non-fatal */
+  }
+}
+
 chrome.runtime.sendMessage({ type: "STATUS" }, (res: StatusResponse) => {
   if (chrome.runtime.lastError) {
     console.warn("[sidepanel] STATUS failed:", chrome.runtime.lastError);
     return;
   }
+  // Restore the mid-run cost/token snapshot BEFORE anything can reset the
+  // counters. (A fresh panel starts at 0 anyway, and run-start clears the
+  // totals in addLogRow — never clear the persisted snapshot here, or a
+  // panel reopened mid-run loses the accumulated totals.)
+  restoreTotalsFromStorage();
+  // Render + consume any persisted "service worker was restarted mid-run"
+  // notice. The notice is written to session storage when the SW restarts
+  // while the panel is closed (the live broadcast is dropped without a
+  // listener), so the first log line after a restart is not lost.
+  void renderInterruptedRunNotice();
   if (res?.running) {
     setRunning(true);
-    clearRunTotals();
     // If no AGENT_EVENT arrives within 8s, the run is likely stale
     // (service worker died, left active:true in session storage).
     if (staleCheckTimer) clearTimeout(staleCheckTimer);
@@ -268,5 +271,4 @@ chrome.runtime.sendMessage({ type: "STATUS" }, (res: StatusResponse) => {
       }
     }, 8_000);
   }
-  restoreTotalsFromStorage();
 });

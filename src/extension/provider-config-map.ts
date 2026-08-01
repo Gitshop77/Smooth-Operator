@@ -8,7 +8,7 @@
  * provider catalog is consolidated, a `catalogId` field on each `ProviderDef` in
  * `options/providers.ts`.
  *
- * Consolidation plan (tracked by the audit):
+ * Consolidation plan:
  * 1. Define the map inside `src/lib/agent/llm/catalog.ts` (or derive it via
  * `Object.fromEntries(PROVIDERS.map(p => [p.id, p.catalogId]))` from
  * `options/providers.ts`).
@@ -19,8 +19,9 @@
  * the two sources must stay in sync until the map is deleted, otherwise model
  * search silently breaks for the new provider.
  *
- * Used by both `provider-config.ts` (in buildProvider) and `agent-bridge.ts`
- * (in the extractState callback) to look up per-model vision capability.
+ * Used by `provider-config.ts` (in buildProvider), `options/providers.ts`
+ * (model-search catalog IDs), and `background/run-helpers.ts` (vision gating)
+ * to look up per-model vision capability.
  */
 
 /** Map our provider IDs to models.dev catalog provider IDs. */

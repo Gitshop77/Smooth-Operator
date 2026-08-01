@@ -19,20 +19,20 @@ export async function handleDropdownOptions(
   if (!(el instanceof HTMLSelectElement)) throw new NoSuchElementException(`element [${action.index}] is not a <select>`);
   const options = await Promise.all(
     Array.from(el.options, async (o, i) => {
-   // Redact each option's label and value before they reach the LLM context /
-   // persisted run history — a <select> (account picker, saved-payment menu,
-   // password-manager dropdown) can list secret-bearing text. Redact the full
-   // value first, then slice, so a secret straddling the truncation boundary is
-   // never partially exposed. isSensitive on the <select> mirrors find-elements.
+      // Redact each option's label and value before they reach the LLM context /
+      // persisted run history — a <select> (account picker, saved-payment menu,
+      // password-manager dropdown) can list secret-bearing text. Redact the full
+      // value first, then slice, so a secret straddling the truncation boundary is
+      // never partially exposed. isSensitive on the <select> mirrors find-elements.
       const rawLabel = o.textContent?.trim() || o.value;
       const label = (await redactSecrets(rawLabel)).slice(0, LIMITS.findElementsTextChars);
       const rawValue = o.value;
-      const value =
-        rawValue && rawValue !== rawLabel
-          ? (isSensitive(el)
-              ? "[value redacted]"
-              : (await redactSecrets(rawValue)).slice(0, LIMITS.findElementsTextChars))
-          : "";
+      let value = "";
+      if (rawValue && rawValue !== rawLabel) {
+        value = isSensitive(el)
+          ? "[value redacted]"
+          : (await redactSecrets(rawValue)).slice(0, LIMITS.findElementsTextChars);
+      }
       return `${i}: ${label}${value ? ` (value="${value}")` : ""}`;
     }),
   );

@@ -89,13 +89,14 @@ export async function handleScheduledTaskFire(taskId: string): Promise<void> {
       e,
     );
  // release the synchronous RUN-guard flag on failure. The flag
- // was set at line 43 above (`setRunStarting(true)`) BEFORE `startRun`
+ // was set above (`setRunStarting(true)`) BEFORE `startRun`
  // was invoked. If anything between there and the orchestrator's own
  // `finally` throws (e.g. `requestKeepAwake` rejects, `chrome.sidePanel.open`
  // throws, or `startRun` itself throws before reaching its own try/finally),
  // the flag sticks `true` and every subsequent RUN message — manual OR
  // scheduled — is rejected with "already starting" until the SW restarts.
- // Same anti-pattern as (which fixed the manual-RUN path).
+ // Same anti-pattern as the manual-RUN handler (which the agent-bridge fix
+ // already resolved for that path).
     setRunStarting(false);
   }
 }
@@ -103,7 +104,7 @@ export async function handleScheduledTaskFire(taskId: string): Promise<void> {
 // Notification + Webhook on run completion
 
 /**
- * C18: Fire a Chrome notification and/or webhook when a run finishes.
+ * Fire a Chrome notification and/or webhook when a run finishes.
  * Reads the user's notification settings from chrome.storage.local.
  */
 export async function fireNotifications(task: string, success?: boolean): Promise<void> {

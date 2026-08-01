@@ -20,7 +20,7 @@ import { classifyError, friendlyErrorMessage } from "../src/lib/agent/errors";
 import { checkActionAllowed, MODE_CONFIGS, requiresConfirmation } from "../src/lib/agent/modes";
 import { listSecrets, setSecret, deleteSecret, redactSecrets, substituteSecrets } from "../src/lib/agent/secrets";
 import { describeAction } from "../src/lib/agent/tools/executor";
-import { ACTION_METADATA } from "../src/lib/agent/tools/schema";
+import { ACTION_METADATA } from "../src/lib/agent/tools/schema-utils";
 import { RunBuilder, saveRun, loadRuns } from "../src/lib/agent/run-history";
 import type { AgentAction, LogEvent } from "../src/lib/agent/types";
 import { installLocalStorageStub, restoreLocalStorageStub } from "./helpers";

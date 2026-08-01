@@ -9,105 +9,34 @@
 
 import type {
   AgentOutput,
+  AgentStepRequest,
   PlannerOutput,
+  PlannerStepRequest,
 } from "../../types";
-import type { AgentStepRequest, PlannerStepRequest } from "../../types";
 import { parseAgentOutput, parsePlannerOutput } from "../../output-parser";
-import { estimateCost } from "../../llm/pricing";
 import { wrapUntrusted } from "../../security";
-import {
+import type {
   CallbackDispatcher,
-  type CallbackContext,
-  type LLMUsageInfo,
+  CallbackContext,
+  LLMUsageInfo,
 } from "../../callbacks";
 import type { LoopDeps, PlannerCallArgs } from "../types";
 import { MAX_PARSE_RETRIES } from "../constants";
+import { sumUsages, accountUsage } from "./llm-calls-utils";
 
 /**
- * Sum a list of per-attempt {@link LLMUsageInfo} records into a single
- * record representing the aggregate cost of a (possibly retried) phase.
- *
- * Navigator retries make several LLM calls; the per-phase callback should
- * receive the *total* cost of every attempted call (failed + the final
- * successful one), not just the last attempt's usage. Retries normally use
- * the same model, so the model of the final attempt is used as the aggregate
- * model name. Optional fields are only emitted when at least one attempt
- * carried them, so a clean single-call usage is preserved when no attempt
- * reported reasoning/cache tokens.
+ * Account + report a single LLM call's token→cost→usage, shared by
+ * `runPlanner` and `callNavigatorWithRetry`. Prefers a pre-computed
+ * `precomputedCost`; otherwise falls back to `estimateCost` (passing
+ * cachedInputTokens + cachedWriteInputTokens through). When the cost is a
+ * number, surfaces it to the caller (`onCost`) + as a `cost` event — per
+ * attempt in the navigator, so the run total stays exact across retries.
+ * Returns the usage record for `dispatcher.llmEnd`/`cost` attribution.
  */
-function sumUsages(usages: LLMUsageInfo[]): LLMUsageInfo | undefined {
-  if (usages.length === 0) return undefined;
-  const model = usages[usages.length - 1].model;
-  let tokensIn = 0;
-  let tokensOut = 0;
-  let costUsd = 0;
-  let reasoningTokens = 0;
-  let cachedInputTokens = 0;
-  let cachedWriteInputTokens = 0;
-  for (const u of usages) {
-    tokensIn += u.tokensIn;
-    tokensOut += u.tokensOut;
-    costUsd += u.costUsd;
-    if (u.reasoningTokens) reasoningTokens += u.reasoningTokens;
-    if (u.cachedInputTokens) cachedInputTokens += u.cachedInputTokens;
-    if (u.cachedWriteInputTokens) cachedWriteInputTokens += u.cachedWriteInputTokens;
-  }
-  return {
-    tokensIn,
-    tokensOut,
-    model,
-    costUsd,
-    ...(reasoningTokens ? { reasoningTokens } : {}),
-    ...(cachedInputTokens ? { cachedInputTokens } : {}),
-    ...(cachedWriteInputTokens ? { cachedWriteInputTokens } : {}),
-  };
-}
-
-/**
- * Build a per-attempt {@link LLMUsageInfo} record (helper for the runPlanner /
- * callNavigatorWithRetry usage literals — both construct the identical shape).
- */
-function buildUsage(
-  model: string,
-  tokensIn: number,
-  tokensOut: number,
-  costUsd: number,
-  reasoningTokens?: number,
-  cachedInputTokens?: number,
-  cachedWriteInputTokens?: number,
-): LLMUsageInfo {
-  return {
-    model,
-    tokensIn,
-    tokensOut,
-    costUsd,
-    reasoningTokens,
-    cachedInputTokens,
-    cachedWriteInputTokens,
-  };
-}
-
-/**
- * Shared token→cost→usage accounting used by both {@link runPlanner} and
- * {@link callNavigatorWithRetry}. Returns the finite dollar cost (or
- * `undefined`) and the matching per-attempt {@link LLMUsageInfo} (or
- * `undefined`), or `undefined` entirely when token counts are missing. The
- * caller is responsible for the `onCost` / `onEvent` side-effects and for
- * pushing the usage into the per-phase aggregate.
- */
-/**
- * Provider-independent floor cost (USD) accrued for an LLM call that omits token
- * usage while a cost cap is active. When the provider reports no
- * `tokensIn`/`tokensOut` we cannot measure real spend, so instead of silently
- * never enforcing the cap we accrue this small floor. It is conservative (it
- * over-counts unmeasurable steps) so a cost cap is still respected even when the
- * provider does not report usage — `costCapExceeded` then trips once the floors
- * accumulate past the cap. Kept tiny so a single omitted call never trips a
- * sensibly-sized cap on its own.
- */
-const MISSING_USAGE_FLOOR_USD = 0.01;
-
-function accountUsage(params: {
+function accountAndReportUsage(params: {
+  step: number;
+  onCost: (usd: number, tokensIn?: number, tokensOut?: number) => void;
+  deps: LoopDeps;
   precomputedCost?: number;
   model?: string;
   tokensIn?: number;
@@ -115,53 +44,17 @@ function accountUsage(params: {
   reasoningTokens?: number;
   cachedInputTokens?: number;
   cachedWriteInputTokens?: number;
-  /** Active cost cap (if any). When > 0 and usage is omitted we accrue a floor. */
   costCapUsd?: number;
-}): { cost: number | undefined; usage: LLMUsageInfo | undefined } | undefined {
-  const { precomputedCost, model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, costCapUsd } = params;
-  if (tokensIn === undefined || tokensOut === undefined) {
-    // Provider omitted token usage but supplied a precomputed cost — count that
-    // known spend rather than discarding it (otherwise a real LLM cost is
-    // silently dropped from the run total / UI).
-    if (typeof precomputedCost === "number" && Number.isFinite(precomputedCost)) {
-      return {
-        cost: precomputedCost,
-        usage: { model: model ?? "", tokensIn: 0, tokensOut: 0, costUsd: precomputedCost },
-      };
-    }
-    // Provider omitted token usage. If a cost cap is in effect we cannot measure
-    // spend, so accrue a provider-independent floor rather than letting the
-    // cap become inert. When no cap is set, preserve the historical behavior
-    // (return undefined — cost for this call is simply not tracked).
-    if (costCapUsd !== undefined && costCapUsd > 0) {
-      return {
-        cost: MISSING_USAGE_FLOOR_USD,
-        usage: { model: model ?? "", tokensIn: 0, tokensOut: 0, costUsd: MISSING_USAGE_FLOOR_USD },
-      };
-    }
-    return undefined;
+}): LLMUsageInfo | undefined {
+  const { step, onCost, deps, precomputedCost, model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, costCapUsd } = params;
+  const accounted = accountUsage({ precomputedCost, model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, costCapUsd });
+  if (!accounted) return undefined;
+  const { cost, usage: u } = accounted;
+  if (typeof cost === "number" && u) {
+    onCost(cost, u.tokensIn, u.tokensOut);
+    deps.onEvent({ type: "cost", step, tokensIn: u.tokensIn, tokensOut: u.tokensOut, costUsd: cost, model: model ?? "" });
   }
- // Production planner/navigator calls go through provider-bridge, which
- // already supplies a provider-scoped `costUsd` (precomputedCost) AND passes
- // its config.providerId into estimateCost — so this fallback only runs when a
- // caller supplies a model without a precomputed cost. When that model id is
- // provider-prefixed (e.g. "google/gemini-2.5-pro" from an OpenRouter-style
- // provider), thread the prefix so pricing disambiguates the same bare id
- // across providers. Bare ids (no "/") carry no provider context at the loop
- // layer (AgentConfig doesn't hold providerId), so we leave it undefined and
- // rely on the first-writer-wins bare-id resolution in pricing.ts.
-  const costModelProviderId = model?.includes("/") ? model.split("/")[0] : undefined;
-  const cost = precomputedCost ?? (model ? estimateCost({ model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, providerId: costModelProviderId }) : undefined);
-  const usage: LLMUsageInfo | undefined =
-    typeof cost === "number" && Number.isFinite(cost)
-      ? buildUsage(model ?? "", tokensIn, tokensOut, cost, reasoningTokens, cachedInputTokens, cachedWriteInputTokens)
-      : model
-        ? buildUsage(model, tokensIn, tokensOut, 0, reasoningTokens, cachedInputTokens, cachedWriteInputTokens)
-        : undefined;
-  return {
-    cost: typeof cost === "number" && Number.isFinite(cost) ? cost : undefined,
-    usage,
-  };
+  return u;
 }
 
 /**
@@ -206,16 +99,8 @@ export async function runPlanner(
  // `cachedWriteInputTokens` is billed at the (higher) cache-write rate, so
  // omitting it under-reports Anthropic cache-creation cost.
     const cachedWriteInputTokens = result.cachedWriteInputTokens ?? 0;
-    const accounted = accountUsage({ precomputedCost, model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, costCapUsd });
-    if (accounted) {
-      const { cost, usage: u } = accounted;
-      if (typeof cost === "number" && u) {
-        args.onCost(cost, u.tokensIn, u.tokensOut);
-        deps.onEvent({ type: "cost", step: args.step, tokensIn: u.tokensIn, tokensOut: u.tokensOut, costUsd: cost, model: model ?? "" });
-      }
-      usage = u;
-    }
-    // C17: a single overshoot planner call must trip the cost cap immediately,
+    usage = accountAndReportUsage({ step: args.step, onCost: args.onCost, deps, precomputedCost, model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, costCapUsd });
+    // A single overshoot planner call must trip the cost cap immediately,
     // right after cost is accrued — NOT only at the next step boundary and NOT
     // only when a dispatcher is wired. Hoisted out of the `if (dispatcher &&
     // ctx)` block so the cap also trips on the parse-failure path and when no
@@ -299,25 +184,10 @@ export async function callNavigatorWithRetry(
  // Anthropic cache-creation cost).
       const cachedWriteInputTokens = navResult.cachedWriteInputTokens ?? 0;
       lastRaw = raw;
-      let usage: LLMUsageInfo | undefined;
- // Prefer pre-computed costUsd; fall back to estimateCost with
- // cachedInputTokens AND cachedWriteInputTokens (billed at the higher
- // cache-write rate) passed through. When only a precomputed cost is
- // supplied (no `model`), report it regardless of model presence.
-      const accounted = accountUsage({ precomputedCost, model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, costCapUsd });
-      if (accounted) {
-        const { cost, usage: u } = accounted;
-        if (typeof cost === "number" && u) {
- // Run-level cost accounting stays per-attempt so the run total (and
- // cost-cap enforcement) stays exact across retries.
-          onCost(cost, u.tokensIn, u.tokensOut);
-          deps.onEvent({ type: "cost", step, tokensIn: u.tokensIn, tokensOut: u.tokensOut, costUsd: cost, model: model ?? "" });
-        }
-        usage = u;
-      }
+      const usage = accountAndReportUsage({ step, onCost, deps, precomputedCost, model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, costCapUsd });
       lastUsage = usage;
       if (usage) attemptUsages.push(usage);
-      // C17: a single overshoot navigator call must trip the cost cap the
+      // A single overshoot navigator call must trip the cost cap the
       // moment cost is accrued, regardless of whether a dispatcher is wired and
       // even on a parse-failure retry attempt. Hoisted out of the
       // `if (dispatcher && ctx)` block below so the cap cannot be skipped.

@@ -7,9 +7,9 @@
  * service workers, browsers, and Node.
  */
 
-export type HeaderMap = Record<string, string>;
+type HeaderMap = Record<string, string>;
 
-export interface AuthInput {
+interface AuthInput {
   method: "POST" | "GET";
   url: string;
   body: string;
@@ -24,16 +24,22 @@ export class MissingCredentialError extends Error {
 }
 
 /** A credential source — knows how to load a secret string. */
-export interface Credential {
+interface Credential {
   readonly load: () => string;
   readonly orElse: (that: Credential) => Credential;
-  readonly bearer: () => Auth;
-  readonly header: (name: string) => Auth;
+  readonly bearer: () => AuthStrategy;
+  readonly header: (name: string) => AuthStrategy;
   readonly pipe: <A>(f: (self: Credential) => A) => A;
 }
 
-/** An auth strategy — knows how to modify request headers. */
-export interface Auth {
+/**
+ * An auth strategy — knows how to modify request headers.
+ *
+ * Named `AuthStrategy` (not `Auth`) so it does not collide with the
+ * `export * as Auth` namespace merge below (interface + namespace under one
+ * name compiles but is confusing).
+ */
+export interface AuthStrategy {
   readonly apply: (input: AuthInput) => HeaderMap;
 }
 
@@ -44,14 +50,14 @@ const makeCredential = (loadFn: () => string): Credential => {
       makeCredential(() => {
         try { return loadFn(); } catch (e) { if (e instanceof MissingCredentialError) return that.load(); throw e; }
       }),
-    bearer: (): Auth => fromCredential(self, (secret) => ({ authorization: `Bearer ${secret}` })),
-    header: (name: string): Auth => fromCredential(self, (secret) => ({ [name]: secret })),
+    bearer: (): AuthStrategy => fromCredential(self, (secret) => ({ authorization: `Bearer ${secret}` })),
+    header: (name: string): AuthStrategy => fromCredential(self, (secret) => ({ [name]: secret })),
     pipe: <A>(f: (self: Credential) => A): A => f(self),
   };
   return self;
 };
 
-const fromCredential = (source: Credential, render: (secret: string) => HeaderMap): Auth =>
+const fromCredential = (source: Credential, render: (secret: string) => HeaderMap): AuthStrategy =>
   makeAuth((input: AuthInput): HeaderMap => {
     const secret = source.load();
     return { ...input.headers, ...render(secret) };
@@ -64,7 +70,7 @@ const secretValue = (secret: string | null | undefined, source: string): string 
   return secret;
 };
 
-const makeAuth = (applyFn: (input: AuthInput) => HeaderMap): Auth => ({
+const makeAuth = (applyFn: (input: AuthInput) => HeaderMap): AuthStrategy => ({
   apply: applyFn,
 });
 
@@ -136,16 +142,16 @@ export const config = (name: string): Credential =>
 
 export const none = makeAuth((input: AuthInput): HeaderMap => input.headers);
 
-export function bearer(source: string | Credential): Auth {
+export function bearer(source: string | Credential): AuthStrategy {
   return (typeof source === "string" ? value(source) : source).bearer();
 }
 
 // Function overloads — the TS-aware `@typescript-eslint/no-redeclare` rule
 // (used for `.ts` files) understands overloads, so no disable directive needed.
-export function header(name: string): (source: string | Credential) => Auth;
-export function header(name: string, source: string | Credential): Auth;
-export function header(name: string, source?: string | Credential): Auth | ((source: string | Credential) => Auth) {
-  if (source === undefined) return (next: string | Credential): Auth => (typeof next === "string" ? value(next) : next).header(name);
+export function header(name: string): (source: string | Credential) => AuthStrategy;
+export function header(name: string, source: string | Credential): AuthStrategy;
+export function header(name: string, source?: string | Credential): AuthStrategy | ((source: string | Credential) => AuthStrategy) {
+  if (source === undefined) return (next: string | Credential): AuthStrategy => (typeof next === "string" ? value(next) : next).header(name);
   return (typeof source === "string" ? value(source) : source).header(name);
 }
 
@@ -159,16 +165,16 @@ export function apiKeyAuth(
   options: ProviderAuthOption<"optional">,
   envVar: string,
   headerName: string,
-): Auth {
+): AuthStrategy {
   if ("auth" in options && options.auth) return options.auth;
   return optional("apiKey" in options ? options.apiKey : undefined, "apiKey")
     .orElse(config(envVar))
     .pipe(header(headerName));
 }
 
-export type ApiKeyMode = "optional" | "required";
+type ApiKeyMode = "optional" | "required";
 export type ProviderAuthOption<Mode extends ApiKeyMode> =
-  | { readonly auth: Auth; readonly apiKey?: never }
+  | { readonly auth: AuthStrategy; readonly apiKey?: never }
   | (Mode extends "optional" ? { readonly apiKey?: string; readonly auth?: never } : { readonly apiKey: string; readonly auth?: never });
 
 export * as Auth from "./auth";

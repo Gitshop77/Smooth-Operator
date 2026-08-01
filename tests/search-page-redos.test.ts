@@ -39,6 +39,24 @@ describe("search_page ReDoS static guards", () => {
       expect(hasNestedQuantifier("(a+){3}")).toBe(false);
       expect(hasNestedQuantifier("(a)?")).toBe(false);
     });
+
+    test("rejects ambiguous alternation whose branch starts with a character class", () => {
+      expect(hasNestedQuantifier("([ab]|b)+")).toBe(true);
+      expect(hasNestedQuantifier("([a-z]|m)+")).toBe(true);
+      expect(hasNestedQuantifier("([^0-9]|x)+")).toBe(true);
+    });
+
+    test("rejects alternation overlapping via a hex escape literal", () => {
+      expect(hasNestedQuantifier("(\\x41|A)+")).toBe(true);
+    });
+
+    test("rejects alternation overlapping via a unicode-property escape", () => {
+      expect(hasNestedQuantifier("(\\p{L}|a)+")).toBe(true);
+    });
+
+    test("does not flag escaped literals whose real char differs (\\n is not 'n')", () => {
+      expect(hasNestedQuantifier("(n|\\n)+")).toBe(false);
+    });
   });
 
   describe("hasBackreference", () => {

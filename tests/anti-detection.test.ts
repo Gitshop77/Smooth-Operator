@@ -14,7 +14,7 @@
  */
 
 import { describe, test, expect, vi, beforeEach } from "vitest";
-import { stealthScriptBody, isStealthEnabled } from "../src/lib/agent/anti-detection";
+import { stealthScriptBody, isStealthEnabled, injectAntiDetection } from "../src/lib/agent/anti-detection";
 
 // ─── Opt-in gate (stealthEnabled) ──────────────────────────────────────────
 // The 13 MAIN-world patches are ToS-sensitive (bot-detection circumvention) and
@@ -147,7 +147,7 @@ describe("anti-detection: stealth patches apply (headless shim)", () => {
     expect(typeof chrome.runtime!.connect).toBe("function");
   });
 
-  test("5. permissions.query returns Notification.permission for notifications", () => {
+  test("5. permissions.query returns Notification.permission for notifications", async () => {
     const shim = buildShim();
     const query = function () {
       return Promise.resolve({ state: "prompt" });
@@ -160,11 +160,10 @@ describe("anti-detection: stealth patches apply (headless shim)", () => {
     const patched = shim.navigator.permissions as {
       query: (p: { name: string }) => Promise<{ state: string }>;
     };
-    return patched.query({ name: "notifications" }).then((st) => {
-      // Patch 7 coerces a "denied" Notification.permission to "default" before
-      // query reads it, so notifications reports the coerced value.
-      expect(st.state).toBe("default");
-    });
+    const st = await patched.query({ name: "notifications" });
+    // Patch 7 coerces a "denied" Notification.permission to "default" before
+    // query reads it, so notifications reports the coerced value.
+    expect(st.state).toBe("default");
   });
 
   test("6. WebGL vendor/renderer spoofed for 0x9245/0x9246", () => {
@@ -244,5 +243,74 @@ describe("anti-detection: serialization safety", () => {
     expect(src).not.toMatch(/^\s*import\s/);
     expect(src).not.toMatch(/require\s*\(/);
     expect(src).toContain("use strict");
+  });
+});
+
+describe("anti-detection: real module execution", () => {
+  test("stealthScriptBody applies the patches to the real (jsdom) environment without throwing", () => {
+    const origChrome = globalThis.chrome;
+    const webdriverDesc = Object.getOwnPropertyDescriptor(navigator, "webdriver");
+    try {
+      expect(() => stealthScriptBody()).not.toThrow();
+      expect((navigator as unknown as { webdriver?: boolean }).webdriver).toBe(false);
+    } finally {
+      if (webdriverDesc) {
+        Object.defineProperty(navigator, "webdriver", webdriverDesc);
+      } else {
+        delete (navigator as unknown as { webdriver?: unknown }).webdriver;
+      }
+      if (origChrome === undefined) {
+        delete (globalThis as { chrome?: unknown }).chrome;
+      } else {
+        (globalThis as { chrome?: unknown }).chrome = origChrome;
+      }
+    }
+  });
+
+  test("injectAntiDetection executes the stealth body in the MAIN world", async () => {
+    let captured: { target: { tabId: number }; world: string; injectImmediately: boolean; func: unknown } | undefined;
+    vi.stubGlobal("chrome", {
+      scripting: {
+        executeScript: async (opts: typeof captured) => {
+          captured = opts;
+        },
+      },
+    });
+    await injectAntiDetection(42);
+    expect(captured?.target).toEqual({ tabId: 42 });
+    expect(captured?.world).toBe("MAIN");
+    expect(captured?.injectImmediately).toBe(true);
+    expect(captured?.func).toBe(stealthScriptBody);
+    vi.unstubAllGlobals();
+  });
+
+  test("blocked-page injection errors are non-fatal (debug-only log)", async () => {
+    const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+    vi.stubGlobal("chrome", {
+      scripting: {
+        executeScript: async () => {
+          throw new Error("Cannot access chrome:// url");
+        },
+      },
+    });
+    await expect(injectAntiDetection(7)).resolves.toBeUndefined();
+    expect(debugSpy).toHaveBeenCalled();
+    debugSpy.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  test("unexpected injection failures surface a warning but do not throw", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal("chrome", {
+      scripting: {
+        executeScript: async () => {
+          throw new Error("tab closed mid-injection");
+        },
+      },
+    });
+    await expect(injectAntiDetection(7)).resolves.toBeUndefined();
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+    vi.unstubAllGlobals();
   });
 });

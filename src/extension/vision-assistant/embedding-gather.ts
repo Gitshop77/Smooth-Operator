@@ -37,8 +37,8 @@ export interface EmbeddingMeta {
 let validatedMeta: EmbeddingMeta | null = null;
 
 /** Call once after the embedding meta/packed/scales shape validation succeeds. */
-export function markEmbeddingMetaValidated(meta?: EmbeddingMeta): void {
-  validatedMeta = meta ?? null;
+export function markEmbeddingMetaValidated(meta: EmbeddingMeta): void {
+  validatedMeta = meta;
 }
 
 /**

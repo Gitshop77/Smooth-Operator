@@ -21,6 +21,7 @@ import type { LogEvent } from "@/lib/agent/types";
 import type { AgentMode } from "@/lib/agent/modes";
 import { MODE_CONFIGS } from "@/lib/agent/modes";
 import { DEFAULT_MAX_ACTIONS, MAX_ACTIONS } from "@/lib/validations";
+import { DEFAULT_COST_CAP } from "@/lib/agent/types-utils";
 import { RunBuilder } from "@/lib/agent/run-history";
 import {
   saveRunState,
@@ -28,7 +29,6 @@ import {
   clearRunState,
   stopKeepalive,
   loadAndSetDomainConfig,
-  hardResetAbortRequested,
   type RunState,
 } from "./state-store";
 import {
@@ -42,12 +42,36 @@ import {
   getVisionElementRect,
   isVisionCacheFresh,
 } from "./run-helpers";
+import {
+  DEFAULT_MAX_STEPS,
+  DEFAULT_MODE,
+  clampInt,
+  clampNumber,
+  isRunStarting,
+  setRunStarting,
+  resetDownloadConsent,
+  consumeDownloadConsentForMode,
+  markDownloadConsentConsumed,
+  releaseDownloadConsentReservation,
+} from "./agent-bridge-utils";
 
 // Re-export so existing importers (message-routing.ts dynamic import) keep
 // resolving. The implementation lives in run-helpers.ts.
 export { getVisionElementRect, isVisionCacheFresh };
 
-export const DEFAULT_MAX_STEPS = 100;
+// Re-export from utils so existing importers keep resolving.
+export {
+  DEFAULT_MAX_STEPS,
+  DEFAULT_MODE,
+  clampInt,
+  clampNumber,
+  isRunStarting,
+  setRunStarting,
+  consumeDownloadConsentForMode,
+  markDownloadConsentConsumed,
+  releaseDownloadConsentReservation,
+};
+
 /** No-op catch for fire-and-forget `sendMessage` calls (side panel may be closed). */
 const SWALLOW_CLOSED_PORT = (): void => {};
 const DEFAULT_PLANNER_INTERVAL = 5;
@@ -55,105 +79,7 @@ const DEFAULT_MAX_FAILURES = 5;
 // Default cost cap in USD. 0 is still a valid EXPLICIT opt-out (a stored value
 // of 0 is preserved by clampNumber); only the unset/undef case adopts this
 // default so a first-time user with REAL API keys gets a fail-safe cap.
-const DEFAULT_COST_CAP = 2;
-export const DEFAULT_MODE: AgentMode = "standard";
-
-/**
- * Coerce an unknown stored/override value into a finite integer clamped to
- * [min, max] (finding: run-time numeric/string inputs are not validated). A
- * corrupted/NaN/negative/string storage value is normalized instead of being
- * passed straight into the loop config where it could cause degenerate behavior.
- */
-export function clampInt(v: unknown, def: number, min: number, max: number): number {
-  const n = typeof v === "number" ? v : Number(v);
-  if (!Number.isFinite(n)) return Math.min(max, Math.max(min, Math.floor(def)));
-  return Math.min(max, Math.max(min, Math.floor(n)));
-}
-
-/** Coerce an unknown stored/override value into a finite number >= min (unbounded above). */
-export function clampNumber(v: unknown, def: number, min: number): number {
-  const n = typeof v === "number" ? v : Number(v);
-  if (!Number.isFinite(n)) return def;
-  return Math.max(min, n);
-}
-
-// Synchronous in-memory guard flag set BEFORE the first `await` in the RUN
-// handler. Closes the TOCTOU window where two near-simultaneous RUN messages
-// both pass the `existing?.active` check before either writes `active: true`
-// to session storage, starting two concurrent loops.
-let runStarting = false;
-
-/** Read the synchronous RUN-guard flag (used by the RUN message handler). */
-export function isRunStarting(): boolean {
-  return runStarting;
-}
-
-/** Set the synchronous RUN-guard flag (used by the RUN message handler). */
-export function setRunStarting(v: boolean): void {
-  runStarting = v;
-}
-
-// ─── Per-run download consent (full_agentic) ──────────────────────────────
-//
-// In `full_agentic` mode the agent can issue repeated `save_as_pdf` /
-// `screenshot` actions; a prompt injection could otherwise silently spam the
-// download directory. The first download of each run forces a `saveAs`
-// confirmation, after which the rest of the run is treated as consented
-// (one-time per-run consent). This flag is owned HERE — the single shared
-// entry point for BOTH manual RUN and scheduled-task runs — and reset at the
-// top of {@link startRun} so consent can never leak across runs (finding:
-// scheduled full_agentic runs inherited a prior run's download-consent flag;
-// the flag was previously reset only on the manual RUN path, so a scheduled
-// run that began after any prior run kept `consent = true` and silently
-// skipped the `saveAs` confirmation).
-let fullAgenticDownloadConsent = false;
-// Set while a `saveAs` download is in flight. Reserving synchronously (rather
-// than permanently consuming up front) stops two concurrent
-// SAVE_AS_PDF/SCREENSHOT messages from both observing an unconsumed flag and
-// double-prompting, while still letting a failed/cancelled first download leave
-// consent unconsumed so the next attempt re-prompts instead of saving silently.
-let fullAgenticDownloadReserved = false;
-
-/** Reset the per-run download-consent flag (called at the start of every run). */
-export function resetDownloadConsent(): void {
-  fullAgenticDownloadConsent = false;
-  fullAgenticDownloadReserved = false;
-}
-
-/**
- * Reserve the one-time per-run download consent for the given run mode and
- * return whether a `saveAs` confirmation is required. Returns `true` only for
- * the FIRST download of a `full_agentic` run that has neither already consumed
- * nor reserved consent; concurrent (in-flight) calls see a reservation and
- * return `false` so they don't double-prompt. Unlike a permanent consume this
- * does NOT mark consent as used — callers must call
- * `markDownloadConsentConsumed()` after a successful download or
- * `releaseDownloadConsentReservation()` after a failed/cancelled one.
- */
-export function consumeDownloadConsentForMode(mode: string | undefined): boolean {
-  const requireSaveAs = mode === "full_agentic" && !fullAgenticDownloadConsent && !fullAgenticDownloadReserved;
-  if (requireSaveAs) fullAgenticDownloadReserved = true;
-  return requireSaveAs;
-}
-
-/**
- * Mark the per-run download consent as consumed. Call this only after a
- * download has actually succeeded so a failed/cancelled first download leaves
- * the flag unconsumed and the next download re-prompts.
- */
-export function markDownloadConsentConsumed(): void {
-  fullAgenticDownloadConsent = true;
-  fullAgenticDownloadReserved = false;
-}
-
-/**
- * Release a previously reserved download consent (call after a download fails
- * or is cancelled) so a subsequent download in the same run re-prompts instead
- * of saving silently without confirmation.
- */
-export function releaseDownloadConsentReservation(): void {
-  fullAgenticDownloadReserved = false;
-}
+// Imported as DEFAULT_COST_CAP from @/lib/agent/types-utils.
 
 interface StartRunArgs {
   task: string;
@@ -178,7 +104,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  // against the two-concurrent-loops TOCTOU window. Previously only the manual
  // RUN handler set this flag, so a scheduled-task run left it false and could
  // start a second loop alongside a manual one.
-  runStarting = true;
+  setRunStarting(true);
  // Local helper to extract a human-readable message from an unknown error,
  // used in every catch site below. Centralized so the two branches can never
  // drift apart if one copy is edited.
@@ -186,8 +112,17 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  // Reset the per-run download-consent flag for EVERY run — this is the single
  // shared entry point for both manual RUN and scheduled-task runs, so resetting
  // here guarantees per-run isolation regardless of how the run was started
- // (finding: scheduled full_agentic runs inherited a prior run's consent flag).
+  // (scheduled full_agentic runs inherited a prior run's consent flag).
   resetDownloadConsent();
+  // Clear any unconsumed interrupted-run notice (a panel that was closed
+  // during a SW restart never rendered it). Without this, a stale "previous
+  // run cannot be resumed" message could surface mid-run or on a later
+  // panel open.
+  try {
+    await chrome.storage.session.remove("open_cowork_interrupted_notice");
+  } catch {
+    /* best-effort */
+  }
 
  // Run-history persistence: a RunBuilder accumulates every LogEvent the
  // orchestrator emits. On run end, saveRun() persists the record to
@@ -201,26 +136,14 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
   let runSucceeded = false;
  // Set true once cleanup has started so a transient `navigator-step-start`
  // event emitted after `cleanupRun`/`clearRunState` can't re-create the
- // persisted run-state object (finding: late saveRunState({step}) could
- // resurrect run state after clearRunState). The step-persist in sendEvent
+  // persisted run-state object (a late saveRunState({step}) could
+  // resurrect run state after clearRunState). The step-persist in sendEvent
  // below is gated on this flag.
   let runFinished = false;
 
-  /** Stream a {@link LogEvent} to the side panel + persist step count.
- * Declared at the top of the function so the early `tab.id` check below can
- * call it before `runState` is constructed. */
- // Declared UP FRONT (before `sendEvent`) so the TDZ can never bite:
- // `sendEvent` reads `runState.step` in its navigator-step-start branch, but
- // that branch only fires after `runState` is assigned at run start (line
- // below). Hoisting the declaration above the closure removes any chance of a
- // ReferenceError if a future change makes an early (pre-assignment) event
- // touch `runState` (finding: latent TDZ / ordering fragility in sendEvent
- // closure).
- // `runState` is held in a `const` ref so the `sendEvent` closure (declared
- // below, before `runState` is constructed) can read it without risking a
- // TDZ ReferenceError if an early (pre-run-start) event ever touches it. The
- // `const` ref satisfies `prefer-const`; the mutable payload lives on
- // `.current`, which stays `null` until run start assigns it.
+  // `runState` is declared before the `sendEvent` closure below so the closure
+  // can read `runState.step` in its navigator-step-start branch without a TDZ
+  // ReferenceError if an early (pre-run-start) event ever touches it.
   let runState: RunState | null = null;
   const sendEvent = (event: LogEvent): void => {
     chrome.runtime
@@ -241,10 +164,10 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     }
     if (event.type === "navigator-step-start") {
  // Keep the in-memory `runState.step` in sync with the persisted value
- // (finding: runState.step is never updated in memory; only persisted via
+ // (runState.step is never updated in memory; only persisted via
  // delta). Otherwise `handleTabAction`'s notify events report step 0.
  // Gated on `runFinished` so a late step event after cleanup can't
- // resurrect the persisted run-state (finding: late saveRunState). Also
+ // resurrect the persisted run-state (late saveRunState). Also
  // guarded by `runState` being assigned, so an early (pre-run) event can
  // never dereference an undefined object.
       if (runState && !runFinished) {
@@ -257,7 +180,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
   };
 
   const releaseRunGuard = (): void => {
-    runStarting = false;
+    setRunStarting(false);
   };
 
   let tab: chrome.tabs.Tab | undefined;
@@ -328,8 +251,8 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
    }
   // Re-narrow tab.id after the privileged-page branch — `tab = newTab` above
   // widened the type to `number | undefined` (chrome.tabs.Tab's id is
-  // optional in the type defs). The early `if (!tab?.id) return` at line 271
-  // is too far above for TS to carry the narrowing across all the intervening
+  // optional in the type defs). The early `if (!tab?.id) return` above is too
+  // far above for TS to carry the narrowing across all the intervening
   // awaits and the reassignment. Localize the validated id here so the
   // `startTabId`/`currentTabId` assignments below type-check; the runtime
   // invariant (every path that reaches here has a real tab.id) is preserved
@@ -363,7 +286,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
   if (!MODE_CONFIGS[mode]) {
     console.warn(`[agent-bridge] invalid mode "${String(mode)}" — falling back to "${DEFAULT_MODE}"`);
  // Surface the fallback to the side panel so an invalid mode isn't a silent
- // run with no explanation (finding: invalid mode crash swallowed with no
+ // run with no explanation (invalid mode crash swallowed with no
  // user-visible error). The run proceeds in the default mode rather than
  // crashing startRun.
     sendEvent({ type: "info", message: `Invalid mode "${String(mode)}" — using "${DEFAULT_MODE}".` });
@@ -394,7 +317,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     releaseRunGuard();
     return;
   }
- // Validate / clamp run-time numeric overrides from storage (finding: run-time
+ // Validate / clamp run-time numeric overrides from storage (run-time
  // numeric/string inputs are not validated). A corrupted value (negative, NaN,
  // non-numeric string) is coerced to a sane bound instead of reaching the loop.
   const cfgMaxActions = clampInt(stored.maxActions, DEFAULT_MAX_ACTIONS, 1, MAX_ACTIONS);
@@ -408,7 +331,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  // "restricted" is meant to keep the blast radius small on sensitive sites — so
  // a user-controlled `chrome.storage.local` value (up to 1000) must never
  // override it. Without this `Math.min`, the mode cap is dead: the loop honors
- // only the user value (see finding: zombie maxSteps flag).
+  // only the user value (zombie maxSteps flag).
   const modeCap = MODE_CONFIGS[effectiveMode].maxSteps;
   const cfgMaxSteps = Math.min(clampInt(stored.maxSteps, maxSteps, 1, 1000), modeCap);
 
@@ -422,24 +345,22 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     active: true,
     abortRequested: false,
   };
- // Wrap `saveRunState` + `startKeepalive` in a try/catch — if either
- // throws (chrome.storage quota exceeded, alarms API unavailable in a
- // unit-test harness, SW termination mid-call), the `runStarting` guard
- // flag would stay `true` forever and every subsequent RUN message would
- // be rejected with "already starting". On throw, release the guard,
- // surface an error event, and bail out cleanly so the user can retry.
- // L21: clear any stale `abortRequested` BEFORE persisting run state so a
- // previous run whose `clearRunState` failed (storage error) can't leave
- // `abortRequested: true` behind and block this run from starting. A genuine
- // STOP that lands during this run's init re-sets the flag and is caught by
- // the post-init re-check below, so this reset cannot mask a real stop.
-  try {
-    await hardResetAbortRequested();
-  } catch (e) {
-    console.error("[agent-bridge] hardResetAbortRequested failed during startRun:", e);
-    // Last-resort: nuke the entire run state to prevent stale flag
-    try { await chrome.storage.session.remove("open_cowork_run_state"); } catch { /* best-effort */ }
-  }
+  // Wrap `saveRunState` + `startKeepalive` in a try/catch — if either
+  // throws (chrome.storage quota exceeded, alarms API unavailable in a
+  // unit-test harness, SW termination mid-call), the `runStarting` guard
+  // flag would stay `true` forever and every subsequent RUN message would
+  // be rejected with "already starting". On throw, release the guard,
+  // surface an error event, and bail out cleanly so the user can retry.
+  // NOTE: there is deliberately NO stale-`abortRequested` reset here. A
+  // STOP that lands at ANY point during init (handleStop writes the flag
+  // whenever `isRunStarting()` is true) must survive into the post-wire
+  // re-check below — wiping it here silently loses the stop.
+  // Stale flags from a previous run are covered by the only two state
+  // clearers: `cleanupRun`'s `clearRunState` (normal run end) and
+  // `onServiceWorkerStartup`'s `clearRunState` (interrupted-run SW
+  // restart). A residual stale flag (e.g. a failed `clearRunState`)
+  // fail-closes: the re-check aborts the run cleanly and the cleanup then
+  // clears it — never a silent run that ignores the user's stop.
   try {
     await initRunState(runState);
   } catch (e) {
@@ -518,10 +439,10 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  // retried. Safe no-op if init is currently in-flight.
     resetVisionInitFlagForNewRun();
 
- // Clear the vision elements cache at run START, not just at run END.
- // `cleanupRun` releases the run guard (line 751) BEFORE it clears the cache
- // (line 827) — between those two lines, the side panel sees the run as
- // finished and a new RUN message could start a new run whose first
+  // Clear the vision elements cache at run START, not just at run END.
+  // `cleanupRun` (in run-helpers.ts) releases the run guard BEFORE it clears
+  // the cache — between those two calls, the side panel sees the run as
+  // finished and a new RUN message could start a new run whose first
  // `extractStateForRun` would read STALE `[vN]` entries from the previous
  // run. Clearing here (before the orchestrator's first observe) guarantees a
  // clean slate regardless of whether the prior run's cleanup finished.
@@ -572,7 +493,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  // Surface the detailed run metrics so the AgentMetricsCallback is not an
  // orphaned accumulator: emit a concise summary to the side panel + run
  // record after every run. (getMetrics()/reset() had no consumer before —
- // the snapshot was silently discarded. See finding: metrics feature orphaned.)
+ // the snapshot was silently discarded.)
     if (metricsCallback) {
       try {
         const m = metricsCallback.getMetrics();

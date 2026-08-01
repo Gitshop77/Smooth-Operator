@@ -160,7 +160,7 @@ describe("withLLMRetry", () => {
       .mockRejectedValueOnce(new Error("HTTP 429: Too many requests"))
       .mockResolvedValueOnce("success");
     const promise = withLLMRetry(fn);
- // Advance past the backoff delay (1.5s base + jitter for first retry).
+    // Advance past the backoff delay (1.5s base + jitter for first retry).
     await vi.advanceTimersByTimeAsync(2000);
     const result = await promise;
     expect(result).toBe("success");
@@ -210,10 +210,10 @@ describe("withLLMRetry", () => {
   test("gives up after MAX_RETRIES (3) + 1 initial = 4 attempts on persistent 429", async () => {
     const fn = vi.fn().mockRejectedValue(new Error("HTTP 429: Too many requests"));
     const promise = withLLMRetry(fn);
- // Advance through all backoff delays: 1.5s, 3s, 6s = 10.5s total.
- // Catch the rejection to prevent an unhandled-rejection error while the
- // timers are advancing (the awaited `expect(...).rejects` handler below
- // attaches only after this resolves).
+    // Advance through all backoff delays: 1.5s, 3s, 6s = 10.5s total.
+    // Catch the rejection to prevent an unhandled-rejection error while the
+    // timers are advancing (the awaited `expect(...).rejects` handler below
+    // attaches only after this resolves).
     promise.catch(() => {});
     await vi.advanceTimersByTimeAsync(12000);
     await expect(promise).rejects.toThrow("429");
@@ -321,10 +321,10 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
   }
 
   test("cachedInputTokens flows from plannerCall → dispatcher.cost usage", async () => {
- // Mock plannerCall to return a verdict-true judge response WITH
- // cachedInputTokens: 200. The judge wrapper captures this value into
- // `judgeCachedInputTokens`, which then appears in the dispatcher.cost
- // usage object.
+    // Mock plannerCall to return a verdict-true judge response WITH
+    // cachedInputTokens: 200. The judge wrapper captures this value into
+    // `judgeCachedInputTokens`, which then appears in the dispatcher.cost
+    // usage object.
     const judgeJson = JSON.stringify({
       reasoning: "x",
       verdict: true,
@@ -360,25 +360,25 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
       ctx,
     );
 
- // The judge agreed → run is finalized.
+    // The judge agreed → run is finalized.
     expect(finalized).toBe(true);
- // plannerCall was called once (judge LLM call routes through plannerCall
- // when summarizeCall is not set).
+    // plannerCall was called once (judge LLM call routes through plannerCall
+    // when summarizeCall is not set).
     expect(plannerCall).toHaveBeenCalledTimes(1);
- // dispatcher.cost fired exactly once with the captured cachedInputTokens.
+    // dispatcher.cost fired exactly once with the captured cachedInputTokens.
     expect(capturedCosts).toHaveLength(1);
     expect(capturedCosts[0].cachedInputTokens).toBe(200);
- // The model name is captured too (used for the cost recompute).
+    // The model name is captured too (used for the cost recompute).
     expect(capturedCosts[0].model).toBe("claude-3-5-sonnet-20241022");
- // The user-facing onCost callback is also invoked in the non-catalog path.
+    // The user-facing onCost callback is also invoked in the non-catalog path.
     expect(userOnCostCalls).toHaveLength(1);
   });
 
   test("cost recompute uses cachedInputTokens (cacheRead discount applied)", async () => {
- // Pricing is now catalog-driven (no static table). Stub a catalog so
- // claude-3-5-sonnet has a real cacheRead rate (0.3 vs in=3); otherwise the
- // model falls back to the conservative default (no cacheRead discount) and
- // the with/without-cache costs would be identical.
+    // Pricing is now catalog-driven (no static table). Stub a catalog so
+    // claude-3-5-sonnet has a real cacheRead rate (0.3 vs in=3); otherwise the
+    // model falls back to the conservative default (no cacheRead discount) and
+    // the with/without-cache costs would be identical.
     const ORIG_URL = process.env.COWORK_MODEL_CATALOG_URL;
     process.env.COWORK_MODEL_CATALOG_URL = "https://fake.test/judge-catalog.json";
     vi.stubGlobal(
@@ -408,11 +408,11 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
     );
     await refreshPricingFromCatalog();
     try {
- // The onCost callback in judges.ts recomputes the cost via:
- // estimateCost(judgeModel, tokensIn, tokensOut, judgeReasoningTokens, judgeCachedInputTokens)
- // With cachedInputTokens=200 on claude-3-5-sonnet (cacheRead=0.3 vs in=3),
- // the cost should be LOWER than the no-cache cost. Verify the captured
- // costUsd matches the with-cache estimate AND differs from the without-cache.
+    // The onCost callback in judges.ts recomputes the cost via:
+    // estimateCost(judgeModel, tokensIn, tokensOut, judgeReasoningTokens, judgeCachedInputTokens)
+    // With cachedInputTokens=200 on claude-3-5-sonnet (cacheRead=0.3 vs in=3),
+    // the cost should be LOWER than the no-cache cost. Verify the captured
+    // costUsd matches the with-cache estimate AND differs from the without-cache.
     const judgeJson = JSON.stringify({
       reasoning: "x", verdict: true, failureReason: null,
       impossibleTask: false, reachedCaptcha: false,
@@ -439,7 +439,7 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
 
     expect(capturedCosts).toHaveLength(1);
     const usage = capturedCosts[0];
- // Expected cost WITH the cacheRead discount applied to 200 cached tokens.
+    // Expected cost WITH the cacheRead discount applied to 200 cached tokens.
     const expectedWithCache = estimateCost(
       "claude-3-5-sonnet-20241022",
       usage.tokensIn,
@@ -447,7 +447,7 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
       0, // judgeReasoningTokens not set in this mock
       200,
     );
- // Expected cost WITHOUT the cacheRead discount (cached billed at full input rate).
+    // Expected cost WITHOUT the cacheRead discount (cached billed at full input rate).
     const expectedWithoutCache = estimateCost(
       "claude-3-5-sonnet-20241022",
       usage.tokensIn,
@@ -455,13 +455,13 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
       0,
       0,
     );
- // The captured cost matches the WITH-cache computation (cacheRead discount applied).
+    // The captured cost matches the WITH-cache computation (cacheRead discount applied).
     expect(usage.costUsd).toBeCloseTo(expectedWithCache, 12);
- // The two computations differ — confirms cachedInputTokens actually affects
- // the cost (i.e. the test would catch a regression that drops the param).
+    // The two computations differ — confirms cachedInputTokens actually affects
+    // the cost (i.e. the test would catch a regression that drops the param).
     expect(expectedWithCache).not.toBeCloseTo(expectedWithoutCache, 12);
     expect(expectedWithCache).toBeLessThan(expectedWithoutCache);
- // The user's onCost receives the recomputed cost (not 0, not the no-cache cost).
+    // The user's onCost receives the recomputed cost (not 0, not the no-cache cost).
     expect(userOnCostCalls).toHaveLength(1);
     expect(userOnCostCalls[0]).toBeCloseTo(expectedWithCache, 12);
     } finally {
@@ -473,9 +473,9 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
   });
 
   test("when cachedInputTokens is absent, the cost recompute still works (no discount)", async () => {
- // Regression guard: the cacheRead discount must not break the no-cache path. When
- // plannerCall returns no cachedInputTokens, judgeCachedInputTokens stays 0,
- // and estimateCost is called with cachedInputTokens=0 (no discount).
+    // Regression guard: the cacheRead discount must not break the no-cache path. When
+    // plannerCall returns no cachedInputTokens, judgeCachedInputTokens stays 0,
+    // and estimateCost is called with cachedInputTokens=0 (no discount).
     const judgeJson = JSON.stringify({
       reasoning: "x", verdict: true, failureReason: null,
       impossibleTask: false, reachedCaptcha: false,
@@ -485,7 +485,7 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
       tokensIn: 1000,
       tokensOut: 10,
       model: "claude-3-5-sonnet-20241022",
- // No cachedInputTokens field.
+      // No cachedInputTokens field.
     }));
     const { deps, dispatcher, capturedCosts, state, ctx } = buildJudgeHarness(plannerCall);
 
@@ -499,10 +499,10 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
     );
 
     expect(capturedCosts).toHaveLength(1);
- // cachedInputTokens is undefined (not 0) when the plannerCall response
- // doesn't carry it — the `> 0` guard in judges.ts:224 keeps it undefined.
+    // cachedInputTokens is undefined (not 0) when the plannerCall response
+    // doesn't carry it — the `> 0` guard in judges.ts:224 keeps it undefined.
     expect(capturedCosts[0].cachedInputTokens).toBeUndefined();
- // Cost is the no-cache estimate.
+    // Cost is the no-cache estimate.
     const expectedNoCache = estimateCost(
       "claude-3-5-sonnet-20241022",
       capturedCosts[0].tokensIn,

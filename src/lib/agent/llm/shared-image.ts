@@ -20,6 +20,19 @@ export function isZodSchema(value: unknown): boolean {
 }
 
 /**
+ * A converted JSON Schema must be a plain object, never a raw Zod schema
+ * object. Zod v4 schema objects expose `safeParse` (and a `~standard`
+ * symbol), so we reject those to avoid forwarding an un-serializable object.
+ */
+export function isPlainJSONSchema(v: unknown): v is Record<string, unknown> {
+  if (typeof v !== "object" || v === null) return false;
+  const o = v as Record<string, unknown>;
+  if (typeof o.safeParse === "function") return false;
+  if ("~standard" in o) return false;
+  return true;
+}
+
+/**
  * Max base64 payload length (~20MB decoded). Rejects absurdly large payloads
  * at the boundary to prevent excessive API costs or memory pressure.
  * 20MB = 20 * 1024 * 1024 bytes; base64 ratio is 4/3, so ≈ 28M chars.
@@ -27,7 +40,7 @@ export function isZodSchema(value: unknown): boolean {
 const MAX_BASE64_LENGTH = 28_000_000;
 
 /** Validate a base64 image payload before forwarding it to the API. */
-export function isValidBase64(value: string): boolean {
+function isValidBase64(value: string): boolean {
   if (value.length === 0 || value.length > MAX_BASE64_LENGTH) return false;
   // Require a canonical base64 length (multiple of 4) and trailing-only
   // padding (0–2 '='), never embedded/standalone padding. The looser
@@ -42,7 +55,7 @@ export function isValidBase64(value: string): boolean {
  * bytes, so requiring the declared `media_type` to match the actual payload is a
  * lightweight provenance check.
  */
-export const IMAGE_SIGNATURES: Record<string, string[]> = {
+const IMAGE_SIGNATURES: Record<string, string[]> = {
   // PNG: 89 50 4E 47 0D 0A 1A 0A -> "iVBORw0KGgo"
   png: ["iVBORw0KGgo"],
   // JPEG: FF D8 FF -> "/9j/"
@@ -59,7 +72,7 @@ export function hasImageProvenance(b64: string, mediaType: string): boolean {
 }
 
 /** Result of extracting screenshots from message content. */
-export interface ScreenshotExtraction {
+interface ScreenshotExtraction {
   /** Message content with all <screenshot> markers stripped. */
   text: string;
   /** Extracted screenshot data URIs (data:image/...;base64,...). */
@@ -81,11 +94,11 @@ export function extractScreenshots(content: string): ScreenshotExtraction {
   const dataUris: string[] = [];
   for (const match of matches) {
     const dataUri = match[1];
-    const b64 = dataUri.split(",")[1];
-    if (!isValidBase64(b64 ?? "")) {
+    const b64 = dataUri.split(",")[1] ?? "";
+    if (!isValidBase64(b64)) {
       throw new Error("Invalid base64 screenshot payload in user message");
     }
-    if (!hasImageProvenance(b64 ?? "", match[2])) {
+    if (!hasImageProvenance(b64, match[2])) {
       throw new Error("<screenshot> marker failed provenance check: base64 payload does not match its declared image type.");
     }
     dataUris.push(dataUri);

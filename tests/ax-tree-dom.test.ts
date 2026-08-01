@@ -44,9 +44,9 @@ import { installJsdomLayoutMock, restoreJsdomLayoutMock } from "./helpers";
 
 beforeEach(() => {
   document.body.innerHTML = "";
- // The element-ref registry is module-scoped (off `window`) for security, so
- // reset it via the test hook to keep ref_N assignments deterministic per
- // test (initElementMap alone is idempotent and won't clear an existing map).
+  // The element-ref registry is module-scoped (off `window`) for security, so
+  // reset it via the test hook to keep ref_N assignments deterministic per
+  // test (initElementMap alone is idempotent and won't clear an existing map).
   __test_resetRegistry();
   initElementMap();
   installJsdomLayoutMock();
@@ -88,21 +88,24 @@ describe("generateAccessibilityTree (DOM walking)", () => {
     expect(result.pageContent).toContain('href="/foo"');
   });
 
-  test("4. input with associated <label for> → accessible name is the label text", () => {
+  test("4. input with associated <label for> → placeholder wins over the label (documented precedence)", () => {
     const label = document.createElement("label");
     label.setAttribute("for", "email");
     label.textContent = "Email";
     const input = document.createElement("input");
     input.id = "email";
     input.setAttribute("type", "email");
+    // Distinct strings on purpose: getName's precedence is aria-label →
+    // placeholder → title → alt → associated <label> (ax-tree-builder.ts:113),
+    // so the textbox MUST be named from the placeholder, and the label must
+    // still appear as its own accessible node. With equal strings the name
+    // source was unobservable; now any change to the precedence fails loudly.
     input.setAttribute("placeholder", "your-email-address");
     document.body.append(label, input);
     const result = generateAccessibilityTree();
- // The input's accessible name resolves to "Email" (from the label or
- // placeholder — both happen to equal "Email" here). Verify the input
- // line is emitted with name "Email" and the right role (textbox).
     expect(result.pageContent).toContain("textbox");
-    expect(result.pageContent).toContain('"Email"');
+    expect(result.pageContent).toContain('"your-email-address"');
+    expect(result.pageContent).toContain('label "Email"');
   });
 
   test("5. select with options → combobox line uses selected option's text + emits child option lines", () => {
@@ -117,10 +120,10 @@ describe("generateAccessibilityTree (DOM walking)", () => {
     select.append(opt1, opt2);
     document.body.appendChild(select);
     const result = generateAccessibilityTree();
- // The combobox line uses the selected option's text ("B").
+    // The combobox line uses the selected option's text ("B").
     expect(result.pageContent).toContain("combobox");
     expect(result.pageContent).toContain('"B"');
- // Child option lines are emitted (with the selected flag on "B").
+    // Child option lines are emitted (with the selected flag on "B").
     expect(result.pageContent).toContain("option");
     expect(result.pageContent).toContain('"A"');
     expect(result.pageContent).toContain("(selected)");
@@ -141,7 +144,7 @@ describe("generateAccessibilityTree (DOM walking)", () => {
     document.body.appendChild(input);
     const result = generateAccessibilityTree();
     expect(result.pageContent).toContain("[value redacted]");
- // The real password value must NEVER appear in the AX tree.
+    // The real password value must NEVER appear in the AX tree.
     expect(result.pageContent).not.toContain("secret");
   });
 
@@ -156,9 +159,9 @@ describe("generateAccessibilityTree (DOM walking)", () => {
   });
 
   test("9. depth limiting — tree stops at the caller-specified max depth", () => {
- // Use <nav> (a structural landmark) so each level IS included in the
- // tree and increments the depth counter. With maxDepth=2, the button
- // at depth 3 is never reached.
+    // Use <nav> (a structural landmark) so each level IS included in the
+    // tree and increments the depth counter. With maxDepth=2, the button
+    // at depth 3 is never reached.
     document.body.innerHTML = `
       <nav aria-label="nav1">
         <nav aria-label="nav2">
@@ -169,16 +172,16 @@ describe("generateAccessibilityTree (DOM walking)", () => {
       </nav>
     `;
     const result = generateAccessibilityTree("all", 2);
- // All three nav levels (depth 0, 1, 2) appear.
+    // All three nav levels (depth 0, 1, 2) appear.
     expect(result.pageContent).toContain("navigation");
     expect(result.pageContent).toContain('"nav1"');
     expect(result.pageContent).toContain('"nav2"');
     expect(result.pageContent).toContain('"nav3"');
- // The button at depth 3 is NOT included (depth > maxDepth returns early).
+    // The button at depth 3 is NOT included (depth > maxDepth returns early).
     expect(result.pageContent).not.toContain("button");
     expect(result.pageContent).not.toContain('"Deep"');
 
- // With maxDepth=3, the button at depth 3 IS included.
+    // With maxDepth=3, the button at depth 3 IS included.
     const result2 = generateAccessibilityTree("all", 3);
     expect(result2.pageContent).toContain("button");
     expect(result2.pageContent).toContain('"Deep"');
@@ -193,16 +196,16 @@ describe("generateAccessibilityTree (DOM walking)", () => {
       <input type="text" placeholder="Search" />
     `;
     const result = generateAccessibilityTree("interactive");
- // Interactive elements appear.
+    // Interactive elements appear.
     expect(result.pageContent).toContain("button");
     expect(result.pageContent).toContain('"Click Me"');
     expect(result.pageContent).toContain("link");
     expect(result.pageContent).toContain('"A Link"');
     expect(result.pageContent).toContain("textbox");
- // Non-interactive structural / generic elements do NOT appear.
+    // Non-interactive structural / generic elements do NOT appear.
     expect(result.pageContent).not.toContain("heading");
     expect(result.pageContent).not.toContain('"Page Title"');
- // The div has no interactive role and no name worth surfacing — excluded.
+    // The div has no interactive role and no name worth surfacing — excluded.
     expect(result.pageContent).not.toContain("Some div text");
   });
 
@@ -238,7 +241,8 @@ describe("generateAccessibilityTree (DOM walking)", () => {
 // the `<>&` neutralization in `escapeAttributeValue`, and the per-attribute
 // length cap — so a future refactor can't silently regress them.
 
-import { buildAttrs, redactUrlTokens } from "../src/lib/agent/dom/extraction/element-info";
+import { buildAttrs } from "../src/lib/agent/dom/extraction/element-info";
+import { redactUrlTokens } from "../src/lib/agent/dom/extraction/element-info-utils";
 
 describe("AX-tree hardening + href redaction", () => {
   test("link href query/fragment tokens are stripped before emission", () => {
@@ -251,6 +255,27 @@ describe("AX-tree hardening + href redaction", () => {
     expect(result.pageContent).not.toContain("SECRET");
     expect(result.pageContent).not.toContain("resetToken");
     expect(result.pageContent).not.toContain("#frag");
+  });
+
+  test("link href userinfo + hostname secret labels are redacted before emission", () => {
+    // Regression: the hostname redaction marker must be a valid
+    // host label ("redacted"), not "[redacted]" (brackets make the WHATWG
+    // hostname setter fail silently, shipping the raw secret label to the LLM).
+    const a = document.createElement("a");
+    a.setAttribute(
+      "href",
+      "https://user:s3cr3t@mySecretToken1234567890.example.com/reset/aB3xZ9qL7mN2pQ8r",
+    );
+    a.textContent = "Reset";
+    document.body.appendChild(a);
+    const result = generateAccessibilityTree();
+    expect(result.pageContent).toContain(
+      'href="https://redacted.example.com/reset/[redacted]"',
+    );
+    expect(result.pageContent).not.toContain("s3cr3t");
+    expect(result.pageContent).not.toContain("user:");
+    expect(result.pageContent).not.toMatch(/mysecrettoken1234567890/i);
+    expect(result.pageContent).not.toContain("aB3xZ9qL7mN2pQ8r");
   });
 
   test("AX-tree neutralizes < > & in attacker-controlled names", () => {
@@ -343,6 +368,18 @@ describe("indexed-tree buildAttrs href redaction", () => {
     expect(attrs.href).toBe("https://bank.com/confirm");
     expect(attrs.href).not.toContain("SECRET");
     expect(attrs.href).not.toContain("#frag");
+  });
+
+  test("buildAttrs href redacts userinfo + hostname secret labels", () => {
+    const a = document.createElement("a");
+    a.setAttribute(
+      "href",
+      "https://user:s3cr3t@mySecretToken1234567890.example.com/confirm?token=SECRET",
+    );
+    const attrs = buildAttrs(a);
+    expect(attrs.href).toBe("https://redacted.example.com/confirm");
+    expect(attrs.href).not.toContain("s3cr3t");
+    expect(attrs.href).not.toMatch(/mysecrettoken1234567890/i);
   });
 
   test("redactUrlTokens strips query+hash but keeps scheme/host/path", () => {

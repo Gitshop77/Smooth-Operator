@@ -41,23 +41,15 @@ export interface ProviderDef {
 }
 
 /**
- * The recognized facade/profile set — the dedicated and OpenAI-compatible
- * providers the extension knows how to build a client for. This is NOT the
- * visible Options dropdown: that list is generated from the bundled models.dev
- * catalog (every provider with an `api` endpoint, plus these). New providers in
- * the catalog appear automatically without editing this list.
- * Order is intentional: local-first, then the most popular, then the rest.
- */
-/**
  * Featured providers — the curated, hand-ordered set shown first in the
  * dropdown. Their `id`s are the UI/storage provider ids that `buildProvider`'s
  * switch (in `provider-config.ts`) and `CATALOG_PROVIDER_ID_MAP` understand.
  * Order is intentional: local-first, then the most popular, then the rest.
  */
-export const FEATURED_PROVIDERS: ProviderDef[] = [
+const FEATURED_PROVIDERS: ProviderDef[] = [
   { id: "ollama",     label: "Ollama (local)", catalogId: CATALOG_PROVIDER_ID_MAP.ollama,     hint: "Ollama — local, free. Run `ollama pull <model>` first.", defaultModel: "llama3.3", defaultBaseUrl: "http://localhost:11434/v1", needsKey: false, keyPlaceholder: "ollama", keyUrl: "https://ollama.com" },
-  { id: "opencode",   label: "OpenCode Zen",    catalogId: CATALOG_PROVIDER_ID_MAP.opencode,   hint: "OpenCode Zen — curated models (GPT, Claude, Gemini, Grok, DeepSeek). All models use /chat/completions.", defaultModel: "", defaultBaseUrl: "https://opencode.ai/zen/v1/chat/completions", needsKey: true, keyPlaceholder: "your-opencode-zen-key", keyUrl: "https://opencode.ai/docs/providers/zen" },
-  { id: "opencode-go", label: "OpenCode Go",    catalogId: CATALOG_PROVIDER_ID_MAP["opencode-go"], hint: "OpenCode Go — budget-friendly models (Grok, GLM, Kimi, DeepSeek, Qwen). All models use /chat/completions.", defaultModel: "", defaultBaseUrl: "https://opencode.ai/zen/go/v1/chat/completions", needsKey: true, keyPlaceholder: "your-opencode-go-key", keyUrl: "https://opencode.ai/docs/providers/zen" },
+  { id: "opencode",   label: "OpenCode Zen",    catalogId: CATALOG_PROVIDER_ID_MAP.opencode,   hint: "OpenCode Zen — curated models (GPT, Claude, Gemini, Grok, DeepSeek). All models use /chat/completions.", defaultModel: "", defaultBaseUrl: "https://opencode.ai/zen/v1", needsKey: true, keyPlaceholder: "your-opencode-zen-key", keyUrl: "https://opencode.ai/docs/providers/zen" },
+  { id: "opencode-go", label: "OpenCode Go",    catalogId: CATALOG_PROVIDER_ID_MAP["opencode-go"], hint: "OpenCode Go — budget-friendly models (Grok, GLM, Kimi, DeepSeek, Qwen). All models use /chat/completions.", defaultModel: "", defaultBaseUrl: "https://opencode.ai/zen/go/v1", needsKey: true, keyPlaceholder: "your-opencode-go-key", keyUrl: "https://opencode.ai/docs/providers/zen" },
   { id: "openai",     label: "OpenAI",          catalogId: CATALOG_PROVIDER_ID_MAP.openai,     hint: "OpenAI — GPT-5.6 (Sol/Terra/Luna), GPT-5.5, o3, o4-mini.", defaultModel: "gpt-5.5", needsKey: true, keyPlaceholder: "sk-proj-...", keyUrl: "https://platform.openai.com/api-keys" },
   { id: "anthropic",  label: "Anthropic",       catalogId: CATALOG_PROVIDER_ID_MAP.anthropic,  hint: "Anthropic — Claude Fable 5, Opus 5, Sonnet 5, Haiku 4.5. Note: temperature deprecated on 4.7+.", defaultModel: "claude-sonnet-5", needsKey: true, keyPlaceholder: "sk-ant-api03-...", keyUrl: "https://console.anthropic.com/" },
   { id: "gemini",     label: "Google Gemini",   catalogId: CATALOG_PROVIDER_ID_MAP.gemini,     hint: "Google Gemini — Gemini 3.6 Flash, 3.5 Flash / Pro (Google AI Studio).", defaultModel: "gemini-3.5-flash", needsKey: true, keyPlaceholder: "AIza...", keyUrl: "https://aistudio.google.com/apikey" },

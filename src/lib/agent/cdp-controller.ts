@@ -35,7 +35,7 @@ const DEFAULT_BUTTON = "left" as const;
 const DEFAULT_CLICK_COUNT = 1;
 
 /** Mouse-button options accepted by cdpClick. */
-export interface CdpClickOptions {
+interface CdpClickOptions {
   /** Which button to press. */
   button?: "left" | "right" | "middle";
   /** Click count (1 = single, 2 = double). */
@@ -165,7 +165,7 @@ export async function cdpClick(
 }
 
 /** Options for {@link cdpPressAndHold}. */
-export interface CdpPressAndHoldOptions {
+interface CdpPressAndHoldOptions {
   /**
  * Delay (ms) between `mouseMoved` and `mousePressed`. Mirrors the natural
  * hover-settle pause before a human begins a press-and-hold gesture.

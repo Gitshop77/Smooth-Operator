@@ -9,7 +9,7 @@
 import { statusDot, statusLabel } from "./elements";
 
 /** Task status lifecycle — drives a single status the UI can color-code. */
-export type TaskStatus = "idle" | "thinking" | "acting" | "waiting" | "done" | "error";
+type TaskStatus = "idle" | "thinking" | "acting" | "waiting" | "done" | "error";
 
 /** Human-readable label for each lifecycle state. */
 const LIFECYCLE_LABELS: Record<TaskStatus, string> = {
@@ -24,7 +24,7 @@ const LIFECYCLE_LABELS: Record<TaskStatus, string> = {
 /** Update the status dot + label in the status bar. */
 export function setLifecycle(state: TaskStatus): void {
   if (statusDot) {
-    statusDot.dataset.status = state === "idle" ? "idle" : state;
+    statusDot.dataset.status = state;
   }
   if (statusLabel) statusLabel.textContent = LIFECYCLE_LABELS[state];
 }

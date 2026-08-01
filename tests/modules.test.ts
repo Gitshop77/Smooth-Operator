@@ -8,7 +8,7 @@ import {
 } from "../src/lib/agent/callbacks";
 import { getDomainSkills, getSkillFrontmatter, getFullSkill } from "../src/lib/agent/domain-skills";
 import { checkActionAllowed, MODE_CONFIGS, requiresConfirmation } from "../src/lib/agent/modes";
-import { ACTION_METADATA } from "../src/lib/agent/tools/schema";
+import { ACTION_METADATA } from "../src/lib/agent/tools/schema-utils";
 
 // ─── Callbacks ───────────────────────────────────────────────────────────────
 

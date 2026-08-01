@@ -125,4 +125,38 @@ describe("earlyStop repeat guards", () => {
     const res = earlyStop(history, 0, { parsingFailure: 5, repeatingAction: 3 });
     expect(res.stop).toBe(false);
   });
+
+  test("wait x3 with DIFFERENT durations does NOT trigger stop (seconds is content-bearing)", () => {
+    // isEquivalentAction ignores `wait.seconds` (treats every wait as equal),
+    // so three genuinely-distinct waits (2s / 5s / 15s) must not read as stuck.
+    const history = step([
+      act({ type: "wait", seconds: 2 }),
+      act({ type: "wait", seconds: 5 }),
+      act({ type: "wait", seconds: 15 }),
+    ]);
+    const res = earlyStop(history, 0, { parsingFailure: 5, repeatingAction: 3 });
+    expect(res.stop).toBe(false);
+  });
+
+  test("scroll down x3 with different page counts does NOT trigger stop (reading a long page)", () => {
+    // isEquivalentAction compares scroll direction only, ignoring `pages` —
+    // scrolling through a long article is a legitimate 3+ step pattern.
+    const history = step([
+      act({ type: "scroll", down: true, pages: 1 }),
+      act({ type: "scroll", down: true, pages: 2 }),
+      act({ type: "scroll", down: true, pages: 3 }),
+    ]);
+    const res = earlyStop(history, 0, { parsingFailure: 5, repeatingAction: 3 });
+    expect(res.stop).toBe(false);
+  });
+
+  test("go_back x3 does NOT trigger stop (multi-step back navigation)", () => {
+    const history = step([
+      act({ type: "go_back" }),
+      act({ type: "go_back" }),
+      act({ type: "go_back" }),
+    ]);
+    const res = earlyStop(history, 0, { parsingFailure: 5, repeatingAction: 3 });
+    expect(res.stop).toBe(false);
+  });
 });

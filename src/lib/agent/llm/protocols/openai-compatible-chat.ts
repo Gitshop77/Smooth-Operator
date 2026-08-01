@@ -10,7 +10,7 @@
 import { Protocol } from "../route/client";
 import * as OpenAIChat from "./openai-chat";
 
-export { DEFAULT_BASE_URL, PATH } from "./openai-chat";
+export { PATH } from "./openai-chat";
 
 /** Default `frequency_penalty` applied to discourage runaway generation. */
 const DEFAULT_FREQUENCY_PENALTY = 0.3;

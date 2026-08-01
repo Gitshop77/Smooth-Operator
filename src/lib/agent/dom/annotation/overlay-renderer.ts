@@ -50,10 +50,10 @@ interface ElementHighlightState {
 
 const elementHighlights = new WeakMap<HTMLElement, ElementHighlightState>();
 
-/** C19: when true, highlights persist until explicitly removed (debug mode). */
+/** When true, highlights persist until explicitly removed (debug mode). */
 let persistentHighlightMode = false;
 
-/** C19: enable/disable persistent highlight mode. */
+/** Enable/disable persistent highlight mode. */
 export function setPersistentHighlight(enabled: boolean): void {
   persistentHighlightMode = enabled;
 }
@@ -188,6 +188,6 @@ export function highlightElement(el: HTMLElement, label: string): OverlayHandle 
 }
 
 // NOTE: a `showStatusBanner` helper previously lived here but had no callers
-// (production or test) and was removed to shrink the public API — see the
-// removal tracked in the continuous-improvement audit. Re-add it only if a
+// (production or test) and was removed to shrink the public API.
+// Re-add it only if a
 // status-reporting path actually wires it up.

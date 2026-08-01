@@ -17,11 +17,11 @@
  * XPath, a text-node walk for link/partial-link text, etc.).
  */
 
-/** Upper bound on a locator value (CSS selector or XPath expression) length. */
-const MAX_LOCATOR_VALUE_LENGTH = 8192;
-
-/** Upper bound on nodes returned by a single locator resolution (anti-DoS cap). */
-const MAX_NODES = 100_000;
+import {
+  escapeCss,
+  MAX_LOCATOR_VALUE_LENGTH,
+  MAX_NODES,
+} from "./selector-helpers";
 
 /**
  * Collect a live `Element[]` from a DOM node collection, keeping only element
@@ -51,7 +51,7 @@ function logBy(by: By): string {
 }
 
 /** The set of locator strategies supported by {@link findByLocator}. */
-export type LocatorUsing =
+type LocatorUsing =
   | "css selector"
   | "xpath"
   | "link text"
@@ -152,69 +152,6 @@ Object.defineProperty(By, "name", {
   configurable: true,
   enumerable: false,
 });
-
-/**
- * Strict CSSOM-identifier escaper. Escapes a string so it can be safely
- * embedded inside a CSS attribute selector (`[id="…"]`, `[name="…"]`) or a
- * class-name fragment (`.foo`). Mirrors the CSSOM `escape(...)` algorithm
- * used by the source `By.id` / `By.name` / `By.className` factories.
- *
- * Falls back to the platform `CSS.escape` when available (all modern
- * browsers + jsdom) — the hand-rolled loop covers the rare environments
- * where `CSS.escape` is missing.
- *
- * This utility never throws on input content (including NUL bytes): NUL is
- * replaced with U+FFFD, matching `CSS.escape`. This keeps the factories and
- * the {@link findByLocator} resolver consistent — the same input produces the
- * same (non-throwing) result whether `escapeCss` runs at construction time or
- * inside the resolver's try/catch.
- */
-export function escapeCss(css: string): string {
-  if (typeof css !== "string") {
-    throw new TypeError("escapeCss: input must be a string");
-  }
- // Prefer the platform implementation when available.
-  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
-    return CSS.escape(css);
-  }
-  const out: string[] = [];
-  const n = css.length;
-  for (let i = 0; i < n; i++) {
-    const c = css.charCodeAt(i);
- // NUL is not representable in CSS; `CSS.escape` substitutes U+FFFD, so we do
- // the same here to keep both code paths equivalent (and never throw).
-    if (c === 0x0) {
-      out.push("�");
-      continue;
-    }
-    if (
-      (c >= 0x0001 && c <= 0x001f) ||
-      c === 0x007f ||
-      (i === 0 && c >= 0x0030 && c <= 0x0039) ||
-      (i === 1 && c >= 0x0030 && c <= 0x0039 && css.charCodeAt(0) === 0x002d)
-    ) {
-      out.push("\\" + c.toString(16) + " ");
-      continue;
-    }
-    if (i === 0 && c === 0x002d && n === 1) {
-      out.push("\\" + css.charAt(i));
-      continue;
-    }
-    if (
-      c >= 0x0080 ||
-      c === 0x002d ||
-      c === 0x005f ||
-      (c >= 0x0030 && c <= 0x0039) ||
-      (c >= 0x0041 && c <= 0x005a) ||
-      (c >= 0x0061 && c <= 0x007a)
-    ) {
-      out.push(css.charAt(i));
-      continue;
-    }
-    out.push("\\" + css.charAt(i));
-  }
-  return out.join("");
-}
 
 /**
  * Resolve a {@link By} locator to a live `Element[]` from the current

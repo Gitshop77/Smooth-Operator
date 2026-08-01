@@ -1,32 +1,20 @@
-/**
- * Shared handler context. `executeAction` captures `beforeUrl` +
- * `beforeFingerprint` once at the top of its try block, then passes them
- * to every handler via this context. The handful of handlers that need
- * page-change detection (click, go_back, press_and_hold, evaluate) read the
- * `beforeUrl`/`beforeFingerprint` fields; the rest ignore them. (`go_back`
- * consults only `beforeUrl`; `evaluate` also reads `beforeFingerprint` to
- * decide `pageChanged`.)
- */
-
 import type { BrowserState } from "../../types";
+import { domFingerprint } from "../helpers";
 
 export interface ActionContext {
-  /** The current browser state (used to resolve `[index]` → element). */
   state: BrowserState;
-  /** `location.href` captured BEFORE the handler ran. */
   beforeUrl: string;
-  /** `domFingerprint()` captured BEFORE the handler ran. */
   beforeFingerprint: string;
-  /** Optional cancellation signal, plumbed so a handler can abort early. */
   signal?: AbortSignal;
 }
 
-/**
- * True only when running inside the extension's content-script / service-worker
- * context (a `chrome` global with a live `runtime.id`). Used to gate actions
- * that must delegate to the background SW rather than fall back to in-page
- * behaviour. Centralized so the guard can't drift between handlers.
- */
 export function isExtensionContext(): boolean {
   return typeof chrome !== "undefined" && !!chrome.runtime?.id;
+}
+
+export function hasPageChanged(ctx: ActionContext): boolean {
+  return (
+    location.href !== ctx.beforeUrl ||
+    domFingerprint() !== ctx.beforeFingerprint
+  );
 }

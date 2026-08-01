@@ -7,6 +7,7 @@
  */
 
 import { describe, test, expect, beforeAll, vi } from "vitest";
+import { makeChromeStorageMock } from "./helpers/chrome-storage-mock";
 
 // Inspectable storage maps, (re)assigned by setupGlobals so tests can assert
 // what saveSettings() persisted.
@@ -16,23 +17,7 @@ let sessionStore: Map<string, unknown>;
 function setupGlobals(): void {
   localStore = new Map<string, unknown>();
   sessionStore = new Map<string, unknown>();
-  const makeArea = (store: Map<string, unknown>) => ({
-    get: (_keys: unknown, cb?: (res: Record<string, unknown>) => void) => {
-      cb?.(Object.fromEntries(store));
-    },
-    set: (items: Record<string, unknown>, cb?: () => void) => {
-      Object.entries(items).forEach(([k, v]) => store.set(k, v));
-      cb?.();
-    },
-    remove: (keys: string | string[], cb?: () => void) => {
-      (Array.isArray(keys) ? keys : [keys]).forEach((k) => store.delete(k));
-      cb?.();
-    },
-  });
-  (globalThis as unknown as { chrome: unknown }).chrome = {
-    storage: { local: makeArea(localStore), session: makeArea(sessionStore) },
-    runtime: { lastError: undefined, id: "test" },
-  };
+  (globalThis as unknown as { chrome: unknown }).chrome = makeChromeStorageMock(localStore, sessionStore);
 
   // Elements touched during import-time load + updateProviderUI.
   document.body.innerHTML = `
@@ -41,6 +26,7 @@ function setupGlobals(): void {
     <input id="model">
     <span id="provider-hint"></span>
     <input id="apiKey">
+    <input type="checkbox" id="rememberApiKey" />
     <span id="apikey-hint"></span>
     <label id="baseurl-label"></label>
     <input id="baseUrl">
@@ -89,12 +75,11 @@ describe("settings-sync URL/hostname validators", () => {
   });
 
   test("isHostname accepts bare hostnames incl. IPv6, rejects scheme/port/path", () => {
-  // NOTE: isIpv6Literal has a known bug where URL.hostname returns bracketed
-  // IPv6 (e.g. "[2001:db8::1]") but the comparison expects unbracketed, so
-  // isHostname("2001:db8::1") currently returns false. This documents the
-  // actual behavior. Once isIpv6Literal is fixed (strip brackets before
-  // comparing), this assertion should be changed to expect true.
-    expect(isHostname("2001:db8::1")).toBe(false); // known source bug: isIpv6Literal bracket mismatch
+  // URL.hostname returns bracketed IPv6 ("[2001:db8::1]") for
+  // "http://[2001:db8::1]"; isIpv6Literal compares against the bracketed
+  // form, so real IPv6 literals are accepted (previously the comparison was
+  // unbracketed and rejected them).
+    expect(isHostname("2001:db8::1")).toBe(true); // bare IPv6 literal
     expect(isHostname("evil.com:9999")).toBe(false); // host:port
     expect(isHostname("EXAMPLE.com")).toBe(true); // IDN/uppercase
     expect(isHostname("*.example.com")).toBe(true); // wildcard
@@ -116,11 +101,12 @@ describe("settings-sync URL/hostname validators", () => {
 });
 
 describe("settings-sync stealthEnabled serialization", () => {
-  // `stealthEnabled` is read at load (settings-sync.ts:167), written at save
-  // (settings-sync.ts:389) and listed in the serialized keys (settings-sync.ts:465),
-  // but no test exercised its round-trip. A regression dropping the field from
-  // serialization/restore would otherwise pass silently. The stealth DEFAULT-OFF
-  // guard itself is intact — we only verify the field survives save/load.
+  // `stealthEnabled` is read at load (`setChecked`), written at save
+  // (`saveSettings`) and listed in the serialized keys, but no test exercised
+  // its round-trip. A regression dropping the field from
+  // serialization/restore would otherwise pass silently. The stealth
+  // DEFAULT-OFF guard itself is intact — we only verify the field survives
+  // save/load.
 
   test("saveSettings persists the enableStealth checkbox as a strict boolean", async () => {
     setupGlobals();
@@ -144,5 +130,93 @@ describe("settings-sync stealthEnabled serialization", () => {
     await import("../src/extension/options/settings-sync");
     const cb = document.getElementById("enableStealth") as HTMLInputElement;
     expect(cb.checked).toBe(true);
+  });
+});
+
+describe("settings-sync rememberApiKey round-trip", () => {
+  test("checked checkbox persists key + consent flag to local", async () => {
+    setupGlobals();
+    const mod = await import("../src/extension/options/settings-sync");
+    const keyInput = document.getElementById("apiKey") as HTMLInputElement;
+    const cb = document.getElementById("rememberApiKey") as HTMLInputElement;
+    keyInput.value = "sk-remember";
+    cb.checked = true;
+    expect(await mod.saveSettings()).toBe(true);
+    expect(localStore.get("apiKey")).toBe("sk-remember");
+    expect(localStore.get("rememberApiKey")).toBe(true);
+  });
+
+  test("unchecked checkbox removes key from local and clears flag", async () => {
+    setupGlobals();
+    localStore.set("apiKey", "sk-stale");
+    localStore.set("rememberApiKey", true);
+    const mod = await import("../src/extension/options/settings-sync");
+    const keyInput = document.getElementById("apiKey") as HTMLInputElement;
+    const cb = document.getElementById("rememberApiKey") as HTMLInputElement;
+    keyInput.value = "sk-new";
+    cb.checked = false;
+    expect(await mod.saveSettings()).toBe(true);
+    expect(localStore.has("apiKey")).toBe(false);
+    expect(localStore.get("rememberApiKey")).toBe(false);
+  });
+
+  test("import-time load reflects a restored rememberApiKey=true as a checked box", async () => {
+    setupGlobals();
+    localStore.set("rememberApiKey", true);
+    vi.resetModules();
+    await import("../src/extension/options/settings-sync");
+    const cb = document.getElementById("rememberApiKey") as HTMLInputElement;
+    expect(cb.checked).toBe(true);
+  });
+
+  test("import-time load reflects an absent consent flag as an unchecked box", async () => {
+    setupGlobals();
+    vi.resetModules();
+    await import("../src/extension/options/settings-sync");
+    const cb = document.getElementById("rememberApiKey") as HTMLInputElement;
+    expect(cb.checked).toBe(false);
+  });
+});
+
+describe("migrateSecretsFromLocalToSession consent behavior", () => {
+  test("keeps the local mirror when the consent flag is set", async () => {
+    setupGlobals();
+    localStore.set("apiKey", "sk-legacy");
+    localStore.set("rememberApiKey", true);
+    const { migrateSecretsFromLocalToSession } =
+      await import("../src/extension/options/settings-sync-utils");
+    await migrateSecretsFromLocalToSession();
+    expect(sessionStore.get("apiKey")).toBe("sk-legacy");
+    expect(localStore.get("apiKey")).toBe("sk-legacy");
+  });
+
+  test("moves the key out of local when consent is NOT set", async () => {
+    setupGlobals();
+    localStore.set("apiKey", "sk-legacy");
+    const { migrateSecretsFromLocalToSession } =
+      await import("../src/extension/options/settings-sync-utils");
+    await migrateSecretsFromLocalToSession();
+    expect(sessionStore.get("apiKey")).toBe("sk-legacy");
+    expect(localStore.has("apiKey")).toBe(false);
+  });
+
+  test("moves the key out of local when the consent flag is truthy but not exactly true", async () => {
+    setupGlobals();
+    localStore.set("apiKey", "sk-legacy");
+    localStore.set("rememberApiKey", "true");
+    const { migrateSecretsFromLocalToSession } =
+      await import("../src/extension/options/settings-sync-utils");
+    await migrateSecretsFromLocalToSession();
+    expect(sessionStore.get("apiKey")).toBe("sk-legacy");
+    expect(localStore.has("apiKey")).toBe(false);
+  });
+
+  test("no local key → no-op", async () => {
+    setupGlobals();
+    const { migrateSecretsFromLocalToSession } =
+      await import("../src/extension/options/settings-sync-utils");
+    await migrateSecretsFromLocalToSession();
+    expect(sessionStore.size).toBe(0);
+    expect(localStore.size).toBe(0);
   });
 });

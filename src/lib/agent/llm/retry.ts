@@ -17,22 +17,14 @@
  * header, the header's value (in ms) replaces the exponential backoff delay.
  */
 
+import { MAX_RETRY_AFTER_MS } from "./constants";
+
 /** Max retry attempts for transient errors (429/5xx/network). */
 const MAX_RETRIES = 3;
 /** Base delay for exponential backoff (doubles each attempt, in ms). */
 const BASE_DELAY_MS = 1_500;
 /** Max jitter added to each backoff delay (ms). */
 const BACKOFF_JITTER_MS = 500;
-/**
- * Ceiling (ms) for a `Retry-After` header so a hostile/buggy 429 can't freeze
- * the run. This is intentionally conservative: a legitimate provider returning
- * a large Retry-After (e.g. during maintenance) would be retried sooner than
- * intended, potentially exacerbating load — but the alternative (honoring an
- * arbitrarily large delay) lets a hostile provider stall the run indefinitely.
- * 30 seconds is long enough for legitimate transient backoffs while capping the
- * worst-case freeze from a malicious Retry-After header.
- */
-const MAX_RETRY_AFTER_MS = 30_000;
 /** Absolute ceiling (ms) on cumulative retry delay — breaks the loop even if individual retries haven't exhausted MAX_RETRIES. */
 const MAX_RETRY_TOTAL_MS = 60_000;
 /** Chunk size (ms) for the abort-aware sleep loop. */

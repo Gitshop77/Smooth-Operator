@@ -10,7 +10,7 @@
  */
 
 /** Tag used by {@link URLEvaluator} when surfacing which check failed. */
-export const URL_EVALUATOR_TAG = "url_match";
+const URL_EVALUATOR_TAG = "url_match";
 
 /** Inputs to {@link URLEvaluator.evaluate}. */
 export interface URLEvaluatorInput {
@@ -66,7 +66,7 @@ interface ParsedUrl {
  * runners) so the evaluator never throws on a malformed URL — it returns
  * an empty `basePath` and an empty `query` instead.
  */
-export function parseUrl(url: string): ParsedUrl {
+function parseUrl(url: string): ParsedUrl {
   try {
     const u = new URL(url);
     const query: Record<string, string[]> = Object.create(null);

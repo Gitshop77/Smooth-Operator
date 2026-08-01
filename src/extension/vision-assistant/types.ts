@@ -30,6 +30,5 @@ export type StatusCallback = (status: VisionStatus, message?: string) => void;
 // Note: `MergedElement` is intentionally NOT defined here — it lives in
 // `merger.ts` (where it `extends ExtractedElement` and carries the extra
 // `source` / `pixelRect` / `indexStr` / `visionId` fields the merger needs).
-// The barrel `index.ts` re-exports it from `merger.ts`; a duplicate definition
-// here would be dead code (never exported from the barrel) and would diverge
-// from the real interface if either file changed.
+// A duplicate definition here would diverge from the real interface if either
+// file changed.

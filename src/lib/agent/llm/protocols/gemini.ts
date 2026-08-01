@@ -12,12 +12,13 @@ import { encodeModelIdForUrl } from "../modelId";
 import { zodToJsonSchema } from "../zod-json-schema";
 import {
   isZodSchema,
+  isPlainJSONSchema,
   extractScreenshots,
 } from "../shared-image";
 
 const ADAPTER = "gemini";
 export const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
-export const PATH = ":streamGenerateContent";
+const PATH = ":streamGenerateContent";
 
 /**
  * Once this many non-JSON SSE frames have been dropped in a single stream,
@@ -26,19 +27,6 @@ export const PATH = ":streamGenerateContent";
  * silently truncated — worth flagging without logging frame contents.
  */
 const DROPPED_FRAME_WARN_THRESHOLD = 5;
-
-/**
- * A converted JSON Schema must be a plain object, never a raw Zod schema
- * object. Zod v4 schema objects expose `safeParse` (and a `~standard`
- * symbol), so we reject those to avoid forwarding an un-serializable object.
- */
-function isPlainJSONSchema(v: unknown): v is Record<string, unknown> {
-  if (typeof v !== "object" || v === null) return false;
-  const o = v as Record<string, unknown>;
-  if (typeof o.safeParse === "function") return false;
-  if ("~standard" in o) return false;
-  return true;
-}
 
 export interface GeminiBody {
   contents: Array<{ role: string; parts: Array<Record<string, unknown>> }>;
@@ -92,7 +80,10 @@ async function fromRequest(request: LLMRequest): Promise<GeminiBody> {
  // rather than being POSTed as a raw Zod object (opaque `400`).
     let jsonSchema: unknown;
     if (isZodSchema(request.schema)) {
-      jsonSchema = await zodToJsonSchema(request.schema);
+      // `z.toJSONSchema` output carries a non-enumerable `~standard` property
+      // (zod 4.4.3) that makes the plainness check below reject every real
+      // Zod schema — round-trip through JSON to strip it.
+      jsonSchema = JSON.parse(JSON.stringify(await zodToJsonSchema(request.schema)));
     } else {
       jsonSchema = request.schema;
     }

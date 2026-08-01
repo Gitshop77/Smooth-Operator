@@ -1,0 +1,205 @@
+/**
+ * background/tab-manager-utils.ts — Low-level helpers extracted from
+ * tab-manager.ts: CDP debugger refcounting, screenshot quality cache,
+ * content-script messaging, and content-script injection.
+ */
+
+import { injectAntiDetection, isStealthEnabled } from "@/lib/agent/anti-detection";
+
+// ─── Screenshot quality cache ───────────────────────────────────────────────
+
+let cachedScreenshotQuality: number | null = null;
+
+if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && changes.screenshotQuality) {
+      cachedScreenshotQuality = null;
+    }
+  });
+}
+
+export async function getScreenshotQuality(): Promise<number> {
+  if (cachedScreenshotQuality !== null) return cachedScreenshotQuality;
+  const { screenshotQuality } = await chrome.storage.local.get("screenshotQuality");
+  cachedScreenshotQuality =
+    typeof screenshotQuality === "number" ? Math.min(100, Math.max(0, screenshotQuality)) : 80;
+  return cachedScreenshotQuality;
+}
+
+// ─── CDP debugger refcount ──────────────────────────────────────────────────
+
+const debuggerRefCounts = new Map<number, number>();
+
+if (typeof chrome !== "undefined") {
+  chrome.debugger?.onDetach?.addListener((source) => {
+    const tabId = (source as { tabId?: number }).tabId;
+    if (typeof tabId === "number") debuggerRefCounts.delete(tabId);
+  });
+  chrome.tabs?.onRemoved?.addListener((tabId: number) => {
+    debuggerRefCounts.delete(tabId);
+  });
+}
+
+export async function acquirePageDebugger<T>(
+  tabId: number,
+  attach: (id: number) => Promise<T>,
+): Promise<void> {
+  const n = (debuggerRefCounts.get(tabId) ?? 0) + 1;
+  debuggerRefCounts.set(tabId, n);
+  try {
+    await attach(tabId);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/already attached/i.test(msg)) return;
+    const m = (debuggerRefCounts.get(tabId) ?? 1) - 1;
+    if (m <= 0) debuggerRefCounts.delete(tabId);
+    else debuggerRefCounts.set(tabId, m);
+    throw e;
+  }
+}
+
+export async function releasePageDebugger<T>(
+  tabId: number,
+  detach: (id: number) => Promise<T>,
+): Promise<void> {
+  if ((debuggerRefCounts.get(tabId) ?? 0) <= 0) return;
+  const n = (debuggerRefCounts.get(tabId) ?? 0) - 1;
+  if (n <= 0) {
+    debuggerRefCounts.delete(tabId);
+    await detach(tabId).catch(() => {});
+  } else {
+    debuggerRefCounts.set(tabId, n);
+  }
+}
+
+export async function withPageDebugger<T>(tabId: number, fn: () => Promise<T>): Promise<T> {
+  const { attachDebugger, detachDebugger } = await import("@/lib/agent/cdp-controller");
+  await acquirePageDebugger(tabId, attachDebugger);
+  try {
+    return await fn();
+  } finally {
+    await releasePageDebugger(tabId, detachDebugger);
+  }
+}
+
+/**
+ * Run a `chrome.debugger.sendCommand` call against a bounded timeout so a
+ * wedged CDP session (crashed target, stalled transport) cannot hang the
+ * caller or leak the per-tab debugger refcount. The single `settled` flag
+ * guarantees the timer is always cleared and the losing branch's rejection is
+ * never orphaned (no unhandled rejection).
+ */
+export function sendDebuggerCommandWithTimeout<T>(
+  tabId: number,
+  command: string,
+  params: Record<string, unknown>,
+  timeoutMs = 10_000,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`${command} timed out after ${timeoutMs / 1000}s`));
+    }, timeoutMs);
+    (chrome.debugger.sendCommand({ tabId }, command, params) as Promise<T>).then(
+      (r) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(r);
+      },
+      (e) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
+// ─── Content-script messaging ───────────────────────────────────────────────
+
+const CONTENT_SCRIPT_TIMEOUT_MS = 20_000;
+const PING_TIMEOUT_MS = 1_500;
+const PING_POLL_TIMEOUT_MS = 500;
+
+export async function sendMessageWithTimeout<R = unknown>(
+  tabId: number,
+  message: unknown,
+  timeoutMs: number = CONTENT_SCRIPT_TIMEOUT_MS,
+): Promise<R> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const send = chrome.tabs.sendMessage<R>(tabId, message as never);
+  send.catch(() => {});
+  try {
+    return await Promise.race([
+      send,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("content script did not respond")),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+export async function getPageFingerprint(tabId: number): Promise<string> {
+  try {
+    await ensureContent(tabId);
+    const res = await sendMessageWithTimeout<{ ok: boolean; fingerprint?: string }>(
+      tabId,
+      { type: "GET_DOM_FINGERPRINT" },
+    );
+    return res?.ok ? res.fingerprint ?? "" : "";
+  } catch {
+    return "";
+  }
+}
+
+export async function ensureContent(tabId: number): Promise<void> {
+  try {
+    const res = await sendMessageWithTimeout<{ ok: boolean } | undefined>(
+      tabId,
+      { type: "PING" },
+      PING_TIMEOUT_MS,
+    );
+    if (res?.ok) return;
+  } catch {
+    /* not injected yet — fall through to injection */
+  }
+  try {
+    if (await isStealthEnabled()) {
+      try {
+        await injectAntiDetection(tabId);
+      } catch (e) {
+        console.warn(
+          `[tab-manager] stealth injection failed; continuing with content script only: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    } else {
+      console.debug("[tab-manager] stealth patches skipped (stealthEnabled is off)");
+    }
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+    for (let i = 0; i < 10; i++) {
+      try {
+        const res = await sendMessageWithTimeout<{ ok: boolean } | undefined>(
+          tabId,
+          { type: "PING" },
+          PING_POLL_TIMEOUT_MS,
+        );
+        if (res?.ok) return;
+      } catch {
+        /* keep polling */
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    throw new Error("content script did not become ready after injection");
+  } catch (e) {
+    throw new Error(`Cannot inject into tab ${tabId}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}

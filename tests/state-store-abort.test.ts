@@ -7,7 +7,7 @@
  */
 
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
-import { hardResetAbortRequested, getRunState, type RunState } from "../src/extension/background/state-store";
+import { hardResetAbortRequested, getRunState } from "../src/extension/background/state-store";
 
 function installFailingSessionStub() {
   const chrome = {
@@ -32,17 +32,6 @@ function installFailingSessionStub() {
   (globalThis as Record<string, unknown>).chrome = chrome;
   return { chrome };
 }
-
-const _baseState = (): RunState => ({
-  task: "t",
-  maxSteps: 1,
-  mode: "standard",
-  startTabId: 1,
-  currentTabId: 1,
-  step: 0,
-  active: true,
-  abortRequested: false,
-});
 
 let restore: () => void;
 let consoleErrorSpy: ReturnType<typeof vi.spyOn>;

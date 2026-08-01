@@ -5,13 +5,6 @@
 
 export { domFingerprint } from "./dom-fingerprint";
 export {
-  type DomainConfig,
-  getDomainConfig,
-  isDomainPolicyEnforced,
-  isDomainConfigMissingButEnforced,
-  checkUrlAllowedWithDomainConfig,
-} from "./domain-config";
-export {
   generateCssSelector,
   isVisible,
   resolveElement,

@@ -7,7 +7,7 @@
 
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
-import type { ActionContext } from "./types";
+import { type ActionContext, isExtensionContext } from "./types";
 import { validateFileName } from "./validate-file-name";
 import { swOkResponseSchema as screenshotResponseSchema } from "./sw-response";
 import { rejectOnAbort } from "./abort";
@@ -19,19 +19,19 @@ export async function handleScreenshot(
   ctx: ActionContext,
   action: Extract<Action, { type: "screenshot" }>,
 ): Promise<ActionResult> {
- // The orchestrator already attaches a fresh screenshot to every
- // `extractState` call so the LLM sees one per step. The `screenshot`
- // ACTION is for explicitly saving a standalone screenshot file to the
- // user's Downloads folder. The content script can't call
- // `chrome.tabs.captureVisibleTab` or `chrome.downloads`, so we route
- // the request to the background SW via the `SCREENSHOT` message. In
- // the in-page demo (no `chrome.runtime.id`), capture is unavailable —
- // return an honest error instead of claiming success.
+  // The orchestrator already attaches a fresh screenshot to every
+  // `extractState` call so the LLM sees one per step. The `screenshot`
+  // ACTION is for explicitly saving a standalone screenshot file to the
+  // user's Downloads folder. The content script can't call
+  // `chrome.tabs.captureVisibleTab` or `chrome.downloads`, so we route
+  // the request to the background SW via the `SCREENSHOT` message. In
+  // the in-page demo (no `chrome.runtime.id`), capture is unavailable —
+  // return an honest error instead of claiming success.
   const fileName = action.file_name;
- // Reject path-traversal / separator attempts at the egress boundary before
- // forwarding to the SW. The SW also re-sanitizes on receipt, so benign
- // characters (spaces, etc.) are still neutralized downstream; we just give
- // the agent an explicit error for genuinely abusive filenames.
+  // Reject path-traversal / separator attempts at the egress boundary before
+  // forwarding to the SW. The SW also re-sanitizes on receipt, so benign
+  // characters (spaces, etc.) are still neutralized downstream; we just give
+  // the agent an explicit error for genuinely abusive filenames.
   const fileNameError = validateFileName(fileName);
   if (fileNameError) {
     return {
@@ -40,13 +40,15 @@ export async function handleScreenshot(
       message: `screenshot failed: invalid file_name — ${fileNameError}`,
     };
   }
- // Enforce .png extension: screenshots are always PNG images. Strip any
- // existing extension and append .png so a misleading "report.pdf" becomes
- // "report.png". When no filename is provided, the SW generates a default.
+  // Enforce .jpg extension: the SW captures JPEG (`Page.captureScreenshot`
+  // format:"jpeg"), so a ".png" or ".pdf" name would receive JPEG bytes under
+  // a misleading extension. Strip any existing extension and append .jpg so
+  // the saved file's name matches its actual format. When no filename is
+  // provided, the SW generates a default.
   const safeFileName = fileName
-    ? fileName.replace(/\.[^.]*$/, "") + ".png"
+    ? fileName.replace(/\.[^.]*$/, "") + ".jpg"
     : undefined;
-  if (typeof chrome === "undefined" || !chrome.runtime?.id) {
+  if (!isExtensionContext()) {
     return {
       action,
       success: false,
@@ -54,14 +56,14 @@ export async function handleScreenshot(
     };
   }
   try {
- // `chrome.runtime.sendMessage` resolves `undefined` (not a rejection) when
- // no listener is present, so read the response and validate each field
- // before formatting the success message. Race a timeout so a live SW
- // handler that keeps the channel open (async) but never responds cannot
- // hang the orchestrator step indefinitely.
+    // `chrome.runtime.sendMessage` resolves `undefined` (not a rejection) when
+    // no listener is present, so read the response and validate each field
+    // before formatting the success message. Race a timeout so a live SW
+    // handler that keeps the channel open (async) but never responds cannot
+    // hang the orchestrator step indefinitely.
     let timer: ReturnType<typeof setTimeout> | undefined;
- // Race the SW call against the timeout AND the step's abort signal so a user
- // STOP is honored mid-step instead of waiting out the full 30s timeout.
+    // Race the SW call against the timeout AND the step's abort signal so a user
+    // STOP is honored mid-step instead of waiting out the full 30s timeout.
     const abort = rejectOnAbort(ctx.signal);
     let raw: unknown;
     try {
@@ -94,14 +96,14 @@ export async function handleScreenshot(
     }
     const res = parsed.data;
     if (res.ok) {
-      const filename = typeof res.filename === "string" && res.filename ? res.filename : undefined;
+      const filename = res.filename;
       return {
         action,
         success: true,
         message: filename ? `Screenshot saved as ${filename}` : "Screenshot saved",
       };
     }
-    const err = typeof res.error === "string" && res.error ? res.error : "unknown error";
+    const err = res.error || "unknown error";
     return { action, success: false, message: `screenshot failed: ${err}` };
   } catch (e) {
     return { action, success: false, message: `screenshot failed: ${e instanceof Error ? e.message : String(e)}` };

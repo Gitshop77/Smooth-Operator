@@ -18,14 +18,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v7.0.0 # actions/checkout v7 (Node 24 runtime; dependabot PR #36)
+        # actions/checkout v7.0.0 — full commit SHA pin (same verified SHA as ci.yml)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
       - name: Dependency Review
-        uses: actions/dependency-review-action@v5.0.0 # dependency-review-action v5 (Node 24 runtime; dependabot PR #37)
+        # actions/dependency-review-action v5.0.0 — full commit SHA pin
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294
         with:
           # Block PRs that introduce MODERATE or higher severity advisories.
           fail-on-severity: moderate
           # Block PRs that introduce a dependency under a license the org disallows.
           deny-licenses: GPL-3.0, AGPL-3.0
-          # All three npm workspaces share the root + their own lockfiles.
+          # The repo has no npm workspaces — a single root lockfile covers everything.
           fail-on-scopes: development, runtime

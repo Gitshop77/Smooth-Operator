@@ -35,7 +35,7 @@ export function redactDialogText(text: string): string {
 let installed = false;
 
 /** Describes which kind of native dialog was triggered. */
-export type DialogKind = "alert" | "confirm" | "prompt";
+type DialogKind = "alert" | "confirm" | "prompt";
 
 /**
  * The most recently-triggered dialog that hasn't been explicitly accepted or
@@ -60,6 +60,13 @@ let pendingAlert: { kind: DialogKind; text: string } | null = null;
  */
 let nextPromptValue: string | null = null;
 
+/** Capture a dismissed dialog's metadata (and log its text redacted). */
+function captureDialog(kind: DialogKind, message?: string): void {
+  const text = String(message ?? "");
+  console.debug(`${LOG_PREFIX} Auto-handled ${kind}:`, redactDialogText(text));
+  pendingAlert = { kind, text };
+}
+
 /**
  * Install the popup handler. Call once per content script injection — safe to
  * call multiple times (subsequent calls are no-ops).
@@ -80,13 +87,6 @@ let nextPromptValue: string | null = null;
  * dialog metadata), no such bridge is installed. Do not document
  * or rely on real page-dialog interception from this handler.
  */
-/** Capture a dismissed dialog's metadata (and log its text redacted). */
-function captureDialog(kind: DialogKind, message?: string): void {
-  const text = String(message ?? "");
-  console.debug(`${LOG_PREFIX} Auto-handled ${kind}:`, redactDialogText(text));
-  pendingAlert = { kind, text };
-}
-
 export function installPopupHandler(): void {
   if (installed) return;
   installed = true;
@@ -111,7 +111,7 @@ export function installPopupHandler(): void {
 
  // Override window.prompt — return any agent-queued text (set via
  // sendAlertText), else empty string (treated as dismiss).
-  window.prompt = function (message?: string, defaultValue?: string): string {
+  window.prompt = function (message?: string): string {
     captureDialog("prompt", message);
     if (nextPromptValue !== null) {
       const v = nextPromptValue;
@@ -150,20 +150,10 @@ export function installPopupHandler(): void {
  *
  * NOTE: this returns the RAW dialog text (which may contain OTP/2FA, PII, or
  * session tokens). Do NOT log or serialize it without redaction — use
- * {@link getPendingAlertTextRedacted} for any channel that leaves the page.
+ * {@link redactDialogText} for any channel that leaves the page.
  */
 export function getPendingAlertText(): string | null {
   return pendingAlert?.text ?? null;
-}
-
-/**
- * Get the redacted text of the currently-open dialog, or `null` if none is
- * open. The raw dialog text (OTP/2FA/PII/tokens) is replaced by a length-only
- * hint so it is safe to log or forward to an LLM channel. Use this
- * instead of {@link getPendingAlertText} whenever the value leaves the page.
- */
-export function getPendingAlertTextRedacted(): string | null {
-  return pendingAlert ? redactDialogText(pendingAlert.text) : null;
 }
 
 /**
@@ -175,6 +165,13 @@ export function getPendingAlertKind(): DialogKind | null {
   return pendingAlert?.kind ?? null;
 }
 
+/** Clear the most-recently-recorded dialog from the pending queue. */
+function clearMostRecentAlert(): boolean {
+  if (!pendingAlert) return false;
+  pendingAlert = null;
+  return true;
+}
+
 /**
  * Accept the currently-open dialog (alert / confirm / prompt).
  *
@@ -183,13 +180,6 @@ export function getPendingAlertKind(): DialogKind | null {
  * override already returned to the page) — this function only clears the
  * pending entry so subsequent `alert_*` actions report "no such alert".
  */
-/** Clear the most-recently-recorded dialog from the pending queue. */
-function clearMostRecentAlert(): boolean {
-  if (!pendingAlert) return false;
-  pendingAlert = null;
-  return true;
-}
-
 export function acceptAlert(): boolean {
   return clearMostRecentAlert();
 }
@@ -207,7 +197,7 @@ export function dismissAlert(): boolean {
 }
 
 /**
- * Stage text for the NEXT window.prompt() call. The currently-open prompt already received the auto-dismiss override empty-string return — this only affects the next prompt.. Only valid when the pending
+ * Stage text for the NEXT window.prompt() call. Only valid when the pending
  * dialog is a `prompt`; for `alert`/`confirm`, returns `false` without
  * modifying the pending entry.
  *

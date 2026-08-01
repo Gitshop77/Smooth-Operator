@@ -181,7 +181,7 @@ Three roles share the work:
 
 Adding a new LLM provider is meant to be easy. The layer is split into a **route** (auth and transport), a **protocol** (formats requests for OpenAI-, Anthropic-, or Gemini-style APIs), and a thin **provider** wrapper on top.
 
-- **7 providers have dedicated wrappers:** OpenAI, Anthropic, Google Gemini, xAI Grok, Azure OpenAI, OpenRouter, and a generic OpenAI-compatible option. 13 more OpenAI-compatible services (DeepSeek, Groq, Ollama, Qwen, Mistral, Together, and others) work through a shared profile table — adding another is a single line.
+- **7 providers have dedicated wrappers:** OpenAI, Anthropic, Google Gemini, xAI Grok, Azure OpenAI, OpenRouter, and a generic OpenAI-compatible option. 13 more OpenAI-compatible services (15 profile-table rows, including DeepSeek, Groq, Ollama, Qwen, Mistral, Together, and others) work through a shared profile table — adding another is a single line.
 
 ### How the agent "sees" a page
 
@@ -202,7 +202,8 @@ Every action is checked in code against the mode you've selected. Each step up t
 | Ability | Restricted | Standard | Full Agentic |
 | --- | --- | --- | --- |
 | Read, click, type, scroll, fill forms | ✅ | ✅ | ✅ |
-| Search, extract, screenshot | ✅ | ✅ | ✅ |
+| Search, extract | ✅ | ✅ | ✅ |
+| Take screenshots | 🚫 | 🚫 | ✅ |
 | Navigate to a new URL | 🚫* | ✅ | ✅ |
 | Open or switch tabs | 🚫 | ✅ | ✅ |
 | Close tabs | 🚫 | ✅ | ✅ |
@@ -242,6 +243,7 @@ The provider list and model picker come straight from the bundled [models.dev](h
 ### API keys and secrets
 
 - Your **API key** stays in the browser and is sent only to the provider you configure.
+- By default your **API key** lives only in memory and you re-enter it once per browser session. A "Remember API key on this device" checkbox in Settings can persist it (unencrypted, in this browser's local storage) so it survives restarts — off by default, and clearing the checkbox deletes the stored copy.
 - **Secrets** — passwords, tokens, payment details — use `%name%` placeholders. The real value is substituted at the moment an action runs, so the LLM never sees it.
 - **Test connection** checks your key against the provider's models list (OpenAI `/v1/models`, Anthropic `/v1/models`, OpenRouter `/api/v1/models`, and so on). It sends no chat message, so a wrong default model ID won't cause a false failure. It also stays on the provider's real host and refuses redirects, so a bad `baseUrl` can't leak your key to an attacker.
 
@@ -267,7 +269,7 @@ Turn on completion notifications in **Options**, and optionally send chosen even
 
 ## What the agent can do
 
-The navigator has 32 actions, plus two internal actions the planner uses.
+The navigator has 32 actions. The planner doesn't use navigator actions — it speaks its own decisions (`continue`, `done`, `web_task`).
 
 **Page interaction**
 
@@ -335,8 +337,7 @@ The navigator has 32 actions, plus two internal actions the planner uses.
 
 Runs a model called **LocateAnything-3B** entirely inside your browser using WebGPU — no data leaves your machine.
 
-- About 2.1 GB on first download, then cached in the browser.
-- Loads as a separate piece only when needed, so the core extension stays small.
+- About 2 GB of weights on first download, then cached in the browser. The code itself is bundled into the extension (no separate chunk — esbuild runs with `splitting: false`), but the model weights download separately and inference is initialized lazily, so the extension stays responsive without the model.
 - Powers `detect_visual` and the merge between marked-up screenshots and page elements.
 - **Options** shows its download status and progress.
 
@@ -381,17 +382,17 @@ Enforced in code, on every run:
 Other code-level backstops: a fail-closed domain list blocks navigation to attacker-supplied URLs, and a handoff to you pauses the run for up to five minutes. The LLM base-URL resolver fails closed on DNS or validation errors and never widens its own trust rules.
 
 > [!CAUTION]
-> `evaluate` and custom tools run JavaScript through `new Function()` inside the page's isolated world — where the secret store also lives. Before any code runs, three gates apply: the mode must be Full Agentic, the target domain must pass a fail-closed allow list, and the code runs with `chrome`, `window`, `globalThis`, `self`, `Function`, and `eval` stubbed out to throw or deny. This sandbox is a second layer of defense, not a hard wall — known ways exist to escape it from untrusted pages. Use Full Agentic only on sites you trust, set a strict allowed-domain list, and rotate your API key if you suspect a Full Agentic run was compromised.
+> `evaluate` and custom tools run JavaScript through `new Function()` inside the page's isolated world. The secret store deliberately doesn't live there — it's kept in the service worker's `chrome.storage.session`, which MV3 keeps unreachable from content-script scope. Before any code runs, three gates apply: the mode must be Full Agentic, the target domain must pass a fail-closed allow list, and the code runs with `chrome`, `window`, `globalThis`, `self`, `Function`, and `eval` stubbed out to throw or deny. This sandbox is a second layer of defense, not a hard wall — known ways exist to escape it from untrusted pages. Use Full Agentic only on sites you trust, set a strict allowed-domain list, and rotate your API key if you suspect a Full Agentic run was compromised.
 
 > [!NOTE]
-> The manifest declares `host_permissions: ["<all_urls>"]` plus `debugger`, `scripting`, `webRequest`, and `dns` permissions. A supply-chain compromise (malicious update, compromised build artifact, or a third-party dependency that gains service-worker execution) would have unrestricted access to every origin. This is inherent to the browser-automation model. The domain allow/block list and mode gating limit what the agent does at runtime, but cannot prevent a compromised extension from using its manifest permissions directly. See [PERMISSIONS.md](PERMISSIONS.md) for the full list.
+> The manifest declares `host_permissions: ["http://*/*", "https://*/*"]` (deliberately NOT `file://` or `ftp://`) plus `debugger`, `scripting`, `webRequest`, and `dns` permissions. A supply-chain compromise (malicious update, compromised build artifact, or a third-party dependency that gains service-worker execution) would have access to every http(s) origin. This is inherent to the browser-automation model. The domain allow/block list and mode gating limit what the agent does at runtime, but cannot prevent a compromised extension from using its manifest permissions directly. See [PERMISSIONS.md](PERMISSIONS.md) for the full list.
 
 ### How keys and secrets are stored
 
 | Storage | Holds | Survives restart? |
 | --- | --- | --- |
-| `chrome.storage.local` | API key, run history, scheduled tasks, custom tools, per-site memory | Yes |
-| `chrome.storage.session` | Every `%secret%` value, current run state | No — cleared when the browser closes |
+| `chrome.storage.local` | Run history, scheduled tasks, custom tools, per-site memory | Yes |
+| `chrome.storage.session` | API key, every `%secret%` value, current run state | No — cleared when the browser closes (the API key can optionally be remembered on this device, see below) |
 
 Both stay on your machine and only ever leave it to reach the provider you chose.
 
@@ -480,12 +481,12 @@ src/lib/agent/             The agent engine, independent of the browser
   security.ts              Injection defense and domain rules
 chrome-extension/          Build output (gitignored, regenerated on build)
 tests/                     Vitest suite
-scripts/                   Catalog build and other scripts
+scripts/                   Icon generation
 ```
 
 ### Continuous integration
 
-`.github/workflows/ci.yml` runs two jobs on Node 22:
+`.github/workflows/ci.yml` runs two jobs (the test job on Node 22):
 
 - **test** — install, lint, type-check, run the coverage suite, confirm the extension builds cleanly, and audit dependencies.
 - **secret-scan** — a full-history secret scan that fails the build if a real secret is committed.
@@ -511,7 +512,7 @@ scripts/                   Catalog build and other scripts
 3. Run `npm run lint` and `npm run test` before opening the PR.
 4. Open a pull request explaining what changed and why.
 
-Don't commit secrets or build output — `.env*`, `.z-ai-config`, `db/`, `chrome-extension/*.js`, `node_modules/`, and `.next/` are gitignored. `chrome-extension/` assets and license files are regenerated by `npm run build:extension`.
+Don't commit secrets or build output — `.env*`, `db/`, `chrome-extension/` (the whole build output directory), `node_modules/`, and `.next/` are gitignored. `chrome-extension/` assets and license files are regenerated by `npm run build:extension`.
 
 ## Known limitations
 

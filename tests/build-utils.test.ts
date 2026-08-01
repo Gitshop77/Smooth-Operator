@@ -80,6 +80,29 @@ describe("stripConsoleDebug", () => {
     const out = stripConsoleDebug('try {} catch (e) {\n  console.debug(\n    "m",\n    e.message,\n  );\n}');
     expect(() => new Function(out)).not.toThrow();
   });
+
+  // The optional-chained form must ALSO be rewritten. The matcher only accepts
+  // `console.` otherwise, so `console?.debug/log` calls survive into production
+  // bundles.
+  it("rewrites optional-chained console?.log / console?.debug calls", () => {
+    expect(stripConsoleDebug('console?.log("x");')).toBe('void ("x");');
+    expect(stripConsoleDebug('console?.debug("x");')).toBe('void ("x");');
+    expect(stripConsoleDebug("console?.log();")).toBe("void 0;");
+  });
+
+  // Only `${` opens a template interpolation. A bare `{` in template text must
+  // not bump the depth, or the closing backtick goes unrecognized and
+  // everything after it (incl. console.log calls) is silently skipped.
+  it("does not treat a literal { in template text as an interpolation", () => {
+    expect(stripConsoleDebug("const s = `{`; console.log(s);")).toBe(
+      "const s = `{`; void (s);",
+    );
+  });
+
+  it("still tracks real ${...} interpolations", () => {
+    const src = "const s = `${a} and ${b}`; console.log(s);";
+    expect(stripConsoleDebug(src)).toBe("const s = `${a} and ${b}`; void (s);");
+  });
 });
 
 describe("lintManifestPermissions", () => {

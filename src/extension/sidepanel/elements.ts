@@ -38,17 +38,10 @@ export const statusCenter = document.getElementById("statusCenter") as HTMLDivEl
 sendBtn.disabled = true;
 
 export const STORAGE_KEYS = {
-  task: "task",
   agentMode: "agentMode",
   maxSteps: "maxSteps",
   costUsd: "__oc_costUsd",
   tokens: "__oc_tokens",
-  log: "__oc_log",
-  // Kept in sync with the canonical options-side map (settings-sync.ts) so the
-  // side panel can reference these keys without hardcoding literals. The actual
-  // persistence for these two is owned by the options page.
-  costCap: "costCap",
-  defaultTask: "defaultTask",
 } as const;
 
 // Mutable shared state (live bindings — sibling modules read/write these)

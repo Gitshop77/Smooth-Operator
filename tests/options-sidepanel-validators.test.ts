@@ -11,35 +11,12 @@
  */
 
 import { describe, test, expect, beforeAll } from "vitest";
+import { makeChromeStorageMock } from "./helpers/chrome-storage-mock";
 
 function setupGlobals(): void {
-  const local = new Map<string, unknown>();
-  const session = new Map<string, unknown>();
-  const makeArea = (store: Map<string, unknown>) => ({
-    get: (_keys: unknown, cb?: (res: Record<string, unknown>) => void) => {
-      cb?.(Object.fromEntries(store));
-    },
-    set: (items: Record<string, unknown>, cb?: () => void) => {
-      Object.entries(items).forEach(([k, v]) => store.set(k, v));
-      cb?.();
-    },
-    remove: (keys: string | string[], cb?: () => void) => {
-      (Array.isArray(keys) ? keys : [keys]).forEach((k) => store.delete(k));
-      cb?.();
-    },
-  });
-  (globalThis as unknown as { chrome: unknown }).chrome = {
-    storage: { local: makeArea(local), session: makeArea(session) },
-    runtime: {
-      lastError: undefined,
-      id: "test",
-      getManifest: () => ({ permissions: [], host_permissions: [] }),
-      onMessage: { addListener: () => {} },
-      sendMessage: (_msg: unknown, cb?: (res: unknown) => void) => {
-        cb?.(undefined);
-      },
-    },
-  };
+  const localStore = new Map<string, unknown>();
+  const sessionStore = new Map<string, unknown>();
+  (globalThis as unknown as { chrome: unknown }).chrome = makeChromeStorageMock(localStore, sessionStore);
 
   document.body.innerHTML = `
     <select id="provider"></select>

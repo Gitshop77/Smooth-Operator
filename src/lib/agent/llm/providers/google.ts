@@ -19,14 +19,17 @@ import * as Gemini from "../protocols/gemini";
 import type { LLMProvider } from "../provider";
 import { toLLMProvider as toLLMProviderBridge } from "../provider-bridge";
 import { assertSafeUserBaseURL } from "./openai-compatible-profile";
-import type { SsrfProvenance } from "../route/ssrf";
+import { isCuratedLocalOrigin, type SsrfProvenance } from "../route/ssrf";
 
-export const id = "google";
+const id = "google";
 
-export type Config = {
+type Config = {
   baseURL?: string;
   // When true (user-configured provenance) the curated-local-provider loopback
-  // exemption is honored; otherwise loopback / RFC1918 / ULA are rejected.
+  // exemption MAY be honored — but only for a baseURL that exactly matches a
+  // curated local origin (Ollama / LiteLLM). For any other baseURL the SSRF
+  // guard stays strict, so this is NOT a blanket toggle that relaxes the guard
+  // for every provider.
   allowLocalExemption?: boolean;
 } & ProviderAuthOption<"optional">;
 
@@ -40,12 +43,15 @@ const auth = (options: ProviderAuthOption<"optional">) => {
 };
 
 export function configure(input: Config = {}) {
- // (SSRF guard): validate any user-supplied baseURL override before
- // building the route/endpoint. The trusted default (Gemini.ENDPOINT) is
- // exempt — only untrusted, user-controlled input is checked. Forward the
- // user-provenance exemption flag so the curated-local-origin exemption applies
- // only for a user-configured baseURL.
-  assertSafeUserBaseURL(input.baseURL, id, input.allowLocalExemption);
+  // (SSRF guard): validate any user-supplied baseURL override before
+  // building the route/endpoint. The trusted default (Gemini.ENDPOINT) is
+  // exempt. The curated-local-provider loopback exemption is honored ONLY when
+  // the baseURL exactly matches a curated local origin (Ollama / LiteLLM) AND
+  // the user opted in; it is NOT a blanket toggle, so an arbitrary
+  // (non-curated) loopback / RFC1918 baseUrl is always rejected by the guard
+  // (mirrors the openai.ts facade).
+  const exemption = !!input.allowLocalExemption && !!input.baseURL && isCuratedLocalOrigin(input.baseURL);
+  assertSafeUserBaseURL(input.baseURL, id, exemption);
   const baseURL = input.baseURL ?? Gemini.ENDPOINT;
  // These depend only on the fixed `baseURL`/`input` captured by `configure`,
  // so compute them once instead of re-parsing the URL and rebuilding the auth
@@ -76,7 +82,10 @@ export function configure(input: Config = {}) {
  // the final URL is `<origin>/v1beta/models/{model}:streamGenerateContent`.
       const fullPath = `${basePath}${Gemini.geminiPath(modelID)}`;
       const route = make({
-        id: "gemini",
+        // Fold the model id into the route id so distinct models register under
+        // distinct registry keys and a later model() call can't clobber the
+        // earlier model's route (per-model paths differ).
+        id: `gemini:${modelID}`,
         provider: id,
         protocol: Gemini.protocol,
         endpoint: Endpoint.path(fullPath, { baseURL: parsed.origin, query: { alt: "sse" } }),

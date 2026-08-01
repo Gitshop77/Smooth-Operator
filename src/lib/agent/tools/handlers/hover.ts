@@ -37,88 +37,32 @@ export async function handleHover(
   const screenX = clientX + window.screenX;
   const screenY = clientY + window.screenY;
 
-  // Construct a MouseEvent once from a shared coordinate bundle so the same
-  // clientX/clientY/screenX/screenY/relatedTarget are applied consistently.
-  const makeMouseEvent = (type: string, init: MouseEventInit) =>
-    new MouseEvent(type, init);
+  // Shared coordinate bundle + relatedTarget so every event in the hover
+  // sequence reports the same clientX/clientY/screenX/screenY (a real hover
+  // does), then dispatch the full pointer + mouse sequences.
+  const coords = { clientX, clientY, screenX, screenY };
+  const relatedTarget: EventTarget | null = document.body;
   // A real hover first emits a parallel PointerEvent sequence
   // (pointerover -> pointerenter -> pointermove) before the mouse events.
   // Many sites key hover/tooltip/drag handlers to pointer events, so dispatch
-  // both sequences; the existing MouseEvent path is preserved.
-  const makePointerEvent = (type: string, init: PointerEventInit) =>
-    new PointerEvent(type, init);
-  // jsdom (used by the test suite) doesn't implement PointerEvent, so guard the
-  // whole parallel pointer sequence — real browsers still get the full
-  // pointerover -> pointerenter -> pointermove sequence alongside the mouse
-  // events below.
+  // both sequences. jsdom (used by the test suite) doesn't implement
+  // PointerEvent, so guard the whole parallel pointer sequence — real browsers
+  // still get the full pointerover -> pointerenter -> pointermove sequence.
   if (typeof PointerEvent !== "undefined") {
-    el.dispatchEvent(
-      makePointerEvent("pointerover", {
-        bubbles: true,
-        relatedTarget: document.body,
-        clientX,
-        clientY,
-        screenX,
-        screenY,
-      }),
-    );
-    el.dispatchEvent(
-      makePointerEvent("pointerenter", {
-        bubbles: false,
-        relatedTarget: document.body,
-        clientX,
-        clientY,
-        screenX,
-        screenY,
-      }),
-    );
-    el.dispatchEvent(
-      makePointerEvent("pointermove", {
-        bubbles: true,
-        clientX,
-        clientY,
-        screenX,
-        screenY,
-      }),
-    );
+    el.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget, ...coords }));
+    el.dispatchEvent(new PointerEvent("pointerenter", { bubbles: false, relatedTarget, ...coords }));
+    el.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, ...coords }));
   }
 
   // Simulate a real hover. When a pointer enters a new element the browser
   // first emits `mouseover` (which bubbles and carries the `relatedTarget` of
   // the element just left) on the element entered, then the non-bubbling
-  // `mouseenter` on the element being entered, followed by `mousemove` with the
-  // pointer coordinates. Dispatching the full `mouseover` -> `mouseenter` ->
-  // `mousemove` sequence makes hover widgets keyed off any of those events open
-  // correctly and mirrors the order a real DOM hover produces.
-  el.dispatchEvent(
-    makeMouseEvent("mouseover", {
-      bubbles: true,
-      relatedTarget: document.body,
-      clientX,
-      clientY,
-      screenX,
-      screenY,
-    }),
-  );
-  el.dispatchEvent(
-    makeMouseEvent("mouseenter", {
-      bubbles: false,
-      relatedTarget: document.body,
-      clientX,
-      clientY,
-      screenX,
-      screenY,
-    }),
-  );
-  el.dispatchEvent(
-    makeMouseEvent("mousemove", {
-      bubbles: true,
-      clientX,
-      clientY,
-      screenX,
-      screenY,
-    }),
-  );
+  // `mouseenter`, followed by `mousemove` with the pointer coordinates.
+  // Dispatching the full `mouseover` -> `mouseenter` -> `mousemove` sequence
+  // makes hover widgets keyed off any of those events open correctly.
+  el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, relatedTarget, ...coords }));
+  el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false, relatedTarget, ...coords }));
+  el.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, ...coords }));
 
   // Move the phantom cursor last, now that the page is scrolled and the rect
   // is final, so it lands on the element's post-scroll position.

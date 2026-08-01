@@ -1,0 +1,252 @@
+/**
+ * Vision cache fingerprint freshness.
+ *
+ * `isVisionCacheFresh` compares the current page fingerprint against the
+ * fingerprint stored when the cached vision rects were CAPTURED. The
+ * adaptive-vision warm-cache path in `extractStateForRun` reuses the cached
+ * rects but used to re-stamp the stored fingerprint with the CURRENT
+ * extraction's EXTRACT_STATE fingerprint — re-baselining the freshness check
+ * to "now" and making a stale cache (page changed since capture) look fresh.
+ *
+ * The fingerprint must only be stamped when the cache entry is actually
+ * written (fresh detect); a warm-branch reuse must not overwrite it.
+ *
+ * These tests drive the REAL `extractStateForRun` + `isVisionCacheFresh`
+ * (mocking only the tab-manager / catalog / vision-assistant dependencies,
+ * mirroring tests/extract-state-for-run.test.ts).
+ */
+
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+
+// ─── Mock chrome global ──────────────────────────────────────────────────────
+
+const sessionStore: Record<string, unknown> = {};
+const localStore: Record<string, unknown> = {};
+
+(globalThis as Record<string, unknown>).chrome = {
+  tabs: {
+    get: vi.fn(async () => ({ id: 1, url: "https://example.com" })),
+  },
+  storage: {
+    local: {
+      get: vi.fn(async (key: unknown) => {
+        if (typeof key === "string") return { [key]: localStore[key] };
+        if (Array.isArray(key)) {
+          const out: Record<string, unknown> = {};
+          for (const k of key) out[k] = localStore[k];
+          return out;
+        }
+        return { ...localStore };
+      }),
+    },
+    session: {
+      get: vi.fn(async (key: unknown) => {
+        if (typeof key === "string") return { [key]: sessionStore[key] };
+        if (Array.isArray(key)) {
+          const out: Record<string, unknown> = {};
+          for (const k of key) out[k] = sessionStore[k];
+          return out;
+        }
+        return { ...sessionStore };
+      }),
+    },
+    onChanged: {
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+    },
+  },
+  runtime: {
+    sendMessage: vi.fn().mockResolvedValue(undefined),
+  },
+};
+
+// ─── Mock all dependencies (mirrors tests/extract-state-for-run.test.ts) ─────
+
+vi.mock("@/lib/agent/llm/catalog", () => ({
+  modelSupportsVision: vi.fn().mockResolvedValue(false),
+}));
+
+vi.mock("@/extension/provider-config-map", () => ({
+  CATALOG_PROVIDER_ID_MAP: {},
+}));
+
+vi.mock("@/extension/background/tab-manager", () => ({
+  extractStateFromTab: vi.fn(),
+  listTabs: vi.fn().mockResolvedValue([]),
+  ensureContent: vi.fn().mockResolvedValue(undefined),
+  executeActionsInTab: vi.fn().mockResolvedValue([]),
+  waitForTabLoad: vi.fn().mockResolvedValue(undefined),
+  handleTabAction: vi.fn().mockResolvedValue(undefined),
+  getPageFingerprint: vi.fn().mockResolvedValue(""),
+  sendMessageWithTimeout: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("@/extension/background/screenshots", () => ({
+  captureTabScreenshot: vi.fn().mockResolvedValue("data:image/png;base64,abc"),
+}));
+
+vi.mock("@/extension/llm-direct", () => ({
+  navigatorCallDirect: vi.fn(),
+  plannerCallDirect: vi.fn(),
+}));
+
+vi.mock("@/extension/background/state-store", () => ({
+  getRunState: vi.fn().mockResolvedValue({ currentTabId: 1, step: 0 }),
+  saveRunState: vi.fn(),
+  clearRunState: vi.fn(),
+  RUN_STATE_KEY: "open_cowork_run_state",
+  startKeepalive: vi.fn(),
+  stopKeepalive: vi.fn(),
+  maybeReleaseKeepAwake: vi.fn(),
+  safeLog: vi.fn(),
+}));
+
+vi.mock("@/extension/provider-config", () => ({
+  resolveModel: vi.fn(() => "mock-model"),
+}));
+
+vi.mock("@/extension/background/vision", () => ({
+  stripUrlFragment: vi.fn((u: string) => u.split("#")[0]),
+}));
+
+vi.mock("@/extension/background/antibot", () => ({
+  makeAntiBotHooks: vi.fn().mockReturnValue({}),
+}));
+
+vi.mock("@/extension/vision-assistant", () => ({
+  VisionAssistant: vi.fn().mockImplementation(() => ({
+    isReady: false,
+    init: vi.fn().mockResolvedValue(undefined),
+    detect: vi.fn().mockResolvedValue([]),
+    cleanup: vi.fn().mockResolvedValue(undefined),
+  })),
+  // The real index re-exports these from ./merger; the warm branch
+  // destructures them from `import("../vision-assistant")`.
+  mergeDetections: vi.fn().mockReturnValue([]),
+  renderMergedElementsText: vi.fn().mockReturnValue(""),
+}));
+
+vi.mock("@/lib/agent/run-history", () => ({
+  RunBuilder: vi.fn(),
+  saveRun: vi.fn(),
+}));
+
+vi.mock("@/lib/agent/modes", () => ({
+  checkActionAllowed: vi.fn().mockReturnValue({ allowed: true }),
+}));
+
+// ─── Lazy imports (same module instance as the SUT) ──────────────────────────
+
+let extractStateForRun: typeof import("@/extension/background/run-helpers")["extractStateForRun"];
+let isVisionCacheFresh: typeof import("@/extension/background/run-helpers")["isVisionCacheFresh"];
+let extractStateFromTabMock: ReturnType<typeof vi.fn>;
+let getPageFingerprintMock: ReturnType<typeof vi.fn>;
+let visionElementsCache: Map<string, { x: number; y: number; width: number; height: number; label: string }>;
+let setVisionCacheUrl: (u: string) => void;
+let setVisionCacheFingerprint: (fp: string) => void;
+
+const MOCK_TABS = [{ id: 1, url: "https://example.com", title: "Test" }] as never[];
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function makeDomState(overrides?: { url?: string; elements?: unknown[]; fingerprint?: string }) {
+  return {
+    url: overrides?.url ?? "https://example.com",
+    title: "Test",
+    tabs: [],
+    elements: overrides?.elements ?? [],
+    elementsText: "",
+    pageInfo: "0.0 pages above, 0.0 pages below",
+    newElementCount: 0,
+    scrollTop: 0,
+    scrollHeight: 1000,
+    viewportHeight: 800,
+    selectorMap: {},
+    devicePixelRatio: 1,
+    ...(overrides?.fingerprint !== undefined ? { fingerprint: overrides.fingerprint } : {}),
+  };
+}
+
+function setVisionSettings(settings: {
+  enableLocalVision?: boolean;
+  enableScreenshots?: boolean;
+  visionMode?: string;
+}) {
+  Object.assign(localStore, {
+    model: "gpt-4",
+    provider: "openai",
+    enableLocalVision: settings.enableLocalVision ?? false,
+    enableScreenshots: settings.enableScreenshots ?? true,
+    visionMode: settings.visionMode ?? undefined,
+  });
+}
+
+function setRunState(tabId = 1, step = 0) {
+  Object.assign(sessionStore, {
+    open_cowork_run_state: { currentTabId: tabId, step },
+  });
+}
+
+describe("adaptive vision — warm-cache fingerprint freshness", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    const mod = await import("@/extension/background/run-helpers");
+    extractStateForRun = mod.extractStateForRun;
+    isVisionCacheFresh = mod.isVisionCacheFresh;
+
+    const tabMod = await import("@/extension/background/tab-manager");
+    extractStateFromTabMock = tabMod.extractStateFromTab as unknown as ReturnType<typeof vi.fn>;
+    getPageFingerprintMock = tabMod.getPageFingerprint as unknown as ReturnType<typeof vi.fn>;
+
+    const utilsMod = await import("@/extension/background/run-helpers-utils");
+    visionElementsCache = utilsMod.visionElementsCache;
+    setVisionCacheUrl = utilsMod.setVisionCacheUrl;
+    setVisionCacheFingerprint = utilsMod.setVisionCacheFingerprint;
+
+    for (const k of Object.keys(localStore)) delete localStore[k];
+    for (const k of Object.keys(sessionStore)) delete sessionStore[k];
+    setRunState();
+    setVisionSettings({ enableLocalVision: true, visionMode: "adaptive" });
+
+    extractStateFromTabMock.mockResolvedValue(makeDomState());
+    getPageFingerprintMock.mockResolvedValue("FP-NEW");
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  test("EXTRACT_STATE fingerprint does not mark a stale warm cache as fresh", async () => {
+    // Capture-time cache state: rects + fingerprint captured when the DOM
+    // fingerprint was "FP-OLD".
+    visionElementsCache.set("v1", { x: 10, y: 10, width: 100, height: 50, label: "login" });
+    setVisionCacheUrl("https://example.com");
+    setVisionCacheFingerprint("FP-OLD");
+
+    // The page changed since capture (EXTRACT_STATE now reports "FP-NEW") but
+    // the URL is unchanged, so the adaptive warm branch runs: it reuses the
+    // cached rects instead of re-detecting.
+    extractStateFromTabMock.mockResolvedValue(makeDomState({ fingerprint: "FP-NEW" }));
+    const state = await extractStateForRun(1, MOCK_TABS);
+
+    // Sanity: the warm branch actually ran (cached rect merged into state).
+    expect(state.newElementCount).toBe(1);
+
+    // The cached rects are STALE (page fingerprint changed since capture) —
+    // clicking them must be rejected by the freshness guard.
+    expect(await isVisionCacheFresh(1)).toBe(false);
+  });
+
+  test("warm-cache reuse with an unchanged page stays fresh", async () => {
+    // Page did NOT change since capture: EXTRACT_STATE fingerprint matches.
+    visionElementsCache.set("v1", { x: 10, y: 10, width: 100, height: 50, label: "login" });
+    setVisionCacheUrl("https://example.com");
+    setVisionCacheFingerprint("FP-OLD");
+
+    extractStateFromTabMock.mockResolvedValue(makeDomState({ fingerprint: "FP-OLD" }));
+    await extractStateForRun(1, MOCK_TABS);
+    getPageFingerprintMock.mockResolvedValue("FP-OLD");
+
+    expect(await isVisionCacheFresh(1)).toBe(true);
+  });
+});

@@ -2,7 +2,7 @@
 
 /**
  * Regression coverage for the two fail-closed security gates in `handleEvaluate`
- * (see evaluate.ts lines ~313-326 and ~330-351):
+ * (see evaluate.ts lines ~40-46 and ~57-60):
  *
  *  1. `isDomainConfigMissingButEnforced()` → the domain policy was configured as
  *     enforced but the config payload is absent → `evaluate` MUST block

@@ -8,8 +8,10 @@
  *   embedded dangerous-IPv4 blocking (cloud-metadata),
  * - the strict-provenance rejection of mapped loopback / RFC1918 endpoints,
  * - `resolveAndValidateLlmBaseUrl` / `resolveAndValidateWebhookUrl` outcome
- *   branches: fail-CLOSED on a DNS lookup error, and fail-OPEN-with-warning
- *   when no resolver is available (only for a trusted / local-exempt caller).
+ *   branches: fail-CLOSED on a DNS lookup error and when no resolver is
+ *   available — even for a local-exempt / trusted caller (`ssrf-validate.ts`
+ *   only fails OPEN when the caller declares `provenance === "user-configured"`,
+ *   which these tests do not).
  */
 import { describe, test, expect, afterEach, vi } from "vitest";
 import {
@@ -52,7 +54,7 @@ describe("embedded IPv6 SSRF classification (cloud metadata)", () => {
     "http://[::ffff:0:a9fe:a9fe]",   // ::ffff:0:0/96 mapped 169.254.169.254
     "http://[64:ff9b::a9fe:a9fe]",   // NAT64 169.254.169.254
     "http://[2002:a9fe:a9fe::]",     // 6to4 169.254.169.254
-    "http://[2001:0:0:0:0:0:a9fe:a9fe]", // Teredo 169.254.169.254
+    "http://[2001:0:0:0:0:0:5601:5601]", // Teredo RFC 4380 (XOR-deobfuscated) 169.254.169.254
   ])("validateLlmBaseUrl blocks metadata via %s", (url) => {
     expect(validateLlmBaseUrl(url).ok).toBe(false);
   });
@@ -61,13 +63,13 @@ describe("embedded IPv6 SSRF classification (cloud metadata)", () => {
     "http://[::ffff:0:a9fe:a9fe]",
     "http://[64:ff9b::a9fe:a9fe]",
     "http://[2002:a9fe:a9fe::]",
-    "http://[2001:0:0:0:0:0:a9fe:a9fe]",
+    "http://[2001:0:0:0:0:0:5601:5601]",
   ])("validateWebhookUrl blocks metadata via %s", (url) => {
     expect(validateWebhookUrl(url).ok).toBe(false);
   });
 });
 
-describe("strict-provenance rejection of mapped loopback / RFC1918 (#1 bypass)", () => {
+describe("strict-provenance rejection of mapped loopback / RFC1918 (mapped-local bypass)", () => {
   test("mapped loopback 127.0.0.1 is rejected when provenance is untrusted", () => {
     // ::ffff:0:7f00:1 === 127.0.0.1
     expect(validateLlmBaseUrl("http://[::ffff:0:7f00:1]:8080", false).ok).toBe(false);
@@ -145,5 +147,13 @@ describe("resolveAndValidateWebhookUrl DNS outcome branches", () => {
     mockDnsResolved(["169.254.169.254"]);
     const res = await resolveAndValidateWebhookUrl("http://rebind.example.com/hook");
     expect(res.ok).toBe(false);
+  });
+
+  test("'resolved' with NO addresses → fail closed (empty result must not be ok)", async () => {
+    mockDnsResolved([]);
+    const res = await resolveAndValidateWebhookUrl("http://empty.example.com/hook");
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected rejection");
+    expect(res.reason).toMatch(/no addresses|DNS/i);
   });
 });

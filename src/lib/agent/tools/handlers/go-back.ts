@@ -28,8 +28,8 @@ export async function handleGoBack(
   ctx: ActionContext,
   action: Extract<Action, { type: "go_back" }>,
 ): Promise<ActionResult> {
- // Genuine failure: the History API is not present (e.g. a non-browser
- // environment) or is not callable. There is nothing we can do but report it.
+  // Genuine failure: the History API is not present (e.g. a non-browser
+  // environment) or is not callable. There is nothing we can do but report it.
   if (typeof history === "undefined" || typeof history.back !== "function") {
     return {
       action,
@@ -39,10 +39,10 @@ export async function handleGoBack(
     };
   }
 
- // Issue the back navigation. `history.back()` returns void and only throws on
- // a malformed call; a no-op (no earlier entry) is silent. Either way the call
- // was *accepted*, so we report success — the page-settle check below records
- // whether anything actually changed.
+  // Issue the back navigation. `history.back()` returns void and only throws on
+  // a malformed call; a no-op (no earlier entry) is silent. Either way the call
+  // was *accepted*, so we report success — the page-settle check below records
+  // whether anything actually changed.
   try {
     history.back();
   } catch {
@@ -54,8 +54,8 @@ export async function handleGoBack(
     };
   }
 
- // Wait for the target document to actually settle before deciding whether the
- // page changed (fixes false negatives on slow back-navigations).
+  // Wait for the target document to actually settle before deciding whether the
+  // page changed (fixes false negatives on slow back-navigations).
   const pageChanged = await waitForPageSettle(ctx);
   return {
     action,
@@ -78,20 +78,20 @@ async function waitForPageSettle(ctx: ActionContext): Promise<boolean> {
   while (Date.now() < deadline) {
     await sleep(TIMINGS.extractWait);
     const url = location.href;
- // Fast path: if the URL already diverged from the pre-action baseline, the
- // navigation succeeded — return immediately without computing a fingerprint.
+    // Fast path: if the URL already diverged from the pre-action baseline, the
+    // navigation succeeded — return immediately without computing a fingerprint.
     if (url !== ctx.beforeUrl) return true;
     const fp = domFingerprint();
- // Seed both baselines on the first real read and only start the stability
- // comparison on the second read, so the page is declared stable only after
- // two consecutive identical reads (the full navigation window is honored).
+    // Seed both baselines on the first real read and only start the stability
+    // comparison on the second read, so the page is declared stable only after
+    // two consecutive identical reads (the full navigation window is honored).
     if (prevUrl === null) {
       prevUrl = url;
       prevFp = fp;
       continue;
     }
     if (url === prevUrl && fp === prevFp) {
- // Stable — stop polling.
+      // Stable — stop polling.
       break;
     }
     prevUrl = url;

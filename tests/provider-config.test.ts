@@ -94,6 +94,90 @@ describe("canonical-host exfil guard rejects public attacker hosts regardless of
 });
 
 /**
+ * (a2) Suffix-canonical hosts (anthropic/google/azure) require a dotted
+ * subdomain boundary: `proxy.anthropic.com` is allowed, but an attacker host
+ * that merely ENDS WITH the canonical host (`evil-anthropic.com`,
+ * `not-anthropic.com`) must be rejected — otherwise an injected baseUrl
+ * redirects the user's API key (Bearer token) to the attacker's endpoint.
+ */
+describe("canonical-host suffix guard requires a dotted subdomain boundary", () => {
+  beforeEach(installPublicDns);
+  afterEach(restoreChrome);
+
+  test("evil-anthropic.com is rejected (ends-with without dotted boundary)", async () => {
+    await expect(
+      buildProvider({
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        apiKey: "sk-test",
+        baseUrl: "https://evil-anthropic.com/v1",
+        provenance: "user",
+      }),
+    ).rejects.toThrow(/not the canonical host/);
+  });
+
+  test("not-anthropic.com is rejected (ends-with without dotted boundary)", async () => {
+    await expect(
+      buildProvider({
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        apiKey: "sk-test",
+        baseUrl: "https://not-anthropic.com/v1",
+        provenance: "user",
+      }),
+    ).rejects.toThrow(/not the canonical host/);
+  });
+
+  test("anthropic.com itself is allowed", async () => {
+    const provider = await buildProvider({
+      provider: "anthropic",
+      model: "claude-sonnet-5",
+      apiKey: "sk-test",
+      baseUrl: "https://anthropic.com/v1",
+      provenance: "user",
+    });
+    expect(provider).toBeTruthy();
+    expect(provider.id).toContain("anthropic");
+  });
+
+  test("proxy.anthropic.com (a real subdomain) is allowed", async () => {
+    const provider = await buildProvider({
+      provider: "anthropic",
+      model: "claude-sonnet-5",
+      apiKey: "sk-test",
+      baseUrl: "https://proxy.anthropic.com/v1",
+      provenance: "user",
+    });
+    expect(provider).toBeTruthy();
+    expect(provider.id).toContain("anthropic");
+  });
+
+  test("evil-googleapis.com is rejected (ends-with without dotted boundary)", async () => {
+    await expect(
+      buildProvider({
+        provider: "google",
+        model: "gemini-3.5-flash",
+        apiKey: "sk-test",
+        baseUrl: "https://evil-googleapis.com/v1beta1",
+        provenance: "user",
+      }),
+    ).rejects.toThrow(/not the canonical host/);
+  });
+
+  test("api.googleapis.com (a real subdomain) is allowed", async () => {
+    const provider = await buildProvider({
+      provider: "google",
+      model: "gemini-3.5-flash",
+      apiKey: "sk-test",
+      baseUrl: "https://api.googleapis.com/v1beta1",
+      provenance: "user",
+    });
+    expect(provider).toBeTruthy();
+    expect(provider.id).toContain("google");
+  });
+});
+
+/**
  * (b) For INJECTED provenance, the SSRF guard must reject loopback and
  * cloud-metadata addresses even though a "user" provenance is exempted for
  * those same endpoints.
@@ -249,9 +333,11 @@ describe("readProviderConfig provenance fail-safe", () => {
  */
 describe("readProviderConfig unknown provider fallback", () => {
   let store: Record<string, unknown>;
+  let sessionStore: Record<string, unknown>;
 
   beforeEach(() => {
     store = {};
+    sessionStore = {};
     (globalThis as unknown as { chrome: unknown }).chrome = {
       storage: {
         local: {
@@ -266,6 +352,7 @@ describe("readProviderConfig unknown provider fallback", () => {
             return Promise.resolve();
           },
         },
+        session: { get: makeStorageGet(sessionStore) },
       },
     };
   });
@@ -277,7 +364,7 @@ describe("readProviderConfig unknown provider fallback", () => {
   test("unknown provider falls back to 'openai'", async () => {
     store.provider = "totally-fake-provider";
     store.model = "some-model";
-    store.apiKey_totally_fake_provider = "sk-test";
+    sessionStore.apiKey = "sk-test";
 
     const config = await readProviderConfig();
     expect(config).not.toBeNull();
@@ -295,7 +382,7 @@ describe("readProviderConfig unknown provider fallback", () => {
   test("known provider is NOT overridden", async () => {
     store.provider = "anthropic";
     store.model = "claude-sonnet-5";
-    store.apiKey_anthropic = "sk-test";
+    sessionStore.apiKey = "sk-test";
 
     const config = await readProviderConfig();
     expect(config!.provider).toBe("anthropic");

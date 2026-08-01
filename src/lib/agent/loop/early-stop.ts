@@ -24,10 +24,11 @@
  */
 
 import type { HistoryItem } from "../types";
-import { isEquivalentAction, type Action } from "../tools/schema";
+import { isEquivalentAction } from "../tools/schema-utils";
+import type { Action } from "../tools/schema";
 
 /** Configurable thresholds for the two early-stop conditions. */
-export interface EarlyStopThresholds {
+interface EarlyStopThresholds {
   /** Consecutive parse failures before stopping. Default `5`. */
   parsingFailure: number;
   /** Consecutive equivalent actions before stopping. Default `3`. */
@@ -41,20 +42,12 @@ export const DEFAULT_EARLY_STOP_THRESHOLDS: EarlyStopThresholds = {
 };
 
 /** Result of an {@link earlyStop} check. */
-export interface EarlyStopResult {
+interface EarlyStopResult {
   /** True when the run should stop now. */
   stop: boolean;
   /** Human-readable reason (empty when `stop === false`). */
   reason: string;
 }
-
-/**
- * Action types that are legitimately repeatable — typing the same text in
- * different fields, sending keys to multiple alert prompts. These are
- * excluded from the repeating-action check (case 2) so the early-stop
- * doesn't fire on normal form-filling flows.
- */
-const REPEATABLE_ACTION_TYPES = new Set<string>(["input", "alert_send_keys"]);
 
 /**
  * Action types that should NEVER trigger the repeating-action early-stop.
@@ -71,6 +64,25 @@ const NEVER_STOP_ON_REPEAT = new Set<string>([
   "alert_dismiss",
   "alert_get_text",
 ]);
+
+/**
+ * Action types whose equivalence classification is too coarse to judge as
+ * "stuck" from a repeat count alone:
+ *
+ * - `wait` is always equivalent regardless of its `seconds` param (see
+ *   `isEquivalentAction`), so 3 waits with genuinely-different durations
+ *   read as a stuck loop.
+ * - `scroll` equivalence compares direction only, ignoring `pages` — 3
+ *   scroll-downs while reading a long page is the most common legitimate
+ *   pattern.
+ * - `go_back` has no params and is always equivalent, yet repeated back
+ *   navigation is a normal multi-step pattern.
+ *
+ * The orchestrator's `LoopDetector` warning layer (5/8/12 repeats) still
+ * covers genuinely repetitive runs of these types; only the hard early-stop
+ * is relaxed for them.
+ */
+const SETTLE_AND_NAVIGATE_ACTIONS = new Set<string>(["wait", "scroll", "go_back"]);
 
 /**
  * Clamp a threshold to a positive integer. A non-positive, NaN, or missing
@@ -130,7 +142,7 @@ export function earlyStop(
   const lastAction = allActions[allActions.length - 1];
 
  // One-shot UI interactions must never halt the run on a repeat check.
-  if (NEVER_STOP_ON_REPEAT.has(lastAction.type)) {
+  if (NEVER_STOP_ON_REPEAT.has(lastAction.type) || SETTLE_AND_NAVIGATE_ACTIONS.has(lastAction.type)) {
     return { stop: false, reason: "" };
   }
 
@@ -138,16 +150,17 @@ export function earlyStop(
   const lastK = allActions.slice(-k);
   if (lastK.length < k) return { stop: false, reason: "" };
 
-  if (REPEATABLE_ACTION_TYPES.has(lastAction.type)) {
- // `alert_send_keys` has no stable field to distinguish prompts, so it can
- // only be judged as "stuck" by the consecutive-K check above — treat it like
- // NEVER_STOP_ON_REPEAT and never stop on the whole-history count alone.
-    if (lastAction.type === "alert_send_keys") {
-      return { stop: false, reason: "" };
-    }
- // For `input`, count DISTINCT target fields across the WHOLE history (typing
- // the same text into 3+ *different* fields IS suspicious). Three retries into
- // the *same* field are legitimate and must not trigger early-stop.
+  // `alert_send_keys` has no stable field to distinguish prompts, so it can
+  // only be judged as "stuck" by the consecutive-K check above — treat it like
+  // NEVER_STOP_ON_REPEAT and never stop on the whole-history count alone.
+  if (lastAction.type === "alert_send_keys") {
+    return { stop: false, reason: "" };
+  }
+
+  // For `input`, count DISTINCT target fields across the WHOLE history (typing
+  // the same text into 3+ *different* fields IS suspicious). Three retries into
+  // the *same* field are legitimate and must not trigger early-stop.
+  if (lastAction.type === "input") {
     const equiv = allActions.filter((a) => isEquivalentAction(a, lastAction));
     const distinctFields = new Set(
       equiv.map((a) => (a as { index?: number }).index),

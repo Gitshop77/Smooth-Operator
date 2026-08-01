@@ -36,44 +36,12 @@
  * `STEALTH_SCRIPT` constant) would throw "X is not defined" at injection time.
  */
 
-/** Regex for detecting blocked-page errors from chrome.scripting injection. */
-const BLOCKED_PAGE_RE = /cannot access|can'?t access|chrome:\/\/|about:|edge:\/\/|not allowed|not permitted|forbidden/i;
+import {
+  BLOCKED_PAGE_RE,
+  isStealthEnabled,
+} from "./anti-detection-utils";
 
-/**
- * Opt-in gate for the MAIN-world stealth patches.
- *
- * These patches mutate page-observable signals (`navigator.webdriver`,
- * `window.chrome`, WebGL vendor/renderer, screen geometry, …) to reduce
- * bot-detection cues. Circumventing automation detection can violate the Terms
- * of Service of the sites the agent visits — especially given real-money API
- * usage. They are therefore OPT-IN and DISABLED BY DEFAULT: the patches are
- * only injected when the user explicitly enables them via the `stealthEnabled`
- * flag in `chrome.storage.local`. No flag (or `false`) → no injection.
- *
- * This is a hard default-off, not a soft recommendation: `isStealthEnabled`
- * returns `false` unless the stored value is exactly `true`, so a missing,
- * corrupt, `undefined`, or prompt-injected value can never arm the patches.
- */
-export const STEALTH_ENABLED_KEY = "stealthEnabled";
-
-/**
- * Read whether the user has opted into MAIN-world stealth patching.
- *
- * Defaults to `false` (patches OFF). Returns `true` ONLY when
- * `chrome.storage.local["stealthEnabled"]` is the boolean `true`; any other
- * value (missing, falsy, non-boolean, or attacker-influenced) is treated as
- * off — fail-safe so the ToS-sensitive behavior can't be armed unintentionally
- * or through injected storage.
- */
-export async function isStealthEnabled(): Promise<boolean> {
-  try {
-    const res = await chrome.storage.local.get(STEALTH_ENABLED_KEY);
-    return res[STEALTH_ENABLED_KEY] === true;
-  } catch {
-    // Storage unavailable (e.g. non-extension context) → stay OFF.
-    return false;
-  }
-}
+export { isStealthEnabled };
 
 /**
  * Inject the 13 anti-detection patches into a tab.

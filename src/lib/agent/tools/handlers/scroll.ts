@@ -3,7 +3,7 @@
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import { TIMINGS } from "../constants";
-import type { ActionContext } from "./types";
+import { type ActionContext, isExtensionContext } from "./types";
 
 /**
  * Best-effort clear of the vision-elements cache in the service worker.
@@ -26,9 +26,9 @@ import type { ActionContext } from "./types";
  * cache may be stale.
  */
 async function clearVisionCache(): Promise<boolean> {
- // No extension runtime — the in-page demo has no SW-managed vision cache, so
- // there is nothing to clear and no staleness to warn about.
-  if (typeof chrome === "undefined" || !chrome.runtime?.id) return true;
+  // No extension runtime — the in-page demo has no SW-managed vision cache, so
+  // there is nothing to clear and no staleness to warn about.
+  if (!isExtensionContext()) return true;
 
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
@@ -53,21 +53,21 @@ export async function handleScroll(
 ): Promise<ActionResult> {
   const down = action.down !== false;
   const pages = action.pages ?? 1;
- // ~0.85 of a viewport height matches a typical "page down" feel; perturb the
- // per-page factor by a few percent so the scroll distance is not a perfectly
- // deterministic, repeatable fingerprint (humans vary per page too).
+  // ~0.85 of a viewport height matches a typical "page down" feel; perturb the
+  // per-page factor by a few percent so the scroll distance is not a perfectly
+  // deterministic, repeatable fingerprint (humans vary per page too).
   const factor = 0.82 + Math.random() * 0.06;
   const dy = (down ? 1 : -1) * pages * window.innerHeight * factor;
- // Honor prefers-reduced-motion: avoid an animated scroll for users who asked
- // the OS to minimize motion (vestibular/migraine triggers).
+  // Honor prefers-reduced-motion: avoid an animated scroll for users who asked
+  // the OS to minimize motion (vestibular/migraine triggers).
   const reduceMotion =
     typeof window.matchMedia === "function"
       ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
       : false;
   window.scrollBy({ top: dy, behavior: reduceMotion ? "auto" : "smooth" });
- // Wait for the scroll to actually settle before the next action reads the
- // viewport. Prefer the `scrollend` event (scales with distance) and cap the
- // wait so a non-firing event can't hang the step.
+  // Wait for the scroll to actually settle before the next action reads the
+  // viewport. Prefer the `scrollend` event (scales with distance) and cap the
+  // wait so a non-firing event can't hang the step.
   await new Promise<void>((resolve) => {
     let settled = false;
     const finish = () => {
@@ -84,10 +84,10 @@ export async function handleScroll(
 
   const cacheCleared = await clearVisionCache();
 
- // The scroll itself always succeeds, so we never flip `success` to false for
- // a failed cache clear. But we surface the staleness in the message so the
- // agent loop / UI can re-extract vision state before the next [vN] click
- // rather than silently risking a wrong-coordinate click.
+  // The scroll itself always succeeds, so we never flip `success` to false for
+  // a failed cache clear. But we surface the staleness in the message so the
+  // agent loop / UI can re-extract vision state before the next [vN] click
+  // rather than silently risking a wrong-coordinate click.
   const base = `Scrolled ${down ? "down" : "up"} ${pages} page(s)`;
   const message = cacheCleared
     ? base

@@ -31,10 +31,14 @@ import type {
   AsyncCallbackHandler,
   AgentRunResult,
   CallbackContext,
-  LLMResponseInfo,
-  LLMUsageInfo,
 } from "../callbacks";
+import type { LLMResponseInfo, LLMUsageInfo } from "../callbacks-utils";
 import type { ActionResult } from "../types";
+import {
+  sanitizeTokenCount,
+  sanitizeCostUsd,
+  cloneActionCounts,
+} from "./metrics-utils";
 
 /** Per-action-type success/failure counts. */
 export interface ActionCounts {
@@ -47,7 +51,7 @@ export interface ActionCounts {
 }
 
 /** Total LLM calls + tokens, broken down by phase (planner vs navigator). */
-export interface PhaseLLMMetrics {
+interface PhaseLLMMetrics {
   /** Number of LLM calls in this phase. */
   calls: number;
   /** Total input tokens (prompt tokens). */
@@ -57,7 +61,7 @@ export interface PhaseLLMMetrics {
 }
 
 /** Errors broken down by recoverability. */
-export interface ErrorMetrics {
+interface ErrorMetrics {
   /** Total errors reported via `onError`. */
   total: number;
   /** Errors flagged recoverable (transient — agent retried). */
@@ -70,7 +74,7 @@ export interface ErrorMetrics {
  * Snapshot of agent-run metrics (a frozen, serialisable object). Returned
  * by {@link AgentMetricsCallback.getMetrics}.
  */
-export interface AgentMetrics {
+interface AgentMetrics {
   /** Total number of navigator steps (`onStepEnd` invocations). */
   totalSteps: number;
   /** Total number of actions executed across all steps. */
@@ -170,28 +174,14 @@ export class AgentMetricsCallback implements AsyncCallbackHandler {
   };
 
   /**
- * Reset all accumulators to zero and re-initialise the phase state
- * machine. Useful when reusing one instance across multiple runs.
- */
-  reset(): void {
-    Object.assign(this, AgentMetricsCallback.ZERO);
-    for (const k of Object.keys(this.actionsByType)) delete this.actionsByType[k];
-    this.nextPhase = "planner";
-  }
-
-  /**
  * Snapshot the current accumulator state. The returned object is a deep
  * copy — safe to mutate without affecting the callback's internal state.
  */
   getMetrics(): AgentMetrics {
-    const actionsByType: Record<string, ActionCounts> = {};
-    for (const [k, v] of Object.entries(this.actionsByType)) {
-      actionsByType[k] = { ...v };
-    }
     return {
       totalSteps: this.totalSteps,
       totalActions: this.totalActions,
-      actionsByType,
+      actionsByType: cloneActionCounts(this.actionsByType),
       llmByPhase: {
         planner: {
           calls: this.plannerCalls,
@@ -256,13 +246,8 @@ export class AgentMetricsCallback implements AsyncCallbackHandler {
   onLLMEnd(_ctx: CallbackContext, response: LLMResponseInfo): void {
     const usage = response.usage;
     if (!usage) return;
- // Guard against malformed/missing `usage` (a provider contract regression
- // can emit non-numeric or absent fields). Without this, a single `NaN`
- // poisons every accumulator total AND permanently disables the
- // `onRunEnd` late-registration recovery (since `totalTokensIn === 0`
- // then evaluates false). Warn once and skip rather than silently corrupt.
-    const tIn = typeof usage.tokensIn === "number" && Number.isFinite(usage.tokensIn) ? usage.tokensIn : undefined;
-    const tOut = typeof usage.tokensOut === "number" && Number.isFinite(usage.tokensOut) ? usage.tokensOut : undefined;
+    const tIn = sanitizeTokenCount(usage.tokensIn);
+    const tOut = sanitizeTokenCount(usage.tokensOut);
     if (tIn === undefined || tOut === undefined) {
       console.warn("[metrics] onLLMEnd: usage has non-numeric tokensIn/tokensOut; skipping token accounting");
       return;
@@ -283,7 +268,7 @@ export class AgentMetricsCallback implements AsyncCallbackHandler {
 
   /** @inheritdoc */
   onCost(_ctx: CallbackContext, usage: LLMUsageInfo): void {
-    const cost = typeof usage.costUsd === "number" && Number.isFinite(usage.costUsd) ? usage.costUsd : undefined;
+    const cost = sanitizeCostUsd(usage.costUsd);
     if (cost === undefined) {
       console.warn("[metrics] onCost: costUsd is non-numeric; skipping cost accounting");
       return;

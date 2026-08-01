@@ -9,17 +9,15 @@
  */
 
 import type {
-  ActionResult,
   AgentAction,
+  AgentConfig,
+  ActionResult,
   BrowserState,
 } from "../../types";
 import { executeAction, describeAction } from "../../tools/executor";
 import { resetDomBaseline } from "../../dom/extractor";
 import { checkActionAllowed, requiresConfirmation, type AgentMode } from "../../modes";
-import {
-  CallbackDispatcher,
-  type CallbackContext,
-} from "../../callbacks";
+import type { CallbackDispatcher, CallbackContext } from "../../callbacks";
 import type { LoopDeps, ActionQueueResult } from "../types";
 import type { LoopDetector } from "../loop-detector";
 import { TAB_LEVEL_ACTIONS } from "../constants";
@@ -38,7 +36,7 @@ export async function executeActionQueue(
   step: number,
   agentMode: AgentMode,
   loopDetector: LoopDetector,
-  config: import("../../types").AgentConfig,
+  config: AgentConfig,
   dispatcher?: CallbackDispatcher,
   ctx?: CallbackContext,
   costCapExceeded?: () => boolean
@@ -61,6 +59,11 @@ export async function executeActionQueue(
     }
   };
 
+  const failQueue = (fromIdx: number): void => {
+    aborted = true;
+    padRemaining(fromIdx);
+  };
+
   for (let i = 0; i < actions.length; i++) {
     if (deps.signal?.aborted) {
  // Push an explicit result for `i` before padding so that
@@ -71,8 +74,7 @@ export async function executeActionQueue(
         success: false,
         message: "BLOCKED: step aborted before this action ran",
       });
-      aborted = true;
-      padRemaining(i);
+      failQueue(i);
       break;
     }
     const action = actions[i];
@@ -92,8 +94,7 @@ export async function executeActionQueue(
  // must NOT emit `actionEnd` here — that would unbalance the callback
  // pair. The success-rate tally still sees a non-success entry.
       results.push(blockedResult);
-      aborted = true;
-      padRemaining(i);
+      failQueue(i);
       break;
     }
 
@@ -127,8 +128,7 @@ export async function executeActionQueue(
         });
  // No matching `actionStart` was emitted, so no balanced `actionEnd`.
         results.push(blockedResult);
-        aborted = true;
-        padRemaining(i);
+        failQueue(i);
         break;
       }
     }
@@ -158,15 +158,17 @@ export async function executeActionQueue(
         success: false,
         message: "BLOCKED: cost cap exceeded",
       });
-      aborted = true;
-      padRemaining(i);
+      failQueue(i);
       break;
     }
 
     let result: ActionResult;
     let pageChangedHandled = false;
     const runLocalAction = async (): Promise<ActionResult> => {
-      try { return await executeAction(action, state); }
+      // Thread the step's abort signal into the action so an in-flight
+      // handler (wait sleeps, SW-RPC races) observes a user STOP instead of
+      // running to completion.
+      try { return await executeAction(action, state, deps.signal); }
       catch (e) { return toActionError(action, e); }
     };
     if (deps.onTabAction && TAB_LEVEL_ACTIONS.has(action.type)) {
@@ -224,8 +226,7 @@ export async function executeActionQueue(
     results.push(result);
 
     if (result.isDone || !result.success || result.pageChanged) {
-      aborted = true;
-      padRemaining(i);
+      failQueue(i);
       break;
     }
   }

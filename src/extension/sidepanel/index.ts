@@ -6,12 +6,7 @@
  * as chat messages with cost + token tracking.
  */
 
-import {
-  openOptionsLink,
-} from "./elements";
-
-// Re-export everything from elements for backward compatibility.
-export * from "./elements";
+import { openOptionsLink } from "./elements";
 
 // Import sibling modules for their top-level side effects (onMessage listener
 // registration + addEventListener calls). ES module evaluation order ensures

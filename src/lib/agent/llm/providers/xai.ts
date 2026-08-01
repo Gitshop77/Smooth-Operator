@@ -11,10 +11,8 @@
  */
 
 import * as OpenAICompatibleChat from "../protocols/openai-compatible-chat";
-import { makeOpenAIChatFacade, type Config } from "./openai";
+import { makeOpenAIChatFacade } from "./openai";
 import { profiles } from "./openai-compatible-profile";
-
-export type { Config };
 
 const facade = makeOpenAIChatFacade({
   id: "xai",
@@ -25,9 +23,6 @@ const facade = makeOpenAIChatFacade({
   path: OpenAICompatibleChat.PATH,
   defaultBaseURL: profiles.xai.baseURL,
 });
-
-export const id = facade.id;
-export const configure = facade.configure;
 
 /**
  * Bridge to the agent's `LLMProvider` interface.

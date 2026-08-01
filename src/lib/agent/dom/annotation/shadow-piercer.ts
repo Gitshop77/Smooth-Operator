@@ -70,71 +70,30 @@
  * shim in `dom/shadow-piercer.ts`.
  */
 
-import { redactUrlTokens } from "../extraction/element-info";
+import { redactUrlTokens } from "../extraction/element-info-utils";
+import {
+  PIERCER_STATE_KEY,
+  type PiercerState,
+  type ShadowPiercerOptions,
+  readBackdoor,
+  clearBackdoorKeys,
+  bindBackdoor,
+} from "./shadow-piercer-utils";
 
-// ─── Public types ───────────────────────────────────────────────────────────
+// ─── Local constants ────────────────────────────────────────────────────────
 
-/** Options for {@link installShadowPiercer}. */
-export interface ShadowPiercerOptions {
-  /** If true, walk the current document and tag pre-existing open shadow roots. */
-  tagExisting?: boolean;
-  /** If true, log each `attachShadow` call to the console (debug only). */
-  debug?: boolean;
-}
-
-/** Backdoor exposed on `window[Symbol.for("__open_cowork_piercer_bd__")]` for cross-world access. */
-export interface ShadowPiercerBackdoor {
-  /** Get the closed (or open) shadow root captured for `host`, if any. */
-  getShadowRoot(host: Element): ShadowRoot | null;
-  /** Whether `host` has a captured shadow root (open or closed). */
-  hasShadowRoot(host: Element): boolean;
-  /** Aggregate counters (open + closed roots captured so far). */
-  stats(): { installed: true; open: number; closed: number };
-}
-
-// Internal state — populated by `installShadowPiercer`, read by
-// `getShadowRoot` / `pierceShadowRoots`. Kept at module scope so the whole
-// module shares one state across the content-script lifetime.
-interface PiercerState {
-  /** host element → captured shadow root (open or closed). */
-  hostToRoot: WeakMap<Element, ShadowRoot>;
-  /** Count of open shadow roots captured. */
-  openCount: number;
-  /** Count of closed shadow roots captured. */
-  closedCount: number;
-  /** Whether to log each attachShadow call. */
-  debug: boolean;
-}
-
-let state: PiercerState | null = null;
-
-// Obscure internal property names — avoid the product name as a detectable
-// fingerprint that page bot-detection can scan for on `Element.prototype` or
-// `window`.
 const PIERCER_PATCHED_KEY = "__oc_p__";
-const PIERCER_STATE_KEY = "__oc_s__";
-// Use a Symbol so page scripts cannot enumerate or access the backdoor via
-// Object.keys / for-in / JSON.stringify. Symbol.for is globally shared across
-// all contexts in the same V8 isolate, so the content script (isolated world)
-// and the MAIN-world injection both resolve the same Symbol.
-const PIERCER_BACKDOOR_KEY = Symbol.for("__open_cowork_piercer_bd__");
-const PIERCER_INJECTED_KEY = "__oc_in__";
-// Neutral, opaque console prefix for debug-only logs — never embeds the
-// product name, so the page console can't be fingerprinted by that string.
 const PIERCER_LOG_TAG = "[oc-piercer]";
-
-/**
- * Hard cap on traversal depth for {@link pierceShadowRoots}. No legitimate
- * page approaches this depth; the cap only guards against adversarial /
- * cyclic deep nesting so the walker can't run unbounded. (pierceShadowRoots
- * is test-only — see its docstring — but the bound is kept tight regardless.)
- */
 const MAX_PIERCE_DEPTH = 512;
-
-// `Element` may not exist in non-DOM environments (Node.js without jsdom).
-// Guard every reference so the module loads cleanly in any context.
 const ELEMENT_CTOR: typeof Element | undefined =
   typeof Element !== "undefined" ? Element : undefined;
+
+// Re-export public types so existing import paths keep working.
+export type { ShadowPiercerBackdoor, ShadowPiercerOptions } from "./shadow-piercer-utils";
+
+// ─── Internal state ─────────────────────────────────────────────────────────
+
+let state: PiercerState | null = null;
 
 // ─── Installation ───────────────────────────────────────────────────────────
 
@@ -149,16 +108,14 @@ const ELEMENT_CTOR: typeof Element | undefined =
  * can read roots captured by a MAIN-world injection of this same module.
  */
 export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
-  if (!ELEMENT_CTOR) return; // non-DOM environment — nothing to pierce.
+  if (!ELEMENT_CTOR) return;
 
- // Idempotency: if the prototype already carries our sentinel, just rebind
- // the backdoor to the live state (handles re-injection on navigation).
   const existing = ELEMENT_CTOR.prototype.attachShadow as
     Element["attachShadow"] & { [PIERCER_PATCHED_KEY]?: boolean; [PIERCER_STATE_KEY]?: PiercerState };
   if (existing?.[PIERCER_PATCHED_KEY] && existing[PIERCER_STATE_KEY]) {
     state = existing[PIERCER_STATE_KEY];
     state.debug = !!opts.debug;
-    bindBackdoor(state);
+    bindBackdoor(state, readBackdoor());
     return;
   }
 
@@ -172,16 +129,12 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
   const original = existing;
   const patched = function (this: Element, init: ShadowRootInit): ShadowRoot {
     const mode = init?.mode ?? "open";
- // Call the real attachShadow FIRST so the returned root is the genuine
- // article (closed roots return a ShadowRoot either way; we just want to
- // keep our own reference to it).
     const root = original.call(this, init);
     try {
       newState.hostToRoot.set(this, root);
       if (mode === "closed") newState.closedCount++;
       else newState.openCount++;
       if (newState.debug) {
- // Best-effort logging — never let a console call throw the patch.
         try {
           console.info(`${PIERCER_LOG_TAG} attachShadow`, {
             tag: this.tagName?.toLowerCase() ?? "",
@@ -201,34 +154,16 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
   patched[PIERCER_PATCHED_KEY] = true;
   patched[PIERCER_STATE_KEY] = newState;
 
- // Hide the patch from Function.prototype.toString-based tamper detection:
- // expose the native attachShadow's toString so the replacement reads as a
- // built-in rather than a hook.
   patched.toString = original.toString.bind(original);
- // Mirror the native method's own descriptors: a patched plain function has
- // `.name === ""` and a real `.prototype` object, whereas the built-in
- // `attachShadow` has `.name === "attachShadow"` and `.prototype === undefined`.
- // Detectors that inspect these would otherwise flag the hook. Both are no-ops
- // for callers (attachShadow is never used as a constructor).
- // `.name` is configurable so it can be redefined; `.prototype` is NOT
- // configurable on a function (a `defineProperty` would throw), but it is
- // writable — assign it directly to mirror the native `undefined` value.
   Object.defineProperty(patched, "name", { value: "attachShadow", configurable: true });
   patched.prototype = undefined;
 
- // Define with configurable + writable so the patch can be overridden by a
- // page that detects it (best-effort, not a security boundary).
   Object.defineProperty(ELEMENT_CTOR.prototype, "attachShadow", {
     configurable: true,
     writable: true,
     value: patched,
   });
 
- // Optionally walk the current document and record pre-existing open shadow
- // roots (ones created before the piercer was installed). Closed roots
- // created before install are unreachable — there's no way to recover them
- // without the patch in place. This is why the MAIN-world injection must
- // happen at document_start before page scripts run.
   if (opts.tagExisting) {
     try {
       const walker = document.createTreeWalker(document, NodeFilter.SHOW_ELEMENT);
@@ -240,8 +175,6 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
         }
       }
     } catch (err) {
- // treeWalker may fail in exotic environments; fail silently in prod but
- // surface it in debug builds so the feature's failure is observable.
       if (newState.debug) {
         try {
           console.warn(`${PIERCER_LOG_TAG} tagExisting tree walk failed`, err);
@@ -253,7 +186,7 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
   }
 
   state = newState;
-  bindBackdoor(newState);
+  bindBackdoor(newState, readBackdoor());
 
   if (newState.debug) {
     try {
@@ -265,93 +198,6 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
       /* ignore */
     }
   }
-}
-
-/** Backdoor tagged with the state it was directly built from (idempotency guard). */
-type TaggedBackdoor = ShadowPiercerBackdoor & { [PIERCER_STATE_KEY]?: PiercerState };
-
-/** Read the cross-world backdoor, if present, as a {@link TaggedBackdoor}. */
-function readTaggedBackdoor(): TaggedBackdoor | undefined {
-  if (typeof window === "undefined") return undefined;
-  return (window as any)[PIERCER_BACKDOOR_KEY] as TaggedBackdoor | undefined;
-}
-
-/** Read the cross-world backdoor, if present, as a {@link ShadowPiercerBackdoor}. */
-function readBackdoor(): ShadowPiercerBackdoor | undefined {
-  return readTaggedBackdoor() as ShadowPiercerBackdoor | undefined;
-}
-
-/**
- * Module-scope cache of the resolved cross-world backdoor. `getShadowRoot`
- * reads it on the hot path (per element) instead of re-reading the `window`
- * property on every miss, then falls back to {@link readBackdoor} if unset.
- */
-let cachedBackdoor: TaggedBackdoor | undefined;
-
-/** Publish the cross-world backdoor on `window` (best-effort). */
-function writeBackdoor(b: TaggedBackdoor): void {
-  try {
-    (window as any)[PIERCER_BACKDOOR_KEY] = b;
-  } catch {
-    /* window may be non-writable in some sandboxes — ignore */
-  }
-}
-
-/** Mark that the backdoor has been injected (best-effort). */
-function markInjected(): void {
-  try {
-    (window as unknown as Record<string, unknown>)[PIERCER_INJECTED_KEY] = true;
-  } catch {
-    /* window may be non-writable in some sandboxes — ignore */
-  }
-}
-
-/** Clear the cross-world backdoor keys (test reset). */
-function clearBackdoorKeys(): void {
-  cachedBackdoor = undefined;
-  try {
-    delete (window as any)[PIERCER_BACKDOOR_KEY];
-    delete (window as unknown as Record<string, unknown>)[PIERCER_INJECTED_KEY];
-  } catch {
-    /* ignore */
-  }
-}
-
-/** Expose the backdoor on `window` so other worlds/code can read closed roots. */
-function bindBackdoor(s: PiercerState): void {
-  if (typeof window === "undefined") return;
- // Merge with any pre-existing backdoor instead of clobbering it. The MAIN-
- // world injection captures the page's closed shadow roots into ITS state and
- // publishes a backdoor here; if the content script (or a re-injection)
- // re-binds, an unconditional overwrite would discard those captured roots
- // and break piercing in production. The combined accessor reads BOTH the
- // local state and any backdoor that was already on `window`.
-  const existing = readTaggedBackdoor();
-
- // Idempotency guard : if the live backdoor was already built from
- // THIS SAME state, re-binding it would wrap itself — double-counting
- // `stats()` and growing an unbounded backdoor wrapper chain on every
- // re-install. The existing backdoor already reflects `s`, so bail out.
-  if (existing && existing[PIERCER_STATE_KEY] === s) return;
-
-  const backdoor: TaggedBackdoor = {
-    getShadowRoot: (host: Element): ShadowRoot | null =>
-      s.hostToRoot.get(host) ?? existing?.getShadowRoot(host) ?? null,
-    hasShadowRoot: (host: Element): boolean =>
-      s.hostToRoot.has(host) || (existing?.hasShadowRoot(host) ?? false),
-    stats: () => {
-      const prev = existing?.stats();
-      return {
-        installed: true,
-        open: (prev?.open ?? 0) + s.openCount,
-        closed: (prev?.closed ?? 0) + s.closedCount,
-      };
-    },
-  };
-  backdoor[PIERCER_STATE_KEY] = s;
-  writeBackdoor(backdoor);
-  cachedBackdoor = backdoor;
-  markInjected();
 }
 
 // ─── Public helpers ─────────────────────────────────────────────────────────
@@ -371,36 +217,21 @@ function bindBackdoor(s: PiercerState): void {
  * and the root is closed).
  */
 export function getShadowRoot(el: Element): ShadowRoot | null {
- // Open shadow root — always accessible.
   try {
     if (el.shadowRoot) return el.shadowRoot;
   } catch {
     /* el.shadowRoot can throw on some implementations — fall through */
   }
- // Closed shadow root — read from the module-local state if installed.
   if (state) {
     const root = state.hostToRoot.get(el);
     if (root) return root;
   }
- // Cross-world backdoor (MAIN-world injection set this on the shared window).
- // The page's MAIN world can overwrite the backdoor, so treat its return value
- // as untrusted: only accept a genuine `ShadowRoot` (or a node of the right
- // `nodeType`), otherwise an attacker-supplied fake node would be walked by the
- // extractor. Defense-in-depth against a fabricated-DOM injection.
   if (typeof window !== "undefined") {
-    const backdoor = cachedBackdoor ?? readBackdoor();
+    const backdoor = readBackdoor();
     if (backdoor) {
       try {
         const root = backdoor.getShadowRoot(el);
         if (root instanceof ShadowRoot) return root;
- // Cross-world / non-instanceof fallback: a genuine ShadowRoot is a
- // DOCUMENT_FRAGMENT_NODE that ALSO exposes a `host` (the element it is
- // attached to) and a real, iterable `childNodes` collection. Requiring
- // `host` distinguishes a real ShadowRoot from a fabricated
- // `DocumentFragment` (which lacks `host`), and the iterable `childNodes`
- // check rejects attacker-supplied fake nodes that only mimic the shape
- // (e.g. `{nodeType:11, host:{}}`) — otherwise the extractor would try to
- // walk them and throw on `Array.from(sr.childNodes)`.
         const srChildNodes = (root as unknown as { childNodes?: unknown }).childNodes;
         if (
           typeof Node !== "undefined" &&
@@ -458,10 +289,6 @@ export function pierceShadowRoots(root: Element | Document | ShadowRoot): Elemen
   const visited = new Set<Node>();
   const elementNodeType = typeof Node !== "undefined" ? Node.ELEMENT_NODE : 1;
 
- // Iterative DFS with an explicit stack : a recursive walk overflows
- // the call stack on pathologically deep shadow/light DOM trees. The explicit
- // stack removes that limit, `visited` guards re-projected/cyclic nodes, and
- // `MAX_PIERCE_DEPTH` caps descent so a truly unbounded tree can't run forever.
   const stack: Array<{ node: Node; depth: number }> = [{ node: root, depth: 0 }];
   while (stack.length > 0) {
     const { node, depth } = stack.pop()!;
@@ -472,28 +299,16 @@ export function pierceShadowRoots(root: Element | Document | ShadowRoot): Elemen
       out.push(node as Element);
     }
 
- // Stop descending past the depth cap, but keep processing the rest of the
- // stack (already-queued siblings/subtrees are still emitted).
     if (depth >= MAX_PIERCE_DEPTH) continue;
 
- // Collect this node's descendants (light-DOM children, then shadow root),
- // then push them in reverse so they pop in depth-first source order —
- // matching the previous recursive traversal exactly.
     const children: Node[] = [];
 
- // Light-DOM children (works for Element, Document, ShadowRoot — all have
- // `childNodes`). `Array.from` snapshots the live NodeList so mutation
- // during the walk doesn't corrupt iteration.
-    const childNodes = (node as { childNodes?: NodeListOf<ChildNode> }).childNodes;
-    if (childNodes) {
-      for (let i = 0; i < childNodes.length; i++) {
-        children.push(childNodes[i]);
-      }
+    // firstChild/nextSibling instead of `childNodes` (indexed access on a live
+    // NodeList re-snapshots it in jsdom — quadratic under bulk mutations).
+    for (let child = node.firstChild; child; child = child.nextSibling) {
+      children.push(child);
     }
 
- // Shadow DOM — pierce both open and closed roots. Only Elements can be
- // shadow hosts, so guard with an instanceof check (cheap and safe even
- // when `Element` is undefined in non-DOM environments).
     if (ELEMENT_CTOR && node instanceof ELEMENT_CTOR) {
       const sr = getShadowRoot(node);
       if (sr) children.push(sr);
@@ -519,11 +334,6 @@ export function _resetShadowPiercerForTests(): void {
       /* ignore */
     }
   }
-  // Clear the idempotency sentinel so the next installShadowPiercer does NOT
-  // short-circuit on the still-patched prototype closure (which would write to
-  // the orphaned old WeakMap). Deleting the sentinel forces a fresh patch and a
-  // fresh `state` on the next install, so tests don't leak captured roots across
-  // re-installs.
   if (ELEMENT_CTOR) {
     try {
       delete (ELEMENT_CTOR.prototype.attachShadow as unknown as Record<string, unknown>)[PIERCER_PATCHED_KEY];

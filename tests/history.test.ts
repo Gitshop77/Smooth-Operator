@@ -7,27 +7,13 @@
  */
 
 import { describe, test, expect, beforeAll } from "vitest";
+import { makeChromeStorageMock } from "./helpers/chrome-storage-mock";
+import type { RunHistoryEntry } from "../src/extension/options/history-utils";
 
 function setupGlobals(): void {
-  const local = new Map<string, unknown>();
-  const session = new Map<string, unknown>();
-  const makeArea = (store: Map<string, unknown>) => ({
-    get: (_keys: unknown, cb?: (res: Record<string, unknown>) => void) => {
-      cb?.(Object.fromEntries(store));
-    },
-    set: (items: Record<string, unknown>, cb?: () => void) => {
-      Object.entries(items).forEach(([k, v]) => store.set(k, v));
-      cb?.();
-    },
-    remove: (keys: string | string[], cb?: () => void) => {
-      (Array.isArray(keys) ? keys : [keys]).forEach((k) => store.delete(k));
-      cb?.();
-    },
-  });
-  (globalThis as unknown as { chrome: unknown }).chrome = {
-    storage: { local: makeArea(local), session: makeArea(session) },
-    runtime: { lastError: undefined, id: "test" },
-  };
+  const localStore = new Map<string, unknown>();
+  const sessionStore = new Map<string, unknown>();
+  (globalThis as unknown as { chrome: unknown }).chrome = makeChromeStorageMock(localStore, sessionStore);
 
   // Settings-sync element set (history.ts imports settings-sync).
   document.body.innerHTML = `
@@ -108,5 +94,56 @@ describe("history import validators", () => {
       isRunHistoryEntry(e) && JSON.stringify(e).length <= MAX_RUN_ENTRY_BYTES;
     expect(passes(small)).toBe(true);
     expect(passes(big)).toBe(false);
+  });
+});
+
+describe("capTranscript", () => {
+  let capTranscript: (run: RunHistoryEntry) => string;
+  let MAX_TRANSCRIPT_CHARS: number;
+
+  beforeAll(async () => {
+    const mod = await import("../src/extension/options/history-utils");
+    capTranscript = mod.capTranscript;
+    MAX_TRANSCRIPT_CHARS = mod.MAX_TRANSCRIPT_CHARS;
+  });
+
+  test("small runs pass through unchanged", () => {
+    const run: RunHistoryEntry = {
+      task: "hi",
+      startedAt: 1,
+      endedAt: 2,
+      stepCount: 1,
+      totalCostUsd: 0.1,
+      transcript: { ok: true },
+    };
+    expect(capTranscript(run)).toBe(JSON.stringify(run, null, 2));
+  });
+
+  test("oversized transcripts are capped with an explicit marker", () => {
+    const run: RunHistoryEntry = {
+      task: "big",
+      startedAt: 1,
+      endedAt: 2,
+      stepCount: 1,
+      totalCostUsd: 0.1,
+      transcript: "y".repeat(200_000),
+    };
+    const out = capTranscript(run);
+    expect(out.length).toBeLessThan(MAX_TRANSCRIPT_CHARS + 120);
+    expect(out).toContain("(truncated:");
+    expect(out).toContain("remains in storage");
+  });
+
+  test("the cap cut is code-point-aware (no lone surrogates)", () => {
+    const run: RunHistoryEntry = {
+      task: "emoji",
+      startedAt: 1,
+      endedAt: 2,
+      stepCount: 1,
+      totalCostUsd: 0.1,
+      transcript: "😀".repeat(120_000),
+    };
+    const out = capTranscript(run);
+    expect(out.includes("\uFFFD")).toBe(false);
   });
 });

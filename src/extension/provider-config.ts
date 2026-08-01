@@ -22,6 +22,7 @@ import * as OpenAICompatibleChat from "../lib/agent/llm/protocols/openai-compati
 import { resolveAndValidateLlmBaseUrl, type SsrfProvenance } from "../lib/agent/llm/route/ssrf";
 import { modelSupportsVision, modelSupportsReasoning, getDefaultModelForProvider, resolveVisionSupport, fetchCatalog } from "../lib/agent/llm/catalog";
 import { CATALOG_PROVIDER_ID_MAP } from "./provider-config-map";
+import { ensureApiKeyInSession } from "./api-key-storage";
 
 /** The user's provider configuration (stored in chrome.storage.local). */
 export interface ProviderConfig {
@@ -47,47 +48,15 @@ export interface ProviderConfig {
   provenance?: "user" | "injected";
 }
 
-// Import the canonical profile table from openai-compatible-profile.ts
-// instead of maintaining a separate DEFAULT_BASE_URLS copy. The profiles table
-// is the single source of truth for OpenAI-compatible provider base URLs.
-import { profiles, byProvider } from "../lib/agent/llm/providers/openai-compatible-profile";
+import { byProvider } from "../lib/agent/llm/providers/openai-compatible-profile";
+import {
+  DEFAULT_BASE_URLS,
+  DEFAULT_MODELS,
+  canonicalLlmHost,
+  isLocalUrl,
+} from "./provider-config-utils";
 
-/**
- * Default base URLs — derived from the canonical profiles table.
- *
- * NOTE: `DEFAULT_BASE_URLS` is ONLY consulted by:
- * - the `default` (OpenAI-compatible) branch in `buildProvider`, which
- * synthesizes a profile for providers without a dedicated `case`
- * (deepseek, qwen, groq, ollama, ...);
- * - the dedicated `case "google"` branch (Vertex AI), which requires an
- * explicit `baseUrl` from the user and THROWS if none is supplied (it does
- * NOT fall back to this map; `google` is intentionally absent here, matching
- * the `google`/Vertex facade which has no static default URL).
- *
- * Providers that have their OWN dedicated `case` AND a static default in their
- * facade (`openai`, `anthropic`, `gemini`, `xai`, `openrouter`, `azure`) never
- * read this map. So we deliberately exclude `openrouter` / `xai` from the
- * spread below (they'd be dead entries that look like they back the dedicated
- * cases but don't). `google` is intentionally NOT in the profiles table, so
- * it is absent here and the `case "google"` branch requires an explicit
- * `baseUrl` from the user .
- */
-const DEFAULT_BASE_URLS: Record<string, string> = {
- // Spread the profiles table entries (covers deepseek, groq, together, etc.)
- // — excluding `openrouter` / `xai`, which have dedicated `case` branches and
- // therefore never consult this map. Providers with a dedicated `case`
- // (`openai`, `anthropic`, `gemini`, `xai`, `openrouter`, `azure`) are NOT
- // listed here on purpose: their default base URLs come from the provider
- // facades, so a dead entry here would be misleading and a regression risk if
- // a dedicated `case` ever regressed to the `default` branch. `google` is
- // handled separately by its own `case` branch and is intentionally absent
- // from this spread.
-  ...Object.fromEntries(
-    Object.values(profiles)
-      .filter((p) => p.provider !== "openrouter" && p.provider !== "xai")
-      .map((p) => [p.provider, p.baseURL]),
-  ),
-};
+export { DEFAULT_MODELS } from "./provider-config-utils";
 
 /**
  * The set of provider ids the extension knows how to build via `buildProvider`.
@@ -103,7 +72,7 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
  * `buildProvider` (`openai`, `anthropic`, `gemini`, `xai`, `openrouter`,
  * `azure`, `google`, `ollama`). Duplicates are harmless (it's a Set).
  */
-export const KNOWN_PROVIDERS: Set<string> = new Set<string>([
+const KNOWN_PROVIDERS: Set<string> = new Set<string>([
   "openai",
   "anthropic",
   "gemini",
@@ -115,61 +84,7 @@ export const KNOWN_PROVIDERS: Set<string> = new Set<string>([
   ...Object.keys(byProvider),
 ]);
 
-/** Default models for each provider (used when the user doesn't specify one).
- * These are OFFLINE FALLBACK ONLY — the online default model is resolved from
- * the models.dev catalog via `getDefaultModelForProvider` (see `buildProvider`).
- * They don't appear in the profiles table because they change frequently.
- *
- * Exported so `agent-bridge.ts` can apply the SAME default-model resolution
- * when computing `mainModelVision` — otherwise an empty `model` field would
- * disagree with the LLM-side check in `navigatorCallDirect()` (which uses
- * `provider.supportsVision` AFTER default resolution in `buildProvider`).
- * That disagreement caused the screenshot gating to flip-flop: extractState
- * thought "no vision" and skipped `captureVisibleTab`, while navigatorCallDirect
- * thought "vision" and tried to embed a non-existent screenshot. */
-// NOTE: keys are CATALOG provider ids (not UI provider ids), because
-// `buildProvider` resolves the model via the catalog id (see CATALOG_PROVIDER_ID_MAP).
-// e.g. qwen -> "alibaba", together -> "togetherai", gemini/google -> "google",
-// azure -> "openai". gemini & azure have NO separate key here — they resolve through
-// the "google" / "openai" keys above.
-export const DEFAULT_MODELS: Record<string, string> = {
-  openai:    "gpt-5.5",
-  anthropic: "claude-sonnet-5",
-  google:    "gemini-3.5-flash",
-  deepseek:  "deepseek-v4-flash",
-  alibaba: "qwen3.7-max",
-  groq:      "llama-3.3-70b-versatile",
-  togetherai:"meta-llama/Llama-3.3-70B-Instruct-Turbo",
-  mistral:   "mistral-small-latest",
-  cerebras:  "gpt-oss-120b",
-  openrouter:"anthropic/claude-sonnet-5",
-  ollama:    "llama3.3",
-  opencode:  "",
-  litellm:   "gpt-5.5",
-  xai:       "grok-4.3",
-};
 
-/**
- * Canonical host(s) an INJECTED provider config's `baseUrl` is allowed to point
- * at. An injected (untrusted) config must not be able to redirect the user's
- * API key (sent as a Bearer token) to an attacker-controlled public endpoint,
- * so the forwarded baseUrl is confined to the provider's own host. Returns null
- * when the provider has no well-known canonical host — callers then reject any
- * injected `baseUrl` (fail safe). For Azure the host is per-resource, so a
- * suffix match on `.openai.azure.com` is used instead of an exact host.
- */
-function canonicalLlmHost(provider: string): { host: string; suffix?: boolean } | null {
-  const prof = byProvider[provider];
-  if (prof) return { host: new URL(prof.baseURL).host };
-  switch (provider) {
-    case "openai": return { host: "api.openai.com" };
-    case "anthropic": return { host: "anthropic.com", suffix: true };
-    case "gemini": return { host: "generativelanguage.googleapis.com" };
-    case "google": return { host: "googleapis.com", suffix: true };
-    case "azure": return { host: ".openai.azure.com", suffix: true };
-    default: return null;
-  }
-}
 
 /**
  * Resolve the effective model id for a provider config.
@@ -192,29 +107,9 @@ export function resolveModel(config: { provider?: string; model?: string; catalo
   return config.model || DEFAULT_MODELS[pid] || getDefaultModelForProvider(pid) || "";
 }
 
-/** Positive check: true if `url` targets a local endpoint (loopback, RFC1918, or localhost). */
-function isLocalUrl(url: string): boolean {
-  try {
-    const { hostname } = new URL(url);
-    const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-    if (h === "localhost" || h.endsWith(".localhost")) return true;
-    if (h.includes(":")) {
-      // IPv6 — simplified check for loopback (::1) and ULA (fc00::/7)
-      return h === "::1" || h === "0:0:0:0:0:0:0:1" || h.startsWith("fc") || h.startsWith("fd");
-    }
-    // IPv4 — check for loopback (127.0.0.0/8) and RFC1918 (10/8, 172.16/12, 192.168/16)
-    const parts = h.split(".");
-    if (parts.length !== 4) return false;
-    const a = Number(parts[0]);
-    const b = Number(parts[1]);
-    if (a === 127) return true;
-    if (a === 10) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    return false;
-  } catch {
-    return false;
-  }
+/** Throw the canonical "requires an API key" error when `apiKey` is empty. */
+function requireApiKey(label: string, apiKey: string | undefined): void {
+  if (!apiKey) throw new Error(`${label} requires an API key. Add one in Options.`);
 }
 
 /**
@@ -289,9 +184,15 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
       const canon = canonicalLlmHost(provider);
       let host = "";
       try { host = new URL(baseUrl).host; } catch { host = ""; }
+      // Suffix canonical hosts require a DOTTED subdomain boundary: an exact
+      // match or `*.canon.host`. A bare `endsWith` would let an attacker host
+      // like `evil-anthropic.com` (or `not-anthropic.com`) masquerade as the
+      // provider and receive the user's API key as a Bearer token.
       const allowed =
         canon !== null &&
-        (canon.suffix ? host.endsWith(canon.host) : host === canon.host);
+        (canon.suffix
+          ? host === canon.host || host.endsWith("." + canon.host)
+          : host === canon.host);
       if (!allowed) {
         throw new Error(
           `LLM baseUrl rejected: ${baseUrl} is not the canonical host for provider "${provider}". ` +
@@ -304,7 +205,7 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
   let result: LLMProvider;
   switch (provider) {
     case "openai":
-      if (!apiKey) throw new Error("OpenAI requires an API key. Add one in Options.");
+      requireApiKey("OpenAI", apiKey);
       result = OpenAI.toLLMProvider({
         apiKey,
         model: resolvedModel,
@@ -314,22 +215,22 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
       break;
 
     case "anthropic":
-      if (!apiKey) throw new Error("Anthropic requires an API key. Add one in Options.");
+      requireApiKey("Anthropic", apiKey);
       result = Anthropic.toLLMProvider({ apiKey, model: resolvedModel, allowLocalExemption: provenance === "user" });
       break;
 
     case "gemini":
-      if (!apiKey) throw new Error("Gemini requires an API key. Add one in Options.");
+      requireApiKey("Gemini", apiKey);
       result = Google.toLLMProvider({ apiKey, model: resolvedModel, allowLocalExemption: provenance === "user" });
       break;
 
     case "xai":
-      if (!apiKey) throw new Error("xAI requires an API key. Add one in Options.");
+      requireApiKey("xAI", apiKey);
       result = XAI.toLLMProvider({ apiKey, model: resolvedModel, allowLocalExemption: provenance === "user" });
       break;
 
     case "openrouter":
-      if (!apiKey) throw new Error("OpenRouter requires an API key. Add one in Options.");
+      requireApiKey("OpenRouter", apiKey);
       result = OpenRouter.toLLMProvider({
         apiKey,
         model: resolvedModel,
@@ -339,7 +240,7 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
       break;
 
     case "azure":
-      if (!apiKey) throw new Error("Azure OpenAI requires an API key. Add one in Options.");
+      requireApiKey("Azure OpenAI", apiKey);
       result = Azure.toLLMProvider({
         apiKey,
         model: resolvedModel,
@@ -356,11 +257,10 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
  // no single static default URL — the user must supply `baseUrl` in
  // Options. Route through the OpenAICompatible facade once a baseUrl is
  // present.
-      if (!apiKey) throw new Error("Google (Vertex AI) requires an API key. Add one in Options.");
+      requireApiKey("Google (Vertex AI)", apiKey);
       // Vertex AI has no static default (the user must supply `baseUrl`); this
       // is intentional — `google` is deliberately absent from `DEFAULT_BASE_URLS`.
-      const resolvedBaseURL = baseUrl;
-      if (!resolvedBaseURL) {
+      if (!baseUrl) {
         throw new Error(
           "Google (Vertex AI) requires a baseUrl. Enter your Vertex OpenAI-compatible endpoint in Options (e.g. https://ai.googleapis.com/v1beta1/projects/…/locations/…/endpoints/openai)."
         );
@@ -369,7 +269,7 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
         provider: "google",
         apiKey,
         model: resolvedModel,
-        baseURL: resolvedBaseURL,
+        baseURL: baseUrl,
         allowLocalExemption: provenance === "user",
       });
       break;
@@ -395,9 +295,7 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
         const isLocal = provider === "ollama" || provider === "litellm" ||
           !!catEntry.api?.match(/localhost|127\.0\.0\.1|\[::1\]/);
         const needsKey = !isLocal && (catEntry.env == null || catEntry.env.length > 0);
-        if (needsKey && !apiKey) {
-          throw new Error(`${provider} requires an API key. Add one in Options.`);
-        }
+        if (needsKey) requireApiKey(provider, apiKey);
         const facade = makeOpenAIChatFacade({
           id: provider,
           displayName: catEntry.name,
@@ -428,9 +326,7 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
         );
       }
       const needsKey = provider !== "ollama";
-      if (needsKey && !apiKey) {
-        throw new Error(`${provider} requires an API key. Add one in Options.`);
-      }
+      if (needsKey) requireApiKey(provider, apiKey);
       const resolvedBaseURL = baseUrl || DEFAULT_BASE_URLS[provider];
       if (!resolvedBaseURL && needsKey) {
         throw new Error(
@@ -497,6 +393,20 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
 }
 
 /**
+ * Read the user's API key. The key lives in `chrome.storage.session`
+ * (in-memory storage cleared when the browser restarts) — see
+ * `api-key-storage.ts`. The Options page write side (`settings-sync.ts`
+ * `saveSettings`) stores the key in session storage and only mirrors it to
+ * disk when the user opts in via the "remember on this device" checkbox;
+ * `ensureApiKeyInSession` re-hydrates the session from that mirror after a
+ * restart — and NEVER trusts a plaintext-disk key without the consent flag.
+ * Never console.log the value.
+ */
+async function readStoredApiKey(): Promise<string> {
+  return ensureApiKeyInSession();
+}
+
+/**
  * Read the provider config from `chrome.storage.local`. Returns null if the
  * provider hasn't been configured yet.
  */
@@ -509,18 +419,7 @@ export async function readProviderConfig(): Promise<ProviderConfig | null> {
     "resourceName",
     "provenance",
   ]);
-  // API keys are stored in `chrome.storage.local` with per-provider
-  // namespacing (`apiKey_${provider}`). A prior design used session-only
-  // storage, but that was lost on extension updates; keys now live in local
-  // storage so they persist. The migration in settings-sync.ts handles the
-  // session-to-local move. Never console.log the value.
   const provider = normalizeString(res.provider);
-  let apiKey = "";
-  if (chrome.storage?.local) {
-    const key = `apiKey_${provider}`;
-    const sres = await chrome.storage.local.get([key]);
-    apiKey = (sres[key] as string) || "";
-  }
   if (!provider) return null; // no provider set → unconfigured user
  // Defense-in-depth: a corrupted / injected `chrome.storage.local` payload
  // could carry an arbitrary provider id. Fall back to the default so the
@@ -533,15 +432,13 @@ export async function readProviderConfig(): Promise<ProviderConfig | null> {
       `[provider-config] Unknown provider "${provider}" read from storage; falling back to default.`
     );
     resolvedProvider = "openai";
-    if (chrome.storage?.local) {
-      try {
-        await chrome.storage.local.set({ provider_reset_warning: true });
-      } catch { /* non-fatal */ }
-    }
-    const fallbackKey = `apiKey_openai`;
-    const sresFallback = await chrome.storage.local.get([fallbackKey]);
-    apiKey = (sresFallback[fallbackKey] as string) || "";
+    try {
+      await chrome.storage.local.set({ provider_reset_warning: true });
+    } catch { /* non-fatal */ }
   }
+ // The API key is NOT per-provider — it is a single session-storage key (see
+ // `readStoredApiKey`), so it is read once after provider resolution.
+  const apiKey = await readStoredApiKey();
   const model = normalizeString(res.model);
   const baseUrl = normalizeString(res.baseUrl);
   const resourceName = normalizeString(res.resourceName);

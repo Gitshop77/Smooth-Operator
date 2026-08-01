@@ -7,7 +7,7 @@
  * Plain TypeScript — no framework dependencies.
  */
 
-import { Auth, type Auth as AuthDef } from "./auth";
+import { Auth, type AuthStrategy as AuthDef } from "./auth";
 import { type Endpoint } from "./endpoint";
 import { type Framing } from "./framing";
 import { type Transport, httpJson, type HttpPrepared } from "./transport-http";
@@ -15,7 +15,7 @@ import type { SsrfProvenance } from "./ssrf";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export interface RouteBody<Body> {
+interface RouteBody<Body> {
   /** Build the provider-native body from a common LLMRequest. */
   readonly from: (request: LLMRequest) => Body | Promise<Body>;
 }
@@ -30,7 +30,7 @@ export interface Protocol<Body = unknown, FrameType = string, EventType = unknow
   };
 }
 
-export interface Route<Body = unknown, Prepared = unknown> {
+interface Route<Body = unknown, Prepared = unknown> {
   readonly endpoint: Endpoint<Body>;
   readonly auth: AuthDef;
   readonly body: RouteBody<Body>;
@@ -48,7 +48,7 @@ export interface Route<Body = unknown, Prepared = unknown> {
  * throw `DataCloneError` on the circular `route` reference and its closures, and would
  * recurse infinitely under `JSON.stringify`.
  */
-export interface Model {
+interface Model {
   readonly id: string;
   readonly provider: string;
   readonly routeId: string;
@@ -64,7 +64,7 @@ export interface Model {
  */
 const routeRegistry = new Map<string, Route<unknown, unknown>>();
 
-export interface GenerationOptions {
+interface GenerationOptions {
   readonly temperature?: number;
   readonly maxTokens?: number;
   readonly topP?: number;
@@ -93,7 +93,7 @@ export interface LLMRequest {
   readonly structuredOutputStrict?: boolean;
 }
 
-export interface LLMResponse {
+interface LLMResponse {
   readonly content: string;
   readonly usage?: {
     tokensIn: number;
@@ -109,7 +109,7 @@ export interface LLMResponse {
 
 // ─── Route factory ────────────────────────────────────────────────────────────
 
-export interface MakeRouteInput<Body, FrameType, EventType, State> {
+interface MakeRouteInput<Body, FrameType, EventType, State> {
   readonly id: string;
   readonly provider?: string;
   readonly protocol: Protocol<Body, FrameType, EventType, State>;
@@ -121,8 +121,9 @@ export interface MakeRouteInput<Body, FrameType, EventType, State> {
    * Provenance of the base URL this route will fetch. Threaded into the SSRF
    * guards so an injected / non-user URL FAILS CLOSED. Defaults to
    * `"untrusted"`; pass `"user-configured"` only for a URL the user explicitly
-   * configured (the curated Ollama / LiteLLM loopback origins are always
-   * treated as `user-configured` regardless).
+   * configured. The curated Ollama / LiteLLM loopback origins are only treated
+   * as `user-configured` when the caller explicitly passes that flag — they are
+   * never upgraded automatically.
    */
   readonly provenance?: SsrfProvenance;
 }

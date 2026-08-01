@@ -14,14 +14,23 @@
 
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
-import type { ActionContext } from "./types";
+import { type ActionContext, isExtensionContext } from "./types";
 import { rejectOnAbort } from "./abort";
+
+const DETECT_VISUAL_TIMEOUT_MS = 30000;
+
+type DetectVisualResponse = {
+  ok?: boolean;
+  count?: number;
+  description?: string;
+  error?: string;
+};
 
 export async function handleDetectVisual(
   ctx: ActionContext,
   action: Extract<Action, { type: "detect_visual" }>,
 ): Promise<ActionResult> {
-  if (typeof chrome === "undefined" || !chrome.runtime?.id) {
+  if (!isExtensionContext()) {
     return {
       action,
       success: false,
@@ -29,17 +38,14 @@ export async function handleDetectVisual(
     };
   }
   try {
- // `chrome.runtime.sendMessage` resolves `undefined` (not a rejection) when
- // no listener is present, so read the response through a typed shape and
- // validate each field before consuming it. Race the call against a timeout
- // so a busy/hung/crashed SW can't hang the agent step indefinitely.
+    // `chrome.runtime.sendMessage` resolves `undefined` (not a rejection) when
+    // no listener is present, so read the response through a typed shape and
+    // validate each field before consuming it. Race the call against a timeout
+    // so a busy/hung/crashed SW can't hang the agent step indefinitely.
     let t: ReturnType<typeof setTimeout> | undefined;
-    let res:
-      | { ok?: boolean; count?: number; description?: string; error?: string }
-      | undefined
-      | null;
- // Race the SW call against the timeout AND the step's abort signal so a user
- // STOP is honored mid-step instead of waiting out the full 30s timeout.
+    let res: DetectVisualResponse | undefined | null;
+    // Race the SW call against the timeout AND the step's abort signal so a user
+    // STOP is honored mid-step instead of waiting out the full 30s timeout.
     const abort = rejectOnAbort(ctx.signal);
     try {
       res = (await Promise.race([
@@ -50,14 +56,11 @@ export async function handleDetectVisual(
         new Promise<never>((_, reject) => {
           t = setTimeout(
             () => reject(new Error("detect_visual timed out waiting for the extension")),
-            30000,
+            DETECT_VISUAL_TIMEOUT_MS,
           );
         }),
         abort.promise,
-      ])) as
-        | { ok?: boolean; count?: number; description?: string; error?: string }
-        | undefined
-        | null;
+      ])) as DetectVisualResponse | undefined | null;
     } finally {
       if (t) clearTimeout(t);
       abort.cleanup();

@@ -1,33 +1,6 @@
 /**
  * `search_page` action handler — regex or substring search across the page's
  * text nodes.
- *
- * ReDoS / freeze protection on the page main thread
- * ------------------------------------------------
- * A single catastrophic-backtracking regex run against ONE large text node can
- * block the main thread inside a single `regex.test(text)` call. That call
- * cannot be interrupted from JavaScript, so a node-visit / match cap is only
- * consulted *between* `test()` calls — it bounds the number of matches but not
- * the cost of any single one. We therefore defend in layers:
- * 1. Cap the pattern length (LIMITS.searchPageMaxRegexPattern) so the source
- * itself can't be a giant pathological expression.
- * 2. Statically reject patterns that are KNOWN catastrophic-backtracking
- * (ReDoS) shapes — a *nested* unbounded quantifier such as `(a+)+`,
- * `(a*)*`, `(a+)*`, or `(a{2,})+`, and *ambiguous alternation* under an
- * unbounded quantifier such as `(a|a)+`, `(a|ab)+`, `(a|a|a)+$`. These are
- * the structural signatures of exponential backtracking. This is the
- * primary safeguard: any pattern that slips past it can still, in
- * principle, hang the thread (the static check is conservative and can't
- * model every engine's optimizer), so it is intentionally biased toward
- * rejection. See `hasNestedQuantifier` below.
- * 3. Truncate each text node before matching (SEARCH_PAGE_NODE_TEXT_CAP) so
- * even a pattern we don't statically reject operates on bounded input
- * (backtracking cost grows with input length), and cap total node visits
- * (LIMITS.searchPageMaxNodeVisits).
- * Together these make the common pathological cases unable to freeze the tab.
- * A pattern that evades the static analyzer could still block the main thread
- * inside one `test()` call — the visit cap does not help there — but layers 1
- * and 3 keep both the source and the per-node input bounded.
  */
 
 import type { ActionResult } from "../../types";
@@ -36,476 +9,15 @@ import { LIMITS, CONTROL_CHARS_RE } from "../constants";
 import type { ActionContext } from "./types";
 import { scanForInjection } from "../../security";
 import { redactSecrets } from "../../secrets";
+import {
+  SEARCH_PAGE_NODE_TEXT_CAP,
+  SEARCH_PAGE_TIME_BUDGET_MS,
+  locateMatch,
+  checkRedos,
+} from "./search-page-utils";
 
-// Per-node text length handed to the regex. Catastrophic-backtracking cost
-// scales with input length, so capping each text node bounds the worst case for
-// any pattern that slips past the static ReDoS check.
-const SEARCH_PAGE_NODE_TEXT_CAP = 1024;
-
-// Hard wall-clock budget for the whole search. A pattern that slips past the
-// static ReDoS check can still spend real time backtracking; capping total
-// elapsed time bounds the freeze across nodes. This is checked *between*
-// per-node match attempts — a single `test()` call remains uninterruptible from
-// JS, but SEARCH_PAGE_NODE_TEXT_CAP bounds that one call's input while this
-// budget bounds the aggregate. Together they cap the worst-case main-thread
-// stall to roughly this many milliseconds plus one capped-input match.
-const SEARCH_PAGE_TIME_BUDGET_MS = 1000;
-
-// ── Static guard against catastrophic-backtracking (ReDoS) patterns ──
-
-// Matches an unbounded (or open-bounded) quantifier token `{n,}` / `{n,m}`.
-// Shared by the two helpers below so the regex can't drift between them.
-const UNBOUNDED_Q = /^\{\d+,\d*\}/;
-
-// A quantifier is "dangerous" when it is unbounded (or open-bounded) repetition:
-// `*` or `+`, or `{n,}` / `{n,m}`. `?` and exact `{n}` cannot create the
-// ambiguity that produces exponential backtracking, so they are treated as safe.
-function atUnboundedQuantifier(src: string, i: number): boolean {
-  const c = src[i];
-  if (c === "*" || c === "+") return true;
-  if (c === "{") return UNBOUNDED_Q.test(src.slice(i));
-  return false;
-}
-
-// Length of the unbounded-quantifier token starting at `i`, or 0 if `src[i]` is
-// not an unbounded quantifier.
-function quantifierLengthAt(src: string, i: number): number {
-  const c = src[i];
-  if (c === "*" || c === "+") return 1;
-  if (c === "{") {
-    const m = UNBOUNDED_Q.exec(src.slice(i));
-    if (m) return m[0].length;
-  }
-  return 0;
-}
-
-// Index of the `)` that closes the group opened at `openIdx`, honoring nesting,
-// escapes and character classes. Returns -1 if the source is malformed.
-function findGroupClose(src: string, openIdx: number): number {
- // Start scanning AFTER the opening paren so `depth` counts only *nested*
- // groups. The matching close is the first `)` seen at depth 0. (Counting the
- // opener itself would leave depth at 1 when the matching `)` is reached, so
- // the function would fall through and return -1 — silently disabling the
- // ReDoS guard for every parenthesized pattern.)
-  let depth = 0;
-  for (let j = openIdx + 1; j < src.length; j++) {
-    const c = src[j];
-    if (c === "\\") {
-      j++;
-      continue;
-    }
-    if (c === "[") {
-     // Scan to the REAL class close, honoring backslash escapes. A naive
-     // `src.indexOf("]", j)` would stop at an escaped `]` (e.g. the `\]` in
-     // `([x\]]+)`, where the first `]` is escaped), making it treat the escaped
-     // bracket as the class terminator and the real terminator as a top-level
-     // `)` at depth 0 — so `findGroupClose` returns a wrong/early close and the
-     // nested-quantifier / ambiguous-alternation ReDoS check can miss a
-     // catastrophic pattern. `firstCharSet` already honors escapes; this must
-     // match it (finding: char-class skip inside-group boundary).
-      let k = j + 1;
-      while (k < src.length) {
-        if (src[k] === "\\") {
-          k += 2;
-          continue;
-        }
-        if (src[k] === "]") break;
-        k++;
-      }
-      if (k >= src.length) return -1;
-      j = k;
-      continue;
-    }
-    if (c === "(") {
-      depth++;
-      continue;
-    }
-    if (c === ")") {
-      if (depth === 0) return j;
-      depth--;
-    }
-  }
-  return -1;
-}
-
-// True when the group opened at `openIdx` is a zero-width lookaround assertion
-// (`(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)`). Quantifying a lookaround is linear and
-// not a ReDoS vector, so such groups are ignored by the analyzer.
-function groupPrefixIsLookaround(src: string, openIdx: number): boolean {
-  if (src[openIdx] !== "(" || src[openIdx + 1] !== "?") return false;
-  const t = src[openIdx + 2];
-  if (t === "=" || t === "!") return true;
-  if (t === "<" && (src[openIdx + 3] === "=" || src[openIdx + 3] === "!")) return true;
-  return false;
-}
-
-// Split a group's CONTENT into its top-level alternation branches (separated by
-// an unescaped `|` that is not nested inside a subgroup or character class).
-// Returns null when the content has no such alternation.
-function splitTopLevelAlternation(content: string): string[] | null {
-  const branches: string[] = [];
-  let cur = "";
-  let depth = 0;
-  for (let i = 0; i < content.length; i++) {
-    const c = content[i];
-    if (c === "\\") {
-      cur += c + (content[i + 1] ?? "");
-      i++;
-      continue;
-    }
-    if (c === "[") {
-      let j = i + 1;
-      if (content[j] === "^") {
-        cur += c + content[j];
-        j++;
-      }
-      while (j < content.length) {
-        if (content[j] === "\\") {
-          cur += content[j] + (content[j + 1] ?? "");
-          j += 2;
-          continue;
-        }
-        if (content[j] === "]") break;
-        cur += content[j];
-        j++;
-      }
-      cur += "]";
-      i = j;
-      continue;
-    }
-    if (c === "(") {
-      depth++;
-      cur += c;
-      continue;
-    }
-    if (c === ")") {
-      depth--;
-      cur += c;
-      continue;
-    }
-    if (c === "|" && depth === 0) {
-      branches.push(cur);
-      cur = "";
-      continue;
-    }
-    cur += c;
-  }
-  branches.push(cur);
-  return branches.length >= 2 ? branches : null;
-}
-
-// Strip a leading non-capturing / named / atomic group prefix from a group's
-// inner content so the ReDoS analyzer sees the real alternation instead of the
-// prefix characters (e.g. `(?:a|a)` → `a|a`). Returns the content unchanged when
-// there is no such prefix. Without this, `(?:a|a)+` and similar shapes slip past
-// the ambiguous-alternation check because the `?:` prefix hides the inner
-// first-character overlap.
-function stripGroupPrefix(content: string): string {
-  if (content.length < 2 || content[0] !== "?") return content;
-  if (content[1] === ":") return content.slice(2);
-  if (content[1] === ">") return content.slice(2);
-  if (content[1] === "<") {
-    const gt = content.indexOf(">", 2);
-    if (gt < 0) return content;
-    return content.slice(gt + 1);
-  }
-  return content;
-}
-
-// The set of characters a branch can start with, or the sentinel "ANY" meaning
-// it can start with (almost) any character. Used to judge whether two
-// alternatives of an alternation can match overlapping input.
-type CharSet = Set<string> | "ANY";
-
-// Char sets used by `firstCharSet` to judge branch overlap. Hoisted to
-// module-level constants (built once at load) instead of re-allocating a fresh
-// Set on every `hasNestedQuantifier` call.
-const DIGIT_SET: Set<string> = (() => {
-  const s = new Set<string>();
-  for (let k = 48; k <= 57; k++) s.add(String.fromCharCode(k));
-  return s;
-})();
-const WORD_SET: Set<string> = (() => {
-  const s = new Set<string>();
-  for (let k = 48; k <= 57; k++) s.add(String.fromCharCode(k));
-  for (let k = 65; k <= 90; k++) s.add(String.fromCharCode(k));
-  for (let k = 97; k <= 122; k++) s.add(String.fromCharCode(k));
-  s.add("_");
-  return s;
-})();
-const SPACE_SET: Set<string> = new Set<string>([" ", "\t", "\n", "\r", "\f", "\v"]);
-
-function firstCharSet(branch: string): CharSet {
-  if (branch === "") return new Set<string>();
-  const c = branch[0];
-  if (c === "\\") {
-    const e = branch[1];
-    if (e === "d") return DIGIT_SET;
-    if (e === "w") return WORD_SET;
-    if (e === "s") return SPACE_SET;
-    if (e === "D" || e === "W" || e === "S" || e === "b" || e === "B") return "ANY";
-    return new Set<string>([e]);
-  }
-  if (c === "[") {
-    let j = 1;
-    if (branch[j] === "^") return "ANY";
-    const set = new Set<string>();
-    while (j < branch.length) {
-      if (branch[j] === "\\") {
-        set.add(branch[j + 1] ?? "");
-        j += 2;
-        continue;
-      }
-      if (branch[j] === "]") break;
-      if (j + 2 < branch.length && branch[j + 1] === "-") {
-        const lo = branch[j].charCodeAt(0);
-        const hi = branch[j + 2].charCodeAt(0);
-        for (let k = lo; k <= hi; k++) set.add(String.fromCharCode(k));
-        j += 3;
-        continue;
-      }
-      set.add(branch[j]);
-      j++;
-    }
-    return set;
-  }
-  if (c === ".") return "ANY";
-  if (c === "(") {
- // Lookarounds are zero-width and treated conservatively as "ANY".
-    if (branch[1] === "?") {
-      const t = branch[2];
-      if (t === "=" || t === "!" || (t === "<" && (branch[3] === "=" || branch[3] === "!"))) {
-        return "ANY";
-      }
-    }
-    const close = findGroupClose(branch, 0);
-    if (close < 0) return "ANY";
-    let start = 1;
-    if (branch[1] === "?") {
-      let p = 2;
-      while (p < branch.length && branch[p] !== ">") p++;
-      start = p + 1;
-    }
-    const innerContent = branch.slice(start, close);
-    const inner = splitTopLevelAlternation(innerContent);
-    if (inner) {
-      const union = new Set<string>();
-      let any = false;
-      for (const b of inner) {
-        const s = firstCharSet(b);
-        if (s === "ANY") any = true;
-        else for (const ch of s) union.add(ch);
-      }
-      return any ? "ANY" : union;
-    }
-    return firstCharSet(innerContent);
-  }
-  if (c === "^" || c === "$") return "ANY";
-  return new Set<string>([c]);
-}
-
-function charSetsOverlap(a: CharSet, b: CharSet): boolean {
-  if (a === "ANY" || b === "ANY") return true;
-  for (const ch of a) if (b.has(ch)) return true;
-  return false;
-}
-
-// True when a group that is directly quantified by an unbounded quantifier
-// contains an ambiguous top-level alternation — the structural signature of
-// alternation-based ReDoS (e.g. `(a|a)+`, `(a|ab)+`, `(a|a|a)+$`). Ambiguity is
-// judged by overlapping first-character sets between branches, or by one branch
-// being a prefix of another. Disjoint alternatives (e.g. `(abc|def)+`) and
-// non-overlapping single chars (e.g. `(a|b|c)+`) are treated as safe.
-function groupHasAmbiguousAlternation(src: string, openIdx: number, closeIdx: number): boolean {
-  let content = src.slice(openIdx + 1, closeIdx);
-  // Strip a leading group prefix so patterns like `(?:a|a)+` are analyzed
-  // against their real inner alternation rather than the prefix characters.
-  content = stripGroupPrefix(content);
-  const branches = splitTopLevelAlternation(content);
-  if (!branches) {
-    // A single wrapping group (e.g. `((a|a))+` or `(?:a|a)+`) — recurse into it
-    // so a nested ambiguous alternation inside the wrapper is still caught.
-    if (content.length > 0 && content[0] === "(") {
-      const innerClose = findGroupClose(content, 0);
-      if (innerClose > 0 && innerClose === content.length - 1) {
-        return groupHasAmbiguousAlternation(content, 0, innerClose);
-      }
-    }
-    return false;
-  }
-  if (branches.some((b) => b === "")) return true; // empty alternative ⇒ ambiguity
-  const sets = branches.map(firstCharSet);
-  for (let x = 0; x < sets.length; x++) {
-    for (let y = x + 1; y < sets.length; y++) {
-      if (charSetsOverlap(sets[x], sets[y])) return true;
-    }
-  }
-  for (let x = 0; x < branches.length; x++) {
-    for (let y = 0; y < branches.length; y++) {
-      if (x !== y && branches[x] !== "" && branches[y].startsWith(branches[x])) return true;
-    }
-  }
-  return false;
-}
-
-// True when the group opened at `openIdx` (closed at `closeIdx`) itself contains
-// an unbounded quantifier at a nesting level strictly inside it — i.e. the group
-// is something like `(a+)`, `([a-z]+)`, `(a*)` — which makes quantifying the
-// whole group a nested-quantifier ReDoS (e.g. `(a+)+`).
-function groupHasDangerousNestedQuantifier(src: string, openIdx: number, closeIdx: number): boolean {
-  let depth = 0;
-  for (let j = openIdx; j <= closeIdx; j++) {
-    const c = src[j];
-    if (c === "\\") {
-      j++;
-      continue;
-    }
-    if (c === "[") {
-     // Honor escapes when locating the class close (mirrors `findGroupClose`):
-     // an escaped `]` inside the class must not be treated as the terminator.
-      let k = j + 1;
-      while (k < src.length) {
-        if (src[k] === "\\") {
-          k += 2;
-          continue;
-        }
-        if (src[k] === "]") break;
-        k++;
-      }
-      if (k >= src.length || k > closeIdx) break;
-      j = k;
-      continue;
-    }
-    if (c === "(") {
-      depth++;
-      continue;
-    }
-    if (c === ")") {
-      if (depth === 0) break;
-      depth--;
-      if (depth === 0) break;
-      continue;
-    }
-    if (depth >= 1 && atUnboundedQuantifier(src, j)) return true;
-  }
-  return false;
-}
-
-// Reject patterns that are KNOWN catastrophic-backtracking (ReDoS) shapes:
-// • a group containing an unbounded quantifier, itself quantified by an
-// unbounded quantifier — e.g. `(a+)+`, `(a*)*`, `(a+)*`, `(a{2,})+`,
-// `([a-z]+)+$`;
-// • a group with an ambiguous top-level alternation, quantified by an unbounded
-// quantifier — e.g. `(a|a)+`, `(a|ab)+`, `(a|a|a)+$`, `((a|b)+)+`.
-// Lookaround groups are ignored (quantifying them is linear). `?` and exact
-// `{n}` repetitions are not triggers. The check is conservative: it may reject a
-// handful of patterns an engine could optimize, but erring toward rejection is
-// the safer choice for a handler driven by LLM / prompt-injection-supplied input.
-// True when the pattern contains a backreference escape — a backslash followed
-// by a digit 1–9. Backreferences make a match depend on previously captured
-// text, which can drive catastrophic backtracking that the structural checks in
-// `hasNestedQuantifier` don't model (e.g. `\b(\w+)\b\s+\1\b`, `(a)\1+`,
-// `(.+?)\1+`). Such patterns are rare for page-text search and are exactly the
-// risky ones, so they are rejected fail-closed. A literal backslash in the
-// regex source is a single '\' character; we advance past the escaped char so
-// an escaped backslash (`\\`) is never mistaken for a backreference.
-export function hasBackreference(pattern: string): boolean {
-  for (let i = 0; i < pattern.length - 1; i++) {
-    if (pattern[i] === "\\") {
-      const d = pattern.charCodeAt(i + 1);
-      if (d >= 49 && d <= 57) return true; // '1'..'9' numeric backreference
-     // Named backreferences come in three JS-accepted forms: `\k<name>`,
-     // `\k{name}`, and `\k'name'`. Detect all three so the static ReDoS guard's
-     // coverage is consistent (the RegExp constructor would reject the `{`/`'`
-     // variants anyway, but we want to catch them before we ever call it).
-      if (d === 107) {
-        const c2 = pattern[i + 2];
-        if (c2 === "<" || c2 === "{" || c2 === "'") return true;
-      }
-      i++;
-    }
-  }
-  return false;
-}
-
-export function hasNestedQuantifier(pattern: string): boolean {
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i];
-    if (c === "\\") {
-      i++;
-      continue;
-    }
-    if (c === "[") {
-      const close = pattern.indexOf("]", i + 1);
-      if (close < 0) break;
-      i = close;
-      continue;
-    }
-    if (c === "(") {
-      if (groupPrefixIsLookaround(pattern, i)) continue;
-      const close = findGroupClose(pattern, i);
-      if (close < 0) continue; // malformed — leave to the RegExp constructor
- // Only a group immediately followed by an unbounded quantifier can be a
- // ReDoS vector of these shapes.
-      if (quantifierLengthAt(pattern, close + 1) > 0) {
-        if (groupHasDangerousNestedQuantifier(pattern, i, close)) return true;
-        if (groupHasAmbiguousAlternation(pattern, i, close)) return true;
-      }
-    }
-  }
-  return false;
-}
-
-// Locate the first match of the search in `text`, returning its start index and
-// length, or null when there is no match. Shared so the match can be located on
-// both the raw node text (detection) and the redacted text (snippet centering)
-// with identical semantics.
-function locateMatch(
-  text: string,
-  regex: RegExp | null,
-  pattern: string,
-  needle: string,
-  caseSensitive: boolean,
-): { idx: number; len: number } | null {
-  if (regex) {
-    regex.lastIndex = 0;
-    const m = regex.exec(text);
-    return m ? { idx: m.index, len: m[0].length } : null;
-  }
-  if (caseSensitive) {
-    const idx = text.indexOf(pattern);
-    return idx >= 0 ? { idx, len: pattern.length } : null;
-  }
-  const lower = text.toLowerCase();
-  const idx = lower.indexOf(needle);
-  if (idx < 0) return null;
-  // Lowercasing can change string length for some scripts (e.g. "ß" → "ss"),
-  // which would make the lowercased `idx`/`len` point at the wrong place in the
-  // ORIGINAL `text`. When the length is preserved the offset is valid; otherwise
-  // walk the original text case-insensitively to recover the real start index.
-  if (lower.length === text.length) {
-    return { idx, len: needle.length };
-  }
-  for (let i = 0; i + needle.length <= text.length; i++) {
-    if (text.slice(i, i + needle.length).toLowerCase() === needle) {
-      return { idx: i, len: needle.length };
-    }
-  }
-  return null;
-}
-
-// Cache ReDoS check results per pattern string to skip re-analysis on repeated searches.
-const redosCheckCache = new Map<string, { nested: boolean; backref: boolean }>();
-
-function checkRedos(pattern: string): { nested: boolean; backref: boolean } {
-  let cached = redosCheckCache.get(pattern);
-  if (!cached) {
-    cached = { nested: hasNestedQuantifier(pattern), backref: hasBackreference(pattern) };
-    if (redosCheckCache.size > 256) redosCheckCache.clear();
-    redosCheckCache.set(pattern, cached);
-  }
-  return cached;
-}
+export { hasNestedQuantifier } from "../schema-utils";
+export { hasBackreference } from "./search-page-utils";
 
 export async function handleSearchPage(
   ctx: ActionContext,
@@ -523,12 +35,6 @@ export async function handleSearchPage(
         message: `Regex pattern too long (${pattern.length} > ${LIMITS.searchPageMaxRegexPattern} chars) — rejected to prevent tab freeze`,
       };
     }
- // Reject patterns whose source is a known catastrophic-backtracking (ReDoS)
- // shape: a nested unbounded quantifier (e.g. `(a+)+`) or an ambiguous
- // alternation under an unbounded quantifier (e.g. `(a|a)+`). This is the
- // structural root cause of exponential backtracking; a short pattern of this
- // shape run against one large text node would otherwise block the main
- // thread inside a single `test()` call that cannot be interrupted.
     const redosCheck = checkRedos(pattern);
     if (redosCheck.nested) {
       return {
@@ -537,11 +43,6 @@ export async function handleSearchPage(
         message: `Regex pattern rejected: nested quantifiers or ambiguous alternation (e.g. "(a+)+" or "(a|a)+") can cause catastrophic backtracking and freeze the tab`,
       };
     }
- // Reject patterns that use a backreference (e.g. "\1"), which can drive
- // catastrophic backtracking that the structural nested-quantifier check
- // above does not model. A backreference against one large text node would
- // otherwise block the main thread inside a single `test()` call that cannot
- // be interrupted. Legitimate page-text searches rarely need backreferences.
     if (redosCheck.backref) {
       return {
         action,
@@ -579,18 +80,25 @@ export async function handleSearchPage(
     if (regex && text.length > SEARCH_PAGE_NODE_TEXT_CAP) {
       text = text.slice(0, SEARCH_PAGE_NODE_TEXT_CAP);
     }
-    if (ctx.signal?.aborted) break;
     const loc = locateMatch(text, regex, pattern, needle, action.case_sensitive);
     if (loc) {
       matchedTexts.push(text);
     }
   }
   const BATCH_DELIM = "\x00";
+  const REDACTION_FAILURE_MASK = "[REDACTED: secret store unavailable]";
   let redactedTexts: string[];
   if (matchedTexts.length > 0) {
     const concatenated = matchedTexts.join(BATCH_DELIM);
     const redacted = await redactSecrets(concatenated);
     redactedTexts = redacted.split(BATCH_DELIM);
+    // A redaction failure returns a single marker string for the whole batch,
+    // and a NUL byte inside matched text shifts the split — either way the
+    // split no longer lines up with `matchedTexts`, and indexing into it would
+    // ship RAW text to the LLM. Mask every entry instead of leaking.
+    if (redactedTexts.length !== matchedTexts.length) {
+      redactedTexts = matchedTexts.map(() => REDACTION_FAILURE_MASK);
+    }
   } else {
     redactedTexts = [];
   }
@@ -607,9 +115,6 @@ export async function handleSearchPage(
     results.length > 0
       ? `Search results for "${pattern.replace(CONTROL_CHARS_RE, "").slice(0, LIMITS.searchPageContextChars)}":\n${results.join("\n")}`
       : undefined;
- // Flag prompt-injection payloads surfaced from page text so the navigator
- // treats search_page output with the same skepticism as the sibling read
- // handlers (extract / find_elements / dropdown_options).
   let injectionWarnings = "";
   if (extractedContent) {
     const scan = scanForInjection(extractedContent);
@@ -621,12 +126,8 @@ export async function handleSearchPage(
   }
   return {
     action,
- // search_page is a read-only search action. Returning success:false on 0
- // matches would abort the action queue, which is wrong for a read-only
- // query (the search succeeded — it just found nothing). find_elements
- // returns success:true on 0 matches; search_page matches that semantic.
     success: true,
     message: results.length > 0 ? `Found ${results.length} matches` : "No matches found",
-    extractedContent: injectionWarnings && extractedContent ? `${injectionWarnings}\n${extractedContent}` : extractedContent,
+    extractedContent: injectionWarnings ? `${injectionWarnings}\n${extractedContent}` : extractedContent,
   };
 }

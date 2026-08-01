@@ -11,8 +11,7 @@
  * (`showStatusBanner` was removed — it had no callers.)
  *
  * New code should import from
- * `@/lib/agent/dom/annotation/overlay-renderer` or from the top-level
- * `@/lib/agent/dom` index.
+ * `@/lib/agent/dom/annotation/overlay-renderer`.
 
  */
 export { highlightElement, setPersistentHighlight, type OverlayHandle } from "./annotation/overlay-renderer";

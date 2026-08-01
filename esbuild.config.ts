@@ -145,10 +145,9 @@ const sharedConfig: BuildOptions = {
   logLevel: "warning",
  // Silence esbuild's bundle-size advisories. The extension legitimately
   // bundles an LLM/transformers stack (options.js, sidepanel.js, the
-  // transformers web chunk), so these "X mb ⚠️" notices are inherent, not
+  // background service worker), so these "X mb ⚠️" notices are inherent, not
   // actionable, and only add noise to `npm run build:extension`. Other warnings
   // (syntax, resolution, type) are unaffected and still surface.
-  // (per-file bundle-size notices are suppressed by logLevel: "warning" above)
   define: isProd
     ? { "process.env.NODE_ENV": '"production"' }
     : { "process.env.NODE_ENV": '"development"' },
@@ -354,9 +353,11 @@ async function copyStatic(): Promise<void> {
  * entries (content/sidepanel/options) don't share chunks with the ESM entry
  * (background) — keeps the chunk graph clean and avoids format-mixing issues.
  *
- * The ESM entry (background) uses `outdir` + `entryNames: "[name]"` because
- * esbuild requires `outdir` (not `outfile`) when `splitting: true` is set.
- * The IIFE entries use `outfile` (single-file output, no chunks).
+ * All entries bundle with `splitting: false` (no code splitting anywhere in
+ * this project) — the background ESM entry still uses `outdir` +
+ * `entryNames: "[name]"` so the service worker is emitted as a single
+ * background.js alongside the IIFE entries, which use `outfile` (single-file
+ * output, no chunks).
  */
 async function buildAll(): Promise<void> {
   if (existsSync(OUT)) await rm(OUT, { recursive: true, force: true });
@@ -369,7 +370,7 @@ async function buildAll(): Promise<void> {
     return build({
       ...e.config,
       entryPoints: [path.join(SRC, e.entry)],
- // ESM with splitting requires `outdir`; IIFE entries use `outfile`.
+ // ESM entries go to `outdir` (with entryNames fixed below), IIFE entries use `outfile`.
       ...(isEsm
         ? { outdir: OUT }
         : { outfile: path.join(OUT, e.out) }),

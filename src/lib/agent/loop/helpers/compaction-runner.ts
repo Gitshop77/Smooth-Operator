@@ -28,43 +28,18 @@ import {
 } from "../compaction";
 import { redactHistoryForPrompt } from "../messages";
 import type { LoopDeps } from "../types";
-import type { CallbackDispatcher, CallbackContext, LLMUsageInfo } from "../../callbacks";
+import type { CallbackDispatcher, CallbackContext } from "../../callbacks";
 import { estimateCost } from "../../llm/pricing";
 import { SECURITY_INSTRUCTION, wrapUntrusted } from "../../security";
 
 /**
- * Report a compaction call's cost + tokens to the caller (`onCost`), emit a
- * `cost` event, and — when a dispatcher is wired — attribute the usage to the
- * planner phase. Shared by the summarize and planner-fallback branches so the
- * three-step reporting sequence can't drift between them.
- */
-async function reportCompactionUsage(
-  step: number,
-  usage: LLMUsageInfo,
-  onCost: ((usd: number, tokensIn?: number, tokensOut?: number) => void) | undefined,
-  deps: LoopDeps,
-  dispatcher: CallbackDispatcher | undefined,
-  ctx: CallbackContext | undefined,
-): Promise<void> {
-  if (!onCost) return;
-  onCost(usage.costUsd, usage.tokensIn, usage.tokensOut);
-  deps.onEvent({
-    type: "cost",
-    step,
-    tokensIn: usage.tokensIn,
-    tokensOut: usage.tokensOut,
-    costUsd: usage.costUsd,
-    model: usage.model,
-  });
-  if (dispatcher && ctx) await dispatcher.cost(ctx, usage);
-}
-
-/**
  * Normalize a raw usage shape (from the summarize or planner call), compute the
- * cost (preferring any pre-computed `costUsd`), and report it via
- * {@link reportCompactionUsage}. Shared by both compaction branches so the
- * token/cost attribution can't drift. No-op when cost reporting is disabled or
- * the usage is missing the required `tokensIn`/`tokensOut`/`model`.
+ * cost (preferring any pre-computed `costUsd`), and report it to the caller
+ * (`onCost`), emit a `cost` event, and — when a dispatcher is wired — attribute
+ * the usage to the planner phase. No-op when cost reporting is disabled or the
+ * usage is missing the required `tokensIn`/`tokensOut`/`model`. Shared by the
+ * summarize and planner-fallback branches so the reporting sequence can't
+ * drift between them.
  */
 async function reportUsage(
   step: number,
@@ -108,7 +83,7 @@ async function reportUsage(
   const compactionProviderId = model.includes("/") ? model.split("/")[0] : undefined;
   const computedCost =
     costUsd ?? estimateCost({ model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens: cw, providerId: compactionProviderId });
-  const usage: LLMUsageInfo = {
+  const usage = {
     tokensIn,
     tokensOut,
     model,
@@ -117,7 +92,16 @@ async function reportUsage(
     cachedInputTokens,
     cachedWriteInputTokens: cw,
   };
-  await reportCompactionUsage(step, usage, onCost, deps, dispatcher, ctx);
+  onCost(usage.costUsd, usage.tokensIn, usage.tokensOut);
+  deps.onEvent({
+    type: "cost",
+    step,
+    tokensIn: usage.tokensIn,
+    tokensOut: usage.tokensOut,
+    costUsd: usage.costUsd,
+    model: usage.model,
+  });
+  if (dispatcher && ctx) await dispatcher.cost(ctx, usage);
 }
 
 export async function runCompaction(
@@ -160,9 +144,7 @@ export async function runCompaction(
  // Surface the summarize-call cost + tokens to the caller (cost-cap +
  // token totals + live UI cost counter). Mirrors the pattern in
  // `runPlanner` / `callNavigatorWithRetry`.
-      if (onCost && res.usage) {
-        await reportUsage(step, res.usage, onCost, deps, dispatcher, ctx);
-      }
+      await reportUsage(step, res.usage, onCost, deps, dispatcher, ctx);
     } else {
       const res = await deps.plannerCall({
         task: `${SECURITY_INSTRUCTION}\n\nSummarize the agent history below into a compacted memory block.${priorCompactedMemory ? `\n\nPrior summary to carry forward:\n${wrapUntrusted(priorCompactedMemory)}` : ""}`,
@@ -183,9 +165,7 @@ export async function runCompaction(
         summary = res.raw;
       }
  // Surface the planner-fallback cost + tokens to the caller.
-      if (onCost && res.tokensIn !== undefined && res.tokensOut !== undefined && res.model) {
-        await reportUsage(step, res, onCost, deps, dispatcher, ctx);
-      }
+      await reportUsage(step, res, onCost, deps, dispatcher, ctx);
     }
     const safeMemory = sanitizeCompactedMemory(summary);
     return {

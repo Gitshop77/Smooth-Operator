@@ -12,14 +12,19 @@ export function rejectOnAbort(signal?: AbortSignal): {
   promise: Promise<never>;
   cleanup: () => void;
 } {
+  // No signal → the promise never settles — harmless in a race with a timeout —
+  // and there is no listener to clean up.
+  if (!signal) {
+    return { promise: new Promise<never>(() => {}), cleanup: () => {} };
+  }
+  const abortError = () => new DOMException("Aborted", "AbortError");
   let cleanup = () => {};
   const promise = new Promise<never>((_, reject) => {
-    if (!signal) return; // never settles — harmless in a race with a timeout
     if (signal.aborted) {
-      reject(new DOMException("Aborted", "AbortError"));
+      reject(abortError());
       return;
     }
-    const onAbort = () => reject(new DOMException("Aborted", "AbortError"));
+    const onAbort = () => reject(abortError());
     signal.addEventListener("abort", onAbort, { once: true });
     cleanup = () => signal.removeEventListener("abort", onAbort);
   });

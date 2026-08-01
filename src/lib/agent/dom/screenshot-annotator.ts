@@ -6,11 +6,10 @@
  *
  * All historically-exported symbols are re-exported here:
  * - `annotateScreenshot`, `DEFAULT_ANNOTATE_PALETTE`,
- * `AnnotatableElement` (interface), `AnnotateOptions` (interface)
+ * `AnnotatableElement` (interface)
  *
  * New code should import from
- * `@/lib/agent/dom/annotation/screenshot-annotator` or from the top-level
- * `@/lib/agent/dom` barrel export.
+ * `@/lib/agent/dom/annotation/screenshot-annotator`.
 
  */
 export * from "./annotation/screenshot-annotator";

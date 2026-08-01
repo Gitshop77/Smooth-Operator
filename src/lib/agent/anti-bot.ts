@@ -24,7 +24,7 @@
  */
 
 /** The kind of anti-bot challenge detected on a page. */
-export type ChallengeKind =
+type ChallengeKind =
   | "cloudflare-js"
   | "cloudflare-block"
   | "cloudflare-turnstile"
@@ -55,7 +55,7 @@ export function isChallengeKind(x: unknown): x is ChallengeKind {
 }
 
 /** Information about a detected anti-bot challenge. */
-export interface ChallengeInfo {
+interface ChallengeInfo {
   /** What type of challenge is present. */
   kind: ChallengeKind;
   /** Human-readable description. */
@@ -63,7 +63,7 @@ export interface ChallengeInfo {
 }
 
 /** Result of waiting for an anti-bot challenge to resolve. */
-export interface ChallengeWaitResult {
+interface ChallengeWaitResult {
   /** Whether the challenge cleared within the timeout. */
   resolved: boolean;
   /** The challenge still present (null if resolved or undetectable). */
@@ -82,7 +82,7 @@ export interface ChallengeWaitResult {
  * want to be safe should treat `"error"` as "couldn't verify — pause or
  * retry" rather than "all clear".
  */
-export type DetectChallengeOutcome =
+type DetectChallengeOutcome =
   | { status: "challenge"; info: ChallengeInfo }
   | { status: "no-challenge" }
   | { status: "error"; error: unknown };
@@ -215,7 +215,7 @@ export function detectChallengeInPage(): ChallengeInfo | null {
  * AND-corroboration an arbitrary password field (e.g. an account-recovery or
  * settings form) is NOT treated as an auth wall.
  */
-export function detectAuthWallInPage(): ChallengeInfo | null {
+function detectAuthWallInPage(): ChallengeInfo | null {
   const passwordField = document.querySelector('input[type="password"]');
   if (passwordField === null) return null;
 

@@ -7,7 +7,8 @@
  */
 
 import { $ } from "@/extension/shared";
-import { STORAGE_KEYS, showSaved } from "./settings-sync";
+import { STORAGE_KEYS } from "./storage-keys";
+import { showSaved } from "./settings-sync-utils";
 import { resolveAndValidateWebhookUrl } from "@/lib/agent/llm/route/ssrf";
 import { alertModal } from "./modal";
 
@@ -43,7 +44,6 @@ export async function loadNotifications(): Promise<void> {
     console.warn("[options] failed to load notification settings:", e);
     return;
   }
-  if (!res) return;
   ($("notifyOnCompletion") as HTMLInputElement).checked = (res.notifyOnCompletion as boolean) || false;
   ($("notifyOnError") as HTMLInputElement).checked = (res.notifyOnError as boolean) || false;
   ($("notifyOnTakeover") as HTMLInputElement).checked = (res.notifyOnTakeover as boolean) || false;
@@ -86,6 +86,10 @@ function persist(key: string, value: string | boolean): void {
     // failure path restores the previous last-good URL (not the unsaved value).
     if (key === STORAGE_KEYS.webhookUrl && typeof value === "string") {
       lastKnownGoodWebhookUrl = value;
+      // Clear the invalid flag only after the write succeeded — a
+      // failed write (handled above) must leave the flag set.
+      const wf = document.getElementById("webhookUrl") as HTMLInputElement | null;
+      wf?.removeAttribute("aria-invalid");
     }
   });
 }
@@ -128,6 +132,5 @@ document.getElementById("webhookUrl")?.addEventListener("change", async (e) => {
  // The last-known-good cache is updated only after a successful persist
  // (see persist()'s success branch), so a failed write reverts the field
  // to the genuinely last-good URL rather than the unsaved one.
-  field.removeAttribute("aria-invalid");
   persist(STORAGE_KEYS.webhookUrl, value);
 });

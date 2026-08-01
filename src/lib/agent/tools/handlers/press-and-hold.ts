@@ -9,8 +9,8 @@ import type { Action } from "../schema";
 import { highlightElement } from "../../dom/overlay";
 import { moveCursorToElement } from "../../dom/phantom-cursor";
 import { TIMINGS, sleep, SW_RPC_TIMEOUT_MS } from "../constants";
-import { domFingerprint, resolveElement, safeScrollIntoView } from "../helpers";
-import { type ActionContext, isExtensionContext } from "./types";
+import { resolveElement, safeScrollIntoView } from "../helpers";
+import { type ActionContext, hasPageChanged, isExtensionContext } from "./types";
 import { rejectOnAbort } from "./abort";
 
 export async function handlePressAndHold(
@@ -18,15 +18,15 @@ export async function handlePressAndHold(
   action: Extract<Action, { type: "press_and_hold" }>,
 ): Promise<ActionResult> {
   const { state } = ctx;
- // Press-and-hold via the CDP controller (chrome.debugger).
- // CDP-dispatched `Input.dispatchMouseEvent` events are treated as
- // trusted user input by the browser — required by anti-bot widgets
- // (Cloudflare Turnstile checkboxes, "press and hold to verify"
- // buttons) that detect synthetic clicks via `event.isTrusted`.
- //
- // Falls back to a regular `el.click()` (strategy 2 path) when the
- // debugger isn't available (in-page demo, tests, or extension
- // contexts where the user hasn't accepted the debugger infobar).
+  // Press-and-hold via the CDP controller (chrome.debugger).
+  // CDP-dispatched `Input.dispatchMouseEvent` events are treated as
+  // trusted user input by the browser — required by anti-bot widgets
+  // (Cloudflare Turnstile checkboxes, "press and hold to verify"
+  // buttons) that detect synthetic clicks via `event.isTrusted`.
+  //
+  // Falls back to a regular `el.click()` (strategy 2 path) when the
+  // debugger isn't available (in-page demo, tests, or extension
+  // contexts where the user hasn't accepted the debugger infobar).
   const el = resolveElement(state, action.index);
   if (!el || !el.isConnected) {
     return {
@@ -54,25 +54,25 @@ export async function handlePressAndHold(
 
   const holdMs = action.hold_ms;
   const delayMs = action.delay_ms;
- // The SW performs the full delay+hold BEFORE responding, so the race timeout
- // must cover that work on top of the base RPC margin (otherwise a legitimate
- // long anti-bot hold — up to 120s total — would spuriously reject while the
- // hold is still running). Do NOT lower the schema caps; this only widens the
- // wait for the press-and-hold RPC.
+  // The SW performs the full delay+hold BEFORE responding, so the race timeout
+  // must cover that work on top of the base RPC margin (otherwise a legitimate
+  // long anti-bot hold — up to 120s total — would spuriously reject while the
+  // hold is still running). Do NOT lower the schema caps; this only widens the
+  // wait for the press-and-hold RPC.
   const cdpTimeoutMs = SW_RPC_TIMEOUT_MS + delayMs + holdMs;
 
- // Strategy 1: CDP press-and-hold via the background script's
- // CDP_PRESS_AND_HOLD message handler. ONLY reachable in an extension
- // context (chrome.runtime.id). When the debugger is genuinely unavailable
- // (in-page demo, tests, no extension context) we skip straight to the
- // native fallback (Strategy 2) — that is the only case where a synthetic
- // click is an acceptable stand-in.
+  // Strategy 1: CDP press-and-hold via the background script's
+  // CDP_PRESS_AND_HOLD message handler. ONLY reachable in an extension
+  // context (chrome.runtime.id). When the debugger is genuinely unavailable
+  // (in-page demo, tests, no extension context) we skip straight to the
+  // native fallback (Strategy 2) — that is the only case where a synthetic
+  // click is an acceptable stand-in.
   const debuggerAvailable = isExtensionContext();
 
   if (debuggerAvailable) {
     try {
- // Race against a timeout so a SW that receives the message but never
- // responds (debugger attach race / hung SW) can't block the agent loop.
+      // Race against a timeout so a SW that receives the message but never
+      // responds (debugger attach race / hung SW) can't block the agent loop.
       let timeoutId: ReturnType<typeof setTimeout>;
       const abort = rejectOnAbort(ctx.signal);
       const cdpResult = await Promise.race([
@@ -95,7 +95,7 @@ export async function handlePressAndHold(
         abort.cleanup();
       });
       if (cdpResult?.ok) {
-        const changed = location.href !== ctx.beforeUrl || domFingerprint() !== ctx.beforeFingerprint;
+        const changed = hasPageChanged(ctx);
         return {
           action,
           success: true,
@@ -103,10 +103,10 @@ export async function handlePressAndHold(
           pageChanged: changed,
         };
       }
- // CDP responded but the hold was NOT performed (e.g. debugger not
- // attached). Do NOT fall back to a synthetic click: that would report
- // success while the hold never happened, so the agent might believe it
- // passed an anti-bot gate it didn't. Fail loudly instead.
+      // CDP responded but the hold was NOT performed (e.g. debugger not
+      // attached). Do NOT fall back to a synthetic click: that would report
+      // success while the hold never happened, so the agent might believe it
+      // passed an anti-bot gate it didn't. Fail loudly instead.
       return {
         action,
         success: false,
@@ -116,11 +116,11 @@ export async function handlePressAndHold(
           `anti-bot widgets will reject a synthetic click`,
       };
     } catch (e) {
- // The CDP hold genuinely failed (debugger attach error, messaging error,
- // or cdpPressAndHold threw). Surface the real error instead of swallowing
- // it into a false success — the agent must know the hold didn't happen so
- // it can retry or escalate rather than proceed past a verification gate it
- // didn't actually satisfy.
+      // The CDP hold genuinely failed (debugger attach error, messaging error,
+      // or cdpPressAndHold threw). Surface the real error instead of swallowing
+      // it into a false success — the agent must know the hold didn't happen so
+      // it can retry or escalate rather than proceed past a verification gate it
+      // didn't actually satisfy.
       if (typeof console !== "undefined" && typeof console.error === "function") {
         console.error("[press_and_hold] CDP hold failed:", e);
       }
@@ -135,13 +135,13 @@ export async function handlePressAndHold(
     }
   }
 
- // Strategy 2: Native click fallback (no hold). ONLY reached when the debugger
- // is genuinely unavailable. The fallback degenerates to a click (no hold) —
- // the hold semantics can't be replicated without CDP. Real anti-bot widgets
- // will reject this, so the message says so explicitly.
+  // Strategy 2: Native click fallback (no hold). ONLY reached when the debugger
+  // is genuinely unavailable. The fallback degenerates to a click (no hold) —
+  // the hold semantics can't be replicated without CDP. Real anti-bot widgets
+  // will reject this, so the message says so explicitly.
   try {
     el.click();
-    const changed = location.href !== ctx.beforeUrl || domFingerprint() !== ctx.beforeFingerprint;
+    const changed = hasPageChanged(ctx);
     return {
       action,
       success: true,

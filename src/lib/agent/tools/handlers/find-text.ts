@@ -16,10 +16,10 @@ export async function handleFindText(
   _ctx: ActionContext,
   action: Extract<Action, { type: "find_text" }>,
 ): Promise<ActionResult> {
- // Use TreeWalker to find a matching text node, then scroll its parent into view.
- // Guard against empty search text — `"".includes("")` = true, so an empty
- // `find_text` would match the first visible text node. The schema should
- // enforce `.min(1)` but defense-in-depth here too.
+  // Use TreeWalker to find a matching text node, then scroll its parent into view.
+  // Guard against empty search text — `"".includes("")` = true, so an empty
+  // `find_text` would match the first visible text node. The schema should
+  // enforce `.min(1)` but defense-in-depth here too.
   const want = action.text.toLowerCase().trim();
   if (!want) {
     return { action, success: false, message: "find_text requires non-empty text" };
@@ -44,9 +44,9 @@ export async function handleFindText(
     visits++;
     const t = node.textContent;
     if (t && t.length >= want.length && t.toLowerCase().includes(want)) {
- // Text nodes inside document.body always have a non-null `parentElement`;
- // if it is somehow missing (detached/oddly-attached node), skip it rather
- // than risking an unsafe `parentNode` cast that could throw in isVisible.
+      // Text nodes inside document.body always have a non-null `parentElement`;
+      // if it is somehow missing (detached/oddly-attached node), skip it rather
+      // than risking an unsafe `parentNode` cast that could throw in isVisible.
       const parent = node.parentElement;
       if (!parent) continue;
       if (isVisible(parent)) {
@@ -56,13 +56,13 @@ export async function handleFindText(
       }
     }
   }
- // Distinguish a *genuine* exhaustion (the TreeWalker returned `null`) from
- // hitting the node-visit cap while more text nodes remain. `node` is
- // reassigned on every iteration; if the loop exited because `walker.nextNode()`
- // returned `null`, `node` is `null` and the walk was exhaustive — report a
- // plain "not found". Only when `node` is still truthy did we stop at the cap
- // with nodes left unscanned, and "truncated" is the honest message (the text
- // may exist beyond the budget; `search_page` is regex-capable and can retry).
+  // Distinguish a *genuine* exhaustion (the TreeWalker returned `null`) from
+  // hitting the node-visit cap while more text nodes remain. `node` is
+  // reassigned on every iteration; if the loop exited because `walker.nextNode()`
+  // returned `null`, `node` is `null` and the walk was exhaustive — report a
+  // plain "not found". Only when `node` is still truthy did we stop at the cap
+  // with nodes left unscanned, and "truncated" is the honest message (the text
+  // may exist beyond the budget; `search_page` is regex-capable and can retry).
   if (node !== null) {
     return {
       action,

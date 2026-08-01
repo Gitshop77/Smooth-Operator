@@ -47,9 +47,13 @@ export function costCapExceeded(state: LoopState): boolean {
     const cap = config.costCapUsd ?? 0;
     const text = `Cost cap of $${cap.toFixed(2)} reached.`;
     // Set state.finalResult so buildRunResult returns the real text for the
-    // runEnd callback (not ""). Without this, dispatcher.runEnd subscribers
-    // get an empty string even though the SSE done event has the real text.
-    state.finalResult = { success: false, text };
+    // runEnd callback (not ""). Idempotent: repeated calls (costCapCheck
+    // fires on every overshoot LLM call + step-boundary checks) must never
+    // clobber an already-recorded terminal result — e.g. a judge's
+    // success:true finalResult, or the text a prior terminal path recorded.
+    if (!state.finalResult) {
+      state.finalResult = { success: false, text };
+    }
     return true;
   }
   return false;

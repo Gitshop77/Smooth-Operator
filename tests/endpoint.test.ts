@@ -1,8 +1,8 @@
 /**
  * Tests for `src/lib/agent/llm/route/endpoint.ts`.
  *
- * Focuses on the query-string construction paths the  audit flagged
- * as 0%-branch-covered: the malformed double-"?" guard and the relative-path
+ * Focuses on the query-string construction paths that were previously
+ * uncovered: the malformed double-"?" guard and the relative-path
  * query merge.
  */
 import { describe, test, expect } from "vitest";
@@ -68,7 +68,7 @@ describe("endpoint merge", () => {
     });
     const merged = base.merge({ query: { b: "2" } });
     expect(buildURL(merged, {})).toBe("https://x.ai/v1/chat?a=1&b=2");
- // The original endpoint is not mutated by merge().
+    // The original endpoint is not mutated by merge().
     expect(buildURL(base, {})).toBe("https://x.ai/v1/chat?a=1");
   });
 });

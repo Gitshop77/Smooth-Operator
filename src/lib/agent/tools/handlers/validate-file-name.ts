@@ -27,8 +27,8 @@ export function validateFileName(fileName: unknown): string | null {
   if (/[\\/]/.test(fileName)) {
     return "file_name must be a bare filename (no path separators)";
   }
-  // Reject '..' only as a complete path segment (e.g. "a/../b", "foo/.."), not as
-  // a substring — a legitimate filename like "my..file.png" is fine.
+  // Reject a bare ".." name (the separator check above already rejects
+  // "a/../b" / "foo/.."); allow ".." inside a name like "my..file.png".
   if (fileName.split(/[\\/]/).some((seg) => seg === "..")) {
     return "file_name must be a bare filename (no '..' path segment)";
   }

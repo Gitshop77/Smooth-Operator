@@ -3,7 +3,7 @@
  * Defines WHERE a request is sent (base URL + path + query params).
  */
 
-export interface EndpointPatch<Body = unknown> {
+interface EndpointPatch<Body = unknown> {
   readonly baseURL?: string;
   readonly path?: string | ((body: Body) => string);
   readonly query?: Record<string, string>;
@@ -59,7 +59,7 @@ export const buildURL = <Body>(endpoint: Endpoint<Body>, body: Body): string => 
   } catch {
     // `base` is not a valid absolute URL (e.g. a host-only string like
     // "example.com") — treat it as relative and fall back to the path branch
-    // rather than throwing (finding: scheme-less/relative baseURL crashed buildURL).
+    // rather than throwing (scheme-less/relative baseURL crashed buildURL).
     return mergeQueryIntoPath(p, endpoint.query);
   }
 
@@ -69,13 +69,13 @@ export const buildURL = <Body>(endpoint: Endpoint<Body>, body: Body): string => 
   const params = new URLSearchParams();
   // Only fold the base URL's query when the path is NOT itself an absolute
   // URL — otherwise the base's query (which may carry secrets) would be
-  // appended to an unrelated origin (finding: base-URL secret query leaked
+  // appended to an unrelated origin (base-URL secret query leaked
   // into an absolute-path URL).
   if (!pIsAbsolute) {
     for (const [k, v] of new URLSearchParams(baseUrl.search)) params.set(k, v);
   }
   // Strip any URL fragment before extracting the path query, so a '#…' is not
-  // folded into a query value (finding: fragment absorbed into query param).
+  // folded into a query value (fragment absorbed into query param).
   const pNoFrag = p.replace(/#.*$/, "");
   const pQueryIndex = pNoFrag.indexOf("?");
   if (pQueryIndex !== -1) {

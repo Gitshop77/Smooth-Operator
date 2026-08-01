@@ -103,15 +103,11 @@ export function movePhantomCursor(x: number, y: number): Promise<void> {
     activeMoveFinish();
   }
 
- // Wait for the transition to complete (with safety timeout).
- // `cursorEl` is non-null here (we just set its transform above), but TS
- // can't narrow across the Promise boundary, so capture a local reference.
+  // Wait for the transition to complete (with safety timeout).
+  // `cursorEl` is non-null here (we just set its transform above); capture a
+  // local reference so the closure type-checks without a null assertion.
   const target = cursorEl;
   return new Promise<void>((resolve) => {
-    if (!target) {
-      resolve();
-      return;
-    }
     let done = false;
     // Resolve the move promise. Marked `done` so neither the transitionend nor
     // the safety-timeout path can resolve twice.

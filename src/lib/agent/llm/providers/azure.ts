@@ -29,10 +29,10 @@ import { assertSafeUserBaseURL } from "./openai-compatible-profile";
 import { isCuratedLocalOriginUrl } from "./openai";
 import type { SsrfProvenance } from "../route/ssrf";
 
-export const id = "azure";
+const id = "azure";
 
 /** Default Azure OpenAI API version (recent stable). */
-export const DEFAULT_API_VERSION = "2024-10-21";
+const DEFAULT_API_VERSION = "2024-10-21";
 
 /**
  * Azure `api-version` is untrusted (Options UI / settings sync / env var) and
@@ -50,7 +50,7 @@ function assertValidAzureApiVersion(apiVersion: string): void {
   }
 }
 
-export type Config = {
+type Config = {
   baseURL?: string;
   resourceName?: string;
   apiVersion?: string;
@@ -62,14 +62,13 @@ export type Config = {
 const auth = (options: ProviderAuthOption<"optional">) =>
   apiKeyAuth(options, "AZURE_OPENAI_API_KEY", "api-key");
 
-/** Resolve the Azure resource name from config or the environment. */
-function resolveEnvResource(): string | undefined {
-  return typeof process !== "undefined" ? process.env?.AZURE_OPENAI_RESOURCE_NAME : undefined;
-}
-
-/** Resolve the Azure API version from the environment (undefined when unavailable). */
-function resolveEnvApiVersion(): string | undefined {
-  return typeof process !== "undefined" ? process.env?.AZURE_OPENAI_API_VERSION : undefined;
+/** Read the Azure env-var config once (guarded for non-Node contexts). */
+function resolveAzureEnv(): { resource?: string; apiVersion?: string } {
+  if (typeof process === "undefined") return {};
+  return {
+    resource: process.env?.AZURE_OPENAI_RESOURCE_NAME,
+    apiVersion: process.env?.AZURE_OPENAI_API_VERSION,
+  };
 }
 
 /**
@@ -80,8 +79,8 @@ function resolveEnvApiVersion(): string | undefined {
  * of silently producing an empty/relative URL that fails opaquely at request
  * time.
  */
-function assertConfigured(input: Config): void {
-  if (!input.resourceName && !input.baseURL && !resolveEnvResource()) {
+function assertConfigured(input: Config, envResource: string | undefined): void {
+  if (!input.resourceName && !input.baseURL && !envResource) {
     throw new Error(
       "Azure OpenAI is not configured. Set your Azure resource name (resourceName) or a custom baseURL in Options."
     );
@@ -106,21 +105,22 @@ function assertValidAzureResourceName(resource: string): void {
 }
 
 export function configure(input: Config = {}) {
- // Fail closed at config time when no usable endpoint can be derived.
-  assertConfigured(input);
+  const env = resolveAzureEnv();
+  // Fail closed at config time when no usable endpoint can be derived.
+  assertConfigured(input, env.resource);
 
  // `resource` is UNTRUSTED (Options UI / settings sync / env var). Reject
  // anything that isn't a strict Azure resource-name DNS label so it cannot
  // inject a host/path/query into the derived baseURL — otherwise a value like
  // `evil.com/` would build `https://evil.com/.openai.azure.com` and exfiltrate
  // the `api-key` header (the transport SSRF recheck only blocks private IPs,
- // not attacker-controlled public hosts). See the audit's host-injection finding.
-  const resource = input.resourceName ?? resolveEnvResource();
+  // not attacker-controlled public hosts).
+  const resource = input.resourceName ?? env.resource;
   if (resource !== undefined) {
     assertValidAzureResourceName(resource);
   }
 
-  const apiVersion = input.apiVersion ?? resolveEnvApiVersion() ?? DEFAULT_API_VERSION;
+  const apiVersion = input.apiVersion ?? env.apiVersion ?? DEFAULT_API_VERSION;
   assertValidAzureApiVersion(apiVersion);
   const baseURL = input.baseURL ?? (resource ? `https://${resource}.openai.azure.com` : undefined);
 
@@ -146,7 +146,10 @@ export function configure(input: Config = {}) {
  // but prevents a malicious/garbage id from injecting path separators into
  // the request URL, and throws on structurally-invalid ids.
       const route = make({
-        id: "azure-openai",
+        // Fold the model id into the route id so distinct deployments register
+        // under distinct registry keys and a later model() call can't clobber
+        // the earlier model's route (per-model deployment URLs differ).
+        id: `azure-openai:${encodeModelIdForUrl(modelID)}`,
         provider: id,
         protocol: OpenAIChat.protocol,
         endpoint: Endpoint.path(`/openai/deployments/${encodeModelIdForUrl(modelID)}/chat/completions`, {

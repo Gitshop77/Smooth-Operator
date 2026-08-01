@@ -11,8 +11,8 @@
  */
 
 import * as OpenAICompatibleChat from "../protocols/openai-compatible-chat";
+import { makeOpenAIChatFacade } from "./openai";
 import { profiles } from "./openai-compatible-profile";
-import { makeOpenAIChatFacade, type Config } from "./openai";
 
 const facade = makeOpenAIChatFacade({
   id: "openrouter",
@@ -24,7 +24,5 @@ const facade = makeOpenAIChatFacade({
   defaultBaseURL: profiles.openrouter.baseURL,
 });
 
-export const id = facade.id;
 export const configure = facade.configure;
 export const toLLMProvider = facade.toLLMProvider;
-export type { Config };

@@ -14,7 +14,7 @@
  * real evidence; these assertions pin the blocked (score 0) outcome.
  */
 
-import { describe, test, expect, vi } from "vitest";
+import { describe, test, expect, vi, afterEach } from "vitest";
 import {
   EvaluatorComb,
   HTMLContentEvaluator,
@@ -22,6 +22,10 @@ import {
 } from "../src/lib/agent/evaluators";
 
 describe("evaluator fail-closed grading gates", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   test("EvaluatorComb: configured kind with no matching input fails closed (score 0)", async () => {
     const comb = new EvaluatorComb(["url_match"]);
     const res = await comb.evaluate({
@@ -40,15 +44,13 @@ describe("evaluator fail-closed grading gates", () => {
 
   test("HTMLContentEvaluator: extraction warning fails closed when failOpen unset (score 0)", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
+    // A `document.*` JS-snippet locator is unsupported by the pure evaluator
+    // and yields an extraction warning → fail closed (score 0).
     const res = await new HTMLContentEvaluator().evaluate({
       pageHtml: "<div>x</div>",
-      resolveLocator: () => {
-        throw new Error("locator boom");
-      },
-      targets: [{ locator: "#missing", required_contents: { exact_match: "" } }],
+      targets: [{ locator: "document.querySelector('x')", required_contents: { exact_match: "" } }],
     });
     expect(res.score).toBe(0);
-    vi.restoreAllMocks();
   });
 
   test("StringEvaluator: empty regex ref fails closed (score 0)", () => {

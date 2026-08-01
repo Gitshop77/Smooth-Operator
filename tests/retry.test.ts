@@ -1,9 +1,13 @@
 /**
  * Retry classification tests — `withLLMRetry` must classify transient
- * errors from the numeric HTTP status carried on the error, not by
- * string-matching the response body. Covers:
+ * errors from the numeric HTTP status when the transport attaches one;
+ * the status wins over any text in the error body, and a plain error
+ * carrying no status is never retried (no retry storm). Covers:
  * - a 429 with a numeric status IS retried
  * - a 4xx (non-429) with a numeric status is NOT retried
+ * - a 5xx with a numeric status IS retried
+ * - a plain Error without a numeric status is NOT retried (single attempt)
+ * - body text mentioning 429/5xx never overrides the numeric status
  * - a Retry-After value attached to the error is honored (retry still fires)
  */
 

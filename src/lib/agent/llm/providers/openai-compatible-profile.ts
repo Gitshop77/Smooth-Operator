@@ -18,9 +18,10 @@
 
 import {
   isAllowedLlmBaseUrl,
+  isCuratedLocalOrigin,
   validateLlmBaseUrl,
-  LOCAL_PROVIDER_BASE_URLS,
 } from "../route/ssrf";
+import { redactUrl } from "../route/url-redact";
 
 export interface OpenAICompatibleProfile {
   readonly provider: string;
@@ -89,27 +90,6 @@ export class UnsafeBaseUrlError extends Error {
 // Failures throw {@link UnsafeBaseUrlError} so callers can branch on the type
 // rather than string-matching the message.
 const LOCAL_PROVIDER_IDS = new Set(["ollama", "litellm"]);
-
-/** Pre-computed set of curated local-provider origins (parsed once). */
-const CURATED_LOCAL_ORIGINS = new Set(
-  LOCAL_PROVIDER_BASE_URLS.map((u) => new URL(u).origin),
-);
-
-/** True iff `url`'s origin exactly matches a curated local-provider endpoint. */
-function isCuratedLocalOrigin(url: string): boolean {
-  try {
-    return CURATED_LOCAL_ORIGINS.has(new URL(url).origin);
-  } catch {
-    return false;
-  }
-}
-
-/** Strip embedded `user:pass@` credentials AND any query/fragment from a URL
- * before it reaches logs/UI, so secrets passed as query params are not leaked
- * in SSRF error messages. Mirrors the sibling redactor in `ssrf.ts`. */
-function redactUrl(u: string): string {
-  return u.replace(/\/\/[^@/]*@/, "//").replace(/[?#].*$/, "");
-}
 
 export const assertSafeUserBaseURL = (
   baseURL: string | undefined,

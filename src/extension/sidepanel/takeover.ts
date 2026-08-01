@@ -53,7 +53,7 @@ export function hideTakeoverBanner(): void {
 }
 
 /** Remove any active dialog overlay, restoring focus to the trigger element. */
-export function removeActiveOverlay(): void {
+function removeActiveOverlay(): void {
   if (activeDialogOverlay) {
     activeDialogOverlay.remove();
     activeDialogOverlay = null;
@@ -88,12 +88,12 @@ resumeBtn?.addEventListener("click", () => {
 /**
  * Build the shared overlay scaffolding for an interactive dialog.
  */
-function buildDialogOverlay(message: string, okLabel = "OK") {
+function buildDialogOverlay(message: string, okLabel: string) {
   // Clean up any existing dialog overlay to prevent zombie dialogs
   // when a second takeover event fires while a dialog is already open.
   if (activeFinish) { activeFinish(null as unknown); activeFinish = null; }
   removeActiveOverlay();
-  const trigger = (document.activeElement as HTMLElement | null) ?? null;
+  const trigger = document.activeElement as HTMLElement | null;
   const uid = globalThis.crypto?.randomUUID?.() ?? `d${Math.random().toString(36).slice(2)}`;
   const labelId = `inline-prompt-label-${uid}`;
 
@@ -129,7 +129,7 @@ function buildDialogOverlay(message: string, okLabel = "OK") {
   document.body.appendChild(overlay);
   activeDialogOverlay = overlay;
 
-  return { trigger, overlay, box, label, btnRow, cancelBtn, okBtn, uid };
+  return { trigger, overlay, label, btnRow, cancelBtn, okBtn, uid };
 }
 
 /**
@@ -144,14 +144,10 @@ function attachDismissBehavior(
     if (e.key === "Escape") {
       e.preventDefault();
       onCancel();
+      return;
     }
-  });
-  overlay.addEventListener("click", (e) => {
-    if (e.target === overlay) onCancel();
-  });
-  overlay.addEventListener("keydown", (e) => {
     if (e.key !== "Tab") return;
-    const focusables = getFocusables().filter((el) => !!el);
+    const focusables = getFocusables();
     if (focusables.length === 0) return;
     const first = focusables[0];
     const last = focusables[focusables.length - 1];
@@ -162,6 +158,9 @@ function attachDismissBehavior(
       e.preventDefault();
       first.focus();
     }
+  });
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) onCancel();
   });
 }
 
@@ -193,7 +192,7 @@ export function promptConfirm(message: string): Promise<boolean> {
  * A free-text input dialog. Resolves with the typed value (OK / Enter)
  * or `null` (Cancel / Esc / backdrop).
  */
-export function promptText(message: string, initialValue = ""): Promise<string | null> {
+export function promptText(message: string, initialValue: string): Promise<string | null> {
   return openInputDialog({ message, masked: false, initialValue });
 }
 

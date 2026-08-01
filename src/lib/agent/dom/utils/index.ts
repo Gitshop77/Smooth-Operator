@@ -6,9 +6,8 @@
  * `PROPAGATING_ELEMENTS` taxonomy.
  * NOTE: the bounding-box containment helpers defined in that module
  * (`containmentRatio`, `isContained`, `nearestPropagatingAncestor`,
- * `shouldExcludeAsContained`, `isPropagatingElement`,
- * `DEFAULT_CONTAINMENT_THRESHOLD`) are currently NOT consumed by the
- * page-state indexed-tree walker, so they perform no runtime
+ * `shouldExcludeAsContained`, `isPropagatingElement`) are currently NOT
+ * consumed by the page-state indexed-tree walker, so they perform no runtime
  * de-duplication today. They are exported for completeness only; see the
  * owning module for the full picture.
  * - {@link ./visibility} — `isLikelyHidden` (cheap pre-check) +

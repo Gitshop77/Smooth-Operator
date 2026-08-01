@@ -8,7 +8,6 @@
 /**
  * HuggingFace repo for the ONNX INT4 model.
  *
- * `MODEL_REPO_URL` is the human-readable repo page (for documentation / README).
  * `MODEL_BASE_URL` is the file-serving prefix — HuggingFace serves individual
  * files at `{repo}/resolve/main/{path}`, which 302-redirects to the CDN.
  * The bare `/resolve/main` URL 404s in a browser, but appending a file path
@@ -20,8 +19,7 @@
  * This is the in-browser ONNX INT4 port by Reza2kn.
  */
 export const MODEL_REPO = "Reza2kn/LocateAnything-3B-ONNX-WebGPU-INT4";
-export const MODEL_REPO_URL = `https://huggingface.co/${MODEL_REPO}`;
-export const MODEL_BASE_URL = `${MODEL_REPO_URL}/resolve/main`;
+const MODEL_BASE_URL = `https://huggingface.co/${MODEL_REPO}/resolve/main`;
 
 // Model file URLs (7 files, ~2 GB total)
 export const VISION_GRAPH_URL = `${MODEL_BASE_URL}/onnx/vision_mlp_int4.onnx`;
@@ -61,6 +59,11 @@ export const MODEL_FILE_HASHES: Partial<Record<string, string>> = {
 // Internal file names for ONNX externalData
 export const VISION_DATA_NAME = "vision_mlp_int4.onnx.data";
 export const LANGUAGE_DATA_NAME = "language_tail_kv_int4.onnx.data";
+
+// Vision encoder output tensor name. The detect loop reads the visual
+// features by this exact name; a re-exported model with renamed/reordered
+// outputs must fail init, not silently feed the wrong tensor.
+export const VISION_FEATURE_OUTPUT = "visual_features";
 
 // Token IDs (from Qwen2.5-3B config)
 export const IMG_CONTEXT_TOKEN = 151665;

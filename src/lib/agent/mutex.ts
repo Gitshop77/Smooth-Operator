@@ -14,7 +14,10 @@ export function createMutex<T = void>(): (fn: () => Promise<T>) => Promise<T> {
     let release!: () => void;
     chain = new Promise<void>((r) => (release = r));
     const run = prev.then(fn, fn);
-    void run.finally(() => release());
+    // Release on BOTH paths. `run.then(ok, err)` (unlike `run.finally`) never
+    // produces a discarded side-promise that rejects when `fn` rejects, so a
+    // failed critical section can't leak an unhandled rejection.
+    void run.then(() => release(), () => release());
     return run;
   };
 }

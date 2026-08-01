@@ -7,7 +7,7 @@
  * discriminated union + `Action` inferred type) — the stated source of
  * truth.
  * 2. The `AgentAction` type in `src/lib/agent/types.ts` — now an ALIAS of
- * `Action` (Approach A from Task 3B), so this drift surface is gone.
+ * `Action` (Approach A), so this drift surface is gone.
  * 3. The hand-written `ACTION_METADATA` object in `schema.ts` (one entry
  * per action: name, description, pageChanging, exclusive, params).
  *
@@ -27,7 +27,8 @@
  */
 
 import { describe, test, expect } from "vitest";
-import { ActionSchema, ACTION_METADATA } from "../src/lib/agent/tools/schema";
+import { ActionSchema } from "../src/lib/agent/tools/schema";
+import { ACTION_METADATA } from "../src/lib/agent/tools/schema-utils";
 import type { Action } from "../src/lib/agent/tools/schema";
 import type { AgentAction } from "../src/lib/agent/types";
 
@@ -88,7 +89,7 @@ const SCHEMA_ACTION_TYPES = schemaActionTypes();
 
 describe("AgentAction <-> Action schema sync", () => {
   test("AgentAction is the same type as Action (Approach A sanity check)", () => {
- // After Task 3B, `AgentAction` in types.ts is `export type AgentAction = Action`.
+ // After the refactor, `AgentAction` in types.ts is `export type AgentAction = Action`.
  // If anyone reverts it to a hand-written union, this assignment stops
  // compiling (the hand-written union has `.default()`-affected fields as
  // OPTIONAL, while `Action` has them as REQUIRED — so the two types are no
@@ -147,11 +148,13 @@ describe("ACTION_METADATA <-> ActionSchema sync", () => {
     }
   });
 
-  test("ACTION_METADATA has no duplicate entries (object keys are unique by construction)", () => {
- // Defensive — a plain object literal can't have duplicate keys at runtime,
- // but this test documents the invariant and guards against future
- // refactors to a Map or array-of-pairs representation.
-    const keys = Object.keys(ACTION_METADATA);
-    expect(new Set(keys).size).toBe(keys.length);
+  test("ACTION_METADATA is a plain object literal (Map-shaped refactor would silently break the sync guards)", () => {
+ // The sync guards above iterate with `Object.keys(ACTION_METADATA)`. If
+ // someone refactors ACTION_METADATA to a Map (or array-of-pairs),
+ // `Object.keys` silently returns [] and every assertion above degrades to
+ // a vacuous pass. This guard makes such a refactor fail loudly instead.
+    expect(ACTION_METADATA).not.toBeInstanceOf(Map);
+    expect(Array.isArray(ACTION_METADATA)).toBe(false);
+    expect(Object.keys(ACTION_METADATA).length).toBeGreaterThan(0);
   });
 });

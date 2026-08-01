@@ -104,19 +104,19 @@ describe("judge success path finalizes correctly (positive control)", () => {
       impossibleTask: false, reachedCaptcha: false,
     });
     const deps = makeDeps(events, {
- // Valid judge response with an affirmative verdict.
+      // Valid judge response with an affirmative verdict.
       plannerCall: vi.fn(async () => ({ raw: judgeJson, tokensIn: 10, tokensOut: 10, model: "m" })),
     });
     const state = makeLoopState(deps, events);
 
     const finalized = await runJudge(deps, state);
 
- // The judge agreed → the run must finalize as success.
+    // The judge agreed → the run must finalize as success.
     expect(finalized).toBe(true);
     expect(state.finalResult?.success).toBe(true);
     expect(state.finalResult?.text).toBe("agent claims done");
 
- // A terminal `done` event with success:true must be emitted.
+    // A terminal `done` event with success:true must be emitted.
     const successDone = events.find((e) => e.type === "done" && e.success === true);
     expect(successDone).toBeDefined();
   });
@@ -128,22 +128,22 @@ describe("null judge verdict must NOT fail open", () => {
   test("non-JSON judge response → run is NOT finalized as success", async () => {
     const events: LogEvent[] = [];
     const deps = makeDeps(events, {
- // Judge LLM returns garbage → judgeTask returns null (UNVERIFIED).
+      // Judge LLM returns garbage → judgeTask returns null (UNVERIFIED).
       plannerCall: vi.fn(async () => ({ raw: "this is not json at all" })),
     });
     const state = makeLoopState(deps, events);
 
     const finalized = await runJudge(deps, state);
 
- // Key invariant: a null verdict must never finalize as success:true.
+    // Key invariant: a null verdict must never finalize as success:true.
     expect(finalized).toBe(false);
     expect(state.finalResult).toBeUndefined();
 
- // No terminal `done` event with success:true may be emitted.
+    // No terminal `done` event with success:true may be emitted.
     const successDone = events.find((e) => e.type === "done" && e.success === true);
     expect(successDone).toBeUndefined();
 
- // An info event must explain the judge was unverified.
+    // An info event must explain the judge was unverified.
     const infoEvent = events.find((e) => e.type === "info");
     expect(infoEvent).toBeDefined();
     expect((infoEvent as { message: string }).message).toMatch(/judge could not be reached/i);
@@ -152,7 +152,7 @@ describe("null judge verdict must NOT fail open", () => {
   test("judge LLM throws → null verdict → run is NOT finalized as success", async () => {
     const events: LogEvent[] = [];
     const deps = makeDeps(events, {
- // Judge LLM call throws → judgeTask catches and returns null.
+      // Judge LLM call throws → judgeTask catches and returns null.
       plannerCall: vi.fn(async () => { throw new Error("LLM unavailable"); }),
     });
     const state = makeLoopState(deps, events);
@@ -172,18 +172,18 @@ describe("null judge verdict must NOT fail open", () => {
       impossibleTask: false, reachedCaptcha: false,
     });
     const deps = makeDeps(events, {
- // Valid, parseable judge response that explicitly disagrees. This must route
- // back to the planner (return false) — identical to the null-verdict path.
+      // Valid, parseable judge response that explicitly disagrees. This must route
+      // back to the planner (return false) — identical to the null-verdict path.
       plannerCall: vi.fn(async () => ({ raw: judgeJson, tokensIn: 10, tokensOut: 10, model: "m" })),
     });
     const state = makeLoopState(deps, events);
 
     const finalized = await runJudge(deps, state);
 
- // An explicit disagreement must never finalize as success:true.
+    // An explicit disagreement must never finalize as success:true.
     expect(finalized).toBe(false);
     expect(state.finalResult).toBeUndefined();
- // No terminal `done` event with success:true may be emitted.
+    // No terminal `done` event with success:true may be emitted.
     const successDone = events.find((e) => e.type === "done" && e.success === true);
     expect(successDone).toBeUndefined();
   });
@@ -199,7 +199,7 @@ describe("non-budget judge error must NOT fail open", () => {
       impossibleTask: false, reachedCaptcha: false,
     });
     const deps = makeDeps(events, {
- // Valid judge response so we get past parse — the throw comes from onCost.
+      // Valid judge response so we get past parse — the throw comes from onCost.
       plannerCall: vi.fn(async () => ({ raw: judgeJson, tokensIn: 10, tokensOut: 10, model: "m" })),
     });
     const state = makeLoopState(deps, events);
@@ -211,11 +211,11 @@ describe("non-budget judge error must NOT fail open", () => {
     expect(finalized).toBe(false);
     expect(state.finalResult).toBeUndefined();
 
- // No terminal `done` event with success:true.
+    // No terminal `done` event with success:true.
     const successDone = events.find((e) => e.type === "done" && e.success === true);
     expect(successDone).toBeUndefined();
 
- // An error event must explain the judge failed (treated as unverified).
+    // An error event must explain the judge failed (treated as unverified).
     const errorEvent = events.find((e) => e.type === "error");
     expect(errorEvent).toBeDefined();
     expect((errorEvent as { message: string }).message).toMatch(/treating as unverified/i);
@@ -236,7 +236,7 @@ describe("non-budget judge error must NOT fail open", () => {
       onCost: () => { throw new Error("Budget exceeded: $5.00 limit hit"); },
     });
 
- // Budget cap is a real failure — preserved from the old behavior.
+    // Budget cap is a real failure — preserved from the old behavior.
     expect(finalized).toBe(true);
     expect(state.finalResult?.success).toBe(false);
   });

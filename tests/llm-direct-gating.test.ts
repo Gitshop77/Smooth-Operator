@@ -3,7 +3,6 @@
  * screenshot-gating branch.
  *
  * Locks:
- * - hashStr: deterministic, distinct inputs differ.
  * - getVisionMode: unset→"disabled"; legacy enableLocalVision===true→"always";
  *   explicit visionMode wins.
  * - getAgentMode: unknown/absent→"standard" fail-safe.
@@ -105,20 +104,6 @@ function makeRequest(): AgentStepRequest {
     maxSteps: 10,
   };
 }
-
-describe("hashStr", () => {
-  test("is deterministic for the same input", async () => {
-    const { hashStr } = await import("../src/extension/llm-direct");
-    expect(hashStr("a")).toBe(hashStr("a"));
-    expect(hashStr("some-secret-key")).toBe(hashStr("some-secret-key"));
-  });
-
-  test("distinct inputs produce distinct digests", async () => {
-    const { hashStr } = await import("../src/extension/llm-direct");
-    expect(hashStr("a")).not.toBe(hashStr("b"));
-    expect(hashStr("")).not.toBe(hashStr("x"));
-  });
-});
 
 describe("getVisionMode", () => {
   test("both keys unset → 'disabled'", async () => {

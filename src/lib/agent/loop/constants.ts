@@ -1,8 +1,7 @@
 /**
  * Loop constants — extracted from orchestrator.ts (Phase 1).
  *
- * Single source of truth for every loop-level tuning constant. Re-exported
- * from `orchestrator.ts` for backward compatibility.
+ * Single source of truth for every loop-level tuning constant.
  */
 
 /** Max parse retries before giving up on a single navigator call. */
@@ -16,7 +15,7 @@ export const EXPLORATION_NUDGE_STEPS = 5;
 /** URL substrings that suggest a captcha is being shown. */
 export const CAPTCHA_URL_HINTS = ["recaptcha", "hcaptcha", "captcha", "cf-chl", "challenge"];
 /** URL substrings / file extensions that suggest a download is in progress. */
-export const DOWNLOAD_URL_HINTS = [".pdf", ".zip", ".tar", ".gz", ".tgz", ".docx", ".xlsx", ".csv", "download"];
+const DOWNLOAD_URL_HINTS = [".pdf", ".zip", ".tar", ".gz", ".tgz", ".docx", ".xlsx", ".csv", "download"];
 /** Boundary-aware download-URL detector, derived from {@link DOWNLOAD_URL_HINTS}.
  * The leading dot is kept ONLY for the extension entries; the bare `download`
  * substring is matched separately so download-ish paths such as `…/download`

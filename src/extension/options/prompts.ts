@@ -9,7 +9,8 @@
  */
 
 import { $, isRecord } from "@/extension/shared";
-import { STORAGE_KEYS, showSaved } from "./settings-sync";
+import { STORAGE_KEYS } from "./storage-keys";
+import { showSaved } from "./settings-sync-utils";
 import { alertModal } from "./modal";
 
 interface QuickPrompt {

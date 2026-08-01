@@ -7,7 +7,7 @@
  * while non-sensitive attributes are returned verbatim.
  */
 
-import { describe, test, expect, beforeEach, beforeAll, afterAll, vi } from "vitest";
+import { describe, test, expect, beforeEach, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { handleFindElements } from "../src/lib/agent/tools/handlers/find-elements";
 import type { ActionContext } from "../src/lib/agent/tools/handlers/types";
 import { setSecret, deleteSecret } from "../src/lib/agent/secrets";
@@ -86,13 +86,13 @@ describe("find_elements sensitive-attribute redaction", () => {
     const out = res.extractedContent ?? "";
     const rows = parseElementRows(out);
 
- // Sensitive `value`s are redacted — the raw secrets must NOT appear.
+    // Sensitive `value`s are redacted — the raw secrets must NOT appear.
     expect(out).toContain("[value redacted]");
     expect(out).not.toContain("supersecret");
     expect(out).not.toContain("000999");
     expect(out).not.toContain("4111111111111111");
 
- // Structural: password input value redacted; non-sensitive value + attr kept.
+    // Structural: password input value redacted; non-sensitive value + attr kept.
     expect(rows[0].value).toBe("[value redacted]");
     expect(rows[3].value).toBe("alice");
     expect(rows[4]["data-x"]).toBe("meta-info");
@@ -162,5 +162,71 @@ describe("find_elements max_results truncation", () => {
       .split("\n")
       .filter((l) => /^\d+:\s*</.test(l));
     expect(rows).toHaveLength(2);
+  });
+});
+
+describe("find_elements redaction-failure masking", () => {
+  beforeEach(async () => {
+    // listSecrets caches the secret list across calls (only setSecret /
+    // deleteSecret invalidate it). Earlier describes leave a cached EMPTY
+    // list, which would short-circuit the failing-store path below. Invalidate
+    // the cache through the public API so the failure test really hits
+    // chrome.storage.session.
+    (globalThis as Record<string, unknown>).chrome = {
+      storage: {
+        session: {
+          get: vi.fn().mockResolvedValue({}),
+          set: vi.fn().mockResolvedValue(undefined),
+        },
+      },
+    };
+    await deleteSecret("__cache_reset__");
+    delete (globalThis as Record<string, unknown>).chrome;
+  });
+
+  afterEach(() => {
+    delete (globalThis as Record<string, unknown>).chrome;
+  });
+
+  test("when redactSecrets fails, NO raw value leaks (every part is masked)", async () => {
+    (globalThis as Record<string, unknown>).chrome = {
+      storage: {
+        session: {
+          get: vi.fn().mockRejectedValue(new Error("SW asleep")),
+        },
+      },
+    };
+    document.body.innerHTML = `
+      <div id="a" data-token="tok-AAAA">x</div>
+      <div id="b" data-token="tok-BBBB">y</div>
+      <div id="c" data-token="tok-CCCC">z</div>
+    `;
+    const res = await handleFindElements(DUMMY_CTX, {
+      type: "find_elements",
+      selector: "div",
+      attributes: ["data-token"],
+      max_results: 50,
+    });
+    expect(res.success).toBe(true);
+    expect(res.extractedContent).not.toContain("tok-AAAA");
+    expect(res.extractedContent).not.toContain("tok-BBBB");
+    expect(res.extractedContent).not.toContain("tok-CCCC");
+    expect(res.extractedContent).toContain("[REDACTED");
+  });
+
+  test("a NUL byte inside a value cannot shift the split so raw text leaks", async () => {
+    const div = document.createElement("div");
+    div.id = "n";
+    div.setAttribute("data-token", "part1\u0000part2");
+    document.body.appendChild(div);
+    const res = await handleFindElements(DUMMY_CTX, {
+      type: "find_elements",
+      selector: "#n",
+      attributes: ["data-token"],
+      max_results: 50,
+    });
+    expect(res.success).toBe(true);
+    expect(res.extractedContent).not.toContain("part1");
+    expect(res.extractedContent).not.toContain("part2");
   });
 });

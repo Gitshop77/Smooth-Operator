@@ -8,6 +8,7 @@
  */
 
 import { withPageDebugger, getScreenshotQuality } from "./tab-manager";
+import { sendDebuggerCommandWithTimeout } from "./tab-manager-utils";
 
 /**
  * Capture a JPEG screenshot of the given tab via `chrome.debugger`. Attaches
@@ -29,46 +30,20 @@ export async function captureTabScreenshot(tabId: number): Promise<string> {
  // `finally` even on error).
   const quality = await getScreenshotQuality();
   return withPageDebugger(tabId, async () => {
- // Guard against a wedged debugger session: if `sendCommand` never resolves
- // (target tab mid-crash, CDP session stalled), reject after 10s instead of
- // hanging the whole agent step until the SW is killed. The single promise
- // below uses a `settled` flag so the timeout is always cleared and the
- // losing branch's rejection is never orphaned (no unhandled rejection).
-    const result = await new Promise<{ data?: string }>((resolve, reject) => {
-      let settled = false;
-      const timer: ReturnType<typeof setTimeout> = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        reject(new Error("captureTabScreenshot timed out after 10s"));
-      }, 10_000);
-      (chrome.debugger.sendCommand(
-        { tabId },
-        "Page.captureScreenshot",
-        {
-          format: "jpeg",
-          quality,
- // Capture only the VISIBLE viewport. CDP defaults `captureBeyondViewport`
- // to true (full scrollable page) when not specified; the vision flow
- // matches screenshots against `pixelRects` expressed in VIEWPORT coords,
- // so a full-page image would misalign clicks (see header warning). Mirror
- // the sibling capture in tab-manager.ts which passes the same flag.
-          captureBeyondViewport: false,
-        },
-      ) as Promise<{ data?: string }>).then(
-        (r) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          resolve(r);
-        },
-        (e) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          reject(e);
-        },
-      );
-    });
+    const result = await sendDebuggerCommandWithTimeout<{ data?: string }>(
+      tabId,
+      "Page.captureScreenshot",
+      {
+        format: "jpeg",
+        quality,
+        // Capture only the VISIBLE viewport. CDP defaults `captureBeyondViewport`
+        // to true (full scrollable page) when not specified; the vision flow
+        // matches screenshots against `pixelRects` expressed in VIEWPORT coords,
+        // so a full-page image would misalign clicks (see header warning). Mirror
+        // the sibling capture in tab-manager.ts which passes the same flag.
+        captureBeyondViewport: false,
+      },
+    );
     if (!result?.data) throw new Error("Page.captureScreenshot returned no data");
     return `data:image/jpeg;base64,${result.data}`;
   });

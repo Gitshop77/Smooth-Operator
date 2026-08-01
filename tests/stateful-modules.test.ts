@@ -14,6 +14,7 @@ import {
   initScheduledTasks,
   type ScheduledTask,
 } from "../src/lib/agent/scheduled-tasks";
+import { isValidTaskEntry } from "../src/lib/agent/scheduled-tasks-utils";
 import {
   saveMemory,
   deleteMemory,
@@ -239,6 +240,93 @@ describe("scheduled-tasks — chrome.alarms MV3 wiring", () => {
       expect(reCreated).toContain(`open_cowork_scheduled_${enabled.id}`);
       // A disabled task must NOT re-arm a firing alarm.
       expect(reCreated).not.toContain(`open_cowork_scheduled_${disabled.id}`);
+    } finally {
+      stub.restore();
+    }
+  });
+
+  test("daily/weekly tasks arm with when = persisted nextRunAt (phase-preserving)", async () => {
+    const stub = installChromeAlarmsStub();
+    try {
+      const task = makeTask("daily-1", { type: "daily", hour: 9, minute: 0 });
+      await saveScheduledTask(task);
+
+      const persisted = (stub.storageData["open_cowork_scheduled_tasks"] as ScheduledTask[]).find(
+        (t) => t.id === "daily-1",
+      );
+      expect(persisted?.nextRunAt).toBeTypeOf("number");
+
+      const armed = stub.created.find((c) => c.name === `open_cowork_scheduled_daily-1`);
+      // The alarm must fire at the persisted absolute time — NOT at a delay
+      // re-derived from `now`, which would shift the wall-clock phase by
+      // however late the arm happened.
+      expect(armed!.spec!.when).toBe(persisted!.nextRunAt);
+      expect(armed!.spec!.periodInMinutes).toBe(1440);
+    } finally {
+      stub.restore();
+    }
+  });
+
+  test("initScheduledTasks re-arm preserves the first-fire time (no phase drift)", async () => {
+    const stub = installChromeAlarmsStub();
+    try {
+      const task = makeTask("weekly-1", { type: "weekly", hour: 9, minute: 0, dayOfWeek: 1 });
+      await saveScheduledTask(task);
+      const persisted = (stub.storageData["open_cowork_scheduled_tasks"] as ScheduledTask[]).find(
+        (t) => t.id === "weekly-1",
+      );
+
+      // Simulate a service-worker cold start mid-cycle.
+      stub.created.length = 0;
+      stub.cleared.length = 0;
+      await initScheduledTasks();
+
+      const reArmed = stub.created.find((c) => c.name === `open_cowork_scheduled_weekly-1`);
+      expect(reArmed!.spec!.when).toBe(persisted!.nextRunAt);
+    } finally {
+      stub.restore();
+    }
+  });
+});
+
+// ─── scheduled-tasks — corrupt persisted entries ────────────────────────────
+
+describe("scheduled-tasks — corrupt persisted entries", () => {
+  test("isValidTaskEntry rejects an entry with no/odd-shaped schedule instead of throwing", () => {
+    // A corrupt/partial persisted entry (e.g. from an older schema or a torn
+    // write) must be filtered out, never crash the load path with a TypeError
+    // from `validateSchedule(undefined).type`.
+    expect(isValidTaskEntry({ id: "x", task: "t", enabled: true })).toBe(false);
+    expect(isValidTaskEntry({ id: "x", task: "t", schedule: null, enabled: true })).toBe(false);
+    expect(isValidTaskEntry({ id: "x", task: "t", schedule: undefined, enabled: true })).toBe(false);
+    expect(isValidTaskEntry({ id: "x", task: "t", schedule: "daily", enabled: true })).toBe(false);
+  });
+
+  test("isValidTaskEntry still accepts a valid entry", () => {
+    expect(isValidTaskEntry(makeTask("ok-1", { type: "daily", hour: 9, minute: 0 }))).toBe(true);
+  });
+
+  test("initScheduledTasks skips corrupt entries instead of crashing SW startup", async () => {
+    const stub = installChromeAlarmsStub();
+    try {
+      const valid = makeTask("good-1", { type: "interval", intervalMinutes: 15 });
+      await saveScheduledTask(valid);
+      // Corrupt a persisted entry (torn write / older schema version).
+      (stub.storageData["open_cowork_scheduled_tasks"] as unknown[]).push({
+        id: "corrupt-1",
+        task: "no schedule",
+        enabled: true,
+      });
+
+      stub.created.length = 0;
+      stub.cleared.length = 0;
+      await expect(initScheduledTasks()).resolves.toBeUndefined();
+
+      // The valid task is still reconciled; the corrupt one is skipped.
+      expect(stub.cleared).toContain("open_cowork_scheduled_good-1");
+      expect(stub.created.map((c) => c.name)).toContain("open_cowork_scheduled_good-1");
+      expect(stub.cleared).not.toContain("open_cowork_scheduled_corrupt-1");
+      expect(stub.created.map((c) => c.name)).not.toContain("open_cowork_scheduled_corrupt-1");
     } finally {
       stub.restore();
     }

@@ -220,8 +220,13 @@ export function renderMergedElementsText(elements: MergedElement[]): string {
         : "";
       lines.push(`${el.indexStr}<${el.tag}${attrStr} />${textStr}`);
     } else {
- // Render vision-only elements with pixel coordinates for CDP clicking
-      const r = el.pixelRect!;
+      // Vision elements carry CSS-pixel coordinates for CDP clicks, but
+      // pixelRect is optional on the type. Guard it: a vision element
+      // without coordinates cannot be clicked anyway, so skip its line
+      // rather than crash the whole render (a future producer bug would
+      // otherwise surface as a runtime TypeError instead of a missing line).
+      const r = el.pixelRect;
+      if (!r) continue;
       lines.push(
         `${el.indexStr}<vision_element label="${escapeXml(
           el.text.slice(0, MAX_ELEMENT_TEXT_LEN),

@@ -18,7 +18,7 @@ import {
   renderElementsText,
   DEFAULT_MIN_HTML_LENGTH,
 } from "../../html-summarizer";
-import { buildPostObserveNudges } from "../context/injection-points";
+import { buildPostObserveNudges, appendPendingLoopWarning } from "../context/injection-points";
 import { ELEMENTS_TEXT_CHAR_CAP } from "../messages";
 
 /**
@@ -54,7 +54,7 @@ export async function prepareNavigatorRequest(
   state: LoopState,
   browserState: BrowserState
 ): Promise<AgentStepRequest> {
- // Opt-in HTML-summarizer pre-pass.
+  // Opt-in HTML-summarizer pre-pass.
   let navElementsText = browserState.elementsText;
   if (state.config.enableHtmlSummarizer && browserState.elementsText.length > DEFAULT_MIN_HTML_LENGTH) {
     try {
@@ -75,13 +75,13 @@ export async function prepareNavigatorRequest(
     }
   }
 
- // Hard cap applied REGARDLESS of the summarizer path: whether the summarizer
- // is disabled, or it ran but fell back to the full DOM (low keyword
- // coverage), `navElementsText` must never exceed `MAX_NAV_ELEMENTS_TEXT_CHARS`.
- // Returning the full DOM on fallback would pay full-DOM token cost for zero
- // savings; truncating bounds the worst case deterministically.
- // Bound the other two large per-step payloads (vision screenshot + a11y tree)
- // so the "never an unbounded payload" guarantee holds for them as well.
+  // Hard cap applied REGARDLESS of the summarizer path: whether the summarizer
+  // is disabled, or it ran but fell back to the full DOM (low keyword
+  // coverage), `navElementsText` must never exceed `MAX_NAV_ELEMENTS_TEXT_CHARS`.
+  // Returning the full DOM on fallback would pay full-DOM token cost for zero
+  // savings; truncating bounds the worst case deterministically.
+  // Bound the other two large per-step payloads (vision screenshot + a11y tree)
+  // so the "never an unbounded payload" guarantee holds for them as well.
   const capPayload = (
     value: string | undefined,
     max: number,
@@ -138,7 +138,7 @@ export async function prepareNavigatorRequest(
     loopWarning: state.pendingLoopWarning,
     compactedMemory: state.compactedMemory,
   };
- // The loop warning is consumed by this request — clear it.
+  // The loop warning is consumed by this request — clear it.
   state.pendingLoopWarning = undefined;
 
   return navRequest;
@@ -154,9 +154,7 @@ export function appendPostObserveNudges(
 ): void {
   const wrapped = buildPostObserveNudges(browserState.url, browserState.title);
   if (wrapped) {
-    state.pendingLoopWarning = state.pendingLoopWarning
-      ? `${state.pendingLoopWarning}\n${wrapped}`
-      : wrapped;
+    appendPendingLoopWarning(state, wrapped);
   }
 }
 
@@ -223,9 +221,9 @@ export async function runPauseCheck(state: LoopState): Promise<void> {
     const PAUSE_POLL_MS = 500;
     const PAUSE_MAX_MS = 30 * 60 * 1000;
     const pauseDeadline = Date.now() + PAUSE_MAX_MS;
- // Track WHY the poll loop ended so we only emit `resumed` when the user
- // actually cleared the pause (not when aborted or when the 30-min safety
- // cap fired while still paused — both must not masquerade as a resume).
+    // Track WHY the poll loop ended so we only emit `resumed` when the user
+    // actually cleared the pause (not when aborted or when the 30-min safety
+    // cap fired while still paused — both must not masquerade as a resume).
     let exitReason: "cleared" | "deadline" | "aborted" = "cleared";
     while (paused && Date.now() < pauseDeadline) {
       if (state.signal?.aborted) {
@@ -236,29 +234,29 @@ export async function runPauseCheck(state: LoopState): Promise<void> {
       try {
         paused = await state.deps.checkPaused!();
       } catch {
- // Transient storage/lookup error — keep the current `paused` value
- // rather than force-resuming. We re-poll on the next iteration (bounded
- // by `pauseDeadline`), so an intermittent failure must NOT silently end
- // an explicit user pause.
+        // Transient storage/lookup error — keep the current `paused` value
+        // rather than force-resuming. We re-poll on the next iteration (bounded
+        // by `pauseDeadline`), so an intermittent failure must NOT silently end
+        // an explicit user pause.
       }
     }
- // Re-check abort after the loop in case it fired on the final iteration.
+    // Re-check abort after the loop in case it fired on the final iteration.
     if (exitReason !== "aborted" && state.signal?.aborted) exitReason = "aborted";
- // If we exited the loop while STILL paused, the 30-min safety cap reached
- // (the `Date.now() < pauseDeadline` condition went false) — mark it so we
- // emit the distinct "safety cap reached" message instead of a misleading
- // "resumed". This assignment was dropped in the reconcile rewrite, which
- // made the `=== "deadline"` branch unreachable (TS2367).
+    // If we exited the loop while STILL paused, the 30-min safety cap reached
+    // (the `Date.now() < pauseDeadline` condition went false) — mark it so we
+    // emit the distinct "safety cap reached" message instead of a misleading
+    // "resumed". This assignment was dropped in the reconcile rewrite, which
+    // made the `=== "deadline"` branch unreachable (TS2367).
     if (exitReason !== "aborted" && paused) exitReason = "deadline";
 
     if (exitReason === "aborted") {
- // Honour the abort: emit no misleading "resumed" event. The orchestrator's
- // top-of-step abort check will exit the run on the next iteration.
+      // Honour the abort: emit no misleading "resumed" event. The orchestrator's
+      // top-of-step abort check will exit the run on the next iteration.
       return;
     }
     if (exitReason === "deadline") {
- // Safety cap elapsed while the user is still paused. We must not claim the
- // user resumed, so emit a distinct info message instead of "resumed".
+      // Safety cap elapsed while the user is still paused. We must not claim the
+      // user resumed, so emit a distinct info message instead of "resumed".
       state.onEvent({
         type: "info",
         message: "Pause safety cap (30 min) reached while still paused — continuing.",
@@ -268,10 +266,10 @@ export async function runPauseCheck(state: LoopState): Promise<void> {
     state.onEvent({ type: "resumed", step: state.step });
     state.onEvent({ type: "info", message: "Agent resumed." });
   } catch (e) {
- // Pause check is best-effort — never crash the loop — but a genuine storage
- // failure (the initial `checkPaused()` or the poll loop) must be observable
- // rather than silently swallowed, so the loop doesn't proceed as if the user
- // never paused.
+    // Pause check is best-effort — never crash the loop — but a genuine storage
+    // failure (the initial `checkPaused()` or the poll loop) must be observable
+    // rather than silently swallowed, so the loop doesn't proceed as if the user
+    // never paused.
     state.onEvent({
       type: "error",
       step: state.step,

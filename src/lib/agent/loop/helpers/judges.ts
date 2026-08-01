@@ -10,80 +10,12 @@
 
 import type { AgentConfig, HistoryItem } from "../../types";
 import { judgeTask } from "../../judge";
-import { EvaluatorComb, type EvaluatorKind } from "../../evaluators";
-import {
+import type {
   CallbackDispatcher,
-  type CallbackContext,
+  CallbackContext,
 } from "../../callbacks";
 import type { LoopDeps, LoopState } from "../types";
-
-/**
- * Run the deterministic evaluators (string / URL / HTML-content) against
- * the agent's final result + current page state.
- */
-async function runDeterministicEvaluators(
-  deps: LoopDeps,
-  config: AgentConfig,
-  agentText: string,
-  state: LoopState,
-): Promise<{ score: number; results: { tag: string; score: number; reason: string }[]; reasons: string[] } | null> {
-  const eo = config.expectedOutcomes;
-  if (!eo) return null;
-  const kinds: EvaluatorKind[] = [];
-  if (eo.string && eo.string.length > 0) kinds.push("string_match");
-  if (eo.url) kinds.push("url_match");
-  if (eo.html && eo.html.length > 0) kinds.push("program_html");
-  if (kinds.length === 0) return null;
-  const comb = new EvaluatorComb(kinds);
-
-  const input: Parameters<EvaluatorComb["evaluate"]>[0] = {};
-  if (eo.string) {
-    input.string = {
-      prediction: agentText,
-      referenceAnswers: eo.string.map((s) => ({
-        type: s.type,
-        ref: s.ref,
-      })),
-    };
-  }
-  if (eo.url) {
-    let url: string;
-    try {
-      url = deps.getCurrentUrl ? await deps.getCurrentUrl() : (state.lastObservedUrl ?? "");
-    } catch {
-      url = state.lastObservedUrl ?? "";
-    }
-    input.url = {
-      prediction: url,
-      referenceUrl: eo.url.referenceUrl,
-      matchingRule: eo.url.matchingRule,
-    };
-  }
-  if (eo.html) {
-    let pageHtml = "";
-    if (deps.getPageHtml) {
-      try {
-        pageHtml = await deps.getPageHtml();
-      } catch {
-        pageHtml = "";
-      }
-    }
-    input.html = {
-      pageHtml,
-      targets: eo.html.map((t) => ({
-        locator: t.locator,
-        required_contents: t.required_contents,
-      })),
-    };
-  }
-
-  const result = await comb.evaluate(input);
-  return {
-    score: result.score,
-    results: result.results.map((r) => ({ tag: r.tag, score: r.score, reason: r.reason })),
-    reasons: result.reasons,
-  };
-}
+import { runDeterministicEvaluators } from "./evaluator-runner";
 
 /**
  * Optionally run the judge LLM to verify the agent's self-reported success,
@@ -116,10 +48,14 @@ export async function maybeJudgeAndFinalize(
   const { step, success, text, navigatorHistory, onCost } = args;
   const finalAttempt = args.finalAttempt ?? true;
 
-  if (!success) {
-    deps.onEvent({ type: "done", step, success: false, text });
-    state.finalResult = { success: false, text };
+  const finalize = (ok: boolean, doneText: string): true => {
+    deps.onEvent({ type: "done", step, success: ok, text: doneText });
+    state.finalResult = { success: ok, text: doneText };
     return true;
+  };
+
+  if (!success) {
+    return finalize(false, text);
   }
 
  // Cheap pre-check short-circuit: an intermediate "done" attempt on a
@@ -127,14 +63,12 @@ export async function maybeJudgeAndFinalize(
  // so the judge would be pure added cost. Skip it and trust the planner's
  // decision for the in-run attempt; the FINAL attempt still runs the judge.
   if (!finalAttempt && !config.expectedOutcomes) {
-    deps.onEvent({ type: "done", step, success: true, text });
-    state.finalResult = { success: true, text };
-    return true;
+    return finalize(true, text);
   }
 
   let evaluatorResult: Awaited<ReturnType<typeof runDeterministicEvaluators>> = null;
   let evaluatorErrored = false;
-  if (success && config.expectedOutcomes) {
+  if (config.expectedOutcomes) {
     try {
       evaluatorResult = await runDeterministicEvaluators(deps, config, text, state);
       if (evaluatorResult !== null && evaluatorResult.score === 1) {
@@ -142,9 +76,7 @@ export async function maybeJudgeAndFinalize(
           type: "info",
           message: `Deterministic evaluators passed (score 1.0) — skipping LLM judge.`,
         });
-        deps.onEvent({ type: "done", step, success: true, text });
-        state.finalResult = { success: true, text };
-        return true;
+        return finalize(true, text);
       }
       if (evaluatorResult !== null) {
         deps.onEvent({
@@ -167,25 +99,14 @@ export async function maybeJudgeAndFinalize(
  // gate. If they ran and scored < 1, they are authoritative — finalize as
  // FAILURE rather than discarding the failing score and declaring success.
     if (evaluatorResult !== null && evaluatorResult.score < 1) {
-      deps.onEvent({
-        type: "done",
-        step,
-        success: false,
-        text,
-      });
-      state.finalResult = { success: false, text };
-      return true;
+      return finalize(false, text);
     }
  // If the evaluators could not run (threw) we cannot verify the task. Do NOT
  // fail open to success — an unverified gate is not a passing one.
     if (evaluatorErrored) {
-      deps.onEvent({ type: "done", step, success: false, text });
-      state.finalResult = { success: false, text };
-      return true;
+      return finalize(false, text);
     }
-    deps.onEvent({ type: "done", step, success: true, text });
-    state.finalResult = { success: true, text };
-    return true;
+    return finalize(true, text);
   }
 
   try {
@@ -230,17 +151,7 @@ export async function maybeJudgeAndFinalize(
           costUsd: usage.costUsd, model: usage.model,
         });
         onCost(usage.costUsd, usage.tokensIn, usage.tokensOut);
-        if (dispatcher && ctx) {
-          await dispatcher.cost(ctx, {
-            tokensIn: usage.tokensIn,
-            tokensOut: usage.tokensOut,
-            model: usage.model,
-            costUsd: usage.costUsd,
-            reasoningTokens: usage.reasoningTokens,
-            cachedInputTokens: usage.cachedInputTokens,
-            cachedWriteInputTokens: usage.cachedWriteInputTokens,
-          });
-        }
+        if (dispatcher && ctx) await dispatcher.cost(ctx, usage);
       },
     });
 
@@ -262,18 +173,9 @@ export async function maybeJudgeAndFinalize(
  // and scored < 1, its verdict is authoritative — finalize as FAILURE rather
  // than letting the (page-content-influenced) judge self-certify completion.
       if (evaluatorResult !== null && evaluatorResult.score < 1) {
-        deps.onEvent({
-          type: "done",
-          step,
-          success: false,
-          text,
-        });
-        state.finalResult = { success: false, text };
-        return true;
+        return finalize(false, text);
       }
-      deps.onEvent({ type: "done", step, success: true, text });
-      state.finalResult = { success: true, text };
-      return true;
+      return finalize(true, text);
     }
 
     const reason = verdict.failureReason || "task may not be complete";
@@ -295,9 +197,7 @@ export async function maybeJudgeAndFinalize(
  // fires if a caller installs a throwing cost handler. Cost-cap
  // enforcement in the default config is via `costCapExceeded(state)`.
     if (/^Budget exceeded:/i.test(msg)) {
-      deps.onEvent({ type: "done", step, success: false, text: msg });
-      state.finalResult = { success: false, text: msg };
-      return true;
+      return finalize(false, msg);
     }
     deps.onEvent({
       type: "error", step,

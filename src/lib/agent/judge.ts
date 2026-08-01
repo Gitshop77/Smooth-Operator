@@ -11,41 +11,19 @@
 
 import type { HistoryItem } from "./types";
 import { wrapUntrusted } from "./security";
-// use the shared balanced-brace JSON extractor from output-parser
-// instead of a duplicate implementation.
 import { extractJson } from "./output-parser";
-// Static import — bundled into the service worker (splitting:false) so the
-// judge cost path never depends on a runtime chunk load.
 import { estimateCost } from "./llm/pricing";
-
-/** Maximum characters of `extractedContent` to include per history entry. */
-const MAX_EXTRACT_SNIPPET = 200;
-
-/** Maximum number of characters to include from the agent's final summary. */
-const MAX_SUMMARY_SNIPPET = 4000;
-
-/** Slice `text` to `max` chars, appending an ellipsis only when actually truncated. */
-function truncate(text: string, max: number): string {
-  const s = text.slice(0, max);
-  return s + (text.length > max ? "…" : "");
-}
-
-/** Result returned by the judge LLM. */
-export interface JudgementResult {
-  /** The judge's step-by-step reasoning, or null if the LLM omitted it. */
-  reasoning: string | null;
-  /** True = task succeeded. */
-  verdict: boolean;
-  /** ≤ 5 sentences explaining why the task failed (null if verdict=true). */
-  failureReason: string | null;
-  /** True if the task was impossible (vague instructions, broken site, etc.). */
-  impossibleTask: boolean;
-  /** True if the agent hit a CAPTCHA during execution. */
-  reachedCaptcha: boolean;
-}
+import {
+  type JudgementResult,
+  MAX_SUMMARY_SNIPPET,
+  truncate,
+  renderHistoryItem,
+  coerceJudgement,
+} from "./judge-helpers";
+export { coerceJudgement } from "./judge-helpers";
 
 /** Inputs to {@link judgeTask}. */
-export interface JudgeTaskArgs {
+interface JudgeTaskArgs {
   /** Original user task. */
   task: string;
   /** Full action history. */
@@ -65,19 +43,19 @@ export interface JudgeTaskArgs {
     };
   }>;
   /** Optional cost callback fired once per judge LLM call. Lets the agent
- * loop accrue judge cost into the same budget tracker used for the
- * navigator + planner.
- *
- * the callback MAY be async. `judgeTask` AWAITS it OUTSIDE its
- * own try/catches so a cost callback
- * propagates up to `maybeJudgeAndFinalize`'s catch — which finalizes the
- * run as FAILURE (not "judge agreement"). A throw here MUST propagate so
- * the run is aborted rather than silently finalized as judge-agreement. */
+   * loop accrue judge cost into the same budget tracker used for the
+   * navigator + planner.
+   *
+   * the callback MAY be async. `judgeTask` AWAITS it OUTSIDE its
+   * own try/catches so a cost callback
+   * propagates up to `maybeJudgeAndFinalize`'s catch — which finalizes the
+   * run as FAILURE (not "judge agreement"). A throw here MUST propagate so
+   * the run is aborted rather than silently finalized as judge-agreement. */
   onCost?: (usage: {
     tokensIn: number;
     tokensOut: number;
     /** The actual model used for the judge call, or "judge" when
- * `modelForCost` was not supplied. */
+   * `modelForCost` was not supplied. */
     model: string;
     costUsd: number;
     reasoningTokens?: number;
@@ -85,11 +63,11 @@ export interface JudgeTaskArgs {
     cachedWriteInputTokens?: number;
   }) => void | Promise<void>;
   /**
- * Optional model name for cost estimation. The judge's `llmCall` wrapper
- * doesn't return the model name, so the judge can't look up pricing on its
- * own. When provided, `onCost` reports the real cost; when omitted, cost
- * is reported as 0 (safe but under-reported).
- */
+   * Optional model name for cost estimation. The judge's `llmCall` wrapper
+   * doesn't return the model name, so the judge can't look up pricing on its
+   * own. When provided, `onCost` reports the real cost; when omitted, cost
+   * is reported as 0 (safe but under-reported).
+   */
   modelForCost?: string;
 }
 
@@ -128,100 +106,6 @@ Rules:
 - If the agent hit a CAPTCHA during execution, set reachedCaptcha=true (regardless of verdict).`;
 
 /**
- * Render a single history item as text for the judge.
- * Truncates extracted content to keep the prompt bounded. Wraps every
- * non-authoritative field in `<untrusted>` so the judge LLM can't be
- * prompt-injected — extracted content is page-derived (untrusted), and the
- * agent's own `evaluation`/`memory`/`goal` notes are model output that may
- * echo page-derived text it copied, so they are untrusted too. The user
- * `task` is the only trusted (author-provided) field and is left unwrapped.
- */
-function renderHistoryItem(h: HistoryItem): string {
-  let s = `Step ${h.step} (${h.agent}):\n`;
-  if (h.evaluation) s += `  Evaluation: ${wrapUntrusted(h.evaluation)}\n`;
-  if (h.memory) s += `  Memory: ${wrapUntrusted(h.memory)}\n`;
-  if (h.goal) s += `  Goal: ${wrapUntrusted(h.goal)}\n`;
- // Null-guard `h.results` — older history items (or hand-built test fixtures)
- // may have `results: undefined`. Without this, `h.results.length` throws.
-  if (h.results?.length) {
-    s += `  Actions:\n`;
-    for (const r of h.results) {
- // `r.action.type` is a model-chosen label and `r.message` is the agent's
- // free-text description of an action, which routinely echoes page-derived
- // content (e.g. "typed '<extracted text>' into the search box"). Both are
- // untrusted per this module's trust model and must be wrapped so they
- // can't prompt-inject the judge LLM.
-      const actionType = r.action?.type ?? "(unknown action)";
-      s += `    - ${wrapUntrusted(actionType)}: ${wrapUntrusted(r.message)}${r.success ? "" : " (FAILED)"}\n`;
-      if (r.extractedContent) {
- // Truncate AND add an ellipsis when truncated so the judge can tell
- // the snippet was cut short (otherwise it might infer the task
- // failed because the data "ended abruptly").
-        const full = r.extractedContent;
-        s += `      Extracted: ${wrapUntrusted(truncate(full, MAX_EXTRACT_SNIPPET))}\n`;
-      }
-    }
-  }
-  return s;
-}
-
-/** Truthy values we accept as a `true` boolean from the judge LLM. */
-// Handle all case variants of "true" (True/TRUE) + "yes" (Yes/YES). Without
-// this, a judge LLM emitting `"verdict": "True"` (capitalized) would be
-// treated as false → false-negative verdict. Matches flexibleBoolean's case
-// coverage in schema.ts.
-const TRUTHY_BOOLEANS = new Set<unknown>([
-  true, 1, "1", "true", "True", "TRUE", "yes", "Yes", "YES",
-]);
-
-/**
- * Coerce a parsed JSON value to a JudgementResult with lenient booleans.
- *
- * `verdict` is the AUTHORITATIVE decision. Its presence (true/false) means the
- * judge rendered a determination, so a missing/omitted `verdict` (or `null`)
- * means the response was structurally incomplete and must route back to the
- * planner (UNVERIFIED → `null`), exactly like an unparseable one. This preserves
- * the fail-closed property: a missing `verdict` can NEVER become `verdict: false`.
- *
- * `impossibleTask` / `reachedCaptcha` are ADVISORY flags, not the verdict. If
- * the judge omitted one of them we default it to `false` (the safe assumption:
- * the task was not impossible and no CAPTCHA was hit) WITH a logged warning,
- * rather than discarding the entire (valid) verdict. This avoids throwing
- * away a useful `verdict: true` simply because the model skipped an optional
- * field. The dangerous case — manufacturing a false-negative `verdict` — is
- * still prevented, because only the optional flags fall back to `false`; the
- * `verdict` itself is never invented.
- */
-export function coerceJudgement(parsed: Record<string, unknown>): JudgementResult | null {
- // `== null` catches both `undefined` (omitted field) and `null`. The verdict
- // is required; without it the response is UNVERIFIED (route back to planner).
-  if (parsed.verdict == null) {
-    return null;
-  }
- // Advised flags: default to `false` when omitted, but warn so a silent
- // downgrade of an intentionally-set flag is observable (it isn't here — the
- // judge simply skipped it).
-  const impossibleTask = parsed.impossibleTask == null
-    ? (console.warn("[judge] coerceJudgement: missing `impossibleTask`; defaulting to false."), false)
-    : TRUTHY_BOOLEANS.has(parsed.impossibleTask);
-  const reachedCaptcha = parsed.reachedCaptcha == null
-    ? (console.warn("[judge] coerceJudgement: missing `reachedCaptcha`; defaulting to false."), false)
-    : TRUTHY_BOOLEANS.has(parsed.reachedCaptcha);
-  const verdict = TRUTHY_BOOLEANS.has(parsed.verdict);
-  return {
-    reasoning: typeof parsed.reasoning === "string" ? parsed.reasoning : null,
- // Loosen boolean coercion — LLMs sometimes emit "true" (string) or 1
- // (number) instead of a JSON `true`. Accept all the common variants.
-    verdict,
- // Null out failureReason when the verdict is truthy — documented contract:
- // a passing verdict must never carry a (stale/false) failure reason.
-    failureReason: verdict ? null : (typeof parsed.failureReason === "string" ? parsed.failureReason : null),
-    impossibleTask,
-    reachedCaptcha,
-  };
-}
-
-/**
  * Run the judge on a completed task.
  *
  * @returns The judge's verdict, or `null` if the judge LLM call failed or
@@ -248,10 +132,6 @@ ${historyText}
 
 Evaluate whether the task was actually completed.`;
 
-// split the LLM-call try/catch from the onCost call so a
- // budget-exceeded throw from `onCost` (raised by the cost callback)
- // propagates UP to `maybeJudgeAndFinalize`'s catch — which finalizes the
- // run as FAILURE.
   let raw: string;
   let llmUsage: { model?: string; tokensIn?: number; tokensOut?: number; reasoningTokens?: number; cachedInputTokens?: number; cachedWriteInputTokens?: number } | undefined;
   try {
@@ -259,28 +139,15 @@ Evaluate whether the task was actually completed.`;
     raw = res.content;
     llmUsage = res.usage;
   } catch {
- // Judge LLM failure — don't crash the run. Return null (UNVERIFIED). The
- // caller (`maybeJudgeAndFinalize`) routes a null verdict back to the
- // planner rather than failing open with success:true.
     return null;
   }
 
- // Best-effort cost tracking — the judge's `llmCall` doesn't return usage,
- // so we estimate from the prompt + completion lengths. The model name is
- // passed via `args.modelForCost` (the orchestrator knows which model the
- // planner/navigator used). Without it, estimateCost returns 0 for unknown
- // models — safe but under-reports the judge's cost.
- //
- // AWAIT `onCost` OUTSIDE any try/catch so a budget-exceeded
- // throw propagates to `maybeJudgeAndFinalize`'s catch (which finalizes
- // the run as FAILURE when the budget is exceeded).
   if (onCost) {
     const tokensIn = llmUsage?.tokensIn ?? Math.ceil((JUDGE_PROMPT.length + userMessage.length) / 4);
     const tokensOut = llmUsage?.tokensOut ?? Math.ceil(raw.length / 4);
+    const resolvedModel = llmUsage?.model || modelForCost;
     let costUsd = 0;
     try {
-      // Prefer the real model from llmCall; fall back to args.modelForCost.
-      const resolvedModel = llmUsage?.model || modelForCost;
       const judgeProviderId = resolvedModel?.includes("/")
         ? resolvedModel.split("/")[0]
         : undefined;
@@ -296,19 +163,8 @@ Evaluate whether the task was actually completed.`;
           })
         : 0;
     } catch (err) {
- // Pricing import / estimateCost failed — report zero cost (safe
- // default; onCost still fires so the dispatcher sees the call). Surface
- // the error so a broken pricing path is observable rather than being
- // silently zeroed forever (which would under-report judge cost and could
- // defeat budget-cap enforcement for the judge portion of a run). The
- // expected "unknown model → 0" case is `modelForCost` being absent, not
- // a thrown error, so any throw here is genuine and worth seeing.
       console.warn("Judge cost estimation failed; reporting zero cost:", err);
     }
- // Propagates budget-exceeded throws to the caller.
- // Report the real model (when known) rather than a generic "judge" label,
- // so per-model cost accounting buckets judge spend under the correct model.
-    const resolvedModel = llmUsage?.model || modelForCost;
     await onCost({
       tokensIn,
       tokensOut,
@@ -320,16 +176,11 @@ Evaluate whether the task was actually completed.`;
     });
   }
 
- // use the shared extractJson from output-parser (handles markdown
- // fences + balanced-brace extraction). If the extracted text isn't valid
- // JSON, return null (UNVERIFIED — NOT agreement).
   try {
     const jsonText = extractJson(raw);
     const parsed = JSON.parse(jsonText) as Record<string, unknown>;
     return coerceJudgement(parsed);
   } catch {
- // LLM produced unparseable JSON — return null (UNVERIFIED). The caller
- // routes this back to the planner rather than failing open.
     return null;
   }
 }

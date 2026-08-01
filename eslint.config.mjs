@@ -4,8 +4,9 @@
  * NOTE: type-safety is provided by `npx tsc --noEmit`, which CI runs directly
  * (see `.github/workflows/ci.yml` — the `Type-check root TypeScript` step).
  * It uses the root tsconfig.json, which includes .ts / .tsx through the **
- * glob and excludes `chrome-extension` (which has its own CI type-check via
- * its own tsconfig). The `compilerOptions.types: ["chrome"]` setting does NOT
+ * glob and excludes the gitignored `chrome-extension` build output (a plain
+ * copy of the sources tsc already checked here). The `compilerOptions.types:
+ * ["chrome"]` setting does NOT
  * break this: explicitly-imported Node modules (`path`, `fs`, `process`) still
  * resolve through `@types/node`, which is present in node_modules, so
  * `npx tsc --noEmit` exits 0 (clean). package.json defines no

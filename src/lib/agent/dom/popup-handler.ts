@@ -5,9 +5,9 @@
  * the executor handlers (`alert.ts`), and `tests/modules-helpers.test.ts`.
  *
  * All historically-exported symbols are re-exported here:
- * - `installPopupHandler`, `getPendingAlertText`, `getPendingAlertTextRedacted`,
+ * - `installPopupHandler`, `getPendingAlertText`,
  * `getPendingAlertKind`, `acceptAlert`, `dismissAlert`, `sendAlertText`,
- * `stagePromptText`, `redactDialogText`, `DialogKind` (type)
+ * `stagePromptText`, `redactDialogText`
  *
  * The popup-handler lives in `navigation/` because it's a navigation-/blocking-
  * dialog concern — it's referenced from `navigation/waiter.ts`'s
@@ -21,12 +21,10 @@
 export {
   installPopupHandler,
   getPendingAlertText,
-  getPendingAlertTextRedacted,
   getPendingAlertKind,
   acceptAlert,
   dismissAlert,
   sendAlertText,
   stagePromptText,
   redactDialogText,
-  type DialogKind,
 } from "./navigation/popup-handler";

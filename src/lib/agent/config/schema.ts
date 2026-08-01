@@ -29,7 +29,7 @@
  */
 
 import { z } from "zod";
-import { hasNestedQuantifier } from "@/lib/agent/tools/handlers/search-page";
+import { hasNestedQuantifier } from "@/lib/agent/tools/schema-utils";
 
 // ─── Sub-schemas ────────────────────────────────────────────────────────────
 

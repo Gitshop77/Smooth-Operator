@@ -18,7 +18,7 @@
 export type AgentMode = "restricted" | "standard" | "full_agentic";
 
 /** Per-mode permission + step-budget configuration. */
-export interface ModeConfig {
+interface ModeConfig {
   /** Can close tabs. */
   canCloseTabs: boolean;
   /** Can navigate to a new URL (different origin). */
@@ -97,7 +97,7 @@ export const MODE_CONFIGS = {
 } as const satisfies Record<AgentMode, ModeConfig>;
 
 /** Result of a mode-policy check. */
-export interface ActionPolicyResult {
+interface ActionPolicyResult {
   /** Whether the action is permitted under the mode. */
   allowed: boolean;
   /** Human-readable reason when `allowed` is false. */

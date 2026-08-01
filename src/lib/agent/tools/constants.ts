@@ -10,16 +10,29 @@ import { SearchSchema } from "./schema";
 
 /** Control characters (CR/LF, Unicode line/para separators) stripped from
  *  page-derived text before it is reflected into log lines / agent messages,
- *  so untrusted DOM content can't forge log lines or inject fake history. */
-export const CONTROL_CHARS_RE = /[\u0000-\u001F\u007F\u0085\u00A0\u00AD\u2028\u2029]/g;
+ *  so untrusted DOM content can't forge log lines or inject fake history.
+ *
+ *  DOCUMENTED EXCEPTION: the strip REPLACES each matched character
+ *  with a single space rather than deleting it — `sanitizeForLog` is the only
+ *  consumer. Deleting would merge words across a newline ("a\nb" → "ab") and
+ *  corrupt NBSP-formatted numbers ("1\u00A0234" → "1234"); replacing with a
+ *  space keeps word/number separation while the anti-log-forgery property
+ *  holds (no CR/LF survives to break a log line). The `+` quantifier collapses
+ *  adjacent controls (e.g. CRLF) into ONE space — "foo\r\nbar" → "foo bar",
+ *  not "foo  bar". `search-page.ts` deletes (replaces with "") — same output
+ *  either way, since adjacent controls delete as one match. */
+export const CONTROL_CHARS_RE = /[\u0000-\u001F\u007F\u0085\u00A0\u00AD\u2028\u2029]+/g;
 
 /** Bound length and strip control characters from page-derived text that is
  *  reflected into agent-facing messages. Display-only — selection logic and
- *  the CSS-identifier guard are untouched. */
+ *  the CSS-identifier guard are untouched.
+ *
+ *  Truncation is code-point-aware: a naive `slice(0, maxLen)` can cut
+ *  through a UTF-16 surrogate pair and leave a lone surrogate in the output. */
 export function sanitizeForLog(value: string, maxLen = 8192): string {
   let v = String(value);
-  if (v.length > maxLen) v = v.slice(0, maxLen);
-  return v.replace(CONTROL_CHARS_RE, "");
+  if (v.length > maxLen) v = Array.from(v).slice(0, maxLen).join("");
+  return v.replace(CONTROL_CHARS_RE, " ");
 }
 
 /** All wait/settle durations used by the executor (in milliseconds). */

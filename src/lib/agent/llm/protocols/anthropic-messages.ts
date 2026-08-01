@@ -11,11 +11,7 @@
  */
 
 import { Protocol, type LLMRequest } from "../route/client";
-import { zodToJsonSchema } from "../zod-json-schema";
-import {
-  isZodSchema,
-  extractScreenshots,
-} from "../shared-image";
+import { fromRequest, buildMessageStartUsage, buildMessageDeltaUsage } from "./anthropic-messages-utils";
 
 const ADAPTER = "anthropic-messages";
 export const DEFAULT_BASE_URL = "https://api.anthropic.com";
@@ -42,92 +38,9 @@ export interface AnthropicBody {
   stream: boolean;
 }
 
-async function fromRequest(request: LLMRequest): Promise<AnthropicBody> {
- // Reject a missing/empty model id up front (mirrors the openai-chat guard) so
- // we don't silently build a body with `model: undefined` that would 400
- // opaquely at request time.
-  if (!request.model || typeof request.model.id !== "string" || request.model.id.length === 0) {
-    throw new Error("request.model.id is required and must be a non-empty string");
-  }
-  const systemMessages = request.messages.filter((m) => m.role === "system");
-  const userMessages = request.messages.filter((m) => m.role !== "system");
-
- // Only attach the image to the user message that CONTAINS the <screenshot>
- // marker — not every user message. Mirrors the OpenAI protocol's per-message
- // check. Attaching to every user message would duplicate the screenshot
- // across turns in a multi-turn conversation.
-  const messages = userMessages.map((m) => {
-    if (m.role === "user") {
-      const { text: textContent, dataUris } = extractScreenshots(m.content);
-      if (dataUris.length > 0) {
-        const imageBlocks = dataUris.map((dataUri) => {
-          const b64 = dataUri.split(",")[1];
-          const mediaType = dataUri.match(/data:image\/(png|jpeg|webp)/)?.[1] ?? "png";
-          return {
-            type: "image",
-            source: { type: "base64", media_type: `image/${mediaType}`, data: b64 },
-          };
-        });
-        return {
-          role: "user",
-          content: [{ type: "text", text: textContent }, ...imageBlocks],
-        };
-      }
-    }
-    return { role: m.role, content: m.content };
-  });
-
-  const body: AnthropicBody = {
-    model: request.model.id,
-    max_tokens: request.generation?.maxTokens ?? 4096,
-    messages,
-    temperature: request.reasoning ? undefined : (request.generation?.temperature ?? 0),
-    stream: true,
-  };
-
-  if (systemMessages.length) {
-    body.system = [{
-      type: "text",
-      text: systemMessages.map((m) => m.content).join("\n\n"),
-      cache_control: { type: "ephemeral", ttl: "1h" },
-    }];
-  }
-
-  if (request.schema) {
- // Serialize the Zod schema to a plain JSON Schema object before passing
- // to Anthropic's input_schema. The raw Zod schema object is not serializable
- // and would be sent as-is (with internal Zod properties), causing 400 errors.
- // If `request.schema` is already a plain JSON Schema, forward it as-is and
- // never silently emit a raw Zod object. A Zod object that can't be converted
- // throws a clear error via `zodToJsonSchema`.
-    let jsonSchema: unknown;
-    try {
-      jsonSchema = isZodSchema(request.schema)
-        ? await zodToJsonSchema(request.schema)
-        : request.schema;
-    } catch (err) {
- // Surface configuration/serialization errors clearly. Only swallow an
- // error when the schema is already a usable plain JSON Schema.
-      if (!isZodSchema(request.schema)) {
-        jsonSchema = request.schema;
-      } else {
-        throw err instanceof Error
-          ? new Error("Failed to serialize structured-output schema: " + err.message)
-          : err;
-      }
-    }
-    body.tools = [{ name: "return_json", description: "Return the structured output as JSON", input_schema: jsonSchema, cache_control: { type: "ephemeral", ttl: "1h" } }];
-    body.tool_choice = { type: "tool", name: "return_json" };
-  }
-
-  return body;
-}
-
 export interface StreamState {
   content: string;
   toolInput: string;
-  /** Accumulated extended-thinking text (Anthropic thinking models). */
-  thinking?: string;
   /** Model id captured at stream start so usage attribution survives reduction. */
   model?: string;
   /** Count of non-JSON SSE frames dropped this stream (see DROPPED_FRAME_WARN_THRESHOLD). */
@@ -170,91 +83,34 @@ export const protocol: Protocol<AnthropicBody, string, { type: string; content?:
         return { state, events };
       }
       state.lastFrameType = data.type;
-      {
-        if (data.type === "error") {
- // Anthropic error payloads (`{"type":"error","error":{...}}`) are
- // valid JSON, so they parse without throwing — but they carry no
- // `content`, so the caller would otherwise receive empty output and
- // a success-like completion, masking auth/quota/permission failures.
- // Surface the error explicitly instead of swallowing it.
-          const err = data.error as { message?: string } | string | undefined;
-          const msg = typeof err === "string" ? err : (err?.message ?? JSON.stringify(data.error ?? data));
-          throw new Error(`Anthropic API error: ${msg}`);
+      if (data.type === "error") {
+        // Anthropic error payloads (`{"type":"error","error":{...}}`) are
+        // valid JSON, so they parse without throwing — but they carry no
+        // `content`, so the caller would otherwise receive empty output and
+        // a success-like completion, masking auth/quota/permission failures.
+        // Surface the error explicitly instead of swallowing it.
+        const err = data.error as { message?: string } | string | undefined;
+        const msg = typeof err === "string" ? err : (err?.message ?? JSON.stringify(data.error ?? data));
+        throw new Error(`Anthropic API error: ${msg}`);
+      }
+      if (data.type === "content_block_delta" && data.delta?.text) {
+        state.content += data.delta.text;
+        events.push({ type: "text", content: data.delta.text });
+      }
+      if (data.type === "content_block_delta" && data.delta?.type === "input_json_delta" && data.delta?.partial_json) {
+        state.toolInput += data.delta.partial_json;
+      }
+      if (data.type === "message_stop") {
+        if (state.toolInput) {
+          events.push({ type: "text", content: state.toolInput });
         }
-        if (data.type === "content_block_delta" && data.delta?.text) {
-          state.content += data.delta.text;
-          events.push({ type: "text", content: data.delta.text });
-        }
-        if (data.type === "content_block_delta" && data.delta?.type === "thinking" && data.delta?.thinking) {
-          state.thinking = (state.thinking ?? "") + data.delta.thinking;
-        }
-        if (data.type === "content_block_delta" && data.delta?.type === "input_json_delta" && data.delta?.partial_json) {
-          state.toolInput += data.delta.partial_json;
-        }
-        if (data.type === "message_stop") {
-          if (state.toolInput) {
-            events.push({ type: "text", content: state.toolInput });
-          }
-          events.push({ type: "finish", usage: state.usage });
-        }
- // Anthropic's SSE format sends `input_tokens` in the `message_start`
- // event (under `data.message.usage`), NOT in `message_delta`. The
- // `message_delta` event only carries `output_tokens` (cumulative).
- // Capture `input_tokens` here so `tokensIn` is reported correctly
- // (otherwise cost tracking would under-report for Anthropic models).
-        if (data.type === "message_start" && data.message?.usage) {
-          const prev = state.usage;
-          const u = data.message.usage;
- // Anthropic's `input_tokens` is FRESH-only (disjoint from cache_read
- // + cache_creation), unlike OpenAI's `prompt_tokens` which is the
- // TOTAL. `estimateCost` (pricing.ts) clamps `cachedRead =
- // Math.min(cachedInputTokens, tokensIn)` assuming cached ⊆ tokensIn
- // (OpenAI semantics). To make the clamp correct for Anthropic, set
- // tokensIn to the TOTAL (fresh + cache_read + cache_creation) so
- // `freshInput = tokensIn - cachedRead - cachedWrite` = fresh-only
- // (correct).
- // Split prompt-cache accounting:
- // cache_read_input_tokens -> cachedInputTokens (billed at cacheReadRate)
- // cache_creation_input_tokens -> cachedWriteInputTokens (billed at cacheWriteRate)
- // Previously cache_creation was folded into cachedInputTokens and
- // billed at the cheaper read rate, under-reporting cost. Now it is
- // tracked separately and billed at the (typically higher) write rate.
-          const cacheRead = u.cache_read_input_tokens ?? 0;
-          const cacheCreation = u.cache_creation_input_tokens ?? 0;
-          state.usage = {
-            tokensIn: (u.input_tokens ?? 0) + cacheRead + cacheCreation,
-            tokensOut: u.output_tokens ?? prev?.tokensOut ?? 0,
- // Anthropic prompt caching: cache_read tokens billed at 0.1× input
- // rate, cache_creation at 1.25×. Tracking them separately lets
- // estimateCost bill each at its own rate (fixes under-billing).
-            cachedInputTokens: cacheRead,
-            cachedWriteInputTokens: cacheCreation,
- // Extended-thinking reasoning tokens (Anthropic bills these at the
- // `out` rate). Surface them so consumers can attribute think-budget usage.
-            reasoningTokens: u.output_tokens_details?.reasoning_tokens ?? prev?.reasoningTokens,
-            model: state.model ?? "",
-            costUsd: 0,
-          };
-        }
- // The `message_delta` event only carries output_tokens (cumulative).
- // Preserve any previously-captured tokensIn + cachedInputTokens +
- // cachedWriteInputTokens from message_start rather than overwriting
- // them with 0.
-        if (data.type === "message_delta" && data.usage) {
-          const prev = state.usage;
-          state.usage = {
-            tokensIn: prev?.tokensIn ?? 0,
-            tokensOut: data.usage.output_tokens ?? prev?.tokensOut ?? 0,
- // Default to 0 (not `undefined`) so downstream `Math.min(cachedInputTokens, tokensIn)`
- // in `estimateCost` never computes `NaN`. A missing `message_start`
- // usage would otherwise leave these `undefined` (see [4]).
-            cachedInputTokens: prev?.cachedInputTokens ?? 0,
-            cachedWriteInputTokens: prev?.cachedWriteInputTokens ?? 0,
-            reasoningTokens: data.usage.output_tokens_details?.reasoning_tokens ?? prev?.reasoningTokens,
-            model: state.model ?? "",
-            costUsd: 0,
-          };
-        }
+        events.push({ type: "finish", usage: state.usage });
+      }
+      if (data.type === "message_start" && data.message?.usage) {
+        state.usage = buildMessageStartUsage(data.message.usage, state.usage, state.model ?? "");
+      }
+      if (data.type === "message_delta" && data.usage) {
+        state.usage = buildMessageDeltaUsage(data.usage, state.usage, state.model ?? "");
       }
       return { state, events };
     },

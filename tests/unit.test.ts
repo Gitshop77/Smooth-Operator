@@ -9,11 +9,11 @@
 
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import { extractJson, parseAgentOutput, parsePlannerOutput } from "../src/lib/agent/output-parser";
-import { LoopDetector } from "../src/lib/agent/loop/loop-detector";
+import { LoopDetector, normalizeAction } from "../src/lib/agent/loop/loop-detector";
 import { estimateCost, refreshPricingFromCatalog, CONSERVATIVE_DEFAULT_PRICING } from "../src/lib/agent/llm/pricing";
 import type { Catalog } from "../src/lib/agent/llm/catalog";
 import { describeAction } from "../src/lib/agent/tools/executor";
-import { actionListForPrompt, ACTION_METADATA } from "../src/lib/agent/tools/schema";
+import { actionListForPrompt, ACTION_METADATA } from "../src/lib/agent/tools/schema-utils";
 import {
   buildCompactionRequest,
   partitionHistory,
@@ -330,35 +330,36 @@ describe("LoopDetector", () => {
     expect(det.shouldWarn()).toBe(0);
   });
 
-  test("normalizes scroll actions (pages=1 and undefined are equivalent)", () => {
-    const det = new LoopDetector();
-    det.record({ type: "scroll", down: true, pages: 1 }, 0);
-    det.record({ type: "scroll", down: true, pages: 1 }, 1);
-    expect(det.shouldWarn()).toBe(0); // only 2, not 5
+  test("normalizes scroll actions (down/pages defaulting is genuine equivalence)", () => {
+ // The AgentAction type requires `down` + `pages`, but the runtime
+ // normalizer defaults them (`down=true`, `pages=1`) because LLM output
+ // often omits them. All three source forms must hash to the SAME bucket —
+ // equivalence, not just self-consistency. Casts are deliberate: the
+ // omitted-field forms are legal at runtime and are exactly the case that
+ // would silently diverge if the defaulting were removed.
+    const full = { type: "scroll", down: true, pages: 1 } as unknown as AgentAction;
+    const omitted = { type: "scroll", down: true } as unknown as AgentAction;
+    const bare = { type: "scroll" } as unknown as AgentAction;
+    expect(normalizeAction(full)).toBe(normalizeAction(omitted));
+    expect(normalizeAction(full)).toBe(normalizeAction(bare));
+    expect(normalizeAction(bare)).toBe("scroll|dir=down|pages=1");
   });
 
-  test("window is bounded to 20 elements", () => {
+  test("window is bounded to 20 elements (unbounded growth is observable)", () => {
  // The rolling window keeps only the last LOOP_WINDOW_SIZE (20) actions.
- // To actually exercise the bound (not just a count that happens to miss
- // a threshold), we fill the window with 20 identical actions, then push
- // the oldest one out with a different action, then re-record the
- // original hash. With the bound in place the re-recorded action sees
- // count=20 (19 prior + this one), which is not in WARN_THRESHOLDS —
- // shouldWarn returns 0. Without the bound, count would be 21 (still
- // not a threshold), but more importantly the 21st identical would
- // never fall off, so a subsequent different action couldn't reset the
- // window. This test would catch a regression that unbounded the window.
+ // `record` returns the count of matching hashes in the window, so the
+ // bound is directly observable: once 20 identical actions are in, every
+ // further identical push MUST return exactly 20 (the oldest was evicted).
+ // With an unbounded window the 21st/22nd pushes would return 21/22 — a
+ // regression is caught by the count, not by a threshold that happens to
+ // miss.
     const det = new LoopDetector();
- // 20 identical actions — fills the window.
-    for (let i = 0; i < 20; i++) det.record({ type: "click", index: 1 }, i);
-    expect(det.shouldWarn()).toBe(0); // count=20, not in [5,8,12]
- // 21st action is different — pushes 1 identical out (19 remain in window).
-    det.record({ type: "click", index: 999 }, 20);
- // 22nd action: same hash as the original 20. Window now holds
- // 19 prior identicals + 1 different + this one = 20 identicals total,
- // still not a threshold → shouldWarn returns 0.
-    det.record({ type: "click", index: 1 }, 21);
-    expect(det.shouldWarn()).toBe(0);
+    let count = 0;
+    for (let i = 0; i < 21; i++) count = det.record({ type: "click", index: 1 }, i);
+    expect(count).toBe(20); // 21st identical sees exactly 20 (1 evicted)
+    count = det.record({ type: "click", index: 1 }, 21);
+    expect(count).toBe(20); // 22nd identical still sees exactly 20
+    expect(det.shouldWarn()).toBe(0); // 20 is not a warn threshold
   });
 
   test("reset() clears the rolling window", () => {
@@ -615,7 +616,18 @@ describe("extractJson", () => {
     expect(extractJson(raw)).toBe('{"a":"he said \\"hi\\""}');
   });
 
-  test("multiple top-level JSON objects → only the FIRST object is returned (documented limitation)", () => {
+  test("multiple top-level JSON objects → the LARGEST valid span wins, not the first", () => {
+ // extractJson returns the largest valid JSON span (strict `>` on length;
+ // equal-length ties keep the first candidate). The two candidates below
+ // differ in length, so a "first object wins" regression (or any order-
+ // dependent picking) is observable here: the shorter FIRST object must
+ // NOT win.
+    expect(extractJson('{"a":1} and {"b":2,"c":3}')).toBe('{"b":2,"c":3}');
+  });
+
+  test("multiple top-level JSON objects of EQUAL length → the first wins (tie-break)", () => {
+ // Equal-length valid candidates tie on the length comparison, and ties
+ // keep the first candidate — the documented tie-break.
     expect(extractJson('{"a":1} and {"b":2}')).toBe('{"a":1}');
   });
 
@@ -867,11 +879,13 @@ describe("LoopDetector — expanded", () => {
 
   test("scroll normalization: {down:true,pages:1} === {} (both default to down,1) → count 2", () => {
  // normalizeAction maps `scroll{}` to `scroll|dir=down|pages=1` (down
- // defaults to true, pages defaults to 1). `scroll{down:true,pages:1}`
- // normalizes to the same signature → equivalent.
+ // defaults to true, pages defaults to 1). Recording the EXPLICIT form and
+ // then the ALL-DEFAULT form must yield count 2 — asserting the two forms
+ // are genuinely equivalent, not merely that the explicit form is
+ // self-consistent.
     const det = new LoopDetector();
     det.record({ type: "scroll", down: true, pages: 1 }, 1);
-    const count = det.record({ type: "scroll", down: true, pages: 1 }, 2);
+    const count = det.record({ type: "scroll" } as unknown as AgentAction, 2);
     expect(count).toBe(2);
   });
 

@@ -7,14 +7,16 @@
  */
 
 import { describe, test, expect } from "vitest";
+import { z } from "zod";
 import * as OpenAIChat from "../src/lib/agent/llm/protocols/openai-chat";
 import * as OpenAICompatibleChat from "../src/lib/agent/llm/protocols/openai-compatible-chat";
 import * as AnthropicMessages from "../src/lib/agent/llm/protocols/anthropic-messages";
 import * as Gemini from "../src/lib/agent/llm/protocols/gemini";
 import { encodeModelIdForUrl } from "../src/lib/agent/llm/modelId";
-import { hasImageProvenance } from "../src/lib/agent/llm/shared-image";
+import { hasImageProvenance, isPlainJSONSchema } from "../src/lib/agent/llm/shared-image";
 import { isValidCatalog, resolveVisionSupport, type CatalogModel } from "../src/lib/agent/llm/catalog";
 import type { LLMRequest } from "../src/lib/agent/llm/route/client";
+import { normalizeStrictSchema } from "../src/lib/agent/llm/protocols/openai-chat-utils";
 
 /** Minimal structural shape of a protocol's stream reducer, used by `reduceFrames`. */
 type StreamProtocol = {
@@ -93,12 +95,12 @@ describe("OpenAIChat.protocol — body construction", () => {
     expect(body.response_format).toBeDefined();
     expect(body.response_format!.type).toBe("json_schema");
     const js = (body.response_format as { json_schema: { name: string; schema: Record<string, unknown>; strict: boolean } }).json_schema;
- // The `name` is a fixed alphanumeric identifier required by the OpenAI
- // structured-output API.
+    // The `name` is a fixed alphanumeric identifier required by the OpenAI
+    // structured-output API.
     expect(js.name).toBe("response");
     expect(js.strict).toBe(true);
- // The schema is serialized into `json_schema.schema` (not discarded, as
- // the old `json_object` form did).
+    // The schema is serialized into `json_schema.schema` (not discarded, as
+    // the old `json_object` form did).
     expect(js.schema).toBeDefined();
     expect(js.schema).toEqual({ type: "object" });
   });
@@ -116,17 +118,17 @@ describe("OpenAIChat.protocol — body construction", () => {
       ],
     })) as OpenAIChat.OpenAIChatBody;
     const userMsg = body.messages[1];
- // The content must be an array of parts, NOT a plain string.
+    // The content must be an array of parts, NOT a plain string.
     expect(Array.isArray(userMsg.content)).toBe(true);
     const parts = userMsg.content as OpenAIChat.OpenAIContentPart[];
     expect(parts).toHaveLength(2);
     expect(parts[0]).toEqual({ type: "text", text: "See this:" });
     expect(parts[1].type).toBe("image_url");
     expect((parts[1] as { image_url: { url: string } }).image_url.url).toBe("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==");
- // The raw base64 must NOT appear as prompt text anywhere.
+    // The raw base64 must NOT appear as prompt text anywhere.
     const serialized = JSON.stringify(body);
     expect(serialized).toContain("image_url");
- // The data URL appears exactly once — inside the image_url part, not as text.
+    // The data URL appears exactly once — inside the image_url part, not as text.
     expect((serialized.match(/data:image\/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==/g) || []).length).toBe(1);
   });
 
@@ -162,13 +164,13 @@ describe("OpenAIChat.protocol — body construction", () => {
 });
 
 describe("OpenAIChat.protocol — streaming truncation regression", () => {
- // Realistic OpenAI SSE chunk sequence: every delta includes
- // `finish_reason: null`; only the final delta sets it to `"stop"`.
- // OpenAI sends `usage` in a SEPARATE chunk AFTER `finish_reason` (with
- // empty `choices: []`), followed by the `[DONE]` sentinel. A naive
- // `terminal` would return `true` on a non-null `finish_reason`, exiting
- // the stream loop BEFORE the usage chunk arrived — silently dropping
- // cost/token accounting on every OpenAI-format provider.
+  // Realistic OpenAI SSE chunk sequence: every delta includes
+  // `finish_reason: null`; only the final delta sets it to `"stop"`.
+  // OpenAI sends `usage` in a SEPARATE chunk AFTER `finish_reason` (with
+  // empty `choices: []`), followed by the `[DONE]` sentinel. A naive
+  // `terminal` would return `true` on a non-null `finish_reason`, exiting
+  // the stream loop BEFORE the usage chunk arrived — silently dropping
+  // cost/token accounting on every OpenAI-format provider.
   const realisticChunks = [
     JSON.stringify({ choices: [{ delta: { role: "assistant" }, finish_reason: null }] }),
     JSON.stringify({ choices: [{ delta: { content: "Hello" }, finish_reason: null }] }),
@@ -180,22 +182,22 @@ describe("OpenAIChat.protocol — streaming truncation regression", () => {
   ];
 
   test("does NOT terminate on intermediate chunks with finish_reason: null", async () => {
- // The first chunk has finish_reason: null — a naive terminal() would
- // return true for it. The terminal() guard must return false here.
+    // The first chunk has finish_reason: null — a naive terminal() would
+    // return true for it. The terminal() guard must return false here.
     expect(OpenAIChat.protocol.stream.terminal?.(realisticChunks[0])).toBe(false);
   });
 
   test("does NOT terminate on a chunk with non-null finish_reason (waits for usage + [DONE])", async () => {
- // The chunk with finish_reason: "stop" must NOT terminate the loop —
- // OpenAI sends `usage` in a separate chunk AFTER it. Terminating here
- // would silently drop cost/token accounting.
+    // The chunk with finish_reason: "stop" must NOT terminate the loop —
+    // OpenAI sends `usage` in a separate chunk AFTER it. Terminating here
+    // would silently drop cost/token accounting.
     expect(OpenAIChat.protocol.stream.terminal?.(realisticChunks[4])).toBe(false);
   });
 
   test("does NOT terminate on the usage chunk (empty choices + usage)", async () => {
- // The usage chunk arrives after finish_reason and before [DONE]. It must
- // NOT terminate the loop — `step()` needs to record the usage first, then
- // `[DONE]` triggers the finish event.
+    // The usage chunk arrives after finish_reason and before [DONE]. It must
+    // NOT terminate the loop — `step()` needs to record the usage first, then
+    // `[DONE]` triggers the finish event.
     expect(OpenAIChat.protocol.stream.terminal?.(realisticChunks[5])).toBe(false);
   });
 
@@ -205,20 +207,20 @@ describe("OpenAIChat.protocol — streaming truncation regression", () => {
 
   test("reduces a full multi-chunk stream without early termination", async () => {
     const { content, terminatedEarly } = reduceFrames(OpenAIChat.protocol, realisticChunks, makeRequest());
- // Without the terminal() guard, content would be "" (terminated on the
- // first chunk before any text delta arrived). With the guard, all three
- // text deltas accumulate.
+    // Without the terminal() guard, content would be "" (terminated on the
+    // first chunk before any text delta arrived). With the guard, all three
+    // text deltas accumulate.
     expect(content).toBe("Hello, world!");
     expect(terminatedEarly).toBe(true);
   });
 
   test("captures usage from the post-finish_reason usage chunk", async () => {
- // The full chunk order: deltas -> finish_reason chunk -> usage chunk ->
- // [DONE]. The usage chunk (index 5) must populate `state.usage` so the
- // finish event emitted on `[DONE]` carries the real cost data.
+    // The full chunk order: deltas -> finish_reason chunk -> usage chunk ->
+    // [DONE]. The usage chunk (index 5) must populate `state.usage` so the
+    // finish event emitted on `[DONE]` carries the real cost data.
     let state = OpenAIChat.protocol.stream.initial(makeRequest());
- // Step through every chunk except [DONE] so we can inspect the state
- // before the finish event is emitted.
+    // Step through every chunk except [DONE] so we can inspect the state
+    // before the finish event is emitted.
     for (let i = 0; i <= 5; i++) {
       const { state: next } = OpenAIChat.protocol.stream.step(state, realisticChunks[i]);
       state = next as OpenAIChat.StreamState;
@@ -240,8 +242,8 @@ describe("OpenAIChat.protocol — streaming truncation regression", () => {
   });
 
   test("reduces a stream that ends with [DONE] but no non-null finish_reason", async () => {
- // Some OpenAI-compatible providers (e.g. older Ollama) emit only [DONE]
- // without a non-null finish_reason. The terminal() guard must still terminate.
+    // Some OpenAI-compatible providers (e.g. older Ollama) emit only [DONE]
+    // without a non-null finish_reason. The terminal() guard must still terminate.
     const chunks = [
       JSON.stringify({ choices: [{ delta: { content: "Hi" }, finish_reason: null }] }),
       "[DONE]",
@@ -256,9 +258,9 @@ describe("OpenAIChat.protocol — streaming truncation regression", () => {
 
 describe("OpenAICompatibleChat.protocol", () => {
   test("inherits the fixed terminal() from OpenAIChat (streaming truncation regression)", async () => {
- // openai-compatible-chat reuses OpenAIChat's stream object verbatim, so
- // the fix propagates. Verify explicitly so a future refactor that
- // detaches the two stays correct.
+    // openai-compatible-chat reuses OpenAIChat's stream object verbatim, so
+    // the fix propagates. Verify explicitly so a future refactor that
+    // detaches the two stays correct.
     const intermediateChunk = JSON.stringify({ choices: [{ delta: { content: "x" }, finish_reason: null }] });
     expect(OpenAICompatibleChat.protocol.stream.terminal?.(intermediateChunk)).toBe(false);
   });
@@ -277,7 +279,7 @@ describe("AnthropicMessages.protocol — body construction", () => {
     expect(body.system).toBeDefined();
     expect(body.system).toHaveLength(1);
     expect(body.system![0].text).toBe("You are a test assistant.");
- // Prompt caching marker (1h TTL keeps the prefix warm across long agentic loops)
+    // Prompt caching marker (1h TTL keeps the prefix warm across long agentic loops)
     expect(body.system![0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
   });
 
@@ -331,13 +333,13 @@ describe("AnthropicMessages.protocol — body construction", () => {
 
 describe("AnthropicMessages.protocol — stream parsing", () => {
   test("accumulates text from content_block_delta events", async () => {
- // Realistic Anthropic SSE sequence:
- // message_start → carries input_tokens (and initial output_tokens) under
- // `data.message.usage`.
- // content_block_delta × N → carries text deltas.
- // message_delta → carries ONLY `output_tokens` (cumulative). Has no
- // input_tokens field at all.
- // message_stop → terminal; finish event uses the accumulated usage.
+    // Realistic Anthropic SSE sequence:
+    // message_start → carries input_tokens (and initial output_tokens) under
+    // `data.message.usage`.
+    // content_block_delta × N → carries text deltas.
+    // message_delta → carries ONLY `output_tokens` (cumulative). Has no
+    // input_tokens field at all.
+    // message_stop → terminal; finish event uses the accumulated usage.
     const frames = [
       JSON.stringify({ type: "message_start", message: { usage: { input_tokens: 5, output_tokens: 0 } } }),
       JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: "Hello" } }),
@@ -365,11 +367,11 @@ describe("AnthropicMessages.protocol — stream parsing", () => {
   });
 
   test("captures input_tokens from message_start (not message_delta)", async () => {
- // Anthropic sends input_tokens in `message_start.data.message.usage`,
- // NOT in `message_delta`. Reading `input_tokens` from
- // `message_delta.data.usage` would always be undefined → tokensIn
- // would always be 0 → cost tracking broken. This test drives the realistic
- // SSE frame order to assert input_tokens survives into the finish event.
+    // Anthropic sends input_tokens in `message_start.data.message.usage`,
+    // NOT in `message_delta`. Reading `input_tokens` from
+    // `message_delta.data.usage` would always be undefined → tokensIn
+    // would always be 0 → cost tracking broken. This test drives the realistic
+    // SSE frame order to assert input_tokens survives into the finish event.
     const frames = [
       JSON.stringify({ type: "message_start", message: { usage: { input_tokens: 42, output_tokens: 0 } } }),
       JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: "hi" } }),
@@ -387,10 +389,10 @@ describe("AnthropicMessages.protocol — stream parsing", () => {
   });
 
   test("message_delta does not overwrite tokensIn with 0", async () => {
- // If a stream happens to lack a message_start event, the message_delta
- // handler must NOT zero out any previously captured tokensIn. Drive two
- // message_delta events back-to-back and confirm tokensIn (if set) is
- // preserved rather than clobbered.
+    // If a stream happens to lack a message_start event, the message_delta
+    // handler must NOT zero out any previously captured tokensIn. Drive two
+    // message_delta events back-to-back and confirm tokensIn (if set) is
+    // preserved rather than clobbered.
     const state0 = AnthropicMessages.protocol.stream.initial(makeRequest()) as AnthropicMessages.StreamState;
     state0.usage = { tokensIn: 99, tokensOut: 0, model: "", costUsd: 0 };
     const { state: after } = AnthropicMessages.protocol.stream.step(
@@ -402,16 +404,16 @@ describe("AnthropicMessages.protocol — stream parsing", () => {
   });
 
   test("cache_read + cache_creation tokens folded into tokensIn (total) + cachedInputTokens", async () => {
- // Anthropic's `input_tokens` is FRESH-only (disjoint from cache_read +
- // cache_creation), unlike OpenAI's `prompt_tokens` which is the TOTAL.
- // The protocol sets `tokensIn = input_tokens + cache_read + cache_creation`
- // so `pricing.ts`'s `cached = Math.min(cached, tokensIn)` clamp (which
- // assumes cached ⊆ tokensIn, OpenAI semantics) works correctly:
- // freshInput = tokensIn - cached = (42+100+50) - 150 = 42 (fresh-only ✓)
- // cached = 150 (billed at cacheReadRate ✓)
- // Without this, `tokensIn` would be just 42, the clamp would zero out
- // `cached` (min(150, 42) = 42), and 108 cached tokens would be silently
- // dropped from cost accounting — under-reporting Anthropic cached-step cost.
+    // Anthropic's `input_tokens` is FRESH-only (disjoint from cache_read +
+    // cache_creation), unlike OpenAI's `prompt_tokens` which is the TOTAL.
+    // The protocol sets `tokensIn = input_tokens + cache_read + cache_creation`
+    // so `pricing.ts`'s `cached = Math.min(cached, tokensIn)` clamp (which
+    // assumes cached ⊆ tokensIn, OpenAI semantics) works correctly:
+    // freshInput = tokensIn - cached = (42+100+50) - 150 = 42 (fresh-only ✓)
+    // cached = 150 (billed at cacheReadRate ✓)
+    // Without this, `tokensIn` would be just 42, the clamp would zero out
+    // `cached` (min(150, 42) = 42), and 108 cached tokens would be silently
+    // dropped from cost accounting — under-reporting Anthropic cached-step cost.
     const frames = [
       JSON.stringify({
         type: "message_start",
@@ -434,19 +436,19 @@ describe("AnthropicMessages.protocol — stream parsing", () => {
       | undefined;
     expect(finish).toBeDefined();
     expect(finish?.usage).toBeDefined();
- // Total input = fresh (42) + cache_read (100) + cache_creation (50) = 192
+    // Total input = fresh (42) + cache_read (100) + cache_creation (50) = 192
     expect(finish?.usage?.tokensIn).toBe(192);
- // cachedInputTokens = cache_read (100); cache_creation is now reported
- // separately as cachedWriteInputTokens (50), billed at the cacheWrite rate.
+    // cachedInputTokens = cache_read (100); cache_creation is now reported
+    // separately as cachedWriteInputTokens (50), billed at the cacheWrite rate.
     expect(finish?.usage?.cachedInputTokens).toBe(100);
     expect(finish?.usage?.cachedWriteInputTokens).toBe(50);
     expect(finish?.usage?.tokensOut).toBe(7);
   });
 
   test("cachedInputTokens is preserved across message_delta (not clobbered to 0)", async () => {
- // message_delta only carries output_tokens — it must NOT zero out the
- // cachedInputTokens captured by message_start. Same invariant as the
- // tokensIn preservation test above, applied to cachedInputTokens.
+    // message_delta only carries output_tokens — it must NOT zero out the
+    // cachedInputTokens captured by message_start. Same invariant as the
+    // tokensIn preservation test above, applied to cachedInputTokens.
     const state0 = AnthropicMessages.protocol.stream.initial(makeRequest()) as AnthropicMessages.StreamState;
     state0.usage = { tokensIn: 200, tokensOut: 0, model: "", costUsd: 0, cachedInputTokens: 150 };
     const { state: after } = AnthropicMessages.protocol.stream.step(
@@ -516,6 +518,26 @@ describe("Gemini.protocol — body construction", () => {
     expect(body.generationConfig.responseSchema).toEqual({ type: "object" });
   });
 
+  test("real Zod schema with .default() fields survives the strict path (no ~standard rejection)", async () => {
+    // zod v4 toJSONSchema output carries a non-enumerable `~standard` property,
+    // which made isPlainJSONSchema reject every real Zod schema and throw.
+    // The JSON round-trip strips it; the schema must pass through unmodified.
+    const ZodSchemaWithDefaults = z.object({
+      thinking: z.string().default(""),
+      next_goal: z.string().default(""),
+      done: z.boolean().default(false),
+      count: z.number().optional().default(3),
+    });
+    const body = await Gemini.protocol.body.from(makeRequest({
+      schema: ZodSchemaWithDefaults,
+    } as Partial<LLMRequest>)) as Gemini.GeminiBody;
+    expect(body.generationConfig.responseMimeType).toBe("application/json");
+    const schema = body.generationConfig.responseSchema as Record<string, unknown>;
+    expect(typeof schema).toBe("object");
+    expect("~standard" in schema).toBe(false);
+    expect(JSON.parse(JSON.stringify(schema))).toEqual(schema);
+  });
+
   test("default maxOutputTokens is 8192", async () => {
     const body = await Gemini.protocol.body.from(makeRequest({ generation: { temperature: 0 } } as Partial<LLMRequest>)) as Gemini.GeminiBody;
     expect(body.generationConfig.maxOutputTokens).toBe(8192);
@@ -526,9 +548,9 @@ describe("Gemini.protocol — body construction", () => {
   });
 
   test("geminiPath throws on a structurally-invalid model id (injection guard)", () => {
- // Model ids containing path separators / query metacharacters are rejected
- // so they can't rewrite the request URL. encodeURIComponent would also
- // neutralize them, but we fail fast on malformed ids.
+    // Model ids containing path separators / query metacharacters are rejected
+    // so they can't rewrite the request URL. encodeURIComponent would also
+    // neutralize them, but we fail fast on malformed ids.
     expect(() => Gemini.geminiPath("weird/model id?x=1")).toThrow(/Invalid model id/);
     expect(() => Gemini.geminiPath("bad\tid")).toThrow(/Invalid model id/);
     expect(() => Gemini.geminiPath("")).toThrow(/Invalid model id/);
@@ -545,8 +567,8 @@ describe("encodeModelIdForUrl — safe URL encoding + validation", () => {
   });
 
   test("percent-encodes characters encodeURIComponent touches (e.g. ':')", () => {
- // `:` is a valid model-id char per the allow-list but is percent-encoded
- // by encodeURIComponent, so it can't be misinterpreted in the URL path.
+    // `:` is a valid model-id char per the allow-list but is percent-encoded
+    // by encodeURIComponent, so it can't be misinterpreted in the URL path.
     expect(encodeModelIdForUrl("ns:model")).toBe("ns%3Amodel");
   });
 
@@ -690,9 +712,9 @@ describe("Gemini.protocol — stream parsing", () => {
 // ─── resolveVisionSupport (vision/screenshot gating) ────────────────────────
 
 describe("resolveVisionSupport — modelSupportsVision gating logic", () => {
- // Build a minimal but well-formed CatalogModel. `attachment` defaults to
- // false (the safe default) so each test opts a model INTO vision
- // explicitly.
+  // Build a minimal but well-formed CatalogModel. `attachment` defaults to
+  // false (the safe default) so each test opts a model INTO vision
+  // explicitly.
   function model(overrides: Partial<CatalogModel> & { id: string }): CatalogModel {
     const { id, ...rest } = overrides;
     return {
@@ -724,23 +746,23 @@ describe("resolveVisionSupport — modelSupportsVision gating logic", () => {
   });
 
   test("requested base id as substring of a vision-only variant is NOT treated as vision", () => {
- // Regression lock-in for the False-Positive finding: 'gpt-4' is a prefix of
- // 'gpt-4-vision-preview', but the base model is NOT a vision model, so the
- // screenshot must NOT be attached (it would 400 on a non-vision model).
+    // 'gpt-4' is a prefix of
+    // 'gpt-4-vision-preview', but the base model is NOT a vision model, so the
+    // screenshot must NOT be attached (it would 400 on a non-vision model).
     const models = [model({ id: "gpt-4-vision-preview", attachment: true })];
     expect(resolveVisionSupport("gpt-4", models)).toBe(false);
   });
 
   test("dated variant of the same vision model IS treated as vision (substring still works)", () => {
- // The case substring matching is supposed to serve: the user typed
- // 'gpt-4o' but the catalog carries only the dated 'gpt-4o-2024-08-06'.
+    // The case substring matching is supposed to serve: the user typed
+    // 'gpt-4o' but the catalog carries only the dated 'gpt-4o-2024-08-06'.
     const models = [model({ id: "gpt-4o-2024-08-06", attachment: true })];
     expect(resolveVisionSupport("gpt-4o", models)).toBe(true);
   });
 
   test("no catalog models falls back to the name heuristic (vision family)", () => {
- // Catalog unavailable / provider-less: 'claude-3-opus' must still resolve
- // to vision via VISION_PATTERNS, not throw or default to false.
+    // Catalog unavailable / provider-less: 'claude-3-opus' must still resolve
+    // to vision via VISION_PATTERNS, not throw or default to false.
     expect(resolveVisionSupport("claude-3-opus", [])).toBe(true);
   });
 
@@ -749,9 +771,88 @@ describe("resolveVisionSupport — modelSupportsVision gating logic", () => {
   });
 
   test("ambiguous substring that matches a non-vision base variant is not vision", () => {
- // 'gpt-4' substring-matches a dated NON-vision base variant; since the base
- // isn't vision, the heuristic (which doesn't cover 'gpt-4') yields false.
-    const models = [model({ id: "gpt-4-2024-01-01", attachment: false })];
+    // 'gpt-4' substring-matches a dated NON-vision base variant; since the base
+    // isn't vision, the heuristic (which doesn't cover 'gpt-4') yields false.
+    const models = [model({ id: "gpt-4-2024-08-06", attachment: false })];
     expect(resolveVisionSupport("gpt-4", models)).toBe(false);
+  });
+});
+
+// ─── isPlainJSONSchema (moved to shared-image) ──────────────────────────────
+
+describe("isPlainJSONSchema — plainness guard for strict schemas", () => {
+  test("accepts a plain JSON Schema object", () => {
+    expect(isPlainJSONSchema({ type: "object", properties: {} })).toBe(true);
+  });
+
+  test("rejects a raw Zod schema object (safeParse + ~standard)", () => {
+    const schema = z.object({ a: z.string() });
+    expect(isPlainJSONSchema(schema)).toBe(false);
+  });
+
+  test("rejects zod v4 toJSONSchema output until JSON round-tripped (~standard)", () => {
+    const converted = z.toJSONSchema(z.object({ a: z.string().default("") })) as Record<string, unknown>;
+    expect("~standard" in converted).toBe(true);
+    expect(isPlainJSONSchema(converted)).toBe(false);
+    expect(isPlainJSONSchema(JSON.parse(JSON.stringify(converted)))).toBe(true);
+  });
+
+  test("rejects non-objects", () => {
+    expect(isPlainJSONSchema("str")).toBe(false);
+    expect(isPlainJSONSchema(null)).toBe(false);
+  });
+});
+
+// ─── normalizeStrictSchema default stripping ────────────────────────────────
+
+describe("normalizeStrictSchema default stripping", () => {
+  test("strips `default` from a plain schema sent through the strict protocol body", async () => {
+    const body = await OpenAIChat.protocol.body.from(makeRequest({
+      schema: {
+        type: "object",
+        properties: {
+          goal: { type: "string", default: "" },
+          done: { type: "boolean", default: false },
+        },
+      },
+    } as Partial<LLMRequest>)) as OpenAIChat.OpenAIChatBody;
+    const js = (body.response_format as { json_schema: { schema: Record<string, unknown>; strict: boolean } }).json_schema;
+    expect(js.strict).toBe(true);
+    expect(JSON.stringify(js.schema)).not.toContain('"default"');
+  });
+
+  test("strips `default` emitted by a real Zod schema with .default() fields", async () => {
+    // Transform-free Zod schema (zodToJsonSchema rejects transform-based
+    // schemas, e.g. the flexibleBoolean helper) so the strict path is
+    // exercised end-to-end: isZodSchema → toJSONSchema → normalizeStrictSchema.
+    const ZodSchemaWithDefaults = z.object({
+      thinking: z.string().default(""),
+      next_goal: z.string().default(""),
+      done: z.boolean().default(false),
+      count: z.number().optional().default(3),
+    });
+    const body = await OpenAIChat.protocol.body.from(makeRequest({
+      schema: ZodSchemaWithDefaults,
+    } as Partial<LLMRequest>)) as OpenAIChat.OpenAIChatBody;
+    const js = (body.response_format as { json_schema: { schema: Record<string, unknown>; strict: boolean } }).json_schema;
+    expect(js.strict).toBe(true);
+    expect(JSON.stringify(js.schema)).not.toContain('"default"');
+  });
+
+  test("strips nested `default` nodes (nullable anyOf branches, array items, $defs, object properties)", () => {
+    const normalized = normalizeStrictSchema({
+      type: "object",
+      properties: {
+        n: { type: ["string", "null"], default: "x" },
+        tags: { type: "array", items: { type: "string", default: "t" }, default: [] },
+        nested: {
+          type: "object",
+          properties: { a: { type: "string", default: "a" } },
+          default: {},
+        },
+      },
+      $defs: { d: { type: "string", default: "d" } },
+    });
+    expect(JSON.stringify(normalized)).not.toContain('"default"');
   });
 });

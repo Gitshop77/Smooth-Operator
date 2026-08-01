@@ -19,14 +19,15 @@ import { buildPlannerPrompt } from "../lib/agent/prompts/planner-prompt";
 import { buildNavigatorUserMessage, buildPlannerUserMessage } from "../lib/agent/loop/messages";
 import { AgentOutputSchema, PlannerOutputSchema } from "../lib/agent/tools/schema";
 import { getFormatInstructions } from "../lib/agent/tools/registry";
-import type { AgentStepRequest, PlannerStepRequest, HistoryItem } from "../lib/agent/types";
+import type { AgentStepRequest, PlannerStepRequest } from "../lib/agent/types";
 import { buildProvider, readProviderConfig, type ProviderConfig } from "./provider-config";
 import { MAX_ACTIONS, MAX_ELEMENTS_CHARS } from "@/lib/validations";
-// The same pattern the protocol adapters (anthropic-messages / gemini /
-// openai-chat) use to turn `<screenshot>` markers in message CONTENT into image
-// blocks. We reuse its source verbatim so our strip rule can never drift from
-// the attach rule.
-import { SCREENSHOT_PATTERN_G } from "@/lib/agent/llm/shared-image";
+import {
+  extractUsage,
+  capText,
+  stripScreenshotMarkers,
+  stripHistoryScreenshotMarkers,
+} from "./llm-direct-utils";
 
 /** Cached provider instance + the config it was built from (rebuilt on config change). */
 let cachedProvider: LLMProvider | null = null;
@@ -44,8 +45,8 @@ let configEpoch = 0;
 
 // Cached settings (invalidated on chrome.storage.onChanged via the listener
 // below). A single Map backs every cached setting so the per-key invalidation
-// is the only place that touches the cache and the four getters share one
-// memoization path instead of four copy-pasted cache variables.
+// is the only place that touches the cache; `cachedSetting` gives every getter
+// the same memoization path instead of copy-pasted cache variables.
 const settingCache = new Map<string, unknown>();
 
 /** Provider-config storage keys whose change must invalidate the cached provider. */
@@ -69,28 +70,27 @@ if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
 
 const VISION_MODES = new Set(["disabled", "always", "adaptive"]);
 
-async function getCustomNavigatorPrompt(): Promise<string | undefined> {
-  if (settingCache.has("customNavigatorPrompt")) {
-    return (settingCache.get("customNavigatorPrompt") as string | undefined) ?? undefined;
-  }
+/** Memoized getter for a chrome.storage.local setting; `read` computes on miss. */
+function cachedSetting<T>(key: string, read: () => Promise<T>): () => Promise<T> {
+  return async () => {
+    if (settingCache.has(key)) return settingCache.get(key) as T;
+    const value = await read();
+    settingCache.set(key, value);
+    return value;
+  };
+}
+
+const getCustomNavigatorPrompt = cachedSetting("customNavigatorPrompt", async () => {
   const { customNavigatorPrompt } = await chrome.storage.local.get("customNavigatorPrompt");
-  settingCache.set("customNavigatorPrompt", customNavigatorPrompt);
   return (customNavigatorPrompt as string | undefined) ?? undefined;
-}
+});
 
-async function getCustomPlannerPrompt(): Promise<string | undefined> {
-  if (settingCache.has("customPlannerPrompt")) {
-    return (settingCache.get("customPlannerPrompt") as string | undefined) ?? undefined;
-  }
+const getCustomPlannerPrompt = cachedSetting("customPlannerPrompt", async () => {
   const { customPlannerPrompt } = await chrome.storage.local.get("customPlannerPrompt");
-  settingCache.set("customPlannerPrompt", customPlannerPrompt);
   return (customPlannerPrompt as string | undefined) ?? undefined;
-}
+});
 
-export async function getVisionMode(): Promise<"disabled" | "always" | "adaptive"> {
-  if (settingCache.has("visionMode")) {
-    return settingCache.get("visionMode") as "disabled" | "always" | "adaptive";
-  }
+export const getVisionMode = cachedSetting("visionMode", async () => {
  // `visionMode` is the single source of truth (disabled | always | adaptive).
  // `enableLocalVision` is a legacy key kept only for one-time backward
  // compatibility: if `visionMode` is unset but `enableLocalVision` was true,
@@ -99,47 +99,16 @@ export async function getVisionMode(): Promise<"disabled" | "always" | "adaptive
     "visionMode",
     "enableLocalVision",
   ]);
-  const mode = VISION_MODES.has(visionMode as string)
+  return VISION_MODES.has(visionMode as string)
     ? (visionMode as "disabled" | "always" | "adaptive")
     : (enableLocalVision === true ? "always" : "disabled");
-  settingCache.set("visionMode", mode);
-  return mode;
-}
+});
 
 /** Cached `enableScreenshots` setting (defaults to true). */
-async function getEnableScreenshots(): Promise<boolean> {
-  if (settingCache.has("enableScreenshots")) {
-    return settingCache.get("enableScreenshots") as boolean;
-  }
+const getEnableScreenshots = cachedSetting("enableScreenshots", async () => {
   const { enableScreenshots } = await chrome.storage.local.get("enableScreenshots");
-  const value = (enableScreenshots as boolean | undefined) ?? true;
-  settingCache.set("enableScreenshots", value);
-  return value;
-}
-
-/** Map a provider chat response's `content`/`usage` to the shape the
- * orchestrator expects from `navigatorCall`/`plannerCall`. */
-function extractUsage(r: {
-  content: string;
-  usage?: {
-    tokensIn?: number;
-    tokensOut?: number;
-    reasoningTokens?: number;
-    cachedInputTokens?: number;
-    model?: string;
-    costUsd?: number;
-  };
-}) {
-  return {
-    raw: r.content,
-    tokensIn: r.usage?.tokensIn,
-    tokensOut: r.usage?.tokensOut,
-    reasoningTokens: r.usage?.reasoningTokens,
-    cachedInputTokens: r.usage?.cachedInputTokens,
-    model: r.usage?.model,
-    costUsd: r.usage?.costUsd,
-  };
-}
+  return (enableScreenshots as boolean | undefined) ?? true;
+});
 
 /**
  * Resolve the active agent mode (full_agentic | standard | restricted) for the
@@ -150,28 +119,11 @@ function extractUsage(r: {
  * an undefined mode.
  */
 const AGENT_MODES = new Set(["full_agentic", "standard", "restricted"]);
-export async function getAgentMode(): Promise<string> {
-  if (settingCache.has("agentMode")) {
-    return settingCache.get("agentMode") as string;
-  }
+export const getAgentMode = cachedSetting("agentMode", async () => {
   const { agentMode } = await chrome.storage.local.get(["agentMode"]);
   const mode = agentMode as string | undefined;
-  const resolved = mode && AGENT_MODES.has(mode) ? mode : "standard";
-  settingCache.set("agentMode", resolved);
-  return resolved;
-}
-
-/**
- * Cheap, non-reversible digest of a secret (e.g. an API key) for use inside a
- * cache key. The key material is never persisted as plaintext — only this short
- * digest survives in the long-lived `cachedConfigKey` string — while cache
- * invalidation still fires whenever the secret changes.
- */
-export function hashStr(s: string): string {
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
-  return (h >>> 0).toString(36);
-}
+  return mode && AGENT_MODES.has(mode) ? mode : "standard";
+});
 
 /**
  * Resolve the LLM provider from stored config, caching the instance until the
@@ -217,8 +169,8 @@ async function getProvider(): Promise<LLMProvider> {
  // clear the entry for THIS key. Otherwise, if two calls with different cache
  // keys overlap, call A's closure could null B's in-flight build (causing a
  // redundant rebuild) or overwrite the cache with A's stale key/provider
- // (finding: concurrent provider builds corrupt shared pendingProvider/
- // cachedProvider state).
+  // (concurrent provider builds could corrupt the shared pendingProvider/
+  // cachedProvider state).
   const epochAtBuild = configEpoch;
   const p = buildProvider(config).then((provider) => {
     pendingProviders.delete(key);
@@ -238,68 +190,15 @@ async function getProvider(): Promise<LLMProvider> {
   return p;
 }
 
-/**
- * Cap `text` to `max` characters, appending a marker so the model knows data
- * was dropped. Guards `undefined` (treated as empty) so a missing field can
- * never throw on `.length`. Used for both elementsText and axTree.
- */
-export function capText(text: string | undefined, max: number): string {
-  const safe = text ?? "";
-  return safe.length > max
-    ? safe.slice(0, max) + `\n[... truncated at ${max} chars ...]`
-    : safe;
-}
-
-/**
- * Strip any `<screenshot>data:image/...;base64,...</screenshot>` markers from
- * UNTRUSTED page-derived text BEFORE it is composed into the model input.
- *
- * Why: the protocol adapters (anthropic-messages / gemini / openai-chat) scan
- * every message's CONTENT for `SCREENSHOT_PATTERN_G` and turn each match into an
- * image block that is forwarded to the model. A malicious page can embed a
- * `<screenshot>` marker (with an attacker-chosen image) inside its AX tree,
- * interactive-element text, or extracted/summarized history. Because the
- * extension concatenates that untrusted text with its OWN trusted screenshot
- * marker, the adapter would happily attach the attacker's image too. `shared
- * -image.ts`'s `hasImageProvenance` only checks PNG magic bytes (trivially
- * forgeable), so it does not stop this.
- *
- * Stripping the marker from untrusted inputs means the ONLY `<screenshot>` that
- * survives into the content is the one `navigatorCallDirect` injects itself from
- * `req.browserState.screenshot` (the real captured pixels). The legitimate
- * screenshot feature is therefore untouched — we only remove markers that an
- * untrusted page could have forged.
- *
- * We build a fresh `g` regex from the adapters' pattern *source* so the strip
- * rule is guaranteed identical to the attach rule, and so we never share mutable
- * `lastIndex` state with the shared global regex object.
- */
-export function stripScreenshotMarkers(text: string): string {
-  if (!text) return text;
-  return text.replace(new RegExp(SCREENSHOT_PATTERN_G.source, "g"), "");
-}
-
-/**
- * Strip screenshot markers from every page-derived string field of the agent's
- * run history. History can carry page content (e.g. `extract`-captured text,
- * evaluation/memory/goal summaries of a malicious page) that may contain an
- * injected `<screenshot>` marker. Returns a stripped COPY; the caller's history
- * array is never mutated.
- */
-function stripHistoryScreenshotMarkers(history: HistoryItem[]): HistoryItem[] {
-  return history.map((h) => ({
-    ...h,
-    evaluation: stripScreenshotMarkers(h.evaluation),
-    memory: stripScreenshotMarkers(h.memory),
-    goal: stripScreenshotMarkers(h.goal),
-    results: h.results.map((r) => ({
-      ...r,
-      message: stripScreenshotMarkers(r.message),
-      extractedContent: r.extractedContent
-        ? stripScreenshotMarkers(r.extractedContent)
-        : r.extractedContent,
-    })),
-  }));
+/** Shape the orchestrator expects from `navigatorCall` / `plannerCall`. */
+interface DirectCallResult {
+  raw: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  reasoningTokens?: number;
+  cachedInputTokens?: number;
+  model?: string;
+  costUsd?: number;
 }
 
 /**
@@ -310,15 +209,7 @@ function stripHistoryScreenshotMarkers(history: HistoryItem[]): HistoryItem[] {
 export async function navigatorCallDirect(
   req: AgentStepRequest,
   signal?: AbortSignal,
-): Promise<{
-  raw: string;
-  tokensIn?: number;
-  tokensOut?: number;
-  reasoningTokens?: number;
-  cachedInputTokens?: number;
-  model?: string;
-  costUsd?: number;
-}> {
+): Promise<DirectCallResult> {
  // Cap elementsText (same abuse-prevention as the Next.js route).
  // Strip any `<screenshot>…</screenshot>` markers from the UNTRUSTED page text
  // BEFORE it is composed into the model input — see `stripScreenshotMarkers`.
@@ -426,15 +317,7 @@ export async function navigatorCallDirect(
 export async function plannerCallDirect(
   req: PlannerStepRequest,
   signal?: AbortSignal,
-): Promise<{
-  raw: string;
-  tokensIn?: number;
-  tokensOut?: number;
-  reasoningTokens?: number;
-  cachedInputTokens?: number;
-  model?: string;
-  costUsd?: number;
-}> {
+): Promise<DirectCallResult> {
  // History can carry page-derived content (extract results, summaries of a
  // malicious page) — strip any injected `<screenshot>` markers before render,
  // mirroring the navigator path's defense against page-injected image attachment.

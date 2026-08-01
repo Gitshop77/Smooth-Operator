@@ -21,10 +21,10 @@ import * as OpenAIChat from "../protocols/openai-chat";
 import type { LLMProvider } from "../provider";
 import { toLLMProvider as toLLMProviderBridge } from "../provider-bridge";
 import { assertSafeUserBaseURL } from "./openai-compatible-profile";
-import { LOCAL_PROVIDER_BASE_URLS, type SsrfProvenance } from "../route/ssrf";
+import { isCuratedLocalOrigin, type SsrfProvenance } from "../route/ssrf";
 import type { Protocol } from "../route/client";
 
-export type Config = {
+type Config = {
   baseURL?: string;
   // When true (user-configured provenance) the curated-local-provider loopback
   // exemption MAY be honored — but only for a baseURL that exactly matches a
@@ -37,22 +37,11 @@ export type Config = {
 /** True iff `url` exactly matches a curated local-provider origin (Ollama / LiteLLM). */
 export function isCuratedLocalOriginUrl(url: string | undefined): boolean {
   if (!url) return false;
-  try {
-    const origin = new URL(url).origin;
-    return LOCAL_PROVIDER_BASE_URLS.some((u) => {
-      try {
-        return new URL(u).origin === origin;
-      } catch {
-        return false;
-      }
-    });
-  } catch {
-    return false;
-  }
+  return isCuratedLocalOrigin(url);
 }
 
 /** Definition for one OpenAI-compatible provider facade. */
-export interface OpenAIChatFacadeDef<P extends Protocol<any, any, any, any> = Protocol> {
+interface OpenAIChatFacadeDef<P extends Protocol<any, any, any, any> = Protocol> {
   id: string;
   displayName: string;
   envKey: string;
@@ -62,7 +51,7 @@ export interface OpenAIChatFacadeDef<P extends Protocol<any, any, any, any> = Pr
   defaultBaseURL: string;
 }
 
-export interface OpenAIChatFacadeConfigure {
+interface OpenAIChatFacadeConfigure {
   id: string;
   model: (modelID: string) => unknown;
   configure: (input?: Config) => OpenAIChatFacadeConfigure;
@@ -135,7 +124,7 @@ export function makeOpenAIChatFacade<P extends Protocol<any, any, any, any> = Pr
     });
   }
 
-  return { id: def.id, configure, toLLMProvider };
+  return { configure, toLLMProvider };
 }
 
 const facade = makeOpenAIChatFacade({
@@ -148,6 +137,4 @@ const facade = makeOpenAIChatFacade({
   defaultBaseURL: OpenAIChat.DEFAULT_BASE_URL,
 });
 
-export const id = facade.id;
-export const configure = facade.configure;
 export const toLLMProvider = facade.toLLMProvider;

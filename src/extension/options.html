@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark light" />
   <title>Open Cowork — Settings</title>
   <!--
-    CSP ACCEPTED RISK (W02-Security-B02 Finding 1):
+    CSP ACCEPTED RISK:
     connect-src allows HTTPS to any host because the Options page makes direct
     fetch() calls to user-configured LLM provider URLs. The SSRF guard
     (resolveAndValidateLlmBaseUrl with "user-configured" provenance) and
@@ -14,8 +14,12 @@
     exfiltration. CSP is defense-in-depth only; if the Options page's network
     calls can be routed through the background worker in a future refactor,
     restrict connect-src to 'self'.
+    Loopback (http://localhost:*, http://127.0.0.1:*, http://[::1]:*) is
+    additionally allowed so Test Connection can reach local providers (Ollama
+    on :11434, LiteLLM on :4000) directly from this page — matching the SSRF
+    guard's loopback exemption (both layers must agree on loopback).
   -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src https://*;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src https://* http://localhost:* http://127.0.0.1:* http://[::1]:*;">
   <link rel="stylesheet" href="options.css" />
 </head>
 <body>
@@ -53,7 +57,17 @@
           <label for="apiKey">
             <span>API key</span>
             <input type="password" id="apiKey" placeholder="sk-…" autocomplete="new-password" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" />
-            <small id="apikey-hint">Your API key — stored locally in your browser profile. Only sent to the provider you choose.</small>
+            <small id="apikey-hint">Held in memory for this session and never written to disk — unless you choose to remember it on this device below. Only sent to the provider you choose.</small>
+          </label>
+
+          <label class="checkbox-row">
+            <input type="checkbox" id="rememberApiKey" />
+            <span>
+              Remember API key on this device —
+              <strong>off by default</strong>. Keeps the key available after
+              browser restarts by storing it unencrypted in this browser's
+              local storage.
+            </span>
           </label>
 
           <label id="baseurl-label" for="baseUrl">

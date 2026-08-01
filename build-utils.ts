@@ -73,8 +73,11 @@ export function stripConsoleDebug(source: string): string {
     // strings whether we are in plain template text or inside a `${}`
     // interpolation, so the closing backtick is located correctly and the
     // interior of an interpolation is scanned as ordinary code below.
+    // Depth only increments on `${` — a bare `{` in template text (e.g.
+    // `const s = \`a { b\``) must NOT bump the depth, or an unmatched
+    // literal brace would corrupt the close-backtick logic below.
     if (strChar === "`") {
-      if (c === "{") { templateDepth++; out.push(c); i++; continue; }
+      if (c === "{" && source[i - 1] === "$") { templateDepth++; out.push(c); i++; continue; }
       if (c === "}" && templateDepth > 0) { templateDepth--; out.push(c); i++; continue; }
       if (c === "`" && templateDepth === 0) { strChar = null; out.push(c); i++; continue; }
     }
@@ -98,7 +101,7 @@ export function stripConsoleDebug(source: string): string {
           continue;
         }
         if (strChar === "`") {
-          if (c === "{") templateDepth++;
+          if (c === "{" && source[i - 1] === "$") templateDepth++;
           else if (c === "}" && templateDepth > 0) templateDepth--;
           else if (c === "`" && templateDepth === 0) strChar = null;
         } else if (c === strChar) {
@@ -159,11 +162,20 @@ export function stripConsoleDebug(source: string): string {
       }
     }
 
-    // Bare `console.debug(` / `console.log(` call → rewrite.
-    // Also match optional-chained `console?.debug(` / `console?.log(`.
-    if (c === "c" && !isIdentChar(prev) && source.startsWith("console.", i)) {
-      let nameOff = i + 8; // index of the char after "console."
-      if (source[nameOff] === "?") nameOff++; // optional chaining `?.`
+    // Bare `console.debug(` / `console.log(` call → rewrite, and the
+    // optional-chained forms `console?.debug(` / `console?.log(` too
+    // (the plain `startsWith("console.", i)` check can never see the `?`
+    // branch, so the chained form must be matched explicitly — without it
+    // optional-chained calls survive into production bundles).
+    if (c === "c" && !isIdentChar(prev)) {
+      let nameOff: number;
+      if (source.startsWith("console.", i)) nameOff = i + 8;
+      else if (source.startsWith("console?.", i)) nameOff = i + 9;
+      else {
+        out.push(c);
+        i++;
+        continue;
+      }
       const name =
         source[nameOff] === "d"
           ? "debug"
@@ -283,7 +295,7 @@ export async function assertOnlyEnZodLocales(
  * array containing non-string entries (e.g. a nested object from a bad merge)
  * would be mis-filtered by the high-risk check, so we reject it loudly.
  */
-export function assertStringArray(value: unknown, field: string): string[] {
+function assertStringArray(value: unknown, field: string): string[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value) || !value.every((x) => typeof x === "string")) {
     throw new Error(

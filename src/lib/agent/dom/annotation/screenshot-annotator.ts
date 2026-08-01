@@ -45,9 +45,14 @@
 import {
   createCompatibleCanvas,
   loadCompatibleImage,
-  type CompatibleCanvas,
   type CompatibleLoadedImage,
 } from "./canvas-utils";
+import {
+  isHexColor,
+  sanitizeColor,
+  pickReadableTextColor,
+  canvasToDataUrl,
+} from "./screenshot-annotator-utils";
 
 export interface AnnotatableElement {
   /** 1-based index the LLM uses to reference this element. */
@@ -77,53 +82,7 @@ export const DEFAULT_ANNOTATE_PALETTE: readonly string[] = [
   "#6366f1", // indigo-500
 ];
 
-/**
- * Test whether a string is a well-formed CSS hex color: `#rgb`, `#rgba`,
- * `#rrggbb`, or `#rrggbbaa` (3/4/6/8 hex digits). A naive `{3}([…]{3}){0,2}`
- * pattern both rejects valid 8-digit `#rrggbbaa` and accepts invalid 9-digit
- * strings that Canvas silently ignores, so the digit counts are enumerated
- * explicitly.
- */
-function isHexColor(c: string): boolean {
-  return /^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(c);
-}
-
-/**
- * Validate a CSS hex color string. Canvas silently ignores an invalid
- * `strokeStyle`/`fillStyle` (keeping the previous value), which would make a
- * malformed `boxColor`/`bgColor`/`textColor` silently produce wrong-colored
- * boxes/labels. Reject anything that isn't a well-formed `#rgb`/`#rgba`/
- * `#rrggbb`/`#rrggbbaa` value and fall back to `fallback` so annotation always
- * uses a real, valid color .
- */
-function sanitizeColor(c: string | undefined, fallback: string): string {
-  return typeof c === "string" && isHexColor(c.trim()) ? c.trim() : fallback;
-}
-
-/** WCAG relative luminance (0 = black, 1 = white) of a `#rgb`/`#rrggbb` hex color. */
-function relativeLuminance(hex: string): number {
-  const c = hex.replace("#", "");
-  const expanded =
-    c.length === 3 || c.length === 4
-      ? c
-          .slice(0, 3)
-          .split("")
-          .map((ch) => ch + ch)
-          .join("")
-      : c.slice(0, 6);
-  const channel = (i: number): number => {
-    const v = parseInt(expanded.slice(i, i + 2), 16) / 255;
-    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
-  };
-  return 0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4);
-}
-
-/** Pick `#000`/`#fff` label text for best contrast against a background color. */
-function pickReadableTextColor(bg: string): string {
-  return relativeLuminance(bg) > 0.5 ? "#000000" : "#ffffff";
-}
-
-export interface AnnotateOptions {
+interface AnnotateOptions {
   /** Base font size for the index label, in CSS pixels. It is multiplied by
  * `scaleFactor` when drawn on the device-resolution canvas, so the label
  * renders at a consistent visual size regardless of DPR. Default 14. */
@@ -241,8 +200,7 @@ export async function annotateScreenshot(
   let img: LoadedImage;
   try {
  // `loadCompatibleImage` selects the decode path internally (no canvas arg
- // needed — see ./canvas-utils). Removing the dead `_canvas` param also
- // fixes the "unused parameter" finding.
+ // needed — see ./canvas-utils). The dead `_canvas` param was removed.
     img = await loadCompatibleImage(screenshotDataUrl);
   } catch {
  // Image load failed (malformed data URL, decode error, …). Return raw.
@@ -351,64 +309,11 @@ export async function annotateScreenshot(
 // ─── Canvas abstraction (OffscreenCanvas ↔ HTMLCanvasElement) ───────────────
 //
 // Canvas creation + image decode now live in `./canvas-utils` so this module
-// and the vision-assistant preprocessor share one implementation (see finding:
+// and the vision-assistant preprocessor share one implementation (previously
 // duplicated `createCanvas()` across two modules). `createCompatibleCanvas`
 // and `loadCompatibleImage` are imported at the top of this file.
 
-/** Minimal common surface we use from either canvas flavor (alias of the shared type). */
-export type AnnotatorCanvas = CompatibleCanvas;
 /** A LoadedImage just knows how to copy itself onto a 2D context (alias of the shared type). */
-export type LoadedImage = CompatibleLoadedImage;
+type LoadedImage = CompatibleLoadedImage;
 
-/** Convert a canvas back to a JPEG data URL.
- *
- * Output JPEG (quality 0.85) instead of PNG. `chrome.tabs.captureVisibleTab`
- * already produces JPEG at quality 80, so the input is already lossy — re-encoding
- * as PNG (3-5× larger for photographic content) was inflating both the bundle
- * sent to the LLM and the prompt token count with no quality benefit. JPEG q=85
- * preserves the numbered-box outlines cleanly while cutting size ~3-5×. */
-async function canvasToDataUrl(canvas: AnnotatorCanvas, fallback: string): Promise<string> {
- // OffscreenCanvas path.
-  const oc = canvas as unknown as {
-    convertToBlob?: (opts: { type: string; quality?: number }) => Promise<Blob>;
-  };
-  if (typeof oc.convertToBlob === "function") {
-    try {
-      const blob = await oc.convertToBlob({ type: "image/jpeg", quality: 0.85 });
-      return await blobToDataUrl(blob);
-    } catch {
- // Encoding failed — fall back to the raw screenshot.
-      return fallback;
-    }
-  }
- // HTMLCanvasElement path.
-  const html = canvas as unknown as { toDataURL?: (type: string, quality?: number) => string };
-  if (typeof html.toDataURL === "function") {
-    try {
-      return html.toDataURL("image/jpeg", 0.85);
-    } catch {
- // Encoding failed — fall back to the raw screenshot.
-      return fallback;
-    }
-  }
- // Should never happen — both canvas flavors implement one of the two.
- // Return the raw screenshot rather than throwing so the documented
- // "always returns a usable image" contract holds airtight.
-  return fallback;
-}
 
-/** Convert a `Blob` to a `data:` URL via `FileReader`. */
-function blobToDataUrl(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
- // FileReader is available in both SW and DOM contexts.
-    const FR = (globalThis as { FileReader?: typeof FileReader }).FileReader;
-    if (!FR) {
-      reject(new Error("FileReader unavailable"));
-      return;
-    }
-    const reader = new FR();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(reader.error ?? new Error("FileReader failed"));
-    reader.readAsDataURL(blob);
-  });
-}

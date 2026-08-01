@@ -16,6 +16,25 @@ import { scanForInjection } from "../../security";
 // find_elements calls skip the per-call module resolution check.
 const domUtilsPromise = import("../../dom/dom-utils");
 
+/** Joins a batch of values into a single `redactSecrets` call, then splits the
+ *  redacted result back into per-value strings. */
+const BATCH_DELIM = "\x00";
+
+/** Stand-in for every part when the batch redaction cannot be aligned back to
+ *  the original values (secret-store failure or a NUL byte inside a value). */
+const REDACTION_FAILURE_MASK = "[REDACTED: secret store unavailable]";
+
+async function redactBatch(parts: string[]): Promise<string[]> {
+  if (parts.length === 0) return parts;
+  const redacted = (await redactSecrets(parts.join(BATCH_DELIM))).split(BATCH_DELIM);
+  // A redaction failure returns a single marker string for the whole batch, and
+  // a NUL byte inside a value shifts the split — either way the split no longer
+  // lines up with `parts`, and indexing into it would ship RAW values to the
+  // LLM. Mask every part instead of leaking.
+  if (redacted.length !== parts.length) return parts.map(() => REDACTION_FAILURE_MASK);
+  return redacted;
+}
+
 /**
  * Attempt `document.querySelectorAll` and return a structured result instead of
  * letting an invalid selector throw. LLM- or prompt-supplied selectors are
@@ -28,9 +47,9 @@ function tryQuerySelectorAll(
   cap = 200,
 ): { ok: true; els: Element[] } | { ok: false; error: string } {
   try {
- // Bound collection so an oversized NodeList (e.g. a broad `*` selector on a
- // large page) is never materialized into a giant array — the result is
- // sliced to `cap` (<= 200) downstream, so the returned set is unchanged.
+    // Bound collection so an oversized NodeList (e.g. a broad `*` selector on a
+    // large page) is never materialized into a giant array — the result is
+    // sliced to `cap` (<= 200) downstream, so the returned set is unchanged.
     const all = document.querySelectorAll(selector);
     const els: Element[] = [];
     for (let i = 0; i < all.length && i < cap; i++) els.push(all[i]);
@@ -76,39 +95,39 @@ export async function handleFindElements(
   _ctx: ActionContext,
   action: Extract<Action, { type: "find_elements" }>,
 ): Promise<ActionResult> {
- // When the selector carries a locator-strategy prefix (`xpath:`, `id:`,
- // `name:`, `tag:`, `class:`, `link:`, `partial:`), resolve via the
- // corresponding `By.*` factory + `findByLocator` instead of
- // `querySelectorAll`. The bare-string CSS path (no prefix) is preserved
- // as the default so existing prompts / callers see no behavior change.
- //
- // Recognized prefixes mirror the W3C `By` taxonomy:
- // css: → By.css(selector) [default when no prefix]
- // xpath: → By.xpath(selector)
- // id: → By.id(selector)
- // name: → By.name(selector)
- // tag: → By.tagName(selector)
- // class: → By.className(selector)
- // link: → By.linkText(selector)
- // partial: → By.partialLinkText(selector)
+  // When the selector carries a locator-strategy prefix (`xpath:`, `id:`,
+  // `name:`, `tag:`, `class:`, `link:`, `partial:`), resolve via the
+  // corresponding `By.*` factory + `findByLocator` instead of
+  // `querySelectorAll`. The bare-string CSS path (no prefix) is preserved
+  // as the default so existing prompts / callers see no behavior change.
+  //
+  // Recognized prefixes mirror the W3C `By` taxonomy:
+  // css: → By.css(selector) [default when no prefix]
+  // xpath: → By.xpath(selector)
+  // id: → By.id(selector)
+  // name: → By.name(selector)
+  // tag: → By.tagName(selector)
+  // class: → By.className(selector)
+  // link: → By.linkText(selector)
+  // partial: → By.partialLinkText(selector)
   const selector = action.selector;
   const prefixMatch = /^(css|xpath|id|name|tag|class|link|partial):([\s\S]+)$/i.exec(selector);
   const kind = prefixMatch?.[1]?.toLowerCase();
   const value = prefixMatch?.[2] ?? "";
   const isLinkLocator = kind === "link" || kind === "partial";
- // For `link:` the value is human-readable link text. Only divert it to the
- // CSS path when the value is one of the known link-state pseudo-classes
- // (`hover`, `active`, `focus`, `visited`, `focus-visible`, `focus-within`);
- // otherwise it is link text. This keeps `link:home`, `link:login`,
- // `link:first-child`, `link:not(.x)` resolving via the locator while
- // `link:hover` still reaches the CSS path. `partial:` never collides with an
- // element name, so it is always a locator.
+  // For `link:` the value is human-readable link text. Only divert it to the
+  // CSS path when the value is one of the known link-state pseudo-classes
+  // (`hover`, `active`, `focus`, `visited`, `focus-visible`, `focus-within`);
+  // otherwise it is link text. This keeps `link:home`, `link:login`,
+  // `link:first-child`, `link:not(.x)` resolving via the locator while
+  // `link:hover` still reaches the CSS path. `partial:` never collides with an
+  // element name, so it is always a locator.
   const looksLikeCssPseudoClass = kind === "link" && linkValueIsCssPseudoClass(value);
   const useLocator = prefixMatch !== null && !(isLinkLocator && looksLikeCssPseudoClass);
 
- // Bound the echoed selector in messages so a very long LLM-supplied selector
- // doesn't bloat the agent context / persisted history. The result data is
- // untouched.
+  // Bound the echoed selector in messages so a very long LLM-supplied selector
+  // doesn't bloat the agent context / persisted history. The result data is
+  // untouched.
   const echo = action.selector.length > 80 ? action.selector.slice(0, 80) + "…" : action.selector;
 
   // A `link:<pseudo>` locator diverts to the CSS path. Its raw selector
@@ -149,15 +168,17 @@ export async function handleFindElements(
       }
     } catch (e) {
       if (!importOk) {
- // The dynamic import of the locator helpers failed — degrade to a plain CSS
- // query of the original selector so the action still returns useful output.
+        // The dynamic import of the locator helpers failed — degrade to a plain
+        // CSS query of the original selector so the action still returns useful
+        // output.
         const fb = cssFallback();
         if (!Array.isArray(fb)) return fb;
         matchedEls = fb;
       } else {
- // The locator resolved but the scan itself threw (e.g. an invalid XPath).
- // Name the strategy and value so the agent can fix it rather than seeing a
- // misleading "Invalid selector \"xpath://div[\"" generic CSS error.
+        // The locator resolved but the scan itself threw (e.g. an invalid
+        // XPath). Name the strategy and value so the agent can fix it rather
+        // than seeing a misleading "Invalid selector \"xpath://div[\"" generic
+        // CSS error.
         const msg = e instanceof Error ? e.message : String(e);
         return { action, success: false, message: `Invalid ${kind} locator "${value}": ${msg}` };
       }
@@ -168,14 +189,13 @@ export async function handleFindElements(
     matchedEls = fb;
   }
 
- // Schema caps `max_results` at 200; clamp defensively so a value that
- // bypassed validation can't produce a runaway payload fed back into the
- // LLM context / persisted history.
-  const raw = action.max_results ?? 50;
-  const cap = Math.min(Math.max(Math.floor(raw), 0), 200);
+  // Schema caps `max_results` at 200; clamp defensively so a value that
+  // bypassed validation can't produce a runaway payload fed back into the
+  // LLM context / persisted history.
+  const maxResults = action.max_results ?? 50;
+  const cap = Math.min(Math.max(Math.floor(maxResults), 0), 200);
   const els = matchedEls.slice(0, cap);
   const attrs = action.attributes;
-  const BATCH_DELIM = "\x00";
   const results: string[] = [];
   if (attrs && attrs.length > 0) {
     const rawValues: string[][] = [];
@@ -193,16 +213,10 @@ export async function handleFindElements(
       rawValues.push(elRaw);
       sensitiveFlags.push(elSensitive);
     }
+    const redactedParts = await redactBatch(allRaw);
     const redactedMap = new Map<string, string>();
-    if (allRaw.length > 0) {
-      const concatenated = allRaw.join(BATCH_DELIM);
-      const redacted = await redactSecrets(concatenated);
-      const parts = redacted.split(BATCH_DELIM);
-      let idx = 0;
-      for (const raw of allRaw) {
-        redactedMap.set(raw, parts[idx] ?? raw);
-        idx++;
-      }
+    for (let idx = 0; idx < allRaw.length; idx++) {
+      redactedMap.set(allRaw[idx], redactedParts[idx] ?? allRaw[idx]);
     }
     for (let i = 0; i < els.length; i++) {
       const picked: Record<string, string> = {};
@@ -223,9 +237,7 @@ export async function handleFindElements(
     }
   } else {
     const textValues: string[] = els.map((el) => (el.textContent || "").trim());
-    const concatenated = textValues.join(BATCH_DELIM);
-    const redacted = await redactSecrets(concatenated);
-    const redactedTexts = redacted.split(BATCH_DELIM);
+    const redactedTexts = await redactBatch(textValues);
     for (let i = 0; i < els.length; i++) {
       const el = els[i];
       const safeText = redactedTexts[i] ?? textValues[i];

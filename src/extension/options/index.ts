@@ -12,7 +12,6 @@
  * all user-facing text is hardcoded English.
  */
 
-import { $ } from "@/extension/shared";
 import { renderSecrets, initAutoSave } from "./settings-sync";
 import { renderSchedule } from "./scheduled-tasks";
 import { renderTools } from "./custom-tools";
@@ -90,8 +89,9 @@ tabs.forEach((tab) => {
 // ARIA tablist keyboard navigation (Left/Right/Up/Down/Home/End).
 // Null-guard: if #tablist is absent from the markup, skip wiring rather than
 // throwing at module-eval and aborting the rest of options init (auto-save
-// wiring, tab renderers, about-version).
-const tablist = $("tablist") as HTMLElement | null;
+// wiring, tab renderers, about-version). `document.getElementById` (not the
+// throwing `$` helper) so the guard actually works.
+const tablist = document.getElementById("tablist");
 if (tablist) tablist.addEventListener("keydown", (e) => {
   const idx = tabs.indexOf(document.activeElement as HTMLButtonElement);
   if (idx === -1) return;
@@ -131,7 +131,7 @@ try {
 }
 
 // Activate the default tab on load so inactive panels receive the `hidden`
-// attribute even if the stylesheet fails to load (finding: panels otherwise
+// attribute even if the stylesheet fails to load (panels otherwise
 // rely solely on the CSS `.active { display }` rule and would remain in the
 // accessibility tree / focusable if the CSS never arrives).
 const initialTab = document.querySelector(".tab.active") as HTMLButtonElement | null;

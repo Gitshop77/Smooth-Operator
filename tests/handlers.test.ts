@@ -144,11 +144,11 @@ describe("handleInput", () => {
       ctxFor(input, 1),
       { type: "input", index: 1, text: "%email%" },
     );
- // substituteSecrets must have been invoked on the placeholder.
+    // substituteSecrets must have been invoked on the placeholder.
     expect(secrets.substituteSecrets).toHaveBeenCalledWith("%email%");
- // Without a trusted substitution context the placeholder is preserved, so the
- // real secret MUST NOT appear in the filled field or in the result message
- // that the loop replays into every subsequent LLM prompt / run-history.
+    // Without a trusted substitution context the placeholder is preserved, so the
+    // real secret MUST NOT appear in the filled field or in the result message
+    // that the loop replays into every subsequent LLM prompt / run-history.
     expect(input.value).toBe("%email%");
     expect(input.value).not.toContain("real-secret-value@x.com");
     expect(res.message).not.toContain("real-secret-value@x.com");
@@ -251,7 +251,7 @@ describe("handleNavigate", () => {
     });
     expect(res.success).toBe(false);
     expect(res.message).toContain("BLOCKED");
- // The allowlist guard must run BEFORE the extension branch.
+    // The allowlist guard must run BEFORE the extension branch.
     expect(sendMessage).not.toHaveBeenCalled();
   });
 

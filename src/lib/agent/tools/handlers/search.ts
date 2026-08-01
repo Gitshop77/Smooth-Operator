@@ -11,21 +11,9 @@
 
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
-import { getSearchEngineUrl } from "../constants";
+import { getSearchEngineUrl, sanitizeForLog } from "../constants";
 import { checkUrlAllowedWithDomainConfig } from "../helpers/domain-config";
 import type { ActionContext } from "./types";
-
-// Control characters stripped from values reflected into logs/history so an
-// LLM / prompt-injection-supplied query can't forge log lines (CR/LF).
-const CONTROL_CHARS_RE = /[\u0000-\u001F\u007F\u0085\u2028\u2029]/g;
-
-// Reflect a value into the success message safely: bound length and strip
-// control characters. The navigation URL is still encoded separately.
-function sanitizeForLog(value: string): string {
-  let v = String(value);
-  if (v.length > 8192) v = v.slice(0, 8192);
-  return v.replace(CONTROL_CHARS_RE, "");
-}
 
 export async function handleSearch(
   _ctx: ActionContext,
@@ -34,22 +22,22 @@ export async function handleSearch(
   const engine = action.engine;
   const baseUrl = getSearchEngineUrl(engine);
   if (!baseUrl) {
- // `engine` is a Zod enum so this is unreachable in normal validation, but
- // guard anyway and report the *actual* requested engine rather than a
- // misleading "duckduckgo" fallback echo.
+    // `engine` is a Zod enum so this is unreachable in normal validation, but
+    // guard anyway and report the *actual* requested engine rather than a
+    // misleading "duckduckgo" fallback echo.
     return { action, success: false, message: `Unknown search engine "${engine}"` };
   }
- // Defense-in-depth: an empty query would navigate to the bare engine
- // homepage (wasting a same-tab navigation and destroying the content
- // script). The schema should enforce `.min(1)`; this catches it regardless.
+  // Defense-in-depth: an empty query would navigate to the bare engine
+  // homepage (wasting a same-tab navigation and destroying the content
+  // script). The schema should enforce `.min(1)`; this catches it regardless.
   const query = action.query ?? "";
   if (!query.trim()) {
     return { action, success: false, message: "search requires a non-empty query" };
   }
   const searchUrl = baseUrl + encodeURIComponent(query);
- // Enforce the domain policy — same gate as `navigate`. Without this,
- // a user with a blocklist covering search-engine domains would have that
- // policy silently bypassed for the `search` action.
+  // Enforce the domain policy — same gate as `navigate`. Without this,
+  // a user with a blocklist covering search-engine domains would have that
+  // policy silently bypassed for the `search` action.
   const urlCheck = checkUrlAllowedWithDomainConfig(searchUrl);
   if (!urlCheck.allowed) {
     return {
@@ -58,8 +46,8 @@ export async function handleSearch(
       message: `BLOCKED: ${urlCheck.reason} (${searchUrl})`,
     };
   }
- // Navigate the current tab to the search URL. The content script is
- // destroyed on navigation; the orchestrator recovers on the next step.
+  // Navigate the current tab to the search URL. The content script is
+  // destroyed on navigation; the orchestrator recovers on the next step.
   location.href = searchUrl;
   return { action, success: true, message: `Searching "${sanitizeForLog(action.query ?? "")}" on ${engine}`, pageChanged: true };
 }

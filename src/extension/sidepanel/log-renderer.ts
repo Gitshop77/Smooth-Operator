@@ -14,6 +14,7 @@ import { redactKeyLeak } from "@/extension/shared";
 import {
   costLabel,
   tokenLabel,
+  statusCenter,
   STORAGE_KEYS,
 } from "./elements";
 import { setLifecycle } from "./lifecycle";
@@ -22,19 +23,13 @@ import {
 } from "./chat-renderer";
 import { showTakeoverBanner, hideTakeoverBanner } from "./takeover";
 import { setRunning, onAgentEvent } from "./controls";
+import { formatTokens, isValidAgentEvent } from "./log-renderer-utils";
 
 // ─── State (owned by this module) ───────────────────────────────────────────
 
 let totalCost = 0;
 let totalTokens = 0;
 let totalsRestored = false;
-
-/**
- * Format a token count with correct English pluralization.
- */
-function formatTokens(n: number): string {
-  return `${n} ${n === 1 ? "token" : "tokens"}`;
-}
 
 // ─── Persistence ───────────────────────────────────────────────────────────
 
@@ -144,8 +139,7 @@ export function addLogRow(event: LogEvent, time: string): void {
         });
       }
       // Reveal telemetry on first cost event
-      const center = document.getElementById("statusCenter");
-      if (center) center.hidden = false;
+      if (statusCenter) statusCenter.hidden = false;
       break;
     }
     case "info":
@@ -176,12 +170,6 @@ export function addLogRow(event: LogEvent, time: string): void {
       setLifecycle("waiting");
       showTakeoverBanner(event.reason);
       break;
-    case "clarify":
-      // Show the clarification question and re-enable input so the user can respond.
-      setLifecycle("clarify");
-      setRunning(false);
-      addSystemMessage("❓", event.question, undefined, time);
-      break;
     default: {
       try {
         body = redactKeyLeak(JSON.stringify(event).slice(0, 100));
@@ -196,7 +184,7 @@ export function addLogRow(event: LogEvent, time: string): void {
 
 // ─── AGENT_EVENT listener ───────────────────────────────────────────────────
 
-chrome.runtime.onMessage.addListener((msg: unknown, sender, _sendResponse) => {
+chrome.runtime.onMessage.addListener((msg: unknown, sender) => {
   // Trust boundary — only accept messages from this extension (matches
   // the guard in human-interact.ts, content.ts, and background/message-routing.ts).
   // Reject messages from content scripts (sender.tab is set) so their
@@ -214,61 +202,6 @@ chrome.runtime.onMessage.addListener((msg: unknown, sender, _sendResponse) => {
   }
   return false;
 });
-
-/**
- * Validate an incoming AGENT_EVENT payload at the message-passing trust boundary.
- */
-function isValidAgentEvent(ev: unknown): ev is LogEvent {
-  if (typeof ev !== "object" || ev === null) return false;
-  const e = ev as Record<string, unknown>;
-  if (typeof e.type !== "string") return false;
-  switch (e.type) {
-    case "run-start":
-      return typeof e.task === "string";
-    case "planner-step":
-      return typeof e.step === "number" && typeof e.decision === "string";
-    case "navigator-step-start":
-      return typeof e.step === "number";
-    case "state":
-      return typeof e.step === "number" && typeof e.elementCount === "number" && typeof e.pageInfo === "string";
-    case "thinking":
-      return typeof e.step === "number";
-    case "action":
-      return typeof e.step === "number" && typeof e.index === "number" && typeof e.total === "number" && typeof e.name === "string";
-    case "action-result":
-      return typeof e.step === "number" && typeof e.name === "string" && typeof e.success === "boolean" && typeof e.message === "string";
-    case "budget-warning":
-      return typeof e.step === "number" && typeof e.pct === "number";
-    case "loop-warning":
-      return typeof e.step === "number" && typeof e.count === "number";
-    case "compaction":
-      return typeof e.step === "number" && typeof e.compactedCount === "number";
-    case "challenge_detected":
-      return typeof e.step === "number" && typeof e.kind === "string" && typeof e.message === "string";
-    case "takeover":
-      return typeof e.step === "number" && typeof e.reason === "string";
-    case "paused":
-      return typeof e.step === "number";
-    case "resumed":
-      return typeof e.step === "number";
-    case "clarify":
-      return typeof e.step === "number" && typeof e.question === "string";
-    case "done":
-      return typeof e.step === "number" && typeof e.success === "boolean" && typeof e.text === "string";
-    case "error":
-      return typeof e.step === "number" && typeof e.message === "string" && typeof e.recoverable === "boolean";
-    case "info":
-      return typeof e.message === "string";
-    case "warn":
-      return typeof e.message === "string";
-    case "cost":
-      return typeof e.step === "number" && typeof e.tokensIn === "number" && typeof e.tokensOut === "number" && typeof e.costUsd === "number" && typeof e.model === "string";
-    case "heartbeat":
-      return typeof e.step === "number" && typeof e.ts === "number";
-    default:
-      return false;
-  }
-}
 
 // ─── Restore totals from storage (called by controls.ts STATUS check) ──────
 
@@ -292,8 +225,7 @@ export function restoreTotalsFromStorage(): void {
       tokenLabel.textContent = formatTokens(totalTokens);
     }
     if (Number.isFinite(storedCost) || Number.isFinite(storedTokens)) {
-      const center = document.getElementById("statusCenter");
-      if (center) center.hidden = false;
+      if (statusCenter) statusCenter.hidden = false;
     }
   });
 }

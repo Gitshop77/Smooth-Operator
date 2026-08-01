@@ -13,7 +13,7 @@
 import { z } from "zod";
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
-import type { ActionContext } from "./types";
+import { type ActionContext, isExtensionContext } from "./types";
 import { rejectOnAbort } from "./abort";
 
 /**
@@ -43,7 +43,7 @@ async function delegateTabAction(
   action: Extract<Action, { type: "switch_tab" | "close_tab" }>,
   signal?: AbortSignal,
 ): Promise<ActionResult> {
-  if (typeof chrome === "undefined" || !chrome.runtime?.id) {
+  if (!isExtensionContext()) {
     return {
       action,
       success: false,
@@ -52,8 +52,8 @@ async function delegateTabAction(
   }
   try {
     let timer: ReturnType<typeof setTimeout> | undefined;
- // Race the SW call against the timeout AND the step's abort signal so a user
- // STOP is honored mid-step instead of waiting out the full 30s timeout.
+    // Race the SW call against the timeout AND the step's abort signal so a user
+    // STOP is honored mid-step instead of waiting out the full 30s timeout.
     const abort = rejectOnAbort(signal);
     let raw: unknown;
     try {
@@ -74,9 +74,9 @@ async function delegateTabAction(
       clearTimeout(timer);
       abort.cleanup();
     }
- // `chrome.runtime.sendMessage` resolves `undefined` (not a rejection) when
- // there is no listener; the timeout above also resolves `undefined`, so
- // distinguish a missing/unresponsive handler from a malformed payload.
+    // `chrome.runtime.sendMessage` resolves `undefined` (not a rejection) when
+    // there is no listener; the timeout above also resolves `undefined`, so
+    // distinguish a missing/unresponsive handler from a malformed payload.
     if (typeof raw === "undefined") {
       return fail(action, "no response from extension (timeout or unreachable service worker)");
     }
@@ -86,9 +86,9 @@ async function delegateTabAction(
     }
     const res = parsed.data;
     if (!res.ok) {
- // Prefer `message` (a descriptive status the SW may set on failure) then
- // `error`, then a concrete fallback — so a bare `{ ok: false }` no longer
- // degrades to the uninformative "no response".
+      // Prefer `message` (a descriptive status the SW may set on failure) then
+      // `error`, then a concrete fallback — so a bare `{ ok: false }` no longer
+      // degrades to the uninformative "no response".
       return fail(action, res.message ?? res.error ?? "unknown error");
     }
     return {

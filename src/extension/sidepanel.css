@@ -444,6 +444,7 @@ header h1 {
   align-items: center;
   gap: 4px;
 }
+.status-center[hidden] { display: none; }
 
 .telemetry {
   color: var(--cw-muted);

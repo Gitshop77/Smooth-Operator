@@ -5,10 +5,10 @@
  * Ported from Reza2kn/LocateAnything-3B-WebGPU app.js.
  */
 
-import * as ort from "onnxruntime-web";
+import * as ort from "onnxruntime-web/webgpu";
 import { ModelLoader } from "./model-loader";
 import { preprocessScreenshot } from "./preprocessor";
-import { gatherEmbed, f16to32, markEmbeddingMetaValidated, type EmbeddingMeta } from "./embedding-gather";
+import { gatherEmbed, markEmbeddingMetaValidated, type EmbeddingMeta } from "./embedding-gather";
 import { parseBoxes, toPixelCoords } from "./box-parser";
 import type { PixelDetection, DownloadProgress, StatusCallback, VisionStatus } from "./types";
 import {
@@ -24,14 +24,29 @@ import {
   IMG_CONTEXT_TOKEN,
   IM_END_TOKEN,
   N_LAYERS,
-  KV_HEADS,
-  HEAD_DIM,
   PATCH_SIZE,
   MERGE_FACTOR,
   DETECTION_PROMPT,
   MAX_NEW_TOKENS,
   MODEL_REPO,
 } from "./constants";
+import {
+  pastKeyNames,
+  presentKeyNames,
+  pastValueNames,
+  presentValueNames,
+  EMPTY_PAST,
+  argmaxLast,
+  getLogits,
+  assertKvCacheOutputs,
+  assertLogitsOutput,
+  assertVisionOutput,
+  assertLanguageInputs,
+  decodeFp16Scales,
+  validateVisionOutput,
+  validateLogitsShape,
+  validateEmbeddingShapes,
+} from "./inference-utils";
 
 /** Tokenizer callable signature (also used for the decode tokenizer below). */
 type TokenizeFn = (
@@ -41,25 +56,9 @@ type TokenizeFn = (
 /** Tokenizer decode signature. */
 type DecodeFn = { decode: (ids: number[], opts: unknown) => string };
 
-/** Precomputed KV-cache key/value name arrays (avoids per-step string concat). */
-const pastKeyNames = Array.from({ length: N_LAYERS }, (_, i) => `past_key_${i}`);
-const presentKeyNames = Array.from({ length: N_LAYERS }, (_, i) => `present_key_${i}`);
-const pastValueNames = Array.from({ length: N_LAYERS }, (_, i) => `past_value_${i}`);
-const presentValueNames = Array.from({ length: N_LAYERS }, (_, i) => `present_value_${i}`);
-
-// Pre-allocated zero-length KV-cache tensors for the prefill phase.
-// These are immutable sentinels — creating them once avoids 72 tensor
-// allocations per detect() call.
-const EMPTY_PAST: Record<string, ort.Tensor> = (() => {
-  const f: Record<string, ort.Tensor> = {};
-  for (let i = 0; i < N_LAYERS; i++) {
-    f[pastKeyNames[i]] = new ort.Tensor("float32", new Float32Array(0), [1, KV_HEADS, 0, HEAD_DIM]);
-    f[pastValueNames[i]] = new ort.Tensor("float32", new Float32Array(0), [1, KV_HEADS, 0, HEAD_DIM]);
-  }
-  return f;
-})();
-
-// Lazy-load transformers.js only when needed (keeps the extension bundle small).
+// Lazy-load transformers.js only when needed. (esbuild bundles it into
+// background.js either way — the dynamic import defers execution until the
+// tokenizer is first requested; it does not shrink the bundle.)
 // Reset the cached promise on rejection so a transient fetch failure (network
 // drop, HuggingFace outage, auth issue) doesn't permanently disable Local
 // Vision until SW restart — the next call retries from scratch.
@@ -128,10 +127,6 @@ export class VisionAssistant {
     this.loader.onWarning((msg) => this.setStatus("warning", msg));
   }
 
-  get status(): VisionStatus {
-    return this._status;
-  }
-
   get isReady(): boolean {
     return this._status === "ready" && this.visionSession !== null && this.languageSession !== null;
   }
@@ -168,10 +163,12 @@ export class VisionAssistant {
 
   /** Core initialization. See `init()` for the re-entrancy wrapper. */
   private async doInit(onProgress?: (p: DownloadProgress) => void): Promise<void> {
-    if (this.isReady) return;
-
+    // WebGPU has been available in MV3 service workers since Chrome/Edge 124
+    // (121–123 expose it in page contexts only). The guard still matters for
+    // older versions and WebGPU-disabled contexts — fail with a clear error
+    // here rather than mid-detect.
     if (!VisionAssistant.isWebGPUAvailable()) {
-      this.setStatus("error", "WebGPU is not available. Use Chrome/Edge 121+.");
+      this.setStatus("error", "WebGPU is not available. Use Chrome/Edge 124+ (the minimum for WebGPU in the service worker).");
       throw new Error("WebGPU not available");
     }
 
@@ -216,7 +213,7 @@ export class VisionAssistant {
  // these straight back as `past_key_*` / `past_value_*`; a differently
  // named export would silently feed `undefined` and break every decode
  // step. Fail loudly here rather than mid-detection.
-      this.assertKvCacheOutputs();
+      assertKvCacheOutputs(this.languageSession!);
 
  // Assert the language ONNX export exposes a `logits` output by the exact
  // name this code reads. The decode loop and prefill both index
@@ -224,7 +221,22 @@ export class VisionAssistant {
  // version skew — exactly the failure class the KV-assert guards against),
  // `logits.dims[2]` would throw a cryptic "Cannot read properties of
  // undefined (reading 'dims')" mid-`detect()`. Fail loudly here instead.
-      this.assertLogitsOutput();
+      assertLogitsOutput(this.languageSession!);
+
+      // Assert the vision ONNX export exposes exactly one output named
+      // "visual_features" — the detect loop indexes the run result by
+      // position today, and a re-exported model with renamed or extra
+      // outputs would silently feed the wrong tensor into the embedding
+      // splice. Fail loudly here rather than mid-detect.
+      assertVisionOutput(this.visionSession!);
+
+      // Assert the language ONNX export declares every input name the
+      // prefill and decode loops feed (input_ids / inputs_embeds /
+      // attention_mask / position_ids + past_key_* / past_value_*). The
+      // feeds are keyed by name, so a renamed input in a version-skewed
+      // export would fail only at the first session.run — which the caller
+      // swallows into a silent "no detections". Fail loudly here instead.
+      assertLanguageInputs(this.languageSession!);
 
  // 3. Load tokenizer + embedding table
       this.tokenizer = await getTokenizer();
@@ -240,14 +252,10 @@ export class VisionAssistant {
  // the binary layout, otherwise `gatherEmbed` reads misaligned bytes and
  // emits silently-garbage embeddings. (Further per-call guards live in
  // `gatherEmbed`.)
-      this.validateEmbeddingShapes(scalesBytes);
+      validateEmbeddingShapes(this.embMeta!, this.embPacked!, scalesBytes);
       markEmbeddingMetaValidated(this.embMeta!);
 
-      const sv = new DataView(scalesBytes.buffer, scalesBytes.byteOffset, scalesBytes.byteLength);
-      this.embScales = new Float32Array(scalesBytes.length >> 1);
-      for (let i = 0; i < this.embScales.length; i++) {
-        this.embScales[i] = f16to32(sv.getUint16(i * 2, true));
-      }
+      this.embScales = decodeFp16Scales(scalesBytes);
 
       this.setStatus("ready");
     } catch (e) {
@@ -264,122 +272,6 @@ export class VisionAssistant {
       this.setStatus("error", e instanceof Error ? e.message : String(e));
       throw e;
     }
-  }
-
-  /**
- * Reject a `meta.json` that disagrees with the binary embedding buffers.
- * `packed` must hold exactly `vocab * hidden / 2` bytes (two 4-bit values per
- * byte) and `scales` must hold exactly `vocab * n_groups` fp16 values. The
- * group layout must also cover every hidden dimension (`n_groups * block_size
- * === hidden`). Throws on any mismatch so a partial/version-skewed cache
- * fails loudly instead of yielding garbage detections.
- */
-  private validateEmbeddingShapes(scalesBytes: Uint8Array): void {
-    const meta = this.embMeta;
-    const packed = this.embPacked;
-    if (!meta || !packed) {
-      throw new Error("validateEmbeddingShapes: embedding meta/packed not loaded");
-    }
-    const { vocab, hidden, block_size, n_groups } = meta;
-    for (const [name, v] of Object.entries({ vocab, hidden, block_size, n_groups })) {
-      if (!Number.isInteger(v) || v <= 0) {
-        throw new Error(`Embedding meta.${name}=${v} must be a positive integer`);
-      }
-    }
-    if (hidden % 2 !== 0) {
-      throw new Error(`Embedding meta.hidden=${hidden} must be even (INT4 packs 2 values/byte)`);
-    }
-    if (n_groups * block_size !== hidden) {
-      throw new Error(
-        `Embedding meta mismatch: n_groups(${n_groups}) * block_size(${block_size}) !== hidden(${hidden})`,
-      );
-    }
-    if (!Number.isInteger(meta.zero_point) || meta.zero_point < 0 || meta.zero_point > 15) {
-      throw new Error(
-        `Embedding meta.zero_point=${meta.zero_point} must be an integer in [0, 15] (INT4 range)`,
-      );
-    }
-    const expectedPacked = vocab * (hidden / 2);
-    if (packed.length !== expectedPacked) {
-      throw new Error(
-        `Embedding packed buffer length ${packed.length} !== expected vocab*H/2 = ${expectedPacked} ` +
-          `(version skew or partial cache?)`,
-      );
-    }
-    if (scalesBytes.length % 2 !== 0) {
-      throw new Error(
-        `Embedding scales buffer length ${scalesBytes.length} is odd; fp16 scale stream is corrupt`,
-      );
-    }
-    const expectedScales = vocab * n_groups;
-    if (scalesBytes.length / 2 !== expectedScales) {
-      throw new Error(
-        `Embedding scales buffer length ${scalesBytes.length} !== expected 2*vocab*n_groups = ${expectedScales * 2} ` +
-          `(version skew or partial cache?)`,
-      );
-    }
-  }
-
-  /**
- * Assert the language ONNX export exposes KV-cache outputs named
- * `present_key_${i}` / `present_value_${i}` for every layer, deriving the
- * expected count from `N_LAYERS`. If the export names them differently, the
- * decode loop would feed `undefined` into `past_key_0` and fail silently, so
- * we surface the real available names in the error.
- */
-  private assertKvCacheOutputs(): void {
-    const session = this.languageSession;
-    if (!session) {
-      throw new Error("assertKvCacheOutputs: language session not created");
-    }
-    const names = new Set(session.outputNames);
-    const missing: string[] = [];
-    for (let i = 0; i < N_LAYERS; i++) {
-      if (!names.has(`present_key_${i}`)) missing.push(`present_key_${i}`);
-      if (!names.has(`present_value_${i}`)) missing.push(`present_value_${i}`);
-    }
-    if (missing.length) {
-      throw new Error(
-        `Language ONNX export missing expected KV-cache outputs: ${missing.join(", ")}. ` +
-          `Actual outputs: ${session.outputNames.join(", ")}`,
-      );
-    }
-  }
-
-  /**
- * Assert the language ONNX export exposes a `logits` output named exactly
- * `"logits"` — the key read by both the prefill (`res["logits"]`) and every
- * decode step (`res["logits"]`). A model/export version skew that renames the
- * output (e.g. to `logits_0`) would otherwise make `res["logits"]` undefined
- * and throw a cryptic `Cannot read properties of undefined (reading 'dims')`
- * mid-`detect()`, masked by the caller's `.catch(() => [])` into silent
- * zero-detection. Surface the real available names here instead.
- */
-  private assertLogitsOutput(): void {
-    const session = this.languageSession;
-    if (!session) {
-      throw new Error("assertLogitsOutput: language session not created");
-    }
-    if (!session.outputNames.includes("logits")) {
-      throw new Error(
-        `Language ONNX export missing expected "logits" output. ` +
-          `Actual outputs: ${session.outputNames.join(", ")}`,
-      );
-    }
-  }
-
-  /** Read the `logits` output from a language-session run, failing loudly if
- * the export did not produce it (defensive — name validity is asserted at
- * init via `assertLogitsOutput`). */
-  private getLogits(res: Record<string, ort.Tensor>): ort.Tensor {
-    const logits = res["logits"];
-    if (!logits) {
-      throw new Error(
-        `Language session produced no "logits" output. ` +
-          `Actual keys: ${Object.keys(res).join(", ")}`,
-      );
-    }
-    return logits;
   }
 
   /**
@@ -409,14 +301,15 @@ export class VisionAssistant {
  * aborted, reclaiming the GPU/CPU that would otherwise be spent finishing
  * an abandoned detection. */
   async detect(screenshotDataUrl: string, signal?: AbortSignal): Promise<PixelDetection[]> {
- // MV3 service workers have no `navigator` / `navigator.gpu`, so WebGPU is
- // unavailable there. Fail with a clear, descriptive error instead of letting
- // the call surface an opaque "WebGPU not available" as an unhandled rejection
- // when Local Vision is invoked from the SW context. (Vision stays bundled in
- // the SW; it just degrades gracefully when WebGPU is absent.)
+    // Chrome/Edge expose WebGPU in service workers since 124, so
+    // `navigator.gpu` is normally present when detect() runs from the SW.
+    // Guard anyway: on 121–123 (page-context WebGPU only) or when WebGPU is
+    // disabled, fail with a clear, descriptive error instead of letting the
+    // call surface an opaque "WebGPU not available" rejection. (Vision stays
+    // bundled in the SW; it just degrades gracefully when WebGPU is absent.)
     if (!VisionAssistant.isWebGPUAvailable()) {
       throw new Error(
-        "WebGPU not available; Local Vision requires WebGPU (Chrome/Edge 121+). " +
+        "WebGPU not available; Local Vision requires WebGPU (Chrome/Edge 124+ in the service worker). " +
           "It cannot run in a context without navigator.gpu.",
       );
     }
@@ -467,9 +360,15 @@ export class VisionAssistant {
       this.detectDataUrl = null;
       this.chain = null;
     });
- // The chain tail is the live run; queued calls append after it.
+  // The chain tail is the live run; queued calls append after it.
     this.chain = this.detectPromise;
     return this.detectPromise;
+  }
+
+  private sampleNextToken(res: Record<string, ort.Tensor>): number {
+    const logits = getLogits(res);
+    const V = validateLogitsShape(logits, "Vision detect()");
+    return argmaxLast(logits.data as Float32Array, V);
   }
 
   /** Core detection. See `detect()` for the re-entrancy wrapper. */
@@ -498,32 +397,9 @@ export class VisionAssistant {
       image_grid_hws: ghTensor,
     });
     const visual = vOut[this.visionSession.outputNames[0]];
- // The vision encoder's feature width MUST equal the LM embedding dim `H`
- // from meta.json. If they differ, every <IMG_CONTEXT> slot reads the wrong
- // H floats at the wrong byte offset (`visIdx*H` instead of `visIdx*width`)
- // and the model emits confidently-wrong boxes with no error. Fail loudly
- // before any splicing occurs. (Replaces the misleading hard-coded `[N, 2048]`
- // comment, which contradicted the actual stride used below.)
-    if (!visual || visual.dims.length !== 2 || Number(visual.dims[1]) !== H) {
-      throw new Error(
-        `Vision encoder output shape mismatch: feature width ` +
-          `${visual ? visual.dims[1] : "n/a"} !== embedding hidden ${H} ` +
-          `(dims=${JSON.stringify(visual?.dims)})`,
-      );
-    }
-
  // 3. Build prompt + tokenize
     const N = Math.floor((gridHeight * gridWidth) / (MERGE_FACTOR * MERGE_FACTOR));
- // The vision encoder must emit exactly N feature vectors (one per injected
- // <IMG_CONTEXT> slot). If dims[0] !== N (model/export skew), the splice at
- // `visIdx*H` would read past `vdata` and `subarray` would silently clamp to
- // an empty slice that `embeds.set` writes as a zeroed, confidently-wrong
- // embedding. Fail loudly instead of emitting garbage boxes.
-    if (Number(visual.dims[0]) !== N) {
-      throw new Error(
-        `Vision encoder output token count ${visual.dims[0]} !== injected <IMG_CONTEXT> count ${N}`,
-      );
-    }
+    validateVisionOutput(visual, H, N);
     const promptStr =
       `<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>\n<|im_start|>user\n<image 1><img>` +
       "<IMG_CONTEXT>".repeat(N) +
@@ -592,13 +468,7 @@ export class VisionAssistant {
     if (signal?.aborted) throw new DOMException("Vision detect aborted", "AbortError");
 
     let res = await this.languageSession.run(feeds);
-    let present = res as Record<string, ort.Tensor>;
-    const logits = this.getLogits(res);
-    if (logits.dims.length !== 3 || !Number.isFinite(Number(logits.dims[2])) || Number(logits.dims[2]) <= 0) {
-      throw new Error(`Vision detect(): logits tensor is not a valid 3-D [1,T,V] tensor (dims=${JSON.stringify(logits.dims)})`);
-    }
-    const V = logits.dims[2];
-    let next = argmaxLast(logits.data as Float32Array, V);
+    let next = this.sampleNextToken(res);
     const gen: number[] = [next];
 
 // 6. Decode loop with KV cache
@@ -619,16 +489,11 @@ export class VisionAssistant {
         position_ids: new ort.Tensor("int64", BigInt64Array.from([BigInt(pastLen)]), [1, 1]),
       };
       for (let i = 0; i < N_LAYERS; i++) {
-        f[pastKeyNames[i]] = present[presentKeyNames[i]];
-        f[pastValueNames[i]] = present[presentValueNames[i]];
+        f[pastKeyNames[i]] = res[presentKeyNames[i]];
+        f[pastValueNames[i]] = res[presentValueNames[i]];
       }
       res = await this.languageSession.run(f);
-      present = res as Record<string, ort.Tensor>;
-      const stepLogits = this.getLogits(res);
-      if (stepLogits.dims.length !== 3 || !Number.isFinite(Number(stepLogits.dims[2])) || Number(stepLogits.dims[2]) <= 0) {
-        throw new Error(`Vision detect(): decode-step logits tensor is not a valid 3-D [1,T,V] tensor (dims=${JSON.stringify(stepLogits.dims)})`);
-      }
-      next = argmaxLast(stepLogits.data as Float32Array, stepLogits.dims[2]);
+      next = this.sampleNextToken(res);
       gen.push(next);
       pastLen += 1;
     }
@@ -693,29 +558,10 @@ export class VisionAssistant {
       try {
         await language.release();
       } catch {
- // Already released or device lost — safe to ignore.
+  // Already released or device lost — safe to ignore.
       }
     }
   }
-
-  /** Delete cached model files. */
-  async clearCache(): Promise<void> {
-    await this.loader.clearCache();
-    await this.cleanup();
-  }
 }
 
-/** Argmax over the last row of logits [1, T, V]. */
-function argmaxLast(arr: Float32Array, V: number): number {
-  const base = arr.length - V;
-  let best = 0;
-  let bv = -Infinity;
-  for (let i = 0; i < V; i++) {
-    const v = arr[base + i];
-    if (v > bv) {
-      bv = v;
-      best = i;
-    }
-  }
-  return best;
-}
+

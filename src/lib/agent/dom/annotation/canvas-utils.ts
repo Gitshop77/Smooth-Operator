@@ -1,14 +1,12 @@
 /**
- * Canvas + image-load helpers shared by the screenshot annotator and the
- * vision-assistant preprocessor.
+ * Canvas + image-load helpers used by the screenshot annotator.
  *
- * Both modules previously contained a byte-for-byte near-identical
- * `createCanvas()` that probes `globalThis.OffscreenCanvas` then falls back to
- * `document.createElement("canvas")`, plus a duplicated image-load path. That
- * duplication drifts (a fix applied to one copy but not the other) and the
- * canvas-selection behaviour must stay consistent wherever screenshot/vision
- * preprocessing runs (service worker vs content script). This module is the
- * single source of truth for both.
+ * The module historically shared canvas-selection logic with the
+ * vision-assistant preprocessor; that preprocessor now keeps its own copy in
+ * `src/extension/vision-assistant/preprocessor-utils.ts`. This module remains
+ * the canonical implementation for the screenshot-annotator path, so the
+ * canvas-selection behaviour stays consistent wherever screenshot annotation
+ * runs (service worker vs content script).
  */
 
 /** Minimal common surface we use from either canvas flavor. */

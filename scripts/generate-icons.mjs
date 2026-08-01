@@ -59,10 +59,9 @@ const TEAL_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
 </svg>`;
 
 // Multi-stage downscale: each step reduces by ≤2x
-// 128 → 64 → 32 → 16
+// 128 → 48 → 32 → 16
 const STAGES = [
   { target: 128, label: '128px' },
-  { target: 64,  label: '64px' },
   { target: 48,  label: '48px' },
   { target: 32,  label: '32px' },
   { target: 16,  label: '16px' },
@@ -80,34 +79,6 @@ async function generateIcons() {
 
   console.log('Hi-res buffer ready (512x512)');
 
-  // Multi-stage downscale pipeline
-  // 512 → 256 → 128 → 64 → 32 → 16
-  // Each step: resize with Lanczos3 + Unsharp Mask
-  const pipeline = [
-    { size: 256, sigma: 0.5, m1: 1.0, m2: 0.3 },  // 512→256: gentle sharpen
-    { size: 128, sigma: 0.5, m1: 1.0, m2: 0.3 },  // 256→128: gentle sharpen
-    { size: 64,  sigma: 0.6, m1: 1.2, m2: 0.4 },  // 128→64: slightly more
-    { size: 48,  sigma: 0.7, m1: 1.4, m2: 0.5 },  // 64→48: more sharpening
-    { size: 32,  sigma: 0.8, m1: 1.5, m2: 0.5 },  // 48→32: strong sharpen
-    { size: 16,  sigma: 1.0, m1: 2.0, m2: 0.7 },  // 32→16: aggressive sharpen
-  ];
-
-  let currentBuffer = hiRes;
-
-  for (const stage of pipeline) {
-    console.log(`  ${stage.size}px: resize + unsharp(sigma=${stage.sigma}, m1=${stage.m1}, m2=${stage.m2})`);
-    currentBuffer = await sharp(currentBuffer)
-      .resize(stage.size, stage.size, {
-        kernel: sharp.kernel.lanczos3,
-        fit: 'contain',
-        background: { r: 10, g: 22, b: 40, alpha: 1 }, // #0a1628
-      })
-      .sharpen({ sigma: stage.sigma, m1: stage.m1, m2: stage.m2 })
-      .png()
-      .toBuffer();
-  }
-
-  // Now extract the sizes we need from the pipeline results
   // Re-run for each target size to get clean outputs
   console.log('\nGenerating final PNGs...');
 

@@ -13,12 +13,13 @@
  */
 
 import { requiresConfirmation, type AgentMode } from "./modes";
+import { resolveTimeoutMs, sanitizeResponse } from "./human-interaction-utils";
 
 /** The 5 supported interaction modes. */
-export type HumanInteractionMode = "confirm" | "input" | "password" | "select" | "request_help";
+type HumanInteractionMode = "confirm" | "input" | "password" | "select" | "request_help";
 
 /** Request payload sent by the agent to the user. */
-export interface HumanInteractionRequest {
+interface HumanInteractionRequest {
   /** Which kind of prompt to display. */
   mode: HumanInteractionMode;
   /** Question or instruction to show the user. */
@@ -27,12 +28,6 @@ export interface HumanInteractionRequest {
   options?: string[];
   /** For `input` mode: pre-filled default value. */
   defaultValue?: string;
-  /**
- * Optional timeout (ms) for the extension prompt. When set, the extension
- * path enforces it (overriding the 5-min default). Ignored in the
- * non-extension fallback. Must be a positive, finite number; invalid values
- * fall back to {@link DEFAULT_ASK_HUMAN_TIMEOUT_MS}.
- */
   timeoutMs?: number;
 }
 
@@ -42,8 +37,8 @@ export type HumanInteractionResponse =
   | { mode: "input"; value: string }
   | { mode: "select"; value: string }
   | { mode: "request_help"; value: string }
-  | { mode: "cancelled" } // user dismissed the prompt (or no response within timeout)
-  | { mode: "error"; reason: string }; // transport/messaging failure — distinct from a user dismissal
+  | { mode: "cancelled" }
+  | { mode: "error"; reason: string };
 
 /**
  * Check if an action type requires human confirmation before executing.
@@ -55,109 +50,12 @@ export function shouldAskForConfirmation(actionType: string, mode: AgentMode): b
   return requiresConfirmation(actionType, mode);
 }
 
-/** Default response timeout for the extension prompt (5 min). */
-const DEFAULT_ASK_HUMAN_TIMEOUT_MS = 5 * 60 * 1000;
-
-/**
- * Resolve the effective timeout for the extension prompt.
- *
- * A caller may set `req.timeoutMs` to override the default. We only accept a
- * positive, finite number; anything else (undefined, 0, negative, NaN,
- * Infinity) falls back to {@link DEFAULT_ASK_HUMAN_TIMEOUT_MS}. This prevents a
- * malformed value from disabling the timeout (0/negative) or producing a
- * nonsensical timer.
- */
-function resolveTimeoutMs(timeoutMs?: number): number {
-  return typeof timeoutMs === "number" &&
-    Number.isFinite(timeoutMs) &&
-    timeoutMs > 0
-    ? timeoutMs
-    : DEFAULT_ASK_HUMAN_TIMEOUT_MS;
-}
-
-/** The known tagged-union response `mode` values. */
-const KNOWN_RESPONSE_MODES = new Set<HumanInteractionResponse["mode"]>([
-  "confirm",
-  "input",
-  "select",
-  "request_help",
-  "cancelled",
-  "error",
-]);
-
-/**
- * Validate a `chrome.runtime` callback payload before trusting it.
- *
- * The `HUMAN_INTERACT` response crosses a `chrome.runtime` message boundary,
- * so we don't assume the listener returned a well-formed
- * {@link HumanInteractionResponse}. An undefined/null payload means the
- * listener never called `sendResponse` — treat that as `cancelled`. A defined
- * payload with an unknown `mode` is a malformed/cross-talk response — treat it
- * as a transport `error` rather than handing the agent loop an unexpected
- * shape.
- */
-export function sanitizeResponse(
-  response: HumanInteractionResponse | undefined | null
-): HumanInteractionResponse {
-  if (response === undefined || response === null) {
-    return { mode: "cancelled" };
-  }
-  const invalid: HumanInteractionResponse = {
-    mode: "error",
-    reason: "invalid HUMAN_INTERACT response shape",
-  };
-  if (typeof response !== "object" || !("mode" in response)) {
-    return invalid;
-  }
-  const mode = (response as { mode: unknown }).mode;
-  if (!KNOWN_RESPONSE_MODES.has(mode as HumanInteractionResponse["mode"])) {
-    return invalid;
-  }
- // The `mode` is known, but a payload that crossed the chrome.runtime boundary
- // may still be missing the fields required by that mode. Validate the
- // mode-specific shape so the agent loop never receives a malformed union
- // member (e.g. a `confirm` without `confirmed`, or an `input` without a
- // string `value`).
-  const r = response as Record<string, unknown>;
-  switch (mode) {
-    case "confirm":
-      return typeof r.confirmed === "boolean"
-        ? { mode: "confirm", confirmed: r.confirmed }
-        : invalid;
-    case "input":
-      return typeof r.value === "string" ? { mode: "input", value: r.value } : invalid;
-    case "select":
-      return typeof r.value === "string" ? { mode: "select", value: r.value } : invalid;
-    case "request_help":
-      return typeof r.value === "string"
-        ? { mode: "request_help", value: r.value }
-        : invalid;
-    case "cancelled":
-      return { mode: "cancelled" };
-    case "error":
-      return typeof r.reason === "string"
-        ? { mode: "error", reason: r.reason }
-        : invalid;
-    default:
-      return invalid;
-  }
-}
-
 /**
  * In the extension, send a message to the side panel and wait for its
  * `sendResponse` payload. Resolves when the side panel responds, or after the
  * timeout elapses (whichever comes first).
- *
- * Robustness:
- * - `sendMessage`'s callback receives the side panel's `sendResponse` payload
- * directly — each call's callback is scoped to that call, so a stale
- * response from an earlier prompt can't resolve the current promise.
- * - `lastError` is checked — fire-and-forget silently drops send failures
- * (e.g. side panel not yet open).
- * - A 5-min timeout guarantees the agent eventually unblocks even if the
- * user walks away. The timer is always cleared in `finish`.
  */
-export async function askHumanExtension(
+async function askHumanExtension(
   req: HumanInteractionRequest,
   timeoutMs: number
 ): Promise<HumanInteractionResponse> {
@@ -172,36 +70,22 @@ export async function askHumanExtension(
 
     const timer = setTimeout(() => finish({ mode: "cancelled" }), timeoutMs);
 
- // The side panel's onMessage listener for HUMAN_INTERACT calls
- // `sendResponse(...)` synchronously, so the response arrives via this
- // callback. Check lastError so a missing receiver doesn't leave the agent
- // hanging until the timeout fires.
     try {
       void chrome.runtime.sendMessage(
         { type: "HUMAN_INTERACT", request: req },
         (response: HumanInteractionResponse | undefined) => {
           const lastError = chrome.runtime.lastError;
           if (lastError) {
- // Receiver missing (side panel closed, etc.) — this is a transport
- // failure, NOT a user dismissal. Report it distinctly so the agent
- // can tell "prompt failed to deliver" apart from "user declined".
             finish({
               mode: "error",
               reason: lastError.message || "chrome.runtime.lastError (no receiver)",
             });
             return;
           }
- // A defined response (including `{ mode: "cancelled" }`) came back
- // from the side panel — the prompt was delivered and the user acted
- // (or dismissed) it. Validate it against the expected shape before
- // trusting it, since it crossed a chrome.runtime message boundary.
           finish(sanitizeResponse(response));
         }
       );
     } catch (err) {
- // An exception while dispatching the message is a transport failure,
- // distinct from a user cancellation. Surface it as an error so the agent
- // can decide whether to retry, abort, or ask again.
       finish({
         mode: "error",
         reason: err instanceof Error ? err.message : String(err),
@@ -222,19 +106,15 @@ export async function askHuman(req: HumanInteractionRequest): Promise<HumanInter
   if (!IS_DEMO) {
     return askHumanExtension(req, resolveTimeoutMs(req.timeoutMs));
   }
-  // Non-extension fallback (tests, non-Chrome contexts).
   if (req.mode === "confirm") {
     return { mode: "confirm", confirmed: window.confirm(req.message) };
   }
   if (req.mode === "input" || req.mode === "password") {
     const isSecret = req.mode === "password";
     if (isSecret) {
-      if (!IS_DEMO) {
-        throw new Error(
-          "password mode requires the Chrome extension side panel; " +
-          "window.prompt exposes secrets in plain text"
-        );
-      }
+      // Only reachable when IS_DEMO is true (the extension path returned
+      // above), so window.prompt is the only fallback — warn that the secret
+      // is visible in plain text in the browser UI.
       console.warn("[human-interaction] password mode falling back to window.prompt — secrets visible in browser UI");
     }
     const def = isSecret ? "" : (req.defaultValue ?? "");
@@ -242,12 +122,8 @@ export async function askHuman(req: HumanInteractionRequest): Promise<HumanInter
     return value === null ? { mode: "cancelled" } : { mode: "input", value };
   }
   if (req.mode === "select") {
- // List the options so the user can pick by number. A cancelled prompt
- // (null) or an out-of-range/invalid pick returns `cancelled` rather than
- // silently swallowing the choice.
     const options = req.options ?? [];
     if (options.length === 0) {
- // No options to choose from — there is nothing meaningful to select.
       return { mode: "cancelled" };
     }
     const list = options.map((opt, i) => `${i + 1}. ${opt}`).join("\n");
@@ -260,8 +136,6 @@ export async function askHuman(req: HumanInteractionRequest): Promise<HumanInter
     return { mode: "select", value: options[idx] };
   }
   if (req.mode === "request_help") {
- // Free-text help request — capture whatever the user types. A cancelled
- // prompt returns `cancelled` instead of inventing a value.
     const value = window.prompt(req.message);
     return value === null ? { mode: "cancelled" } : { mode: "request_help", value };
   }

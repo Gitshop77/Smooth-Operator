@@ -297,6 +297,7 @@ describe("httpJson.frames — Retry-After + SSRF guard", () => {
       "http://[::ffff:169.254.169.254]/",
       "http://[fe80::1]/",
       "http://[::ffff:0.0.0.0]/",
+      "http://[2001::5601:5601]/",
     ]) {
       const iter = transport
         .frames(makePrepared(url))[Symbol.asyncIterator]();
@@ -331,6 +332,78 @@ describe("httpJson.frames — Retry-After + SSRF guard", () => {
     } finally {
       chromeRef.chrome = undefined;
     }
+  });
+});
+
+// ─── Bounded error-body reads ────────────────────────────────────────────────
+
+describe("httpJson.frames — bounded error-body reads", () => {
+  test("a huge 4xx error body is consumed with a byte cap, not buffered whole via text()", async () => {
+    // The old `r.text()` on 4xx/5xx buffered the ENTIRE (potentially
+    // multi-GB) error body before slicing the first 100 chars. The fixed path
+    // must read from the body STREAM with a byte cap. Instrument the stream to
+    // count consumed bytes: the fixed path reads at most the cap; the old
+    // text()-based path never touches the stream at all.
+    const encoder = new TextEncoder();
+    const CHUNK = 8 * 1024; // realistic network-chunk size
+    const chunkCount = 512; // 512 × 8 KB = 4 MB of error text
+    const hugeBody = "e".repeat(CHUNK * chunkCount);
+    let bytesConsumed = 0;
+    const makeCountingStream = () => {
+      const counting = new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          bytesConsumed += chunk.byteLength;
+          controller.enqueue(chunk);
+        },
+      });
+      return new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (let i = 0; i < chunkCount; i++) {
+            controller.enqueue(encoder.encode("e".repeat(CHUNK)));
+          }
+          controller.close();
+        },
+      }).pipeThrough(counting);
+    };
+    // withLLMRetry re-issues the fetch for a 500 — each attempt must get a
+    // FRESH response (a real network would too); reusing one Response object
+    // would hand later attempts an already-cancelled body.
+    const fetchMock = vi.fn(async () =>
+      makeFakeResponse({
+        status: 500,
+        ok: false,
+        body: makeCountingStream(),
+        // Mirror a real Response: text() would produce the whole (huge) body.
+        text: () => Promise.resolve(hugeBody),
+      }) as unknown as Response,
+    );
+    globalThis.fetch = fetchMock as typeof globalThis.fetch;
+
+    const transport = httpJson({ framing: sse });
+    const iter = transport.frames(makePrepared())[Symbol.asyncIterator]();
+
+    // A 500 is retryable, so withLLMRetry re-issues the fetch with backoff
+    // delays; drive them with fake timers for deterministic, fast completion.
+    vi.useFakeTimers();
+    try {
+      const settled = iter.next().then(
+        () => ({ ok: true as const }),
+        (e: unknown) => ({ ok: false as const, error: e as Error }),
+      );
+      await vi.advanceTimersByTimeAsync(30_000);
+      const result = await settled;
+      expect(result.ok).toBe(false);
+      const msg = (result as { error: Error }).error.message;
+      // The message must still carry the first 100 chars of the error body.
+      expect(msg).toBe(`LLM API 500: ${"e".repeat(100)}`);
+    } finally {
+      vi.useRealTimers();
+    }
+    // The body was read from the STREAM (bounded), not via text() (unbounded):
+    // some bytes flowed, but far fewer than the 4 MB body (even across the
+    // retry loop's re-reads of the 500 response).
+    expect(bytesConsumed).toBeGreaterThan(0);
+    expect(bytesConsumed).toBeLessThan(64 * 1024);
   });
 });
 

@@ -62,8 +62,8 @@ async function acceptOrDismiss(
     return {
       action,
       success: true,
- // Redact the dialog text — it may contain OTP/2FA codes, PII, or session
- // tokens, and this message is echoed into service-worker logs.
+      // Redact the dialog text — it may contain OTP/2FA codes, PII, or session
+      // tokens, and this message is echoed into service-worker logs.
       message: `${pastTense} JS dialog: ${redactDialogText(text)}`,
     };
   } catch (e) {
@@ -79,10 +79,10 @@ export async function handleAlertAccept(
   _ctx: ActionContext,
   action: Extract<Action, { type: "alert_accept" }>,
 ): Promise<ActionResult> {
- // Accept the currently-open JS dialog. The popup-handler queues
- // every dialog so the agent can explicitly accept/dismiss it after
- // the auto-dismiss override has returned to the page. Returns
- // failure if no dialog is open.
+  // Accept the currently-open JS dialog. The popup-handler queues
+  // every dialog so the agent can explicitly accept/dismiss it after
+  // the auto-dismiss override has returned to the page. Returns
+  // failure if no dialog is open.
   return acceptOrDismiss(action, (mod) => mod.acceptAlert(), "accept", "Accepted");
 }
 
@@ -90,7 +90,7 @@ export async function handleAlertDismiss(
   _ctx: ActionContext,
   action: Extract<Action, { type: "alert_dismiss" }>,
 ): Promise<ActionResult> {
- // Dismiss the currently-open JS dialog. Symmetric with `alert_accept`.
+  // Dismiss the currently-open JS dialog. Symmetric with `alert_accept`.
   return acceptOrDismiss(action, (mod) => mod.dismissAlert(), "dismiss", "Dismissed");
 }
 
@@ -98,9 +98,9 @@ export async function handleAlertGetText(
   _ctx: ActionContext,
   action: Extract<Action, { type: "alert_get_text" }>,
 ): Promise<ActionResult> {
- // Get the text of the currently-open JS dialog. Returns empty
- // content (success: true) if no dialog is open — the LLM can branch
- // on the extractedContent length.
+  // Get the text of the currently-open JS dialog. Returns empty
+  // content (success: true) if no dialog is open — the LLM can branch
+  // on the extractedContent length.
   try {
     const mod = await getPopupHandlerMod();
     const text = mod.getPendingAlertText();
@@ -115,11 +115,11 @@ export async function handleAlertGetText(
     return {
       action,
       success: true,
- // Redact the dialog text — it may contain OTP/2FA codes, PII, or session
- // tokens, and `extractedContent` is replayed into subsequent LLM prompts
- // and written to disk via run-history. The length-only message lets the
- // agent branch on presence/size without leaking the value (consistent with
- // `alert_accept` / `alert_dismiss`).
+      // Redact the dialog text — it may contain OTP/2FA codes, PII, or session
+      // tokens, and `extractedContent` is replayed into subsequent LLM prompts
+      // and written to disk via run-history. The length-only message lets the
+      // agent branch on presence/size without leaking the value (consistent with
+      // `alert_accept` / `alert_dismiss`).
       message: `Got alert text (${text.length} chars)`,
       extractedContent: redactDialogText(text),
     };
@@ -136,30 +136,30 @@ export async function handleAlertSendKeys(
   _ctx: ActionContext,
   action: Extract<Action, { type: "alert_send_keys" }>,
 ): Promise<ActionResult> {
- // Stage `text` to be returned by the NEXT `window.prompt()` call.
- // `window.prompt` is synchronous, so once a prompt has fired, the page
- // already received the auto-dismiss override's empty-string return —
- // there's no way to retroactively deliver text to that call. The agent
- // must call `alert_send_keys` BEFORE triggering the action that opens
- // the prompt for the text to reach the page. When no dialog is open the
- // text is staged (success); returns failure for non-prompt dialogs
- // (`alert`/`confirm`).
+  // Stage `text` to be returned by the NEXT `window.prompt()` call.
+  // `window.prompt` is synchronous, so once a prompt has fired, the page
+  // already received the auto-dismiss override's empty-string return —
+  // there's no way to retroactively deliver text to that call. The agent
+  // must call `alert_send_keys` BEFORE triggering the action that opens
+  // the prompt for the text to reach the page. When no dialog is open the
+  // text is staged (success); returns failure for non-prompt dialogs
+  // (`alert`/`confirm`).
   try {
     const mod = await getPopupHandlerMod();
     const kind = mod.getPendingAlertKind();
     if (kind === null) {
- // No dialog currently open — stage the text for the NEXT prompt.
- // The agent may call alert_send_keys before triggering the action
- // that opens the prompt. The text will be returned by the next
- // window.prompt() call.
+      // No dialog currently open — stage the text for the NEXT prompt.
+      // The agent may call alert_send_keys before triggering the action
+      // that opens the prompt. The text will be returned by the next
+      // window.prompt() call.
       mod.stagePromptText(action.text);
       return {
         action,
         success: true,
- // Redact the staged value — it may be a credential typed into a prompt
- // dialog, and the success message is echoed into history / logs. Report
- // only the redacted placeholder + length, consistent with the sibling
- // dialog handlers.
+        // Redact the staged value — it may be a credential typed into a prompt
+        // dialog, and the success message is echoed into history / logs. Report
+        // only the redacted placeholder + length, consistent with the sibling
+        // dialog handlers.
         message: `Staged text for next prompt: ${redactDialogText(action.text)}`,
       };
     }

@@ -38,7 +38,7 @@ afterAll(() => {
 });
 
 beforeEach(() => {
- // Clear storage + in-memory cache so each test starts from a clean slate.
+  // Clear storage + in-memory cache so each test starts from a clean slate.
   localStorage.removeItem("__opencowork_site_memories");
   __resetMemoryCacheForTests();
 });
@@ -98,8 +98,8 @@ describe("formatMemories stable output", () => {
       { domain: "apple.com", notes: "first", updatedAt: 2 },
       { domain: "zebra.com", notes: "second", updatedAt: 1 },
     ];
- // formatMemories is a pure formatter — it renders exactly in input order,
- // so the output is stable/byte-for-byte reproducible for a given input.
+    // formatMemories is a pure formatter — it renders exactly in input order,
+    // so the output is stable/byte-for-byte reproducible for a given input.
     expect(formatMemories(memories)).toBe(
       "<site_memory>\n[apple.com]: first\n[zebra.com]: second\n</site_memory>",
     );
@@ -122,9 +122,9 @@ describe("formatMemories stable output", () => {
 // ─── Loop integration: memory is injected into the navigator prompt ──────────
 
 describe("loop/messages — persistent memory injected into navigator prompt", () => {
- // Local factory: the four tests below each hand `buildNavigatorUserMessage`
- // an identical browser-state shape. Collapse the repeated literal into one
- // helper so the per-test delta (the URL / elements under test) is obvious.
+  // Local factory: the four tests below each hand `buildNavigatorUserMessage`
+  // an identical browser-state shape. Collapse the repeated literal into one
+  // helper so the per-test delta (the URL / elements under test) is obvious.
   const makeBrowserState = (url: string, elementsText = "") => ({
     url,
     title: "T",
@@ -151,8 +151,8 @@ describe("loop/messages — persistent memory injected into navigator prompt", (
 
     expect(msg).toContain("<site_memory>");
     expect(msg).toContain("username is alice");
- // The github.com memory is for a different domain and must NOT leak into
- // the example.com navigator prompt.
+    // The github.com memory is for a different domain and must NOT leak into
+    // the example.com navigator prompt.
     expect(msg).not.toContain("prefer the CLI");
   });
 
@@ -184,8 +184,8 @@ describe("loop/messages — persistent memory injected into navigator prompt", (
     });
     expect(first).toContain("first note");
 
- // The options page can update the per-site note; the next loop build must
- // re-read storage and surface the NEW value (live read, not a stale cache).
+    // The options page can update the per-site note; the next loop build must
+    // re-read storage and surface the NEW value (live read, not a stale cache).
     await saveMemory("example.com", "updated note");
     const second = await buildNavigatorUserMessage({
       task: "t",

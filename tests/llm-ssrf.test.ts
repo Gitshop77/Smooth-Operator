@@ -11,6 +11,7 @@
 
 import { describe, test, expect, afterEach } from "vitest";
 import { validateLlmBaseUrl, isAllowedLlmBaseUrl, validateWebhookUrl, resolveAndValidateLlmBaseUrl } from "../src/lib/agent/llm/route/ssrf";
+import { redactUrl } from "../src/lib/agent/llm/route/url-redact";
 
 function assertRejected(res: ReturnType<typeof validateLlmBaseUrl>, re: RegExp): void {
   expect(res.ok).toBe(false);
@@ -50,7 +51,7 @@ describe("validateLlmBaseUrl (SSRF guard)", () => {
     assertRejected(validateLlmBaseUrl("http://0.0.0.0/"), /private\/loopback\/link-local/i);
   });
 
- // Extra coverage beyond the required cases:
+  // Extra coverage beyond the required cases:
   test("rejects CGNAT / link-local / unspecified but allows loopback + RFC1918", () => {
     expect(validateLlmBaseUrl("http://172.16.5.5/").ok).toBe(true); // RFC1918 allowed
     expect(validateLlmBaseUrl("http://127.0.0.1/").ok).toBe(true); // loopback allowed
@@ -63,8 +64,8 @@ describe("validateLlmBaseUrl (SSRF guard)", () => {
     expect(validateLlmBaseUrl("http://[::ffff:127.0.0.1]/").ok).toBe(true); // loopback mapped allowed
     expect(validateLlmBaseUrl("http://[::ffff:10.0.0.1]/").ok).toBe(true); // RFC1918 mapped allowed
     expect(validateLlmBaseUrl("http://[fe80::1]/").ok).toBe(false); // link-local blocked
- // Parse-layer defense-in-depth: IPv4-mapped cloud-metadata must be rejected
- // here, not only at the transport layer (isAllowedLlmBaseUrl).
+    // Parse-layer defense-in-depth: IPv4-mapped cloud-metadata must be rejected
+    // here, not only at the transport layer (isAllowedLlmBaseUrl).
     assertRejected(validateLlmBaseUrl("http://[::ffff:169.254.169.254]/"), /link-local|metadata/i);
     assertRejected(validateLlmBaseUrl("http://[::ffff:0.0.0.0]/"), /link-local|metadata/i);
   });
@@ -83,12 +84,22 @@ describe("validateLlmBaseUrl (SSRF guard)", () => {
   });
 
   test("Teredo / 6to4 IPv6 forms embedding link-local cloud-metadata are rejected", () => {
-    // Teredo (RFC 4380) `2001::/32` with the embedded IPv4 in the last 32 bits.
-    assertRejected(validateLlmBaseUrl("http://[2001::a9fe:a9fe]/"), /link-local|metadata/i);
-    expect(isAllowedLlmBaseUrl("http://[2001::a9fe:a9fe]/")).toBe(false);
+    // RFC 4380 stores the Teredo client IPv4 XORed with 0xFFFFFFFF, so the
+    // Teredo encoding of 169.254.169.254 (a9fe:a9fe) is `2001::5601:5601`.
+    // The de-obfuscated reading must be rejected at BOTH the config layer and
+    // the transport layer (the obfuscated form previously passed both).
+    assertRejected(validateLlmBaseUrl("http://[2001::5601:5601]/"), /link-local|metadata/i);
+    expect(isAllowedLlmBaseUrl("http://[2001::5601:5601]/")).toBe(false);
     // 6to4 (RFC 3056) `2002::/16` with the embedded IPv4 in groups[1]:groups[2].
     assertRejected(validateLlmBaseUrl("http://[2002:a9fe:a9fe::]/"), /link-local|metadata/i);
     expect(isAllowedLlmBaseUrl("http://[2002:a9fe:a9fe::]/")).toBe(false);
+  });
+
+  test("Teredo-encoded loopback (2001::80ff:fffe = 127.0.0.1 XOR 0xFFFFFFFF) is a self-hosted local endpoint", () => {
+    // Directional pin for the de-obfuscation: `80ff:fffe ^ ffff:ffff` reads back
+    // to 127.0.0.1, which the parse layer allows as user-local infra (the
+    // transport gate still rejects all IPv6 — pinned in the transport section).
+    expect(validateLlmBaseUrl("http://[2001::80ff:fffe]/").ok).toBe(true);
   });
 
   test("zone-id IPv6 (fe80::1%eth0) is rejected", () => {
@@ -103,19 +114,19 @@ describe("validateLlmBaseUrl (SSRF guard)", () => {
   });
 
   test("deprecated IPv4-compatible form (::a.b.c.d) catches an embedded cloud-metadata IPv4", () => {
-   // The WHATWG URL parser canonicalizes the deprecated IPv4-compatible form
-   // `http://[::169.254.169.254]/` to the hex `::a9fe:a9fe`; the IPv6 classifier
-   // must still read the embedded IPv4 (169.254.169.254) off the last two groups
-   // and reject it as link-local cloud metadata — at BOTH the parse layer and
-   // the transport layer. This pins the branch so a future regression that
-   // drops the deprecated-form handling silently reopens the cloud-metadata SSRF
-   // path.
+    // The WHATWG URL parser canonicalizes the deprecated IPv4-compatible form
+    // `http://[::169.254.169.254]/` to the hex `::a9fe:a9fe`; the IPv6 classifier
+    // must still read the embedded IPv4 (169.254.169.254) off the last two groups
+    // and reject it as link-local cloud metadata — at BOTH the parse layer and
+    // the transport layer. This pins the branch so a future regression that
+    // drops the deprecated-form handling silently reopens the cloud-metadata SSRF
+    // path.
     assertRejected(validateLlmBaseUrl("http://[::169.254.169.254]/"), /link-local|metadata/i);
     expect(isAllowedLlmBaseUrl("http://[::169.254.169.254]/")).toBe(false);
-   // The same deprecated form embedding a *loopback* IPv4 (self-hosted infra) is
-   // NOT a sink, so the branch must allow it — confirming the check keys on the
-   // embedded IPv4 being genuinely dangerous rather than rejecting the whole
-   // `::a.b.c.d` shape.
+    // The same deprecated form embedding a *loopback* IPv4 (self-hosted infra) is
+    // NOT a sink, so the branch must allow it — confirming the check keys on the
+    // embedded IPv4 being genuinely dangerous rather than rejecting the whole
+    // `::a.b.c.d` shape.
     expect(validateLlmBaseUrl("http://[::127.0.0.1]/").ok).toBe(true);
     expect(isAllowedLlmBaseUrl("http://[::127.0.0.1]/")).toBe(true);
   });
@@ -143,7 +154,9 @@ describe("validateWebhookUrl (webhook SSRF guard)", () => {
   test("rejects IPv6 embedded-IPv4 cloud-metadata forms (NAT64 / mapped / Teredo / 6to4 / IPv4-compatible)", () => {
     expect(validateWebhookUrl("http://[64:ff9b::169.254.169.254]/hook").ok).toBe(false);
     expect(validateWebhookUrl("http://[2002:a9fe:a9fe::]/hook").ok).toBe(false);
-    expect(validateWebhookUrl("http://[2001::a9fe:a9fe]/hook").ok).toBe(false);
+    // RFC 4380 de-obfuscated Teredo encoding of 169.254.169.254 must be
+    // blocked by the webhook path too (parity with the LLM path).
+    expect(validateWebhookUrl("http://[2001::5601:5601]/hook").ok).toBe(false);
     expect(validateWebhookUrl("http://[::ffff:169.254.169.254]/hook").ok).toBe(false);
     expect(validateWebhookUrl("http://[::169.254.169.254]/hook").ok).toBe(false);
   });
@@ -163,7 +176,7 @@ describe("IPv6 embedded-IPv4 SSRF classifier parity (LLM vs webhook)", () => {
   const metadataForms = [
     "http://[64:ff9b::169.254.169.254]/",
     "http://[2002:a9fe:a9fe::]/",
-    "http://[2001::a9fe:a9fe]/",
+    "http://[2001::5601:5601]/",
     "http://[::ffff:169.254.169.254]/",
     "http://[::169.254.169.254]/",
   ];
@@ -206,27 +219,27 @@ describe("isAllowedLlmBaseUrl (transport-layer SSRF guard)", () => {
   });
 
   test("curated loopback URLs are REJECTED when allowLocalExemption=false", () => {
- // When `allowLocalExemption=false` (i.e. the baseUrl did NOT originate from
- // user configuration — e.g. injected via prompt injection / malicious
- // settings-sync), `isAllowedLlmBaseUrl` must apply the strict check and
- // reject even the curated local-provider loopback URLs, so an injected
- // `http://localhost:11434` can never reach the user's local Ollama / LiteLLM
- // server. Rejecting loopback here is the CORRECT security behavior.
+    // When `allowLocalExemption=false` (i.e. the baseUrl did NOT originate from
+    // user configuration — e.g. injected via prompt injection / malicious
+    // settings-sync), `isAllowedLlmBaseUrl` must apply the strict check and
+    // reject even the curated local-provider loopback URLs, so an injected
+    // `http://localhost:11434` can never reach the user's local Ollama / LiteLLM
+    // server. Rejecting loopback here is the CORRECT security behavior.
     expect(isAllowedLlmBaseUrl("http://localhost:11434/v1", false)).toBe(false);
     expect(isAllowedLlmBaseUrl("http://127.0.0.1:11434/v1", false)).toBe(false);
     expect(isAllowedLlmBaseUrl("http://localhost:4000/v1", false)).toBe(false);
     expect(isAllowedLlmBaseUrl("http://127.0.0.1:4000/v1", false)).toBe(false);
- // A genuine sink is still rejected when the exemption is disabled.
+    // A genuine sink is still rejected when the exemption is disabled.
     expect(isAllowedLlmBaseUrl("http://169.254.169.254/", false)).toBe(false);
   });
 
   test("IPv6 parity: transport guard rejects loopback/ULA/link-local/mapped regardless of exemption", () => {
- // Unlike the parse-layer `validateLlmBaseUrl` (which ALLOWS IPv6 loopback
- // `:1` and ULA `fc00:/7` as self-hosted infra), the transport-layer guard
- // only exempts the curated IPv4 local-provider origins (localhost /
- // 127.0.0.1). So every IPv6 variant — even loopback/ULA — is rejected, which
- // closes the gap where an IPv6 SSRF sink could slip through to `fetch`. Pin
- // this so a future change that adds IPv6 to the curated exemption is caught.
+    // Unlike the parse-layer `validateLlmBaseUrl` (which ALLOWS IPv6 loopback
+    // `:1` and ULA `fc00:/7` as self-hosted infra), the transport-layer guard
+    // only exempts the curated IPv4 local-provider origins (localhost /
+    // 127.0.0.1). So every IPv6 variant — even loopback/ULA — is rejected, which
+    // closes the gap where an IPv6 SSRF sink could slip through to `fetch`. Pin
+    // this so a future change that adds IPv6 to the curated exemption is caught.
     const ipv6 = [
       "http://[::1]/v1",
       "http://[fc00::1]/v1",
@@ -360,6 +373,42 @@ describe("resolveAndValidateLlmBaseUrl (DNS-resolution SSRF guard)", () => {
     expect(res.ok).toBe(false);
     if (res.ok) throw new Error("expected rejection");
     expect(res.reason).toMatch(/private\/loopback\/link-local/i);
+  });
+
+  test("a 'resolved' outcome with NO addresses fails closed (empty result must not be ok)", async () => {
+    setMockDns({ kind: "resolved", addresses: [] });
+    const res = await resolveAndValidateLlmBaseUrl("http://empty.example.attacker/v1");
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected rejection");
+    expect(res.reason).toMatch(/no addresses|DNS/i);
+  });
+});
+
+// ─── URL redaction (used in SSRF error messages and logs) ────────────────────
+
+describe("redactUrl (URL redaction)", () => {
+  test("strips simple userinfo (user:pass@)", () => {
+    expect(redactUrl("http://user:pass@host/x")).toBe("http://host/x");
+  });
+
+  test("strips to the LAST '@' before the first '/' (multi-@ userinfo does not leak)", () => {
+    // The old /\/\/[^/@]*@/ regex stopped at the FIRST '@', leaking
+    // `name:Pass@host/x` out of `http://user@name:Pass@host/x`.
+    expect(redactUrl("http://user@name:Pass@host/x")).toBe("http://host/x");
+  });
+
+  test("a legitimate '@' inside the path is preserved", () => {
+    expect(redactUrl("https://host/@user/repo")).toBe("https://host/@user/repo");
+  });
+
+  test("userinfo with an '@' inside the password is fully stripped", () => {
+    expect(redactUrl("http://user:pa@ss@host/x")).toBe("http://host/x");
+  });
+
+  test("stripQuery=false replaces the query with [redacted-query]", () => {
+    expect(redactUrl("http://user:pass@host/x?token=1#frag", false)).toBe(
+      "http://host/x[redacted-query]",
+    );
   });
 });
 

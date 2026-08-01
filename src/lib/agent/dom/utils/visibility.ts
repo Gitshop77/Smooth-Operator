@@ -62,27 +62,6 @@ export function isLikelyHidden(el: HTMLElement): boolean {
 }
 
 /**
- * Determine whether an element is *actually* visible to the user. Combines
- * computed style (display / visibility / opacity), bounding-box, and
- * `aria-hidden` checks.
- *
- * EXPENSIVE — calls `window.getComputedStyle` (full cascade resolution) and
- * `getBoundingClientRect` (layout flush). For hot paths (e.g. the DOM walker),
- * gate this behind {@link isLikelyHidden} so display:none / detached nodes
- * never reach this function.
- *
- * Canonical version — matches the historical `extractor.ts` definition, which
- * uses `getBoundingClientRect` (more accurate than `offsetWidth/offsetHeight`
- * for rotated/transformed elements). Also folds in the `aria-hidden` check
- * that the historical `ax-tree.ts` was missing inside its `isVisible`. The
- * rect parameter lets callers reuse a rect they already fetched (e.g. the
- * extractor computes it once for the `ExtractedElement` payload and passes it
- * here for the visibility check, avoiding a second layout flush).
- *
- * @param rect optional pre-computed bounding rect; if omitted, a fresh
- * `getBoundingClientRect()` is called.
- */
-/**
  * Returns true when a `clip` / `clip-path` value provably collapses the element
  * to zero visible area (so it should be treated as hidden). Shape clips that
  * still leave the element visible (`circle(50%)`, `ellipse(...)`, `inset(0)`,
@@ -133,6 +112,67 @@ function isZeroSize(token: string): boolean {
   return false;
 }
 
+/**
+ * Per-extract memo of "this ancestor is fully transparent" (`opacity: 0`).
+ *
+ * `isVisibleFull` walks the ancestor chain of every interactive element, and
+ * `getComputedStyle` is the single most expensive operation in the walker.
+ * On a page with thousands of siblings under one `<body>`, the same ancestors
+ * are re-resolved for every sibling; memoizing per ancestor within one
+ * extraction collapses that to one style resolution per ancestor.
+ *
+ * The memo is only active while a walker is running (`beginVisibilityCache` /
+ * `endVisibilityCache`): `isVisibleFull` is also called outside extractions
+ * (e.g. `find_text`'s action-time visibility probe), and the DOM can change
+ * between those calls, so the cache must never outlive the synchronous walk.
+ */
+let transparentAncestorCache: WeakMap<HTMLElement, boolean> | null = null;
+
+/** Start a memoized walk — call at the beginning of every DOM extraction. */
+export function beginVisibilityCache(): void {
+  transparentAncestorCache = new WeakMap<HTMLElement, boolean>();
+}
+
+/** End the memoized walk — call when the extraction finishes (even on error). */
+export function endVisibilityCache(): void {
+  transparentAncestorCache = null;
+}
+
+/** True when the element has `opacity: 0` per computed style (memoized during a walk). */
+function isFullyTransparent(el: HTMLElement): boolean {
+  const cache = transparentAncestorCache;
+  if (cache) {
+    let transparent = cache.get(el);
+    if (transparent === undefined) {
+      transparent = parseFloat(window.getComputedStyle(el).opacity) === 0;
+      cache.set(el, transparent);
+    }
+    return transparent;
+  }
+  return parseFloat(window.getComputedStyle(el).opacity) === 0;
+}
+
+/**
+ * Determine whether an element is *actually* visible to the user. Combines
+ * computed style (display / visibility / opacity), bounding-box, and
+ * `aria-hidden` checks.
+ *
+ * EXPENSIVE — calls `window.getComputedStyle` (full cascade resolution) and
+ * `getBoundingClientRect` (layout flush). For hot paths (e.g. the DOM walker),
+ * gate this behind {@link isLikelyHidden} so display:none / detached nodes
+ * never reach this function.
+ *
+ * Canonical version — matches the historical `extractor.ts` definition, which
+ * uses `getBoundingClientRect` (more accurate than `offsetWidth/offsetHeight`
+ * for rotated/transformed elements). Also folds in the `aria-hidden` check
+ * that the historical `ax-tree.ts` was missing inside its `isVisible`. The
+ * rect parameter lets callers reuse a rect they already fetched (e.g. the
+ * extractor computes it once for the `ExtractedElement` payload and passes it
+ * here for the visibility check, avoiding a second layout flush).
+ *
+ * @param rect optional pre-computed bounding rect; if omitted, a fresh
+ * `getBoundingClientRect()` is called.
+ */
 export function isVisibleFull(el: HTMLElement, rect?: DOMRect): boolean {
   const style = window.getComputedStyle(el);
   if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return false;
@@ -143,7 +183,7 @@ export function isVisibleFull(el: HTMLElement, rect?: DOMRect): boolean {
  // element as hidden if any ancestor is fully transparent — otherwise the agent
  // could target a transparent, non-interactable element.
   for (let ancestor = el.parentElement; ancestor; ancestor = ancestor.parentElement) {
-    if (parseFloat(window.getComputedStyle(ancestor).opacity) === 0) return false;
+    if (isFullyTransparent(ancestor)) return false;
     if (ancestor.getAttribute("aria-hidden") === "true") return false;
   }
   const r = rect ?? el.getBoundingClientRect();

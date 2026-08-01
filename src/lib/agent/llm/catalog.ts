@@ -1,84 +1,41 @@
 /**
- * models.dev catalog — the central model/provider registry for the agent.
+ * models.dev catalog — runtime layer for the model/provider registry.
  *
- * Offline-primary: the `@opencode-ai/models` SDK's snapshot is the committed
- * data source imported here as `BUNDLED_CATALOG`. It is always available at boot
- * with zero network, so the model picker works offline and never crashes when
- * the network is down.
- *
- * Refresh/merge layer: `fetchCatalog` lazily fetches the LIVE
- * `https://models.dev/api.json` and merges it OVER the bundled snapshot.
- * The merge is additive (bundled providers are never dropped) and live wins on
- * id conflicts. The live result is cached 5 minutes (in-memory +
- * `chrome.storage.session` when available), and every network/storage call is
- * guarded in try/catch so an offline or failed refresh transparently falls back
- * to the bundled snapshot.
- *
- * Note on ids: OpenRouter model ids use DOTS, not hyphens
- * (e.g. `anthropic/claude-3.5-sonnet`). The `id` fields in this catalog preserve
- * that — match on exact `id`, not a hyphen-normalized form.
+ * Re-exports all types, constants, and pure helpers from {@link catalog-data}.
+ * This module owns mutable runtime state (merged cache, search index, fetch
+ * deduplication) and the I/O path (live catalog fetch + chrome.storage cache).
  */
 
 /* ============================================================= *
- * Authoritative types (Agent A's bundle conforms to these).    *
+ * Re-exports from catalog-data (single source of truth).       *
  * ============================================================= */
 
-/** A single model in the models.dev catalog. */
-export interface CatalogModel {
-  id: string;
-  name: string;
-  family?: string;
-  description?: string;
-  release_date: string;
-  last_updated?: string;
-  knowledge?: string;
-  attachment: boolean;
-  reasoning: boolean;
-  temperature?: boolean;
-  tool_call: boolean;
-  structured_output?: boolean;
-  open_weights?: boolean;
-  status?: string; // "alpha" | "beta" | "deprecated"
-  modalities?: { input?: string[]; output?: string[] };
-  limit?: { context: number; input?: number; output: number };
-  cost?: {
-    input: number;
-    output: number;
-    cache_read?: number;
-    cache_write?: number;
-    reasoning?: number;
-    input_audio?: number;
-    output_audio?: number;
-  };
-}
+export type {
+  CatalogModel,
+  Catalog,
+};
+export {
+  isValidCatalog,
+} from "./catalog-data";
 
-/** A provider in the models.dev catalog. */
-export interface CatalogProvider {
-  id: string;
-  name: string;
-  api?: string;
-  env?: string[];
-  npm?: string;
-  doc?: string;
-  models: Record<string, CatalogModel>;
-}
-
-/** The full catalog — a map of provider ID → provider info. */
-export type Catalog = Record<string, CatalogProvider>;
-
-/* ============================================================= *
- * Offline-primary snapshot (from @opencode-ai/models SDK).     *
- * ============================================================= */
-
-import { providers as BUNDLED_CATALOG } from "@opencode-ai/models/snapshot";
+import {
+  BUNDLED_CATALOG,
+  CACHE_TTL_MS,
+  CACHE_KEY,
+  CATALOG_URL,
+  VISION_PATTERNS,
+  REASONING_PATTERNS,
+  isValidCatalog,
+  mergeCatalogs,
+  type CatalogModel,
+  type CatalogProvider,
+  type Catalog,
+  type CachedCatalog,
+} from "./catalog-data";
 
 /* ============================================================= *
  * Constants & shared state.                                    *
  * ============================================================= */
-
-const CATALOG_URL = "https://models.dev/api.json";
-const CACHE_KEY = "__opencowork_models_dev_catalog";
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 /**
  * The merged catalog that synchronous accessors read from. Seeded at module
@@ -131,193 +88,8 @@ function getSearchIndex(): SearchIndexEntry[] {
 }
 
 /* ============================================================= *
- * Fallback heuristics (used only when the catalog is absent).  *
- * ============================================================= */
-
-/**
- * Heuristic vision-capable model-name patterns (fallback used only when a
- * model is NOT in the catalog). Hoisted to module scope so it is allocated
- * once per process, not on every `modelSupportsVision` call.
- *
- * Word-boundary (`\b`) matching replaces the previous `name.includes(kw)`
- * scan: a bare `includes("vl")` matched any id containing those two letters
- * (e.g. a non-vision model whose name happened to include "vl"), feeding the
- * wrong screenshot-gating path. Anchoring each token to a word boundary keeps
- * the heuristic precise while still catching the common vision families
- * (qwen-vl, deepseek-vl, gpt-4o, claude-3, gemini, …).
- */
-const VISION_PATTERNS: RegExp[] = [
-  /\bvision\b/i,
-  /\bvl\b/i,
-  /\bllava\b/i,
-  /\bbakllava\b/i,
-  /\bmoondream\b/i,
-  /\bminicpm\b/i,
-  /\bpixtral\b/i,
-  /\bflorence\b/i,
-  /\bcogvlm\b/i,
-  /\bgpt-4o\b/i,
-  /\bgpt-5\b/i,
-  /\bclaude-3\b/i,
-  /\bclaude-4\b/i,
-  /\bclaude-sonnet\b/i,
-  /\bclaude-opus\b/i,
-  /\bclaude-haiku\b/i,
-  /\bgemini\b/i,
-  /\bgrok-2-vision\b/i,
-];
-
-/**
- * Name/id patterns for reasoning models. These models reject or ignore the
- * `temperature` parameter and instead use `max_completion_tokens` for their
- * thinking budget (e.g. OpenAI o1/o3/o4, xAI grok-4-reasoning). Sending
- * `temperature` to them can produce an HTTP 400 or silently waste the
- * parameter, so callers must omit temperature for them.
- */
-const REASONING_PATTERNS: RegExp[] = [
-  /\bo1\b/i,
-  /\bo1-?mini\b/i,
-  /\bo3\b/i,
-  /\bo3-?mini\b/i,
-  /\bo4\b/i,
-  /\bo4-?mini\b/i,
-  /\bgrok-4-?reasoning\b/i,
-  /\bdeepseek-?reasoner\b/i,
-  /\bclaude-sonnet-5\b/i,
-  // models.dev ids use DOTS between version segments (e.g. `claude-opus-4.8`),
-  // but some endpoints / resolved model ids surface the hyphenated form
-  // (`claude-opus-4-8`). A `[.-]` character class matches BOTH so the reasoning
-  // heuristic never misses a reasoning model and wrongly sends `temperature`
-  // (which produces an HTTP 400 on reasoning models). The provider-name hyphens
-  // (`claude-sonnet`, `claude-opus`) are intentionally left untouched.
-  /\bclaude-sonnet-4[.-]5\b/i,
-  /\bclaude-opus-4[.-]1\b/i,
-  /\bclaude-opus-4[.-]8\b/i,
-];
-
-/* ============================================================= *
- * Validation (single trust boundary for any untrusted catalog).*
- * ============================================================= */
-
-interface CachedCatalog {
-  data: Catalog;
-  fetchedAt: number;
-}
-
-/** Validate a single provider entry within a catalog. */
-function isValidProvider(entry: unknown): entry is CatalogProvider {
-  if (!entry || typeof entry !== "object") return false;
-  const provider = entry as Record<string, unknown>;
-  if (typeof provider.id !== "string" || typeof provider.name !== "string") return false;
-  if (!provider.models || typeof provider.models !== "object") return false;
-  for (const model of Object.values(provider.models as Record<string, unknown>)) {
-    if (!isValidModel(model)) return false;
-  }
-  return true;
-}
-
-/** Validate a single model entry within a provider. */
-function isValidModel(model: unknown): model is CatalogModel {
-  if (!model || typeof model !== "object") return false;
-  const m = model as Record<string, unknown>;
-  if (
-    typeof m.id !== "string" ||
-    typeof m.name !== "string" ||
-    typeof m.release_date !== "string"
-  ) return false;
-  if (m.cost !== undefined) {
-    const c = m.cost as Record<string, unknown>;
-    const inputRate = c.input;
-    const outputRate = c.output;
-    if (
-      typeof inputRate !== "number" ||
-      !Number.isFinite(inputRate) ||
-      inputRate < 0 ||
-      typeof outputRate !== "number" ||
-      !Number.isFinite(outputRate) ||
-      outputRate < 0
-    ) return false;
-    const rateOk = (v: unknown) =>
-      v === undefined || (typeof v === "number" && v >= 0);
-    if (
-      !rateOk(c.cache_read) ||
-      !rateOk(c.cache_write) ||
-      !rateOk(c.reasoning) ||
-      !rateOk(c.input_audio) ||
-      !rateOk(c.output_audio)
-    ) return false;
-  }
-  if (m.attachment !== undefined && typeof m.attachment !== "boolean") return false;
-  if (m.limit !== undefined) {
-    const lim = m.limit as Record<string, unknown>;
-    const ctxLimit = lim.context;
-    const outLimit = lim.output;
-    if (
-      typeof ctxLimit !== "number" ||
-      !Number.isFinite(ctxLimit) ||
-      ctxLimit < 1 ||
-      typeof outLimit !== "number" ||
-      !Number.isFinite(outLimit) ||
-      outLimit < 0
-    ) return false;
-  }
-  return true;
-}
-
-/**
- * Minimal structural validation of a parsed models.dev catalog. Rejects
- * obviously-wrong shapes (non-object, missing provider entries, `models`
- * not a record, non-numeric or negative cost fields, or a non-string `name`)
- * so malformed/compromised data can't flow into the model picker. A negative
- * rate is rejected because it would feed `estimateCost` (pricing.ts) and
- * subtract from accumulated spend, silently defeating the cost cap; zero is
- * permitted so an operator may legitimately reprice a private model to free.
- * Returns a typed `Catalog` on success.
- *
- * Exported so pricing.ts can reuse the same single trust-boundary rule for
- * its custom-`COWORK_MODEL_CATALOG_URL` path instead of maintaining a
- * parallel copy (which would drift and weaken whichever copy lags).
- */
-export function isValidCatalog(value: unknown): value is Catalog {
-  if (!value || typeof value !== "object") return false;
-  for (const entry of Object.values(value as Record<string, unknown>)) {
-    if (!isValidProvider(entry)) return false;
-  }
-  return true;
-}
-
-/* ============================================================= *
  * Merge + fetch (live merged OVER bundled; additive; cached).  *
  * ============================================================= */
-
-/**
- * Merge `live` OVER `base`. Bundled providers/models are never dropped
- * (additive); for any provider or model id present in both, the live entry
- * wins. Returns a fresh `Catalog` (no mutation of the inputs).
- */
-function mergeCatalogs(base: Catalog, live: Catalog): Catalog {
-  const out: Catalog = {};
-  for (const [pid, provider] of Object.entries(base)) {
-    out[pid] = { ...provider, models: { ...provider.models } };
-  }
-  for (const [pid, liveProvider] of Object.entries(live)) {
-    const baseProvider = out[pid];
-    if (!baseProvider) {
-      out[pid] = { ...liveProvider, models: { ...liveProvider.models } };
-      continue;
-    }
-    const merged: CatalogProvider = {
-      ...baseProvider,
-      ...liveProvider,
-      models: { ...baseProvider.models },
-    };
-    for (const [mid, liveModel] of Object.entries(liveProvider.models)) {
-      merged.models[mid] = liveModel; // live wins on id conflict
-    }
-    out[pid] = merged;
-  }
-  return Object.freeze(out);
-}
 
 /** Storage area to use for the 5-min cache: `session` if present, else `local`. */
 function cacheStorage():
@@ -343,8 +115,6 @@ async function readCachedCatalog(): Promise<CachedCatalog | null> {
   try {
     const cached = await store.get(CACHE_KEY);
     const entry = (cached as Record<string, CachedCatalog | undefined>)[CACHE_KEY];
-    // Trust-boundary guard: a corrupted/compromised persisted entry must be
-    // re-validated before it is served.
     if (entry && isValidCatalog(entry.data)) return entry;
   } catch {
     /* ignore storage errors */
@@ -358,7 +128,6 @@ async function readCachedCatalog(): Promise<CachedCatalog | null> {
  * persistent cache, and finally returns the bundled snapshot.
  */
 async function loadCatalog(force: boolean, signal?: AbortSignal): Promise<Catalog> {
-  // Check persistent cache first (unless forced).
   if (!force) {
     const cached = await readCachedCatalog();
     if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
@@ -368,7 +137,6 @@ async function loadCatalog(force: boolean, signal?: AbortSignal): Promise<Catalo
     }
   }
 
-  // Fetch + merge the live catalog OVER the bundled snapshot.
   try {
     const timeoutSignal = AbortSignal.timeout(10_000);
     const fetchSignal = signal
@@ -394,7 +162,6 @@ async function loadCatalog(force: boolean, signal?: AbortSignal): Promise<Catalo
     }
     return merged;
   } catch (err) {
-    // Network/validation failure — try a stale cache, then bundled snapshot.
     const msg = err instanceof Error ? err.message : String(err);
     console.warn("[catalog] fetchCatalog failed, using bundled:", msg);
     const cached = await readCachedCatalog();
@@ -403,17 +170,15 @@ async function loadCatalog(force: boolean, signal?: AbortSignal): Promise<Catalo
       memoryCacheTime = cached.fetchedAt;
       return cached.data;
     }
-    // Offline / no cache: the bundled snapshot is always correct.
     mergedCache = { ...BUNDLED_CATALOG };
     memoryCacheTime = Date.now();
     return BUNDLED_CATALOG;
   }
 }
 
-export interface FetchCatalogOptions {
+interface FetchCatalogOptions {
   force?: boolean;
 }
-
 /**
  * Get the merged catalog (bundled snapshot + live refresh layered on top).
  * Accepts either a boolean `force` (legacy) or an options object. Swallows all
@@ -424,15 +189,12 @@ export async function fetchCatalog(
 ): Promise<Catalog> {
   const force = typeof opts === "boolean" ? opts : (opts?.force ?? false);
 
-  // Reuse an in-flight fetch so concurrent callers share one network request.
   if (!force && inflight) return inflight;
 
-  // Fast in-memory hit (synchronous short-circuit before memoizing).
   if (!force && Date.now() - memoryCacheTime < CACHE_TTL_MS) {
     return mergedCache;
   }
 
-  // Abort the previous in-flight fetch when superseded by a forced refresh.
   if (force && inflightController) {
     inflightController.abort();
   }
@@ -454,8 +216,6 @@ export async function fetchCatalog(
     } catch (err) {
       rejectFn(err);
     } finally {
-      // Only clear the shared slot if it still points at THIS promise (a newer
-      // concurrent fetch may have overwritten `inflight` while we awaited).
       if (inflight === promise) {
         inflight = null;
         inflightController = null;
@@ -498,18 +258,16 @@ export function getModelsForProvider(
 ): CatalogModel[] | CatalogModel | undefined {
   const provider = mergedCache[id];
   if (!provider || !provider.models) return modelId !== undefined ? undefined : [];
-  // Exact-id fast path: resolve a single model without sorting the whole list
-  // (~hundreds–thousands of models). Used by the per-request capability lookups.
   if (modelId !== undefined) {
     return Object.values(provider.models).find((m) => catalogIdMatches(modelId, m.id));
   }
   return Object.values(provider.models).sort((a, b) => {
     const aDep = a.status === "deprecated" ? 1 : 0;
     const bDep = b.status === "deprecated" ? 1 : 0;
-    if (aDep !== bDep) return aDep - bDep; // non-deprecated first
+    if (aDep !== bDep) return aDep - bDep;
     const da = typeof a.release_date === "string" ? a.release_date : "";
     const db = typeof b.release_date === "string" ? b.release_date : "";
-    return db.localeCompare(da); // newest first
+    return db.localeCompare(da);
   });
 }
 
@@ -517,15 +275,14 @@ export function getModelsForProvider(
  * The self-updating default model id for a provider over the merged catalog:
  * the newest model that is not `deprecated`, preferring a stable (non-alpha /
  * non-beta) model when alternatives exist. Returns `""` if the provider is
- * unknown or has no usable models. Synchronous — callers typically `await` it,
- * which is harmless for a string return.
+ * unknown or has no usable models.
  */
 export function getDefaultModelForProvider(id: string): string {
   const provider = mergedCache[id];
   if (!provider || !provider.models) return "";
   const usable = Object.values(provider.models).filter((m) => m.status !== "deprecated");
   if (usable.length === 0) return "";
-  usable.sort((a, b) => String(b.release_date ?? "").localeCompare(String(a.release_date ?? ""))); // newest first
+  usable.sort((a, b) => String(b.release_date ?? "").localeCompare(String(a.release_date ?? "")));
   const stable = usable.filter((m) => m.status !== "alpha" && m.status !== "beta");
   return (stable.length > 0 ? stable : usable)[0].id;
 }
@@ -533,7 +290,7 @@ export function getDefaultModelForProvider(id: string): string {
 /**
  * Search across ALL providers + models. Case-insensitive substring match over
  * model id + name + family; results newest-first. Deprecated models are
- * excluded unless they are the only matches for the query. Synchronous.
+ * excluded unless they are the only matches for the query.
  */
 export function searchModels(
   query: string,
@@ -543,15 +300,12 @@ export function searchModels(
   const index = getSearchIndex();
   const all: Array<{ providerId: string; providerName: string; model: CatalogModel }> = [];
 
-  if (q === "") {
-    for (const e of index) all.push({ providerId: e.providerId, providerName: e.providerName, model: e.model });
-  } else {
-    for (const e of index) {
-      if (e.lower.includes(q)) all.push({ providerId: e.providerId, providerName: e.providerName, model: e.model });
+  for (const e of index) {
+    if (q === "" || e.lower.includes(q)) {
+      all.push({ providerId: e.providerId, providerName: e.providerName, model: e.model });
     }
   }
 
-  // Exclude deprecated unless the query matches ONLY deprecated models.
   const nonDeprecated = all.filter((x) => x.model.status !== "deprecated");
   const pool = nonDeprecated.length > 0 ? nonDeprecated : all;
 
@@ -566,15 +320,8 @@ export function searchModels(
 
 /**
  * Compare a requested model id against a catalog model id, tolerating the
- * OpenRouter-style `provider/` prefix. The catalog stores OpenRouter models as
- * `anthropic/claude-opus-4.8` while a resolved model id may be the bare
- * `claude-opus-4.8` (or vice versa). We strip any `provider/` prefix from BOTH
- * sides and also accept `endsWith` of `/<id>` so either form resolves to the
- * same catalog entry instead of falling through to the (now fixed) heuristic.
- * Provider-name hyphens are never altered.
- *
- * Uses exact segment matching (not substring) to avoid false positives
- * (e.g. `gpt-4o` must NOT match `gpt-4o-mini`).
+ * OpenRouter-style `provider/` prefix. Uses exact segment matching (not
+ * substring) to avoid false positives (e.g. `gpt-4o` must NOT match `gpt-4o-mini`).
  */
 export function catalogIdMatches(requested: string, catalogId: string): boolean {
   const req = requested.toLowerCase();
@@ -593,10 +340,9 @@ export function catalogIdMatches(requested: string, catalogId: string): boolean 
 /**
  * Decide whether `modelId` is a reasoning model given the catalog models for
  * its provider. Pure (no I/O); `REASONING_PATTERNS` is the final fallback
- * whenever the catalog gives no conclusive signal (offline catalog, or a
- * custom OpenAI-compatible endpoint absent from the catalog).
+ * whenever the catalog gives no conclusive signal.
  */
-export function resolveReasoningSupport(modelId: string, models: CatalogModel[]): boolean {
+function resolveReasoningSupport(modelId: string, models: CatalogModel[]): boolean {
   if (models.length > 0) {
     const exact = models.find((m) => catalogIdMatches(modelId, m.id));
     if (exact) return exact.reasoning === true;
@@ -619,20 +365,19 @@ function isVisionModel(m: CatalogModel): boolean {
 export function resolveVisionSupport(modelId: string, models: CatalogModel[]): boolean {
   const name = modelId.toLowerCase();
   if (models.length > 0) {
-    const reqId = name;
-    const reqBase = reqId.replace(/-?\d{4}-\d{2}-\d{2}$/, "");
+    const reqBase = name.replace(/-?\d{4}-\d{2}-\d{2}$/, "");
     const exact = models.find((m) => catalogIdMatches(modelId, m.id));
     if (exact) {
       if (isVisionModel(exact)) return true;
       if (exact.attachment === false && !VISION_PATTERNS.some((re) => re.test(name))) return false;
     }
-    const substringMatches = models.filter((m) => m.id.toLowerCase().includes(reqId));
+    const substringMatches = models.filter((m) => m.id.toLowerCase().includes(name));
     if (substringMatches.length > 0) {
       const vision = substringMatches.find((m) => {
         if (!isVisionModel(m)) return false;
         const id = m.id.toLowerCase();
         const idBase = id.replace(/-?\d{4}-\d{2}-\d{2}$/, "");
-        return id === reqId || idBase === reqBase;
+        return id === name || idBase === reqBase;
       });
       if (vision) return true;
     }
@@ -640,17 +385,9 @@ export function resolveVisionSupport(modelId: string, models: CatalogModel[]): b
   return VISION_PATTERNS.some((re) => re.test(name));
 }
 
-/**
- * Whether a catalog model supports vision, based on its boolean fields
- * (`attachment` / `modalities.input` image), falling back to the name
- * heuristic when those are inconclusive. Synchronous.
- */
+/** Whether a catalog model supports vision, based on its boolean fields. */
 export function modelSupportsVision(m: CatalogModel): boolean;
-/**
- * Whether `modelId` (resolved within `providerId`) supports vision. Looks the
- * provider's models up in the merged catalog and delegates to
- * {@link resolveVisionSupport}, falling back to the heuristic when offline.
- */
+/** Whether `modelId` (resolved within `providerId`) supports vision. */
 export function modelSupportsVision(modelId: string, providerId?: string): Promise<boolean>;
 export function modelSupportsVision(
   mOrId: CatalogModel | string,
@@ -663,16 +400,9 @@ export function modelSupportsVision(
   return resolveVisionSupport(mOrId.id, []);
 }
 
-/**
- * Whether a catalog model is a reasoning model, based on its `reasoning`
- * boolean, falling back to the name heuristic. Synchronous.
- */
+/** Whether a catalog model is a reasoning model, based on its `reasoning` boolean. */
 export function modelSupportsReasoning(m: CatalogModel): boolean;
-/**
- * Whether `modelId` (resolved within `providerId`) is a reasoning model. Looks
- * the provider's models up in the merged catalog and delegates to
- * {@link resolveReasoningSupport}, falling back to the heuristic when offline.
- */
+/** Whether `modelId` (resolved within `providerId`) is a reasoning model. */
 export function modelSupportsReasoning(modelId: string, providerId?: string): Promise<boolean>;
 export function modelSupportsReasoning(
   mOrId: CatalogModel | string,
@@ -685,12 +415,6 @@ export function modelSupportsReasoning(
   return resolveReasoningSupport(mOrId.id, []);
 }
 
-/**
- * Common "resolve model from provider, then delegate" pattern shared by
- * modelSupportsVision and modelSupportsReasoning. Resolves the exact model
- * via the fast path, falls back to the full provider model list, then
- * delegates to the provided resolver function.
- */
 function resolveCapability(
   modelId: string,
   providerId: string | undefined,

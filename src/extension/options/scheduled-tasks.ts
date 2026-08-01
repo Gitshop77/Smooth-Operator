@@ -18,22 +18,21 @@
 
 import type { ScheduledTask, ScheduledTaskSchedule } from "@/lib/agent/scheduled-tasks";
 import { listScheduledTasks, saveScheduledTask } from "@/lib/agent/scheduled-tasks";
+// Constants come from the lib (single source of truth) — a local
+// duplicate here is a drift hazard.
+import { ALARM_PREFIX, DEFAULT_HOUR, DEFAULT_MINUTE, DEFAULT_DAY_OF_WEEK } from "@/lib/agent/scheduled-tasks-utils";
 import { $, escapeHtml } from "@/extension/shared";
-import { STORAGE_KEYS } from "./settings-sync";
+import { STORAGE_KEYS } from "./storage-keys";
 import { alertModal } from "./modal";
 import { maybeReleaseKeepAwake } from "@/extension/background/state-store";
 
-const ALARM_PREFIX = "open_cowork_scheduled_";
-const DEFAULT_HOUR = 9;
-const DEFAULT_MINUTE = 0;
-const DEFAULT_DAY_OF_WEEK = 1;
 /** Max characters allowed in a scheduled-task prompt (storage / UI sanity). */
 const MAX_SCHEDULED_TASK_PROMPT = 10_000;
 
 /**
  * Serialize Options-side scheduled-task mutations so rapid delete clicks in the
  * SAME context can't interleave their read-modify-write of the whole list and
- * resurrect a just-deleted task (finding #10 — lost-update / task resurrection).
+ * resurrect a just-deleted task (lost-update / task-resurrection race).
  * This mirrors the `withTaskMutation` mutex in `lib/agent/scheduled-tasks.ts`.
  * The canonical delete should ultimately live in the lib (sharing ONE lock with
  * the SW context), but until then this prevents the same-context race.
@@ -125,8 +124,8 @@ export async function renderSchedule(): Promise<void> {
       try {
         await withTaskMutation(async () => {
  // Re-read the freshest list INSIDE the lock so two rapid deletes can't
- // each overwrite the other's write (task-resurrection race, finding
- // #10). Removing by id (not by a stale render snapshot) is safe even if
+ // each overwrite the other's write (task-resurrection race). Removing by
+ // id (not by a stale render snapshot) is safe even if
  // another context mutated the list between renders.
         const current = await listScheduledTasks();
         const filtered = current.filter((x) => x.id !== t.id);
@@ -134,8 +133,8 @@ export async function renderSchedule(): Promise<void> {
  // storage write. If the alarm cannot be cleared we roll the storage write
  // BACK (re-persist the original list) rather than leaving a
  // storage-less-but-still-armed chrome.alarm that could fire for a deleted
- // task (finding #78 — delete storage-write success was not matched by
- // alarm-clear success, so a deleted task's orphaned alarm could still fire).
+ // task (delete storage-write success was not matched by alarm-clear
+ // success, so a deleted task's orphaned alarm could still fire).
  // `chrome.alarms.clear` resolves (not throws) when the alarm is already gone,
  // so `cleared` is only false after a genuine error.
         let cleared = false;
@@ -175,7 +174,7 @@ export async function renderSchedule(): Promise<void> {
     enableBtn.addEventListener("click", async () => {
       await withTaskMutation(async () => {
  // Re-read the freshest list so a stale render-closure object can't resurrect
- // a task that was deleted in another context (finding #44).
+ // a task that was deleted in another context.
         const current = await listScheduledTasks();
         const target = current.find((x) => x.id === t.id);
         if (!target) return; // deleted — do not re-persist
@@ -196,8 +195,8 @@ $("addSchedule").addEventListener("click", async () => {
   const task = ($("scheduleTask") as HTMLInputElement).value.trim();
   const type = ($("scheduleType") as HTMLSelectElement).value as ScheduledTaskSchedule["type"];
   if (!task) return;
- // Bound the prompt length before persisting (finding: scheduled task prompt
- // stored with no length/content guard). An unbounded prompt bloats
+ // Bound the prompt length before persisting (a scheduled-task prompt stored
+ // with no length/content guard). An unbounded prompt bloats
  // chrome.storage.local and is only shown truncated in the list preview.
   if (task.length > MAX_SCHEDULED_TASK_PROMPT) {
     await alertModal({
@@ -250,7 +249,7 @@ $("addSchedule").addEventListener("click", async () => {
   } catch (e) {
     console.warn("[options] saveScheduledTask failed:", e);
  // Surface the failure to the user instead of silently dropping the task
- // (finding: addSchedule silently swallowed saveScheduledTask failures).
+ // (addSchedule used to swallow saveScheduledTask failures).
     await alertModal({
       title: "Could not save scheduled task",
       message: e instanceof Error ? e.message : String(e),

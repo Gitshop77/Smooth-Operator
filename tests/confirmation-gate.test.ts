@@ -16,7 +16,7 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import { shouldAskForConfirmation } from "../src/lib/agent/human-interaction";
 import { requiresConfirmation, MODE_CONFIGS } from "../src/lib/agent/modes";
-import { ACTION_METADATA } from "../src/lib/agent/tools/schema";
+import { ACTION_METADATA } from "../src/lib/agent/tools/schema-utils";
 import type { AgentAction, LogEvent } from "../src/lib/agent/types";
 import { makeState } from "./helpers";
 
@@ -80,8 +80,8 @@ describe("shouldAskForConfirmation reports the per-mode confirmation policy", ()
   });
 
   test("MODE_CONFIGS confirmRequired lists agree with requiresConfirmation", () => {
- // Verify the mode table's confirmRequired matches the function's output
- // for every action type in the list.
+    // Verify the mode table's confirmRequired matches the function's output
+    // for every action type in the list.
     const standardList = MODE_CONFIGS.standard.confirmRequired as readonly string[];
     for (const a of standardList) {
       expect(requiresConfirmation(a, "standard")).toBe(true);
@@ -101,35 +101,35 @@ describe("shouldAskForConfirmation reports the per-mode confirmation policy", ()
 // exercised end-to-end.
 
 describe("confirmation gate in executeActionQueue", () => {
- // Dedicated test-mode override: make `evaluate` mode-allowed in standard mode
- // so it is BOTH allowed (real `checkActionAllowed`) and confirm-required
- // (real `requiresConfirmation`). Restored after each test.
+  // Dedicated test-mode override: make `evaluate` mode-allowed in standard mode
+  // so it is BOTH allowed (real `checkActionAllowed`) and confirm-required
+  // (real `requiresConfirmation`). Restored after each test.
   let savedCanExecuteJs: boolean;
- // `evaluate` fails closed without an explicit domain allowlist. The
- // "allows the action to proceed" test actually executes the evaluate, so the
- // jsdom origin (localhost) must be allowlisted; the decline test never
- // reaches execution but the config is harmless there.
+  // `evaluate` fails closed without an explicit domain allowlist. The
+  // "allows the action to proceed" test actually executes the evaluate, so the
+  // jsdom origin (localhost) must be allowlisted; the decline test never
+  // reaches execution but the config is harmless there.
   let savedLocation: unknown;
   beforeEach(() => {
- // Flip the real mode config so `evaluate` is mode-allowed in standard mode.
- // `MODE_CONFIGS` is a runtime object (not frozen), so this mutation is
- // visible to the real, unmocked `checkActionAllowed`. `confirmRequired`
- // is left intact, so `requiresConfirmation` still returns `true`.
+    // Flip the real mode config so `evaluate` is mode-allowed in standard mode.
+    // `MODE_CONFIGS` is a runtime object (not frozen), so this mutation is
+    // visible to the real, unmocked `checkActionAllowed`. `confirmRequired`
+    // is left intact, so `requiresConfirmation` still returns `true`.
     savedCanExecuteJs = MODE_CONFIGS.standard.canExecuteJs;
     (MODE_CONFIGS.standard as { canExecuteJs: boolean }).canExecuteJs = true;
     (globalThis as Record<string, unknown>).__openCoworkDomainConfig = {
- // Use a dotted (multi-label) host. The domain-allowlist matcher
- // intentionally REJECTS single-label hosts like "localhost" (to stop a
- // typo'd "com"/"org" from over-matching every host), so the jsdom
- // origin must be represented as a dotted domain here.
+      // Use a dotted (multi-label) host. The domain-allowlist matcher
+      // intentionally REJECTS single-label hosts like "localhost" (to stop a
+      // typo'd "com"/"org" from over-matching every host), so the jsdom
+      // origin must be represented as a dotted domain here.
       allowedDomains: ["app.example.com"],
     };
- // The executor's `evaluate` gate reads the global `location.href`. jsdom's
- // default origin is `http://test.example.com/` whose dotted host is
- // accepted by the hardened matcher above, so point `location` at a dotted
- // host the allowlist permits. This exercises the REAL executor path
- // end-to-end (domain allowlist → confirmation → execution) without
- // weakening the single-label hardening.
+    // The executor's `evaluate` gate reads the global `location.href`. jsdom's
+    // default origin is `http://test.example.com/` whose dotted host is
+    // accepted by the hardened matcher above, so point `location` at a dotted
+    // host the allowlist permits. This exercises the REAL executor path
+    // end-to-end (domain allowlist → confirmation → execution) without
+    // weakening the single-label hardening.
     savedLocation = (globalThis as Record<string, unknown>).location;
     Object.defineProperty(globalThis, "location", {
       configurable: true,
@@ -137,7 +137,7 @@ describe("confirmation gate in executeActionQueue", () => {
     });
   });
   afterEach(() => {
- // Restore the shipped mode table so no other suite sees the override.
+    // Restore the shipped mode table so no other suite sees the override.
     (MODE_CONFIGS.standard as { canExecuteJs: boolean }).canExecuteJs =
       savedCanExecuteJs;
     delete (globalThis as Record<string, unknown>).__openCoworkDomainConfig;
@@ -178,15 +178,15 @@ describe("confirmation gate in executeActionQueue", () => {
       DEFAULT_CONFIG,
     );
 
- // The confirmation callback must have fired with the pending action.
+    // The confirmation callback must have fired with the pending action.
     expect(requestConfirmation).toHaveBeenCalledTimes(1);
     expect(requestConfirmation).toHaveBeenCalledWith(evaluateAction);
- // Decline → queue aborts, the action's result is a "user declined" block.
+    // Decline → queue aborts, the action's result is a "user declined" block.
     expect(result.aborted).toBe(true);
     expect(result.results).toHaveLength(1);
     expect(result.results[0].success).toBe(false);
     expect(result.results[0].message).toContain("user declined");
- // The decline event surfaces a `BLOCKED` message via the event sink.
+    // The decline event surfaces a `BLOCKED` message via the event sink.
     const blockEvents = onEvent.mock.calls.filter(
       (call: unknown[]) => {
         const e = call[0] as LogEvent;
@@ -226,9 +226,9 @@ describe("confirmation gate in executeActionQueue", () => {
     );
 
     expect(requestConfirmation).toHaveBeenCalledTimes(1);
- // Confirm → the action actually executes (return 2 + 2 === 4). A read-only
- // `evaluate` no longer flags `pageChanged`, so the queue does NOT
- // abort; the action's own result is success.
+    // Confirm → the action actually executes (return 2 + 2 === 4). A read-only
+    // `evaluate` no longer flags `pageChanged`, so the queue does NOT
+    // abort; the action's own result is success.
     expect(result.aborted).toBe(false);
     expect(result.results).toHaveLength(1);
     expect(result.results[0].success).toBe(true);
@@ -242,11 +242,11 @@ describe("confirmation gate in executeActionQueue", () => {
 
     const requestConfirmation = vi.fn().mockResolvedValue(true);
     const onEvent = vi.fn();
- // `click` is in the UNGATED_ACTION_TYPES list — never requires confirmation
- // in any mode. (It's also mode-allowed in standard mode.)
+    // `click` is in the UNGATED_ACTION_TYPES list — never requires confirmation
+    // in any mode. (It's also mode-allowed in standard mode.)
     const clickAction: AgentAction = { type: "click", index: 1 } as AgentAction;
 
- // Set up a clickable element at index 1 so the action succeeds.
+    // Set up a clickable element at index 1 so the action succeeds.
     const btn = document.createElement("button");
     document.body.appendChild(btn);
     const state = makeState({ selectorMap: { 1: btn } });
@@ -339,7 +339,7 @@ describe("ask_human executor action", () => {
   });
 
   test("calls askHuman and surfaces the user's answer (not a fabricated response)", async () => {
- // Mock window.prompt to simulate the user typing an answer.
+    // Mock window.prompt to simulate the user typing an answer.
     window.prompt = vi.fn(() => "user typed this answer") as typeof window.prompt;
     window.confirm = vi.fn(() => true) as typeof window.confirm;
 
@@ -347,13 +347,13 @@ describe("ask_human executor action", () => {
     const action: AgentAction = { type: "ask_human", question: "What is your name?" } as AgentAction;
     const result = await executeAction(action, makeState());
     expect(result.success).toBe(true);
- // The real answer must be surfaced — not a fabricated "Asked user: ..."
- // message that never actually asked anything.
+    // The real answer must be surfaced — not a fabricated "Asked user: ..."
+    // message that never actually asked anything.
     expect(result.message).toContain("user typed this answer");
     expect(result.extractedContent).toContain("user typed this answer");
     expect(result.extractedContent).toContain("What is your name?");
- // Verify window.prompt was actually called — and with the question, so a
- // regression that passes the wrong/empty argument to the dialog is caught.
+    // Verify window.prompt was actually called — and with the question, so a
+    // regression that passes the wrong/empty argument to the dialog is caught.
     expect(window.prompt).toHaveBeenCalled();
     expect(window.prompt).toHaveBeenCalledWith(
       expect.stringContaining("What is your name?"),

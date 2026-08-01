@@ -8,10 +8,8 @@
  */
 
 import { describe, test, expect } from "vitest";
-import {
-  sanitizeResponse,
-  type HumanInteractionResponse,
-} from "../src/lib/agent/human-interaction";
+import { sanitizeResponse } from "../src/lib/agent/human-interaction-utils";
+import type { HumanInteractionResponse } from "../src/lib/agent/human-interaction";
 
 describe("sanitizeResponse", () => {
   test("undefined payload is treated as cancelled", () => {

@@ -26,11 +26,15 @@ describe("security guard drift-guard", () => {
 
  // Token-presence alone is not enough: a self-heal refactor could keep the
  // guard definition while deleting the call site, and CI would still pass.
- // Assert the guards are actually invoked on the live code path.
+ // Assert the guards are actually invoked on the live code path — either
+ // directly or via the checkRedos helper that wraps them.
   it("invokes the ReDoS guards on the live search-page handler path", () => {
     const src = readSrc("src/lib/agent/tools/handlers/search-page.ts");
-    expect(src).toMatch(/hasNestedQuantifier\(\s*pattern\s*\)/);
-    expect(src).toMatch(/hasBackreference\(\s*pattern\s*\)/);
+    const callsGuardsDirectly =
+      /hasNestedQuantifier\(\s*pattern\s*\)/.test(src) &&
+      /hasBackreference\(\s*pattern\s*\)/.test(src);
+    const callsCheckRedos = /checkRedos\(\s*pattern\s*\)/.test(src);
+    expect(callsGuardsDirectly || callsCheckRedos).toBe(true);
   });
 
  // A behavioral regression test must exist so a ReDoS payload is rejected at
@@ -50,9 +54,14 @@ describe("security guard drift-guard", () => {
   });
 
   it("keeps the SSRF link-local / cloud-metadata block (169.254 and fe80)", () => {
-    const src = readSrc("src/lib/agent/llm/route/ssrf.ts");
-    expect(src).toContain("169.254");
-    expect(src).toContain("fe80");
+ // ssrf.ts only mentions 169.254 / fe80 in its header comment, so grepping
+ // ssrf.ts would pass even if the real guards were deleted. Assert against
+ // the CODE in ssrf-ipv6.ts instead: isSsrfSinkIpv4 rejects 169.254.0.0/16
+ // and the fe80 checks use a masked comparison — a weakened full-value
+ // `===` fails the assertion below.
+    const src = readSrc("src/lib/agent/llm/route/ssrf-ipv6.ts");
+    expect(src).toContain("a === 169 && b === 254");
+    expect(src).toContain("(groups[0] & 0xffc0) === 0xfe80");
   });
 
   it("keeps the user-provenance short-circuit in provider-config", () => {

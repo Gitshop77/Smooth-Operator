@@ -22,6 +22,8 @@
  * detached without paying the style-recalc cost on every visited node.
  */
 
+import { INTERACTIVE_TAGS, INTERACTIVE_ROLES, SENSITIVE_AUTOCOMPLETE_SET, getRole } from "./classification-helpers";
+
 // ─── Skip-tag set ───────────────────────────────────────────────────────────
 
 /**
@@ -39,53 +41,6 @@ export const SKIP_TAGS: ReadonlySet<string> = new Set([
 ]);
 
 // ─── Interactive-element classification ─────────────────────────────────────
-
-/** Tags that are always treated as interactive (in addition to role-based). */
-const INTERACTIVE_TAGS: ReadonlySet<string> = new Set([
-  "button", "input", "select", "textarea", "summary", "details",
-]);
-
-/**
- * ARIA roles that imply interactivity. Module-internal — re-used by the
- * bounding-box propagation filter in {@link shouldExcludeAsContained} to
- * decide whether a child element has its own independent interaction
- * semantics (and therefore should NOT be suppressed as a duplicate click
- * target inside a propagating ancestor).
- */
-const INTERACTIVE_ROLES: ReadonlySet<string> = new Set([
-  "button", "link", "checkbox", "radio", "tab", "menuitem",
-  "menuitemcheckbox", "menuitemradio", "option", "combobox",
-  "listbox", "slider", "switch", "textbox", "spinbutton", "searchbox",
-  "treeitem", "gridcell",
-]);
-
-/**
- * Determine whether an element is interactive (clickable / focusable / editable).
- * Interactive elements receive an `[index]` in the serialized DOM tree.
- *
- * Canonical version — matches the historical `extractor.ts` definition (the
- * more complete of the two) and supersedes the simpler `ax-tree.ts` version
- * (which missed `draggable`, the full ARIA role set, and the
- * `contenteditable !== "false"` distinction). A public re-export of this
- * function lives in `extraction/page-state.ts` (the indexed tree, for
- * backwards compatibility with `extractor.ts` importers).
- *
- * Implementation note: we use `getAttribute(...) !== null` rather than
- * `hasAttribute(...)` for the boolean-attribute checks. The two are
- * semantically identical for `HTMLElement`, but `getAttribute` is the smaller
- * API surface — the historical `ax-tree.ts` definition only used
- * `getAttribute`, and the ax-tree test stub only mocks `getAttribute`. Keeping
- * that contract means the ax-tree tests don't need to be expanded when the
- * canonical helper is unified here.
- */
-/**
- * Read an element's ARIA `role` attribute, lowercased, or `null` when absent.
- * Centralizes the `getAttribute("role")?.toLowerCase()` idiom so the two
- * extractors can't drift on role normalization.
- */
-function getRole(el: Element): string | null {
-  return el.getAttribute("role")?.toLowerCase() ?? null;
-}
 
 export function isInteractive(el: HTMLElement): boolean {
   const tag = el.tagName.toLowerCase();
@@ -136,7 +91,7 @@ export function isInteractive(el: HTMLElement): boolean {
 // - `{tag:"input", role:"combobox"}` — combobox input
 
 /** A single propagating-element pattern: tag + optional role constraint. */
-export interface PropagatingElementPattern {
+interface PropagatingElementPattern {
   /** Lowercased tag name (e.g. `"a"`, `"button"`, `"div"`). */
   tag: string;
   /** If set, the element's `role` attribute must match this value. */
@@ -179,7 +134,7 @@ export function isPropagatingElement(el: Element): boolean {
  * Default containment threshold — a child whose area is ≥99% inside the
  * parent is considered a duplicate click target.
  */
-export const DEFAULT_CONTAINMENT_THRESHOLD = 0.99;
+const DEFAULT_CONTAINMENT_THRESHOLD = 0.99;
 
 /**
  * Compute the bounding-box containment ratio of `child` within `parent`.
@@ -274,35 +229,9 @@ export function shouldExcludeAsContained(child: Element): boolean {
 
 // ─── Sensitive-field detection ──────────────────────────────────────────────
 
-/**
- * Autocomplete tokens that mark a field as sensitive (its value must never be
- * surfaced to the LLM). Shared by both the indexed-tree extractor
- * (`element-info.buildAttrs`) and the AX-tree builder so the two redact
- * consistently — previously only the AX tree redacted these, so a credit-card
- * number autofilled into `<input type="text" autocomplete="cc-number">` was
- * shipped to the LLM via the indexed tree.
- */
-export const SENSITIVE_AUTOCOMPLETE: readonly string[] = [
-  "current-password", "new-password", "one-time-code",
-  "cc-number", "cc-csc", "cc-exp", "cc-exp-month", "cc-exp-year",
-];
-
-const SENSITIVE_AUTOCOMPLETE_SET = new Set(SENSITIVE_AUTOCOMPLETE);
-
-/**
- * Determine whether an element holds sensitive data whose `value` should be
- * redacted before being sent to the LLM. True for `type="password"`,
- * `type="hidden"` (CSRF/session tokens), and any field whose `autocomplete`
- * token list includes a sensitive token (credit-card, OTP, password).
- */
 export function isSensitive(el: HTMLElement): boolean {
   const type = (el.getAttribute("type") || "").toLowerCase();
   if (type === "password" || type === "hidden") return true;
- // The `autocomplete` attribute is a whitespace-separated token list (e.g.
- // "section-cc cc-number"). Compare tokens rather than doing a raw substring
- // match, so a benign value whose text merely *contains* a sensitive token as
- // a substring (e.g. "cc-exp-month" should not match the bare "cc-exp" token
- // unless it is itself listed) is classified precisely.
   const autocompleteTokens = (el.getAttribute("autocomplete") || "")
     .toLowerCase()
     .split(/\s+/);

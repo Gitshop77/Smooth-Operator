@@ -39,52 +39,19 @@
  */
 
 import type { ExtractedElement } from "./types";
-
-/** Common English stop-words to filter out of the keyword set. */
-const STOP_WORDS = new Set<string>([
-  "a", "an", "the", "and", "or", "but", "if", "then", "else", "for",
-  "of", "to", "in", "on", "at", "by", "with", "from", "as", "is",
-  "are", "was", "were", "be", "been", "being", "have", "has", "had",
-  "do", "does", "did", "will", "would", "should", "could", "can", "may",
-  "might", "must", "shall", "this", "that", "these", "those", "i", "you",
-  "he", "she", "it", "we", "they", "me", "him", "her", "us", "them",
-  "my", "your", "his", "its", "our", "their", "mine", "yours", "hers",
-  "ours", "theirs", "all", "any", "some", "no", "not", "nor", "only",
-  "own", "same", "so", "than", "too", "very", "just", "now", "up",
-  "down", "out", "off", "over", "under", "again", "further", "once",
-  "here", "there", "when", "where", "why", "how", "what", "which",
-  "who", "whom", "page", "site", "tab", "browser", "agent",
-]);
-
-/** Minimum keyword length to keep (filters out 1-char noise). */
-const MIN_KEYWORD_LENGTH = 2;
-
-/**
- * Tokenize a free-text prompt into a set of lowercased keywords.
- *
- * Splits on whitespace + punctuation, drops stop-words + 1-char tokens,
- * lowercases everything. Returns a Set for O(1) membership checks.
- */
-export function extractKeywords(text: string): Set<string> {
-  const out = new Set<string>();
-  if (!text) return out;
-  const tokens = text.toLowerCase().split(/[^a-z0-9]+/i);
-  for (const tok of tokens) {
-    if (tok.length < MIN_KEYWORD_LENGTH) continue;
-    if (STOP_WORDS.has(tok)) continue;
-    out.add(tok);
-  }
-  return out;
-}
+import {
+  extractKeywords,
+  FORM_INTENT_RE,
+  NAV_INTENT_RE,
+  SEARCH_INTENT_RE,
+  READ_INTENT_RE,
+  INTENT_TAGS,
+  stripNewlines,
+  escapeAttr,
+} from "./html-summarizer-utils";
 
 /** Task-intent detection — returns a set of "intents" the task implies. */
-/** Pre-compiled intent-detection patterns (hoisted so they aren't reallocated on every call). */
-const FORM_INTENT_RE = /\b(fill|submit|login|sign in|sign up|register|enter|form|password|email|username|checkout|pay)\b/;
-const NAV_INTENT_RE = /\b(go to|open|navigate|visit|browse|click|link)\b/;
-const SEARCH_INTENT_RE = /\b(search|find|look up|query|filter)\b/;
-const READ_INTENT_RE = /\b(read|summarize|list|what|who|when|where|how many|tell me|give me|show me)\b/;
-
-export function detectIntents(text: string): Set<"form" | "nav" | "search" | "read"> {
+function detectIntents(text: string): Set<"form" | "nav" | "search" | "read"> {
   const intents = new Set<"form" | "nav" | "search" | "read">();
   const t = text.toLowerCase();
   if (FORM_INTENT_RE.test(t)) {
@@ -102,14 +69,6 @@ export function detectIntents(text: string): Set<"form" | "nav" | "search" | "re
   return intents;
 }
 
-/** Tag sets for each intent. */
-const INTENT_TAGS: Record<"form" | "nav" | "search" | "read", Set<string>> = {
-  form: new Set(["input", "textarea", "select", "button", "label", "option"]),
-  nav: new Set(["a", "button"]),
-  search: new Set(["input", "button", "a"]),
-  read: new Set(["a", "h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "td", "article", "section"]),
-};
-
 /**
  * Score a single element against the keyword set + intents.
  *
@@ -117,7 +76,7 @@ const INTENT_TAGS: Record<"form" | "nav" | "search" | "read", Set<string>> = {
  * (unless the summarizer falls back to "keep all" because too few elements
  * scored non-zero).
  */
-export function scoreElement(
+function scoreElement(
   el: ExtractedElement,
   keywords: Set<string>,
   intents: Set<"form" | "nav" | "search" | "read">,
@@ -165,7 +124,7 @@ export function scoreElement(
 }
 
 /** Default cap on the number of elements the summarizer keeps. */
-export const DEFAULT_MAX_SUMMARIZED_ELEMENTS = 30;
+const DEFAULT_MAX_SUMMARIZED_ELEMENTS = 30;
 
 /**
  * Bounded cap on how many elements we keep when falling back (too few keywords
@@ -174,13 +133,13 @@ export const DEFAULT_MAX_SUMMARIZED_ELEMENTS = 30;
  * Guarantees at least this many best-scored elements are surfaced, but never
  * the full DOM.
  */
-export const FALLBACK_CAP_ELEMENTS = 50;
+const FALLBACK_CAP_ELEMENTS = 50;
 
 /** Default minimum `elementsText` length to trigger the summarizer at all. */
 export const DEFAULT_MIN_HTML_LENGTH = 10_000;
 
 /** Inputs to {@link summarizeDom}. */
-export interface SummarizeDomInput {
+interface SummarizeDomInput {
   /** The user's original task description. */
   task: string;
   /** The current sub-goal the navigator is pursuing. */
@@ -192,7 +151,7 @@ export interface SummarizeDomInput {
 }
 
 /** Output of {@link summarizeDom}. */
-export interface SummarizeDomOutput {
+interface SummarizeDomOutput {
   /** The indices (1-based, matching `ExtractedElement.index`) that were kept. */
   keptIndices: number[];
   /** The filtered element objects (preserving their original `index`). */
@@ -271,20 +230,6 @@ export function summarizeDom(input: SummarizeDomInput): SummarizeDomOutput {
  * threaded into this layer. The orchestrator swaps this filtered text into
  * the navigator request when the summarizer is enabled.
  */
-/** Collapse runs of CR/LF into a single space for compact element text. */
-function stripNewlines(s: string): string {
-  return s.replace(/[\r\n]+/g, " ");
-}
-
-/** HTML-attribute string escape (ampersand / angle brackets / quotes). */
-function escapeAttr(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
 export function renderElementsText(keptElements: ExtractedElement[]): string {
   const lines: string[] = [];
   for (const el of keptElements) {

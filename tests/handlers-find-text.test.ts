@@ -6,13 +6,16 @@
  *    `""`.includes("") first-node false match);
  *  - a search that exhausts the node-visit cap fails with an explicit
  *    "search truncated" message instead of a silent miss.
+ *  - a happy path: visible text in the body IS found (so the guards are
+ *    proven to reject only what they must, never everything).
  * These tests lock those guards in.
  */
 
-import { describe, test, expect, beforeEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import type { ActionContext } from "../src/lib/agent/tools/handlers/types";
 import { makeState } from "./helpers/make-state";
 import { handleFindText } from "../src/lib/agent/tools/handlers/find-text";
+import { installJsdomLayoutMock, restoreJsdomLayoutMock } from "./helpers/jsdom-layout-mock";
 
 function ctx(): ActionContext {
   return {
@@ -24,9 +27,26 @@ function ctx(): ActionContext {
 
 beforeEach(() => {
   document.body.innerHTML = "";
+  // handleFindText only matches nodes that pass the visibility check; jsdom
+  // has no layout engine (offsetParent null / zero rects), so the layout mock
+  // is required for the happy path to be findable.
+  installJsdomLayoutMock();
+});
+
+afterEach(() => {
+  restoreJsdomLayoutMock();
 });
 
 describe("handleFindText", () => {
+  test("matching visible text in the body is found and reported", async () => {
+    const p = document.createElement("p");
+    p.textContent = "the needle in the haystack";
+    document.body.appendChild(p);
+    const res = await handleFindText(ctx(), { type: "find_text", text: "needle" });
+    expect(res.success).toBe(true);
+    expect(res.message).toBe('Found "needle" and scrolled to it');
+  });
+
   test("text located only inside script/style/template is NOT matched", async () => {
     // type="text/plain" makes jsdom treat the element as a data block (no exec)
     // while still carrying text inside a SCRIPT tag, so the FILTER_REJECT path

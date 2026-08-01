@@ -19,7 +19,7 @@
  */
 
 /** A button description for the modal footer. */
-export interface ModalAction {
+interface ModalAction {
   label: string;
   /** Value resolved by the promise when this button is clicked. */
   value: string;
@@ -29,7 +29,7 @@ export interface ModalAction {
   autofocus?: boolean;
 }
 
-export interface ModalOptions {
+interface ModalOptions {
   title: string;
   /** Body content — an HTMLElement (preferred) or a plain-text string. */
   body: HTMLElement | string;

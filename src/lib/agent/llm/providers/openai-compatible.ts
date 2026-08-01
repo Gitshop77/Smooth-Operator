@@ -48,7 +48,7 @@ class UnknownProviderError extends Error {
   }
 }
 
-export type Config = {
+type Config = {
   baseURL?: string;
   // When true (user-configured provenance) the curated-local-provider loopback
   // exemption is honored; otherwise loopback / RFC1918 / ULA are rejected.
@@ -76,16 +76,18 @@ function routeKey(baseURL: string | undefined): string {
 
 // Stable per-instance id for an explicit `auth` override so distinct
 // caller-supplied auth objects don't clobber each other's route entry in the
-// global registry (the route id otherwise folds only baseURL + apiKey, so two
-// `configure()` calls with the same baseURL/apiKey but different `auth`
-// would share a routeId and the last writer wins). The map is scoped to this
+// global registry (the route id otherwise folds only baseURL + a nonce, so two
+// `configure()` calls with the same baseURL but different credentials must NOT
+// share a routeId — the last writer would win). The map is scoped to this
 // module / process — matching the lifetime of the in-memory route registry.
 const authIdMap = new WeakMap<object, string>();
 let authIdCounter = 0;
 function authKey(value: unknown): string {
   if (value === undefined || value === null) return "";
   if (typeof value !== "object" && typeof value !== "function") {
-    return String(value);
+    // Never fold a raw (potentially secret) primitive into the route id —
+    // map it through the counter instead, same as object auths.
+    return `s${authIdCounter++}`;
   }
   let id = authIdMap.get(value as object);
   if (!id) {
@@ -94,6 +96,14 @@ function authKey(value: unknown): string {
   }
   return id;
 }
+
+// Monotonic per-configure nonce. Folded into the route id so distinct
+// `configure()` calls for the same provider/baseURL but DIFFERENT credentials
+// register under distinct registry keys — WITHOUT hashing the raw apiKey into
+// the id (key-derived material in route ids, error messages, and request
+// payloads is a brute-force oracle). The counter mirrors the `authIdCounter`
+// precedent: ids are per-process and non-secret.
+let configNonce = 0;
 
 const auth = (options: ProviderAuthOption<"optional">) => {
   if ("auth" in options && options.auth) return options.auth;
@@ -119,7 +129,6 @@ function configure(profile: OpenAICompatibleProfile, input: Config = {}) {
  // only for a user-configured baseURL.
   assertSafeUserBaseURL(input.baseURL, profile.provider, input.allowLocalExemption);
   const baseURL = input.baseURL ?? profile.baseURL;
-  const apiKey = "apiKey" in input ? input.apiKey : undefined;
   // Split the (possibly path-prefixed) base URL into origin + path-prefix and
   // re-attach the prefix to `PATH` so `buildURL`'s `new URL(path, base)` (which
   // replaces the base path for a leading-slash path) doesn't drop a required
@@ -132,9 +141,13 @@ function configure(profile: OpenAICompatibleProfile, input: Config = {}) {
   // validation in transport-http.ts uses the correct trust level.
   const provenance: SsrfProvenance = input.allowLocalExemption ? "user-configured" : "untrusted";
   const route = make({
- // Fold the (effective) baseURL AND credentials into the route id so distinct
- // endpoints/credentials don't clobber each other in the global route registry.
-    id: `openai-compatible:${profile.provider}:${routeKey(`${baseURL}::${apiKey ?? ""}::${authKey((input as { auth?: unknown }).auth)}`)}`,
+    // Fold the (effective) baseURL AND a per-configure nonce into the route id
+    // so distinct endpoints/credentials don't clobber each other in the global
+    // route registry. The raw apiKey is deliberately NOT hashed in — it would
+    // leak key-derived material into route ids, error messages, and request
+    // payloads; the nonce keeps distinct credentials isolated without
+    // exposing anything secret.
+    id: `openai-compatible:${profile.provider}:${routeKey(baseURL)}:${authKey((input as { auth?: unknown }).auth)}:${configNonce++}`,
     provider: profile.provider,
     protocol: OpenAICompatibleChat.protocol,
     endpoint: Endpoint.path(`${prefix}${PATH}`, { baseURL: url.origin }),

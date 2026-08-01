@@ -22,7 +22,7 @@ import type { LoopDetector } from "./loop-detector";
 // ─── LLM call signatures ────────────────────────────────────────────────────
 
 /** Shared return shape for an LLM call that yields raw text + optional usage. */
-export type LLMCall<Req> = (req: Req, signal?: AbortSignal) => Promise<{
+type LLMCall<Req> = (req: Req, signal?: AbortSignal) => Promise<{
   raw: string;
   tokensIn?: number;
   tokensOut?: number;
@@ -40,17 +40,17 @@ export type LLMCall<Req> = (req: Req, signal?: AbortSignal) => Promise<{
 }>;
 
 /** Call the navigator LLM API with a structured request. Returns raw text + optional usage. */
-export type NavigatorLLMCall = LLMCall<import("../types").AgentStepRequest>;
+type NavigatorLLMCall = LLMCall<import("../types").AgentStepRequest>;
 
 /** Call the planner LLM API with a structured request. Returns raw text + optional usage. */
-export type PlannerLLMCall = LLMCall<import("../types").PlannerStepRequest>;
+type PlannerLLMCall = LLMCall<import("../types").PlannerStepRequest>;
 
 /**
  * Optional summarization call used by compaction. Accepts a system + user
  * prompt and optional model hint; returns the summary text + usage. Falls
  * back to {@link LoopDeps.plannerCall} when not provided.
  */
-export type SummarizeLLMCall = (req: {
+type SummarizeLLMCall = (req: {
   systemPrompt: string;
   userPrompt: string;
   model?: string;
@@ -219,6 +219,12 @@ export interface LoopState {
   currentGoal: string;
   /** The actual final result (success + text) when the run is finalized. */
   finalResult?: { success: boolean; text: string };
+  /** True once the terminal `done` event + `runEnd` dispatch have been
+  * emitted. `finish()` / `finishWithRunEnd` short-circuit on this flag so a
+  * run can never emit the terminal event twice (multiple finish call sites
+  * can fire in one run — e.g. a cost-capped compaction continues the step,
+  * and a later navigator/planner catch would otherwise re-emit). */
+  terminalEmitted?: boolean;
   /** The last URL observed by `observeState`. */
   lastObservedUrl?: string;
  // ── Optional callback dispatcher ──
@@ -287,20 +293,3 @@ export interface StepInfo {
   /** Maximum number of steps allowed for the run. */
   maxSteps: number;
 }
-
-// ─── Shared helpers ─────────────────────────────────────────────────────────
-
-/**
- * Append text to the pending loop warning, concatenating with a newline
- * when a prior warning exists, or setting it directly when empty.
- */
-export function appendToPendingWarning(state: LoopState, text: string): void {
-  state.pendingLoopWarning = state.pendingLoopWarning
-    ? `${state.pendingLoopWarning}\n${text}`
-    : text;
-}
-
-// ─── Re-exports for convenience ─────────────────────────────────────────────
-
-export type { CallbackContext, LLMUsageInfo, AgentRunResult } from "../callbacks";
-export type { LoopDetector } from "./loop-detector";

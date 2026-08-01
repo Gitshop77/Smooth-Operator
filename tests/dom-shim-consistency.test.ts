@@ -72,7 +72,7 @@ function assertConsistent(
     expect(added, `${shimName} has unexpected exports: ${added}`).toEqual([]);
     expect(removed, `${shimName} is missing exports: ${removed}`).toEqual([]);
   } else {
- // subset: every canonical export must be present in the shim.
+    // subset: every canonical export must be present in the shim.
     const missing = canonicalKeys.filter((k) => !shimSet.has(k));
     expect(
       missing,

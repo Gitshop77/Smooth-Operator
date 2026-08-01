@@ -104,10 +104,10 @@ describe("LoopDetector", () => {
     expect(det.shouldWarn()).toBe(0);
   });
 
-  test("normalizeAction distinguishes screenshot by fileName", () => {
+  test("normalizeAction distinguishes screenshot by file_name", () => {
     const det = new LoopDetector();
-    recordN(det, { type: "screenshot", fileName: "a.jpg" } as AgentAction, 4);
-    recordN(det, { type: "screenshot", fileName: "b.jpg" } as AgentAction, 4, 4);
+    recordN(det, { type: "screenshot", file_name: "a.jpg" } as AgentAction, 4);
+    recordN(det, { type: "screenshot", file_name: "b.jpg" } as AgentAction, 4, 4);
     expect(det.shouldWarn()).toBe(0);
   });
 
@@ -126,8 +126,19 @@ describe("LoopDetector", () => {
 
   test("normalizes equivalent scroll actions to the same hash", () => {
     const det = new LoopDetector();
- // {type:"scroll", down:true, pages:1} === {type:"scroll"} after normalization
-    recordN(det, { type: "scroll", down: true, pages: 1 }, 5);
+ // Mix the two source forms: `{down:true,pages:1}` and the all-defaults
+ // `{}` must land in the SAME bucket — 5 records alternating forms still
+ // trip the warning, proving the equivalence holds across forms (not just
+ // self-consistency of one form). The `{}` form is legal at runtime (the
+ // normalizer defaults down+pages), so the cast matches production reality.
+    for (let i = 0; i < 5; i++) {
+      det.record(
+        (i % 2 === 0
+          ? { type: "scroll", down: true, pages: 1 }
+          : { type: "scroll" }) as unknown as AgentAction,
+        i,
+      );
+    }
     expect(det.shouldWarn()).toBe(5);
   });
 });
@@ -445,12 +456,12 @@ describe("runAgentLoop — executeActions branch loop-detector integration", () 
   });
 });
 
-// ─── Hard maxSteps cap terminates a benign, distinct-action run (brief §1 / #1) ───
+// ─── Hard maxSteps cap terminates a benign, distinct-action run ───
 //
-// The research brief names the hard outer iteration cap (maxSteps) as the single
-// most important anti-loop control, and demands the cap be tested around the REAL
-// feedback loop (distinct actions, planner `continue`) — not the loop-detector
-// early-stop halt. Every other runAgentLoop test that reaches a terminal state does
+// The hard outer iteration cap (maxSteps) is the single most important
+// anti-loop control, and it must be tested around the REAL feedback loop
+// (distinct actions, planner `continue`) — not the loop-detector early-stop
+// halt. Every other runAgentLoop test that reaches a terminal state does
 // so via enableEarlyStop/loop-detector, so a regression that dropped the cap (or
 // stopped incrementing the step counter on the continue path) would be invisible.
 // This test isolates the cap: enableEarlyStop is OFF, the navigator emits a UNIQUE
@@ -517,7 +528,7 @@ describe("runAgentLoop — hard maxSteps cap terminates a benign distinct-action
   });
 });
 
-// ─── Terminal `done` matches the planner/judge decision (finding #1 regression guard) ─
+// ─── Terminal `done` matches the planner/judge decision (regression guard) ─
 //
 // When the navigator emits `done`, the planner verifies and (with the judge or
 // the deterministic evaluator) finalizes the run. That helper path emits the
@@ -590,7 +601,7 @@ describe("runAgentLoop — terminal done matches planner/judge decision", () => 
   });
 });
 
-// ─── Repeating-action early-stop terminates the run (finding #2 regression guard) ─
+// ─── Repeating-action early-stop terminates the run (regression guard) ─
 //
 // With `enableEarlyStop` on by default, a run that emits the same equivalent
 // action repeatedly must be hard-stopped well before `maxSteps`. This locks in

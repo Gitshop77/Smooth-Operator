@@ -132,7 +132,10 @@ export function parseKeys(keys: string): ParsedKeys {
   }
 
   const mainLower = mainRaw.toLowerCase();
-  let main = KEY_MAP[mainLower] ?? mainRaw;
+  // Own-property lookup only: `KEY_MAP` is a plain object, so `"constructor"`
+  // / `"toString"` would otherwise resolve through Object.prototype to garbage
+  // and be treated as a real key name.
+  let main = Object.hasOwn(KEY_MAP, mainLower) ? KEY_MAP[mainLower] : mainRaw;
   const shift = modifierSet.has("shift");
 
  // Apply Shift to produce the correct literal character. This mirrors what a

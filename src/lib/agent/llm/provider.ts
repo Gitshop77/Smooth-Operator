@@ -59,7 +59,7 @@ export interface LLMResponse {
 }
 
 /** A streamed text chunk from a streaming chat completion. */
-export interface StreamChunk {
+interface StreamChunk {
   /** Partial text content (may be empty for the final usage-only chunk). */
   content?: string;
   /** Final usage/cost (only present on the terminal chunk). */

@@ -24,89 +24,22 @@
  * acknowledge the trust boundary before the snippet is persisted.
  */
 
-import { $, escapeHtml, isRecord } from "@/extension/shared";
+import { $, escapeHtml } from "@/extension/shared";
 import { CUSTOM_TOOL_NAME_REGEX } from "@/lib/agent/tools/registry";
-import { STORAGE_KEYS, showSaved } from "./settings-sync";
+import { showSaved } from "./settings-sync";
 import { confirmModal, alertModal } from "./modal";
+import {
+  type CustomToolEntry,
+  DESC_MAX,
+  CODE_MAX,
+  serialize,
+  readCustomTools,
+  writeCustomTools,
+  computeCodeHash,
+  dangerousCodeWarnings,
+} from "./custom-tools-utils";
 
-/**
- * Compute a truncated SHA-256 hex digest of `input` (first 16 hex chars ≈
- * 64 bits). Used to give operators a per-tool code-integrity fingerprint so
- * they can spot tampering at a glance.
- */
-async function computeCodeHash(input: string): Promise<string> {
-  const data = new TextEncoder().encode(input);
-  const buf = await crypto.subtle.digest("SHA-256", data);
-  const bytes = new Uint8Array(buf);
-  let hex = "";
-  for (let i = 0; i < 16; i++) hex += bytes[i].toString(16).padStart(2, "0");
-  return hex;
-}
-
-/** A user-defined custom tool. */
-interface CustomToolEntry {
-  name: string;
-  description: string;
-  code: string;
-  createdAt?: number;
-  /** Truncated SHA-256 hex of `code` — operator-visible integrity fingerprint. */
-  codeHash?: string;
-}
-
-// ─── Field constraints ───────────────────────────────────────────────────────
-// `name` is bounded by CUSTOM_TOOL_NAME_REGEX (max 64). These cap the other
-// fields so a single tool cannot blow the ~5 MB chrome.storage.local quota.
-const DESC_MAX = 500;
-const CODE_MAX = 50_000;
-
-// ─── Mutation serialization ──────────────────────────────────────────────────
-// The add/delete handlers do a read-modify-write against storage. Two rapid
-// clicks can interleave the reads so the second write clobbers the first.
-// Serialize every storage mutation behind a single promise chain.
-let mutationQueue: Promise<unknown> = Promise.resolve();
-function serialize<T>(task: () => Promise<T>): Promise<T> {
-  const run = mutationQueue.then(task, task);
- // Swallow rejections so one failed mutation doesn't poison the queue.
-  mutationQueue = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  return run;
-}
-
-export function validateCustomTools(raw: unknown): CustomToolEntry[] {
-  if (raw === undefined || raw === null) return [];
-  if (!Array.isArray(raw)) {
-    console.warn("[custom-tools] stored value is not an array; ignoring.", raw);
-    return [];
-  }
-  const out: CustomToolEntry[] = [];
-  raw.forEach((entry, i) => {
-    if (
-      !isRecord(entry) ||
-      typeof entry.name !== "string" ||
-      typeof entry.description !== "string" ||
-      typeof entry.code !== "string"
-    ) {
-      console.warn(`[custom-tools] dropping malformed entry at index ${i}.`, entry);
-      return;
-    }
-    const createdAt = typeof entry.createdAt === "number" ? entry.createdAt : undefined;
-    const codeHash = typeof entry.codeHash === "string" ? entry.codeHash : undefined;
-    out.push({ name: entry.name, description: entry.description, code: entry.code, createdAt, codeHash });
-  });
-  return out;
-}
-
-async function readCustomTools(): Promise<CustomToolEntry[]> {
-  const res = await chrome.storage.local.get(STORAGE_KEYS.customTools);
-  return validateCustomTools(res[STORAGE_KEYS.customTools]);
-}
-
-async function writeCustomTools(tools: CustomToolEntry[]): Promise<void> {
- // The promise form rejects on storage failure; callers catch and surface it.
-  await chrome.storage.local.set({ [STORAGE_KEYS.customTools]: tools });
-}
+export { validateCustomTools } from "./custom-tools-utils";
 
 /** Render the manifest permission set as badges (read-only, informational). */
 async function renderToolPermissions(): Promise<void> {
@@ -126,7 +59,6 @@ async function renderToolPermissions(): Promise<void> {
     host.innerHTML = '<p class="empty-hint">No manifest permissions declared.</p>';
     return;
   }
- // Use the project-standard sanitizer rather than the ad-hoc `<`-only replace.
   host.innerHTML = permissions
     .map((p) => `<span class="perm-badge">${escapeHtml(p)}</span>`)
     .join("");
@@ -167,17 +99,21 @@ export async function renderTools(): Promise<void> {
           danger: true,
         });
         if (!ok) return;
- // Delete by index, not by name, so a pre-existing duplicate name
- // cannot mass-delete sibling entries. The captured render-time index may be
- // stale if another tab / external storage write mutated the list before this
- // click, so re-verify identity before splicing and abort + re-render on
- // mismatch.
         const current = await readCustomTools();
         const target = current[index];
+        // Legacy entries lack `createdAt` — fall back to `codeHash`
+        // for identity so a stale render snapshot can't delete a re-created
+        // tool whose code changed (name-only matching is the last resort).
+        const sameIdentity =
+          t.createdAt !== undefined
+            ? target?.createdAt === t.createdAt
+            : t.codeHash !== undefined
+              ? target?.codeHash === t.codeHash
+              : true;
         if (
           !target ||
           target.name !== t.name ||
-          (t.createdAt !== undefined && target.createdAt !== t.createdAt)
+          !sameIdentity
         ) {
           await renderTools();
           return;
@@ -212,9 +148,6 @@ export async function renderTools(): Promise<void> {
     frag.appendChild(item);
   });
   list.appendChild(frag);
- // `renderToolPermissions` is invoked once at module load (the manifest
- // permission set is static and doesn't change when tools are added/deleted),
- // so it is intentionally NOT re-rendered here — avoids a redundant call.
 }
 
 $("addTool").addEventListener("click", () => {
@@ -256,10 +189,6 @@ $("addTool").addEventListener("click", () => {
       });
       return;
     }
-    // EXECUTION-CONFIRMATION GATE: the tool's `code` executes with full
-    // extension privileges. Require an explicit acknowledgement so a tool
-    // cannot be planted silently (RCE / data-exfil surface). Aborting leaves
-    // storage unchanged and the form populated so the user can revise.
     const ack = await confirmModal({
       title: "Confirm custom tool",
       message:
@@ -271,17 +200,7 @@ $("addTool").addEventListener("click", () => {
     });
     if (!ack) return;
 
-    // Static analysis: warn (don't block) on patterns that could exfiltrate
-    // data or modify extension state when the code runs with full privileges.
-    const DANGEROUS_PATTERNS: [RegExp, string][] = [
-      [/fetch\s*\(/, "network fetch() — could exfiltrate data"],
-      [/XMLHttpRequest/, "XMLHttpRequest — could exfiltrate data"],
-      [/chrome\.\s*(runtime|tabs|storage|permissions)/, "chrome.* API — could modify extension state"],
-      [/\bimport\s*\(/, "dynamic import() — could load external modules"],
-    ];
-    const warnings = DANGEROUS_PATTERNS
-      .filter(([re]) => re.test(code))
-      .map(([, desc]) => `  - ${desc}`);
+    const warnings = dangerousCodeWarnings(code);
     if (warnings.length > 0) {
       const proceed = await confirmModal({
         title: "Potentially dangerous code detected",
@@ -306,8 +225,6 @@ $("addTool").addEventListener("click", () => {
       return;
     }
     const codeHash = await computeCodeHash(code);
- // Enforce name uniqueness: overwrite the existing entry instead of adding a
- // second one, so delete-by-name (and delete-by-index) stays safe.
     const idx = tools.findIndex((t) => t.name === name);
     const entry: CustomToolEntry = { name, description, code, createdAt: Date.now(), codeHash };
     if (idx >= 0) {

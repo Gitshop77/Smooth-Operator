@@ -31,7 +31,7 @@ import {
 export type EvaluatorKind = "string_match" | "url_match" | "program_html";
 
 /** Inputs to the combinator — one entry per evaluator kind. */
-export interface EvaluatorCombInput {
+interface EvaluatorCombInput {
   /** Optional string-match input. Skipped when `undefined`. */
   string?: StringEvaluatorInput;
   /** Optional URL-match input. Skipped when `undefined`. */
@@ -41,7 +41,7 @@ export interface EvaluatorCombInput {
 }
 
 /** One evaluator's result (regardless of kind). */
-export interface EvaluatorResult {
+interface EvaluatorResult {
   /** 1.0 = pass, 0.0 = fail (we don't do partial credit). */
   score: number;
   /** Tag identifying which evaluator produced this result. */
@@ -51,7 +51,7 @@ export interface EvaluatorResult {
 }
 
 /** Combined result from running an `EvaluatorComb`. */
-export interface EvaluatorCombResult {
+interface EvaluatorCombResult {
   /** Product of every evaluator's score (1.0 only if all pass). */
   score: number;
   /** Per-evaluator results, in evaluation order. */
@@ -159,23 +159,8 @@ export class EvaluatorComb {
   }
 }
 
-// Re-export the individual evaluators + their input types so callers can
-// import everything from a single module.
-export {
-  StringEvaluator,
-  type StringEvaluatorInput,
-  type StringEvaluatorResult,
-  type StringReferenceAnswer,
-} from "./string-evaluator";
-export {
-  URLEvaluator,
-  type URLEvaluatorInput,
-  type URLEvaluatorResult,
-} from "./url-evaluator";
-export {
-  HTMLContentEvaluator,
-  type HTMLContentEvaluatorInput,
-  type HTMLContentEvaluatorResult,
-  type HTMLContentTarget,
-  type RequiredContents,
-} from "./html-content-evaluator";
+// Re-export the evaluator classes so callers can import everything from a
+// single module. (Their input/result types are consumed only inside the
+// evaluators — import them from the individual modules if needed.)
+export { StringEvaluator } from "./string-evaluator";
+export { HTMLContentEvaluator } from "./html-content-evaluator";

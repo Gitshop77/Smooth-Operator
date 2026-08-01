@@ -12,8 +12,8 @@
  */
 
 import { $, escapeHtml, isRecord } from "@/extension/shared";
-import { showSaved, isHostname } from "./settings-sync";
-import { alertModal } from "./modal";
+import { showSaved, isHostname } from "./settings-sync-utils";
+import { alertModal, confirmModal } from "./modal";
 
 const CUSTOM_SKILLS_KEY = "open_cowork_custom_skills";
 
@@ -22,6 +22,8 @@ interface CustomSkill {
   name: string;
   frontmatter: string;
   instructions: string;
+  /** Stamp used for delete identity (mirrors custom-tools). Optional: legacy entries lack it. */
+  createdAt?: number;
 }
 
 // ─── Field constraints ───────────────────────────────────────────────────────
@@ -33,11 +35,11 @@ const INSTRUCTIONS_MAX = 50_000;
 const NAME_RE = new RegExp("^[^\\n\\r\\t]{1," + NAME_MAX + "}$");
 
 /**
- * `isHostname` is imported from `settings-sync` (single shared definition)
- * rather than duplicated here, so skill-domain validation matches the exact
- * contract the domain-skills matcher and `allowedDomains`/`blockedDomains`
- * rely on — including IPv6 literals, which a naive `:`-rejecting check would
- * silently fail.
+ * `isHostname` is imported from `settings-sync-utils` (single shared
+ * definition) rather than duplicated here, so skill-domain validation matches
+ * the exact contract the domain-skills matcher and
+ * `allowedDomains`/`blockedDomains` rely on — including IPv6 literals, which
+ * a naive `:`-rejecting check would silently fail.
  */
 
 
@@ -81,6 +83,7 @@ export function validateCustomSkills(raw: unknown): CustomSkill[] {
       name: entry.name,
       frontmatter,
       instructions: entry.instructions,
+      createdAt: typeof entry.createdAt === "number" ? entry.createdAt : undefined,
     });
   });
   return out;
@@ -112,13 +115,35 @@ export async function renderSkills(): Promise<void> {
       `<button type="button" class="skill-delete" aria-label="Delete skill ${escapeHtml(s.name)}">Delete</button>`;
     item.querySelector("button")!.addEventListener("click", () => {
       void serialize(async () => {
- // Re-read storage inside the task and delete by stable `name` so
- // concurrent deletes don't operate on a stale render-time snapshot
- // (index-based filtering resurrects/removes the wrong skill).
+        // Confirm before deleting (mirrors custom-tools) and use the
+        // same stale-render identity check — a name match PLUS a createdAt
+        // match when the render snapshot has one. Name uniqueness is enforced
+        // on add, so name alone is safe today; the createdAt check protects
+        // against a stale snapshot deleting a re-created skill.
+        const ok = await confirmModal({
+          title: "Delete skill",
+          message: `Delete skill "${s.name}"?`,
+          confirmLabel: "Delete",
+          danger: true,
+        });
+        if (!ok) return;
+        // Re-read storage inside the task and delete by stable identity so
+        // concurrent deletes don't operate on a stale render-time snapshot
+        // (index-based filtering resurrects/removes the wrong skill).
         const current = await readCustomSkills();
-        const filtered = current.filter((sk) => sk.name !== s.name);
+        const idx = current.findIndex((sk) => sk.name === s.name);
+        if (idx < 0) {
+          await renderSkills();
+          return;
+        }
+        const target = current[idx];
+        if (s.createdAt !== undefined && target.createdAt !== s.createdAt) {
+          await renderSkills();
+          return;
+        }
+        current.splice(idx, 1);
         try {
-          await chrome.storage.local.set({ [CUSTOM_SKILLS_KEY]: filtered });
+          await chrome.storage.local.set({ [CUSTOM_SKILLS_KEY]: current });
           await renderSkills();
           showSaved();
         } catch (err) {
@@ -187,9 +212,13 @@ $("addSkill")?.addEventListener("click", () => {
     } else {
       domains = [domain];
     }
-    const entry: CustomSkill = { domains, name, frontmatter, instructions };
-    if (idx >= 0) skills[idx] = entry;
-    else skills.push(entry);
+    const entry: CustomSkill = { domains, name, frontmatter, instructions, createdAt: Date.now() };
+    if (idx >= 0) {
+      entry.createdAt = skills[idx].createdAt;
+      skills[idx] = entry;
+    } else {
+      skills.push(entry);
+    }
     try {
       await chrome.storage.local.set({ [CUSTOM_SKILLS_KEY]: skills });
       ($("skillDomain") as HTMLInputElement).value = "";

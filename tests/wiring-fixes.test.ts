@@ -29,11 +29,10 @@ import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { executeAction, describeAction } from "../src/lib/agent/tools/executor";
 import {
   ActionSchema,
-  ACTION_METADATA,
   AgentOutputSchema,
   AskHumanSchema,
-  isEquivalentAction,
 } from "../src/lib/agent/tools/schema";
+import { ACTION_METADATA, isEquivalentAction } from "../src/lib/agent/tools/schema-utils";
 import { getFormatInstructions } from "../src/lib/agent/tools/registry";
 import { EvaluatorComb } from "../src/lib/agent/evaluators";
 import { LoopDetector } from "../src/lib/agent/loop/loop-detector";

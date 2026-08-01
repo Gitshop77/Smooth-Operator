@@ -1,5 +1,5 @@
 /**
- * Tests for `src/lib/agent/llm/provider-bridge.ts` . The audit called out two untested branches: the `costUsd`
+ * Tests for `src/lib/agent/llm/provider-bridge.ts` . Two untested branches are pinned here: the `costUsd`
  * recomputation and the conditional dropping of zero usage fields on every chat
  * call. We mock the route-layer `generate` so no network/credential is needed.
  */

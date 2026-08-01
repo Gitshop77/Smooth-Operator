@@ -7,9 +7,10 @@
  * terminated by a blank line, and multiple `data:` lines within one event MUST
  * be joined with `\n` into a single payload. The HTTP transport feeds this
  * framer one complete line at a time (`line + "\n"`) and flushes any leftover
- * tail without a trailing newline. We accumulate `data:` lines across those
- * calls and emit exactly one frame per event, on the blank-line boundary,
- * concatenating multi-line `data:` with `\n`.
+ * tail without a trailing newline. Each `parse` call uses a FRESH internal
+ * framer (see {@link sse}), so the `data:` lines accumulated and joined with
+ * `\n` are only those within a single call — there is no state carried across
+ * calls.
  */
 
 export type Frame = string;
@@ -101,7 +102,7 @@ function createSSEFramer(): Framing {
  * Each `parse` call creates a FRESH framer instance, so concurrent streams
  * never share the internal `dataLines` buffer. (An earlier version reused a
  * single module-level instance, which interleaved `data:` payloads from
- * parallel LLM calls — the audit's "shared singleton" finding.) The spec
+ * parallel LLM calls via the shared singleton). The spec
  * compliance (multi-line `data:` joined with "\n" on the blank-line boundary)
  * lives in {@link createSSEFramer}.
  */

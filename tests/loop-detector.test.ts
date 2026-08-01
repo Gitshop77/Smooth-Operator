@@ -18,6 +18,7 @@ import {
   GOAL_TOP_THRESHOLD,
   LOOP_TOP_THRESHOLD,
 } from "../src/lib/agent/loop/loop-detector";
+import { ActionSchema } from "../src/lib/agent/tools/schema";
 import type { AgentAction } from "../src/lib/agent/types";
 
 function act(a: Record<string, unknown>): AgentAction {
@@ -52,8 +53,8 @@ describe("normalizeAction type-specific signatures", () => {
       [act({ type: "load_skill", name: "n" }), "name=n"],
       [act({ type: "alert_send_keys", text: "ok" }), "text=ok"],
       [act({ type: "detect_visual", query: "v" }), "query=v"],
-      [act({ type: "screenshot", fileName: "a.png" }), "file=a.png"],
-      [act({ type: "save_as_pdf", fileName: "b.pdf" }), "file=b.pdf"],
+      [act({ type: "screenshot", file_name: "a.png" }), "file=a.png"],
+      [act({ type: "save_as_pdf", file_name: "b.pdf" }), "file=b.pdf"],
       [act({ type: "wait" }), "wait"],
       [act({ type: "go_back" }), "go_back"],
       [act({ type: "done", success: true }), "done"],
@@ -80,6 +81,29 @@ describe("normalizeAction type-specific signatures", () => {
     expect(normalizeAction(act({ type: "scroll", down: true }))).toBe(
       normalizeAction(act({ type: "scroll", down: true, pages: 1 })),
     );
+  });
+
+  test("schema-parsed screenshot/save_as_pdf actions hash the REAL file name (snake_case field)", () => {
+    // The zod schema names the field `file_name` (src/lib/agent/tools/schema.ts).
+    // A schema-parsed action lands the name in `file_name`; if the signature
+    // reads the camelCase `fileName` it hashes an empty string — collapsing a
+    // file action onto the no-file variant and producing false loop hits.
+    const screenshot = ActionSchema.safeParse({ type: "screenshot", file_name: "shot-a.png" });
+    expect(screenshot.success).toBe(true);
+    if (screenshot.success) {
+      expect(normalizeAction(screenshot.data as unknown as AgentAction)).toContain("file=shot-a.png");
+    }
+    const pdf = ActionSchema.safeParse({ type: "save_as_pdf", file_name: "doc-b.pdf" });
+    expect(pdf.success).toBe(true);
+    if (pdf.success) {
+      expect(normalizeAction(pdf.data as unknown as AgentAction)).toContain("file=doc-b.pdf");
+    }
+    // Two distinct file actions must NOT collapse onto one signature.
+    if (screenshot.success && pdf.success) {
+      expect(normalizeAction(screenshot.data as unknown as AgentAction)).not.toBe(
+        normalizeAction(pdf.data as unknown as AgentAction),
+      );
+    }
   });
 });
 

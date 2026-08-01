@@ -19,14 +19,17 @@ const VALID_DONE = JSON.stringify({
 });
 
 describe("output-parser adversarial budget guards", () => {
-  test("a 2MB all-'{' payload returns quickly via early bail, not O(n²) scan", () => {
+  test("a 2MB all-'{' payload bails on the pre-scan length guard, not an O(n²) brace scan", () => {
+ // No wall-clock assertions here — elapsed-time checks are flaky on loaded
+ // CI runners. The guard is structural: the payload exceeds MAX_JSON_LENGTH
+ // (1,000,000), so extractJson MUST reject it with the budget error BEFORE
+ // any brace scanning (output-parser-utils.ts:166) — which is precisely why
+ // the call stays fast. If the length guard were ever deleted, this test
+ // fails (scanner hangs or returns a non-budget error).
     const big = "{".repeat(2_000_000);
-    const start = Date.now();
     const result = parseAgentOutput(big);
-    const elapsed = Date.now() - start;
-    // The guard runs before any brace scanning, so this must not stall.
-    expect(elapsed).toBeLessThan(2000);
     expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/exceeds the .*-character budget/);
   });
 
   test("raw payload > MAX_JSON_LENGTH returns ok:false with the budget error", () => {

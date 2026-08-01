@@ -17,7 +17,7 @@ import {
   _resetShadowPiercerForTests,
   installShadowPiercer,
 } from "../src/lib/agent/dom/shadow-piercer";
-import { redactUrlTokens } from "../src/lib/agent/dom/extraction/element-info";
+import { redactUrlTokens } from "../src/lib/agent/dom/extraction/element-info-utils";
 import {
   generateAccessibilityTree,
   __test_resetRegistry,

@@ -39,6 +39,7 @@
   "overrides": {
     "flatted": "^3.4.2",
     "adm-zip": "0.6.0",
-    "sharp": ">=0.35.0"
+    "sharp": ">=0.35.0",
+    "onnxruntime-web": "1.27.0"
   }
 }

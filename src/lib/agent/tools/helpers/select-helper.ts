@@ -192,12 +192,6 @@ export class Select {
   }
 
   /**
- * Mark `option` as selected. Throws {@link ElementNotSelectableError} if
- * the option is `disabled` — mirrors the standard guard from the source
- * taxonomy. Fires a `change` event on the `<select>` so framework listeners
- * (React, Vue, etc.) pick up the new value.
- */
-  /**
    * Build the standard error message for attempting to select a disabled
    * `<option>`. Centralized so the wording can't drift between the five
    * guard sites.
@@ -207,6 +201,12 @@ export class Select {
     return `cannot select a disabled option: "${label}"`;
   }
 
+  /**
+   * Mark `option` as selected. Throws {@link ElementNotSelectableError} if
+   * the option is `disabled` — mirrors the standard guard from the source
+   * taxonomy. Fires a `change` event on the `<select>` so framework listeners
+   * (React, Vue, etc.) pick up the new value.
+   */
   private setSelected(option: HTMLOptionElement): void {
     if (option.disabled) {
       throw new ElementNotSelectableError(this.disabledOptionMessage(option));

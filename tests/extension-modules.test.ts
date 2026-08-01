@@ -59,10 +59,10 @@ describe("provider-config: buildProvider", () => {
       apiKey: "sk-test",
       model: "",
     });
- // `LLMProvider` does not expose the resolved `model` field, but its id embeds
- // the resolved model. An empty input must resolve to a CONCRETE default model
- // (the models.dev catalog default, or `DEFAULT_MODELS['openai'] = 'gpt-4o'`
- // offline) rather than staying empty — assert a non-empty model was resolved.
+    // `LLMProvider` does not expose the resolved `model` field, but its id embeds
+    // the resolved model. An empty input must resolve to a CONCRETE default model
+    // (the models.dev catalog default, or `DEFAULT_MODELS['openai'] = 'gpt-4o'`
+    // offline) rather than staying empty — assert a non-empty model was resolved.
     expect(provider.id).toMatch(/^openai:[a-z0-9.-]+$/i);
   });
 });
@@ -82,11 +82,11 @@ describe("provider-config: readProviderConfig", () => {
     });
 
   beforeEach(() => {
- // Stub chrome.storage for the test. The API key is intentionally kept in
- // `chrome.storage.session` (in-memory, never written to disk) for security —
- // it must NOT be persisted in chrome.storage.local as plaintext. The test
- // reflects that design: provider/model/baseUrl live in `local`, the apiKey
- // lives in `session`.
+    // Stub chrome.storage for the test. The API key is intentionally kept in
+    // `chrome.storage.session` (in-memory, never written to disk) for security —
+    // it must NOT be persisted in chrome.storage.local as plaintext. The test
+    // reflects that design: provider/model/baseUrl live in `local`, the apiKey
+    // lives in `session`.
     store = {};
     sessionStore = {};
     (globalThis as unknown as { chrome: unknown }).chrome = {
@@ -110,8 +110,6 @@ describe("provider-config: readProviderConfig", () => {
     store.provider = "openai";
     store.model = "gpt-4o";
     store.baseUrl = "";
- // The API key is read from chrome.storage.session (in-memory), never from
- // chrome.storage.local (plaintext on disk).
     sessionStore.apiKey = "sk-test";
 
     const config = await readProviderConfig();
@@ -121,28 +119,39 @@ describe("provider-config: readProviderConfig", () => {
     expect(config!.model).toBe("gpt-4o");
   });
 
-  test("prefers the in-memory session API key over the plaintext local key", async () => {
+  test("reads the API key from session storage", async () => {
     store.provider = "openai";
     store.model = "gpt-4o";
-    store.apiKey = "sk-local";
     sessionStore.apiKey = "sk-session";
     const config = await readProviderConfig();
     expect(config).not.toBeNull();
     expect(config!.apiKey).toBe("sk-session");
   });
 
-  test("never trusts a plaintext local key when no session key exists", async () => {
+  test("session apiKey is authoritative over a legacy local key", async () => {
     store.provider = "openai";
     store.model = "gpt-4o";
-    // A plaintext key left in chrome.storage.local is attacker-writable
-    // (prompt injection / crafted settings-sync) and must NEVER be trusted as
-    // the provider key — an attacker could plant it. The key lives ONLY in
-    // chrome.storage.session (in-memory), so a missing session key means there
-    // is no usable key, and `readProviderConfig` must not fall back to local.
+    sessionStore.apiKey = "sk-session";
     store.apiKey = "sk-local";
     const config = await readProviderConfig();
     expect(config).not.toBeNull();
-    expect(config!.apiKey).not.toBe("sk-local");
+    expect(config!.apiKey).toBe("sk-session");
+  });
+
+  test("never trusts a plaintext local key WITHOUT the rememberApiKey consent flag", async () => {
+    store.provider = "openai";
+    store.model = "gpt-4o";
+    // The API key must NEVER be read from `chrome.storage.local` on its own:
+    // local is persisted to disk in plaintext, and the session-storage design
+    // keeps the key in memory by default. A local fallback is authorized ONLY
+    // by the opt-in "remember on this device" consent flag (see
+    // api-key-storage.ts ensureApiKeyInSession); this fixture deliberately
+    // omits that flag, so the plaintext copy must not be trusted.
+    // `migrateSecretsFromLocalToSession` moves any legacy local key into
+    // session at Options load.
+    store.apiKey = "sk-legacy-plaintext";
+    const config = await readProviderConfig();
+    expect(config).not.toBeNull();
     expect(config!.apiKey).toBe("");
   });
 

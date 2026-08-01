@@ -5,10 +5,12 @@
  * so its acceptance/rejection behavior is locked down here.
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect, afterEach } from "vitest";
+import { vi } from "vitest";
 import type { ActionContext } from "../src/lib/agent/tools/handlers/types";
 import type { BrowserState } from "../src/lib/agent/types";
 import { hasNestedQuantifier, hasBackreference, handleSearchPage } from "../src/lib/agent/tools/handlers/search-page";
+import { makeState } from "./helpers";
 
 describe("hasNestedQuantifier (ReDoS static guard)", () => {
   // Shapes that MUST be allowed: disjunctions of disjoint tokens, exact and
@@ -44,12 +46,12 @@ describe("hasNestedQuantifier (ReDoS static guard)", () => {
     "((a|b)+)+",
   ];
 
-   
+
   test.each(safe as any[])("accepts safe shape: %s", (pattern) => {
     expect(hasNestedQuantifier(pattern)).toBe(false);
   });
 
-   
+
   test.each(unsafe as any[])("rejects unsafe shape: %s", (pattern) => {
     expect(hasNestedQuantifier(pattern)).toBe(true);
   });
@@ -80,12 +82,12 @@ describe("hasBackreference (ReDoS backreference guard)", () => {
     "(a|b)\\k",
   ];
 
-   
+
   test.each(withBackref as any[])("rejects backreference pattern: %s", (pattern) => {
     expect(hasBackreference(pattern)).toBe(true);
   });
 
-   
+
   test.each(withoutBackref as any[])("accepts non-backreference pattern: %s", (pattern) => {
     expect(hasBackreference(pattern)).toBe(false);
   });
@@ -119,5 +121,42 @@ describe("handleSearchPage pattern-length cap", () => {
     });
     expect(res.success).toBe(false);
     expect(res.message).toMatch(/backreference/i);
+  });
+});
+
+describe("handleSearchPage redaction-failure masking", () => {
+  const ctx = {
+    state: makeState(),
+    beforeUrl: location.href,
+    beforeFingerprint: "fingerprint",
+  } as ActionContext;
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+    delete (globalThis as Record<string, unknown>).chrome;
+  });
+
+  test("when redactSecrets fails, matched text is masked — never shipped raw", async () => {
+    (globalThis as Record<string, unknown>).chrome = {
+      storage: {
+        session: {
+          get: vi.fn().mockRejectedValue(new Error("SW asleep")),
+        },
+      },
+    };
+    document.body.innerHTML = `
+      <div>alpha secret-tok-1 omega</div>
+      <div>beta secret-tok-2 gamma</div>
+    `;
+    const res = await handleSearchPage(ctx, {
+      type: "search_page",
+      pattern: "secret-tok",
+      regex: false,
+      case_sensitive: false,
+    });
+    expect(res.success).toBe(true);
+    expect(res.extractedContent).not.toContain("secret-tok-1");
+    expect(res.extractedContent).not.toContain("secret-tok-2");
+    expect(res.extractedContent).toContain("[REDACTED");
   });
 });

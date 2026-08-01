@@ -148,6 +148,12 @@ export function buildCompactionRequest(history: HistoryItem[]): string {
   return `${SUMMARIZE_PROMPT}\n\n${renderHistoryForSummarization(toSummarize)}`;
 }
 
+/** Prompt-tag marker stripper, compiled once at module scope (hot path). */
+const PROMPT_TAG_STRIP_RE = new RegExp(
+  `<\\/?(?:${INTERLEAVED_PROMPT_TAGS})[^>]*>`,
+  "g",
+);
+
 /**
  * Strip prompt-level XML tags (with or without attributes) from a *summary*
  * string so the navigator can't see forged prompt blocks inside
@@ -172,12 +178,6 @@ export function buildCompactionRequest(history: HistoryItem[]): string {
  * Uses the shared `INTERLEAVED_PROMPT_TAGS` constant from security.ts (single
  * source of truth) so both sanitizers stay in sync.
  */
-/** Prompt-tag marker stripper, compiled once at module scope (hot path). */
-const PROMPT_TAG_STRIP_RE = new RegExp(
-  `<\\/?(?:${INTERLEAVED_PROMPT_TAGS})[^>]*>`,
-  "g",
-);
-
 export function sanitizeCompactedMemory(memory: string): string {
  // 1) Replace ONLY the tag markers (`<tag>`/`</tag>`, with or without
  // attributes) with `[tag]`. Content between tags is preserved.

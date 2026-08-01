@@ -24,7 +24,7 @@ export interface TabInfo {
 }
 
 /** Bounding-box rectangle in CSS pixels. */
-export interface ElementRect {
+interface ElementRect {
   x: number;
   y: number;
   width: number;
@@ -208,7 +208,7 @@ export type LogEvent =
 // ─── API contracts ──────────────────────────────────────────────────────────
 
 /** Browser state subset that crosses the wire to the LLM API. */
-export interface WireBrowserState {
+interface WireBrowserState {
   url: string;
   title: string;
   tabs: TabInfo[];
@@ -365,7 +365,7 @@ export interface AgentConfig {
  * present. When `expectedOutcomes` is undefined on AgentConfig, no
  * evaluators run (the LLM judge is the only verification path).
  */
-export interface ExpectedOutcomes {
+interface ExpectedOutcomes {
   /** Optional string-match inputs (the agent's final answer is the prediction). */
   string?: Array<{ type: "exact_match" | "must_include" | "regex"; ref: string }>;
   /** Optional URL-match input (the agent's final page URL is the prediction). */
@@ -377,33 +377,4 @@ export interface ExpectedOutcomes {
   }>;
 }
 
-/** Default agent configuration used when no override is provided. */
-// Fail-safe cost cap: the DEFAULT_COST_CAP invariant (cap = $2, 0 = opt-out)
-// must be enforced by the library default — not only by the extension's
-// agent-bridge clamp — so any direct core-library usage is still bounded.
-export const DEFAULT_COST_CAP = 2;
-export const DEFAULT_CONFIG: AgentConfig = {
-  costCapUsd: DEFAULT_COST_CAP,
-  maxSteps: 100,
-  maxActionsPerStep: 10,
-  plannerInterval: 5,
-  maxFailures: 5,
-  enableLoopDetection: true,
-  enableCompaction: true,
-  compactionStepInterval: 20,
-  compactionCharThreshold: 30_000,
- // Bound each cloud LLM / compaction call so a provider that accepts the
- // request but never responds can't hang the run forever (the only other
- // interrupt is an explicit user Stop). Generous default; set 0 to disable.
-  llmCallTimeoutMs: 180_000,
-  enableJudge: true,
- // ON by default — the repeating-action / parse-failure early-stop is the only
- // hard-halt layer that actually terminates runaway loops (LoopDetector only
- // warns). Safe thresholds (5/3) and the input/alert_send_keys exclusions keep
- // it conservative, so enabling by default closes the infinite-loop gap.
-  enableEarlyStop: true,
- // ON by default — the HTML summarizer is the single biggest per-action cost
- // lever (the raw DOM is the largest part of the navigator request). See
- // `enableHtmlSummarizer` in config/schema.ts.
-  enableHtmlSummarizer: true,
-};
+export { DEFAULT_CONFIG } from "./types-utils";

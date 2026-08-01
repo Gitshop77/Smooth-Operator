@@ -7,11 +7,17 @@ import { describe, test, expect, afterEach, afterAll, beforeAll, vi } from "vite
 import { webcrypto } from "node:crypto";
 
 import { parseBoxes, toPixelCoords } from "../src/extension/vision-assistant/box-parser";
-import { mergeDetections } from "../src/extension/vision-assistant/merger";
+import { mergeDetections, renderMergedElementsText } from "../src/extension/vision-assistant/merger";
 import { f16to32, gatherEmbed } from "../src/extension/vision-assistant/embedding-gather";
 import { preprocessScreenshot } from "../src/extension/vision-assistant/preprocessor";
+import { loadImage } from "../src/extension/vision-assistant/preprocessor-utils";
 import { ModelLoader, ALL_MODEL_FILE_URLS } from "../src/extension/vision-assistant/model-loader";
-import { MODEL_FILE_HASHES } from "../src/extension/vision-assistant/constants";
+import { MODEL_FILE_HASHES, N_LAYERS } from "../src/extension/vision-assistant/constants";
+import {
+  assertVisionOutput,
+  assertLanguageInputs,
+  pastKeyNames,
+} from "../src/extension/vision-assistant/inference-utils";
 
 // jsdom does not implement Crypto.subtle; provide node's Web Crypto for the
 // sha256-based integrity checks. Stubbed (and restored in afterAll) so it does
@@ -173,6 +179,124 @@ describe("preprocessor", () => {
     ).rejects.toThrow(/data:image|malformed|non-image/);
     await expect(preprocessScreenshot("data:image/png;base64,!!")).rejects.toThrow();
     await expect(preprocessScreenshot("data:image/png;base64,")).rejects.toThrow();
+  });
+});
+
+describe("inference session asserts", () => {
+  test("vision session with exactly the expected output passes init", () => {
+    expect(() => assertVisionOutput({ outputNames: ["visual_features"] } as never)).not.toThrow();
+  });
+
+  test("vision session with a renamed output fails init", () => {
+    expect(() => assertVisionOutput({ outputNames: ["output"] } as never)).toThrow(/visual_features/);
+  });
+
+  test("vision session with extra outputs fails init", () => {
+    expect(() =>
+      assertVisionOutput({ outputNames: ["visual_features", "present_key_0"] } as never),
+    ).toThrow(/visual_features/);
+  });
+
+  test("vision session with no outputs fails init", () => {
+    expect(() => assertVisionOutput({ outputNames: [] } as never)).toThrow(/visual_features/);
+  });
+
+  test("language session declaring all expected inputs passes init", () => {
+    const inputs = ["input_ids", "inputs_embeds", "attention_mask", "position_ids"];
+    for (let i = 0; i < N_LAYERS; i++) {
+      inputs.push(`past_key_${i}`, `past_value_${i}`);
+    }
+    expect(() => assertLanguageInputs({ inputNames: inputs } as never)).not.toThrow();
+  });
+
+  test("language session missing an expected input fails init", () => {
+    const inputs = ["input_ids", "inputs_embeds", "position_ids"];
+    expect(() => assertLanguageInputs({ inputNames: inputs } as never)).toThrow(/attention_mask/);
+  });
+
+  test("language session missing a KV-cache input fails init", () => {
+    const inputs = ["input_ids", "inputs_embeds", "attention_mask", "position_ids", ...pastKeyNames];
+    expect(() => assertLanguageInputs({ inputNames: inputs } as never)).toThrow(/past_value_/);
+  });
+});
+
+describe("merger render", () => {
+  test("renders a vision element with pixel coordinates", () => {
+    const out = renderMergedElementsText([
+      {
+        index: -1,
+        tag: "vision_element",
+        text: "btn",
+        attributes: {},
+        hash: "v1_btn",
+        rect: { x: 10, y: 20, width: 30, height: 40 },
+        source: "vision",
+        pixelRect: { x: 10, y: 20, width: 30, height: 40 },
+        indexStr: "[v1]",
+        visionId: "v1",
+      },
+    ]);
+    expect(out).toContain('x="10" y="20" w="30" h="40"');
+  });
+
+  test("skips a vision element without pixelRect instead of crashing", () => {
+    const out = renderMergedElementsText([
+      {
+        index: -1,
+        tag: "vision_element",
+        text: "btn",
+        attributes: {},
+        hash: "v1_btn",
+        rect: { x: 10, y: 20, width: 30, height: 40 },
+        source: "vision",
+        indexStr: "[v1]",
+        visionId: "v1",
+      },
+    ]);
+    expect(out).toBe("");
+  });
+
+  test("renders DOM elements unchanged", () => {
+    const out = renderMergedElementsText([
+      {
+        index: 1,
+        tag: "button",
+        text: "Go",
+        attributes: {},
+        hash: "h1",
+        rect: { x: 0, y: 0, width: 100, height: 100 },
+        source: "dom",
+        indexStr: "[1]",
+      },
+    ]);
+    expect(out).toBe("[1]<button /> Go");
+  });
+});
+
+describe("preprocessor-utils loadImage", () => {
+  test("exposes a close that releases the ImageBitmap after the last draw", async () => {
+    const close = vi.fn();
+    const realFetch = globalThis.fetch;
+    const realCib = (globalThis as { createImageBitmap?: unknown }).createImageBitmap;
+    try {
+      globalThis.fetch = (async () =>
+        new Response(new Blob(["x"], { type: "image/png" }))) as typeof fetch;
+      (globalThis as { createImageBitmap?: unknown }).createImageBitmap = async () => ({
+        width: 4,
+        height: 4,
+        close,
+      });
+      const img = await loadImage("data:image/png;base64,AAAA");
+      expect(close).not.toHaveBeenCalled();
+      const ctx = { drawImage: vi.fn() } as unknown as CanvasRenderingContext2D;
+      img.drawTo(ctx, 0, 0, 4, 4);
+      expect(close).not.toHaveBeenCalled();
+      img.close?.();
+      expect(close).toHaveBeenCalledOnce();
+    } finally {
+      globalThis.fetch = realFetch;
+      (globalThis as { createImageBitmap?: unknown }).createImageBitmap = realCib;
+    }
   });
 });
 

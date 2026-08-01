@@ -9,10 +9,13 @@
  * lock in that corroboration so a future edit that re-weakens the guard (e.g.
  * accepting title-only "just a moment...") fails CI.
  */
-import { describe, test, expect, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import {
   detectChallengeInPage,
+  isChallengeKind,
   parseChallengeResult,
+  detectChallengeResult,
+  waitForChallengeResolution,
 } from "../src/lib/agent/anti-bot";
 
 function resetDom(): void {
@@ -79,8 +82,8 @@ describe("detectChallengeInPage — block page AND-corroboration", () => {
   });
 
   test("title 'attention required' + body 'blocked' → cloudflare-block via AND-corroboration", () => {
-  // The source removed .cf-error-details as a standalone trigger (attacker-settable).
-  // The current detection requires title "attention required" AND body "blocked".
+    // The source removed .cf-error-details as a standalone trigger (attacker-settable).
+    // The current detection requires title "attention required" AND body "blocked".
     document.title = "Attention Required! | Cloudflare";
     document.body.innerHTML = '<div class="cf-error-details"></div><p>Sorry, you have been blocked</p>';
     expect(detectChallengeInPage()).toEqual({
@@ -141,5 +144,114 @@ describe("parseChallengeResult — trust-boundary validation", () => {
     expect(parseChallengeResult({ kind: "cloudflare-js" })).toBeNull();
     expect(parseChallengeResult({ message: "x" })).toBeNull();
     expect(parseChallengeResult({ kind: 5, message: "x" })).toBeNull();
+    expect(parseChallengeResult({ kind: "hcaptcha", message: 5 })).toBeNull();
+  });
+
+  test("auth-wall kind parses (positive — allowlisted challenge kind)", () => {
+    expect(parseChallengeResult({ kind: "auth-wall", message: "login required" })).toEqual({
+      kind: "auth-wall",
+      message: "login required",
+    });
+  });
+});
+
+describe("isChallengeKind — allowlist trust boundary", () => {
+  test("accepts every allowlisted kind (incl. auth-wall)", () => {
+    const allowlisted = [
+      "cloudflare-js",
+      "cloudflare-block",
+      "cloudflare-turnstile",
+      "hcaptcha",
+      "recaptcha",
+      "blocked",
+      "rate-limited",
+      "auth-wall",
+    ];
+    for (const kind of allowlisted) {
+      expect(isChallengeKind(kind)).toBe(true);
+    }
+  });
+
+  test("rejects unknown / non-string values", () => {
+    expect(isChallengeKind("totally-made-up")).toBe(false);
+    expect(isChallengeKind("CLOUDFLARE-JS")).toBe(false);
+    expect(isChallengeKind("")).toBe(false);
+    expect(isChallengeKind(42)).toBe(false);
+    expect(isChallengeKind(null)).toBe(false);
+    expect(isChallengeKind({ kind: "hcaptcha" })).toBe(false);
+  });
+});
+
+// ─── chrome.scripting mocks (folded in from the former tests/agent/anti-bot.test.ts) ───
+
+let prevChrome: unknown;
+
+beforeEach(() => {
+  prevChrome = (globalThis as { chrome?: unknown }).chrome;
+});
+
+afterEach(() => {
+  (globalThis as { chrome?: unknown }).chrome = prevChrome;
+});
+
+const setExecuteScript = (impl: (...args: unknown[]) => Promise<unknown>) => {
+  (globalThis as { chrome?: unknown }).chrome = {
+    scripting: { executeScript: impl },
+  };
+};
+
+describe("detectChallengeResult — tab injection outcomes", () => {
+  test("successful challenge result → status:'challenge' with info", async () => {
+    setExecuteScript(async () => [
+      { result: { kind: "cloudflare-js", message: "cf" } },
+    ]);
+    const out = await detectChallengeResult(1);
+    expect(out.status).toBe("challenge");
+    if (out.status === "challenge") {
+      expect(out.info).toEqual({ kind: "cloudflare-js", message: "cf" });
+    }
+  });
+
+  test("auth-wall challenge result → status:'challenge' (positive path)", async () => {
+    setExecuteScript(async () => [
+      { result: { kind: "auth-wall", message: "login required" } },
+    ]);
+    const out = await detectChallengeResult(1);
+    expect(out.status).toBe("challenge");
+    if (out.status === "challenge") {
+      expect(out.info).toEqual({ kind: "auth-wall", message: "login required" });
+    }
+  });
+
+  test("no challenge found → status:'no-challenge'", async () => {
+    setExecuteScript(async () => [{ result: null }]);
+    const out = await detectChallengeResult(2);
+    expect(out.status).toBe("no-challenge");
+  });
+
+  test("injection failure → status:'error' (NOT 'no-challenge' — fail-closed)", async () => {
+    setExecuteScript(async () => {
+      throw new Error("injection failed");
+    });
+    const out = await detectChallengeResult(3);
+    expect(out.status).toBe("error");
+  });
+});
+
+describe("waitForChallengeResolution — conservative on detection failure", () => {
+  test("initial no-challenge → resolved immediately", async () => {
+    setExecuteScript(async () => [{ result: null }]);
+    const out = await waitForChallengeResolution(1, { timeoutMs: 1000, pollMs: 250 });
+    expect(out.resolved).toBe(true);
+    expect(out.challenge).toBeNull();
+  });
+
+  test("initial detection error → unresolved (never 'resolved' on failure)", async () => {
+    setExecuteScript(async () => {
+      throw new Error("injection failed");
+    });
+    const out = await waitForChallengeResolution(1, { timeoutMs: 1000, pollMs: 250 });
+    expect(out.resolved).toBe(false);
+    expect(out.challenge).toBeNull();
   });
 });

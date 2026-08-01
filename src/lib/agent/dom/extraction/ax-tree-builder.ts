@@ -32,11 +32,14 @@ import {
   isInteractive,
   isVisibleFull as isVisible,
   isLikelyHidden,
+  beginVisibilityCache,
+  endVisibilityCache,
   directText,
   SKIP_TAGS,
   isSensitive,
 } from "../utils";
-import { redactUrlTokens } from "./element-info";
+import { getRole, escapeAttributeValue, isStructural } from "./ax-tree-utils";
+import { redactUrlTokens } from "./element-info-utils";
 import { getShadowRoot } from "../annotation/shadow-piercer";
 
 /**
@@ -93,81 +96,10 @@ export function resolveRef(refId: string): HTMLElement | null {
   return el;
 }
 
-// ─── Attribute serialization ────────────────────────────────────────────────
-
-/**
- * Escape an attribute value for safe interpolation into a serialized AX-tree
- * line.
- *
- * SECURITY : the serialized tree's invariant is "one element per line"
- * and is consumed by the navigator LLM as ground-truth page structure. A page
- * controls attribute text (`href`/`type`/`placeholder`/option `value`), which
- * may contain literal newlines/tabs/carriage-returns. Quote-escaping alone
- * lets a hostile page inject line breaks and forge additional AX-tree rows
- * (e.g. a spoofed `link Approve transfer [ref_1] ...` line). Collapse all
- * `\r`/`\n`/`\t` runs to a single space *before* quote-escaping so a value can
- * never span or spoof a line.
- */
-function escapeAttributeValue(s: string): string {
-  let out = s
-    .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/"/g, '\\"');
-  if (out.length > MAX_ATTR_VALUE_LENGTH) {
-    out = out.slice(0, MAX_ATTR_VALUE_LENGTH) + "...";
-  }
-  return out
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-// ─── Role detection ─────────────────────────────────────────────────────────
-
-/** Implicit ARIA roles for tags that don't need an explicit `role` attribute. */
-const IMPLICIT_ROLES: Record<string, string> = {
-  a: "link",
-  button: "button",
-  select: "combobox",
-  textarea: "textbox",
-  h1: "heading", h2: "heading", h3: "heading",
-  h4: "heading", h5: "heading", h6: "heading",
-  img: "image",
-  nav: "navigation",
-  main: "main",
-  header: "banner",
-  footer: "contentinfo",
-  section: "region",
-  article: "article",
-  aside: "complementary",
-  form: "form",
-  table: "table",
-  ul: "list", ol: "list",
-  li: "listitem",
-  label: "label",
-};
-
-/** Compute the ARIA role for an element (explicit attribute wins, else implicit). */
-function getRole(el: HTMLElement): string {
-  const explicit = el.getAttribute("role");
-  if (explicit) return explicit;
-  const tag = el.tagName.toLowerCase();
-  if (tag === "input") {
-    const type = el.getAttribute("type");
-    if (type === "submit" || type === "button") return "button";
-    if (type === "checkbox") return "checkbox";
-    if (type === "radio") return "radio";
-    if (type === "file") return "button";
-    return "textbox";
-  }
-  return IMPLICIT_ROLES[tag] || "generic";
-}
-
 // ─── Sensitive field detection ──────────────────────────────────────────────
-// `isSensitive` + `SENSITIVE_AUTOCOMPLETE` now live in `../utils/classification`
-// (shared with `element-info.buildAttrs` so the indexed tree + AX tree redact
-// consistently).
+// `isSensitive` (in `../utils/classification`) + `SENSITIVE_AUTOCOMPLETE_SET`
+// (in `../utils/classification-helpers`) are shared with
+// `element-info.buildAttrs` so the indexed tree + AX tree redact consistently.
 
 // ─── Accessible name extraction ─────────────────────────────────────────────
 
@@ -314,15 +246,6 @@ function getName(el: HTMLElement, labelMap: Map<string, HTMLLabelElement>): stri
 // the AX-tree path is not as hot as the indexed-tree walk, so we don't bother
 // with the `isLikelyHidden` pre-check.
 
-/** Structural tags (headings, landmarks) we include for context even if not interactive. */
-const STRUCTURAL_TAGS = ["h1", "h2", "h3", "h4", "h5", "h6", "nav", "main", "header", "footer", "section", "article", "aside"];
-
-/** Determine whether an element is a structural landmark worth surfacing. */
-function isStructural(el: HTMLElement): boolean {
-  const tag = el.tagName.toLowerCase();
-  return STRUCTURAL_TAGS.includes(tag) || el.getAttribute("role") !== null;
-}
-
 // `SKIP_TAGS` (used below in `shouldInclude`) is imported from ../utils.
 
 /**
@@ -334,7 +257,6 @@ function shouldInclude(
   el: HTMLElement,
   filter: string,
   hasRefId: boolean,
-  labelMap: Map<string, HTMLLabelElement>,
   name: string,
 ): boolean {
   const tag = el.tagName.toLowerCase();
@@ -362,12 +284,22 @@ function shouldInclude(
   return role !== "generic" && role !== "image";
 }
 
+/**
+ * Build the AX-tree error envelope for an unresolved ref (missing/GC'd element).
+ * Messages are preserved verbatim for the refId error-path contract.
+ */
+function refNotFound(refId: string, detail: string): AXTreeResult {
+  return {
+    error: `Element with ref_id '${refId}' ${detail}`,
+    pageContent: "",
+    viewport: { width: window.innerWidth, height: window.innerHeight },
+  };
+}
+
 // ─── Tree builder ───────────────────────────────────────────────────────────
 
 /** Hard cap on the number of elements emitted (prevents runaway output). */
 const MAX_ELEMENTS = 10_000;
-/** Max length for a single attribute value rendered into the AX-tree (mirrors the indexed tree). */
-const MAX_ATTR_VALUE_LENGTH = 200;
 /** Default max tree depth (overridable by the caller). */
 const DEFAULT_MAX_DEPTH = 15;
 
@@ -390,7 +322,7 @@ function buildTree(
   if (!el || !el.tagName) return;
 
   const name = getName(el, labelMap);
-  const included = shouldInclude(el, filter, !!refId, labelMap, name) || (!!refId && depth === 0);
+  const included = shouldInclude(el, filter, !!refId, name) || (!!refId && depth === 0);
 
   if (included) {
     const role = getRole(el);
@@ -459,8 +391,13 @@ function buildTree(
  // Recurse into children (skip <option> children of non-sensitive <select> —
  // they were already emitted explicitly above to avoid duplication).
   if (depth < maxDepth) {
-    if (el.tagName.toLowerCase() !== "select" && el.children) {
-      for (const child of Array.from(el.children)) {
+    if (el.tagName.toLowerCase() !== "select") {
+      // firstChild/nextSibling instead of `el.children` so we never
+      // instantiate the live children collection on body (jsdom re-snapshots
+      // it on every child mutation — O(n^2) for bulk appends, see
+      // extractor.test.ts test 19).
+      for (let child = el.firstChild; child; child = child.nextSibling) {
+        if (child.nodeType !== 1) continue;
         buildTree(child as HTMLElement, included ? depth + 1 : depth, filter, refId, maxDepth, lines, counter, labelMap);
       }
     }
@@ -519,6 +456,7 @@ export function generateAccessibilityTree(
   try {
     const lines: string[] = [];
     const counter = { count: 0 };
+    beginVisibilityCache();
 
  // pre-build a Map of all <label for="..."> elements ONCE per
  // generateAccessibilityTree call. Previously, getName() called
@@ -536,32 +474,26 @@ export function generateAccessibilityTree(
     }
 
     if (refId) {
- // Extract only the subtree for the given ref. Guard a null `elementMap`
- // (e.g. a fresh page where init hasn't populated refs yet) so we return the
- // graceful "not found" error instead of dereferencing a null map and throwing
- // a TypeError (finding: refId path dereferenced potentially-null elementMap).
+      // Extract only the subtree for the given ref. Guard a null `elementMap`
+      // (e.g. a fresh page where init hasn't populated refs yet) so we return the
+      // graceful "not found" error instead of dereferencing a null map and throwing
+      // a TypeError (the refId path dereferenced a potentially-null elementMap).
       if (!elementMap || !Object.hasOwn(elementMap, refId)) {
-        return {
-          error: `Element with ref_id '${refId}' not found. It may have been removed from the page. Use read_page without ref_id to get the current page state.`,
-          pageContent: "",
-          viewport: { width: window.innerWidth, height: window.innerHeight },
-        };
+        return refNotFound(
+          refId,
+          "not found. It may have been removed from the page. Use read_page without ref_id to get the current page state.",
+        );
       }
       const ref = elementMap[refId];
       if (!ref) {
-        return {
-          error: `Element with ref_id '${refId}' not found. It may have been removed from the page. Use read_page without ref_id to get the current page state.`,
-          pageContent: "",
-          viewport: { width: window.innerWidth, height: window.innerHeight },
-        };
+        return refNotFound(
+          refId,
+          "not found. It may have been removed from the page. Use read_page without ref_id to get the current page state.",
+        );
       }
       const el = ref.deref();
       if (!el) {
-        return {
-          error: `Element with ref_id '${refId}' no longer exists. It may have been removed from the page.`,
-          pageContent: "",
-          viewport: { width: window.innerWidth, height: window.innerHeight },
-        };
+        return refNotFound(refId, "no longer exists. It may have been removed from the page.");
       }
       buildTree(el as HTMLElement, 0, filter, refId, maxDepth, lines, counter, labelMap);
     } else if (document.body) {
@@ -614,6 +546,8 @@ export function generateAccessibilityTree(
     const err = e instanceof Error ? e : new Error(String(e));
     err.message = `Error generating accessibility tree: ${err.message}`;
     throw err;
+  } finally {
+    endVisibilityCache();
   }
 }
 

@@ -6,10 +6,9 @@
  *
  * Re-exported symbols:
  * - `SKIP_TAGS`, `isInteractive`, `isPropagatingElement`,
- * `PROPAGATING_ELEMENTS`, `PropagatingElementPattern`,
- * `DEFAULT_CONTAINMENT_THRESHOLD`, `containmentRatio`, `isContained`,
+ * `PROPAGATING_ELEMENTS`, `containmentRatio`, `isContained`,
  * `nearestPropagatingAncestor`, `shouldExcludeAsContained`,
- * `isSensitive`, `SENSITIVE_AUTOCOMPLETE`
+ * `isSensitive`
  * (from `./utils/classification`)
  * - `isLikelyHidden`, `isVisibleFull` (from `./utils/visibility`)
  * - `directText` (from `./utils/tree-walker`)
@@ -18,7 +17,7 @@
  *
  * NOTE: the bounding-box containment / propagation helpers re-exported from
  * `./utils/classification` below (`isPropagatingElement`, `PROPAGATING_ELEMENTS`,
- * `DEFAULT_CONTAINMENT_THRESHOLD`, `containmentRatio`, `isContained`,
+ * `containmentRatio`, `isContained`,
  * `nearestPropagatingAncestor`, `shouldExcludeAsContained`) are retained ONLY for
  * backwards-compat with the legacy `@/lib/agent/dom/dom-utils` import path. The
  * current extractor (`extraction/page-state.ts`) does NOT call them — they are

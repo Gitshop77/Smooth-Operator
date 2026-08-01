@@ -17,7 +17,7 @@
  */
 
 /** Tag used by {@link StringEvaluator} when surfacing which check failed. */
-export const STRING_EVALUATOR_TAG = "string_match";
+const STRING_EVALUATOR_TAG = "string_match";
 
 /**
  * Maximum prediction length fed to a `regex` match. Config-supplied patterns
@@ -43,7 +43,7 @@ const MAX_REGEX_PATTERN_LENGTH = 500;
  * When `false`, callers should fall back to literal string matching instead of
  * using the pattern as a regular expression.
  */
-export function isSafeRegex(pattern: string): boolean {
+function isSafeRegex(pattern: string): boolean {
   if (pattern.length > MAX_REGEX_PATTERN_LENGTH) return false;
   // Nested quantifiers: a quantifier character (+, *, {) immediately preceded
   // (possibly with whitespace) by another quantifier character.
@@ -57,7 +57,7 @@ export function isSafeRegex(pattern: string): boolean {
 }
 
 /** A single reference-answer entry — one of three matching modes. */
-export interface StringReferenceAnswer {
+interface StringReferenceAnswer {
   /** Discriminator for which match strategy to use. */
   type: "exact_match" | "must_include" | "regex";
   /** The reference string (or regex pattern when `type === "regex"`). */
@@ -93,7 +93,7 @@ export interface StringEvaluatorResult {
  * Strips leading/trailing whitespace and a single pair of surrounding single
  * or double quotes (so `"yes"` matches `yes`). Lowercases the result.
  */
-export function cleanAnswer(answer: string): string {
+function cleanAnswer(answer: string): string {
   let s = answer.trim();
   if (
     (s.startsWith("'") && s.endsWith("'")) ||
@@ -105,7 +105,7 @@ export function cleanAnswer(answer: string): string {
 }
 
 /** Exact-match check (case-insensitive, quote-stripped). Returns 1 or 0. */
-export function exactMatch(ref: string, pred: string, predClean?: string): number {
+function exactMatch(ref: string, pred: string, predClean?: string): number {
   return (predClean ?? cleanAnswer(pred)) === cleanAnswer(ref) ? 1 : 0;
 }
 
@@ -129,7 +129,7 @@ export function splitOrAlternatives(ref: string): string[] {
  * `ref="0"` does NOT match `pred="10"`. Otherwise falls back to a plain
  * substring check. An empty reference (no alternatives) is a no-op → 1.
  */
-export function mustInclude(ref: string, pred: string, tokenize = false, predClean?: string): number {
+function mustInclude(ref: string, pred: string, tokenize = false, predClean?: string): number {
   const cp = predClean ?? cleanAnswer(pred);
   const alternatives = splitOrAlternatives(ref).map(cleanAnswer);
   if (alternatives.length === 0) return 1;

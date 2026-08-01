@@ -87,16 +87,16 @@ describe("shadow-piercer", () => {
   test("getShadowRoot returns the CLOSED shadow root (captured via the piercer)", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
- // attachShadow with mode:"closed" — host.shadowRoot will be null, but the
- // piercer captured the root in its WeakMap.
+    // attachShadow with mode:"closed" — host.shadowRoot will be null, but the
+    // piercer captured the root in its WeakMap.
     const shadow = host.attachShadow({ mode: "closed" });
     const btn = document.createElement("button");
     btn.textContent = "Closed";
     shadow.appendChild(btn);
 
- // host.shadowRoot is null for closed roots — that's the whole problem.
+    // host.shadowRoot is null for closed roots — that's the whole problem.
     expect(host.shadowRoot).toBeNull();
- // But getShadowRoot pierces the closed root via the piercer's WeakMap.
+    // But getShadowRoot pierces the closed root via the piercer's WeakMap.
     expect(getShadowRoot(host)).toBe(shadow);
     expect(isShadowHost(host)).toBe(true);
   });
@@ -109,7 +109,7 @@ describe("shadow-piercer", () => {
   });
 
   test("pierceShadowRoots walks into BOTH open and closed shadow roots", () => {
- // Open shadow root.
+    // Open shadow root.
     const openHost = document.createElement("section");
     openHost.id = "open-host";
     document.body.appendChild(openHost);
@@ -119,7 +119,7 @@ describe("shadow-piercer", () => {
     openBtn.textContent = "Open";
     openShadow.appendChild(openBtn);
 
- // Closed shadow root.
+    // Closed shadow root.
     const closedHost = document.createElement("section");
     closedHost.id = "closed-host";
     document.body.appendChild(closedHost);
@@ -129,7 +129,7 @@ describe("shadow-piercer", () => {
     closedBtn.textContent = "Closed";
     closedShadow.appendChild(closedBtn);
 
- // Top-level button (no shadow).
+    // Top-level button (no shadow).
     const topBtn = document.createElement("button");
     topBtn.id = "top-btn";
     topBtn.textContent = "Top";
@@ -137,7 +137,7 @@ describe("shadow-piercer", () => {
 
     const all = pierceShadowRoots(document.body);
     const ids = all.map((e) => e.id).filter(Boolean);
- // All three buttons + both hosts appear in the pierced walk.
+    // All three buttons + both hosts appear in the pierced walk.
     expect(ids).toContain("top-btn");
     expect(ids).toContain("open-btn");
     expect(ids).toContain("closed-btn");
@@ -146,9 +146,9 @@ describe("shadow-piercer", () => {
   });
 
   test("installShadowPiercer is idempotent — calling twice is a no-op", () => {
- // Already installed in beforeEach; calling again must not throw and must
- // keep the same state (closed roots captured before the second call are
- // still resolvable).
+    // Already installed in beforeEach; calling again must not throw and must
+    // keep the same state (closed roots captured before the second call are
+    // still resolvable).
     const host = document.createElement("div");
     document.body.appendChild(host);
     const shadow = host.attachShadow({ mode: "closed" });
@@ -165,8 +165,8 @@ describe("shadow-piercer", () => {
     shadow.appendChild(btn);
 
     const state = extractBrowserState(MOCK_TABS);
- // The button inside the closed shadow root is now indexed — without the
- // piercer, the extractor's `el.shadowRoot` walk would miss it entirely.
+    // The button inside the closed shadow root is now indexed — without the
+    // piercer, the extractor's `el.shadowRoot` walk would miss it entirely.
     expect(state.elements).toHaveLength(1);
     expect(state.elements[0].tag).toBe("button");
     expect(state.elements[0].text).toBe("Pierced");
@@ -187,19 +187,19 @@ describe("extractor: compound control virtual children", () => {
     document.body.appendChild(select);
 
     const state = extractBrowserState(MOCK_TABS);
- // The select is the single indexed element.
+    // The select is the single indexed element.
     expect(state.elements).toHaveLength(1);
     expect(state.elements[0].tag).toBe("select");
- // The elementsText contains virtual child <option> lines for the first 4.
- // The first option is selected by default, so it carries `selected=`.
+    // The elementsText contains virtual child <option> lines for the first 4.
+    // The first option is selected by default, so it carries `selected=`.
     expect(state.elementsText).toContain("<option value=\"us\"");
     expect(state.elementsText).toContain(" /> US");
     expect(state.elementsText).toContain("<option value=\"ca\" /> CA");
     expect(state.elementsText).toContain("<option value=\"mx\" /> MX");
     expect(state.elementsText).toContain("<option value=\"uk\" /> UK");
- // The 5th+ options are summarized as "... N more options".
+    // The 5th+ options are summarized as "... N more options".
     expect(state.elementsText).toContain("... 2 more options");
- // The 5th option's value is NOT surfaced as a virtual child.
+    // The 5th option's value is NOT surfaced as a virtual child.
     expect(state.elementsText).not.toContain("<option value=\"au\" />");
   });
 
@@ -254,7 +254,7 @@ describe("extractor: compound control virtual children", () => {
     document.body.append(btn, input);
 
     const state = extractBrowserState(MOCK_TABS);
- // No slider, summary, or Browse Files lines.
+    // No slider, summary, or Browse Files lines.
     expect(state.elementsText).not.toContain("<slider");
     expect(state.elementsText).not.toContain("<summary");
     expect(state.elementsText).not.toContain("Browse Files");
@@ -280,9 +280,9 @@ describe("dom-utils: propagating elements + 99% containment", () => {
     spanBtn.setAttribute("role", "button");
     expect(isPropagatingElement(spanBtn)).toBe(true);
 
- // Plain div is NOT propagating.
+    // Plain div is NOT propagating.
     expect(isPropagatingElement(document.createElement("div"))).toBe(false);
- // div with a non-propagating role is NOT propagating.
+    // div with a non-propagating role is NOT propagating.
     const divMain = document.createElement("div");
     divMain.setAttribute("role", "main");
     expect(isPropagatingElement(divMain)).toBe(false);
@@ -303,11 +303,11 @@ describe("dom-utils: propagating elements + 99% containment", () => {
     parent.appendChild(child);
     document.body.appendChild(parent);
 
- // Stub rects: parent is 100x100 at (0,0), child is 50x50 at (10,10).
+    // Stub rects: parent is 100x100 at (0,0), child is 50x50 at (10,10).
     parent.getBoundingClientRect = () => makeRect(0, 0, 100, 100);
     child.getBoundingClientRect = () => makeRect(10, 10, 60, 60);
 
- // 100% contained (intersection = 50*50 = 2500, childArea = 50*50 = 2500).
+    // 100% contained (intersection = 50*50 = 2500, childArea = 50*50 = 2500).
     expect(containmentRatio(child, parent)).toBeCloseTo(1, 5);
     expect(isContained(child, parent)).toBe(true);
     expect(isContained(child, parent, 0.99)).toBe(true);
@@ -319,7 +319,7 @@ describe("dom-utils: propagating elements + 99% containment", () => {
     parent.appendChild(child);
     document.body.appendChild(parent);
 
- // Parent 100x100 at (0,0); child 100x100 at (50,50) — only 25% overlaps.
+    // Parent 100x100 at (0,0); child 100x100 at (50,50) — only 25% overlaps.
     parent.getBoundingClientRect = () => makeRect(0, 0, 100, 100);
     child.getBoundingClientRect = () => makeRect(50, 50, 150, 150);
 
@@ -347,7 +347,7 @@ describe("dom-utils: propagating elements + 99% containment", () => {
     document.body.appendChild(button);
 
     expect(nearestPropagatingAncestor(span)).toBe(button);
- // The button itself has no propagating ancestor (body is not propagating).
+    // The button itself has no propagating ancestor (body is not propagating).
     expect(nearestPropagatingAncestor(button)).toBeNull();
   });
 
@@ -357,7 +357,7 @@ describe("dom-utils: propagating elements + 99% containment", () => {
     button.appendChild(span);
     document.body.appendChild(button);
 
- // Stub identical rects so span is 100% contained.
+    // Stub identical rects so span is 100% contained.
     const rect = makeRect(0, 0, 100, 30);
     button.getBoundingClientRect = () => rect;
     span.getBoundingClientRect = () => rect;
@@ -376,7 +376,7 @@ describe("dom-utils: propagating elements + 99% containment", () => {
     button.getBoundingClientRect = () => rect;
     input.getBoundingClientRect = () => rect;
 
- // Form elements have independent interaction semantics — never excluded.
+    // Form elements have independent interaction semantics — never excluded.
     expect(shouldExcludeAsContained(input)).toBe(false);
   });
 
@@ -419,7 +419,7 @@ describe("screenshot-annotator: ref-keyed labels + minSize + palette", () => {
 
   test("DEFAULT_ANNOTATE_PALETTE has 12 colors", () => {
     expect(DEFAULT_ANNOTATE_PALETTE).toHaveLength(12);
- // All entries are hex color strings.
+    // All entries are hex color strings.
     for (const c of DEFAULT_ANNOTATE_PALETTE) {
       expect(c).toMatch(/^#[0-9a-f]{6}$/i);
     }

@@ -8,6 +8,20 @@
  */
 
 /**
+ * Strip C0/C1 control characters (everything except the common whitespace
+ * tab/LF/CR) from a string. Page-controlled DOM text/attributes are
+ * serialized verbatim into the LLM prompt; control characters (NUL, DEL, ESC,
+ * …) can smuggle delimiter-breaking or otherwise injection-prone content into
+ * that prompt. We strip them here, at the extraction boundary, so no
+ * downstream serialization step has to remember to.
+ */
+const CONTROL_CHAR_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g;
+
+function stripControlChars(s: string): string {
+  return s.replace(CONTROL_CHAR_RE, "");
+}
+
+/**
  * Concatenate the direct text-node children of an element, collapsing
  * internal whitespace runs to a single space and trimming.
  *
@@ -18,41 +32,12 @@
  * `getName` (which collapses whitespace again before emitting the line) or
  * compares against a min-length threshold after a trim.
  */
-/**
- * Strip C0/C1 control characters (everything except the common whitespace
- * tab/LF/CR) from a string. Page-controlled DOM text/attributes are
- * serialized verbatim into the LLM prompt; control characters (NUL, DEL, ESC,
- * …) can smuggle delimiter-breaking or otherwise injection-prone content into
- * that prompt. We strip them here, at the extraction boundary, so no
- * downstream serialization step has to remember to.
- */
-const CONTROL_CHAR_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g;
-
-export function stripControlChars(s: string): string {
-  return s.replace(CONTROL_CHAR_RE, "");
-}
-
-/**
- * Mark a piece of page-controlled DOM content as untrusted before it is
- * embedded in the LLM prompt. Strips control characters and wraps the value
- * in explicit XML markers so the model is told (and can be instructed) that
- * the enclosed text is attacker-influenceable page content, not instructions.
- */
-export function sanitizeDomText(s: string): string {
-  const cleaned = stripControlChars(s);
- // Escape the page-controlled text before wrapping it in the XML marker so a
- // hostile value cannot forge the closing `</untrusted_dom>` delimiter (or
- // smuggle `<`, `>`, `&`) and break out of the untrusted block.
-  const escaped = cleaned
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-  return `<untrusted_dom>${escaped}</untrusted_dom>`;
-}
-
 export function directText(el: Element): string {
   const parts: string[] = [];
-  for (const node of el.childNodes) {
+  // firstChild/nextSibling instead of `el.childNodes` so we never instantiate
+  // live child lists on walked elements (jsdom re-snapshots them on every
+  // mutation — quadratic bulk appends, see extractor.test.ts test 19).
+  for (let node = el.firstChild; node; node = node.nextSibling) {
     if (node.nodeType === Node.TEXT_NODE) parts.push(node.nodeValue ?? "");
   }
   return stripControlChars(parts.join("").replace(/\s+/g, " ").trim());

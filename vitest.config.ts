@@ -11,12 +11,14 @@ export default defineConfig({
  // (from tests that mutate globalThis.window/document/HTMLElement.prototype)
  // can't silently regress if pool/isolation settings change in the future.
     isolate: true,
- // `isolate: true` (above) is not honoured by the installed vitest version, so
- // without this teardown a `globalThis.chrome` stub or a `document.body` left
- // behind by one test file leaks into later files and breaks otherwise-correct
- // tests (e.g. secret redaction, SSRF DNS resolution, ax-tree walking). This
- // setup resets those ambient globals after each file — restoring the per-file
- // isolation the config intends — without altering any security logic.
+ // `isolate: true` IS honoured by vitest v4: per-file `moduleRunner.mocker?.reset()`
+ // + module re-evaluation run whenever `config.isolate` is set (see
+ // node_modules/vitest/dist/chunks/base.B6Opl8PE.js in the pinned vitest
+ // version), and the CLI documents `--no-isolate` (default: `true`). The setup
+ // file below is kept as defense-in-depth: it resets ambient globals
+ // (`globalThis.chrome`, `document.body`, `localStorage`, `fetch`) that could
+ // otherwise leak across files if the isolation implementation ever changes —
+ // without altering any security logic.
     setupFiles: ["./tests/helpers/test-isolation.ts"],
     coverage: {
       provider: "v8",

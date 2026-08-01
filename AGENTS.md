@@ -39,7 +39,7 @@ Build first, then load `chrome-extension/` as an unpacked extension at `chrome:/
 
 ## Testing
 
-- **Vitest v4** ignores the `isolate: true` config option, so `tests/helpers/test-isolation.ts` (loaded via `setupFiles`) resets leaked globals (`globalThis.chrome`, `document.body`, `localStorage`, `fetch`) between test files. Don't remove it.
+- **Vitest v4** honors the `isolate: true` config option (per-file module + mock reset). `tests/helpers/test-isolation.ts` (loaded via `setupFiles`) additionally resets leaked globals (`globalThis.chrome`, `document.body`, `localStorage`, `fetch`) between test files as defense-in-depth. Don't remove it.
 - Test files live in `tests/` with `.test.ts` suffix.
 - Coverage thresholds are pinned at measured baselines with per-glob overrides for security-critical modules (`security.ts`, `ssrf.ts`, `endpoint.ts`, `auth.ts`, `anti-bot.ts`, `anti-detection.ts`). The baselines are documented in `vitest.config.ts`.
 
@@ -47,13 +47,13 @@ Build first, then load `chrome-extension/` as an unpacked extension at `chrome:/
 
 `.github/workflows/ci.yml` runs on push/PR to `main`/`master`:
 1. `npm ci` → `npm run lint` → `npx tsc --noEmit` → `npx vitest run --coverage` → `npm run build:extension` → verify build output → `npm audit --audit-level=high` + `npm audit signatures`
-2. `secret-scan` job runs gitleaks against full history using `.github/gitleaks.toml` (allows fake secret fixtures in 4 test files).
+2. `secret-scan` job runs gitleaks against full history using `.github/gitleaks.toml` (allows fake secret fixtures in 6 test files).
 
 `.github/workflows/dependency-review.yml` blocks PRs with moderate+ vulnerability advisories or GPL-3.0/AGPL-3.0 licenses.
 
 ## LLM providers
 
-7 dedicated wrappers in `src/lib/agent/llm/providers/`: `anthropic.ts`, `azure.ts`, `google.ts`, `openai.ts`, `openai-compatible.ts`, `openrouter.ts`, `xai.ts`. 13 more OpenAI-compatible services use a shared profile table (`openai-compatible-profile.ts`). Protocols in `src/lib/agent/llm/protocols/`.
+7 dedicated wrappers in `src/lib/agent/llm/providers/`: `anthropic.ts`, `azure.ts`, `google.ts`, `openai.ts`, `openai-compatible.ts`, `openrouter.ts`, `xai.ts`. 13 more OpenAI-compatible services (15 profile-table rows; openrouter + xai also have dedicated wrappers) use a shared profile table (`openai-compatible-profile.ts`). Protocols in `src/lib/agent/llm/protocols/`.
 
 ## Gotchas
 

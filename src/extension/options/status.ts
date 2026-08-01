@@ -23,10 +23,10 @@ export const STATUS_DISPLAY: Record<VisionStatus, { label: string; bg: string; c
 };
 
 /** Outcome of a single agent run. */
-export type RunStatus = "success" | "failure";
+type RunStatus = "success" | "failure";
 
 /** Map a run outcome to its badge CSS class (defined once in options.css). */
-export const RUN_BADGE_CLASS: Record<RunStatus, string> = {
+const RUN_BADGE_CLASS: Record<RunStatus, string> = {
   success: "success",
   failure: "failure",
 };
