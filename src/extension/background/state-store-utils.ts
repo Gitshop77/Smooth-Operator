@@ -28,6 +28,56 @@ export async function safeLog(
 
 // ─── Run state (persisted to chrome.storage.session for MV3 resilience) ─────
 
+/** Aggregated token/cost totals for a run. */
+export interface UsageTotals {
+  tokensIn: number;
+  tokensOut: number;
+  costUsd: number;
+  /** Reasoning/thinking tokens (Gemini also counts them inside tokensOut). */
+  reasoningTokens?: number;
+  cachedInputTokens?: number;
+  cachedWriteInputTokens?: number;
+}
+
+/** Accumulated usage attached to a run, keyed by the last-reported model. */
+export interface RunUsage extends UsageTotals {
+  model: string;
+}
+
+/** Shape of a `cost` LogEvent that feeds the run-usage accumulator. */
+export interface CostEventLike {
+  tokensIn: number;
+  tokensOut: number;
+  costUsd: number;
+  model: string;
+  reasoningTokens?: number;
+  cachedInputTokens?: number;
+  cachedWriteInputTokens?: number;
+}
+
+export function zeroRunUsage(): RunUsage {
+  return { tokensIn: 0, tokensOut: 0, costUsd: 0, model: "" };
+}
+
+/**
+ * Merge one cost event into the run's accumulated usage (immutable). Rich
+ * fields are summed when either side carries them; the latest model wins.
+ */
+export function addCostEvent(usage: RunUsage, event: CostEventLike): RunUsage {
+  const reasoning = (usage.reasoningTokens ?? 0) + (event.reasoningTokens ?? 0);
+  const cachedInput = (usage.cachedInputTokens ?? 0) + (event.cachedInputTokens ?? 0);
+  const cachedWrite = (usage.cachedWriteInputTokens ?? 0) + (event.cachedWriteInputTokens ?? 0);
+  return {
+    tokensIn: usage.tokensIn + event.tokensIn,
+    tokensOut: usage.tokensOut + event.tokensOut,
+    costUsd: usage.costUsd + event.costUsd,
+    model: event.model,
+    ...(usage.reasoningTokens || event.reasoningTokens ? { reasoningTokens: reasoning } : {}),
+    ...(usage.cachedInputTokens || event.cachedInputTokens ? { cachedInputTokens: cachedInput } : {}),
+    ...(usage.cachedWriteInputTokens || event.cachedWriteInputTokens ? { cachedWriteInputTokens: cachedWrite } : {}),
+  };
+}
+
 export interface RunState {
   task: string;
   maxSteps: number;
@@ -37,6 +87,8 @@ export interface RunState {
   step: number;
   active: boolean;
   abortRequested: boolean;
+  /** Accumulated usage for the current run (see addCostEvent). */
+  usage?: RunUsage;
 }
 
 export const RUN_STATE_KEY = "open_cowork_run_state";
@@ -63,8 +115,16 @@ export async function saveRunState(state: Partial<RunState>): Promise<void> {
     const cur = (await getRunState()) ?? {};
     const next = { ...cur, ...state } as RunState;
     next.abortRequested = Boolean((cur as RunState).abortRequested) || Boolean(state.abortRequested);
+    try {
+      await chrome.storage.session.set({ [RUN_STATE_KEY]: next });
+    } catch (e) {
+      // A failed write must not leave the cache holding state storage never
+      // received: the abort listener (and every other consumer) reads via
+      // `getRunState`, so a divergent cache would skip the STOP signal.
+      cachedRunState = undefined;
+      throw e;
+    }
     cachedRunState = next;
-    await chrome.storage.session.set({ [RUN_STATE_KEY]: next });
   });
 }
 
@@ -81,28 +141,6 @@ export async function clearRunState(): Promise<void> {
   return enqueueWrite(async () => {
     cachedRunState = undefined;
     await chrome.storage.session.remove(RUN_STATE_KEY);
-  });
-}
-
-export async function hardResetAbortRequested(): Promise<void> {
-  await enqueueWrite(async () => {
-    try {
-      const res = await chrome.storage.session.get(RUN_STATE_KEY);
-      const cur = res[RUN_STATE_KEY] as RunState | undefined;
-      if (cur) {
-        cur.abortRequested = false;
-        cachedRunState = cur;
-        await chrome.storage.session.set({ [RUN_STATE_KEY]: cur });
-      }
-    } catch (e) {
-      console.error("[state-store] hardResetAbortRequested failed:", e);
-      cachedRunState = undefined;
-      try {
-        await chrome.storage.session.remove(RUN_STATE_KEY);
-      } catch {
-        /* best-effort */
-      }
-    }
   });
 }
 

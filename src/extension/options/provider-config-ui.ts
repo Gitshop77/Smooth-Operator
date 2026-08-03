@@ -11,6 +11,7 @@
 
 import { $, escapeHtml, redactKeyLeak } from "@/extension/shared";
 import { PROVIDER_META, DEFAULT_PROVIDER_ID, catalogIdFor } from "./providers";
+import { STORAGE_KEYS } from "./storage-keys";
 import { testProviderConnection, type ConnectionTestResult } from "./connection-test";
 import {
   fetchCatalog,
@@ -20,7 +21,9 @@ import {
   formatCost,
   formatContext,
   formatVision,
+  reasoningOptionsFor,
 } from "@/lib/agent/llm/catalog";
+import type { ReasoningOption, ReasoningEffort } from "@/lib/agent/llm/catalog-data";
 import {
   refreshPricingFromCatalog,
   getLastPricingError,
@@ -29,6 +32,8 @@ import {
   updateOpencodeEndpointHint,
   applyDefaultModelPlaceholder,
   renderModelResultItem,
+  reasoningEffortOptions,
+  budgetTokensOption,
 } from "./provider-config-ui-utils";
 
 // Re-export the shared secret-masking primitive so callers (and tests) that
@@ -44,9 +49,9 @@ let lastProvider = "";
 // provider to the default. The flag is written by readProviderConfig and
 // consumed (cleared) here on first render.
 if (typeof chrome !== "undefined" && chrome.storage?.local) {
-  void chrome.storage.local.get(["provider_reset_warning"]).then((res) => {
-    if (res?.provider_reset_warning) {
-      void chrome.storage.local.remove("provider_reset_warning");
+  void chrome.storage.local.get([STORAGE_KEYS.providerResetWarning]).then((res) => {
+    if (res?.[STORAGE_KEYS.providerResetWarning]) {
+      void chrome.storage.local.remove(STORAGE_KEYS.providerResetWarning);
       const sel = document.getElementById("provider") as HTMLSelectElement | null;
       const host = sel?.parentElement ?? document.body;
       const el = document.createElement("div");
@@ -132,6 +137,70 @@ export function updateProviderUI(): void {
       updateOpencodeEndpointHint("go");
     } else {
       endpointHint.classList.add("is-hidden");
+    }
+  }
+
+  // O1: re-render the reasoning section for the current provider/model. Keeps
+  // the effort list + budget range in sync when the provider changes.
+  populateReasoningControls();
+}
+
+/**
+ * Render the reasoning (O1) section for the selected provider/model. The
+ * effort levels come from the model's `reasoning_options` intersected with the
+ * safe low/medium/high set; the thinking-budget field appears only for models
+ * that declare a token range. Explicit args override DOM reads so callers can
+ * render for a freshly-committed model id. Non-throwing: a partial DOM (tests)
+ * simply leaves the section untouched.
+ */
+export function populateReasoningControls(modelId?: string, providerId?: string): void {
+  const effortSel = document.getElementById("reasoningEffort") as HTMLSelectElement | null;
+  const budgetLabel = document.getElementById("reasoning-budget-label") as HTMLElement | null;
+  const budgetInput = document.getElementById("reasoningBudget") as HTMLInputElement | null;
+  if (!effortSel) return;
+
+  const provider = providerId ??
+    (document.getElementById("provider") as HTMLSelectElement | null)?.value ?? "";
+  const model = (modelId ?? (document.getElementById("model") as HTMLInputElement | null)?.value ?? "")
+    .trim();
+  const catId = catalogIdFor(provider);
+  const options: ReasoningOption[] = catId ? reasoningOptionsFor(model, catId) : [];
+  const efforts = reasoningEffortOptions(options);
+  const budget = budgetTokensOption(options);
+
+  // Preserve the current selection when it stays valid; otherwise reset to the
+  // first supported level so the form never carries an option that vanished.
+  const current = effortSel.value;
+  effortSel.innerHTML = "";
+  for (const v of efforts) {
+    const opt = document.createElement("option");
+    // `ReasoningEffort` includes literal `null` ("disable reasoning"); the
+    // safe-set intersection above never emits it, but the type allows it.
+    opt.value = v ?? "";
+    opt.textContent = v ?? "";
+    effortSel.appendChild(opt);
+  }
+  const fallbackEffort = efforts[0] ?? "medium";
+  effortSel.value = efforts.includes(current as ReasoningEffort) ? current : fallbackEffort;
+
+  if (budgetLabel && budgetInput) {
+    if (budget) {
+      budgetLabel.classList.remove("is-hidden");
+      if (budget.min !== undefined) budgetInput.min = String(budget.min);
+      if (budget.max !== undefined) budgetInput.max = String(budget.max);
+      // Nudge an out-of-range stored value back into the model's range.
+      const v = Number(budgetInput.value);
+      if (budgetInput.value !== "" && !Number.isNaN(v)) {
+        const clamped = Math.max(
+          budget.min ?? -Infinity,
+          Math.min(budget.max ?? Infinity, v),
+        );
+        budgetInput.value = String(clamped);
+      }
+    } else {
+      budgetLabel.classList.add("is-hidden");
+      budgetInput.removeAttribute("min");
+      budgetInput.removeAttribute("max");
     }
   }
 }
@@ -325,6 +394,29 @@ document.getElementById("model")?.addEventListener("input", () => {
 
 // ─── Delegated click handler for model search results ───────────────────────
 
+/** Remove any stale experimental-model notice. */
+function clearExperimentalModelNotice(): void {
+  document.querySelectorAll(".experimental-notice").forEach((n) => n.remove());
+}
+
+/**
+ * Show a confirmation notice when an alpha/beta (experimental) model is
+ * explicitly committed. Experimental releases can change or disappear without
+ * notice, so the options UI surfaces that at selection time; the notice is
+ * replaced on the next commit. `role=alert` so assistive tech announces it.
+ */
+function showExperimentalModelNotice(modelId: string, status: "alpha" | "beta"): void {
+  clearExperimentalModelNotice();
+  const modelInput = $("model") as HTMLInputElement;
+  const notice = document.createElement("div");
+  notice.className = "experimental-notice";
+  notice.setAttribute("role", "alert");
+  notice.textContent =
+    `Model "${modelId}" is an ${status} (experimental) release — ` +
+    `it may change or disappear without notice.`;
+  modelInput.insertAdjacentElement("afterend", notice);
+}
+
 document.getElementById("model-search-results")?.addEventListener("click", (e) => {
   const target = (e.target as HTMLElement).closest<HTMLDivElement>(".model-search-result-item");
   if (!target?.dataset.modelId) return;
@@ -334,6 +426,15 @@ document.getElementById("model-search-results")?.addEventListener("click", (e) =
   modelInput.setAttribute("aria-expanded", "false");
   const resultsDiv = $("model-search-results") as HTMLDivElement;
   resultsDiv.classList.add("is-hidden");
+  const status = target.dataset.status;
+  if (status === "alpha" || status === "beta") {
+    showExperimentalModelNotice(target.dataset.modelId, status);
+  } else {
+    clearExperimentalModelNotice();
+  }
+  // O1: a committed model may carry different reasoning options than the
+  // previous one — refresh the reasoning section for it.
+  populateReasoningControls(target.dataset.modelId);
 });
 
 // ─── Keyboard navigation for model search results ──────────────────────────

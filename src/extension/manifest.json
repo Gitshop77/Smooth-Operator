@@ -4,8 +4,16 @@
   "version": "0.3.1",
   "description": "Open-source agentic Chrome extension. Give it a prompt and it autonomously reads, reasons, clicks and types across any of your open tabs. Planner + Navigator multi-agent architecture.",
   "minimum_chrome_version": "116",
-  "permissions": ["sidePanel", "scripting", "tabs", "activeTab", "storage", "alarms", "debugger", "notifications", "downloads", "unlimitedStorage", "power", "webRequest", "dns"],
+  "permissions": ["sidePanel", "scripting", "tabs", "activeTab", "storage", "alarms", "debugger", "notifications", "downloads", "unlimitedStorage", "power", "webRequest", "dns", "cookies"],
   "host_permissions": ["http://*/*", "https://*/*"],
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content-main.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; base-uri 'self'; frame-ancestors 'none';"
   },

@@ -48,6 +48,8 @@ export interface OpenAIChatBody {
   frequency_penalty?: number;
   /** Reasoning models (o-series / grok-reasoning) need this instead of `max_tokens`. */
   max_completion_tokens?: number;
+  /** Reasoning-effort level for reasoning models (e.g. "low" | "medium" | "high"). */
+  reasoning_effort?: string;
 }
 
 interface OpenAIChatChunk {
@@ -112,8 +114,11 @@ async function fromRequest(request: LLMRequest): Promise<OpenAIChatBody> {
  // Reasoning models (OpenAI o-series, Grok-reasoning) reject `temperature`
  // and require `max_completion_tokens` instead of `max_tokens`; sending the
  // unsupported params yields a provider 400. Gate on `request.reasoning`.
-  if (request.reasoning) {
+ // `enabled: false` (user forced reasoning off) suppresses the whole
+ // reasoning branch and restores the non-reasoning params.
+  if (request.reasoning && request.reasoningConfig?.enabled !== false) {
     body.max_completion_tokens = request.generation?.maxTokens ?? DEFAULT_MAX_TOKENS;
+    if (request.reasoningConfig?.effort) body.reasoning_effort = request.reasoningConfig.effort;
   } else {
     body.temperature = request.generation?.temperature ?? 0;
  // match Anthropic (4096) and Gemini (8192) by having a hardcoded

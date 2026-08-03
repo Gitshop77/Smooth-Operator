@@ -6,7 +6,7 @@
  * dynamic import (mirrors settings-sync.test.ts / log-renderer.test.ts).
  */
 
-import { describe, test, expect, beforeAll } from "vitest";
+import { describe, test, expect, beforeAll, vi } from "vitest";
 import { makeChromeStorageMock } from "./helpers/chrome-storage-mock";
 import type { RunHistoryEntry } from "../src/extension/options/history-utils";
 
@@ -126,7 +126,9 @@ describe("capTranscript", () => {
       endedAt: 2,
       stepCount: 1,
       totalCostUsd: 0.1,
-      transcript: "y".repeat(200_000),
+      // Spaced content survives redactKeyLeak (a single unbroken token would
+      // be masked as high-entropy and collapse below the cap).
+      transcript: "y ".repeat(100_000),
     };
     const out = capTranscript(run);
     expect(out.length).toBeLessThan(MAX_TRANSCRIPT_CHARS + 120);
@@ -145,5 +147,106 @@ describe("capTranscript", () => {
     };
     const out = capTranscript(run);
     expect(out.includes("\uFFFD")).toBe(false);
+  });
+
+  test("key-shaped tokens are masked before the transcript is rendered", () => {
+    const run: RunHistoryEntry = {
+      task: "hi",
+      startedAt: 1,
+      endedAt: 2,
+      stepCount: 1,
+      totalCostUsd: 0.1,
+      transcript: { echoed: "gsk_live_abc123def456ghi789jkl012" },
+    };
+    const out = capTranscript(run);
+    expect(out).not.toContain("gsk_live_abc123def456ghi789jkl012");
+    expect(out).toContain("gsk_[REDACTED]");
+  });
+});
+
+describe("history export", () => {
+  test("export file contains redacted runs, not raw key-shaped tokens", async () => {
+    const { localStore } = await (async () => {
+      const local = new Map<string, unknown>();
+      const session = new Map<string, unknown>();
+      (globalThis as unknown as { chrome: unknown }).chrome = makeChromeStorageMock(local, session);
+      document.body.innerHTML = `
+        <select id="provider"></select>
+        <button id="testConnection"></button>
+        <input id="model">
+        <span id="provider-hint"></span>
+        <input id="apiKey">
+        <span id="apikey-hint"></span>
+        <label id="baseurl-label"></label>
+        <input id="baseUrl">
+        <input id="maxSteps">
+        <input id="maxActions">
+        <input id="plannerInterval">
+        <input id="maxFailures">
+        <input id="costCap">
+        <textarea id="defaultTask"></textarea>
+        <input id="screenshotQuality">
+        <input id="enableScreenshots">
+        <input type="checkbox" id="enableStealth" />
+        <textarea id="allowedDomains"></textarea>
+        <textarea id="blockedDomains"></textarea>
+        <input id="notifyOnCompletion">
+        <input id="notifyOnError">
+        <input id="notifyOnTakeover">
+        <input id="webhookUrl">
+        <div id="saved"></div>
+        <button id="addSecret"></button>
+        <input id="secretName">
+        <input id="secretValue">
+        <div id="secretsList"></div>
+        <div id="historyList"></div>
+        <button id="clearHistory"></button>
+        <button id="exportHistory"></button>
+        <button id="importHistory"></button>
+        <input id="importHistoryFile">
+      `;
+      return { localStore: local };
+    })();
+    localStore.set("open_cowork_run_history", [
+      {
+        id: "r1",
+        task: "demo",
+        startedAt: Date.now() - 1000,
+        endedAt: Date.now(),
+        steps: [],
+        result: null,
+        totalTokensIn: 1,
+        totalTokensOut: 1,
+        totalCostUsd: 0.1,
+        stepCount: 1,
+        overflowCount: 0,
+        transcript: { echoed: "ghp_abc123def456ghi789jkl012" },
+      },
+    ]);
+    vi.resetModules();
+    await import("../src/extension/options/history");
+
+    const blobs: Blob[] = [];
+    const origCreate = URL.createObjectURL;
+    const origRevoke = URL.revokeObjectURL;
+    URL.createObjectURL = (b: Blob) => {
+      blobs.push(b);
+      return "blob:history-export";
+    };
+    URL.revokeObjectURL = () => {};
+    try {
+      (document.getElementById("exportHistory") as HTMLButtonElement).click();
+      const deadline = Date.now() + 2000;
+      while (blobs.length === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    } finally {
+      URL.createObjectURL = origCreate;
+      URL.revokeObjectURL = origRevoke;
+    }
+    expect(blobs.length).toBe(1);
+    const text = await blobs[0].text();
+    expect(text).not.toContain("ghp_abc123def456ghi789jkl012");
+    expect(text).toContain("ghp_[REDACTED]");
   });
 });

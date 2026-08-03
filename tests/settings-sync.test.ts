@@ -9,10 +9,25 @@
 import { describe, test, expect, beforeAll, vi } from "vitest";
 import { makeChromeStorageMock } from "./helpers/chrome-storage-mock";
 
+// Shared spy over the SSRF webhook validator so tests can simulate transient
+// DNS failures without real chrome.dns. Defaults to the real implementation.
+const webhookResolveMock = vi.fn();
+vi.mock("@/lib/agent/llm/route/ssrf", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/agent/llm/route/ssrf")>();
+  webhookResolveMock.mockImplementation((url: string) => actual.resolveAndValidateWebhookUrl(url));
+  return { ...actual, resolveAndValidateWebhookUrl: webhookResolveMock };
+});
+
 // Inspectable storage maps, (re)assigned by setupGlobals so tests can assert
 // what saveSettings() persisted.
 let localStore: Map<string, unknown>;
 let sessionStore: Map<string, unknown>;
+
+/** The provider id currently selected in the (populated) provider <select>. */
+function activeProviderId(): string {
+  const sel = document.getElementById("provider") as HTMLSelectElement;
+  return sel.options[sel.selectedIndex]?.value ?? sel.value;
+}
 
 function setupGlobals(): void {
   localStore = new Map<string, unknown>();
@@ -50,6 +65,18 @@ function setupGlobals(): void {
     <input id="secretName">
     <input id="secretValue">
     <div id="secretsList"></div>
+    <input id="resourceName">
+    <select id="reasoningEffort">
+      <option value="low">low</option>
+      <option value="medium" selected>medium</option>
+      <option value="high">high</option>
+    </select>
+    <input id="reasoningBudget">
+    <select id="forceReasoning">
+      <option value="auto" selected>auto</option>
+      <option value="on">on</option>
+      <option value="off">off</option>
+    </select>
   `;
 }
 
@@ -75,10 +102,10 @@ describe("settings-sync URL/hostname validators", () => {
   });
 
   test("isHostname accepts bare hostnames incl. IPv6, rejects scheme/port/path", () => {
-  // URL.hostname returns bracketed IPv6 ("[2001:db8::1]") for
-  // "http://[2001:db8::1]"; isIpv6Literal compares against the bracketed
-  // form, so real IPv6 literals are accepted (previously the comparison was
-  // unbracketed and rejected them).
+    // URL.hostname returns bracketed IPv6 ("[2001:db8::1]") for
+    // "http://[2001:db8::1]"; isIpv6Literal compares against the bracketed
+    // form, so real IPv6 literals are accepted (previously the comparison was
+    // unbracketed and rejected them).
     expect(isHostname("2001:db8::1")).toBe(true); // bare IPv6 literal
     expect(isHostname("evil.com:9999")).toBe(false); // host:port
     expect(isHostname("EXAMPLE.com")).toBe(true); // IDN/uppercase
@@ -218,5 +245,263 @@ describe("migrateSecretsFromLocalToSession consent behavior", () => {
     await migrateSecretsFromLocalToSession();
     expect(sessionStore.size).toBe(0);
     expect(localStore.size).toBe(0);
+  });
+});
+
+describe("migrateSecretsFromLocalToSession newer-session-key guard", () => {
+  test("never overwrites a session key that a save already wrote", async () => {
+    setupGlobals();
+    sessionStore.set("apiKey", "sk-newer");
+    localStore.set("apiKey", "sk-stale");
+    vi.resetModules();
+    const { migrateSecretsFromLocalToSession } =
+      await import("../src/extension/options/settings-sync-utils");
+    await migrateSecretsFromLocalToSession();
+    expect(sessionStore.get("apiKey")).toBe("sk-newer");
+    // The stale local mirror is left alone too — the save that wrote the
+    // session key is the authority over the local mirror.
+    expect(localStore.get("apiKey")).toBe("sk-stale");
+  });
+});
+
+describe("migrateSecretsFromLocalToSession duplicate handling", () => {
+  test("keeps a local secret that differs from the session entry", async () => {
+    setupGlobals();
+    localStore.set("open_cowork_secrets", [{ name: "TOKEN", value: "local-value" }]);
+    sessionStore.set("open_cowork_secrets", [{ name: "TOKEN", value: "session-value" }]);
+    vi.resetModules();
+    const { migrateSecretsFromLocalToSession } =
+      await import("../src/extension/options/settings-sync-utils");
+    await migrateSecretsFromLocalToSession();
+    // Differing local value is NOT counted as migrated, so it is not dropped.
+    expect(localStore.get("open_cowork_secrets")).toEqual([{ name: "TOKEN", value: "local-value" }]);
+    expect(sessionStore.get("open_cowork_secrets")).toEqual([{ name: "TOKEN", value: "session-value" }]);
+  });
+
+  test("removes a local secret identical to the session entry", async () => {
+    setupGlobals();
+    localStore.set("open_cowork_secrets", [{ name: "TOKEN", value: "same" }]);
+    sessionStore.set("open_cowork_secrets", [{ name: "TOKEN", value: "same" }]);
+    vi.resetModules();
+    const { migrateSecretsFromLocalToSession } =
+      await import("../src/extension/options/settings-sync-utils");
+    await migrateSecretsFromLocalToSession();
+    expect(localStore.has("open_cowork_secrets")).toBe(false);
+  });
+});
+
+describe("webhook URL validation on save", () => {
+  test("transient DNS failure keeps the previous webhook and does not clear the field", async () => {
+    setupGlobals();
+    localStore.set("webhookUrl", "https://old.example.com/hook");
+    vi.resetModules();
+    const mod = await import("../src/extension/options/settings-sync");
+    webhookResolveMock.mockClear();
+    webhookResolveMock.mockResolvedValueOnce({
+      ok: false,
+      reason: "DNS resolution for new.example.com failed; refusing https://new.example.com/hook (fail-closed SSRF guard).",
+    });
+    const field = document.getElementById("webhookUrl") as HTMLInputElement;
+    field.value = "https://new.example.com/hook";
+    expect(await mod.saveSettings()).toBe(true);
+    // The configured webhook must not silently disappear after a DNS hiccup.
+    expect(localStore.get("webhookUrl")).toBe("https://old.example.com/hook");
+    expect(field.value).toBe("https://new.example.com/hook");
+  });
+
+  test("syntactic rejection still clears the field and persists empty", async () => {
+    setupGlobals();
+    vi.resetModules();
+    const mod = await import("../src/extension/options/settings-sync");
+    webhookResolveMock.mockClear();
+    webhookResolveMock.mockResolvedValueOnce({ ok: false, reason: "scheme \"ftp\" is not allowed (only http/https)" });
+    const field = document.getElementById("webhookUrl") as HTMLInputElement;
+    field.value = "ftp://x";
+    const savePromise = mod.saveSettings();
+    // The invalid-value alert blocks the save until dismissed; Esc closes it.
+    // The overlay only appears after the (async) webhook check resolves, so
+    // wait for it before dispatching Escape — otherwise the keydown hits
+    // nothing and the alert promise never settles.
+    await vi.waitFor(() => {
+      expect(document.querySelector(".modal-overlay")).not.toBeNull();
+    });
+    document.querySelector(".modal-overlay")
+      ?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(await savePromise).toBe(true);
+    expect(localStore.get("webhookUrl")).toBe("");
+    expect(field.value).toBe("");
+  });
+
+  test("validation verdict is cached per URL (no DNS round-trip per autosave)", async () => {
+    setupGlobals();
+    vi.resetModules();
+    const mod = await import("../src/extension/options/settings-sync");
+    webhookResolveMock.mockClear();
+    webhookResolveMock.mockResolvedValue({ ok: true });
+    const field = document.getElementById("webhookUrl") as HTMLInputElement;
+    field.value = "https://valid.example.com/hook";
+    await mod.saveSettings();
+    await mod.saveSettings();
+    expect(localStore.get("webhookUrl")).toBe("https://valid.example.com/hook");
+    expect(webhookResolveMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("agentMode/maxSteps change tracking", () => {
+  test("an unrelated save does not re-write agentMode/maxSteps (sidepanel change preserved)", async () => {
+    setupGlobals();
+    localStore.set("agentMode", "full");
+    localStore.set("maxSteps", 42);
+    vi.resetModules();
+    const mod = await import("../src/extension/options/settings-sync");
+    // The sidepanel writes after Options loaded; the form still holds the
+    // page-load values.
+    localStore.set("agentMode", "agent");
+    localStore.set("maxSteps", 7);
+    expect(await mod.saveSettings()).toBe(true);
+    expect(localStore.get("agentMode")).toBe("agent");
+    expect(localStore.get("maxSteps")).toBe(7);
+  });
+
+  test("changing the maxSteps control persists the new value", async () => {
+    setupGlobals();
+    localStore.set("maxSteps", 42);
+    vi.resetModules();
+    const mod = await import("../src/extension/options/settings-sync");
+    const steps = document.getElementById("maxSteps") as HTMLInputElement;
+    steps.value = "7";
+    steps.dispatchEvent(new Event("input"));
+    await mod.saveSettings();
+    expect(localStore.get("maxSteps")).toBe(7);
+  });
+});
+
+/**
+ * O1 — the Options reasoning controls round-trip through saveSettings/load.
+ * llm-direct.ts reads these exact top-level keys (getReasoningEffort /
+ * getReasoningBudget / getForceReasoning), so a regression dropping them from
+ * the save path would silently reset user reasoning configuration.
+ */
+describe("settings-sync reasoning (O1) round-trip", () => {
+  test("saveSettings persists effort/budget/force with sanctioned values", async () => {
+    setupGlobals();
+    const mod = await import("../src/extension/options/settings-sync");
+    (document.getElementById("reasoningEffort") as HTMLSelectElement).value = "high";
+    (document.getElementById("reasoningBudget") as HTMLInputElement).value = "20480";
+    (document.getElementById("forceReasoning") as HTMLSelectElement).value = "off";
+    expect(await mod.saveSettings()).toBe(true);
+    expect(localStore.get("reasoningEffort")).toBe("high");
+    expect(localStore.get("reasoningBudget")).toBe(20480);
+    expect(localStore.get("forceReasoning")).toBe("off");
+  });
+
+  test("an emptied budget field removes the previously-stored budget", async () => {
+    setupGlobals();
+    localStore.set("reasoningBudget", 1024);
+    vi.resetModules();
+    const mod = await import("../src/extension/options/settings-sync");
+    (document.getElementById("reasoningBudget") as HTMLInputElement).value = "";
+    expect(await mod.saveSettings()).toBe(true);
+    expect(localStore.has("reasoningBudget")).toBe(false);
+  });
+
+  test("a tampered effort/force value falls back to the default instead of persisting junk", async () => {
+    setupGlobals();
+    const mod = await import("../src/extension/options/settings-sync");
+    // populateReasoningControls rebuilds the effort select, so an out-of-set
+    // value can only come from tampering — the save path must guard it.
+    (document.getElementById("reasoningEffort") as HTMLSelectElement).value = "xhigh";
+    (document.getElementById("forceReasoning") as HTMLSelectElement).value = "sometimes";
+    expect(await mod.saveSettings()).toBe(true);
+    expect(localStore.get("reasoningEffort")).toBe("medium");
+    expect(localStore.get("forceReasoning")).toBe("auto");
+  });
+
+  test("import-time load reflects restored reasoning settings", async () => {
+    setupGlobals();
+    localStore.set("reasoningEffort", "high");
+    localStore.set("reasoningBudget", 20480);
+    localStore.set("forceReasoning", "off");
+    vi.resetModules();
+    await import("../src/extension/options/settings-sync");
+    expect((document.getElementById("reasoningEffort") as HTMLSelectElement).value).toBe("high");
+    expect((document.getElementById("reasoningBudget") as HTMLInputElement).value).toBe("20480");
+    expect((document.getElementById("forceReasoning") as HTMLSelectElement).value).toBe("off");
+  });
+});
+
+/**
+ * O8 — the provider-scoped config record written by the Options save path.
+ * The active provider's entry mirrors the flat values; other providers' entries
+ * survive untouched so switching providers restores their config.
+ */
+describe("settings-sync providerConfigs (O8) write + load", () => {
+  test("saveSettings writes a nested record mirroring the flat values", async () => {
+    setupGlobals();
+    const mod = await import("../src/extension/options/settings-sync");
+    const providerId = activeProviderId();
+    (document.getElementById("model") as HTMLInputElement).value = "gpt-5.5";
+    (document.getElementById("baseUrl") as HTMLInputElement).value = "https://custom.example.com/v1";
+    (document.getElementById("resourceName") as HTMLInputElement).value = "my-resource";
+    expect(await mod.saveSettings()).toBe(true);
+    const record = localStore.get("providerConfigs") as Record<string, unknown>;
+    expect(record[providerId]).toEqual({
+      model: "gpt-5.5",
+      baseUrl: "https://custom.example.com/v1",
+      resourceName: "my-resource",
+      provenance: "user",
+    });
+  });
+
+  test("saveSettings preserves other providers' nested entries", async () => {
+    setupGlobals();
+    localStore.set("providerConfigs", {
+      anthropic: { model: "claude-old", baseUrl: "https://legacy.example.com", resourceName: "", provenance: "user" },
+    });
+    vi.resetModules();
+    const mod = await import("../src/extension/options/settings-sync");
+    const providerId = activeProviderId();
+    (document.getElementById("model") as HTMLInputElement).value = "gpt-5.5";
+    expect(await mod.saveSettings()).toBe(true);
+    const record = localStore.get("providerConfigs") as Record<string, unknown>;
+    expect(record.anthropic).toEqual({
+      model: "claude-old",
+      baseUrl: "https://legacy.example.com",
+      resourceName: "",
+      provenance: "user",
+    });
+    expect(record[providerId]).toBeDefined();
+  });
+
+  test("import-time load applies the nested record over the flat mirror", async () => {
+    setupGlobals();
+    localStore.set("provider", "openai");
+    localStore.set("model", "flat-model");
+    localStore.set("baseUrl", "https://flat.example.com");
+    localStore.set("resourceName", "flat-res");
+    localStore.set("providerConfigs", {
+      openai: {
+        model: "nested-model",
+        baseUrl: "https://nested.example.com",
+        resourceName: "nested-res",
+        provenance: "user",
+      },
+    });
+    vi.resetModules();
+    await import("../src/extension/options/settings-sync");
+    expect((document.getElementById("model") as HTMLInputElement).value).toBe("nested-model");
+    expect((document.getElementById("baseUrl") as HTMLInputElement).value).toBe("https://nested.example.com");
+    expect((document.getElementById("resourceName") as HTMLInputElement).value).toBe("nested-res");
+  });
+
+  test("import-time load falls back to the flat mirror when the provider has no nested entry", async () => {
+    setupGlobals();
+    localStore.set("provider", "openai");
+    localStore.set("model", "flat-model");
+    localStore.set("baseUrl", "https://flat.example.com");
+    vi.resetModules();
+    await import("../src/extension/options/settings-sync");
+    expect((document.getElementById("model") as HTMLInputElement).value).toBe("flat-model");
+    expect((document.getElementById("baseUrl") as HTMLInputElement).value).toBe("https://flat.example.com");
   });
 });

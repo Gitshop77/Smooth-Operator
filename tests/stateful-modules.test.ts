@@ -68,13 +68,18 @@ describe("scheduled-tasks — validateSchedule", () => {
 });
 
 describe("scheduled-tasks — computeNextFire", () => {
-  test("interval schedule returns the current date (interval is handled by chrome.alarms)", () => {
+  test("interval schedule falls through to the default-hour branch and pins the exact next fire", () => {
+ // There is no dedicated interval branch: an interval schedule drops into
+ // the default-hour (09:00) logic plus the MIN_FIRE_DELAY_MS bump. Pin the
+ // EXACT result so a future dedicated `computeNextIntervalFire` branch that
+ // stops exercising this code path fails loudly instead of silently passing
+ // the loose `>= 60s` assertion.
     const now = new Date("2025-01-15T10:00:00");
     const result = computeNextFire({ type: "interval", intervalMinutes: 60 }, now);
- // computeNextFire sets the time to the default hour:minute for interval
- // schedules (they don't use hour/minute), so the result should be at
- // least 1 minute in the future. Pin the documented minimum 1-minute delay.
-    expect(result.getTime()).toBeGreaterThan(now.getTime());
+    // target = today 09:00; minFuture = 10:01; one 24h step → tomorrow 09:00.
+    const expected = new Date("2025-01-16T09:00:00");
+    expect(result.getTime()).toBe(expected.getTime());
+    // The documented minimum delay still holds.
     expect(result.getTime() - now.getTime()).toBeGreaterThanOrEqual(60_000);
   });
 
@@ -306,6 +311,19 @@ describe("scheduled-tasks — corrupt persisted entries", () => {
     expect(isValidTaskEntry(makeTask("ok-1", { type: "daily", hour: 9, minute: 0 }))).toBe(true);
   });
 
+  test("isValidTaskEntry rejects entries with a missing/blank id or task", () => {
+    // A corrupt/legacy entry with garbage identity would otherwise be re-armed
+    // under `open_cowork_scheduled_undefined` with a blank prompt.
+    const validSchedule = { type: "interval", intervalMinutes: 15 };
+    expect(isValidTaskEntry({ task: "t", schedule: validSchedule })).toBe(false);
+    expect(isValidTaskEntry({ id: "", task: "t", schedule: validSchedule })).toBe(false);
+    expect(isValidTaskEntry({ id: "   ", task: "t", schedule: validSchedule })).toBe(false);
+    expect(isValidTaskEntry({ id: "x", task: "", schedule: validSchedule })).toBe(false);
+    expect(isValidTaskEntry({ id: "x", task: "   ", schedule: validSchedule })).toBe(false);
+    // The schedule is still validated on top of the identity checks.
+    expect(isValidTaskEntry({ id: "x", task: "t", schedule: { type: "interval" } })).toBe(false);
+  });
+
   test("initScheduledTasks skips corrupt entries instead of crashing SW startup", async () => {
     const stub = installChromeAlarmsStub();
     try {
@@ -340,7 +358,7 @@ describe("persistent-memory", () => {
  // Clear localStorage AND the in-memory cache so each test starts clean.
  // Without resetting the cache, a previous test's saveMemory could leave
  // stale data that loadAllMemories reads instead of the cleared storage.
-    localStorage.removeItem("__opencowork_site_memories");
+    localStorage.removeItem("open_cowork_site_memories");
     __resetMemoryCacheForTests();
   });
 

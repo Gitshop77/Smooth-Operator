@@ -30,9 +30,18 @@ describe("search_page ReDoS static guards", () => {
       expect(hasNestedQuantifier("((a|b)+)+")).toBe(true);
     });
 
+    test("rejects group-prefixed and single-wrapper ambiguities", () => {
+      // `(?:a|a)+` must be analyzed against the inner alternation, not the
+      // `?:` prefix; `((a|a))+` must recurse into the wrapper group.
+      expect(hasNestedQuantifier("(?:a|a)+")).toBe(true);
+      expect(hasNestedQuantifier("(?:a+)+")).toBe(true);
+      expect(hasNestedQuantifier("((a|a))+")).toBe(true);
+    });
+
     test("accepts safe alternation under unbounded quantifier", () => {
       expect(hasNestedQuantifier("(abc|def)+")).toBe(false);
       expect(hasNestedQuantifier("(a|b|c)+")).toBe(false);
+      expect(hasNestedQuantifier("(?:ab)+")).toBe(false);
     });
 
     test("accepts exact repetitions and ? quantifiers", () => {
@@ -40,10 +49,35 @@ describe("search_page ReDoS static guards", () => {
       expect(hasNestedQuantifier("(a)?")).toBe(false);
     });
 
+    test("rejects large exact {n} on an ambiguous or nested-quantifier group", () => {
+      // `(a+){100}` and `(a|aa){100}` keep the full exponential blowup of the
+      // unbounded forms — only the repetition count is bounded, which does
+      // not bound the path count.
+      expect(hasNestedQuantifier("(a+){100}b")).toBe(true);
+      expect(hasNestedQuantifier("(a|aa){100}b")).toBe(true);
+      expect(hasNestedQuantifier("(a+){32}")).toBe(true);
+    });
+
+    test("accepts bounded exact {n} and bounded atoms under large repetitions", () => {
+      expect(hasNestedQuantifier("(a+){3}")).toBe(false);
+      expect(hasNestedQuantifier("(a|b){50}")).toBe(false);
+      expect(hasNestedQuantifier("(?:ab){100}")).toBe(false);
+      expect(hasNestedQuantifier("(a{100})+")).toBe(false);
+      expect(hasNestedQuantifier("(a{100}){50}")).toBe(false);
+    });
+
     test("rejects ambiguous alternation whose branch starts with a character class", () => {
       expect(hasNestedQuantifier("([ab]|b)+")).toBe(true);
       expect(hasNestedQuantifier("([a-z]|m)+")).toBe(true);
       expect(hasNestedQuantifier("([^0-9]|x)+")).toBe(true);
+    });
+
+    test("rejects class-escape branches that overlap a literal alternative", () => {
+      expect(hasNestedQuantifier("([\\d]|5)+")).toBe(true);
+      expect(hasNestedQuantifier("([\\s]| )+")).toBe(true);
+      expect(hasNestedQuantifier("([\\D]|x)+")).toBe(true);
+      expect(hasNestedQuantifier("([\\x41]|A)+")).toBe(true);
+      expect(hasNestedQuantifier("([a-z\\x41]|A)+")).toBe(true);
     });
 
     test("rejects alternation overlapping via a hex escape literal", () => {

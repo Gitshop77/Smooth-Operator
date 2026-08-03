@@ -12,6 +12,7 @@ import { $, isRecord } from "@/extension/shared";
 import { STORAGE_KEYS } from "./storage-keys";
 import { showSaved } from "./settings-sync-utils";
 import { alertModal } from "./modal";
+import { serialize } from "./custom-tools-utils";
 
 interface QuickPrompt {
   name: string;
@@ -22,27 +23,18 @@ interface QuickPrompt {
 const NAME_MAX = 64;
 const TEXT_MAX = 5_000;
 
-// ─── Mutation serialization ──────────────────────────────────────────────────
-let mutationQueue: Promise<unknown> = Promise.resolve();
-function serialize<T>(task: () => Promise<T>): Promise<T> {
-  const run = mutationQueue.then(task, task);
-  mutationQueue = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  return run;
-}
-
 export function validateQuickPrompts(raw: unknown): QuickPrompt[] {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) {
-    console.warn("[prompts] stored quick-prompts value is not an array; ignoring.", raw);
+    // Log the shape only — the payload is user prompt text and must not be
+    // dumped to the console.
+    console.warn(`[prompts] stored quick-prompts value is not an array (got ${typeof raw}); ignoring.`);
     return [];
   }
   const out: QuickPrompt[] = [];
   raw.forEach((entry, i) => {
     if (!isRecord(entry) || typeof entry.name !== "string" || typeof entry.text !== "string") {
-      console.warn(`[prompts] dropping malformed quick-prompt at index ${i}.`, entry);
+      console.warn(`[prompts] dropping malformed quick-prompt at index ${i} (expected {name, text} strings).`);
       return;
     }
     out.push({ name: entry.name, text: entry.text });

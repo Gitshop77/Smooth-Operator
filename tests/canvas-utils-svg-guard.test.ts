@@ -51,4 +51,28 @@ describe("assertDataUrl SVG rejection is case-insensitive", () => {
     stubFetchBlob(fakeBlob);
     await expect(dataUrlToBlob(jpeg)).resolves.toBe(fakeBlob);
   });
+
+  test("accepts a valid raster JPG data URL (jpg variant)", async () => {
+    const jpg = "data:image/jpg;base64,/9j/4AAQSkZJRg==";
+    const fakeBlob = new Blob(["z"]);
+    stubFetchBlob(fakeBlob);
+    await expect(dataUrlToBlob(jpg)).resolves.toBe(fakeBlob);
+  });
+});
+
+describe("assertDataUrl rejects percent-encoded media types", () => {
+  test("rejects a percent-encoded svg+xml media type (single-encoded bypass)", async () => {
+    const svg = "data:image/svg%2Bxml;base64,PHN2Zz48L3N2Zz4=";
+    await expect(dataUrlToBlob(svg)).rejects.toThrow(/expected a raster data:image URL/);
+  });
+
+  test("rejects a double-encoded svg media type (percent-decode bypass)", async () => {
+    const svg = "data:image/%2573v%2567%252Bxml;base64,PHN2Zz48L3N2Zz4=";
+    await expect(dataUrlToBlob(svg)).rejects.toThrow(/expected a raster data:image URL/);
+  });
+
+  test("rejects a percent-encoded raster media type (browser never percent-decodes data-URL MIME types)", async () => {
+    const jpeg = "data:image/jpeg%3Bbase64,/9j/4AAQ==";
+    await expect(dataUrlToBlob(jpeg)).rejects.toThrow(/expected a raster data:image URL/);
+  });
 });

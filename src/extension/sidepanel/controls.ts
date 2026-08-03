@@ -30,7 +30,6 @@ import { restoreTotalsFromStorage, clearRunTotals } from "./log-renderer";
 import {
   sanitizeLastError,
   storageGet,
-  storageSet,
   runtimeSendMessage,
 } from "./controls-utils";
 import { ensureApiKeyInSession } from "../api-key-storage";
@@ -68,25 +67,14 @@ async function sendMessage(): Promise<void> {
   const text = messageInput.value.trim();
   if (!text || running) return;
 
-  // Debounce rapid-fire sends.
+  // Debounce rapid-fire sends. The guard stays armed until the RUN response
+  // settles (cleared on every settle path below) so a second send can't slip
+  // through the storage-read window and issue a duplicate RUN. The 10s
+  // timeout is a fail-safe in case a settle path is ever missed.
   if (sendDebounceTimer) return;
-  sendDebounceTimer = setTimeout(() => { sendDebounceTimer = null; }, 500);
+  sendDebounceTimer = setTimeout(() => { sendDebounceTimer = null; }, 10_000);
 
   try {
-    // Check if we're in a clarify state — if so, send a CLARIFY message instead.
-    const clarifyRes = await storageGet(["open_cowork_clarify"], "session") as Record<string, unknown>;
-    const isClarifying = !!clarifyRes?.open_cowork_clarify;
-
-    if (isClarifying) {
-      await storageSet({ open_cowork_clarify_response: text }, "session");
-      clearSendDebounce();
-      addUserMessage(text);
-      messageInput.value = "";
-      setLifecycle("thinking");
-      addSystemMessage("💬", "Clarification received, resuming task…");
-      return;
-    }
-
     // Guard: check that an API key is configured before sending. The provider
     // is saved to LOCAL storage; the API key lives in SESSION storage
     // (in-memory — never written to disk unless the user opted into
@@ -142,8 +130,12 @@ async function sendMessage(): Promise<void> {
     setRunning(true);
     clearRunTotals();
     clearSendDebounce();
-  } catch {
+  } catch (err) {
     clearSendDebounce();
+    addSystemMessage(
+      "❌",
+      `Send failed: ${sanitizeLastError(err instanceof Error ? err.message : undefined)}`
+    );
   }
 }
 
@@ -163,10 +155,16 @@ messageInput.addEventListener("input", () => {
 // ─── / keyboard shortcut to focus input ──────────────────────────────────
 
 document.addEventListener("keydown", (e: KeyboardEvent) => {
-  if (e.key === "/" && document.activeElement !== messageInput && !e.ctrlKey && !e.metaKey) {
-    e.preventDefault();
-    messageInput.focus();
-  }
+  if (e.key !== "/" || e.ctrlKey || e.metaKey) return;
+  const target = e.target as HTMLElement | null;
+  // Never swallow the keystroke while the user is typing in a field — the
+  // takeover password/text prompts in particular must keep receiving "/".
+  if (!target) return;
+  const tag = target.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable) return;
+  if (document.activeElement === messageInput) return;
+  e.preventDefault();
+  messageInput.focus();
 });
 
 // ─── Stop button ─────────────────────────────────────────────────────────

@@ -10,6 +10,32 @@
  * Authoritative types (Agent A's bundle conforms to these).    *
  * ============================================================= */
 
+/**
+ * Effort levels a provider accepts for a reasoning model. `null` means the
+ * provider accepts disabling reasoning explicitly (mirrors the models.dev SDK's
+ * `ReasoningEffort`).
+ */
+export type ReasoningEffort =
+  | null
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max"
+  | "default";
+
+/**
+ * Variant descriptors for a model's reasoning configuration (models.dev
+ * `reasoning_options`): an effort list, an on/off toggle, and/or a thinking
+ * budget token range. Each model may declare any subset of these.
+ */
+export type ReasoningOption =
+  | { type: "effort"; values: ReasoningEffort[] }
+  | { type: "toggle" }
+  | { type: "budget_tokens"; min?: number; max?: number };
+
 /** A single model in the models.dev catalog. */
 export interface CatalogModel {
   id: string;
@@ -27,6 +53,8 @@ export interface CatalogModel {
   open_weights?: boolean;
   status?: string; // "alpha" | "beta" | "deprecated"
   modalities?: { input?: string[]; output?: string[] };
+  /** Reasoning variant surface (drives the options UI effort/toggle/budget fields). */
+  reasoning_options?: ReasoningOption[];
   limit?: { context: number; input?: number; output: number };
   cost?: {
     input: number;
@@ -36,6 +64,22 @@ export interface CatalogModel {
     reasoning?: number;
     input_audio?: number;
     output_audio?: number;
+    /** Context-tier rates — the highest tier whose `size` is below the prompt's
+     * context-token count applies (models.dev `CostTier`, type pinned to "context"). */
+    tiers?: Array<{
+      input: number;
+      output: number;
+      cache_read?: number;
+      cache_write?: number;
+      tier: { type: "context"; size: number };
+    }>;
+    /** Rates applied when the prompt exceeds 200k context tokens and no tier matches. */
+    context_over_200k?: {
+      input: number;
+      output: number;
+      cache_read?: number;
+      cache_write?: number;
+    };
   };
 }
 
@@ -62,8 +106,22 @@ import { providers as BUNDLED_CATALOG } from "@opencode-ai/models/snapshot";
 export { BUNDLED_CATALOG };
 
 export const CATALOG_URL = "https://models.dev/api.json";
-export const CACHE_KEY = "__opencowork_models_dev_catalog";
+// Storage keys are the one namespace users may see; keep this on the
+// project's `open_cowork_` convention (the old `__opencowork_` prefix
+// diverged — cached values self-heal via TTL revalidation after the rename).
+export const CACHE_KEY = "open_cowork_models_dev_catalog";
 export const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * The reasoning variant options for a model, read from the BUNDLED snapshot
+ * record (models.dev `reasoning_options`). Returns `[]` when the provider or
+ * model is unknown, or when the model declares no variant descriptors. Pure —
+ * no I/O, no dependence on the merged cache, so it works before any catalog
+ * load. `providerId` is the models.dev catalog provider id.
+ */
+export function reasoningOptionsFor(modelId: string, providerId: string): ReasoningOption[] {
+  return BUNDLED_CATALOG[providerId]?.models[modelId]?.reasoning_options ?? [];
+}
 
 /**
  * Heuristic vision-capable model-name patterns (fallback used only when a
@@ -169,7 +227,7 @@ function isValidModel(model: unknown): model is CatalogModel {
       outputRate < 0
     ) return false;
     const rateOk = (v: unknown) =>
-      v === undefined || (typeof v === "number" && v >= 0);
+      v === undefined || (typeof v === "number" && Number.isFinite(v) && v >= 0);
     if (
       !rateOk(c.cache_read) ||
       !rateOk(c.cache_write) ||

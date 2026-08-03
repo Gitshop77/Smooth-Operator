@@ -12,7 +12,6 @@
  * uses window.prompt/confirm. The agent PAUSES until the user responds.
  */
 
-import { requiresConfirmation, type AgentMode } from "./modes";
 import { resolveTimeoutMs, sanitizeResponse } from "./human-interaction-utils";
 
 /** The 5 supported interaction modes. */
@@ -39,16 +38,6 @@ export type HumanInteractionResponse =
   | { mode: "request_help"; value: string }
   | { mode: "cancelled" }
   | { mode: "error"; reason: string };
-
-/**
- * Check if an action type requires human confirmation before executing.
- *
- * This delegates to {@link requiresConfirmation} from `./modes` — the
- * single source of truth for which actions need confirmation per mode.
- */
-export function shouldAskForConfirmation(actionType: string, mode: AgentMode): boolean {
-  return requiresConfirmation(actionType, mode);
-}
 
 /**
  * In the extension, send a message to the side panel and wait for its

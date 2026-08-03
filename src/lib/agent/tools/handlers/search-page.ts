@@ -77,7 +77,10 @@ export async function handleSearchPage(
     let text = node.textContent || "";
     const parentTag = (node.parentElement as HTMLElement | null)?.tagName;
     if (parentTag === "SCRIPT" || parentTag === "STYLE") continue;
-    if (regex && text.length > SEARCH_PAGE_NODE_TEXT_CAP) {
+    // Cap every matched node — regex AND substring searches — so a huge text
+    // node cannot push multi-MB batches into `matchedTexts` (the joined batch
+    // is handed to redactSecrets and re-scanned per snippet).
+    if (text.length > SEARCH_PAGE_NODE_TEXT_CAP) {
       text = text.slice(0, SEARCH_PAGE_NODE_TEXT_CAP);
     }
     const loc = locateMatch(text, regex, pattern, needle, action.case_sensitive);

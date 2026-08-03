@@ -7,6 +7,9 @@
  * All historically-exported symbols are re-exported here:
  * - `generateAccessibilityTree`, `initElementMap`, `resolveRef`,
  * `AXTreeResult` (interface)
+ * - test-only registry accessors `__test_registry`, `__test_registerElement`,
+ * `__test_resetRegistry` (consumed by the AX-tree test suite; tree-shaken
+ * out of the extension bundle since only tests import them)
  *
  * OBSERVATION-ONLY: `resolveRef` and `AXTreeResult` are provided for reading
  * and inspecting the accessibility tree (and are consumed by the AX-tree

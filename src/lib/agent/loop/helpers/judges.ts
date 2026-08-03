@@ -10,6 +10,7 @@
 
 import type { AgentConfig, HistoryItem } from "../../types";
 import { judgeTask } from "../../judge";
+import { redactHistoryForPrompt } from "../messages";
 import type {
   CallbackDispatcher,
   CallbackContext,
@@ -110,14 +111,20 @@ export async function maybeJudgeAndFinalize(
   }
 
   try {
+  // Redact secret values from the history BEFORE it crosses the network to
+  // the judge. The judge prompt renders `message` / `extractedContent` /
+  // reasoning fields verbatim (wrapUntrusted only neutralizes injection
+  // patterns, not credentials) — mirrors compaction-runner's redaction of
+  // the to-summarize slice so the two outbound history sinks cannot drift.
+    const redactedHistory = await redactHistoryForPrompt(navigatorHistory);
     const judgeLlmCall = async (systemPrompt: string, userMessage: string) => {
       if (deps.summarizeCall) {
-        const res = await deps.summarizeCall({ systemPrompt, userPrompt: userMessage });
+        const res = await deps.summarizeCall({ systemPrompt, userPrompt: userMessage, signal: state.signal });
         return { content: res.content, usage: res.usage };
       }
       const res = await deps.plannerCall({
         task: `${systemPrompt}\n\n${userMessage}`,
-        history: navigatorHistory,
+        history: redactedHistory,
         plan: undefined,
         currentPlanItem: undefined,
         url: "",
@@ -140,7 +147,7 @@ export async function maybeJudgeAndFinalize(
 
     const verdict = await judgeTask({
       task: deps.task,
-      history: navigatorHistory,
+      history: redactedHistory,
       agentResult: { success, text },
       llmCall: judgeLlmCall,
       modelForCost: undefined,

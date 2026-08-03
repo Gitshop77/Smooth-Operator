@@ -110,15 +110,11 @@ export class EvaluatorComb {
       if (r.score < 1) reasons.push(r.reason);
     }
 
- // Fail CLOSED against a silent false pass: when `kinds` is configured but
- // NONE of the configured evaluators had a matching input present, no branch
- // ran and `score` would otherwise stay 1.0 — which the orchestrator reads
- // as a PASS with zero evaluation evidence. This is only a real concern when
- // the caller SUPPLIED some input that matched none of the configured kinds
- // (e.g. `kinds=["url_match"]` while only a `string` input is supplied). When
- // no input is supplied at all, the product of the empty evaluator set would
- // be the neutral default score of 1.0 — but a missing evaluation is not
- // evidence of success, so we fail CLOSED (score 0) rather than a false pass.
+ // Fail CLOSED against a silent false pass: when `kinds` is configured but a
+ // configured evaluator had no matching input (e.g. `kinds=["url_match"]`
+ // while only a `string` input is supplied), that check ran ZERO assertions —
+ // grading on the partial set would still read as a PASS, so we fail closed.
+ // (The no-input-at-all case is handled by the results-empty guard below.)
     if (this.kinds.length > 0) {
       const kindHasInput: Record<EvaluatorKind, boolean> = {
         string_match: !!input.string,
@@ -127,15 +123,23 @@ export class EvaluatorComb {
       };
       const missingKinds = this.kinds.filter((k) => !kindHasInput[k]);
       const ranKinds = this.kinds.filter((k) => kindHasInput[k]);
-      const hasAnyInput = !!(input.string || input.url || input.html);
+
+      // A supplied input whose kind is not in the configured set is silently
+      // ignored — surface it so a config drift between `eval_types` and
+      // `expectedOutcomes` is observable instead of a quiet no-op.
+      const ignoredKinds: EvaluatorKind[] = [];
+      for (const [kind, has] of Object.entries(kindHasInput) as Array<[EvaluatorKind, boolean]>) {
+        if (has && !this.kinds.includes(kind)) ignoredKinds.push(kind);
+      }
+      if (ignoredKinds.length > 0) {
+        console.warn(
+          `[EvaluatorComb] Input(s) for evaluator(s) [${ignoredKinds.join(", ")}] were supplied ` +
+          `but are not in the configured kinds [${this.kinds.join(", ")}]; they were ignored. ` +
+          `Check eval_types vs expectedOutcomes.`
+        );
+      }
 
       if (missingKinds.length > 0) {
-        if (!hasAnyInput) {
-          // Configured evaluators but no input supplied at all — a missing
-          // evaluation is not evidence of success, so fail closed (score 0)
-          // rather than reporting a false pass with zero evidence.
-          return { score: 0, results: [], reasons: ["no evaluator input supplied"] };
-        }
         // A configured evaluator had no matching input while at least one other
         // configured evaluator ran (or some off-config input was supplied). The
         // missing check therefore ran ZERO assertions; grading on the partial set
@@ -153,6 +157,13 @@ export class EvaluatorComb {
           reasons: [`configured evaluator(s) (${missing}) had no matching input`],
         };
       }
+    }
+
+    // No evaluator ran (e.g. the legacy `kinds=[]` path with no input at all).
+    // A missing evaluation is not evidence of success, so fail CLOSED (score 0)
+    // rather than a false pass with zero evidence.
+    if (results.length === 0) {
+      return { score: 0, results: [], reasons: ["no evaluator input supplied"] };
     }
 
     return { score, results, reasons };

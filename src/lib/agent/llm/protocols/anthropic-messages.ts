@@ -32,6 +32,8 @@ export interface AnthropicBody {
   max_tokens: number;
   messages: Array<{ role: string; content: unknown }>;
   temperature?: number;
+  /** Thinking configuration: enabled with a token budget, or explicitly disabled. */
+  thinking?: { type: "enabled"; budget_tokens: number } | { type: "disabled" };
   system?: Array<{ type: string; text: string; cache_control?: { type: string; ttl?: "1h" | "30m" } }>;
   tools?: Array<{ name: string; description: string; input_schema: unknown; cache_control?: { type: string; ttl?: "1h" | "30m" } }>;
   tool_choice?: { type: string; name: string };

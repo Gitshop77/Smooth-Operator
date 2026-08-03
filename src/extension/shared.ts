@@ -2,16 +2,19 @@
  * shared.ts — DOM helpers shared by options.ts and sidepanel.ts.
  *
  * Keeping these in one module avoids two divergent copies and lets both pages
- * use the same `$` (throw on missing) + `escapeHtml` semantics. Also hosts
- * the `redactKeyLeak` secret-masking primitive used by both the options
- * test-connection path and the live side-panel log / thinking renderers.
+ * use the same `$` (throw on missing) + `escapeHtml` semantics. Also re-exports
+ * the canonical `redactKeyLeak` secret-masking primitive (which lives in
+ * `lib/agent/redact-shared.ts` so the agent engine never imports the UI layer)
+ * and registers the provider-catalog key prefixes it masks with.
  */
 
 import { PROVIDER_META } from "./options/providers";
-// Canonical key-shape redactor (agent pipeline). `redactKeyLeak` reuses it as its
-// final pass so a single shape-detection source backs both the agent pipeline
-// and the UI surfaces — see `redactKeyLeak` below.
-import { redactKeyShapes } from "../lib/agent/key-shape-redact";
+import {
+  redactKeyLeak,
+  setRedactKeyLeakProviderPatterns,
+} from "../lib/agent/redact-shared";
+
+export { redactKeyLeak };
 
 /**
  * Get an element by id, throwing if missing (dev-time safety).
@@ -62,33 +65,12 @@ export function escapeHtml(s: unknown): string {
 // API key: sk-ant-api03-...`). The same key-masking primitive is reused by the
 // options test-connection path AND the live side-panel log / thinking renderers
 // so a provider error surfaced through the agent loop is never shown verbatim.
+// The primitive itself lives in `lib/agent/redact-shared.ts`; this module only
+// derives the provider-catalog key prefixes and registers them with it.
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-
-/** Base key patterns not derivable from a single catalog placeholder. */
-const BASE_KEY_PATTERNS = [
-  "sk-ant-[A-Za-z0-9_-]+",
-  "sk-[A-Za-z0-9_-]+",
-  "AIza[A-Za-z0-9_-]+",
-  "ya29\\.[A-Za-z0-9_-]+",
-  "ghp_[A-Za-z0-9_-]+",
-  "gho_[A-Za-z0-9_-]+",
-  "ghu_[A-Za-z0-9_-]+",
-  "ghs_[A-Za-z0-9_-]+",
-  "ghr_[A-Za-z0-9_-]+",
-  "github_pat_[A-Za-z0-9_-]+",
-  "glpat-[A-Za-z0-9_-]+",
-  "gsk_[A-Za-z0-9_-]+",
-  "xoxb-[A-Za-z0-9_-]+",
-  "xoxp-[A-Za-z0-9_-]+",
-  "xoxa-[A-Za-z0-9_-]+",
-  "xoxs-[A-Za-z0-9_-]+",
-  "AKIA[0-9A-Z]{16}",
-  // JWT: mask the ENTIRE token (header.payload.signature), not just the header.
-  "eyJ[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*",
-];
 
 /** Derive concrete key prefixes from provider placeholders (e.g. `sk-ant-api03-...` → `sk-ant-`). */
 function providerKeyPrefixes(): string[] {
@@ -106,82 +88,4 @@ function providerKeyPrefixes(): string[] {
   return [...out];
 }
 
-/** Lazy-compiled key regex (provider prefixes + base patterns). Built once on first use. */
-let KEY_RE: RegExp | null = null;
-
-/** Bearer token redaction — used only with `.replace()`, safe to hoist. */
-const BEARER_RE = /\bBearer\s+[A-Za-z0-9._\-+/=]+/g;
-
-/** JSON secret-key value redaction — used only with `.replace()`, safe to hoist. */
-const JSON_SECRET_RE =
-  /("(?:password|passwd|api[_-]?key|apikey|secret|token|access[_-]?token|refresh[_-]?token|private[_-]?key|client[_-]?secret|auth[_-]?token)"\s*:\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/gi;
-
-/** Generic high-entropy quoted scalar redaction — used only with `.replace()`, safe to hoist. */
-const HIGH_ENTROPY_RE = /"([^"]+)"/g;
-
-/**
- * Heuristic: does a quoted/bare scalar look like a high-entropy secret rather
- * than ordinary prose, a URL, or a short label? Additive mask only — it never
- * weakens the prefix matchers above. Conservative on length and requires mixed
- * character classes so normal words and structured text survive, while
- * EchoLeak-class secrets with no known key prefix are still caught.
- */
-function looksLikeSecret(v: string): boolean {
-  const t = v.trim();
-  if (t.length < 16) return false;
-  if (/\s/.test(t)) return false;
-  if (t.includes("://")) return false; // leave URLs intact
-  const hasLower = /[a-z]/.test(t);
-  const hasUpper = /[A-Z]/.test(t);
-  const hasDigit = /[0-9]/.test(t);
-  const hasSpecial = /[^A-Za-z0-9]/.test(t);
-  const classes = [hasLower, hasUpper, hasDigit, hasSpecial].filter(Boolean).length;
-  // Very long (single-class or otherwise) scalars are masked even past the old
-  // 512-char ceiling — closing the oversized-token EchoLeak gap.
-  if (t.length > 512) return true;
-  // Ordinary multi-class secrets (e.g. a base64 blob).
-  if (classes >= 2) return true;
-  // High-entropy single-class secrets (pure-numeric / pure-alpha / pure-special
-  // tokens of 16+ chars) — prefix-less EchoLeak-class tokens that the prior
-  // 32-char floor let through.
-  if (classes === 1 && t.length >= 16) return true;
-  return false;
-}
-
-/**
- * Mask common API-key prefixes that may leak into provider error text before
- * the message is shown in the UI. The allowlist is derived from the provider
- * catalog (`PROVIDER_META`) so a new or custom provider's key prefix is covered
- * automatically, plus a base set of well-known global prefixes. Non-key text is
- * returned unchanged. Over-redaction in a debug log is safe; leaking the key is
- * not.
- */
-export function redactKeyLeak(s: string): string {
-  if (!KEY_RE) {
-    KEY_RE = new RegExp(
-      "(" + [...providerKeyPrefixes(), ...BASE_KEY_PATTERNS].join("|") + ")",
-      "g",
-    );
-  }
-  let out = s.replace(KEY_RE, (m) => {
-    const dash = m.indexOf("-");
-    const prefix = dash > 0 ? m.slice(0, dash + 1) : m.slice(0, 4);
-    return `${prefix}[REDACTED]`;
-  });
-
-  out = out.replace(BEARER_RE, "Bearer [REDACTED]");
-
-  out = out.replace(
-    JSON_SECRET_RE,
-    (_, keyPart: string, valPart: string) => {
-      const q = valPart[0];
-      return `${keyPart}${q}[REDACTED]${q}`;
-    },
-  );
-
-  out = out.replace(HIGH_ENTROPY_RE, (full, inner: string) =>
-    looksLikeSecret(inner) ? `"[REDACTED]"` : full,
-  );
-
-  return redactKeyShapes(out);
-}
+setRedactKeyLeakProviderPatterns(providerKeyPrefixes());

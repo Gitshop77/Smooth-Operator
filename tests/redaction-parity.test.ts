@@ -62,6 +62,25 @@ describe("redactKeyShapes (canonical) vs redactKeyLeak — shared shape coverage
       input: "postgres://user:pass@db.example.com:5432/app",
       secret: "pass",
     },
+    {
+      // `@` inside the password is legal userinfo and must still be masked.
+      name: "postgres connection string with @ in password",
+      input: "postgres://user:p@ss@db.example.com:5432/app",
+      secret: "p@ss",
+    },
+    {
+      // `/` inside the password is legal userinfo; the password class must
+      // not stop at the first slash.
+      name: "postgres connection string with / in password",
+      input: "postgres://user:pa/ss@db.example.com:5432/app",
+      secret: "pa/ss",
+    },
+    {
+      // An empty username (redis allows `:password@`) must still be masked.
+      name: "redis connection string with empty username",
+      input: "redis://:p@ss@127.0.0.1:6379/0",
+      secret: "p@ss",
+    },
   ];
 
   for (const s of SHARED) {

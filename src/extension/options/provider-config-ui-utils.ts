@@ -1,6 +1,46 @@
 import { escapeHtml } from "@/extension/shared";
 import { PROVIDER_META, DEFAULT_PROVIDER_ID } from "./providers";
 import type { CatalogModel } from "../../lib/agent/llm/catalog";
+import type { ReasoningOption, ReasoningEffort } from "../../lib/agent/llm/catalog-data";
+
+/**
+ * Effort levels the local runtime accepts today (first cut — mirrors
+ * llm-direct's REASONING_EFFORTS). The UI must never offer a level the runtime
+ * will silently drop (or that can 400 on a pre-cutoff model), so the model's
+ * `reasoning_options` are intersected with this set.
+ */
+const SUPPORTED_REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high"];
+
+/**
+ * The effort levels to offer for a model, derived from its `reasoning_options`
+ * intersected with the widely-supported safe set. Falls back to low/medium/high
+ * when the model declares no safe effort levels.
+ */
+export function reasoningEffortOptions(options: ReasoningOption[]): ReasoningEffort[] {
+  const declared = options.find((o) => o.type === "effort");
+  if (!declared || declared.type !== "effort" || declared.values.length === 0) {
+    return SUPPORTED_REASONING_EFFORTS;
+  }
+  const safe = declared.values.filter((v): v is (typeof SUPPORTED_REASONING_EFFORTS)[number] =>
+    SUPPORTED_REASONING_EFFORTS.includes(v),
+  );
+  return safe.length > 0 ? safe : SUPPORTED_REASONING_EFFORTS;
+}
+
+/**
+ * The thinking-budget token range a model declares (Anthropic-style budget
+ * form), or undefined when the model takes no budget.
+ */
+export function budgetTokensOption(
+  options: ReasoningOption[],
+): { min?: number; max?: number } | undefined {
+  const budget = options.find((o) => o.type === "budget_tokens");
+  if (!budget || budget.type !== "budget_tokens") return undefined;
+  return {
+    ...(budget.min !== undefined ? { min: budget.min } : {}),
+    ...(budget.max !== undefined ? { max: budget.max } : {}),
+  };
+}
 
 /**
  * OpenCode Zen/Go endpoint hint — the server routes all model families through
@@ -86,15 +126,23 @@ export function renderModelResultItem(
   item.id = `model-search-opt-${optIdx}`;
   item.setAttribute("aria-label", `Select model ${model.name} from ${providerName}`);
   item.dataset.modelId = model.id;
+  // Surface the catalog status on the row so the click handler can confirm
+  // alpha/beta (experimental) selections without a second catalog lookup.
+  item.dataset.status = model.status ?? "";
   item.addEventListener("mouseenter", () => {
     modelInput.setAttribute("aria-activedescendant", item.id);
   });
   const visionTag = fmt.vision(model.attachment);
+  const experimentalTag =
+    model.status === "alpha" || model.status === "beta"
+      ? `<span class="experimental-tag">${escapeHtml(model.status)}</span>`
+      : "";
   item.innerHTML =
     `<div class="result-primary">` +
       `<strong>${highlightMatch(model.name, searchRe)}</strong> ` +
       `<span class="provider-name">${escapeHtml(providerName)}</span> ` +
       (visionTag ? `<span class="vision-tag">${escapeHtml(visionTag)}</span>` : "") +
+      (experimentalTag ? ` ${experimentalTag}` : "") +
     `</div>` +
     `<div class="result-secondary">` +
       `<code class="model-id">${escapeHtml(model.id)}</code> ` +

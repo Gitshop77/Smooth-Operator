@@ -13,6 +13,7 @@
 
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import { httpJson, parseRetryAfterHeader, type HttpPrepared } from "../src/lib/agent/llm/route/transport-http";
+import { readErrorBodyPreview } from "../src/lib/agent/llm/route/transport-http-utils";
 import { sse } from "../src/lib/agent/llm/route/framing";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -469,5 +470,232 @@ describe("httpJson.frames — per-chunk stream-stall timeout", () => {
     expect(msg.toLowerCase()).not.toMatch(/fetch|network|econn|timeout/);
  // The reader must be cancelled to release the underlying network resources.
     expect(cancelled).toBe(true);
+  });
+});
+
+// ─── Abort-listener lifecycle (no leaks on the long-lived run signal) ────────
+
+describe("httpJson.frames — abort-listener lifecycle", () => {
+ // Count abort-listener add/remove calls on the caller's signal. `fetchWithTimeout`
+ // adds one listener per fetch and removes it via a detach fn; the regression
+ // under test is that failed HTTP attempts never removed theirs. (AbortSignal has
+ // no public listener introspection, so the explicit calls are the observable.)
+  const trackAbortListeners = (signal: AbortSignal): { added: () => number; removed: () => number } => {
+    const addSpy = vi.spyOn(signal, "addEventListener");
+    const removeSpy = vi.spyOn(signal, "removeEventListener");
+    return {
+      added: () => addSpy.mock.calls.filter(([type]) => type === "abort").length,
+      removed: () => removeSpy.mock.calls.filter(([type]) => type === "abort").length,
+    };
+  };
+
+  test("every failed attempt detaches its abort listener (no leak after retryable 429s)", async () => {
+ // `fetchWithTimeout` attaches an abort listener to the caller's signal and
+ // stashes a detach fn on the response; a NON-OK response resolves normally
+ // (only fetch-layer errors hit its .catch detach). The transport retry
+ // callback previously threw on the non-ok path WITHOUT detaching, so each
+ // retryable 429/5xx attempt left one listener on the long-lived run signal —
+ // 4 sequential 429s left 4. The retry callback must detach before throwing.
+    const controller = new AbortController();
+    const tracking = trackAbortListeners(controller.signal);
+    const fetchMock = vi.fn(async () =>
+      makeFakeResponse({
+        status: 429,
+        ok: false,
+        text: () => Promise.resolve("rate limited"),
+      }) as unknown as Response,
+    );
+    globalThis.fetch = fetchMock as typeof globalThis.fetch;
+
+    const transport = httpJson({ framing: sse });
+    const iter = transport.frames(makePrepared(), controller.signal)[Symbol.asyncIterator]();
+
+    vi.useFakeTimers();
+    try {
+      const settled = iter.next().then(
+        () => ({ ok: true as const }),
+        (e: unknown) => ({ ok: false as const, error: e as Error }),
+      );
+ // 1 initial attempt + 3 retries; the cumulative retry budget (60s) is far
+ // above the ~10.5s of backoff, so 60s of fake time settles the loop.
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await settled;
+      expect(result.ok).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+ // The regression: each failed attempt leaked an abort listener on the
+ // caller's signal (4 adds, 0 removes); after all attempts settle, every
+ // added listener must have been removed.
+      expect(tracking.added()).toBe(4);
+      expect(tracking.removed()).toBe(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("the abort listener stays attached while the stream is open (mid-stream Stop) and is detached once the stream ends", async () => {
+ // The success-path detach must NOT happen early: the listener stays attached
+ // for the whole SSE body so a user Stop mid-stream can cancel the fetch.
+    const controller = new AbortController();
+    const tracking = trackAbortListeners(controller.signal);
+    const encoder = new TextEncoder();
+ // Enqueues one chunk then never closes → the generator yields the frame and
+ // suspends on the next (never-resolving) read, still mid-stream.
+    const openStream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(encoder.encode("data: [DONE]\n\n"));
+      },
+    });
+    const fakeResponse = makeFakeResponse({
+      headers: { get: (n: string) => (n.toLowerCase() === "content-type" ? "text/event-stream" : null) },
+      body: openStream,
+    });
+    globalThis.fetch = vi.fn(async () => fakeResponse as unknown as Response) as typeof globalThis.fetch;
+
+    const transport = httpJson({ framing: sse });
+    const iter = transport
+      .frames(makePrepared("https://api.example.com/v1/chat"), controller.signal)[Symbol.asyncIterator]();
+
+    const first = await iter.next();
+    expect(first.done).toBe(false);
+ // Stream still open → the listener must still be attached (1 add, 0 removes).
+    expect(tracking.added() - tracking.removed()).toBe(1);
+
+ // User Stop mid-stream: the generator must observe the aborted signal and
+ // surface an AbortError instead of hanging on the stalled read.
+    controller.abort();
+    await expect(iter.next()).rejects.toMatchObject({ name: "AbortError" });
+ // After the stream ends (even via abort), the explicit detach must have run.
+    expect(tracking.added() - tracking.removed()).toBe(0);
+  });
+
+  test("a fully consumed stream detaches its abort listener", async () => {
+    const controller = new AbortController();
+    const tracking = trackAbortListeners(controller.signal);
+    const fakeResponse = makeFakeResponse({
+      headers: { get: (n: string) => (n.toLowerCase() === "content-type" ? "text/event-stream" : null) },
+      body: stringToStream("data: [DONE]\n\n"),
+    });
+    globalThis.fetch = vi.fn(async () => fakeResponse as unknown as Response) as typeof globalThis.fetch;
+
+    const transport = httpJson({ framing: sse });
+    const frames: string[] = [];
+    for await (const f of transport.frames(makePrepared("https://api.example.com/v1/chat"), controller.signal)) {
+      frames.push(f as string);
+    }
+    expect(frames).toEqual(["[DONE]"]);
+    expect(tracking.added() - tracking.removed()).toBe(0);
+  });
+});
+
+// ─── OpenAI-404 retry wiring ─────────────────────────────────────────────────
+
+describe("httpJson.frames — OpenAI-404 retry wiring (providerId)", () => {
+  test("404 from an OpenAI-scoped provider is retried, then succeeds", async () => {
+ // The transport previously called `withLLMRetry` WITHOUT the provider id, so
+ // `isRetryableOpenAI404` never matched in production — a transient 404 from
+ // openai/azure/openrouter surfaced as a hard failure instead of a retry.
+ // `Retry-After: 0` keeps the retry instant (no 1.5s base backoff).
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        makeFakeResponse({
+          status: 404,
+          ok: false,
+          headers: { get: (n: string) => (n.toLowerCase() === "retry-after" ? "0" : null) },
+        }) as unknown as Response,
+      )
+      .mockResolvedValueOnce(
+        makeFakeResponse({
+          status: 200,
+          ok: true,
+          headers: { get: (n: string) => (n.toLowerCase() === "content-type" ? "text/event-stream" : null) },
+          body: stringToStream('data: {"ok":true}\n\ndata: [DONE]\n\n'),
+        }) as unknown as Response,
+      );
+    globalThis.fetch = fetchMock as typeof globalThis.fetch;
+
+    const transport = httpJson({ framing: sse, providerId: "openai" });
+    const frames: unknown[] = [];
+    for await (const frame of transport.frames(makePrepared())) frames.push(frame);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(frames).toEqual(['{"ok":true}', "[DONE]"]);
+  });
+
+  test("404 without a providerId stays non-retryable (single attempt)", async () => {
+    const fetchMock = vi.fn(async () =>
+      makeFakeResponse({ status: 404, ok: false }) as unknown as Response,
+    );
+    globalThis.fetch = fetchMock as typeof globalThis.fetch;
+
+    const transport = httpJson({ framing: sse });
+    const iter = transport.frames(makePrepared())[Symbol.asyncIterator]();
+    await expect(iter.next()).rejects.toThrow(/404/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── Error-body preview stall guard ──────────────────────────────────────────
+
+describe("readErrorBodyPreview — stall guard", () => {
+ // Keep in sync with CHUNK_TIMEOUT_MS in transport-http-utils.ts (30s).
+  const CHUNK_TIMEOUT_MS = 30_000;
+
+  test("a stalled error body resolves to '' instead of hanging past the chunk timeout", async () => {
+ // A 5xx server that sends headers then stalls the body previously hung the
+ // retry callback forever (only a user abort broke it). The preview read must
+ // race the same per-chunk timeout and degrade to an empty preview.
+    const stallStream = new ReadableStream<Uint8Array>({
+      start() {
+ // Enqueue nothing and never close → `reader.read()` hangs indefinitely.
+      },
+    });
+    const fakeResponse = makeFakeResponse({ status: 500, ok: false, body: stallStream });
+
+    vi.useFakeTimers();
+    try {
+      const pending = readErrorBodyPreview(fakeResponse as unknown as Response);
+      await vi.advanceTimersByTimeAsync(CHUNK_TIMEOUT_MS + 1);
+      await expect(pending).resolves.toBe("");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("frames() rejects instead of hanging when a retryable 5xx stalls its error body", async () => {
+ // End-to-end: every retry attempt hits the stalled error body; each preview
+ // read must time out (30s) and degrade to "", so withLLMRetry still settles
+ // with the 500 error. Previously this hung forever.
+    const freshStallStream = () =>
+      new ReadableStream<Uint8Array>({
+        start() {
+ // Never enqueue, never close.
+        },
+      });
+    const fetchMock = vi.fn(async () =>
+      makeFakeResponse({ status: 500, ok: false, body: freshStallStream() }) as unknown as Response,
+    );
+    globalThis.fetch = fetchMock as typeof globalThis.fetch;
+
+    const transport = httpJson({ framing: sse });
+    const iter = transport.frames(makePrepared())[Symbol.asyncIterator]();
+
+    vi.useFakeTimers();
+    try {
+      const settled = iter.next().then(
+        () => ({ ok: true as const }),
+        (e: unknown) => ({ ok: false as const, error: e as Error }),
+      );
+ // 4 attempts × 30s stalled-preview reads + ~10.5s of backoff.
+      await vi.advanceTimersByTimeAsync(200_000);
+      const result = await settled;
+      expect(result.ok).toBe(false);
+      const msg = (result as { error: Error }).error.message;
+ // The stalled preview must degrade to an empty body preview, not hang.
+      expect(msg).toBe("LLM API 500: ");
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

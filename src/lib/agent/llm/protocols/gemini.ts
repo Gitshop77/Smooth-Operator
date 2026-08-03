@@ -28,6 +28,15 @@ const PATH = ":streamGenerateContent";
  */
 const DROPPED_FRAME_WARN_THRESHOLD = 5;
 
+/**
+ * Upper bound for `thinkingConfig.thinkingBudget` — Google's documented
+ * maximum thinking budget for Gemini reasoning models. A configured budget
+ * beyond this (e.g. a huge `reasoningBudget` setting) is clamped so the API
+ * never receives an out-of-range value.
+ */
+export const MAX_THINKING_BUDGET = 32_768;
+
+
 export interface GeminiBody {
   contents: Array<{ role: string; parts: Array<Record<string, unknown>> }>;
   generationConfig: {
@@ -35,6 +44,7 @@ export interface GeminiBody {
     maxOutputTokens?: number;
     responseMimeType?: string;
     responseSchema?: unknown;
+    thinkingConfig?: { thinkingBudget: number };
   };
   systemInstruction?: { parts: Array<{ text: string }> };
 }
@@ -65,9 +75,31 @@ async function fromRequest(request: LLMRequest): Promise<GeminiBody> {
   });
 
   const generationConfig: GeminiBody["generationConfig"] = {
-    temperature: request.generation?.temperature ?? 0,
+  // Reasoning models (Gemini 3.x) deprecate temperature/top_p/top_k: the
+  // params are ignored on 3.6 Flash / 3.5 Flash-Lite and "will result in an
+  // HTTP 400 error in future model generations" per Google's docs. Mirror the
+  // openai-chat / anthropic-messages protocols: omit temperature for
+  // `request.reasoning` models; `maxOutputTokens` is still sent (it is the
+  // thinking budget on reasoning models). `enabled: false` (user forced
+  // reasoning off) restores the non-reasoning params.
+    ...(request.reasoning && request.reasoningConfig?.enabled !== false
+      ? {}
+      : { temperature: request.generation?.temperature ?? 0 }),
     maxOutputTokens: request.generation?.maxTokens ?? 8192,
   };
+  // Thinking budget: only when the model is reasoning (and not forced off) and
+  // a positive budget is configured — mirrors the opencode transform layer's
+  // `thinkingConfig: { thinkingBudget }`.
+  if (
+    request.reasoning &&
+    request.reasoningConfig?.enabled !== false &&
+    request.reasoningConfig?.budgetTokens !== undefined &&
+    request.reasoningConfig.budgetTokens > 0
+  ) {
+    generationConfig.thinkingConfig = {
+      thinkingBudget: Math.min(MAX_THINKING_BUDGET, Math.floor(request.reasoningConfig.budgetTokens)),
+    };
+  }
   if (request.schema) {
  // Serialize the Zod schema to a plain JSON Schema object before passing
  // to Gemini's responseSchema. The raw Zod schema object is not serializable.

@@ -9,7 +9,7 @@
  * lock in that corroboration so a future edit that re-weakens the guard (e.g.
  * accepting title-only "just a moment...") fails CI.
  */
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   detectChallengeInPage,
   isChallengeKind,
@@ -253,5 +253,151 @@ describe("waitForChallengeResolution — conservative on detection failure", () 
     const out = await waitForChallengeResolution(1, { timeoutMs: 1000, pollMs: 250 });
     expect(out.resolved).toBe(false);
     expect(out.challenge).toBeNull();
+  });
+});
+
+// ─── waitForChallengeResolution — poll loop, deadline, and clamping (fake timers) ───
+//
+// These pin the polling contract: the challenge clears on a later poll, a
+// persistent challenge is reported unresolved WITH its info at the deadline,
+// detection errors mid-poll are never treated as "resolved", and the opts are
+// clamped to timeoutMs [500, 120000] / pollMs [250, 5000].
+
+describe("waitForChallengeResolution — poll loop and deadline (fake timers)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  test("challenge clears on a later poll → resolved", async () => {
+    const script = vi
+      .fn()
+      .mockResolvedValueOnce([{ result: { kind: "cloudflare-js", message: "cf" } }])
+      .mockResolvedValue([{ result: null }]);
+    setExecuteScript(script);
+    const p = waitForChallengeResolution(1, { timeoutMs: 5000, pollMs: 250 });
+    await vi.advanceTimersByTimeAsync(0); // initial detect settles
+    await vi.advanceTimersByTimeAsync(249);
+    expect(script).toHaveBeenCalledTimes(1); // no poll fired yet
+    await vi.advanceTimersByTimeAsync(1); // poll at t=250: challenge cleared
+    await expect(p).resolves.toEqual({ resolved: true, challenge: null });
+    // 1 initial + 2 for the clearing detect (challenge scan + auth-wall scan).
+    expect(script).toHaveBeenCalledTimes(3);
+  });
+
+  test("challenge persists past the deadline → unresolved with the challenge info", async () => {
+    const script = vi.fn().mockResolvedValue([{ result: { kind: "cloudflare-js", message: "cf" } }]);
+    setExecuteScript(script);
+    const p = waitForChallengeResolution(1, { timeoutMs: 750, pollMs: 250 });
+    await vi.advanceTimersByTimeAsync(0);
+    // deadline at t=750 → loop polls at 250/500/750, then one final check.
+    await vi.advanceTimersByTimeAsync(750);
+    await expect(p).resolves.toEqual({
+      resolved: false,
+      challenge: { kind: "cloudflare-js", message: "cf" },
+    });
+    expect(script).toHaveBeenCalledTimes(5);
+  });
+
+  test("a detection error mid-poll is not treated as resolved — keeps waiting", async () => {
+    const script = vi
+      .fn()
+      .mockResolvedValueOnce([{ result: { kind: "cloudflare-js", message: "cf" } }])
+      .mockRejectedValueOnce(new Error("injection failed"))
+      .mockResolvedValue([{ result: null }]);
+    setExecuteScript(script);
+    const p = waitForChallengeResolution(1, { timeoutMs: 5000, pollMs: 250 });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(500); // poll 1 errors, poll 2 clears
+    await expect(p).resolves.toEqual({ resolved: true, challenge: null });
+    // 1 initial + 1 error + 2 for the clearing detect (challenge + auth-wall).
+    expect(script).toHaveBeenCalledTimes(4);
+  });
+
+  test("persistent detection errors past the deadline → unresolved with null challenge", async () => {
+    const script = vi
+      .fn()
+      .mockResolvedValueOnce([{ result: { kind: "cloudflare-js", message: "cf" } }])
+      .mockRejectedValue(new Error("injection failed"));
+    setExecuteScript(script);
+    const p = waitForChallengeResolution(1, { timeoutMs: 500, pollMs: 250 });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(500);
+    // Deadline hit; the final check errors too, so the challenge is null.
+    await expect(p).resolves.toEqual({ resolved: false, challenge: null });
+    expect(script).toHaveBeenCalledTimes(4);
+  });
+
+  test("timeoutMs is clamped to a minimum of 500", async () => {
+    const script = vi.fn().mockResolvedValue([{ result: { kind: "cloudflare-js", message: "cf" } }]);
+    setExecuteScript(script);
+    const p = waitForChallengeResolution(1, { timeoutMs: 1, pollMs: 250 });
+    await vi.advanceTimersByTimeAsync(0);
+    let settled = false;
+    void p.then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(250);
+    // Unclamped (deadline=1) would have settled here; the clamped 500ms deadline has not.
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(250);
+    await p;
+    expect(settled).toBe(true);
+  });
+
+  test("timeoutMs is clamped to a maximum of 120000", async () => {
+    const script = vi.fn().mockResolvedValue([{ result: { kind: "cloudflare-js", message: "cf" } }]);
+    setExecuteScript(script);
+    const p = waitForChallengeResolution(1, { timeoutMs: 999999, pollMs: 250 });
+    await vi.advanceTimersByTimeAsync(0);
+    let settled = false;
+    void p.then(() => {
+      settled = true;
+    });
+    // The loop exits exactly at the clamped 120s deadline; an unclamped
+    // 999999ms deadline would still be polling at this point.
+    await vi.advanceTimersByTimeAsync(120000);
+    await p;
+    expect(settled).toBe(true);
+  });
+
+  test("pollMs is clamped to a minimum of 250", async () => {
+    const script = vi
+      .fn()
+      .mockResolvedValueOnce([{ result: { kind: "cloudflare-js", message: "cf" } }])
+      .mockResolvedValue([{ result: null }]);
+    setExecuteScript(script);
+    const p = waitForChallengeResolution(1, { timeoutMs: 5000, pollMs: 1 });
+    await vi.advanceTimersByTimeAsync(0);
+    let settled = false;
+    void p.then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(249);
+    expect(script).toHaveBeenCalledTimes(1); // clamped 250ms poll not fired yet
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await p;
+    expect(settled).toBe(true);
+    // 1 initial + 2 for the clearing detect (challenge + auth-wall).
+    expect(script).toHaveBeenCalledTimes(3);
+  });
+
+  test("pollMs is clamped to a maximum of 5000", async () => {
+    const script = vi
+      .fn()
+      .mockResolvedValueOnce([{ result: { kind: "cloudflare-js", message: "cf" } }])
+      .mockResolvedValue([{ result: null }]);
+    setExecuteScript(script);
+    const p = waitForChallengeResolution(1, { timeoutMs: 20000, pollMs: 999999 });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(script).toHaveBeenCalledTimes(1); // clamped 5000ms poll not fired yet
+    await vi.advanceTimersByTimeAsync(1);
+    await p;
+    // 1 initial + 2 for the clearing detect (challenge + auth-wall).
+    expect(script).toHaveBeenCalledTimes(3);
   });
 });

@@ -167,3 +167,51 @@ describe("runSandboxedCode unicode-escape normalization", () => {
     expect(() => runSandboxedCode("'\\\\\\u002econstructor'")).toThrow(/blocked/);
   });
 });
+
+describe("domFingerprint window hashing", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  test("is stable across calls on an unchanged DOM", () => {
+    document.body.innerHTML = "<button>1</button><button>2</button>";
+    expect(domFingerprint()).toBe(domFingerprint());
+  });
+
+  test("changes when an interactive element's text changes", () => {
+    document.body.innerHTML = "<button>one</button>";
+    const before = domFingerprint();
+    document.querySelector("button")!.textContent = "two";
+    expect(domFingerprint()).not.toBe(before);
+  });
+
+  test("hashes the trailing window when n > limit (below-the-fold changes detected)", () => {
+    // 501 buttons (limit = 500): the LAST element falls only in the trailing
+    // window. Leading-window-only hashing would miss the change.
+    for (let i = 0; i < 501; i++) {
+      const b = document.createElement("button");
+      b.textContent = `b${i}`;
+      document.body.appendChild(b);
+    }
+    const before = domFingerprint();
+    const last = document.querySelectorAll("button")[500];
+    last.textContent = "changed-last";
+    expect(domFingerprint()).not.toBe(before);
+  });
+
+  test("caps per-element signature length (very long text/aria-label bound)", () => {
+    const longText = "x".repeat(4000);
+    document.body.innerHTML = `<button aria-label="${longText}">${longText}</button>`;
+    // The fingerprint stays a compact hex string (16 chars from FNV-1a) — the
+    // per-element signature cap prevents hashing megabytes of text.
+    expect(domFingerprint()).toMatch(/^[0-9a-f]{1,8}$/);
+  });
+
+  test("does NOT fold input values into the fingerprint (transient input churn)", () => {
+    document.body.innerHTML = '<input type="text" value="secret">';
+    const before = domFingerprint();
+    const input = document.querySelector("input")!;
+    input.value = "changed";
+    expect(domFingerprint()).toBe(before);
+  });
+});

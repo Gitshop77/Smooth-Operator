@@ -39,7 +39,9 @@ afterAll(() => {
 
 beforeEach(() => {
   // Clear storage + in-memory cache so each test starts from a clean slate.
-  localStorage.removeItem("__opencowork_site_memories");
+  // The key must match persistent-memory.ts's STORAGE_KEY exactly — a stale
+  // key here would silently leave entries behind between tests.
+  localStorage.removeItem("open_cowork_site_memories");
   __resetMemoryCacheForTests();
 });
 

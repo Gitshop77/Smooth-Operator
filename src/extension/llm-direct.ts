@@ -13,14 +13,16 @@
  * No server, no env vars. The extension is fully self-contained.
  */
 
-import type { LLMProvider, ChatMessage } from "../lib/agent/llm/provider";
+import type { LLMProvider, LLMRequest, ChatMessage } from "../lib/agent/llm/provider";
 import { buildNavigatorPrompt } from "../lib/agent/prompts/navigator-prompt";
 import { buildPlannerPrompt } from "../lib/agent/prompts/planner-prompt";
 import { buildNavigatorUserMessage, buildPlannerUserMessage } from "../lib/agent/loop/messages";
 import { AgentOutputSchema, PlannerOutputSchema } from "../lib/agent/tools/schema";
 import { getFormatInstructions } from "../lib/agent/tools/registry";
 import type { AgentStepRequest, PlannerStepRequest } from "../lib/agent/types";
-import { buildProvider, readProviderConfig, type ProviderConfig } from "./provider-config";
+import { buildProvider, readProviderConfig, resolveModel, type ProviderConfig } from "./provider-config";
+import { CATALOG_PROVIDER_ID_MAP } from "./provider-config-map";
+import { getModelsForProvider } from "../lib/agent/llm/catalog";
 import { MAX_ACTIONS, MAX_ELEMENTS_CHARS } from "@/lib/validations";
 import {
   extractUsage,
@@ -43,6 +45,36 @@ const pendingProviders = new Map<string, Promise<LLMProvider>>();
  * provider after an invalidation. */
 let configEpoch = 0;
 
+/** Models already surfaced with an experimental-release warning (once per session). */
+const warnedExperimentalModels = new Set<string>();
+
+/** Bound the warned-set growth, mirroring the pricing fallback warning. */
+function maybeClearWarnedExperimentalModels(): void {
+  if (warnedExperimentalModels.size > 32) warnedExperimentalModels.clear();
+}
+
+/**
+ * One-time console warning when a DIRECT call runs with an alpha/beta
+ * (experimental) catalog model. Default resolution never selects experimental
+ * models, so reaching this code means the user opted in explicitly — worth
+ * surfacing once, since the release can change or disappear without notice.
+ */
+function warnExperimentalModelOnce(providerId: string, modelId: string): void {
+  if (!providerId || !modelId) return;
+  const status = getModelsForProvider(
+    CATALOG_PROVIDER_ID_MAP[providerId] ?? providerId,
+    modelId,
+  )?.status;
+  if (status !== "alpha" && status !== "beta") return;
+  if (warnedExperimentalModels.has(modelId)) return;
+  maybeClearWarnedExperimentalModels();
+  warnedExperimentalModels.add(modelId);
+  console.warn(
+    `[llm-direct] Model "${modelId}" is an ${status} (experimental) release — ` +
+      `it may change or disappear without notice.`
+  );
+}
+
 // Cached settings (invalidated on chrome.storage.onChanged via the listener
 // below). A single Map backs every cached setting so the per-key invalidation
 // is the only place that touches the cache; `cachedSetting` gives every getter
@@ -54,7 +86,12 @@ const PROVIDER_CONFIG_KEYS = ["provider", "model", "baseUrl", "resourceName", "a
 
 if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
   chrome.storage.onChanged.addListener((changes, _area) => {
-    if (PROVIDER_CONFIG_KEYS.some((k) => k in changes)) {
+    // `forceReasoning` is read by buildProvider to patch supportsReasoning, so
+    // a change must invalidate the cached provider — not just the setting.
+    if (
+      PROVIDER_CONFIG_KEYS.some((k) => k in changes) ||
+      changes.forceReasoning
+    ) {
       cachedProvider = null;
       cachedConfigKey = null;
       cachedProviderConfig = null;
@@ -65,6 +102,9 @@ if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
     if (changes.visionMode || changes.enableLocalVision) settingCache.delete("visionMode");
     if (changes.enableScreenshots) settingCache.delete("enableScreenshots");
     if (changes.agentMode) settingCache.delete("agentMode");
+    if (changes.reasoningEffort) settingCache.delete("reasoningEffort");
+    if (changes.reasoningBudget) settingCache.delete("reasoningBudget");
+    if (changes.forceReasoning) settingCache.delete("forceReasoning");
   });
 }
 
@@ -125,6 +165,63 @@ export const getAgentMode = cachedSetting("agentMode", async () => {
   return mode && AGENT_MODES.has(mode) ? mode : "standard";
 });
 
+/** Recognized reasoning-effort levels (release-date-agnostic first cut — no
+ * "none"/"xhigh" yet, so pre-cutoff models never 400 on an unsupported value). */
+const REASONING_EFFORTS = new Set(["low", "medium", "high"]);
+
+/** Memoized `reasoningEffort` setting ("low" | "medium" | "high"). */
+export const getReasoningEffort = cachedSetting("reasoningEffort", async () => {
+  const { reasoningEffort } = await chrome.storage.local.get("reasoningEffort");
+  const v = reasoningEffort as string | undefined;
+  return v && REASONING_EFFORTS.has(v) ? v : undefined;
+});
+
+/** Memoized `reasoningBudget` setting (positive integer thinking-budget tokens). */
+export const getReasoningBudget = cachedSetting("reasoningBudget", async () => {
+  const { reasoningBudget } = await chrome.storage.local.get("reasoningBudget");
+  return typeof reasoningBudget === "number" &&
+    Number.isFinite(reasoningBudget) &&
+    reasoningBudget > 0
+    ? Math.floor(reasoningBudget)
+    : undefined;
+});
+
+/** Recognized forceReasoning values: "on" forces reasoning params even for
+ * models the catalog doesn't flag; "off" suppresses them; "auto" keeps the
+ * catalog-derived flag. */
+const REASONING_FORCE = new Set(["on", "off", "auto"]);
+
+/** Memoized `forceReasoning` setting ("on" | "off" | "auto"). */
+export const getForceReasoning = cachedSetting("forceReasoning", async () => {
+  const { forceReasoning } = await chrome.storage.local.get("forceReasoning");
+  const v = forceReasoning as string | undefined;
+  return v && REASONING_FORCE.has(v) ? v : undefined;
+});
+
+/**
+ * Resolve the user's reasoning configuration into the `LLMRequest.reasoning`
+ * shape (effort / budget / force), or undefined when nothing is configured.
+ * "auto"/unset force produces an empty override so the provider's own
+ * reasoning support decides.
+ */
+async function resolveReasoningConfig(): Promise<LLMRequest["reasoning"]> {
+  const [effort, budgetTokens, forceReasoning] = await Promise.all([
+    getReasoningEffort(),
+    getReasoningBudget(),
+    getForceReasoning(),
+  ]);
+  if (!effort && budgetTokens === undefined && !forceReasoning) return undefined;
+  return {
+    ...(effort ? { effort } : {}),
+    ...(budgetTokens !== undefined ? { budgetTokens } : {}),
+    ...(forceReasoning === "on"
+      ? { enabled: true }
+      : forceReasoning === "off"
+        ? { enabled: false }
+        : {}),
+  };
+}
+
 /**
  * Resolve the LLM provider from stored config, caching the instance until the
  * config changes. An in-flight promise prevents double-building when concurrent
@@ -174,6 +271,18 @@ async function getProvider(): Promise<LLMProvider> {
   const epochAtBuild = configEpoch;
   const p = buildProvider(config).then((provider) => {
     pendingProviders.delete(key);
+    // Experimental (alpha/beta) models are never defaulted to, so reaching a
+    // direct call with one is an explicit opt-in worth warning about — once.
+    // Resolve the model with the same shared helper buildProvider uses so the
+    // warning names the model actually called.
+    warnExperimentalModelOnce(
+      config.provider,
+      resolveModel({
+        provider: config.provider,
+        model: config.model,
+        catalogId: CATALOG_PROVIDER_ID_MAP[config.provider] ?? config.provider,
+      }),
+    );
    // Only commit if no config change happened while this build was in flight.
    // A superseded build must not resurrect a stale provider/key.
     if (configEpoch === epochAtBuild) {
@@ -242,15 +351,19 @@ export async function navigatorCallDirect(
     maxSteps: req.maxSteps,
  // pass the compacted-memory block so it's rendered in the prompt.
     compactedMemory: req.compactedMemory,
+ // pass the loop-warning block (budget/replan/loop nudges, parse-error
+ // retry feedback) so the navigator actually sees it.
+    loopWarning: req.loopWarning,
   });
 
  // load custom navigator prompt override (cached, invalidated on storage change).
- // These four reads are independent — fetch them in parallel so a cache miss
- // doesn't serialize 3-4 extra chrome.storage.local.get round-trips per step.
-  const [customNavigatorPrompt, visionMode, agentMode, provider] = await Promise.all([
+ // These reads are independent — fetch them in parallel so a cache miss
+ // doesn't serialize extra chrome.storage.local.get round-trips per step.
+  const [customNavigatorPrompt, visionMode, agentMode, reasoningConfig, provider] = await Promise.all([
     getCustomNavigatorPrompt(),
     getVisionMode(),
     getAgentMode(),
+    resolveReasoningConfig(),
     getProvider(),
   ]);
   let systemPrompt = buildNavigatorPrompt(MAX_ACTIONS, customNavigatorPrompt, visionMode, agentMode);
@@ -296,6 +409,10 @@ export async function navigatorCallDirect(
   const response = await provider.chat({
     messages,
     ...(provider.supportsReasoning ? {} : { temperature: 0 }),
+    ...(reasoningConfig ? { reasoning: reasoningConfig } : {}),
+    // Navigator steps reuse this exact system prompt across steps, so a
+    // cache write is actually re-read — keep the Anthropic "1h" cache marker.
+    cacheEligible: true,
     schema: provider.supportsStructuredOutput ? AgentOutputSchema : undefined,
     ...(signal ? { signal } : {}),
   });
@@ -335,9 +452,11 @@ export async function plannerCallDirect(
   });
 
  // load custom planner prompt override (cached, invalidated on storage change).
- // Planner prompt + provider are independent reads — fetch them in parallel.
-  const [customPlannerPrompt, provider] = await Promise.all([
+ // Planner prompt + reasoning config + provider are independent reads — fetch
+ // them in parallel.
+  const [customPlannerPrompt, reasoningConfig, provider] = await Promise.all([
     getCustomPlannerPrompt(),
+    resolveReasoningConfig(),
     getProvider(),
   ]);
   let systemPrompt = buildPlannerPrompt(customPlannerPrompt);
@@ -359,6 +478,10 @@ export async function plannerCallDirect(
   const response = await provider.chat({
     messages,
     ...(provider.supportsReasoning ? {} : { temperature: 0 }),
+    ...(reasoningConfig ? { reasoning: reasoningConfig } : {}),
+    // No cacheEligible: planner calls are one-shot, so the anthropic protocol
+    // omits cache markers entirely (no cache-write premium for a cache the
+    // call never re-reads).
     schema: provider.supportsStructuredOutput ? PlannerOutputSchema : undefined,
     ...(signal ? { signal } : {}),
   });

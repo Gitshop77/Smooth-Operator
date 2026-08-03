@@ -14,6 +14,16 @@
  * - `syncRememberedApiKey()` applies the checkbox state: opted in → mirror
  *   key + flag to `chrome.storage.local`; opted out → remove the mirror and
  *   clear the flag.
+ *
+ * Trade-off (documented): the consent-gated mirror lives in
+ * `chrome.storage.local`, which — unlike `chrome.storage.session` — is also
+ * readable by the extension's content scripts on every page. That makes the
+ * persisted key reachable through the content-script code-execution surface
+ * (`evaluate`) if the sandbox is ever bypassed. The mirror is kept anyway
+ * because persistence across browser restarts is a user-facing feature; the
+ * evaluate sandbox is hardened against secret-store egress, and Options
+ * discloses the at-rest trade-off. Do not add further content-script-visible
+ * copies of the key.
  */
 
 import { STORAGE_KEYS } from "./options/storage-keys";

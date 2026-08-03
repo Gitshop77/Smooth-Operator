@@ -61,12 +61,27 @@ export const ACTION_METADATA: Record<string, ActionMeta> = {
   input:              { name: "input",              description: "Type text into an input/textarea.",                    pageChanging: false, exclusive: false, params: "index: number, text: string, clear?: boolean (default true = replace)" },
   select_dropdown:    { name: "select_dropdown",    description: "Choose an option in a <select>.",                      pageChanging: false, exclusive: false, params: "index: number, text?: string OR option_index?: number" },
   scroll:             { name: "scroll",             description: "Scroll the page.",                                     pageChanging: false, exclusive: false, params: "down?: boolean (default true), pages?: number (default 1)" },
+  scroll_to_bottom:   { name: "scroll_to_bottom",   description: "Scroll to the very bottom, then restore the viewport to the top.", pageChanging: false, exclusive: false, params: "delay_seconds?: number (default 0.4)" },
   send_keys:          { name: "send_keys",          description: "Press a key (Enter, Escape, Tab...).",                 pageChanging: false, exclusive: false, params: "keys: string" },
   navigate:           { name: "navigate",           description: "Go to a URL (optionally new tab).",                    pageChanging: true,  exclusive: false, params: "url: string, new_tab?: boolean (default false)" },
   switch_tab:         { name: "switch_tab",         description: "Switch to another open tab.",                          pageChanging: true,  exclusive: false, params: "tab_id: number" },
   close_tab:          { name: "close_tab",          description: "Close a tab.",                                         pageChanging: true,  exclusive: false, params: "tab_id: number" },
   go_back:            { name: "go_back",            description: "Browser back button.",                                 pageChanging: true,  exclusive: false, params: "(none)" },
   wait:               { name: "wait",               description: "Wait for the page to settle.",                         pageChanging: false, exclusive: false, params: "seconds?: number (default 3)" },
+  wait_for_element:   { name: "wait_for_element",   description: "Wait until an element matches a state (visible/hidden/attached/detached).", pageChanging: false, exclusive: false, params: "selector: string, state?: 'visible'|'hidden'|'attached'|'detached' (default visible), timeout_seconds?: number (default 30)" },
+  wait_for_text:      { name: "wait_for_text",      description: "Wait until text is present in the page's visible text.", pageChanging: false, exclusive: false, params: "text: string, timeout_seconds?: number (default 30)" },
+  wait_for_url:       { name: "wait_for_url",       description: "Wait until the URL matches a glob pattern (`*` ≠ `/`, `**` = anything).", pageChanging: false, exclusive: false, params: "url: string, timeout_seconds?: number (default 30)" },
+  wait_for_network_idle: { name: "wait_for_network_idle", description: "Wait until the network is idle (no resource loads for 500ms).", pageChanging: false, exclusive: false, params: "timeout_seconds?: number (default 30)" },
+  enable_network_log:  { name: "enable_network_log",  description: "Start recording network requests/responses.",              pageChanging: false, exclusive: false, params: "(none)" },
+  disable_network_log: { name: "disable_network_log", description: "Stop recording network activity (entries kept).",           pageChanging: false, exclusive: false, params: "(none)" },
+  get_network_log:     { name: "get_network_log",     description: "Get the recorded network requests/responses as JSON.",      pageChanging: false, exclusive: false, params: "(none)" },
+  clear_network_log:   { name: "clear_network_log",   description: "Clear the recorded network log.",                          pageChanging: false, exclusive: false, params: "(none)" },
+  getclear_network_log:{ name: "getclear_network_log",description: "Get AND clear the recorded network log in one step.",      pageChanging: false, exclusive: false, params: "(none)" },
+  enable_console_log:  { name: "enable_console_log",  description: "Start recording the page's console.log/error/warn/info calls.", pageChanging: false, exclusive: false, params: "(none)" },
+  disable_console_log: { name: "disable_console_log", description: "Stop recording console calls (entries kept).",            pageChanging: false, exclusive: false, params: "(none)" },
+  get_console_log:     { name: "get_console_log",     description: "Get the recorded console calls as JSON.",                 pageChanging: false, exclusive: false, params: "(none)" },
+  clear_console_log:   { name: "clear_console_log",   description: "Clear the recorded console log.",                         pageChanging: false, exclusive: false, params: "(none)" },
+  getclear_console_log:{ name: "getclear_console_log",description: "Get AND clear the recorded console log in one step.",     pageChanging: false, exclusive: false, params: "(none)" },
   find_text:          { name: "find_text",          description: "Scroll until text is visible.",                        pageChanging: false, exclusive: false, params: "text: string" },
   extract:            { name: "extract",            description: "Extract info from page text via a query.",             pageChanging: false, exclusive: false, params: "query: string" },
   done:               { name: "done",               description: "Finish the task.",                                     pageChanging: false, exclusive: true,  params: "text: string (summary), success: boolean" },
@@ -75,9 +90,15 @@ export const ACTION_METADATA: Record<string, ActionMeta> = {
   screenshot:         { name: "screenshot",         description: "Take a screenshot of the page.",                       pageChanging: false, exclusive: false, params: "file_name?: string" },
   save_as_pdf:        { name: "save_as_pdf",        description: "Save the page as a PDF.",                              pageChanging: false, exclusive: false, params: "file_name?: string" },
   dropdown_options:   { name: "dropdown_options",   description: "List options of a <select>.",                          pageChanging: false, exclusive: false, params: "index: number" },
+  page_next:          { name: "page_next",          description: "Continue reading a truncated page snapshot from a char offset (use the offset from the snapshot's marker).", pageChanging: false, exclusive: false, params: "offset?: number (default 0)" },
+  list_downloads:     { name: "list_downloads",     description: "List the files downloaded during this session (name, size, mime).", pageChanging: false, exclusive: false, params: "(none)" },
   search_page:        { name: "search_page",        description: "Search for text/pattern on the page (instant, free).", pageChanging: false, exclusive: false, params: "pattern: string, regex?: boolean, case_sensitive?: boolean" },
   find_elements:      { name: "find_elements",      description: "Find elements by CSS selector (instant, free).",       pageChanging: false, exclusive: false, params: "selector: string, attributes?: string[], max_results?: number" },
+  list_interactive:   { name: "list_interactive",   description: "List interactive elements (links, buttons, inputs, selects, textareas, [role=…], [onclick], [tabindex], label[for], summary, [contenteditable]) with pixel coordinates + unique CSS selectors for direct CDP clicks without a vision pass.", pageChanging: false, exclusive: false, params: "visible_only?: boolean (default false), max_results?: number (default 50, cap 200)" },
+  get_computed_style: { name: "get_computed_style", description: "Get computed CSS style values of an element.",           pageChanging: false, exclusive: false, params: "index: number, properties: string[] (max 50, camelCase or kebab-case)" },
+  get_page_info:      { name: "get_page_info",      description: "Get page URL, title, state, and dimensions as JSON.", pageChanging: false, exclusive: false, params: "(none)" },
   evaluate:           { name: "evaluate",           description: "Execute JavaScript on the page.",                      pageChanging: true,  exclusive: false, params: "code: string" },
+  run_script:         { name: "run_script",         description: "Run a multi-step YAML/JSON script (parsed + validated; each step executes like an ordinary action).", pageChanging: true, exclusive: false, params: "script: string (YAML/JSON text)" },
   hover:              { name: "hover",              description: "Hover over an element.",                               pageChanging: false, exclusive: false, params: "index: number" },
   press_and_hold:     { name: "press_and_hold",     description: "Press and hold an element (anti-bot widgets).",        pageChanging: true,  exclusive: false, params: "index: number, hold_ms?: number (default 1500), delay_ms?: number (default 0)" },
   ask_human:          { name: "ask_human",          description: "Ask the user a question when stuck.",                  pageChanging: false, exclusive: true,  params: "question: string, mode?: 'input'|'password' (default 'input')" },
@@ -89,6 +110,14 @@ export const ACTION_METADATA: Record<string, ActionMeta> = {
   alert_get_text:     { name: "alert_get_text",     description: "Get the text of the open JS dialog.",                   pageChanging: false, exclusive: false, params: "(none)" },
   alert_send_keys:    { name: "alert_send_keys",    description: "Queue text for the next window.prompt() call (call BEFORE the action that opens the prompt).",             pageChanging: false, exclusive: false, params: "text: string" },
   detect_visual:      { name: "detect_visual",      description: "Run local vision detection to find UI elements not in the DOM (Canvas, WebGL, custom widgets). Returns [v1], [v2] etc. that you can click. Use ONLY when you can see something visually but can't find it in the elements list.",  pageChanging: false, exclusive: true,  params: "query: string" },
+  detect_challenge:   { name: "detect_challenge",   description: "Detect anti-bot challenge widgets on the page (Turnstile, reCAPTCHA, hCaptcha, Friendly Captcha, Altcha, AWS WAF, Arkose, Geetest). Read-only, no network. Optionally scrolls the first detected widget into view.", pageChanging: false, exclusive: false, params: "scroll_into_view?: boolean (default false)" },
+  list_tabs:          { name: "list_tabs",          description: "List the open browser tabs (URL + active state). Read-only.",                              pageChanging: false, exclusive: false, params: "(none)" },
+  get_cookies:        { name: "get_cookies",        description: "Read cookies (name, value, domain, path, secure, httpOnly, sameSite, expiry, session, hostOnly). Read-only.", pageChanging: false, exclusive: false, params: "urls?: string[] (http/https)" },
+  set_cookie:         { name: "set_cookie",         description: "Write a cookie for url or domain (url OR domain required; the effective URL must pass the domain policy).", pageChanging: false, exclusive: false, params: "url?: string | domain?: string, name: string, value: string, path?/secure?/httpOnly?/sameSite?/expirationDate?" },
+  delete_cookies:     { name: "delete_cookies",     description: "Delete cookies. Requires ≥1 url OR explicit all:true (never inferred).",                          pageChanging: true,  exclusive: false, params: "urls?: string[] (http/https) | all?: boolean" },
+  get_storage:        { name: "get_storage",        description: "Read the extension's key/value storage (cross-step memory). Read-only.",               pageChanging: false, exclusive: false, params: "storage_type?: 'local'|'session' (default 'local')" },
+  set_storage:        { name: "set_storage",        description: "Write a JSON-serializable value to the extension's key/value storage (cross-step memory).", pageChanging: false, exclusive: false, params: "storage_type?: 'local'|'session', key: string, value: unknown" },
+  clear_storage:      { name: "clear_storage",      description: "Clear the extension's key/value storage. Requires a keys list OR explicit all:true (a whole-area wipe is never inferred).", pageChanging: false, exclusive: false, params: "storage_type?: 'local'|'session', keys?: string[] | all?: boolean" },
 };
 
 /**
@@ -148,6 +177,28 @@ export function isEquivalentAction(a: Action, b: Action): boolean {
     case "go_back":
     case "wait":
       return true;
+    case "wait_for_element": {
+      const bb = b as Extract<Action, { type: "wait_for_element" }>;
+      return a.selector === bb.selector && (a.state ?? "visible") === (bb.state ?? "visible");
+    }
+    case "wait_for_text":
+      return a.text === (b as Extract<Action, { type: "wait_for_text" }>).text;
+    case "wait_for_url":
+      return a.url === (b as Extract<Action, { type: "wait_for_url" }>).url;
+    case "wait_for_network_idle":
+      return true;
+    case "enable_network_log":
+    case "disable_network_log":
+    case "get_network_log":
+    case "clear_network_log":
+    case "getclear_network_log":
+      return true;
+    case "enable_console_log":
+    case "disable_console_log":
+    case "get_console_log":
+    case "clear_console_log":
+    case "getclear_console_log":
+      return true;
     case "find_text":
       return a.text === (b as Extract<Action, { type: "find_text" }>).text;
     case "extract":
@@ -185,8 +236,21 @@ export function isEquivalentAction(a: Action, b: Action): boolean {
         (a.max_results ?? 50) === (bb.max_results ?? 50)
       );
     }
+    case "list_interactive":
+      // Read-only DOM scan — a repeated call is equivalent (like get_page_info).
+      return true;
+    case "scroll_to_bottom":
+      return (a.delay_seconds ?? 0.4) === ((b as Extract<Action, { type: "scroll_to_bottom" }>).delay_seconds ?? 0.4);
+    case "get_computed_style": {
+      const bb = b as Extract<Action, { type: "get_computed_style" }>;
+      return a.index === bb.index && JSON.stringify(a.properties) === JSON.stringify(bb.properties);
+    }
+    case "get_page_info":
+      return true;
     case "evaluate":
       return a.code === (b as Extract<Action, { type: "evaluate" }>).code;
+    case "run_script":
+      return a.script === (b as Extract<Action, { type: "run_script" }>).script;
     case "ask_human": {
       const bb = b as Extract<Action, { type: "ask_human" }>;
       return a.question === bb.question && (a.mode ?? "input") === (bb.mode ?? "input");
@@ -205,6 +269,53 @@ export function isEquivalentAction(a: Action, b: Action): boolean {
       return a.text === (b as Extract<Action, { type: "alert_send_keys" }>).text;
     case "detect_visual":
       return a.query === (b as Extract<Action, { type: "detect_visual" }>).query;
+    case "detect_challenge":
+      return (a.scroll_into_view ?? false) ===
+        ((b as Extract<Action, { type: "detect_challenge" }>).scroll_into_view ?? false);
+    case "list_tabs":
+      return true;
+    case "get_cookies": {
+      const bb = b as Extract<Action, { type: "get_cookies" }>;
+      return JSON.stringify(a.urls ?? []) === JSON.stringify(bb.urls ?? []);
+    }
+    case "set_cookie": {
+      const bb = b as Extract<Action, { type: "set_cookie" }>;
+      const k: Array<keyof Extract<Action, { type: "set_cookie" }>> = [
+        "url", "domain", "name", "value", "path", "secure", "httpOnly", "sameSite", "expirationDate",
+      ];
+      return k.every((key) => a[key] === bb[key]);
+    }
+    case "delete_cookies": {
+      const bb = b as Extract<Action, { type: "delete_cookies" }>;
+      return (
+        JSON.stringify(a.urls ?? []) === JSON.stringify(bb.urls ?? []) &&
+        (a.all ?? false) === (bb.all ?? false)
+      );
+    }
+    case "get_storage": {
+      const bb = b as Extract<Action, { type: "get_storage" }>;
+      return (a.storage_type ?? "local") === (bb.storage_type ?? "local");
+    }
+    case "set_storage": {
+      const bb = b as Extract<Action, { type: "set_storage" }>;
+      return (
+        (a.storage_type ?? "local") === (bb.storage_type ?? "local") &&
+        a.key === bb.key &&
+        JSON.stringify(a.value) === JSON.stringify(bb.value)
+      );
+    }
+    case "clear_storage": {
+      const bb = b as Extract<Action, { type: "clear_storage" }>;
+      return (
+        (a.storage_type ?? "local") === (bb.storage_type ?? "local") &&
+        (a.all ?? false) === (bb.all ?? false) &&
+        JSON.stringify(a.keys ?? []) === JSON.stringify(bb.keys ?? [])
+      );
+    }
+    case "page_next":
+      return (a.offset ?? 0) === ((b as Extract<Action, { type: "page_next" }>).offset ?? 0);
+    case "list_downloads":
+      return true;
     default: {
       const _exhaustive: never = a;
       void _exhaustive;
@@ -223,6 +334,13 @@ export function isEquivalentAction(a: Action, b: Action): boolean {
 // Shared by the two helpers below so the regex can't drift between them.
 const UNBOUNDED_Q = /^\{\d+,\d*\}/;
 
+// Exact `{n}` repetitions at or above this count are treated as
+// unbounded-equivalent when the quantified group can match the same input
+// multiple ways: `(a+){100}` has C(L-1, 99) paths — the bounded repetition
+// count does NOT bound the path count. Small exact counts (`(a+){3}`, with a
+// polynomial path count) remain accepted.
+const EXACT_REPEAT_DANGER_THRESHOLD = 32;
+
 // A quantifier is "dangerous" when it is unbounded (or open-bounded) repetition:
 // `*` or `+`, or `{n,}` / `{n,m}`. `?` and exact `{n}` cannot create the
 // ambiguity that produces exponential backtracking, so they are treated as safe.
@@ -233,14 +351,20 @@ function atUnboundedQuantifier(src: string, i: number): boolean {
   return false;
 }
 
-// Length of the unbounded-quantifier token starting at `i`, or 0 if `src[i]` is
-// not an unbounded quantifier.
-function quantifierLengthAt(src: string, i: number): number {
+// Length of the dangerous-quantifier token starting at `i`, or 0 if `src[i]`
+// is not one. In addition to the unbounded tokens (`*`, `+`, `{n,}`, `{n,m}`)
+// this includes an exact `{n}` with n >= EXACT_REPEAT_DANGER_THRESHOLD, which
+// is only meaningful as the quantifier of a GROUP: `(a+){100}` is exponential
+// while a plain `a{100}` is linear, and the inner checks below only run when
+// this returns non-zero.
+function dangerousQuantifierLengthAt(src: string, i: number): number {
   const c = src[i];
   if (c === "*" || c === "+") return 1;
   if (c === "{") {
     const m = UNBOUNDED_Q.exec(src.slice(i));
     if (m) return m[0].length;
+    const exact = /^\{(\d+)\}/.exec(src.slice(i));
+    if (exact && Number(exact[1]) >= EXACT_REPEAT_DANGER_THRESHOLD) return exact[0].length;
   }
   return 0;
 }
@@ -457,8 +581,31 @@ function firstCharSet(branch: string): CharSet {
         if ((branch[j + 1] === "p" || branch[j + 1] === "P") && branch[j + 2] === "{") {
           return "ANY";
         }
-        const lit = escapedLiteralChar(branch, branch[j + 1] ?? "");
-        set.add(lit ?? (branch[j + 1] ?? ""));
+        const e = branch[j + 1] ?? "";
+        // Shorthand classes inside `[...]` expand to their full set (a `\d`
+        // in a class matches any digit, not the literal "d"). `\D`/`\W`/`\S`
+        // are complements of unbounded sets — treat as ANY so alternations
+        // like `([\D]|x)+` are flagged.
+        if (e === "d") {
+          for (const ch of DIGIT_SET) set.add(ch);
+          j += 2;
+          continue;
+        }
+        if (e === "w") {
+          for (const ch of WORD_SET) set.add(ch);
+          j += 2;
+          continue;
+        }
+        if (e === "s") {
+          for (const ch of SPACE_SET) set.add(ch);
+          j += 2;
+          continue;
+        }
+        if (e === "D" || e === "W" || e === "S") return "ANY";
+        // Pass the substring starting AT the escape so hex/unicode escapes
+        // (`\x41`, `\u0041`) parse correctly from inside the class.
+        const lit = escapedLiteralChar(branch.slice(j), e);
+        set.add(lit ?? e);
         j += 2;
         continue;
       }
@@ -600,13 +747,16 @@ function groupHasDangerousNestedQuantifier(src: string, openIdx: number, closeId
 // Reject patterns that are KNOWN catastrophic-backtracking (ReDoS) shapes:
 // • a group containing an unbounded quantifier, itself quantified by an
 // unbounded quantifier — e.g. `(a+)+`, `(a*)*`, `(a+)*`, `(a{2,})+`,
-// `([a-z]+)+$`;
+// `([a-z]+)+$`, `(a+){100}` (a LARGE exact repetition of an ambiguous group
+// keeps the exponential path count — only small exact counts like `(a+){3}`
+// are accepted);
 // • a group with an ambiguous top-level alternation, quantified by an unbounded
-// quantifier — e.g. `(a|a)+`, `(a|ab)+`, `(a|a|a)+$`, `((a|b)+)+`.
-// Lookaround groups are ignored (quantifying them is linear). `?` and exact
-// `{n}` repetitions are not triggers. The check is conservative: it may reject a
-// handful of patterns an engine could optimize, but erring toward rejection is
-// the safer choice for a handler driven by LLM / prompt-injection-supplied input.
+// quantifier — e.g. `(a|a)+`, `(a|ab)+`, `(a|a|a)+$`, `((a|b)+)+`, `(a|aa){100}`.
+// Lookaround groups are ignored (quantifying them is linear). `?` and small
+// exact `{n}` repetitions are not triggers. The check is conservative: it may
+// reject a handful of patterns an engine could optimize, but erring toward
+// rejection is the safer choice for a handler driven by LLM / prompt-injection-
+// supplied input.
 export function hasNestedQuantifier(pattern: string): boolean {
   for (let i = 0; i < pattern.length; i++) {
     const c = pattern[i];
@@ -624,9 +774,10 @@ export function hasNestedQuantifier(pattern: string): boolean {
       if (groupPrefixIsLookaround(pattern, i)) continue;
       const close = findGroupClose(pattern, i);
       if (close < 0) continue; // malformed — leave to the RegExp constructor
-      // Only a group immediately followed by an unbounded quantifier can be a
-      // ReDoS vector of these shapes.
-      if (quantifierLengthAt(pattern, close + 1) > 0) {
+      // Only a group immediately followed by a dangerous quantifier can be a
+      // ReDoS vector of these shapes (large exact `{n}` included — `(a+){100}`
+      // stays exponential).
+      if (dangerousQuantifierLengthAt(pattern, close + 1) > 0) {
         if (groupHasDangerousNestedQuantifier(pattern, i, close)) return true;
         if (groupHasAmbiguousAlternation(pattern, i, close)) return true;
       }

@@ -15,9 +15,12 @@ vi.mock("@/lib/agent/tools/helpers/domain-config", () => ({
   checkUrlAllowedWithDomainConfig: vi.fn(),
 }));
 
-import { handleTabAction } from "../src/extension/background/tab-manager";
+import { handleTabAction, executeActionsInTab } from "../src/extension/background/tab-manager";
 import { checkUrlAllowedWithDomainConfig } from "@/lib/agent/tools/helpers/domain-config";
 import type { RunState } from "../src/extension/background/state-store";
+import type { AgentAction } from "@/lib/agent/types";
+import { setSecret, deleteSecret } from "../src/lib/agent/secrets";
+import { installLocalStorageStub, restoreLocalStorageStub } from "./helpers";
 
 let chromeMock: {
   tabs: {
@@ -182,5 +185,55 @@ describe("handleTabAction security gate", () => {
     expect(notify).toHaveBeenCalledWith(
       expect.objectContaining({ type: "error", recoverable: false }),
     );
+  });
+});
+
+describe("executeActionsInTab input message patch", () => {
+  const SECRET = "sk-input-secret-123";
+
+  function installExecuteStub(results: Array<{ success: boolean; message: string }>) {
+    chromeMock.tabs.sendMessage.mockImplementation(async (_tabId: number, msg: { type?: string; actions?: AgentAction[] }) => {
+      if (msg?.type === "PING") return { ok: true };
+      if (msg?.type === "EXECUTE_ACTIONS") {
+        const acts = msg.actions ?? [];
+        return { ok: true, results: acts.map((a, i) => ({ action: a, success: results[i]?.success ?? true, message: results[i]?.message ?? "ok" })) };
+      }
+      return { ok: true };
+    });
+  }
+
+  beforeEach(async () => {
+    installLocalStorageStub();
+    await setSecret("api_key", SECRET);
+  });
+
+  afterEach(async () => {
+    await deleteSecret("api_key").catch(() => {});
+    localStorage.removeItem("open_cowork_secrets");
+    restoreLocalStorageStub();
+  });
+
+  test("a SUCCESSFUL input with a substituted secret reports the redacted message", async () => {
+    installExecuteStub([{ success: true, message: "typed" }]);
+    // The action text uses the %secret-name% placeholder; the content script
+    // receives the SUBSTITUTED value, and the SW patch reports it as redacted.
+    const results = (await executeActionsInTab(1, [
+      { type: "input", index: 0, text: "my key is %api_key%" },
+    ] as AgentAction[])) as Array<{ message?: string; success?: boolean }>;
+
+    expect(results[0].success).toBe(true);
+    expect(results[0].message).toContain("Typed [REDACTED — secret substituted]");
+    expect(results[0].message).not.toContain(SECRET);
+  });
+
+  test("a FAILED input keeps its honest error message (no misleading 'Typed …')", async () => {
+    installExecuteStub([{ success: false, message: "input failed: element not found" }]);
+    const results = (await executeActionsInTab(1, [
+      { type: "input", index: 0, text: "my key is %api_key%" },
+    ] as AgentAction[])) as Array<{ message?: string; success?: boolean }>;
+
+    expect(results[0].success).toBe(false);
+    expect(results[0].message).toBe("input failed: element not found");
+    expect(results[0].message).not.toContain("Typed");
   });
 });

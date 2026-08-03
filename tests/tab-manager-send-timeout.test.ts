@@ -107,4 +107,22 @@ describe("content-script sendMessage timeout", () => {
     const results = await executeActionsInTab(1, []);
     expect(results).toEqual([]);
   });
+
+  test("executeActionsInTab forwards the agent mode so loader steps are gated", async () => {
+    let sent: { type?: string; agentMode?: unknown } | undefined;
+    chromeMock.tabs.sendMessage.mockImplementation((_tabId: number, msg: { type?: string }) => {
+      sent = msg as { type?: string; agentMode?: unknown };
+      if (msg?.type === "PING") return Promise.resolve({ ok: true });
+      if (msg?.type === "EXECUTE_ACTIONS") {
+        return Promise.resolve({ ok: true, results: [] });
+      }
+      return Promise.resolve({});
+    });
+
+    await executeActionsInTab(1, [], "restricted");
+    expect(sent?.agentMode).toBe("restricted");
+
+    await executeActionsInTab(1, []);
+    expect(sent?.agentMode).toBeUndefined();
+  });
 });

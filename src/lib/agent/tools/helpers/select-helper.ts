@@ -119,7 +119,16 @@ export class Select {
  * @throws {NoSuchElementException} if no option has the value.
  */
   selectByValue(value: string): void {
-    const want = String(value);
+    const want = String(value).trim();
+    if (want === "") {
+      // An empty/whitespace-only argument is almost always a missing-field bug
+      // (an LLM tool call with an omitted field). Matching by empty string is
+      // meaningless — reject it the same way `selectByVisibleText` does rather
+      // than letting a stale `value=""` option absorb the call.
+      throw new NoSuchElementException(
+        "selectByValue requires a non-empty value argument",
+      );
+    }
     const opts = this.getOptions();
     const matched = opts.filter((o) => o.value === want);
     if (matched.length === 0) {

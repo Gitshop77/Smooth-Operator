@@ -24,10 +24,10 @@ describe("security guard drift-guard", () => {
     expect(src).toContain("hasBackreference");
   });
 
- // Token-presence alone is not enough: a self-heal refactor could keep the
- // guard definition while deleting the call site, and CI would still pass.
- // Assert the guards are actually invoked on the live code path — either
- // directly or via the checkRedos helper that wraps them.
+  // Token-presence alone is not enough: a self-heal refactor could keep the
+  // guard definition while deleting the call site, and CI would still pass.
+  // Assert the guards are actually invoked on the live code path — either
+  // directly or via the checkRedos helper that wraps them.
   it("invokes the ReDoS guards on the live search-page handler path", () => {
     const src = readSrc("src/lib/agent/tools/handlers/search-page.ts");
     const callsGuardsDirectly =
@@ -37,11 +37,11 @@ describe("security guard drift-guard", () => {
     expect(callsGuardsDirectly || callsCheckRedos).toBe(true);
   });
 
- // A behavioral regression test must exist so a ReDoS payload is rejected at
- // runtime, not merely that the guard text is present. Assert the test file
- // actually exercises the guards AND that it rejects a catastrophic pattern
- // (guard returns true for danger) while accepting a safe one (false) — proving
- // it distinguishes real ReDoS rather than always-rejecting.
+  // A behavioral regression test must exist so a ReDoS payload is rejected at
+  // runtime, not merely that the guard text is present. Assert the test file
+  // actually exercises the guards AND that it rejects a catastrophic pattern
+  // (guard returns true for danger) while accepting a safe one (false) — proving
+  // it distinguishes real ReDoS rather than always-rejecting.
   it("ships a behavioral ReDoS-rejection test", () => {
     const redos = readSrc("tests/search-page-redos.test.ts");
     expect(redos).toMatch(/hasNestedQuantifier|hasBackreference/);
@@ -72,5 +72,19 @@ describe("security guard drift-guard", () => {
   it("keeps the verbatim SECURITY_INSTRUCTION marker", () => {
     const src = readSrc("src/lib/agent/security.ts");
     expect(src).toContain("SECURITY_INSTRUCTION");
+  });
+
+  // A marker that exists in security.ts but is never injected into a prompt
+  // template is dead weight — a refactor dropping the imports would not fail
+  // the marker-presence guard above. Assert at least one prompt module still
+  // imports/uses it on the live path.
+  it("injects SECURITY_INSTRUCTION into at least one prompt template", () => {
+    const promptModules = [
+      "src/lib/agent/loop/helpers/compaction-runner.ts",
+      "src/lib/agent/prompts/navigator-prompt.ts",
+      "src/lib/agent/prompts/planner-prompt.ts",
+    ];
+    const usedBy = promptModules.filter((rel) => readSrc(rel).includes("SECURITY_INSTRUCTION"));
+    expect(usedBy.length).toBeGreaterThan(0);
   });
 });

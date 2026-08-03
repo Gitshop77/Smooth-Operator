@@ -120,8 +120,12 @@ export function mergeDetections(
     });
   }
 
- // 2. Add vision-only elements (those that don't overlap with any DOM element)
+ // 2. Add vision-only elements (those that don't overlap with any DOM element
+ // OR with an already-accepted vision element). Two overlapping boxes for the
+ // same on-screen object would otherwise both become separate `[vN]` elements
+ // — duplicate click targets and doubled prompt tokens.
   let vIdx = 1;
+  const acceptedVisionRects: Array<{ x: number; y: number; width: number; height: number }> = [];
   for (const det of visionDetections) {
  // Scale the vision rect from device pixels → CSS pixels so the IoU
  // comparison is apples-to-apples with DOM `getBoundingClientRect` rects.
@@ -140,8 +144,17 @@ export function mergeDetections(
         break;
       }
     }
+    if (!isDuplicate) {
+      for (const prior of acceptedVisionRects) {
+        if (iou(visionRectCss, prior) > 0.5) {
+          isDuplicate = true;
+          break;
+        }
+      }
+    }
 
     if (!isDuplicate) {
+      acceptedVisionRects.push(visionRectCss);
       const visionId = `v${vIdx}`;
       vIdx++;
       merged.push({

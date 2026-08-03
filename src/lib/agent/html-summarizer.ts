@@ -20,8 +20,10 @@
  * 3. Keep the top N elements by score (preserving their original indices
  * so the navigator's `[index]` references still resolve via the
  * selector map). When fewer than N elements have a non-zero score,
- * fall back to returning the full DOM (the summarizer is best-effort
- * — a wrong filter is worse than no filter).
+ * fall back to the best-scored subset — still capped at
+ * `FALLBACK_CAP_ELEMENTS`, never the full DOM (the summarizer is
+ * best-effort — a wrong filter is worse than no filter, but an
+ * unbounded payload is worse than a bounded one).
  *
  * Tag-relevance heuristics (tuned for web-form / navigation tasks):
  * - Form tasks ("fill", "submit", "login", "form", "enter"): input,
@@ -163,6 +165,23 @@ interface SummarizeDomOutput {
 }
 
 /**
+ * Clamp the per-call element cap to a sane range before it feeds
+ * `pool.slice(0, cap)`:
+ * - negative values make `slice` use a negative end index, dropping elements
+ *   from the END of the scored list — the opposite of "keep fewer" (and an
+ *   empty result when the pool is smaller than the cap);
+ * - zero would keep nothing at all;
+ * - values above `FALLBACK_CAP_ELEMENTS` defeat the bounded-payload
+ *   guarantee.
+ * Non-finite values (NaN/Infinity) replace nonsense with the default cap.
+ */
+function clampMaxElements(cap: number): number {
+  if (!Number.isFinite(cap)) return DEFAULT_MAX_SUMMARIZED_ELEMENTS;
+  if (cap < 1) return 1;
+  return Math.min(cap, FALLBACK_CAP_ELEMENTS);
+}
+
+/**
  * Filter the page's interactive elements down to the task-relevant subset.
  *
  * Steps:
@@ -170,14 +189,15 @@ interface SummarizeDomOutput {
  * 2. Detect task intents (form / nav / search / read).
  * 3. Score every element against the keywords + intents.
  * 4. Keep the top `maxElements` by score (preserving original order).
- * 5. If fewer than ~5 elements scored non-zero, fall back to keeping all
- * (the summarizer is best-effort — returning too few elements is
- * worse than no filter at all, since the navigator can't act on what
- * it can't see).
+ * 5. If fewer than ~5 elements scored non-zero, fall back to the
+ * best-scored subset, still capped at `FALLBACK_CAP_ELEMENTS` (the
+ * summarizer is best-effort — returning too few elements is worse
+ * than no filter at all, since the navigator can't act on what it
+ * can't see, but the full DOM must never be returned).
  */
 export function summarizeDom(input: SummarizeDomInput): SummarizeDomOutput {
   const { task, currentGoal, elements } = input;
-  const maxElements = input.maxElements ?? DEFAULT_MAX_SUMMARIZED_ELEMENTS;
+  const maxElements = clampMaxElements(input.maxElements ?? DEFAULT_MAX_SUMMARIZED_ELEMENTS);
 
   const keywords = new Set<string>([
     ...extractKeywords(task),

@@ -73,6 +73,8 @@ export async function callPlannerAndHandleError(
       type: "error", step,
       message: errorMessage,
       recoverable: !classified.fatal,
+      code: classified.machineCode,
+      recovery: classified.recoveryHint,
     });
     if (classified.fatal || classified.category === "cancelled") {
       const doneText = `Fatal planner error (${classified.category}): ${classified.message}`;
@@ -195,7 +197,7 @@ export async function handleNavigatorDone(
     evaluation: output.evaluation_previous_goal,
     memory: output.memory, goal: output.next_goal,
     results: [{
-      action: doneAction, success: doneAction.success ?? true,
+      action: doneAction, success: doneAction.success ?? false,
       message: `Navigator requested completion: ${doneAction.text}`,
       isDone: true,
     }],

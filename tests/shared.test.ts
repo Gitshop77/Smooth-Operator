@@ -26,8 +26,8 @@ describe("escapeHtml", () => {
   });
 
   test("also escapes '/' to &#47;", () => {
+    // Harmless in normal text rendering, but closes the cross-context hole.
     expect(escapeHtml("a/b")).toBe("a&#47;b");
-  // Harmless in normal text rendering, but closes the cross-context hole.
     expect(escapeHtml("anthropic/claude-3-5-sonnet")).toBe("anthropic&#47;claude-3-5-sonnet");
   });
 

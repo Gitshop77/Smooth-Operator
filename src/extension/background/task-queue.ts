@@ -13,7 +13,8 @@ import { getScheduledTask } from "@/lib/agent/scheduled-tasks";
 import { resolveAndValidateWebhookUrl } from "@/lib/agent/llm/route/ssrf";
 import { redactSecrets } from "@/lib/agent/secrets";
 import { getRunState, requestKeepAwake, safeLog } from "./state-store";
-import { DEFAULT_MAX_STEPS, isRunStarting, setRunStarting } from "./agent-bridge";
+import { DEFAULT_MAX_STEPS, DEFAULT_MODE, isRunStarting, setRunStarting } from "./agent-bridge";
+import { KNOWN_MODES } from "./message-types";
 
 /** Truncate a string for display, adding an ellipsis only when actually truncated. */
 const clip = (s: string, n = 80): string => (s.length > n ? s.slice(0, n - 1) + "…" : s);
@@ -71,14 +72,18 @@ export async function handleScheduledTaskFire(taskId: string): Promise<void> {
         type: "basic",
         iconUrl: "icons/icon.png",
         title: "Open Cowork — Scheduled Task",
-        message: `Starting: ${clip(task.task)}\nClick the extension icon to view.`,
+        message: `Starting: ${clip(await redactSecrets(task.task))}\nClick the extension icon to view.`,
         priority: 2,
       }, () => { /* notifications API may not be available */ });
     }
- // Dynamic import breaks the circular dep with agent-bridge.ts (which calls
- // fireNotifications from its `finally` block).
+  // Dynamic import breaks the circular dep with agent-bridge.ts (which calls
+  // fireNotifications from its `finally` block).
     const { startRun } = await import("./agent-bridge");
-    await startRun({ task: task.task, maxSteps: DEFAULT_MAX_STEPS, mode: task.mode ?? "standard", isScheduledTaskRun: true });
+  // Validate the stored mode against the known enum before it reaches
+  // startRun: a corrupted/stale task row must not feed an unvalidated string
+  // into the loop (or the fallback path in agent-bridge logs raw values).
+    const mode = task.mode && KNOWN_MODES.has(task.mode) ? task.mode : DEFAULT_MODE;
+    await startRun({ task: task.task, maxSteps: DEFAULT_MAX_STEPS, mode, isScheduledTaskRun: true });
   } catch (e) {
  // Route through safeLog so any secret-shaped values embedded in the error
  // (task text, webhook URLs, run-derived strings) are redacted first — the
@@ -120,11 +125,15 @@ export async function fireNotifications(task: string, success?: boolean): Promis
     const webhookUrl = res.webhookUrl as string;
 
     if (notify || (notifyOnError && !success)) {
+      // Redact before clip: task prompts may contain pasted secret-shaped
+      // values, and the message lands in the notification shade (visible in
+      // screenshots / screen recordings). Same discipline as the webhook path.
+      const message = `Task: ${clip(await redactSecrets(task))}`;
       void chrome.notifications.create({
         type: "basic",
         iconUrl: "icons/icon.png",
         title: success ? "Open Cowork — Run Succeeded" : "Open Cowork — Run Finished",
-        message: `Task: ${clip(task)}`,
+        message,
         priority: 2,
       }, () => { /* non-fatal */ });
     }

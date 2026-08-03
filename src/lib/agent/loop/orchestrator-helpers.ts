@@ -1,8 +1,13 @@
 import type {
-  ActionResult,
+  AgentAction,
+  AgentConfig,
   AgentOutput,
-  PlannerOutput,
+  AgentStepRequest,
+  ActionResult,
+  BrowserState,
   LogEvent,
+  PlannerOutput,
+  TabInfo,
 } from "../types";
 import { DEFAULT_CONFIG } from "../types";
 import { classifyError, friendlyErrorMessage } from "../errors";
@@ -37,6 +42,9 @@ import {
   runChallengeDetection,
   runPauseCheck,
 } from "./phases/navigator";
+import {
+  clampPlanItem,
+} from "./phases/planner-phases-utils";
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
@@ -49,6 +57,26 @@ const SETTLE_SLA_MS = 30_000;
 type StepResult =
   | { kind: "continue" }
   | { kind: "exit"; success: boolean; text: string };
+
+/** Payload carried between navigator-step phases. */
+type ObservePayload = { browserState: BrowserState; tabs: TabInfo[] };
+type ModelCallPayload = { output: AgentOutput };
+type ActionSelectionPayload = {
+  actions: AgentAction[];
+  doneAction: Extract<AgentAction, { type: "done" }> | undefined;
+};
+type ExecutionPayload = { results: ActionResult[] };
+
+/** Outcome of a navigator-step phase: abort with a terminal StepResult, or
+ * continue with the phase's data payload. */
+type NavigatorPhaseResult<T> =
+  | { kind: "abort"; result: StepResult }
+  | { kind: "ok"; data: T };
+
+/** Outcome of a navigator-step phase that produces no payload. */
+type NavigatorPhaseOutcome =
+  | { kind: "abort"; result: StepResult }
+  | { kind: "ok" };
 
 // ─── Sleep + heartbeat ─────────────────────────────────────────────────────
 
@@ -160,6 +188,22 @@ export async function safeDispatch(
 }
 
 /**
+ * Like {@link safeDispatch} but narrows the dispatcher to non-null for the
+ * handler. `safeDispatch` guards `if (!state.dispatcher) return;` before
+ * invoking the handler, and `state.dispatcher` is assigned exactly once in
+ * `initState` (never reassigned), so the non-null assertion here is sound.
+ * This is the single consolidation point for the per-call-site
+ * `state.dispatcher!` assertions.
+ */
+function dispatch(
+  state: LoopState,
+  label: string,
+  fn: (dispatcher: CallbackDispatcher) => Promise<void>,
+): Promise<void> {
+  return safeDispatch(state, label, () => fn(state.dispatcher!));
+}
+
+/**
  * Emit the terminal `done` event + `runEnd` dispatcher callback in one place.
  *
  * Idempotent: multiple call sites can fire within a single run (e.g. a
@@ -177,8 +221,8 @@ export async function finish(
   state.terminalEmitted = true;
   if (!state.finalResult) state.finalResult = { success, text };
   state.onEvent({ type: "done", step: state.step, success, text });
-  await safeDispatch(state, "runEnd", () =>
-    state.dispatcher!.runEnd(buildRunResult(state, success, text)),
+  await dispatch(state, "runEnd", (d) =>
+    d.runEnd(buildRunResult(state, success, text)),
   );
 }
 
@@ -192,11 +236,46 @@ export async function finish(
 async function finishWithRunEnd(state: LoopState): Promise<StepResult> {
   if (!state.terminalEmitted) {
     state.terminalEmitted = true;
-    await safeDispatch(state, "runEnd", () =>
-      state.dispatcher!.runEnd(buildRunResult(state, state.finalResult?.success ?? false, state.finalResult?.text ?? "")),
+    await dispatch(state, "runEnd", (d) =>
+      d.runEnd(buildRunResult(state, state.finalResult?.success ?? false, state.finalResult?.text ?? "")),
     );
   }
   return { kind: "exit", success: state.finalResult?.success ?? false, text: state.finalResult?.text ?? "" };
+}
+
+// ─── Navigator-step exit helpers ───────────────────────────────────────────
+
+/**
+ * Emit the canonical "Agent stopped by user." terminal sequence: info event,
+ * then `finish`, then the matching exit StepResult. Every user-stop path in
+ * the navigator step shares these exact three statements.
+ */
+async function exitStoppedByUser(state: LoopState): Promise<StepResult> {
+  state.onEvent({ type: "info", message: "Agent stopped by user." });
+  await finish(state, false, "Agent stopped by user.");
+  return { kind: "exit", success: false, text: "Agent stopped by user." };
+}
+
+/**
+ * Emit the cost-cap terminal sequence: `finish` with the canonical cost-cap
+ * text, then the matching exit StepResult.
+ */
+async function exitCostCap(state: LoopState, config: AgentConfig): Promise<StepResult> {
+  const text = `Cost cap of $${config.costCapUsd} reached.`;
+  await finish(state, false, text);
+  return { kind: "exit", success: false, text };
+}
+
+/**
+ * Emit the terminal sequence for an arbitrary failure text. Every non-stop
+ * exit in the navigator step is exactly `finish(state, false, text)` followed
+ * by `{ kind: "exit", success: false, text }`; the per-site differences
+ * (extra events emitted before the exit) stay at the call site, so this
+ * helper is safe to share across all of them.
+ */
+async function exitWithFinish(state: LoopState, text: string): Promise<StepResult> {
+  await finish(state, false, text);
+  return { kind: "exit", success: false, text };
 }
 
 // ─── Config validation ─────────────────────────────────────────────────────
@@ -378,24 +457,30 @@ export async function runInitialPlannerPhase(
     if (finalized) {
       return finishWithRunEnd(state);
     }
+  // The judge refused to certify the self-reported `done` — mirror the
+  // web_task branch: announce it and rewrite the decision to "continue" so
+  // the plan application below cannot silently reapply a stale done state.
+    onEvent({
+      type: "info",
+      message: "Judge disagreed with done result — continuing the run.",
+    });
+    plannerResult = { ...plannerResult, decision: "continue" };
   }
 
   state.plan = plannerResult.plan;
-  {
-    const cpiRaw = plannerResult.current_plan_item ?? 0;
-    const planLen = plannerResult.plan?.length ?? 0;
-    const cpi = Number.isInteger(cpiRaw) && cpiRaw >= 0 && cpiRaw < planLen
-      ? cpiRaw
-      : (cpiRaw < 0 ? 0 : Math.max(0, planLen - 1));
-    state.currentPlanItem = cpi;
-  }
+  // Clamp `current_plan_item` against the plan in effect (shared with the
+  // periodic-planner path via clampPlanItem): coerces out-of-range and
+  // non-integer values to a valid index and surfaces the coercion as an
+  // info event.
+  const clampedCpi = clampPlanItem(plannerResult.plan, plannerResult.current_plan_item, onEvent);
+  state.currentPlanItem = clampedCpi ?? 0;
   state.currentGoal = plannerResult.next_goal || (state.plan && state.plan[state.currentPlanItem]) || task;
   onEvent({
     type: "planner-step", step: state.step, decision: plannerResult.decision,
     goal: state.currentGoal, plan: state.plan,
   });
   if (state.dispatcher) {
-    await safeDispatch(state, "plannerStep", () => state.dispatcher!.plannerStep(makeCtx(state), plannerResult.decision, state.currentGoal, state.plan));
+    await dispatch(state, "plannerStep", (d) => d.plannerStep(makeCtx(state), plannerResult.decision, state.currentGoal, state.plan));
   }
 
   return { kind: "continue" };
@@ -464,7 +549,7 @@ async function checkAndRunCompaction(
       state.compactedMemory = compacted.compactedMemory;
       state.lastCompactionStep = state.step;
       state.onEvent({ type: "compaction", step: state.step, compactedCount: compacted.compactedCount });
-      await safeDispatch(state, "compaction", () => state.dispatcher!.compaction(makeCtx(state), compacted!.compactedCount));
+      await dispatch(state, "compaction", (d) => d.compaction(makeCtx(state), compacted!.compactedCount));
     }
   }
 }
@@ -474,33 +559,119 @@ async function checkAndRunCompaction(
 /**
  * Run a single navigator step: observe → challenge → LLM call → execute →
  * settle. Returns "exit" when the run should terminate, "continue" otherwise.
+ *
+ * The step is decomposed into named phase functions (preflight, start,
+ * observe, challenge, model call, action selection, done handling, execution,
+ * step end, history update, settle, tail) so each phase has a single,
+ * testable responsibility. The phases run strictly in sequence; any phase
+ * that returns an `abort` outcome terminates the step immediately with that
+ * StepResult, exactly like the original single-function control flow.
  */
 export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
-  const { deps, config } = state;
+  // Pre-flight: user stop / cost cap / budget warning.
+  const preflight = await runNavigatorPreflight(state);
+  if (preflight) return preflight;
+
+  // Pre-observe nudges + step-start event + dispatch.
+  await runNavigatorStart(state);
+
+  // Observe the page, record the state event + loop fingerprint, dispatch the
+  // screenshot callback.
+  const observed = await runNavigatorObserve(state);
+  if (observed.kind === "abort") return observed.result;
+  let { browserState, tabs } = observed.data;
+
+  // Anti-bot challenge detection; re-observes when a challenge clears.
+  const challenge = await runNavigatorChallenge(state, browserState, tabs);
+  if (challenge.kind === "abort") return challenge.result;
+  ({ browserState, tabs } = challenge.data);
+
+  // Post-observe nudges + pause check + navigator request build.
+  appendPostObserveNudges(state, browserState);
+  await runPauseCheck(state);
+  const navRequest = await prepareNavigatorRequest(state, browserState);
+
+  // Navigator LLM call (heartbeat + SLA wrapped), with error classification.
+  const call = await runNavigatorModelCall(state, navRequest);
+  if (call.kind === "abort") return call.result;
+  const { output } = call.data;
+
+  // Cost-cap re-check + thinking event + action selection/truncation.
+  const selection = await runNavigatorActionSelection(state, output);
+  if (selection.kind === "abort") return selection.result;
+  const { actions, doneAction } = selection.data;
+
+  // Navigator `done` → planner verify/judge path (always terminal).
+  if (doneAction) {
+    return runNavigatorDoneAction(state, doneAction, output, browserState, tabs);
+  }
+
+  // Execute the action batch (executeActions override or built-in queue).
+  const execution = await runNavigatorActionExecution(state, actions, browserState);
+  if (execution.kind === "abort") return execution.result;
+  const { results } = execution.data;
+
+  // Step-end dispatch + takeover resume wait.
+  const stepEnd = await runNavigatorStepEnd(state, results);
+  if (stepEnd.kind === "abort") return stepEnd.result;
+
+  // History push + failure accounting + early-stop.
+  const historyUpdate = await runNavigatorHistoryUpdate(state, output, results);
+  if (historyUpdate.kind === "abort") return historyUpdate.result;
+
+  // Settle wait (page-stable before the next step).
+  const settle = await runNavigatorSettle(state);
+  if (settle.kind === "abort") return settle.result;
+
+  // Step rollover + compaction + post-compaction checks + periodic planner.
+  return runNavigatorTail(state, browserState);
+}
+
+/**
+ * Phase: pre-flight. User-stop and cost-cap checks short-circuit the step
+ * with the canonical terminal results; the budget-warning event fires once at
+ * the warning step. Returns null when the step should proceed.
+ */
+async function runNavigatorPreflight(state: LoopState): Promise<StepResult | null> {
+  const { config } = state;
   const { onEvent, signal } = state;
 
   if (signal?.aborted) {
-    onEvent({ type: "info", message: "Agent stopped by user." });
-    await finish(state, false, "Agent stopped by user.");
-    return { kind: "exit", success: false, text: "Agent stopped by user." };
+    return exitStoppedByUser(state);
   }
   if (costCapExceeded(state)) {
-    const text = `Cost cap of $${config.costCapUsd} reached.`;
-    await finish(state, false, text);
-    return { kind: "exit", success: false, text };
+    return exitCostCap(state, config);
   }
-
   if (state.step === Math.max(1, Math.floor(config.maxSteps * BUDGET_WARNING_FRACTION))) {
     onEvent({ type: "budget-warning", step: state.step, pct: Math.floor(BUDGET_WARNING_FRACTION * 100) });
   }
+  return null;
+}
 
+/**
+ * Phase: step start. Applies the pre-observe nudges, emits the
+ * `navigator-step-start` event, and dispatches the `stepStart` callback.
+ */
+async function runNavigatorStart(state: LoopState): Promise<void> {
   const preObserveNudges = buildPreObserveNudges(state);
   if (preObserveNudges) {
     appendPendingLoopWarning(state, preObserveNudges);
   }
 
-  onEvent({ type: "navigator-step-start", step: state.step });
-  await safeDispatch(state, "stepStart", () => state.dispatcher!.stepStart(makeCtx(state)));
+  state.onEvent({ type: "navigator-step-start", step: state.step });
+  await dispatch(state, "stepStart", (d) => d.stepStart(makeCtx(state)));
+}
+
+/**
+ * Phase: observe. Wraps `observeState` with the error/failure accounting and
+ * the page-fingerprint (stagnation) loop detection. On success returns the
+ * observed `browserState` + tabs and dispatches the screenshot callback.
+ */
+async function runNavigatorObserve(
+  state: LoopState,
+): Promise<NavigatorPhaseResult<ObservePayload>> {
+  const { config } = state;
+  const { onEvent } = state;
 
   const observed = await observeState(state);
   if (observed.status === "error") {
@@ -509,18 +680,16 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
       message: observed.message,
       recoverable: true,
     });
-    await safeDispatch(state, "error", () => state.dispatcher!.error(makeCtx(state), observed.message, true));
+    await dispatch(state, "error", (d) => d.error(makeCtx(state), observed.message, true));
     state.consecutiveFailures++;
     if (state.consecutiveFailures >= config.maxFailures) {
       const text = `Agent aborted after ${config.maxFailures} consecutive failures (${observed.phase}).`;
-      await finish(state, false, text);
-      return { kind: "exit", success: false, text };
+      return { kind: "abort", result: await exitWithFinish(state, text) };
     }
     state.step++;
-    return { kind: "continue" };
+    return { kind: "abort", result: { kind: "continue" } };
   }
-  const { state: browserState, tabs: initialTabs } = observed;
-  let tabs = initialTabs;
+  const { state: browserState, tabs } = observed;
   state.lastObservedUrl = browserState.url;
 
   onEvent({
@@ -540,8 +709,7 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
         onEvent({ type: "loop-warning", step: state.step, count: stagnantCount });
         if (config.enableEarlyStop && stagnantCount >= LOOP_TOP_THRESHOLD) {
           const text = `Loop detected: page state unchanged across ${stagnantCount} snapshots — aborting run.`;
-          await finish(state, false, text);
-          return { kind: "exit", success: false, text };
+          return { kind: "abort", result: await exitWithFinish(state, text) };
         }
       }
     } catch (e) {
@@ -553,8 +721,24 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
   }
   if (browserState.screenshot && state.dispatcher) {
     const screenshot = browserState.screenshot;
-    await safeDispatch(state, "screenshot", () => state.dispatcher!.screenshot(makeCtx(state), screenshot));
+    await dispatch(state, "screenshot", (d) => d.screenshot(makeCtx(state), screenshot));
   }
+
+  return { kind: "ok", data: { browserState, tabs } };
+}
+
+/**
+ * Phase: challenge. Runs the anti-bot challenge detector; when a challenge is
+ * detected it waits for resolution (or a takeover), then re-observes the page
+ * and returns the refreshed state.
+ */
+async function runNavigatorChallenge(
+  state: LoopState,
+  browserState: BrowserState,
+  tabs: TabInfo[],
+): Promise<NavigatorPhaseResult<ObservePayload>> {
+  const { deps } = state;
+  const { onEvent } = state;
 
   const challengeResult = await runChallengeDetection(state);
   if (challengeResult.challenge) {
@@ -564,8 +748,7 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
       );
       if (resumeResult === "timeout") {
         const text = `Timed out waiting for anti-bot challenge to resolve.`;
-        await finish(state, false, text);
-        return { kind: "exit", success: false, text };
+        return { kind: "abort", result: await exitWithFinish(state, text) };
       }
     }
     const reObserved = await observeState(state);
@@ -576,19 +759,28 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
         recoverable: true,
       });
       state.step++;
-      return { kind: "continue" };
+      return { kind: "abort", result: { kind: "continue" } };
     }
     Object.assign(browserState, reObserved.state);
     tabs = reObserved.tabs;
     onEvent({ type: "resumed", step: state.step });
     onEvent({ type: "info", message: `Anti-bot challenge cleared — resuming.` });
   }
+  return { kind: "ok", data: { browserState, tabs } };
+}
 
-  appendPostObserveNudges(state, browserState);
-
-  await runPauseCheck(state);
-
-  const navRequest = await prepareNavigatorRequest(state, browserState);
+/**
+ * Phase: navigator model call. Runs the navigator LLM call (heartbeat + SLA
+ * wrapped, with cost accounting) and applies the error-classification
+ * retry/failure ladder on throw. On success resets the parse-failure counter
+ * and returns the parsed output.
+ */
+async function runNavigatorModelCall(
+  state: LoopState,
+  navRequest: AgentStepRequest,
+): Promise<NavigatorPhaseResult<ModelCallPayload>> {
+  const { deps, config } = state;
+  const { onEvent, signal } = state;
 
   let output: AgentOutput;
   try {
@@ -603,8 +795,7 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (/^Budget exceeded:/i.test(msg)) {
-      await finish(state, false, msg);
-      return { kind: "exit", success: false, text: msg };
+      return { kind: "abort", result: await exitWithFinish(state, msg) };
     }
     const classified = classifyError(e, state.consecutiveFailures);
     const willExceed = (state.consecutiveFailures + 1) >= config.maxFailures;
@@ -613,19 +804,18 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
       step: state.step,
       message: friendlyErrorMessage(classified),
       recoverable: !classified.fatal && !willExceed,
+      code: classified.machineCode,
+      recovery: classified.recoveryHint,
     });
     if (state.dispatcher) {
-      await safeDispatch(state, "error", () => state.dispatcher!.error(makeCtx(state), friendlyErrorMessage(classified), !classified.fatal && !willExceed));
+      await dispatch(state, "error", (d) => d.error(makeCtx(state), friendlyErrorMessage(classified), !classified.fatal && !willExceed));
     }
     if (classified.fatal) {
       const text = `Fatal error (${classified.category}): ${classified.message}`;
-      await finish(state, false, text);
-      return { kind: "exit", success: false, text };
+      return { kind: "abort", result: await exitWithFinish(state, text) };
     }
     if (classified.category === "cancelled") {
-      onEvent({ type: "info", message: "Agent stopped by user." });
-      await finish(state, false, "Agent stopped by user.");
-      return { kind: "exit", success: false, text: "Agent stopped by user." };
+      return { kind: "abort", result: await exitStoppedByUser(state) };
     }
     state.consecutiveFailures++;
     if (/\b(parse|unparseable)\b/i.test(msg)) {
@@ -633,8 +823,7 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
     }
     if (state.consecutiveFailures >= config.maxFailures) {
       const text = `Agent aborted after ${config.maxFailures} consecutive failures. Last error: ${classified.message}`;
-      await finish(state, false, text);
-      return { kind: "exit", success: false, text };
+      return { kind: "abort", result: await exitWithFinish(state, text) };
     }
     if (config.enableEarlyStop) {
       const es = earlyStop(
@@ -644,18 +833,28 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
       );
       if (es.stop) {
         const text = `Early-stop: ${es.reason}`;
-        await finish(state, false, text);
-        return { kind: "exit", success: false, text };
+        return { kind: "abort", result: await exitWithFinish(state, text) };
       }
     }
     state.step++;
-    return { kind: "continue" };
+    return { kind: "abort", result: { kind: "continue" } };
   }
+  return { kind: "ok", data: { output } };
+}
+
+/**
+ * Phase: action selection. Re-checks the cost cap, emits the `thinking` event
+ * (+ dispatch), and selects/truncates the action batch (`done` is kept alone).
+ */
+async function runNavigatorActionSelection(
+  state: LoopState,
+  output: AgentOutput,
+): Promise<NavigatorPhaseResult<ActionSelectionPayload>> {
+  const { config } = state;
+  const { onEvent } = state;
 
   if (costCapExceeded(state)) {
-    const text = `Cost cap of $${config.costCapUsd} reached.`;
-    await finish(state, false, text);
-    return { kind: "exit", success: false, text };
+    return { kind: "abort", result: await exitCostCap(state, config) };
   }
 
   onEvent({
@@ -663,7 +862,7 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
     evaluation: output.evaluation_previous_goal, memory: output.memory, nextGoal: output.next_goal,
   });
   if (state.dispatcher) {
-    await safeDispatch(state, "thinking", () => state.dispatcher!.thinking(
+    await dispatch(state, "thinking", (d) => d.thinking(
       makeCtx(state), output.thinking, output.evaluation_previous_goal, output.memory, output.next_goal
     ));
   }
@@ -675,21 +874,63 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
       ? `Navigator emitted ${output.action.length} actions (max ${config.maxActionsPerStep}); keeping only the done action.`
       : `Navigator emitted ${output.action.length} actions (max ${config.maxActionsPerStep}); truncating.`;
     onEvent({ type: "error", step: state.step, message: truncMsg, recoverable: true });
-    await safeDispatch(state, "error", () => state.dispatcher!.error(makeCtx(state), truncMsg, true));
+    await dispatch(state, "error", (d) => d.error(makeCtx(state), truncMsg, true));
   }
 
   const doneAction = actions.find((a) => a.type === "done");
+  return { kind: "ok", data: { actions, doneAction } };
+}
 
-  if (doneAction) {
-    const result = await handleNavigatorDone(state, doneAction, output, browserState, tabs);
-    if (result.finalized) {
-      return finishWithRunEnd(state);
+/**
+ * Phase: navigator `done`. Asks the planner to verify the self-reported
+ * completion (with the judge path); on finalization ends the run, otherwise
+ * dispatches `stepEnd` with the done action and continues the loop.
+ * Always returns a terminal StepResult.
+ */
+async function runNavigatorDoneAction(
+  state: LoopState,
+  doneAction: Extract<AgentAction, { type: "done" }>,
+  output: AgentOutput,
+  browserState: BrowserState,
+  tabs: TabInfo[],
+): Promise<StepResult> {
+  const { deps } = state;
+
+  let result: Awaited<ReturnType<typeof handleNavigatorDone>>;
+  try {
+    result = await handleNavigatorDone(state, doneAction, output, browserState, tabs);
+  } catch (e) {
+    // The planner-phase settle wait re-throws aborts: a user stop during
+    // the verification settle must end the run with the canonical stop
+    // text, exactly like the navigator-path settle wait below.
+    const isAbort = deps.signal?.aborted ||
+      (e instanceof Error && (/abort/i.test(e.name) || /abort/i.test(e.message)));
+    if (isAbort) {
+      return exitStoppedByUser(state);
     }
-    await safeDispatch(state, "stepEnd", () => state.dispatcher!.stepEnd(makeCtx(state), [{ action: doneAction, success: doneAction.success ?? true, message: `Navigator requested completion: ${doneAction.text}`, isDone: true }]));
-    state.step++;
-    state.navigatorStepsSincePlanner++;
-    return { kind: "continue" };
+    throw e;
   }
+  if (result.finalized) {
+    return finishWithRunEnd(state);
+  }
+  await dispatch(state, "stepEnd", (d) => d.stepEnd(makeCtx(state), [{ action: doneAction, success: doneAction.success ?? false, message: `Navigator requested completion: ${doneAction.text}`, isDone: true }]));
+  state.step++;
+  state.navigatorStepsSincePlanner++;
+  return { kind: "continue" };
+}
+
+/**
+ * Phase: action execution. Runs the action batch through `deps.executeActions`
+ * (with per-action loop-detector recording) or the built-in queue, with the
+ * failure/budget/cost-cap accounting for both branches.
+ */
+async function runNavigatorActionExecution(
+  state: LoopState,
+  actions: AgentAction[],
+  browserState: BrowserState,
+): Promise<NavigatorPhaseResult<ExecutionPayload>> {
+  const { deps, config } = state;
+  const { onEvent } = state;
 
   const agentMode = deps.mode ?? "standard";
   let results: ActionResult[];
@@ -697,15 +938,14 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
     try {
       if (config.enableLoopDetection) {
         for (const action of actions) {
-          state.loopDetector.record(action, state.step);
+          state.loopDetector.record(action);
           const warnCount = state.loopDetector.shouldWarn();
           if (warnCount > 0) {
             onEvent({ type: "loop-warning", step: state.step, count: warnCount });
-            await safeDispatch(state, "loopWarning", () => state.dispatcher!.loopWarning(makeCtx(state), warnCount));
+            await dispatch(state, "loopWarning", (d) => d.loopWarning(makeCtx(state), warnCount));
             if (config.enableEarlyStop && warnCount >= LOOP_TOP_THRESHOLD) {
               const text = `Loop detected: equivalent action repeated ${warnCount} times without progress — aborting run.`;
-              await finish(state, false, text);
-              return { kind: "exit", success: false, text };
+              return { kind: "abort", result: await exitWithFinish(state, text) };
             }
           }
         }
@@ -713,9 +953,7 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
       results = await deps.executeActions(actions, browserState);
       if (costCapExceeded(state)) {
         onEvent({ type: "info", message: "Cost cap exceeded mid-step. Stopping." });
-        const text = `Cost cap of $${config.costCapUsd} reached.`;
-        await finish(state, false, text);
-        return { kind: "exit", success: false, text };
+        return { kind: "abort", result: await exitCostCap(state, config) };
       }
       if (config.enableLoopDetection && results.some((r) => r.pageChanged)) {
         state.loopDetector.reset();
@@ -723,15 +961,14 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
     } catch (e) {
       const errMsg = `executeActions override failed: ${e instanceof Error ? e.message : String(e)}`;
       onEvent({ type: "error", step: state.step, message: errMsg, recoverable: true });
-      await safeDispatch(state, "error", () => state.dispatcher!.error(makeCtx(state), errMsg, true));
+      await dispatch(state, "error", (d) => d.error(makeCtx(state), errMsg, true));
       state.consecutiveFailures++;
       if (state.consecutiveFailures >= config.maxFailures) {
         const text = `Agent aborted after ${config.maxFailures} consecutive failures (executeActions).`;
-        await finish(state, false, text);
-        return { kind: "exit", success: false, text };
+        return { kind: "abort", result: await exitWithFinish(state, text) };
       }
       state.step++;
-      return { kind: "continue" };
+      return { kind: "abort", result: { kind: "continue" } };
     }
   } else {
     try {
@@ -744,24 +981,34 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (/^Budget exceeded:/i.test(msg)) {
-        await finish(state, false, msg);
-        return { kind: "exit", success: false, text: msg };
+        return { kind: "abort", result: await exitWithFinish(state, msg) };
       }
       const errMsg = `executeActionQueue failed: ${msg}`;
       onEvent({ type: "error", step: state.step, message: errMsg, recoverable: true });
-      await safeDispatch(state, "error", () => state.dispatcher!.error(makeCtx(state), errMsg, true));
+      await dispatch(state, "error", (d) => d.error(makeCtx(state), errMsg, true));
       state.consecutiveFailures++;
       if (state.consecutiveFailures >= config.maxFailures) {
         const text = `Agent aborted after ${config.maxFailures} consecutive failures (executeActionQueue).`;
-        await finish(state, false, text);
-        return { kind: "exit", success: false, text };
+        return { kind: "abort", result: await exitWithFinish(state, text) };
       }
       state.step++;
-      return { kind: "continue" };
+      return { kind: "abort", result: { kind: "continue" } };
     }
   }
+  return { kind: "ok", data: { results } };
+}
 
-  await safeDispatch(state, "stepEnd", () => state.dispatcher!.stepEnd(makeCtx(state), results));
+/**
+ * Phase: step end. Dispatches the `stepEnd` callback with the results and
+ * waits for a user takeover resume when a takeover action was executed.
+ */
+async function runNavigatorStepEnd(
+  state: LoopState,
+  results: ActionResult[],
+): Promise<NavigatorPhaseOutcome> {
+  const { deps } = state;
+
+  await dispatch(state, "stepEnd", (d) => d.stepEnd(makeCtx(state), results));
 
   const takeoverResult = results.find((r) => r.action.type === "takeover");
   if (takeoverResult) {
@@ -769,10 +1016,24 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
     const resumeResult = await waitForTakeoverResume(deps, takeoverAction.reason, state.step);
     if (resumeResult === "timeout") {
       const text = "Timed out waiting for user takeover.";
-      await finish(state, false, text);
-      return { kind: "exit", success: false, text };
+      return { kind: "abort", result: await exitWithFinish(state, text) };
     }
   }
+  return { kind: "ok" };
+}
+
+/**
+ * Phase: history update. Pushes the step into the navigator history, updates
+ * the consecutive-failure counter from the results, and applies the
+ * early-stop detector.
+ */
+async function runNavigatorHistoryUpdate(
+  state: LoopState,
+  output: AgentOutput,
+  results: ActionResult[],
+): Promise<NavigatorPhaseOutcome> {
+  const { config } = state;
+  const { onEvent } = state;
 
   state.navigatorHistory.push({
     step: state.step, agent: "navigator",
@@ -796,10 +1057,20 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
         ? state.consecutiveParseFailures
         : (config.earlyStopThresholds?.repeatingAction ?? 3);
       onEvent({ type: "loop-warning", step: state.step, count: warnCount });
-      await finish(state, false, text);
-      return { kind: "exit", success: false, text };
+      return { kind: "abort", result: await exitWithFinish(state, text) };
     }
   }
+  return { kind: "ok" };
+}
+
+/**
+ * Phase: settle. Waits for the page to settle (either `deps.waitForSettled`
+ * or a jittered sleep, heartbeat + SLA wrapped); a user stop during the wait
+ * exits with the canonical stop result instead of a recoverable error.
+ */
+async function runNavigatorSettle(state: LoopState): Promise<NavigatorPhaseOutcome> {
+  const { deps } = state;
+  const { onEvent } = state;
 
   try {
     const jittered = state.settleDelay * (0.8 + Math.random() * 0.4);
@@ -816,14 +1087,49 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
       { signal: deps.signal, timeoutMs: SETTLE_SLA_MS },
     );
   } catch (e) {
+    // A user stop during the settle wait is not a settle failure: exit
+    // immediately with the same "Agent stopped by user." result as every
+    // other stop-path, instead of surfacing a recoverable error and letting
+    // the run continue into the next step.
+    const isAbort = deps.signal?.aborted || (e instanceof Error && (/abort/i.test(e.name) || /abort/i.test(e.message)));
+    if (isAbort) {
+      return { kind: "abort", result: await exitStoppedByUser(state) };
+    }
     const errMsg = `waitForSettled failed: ${e instanceof Error ? e.message : String(e)}`;
     onEvent({ type: "error", step: state.step, message: errMsg, recoverable: true });
-    await safeDispatch(state, "error", () => state.dispatcher!.error(makeCtx(state), errMsg, true));
+    await dispatch(state, "error", (d) => d.error(makeCtx(state), errMsg, true));
   }
+  return { kind: "ok" };
+}
+
+/**
+ * Phase: tail. Rolls the step counter forward, runs compaction, re-checks the
+ * terminal/cost-cap/abort conditions after it, and runs the periodic planner
+ * check when due. Always returns a terminal StepResult.
+ */
+async function runNavigatorTail(state: LoopState, browserState: BrowserState): Promise<StepResult> {
+  const { config } = state;
+  const { signal } = state;
+
   state.step++;
   state.navigatorStepsSincePlanner++;
 
   await checkAndRunCompaction(state);
+
+  // Compaction can terminate the run itself: the summarizer call hit the
+  // cost cap (checkAndRunCompaction finishes on "Budget exceeded"), or the
+  // user stopped while it was in flight (withHeartbeat aborts it). Both
+  // would otherwise fall through into the periodic planner check below and
+  // fire another outbound LLM call after the run already ended.
+  if (state.terminalEmitted || state.finalResult) {
+    return finishWithRunEnd(state);
+  }
+  if (costCapExceeded(state)) {
+    return exitCostCap(state, config);
+  }
+  if (signal?.aborted) {
+    return exitStoppedByUser(state);
+  }
 
   if (state.navigatorStepsSincePlanner >= config.plannerInterval) {
     const result = await runPeriodicPlannerCheck(state, browserState);

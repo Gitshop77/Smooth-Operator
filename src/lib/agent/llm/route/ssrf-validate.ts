@@ -9,8 +9,6 @@ import {
   isCuratedLocalOrigin,
 } from "./ssrf-constants";
 import {
-  expandIPv6,
-  groupsToIpv4,
   isDangerousIpv4,
   isDangerousIpv6,
   isDangerousSinkIp,
@@ -181,16 +179,6 @@ export function isAllowedLlmBaseUrl(
     }
   } catch {
     // Invalid URL → not a curated local provider; leave it rejected.
-  }
-  try {
-    const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
-    const groups = expandIPv6(host);
-    if (groups && groups.slice(0, 6).every((g) => g === 0)) {
-      const embedded = groupsToIpv4(groups[6], groups[7]);
-      if (embedded && /^127\./.test(embedded)) return true;
-    }
-  } catch {
-    // Invalid URL → leave it rejected.
   }
   return false;
 }

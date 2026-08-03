@@ -52,7 +52,7 @@ jobs:
         run: |
           cd chrome-extension
           # JS entry bundles
-          for f in background.js content.js sidepanel.js options.js; do
+          for f in background.js content.js content-main.js sidepanel.js options.js; do
             [ ! -s "$f" ] && echo "ERROR: $f missing or empty" && exit 1
           done
           # Static assets
@@ -69,6 +69,15 @@ jobs:
           done
           # Manifest validity
           node -e "const m=require('./manifest.json'); if(!m.background?.service_worker) process.exit(1)"
+          # MV3 module service workers disallow native import(); esbuild inlines
+          # every statically-resolvable import (splitting: false), but the
+          # transformers web-bundle loader's computed-specifier `import(a)`
+          # survives verbatim. It is never executed in the service worker (Local
+          # Vision runs in DOM contexts), but any ADDITIONAL dynamic import
+          # would throw at runtime — fail on a second occurrence.
+          if [ "$(grep -c 'await import(' background.js)" -gt 1 ]; then
+            echo "ERROR: background.js contains a native import() call" && exit 1
+          fi
 
       - name: Audit root dependencies
         # High-severity advisories intentionally FAIL CI (no `|| true`), so

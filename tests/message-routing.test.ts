@@ -62,6 +62,20 @@ describe("truncateFilename", () => {
     const out = (await import("../src/extension/background/message-routing")).truncateFilename("noext", 5);
     expect(out).toBe("noext");
   });
+
+  test("extension longer than maxLen falls back to a truncated extension", async () => {
+    // baseMax <= 0 branch: the whole `.ext` doesn't fit, so the result is a
+    // plain slice of the extension (`ext.slice(0, maxLen)`).
+    const { truncateFilename } = await import("../src/extension/background/message-routing");
+    const out = truncateFilename("1234567890.abcde", 4);
+    expect(out).toBe(".abc");
+  });
+
+  test("extension exactly maxLen chars keeps the extension and drops the base", async () => {
+    const { truncateFilename } = await import("../src/extension/background/message-routing");
+    const out = truncateFilename("1234567890.abcde", 6);
+    expect(out).toBe(".abcde");
+  });
 });
 
 describe("sanitizeDownloadName", () => {
@@ -97,6 +111,20 @@ describe("sanitizeDownloadName", () => {
     expect(out.endsWith(".jpg")).toBe(true);
     expect(out).not.toContain("..");
     expect(out.includes("/")).toBe(false);
+  });
+
+  test("preserves Unicode letters (\\p{L} path) in a normal filename", async () => {
+    const { sanitizeDownloadName } = await import("../src/extension/background/message-routing");
+    expect(sanitizeDownloadName("rapport-été-2026.pdf")).toBe("rapport-été-2026.pdf");
+    expect(sanitizeDownloadName("季度报告.pdf")).toBe("季度报告.pdf");
+  });
+
+  test("keeps Unicode letters while still stripping path separators", async () => {
+    const { sanitizeDownloadName } = await import("../src/extension/background/message-routing");
+    const out = sanitizeDownloadName("../résumé-äöü.txt");
+    expect(out).not.toContain("..");
+    expect(out.includes("/")).toBe(false);
+    expect(out).toContain("résumé-äöü.txt");
   });
 });
 

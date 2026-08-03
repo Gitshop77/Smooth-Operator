@@ -76,7 +76,7 @@ async function waitForPageSettle(ctx: ActionContext): Promise<boolean> {
   let prevUrl: string | null = null;
   let prevFp: string | null = null;
   while (Date.now() < deadline) {
-    await sleep(TIMINGS.extractWait);
+    await sleep(TIMINGS.extractWait, ctx.signal);
     const url = location.href;
     // Fast path: if the URL already diverged from the pre-action baseline, the
     // navigation succeeded — return immediately without computing a fingerprint.

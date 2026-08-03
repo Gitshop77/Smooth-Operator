@@ -373,6 +373,22 @@ describe("executeAction — DOM-requiring actions (enabled under jsdom)", () => 
     expect(clicked).toBe(true);
   });
 
+  test("click on a DETACHED element fails with an element-not-found error", async () => {
+    // A live reference that is no longer connected to the document (its node
+    // was removed / re-rendered since extraction) must not silently no-op a
+    // click. Resolving it fails with the "element disappeared → re-extract"
+    // contract so the caller re-extracts state and retries instead of
+    // reporting success for a click that never happened.
+    const button = document.createElement("button");
+    document.body.appendChild(button);
+    const state = { selectorMap: { 1: button } } as unknown as BrowserState;
+    button.remove(); // detach before the action runs
+
+    const result = await executeAction({ type: "click", index: 1 }, state);
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("detached");
+  });
+
   test("input types text into an HTMLInputElement", async () => {
     const input = document.createElement("input");
     document.body.appendChild(input);
@@ -450,6 +466,30 @@ describe("executeAction — DOM-requiring actions (enabled under jsdom)", () => 
     expect(result.message).toContain("2");
   });
 
+  test("find_elements reports a malformed xpath locator as an invalid-locator failure", async () => {
+    // `findByLocator` swallows XPath parse errors and returns `[]` (a
+    // misleading "Found 0 elements" success); the handler pre-validates with
+    // `document.evaluate` so the agent gets an actionable error instead.
+    document.body.innerHTML = "<div>ok</div>";
+    const result = await executeAction(
+      { type: "find_elements", selector: "xpath://div[", max_results: 50 },
+      emptyState(),
+    );
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("Invalid xpath locator");
+    expect(result.message).not.toContain("Found 0 elements");
+  });
+
+  test("find_elements still succeeds for a valid xpath locator", async () => {
+    document.body.innerHTML = "<div id='v'>ok</div>";
+    const result = await executeAction(
+      { type: "find_elements", selector: "xpath://div[@id='v']", max_results: 50 },
+      emptyState(),
+    );
+    expect(result.success).toBe(true);
+    expect(result.extractedContent).toContain("<div>");
+  });
+
   test("dropdown_options lists options", async () => {
     const select = document.createElement("select");
     select.innerHTML = "<option>One</option><option>Two</option>";
@@ -489,5 +529,57 @@ describe("executeAction: unhandled action type", () => {
     );
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).name).toBe("UnhandledActionError");
+  });
+
+  test("UnhandledActionError carries machine code, retryable=false and a recovery hint", async () => {
+    const err = await executeAction(
+      { type: "definitely_not_a_real_action" } as unknown as Parameters<typeof executeAction>[0],
+      emptyState(),
+    ).then(
+      () => null,
+      (e) => e,
+    );
+    const typed = err as Error & { machineCode?: string; retryable?: boolean; recoveryHint?: string };
+    expect(typed.machineCode).toBe("action_unsupported");
+    expect(typed.retryable).toBe(false);
+    expect(typeof typed.recoveryHint).toBe("string");
+    expect((typed.recoveryHint ?? "").length).toBeGreaterThan(0);
+  });
+});
+
+describe("executeAction: failed actions carry the error vocabulary suffix", () => {
+  beforeEach(() => {
+    // The `evaluate` path needs an allowlisted origin + a stub location
+    // (mirrors `installMinimalDomStubs` in the earlier describe).
+    allowDomain("example.test");
+    Object.defineProperty(globalThis, "location", {
+      value: { href: "https://example.test/" },
+      configurable: true,
+      writable: true,
+    });
+  });
+
+  afterEach(() => {
+    clearDomainAllowlist();
+    Object.defineProperty(globalThis, "location", {
+      value: REAL_LOCATION,
+      configurable: true,
+      writable: true,
+    });
+  });
+
+  test("a handler failure appends [code: ...; retryable: ...] (recovery: ...)", async () => {
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    const state = { selectorMap: { 1: el } } as unknown as BrowserState;
+    const result = await executeAction({ type: "input", index: 1, text: "x", clear: true }, state);
+    expect(result.success).toBe(false);
+    expect(result.message).toMatch(/\[code: action_failed; retryable: no\] \(recovery: /);
+  });
+
+  test("an evaluate sandbox denial maps to action_forbidden", async () => {
+    const result = await executeAction({ type: "evaluate", code: "return document.defaultView;" }, emptyState());
+    expect(result.success).toBe(false);
+    expect(result.message).toMatch(/\[code: action_forbidden; retryable: no\] \(recovery: /);
   });
 });

@@ -192,77 +192,82 @@ export async function renderSchedule(): Promise<void> {
 }
 
 $("addSchedule").addEventListener("click", async () => {
-  const task = ($("scheduleTask") as HTMLInputElement).value.trim();
-  const type = ($("scheduleType") as HTMLSelectElement).value as ScheduledTaskSchedule["type"];
-  if (!task) return;
- // Bound the prompt length before persisting (a scheduled-task prompt stored
- // with no length/content guard). An unbounded prompt bloats
- // chrome.storage.local and is only shown truncated in the list preview.
-  if (task.length > MAX_SCHEDULED_TASK_PROMPT) {
-    await alertModal({
-      title: "Prompt too long",
-      message: `Scheduled task prompt must be ${MAX_SCHEDULED_TASK_PROMPT} characters or fewer.`,
-    });
-    return;
-  }
-  const schedule: ScheduledTaskSchedule = { type };
-  if (type === "interval") {
-    const intervalMinutes = parseInt(($("scheduleInterval") as HTMLInputElement).value, 10);
-    if (Number.isNaN(intervalMinutes) || intervalMinutes < 1 || intervalMinutes > 7 * 24 * 60) {
-      await alertModal({ title: "Invalid interval", message: "Interval must be between 1 and 10080 minutes." });
+  // The add flow runs under the same page-local mutation lock as delete/toggle,
+  // so a rapid add+delete interleave cannot lose the added task (read-modify-
+  // write of the whole list under two independent locks).
+  await withTaskMutation(async () => {
+    const task = ($("scheduleTask") as HTMLInputElement).value.trim();
+    const type = ($("scheduleType") as HTMLSelectElement).value as ScheduledTaskSchedule["type"];
+    if (!task) return;
+    // Bound the prompt length before persisting (a scheduled-task prompt stored
+    // with no length/content guard). An unbounded prompt bloats
+    // chrome.storage.local and is only shown truncated in the list preview.
+    if (task.length > MAX_SCHEDULED_TASK_PROMPT) {
+      await alertModal({
+        title: "Prompt too long",
+        message: `Scheduled task prompt must be ${MAX_SCHEDULED_TASK_PROMPT} characters or fewer.`,
+      });
       return;
     }
-    schedule.intervalMinutes = intervalMinutes;
-  } else {
-    const timeStr = ($("scheduleTime") as HTMLInputElement).value;
-    const [h, m] = timeStr.split(":").map(Number);
-    if (Number.isNaN(h) || Number.isNaN(m) || h < 0 || h > 23 || m < 0 || m > 59) {
-      await alertModal({ title: "Invalid time", message: "Time must be HH:MM (00:00 to 23:59)." });
-      return;
-    }
-    schedule.hour = h;
-    schedule.minute = m;
-    if (type === "weekly") {
-      const dayOfWeek = parseInt(($("scheduleDay") as HTMLSelectElement).value, 10);
-      if (Number.isNaN(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6) {
-        await alertModal({ title: "Invalid day", message: "Day of week must be 0 (Sun) to 6 (Sat)." });
+    const schedule: ScheduledTaskSchedule = { type };
+    if (type === "interval") {
+      const intervalMinutes = parseInt(($("scheduleInterval") as HTMLInputElement).value, 10);
+      if (Number.isNaN(intervalMinutes) || intervalMinutes < 1 || intervalMinutes > 7 * 24 * 60) {
+        await alertModal({ title: "Invalid interval", message: "Interval must be between 1 and 10080 minutes." });
         return;
       }
-      schedule.dayOfWeek = dayOfWeek;
+      schedule.intervalMinutes = intervalMinutes;
+    } else {
+      const timeStr = ($("scheduleTime") as HTMLInputElement).value;
+      const [h, m] = timeStr.split(":").map(Number);
+      if (Number.isNaN(h) || Number.isNaN(m) || h < 0 || h > 23 || m < 0 || m > 59) {
+        await alertModal({ title: "Invalid time", message: "Time must be HH:MM (00:00 to 23:59)." });
+        return;
+      }
+      schedule.hour = h;
+      schedule.minute = m;
+      if (type === "weekly") {
+        const dayOfWeek = parseInt(($("scheduleDay") as HTMLSelectElement).value, 10);
+        if (Number.isNaN(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6) {
+          await alertModal({ title: "Invalid day", message: "Day of week must be 0 (Sun) to 6 (Sat)." });
+          return;
+        }
+        schedule.dayOfWeek = dayOfWeek;
+      }
     }
-  }
-  const mode = ($("scheduleMode") as HTMLSelectElement).value as ScheduledTask["mode"];
-  const scheduledTask: ScheduledTask = {
-    id: crypto.randomUUID(),
-    task,
-    schedule,
-    enabled: true,
-    createdAt: Date.now(),
-    ...(mode && { mode }),
-  };
- // Persist + arm via the canonical `saveScheduledTask` (single source of truth
- // for arming). It validates the schedule, writes storage, and arms the alarm
- // — rolling storage back if arming fails, so a half-committed state (task
- // stored + enabled but no alarm) can never persist.
-  try {
-    await saveScheduledTask(scheduledTask);
-  } catch (e) {
-    console.warn("[options] saveScheduledTask failed:", e);
- // Surface the failure to the user instead of silently dropping the task
- // (addSchedule used to swallow saveScheduledTask failures).
-    await alertModal({
-      title: "Could not save scheduled task",
-      message: e instanceof Error ? e.message : String(e),
-    });
-    await renderSchedule().catch((err) => console.warn("[options] renderSchedule failed:", err));
-    return;
-  }
-  ($("scheduleTask") as HTMLInputElement).value = "";
-  ($("scheduleInterval") as HTMLInputElement).value = "";
-  ($("scheduleTime") as HTMLInputElement).value = "";
-  ($("scheduleDay") as HTMLSelectElement).value = String(DEFAULT_DAY_OF_WEEK);
-  ($("scheduleMode") as HTMLSelectElement).value = "standard";
- // Re-sync the visible schedule sections to the now-reset form.
-  ($("scheduleType") as HTMLSelectElement).dispatchEvent(new Event("change"));
-  await renderSchedule();
+    const mode = ($("scheduleMode") as HTMLSelectElement).value as ScheduledTask["mode"];
+    const scheduledTask: ScheduledTask = {
+      id: crypto.randomUUID(),
+      task,
+      schedule,
+      enabled: true,
+      createdAt: Date.now(),
+      ...(mode && { mode }),
+    };
+    // Persist + arm via the canonical `saveScheduledTask` (single source of truth
+    // for arming). It validates the schedule, writes storage, and arms the alarm
+    // — rolling storage back if arming fails, so a half-committed state (task
+    // stored + enabled but no alarm) can never persist.
+    try {
+      await saveScheduledTask(scheduledTask);
+    } catch (e) {
+      console.warn("[options] saveScheduledTask failed:", e);
+      // Surface the failure to the user instead of silently dropping the task
+      // (addSchedule used to swallow saveScheduledTask failures).
+      await alertModal({
+        title: "Could not save scheduled task",
+        message: e instanceof Error ? e.message : String(e),
+      });
+      await renderSchedule().catch((err) => console.warn("[options] renderSchedule failed:", err));
+      return;
+    }
+    ($("scheduleTask") as HTMLInputElement).value = "";
+    ($("scheduleInterval") as HTMLInputElement).value = "";
+    ($("scheduleTime") as HTMLInputElement).value = "";
+    ($("scheduleDay") as HTMLSelectElement).value = String(DEFAULT_DAY_OF_WEEK);
+    ($("scheduleMode") as HTMLSelectElement).value = "standard";
+    // Re-sync the visible schedule sections to the now-reset form.
+    ($("scheduleType") as HTMLSelectElement).dispatchEvent(new Event("change"));
+    await renderSchedule();
+  });
 });

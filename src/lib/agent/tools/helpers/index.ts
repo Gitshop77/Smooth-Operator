@@ -6,6 +6,7 @@
 export { domFingerprint } from "./dom-fingerprint";
 export {
   generateCssSelector,
+  isRendered,
   isVisible,
   resolveElement,
   safeScrollIntoView,

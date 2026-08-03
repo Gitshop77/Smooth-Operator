@@ -28,35 +28,53 @@ export interface OpenAICompatibleProfile {
   readonly baseURL: string;
   /** Whether this endpoint honors `response_format: { type: "json_schema" }`. */
   readonly supportsStructuredOutput: boolean;
+  /**
+   * Whether this endpoint accepts the OpenAI `reasoning_effort` parameter on
+   * reasoning models. Conservative first cut: only providers documented to
+   * pass OpenAI-compatible reasoning params through (openrouter) opt in;
+   * everything else fails closed so a stray `reasoning_effort` never 400s a
+   * non-reasoning endpoint. Consumed by {@link reasoningEffortSupported}.
+   */
+  readonly supportsReasoningEffort: boolean;
 }
 
 export const profiles = {
-  baseten: { provider: "baseten", baseURL: "https://inference.baseten.co/v1", supportsStructuredOutput: true },
-  cerebras: { provider: "cerebras", baseURL: "https://api.cerebras.ai/v1", supportsStructuredOutput: true },
-  deepinfra: { provider: "deepinfra", baseURL: "https://api.deepinfra.com/v1/openai", supportsStructuredOutput: true },
-  deepseek: { provider: "deepseek", baseURL: "https://api.deepseek.com", supportsStructuredOutput: true },
-  fireworks: { provider: "fireworks", baseURL: "https://api.fireworks.ai/inference/v1", supportsStructuredOutput: true },
-  groq: { provider: "groq", baseURL: "https://api.groq.com/openai/v1", supportsStructuredOutput: true },
-  qwen: { provider: "qwen", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", supportsStructuredOutput: true },
-  mistral: { provider: "mistral", baseURL: "https://api.mistral.ai/v1", supportsStructuredOutput: true },
-  openrouter: { provider: "openrouter", baseURL: "https://openrouter.ai/api/v1", supportsStructuredOutput: true },
-  together: { provider: "together", baseURL: "https://api.together.ai/v1", supportsStructuredOutput: true },
-  xai: { provider: "xai", baseURL: "https://api.x.ai/v1", supportsStructuredOutput: true },
+  baseten: { provider: "baseten", baseURL: "https://inference.baseten.co/v1", supportsStructuredOutput: true, supportsReasoningEffort: false },
+  cerebras: { provider: "cerebras", baseURL: "https://api.cerebras.ai/v1", supportsStructuredOutput: true, supportsReasoningEffort: false },
+  deepinfra: { provider: "deepinfra", baseURL: "https://api.deepinfra.com/v1/openai", supportsStructuredOutput: true, supportsReasoningEffort: false },
+  deepseek: { provider: "deepseek", baseURL: "https://api.deepseek.com", supportsStructuredOutput: true, supportsReasoningEffort: false },
+  fireworks: { provider: "fireworks", baseURL: "https://api.fireworks.ai/inference/v1", supportsStructuredOutput: true, supportsReasoningEffort: false },
+  groq: { provider: "groq", baseURL: "https://api.groq.com/openai/v1", supportsStructuredOutput: true, supportsReasoningEffort: false },
+  qwen: { provider: "qwen", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", supportsStructuredOutput: true, supportsReasoningEffort: false },
+  mistral: { provider: "mistral", baseURL: "https://api.mistral.ai/v1", supportsStructuredOutput: true, supportsReasoningEffort: false },
+  openrouter: { provider: "openrouter", baseURL: "https://openrouter.ai/api/v1", supportsStructuredOutput: true, supportsReasoningEffort: true },
+  together: { provider: "together", baseURL: "https://api.together.ai/v1", supportsStructuredOutput: true, supportsReasoningEffort: false },
+  xai: { provider: "xai", baseURL: "https://api.x.ai/v1", supportsStructuredOutput: true, supportsReasoningEffort: false },
  // Ollama's OpenAI-compatible shim accepts `response_format: { type: "json_object" }`
  // but does NOT honor the full `json_schema` variant reliably across model
  // families. Default false so the in-prompt schema fallback fires.
-  ollama: { provider: "ollama", baseURL: "http://localhost:11434/v1", supportsStructuredOutput: false },
-  opencode: { provider: "opencode", baseURL: "https://opencode.ai/zen/v1", supportsStructuredOutput: true },
-  "opencode-go": { provider: "opencode-go", baseURL: "https://opencode.ai/zen/go/v1", supportsStructuredOutput: true },
+  ollama: { provider: "ollama", baseURL: "http://localhost:11434/v1", supportsStructuredOutput: false, supportsReasoningEffort: false },
+  opencode: { provider: "opencode", baseURL: "https://opencode.ai/zen/v1", supportsStructuredOutput: true, supportsReasoningEffort: false },
+  "opencode-go": { provider: "opencode-go", baseURL: "https://opencode.ai/zen/go/v1", supportsStructuredOutput: true, supportsReasoningEffort: false },
  // LiteLLM is a proxy — structured-output support depends on the upstream
  // model it routes to, which we can't know at config time. Default false so
  // the fallback fires; users whose upstream supports it can override.
-  litellm: { provider: "litellm", baseURL: "http://localhost:4000/v1", supportsStructuredOutput: false },
+  litellm: { provider: "litellm", baseURL: "http://localhost:4000/v1", supportsStructuredOutput: false, supportsReasoningEffort: false },
 } as const satisfies Record<string, OpenAICompatibleProfile>;
 
 export const byProvider: Record<string, OpenAICompatibleProfile> = Object.fromEntries(
   Object.values(profiles).map((p) => [p.provider, p]),
 );
+
+/**
+ * Whether the OpenAI-compatible provider with `providerId` accepts the
+ * `reasoning_effort` parameter. Unknown / unlisted providers fail closed
+ * (false), so a configured effort is only forwarded to endpoints known to
+ * support it.
+ */
+export function reasoningEffortSupported(providerId: string): boolean {
+  return byProvider[providerId]?.supportsReasoningEffort ?? false;
+}
 
 /**
  * Thrown when a user-supplied LLM `baseURL` fails the SSRF guard. Callers can

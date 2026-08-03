@@ -8,7 +8,8 @@
  *   completions`) and a 404 on Test Connection.
  * - The options-side canonical-host check must mirror `buildProvider`'s
  *   `canonicalLlmHost` — `null` for tail (catalog-derived) providers, never a
- *   host invented from the catalog `api` URL.
+ *   host invented from the catalog `api` URL, and `null` means REJECT (the
+ *   runtime computes `allowed = canon !== null && …`).
  *
  * `provider-config-ui.ts` runs DOM side-effects at import time, so the minimal
  * element set is created before the dynamic imports (mirroring
@@ -107,17 +108,25 @@ describe("options provider fixes", () => {
   });
 
   describe("Canonical-host check mirrors buildProvider", () => {
-    test("tail (catalog-derived) provider: no canonical host, no confinement", () => {
+    test("tail (catalog-derived) provider: no canonical host means reject (runtime parity)", () => {
       // "nvidia" is a catalog-derived provider with no runtime profile entry,
-      // so buildProvider's canonicalLlmHost returns null. The options-side
-      // check must NOT invent a canonical host from the catalog api URL.
-      expect(checkCanonicalHost("nvidia", "https://evil.example.com/v1", "sk-x")).toBeNull();
+      // so buildProvider's canonicalLlmHost returns null. The runtime computes
+      // `allowed = canon !== null && …` — null rejects — and the options-side
+      // check must mirror that instead of inventing a canonical host from the
+      // catalog api URL.
+      const err = checkCanonicalHost("nvidia", "https://evil.example.com/v1", "sk-x");
+      expect(err).not.toBeNull();
+      expect(err).toContain("canonical host");
     });
 
-    test("tail provider with its catalog api URL: still no confinement error", () => {
-      expect(
-        checkCanonicalHost("nvidia", "https://integrate.api.nvidia.com/v1", "sk-x"),
-      ).toBeNull();
+    test("tail provider rejects even its catalog api URL", () => {
+      const err = checkCanonicalHost(
+        "nvidia",
+        "https://integrate.api.nvidia.com/v1",
+        "sk-x",
+      );
+      expect(err).not.toBeNull();
+      expect(err).toContain("canonical host");
     });
 
     test("opencode-go (featured, runtime-confined) still rejects a foreign host", () => {

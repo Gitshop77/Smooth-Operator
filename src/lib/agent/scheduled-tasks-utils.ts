@@ -74,10 +74,16 @@ export function validateSchedule(s: ScheduledTaskSchedule): string | null {
   return `unknown schedule type: ${s.type as string}`;
 }
 
-/** Type guard: a persisted entry is a usable ScheduledTask iff its schedule validates. */
+/** Type guard: a persisted entry is a usable ScheduledTask iff its identity and schedule validate. */
 export function isValidTaskEntry(t: unknown): t is ScheduledTask {
   if (t == null || typeof t !== "object") return false;
-  const schedule = (t as ScheduledTask).schedule;
+  const task = t as Partial<ScheduledTask>;
+  // A corrupt/legacy entry with garbage identity would be re-armed under a
+  // nonsense alarm name (`open_cowork_scheduled_undefined`) with a blank
+  // prompt. Require a non-empty id and task before trusting the entry.
+  if (typeof task.id !== "string" || task.id.trim() === "") return false;
+  if (typeof task.task !== "string" || task.task.trim() === "") return false;
+  const schedule = task.schedule;
   // A torn/partial write or an older schema version can leave `schedule`
   // missing — validateSchedule would crash on `s.type` and take down the
   // whole load path (listScheduledTasks/initScheduledTasks). Filter it out.

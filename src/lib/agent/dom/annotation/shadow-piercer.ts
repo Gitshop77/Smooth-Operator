@@ -25,8 +25,8 @@
  *
  * ## Worlds (extension context)
  *
- * In the Chrome extension, the piercer is injected as a separate
- * `shadow-piercer.js` entry point in the MAIN world (before the content
+ * In the Chrome extension, the piercer is installed from `content-main.js`,
+ * the MAIN-world entry point declared in the manifest (before the content
  * script). The MAIN-world instance patches the REAL page's
  * `Element.prototype.attachShadow` and exposes a backdoor on `window` via
  * a Symbol key — `window[Symbol.for("__open_cowork_piercer_bd__")]` — that
@@ -94,6 +94,8 @@ export type { ShadowPiercerBackdoor, ShadowPiercerOptions } from "./shadow-pierc
 // ─── Internal state ─────────────────────────────────────────────────────────
 
 let state: PiercerState | null = null;
+/** The `attachShadow` implementation replaced at install time; restored on reset. */
+let originalAttachShadow: Element["attachShadow"] | null = null;
 
 // ─── Installation ───────────────────────────────────────────────────────────
 
@@ -119,6 +121,7 @@ export function installShadowPiercer(opts: ShadowPiercerOptions = {}): void {
     return;
   }
 
+  originalAttachShadow = existing;
   const newState: PiercerState = {
     hostToRoot: new WeakMap<Element, ShadowRoot>(),
     openCount: 0,
@@ -277,12 +280,6 @@ export function isShadowHost(el: Element): boolean {
  *
  * @param root the subtree root (Element, Document, or ShadowRoot).
  * @returns a flat `Element[]` including shadow-pierced descendants.
- *
- * LOW-3 note: `pierceShadowRoots` is exported but NOT called in production
- * code (`src/`) — the production walker uses `getShadowRoot` directly. It IS
- * used by tests (`tests/dom-extraction-enhancements.test.ts`) to verify
- * shadow-piercing correctness. Kept as a test-only utility; the production
- * `page-state.ts` walker calls `getShadowRoot` per-element instead.
  */
 export function pierceShadowRoots(root: Element | Document | ShadowRoot): Element[] {
   const out: Element[] = [];
@@ -323,8 +320,9 @@ export function pierceShadowRoots(root: Element | Document | ShadowRoot): Elemen
 }
 
 /**
- * Reset the module-local piercer state. Exposed for tests that re-install
- * the piercer on a fresh document; production code should never call this.
+ * Reset the module-local piercer state and restore the original
+ * `Element.prototype.attachShadow`. Exposed for tests that re-install the
+ * piercer on a fresh document; production code should never call this.
  */
 export function _resetShadowPiercerForTests(): void {
   if (typeof window !== "undefined") {
@@ -334,12 +332,17 @@ export function _resetShadowPiercerForTests(): void {
       /* ignore */
     }
   }
-  if (ELEMENT_CTOR) {
+  if (ELEMENT_CTOR && originalAttachShadow) {
     try {
-      delete (ELEMENT_CTOR.prototype.attachShadow as unknown as Record<string, unknown>)[PIERCER_PATCHED_KEY];
+      Object.defineProperty(ELEMENT_CTOR.prototype, "attachShadow", {
+        configurable: true,
+        writable: true,
+        value: originalAttachShadow,
+      });
     } catch {
       /* ignore */
     }
   }
+  originalAttachShadow = null;
   state = null;
 }

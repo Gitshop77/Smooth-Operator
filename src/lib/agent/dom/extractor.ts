@@ -6,20 +6,14 @@
  * `hashElement` + the shared `DOM_CONFIG` / `BOOLEAN_ATTRS` constants).
  *
  * This file preserves the legacy `@/lib/agent/dom/extractor` import path
- * used by `extension/content.ts`, `agent/loop/{helpers,orchestrator,
- * observe-state}.ts`, and the extractor tests.
+ * used by `extension/content-utils.ts`, `agent/loop/helpers/action-queue.ts`,
+ * `agent/loop/phases/observe-state.ts`, and the extractor tests.
  *
  * All historically-exported symbols are re-exported here:
  * - `extractBrowserState`, `resetDomBaseline`, `getSelectorMap`,
  * `isVisible` (from `./extraction/page-state`)
  * - `buildAttrs`, `hashElement` (from `./extraction/element-info`)
  * - `isInteractive` (from `./utils/classification`)
- *
- * Module-load side effect preserved: importing this shim triggers
- * `./extraction/page-state` to evaluate, which calls
- * `installShadowPiercer({ tagExisting: true })` inside a try/catch (the
- * original `extractor.ts` did this at module load). The guard catches
- * non-DOM environments (Node.js without jsdom) where `Element` is undefined.
  *
  * Note on `isInteractive`: it is re-exported here from `./utils/classification`
  * — the single source of truth that `./extraction/page-state` also sources it

@@ -175,6 +175,39 @@ describe("loadAndSetDomainConfig fail-closed", () => {
     delete (globalThis as Record<string, unknown>).__openCoworkDomainConfigEnforced;
   });
 
+  test("a malformed shape (string instead of string[]) fails closed", async () => {
+    const chrome = {
+      storage: {
+        local: {
+          get: vi.fn(async () => ({
+            allowedDomains: "allowed.example", // wrong shape — must NOT be treated as a policy
+            blockedDomains: [],
+          })),
+        },
+      },
+    };
+    (globalThis as Record<string, unknown>).chrome = chrome as unknown as Record<string, unknown>;
+    delete (globalThis as Record<string, unknown>).__openCoworkDomainConfig;
+    delete (globalThis as Record<string, unknown>).__openCoworkDomainConfigEnforced;
+
+    const cfg = await loadAndSetDomainConfig();
+    // No policy surfaced (lib-side validation would treat it as allow-all),
+    // and the enforced flag is set so the live gate fails closed.
+    expect(cfg.allowedDomains).toBeUndefined();
+    expect(
+      (globalThis as Record<string, unknown>).__openCoworkDomainConfigEnforced,
+    ).toBe(true);
+
+    // The live policy gate now blocks any navigation rather than allow-all.
+    expect(
+      checkUrlAllowedWithDomainConfig("https://example.com/anything").allowed,
+    ).toBe(false);
+
+    delete (globalThis as Record<string, unknown>).chrome;
+    delete (globalThis as Record<string, unknown>).__openCoworkDomainConfig;
+    delete (globalThis as Record<string, unknown>).__openCoworkDomainConfigEnforced;
+  });
+
   test("a loaded allowlist is consulted and an off-allowlist host blocks", async () => {
     const chrome = {
       storage: {

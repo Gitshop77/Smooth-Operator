@@ -4,6 +4,7 @@
  */
 
 import { chatMessages } from "./elements";
+import { redactKeyLeak } from "@/extension/shared";
 
 const MAX_CHAT_NODES = 500;
 
@@ -103,6 +104,9 @@ export function addSystemMessage(
   variant?: "error" | "warning",
   time?: string,
 ): void {
+  // Agent-sourced strings (error text, takeover reasons, thinking) can embed
+  // provider API keys — mask them before anything reaches the DOM.
+  text = redactKeyLeak(text);
   const el = document.createElement("div");
   el.className = "msg-system" + (variant ? ` msg-${variant}` : "");
   const iconSpan = document.createElement("span");

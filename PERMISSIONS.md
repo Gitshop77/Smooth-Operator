@@ -14,11 +14,12 @@ Open Cowork is an agentic browser extension — it reads pages, reasons about th
 | `alarms` | Fires scheduled-task alarms; also used as a keepalive while a run is active. |
 | `debugger` | Attaches Chrome DevTools Protocol to a tab for pixel-accurate input (click, press-and-hold, screenshot). Only available in the service worker. |
 | `notifications` | Shows a desktop notification when a scheduled or background run completes. |
-| `downloads` | Saves files the agent downloads (Restricted/Standard download actions, PDF export). |
+| `downloads` | Saves files the agent downloads (Full Agentic save-as-PDF / screenshot export). |
 | `unlimitedStorage` | Run history grows without bound — `chrome.storage.local` has a default quota that would be hit quickly. |
 | `power` | Keeps the machine awake during long-running tasks via `chrome.power.requestKeepAwake`. |
 | `webRequest` | Monitors navigation requests for SSRF protection — blocks the agent from following attacker-supplied redirects. |
 | `dns` | Resolves hostnames during SSRF validation so the agent can verify a target isn't pointing at a private/internal IP. |
+| `cookies` | Enables the agent's cookie actions (`get_cookies` / `set_cookie` / `delete_cookies`). Reads are read-only; `set_cookie` requires `url` or `domain`, and the effective URL passes the same domain allow/blocklist gate as `navigate`/`search` before any write — a cookie can never be written to a disallowed host. |
 
 ## Host permissions
 

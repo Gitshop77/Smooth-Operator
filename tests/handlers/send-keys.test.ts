@@ -77,6 +77,31 @@ describe("keyEventCodes fidelity", () => {
       meta: false,
     });
   });
+
+  test("parseKeys throws on an empty key string (missing-field guard)", () => {
+    expect(() => parseKeys("")).toThrow(/empty key combination/);
+  });
+
+  test("parseKeys still maps an explicit space token to a literal space", () => {
+    expect(parseKeys("space")).toEqual(plain(" "));
+  });
+
+  test("parseKeys resolves shifted symbols via SHIFT_SYMBOLS with own-property lookup", () => {
+    expect(parseKeys("shift+1")).toEqual({
+      main: "!",
+      ctrl: false,
+      shift: true,
+      alt: false,
+      meta: false,
+    });
+    expect(parseKeys("shift+=")).toEqual({
+      main: "+",
+      ctrl: false,
+      shift: true,
+      alt: false,
+      meta: false,
+    });
+  });
 });
 
 describe("mutateTextInput caret placement", () => {

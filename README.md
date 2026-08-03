@@ -99,7 +99,7 @@ npm run build:all      # builds the extension
 
 ### The pieces
 
-A Chrome extension is really several small programs talking to each other. Open Cowork has four core pieces, plus two optional companion services.
+A Chrome extension is really several small programs talking to each other. Open Cowork has four core pieces.
 
 ```mermaid
 flowchart LR
@@ -443,6 +443,7 @@ Then load `chrome-extension/` through `chrome://extensions` as described above.
 | `npm run build:all` | Alias for `build:extension` |
 | `npm run dev` | Watch-build the extension |
 | `npm run dev:ext` | Watch-build the extension only |
+| `npm run icons` | Regenerate the icon PNGs into `src/extension/icons/` |
 
 ### Run locally
 
@@ -462,7 +463,7 @@ npm run test:watch                               # Vitest, watch mode
 npm run test:coverage                            # Vitest with coverage gate
 ```
 
-Coverage thresholds are pinned in `vitest.config.ts` with per-glob overrides for security-critical modules (`security.ts`, `ssrf.ts`, `endpoint.ts`, `auth.ts`, `anti-bot.ts`, `anti-detection.ts`). A PR that drops coverage below the baseline fails CI. If you see a coverage failure, check `vitest.config.ts` for the current thresholds — they are ratcheted upward over time, never downward.
+Coverage thresholds are pinned in `vitest.config.ts` with per-glob overrides for security-critical modules (`ssrf-ipv6.ts`, `ssrf-validate.ts`, `ssrf-dns.ts`, `security-injection.ts`, `auth.ts`, `endpoint.ts`, `anti-bot.ts`, `anti-detection.ts`). A PR that drops coverage below the baseline fails CI. If you see a coverage failure, check `vitest.config.ts` for the current thresholds — they are ratcheted upward over time, never downward.
 
 ### Project layout
 
@@ -500,7 +501,7 @@ scripts/                   Icon generation
 - TypeScript 5, strict mode
 - Node.js 22, npm
 - Chrome 116+
-- esbuild (ESM for the service worker, IIFE for content/sidepanel/options; no code splitting — MV3 SW blocks native `import()`)
+- esbuild (ESM for the service worker, IIFE for content/content-main/sidepanel/options; no code splitting — MV3 SW blocks native `import()`)
 - `chrome.storage.local` / `chrome.storage.session` for extension storage
 - Zod 4 for validation
 - `@huggingface/transformers` and `onnxruntime-web` for on-device vision

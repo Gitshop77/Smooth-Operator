@@ -33,7 +33,7 @@ export class LoopDetector {
   private static readonly GOAL_WINDOW_SIZE = 6;
   private lastCount = 0;
 
-  record(action: AgentAction, _step: number): number {
+  record(action: AgentAction): number {
     const hash = fnv1a(normalizeAction(action));
     this.window.push({ hash });
     if (this.window.length > LOOP_WINDOW_SIZE) {
@@ -46,7 +46,11 @@ export class LoopDetector {
 
   shouldWarn(): number {
     if (this.window.length === 0) return 0;
-    return WARN_THRESHOLDS.includes(this.lastCount) ? this.lastCount : 0;
+  // Warn on the live count once it crosses the first threshold, and keep
+  // warning while it stays above — NOT only at exact milestones. Gating on
+  // exact counts (5/8/12) made the warning vanish at 6-7 and 9-11 while the
+  // counter climbed, then reappear (flicker).
+    return this.lastCount >= WARN_THRESHOLDS[0] ? this.lastCount : 0;
   }
 
   static warningText(count: number): string {
@@ -68,8 +72,11 @@ export class LoopDetector {
   }
 
   shouldWarnStagnant(): number {
-    if (!WARN_THRESHOLDS.includes(this.consecutiveStagnantPages)) return 0;
-    return this.consecutiveStagnantPages;
+  // Same non-flicker rule as `shouldWarn`: warn on the live count once it
+  // crosses the first threshold, not only at exact milestones.
+    return this.consecutiveStagnantPages >= WARN_THRESHOLDS[0]
+      ? this.consecutiveStagnantPages
+      : 0;
   }
 
   static stagnantWarningText(count: number): string {

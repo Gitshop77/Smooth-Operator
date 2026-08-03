@@ -12,7 +12,6 @@ dev.log
 
 # env
 .env*
-!.env.example
 
 # credentials
 *.pem
@@ -53,6 +52,7 @@ Thumbs.db
 
 # ai
 .claude
+.opencode/
 
 # review scaffolding (never commit)
 .review/

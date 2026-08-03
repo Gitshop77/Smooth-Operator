@@ -22,6 +22,22 @@ export interface LLMRequest {
   temperature?: number;
   /** Max tokens (provider default if omitted). */
   maxTokens?: number;
+  /** Optional reasoning configuration: effort level, thinking budget in tokens,
+   * and a force on/off switch. Protocols only act on it when the provider is a
+   * reasoning model (`supportsReasoning`), so non-reasoning providers keep
+   * today's exact request shape. */
+  reasoning?: {
+    /** Reasoning-effort level (e.g. "low" | "medium" | "high"). */
+    effort?: string;
+    /** Thinking budget in tokens (Anthropic `budget_tokens` / Gemini `thinkingBudget`). */
+    budgetTokens?: number;
+    /** Force reasoning params on (true) or off (false); unset = provider default. */
+    enabled?: boolean;
+  };
+  /** True when the caller expects the same prompt to be reused across calls, so
+   * prompt-cache markers are worth writing (Anthropic "1h" TTL). One-shot calls
+   * leave this unset so protocols can omit cache markers entirely. */
+  cacheEligible?: boolean;
   /** Optional abort signal, honored by the underlying fetch so a run's STOP/cancel
    * is respected mid-generation rather than only after the request completes. */
   signal?: AbortSignal;
@@ -39,9 +55,12 @@ export interface LLMUsage {
  * prompt caching — Anthropic cache_read + cache_creation, OpenAI cached_tokens). */
   cachedInputTokens?: number;
   /** Cache-write (creation) input tokens — Anthropic `cache_creation_input_tokens`.
- * Billed at the provider's (typically higher) cache-write rate, distinct from
- * `cachedInputTokens` (cache reads). */
+  * Billed at the provider's (typically higher) cache-write rate, distinct from
+  * `cachedInputTokens` (cache reads). */
   cachedWriteInputTokens?: number;
+  /** Context (input) token count driving tiered-rate selection. When absent,
+   * cost estimation falls back to `tokensIn` (input tokens are the context). */
+  contextTokens?: number;
   /** Model name (provider-specific). */
   model: string;
   /** Cost in USD (best-effort; 0 if unknown). */

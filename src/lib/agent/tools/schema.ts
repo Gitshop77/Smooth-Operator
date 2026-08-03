@@ -32,6 +32,7 @@ export const InputSchema = z.object({
   index: z.coerce.number().int().min(1).describe("The [index] of the input element."),
   text: boundedText(MAX_FREE_TEXT_CHARS).describe("The text to type."),
   clear: flexibleBoolean.optional().default(true).describe("If true (default), replace existing content; if false, append."),
+  humanized: z.boolean().optional().describe("OPT-IN: type via browser-trusted CDP key events (slower, more human). Defaults to instant value-set."),
 });
 
 /** Choose an option in a `<select>` dropdown by its visible text or index. */
@@ -51,6 +52,12 @@ const ScrollSchema = z.object({
   type: z.literal("scroll").describe("Scroll the page up or down."),
   down: flexibleBoolean.optional().default(true).describe("true = scroll down (default), false = scroll up."),
   pages: z.coerce.number().min(0).max(100).optional().default(1).describe("Number of viewport-heights to scroll (default 1, capped at 100)."),
+});
+
+/** Scroll the page to the very bottom, then restore the viewport to the top. */
+const ScrollToBottomSchema = z.object({
+  type: z.literal("scroll_to_bottom").describe("Scroll to the very bottom of the page, then restore the viewport to the top."),
+  delay_seconds: z.coerce.number().min(0).max(10).optional().default(0.4).describe("Seconds to wait after each viewport scroll for lazy content (default 0.4, capped at 10)."),
 });
 
 /** Press a single key or a key combination (e.g. Enter, Ctrl+S). */
@@ -92,6 +99,84 @@ export const WaitSchema = z.object({
   seconds: z.coerce.number().min(0).max(300).optional().default(3).describe("Seconds to wait (default 3, clamped to 0–300)."),
 });
 
+/** Wait until an element reaches a visibility / attachment state. */
+export const WaitForElementSchema = z.object({
+  type: z.literal("wait_for_element").describe("Wait until an element matches the requested state. Fails if the state is not reached within the timeout."),
+  selector: boundedText(MAX_SHORT_TEXT_CHARS).describe("CSS selector of the element to wait for."),
+  state: z.enum(["visible", "hidden", "attached", "detached"]).optional().default("visible").describe("Desired state: visible (default), hidden, attached (in DOM), or detached (not in DOM)."),
+  timeout_seconds: z.coerce.number().min(0).max(300).optional().default(30).describe("Seconds to wait before failing (default 30)."),
+});
+
+/** Wait until the given text appears in the page's visible text. */
+const WaitForTextSchema = z.object({
+  type: z.literal("wait_for_text").describe("Wait until the given text is present in the page's visible text (substring match)."),
+  text: boundedText(MAX_FREE_TEXT_CHARS).describe("Text to look for in the page body."),
+  timeout_seconds: z.coerce.number().min(0).max(300).optional().default(30).describe("Seconds to wait before failing (default 30)."),
+});
+
+/** Wait until the page URL matches a glob pattern. */
+const WaitForUrlSchema = z.object({
+  type: z.literal("wait_for_url").describe("Wait until the page URL matches a glob pattern. `*` matches anything except `/`, `**` matches everything."),
+  url: boundedText(MAX_SHORT_TEXT_CHARS).describe("Glob pattern for the URL (e.g. **/settings/account)."),
+  timeout_seconds: z.coerce.number().min(0).max(300).optional().default(30).describe("Seconds to wait before failing (default 30)."),
+});
+
+/** Wait until the network is idle (no new resource loads for 500ms). */
+const WaitForNetworkIdleSchema = z.object({
+  type: z.literal("wait_for_network_idle").describe("Wait until the network is idle (no new resource loads for 500ms)."),
+  timeout_seconds: z.coerce.number().min(0).max(300).optional().default(30).describe("Seconds to wait before failing (default 30)."),
+});
+
+/** Start capturing network requests/responses into the network log ring. */
+const EnableNetworkLogSchema = z.object({
+  type: z.literal("enable_network_log").describe("Start recording network requests and responses into the network log (keep existing entries)."),
+});
+
+/** Stop capturing network activity (existing entries are kept). */
+const DisableNetworkLogSchema = z.object({
+  type: z.literal("disable_network_log").describe("Stop recording network activity. Existing entries are kept."),
+});
+
+/** Get the recorded network requests/responses (up to 500 most recent). */
+const GetNetworkLogSchema = z.object({
+  type: z.literal("get_network_log").describe("Get the recorded network requests/responses as JSON (up to 500 most recent)."),
+});
+
+/** Empty the network log. */
+const ClearNetworkLogSchema = z.object({
+  type: z.literal("clear_network_log").describe("Clear the recorded network log."),
+});
+
+/** Get AND clear the network log in one step. */
+const GetclearNetworkLogSchema = z.object({
+  type: z.literal("getclear_network_log").describe("Get AND clear the recorded network log in one step (entries are returned, then the log is emptied)."),
+});
+
+/** Start capturing page console.log/error/warn/info calls into the console log ring. */
+const EnableConsoleLogSchema = z.object({
+  type: z.literal("enable_console_log").describe("Start recording the page's console.log/error/warn/info calls (keep existing entries)."),
+});
+
+/** Stop capturing console calls (existing entries are kept). */
+const DisableConsoleLogSchema = z.object({
+  type: z.literal("disable_console_log").describe("Stop recording console calls. Existing entries are kept."),
+});
+
+/** Get the recorded console calls (up to 500 most recent). */
+const GetConsoleLogSchema = z.object({
+  type: z.literal("get_console_log").describe("Get the recorded console calls as JSON (up to 500 most recent)."),
+});
+
+/** Empty the console log. */
+const ClearConsoleLogSchema = z.object({
+  type: z.literal("clear_console_log").describe("Clear the recorded console log."),
+});
+
+/** Get AND clear the console log in one step. */
+const GetclearConsoleLogSchema = z.object({
+  type: z.literal("getclear_console_log").describe("Get AND clear the recorded console log in one step (entries are returned, then the log is emptied)."),
+});
+
 /** Scroll the page until the given text becomes visible. */
 const FindTextSchema = z.object({
   type: z.literal("find_text").describe("Scroll the page until the given text becomes visible."),
@@ -111,7 +196,7 @@ const DoneSchema = z.object({
     (v) => (v === null || v === undefined ? "" : v),
     z.coerce.string().max(MAX_FREE_TEXT_CHARS),
   ).describe("A summary of what was accomplished, including all results the user asked for."),
-  success: flexibleBoolean.describe("true ONLY if the entire user request is fully complete; false otherwise."),
+  success: flexibleBoolean.default(false).describe("true ONLY if the entire user request is fully complete; false otherwise."),
 });
 
 /** Search the web using a search engine. Page-changing — put LAST. */
@@ -146,6 +231,17 @@ const DropdownOptionsSchema = z.object({
   index: z.coerce.number().int().min(1).describe("The [index] of the <select> element."),
 });
 
+/** Continue reading a truncated page snapshot from the given char offset. */
+const PageNextSchema = z.object({
+  type: z.literal("page_next").describe("Continue reading a truncated page snapshot. Use the offset from the snapshot's 'Call page_next with offset=N' marker to resume from where it stopped."),
+  offset: z.coerce.number().int().min(0).optional().describe("Char offset to resume from (default 0 = first window)."),
+});
+
+/** List files the agent has downloaded this session. */
+const ListDownloadsSchema = z.object({
+  type: z.literal("list_downloads").describe("List the files downloaded during this session (name, size, mime). Read-only."),
+});
+
 /** Search for text/regex on the current page (instant, free). */
 const SearchPageSchema = z.object({
   type: z.literal("search_page").describe("Search for text/pattern on the current page (instant, free). Use before scrolling to find specific content."),
@@ -168,10 +264,42 @@ export const FindElementsSchema = z.object({
   ).optional().default(50).describe("Max results to return (default 50, capped at 200)."),
 });
 
+/** List interactive elements with pixel coordinates (port of get_elements.js). */
+export const ListInteractiveSchema = z.object({
+  type: z.literal("list_interactive").describe("List interactive elements (links, buttons, inputs, selects, textareas, [role=…], [onclick], [tabindex], label[for], summary, [contenteditable]) with pixel coordinates (x/y/w/h) + unique CSS selectors — CDP click targets without a vision pass."),
+  visible_only: flexibleBoolean.optional().default(false).describe("If true, only return elements overlapping the current viewport."),
+  max_results: z.preprocess(
+    (v) => (v === null || v === "" ? 50 : v),
+    z.coerce.number().int().min(1).max(200),
+  ).optional().default(50).describe("Max results to return (default 50, capped at 200)."),
+});
+
+/** Read computed CSS style values of an element (instant, free). */
+const GetComputedStyleSchema = z.object({
+  type: z.literal("get_computed_style").describe("Get computed CSS style values of an element (instant, free)."),
+  index: z.coerce.number().int().min(1).describe("The [index] of the element."),
+  properties: z
+    .array(z.coerce.string().regex(/^[a-zA-Z-]{1,64}$/).describe("CSS property name (camelCase or kebab-case)."))
+    .min(1)
+    .max(50)
+    .describe("CSS properties to read (max 50)."),
+});
+
+/** Read page-level metadata (URL, title, state, dimensions) as JSON (instant, free). */
+const GetPageInfoSchema = z.object({
+  type: z.literal("get_page_info").describe("Get the current page URL, title, state, and viewport/document dimensions as JSON (instant, free)."),
+});
+
 /** Execute arbitrary JavaScript on the page. Page-changing — put LAST. */
 const EvaluateSchema = z.object({
   type: z.literal("evaluate").describe("Execute JavaScript on the page. Page-changing — put LAST. Use only when no other action works."),
   code: boundedText(MAX_CODE_CHARS).describe("JavaScript code to execute (wrapped in an IIFE). Only browser APIs, no Node.js."),
+});
+
+/** Run a multi-step YAML/JSON script (parsed + validated, steps execute as actions). */
+const RunScriptSchema = z.object({
+  type: z.literal("run_script").describe("Run a multi-step YAML or JSON script (parsed and validated before execution; each step runs like an ordinary action). Page-changing — put LAST."),
+  script: boundedText(MAX_FREE_TEXT_CHARS).describe("YAML or JSON script text: {name?, on_error?: 'stop'|'continue', steps: [...]} with action steps + if/repeat/while control nodes."),
 });
 
 /** Hover over an element to trigger menus or tooltips. */
@@ -249,20 +377,107 @@ const DetectVisualSchema = z.object({
   query: boundedText(MAX_FREE_TEXT_CHARS).describe("What you're looking for (e.g. 'submit button', 'login form', 'canvas dropdown')."),
 });
 
+/** Detect anti-bot challenge widgets (Turnstile, reCAPTCHA, hCaptcha, …). */
+const DetectChallengeSchema = z.object({
+  type: z.literal("detect_challenge").describe("Detect anti-bot challenge widgets on the page (Cloudflare Turnstile, reCAPTCHA, hCaptcha, Friendly Captcha, Altcha, AWS WAF, Arkose, Geetest). Read-only — no DOM mutation and no network requests. Optionally scrolls the first detected widget into view."),
+  scroll_into_view: z.boolean().optional().describe("If true, scroll the first visible detected challenge into view (centered). Default false."),
+});
+
+/** List the browser tabs the agent can navigate to. Read-only. */
+const ListTabsSchema = z.object({
+  type: z.literal("list_tabs").describe("List the open browser tabs (URL + active state). Read-only. The index is the tab ID you can switch to or close."),
+});
+
+/** Read cookies for the current site or the given URLs. Read-only. */
+const GetCookiesSchema = z.object({
+  type: z.literal("get_cookies").describe("Read cookies (name, value, domain, path, secure, httpOnly, sameSite, expiry, session, hostOnly). Read-only."),
+  urls: z.array(z.string().regex(/^https?:\/\//i)).max(20).optional().describe("Optional URLs to filter cookies by (http/https only). Defaults to all cookies."),
+});
+
+/** Write a cookie. The effective URL is subject to the domain allow/blocklist. */
+const SetCookieSchema = z
+  .object({
+    type: z.literal("set_cookie").describe("Write a cookie for url or domain. Requires url OR domain; the effective URL must pass the domain policy."),
+    url: z.string().regex(/^https?:\/\//i).optional().describe("URL to write the cookie for."),
+    domain: z.string().optional().describe("Domain to write the cookie for (use url OR domain)."),
+    name: boundedText(MAX_SHORT_TEXT_CHARS).describe("Cookie name."),
+    value: boundedText(MAX_FREE_TEXT_CHARS).describe("Cookie value."),
+    path: z.string().optional().describe("Cookie path (defaults to the URL's path)."),
+    secure: z.boolean().optional().describe("Whether the cookie is restricted to HTTPS."),
+    httpOnly: z.boolean().optional().describe("Whether the cookie is inaccessible to page scripts."),
+    sameSite: z.enum(["no_restriction", "lax", "strict"]).optional().describe("SameSite policy."),
+    expirationDate: z.number().optional().describe("Expiration as a Unix timestamp in seconds (omit for a session cookie)."),
+  })
+  .refine((d) => d.url !== undefined || d.domain !== undefined, {
+    message: "set_cookie requires url or domain",
+  });
+
+/** Delete cookies. Destructive — requires an explicit opt-in (≥1 url or all:true). */
+const DeleteCookiesSchema = z
+  .object({
+    type: z.literal("delete_cookies").describe("Delete cookies. Requires at least one url OR the explicit all:true opt-in (deleting every cookie is destructive)."),
+    urls: z.array(z.string().regex(/^https?:\/\//i)).max(20).optional().describe("URLs to delete cookies for (http/https only)."),
+    all: z.boolean().optional().describe("EXPLICIT opt-in to delete every cookie. Never inferred from an empty/absent urls list."),
+  })
+  .refine((d) => d.all === true || (Array.isArray(d.urls) && d.urls.length > 0), {
+    message: "delete_cookies requires at least one url or explicit all:true",
+  });
+
+/** Read the extension's own key/value storage. Read-only. */
+const GetStorageSchema = z.object({
+  type: z.literal("get_storage").describe("Read the extension's key/value storage (use for cross-step memory). Read-only."),
+  storage_type: z.enum(["local", "session"]).optional().default("local").describe("Which storage area to read (default local)."),
+});
+
+/** Write a value to the extension's key/value storage. */
+const SetStorageSchema = z.object({
+  type: z.literal("set_storage").describe("Write a JSON-serializable value to the extension's key/value storage (use for cross-step memory)."),
+  storage_type: z.enum(["local", "session"]).optional().default("local").describe("Which storage area to write (default local)."),
+  key: boundedText(MAX_SHORT_TEXT_CHARS).describe("Storage key."),
+  value: z.unknown().describe("Value to store (must be JSON-serializable)."),
+});
+
+/** Clear the extension's key/value storage. Destructive — requires an explicit opt-in. */
+const ClearStorageSchema = z
+  .object({
+    type: z.literal("clear_storage").describe("Clear the extension's key/value storage. Requires a keys list OR the explicit all:true opt-in (a whole-area wipe is destructive and is never inferred from an empty/absent keys list)."),
+    storage_type: z.enum(["local", "session"]).optional().default("local").describe("Which storage area to clear (default local)."),
+    keys: z.array(boundedText(MAX_SHORT_TEXT_CHARS)).max(100).optional().describe("Exact keys to remove."),
+    all: z.boolean().optional().describe("EXPLICIT opt-in to clear the entire storage area."),
+  })
+  .refine((d) => d.all === true || (Array.isArray(d.keys) && d.keys.length > 0), {
+    message: "clear_storage requires at least one key or explicit all:true",
+  });
+
 // ─── Union + helpers ────────────────────────────────────────────────────────
 
-/** Discriminated union of all action schemas (32 actions). */
+/** Discriminated union of all action schemas (60 actions). */
 export const ActionSchema = z.discriminatedUnion("type", [
   ClickSchema,
   InputSchema,
   SelectDropdownSchema,
   ScrollSchema,
+  ScrollToBottomSchema,
   SendKeysSchema,
   NavigateSchema,
   SwitchTabSchema,
   CloseTabSchema,
   GoBackSchema,
   WaitSchema,
+  WaitForElementSchema,
+  WaitForTextSchema,
+  WaitForUrlSchema,
+  WaitForNetworkIdleSchema,
+  EnableNetworkLogSchema,
+  DisableNetworkLogSchema,
+  GetNetworkLogSchema,
+  ClearNetworkLogSchema,
+  GetclearNetworkLogSchema,
+  EnableConsoleLogSchema,
+  DisableConsoleLogSchema,
+  GetConsoleLogSchema,
+  ClearConsoleLogSchema,
+  GetclearConsoleLogSchema,
   FindTextSchema,
   ExtractSchema,
   DoneSchema,
@@ -271,9 +486,15 @@ export const ActionSchema = z.discriminatedUnion("type", [
   ScreenshotSchema,
   SaveAsPdfSchema,
   DropdownOptionsSchema,
+  PageNextSchema,
+  ListDownloadsSchema,
   SearchPageSchema,
   FindElementsSchema,
+  ListInteractiveSchema,
+  GetComputedStyleSchema,
+  GetPageInfoSchema,
   EvaluateSchema,
+  RunScriptSchema,
   HoverSchema,
   PressAndHoldSchema,
   AskHumanSchema,
@@ -285,6 +506,14 @@ export const ActionSchema = z.discriminatedUnion("type", [
   AlertGetTextSchema,
   AlertSendKeysSchema,
   DetectVisualSchema,
+  DetectChallengeSchema,
+  ListTabsSchema,
+  GetCookiesSchema,
+  SetCookieSchema,
+  DeleteCookiesSchema,
+  GetStorageSchema,
+  SetStorageSchema,
+  ClearStorageSchema,
 ]);
 
 /** Schema for the navigator's per-step structured output. */

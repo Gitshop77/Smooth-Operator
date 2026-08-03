@@ -203,6 +203,14 @@ describe("anti-detection: stealth patches apply (headless shim)", () => {
     expect(conn.downlink).toBe(10);
   });
 
+  test("8b. pre-seeded navigator.connection is preserved (missing-only guard)", () => {
+    const shim = buildShim();
+    const seeded = { effectiveType: "2g", rtt: 1000, downlink: 0.1 };
+    shim.navigator.connection = seeded;
+    runInIsolation(shim);
+    expect(shim.navigator.connection).toBe(seeded);
+  });
+
   test("10. console method toString reports native code", () => {
     const shim = buildShim();
     runInIsolation(shim);
@@ -225,10 +233,24 @@ describe("anti-detection: stealth patches apply (headless shim)", () => {
     expect(shim.navigator.hardwareConcurrency).toBe(4);
   });
 
+  test("12b. pre-seeded hardwareConcurrency is preserved (missing-only guard)", () => {
+    const shim = buildShim();
+    shim.navigator.hardwareConcurrency = 16;
+    runInIsolation(shim);
+    expect(shim.navigator.hardwareConcurrency).toBe(16);
+  });
+
   test("13. navigator.deviceMemory defaults to 8", () => {
     const shim = buildShim();
     runInIsolation(shim);
     expect(shim.navigator.deviceMemory).toBe(8);
+  });
+
+  test("13b. pre-seeded deviceMemory is preserved (missing-only guard)", () => {
+    const shim = buildShim();
+    shim.navigator.deviceMemory = 32;
+    runInIsolation(shim);
+    expect(shim.navigator.deviceMemory).toBe(32);
   });
 });
 

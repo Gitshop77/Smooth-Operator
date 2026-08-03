@@ -29,7 +29,11 @@ import {
   clearRunState,
   stopKeepalive,
   loadAndSetDomainConfig,
+  safeLog,
+  zeroRunUsage,
+  addCostEvent,
   type RunState,
+  type RunUsage,
 } from "./state-store";
 import {
   buildLoopDeps,
@@ -70,6 +74,7 @@ export {
   consumeDownloadConsentForMode,
   markDownloadConsentConsumed,
   releaseDownloadConsentReservation,
+  resetDownloadConsent,
 };
 
 /** No-op catch for fire-and-forget `sendMessage` calls (side panel may be closed). */
@@ -145,6 +150,10 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
   // can read `runState.step` in its navigator-step-start branch without a TDZ
   // ReferenceError if an early (pre-run-start) event ever touches it.
   let runState: RunState | null = null;
+  // Accumulated run usage (cost events). Mirrored into persisted run state so
+  // the side panel can render live totals; a late cost event after cleanup is
+  // dropped by the same `runFinished` gate as the step-persist below.
+  let usageAccum: RunUsage | undefined;
   const sendEvent = (event: LogEvent): void => {
     chrome.runtime
       .sendMessage({
@@ -161,6 +170,14 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  // failure, max-steps, cost-cap, judge-rejection, …) leaves it false.
     if (event.type === "done" && event.success) {
       runSucceeded = true;
+    }
+    if (event.type === "cost") {
+      usageAccum = usageAccum ? addCostEvent(usageAccum, event) : addCostEvent(zeroRunUsage(), event);
+      if (runState && !runFinished) {
+        saveRunState({ usage: usageAccum }).catch(() => {
+          /* best-effort persistence */
+        });
+      }
     }
     if (event.type === "navigator-step-start") {
  // Keep the in-memory `runState.step` in sync with the persisted value
@@ -284,7 +301,10 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  // configure). We do NOT throw: the run can still proceed for non-JS actions;
  // only the unsandboxed RCE path is gated.
   if (!MODE_CONFIGS[mode]) {
-    console.warn(`[agent-bridge] invalid mode "${String(mode)}" — falling back to "${DEFAULT_MODE}"`);
+    // The mode string is storage/message-derived and unvalidated on the
+    // scheduled-task path — a corrupted value could embed secret-shaped text,
+    // so route through safeLog (redacts) instead of console.warn.
+    void safeLog("warn", `[agent-bridge] invalid mode — falling back to "${DEFAULT_MODE}" (raw value redacted)`);
  // Surface the fallback to the side panel so an invalid mode isn't a silent
  // run with no explanation (invalid mode crash swallowed with no
  // user-visible error). The run proceeds in the default mode rather than

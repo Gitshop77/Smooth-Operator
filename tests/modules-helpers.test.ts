@@ -3,7 +3,7 @@
  * to warrant a dedicated test file each:
  * - `tools/registry` — `getFormatInstructions` (prompt-injection helper)
  * - `dom/dom-utils` — `By` / `findByLocator` (CSS/XPath/tag-name locators)
- * - `errors` — typed hierarchy + encode/decode round-trip
+ * - `errors` — typed hierarchy + classification
  * - `tools/executor` — `Select` helper, alert actions, native-click fallback
  *
  * Renamed from `agent4-probe.test.ts` (the historical name referenced an
@@ -78,31 +78,24 @@ describe("dom-utils: By + findByLocator", () => {
 describe("errors: typed hierarchy", () => {
   test("each typed error carries a stable code", async () => {
     const {
-      NoSuchElementException, ElementNotFoundError, StaleElementReferenceError,
-      TimeoutError, InvalidSelectorError, ElementNotInteractableError, ElementClickInterceptedError,
-      UnexpectedAlertOpenError, NoSuchAlertError, isAgentError,
+      NoSuchElementException,
+      ElementNotSelectableError,
+      TimeoutError,
+      UnsupportedOperationError,
+      isAgentError,
     } = await import("../src/lib/agent/errors");
     expect(new NoSuchElementException().code).toBe("no_such_element");
-    expect(new ElementNotFoundError().code).toBe("element_not_found");
-    expect(new StaleElementReferenceError().code).toBe("stale_element_reference");
+    expect(new ElementNotSelectableError().code).toBe("element_not_selectable");
     expect(new TimeoutError().code).toBe("timeout");
-    expect(new InvalidSelectorError().code).toBe("invalid_selector");
-    expect(new ElementNotInteractableError().code).toBe("element_not_interactable");
-    expect(new ElementClickInterceptedError().code).toBe("element_click_intercepted");
-    expect(new UnexpectedAlertOpenError().code).toBe("unexpected_alert_open");
-    expect(new NoSuchAlertError().code).toBe("no_such_alert");
+    expect(new UnsupportedOperationError().code).toBe("unsupported_operation");
     expect(isAgentError(new TimeoutError())).toBe(true);
     expect(isAgentError(new Error("plain"))).toBe(false);
   });
 
-  test("encode/decode round-trip preserves the typed class", async () => {
-    const { encodeAgentError, decodeAgentError, TimeoutError, isAgentError } = await import("../src/lib/agent/errors");
-    const encoded = encodeAgentError(new TimeoutError("waited too long"));
-    expect(encoded.code).toBe("timeout");
-    const decoded = decodeAgentError(encoded);
-    expect(isAgentError(decoded)).toBe(true);
-    expect(decoded).toBeInstanceOf(TimeoutError);
-    expect(decoded.message).toBe("waited too long");
+  test("typed errors expose a default message and their own name", async () => {
+    const { TimeoutError, UnsupportedOperationError } = await import("../src/lib/agent/errors");
+    expect(new TimeoutError().message).toBe("timeout");
+    expect(new UnsupportedOperationError().name).toBe("UnsupportedOperationError");
   });
 });
 
@@ -327,5 +320,304 @@ describe("executor: CDP-first click cascade", () => {
     expect(result.success).toBe(true);
     expect(result.message).toContain("native");
     expect(result.message).not.toContain("CDP");
+  });
+});
+
+// ─── coerceJudgement advisory flags ─────────────────────────────────────────
+//
+// `impossibleTask` / `reachedCaptcha` are advisory outputs of the
+// judge — they must default to false when omitted and coerce lenient booleans
+// exactly like `verdict` does. The fields remain surfaced (loop/helpers/judges
+// decides what to do with them); these tests pin the coercion contract.
+
+describe("judge-helpers: coerceJudgement advisory flags", () => {
+  async function coerce(parsed: Record<string, unknown>) {
+    const { coerceJudgement } = await import("../src/lib/agent/judge-helpers");
+    return coerceJudgement(parsed);
+  }
+
+  test("missing verdict routes to null (unchanged contract)", async () => {
+    expect(await coerce({ impossibleTask: true })).toBeNull();
+  });
+
+  test("omitted advisory flags default to false", async () => {
+    const r = await coerce({ verdict: true });
+    expect(r?.impossibleTask).toBe(false);
+    expect(r?.reachedCaptcha).toBe(false);
+  });
+
+  test("lenient truthy strings coerce flags to true", async () => {
+    const r = await coerce({ verdict: true, impossibleTask: "true", reachedCaptcha: "Yes" });
+    expect(r?.impossibleTask).toBe(true);
+    expect(r?.reachedCaptcha).toBe(true);
+  });
+
+  test("non-truthy values coerce flags to false", async () => {
+    const r = await coerce({ verdict: true, impossibleTask: "maybe", reachedCaptcha: 0 });
+    expect(r?.impossibleTask).toBe(false);
+    expect(r?.reachedCaptcha).toBe(false);
+  });
+
+  test("flags are independent of the verdict value", async () => {
+    const r = await coerce({ verdict: false, impossibleTask: 1 });
+    expect(r?.verdict).toBe(false);
+    expect(r?.impossibleTask).toBe(true);
+  });
+});
+
+// ─── output-parser JSON-snippet redaction ───────────────────────────────────
+//
+// A JSON parse failure embeds a 200-char snippet of the model's own
+// output in the error string. If that output echoed a credential, the snippet
+// must be key-shape-redacted before the error reaches retry prompts / logs.
+
+describe("output-parser-utils: JSON error snippet redaction", () => {
+  test("a key-shaped credential in a failed parse snippet is masked", async () => {
+    const { parseOutput } = await import("../src/lib/agent/output-parser-utils");
+    const { z } = await import("zod");
+    const schema = z.object({ completion: z.string() });
+
+    const raw = '{"completion": "sk-ant-api03-abcdefghijklmnopqrstuvwxyz123456", broken';
+    const result = await parseOutput(schema, raw);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("[redacted]");
+    expect(result.error).not.toContain("sk-ant-api03-abcdefghijklmnopqrstuvwxyz123456");
+    // The raw payload is still preserved on the result for diagnostics.
+    expect(result.raw).toBe(raw);
+  });
+
+  test("an ordinary parse failure keeps the human-readable snippet", async () => {
+    const { parseOutput } = await import("../src/lib/agent/output-parser-utils");
+    const { z } = await import("zod");
+    const schema = z.object({ completion: z.string() });
+
+    const raw = '{"completion": "almost", broken';
+    const result = await parseOutput(schema, raw);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("JSON parse error");
+    expect(result.error).toContain('"completion": "almost"');
+  });
+});
+
+// ─── metrics-utils sanitizers ───────────────────────────────────────────────
+//
+// `sanitizeTokenCount` and `sanitizeCostUsd` are one sanitizer; both
+// must accept finite numbers and reject anything else identically.
+
+describe("metrics-utils sanitizers", () => {
+  test("sanitizeTokenCount accepts finite numbers, rejects everything else", async () => {
+    const { sanitizeTokenCount } = await import("../src/lib/agent/callbacks/metrics-utils");
+    expect(sanitizeTokenCount(10)).toBe(10);
+    expect(sanitizeTokenCount(0)).toBe(0);
+    expect(sanitizeTokenCount(1.5)).toBe(1.5);
+    expect(sanitizeTokenCount(Number.NaN)).toBeUndefined();
+    expect(sanitizeTokenCount(Number.POSITIVE_INFINITY)).toBeUndefined();
+    expect(sanitizeTokenCount("10")).toBeUndefined();
+    expect(sanitizeTokenCount(null)).toBeUndefined();
+    expect(sanitizeTokenCount(undefined)).toBeUndefined();
+  });
+
+  test("sanitizeCostUsd behaves identically (shared sanitizer)", async () => {
+    const { sanitizeCostUsd } = await import("../src/lib/agent/callbacks/metrics-utils");
+    expect(sanitizeCostUsd(0.01)).toBe(0.01);
+    expect(sanitizeCostUsd(Number.NaN)).toBeUndefined();
+    expect(sanitizeCostUsd(Number.NEGATIVE_INFINITY)).toBeUndefined();
+    expect(sanitizeCostUsd("0.01")).toBeUndefined();
+  });
+});
+
+// ─── AgentMetricsCallback ───────────────────────────────────────────────────
+//
+// The metrics callback has zero direct tests. Pin the phase-attribution
+// state machine, the positive/negative gap reconciliation, the sanitization
+// paths, and the deep-copy snapshot guarantee.
+
+describe("callbacks/metrics: AgentMetricsCallback", () => {
+  const ctx = { task: "t", step: 0, history: [] };
+
+  async function makeMetrics() {
+    const { AgentMetricsCallback } = await import("../src/lib/agent/callbacks/metrics");
+    return new AgentMetricsCallback();
+  }
+
+  function llmEnd(tokensIn?: number, tokensOut?: number) {
+    return {
+      content: "x",
+      usage:
+        tokensIn === undefined && tokensOut === undefined
+          ? undefined
+          : {
+              tokensIn: tokensIn ?? 0,
+              tokensOut: tokensOut ?? 0,
+              model: "m",
+              costUsd: 0,
+            },
+    };
+  }
+
+  test("initial snapshot is all zeros", async () => {
+    const cb = await makeMetrics();
+    const m = cb.getMetrics();
+    expect(m.totalSteps).toBe(0);
+    expect(m.totalActions).toBe(0);
+    expect(m.totalTokensIn).toBe(0);
+    expect(m.totalTokensOut).toBe(0);
+    expect(m.totalCostUsd).toBe(0);
+    expect(m.llmByPhase.planner.calls).toBe(0);
+    expect(m.llmByPhase.navigator.calls).toBe(0);
+    expect(m.llmByPhase.unattributed.calls).toBe(0);
+  });
+
+  test("first LLM call attributes to planner; plannerStep/stepStart/stepEnd steer the state machine", async () => {
+    const cb = await makeMetrics();
+
+    cb.onLLMEnd(ctx, llmEnd(100, 20)); // first call → planner
+    expect(cb.getMetrics().llmByPhase.planner.calls).toBe(1);
+
+    cb.onPlannerStep();
+    cb.onLLMEnd(ctx, llmEnd(50, 10)); // after planner step → navigator
+    expect(cb.getMetrics().llmByPhase.navigator.calls).toBe(1);
+
+    cb.onStepStart();
+    cb.onLLMEnd(ctx, llmEnd(5, 2)); // inside a step → navigator
+    expect(cb.getMetrics().llmByPhase.navigator.calls).toBe(2);
+
+    cb.onStepEnd(ctx, []);
+    cb.onLLMEnd(ctx, llmEnd(1, 1)); // between steps → planner guess
+    expect(cb.getMetrics().llmByPhase.planner.calls).toBe(2);
+
+    const m = cb.getMetrics();
+    expect(m.totalTokensIn).toBe(156);
+    expect(m.totalTokensOut).toBe(33);
+  });
+
+  test("onStepEnd tallies steps and per-action-type success/failure", async () => {
+    const cb = await makeMetrics();
+    const actions = [
+      { action: { type: "click" }, success: true },
+      { action: { type: "click" }, success: false },
+      { action: { type: "type" }, success: true },
+    ];
+    cb.onStepEnd(ctx, actions as never);
+
+    const m = cb.getMetrics();
+    expect(m.totalSteps).toBe(1);
+    expect(m.totalActions).toBe(3);
+    expect(m.actionsByType.click).toEqual({ total: 2, successes: 1, failures: 1 });
+    expect(m.actionsByType.type).toEqual({ total: 1, successes: 1, failures: 0 });
+  });
+
+  test("positive token gap on run end is attributed to the unattributed bucket", async () => {
+    const cb = await makeMetrics();
+    cb.onLLMEnd(ctx, llmEnd(100, 20)); // planner captured 100/20
+
+    cb.onRunEnd({
+      success: true,
+      text: "ok",
+      stepCount: 1,
+      totalCostUsd: 0,
+      totalTokensIn: 300,
+      totalTokensOut: 80,
+    });
+
+    const m = cb.getMetrics();
+    expect(m.totalTokensIn).toBe(300);
+    expect(m.totalTokensOut).toBe(80);
+    // 300 - 100 = 200 unattributed in; 80 - 20 = 60 unattributed out.
+    expect(m.llmByPhase.unattributed.tokensIn).toBe(200);
+    expect(m.llmByPhase.unattributed.tokensOut).toBe(60);
+    expect(m.llmByPhase.unattributed.calls).toBe(1);
+    // Invariant: planner + navigator + unattributed == authoritative total.
+    expect(m.llmByPhase.planner.tokensIn + m.llmByPhase.unattributed.tokensIn).toBe(300);
+  });
+
+  test("negative token gap warns and records a negative unattributed delta", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cb = await makeMetrics();
+      cb.onLLMEnd(ctx, llmEnd(100, 20)); // accumulated 100/20
+
+      cb.onRunEnd({
+        success: true,
+        text: "ok",
+        stepCount: 1,
+        totalCostUsd: 0,
+        totalTokensIn: 50,
+        totalTokensOut: 10,
+      });
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const m = cb.getMetrics();
+      expect(m.llmByPhase.unattributed.tokensIn).toBe(-50);
+      expect(m.llmByPhase.unattributed.tokensOut).toBe(-10);
+      // Invariant restored: 100 + (-50) == 50 authoritative.
+      expect(m.llmByPhase.planner.tokensIn + m.llmByPhase.unattributed.tokensIn).toBe(50);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test("sanitization: non-numeric usage is warned and skipped", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const cb = await makeMetrics();
+      cb.onLLMEnd(ctx, { content: "x", usage: { tokensIn: Number.NaN, tokensOut: 5, model: "m", costUsd: 0 } } as never);
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(cb.getMetrics().llmByPhase.planner.calls).toBe(0);
+      expect(cb.getMetrics().totalTokensIn).toBe(0);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test("onRunEnd overwrites cost with the authoritative result", async () => {
+    const cb = await makeMetrics();
+    cb.onCost(ctx, { tokensIn: 1, tokensOut: 1, model: "m", costUsd: 0.25 });
+    expect(cb.getMetrics().totalCostUsd).toBe(0.25);
+
+    cb.onRunEnd({ success: true, text: "ok", stepCount: 0, totalCostUsd: 1.5, totalTokensIn: 0, totalTokensOut: 0 });
+    expect(cb.getMetrics().totalCostUsd).toBe(1.5);
+  });
+
+  test("run-end stepCount reconciliation takes the max", async () => {
+    const cb = await makeMetrics();
+    cb.onStepEnd(ctx, []);
+    cb.onStepEnd(ctx, []);
+    expect(cb.getMetrics().totalSteps).toBe(2);
+
+    cb.onRunEnd({ success: true, text: "ok", stepCount: 5, totalCostUsd: 0, totalTokensIn: 0, totalTokensOut: 0 });
+    expect(cb.getMetrics().totalSteps).toBe(5);
+  });
+
+  test("getMetrics returns a deep copy — mutating it does not affect the callback", async () => {
+    const cb = await makeMetrics();
+    cb.onStepEnd(ctx, [{ action: { type: "click" }, success: true }] as never);
+
+    const snap = cb.getMetrics();
+    snap.actionsByType.click!.total = 99;
+    snap.totalSteps = 99;
+    snap.llmByPhase.planner.tokensIn = 99;
+
+    const fresh = cb.getMetrics();
+    expect(fresh.actionsByType.click!.total).toBe(1);
+    expect(fresh.totalSteps).toBe(1);
+    expect(fresh.llmByPhase.planner.tokensIn).toBe(0);
+  });
+
+  test("loop warnings, compactions, and error recoverability are counted", async () => {
+    const cb = await makeMetrics();
+    cb.onLoopWarning();
+    cb.onLoopWarning();
+    cb.onCompaction();
+    cb.onError(ctx, "transient", true);
+    cb.onError(ctx, "fatal", false);
+
+    const m = cb.getMetrics();
+    expect(m.loopWarnings).toBe(2);
+    expect(m.compactions).toBe(1);
+    expect(m.errors).toEqual({ total: 2, recoverable: 1, fatal: 1 });
   });
 });

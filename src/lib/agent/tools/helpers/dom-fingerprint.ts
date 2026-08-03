@@ -28,14 +28,15 @@ function elementSignature(el: Element): string {
       ? el.getAttribute("href") || ""
       : "";
   const value = getElementValue(el);
- // Bound the hashed `text` length. `.slice(0, 256)` limits how many
- // characters of `text` enter the FNV hash (keeping the signature compact
- // for text-heavy elements); it does NOT avoid allocating the full
- // `textContent` string — that is always materialized by the DOM. The outer
- // `.slice(0, 256)` below remains a final safety cap on the concatenated
- // signature.
+  // Bound the hashed `text` length. `.slice(0, 256)` limits how many
+  // characters of `text` enter the FNV hash (keeping the signature compact
+  // for text-heavy elements); it does NOT avoid allocating the full
+  // `textContent` string — that is always materialized by the DOM.
   const text = (el.textContent || "").trim().slice(0, 256);
-  return el.tagName + type + ariaLabel + href + value + text;
+  // Cap the CONCATENATED signature too, so a long `aria-label`/`href`/`value`
+  // cannot push the per-element string past the bound the comment above
+  // promises. `text` alone is already capped; this guards the other fields.
+  return (el.tagName + type + ariaLabel + href + value + text).slice(0, 256);
 }
 
 function getElementValue(el: Element): string {
@@ -95,24 +96,32 @@ export function domFingerprint(): string {
  // Hash a leading and a trailing window of interactive elements. The leading
  // window covers a stable top nav; the trailing window catches below-the-fold
  // route changes that would otherwise sit entirely beyond the leading window.
- // Iterate only the two windows (not every element) so we don't scan the full
- // list performing a branch per element on large DOMs.
- //
- // When the element list fits within two windows the leading + trailing windows
- // together cover every element, so we hash exactly those two windows. Once
- // the list is longer than two windows, their union leaves a contiguous
- // MIDDLE band unsampled (a SPA route change confined there would be
- // invisible), so we fall back to a strided full-list sample that still bounds
- // the cost to ~2*limit elements while covering the entire list.
+// Iterate only the two windows (not every element) so we don't scan the full
+  // list performing a branch per element on large DOMs.
+  //
+  // When the element list fits within two windows the leading + trailing windows
+  // together cover every element between them, so we hash exactly those two
+  // windows (when `n <= limit` the leading window alone already covers the
+  // whole list, so the trailing pass is skipped). Once the list is longer than
+  // two windows, their union leaves a contiguous MIDDLE band unsampled (a SPA
+  // route change confined there would be invisible), so we fall back to a
+  // strided full-list sample that still bounds the cost to ~2*limit elements
+  // while covering the entire list.
   const limit = FINGERPRINT_MAX_ELEMENTS;
   const n = els.length;
   if (n <= limit * 2) {
     for (let i = 0; i < limit && i < n; i++) {
       h = hashString(h, elementSignature(els[i]));
     }
-    const lastStart = Math.max(0, n - limit);
-    for (let i = lastStart; i < n; i++) {
-      h = hashString(h, elementSignature(els[i]));
+    // A trailing window overlapping the leading one would double-hash the
+    // same elements (when `n <= limit` the leading window already covers
+    // every element). Only hash the trailing window when it adds elements
+    // the leading pass did not see.
+    if (n > limit) {
+      const lastStart = n - limit;
+      for (let i = lastStart; i < n; i++) {
+        h = hashString(h, elementSignature(els[i]));
+      }
     }
   } else {
     const step = Math.max(1, Math.ceil(n / (limit * 2)));

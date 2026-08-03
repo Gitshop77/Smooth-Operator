@@ -42,7 +42,9 @@ export function showTakeoverBanner(reason: string): void {
   takeoverBanner.hidden = false;
   if (resumeBtn) {
     resumeBtn.disabled = false;
-    resumeBtn.focus();
+    // Don't steal focus from an open dialog (password/text prompt) — the
+    // modal's Enter-to-submit would stop working until the user re-clicks.
+    if (!activeDialogOverlay) resumeBtn.focus();
   }
 }
 
@@ -52,8 +54,17 @@ export function hideTakeoverBanner(): void {
   removeActiveOverlay();
 }
 
-/** Remove any active dialog overlay, restoring focus to the trigger element. */
+/**
+ * Remove any active dialog overlay, settling its promise with the cancel
+ * value first — an open modal must never be left dangling when the run ends
+ * or a takeover banner is dismissed (the agent loop's askHuman would stall
+ * until its 5-minute timeout).
+ */
 function removeActiveOverlay(): void {
+  if (activeFinish) {
+    activeFinish(undefined);
+    activeFinish = null;
+  }
   if (activeDialogOverlay) {
     activeDialogOverlay.remove();
     activeDialogOverlay = null;
@@ -74,11 +85,6 @@ resumeBtn?.addEventListener("click", () => {
     } else {
       hideTakeoverBanner();
       addSystemMessage("▶", "Resuming agent…");
-      // Clear the pause flag only on success — a failed RESUME should not
-      // leave the session thinking the agent is unpaused.
-      if (chrome.storage?.session) {
-        chrome.storage.session.set({ open_cowork_paused: false }).catch(() => {});
-      }
     }
   });
 });
@@ -89,9 +95,10 @@ resumeBtn?.addEventListener("click", () => {
  * Build the shared overlay scaffolding for an interactive dialog.
  */
 function buildDialogOverlay(message: string, okLabel: string) {
-  // Clean up any existing dialog overlay to prevent zombie dialogs
-  // when a second takeover event fires while a dialog is already open.
-  if (activeFinish) { activeFinish(null as unknown); activeFinish = null; }
+  // Clean up any existing dialog overlay to prevent zombie dialogs when a
+  // second takeover event fires while a dialog is already open. Settles the
+  // previous promise with its cancel value (removeActiveOverlay resolves
+  // activeFinish), never leaving it dangling.
   removeActiveOverlay();
   const trigger = document.activeElement as HTMLElement | null;
   const uid = globalThis.crypto?.randomUUID?.() ?? `d${Math.random().toString(36).slice(2)}`;
@@ -170,14 +177,16 @@ export function promptConfirm(message: string): Promise<boolean> {
     const { trigger, overlay, cancelBtn, okBtn } = buildDialogOverlay(message, "OK");
 
     let settled = false;
-    const finish = (value: boolean): void => {
+    const finish = (value: boolean | undefined): void => {
       if (settled) return;
       settled = true;
       activeFinish = null;
       if (activeDialogOverlay === overlay) activeDialogOverlay = null;
       overlay.remove();
       trigger?.focus?.();
-      resolve(value);
+      // `undefined` arrives from removeActiveOverlay (run end / replacement
+      // dialog) — that's a cancel, so resolve `false`, not a transport shape.
+      resolve(value ?? false);
     };
 
     activeFinish = finish as (value: unknown) => void;
@@ -223,14 +232,16 @@ function openInputDialog(opts: {
     btnRow.before(input);
 
     let settled = false;
-    const finish = (value: string | null): void => {
+    const finish = (value: string | null | undefined): void => {
       if (settled) return;
       settled = true;
       activeFinish = null;
       if (activeDialogOverlay === overlay) activeDialogOverlay = null;
       overlay.remove();
       trigger?.focus?.();
-      resolve(value);
+      // `undefined` arrives from removeActiveOverlay (run end / replacement
+      // dialog) — that's a cancel, so resolve `null`.
+      resolve(value ?? null);
     };
 
     activeFinish = finish as (value: unknown) => void;

@@ -117,15 +117,17 @@ describe("resolveAndValidateLlmBaseUrl DNS outcome branches", () => {
     }
   });
 
-  test("no resolver + local-exempt provenance → fail CLOSED (guard never weakens for an unverifiable target)", async () => {
+  test("no resolver + local-exempt provenance → fail CLOSED (absent explicit user-configured provenance)", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const savedRequire = g.require;
     delete g.require;
     try {
       const res = await resolveAndValidateLlmBaseUrl("http://api.example.com", true);
-      // No DNS resolver is available in this runtime, so the guard FAILS CLOSED
-      // (with a warning) even for a user-configured provenance — an unverifiable
-      // target IP must never be trusted.
+      // `allowLocalExemption=true` (boolean) is NOT the same as declaring
+      // `provenance === "user-configured"`: the fail-open branch is keyed on
+      // the provenance STRING, so a boolean-exempt caller still fails closed
+      // (with a warning) when the target IP cannot be verified. The explicit
+      // user-configured best-effort allowance is pinned in llm-ssrf.test.ts.
       expect(res.ok).toBe(false);
       if (res.ok) throw new Error("expected rejection");
       expect(res.reason).toMatch(/DNS (resolution|resolver unavailable)/i);

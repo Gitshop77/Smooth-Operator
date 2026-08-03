@@ -51,6 +51,17 @@ export const TIMINGS = {
 /** Timeout (ms) for SW/CDP RPC responses (new-tab navigate, press-and-hold). */
 export const SW_RPC_TIMEOUT_MS = 15000;
 
+/** Default timeout for the wait_for_* actions (in ms) — mirrors the schema's
+ *  `timeout_seconds` default of 30 so a hand-built action (bypassing schema
+ *  validation) falls back to the same limit as a parsed one. */
+export const WAIT_TIMEOUT_MS = 30_000;
+/** Base polling interval for the wait_for_* actions (in ms). Each poll runs a
+ *  FRESH condition evaluation against the live page — never a snapshot. */
+export const WAIT_POLL_MS = 100;
+/** wait_for_network_idle: how long the network must be silent (in ms) before
+ *  the action reports success. */
+export const NETWORK_IDLE_WINDOW_MS = 500;
+
 /**
  * Character / element truncation limits used by handlers when surfacing text
  * (extracted content, action echoes, search matches, etc.) back to the LLM.
@@ -120,6 +131,87 @@ export const SEARCH_ENGINE_URLS = {
  */
 export function getSearchEngineUrl(engine: string): string | null {
   return (SEARCH_ENGINE_URLS as Record<string, string>)[engine] ?? null;
+}
+
+/**
+ * Search macros — `@macro_name query` expands to a site-specific URL
+ * template (verbatim table from the camofox macro set). The agent can
+ * navigate/search directly on a site's own search results page instead of
+ * routing through a general engine. Every query is encoded with
+ * `encodeURIComponent` uniformly.
+ */
+export const SEARCH_MACROS = {
+  "@google_search": "https://www.google.com/search?q=",
+  "@youtube_search": "https://www.youtube.com/results?search_query=",
+  "@amazon_search": "https://www.amazon.com/s?k=",
+  "@reddit_search": "https://www.reddit.com/search.json?q=",
+  "@reddit_subreddit": "https://www.reddit.com/r/",
+  "@wikipedia_search": "https://en.wikipedia.org/wiki/Special:Search?search=",
+  "@twitter_search": "https://twitter.com/search?q=",
+  "@yelp_search": "https://www.yelp.com/search?find_desc=",
+  "@spotify_search": "https://open.spotify.com/search/",
+  "@netflix_search": "https://www.netflix.com/search?q=",
+  "@linkedin_search": "https://www.linkedin.com/search/results/all/?keywords=",
+  "@instagram_search": "https://www.instagram.com/explore/tags/",
+  "@tiktok_search": "https://www.tiktok.com/search?q=",
+  "@twitch_search": "https://www.twitch.tv/search?term=",
+} as const;
+
+/** The reddit JSON endpoints append a fixed limit suffix to the query. */
+const REDDIT_SEARCH_SUFFIX = "&limit=25";
+/** `@reddit_subreddit` falls back to `all` when no subreddit is given. */
+const REDDIT_SUBREDDIT_DEFAULT = "all";
+const REDDIT_SUBREDDIT_SUFFIX = ".json?limit=25";
+
+/** The list of supported macro names (each starts with `@`). */
+export function getSupportedSearchMacros(): readonly string[] {
+  return Object.keys(SEARCH_MACROS);
+}
+
+/**
+ * Expand a macro name + query into a site-specific URL, or `null` when the
+ * macro is unknown. Mirrors camofox's `expandMacro` semantics, with uniform
+ * encoding for every macro (including wikipedia).
+ */
+export function expandSearchMacro(
+  name: string,
+  query: string | null | undefined,
+): string | null {
+  const base = (SEARCH_MACROS as Record<string, string>)[name];
+  if (!base) return null;
+  if (name === "@reddit_search") {
+    return base + encodeURIComponent(query ?? "") + REDDIT_SEARCH_SUFFIX;
+  }
+  if (name === "@reddit_subreddit") {
+    return base + encodeURIComponent(query || REDDIT_SUBREDDIT_DEFAULT) + REDDIT_SUBREDDIT_SUFFIX;
+  }
+  return base + encodeURIComponent(query ?? "");
+}
+
+/** A macro token matched at the start of a query string. */
+export interface SearchMacroMatch {
+  /** The matched macro name, e.g. `"@google_search"`. */
+  name: string;
+  /** The fully expanded URL. */
+  url: string;
+}
+
+const MACRO_TOKEN_RE = /^(@[A-Za-z_][A-Za-z0-9_]*)(?:\s+(.*))?$/;
+
+/**
+ * If `text` starts with a supported `@macro` token, expand the token (with
+ * the rest of the string as the query) into a URL; otherwise return `null`.
+ * Used by the navigate/search action paths to accept `@macro query`.
+ */
+export function tryExpandSearchMacro(
+  text: string | null | undefined,
+): SearchMacroMatch | null {
+  if (typeof text !== "string") return null;
+  const m = MACRO_TOKEN_RE.exec(text.trim());
+  if (!m) return null;
+  const url = expandSearchMacro(m[1], m[2] ?? "");
+  if (!url) return null;
+  return { name: m[1], url };
 }
 
 /**

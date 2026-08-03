@@ -39,7 +39,11 @@ const StringMatchSchema = z
     type: z.enum(["exact_match", "must_include", "regex"]),
  // Bound the pattern length so an attacker-influenced config cannot supply
  // an arbitrarily huge (and potentially catastrophic-backtracking) regex.
-    ref: z.string().max(2000),
+ // An empty/blank ref would assert nothing and grade every task complete —
+ // reject it so a no-op target can't be configured.
+    ref: z.string().min(1).max(2000).refine((s) => s.trim().length > 0, {
+      message: "ref must be a non-blank string",
+    }),
   })
   .superRefine((val, ctx) => {
  // Validate `regex`-type refs compile at the boundary (don't push the check
@@ -73,6 +77,14 @@ const StringMatchSchema = z
  // backreference against a large page-derived string can still drive
  // catastrophic backtracking at evaluator runtime (ReDoS). Reject them at the
  // boundary so the pattern is never compiled-and-run later.
+ //
+ // This guard intentionally over-rejects a small class of benign patterns:
+ // `\8`/`\9` are octal/identity escapes (never backreferences without 8+/
+ // 9+ capturing groups) and `\g` is a legacy identity escape, but telling
+ // them apart from real backreferences requires parsing the pattern's group
+ // structure. Fail-closed over-rejection is the deliberate tradeoff — a
+ // config author with a legitimate `\8`-containing pattern must restructure
+ // it (e.g. put the digit in a class: `a[8]b`).
       if (
         new RegExp("\\\\" + "[1-9]").test(val.ref) ||
         new RegExp("\\\\k<[^>]+>").test(val.ref) ||
@@ -102,10 +114,13 @@ const UrlMatchSchema = z.object({
 /** Schema for a single HTML-content evaluator target. */
 const HtmlContentTargetSchema = z
   .object({
-    locator: z.string().optional(),
+   // Cap the locator and contents lengths (mirroring StringMatchSchema's ref
+   // cap) so an attacker-influenced config cannot supply arbitrarily large
+   // strings that the evaluator then compares against page HTML.
+    locator: z.string().max(2000).optional(),
     required_contents: z.object({
-      exact_match: z.string().optional(),
-      must_include: z.array(z.string()).optional(),
+      exact_match: z.string().min(1).max(2000).optional(),
+      must_include: z.array(z.string().max(2000)).optional(),
     }),
   })
   .superRefine((val, ctx) => {
@@ -121,6 +136,15 @@ const HtmlContentTargetSchema = z
         code: z.ZodIssueCode.custom,
         message: "required_contents must specify a non-empty exact_match or must_include",
         path: ["required_contents"],
+      });
+    }
+ // A blank `must_include` item asserts nothing (the runtime guard already
+ // fails closed on it, but reject it at the boundary like the empty target).
+    if (Array.isArray(rc.must_include) && rc.must_include.some((s) => s.trim().length === 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "must_include items must be non-blank strings",
+        path: ["required_contents", "must_include"],
       });
     }
   });

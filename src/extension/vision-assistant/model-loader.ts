@@ -282,6 +282,12 @@ export class ModelLoader {
     const response = await this.cache!.match(url);
     if (!response) throw new Error(`Model file not cached: ${url}`);
     const rawBuf = new Uint8Array(await response.arrayBuffer());
+  // Re-verify integrity BEFORE parsing: a poisoned cache entry (HTML error
+  // page from a bad CDN redirect, rollback, tampering) must surface as the
+  // integrity error with auto-recovery, not as a confusing "not valid JSON"
+  // error that echoes raw cached bytes. It also rejects the poisoned entry
+  // before any parse-time allocation.
+    await this.reverifyAndRecover(url, rawBuf, response);
     const text = new TextDecoder().decode(rawBuf);
     let parsed: unknown;
     try {
@@ -299,7 +305,6 @@ export class ModelLoader {
           `object; refusing to use an unexpected payload as model metadata.`,
       );
     }
-    await this.reverifyAndRecover(url, rawBuf, response);
     return parsed;
   }
 

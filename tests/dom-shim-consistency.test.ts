@@ -52,7 +52,15 @@ import * as domUtilsVisibility from "@/lib/agent/dom/utils/visibility";
 import * as domUtilsTreeWalker from "@/lib/agent/dom/utils/tree-walker";
 import * as domUtilsSelectors from "@/lib/agent/dom/utils/selectors";
 
-type Relation = "exact" | "subset";
+import * as axTreeShim from "@/lib/agent/dom/ax-tree";
+import * as axTreeCanonical from "@/lib/agent/dom/extraction/ax-tree-builder";
+
+import * as extractorShim from "@/lib/agent/dom/extractor";
+import * as extractorPageState from "@/lib/agent/dom/extraction/page-state";
+import * as extractorElementInfo from "@/lib/agent/dom/extraction/element-info";
+import * as extractorClassification from "@/lib/agent/dom/utils/classification";
+
+type Relation = "exact" | "subset" | "shim-subset";
 
 const sortedKeys = (mod: Record<string, unknown>): string[] =>
   Object.keys(mod).sort();
@@ -71,12 +79,21 @@ function assertConsistent(
     const removed = canonicalKeys.filter((k) => !shimSet.has(k));
     expect(added, `${shimName} has unexpected exports: ${added}`).toEqual([]);
     expect(removed, `${shimName} is missing exports: ${removed}`).toEqual([]);
-  } else {
+  } else if (relation === "subset") {
     // subset: every canonical export must be present in the shim.
     const missing = canonicalKeys.filter((k) => !shimSet.has(k));
     expect(
       missing,
       `${shimName} is missing canonical exports from ${canonicalName}: ${missing.join(", ")}`,
+    ).toEqual([]);
+  } else {
+    // shim-subset: a selective re-export shim must not export any symbol the
+    // canonical modules don't have (drift would mean a moved/removed symbol
+    // still resolves through the shim).
+    const extra = shimKeys.filter((k) => !canonicalSet.has(k));
+    expect(
+      extra,
+      `${shimName} exports unknown symbols not present in ${canonicalName}: ${extra.join(", ")}`,
     ).toEqual([]);
   }
 }
@@ -118,6 +135,31 @@ describe("DOM re-export shim consistency", () => {
       "aggregated ./utils/{classification,visibility,tree-walker,selectors}",
       canonicalKeys,
       "exact",
+    );
+  });
+
+  it("ax-tree shim mirrors the canonical ax-tree-builder exactly (incl. __test_* hooks)", () => {
+    assertConsistent(
+      "@/lib/agent/dom/ax-tree",
+      sortedKeys(axTreeShim),
+      "@/lib/agent/dom/extraction/ax-tree-builder",
+      sortedKeys(axTreeCanonical),
+      "exact",
+    );
+  });
+
+  it("extractor shim only re-exports symbols that exist in its canonical modules", () => {
+    const canonicalKeys = [
+      ...sortedKeys(extractorPageState),
+      ...sortedKeys(extractorElementInfo),
+      ...sortedKeys(extractorClassification),
+    ].sort();
+    assertConsistent(
+      "@/lib/agent/dom/extractor",
+      sortedKeys(extractorShim),
+      "aggregated ./extraction/{page-state,element-info} + ./utils/classification",
+      canonicalKeys,
+      "shim-subset",
     );
   });
 });

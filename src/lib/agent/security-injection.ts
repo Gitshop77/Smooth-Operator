@@ -126,7 +126,7 @@ const INTERLEAVED_BARE_TAGS = BARE_TAG_PATTERN.split("|").map(interleaveTagName)
  *
  * Compiled once at module load into {@link INJECTION_PATTERNS} (see below).
  * The patterns themselves are the source of truth — never modify sources or
- * flags without auditing the redaction tests in `tests/security.test.ts` and
+ * flags without reviewing the redaction tests in `tests/security.test.ts` and
  * the ordering note below (some redaction patterns must run before others to
  * avoid leaving partial tags behind).
  */
@@ -379,6 +379,12 @@ export function normalize(text: string): string {
  *
  * Normalizes first (defeats zero-width + lookalike attacks), then replaces
  * every injection-pattern match with `[redacted]`.
+ *
+ * FIDELITY COST: homoglyph folding (see {@link foldHomoglyphs}) runs inside
+ * `normalize`-adjacent processing here, so non-English text containing a
+ * mapped confusable codepoint is transliterated on its way into the prompt
+ * (e.g. Cyrillic "сора" → "copa"). This is the accepted trade for closing
+ * the homoglyph injection channel on the page-text path.
  */
 export function sanitizeUntrusted(text: string): string {
   const normalized = foldHomoglyphs(normalize(text));
@@ -411,6 +417,11 @@ export function wrapUntrusted(text: string): string {
  * honored as a trusted block, so we break the tag markers. Derived from
  * {@link PROMPT_TAGS} (single source of truth) so it stays in sync with every
  * other tag-stripping sanitizer.
+ *
+ * FIDELITY COST: like `sanitizeUntrusted`, this folds homoglyphs before
+ * scanning (see {@link foldHomoglyphs}), so user-authored non-English text
+ * containing a mapped confusable codepoint is transliterated. Same accepted
+ * trade: the fold closes the homoglyph channel on every prompt-bound path.
  */
 const NEUTRALIZE_PROMPT_TAG_RE = new RegExp(
   `<(\\/?\\s*(?:${INTERLEAVED_PROMPT_TAGS})\\b[^>]*)>`,

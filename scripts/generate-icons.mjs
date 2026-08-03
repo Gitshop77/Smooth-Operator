@@ -15,7 +15,9 @@ import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
-const ICONS_DIR = join(ROOT, 'chrome-extension', 'icons');
+// Tracked source icons: the build copies these into chrome-extension/icons/.
+// Writing into the build dir would wipe them on the next build.
+const ICONS_DIR = join(ROOT, 'src', 'extension', 'icons');
 // The 128px Teal/Cyan Orbiting Steps SVG (master version)
 const TEAL_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
   <defs>

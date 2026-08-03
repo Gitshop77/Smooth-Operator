@@ -33,7 +33,7 @@ import {
 export { keyEventCodes } from "./send-keys-utils";
 
 export async function handleSendKeys(
-  _ctx: ActionContext,
+  ctx: ActionContext,
   action: Extract<Action, { type: "send_keys" }>,
 ): Promise<ActionResult> {
   let parsed;
@@ -98,7 +98,7 @@ export async function handleSendKeys(
     if (form && typeof form.requestSubmit === "function") form.requestSubmit();
   }
 
-  await sleep(TIMINGS.keyEventAfter);
+  await sleep(TIMINGS.keyEventAfter, ctx.signal);
 
   const isMutationKey =
     isPrintableKey(parsed) || CONTENT_KEYS.has(parsed.main);

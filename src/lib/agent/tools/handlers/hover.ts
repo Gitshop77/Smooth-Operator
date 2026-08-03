@@ -26,7 +26,7 @@ export async function handleHover(
   // the rect, so the cursor targets the element's post-scroll viewport position
   // and the dispatched events use coordinates that match what the user sees.
   safeScrollIntoView(el);
-  await sleep(TIMINGS.clickScrollIntoView);
+  await sleep(TIMINGS.clickScrollIntoView, ctx.signal);
   const rect = el.getBoundingClientRect();
   const clientX = Math.round(rect.left + rect.width / 2);
   const clientY = Math.round(rect.top + rect.height / 2);

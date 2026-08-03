@@ -17,6 +17,7 @@ import {
   FORMAT_INSTRUCTIONS_PREAMBLE,
   MAX_CUSTOM_TOOL_CODE_LENGTH,
   MAX_CUSTOM_TOOL_DESCRIPTION_LENGTH,
+  MAX_CUSTOM_TOOLS_BLOCK,
   MAX_SUBSTITUTION_RESULT_LENGTH,
   RENDERED_TOOL_DESCRIPTION_LENGTH,
 } from "./registry-data";
@@ -172,9 +173,16 @@ async function loadCustomTools(): Promise<CustomTool[]> {
 export async function formatCustomToolsBlock(): Promise<string> {
   const tools = await loadCustomTools();
   if (tools.length === 0) return "";
-  const lines = tools.map(
+  // Cap the number of tools advertised so a large stored set cannot balloon
+  // the prompt. The line count is bounded by MAX_CUSTOM_TOOLS_BLOCK; the
+  // description of each tool is additionally sanitized + length-capped below.
+  const visible = tools.slice(0, MAX_CUSTOM_TOOLS_BLOCK);
+  const lines = visible.map(
     (t) => `- ${t.name}: ${sanitizeToolDescription(sanitizeUntrusted(t.description))}`,
   );
+  if (tools.length > visible.length) {
+    lines.push(`- … and ${tools.length - visible.length} more custom tool(s) not listed`);
+  }
   return (
     "<custom_tools>\n" +
     "The following custom JavaScript tools are available. Use `evaluate` with " +

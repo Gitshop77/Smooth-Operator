@@ -18,7 +18,6 @@ paths = [
   '''tests/security\.test\.ts''',
   '''tests/shared\.test\.ts''',
   '''tests/redaction-parity\.test\.ts''',
-  '''tests/cowork-events\.test\.ts''',
   # cockpit/ was removed from the tree (d180cc9) but its test fixtures
   # survive in git history, which the full-history CI scan covers.
   '''cockpit/src/lib/redact-client\.test\.ts''',

@@ -10,7 +10,11 @@ import { highlightElement } from "../../dom/overlay";
 import { substituteSecrets } from "../../secrets";
 import { LIMITS, TIMINGS, sleep } from "../constants";
 import { resolveElement, safeScrollIntoView } from "../helpers";
-import type { ActionContext } from "./types";
+import { type ActionContext, isExtensionContext } from "./types";
+import { rejectOnAbort } from "./abort";
+
+/** Give up on an unresponsive SW typer rather than hanging the agent loop. */
+const HUMANIZED_INPUT_TIMEOUT_MS = 30_000;
 
 // Cache native value setters at module scope (mirrors send-keys.ts pattern).
 // Lazy-initialized on first input call to avoid touching HTMLInputElement
@@ -54,6 +58,56 @@ type InputAction = Omit<Extract<Action, { type: "input" }>, "clear"> & {
   clear?: boolean | null;
 };
 
+/**
+ * Delegate humanized typing to the service worker, which types the text via
+ * CDP `Input.dispatchKeyEvent` (browser-trusted key events) instead of the
+ * content script's instant value-set. The SW returns a `TAB_ACTION`-shaped
+ * response; this mirrors the delegation contract used by switch_tab/close_tab.
+ */
+async function delegateHumanizedInput(
+  action: Extract<Action, { type: "input" }>,
+  signal?: AbortSignal,
+): Promise<ActionResult> {
+  if (!isExtensionContext()) {
+    return {
+      action,
+      success: false,
+      message: `${action.type} is not supported in the current mode (no extension tab API)`,
+    };
+  }
+  try {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const abort = rejectOnAbort(signal);
+    let raw: unknown;
+    try {
+      raw = await Promise.race([
+        chrome.runtime.sendMessage({ type: "TAB_ACTION", action }).finally(() => clearTimeout(timer)),
+        new Promise<undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), HUMANIZED_INPUT_TIMEOUT_MS);
+        }),
+        abort.promise,
+      ]);
+    } finally {
+      clearTimeout(timer);
+      abort.cleanup();
+    }
+    if (typeof raw === "undefined") {
+      return { action, success: false, message: `${action.type} failed: no response from extension (timeout or unreachable service worker)` };
+    }
+    const res = raw as { ok?: boolean; success?: boolean; message?: string; error?: string };
+    if (!res.ok) {
+      return { action, success: false, message: `${action.type} failed: ${res.message ?? res.error ?? "unknown error"}` };
+    }
+    return {
+      action,
+      success: res.success ?? true,
+      message: res.message ?? `${action.type} ok`,
+    };
+  } catch (e) {
+    return { action, success: false, message: `${action.type} failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
 export async function handleInput(
   ctx: ActionContext,
   action: InputAction,
@@ -70,7 +124,7 @@ export async function handleInput(
   }
   highlightElement(el, `input [${action.index}]`);
   safeScrollIntoView(el);
-  await sleep(TIMINGS.inputScrollIntoView);
+  await sleep(TIMINGS.inputScrollIntoView, ctx.signal);
   el.focus({ preventScroll: true });
   // Substitute %secret_name% placeholders at execution time.
   // The LLM only sees the placeholder — the real value never reaches the LLM.
@@ -78,6 +132,36 @@ export async function handleInput(
   // of the schema to an optional text can never silently append the literal
   // "undefined" to a field via the `clear:false` append path below.
   const text = await substituteSecrets(action.text ?? "");
+  if (action.humanized === true) {
+    // Humanized path (OPT-IN): clear the field content-side so the SW's CDP
+    // typing fills a blank field — native inputs need the prototype setter so
+    // React-controlled inputs stay in sync, contenteditable elements get their
+    // textContent emptied. Otherwise typing lands at the caret over old
+    // content and the action reports success with a wrong value.
+    if (action.clear !== false) {
+      if (isNativeTextInput(el)) {
+        resolveSetters();
+        const nativeSetter = typeof HTMLTextAreaElement !== "undefined" && el instanceof HTMLTextAreaElement
+          ? cachedTextareaSetter
+          : cachedInputSetter;
+        if (nativeSetter) nativeSetter.call(el, "");
+        else el.value = "";
+      } else if (el.isContentEditable) {
+        el.textContent = "";
+      }
+    }
+    const delegated = await delegateHumanizedInput({
+      type: "input",
+      index: action.index,
+      text,
+      clear: false,
+      humanized: true,
+    } as Extract<Action, { type: "input" }>);
+    if (delegated.success) {
+      return { ...delegated, action: { ...action, clear: action.clear !== false } };
+    }
+    return delegated;
+  }
   if (isNativeTextInput(el)) {
     // Use the native value setter so React-controlled inputs sync their
     // state. Directly assigning `el.value = text` works for uncontrolled
@@ -117,7 +201,7 @@ export async function handleInput(
     // type-checker, since `el.isContentEditable` is not a TS type guard.
     throw new Error(`element [${action.index}] is not a text input`);
   }
-  await sleep(TIMINGS.inputAfterType);
+  await sleep(TIMINGS.inputAfterType, ctx.signal);
   // If `substituteSecrets` changed the text (a %secret% placeholder was
   // replaced with a real value), the real value must NOT appear in
   // `ActionResult.message` — that field is replayed into every subsequent LLM

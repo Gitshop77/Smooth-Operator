@@ -52,3 +52,49 @@ describe("handleScreenshot filename normalization", () => {
     expect(res.success).toBe(true);
   });
 });
+
+describe("handleScreenshot SW error responses", () => {
+  test("an explicit SW error surfaces in the failure message", async () => {
+    const sendMessage = vi.fn(async () => ({ ok: false, error: "disk full" }));
+    installExtensionMock(sendMessage);
+    const res = await handleScreenshot(ctx, { type: "screenshot", file_name: "report" });
+    expect(res.success).toBe(false);
+    expect(res.message).toContain("disk full");
+  });
+
+  test("an invalid response shape is rejected, not trusted", async () => {
+    const sendMessage = vi.fn(async () => ({ ok: "yes" })); // malformed payload
+    installExtensionMock(sendMessage);
+    const res = await handleScreenshot(ctx, { type: "screenshot", file_name: "report" });
+    expect(res.success).toBe(false);
+    expect(res.message).toContain("invalid response");
+  });
+
+  test("no response from the SW (undefined, timeout) fails instead of claiming success", async () => {
+    // `chrome.runtime.sendMessage` resolves `undefined` when no listener is
+    // present (or the timeout wins the race) — must be surfaced as a failure.
+    const sendMessage = vi.fn(async () => undefined);
+    installExtensionMock(sendMessage);
+    const res = await handleScreenshot(ctx, { type: "screenshot", file_name: "report" });
+    expect(res.success).toBe(false);
+    expect(res.message).toContain("no response");
+  });
+
+  test("rejects path-traversal file names before forwarding to the SW", async () => {
+    const sendMessage = vi.fn();
+    installExtensionMock(sendMessage);
+    const res = await handleScreenshot(ctx, { type: "screenshot", file_name: "../evil.jpg" });
+    expect(res.success).toBe(false);
+    expect(res.message).toContain("invalid file_name");
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  test("fails honestly without an extension context (no chrome.runtime.id)", async () => {
+    // No chrome mock installed: `isExtensionContext()` is false, and capture
+    // is unavailable in that mode. The handler must return an honest failure
+    // instead of claiming the screenshot was saved.
+    const res = await handleScreenshot(ctx, { type: "screenshot", file_name: "report" });
+    expect(res.success).toBe(false);
+    expect(res.message).toContain("not supported");
+  });
+});

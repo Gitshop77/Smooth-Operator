@@ -98,19 +98,34 @@ export function tryCssSelectorClick(el: HTMLElement): ClickStrategyResult {
   const css = generateCssSelector(el);
   if (!css) return { clicked: false, strategyUsed: "" };
   try {
-    const found = document.querySelector(css) as HTMLElement | null;
-    if (found) {
-      if (found !== el) {
-        found.click();
-        return { clicked: true, strategyUsed: "css-selector" };
-      }
-      return { clicked: false, strategyUsed: "" };
+    // `generateCssSelector` can return a NON-unique selector (bare tag or
+    // tag+classes when the element has no id), so `querySelector` — which
+    // returns the FIRST match — could click a different element than the
+    // target and report success. Require exactly one match (mirroring
+    // `tryTextSearchClick`'s ambiguity guard): a unique match is either the
+    // target or its re-created twin (the strategy's documented purpose);
+    // anything else falls back to the next strategy instead of misclicking.
+    const matches = Array.from(document.querySelectorAll(css));
+    if (matches.length === 0) {
+      return {
+        clicked: false,
+        strategyUsed: "",
+        error: `CSS selector click skipped: selector "${css}" did not match any element`,
+      };
     }
-    return {
-      clicked: false,
-      strategyUsed: "",
-      error: `CSS selector click skipped: selector "${css}" did not match any element`,
-    };
+    if (matches.length > 1) {
+      return {
+        clicked: false,
+        strategyUsed: "",
+        error: `CSS selector click skipped: selector "${css}" matches ${matches.length} elements ambiguously`,
+      };
+    }
+    const found = matches[0] as HTMLElement;
+    if (found !== el) {
+      found.click();
+      return { clicked: true, strategyUsed: "css-selector" };
+    }
+    return { clicked: false, strategyUsed: "" };
   } catch (e) {
     return { clicked: false, strategyUsed: "", error: `CSS selector click failed: ${(e as Error).message}` };
   }
@@ -223,7 +238,7 @@ export async function handleVisionClick(
   try {
     const result = await sendCdpClick({ x: 0, y: 0, width: 1, height: 1 }, indexStr);
     if (result?.ok) {
-      await sleep(TIMINGS.clickAfterSettle);
+      await sleep(TIMINGS.clickAfterSettle, ctx.signal);
       const changed = hasPageChanged(ctx);
       return {
         action,

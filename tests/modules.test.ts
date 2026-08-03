@@ -221,6 +221,22 @@ describe("Mode enforcement", () => {
     expect(r.canExecuteJs).toBe(false);
   });
 
+  test("search is gated on canNavigate (restricted cannot search)", () => {
+    expect(checkActionAllowed("search", "restricted").allowed).toBe(false);
+    expect(checkActionAllowed("search", "standard").allowed).toBe(true);
+    expect(checkActionAllowed("search", "full_agentic").allowed).toBe(true);
+  });
+
+  test("destructive cookie/storage verbs are mode-gated + confirm-required in standard", () => {
+    for (const verb of ["set_cookie", "delete_cookies", "set_storage", "clear_storage"] as const) {
+      expect(checkActionAllowed(verb, "restricted").allowed).toBe(false);
+      expect(checkActionAllowed(verb, "standard").allowed).toBe(true);
+      expect(checkActionAllowed(verb, "full_agentic").allowed).toBe(true);
+      expect(requiresConfirmation(verb, "standard")).toBe(true);
+      expect(requiresConfirmation(verb, "full_agentic")).toBe(false);
+    }
+  });
+
   test("full_agentic mode has the most permissions", () => {
     const f = MODE_CONFIGS.full_agentic;
  // All capability flags must be true in full_agentic mode.

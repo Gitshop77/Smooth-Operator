@@ -11,6 +11,7 @@ import {
   config,
   bearer,
   header,
+  none,
   apiKeyAuth,
   resetInjectedEnv,
   MissingCredentialError,
@@ -74,6 +75,51 @@ describe("auth credential chain", () => {
     const headers = auth.apply({ method: "POST", url: "https://x", body: "", headers: {} });
     expect(headers.authorization).toBe("from-env");
   });
+
+  test("none leaves the input headers untouched", () => {
+    const headers = { "Content-Type": "application/json" };
+    const result = none.apply({ method: "POST", url: "https://x", body: "", headers });
+    expect(result).toBe(headers);
+  });
+
+  test("curried single-arg header(name) form renders the header once given a source", () => {
+    const strategy = header("x-api-key")("sk-123");
+    const headers = strategy.apply({ method: "POST", url: "https://x", body: "", headers: {} });
+    expect(headers["x-api-key"]).toBe("sk-123");
+  });
+
+  test("bearer accepts a Credential and renders it", () => {
+    const headers = bearer(optional("sk-456", "apiKey")).apply({ method: "POST", url: "https://x", body: "", headers: {} });
+    expect(headers.authorization).toBe("Bearer sk-456");
+  });
+
+  test("MissingCredentialError message names the missing source", () => {
+    expect(() => optional(undefined, "apiKey").load()).toThrow("Missing credential: apiKey");
+    expect(new MissingCredentialError("header-name").message).toBe("Missing credential: header-name");
+    expect(new MissingCredentialError("x").name).toBe("MissingCredentialError");
+  });
+});
+
+describe("auth header control-character rejection", () => {
+  const apply = (strategy: { apply: (i: { method: "POST"; url: string; body: string; headers: Record<string, string> }) => Record<string, string> }): Record<string, string> =>
+    strategy.apply({ method: "POST", url: "https://x", body: "", headers: {} });
+
+  test("a secret containing CR/LF is rejected at render time", () => {
+    expect(() => apply(header("x-api-key", "sk-123\r\nInjected: 1"))).toThrow(/control character/i);
+  });
+
+  test("a header NAME containing a control character is rejected", () => {
+    expect(() => apply(header("x-\nkey", "v"))).toThrow(/control character/i);
+  });
+
+  test("bearer with an embedded newline is rejected", () => {
+    expect(() => apply(bearer("sk-123\nInjected"))).toThrow(/control character/i);
+  });
+
+  test("HTAB in a header value is allowed (RFC 7230 field-value permits it)", () => {
+    const headers = apply(header("x-key", "a\tb"));
+    expect(headers["x-key"]).toBe("a\tb");
+  });
 });
 
 describe("auth injected-env snapshot", () => {
@@ -126,6 +172,18 @@ describe("sse framing", () => {
   test("a bare 'data' line with no colon contributes an empty value", () => {
     expect(sse.parse("data\ndata: x\n\n")).toEqual(["\nx"]);
   });
+
+  test("each parse() call is isolated — a partial event is not carried into the next call", () => {
+    // A shared module-level framer would accumulate the first chunk's "data: a"
+    // and emit ["a\nb"] on the second call. The fresh-framer-per-call contract
+    // must return only the event terminated within the second chunk.
+    expect(sse.parse("data: a\n")).toEqual([]);
+    expect(sse.parse("data: b\n\n")).toEqual(["b"]);
+  });
+
+  test("two complete events in a single chunk are emitted as two frames", () => {
+    expect(sse.parse("data: a\n\ndata: b\n\n")).toEqual(["a", "b"]);
+  });
 });
 
 describe("endpoint fragment preservation", () => {
@@ -138,5 +196,32 @@ describe("endpoint fragment preservation", () => {
     const ep = Endpoint.path("/chat?x=1#frag", { query: { a: "1" } });
     const url = buildURL(ep, {});
     expect(url).toBe("/chat?x=1&a=1#frag");
+  });
+
+  test("an absolute non-http(s) path is rejected at build time", () => {
+    // `Endpoint.path("file:///etc/passwd", { baseURL })` must NOT emit a
+    // file:// URL — the transport SSRF guard only permits http(s), so a path
+    // of any other scheme fails at build time instead of surfacing a generic
+    // fetch/SSRF error later.
+    const ep = Endpoint.path("file:///etc/passwd", { baseURL: "https://api.openai.com" });
+    expect(() => buildURL(ep, {})).toThrow(/http\(s\)/i);
+  });
+
+  test("a scheme-relative path is rejected at build time (would silently swap the endpoint origin)", () => {
+    // `//host/x` resolves against the base's scheme but DROPS the base's
+    // host — an absolute URL of a different origin than the endpoint.
+    const ep = Endpoint.path("//evil.example.com/x", { baseURL: "https://api.openai.com" });
+    expect(() => buildURL(ep, {})).toThrow(/http\(s\)/i);
+  });
+
+  test("an http(s)-absolute path is allowed and does not fold the base query into the foreign origin", () => {
+    const ep = Endpoint.path("https://proxy.example.com/v1/chat", {
+      baseURL: "https://api.openai.com?secret=1",
+      query: { v: "2" },
+    });
+    const url = buildURL(ep, {});
+    expect(url.startsWith("https://proxy.example.com/v1/chat?")).toBe(true);
+    expect(url).not.toContain("secret=1");
+    expect(url).toContain("v=2");
   });
 });

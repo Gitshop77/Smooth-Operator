@@ -37,7 +37,7 @@ export async function handlePressAndHold(
   }
   highlightElement(el, `press_and_hold [${action.index}]`);
   safeScrollIntoView(el);
-  await sleep(TIMINGS.clickScrollIntoView);
+  await sleep(TIMINGS.clickScrollIntoView, ctx.signal);
   const rect = el.getBoundingClientRect();
   const vw = window.innerWidth || document.documentElement.clientWidth;
   const vh = window.innerHeight || document.documentElement.clientHeight;

@@ -2,6 +2,7 @@ import { extractBrowserState, getSelectorMap } from "@/lib/agent/dom/extractor";
 import { generateAccessibilityTree } from "@/lib/agent/dom/ax-tree";
 import { executeAction } from "@/lib/agent/tools/executor";
 import { setSecretsResolvedExternally } from "@/lib/agent/secrets";
+import { redactKeyShapes } from "@/lib/agent/key-shape-redact";
 import {
   isDomainPolicyEnforced,
   setDomainConfig,
@@ -9,6 +10,12 @@ import {
 } from "@/lib/agent/tools/helpers/domain-config";
 import { domFingerprint } from "@/lib/agent/tools/helpers";
 import type { AgentAction, ActionResult, BrowserState, TabInfo } from "@/lib/agent/types";
+import type { AgentMode } from "@/lib/agent/modes";
+
+const AGENT_MODES: readonly AgentMode[] = ["restricted", "standard", "full_agentic"];
+function isAgentMode(value: unknown): value is AgentMode {
+  return typeof value === "string" && (AGENT_MODES as readonly string[]).includes(value);
+}
 
 export const log: (...args: unknown[]) => void = console.warn.bind(console, "[content]");
 
@@ -29,6 +36,7 @@ interface ExecuteActionsMessage {
   actions?: AgentAction[];
   domainConfig?: unknown;
   secretsResolved?: boolean;
+  agentMode?: string;
 }
 interface ExtractHtmlMessage {
   type: "EXTRACT_HTML";
@@ -65,7 +73,7 @@ function errorResponse(e: unknown): ErrorResponse {
 }
 
 /** Clamp a finite numeric message field into `[min, max]`, else `fallback`. */
-function clampInt(value: number | undefined, fallback: number, min: number, max: number): number {
+export function clampInt(value: number | undefined, fallback: number, min: number, max: number): number {
   return value !== undefined && Number.isFinite(value)
     ? Math.min(Math.max(min, Math.floor(value)), max)
     : fallback;
@@ -117,6 +125,11 @@ export function handleExecuteActions(
   sendResponse: (r: Response) => void,
 ): boolean {
   let responded = false;
+  // The background threads the active agent mode through the message so
+  // URL-loader steps spawned by a content-script navigate are mode-gated
+  // (user-authored loaders cannot bypass the capability boundary). Absent
+  // mode keeps the direct content-script path unchanged.
+  const agentMode = isAgentMode(msg.agentMode) ? msg.agentMode : undefined;
   const safeRespond = (r: Response) => {
     if (responded) return;
     responded = true;
@@ -191,7 +204,7 @@ export function handleExecuteActions(
           }
         }
         if (!result) {
-          result = await executeAction(action, state);
+          result = await executeAction(action, state, undefined, undefined, agentMode);
         }
         results.push(result);
         if (!result.success || result.pageChanged || result.isDone) {
@@ -221,7 +234,12 @@ export function handleExtractHtml(
   try {
     const html = document.documentElement.outerHTML || "";
     const capped = html.length > 500_000 ? html.slice(0, 500_000) : html;
-    sendResponse({ ok: true, html: capped });
+    // The HTML flows to the evaluator (possibly a remote judge model), so
+    // mask well-known credential shapes — secrets the extension substituted
+    // into forms serialize back into the HTML, and pages can embed real keys.
+    // Shape-based redaction only (no secret-store reads): the content world
+    // must never pull key VALUES across the session-storage boundary.
+    sendResponse({ ok: true, html: redactKeyShapes(capped) });
   } catch (e) {
     sendResponse(errorResponse(e));
   }

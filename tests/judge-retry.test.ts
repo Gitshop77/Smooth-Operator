@@ -9,7 +9,7 @@ import { withLLMRetry } from "../src/lib/agent/llm/retry";
 import { maybeJudgeAndFinalize } from "../src/lib/agent/loop/helpers/judges";
 import { CallbackDispatcher, type AsyncCallbackHandler, type CallbackContext, type LLMUsageInfo } from "../src/lib/agent/callbacks";
 import { LoopDetector } from "../src/lib/agent/loop/loop-detector";
-import { estimateCost, refreshPricingFromCatalog } from "../src/lib/agent/llm/pricing";
+import { estimateCost, refreshPricingFromCatalog, __resetPricingForTests } from "../src/lib/agent/llm/pricing";
 import { DEFAULT_CONFIG } from "../src/lib/agent/types";
 import type { LoopDeps, LoopState } from "../src/lib/agent/loop/types";
 import type { AgentConfig } from "../src/lib/agent/types";
@@ -210,12 +210,13 @@ describe("withLLMRetry", () => {
   test("gives up after MAX_RETRIES (3) + 1 initial = 4 attempts on persistent 429", async () => {
     const fn = vi.fn().mockRejectedValue(new Error("HTTP 429: Too many requests"));
     const promise = withLLMRetry(fn);
-    // Advance through all backoff delays: 1.5s, 3s, 6s = 10.5s total.
-    // Catch the rejection to prevent an unhandled-rejection error while the
-    // timers are advancing (the awaited `expect(...).rejects` handler below
-    // attaches only after this resolves).
-    promise.catch(() => {});
-    await vi.advanceTimersByTimeAsync(12000);
+    let settled = false;
+    promise.then(() => {}, () => { settled = true; });
+    // Advance in chunks until the retry loop settles instead of a fixed 12s
+    // advance, so the test stays correct if the backoff constants
+    // (BASE_DELAY_MS / BACKOFF_JITTER_MS) change.
+    for (let i = 0; i < 2000 && !settled; i++) await vi.advanceTimersByTimeAsync(100);
+    expect(settled).toBe(true);
     await expect(promise).rejects.toThrow("429");
     expect(fn).toHaveBeenCalledTimes(4); // 1 initial + 3 retries
   });
@@ -232,17 +233,68 @@ describe("withLLMRetry", () => {
     const fn = vi.fn().mockRejectedValueOnce(new Error("HTTP 429: Too many requests"));
     const controller = new AbortController();
     const promise = withLLMRetry(fn, controller.signal);
-    promise.catch(() => {});
-    // Advance partway into the first backoff (1.5s base + jitter) so the first
-    // attempt has failed and the retry loop is sleeping.
-    await vi.advanceTimersByTimeAsync(800);
+    let settled = false;
+    promise.then(() => {}, () => { settled = true; });
+    // Let the first attempt fail and the backoff sleep start (no fixed advance
+    // that must stay shorter than the first backoff delay).
+    await vi.advanceTimersByTimeAsync(0);
     expect(fn).toHaveBeenCalledTimes(1);
     // Abort mid-backoff; the chunked sleep must observe it promptly.
     controller.abort();
-    await vi.advanceTimersByTimeAsync(2000);
+    for (let i = 0; i < 200 && !settled; i++) await vi.advanceTimersByTimeAsync(100);
+    expect(settled).toBe(true);
     await expect(promise).rejects.toThrow("abort");
     // The abort must cancel the retry — fn is never invoked a second time.
     expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  test("honors the Retry-After delay when the error carries retryAfter", async () => {
+    const retryError = Object.assign(new Error("HTTP 429: Too many requests"), { retryAfter: 2500 });
+    const fn = vi.fn().mockRejectedValueOnce(retryError).mockResolvedValue("ok");
+    const promise = withLLMRetry(fn);
+    let settled = false;
+    promise.then(() => { settled = true; }, () => { settled = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    // The retryAfter (2500ms) must win over the exponential base (1500ms):
+    // still sleeping at 2499ms means the base delay was NOT used.
+    await vi.advanceTimersByTimeAsync(2499);
+    expect(settled).toBe(false);
+    expect(fn).toHaveBeenCalledTimes(1);
+    for (let i = 0; i < 200 && !settled; i++) await vi.advanceTimersByTimeAsync(100);
+    expect(settled).toBe(true);
+    await promise;
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  test("caps retryAfter at MAX_RETRY_AFTER_MS (30s)", async () => {
+    const retryError = Object.assign(new Error("HTTP 429: Too many requests"), { retryAfter: 999999 });
+    const fn = vi.fn().mockRejectedValueOnce(retryError).mockResolvedValue("ok");
+    const promise = withLLMRetry(fn);
+    let settled = false;
+    promise.then(() => { settled = true; }, () => { settled = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    // Un-capped, the 999999ms retryAfter would still be sleeping after 30s.
+    // The cap (30s + jitter) means the retry fires long before that.
+    for (let i = 0; i < 400 && !settled; i++) await vi.advanceTimersByTimeAsync(100);
+    expect(settled).toBe(true);
+    await promise;
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  test("total backoff delay is capped at MAX_RETRY_TOTAL_MS (60s)", async () => {
+    // Deterministic large delays via retryAfter: two sleeps of ~25s each are
+    // allowed, the third pushes totalDelay past the 60s ceiling, which throws
+    // immediately — before MAX_RETRIES would have been exhausted.
+    const retryError = Object.assign(new Error("HTTP 429: Too many requests"), { retryAfter: 25000 });
+    const fn = vi.fn().mockRejectedValue(retryError);
+    const promise = withLLMRetry(fn);
+    let settled = false;
+    promise.then(() => {}, () => { settled = true; });
+    for (let i = 0; i < 3000 && !settled; i++) await vi.advanceTimersByTimeAsync(100);
+    expect(settled).toBe(true);
+    await expect(promise).rejects.toThrow("429");
+    // 1 initial + 2 retries; the 3rd retry is suppressed by the total-delay cap.
+    expect(fn).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -469,6 +521,10 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
       else process.env.COWORK_MODEL_CATALOG_URL = ORIG_URL;
       vi.unstubAllGlobals();
       vi.restoreAllMocks();
+      // The stub catalog above was merged into the pricing singleton
+      // (pricingOverride + pricingLoaded) — reset it so the fake rates cannot
+      // leak into later tests that compute absolute costs.
+      __resetPricingForTests();
     }
   });
 

@@ -28,6 +28,7 @@ import { parseAlarmName, initScheduledTasks } from "@/lib/agent/scheduled-tasks"
 import { getRunState, clearRunState, stopKeepalive, KEEPALIVE_ALARM, requestKeepAwake, safeLog } from "./state-store";
 import { handleScheduledTaskFire } from "./task-queue";
 import { registerRateLimitListener } from "./rate-limit-tracker";
+import { startSwWatchdog } from "./watchdog";
 // Importing `./message-routing` registers the `chrome.runtime.onMessage`
 // listener as a top-level side effect. The listener depends on `startRun`
 // (from `./agent-bridge`), which depends on `./tab-manager` + `./state-store`.
@@ -40,6 +41,13 @@ import "./message-routing";
 // content, so this listener supplies the authoritative signal the anti-bot
 // hooks surface as a `rate-limited` challenge kind.
 registerRateLimitListener();
+
+// ─── SW watchdog (stalls / leaks) ──────────────────────────────────────────
+// Arm the interval watchdog: it surfaces event-loop stalls and vision-model
+// memory growth into the side panel via the AGENT_EVENT bus (own interval,
+// own guard, own notice path — independent of the pricing boot arm above).
+// MV3: the interval dies with the SW and is re-armed on the next load.
+startSwWatchdog();
 
 // Top-level safety net: rejections thrown outside any try/catch (e.g. an async
 // listener body or a late `import()` that rejects) are otherwise silently
@@ -62,6 +70,13 @@ self.addEventListener("error", (e: ErrorEvent) => {
 function warmPricingCatalog(): void {
   void import("../../lib/agent/llm/pricing")
     .then((m) => m.refreshPricingFromCatalog())
+    .then(async () => {
+  // After the first successful live catalog load, arm the one-shot
+  // stale-while-refresh timer so a long-lived SW keeps picking up fresh rates
+  // (catalog.ts re-arms it on each subsequent successful load).
+      const catalog = await import("../../lib/agent/llm/catalog");
+      if (catalog.catalogFetchSucceeded()) catalog.scheduleRefresh();
+    })
     .catch((e) => void safeLog("warn", "[pricing] live catalog refresh failed:", e));
 }
 

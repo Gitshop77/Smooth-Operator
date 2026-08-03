@@ -139,6 +139,7 @@ export async function runCompaction(
       const res = await deps.summarizeCall({
         systemPrompt: `${SECURITY_INSTRUCTION}\n\nYou are summarizing agent history.`,
         userPrompt: request,
+        signal,
       });
       summary = res.content;
  // Surface the summarize-call cost + tokens to the caller (cost-cap +

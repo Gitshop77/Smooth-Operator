@@ -13,9 +13,11 @@
 export type {
   CatalogModel,
   Catalog,
+  ReasoningOption,
 };
 export {
   isValidCatalog,
+  reasoningOptionsFor,
 } from "./catalog-data";
 
 import {
@@ -31,6 +33,7 @@ import {
   type CatalogProvider,
   type Catalog,
   type CachedCatalog,
+  type ReasoningOption,
 } from "./catalog-data";
 
 /* ============================================================= *
@@ -49,6 +52,52 @@ let memoryCacheTime = 0;
 let inflight: Promise<Catalog> | null = null;
 /** AbortController for the in-flight fetch — aborted when force=true supersedes it. */
 let inflightController: AbortController | null = null;
+/**
+ * Whether the most recent `loadCatalog` completed a LIVE merge (vs falling
+ * back to the stale cache / bundled snapshot). `fetchCatalog` never throws by
+ * contract, so consumers that need to distinguish "live rates" from "fallback
+ * rates" (pricing's lazy refresh) read this instead of inferring success.
+ */
+let liveFetchSucceeded = false;
+
+/** Whether the most recent catalog load completed a live merge. */
+export function catalogFetchSucceeded(): boolean {
+  return liveFetchSucceeded;
+}
+
+/** One-shot stale-while-refresh timer handle (null when none is pending). */
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Arm a one-shot stale-while-refresh: `CACHE_TTL_MS` after the last successful
+ * live load, re-fetch the catalog with `force`. Re-armed by `loadCatalog` after
+ * every successful live merge, so a long-lived session keeps picking up fresh
+ * rates. At most one timer is ever pending; the fire-time inflight check
+ * dedupes against a concurrent fetch (that fetch re-arms on success).
+ */
+export function scheduleRefresh(): void {
+  if (refreshTimer !== null) return;
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    if (inflight) return;
+    void fetchCatalog({ force: true });
+  }, CACHE_TTL_MS);
+}
+
+/** Reset all mutable module state (test isolation). */
+export function __resetCatalogForTests(): void {
+  if (refreshTimer !== null) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+  inflight = null;
+  inflightController = null;
+  mergedCache = { ...BUNDLED_CATALOG };
+  memoryCacheTime = 0;
+  liveFetchSucceeded = false;
+  searchIndex = null;
+  searchIndexTime = 0;
+}
 
 /**
  * Memoized lowercase search index. `searchModels` is keystroke-driven, so we
@@ -151,6 +200,10 @@ async function loadCatalog(force: boolean, signal?: AbortSignal): Promise<Catalo
     const merged = mergeCatalogs(BUNDLED_CATALOG, raw);
     mergedCache = merged;
     memoryCacheTime = Date.now();
+    liveFetchSucceeded = true;
+    // Stale-while-refresh: every successful live load arms the next one-shot
+    // refresh (fire-once-per-successful-load; a failed refresh never re-arms).
+    scheduleRefresh();
 
     const store = cacheStorage();
     if (store) {
@@ -164,6 +217,7 @@ async function loadCatalog(force: boolean, signal?: AbortSignal): Promise<Catalo
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn("[catalog] fetchCatalog failed, using bundled:", msg);
+    liveFetchSucceeded = false;
     const cached = await readCachedCatalog();
     if (cached) {
       mergedCache = cached.data;
@@ -272,19 +326,34 @@ export function getModelsForProvider(
 }
 
 /**
- * The self-updating default model id for a provider over the merged catalog:
- * the newest model that is not `deprecated`, preferring a stable (non-alpha /
- * non-beta) model when alternatives exist. Returns `""` if the provider is
- * unknown or has no usable models.
+ * The self-updating default model id for a provider over the merged catalog.
+ *
+ * When a `priority` family list is supplied, the first STABLE member present in
+ * the catalog wins (matched via {@link catalogIdMatches}, so provider-prefixed
+ * entries work). Experimental (alpha/beta) and deprecated entries are skipped —
+ * a default must never silently select a model that requires an explicit
+ * opt-in. Otherwise (or when no priority entry matches) the newest model that
+ * is not `deprecated` is chosen, preferring a stable (non-alpha / non-beta)
+ * model when alternatives exist. Returns `""` when the provider is unknown,
+ * has no usable models, or every non-deprecated model is experimental
+ * (alpha/beta) — those providers require an explicit model choice.
  */
-export function getDefaultModelForProvider(id: string): string {
+export function getDefaultModelForProvider(id: string, priority?: string[]): string {
   const provider = mergedCache[id];
   if (!provider || !provider.models) return "";
   const usable = Object.values(provider.models).filter((m) => m.status !== "deprecated");
   if (usable.length === 0) return "";
+  if (priority && priority.length > 0) {
+    for (const wanted of priority) {
+      const hit = usable.find((m) => catalogIdMatches(wanted, m.id));
+      if (!hit) continue;
+      if (hit.status === "alpha" || hit.status === "beta") continue;
+      return hit.id;
+    }
+  }
   usable.sort((a, b) => String(b.release_date ?? "").localeCompare(String(a.release_date ?? "")));
   const stable = usable.filter((m) => m.status !== "alpha" && m.status !== "beta");
-  return (stable.length > 0 ? stable : usable)[0].id;
+  return stable.length > 0 ? stable[0].id : "";
 }
 
 /**
@@ -369,7 +438,14 @@ export function resolveVisionSupport(modelId: string, models: CatalogModel[]): b
     const exact = models.find((m) => catalogIdMatches(modelId, m.id));
     if (exact) {
       if (isVisionModel(exact)) return true;
-      if (exact.attachment === false && !VISION_PATTERNS.some((re) => re.test(name))) return false;
+  // An explicit `attachment: false` on the exact match wins over the
+  // VISION_PATTERNS heuristic — the heuristic is a fallback for models the
+  // catalog has NO opinion about, and its patterns (`\bgpt-4o\b`,
+  // `\bclaude-3\b`, `\bgemini\b`, …) are broad enough to match non-vision
+  // models the catalog explicitly marks otherwise (e.g. a text-only
+  // `grok-3`-style variant of a vision family). The screenshot gate would
+  // otherwise attach images to models that reject them.
+      if (exact.attachment === false) return false;
     }
     const substringMatches = models.filter((m) => m.id.toLowerCase().includes(name));
     if (substringMatches.length > 0) {

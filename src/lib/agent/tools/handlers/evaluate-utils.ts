@@ -61,6 +61,12 @@ function normalizeUnicodeEscapes(src: string): string {
 const DENY_CHROME = makeThrowingProxy("chrome");
 const DENY_FUNCTION = makeThrowingProxy("Function");
 const DENY_EVAL = makeThrowingProxy("eval");
+// `atob`/`btoa` are base64 string decoders that computed-key constructor
+// escapes (`Array[atob("Y29uc3RydWN0b3I=")]`) use to build the literal
+// "constructor" string dynamically, defeating the literal-string scans below.
+// Denying them closes that obfuscation path.
+const DENY_ATOB = makeThrowingProxy("atob");
+const DENY_BTOA = makeThrowingProxy("btoa");
 
 /**
  * Hardened forwarding proxy for a REAL built-in constructor/object (e.g.
@@ -300,8 +306,9 @@ let cachedSandbox: {
  * Run `code` in the hardened evaluate sandbox and return its synchronous
  * result (or a pending Promise if the code returns one — callers must
  * `await`/`Promise.race` as needed). The sandbox denies `chrome`,
- * `Function`, `eval`, and the `window`/`globalThis`/`self`/`document`
- * traversal paths to the real extension globals (see the traps above).
+ * `Function`, `eval`, `atob`/`btoa`, and the `window`/`globalThis`/`self`/
+ * `document`/`parent`/`top`/`frames`/`opener` traversal paths to the real
+ * extension globals (see the traps above).
  *
  * Exported so the hardening can be regression-tested directly without the
  * domain/registry/secret machinery of {@link handleEvaluate} — the test
@@ -327,6 +334,29 @@ export function runSandboxedCode(code: string): unknown {
     cachedFingerprint = fp;
   }
   const { hardenedDocument, sandboxWindow, sandboxGlobal, sandboxSelf } = cachedSandbox;
+  // Hardened stand-ins for the window-traversal free identifiers. In a real
+  // page `parent`/`top`/`frames`/`opener` resolve to the content-script realm
+  // window (or sibling frames), whose `.chrome` is the REAL extension API —
+  // `parent.chrome.storage.local.get("apiKey")` reaches the
+  // content-script-readable api-key mirror. Passing the same hardened
+  // window-like proxy used for `window`/`self` denies `chrome` at every level
+  // of the traversal.
+  const sandboxParent = makeHardenedWindowLike(
+    typeof window !== "undefined" ? (window as object) : (globalThis as object),
+    hardenedDocument,
+  );
+  const sandboxTop = makeHardenedWindowLike(
+    typeof window !== "undefined" ? ((window as Window).top ?? window) as object : (globalThis as object),
+    hardenedDocument,
+  );
+  const sandboxFrames = makeHardenedWindowLike(
+    typeof window !== "undefined" ? (window as object) : (globalThis as object),
+    hardenedDocument,
+  );
+  const sandboxOpener = makeHardenedWindowLike(
+    typeof window !== "undefined" ? (window as object) : (globalThis as object),
+    hardenedDocument,
+  );
   // Normalize Unicode escape sequences before scanning so encoded patterns
   // like \u002econstructor (→ .constructor) are visible to the regex checks.
   const normalizedCode = normalizeUnicodeEscapes(code);
@@ -381,6 +411,12 @@ export function runSandboxedCode(code: string): unknown {
     "self",
     "Function",
     "eval",
+    "parent",
+    "top",
+    "frames",
+    "opener",
+    "atob",
+    "btoa",
     "Object",
     "Array",
     "String",
@@ -411,6 +447,12 @@ export function runSandboxedCode(code: string): unknown {
     sandboxSelf,
     DENY_FUNCTION,
     DENY_EVAL,
+    sandboxParent,
+    sandboxTop,
+    sandboxFrames,
+    sandboxOpener,
+    DENY_ATOB,
+    DENY_BTOA,
     HARDENED_BUILTINS.Object,
     HARDENED_BUILTINS.Array,
     HARDENED_BUILTINS.String,

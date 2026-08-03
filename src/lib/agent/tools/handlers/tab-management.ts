@@ -1,12 +1,13 @@
 /**
- * `switch_tab` + `close_tab` action handlers — both need the `chrome.tabs`
- * API, which is only available in the service worker. The content script
- * delegates these to the SW via the `TAB_ACTION` message (which calls
- * `handleTabAction` — owning the chrome.tabs.update/remove + currentTabId
- * update).
+ * Tab-level action handlers — switch_tab/close_tab (chrome.tabs) plus
+ * list_tabs/cookies/storage (chrome.tabs, chrome.cookies, chrome.storage).
+ * All need APIs that only exist in the service worker, so the content script
+ * delegates them via the `TAB_ACTION` message (which calls
+ * `handleTabAction` — owning the chrome.tabs.update/remove, currentTabId
+ * update, and the cookie/storage reads).
  *
- * Without an extension context (in-page demo / tests) the actions can't
- * switch or close tabs, so we return an HONEST failure rather than claiming
+ * Without an extension context (in-page demo / tests) these actions can't
+ * reach the SW APIs, so we return an HONEST failure rather than claiming
  * success with no underlying effect.
  */
 
@@ -15,6 +16,15 @@ import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import { type ActionContext, isExtensionContext } from "./types";
 import { rejectOnAbort } from "./abort";
+
+/** Action types that run in the SW's `handleTabAction` (tab APIs + cookies + storage). */
+export type SwDelegatedAction = Extract<
+  Action,
+  | { type: "switch_tab" | "close_tab" }
+  | { type: "list_tabs" }
+  | { type: "get_cookies" | "set_cookie" | "delete_cookies" }
+  | { type: "get_storage" | "set_storage" | "clear_storage" }
+>;
 
 /**
  * Shape the background SW returns for a `TAB_ACTION` message. Validated rather
@@ -27,6 +37,7 @@ const tabActionResponseSchema = z.object({
   success: z.boolean().optional(),
   message: z.string().optional(),
   pageChanged: z.boolean().optional(),
+  data: z.unknown().optional(),
   error: z.string().optional(),
 });
 
@@ -39,8 +50,8 @@ function fail(action: Action, msg: string): ActionResult {
 }
 
 /** Delegate a tab-level action to the SW's `handleTabAction` via TAB_ACTION. */
-async function delegateTabAction(
-  action: Extract<Action, { type: "switch_tab" | "close_tab" }>,
+export async function delegateTabAction(
+  action: SwDelegatedAction,
   signal?: AbortSignal,
 ): Promise<ActionResult> {
   if (!isExtensionContext()) {
@@ -91,7 +102,7 @@ async function delegateTabAction(
       // degrades to the uninformative "no response".
       return fail(action, res.message ?? res.error ?? "unknown error");
     }
-    return {
+    const result: ActionResult = {
       action,
       success: res.success ?? res.ok,
       message:
@@ -99,6 +110,9 @@ async function delegateTabAction(
         `${action.type} ${res.success ?? res.ok ? "ok" : "failed"}`,
       pageChanged: !!res.pageChanged,
     };
+    // Structured payloads (tab listings, cookies, storage reads) ride along.
+    if (res.data !== undefined) result.data = res.data;
+    return result;
   } catch (e) {
     return fail(action, e instanceof Error ? e.message : String(e));
   }
@@ -114,6 +128,13 @@ export async function handleSwitchTab(
 export async function handleCloseTab(
   ctx: ActionContext,
   action: Extract<Action, { type: "close_tab" }>,
+): Promise<ActionResult> {
+  return delegateTabAction(action, ctx.signal);
+}
+
+export async function handleListTabs(
+  ctx: ActionContext,
+  action: Extract<Action, { type: "list_tabs" }>,
 ): Promise<ActionResult> {
   return delegateTabAction(action, ctx.signal);
 }

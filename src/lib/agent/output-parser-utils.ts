@@ -1,4 +1,5 @@
 import type { ZodType } from "zod";
+import { redactKeyShapes } from "./key-shape-redact";
 
 /** Maximum characters of the raw payload to include in error messages. */
 const ERROR_SNIPPET_LENGTH = 200;
@@ -180,9 +181,14 @@ function jsonError(
   e: unknown,
 ): { ok: false; error: string; raw: string } {
   const message = e instanceof Error ? e.message : String(e);
+  // The snippet is the model's own output — a model that echoed a real
+  // credential back into its JSON would otherwise re-ship it verbatim in the
+  // error string (which can reach retry prompts and run logs). Mask key
+  // shapes before embedding.
+  const snippet = redactKeyShapes(jsonStr.slice(0, ERROR_SNIPPET_LENGTH));
   return {
     ok: false,
-    error: `JSON parse error: ${message}. Snippet: ${jsonStr.slice(0, ERROR_SNIPPET_LENGTH)}`,
+    error: `JSON parse error: ${message}. Snippet: ${snippet}`,
     raw,
   };
 }

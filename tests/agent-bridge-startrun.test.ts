@@ -65,14 +65,14 @@ vi.mock("../src/extension/background/state-store", () => ({
   getRunState: vi.fn(async () => undefined),
   clearRunState: vi.fn(async () => {}),
   loadAndSetDomainConfig: vi.fn(async () => {}),
-  hardResetAbortRequested: vi.fn(async () => {}),
+  safeLog: vi.fn(async () => {}),
   stopKeepalive: vi.fn(async () => {}),
 }));
 
 // ── Imports AFTER mocks ─────────────────────────────────────────────────────
 
 const ab = await import("../src/extension/background/agent-bridge");
-const { startRun, consumeDownloadConsentForMode, setRunStarting, isRunStarting } = ab;
+const { startRun, consumeDownloadConsentForMode, resetDownloadConsent, setRunStarting, isRunStarting } = ab;
 const orchestrator = await import("@/lib/agent/loop/orchestrator");
 const runHelpers = await import("../src/extension/background/run-helpers");
 const stateStore = await import("../src/extension/background/state-store");
@@ -123,6 +123,11 @@ beforeEach(() => {
   }));
   clearRunState.mockImplementation(async () => {});
   setRunStarting(false);
+  // Reset the module-level download-consent flag so test (a) — which asserts
+  // a fresh consume succeeds after startRun — is order-independent: a future
+  // test consuming consent before (a) without an intervening startRun would
+  // otherwise flip the initial expectation.
+  resetDownloadConsent();
   stubChrome();
 });
 
@@ -178,14 +183,14 @@ describe("startRun lifecycle", () => {
   });
 
   test("(e) never clears abortRequested during init (STOP during init must survive)", async () => {
-    // a STOP that lands while startRun is still initializing must not
-    // be wiped by a stale-flag reset — the post-wire re-check + storage
-    // listener depend on the flag surviving. The ONLY places that clear run
-    // state are cleanupRun (normal run end) and onServiceWorkerStartup
-    // (interrupted-run SW restart), never startRun's init path.
-    const hardResetAbortRequested = stateStore.hardResetAbortRequested as ReturnType<typeof vi.fn>;
+    // A STOP that lands while startRun is still initializing must not be
+    // wiped by any state reset — the post-wire re-check + storage listener
+    // depend on the flag surviving. The ONLY places that clear run state are
+    // cleanupRun (normal run end) and onServiceWorkerStartup (interrupted-run
+    // SW restart), never startRun's init path.
+    const clearRunStateMock = stateStore.clearRunState as ReturnType<typeof vi.fn>;
     await startRun({ task: "do something", maxSteps: 10, mode: "standard" });
-    expect(hardResetAbortRequested).not.toHaveBeenCalled();
+    expect(clearRunStateMock).not.toHaveBeenCalled();
   });
 
   test("(f) a STOP persisted during init aborts the run at the post-wire re-check", async () => {

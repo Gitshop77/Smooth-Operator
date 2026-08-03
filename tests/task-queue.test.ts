@@ -168,13 +168,13 @@ describe("fireNotifications webhook task redaction", () => {
   test("POSTs a webhook body whose task is redacted (never the raw secret)", async () => {
     const SECRET = "sk-webhook-secret-555";
     // Seed the secret via `setSecret` (NOT a raw `localStorage` write): the
- // secrets module now memoizes `listSecrets()` results, and earlier tests in
- // this file populate that cache with an empty set. Writing the secret through
- // `setSecret` invalidates the cache + bumps the secret-set version so the
- // subsequent `redactSecrets` call re-reads storage and actually masks the
- // value. A direct `localStorage.setItem` would be invisible to the cache and
- // the secret would leak. This is a guard-preserving test fix only — it does
- // not change production redaction behavior.
+    // secrets module now memoizes `listSecrets()` results, and earlier tests in
+    // this file populate that cache with an empty set. Writing the secret through
+    // `setSecret` invalidates the cache + bumps the secret-set version so the
+    // subsequent `redactSecrets` call re-reads storage and actually masks the
+    // value. A direct `localStorage.setItem` would be invisible to the cache and
+    // the secret would leak. This is a guard-preserving test fix only — it does
+    // not change production redaction behavior.
     await setSecret("api_key", SECRET);
 
     stubChrome("https://hooks.example.com/notify", false);
@@ -187,6 +187,22 @@ describe("fireNotifications webhook task redaction", () => {
     expect(parsed.task).toBeDefined();
     expect(parsed.task).toContain("[REDACTED:api_key]");
     expect(parsed.task).not.toContain(SECRET);
+  });
+
+  test("notification message redacts secrets (same discipline as the webhook)", async () => {
+    const SECRET = "sk-notif-secret-777";
+    await setSecret("api_key", SECRET);
+
+    const chrome = stubChrome(undefined, true);
+    await fireNotifications(`task contained ${SECRET} value`, true);
+
+    expect(chrome.notifications.create).toHaveBeenCalledTimes(1);
+    const opts = (chrome.notifications.create.mock.calls[0] as unknown[])[0] as {
+      message?: string;
+    };
+    expect(opts.message).toBeDefined();
+    expect(opts.message).toContain("[REDACTED:api_key]");
+    expect(opts.message).not.toContain(SECRET);
   });
 });
 
@@ -211,13 +227,24 @@ describe("fireNotifications webhook abort timeout", () => {
     (globalThis as Record<string, unknown>).fetch = hungFetch;
 
     let threw = false;
+    // Create the escape hatch with the REAL timer before fake timers take
+    // over: if `fireNotifications` ever awaits the webhook fetch (e.g. to
+    // check `res.ok`), the race below resolves in ~200ms real time with a
+    // clear assertion failure instead of hanging until vitest's per-test
+    // timeout. The fire-and-forget contract is load-bearing: the SW must
+    // return without awaiting the POST.
+    const escape = new Promise<"escape">((resolve) => {
+      setTimeout(() => resolve("escape"), 200);
+    });
     vi.useFakeTimers();
     try {
       const p = fireNotifications("task", true);
- // Let fireNotifications reach the point where it schedules the 5s abort
- // timer (this happens after the `await chrome.storage.local.get`
- // microtask resumes), then advance the fake clock past the timeout.
-      await p;
+      const raced = await Promise.race([p, escape]);
+      if (raced === "escape") {
+        expect.fail("fireNotifications awaited the webhook fetch — fire-and-forget contract broken");
+      }
+  // fireNotifications returned; the 5s abort timer is still pending on the
+  // fake clock. Advance past the timeout so the hung connection is aborted.
       vi.advanceTimersByTime(5000 + 10);
     } catch {
       threw = true;

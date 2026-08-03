@@ -10,11 +10,13 @@
 export {
   safeLog,
   type RunState,
+  type RunUsage,
   RUN_STATE_KEY,
   getRunState,
   saveRunState,
   clearRunState,
-  hardResetAbortRequested,
+  zeroRunUsage,
+  addCostEvent,
   requestKeepAwake,
   maybeReleaseKeepAwake,
 } from "./state-store-utils";
@@ -49,8 +51,27 @@ function getDomainConfigGlobal(): UrlPolicyConfig | undefined {
 export async function loadAndSetDomainConfig(): Promise<UrlPolicyConfig> {
   try {
     const res = await chrome.storage.local.get(["allowedDomains", "blockedDomains"]);
-    const allowedDomains = (res.allowedDomains as string[] | undefined) || [];
-    const blockedDomains = (res.blockedDomains as string[] | undefined) || [];
+    const rawAllowed = res.allowedDomains;
+    const rawBlocked = res.blockedDomains;
+    if (
+      (rawAllowed !== undefined && !Array.isArray(rawAllowed)) ||
+      (rawBlocked !== undefined && !Array.isArray(rawBlocked))
+    ) {
+      // A malformed policy shape (e.g. a string instead of `string[]`) must
+      // fail CLOSED, not silently degrade to allow-all: the lib-side validator
+      // rejects it as "no policy" on both the SW and content-script gates.
+      // Flag enforcement + clear the cached config so `getDomainConfig`
+      // blocks every navigation until the stored value is fixed.
+      (globalThis as { __openCoworkDomainConfigEnforced?: boolean }).__openCoworkDomainConfigEnforced = true;
+      delete (globalThis as { __openCoworkDomainConfig?: unknown }).__openCoworkDomainConfig;
+      void safeLog(
+        "error",
+        "[Open Cowork] Domain config has an invalid shape (allowedDomains/blockedDomains must be string[]) — policy cleared, failing closed:",
+      );
+      return {};
+    }
+    const allowedDomains = (rawAllowed as string[] | undefined) || [];
+    const blockedDomains = (rawBlocked as string[] | undefined) || [];
     const config: UrlPolicyConfig = {
       allowedDomains: allowedDomains.length > 0 ? allowedDomains : undefined,
       blockedDomains: blockedDomains.length > 0 ? blockedDomains : undefined,

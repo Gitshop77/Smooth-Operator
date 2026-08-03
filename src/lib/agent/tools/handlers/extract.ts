@@ -15,7 +15,7 @@ export async function handleExtract(
   action: Extract<Action, { type: "extract" }>,
 ): Promise<ActionResult> {
   if (ctx.signal?.aborted) return { action, success: false, message: "extract: aborted" };
-  await sleep(TIMINGS.extractWait);
+  await sleep(TIMINGS.extractWait, ctx.signal);
   const rawText = document.body?.innerText || "";
   // Slice BEFORE redaction so the [truncated] marker reflects the true
   // source size (redaction can shrink/grow the text and mask the cutoff).

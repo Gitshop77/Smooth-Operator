@@ -13,7 +13,32 @@ export function makeChromeStorageMock(
 ) {
   const makeArea = (store: Map<string, unknown>) => ({
     get: (keysOrCb?: unknown, cb?: (res: Record<string, unknown>) => void) => {
-      const result = Object.fromEntries(store);
+      // Mirror the real chrome.storage contract: only the REQUESTED keys are
+      // returned, so a source that reads a key it never requested (or that
+      // relies on defaults) is caught by its consumers. Shapes:
+      //   get() / get(null) / get(undefined)      → all keys
+      //   get("key")                              → that key only
+      //   get(["k1","k2"])                        → those keys only
+      //   get({ k1: fallback })                   → keys with defaults
+      //   get(cb)                                 → callback receives all keys
+      const all = Object.fromEntries(store);
+      let result: Record<string, unknown>;
+      if (keysOrCb === undefined || keysOrCb === null || typeof keysOrCb === "function") {
+        result = { ...all };
+      } else if (typeof keysOrCb === "string") {
+        result = keysOrCb in all ? { [keysOrCb]: all[keysOrCb] } : {};
+      } else if (Array.isArray(keysOrCb)) {
+        result = {};
+        for (const k of keysOrCb) if (k in all) result[k] = all[k];
+      } else if (typeof keysOrCb === "object") {
+        result = {};
+        for (const [k, fallback] of Object.entries(keysOrCb)) {
+          result[k] = k in all ? all[k] : fallback;
+        }
+      } else {
+        // Unknown key selector — never fall back to returning everything.
+        result = {};
+      }
       if (typeof keysOrCb === "function") {
         keysOrCb(result);
         return Promise.resolve(result);
@@ -28,6 +53,11 @@ export function makeChromeStorageMock(
     },
     remove: (keys: string | string[], cb?: () => void) => {
       (Array.isArray(keys) ? keys : [keys]).forEach((k) => store.delete(k));
+      cb?.();
+      return Promise.resolve();
+    },
+    clear: (cb?: () => void) => {
+      store.clear();
       cb?.();
       return Promise.resolve();
     },

@@ -13,10 +13,11 @@
  *  5. useAlwaysOnVision=true, vision assistant ready, try succeeds → parallel merge
  *  6. useAlwaysOnVision=true, try fails (catch) → DOM-only fallback
  *
- * Branches 5 & 6 require the fire-and-forget `ensureVisionAssistantInit` to
- * complete and set `globalVisionAssistant`. Because that variable is module-
- * internal and not resettable, these branches are tested by triggering init
- * and yielding to the microtask queue.
+ * Branches 5 & 6 need `globalVisionAssistant` to be set. The mock's `isReady`
+ * is controllable via the hoisted `visionAssistantState` flag; the first call
+ * in a test primes the fire-and-forget `ensureVisionAssistantInit` (the sync
+ * guard sees a null global on that first call), and the second call reaches
+ * the ready-state merge path.
  */
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
@@ -57,6 +58,9 @@ const localStore: Record<string, unknown> = {};
   },
   runtime: {
     sendMessage: vi.fn().mockResolvedValue(undefined),
+  },
+  tabs: {
+    get: vi.fn().mockResolvedValue({ id: 1, url: "https://example.com", title: "Test" }),
   },
 };
 
@@ -126,18 +130,46 @@ vi.mock("@/extension/background/antibot", () => ({
   makeAntiBotHooks: vi.fn().mockReturnValue({}),
 }));
 
+// Hoisted state shared with the vision-assistant mock factory: makes the
+// assistant's readiness (and its detect mock) controllable from tests so the
+// ready-state merge branches (5 & 6) are reachable. The flag is reset in
+// beforeEach; `detect` is rebound per test to a fresh vi.fn.
+const visionAssistantState = vi.hoisted(() => ({
+  isReady: false,
+  detect: undefined as unknown as ReturnType<typeof vi.fn>,
+  cleanup: undefined as unknown as ReturnType<typeof vi.fn>,
+  mergeDetections: undefined as unknown as ReturnType<typeof vi.fn>,
+  renderMergedElementsText: undefined as unknown as ReturnType<typeof vi.fn>,
+}));
+
 vi.mock("@/extension/vision-assistant", () => ({
-  VisionAssistant: vi.fn().mockImplementation(() => ({
-    isReady: false,
-    init: vi.fn().mockResolvedValue(undefined),
-    detect: vi.fn().mockResolvedValue([]),
-    cleanup: vi.fn().mockResolvedValue(undefined),
-  })),
+  // A real class (not `vi.fn(() => ({...}))`): `run-helpers` constructs the
+  // assistant with `new VA()`, and vitest's spy is not a constructor for an
+  // arrow implementation. `Detect`/`cleanup` are created lazily on first
+  // construction and shared with the hoisted state so tests can rebind them.
+  VisionAssistant: class {
+    isReady: boolean;
+    init: ReturnType<typeof vi.fn>;
+    detect: ReturnType<typeof vi.fn>;
+    cleanup: ReturnType<typeof vi.fn>;
+
+    constructor() {
+      this.isReady = visionAssistantState.isReady;
+      this.init = vi.fn().mockResolvedValue(undefined);
+      this.detect = (visionAssistantState.detect ??= vi.fn().mockResolvedValue([]));
+      this.cleanup = (visionAssistantState.cleanup ??= vi.fn().mockResolvedValue(undefined));
+    }
+  },
+  // The real barrel re-exports the merger; `run-helpers` destructures these
+  // from `loadVisionAssistant()`. Without them the ready-path merge throws and
+  // falls back to DOM-only, hiding the branch under test.
+  mergeDetections: (visionAssistantState.mergeDetections ??= vi.fn().mockReturnValue([])),
+  renderMergedElementsText: (visionAssistantState.renderMergedElementsText ??= vi.fn().mockReturnValue("")),
 }));
 
 vi.mock("@/extension/vision-assistant/merger", () => ({
-  mergeDetections: vi.fn().mockReturnValue([]),
-  renderMergedElementsText: vi.fn().mockReturnValue(""),
+  mergeDetections: (visionAssistantState.mergeDetections ??= vi.fn().mockReturnValue([])),
+  renderMergedElementsText: (visionAssistantState.renderMergedElementsText ??= vi.fn().mockReturnValue("")),
 }));
 
 vi.mock("@/lib/agent/run-history", () => ({
@@ -161,6 +193,19 @@ let renderMergedElementsTextMock: ReturnType<typeof vi.fn>;
 const MOCK_TABS = [{ id: 1, url: "https://example.com", title: "Test" }] as never[];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Let the fire-and-forget vision init settle. `ensureVisionAssistantInit` runs
+ * `(async () => { await import(...); new VA(); await va.init(); ... })()` with
+ * no handle for tests, and its module import + microtasks need a macrotask
+ * turn to complete — without this, a following call sees a null assistant and
+ * the "still loading" fallback instead of the ready state the test is
+ * pinning.
+ */
+async function flushAsync(): Promise<void> {
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+}
 
 function makeDomState(overrides?: { url?: string; elements?: unknown[]; fingerprint?: string }) {
   return {
@@ -187,13 +232,14 @@ function setVisionSettings(settings: {
   enableScreenshots?: boolean;
   visionMode?: string;
 }) {
-  Object.assign(localStore, {
-    model: settings.model ?? "gpt-4",
-    provider: settings.provider ?? "openai",
-    enableLocalVision: settings.enableLocalVision ?? false,
-    enableScreenshots: settings.enableScreenshots ?? true,
-    visionMode: settings.visionMode ?? undefined,
-  });
+  // Store RAW values: keys the caller leaves undefined are OMITTED from the
+  // fixture so the source's own defaults (`enableScreenshots ?? true`, the
+  // visionMode fallback) — not the fixture — are what the tests pin.
+  if (settings.model !== undefined) localStore.model = settings.model;
+  if (settings.provider !== undefined) localStore.provider = settings.provider;
+  if (settings.enableLocalVision !== undefined) localStore.enableLocalVision = settings.enableLocalVision;
+  if (settings.enableScreenshots !== undefined) localStore.enableScreenshots = settings.enableScreenshots;
+  if (settings.visionMode !== undefined) localStore.visionMode = settings.visionMode;
 }
 
 function setRunState(tabId = 1, step = 0) {
@@ -230,6 +276,16 @@ describe("extractStateForRun — vision-merge branches", () => {
     for (const k of Object.keys(localStore)) delete localStore[k];
     for (const k of Object.keys(sessionStore)) delete sessionStore[k];
     setRunState();
+
+    // Fresh vision-assistant state: not ready, fresh detect/cleanup mocks.
+    visionAssistantState.isReady = false;
+    visionAssistantState.detect = vi.fn().mockResolvedValue([]);
+    visionAssistantState.cleanup = vi.fn().mockResolvedValue(undefined);
+    // Module-level merger refs are captured by the factory on first import;
+    // reset them in place so the barrel and the merger subpath stay the same
+    // function across tests.
+    visionAssistantState.mergeDetections!.mockReset().mockReturnValue([]);
+    visionAssistantState.renderMergedElementsText!.mockReset().mockReturnValue("");
 
     // Default mocks
     extractStateFromTabMock.mockResolvedValue(makeDomState());
@@ -304,21 +360,62 @@ describe("extractStateForRun — vision-merge branches", () => {
     const state = await extractStateForRun(1, MOCK_TABS);
     expect(state.url).toBe("https://example.com");
     expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false);
+    // `captureTabScreenshot` is only reachable PAST the `!va?.isReady` guard
+    // (the always-on merge block). Asserting it was NOT called discriminates
+    // this branch from the ready-state merge path — deleting the guard would
+    // make this assertion fail (a TypeError at va.detect would be caught and
+    // produce the same DOM-only fallback call).
+    expect(captureTabScreenshotMock).not.toHaveBeenCalled();
   });
 
-  // ── Branch 5 & 6: Always-on, vision ready — requires integration test ─────
-  //
-  // These branches require `globalVisionAssistant` (module-internal state) to
-  // be set by `ensureVisionAssistantInit()`, which is fire-and-forget async.
-  // The VA constructor is imported via a relative dynamic import
-  // (`import("../vision-assistant")`) that vi.mock("@/extension/...") does
-  // not intercept, so we cannot control the init outcome from unit tests.
-  //
-  // The branches are:
-  //   5: try succeeds → parallel DOM + vision detection, merge results
-  //   6: try fails → catch returns DOM-only fallback
-  //
-  // These are integration-tested via manual testing with Local Vision enabled.
+  // ── Branch 5: Always-on, vision assistant ready, try succeeds ──────────────
+
+  test("always-on, vision ready: parallel merge with vision detections", async () => {
+    modelSupportsVisionMock.mockResolvedValue(false);
+    setVisionSettings({
+      enableLocalVision: true,
+      visionMode: "always",
+      enableScreenshots: true,
+    });
+    visionAssistantState.isReady = true;
+    mergeDetectionsMock.mockReturnValue([
+      { source: "vision", visionId: "v1", pixelRect: { x: 1, y: 2, width: 10, height: 10 }, text: "btn" },
+    ]);
+
+    // First call primes the fire-and-forget init (the sync guard sees a null
+    // global); the second call finds the initialized, ready assistant and
+    // reaches the merge block.
+    await extractStateForRun(1, MOCK_TABS);
+    await flushAsync();
+    captureTabScreenshotMock.mockClear();
+    const state = await extractStateForRun(1, MOCK_TABS);
+
+    expect(captureTabScreenshotMock).toHaveBeenCalledTimes(1);
+    expect(visionAssistantState.detect).toHaveBeenCalled();
+    expect(mergeDetectionsMock).toHaveBeenCalled();
+    expect(state.url).toBe("https://example.com");
+  });
+
+  // ── Branch 6: Always-on, vision ready, detect fails → DOM-only fallback ────
+
+  test("always-on, vision ready, detect rejects: falls back to DOM-only", async () => {
+    modelSupportsVisionMock.mockResolvedValue(false);
+    setVisionSettings({
+      enableLocalVision: true,
+      visionMode: "always",
+      enableScreenshots: true,
+    });
+    visionAssistantState.isReady = true;
+
+    await extractStateForRun(1, MOCK_TABS); // prime init
+    await flushAsync();
+    visionAssistantState.detect.mockRejectedValue(new Error("decode failed"));
+    captureTabScreenshotMock.mockClear();
+    const state = await extractStateForRun(1, MOCK_TABS);
+
+    expect(state.url).toBe("https://example.com");
+    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false);
+  });
 
   // ── Fallback tab id: used when run state has no currentTabId ───────────────
 
@@ -409,5 +506,189 @@ describe("extractStateForRun — vision-merge branches", () => {
     expect(state.url).toBe("https://example.com");
     // effectiveTextOnly=true (mainModelVision=false) → DOM-only with screenshot=false
     expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false);
+  });
+});
+
+describe("handleDetectVisualRequest abort signal", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    const ssMod = await import("@/extension/background/screenshots");
+    captureTabScreenshotMock = ssMod.captureTabScreenshot as unknown as ReturnType<typeof vi.fn>;
+    const mergerMod = await import("@/extension/vision-assistant/merger");
+    mergeDetectionsMock = mergerMod.mergeDetections as unknown as ReturnType<typeof vi.fn>;
+    renderMergedElementsTextMock = mergerMod.renderMergedElementsText as unknown as ReturnType<typeof vi.fn>;
+    const catMod = await import("@/lib/agent/llm/catalog");
+    modelSupportsVisionMock = catMod.modelSupportsVision as unknown as ReturnType<typeof vi.fn>;
+
+    for (const k of Object.keys(localStore)) delete localStore[k];
+    for (const k of Object.keys(sessionStore)) delete sessionStore[k];
+    setRunState(1, 0);
+    // Restore the default run-state shape: earlier tests (the "fallback tab
+    // id" case) call mockResolvedValue on the SAME mock object this describe
+    // uses, so re-importing state-store does not reset its implementation — do
+    // it explicitly or a stray `{ step: 0 }` makes every DETECT_VISUAL request
+    // fail with "no active run".
+    const storeMod = await import("@/extension/background/state-store");
+    (storeMod.getRunState as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ currentTabId: 1, step: 0 });
+    setVisionSettings({
+      enableLocalVision: true,
+      visionMode: "always",
+      enableScreenshots: true,
+    });
+    visionAssistantState.isReady = true;
+    visionAssistantState.detect = vi.fn().mockResolvedValue([]);
+    visionAssistantState.cleanup = vi.fn().mockResolvedValue(undefined);
+    visionAssistantState.mergeDetections!.mockReset().mockReturnValue([]);
+    visionAssistantState.renderMergedElementsText!.mockReset().mockReturnValue("");
+    captureTabScreenshotMock.mockResolvedValue("data:image/png;base64,abc");
+    modelSupportsVisionMock.mockResolvedValue(false);
+    mergeDetectionsMock.mockReturnValue([]);
+    renderMergedElementsTextMock.mockReturnValue("");
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function primeReadyAssistant(): Promise<typeof import("@/extension/background/run-helpers")> {
+    const mod = await import("@/extension/background/run-helpers");
+    // First call primes the fire-and-forget init; the ready assistant is then
+    // available for handleDetectVisualRequest.
+    await mod.extractStateForRun(1, MOCK_TABS);
+    await flushAsync();
+    visionAssistantState.detect.mockClear();
+    return mod;
+  }
+
+  test("threads a caller-supplied signal into va.detect", async () => {
+    const mod = await primeReadyAssistant();
+    const signal = new AbortController().signal;
+
+    const result = await mod.handleDetectVisualRequest("find buttons", signal);
+
+    expect(result.ok).toBe(true);
+    expect(visionAssistantState.detect).toHaveBeenCalledTimes(1);
+    expect(visionAssistantState.detect.mock.calls[0]?.[1]).toBe(signal);
+  });
+
+  test("falls back to the active run's signal (set via buildLoopDeps)", async () => {
+    const mod = await primeReadyAssistant();
+    const controller = new AbortController();
+    mod.buildLoopDeps({
+      tab: { id: 1 } as chrome.tabs.Tab,
+      sendEvent: vi.fn(),
+      controller,
+      config: {
+        maxSteps: 10,
+        maxActionsPerStep: 5,
+        plannerInterval: 5,
+        maxFailures: 5,
+        costCapUsd: 10,
+      },
+      task: "t",
+      mode: "standard",
+    });
+
+    const result = await mod.handleDetectVisualRequest("find buttons");
+
+    expect(result.ok).toBe(true);
+    expect(visionAssistantState.detect.mock.calls[0]?.[1]).toBe(controller.signal);
+  });
+
+  test("with no signal available, detect is called with undefined (no crash)", async () => {
+    const mod = await primeReadyAssistant();
+
+    const result = await mod.handleDetectVisualRequest("find buttons");
+
+    expect(result.ok).toBe(true);
+    expect(visionAssistantState.detect.mock.calls[0]?.[1]).toBeUndefined();
+  });
+
+  test("returns an honest error when no active run/tab exists", async () => {
+    const mod = await primeReadyAssistant();
+    const { getRunState } = await import("@/extension/background/state-store");
+    (getRunState as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+
+    const result = await mod.handleDetectVisualRequest("find buttons");
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("no active run");
+  });
+});
+
+describe("vision assistant generation ownership", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    const ssMod = await import("@/extension/background/screenshots");
+    captureTabScreenshotMock = ssMod.captureTabScreenshot as unknown as ReturnType<typeof vi.fn>;
+    const catMod = await import("@/lib/agent/llm/catalog");
+    modelSupportsVisionMock = catMod.modelSupportsVision as unknown as ReturnType<typeof vi.fn>;
+
+    for (const k of Object.keys(localStore)) delete localStore[k];
+    for (const k of Object.keys(sessionStore)) delete sessionStore[k];
+    setRunState(1, 0);
+    setVisionSettings({
+      enableLocalVision: true,
+      visionMode: "always",
+      enableScreenshots: true,
+    });
+    visionAssistantState.isReady = true;
+    visionAssistantState.detect = vi.fn().mockResolvedValue([]);
+    visionAssistantState.cleanup = vi.fn().mockResolvedValue(undefined);
+    visionAssistantState.mergeDetections!.mockReset().mockReturnValue([]);
+    visionAssistantState.renderMergedElementsText!.mockReset().mockReturnValue("");
+    captureTabScreenshotMock.mockResolvedValue("data:image/png;base64,abc");
+    modelSupportsVisionMock.mockResolvedValue(false);
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  test("teardownScheduledVision skips cleanup when a newer run claimed the assistant", async () => {
+    const mod = await import("@/extension/background/run-helpers");
+    // Prime the fire-and-forget init so the shared assistant is in place.
+    await mod.extractStateForRun(1, MOCK_TABS);
+    await flushAsync();
+    expect(visionAssistantState.cleanup).not.toHaveBeenCalled();
+
+    // A new run claims ownership (bumps the generation).
+    mod.resetVisionInitFlagForNewRun();
+    // The PREVIOUS run's teardown now runs — it must leave the assistant
+    // alone, otherwise the new run's vision silently breaks.
+    await mod.teardownScheduledVision();
+    expect(visionAssistantState.cleanup).not.toHaveBeenCalled();
+  });
+
+  test("teardownScheduledVision cleans up when NO newer run claimed it", async () => {
+    const mod = await import("@/extension/background/run-helpers");
+    await mod.extractStateForRun(1, MOCK_TABS);
+    await flushAsync();
+
+    await mod.teardownScheduledVision();
+    expect(visionAssistantState.cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  test("a mid-cleanup claim leaves the new run with a functioning fresh assistant", async () => {
+    const mod = await import("@/extension/background/run-helpers");
+    await mod.extractStateForRun(1, MOCK_TABS);
+    await flushAsync();
+
+    // Make cleanup slow so the claim lands mid-teardown.
+    visionAssistantState.cleanup.mockImplementation(async () => {
+      await Promise.resolve();
+    });
+    const teardown = mod.teardownScheduledVision();
+    mod.resetVisionInitFlagForNewRun();
+    await teardown;
+
+    // The new run's next extraction re-initializes fresh (the global was
+    // nulled before cleanup) and reaches the ready merge path.
+    await mod.extractStateForRun(1, MOCK_TABS); // re-init + DOM-only
+    await flushAsync();
+    await mod.extractStateForRun(1, MOCK_TABS); // ready path
+    expect(visionAssistantState.detect).toHaveBeenCalled();
+    // Only the stale teardown cleaned up — nothing else touched the assistant.
+    expect(visionAssistantState.cleanup).toHaveBeenCalledTimes(1);
   });
 });

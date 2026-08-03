@@ -56,4 +56,20 @@ describe("lifecycle status updates", () => {
     expect(dot.dataset.status).toBe("error");
     expect(label.textContent).toBe("Error");
   });
+
+  test("sets done state", () => {
+    setLifecycle("done");
+    const dot = document.getElementById("statusDot") as HTMLElement;
+    const label = document.getElementById("statusLabel") as HTMLElement;
+    expect(dot.dataset.status).toBe("done");
+    expect(label.textContent).toBe("Done ✓");
+  });
+
+  test("sets waiting state", () => {
+    setLifecycle("waiting");
+    const dot = document.getElementById("statusDot") as HTMLElement;
+    const label = document.getElementById("statusLabel") as HTMLElement;
+    expect(dot.dataset.status).toBe("waiting");
+    expect(label.textContent).toBe("Waiting…");
+  });
 });

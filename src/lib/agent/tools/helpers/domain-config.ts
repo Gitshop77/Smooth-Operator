@@ -47,6 +47,15 @@ const DOMAIN_CONFIG_ENFORCED_KEY = "__openCoworkDomainConfigEnforced";
 let lastKnownGood: DomainConfig = {};
 
 /**
+ * Whether a VALID policy has ever been installed via `setDomainConfig`. The
+ * initial `{}` default for `lastKnownGood` must not be treated as "a policy
+ * was configured": writing it on the first-ever `setDomainConfig(undefined,
+ * enforced)` would make `isDomainConfigMissingButEnforced` see a present
+ * config and FAIL OPEN. Only a genuinely installed policy counts as known-good.
+ */
+let hasKnownGood = false;
+
+/**
  * Set when a `globalThis` policy read throws (e.g. a hostile/buggy accessor).
  * A throwing read must NOT be silently treated as "no policy" (allow-all) — we
  * fail CLOSED instead (see {@link checkUrlAllowedWithDomainConfig}).
@@ -96,20 +105,35 @@ function writeGlobal(key: string, value: unknown): void {
  * instead of writing the globals directly.
  */
 export function setDomainConfig(config?: DomainConfig, enforced?: boolean): void {
+  // `enforced === false` is an explicit "no restrictions right now" from the
+  // host. It MUST win over any config payload: a valid allow/block list passed
+  // alongside it would otherwise re-install the policy and make the config
+  // look enforced after the host turned enforcement off. Write an explicit
+  // empty config (allow-all) so the side-channel reflects the disabled state.
+  if (enforced === false) {
+    writeGlobal(DOMAIN_CONFIG_KEY, EMPTY_CONFIG);
+    if (enforced !== undefined) {
+      writeGlobal(DOMAIN_CONFIG_ENFORCED_KEY, enforced);
+    }
+    return;
+  }
   const validated = config ? validateDomainConfig(config) : null;
   if (validated) {
     lastKnownGood = validated;
+    hasKnownGood = true;
     writeGlobal(DOMAIN_CONFIG_KEY, validated);
-  } else if (enforced === false) {
- // Explicitly disabling enforcement means allow-all: clear any prior
- // allow/block list rather than retaining lastKnownGood, so enforced=false
- // actually drops URL filtering (matching the documented contract).
-    writeGlobal(DOMAIN_CONFIG_KEY, EMPTY_CONFIG);
-  } else {
- // Missing or malformed config → retain the last-known-good policy rather
- // than overwriting with `undefined` (which `getDomainConfig` would treat
- // as `{}` → unrestricted navigation).
+  } else if (hasKnownGood) {
+    // Missing or malformed config → retain the last-known-good policy rather
+    // than overwriting with `undefined` (which `getDomainConfig` would treat
+    // as `{}` → unrestricted navigation).
     writeGlobal(DOMAIN_CONFIG_KEY, lastKnownGood);
+  } else {
+    // No valid policy was ever installed — do NOT write the initial `{}`
+    // default. A present-but-empty global would make
+    // `isDomainConfigMissingButEnforced` report "config present" and FAIL
+    // OPEN when enforcement is expected. Leaving the global absent preserves
+    // the missing-but-enforced fail-Closed contract.
+    delete (globalThis as Record<string, unknown>)[DOMAIN_CONFIG_KEY];
   }
   if (enforced !== undefined) {
     writeGlobal(DOMAIN_CONFIG_ENFORCED_KEY, enforced);

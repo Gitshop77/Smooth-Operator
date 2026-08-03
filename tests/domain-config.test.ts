@@ -11,7 +11,7 @@
  * fails CLOSED in the latter case.
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   getDomainConfig,
   setDomainConfig,
@@ -199,5 +199,45 @@ describe("setDomainConfig retains last-known-good (never downgrades to allow-all
     setDomainConfig({ allowedDomains: ["a.com"] }, true);
     expect(checkUrlAllowedWithDomainConfig("https://a.com").allowed).toBe(true);
     expect(checkUrlAllowedWithDomainConfig("https://b.com").allowed).toBe(false);
+  });
+
+  test("enforced=false writes EMPTY_CONFIG even when a VALID config is supplied", () => {
+    // Turning enforcement OFF is a deliberate "no restrictions" state. A valid
+    // allow/block list must NOT be installed alongside it — otherwise the
+    // config would still read as configured (and enforced-global absent or
+    // stale) when the operator intended allow-all.
+    setDomainConfig({ allowedDomains: ["a.com"] }, false);
+    expect(isDomainPolicyEnforced()).toBe(false);
+    expect(getDomainConfig()).toEqual({});
+    expect(checkUrlAllowedWithDomainConfig("https://anything.com").allowed).toBe(true);
+  });
+});
+
+describe("setDomainConfig first-ever call without a valid policy (fail-closed)", () => {
+  // Installed as a FRESH module copy so `hasKnownGood`/`lastKnownGood` module
+  // state starts at the default — this describes the "no policy has EVER been
+  // installed" scenario, which module state from the tests above would mask.
+  async function freshDomainConfig() {
+    vi.resetModules();
+    return import("../src/lib/agent/tools/helpers/domain-config");
+  }
+
+  afterEach(() => {
+    delete (globalThis as Record<string, unknown>)[ENFORCED];
+    delete (globalThis as Record<string, unknown>)[CONFIG];
+  });
+
+  test("undefined config + enforced=true with no prior policy does NOT write {} (fails closed)", async () => {
+    const fresh = await freshDomainConfig();
+    fresh.setDomainConfig(undefined, true);
+    // The config global must be ABSENT — writing the module's initial {}
+    // would make isDomainConfigMissingButEnforced report "present" and fail
+    // OPEN (allow-all) despite enforcement being requested.
+    expect((globalThis as Record<string, unknown>)[CONFIG]).toBeUndefined();
+    expect(fresh.isDomainPolicyEnforced()).toBe(true);
+    expect(fresh.isDomainConfigMissingButEnforced()).toBe(true);
+    const result = fresh.checkUrlAllowedWithDomainConfig("https://evil.com");
+    expect(result.allowed).toBe(false);
+    expect(result.reason ?? "").toMatch(/fail closed/i);
   });
 });

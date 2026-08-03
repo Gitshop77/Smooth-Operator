@@ -10,7 +10,6 @@
  */
 
 import type { LogEvent } from "@/lib/agent/types";
-import { redactKeyLeak } from "@/extension/shared";
 import {
   costLabel,
   tokenLabel,
@@ -30,6 +29,7 @@ import { formatTokens, isValidAgentEvent } from "./log-renderer-utils";
 let totalCost = 0;
 let totalTokens = 0;
 let totalsRestored = false;
+let restoreGeneration = 0;
 
 // ─── Persistence ───────────────────────────────────────────────────────────
 
@@ -41,6 +41,10 @@ export function clearRunTotals(): void {
   totalCost = 0;
   totalTokens = 0;
   totalsRestored = true;
+  // Invalidate any in-flight restore so a stale snapshot can't be applied
+  // after the counters were reset (restoreGeneration is re-checked in the
+  // restore callback).
+  restoreGeneration++;
   costLabel.textContent = "$0.0000";
   tokenLabel.textContent = formatTokens(0);
   // Clear persisted snapshot so restoreTotalsFromStorage doesn't read stale
@@ -61,6 +65,7 @@ export function addLogRow(event: LogEvent, time: string): void {
   switch (event.type) {
     case "run-start":
       setLifecycle("thinking");
+      setRunning(true);
       clearRunTotals();
       addSystemMessage("▶", `Task: ${event.task}`, undefined, time);
       break;
@@ -109,16 +114,19 @@ export function addLogRow(event: LogEvent, time: string): void {
         time,
       );
       break;
-    case "error":
+    case "error": {
+      const parts = [event.code ? `[${event.code}]` : null, event.recovery ?? null].filter(Boolean).join(" ");
+      const text = `${event.message}${parts ? ` — ${parts}` : ""}`;
       if (!event.recoverable) {
         setRunning(false);
         setLifecycle("error");
-        addSystemMessage("❌", event.message, "error", time);
+        addSystemMessage("❌", text, "error", time);
       } else {
         setLifecycle("error");
-        addSystemMessage("⚠", event.message, "warning", time);
+        addSystemMessage("⚠", text, "warning", time);
       }
       break;
+    }
     case "cost": {
       const c = Number(event.costUsd);
       const ti = Number(event.tokensIn);
@@ -172,7 +180,7 @@ export function addLogRow(event: LogEvent, time: string): void {
       break;
     default: {
       try {
-        body = redactKeyLeak(JSON.stringify(event).slice(0, 100));
+        body = JSON.stringify(event).slice(0, 100);
       } catch {
         body = "[unserializable event]";
       }
@@ -212,8 +220,11 @@ chrome.runtime.onMessage.addListener((msg: unknown, sender) => {
 export function restoreTotalsFromStorage(): void {
   if (totalsRestored) return;
   totalsRestored = true;
+  const generation = restoreGeneration;
   chrome.storage.local.get([STORAGE_KEYS.costUsd, STORAGE_KEYS.tokens], (s) => {
     if (chrome.runtime.lastError) return;
+    // A clearRunTotals() landing while the read was in flight must win.
+    if (generation !== restoreGeneration) return;
     const storedCost = s[STORAGE_KEYS.costUsd];
     const storedTokens = s[STORAGE_KEYS.tokens];
     if (Number.isFinite(storedCost)) {

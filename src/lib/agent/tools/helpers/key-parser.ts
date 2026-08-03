@@ -106,13 +106,23 @@ export function parseKeys(keys: string): ParsedKeys {
   const modifierSet = new Set(modifiers.map((m) => MODIFIER_ALIASES[m] ?? m));
  // The main key is kept at its original case.
   let mainRaw = rawParts[rawParts.length - 1] ?? "";
- // A trailing `+` separator with nothing after it denotes a LITERAL "+"
- // key (e.g. `"+"` → just "+", `"ctrl++"` → Ctrl + "+"). Without this
- // special-case `keys.split("+")` yields an empty main token and we'd wrongly
- // reject a valid request to type a plus sign. The agent can also use the
- // `shift+=` form; both now work.
+// A trailing `+` separator with nothing after it denotes a LITERAL "+"
+  // key (e.g. `"+"` → just "+", `"ctrl++"` → Ctrl + "+"). Without this
+  // special-case `keys.split("+")` yields an empty main token and we'd wrongly
+  // reject a valid request to type a plus sign. The agent can also use the
+  // `shift+=` form; both now work.
   if (mainRaw === "" && rawParts.length > 1) {
     mainRaw = "+";
+  } else if (mainRaw === "") {
+    // An empty input (or bare "+" with nothing after it) is almost always a
+    // missing-field bug in the LLM tool call. Throwing here keeps the error
+    // loud instead of silently mapping "" to a space key (which would type an
+    // unintended space). A literal space is still expressible via `" "` (its
+    // trimmed form is non-empty, so it falls to the `trim() === ""` branch
+    // below and maps to a literal space).
+    throw new Error(
+      `parseKeys: empty key combination "${keys}" — expected a main key (e.g. "ctrl+a" or "Enter")`,
+    );
   } else if (mainRaw.trim() === "") {
     mainRaw = " ";
   }
@@ -138,11 +148,15 @@ export function parseKeys(keys: string): ParsedKeys {
   let main = Object.hasOwn(KEY_MAP, mainLower) ? KEY_MAP[mainLower] : mainRaw;
   const shift = modifierSet.has("shift");
 
- // Apply Shift to produce the correct literal character. This mirrors what a
- // real keypress would yield; the `send_keys` handler inserts `main`
- // imperatively, so it must already be the shifted symbol / upper-cased letter.
+// Apply Shift to produce the correct literal character. This mirrors what a
+  // real keypress would yield; the `send_keys` handler inserts `main`
+  // imperatively, so it must already be the shifted symbol / upper-cased letter.
   if (shift && main.length === 1) {
-    const shifted = SHIFT_SYMBOLS[main];
+    // Own-property lookup only — `SHIFT_SYMBOLS` is a plain object, so
+    // `Object.prototype` names would otherwise resolve to garbage. The
+    // `main.length === 1` guard already excludes single-char proto names, but
+    // the hasOwn check keeps the table access consistent with `KEY_MAP`.
+    const shifted = Object.hasOwn(SHIFT_SYMBOLS, main) ? SHIFT_SYMBOLS[main] : undefined;
     if (shifted !== undefined) {
       main = shifted;
     } else if (main >= "a" && main <= "z") {

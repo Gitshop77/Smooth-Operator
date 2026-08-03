@@ -25,7 +25,8 @@ export interface CompatibleCanvas {
 export interface CompatibleLoadedImage {
   width: number;
   height: number;
-  drawTo(ctx: Any2DContext): void;
+  /** Draw at natural size, or at `dw × dh` when both are provided. */
+  drawTo(ctx: Any2DContext, dw?: number, dh?: number): void;
   cleanup?(): void;
 }
 
@@ -71,22 +72,17 @@ export function createCompatibleCanvas(): CompatibleCanvas | null {
  */
 function assertDataUrl(url: string, label: string): void {
   if (typeof url !== "string") throw new Error(`${label}: expected a raster data:image URL`);
- // Parse out the media type (everything before the first comma) and
- // PERCENT-DECODE it before classifying. The previous negative lookahead
- // `/(?!svg\+xml)/` could be bypassed by an encoded media subtype such as
- // `image/svg%2Bxml` (the literal `%2B` survives the regex check and is only
- // decoded later by the decoder), silently letting an SVG payload through to
- // be rasterized. Decoding first closes that gap.
+  // Parse out the media type (everything before the first comma) and reject
+  // ANY `%` in it. Browsers percent-decode a data URL's MIME type during
+  // parsing, so an encoded subtype like `image/svg%2Bxml` would survive a
+  // substring check on the raw string and only become a real SVG later, at
+  // decode time. Raster media types never contain `%`, so rejecting it up
+  // front closes the encoded-subtype bypass (including double-encoded forms)
+  // without needing to decode anything ourselves.
   const comma = url.indexOf(",");
   if (comma < 0) throw new Error(`${label}: expected a raster data:image URL`);
-  const rawMedia = url.slice(0, comma).toLowerCase();
-  let media: string;
-  try {
-    media = decodeURIComponent(rawMedia);
-  } catch {
-    media = rawMedia; // leave undecoded; the checks below still reject it
-  }
-  if (!media.startsWith("data:image/") || media.includes("svg")) {
+  const media = url.slice(0, comma).toLowerCase();
+  if (media.includes("%") || !media.startsWith("data:image/") || media.includes("svg")) {
     throw new Error(`${label}: expected a raster data:image URL`);
   }
 }
@@ -126,9 +122,15 @@ export async function loadCompatibleImage(dataUrl: string): Promise<CompatibleLo
     return {
       width: bitmap.width,
       height: bitmap.height,
-      drawTo: (ctx) => ctx.drawImage(bitmap as unknown as CanvasImageSource, 0, 0),
- // ImageBitmap holds GPU/decoded-image resources — close after drawing
- // to prevent accumulation across long agent runs.
+      drawTo: (ctx, dw, dh) => {
+        if (dw !== undefined && dh !== undefined) {
+          ctx.drawImage(bitmap as unknown as CanvasImageSource, 0, 0, dw, dh);
+        } else {
+          ctx.drawImage(bitmap as unknown as CanvasImageSource, 0, 0);
+        }
+      },
+  // ImageBitmap holds GPU/decoded-image resources — close after drawing
+  // to prevent accumulation across long agent runs.
       cleanup: () => {
         try {
           bitmap.close();
@@ -163,7 +165,13 @@ function loadImageViaImg(dataUrl: string): Promise<CompatibleLoadedImage> {
       resolve({
         width: img.width,
         height: img.height,
-        drawTo: (ctx) => ctx.drawImage(img, 0, 0),
+        drawTo: (ctx, dw, dh) => {
+          if (dw !== undefined && dh !== undefined) {
+            ctx.drawImage(img, 0, 0, dw, dh);
+          } else {
+            ctx.drawImage(img, 0, 0);
+          }
+        },
       });
     };
     img.onerror = () => reject(new Error("Image decode failed"));

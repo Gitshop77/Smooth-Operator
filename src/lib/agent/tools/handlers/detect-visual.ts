@@ -17,6 +17,14 @@ import type { Action } from "../schema";
 import { type ActionContext, isExtensionContext } from "./types";
 import { rejectOnAbort } from "./abort";
 
+// Vision detection is deliberately 2x the generic SW-RPC timeout
+// (SW_RPC_TIMEOUT_MS = 15s): unlike CDP clicks / tab actions (fast message
+// hops), `DETECT_VISUAL` runs the on-device vision model in the SW — the
+// round trip includes a screenshot capture plus model inference, which
+// routinely lands between 2-5s and can exceed 15s on first load / cold model
+// startup (the action docblock above documents the 2-5s typical latency).
+// The 30s cap still bounds a hung SW; a user STOP aborts immediately via
+// `rejectOnAbort` regardless of the timeout.
 const DETECT_VISUAL_TIMEOUT_MS = 30000;
 
 type DetectVisualResponse = {

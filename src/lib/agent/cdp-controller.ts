@@ -42,6 +42,124 @@ interface CdpClickOptions {
   clickCount?: number;
   /** Modifier keys to hold during the click (space-separated names). */
   modifiers?: string;
+  /** Approach the target through a human-like multi-step mouse path. */
+  path?: boolean;
+}
+
+/**
+ * Last known cursor position (CSS pixels, viewport-relative). Humanized
+ * interactions track it so consecutive gestures form a continuous path —
+ * teleporting the cursor across the screen is a classic automation tell.
+ */
+let lastCursor = { x: 0, y: 0 };
+
+/** Options for {@link cdpMoveMousePath}. */
+interface MousePathOptions {
+  /** Total duration of the move in ms. Defaults to a random 200–600 ms. */
+  durationMs?: number;
+}
+
+/**
+ * Move the mouse from (fromX, fromY) to (toX, toY) through a human-like
+ * multi-step path via CDP `Input.dispatchMouseEvent(mouseMoved)`.
+ *
+ * - `steps = max(floor(distance / 50), 10)` — a minimum of 10 events so even
+ *   short moves look like a path, not a teleport.
+ * - Ease-out curve `t = 1 - (1 - i/steps)^2` — fast start, slow landing.
+ * - Per-step ±1px position noise (zero on the final step) + a one-time ±3px
+ *   jitter on the target — real mouse movements are never perfectly straight
+ *   or pixel-exact.
+ * - The cursor's final position (including jitter) is recorded in
+ *   {@link lastCursor} and returned so the caller can press exactly where the
+ *   pointer ended up.
+ *
+ * @param tabId The tab to dispatch the events in (debugger must be attached).
+ * @returns The final cursor position, including the target jitter.
+ */
+export async function cdpMoveMousePath(
+  tabId: number,
+  fromX: number,
+  fromY: number,
+  toX: number,
+  toY: number,
+  opts: MousePathOptions = {}
+): Promise<{ x: number; y: number }> {
+  const durationMs = opts.durationMs ?? 200 + Math.random() * 400;
+  const distance = Math.hypot(toX - fromX, toY - fromY);
+  const steps = Math.max(Math.floor(distance / 50), 10);
+  const stepSleepMs = durationMs / steps;
+
+  // Jitter the target once; every step interpolates toward this shifted point.
+  const target = { x: toX + (Math.random() * 6 - 3), y: toY + (Math.random() * 6 - 3) };
+
+  let x = fromX;
+  let y = fromY;
+  for (let i = 1; i <= steps; i++) {
+    // Ease-out: the first step covers the most ground, the last the least.
+    const t = 1 - (1 - i / steps) ** 2;
+    x = fromX + (target.x - fromX) * t;
+    y = fromY + (target.y - fromY) * t;
+    // Small per-step noise; the final step lands exactly on the target.
+    if (i < steps) {
+      x += Math.random() * 2 - 1;
+      y += Math.random() * 2 - 1;
+    }
+    await dispatchMouseEvent(tabId, "mouseMoved", {
+      x: Math.round(x),
+      y: Math.round(y),
+      button: "none",
+    });
+    await new Promise((r) => setTimeout(r, stepSleepMs));
+  }
+
+  lastCursor = { x: Math.round(target.x), y: Math.round(target.y) };
+  return { ...lastCursor };
+}
+
+/** Options for {@link cdpTypeText}. */
+interface TypeTextOptions {
+  /**
+   * Mean per-character interval in ms. The actual pause is
+   * `max(20, interval + uniform(-30, 50))` ms — a bounded human-like typing
+   * rhythm. Defaults to 80 ms.
+   */
+  intervalMs?: number;
+}
+
+/**
+ * Type text via CDP `Input.dispatchKeyEvent` — one keyDown + keyUp pair per
+ * character with a bounded human-like delay between characters.
+ *
+ * Unlike the content-script's instant value-set, CDP key events are
+ * browser-trusted input: they trigger every key handler the page registers
+ * (React onChange, global hotkey listeners, form auto-submit) and produce
+ * natural composition events. Useful on anti-bot forms that reject
+ * programmatic value assignment or synthetic `input` events.
+ *
+ * @param tabId The tab to type in (debugger must be attached).
+ */
+export async function cdpTypeText(
+  tabId: number,
+  text: string,
+  opts: TypeTextOptions = {}
+): Promise<void> {
+  const intervalMs = opts.intervalMs ?? 80;
+  const chars = Array.from(text);
+  for (const char of chars) {
+    // max(0.02, interval + uniform(-0.03, 0.05)) seconds — bounded so a
+    // pathological random draw can never stall the action.
+    const delayMs = Math.max(20, intervalMs + (Math.random() * 80 - 30));
+    await new Promise((r) => setTimeout(r, delayMs));
+    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
+      type: "keyDown",
+      key: char,
+      text: char,
+    });
+    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: char,
+    });
+  }
 }
 
 /**
@@ -133,30 +251,41 @@ export async function cdpClick(
   y: number,
   options: CdpClickOptions = {}
 ): Promise<void> {
-  const { button = DEFAULT_BUTTON, clickCount = DEFAULT_CLICK_COUNT, modifiers = "" } = options;
+  const { button = DEFAULT_BUTTON, clickCount = DEFAULT_CLICK_COUNT, modifiers = "", path = false } = options;
   const modifierMask = modifierBitmask(modifiers);
   const buttonMask = button === "right" ? 2 : button === "middle" ? 4 : 1;
 
- // Move mouse first (triggers mousemove/hover handlers).
-  await dispatchMouseEvent(tabId, "mouseMoved", { x, y, modifiers: modifierMask });
+  let pressX = x;
+  let pressY = y;
+  if (path) {
+    // Approach from the last known cursor position through a human-like path;
+    // press exactly where the path lands (the jittered target).
+    const landed = await cdpMoveMousePath(tabId, lastCursor.x, lastCursor.y, x, y);
+    pressX = landed.x;
+    pressY = landed.y;
+  } else {
+    lastCursor = { x, y };
+    // Move mouse first (triggers mousemove/hover handlers).
+    await dispatchMouseEvent(tabId, "mouseMoved", { x, y, modifiers: modifierMask });
+  }
 
- // Small delay between move and click (matches human behavior + lets hover handlers fire).
+  // Small delay between move and click (matches human behavior + lets hover handlers fire).
   await new Promise((r) => setTimeout(r, MOUSE_MOVE_SETTLE_MS));
 
- // Press.
+  // Press.
   await dispatchMouseEvent(tabId, "mousePressed", {
-    x,
-    y,
+    x: pressX,
+    y: pressY,
     button,
     buttons: buttonMask,
     clickCount,
     modifiers: modifierMask,
   });
 
- // Release.
+  // Release.
   await dispatchMouseEvent(tabId, "mouseReleased", {
-    x,
-    y,
+    x: pressX,
+    y: pressY,
     button,
     buttons: 0,
     clickCount,

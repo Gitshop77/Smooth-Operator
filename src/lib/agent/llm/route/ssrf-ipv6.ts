@@ -87,6 +87,10 @@ export function expandIPv6(host: string): number[] | null {
   if (zoneIdx !== -1) host = host.slice(0, zoneIdx);
   if (!/^[0-9a-fA-F:]+$/.test(host)) return null;
   const doubleColon = host.indexOf("::");
+  // A second "::" makes the literal malformed (`1::2::3` is not an address);
+  // only the first compression marker may appear, and parsing it as a single
+  // marker would silently fabricate a valid-looking group list.
+  if (doubleColon !== -1 && host.indexOf("::", doubleColon + 2) !== -1) return null;
   let head: string[];
   let tail: string[];
   if (doubleColon === -1) {
@@ -94,8 +98,14 @@ export function expandIPv6(host: string): number[] | null {
     tail = [];
     if (head.length !== 8) return null;
   } else {
-    head = host.slice(0, doubleColon).split(":").filter((x) => x.length > 0);
-    tail = host.slice(doubleColon + 2).split(":").filter((x) => x.length > 0);
+    const headRaw = host.slice(0, doubleColon);
+    const tailRaw = host.slice(doubleColon + 2);
+    // A lone ":" around the compression marker (`:1::`, `:::1`, `1:::2`) or a
+    // trailing one (`::1:`) is malformed — the split would otherwise silently
+    // drop the empty group.
+    if (headRaw.startsWith(":") || tailRaw.startsWith(":") || tailRaw.endsWith(":")) return null;
+    head = headRaw.split(":").filter((x) => x.length > 0);
+    tail = tailRaw.split(":").filter((x) => x.length > 0);
     if (head.length + tail.length > 8) return null;
   }
   const groups: number[] = [];

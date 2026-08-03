@@ -129,8 +129,9 @@ function getName(el: HTMLElement, labelMap: Map<string, HTMLLabelElement>): stri
     if (sensitive) {
       const ariaLabel = el.getAttribute("aria-label");
       if (ariaLabel?.trim()) return ariaLabel.trim();
-      const title = el.getAttribute("title");
-      if (title?.trim()) return title.trim();
+      // `title` is deliberately skipped here: it can reveal what secret the
+      // field holds (e.g. `title="Card number field"`), matching the
+      // sensitive input/textarea policy below.
       if (el.id) {
         const label = labelMap.get(el.id);
         if (label) { const t = directText(label); if (t) return t; }
@@ -263,10 +264,15 @@ function shouldInclude(
   if (SKIP_TAGS.has(tag)) return false;
  // apply visibility + aria-hidden gating even in "all" mode so
  // hidden modals, off-screen duplicates, and aria-hidden decorative elements
- // don't inflate the AX payload with content the user can't see.
-  if (el.getAttribute("aria-hidden") === "true") return false;
-  if (isLikelyHidden(el)) return false;
-  if (filter !== "all") {
+ // don't inflate the AX payload with content the user can't see. `aria-hidden`
+ // is matched case-insensitively (ARIA attribute values are ASCII case-insensitive).
+  if ((el.getAttribute("aria-hidden") || "").toLowerCase() === "true") return false;
+
+  if (filter === "interactive") {
+    if (!isInteractive(el)) return false;
+    // Visibility gate (same as the "all" path below): a hidden element is
+    // never included, even when interactive.
+    if (isLikelyHidden(el)) return false;
  // Reuse a single rect for both the visibility check and the viewport-bounds
  // test so we don't call getBoundingClientRect twice on the hot path.
     const rect = el.getBoundingClientRect();
@@ -275,13 +281,27 @@ function shouldInclude(
  // When not extracting a specific subtree, only include viewport-visible els.
       if (!(rect.top < window.innerHeight && rect.bottom > 0 && rect.left < window.innerWidth && rect.right > 0)) return false;
     }
+    return true;
   }
-  if (filter === "interactive") return isInteractive(el);
-  if (isInteractive(el)) return true;
-  if (isStructural(el)) return true;
-  if (name.length > 0) return true;
+
+ // "all" mode: cheap classification first, visibility last. `isLikelyHidden`
+ // resolves computed style, and style resolution cost grows with ancestor
+ // depth (in jsdom the cascade walks the ancestor chain per element; real
+ // browsers pay a style recalc). A chain of excluded wrappers (plain divs
+ // with no role, name, or interactivity) fails the cheap gates and is
+ // excluded without ever consulting the style system, so a hostile page's
+ // arbitrarily deep excluded chain costs O(cap) instead of O(cap² × rules).
+  const interactive = isInteractive(el);
+  if (interactive || isStructural(el) || name.length > 0) {
+    if (isLikelyHidden(el)) return false;
+    return true;
+  }
   const role = getRole(el);
-  return role !== "generic" && role !== "image";
+  if (role !== "generic" && role !== "image") {
+    if (isLikelyHidden(el)) return false;
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -302,14 +322,24 @@ function refNotFound(refId: string, detail: string): AXTreeResult {
 const MAX_ELEMENTS = 10_000;
 /** Default max tree depth (overridable by the caller). */
 const DEFAULT_MAX_DEPTH = 15;
+/** Absolute recursion cap — bounds stack depth even for hostile DOM trees. */
+const MAX_ABSOLUTE_DEPTH = 512;
 
 /**
  * Recursively build the accessibility tree under `el`. Appends serialized
  * lines to `lines` and increments `counter.count` for each emitted element.
+ *
+ * `depth` is the EMITTED depth (indentation; advances only for included
+ * elements so skipped wrappers don't inflate the output tree). `absDepth`
+ * ALWAYS increments per DOM level, so a chain of excluded elements (e.g. a
+ * DOM-API-built stack of thousands of `<div>`s) hits {@link MAX_ABSOLUTE_DEPTH}
+ * and truncates instead of overflowing the call stack — the emitted-depth
+ * guard alone can't stop it because excluded elements never advance `depth`.
  */
 function buildTree(
   el: HTMLElement,
   depth: number,
+  absDepth: number,
   filter: string,
   refId: string | undefined,
   maxDepth: number,
@@ -318,6 +348,7 @@ function buildTree(
   labelMap: Map<string, HTMLLabelElement>
 ): void {
   if (counter.count >= MAX_ELEMENTS) return;
+  if (absDepth > MAX_ABSOLUTE_DEPTH) return;
   if (depth > maxDepth) return;
   if (!el || !el.tagName) return;
 
@@ -388,9 +419,9 @@ function buildTree(
     }
   }
 
- // Recurse into children (skip <option> children of non-sensitive <select> —
- // they were already emitted explicitly above to avoid duplication).
-  if (depth < maxDepth) {
+  // Recurse into children (skip <option> children of non-sensitive <select> —
+  // they were already emitted explicitly above to avoid duplication).
+  if (depth < maxDepth && absDepth < MAX_ABSOLUTE_DEPTH) {
     if (el.tagName.toLowerCase() !== "select") {
       // firstChild/nextSibling instead of `el.children` so we never
       // instantiate the live children collection on body (jsdom re-snapshots
@@ -398,7 +429,7 @@ function buildTree(
       // extractor.test.ts test 19).
       for (let child = el.firstChild; child; child = child.nextSibling) {
         if (child.nodeType !== 1) continue;
-        buildTree(child as HTMLElement, included ? depth + 1 : depth, filter, refId, maxDepth, lines, counter, labelMap);
+        buildTree(child as HTMLElement, included ? depth + 1 : depth, absDepth + 1, filter, refId, maxDepth, lines, counter, labelMap);
       }
     }
  // Pierce shadow DOM so controls rendered inside open/closed shadow roots
@@ -408,7 +439,7 @@ function buildTree(
     const sr = getShadowRoot(el);
     if (sr) {
       for (const child of Array.from(sr.children)) {
-        buildTree(child as HTMLElement, included ? depth + 1 : depth, filter, refId, maxDepth, lines, counter, labelMap);
+        buildTree(child as HTMLElement, included ? depth + 1 : depth, absDepth + 1, filter, refId, maxDepth, lines, counter, labelMap);
       }
     }
   }
@@ -495,9 +526,9 @@ export function generateAccessibilityTree(
       if (!el) {
         return refNotFound(refId, "no longer exists. It may have been removed from the page.");
       }
-      buildTree(el as HTMLElement, 0, filter, refId, maxDepth, lines, counter, labelMap);
+      buildTree(el as HTMLElement, 0, 0, filter, refId, maxDepth, lines, counter, labelMap);
     } else if (document.body) {
-      buildTree(document.body, 0, filter, undefined, maxDepth, lines, counter, labelMap);
+      buildTree(document.body, 0, 0, filter, undefined, maxDepth, lines, counter, labelMap);
     }
 
  // Cleanup dead WeakRefs to avoid unbounded map growth.
@@ -556,7 +587,10 @@ export function generateAccessibilityTree(
 // The element-ref registry is intentionally module-scoped (off `window`) for
 // security. These accessors exist SOLELY so the unit tests can observe /
 // populate the registry without reaching into a `window` global that no longer
-// exists. They are not part of the public runtime API.
+// exists. They are exported deliberately rather than gated behind a build flag
+// because the test suite imports them from the production module path; they
+// are tree-shaken out of the extension bundle (only tests reference them) and
+// are not exposed on `window`, so a hostile page cannot reach them.
 /** @internal Test-only: snapshot of the registry state. */
 export function __test_registry(): {
   initialized: boolean;

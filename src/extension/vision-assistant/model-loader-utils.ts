@@ -266,12 +266,15 @@ async function downloadChunks(
     }
   }
 
- // Final sanity check: the assembled buffer must exactly equal the declared
- // total, otherwise a misbehaving server truncated us mid-stream.
-  if (buf.byteLength !== total) {
+ // Final sanity check: the assembled buffer must have every byte filled up to
+ // the declared total, otherwise a misbehaving server truncated us mid-stream
+ // (the per-chunk length check above already rejects short chunks, so `off`
+ // reaching `total` is the meaningful invariant — `buf.byteLength` is fixed at
+ // allocation time and cannot diverge).
+  if (off !== total) {
     throw new Error(
       `[vision-assistant] Download of ${label} (${url}) assembled ` +
-        `${buf.byteLength} bytes but expected ${total}`,
+        `${off} bytes but expected ${total}`,
     );
   }
 

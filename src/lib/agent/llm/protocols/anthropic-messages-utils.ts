@@ -47,11 +47,50 @@ export async function fromRequest(request: LLMRequest): Promise<AnthropicBody> {
     stream: true,
   };
 
+  // Reasoning configuration replaces the old temperature-omission hack with a
+  // real `thinking` block. A forced-off request emits an explicit disabled
+  // block and restores temperature; an enabled request (explicit, budget, or
+  // effort) emits `{type:"enabled", budget_tokens:N}` with N clamped to
+  // min(31_999, output-1) — or derived as min(16_000, output/2-1) when only an
+  // effort/enabled signal is given (mirrors opencode's transform layer).
+  // Everything is gated on `request.reasoning` (the provider is a reasoning
+  // model), so an empty reasoningConfig or a non-reasoning provider changes
+  // nothing.
+  const reasoningConfig = request.reasoningConfig;
+  const reasoningActive = request.reasoning === true && reasoningConfig !== undefined;
+  if (reasoningActive && reasoningConfig.enabled === false) {
+    body.thinking = { type: "disabled" };
+    body.temperature = request.generation?.temperature ?? 0;
+  } else if (
+    reasoningActive &&
+    (reasoningConfig.enabled === true ||
+      reasoningConfig.budgetTokens !== undefined ||
+      reasoningConfig.effort !== undefined)
+  ) {
+    const maxOutput = request.generation?.maxTokens ?? 4096;
+    const maxBudget = Math.min(31_999, Math.max(1, maxOutput - 1));
+    const explicit = reasoningConfig.budgetTokens;
+    const budget =
+      typeof explicit === "number" && explicit > 0
+        ? Math.min(Math.floor(explicit), maxBudget)
+        : Math.min(16_000, Math.max(1, Math.floor(maxOutput / 2 - 1)));
+    body.thinking = { type: "enabled", budget_tokens: budget };
+    body.temperature = undefined;
+  }
+
+  // Prompt-cache economics: only emit cache markers when the request is
+  // cache-eligible OR the conversation is multi-turn — a cache the call will
+  // actually re-read. A stateless one-shot call (one system + one user) never
+  // re-reads its own cache write, so emitting cache_control there just pays
+  // the cache-write premium for nothing.
+  const oneShotTwoMessage = systemMessages.length === 1 && userMessages.length === 1;
+  const cacheEligible = request.cacheEligible === true || !oneShotTwoMessage;
+
   if (systemMessages.length) {
     body.system = [{
       type: "text",
       text: systemMessages.map((m) => m.content).join("\n\n"),
-      cache_control: { type: "ephemeral", ttl: "1h" },
+      ...(cacheEligible ? { cache_control: { type: "ephemeral", ttl: "1h" } } : {}),
     }];
   }
 
@@ -66,7 +105,7 @@ export async function fromRequest(request: LLMRequest): Promise<AnthropicBody> {
         ? new Error("Failed to serialize structured-output schema: " + err.message)
         : err;
     }
-    body.tools = [{ name: "return_json", description: "Return the structured output as JSON", input_schema: jsonSchema, cache_control: { type: "ephemeral", ttl: "1h" } }];
+    body.tools = [{ name: "return_json", description: "Return the structured output as JSON", input_schema: jsonSchema, ...(cacheEligible ? { cache_control: { type: "ephemeral", ttl: "1h" } } : {}) }];
     body.tool_choice = { type: "tool", name: "return_json" };
   }
 

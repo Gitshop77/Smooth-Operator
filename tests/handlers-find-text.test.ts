@@ -47,6 +47,32 @@ describe("handleFindText", () => {
     expect(res.message).toBe('Found "needle" and scrolled to it');
   });
 
+  test("rendered-but-below-fold text is found and scrolled to (no viewport gate)", async () => {
+    // Pin the viewport so the match element sits fully below the fold: the
+    // layout mock reports a 100x30 rect at y=0, so offset the element with a
+    // spacer and a small viewport (10px) to force `bottom > innerHeight`.
+    const spacer = document.createElement("div");
+    spacer.style.height = "400px";
+    document.body.appendChild(spacer);
+    const p = document.createElement("p");
+    p.textContent = "below the fold needle";
+    document.body.appendChild(p);
+
+    const origInnerHeight = window.innerHeight;
+    Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 10 });
+    try {
+      const res = await handleFindText(ctx(), { type: "find_text", text: "below the fold needle" });
+      expect(res.success).toBe(true);
+      expect(res.message).toContain("Found");
+    } finally {
+      Object.defineProperty(window, "innerHeight", {
+        configurable: true,
+        writable: true,
+        value: origInnerHeight,
+      });
+    }
+  });
+
   test("text located only inside script/style/template is NOT matched", async () => {
     // type="text/plain" makes jsdom treat the element as a data block (no exec)
     // while still carrying text inside a SCRIPT tag, so the FILTER_REJECT path

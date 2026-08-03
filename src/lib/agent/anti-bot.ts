@@ -9,15 +9,11 @@
  * that need human help).
  *
  * Public API:
- * - `detectChallenge(tabId)` — runs the detection script in the tab and
- * returns the parsed `ChallengeInfo` (or `null` if no challenge). This is
- * the backward-compatible convenience wrapper used by callers that only
- * care about a binary "challenge vs. not".
- * - `detectChallengeResult(tabId)` — the same detection, but returns a
- * discriminated `DetectChallengeOutcome` (`"challenge"` | `"no-challenge"`
- * | `"error"`) so the orchestrator can tell a failed injection apart from
- * a genuine "no challenge" and choose to retry / pause rather than blindly
- * proceed.
+ * - `detectChallengeResult(tabId)` — runs the detection script in the tab and
+ * returns a discriminated `DetectChallengeOutcome` (`"challenge"` |
+ * `"no-challenge"` | `"error"`) so the orchestrator can tell a failed
+ * injection apart from a genuine "no challenge" and choose to retry / pause
+ * rather than blindly proceed.
  * - `waitForChallengeResolution(tabId, opts)` — polls `detectChallengeResult`
  * until the challenge clears, the timeout expires, or detection repeatedly
  * fails (errors are treated conservatively as "unresolved").
@@ -73,14 +69,13 @@ interface ChallengeWaitResult {
 /**
  * Discriminated outcome of a single challenge-detection attempt.
  *
- * `detectChallenge` collapses this to `ChallengeInfo | null`, but the
- * `"error"` case is important: it means the MAIN-world injection could not be
- * performed (tab closed, permission denied, `chrome://`/extension URL, CSP, a
- * racing navigation, etc.). Previously this was silently treated the same as
- * `"no-challenge"`, so a page that made injection throw could bypass challenge
- * detection and the agent would proceed onto an interstitial. Callers that
- * want to be safe should treat `"error"` as "couldn't verify — pause or
- * retry" rather than "all clear".
+ * The `"error"` case is important: it means the MAIN-world injection could
+ * not be performed (tab closed, permission denied, `chrome://`/extension
+ * URL, CSP, a racing navigation, etc.). Previously this was silently treated
+ * the same as `"no-challenge"`, so a page that made injection throw could
+ * bypass challenge detection and the agent would proceed onto an
+ * interstitial. Callers that want to be safe should treat `"error"` as
+ * "couldn't verify — pause or retry" rather than "all clear".
  */
 type DetectChallengeOutcome =
   | { status: "challenge"; info: ChallengeInfo }
@@ -163,23 +158,38 @@ export function detectChallengeInPage(): ChallengeInfo | null {
     return { kind: "cloudflare-block", message: "Cloudflare block page" };
   }
 
- // Widget-only challenges — only count when the widget iframe is actually
- // present (the authoritative selector); the short-body check is secondary
- // corroboration, not the sole signal.
+ // Widget-only challenges — a widget selector alone is NOT sufficient:
+ // contact/checkout/login pages legitimately embed Turnstile/hCaptcha/
+ // reCAPTCHA and would otherwise stall every navigator step for 15s. Only
+ // count the widget when corroborated by an interstitial signal: the
+ // `#challenge-running` marker Cloudflare injects during a real challenge,
+ // or a near-empty body (a genuine interstitial is a shell — a content page
+ // has real text). A short body can never be forged by an attacker who wants
+ // to AVOID a challenge, so this does not re-open a false-positive vector;
+ // and the widget selector stays the primary trigger.
+  const hasInterstitialCorroboration = (): boolean => {
+    return (
+      document.querySelector("#challenge-running") !== null ||
+      getBody().trim().length < 512
+    );
+  };
   if (
-    document.querySelector('.cf-turnstile, iframe[src^="https://challenges.cloudflare.com/"]')
+    document.querySelector('.cf-turnstile, iframe[src^="https://challenges.cloudflare.com/"]') &&
+    hasInterstitialCorroboration()
   ) {
     return { kind: "cloudflare-turnstile", message: "Cloudflare Turnstile challenge" };
   }
 
   if (
-    document.querySelector('.h-captcha, iframe[src^="https://hcaptcha.com/"]')
+    document.querySelector('.h-captcha, iframe[src^="https://hcaptcha.com/"]') &&
+    hasInterstitialCorroboration()
   ) {
     return { kind: "hcaptcha", message: "hCaptcha challenge" };
   }
 
   if (
-    document.querySelector('.g-recaptcha, iframe[src^="https://www.google.com/recaptcha/"]')
+    document.querySelector('.g-recaptcha, iframe[src^="https://www.google.com/recaptcha/"]') &&
+    hasInterstitialCorroboration()
   ) {
     return { kind: "recaptcha", message: "reCAPTCHA challenge" };
   }
@@ -257,10 +267,10 @@ function detectAuthWallInPage(): ChallengeInfo | null {
 /**
  * Run the MAIN-world detection script and return a discriminated outcome.
  *
- * Unlike `detectChallenge`, this distinguishes a failed injection from a
- * genuine "no challenge": an `executeScript` rejection is reported as
- * `{ status: "error" }` (with a warning logged) so the orchestrator can retry
- * or pause instead of proceeding blindly onto a possibly-injected page.
+ * This distinguishes a failed injection from a genuine "no challenge": an
+ * `executeScript` rejection is reported as `{ status: "error" }` (with a
+ * warning logged) so the orchestrator can retry or pause instead of
+ * proceeding blindly onto a possibly-injected page.
  *
  * @param tabId The tab to check.
  */
@@ -303,22 +313,6 @@ export async function detectChallengeResult(
     );
     return { status: "error", error };
   }
-}
-
-/**
- * Detect whether the current page is showing an anti-bot challenge.
- *
- * Convenience wrapper around {@link detectChallengeResult} that collapses the
- * discriminated outcome to `ChallengeInfo | null` for callers that only need
- * the binary signal. Injection failures are collapsed to `null` here (matching
- * the historical contract) — callers that need to distinguish a failed check
- * from a genuine "no challenge" should use `detectChallengeResult` directly.
- *
- * @param tabId The tab to check.
- */
-export async function detectChallenge(tabId: number): Promise<ChallengeInfo | null> {
-  const outcome = await detectChallengeResult(tabId);
-  return outcome.status === "challenge" ? outcome.info : null;
 }
 
 /**

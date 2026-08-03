@@ -2,8 +2,10 @@
  * Anthropic provider facade — uses the anthropic-messages protocol against
  * `https://api.anthropic.com/v1/messages` with `x-api-key` header auth.
  *
- * Adds the required `anthropic-version` header (set by the protocol module)
- * and `anthropic-dangerous-direct-browser-access: true` (so browser contexts
+ * Adds the required `anthropic-version` header (sourced from the protocol
+ * module's exported `API_VERSION` — the protocol itself does not set headers;
+ * the facade attaches it on the route) and
+ * `anthropic-dangerous-direct-browser-access: true` (so browser contexts
  * like the extension service worker can call the API directly).
  *
  * Auth chain: explicit `apiKey` → `ANTHROPIC_API_KEY` env var → throw.

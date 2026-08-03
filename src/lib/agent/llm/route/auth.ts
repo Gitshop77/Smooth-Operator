@@ -60,7 +60,22 @@ const makeCredential = (loadFn: () => string): Credential => {
 const fromCredential = (source: Credential, render: (secret: string) => HeaderMap): AuthStrategy =>
   makeAuth((input: AuthInput): HeaderMap => {
     const secret = source.load();
-    return { ...input.headers, ...render(secret) };
+    // Header-injection guard: a C0 control char (except HTAB, which RFC 7230
+    // permits inside field values) in a secret would let a compromised or
+    // malicious credential split the header line and forge additional headers;
+    // a control char in a header NAME is never valid (field-name is a token).
+    // Throw at render time so the failure surfaces in the request-building call
+    // path instead of shipping an injectable header to the network layer.
+    if (/[\u0000-\u0008\u000A-\u001F\u007F]/.test(secret)) {
+      throw new Error("control character in credential value");
+    }
+    const rendered = render(secret);
+    for (const name of Object.keys(rendered)) {
+      if (/[\u0000-\u001F\u007F]/.test(name)) {
+        throw new Error(`control character in header name (${name})`);
+      }
+    }
+    return { ...input.headers, ...rendered };
   });
 
 const secretValue = (secret: string | null | undefined, source: string): string => {

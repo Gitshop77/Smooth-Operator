@@ -67,6 +67,9 @@ function buildUsage(
   const reasoningTokens = response.usage.reasoningTokens ?? 0;
   const cachedInputTokens = response.usage.cachedInputTokens ?? 0;
   const cachedWriteInputTokens = response.usage.cachedWriteInputTokens ?? 0;
+  // Context tokens drive tiered-rate selection; the input count is the context
+  // when the provider reports no distinct value.
+  const contextTokens = response.usage.contextTokens ?? tokensIn;
   return {
     tokensIn,
     tokensOut,
@@ -74,7 +77,7 @@ function buildUsage(
     cachedInputTokens: omitZero(cachedInputTokens),
     cachedWriteInputTokens: omitZero(cachedWriteInputTokens),
     model,
-    costUsd: estimateCost({ model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, providerId }),
+    costUsd: estimateCost({ model, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, cachedWriteInputTokens, contextTokens, providerId }),
   };
 }
 
@@ -102,6 +105,13 @@ export function toLLMProvider(config: ProviderBridgeConfig): LLMProvider {
       throw new Error("streamChat not supported by bridged providers");
     },
     async chat(req: LLMRequest): Promise<LLMResponse> {
+  // Read the capability flags off the RECEIVER, not the closure: `buildProvider`
+  // (provider-config.ts) patches `supportsReasoning`/`supportsVision` onto a
+  // spread copy AFTER construction, so `config` holds the stale pre-patch
+  // values. `this.supportsReasoning` is set at construction (from config) and
+  // overwritten by the patch, so the nullish chain prefers the live value.
+      const reasoning =
+        (this as LLMProvider | undefined)?.supportsReasoning ?? config.supportsReasoning;
       const model = config.configureResult.model(config.model);
       const { generate } = await import("./route/client");
  // Route registration is a side effect of importing the provider's route
@@ -120,7 +130,14 @@ export function toLLMProvider(config: ProviderBridgeConfig): LLMProvider {
               ...(req.maxTokens !== undefined ? { maxTokens: req.maxTokens } : {}),
             },
             schema: req.schema,
-            ...(config.supportsReasoning ? { reasoning: true } : {}),
+            ...(reasoning ? { reasoning: true } : {}),
+            // Reasoning config is only forwarded to reasoning providers — a
+            // non-reasoning model must keep today's exact request shape (a
+            // stray reasoning param can 400 on non-reasoning endpoints).
+            ...(reasoning && req.reasoning ? { reasoningConfig: req.reasoning } : {}),
+            // Forward the cache-eligibility hint so one-shot calls can omit
+            // cache markers while reused prompts keep their "1h" cache.
+            ...(req.cacheEligible ? { cacheEligible: true } : {}),
             ...(config.structuredOutputStrict ? { structuredOutputStrict: true } : {}),
           },
           req.signal,

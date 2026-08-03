@@ -65,6 +65,14 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: {
    * never upgraded automatically.
    */
   provenance?: SsrfProvenance;
+  /**
+   * Provider id for retry classification. Threaded into
+   * {@link withLLMRetry} so the OpenAI-404 quirk
+   * ({@link isRetryableOpenAI404}) can distinguish transient 404s from
+   * OpenAI/Azure/OpenRouter from permanent "model not found" 404s on other
+   * providers. Optional — omit to keep 404 non-retryable.
+   */
+  providerId?: string;
 }): Transport<Body, HttpPrepared<FrameType>, FrameType> => ({
   prepare: (input: TransportPrepareInput<Body>): HttpPrepared<FrameType> => {
     const bodyStr = input.encodeBody(input.body);
@@ -89,6 +97,14 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: {
         body: prepared.body,
       }, signal, opts.provenance ?? "untrusted");
       if (!r.ok) {
+        // Detach the user-abort listener BEFORE throwing: a non-ok response
+        // resolves normally from fetchWithTimeout (its .catch detach only
+        // fires on fetch-layer errors), so without this every retryable
+        // 429/5xx attempt leaks an abort listener on the long-lived run
+        // signal — an erroring endpoint would accumulate one per attempt for
+        // the whole run. The success path keeps its detach until the stream
+        // ends (mid-stream Stop must stay honored).
+        (r as Response & { __detachAbortListener?: () => void }).__detachAbortListener?.();
         // Read the error body with a byte cap: the old `r.text()` path
         // buffered the entire (potentially multi-GB) error payload before the
         // 100-char slice; the preview reads bounded chunks and cancels once the
@@ -117,7 +133,7 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: {
         throw err;
       }
       return r;
-    }, signal);
+    }, signal, undefined, opts.providerId);
  // `withLLMRetry` only returns when the fetch succeeded (non-ok responses
  // throw inside the retry callback above), so `res.ok` is guaranteed true
  // here — no guard needed.

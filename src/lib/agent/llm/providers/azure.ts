@@ -137,6 +137,19 @@ export function configure(input: Config = {}) {
   // "user-configured"; otherwise "untrusted". This ensures the async DNS
   // validation in transport-http.ts uses the correct trust level.
   const provenance: SsrfProvenance = input.allowLocalExemption ? "user-configured" : "untrusted";
+  // baseURL is guaranteed non-empty here (assertConfigured above); TS can't
+  // see the invariant, so surface a clear error if it ever regresses.
+  if (!baseURL) {
+    throw new Error("Azure baseURL is not configured");
+  }
+  // Split the (possibly path-prefixed) base URL into origin + path-prefix and
+  // re-attach the prefix to the deployment path so `buildURL`'s
+  // `new URL(path, base)` (which replaces the base path for a leading-slash
+  // path) doesn't drop a user-supplied prefix like `/proxy` — a proxied Azure
+  // endpoint would otherwise silently hit the unprefixed URL (404/401).
+  // Mirrors the google.ts / openai.ts / anthropic.ts prefix handling.
+  const parsed = new URL(baseURL);
+  const basePath = parsed.pathname.replace(/\/+$/, "");
 
   return {
     id,
@@ -152,8 +165,8 @@ export function configure(input: Config = {}) {
         id: `azure-openai:${encodeModelIdForUrl(modelID)}`,
         provider: id,
         protocol: OpenAIChat.protocol,
-        endpoint: Endpoint.path(`/openai/deployments/${encodeModelIdForUrl(modelID)}/chat/completions`, {
-          baseURL,
+        endpoint: Endpoint.path(`${basePath}/openai/deployments/${encodeModelIdForUrl(modelID)}/chat/completions`, {
+          baseURL: parsed.origin,
           query: { "api-version": apiVersion },
         }),
         auth: auth(input),

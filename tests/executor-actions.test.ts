@@ -214,9 +214,60 @@ describe("action execution behavior", () => {
     }
   });
 
+  test("save_as_pdf: strips a misleading extension and forces .pdf", async () => {
+    // This handler ALWAYS captures PDF — a "report.png" name must not save
+    // PDF bytes under a .png name (the SW uses the raw name when non-empty).
+    const sendMessage = vi.fn(async () => ({ ok: true, filename: "report.pdf" }));
+    (globalThis as Record<string, unknown>).chrome = {
+      runtime: { id: "ext-id", sendMessage },
+    };
+    try {
+      const action = { type: "save_as_pdf", file_name: "report.png" } as AgentAction;
+      const result = await executeAction(action, makeState());
+      expect(result.success).toBe(true);
+      expect(sendMessage).toHaveBeenCalledWith({ type: "SAVE_AS_PDF", fileName: "report.pdf" });
+    } finally {
+      delete (globalThis as Record<string, unknown>).chrome;
+    }
+  });
+
+  test("save_as_pdf: appends .pdf to a bare name", async () => {
+    const sendMessage = vi.fn(async () => ({ ok: true, filename: "report.pdf" }));
+    (globalThis as Record<string, unknown>).chrome = {
+      runtime: { id: "ext-id", sendMessage },
+    };
+    try {
+      const action = { type: "save_as_pdf", file_name: "report" } as AgentAction;
+      const result = await executeAction(action, makeState());
+      expect(result.success).toBe(true);
+      expect(sendMessage).toHaveBeenCalledWith({ type: "SAVE_AS_PDF", fileName: "report.pdf" });
+    } finally {
+      delete (globalThis as Record<string, unknown>).chrome;
+    }
+  });
+
+  test("save_as_pdf: rejects path-traversal file names before forwarding to the SW", async () => {
+    const sendMessage = vi.fn();
+    (globalThis as Record<string, unknown>).chrome = {
+      runtime: { id: "ext-id", sendMessage },
+    };
+    try {
+      const action = { type: "save_as_pdf", file_name: "../evil.pdf" } as AgentAction;
+      const result = await executeAction(action, makeState());
+      expect(result.success).toBe(false);
+      expect(result.message).toContain("invalid file_name");
+      expect(sendMessage).not.toHaveBeenCalled();
+    } finally {
+      delete (globalThis as Record<string, unknown>).chrome;
+    }
+  });
+
   test("dropdown_options: throws for non-select element", async () => {
-    // Create a mock state with a non-select element at index 1.
+    // Create a mock state with a non-select element at index 1. The element is
+    // attached to the document — selectorMap entries are live page nodes, and a
+    // detached reference would be rejected earlier as "element not found".
     const mockEl = document.createElement("div");
+    document.body.appendChild(mockEl);
     const state = makeState({ selectorMap: { 1: mockEl } });
     const action = { type: "dropdown_options", index: 1 } as AgentAction;
     const result = await executeAction(action, state);
@@ -234,6 +285,7 @@ describe("action execution behavior", () => {
     opt2.value = "b";
     select.appendChild(opt1);
     select.appendChild(opt2);
+    document.body.appendChild(select);
     const state = makeState({ selectorMap: { 1: select } });
     const action = { type: "dropdown_options", index: 1 } as AgentAction;
     const result = await executeAction(action, state);

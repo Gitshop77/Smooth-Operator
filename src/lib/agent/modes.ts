@@ -3,11 +3,10 @@
  * can do.
  *
  * RESTRICTED — current tab only. No new tabs are opened and the explicit
- * `navigate` action to a new URL is blocked. In-tab
- * navigation caused by a link `click` or a same-tab `search`
- * is permitted (the current tab may still change URL) — it is
- * not a sandbox. Safe for "fill this form" tasks on a page
- * whose links you trust.
+ * `navigate` / `search` actions (which point the tab at a new URL) are
+ * blocked. In-tab navigation caused by a link `click` is permitted (the
+ * current tab may still change URL) — it is not a sandbox. Safe for
+ * "fill this form" tasks on a page whose links you trust.
  * STANDARD — current tab + open new tabs + navigate. Default.
  * The agent can browse freely but can't do destructive things.
  * FULL_AGENTIC — everything: open/close tabs, navigate, execute JS, upload,
@@ -79,10 +78,21 @@ export const MODE_CONFIGS = {
  // HARD-BLOCKED here via `canExecuteJs:false` / `canUploadFiles:false` /
  // `canDownloadFiles:false` (fail-closed before any prompt), but the
  // confirmation flag is still asserted by callers and must report `true` so
- // the gate cannot be bypassed if/when the capability flags change. The
+ // the gate cannot be bypassed if/when the capability flags change.
+ // `set_cookie` / `delete_cookies` / `set_storage` / `clear_storage` are
+ // MODE-ALLOWED here (no capability flag gates them) — the confirmation
+ // prompt is the primary guard for these destructive state mutations. The
  // domain-allowlist gating on `evaluate` is enforced separately in
  // `evaluate.ts` / `agent-bridge.ts` and is NOT affected by this entry.
-    confirmRequired: ["evaluate", "upload_file", "save_as_pdf"],
+    confirmRequired: [
+      "evaluate",
+      "upload_file",
+      "save_as_pdf",
+      "set_cookie",
+      "delete_cookies",
+      "set_storage",
+      "clear_storage",
+    ],
   },
   full_agentic: {
     canCloseTabs: true,
@@ -111,16 +121,39 @@ const UNGATED_ACTION_TYPES = [
   "select_dropdown",
   "dropdown_options",
   "scroll",
+  "scroll_to_bottom",
   "send_keys",
   "hover",
   "press_and_hold",
   "go_back",
   "wait",
+  // Wait-condition actions: read-only observation of the DOM/URL/network
+  // (polling never mutates the page). Safe in every mode including restricted.
+  "wait_for_element",
+  "wait_for_text",
+  "wait_for_url",
+  "wait_for_network_idle",
+  // Network-log actions: toggle/read a logging ring in the service worker —
+  // no page mutation, no tab-level API access. Safe in every mode.
+  "enable_network_log",
+  "disable_network_log",
+  "get_network_log",
+  "clear_network_log",
+  "getclear_network_log",
+  // Console-log actions: same pattern — toggle/read the console-capture ring
+  // in the service worker, no page mutation. Safe in every mode.
+  "enable_console_log",
+  "disable_console_log",
+  "get_console_log",
+  "clear_console_log",
+  "getclear_console_log",
   "find_text",
   "find_elements",
+  "list_interactive",
+  "get_computed_style",
+  "get_page_info",
   "extract",
   "done",
-  "search",
   "search_page",
  // User-interaction actions: not page mutations, safe in every mode.
   "ask_human",
@@ -140,9 +173,29 @@ const UNGATED_ACTION_TYPES = [
   "alert_dismiss",
   "alert_get_text",
   "alert_send_keys",
- // Vision detection: read-only observation (like find_elements), no page
- // mutation. Safe in every mode including restricted.
+  // Vision detection: read-only observation (like find_elements), no page
+  // mutation. Safe in every mode including restricted.
   "detect_visual",
+  // Challenge detection: read-only DOM classifier (no DOM mutation, no
+  // network requests). Safe in every mode including restricted.
+  "detect_challenge",
+  // Snapshot paging: read-only continuation of the cached serialization, no
+  // page mutation. Safe in every mode including restricted.
+  "page_next",
+  // Download listing: reads the SW's capture ring, no page mutation, no
+  // tab-level API access. Safe in every mode including restricted.
+  "list_downloads",
+  // Tab listing: read-only chrome.tabs.query projection, no page mutation.
+  // Safe in every mode including restricted.
+  "list_tabs",
+  // Cookie reads: read-only chrome.cookies access — never mutates state.
+  // Safe in every mode including restricted. (set_cookie / delete_cookies
+  // are destructive and are gated per-mode in checkActionAllowed.)
+  "get_cookies",
+  // Storage reads: read-only chrome.storage access — never mutates state.
+  // Safe in every mode including restricted. (set_storage / clear_storage
+  // are destructive and are gated per-mode in checkActionAllowed.)
+  "get_storage",
 ] as const;
 
 /**
@@ -178,6 +231,14 @@ export function checkActionAllowed(actionType: string, mode: AgentMode): ActionP
         return deny("Navigation");
       }
       return { allowed: true };
+    case "search":
+ // `search` navigates the current tab to a search-results URL — the same
+ // capability boundary as `navigate`. Restricted mode (canNavigate:false)
+ // must not be bypassed by emitting `search` instead of `navigate`.
+      if (!config.canNavigate) {
+        return deny("Search");
+      }
+      return { allowed: true };
     case "switch_tab":
       if (!config.canSwitchTabs) {
         return deny("Tab switching");
@@ -193,6 +254,14 @@ export function checkActionAllowed(actionType: string, mode: AgentMode): ActionP
         return deny("JavaScript execution");
       }
       return { allowed: true };
+    case "run_script":
+  // Script steps dispatch as ordinary actions (including `evaluate`), so the
+  // whole script is gated by the same `canExecuteJs` flag — a script can never
+  // run JS in a mode that blocks `evaluate`.
+      if (!config.canExecuteJs) {
+        return deny("Script execution");
+      }
+      return { allowed: true };
     case "upload_file":
       if (!config.canUploadFiles) {
         return deny("File upload");
@@ -206,6 +275,20 @@ export function checkActionAllowed(actionType: string, mode: AgentMode): ActionP
  // bypass the download block.
       if (!config.canDownloadFiles) {
         return deny("Downloads");
+      }
+      return { allowed: true };
+    case "set_cookie":
+    case "delete_cookies":
+    case "set_storage":
+    case "clear_storage":
+ // Destructive cookie/storage writes mutate browser/extension state beyond
+ // the current page (cookie jar, extension memory) — outside restricted
+ // mode's "current tab only" confinement. There is no page capability flag
+ // for these: the boundary is the mode itself. In standard mode the
+ // confirmation prompt is the primary guard (see confirmRequired);
+ // full_agentic allows them outright.
+      if (mode === "restricted") {
+        return deny("Cookie/storage mutation");
       }
       return { allowed: true };
     default:

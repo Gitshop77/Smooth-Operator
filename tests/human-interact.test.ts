@@ -8,6 +8,17 @@
  */
 
 import { describe, test, expect, vi, beforeAll } from "vitest";
+import {
+  promptConfirm,
+  promptText,
+  promptPassword,
+} from "../src/extension/sidepanel/takeover";
+
+vi.mock("../src/extension/sidepanel/takeover", () => ({
+  promptConfirm: vi.fn(),
+  promptText: vi.fn(),
+  promptPassword: vi.fn(),
+}));
 
 type Sender = { id?: string; tab?: unknown; url?: string };
 type Listener = (
@@ -82,6 +93,104 @@ describe("human-interact parseHumanRequest", () => {
     const r = parseHumanRequest({ request: { mode: "input", message: "hi" } });
     expect(r?.mode).toBe("input");
     expect(r?.message).toBe("hi");
+  });
+
+  test("passes through a string defaultValue", () => {
+    expect(
+      parseHumanRequest({
+        request: { mode: "input", message: "email", defaultValue: "pre-filled" },
+      }),
+    ).toEqual({ mode: "input", message: "email", defaultValue: "pre-filled" });
+  });
+});
+
+async function flush(): Promise<void> {
+  await new Promise((r) => setTimeout(r, 0));
+}
+
+describe("HUMAN_INTERACT listener success paths", () => {
+  beforeAll(async () => {
+    // Self-contained setup so this describe does not depend on earlier ones.
+    vi.resetModules();
+    setupGlobals();
+    await import("../src/extension/sidepanel/human-interact");
+  });
+
+  test("confirm mode resolves the prompt and replies confirmed: true", async () => {
+    vi.mocked(promptConfirm).mockResolvedValue(true);
+    const sendResponse = vi.fn();
+    const ret = listener!(
+      { type: "HUMAN_INTERACT", request: { mode: "confirm", message: "Submit?" } },
+      { id: "test" },
+      sendResponse,
+    );
+    expect(ret).toBe(true);
+    await flush();
+    expect(sendResponse).toHaveBeenCalledWith({ mode: "confirm", confirmed: true });
+  });
+
+  test("confirm declined replies confirmed: false", async () => {
+    vi.mocked(promptConfirm).mockResolvedValue(false);
+    const sendResponse = vi.fn();
+    listener!(
+      { type: "HUMAN_INTERACT", request: { mode: "confirm", message: "Submit?" } },
+      { id: "test" },
+      sendResponse,
+    );
+    await flush();
+    expect(sendResponse).toHaveBeenCalledWith({ mode: "confirm", confirmed: false });
+  });
+
+  test("input mode forwards defaultValue to the prompt and replies with the value", async () => {
+    vi.mocked(promptText).mockResolvedValue("typed-value");
+    const sendResponse = vi.fn();
+    listener!(
+      {
+        type: "HUMAN_INTERACT",
+        request: { mode: "input", message: "Email?", defaultValue: "pre" },
+      },
+      { id: "test" },
+      sendResponse,
+    );
+    await flush();
+    expect(promptText).toHaveBeenCalledWith("Email?", "pre");
+    expect(sendResponse).toHaveBeenCalledWith({ mode: "input", value: "typed-value" });
+  });
+
+  test("password mode replies with the entered secret as an input value", async () => {
+    vi.mocked(promptPassword).mockResolvedValue("hunter2");
+    const sendResponse = vi.fn();
+    listener!(
+      { type: "HUMAN_INTERACT", request: { mode: "password", message: "Password?" } },
+      { id: "test" },
+      sendResponse,
+    );
+    await flush();
+    expect(sendResponse).toHaveBeenCalledWith({ mode: "input", value: "hunter2" });
+  });
+
+  test("a cancelled input replies { mode: 'cancelled' }", async () => {
+    vi.mocked(promptText).mockResolvedValue(null);
+    const sendResponse = vi.fn();
+    listener!(
+      { type: "HUMAN_INTERACT", request: { mode: "input", message: "Email?" } },
+      { id: "test" },
+      sendResponse,
+    );
+    await flush();
+    expect(sendResponse).toHaveBeenCalledWith({ mode: "cancelled" });
+  });
+
+  test("a rejected prompt logs an error row and replies cancelled", async () => {
+    vi.mocked(promptConfirm).mockRejectedValue(new Error("modal exploded"));
+    const sendResponse = vi.fn();
+    listener!(
+      { type: "HUMAN_INTERACT", request: { mode: "confirm", message: "Submit?" } },
+      { id: "test" },
+      sendResponse,
+    );
+    await flush();
+    expect(sendResponse).toHaveBeenCalledWith({ mode: "cancelled" });
   });
 });
 

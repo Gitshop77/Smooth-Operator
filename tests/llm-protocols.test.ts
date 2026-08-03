@@ -6,7 +6,7 @@
  * (`finish_reason` check).
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect, vi } from "vitest";
 import { z } from "zod";
 import * as OpenAIChat from "../src/lib/agent/llm/protocols/openai-chat";
 import * as OpenAICompatibleChat from "../src/lib/agent/llm/protocols/openai-compatible-chat";
@@ -15,6 +15,9 @@ import * as Gemini from "../src/lib/agent/llm/protocols/gemini";
 import { encodeModelIdForUrl } from "../src/lib/agent/llm/modelId";
 import { hasImageProvenance, isPlainJSONSchema } from "../src/lib/agent/llm/shared-image";
 import { isValidCatalog, resolveVisionSupport, type CatalogModel } from "../src/lib/agent/llm/catalog";
+import { CACHE_KEY } from "../src/lib/agent/llm/catalog-data";
+import { configure as configureAzure } from "../src/lib/agent/llm/providers/azure";
+import { generate } from "../src/lib/agent/llm/route/client";
 import type { LLMRequest } from "../src/lib/agent/llm/route/client";
 import { normalizeStrictSchema } from "../src/lib/agent/llm/protocols/openai-chat-utils";
 
@@ -32,7 +35,7 @@ type StreamProtocol = {
 /** Build a minimal LLMRequest the protocol's `body.from()` can consume. */
 function makeRequest(overrides: Partial<LLMRequest> = {}): LLMRequest {
   return {
-    model: { id: "test-model", provider: "test", route: {} as never, defaults: {} },
+    model: { id: "test-model", provider: "test", routeId: "test" },
     messages: [
       { role: "system", content: "You are a test assistant." },
       { role: "user", content: "Say hello." },
@@ -161,6 +164,33 @@ describe("OpenAIChat.protocol — body construction", () => {
     const body = await OpenAIChat.protocol.body.from(makeRequest({ generation: { temperature: 0 } } as Partial<LLMRequest>)) as OpenAIChat.OpenAIChatBody;
     expect(body.max_tokens).toBe(4096);
   });
+
+  test("emits reasoning_effort in the reasoning branch when effort is configured", async () => {
+    const body = await OpenAIChat.protocol.body.from(makeRequest({
+      reasoning: true,
+      reasoningConfig: { effort: "high" },
+    })) as OpenAIChat.OpenAIChatBody;
+    expect(body.reasoning_effort).toBe("high");
+    expect(body.max_completion_tokens).toBe(100);
+    expect(body.temperature).toBeUndefined();
+  });
+
+  test("omits reasoning_effort when no effort is configured", async () => {
+    const body = await OpenAIChat.protocol.body.from(makeRequest({ reasoning: true })) as OpenAIChat.OpenAIChatBody;
+    expect(body.reasoning_effort).toBeUndefined();
+    expect(body.max_completion_tokens).toBe(100);
+  });
+
+  test("suppresses the whole reasoning branch when enabled === false", async () => {
+    const body = await OpenAIChat.protocol.body.from(makeRequest({
+      reasoning: true,
+      reasoningConfig: { enabled: false },
+    })) as OpenAIChat.OpenAIChatBody;
+    expect(body.reasoning_effort).toBeUndefined();
+    expect(body.max_completion_tokens).toBeUndefined();
+    expect(body.temperature).toBe(0);
+    expect(body.max_tokens).toBe(100);
+  });
 });
 
 describe("OpenAIChat.protocol — streaming truncation regression", () => {
@@ -269,6 +299,61 @@ describe("OpenAICompatibleChat.protocol", () => {
     const body = await OpenAICompatibleChat.protocol.body.from(makeRequest()) as OpenAIChat.OpenAIChatBody;
     expect(body.frequency_penalty).toBe(0.3);
   });
+
+  test("skips frequency_penalty for reasoning requests (o-series / grok-reasoning reject it)", async () => {
+    const body = await OpenAICompatibleChat.protocol.body.from(makeRequest({ reasoning: true })) as OpenAIChat.OpenAIChatBody;
+    expect(body.frequency_penalty).toBeUndefined();
+  });
+
+  test("drops reasoning_effort for providers that do not opt in (fails closed)", async () => {
+    const body = await OpenAICompatibleChat.protocol.body.from(makeRequest({
+      model: { id: "test-model", provider: "groq", routeId: "test" },
+      reasoning: true,
+      reasoningConfig: { effort: "high" },
+    })) as OpenAIChat.OpenAIChatBody;
+    // The openai-chat builder emits reasoning_effort for any reasoning request;
+    // the openai-compatible shim must strip it unless the profile opts in.
+    expect(body.reasoning_effort).toBeUndefined();
+    // The reasoning branch itself is preserved (max_completion_tokens stays).
+    expect(body.max_completion_tokens).toBe(100);
+  });
+
+  test("forwards reasoning_effort for providers that opt in (openrouter)", async () => {
+    const body = await OpenAICompatibleChat.protocol.body.from(makeRequest({
+      model: { id: "test-model", provider: "openrouter", routeId: "test" },
+      reasoning: true,
+      reasoningConfig: { effort: "high" },
+    })) as OpenAIChat.OpenAIChatBody;
+    expect(body.reasoning_effort).toBe("high");
+    expect(body.max_completion_tokens).toBe(100);
+  });
+
+  test("drops reasoning_effort for unknown providers (synthesized profiles fail closed)", async () => {
+    const body = await OpenAICompatibleChat.protocol.body.from(makeRequest({
+      model: { id: "test-model", provider: "not-a-real-provider", routeId: "test" },
+      reasoning: true,
+      reasoningConfig: { effort: "high" },
+    })) as OpenAIChat.OpenAIChatBody;
+    expect(body.reasoning_effort).toBeUndefined();
+  });
+
+  test("keeps json_schema when structuredOutputStrict is set", async () => {
+    const body = await OpenAICompatibleChat.protocol.body.from(makeRequest({
+      schema: { type: "object" },
+      structuredOutputStrict: true,
+    })) as OpenAIChat.OpenAIChatBody;
+    expect(body.response_format).toBeDefined();
+    expect(body.response_format!.type).toBe("json_schema");
+    expect((body.response_format as { json_schema: { strict: boolean } }).json_schema.strict).toBe(true);
+  });
+
+  test("downgrades json_schema to json_object without structuredOutputStrict", async () => {
+    // The in-prompt schema fallback (llm-direct) carries the contract for
+    // providers that 400 on strict json_schema mode — the wire downgrade must
+    // pair with that fallback, never drop the schema silently.
+    const body = await OpenAICompatibleChat.protocol.body.from(makeRequest({ schema: { type: "object" } })) as OpenAIChat.OpenAIChatBody;
+    expect(body.response_format).toEqual({ type: "json_object" });
+  });
 });
 
 // ─── Anthropic Messages protocol ────────────────────────────────────────────
@@ -279,8 +364,9 @@ describe("AnthropicMessages.protocol — body construction", () => {
     expect(body.system).toBeDefined();
     expect(body.system).toHaveLength(1);
     expect(body.system![0].text).toBe("You are a test assistant.");
-    // Prompt caching marker (1h TTL keeps the prefix warm across long agentic loops)
-    expect(body.system![0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    // A stateless one-shot call (one system + one user) never re-reads its own
+    // cache write, so cache_control is omitted (no cache-write premium).
+    expect(body.system![0].cache_control).toBeUndefined();
   });
 
   test("omits system when no system message", async () => {
@@ -328,6 +414,94 @@ describe("AnthropicMessages.protocol — body construction", () => {
   test("default max_tokens is 4096", async () => {
     const body = await AnthropicMessages.protocol.body.from(makeRequest({ generation: { temperature: 0 } } as Partial<LLMRequest>)) as AnthropicMessages.AnthropicBody;
     expect(body.max_tokens).toBe(4096);
+  });
+
+  test("emits a thinking block with the derived budget when only effort is configured", async () => {
+    const body = await AnthropicMessages.protocol.body.from(makeRequest({
+      generation: { maxTokens: 64000 },
+      reasoning: true,
+      reasoningConfig: { effort: "high" },
+    })) as AnthropicMessages.AnthropicBody;
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 16000 });
+    expect(body.temperature).toBeUndefined();
+  });
+
+  test("derives the thinking budget as min(16_000, output/2-1)", async () => {
+    const body = await AnthropicMessages.protocol.body.from(makeRequest({
+      generation: { maxTokens: 8192 },
+      reasoning: true,
+      reasoningConfig: { enabled: true },
+    })) as AnthropicMessages.AnthropicBody;
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 4095 });
+  });
+
+  test("clamps an explicit thinking budget to min(31_999, output-1)", async () => {
+    const body = await AnthropicMessages.protocol.body.from(makeRequest({
+      generation: { maxTokens: 8192 },
+      reasoning: true,
+      reasoningConfig: { budgetTokens: 16000 },
+    })) as AnthropicMessages.AnthropicBody;
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 8191 });
+  });
+
+  test("passes an explicit thinking budget through when under the cap", async () => {
+    const body = await AnthropicMessages.protocol.body.from(makeRequest({
+      generation: { maxTokens: 64000 },
+      reasoning: true,
+      reasoningConfig: { budgetTokens: 30000 },
+    })) as AnthropicMessages.AnthropicBody;
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 30000 });
+  });
+
+  test("emits thinking:disabled when reasoning is forced off", async () => {
+    const body = await AnthropicMessages.protocol.body.from(makeRequest({
+      reasoning: true,
+      reasoningConfig: { enabled: false },
+    })) as AnthropicMessages.AnthropicBody;
+    expect(body.thinking).toEqual({ type: "disabled" });
+    expect(body.temperature).toBe(0);
+  });
+
+  test("keeps today's body when no reasoning config is set", async () => {
+    const body = await AnthropicMessages.protocol.body.from(makeRequest({ reasoning: true })) as AnthropicMessages.AnthropicBody;
+    expect(body.thinking).toBeUndefined();
+    expect(body.temperature).toBeUndefined();
+  });
+
+  test("ignores reasoning config on non-reasoning providers", async () => {
+    const body = await AnthropicMessages.protocol.body.from(makeRequest({
+      reasoning: false,
+      reasoningConfig: { budgetTokens: 16000 },
+    })) as AnthropicMessages.AnthropicBody;
+    expect(body.thinking).toBeUndefined();
+    expect(body.temperature).toBe(0);
+  });
+
+  test("keeps cache_control '1h' when the request is cache-eligible", async () => {
+    const body = await AnthropicMessages.protocol.body.from(makeRequest({ cacheEligible: true })) as AnthropicMessages.AnthropicBody;
+    expect(body.system![0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  });
+
+  test("keeps cache_control '1h' for multi-message conversations", async () => {
+    const body = await AnthropicMessages.protocol.body.from(makeRequest({
+      messages: [
+        { role: "system", content: "sys" },
+        { role: "user", content: "u1" },
+        { role: "assistant", content: "a1" },
+        { role: "user", content: "u2" },
+      ],
+    })) as AnthropicMessages.AnthropicBody;
+    expect(body.system![0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  });
+
+  test("omits cache_control on the tools block for one-shot non-eligible requests", async () => {
+    const body = await AnthropicMessages.protocol.body.from(makeRequest({ schema: { type: "object" } } as Partial<LLMRequest>)) as AnthropicMessages.AnthropicBody;
+    expect(body.tools![0].cache_control).toBeUndefined();
+  });
+
+  test("keeps cache_control '1h' on the tools block when cache-eligible", async () => {
+    const body = await AnthropicMessages.protocol.body.from(makeRequest({ schema: { type: "object" }, cacheEligible: true } as Partial<LLMRequest>)) as AnthropicMessages.AnthropicBody;
+    expect(body.tools![0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
   });
 });
 
@@ -543,6 +717,53 @@ describe("Gemini.protocol — body construction", () => {
     expect(body.generationConfig.maxOutputTokens).toBe(8192);
   });
 
+  test("omits temperature for reasoning requests (Gemini 3.x rejects it)", async () => {
+    // Google deprecates temperature/top_p/top_k on Gemini 3.x reasoning models
+    // and returns HTTP 400 for them on future generations. The sibling
+    // protocols (openai-chat, anthropic-messages-utils) gate temperature on
+    // `request.reasoning`; gemini must do the same.
+    const body = await Gemini.protocol.body.from(makeRequest({ reasoning: true })) as Gemini.GeminiBody;
+    expect(body.generationConfig.temperature).toBeUndefined();
+    // The output budget is still sent (it is the thinking budget on reasoning models).
+    expect(body.generationConfig.maxOutputTokens).toBe(100);
+  });
+
+  test("keeps temperature for non-reasoning requests", async () => {
+    const body = await Gemini.protocol.body.from(makeRequest({ reasoning: false })) as Gemini.GeminiBody;
+    expect(body.generationConfig.temperature).toBe(0);
+  });
+
+  test("adds thinkingConfig.thinkingBudget when a budget is configured", async () => {
+    const body = await Gemini.protocol.body.from(makeRequest({
+      reasoning: true,
+      reasoningConfig: { budgetTokens: 16000 },
+    })) as Gemini.GeminiBody;
+    expect(body.generationConfig.thinkingConfig).toEqual({ thinkingBudget: 16000 });
+    expect(body.generationConfig.temperature).toBeUndefined();
+  });
+
+  test("clamps an oversized thinking budget to the Gemini max (32768)", async () => {
+    const body = await Gemini.protocol.body.from(makeRequest({
+      reasoning: true,
+      reasoningConfig: { budgetTokens: 1e12 },
+    })) as Gemini.GeminiBody;
+    expect(body.generationConfig.thinkingConfig).toEqual({ thinkingBudget: 32768 });
+  });
+
+  test("omits thinkingConfig without a budget", async () => {
+    const body = await Gemini.protocol.body.from(makeRequest({ reasoning: true, reasoningConfig: { enabled: true } })) as Gemini.GeminiBody;
+    expect(body.generationConfig.thinkingConfig).toBeUndefined();
+  });
+
+  test("respects enabled:false (restores temperature, no thinkingConfig)", async () => {
+    const body = await Gemini.protocol.body.from(makeRequest({
+      reasoning: true,
+      reasoningConfig: { budgetTokens: 16000, enabled: false },
+    })) as Gemini.GeminiBody;
+    expect(body.generationConfig.thinkingConfig).toBeUndefined();
+    expect(body.generationConfig.temperature).toBe(0);
+  });
+
   test("geminiPath embeds the model id in the URL path", async () => {
     expect(Gemini.geminiPath("gemini-2.0-flash")).toBe("/gemini-2.0-flash:streamGenerateContent");
   });
@@ -666,6 +887,17 @@ describe("isValidCatalog — catalog trust-boundary guard", () => {
     expect(isValidCatalog({ openai: c })).toBe(false);
   });
 
+  test("rejects a non-finite cost (NaN/Infinity would poison the cost cap)", () => {
+    // typeof NaN and typeof Infinity are both "number", so the guard must
+    // check Number.isFinite, not just type. The secondary rate fields
+    // (cache_write, input_audio, …) went through a typeof-only check.
+    const c = validProvider();
+    (c.models["gpt-4o"] as { cost: Record<string, unknown> }).cost = { input: 1, output: 1, cache_write: Number.POSITIVE_INFINITY };
+    expect(isValidCatalog({ openai: c })).toBe(false);
+    (c.models["gpt-4o"] as { cost: Record<string, unknown> }).cost = { input: 1, output: 1, input_audio: Number.NaN };
+    expect(isValidCatalog({ openai: c })).toBe(false);
+  });
+
   test("rejects a missing/non-string release_date (would crash the picker)", () => {
     const c = validProvider();
     (c.models["gpt-4o"] as { release_date: unknown }).release_date = 20240101;
@@ -676,6 +908,15 @@ describe("isValidCatalog — catalog trust-boundary guard", () => {
     const c = validProvider();
     (c as { id: unknown }).id = 123;
     expect(isValidCatalog({ openai: c })).toBe(false);
+  });
+});
+
+describe("model catalog cache key convention", () => {
+  test("CACHE_KEY follows the project's open_cowork_ storage prefix", () => {
+    // Storage keys are the one namespace users may see; the __opencowork_
+    // double-underscore prefix diverges from the open_cowork_ convention
+    // used by every other storage key in the extension.
+    expect(CACHE_KEY).toMatch(/^open_cowork_/);
   });
 });
 
@@ -776,6 +1017,22 @@ describe("resolveVisionSupport — modelSupportsVision gating logic", () => {
     const models = [model({ id: "gpt-4-2024-08-06", attachment: false })];
     expect(resolveVisionSupport("gpt-4", models)).toBe(false);
   });
+
+  test("exact catalog entry with explicit attachment:false beats the name heuristic", () => {
+    // 'claude-3-opus' matches VISION_PATTERNS ('\bclaude-3\b'), but the catalog
+    // explicitly declares attachment:false for this exact id. The explicit
+    // statement must win — the heuristic is only a fallback for models the
+    // catalog has no opinion about.
+    const models = [model({ id: "claude-3-opus", attachment: false })];
+    expect(resolveVisionSupport("claude-3-opus", models)).toBe(false);
+  });
+
+  test("modalities input 'image' still reports vision even when attachment is false", () => {
+    // The modalities field is an explicit signal; it is not overridden by the
+    // attachment default.
+    const models = [model({ id: "claude-3-opus", attachment: false, modalities: { input: ["image"] } })];
+    expect(resolveVisionSupport("claude-3-opus", models)).toBe(true);
+  });
 });
 
 // ─── isPlainJSONSchema (moved to shared-image) ──────────────────────────────
@@ -854,5 +1111,48 @@ describe("normalizeStrictSchema default stripping", () => {
       $defs: { d: { type: "string", default: "d" } },
     });
     expect(JSON.stringify(normalized)).not.toContain('"default"');
+  });
+});
+
+// ─── azure facade: path-prefixed baseURL must survive ────────────────────────
+
+describe("azure facade baseURL path prefix", () => {
+  test("a path-prefixed baseURL is preserved in the deployment URL", async () => {
+    // The transport's DNS recheck fails closed without a resolver; shim a
+    // public IP so the generate-based test reaches the mocked fetch.
+    const g = globalThis as unknown as { chrome?: unknown };
+    const savedFetch = globalThis.fetch;
+    const savedChrome = g.chrome;
+    try {
+      g.chrome = {
+        runtime: {},
+        dns: { resolve: (_h: string, cb: (r: { addresses?: string[] }) => void) => cb({ addresses: ["93.184.216.34"] }) },
+      };
+      const fetchMock = vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        type: "basic",
+        headers: { get: () => null },
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.close();
+          },
+        }),
+      }));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const cfg = configureAzure({ baseURL: "https://example.org/proxy", apiKey: "k", apiVersion: "2024-10-21" });
+      const model = cfg.model("gpt-4o");
+      await generate({ model, messages: [{ role: "user", content: "hi" }] });
+      const [url] = fetchMock.mock.calls[0] as unknown as [string];
+      // buildURL's `new URL(path, base)` replaces the base PATH for a
+      // leading-slash path — the facade must split origin + prefix so a
+      // proxied Azure endpoint (`https://{resource}.openai.azure.com/prefix`)
+      // doesn't silently hit the unprefixed URL (404/401).
+      expect(url).toContain("https://example.org/proxy/openai/deployments/gpt-4o/chat/completions");
+    } finally {
+      globalThis.fetch = savedFetch;
+      if (savedChrome === undefined) delete g.chrome;
+      else g.chrome = savedChrome;
+    }
   });
 });

@@ -10,9 +10,11 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
-import { redactValue } from "../src/lib/agent/run-history-utils";
+import { redactValue, redactRunSecrets } from "../src/lib/agent/run-history-utils";
+import { RunBuilder } from "../src/lib/agent/run-history";
 import { setSecret, deleteSecret } from "../src/lib/agent/secrets";
 import { installLocalStorageStub, restoreLocalStorageStub } from "./helpers";
+import type { LogEvent } from "../src/lib/agent/types";
 
 beforeAll(() => {
   installLocalStorageStub();
@@ -49,5 +51,32 @@ describe("redactValue cache invalidation on secret-set change", () => {
     // Deleting the secret bumps the version again; the stale redacted cache
     // entry must NOT be served — the raw value comes back.
     expect(await redactValue(value)).toBe(value);
+  });
+});
+
+describe("redactRunSecrets applies key-shape redaction on every persisted surface", () => {
+  test("task and result text mask well-known key shapes", async () => {
+    const GSK = `gsk-${"a".repeat(24)}`;
+    const GHP = `ghp_${"b".repeat(36)}`;
+    const builder = new RunBuilder(`use ${GSK} for the api`);
+    const run = builder.finish({ success: true, text: `saved ${GHP}` });
+    const out = await redactRunSecrets(run);
+    expect(out.task).not.toContain(GSK);
+    expect(out.result!.text).not.toContain(GHP);
+  });
+
+  test("step event messages mask DB connection strings", async () => {
+    const builder = new RunBuilder("task");
+    builder.addEvent({
+      type: "action-result",
+      step: 1,
+      name: "fill",
+      success: true,
+      message: "postgres://user:pass@db.example.com:5432/app",
+    });
+    const run = builder.finish({ success: true, text: "done" });
+    const out = await redactRunSecrets(run);
+    const msg = (out.steps[0] as LogEvent & { message: string }).message;
+    expect(msg).not.toContain("pass@db.example.com");
   });
 });

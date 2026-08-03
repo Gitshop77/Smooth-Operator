@@ -62,6 +62,21 @@ export function getSecretSetVersion(): number {
   return secretSetVersion;
 }
 
+// The options page writes secrets from its own module instance, so an
+// in-instance write is not the only way the store changes. Without this
+// listener the service worker would redact/substitute against a frozen
+// secret set for its whole lifetime. Mirror the pattern used by
+// persistent-memory.ts / domain-skills-data.ts / registry-utils.ts.
+if (isExtensionWithSession() && typeof chrome !== "undefined" && chrome.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "session" && changes[STORAGE_KEY]) {
+      secretsCache = null;
+      redactionCache = null;
+      secretSetVersion++;
+    }
+  });
+}
+
 export async function listSecrets(): Promise<SecretEntry[]> {
   if (secretsCache) return secretsCache;
   if (isExtensionWithSession()) {
@@ -130,13 +145,6 @@ export async function substituteSecrets(
   const artifacts = getRedactionArtifacts(secrets);
   const map = artifacts ? artifacts.nameToValue : new Map(secrets.map((s) => [s.name, s.value]));
   return text.replace(PLACEHOLDER_PATTERN, (match, name: string) => map.get(name) ?? match);
-}
-
-export function extractPlaceholders(text: string): string[] {
-  const matches = text.matchAll(PLACEHOLDER_PATTERN);
-  const names = new Set<string>();
-  for (const m of matches) names.add(m[1]);
-  return Array.from(names);
 }
 
 export async function redactSecrets(text: string): Promise<string> {

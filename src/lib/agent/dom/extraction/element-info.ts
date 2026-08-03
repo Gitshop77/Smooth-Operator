@@ -49,7 +49,11 @@ export function buildAttrs(el: HTMLElement): Record<string, string> {
   const attrs: Record<string, string> = {};
   const sensitive = isSensitive(el);
   for (const name of DOM_CONFIG.includeAttrs) {
-    if (sensitive && (name === "autocomplete" || name === "placeholder")) {
+    // Sensitive fields: skip autocomplete/placeholder/title/pattern — these
+    // reveal what secret the field holds or its exact format (e.g.
+    // `title="Password hint: MyDog123"` or `pattern="MyDog123|MyCat456"`),
+    // matching the AX tree's title-suppression policy for sensitive fields.
+    if (sensitive && (name === "autocomplete" || name === "placeholder" || name === "title" || name === "pattern")) {
       continue;
     }
     let val: string | null = null;

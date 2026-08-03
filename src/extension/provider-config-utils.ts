@@ -72,6 +72,27 @@ export const DEFAULT_MODELS: Record<string, string> = {
 };
 
 /**
+ * Per-family default-model priorities, consulted by the catalog default
+ * resolution (`getDefaultModelForProvider`) BEFORE its newest-stable fallback.
+ *
+ * Keys are CATALOG provider ids (the same namespace as `DEFAULT_MODELS`). Each
+ * list names the preferred model families for that provider in order; the
+ * first STABLE member present in the live catalog wins. This keeps defaults
+ * family-aware for providers with no curated `DEFAULT_MODELS` entry (e.g. the
+ * catalog-derived long tail) and expresses the flagship family preference
+ * without hardcoding a point release. Experimental (alpha/beta) entries are
+ * skipped so a default never silently selects an opt-in model.
+ */
+export const defaultModelPriority: Record<string, string[]> = {
+  // Prefer the flagship GPT-5.x family over the newest point release.
+  openai: ["gpt-5.4", "gpt-5.2"],
+  anthropic: ["claude-sonnet-5", "claude-opus-5"],
+  google: ["gemini-3.5-flash", "gemini-3-pro"],
+  // Kimi's k2.x line is the battle-tested family; kimi-k3 is the newest.
+  moonshotai: ["kimi-k2.5", "kimi-k2.6"],
+};
+
+/**
  * Canonical host(s) an INJECTED provider config's `baseUrl` is allowed to point
  * at. An injected (untrusted) config must not be able to redirect the user's
  * API key (sent as a Bearer token) to an attacker-controlled public endpoint,
@@ -81,10 +102,17 @@ export const DEFAULT_MODELS: Record<string, string> = {
  * DOTTED subdomain boundary is required at the call site (`host === canon.host`
  * or `host.endsWith("." + canon.host)`) — this allows `proxy.anthropic.com`
  * but rejects `evil-anthropic.com`, which merely ends with the canonical host.
- * For Azure the host is per-resource, so the suffix entry covers any
- * `{resource}.openai.azure.com` subdomain.
+ *
+ * Azure is special-cased: any Azure account can claim `{name}.openai.azure.com`,
+ * so the per-resource suffix allowance is granted ONLY for a user-configured
+ * `baseUrl` (`provenance === "user"`). An injected azure config must match the
+ * exact canonical host — which is not a real endpoint — and therefore fails
+ * closed.
  */
-export function canonicalLlmHost(provider: string): { host: string; suffix?: boolean } | null {
+export function canonicalLlmHost(
+  provider: string,
+  provenance: "user" | "injected" = "user",
+): { host: string; suffix?: boolean } | null {
   const prof = byProvider[provider];
   if (prof) return { host: new URL(prof.baseURL).host };
   switch (provider) {
@@ -92,7 +120,7 @@ export function canonicalLlmHost(provider: string): { host: string; suffix?: boo
     case "anthropic": return { host: "anthropic.com", suffix: true };
     case "gemini": return { host: "generativelanguage.googleapis.com" };
     case "google": return { host: "googleapis.com", suffix: true };
-    case "azure": return { host: "openai.azure.com", suffix: true };
+    case "azure": return { host: "openai.azure.com", suffix: provenance === "user" };
     default: return null;
   }
 }

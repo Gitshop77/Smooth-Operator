@@ -105,9 +105,9 @@ vi.mock("@/extension/provider-config", () => ({
   resolveModel: vi.fn(() => "mock-model"),
 }));
 
-vi.mock("@/extension/background/vision", () => ({
-  stripUrlFragment: vi.fn((u: string) => u.split("#")[0]),
-}));
+// NOTE: `@/extension/background/vision` is NOT mocked — the real pure
+// `stripUrlFragment` (which keeps `#/...` / `#!` hash-route fragments) is
+// loaded so cache-key semantics match production.
 
 vi.mock("@/extension/background/antibot", () => ({
   makeAntiBotHooks: vi.fn().mockReturnValue({}),
@@ -181,12 +181,6 @@ function setVisionSettings(settings: {
   });
 }
 
-function setRunState(tabId = 1, step = 0) {
-  Object.assign(sessionStore, {
-    open_cowork_run_state: { currentTabId: tabId, step },
-  });
-}
-
 describe("adaptive vision — warm-cache fingerprint freshness", () => {
   beforeEach(async () => {
     vi.resetModules();
@@ -205,7 +199,6 @@ describe("adaptive vision — warm-cache fingerprint freshness", () => {
 
     for (const k of Object.keys(localStore)) delete localStore[k];
     for (const k of Object.keys(sessionStore)) delete sessionStore[k];
-    setRunState();
     setVisionSettings({ enableLocalVision: true, visionMode: "adaptive" });
 
     extractStateFromTabMock.mockResolvedValue(makeDomState());
@@ -248,5 +241,74 @@ describe("adaptive vision — warm-cache fingerprint freshness", () => {
     getPageFingerprintMock.mockResolvedValue("FP-OLD");
 
     expect(await isVisionCacheFresh(1)).toBe(true);
+  });
+
+  test("isVisionCacheFresh returns false when no cache URL was recorded", async () => {
+    // beforeEach leaves the vision cache empty (no URL, no fingerprint).
+    await expect(isVisionCacheFresh(1)).resolves.toBe(false);
+  });
+
+  test("isVisionCacheFresh returns false when chrome.tabs.get rejects", async () => {
+    setVisionCacheUrl("https://example.com");
+    const tabsGet = (globalThis as unknown as { chrome: { tabs: { get: ReturnType<typeof vi.fn> } } })
+      .chrome.tabs.get;
+    tabsGet.mockRejectedValue(new Error("tab gone"));
+    await expect(isVisionCacheFresh(1)).resolves.toBe(false);
+    // Restore the shared mock so later tests keep the default resolved tab.
+    tabsGet.mockResolvedValue({ id: 1, url: "https://example.com" });
+  });
+
+  test("isVisionCacheFresh returns false when the tab URL differs from the cache URL", async () => {
+    setVisionCacheUrl("https://example.com/cached-page");
+    await expect(isVisionCacheFresh(1)).resolves.toBe(false);
+  });
+
+  test("isVisionCacheFresh skips the fingerprint check when none was stored", async () => {
+    setVisionCacheUrl("https://example.com");
+    // No stored fingerprint → URL match alone is enough; the fingerprint
+    // fetch must not even be consulted.
+    getPageFingerprintMock.mockRejectedValue(new Error("should not be consulted"));
+    await expect(isVisionCacheFresh(1)).resolves.toBe(true);
+    expect(getPageFingerprintMock).not.toHaveBeenCalled();
+  });
+
+  test("isVisionCacheFresh returns false when getPageFingerprint rejects", async () => {
+    setVisionCacheUrl("https://example.com");
+    setVisionCacheFingerprint("FP-OLD");
+    getPageFingerprintMock.mockRejectedValueOnce(new Error("fingerprint failed"));
+    await expect(isVisionCacheFresh(1)).resolves.toBe(false);
+  });
+
+  test("isVisionCacheFresh returns false when the page fingerprint changed since capture", async () => {
+    setVisionCacheUrl("https://example.com");
+    setVisionCacheFingerprint("FP-OLD");
+    getPageFingerprintMock.mockResolvedValue("FP-NEW");
+    await expect(isVisionCacheFresh(1)).resolves.toBe(false);
+  });
+
+  test("warm branch clears the cache when the URL changed since capture", async () => {
+    visionElementsCache.set("v1", { x: 10, y: 10, width: 100, height: 50, label: "login" });
+    setVisionCacheUrl("https://old.example.com/page");
+    setVisionCacheFingerprint("FP-OLD");
+
+    await extractStateForRun(1, MOCK_TABS);
+
+    expect(visionElementsCache.size).toBe(0);
+    await expect(isVisionCacheFresh(1)).resolves.toBe(false);
+  });
+
+  test("a plain-anchor fragment difference keeps the cache fresh (real stripUrlFragment)", async () => {
+    setVisionCacheUrl("https://example.com#section-2");
+    // tabs.get returns "https://example.com" (no fragment) — the anchor is
+    // stripped on both sides, so the cache key matches.
+    await expect(isVisionCacheFresh(1)).resolves.toBe(true);
+  });
+
+  test("a hash-route fragment difference invalidates the cache (real stripUrlFragment)", async () => {
+    setVisionCacheUrl("https://example.com/app#/settings");
+    const tabsGet = (globalThis as unknown as { chrome: { tabs: { get: ReturnType<typeof vi.fn> } } })
+      .chrome.tabs.get;
+    tabsGet.mockResolvedValue({ id: 1, url: "https://example.com/app#/billing" });
+    await expect(isVisionCacheFresh(1)).resolves.toBe(false);
   });
 });

@@ -54,6 +54,8 @@ type SummarizeLLMCall = (req: {
   systemPrompt: string;
   userPrompt: string;
   model?: string;
+  /** Abort signal to tear the request down when the user stops the run. */
+  signal?: AbortSignal;
 }) => Promise<{ content: string; usage?: TokenUsage }>;
 
 // ─── External dependencies ──────────────────────────────────────────────────

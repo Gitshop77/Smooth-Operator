@@ -11,6 +11,7 @@
 
 import { describe, test, expect, afterEach } from "vitest";
 import { validateLlmBaseUrl, isAllowedLlmBaseUrl, validateWebhookUrl, resolveAndValidateLlmBaseUrl } from "../src/lib/agent/llm/route/ssrf";
+import { expandIPv6 } from "../src/lib/agent/llm/route/ssrf-ipv6";
 import { redactUrl } from "../src/lib/agent/llm/route/url-redact";
 
 function assertRejected(res: ReturnType<typeof validateLlmBaseUrl>, re: RegExp): void {
@@ -124,11 +125,13 @@ describe("validateLlmBaseUrl (SSRF guard)", () => {
     assertRejected(validateLlmBaseUrl("http://[::169.254.169.254]/"), /link-local|metadata/i);
     expect(isAllowedLlmBaseUrl("http://[::169.254.169.254]/")).toBe(false);
     // The same deprecated form embedding a *loopback* IPv4 (self-hosted infra) is
-    // NOT a sink, so the branch must allow it — confirming the check keys on the
-    // embedded IPv4 being genuinely dangerous rather than rejecting the whole
-    // `::a.b.c.d` shape.
+    // NOT a sink: the parse layer allows it (user-local), and the transport layer
+    // allows it on a CURATED port (IPv6 Ollama/LiteLLM spellings) but rejects a
+    // non-curated port — the transport policy is curated-origin equality, not
+    // "any loopback".
     expect(validateLlmBaseUrl("http://[::127.0.0.1]/").ok).toBe(true);
-    expect(isAllowedLlmBaseUrl("http://[::127.0.0.1]/")).toBe(true);
+    expect(isAllowedLlmBaseUrl("http://[::127.0.0.1]:11434/v1", undefined, "user-configured")).toBe(true);
+    expect(isAllowedLlmBaseUrl("http://[::127.0.0.1]:9999/v1", undefined, "user-configured")).toBe(false);
   });
 
   test("still allows a user-configured loopback local-provider URL", () => {
@@ -233,13 +236,15 @@ describe("isAllowedLlmBaseUrl (transport-layer SSRF guard)", () => {
     expect(isAllowedLlmBaseUrl("http://169.254.169.254/", false)).toBe(false);
   });
 
-  test("IPv6 parity: transport guard rejects loopback/ULA/link-local/mapped regardless of exemption", () => {
+  test("IPv6 parity: transport guard rejects non-curated loopback/ULA/link-local/mapped regardless of exemption", () => {
     // Unlike the parse-layer `validateLlmBaseUrl` (which ALLOWS IPv6 loopback
     // `:1` and ULA `fc00:/7` as self-hosted infra), the transport-layer guard
-    // only exempts the curated IPv4 local-provider origins (localhost /
-    // 127.0.0.1). So every IPv6 variant — even loopback/ULA — is rejected, which
-    // closes the gap where an IPv6 SSRF sink could slip through to `fetch`. Pin
-    // this so a future change that adds IPv6 to the curated exemption is caught.
+    // only exempts the CURATED local-provider origins (localhost / 127.0.0.1
+    // and the IPv6 loopback spellings of the curated ports — see the curated-
+    // origin tests below). So every IPv6 variant on a NON-curated origin — even
+    // loopback/ULA — is rejected, closing the gap where an IPv6 SSRF sink could
+    // slip through to `fetch`. Pin this so a future change that widens the IPv6
+    // exemption is caught.
     const ipv6 = [
       "http://[::1]/v1",
       "http://[fc00::1]/v1",
@@ -254,6 +259,51 @@ describe("isAllowedLlmBaseUrl (transport-layer SSRF guard)", () => {
       expect(isAllowedLlmBaseUrl(u, false)).toBe(false);
     }
   });
+
+  test("curated IPv6 loopback spellings of the curated ports are allowed with user-configured provenance", () => {
+    // IPv6-only Ollama/LiteLLM hosts configure `[::1]` (or the IPv4-embedded
+    // loopback spellings, canonicalized by the URL parser) on the curated
+    // ports; the transport must treat them like their IPv4 counterparts.
+    expect(isAllowedLlmBaseUrl("http://[::1]:11434/v1", undefined, "user-configured")).toBe(true);
+    expect(isAllowedLlmBaseUrl("http://[::1]:4000/v1", undefined, "user-configured")).toBe(true);
+    expect(isAllowedLlmBaseUrl("http://[::127.0.0.1]:11434/v1", undefined, "user-configured")).toBe(true);
+    expect(isAllowedLlmBaseUrl("http://[::127.0.0.1]:4000/v1", undefined, "user-configured")).toBe(true);
+    expect(isAllowedLlmBaseUrl("http://[::ffff:127.0.0.1]:11434/v1", undefined, "user-configured")).toBe(true);
+  });
+
+  test("non-curated IPv6 loopback ports are REJECTED even for a user-configured baseUrl", () => {
+    // The old fallback exempted ANY `::127.x`-embedded IPv6 on ANY port
+    // (fail-open vs the curated-only policy) while rejecting `[::1]` on the
+    // curated ports (fail-closed for a legit IPv6 Ollama user). The transport
+    // policy is exact curated-origin equality: host AND port must match.
+    expect(isAllowedLlmBaseUrl("http://[::127.0.0.1]:9999/v1", undefined, "user-configured")).toBe(false);
+    expect(isAllowedLlmBaseUrl("http://[::1]:9999/v1", undefined, "user-configured")).toBe(false);
+    expect(isAllowedLlmBaseUrl("http://[::ffff:127.0.0.1]:9999/v1", undefined, "user-configured")).toBe(false);
+    expect(isAllowedLlmBaseUrl("http://[::127.0.0.1]:11435/v1", undefined, "user-configured")).toBe(false);
+    expect(isAllowedLlmBaseUrl("http://[::1]:11434/v1", undefined, "untrusted")).toBe(false);
+  });
+
+  test("expandIPv6 rejects malformed literals with a second '::' or a lone ':'", () => {
+    expect(expandIPv6("1::2::3")).toBeNull();
+    expect(expandIPv6("::1::")).toBeNull();
+    expect(expandIPv6(":::1")).toBeNull();
+    expect(expandIPv6("1:::2")).toBeNull();
+    expect(expandIPv6("::1:")).toBeNull();
+    expect(expandIPv6(":1::")).toBeNull();
+    expect(expandIPv6("1:")).toBeNull();
+    expect(expandIPv6(":1")).toBeNull();
+  });
+
+  test("expandIPv6 still accepts valid compressed and uncompressed literals", () => {
+    expect(expandIPv6("::1")).toEqual([0, 0, 0, 0, 0, 0, 0, 1]);
+    expect(expandIPv6("1::")).toEqual([1, 0, 0, 0, 0, 0, 0, 0]);
+    expect(expandIPv6("::")).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
+    expect(expandIPv6("2001:db8::1")).toEqual([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]);
+    expect(expandIPv6("1:2:3:4:5:6:7:8")).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(expandIPv6("1::2:3:4:5:6:7")).toEqual([1, 0, 2, 3, 4, 5, 6, 7]);
+    expect(expandIPv6("::ffff:7f00:1")).toEqual([0, 0, 0, 0, 0, 0xffff, 0x7f00, 1]);
+    expect(expandIPv6("::ffff:127.0.0.1")).toBeNull(); // dotted forms are never literals here
+  });
 });
 
 // ─── DNS-resolution SSRF guard (closes the rebinding-to-metadata hole) ───
@@ -267,22 +317,40 @@ describe("isAllowedLlmBaseUrl (transport-layer SSRF guard)", () => {
 
 // Mock `chrome.dns.resolve` so the resolution is fully controlled (no real
 // network). The host argument is ignored; `cb` receives the canned IPs. The
-// `error` mode simulates `chrome.runtime.lastError` to exercise the
-// fail-closed path. With both `chrome` and `require` absent (the test runtime's
-// default), `dnsResolve` returns `unavailable`, which we use directly for the
-// unavailable-resolution cases.
+// `lastError` mode simulates `chrome.runtime.lastError` being set during the
+// callback (the real failure path in `ssrf-dns.ts`); the `throw` mode simulates
+// a synchronous throw inside `dns.resolve` (the try/catch path). With both
+// `chrome` and `require` absent (the test runtime's default), `dnsResolve`
+// returns `unavailable`, which we use directly for the unavailable-resolution
+// cases.
 type DnsMode =
   | { kind: "resolved"; addresses: string[] }
-  | { kind: "error" };
+  | { kind: "lastError" }
+  | { kind: "throw" };
 
 function setMockDns(mode: DnsMode): void {
   const chrome = globalThis as unknown as {
     chrome?: { runtime?: { lastError?: { message: string } }; dns?: { resolve?: (h: string, cb: (r: { addresses?: string[] }) => void) => void } };
   };
-  if (mode.kind === "error") {
+  if (mode.kind === "throw") {
     chrome.chrome = {
       runtime: {},
-      dns: { resolve: (_h: string, _cb: (r: { addresses?: string[] }) => void) => { throw new Error("dns failure"); } },
+      dns: { resolve: () => { throw new Error("dns failure"); } },
+    };
+    return;
+  }
+  if (mode.kind === "lastError") {
+    chrome.chrome = {
+      runtime: { lastError: { message: "dns failure" } },
+      dns: {
+        resolve: (_h, cb) => {
+          // Mirror Chrome: `runtime.lastError` is set while the callback runs
+          // and cleared once it returns.
+          (chrome.chrome as { runtime: { lastError?: { message: string } } }).runtime.lastError = { message: "dns failure" };
+          cb({});
+          delete (chrome.chrome as { runtime: { lastError?: { message: string } } }).runtime.lastError;
+        },
+      },
     };
     return;
   }
@@ -317,32 +385,49 @@ describe("resolveAndValidateLlmBaseUrl (DNS-resolution SSRF guard)", () => {
     expect(allowed.ok).toBe(true);
   });
 
-  test("error resolver: fail-closed for untrusted AND user-configured (unverifiable target)", async () => {
-    setMockDns({ kind: "error" });
+  test("error resolver (chrome.runtime.lastError callback): fail-closed for untrusted, best-effort allow for user-configured", async () => {
+    setMockDns({ kind: "lastError" });
     const rejected = await resolveAndValidateLlmBaseUrl("http://example.attacker/v1", false);
     expect(rejected.ok).toBe(false);
     if (rejected.ok) throw new Error("expected rejection");
     expect(rejected.reason).toMatch(/DNS resolution/i);
-    // A resolver error FAILS CLOSED regardless of provenance — a user-configured
-    // origin whose target IP cannot be verified must not be trusted either.
+    // A resolver error FAILS CLOSED for an untrusted / unspecified-provenance
+    // origin — its target IP cannot be verified.
     const alsoRejected = await resolveAndValidateLlmBaseUrl("http://example.attacker/v1", true);
     expect(alsoRejected.ok).toBe(false);
     if (alsoRejected.ok) throw new Error("expected rejection");
     expect(alsoRejected.reason).toMatch(/DNS resolution/i);
+    // An EXPLICITLY user-configured baseUrl is allowed on a best-effort basis
+    // (documented in options.html): the sync transport-layer guard already
+    // rejected literal sinks, and the fetch-time re-check still applies.
+    const userAllowed = await resolveAndValidateLlmBaseUrl("http://example.attacker/v1", undefined, "user-configured");
+    expect(userAllowed.ok).toBe(true);
   });
 
-  test("unavailable resolver: fail-closed for untrusted AND user-configured", async () => {
+  test("a resolver that throws synchronously also fails closed (try/catch path)", async () => {
+    setMockDns({ kind: "throw" });
+    const rejected = await resolveAndValidateLlmBaseUrl("http://example.attacker/v1", false);
+    expect(rejected.ok).toBe(false);
+    if (rejected.ok) throw new Error("expected rejection");
+    expect(rejected.reason).toMatch(/DNS resolution/i);
+  });
+
+  test("unavailable resolver: fail-closed for untrusted, best-effort allow for user-configured", async () => {
     clearMockDns(); // no chrome.dns, no require → resolveAndValidateLlmBaseUrl sees `unavailable`
     const rejected = await resolveAndValidateLlmBaseUrl("http://example.attacker/v1", false);
     expect(rejected.ok).toBe(false);
     if (rejected.ok) throw new Error("expected rejection");
     expect(rejected.reason).toMatch(/DNS (resolution|resolver unavailable)/i);
-    // No resolver available FAILS CLOSED regardless of provenance — when the
-    // real target IP cannot be verified we must never trust the URL.
+    // No resolver available FAILS CLOSED when provenance is absent or untrusted
+    // — the real target IP cannot be verified and the URL must not be trusted.
     const alsoRejected = await resolveAndValidateLlmBaseUrl("http://example.attacker/v1", true);
     expect(alsoRejected.ok).toBe(false);
     if (alsoRejected.ok) throw new Error("expected rejection");
     expect(alsoRejected.reason).toMatch(/DNS (resolution|resolver unavailable)/i);
+    // An explicitly user-configured baseUrl keeps the documented best-effort
+    // allowance (the config-time + fetch-time guards still apply).
+    const userAllowed = await resolveAndValidateLlmBaseUrl("http://example.attacker/v1", undefined, "user-configured");
+    expect(userAllowed.ok).toBe(true);
   });
 
   test("still rejects a genuine IP-literal sink (no DNS needed)", async () => {

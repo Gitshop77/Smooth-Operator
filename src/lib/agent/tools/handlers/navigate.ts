@@ -10,7 +10,9 @@ import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import { checkUrlAllowedWithDomainConfig } from "../helpers/domain-config";
 import { SW_RPC_TIMEOUT_MS } from "../constants";
-import { type ActionContext, isExtensionContext } from "./types";
+import { type ActionContext, type LoaderRunner, isExtensionContext } from "./types";
+import { rejectOnAbort } from "./abort";
+import type { LoaderRunResult } from "../../dom/navigation/url-loaders";
 
 /** Response shape the SW's `TAB_ACTION` handler returns for a new-tab navigate. */
 type TabActionResult = {
@@ -22,8 +24,9 @@ type TabActionResult = {
 };
 
 export async function handleNavigate(
-  _ctx: ActionContext,
+  ctx: ActionContext,
   action: Extract<Action, { type: "navigate" }>,
+  runLoaderSteps?: LoaderRunner,
 ): Promise<ActionResult> {
   // Enforce domain restrictions before navigating.
   const urlCheck = checkUrlAllowedWithDomainConfig(action.url);
@@ -34,6 +37,26 @@ export async function handleNavigate(
       message: `BLOCKED: ${urlCheck.reason} (${action.url})`,
     };
   }
+  // S6 URL loaders: after a SUCCESSFUL navigation, run the loader steps
+  // matching the destination URL. The runner is wired by the executor
+  // (loader-originated navigations carry `ctx.fromLoader` and skip the hook,
+  // so a loader never re-triggers itself). Note that loader steps execute in
+  // the content-script window right after navigation commits — for
+  // cross-document navigations that window is the old document being torn
+  // down, so the steps are best used for quick same-document work; running
+  // them against the freshly-loaded page requires the agent-loop integration
+  // (future wave, see CONCERNS).
+  const loaderHook = async (message: string): Promise<string> => {
+    if (ctx.fromLoader || !runLoaderSteps) return message;
+    try {
+      const report: LoaderRunResult = await runLoaderSteps(action.url);
+      return report.matched ? `${message} [${report.message}]` : message;
+    } catch {
+      // The navigation itself succeeded — don't fail the action because the
+      // loader hook errored; the engine reports its own failures in-message.
+      return message;
+    }
+  };
   // New-tab navigation needs chrome.tabs.create + currentTabId update —
   // delegate to the SW (which owns handleTabAction). The content script
   // survives new-tab opens (the current tab stays), so the TAB_ACTION
@@ -41,19 +64,25 @@ export async function handleNavigate(
   if (action.new_tab) {
     if (isExtensionContext()) {
       try {
-        // Race against a timeout so a SW that receives the message but never calls
-        // sendResponse (throws / is hung) can't block the agent loop forever.
+        // Race against a timeout AND the step's abort signal so a user STOP
+        // is honored mid-step instead of waiting out the full 15s timeout (a
+        // SW that receives the message but never calls sendResponse — throws /
+        // is hung — can't block the agent loop forever, and neither can a
+        // stuck navigation while the user cancelled).
         let t: ReturnType<typeof setTimeout> | undefined;
         let res: TabActionResult | undefined | null;
+        const abort = rejectOnAbort(ctx.signal);
         try {
           res = (await Promise.race([
             chrome.runtime.sendMessage({ type: "TAB_ACTION", action }),
             new Promise<never>((_, reject) => {
               t = setTimeout(() => reject(new Error("TAB_ACTION timeout")), SW_RPC_TIMEOUT_MS);
             }),
+            abort.promise,
           ])) as TabActionResult;
         } finally {
           if (t) clearTimeout(t);
+          abort.cleanup();
         }
         if (!res?.ok) {
           return { action, success: false, message: `navigate failed: ${res?.error || "no response"}` };
@@ -61,7 +90,7 @@ export async function handleNavigate(
         return {
           action,
           success: !!res.success,
-          message: res.message || "navigated (new tab)",
+          message: await loaderHook(res.message || "navigated (new tab)"),
           pageChanged: !!res.pageChanged,
         };
       } catch (e) {
@@ -76,12 +105,12 @@ export async function handleNavigate(
     if (!w) {
       return { action, success: false, message: "navigate failed: popup blocked (demo)" };
     }
-    return { action, success: true, message: "navigated via content script (new tab)", pageChanged: true };
+    return { action, success: true, message: await loaderHook("navigated via content script (new tab)"), pageChanged: true };
   }
   // Same-tab navigation — location.href works. The content script is
   // destroyed on navigation, so the EXECUTE_ACTIONS sendResponse to the SW
   // will reject (port closed); the orchestrator recovers on the next step
   // (extractState re-injects via ensureContent).
   location.href = action.url;
-  return { action, success: true, message: "navigated via content script", pageChanged: true };
+  return { action, success: true, message: await loaderHook("navigated via content script"), pageChanged: true };
 }

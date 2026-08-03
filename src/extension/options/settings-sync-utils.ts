@@ -7,6 +7,7 @@ import {
 import { updateProviderUI, populateModelSuggestions } from "./provider-config-ui";
 import { PROVIDERS } from "./providers";
 import { STORAGE_KEYS } from "./storage-keys";
+import { alertModal } from "./modal";
 
 export function readInt(id: string, def: number, min: number, max: number, invalid: string[]): number {
   const el = $(id) as HTMLInputElement;
@@ -103,6 +104,7 @@ export function initAutoSave(saveSettings: () => Promise<boolean>): void {
     "maxSteps", "maxActions", "plannerInterval", "maxFailures", "costCap",
     "defaultTask", "screenshotQuality", "allowedDomains", "blockedDomains", "enableStealth",
     "agentMode",
+    "reasoningEffort", "reasoningBudget", "forceReasoning",
   ];
 
   let saveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -136,12 +138,22 @@ export async function migrateSecretsFromLocalToSession(): Promise<void> {
     if (typeof chrome !== "undefined" && chrome.storage?.session) {
       const localRes = await chrome.storage.local.get([STORAGE_KEYS.apiKey, STORAGE_KEYS.rememberApiKey]);
       const localKey = localRes[STORAGE_KEYS.apiKey] as string | undefined;
-      if (typeof localKey === "string" && localKey.length > 0) {
-        await chrome.storage.session.set({ [STORAGE_KEYS.apiKey]: localKey });
-        // The local mirror is kept ONLY when the user opted in via
-        // "remember on this device"; otherwise move the key out of disk.
-        if (localRes[STORAGE_KEYS.rememberApiKey] !== true) {
-          await chrome.storage.local.remove(STORAGE_KEYS.apiKey);
+      const sessionRes = await chrome.storage.session.get([STORAGE_KEYS.apiKey]);
+      const sessionKey = sessionRes[STORAGE_KEYS.apiKey] as string | undefined;
+      // The migration runs at module import, concurrently with the first
+      // saveSettings write. If the session already holds a non-empty key, a
+      // save already happened — never overwrite that newer value with the
+      // stale local mirror.
+      if (
+        typeof sessionKey !== "string" || sessionKey.length === 0
+      ) {
+        if (typeof localKey === "string" && localKey.length > 0) {
+          await chrome.storage.session.set({ [STORAGE_KEYS.apiKey]: localKey });
+          // The local mirror is kept ONLY when the user opted in via
+          // "remember on this device"; otherwise move the key out of disk.
+          if (localRes[STORAGE_KEYS.rememberApiKey] !== true) {
+            await chrome.storage.local.remove(STORAGE_KEYS.apiKey);
+          }
         }
       }
     }
@@ -149,13 +161,18 @@ export async function migrateSecretsFromLocalToSession(): Promise<void> {
     const localSecrets = localRes[STORAGE_KEYS.secrets] as Array<{ name: string; value: string }> | undefined;
     if (!Array.isArray(localSecrets) || localSecrets.length === 0) return;
     const sessionSecrets = await listSecretsFromStore();
-    const sessionNames = new Set(sessionSecrets.map((s) => s.name));
+    const sessionByName = new Map(sessionSecrets.map((s) => [s.name, s.value]));
     const migrated = new Set<string>();
     for (const s of localSecrets) {
       if (!s || typeof s.name !== "string" || typeof s.value !== "string") continue;
-      const alreadyInSession = sessionNames.has(s.name);
-      let ok = alreadyInSession;
-      if (!alreadyInSession) {
+      const existing = sessionByName.get(s.name);
+      let ok = false;
+      if (existing !== undefined) {
+        // Only count an existing entry as migrated when it is identical — a
+        // differing local value is kept rather than silently dropped (session
+        // wins for reads, but the local copy stays visible for the user).
+        ok = existing === s.value;
+      } else {
         try {
           await setSecretInStore(s.name, s.value);
           ok = true;
@@ -194,8 +211,20 @@ export async function renderSecrets(): Promise<void> {
       `<span class="value">${"•".repeat(Math.min(s.value.length, 20))}</span>` +
       `<button type="button" class="secret-delete" aria-label="Delete secret %${escapeHtml(s.name)}%">Delete</button>`;
     item.querySelector("button")!.addEventListener("click", async () => {
-      await deleteSecretFromStore(s.name);
-      await renderSecrets();
+      try {
+        await deleteSecretFromStore(s.name);
+      } catch (e) {
+        console.warn("[options] delete secret failed:", e);
+        void alertModal({
+          title: "Could not delete secret",
+          message: e instanceof Error ? e.message : String(e),
+        });
+      }
+      try {
+        await renderSecrets();
+      } catch (e) {
+        console.warn("[options] render secrets failed:", e);
+      }
       showSaved();
     });
     list.appendChild(item);

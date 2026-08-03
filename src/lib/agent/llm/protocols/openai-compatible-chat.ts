@@ -9,6 +9,7 @@
 
 import { Protocol } from "../route/client";
 import * as OpenAIChat from "./openai-chat";
+import { reasoningEffortSupported } from "../providers/openai-compatible-profile";
 
 export { PATH } from "./openai-chat";
 
@@ -24,6 +25,15 @@ export const protocol: Protocol<OpenAIChat.OpenAIChatBody, string, { type: strin
  // grok-reasoning) — skip it when `request.reasoning` is set.
       if (!request.reasoning) {
         body.frequency_penalty = DEFAULT_FREQUENCY_PENALTY;
+      }
+ // The openai-chat body builder emits `reasoning_effort` for every reasoning
+ // request, but only endpoints that opt in (per-profile
+ // `supportsReasoningEffort`) accept it; unlisted/unknown providers fail
+ // closed so a stray `reasoning_effort` never 400s a non-reasoning endpoint.
+ // The dedicated OpenAI/Azure facades use the openai-chat protocol directly
+ // and always forward it — only this shim gates on the capability.
+      if (body.reasoning_effort !== undefined && !reasoningEffortSupported(request.model.provider)) {
+        delete body.reasoning_effort;
       }
  // OpenAI-compatible providers (DeepSeek, Ollama, Qwen, Fireworks, …)
  // 400 on strict JSON-schema mode. Unless the caller explicitly opts into

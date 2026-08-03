@@ -395,6 +395,8 @@ export function handleTabAction(
       pageChanged: result.pageChanged,
       success: result.success,
       message: result.message,
+      // Structured payloads (tab listings, cookies, storage reads) ride along.
+      ...(result.data !== undefined ? { data: result.data } : {}),
     });
   });
 }
@@ -407,8 +409,10 @@ export function handleDetectVisual(
   return bindHandler(sendResponse, async () => {
     if (!requirePrivileged(sender, sendResponse)) return;
     const query = typeof msg.query === "string" ? msg.query : "";
-    const { handleDetectVisualRequest } = await import("./run-helpers");
-    const result = await handleDetectVisualRequest(query);
+    const { handleDetectVisualRequest, getCurrentRunAbortSignal } = await import("./run-helpers");
+    // Thread the active run's abort signal so a user STOP short-circuits an
+    // in-flight vision decode instead of letting it run to completion.
+    const result = await handleDetectVisualRequest(query, getCurrentRunAbortSignal() ?? undefined);
     sendResponse(result);
   });
 }

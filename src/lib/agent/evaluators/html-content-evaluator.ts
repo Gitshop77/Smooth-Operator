@@ -158,8 +158,13 @@ export class HTMLContentEvaluator {
       const hasExact = rc.exact_match !== undefined;
       const hasInclude = rc.must_include !== undefined;
       if (!hasExact && !hasInclude) {
-        // No required_contents specified — skip (don't multiply by 0).
-        continue;
+        // No required_contents specified — the target asserts nothing. A skip
+        // here would leave the score untouched (a silent PASS), the same
+        // zero-evidence false-pass the empty-targets guard prevents, so fail
+        // CLOSED.
+        score *= 0;
+        reasons.push(`target[${i}] required_contents is empty — failing closed`);
+        break;
       }
 
       // Fail CLOSED on extraction warnings: a misconfigured / undextractable

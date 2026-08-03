@@ -30,11 +30,16 @@ function normalizeDomainInput(raw: string): string | null {
   if (!d) return null;
   d = d.replace(/^\.+/, "");
   d = d.replace(/^\*\./, "");
-  // Strip trailing :port only for non-IPv6 addresses.
-  if (!d.includes(":") || d.includes("]:")) {
-    d = d.replace(/:\d+$/, "");
-  } else if (d.startsWith("[") && d.includes("]:")) {
+  // Strip a trailing `:port` unless the remainder is a bare IPv6 literal.
+  // A plain hostname (or IPv4 address) contains exactly one colon — the port
+  // separator — while an IPv6 literal contains further colons or starts with
+  // one (e.g. `::1` or the abbreviated `:1`), and must be preserved.
+  if (d.includes("]:")) {
     d = d.replace(/^\[(.+)\]:\d+$/, "$1");
+  } else if (d.includes(":") && !d.startsWith(":")) {
+    if (d.split(":").length === 2) {
+      d = d.replace(/:\d+$/, "");
+    }
   }
   if (!d || d.includes("*") || /\s/.test(d)) return null;
   d = d.replace(/\.+$/, "");

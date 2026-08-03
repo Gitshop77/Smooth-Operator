@@ -445,6 +445,31 @@ describe("indexed-tree buildAttrs sensitive-field redaction", () => {
     expect(attrs.option_count).toBeUndefined();
   });
 
+  test("password input redacts title and pattern (hint reveals the secret)", () => {
+    const input = document.createElement("input");
+    input.setAttribute("type", "password");
+    input.setAttribute("title", "Password hint: MyDog123");
+    input.setAttribute("pattern", "MyDog123|MyCat456");
+    input.value = "SUPER_SECRET";
+    const attrs = buildAttrs(input);
+    expect(attrs.title).toBeUndefined();
+    expect(attrs.pattern).toBeUndefined();
+    // `type` is intentionally still surfaced (non-secret semantic metadata).
+    expect(attrs.type).toBe("password");
+  });
+
+  test("sensitive-autocomplete field redacts title and pattern", () => {
+    const input = document.createElement("input");
+    input.setAttribute("type", "text");
+    input.setAttribute("autocomplete", "one-time-code");
+    input.setAttribute("title", "OTP hint");
+    input.setAttribute("pattern", "[0-9]{6}");
+    input.value = "482913";
+    const attrs = buildAttrs(input);
+    expect(attrs.title).toBeUndefined();
+    expect(attrs.pattern).toBeUndefined();
+  });
+
   test("non-sensitive field still surfaces value, autocomplete, placeholder", () => {
     const input = document.createElement("input");
     input.setAttribute("type", "text");
@@ -455,5 +480,146 @@ describe("indexed-tree buildAttrs sensitive-field redaction", () => {
     expect(attrs.value).toBe("alice");
     expect(attrs.autocomplete).toBe("username");
     expect(attrs.placeholder).toBe("Login");
+  });
+
+  test("non-sensitive field keeps title and pattern", () => {
+    const input = document.createElement("input");
+    input.setAttribute("type", "text");
+    input.setAttribute("title", "Search the site");
+    input.setAttribute("pattern", "[A-Za-z ]+");
+    const attrs = buildAttrs(input);
+    expect(attrs.title).toBe("Search the site");
+    expect(attrs.pattern).toBe("[A-Za-z ]+");
+  });
+});
+
+// ─── sensitive <select> name policy parity ───────────────────────────────────
+
+describe("sensitive <select> name sources", () => {
+  test("title is not used as a name source for a sensitive select", () => {
+    const select = document.createElement("select");
+    select.setAttribute("autocomplete", "cc-number");
+    select.setAttribute("title", "Card number field");
+    document.body.appendChild(select);
+
+    const { pageContent } = generateAccessibilityTree("all");
+    // The title would reveal what secret the field holds — the select branch
+    // must skip it (aria-label remains the explicit override).
+    expect(pageContent).not.toContain("Card number field");
+  });
+
+  test("aria-label still overrides for a sensitive select", () => {
+    const select = document.createElement("select");
+    select.setAttribute("autocomplete", "cc-number");
+    select.setAttribute("aria-label", "Card number");
+    select.setAttribute("title", "Card number field");
+    document.body.appendChild(select);
+
+    const { pageContent } = generateAccessibilityTree("all");
+    expect(pageContent).toContain("Card number");
+    expect(pageContent).not.toContain("Card number field");
+  });
+});
+
+// ─── AX-tree attribute escaping cap ─────────────────────────────────────────
+
+describe("AX-tree attribute cap applies after entity escaping", () => {
+  test("a `<`-dense placeholder cannot overshoot the 200-char budget 4x", () => {
+    const input = document.createElement("input");
+    input.setAttribute("type", "text");
+    input.setAttribute("placeholder", "<".repeat(500));
+    document.body.appendChild(input);
+
+    const result = generateAccessibilityTree("all");
+    const line = result.pageContent.match(/placeholder="([^"]*)"/);
+    expect(line).not.toBeNull();
+    expect(line![1].length).toBeLessThanOrEqual(203);
+    expect(line![1]).toContain("...");
+    expect(line![1]).toContain("&lt;");
+    expect(line![1]).not.toContain("<<<");
+  });
+
+  test("truncation never leaves a dangling entity at the cut point", () => {
+    const input = document.createElement("input");
+    input.setAttribute("type", "text");
+    // 100 literal `&` → 400 chars of `&amp;` after escaping → cut mid-entity.
+    input.setAttribute("placeholder", "&".repeat(100));
+    document.body.appendChild(input);
+
+    const result = generateAccessibilityTree("all");
+    const line = result.pageContent.match(/placeholder="([^"]*)"/);
+    expect(line).not.toBeNull();
+    expect(line![1].length).toBeLessThanOrEqual(203);
+    expect(line![1]).not.toMatch(/&(?!amp;|lt;|gt;|quot;|apos;|#)/);
+  });
+});
+
+// ─── aria-hidden case sensitivity in the AX tree ────────────────────────────
+
+describe("AX-tree aria-hidden matching", () => {
+  test("aria-hidden is matched case-insensitively per the ARIA spec", () => {
+    const btn = document.createElement("button");
+    btn.setAttribute("aria-hidden", "TRUE");
+    btn.textContent = "HiddenBtn";
+    document.body.appendChild(btn);
+
+    const { pageContent } = generateAccessibilityTree("all");
+    expect(pageContent).not.toContain("HiddenBtn");
+  });
+
+  test("lowercase aria-hidden continues to exclude", () => {
+    const btn = document.createElement("button");
+    btn.setAttribute("aria-hidden", "true");
+    btn.textContent = "HiddenBtn2";
+    document.body.appendChild(btn);
+
+    const { pageContent } = generateAccessibilityTree("all");
+    expect(pageContent).not.toContain("HiddenBtn2");
+  });
+});
+
+// ─── short path-segment redaction ───────────────────────────────────────────
+
+describe("redactUrlTokens short path-segment redaction", () => {
+  test("all-digit path segments are redacted (OTP codes)", () => {
+    expect(redactUrlTokens("https://example.com/otp/482913")).toBe(
+      "https://example.com/otp/[redacted]",
+    );
+  });
+
+  test("mixed-case alphanumeric short segments are redacted (magic-link codes)", () => {
+    expect(redactUrlTokens("https://example.com/reset/x7K9p2")).toBe(
+      "https://example.com/reset/[redacted]",
+    );
+    expect(redactUrlTokens("https://example.com/magic/8f3kA1")).toBe(
+      "https://example.com/magic/[redacted]",
+    );
+  });
+
+  test("ordinary short path segments are NOT redacted (false-positive guard)", () => {
+    expect(redactUrlTokens("https://example.com/login")).toBe("https://example.com/login");
+    expect(redactUrlTokens("https://example.com/about")).toBe("https://example.com/about");
+    // Date-like slugs and product names stay intact.
+    expect(redactUrlTokens("https://example.com/posts/2026Aug")).toBe(
+      "https://example.com/posts/2026Aug",
+    );
+    expect(redactUrlTokens("https://example.com/downloads/Xcode9")).toBe(
+      "https://example.com/downloads/Xcode9",
+    );
+  });
+
+  test("long secret segments still redact (existing rule untouched)", () => {
+    expect(redactUrlTokens("https://example.com/reset/x7K9p2ABCDEF123456")).toBe(
+      "https://example.com/reset/[redacted]",
+    );
+  });
+
+  test("host labels are unaffected by the short-segment rule", () => {
+    // The mixed-case short label is NOT redacted (only the pathname gets the
+    // short-segment rule); the URL parser lowercases hostnames, which is
+    // normalization, not redaction.
+    expect(redactUrlTokens("https://x7K9p2.example.com/")).toBe(
+      "https://x7k9p2.example.com/",
+    );
   });
 });

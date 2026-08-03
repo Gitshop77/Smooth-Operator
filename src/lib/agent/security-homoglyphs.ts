@@ -47,16 +47,18 @@ const HOMOGLYPH_RE = new RegExp(`[${Object.keys(HOMOGLYPH_MAP).join("")}]`, "gu"
  * Fold ASCII-confusable homoglyphs (Cyrillic/Greek/dotless-i lookalikes) to
  * their ASCII counterparts.
  *
- * SCOPED TO THE INJECTION-SCANNING PATH ONLY. This fold is deliberately NOT part
- * of the generic {@link normalize} (which is also used for EXACT page-text
- * matching — e.g. `click` matching a target string against a candidate). Folding
- * homoglyphs in that path would corrupt legitimate non-English text and break
- * exact-match lookups the agent relies on (e.g. `click` matching a target string
- * against a candidate), so the fold is confined to the injection path. The fold is a defense-in-depth measure that only makes sense
- * where we are hunting for *English* injection keywords in untrusted content, so
- * it is applied exclusively by the security/injection callers below
- * (`sanitizeUntrusted`, `neutralizePromptTags`, `scanForInjection`) — never to
- * raw page text the agent must match verbatim.
+ * APPLIED TO EVERY TEXT THAT ENTERS THE INJECTION PATH — including
+ * `sanitizeUntrusted` / `neutralizePromptTags`, which ARE the main raw
+ * page-text path into the LLM prompt. The fold therefore has a REAL fidelity
+ * cost: legitimate non-English text containing a mapped codepoint is
+ * corrupted on its way into the prompt (e.g. Cyrillic "сора" → "copa"). That
+ * trade is deliberate — the same lookalike codepoints are the homoglyph
+ * injection channel — but it is broader collateral than "scoped to
+ * scanning" might suggest. The one path that is NOT folded is {@link normalize}
+ * (exact page-text matching, where corrupting non-English text would break
+ * match lookups the agent relies on). Only near-indistinguishable
+ * ASCII-confusable letters are mapped; the set is curated and narrow, so
+ * only text containing those specific codepoints is affected.
  */
 export function foldHomoglyphs(text: string): string {
   return text.replace(HOMOGLYPH_RE, (ch) => HOMOGLYPH_MAP[ch] ?? ch);

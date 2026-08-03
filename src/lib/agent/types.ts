@@ -158,6 +158,8 @@ export interface ActionResult {
   extractedContent?: string;
   /** Whether the action likely changed the page (URL or DOM fingerprint). */
   pageChanged?: boolean;
+  /** Optional structured payload (tab listings, cookies, storage reads). */
+  data?: unknown;
   /** Set true ONLY for the `done` action. */
   isDone?: boolean;
 }
@@ -199,10 +201,10 @@ export type LogEvent =
   | { type: "paused"; step: number }
   | { type: "resumed"; step: number }
   | { type: "done"; step: number; success: boolean; text: string }
-  | { type: "error"; step: number; message: string; recoverable: boolean }
+  | { type: "error"; step: number; message: string; recoverable: boolean; code?: string; recovery?: string }
   | { type: "info"; message: string }
   | { type: "warn"; step?: number; message: string }
-  | { type: "cost"; step: number; tokensIn: number; tokensOut: number; costUsd: number; model: string }
+  | { type: "cost"; step: number; tokensIn: number; tokensOut: number; costUsd: number; model: string; reasoningTokens?: number; cachedInputTokens?: number; cachedWriteInputTokens?: number }
   | { type: "heartbeat"; step: number; ts: number };
 
 // ─── API contracts ──────────────────────────────────────────────────────────

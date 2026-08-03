@@ -29,7 +29,7 @@ Build first, then load `chrome-extension/` as an unpacked extension at `chrome:/
 
 ## Key architecture notes
 
-- **esbuild** bundles 4 entry points: `background.ts` (ESM, no splitting — MV3 SW can't use native `import()`), `content.ts`/`sidepanel.ts`/`options.ts` (IIFE).
+- **esbuild** bundles 5 entry points: `background.ts` (ESM, no splitting — MV3 SW can't use native `import()`), `content.ts`/`content-main.ts`/`sidepanel.ts`/`options.ts` (IIFE). `content-main.ts` is the MAIN-world shadow-piercer content script (declared as `world: "MAIN"` in the manifest).
 - **esbuild.config.ts** has two special plugins: a zod-locales stub (strips 50+ locale files → `en` only, saves ~600 KB) and a console debug strip (production builds only, rewrites `console.debug/log` to `void`).
 - `build-utils.ts` extracts testable helpers from the esbuild config so `tests/build-utils.test.ts` doesn't need to bundle the extension.
 - Third-party licenses (`LICENSE-APACHE` for `@huggingface/transformers`, inline `LICENSE-MIT` for `onnxruntime-web`, `NOTICE`) are emitted by the build into `chrome-extension/` — see LIC-1 in `esbuild.config.ts`.
@@ -41,13 +41,13 @@ Build first, then load `chrome-extension/` as an unpacked extension at `chrome:/
 
 - **Vitest v4** honors the `isolate: true` config option (per-file module + mock reset). `tests/helpers/test-isolation.ts` (loaded via `setupFiles`) additionally resets leaked globals (`globalThis.chrome`, `document.body`, `localStorage`, `fetch`) between test files as defense-in-depth. Don't remove it.
 - Test files live in `tests/` with `.test.ts` suffix.
-- Coverage thresholds are pinned at measured baselines with per-glob overrides for security-critical modules (`security.ts`, `ssrf.ts`, `endpoint.ts`, `auth.ts`, `anti-bot.ts`, `anti-detection.ts`). The baselines are documented in `vitest.config.ts`.
+- Coverage thresholds are pinned at measured baselines with per-glob overrides for security-critical modules (`ssrf-ipv6.ts`, `ssrf-validate.ts`, `ssrf-dns.ts`, `security-injection.ts`, `auth.ts`, `endpoint.ts`, `anti-bot.ts`, `anti-detection.ts`). The baselines are documented in `vitest.config.ts`.
 
 ## CI
 
 `.github/workflows/ci.yml` runs on push/PR to `main`/`master`:
 1. `npm ci` → `npm run lint` → `npx tsc --noEmit` → `npx vitest run --coverage` → `npm run build:extension` → verify build output → `npm audit --audit-level=high` + `npm audit signatures`
-2. `secret-scan` job runs gitleaks against full history using `.github/gitleaks.toml` (allows fake secret fixtures in 6 test files).
+2. `secret-scan` job runs gitleaks against full history using `.github/gitleaks.toml` (allows fake secret fixtures in 5 test files).
 
 `.github/workflows/dependency-review.yml` blocks PRs with moderate+ vulnerability advisories or GPL-3.0/AGPL-3.0 licenses.
 

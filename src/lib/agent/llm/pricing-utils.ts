@@ -2,6 +2,23 @@ import type { Catalog } from "./catalog";
 import { isValidCatalog } from "./catalog";
 import { validateLlmBaseUrl } from "./route/ssrf";
 
+/** A context-tier pricing block (models.dev `CostTier` shape, verbatim). */
+export interface CostTier {
+  readonly input: number;
+  readonly output: number;
+  readonly cache_read?: number;
+  readonly cache_write?: number;
+  readonly tier: { type: "context"; size: number };
+}
+
+/** The legacy >200k-context pricing block (`context_over_200k`). */
+export interface CostBlock {
+  readonly input: number;
+  readonly output: number;
+  readonly cache_read?: number;
+  readonly cache_write?: number;
+}
+
 export interface ModelPricing {
   /** Input (prompt) tokens — per 1M tokens, USD. */
   readonly in: number;
@@ -13,6 +30,11 @@ export interface ModelPricing {
   readonly cacheRead?: number;
   /** Cache write tokens — per 1M tokens, USD (optional). */
   readonly cacheWrite?: number;
+  /** Context-tier rates — the highest tier whose `size` is below the prompt's
+   * context-token count applies (tier selection mirrors opencode's session cost). */
+  readonly tiers?: CostTier[];
+  /** Rates applied when the prompt exceeds 200k context tokens and no tier matches. */
+  readonly contextOver200k?: CostBlock;
   readonly uncatalogued?: boolean;
 }
 
@@ -82,6 +104,12 @@ function lookupBySubstring(
 /**
  * Convert a models.dev-shaped catalog into a lowercased pricing table.
  * Only models that declare a `cost` block contribute a rate.
+ *
+ * Zero rates ARE honored (a model may legitimately be repriced to free): the
+ * validation layer (`isValidCatalog`) permits them, so skipping them here
+ * would silently drop ~575 bundled models to DEFAULT_UNKNOWN_MODEL_PRICE
+ * ($10/$30 per 1M) and make a custom-catalog "reprice to free" never take
+ * effect. Only negative rates are rejected (they would subtract from spend).
  */
 export function convertCatalog(catalog: Catalog): Record<string, ModelPricing> {
   const table: Record<string, ModelPricing> = {};
@@ -91,9 +119,39 @@ export function convertCatalog(catalog: Catalog): Record<string, ModelPricing> {
       if (!model || typeof model.id !== "string") continue;
       const cost = model.cost;
       if (!cost || typeof cost.input !== "number" || typeof cost.output !== "number") continue;
-      if (cost.input <= 0 || cost.output <= 0) continue;
+      if (cost.input < 0 || cost.output < 0) continue;
       if (cost.cache_read !== undefined && (typeof cost.cache_read !== "number" || cost.cache_read < 0)) continue;
       if (cost.cache_write !== undefined && (typeof cost.cache_write !== "number" || cost.cache_write < 0)) continue;
+      if (cost.tiers !== undefined) {
+        if (!Array.isArray(cost.tiers)) continue;
+        let tiersValid = true;
+        for (const t of cost.tiers) {
+          if (
+            !t || typeof t !== "object" ||
+            typeof t.input !== "number" || t.input < 0 ||
+            typeof t.output !== "number" || t.output < 0 ||
+            (t.cache_read !== undefined && (typeof t.cache_read !== "number" || t.cache_read < 0)) ||
+            (t.cache_write !== undefined && (typeof t.cache_write !== "number" || t.cache_write < 0)) ||
+            !t.tier || typeof t.tier.size !== "number" || t.tier.size < 0
+          ) {
+            // A malformed tier poisons the whole model — never bill tier rates
+            // from partially-valid data (mirrors the flat-field rejection above).
+            tiersValid = false;
+            break;
+          }
+        }
+        if (!tiersValid) continue;
+      }
+      if (cost.context_over_200k !== undefined) {
+        const b = cost.context_over_200k;
+        if (
+          !b || typeof b !== "object" ||
+          typeof b.input !== "number" || b.input < 0 ||
+          typeof b.output !== "number" || b.output < 0 ||
+          (b.cache_read !== undefined && (typeof b.cache_read !== "number" || b.cache_read < 0)) ||
+          (b.cache_write !== undefined && (typeof b.cache_write !== "number" || b.cache_write < 0))
+        ) continue;
+      }
       const id = model.id.toLowerCase();
       const entry: ModelPricing = {
         in: cost.input,
@@ -101,12 +159,66 @@ export function convertCatalog(catalog: Catalog): Record<string, ModelPricing> {
         reasoning: typeof cost.reasoning === "number" ? cost.reasoning : undefined,
         cacheRead: typeof cost.cache_read === "number" ? cost.cache_read : undefined,
         cacheWrite: typeof cost.cache_write === "number" ? cost.cache_write : undefined,
+        tiers:
+          cost.tiers !== undefined
+            ? cost.tiers
+                .filter((t) => t.tier.type === "context")
+                .map((t) => ({
+                  input: t.input,
+                  output: t.output,
+                  cache_read: t.cache_read,
+                  cache_write: t.cache_write,
+                  tier: { type: "context" as const, size: t.tier.size },
+                }))
+            : undefined,
+        contextOver200k:
+          cost.context_over_200k !== undefined
+            ? {
+                input: cost.context_over_200k.input,
+                output: cost.context_over_200k.output,
+                cache_read: cost.context_over_200k.cache_read,
+                cache_write: cost.context_over_200k.cache_write,
+              }
+            : undefined,
       };
       if (table[id] === undefined) table[id] = entry;
       table[`${providerId.toLowerCase()}/${id}`] = entry;
     }
   }
   return table;
+}
+
+/**
+ * Select the pricing block for a given context-token usage, mirroring
+ * opencode's session cost: the highest context tier whose `size` is below
+ * `contextTokens`, else the over-200k block when the context exceeds 200k,
+ * else the base rate. Returns the base rate when no tiers are declared.
+ */
+export function selectPricingRate(rate: ModelPricing, contextTokens: number): ModelPricing {
+  if (rate.tiers && rate.tiers.length > 0) {
+    const tiers = rate.tiers
+      .filter((t) => t.tier.type === "context" && contextTokens > t.tier.size)
+      .sort((a, b) => b.tier.size - a.tier.size);
+    if (tiers.length > 0) {
+      const t = tiers[0];
+      return {
+        in: t.input,
+        out: t.output,
+        cacheRead: t.cache_read,
+        cacheWrite: t.cache_write,
+      };
+    }
+  }
+  if (rate.contextOver200k && contextTokens > 200_000) {
+    const b = rate.contextOver200k;
+    return {
+      in: b.input,
+      out: b.output,
+      cacheRead: b.cache_read,
+      cacheWrite: b.cache_write,
+    };
+  }
+  return rate;
 }
 
 /**

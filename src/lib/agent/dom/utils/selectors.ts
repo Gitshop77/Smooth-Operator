@@ -142,9 +142,10 @@ export class By {
  * We deliberately do NOT declare `static name` on the class: it shadows the
  * inherited `Function.name` and requires the fragile `@ts-expect-error` removed
  * above. Defining an own `name` property here (via `Object.defineProperty`, which
- * succeeds because it shadows the prototype's `name` accessor) keeps
- * `By.name(...)` working for the external `find_elements` handler without the
- * type conflict. Prefer {@link By.byName} in new code.
+ * succeeds because it shadows the prototype's `name` accessor) keeps the
+ * Selenium-style `By.name(...)` alias available for API compatibility.
+ * `find_elements` uses {@link By.byName} directly; prefer {@link By.byName}
+ * in new code.
  */
 Object.defineProperty(By, "name", {
   value: By.byName,
@@ -175,14 +176,16 @@ Object.defineProperty(By, "name", {
  * handler. Failures are nonetheless surfaced to the console so genuine bugs
  * aren't masked as "no match" (see the notes in the `catch`/`default` below).
  */
-// Diagnostics should be suppressed ONLY in a real production Node build. In a
-// browser content script `process` is undefined, so the previous
-// `typeof process === "undefined" ? true` branch wrongly treated every
-// in-browser run as production and silenced oversized-locator / invalid-
-// selector diagnostics as "no match". With no build-time DEV constant
-// available, drive the check off `process.env.NODE_ENV` safely: it is true
-// only when `process` exists AND is explicitly set to "production", so the
-// browser path (process undefined) keeps diagnostics enabled.
+// Diagnostics gate. NOTE: in the shipped extension this is effectively always
+// ON — content scripts / service workers have no `process`, so `isProd()`
+// returns false and oversized-locator / invalid-selector warnings are always
+// emitted. (esbuild's `define` can only replace `process.env.NODE_ENV`; the
+// `typeof process` check still runs and fails in the browser.) The guard
+// exists to silence these warnings only in Node-based environments where
+// `NODE_ENV=production` is genuinely set (e.g. bundling for an embedded
+// runtime). LLM-controlled locator failures are expected user input, so the
+// always-on diagnostics in the browser are intentional — they prevent a
+// malformed locator from being silently swallowed as "no match".
 const isProd = (): boolean =>
   typeof process !== "undefined" && process.env?.NODE_ENV === "production";
 
@@ -282,8 +285,10 @@ export function findByLocator(by: By): Element[] {
  // so a genuine programming error must not be swallowed as "no match".
  //
  // A malformed selector / XPath handed to us by the caller is the *expected*
- // failure mode (it's user-controlled input) — log it only in non-production
- // builds so debugging isn't noisy in prod.
+ // failure mode (it's user-controlled input). `isProd()` can only be true in
+ // a Node environment with NODE_ENV=production (see its definition); in the
+ // extension the warning always fires, which is the desired behavior — the
+ // handler surfaces the bad locator instead of silently returning "no match".
  //
  // Anything else (a `TypeError`, an internal bug, a non-string `value`, …) is
  // *unexpected* and is always surfaced — including in production — because

@@ -19,21 +19,35 @@ import type { AgentStepRequest } from "../src/lib/agent/types";
 const h = vi.hoisted(() => ({
   supportsVision: false,
   chatMessages: [] as { role: string; content: string }[][],
+  chatRequests: [] as Record<string, unknown>[],
+  chatUsage: undefined as
+    | { tokensIn: number; tokensOut: number; cachedInputTokens: number; costUsd: number }
+    | undefined,
+  buildCount: 0,
+  mockProviderId: "openai",
+  mockModel: "m",
 }));
 
 vi.mock("../src/extension/provider-config", () => ({
-  readProviderConfig: async () => ({ provider: "openai", apiKey: "k", model: "m" }),
-  buildProvider: async () => ({
-    id: "openai",
-    supportsStructuredOutput: true,
-    get supportsVision() {
-      return h.supportsVision;
-    },
-    chat: async ({ messages }: { messages: { role: string; content: string }[] }) => {
-      h.chatMessages.push(messages);
-      return { content: "{}" };
-    },
-  }),
+  readProviderConfig: async () => ({ provider: h.mockProviderId, apiKey: "k", model: h.mockModel }),
+  resolveModel: (c: { provider?: string; model?: string; catalogId?: string }) =>
+    c.model ?? "resolved-default",
+  buildProvider: async () => {
+    h.buildCount++;
+    return {
+      id: h.mockProviderId,
+      model: h.mockModel,
+      supportsStructuredOutput: true,
+      get supportsVision() {
+        return h.supportsVision;
+      },
+      chat: async (req: { messages: { role: string; content: string }[] }) => {
+        h.chatMessages.push(req.messages);
+        h.chatRequests.push(req as Record<string, unknown>);
+        return { content: "{}", ...(h.chatUsage ? { usage: h.chatUsage } : {}) };
+      },
+    };
+  },
 }));
 
 vi.mock("../src/lib/agent/prompts/navigator-prompt", () => ({
@@ -59,9 +73,14 @@ let lastNavigatorArgs: {
 } | undefined;
 
 let store: Record<string, unknown>;
+/** Captured chrome.storage.onChanged listener (the SW registers it at import). */
+let onChangedCb:
+  | ((changes: Record<string, unknown>, area: string) => void)
+  | undefined;
 
 function installChrome() {
   store = {};
+  onChangedCb = undefined;
   const get = (keys: string | string[]) => {
     const arr = Array.isArray(keys) ? keys : [keys];
     const result: Record<string, unknown> = {};
@@ -71,7 +90,11 @@ function installChrome() {
   (globalThis as unknown as { chrome: unknown }).chrome = {
     storage: {
       local: { get, set: () => Promise.resolve() },
-      onChanged: { addListener: () => {} },
+      onChanged: {
+        addListener: (cb: (changes: Record<string, unknown>, area: string) => void) => {
+          onChangedCb = cb;
+        },
+      },
     },
   };
 }
@@ -79,6 +102,9 @@ function installChrome() {
 beforeEach(() => {
   h.supportsVision = false;
   h.chatMessages = [];
+  h.chatRequests = [];
+  h.chatUsage = undefined;
+  h.buildCount = 0;
   installChrome();
 });
 
@@ -200,5 +226,194 @@ describe("navigatorCallDirect screenshot gating", () => {
     const userContent = h.chatMessages[0].find((m) => m.role === "user")!.content;
     expect(userContent).toContain("<screenshot>BASE64_SCREENSHOT_DATA</screenshot>");
     expect(userContent).not.toContain("iVBORw0KGgoFAKE");
+  });
+});
+
+describe("getReasoningEffort", () => {
+  test("unset → undefined", async () => {
+    const { getReasoningEffort } = await import("../src/extension/llm-direct");
+    expect(await getReasoningEffort()).toBeUndefined();
+  });
+
+  test("an unrecognized value → undefined (fail-safe)", async () => {
+    store.reasoningEffort = "ultra";
+    const { getReasoningEffort } = await import("../src/extension/llm-direct");
+    expect(await getReasoningEffort()).toBeUndefined();
+  });
+
+  test("a recognized effort passes through", async () => {
+    store.reasoningEffort = "high";
+    const { getReasoningEffort } = await import("../src/extension/llm-direct");
+    expect(await getReasoningEffort()).toBe("high");
+  });
+});
+
+describe("getReasoningBudget", () => {
+  test("unset → undefined", async () => {
+    const { getReasoningBudget } = await import("../src/extension/llm-direct");
+    expect(await getReasoningBudget()).toBeUndefined();
+  });
+
+  test("non-positive or non-numeric values → undefined", async () => {
+    store.reasoningBudget = 0;
+    const { getReasoningBudget } = await import("../src/extension/llm-direct");
+    expect(await getReasoningBudget()).toBeUndefined();
+  });
+
+  test("a fractional budget is floored", async () => {
+    store.reasoningBudget = 16000.5;
+    const { getReasoningBudget } = await import("../src/extension/llm-direct");
+    expect(await getReasoningBudget()).toBe(16000);
+  });
+
+  test("a positive integer passes through", async () => {
+    store.reasoningBudget = 16000;
+    const { getReasoningBudget } = await import("../src/extension/llm-direct");
+    expect(await getReasoningBudget()).toBe(16000);
+  });
+});
+
+describe("getForceReasoning", () => {
+  test("unset → undefined", async () => {
+    const { getForceReasoning } = await import("../src/extension/llm-direct");
+    expect(await getForceReasoning()).toBeUndefined();
+  });
+
+  test("an unrecognized value → undefined (fail-safe)", async () => {
+    store.forceReasoning = "maybe";
+    const { getForceReasoning } = await import("../src/extension/llm-direct");
+    expect(await getForceReasoning()).toBeUndefined();
+  });
+
+  test("'on' and 'off' pass through", async () => {
+    store.forceReasoning = "on";
+    const { getForceReasoning } = await import("../src/extension/llm-direct");
+    expect(await getForceReasoning()).toBe("on");
+  });
+});
+
+describe("reasoning config + cache-eligibility wiring", () => {
+  test("navigator passes the reasoning config + cacheEligible when settings are set", async () => {
+    store.reasoningEffort = "high";
+    store.reasoningBudget = 16000;
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest());
+    expect(h.chatRequests[0]).toMatchObject({
+      cacheEligible: true,
+      reasoning: { effort: "high", budgetTokens: 16000 },
+    });
+  });
+
+  test("navigator passes cacheEligible but no reasoning config when unset", async () => {
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest());
+    expect(h.chatRequests[0]).toMatchObject({ cacheEligible: true });
+    expect(h.chatRequests[0].reasoning).toBeUndefined();
+  });
+
+  test("forceReasoning 'off' is passed as enabled:false (navigator)", async () => {
+    store.forceReasoning = "off";
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest());
+    expect(h.chatRequests[0]).toMatchObject({ reasoning: { enabled: false } });
+  });
+
+  test("forceReasoning 'on' is passed as enabled:true (navigator)", async () => {
+    store.forceReasoning = "on";
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest());
+    expect(h.chatRequests[0]).toMatchObject({ reasoning: { enabled: true } });
+  });
+
+  test("planner passes the reasoning config but never cacheEligible", async () => {
+    store.reasoningEffort = "medium";
+    const { plannerCallDirect } = await import("../src/extension/llm-direct");
+    await plannerCallDirect({
+      task: "plan",
+      history: [],
+      plan: [],
+      currentPlanItem: 0,
+      url: "https://example.com",
+      tabs: [],
+      step: 1,
+      maxSteps: 10,
+    });
+    expect(h.chatRequests[0]).toMatchObject({ reasoning: { effort: "medium" } });
+    expect(h.chatRequests[0].cacheEligible).toBeUndefined();
+  });
+});
+
+describe("provider cache invalidation", () => {
+  test("a forceReasoning change rebuilds the cached provider", async () => {
+    // buildProvider reads forceReasoning to patch supportsReasoning (the "on"
+    // override). A storage change must invalidate the cached provider, or the
+    // override is silently ignored until some other config key changes.
+    store.forceReasoning = "off";
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest());
+    const buildsAfterFirstCall = h.buildCount;
+    store.forceReasoning = "on";
+    onChangedCb?.({ forceReasoning: { newValue: "on" } }, "local");
+    await navigatorCallDirect(makeRequest());
+    expect(h.buildCount).toBeGreaterThan(buildsAfterFirstCall);
+  });
+
+  test("the cached provider is reused when no config key changed", async () => {
+    store.forceReasoning = "off";
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest());
+    const buildsAfterFirstCall = h.buildCount;
+    await navigatorCallDirect(makeRequest());
+    expect(h.buildCount).toBe(buildsAfterFirstCall);
+  });
+});
+
+describe("cachedInputTokens + precomputed costUsd forwarding", () => {
+  test("navigator result preserves cachedInputTokens and costUsd", async () => {
+    h.chatUsage = { tokensIn: 1000, tokensOut: 200, cachedInputTokens: 800, costUsd: 0.042 };
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    const result = await navigatorCallDirect(makeRequest());
+    expect(result.cachedInputTokens).toBe(800);
+    expect(result.costUsd).toBe(0.042);
+  });
+});
+
+describe("experimental (alpha/beta) model one-time warning", () => {
+  test("running with an alpha model warns once via console.warn", async () => {
+    h.mockProviderId = "inceptron";
+    h.mockModel = "moonshotai/Kimi-K2.6-Fast";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest());
+    // Same cached provider — the hot path short-circuits before the warning.
+    await navigatorCallDirect(makeRequest());
+    expect(warn).toHaveBeenCalledTimes(1);
+    const msg = String(warn.mock.calls[0]?.[0] ?? "");
+    expect(msg).toContain("moonshotai/Kimi-K2.6-Fast");
+    expect(msg).toContain("alpha");
+    expect(msg).toContain("experimental");
+    warn.mockRestore();
+  });
+
+  test("the warning fires only once per model even across provider rebuilds", async () => {
+    h.mockProviderId = "inceptron";
+    h.mockModel = "moonshotai/Kimi-K2.6-Fast";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest()); // builds → warns
+    onChangedCb?.({ provider: { newValue: "x" } }, "local"); // invalidates cache
+    await navigatorCallDirect(makeRequest()); // rebuilds → warned-set suppresses
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  test("stable models never warn", async () => {
+    h.mockProviderId = "openai";
+    h.mockModel = "gpt-4o";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest());
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

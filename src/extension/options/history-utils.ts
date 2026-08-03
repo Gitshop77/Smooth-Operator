@@ -5,7 +5,7 @@
  * effects) so validators and render logic are independently testable.
  */
 
-import { $, escapeHtml } from "@/extension/shared";
+import { $, escapeHtml, redactKeyLeak } from "@/extension/shared";
 import { STORAGE_KEYS } from "./storage-keys";
 import { openModal } from "./modal";
 import { runBadge } from "./status";
@@ -36,15 +36,21 @@ export const MAX_RUN_ENTRY_BYTES = 2 * 1024 * 1024; // 2 MiB per entry
 export const MAX_TRANSCRIPT_CHARS = 100_000;
 
 /**
- * Stringify a run entry for the transcript modal and cap the rendered
- * size. Truncation is code-point-aware (no lone surrogates at the cut) and
- * appends an explicit marker so a partial dump is never mistaken for the full
- * run. The full entry stays in storage — this only bounds what is rendered.
+ * Stringify a run entry for the transcript modal, mask key-shaped tokens, and
+ * cap the rendered size. The storage layer redacts by VALUE only, so a pasted
+ * or model-echoed key-shaped token (gsk_…, ghp_…, a JWT, …) that is not in the
+ * user's secret store would otherwise surface verbatim here and in exports.
+ * Redaction runs BEFORE the cap so a masked token is never cut back into a
+ * partial-but-recognizable secret. Truncation is code-point-aware (no lone
+ * surrogates at the cut) and appends an explicit marker so a partial dump is
+ * never mistaken for the full run. The full entry stays in storage — this only
+ * bounds what is rendered.
  */
 export function capTranscript(run: RunHistoryEntry): string {
   const raw = JSON.stringify(run, null, 2);
-  if (raw.length <= MAX_TRANSCRIPT_CHARS) return raw;
-  const cut = Array.from(raw).slice(0, MAX_TRANSCRIPT_CHARS).join("");
+  const redacted = redactKeyLeak(raw);
+  if (redacted.length <= MAX_TRANSCRIPT_CHARS) return redacted;
+  const cut = Array.from(redacted).slice(0, MAX_TRANSCRIPT_CHARS).join("");
   return `${cut}\n… (truncated: rendered first ${MAX_TRANSCRIPT_CHARS} of ${raw.length} chars; the full run remains in storage)`;
 }
 

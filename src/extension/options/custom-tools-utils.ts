@@ -13,6 +13,15 @@ export interface CustomToolEntry {
 export const DESC_MAX = 500;
 export const CODE_MAX = 50_000;
 
+/**
+ * Maximum number of custom tools the store accepts. Every tool's name +
+ * description is inlined into the `<custom_tools>` prompt block on each agent
+ * run, so an unbounded store silently bloats every prompt and the storage
+ * quota. The runtime loader (`registry-utils.ts` `formatCustomToolsBlock`)
+ * must enforce the same cap — keep the two sides in lockstep.
+ */
+export const MAX_CUSTOM_TOOLS = 50;
+
 let mutationQueue: Promise<unknown> = Promise.resolve();
 export function serialize<T>(task: () => Promise<T>): Promise<T> {
   const run = mutationQueue.then(task, task);
@@ -26,7 +35,9 @@ export function serialize<T>(task: () => Promise<T>): Promise<T> {
 export function validateCustomTools(raw: unknown): CustomToolEntry[] {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) {
-    console.warn("[custom-tools] stored value is not an array; ignoring.", raw);
+    // Log the shape only — the payload can contain tool `code` (and possibly
+    // embedded key material) and must not be dumped to the console.
+    console.warn(`[custom-tools] stored value is not an array (got ${typeof raw}); ignoring.`);
     return [];
   }
   const out: CustomToolEntry[] = [];
@@ -37,7 +48,7 @@ export function validateCustomTools(raw: unknown): CustomToolEntry[] {
       typeof entry.description !== "string" ||
       typeof entry.code !== "string"
     ) {
-      console.warn(`[custom-tools] dropping malformed entry at index ${i}.`, entry);
+      console.warn(`[custom-tools] dropping malformed entry at index ${i} (expected {name, description, code} strings).`);
       return;
     }
     const createdAt = typeof entry.createdAt === "number" ? entry.createdAt : undefined;

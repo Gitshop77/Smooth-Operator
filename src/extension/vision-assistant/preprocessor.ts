@@ -67,6 +67,35 @@ function paddedDims(w: number, h: number): { tw: number; th: number; patches: nu
 }
 
 /**
+ * Rescale + pad dimensions to fit within MAX_IMAGE_PATCHES.
+ *
+ * Padding rounds `w`/`h` up to the next multiple of `MERGE_FACTOR * PATCH_SIZE`,
+ * so the effective patch count is computed AFTER padding. The rescale loop
+ * iterates because a single pass can still exceed the cap due to
+ * ceiling-rounding after the scale-down (e.g. a 1920×1080 screenshot lands at
+ * 264 patches after one pass, still > 256).
+ *
+ * The floor() rescale can shrink a small dimension of an extreme-aspect-ratio
+ * screenshot to 0 (20000×10 → h=0). The clamp to ≥1 keeps the canvas
+ * non-degenerate, and the loop re-checks the cap AFTER clamping — re-padding
+ * a clamped dimension can push the count back over MAX_IMAGE_PATCHES, which a
+ * post-loop clamp alone would miss.
+ */
+export function fitPatchDims(
+  w: number,
+  h: number,
+): { w: number; h: number; tw: number; th: number; patches: number } {
+  let { tw, th, patches } = paddedDims(w, h);
+  while (patches > MAX_IMAGE_PATCHES) {
+    const scale = Math.sqrt(MAX_IMAGE_PATCHES / patches);
+    w = Math.max(1, Math.floor(w * scale));
+    h = Math.max(1, Math.floor(h * scale));
+    ({ tw, th, patches } = paddedDims(w, h));
+  }
+  return { w, h, tw, th, patches };
+}
+
+/**
  * Preprocess a screenshot for the MoonViT vision encoder.
  *
  * Pipeline:
@@ -118,33 +147,14 @@ export async function preprocessScreenshot(screenshotDataUrl: string): Promise<P
   // coordinates back to actual screenshot pixels.
   const originalWidth = img.width;
   const originalHeight = img.height;
-  let w = originalWidth;
-  let h = originalHeight;
-
-  // Rescale if the post-padding patch count exceeds the cap. Padding rounds
-  // `w`/`h` up to the next multiple of `MERGE_FACTOR * PATCH_SIZE`, so the
-  // effective patch count is `(tw / PATCH_SIZE) * (th / PATCH_SIZE)` after
-  // padding — not the pre-padding `floor(w/PATCH) * floor(h/PATCH)`.
-  // Iterate the rescale because a single pass may still exceed the cap
-  // due to ceiling-rounding after the scale-down (e.g. a 1920×1080 screenshot
-  // lands at 264 patches after one pass, still > 256).
-  let { tw, th, patches } = paddedDims(w, h);
-  while (patches > MAX_IMAGE_PATCHES) {
-    const scale = Math.sqrt(MAX_IMAGE_PATCHES / patches);
-    w = Math.floor(w * scale);
-    h = Math.floor(h * scale);
-    ({ tw, th, patches } = paddedDims(w, h));
-  }
-
-  // Guard against a degenerate (zero-sized) source image. A zero-width/height
-  // source leaves `w`/`h` at 0 and the rescale loop's floor(… × scale) can also
-  // floor a small dimension down to 0. That would make `tw`/`th` (and therefore
-  // the canvas) zero-sized AND turn `rescaledWidth`/`rescaledHeight` into
-  // divisors of zero downstream (non-finite 0-1000 → pixel coordinates). Clamp
-  // to ≥1 and recompute the padded dimensions so the invariant holds.
-  w = Math.max(1, w);
-  h = Math.max(1, h);
-  ({ tw, th } = paddedDims(w, h));
+  // Rescale if the post-padding patch count exceeds the cap, then clamp the
+  // (possibly floored-to-0) dimensions to ≥1 and re-check the cap — see
+  // `fitPatchDims`.
+  const fitted = fitPatchDims(originalWidth, originalHeight);
+  const w = fitted.w;
+  const h = fitted.h;
+  const tw = fitted.tw;
+  const th = fitted.th;
 
   const canvas = createCanvas();
   if (!canvas) {

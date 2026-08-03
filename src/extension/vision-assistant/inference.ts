@@ -28,7 +28,6 @@ import {
   MERGE_FACTOR,
   DETECTION_PROMPT,
   MAX_NEW_TOKENS,
-  MODEL_REPO,
 } from "./constants";
 import {
   pastKeyNames,
@@ -47,6 +46,12 @@ import {
   validateLogitsShape,
   validateEmbeddingShapes,
 } from "./inference-utils";
+import { getTokenizer } from "./tokenizer";
+import {
+  MemoryWatchdog,
+  readMemoryInfo,
+  pushMemoryWarning,
+} from "./memory-watchdog";
 
 /** Tokenizer callable signature (also used for the decode tokenizer below). */
 type TokenizeFn = (
@@ -55,25 +60,6 @@ type TokenizeFn = (
 ) => Promise<{ input_ids: { data: BigInt64Array | number[] } }>;
 /** Tokenizer decode signature. */
 type DecodeFn = { decode: (ids: number[], opts: unknown) => string };
-
-// Lazy-load transformers.js only when needed. (esbuild bundles it into
-// background.js either way — the dynamic import defers execution until the
-// tokenizer is first requested; it does not shrink the bundle.)
-// Reset the cached promise on rejection so a transient fetch failure (network
-// drop, HuggingFace outage, auth issue) doesn't permanently disable Local
-// Vision until SW restart — the next call retries from scratch.
-let tokenizerLoadPromise: Promise<unknown> | null = null;
-async function getTokenizer(): Promise<unknown> {
-  if (!tokenizerLoadPromise) {
-    tokenizerLoadPromise = import("@huggingface/transformers").then((mod) => {
-      return mod.AutoTokenizer.from_pretrained(MODEL_REPO);
-    }).catch((e) => {
-      tokenizerLoadPromise = null; // allow retry on next call
-      throw e;
-    });
-  }
-  return tokenizerLoadPromise;
-}
 
 export class VisionAssistant {
   private visionSession: ort.InferenceSession | null = null;
@@ -120,6 +106,8 @@ export class VisionAssistant {
  * separately by `detectPromise`/`detectDataUrl` and is preserved unchanged.
  */
   private chain: Promise<unknown> | null = null;
+  /** JS-heap growth watchdog sampled at the end of each detection run. */
+  private memoryWatchdog = new MemoryWatchdog();
 
   constructor() {
     // Surface the non-fatal supply-chain warning (unpinned-weights opt-in)
@@ -138,6 +126,23 @@ export class VisionAssistant {
 
   onStatus(callback: StatusCallback): void {
     this.statusCallback = callback;
+  }
+
+  /**
+   * Sample Chrome's JS heap after a detection and surface a memory-growth
+   * warning when the watchdog fires. The warning goes to the status callback
+   * (without flipping `_status`, so a warning never disables an active run)
+   * and to the module-level notice registry that the background SW watchdog
+   * drains into the side panel.
+   */
+  private sampleMemory(): void {
+    const info = readMemoryInfo();
+    if (!info) return;
+    const warning = this.memoryWatchdog.record(info);
+    if (warning) {
+      pushMemoryWarning(warning);
+      this.statusCallback?.("warning", warning.message);
+    }
   }
 
   /** Check if WebGPU is available in this browser. */
@@ -323,7 +328,10 @@ export class VisionAssistant {
  //     screenshot is currently running, return the cached promise instead of
  //     queueing a duplicate run. This is checked synchronously against the
  //     live run so two overlapping calls for the same input share one result.
+ //     An aborted second caller must not be handed the full detection — honor
+ //     its signal and throw AbortError like every other abort check.
     if (this.detectPromise && this.detectDataUrl === screenshotDataUrl) {
+      if (signal?.aborted) throw new DOMException("Vision detect aborted", "AbortError");
       return this.detectPromise;
     }
 
@@ -521,11 +529,15 @@ export class VisionAssistant {
     }
     const effectiveWidth = targetWidth * (originalWidth / rescaledWidth);
     const effectiveHeight = targetHeight * (originalHeight / rescaledHeight);
- // Clamp to the ORIGINAL screenshot bounds (originalWidth ×
- // originalHeight), not the padded canvas bounds (effectiveWidth ×
- // effectiveHeight). effectiveWidth ≥ originalWidth due to padding; clamping
- // to effectiveWidth-1 would allow coords 3-6 CSS px beyond the viewport.
-    return toPixelCoords(detections, effectiveWidth, effectiveHeight, originalWidth, originalHeight);
+  // Clamp to the ORIGINAL screenshot bounds (originalWidth ×
+  // originalHeight), not the padded canvas bounds (effectiveWidth ×
+  // effectiveHeight). effectiveWidth ≥ originalWidth due to padding; clamping
+  // to effectiveWidth-1 would allow coords 3-6 CSS px beyond the viewport.
+    const pixelDetections = toPixelCoords(detections, effectiveWidth, effectiveHeight, originalWidth, originalHeight);
+    // Sample the JS heap after a successful run — the first run establishes
+    // the baseline, later runs measure growth across detections.
+    this.sampleMemory();
+    return pixelDetections;
   }
 
   /** Release ONNX sessions and free VRAM. */
@@ -547,6 +559,9 @@ export class VisionAssistant {
     this.embScales = null;
     this.embMeta = null;
     this.setStatus("uninitialized");
+    // Sessions released → heap drops back; rebaseline so the next init
+    // measures from a fresh episode instead of the pre-cleanup high-water.
+    this.memoryWatchdog.reset();
     if (vision) {
       try {
         await vision.release();

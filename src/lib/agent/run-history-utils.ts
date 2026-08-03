@@ -1,5 +1,7 @@
 import type { LogEvent } from "./types";
+import type { LogEntry } from "./logging";
 import { getSecretSetVersion, redactSecrets } from "./secrets";
+import { redactKeyShapes } from "./key-shape-redact";
 
 /** Persistent record of one completed (or aborted) agent run. */
 export interface RunRecord {
@@ -8,6 +10,8 @@ export interface RunRecord {
   startedAt: number;
   endedAt: number;
   steps: LogEvent[];
+  /** Structured JSON-lines log entries (bounded ring, drained at finish). */
+  logs: LogEntry[];
   result: { success: boolean; text: string } | null;
   totalTokensIn: number;
   totalTokensOut: number;
@@ -56,6 +60,7 @@ export function writeToLocalStorageWithRetry(runs: RunRecord[]): void {
 export function normalizeRunRecord(r: RunRecord): RunRecord {
   return {
     ...r,
+    logs: Array.isArray(r.logs) ? r.logs : [],
     totalTokensIn: r.totalTokensIn ?? 0,
     totalTokensOut: r.totalTokensOut ?? 0,
     totalCostUsd: r.totalCostUsd ?? 0,
@@ -78,8 +83,20 @@ function isPlainObject(val: object): val is Record<string, unknown> {
 }
 
 const MAX_REDACT_DEPTH = 6;
+const MAX_REDACT_CACHE_ENTRIES = 1000;
 const redactCache = new Map<string, string>();
 let lastRedactCacheVersion = -1;
+
+/**
+ * Redact one string for persistence: stored-secret values first, then
+ * well-known key shapes (API keys, tokens, DB URLs). The key-shape pass is
+ * what every other persistence surface does (messages.ts, compaction) — run
+ * history receives page-derived strings that never passed the LLM prompt, so
+ * it needs the same parity.
+ */
+const redactString = async (val: string): Promise<string> => {
+  return redactKeyShapes(await redactSecrets(val));
+};
 
 export const redactValue = async (val: unknown, depth = 0): Promise<unknown> => {
   if (typeof val === "string") {
@@ -90,8 +107,17 @@ export const redactValue = async (val: unknown, depth = 0): Promise<unknown> => 
     }
     const cached = redactCache.get(val);
     if (cached !== undefined) return cached;
-    const result = await redactSecrets(val);
+    const result = await redactString(val);
     redactCache.set(val, result);
+    if (redactCache.size > MAX_REDACT_CACHE_ENTRIES) {
+      // Evict the oldest entries (Map preserves insertion order) so the
+      // cache cannot grow without bound.
+      let excess = redactCache.size - MAX_REDACT_CACHE_ENTRIES;
+      for (const key of redactCache.keys()) {
+        if (excess-- <= 0) break;
+        redactCache.delete(key);
+      }
+    }
     return result;
   }
   if (depth >= MAX_REDACT_DEPTH) return val;
@@ -135,7 +161,19 @@ export async function redactRunSecrets(run: RunRecord): Promise<RunRecord> {
   );
   const result = run.result;
   const resultText = result?.text ?? "";
-  const redactedResultText = typeof resultText === "string" ? await redactSecrets(resultText) : resultText;
-  const task = typeof run.task === "string" ? await redactSecrets(run.task) : run.task;
-  return { ...run, task, steps, result: result ? { success: result.success, text: redactedResultText } : null };
+  const redactedResultText = typeof resultText === "string" ? await redactString(resultText) : resultText;
+  const task = typeof run.task === "string" ? await redactString(run.task) : run.task;
+  const logs = await Promise.all(
+    (run.logs ?? []).map(async (entry) => {
+      let patched: LogEntry = entry;
+      for (const [key, val] of Object.entries(entry)) {
+        const redacted = await redactValue(val);
+        if (redacted !== val) {
+          patched = { ...patched, [key]: redacted };
+        }
+      }
+      return patched;
+    }),
+  );
+  return { ...run, task, steps, logs, result: result ? { success: result.success, text: redactedResultText } : null };
 }

@@ -27,13 +27,16 @@ describe("hasNestedQuantifier (ReDoS static guard)", () => {
     "a{3}",
     "[a-z]+",
     "foo",
-    "(:?ab)+",
+    "(?:ab)+",
     "a+b+c+",
+    "(a+){3}",
+    "(a|b){50}",
+    "(a{100})+",
   ];
 
   // Shapes that MUST be rejected: a group containing an unbounded quantifier,
-  // itself quantified by an unbounded quantifier, OR an ambiguous alternation
-  // under an unbounded quantifier.
+  // itself quantified by an unbounded quantifier (or by a large exact {n}),
+  // OR an ambiguous alternation under an unbounded quantifier.
   const unsafe = [
     "(a+)+",
     "(a*)*",
@@ -44,15 +47,20 @@ describe("hasNestedQuantifier (ReDoS static guard)", () => {
     "(a|ab)+",
     "(a|a|a)+$",
     "((a|b)+)+",
+    "(?:a|a)+",
+    "(?:a+)+",
+    "((a|a))+",
+    "(a+){100}b",
+    "(a|aa){100}b",
+    "([\\d]|5)+",
+    "([\\x41]|A)+",
   ];
 
-
-  test.each(safe as any[])("accepts safe shape: %s", (pattern) => {
+  test.each(safe)("accepts safe shape: %s", (pattern) => {
     expect(hasNestedQuantifier(pattern)).toBe(false);
   });
 
-
-  test.each(unsafe as any[])("rejects unsafe shape: %s", (pattern) => {
+  test.each(unsafe)("rejects unsafe shape: %s", (pattern) => {
     expect(hasNestedQuantifier(pattern)).toBe(true);
   });
 });
@@ -83,12 +91,11 @@ describe("hasBackreference (ReDoS backreference guard)", () => {
   ];
 
 
-  test.each(withBackref as any[])("rejects backreference pattern: %s", (pattern) => {
+  test.each(withBackref)("rejects backreference pattern: %s", (pattern) => {
     expect(hasBackreference(pattern)).toBe(true);
   });
 
-
-  test.each(withoutBackref as any[])("accepts non-backreference pattern: %s", (pattern) => {
+  test.each(withoutBackref)("accepts non-backreference pattern: %s", (pattern) => {
     expect(hasBackreference(pattern)).toBe(false);
   });
 });

@@ -4,7 +4,7 @@
  * These are CRITICAL tests — the security code had zero coverage before.
  */
 
-import { describe, test, expect, beforeEach, afterEach, afterAll, beforeAll } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, afterAll, beforeAll, vi } from "vitest";
 import {
   sanitizeUntrusted,
   wrapUntrusted,
@@ -23,6 +23,7 @@ import { describeAction } from "../src/lib/agent/tools/executor";
 import { ACTION_METADATA } from "../src/lib/agent/tools/schema-utils";
 import { RunBuilder, saveRun, loadRuns } from "../src/lib/agent/run-history";
 import type { AgentAction, LogEvent } from "../src/lib/agent/types";
+import type { RunState } from "../src/extension/background/state-store";
 import { installLocalStorageStub, restoreLocalStorageStub } from "./helpers";
 
 // jsdom doesn't provide a global `localStorage` by default — the
@@ -533,8 +534,74 @@ describe("checkUrlAllowed", () => {
     expect(checkUrlAllowed("https://example.com:443/", { allowedDomains: ["example.com"] }).allowed).toBe(true);
   });
 
+  // Entries with a trailing `:port` must behave like the bare hostname
+  // (the port is a transport detail, not part of the domain identity).
+  test("plain hostname:port entry matches the bare hostname (allowlist)", () => {
+    expect(checkUrlAllowed("https://example.com/", { allowedDomains: ["example.com:443"] }).allowed).toBe(true);
+  });
+
+  test("plain hostname:port entry matches a URL with a different port", () => {
+    expect(checkUrlAllowed("https://example.com:8443/", { allowedDomains: ["example.com:443"] }).allowed).toBe(true);
+  });
+
+  test("plain hostname:port entry blocks the bare hostname (blocklist)", () => {
+    expect(checkUrlAllowed("http://evil.com/", { blockedDomains: ["evil.com:443"] }).allowed).toBe(false);
+  });
+
+  test("IPv4:port entry matches the bare IPv4 address", () => {
+    expect(checkUrlAllowed("http://1.2.3.4/", { allowedDomains: ["1.2.3.4:8080"] }).allowed).toBe(true);
+  });
+
   test("IPv6 address with port in allowlist matches URL", () => {
     expect(checkUrlAllowed("http://[2001:db8::1]/", { allowedDomains: ["[2001:db8::1]:8080"] }).allowed).toBe(true);
+  });
+});
+
+describe("reputationDeny additive gate", () => {
+  test("a flagged hostname rejects the URL", () => {
+    const res = checkUrlAllowed("http://phish.example/", {
+      reputationDeny: (hostname) => hostname === "phish.example",
+    });
+    expect(res).toEqual({ allowed: false, reason: "URL flagged by reputation list" });
+  });
+
+  test("an unflagged hostname passes through", () => {
+    const res = checkUrlAllowed("http://good.example/", {
+      reputationDeny: (hostname) => hostname === "phish.example",
+    });
+    expect(res.allowed).toBe(true);
+  });
+
+  test("a throwing reputation source fails OPEN (never blocks)", () => {
+    const res = checkUrlAllowed("http://good.example/", {
+      reputationDeny: () => {
+        throw new Error("reputation service unavailable");
+      },
+    });
+    expect(res.allowed).toBe(true);
+  });
+
+  test("the deny-gate can only add blocks — it never grants access", () => {
+    // Allowlist is set, reputation says "not flagged" → the URL is still
+    // rejected because it is not in the allowlist.
+    const res = checkUrlAllowed("http://other.example/", {
+      allowedDomains: ["good.example"],
+      reputationDeny: () => false,
+    });
+    expect(res).toEqual({ allowed: false, reason: "URL domain not in allowlist" });
+  });
+
+  test("static blocklist takes precedence (reputation not consulted)", () => {
+    let consulted = false;
+    const res = checkUrlAllowed("http://evil.example/", {
+      blockedDomains: ["evil.example"],
+      reputationDeny: () => {
+        consulted = true;
+        return false;
+      },
+    });
+    expect(res).toEqual({ allowed: false, reason: "URL domain is blocked" });
+    expect(consulted).toBe(false);
   });
 });
 
@@ -681,6 +748,144 @@ describe("checkActionAllowed + modes", () => {
 
   test("standard mode blocks file uploads", () => {
     expect(checkActionAllowed("upload_file", "standard").allowed).toBe(false);
+  });
+
+  test("search is gated on canNavigate (restricted cannot bypass navigation via search)", () => {
+    // `search` navigates the current tab to a search-results URL — the same
+    // capability boundary as `navigate`. Restricted mode (canNavigate:false)
+    // must not be bypassed by emitting `search` instead of `navigate`.
+    expect(checkActionAllowed("search", "restricted").allowed).toBe(false);
+    expect(checkActionAllowed("search", "standard").allowed).toBe(true);
+    expect(checkActionAllowed("search", "full_agentic").allowed).toBe(true);
+  });
+
+  test("restricted mode blocks destructive cookie/storage mutations but allows reads", () => {
+    for (const verb of ["set_cookie", "delete_cookies", "set_storage", "clear_storage"] as const) {
+      expect(checkActionAllowed(verb, "restricted").allowed).toBe(false);
+    }
+    // Read-only cookie/storage reads stay allowed in restricted mode.
+    expect(checkActionAllowed("get_cookies", "restricted").allowed).toBe(true);
+    expect(checkActionAllowed("get_storage", "restricted").allowed).toBe(true);
+  });
+
+  test("standard mode allows destructive cookie/storage mutations (confirmation gated separately)", () => {
+    for (const verb of ["set_cookie", "delete_cookies", "set_storage", "clear_storage"] as const) {
+      expect(checkActionAllowed(verb, "standard").allowed).toBe(true);
+      expect(requiresConfirmation(verb, "standard")).toBe(true);
+    }
+  });
+});
+
+// ─── SW delete_cookies all:true respects the domain allow/blocklist ─────────
+//
+// The `all:true` wipe enumerates the ENTIRE cookie jar. It must go through the
+// same domain gate as set_cookie / delete_cookies-with-urls: a cookie whose
+// domain the policy disallows must abort the whole wipe (fail closed — nothing
+// removed). The real checkUrlAllowedWithDomainConfig is driven via the
+// globalThis policy side-channel, exactly as the extension host sets it.
+
+describe("handleTabAction delete_cookies all:true respects the domain gate", () => {
+  const runState: RunState = {
+    task: "t",
+    maxSteps: 10,
+    mode: "standard",
+    startTabId: 1,
+    currentTabId: 1,
+    step: 0,
+    active: true,
+    abortRequested: false,
+  };
+  let removeSpy: ReturnType<typeof vi.fn>;
+  let savedConfig: unknown;
+  let savedEnforced: unknown;
+
+  beforeEach(() => {
+    const cookieFixture = [
+      {
+        name: "good",
+        value: "1",
+        domain: ".example.com",
+        path: "/",
+        secure: true,
+        httpOnly: true,
+        sameSite: "lax" as chrome.cookies.SameSiteStatus,
+        expirationDate: 1_800_000_000,
+        session: false,
+        hostOnly: false,
+      },
+      {
+        name: "evil",
+        value: "1",
+        domain: "evil.com",
+        path: "/",
+        secure: false,
+        httpOnly: false,
+        sameSite: "no_restriction" as chrome.cookies.SameSiteStatus,
+        expirationDate: undefined,
+        session: true,
+        hostOnly: true,
+      },
+    ];
+    removeSpy = vi.fn(async () => ({}));
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: {
+        get: vi.fn(async () => ({ id: 1, status: "complete", url: "https://example.com" })),
+        query: vi.fn(async () => []),
+      },
+      cookies: {
+        getAll: vi.fn(async () => cookieFixture),
+        set: vi.fn(async () => ({})),
+        remove: removeSpy,
+      },
+    };
+    savedConfig = (globalThis as Record<string, unknown>).__openCoworkDomainConfig;
+    savedEnforced = (globalThis as Record<string, unknown>).__openCoworkDomainConfigEnforced;
+    (globalThis as Record<string, unknown>).__openCoworkDomainConfig = { blockedDomains: ["evil.com"] };
+    delete (globalThis as Record<string, unknown>).__openCoworkDomainConfigEnforced;
+  });
+
+  afterEach(() => {
+    delete (globalThis as Record<string, unknown>).chrome;
+    if (savedConfig !== undefined) {
+      (globalThis as Record<string, unknown>).__openCoworkDomainConfig = savedConfig;
+    } else {
+      delete (globalThis as Record<string, unknown>).__openCoworkDomainConfig;
+    }
+    if (savedEnforced !== undefined) {
+      (globalThis as Record<string, unknown>).__openCoworkDomainConfigEnforced = savedEnforced;
+    } else {
+      delete (globalThis as Record<string, unknown>).__openCoworkDomainConfigEnforced;
+    }
+  });
+
+  test("BLOCKED when the jar contains a cookie for a blocked domain — nothing is removed", async () => {
+    const { handleTabAction } = await import("../src/extension/background/tab-manager");
+    const notify = vi.fn();
+    const res = await handleTabAction(
+      { type: "delete_cookies", all: true } as never,
+      runState,
+      notify,
+    );
+    expect(res.success).toBe(false);
+    expect(res.message).toContain("BLOCKED");
+    // Fail closed: not a single cookie was removed.
+    expect(removeSpy).not.toHaveBeenCalled();
+    // Same error surface as set_cookie: a recoverable:false error event fires.
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "error", recoverable: false }),
+    );
+  });
+
+  test("proceeds when every cookie's domain is allowed by the policy", async () => {
+    const { handleTabAction } = await import("../src/extension/background/tab-manager");
+    (globalThis as Record<string, unknown>).__openCoworkDomainConfig = { blockedDomains: ["other.example"] };
+    const res = await handleTabAction(
+      { type: "delete_cookies", all: true } as never,
+      runState,
+    );
+    expect(res.success).toBe(true);
+    expect((res.data as { deleted: number }).deleted).toBe(2);
+    expect(removeSpy).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -1012,6 +1217,58 @@ describe("run-history TTL filter", () => {
     const runs = await loadRuns();
     expect(runs).toHaveLength(1);
     expect(runs[0].id).toBe("epoch");
+  });
+});
+
+describe("run-history redaction fails CLOSED", () => {
+  test("a throwing redaction persists a marker run instead of the unredacted one", async () => {
+    const builder = new RunBuilder("task with sk-super-secret-999");
+    // A getter that throws makes Object.entries() inside redactRunSecrets throw.
+    const evilEvent = {
+      type: "action-result",
+      step: 1,
+      name: "click",
+      success: true,
+      message: "sk-super-secret-999",
+    } as unknown as LogEvent;
+    Object.defineProperty(evilEvent, "message", {
+      enumerable: true,
+      get() {
+        throw new Error("boom");
+      },
+    });
+    builder.addEvent(evilEvent);
+    const run = builder.finish({ success: true, text: "sk-super-secret-999" });
+
+    localStorage.removeItem("open_cowork_run_history");
+    await saveRun(run);
+
+    const persisted = await loadRuns();
+    expect(persisted).toHaveLength(1);
+    const rec = persisted[0];
+    // Marker content — the raw secret must NOT survive anywhere.
+    expect(rec.task).toBe("[REDACTED: redaction failed]");
+    expect(rec.steps).toHaveLength(0);
+    expect(rec.result).toBeNull();
+    expect(JSON.stringify(persisted)).not.toContain("sk-super-secret-999");
+    // Run identity is preserved so the transcript still has a slot.
+    expect(rec.id).toBe(run.id);
+  });
+
+  test("loadRuns extension path swallows storage errors (returns [])", async () => {
+    (globalThis as { chrome?: unknown }).chrome = {
+      storage: {
+        local: {
+          get: () => Promise.reject(new Error("storage unavailable")),
+        },
+      },
+    };
+    try {
+      const runs = await loadRuns();
+      expect(runs).toEqual([]);
+    } finally {
+      delete (globalThis as { chrome?: unknown }).chrome;
+    }
   });
 });
 

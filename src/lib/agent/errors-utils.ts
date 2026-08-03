@@ -31,9 +31,45 @@ export interface ClassifiedError {
   retryable: boolean;
   /** Original error message. */
   message: string;
+  /** Stable machine code, shared with the UI transcript vocabulary. */
+  machineCode: string;
+  /** Actionable guidance for the user/agent. */
+  recoveryHint: string;
   /** Original error object (for re-throwing or inspecting stack). */
   originalError?: unknown;
 }
+
+/** Stable machine code per category (shown in the UI transcript). */
+export const MACHINE_CODES: Record<ErrorCategory, string> = {
+  auth: "auth_failed",
+  forbidden: "access_forbidden",
+  bad_request: "invalid_request",
+  rate_limit: "rate_limited",
+  server_error: "server_error",
+  network: "network_error",
+  cancelled: "cancelled",
+  parse: "parse_error",
+  max_steps: "max_steps_reached",
+  max_failures: "max_failures_reached",
+  programmer_error: "internal_error",
+  unknown: "unknown_error",
+};
+
+/** Actionable recovery guidance per category (shown in the UI transcript). */
+export const RECOVERY_HINTS: Record<ErrorCategory, string> = {
+  auth: "Check that the API key is valid and not expired.",
+  forbidden: "The API key may not have permission for this model or endpoint.",
+  bad_request: "This is likely a bug in the agent — report it.",
+  rate_limit: "Wait a few seconds; the agent will retry automatically.",
+  server_error: "The LLM server is having issues; the agent will retry automatically.",
+  network: "Check your internet connection and try again.",
+  cancelled: "No action needed — the agent was stopped by the user.",
+  parse: "The LLM response was malformed; the agent will retry with a corrected prompt.",
+  max_steps: "Reached the step budget. Increase maxSteps or split the task.",
+  max_failures: "Too many consecutive failures. Simplify the task or fix the blocker.",
+  programmer_error: "An internal error occurred — report it.",
+  unknown: "The agent will retry; if it keeps failing, simplify the task.",
+};
 
 /**
  * Extract a lowercase message string from any thrown value.
@@ -84,6 +120,8 @@ export function classifyError(error: unknown, attempt = 0): ClassifiedError {
     fatal,
     retryable,
     message: originalMessage,
+    machineCode: MACHINE_CODES[category],
+    recoveryHint: RECOVERY_HINTS[category],
     originalError: error,
   });
 
@@ -208,4 +246,84 @@ export function friendlyErrorMessage(error: ClassifiedError): string {
     default:
       return "An unexpected error occurred. The agent will retry.";
   }
+}
+
+// ─── Action-level error taxonomy (P2) ───────────────────────────────────────
+
+/** Classification of a failed action, consumed by the loop/LLM error output. */
+export interface ActionErrorClassification {
+  /** Stable machine code (shared with the E7 UI vocabulary). */
+  machineCode: string;
+  /** Whether the failure is transient and worth retrying. */
+  retryable: boolean;
+  /** Actionable guidance for the agent/user. */
+  recoveryHint: string;
+}
+
+/** Build a classification result. */
+function mkAction(code: string, retryable: boolean, recoveryHint: string): ActionErrorClassification {
+  return { machineCode: code, retryable, recoveryHint };
+}
+
+/**
+ * Classify a thrown action error into the retryable/recovery vocabulary.
+ * Transient failures (timeout, stale element ref, navigation-in-flight) are
+ * retryable; permanent failures (invalid action, forbidden) are not.
+ * Message-based, mirroring the camofox `browserErrorCode`/`browserErrorRecovery`
+ * pair, with a non-retryable default so an unclassified failure is never
+ * blindly retried.
+ */
+export function classifyActionError(error: unknown): ActionErrorClassification {
+  const msg = error instanceof Error ? error.message : String(error);
+  const lower = msg.toLowerCase();
+
+  if (/(timed out|timeout)/.test(lower)) {
+    return mkAction(
+      "action_timeout",
+      true,
+      "The action timed out. Wait for the page to settle, then try again.",
+    );
+  }
+
+  if (/(stale element|element is not attached|element not attached|no longer attached|detached|no such element|no longer present|strict mode violation|resolved to)/.test(lower)) {
+    return mkAction(
+      "element_state_changed",
+      true,
+      "The page state changed mid-action. Re-read the page snapshot, then try the action again.",
+    );
+  }
+
+  if (/(execution context was destroyed|cannot find context|frame was detached|navigation failed|navigation interrupted|err_aborted|ns_error_abort|ns_error_net_interrupt|ns_binding_aborted)/.test(lower)) {
+    return mkAction(
+      "navigation_race",
+      true,
+      "The page navigated mid-action. Wait for the page to settle, then try again.",
+    );
+  }
+
+  if (/(access denied|blocked|not allowed|not permitted|forbidden)/.test(lower)) {
+    return mkAction(
+      "action_forbidden",
+      false,
+      "This action is not permitted on this page. Re-read the page state and choose a different action.",
+    );
+  }
+
+  return mkAction(
+    "action_failed",
+    false,
+    "The action failed. Re-read the page snapshot and choose a different action.",
+  );
+}
+
+/**
+ * Format the error vocabulary as a parseable suffix appended to a failure
+ * message the loop shows the LLM: `[code: X; retryable: yes/no] (recovery: Y)`.
+ */
+export function formatErrorSuffix(
+  machineCode: string,
+  retryable: boolean,
+  recoveryHint: string,
+): string {
+  return `[code: ${machineCode}; retryable: ${retryable ? "yes" : "no"}] (recovery: ${recoveryHint})`;
 }

@@ -31,10 +31,10 @@ export function hasBackreference(pattern: string): boolean {
     if (pattern[i] === "\\") {
       const d = pattern.charCodeAt(i + 1);
       if (d >= 49 && d <= 57) return true; // '1'..'9' numeric backreference
-      // Named backreferences come in three JS-accepted forms: `\k<name>`,
-      // `\k{name}`, and `\k'name'`. Detect all three so the static ReDoS guard's
-      // coverage is consistent (the RegExp constructor would reject the `{`/`'`
-      // variants anyway, but we want to catch them before we ever call it).
+      // Named backreferences use `\k<name>` in JavaScript; `\k{name}` and
+      // `\k'name'` are PCRE syntax that the RegExp constructor rejects. All
+      // three forms are flagged here so the PCRE forms are caught before
+      // compilation — fail-closed over-rejection only.
       if (d === 107) {
         const c2 = pattern[i + 2];
         if (c2 === "<" || c2 === "{" || c2 === "'") return true;

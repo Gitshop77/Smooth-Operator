@@ -44,9 +44,11 @@ function installExtensionMock(sendMessage: () => Promise<unknown>): void {
 }
 
 // Fresh DOM + clean spies + no accidental chrome global each test.
-installLocalStorageStub();
-
+// The localStorage stub is installed per-test (not at module scope) so a
+// secret written by one test (e.g. the input-secret test) never leaks into
+// the next test's store.
 beforeEach(() => {
+  installLocalStorageStub();
   document.body.innerHTML = "";
   vi.spyOn(secrets, "substituteSecrets");
   vi.spyOn(window, "open").mockImplementation(() => null);

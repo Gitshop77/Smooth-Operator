@@ -40,7 +40,7 @@ export async function handleClick(
   highlightElement(el, `click [${numericIndex}]`);
   await moveCursorToElement(el);
   safeScrollIntoView(el);
-  await sleep(TIMINGS.clickScrollIntoView);
+  await sleep(TIMINGS.clickScrollIntoView, ctx.signal);
   if (typeof el.focus === "function") el.focus();
 
   const errors: string[] = [];
@@ -82,7 +82,7 @@ export async function handleClick(
   attempt(() => tryTextSearchClick(el));
   attempt(() => tryDispatchedEventClick(el));
 
-  await sleep(TIMINGS.clickAfterSettle);
+  await sleep(TIMINGS.clickAfterSettle, ctx.signal);
 
   if (!clicked && cdpUncertain) {
     return {

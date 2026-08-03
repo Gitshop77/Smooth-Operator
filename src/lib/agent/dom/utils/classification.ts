@@ -174,21 +174,24 @@ export function isContained(child: Element, parent: Element, threshold: number =
 
 /**
  * Find the nearest propagating ancestor of `el` (or `null` if none).
- * Walks up the parentElement chain, returning the first element that matches
- * {@link isPropagatingElement}. Used by the indexed-tree extractor to decide
- * whether `el`'s index should be suppressed (it's ≥99% inside a propagating
- * ancestor).
+ * Walks up the parentNode chain, returning the first element that matches
+ * {@link isPropagatingElement}. Consumed by {@link shouldExcludeAsContained}
+ * and the test suite; no production caller wires it into the indexed-tree
+ * extractor yet, so it performs no runtime de-duplication today.
  */
 export function nearestPropagatingAncestor(el: Element): Element | null {
-  let cur: Node | null = el.parentElement;
+  // Seed from `parentNode` (not `parentElement`): an element that is a direct
+  // child of a shadow root has `parentElement === null` (the ShadowRoot is not
+  // an Element), and its light-DOM host on the other side of the boundary is
+  // exactly the propagating ancestor we are looking for.
+  let cur: Node | null = el.parentNode;
   while (cur) {
     if (cur instanceof Element && isPropagatingElement(cur)) return cur;
     // Cross shadow-DOM boundaries: a parenting shadow root's `.host` is the
     // light-DOM element on the other side, so containment suppression also
     // applies to nodes nested inside shadow trees.
-    const parent = cur.parentNode;
-    if (parent instanceof ShadowRoot) cur = parent.host;
-    else cur = parent instanceof Element ? parent : null;
+    if (cur instanceof ShadowRoot) cur = cur.host;
+    else cur = cur.parentNode;
   }
   return null;
 }

@@ -7,9 +7,6 @@
 /** Obscure internal property names — avoid the product name as a detectable fingerprint. */
 export const PIERCER_STATE_KEY = "__oc_s__";
 
-/** Marker set on `window` after backdoor injection (best-effort). */
-const PIERCER_INJECTED_KEY = "__oc_in__";
-
 /**
  * Symbol key for the cross-world backdoor on `window`. Symbol.for is globally
  * shared across all contexts in the same V8 isolate, so the content script
@@ -43,8 +40,6 @@ export interface PiercerState {
 export interface ShadowPiercerBackdoor {
   /** Get the closed (or open) shadow root captured for `host`, if any. */
   getShadowRoot(host: Element): ShadowRoot | null;
-  /** Whether `host` has a captured shadow root (open or closed). */
-  hasShadowRoot(host: Element): boolean;
   /** Aggregate counters (open + closed roots captured so far). */
   stats(): { installed: true; open: number; closed: number };
 }
@@ -66,20 +61,10 @@ function writeBackdoor(b: ShadowPiercerBackdoor): void {
   }
 }
 
-/** Mark that the backdoor has been injected (best-effort). */
-function markInjected(): void {
-  try {
-    (window as unknown as Record<string, unknown>)[PIERCER_INJECTED_KEY] = true;
-  } catch {
-    /* window may be non-writable in some sandboxes — ignore */
-  }
-}
-
-/** Clear the cross-world backdoor keys (test reset). */
+/** Clear the cross-world backdoor key (test reset). */
 export function clearBackdoorKeys(): void {
   try {
     delete (window as any)[PIERCER_BACKDOOR_KEY];
-    delete (window as unknown as Record<string, unknown>)[PIERCER_INJECTED_KEY];
   } catch {
     /* ignore */
   }
@@ -108,8 +93,6 @@ export function bindBackdoor(
   const backdoor: ShadowPiercerBackdoor & { [PIERCER_STATE_KEY]?: PiercerState } = {
     getShadowRoot: (host: Element): ShadowRoot | null =>
       newState.hostToRoot.get(host) ?? existingBackdoor?.getShadowRoot(host) ?? null,
-    hasShadowRoot: (host: Element): boolean =>
-      newState.hostToRoot.has(host) || (existingBackdoor?.hasShadowRoot(host) ?? false),
     stats: () => {
       const prev = existingBackdoor?.stats();
       return {
@@ -121,5 +104,4 @@ export function bindBackdoor(
   };
   backdoor[PIERCER_STATE_KEY] = newState;
   writeBackdoor(backdoor);
-  markInjected();
 }

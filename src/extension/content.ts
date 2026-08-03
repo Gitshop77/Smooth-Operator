@@ -14,6 +14,10 @@
 import { initElementMap } from "@/lib/agent/dom/ax-tree";
 import { installPopupHandler } from "@/lib/agent/dom/popup-handler";
 import {
+  CONSOLE_CAPTURE_EVENT,
+  type ConsoleLogEntry,
+} from "@/lib/agent/dom/console-capture";
+import {
   log,
   type IncomingMessage,
   type Response,
@@ -38,6 +42,22 @@ import {
   } catch (e) {
     log("installPopupHandler failed:", e);
   }
+
+  // Relay MAIN-world console captures to the SW console-log ring. The
+  // CustomEvent crosses from the MAIN world (where console-capture overrides
+  // the page's console) into this isolated world. Best-effort — a sleeping SW
+  // or a rejected sendMessage must never throw here.
+  window.addEventListener(CONSOLE_CAPTURE_EVENT, (e) => {
+    const entry = (e as CustomEvent<{ entry?: ConsoleLogEntry }>).detail?.entry;
+    if (!entry) return;
+    try {
+      // `.catch` swallows async rejections (e.g. the SW sleeping between
+      // wakes) — the try/catch alone only covers synchronous throws.
+      void chrome.runtime.sendMessage({ type: "CONSOLE_LOG_ENTRY", entry }).catch(() => {});
+    } catch {
+      /* ignore */
+    }
+  });
 
   chrome.runtime.onMessage.addListener(
     (msg: IncomingMessage, sender, sendResponse: (r: Response) => void) => {

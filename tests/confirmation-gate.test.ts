@@ -2,10 +2,9 @@
  * Confirmation gate wiring + ask_human actual invocation tests.
  *
  * Verifies:
- * - `shouldAskForConfirmation` reports the per-mode confirmation *policy*
- * (it is the public entry point; the test asserts policy outcomes rather
- * than coupling to the internal `requiresConfirmation` helper, so a
- * behavior-preserving refactor can't break it).
+ * - `requiresConfirmation` reports the per-mode confirmation *policy*
+ * (it is the real gate used by `executeActionQueue` and the background
+ * run helpers; the test asserts policy outcomes against the mode table).
  * - `executeActionQueue` calls `requestConfirmation` for actions in the
  * mode's `confirmRequired` list, blocks on decline, and proceeds on
  * approval.
@@ -14,8 +13,9 @@
  */
 
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
-import { shouldAskForConfirmation } from "../src/lib/agent/human-interaction";
-import { requiresConfirmation, MODE_CONFIGS } from "../src/lib/agent/modes";
+import { checkActionAllowed, requiresConfirmation, MODE_CONFIGS } from "../src/lib/agent/modes";
+import { hostnameMatches } from "../src/lib/agent/security-hosts";
+import { checkUrlAllowed } from "../src/lib/agent/security-url-policy";
 import { ACTION_METADATA } from "../src/lib/agent/tools/schema-utils";
 import type { AgentAction, LogEvent } from "../src/lib/agent/types";
 import { makeState } from "./helpers";
@@ -28,34 +28,40 @@ import { makeState } from "./helpers";
 const ACTION_TYPES = Object.keys(ACTION_METADATA) as string[];
 
 // The orchestrator's `executeActionQueue` runs `checkActionAllowed` BEFORE
-// `requiresConfirmation`. In the shipped mode table no action is BOTH
-// mode-allowed and confirm-required — standard mode's `confirmRequired`
-// entries (`evaluate`, `upload_file`, `save_as_pdf`) are each hard-blocked by
-// their capability flags (`canExecuteJs`/`canUploadFiles`/`canDownloadFiles`
-// = false), so `checkActionAllowed` always fails closed first and the
-// confirmation gate is never reached through the real functions.
+// `requiresConfirmation`. Standard mode's `confirmRequired` has two kinds of
+// entries:
+// - `evaluate`, `upload_file`, `save_as_pdf` — HARD-BLOCKED by their
+//   capability flags (`canExecuteJs`/`canUploadFiles`/`canDownloadFiles` =
+//   false), so `checkActionAllowed` fails closed first and the confirmation
+//   gate is never reached through the real functions for them.
+// - `set_cookie`, `delete_cookies`, `set_storage`, `clear_storage` — MODE-
+//   ALLOWED (no capability flag gates them) and confirm-required, so these
+//   DO reach the confirmation gate through the real functions.
 //
-// Mocking `checkActionAllowed` away (as this test previously did) hides that
-// dead-code fact and asserts against a fiction. Instead, the
-// `executeActionQueue` suite below runs BOTH `checkActionAllowed` and
-// `requiresConfirmation` for real (unmocked) and temporarily flips
+// For the `executeActionQueue` suite below, `evaluate` is exercised as a
+// mode-allowed + confirm-required action by temporarily flipping
 // `MODE_CONFIGS.standard.canExecuteJs` to `true` for the duration of each
 // test — a dedicated test-mode override that makes `evaluate` mode-allowed
 // while it stays in `confirmRequired`, creating the real
 // `confirmRequired ∩ mode-allowed ≠ ∅` overlap the gate needs. The original
 // config value is restored after every test so the shipped table is untouched.
 
-// ─── shouldAskForConfirmation reports the per-mode confirmation policy ───────
+// ─── requiresConfirmation reports the per-mode confirmation policy ───────────
 
-describe("shouldAskForConfirmation reports the per-mode confirmation policy", () => {
-  test("standard mode requires confirmation for evaluate/upload_file/save_as_pdf only", () => {
+describe("requiresConfirmation reports the per-mode confirmation policy", () => {
+  test("standard mode requires confirmation for destructive + hard-blocked actions only", () => {
     const actionTypes = ACTION_TYPES;
+    const confirmRequiredStandard = new Set([
+      "evaluate",
+      "upload_file",
+      "save_as_pdf",
+      "set_cookie",
+      "delete_cookies",
+      "set_storage",
+      "clear_storage",
+    ]);
     for (const actionType of actionTypes) {
-      const expected =
-        actionType === "evaluate" ||
-        actionType === "upload_file" ||
-        actionType === "save_as_pdf";
-      expect(shouldAskForConfirmation(actionType, "standard")).toBe(expected);
+      expect(requiresConfirmation(actionType, "standard")).toBe(confirmRequiredStandard.has(actionType));
     }
   });
 
@@ -63,7 +69,7 @@ describe("shouldAskForConfirmation reports the per-mode confirmation policy", ()
     const actionTypes = ACTION_TYPES;
     for (const mode of ["restricted", "full_agentic"] as const) {
       for (const actionType of actionTypes) {
-        expect(shouldAskForConfirmation(actionType, mode)).toBe(false);
+        expect(requiresConfirmation(actionType, mode)).toBe(false);
       }
     }
   });
@@ -86,6 +92,47 @@ describe("shouldAskForConfirmation reports the per-mode confirmation policy", ()
     for (const a of standardList) {
       expect(requiresConfirmation(a, "standard")).toBe(true);
     }
+  });
+
+  test("destructive cookie/storage verbs are gated per mode; reads stay ungated", () => {
+    // Destructive verbs: blocked in restricted, mode-allowed + confirm-
+    // required in standard (the confirmation prompt is the primary guard),
+    // allowed without confirmation in full_agentic.
+    for (const verb of ["set_cookie", "delete_cookies", "set_storage", "clear_storage"] as const) {
+      expect(checkActionAllowed(verb, "restricted").allowed).toBe(false);
+      expect(checkActionAllowed(verb, "standard").allowed).toBe(true);
+      expect(requiresConfirmation(verb, "standard")).toBe(true);
+      expect(checkActionAllowed(verb, "full_agentic").allowed).toBe(true);
+      expect(requiresConfirmation(verb, "full_agentic")).toBe(false);
+    }
+    // Read-only verbs never require confirmation and remain allowed in every
+    // mode (they cannot mutate state).
+    for (const verb of ["get_cookies", "get_storage"] as const) {
+      expect(requiresConfirmation(verb, "standard")).toBe(false);
+      expect(checkActionAllowed(verb, "restricted").allowed).toBe(true);
+      expect(checkActionAllowed(verb, "standard").allowed).toBe(true);
+      expect(checkActionAllowed(verb, "full_agentic").allowed).toBe(true);
+    }
+  });
+});
+
+// ─── domain allowlist — single-label entry hardening ────────────────────────
+
+describe("domain allowlist — single-label entry hardening", () => {
+  test("a single-label allowlist entry is dropped at normalization, so it can never match", () => {
+    // Entry-side hardening lives in security-hosts `normalizeDomainInput`:
+    // non-IP single-label entries like "localhost" are rejected so a typo'd
+    // "com"/"org" cannot over-match every host. Pin the matcher directly on
+    // the exact host==entry case — the strongest possible bypass attempt.
+    expect(hostnameMatches("localhost", "localhost")).toBe(false);
+    expect(hostnameMatches("com", "com")).toBe(false);
+  });
+
+  test("checkUrlAllowed fails closed when the allowlist contains only a single-label entry", () => {
+    const result = checkUrlAllowed("http://localhost/", { allowedDomains: ["localhost"] }, true);
+    expect(result.allowed).toBe(false);
+    expect(typeof result.reason).toBe("string");
+    expect((result.reason ?? "").length).toBeGreaterThan(0);
   });
 });
 

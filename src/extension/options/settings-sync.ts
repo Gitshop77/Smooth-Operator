@@ -8,7 +8,8 @@ import { syncRememberedApiKey } from "@/extension/api-key-storage";
 import { updateProviderUI } from "./provider-config-ui";
 import { PROVIDER_META, DEFAULT_PROVIDER_ID } from "./providers";
 import { alertModal } from "./modal";
-import { resolveAndValidateWebhookUrl } from "@/lib/agent/llm/route/ssrf";
+import { validateWebhookUrl, resolveAndValidateWebhookUrl } from "@/lib/agent/llm/route/ssrf";
+import type { SsrfCheckResult } from "@/lib/agent/llm/route/ssrf-constants";
 import { MAX_ACTIONS, DEFAULT_MAX_ACTIONS } from "@/lib/validations";
 import {
   readInt, isHttpUrl, isHostname, setVal, setChecked, parseDomains,
@@ -18,6 +19,12 @@ import {
 import { STORAGE_KEYS } from "./storage-keys";
 
 export { readInt, isHttpUrl, isHostname, showSaved, renderSecrets };
+
+// Last successfully-persisted webhook URL. On a transient DNS failure the field
+// keeps the typed URL but the previous good value is what gets persisted, so
+// the configured webhook never silently disappears (mirrors notifications.ts).
+// Declared before the load block below, which seeds it from storage.
+let lastKnownGoodWebhookUrl = "";
 
 populateProviderSelect();
 
@@ -31,10 +38,12 @@ if (typeof chrome !== "undefined" && chrome.storage?.local) {
       STORAGE_KEYS.baseUrl, STORAGE_KEYS.resourceName, STORAGE_KEYS.maxSteps,
       STORAGE_KEYS.maxActions, STORAGE_KEYS.plannerInterval,
       STORAGE_KEYS.maxFailures, STORAGE_KEYS.costCap, STORAGE_KEYS.defaultTask,
-      "screenshotQuality", "enableScreenshots", "stealthEnabled",
-      "enableLocalVision", "visionMode", "allowedDomains", "blockedDomains",
+      STORAGE_KEYS.screenshotQuality, STORAGE_KEYS.enableScreenshots, STORAGE_KEYS.stealthEnabled,
+      STORAGE_KEYS.enableLocalVision, STORAGE_KEYS.visionMode, STORAGE_KEYS.allowedDomains, STORAGE_KEYS.blockedDomains,
       STORAGE_KEYS.notifyOnCompletion, STORAGE_KEYS.notifyOnError,
-      STORAGE_KEYS.notifyOnTakeover, STORAGE_KEYS.webhookUrl, "agentMode",
+      STORAGE_KEYS.notifyOnTakeover, STORAGE_KEYS.webhookUrl, STORAGE_KEYS.agentMode,
+      STORAGE_KEYS.reasoningEffort, STORAGE_KEYS.reasoningBudget, STORAGE_KEYS.forceReasoning,
+      STORAGE_KEYS.providerConfigs,
     ],
     (res) => {
       if (chrome.runtime.lastError) {
@@ -68,44 +77,107 @@ if (typeof chrome !== "undefined" && chrome.storage?.local) {
       setChecked("rememberApiKey", res[STORAGE_KEYS.rememberApiKey] === true);
 
       const textFields: Array<[string, string, string]> = [
-        ["model", "model", ""], ["baseUrl", "baseUrl", ""],
-        ["resourceName", "resourceName", ""], ["agentMode", "agentMode", "standard"],
-        ["defaultTask", "defaultTask", ""], ["webhookUrl", "webhookUrl", ""],
+        ["model", STORAGE_KEYS.model, ""], ["baseUrl", STORAGE_KEYS.baseUrl, ""],
+        ["resourceName", STORAGE_KEYS.resourceName, ""], ["agentMode", STORAGE_KEYS.agentMode, "standard"],
+        ["defaultTask", STORAGE_KEYS.defaultTask, ""], ["webhookUrl", STORAGE_KEYS.webhookUrl, ""],
       ];
       for (const [elId, key, def] of textFields) setVal(elId, (res[key] as string) ?? def);
 
       const numFields: Array<[string, string, number]> = [
-        ["maxSteps", "maxSteps", 100], ["maxActions", "maxActions", 10],
-        ["plannerInterval", "plannerInterval", 5], ["maxFailures", "maxFailures", 5],
+        ["maxSteps", STORAGE_KEYS.maxSteps, 100], ["maxActions", STORAGE_KEYS.maxActions, 10],
+        ["plannerInterval", STORAGE_KEYS.plannerInterval, 5], ["maxFailures", STORAGE_KEYS.maxFailures, 5],
       ];
       for (const [elId, key, def] of numFields) setVal(elId, String(res[key] ?? def));
 
-      const costCap = typeof res.costCap === "number" ? Math.max(0, res.costCap) : 0;
+      const costCap = typeof res[STORAGE_KEYS.costCap] === "number" ? Math.max(0, res[STORAGE_KEYS.costCap] as number) : 0;
       setVal("costCap", String(costCap));
-      setVal("screenshotQuality", String(res.screenshotQuality ?? 80));
-      setChecked("enableScreenshots", res.enableScreenshots !== false);
-      setChecked("enableStealth", res.stealthEnabled === true);
+      setVal("screenshotQuality", String(res[STORAGE_KEYS.screenshotQuality] ?? 80));
+      setChecked("enableScreenshots", res[STORAGE_KEYS.enableScreenshots] !== false);
+      setChecked("enableStealth", res[STORAGE_KEYS.stealthEnabled] === true);
 
-      const visionMode = (res.visionMode as string) || (res.enableLocalVision === true ? "always" : "disabled");
+      const visionMode = (res[STORAGE_KEYS.visionMode] as string) || (res[STORAGE_KEYS.enableLocalVision] === true ? "always" : "disabled");
       const visionRadio = Array.from(
         document.querySelectorAll<HTMLInputElement>('input[name="visionMode"]'),
       ).find((r) => r.value === visionMode) ?? null;
       if (visionRadio) visionRadio.checked = true;
 
       const toLines = (v: unknown) => Array.isArray(v) ? (v as string[]).join("\n") : "";
-      setVal("allowedDomains", toLines(res.allowedDomains));
-      setVal("blockedDomains", toLines(res.blockedDomains));
-      setChecked("notifyOnCompletion", (res.notifyOnCompletion as boolean) || false);
-      setChecked("notifyOnError", (res.notifyOnError as boolean) || false);
-      setChecked("notifyOnTakeover", (res.notifyOnTakeover as boolean) || false);
-      updateProviderUI();
-    },
+      setVal("allowedDomains", toLines(res[STORAGE_KEYS.allowedDomains]));
+      setVal("blockedDomains", toLines(res[STORAGE_KEYS.blockedDomains]));
+      setChecked("notifyOnCompletion", (res[STORAGE_KEYS.notifyOnCompletion] as boolean) || false);
+      setChecked("notifyOnError", (res[STORAGE_KEYS.notifyOnError] as boolean) || false);
+      setChecked("notifyOnTakeover", (res[STORAGE_KEYS.notifyOnTakeover] as boolean) || false);
+      // Remember the persisted webhook so a transient validation failure during
+      // a later save cannot wipe it (mirrors notifications.ts last-known-good).
+      lastKnownGoodWebhookUrl = (res[STORAGE_KEYS.webhookUrl] as string) || "";
+
+      // O1 reasoning settings: effort/force are enums with form defaults; the
+      // budget is only persisted when the user set it (llm-direct reads it as
+      // a positive integer and treats absence as "no override").
+      setVal("reasoningEffort", (res[STORAGE_KEYS.reasoningEffort] as string) ?? "medium");
+      const storedBudget = res[STORAGE_KEYS.reasoningBudget];
+      setVal(
+        "reasoningBudget",
+        typeof storedBudget === "number" && Number.isFinite(storedBudget) && storedBudget > 0
+          ? String(Math.floor(storedBudget))
+          : "",
+      );
+      setVal("forceReasoning", (res[STORAGE_KEYS.forceReasoning] as string) ?? "auto");
+
+      // O8: the provider-scoped record wins over the flat mirror when the
+      // saved provider has one (mirrors readProviderConfig's nested-first read
+      // so the Options UI shows exactly what the runtime will use).
+      const providerConfigs = res[STORAGE_KEYS.providerConfigs];
+      const nestedForProvider =
+        providerConfigs &&
+        typeof providerConfigs === "object" &&
+        !Array.isArray(providerConfigs) &&
+        (providerConfigs as Record<string, unknown>)[savedProvider] &&
+        typeof (providerConfigs as Record<string, unknown>)[savedProvider] === "object" &&
+        !Array.isArray((providerConfigs as Record<string, unknown>)[savedProvider])
+          ? (providerConfigs as Record<string, unknown>)[savedProvider] as Record<string, unknown>
+          : null;
+      if (nestedForProvider) {
+        if (typeof nestedForProvider.model === "string") setVal("model", nestedForProvider.model);
+        if (typeof nestedForProvider.baseUrl === "string") setVal("baseUrl", nestedForProvider.baseUrl);
+        if (typeof nestedForProvider.resourceName === "string") setVal("resourceName", nestedForProvider.resourceName);
+      }
+
+      updateProviderUI();    },
   );
 }
 
 // ─── Save settings ─────────────────────────────────────────────────────────
 
 let saveQueue: Promise<unknown> = Promise.resolve();
+
+// ─── Webhook validation memo ────────────────────────────────────────────────
+// `resolveAndValidateWebhookUrl` performs a live chrome.dns.resolve round-trip.
+// saveSettings runs on every autosave, so the verdict is memoized per URL —
+// the DNS check only re-runs when the URL actually changed.
+const webhookValidationCache = new Map<string, SsrfCheckResult>();
+const WEBHOOK_VALIDATION_CACHE_MAX = 20;
+
+async function cachedWebhookValidation(url: string): Promise<SsrfCheckResult> {
+  const cached = webhookValidationCache.get(url);
+  if (cached) return cached;
+  const result = await resolveAndValidateWebhookUrl(url);
+  if (webhookValidationCache.size >= WEBHOOK_VALIDATION_CACHE_MAX) {
+    const oldest = webhookValidationCache.keys().next().value;
+    if (oldest !== undefined) webhookValidationCache.delete(oldest);
+  }
+  webhookValidationCache.set(url, result);
+  return result;
+}
+
+// ─── Change tracking ────────────────────────────────────────────────────────
+// agentMode/maxSteps are also written by the sidepanel while Options is open.
+// Re-writing them from page-load-time state on unrelated saves would revert a
+// sidepanel change, so they are persisted only when their control changed here.
+let agentModeChanged = false;
+let maxStepsChanged = false;
+document.getElementById("agentMode")?.addEventListener("change", () => { agentModeChanged = true; });
+document.getElementById("maxSteps")?.addEventListener("input", () => { maxStepsChanged = true; });
 
 export function saveSettings(): Promise<boolean> {
   const run = saveQueue.then(() => doSaveSettings(), () => doSaveSettings());
@@ -138,9 +210,20 @@ async function doSaveSettings(): Promise<boolean> {
     invalid.push("baseUrl"); ($("baseUrl") as HTMLInputElement).value = "";
   }
   const webhookUrlRaw = ($("webhookUrl") as HTMLInputElement).value.trim();
-  const webhookCheck = webhookUrlRaw !== "" ? await resolveAndValidateWebhookUrl(webhookUrlRaw) : null;
+  const webhookCheck = webhookUrlRaw !== "" ? await cachedWebhookValidation(webhookUrlRaw) : null;
+  let webhookPersist = webhookUrlRaw;
   if (webhookUrlRaw !== "" && webhookCheck && !webhookCheck.ok) {
-    invalid.push("webhookUrl"); ($("webhookUrl") as HTMLInputElement).value = "";
+    if (validateWebhookUrl(webhookUrlRaw).ok) {
+      // The DNS-free guard passed but the resolving check failed — a transient
+      // resolver error/unavailability, not a bad URL. Do not wipe the field or
+      // the persisted value; keep the previous webhook and warn.
+      console.warn("[options] webhook URL failed the DNS-based SSRF check; keeping the previous value:", webhookCheck.reason);
+      webhookPersist = lastKnownGoodWebhookUrl;
+    } else {
+      invalid.push("webhookUrl");
+      ($("webhookUrl") as HTMLInputElement).value = "";
+      webhookPersist = "";
+    }
   }
 
   if (invalid.length > 0) {
@@ -154,29 +237,79 @@ async function doSaveSettings(): Promise<boolean> {
   const sq = Math.min(100, Math.max(50, parseInt(($("screenshotQuality") as HTMLInputElement).value, 10) || 80));
   ($("screenshotQuality") as HTMLInputElement).value = String(sq);
 
-  const data: Record<string, string | number | string[] | boolean> = {
-    provider: ($("provider") as HTMLSelectElement).value,
+  // O1 reasoning settings. The effort/force selects only ever hold sanctioned
+  // values (populateReasoningControls rebuilds them from the model catalog), so
+  // an out-of-set value can only come from tampering — fall back to the default
+  // instead of persisting junk. The budget is an optional positive integer; an
+  // empty field is an explicit "no override" and must REMOVE the stored key
+  // (llm-direct reads absence as no budget).
+  const effortRaw = ($("reasoningEffort") as HTMLSelectElement).value;
+  const reasoningEffort =
+    effortRaw === "low" || effortRaw === "medium" || effortRaw === "high" ? effortRaw : "medium";
+  const forceRaw = ($("forceReasoning") as HTMLSelectElement).value;
+  const forceReasoning =
+    forceRaw === "on" || forceRaw === "off" || forceRaw === "auto" ? forceRaw : "auto";
+  const budgetRaw = ($("reasoningBudget") as HTMLInputElement).value.trim();
+  let reasoningBudget: number | undefined;
+  if (budgetRaw !== "") {
+    const parsed = Number(budgetRaw);
+    if (/^\d+$/.test(budgetRaw) && Number.isFinite(parsed) && parsed > 0) {
+      reasoningBudget = Math.floor(parsed);
+    } else {
+      ($("reasoningBudget") as HTMLInputElement).value = "";
+    }
+  }
+
+  const providerId = ($("provider") as HTMLSelectElement).value;
+
+  // O8: keep every provider's nested entry (so switching providers restores
+  // each one's config) and mirror the ACTIVE provider's flat values into its
+  // entry. `provenance: "user"` marks the nested values as user-set (trusted).
+  const storedConfigsRes = await chrome.storage.local.get(STORAGE_KEYS.providerConfigs);
+  const storedConfigs = storedConfigsRes[STORAGE_KEYS.providerConfigs];
+  const providerConfigs: Record<string, unknown> =
+    storedConfigs && typeof storedConfigs === "object" && !Array.isArray(storedConfigs)
+      ? { ...(storedConfigs as Record<string, unknown>) }
+      : {};
+  providerConfigs[providerId] = {
+    model: ($("model") as HTMLInputElement).value,
+    baseUrl: baseUrlValid ? baseUrlRaw : "",
+    resourceName: (document.getElementById("resourceName") as HTMLInputElement | null)?.value.trim() ?? "",
+    provenance: "user",
+  };
+
+  const data: Record<string, string | number | string[] | boolean | Record<string, unknown>> = {
+    provider: providerId,
     model: ($("model") as HTMLInputElement).value,
     provenance: "user",
     baseUrl: baseUrlValid ? baseUrlRaw : "",
     resourceName: (document.getElementById("resourceName") as HTMLInputElement | null)?.value.trim() ?? "",
-    maxSteps, maxActions, plannerInterval, maxFailures, costCap,
+    maxActions, plannerInterval, maxFailures, costCap,
+    ...(maxStepsChanged ? { maxSteps } : {}),
     defaultTask: ($("defaultTask") as HTMLTextAreaElement).value,
-    screenshotQuality: sq,
-    enableScreenshots: ($("enableScreenshots") as HTMLInputElement).checked,
-    stealthEnabled: ($("enableStealth") as HTMLInputElement).checked === true,
-    visionMode: (document.querySelector('input[name="visionMode"]:checked') as HTMLInputElement | null)?.value || "disabled",
-    allowedDomains: parseDomains(($("allowedDomains") as HTMLTextAreaElement).value, droppedDomains),
-    blockedDomains: parseDomains(($("blockedDomains") as HTMLTextAreaElement).value, droppedDomains),
-    agentMode: (document.getElementById("agentMode") as HTMLSelectElement | null)?.value || "standard",
-    [STORAGE_KEYS.webhookUrl]: webhookUrlRaw !== "" && webhookCheck?.ok ? webhookUrlRaw : "",
+    [STORAGE_KEYS.screenshotQuality]: sq,
+    [STORAGE_KEYS.enableScreenshots]: ($("enableScreenshots") as HTMLInputElement).checked,
+    [STORAGE_KEYS.stealthEnabled]: ($("enableStealth") as HTMLInputElement).checked === true,
+    [STORAGE_KEYS.visionMode]: (document.querySelector('input[name="visionMode"]:checked') as HTMLInputElement | null)?.value || "disabled",
+    [STORAGE_KEYS.allowedDomains]: parseDomains(($("allowedDomains") as HTMLTextAreaElement).value, droppedDomains),
+    [STORAGE_KEYS.blockedDomains]: parseDomains(($("blockedDomains") as HTMLTextAreaElement).value, droppedDomains),
+    ...(agentModeChanged ? { [STORAGE_KEYS.agentMode]: (document.getElementById("agentMode") as HTMLSelectElement | null)?.value || "standard" } : {}),
+    [STORAGE_KEYS.webhookUrl]: webhookPersist,
     [STORAGE_KEYS.notifyOnCompletion]: ($("notifyOnCompletion") as HTMLInputElement).checked,
     [STORAGE_KEYS.notifyOnError]: ($("notifyOnError") as HTMLInputElement).checked,
     [STORAGE_KEYS.notifyOnTakeover]: ($("notifyOnTakeover") as HTMLInputElement).checked,
+    [STORAGE_KEYS.reasoningEffort]: reasoningEffort,
+    ...(reasoningBudget !== undefined ? { [STORAGE_KEYS.reasoningBudget]: reasoningBudget } : {}),
+    [STORAGE_KEYS.forceReasoning]: forceReasoning,
+    [STORAGE_KEYS.providerConfigs]: providerConfigs,
   };
 
   return new Promise<boolean>((resolve) => {
     const finish = (): void => {
+      // Only a successful write advances the revert cache (the failure path
+      // resolves without calling finish), so a failed save reverts to the
+      // genuinely last-good URL rather than the unsaved one.
+      lastKnownGoodWebhookUrl = webhookPersist;
       showSaved();
       if (droppedDomains.length) {
         void alertModal({ title: "Invalid domain entries ignored", message: "The following domain lines were not valid bare hostnames and were dropped:\n" + droppedDomains.join("\n") });
@@ -189,6 +322,16 @@ async function doSaveSettings(): Promise<boolean> {
         void alertModal({ title: "Save failed", message: "Failed to save settings: " + (chrome.runtime.lastError?.message || "unknown error") });
         resolve(false);
         return;
+      }
+      // An emptied budget field must clear any previously-stored value (the set
+      // payload above omits the key when the field is empty — Chrome storage
+      // only writes the given keys, so a stale budget would otherwise survive).
+      if (reasoningBudget === undefined) {
+        try {
+          await chrome.storage.local.remove(STORAGE_KEYS.reasoningBudget);
+        } catch (e) {
+          console.warn("[options] reasoning budget removal failed:", e);
+        }
       }
       const apiKeyValue = ($("apiKey") as HTMLInputElement).value;
       const rememberKey = (document.getElementById("rememberApiKey") as HTMLInputElement | null)?.checked ?? false;

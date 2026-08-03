@@ -2,17 +2,24 @@
  * Retry classification tests — `withLLMRetry` must classify transient
  * errors from the numeric HTTP status when the transport attaches one;
  * the status wins over any text in the error body, and a plain error
- * carrying no status is never retried (no retry storm). Covers:
+ * carrying no status is only retried when its message matches a known
+ * transient signal (429 / 5xx / network) — arbitrary messages never
+ * trigger a retry storm. Covers:
  * - a 429 with a numeric status IS retried
  * - a 4xx (non-429) with a numeric status is NOT retried
  * - a 5xx with a numeric status IS retried
- * - a plain Error without a numeric status is NOT retried (single attempt)
+ * - a plain Error whose message matches a transient signal IS retried
+ * - a plain Error with no transient signal is NOT retried (single attempt)
  * - body text mentioning 429/5xx never overrides the numeric status
+ * - a numeric status outside 4xx/5xx blocks message-based network retry
  * - a Retry-After value attached to the error is honored (retry still fires)
+ * - Retry-After above the ceiling is capped, abort is never retried, and
+ *   the cumulative-delay budget stops the loop
  */
 
 import { describe, test, expect, vi } from "vitest";
 import { withLLMRetry } from "../src/lib/agent/llm/retry";
+import { MAX_RETRY_AFTER_MS } from "../src/lib/agent/llm/constants";
 
 type StatusError = Error & { status?: number; retryAfter?: number };
 
@@ -133,6 +140,131 @@ describe("withLLMRetry — numeric-status classification", () => {
         await vi.advanceTimersByTimeAsync(1);
         const result = await p;
         expect(result).toBe("ok");
+        expect(fn).toHaveBeenCalledTimes(2);
+      } finally {
+        randomSpy.mockRestore();
+      }
+    });
+  });
+});
+
+describe("withLLMRetry — message-based fallback classification (no numeric status)", () => {
+  // Transports that do not attach a numeric `status` rely on the message
+  // fallback: "429"/"Too Many Requests", a 5xx pattern, or fetch/network
+  // wording must still be retried (positive tests for this branch).
+  const transientMessages = [
+    "TypeError: Failed to fetch",
+    "fetch failed",
+    "ECONNRESET: socket hang up",
+    "timeout of 10000ms exceeded",
+    "LLM API 429: Too Many Requests",
+    "upstream returned 502 Bad Gateway",
+  ];
+
+  for (const message of transientMessages) {
+    test(`plain Error(${JSON.stringify(message)}) is retried and succeeds on the second attempt`, async () => {
+      await withFakeTimers(async () => {
+        let calls = 0;
+        const fn = vi.fn(async () => {
+          calls++;
+          if (calls < 2) throw new Error(message);
+          return "ok";
+        });
+        const p = withLLMRetry(fn);
+        await vi.runAllTimersAsync();
+        expect(await p).toBe("ok");
+        expect(fn).toHaveBeenCalledTimes(2);
+      });
+    });
+  }
+
+  test("a numeric status outside 4xx/5xx blocks message-based network retry", async () => {
+    // `status: 200` (or any non-4xx/5xx number) means the transport
+    // HAD a status and chose not to classify it as transient — the message
+    // fallback must not second-guess it, or a 200 with "network" in the body
+    // would be retried 3×.
+    const fn = vi.fn(async () => {
+      throw statusError(200, "status 200 but body mentions fetch failed");
+    });
+    await expect(withLLMRetry(fn)).rejects.toThrow(/status 200/);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("withLLMRetry — abort handling and retry budgets", () => {
+  test("a pre-aborted signal throws AbortError without attempting fn", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fn = vi.fn(async () => "ok");
+    await expect(withLLMRetry(fn, controller.signal)).rejects.toThrow(/aborted/i);
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  test("aborting during the backoff sleep aborts the retry (no further attempts)", async () => {
+    await withFakeTimers(async () => {
+      const controller = new AbortController();
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+      try {
+        const fn = vi.fn(async () => {
+          throw statusError(503);
+        });
+        const p = withLLMRetry(fn, controller.signal);
+        // Attach the rejection handler before the timers fire so the
+        // mid-backoff abort is not observed as an unhandled rejection.
+        const rejection = expect(p).rejects.toThrow(/aborted/i);
+        // First attempt fails; the 1500ms backoff is mid-flight…
+        await vi.advanceTimersByTimeAsync(100);
+        controller.abort();
+        // …the next 100ms sleep chunk observes the abort and throws.
+        await vi.advanceTimersByTimeAsync(100);
+        await rejection;
+        expect(fn).toHaveBeenCalledTimes(1);
+      } finally {
+        randomSpy.mockRestore();
+      }
+    });
+  });
+
+  test("a Retry-After value above MAX_RETRY_AFTER_MS is capped to the ceiling", async () => {
+    await withFakeTimers(async () => {
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+      try {
+        let calls = 0;
+        const fn = vi.fn(async () => {
+          calls++;
+          if (calls < 2) throw statusError(429, "LLM API 429: rate", 120_000);
+          return "ok";
+        });
+        const p = withLLMRetry(fn);
+        // Delay must be the 30s ceiling, not the hostile 120s header.
+        await vi.advanceTimersByTimeAsync(MAX_RETRY_AFTER_MS - 1);
+        expect(fn).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await p).toBe("ok");
+        expect(fn).toHaveBeenCalledTimes(2);
+      } finally {
+        randomSpy.mockRestore();
+      }
+    });
+  });
+
+  test("the cumulative-delay budget stops the retry loop before MAX_RETRIES", async () => {
+    await withFakeTimers(async () => {
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+      try {
+        const fn = vi.fn(async () => {
+          throw statusError(429, "LLM API 429: rate", 60_000);
+        });
+        const p = withLLMRetry(fn);
+        // Attach the rejection handler first so the budget-exhaustion throw
+        // is never observed as an unhandled rejection.
+        const rejection = expect(p).rejects.toThrow(/429/);
+        // Each retry sleeps the capped 30s; after two retries the cumulative
+        // delay hits the 60s budget and the loop throws without a third retry.
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(fn).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await rejection;
         expect(fn).toHaveBeenCalledTimes(2);
       } finally {
         randomSpy.mockRestore();

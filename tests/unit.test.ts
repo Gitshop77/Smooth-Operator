@@ -21,7 +21,7 @@ import {
   renderHistoryForSummarization,
   sanitizeCompactedMemory,
 } from "../src/lib/agent/loop/compaction";
-import { extractPlaceholders, substituteSecrets, setSecret, deleteSecret } from "../src/lib/agent/secrets";
+import { substituteSecrets, setSecret, deleteSecret } from "../src/lib/agent/secrets";
 import { evaluateUrl } from "../src/lib/agent/evaluators/url-evaluator";
 import { StringEvaluator } from "../src/lib/agent/evaluators/string-evaluator";
 import { HTMLContentEvaluator } from "../src/lib/agent/evaluators/html-content-evaluator";
@@ -306,27 +306,27 @@ describe("parsePlannerOutput", () => {
 describe("LoopDetector", () => {
   test("does not warn on varied actions", () => {
     const det = new LoopDetector();
-    det.record({ type: "click", index: 1 }, 0);
-    det.record({ type: "input", index: 2, text: "a", clear: true }, 1);
-    det.record({ type: "scroll", down: true, pages: 1 }, 2);
+    det.record({ type: "click", index: 1 });
+    det.record({ type: "input", index: 2, text: "a", clear: true });
+    det.record({ type: "scroll", down: true, pages: 1 });
     expect(det.shouldWarn()).toBe(0);
   });
 
   test("warns after 5 repeated actions", () => {
     const det = new LoopDetector();
     for (let i = 0; i < 5; i++) {
-      det.record({ type: "click", index: 5 }, i);
+      det.record({ type: "click", index: 5 });
     }
     expect(det.shouldWarn()).toBe(5);
   });
 
   test("does not warn for different clicks on different elements", () => {
     const det = new LoopDetector();
-    det.record({ type: "click", index: 1 }, 0);
-    det.record({ type: "click", index: 2 }, 1);
-    det.record({ type: "click", index: 3 }, 2);
-    det.record({ type: "click", index: 4 }, 3);
-    det.record({ type: "click", index: 5 }, 4);
+    det.record({ type: "click", index: 1 });
+    det.record({ type: "click", index: 2 });
+    det.record({ type: "click", index: 3 });
+    det.record({ type: "click", index: 4 });
+    det.record({ type: "click", index: 5 });
     expect(det.shouldWarn()).toBe(0);
   });
 
@@ -355,16 +355,16 @@ describe("LoopDetector", () => {
  // miss.
     const det = new LoopDetector();
     let count = 0;
-    for (let i = 0; i < 21; i++) count = det.record({ type: "click", index: 1 }, i);
+    for (let i = 0; i < 21; i++) count = det.record({ type: "click", index: 1 });
     expect(count).toBe(20); // 21st identical sees exactly 20 (1 evicted)
-    count = det.record({ type: "click", index: 1 }, 21);
+    count = det.record({ type: "click", index: 1 });
     expect(count).toBe(20); // 22nd identical still sees exactly 20
-    expect(det.shouldWarn()).toBe(0); // 20 is not a warn threshold
+    expect(det.shouldWarn()).toBe(20); // 20 >= first threshold: warns at the live count
   });
 
   test("reset() clears the rolling window", () => {
     const det = new LoopDetector();
-    for (let i = 0; i < 5; i++) det.record({ type: "click", index: 1 }, i);
+    for (let i = 0; i < 5; i++) det.record({ type: "click", index: 1 });
     expect(det.shouldWarn()).toBe(5);
     det.reset();
     expect(det.shouldWarn()).toBe(0);
@@ -376,18 +376,24 @@ describe("LoopDetector", () => {
     expect(text).toContain("5");
   });
 
-  test("escalating warnings at 5, 8, 12 repetitions", () => {
+  test("warns at the live count once it crosses the first threshold (no flicker)", () => {
+ // Warning is continuous once the count reaches the first threshold: it
+ // must NOT vanish at non-milestone counts (6-7, 9-11) only to reappear —
+ // that flicker made the nudge unreliable.
     const det = new LoopDetector();
-    for (let i = 0; i < 5; i++) det.record({ type: "click", index: 1 }, i);
+    for (let i = 0; i < 5; i++) det.record({ type: "click", index: 1 });
     expect(det.shouldWarn()).toBe(5);
-    det.record({ type: "click", index: 1 }, 5);
-    det.record({ type: "click", index: 1 }, 6);
-    det.record({ type: "click", index: 1 }, 7);
+    det.record({ type: "click", index: 1 });
+    expect(det.shouldWarn()).toBe(6);
+    det.record({ type: "click", index: 1 });
+    expect(det.shouldWarn()).toBe(7);
+    det.record({ type: "click", index: 1 });
     expect(det.shouldWarn()).toBe(8);
-    det.record({ type: "click", index: 1 }, 8);
-    det.record({ type: "click", index: 1 }, 9);
-    det.record({ type: "click", index: 1 }, 10);
-    det.record({ type: "click", index: 1 }, 11);
+    det.record({ type: "click", index: 1 });
+    det.record({ type: "click", index: 1 });
+    det.record({ type: "click", index: 1 });
+    expect(det.shouldWarn()).toBe(11);
+    det.record({ type: "click", index: 1 });
     expect(det.shouldWarn()).toBe(12);
   });
 });
@@ -449,34 +455,6 @@ describe("ACTION_METADATA + actionListForPrompt", () => {
     expect(prompt).toContain("keys: string");            // send_keys
     expect(prompt).toContain("code: string");            // evaluate
     expect(prompt).toContain("success: boolean");        // done
-  });
-});
-
-// ─── Secret extraction ──────────────────────────────────────────────────────
-
-describe("extractPlaceholders", () => {
-  test("extracts %var% placeholders", () => {
-    expect(extractPlaceholders("log in with %email% and %password%")).toEqual(["email", "password"]);
-  });
-
-  test("handles no placeholders", () => {
-    expect(extractPlaceholders("no placeholders here")).toEqual([]);
-  });
-
-  test("handles duplicate placeholders", () => {
-    expect(extractPlaceholders("%email% and %email% again")).toEqual(["email"]);
-  });
-
-  test("ignores invalid names", () => {
-    expect(extractPlaceholders("%1invalid% and %ok%")).toEqual(["ok"]);
-  });
-
-  test("handles empty string", () => {
-    expect(extractPlaceholders("")).toEqual([]);
-  });
-
-  test("preserves order of first occurrence", () => {
-    expect(extractPlaceholders("%z% %a% %m% %a%")).toEqual(["z", "a", "m"]);
   });
 });
 
@@ -659,22 +637,24 @@ describe("extractJson", () => {
 // Pricing is sourced from the live models.dev catalog (hydrated via
 // `refreshPricingFromCatalog`); there is no static table. These tests stub
 // `fetch` so they run without network. `estimateCost` does a case-insensitive
-// substring match against the catalogued rates (the more-specific key must be
-// declared first so it wins for "gpt-4o-mini-…").
+// substring match against the catalogued rates, picking the LONGEST matching
+// key ("gpt-4o-mini-…" matches both "gpt-4o-mini" and "gpt-4o"; the longer
+// key wins).
 
 const UNIT_CATALOG: Catalog = {
   openai: {
     id: "openai",
     name: "OpenAI",
     models: {
- // NB: gpt-4o-mini is declared BEFORE gpt-4o so the substring matcher
- // (first key that is a substring of the queried id) returns the mini
- // rate for "gpt-4o-mini-…".
+ // NB: "gpt-4o-mini" must be a key distinct from "gpt-4o" — the substring
+ // matcher picks the LONGEST matching key, so "gpt-4o-mini-…" resolves to
+ // the mini rate regardless of declaration order.
       "gpt-4o-mini": { id: "gpt-4o-mini", name: "GPT-4o mini", release_date: "2024-07-18", attachment: false, reasoning: false, temperature: true, tool_call: true, cost: { input: 0.15, output: 0.6 } },
       "gpt-4o": { id: "gpt-4o", name: "GPT-4o", release_date: "2024-05-13", attachment: false, reasoning: false, temperature: true, tool_call: true, cost: { input: 2.5, output: 10 } },
- // NB: o3-mini / o1-mini declared before o3 / o1.
+ // NB: o3-mini / o1-mini are separate keys so the longest match resolves
+ // them over their shorter prefixes o3 / o1.
       "o3-mini": { id: "o3-mini", name: "o3-mini", release_date: "2025-01-31", attachment: false, reasoning: true, temperature: false, tool_call: true, cost: { input: 1.1, output: 4.4 } },
-      "o3": { id: "o3", name: "o3", release_date: "2025-04-16", attachment: false, reasoning: true, temperature: false, tool_call: true, cost: { input: 2, output: 8 } },
+      "o3": { id: "o3", name: "o3", release_date: "2025-04-16", attachment: false, reasoning: false, temperature: true, tool_call: true, cost: { input: 2, output: 8 } },
       "o1-mini": { id: "o1-mini", name: "o1-mini", release_date: "2024-09-12", attachment: false, reasoning: true, temperature: false, tool_call: true, cost: { input: 3, output: 12 } },
       "o1": { id: "o1", name: "o1", release_date: "2024-12-05", attachment: false, reasoning: true, temperature: false, tool_call: true, cost: { input: 15, output: 60 } },
     },
@@ -770,10 +750,11 @@ describe("estimateCost", () => {
 
 // ─── LoopDetector — expanded edge cases ─────────────────────────────────────
 //
-// The base LoopDetector describe block above covers the happy path (5/8/12
-// escalation, basic reset, basic window bound). These tests exercise the
-// eviction policy, the threshold "quiet" gaps, strict alternation, full
-// action-type normalization coverage, and post-reset recovery more rigorously.
+// The base LoopDetector describe block above covers the happy path (warning
+// once past the first threshold, basic reset, basic window bound). These
+// tests exercise the eviction policy, the continuous-warning (non-flicker)
+// rule, strict alternation, full action-type normalization coverage, and
+// post-reset recovery more rigorously.
 
 describe("LoopDetector — expanded", () => {
   test("window evicts oldest entries beyond LOOP_WINDOW_SIZE (20) — proven by count regression", () => {
@@ -782,70 +763,64 @@ describe("LoopDetector — expanded", () => {
  // evicted. shouldWarn returns 0 (no single action repeated enough).
     const det = new LoopDetector();
     for (let i = 0; i < 25; i++) {
-      det.record({ type: "click", index: i }, i + 1);
+      det.record({ type: "click", index: i });
     }
     expect(det.shouldWarn()).toBe(0);
  // 26th action: click(0) again. If the window is correctly bounded to 20,
  // click(0)'s earlier record (step 1) has been evicted, so count = 1.
  // If the window were UNBOUNDED, count would be 2 (this is the regression
  // signal: a bounded window MUST show 1 here).
-    const count = det.record({ type: "click", index: 0 }, 26);
+    const count = det.record({ type: "click", index: 0 });
     expect(count).toBe(1);
   });
 
-  test("all 3 real thresholds [5, 8, 12] fire, with quiet gaps between", () => {
- // Matches the REAL WARN_THRESHOLDS = [5, 8, 12] (NOT 5/8/12/16).
+  test("warn count climbs monotonically once past the first threshold", () => {
+ // Matches the REAL behavior: WARN_THRESHOLDS[0] = 5, warning is continuous
+ // at the live count (NOT milestone-gated at 5/8/12 — non-flicker rule).
     const det = new LoopDetector();
     const click: AgentAction = { type: "click", index: 7 };
  // 1..5 → fires at 5
-    for (let i = 0; i < 5; i++) det.record(click, i + 1);
+    for (let i = 0; i < 5; i++) det.record(click);
     expect(det.shouldWarn()).toBe(5);
- // 6, 7 → quiet (not in thresholds)
-    det.record(click, 6);
-    expect(det.shouldWarn()).toBe(0);
-    det.record(click, 7);
-    expect(det.shouldWarn()).toBe(0);
- // 8 → fires
-    det.record(click, 8);
-    expect(det.shouldWarn()).toBe(8);
- // 9, 10, 11 → quiet
-    det.record(click, 9);
-    expect(det.shouldWarn()).toBe(0);
-    det.record(click, 10);
-    expect(det.shouldWarn()).toBe(0);
-    det.record(click, 11);
-    expect(det.shouldWarn()).toBe(0);
- // 12 → fires
-    det.record(click, 12);
+ // 6, 7 → still warning, count follows the live count
+    det.record(click);
+    expect(det.shouldWarn()).toBe(6);
+    det.record(click);
+    expect(det.shouldWarn()).toBe(7);
+ // 8..11 → warning continues
+    for (let i = 0; i < 4; i++) det.record(click);
+    expect(det.shouldWarn()).toBe(11);
+ // 12 → count 12
+    det.record(click);
     expect(det.shouldWarn()).toBe(12);
- // 13 → quiet (12 is the last threshold)
-    det.record(click, 13);
-    expect(det.shouldWarn()).toBe(0);
+ // 13 → count 13 (no top plateau in the warning itself)
+    det.record(click);
+    expect(det.shouldWarn()).toBe(13);
   });
 
-  test("alternating A,B,A,B does NOT false-positive below threshold", () => {
+  test("alternating A,B,A,B stays below the first threshold", () => {
  // Strict alternation: 10 × click(0) + 10 × click(1) = 20 actions (fills
- // the window). Each action appears 10 times — 10 is NOT in [5,8,12] →
- // shouldWarn returns 0. The detector must not conflate alternation with
- // repetition.
+ // the window). Each action appears 10 times — above the first threshold →
+ // the LAST action's count (10) is what warns. The detector must warn on
+ // the live count of the most recent action, not conflate totals.
     const det = new LoopDetector();
     const a: AgentAction = { type: "click", index: 0 };
     const b: AgentAction = { type: "click", index: 1 };
-    for (let i = 0; i < 10; i++) {
-      det.record(a, i * 2 + 1);
-      det.record(b, i * 2 + 2);
+    for (let i = 0; i < 4; i++) {
+      det.record(a);
+      det.record(b);
     }
-    expect(det.shouldWarn()).toBe(0); // last action is b, count 10
+    expect(det.shouldWarn()).toBe(0); // count of b = 4, below threshold
  // Push a 4 more times. Each push evicts the oldest (alternating a,b,a,b…).
- // After 4 pushes the window holds 12 a + 8 b → count of a = 12 → fires.
-    det.record(a, 21); // evicts a1, window 10a+10b, count(a)=10 → 0
-    expect(det.shouldWarn()).toBe(0);
-    det.record(a, 22); // evicts b2, window 11a+9b, count(a)=11 → 0
-    expect(det.shouldWarn()).toBe(0);
-    det.record(a, 23); // evicts a3, window 11a+9b, count(a)=11 → 0
-    expect(det.shouldWarn()).toBe(0);
-    det.record(a, 24); // evicts b4, window 12a+8b, count(a)=12 → fires
-    expect(det.shouldWarn()).toBe(12);
+ // a's count climbs 5 → 6 → 7 → 8, and the warning tracks the live count.
+    det.record(a); // window 5a+4b, count(a)=5 → warns at 5
+    expect(det.shouldWarn()).toBe(5);
+    det.record(a); // window 6a+4b, count(a)=6 → warns at 6
+    expect(det.shouldWarn()).toBe(6);
+    det.record(a); // window 7a+4b, count(a)=7 → warns at 7
+    expect(det.shouldWarn()).toBe(7);
+    det.record(a); // window 8a+4b, count(a)=8 → warns at 8
+    expect(det.shouldWarn()).toBe(8);
   });
 
   test("all action-type normalizations: same action twice → count 2 (equivalence holds)", () => {
@@ -868,11 +843,11 @@ describe("LoopDetector — expanded", () => {
     ];
     for (const [, action] of cases) {
       const det = new LoopDetector();
-      const c1 = det.record(action, 1);
-      const c2 = det.record(action, 2);
+      const c1 = det.record(action);
+      const c2 = det.record(action);
       expect(c1).toBe(1);
       expect(c2).toBe(2);
- // Sanity: shouldWarn reflects the count (2 is not a threshold).
+ // Sanity: shouldWarn reflects the count (2 is below the first threshold).
       expect(det.shouldWarn()).toBe(0);
     }
   });
@@ -884,8 +859,8 @@ describe("LoopDetector — expanded", () => {
  // are genuinely equivalent, not merely that the explicit form is
  // self-consistent.
     const det = new LoopDetector();
-    det.record({ type: "scroll", down: true, pages: 1 }, 1);
-    const count = det.record({ type: "scroll" } as unknown as AgentAction, 2);
+    det.record({ type: "scroll", down: true, pages: 1 });
+    const count = det.record({ type: "scroll" } as unknown as AgentAction);
     expect(count).toBe(2);
   });
 
@@ -894,12 +869,12 @@ describe("LoopDetector — expanded", () => {
  // does NOT match `scroll|dir=down|pages=1`. Each direction must bucket
  // independently.
     const det = new LoopDetector();
-    const c1 = det.record({ type: "scroll", down: true, pages: 1 }, 1);   // down bucket: 1
-    const c2 = det.record({ type: "scroll", down: false, pages: 1 }, 2);  // up bucket: 1
+    const c1 = det.record({ type: "scroll", down: true, pages: 1 });   // down bucket: 1
+    const c2 = det.record({ type: "scroll", down: false, pages: 1 });  // up bucket: 1
     expect(c1).toBe(1);
     expect(c2).toBe(1);
  // Push down again — matches the first down (count 2). Up bucket still 1.
-    const c3 = det.record({ type: "scroll", down: true, pages: 1 }, 3);
+    const c3 = det.record({ type: "scroll", down: true, pages: 1 });
     expect(c3).toBe(2);
   });
 
@@ -909,10 +884,10 @@ describe("LoopDetector — expanded", () => {
  // shouldWarn returns 0. This proves reset wipes the rolling window fully
  // — the post-reset action does NOT inherit the pre-reset repetition count.
     const det = new LoopDetector();
-    for (let i = 0; i < 5; i++) det.record({ type: "click", index: 0 }, i + 1);
+    for (let i = 0; i < 5; i++) det.record({ type: "click", index: 0 });
     expect(det.shouldWarn()).toBe(5);
     det.reset();
-    const count = det.record({ type: "click", index: 0 }, 10);
+    const count = det.record({ type: "click", index: 0 });
     expect(count).toBe(1);
     expect(det.shouldWarn()).toBe(0);
   });

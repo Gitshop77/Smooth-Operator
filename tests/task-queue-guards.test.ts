@@ -12,6 +12,7 @@ import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("../src/extension/background/agent-bridge", () => ({
   DEFAULT_MAX_STEPS: 100,
+  DEFAULT_MODE: "standard",
   isRunStarting: vi.fn(() => false),
   setRunStarting: vi.fn(),
   startRun: vi.fn(async () => {}),
@@ -32,6 +33,8 @@ import { handleScheduledTaskFire } from "../src/extension/background/task-queue"
 import { getScheduledTask, saveScheduledTask } from "@/lib/agent/scheduled-tasks";
 import { getRunState, requestKeepAwake } from "../src/extension/background/state-store";
 import { isRunStarting, startRun, setRunStarting } from "../src/extension/background/agent-bridge";
+import { setSecret, deleteSecret } from "../src/lib/agent/secrets";
+import { installLocalStorageStub, restoreLocalStorageStub } from "./helpers";
 
 const getScheduledTaskMock = getScheduledTask as ReturnType<typeof vi.fn>;
 const saveScheduledTaskMock = saveScheduledTask as ReturnType<typeof vi.fn>;
@@ -111,5 +114,59 @@ describe("handleScheduledTaskFire re-entry guards", () => {
       mode: "standard",
       isScheduledTaskRun: true,
     });
+  });
+
+  test("a corrupted stored mode falls back to DEFAULT_MODE (never fed raw to startRun)", async () => {
+    getScheduledTaskMock.mockResolvedValue({
+      id: "task-1",
+      task: "do the thing",
+      enabled: true,
+      mode: "not-a-real-mode",
+      lastRunAt: 0,
+    });
+    await handleScheduledTaskFire("task-1");
+    expect(startRunMock).toHaveBeenCalledTimes(1);
+    expect(startRunMock).toHaveBeenCalledWith({
+      task: "do the thing",
+      maxSteps: 100,
+      mode: "standard",
+      isScheduledTaskRun: true,
+    });
+  });
+});
+
+describe("handleScheduledTaskFire notification redaction", () => {
+  let notificationsMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    installLocalStorageStub();
+    notificationsMock = (globalThis as unknown as { chrome: { notifications: { create: ReturnType<typeof vi.fn> } } }).chrome.notifications.create;
+  });
+
+  afterEach(async () => {
+    await deleteSecret("api_key").catch(() => {});
+    localStorage.removeItem("open_cowork_secrets");
+    restoreLocalStorageStub();
+  });
+
+  test("the 'Starting' notification redacts secrets embedded in the task prompt", async () => {
+    const SECRET = "sk-scheduled-notif-999";
+    await setSecret("api_key", SECRET);
+
+    getScheduledTaskMock.mockResolvedValue({
+      id: "task-1",
+      task: `fill the form with ${SECRET}`,
+      enabled: true,
+      mode: "standard",
+      lastRunAt: 0,
+    });
+
+    await handleScheduledTaskFire("task-1");
+
+    expect(notificationsMock).toHaveBeenCalledTimes(1);
+    const opts = (notificationsMock.mock.calls[0] as unknown[])[0] as { message?: string };
+    expect(opts.message).toBeDefined();
+    expect(opts.message).toContain("[REDACTED:api_key]");
+    expect(opts.message).not.toContain(SECRET);
   });
 });

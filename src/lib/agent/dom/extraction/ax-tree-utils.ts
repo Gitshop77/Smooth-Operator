@@ -62,14 +62,25 @@ export function escapeAttributeValue(s: string): string {
     .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
     .replace(/\s+/g, " ")
     .trim()
-    .replace(/"/g, '\\"');
-  if (out.length > MAX_ATTR_VALUE_LENGTH) {
-    out = out.slice(0, MAX_ATTR_VALUE_LENGTH) + "...";
-  }
-  return out
+    .replace(/"/g, '\\"')
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+  if (out.length > MAX_ATTR_VALUE_LENGTH) {
+    // The cap applies to the entity-EXPANDED text so the token budget is
+    // real: a `<`-dense value (e.g. 200 literal `<`) expands to ~800 chars,
+    // and capping the raw value first would let it overshoot up to 4x.
+    let cut = MAX_ATTR_VALUE_LENGTH;
+    // Every `&` in `out` starts an entity (raw `&` was escaped above), so a
+    // cut inside one leaves a dangling `&lt`-style fragment. Back up to the
+    // entity start when the entity is incomplete before the cut point.
+    const lastAmp = out.slice(0, cut).lastIndexOf("&");
+    if (lastAmp >= 0 && !out.slice(lastAmp, cut).includes(";")) {
+      cut = lastAmp;
+    }
+    out = out.slice(0, cut) + "...";
+  }
+  return out;
 }
 
 // ─── Structural checks ─────────────────────────────────────────────────────

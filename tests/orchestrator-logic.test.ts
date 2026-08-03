@@ -18,11 +18,12 @@ import type { HistoryItem, AgentAction, ActionResult, LogEvent, AgentOutput } fr
 import { AgentOutputSchema } from "../src/lib/agent/tools/schema";
 import { makeHistoryItem, makeState } from "./helpers";
 
-// Records an action n times (with consecutive step indices) into a LoopDetector.
-// Centralizes the `as AgentAction` cast and the step-index convention so the
-// loop-detector tests stay uniform and drift-resistant.
-function recordN(det: LoopDetector, a: AgentAction, n: number, start = 0) {
-  for (let i = 0; i < n; i++) det.record(a, start + i);
+// Records an action n times into a LoopDetector. Centralizes the
+// `as AgentAction` cast so the loop-detector tests stay uniform and
+// drift-resistant. (record no longer takes a step index — the loop
+// detector tracks repetition, not step position.)
+function recordN(det: LoopDetector, a: AgentAction, n: number) {
+  for (let i = 0; i < n; i++) det.record(a);
 }
 
 // BASE_CONFIG mirrors the default LoopDeps config. The non-obvious coupling is
@@ -53,7 +54,7 @@ test("BASE_CONFIG invariant: maxSteps < plannerInterval", () => {
 describe("LoopDetector", () => {
   test("does not warn on the first occurrence of an action", () => {
     const det = new LoopDetector();
-    det.record({ type: "click", index: 1 } as AgentAction, 0);
+    det.record({ type: "click", index: 1 } as AgentAction);
     expect(det.shouldWarn()).toBe(0);
   });
 
@@ -69,10 +70,10 @@ describe("LoopDetector", () => {
     expect(det.shouldWarn()).toBe(8);
   });
 
-  test("does not warn between thresholds (6, 7)", () => {
+  test("keeps warning above the first threshold (6, 7 — no flicker)", () => {
     const det = new LoopDetector();
     recordN(det, { type: "click", index: 1 }, 6);
-    expect(det.shouldWarn()).toBe(0);
+    expect(det.shouldWarn()).toBe(6);
   });
 
   test("reset clears the window", () => {
@@ -80,7 +81,7 @@ describe("LoopDetector", () => {
     recordN(det, { type: "click", index: 1 }, 5);
     expect(det.shouldWarn()).toBe(5);
     det.reset();
-    det.record({ type: "click", index: 1 } as AgentAction, 5);
+    det.record({ type: "click", index: 1 } as AgentAction);
     expect(det.shouldWarn()).toBe(0);
   });
 
@@ -100,14 +101,14 @@ describe("LoopDetector", () => {
     const det = new LoopDetector();
  // 4 detect_visual with query A + 4 with query B — neither should hit 5.
     recordN(det, { type: "detect_visual", query: "button" }, 4);
-    recordN(det, { type: "detect_visual", query: "form" }, 4, 4);
+    recordN(det, { type: "detect_visual", query: "form" }, 4);
     expect(det.shouldWarn()).toBe(0);
   });
 
   test("normalizeAction distinguishes screenshot by file_name", () => {
     const det = new LoopDetector();
     recordN(det, { type: "screenshot", file_name: "a.jpg" } as AgentAction, 4);
-    recordN(det, { type: "screenshot", file_name: "b.jpg" } as AgentAction, 4, 4);
+    recordN(det, { type: "screenshot", file_name: "b.jpg" } as AgentAction, 4);
     expect(det.shouldWarn()).toBe(0);
   });
 
@@ -136,7 +137,6 @@ describe("LoopDetector", () => {
         (i % 2 === 0
           ? { type: "scroll", down: true, pages: 1 }
           : { type: "scroll" }) as unknown as AgentAction,
-        i,
       );
     }
     expect(det.shouldWarn()).toBe(5);
@@ -236,7 +236,7 @@ describe("buildCompactionRequest", () => {
 //
 // The `deps.executeActions` override (always set in the extension path — see
 // run-helpers.ts) previously bypassed `executeActionQueue`, which is the only
-// caller of `loopDetector.record(action, step)`. That made the action-repetition
+// caller of `loopDetector.record(action)`. That made the action-repetition
 // loop detector DEAD CODE in production — only the page-fingerprint detector
 // fired. The executeActions branch records each action in the batch + calls
 // loopDetector.reset() when any result has pageChanged: true.
@@ -323,17 +323,15 @@ describe("runAgentLoop — executeActions branch loop-detector integration", () 
   });
 
   test("loopDetector.reset() fires when executeActions returns pageChanged: true", async () => {
- // After step 1 emits loop-warning (5 clicks) + pageChanged reset, step 2's
- // 5 clicks should emit ANOTHER count=5 warning (the window was reset to
- // empty, so the 5th click is count=5 again). WITHOUT the reset, the
- // window would carry over the 5 clicks from step 1 → step 2's 5 clicks
- // would push the count to 10, and shouldWarn would return 0 (10 is NOT
- // in WARN_THRESHOLDS = [5, 8, 12]). The 8th click (count=8) WOULD fire,
- // but with count=8, not count=5.
- //
- // So the assertion "second warning has count=5" distinguishes:
- // - reset in place: reset fired → window empty → step 2's 5th click = count 5.
- // - reset broken (no reset): window carried over → step 2's 8th click = count 8.
+  // After step 1 emits loop-warning (5 clicks) + pageChanged reset, step 2's
+  // 5 clicks should emit ANOTHER count=5 warning (the window was reset to
+  // empty, so the 5th click is count=5 again). WITHOUT the reset, the
+  // window would carry over the 5 clicks from step 1 → step 2's 5th click
+  // would hit count=10 (and warn at 10).
+  //
+  // So the assertion "every warning has count=5" distinguishes:
+  // - reset in place: reset fired → window empty → each step's 5th click = count 5.
+  // - reset broken (no reset): window carried over → step 2+ warn at higher counts.
     const events: LogEvent[] = [];
     const deps = makeDeps({
       navigatorOutput: navigatorOutputWithRepeatedClicks(5),
@@ -357,20 +355,22 @@ describe("runAgentLoop — executeActions branch loop-detector integration", () 
     }
   });
 
-  test("WITHOUT pageChanged, the loop window carries over (no reset) — count escalates to 8", async () => {
- // Control: when executeActions returns pageChanged: false (or undefined),
- // the reset does NOT fire. Step 1's 5 clicks carry over to step 2.
- // Step 2's 5 clicks push the count to 10; shouldWarn fires at count=8
- // (the 3rd click of step 2, when window has 5+3=8 entries).
- // This test confirms the reset is CONDITIONAL on pageChanged — without
- // that condition, the reset would fire every step and the escalation
- // semantics would be lost.
+  test("WITHOUT pageChanged, the loop window carries over (no reset) — the count escalates continuously", async () => {
+  // Control: when executeActions returns pageChanged: false (or undefined),
+  // the reset does NOT fire. Step 1's 5 clicks carry over to step 2.
+  // Step 2's 5 clicks push the count to 10; step 3's push it to 15. The
+  // warning fires CONTINUOUSLY at the live count once it crosses the first
+  // threshold (5, 6, 7, …) — it must not vanish between the old 5/8/12
+  // milestones (flicker).
+  // This test confirms the reset is CONDITIONAL on pageChanged — without
+  // that condition, the reset would fire every step and the escalation
+  // semantics would be lost.
     const events: LogEvent[] = [];
     const deps = makeDeps({
       navigatorOutput: navigatorOutputWithRepeatedClicks(5),
       executeActionsResult: (actions) => actions.map((action) => ({
         action, success: true, message: "ok",
- // pageChanged: false → reset does NOT fire.
+  // pageChanged: false → reset does NOT fire.
       } as ActionResult)),
       events,
     });
@@ -378,14 +378,12 @@ describe("runAgentLoop — executeActions branch loop-detector integration", () 
     await runAgentLoop(deps);
 
     const warnings = events.filter(isLoopWarning);
- // Step 1: 5th click → count=5 → warning.
- // Step 2: 3rd click → count=8 → warning (window: 5 + 3 = 8).
- // Step 2: 4th, 5th clicks → count=9, 10 → no warning (not in [5,8,12]).
- // Step 3: 1st click → count=11 → no warning.
- // Step 3: 2nd click → count=12 → warning.
- // So warnings should be: 5, 8, 12.
+  // Step 1: 5th click → count=5 → warning.
+  // Step 2: clicks reach counts 6-10 → warnings at each (no flicker).
+  // Step 3: clicks reach counts 11-15 → warnings at 11 through 15.
+  // So warnings should be: 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15.
     const counts = warnings.map((w) => w.count);
-    expect(counts).toEqual([5, 8, 12]);
+    expect(counts).toEqual([5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
   });
 
   test("hard-stops the run (success:false) once the same action repeats past the top loop threshold", async () => {
@@ -651,5 +649,574 @@ describe("runAgentLoop — repeating action early-stops under default config", (
     expect(doneEvents).toHaveLength(1);
     expect(doneEvents[0].success).toBe(false);
     expect(doneEvents[0].text).toContain("Early-stop");
+  });
+});
+
+// ─── Initial-planner decision handling: clamp + done-judge disagreement ─────
+//
+// `runInitialPlannerPhase` applies the initial planner's plan. Two behaviors
+// are pinned here:
+//  1. A non-integer/out-of-range `current_plan_item` is clamped to a sane
+//     index (truncated to the valid range), with a visible info event —
+//     not the old silent Math.max fallback that mapped 2.7 → last index.
+//  2. When the judge disagrees with a `done` decision, the run CONTINUES
+//     (info event + decision rewrite), exactly like the web_task branch —
+//     instead of silently falling through with the run state half-applied.
+
+describe("runAgentLoop — initial planner plan application", () => {
+  /** Build deps with a fixed initial-planner output + optional summarizeCall. */
+  function makePlannerDeps(opts: {
+    plannerOutput: Record<string, unknown>;
+    summarizeCall?: LoopDeps["summarizeCall"];
+    events: LogEvent[];
+    config?: Partial<LoopDeps["config"]>;
+  }): LoopDeps {
+    return {
+      task: "test task",
+      navigatorCall: vi.fn(async () => ({
+        raw: JSON.stringify({
+          thinking: "x",
+          evaluation_previous_goal: "y",
+          memory: "z",
+          next_goal: "w",
+          action: [{ type: "scroll", down: true, pages: 1 } as AgentAction],
+        }),
+      })),
+      plannerCall: vi.fn(async () => ({ raw: JSON.stringify(opts.plannerOutput) })),
+      summarizeCall: opts.summarizeCall,
+      getTabs: vi.fn(async () => [
+        { id: 1, label: "1", url: "https://example.com", title: "t", active: true },
+      ]),
+      extractState: vi.fn(async () => makeState()),
+      executeActions: vi.fn(async (actions: AgentAction[]) =>
+        actions.map((action) => ({ action, success: true, message: "ok" } as ActionResult)),
+      ),
+      onEvent: (e: LogEvent) => { opts.events.push(e); },
+      settleDelay: 0,
+      config: { ...BASE_CONFIG, ...opts.config },
+    };
+  }
+
+  test("out-of-range current_plan_item is clamped to the last index with an info event", async () => {
+    const events: LogEvent[] = [];
+    const deps = makePlannerDeps({
+      plannerOutput: {
+        thinking: "x",
+        decision: "continue",
+        plan: ["a", "b", "c", "d", "e"],
+        current_plan_item: 99,
+        next_goal: "g",
+      },
+      events,
+    });
+
+    await runAgentLoop(deps);
+
+  // The clamp must be visible (info event) and must coerce 99 into the
+  // valid range [0, 4] — the old inline clamp was silent about the coercion.
+    const clampInfo = events.find(
+      (e) => e.type === "info" && typeof e.message === "string" && e.message.includes("current_plan_item"),
+    );
+    expect(clampInfo).toBeDefined();
+    expect((clampInfo as Extract<LogEvent, { type: "info" }>).message).toContain("clamped to 4");
+  });
+
+  test("judge disagreement on a done decision continues the run with an info event", async () => {
+    const events: LogEvent[] = [];
+    const deps = makePlannerDeps({
+      plannerOutput: {
+        thinking: "x",
+        decision: "done",
+        success: true,
+        text: "task finished",
+      },
+      // The judge disagrees with the agent's self-reported success.
+      summarizeCall: vi.fn(async () => ({
+        content: JSON.stringify({
+          reasoning: "x",
+          verdict: false,
+          failureReason: "The page did not actually change.",
+          impossibleTask: false,
+          reachedCaptcha: false,
+        }),
+      })),
+      events,
+      config: { enableJudge: true, maxSteps: 5 },
+    });
+
+    await runAgentLoop(deps);
+
+  // The disagreement must be announced and the run must continue (the
+  // navigator runs again instead of finalizing on the unverified claim).
+    const disagreeInfo = events.find(
+      (e) => e.type === "info" && typeof e.message === "string" && e.message.includes("Judge disagreed with done result"),
+    );
+    expect(disagreeInfo).toBeDefined();
+  // The run continued past the disagreeing done attempt instead of
+  // finalizing on the unverified claim (a second navigator step ran).
+    const stepStarts = events.filter((e) => e.type === "navigator-step-start");
+    expect(stepStarts.length).toBeGreaterThan(1);
+  });
+});
+
+// ─── Compaction may terminate the run (budget cap) — no post-cap LLM call ───
+//
+// `checkAndRunCompaction` finishes the run when the summarizer call blows
+// through the cost cap. The step must then exit immediately: the periodic
+// planner check right after it is an outbound LLM call that must not fire
+// after the run has ended (it would spend more budget on a dead run).
+
+describe("runAgentLoop — cost cap hit during compaction exits before the periodic planner check", () => {
+  test("no planner call fires after compaction exceeds the cost cap", async () => {
+    const events: LogEvent[] = [];
+    const summarizeCall = vi.fn(async () => ({
+      content: "compacted summary",
+      usage: { tokensIn: 1e12, tokensOut: 1e12, model: "gpt-4o" },
+    }));
+    const plannerCall = vi.fn(async () => ({
+      raw: JSON.stringify({
+        thinking: "x",
+        decision: "continue",
+        plan: ["a"],
+        // A changing goal every call so the goal-level loop detector never
+        // aborts the run before compaction has a chance to fire.
+        next_goal: `g${plannerCall.mock.calls.length}`,
+      }),
+    }));
+    const deps: LoopDeps = {
+      task: "test task",
+      navigatorCall: vi.fn(async () => ({
+        raw: JSON.stringify({
+          thinking: "x",
+          evaluation_previous_goal: "y",
+          memory: "z",
+          next_goal: "w",
+          action: [{ type: "scroll", down: true, pages: 1 } as AgentAction],
+        }),
+      })),
+      plannerCall,
+      summarizeCall,
+      getTabs: vi.fn(async () => [
+        { id: 1, label: "1", url: "https://example.com", title: "t", active: true },
+      ]),
+      extractState: vi.fn(async () => makeState()),
+      executeActions: vi.fn(async (actions: AgentAction[]) =>
+        // Huge result messages push the rendered history past the char
+        // threshold so the compaction gate opens as soon as the history is
+        // long enough to summarize.
+        actions.map((action) => ({
+          action,
+          success: true,
+          message: `ok ${"x".repeat(1200)}`,
+        } as ActionResult)),
+      ),
+      onEvent: (e: LogEvent) => { events.push(e); },
+      settleDelay: 0,
+      config: {
+        ...BASE_CONFIG,
+        maxSteps: 10,
+        enableCompaction: true,
+        // Compact on every eligible step (gap >= min(1, 3)).
+        compactionStepInterval: 1,
+        // Minimum valid threshold — the oversized result messages clear it.
+        compactionCharThreshold: 1000,
+        // Below the per-call missing-usage floor ($0.01 × ~10 calls), so the
+        // planner/navigator calls stay under it — but the summarizer's 1e12
+        // tokens blow far past it.
+        costCapUsd: 0.5,
+        // The periodic planner check fires at the end of EVERY navigator step
+        // — the exact outbound call that must be suppressed after the cap.
+        plannerInterval: 1,
+        // Repeated scroll actions must not early-stop the run before the
+        // history is long enough to compact.
+        enableEarlyStop: false,
+      },
+    };
+
+    await runAgentLoop(deps);
+
+    const doneEvents = events.filter((e) => e.type === "done");
+    expect(doneEvents).toHaveLength(1);
+    expect(doneEvents[0].text).toContain("Cost cap");
+  // Compaction ran (the summarizer was called)…
+    expect(summarizeCall).toHaveBeenCalled();
+  // …and the run exited BEFORE the periodic planner check that would have
+  // fired at the end of the compaction step: the planner was called exactly
+  // once initially plus once per completed step (steps 0-6). The step-7
+  // periodic call is the one suppressed by the cost-cap exit.
+    expect(plannerCall).toHaveBeenCalledTimes(8);
+  });
+});
+
+// ─── Uncaught mid-run error terminates via finish() (runEnd dispatched) ─────
+//
+// A throw that escapes the per-phase error handling (e.g. a user-supplied
+// `onEvent` handler crashing mid-step) must terminate the run through
+// `finish()`: the terminal `done` event is emitted at most once AND the
+// `runEnd` dispatcher callback still fires with the failure. Emitting a bare
+// `done` through `deps.onEvent` from the outermost catch skips both the
+// idempotency guard (a second `done` after a prior terminal emission) and
+// the `runEnd` dispatch.
+
+describe("runAgentLoop — uncaught mid-run error terminates via finish()", () => {
+  test("runEnd fires with success:false when a user handler throws mid-step", async () => {
+    const events: LogEvent[] = [];
+    const runStart = vi.fn();
+    const runEnd = vi.fn();
+    const deps: LoopDeps = {
+      task: "test task",
+      navigatorCall: vi.fn(async () => ({
+        raw: JSON.stringify({
+          thinking: "x",
+          evaluation_previous_goal: "y",
+          memory: "z",
+          next_goal: "w",
+          action: [{ type: "click", index: 1 } as AgentAction],
+        }),
+      })),
+      plannerCall: vi.fn(async () => ({
+        raw: JSON.stringify({
+          thinking: "x",
+          decision: "continue",
+          plan: ["a"],
+          next_goal: "g",
+        }),
+      })),
+      getTabs: vi.fn(async () => [
+        { id: 1, label: "1", url: "https://example.com", title: "t", active: true },
+      ]),
+      extractState: vi.fn(async () => makeState()),
+      executeActions: vi.fn(async (actions: AgentAction[]) =>
+        actions.map((action) => ({ action, success: true, message: "ok" } as ActionResult)),
+      ),
+      callbacks: [{
+        onRunStart: runStart,
+        onRunEnd: runEnd,
+      }],
+      onEvent: (e: LogEvent) => {
+        // The user-facing event stream crashes once the run is mid-flight —
+        // a realistic failure in the extension's UI wiring. It must NOT abort
+        // the loop with a bare, unguarded `done` that skips `runEnd`.
+        if (e.type === "state") throw new Error("UI event handler crashed");
+        events.push(e);
+      },
+      settleDelay: 0,
+      config: { ...BASE_CONFIG },
+    };
+
+    await runAgentLoop(deps);
+
+    const doneEvents = events.filter((e) => e.type === "done");
+    expect(doneEvents).toHaveLength(1);
+    expect(doneEvents[0]).toMatchObject({ type: "done", success: false });
+    expect(doneEvents[0].text).toContain("Uncaught error");
+    // The runEnd callback must fire for the failure — the bare `done` path
+    // in the outer catch never dispatched it.
+    expect(runStart).toHaveBeenCalledTimes(1);
+    expect(runEnd).toHaveBeenCalledTimes(1);
+    expect(runEnd.mock.calls[0][0]).toMatchObject({ success: false });
+  });
+});
+
+// ─── Extracted-phase composition order ──────────────────────────────────────
+//
+// The navigator step was split into named phases (preflight → start → observe
+// → challenge → model call → action selection → execution → step end →
+// history → settle → tail). These tests lock the OBSERVABLE order of those
+// phases through the event/callback stream, so a future reordering (or a
+// regression that skips a phase) is caught by the interleaving assertions
+// instead of silently changing run behavior.
+
+describe("runAgentLoop — extracted phase order within a step", () => {
+  test("step phases interleave in the extracted order (start → observe → model → select → execute → stepEnd)", async () => {
+    // A shared trace records both the event stream and the dispatcher
+    // callbacks, so relative ordering across the two is asserted directly.
+    const trace: string[] = [];
+    const events: LogEvent[] = [];
+    const deps: LoopDeps = {
+      task: "test task",
+      navigatorCall: vi.fn(async () => ({
+        raw: JSON.stringify({
+          thinking: "x",
+          evaluation_previous_goal: "y",
+          memory: "z",
+          next_goal: "w",
+          action: [{ type: "click", index: 1 } as AgentAction],
+        }),
+      })),
+      plannerCall: vi.fn(async () => ({
+        raw: JSON.stringify({
+          thinking: "x",
+          decision: "continue",
+          plan: ["a"],
+          next_goal: "g",
+        }),
+      })),
+      getTabs: vi.fn(async () => [
+        { id: 1, label: "1", url: "https://example.com", title: "t", active: true },
+      ]),
+      extractState: vi.fn(async () => makeState()),
+      executeActions: vi.fn(async (actions: AgentAction[]) => {
+        trace.push("executeActions");
+        return actions.map((action) => ({ action, success: true, message: "ok" } as ActionResult));
+      }),
+      callbacks: [{
+        onStepStart: () => { trace.push("stepStart"); },
+        onStepEnd: () => { trace.push("stepEnd"); },
+      }],
+      onEvent: (e: LogEvent) => {
+        trace.push(`event:${e.type}`);
+        events.push(e);
+      },
+      settleDelay: 0,
+      config: {
+        ...BASE_CONFIG,
+        maxSteps: 2,
+        enableEarlyStop: false,
+      },
+    };
+
+    await runAgentLoop(deps);
+
+    // The first step's phase sequence, in order: step-start event and
+    // callback, then the observe `state` event, then the `thinking` event
+    // (action selection), then execution, then the step-end callback.
+    const firstStepStart = trace.indexOf("event:navigator-step-start");
+    expect(firstStepStart).toBeGreaterThan(-1);
+    expect(trace.indexOf("event:run-start")).toBeLessThan(firstStepStart);
+    const stepStartCb = trace.indexOf("stepStart");
+    const stateEvt = trace.indexOf("event:state");
+    const thinkingEvt = trace.indexOf("event:thinking");
+    const exec = trace.indexOf("executeActions");
+    const stepEndCb = trace.indexOf("stepEnd");
+    const secondStepStart = trace.indexOf("event:navigator-step-start", firstStepStart + 1);
+
+    expect(stepStartCb).toBeGreaterThan(firstStepStart);
+    expect(stateEvt).toBeGreaterThan(stepStartCb);
+    expect(thinkingEvt).toBeGreaterThan(stateEvt);
+    expect(exec).toBeGreaterThan(thinkingEvt);
+    expect(stepEndCb).toBeGreaterThan(exec);
+    // The next step starts only after the current step's end callback.
+    expect(secondStepStart).toBeGreaterThan(stepEndCb);
+  });
+});
+
+// ─── Exit paths through the unified finish helpers ──────────────────────────
+//
+// The pre-rewrite `runNavigatorStep` copy-pasted its terminal exit blocks
+// (fatal error, user stop, max-failures, takeover timeout, challenge timeout).
+// Those were unified into `exitWithFinish` / `exitStoppedByUser` helpers. Each
+// test below drives runAgentLoop into ONE of those exits and asserts the exact
+// terminal `done` text, so a future re-inlining that changes the exit outcome
+// is caught.
+
+describe("runAgentLoop — fatal error exit (exitWithFinish)", () => {
+  test("auth-classified navigator error terminates with 'Fatal error (auth): …'", async () => {
+    const events: LogEvent[] = [];
+    const deps: LoopDeps = {
+      task: "test task",
+      navigatorCall: vi.fn(async () => {
+        throw new Error("401 unauthorized");
+      }),
+      plannerCall: vi.fn(async () => ({
+        raw: JSON.stringify({
+          thinking: "x",
+          decision: "continue",
+          plan: ["a"],
+          next_goal: "g",
+        }),
+      })),
+      getTabs: vi.fn(async () => [
+        { id: 1, label: "1", url: "https://example.com", title: "t", active: true },
+      ]),
+      extractState: vi.fn(async () => makeState()),
+      onEvent: (e: LogEvent) => { events.push(e); },
+      settleDelay: 0,
+      config: { ...BASE_CONFIG },
+    };
+
+    await runAgentLoop(deps);
+
+    const doneEvents = events.filter((e) => e.type === "done");
+    expect(doneEvents).toHaveLength(1);
+    expect(doneEvents[0]).toMatchObject({ type: "done", success: false, step: 0 });
+    expect(doneEvents[0].text).toBe("Fatal error (auth): 401 unauthorized");
+  });
+});
+
+describe("runAgentLoop — user-stop exit (exitStoppedByUser)", () => {
+  test("cancelled-classified navigator error terminates with 'Agent stopped by user.'", async () => {
+    const events: LogEvent[] = [];
+    const deps: LoopDeps = {
+      task: "test task",
+      navigatorCall: vi.fn(async () => {
+        throw new Error("request cancelled by user");
+      }),
+      plannerCall: vi.fn(async () => ({
+        raw: JSON.stringify({
+          thinking: "x",
+          decision: "continue",
+          plan: ["a"],
+          next_goal: "g",
+        }),
+      })),
+      getTabs: vi.fn(async () => [
+        { id: 1, label: "1", url: "https://example.com", title: "t", active: true },
+      ]),
+      extractState: vi.fn(async () => makeState()),
+      onEvent: (e: LogEvent) => { events.push(e); },
+      settleDelay: 0,
+      config: { ...BASE_CONFIG },
+    };
+
+    await runAgentLoop(deps);
+
+    const doneEvents = events.filter((e) => e.type === "done");
+    expect(doneEvents).toHaveLength(1);
+    expect(doneEvents[0]).toMatchObject({ type: "done", success: false, step: 0 });
+    expect(doneEvents[0].text).toBe("Agent stopped by user.");
+  });
+});
+
+describe("runAgentLoop — max-failures exit (exitWithFinish)", () => {
+  test("repeated retryable navigator errors abort at maxFailures with the failure count", async () => {
+    const events: LogEvent[] = [];
+    const MAX_FAILURES = 2;
+    const deps: LoopDeps = {
+      task: "test task",
+      navigatorCall: vi.fn(async () => {
+        // A retryable (non-fatal, non-cancelled) error every attempt.
+        throw new Error("500 internal server error");
+      }),
+      plannerCall: vi.fn(async () => ({
+        raw: JSON.stringify({
+          thinking: "x",
+          decision: "continue",
+          plan: ["a"],
+          next_goal: "g",
+        }),
+      })),
+      getTabs: vi.fn(async () => [
+        { id: 1, label: "1", url: "https://example.com", title: "t", active: true },
+      ]),
+      extractState: vi.fn(async () => makeState()),
+      onEvent: (e: LogEvent) => { events.push(e); },
+      settleDelay: 0,
+      config: {
+        ...BASE_CONFIG,
+        maxFailures: MAX_FAILURES,
+        // Keep the loop-detector/early-stop layers from terminating the run
+        // before the max-failures counter does — this test isolates the
+        // consecutive-failure exit.
+        enableLoopDetection: false,
+        enableEarlyStop: false,
+      },
+    };
+
+    await runAgentLoop(deps);
+
+    const doneEvents = events.filter((e) => e.type === "done");
+    expect(doneEvents).toHaveLength(1);
+    expect(doneEvents[0]).toMatchObject({ type: "done", success: false });
+    expect(doneEvents[0].text).toBe(
+      `Agent aborted after ${MAX_FAILURES} consecutive failures. Last error: 500 internal server error`,
+    );
+    // Both failing attempts ran before the abort (step 0 and step 1).
+    expect(deps.navigatorCall).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("runAgentLoop — takeover timeout exit (exitWithFinish)", () => {
+  test("takeover action with a never-resuming requestTakeoverResume times out", async () => {
+    const events: LogEvent[] = [];
+    const deps: LoopDeps = {
+      task: "test task",
+      navigatorCall: vi.fn(async () => ({
+        raw: JSON.stringify({
+          thinking: "x",
+          evaluation_previous_goal: "y",
+          memory: "z",
+          next_goal: "w",
+          action: [{ type: "takeover", reason: "login required" } as AgentAction],
+        }),
+      })),
+      plannerCall: vi.fn(async () => ({
+        raw: JSON.stringify({
+          thinking: "x",
+          decision: "continue",
+          plan: ["a"],
+          next_goal: "g",
+        }),
+      })),
+      getTabs: vi.fn(async () => [
+        { id: 1, label: "1", url: "https://example.com", title: "t", active: true },
+      ]),
+      extractState: vi.fn(async () => makeState()),
+      executeActions: vi.fn(async (actions: AgentAction[]) =>
+        actions.map((action) => ({ action, success: true, message: "ok" } as ActionResult)),
+      ),
+      // The resume override never succeeds → the wait resolves as "timeout".
+      requestTakeoverResume: vi.fn(async () => {
+        throw new Error("no resume available");
+      }),
+      onEvent: (e: LogEvent) => { events.push(e); },
+      settleDelay: 0,
+      config: { ...BASE_CONFIG },
+    };
+
+    await runAgentLoop(deps);
+
+    const doneEvents = events.filter((e) => e.type === "done");
+    expect(doneEvents).toHaveLength(1);
+    expect(doneEvents[0]).toMatchObject({ type: "done", success: false });
+    expect(doneEvents[0].text).toBe("Timed out waiting for user takeover.");
+  });
+});
+
+describe("runAgentLoop — anti-bot challenge timeout exit (exitWithFinish)", () => {
+  test("an unresolved challenge with a never-resuming takeover times out", async () => {
+    const events: LogEvent[] = [];
+    const deps: LoopDeps = {
+      task: "test task",
+      navigatorCall: vi.fn(async () => ({
+        raw: JSON.stringify({
+          thinking: "x",
+          evaluation_previous_goal: "y",
+          memory: "z",
+          next_goal: "w",
+          action: [{ type: "click", index: 1 } as AgentAction],
+        }),
+      })),
+      plannerCall: vi.fn(async () => ({
+        raw: JSON.stringify({
+          thinking: "x",
+          decision: "continue",
+          plan: ["a"],
+          next_goal: "g",
+        }),
+      })),
+      getTabs: vi.fn(async () => [
+        { id: 1, label: "1", url: "https://example.com", title: "t", active: true },
+      ]),
+      extractState: vi.fn(async () => makeState()),
+      executeActions: vi.fn(async (actions: AgentAction[]) =>
+        actions.map((action) => ({ action, success: true, message: "ok" } as ActionResult)),
+      ),
+      // A challenge is detected but never resolves within the wait window.
+      detectChallenge: vi.fn(async () => ({ kind: "captcha", message: "verify you are human" })),
+      requestTakeoverResume: vi.fn(async () => {
+        throw new Error("no resume available");
+      }),
+      onEvent: (e: LogEvent) => { events.push(e); },
+      settleDelay: 0,
+      config: { ...BASE_CONFIG },
+    };
+
+    await runAgentLoop(deps);
+
+    const doneEvents = events.filter((e) => e.type === "done");
+    expect(doneEvents).toHaveLength(1);
+    expect(doneEvents[0]).toMatchObject({ type: "done", success: false });
+    expect(doneEvents[0].text).toBe("Timed out waiting for anti-bot challenge to resolve.");
   });
 });

@@ -99,7 +99,24 @@ export async function readErrorBodyPreview(res: Response): Promise<string> {
   let total = 0;
   try {
     while (total < cap) {
-      const { done, value } = await reader.read();
+      // Stall guard: an upstream that accepts the request and then goes silent
+      // on the error body would otherwise hang the retry callback past the
+      // whole retry budget. Race every chunk against the same per-chunk
+      // timeout the stream path uses and bail out with an empty preview — the
+      // error message then carries just the status, and the empty string can
+      // never match retry.ts's retryable network regex.
+      const readPromise = reader.read();
+      const chunk = await Promise.race([
+        readPromise,
+        new Promise<"__stalled__">((resolve) => {
+          setTimeout(() => {
+            void readPromise.then(() => reader.cancel().catch(() => {}));
+            resolve("__stalled__");
+          }, CHUNK_TIMEOUT_MS);
+        }),
+      ]);
+      if (chunk === "__stalled__") return "";
+      const { done, value } = chunk;
       if (done) break;
       total += value.byteLength;
       out += decoder.decode(value, { stream: true });

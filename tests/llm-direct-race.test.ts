@@ -34,6 +34,8 @@ vi.mock("../src/extension/provider-config", () => ({
     h.readCallIndex++;
     return h.configs[idx % h.configs.length];
   },
+  resolveModel: (cfg: { provider?: string; model?: string; catalogId?: string }) =>
+    cfg.model ?? "resolved-default",
   buildProvider: async (cfg: { provider: string; apiKey: string; model: string }) => {
     const idx = h.buildConfigs.length;
     h.buildConfigs.push(cfg.provider);
@@ -44,9 +46,11 @@ vi.mock("../src/extension/provider-config", () => ({
       supportsStructuredOutput: true,
       supportsVision: false,
       supportsReasoning: false,
+      // The raw content is passed through untouched by navigatorCallDirect, so
+      // embedding the config's provider id lets tests observe WHICH provider
+      // instance served a call (cache-hit calls reuse the committed provider).
       chat: async () => ({
-        content:
-          '{"action":{"type":"done","summary":"ok"},"evaluation":"ok","memory":"ok","goal":"ok","results":[]}',
+        content: JSON.stringify({ provider: cfg.provider }),
       }),
     };
   },
@@ -139,6 +143,13 @@ describe("provider cache race condition", () => {
 
     // The last-to-build should be config B (the slow one)
     expect(h.buildConfigs[h.buildConfigs.length - 1]).toBe("anthropic");
+
+    // The committed cache must match the last-to-resolve config (B): a third
+    // call hits the hot path — no new build, and the provider serving it is
+    // the one built from config B.
+    const r3 = await navigatorCallDirect(makeRequest());
+    expect(h.buildConfigs).toHaveLength(2);
+    expect(JSON.parse(r3.raw).provider).toBe("anthropic");
   });
 
   test("slow config resolves last and wins the cache", async () => {
@@ -155,6 +166,12 @@ describe("provider cache race condition", () => {
 
     // Both were built
     expect(h.buildConfigs).toEqual(["openai", "anthropic"]);
+
+    // The cache committed the slow config: a third call reuses it without a
+    // new build (the exact property the file's header claims the test locks).
+    const r3 = await navigatorCallDirect(makeRequest());
+    expect(h.buildConfigs).toEqual(["openai", "anthropic"]);
+    expect(JSON.parse(r3.raw).provider).toBe("anthropic");
   });
 
   test("same config concurrent calls reuse the in-flight build (pendingProviders)", async () => {
@@ -176,5 +193,11 @@ describe("provider cache race condition", () => {
 
     // Only ONE build should have been triggered (the second reused the in-flight).
     expect(h.buildConfigs).toEqual(["openai"]);
+
+    // The committed provider is that single build; a third call short-circuits
+    // the cache without rebuilding or re-reading the config.
+    const r3 = await navigatorCallDirect(makeRequest());
+    expect(h.buildConfigs).toEqual(["openai"]);
+    expect(JSON.parse(r3.raw).provider).toBe("openai");
   });
 });

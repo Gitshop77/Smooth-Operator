@@ -90,15 +90,17 @@ export async function handleEvaluate(
     // The ONE thing we must prevent is egress of the extension secret store,
     // which lives in `chrome.storage.session` (key "open_cowork_secrets", see
     // secrets.ts). The sandbox/proxy hardening in evaluate-utils.ts
-    // (`runSandboxedCode`) denies `chrome`, `Function`, `eval`, and the
-    // window/document traversal paths to the real extension globals; its
+    // (`runSandboxedCode`) denies `chrome`, `Function`, `eval`, `atob`/`btoa`,
+    // and the window/document traversal paths (including the free identifiers
+    // `parent`/`top`/`frames`/`opener`) to the real extension globals; its
     // docblock documents the threat model and the known residual bypasses
     // (obfuscated Function-constructor escapes,
-    // `<anyNode>.ownerDocument.defaultView.chrome`). Those are caught by the
-    // MV3 platform restriction that keeps `chrome.storage.session`
-    // unreachable from content-script scope (the extension never calls
-    // `setAccessLevel`) — the real mitigation is architectural (keep the
-    // secret store in the background SW). The proxy hardening here is
+    // `<anyNode>.ownerDocument.defaultView.chrome`). The `chrome.storage.session`
+    // secret store is additionally unreachable from content-script scope (the
+    // extension never calls `setAccessLevel`), and the remembered api-key
+    // mirror (chrome.storage.local, content-script-readable by design — the
+    // "remember on this device" feature) is protected only by the sandbox
+    // denial above, not by platform restrictions. The proxy hardening is
     // defense-in-depth, NOT a security boundary — do not rely on this handler
     // for confidentiality.
     const syncResult = runSandboxedCode(code);
@@ -125,8 +127,16 @@ export async function handleEvaluate(
     // detector (every `evaluate` reset the repetition window, so page-changing
     // actions could never accumulate) and forced a full DOM re-extract every
     // step. Wrapped in try/catch so a fingerprint failure can't mask a
-    // successful evaluation.
-    const pageChanged = hasPageChanged(ctx);
+    // successful evaluation (the evaluated code can navigate the page while
+    // the fingerprint runs, detaching nodes mid-walk).
+    let pageChanged = false;
+    try {
+      pageChanged = hasPageChanged(ctx);
+    } catch {
+      // Fingerprint failures are diagnostic noise, not action failures —
+      // default to "no change" rather than failing the evaluation.
+      pageChanged = false;
+    }
     return {
       action,
       success: true,

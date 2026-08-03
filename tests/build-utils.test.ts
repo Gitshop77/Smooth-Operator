@@ -103,6 +103,34 @@ describe("stripConsoleDebug", () => {
     const src = "const s = `${a} and ${b}`; console.log(s);";
     expect(stripConsoleDebug(src)).toBe("const s = `${a} and ${b}`; void (s);");
   });
+
+  it("rewrites console.log inside a template interpolation", () => {
+    const src = "const s = `${console.log(x)}`;";
+    expect(stripConsoleDebug(src)).toBe("const s = `${void (x)}`;");
+  });
+
+  it("leaves console.log( inside a block comment intact", () => {
+    const out = stripConsoleDebug("/* console.log(x) */");
+    expect(out).toContain("/* console.log(x) */");
+    expect(out).not.toContain("void (");
+  });
+
+  // A leading spread argument would become `void (...args)` — a SyntaxError —
+  // so the original call must survive verbatim.
+  it("leaves a leading-spread call untouched", () => {
+    expect(stripConsoleDebug("console.log(...args);")).toBe("console.log(...args);");
+  });
+
+  // Documented hazard: a mid-spread argument rewrites to `void (a, ...b)`,
+  // which is a SyntaxError at build time. No first-party source hits this
+  // today, so the rewrite is pinned as-is rather than attempting a scope-aware
+  // fix (the scanner is textual, not an AST walk).
+  it("rewrites a mid-spread call (documented SyntaxError hazard)", () => {
+    expect(stripConsoleDebug("console.log(a, ...b);")).toBe("void (a, ...b);");
+    expect(stripConsoleDebug('console.debug("prefix", ...rest);')).toBe(
+      'void ("prefix", ...rest);',
+    );
+  });
 });
 
 describe("lintManifestPermissions", () => {
@@ -125,7 +153,7 @@ describe("lintManifestPermissions", () => {
 
   const BASELINE = {
     permissions: ["debugger", "scripting", "tabs"],
-    host_permissions: ["<all_urls>"],
+    host_permissions: ["http://*/*", "https://*/*"],
     optional_permissions: [],
   };
 
@@ -135,10 +163,23 @@ describe("lintManifestPermissions", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
+  it("warns on a universal host pattern beyond the reviewed baseline", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    lintManifestPermissions(
+      writeManifest({
+        ...BASELINE,
+        host_permissions: ["http://*/*", "https://*/*", "<all_urls>"],
+      }),
+    );
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("universal host_permissions");
+    expect(warn.mock.calls[0][0]).toContain("<all_urls>");
+  });
+
   it("warns on a newly-added high-risk permission", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     lintManifestPermissions(
-      writeManifest({ ...BASELINE, permissions: ["debugger", "scripting", "tabs", "cookies"] }),
+      writeManifest({ ...BASELINE, permissions: ["debugger", "scripting", "tabs", "history"] }),
     );
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0][0]).toContain("NEW high-risk");
@@ -150,10 +191,29 @@ describe("lintManifestPermissions", () => {
       lintManifestPermissions(
         writeManifest({
           ...BASELINE,
-          optional_permissions: ["cookies"],
+          optional_permissions: ["history"],
         }),
       ),
     ).toThrow(/NEW high-risk/);
+  });
+
+  it("throws on a new universal host pattern when MANIFEST_LINT_FAIL_HIGH_RISK=1", () => {
+    process.env.MANIFEST_LINT_FAIL_HIGH_RISK = "1";
+    expect(() =>
+      lintManifestPermissions(
+        writeManifest({
+          ...BASELINE,
+          host_permissions: ["http://*/*", "https://*/*", "<all_urls>"],
+        }),
+      ),
+    ).toThrow(/NEW high-risk/);
+  });
+
+  it("the shipped source manifest passes under MANIFEST_LINT_FAIL_HIGH_RISK=1", () => {
+    // The CI gate: the REAL manifest (default path) must not trip the
+    // fail-closed mode — a regression here breaks CI, not just a warning.
+    process.env.MANIFEST_LINT_FAIL_HIGH_RISK = "1";
+    expect(() => lintManifestPermissions()).not.toThrow();
   });
 
   it("fails closed on a malformed manifest", () => {

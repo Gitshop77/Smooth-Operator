@@ -40,6 +40,13 @@ export async function handleSaveAsPdf(
       message: `save_as_pdf failed: invalid file_name — ${fileNameError}`,
     };
   }
+  // Normalize the extension: this handler ALWAYS captures PDF, so a supplied
+  // name like "report.png" must not save PDF bytes under a `.png` name (the
+  // SW's captureAndDownload uses the raw name when non-empty). Strip any
+  // trailing extension and force `.pdf` — mirror of screenshot.ts's `.jpg`
+  // enforcement. A bare name ("report") also gets `.pdf` appended; the
+  // validateFileName length checks above already ran against the raw name.
+  const pdfName = file_name ? file_name.replace(/\.[^.]*$/, "") + ".pdf" : file_name;
   if (!isExtensionContext()) {
     return {
       action,
@@ -62,7 +69,7 @@ export async function handleSaveAsPdf(
     try {
       raw = await Promise.race([
         chrome.runtime
-          .sendMessage({ type: "SAVE_AS_PDF", fileName: file_name })
+          .sendMessage({ type: "SAVE_AS_PDF", fileName: pdfName })
           .catch((e) => { console.debug("[save_as_pdf] SW rejected:", e); return undefined; }),
         new Promise<undefined>((resolve) => {
           timer = setTimeout(() => resolve(undefined), SAVE_AS_PDF_TIMEOUT_MS);

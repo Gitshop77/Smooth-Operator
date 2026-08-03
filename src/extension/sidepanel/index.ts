@@ -16,6 +16,7 @@ import "./controls";
 import "./takeover";
 import "./human-interact";
 import "./lifecycle";
+import "./usage-panel";
 
 // ─── Port-based service-worker keepalive ──────────────────────────────────
 
@@ -29,6 +30,10 @@ function connectKeepalivePort(): void {
     const port = chrome.runtime.connect({ name: "keepalive" });
     keepaliveDelay = 1000;
     port.onDisconnect.addListener(() => {
+      // Back off on disconnect-driven reconnects too — a flapping port
+      // should not reconnect every second indefinitely (matches the catch
+      // path below).
+      keepaliveDelay = Math.min(keepaliveDelay * 2, KEEPALIVE_MAX_DELAY);
       reconnectTimer = setTimeout(connectKeepalivePort, keepaliveDelay);
     });
   } catch {

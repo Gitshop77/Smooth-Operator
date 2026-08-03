@@ -76,11 +76,13 @@ export function coerceJudgement(parsed: Record<string, unknown>): JudgementResul
   if (parsed.verdict == null) {
     return null;
   }
+  // Advisory flags default to false when the judge LLM omits them — they are
+  // informational only, so a missing flag is not worth a warning per call.
   const impossibleTask = parsed.impossibleTask == null
-    ? (console.warn("[judge] coerceJudgement: missing `impossibleTask`; defaulting to false."), false)
+    ? false
     : TRUTHY_BOOLEANS.has(parsed.impossibleTask);
   const reachedCaptcha = parsed.reachedCaptcha == null
-    ? (console.warn("[judge] coerceJudgement: missing `reachedCaptcha`; defaulting to false."), false)
+    ? false
     : TRUTHY_BOOLEANS.has(parsed.reachedCaptcha);
   const verdict = TRUTHY_BOOLEANS.has(parsed.verdict);
   return {

@@ -1,6 +1,9 @@
 import type { AgentMode } from "@/lib/agent/modes";
 import { MODE_CONFIGS } from "@/lib/agent/modes";
 import type { AgentAction } from "@/lib/agent/types";
+import type { ConsoleLogEntry } from "@/lib/agent/dom/console-capture";
+
+export type { ConsoleLogEntry } from "@/lib/agent/dom/console-capture";
 
 export const KNOWN_MODES = new Set(Object.keys(MODE_CONFIGS) as AgentMode[]);
 
@@ -44,6 +47,38 @@ export interface DetectVisualMessage {
   type: "DETECT_VISUAL";
   query: string;
 }
+/** One captured network-log entry (SW-side ring, mirrored to the agent). */
+export interface NetworkLogRequestEntry {
+  type: "request";
+  url: string;
+  method: string;
+  resource_type: string;
+  /** Epoch ms when the request was observed. */
+  timestamp: number;
+}
+export interface NetworkLogResponseEntry {
+  type: "response";
+  url: string;
+  status: number;
+  /** Epoch ms when the response completed. */
+  timestamp: number;
+}
+export type NetworkLogEntry = NetworkLogRequestEntry | NetworkLogResponseEntry;
+export type NetworkLogVerb = "enable" | "disable" | "get" | "clear" | "getclear";
+export interface NetworkLogMessage {
+  type: "NETWORK_LOG";
+  verb: NetworkLogVerb;
+}
+export type ConsoleLogVerb = "enable" | "disable" | "get" | "clear" | "getclear";
+export interface ConsoleLogMessage {
+  type: "CONSOLE_LOG";
+  verb: ConsoleLogVerb;
+}
+/** One captured console call relayed from the MAIN-world capture (content side). */
+export interface ConsoleLogEntryMessage {
+  type: "CONSOLE_LOG_ENTRY";
+  entry: ConsoleLogEntry;
+}
 interface ClearVisionCacheMessage {
   type: "CLEAR_VISION_CACHE";
 }
@@ -57,4 +92,7 @@ export type IncomingMessage =
   | ScreenshotMessage
   | TabActionMessage
   | DetectVisualMessage
+  | NetworkLogMessage
+  | ConsoleLogMessage
+  | ConsoleLogEntryMessage
   | ClearVisionCacheMessage;

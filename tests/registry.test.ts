@@ -15,6 +15,8 @@
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { installLocalStorageStub, restoreLocalStorageStub } from "./helpers";
+import { CUSTOM_TOOLS_STORAGE_KEY } from "../src/lib/agent/tools/registry-data";
+import { MAX_SUBSTITUTION_RESULT_LENGTH } from "../src/lib/agent/tools/registry-data";
 
 // `registry` caches custom tools at module scope and (in jsdom, with no
 // `chrome.storage`) reads them from localStorage on first load. To vary the
@@ -127,6 +129,32 @@ describe("substituteCustomToolCalls", () => {
     const out = await reg.substituteCustomToolCalls(call);
     expect(out).toBe(call);
   });
+
+  test("blocks a substitution that would push the result past the length cap", async () => {
+    // The tool body is huge relative to a short caller: expanding it would
+    // exceed MAX_SUBSTITUTION_RESULT_LENGTH, so the call must stay verbatim —
+    // the oversized body must NOT be injected into the evaluate payload.
+    const bigBody = "return " + JSON.stringify("x".repeat(MAX_SUBSTITUTION_RESULT_LENGTH));
+    const reg = await loadRegistryWith([
+      { name: "big", description: "b", code: bigBody },
+    ]);
+    const call = "__opencowork_custom_tool('big')";
+    const out = await reg.substituteCustomToolCalls(call);
+    expect(out).toContain(call);
+    expect(out).not.toContain("xxxx");
+  });
+
+  test("reverts to the ORIGINAL code when the caller itself exceeds the cap", async () => {
+    // A caller payload over the cap: the per-call substitution check blocks
+    // expansion, and the post-pass cap check returns the input byte-for-byte
+    // (never a partially-substituted blob that would silently drop the call).
+    const caller = "x".repeat(MAX_SUBSTITUTION_RESULT_LENGTH + 100) + "__opencowork_custom_tool('small')";
+    const reg = await loadRegistryWith([
+      { name: "small", description: "s", code: "return 1;" },
+    ]);
+    const out = await reg.substituteCustomToolCalls(caller);
+    expect(out).toBe(caller);
+  });
 });
 
 describe("sanitizeToolDescription (via formatCustomToolsBlock)", () => {
@@ -146,6 +174,35 @@ describe("sanitizeToolDescription (via formatCustomToolsBlock)", () => {
     expect(block.trimEnd().endsWith("</custom_tools>")).toBe(true);
     expect(block).toContain("FAKE INSTRUCTION");
   });
+
+  test("renders at most MAX_CUSTOM_TOOLS_BLOCK tools and notes the omitted count", async () => {
+    // 60 tools is over the UI's 50-tool cap (the prompt must not balloon).
+    const tools = Array.from({ length: 60 }, (_, i) => ({
+      name: `tool_${i}`,
+      description: `desc ${i}`,
+      code: "1",
+    }));
+    const reg = await loadRegistryWith(tools);
+    const block = await reg.formatCustomToolsBlock();
+    // Exactly 50 advertised tools (plus the "N more" line), never 60 lines.
+    expect(block.match(/^- /gm)?.length).toBe(51); // 50 tools + 1 notice
+    expect(block).toContain("10 more custom tool(s) not listed");
+    expect(block).toContain("tool_0");
+    expect(block).not.toContain("tool_59");
+  });
+
+  test("under the cap, every tool is listed and no notice appears", async () => {
+    const tools = Array.from({ length: 3 }, (_, i) => ({
+      name: `tool_${i}`,
+      description: `desc ${i}`,
+      code: "1",
+    }));
+    const reg = await loadRegistryWith(tools);
+    const block = await reg.formatCustomToolsBlock();
+    expect(block).toContain("tool_0");
+    expect(block).toContain("tool_2");
+    expect(block).not.toContain("more custom tool(s) not listed");
+  });
 });
 
 describe("CUSTOM_TOOL_CALL_REGEX / CUSTOM_TOOL_NAME_REGEX sync", () => {
@@ -164,5 +221,56 @@ describe("CUSTOM_TOOL_CALL_REGEX / CUSTOM_TOOL_NAME_REGEX sync", () => {
     );
     expect(out).toContain("(42");
     expect(out).not.toContain("__opencowork_custom_tool(");
+  });
+});
+
+describe("custom-tools cache invalidation on the localStorage path", () => {
+  test("a storage event for the custom-tools key invalidates the cached block", async () => {
+    // First import: cache is primed with the "first" tool.
+    const reg = await loadRegistryWith([
+      { name: "first", description: "d1", code: "1" },
+    ]);
+    expect(await reg.formatCustomToolsBlock()).toContain("first");
+
+    // A second context (another tab) edits the store; only a `storage` event
+    // reaches this context. The listener must drop the stale cache so the
+    // next read sees the new tool set.
+    localStorage.setItem(
+      CUSTOM_TOOLS_STORAGE_KEY,
+      JSON.stringify([{ name: "second", description: "d2", code: "2" }]),
+    );
+    window.dispatchEvent(
+      new StorageEvent("storage", { key: CUSTOM_TOOLS_STORAGE_KEY }),
+    );
+
+    const block = await reg.formatCustomToolsBlock();
+    expect(block).toContain("second");
+    expect(block).not.toContain("first");
+  });
+
+  test("a storage event with key null (localStorage.clear) also invalidates", async () => {
+    const reg = await loadRegistryWith([
+      { name: "cleared", description: "d", code: "1" },
+    ]);
+    expect(await reg.formatCustomToolsBlock()).toContain("cleared");
+
+    localStorage.clear();
+    window.dispatchEvent(new StorageEvent("storage", { key: null }));
+
+    // Cache dropped → re-read finds nothing → empty block (no stale tools).
+    expect(await reg.formatCustomToolsBlock()).toBe("");
+  });
+
+  test("a storage event for an UNRELATED key leaves the cache untouched", async () => {
+    const reg = await loadRegistryWith([
+      { name: "kept", description: "d", code: "1" },
+    ]);
+    expect(await reg.formatCustomToolsBlock()).toContain("kept");
+
+    localStorage.setItem("some_other_key", "value");
+    window.dispatchEvent(new StorageEvent("storage", { key: "some_other_key" }));
+
+    // Still the cached (stale-but-valid) block — no spurious invalidation.
+    expect(await reg.formatCustomToolsBlock()).toContain("kept");
   });
 });

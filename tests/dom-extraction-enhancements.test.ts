@@ -8,6 +8,15 @@
  * `tests/extractor.test.ts` so the extractor's visibility checks don't reject
  * every element.
  *
+ * NOTE: `pierceShadowRoots` and the propagation/containment helpers
+ * (`isPropagatingElement`, `containmentRatio`, `isContained`,
+ * `nearestPropagatingAncestor`, `shouldExcludeAsContained`,
+ * `PROPAGATING_ELEMENTS`) are intentionally TEST-ONLY utilities — they have
+ * no production call sites (see the module docs in
+ * `utils/classification.ts` and `annotation/shadow-piercer.ts`, which
+ * declare them test-only). These tests deliberately pin their behavior; do
+ * not treat them as live production APIs.
+ *
  * Run with: `npx vitest run tests/dom-extraction-enhancements.test.ts`
  */
 
@@ -432,5 +441,103 @@ describe("screenshot-annotator: ref-keyed labels + minSize + palette", () => {
     };
     expect(el.index).toBe(7);
     expect(el.rect.width).toBe(100);
+  });
+});
+
+// ─── extractBrowserState tab redaction ──────────────────────────────────────
+
+describe("extractBrowserState: tab URLs are redacted at the boundary", () => {
+  test("OAuth/session query tokens in tab URLs never reach BrowserState.tabs", () => {
+    const tabs: TabInfo[] = [
+      {
+        id: 1,
+        label: "1",
+        url: "https://oauth.example.com/callback?code=SECRET123&state=xyz",
+        title: "OAuth",
+        active: true,
+      },
+    ];
+    const state = extractBrowserState(tabs);
+    expect(state.tabs[0].url).toBe("https://oauth.example.com/callback");
+    expect(state.tabs[0].url).not.toContain("SECRET123");
+    // Non-URL fields pass through untouched.
+    expect(state.tabs[0].id).toBe(1);
+    expect(state.tabs[0].title).toBe("OAuth");
+  });
+
+  test("clean tab URLs pass through unchanged", () => {
+    const state = extractBrowserState(MOCK_TABS);
+    // The WHATWG URL parser normalizes a bare host to include the trailing
+    // slash — that normalization is unrelated to redaction.
+    expect(state.tabs[0].url).toBe("https://example.com/");
+  });
+});
+
+// ─── visibility across shadow boundaries ────────────────────────────────────
+
+describe("isVisibleFull crosses shadow boundaries", () => {
+  test("an opacity:0 host hides shadow-DOM content", () => {
+    const host = document.createElement("div");
+    host.style.opacity = "0";
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: "open" });
+    const btn = document.createElement("button");
+    shadow.appendChild(btn);
+
+    // The identical light-DOM structure reports visible=false…
+    expect(isVisibleFull(host)).toBe(false);
+    // …and shadow-DOM content must inherit the host's invisibility instead
+    // of stopping the ancestor walk at the shadow boundary.
+    expect(isVisibleFull(btn)).toBe(false);
+  });
+
+  test("an aria-hidden ancestor inside the shadow tree hides content", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: "open" });
+    const wrapper = document.createElement("div");
+    wrapper.setAttribute("aria-hidden", "true");
+    const btn = document.createElement("button");
+    wrapper.appendChild(btn);
+    shadow.appendChild(wrapper);
+
+    expect(isVisibleFull(btn)).toBe(false);
+  });
+
+  test("aria-hidden is matched case-insensitively per the ARIA spec", () => {
+    const parent = document.createElement("div");
+    parent.setAttribute("aria-hidden", "True");
+    document.body.appendChild(parent);
+    const child = document.createElement("button");
+    parent.appendChild(child);
+
+    expect(isVisibleFull(child)).toBe(false);
+  });
+});
+
+// ─── nearestPropagatingAncestor across shadow boundaries ────────────────────
+
+describe("nearestPropagatingAncestor crosses shadow boundaries", () => {
+  test("finds a propagating host when the element's parentNode is a ShadowRoot", () => {
+    // jsdom rejects <button>/<a> as shadow hosts, so use a div[role=button]
+    // (a propagating pattern per the PROPAGATING_ELEMENTS taxonomy).
+    const host = document.createElement("div");
+    host.setAttribute("role", "button");
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: "open" });
+    const inner = document.createElement("div");
+    shadow.appendChild(inner);
+
+    // `el.parentElement` is null here (parentNode is the ShadowRoot), so the
+    // walk must seed from parentNode and hop ShadowRoot → host.
+    expect(nearestPropagatingAncestor(inner)).toBe(host);
+  });
+
+  test("light-DOM propagation is unaffected", () => {
+    const button = document.createElement("button");
+    document.body.appendChild(button);
+    const span = document.createElement("span");
+    button.appendChild(span);
+    expect(nearestPropagatingAncestor(span)).toBe(button);
   });
 });

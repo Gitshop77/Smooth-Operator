@@ -1,77 +1,129 @@
 /**
- * state-store.ts — hardResetAbortRequested error handling.
+ * state-store.ts — saveRunState write-failure resilience.
  *
- * Verify that hardResetAbortRequested doesn't throw when storage fails,
- * and that the error is logged. Also verify that a stale abortRequested: true
- * flag can be cleared even when storage is unreliable.
+ * `saveRunState` must not let the optimistic cache diverge from storage: if
+ * `chrome.storage.session.set` throws, the cache is cleared (so the abort
+ * listener — which reads via `getRunState` — never sees state storage never
+ * received) and the error propagates to the caller.
  */
 
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
-import { hardResetAbortRequested, getRunState } from "../src/extension/background/state-store";
+import { clearRunState, getRunState, saveRunState, RUN_STATE_KEY } from "../src/extension/background/state-store";
 
-function installFailingSessionStub() {
-  const chrome = {
-    storage: {
-      session: {
-        get: vi.fn(async () => {
-          throw new Error("storage unavailable");
-        }),
-        set: vi.fn(async () => {
-          throw new Error("storage unavailable");
-        }),
-        remove: vi.fn(async () => {
-          throw new Error("storage unavailable");
-        }),
-      },
-    },
-    alarms: {
-      create: vi.fn(),
-      clear: vi.fn(),
-    },
-  };
-  (globalThis as Record<string, unknown>).chrome = chrome;
-  return { chrome };
+interface SessionStub {
+  get: ReturnType<typeof vi.fn>;
+  set: ReturnType<typeof vi.fn>;
+  remove: ReturnType<typeof vi.fn>;
 }
 
-let restore: () => void;
+/**
+ * Session stub that stores run state under RUN_STATE_KEY (the shape
+ * `getRunState` actually reads). `getImpl`/`setImpl` let a test simulate
+ * storage failures; a successful set commits the value.
+ */
+function installSessionStub(opts: {
+  initial?: Record<string, unknown>;
+  getImpl?: () => Promise<Record<string, unknown>>;
+  setImpl?: (value: Record<string, unknown>) => Promise<void>;
+}): SessionStub {
+  const { initial = {}, getImpl, setImpl } = opts;
+  let store = initial;
+  const get = vi.fn(async () => {
+    if (getImpl) return getImpl();
+    return { [RUN_STATE_KEY]: store };
+  });
+  const set = vi.fn(async (value: Record<string, unknown>) => {
+    if (setImpl) await setImpl(value);
+    store = (value[RUN_STATE_KEY] as Record<string, unknown> | undefined) ?? {};
+  });
+  const remove = vi.fn(async () => {
+    store = {};
+  });
+  (globalThis as Record<string, unknown>).chrome = {
+    storage: { session: { get, set, remove }, local: { get: vi.fn(async () => ({})) } },
+    alarms: { create: vi.fn(), clear: vi.fn() },
+    power: { requestKeepAwake: vi.fn(), releaseKeepAwake: vi.fn() },
+  };
+  return { get, set, remove };
+}
+
 let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
 
-beforeEach(() => {
-  installFailingSessionStub();
+beforeEach(async () => {
   consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-  restore = () => {
-    delete (globalThis as Record<string, unknown>).chrome;
-  };
+  // Drop any module-level run-state cache left by a previous test so each
+  // test starts from a cold `getRunState` (the stub is reinstalled per test).
+  await clearRunState().catch(() => {});
 });
 
 afterEach(() => {
-  restore();
+  delete (globalThis as Record<string, unknown>).chrome;
   consoleErrorSpy.mockRestore();
 });
 
-describe("hardResetAbortRequested error handling", () => {
-  test("does not throw when storage.get throws", async () => {
-    await expect(hardResetAbortRequested()).resolves.toBeUndefined();
+const validState = {
+  task: "t", maxSteps: 10, mode: "standard", startTabId: 1, currentTabId: 1,
+  step: 0, active: true, abortRequested: false,
+};
+
+describe("saveRunState write-failure resilience", () => {
+  test("rejects when storage.set throws", async () => {
+    const session = installSessionStub({
+      initial: validState,
+      setImpl: async () => {
+        throw new Error("storage unavailable");
+      },
+    });
+    await expect(saveRunState({ step: 3 })).rejects.toThrow("storage unavailable");
+    expect(session.set).toHaveBeenCalled();
   });
 
-  test("logs console.error when storage fails", async () => {
-    await hardResetAbortRequested();
-    expect(consoleErrorSpy).toHaveBeenCalled();
-    const firstCall = consoleErrorSpy.mock.calls[0]?.[0];
-    expect(String(firstCall)).toContain("hardResetAbortRequested failed");
+  test("clears the optimistic cache on set failure — next getRunState reads storage fresh", async () => {
+    const stored = { ...validState, step: 2 };
+    const session = installSessionStub({
+      initial: stored,
+      setImpl: async () => {
+        throw new Error("storage unavailable");
+      },
+    });
+    // Prime the cache with a successful read.
+    await getRunState();
+
+    await expect(saveRunState({ step: 3 })).rejects.toThrow("storage unavailable");
+
+    // The cache must NOT serve the failed `next` (step 3): the follow-up read
+    // re-queries storage and sees the previously persisted value.
+    session.get.mockClear();
+    const after = await getRunState();
+    expect(after?.step).toBe(2);
+    expect(session.get).toHaveBeenCalled();
   });
 
-  test("returns cleanly even when storage.set also throws", async () => {
-    // First call: get throws → error logged, returns
-    await expect(hardResetAbortRequested()).resolves.toBeUndefined();
-    // Second call: still throws, still returns
-    await expect(hardResetAbortRequested()).resolves.toBeUndefined();
+  test("a successful write still populates the cache", async () => {
+    const session = installSessionStub({ initial: validState });
+    await saveRunState({ step: 5 });
+    session.get.mockClear();
+    const after = await getRunState();
+    expect(after?.step).toBe(5);
+    expect(session.get).not.toHaveBeenCalled(); // served from cache
   });
 
-  test("getRunState throws when storage is unavailable (no catch)", async () => {
-    // hardResetAbortRequested logs but doesn't throw
-    await hardResetAbortRequested();
-    // getRunState does NOT catch storage errors — it throws
+  test("abortRequested survives into the next write (merge is monotonic)", async () => {
+    const session = installSessionStub({ initial: validState });
+    await saveRunState({ abortRequested: true });
+    await saveRunState({ step: 1 });
+    expect((session.set.mock.calls[1][0] as Record<string, unknown>)[RUN_STATE_KEY]).toMatchObject({
+      abortRequested: true,
+      step: 1,
+    });
+  });
+
+  test("getRunState throws when storage.get is unavailable (no catch)", async () => {
+    installSessionStub({
+      getImpl: async () => {
+        throw new Error("storage unavailable");
+      },
+    });
     await expect(getRunState()).rejects.toThrow("storage unavailable");
   });
 });

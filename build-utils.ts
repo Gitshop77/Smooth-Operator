@@ -362,14 +362,18 @@ export function lintManifestPermissions(
   ]);
   const risky = perms.filter((p) => HIGH_RISK.has(p));
   const riskyOptional = optional.filter((p) => HIGH_RISK.has(p));
-  const wideHost = host.some(
-    (h) => h === "<all_urls>" || h === "http://*/*" || h === "https://*/*"
-  );
+  // Universal host patterns: match every (or every http/https) origin. Any
+  // pattern in this set that is NOT in the reviewed baseline below is creep.
+  const UNIVERSAL_HOST_PATTERNS: readonly string[] = [
+    "<all_urls>",
+    "http://*/*",
+    "https://*/*",
+  ];
 
   // Reviewed baseline: the high-risk permissions + universal host access already
   // present in the shipped manifest, each with an in-repo justification.
   // The lint is a *creep* guard, not a presence check: it only fires when a NEW
-  // high-risk permission (or new universal-host entry) is added BEYOND this
+  // high-risk permission (or new universal-host pattern) is added BEYOND this
   // baseline. That makes MANIFEST_LINT_FAIL_HIGH_RISK=1 safe to enable in CI.
   const BASELINE_HIGH_RISK = new Set([
     "debugger",
@@ -378,18 +382,29 @@ export function lintManifestPermissions(
     "webRequest",
     "unlimitedStorage",
     "dns",
+    // cookies: required by the get_cookies/set_cookie/delete_cookies actions.
+    // set_cookie's effective URL passes the same domain allow/blocklist gate
+    // as navigate/search before any write; reads are read-only.
+    "cookies",
   ]);
-  const BASELINE_WIDE_HOST = true;
+  // The shipped manifest grants http/https everywhere (deliberately NOT
+  // file:// or ftp://), so those two patterns are the reviewed baseline; any
+  // other universal pattern (e.g. <all_urls>) extends access beyond it.
+  const BASELINE_WIDE_HOST = new Set(["http://*/*", "https://*/*"]);
 
   const newRisky = risky.filter((p) => !BASELINE_HIGH_RISK.has(p));
   const newRiskyOptional = riskyOptional.filter((p) => !BASELINE_HIGH_RISK.has(p));
-  const newWideHost = wideHost && !BASELINE_WIDE_HOST;
+  const newWideHost = host.filter(
+    (h) => UNIVERSAL_HOST_PATTERNS.includes(h) && !BASELINE_WIDE_HOST.has(h)
+  );
 
-  if (newRisky.length || newRiskyOptional.length || newWideHost) {
+  if (newRisky.length || newRiskyOptional.length || newWideHost.length) {
     const items = [
       ...newRisky,
       ...newRiskyOptional,
-      ...(newWideHost ? ["universal host_permissions"] : []),
+      ...(newWideHost.length
+        ? [`universal host_permissions: ${newWideHost.join(", ")}`]
+        : []),
     ];
     const msg =
       "[manifest-lint] NEW high-risk permission(s) added beyond the reviewed " +

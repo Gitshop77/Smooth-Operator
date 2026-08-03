@@ -32,6 +32,7 @@ import {
   type CustomToolEntry,
   DESC_MAX,
   CODE_MAX,
+  MAX_CUSTOM_TOOLS,
   serialize,
   readCustomTools,
   writeCustomTools,
@@ -226,6 +227,18 @@ $("addTool").addEventListener("click", () => {
     }
     const codeHash = await computeCodeHash(code);
     const idx = tools.findIndex((t) => t.name === name);
+    // Cap the store so the per-run <custom_tools> prompt block stays bounded
+    // (mirrors the runtime loader's cap). Updating an existing tool is always
+    // allowed; only NEW entries count against the limit.
+    if (idx < 0 && tools.length >= MAX_CUSTOM_TOOLS) {
+      await alertModal({
+        title: "Tool limit reached",
+        message:
+          `You can define at most ${MAX_CUSTOM_TOOLS} custom tools. ` +
+          "Delete one before adding another.",
+      });
+      return;
+    }
     const entry: CustomToolEntry = { name, description, code, createdAt: Date.now(), codeHash };
     if (idx >= 0) {
       entry.createdAt = tools[idx].createdAt;

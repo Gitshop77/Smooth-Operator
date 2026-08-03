@@ -15,6 +15,7 @@ import type {
 } from "../../types";
 import { parseAgentOutput, parsePlannerOutput } from "../../output-parser";
 import { wrapUntrusted } from "../../security";
+import { redactKeyShapes } from "../../key-shape-redact";
 import type {
   CallbackDispatcher,
   CallbackContext,
@@ -52,7 +53,13 @@ function accountAndReportUsage(params: {
   const { cost, usage: u } = accounted;
   if (typeof cost === "number" && u) {
     onCost(cost, u.tokensIn, u.tokensOut);
-    deps.onEvent({ type: "cost", step, tokensIn: u.tokensIn, tokensOut: u.tokensOut, costUsd: cost, model: model ?? "" });
+    deps.onEvent({
+      type: "cost", step, tokensIn: u.tokensIn, tokensOut: u.tokensOut,
+      costUsd: cost, model: model ?? "",
+      ...(u.reasoningTokens ? { reasoningTokens: u.reasoningTokens } : {}),
+      ...(u.cachedInputTokens ? { cachedInputTokens: u.cachedInputTokens } : {}),
+      ...(u.cachedWriteInputTokens ? { cachedWriteInputTokens: u.cachedWriteInputTokens } : {}),
+    });
   }
   return u;
 }
@@ -199,7 +206,7 @@ export async function callNavigatorWithRetry(
  // dispatcher on the success path does not get re-emitted by the finally
  // block (duplicate llmEnd/cost + masked original error).
           fired = true;
-          await dispatcher.llmEnd(ctx, { content: raw, usage });
+          await dispatcher.llmEnd(ctx, { content: redactKeyShapes(raw), usage });
  // Per-phase cost attribution: report the SUM of all attempted
  // usages (failed + this successful attempt) so the per-phase
  // callback breakdown is accurate across retries.
@@ -221,15 +228,18 @@ export async function callNavigatorWithRetry(
         });
         const parseErrorBlock =
           `<sys>\n<parse_error>\n` +
- // `parsed.error` is produced by the local parser and frequently
- // embeds the offending/raw model snippet, so it is untrusted model
- // output — wrap it exactly like `raw` below to keep injection
- // patterns out of the retry's prompt context.
-          `Your previous response failed to parse and was rejected. Error: ${wrapUntrusted(parsed.error ?? "unknown parse error")}\n` +
- // Wrap the raw LLM output in wrapUntrusted — it may contain echoed
- // page content with injection patterns. Without wrapping, those
- // patterns are re-injected into the retry's loopWarning context.
-          `Raw response (truncated): ${wrapUntrusted(raw.slice(0, 400))}\n` +
+  // `parsed.error` is produced by the local parser and frequently
+  // embeds the offending/raw model snippet, so it is untrusted model
+  // output — wrap it exactly like `raw` below to keep injection
+  // patterns out of the retry's prompt context. Key-shape redaction
+  // runs first: a model that echoed a substituted credential would
+  // otherwise ship it to the provider a second time inside the retry.
+          `Your previous response failed to parse and was rejected. Error: ${wrapUntrusted(redactKeyShapes(parsed.error ?? "unknown parse error"))}\n` +
+  // Wrap the raw LLM output in wrapUntrusted — it may contain echoed
+  // page content with injection patterns. Without wrapping, those
+  // patterns are re-injected into the retry's loopWarning context. The
+  // key-shape redaction pass mirrors the one on `parsed.error` above.
+          `Raw response (truncated): ${wrapUntrusted(redactKeyShapes(raw.slice(0, 400)))}\n` +
           `Please re-emit your response as valid JSON matching the AgentOutput schema ` +
           `({thinking, evaluation_previous_goal, memory, next_goal, action:[...]}). ` +
           `Do NOT wrap the JSON in markdown fences. Do NOT add commentary before or after the JSON.\n` +
@@ -248,7 +258,7 @@ export async function callNavigatorWithRetry(
     );
   } finally {
     if (dispatcher && ctx && !fired) {
-      await dispatcher.llmEnd(ctx, { content: lastRaw, usage: lastUsage });
+      await dispatcher.llmEnd(ctx, { content: redactKeyShapes(lastRaw), usage: lastUsage });
  // Attribute cost on the parse-failure / transient-error path too — the
  // LLM call DID consume tokens. Report the SUM of all attempted usages
  // (not just the final attempt) so per-phase analytics stay accurate.

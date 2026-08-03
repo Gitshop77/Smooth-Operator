@@ -1,7 +1,7 @@
 import type { PlannerOutput, LogEvent } from "../../types";
 import type { LoopState } from "../types";
 import { makeCtx } from "../helpers";
-import { classifyError, friendlyErrorMessage, type ClassifiedError } from "../../errors";
+import { classifyError, friendlyErrorMessage, MACHINE_CODES, RECOVERY_HINTS, type ClassifiedError } from "../../errors";
 
 /**
  * Emit a `plannerStep` dispatcher event, swallowing any callback exception so a
@@ -49,6 +49,11 @@ export async function safeWaitForSettled(state: LoopState): Promise<void> {
       }
     });
   } catch (e) {
+    // An abort is not a settle failure: re-throw so the caller's stop-path
+    // handling terminates the run instead of continuing into the next step.
+    const isAbort = signal?.aborted ||
+      (e instanceof Error && (/abort/i.test(e.name) || /abort/i.test(e.message)));
+    if (isAbort) throw e;
     onEvent({
       type: "error",
       step,
@@ -104,7 +109,11 @@ export function classifyPlannerError(
     return { classified, errorMessage: friendlyErrorMessage(classified) };
   } catch {
     return {
-      classified: { category: "unknown", fatal: false, retryable: true, message: msg, originalError: e },
+      classified: {
+        category: "unknown", fatal: false, retryable: true, message: msg,
+        machineCode: MACHINE_CODES.unknown, recoveryHint: RECOVERY_HINTS.unknown,
+        originalError: e,
+      },
       errorMessage: msg,
     };
   }

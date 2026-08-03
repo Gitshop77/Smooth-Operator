@@ -13,6 +13,7 @@ import type { HistoryItem } from "./types";
 import { wrapUntrusted } from "./security";
 import { extractJson } from "./output-parser";
 import { estimateCost } from "./llm/pricing";
+import { redactKeyLeak } from "./redact-shared";
 import {
   type JudgementResult,
   MAX_SUMMARY_SNIPPET,
@@ -163,7 +164,9 @@ Evaluate whether the task was actually completed.`;
           })
         : 0;
     } catch (err) {
-      console.warn("Judge cost estimation failed; reporting zero cost:", err);
+      // Mask any key-shaped secret that could have leaked into the pricing
+      // error before it reaches the console / run log.
+      console.warn("Judge cost estimation failed; reporting zero cost:", redactKeyLeak(String(err)));
     }
     await onCost({
       tokensIn,

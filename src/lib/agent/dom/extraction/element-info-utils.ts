@@ -24,10 +24,31 @@ export function looksLikeSecretSegment(seg: string): boolean {
   return false;
 }
 
+// Short segments can still carry secrets that the classifier above misses:
+// one-time codes are all-digit (`/otp/482913`) and short tokens mix cases
+// (`/reset/x7K9p2`). Guard the obvious false positives: date-like slugs keep
+// a digit run of 4+ (`2026Aug`), product/version-like slugs keep an alpha run
+// of 4+ (`Xcode9`), and plain words are single-case.
+function looksLikeShortSecretSegment(seg: string): boolean {
+  if (seg.length < 6 || seg.length >= 12) return false;
+  if (/[\s"'<>]/.test(seg)) return false;
+  if (/^[0-9]+$/.test(seg)) return true;
+  const hasLower = /[a-z]/.test(seg);
+  const hasUpper = /[A-Z]/.test(seg);
+  if (!(hasLower && hasUpper)) return false;
+  const runs = seg.match(/[A-Za-z]+|[0-9]+/g) ?? [];
+  for (const run of runs) {
+    if (run.length >= 4) return false;
+  }
+  return true;
+}
+
 export function redactPathSecrets(pathname: string): string {
   return pathname
     .split("/")
-    .map((seg) => (looksLikeSecretSegment(seg) ? "[redacted]" : seg))
+    .map((seg) =>
+      looksLikeSecretSegment(seg) || looksLikeShortSecretSegment(seg) ? "[redacted]" : seg,
+    )
     .join("/");
 }
 

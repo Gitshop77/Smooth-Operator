@@ -1,5 +1,6 @@
 import type { HistoryItem, TabInfo } from "../types";
 import { wrapUntrusted } from "../security";
+import { escapeXml } from "./xml-escape";
 
 /** Max chars of interactive-element text shipped to the navigator per step. */
 export const ELEMENTS_TEXT_CHAR_CAP = 60_000;
@@ -41,7 +42,7 @@ export function renderHistory(history: HistoryItem[], limit: number, total = his
     out += `<sys>[${total - limit} previous steps omitted]</sys>\n`;
   }
   for (const h of recent) {
-    out += `<step_${h.step} agent="${h.agent}">\n`;
+    out += `<step_${escapeXml(String(h.step), true)} agent="${escapeXml(h.agent, true)}">\n`;
     if (h.evaluation) out += `Evaluation: ${wrapUntrusted(h.evaluation)}\n`;
     if (h.memory) out += `Memory: ${wrapUntrusted(h.memory)}\n`;
     if (h.goal) out += `Goal: ${wrapUntrusted(h.goal)}\n`;
@@ -54,7 +55,7 @@ export function renderHistory(history: HistoryItem[], limit: number, total = his
         }
       }
     }
-    out += `</step_${h.step}>\n`;
+    out += `</step_${escapeXml(String(h.step), true)}>\n`;
   }
   return out.trim();
 }

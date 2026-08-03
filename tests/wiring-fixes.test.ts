@@ -36,7 +36,10 @@ import { ACTION_METADATA, isEquivalentAction } from "../src/lib/agent/tools/sche
 import { getFormatInstructions } from "../src/lib/agent/tools/registry";
 import { EvaluatorComb } from "../src/lib/agent/evaluators";
 import { LoopDetector } from "../src/lib/agent/loop/loop-detector";
-import type { AgentAction } from "../src/lib/agent/types";
+import { executeActionQueue } from "../src/lib/agent/loop/helpers/action-queue";
+import type { CallbackDispatcher, CallbackContext } from "../src/lib/agent/callbacks";
+import type { LoopDeps } from "../src/lib/agent/loop/types";
+import type { AgentAction, LogEvent, AgentConfig } from "../src/lib/agent/types";
 import { makeState } from "./helpers";
 
 // ─── Evaluator combinator ───────────────────────────────────────────────────
@@ -119,13 +122,11 @@ describe("EvaluatorComb (deterministic-evaluator fast-path)", () => {
 
 describe("press_and_hold action wiring", () => {
   test("PressAndHoldSchema is part of ActionSchema (variant exists)", () => {
-    const opts = (ActionSchema as unknown as { options: unknown[] }).options;
-    const types = opts.map((o) => {
-      const typeSchema = (o as { shape?: { type?: { values?: Set<unknown> } } }).shape?.type;
-      if (typeSchema?.values instanceof Set) return Array.from(typeSchema.values)[0];
-      return undefined;
-    });
-    expect(types).toContain("press_and_hold");
+  // Round-trip through the real schema instead of introspecting zod
+  // internals (`shape.type.values instanceof Set`), which a zod upgrade
+  // could break independently of the schema's actual content.
+    const parsed = ActionSchema.safeParse({ type: "press_and_hold", index: 1 });
+    expect(parsed.success).toBe(true);
   });
 
   test("ACTION_METADATA has press_and_hold entry", () => {
@@ -149,10 +150,15 @@ describe("press_and_hold action wiring", () => {
     expect(isEquivalentAction(a, c)).toBe(false);
   });
 
-  test("LoopDetector normalizes press_and_hold by index + hold_ms", () => {
+  test("LoopDetector normalizes press_and_hold by index + hold_ms (delay_ms ignored)", () => {
     const det = new LoopDetector();
+  // Alternate delay_ms between records: delay is a UX knob, not a
+  // page-effect knob, so it must NOT change the loop signature — 5
+  // records that differ only in delay_ms still trip the warning.
     for (let i = 0; i < 5; i++) {
-      det.record({ type: "press_and_hold", index: 1, hold_ms: 1500, delay_ms: 0 } as AgentAction, i);
+      det.record({
+        type: "press_and_hold", index: 1, hold_ms: 1500, delay_ms: i % 2 === 0 ? 0 : 100,
+      } as AgentAction);
     }
     expect(det.shouldWarn()).toBe(5);
   });
@@ -184,6 +190,10 @@ describe("getFormatInstructions", () => {
     expect(text.length).toBeGreaterThan(100);
     expect(text).toContain("JSON");
     expect(text).toContain("```");
+  // The instructions must carry an actual schema artifact, not just the
+  // preamble — assert a field that only exists in the parsed schema
+  // (passing on the intro/prelude text alone would be a false positive).
+    expect(text).toContain("next_goal");
   });
 });
 
@@ -390,5 +400,53 @@ describe("LoopDetector page-fingerprint stagnant detection", () => {
     const text = LoopDetector.stagnantWarningText(5);
     expect(text).toContain("STAGNANT PAGE");
     expect(text).toContain("5");
+  });
+});
+
+// ─── executeActionQueue dispatcher-throw resilience ─────────────────────────
+//
+// A throwing dispatcher/callback handler must degrade the step, not truncate
+// the queue: the remaining actions must still execute and be reported, or the
+// per-action history/storage alignment (results.length === actions.length)
+// breaks. Guards every dispatcher call in the queue (actionStart /
+// loopWarning / actionEnd).
+
+describe("executeActionQueue — dispatcher-throw resilience", () => {
+  test("a dispatcher that throws on every hook does not truncate the queue", async () => {
+    const btn = document.createElement("button");
+    btn.textContent = "Click me";
+    document.body.appendChild(btn);
+    const state = makeState({ selectorMap: { 1: btn } });
+    const events: LogEvent[] = [];
+    const deps = { onEvent: (e: LogEvent) => { events.push(e); } } as unknown as LoopDeps;
+    const actions = Array.from({ length: 5 }, () => ({ type: "click", index: 1 } as AgentAction));
+    const throwingDispatcher = {
+      actionStart: vi.fn(async () => { throw new Error("actionStart boom"); }),
+      loopWarning: vi.fn(async () => { throw new Error("loopWarning boom"); }),
+      actionEnd: vi.fn(async () => { throw new Error("actionEnd boom"); }),
+    } as unknown as CallbackDispatcher;
+
+  // 5 identical clicks cross the loop-detection first threshold (5), so the
+  // loopWarning hook fires mid-queue and must not abort the remaining actions.
+    const result = await executeActionQueue(
+      deps,
+      actions,
+      state,
+      0,
+      "full_agentic",
+      new LoopDetector(),
+      { enableLoopDetection: true, maxActionsPerStep: 10 } as unknown as AgentConfig,
+      throwingDispatcher,
+      {} as CallbackContext,
+      undefined,
+    );
+
+  // Every action executed and was reported — the queue was not truncated.
+    expect(result.results).toHaveLength(5);
+    expect(result.results.every((r) => r.success)).toBe(true);
+    expect(result.aborted).toBe(false);
+    expect(throwingDispatcher.actionEnd).toHaveBeenCalledTimes(5);
+    expect(throwingDispatcher.loopWarning).toHaveBeenCalledTimes(1);
+    document.body.removeChild(btn);
   });
 });

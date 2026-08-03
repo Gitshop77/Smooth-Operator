@@ -6,15 +6,19 @@
  * Run with: `npx vitest run tests/catalog.test.ts`
  */
 
-import { describe, test, expect, beforeEach, vi } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   getProviders,
   getModelsForProvider,
   getDefaultModelForProvider,
   isValidCatalog,
   catalogIdMatches,
+  fetchCatalog,
+  scheduleRefresh,
+  __resetCatalogForTests,
 } from "../src/lib/agent/llm/catalog";
 import { providers as BUNDLED_CATALOG } from "@opencode-ai/models/snapshot";
+import { mergeCatalogs, CACHE_TTL_MS, reasoningOptionsFor, type CatalogModel, type CatalogProvider, type Catalog } from "../src/lib/agent/llm/catalog-data";
 import { DEFAULT_MODELS } from "../src/extension/provider-config";
 import { testProviderConnection } from "../src/extension/options/connection-test";
 
@@ -86,6 +90,96 @@ describe("catalog bundle integrity", () => {
     const fromBundled = Object.keys(BUNDLED_CATALOG).sort();
     expect(fromGet).toEqual(fromBundled);
   });
+
+  test("getProviders returns bundled provider entries with intact identity", () => {
+    // The load-time merge is a shallow spread of BUNDLED_CATALOG, so the
+    // accessor path must hand back the same provider set with the same
+    // identity fields and model tables. This pins the accessor pipeline: a
+    // future getProviders that re-builds provider objects (wrong name, wrong
+    // model table, dropped/renamed ids) fails here.
+    const fromGet = getProviders();
+    for (const p of fromGet) {
+      const bundled = BUNDLED_CATALOG[p.id];
+      expect(bundled, `no bundled entry for ${p.id}`).toBeDefined();
+      expect(p.id).toBe(bundled.id);
+      expect(p.name).toBe(bundled.name);
+      expect(Object.keys(p.models).sort()).toEqual(Object.keys(bundled.models).sort());
+    }
+    // Spot-check the accessor path returns the same model objects the bundle
+    // exposes (a re-built models table with the same keys but new objects
+    // would be invisible to the key-set check above).
+    for (const pid of ["openai", "anthropic"]) {
+      for (const m of getModelsForProvider(pid)) {
+        expect(BUNDLED_CATALOG[pid].models[m.id]).toBe(m);
+      }
+    }
+  });
+});
+
+describe("mergeCatalogs — live-over-base additive merge", () => {
+  function model(id: string, name = `Model ${id}`): CatalogModel {
+    return {
+      id,
+      name,
+      release_date: "2024-01-01",
+      attachment: false,
+      reasoning: false,
+      tool_call: true,
+      cost: { input: 1, output: 2 },
+    };
+  }
+
+  function provider(id: string, models: Record<string, CatalogModel>, name = `Provider ${id}`): CatalogProvider {
+    return { id, name, models };
+  }
+
+  test("live wins for overlapping provider ids (fields and models)", () => {
+    const base = {
+      p: provider("p", { a: model("a"), b: model("b") }, "Base P"),
+    };
+    const live = {
+      p: provider("p", { b: model("b", "Live B"), c: model("c") }, "Live P"),
+    };
+    const merged = mergeCatalogs(base, live);
+    expect(merged.p.name).toBe("Live P"); // provider fields: live wins
+    expect(Object.keys(merged.p.models).sort()).toEqual(["a", "b", "c"]); // base models never dropped
+    expect(merged.p.models.a).toBe(base.p.models.a); // untouched base model kept
+    expect(merged.p.models.b.name).toBe("Live B"); // overlapping model: live wins
+    expect(merged.p.models.c.id).toBe("c"); // new model appended
+  });
+
+  test("bundled providers are never dropped by a live catalog", () => {
+    const base = {
+      p1: provider("p1", { a: model("a") }),
+      p2: provider("p2", { x: model("x") }),
+    };
+    const merged = mergeCatalogs(base, {
+      p1: provider("p1", { b: model("b") }, "Live P1"),
+    });
+    expect(Object.keys(merged).sort()).toEqual(["p1", "p2"]);
+    expect(merged.p2).toEqual(base.p2); // untouched provider carried through with intact data
+  });
+
+  test("new providers are appended", () => {
+    const base = { p1: provider("p1", { a: model("a") }) };
+    const merged = mergeCatalogs(base, {
+      p2: provider("p2", { z: model("z") }, "Live P2"),
+    });
+    expect(Object.keys(merged).sort()).toEqual(["p1", "p2"]);
+    expect(merged.p2.name).toBe("Live P2");
+    expect(merged.p2.models.z.id).toBe("z");
+  });
+
+  test("inputs are not mutated and the merged catalog is frozen", () => {
+    const base = { p: provider("p", { a: model("a") }) };
+    const live = { p: provider("p", { b: model("b") }, "Live P") };
+    const baseSnapshot = JSON.stringify(base);
+    const liveSnapshot = JSON.stringify(live);
+    const merged = mergeCatalogs(base, live);
+    expect(Object.isFrozen(merged)).toBe(true);
+    expect(JSON.stringify(base)).toBe(baseSnapshot);
+    expect(JSON.stringify(live)).toBe(liveSnapshot);
+  });
 });
 
 describe("no hyphenated OpenRouter claude ids", () => {
@@ -112,6 +206,11 @@ describe("every model has numeric cost (documents known gaps)", () => {
   // ids as a baseline. If the bundle regenerates and pricing changes (a provider
   // silently dropping cost, or a new provider without pricing), this assertion
   // flags it loudly instead of silently passing.
+  //
+  // REFRESHING after `npm update` (which regenerates the @opencode-ai/models
+  // snapshot): run this file; the divergence warning prints the exact
+  // `added` / `removed` id lists. Copy the "added" ids into this baseline and
+  // delete the "removed" ids, then re-run until green.
   const KNOWN_MISSING_COST = [
     "anyapi/anthropic/claude-haiku-4-5",
     "anyapi/anthropic/claude-opus-4-6",
@@ -561,6 +660,101 @@ describe("getDefaultModelForProvider", () => {
   }
 });
 
+describe("getDefaultModelForProvider — family priority", () => {
+  test("a priority list wins over a newer release", () => {
+    // gpt-5.6 (2026-07-09) is newer than gpt-5.4 (2026-03-05), yet the
+    // priority list must select gpt-5.4.
+    expect(getDefaultModelForProvider("openai", ["gpt-5.4", "gpt-5.2"])).toBe("gpt-5.4");
+  });
+
+  test("priority entries are matched prefix-tolerantly (catalogIdMatches)", () => {
+    expect(getDefaultModelForProvider("openai", ["openai/gpt-5.4"])).toBe("gpt-5.4");
+  });
+
+  test("an unknown priority family falls back to newest-stable", () => {
+    const stable = getModelsForProvider("openai")
+      .filter((m) => m.status !== "alpha" && m.status !== "beta" && m.status !== "deprecated")
+      .sort((a, b) => String(b.release_date ?? "").localeCompare(String(a.release_date ?? "")));
+    expect(getDefaultModelForProvider("openai", ["gpt-9.9"])).toBe(stable[0].id);
+  });
+
+  test("missing priority entries are skipped in favor of a later one", () => {
+    expect(getDefaultModelForProvider("openai", ["gpt-9.9", "gpt-5.2"])).toBe("gpt-5.2");
+  });
+
+  test("without a priority argument the newest-stable behavior is unchanged", () => {
+    expect(getDefaultModelForProvider("openai")).toBe("gpt-5.6");
+  });
+});
+
+describe("experimental (alpha/beta) models are never chosen by default resolution", () => {
+  test("openai default is stable", () => {
+    const def = getDefaultModelForProvider("openai");
+    const model = getModelsForProvider("openai").find((m) => m.id === def);
+    expect(model?.status).not.toBe("alpha");
+    expect(model?.status).not.toBe("beta");
+  });
+
+  test("azure default is stable even though azure carries beta models", () => {
+    const def = getDefaultModelForProvider("azure");
+    const model = getModelsForProvider("azure").find((m) => m.id === def);
+    expect(model).toBeDefined();
+    expect(model?.status).not.toBe("alpha");
+    expect(model?.status).not.toBe("beta");
+  });
+
+  test("priority resolution skips an experimental priority entry", () => {
+    // gpt-5.6-luna is beta in the azure catalog — the priority walk must skip
+    // it and fall through to the newest stable azure model.
+    const def = getDefaultModelForProvider("azure", ["gpt-5.6-luna"]);
+    const model = getModelsForProvider("azure").find((m) => m.id === def);
+    expect(model).toBeDefined();
+    expect(model?.status).not.toBe("alpha");
+    expect(model?.status).not.toBe("beta");
+  });
+
+  test("a provider whose non-deprecated models are all experimental yields no default", () => {
+    // blueclaw/hetzner currently ship only beta Qwen3.6 models — the default
+    // must be "" (never an experimental model), so selection stays explicit.
+    // If models.dev later adds a stable model for either, this pin needs
+    // updating (same discipline as the cost-less baseline above).
+    expect(getDefaultModelForProvider("blueclaw")).toBe("");
+    expect(getDefaultModelForProvider("hetzner")).toBe("");
+  });
+});
+
+describe("reasoningOptionsFor — reasoning_options variant surface", () => {
+  test("openai gpt-5.4 yields its effort variant list", () => {
+    expect(reasoningOptionsFor("gpt-5.4", "openai")).toEqual([
+      { type: "effort", values: ["none", "low", "medium", "high", "xhigh"] },
+    ]);
+  });
+
+  test("a model with toggle + effort + budget_tokens yields all three variants", () => {
+    expect(reasoningOptionsFor("claude-opus-4-5", "302ai")).toEqual([
+      { type: "toggle" },
+      { type: "effort", values: ["low", "medium", "high"] },
+      { type: "budget_tokens", min: 1024, max: 63999 },
+    ]);
+  });
+
+  test("anthropic claude-sonnet-5 yields toggle + a max-effort variant list", () => {
+    expect(reasoningOptionsFor("claude-sonnet-5", "anthropic")).toEqual([
+      { type: "toggle" },
+      { type: "effort", values: ["low", "medium", "high", "xhigh", "max"] },
+    ]);
+  });
+
+  test("a model without reasoning_options yields []", () => {
+    expect(reasoningOptionsFor("gpt-4o", "openai")).toEqual([]);
+  });
+
+  test("an unknown provider or model yields []", () => {
+    expect(reasoningOptionsFor("gpt-5.4", "no-such-provider")).toEqual([]);
+    expect(reasoningOptionsFor("no-such-model", "openai")).toEqual([]);
+  });
+});
+
 describe("isValidCatalog", () => {
   test("rejects non-object / string / null", () => {
     expect(isValidCatalog(null)).toBe(false);
@@ -702,5 +896,102 @@ describe("catalogIdMatches", () => {
 
   test("no false positive: openai/gpt-4 does not match provider/openai/gpt-4o", () => {
     expect(catalogIdMatches("openai/gpt-4", "provider/openai/gpt-4o")).toBe(false);
+  });
+});
+
+describe("fetchCatalog — stale-while-refresh", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  /** A minimal valid models.dev-shaped catalog served by the fetch stub. */
+  function miniCatalog(): Catalog {
+    return {
+      tp: {
+        id: "tp",
+        name: "Test Provider",
+        models: {
+          "test-model": {
+            id: "test-model",
+            name: "Test Model",
+            release_date: "2026-01-01",
+            attachment: false,
+            reasoning: false,
+            temperature: true,
+            tool_call: true,
+            cost: { input: 1, output: 2 },
+          },
+        },
+      },
+    };
+  }
+
+  beforeEach(() => {
+    __resetCatalogForTests();
+    fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => miniCatalog() }));
+    vi.stubGlobal("fetch", fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  test("a successful live load arms a one-shot refresh (stale-while-refresh)", async () => {
+    vi.useFakeTimers();
+    await fetchCatalog({ force: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // CACHE_TTL_MS after the successful load the one-shot timer re-fetches.
+    await vi.advanceTimersByTimeAsync(CACHE_TTL_MS);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test("the refresh chain re-arms after each successful load", async () => {
+    vi.useFakeTimers();
+    await fetchCatalog({ force: true });
+    await vi.advanceTimersByTimeAsync(CACHE_TTL_MS);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(CACHE_TTL_MS);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  test("a failed live load does not arm a refresh", async () => {
+    vi.useFakeTimers();
+    fetchMock.mockRejectedValue(new Error("network down"));
+    await fetchCatalog({ force: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(CACHE_TTL_MS);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("force bypasses the memory TTL", async () => {
+    await fetchCatalog({ force: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Memory TTL is still fresh — a non-force call must NOT re-fetch.
+    await fetchCatalog();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // force bypasses the memory TTL and goes to the network again.
+    await fetchCatalog({ force: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test("a scheduled refresh does not double-fetch while a force load is in flight", async () => {
+    vi.useFakeTimers();
+    let resolveFetch!: (value: { ok: boolean; status: number; json: () => Promise<Catalog> }) => void;
+    fetchMock = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    // Boot-style arm — background/index.ts calls this after the first
+    // successful worker load.
+    scheduleRefresh();
+    const inflight = fetchCatalog({ force: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // The timer fires while the force fetch is in flight — the inflight memo
+    // dedupes it, so exactly one fetch happens.
+    await vi.advanceTimersByTimeAsync(CACHE_TTL_MS);
+    resolveFetch({ ok: true, status: 200, json: async () => miniCatalog() });
+    await inflight;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

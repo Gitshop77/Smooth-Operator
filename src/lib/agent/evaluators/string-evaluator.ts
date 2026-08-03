@@ -19,6 +19,8 @@
 /** Tag used by {@link StringEvaluator} when surfacing which check failed. */
 const STRING_EVALUATOR_TAG = "string_match";
 
+import { hasNestedQuantifier } from "../tools/schema-utils";
+
 /**
  * Maximum prediction length fed to a `regex` match. Config-supplied patterns
  * are already validated/length-capped/bounded against catastrophic constructs
@@ -37,17 +39,18 @@ const MAX_REGEX_PATTERN_LENGTH = 500;
  *
  * Returns `false` for:
  * - Patterns exceeding {@link MAX_REGEX_PATTERN_LENGTH}
- * - Patterns containing nested quantifiers (e.g. `(a+)+`, `(a*){2,}`)
+ * - Patterns containing nested quantifiers (e.g. `(a+)+`, `(a*){2,}`) or
+ *   ambiguous alternation under repetition (e.g. `(a|aa)+`) — the same
+ *   structural shapes {@link hasNestedQuantifier} rejects for config-supplied
+ *   patterns, applied here for programmatically constructed refs
  * - Patterns that fail to compile
  *
- * When `false`, callers should fall back to literal string matching instead of
- * using the pattern as a regular expression.
+ * When `false`, callers must treat the reference as a no-match (fail closed)
+ * rather than falling back to literal matching.
  */
 function isSafeRegex(pattern: string): boolean {
   if (pattern.length > MAX_REGEX_PATTERN_LENGTH) return false;
-  // Nested quantifiers: a quantifier character (+, *, {) immediately preceded
-  // (possibly with whitespace) by another quantifier character.
-  if (/(\+|\*|\{)\s*(\+|\*|\{)/.test(pattern)) return false;
+  if (hasNestedQuantifier(pattern)) return false;
   try {
     new RegExp(pattern);
     return true;
@@ -127,12 +130,13 @@ export function splitOrAlternatives(ref: string): string[] {
  * ANY one of them (matches the HTML evaluator's semantics). When `tokenize`
  * is true AND every alternative is a single word, uses whole-word matching so
  * `ref="0"` does NOT match `pred="10"`. Otherwise falls back to a plain
- * substring check. An empty reference (no alternatives) is a no-op → 1.
+ * substring check. An empty reference (no alternatives) asserts nothing and
+ * fails CLOSED — a no-op pass would silently grade every task complete.
  */
 function mustInclude(ref: string, pred: string, tokenize = false, predClean?: string): number {
   const cp = predClean ?? cleanAnswer(pred);
   const alternatives = splitOrAlternatives(ref).map(cleanAnswer);
-  if (alternatives.length === 0) return 1;
+  if (alternatives.length === 0) return 0;
   if (tokenize && alternatives.every((a) => /^\S+$/.test(a))) {
     const tokens = cp.split(/\s+/);
     return alternatives.some((a) => tokens.includes(a)) ? 1 : 0;
@@ -210,10 +214,12 @@ export class StringEvaluator {
             break;
           }
  // Reject patterns that could cause catastrophic backtracking (ReDoS)
- // or are otherwise unsafe to compile. Fall back to literal substring
- // matching so the reference is still usable.
+ // or are otherwise unsafe to compile. Fail CLOSED — a literal-substring
+ // fallback could still PASS against a prediction containing the pattern
+ // text, silently grading a task complete on an unvalidated pattern.
           if (!isSafeRegex(ref.ref)) {
-            cur = cleanPred.includes(cleanAnswer(ref.ref)) ? 1 : 0;
+            cur = 0;
+            reasons.push("regex ref rejected as unsafe (catastrophic-backtracking risk)");
             break;
           }
           try {

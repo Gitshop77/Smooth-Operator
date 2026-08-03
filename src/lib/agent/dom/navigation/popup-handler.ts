@@ -9,8 +9,9 @@
  * {@link sendAlertText}. The queue is bounded (only the most recent dialog
  * is kept — dialogs are inherently modal, so only one can be open at a
  * time). {@link getPendingAlertText} returns the queued dialog's text (or
- * `null` if no dialog is currently open) — used by the `until.alertIsPresent`
- * expected condition and the `alert_*` actions.
+ * `null` if no dialog is currently open) — used by the `alert_*` action
+ * handlers (`tools/handlers/alert.ts`) to read the dialog before dismissing
+ * or replying to it.
  *
  * Extracted from the historical `dom/popup-handler.ts`. The legacy
  * `@/lib/agent/dom/popup-handler` import path stays working via a re-export

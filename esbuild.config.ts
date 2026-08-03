@@ -36,11 +36,11 @@ const LIB_SRC = path.resolve("src/lib");
  * This plugin intercepts any import of the locales barrel coming from inside
  * `node_modules/zod/` and redirects it to a one-line stub that exports ONLY
  * `en`. Because zod is reachable from multiple entry points (background,
- * content, sidepanel, options), the stub is registered on ALL entries via
- * `sharedConfig` — not just the MV3 service worker. If a non-`en` locale is
- * ever requested, the stub resolves to `undefined`; the build-time guard fails
- * closed so the latent risk never reaches a shipped bundle. Saves ~600 KB on
- * every bundle.
+ * content, content-main, sidepanel, options), the stub is registered on ALL
+ * entries via `sharedConfig` — not just the MV3 service worker. If a non-`en`
+ * locale is ever requested, the stub resolves to `undefined`; the build-time
+ * guard fails closed so the latent risk never reaches a shipped bundle. Saves
+ * ~600 KB on every bundle.
  */
 const zodLocalesStubPlugin: Plugin = {
   name: "zod-locales-stub",
@@ -166,10 +166,20 @@ const sharedConfig: BuildOptions = {
  * code-splitting (static OR dynamic) under `format: "esm"` makes esbuild emit
  * native `import()` calls to load the chunks — which throw at runtime and take
  * the whole worker down. With `splitting: false`, esbuild INLINES every import
- * (including the `await import("../vision-assistant")` in `agent-bridge.ts`)
- * into a single self-contained `background.js`, so no native `import()` is ever
- * emitted. Dynamic imports still resolve lazily (esbuild wraps them in a
- * `Promise`), they just aren't separate files.
+ * with a statically-resolvable specifier (including the
+ * `await import("../vision-assistant")` in `agent-bridge.ts`) into a single
+ * self-contained `background.js`, so no native `import()` is emitted for those.
+ * Dynamic imports still resolve lazily (esbuild wraps them in a `Promise`),
+ * they just aren't separate files.
+ *
+ * One exception survives: a COMPUTED-specifier dynamic import (`import(x)`
+ * where x is a variable) cannot be inlined, because esbuild cannot know what
+ * to bundle for it. The transformers web bundle contains exactly one such
+ * loader (`nc = async (a) => (await import(a)).default`), which therefore
+ * ships verbatim in background.js. It is never EXECUTED in the service worker
+ * (Local Vision only runs in DOM contexts — see below), but the invariant to
+ * hold is "no additional dynamic import may appear": CI greps background.js
+ * for `await import(` and fails the build on a second occurrence.
  *
  * Trade-off: the 2.6 MB vision stack (`@huggingface/transformers` +
  * `onnxruntime-web`) is now parsed as part of the SW bundle instead of loaded
@@ -217,6 +227,9 @@ const STATIC_FILES = [
 const ENTRIES = [
   { entry: "background.ts", out: "background.js", config: backgroundConfig },
   { entry: "content.ts", out: "content.js", config: iifeConfig },
+  // MAIN-world shadow-piercer content script (closed-root capture); declared
+  // as a `world: "MAIN"` content script in the manifest (see content-main.ts).
+  { entry: "content-main.ts", out: "content-main.js", config: iifeConfig },
   { entry: "sidepanel.ts", out: "sidepanel.js", config: iifeConfig },
   { entry: "options.ts", out: "options.js", config: iifeConfig },
 ] as const;
@@ -350,8 +363,9 @@ async function copyStatic(): Promise<void> {
 /**
  * One-shot build: clean OUT, copy static assets, bundle every entry point in
  * parallel. Each entry is bundled in its own esbuild invocation so the IIFE
- * entries (content/sidepanel/options) don't share chunks with the ESM entry
- * (background) — keeps the chunk graph clean and avoids format-mixing issues.
+ * entries (content/content-main/sidepanel/options) don't share chunks with the
+ * ESM entry (background) — keeps the chunk graph clean and avoids
+ * format-mixing issues.
  *
  * All entries bundle with `splitting: false` (no code splitting anywhere in
  * this project) — the background ESM entry still uses `outdir` +

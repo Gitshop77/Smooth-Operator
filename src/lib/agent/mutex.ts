@@ -6,6 +6,17 @@
  *
  * Cannot prevent races across separate JS contexts (e.g. the Options page
  * vs. the service worker); that would require per-key storage partitioning.
+ *
+ * NOT REENTRANT: a critical section must not acquire the same mutex again
+ * (directly or transitively). An awaited inner acquisition queues behind the
+ * outer section's release promise while the outer section waits for the
+ * inner, so the chain deadlocks. Re-entry is deliberately not detected by
+ * throwing at call time: a legitimate concurrent caller invokes the mutex
+ * while a section is running too (and must queue), and the queue gate means
+ * an awaited re-entry never reaches a section body — the two are
+ * indistinguishable without async-context tracking, which the MV3 service
+ * worker cannot provide. No caller in this codebase re-enters; sections must
+ * stay free of same-mutex acquisitions.
  */
 export function createMutex<T = void>(): (fn: () => Promise<T>) => Promise<T> {
   let chain: Promise<void> = Promise.resolve();

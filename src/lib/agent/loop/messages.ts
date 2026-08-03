@@ -241,10 +241,16 @@ interface NavigatorMessageArgs {
   /** Compacted-memory block from history compaction. When present, this
  * is rendered as a `<compacted_memory>` block in the prompt so the
  * navigator retains context from older (summarized) steps. Without this,
- * every compaction cycle pays for an LLM summarization call and drops the
- * old history items — but the summary is never injected, so the context is
- * lost at a cost. */
+   * every compaction cycle pays for an LLM summarization call and drops the
+   * old history items — but the summary is never injected, so the context is
+   * lost at a cost. */
   compactedMemory?: string;
+  /** Loop feedback assembled by the orchestrator: a fully-formed `<sys>` block
+   * with budget/replan/loop-detect nudges or the parse-error retry feedback.
+   * Emitted verbatim — producers (`injection-points.ts`, `llm-calls.ts`)
+   * already sanitize the content, so any re-wrapping/redaction here would
+   * mangle the block. */
+  loopWarning?: string;
 }
 
 /**
@@ -281,7 +287,19 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
     warnOnce("domainSkills", "../domain-skills", "skills block", e);
   }
 
- // Injection classifier: scan the RAW elements text AND page-derived
+  // Cap BEFORE the injection scan and redaction: scanning/redacting the full
+  // (possibly huge) elementsText then truncating wastes work on the discarded
+  // tail, and flagging patterns that were truncated out of the message would
+  // be misleading.
+  const rawElementsText = browserState.elementsText;
+  let elementsText = rawElementsText;
+  if (elementsText.length > ELEMENTS_TEXT_CHAR_CAP) {
+    const dropped = elementsText.length - ELEMENTS_TEXT_CHAR_CAP;
+    elementsText = elementsText.slice(0, ELEMENTS_TEXT_CHAR_CAP) +
+      `\n…[truncated ${dropped} chars of interactive elements]`;
+  }
+
+ // Injection classifier: scan the CAPPED elements text AND page-derived
  // title/URL/tabs/axTree for prompt-injection patterns. Sanitization (via
  // wrapUntrusted below) already redacts the highest-confidence patterns;
  // this scan FLAGS a broader set so the LLM knows to be extra skeptical.
@@ -294,7 +312,7 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
  // otherwise be injected into the prompt unwrapped + unscanned, and the AX
  // tree can carry the same injected instructions in a parallel channel.
   let injectionWarningsBlock = "";
-  const injectionScanText = browserState.elementsText
+  const injectionScanText = elementsText
     + "\n" + browserState.title
     + "\n" + browserState.url
     + "\n" + browserState.pageInfo
@@ -315,15 +333,6 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
  // `redactSecrets`). Redact here so a substituted secret can't round-trip back
  // to the provider. This is the REDACT layer; the injection FLAG layer above is
  // left untouched.
-  // Cap BEFORE redaction: redacting the full (possibly huge)
-  // elementsText then truncating wastes redaction work on the discarded tail.
-  const rawElementsText = browserState.elementsText;
-  let elementsText = rawElementsText;
-  if (elementsText.length > ELEMENTS_TEXT_CHAR_CAP) {
-    const dropped = elementsText.length - ELEMENTS_TEXT_CHAR_CAP;
-    elementsText = elementsText.slice(0, ELEMENTS_TEXT_CHAR_CAP) +
-      `\n…[truncated ${dropped} chars of interactive elements]`;
-  }
  // Fail CLOSED like `redactHistoryForPrompt`: a key-shape redaction throw must
  // not abort the whole navigator message build. Each redaction degrades to the
  // `REDACTION_FAILED` placeholder rather than emitting unredacted content.
@@ -384,6 +393,8 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
  // through the compaction summarization path).
   const compactedMemoryBlock = await buildCompactedMemoryBlock(args.compactedMemory);
 
+  const loopWarningBlock = args.loopWarning ? `\n${args.loopWarning}\n` : "";
+
   return `<user_request>
 ${task}
 </user_request>
@@ -415,7 +426,7 @@ ${redactedAxTree !== undefined ? `
 <accessibility_tree>
 ${wrapUntrusted(redactedAxTree)}
 </accessibility_tree>
-` : ""}${compactedMemoryBlock}${skillsBlock}${injectionWarningsBlock}${memoryBlock}${customToolsBlock}
+` : ""}${compactedMemoryBlock}${skillsBlock}${injectionWarningsBlock}${loopWarningBlock}${memoryBlock}${customToolsBlock}
 <step_info>Navigator step ${step + 1} of ${maxSteps}</step_info>`;
 }
 

@@ -14,8 +14,10 @@
 import { $, escapeHtml, isRecord } from "@/extension/shared";
 import { showSaved, isHostname } from "./settings-sync-utils";
 import { alertModal, confirmModal } from "./modal";
+import { serialize } from "./custom-tools-utils";
+import { STORAGE_KEYS } from "./storage-keys";
 
-const CUSTOM_SKILLS_KEY = "open_cowork_custom_skills";
+const CUSTOM_SKILLS_KEY = STORAGE_KEYS.customSkills;
 
 interface CustomSkill {
   domains: string[];
@@ -43,21 +45,13 @@ const NAME_RE = new RegExp("^[^\\n\\r\\t]{1," + NAME_MAX + "}$");
  */
 
 
-// ─── Mutation serialization ──────────────────────────────────────────────────
-let mutationQueue: Promise<unknown> = Promise.resolve();
-function serialize<T>(task: () => Promise<T>): Promise<T> {
-  const run = mutationQueue.then(task, task);
-  mutationQueue = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  return run;
-}
-
+// ─── Validation ──────────────────────────────────────────────────────────────
 export function validateCustomSkills(raw: unknown): CustomSkill[] {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) {
-    console.warn("[skills] stored custom-skills value is not an array; ignoring.", raw);
+    // Log the shape only — the payload can contain the skill instructions and
+    // must not be dumped to the console.
+    console.warn(`[skills] stored custom-skills value is not an array (got ${typeof raw}); ignoring.`);
     return [];
   }
   const out: CustomSkill[] = [];
@@ -69,11 +63,11 @@ export function validateCustomSkills(raw: unknown): CustomSkill[] {
       !Array.isArray(entry.domains) ||
       !entry.domains.every((d) => typeof d === "string")
     ) {
-      console.warn(`[skills] dropping malformed custom skill at index ${i}.`, entry);
+      console.warn(`[skills] dropping malformed custom skill at index ${i} (expected {name, instructions, domains} strings).`);
       return;
     }
- // `frontmatter` is optional in storage (older entries may lack it); derive
- // it when missing so the runtime keeps getting a one-line description.
+    // `frontmatter` is optional in storage (older entries may lack it); derive
+    // it when missing so the runtime keeps getting a one-line description.
     const frontmatter =
       typeof entry.frontmatter === "string"
         ? entry.frontmatter

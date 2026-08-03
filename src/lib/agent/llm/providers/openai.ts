@@ -120,6 +120,13 @@ export function makeOpenAIChatFacade<P extends Protocol<any, any, any, any> = Pr
  // single source of truth and must cover every model these facades can serve.
       supportsVision: true,
       supportsStructuredOutput: true,
+  // Request strict JSON-schema mode so the openai-compatible-chat protocol
+  // (OpenRouter / xAI) keeps `response_format: { type: "json_schema" }`
+  // instead of silently downgrading to schema-less `json_object` — the
+  // in-prompt schema fallback (llm-direct) only fires when
+  // `supportsStructuredOutput` is false, so without this flag the schema
+  // contract would reach the model in NO form.
+      structuredOutputStrict: true,
       configureResult: configure(config),
     });
   }

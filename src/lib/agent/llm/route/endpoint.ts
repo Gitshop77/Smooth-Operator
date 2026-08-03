@@ -41,6 +41,18 @@ export const buildURL = <Body>(endpoint: Endpoint<Body>, body: Body): string => 
   const base = endpoint.baseURL ?? "";
   const p = typeof endpoint.path === "function" ? endpoint.path(body) : endpoint.path;
 
+  // A path that carries its own scheme must be http(s): emitting a file:/data:
+  // URL would bypass the transport's http(s)-only contract, and a
+  // scheme-relative "//host/x" would silently resolve to a DIFFERENT origin
+  // than the endpoint's base (its host is dropped). Fail at build time with a
+  // message the caller can attribute to the endpoint config.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(p) && !/^https?:\/\//i.test(p)) {
+    throw new Error(`buildURL: absolute path must be http(s), got "${p}"`);
+  }
+  if (/^\/\//.test(p)) {
+    throw new Error(`buildURL: scheme-relative path is not allowed — must be an http(s) URL (origin would change), got "${p}"`);
+  }
+
   if (!base) {
  // No base URL: preserve the (relative) path exactly, but merge any
  // endpoint-level query params into a query `p` may already carry, so we

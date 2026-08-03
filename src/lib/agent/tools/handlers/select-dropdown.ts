@@ -18,13 +18,13 @@ export async function handleSelectDropdown(
       el.getAttribute("role") === "listbox" ||
       el.getAttribute("role") === "combobox" ||
       !!el.querySelector('[role="option"]');
-    if (isCustomDropdown) {
+      if (isCustomDropdown) {
       try {
         safeScrollIntoView(el);
         highlightElement(el, `select [${action.index}]`);
-        await sleep(TIMINGS.clickScrollIntoView);
+        await sleep(TIMINGS.clickScrollIntoView, ctx.signal);
         (el as HTMLElement).click();
-        await sleep(TIMINGS.clickAfterSettle);
+        await sleep(TIMINGS.clickAfterSettle, ctx.signal);
         const optionEls = collectDropdownOptions(el);
         if (optionEls.length === 0) {
           return {
@@ -67,10 +67,38 @@ export async function handleSelectDropdown(
         }
         safeScrollIntoView(match);
         highlightElement(match, `select [${action.index}]`);
-        await sleep(TIMINGS.clickScrollIntoView);
+        await sleep(TIMINGS.clickScrollIntoView, ctx.signal);
+        // Snapshot the widget state BEFORE the click so we can verify the
+        // selection actually registered (ARIA widgets commonly bind
+        // mousedown/pointerdown — a synthetic `.click()` is a no-op there, and
+        // the native-`<select>` path's `getFirstSelectedOption()` equivalent
+        // does not exist for custom widgets).
+        const triggerTextBefore = (el.textContent || "").trim();
         match.click();
-        await sleep(TIMINGS.clickAfterSettle);
+        await sleep(TIMINGS.clickAfterSettle, ctx.signal);
+        // Verification only applies to widgets that EXPOSE selection state we
+        // can observe (an `aria-selected` attribute on any option, or an
+        // `aria-activedescendant` on the trigger). A widget with no such ARIA
+        // machinery is a plain clickable element — a dispatched click that
+        // reaches a listener IS its registration, so we can't distinguish a
+        // no-op and must trust the click (matching the native path).
+        const exposesSelectionState =
+          el.hasAttribute("aria-activedescendant") || !!el.querySelector('[aria-selected]');
+        const ariaSelectedNow = match.getAttribute("aria-selected") === "true";
+        const activeDescendantMoved =
+          match.id !== "" && el.getAttribute("aria-activedescendant") === match.id;
+        const triggerTextChanged = (el.textContent || "").trim() !== triggerTextBefore;
         const selectedLabel = sanitizeLabel((match.textContent || "").trim());
+        if (exposesSelectionState && !ariaSelectedNow && !activeDescendantMoved && !triggerTextChanged) {
+          return {
+            action,
+            success: false,
+            message:
+              `custom-dropdown did not register the selection of "${selectedLabel}" ` +
+              `in [${action.index}] (synthetic click was a no-op — the widget may bind ` +
+              `mousedown/pointerdown events)`,
+          };
+        }
         // Report pageChanged only on ACTUAL navigation. The full
         // `hasPageChanged` (URL OR fingerprint) can't be used for selects: the
         // select/trigger state itself folds into the DOM fingerprint, so any

@@ -103,7 +103,29 @@ function authKey(value: unknown): string {
 // the id (key-derived material in route ids, error messages, and request
 // payloads is a brute-force oracle). The counter mirrors the `authIdCounter`
 // precedent: ids are per-process and non-secret.
+//
+// The global route registry (route/client.ts) NEVER evicts entries, so a fresh
+// nonce per call would leak one dead route per configure()/toLLMProvider()
+// call for the life of the service worker. Memoize the nonce per effective
+// config: repeated calls with identical (provider, baseURL, auth, apiKey)
+// reuse the same route id (the registry's Map.set overwrites in place), while
+// a genuinely different credential still gets a fresh nonce and its own route.
+// The memo key holds the raw apiKey only in memory — nothing derived from it
+// is ever serialized into ids, errors, or payloads.
+const nonceCache = new Map<string, number>();
 let configNonce = 0;
+
+function configNonceFor(input: Config, baseURL: string, provider: string): number {
+  const apiKey = "apiKey" in input ? input.apiKey : undefined;
+  const authValue = (input as { auth?: unknown }).auth;
+  const key = `${provider}\u0000${baseURL}\u0000${authKey(authValue)}\u0000${typeof apiKey === "string" ? apiKey : ""}`;
+  let nonce = nonceCache.get(key);
+  if (nonce === undefined) {
+    nonce = configNonce++;
+    nonceCache.set(key, nonce);
+  }
+  return nonce;
+}
 
 const auth = (options: ProviderAuthOption<"optional">) => {
   if ("auth" in options && options.auth) return options.auth;
@@ -147,7 +169,7 @@ function configure(profile: OpenAICompatibleProfile, input: Config = {}) {
     // leak key-derived material into route ids, error messages, and request
     // payloads; the nonce keeps distinct credentials isolated without
     // exposing anything secret.
-    id: `openai-compatible:${profile.provider}:${routeKey(baseURL)}:${authKey((input as { auth?: unknown }).auth)}:${configNonce++}`,
+    id: `openai-compatible:${profile.provider}:${routeKey(baseURL)}:${authKey((input as { auth?: unknown }).auth)}:${configNonceFor(input, baseURL, profile.provider)}`,
     provider: profile.provider,
     protocol: OpenAICompatibleChat.protocol,
     endpoint: Endpoint.path(`${prefix}${PATH}`, { baseURL: url.origin }),
@@ -186,8 +208,10 @@ function resolveProfile(
     throw new UnknownProviderError(provider);
   }
  // Unknown provider — default supportsStructuredOutput to false so the
- // in-prompt schema fallback fires (safer assumption for unknown endpoints).
-  return { provider, baseURL, supportsStructuredOutput: false };
+ // in-prompt schema fallback fires (safer assumption for unknown endpoints),
+ // and default supportsReasoningEffort to false so a configured
+ // `reasoning_effort` is never forwarded to an unknown endpoint.
+  return { provider, baseURL, supportsStructuredOutput: false, supportsReasoningEffort: false };
 }
 
 /**
@@ -215,6 +239,13 @@ export function toLLMProvider(
     model: config.model,
     supportsVision: false,
     supportsStructuredOutput: profile.supportsStructuredOutput,
+  // Pair `supportsStructuredOutput` with the wire flag: the
+  // openai-compatible-chat protocol downgrades `json_schema` to schema-less
+  // `json_object` unless `structuredOutputStrict` is set, and llm-direct's
+  // in-prompt schema fallback only fires when `supportsStructuredOutput` is
+  // false. Without both halves the schema contract reaches the model in NO
+  // form for capable profiles (OpenRouter/Groq/xAI/DeepSeek/…).
+    structuredOutputStrict: profile.supportsStructuredOutput,
     configureResult: configure(profile, config),
   });
 }

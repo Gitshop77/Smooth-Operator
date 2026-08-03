@@ -2,7 +2,7 @@
 
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
-import { TIMINGS } from "../constants";
+import { TIMINGS, sleep } from "../constants";
 import { type ActionContext, isExtensionContext } from "./types";
 
 /**
@@ -89,6 +89,48 @@ export async function handleScroll(
   // agent loop / UI can re-extract vision state before the next [vN] click
   // rather than silently risking a wrong-coordinate click.
   const base = `Scrolled ${down ? "down" : "up"} ${pages} page(s)`;
+  const message = cacheCleared
+    ? base
+    : `${base} (warning: vision cache clear failed — re-extract vision state before clicking [vN])`;
+
+  return { action, success: true, message };
+}
+
+/**
+ * `scroll_to_bottom` action handler — scroll the page to the very bottom in
+ * viewport-sized steps, waiting for lazy content after each step, then restore
+ * the viewport to the top so the next step's screenshot shows the page from a
+ * known position.
+ *
+ * The loop terminates when a scroll no longer changes the position (the
+ * bottom was reached, possibly with a "already at the bottom" first step).
+ * Each wait honors the abort signal, so a cancelled run aborts mid-loop with
+ * an AbortError instead of hanging (same contract as `wait`).
+ */
+export async function handleScrollToBottom(
+  ctx: ActionContext,
+  action: Extract<Action, { type: "scroll_to_bottom" }>,
+): Promise<ActionResult> {
+  const delayMs = Math.round((action.delay_seconds ?? 0.4) * 1000);
+  const { signal } = ctx;
+  let steps = 0;
+  let lastY = window.scrollY;
+  for (;;) {
+    window.scrollBy({ top: window.innerHeight });
+    // Wait for lazy-loaded content to extend the page before checking whether
+    // the viewport can still move.
+    await sleep(delayMs, signal);
+    const y = window.scrollY;
+    if (y === lastY) break; // viewport stopped moving — bottom reached
+    lastY = y;
+    steps++;
+  }
+  // Restore the viewport to the top (matches the spec: scroll down, then back
+  // to the top) so the next action starts from a known position.
+  window.scrollTo(0, 0);
+
+  const cacheCleared = await clearVisionCache();
+  const base = `Scrolled to bottom (${steps} steps) and restored the viewport to the top`;
   const message = cacheCleared
     ? base
     : `${base} (warning: vision cache clear failed — re-extract vision state before clicking [vN])`;

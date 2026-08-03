@@ -40,6 +40,16 @@ export function resolveElement(state: BrowserState, index: number): HTMLElement 
         `element [${index}] is not an HTMLElement (got ${(el as object).constructor.name})`,
       );
     }
+    // A live reference that is no longer connected to the document (removed /
+    // re-rendered since extraction) must not be operated on — dispatching
+    // events or clicking a detached node is a silent no-op reported as
+    // success. Fail with the same "element disappeared" contract so the
+    // executor re-extracts state and retries.
+    if (!el.isConnected) {
+      throw new NoSuchElementException(
+        `element [${index}] is detached from the document (page may have changed — extract state again)`,
+      );
+    }
     return el;
   }
   // Non-DOM context (e.g. the MV3 service worker): this helper is only ever
@@ -71,6 +81,24 @@ export function isVisible(el: HTMLElement): boolean {
  // users/AT — surfacing or clicking them would be both an a11y gap and a
  // correctness issue (clicks on inert elements are no-ops). A fast attribute
  // lookup (no style/layout flush) excludes only genuinely non-interactable nodes.
+  if (el.closest("[inert]")) return false;
+  const style = window.getComputedStyle(el);
+  if (style.display === "none" || style.visibility === "hidden") return false;
+  if (parseFloat(style.opacity) === 0) return false;
+  return true;
+}
+
+/**
+ * Rendered-only visibility check (no viewport requirement), used by
+ * `find_text`. An element with a non-zero box that is not hidden by
+ * display/visibility/opacity/inert is *rendered* even when scrolled below the
+ * fold; `isVisible` additionally requires viewport intersection, which made
+ * `find_text` reject off-screen matches before it could scroll to them
+ * (reporting "not found" for text that exists further down the page).
+ */
+export function isRendered(el: HTMLElement): boolean {
+  const rect = el.getBoundingClientRect();
+  if (rect.width <= 0 && rect.height <= 0) return false;
   if (el.closest("[inert]")) return false;
   const style = window.getComputedStyle(el);
   if (style.display === "none" || style.visibility === "hidden") return false;
@@ -115,26 +143,34 @@ export function safeScrollIntoView(el: HTMLElement): void {
 
 /**
  * Generate a CSS selector that uniquely identifies `el` (or comes close).
- * Used by the click fallback's strategy 3 (re-find element by selector).
+ * Used by the click fallback's strategy 3 (re-find element by selector) and
+ * by `list_interactive` descriptors.
  *
- * Strategy:
- * 1. If `el.id` is non-empty, return `#<escaped-id>`.
- * 2. Otherwise, build `tagname.class1.class2...` from the element's
- * `tagName` + `classList`. If `classList` is empty, return just the tag.
+ * Strategy chain (extended from the original 2 to 5 — plan S7):
+ * 1. If `el.id` is non-empty, return `*[id="<escaped-id>"]` (byte-for-byte
+ *    stable with the pre-S7 output).
+ * 2. `tagname.class1.class2…` — returned ONLY when globally unique
+ *    (previously returned even when ambiguous; the unique case is unchanged).
+ * 3. `tag[name="…"]` — when globally unique.
+ * 4. `tag[data-testid|aria-label|title|placeholder="…"]` — first unique
+ *    attribute (quotes escaped).
+ * 5. CSS sibling-count chain (`html > body > div:nth-of-type(2) > …`) — the
+ *    XPath `/html[1]/body[1]/div[2]` walk expressed as `:nth-of-type`, which
+ *    stays CSS-parseable for the click fallback's `querySelectorAll`.
  *
- * The returned selector is NOT guaranteed to be unique on the page — the
- * caller (strategy 3) handles the "matched multiple elements" case by
- * falling back to the next strategy.
+ * If no strategy yields a unique selector, the bare tag is returned — the
+ * callers (click fallback) handle the ambiguous case by falling through to
+ * the next strategy.
  */
 export function generateCssSelector(el: Element): string {
   if (el.id) {
- // The id is interpolated into a DOUBLE-QUOTED attribute string
- // (`*[id="…"]`), so it must be escaped for STRING context, not identifier
- // context — `CSS.escape` (used by `cssEscape` for the class branch below)
- // is for identifier context and would mis-escape an id whose escaped form is
- // immediately followed by a hex digit (e.g. id `"b` → `\22b` parses as
- // U+022B, not `"` + `b`). Escape only the characters that are special
- // inside a CSS string: backslash and double-quote.
+  // The id is interpolated into a DOUBLE-QUOTED attribute string
+  // (`*[id="…"]`), so it must be escaped for STRING context, not identifier
+  // context — `CSS.escape` (used by `cssEscape` for the class branch below)
+  // is for identifier context and would mis-escape an id whose escaped form is
+  // immediately followed by a hex digit (e.g. id `"b` → `\22b` parses as
+  // U+022B, not `"` + `b`). Escape only the characters that are special
+  // inside a CSS string: backslash and double-quote.
     const id = el.id
       .replace(/\\/g, "\\\\")
       .replace(/"/g, '\\"')
@@ -144,8 +180,72 @@ export function generateCssSelector(el: Element): string {
     return `*[id="${id}"]`;
   }
   const tag = el.tagName.toLowerCase();
-  const classes = Array.from(el.classList).map((c) => `.${cssEscape(c)}`);
-  return classes.length > 0 ? `${tag}${classes.join("")}` : tag;
+  const classes = Array.from(el.classList);
+  if (classes.length > 0) {
+    const classSel = `${tag}${classes.map((c) => `.${cssEscape(c)}`).join("")}`;
+    if (isUnique(classSel)) return classSel;
+  }
+  const name = el.getAttribute("name");
+  if (name) {
+    const nameSel = `${tag}[name="${escapeCssString(name)}"]`;
+    if (isUnique(nameSel)) return nameSel;
+  }
+  for (const attr of ["data-testid", "aria-label", "title", "placeholder"]) {
+    const value = el.getAttribute(attr);
+    if (value) {
+      const attrSel = `${tag}[${attr}="${escapeCssString(value)}"]`;
+      if (isUnique(attrSel)) return attrSel;
+    }
+  }
+  const chain = toCssSiblingChain(el);
+  if (isUnique(chain)) return chain;
+  return tag;
+}
+
+/** True when `selector` matches exactly one element (never throws). */
+function isUnique(selector: string): boolean {
+  try {
+    return document.querySelectorAll(selector).length === 1;
+  } catch {
+    return false;
+  }
+}
+
+/** Escape a value for a DOUBLE-QUOTED CSS attribute selector. */
+function escapeCssString(s: string): string {
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\A ")
+    .replace(/\r/g, "\\D ")
+    .replace(/\0/g, "\\0 ");
+}
+
+/**
+ * Sibling-count walk (the XPath `/html[1]/body[1]/div[2]/button[1]` pattern)
+ * expressed as a CSS selector: each ancestor becomes `tag:nth-of-type(i)`
+ * where `i` is the element's index among its same-tag siblings.
+ */
+function toCssSiblingChain(el: Element): string {
+  const parts: string[] = [];
+  let node: Element | null = el;
+  while (node) {
+    const tag = node.tagName.toLowerCase();
+    const parent: HTMLElement | null = node.parentElement;
+    if (!parent) {
+      parts.unshift(tag);
+      break;
+    }
+    let index = 1;
+    let sibling: Element | null = node.previousElementSibling;
+    while (sibling) {
+      if (sibling.tagName === node.tagName) index++;
+      sibling = sibling.previousElementSibling;
+    }
+    parts.unshift(`${tag}:nth-of-type(${index})`);
+    node = parent;
+  }
+  return parts.join(" > ");
 }
 
 /**

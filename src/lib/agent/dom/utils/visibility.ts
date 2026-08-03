@@ -153,6 +153,15 @@ function isFullyTransparent(el: HTMLElement): boolean {
 }
 
 /**
+ * True when the element carries `aria-hidden="true"` (matched
+ * case-insensitively — the ARIA spec treats attribute values as ASCII
+ * case-insensitive).
+ */
+function isAriaHidden(el: Element): boolean {
+  return (el.getAttribute("aria-hidden") || "").toLowerCase() === "true";
+}
+
+/**
  * Determine whether an element is *actually* visible to the user. Combines
  * computed style (display / visibility / opacity), bounding-box, and
  * `aria-hidden` checks.
@@ -181,14 +190,25 @@ export function isVisibleFull(el: HTMLElement, rect?: DOMRect): boolean {
  // ancestor computes its own opacity as `"1"` even though it is visually
  // invisible. Walk the ancestor chain (up to the document root) and treat the
  // element as hidden if any ancestor is fully transparent — otherwise the agent
- // could target a transparent, non-interactable element.
-  for (let ancestor = el.parentElement; ancestor; ancestor = ancestor.parentElement) {
-    if (isFullyTransparent(ancestor)) return false;
-    if (ancestor.getAttribute("aria-hidden") === "true") return false;
+ // could target a transparent, non-interactable element. The walk crosses
+ // shadow-tree boundaries via `parentNode` → `ShadowRoot` → `host`, so an
+ // `opacity:0` host hides the interactive content rendered inside its shadow
+ // root just like a light-DOM ancestor would.
+  let ancestor: Node | null = el.parentNode;
+  while (ancestor) {
+    if (ancestor instanceof ShadowRoot) {
+      ancestor = ancestor.host;
+      continue;
+    }
+    if (ancestor instanceof Element) {
+      if (isFullyTransparent(ancestor as HTMLElement)) return false;
+      if (isAriaHidden(ancestor)) return false;
+    }
+    ancestor = ancestor.parentNode;
   }
   const r = rect ?? el.getBoundingClientRect();
   if (r.width === 0 && r.height === 0) return false;
-  if (el.getAttribute("aria-hidden") === "true") return false;
+  if (isAriaHidden(el)) return false;
  // `aria-hidden` is commonly set on an ancestor to prune a decorative subtree
  // from the accessibility tree while keeping it visible. An element inside such
  // a subtree is not a legitimate interaction target for an AT-driven agent, so

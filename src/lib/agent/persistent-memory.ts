@@ -47,7 +47,7 @@ export interface SiteMemory {
 }
 
 /** Storage key under which the whole `{ domain -> SiteMemory }` map is persisted. */
-const STORAGE_KEY = "__opencowork_site_memories";
+const STORAGE_KEY = "open_cowork_site_memories";
 
 // Module-level cache. `getMemoriesForUrl` is called on every navigator step;
 // without caching, each step does a fresh chrome.storage.local round-trip.
@@ -62,6 +62,18 @@ let hostnameMemoriesCache: { hostname: string; memories: SiteMemory[] } | null =
 if (isExtensionWithLocal() && typeof chrome !== "undefined" && chrome.storage?.onChanged) {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && changes[STORAGE_KEY]) {
+      memoriesCache = null;
+      hostnameMemoriesCache = null;
+    }
+  });
+}
+
+// The localStorage (demo / non-extension) path has no chrome.storage events;
+// a write from another tab fires a `storage` event instead. Without this
+// listener the second tab would keep serving a stale cache.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if (e.key === STORAGE_KEY) {
       memoriesCache = null;
       hostnameMemoriesCache = null;
     }

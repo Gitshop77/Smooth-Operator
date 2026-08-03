@@ -26,10 +26,11 @@ import type { AgentAction, ActionResult } from "./types";
 // extension console. It is async (loads the secret map), so
 // we log via a fire-and-forget `.then`.
 import { redactSecrets } from "./secrets";
-// `redactKeyLeak` (from the extension shared module) is the canonical
-// API-key masker — used as a defense-in-depth safety net on every log line
-// (including the redaction-failure fallback) so a key can never be echoed.
-import { redactKeyLeak } from "@/extension/shared";
+// `redactKeyLeak` (from `./redact-shared`, the canonical masker in the
+// agent layer) is the API-key masker — used as a defense-in-depth safety net
+// on every log line (including the redaction-failure fallback) so a key can
+// never be echoed. The extension's `shared.ts` re-exports it for UI surfaces.
+import { redactKeyLeak } from "./redact-shared";
 import type {
   AgentRunResult,
   LLMUsageInfo,

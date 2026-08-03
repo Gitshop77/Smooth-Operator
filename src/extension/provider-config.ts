@@ -19,7 +19,8 @@ import * as Azure from "../lib/agent/llm/providers/azure";
 import * as OpenAICompatible from "../lib/agent/llm/providers/openai-compatible";
 import { makeOpenAIChatFacade } from "../lib/agent/llm/providers/openai";
 import * as OpenAICompatibleChat from "../lib/agent/llm/protocols/openai-compatible-chat";
-import { resolveAndValidateLlmBaseUrl, type SsrfProvenance } from "../lib/agent/llm/route/ssrf";
+import { resolveAndValidateLlmBaseUrl, isCuratedLocalOrigin, type SsrfProvenance } from "../lib/agent/llm/route/ssrf";
+import { redactUrl } from "../lib/agent/llm/route/url-redact";
 import { modelSupportsVision, modelSupportsReasoning, getDefaultModelForProvider, resolveVisionSupport, fetchCatalog } from "../lib/agent/llm/catalog";
 import { CATALOG_PROVIDER_ID_MAP } from "./provider-config-map";
 import { ensureApiKeyInSession } from "./api-key-storage";
@@ -52,6 +53,7 @@ import { byProvider } from "../lib/agent/llm/providers/openai-compatible-profile
 import {
   DEFAULT_BASE_URLS,
   DEFAULT_MODELS,
+  defaultModelPriority,
   canonicalLlmHost,
   isLocalUrl,
 } from "./provider-config-utils";
@@ -64,8 +66,8 @@ export { DEFAULT_MODELS } from "./provider-config-utils";
  * Used ONLY for a defensive warning in `readProviderConfig`: if a corrupted or
  * injected `chrome.storage.local` payload carries a provider id we don't
  * recognise, we surface a dev warning here (so the anomaly is observable)
- * while still returning it, letting `buildProvider` reject it with a precise
- * "Unknown provider" error. It is not a security boundary.
+ * before falling back to the default provider (`openai`) with a
+ * `provider_reset_warning` flag the UI surfaces. It is not a security boundary.
  *
  * Forwards the canonical OpenAI-compatible profile ids (via `byProvider`) plus
  * the dedicated-case providers that have their own `switch` branch in
@@ -91,7 +93,8 @@ const KNOWN_PROVIDERS: Set<string> = new Set<string>([
  *
  * Order (the SAME order `buildProvider` uses): explicit user choice (`model`)
  * > curated offline `DEFAULT_MODELS` fallback (keyed by the CATALOG provider id)
- * > live catalog default (`getDefaultModelForProvider`) > `""`.
+ * > family priority (live catalog, `defaultModelPriority`) > newest-stable
+ * catalog default (`getDefaultModelForProvider`) > `""`.
  *
  * Centralised here so `extractStateForRun` (run-helpers.ts) can apply this exact
  * resolution instead of re-deriving it with a DIFFERENT order — a mismatch that
@@ -104,7 +107,12 @@ const KNOWN_PROVIDERS: Set<string> = new Set<string>([
  */
 export function resolveModel(config: { provider?: string; model?: string; catalogId?: string }): string {
   const pid = config.catalogId ?? config.provider ?? "";
-  return config.model || DEFAULT_MODELS[pid] || getDefaultModelForProvider(pid) || "";
+  return (
+    config.model ||
+    DEFAULT_MODELS[pid] ||
+    getDefaultModelForProvider(pid, defaultModelPriority[pid]) ||
+    ""
+  );
 }
 
 /** Throw the canonical "requires an API key" error when `apiKey` is empty. */
@@ -155,47 +163,68 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
     const ssrfProvenance: SsrfProvenance = provenance === "user" ? "user-configured" : "untrusted";
     const ssrf = await resolveAndValidateLlmBaseUrl(baseUrl, allowLocalExemption, ssrfProvenance);
     if (!ssrf.ok) {
-      throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${baseUrl} (${ssrf.reason})`);
+      throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${redactUrl(baseUrl)} (${ssrf.reason})`);
+    }
+
+    // Config-time narrowing for the curated local providers: the transport
+    // layer only ever permits Ollama/LiteLLM's curated loopback origins for
+    // local endpoints, so a local baseUrl outside that allowlist would fail on
+    // EVERY request with an opaque transport error. Reject it here instead,
+    // with a clear message.
+    if (
+      (provider === "ollama" || provider === "litellm") &&
+      isLocalUrl(baseUrl) &&
+      !isCuratedLocalOrigin(baseUrl)
+    ) {
+      throw new Error(
+        `LLM baseUrl rejected: local endpoints for "${provider}" are limited to the curated loopback origins ` +
+          `(http://localhost:11434, http://127.0.0.1:11434, http://[::1]:11434` +
+          `${provider === "litellm" ? ", http://localhost:4000, http://127.0.0.1:4000, http://[::1]:4000" : ""}).`,
+      );
     }
   }
 
- // Companion guard against API-key exfiltration (ADDITIVE — does not weaken
- // the SSRF guard above). The SSRF guard only blocks private/loopback/metadata
- // ranges, so a public attacker host still passes and would receive the user's
- // API key as a Bearer token. The stored `provenance` flag is NOT a safe trust
- // signal here: `chrome.storage.local` is attacker-writable (prompt injection,
- // malicious settings-sync, crafted tool call), so a hostile write can stamp
- // `provenance: "user"` on a public attacker host and — under the old behavior
- // — skip this check and exfiltrate the key. The loopback exemption governed by
- // the SSRF guard above only affects LOCAL endpoints (an injected loopback is
- // rejected; a user loopback is the legitimate Ollama/LiteLLM case), so for any
- // PUBLIC baseUrl we always confine the forwarded host to the provider's own
- // canonical host. Local endpoints keep the curated exemption and are excluded
- // from this check.
-  if (baseUrl && apiKey) {
+  // Companion guard against API-key exfiltration (ADDITIVE — does not weaken
+  // the SSRF guard above). The SSRF guard only blocks private/loopback/metadata
+  // ranges, so a public attacker host still passes and would receive the user's
+  // API key as a Bearer token. The stored `provenance` flag is NOT a safe trust
+  // signal here: `chrome.storage.local` is attacker-writable (prompt injection,
+  // malicious settings-sync, crafted tool call), so a hostile write can stamp
+  // `provenance: "user"` on a public attacker host and — under the old behavior
+  // — skip this check and exfiltrate the key. The loopback exemption governed by
+  // the SSRF guard above only affects LOCAL endpoints (an injected loopback is
+  // rejected; a user loopback is the legitimate Ollama/LiteLLM case), so for any
+  // PUBLIC baseUrl we always confine the forwarded host to the provider's own
+  // canonical host. Local endpoints keep the curated exemption and are excluded
+  // from this check.
+  if (baseUrl && (apiKey || provenance === "injected")) {
     // A local/loopback/RFC1918 endpoint is governed by the SSRF loopback
     // exemption above (an injected loopback is rejected; a user loopback is the
     // legitimate Ollama/LiteLLM case), so it is excluded from this check.
-    // When no API key is present (e.g. self-hosted Ollama on a remote host) there
-    // is no secret to exfiltrate, so host confinement is skipped; the SSRF guard
-    // above still blocks metadata/private/link-local targets.
+    // When no API key is present, host confinement still applies to an INJECTED
+    // config: a keyless public attacker host has no secret to steal, but every
+    // forwarded request would exfiltrate page data (task text, screenshots) to
+    // the attacker, so the forwarded host is confined regardless of apiKey.
+    // The SSRF guard above still blocks metadata/private/link-local targets.
     const isLocalEndpoint = isLocalUrl(baseUrl);
     if (!isLocalEndpoint) {
-      const canon = canonicalLlmHost(provider);
-      let host = "";
-      try { host = new URL(baseUrl).host; } catch { host = ""; }
+      const canon = canonicalLlmHost(provider, provenance);
+      let hostname = "";
+      try { hostname = new URL(baseUrl).hostname; } catch { hostname = ""; }
       // Suffix canonical hosts require a DOTTED subdomain boundary: an exact
       // match or `*.canon.host`. A bare `endsWith` would let an attacker host
       // like `evil-anthropic.com` (or `not-anthropic.com`) masquerade as the
-      // provider and receive the user's API key as a Bearer token.
+      // provider and receive the user's API key as a Bearer token. The
+      // comparison uses the HOSTNAME (port stripped) so a legit non-default
+      // port on the canonical host is not rejected.
       const allowed =
         canon !== null &&
         (canon.suffix
-          ? host === canon.host || host.endsWith("." + canon.host)
-          : host === canon.host);
+          ? hostname === canon.host || hostname.endsWith("." + canon.host)
+          : hostname === canon.host);
       if (!allowed) {
         throw new Error(
-          `LLM baseUrl rejected: ${baseUrl} is not the canonical host for provider "${provider}". ` +
+          `LLM baseUrl rejected: ${redactUrl(baseUrl)} is not the canonical host for provider "${provider}". ` +
             `To protect your API key from exfiltration, the baseUrl must target the provider's own host.`
         );
       }
@@ -389,6 +418,24 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
     /* catalog/lookup failure — leave supportsReasoning unset (non-reasoning default) */
   }
 
+  // forceReasoning user override ("on" | "off" | "auto"): "on" forces
+  // reasoning-parameter emission even for models the catalog doesn't flag
+  // (e.g. an OpenAI-compatible reasoning model unknown to the catalog);
+  // "off" is handled downstream (callers send `reasoning.enabled: false` so
+  // protocols suppress reasoning params); "auto"/unset keep the
+  // catalog-derived flag. Read fail-safe — a missing or corrupt storage
+  // layer must never crash provider construction.
+  try {
+    if (typeof chrome !== "undefined" && chrome.storage?.local) {
+      const { forceReasoning } = await chrome.storage.local.get("forceReasoning");
+      if (forceReasoning === "on" && result.supportsReasoning !== true) {
+        result = { ...result, supportsReasoning: true };
+      }
+    }
+  } catch {
+    /* fail-safe: keep the catalog-derived flag */
+  }
+
   return result;
 }
 
@@ -409,6 +456,15 @@ async function readStoredApiKey(): Promise<string> {
 /**
  * Read the provider config from `chrome.storage.local`. Returns null if the
  * provider hasn't been configured yet.
+ *
+ * Provider-scoped config record (O8): `chrome.storage.local["providerConfigs"]`
+ * is keyed by provider id and holds per-provider model/baseUrl/resourceName. A
+ * nested entry for the RESOLVED provider wins over the flat top-level keys,
+ * which stay as the active back-compat mirror (so older tooling that only
+ * writes the top-level keys keeps working, and the UI keeps a single mirror to
+ * write). The nested record's provenance follows the same fail-safe as the
+ * top-level: only an explicit `"user"` stamp is trusted, anything else —
+ * absent or malformed — is `"injected"` (no SSRF loopback exemption).
  */
 export async function readProviderConfig(): Promise<ProviderConfig | null> {
   if (typeof chrome === "undefined" || !chrome.storage?.local) return null;
@@ -418,6 +474,7 @@ export async function readProviderConfig(): Promise<ProviderConfig | null> {
     "baseUrl",
     "resourceName",
     "provenance",
+    "providerConfigs",
   ]);
   const provider = normalizeString(res.provider);
   if (!provider) return null; // no provider set → unconfigured user
@@ -437,8 +494,12 @@ export async function readProviderConfig(): Promise<ProviderConfig | null> {
     } catch { /* non-fatal */ }
   }
  // The API key is NOT per-provider — it is a single session-storage key (see
- // `readStoredApiKey`), so it is read once after provider resolution.
-  const apiKey = await readStoredApiKey();
+ // `readStoredApiKey`), so it is read once after provider resolution. When the
+ // provider was UNKNOWN and we fell back to the default, the stored key belongs
+ // to a different provider: forwarding it to the default host would exfiltrate
+ // it (e.g. an Anthropic key sent to api.openai.com). Clear it so the user must
+ // re-enter the key for the reset provider.
+  const apiKey = resolvedProvider === provider ? await readStoredApiKey() : "";
   const model = normalizeString(res.model);
   const baseUrl = normalizeString(res.baseUrl);
   const resourceName = normalizeString(res.resourceName);
@@ -455,7 +516,35 @@ export async function readProviderConfig(): Promise<ProviderConfig | null> {
     baseUrl: baseUrl || undefined,
     resourceName: resourceName || undefined,
     provenance,
+    ...applyNestedProviderConfig(resolvedProvider, res.providerConfigs),
   };
+}
+
+/**
+ * Merge the provider-scoped nested record over the flat top-level values.
+ * Only the per-provider scope-guarded fields (model/baseUrl/resourceName/
+ * provenance) are read — no headers/options passthrough bags. The nested
+ * provenance uses the same fail-safe as the top-level (`"user"` only).
+ */
+function applyNestedProviderConfig(
+  resolvedProvider: string,
+  raw: unknown,
+): Partial<ProviderConfig> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const entry = (raw as Record<string, unknown>)[resolvedProvider];
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return {};
+  const rec = entry as Record<string, unknown>;
+  const out: Partial<ProviderConfig> = {};
+  const nestedModel = normalizeString(rec.model);
+  const nestedBaseUrl = normalizeString(rec.baseUrl);
+  const nestedResourceName = normalizeString(rec.resourceName);
+  if (nestedModel) out.model = nestedModel;
+  if (nestedBaseUrl) out.baseUrl = nestedBaseUrl;
+  if (nestedResourceName) out.resourceName = nestedResourceName;
+  // Only an explicit "user" stamp is trusted; absent or malformed → "injected"
+  // (no SSRF loopback exemption for the nested baseUrl).
+  out.provenance = rec.provenance === "user" ? "user" : "injected";
+  return out;
 }
 
 /**

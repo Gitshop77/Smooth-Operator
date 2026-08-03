@@ -155,7 +155,24 @@ export async function handleFindElements(
       let by: InstanceType<typeof By> | null = null;
       switch (kind) {
         case "css":     by = By.css(value); break;
-        case "xpath":   by = By.xpath(value); break;
+        case "xpath":
+          // `findByLocator` never throws on a malformed XPath (documented
+          // contract: parse errors are caught internally and return `[]`), so
+          // an invalid expression would surface as a misleading
+          // "Found 0 elements" success the agent cannot distinguish from a
+          // genuine no-match. Pre-validate with `document.evaluate` so a
+          // syntax error is reported as an invalid-locator failure instead.
+          try {
+            document.evaluate(value, document, null, XPathResult.ANY_TYPE, null);
+          } catch (err) {
+            return {
+              action,
+              success: false,
+              message: `Invalid xpath locator "${value}": ${err instanceof Error ? err.message : String(err)}`,
+            };
+          }
+          by = By.xpath(value);
+          break;
         case "id":      by = By.id(value); break;
         case "name":    by = By.byName(value); break;
         case "tag":     by = By.tagName(value); break;

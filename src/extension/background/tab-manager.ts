@@ -7,9 +7,10 @@
  */
 
 import { checkUrlAllowedWithDomainConfig } from "@/lib/agent/tools/helpers/domain-config";
-import { SEARCH_ENGINE_URLS, getSearchEngineUrl } from "@/lib/agent/tools/constants";
+import { SEARCH_ENGINE_URLS, getSearchEngineUrl, tryExpandSearchMacro } from "@/lib/agent/tools/constants";
 import { substituteSecrets, redactSecrets } from "@/lib/agent/secrets";
 import type { ActionResult, AgentAction, BrowserState, LogEvent, TabInfo } from "@/lib/agent/types";
+import type { AgentMode } from "@/lib/agent/modes";
 import { getDomainConfig, saveRunState, type RunState } from "./state-store";
 import {
   ensureContent,
@@ -117,7 +118,8 @@ export async function extractStateFromTab(
 
 export async function executeActionsInTab(
   tabId: number,
-  actions: AgentAction[]
+  actions: AgentAction[],
+  agentMode?: AgentMode
 ): Promise<unknown> {
   await ensureContent(tabId);
 
@@ -140,6 +142,7 @@ export async function executeActionsInTab(
       actions: resolvedActions,
       domainConfig: getDomainConfig(),
       secretsResolved: true,
+      agentMode,
     },
   );
   if (!res?.ok) throw new Error(`execute failed: ${res?.error || "no response"}`);
@@ -154,9 +157,13 @@ export async function executeActionsInTab(
       if (!orig) return r;
       if (
         orig.type === "input" &&
+        r.success === true &&
         inputResolvedText.has(i) &&
         (orig.text ?? "") !== inputResolvedText.get(i)
       ) {
+        // Patch the message only on SUCCESS: a failed input action must keep
+        // its honest error message — claiming "Typed …" over a failure is
+        // misleading to the user and to the loop's outcome tracking.
         return {
           ...r,
           action: { ...r.action, text: orig.text },
@@ -215,6 +222,8 @@ interface TabActionResult {
   pageChanged: boolean;
   success: boolean;
   message: string;
+  /** Optional structured payload (tab listings, cookies, storage reads). */
+  data?: unknown;
 }
 
 export async function handleTabAction(
@@ -253,26 +262,27 @@ export async function handleTabAction(
       return { handled: true, pageChanged: true, success: true, message: `Closed tab ${action.tab_id}` };
     }
     case "navigate": {
-      if (!/^https?:\/\//i.test(String(action.url ?? ""))) {
+      const targetUrl = tryExpandSearchMacro(String(action.url ?? ""))?.url ?? String(action.url ?? "");
+      if (!/^https?:\/\//i.test(targetUrl)) {
         return {
           handled: true,
           pageChanged: false,
           success: false,
-          message: `BLOCKED: unsupported URL scheme in navigate: ${action.url}`,
+          message: `BLOCKED: unsupported URL scheme in navigate: ${targetUrl}`,
         };
       }
-      const urlCheck = checkUrlAllowedWithDomainConfig(action.url);
+      const urlCheck = checkUrlAllowedWithDomainConfig(targetUrl);
       if (!urlCheck.allowed) {
         notify?.({
           type: "error",
           step: runState.step,
-          message: `BLOCKED navigation: ${urlCheck.reason} (${action.url})`,
+          message: `BLOCKED navigation: ${urlCheck.reason} (${targetUrl})`,
           recoverable: false,
         });
-        return { handled: true, pageChanged: false, success: false, message: `BLOCKED: ${urlCheck.reason} (${action.url})` };
+        return { handled: true, pageChanged: false, success: false, message: `BLOCKED: ${urlCheck.reason} (${targetUrl})` };
       }
       if (action.new_tab) {
-        const newTab = await chrome.tabs.create({ url: action.url, active: true });
+        const newTab = await chrome.tabs.create({ url: targetUrl, active: true });
         runState.currentTabId = newTab.id!;
         await saveRunState({ currentTabId: newTab.id! });
         await waitForTabLoad(newTab.id!);
@@ -281,11 +291,11 @@ export async function handleTabAction(
         if (!runState.currentTabId) {
           return { handled: true, pageChanged: false, success: false, message: "BLOCKED: no active tab — set new_tab:true to open one" };
         }
-        await chrome.tabs.update(runState.currentTabId, { url: action.url });
+        await chrome.tabs.update(runState.currentTabId, { url: targetUrl });
         await waitForTabLoad(runState.currentTabId);
         await ensureContent(runState.currentTabId);
       }
-      return { handled: true, pageChanged: true, success: true, message: `navigated to ${action.url}` };
+      return { handled: true, pageChanged: true, success: true, message: `navigated to ${targetUrl}` };
     }
     case "search": {
       const engine = (action as { engine?: string }).engine ?? "duckduckgo";
@@ -297,8 +307,9 @@ export async function handleTabAction(
       if (typeof query !== "string" || query.length === 0) {
         return { handled: true, pageChanged: false, success: false, message: "BLOCKED: missing query" };
       }
-      const baseUrl = getSearchEngineUrl(resolvedEngine) ?? SEARCH_ENGINE_URLS.duckduckgo;
-      const searchUrl = baseUrl + encodeURIComponent(query);
+      const macro = tryExpandSearchMacro(query);
+      const searchUrl = macro?.url ??
+        (getSearchEngineUrl(resolvedEngine) ?? SEARCH_ENGINE_URLS.duckduckgo) + encodeURIComponent(query);
       if (!/^https?:\/\//i.test(searchUrl)) {
         return {
           handled: true,
@@ -323,7 +334,234 @@ export async function handleTabAction(
       await chrome.tabs.update(runState.currentTabId, { url: searchUrl });
       await waitForTabLoad(runState.currentTabId);
       await ensureContent(runState.currentTabId);
-      return { handled: true, pageChanged: true, success: true, message: `Searching on ${resolvedEngine}` };
+      const label = macro?.name ?? resolvedEngine;
+      return { handled: true, pageChanged: true, success: true, message: `Searching on ${label}` };
+    }
+    case "input": {
+      // Only humanized typing is routed through the SW: plain input is owned
+      // by the content script's instant value-set path. Humanized input needs
+      // the CDP debugger attached, which only the SW can do.
+      const humanized = (action as { humanized?: boolean }).humanized;
+      if (humanized !== true) return { handled: false, pageChanged: false, success: false, message: "" };
+      const text = (action as { text?: unknown }).text;
+      if (typeof text !== "string" || text.length === 0) {
+        return { handled: true, pageChanged: false, success: false, message: "BLOCKED: missing text" };
+      }
+      if (!runState.currentTabId) {
+        return { handled: true, pageChanged: false, success: false, message: "BLOCKED: no active tab" };
+      }
+      const { cdpTypeText } = await import("@/lib/agent/cdp-controller");
+      await withPageDebugger(runState.currentTabId, () => cdpTypeText(runState.currentTabId, text));
+      return {
+        handled: true,
+        pageChanged: false,
+        success: true,
+        message: `typed ${Array.from(text).length} chars via CDP`,
+      };
+    }
+    case "list_tabs": {
+      const tabs = await listTabs();
+      return {
+        handled: true,
+        pageChanged: false,
+        success: true,
+        message: `listed ${tabs.length} tabs`,
+        data: {
+          tabs: tabs.map((t) => ({ index: t.id, url: t.url, active: t.active })),
+          count: tabs.length,
+        },
+      };
+    }
+    case "get_cookies": {
+      const urls = (action as { urls?: unknown }).urls;
+      const urlList = Array.isArray(urls)
+        ? urls.filter((u): u is string => typeof u === "string" && /^https?:\/\//i.test(u))
+        : undefined;
+      const cookies = urlList && urlList.length > 0
+        ? (await Promise.all(urlList.map((url) => chrome.cookies.getAll({ url })))).flat()
+        : await chrome.cookies.getAll({});
+      return {
+        handled: true,
+        pageChanged: false,
+        success: true,
+        message: `read ${cookies.length} cookies`,
+        data: {
+          cookies: cookies.map((c) => ({
+            name: c.name,
+            value: c.value,
+            domain: c.domain,
+            path: c.path,
+            secure: c.secure,
+            httpOnly: c.httpOnly,
+            sameSite: c.sameSite,
+            expirationDate: c.expirationDate,
+            session: c.session,
+            hostOnly: c.hostOnly,
+          })),
+          count: cookies.length,
+        },
+      };
+    }
+    case "set_cookie": {
+      const sc = action as {
+        url?: string;
+        domain?: string;
+        name?: string;
+        value?: string;
+        path?: string;
+        secure?: boolean;
+        httpOnly?: boolean;
+        sameSite?: string;
+        expirationDate?: number;
+      };
+      if (!sc.url && !sc.domain) {
+        return { handled: true, pageChanged: false, success: false, message: "BLOCKED: set_cookie requires url or domain" };
+      }
+      // The effective URL is the cookie's write target — gate it exactly like
+      // navigate/search so a disallowed host can never be written to.
+      const gateUrl = sc.url ?? `https://${sc.domain!.replace(/^\./, "")}`;
+      const urlCheck = checkUrlAllowedWithDomainConfig(gateUrl);
+      if (!urlCheck.allowed) {
+        notify?.({
+          type: "error",
+          step: runState.step,
+          message: `BLOCKED cookie write: ${urlCheck.reason} (${gateUrl})`,
+          recoverable: false,
+        });
+        return { handled: true, pageChanged: false, success: false, message: `BLOCKED: ${urlCheck.reason} (${gateUrl})` };
+      }
+      await chrome.cookies.set({
+        url: gateUrl,
+        name: sc.name ?? "",
+        value: sc.value ?? "",
+        domain: sc.domain,
+        path: sc.path,
+        secure: sc.secure,
+        httpOnly: sc.httpOnly,
+        sameSite: sc.sameSite as chrome.cookies.SameSiteStatus,
+        expirationDate: sc.expirationDate,
+      });
+      return { handled: true, pageChanged: false, success: true, message: `set cookie ${sc.name}`, data: { set: sc.name } };
+    }
+    case "delete_cookies": {
+      const dc = action as { urls?: unknown; all?: unknown };
+      const explicitAll = dc.all === true;
+      const urlList = Array.isArray(dc.urls)
+        ? dc.urls.filter((u): u is string => typeof u === "string" && /^https?:\/\//i.test(u))
+        : undefined;
+      const hasUrls = !!urlList && urlList.length > 0;
+      // Deleting every cookie is destructive: require the explicit all:true
+      // opt-in. A bare delete_cookies (or an empty urls list) must never wipe
+      // the whole jar — the schema refine is the first gate, this is the
+      // second (defense in depth against a malformed/forged message).
+      if (!explicitAll && !hasUrls) {
+        return {
+          handled: true,
+          pageChanged: false,
+          success: false,
+          message: "BLOCKED: delete_cookies requires at least one url or explicit all:true",
+        };
+      }
+      // Same domain gate as set_cookie: a cookie can only be deleted for a
+      // host the domain policy allows. Every URL is checked so a mixed list
+      // fails closed on the first disallowed host.
+      if (!explicitAll && hasUrls) {
+        for (const url of urlList!) {
+          const urlCheck = checkUrlAllowedWithDomainConfig(url);
+          if (!urlCheck.allowed) {
+            notify?.({
+              type: "error",
+              step: runState.step,
+              message: `BLOCKED cookie delete: ${urlCheck.reason} (${url})`,
+              recoverable: false,
+            });
+            return { handled: true, pageChanged: false, success: false, message: `BLOCKED: ${urlCheck.reason} (${url})` };
+          }
+        }
+      }
+      const all = explicitAll
+        ? await chrome.cookies.getAll({})
+        : (await Promise.all(urlList!.map((url) => chrome.cookies.getAll({ url })))).flat();
+      // The all:true wipe enumerates the ENTIRE cookie jar — a domain-agnostic
+      // deletion. It must go through the same domain gate as the urls path
+      // (and set_cookie): a cookie whose domain the policy disallows aborts the
+      // whole wipe. Fail closed BEFORE any removal so a blocked host in the jar
+      // cannot be wiped by routing through all:true instead of a url list.
+      if (explicitAll) {
+        for (const c of all) {
+          const url = `http${c.secure ? "s" : ""}://${c.domain.replace(/^\./, "")}${c.path}`;
+          const urlCheck = checkUrlAllowedWithDomainConfig(url);
+          if (!urlCheck.allowed) {
+            notify?.({
+              type: "error",
+              step: runState.step,
+              message: `BLOCKED cookie delete: ${urlCheck.reason} (${url})`,
+              recoverable: false,
+            });
+            return { handled: true, pageChanged: false, success: false, message: `BLOCKED: ${urlCheck.reason} (${url})` };
+          }
+        }
+      }
+      for (const c of all) {
+        // Removal keys are URL-based; reconstruct from the cookie's own fields
+        // (secure → https, host-only domain, its path).
+        const url = `http${c.secure ? "s" : ""}://${c.domain.replace(/^\./, "")}${c.path}`;
+        await chrome.cookies.remove({ url, name: c.name });
+      }
+      return { handled: true, pageChanged: false, success: true, message: `deleted ${all.length} cookies`, data: { deleted: all.length } };
+    }
+    case "get_storage":
+    case "set_storage":
+    case "clear_storage": {
+      const storageType = (action as { storage_type?: string }).storage_type === "session" ? "session" : "local";
+      const area = storageType === "session" ? chrome.storage.session : chrome.storage.local;
+      if (action.type === "get_storage") {
+        const items = await area.get(null);
+        return { handled: true, pageChanged: false, success: true, message: `read storage (${storageType})`, data: { items, type: storageType } };
+      }
+      if (action.type === "set_storage") {
+        const key = (action as { key?: unknown }).key;
+        const value = (action as { value?: unknown }).value;
+        if (typeof key !== "string" || key.length === 0) {
+          return { handled: true, pageChanged: false, success: false, message: "BLOCKED: set_storage requires a key" };
+        }
+        // JSON round-trip: the stored value must survive serialization, and
+        // what's stored is exactly what a later get_storage returns.
+        let serializable: unknown;
+        try {
+          serializable = JSON.parse(JSON.stringify(value));
+        } catch {
+          return { handled: true, pageChanged: false, success: false, message: "BLOCKED: set_storage value is not JSON-serializable" };
+        }
+        await area.set({ [key]: serializable });
+        return { handled: true, pageChanged: false, success: true, message: `set storage ${key} (${storageType})`, data: { set: key, type: storageType } };
+      }
+      if (action.type === "clear_storage") {
+        const cs = action as { keys?: unknown; all?: unknown };
+        const explicitAll = cs.all === true;
+        const keys = Array.isArray(cs.keys)
+          ? cs.keys.filter((k): k is string => typeof k === "string" && k.length > 0)
+          : undefined;
+        const hasKeys = !!keys && keys.length > 0;
+        // A whole-area wipe destroys API keys / settings / the domain config:
+        // require explicit all:true OR a concrete keys list — never infer a
+        // wipe from an empty/absent keys list (schema refine + this guard).
+        if (!explicitAll && !hasKeys) {
+          return {
+            handled: true,
+            pageChanged: false,
+            success: false,
+            message: "BLOCKED: clear_storage requires at least one key or explicit all:true",
+          };
+        }
+        if (explicitAll) {
+          await area.clear();
+          return { handled: true, pageChanged: false, success: true, message: `cleared storage (${storageType})`, data: { cleared: storageType } };
+        }
+        await area.remove(keys!);
+        return { handled: true, pageChanged: false, success: true, message: `cleared ${keys!.length} keys (${storageType})`, data: { removed: keys!.length, type: storageType } };
+      }
+      throw new Error("unreachable: storage action type");
     }
     default:
       return { handled: false, pageChanged: false, success: false, message: "" };

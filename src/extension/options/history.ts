@@ -5,7 +5,7 @@
  * helpers live in history-utils.ts.
  */
 
-import { $ } from "@/extension/shared";
+import { $, redactKeyLeak } from "@/extension/shared";
 import { showSaved } from "./settings-sync";
 import { confirmModal, alertModal } from "./modal";
 import {
@@ -47,8 +47,18 @@ document.getElementById("clearHistory")?.addEventListener("click", async () => {
 // ─── A8: Run Export/Import ──────────────────────────────────────────────────
 
 document.getElementById("exportHistory")?.addEventListener("click", async () => {
-  const runs = await (await import("@/lib/agent/run-history")).loadRuns();
-  const blob = new Blob([JSON.stringify(runs, null, 2)], { type: "application/json" });
+  let runs;
+  try {
+    runs = await (await import("@/lib/agent/run-history")).loadRuns();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[history] failed to load runs for export:", message);
+    await alertModal({ title: "Export failed", message: `Storage error: ${message}` });
+    return;
+  }
+  // Mask key-shaped tokens in the exported JSON (same leak surface as the
+  // transcript modal — the storage layer redacts by value only).
+  const blob = new Blob([redactKeyLeak(JSON.stringify(runs, null, 2))], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

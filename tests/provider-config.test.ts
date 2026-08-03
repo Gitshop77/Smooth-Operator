@@ -13,7 +13,13 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { buildProvider, readProviderConfig, type ProviderConfig } from "../src/extension/provider-config";
+import {
+  buildProvider,
+  readProviderConfig,
+  resolveModel,
+  type ProviderConfig,
+} from "../src/extension/provider-config";
+import { DEFAULT_MODELS } from "../src/extension/provider-config";
 
 const LOOPBACK_BASE_URL = "http://localhost:11434";
 
@@ -371,6 +377,19 @@ describe("readProviderConfig unknown provider fallback", () => {
     expect(config!.provider).toBe("openai");
   });
 
+  test("unknown-provider fallback clears the stored key (foreign-key protection)", async () => {
+    // The stored key belongs to whatever provider the user last configured;
+    // forwarding it to the default host would exfiltrate it (e.g. an Anthropic
+    // key sent to api.openai.com). The fallback must require re-entry.
+    store.provider = "totally-fake-provider";
+    store.model = "some-model";
+    sessionStore.apiKey = "sk-ant-secret";
+
+    const config = await readProviderConfig();
+    expect(config!.provider).toBe("openai");
+    expect(config!.apiKey).toBe("");
+  });
+
   test("writes provider_reset_warning flag when falling back", async () => {
     store.provider = "totally-fake-provider";
     store.model = "some-model";
@@ -387,5 +406,257 @@ describe("readProviderConfig unknown provider fallback", () => {
     const config = await readProviderConfig();
     expect(config!.provider).toBe("anthropic");
     expect(store.provider_reset_warning).toBeUndefined();
+  });
+});
+
+/**
+ * (e) The forceReasoning user override: "on" must force reasoning-parameter
+ * emission even for models the catalog doesn't flag (e.g. an
+ * OpenAI-compatible reasoning model unknown to the catalog); "off"/"auto"/
+ * unset must keep the catalog-derived flag. The override is read fail-safe —
+ * provider construction must never crash on a missing/corrupt storage layer.
+ */
+describe("forceReasoning override", () => {
+  function installChromeWithStorage(stored: Record<string, unknown>): void {
+    (globalThis as unknown as { chrome: unknown }).chrome = {
+      runtime: { lastError: undefined },
+      dns: {
+        resolve: (_h: string, cb: (r: { addresses?: string[] }) => void) =>
+          cb({ addresses: ["93.184.216.34"] }),
+      },
+      storage: {
+        local: { get: makeStorageGet(stored), set: async () => undefined },
+      },
+    };
+  }
+
+  afterEach(() => {
+    delete (globalThis as unknown as { chrome?: unknown }).chrome;
+  });
+
+  // `totally-unknown-model-xyz` is absent from the bundled catalog and matches
+  // no reasoning name pattern, so the catalog-derived flag is deterministically
+  // false — the override is the only thing that can flip it to true.
+  const UNKNOWN_MODEL = "totally-unknown-model-xyz";
+
+  test("forceReasoning 'on' forces supportsReasoning even for uncatalogued models", async () => {
+    installChromeWithStorage({ forceReasoning: "on" });
+    const provider = await buildProvider({
+      provider: "openai",
+      model: UNKNOWN_MODEL,
+      apiKey: "sk-test",
+      baseUrl: "https://api.openai.com/v1",
+      provenance: "user",
+    });
+    expect(provider.supportsReasoning).toBe(true);
+  });
+
+  test("unset forceReasoning keeps the catalog-derived flag", async () => {
+    installChromeWithStorage({});
+    const provider = await buildProvider({
+      provider: "openai",
+      model: UNKNOWN_MODEL,
+      apiKey: "sk-test",
+      baseUrl: "https://api.openai.com/v1",
+      provenance: "user",
+    });
+    expect(provider.supportsReasoning).toBe(false);
+  });
+
+  test("forceReasoning 'off' keeps the catalog-derived flag at build time", async () => {
+    installChromeWithStorage({ forceReasoning: "off" });
+    const provider = await buildProvider({
+      provider: "openai",
+      model: UNKNOWN_MODEL,
+      apiKey: "sk-test",
+      baseUrl: "https://api.openai.com/v1",
+      provenance: "user",
+    });
+    expect(provider.supportsReasoning).toBe(false);
+  });
+});
+
+/**
+ * resolveModel — the shared default-model resolution used by buildProvider and
+ * extractStateForRun. Order: explicit model > curated offline DEFAULT_MODELS >
+ * family priority (live catalog) > newest-stable > "".
+ */
+describe("resolveModel — default-model family priority", () => {
+  test("offline DEFAULT_MODELS still resolve first", () => {
+    expect(resolveModel({ provider: "openai", catalogId: "openai" })).toBe(DEFAULT_MODELS.openai);
+  });
+
+  test("an explicit model always wins", () => {
+    expect(resolveModel({ provider: "openai", catalogId: "openai", model: "gpt-4o" })).toBe("gpt-4o");
+  });
+
+  test("a provider without a DEFAULT_MODELS entry resolves via its priority family", () => {
+    // moonshotai has no DEFAULT_MODELS entry; its shipped priority prefers the
+    // kimi-k2.x family over the newest kimi-k3 release.
+    expect(resolveModel({ provider: "moonshotai", catalogId: "moonshotai" })).toBe("kimi-k2.5");
+  });
+
+  test("unknown provider id resolves to the empty string", () => {
+    expect(resolveModel({ provider: "no-such-provider", catalogId: "no-such-provider" })).toBe("");
+  });
+});
+
+/**
+ * O8 — provider-scoped config record (`chrome.storage.local["providerConfigs"]`
+ * keyed by provider id). The nested record wins over the flat top-level keys,
+ * which stay as the active back-compat mirror. The nested record's provenance
+ * follows the same fail-safe as the top-level: only an explicit "user" stamp is
+ * trusted, everything else is "injected".
+ */
+describe("readProviderConfig providerConfigs nested record", () => {
+  let store: Record<string, unknown>;
+  let sessionStore: Record<string, unknown>;
+
+  beforeEach(() => {
+    store = {};
+    sessionStore = {};
+    (globalThis as unknown as { chrome: unknown }).chrome = {
+      storage: {
+        local: {
+          get: (keys: string | string[] | null): Promise<Record<string, unknown>> => {
+            const result: Record<string, unknown> = {};
+            const arr = keys == null ? Object.keys(store) : Array.isArray(keys) ? keys : [keys];
+            for (const k of arr) if (k in store) result[k] = store[k];
+            return Promise.resolve(result);
+          },
+          set: (items: Record<string, unknown>): Promise<void> => {
+            Object.assign(store, items);
+            return Promise.resolve();
+          },
+        },
+        session: { get: makeStorageGet(sessionStore) },
+      },
+    };
+  });
+
+  afterEach(() => {
+    delete (globalThis as unknown as { chrome?: unknown }).chrome;
+  });
+
+  test("nested record wins over top-level for baseUrl/model/resourceName", async () => {
+    store.provider = "openai";
+    store.model = "top-model";
+    store.baseUrl = "https://top.example.com/v1";
+    store.resourceName = "top-resource";
+    store.provenance = "user";
+    sessionStore.apiKey = "sk-test";
+    store.providerConfigs = {
+      openai: {
+        model: "nested-model",
+        baseUrl: "https://nested.example.com/v1",
+        resourceName: "nested-resource",
+        provenance: "user",
+      },
+    };
+
+    const config = await readProviderConfig();
+    expect(config!.provider).toBe("openai");
+    expect(config!.model).toBe("nested-model");
+    expect(config!.baseUrl).toBe("https://nested.example.com/v1");
+    expect(config!.resourceName).toBe("nested-resource");
+    expect(config!.provenance).toBe("user");
+  });
+
+  test("partial nested record merges per-field over the top-level mirror", async () => {
+    store.provider = "anthropic";
+    store.model = "claude-sonnet-5";
+    store.baseUrl = "https://api.anthropic.com/v1";
+    store.provenance = "user";
+    sessionStore.apiKey = "sk-test";
+    store.providerConfigs = {
+      anthropic: { baseUrl: "https://nested.example.com/v1", provenance: "user" },
+    };
+
+    const config = await readProviderConfig();
+    expect(config!.model).toBe("claude-sonnet-5"); // top-level wins when nested omits
+    expect(config!.baseUrl).toBe("https://nested.example.com/v1");
+  });
+
+  test("absent nested entry for the resolved provider → top-level authoritative", async () => {
+    store.provider = "openai";
+    store.model = "top-model";
+    store.baseUrl = "https://top.example.com/v1";
+    store.provenance = "user";
+    sessionStore.apiKey = "sk-test";
+    store.providerConfigs = { anthropic: { model: "other-model", provenance: "user" } };
+
+    const config = await readProviderConfig();
+    expect(config!.model).toBe("top-model");
+    expect(config!.baseUrl).toBe("https://top.example.com/v1");
+  });
+
+  test("providerConfigs absent entirely → top-level authoritative", async () => {
+    store.provider = "openai";
+    store.model = "top-model";
+    store.baseUrl = "https://top.example.com/v1";
+    store.provenance = "user";
+    sessionStore.apiKey = "sk-test";
+
+    const config = await readProviderConfig();
+    expect(config!.model).toBe("top-model");
+    expect(config!.baseUrl).toBe("https://top.example.com/v1");
+  });
+
+  test("nested record without a provenance stamp defaults to 'injected'", async () => {
+    store.provider = "openai";
+    store.provenance = "user";
+    sessionStore.apiKey = "sk-test";
+    store.providerConfigs = { openai: { baseUrl: LOOPBACK_BASE_URL } };
+
+    const config = await readProviderConfig();
+    expect(config!.provenance).toBe("injected");
+    expect(config!.baseUrl).toBe(LOOPBACK_BASE_URL);
+  });
+
+  test("nested record with a non-string provenance defaults to 'injected'", async () => {
+    store.provider = "openai";
+    store.provenance = "user";
+    sessionStore.apiKey = "sk-test";
+    store.providerConfigs = { openai: { baseUrl: LOOPBACK_BASE_URL, provenance: "user-ish" } };
+
+    const config = await readProviderConfig();
+    expect(config!.provenance).toBe("injected");
+  });
+
+  test("unknown provider falls back to openai AND applies openai's nested record", async () => {
+    store.provider = "totally-fake-provider";
+    store.model = "some-model";
+    sessionStore.apiKey = "sk-test";
+    store.providerConfigs = {
+      openai: { model: "nested-openai-model", baseUrl: "https://api.openai.com/v1", provenance: "user" },
+    };
+
+    const config = await readProviderConfig();
+    expect(config!.provider).toBe("openai");
+    expect(config!.model).toBe("nested-openai-model");
+    expect(config!.baseUrl).toBe("https://api.openai.com/v1");
+  });
+
+  test("unknown-provider fallback keeps the foreign-key protection (key stays cleared)", async () => {
+    store.provider = "totally-fake-provider";
+    store.model = "some-model";
+    sessionStore.apiKey = "sk-ant-secret";
+    store.providerConfigs = { openai: { model: "nested-openai-model", provenance: "user" } };
+
+    const config = await readProviderConfig();
+    expect(config!.provider).toBe("openai");
+    expect(config!.apiKey).toBe("");
+    expect(store.provider_reset_warning).toBe(true);
+  });
+
+  test("malformed providerConfigs (non-object) is ignored", async () => {
+    store.provider = "openai";
+    store.model = "top-model";
+    store.provenance = "user";
+    sessionStore.apiKey = "sk-test";
+    store.providerConfigs = "corrupted";
+
+    const config = await readProviderConfig();
+    expect(config!.model).toBe("top-model");
   });
 });

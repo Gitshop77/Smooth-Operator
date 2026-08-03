@@ -6,14 +6,14 @@
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import { TIMINGS, LIMITS, sleep } from "../constants";
-import { isVisible, safeScrollIntoView } from "../helpers";
+import { isRendered, safeScrollIntoView } from "../helpers";
 import type { ActionContext } from "./types";
 
 /** Tag names whose text nodes should never be reported as "visible page text". */
 const NON_RENDERED_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"]);
 
 export async function handleFindText(
-  _ctx: ActionContext,
+  ctx: ActionContext,
   action: Extract<Action, { type: "find_text" }>,
 ): Promise<ActionResult> {
   // Use TreeWalker to find a matching text node, then scroll its parent into view.
@@ -49,9 +49,14 @@ export async function handleFindText(
       // than risking an unsafe `parentNode` cast that could throw in isVisible.
       const parent = node.parentElement;
       if (!parent) continue;
-      if (isVisible(parent)) {
+      // Rendered check only (no viewport requirement) — text below the fold
+      // is a legitimate match: the handler scrolls it into view, which is
+      // exactly the schema contract ("Scroll the page until the given text
+      // becomes visible"). Requiring viewport intersection here made
+      // below-fold text unreachable ("not found" despite existing).
+      if (isRendered(parent)) {
         safeScrollIntoView(parent);
-        await sleep(TIMINGS.findTextScroll);
+        await sleep(TIMINGS.findTextScroll, ctx.signal);
         return { action, success: true, message: `Found "${action.text}" and scrolled to it` };
       }
     }

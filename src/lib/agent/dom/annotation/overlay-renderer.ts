@@ -50,14 +50,6 @@ interface ElementHighlightState {
 
 const elementHighlights = new WeakMap<HTMLElement, ElementHighlightState>();
 
-/** When true, highlights persist until explicitly removed (debug mode). */
-let persistentHighlightMode = false;
-
-/** Enable/disable persistent highlight mode. */
-export function setPersistentHighlight(enabled: boolean): void {
-  persistentHighlightMode = enabled;
-}
-
 /**
  * Single memoized visually-hidden `aria-live` region that announces which
  * element the agent is acting on, so screen-reader users can follow the
@@ -65,7 +57,10 @@ export function setPersistentHighlight(enabled: boolean): void {
  */
 let liveRegion: HTMLElement | null = null;
 function announceAction(label: string): void {
-  if (!liveRegion) {
+  // Recreate the region if it was detached (e.g. a page framework replaced
+  // `document.body` mid-session); a detached region would silently swallow
+  // every announcement from then on.
+  if (!liveRegion || !liveRegion.isConnected) {
     liveRegion = document.createElement("div");
     liveRegion.setAttribute("aria-live", "polite");
     liveRegion.style.cssText = [
@@ -86,8 +81,8 @@ function announceAction(label: string): void {
 
 /**
  * Highlight an element with an orange outline + a floating label badge.
- * The highlight auto-removes after {@link HIGHLIGHT_DURATION_MS} milliseconds,
- * unless C19 persistent mode is enabled (then it stays until the next action).
+ * The highlight auto-removes after {@link HIGHLIGHT_DURATION_MS} milliseconds
+ * (or sooner via the returned handle).
  *
  * @param el The element to highlight.
  * @param label Text shown in the floating badge (typically the action summary).
@@ -178,16 +173,13 @@ export function highlightElement(el: HTMLElement, label: string): OverlayHandle 
     }
   };
 
- // in persistent mode, highlights stay until explicitly removed
- // (the executor calls remove() on the previous highlight before adding a
- // new one). In normal mode, they auto-remove after HIGHLIGHT_DURATION_MS.
-  if (!persistentHighlightMode) {
-    setTimeout(remove, HIGHLIGHT_DURATION_MS);
-  }
+  // Highlights always auto-remove after HIGHLIGHT_DURATION_MS (the executor
+  // also calls remove() on the previous highlight before adding a new one,
+  // which clears it early when actions run back-to-back).
+  setTimeout(remove, HIGHLIGHT_DURATION_MS);
   return { remove };
 }
 
 // NOTE: a `showStatusBanner` helper previously lived here but had no callers
-// (production or test) and was removed to shrink the public API.
-// Re-add it only if a
-// status-reporting path actually wires it up.
+// (production or test) and was removed to shrink the public API. Re-add it
+// only if a status-reporting path actually wires it up.

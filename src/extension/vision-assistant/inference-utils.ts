@@ -128,6 +128,16 @@ export function validateVisionOutput(visual: ort.Tensor, H: number, N: number): 
         `(dims=${JSON.stringify(visual?.dims)})`,
     );
   }
+  // The detect loop casts `visual.data` to Float32Array and splices it into
+  // the embedding table; a re-exported model emitting fp16 features would be
+  // silently misread as 32-bit garbage. Assert the dtype like the other
+  // version-skew guards (see `assertVisionOutput`).
+  if (visual.type !== "float32") {
+    throw new Error(
+      `Vision encoder output dtype "${visual.type}" !== "float32"; ` +
+        `refusing to misread ${visual.type} features as float32 embeddings.`,
+    );
+  }
   if (Number(visual.dims[0]) !== N) {
     throw new Error(
       `Vision encoder output token count ${visual.dims[0]} !== injected <IMG_CONTEXT> count ${N}`,
@@ -136,6 +146,14 @@ export function validateVisionOutput(visual: ort.Tensor, H: number, N: number): 
 }
 
 export function validateLogitsShape(logits: ort.Tensor, label: string): number {
+  // `sampleNextToken` casts `logits.data` to Float32Array; an fp16 logits
+  // tensor would be silently misread as 32-bit (wrong argmax → wrong token).
+  if (logits.type !== "float32") {
+    throw new Error(
+      `${label}: logits dtype "${logits.type}" !== "float32"; ` +
+        `refusing to misread ${logits.type} logits as float32.`,
+    );
+  }
   if (logits.dims.length !== 3 || !Number.isFinite(Number(logits.dims[2])) || Number(logits.dims[2]) <= 0) {
     throw new Error(`${label}: logits tensor is not a valid 3-D [1,T,V] tensor (dims=${JSON.stringify(logits.dims)})`);
   }

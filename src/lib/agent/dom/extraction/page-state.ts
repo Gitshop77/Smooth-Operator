@@ -9,7 +9,7 @@ import {
 } from "../utils";
 import { buildAttrs, hashElement, DOM_CONFIG, resetHashCaches } from "./element-info";
 import { redactUrlTokens } from "./element-info-utils";
-import { getShadowRoot, installShadowPiercer } from "../annotation/shadow-piercer";
+import { getShadowRoot } from "../annotation/shadow-piercer";
 import { escapeAttr, attrString, buildPageInfo, buildCompoundChildren } from "./page-state-utils";
 
 export function isVisible(el: HTMLElement): boolean {
@@ -19,6 +19,64 @@ export function isVisible(el: HTMLElement): boolean {
 const MAX_WALK_DEPTH = 100;
 const MAX_ELEMENTS = 10_000;
 const MAX_LINES = 10_000;
+
+/** Char budget for the serialized snapshot handed to the model per window. */
+export const MAX_SNAPSHOT_CHARS = 80_000;
+/** Keep the last N chars (pagination/nav links) in every window. */
+export const SNAPSHOT_TAIL_CHARS = 5_000;
+/** Room reserved inside the window budget for the truncation marker. */
+const SNAPSHOT_MARKER_ROOM = 200;
+
+/** One paged window of a serialized snapshot. */
+export interface SnapshotWindow {
+  text: string;
+  truncated: boolean;
+  totalChars: number;
+  offset: number;
+  hasMore: boolean;
+  nextOffset: number | null;
+}
+
+/**
+ * Window a serialized snapshot: `offset=0` returns the head of the page,
+ * `offset=N` resumes at char N. When the snapshot fits under
+ * {@link MAX_SNAPSHOT_CHARS} it is returned unchanged. The tail is always
+ * included so pagination/nav links stay available in every window.
+ *
+ * The marker sits at the HEAD of the window: the message layer re-caps
+ * `elementsText` at 60k from the start (loop/messages.ts), which would
+ * otherwise cut a mid-window marker and hide the resume offset from the model.
+ * The tail is placed BEFORE the chunk for the same reason — a trailing tail
+ * falls outside the 60k visible budget (and outside the history render
+ * window for `page_next` results), which would silently drop the nav links
+ * the tail exists to preserve.
+ */
+export function windowSnapshot(yaml: string, offset = 0): SnapshotWindow {
+  if (!yaml) {
+    return { text: "", truncated: false, totalChars: 0, offset: 0, hasMore: false, nextOffset: null };
+  }
+  const total = yaml.length;
+  if (total <= MAX_SNAPSHOT_CHARS) {
+    return { text: yaml, truncated: false, totalChars: total, offset: 0, hasMore: false, nextOffset: null };
+  }
+  const contentBudget = MAX_SNAPSHOT_CHARS - SNAPSHOT_TAIL_CHARS - SNAPSHOT_MARKER_ROOM;
+  const tail = yaml.slice(-SNAPSHOT_TAIL_CHARS);
+  const clampedOffset = Math.min(Math.max(0, offset), total - SNAPSHOT_TAIL_CHARS);
+  const chunk = yaml.slice(clampedOffset, clampedOffset + contentBudget);
+  const chunkEnd = clampedOffset + contentBudget;
+  const hasMore = chunkEnd < total - SNAPSHOT_TAIL_CHARS;
+  const marker = hasMore
+    ? `[... truncated at char ${chunkEnd} of ${total}. Call page_next with offset=${chunkEnd} to see more. Pagination links below. ...]\n`
+    : "";
+  return {
+    text: marker + tail + "\n" + chunk,
+    truncated: true,
+    totalChars: total,
+    offset: clampedOffset,
+    hasMore,
+    nextOffset: hasMore ? chunkEnd : null,
+  };
+}
 
 function pushLine(acc: WalkAccumulator, line: string): void {
   if (acc.lines.length >= MAX_LINES) {
@@ -161,21 +219,31 @@ function walkNode(node: Node, depth: number, acc: WalkAccumulator): void {
 
 let cachedSelectorMap: Record<number, HTMLElement> = {};
 let cachedHashes: Set<string> = new Set();
-
-try {
-  installShadowPiercer({ tagExisting: true });
-} catch {
-  /* non-DOM environment */
-}
+/** Full serialized snapshot from the last successful extract (paging cache). */
+let snapshotCacheText: string | null = null;
 
 export function resetDomBaseline(): void {
   cachedHashes = new Set();
+}
+
+/**
+ * Return the next window of the cached snapshot serialization (or null when
+ * no snapshot has been extracted in this content-script instance). The
+ * `page_next` action consumes this to page through a truncated page.
+ */
+export function pageSnapshotChunk(offset?: number): SnapshotWindow | null {
+  if (snapshotCacheText === null) return null;
+  return windowSnapshot(snapshotCacheText, offset ?? 0);
 }
 
 export function extractBrowserState(tabs: TabInfo[]): BrowserState {
   visibilityCache = new WeakMap<HTMLElement, boolean>();
   resetHashCaches();
   beginVisibilityCache();
+  // Redact each tab URL at the boundary, the same way `location.href` below is
+  // redacted — a tab open on an OAuth callback (or a share link carrying a
+  // token) would otherwise leak its query-string secrets into page state.
+  const redactedTabs = tabs.map((t) => (t.url ? { ...t, url: redactUrlTokens(t.url) } : t));
   const acc: WalkAccumulator = {
     index: 0,
     selectorMap: {},
@@ -186,6 +254,7 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
     truncated: false,
     elementTruncated: false,
   };
+  let walkFailed = false;
   if (document.body) {
     try {
       // Iterate via firstChild/nextSibling instead of `document.body.childNodes`:
@@ -200,10 +269,12 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
       acc.selectorMap = {};
       acc.elements = [];
       acc.lines = [];
+      walkFailed = true;
     } finally {
       endVisibilityCache();
     }
   } else {
+    walkFailed = true;
     endVisibilityCache();
   }
   cachedHashes = new Set(acc.elements.map((e) => e.hash));
@@ -211,14 +282,19 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
   const scrollTop = window.scrollY || 0;
   const scrollHeight = document.documentElement.scrollHeight;
   const vh = window.innerHeight;
-  const elementsText = acc.lines.join("\n");
+  const rawElementsText = acc.lines.join("\n");
+  // Cache only SUCCESSFUL serializations. A failed walk (or a missing body)
+  // leaves the page-state degraded; page_next must surface "extract first"
+  // instead of paging an empty or stale snapshot.
+  snapshotCacheText = walkFailed ? null : rawElementsText;
+  const windowedText = windowSnapshot(rawElementsText, 0).text;
   return {
     url: redactUrlTokens(location.href),
     title: document.title,
-    tabs,
+    tabs: redactedTabs,
     elements: acc.elements,
-    elementsText: elementsText.trim().length > 0
-      ? `<untrusted_page_state>\n${elementsText}\n</untrusted_page_state>`
+    elementsText: windowedText.trim().length > 0
+      ? `<untrusted_page_state>\n${windowedText}\n</untrusted_page_state>`
       : "[empty page]",
     pageInfo: buildPageInfo(scrollTop, scrollHeight, vh),
     newElementCount: acc.newElementCount,

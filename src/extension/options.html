@@ -19,7 +19,7 @@
     on :11434, LiteLLM on :4000) directly from this page — matching the SSRF
     guard's loopback exemption (both layers must agree on loopback).
   -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src https://* http://localhost:* http://127.0.0.1:* http://[::1]:*;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src https://* http://localhost:* http://127.0.0.1:* http://[::1]:*;">
   <link rel="stylesheet" href="options.css" />
 </head>
 <body>
@@ -66,7 +66,8 @@
               Remember API key on this device —
               <strong>off by default</strong>. Keeps the key available after
               browser restarts by storing it unencrypted in this browser's
-              local storage.
+              local storage, where it remains readable to extension code on
+              every page you visit — not just this page.
             </span>
           </label>
 
@@ -135,6 +136,42 @@
               <span id="refreshModelsStatus" class="test-result" role="status" aria-live="polite"></span>
             </div>
           </div>
+        </div>
+
+        <!-- Reasoning -->
+        <div class="section-group">
+          <h3 class="section-title">Reasoning</h3>
+          <p class="section-desc">
+            Per-model reasoning settings: the effort level (low/medium/high) and,
+            for models that take a thinking budget (Anthropic-style), the max
+            thinking tokens. Not all models support every level — the lists below
+            reflect what your selected model declares.
+          </p>
+          <div class="row2">
+            <label>
+              <span>Reasoning effort</span>
+              <select id="reasoningEffort">
+                <option value="low">low</option>
+                <option value="medium" selected>medium</option>
+                <option value="high">high</option>
+              </select>
+              <small>How much reasoning the model applies before answering.</small>
+            </label>
+            <label>
+              <span id="reasoning-budget-label" class="is-hidden">Max thinking budget (tokens)</span>
+              <input type="number" id="reasoningBudget" min="1024" max="63999" step="1024" placeholder="20480" />
+              <small>Only used by models that take an explicit thinking budget.</small>
+            </label>
+          </div>
+          <label>
+            <span>Force reasoning</span>
+            <select id="forceReasoning">
+              <option value="auto">Auto — follow the model default</option>
+              <option value="on">On — always reason before answering</option>
+              <option value="off">Off — disable reasoning when supported</option>
+            </select>
+            <small>Overrides the model's own default when the provider supports it.</small>
+          </label>
         </div>
 
         <!-- Vision Assistant -->

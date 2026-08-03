@@ -192,4 +192,28 @@ describe("executeActions mode/confirmation gate", () => {
     expect(results[3].success).toBe(false);
     expect(results[3].message).toMatch(/BLOCKED: prior action/);
   });
+
+  test("a throwing content-script round-trip yields per-action failures (queue not truncated)", async () => {
+    // The content script is unreachable: sendMessage resolves with ok:false,
+    // which makes executeActionsInTab THROW. executeActions must catch that
+    // and mark every forwarded action failed instead of rejecting — the
+    // mirror of the loop-side safeDispatch guard.
+    chromeMock.tabs.sendMessage.mockImplementation(async (_tabId: number, msg: { type?: string }) => {
+      if (msg?.type === "PING") return { ok: true };
+      return { ok: false, error: "content script not ready" };
+    });
+    const executeActions = makeExecuteActions("standard");
+    const actions: AgentAction[] = [
+      { type: "click", index: 0 },
+      { type: "click", index: 1 },
+    ] as AgentAction[];
+
+    const results = await executeActions(actions, {} as never);
+
+    expect(results.length).toBe(2);
+    for (const r of results) {
+      expect(r.success).toBe(false);
+      expect(r.message).toMatch(/BLOCKED: content script failed/);
+    }
+  });
 });

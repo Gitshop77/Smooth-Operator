@@ -17,17 +17,41 @@ import type {
 import { executeAction, describeAction } from "../../tools/executor";
 import { resetDomBaseline } from "../../dom/extractor";
 import { checkActionAllowed, requiresConfirmation, type AgentMode } from "../../modes";
+import { formatErrorSuffix } from "../../errors";
 import type { CallbackDispatcher, CallbackContext } from "../../callbacks";
 import type { LoopDeps, ActionQueueResult } from "../types";
 import type { LoopDetector } from "../loop-detector";
 import { TAB_LEVEL_ACTIONS } from "../constants";
 
 /** Build a uniform failure {@link ActionResult} for an exception. */
-const toActionError = (a: AgentAction, e: unknown): ActionResult => ({
-  action: a,
-  success: false,
-  message: `Error: ${e instanceof Error ? e.message : String(e)}`,
-});
+const toActionError = (a: AgentAction, e: unknown): ActionResult => {
+  let message = `Error: ${e instanceof Error ? e.message : String(e)}`;
+  // Errors that carry the P2 vocabulary (e.g. the executor's
+  // UnhandledActionError, flattened by the catch-all here) keep their code +
+  // recovery hint so the LLM still sees the guidance.
+  const err = e instanceof Error ? e : null;
+  const vocab = err as { machineCode?: unknown; retryable?: unknown; recoveryHint?: unknown } | null;
+  const code = err && typeof vocab?.machineCode === "string" ? vocab.machineCode : null;
+  const hint = err && typeof vocab?.recoveryHint === "string" ? vocab.recoveryHint : null;
+  if (code && hint) {
+    message += ` ${formatErrorSuffix(code, vocab?.retryable === true, hint)}`;
+  }
+  return { action: a, success: false, message };
+};
+
+/**
+ * Invoke a dispatcher hook, swallowing throws. A buggy callback handler must
+ * never truncate the queue mid-step — the remaining actions still execute and
+ * are reported, keeping `results.length === actions.length` (the alignment
+ * the padding contract relies on). Mirrors the orchestrator's `safeDispatch`.
+ */
+async function safeDispatcherCall(fn: () => Promise<void>): Promise<void> {
+  try {
+    await fn();
+  } catch (e) {
+    console.error("[action-queue] dispatcher hook threw (continuing queue):", e);
+  }
+}
 
 export async function executeActionQueue(
   deps: LoopDeps,
@@ -140,14 +164,14 @@ export async function executeActionQueue(
       type: "action", step, index: i + 1, total: actions.length,
       name: action.type, description,
     });
-    if (dispatcher && ctx) await dispatcher.actionStart(ctx, action);
+    if (dispatcher && ctx) await safeDispatcherCall(() => dispatcher.actionStart(ctx, action));
 
     if (config.enableLoopDetection) {
-      loopDetector.record(action, step);
+      loopDetector.record(action);
       const warnCount = loopDetector.shouldWarn();
       if (warnCount > 0) {
         deps.onEvent({ type: "loop-warning", step, count: warnCount });
-        if (dispatcher && ctx) await dispatcher.loopWarning(ctx, warnCount);
+        if (dispatcher && ctx) await safeDispatcherCall(() => dispatcher.loopWarning(ctx, warnCount));
       }
     }
 
@@ -167,8 +191,11 @@ export async function executeActionQueue(
     const runLocalAction = async (): Promise<ActionResult> => {
       // Thread the step's abort signal into the action so an in-flight
       // handler (wait sleeps, SW-RPC races) observes a user STOP instead of
-      // running to completion.
-      try { return await executeAction(action, state, deps.signal); }
+      // running to completion. The active agent mode rides along so the
+      // executor can mode-gate any URL-loader steps spawned by a navigate
+      // (loaders are user-authored content and must not bypass the mode
+      // capability boundary; see tools/executor.ts makeLoaderRunner).
+      try { return await executeAction(action, state, deps.signal, undefined, agentMode); }
       catch (e) { return toActionError(action, e); }
     };
     if (deps.onTabAction && TAB_LEVEL_ACTIONS.has(action.type)) {
@@ -222,7 +249,7 @@ export async function executeActionQueue(
       type: "action-result", step, name: action.type,
       success: result.success, message: result.message,
     });
-    if (dispatcher && ctx) await dispatcher.actionEnd(ctx, action, result);
+    if (dispatcher && ctx) await safeDispatcherCall(() => dispatcher.actionEnd(ctx, action, result));
     results.push(result);
 
     if (result.isDone || !result.success || result.pageChanged) {

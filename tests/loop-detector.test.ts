@@ -5,8 +5,9 @@
  * loop-safety:
  *  - `normalizeAction` emits a type-specific signature for every action type
  *    and distinguishes actions that differ only in their distinguishing param;
- *  - `shouldWarn` fires only at the `WARN_THRESHOLDS` milestones (5 / 8 / 12)
- *    and nowhere else;
+ *  - `shouldWarn` stays silent below the first threshold (5) and then fires
+ *    CONTINUOUSLY at the live count (5, 6, 7, …) — the warning must not
+ *    disappear between thresholds (no flicker);
  *  - goal-level thresholds (`GOAL_WARN_THRESHOLD` / `GOAL_TOP_THRESHOLD`) are
  *    reached exactly, and distinct goals don't accumulate.
  */
@@ -28,33 +29,33 @@ function act(a: Record<string, unknown>): AgentAction {
 describe("normalizeAction type-specific signatures", () => {
   test("every action type emits a distinct, deterministic signature", () => {
     const cases: Array<[AgentAction, string]> = [
-      [act({ type: "click", index: 3 }), "idx=3"],
-      [act({ type: "hover", index: 4 }), "idx=4"],
-      [act({ type: "dropdown_options", index: 2 }), "idx=2"],
-      [act({ type: "upload_file", index: 1 }), "idx=1"],
-      [act({ type: "input", index: 2, text: "hi" }), "idx=2|text=hi"],
-      [act({ type: "select_dropdown", index: 1, text: "a", option_index: 0 }), "optidx=0"],
-      [act({ type: "press_and_hold", index: 5, hold_ms: 1000 }), "hold=1000"],
-      [act({ type: "scroll", down: false }), "dir=up"],
-      [act({ type: "scroll" }), "dir=down"],
-      [act({ type: "send_keys", keys: "Enter" }), "keys=Enter"],
-      [act({ type: "navigate", url: "https://x.test" }), "url=https://x.test"],
-      [act({ type: "switch_tab", tab_id: 7 }), "tab=7"],
-      [act({ type: "close_tab", tab_id: 8 }), "tab=8"],
-      [act({ type: "find_text", text: "q" }), "text=q"],
-      [act({ type: "extract", query: "p" }), "query=p"],
-      [act({ type: "search", query: "s" }), "query=s"],
-      [act({ type: "search_page", pattern: "p" }), "pattern=p"],
-      [act({ type: "find_elements", selector: ".x" }), "selector=.x"],
-      [act({ type: "evaluate", code: "1+1" }), "code=1+1"],
-      [act({ type: "ask_human", question: "?" }), "question=?"],
-      [act({ type: "takeover", reason: "r" }), "reason=r"],
-      [act({ type: "verify", expectation: "e" }), "expectation=e"],
-      [act({ type: "load_skill", name: "n" }), "name=n"],
-      [act({ type: "alert_send_keys", text: "ok" }), "text=ok"],
-      [act({ type: "detect_visual", query: "v" }), "query=v"],
-      [act({ type: "screenshot", file_name: "a.png" }), "file=a.png"],
-      [act({ type: "save_as_pdf", file_name: "b.pdf" }), "file=b.pdf"],
+      [act({ type: "click", index: 3 }), "click|idx=3"],
+      [act({ type: "hover", index: 4 }), "hover|idx=4"],
+      [act({ type: "dropdown_options", index: 2 }), "dropdown_options|idx=2"],
+      [act({ type: "upload_file", index: 1 }), "upload_file|idx=1|path="],
+      [act({ type: "input", index: 2, text: "hi" }), "input|idx=2|text=hi"],
+      [act({ type: "select_dropdown", index: 1, text: "a", option_index: 0 }), "select_dropdown|idx=1|text=a|optidx=0"],
+      [act({ type: "press_and_hold", index: 5, hold_ms: 1000 }), "press_and_hold|idx=5|hold=1000"],
+      [act({ type: "scroll", down: false }), "scroll|dir=up|pages=1"],
+      [act({ type: "scroll" }), "scroll|dir=down|pages=1"],
+      [act({ type: "send_keys", keys: "Enter" }), "send_keys|keys=Enter"],
+      [act({ type: "navigate", url: "https://x.test" }), "navigate|url=https://x.test"],
+      [act({ type: "switch_tab", tab_id: 7 }), "switch_tab|tab=7"],
+      [act({ type: "close_tab", tab_id: 8 }), "close_tab|tab=8"],
+      [act({ type: "find_text", text: "q" }), "find_text|text=q"],
+      [act({ type: "extract", query: "p" }), "extract|query=p"],
+      [act({ type: "search", query: "s" }), "search|query=s"],
+      [act({ type: "search_page", pattern: "p" }), "search_page|pattern=p"],
+      [act({ type: "find_elements", selector: ".x" }), "find_elements|selector=.x"],
+      [act({ type: "evaluate", code: "1+1" }), "evaluate|code=1+1"],
+      [act({ type: "ask_human", question: "?" }), "ask_human|question=?"],
+      [act({ type: "takeover", reason: "r" }), "takeover|reason=r"],
+      [act({ type: "verify", expectation: "e" }), "verify|expectation=e"],
+      [act({ type: "load_skill", name: "n" }), "load_skill|name=n"],
+      [act({ type: "alert_send_keys", text: "ok" }), "alert_send_keys|text=ok"],
+      [act({ type: "detect_visual", query: "v" }), "detect_visual|query=v"],
+      [act({ type: "screenshot", file_name: "a.png" }), "screenshot|file=a.png"],
+      [act({ type: "save_as_pdf", file_name: "b.pdf" }), "save_as_pdf|file=b.pdf"],
       [act({ type: "wait" }), "wait"],
       [act({ type: "go_back" }), "go_back"],
       [act({ type: "done", success: true }), "done"],
@@ -62,10 +63,13 @@ describe("normalizeAction type-specific signatures", () => {
       [act({ type: "alert_dismiss" }), "alert_dismiss"],
       [act({ type: "alert_get_text" }), "alert_get_text"],
     ];
-    for (const [a, expectSub] of cases) {
-      const sig = normalizeAction(a);
-      expect(sig, `signature for ${a.type}`).toContain(expectSub);
+    for (const [a, expected] of cases) {
+      expect(normalizeAction(a), `signature for ${a.type}`).toBe(expected);
     }
+    // Cross-type uniqueness: no two types (or param variants) may collapse
+    // onto one signature — substring containment alone couldn't prove this.
+    const sigs = cases.map(([a]) => normalizeAction(a));
+    expect(new Set(sigs).size).toBe(sigs.length);
   });
 
   test("two actions differing only in their distinguishing param hash differently", () => {
@@ -108,13 +112,12 @@ describe("normalizeAction type-specific signatures", () => {
 });
 
 describe("LoopDetector action-repetition warnings", () => {
-  test("shouldWarn fires only at the WARN_THRESHOLDS milestones (5/8/12)", () => {
+  test("shouldWarn stays silent below 5, then fires continuously at the live count", () => {
     const det = new LoopDetector();
     const action = act({ type: "click", index: 1 });
-    const milestones = new Set([5, 8, 12]);
     for (let i = 1; i <= 12; i++) {
-      det.record(action, i);
-      if (milestones.has(i)) {
+      det.record(action);
+      if (i >= 5) {
         expect(det.shouldWarn(), `step ${i}`).toBe(i);
       } else {
         expect(det.shouldWarn(), `step ${i}`).toBe(0);
@@ -124,7 +127,7 @@ describe("LoopDetector action-repetition warnings", () => {
 
   test("record count reflects equivalent actions in the rolling window", () => {
     const det = new LoopDetector();
-    for (let i = 0; i < 4; i++) det.record(act({ type: "click", index: 1 }), i);
+    for (let i = 0; i < 4; i++) det.record(act({ type: "click", index: 1 }));
     // 4 equivalent clicks → count 4, but not a warning milestone yet.
     expect(det.shouldWarn()).toBe(0);
   });

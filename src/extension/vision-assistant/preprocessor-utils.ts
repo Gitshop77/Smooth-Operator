@@ -7,8 +7,14 @@
 
 import { IMAGE_MEAN } from "./constants";
 
-/** Matches a well-formed `data:image/*;base64,…` URL (compiled once, not per screenshot). */
-export const DATA_URL_RE = /^data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+$/;
+/**
+ * Matches a well-formed raster `data:image/*;base64,…` URL (compiled once, not
+ * per screenshot). Explicit raster-mime allowlist — `image/svg+xml` and other
+ * non-raster subtypes are rejected even though the decode paths rasterize
+ * scriptlessly, so the guard's "image/*" intent cannot drift toward accepting
+ * markup payloads.
+ */
+export const DATA_URL_RE = /^data:image\/(?:png|jpe?g|webp|gif|avif);base64,[A-Za-z0-9+/=]+$/;
 
 /** Mean normalization value as a 0–255 grey (image mean is a constant import). */
 export const MEAN_GREY = Math.round(IMAGE_MEAN * 255);

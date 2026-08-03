@@ -48,4 +48,27 @@ describe("flexibleBoolean — JSON Schema conversion (T3 probe)", () => {
     expect(js.type).toBe("object");
     expect(typeof js.properties).toBe("object");
   });
+
+  test("done.success is emitted as required with a false default", async () => {
+    // With `.default(false)`, the LLM-facing schema requires `success` on
+    // `done` and declares the default, so an omission can never be silently
+    // interpreted as an incomplete verdict.
+    const js = (await zodToJsonSchema(AgentOutputSchema)) as {
+      properties?: {
+        action?: {
+          items?: {
+            oneOf?: Array<{
+              properties?: { type?: { const?: string }; success?: unknown };
+              required?: string[];
+            }>;
+          };
+        };
+      };
+    };
+    const doneVariant = js.properties?.action?.items?.oneOf?.find(
+      (v) => v.properties?.type?.const === "done",
+    );
+    expect(doneVariant?.properties?.success).toMatchObject({ default: false, type: "boolean" });
+    expect(doneVariant?.required).toContain("success");
+  });
 });

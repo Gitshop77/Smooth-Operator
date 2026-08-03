@@ -16,6 +16,9 @@ import { describe, test, expect, beforeEach, vi } from "vitest";
 vi.mock("@/extension/background/state-store", () => ({
   getRunState: vi.fn(),
 }));
+vi.mock("@/extension/background/rate-limit-tracker", () => ({
+  consumeRecentRateLimit: vi.fn(),
+}));
 vi.mock("@/lib/agent/anti-bot", () => ({
   detectChallengeResult: vi.fn(),
   waitForChallengeResolution: vi.fn(),
@@ -23,12 +26,15 @@ vi.mock("@/lib/agent/anti-bot", () => ({
 
 import { makeAntiBotHooks } from "../src/extension/background/antibot";
 import { getRunState } from "@/extension/background/state-store";
+import { consumeRecentRateLimit } from "@/extension/background/rate-limit-tracker";
 import { detectChallengeResult, waitForChallengeResolution } from "@/lib/agent/anti-bot";
 
 const validRunState = { currentTabId: 5, active: true } as never;
 
 beforeEach(() => {
   (getRunState as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(validRunState);
+  (consumeRecentRateLimit as unknown as ReturnType<typeof vi.fn>).mockReset();
+  (consumeRecentRateLimit as unknown as ReturnType<typeof vi.fn>).mockReturnValue(false);
   (detectChallengeResult as unknown as ReturnType<typeof vi.fn>).mockReset();
   (waitForChallengeResolution as unknown as ReturnType<typeof vi.fn>).mockReset();
 });
@@ -79,5 +85,51 @@ describe("makeAntiBotHooks detection-error sentinel", () => {
     const pollMs = (waitForChallengeResolution as unknown as ReturnType<typeof vi.fn>).mock.calls[0][1].pollMs;
     expect(pollMs).toBeGreaterThanOrEqual(500);
     expect(pollMs).toBeLessThan(600);
+  });
+});
+
+// ─── makeAntiBotHooks fallbacks (no-valid-tab / rate-limited / catch-all) ───
+
+describe("makeAntiBotHooks fallbacks", () => {
+  test("no valid tab in RunState → detectChallenge returns null without touching the detectors", async () => {
+    (getRunState as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    const hooks = makeAntiBotHooks();
+    expect(await hooks.detectChallenge()).toBeNull();
+    expect(detectChallengeResult).not.toHaveBeenCalled();
+  });
+
+  test("RunState with a missing/invalid tab (not active) → waitForChallengeResolution returns false", async () => {
+    (getRunState as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ currentTabId: 5 });
+    const hooks = makeAntiBotHooks();
+    expect(await hooks.waitForChallengeResolution()).toBe(false);
+    expect(waitForChallengeResolution).not.toHaveBeenCalled();
+  });
+
+  test("rate-limited (fresh 429/503 recorded) → rate-limited sentinel, detectors untouched", async () => {
+    (consumeRecentRateLimit as unknown as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    const hooks = makeAntiBotHooks();
+    const result = await hooks.detectChallenge();
+    expect(result).toEqual({
+      kind: "rate-limited",
+      message: "Server returned HTTP 429/503 (rate limited).",
+    });
+    expect(consumeRecentRateLimit).toHaveBeenCalledWith(5);
+    expect(detectChallengeResult).not.toHaveBeenCalled();
+  });
+
+  test("detectChallenge never throws — a thrown detector is caught and reported as null", async () => {
+    (detectChallengeResult as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("boom"),
+    );
+    const hooks = makeAntiBotHooks();
+    expect(await hooks.detectChallenge()).toBeNull();
+  });
+
+  test("waitForChallengeResolution never throws — a thrown resolver is caught as unresolved", async () => {
+    (waitForChallengeResolution as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("boom"),
+    );
+    const hooks = makeAntiBotHooks();
+    expect(await hooks.waitForChallengeResolution()).toBe(false);
   });
 });

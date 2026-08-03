@@ -2,6 +2,7 @@ import type { ModelPricing } from "./pricing-utils";
 import {
   lookupPricing,
   convertCatalog,
+  selectPricingRate,
   fetchWithRetry,
   fetchCustomCatalog,
   tokenCount,
@@ -59,9 +60,18 @@ export async function refreshPricingFromCatalog(): Promise<void> {
     if (url) {
       table = await fetchCustomCatalog(url);
     } else {
-      const { fetchCatalog } = await import("./catalog");
+      const { fetchCatalog, catalogFetchSucceeded } = await import("./catalog");
       const catalog = await fetchWithRetry(() => fetchCatalog(true));
       table = convertCatalog(catalog);
+  // `fetchCatalog` never throws by contract (it falls back to the bundled
+  // snapshot), so the live-merge flag is the only way to detect a failed
+  // fetch here. Without this check `pricingLoaded` would be set on a
+  // fallback and the lazy refresh (guarded on `!pricingLoaded`) would never
+  // re-fire after a transient startup network failure. The bundled rates are
+  // still applied below — only the "loaded" flag is withheld.
+      if (!catalogFetchSucceeded()) {
+        throw new Error("live model catalog fetch failed (bundled snapshot in use)");
+      }
     }
     pricingOverride = { ...pricingOverride, ...table };
     pricingLoaded = true;
@@ -137,6 +147,9 @@ interface EstimateCostOptions {
   cachedWriteInputTokens?: number;
   completionTokens?: number;
   providerId?: string;
+  /** Context (input) token count driving tiered-rate selection. Defaults to
+   * `tokensIn` when omitted (opencode derives context tokens from input tokens). */
+  contextTokens?: number;
 }
 
 export function estimateCost(
@@ -163,14 +176,15 @@ export function estimateCost(
         }
       : modelOrOpts;
   const { model, providerId: pid } = opts;
-  const rate = getPricingForModel(model, pid);
-
   const tIn = tokenCount(opts.tokensIn);
   const tOut = tokenCount(opts.tokensOut);
   const rTokens = tokenCount(opts.reasoningTokens);
   const cRead = tokenCount(opts.cachedInputTokens);
   const cWrite = tokenCount(opts.cachedWriteInputTokens);
   const compTokens = opts.completionTokens !== undefined ? tokenCount(opts.completionTokens) : undefined;
+
+  const contextTokens = opts.contextTokens !== undefined ? tokenCount(opts.contextTokens) : tIn;
+  const rate = selectPricingRate(getPricingForModel(model, pid), contextTokens);
 
   const cachedRead = Math.min(cRead, tIn);
   const cachedWrite = Math.min(

@@ -26,6 +26,18 @@ describe("validateFileName (path-traversal egress guard)", () => {
 
   test("rejects '..' traversal segments", () => {
     expect(validateFileName("../../etc/passwd")).not.toBeNull();
+    // A bare ".." name is also a traversal attempt (no separators needed — the
+    // Windows-aware segment check catches it even without a "/" or "\" in the
+    // name, e.g. ".." alone or a "..\\.." style name on Windows).
+    expect(validateFileName("..")).not.toBeNull();
+    expect(validateFileName("..\\..")).not.toBeNull();
+    expect(validateFileName("...")).toBeNull(); // "..." is a valid bare name
+  });
+
+  test("rejects over-long names (120-char cap)", () => {
+    expect(validateFileName("a".repeat(120))).toBeNull();
+    expect(validateFileName("a".repeat(121))).not.toBeNull();
+    expect(validateFileName("a".repeat(500))).not.toBeNull();
   });
 
   test("allows '..' as a substring in a filename", () => {

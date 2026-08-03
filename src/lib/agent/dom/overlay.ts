@@ -5,13 +5,13 @@
  * (click, input, hover, press-and-hold, select-dropdown) and
  * `extension/content.ts`.
  *
- * All historically-exported symbols are re-exported here:
- * - `highlightElement`, `setPersistentHighlight`, `OverlayHandle` (interface)
+ * Historically-exported symbols:
+ * - `highlightElement`, `OverlayHandle` (interface)
  *
- * (`showStatusBanner` was removed — it had no callers.)
+ * (`showStatusBanner` and `setPersistentHighlight` were removed — they had no
+ * callers.)
  *
  * New code should import from
  * `@/lib/agent/dom/annotation/overlay-renderer`.
-
  */
-export { highlightElement, setPersistentHighlight, type OverlayHandle } from "./annotation/overlay-renderer";
+export { highlightElement, type OverlayHandle } from "./annotation/overlay-renderer";

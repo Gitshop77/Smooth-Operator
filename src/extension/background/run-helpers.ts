@@ -103,6 +103,15 @@ async function getVisionSettings(): Promise<VisionSettings> {
 let globalVisionAssistant: VisionAssistant | null = null;
 let visionInitPromise: Promise<void> | null = null;
 let visionInitFailed = false;
+// Generation counter for the shared vision assistant: a new run claims the
+// assistant via `resetVisionInitFlagForNewRun` (bumps the counter), and the
+// initialized instance records which generation it belongs to. A stale
+// `teardownScheduledVision` from a PREVIOUS run's cleanup must not clean up
+// an instance a NEWER run already claimed — the comparison below is checked
+// at teardown time, so it covers a claim landing either before OR during the
+// teardown's own await.
+let visionGeneration = 0;
+let visionAssistantGeneration = -1;
 
 function ensureVisionAssistantInit(): void {
   if (globalVisionAssistant || visionInitPromise || visionInitFailed) return;
@@ -116,6 +125,8 @@ function ensureVisionAssistantInit(): void {
         const va = new VA();
         await va.init();
         globalVisionAssistant = va;
+        // Record which generation owns the initialized instance.
+        visionAssistantGeneration = visionGeneration;
         return;
       } catch (e) {
         const transient = isTransientVisionError(e);
@@ -144,7 +155,25 @@ function ensureVisionAssistantInit(): void {
 
 let lastKnownDpr = 1;
 
+// The active run's abort signal, tracked at module level so the on-demand
+// DETECT_VISUAL path (which has no LoopDeps context) can short-circuit a long
+// vision decode when the user aborts the run — the always-on extract path
+// already threads `controller.signal` directly.
+let currentRunAbortSignal: AbortSignal | null = null;
+
+export function setCurrentRunAbortSignal(signal: AbortSignal | null): void {
+  currentRunAbortSignal = signal;
+}
+
+export function getCurrentRunAbortSignal(): AbortSignal | null {
+  return currentRunAbortSignal;
+}
+
 export function resetVisionInitFlagForNewRun(): void {
+  // Claim ownership of the (possibly still-initialized) shared assistant:
+  // any in-flight teardown from a previous run sees the generation change and
+  // leaves the instance in place for this run.
+  visionGeneration++;
   if (!visionInitPromise) visionInitFailed = false;
   adaptiveVisionLastUsedStep = -1;
   adaptiveVisionCurrentStep = 0;
@@ -158,12 +187,21 @@ export async function teardownScheduledVision(): Promise<void> {
   if (visionInitPromise) {
     await visionInitPromise.catch(() => {});
   }
-  if (globalVisionAssistant) {
-    await globalVisionAssistant.cleanup();
-    globalVisionAssistant = null;
-  }
+  // Only clean up an assistant this generation still owns: a newer run
+  // claiming it (resetVisionInitFlagForNewRun bumps visionGeneration) means
+  // this teardown belongs to a stale run and must leave the instance in place
+  // — destroying it would strand the new run without vision.
+  if (visionAssistantGeneration !== visionGeneration) return;
+  // Null the global BEFORE cleanup so a run starting mid-cleanup initializes
+  // a fresh assistant instead of reusing the instance being destroyed.
+  const va = globalVisionAssistant;
+  globalVisionAssistant = null;
+  visionAssistantGeneration = -1;
   visionInitPromise = null;
   visionInitFailed = false;
+  if (va) {
+    await va.cleanup();
+  }
 }
 
 let adaptiveVisionLastUsedStep = -1;
@@ -178,13 +216,17 @@ function trackAdaptiveVisionStep(step: number): void {
   ) {
     const va = globalVisionAssistant;
     globalVisionAssistant = null;
+    visionAssistantGeneration = -1;
     visionInitPromise = null;
     visionInitFailed = false;
     void va.cleanup().catch((e) => void safeLog("warn", "[vision] cleanup failed:", e));
   }
 }
 
-export async function handleDetectVisualRequest(query: string): Promise<{
+export async function handleDetectVisualRequest(
+  query: string,
+  signal?: AbortSignal,
+): Promise<{
   ok: boolean;
   count?: number;
   description?: string;
@@ -205,7 +247,11 @@ export async function handleDetectVisualRequest(query: string): Promise<{
       return { ok: false, error: "no active run — cannot determine agent tab for screenshot" };
     }
     const screenshotDataUrl = await captureTabScreenshot(tabId);
-    const visionDetections = await va.detect(screenshotDataUrl).catch((e: unknown) => { void safeLog("warn", "[vision] detect failed:", e); return []; });
+    // Prefer the caller-supplied signal; fall back to the active run's signal
+    // so a user STOP aborts an in-flight decode even when the request came
+    // from the side panel (which has no LoopDeps context).
+    const abortSignal = signal ?? getCurrentRunAbortSignal() ?? undefined;
+    const visionDetections = await va.detect(screenshotDataUrl, abortSignal).catch((e: unknown) => { void safeLog("warn", "[vision] detect failed:", e); return []; });
     clearVisionCache();
     const { mergeDetections } = await loadVisionAssistant();
     const merged = mergeDetections([], visionDetections, lastKnownDpr);
@@ -391,6 +437,8 @@ interface LoopDepsContext {
 export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
   const { tab, sendEvent, controller, config, task, mode, callbacks } = ctx;
   const fallbackTabId = tab.id!;
+  // Publish the run's abort signal for the on-demand DETECT_VISUAL path.
+  setCurrentRunAbortSignal(controller.signal);
   return {
     task,
     mode,
@@ -445,7 +493,25 @@ export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
         filtered.push({ action, i });
       }
       if (filtered.length === 0) return results;
-      const execResults = (await executeActionsInTab(tabId, filtered.map((f) => f.action))) as ActionResult[];
+      // Mirror of the loop-side safeDispatch guard (action-queue.ts): a
+      // throwing content-script round-trip (tab closed mid-step, script
+      // unloaded) must not truncate the action queue. Mark every filtered
+      // action failed so the loop continues with the remaining steps instead
+      // of losing the whole result array to a rejected executeActions.
+      let execResults: ActionResult[];
+      try {
+        execResults = (await executeActionsInTab(tabId, filtered.map((f) => f.action), agentMode)) as ActionResult[];
+      } catch (e) {
+        void safeLog("warn", "[run-helpers] executeActionsInTab failed:", e);
+        filtered.forEach((f) => {
+          results[f.i] = {
+            action: f.action,
+            success: false,
+            message: "BLOCKED: content script failed to execute actions",
+          };
+        });
+        return results;
+      }
       filtered.forEach((f, k) => { results[f.i] = execResults[k]; });
       for (let i = 0; i < results.length; i++) {
         if (!results[i]) {
@@ -545,6 +611,9 @@ export async function cleanupRun(ctx: CleanupContext): Promise<void> {
     } catch { void 0; }
   }
   try { void import("./task-queue").then((m) => m.fireNotifications(task, runSucceeded)).catch(() => { void 0; }); } catch { void 0; }
+  // The run is over — stop publishing its abort signal so a DETECT_VISUAL
+  // arriving between runs doesn't short-circuit against a stale controller.
+  setCurrentRunAbortSignal(null);
 }
 
 export async function initRunState(runState: RunState): Promise<void> {

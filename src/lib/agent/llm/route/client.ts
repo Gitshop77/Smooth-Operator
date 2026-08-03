@@ -83,6 +83,23 @@ export interface LLMRequest {
    */
   readonly reasoning?: boolean;
   /**
+   * Per-request reasoning configuration: effort level, thinking budget in
+   * tokens, and a force on/off switch. Protocols only act on it when
+   * `reasoning` is also true (the provider is a reasoning model), so
+   * non-reasoning providers keep today's exact request shape.
+   */
+  readonly reasoningConfig?: {
+    readonly effort?: string;
+    readonly budgetTokens?: number;
+    readonly enabled?: boolean;
+  };
+  /**
+   * True when the caller expects the same prompt to be reused across calls
+   * (prompt-cache friendly). Protocols may omit cache markers for one-shot
+   * requests that never re-read them.
+   */
+  readonly cacheEligible?: boolean;
+  /**
    * When true, request OpenAI "strict" JSON-schema structured output
    * (`response_format: { type: "json_schema", strict: true }`). When false
    * (or unset and the protocol defaults to non-strict), fall back to
@@ -131,7 +148,11 @@ interface MakeRouteInput<Body, FrameType, EventType, State> {
 export function make<Body, FrameType, EventType, State>(
   input: MakeRouteInput<Body, FrameType, EventType, State>
 ): Route<Body, HttpPrepared<FrameType>> {
-  const transport = httpJson<Body, FrameType>({ framing: input.framing, provenance: input.provenance });
+  const transport = httpJson<Body, FrameType>({
+    framing: input.framing,
+    provenance: input.provenance,
+    providerId: input.provider,
+  });
   return makeFromTransport({
     ...input,
     transport,

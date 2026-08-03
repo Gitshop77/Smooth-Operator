@@ -62,3 +62,13 @@ export const RENDERED_TOOL_DESCRIPTION_LENGTH = 200;
  * that ends up in `chrome.storage.local` and in the prompt block.
  */
 export const MAX_CUSTOM_TOOL_DESCRIPTION_LENGTH = 2000;
+
+/**
+ * Maximum NUMBER of custom tools rendered into the `<custom_tools>` prompt
+ * block. Bounds the prompt when the operator has stored many tools: the block
+ * advertises each tool with a `- name: description` line, and a defensive cap
+ * keeps the prompt from ballooning. Must stay in sync with the options page's
+ * creation cap (`MAX_CUSTOM_TOOLS` in `src/extension/options/custom-tools-utils.ts`)
+ * so the prompt never advertises a set the UI cannot produce.
+ */
+export const MAX_CUSTOM_TOOLS_BLOCK = 50;

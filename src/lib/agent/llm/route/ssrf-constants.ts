@@ -20,14 +20,25 @@ export type SsrfProvenance = "user-configured" | "untrusted";
 /**
  * Curated local-provider base URLs EXEMPT from the strict transport-layer SSRF
  * check. These are the exact default endpoints for Ollama and LiteLLM — both
- * reachable via `localhost` and `127.0.0.1`. Any OTHER loopback / RFC1918 URL
- * is still rejected.
+ * reachable via `localhost`, `127.0.0.1`, and their IPv6 loopback spellings
+ * (`::1`, the IPv4-mapped `::ffff:127.0.0.1`, and the deprecated IPv4-compatible
+ * `::127.0.0.1`). Any OTHER loopback / RFC1918 URL — including those spellings
+ * on non-default ports — is still rejected. The WHATWG URL parser canonicalizes
+ * every embedded-IPv4 spelling to the same origin, so the exact-origin match in
+ * `isCuratedLocalOrigin` covers all of them without extra parsing.
  */
 export const LOCAL_PROVIDER_BASE_URLS: readonly string[] = [
   "http://localhost:11434",
   "http://127.0.0.1:11434",
   "http://localhost:4000",
   "http://127.0.0.1:4000",
+  // IPv6 loopback spellings of the same two endpoints (default ports only).
+  "http://[::1]:11434",
+  "http://[::1]:4000",
+  "http://[::ffff:127.0.0.1]:11434",
+  "http://[::ffff:127.0.0.1]:4000",
+  "http://[::127.0.0.1]:11434",
+  "http://[::127.0.0.1]:4000",
 ];
 
 /** Origins of the curated local providers (Ollama / LiteLLM), precomputed once. */

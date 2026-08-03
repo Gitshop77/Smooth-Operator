@@ -34,8 +34,12 @@ export async function runAgentLoop(deps: LoopDeps): Promise<void> {
   try {
     await runAgentLoopInner(deps);
   } catch (e) {
+    // Only reachable when the failure happens BEFORE a run state exists
+    // (config validation / state init) — at that point no terminal event
+    // could have been emitted, so a single raw `done` is safe, and the
+    // dispatcher never saw `runStart`, so skipping `runEnd` is correct.
     const message = e instanceof Error ? e.message : String(e);
-    console.error("[orchestrator] runAgentLoop uncaught error:", e);
+    console.error("[orchestrator] runAgentLoop failed before the loop started:", e);
     try {
       deps.onEvent({
         type: "done",
@@ -56,13 +60,26 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
     await safeDispatch(state, "runStart", () => state.dispatcher!.runStart(makeCtx(state)));
   }
 
-  const initialResult = await runInitialPlannerPhase(state);
-  if (initialResult.kind === "exit") return;
+  try {
+    const initialResult = await runInitialPlannerPhase(state);
+    if (initialResult.kind === "exit") return;
 
-  while (state.step < config.maxSteps) {
-    const stepResult = await runNavigatorStep(state);
-    if (stepResult.kind === "exit") return;
+    while (state.step < config.maxSteps) {
+      const stepResult = await runNavigatorStep(state);
+      if (stepResult.kind === "exit") return;
+    }
+
+    await finish(state, false, `Reached max steps (${config.maxSteps}) without the planner calling done.`);
+  } catch (e) {
+    // A throw that escapes the per-phase error handling (e.g. a crashing
+    // user `onEvent` handler) terminates the run through `finish()` so the
+    // terminal `done` is emitted at most once and the `runEnd` dispatcher
+    // callback still fires. `finish` itself can throw only if `onEvent`
+    // throws on the `done` event — nothing left to surface then.
+    const message = e instanceof Error ? e.message : String(e);
+    console.error("[orchestrator] runAgentLoop uncaught error:", e);
+    try {
+      await finish(state, false, `Uncaught error in agent loop: ${message}`);
+    } catch { /* swallow — the terminal event could not be emitted */ }
   }
-
-  await finish(state, false, `Reached max steps (${config.maxSteps}) without the planner calling done.`);
 }
