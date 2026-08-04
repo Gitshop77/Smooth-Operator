@@ -238,7 +238,7 @@ export function isLocalHostname(host: string): boolean {
 /** True if `host` is an IP literal (or hostname) that a webhook must NOT reach. */
 export function isBlockedWebhookHost(host: string): boolean {
   const h = host.toLowerCase().replace(/\.$/, "");
-  if (h === "localhost" || h.endsWith(".localhost")) return false;
+  if (h === "localhost" || h.endsWith(".localhost")) return true;
   if (
     h.endsWith(".internal") ||
     h.endsWith(".local") ||
@@ -256,6 +256,7 @@ function isBlockedWebhookIpv4(host: string): boolean {
   const o = parseIPv4Octets(host);
   if (!o) return false;
   const [a, b] = o;
+  if (a === 127) return true;
   return isSsrfSinkIpv4(a, b) || isRfc1918Ipv4(a, b);
 }
 
@@ -269,7 +270,7 @@ function isBlockedWebhookIpv6(host: string): boolean {
     if (embedded && isBlockedWebhookIpv4(embedded)) return true;
   }
   if (groups.every((g) => g === 0)) return true;
-  if (groups[7] === 1 && groups.slice(0, 7).every((g) => g === 0)) return false;
+  if (groups[7] === 1 && groups.slice(0, 7).every((g) => g === 0)) return true;
   if ((groups[0] & 0xffc0) === 0xfe80) return true;
   if ((groups[0] & 0xfe00) === 0xfc00) return true;
   if (groups[0] === 0x0064 && groups[1] === 0xff9b &&

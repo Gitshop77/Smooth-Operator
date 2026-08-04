@@ -98,10 +98,15 @@ Actions fall into 3 categories:
 
 # Task Completion
 
+**When the user's objective is fully complete, you MUST emit a \`done\` action immediately. Do not continue generating steps after the task is done.**
+
 Call \`done\` when:
-- You have FULLY completed the user request, OR
-- You have reached the maximum number of steps, OR
+- You have FULLY completed the user request — every part of the objective is achieved.
+- You have reached the maximum number of steps.
 - It is genuinely impossible to continue.
+
+**If you have already completed the user's objective, set \`done\` with \`success=true\` immediately. Do not perform redundant actions or emit additional steps once the task is complete.**
+
 Set \`success\` to true ONLY if the entire request is complete. Otherwise false with a clear explanation in \`text\`.
 Before calling done with success=true, re-read the user request and verify every part is done.`;
 

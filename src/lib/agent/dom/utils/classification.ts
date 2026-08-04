@@ -49,7 +49,22 @@ export function isInteractive(el: HTMLElement): boolean {
  // (it's not focusable, not clickable-as-a-link, and ARIA assigns it the
  // generic role rather than "link"). Treating every <a> as interactive
  // would surface dead anchors to the LLM as click targets.
-  if (tag === "a") return el.getAttribute("href") !== null;
+  if (tag === "a") {
+    if (el.getAttribute("href") !== null) return true;
+    if (el.getAttribute("onclick") !== null) return true;
+    const tabindex = el.getAttribute("tabindex");
+    if (tabindex !== null && parseInt(tabindex, 10) >= -1) return true;
+    const aRole = getRole(el);
+    if (aRole && INTERACTIVE_ROLES.has(aRole)) return true;
+    return false;
+  }
+  if (tag === "svg") {
+    const ariaLabel = el.getAttribute("aria-label");
+    if (ariaLabel !== null && ariaLabel.trim() !== "") return true;
+    const title = el.querySelector("title");
+    if (title && (title.textContent || "").trim() !== "") return true;
+    return false;
+  }
   if (INTERACTIVE_TAGS.has(tag)) return true;
   const role = getRole(el);
   if (role && INTERACTIVE_ROLES.has(role)) return true;
@@ -57,8 +72,6 @@ export function isInteractive(el: HTMLElement): boolean {
   if (contenteditable !== null && contenteditable !== "false") return true;
   if (el.getAttribute("onclick") !== null) return true;
   const tabindex = el.getAttribute("tabindex");
-  // tabindex=-1 elements are still focusable/clickable (e.g. menu items,
-  // custom widgets), so treat any explicit tabindex (incl. -1) as interactive.
   if (tabindex !== null && parseInt(tabindex, 10) >= -1) return true;
  // Only treat `draggable` as a signal of interactivity when it is explicitly
  // set to "true". `HTMLElement.draggable` defaults to `true` for `<img>` and
@@ -67,6 +80,23 @@ export function isInteractive(el: HTMLElement): boolean {
  // the serialized tree. Links are already covered by the `href` check above,
  // and images are not actionable, so we only honor an explicit opt-in.
   if (el.getAttribute("draggable") === "true") return true;
+  return false;
+}
+
+/**
+ * Test whether `el` is an interactive container that should be indexed as a
+ * click target but whose children should still be walked (ancestor-proxy
+ * pattern). This catches non-interactive tags (div, span, li, …) that carry
+ * an `onclick` handler or an interactive ARIA role — they behave as clickable
+ * wrappers around their content.
+ */
+export function isInteractiveContainer(el: HTMLElement): boolean {
+  if (isInteractive(el)) return false;
+  const tag = el.tagName.toLowerCase();
+  if (tag === "script" || tag === "style" || tag === "noscript" || tag === "meta" || tag === "link" || tag === "title") return false;
+  if (el.getAttribute("onclick") !== null) return true;
+  const role = getRole(el);
+  if (role && INTERACTIVE_ROLES.has(role)) return true;
   return false;
 }
 

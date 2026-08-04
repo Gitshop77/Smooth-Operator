@@ -82,6 +82,11 @@ export function buildAttrs(el: HTMLElement): Record<string, string> {
       .map((o) => o.textContent?.trim() || o.value);
     attrs["options"] = opts.join(" | ");
     attrs["option_count"] = String(el.options.length);
+    const selected = el.options[el.selectedIndex];
+    if (selected) {
+      const selectedText = (selected.textContent || "").replace(/\s+/g, " ").trim();
+      if (selectedText) attrs["selected_text"] = selectedText;
+    }
   }
 
   if (!attrs["role"]) {
@@ -161,4 +166,103 @@ function collisionFreeId(el: HTMLElement): string {
 
 export function hashElement(el: HTMLElement, attrs?: Record<string, string>): string {
   return fnv1aHash(elementIdentity(el, attrs), DOM_CONFIG.fnvOffsetBasis, DOM_CONFIG.fnvPrime);
+}
+
+// ─── Fallback identity matching ────────────────────────────────────────────
+
+/**
+ * Build fallback identity strings for an element. Used when the primary
+ * uid/hash match fails (e.g. DOM restructured between steps). Each strategy
+ * is progressively looser — callers should try them in order.
+ */
+export function buildIdentityFallbacks(el: HTMLElement): string[] {
+  const tag = el.tagName.toLowerCase();
+  const a = buildAttrs(el);
+  const keyAttrs = DOM_CONFIG.identityKeyAttrs
+    .map((k) => a[k] ? `${k}=${a[k]}` : "")
+    .filter(Boolean)
+    .join("|");
+
+  const fallbacks: string[] = [];
+
+  const visibleText = (el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 200);
+  if (visibleText) {
+    fallbacks.push(`text|${tag}|${visibleText}|${keyAttrs}`);
+  }
+
+  const ariaLabel = a["aria-label"] || "";
+  const placeholder = a["placeholder"] || "";
+  const name = a["name"] || "";
+  if (ariaLabel || placeholder || name) {
+    fallbacks.push(`label|${tag}|${ariaLabel}|${placeholder}|${name}`);
+  }
+
+  const parent = el.parentElement;
+  if (parent) {
+    const parentTag = parent.tagName.toLowerCase();
+    const parentText = (parent.textContent || "").replace(/\s+/g, " ").trim().slice(0, 100);
+    fallbacks.push(`parent|${tag}|${parentTag}|${parentText}|${keyAttrs}`);
+  }
+
+  return fallbacks;
+}
+
+/**
+ * Try to match a target identity string against a list of elements using
+ * fallback strategies. Returns the matched element or null.
+ *
+ * Strategies (tried in order):
+ * 1. tag + full visible text + visible position (normalized)
+ * 2. tag + aria-label + placeholder/name attributes
+ * 3. tag + parent context (parent tag + parent text)
+ *
+ * If multiple elements match the same strategy, returns null (ambiguous).
+ */
+export function matchElementByFallbacks(
+  targetId: string,
+  elements: HTMLElement[],
+): HTMLElement | null {
+  if (!targetId || elements.length === 0) return null;
+
+  const tagMatch = targetId.match(/^(\w+)\|/);
+  const targetTag = tagMatch ? tagMatch[1] : null;
+
+  const candidates = targetTag
+    ? elements.filter((el) => el.tagName.toLowerCase() === targetTag)
+    : elements;
+
+  if (candidates.length === 0) return null;
+
+  for (const el of candidates) {
+    const fallbacks = buildIdentityFallbacks(el);
+    for (const fb of fallbacks) {
+      if (fb === targetId) return el;
+    }
+  }
+
+  const targetTextMatch = targetId.match(/^text\|\w+\|(.+?)\|/);
+  if (targetTextMatch && targetTag) {
+    const targetText = targetTextMatch[1].toLowerCase();
+    const matches = candidates.filter((el) => {
+      const text = (el.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+      return text.includes(targetText) || targetText.includes(text);
+    });
+    if (matches.length === 1) return matches[0];
+  }
+
+  const targetLabelMatch = targetId.match(/^label\|\w+\|(.+?)\|(.+?)\|(.+)$/);
+  if (targetLabelMatch && targetTag) {
+    const [, targetAriaLabel, targetPlaceholder, targetName] = targetLabelMatch;
+    const matches = candidates.filter((el) => {
+      const a = buildAttrs(el);
+      return (
+        (targetAriaLabel && a["aria-label"] === targetAriaLabel) ||
+        (targetPlaceholder && a["placeholder"] === targetPlaceholder) ||
+        (targetName && a["name"] === targetName)
+      );
+    });
+    if (matches.length === 1) return matches[0];
+  }
+
+  return null;
 }

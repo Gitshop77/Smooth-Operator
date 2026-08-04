@@ -1,6 +1,7 @@
 import type { BrowserState, ExtractedElement, TabInfo } from "../../types";
 import {
   isInteractive,
+  isInteractiveContainer,
   isVisibleFull,
   isLikelyHidden,
   beginVisibilityCache,
@@ -146,6 +147,18 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
 
   if (DOM_CONFIG.skipTags.has(tag) || tag === "iframe") {
     if (tag === "iframe") trySerializeIframe(el as HTMLIFrameElement, depth, acc);
+    if (tag === "svg" && isInteractive(el)) {
+      const idx = ++acc.index;
+      const attrs = buildAttrs(el);
+      const hash = hashElement(el, attrs);
+      const isNew = !acc.prevHashes.has(hash);
+      if (isNew) acc.newElementCount++;
+      const text = directText(el) || el.getAttribute("aria-label") || "";
+      acc.selectorMap[idx] = el;
+      acc.elements.push({ index: idx, tag, text, attributes: attrs, hash, rect: el.getBoundingClientRect() });
+      const prefix = isNew ? "*" : "";
+      pushLine(acc, "\t".repeat(depth) + `${prefix}[${idx}]<${tag}${attrString(attrs)} />`);
+    }
     return;
   }
 
@@ -179,6 +192,20 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
       }
       return;
     }
+  }
+
+  if (isInteractiveContainer(el)) {
+    const idx = ++acc.index;
+    const attrs = buildAttrs(el);
+    const hash = hashElement(el, attrs);
+    const isNew = !acc.prevHashes.has(hash);
+    if (isNew) acc.newElementCount++;
+    const text = directText(el) || el.getAttribute("aria-label") || "";
+    const containerRect = el.getBoundingClientRect();
+    acc.selectorMap[idx] = el;
+    acc.elements.push({ index: idx, tag, text, attributes: attrs, hash, rect: containerRect });
+    const prefix = isNew ? "*" : "";
+    pushLine(acc, "\t".repeat(depth) + `${prefix}[${idx}]<${tag}${attrString(attrs)} />`);
   }
 
   walkLightAndShadowChildren(el, depth + 1, acc);

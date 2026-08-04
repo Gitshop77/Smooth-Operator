@@ -24,10 +24,22 @@ const makeBoxRe = (): RegExp => /<box>([\s\S]*?)<\/box>/gi;
 function parseBoxBody(body: string): [number, number, number, number] | null {
   const trimmed = body.trim();
   const tokens = trimmed.split(/[\s,]+/).filter((t) => t.length > 0);
-  if (tokens.length !== 4) return null;
-  const nums = tokens.map(Number);
-  if (nums.some((n) => !Number.isFinite(n))) return null;
-  return [nums[0], nums[1], nums[2], nums[3]];
+  if (tokens.length === 4) {
+    const nums = tokens.map(Number);
+    if (nums.every((n) => Number.isFinite(n))) {
+      return [nums[0], nums[1], nums[2], nums[3]];
+    }
+  }
+  const angleNums: number[] = [];
+  const angleRe = /<(\d+(?:\.\d+)?)>/g;
+  let am: RegExpExecArray | null;
+  while ((am = angleRe.exec(trimmed)) !== null) {
+    angleNums.push(Number(am[1]));
+  }
+  if (angleNums.length === 4 && angleNums.every((n) => Number.isFinite(n))) {
+    return [angleNums[0], angleNums[1], angleNums[2], angleNums[3]];
+  }
+  return null;
 }
 
 /** Parse <ref>label</ref><box>...</box> from model output text. */

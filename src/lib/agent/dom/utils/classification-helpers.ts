@@ -1,6 +1,6 @@
 /** Tags that are always treated as interactive (in addition to role-based). */
 export const INTERACTIVE_TAGS: ReadonlySet<string> = new Set([
-  "button", "input", "select", "textarea", "summary", "details",
+  "button", "input", "select", "textarea", "summary", "details", "label",
 ]);
 
 /**

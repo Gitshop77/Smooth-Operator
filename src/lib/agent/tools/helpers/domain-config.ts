@@ -119,13 +119,11 @@ export function setDomainConfig(config?: DomainConfig, enforced?: boolean): void
   }
   const validated = config ? validateDomainConfig(config) : null;
   if (validated) {
+    freezeConfigInPlace(validated);
     lastKnownGood = validated;
     hasKnownGood = true;
     writeGlobal(DOMAIN_CONFIG_KEY, validated);
   } else if (hasKnownGood) {
-    // Missing or malformed config → retain the last-known-good policy rather
-    // than overwriting with `undefined` (which `getDomainConfig` would treat
-    // as `{}` → unrestricted navigation).
     writeGlobal(DOMAIN_CONFIG_KEY, lastKnownGood);
   } else {
     // No valid policy was ever installed — do NOT write the initial `{}`

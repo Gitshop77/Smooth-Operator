@@ -55,6 +55,7 @@ describe("requiresConfirmation reports the per-mode confirmation policy", () => 
       "evaluate",
       "upload_file",
       "save_as_pdf",
+      "screenshot",
       "set_cookie",
       "delete_cookies",
       "set_storage",

@@ -20,7 +20,7 @@ import { make } from "../route/client";
 import * as OpenAIChat from "../protocols/openai-chat";
 import type { LLMProvider } from "../provider";
 import { toLLMProvider as toLLMProviderBridge } from "../provider-bridge";
-import { assertSafeUserBaseURL } from "./openai-compatible-profile";
+import { assertSafeUserBaseURL, LOCAL_PROVIDER_IDS } from "./openai-compatible-profile";
 import { isCuratedLocalOrigin, type SsrfProvenance } from "../route/ssrf";
 import type { Protocol } from "../route/client";
 
@@ -79,7 +79,7 @@ export function makeOpenAIChatFacade<P extends Protocol<any, any, any, any> = Pr
  // matches a curated local origin (Ollama / LiteLLM) AND the user opted in; it
  // is NOT a blanket toggle, so an arbitrary (non-curated) loopback / RFC1918
  // baseUrl for any provider is always rejected by the guard.
-    const exemption = !!input.allowLocalExemption && isCuratedLocalOriginUrl(input.baseURL);
+    const exemption = !!input.allowLocalExemption && isCuratedLocalOriginUrl(input.baseURL) && LOCAL_PROVIDER_IDS.has(def.id);
     assertSafeUserBaseURL(input.baseURL, def.id, exemption);
     // Split the (possibly path-prefixed) base URL into origin + path-prefix and
     // re-attach the prefix to `def.path` so `buildURL`'s `new URL(path, base)`

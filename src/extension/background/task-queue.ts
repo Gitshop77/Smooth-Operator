@@ -153,7 +153,7 @@ export async function fireNotifications(task: string, success?: boolean): Promis
  // URLs are logged + skipped (non-fatal).
       let safeUrl: string | null = null;
       let parsed: URL | null = null;
-      const ssrfCheck = await resolveAndValidateWebhookUrl(webhookUrl);
+      const ssrfCheck = await resolveAndValidateWebhookUrl(webhookUrl, "user-configured");
       if (ssrfCheck.ok) {
         try {
           parsed = new URL(webhookUrl);

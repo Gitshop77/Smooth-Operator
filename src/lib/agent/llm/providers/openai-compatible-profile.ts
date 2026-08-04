@@ -107,7 +107,7 @@ export class UnsafeBaseUrlError extends Error {
 //
 // Failures throw {@link UnsafeBaseUrlError} so callers can branch on the type
 // rather than string-matching the message.
-const LOCAL_PROVIDER_IDS = new Set(["ollama", "litellm"]);
+export const LOCAL_PROVIDER_IDS = new Set(["ollama", "litellm"]);
 
 export const assertSafeUserBaseURL = (
   baseURL: string | undefined,

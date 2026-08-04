@@ -277,8 +277,17 @@ const INJECTION_DETECTORS: readonly InjectionDetector[] = [
  // Agent-internal tag injection (overlap with the redaction layer — flag in
  // addition to redacting so the LLM knows the page tried to forge tags).
   { source: "<\\/?(?:system|assistant|user_request|agent_history|agent_state|browser_state|step_info|action_set|untrusted_page_data|compacted_memory|current_goal|plan)\\s*>", flags: "gi", label: "tag-injection" },
- // "New instructions:" / "new task:" — classic injection preamble.
+  // "New instructions:" / "new task:" — classic injection preamble.
   { source: "new\\s+(instructions?|task)\\s*:", flags: "gi", label: "new-instructions-preamble" },
+  // Polite imperative requests — social-engineering phrasings that ask for
+  // privileged actions without overt injection syntax.
+  { source: "please\\s+(?:grant|give|allow|provide|unlock|open|share|transfer|move|pay|send|submit)\\s", flags: "gi", label: "social-engineering" },
+  { source: "(?:grant|give|allow|provide|unlock|open|share|transfer)\\s+(?:access|permission|control|entry|admin|root|owner)", flags: "gi", label: "social-engineering" },
+  // Token-prefix detection — known credential prefixes that should not appear
+  // in untrusted page content. Flags rather than redacts so the LLM retains
+  // the surrounding context for task completion.
+  { source: "\\b(?:glcbt-|glpat-|glrt-|gloas-|glfs-|shpat_|shpca_|shppa_|shpss_|nrjs-|NRI-|doo_v1_|DO_V1_)\\b", flags: "g", label: "token-prefix-detected" },
+  { source: "\\b(?:twitter|cloudflare|discord|dropbox|plaid)\\b", flags: "gi", label: "token-prefix-detected" },
 ];
 
 /**
@@ -379,6 +388,15 @@ export function normalize(text: string): string {
  *
  * Normalizes first (defeats zero-width + lookalike attacks), then replaces
  * every injection-pattern match with `[redacted]`.
+ *
+ * NOTE: This function is NOT a security boundary. It is a soft defense layer
+ * that reduces the attack surface by stripping known injection patterns. The
+ * primary defense against prompt injection is the SECURITY_INSTRUCTION block
+ * (instruction precedence + content isolation) combined with model compliance.
+ * An attacker instruction that survives byte-for-byte through this sanitizer
+ * is still blocked by the model's adherence to the system prompt. Do NOT
+ * assume that text passing through sanitizeUntrusted is "safe" — it is
+ * sanitized, not neutralized.
  *
  * FIDELITY COST: homoglyph folding (see {@link foldHomoglyphs}) runs inside
  * `normalize`-adjacent processing here, so non-English text containing a

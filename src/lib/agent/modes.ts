@@ -88,6 +88,7 @@ export const MODE_CONFIGS = {
       "evaluate",
       "upload_file",
       "save_as_pdf",
+      "screenshot",
       "set_cookie",
       "delete_cookies",
       "set_storage",

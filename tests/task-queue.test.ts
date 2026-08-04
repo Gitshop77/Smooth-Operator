@@ -101,11 +101,10 @@ describe("fireNotifications webhook URL validation", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  test("does NOT post to an RFC1918 private IP (skipped + warned)", async () => {
+  test("posts to an RFC1918 private IP when user-configured (local dev relay)", async () => {
     stubChrome("http://192.168.1.1/hook", false);
     await fireNotifications("task", false);
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(warnSpy).toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   test("does NOT post to a cloud-metadata IP (skipped + warned)", async () => {

@@ -24,6 +24,12 @@ const HOMOGLYPH_MAP: Record<string, string> = {
   "\u0440": "p", "\u0420": "P",
   "\u0456": "i", "\u0406": "I",
   "\u0455": "s", "\u0405": "S",
+  "\u0432": "v", "\u0412": "V",
+  "\u043d": "h", "\u041d": "H",
+  "\u043c": "m", "\u041c": "M",
+  "\u0442": "t", "\u0422": "T",
+  "\u043f": "p", "\u041f": "P",
+  "\u0433": "r", "\u0413": "R",
   // Greek lookalikes
   "\u03b1": "a", "\u0391": "A",
   "\u03b2": "b", "\u0392": "B",
@@ -40,6 +46,8 @@ const HOMOGLYPH_MAP: Record<string, string> = {
   "\u03b7": "n", "\u0397": "N",
   "\u03c3": "s", "\u03a3": "S",
   "\u03c2": "s",
+  "\u03b3": "g", "\u0393": "G",
+  "\u03b4": "d", "\u0394": "D",
 };
 const HOMOGLYPH_RE = new RegExp(`[${Object.keys(HOMOGLYPH_MAP).join("")}]`, "gu");
 

@@ -1,4 +1,5 @@
 import type { ZodType } from "zod";
+import { ZodArray, ZodObject } from "zod";
 import { redactKeyShapes } from "./key-shape-redact";
 
 /** Maximum characters of the raw payload to include in error messages. */
@@ -38,12 +39,16 @@ interface ZodErrorLike {
 }
 
 /**
- * Given `s` and the index of an opening `{` at `start`, return the index of the
- * matching top-level `}` (inclusive) or `-1` if the scan never returns to depth
- * 0 (unbalanced input). String literals and escape sequences are honored so
- * braces inside string values do not perturb the depth count.
+ * Given `s` and the index of an opening `{` or `[` at `start`, return the index
+ * of the matching top-level `}` or `]` (inclusive) or `-1` if the scan never
+ * returns to depth 0 (unbalanced input). String literals and escape sequences
+ * are honored so braces/brackets inside string values do not perturb the depth
+ * count. Only the bracket pair matching the opening character is tracked —
+ * nested braces inside a bracket scan (or vice versa) do not affect depth.
  */
 function balancedEnd(s: string, start: number): number {
+  const open = s[start];
+  const close = open === "{" ? "}" : "]";
   let depth = 0;
   let inString = false;
   let escape = false;
@@ -61,9 +66,9 @@ function balancedEnd(s: string, start: number): number {
     }
     if (ch === '"') {
       inString = true;
-    } else if (ch === "{") {
+    } else if (ch === open) {
       depth++;
-    } else if (ch === "}") {
+    } else if (ch === close) {
       depth--;
       if (depth === 0) {
         return i;
@@ -94,9 +99,10 @@ export function extractJson(raw: string): string {
       .trim();
   }
 
-  const candidates: number[] = [];
+  const candidates: Array<[number, "{" | "["]> = [];
   for (let i = 0; i < s.length; i++) {
-    if (s[i] === "{") candidates.push(i);
+    const ch = s[i];
+    if (ch === "{" || ch === "[") candidates.push([i, ch]);
   }
   if (candidates.length === 0) return s;
 
@@ -104,7 +110,7 @@ export function extractJson(raw: string): string {
   let scanned = 0;
   const SCAN_BUDGET = MAX_JSON_LENGTH * 4;
   const spans: Array<[number, number]> = [];
-  for (const start of candidates) {
+  for (const [start] of candidates) {
     if (checked >= MAX_CANDIDATES) break;
     const span = s.length - start;
     if (checked >= BUDGET_BYPASS_CANDIDATES && scanned + span > SCAN_BUDGET) break;
@@ -138,10 +144,15 @@ export function extractJson(raw: string): string {
     return s.slice(best[0], best[1] + 1);
   }
 
-  const lastOpen = s.lastIndexOf("{");
-  const lastClose = s.lastIndexOf("}");
-  if (lastOpen !== -1 && lastClose !== -1 && lastClose > lastOpen) {
-    return s.slice(lastOpen, lastClose + 1);
+  const lastOpenObj = s.lastIndexOf("{");
+  const lastCloseObj = s.lastIndexOf("}");
+  if (lastOpenObj !== -1 && lastCloseObj !== -1 && lastCloseObj > lastOpenObj) {
+    return s.slice(lastOpenObj, lastCloseObj + 1);
+  }
+  const lastOpenArr = s.lastIndexOf("[");
+  const lastCloseArr = s.lastIndexOf("]");
+  if (lastOpenArr !== -1 && lastCloseArr !== -1 && lastCloseArr > lastOpenArr) {
+    return s.slice(lastOpenArr, lastCloseArr + 1);
   }
   return s;
 }
@@ -212,19 +223,46 @@ function decodeJson(
  * Generic parser shared by parseAgentOutput / parsePlannerOutput.
  * Guards the raw length, decodes + extracts the JSON, then validates against the
  * given schema — returning the same ParseResult shape for both.
+ *
+ * When the decoded JSON is a single object but the schema expects an array,
+ * the object is automatically wrapped in `[{...}]` before validation. This
+ * covers the common case where the model returns `{"action": [...]}` instead
+ * of `[{"action": [...]}]`.
  */
 export function parseOutput<T>(schema: ZodType<T>, raw: string): ParseResult<T> {
   const oversize = guardRawLength(raw);
   if (oversize) return oversize;
-  const decoded = decodeJson(raw, extractJson(raw));
+  const extracted = extractJson(raw);
+  const decoded = decodeJson(raw, extracted);
   if (!decoded.ok) return decoded;
+
+  if (
+    schema instanceof ZodArray &&
+    decoded.parsed !== null &&
+    typeof decoded.parsed === "object" &&
+    !Array.isArray(decoded.parsed)
+  ) {
+    decoded.parsed = [decoded.parsed];
+  }
+
   const result = schema.safeParse(decoded.parsed);
   if (result.success) {
     return { ok: true, output: result.data, raw };
   }
+
+  const expectedDesc = schema instanceof ZodArray
+    ? "array of objects"
+    : schema instanceof ZodObject
+      ? "single object"
+      : "unexpected shape";
+  const receivedDesc = Array.isArray(decoded.parsed)
+    ? `array (${decoded.parsed.length} items)`
+    : typeof decoded.parsed === "object" && decoded.parsed !== null
+      ? `single object (keys: ${Object.keys(decoded.parsed).slice(0, 5).join(", ")})`
+      : typeof decoded.parsed;
   return {
     ok: false,
-    error: `Schema validation error: ${formatZodError(result.error)}`,
+    error: `Schema validation error (expected ${expectedDesc}, received ${receivedDesc}): ${formatZodError(result.error)}`,
     raw,
   };
 }

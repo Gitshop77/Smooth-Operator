@@ -41,14 +41,14 @@ describe("buildProvider SSRF provenance gate", () => {
 
   test("user loopback baseUrl (Ollama) keeps the exemption and resolves", async () => {
     const provider = await buildProvider({
-      provider: "openai",
+      provider: "ollama",
       model: "x",
       apiKey: "k",
       baseUrl: LOOPBACK_BASE_URL,
       provenance: "user",
     });
     expect(provider).toBeTruthy();
-    expect(provider.id).toContain("openai");
+    expect(provider.id).toContain("ollama");
   });
 
   test("injected cloud-metadata baseUrl (169.254.169.254) is rejected", async () => {
@@ -96,7 +96,7 @@ describe("readProviderConfig provenance (fail-safe)", () => {
   });
 
   function seed(provenance: ProviderConfig["provenance"] | undefined): void {
-    store.provider = "openai";
+    store.provider = "ollama";
     store.model = "gpt-4o";
     store.baseUrl = LOOPBACK_BASE_URL;
     if (provenance !== undefined) store.provenance = provenance;

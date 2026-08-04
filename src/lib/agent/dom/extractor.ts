@@ -25,5 +25,5 @@ export {
   getSelectorMap,
   isVisible,
 } from "./extraction/page-state";
-export { buildAttrs, hashElement } from "./extraction/element-info";
+export { buildAttrs, hashElement, buildIdentityFallbacks, matchElementByFallbacks } from "./extraction/element-info";
 export { isInteractive } from "./utils/classification";

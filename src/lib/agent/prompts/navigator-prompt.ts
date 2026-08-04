@@ -181,6 +181,10 @@ When something goes wrong, use these proven recovery strategies:
 
 ${ACTION_STEERING_BLOCK}
 
+# Immediate Completion
+
+When the user's objective is fully achieved, emit \`done\` with \`success=true\` on the VERY NEXT step. Do not perform additional actions, re-read the page, or generate exploratory steps after the task is complete. Emitting \`done\` IS the final action — there is nothing left to do after it.
+
 ${OUTPUT_FORMAT_BLOCK}
 
 ${evaluateGuidance(mode)}

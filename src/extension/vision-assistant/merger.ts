@@ -39,6 +39,27 @@ export interface MergedElement extends ExtractedElement {
   visionId?: string;
 }
 
+const IOU_THRESHOLD = 0.3;
+const CENTER_DIST_THRESHOLD = 20;
+
+function centerDistance(
+  a: { x: number; y: number; width: number; height: number },
+  b: { x: number; y: number; width: number; height: number },
+): number {
+  const acx = a.x + a.width / 2;
+  const acy = a.y + a.height / 2;
+  const bcx = b.x + b.width / 2;
+  const bcy = b.y + b.height / 2;
+  return Math.hypot(acx - bcx, acy - bcy);
+}
+
+function isOverlapping(
+  a: { x: number; y: number; width: number; height: number },
+  b: { x: number; y: number; width: number; height: number },
+): boolean {
+  return iou(a, b) > IOU_THRESHOLD || centerDistance(a, b) < CENTER_DIST_THRESHOLD;
+}
+
 /** Calculate IoU (Intersection over Union) of two rects. */
 function iou(
   a: { x: number; y: number; width: number; height: number },
@@ -139,14 +160,14 @@ export function mergeDetections(
 
     for (const domEl of domElements) {
       if (!domEl.rect) continue;
-      if (iou(visionRectCss, domEl.rect) > 0.5) {
+      if (isOverlapping(visionRectCss, domEl.rect)) {
         isDuplicate = true;
         break;
       }
     }
     if (!isDuplicate) {
       for (const prior of acceptedVisionRects) {
-        if (iou(visionRectCss, prior) > 0.5) {
+        if (isOverlapping(visionRectCss, prior)) {
           isDuplicate = true;
           break;
         }

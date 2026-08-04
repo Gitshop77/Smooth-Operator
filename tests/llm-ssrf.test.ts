@@ -150,8 +150,12 @@ describe("validateWebhookUrl (webhook SSRF guard)", () => {
     assertRejected(validateWebhookUrl("http://metadata.google.internal/"), /private\/metadata\/link-local/i);
   });
 
-  test("allows a loopback webhook relay (self-hosted dev notification)", () => {
-    expect(validateWebhookUrl("http://localhost:8080/hook").ok).toBe(true);
+  test("rejects loopback webhook without provenance (injected default)", () => {
+    expect(validateWebhookUrl("http://localhost:8080/hook").ok).toBe(false);
+  });
+
+  test("allows loopback webhook with user-configured provenance (dev relay)", () => {
+    expect(validateWebhookUrl("http://localhost:8080/hook", "user-configured").ok).toBe(true);
   });
 
   test("rejects IPv6 embedded-IPv4 cloud-metadata forms (NAT64 / mapped / Teredo / 6to4 / IPv4-compatible)", () => {
@@ -164,8 +168,9 @@ describe("validateWebhookUrl (webhook SSRF guard)", () => {
     expect(validateWebhookUrl("http://[::169.254.169.254]/hook").ok).toBe(false);
   });
 
-  test("allows IPv6 loopback and a public IPv6 webhook", () => {
-    expect(validateWebhookUrl("http://[::1]:8080/hook").ok).toBe(true);
+  test("rejects IPv6 loopback without provenance, allows with user-configured provenance", () => {
+    expect(validateWebhookUrl("http://[::1]:8080/hook").ok).toBe(false);
+    expect(validateWebhookUrl("http://[::1]:8080/hook", "user-configured").ok).toBe(true);
     expect(validateWebhookUrl("http://[2606:4700:4700::1111]/hook").ok).toBe(true);
   });
 });
@@ -191,11 +196,15 @@ describe("IPv6 embedded-IPv4 SSRF classifier parity (LLM vs webhook)", () => {
     }
   });
 
-  test("both paths allow IPv6 loopback and a public IPv6 address", () => {
+  test("both paths allow IPv6 loopback with user-configured provenance and a public IPv6 address", () => {
     for (const u of ["http://[::1]/", "http://[2606:4700:4700::1111]/"]) {
       expect(validateLlmBaseUrl(u).ok).toBe(true);
-      expect(validateWebhookUrl(u).ok).toBe(true);
+      expect(validateWebhookUrl(u, "user-configured").ok).toBe(true);
     }
+  });
+
+  test("webhook path rejects IPv6 loopback without provenance (injected default)", () => {
+    expect(validateWebhookUrl("http://[::1]/").ok).toBe(false);
   });
 });
 
