@@ -47,7 +47,7 @@ const STATIC_REGION_IDS: Record<"polite" | "assertive", string[]> = {
   assertive: ["runErrorLive", "errorMessage", "ocLiveAlert"],
 };
 
-export function getLiveRegion(
+function getLiveRegion(
   kind: "polite" | "assertive",
   doc: Document = document,
 ): HTMLElement {

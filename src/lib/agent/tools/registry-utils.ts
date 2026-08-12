@@ -153,7 +153,13 @@ async function loadCustomTools(): Promise<CustomTool[]> {
     }
   }
   try {
-    const raw = localStorage.getItem(CUSTOM_TOOLS_STORAGE_KEY);
+    // Guard the storage global itself: in non-browser contexts (Node scripts,
+    // tests, the measure harness) `localStorage` is `undefined`, and reaching
+    // `getItem` would throw + log a scary console.warn on EVERY prompt build.
+    // `null` falls through to the empty-array path — no custom tools, no noise.
+    const raw = typeof localStorage !== "undefined"
+      ? localStorage.getItem(CUSTOM_TOOLS_STORAGE_KEY)
+      : null;
     const tools = raw ? (JSON.parse(raw) as CustomTool[]) : [];
     customToolsCache = tools.filter(isValidCustomTool);
     return customToolsCache;

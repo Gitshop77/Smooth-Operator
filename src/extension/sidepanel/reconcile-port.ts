@@ -15,7 +15,3 @@ export function registerAgentEventReconciler(
 export function requestAgentEventReconciliation(): void {
   reconcileAgentEvent?.();
 }
-
-export function resetAgentEventReconcilerForTests(): void {
-  reconcileAgentEvent = null;
-}
