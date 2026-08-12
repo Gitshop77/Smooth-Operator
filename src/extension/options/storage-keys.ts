@@ -65,6 +65,11 @@ export const STORAGE_KEYS = {
   reasoningEffort: "reasoningEffort",
   reasoningBudget: "reasoningBudget",
   forceReasoning: "forceReasoning",
+  // Optional model-context override (tokens). Read by llm-direct.ts
+  // getContextTokens; written by settings-sync.ts from the options UI.
+  // Key literal matches the llm-direct read exactly — do not rename without
+  // updating both sides.
+  contextTokens: "contextTokens",
   // Provider-config UI warning banner state (provider-config-ui.ts).
   providerResetWarning: "provider_reset_warning",
   // Provider-scoped config record (O8): chrome.storage.local["providerConfigs"]

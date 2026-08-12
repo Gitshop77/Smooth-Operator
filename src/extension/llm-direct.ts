@@ -18,7 +18,10 @@ import {
   compileNavigatorPromptV1,
   compilePlannerPromptV1,
 } from "../lib/agent/prompts/prompt-compiler";
-import { assertCompiledPromptWithinProfileV1 } from "../lib/agent/prompts/prompt-token-budget";
+import {
+  assertCompiledPromptWithinContextBudgetV1,
+  assertCompiledPromptWithinProfileV1,
+} from "../lib/agent/prompts/prompt-token-budget";
 import { AgentOutputSchema, PlannerOutputSchema } from "../lib/agent/tools/schema";
 import { getFormatInstructions } from "../lib/agent/tools/registry";
 import type { AgentStepRequest, PlannerStepRequest, TokenUsage } from "../lib/agent/types";
@@ -136,6 +139,7 @@ if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
     if (changes.reasoningEffort) settingCache.delete("reasoningEffort");
     if (changes.reasoningBudget) settingCache.delete("reasoningBudget");
     if (changes.forceReasoning) settingCache.delete("forceReasoning");
+    if (changes.contextTokens) settingCache.delete("contextTokens");
   });
 }
 
@@ -227,6 +231,25 @@ export const getForceReasoning = cachedSetting("forceReasoning", async () => {
   const { forceReasoning } = await chrome.storage.local.get("forceReasoning");
   const v = forceReasoning as string | undefined;
   return v && REASONING_FORCE.has(v) ? v : undefined;
+});
+
+/** Minimum accepted `contextTokens` override (1k) — below this the setting is
+ * rejected at the boundary so a corrupt value can never derive a degenerate
+ * budget (e.g. a 1-token context that fail-closes every call). */
+const MIN_CONTEXT_TOKENS = 1_000;
+
+/** Memoized `contextTokens` setting — the user's manual override of the model's
+ * effective context window (tokens). Lets a user cap a natively-larger model
+ * (e.g. a local 256k run) to what their hardware/provider actually accepts
+ * (e.g. 64k). When unset, the budget layer falls back to the models.dev
+ * catalog's per-model `limit.context` for known models. */
+export const getContextTokens = cachedSetting("contextTokens", async () => {
+  const { contextTokens } = await chrome.storage.local.get("contextTokens");
+  return typeof contextTokens === "number" &&
+    Number.isFinite(contextTokens) &&
+    contextTokens >= MIN_CONTEXT_TOKENS
+    ? Math.floor(contextTokens)
+    : undefined;
 });
 
 /**
@@ -344,6 +367,49 @@ interface DirectCallResult {
   cachedWriteInputTokens?: number;
   model?: string;
   costUsd?: number;
+}
+
+/** Resolve a provider config's model in the models.dev catalog and return its
+ * declared context window (`limit.context`), or `undefined` when the model is
+ * unknown (e.g. an arbitrary local Ollama name). */
+export function catalogContextFor(providerId: string, modelId: string): number | undefined {
+  const catId = CATALOG_PROVIDER_ID_MAP[providerId] ?? providerId;
+  const resolved = resolveModel({ provider: providerId, model: modelId, catalogId: catId });
+  if (!resolved) return undefined;
+  const limit = getModelsForProvider(catId, resolved)?.limit?.context;
+  return typeof limit === "number" && Number.isFinite(limit) && limit > 0 ? limit : undefined;
+}
+
+/** The effective context window (tokens) for the ACTIVE provider/model:
+ * 1. the user's manual `contextTokens` override (e.g. "256k native, but I run at 64k"),
+ * 2. else the catalog's per-model `limit.context`,
+ * 3. else `undefined` → the fixed per-kind budget profiles apply.
+ * Uses the cached provider config (populated by `getProvider()` in the same
+ * call path) so the hot path adds no storage round-trip. */
+export async function getEffectiveContextTokens(): Promise<number | undefined> {
+  const override = await getContextTokens();
+  if (override !== undefined) return override;
+  const config = cachedProviderConfig ?? (await readProviderConfig());
+  if (!config) return undefined;
+  return catalogContextFor(config.provider, config.model);
+}
+
+/** Assert a compiled prompt against the effective model context when one is
+ * known (catalog-derived or user override), else the fixed per-kind profile.
+ * This is the fail-closed guard that makes the 32k/64k-model protection real
+ * at runtime — previously only the fixed 128k (navigator) / 64k (planner)
+ * profiles applied, so a 64k model could receive an over-context prompt. */
+export function assertPromptBudget(
+  kind: "navigator" | "planner" | "compaction" | "judge",
+  label: string,
+  messages: readonly { content: string }[],
+  effectiveContextTokens: number | undefined,
+): void {
+  if (effectiveContextTokens !== undefined) {
+    assertCompiledPromptWithinContextBudgetV1(kind, label, messages, effectiveContextTokens);
+  } else {
+    assertCompiledPromptWithinProfileV1(kind, label, messages);
+  }
 }
 
 /**
@@ -468,13 +534,16 @@ export async function navigatorCallDirect(
       : "",
   });
   const messages: ChatMessage[] = compiled.messages;
-  // Budget guard: the fully assembled navigator prompt (system + user,
-  // including the injected screenshot marker and format instructions) must fit
-  // the navigator profile's conservative UTF-8-byte input budget before any
-  // tokens are spent. Failing closed here prevents an unbounded DOM/screenshot
-  // payload from ever crossing the network, even if every earlier cap is
-  // misconfigured.
-  assertCompiledPromptWithinProfileV1("navigator", "navigator", messages);
+  // Model-context-aware budget guard: when the model's effective context is
+  // known (catalog `limit.context`, or the user's `contextTokens` override),
+  // the fully assembled navigator prompt (system + user, including the injected
+  // screenshot marker and format instructions) must fit the DERIVED input
+  // budget — a 64k model must never receive a 128k-sized prompt. Unknown
+  // models fall back to the fixed 128k navigator profile. Failing closed here
+  // prevents an unbounded DOM/screenshot payload from ever crossing the
+  // network, even if every earlier cap is misconfigured.
+  const effectiveContextTokens = await getEffectiveContextTokens();
+  assertPromptBudget("navigator", "navigator", messages, effectiveContextTokens);
 
   const response = await provider.chat({
     messages,
@@ -544,9 +613,12 @@ export async function plannerCallDirect(
       : "\n\n" + getFormatInstructions(PlannerOutputSchema),
   });
   const messages: ChatMessage[] = compiled.messages;
-  // Budget guard: the assembled planner prompt must fit the planner
-  // profile's conservative UTF-8-byte input budget before tokens are spent.
-  assertCompiledPromptWithinProfileV1("planner", "planner", messages);
+  // Model-context-aware budget guard, mirroring the navigator path: the
+  // assembled planner prompt must fit the model's DERIVED input budget when its
+  // effective context is known (64k planner prompt on a 32k model fails closed
+  // instead of shipping an over-context prompt).
+  const effectiveContextTokens = await getEffectiveContextTokens();
+  assertPromptBudget("planner", "planner", messages, effectiveContextTokens);
 
   const response = await provider.chat({
     messages,
@@ -579,10 +651,15 @@ export async function summarizeCallDirect(
   req: { systemPrompt: string; userPrompt: string; signal?: AbortSignal },
 ): Promise<{ content: string; usage?: TokenUsage }> {
   const provider = await raceWithAbort(getProvider(), req.signal);
-  assertCompiledPromptWithinProfileV1("compaction", "compaction", [
+  // Model-context-aware budget guard, mirroring the navigator/planner paths:
+  // the compaction request must fit the model's DERIVED input budget when its
+  // effective context is known (defense-in-depth — the request is already
+  // deterministically bounded in `runCompaction`).
+  const effectiveContextTokens = await getEffectiveContextTokens();
+  assertPromptBudget("compaction", "compaction", [
     { content: req.systemPrompt },
     { content: req.userPrompt },
-  ]);
+  ], effectiveContextTokens);
   const response = await provider.chat({
     messages: [
       { role: "system", content: req.systemPrompt },

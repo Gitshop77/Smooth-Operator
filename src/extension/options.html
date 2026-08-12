@@ -176,6 +176,16 @@
             </select>
             <small>Overrides the model's own default when the provider supports it.</small>
           </label>
+          <label>
+            <span>Context window override (tokens)</span>
+            <input type="number" id="contextTokens" min="1000" step="1000" placeholder="e.g. 64000" />
+            <small>
+              Optional. Caps the per-step prompt budget to what your setup can
+              actually run when it differs from the model's catalog context
+              (e.g. a 256k model served locally at 64k). Leave empty to use the
+              catalog value automatically.
+            </small>
+          </label>
         </div>
 
         <!-- Vision Assistant -->

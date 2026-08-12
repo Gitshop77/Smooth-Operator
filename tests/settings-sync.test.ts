@@ -79,6 +79,7 @@ function setupGlobals(): void {
       <option value="on">on</option>
       <option value="off">off</option>
     </select>
+    <input id="contextTokens">
   `;
 }
 
@@ -442,6 +443,50 @@ describe("settings-sync reasoning (O1) round-trip", () => {
     expect((document.getElementById("reasoningEffort") as HTMLSelectElement).value).toBe("high");
     expect((document.getElementById("reasoningBudget") as HTMLInputElement).value).toBe("20480");
     expect((document.getElementById("forceReasoning") as HTMLSelectElement).value).toBe("off");
+  });
+});
+
+/**
+ * Context-override (tokens) round-trip. llm-direct.ts reads the top-level
+ * `contextTokens` key (getContextTokens) to derive per-kind prompt budgets for
+ * models whose catalog `limit.context` differs from what the user can actually
+ * run — a regression dropping it from the save path would silently ignore the
+ * user's "256k native, but I run at 64k" cap.
+ */
+describe("settings-sync context override round-trip", () => {
+  test("saveSettings persists a valid override", async () => {
+    setupGlobals();
+    const mod = await import("../src/extension/options/settings-sync");
+    (document.getElementById("contextTokens") as HTMLInputElement).value = "64000";
+    expect(await mod.saveSettings()).toBe(true);
+    expect(localStore.get("contextTokens")).toBe(64_000);
+  });
+
+  test("an emptied field removes the previously-stored override", async () => {
+    setupGlobals();
+    localStore.set("contextTokens", 64_000);
+    vi.resetModules();
+    const mod = await import("../src/extension/options/settings-sync");
+    (document.getElementById("contextTokens") as HTMLInputElement).value = "";
+    expect(await mod.saveSettings()).toBe(true);
+    expect(localStore.has("contextTokens")).toBe(false);
+  });
+
+  test("an out-of-range value resets the field and stores nothing", async () => {
+    setupGlobals();
+    const mod = await import("../src/extension/options/settings-sync");
+    (document.getElementById("contextTokens") as HTMLInputElement).value = "42";
+    expect(await mod.saveSettings()).toBe(true);
+    expect((document.getElementById("contextTokens") as HTMLInputElement).value).toBe("");
+    expect(localStore.has("contextTokens")).toBe(false);
+  });
+
+  test("import-time load reflects a stored override", async () => {
+    setupGlobals();
+    localStore.set("contextTokens", 64_000);
+    vi.resetModules();
+    await import("../src/extension/options/settings-sync");
+    expect((document.getElementById("contextTokens") as HTMLInputElement).value).toBe("64000");
   });
 });
 

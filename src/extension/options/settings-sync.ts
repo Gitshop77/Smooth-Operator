@@ -47,6 +47,7 @@ if (typeof chrome !== "undefined" && chrome.storage?.local) {
       STORAGE_KEYS.notifyOnCompletion, STORAGE_KEYS.notifyOnError,
       STORAGE_KEYS.notifyOnTakeover, STORAGE_KEYS.webhookUrl, STORAGE_KEYS.agentMode,
       STORAGE_KEYS.reasoningEffort, STORAGE_KEYS.reasoningBudget, STORAGE_KEYS.forceReasoning,
+      STORAGE_KEYS.contextTokens,
       STORAGE_KEYS.providerConfigs,
     ],
     (res) => {
@@ -96,6 +97,15 @@ if (typeof chrome !== "undefined" && chrome.storage?.local) {
         ["plannerInterval", STORAGE_KEYS.plannerInterval, 5], ["maxFailures", STORAGE_KEYS.maxFailures, 5],
       ];
       for (const [elId, key, def] of numFields) setVal(elId, String(res[key] ?? def));
+
+      // Optional model-context override (tokens). llm-direct reads this to
+      // derive per-kind prompt budgets for models whose catalog `limit.context`
+      // differs from what the user can actually run (e.g. a 256k native model
+      // capped at 64k locally). Empty → no override.
+      const ctxEl = document.getElementById("contextTokens") as HTMLInputElement | null;
+      if (ctxEl) {
+        setVal("contextTokens", res[STORAGE_KEYS.contextTokens] != null ? String(res[STORAGE_KEYS.contextTokens]) : "");
+      }
 
       const costCap = typeof res[STORAGE_KEYS.costCap] === "number" ? Math.max(0, res[STORAGE_KEYS.costCap] as number) : 0;
       setVal("costCap", String(costCap));
@@ -287,6 +297,24 @@ async function doSaveSettings(): Promise<boolean> {
     }
   }
 
+  // Optional model-context override (tokens): a positive integer ≥ 1000. Empty
+  // field = explicit "no override" (REMOVES the stored key — llm-direct reads
+  // absence as catalog-derived/fixed profiles). An out-of-range value is reset
+  // instead of persisted.
+  const ctxRawEl = document.getElementById("contextTokens") as HTMLInputElement | null;
+  let contextTokens: number | undefined;
+  if (ctxRawEl) {
+    const ctxRaw = ctxRawEl.value.trim();
+    if (ctxRaw !== "") {
+      const parsed = Number(ctxRaw);
+      if (/^\d+$/.test(ctxRaw) && Number.isFinite(parsed) && parsed >= 1000) {
+        contextTokens = Math.floor(parsed);
+      } else {
+        ctxRawEl.value = "";
+      }
+    }
+  }
+
   const providerId = ($("provider") as HTMLSelectElement).value || DEFAULT_PROVIDER_ID;
 
   // Sync the authoritative provider-config store with the values about to be
@@ -339,6 +367,7 @@ async function doSaveSettings(): Promise<boolean> {
     [STORAGE_KEYS.reasoningEffort]: reasoningEffort,
     ...(reasoningBudget !== undefined ? { [STORAGE_KEYS.reasoningBudget]: reasoningBudget } : {}),
     [STORAGE_KEYS.forceReasoning]: forceReasoning,
+    ...(contextTokens !== undefined ? { [STORAGE_KEYS.contextTokens]: contextTokens } : {}),
     [STORAGE_KEYS.providerConfigs]: providerConfigs,
   };
 
@@ -385,6 +414,15 @@ async function doSaveSettings(): Promise<boolean> {
           await chrome.storage.local.remove(STORAGE_KEYS.reasoningBudget);
         } catch (e) {
           console.warn("[options] reasoning budget removal failed:", e);
+        }
+      }
+      // Same empty-field cleanup for the context override (guarded by element
+      // presence so a page without the field never touches storage).
+      if (contextTokens === undefined && document.getElementById("contextTokens")) {
+        try {
+          await chrome.storage.local.remove(STORAGE_KEYS.contextTokens);
+        } catch (e) {
+          console.warn("[options] context-tokens removal failed:", e);
         }
       }
       const apiKeyValue = ($("apiKey") as HTMLInputElement).value;
