@@ -151,7 +151,7 @@ describe("meta CSP on extension pages", () => {
     );
     expect(csp).not.toBeNull();
     // This is a characterization, not an endorsement of broad direct network
-    // access. Phase 4 owns replacing the current policy with a browser-valid,
+    // access. Replacing the current policy with a browser-valid,
     // reviewed provider/loopback policy. Until then, do not let a markup edit
     // silently delete the only declared connection boundary.
     expect(csp![1]).toContain("connect-src");

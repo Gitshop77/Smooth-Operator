@@ -1,5 +1,5 @@
 /**
- * Phase 10 — debugger/CDP cleanup reliability.
+ * Debugger/CDP cleanup reliability.
  *
  * No chrome.debugger session may leak after evaluate / PDF / screenshot /
  * click flows, on success OR on error. Pins:

@@ -200,9 +200,9 @@ export function safeScrollIntoView(el: HTMLElement): void {
  * Used by the click fallback's strategy 3 (re-find element by selector) and
  * by `list_interactive` descriptors.
  *
- * Strategy chain (extended from the original 2 to 5 — plan S7):
+ * Strategy chain (extended from the original 2 to 5):
  * 1. If `el.id` is non-empty, return `*[id="<escaped-id>"]` (byte-for-byte
- *    stable with the pre-S7 output).
+ *    stable with the pre-extension output).
  * 2. `tagname.class1.class2…` — returned ONLY when globally unique
  *    (previously returned even when ambiguous; the unique case is unchanged).
  * 3. `tag[name="…"]` — when globally unique.

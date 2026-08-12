@@ -1,5 +1,5 @@
 /**
- * Phase: navigator — extracted from orchestrator.ts (Phase 1).
+ * Phase: navigator — extracted from orchestrator.ts.
  *
  * The navigator LLM call with parse retry, the HTML-summarizer pre-pass,
  * and the post-observe challenge/pause checks. This is the "reason + act"

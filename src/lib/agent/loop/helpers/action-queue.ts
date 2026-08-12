@@ -1,7 +1,7 @@
 /**
  * Loop helper — `executeActionQueue`.
  *
- * Extracted from the original `loop/helpers.ts` (Phase 10a).
+ * Extracted from the original `loop/helpers.ts`.
  *
  * Execute a step's action queue. Enforces mode checks, loop detection, and
  * page-change guards. Tab-level actions are delegated to `deps.onTabAction`

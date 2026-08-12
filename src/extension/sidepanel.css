@@ -5,7 +5,7 @@
    accent used purposefully.
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* ─── Shared design tokens + component families (Phase 13) ──────────────── */
+/* ─── Shared design tokens + component families ──────────────── */
 @import url("tokens.css");
 @import url("components.css");
 /* ─── Reset ───────────────────────────────────────────────────────────────── */

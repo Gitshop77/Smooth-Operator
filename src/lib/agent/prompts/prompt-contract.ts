@@ -56,7 +56,7 @@ export interface CompiledPromptV1 {
   cache: PromptCacheDescriptorV1;
 }
 
-/** Shared seam for the deterministic Phase 8 token-budget implementation. */
+/** Shared seam for the deterministic token-budget implementation. */
 export interface PromptBudgetPortV1 {
   readonly version: typeof PROMPT_CONTRACT_VERSION;
   estimateTokens(text: string): number;

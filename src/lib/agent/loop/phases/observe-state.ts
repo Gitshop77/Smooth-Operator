@@ -1,5 +1,5 @@
 /**
- * Phase: observe-state — extracted from orchestrator.ts (Phase 1).
+ * Phase: observe-state — extracted from orchestrator.ts.
  *
  * Wraps the getTabs + extractState logic with error handling. Returns the
  * browser state on success, or an error result that the caller can use to

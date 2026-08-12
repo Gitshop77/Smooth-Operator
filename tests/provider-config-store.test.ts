@@ -1,5 +1,5 @@
 /**
- * Phase 12 — provider/model change flow (Connection tab store).
+ * Provider/model change flow (Connection tab store).
  *
  * Covers the "changing provider/model updates capabilities, connection
  * diagnostics, and prompts without stale-cache leaks" invariant:

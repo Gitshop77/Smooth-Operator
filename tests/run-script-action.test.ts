@@ -1,5 +1,5 @@
 /**
- * S3 — `run_script` as a first-class LLM-addressable action.
+ * `run_script` as a first-class LLM-addressable action.
  *
  * `run_script` executes a multi-step YAML/JSON script through the script
  * engine (`script-runner.ts`) with each step dispatched as an ordinary

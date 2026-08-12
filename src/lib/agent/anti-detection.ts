@@ -60,6 +60,8 @@ export interface StealthSeed {
   deviceMemory: number;
   connectionRtt: number;
   connectionDownlink: number;
+  /** Number of fabricated navigator.plugins entries (2 or 3). */
+  pluginCount: number;
 }
 
 export const DEFAULT_STEALTH_SEED: StealthSeed = {
@@ -67,6 +69,7 @@ export const DEFAULT_STEALTH_SEED: StealthSeed = {
   deviceMemory: 8,
   connectionRtt: 50,
   connectionDownlink: 10,
+  pluginCount: 2,
 };
 
 /** Validates a candidate seed against the plausible-desktop grids. */
@@ -82,7 +85,9 @@ export function isValidStealthSeed(value: unknown): value is StealthSeed {
     s.connectionRtt >= 30 &&
     s.connectionRtt <= 90 &&
     typeof s.connectionDownlink === "number" &&
-    [5, 10, 20, 30].includes(s.connectionDownlink)
+    [5, 10, 20, 30].includes(s.connectionDownlink) &&
+    typeof s.pluginCount === "number" &&
+    [2, 3].includes(s.pluginCount)
   );
 }
 
@@ -94,6 +99,10 @@ export function generateStealthSeed(random: () => number = Math.random): Stealth
     deviceMemory: pick([4, 8] as const),
     connectionRtt: pick([40, 45, 50, 55, 60, 65] as const),
     connectionDownlink: pick([10, 20, 30] as const),
+    // Modern Chrome ships two PDF plugins; the legacy Native Client plugin is
+    // absent on newer versions. Weight the draw toward 2 to match the
+    // population while still producing both personas.
+    pluginCount: pick([2, 2, 3] as const),
   };
 }
 
@@ -179,7 +188,7 @@ export function stealthScriptBody(seed?: StealthSeed): void {
     const s: StealthSeed =
       seed && typeof seed.hardwareConcurrency === "number" && typeof seed.deviceMemory === "number"
         ? seed
-        : { hardwareConcurrency: 4, deviceMemory: 8, connectionRtt: 50, connectionDownlink: 10 };
+        : { hardwareConcurrency: 4, deviceMemory: 8, connectionRtt: 50, connectionDownlink: 10, pluginCount: 2 };
     function p(fn: () => void) {
       try {
         fn();
@@ -294,7 +303,9 @@ export function stealthScriptBody(seed?: StealthSeed): void {
       const plugins = [
         new PluginCtor("Chrome PDF Plugin", "internal-pdf-viewer", "Portable Document Format", [m1]),
         new PluginCtor("Chrome PDF Viewer", "mhjfbmdgcfjbbpaeojofohoefgiehjai", "", [m2]),
-        new PluginCtor("Native Client", "internal-nacl-plugin", "", [m3, m4]),
+        ...(s.pluginCount === 3
+          ? [new PluginCtor("Native Client", "internal-nacl-plugin", "", [m3, m4])]
+          : []),
       ];
 
       function makeIterable(
@@ -353,7 +364,7 @@ export function stealthScriptBody(seed?: StealthSeed): void {
         },
       });
 
-      const allMimes = [m1, m2, m3, m4];
+      const allMimes = s.pluginCount === 3 ? [m1, m2, m3, m4] : [m1, m2];
       const ma: {
         length: number;
         [k: number]: unknown;

@@ -1,5 +1,5 @@
 /**
- * S7 — `list_interactive` + the 5-strategy selector chain.
+ * `list_interactive` + the 5-strategy selector chain.
  *
  * `list_interactive` is the port of stealthy's get_elements.js: lists
  * interactive elements (links, buttons, inputs, selects, textareas,

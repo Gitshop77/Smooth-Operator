@@ -1,5 +1,5 @@
 /**
- * Phase 12 — schedules store (automation/scheduling Options surface).
+ * Schedules store (automation/scheduling Options surface).
  *
  * Covers the explicit command acknowledgement (wait-for-response) lifecycle:
  * list and each mutation move `pending → acked | failed`; a failed mutation

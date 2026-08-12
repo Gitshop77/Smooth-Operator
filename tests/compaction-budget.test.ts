@@ -1,5 +1,5 @@
 /**
- * Phase 8 compaction budget tests.
+ * Compaction budget tests.
  *
  * `runCompaction` must deterministically bound the summarization request to
  * the compaction profile's conservative UTF-8-byte input budget before any

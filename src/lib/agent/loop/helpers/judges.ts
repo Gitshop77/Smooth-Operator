@@ -44,7 +44,7 @@ function recordJudgeDisagreement(state: LoopState): void {
  * Optionally run the judge LLM to verify the agent's self-reported success,
  * then emit the terminal `done` event. Returns `true` if the run is finalized.
  *
- * Phase 9 completion-with-evidence: a `done(success=true)` finalizes ONLY
+ * Completion-with-evidence: a `done(success=true)` finalizes ONLY
  * with positive completion evidence —
  *   1. a passing deterministic evaluator (expectedOutcomes, score 1), or
  *   2. an agreeing LLM judge.
@@ -104,7 +104,7 @@ export async function maybeJudgeAndFinalize(
     return finalize(false, text);
   }
 
-  // Phase 9 completion-with-evidence: does the config provide a DETERMINISTIC
+  // Completion-with-evidence: does the config provide a DETERMINISTIC
   // evidence source? (expectedOutcomes with at least one evaluator kind — an
   // empty spec is not evidence.)
   const hasDeterministicEvidence =

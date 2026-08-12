@@ -1,5 +1,5 @@
 /**
- * Structural validation for the S3 script format — the validation half of the
+ * Structural validation for the script format — the validation half of the
  * script engine (port of stealthy-auto-browse's `script_runner.py`), split
  * out of `script-runner.ts` so the grammar rules live beside the constants
  * that constrain them. `validateScript` throws {@link ScriptValidationError}

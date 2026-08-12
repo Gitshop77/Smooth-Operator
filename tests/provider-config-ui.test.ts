@@ -252,15 +252,15 @@ describe("experimental model badge + confirmation", () => {
 });
 
 /**
- * Phase 3 characterization for the model-persistence defect recorded in the
+ * Characterization for the model-persistence defect recorded in the
  * modernization plan. These tests follow the Options runtime path through
  * `settings-sync.initAutoSave()` and `saveSettings()` to the mocked
  * `chrome.storage.local` persistence boundary. Typing persists both the flat
  * model mirror and the active provider's nested model, but result commits
- * Phase 7 commits a selected result through the same bubbling input boundary,
+ * Commits a selected result through the same bubbling input boundary,
  * so click and keyboard selection are ordinary persistence regressions.
  */
-describe("Phase 3 model selection persistence characterization", () => {
+describe("Model selection persistence characterization", () => {
   beforeAll(async () => {
     const { initAutoSave } = await import("../src/extension/options/settings-sync");
     initAutoSave();

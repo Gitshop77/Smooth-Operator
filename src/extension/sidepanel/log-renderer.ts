@@ -70,6 +70,20 @@ export function clearRunTotals(): void {
   void chrome.storage.local.remove([STORAGE_KEYS.costUsd, STORAGE_KEYS.tokens]);
 }
 
+/**
+ * Drive the cost/token display from an authoritative snapshot usage. Unlike
+ * per-event accumulation, this makes the totals correct even when the panel
+ * opened mid-run and missed earlier `cost` events.
+ */
+export function setRunTotalsFromUsage(usage: { tokensIn: number; tokensOut: number; costUsd: number }): void {
+  totalCost = Number(usage.costUsd) || 0;
+  totalTokens = (Number(usage.tokensIn) || 0) + (Number(usage.tokensOut) || 0);
+  totalsRestored = true;
+  costLabel.textContent = `$${totalCost.toFixed(4)}`;
+  tokenLabel.textContent = formatTokens(totalTokens);
+  scheduleCostStorageWrite();
+}
+
 // ─── Event rendering ──────────────────────────────────────────────────────
 
 /**

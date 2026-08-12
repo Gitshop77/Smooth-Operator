@@ -1,5 +1,5 @@
 /**
- * Phase 12 — settings-sync store (Options load/save acknowledgement).
+ * Settings-sync store (Options load/save acknowledgement).
  *
  * Covers: load and save move `pending → ok | failed`; a storage failure
  * surfaces explicitly with a sanitized message (never a silent success); the

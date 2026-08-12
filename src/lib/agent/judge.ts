@@ -92,7 +92,7 @@ export async function judgeTask(args: JudgeTaskArgs): Promise<JudgementResult | 
   const { task, history, agentResult, llmCall, onCost, modelForCost } = args;
 
   const compiled = await compileJudgePromptV1({ task, history, agentResult });
-  // Phase 8 budget guard: the judge prompt (system + user) must fit the judge
+  // Budget guard: the judge prompt (system + user) must fit the judge
   // profile's conservative UTF-8-byte input budget before any tokens are spent.
   // A failure here surfaces as a typed `PromptBudgetExceededError` and is
   // classified by the caller exactly like a cost-cap stop.

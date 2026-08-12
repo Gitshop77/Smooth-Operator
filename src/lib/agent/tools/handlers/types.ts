@@ -29,7 +29,7 @@ export interface ActionContext {
   fromLoader?: boolean;
 }
 
-/** Runs the URL loaders matching a freshly-navigated URL (S6). */
+/** Runs the URL loaders matching a freshly-navigated URL. */
 export type LoaderRunner = (url: string) => Promise<LoaderRunResult>;
 
 export function isExtensionContext(): boolean {

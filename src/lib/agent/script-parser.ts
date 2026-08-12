@@ -1,6 +1,6 @@
 /**
  * Browser-agnostic YAML/JSON subset parser for script files — the parsing
- * half of the S3 script engine (port of stealthy-auto-browse's
+ * half of the script engine (port of stealthy-auto-browse's
  * `script_runner.py`). Split out of `script-runner.ts` so callers that only
  * parse script text (e.g. the URL-loader registry) never pull in the
  * execution engine.

@@ -42,6 +42,7 @@ import {
   persistInterruptedRunSnapshot,
 } from "./run-snapshot-store";
 import { setRunRecoveryAudit } from "./run-recovery-gate";
+import { captureStorageVersionFailure } from "./storage-version-gate";
 import { serializeEventTime } from "./run-event-projection";
 import { handleScheduledTaskFire } from "./task-queue";
 import { registerRateLimitListener } from "./rate-limit-tracker";
@@ -227,8 +228,11 @@ async function onServiceWorkerStartup(): Promise<void> {
       assertStorageVersionSupported("schedules"),
     ]);
   } catch (e) {
+    captureStorageVersionFailure(e);
     void safeLog("error", "[sw-startup] storage version gate failed (refusing admission):", e);
-    throw e;
+    // Do NOT throw: keep the worker responsive so STATUS can surface the
+    // failure to the panel. The per-domain gates above still fail closed on
+    // every later read/mutation of the affected domain.
   }
 
   // STATUS and recovery can expose a persisted snapshot before the first run

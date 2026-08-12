@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Full-suite test-duration budget (Phase 15).
+ * Full-suite test-duration budget.
  *
  * Runs the complete vitest suite once and FAILS the build when the wall-clock
  * duration exceeds the budget. This is a cumulative-regression gate: a single

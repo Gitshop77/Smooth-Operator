@@ -372,7 +372,7 @@ export function initState(
 // ─── Initial planner phase ─────────────────────────────────────────────────
 
 /**
- * Phase 9 — measured simple-task fast path.
+ * Measured simple-task fast path.
  *
  * Before the initial planner LLM call, attempt a DETERMINISTIC pre-check:
  * when the task is a current-page metadata question (title / URL / page
@@ -382,8 +382,7 @@ export function initState(
  *
  * Gates (conservative defaults — the fast path is default-on since the Phase
  * 16 measured decision and never silently downgrades safety modes):
- * - `config.enableFastPath === true` (default true since the Phase 16
- *   measured decision — see PHASE_EVIDENCE.md).
+ * - `config.enableFastPath === true` (default true since the measured decision).
  * - mode is not `full_agentic` (full agentic keeps the full pipeline).
  * - The run is at the INITIAL decision point only (step 0, no history, no
  *   plan yet).
@@ -452,7 +451,7 @@ export async function runInitialPlannerPhase(
   const { deps, config } = state;
   const { task, onEvent, signal } = state;
 
-  // Phase 9 fast path: deterministic simple-task pre-check (skips the
+  // Fast path: deterministic simple-task pre-check (skips the
   // initial planner LLM call + screenshot when direct evidence answers the
   // task).
   const fastPath = await maybeRunFastPath(state);
@@ -683,7 +682,7 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
   const preflight = await runNavigatorPreflight(state);
   if (preflight) return preflight;
 
-  // Phase 9 state machine: the step's observation phase begins.
+  // State machine: the step's observation phase begins.
   transitionRunPhase(state, "observe", "navigator step begins");
 
   // Pre-observe nudges + step-start event + dispatch.
@@ -705,7 +704,7 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
   await runPauseCheck(state);
   const navRequest = await prepareNavigatorRequest(state, browserState);
 
-  // Phase 9 state machine: the action phase begins (navigator LLM call).
+  // State machine: the action phase begins (navigator LLM call).
   transitionRunPhase(state, "act", "navigator LLM call begins");
 
   // Navigator LLM call (heartbeat + SLA wrapped), with error classification.
@@ -720,7 +719,7 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
 
   // Navigator `done` → planner verify/judge path (always terminal).
   if (doneAction) {
-    // Phase 9 state machine: the verification phase begins.
+    // State machine: the verification phase begins.
     transitionRunPhase(state, "verify", "navigator emitted done — planner verify + judge");
     return runNavigatorDoneAction(state, doneAction, output, browserState, tabs);
   }
@@ -1299,7 +1298,7 @@ async function runNavigatorTail(state: LoopState, browserState: BrowserState): P
   const { config } = state;
   const { signal } = state;
 
-  // Phase 9 state machine: step rollover + compaction are the recovery phase.
+  // State machine: step rollover + compaction are the recovery phase.
   transitionRunPhase(state, "recover", "step rollover + compaction");
 
   state.step++;
@@ -1323,7 +1322,7 @@ async function runNavigatorTail(state: LoopState, browserState: BrowserState): P
   }
 
   if (state.navigatorStepsSincePlanner >= config.plannerInterval) {
-    // Phase 9 state machine: the periodic planner re-evaluation begins.
+    // State machine: the periodic planner re-evaluation begins.
     transitionRunPhase(state, "plan", "periodic planner check");
     const result = await runPeriodicPlannerCheck(state, browserState);
     if (result.finalized) {

@@ -19,10 +19,10 @@ import type { AgentMode } from "../modes";
 import type { CallbackDispatcher, AsyncCallbackHandler } from "../callbacks";
 import type { LoopDetector } from "./loop-detector";
 
-// ─── Run-phase state machine (Phase 9) ───────────────────────────────────────
+// ─── Run-phase state machine ───────────────────────────────────────
 
 /**
- * Typed run phases of the agent loop's EXPLICIT state machine (Phase 9).
+ * Typed run phases of the agent loop's explicit state machine.
  *
  * The orchestrator's control flow is expressed as documented transitions
  * between these phases instead of an implicit while-loop. Each phase owns a
@@ -242,13 +242,13 @@ export interface LoopState {
   /** Delay between steps when `deps.waitForSettled` is absent. */
   settleDelay: number;
  // ── Mutable ──
-  /** Current phase of the explicit run-state machine (Phase 9). Set to
+  /** Current phase of the explicit run-state machine. Set to
   * `"init"` by {@link initState}; advanced only through
   * {@link transitionRunPhase} (which validates against the transition table).
   * `"terminal"` is sticky — once the terminal event is emitted the phase never
   * leaves `terminal`. */
   phase: RunPhase;
-  /** True when the measured simple-task fast path (Phase 9) completed the run
+  /** True when the measured simple-task fast path completed the run
   * on direct current-page evidence (no initial planner call, no screenshot). */
   fastPathUsed?: boolean;
   /** Accumulated navigator history (one entry per navigator step). */

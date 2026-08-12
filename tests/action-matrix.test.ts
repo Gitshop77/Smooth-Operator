@@ -1,7 +1,7 @@
 // @vitest-environment-options {"url":"http://matrix.test/"}
 
 /**
- * Phase 10 — generated action matrix.
+ * Generated action matrix.
  *
  * A matrix test over EVERY canonical action in `ActionSchema`. For each action
  * the matrix proves all seven legs:
@@ -32,7 +32,7 @@ import type { AgentAction } from "../src/lib/agent/types";
 import { makeState } from "./helpers";
 
 // ─── Canonical fixtures (one per action type) ───────────────────────────────
-// Mirrors tests/phase3-action-parity-contract.test.ts — kept as RAW inputs so
+// Mirrors tests/action-parity-contract.test.ts — kept as RAW inputs so
 // the schema leg proves each representative is accepted by the canonical
 // schema before any downstream contract runs.
 
@@ -194,7 +194,7 @@ const HANDLER_NAMES = [...new Set(Object.values(HANDLER_BY_ACTION).filter((v): v
 
 // ─── Leg 1: schema + generation completeness ─────────────────────────────────
 
-describe("Phase 10 action matrix — schema leg (generated completeness)", () => {
+describe("Action matrix — schema leg (generated completeness)", () => {
   test("the schema's action set EXACTLY matches the matrix rows (no orphan, no gap)", () => {
     const schemaTypes = schemaActionTypes();
     expect(schemaTypes.sort()).toEqual([...ACTION_TYPES].sort());
@@ -210,7 +210,7 @@ describe("Phase 10 action matrix — schema leg (generated completeness)", () =>
 
 // ─── Legs 2/3/4/7: authorization + invocation + cancellation + evidence ──────
 
-describe("Phase 10 action matrix — dispatch legs (mocked handlers)", () => {
+describe("Action matrix — dispatch legs (mocked handlers)", () => {
   afterEach(() => {
     vi.doUnmock("../src/lib/agent/tools/handlers");
     vi.doUnmock("../src/lib/agent/script-runner");
@@ -263,7 +263,7 @@ describe("Phase 10 action matrix — dispatch legs (mocked handlers)", () => {
         undefined,
         undefined,
         undefined,
-        { runId: "phase10-matrix", dispatchRevision: 1 },
+        { runId: "matrix-fixture", dispatchRevision: 1 },
         undefined,
         async (candidate: AgentAction) => {
           // Authorization boundary must receive the CANONICAL parsed payload,
@@ -334,7 +334,7 @@ describe("Phase 10 action matrix — dispatch legs (mocked handlers)", () => {
 
 // ─── Legs 5/6: timeout + cleanup with REAL handlers ──────────────────────────
 
-describe("Phase 10 action matrix — timeout + cleanup legs (real handlers)", () => {
+describe("Action matrix — timeout + cleanup legs (real handlers)", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
@@ -378,7 +378,7 @@ describe("Phase 10 action matrix — timeout + cleanup legs (real handlers)", ()
     // describe's afterEach vi.restoreAllMocks).
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const state = makeState();
-    const token = { runId: "phase10-matrix-timeout", dispatchRevision: 1 };
+    const token = { runId: "matrix-timeout-fixture", dispatchRevision: 1 };
     const swRpcTypes = ACTION_TYPES.filter((type) => SW_RPC_TYPES.has(type));
 
     for (const type of swRpcTypes) {

@@ -162,7 +162,7 @@ function renderScheduleFromStore(): void {
     const enableBtn = item.querySelector("button.toggle-enable") as HTMLButtonElement;
     const delBtn = item.querySelector("button.schedule-delete") as HTMLButtonElement;
     delBtn.addEventListener("click", () => {
-      // Destructive-action gate (Phase 14): deleting a scheduled task requires
+      // Destructive-action gate: deleting a scheduled task requires
       // explicit acknowledgement through the danger-styled modal (anti-misclick
       // delay included). Cancel leaves the list untouched.
       void confirmModal({

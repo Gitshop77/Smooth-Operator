@@ -201,3 +201,30 @@ describe("isPrivilegedSender", () => {
     ).toBe(false);
   });
 });
+
+describe("log-ring message dispatch", () => {
+  test("NETWORK_LOG / CONSOLE_LOG / CONSOLE_LOG_ENTRY route to the shared handler", async () => {
+    vi.resetModules();
+    const chromeStub = installChromeStub();
+    await import("../src/extension/background/message-routing");
+    const addListener = chromeStub.runtime.onMessage.addListener as ReturnType<typeof vi.fn>;
+    const listener = addListener.mock.calls[0][0] as (
+      msg: unknown,
+      sender: { id?: string },
+      respond: (r?: unknown) => void,
+    ) => boolean | undefined;
+    const respond = vi.fn();
+
+    // Unknown types fall through (return false) so other listeners may run.
+    expect(listener({ type: "UNKNOWN_TYPE" }, { id: "extid" }, respond)).toBe(false);
+
+    // NETWORK_LOG is consumed asynchronously by the shared handler (true).
+    expect(listener({ type: "NETWORK_LOG", verb: "enable" }, { id: "extid" }, respond)).toBe(true);
+
+    // CONSOLE_LOG_ENTRY is a fire-and-forget push (false, no response).
+    expect(
+      listener({ type: "CONSOLE_LOG_ENTRY", entry: { type: "log", message: "x", timestamp: 1 } }, { id: "extid" }, respond),
+    ).toBe(false);
+    expect(respond).not.toHaveBeenCalled();
+  });
+});

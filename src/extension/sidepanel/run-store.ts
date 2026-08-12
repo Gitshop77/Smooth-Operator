@@ -182,7 +182,7 @@ function isUnversionedCancellationTranscript(event: LogEvent): boolean {
  * Admit one event envelope for transcript rendering. `false` means it is
  * stale/cross-run and must not reach either the transcript or lifecycle UI.
  *
- * Events never mutate lifecycle state (ADR-005, closed at Phase 12): the panel
+ * Events never mutate lifecycle state (ADR-005): the panel
  * renders strictly from the snapshot projection, and the caller reconciles
  * STATUS after every admitted event so the authoritative snapshot converges.
  */

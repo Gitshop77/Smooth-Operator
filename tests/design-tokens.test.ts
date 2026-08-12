@@ -1,5 +1,5 @@
 /**
- * Phase 13 — design tokens: WCAG AA contrast + CSS↔TS sync + alias coverage.
+ * Design tokens: WCAG AA contrast + CSS↔TS sync + alias coverage.
  *
  * - Every pair in `ocContrastPairs` must reach ≥4.5:1 (normal text) in both
  *   themes, with rgba backgrounds blended over the app surface.
@@ -54,7 +54,7 @@ function resolveVars(map: Map<string, string>, name: string, depth = 0): string 
   return m ? resolveVars(map, m[1], depth + 1) : value;
 }
 
-describe("Phase 13 — WCAG AA contrast (both themes)", () => {
+describe("WCAG AA contrast (both themes)", () => {
   test("every text/background pair reaches ≥4.5:1 (WCAG AA normal text)", () => {
     const failures: string[] = [];
     for (const pair of ocContrastPairs) {
@@ -104,7 +104,7 @@ describe("Phase 13 — WCAG AA contrast (both themes)", () => {
 });
 
 
-describe("Phase 13 — tokens.css ↔ tokens.ts sync", () => {
+describe("tokens.css ↔ tokens.ts sync", () => {
   test("dark + light color tokens match the stylesheet exactly", () => {
     const LIGHT_MARKER = "@media (prefers-color-scheme: light) {";
     const darkVars = extractVars(tokensCss.slice(0, tokensCss.indexOf(LIGHT_MARKER)));
@@ -154,7 +154,7 @@ describe("Phase 13 — tokens.css ↔ tokens.ts sync", () => {
   });
 });
 
-describe("Phase 13 — custom property integrity", () => {
+describe("Custom property integrity", () => {
   test("every var(--oc-*) referenced by the stylesheets is defined in tokens.css", () => {
     const defined = extractVars(tokensCss);
     const referenced = new Set<string>();
@@ -203,7 +203,7 @@ describe("Phase 13 — custom property integrity", () => {
   });
 });
 
-describe("Phase 13 — components.css parse structure + AA hover/render contract (B1/M1/M2 regressions)", () => {
+describe("Components.css parse structure + AA hover/render contract (B1/M1/M2 regressions)", () => {
   /** Collect top-level rule selectors via a css-tree walk of the stylesheet. */
   function topLevelSelectors(css: string): Set<string> {
     const ast = csstree.parse(css, { positions: false });

@@ -1,6 +1,6 @@
 /**
  * options/stores/schedules-store.ts — authoritative scheduled-task list state
- * for the Options automation surface (Phase 12).
+ * for the Options automation surface.
  *
  * The background worker remains the only mutation authority; this store
  * mirrors the acknowledged result of each typed command (list/save/delete/

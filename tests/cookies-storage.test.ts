@@ -1,5 +1,5 @@
 /**
- * cookies + storage (S5): SW-side `handleTabAction` cases and the content-script
+ * cookies + storage: SW-side `handleTabAction` cases and the content-script
  * delegation contract.
  *
  * - get_cookies: optional urls filter, full cookie projection (name, value,

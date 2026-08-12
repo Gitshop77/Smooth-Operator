@@ -15,7 +15,7 @@
  * | live-region         | moderate | expected live regions exist (status + alert)             |
  * | heading-order       | moderate | h1..h6 levels do not skip a level                        |
  *
- * Phase 13 gate: critical flows must have ZERO serious/critical findings.
+ * Gate: critical flows must have ZERO serious/critical findings.
  */
 
 export type A11ySeverity = "critical" | "serious" | "moderate" | "minor";

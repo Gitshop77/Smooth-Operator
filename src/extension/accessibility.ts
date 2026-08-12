@@ -6,7 +6,7 @@
  * cleanly when the expected DOM nodes are absent (partial fixtures in tests,
  * an Options page without a given panel, etc.).
  *
- * Tested in tests/phase13-a11y.test.ts (live region creation, reduced-motion
+ * Tested in tests/panel-accessibility.test.ts (live region creation, reduced-motion
  * gating, focus helpers, Tab trap).
  */
 
@@ -119,7 +119,7 @@ export function moveFocusTo(el: HTMLElement | null, container?: HTMLElement): bo
  * its own inline Tab trap with live recomputation, so no production caller
  * uses this helper yet. It is kept for future dialog surfaces (side-panel
  * takeover dialogs, transcript viewers) and remains covered by
- * tests/phase13-a11y.test.ts.
+ * tests/panel-accessibility.test.ts.
  *
  * `doc` is injectable (M6) so tests never depend on the ambient `document`;
  * callers in production omit it and get the real document.

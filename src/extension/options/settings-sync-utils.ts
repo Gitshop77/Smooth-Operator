@@ -105,7 +105,7 @@ export function showSaved(): void {
 
 /**
  * Compose the confirmable save summary shown after every settings write
- * (Phase 14 "no silent changes" invariant). The sensitive categories —
+ * ("no silent changes" invariant). The sensitive categories —
  * mode, cost, destination (provider/baseUrl), data-collection permissions,
  * vision, and delivery/retention (webhook) — must never change silently, so
  * the summary states exactly what was persisted. Pure: no DOM, no storage.
@@ -216,7 +216,7 @@ export async function migrateSecretsFromLocalToSession(): Promise<void> {
           if (localRes[STORAGE_KEYS.rememberApiKey] !== true) {
             await chrome.storage.local.remove(STORAGE_KEYS.apiKey);
           } else {
-            // Phase 7 legacy adapter: the source remains until the encrypted
+            // Legacy adapter: the source remains until the encrypted
             // vault copy and session hydration have both round-tripped.
             await migrateRememberedCredential();
           }
@@ -277,7 +277,7 @@ export async function renderSecrets(): Promise<void> {
       `<span class="value">${"•".repeat(Math.min(s.value.length, 20))}</span>` +
       `<button type="button" class="secret-delete" aria-label="Delete secret %${escapeHtml(s.name)}%">Delete</button>`;
     item.querySelector("button")!.addEventListener("click", async () => {
-      // Destructive-action gate (Phase 14): deleting a secret value requires
+      // Destructive-action gate: deleting a secret value requires
       // explicit acknowledgement — prompts referencing %name% fail to resolve
       // until the value is re-added.
       const ok = await confirmModal({

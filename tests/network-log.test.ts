@@ -1,5 +1,5 @@
 /**
- * Network log ring (S8) — SW-side capture via chrome.webRequest + the
+ * Network log ring — SW-side capture via chrome.webRequest + the
  * NETWORK_LOG RPC, and the content-side enable/disable/get/clear/getclear
  * action handlers.
  *
@@ -9,8 +9,9 @@
  * - disabled → nothing is captured (listeners early-return).
  * - ring cap is 500 — the OLDEST entry is dropped first.
  * - getclear snapshots AND clears in one synchronous step (atomic).
- * - listeners register exactly once (idempotent), including the NETWORK_LOG
- *   onMessage listener (message-routing.ts does not know the type).
+ * - listeners register exactly once (idempotent). The NETWORK_LOG RPC is
+ *   dispatched through `handleLogRingMessage`, which `message-routing.ts`
+ *   owns as the single onMessage dispatch path.
  */
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
@@ -116,7 +117,6 @@ describe("rate-limit-tracker: network log ring", () => {
     mod.registerRateLimitListener();
     expect(listeners.onBeforeRequest).toHaveLength(1);
     expect(listeners.onCompleted).toHaveLength(2); // rate-limit + network-log capture
-    expect(listeners.onMessage).toHaveLength(1);
   });
 
   test("request + response entries are recorded with the pinned shape", async () => {
@@ -198,7 +198,7 @@ describe("rate-limit-tracker: network log ring", () => {
     controller.markRunning();
     const token = controller.dispatchToken;
     mod.registerRateLimitListener();
-    const rpc = listeners.onMessage[0];
+    const rpc = mod.handleLogRingMessage;
     const respond = (res?: unknown) => res;
 
     // unknown verb → error
@@ -236,7 +236,7 @@ describe("rate-limit-tracker: network log ring", () => {
   test("NETWORK_LOG from an unauthorized sender is ignored", async () => {
     const mod = await loadTracker();
     mod.registerRateLimitListener();
-    const rpc = listeners.onMessage[0];
+    const rpc = mod.handleLogRingMessage;
     const spy = vi.fn();
     const ret = rpc({ type: "NETWORK_LOG", verb: "enable" }, { id: "other-ext" }, spy);
     expect(ret).toBe(false);
@@ -256,7 +256,7 @@ describe("rate-limit-tracker: network log ring", () => {
       mode: "standard",
     });
     controller.markRunning();
-    const rpc = listeners.onMessage[0];
+    const rpc = tracker.handleLogRingMessage;
     const response = vi.fn();
     try {
       expect(rpc({ type: "NETWORK_LOG", verb: "enable" }, { id: "test-ext" }, response)).toBe(true);
@@ -275,7 +275,7 @@ describe("rate-limit-tracker: network log ring", () => {
     tracker.registerRateLimitListener();
     const controller = controllers.beginRunController({ runId: "network-effects", task: "inspect", maxSteps: 1, mode: "standard" });
     controller.markRunning();
-    const rpc = listeners.onMessage[0];
+    const rpc = tracker.handleLogRingMessage;
     const call = (message: Record<string, unknown>) => new Promise<unknown>((resolve) => rpc(message, { id: "test-ext" }, resolve));
     try {
       await expect(call({ type: "NETWORK_LOG", verb: "enable", token: controller.dispatchToken }))
@@ -301,7 +301,7 @@ describe("rate-limit-tracker: network log ring", () => {
     controllers.resetRunControllerForTests();
     tracker.registerRateLimitListener();
     const response = vi.fn();
-    const rpc = listeners.onMessage[0];
+    const rpc = tracker.handleLogRingMessage;
     expect(rpc({
       type: "NETWORK_LOG",
       verb: "get",

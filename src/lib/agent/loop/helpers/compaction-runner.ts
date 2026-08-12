@@ -140,7 +140,7 @@ export async function runCompaction(
  // Inline the request build to avoid calling partitionHistory a second time
  // (buildCompactionRequest calls it internally).
   const rawRequest = `${SUMMARIZE_PROMPT}\n\n${priorBlock}${renderHistoryForSummarization(redactedToSummarize)}`;
-  // Phase 8 budget guard: deterministically bound the summarization request so
+  // Budget guard: deterministically bound the summarization request so
   // the SYSTEM prompt + user request together fit the compaction profile's
   // conservative UTF-8-byte input budget before any tokens are spent. The
   // user-request bound reserves the system prompt's bytes; the prefix-bound

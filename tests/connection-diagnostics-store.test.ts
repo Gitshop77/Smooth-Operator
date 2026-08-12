@@ -1,5 +1,5 @@
 /**
- * Phase 12 — connection diagnostics store (provider health check surface).
+ * Connection diagnostics store (provider health check surface).
  *
  * Covers the stale-cache-leak invariant with a generation guard:
  * - a provider/model change invalidates the surface and advances the

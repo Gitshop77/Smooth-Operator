@@ -51,7 +51,7 @@
     <div id="runPhaseLabel" class="run-phase"></div>
   </section>
 
-  <!-- Phase 13: assertive live region for run-level errors/cancellation.
+  <!-- Assertive live region for run-level errors/cancellation.
        Populated via announce() in accessibility.ts; kept in the static markup
        so the region exists before any JS wiring. -->
   <div id="runErrorLive" class="sr-only" role="alert" aria-live="assertive" aria-atomic="true"></div>
@@ -103,6 +103,14 @@
       <div class="takeover-hint">Perform the action manually, then click Resume.</div>
     </div>
     <button type="button" class="btn btn-primary btn-resume" id="resumeBtn">Resume</button>
+  </div>
+
+  <div class="takeover-banner storage-version-banner" id="storageVersionBanner" hidden>
+    <div class="takeover-body">
+      <div class="takeover-title">Stored data is from a newer version</div>
+      <div class="takeover-reason" id="storageVersionReason"></div>
+      <div class="takeover-hint">This build cannot read it safely. Update the extension, or reset the affected data in Options.</div>
+    </div>
   </div>
 
   <button type="button" id="openOptions" class="btn-settings" aria-label="Settings">

@@ -1,5 +1,5 @@
 /**
- * F-1 regression coverage: secret substitution/redaction must not run inside a
+ * Regression coverage: secret substitution/redaction must not run inside a
  * content-script context that cannot read `chrome.storage.session`.
  *
  * A content script is an isolated world where `chrome.storage.session.get`
@@ -76,7 +76,7 @@ afterEach(() => {
   }
 });
 
-describe("F-1: content-script context must not fail on placeholder-free input", () => {
+describe("content-script context must not fail on placeholder-free input", () => {
   test("substituteSecrets short-circuits (no store read) for placeholder-free text even though session.get throws", async () => {
     installThrowingSessionStub();
     // `isExtensionWithSession()` is now true, so the throwing session.get would
@@ -98,7 +98,7 @@ describe("F-1: content-script context must not fail on placeholder-free input", 
   });
 });
 
-describe("F-1: service-worker context (readable session) substitutes + redacts", () => {
+describe("service-worker context (readable session) substitutes + redacts", () => {
   test("substituteSecrets resolves a placeholder from session storage", async () => {
     installReadableSessionStub();
     const out = await substituteSecrets("email is %email%", { trusted: true });
@@ -113,7 +113,7 @@ describe("F-1: service-worker context (readable session) substitutes + redacts",
   });
 });
 
-describe("F-1: demo / non-extension path (localStorage) is unaffected", () => {
+describe("demo / non-extension path (localStorage) is unaffected", () => {
   beforeAll(() => {
     installLocalStorageStub();
   });

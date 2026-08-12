@@ -1,5 +1,5 @@
 /**
- * Phase 13 — accessibility foundation tests (jsdom level).
+ * Accessibility foundation tests (jsdom level).
  *
  * Covers:
  * 1. Reduced-motion gating (prefersReducedMotion honors matchMedia).
@@ -84,7 +84,7 @@ function mountOptions(): void {
   document.body.innerHTML = optionsBody;
 }
 
-describe("Phase 13 — reduced motion + focus + live regions", () => {
+describe("Reduced motion + focus + live regions", () => {
   beforeEach(() => {
     document.body.innerHTML = "";
     vi.restoreAllMocks();
@@ -209,7 +209,7 @@ describe("Phase 13 — reduced motion + focus + live regions", () => {
 });
 
 
-describe("Phase 13 — axe-style checks on critical flows (no serious/critical findings)", () => {
+describe("Axe-style checks on critical flows (no serious/critical findings)", () => {
   beforeEach(() => {
     vi.resetModules();
     document.body.innerHTML = "";
@@ -272,9 +272,9 @@ describe("Phase 13 — axe-style checks on critical flows (no serious/critical f
     });
     expect(seriousViolations(initial)).toEqual([]);
 
-    // Render a row, then run the keyboard delete flow; the Phase 14
+    // Render a row, then run the keyboard delete flow; the
     // destructive-action gate requires explicit confirmation first, then focus
-    // must land on the add-prompt (Phase 12 contract) and the DOM must stay clean.
+    // must land on the add-prompt (contract) and the DOM must stay clean.
     const taskList = [
       {
         id: "t1", task: "daily summary", schedule: { type: "daily", hour: 9, minute: 0 },

@@ -468,7 +468,7 @@ export async function navigatorCallDirect(
       : "",
   });
   const messages: ChatMessage[] = compiled.messages;
-  // Phase 8 budget guard: the fully assembled navigator prompt (system + user,
+  // Budget guard: the fully assembled navigator prompt (system + user,
   // including the injected screenshot marker and format instructions) must fit
   // the navigator profile's conservative UTF-8-byte input budget before any
   // tokens are spent. Failing closed here prevents an unbounded DOM/screenshot
@@ -544,7 +544,7 @@ export async function plannerCallDirect(
       : "\n\n" + getFormatInstructions(PlannerOutputSchema),
   });
   const messages: ChatMessage[] = compiled.messages;
-  // Phase 8 budget guard: the assembled planner prompt must fit the planner
+  // Budget guard: the assembled planner prompt must fit the planner
   // profile's conservative UTF-8-byte input budget before tokens are spent.
   assertCompiledPromptWithinProfileV1("planner", "planner", messages);
 

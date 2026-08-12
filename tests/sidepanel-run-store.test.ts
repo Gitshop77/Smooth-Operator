@@ -122,7 +122,7 @@ describe("side-panel run snapshot store", () => {
   });
 });
 
-describe("Phase 12 cutover — events are transcript facts, never lifecycle state (ADR-005)", () => {
+describe("Events are transcript facts, never lifecycle state (ADR-005)", () => {
   beforeEach(() => resetRunStoreForTests());
 
   test("an unversioned run-start event no longer drives the lifecycle projection", () => {
@@ -156,7 +156,7 @@ describe("Phase 12 cutover — events are transcript facts, never lifecycle stat
   });
 });
 
-describe("Phase 12 multi-panel behavior", () => {
+describe("Multi-panel behavior", () => {
   beforeEach(() => resetRunStoreForTests());
 
   test("a second panel (fresh store) converges to an identical projection from the same inputs", () => {

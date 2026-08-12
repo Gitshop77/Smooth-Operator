@@ -230,7 +230,7 @@ const AgentConfigSchema = z.object({
   /** Optional expected-outcomes spec for deterministic evaluator fast-path. */
   expectedOutcomes: ExpectedOutcomesSchema.optional(),
   /**
-   * Phase 9/16 — measured simple-task fast path. Enabled by default: the
+   * Measured simple-task fast path. Enabled by default: the
    * classifier is exact-match (enumerated current-page metadata questions),
    * the answer is evidence-gated (empty title / non-http URL fall through),
    * and the orchestrator additionally refuses the fast path in `full_agentic`

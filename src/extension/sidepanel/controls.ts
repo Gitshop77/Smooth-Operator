@@ -13,12 +13,14 @@ import {
   runSummary,
   runTaskLabel,
   runPhaseLabel,
+  storageVersionBanner,
+  storageVersionReason,
 } from "./elements";
 import { setLifecycle } from "./lifecycle";
 import { announce } from "../accessibility";
 import { hideTakeoverBanner } from "./takeover";
 import { addUserMessage, addSystemMessage, removeEmptyState } from "./chat-renderer";
-import { restoreTotalsFromStorage, clearRunTotals } from "./log-renderer";
+import { restoreTotalsFromStorage, clearRunTotals, setRunTotalsFromUsage } from "./log-renderer";
 import { registerAgentEventReconciler } from "./reconcile-port";
 import { sanitizeLastError, storageGet, runtimeSendMessage } from "./controls-utils";
 import { ensureApiKeyInSession } from "../api-key-storage";
@@ -40,6 +42,13 @@ interface StatusResponse {
   running?: boolean;
   state?: unknown;
   snapshot?: RunSnapshotV1;
+  storageVersionFailure?: {
+    code?: string;
+    domain?: string;
+    found?: number;
+    supported?: number;
+    message?: string;
+  } | null;
 }
 
 interface StopResponse {
@@ -136,7 +145,13 @@ export function handleRunSnapshotStorageChange(
 ): boolean {
   if (areaName !== "session") return false;
   const change = changes[RUN_SNAPSHOT_STORAGE_KEY];
-  return change ? hydrateRunSnapshot(change.newValue) : false;
+  if (!change) return false;
+  const hydrated = hydrateRunSnapshot(change.newValue);
+  if (hydrated) {
+    const usage = (change.newValue as { usage?: RunSnapshotV1["usage"] } | null)?.usage;
+    if (usage) setRunTotalsFromUsage(usage);
+  }
+  return hydrated;
 }
 
 chrome.storage?.onChanged?.addListener((changes, areaName) => {
@@ -153,9 +168,36 @@ async function reconcileStatus(): Promise<StatusResponse | undefined> {
   resetKeepaliveBackoff();
   const response = await runtimeSendMessage({ type: "STATUS" }) as StatusResponse | undefined;
   if (!response) return undefined;
-  if (response.snapshot) hydrateRunSnapshot(response.snapshot);
-  else hydrateLegacyStatus(Boolean(response.running));
+  renderStorageVersionBanner(response.storageVersionFailure);
+  if (response.snapshot) {
+    hydrateRunSnapshot(response.snapshot);
+    if (response.snapshot.usage) setRunTotalsFromUsage(response.snapshot.usage);
+  } else hydrateLegacyStatus(Boolean(response.running));
   return response;
+}
+
+/**
+ * Surface a fail-closed storage-version rejection from the background: the
+ * panel must tell the user the data cannot be read rather than silently
+ * reporting an idle worker.
+ */
+function renderStorageVersionBanner(
+  failure: StatusResponse["storageVersionFailure"],
+): void {
+  if (!storageVersionBanner || !storageVersionReason) return;
+  if (!failure) {
+    storageVersionBanner.hidden = true;
+    storageVersionBanner.removeAttribute("role");
+    return;
+  }
+  const domain = failure.domain ?? "unknown";
+  const found = failure.found ?? 0;
+  const supported = failure.supported ?? 0;
+  storageVersionReason.textContent =
+    `The "${domain}" records are version ${found}, but this build supports ` +
+    `at most version ${supported}. Runs are blocked until the data is updated or reset.`;
+  storageVersionBanner.hidden = false;
+  storageVersionBanner.setAttribute("role", "alert");
 }
 
 async function pollStopUntilReconciled(generation: number): Promise<void> {
@@ -293,7 +335,7 @@ stopBtn.addEventListener("click", () => {
   })();
 });
 
-// Phase 14 "no silent changes": a mode change is a safety-relevant control, so
+// "no silent changes": a mode change is a safety-relevant control, so
 // every user-initiated switch is announced (polite) with the exact mode label
 // and, for the most capable mode, the consequence. Storage hydration / sync
 // from another window never announces — only a real change event does.

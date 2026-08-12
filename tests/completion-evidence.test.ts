@@ -1,5 +1,5 @@
 /**
- * Phase 9 — completion-with-evidence + blind-retry elimination tests.
+ * Completion-with-evidence + blind-retry elimination tests.
  *
  * Completion-with-evidence: a planner `done(success=true)` finalizes ONLY
  * with positive completion evidence (passing deterministic evaluator or an
@@ -106,7 +106,7 @@ const DISAGREEING_JUDGE = JSON.stringify({
   impossibleTask: false, reachedCaptcha: false,
 });
 
-describe("maybeJudgeAndFinalize — completion-with-evidence (Phase 9)", () => {
+describe("maybeJudgeAndFinalize — completion-with-evidence", () => {
   test("in-run done(success=true) + judge disabled + no deterministic evidence → ROUTED BACK (never bare-claim success)", async () => {
     const events: LogEvent[] = [];
     const deps = makeDeps(events);
@@ -232,7 +232,7 @@ function makeRetryDeps(navigatorImpl: () => Promise<unknown>): LoopDeps {
   };
 }
 
-describe("callNavigatorWithRetry — retries ONLY on recoverable parse errors (Phase 9)", () => {
+describe("callNavigatorWithRetry — retries ONLY on recoverable parse errors", () => {
   test("unparseable output IS retried exactly MAX_PARSE_RETRIES times, then throws", async () => {
     const navigatorCall = vi.fn(async () => ({ raw: "this is not the agent output json" }));
     const deps = makeRetryDeps(navigatorCall);

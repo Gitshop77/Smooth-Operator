@@ -1,7 +1,7 @@
-// @vitest-environment-options {"url":"http://phase10-cancel.test/"}
+// @vitest-environment-options {"url":"http://cancel-matrix.test/"}
 
 /**
- * Phase 10 — no-post-cancel action invariant across EVERY handler family.
+ * No-post-cancel action invariant across every handler family.
  *
  * Two layers are proven with REAL handlers (not mocks):
  *
@@ -13,7 +13,7 @@
  *    gap (sleep / SW round-trip / scroll settle) interrupts it — the action
  *    never reports success and performs no post-abort side effect.
  *
- * The generated matrix (phase10-action-matrix.test.ts) proves the pre-abort
+ * The generated matrix (action-matrix.test.ts) proves the pre-abort
  * boundary with mocked handlers for ALL 60 actions; this file exercises the
  * same boundary and the mid-flight path against the real click / input /
  * hover / scroll / wait / extract / evaluate / screenshot / navigate /

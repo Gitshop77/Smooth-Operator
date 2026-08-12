@@ -125,7 +125,7 @@ export async function sendHistoryCommand(command: HistoryCommand): Promise<Histo
  * migration window (a background that cannot answer `list` is treated as an
  * unreachable read surface, never as a mutation authority). When BOTH surfaces
  * fail the load reports an explicit error instead of silently rendering an
- * empty list (Phase 12: no silent data loss).
+ * empty list (no silent data loss).
  */
 async function readRunHistory(): Promise<
   { ok: true; runs: RunHistoryEntry[] } | { ok: false; error: string }

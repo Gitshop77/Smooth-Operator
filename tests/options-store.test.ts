@@ -1,5 +1,5 @@
 /**
- * Phase 12 — shared Options store primitive + command acknowledgement.
+ * Shared Options store primitive + command acknowledgement.
  *
  * Covers: deterministic reducer transitions, subscribe/notify semantics,
  * listener immutability (no notification during reducer runs), the explicit

@@ -1,9 +1,9 @@
 /**
- * Phase 3 characterization of Options Test Connection body handling.
+ * Characterization of Options Test Connection body handling.
  *
  * The provider transport has bounded stream utilities, but the Options helper
  * is a separate fetch implementation. These expected failures specify its own
- * limits before Phase 4 changes that seam.
+ * limits before the seam changes.
  */
 
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -33,7 +33,7 @@ async function settleWithin<T>(promise: Promise<T>, message: string): Promise<T>
   }
 }
 
-describe("Phase 3 Options Test Connection body bounds", () => {
+describe("Options Test Connection body bounds", () => {
   test("rejects a success response whose declared length exceeds the Options body cap before parsing", async () => {
     const declaredBytes = CONNECTION_BODY_CAP + 1;
     const response = new Response('{"data":[]}', {

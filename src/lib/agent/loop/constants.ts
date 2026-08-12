@@ -1,5 +1,5 @@
 /**
- * Loop constants — extracted from orchestrator.ts (Phase 1).
+ * Loop constants — extracted from orchestrator.ts.
  *
  * Single source of truth for every loop-level tuning constant.
  */

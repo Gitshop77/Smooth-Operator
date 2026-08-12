@@ -1,6 +1,5 @@
 /**
- * options/stores/history-store.ts — authoritative run-history surface state
- * (Phase 12).
+ * options/stores/history-store.ts — authoritative run-history surface state.
  *
  * Entries, load state, and the last mutation outcome are reducer state, so a
  * storage failure surfaces as an explicit `failed` load/mutation with a

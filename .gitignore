@@ -10,6 +10,9 @@ chrome-extension/
 dev.log
 *.log
 
+# generated measurement evidence (scripts/measure-prompts.mts output)
+measurements.json
+
 # env
 .env*
 

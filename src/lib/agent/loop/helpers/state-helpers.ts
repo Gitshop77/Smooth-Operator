@@ -1,7 +1,7 @@
 /**
  * Loop helper — `LoopState` helper functions.
  *
- * Extracted from the original `loop/helpers.ts` (Phase 10a).
+ * Extracted from the original `loop/helpers.ts`.
  *
  * The {@link LoopState} holds the agent loop's running totals (step, cost,
  * tokens). These helpers mutate / inspect the state in a small, well-named

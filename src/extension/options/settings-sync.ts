@@ -350,7 +350,7 @@ async function doSaveSettings(): Promise<boolean> {
       lastKnownGoodWebhookUrl = webhookPersist;
       settingsSyncStore.dispatch({ type: "SETTINGS_SAVE_OK" });
       showSaved();
-      // Phase 14 "no silent changes": every successful write renders + announces
+      // "no silent changes": every successful write renders + announces
       // a confirmable summary of the sensitive categories (mode, cost cap,
       // provider/destination, screenshots, stealth, vision, webhook/retention)
       // so a destination/permission/cost/mode/retention change is never silent.

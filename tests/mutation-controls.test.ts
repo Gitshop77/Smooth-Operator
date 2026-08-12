@@ -1,5 +1,5 @@
 /**
- * Phase 15 — adversarial mutation/negative tests for the CRITICAL CONTROLS.
+ * Adversarial mutation/negative tests for the CRITICAL CONTROLS.
  *
  * Every test here is a REAL passing test that asserts the control HOLDS under
  * adversarial conditions. The suite is deliberately written so that weakening

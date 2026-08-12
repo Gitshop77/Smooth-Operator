@@ -43,19 +43,19 @@ jobs:
         run: npm run verify:baseline
 
       - name: Enforce the full-suite test-duration budget
-        # Phase 15 gate: the full vitest suite must finish under the budget
+        # Gate: the full vitest suite must finish under the budget
         # (default 180s; measured baseline ~46s on a dev host). Catches
         # cumulative regressions that per-test timeouts cannot.
         run: npm run test:budget
 
       - name: Flake hardening — repeated flake-prone suite runs
-        # Phase 15 gate: the timer/async/chrome-mock suites run 3 rounds with
+        # Gate: the timer/async/chrome-mock suites run 3 rounds with
         # vitest --retry=2; a test that fails all three attempts in any round
         # is a real flake and fails the build.
         run: npm run test:flake
 
       - name: Mutation verification — critical controls must be caught
-        # Phase 15 gate: the adversarial mutation harness weakens each critical
+        # Gate: the adversarial mutation harness weakens each critical
         # control (cancellation, budget enforcement, credential redaction, SSRF,
         # stale-element guard, run-store status, settings save summary) and
         # asserts the suite FAILS; a control whose mutation goes uncaught fails

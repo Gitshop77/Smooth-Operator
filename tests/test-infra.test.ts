@@ -1,7 +1,7 @@
 /**
- * Phase 15 — test-architecture infrastructure pins.
+ * Test-architecture infrastructure pins.
  *
- * Pins the Phase 15 verification tooling so the gates themselves cannot drift
+ * Pins the Verification tooling so the gates themselves cannot drift
  * silently:
  * - `scripts/test-duration-budget.mjs`: budget math (a negative or NaN
  *   elapsed time must throw; the comparison is inclusive at the boundary).
@@ -9,7 +9,7 @@
  *   once in its production file (a source refactor that splits or renames the
  *   guarded line breaks the mutation harness loudly instead of silently
  *   mutating nothing); ids must be unique and every mutation must have at
- *   least the phase15 adversarial suite attached.
+ *   least the adversarial mutation suite attached.
  * - `scripts/flake-check.mjs`: every flake-prone file must exist and the
  *   round-count parser must reject invalid input.
  */
@@ -51,12 +51,12 @@ describe("test-duration-budget helpers", () => {
 });
 
 describe("mutation-check table integrity", () => {
-  test("mutation ids are unique and every mutation carries the phase15 suite", () => {
+  test("mutation ids are unique and every mutation carries the mutation suite", () => {
     const ids = MUTATIONS.map((m) => m.id);
     expect(new Set(ids).size).toBe(ids.length);
     for (const mutation of MUTATIONS) {
       expect(mutation.suites, `${mutation.id} must run the adversarial suite`).toContain(
-        "tests/phase15-mutation-controls.test.ts",
+        "tests/mutation-controls.test.ts",
       );
     }
   });

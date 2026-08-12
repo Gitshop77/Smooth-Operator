@@ -64,7 +64,7 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
   }
 
   try {
-    // Phase 9 state machine: init → plan (the initial planner phase begins).
+    // State machine: init → plan (the initial planner phase begins).
     transitionRunPhase(state, "plan", "initial planner phase begins");
     const initialResult = await runInitialPlannerPhase(state);
     if (initialResult.kind === "exit") return;

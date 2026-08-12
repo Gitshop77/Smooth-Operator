@@ -2,6 +2,7 @@
 
 import type { AgentMode } from "@/lib/agent/modes";
 import { redactLiveSecretValue } from "@/lib/agent/secrets";
+import { getStorageVersionFailure } from "./storage-version-gate";
 import {
   DEFAULT_MAX_STEPS,
   DEFAULT_MODE,
@@ -159,6 +160,7 @@ export class BackgroundRunCommandService implements RunCommandService {
         running,
         state: safeState,
         snapshot: snapshot ? redactLiveRunSnapshot(snapshot) : snapshot,
+        storageVersionFailure: getStorageVersionFailure(),
       });
     });
   }

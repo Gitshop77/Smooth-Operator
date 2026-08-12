@@ -536,7 +536,7 @@ describe("runAgentLoop — hard maxSteps cap terminates a benign distinct-action
 // second, duplicate `done` with literal `success:false, text:""` that would
 // clobber a genuinely-successful completion in the UI.
 
-describe("runAgentLoop — terminal done + completion-with-evidence (Phase 9)", () => {
+describe("runAgentLoop — terminal done + completion-with-evidence", () => {
   /** Build deps: navigator emits done, the verification planner says done(success=true). */
   function makeDoneDeps(opts: {
     events: LogEvent[];
@@ -586,7 +586,7 @@ describe("runAgentLoop — terminal done + completion-with-evidence (Phase 9)", 
   }
 
   test("in-run done(success=true) without evidence + judge disabled → routed back (unverified), never a bare-claim success", async () => {
-    // Phase 9 completion-with-evidence: the verification planner's bare
+    // Completion-with-evidence: the verification planner's bare
     // done(success=true) has NO positive completion evidence (no
     // expectedOutcomes) and the judge is disabled (BASE_CONFIG) — there is
     // no verification path, so the claim must be routed back and the run
@@ -619,7 +619,7 @@ describe("runAgentLoop — terminal done + completion-with-evidence (Phase 9)", 
   });
 
   test("in-run done(success=true) + agreeing judge → finalizes success (judge is the evidence)", async () => {
-    // Phase 9 completion-with-evidence: with the judge ENABLED, the in-run
+    // Completion-with-evidence: with the judge ENABLED, the in-run
     // done attempt now runs the LLM judge as the evidence source; an
     // agreeing verdict finalizes success. (Pre-Phase-9 the judge was skipped
     // for free-form in-run done attempts.)

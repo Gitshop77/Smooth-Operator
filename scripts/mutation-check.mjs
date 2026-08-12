@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Mutation / negative verification for the CRITICAL CONTROLS (Phase 15).
+ * Mutation / negative verification for the critical controls.
  *
  * For each control, applies ONE deliberate weakening to the production source
  * (backup → mutate → run the adversarial suite → restore), then requires the
@@ -9,7 +9,7 @@
  * is a real gap in the control's verification and fails this gate.
  *
  * The mutation targets mirror the tests in
- * `tests/phase15-mutation-controls.test.ts` (and, where noted, the existing
+ * `tests/mutation-controls.test.ts` (and, where noted, the existing
  * dedicated suites): cancellation abort, cost-cap enforcement, credential
  * redaction, SSRF sink-IP guard, stale-element guard, run-phase transition
  * fail-closed, and the settings save-summary permission line.
@@ -39,7 +39,7 @@ export const MUTATIONS = [
     file: "src/extension/background/run-controller.ts",
     find: '    this.rootAbortController.abort(new DOMException(message, "AbortError"));\n    return this.snapshot;',
     replace: '    void message; // MUTATION-15: cancellation abort removed\n    return this.snapshot;',
-    suites: ["tests/phase15-mutation-controls.test.ts", "tests/run-controller.test.ts"],
+    suites: ["tests/mutation-controls.test.ts", "tests/run-controller.test.ts"],
   },
   {
     id: "budget-cap",
@@ -47,7 +47,7 @@ export const MUTATIONS = [
     file: "src/lib/agent/loop/helpers/state-helpers.ts",
     find: "  const exceeded =\n    Number.isFinite(totalCostUsd) &&",
     replace: "  const exceeded =\n    false && // MUTATION-15: cost cap bypassed\n    Number.isFinite(totalCostUsd) &&",
-    suites: ["tests/phase15-mutation-controls.test.ts", "tests/cost-cap.test.ts"],
+    suites: ["tests/mutation-controls.test.ts", "tests/cost-cap.test.ts"],
   },
   {
     id: "credential-redaction",
@@ -55,7 +55,7 @@ export const MUTATIONS = [
     file: "src/lib/agent/redact-shared.ts",
     find: "  let out = s.replace(keyRe(), (m) => {",
     replace: "  let out = s; if (false) out = s.replace(keyRe(), (m) => { // MUTATION-15: key-prefix redaction removed",
-    suites: ["tests/phase15-mutation-controls.test.ts", "tests/messages-redaction.test.ts"],
+    suites: ["tests/mutation-controls.test.ts", "tests/messages-redaction.test.ts"],
   },
   {
     id: "ssrf-sink-ip",
@@ -63,7 +63,7 @@ export const MUTATIONS = [
     file: "src/lib/agent/llm/route/ssrf-validate.ts",
     find: "  if (isDangerousSinkIp(normalizedHost)) {",
     replace: "  if (false && isDangerousSinkIp(normalizedHost)) { // MUTATION-15: sink-IP check disabled",
-    suites: ["tests/phase15-mutation-controls.test.ts", "tests/llm-ssrf.test.ts"],
+    suites: ["tests/mutation-controls.test.ts", "tests/llm-ssrf.test.ts"],
   },
   {
     id: "stale-element",
@@ -71,7 +71,7 @@ export const MUTATIONS = [
     file: "src/lib/agent/tools/helpers/element-resolver.ts",
     find: "    if (!el.isConnected) {",
     replace: "    if (false && !el.isConnected) { // MUTATION-15: stale-element guard disabled",
-    suites: ["tests/phase15-mutation-controls.test.ts", "tests/phase10-stale-element.test.ts"],
+    suites: ["tests/mutation-controls.test.ts", "tests/stale-element-guard.test.ts"],
   },
   {
     id: "run-phase-transitions",
@@ -79,7 +79,7 @@ export const MUTATIONS = [
     file: "src/lib/agent/loop/run-state-machine.ts",
     find: "  if (!RUN_TRANSITIONS[from].includes(to)) {",
     replace: "  if (false && !RUN_TRANSITIONS[from].includes(to)) { // MUTATION-15: illegal transitions legalized",
-    suites: ["tests/phase15-mutation-controls.test.ts", "tests/run-state-machine.test.ts"],
+    suites: ["tests/mutation-controls.test.ts", "tests/run-state-machine.test.ts"],
   },
   {
     id: "save-summary-permissions",
@@ -87,7 +87,7 @@ export const MUTATIONS = [
     file: "src/extension/options/settings-sync-utils.ts",
     find: '  if (typeof data.enableScreenshots === "boolean") {',
     replace: '  if (false && typeof data.enableScreenshots === "boolean") { // MUTATION-15: screenshots line dropped',
-    suites: ["tests/phase15-mutation-controls.test.ts", "tests/phase14-no-silent-changes.test.ts"],
+    suites: ["tests/mutation-controls.test.ts", "tests/no-silent-changes.test.ts"],
   },
 ];
 

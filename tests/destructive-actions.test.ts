@@ -1,5 +1,5 @@
 /**
- * Phase 14 — destructive-action safety.
+ * Destructive-action safety.
  *
  * Every destructive operation (delete scheduled task, clear run history,
  * delete secret) must go through the danger-styled confirmation modal with an
@@ -149,7 +149,7 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
-describe("Phase 14 — destructive-action safety", () => {
+describe("Destructive-action safety", () => {
   test("delete scheduled task: cancel sends nothing, confirm sends exactly one typed command", async () => {
     const tasks = [
       { id: "t1", task: "report", schedule: { type: "daily", hour: 9, minute: 0 }, enabled: true, createdAt: 100, revision: 1 },

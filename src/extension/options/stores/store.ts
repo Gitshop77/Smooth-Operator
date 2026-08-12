@@ -1,6 +1,6 @@
 /**
  * options/stores/store.ts — minimal reducer-style store primitive shared by
- * every Options surface (Phase 12 frontend application-state rewrite).
+ * every Options surface (frontend application-state rewrite).
  *
  * Each Options store is a pure reducer over typed state with deterministic
  * transitions, subscribe/notify, and a test-only reset.  Command ack helpers

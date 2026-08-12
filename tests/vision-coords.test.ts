@@ -1,7 +1,7 @@
-// @vitest-environment-options {"url":"http://phase10-coords.test/"}
+// @vitest-environment-options {"url":"http://vision-coords.test/"}
 
 /**
- * Phase 10 — screenshot/vision coordinate correctness.
+ * Screenshot/vision coordinate correctness.
  *
  * Pins the full bounding-box → viewport-coordinate contract:
  * - `getBoundingClientRect()` returns CSS pixels, VIEWPORT-relative (the

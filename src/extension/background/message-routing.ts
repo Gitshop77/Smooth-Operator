@@ -30,6 +30,7 @@ import { handleScheduledTaskCommand } from "./scheduled-task-command";
 import { handleHistoryCommand } from "./history-command";
 import { sanitizeDownloadName } from "./download-name";
 import { handleOptionsPlatformCommand } from "./options-platform-command";
+import { handleLogRingMessage } from "./rate-limit-tracker";
 
 export { isPrivilegedSender } from "./message-handlers";
 export { sanitizeDownloadName, truncateFilename } from "./download-name";
@@ -187,6 +188,9 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
   }
   if (msg?.type === "DETECT_VISUAL") {
     return handleDetectVisual(msg, sender, sendResponse);
+  }
+  if (msg?.type === "CONSOLE_LOG_ENTRY" || msg?.type === "NETWORK_LOG" || msg?.type === "CONSOLE_LOG") {
+    return handleLogRingMessage(msg, sender, sendResponse);
   }
   if ((msg as { type?: string } | null)?.type === "RESUME") {
     const fromExtensionPage = Boolean(

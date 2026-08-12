@@ -1,5 +1,5 @@
 /**
- * Phase 14 — critical-flow E2E at the jsdom level.
+ * Critical-flow E2E at the jsdom level.
  *
  * Each critical workflow is walked end-to-end through the REAL surface
  * modules (store dispatch + DOM wiring), asserting the full state walk
@@ -154,7 +154,7 @@ function snapshotOf(overrides: Partial<Snapshot> & Pick<Snapshot, "status" | "ph
 
 // ─── Flow 1: run start → progress → Stop → result (side panel) ─────────────
 
-describe("Phase 14 flow 1 — side panel run start → progress → Stop → result", () => {
+describe("Flow 1 — side panel run start → progress → Stop → result", () => {
   beforeEach(() => {
     vi.resetModules();
     mountSidepanelDom();
@@ -436,7 +436,7 @@ function setupOptionsChrome(opts: OptionsChromeOptions): {
 
 // ─── Flow 2: provider/key/model setup → connection test → save ─────────────
 
-describe("Phase 14 flow 2 — Options provider/key/model setup → connection test → save", () => {
+describe("Flow 2 — Options provider/key/model setup → connection test → save", () => {
   beforeEach(() => {
     vi.resetModules();
     mountOptionsDom();
@@ -628,7 +628,7 @@ describe("Phase 14 flow 2 — Options provider/key/model setup → connection te
 
 // ─── Flow 3: schedule create → list → delete ───────────────────────────────
 
-describe("Phase 14 flow 3 — Options schedule create → list → delete", () => {
+describe("Flow 3 — Options schedule create → list → delete", () => {
   beforeEach(() => {
     vi.resetModules();
     mountOptionsDom();
@@ -753,7 +753,7 @@ describe("Phase 14 flow 3 — Options schedule create → list → delete", () =
 
 // ─── Flow 4: history load → clear → export → import ────────────────────────
 
-describe("Phase 14 flow 4 — Options history load → clear → export → import", () => {
+describe("Flow 4 — Options history load → clear → export → import", () => {
   beforeEach(() => {
     vi.resetModules();
     mountOptionsDom();

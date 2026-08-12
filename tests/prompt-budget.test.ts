@@ -1,5 +1,5 @@
 /**
- * Phase 8 prompt token-economics tests.
+ * Prompt token-economics tests.
  *
  * Covers the deterministic UTF-8 byte budget port, the per-kind budget
  * profiles, fail-closed admission, and the deterministic byte-bounded

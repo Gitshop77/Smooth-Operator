@@ -441,7 +441,7 @@ maybeDescribe("browser e2e (E2E_CHROME=1)", () => {
     const page = await browser.newPage();
     await page.goto(baseUrl, { waitUntil: "load" });
     const tabId = await agentTabId(page);
-    const fakeSessionKey = "phase3-fake-session-key";
+    const fakeSessionKey = "fake-session-key";
     await apiPage().evaluate(async (key) => chrome.storage.session.set({ apiKey: key }), fakeSessionKey);
 
     // `executeScript` defaults to the same isolated world used by content.js.
@@ -474,7 +474,7 @@ maybeDescribe("browser e2e (E2E_CHROME=1)", () => {
     const page = await browser.newPage();
     await page.goto(baseUrl, { waitUntil: "load" });
     const tabId = await agentTabId(page);
-    const fakeRememberedKey = "phase3-fake-remembered-key";
+    const fakeRememberedKey = "fake-remembered-key";
     await apiPage().evaluate(async (key) => chrome.storage.local.set({
       apiKey: key,
       rememberApiKey: true,
@@ -577,7 +577,7 @@ maybeDescribe("browser e2e (E2E_CHROME=1)", () => {
       await page.goto(`chrome-extension://${await extensionId()}/options.html`, { waitUntil: "load" });
       await page.waitForFunction(() => document.readyState === "complete", { timeout: 10_000 });
 
-      // The Phase 4 package must admit the Options CSP without silently
+      // The package must admit the Options CSP without silently
       // discarding an invalid IPv6 wildcard source.
       expect(diagnostics).toEqual([]);
     } finally {
@@ -1031,7 +1031,7 @@ maybeDescribe("browser e2e (E2E_CHROME=1)", () => {
       stopDisabled: false,
     });
     if (E2E_ARTIFACT_DIR) {
-      await page.screenshot({ path: path.join(E2E_ARTIFACT_DIR, "phase1-sidepanel-running-narrow-chrome.png") });
+      await page.screenshot({ path: path.join(E2E_ARTIFACT_DIR, "sidepanel-running-narrow-chrome.png") });
     }
 
     await page.setViewport({ width: 1200, height: 800, deviceScaleFactor: 1 });
@@ -1042,7 +1042,7 @@ maybeDescribe("browser e2e (E2E_CHROME=1)", () => {
     );
     expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
     if (E2E_ARTIFACT_DIR) {
-      await page.screenshot({ path: path.join(E2E_ARTIFACT_DIR, "phase1-sidepanel-running-desktop-chrome.png") });
+      await page.screenshot({ path: path.join(E2E_ARTIFACT_DIR, "sidepanel-running-desktop-chrome.png") });
     }
 
     const terminal = {
@@ -1074,12 +1074,12 @@ maybeDescribe("browser e2e (E2E_CHROME=1)", () => {
     expect(terminalView.inputDisabled).toBe(false);
     expect(terminalView.overflow).toBe(false);
     if (E2E_ARTIFACT_DIR) {
-      await page.screenshot({ path: path.join(E2E_ARTIFACT_DIR, "phase1-sidepanel-terminal-chrome.png") });
+      await page.screenshot({ path: path.join(E2E_ARTIFACT_DIR, "sidepanel-terminal-chrome.png") });
     }
     await page.close();
   });
 
-  // ─── Phase 10: browser-real action-family coverage ─────────────────────────
+  // ─── Browser-real action-family coverage ─────────────────────────
   // Runs ONLY when E2E_CHROME=1 (the whole describe is skipped otherwise).
   // Exercises the highest-risk content-script action families against a real
   // Chrome: click, input, evaluate, navigate, screenshot. Each batch goes
@@ -1292,7 +1292,7 @@ maybeDescribe("browser e2e (E2E_CHROME=1)", () => {
         expect(result?.message).toMatch(/screenshot failed/i);
       }
       if (E2E_ARTIFACT_DIR && result?.success) {
-        await page.screenshot({ path: path.join(E2E_ARTIFACT_DIR, "phase10-e2e-screenshot-action.png") });
+        await page.screenshot({ path: path.join(E2E_ARTIFACT_DIR, "e2e-screenshot-action.png") });
       }
     } finally {
       await stopActionRun();

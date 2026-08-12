@@ -602,7 +602,7 @@ document.getElementById("refreshModels")?.addEventListener("click", async () => 
   btn.setAttribute("aria-busy", "false");
 });
 
-// ─── Diagnostics invalidation + rendering (Phase 12 store wiring) ───────────
+// ─── Diagnostics invalidation + rendering (store wiring) ───────────
 
 /**
  * Whenever the authoritative provider/model selection changes, the diagnostic

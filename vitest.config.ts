@@ -63,9 +63,9 @@ export default defineConfig({
         // IMPORTANT (vitest v4 semantics): a bare NUMBER glob pin is silently
         // ignored by vitest v4's `checkThresholds` (all four metrics resolve
         // to undefined and the set is skipped). Every per-glob pin MUST use
-        // the object form below or it is dead config. `tests/phase15-test-
-        // infra.test.ts` pins this shape so a bare-number pin can never
-        // silently return. Measured on 2026-08-13 (final phase 15 run):
+        // the object form below or it is dead config. `tests/test-infra.test.ts`
+        // pins this shape so a bare-number pin can never silently return.
+        // Measured on 2026-08-13:
         //   ssrf-ipv6.ts       89.23 st / 86.02 br / 100 fn / 97.4 lines
         //   ssrf-validate.ts   92.79 st / 93 br / 100 fn / 92.07 lines
         //   ssrf-dns.ts        95.08 st / 89.58 br / 91.66 fn / 100 lines

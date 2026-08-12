@@ -1,6 +1,6 @@
 /**
- * WCAG 2.1 relative-luminance / contrast helpers for the Phase 13 token
- * contrast suite (tests/phase13-tokens.test.ts). Pure functions.
+ * WCAG 2.1 relative-luminance / contrast helpers for the token
+ * contrast suite (tests/design-tokens.test.ts). Pure functions.
  *
  * Supports `#RGB`/`#RRGGBB` and `rgba(r, g, b, a)` colors; rgba is blended
  * over a base color first (mirroring how `*-subtle` tokens render over the

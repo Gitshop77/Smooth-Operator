@@ -1,5 +1,5 @@
 /**
- * Phase 3 action parity contract.
+ * Action parity contract.
  *
  * `ActionSchema` is the canonical action set.  This suite deliberately keeps
  * one valid fixture for every variant, then uses that same exhaustive set to
@@ -183,7 +183,7 @@ const BACKGROUND_ROUTE: Record<ActionType, BackgroundRoute> = {
   set_cookie: "TAB_ACTION", delete_cookies: "TAB_ACTION", get_storage: "TAB_ACTION", set_storage: "TAB_ACTION", clear_storage: "TAB_ACTION",
 };
 
-describe("Phase 3 AgentAction canonical-set parity", () => {
+describe("AgentAction canonical-set parity", () => {
   test("has one parseable fixture, metadata entry, prompt line, and UI description for every schema member", () => {
     expect(new Set(ACTION_TYPES)).toEqual(new Set(schemaActionTypes()));
     expect(ACTION_TYPES).toHaveLength(schemaActionTypes().length);
@@ -252,7 +252,7 @@ const HANDLER_BY_ACTION: Partial<Record<ActionType, string>> = {
 
 const HANDLER_NAMES = [...new Set(Object.values(HANDLER_BY_ACTION))] as string[];
 
-describe("Phase 3 AgentAction executor parity", () => {
+describe("AgentAction executor parity", () => {
   afterEach(() => {
     vi.doUnmock("../src/lib/agent/tools/handlers");
     vi.doUnmock("../src/lib/agent/script-runner");
@@ -342,7 +342,7 @@ describe("Phase 3 AgentAction executor parity", () => {
         undefined,
         undefined,
         undefined,
-        { runId: "phase3-contract", dispatchRevision: 1 },
+        { runId: "contract-fixture", dispatchRevision: 1 },
         undefined,
         async (candidate) => {
           // The effect boundary must authorize the parsed canonical payload,
@@ -371,7 +371,7 @@ describe("Phase 3 AgentAction executor parity", () => {
   });
 });
 
-describe("Phase 3 conditional background routes use live handlers", () => {
+describe("Conditional background routes use live handlers", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     delete (globalThis as Record<string, unknown>).chrome;
@@ -382,8 +382,8 @@ describe("Phase 3 conditional background routes use live handlers", () => {
     // Do not mock the handler registry or any handler module here. These calls
     // execute the real conditional implementations; only DOM/runtime edges are
     // replaced so the test stays deterministic outside a packaged browser.
-    const token = { runId: "phase3-conditional-routes", dispatchRevision: 19 };
-    const effectCapability = "phase3-issued-effect-capability";
+    const token = { runId: "conditional-routes-fixture", dispatchRevision: 19 };
+    const effectCapability = "issued-effect-capability";
     const clickAction = PARSED_ACTIONS.click;
     const humanizedInputAction = ActionSchema.parse({
       ...ACTION_FIXTURES.input,
@@ -431,7 +431,7 @@ describe("Phase 3 conditional background routes use live handlers", () => {
     const context = (selectorMap: Record<number, HTMLElement>): ActionContext => ({
       state: { selectorMap } as unknown as BrowserState,
       beforeUrl: location.href,
-      beforeFingerprint: "phase3-before",
+      beforeFingerprint: "before-fixture",
       dispatchToken: token,
       effectCapability,
     });
@@ -516,7 +516,7 @@ describe("Phase 3 conditional background routes use live handlers", () => {
   });
 });
 
-describe("Phase 3 content authorization parity", () => {
+describe("Content authorization parity", () => {
   afterEach(() => {
     vi.doUnmock("../src/lib/agent/tools/executor");
     vi.resetModules();
@@ -552,7 +552,7 @@ describe("Phase 3 content authorization parity", () => {
     const response = await new Promise<unknown>((resolve) => {
       expect(handleExecuteActions({
         type: "EXECUTE_ACTIONS",
-        token: { runId: "phase3-authorize-all", dispatchRevision: 1 },
+        token: { runId: "authorize-all-fixture", dispatchRevision: 1 },
         secretsResolved: true,
         domainConfig: { allowedDomains: ["example.test"] },
         actions: ACTION_TYPES.map((type) => PARSED_ACTIONS[type]),
@@ -570,7 +570,7 @@ describe("Phase 3 content authorization parity", () => {
     for (const [index, type] of ACTION_TYPES.entries()) {
       expect(authorizations[index]).toEqual({
         type: "AUTHORIZE_ACTION_EFFECT",
-        token: { runId: "phase3-authorize-all", dispatchRevision: 1 },
+        token: { runId: "authorize-all-fixture", dispatchRevision: 1 },
         action: PARSED_ACTIONS[type],
       });
     }
@@ -595,7 +595,7 @@ function installRuntime(sendMessage: ReturnType<typeof vi.fn>): void {
   (globalThis as Record<string, unknown>).chrome = { runtime: { id: "contract-extension", sendMessage } };
 }
 
-describe("Phase 3 AgentAction background-routing parity", () => {
+describe("AgentAction background-routing parity", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.resetModules();
@@ -604,7 +604,7 @@ describe("Phase 3 AgentAction background-routing parity", () => {
   });
 
   test("sends the exact token, capability, and complete message for every unconditional effect route", async () => {
-    const token = { runId: "phase3-unconditional-routes", dispatchRevision: 23 };
+    const token = { runId: "unconditional-routes-fixture", dispatchRevision: 23 };
     const sendMessage = vi.fn(async (message: { type: string }) => {
       if (message.type === "SCREENSHOT" || message.type === "SAVE_AS_PDF") {
         return { ok: true, filename: "contract.file" };
@@ -657,7 +657,7 @@ describe("Phase 3 AgentAction background-routing parity", () => {
     const { executeAction } = await import("../src/lib/agent/tools/executor");
     for (const type of effectRouteTypes) {
       sendMessage.mockClear();
-      const effectCapability = `phase3-capability-for-${type}`;
+      const effectCapability = `capability-for-${type}`;
       const ctx = extensionContext(token, effectCapability);
       if (type === "list_downloads") {
         await executeAction(PARSED_ACTIONS[type], ctx.state, undefined, undefined, undefined, token, effectCapability);
@@ -686,7 +686,7 @@ describe("Phase 3 AgentAction background-routing parity", () => {
   });
 
   test("routes ask_human through its exact token-only correlated request contract", async () => {
-    const token = { runId: "phase3-human-route", dispatchRevision: 29 };
+    const token = { runId: "human-route-fixture", dispatchRevision: 29 };
     vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue("00000000-0000-4000-8000-000000000029");
     const sendMessage = vi.fn((message: { type: string }, callback?: (response: unknown) => void) => {
       if (message.type === "HUMAN_INTERACT_REQUEST") {
@@ -713,7 +713,7 @@ describe("Phase 3 AgentAction background-routing parity", () => {
   });
 
   test("observes no background message for every action classified as none", async () => {
-    const token = { runId: "phase3-no-background-route", dispatchRevision: 31 };
+    const token = { runId: "no-background-route-fixture", dispatchRevision: 31 };
     const sendMessage = vi.fn().mockResolvedValue({ ok: false, error: "unexpected background route" });
     installRuntime(sendMessage);
     const { executeAction } = await import("../src/lib/agent/tools/executor");
@@ -749,7 +749,7 @@ describe("Phase 3 AgentAction background-routing parity", () => {
         undefined,
         undefined,
         token,
-        `phase3-unused-capability-for-${type}`,
+        `unused-capability-for-${type}`,
       );
       expect(result.action.type, type).toBe(type);
       expect(sendMessage, type).not.toHaveBeenCalled();

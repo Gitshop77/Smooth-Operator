@@ -1,5 +1,5 @@
 /**
- * Phase 9 — measured simple-task fast path tests.
+ * Measured simple-task fast path tests.
  *
  * Proves:
  * - On the fast path (task exactly matches a current-page metadata question
@@ -167,7 +167,7 @@ describe("buildFastPathAnswer (evidence gating)", () => {
 
 // ─── Orchestrator integration: fast path vs full planner path ───────────────
 
-describe("runAgentLoop — simple-task fast path (Phase 9)", () => {
+describe("runAgentLoop — simple-task fast path", () => {
   test("fast path completes on direct evidence: NO planner call, NO screenshot (extractState)", async () => {
     const events: LogEvent[] = [];
     const deps = makeDeps({
@@ -243,7 +243,7 @@ describe("runAgentLoop — simple-task fast path (Phase 9)", () => {
       task: "what is the title of this page",
       url: "https://docs.example.com",
       title: "Docs",
-      // Phase 16: enableFastPath defaults to true, so an explicit `false`
+      // enableFastPath defaults to true, so an explicit `false`
       // exercises the opt-out path (planner runs).
       config: { enableFastPath: false },
     });
@@ -254,7 +254,7 @@ describe("runAgentLoop — simple-task fast path (Phase 9)", () => {
     expect(deps.extractState).toHaveBeenCalled();
   });
 
-  test("fast path runs by default for a matching task (Phase 16 enablement)", async () => {
+  test("fast path runs by default for a matching task", async () => {
     const events: LogEvent[] = [];
     const deps = makeDeps({
       events,

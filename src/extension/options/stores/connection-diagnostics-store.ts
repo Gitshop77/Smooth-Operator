@@ -1,6 +1,6 @@
 /**
  * options/stores/connection-diagnostics-store.ts — connection-test lifecycle
- * and bounded result history (Phase 12).
+ * and bounded result history.
  *
  * Every provider/model change invalidates the diagnostic surface (the UI
  * dispatches DIAGNOSTICS_INVALIDATED whenever the provider-config store's

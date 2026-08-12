@@ -1,11 +1,11 @@
 /**
- * Phase 3 credential-visibility characterization.
+ * Credential-visibility characterization.
  *
  * Session storage is explicitly restricted to Chrome trusted contexts. The browser E2E
  * companion proves that exact package behavior in a real isolated world; this
  * source guard makes a future privilege widening fail before a package exists.
  * The intentionally remembered `storage.local` key remains a separately
- * recorded expected failure in the browser lane (Phase 4/7/11 ownership).
+ * recorded expected failure in the browser lane.
  */
 
 import { describe, expect, test } from "vitest";
@@ -33,7 +33,7 @@ function sourceFiles(directory: string): string[] {
   });
 }
 
-describe("Phase 3 credential visibility contract", () => {
+describe("Credential visibility contract", () => {
   test("source never widens chrome.storage.session to untrusted content contexts", () => {
     const violations = sourceFiles(SOURCE_ROOT).filter((file) => {
       const text = readFileSync(file, "utf8");

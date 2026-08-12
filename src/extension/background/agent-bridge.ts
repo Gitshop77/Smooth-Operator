@@ -531,7 +531,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  // will catch a genuine abort on the next step.
   }
 
- // Wire the AgentMetricsCallback (Phase 8) to track detailed run metrics.
+ // Wire the AgentMetricsCallback to track detailed run metrics.
  // Declared at function scope (NOT inside the try below) so the `finally`
  // block can read its snapshot after the run ends — a variable declared
  // inside the try would be out of scope in `finally` (broken by the

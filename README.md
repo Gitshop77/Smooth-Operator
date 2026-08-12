@@ -488,7 +488,7 @@ npm run verify:baseline:installed                # Clean-install reproducibility
 
 Coverage thresholds are pinned in `vitest.config.ts` with per-glob overrides for security-critical modules (`ssrf-ipv6.ts`, `ssrf-validate.ts`, `ssrf-dns.ts`, `security-injection.ts`, `auth.ts`, `endpoint.ts`, `anti-bot.ts`, `anti-detection.ts`). A PR that drops coverage below the baseline fails CI. If you see a coverage failure, check `vitest.config.ts` for the current thresholds — they are ratcheted upward over time, never downward.
 
-The Phase 15/16 gates are wired into CI: `test:budget` fails if the full suite exceeds its duration budget; `test:flake` runs the timer/async/mock suites three times with `--retry=2`; `test:mutation` weakens each critical control (cancellation, budget enforcement, credential redaction, SSRF, stale-element guard, run-store status, settings save summary) and fails if any mutation goes uncaught by the suite.
+The duration/flake/mutation gates are wired into CI: `test:budget` fails if the full suite exceeds its duration budget; `test:flake` runs the timer/async/mock suites three times with `--retry=2`; `test:mutation` weakens each critical control (cancellation, budget enforcement, credential redaction, SSRF, stale-element guard, run-store status, settings save summary) and fails if any mutation goes uncaught by the suite.
 
 ### Project layout
 
@@ -516,7 +516,7 @@ scripts/                   Icon generation, verifier, budget/flake/mutation gate
 
 `.github/workflows/ci.yml` runs two jobs (the test job pins Node 22.23.2 and npm 10.9.8):
 
-- **test** — runs `npm run verify:baseline`: clean install, lint, type-check, coverage, exact package/rebuild verification, and audit/signature checks, followed by the Phase 15 gates: `test:budget` (full-suite duration budget), `test:flake` (3× repeated flake-prone runs), and `test:mutation` (critical-control mutation verification).
+- **test** — runs `npm run verify:baseline`: clean install, lint, type-check, coverage, exact package/rebuild verification, and audit/signature checks, followed by the duration/flake/mutation gates: `test:budget` (full-suite duration budget), `test:flake` (3× repeated flake-prone runs), and `test:mutation` (critical-control mutation verification).
 - **secret-scan** — a full-history secret scan that fails the build if a real secret is committed.
 
 `.github/workflows/dependency-review.yml` blocks PRs that introduce dependencies with moderate+ vulnerability advisories or disallowed licenses (GPL-3.0, AGPL-3.0).
@@ -560,17 +560,15 @@ A release candidate must pass the full reproducibility gate before shipping:
 ```bash
 npm run lint && npx tsc --noEmit          # static gates
 npx vitest run --coverage                  # full suite + coverage thresholds
-npm run test:budget && npm run test:flake && npm run test:mutation   # Phase 15 gates
-npm run verify:baseline:installed          # clean-install reproducibility + delta chain + ledger closure
+npm run test:budget && npm run test:flake && npm run test:mutation   # duration/flake/mutation gates
+npm run verify:baseline:installed          # clean-install reproducibility
 npm run build:extension                    # produce the exact chrome-extension/ artifact
 ```
 
-The verifier pins: the sealed per-phase delta chain (PHASE2..PHASE19), the
-file-disposition ledger (zero Unreviewed rows — Phase 19 gate), the manifest
-permissions/CSP contract, the packaged artifact inventory, and the
-dependency audit. Rollback: a previously verified `chrome-extension/`
-artifact (or the last compatible git tag) is a drop-in replacement; every
-phase migration is reversible per `docs/redesign/MIGRATION_ROLLBACK_REGISTER.md`.
+The verifier pins: the manifest permissions/CSP contract, the packaged
+artifact inventory, and the dependency audit. Rollback: a previously verified
+`chrome-extension/` artifact (or the last compatible git tag) is a drop-in
+replacement.
 
 Browser-real lanes that require a Chrome host (packaged E2E, screenshots,
 keyboard/screen-reader walks, alarm/webhook timing, vision download) run via

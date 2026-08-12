@@ -12,7 +12,7 @@
  * capped at 60 chars), `x`/`y` are the rounded center point.
  *
  * Local limits are KEPT (cap 200 max / 50 default — same as `find_elements`);
- * stealthy's 100/20 is not adopted (see plan S7).
+ * stealthy's 100/20 is not adopted.
  */
 
 import type { ActionResult } from "../../types";

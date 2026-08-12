@@ -1,7 +1,7 @@
-// @vitest-environment-options {"url":"https://phase10-stale.test/"}
+// @vitest-environment-options {"url":"https://stale-element.test/"}
 
 /**
- * Phase 10 — stale-element execution guard + element-identity stability.
+ * Stale-element execution guard + element-identity stability.
  *
  * The canonical action set MUST never operate on a stale element reference:
  * - `resolveElement` (the single resolution path every index-based handler

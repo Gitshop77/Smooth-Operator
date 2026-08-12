@@ -1,5 +1,5 @@
 /**
- * options/stores/index.ts — Options store singletons (Phase 12).
+ * options/stores/index.ts — Options store singletons.
  *
  * Each Options surface owns one reducer store; the DOM modules below dispatch
  * typed actions and render from `getState()`/`subscribe()`.  Singletons are

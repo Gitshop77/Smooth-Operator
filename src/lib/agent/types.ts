@@ -370,7 +370,7 @@ export interface AgentConfig {
  */
   expectedOutcomes?: ExpectedOutcomes;
   /**
-   * Phase 9 — measured simple-task fast path. When `true`, the orchestrator
+   * Measured simple-task fast path. When `true`, the orchestrator
    * attempts a DETERMINISTIC pre-check (current-page title / URL metadata
    * question) before the initial planner call; a matching read-only task
    * completes on direct evidence without the initial planner LLM call and

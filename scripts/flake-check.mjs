@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Flake hardening (Phase 15).
+ * Flake hardening.
  *
  * Runs the flake-prone suites (timers, async races, chrome-mock interactions)
  * ROUNDS times — default 3 — with vitest's `--retry=2` (a failed test is

@@ -1,6 +1,6 @@
 /**
  * Phase: callPlannerAndHandleError + handlePlannerDecision + handleNavigatorDone
- * + runPeriodicPlannerCheck — extracted from orchestrator.ts (Phase 1).
+ * + runPeriodicPlannerCheck — extracted from orchestrator.ts.
  *
  * These four helpers cover every planner-related phase (initial, verify,
  * periodic). The initial planner call is inlined in the main orchestrator

@@ -1,5 +1,5 @@
 /**
- * Wait-condition family (S1) — wait_for_element / wait_for_text /
+ * Wait-condition family — wait_for_element / wait_for_text /
  * wait_for_url / wait_for_network_idle semantics.
  *
  * Pinned contracts:

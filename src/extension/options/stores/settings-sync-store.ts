@@ -1,6 +1,6 @@
 /**
  * options/stores/settings-sync-store.ts — authoritative load/save status for
- * the Options settings surface (Phase 12).
+ * the Options settings surface.
  *
  * The heavy settings persistence stays in settings-sync.ts (it owns the DOM
  * read + storage write); this store makes the *acknowledgement* explicit and

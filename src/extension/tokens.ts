@@ -1,6 +1,6 @@
 /**
  * Design tokens — TypeScript mirror of `tokens.css` (single source for the
- * automated contrast/consistency checks in `tests/phase13-tokens.test.ts`).
+ * automated contrast/consistency checks in `tests/design-tokens.test.ts`).
  *
  * Values here MUST match `tokens.css` (the runtime source of truth). The test
  * suite cross-checks a subset of key values against the parsed stylesheet so

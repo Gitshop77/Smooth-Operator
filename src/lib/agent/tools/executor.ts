@@ -157,7 +157,7 @@ class UnhandledActionError extends Error {
 }
 
 /**
- * Build the S6 URL-loader runner for a fresh agent-driven navigation. Loader
+ * Build the URL-loader runner for a fresh agent-driven navigation. Loader
  * steps are dispatched as ordinary actions with `fromLoader: true` so a
  * loader-originated `navigate` never re-triggers loaders (recursion guard).
  *
@@ -250,7 +250,7 @@ function scriptStepToAction(step: Record<string, unknown>): AgentAction | null {
  * @param signal Optional abort signal threaded from the agent loop.
  * @param fromLoader True when the action originates from a URL-loader step —
  *   suppresses the loader hook so loaders never re-trigger on their own
- *   navigation (S6 recursion guard).
+ *   navigation (recursion guard).
  * @param agentMode Optional active agent mode. When provided, URL-loader
  *   steps spawned by a `navigate`/`search` are mode-gated with
  *   `checkActionAllowed` before dispatch (see {@link makeLoaderRunner}); the

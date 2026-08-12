@@ -1,5 +1,5 @@
 /**
- * Phase 9 — measured simple-task fast path (deterministic classifier).
+ * Measured simple-task fast path (deterministic classifier).
  *
  * For simple READ-ONLY tasks whose answer is exactly derivable from the
  * current page's own metadata (title / URL), the orchestrator can complete

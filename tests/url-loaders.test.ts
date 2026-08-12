@@ -1,5 +1,5 @@
 /**
- * S6 — URL-triggered page loaders (port of stealthy-auto-browse loaders).
+ * URL-triggered page loaders (port of stealthy-auto-browse loaders).
  *
  * The engine lives in `src/lib/agent/dom/navigation/url-loaders.ts`:
  * - `parseLoaderRegistry` validates the chrome.storage registry (≥1 match

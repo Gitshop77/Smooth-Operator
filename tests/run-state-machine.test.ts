@@ -1,5 +1,5 @@
 /**
- * Phase 9 — explicit run-state machine tests.
+ * Explicit run-state machine tests.
  *
  * Covers the typed run-phase machine (`run-state-machine.ts`) and the
  * orchestrator flows that drive it:

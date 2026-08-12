@@ -17,7 +17,7 @@
      5. Theme       — @media (prefers-color-scheme: light) re-maps primitives;
                       semantic aliases follow because they reference them.
 
-   Values mirror `tokens.ts` (checked by tests/phase13-tokens.test.ts).
+   Values mirror `tokens.ts` (checked by tests/design-tokens.test.ts).
    AA contract: every text/background pair reaches ≥4.5:1; `--oc-accent-text`
    is the AA-corrected accent for text; `--oc-status-danger-strong` is the
    danger FILL (white text reaches ≥4.5:1 on it).

@@ -1,7 +1,7 @@
 /**
- * Phase 3 characterization — scheduler mutation, recovery history, and
- * credential/session boundaries that must remain true before Phase 4 changes
- * their implementation seams.
+ * Characterization — scheduler mutation, recovery history, and
+ * credential/session boundaries that must remain true before their
+ * implementation seams change.
  */
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -21,7 +21,7 @@ function task(enabled: boolean): ScheduledTask {
   };
 }
 
-describe("Phase 3 scheduler mutation characterization", () => {
+describe("Scheduler mutation characterization", () => {
   let storage: Record<string, unknown>;
   let activeAlarms: Set<string>;
   let saveScheduledTask: typeof import("../src/lib/agent/scheduled-tasks")["saveScheduledTask"];
@@ -95,7 +95,7 @@ describe("Phase 3 scheduler mutation characterization", () => {
     // Freeze it after that snapshot reaches its stale alarm-clear operation,
     // let an Options save durably disable + clear the task, then release
     // startup. Today startup creates an alarm from its stale enabled snapshot.
-    // Phase 4 clears from the startup snapshot, then re-reads under the
+    // Today startup clears from the startup snapshot, then re-reads under the
     // mutation authority immediately before any create.
     storage[SCHEDULED_TASKS_KEY] = [task(true)];
     let releaseStartupClear!: () => void;
@@ -125,7 +125,7 @@ describe("Phase 3 scheduler mutation characterization", () => {
   });
 });
 
-describe("Phase 3 recovery-to-history characterization", () => {
+describe("Recovery-to-history characterization", () => {
   const local = new Map<string, unknown>();
   const session = new Map<string, unknown>();
 

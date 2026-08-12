@@ -44,7 +44,7 @@ export interface ClassifiedError {
 
 /**
  * Recognize a run-stopping budget/cost-cap error. Matches both the legacy
- * cost-cap message (`Budget exceeded: …`) and the Phase 8 typed
+ * cost-cap message (`Budget exceeded: …`) and the typed
  * `PromptBudgetExceededError` (`Prompt budget exceeded …` or its
  * `budgetExceeded === true` flag). All callers that finalize a run on a
  * budget stop must use this so no budget class is silently misclassified.

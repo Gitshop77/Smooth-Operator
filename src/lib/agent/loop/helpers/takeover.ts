@@ -1,7 +1,7 @@
 /**
  * Loop helper — `waitForTakeoverResume`.
  *
- * Extracted from the original `loop/helpers.ts` (Phase 10a).
+ * Extracted from the original `loop/helpers.ts`.
  *
  * Wait for the user to resume after a `takeover` action. Emits a `takeover`
  * event + an info banner, then awaits one of:

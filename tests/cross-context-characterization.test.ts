@@ -1,5 +1,5 @@
 /**
- * Phase 3 cross-context scheduled-task characterization.
+ * Cross-context scheduled-task characterization.
  *
  * These cases intentionally drive the Options-page event handlers and the
  * background/library writer through separate module-local locks. They are not
@@ -83,16 +83,16 @@ function installCrossContextChrome(storage: Record<string, unknown>, hooks: Stor
     onAlarm: { addListener: vi.fn() },
   };
   const runtime = {
-    id: "phase4-scheduler-extension",
-    getURL: (path: string) => `chrome-extension://phase4-scheduler-extension/${path}`,
+    id: "scheduler-extension-fixture",
+    getURL: (path: string) => `chrome-extension://scheduler-extension-fixture/${path}`,
     sendMessage: vi.fn(async (message: unknown) => {
       const { handleScheduledTaskCommand } = await import("../src/extension/background/scheduled-task-command");
       return new Promise<unknown>((resolve) => {
         handleScheduledTaskCommand(
           message as never,
           {
-            id: "phase4-scheduler-extension",
-            url: "chrome-extension://phase4-scheduler-extension/options.html",
+            id: "scheduler-extension-fixture",
+            url: "chrome-extension://scheduler-extension-fixture/options.html",
           },
           resolve,
         );
@@ -124,7 +124,7 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
-describe("Phase 3 cross-context harness credibility controls", () => {
+describe("Cross-context harness credibility controls", () => {
   test("the real Options delete handler removes one isolated task and clears its alarm", async () => {
     const task = fixtureTask("delete-smoke");
     const storage: Record<string, unknown> = { [STORAGE_KEY]: [task] };
@@ -138,7 +138,7 @@ describe("Phase 3 cross-context harness credibility controls", () => {
     expect(deleteButton?.textContent).toBe("Delete");
     deleteButton!.click();
 
-    // Phase 14 destructive-action gate: confirm the danger modal explicitly.
+    // Destructive-action gate: confirm the danger modal explicitly.
     await new Promise((r) => setTimeout(r, 250));
     const overlay = document.querySelector(".modal-overlay");
     const footer = overlay?.querySelectorAll<HTMLButtonElement>(".modal-footer button");
@@ -196,7 +196,7 @@ describe("Phase 3 cross-context harness credibility controls", () => {
   });
 });
 
-describe("Phase 4 background scheduled-task command authority", () => {
+describe("Background scheduled-task command authority", () => {
   test("accepts the absent-version legacy adapter and rejects unknown command versions", async () => {
     const task = fixtureTask("command-version");
     const storage: Record<string, unknown> = { [STORAGE_KEY]: [task] };
@@ -226,7 +226,7 @@ describe("Phase 4 background scheduled-task command authority", () => {
     expect(handleScheduledTaskCommand(
       { type: "SCHEDULED_TASK_COMMAND", command: { kind: "list" } },
       {
-        id: "phase4-scheduler-extension",
+        id: "scheduler-extension-fixture",
         url: "https://example.test/content-script",
       },
       (value) => { response = value; },
@@ -296,7 +296,7 @@ describe("Phase 4 background scheduled-task command authority", () => {
   });
 });
 
-describe("Phase 3 true Options/background scheduled-task races", () => {
+describe("True Options/background scheduled-task races", () => {
   test("an Options delete cannot overwrite a concurrent background save with its stale full list", async () => {
     const first = fixtureTask("delete-target");
     const second = fixtureTask("background-result");
@@ -315,7 +315,7 @@ describe("Phase 3 true Options/background scheduled-task races", () => {
     const workerSave = saveScheduledTask({ ...second, task: "fake background result update" });
     await backgroundClearStarted.promise;
     (document.querySelector(".schedule-delete") as HTMLButtonElement).click();
-    // Phase 14 destructive-action gate: confirm the danger modal explicitly.
+    // Destructive-action gate: confirm the danger modal explicitly.
     await new Promise((r) => setTimeout(r, 250));
     const overlay = document.querySelector(".modal-overlay");
     const footer = overlay?.querySelectorAll<HTMLButtonElement>(".modal-footer button");
@@ -393,7 +393,7 @@ describe("Phase 3 true Options/background scheduled-task races", () => {
     const backgroundResult = saveScheduledTask({ ...task, lastRunAt: 222 });
     await backgroundClearStarted.promise;
     (document.querySelector(".schedule-delete") as HTMLButtonElement).click();
-    // Phase 14 destructive-action gate: confirm the danger modal explicitly.
+    // Destructive-action gate: confirm the danger modal explicitly.
     await new Promise((r) => setTimeout(r, 250));
     const overlay = document.querySelector(".modal-overlay");
     const footer = overlay?.querySelectorAll<HTMLButtonElement>(".modal-footer button");

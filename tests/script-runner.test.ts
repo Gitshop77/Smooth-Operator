@@ -1,5 +1,5 @@
 /**
- * Contract tests for the browser-agnostic YAML script engine — the S3 port of
+ * Contract tests for the browser-agnostic YAML script engine — the port of
  * stealthy-auto-browse's `script_runner.py`. The engine executes validated
  * script steps through an injected dispatch function and returns the exact
  * result envelope. `src/lib/agent/script-runner.ts` is the facade that

@@ -1,6 +1,6 @@
 /**
  * options/stores/provider-config-store.ts — authoritative provider/model
- * selection state for the Connection tab (Phase 12).
+ * selection state for the Connection tab.
  *
  * The store owns the *selection* and the *derived capabilities* for the current
  * provider/model.  Every provider/model change bumps `generation` and clears

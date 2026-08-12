@@ -1,5 +1,5 @@
 /**
- * list_tabs (S5): SW-side `handleTabAction` listing and the content-script
+ * list_tabs: SW-side `handleTabAction` listing and the content-script
  * delegation contract.
  *
  * The SW returns `data: { tabs: [{index, url, active}], count }` where index

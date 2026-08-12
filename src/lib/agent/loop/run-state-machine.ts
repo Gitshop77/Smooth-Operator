@@ -1,5 +1,5 @@
 /**
- * Run-phase state machine — Phase 9.
+ * Run-phase state machine.
  *
  * The orchestrator's control flow is an EXPLICIT typed state machine instead
  * of an implicit while-loop. This module owns:

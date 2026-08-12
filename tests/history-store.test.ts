@@ -1,5 +1,5 @@
 /**
- * Phase 12 — history store (run-history Options surface).
+ * History store (run-history Options surface).
  *
  * Covers: load ack lifecycle, explicit clear/import/export ack with failure
  * recovery (a failed operation surfaces as `failed` and never drops entries

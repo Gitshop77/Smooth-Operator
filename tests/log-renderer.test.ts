@@ -156,7 +156,7 @@ describe("log-renderer", () => {
 
   test("run-start marks the run as running (Stop enabled, input disabled)", async () => {
     const { hydrateLegacyStatus } = await import("../src/extension/sidepanel/run-store");
-    // Phase 12/18: the run-view store is the authority for control state. A
+    // The run-view store is the authority for control state. A
     // running store status enables Stop and disables Send/input.
     hydrateLegacyStatus(true);
     addLogRow({ type: "run-start", task: "scheduled task" }, "t0");

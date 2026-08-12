@@ -1,5 +1,5 @@
 /**
- * Console log ring (S9) — MAIN-world console.log/error/warn/info capture
+ * Console log ring — MAIN-world console.log/error/warn/info capture
  * bridged to the SW ring via a CustomEvent + CONSOLE_LOG_ENTRY message, the
  * CONSOLE_LOG verb RPC, and the content-side enable/disable/get/clear/getclear
  * action handlers.
@@ -14,9 +14,9 @@
  * - disabled → entries are NOT stored (CONSOLE_LOG_ENTRY is dropped).
  * - ring cap is 500 — the OLDEST entry is dropped first.
  * - getclear snapshots AND clears in one synchronous step (atomic).
- * - listeners register exactly once (idempotent), including the CONSOLE_LOG /
- *   CONSOLE_LOG_ENTRY onMessage listener (message-routing.ts does not know
- *   the type).
+ * - listeners register exactly once (idempotent). CONSOLE_LOG /
+ *   CONSOLE_LOG_ENTRY are dispatched through `handleLogRingMessage`, which
+ *   `message-routing.ts` owns as the single onMessage dispatch path.
  */
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
@@ -61,6 +61,8 @@ describe("rate-limit-tracker: console log ring", () => {
 
   let listeners: FakeChromeListeners;
 
+  let trackerModule: Awaited<ReturnType<typeof loadTracker>> | undefined;
+
   async function issueEffectCapability(
     token: { runId: string; dispatchRevision: number },
     action: { type: "enable_console_log" | "disable_console_log" | "get_console_log" | "clear_console_log" | "getclear_console_log" },
@@ -98,6 +100,7 @@ describe("rate-limit-tracker: console log ring", () => {
   beforeEach(() => {
     // Fresh module state (the rings + registered flag are module-level).
     vi.resetModules();
+    trackerModule = undefined;
     listeners = installFakeChrome();
   });
 
@@ -107,12 +110,13 @@ describe("rate-limit-tracker: console log ring", () => {
   });
 
   async function loadTracker(): Promise<typeof import("../src/extension/background/rate-limit-tracker")> {
-    return await import("../src/extension/background/rate-limit-tracker");
+    trackerModule = await import("../src/extension/background/rate-limit-tracker");
+    return trackerModule;
   }
 
-  /** Send one console entry to every onMessage listener (only the tracker one). */
+  /** Push one console entry through the shared log-ring message handler. */
   function pushEntry(entry: unknown): void {
-    for (const fn of listeners.onMessage) fn({ type: "CONSOLE_LOG_ENTRY", entry }, { id: "test-ext" }, () => {});
+    trackerModule?.handleLogRingMessage({ type: "CONSOLE_LOG_ENTRY", entry }, { id: "test-ext" } as chrome.runtime.MessageSender, () => {});
   }
 
   test("listeners register exactly once (idempotent across calls)", async () => {
@@ -122,7 +126,6 @@ describe("rate-limit-tracker: console log ring", () => {
     mod.registerRateLimitListener();
     expect(listeners.onBeforeRequest).toHaveLength(1);
     expect(listeners.onCompleted).toHaveLength(2); // rate-limit + network-log capture
-    expect(listeners.onMessage).toHaveLength(1); // NETWORK_LOG + CONSOLE_LOG share one listener
   });
 
   test("console entries are recorded with the pinned shape", async () => {
@@ -190,7 +193,7 @@ describe("rate-limit-tracker: console log ring", () => {
     controller.markRunning();
     const token = controller.dispatchToken;
     mod.registerRateLimitListener();
-    const rpc = listeners.onMessage[0];
+    const rpc = mod.handleLogRingMessage;
     const respond = (res?: unknown) => res;
 
     // unknown verb → error
@@ -232,7 +235,7 @@ describe("rate-limit-tracker: console log ring", () => {
   test("CONSOLE_LOG / CONSOLE_LOG_ENTRY from an unauthorized sender are ignored", async () => {
     const mod = await loadTracker();
     mod.registerRateLimitListener();
-    const rpc = listeners.onMessage[0];
+    const rpc = mod.handleLogRingMessage;
     const spy = vi.fn();
     const ret = rpc({ type: "CONSOLE_LOG", verb: "enable" }, { id: "other-ext" }, spy);
     expect(ret).toBe(false);
@@ -249,7 +252,7 @@ describe("rate-limit-tracker: console log ring", () => {
     controllers.resetRunControllerForTests();
     mod.registerRateLimitListener();
     const response = vi.fn();
-    const rpc = listeners.onMessage[0];
+    const rpc = mod.handleLogRingMessage;
     expect(rpc({
       type: "CONSOLE_LOG",
       verb: "get",
@@ -269,7 +272,7 @@ describe("rate-limit-tracker: console log ring", () => {
     tracker.registerRateLimitListener();
     const controller = controllers.beginRunController({ runId: "console-effects", task: "inspect", maxSteps: 1, mode: "standard" });
     controller.markRunning();
-    const rpc = listeners.onMessage[0];
+    const rpc = tracker.handleLogRingMessage;
     const call = (message: Record<string, unknown>) => new Promise<unknown>((resolve) => rpc(message, { id: "test-ext" }, resolve));
     try {
       await expect(call({ type: "CONSOLE_LOG", verb: "enable", token: controller.dispatchToken }))

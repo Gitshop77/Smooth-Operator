@@ -1,5 +1,5 @@
 /**
- * S6 — URL-triggered page loaders (port of stealthy-auto-browse's loaders.py).
+ * URL-triggered page loaders (port of stealthy-auto-browse's loaders.py).
  *
  * A loader is a URL-triggered automation recipe: when the agent navigates to
  * a matching URL, its `steps` are dispatched like ordinary actions. The
@@ -7,7 +7,7 @@
  * as `{ "<filename>": "<YAML-or-JSON text>" }` and is re-read on EVERY
  * navigation (hot-reload).
  *
- * Deliberate divergences from stealthy (see plan S6):
+ * Deliberate divergences from stealthy:
  * - At least one match field is REQUIRED — stealthy's unknown-key catch-all
  *   hazard (all-None loader matching every page) is rejected at parse time.
  * - Control nodes (`if` / `repeat` / `while`) are NOT supported in loader

@@ -37,7 +37,7 @@ export async function handleNavigate(
       message: `BLOCKED: ${urlCheck.reason} (${action.url})`,
     };
   }
-  // S6 URL loaders: after a SUCCESSFUL navigation, run the loader steps
+  // URL loaders: after a SUCCESSFUL navigation, run the loader steps
   // matching the destination URL. The runner is wired by the executor
   // (loader-originated navigations carry `ctx.fromLoader` and skip the hook,
   // so a loader never re-triggers itself). Note that loader steps execute in

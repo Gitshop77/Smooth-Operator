@@ -1,21 +1,21 @@
 /**
- * Phase 16 — measured baselines (offline, deterministic).
+ * Measured baselines (offline, deterministic).
  *
  * Measures, WITHOUT any network or browser:
  *  1. Provider-construction latency (`buildProvider`) per provider family.
  *  2. Prompt-compile latency per family (navigator / planner / judge),
  *     including the SHA-256 cache descriptor.
  *  3. Compiled-prompt byte sizes across a representative corpus + headroom
- *     versus the Phase 8 budget profiles (per-family max-input tokens).
+ *     versus the budget profiles (per-family max-input tokens).
  *  4. Fast-path classifier stats over a task corpus + the compiled planner
  *     prompt bytes a matching task avoids (the LLM cost the fast path saves).
  *  5. Loop hot-path costs: full navigator-message build (redaction +
  *     injection scan + render) with warm vs cold redaction caches, and
  *     key-shape redaction throughput.
  *
- * Run: `npx tsx scripts/measure-phase16.ts`
+ * Run: `npx tsx scripts/measure-prompts.mts`
  * Output: printed table + JSON evidence written to
- *         docs/redesign/phase16-measurements.json (overwritten each run).
+ *         measurements.json (overwritten each run).
  */
 
 import { writeFileSync } from "node:fs";
@@ -313,7 +313,7 @@ const log = (s: string) => {
   rows.push(s);
 };
 
-log("=== Phase 16 measured baselines (offline) ===");
+log("=== Measured baselines (offline) ===");
 
 // 1. Provider construction.
 log("\n--- 1. Provider construction (buildProvider) ---");
@@ -506,7 +506,7 @@ log(`  ${"redactKeyShapes 20k lines".padEnd(28)} ${fmt(ksStats)} (input ${utf8By
 
 // ─── Emit evidence file ───────────────────────────────────────────────────────
 
-const outPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../docs/redesign/phase16-measurements.json");
+const outPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../measurements.json");
 writeFileSync(outPath, `${JSON.stringify(evidence, null, 2)}\n`);
-log(`\nEvidence written to docs/redesign/phase16-measurements.json`);
+log(`\nEvidence written to measurements.json`);
 process.stdout.write(rows.join("\n") + "\n");

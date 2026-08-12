@@ -440,15 +440,18 @@ describe("anti-detection: per-profile stealth seed drift", () => {
   test("isValidStealthSeed accepts only plausible desktop grids", async () => {
     const { isValidStealthSeed, DEFAULT_STEALTH_SEED } = await import("../src/lib/agent/anti-detection");
     expect(isValidStealthSeed(DEFAULT_STEALTH_SEED)).toBe(true);
-    expect(isValidStealthSeed({ hardwareConcurrency: 4, deviceMemory: 8, connectionRtt: 50, connectionDownlink: 10 })).toBe(true);
+    expect(isValidStealthSeed({ hardwareConcurrency: 4, deviceMemory: 8, connectionRtt: 50, connectionDownlink: 10, pluginCount: 2 })).toBe(true);
+    expect(isValidStealthSeed({ hardwareConcurrency: 4, deviceMemory: 8, connectionRtt: 50, connectionDownlink: 10, pluginCount: 3 })).toBe(true);
     expect(isValidStealthSeed(null)).toBe(false);
     expect(isValidStealthSeed({})).toBe(false);
     // Out-of-grid values (a corrupted stored seed) are rejected so a corrupted
     // profile never injects a tell-tale fabrication.
-    expect(isValidStealthSeed({ hardwareConcurrency: 1, deviceMemory: 8, connectionRtt: 50, connectionDownlink: 10 })).toBe(false);
-    expect(isValidStealthSeed({ hardwareConcurrency: 4, deviceMemory: 3, connectionRtt: 50, connectionDownlink: 10 })).toBe(false);
-    expect(isValidStealthSeed({ hardwareConcurrency: 4, deviceMemory: 8, connectionRtt: 999, connectionDownlink: 10 })).toBe(false);
-    expect(isValidStealthSeed({ hardwareConcurrency: 4, deviceMemory: 8, connectionRtt: 50, connectionDownlink: 7 })).toBe(false);
+    expect(isValidStealthSeed({ hardwareConcurrency: 1, deviceMemory: 8, connectionRtt: 50, connectionDownlink: 10, pluginCount: 2 })).toBe(false);
+    expect(isValidStealthSeed({ hardwareConcurrency: 4, deviceMemory: 3, connectionRtt: 50, connectionDownlink: 10, pluginCount: 2 })).toBe(false);
+    expect(isValidStealthSeed({ hardwareConcurrency: 4, deviceMemory: 8, connectionRtt: 999, connectionDownlink: 10, pluginCount: 2 })).toBe(false);
+    expect(isValidStealthSeed({ hardwareConcurrency: 4, deviceMemory: 8, connectionRtt: 50, connectionDownlink: 7, pluginCount: 2 })).toBe(false);
+    expect(isValidStealthSeed({ hardwareConcurrency: 4, deviceMemory: 8, connectionRtt: 50, connectionDownlink: 10, pluginCount: 5 })).toBe(false);
+    expect(isValidStealthSeed({ hardwareConcurrency: 4, deviceMemory: 8, connectionRtt: 50, connectionDownlink: 10 })).toBe(false);
   });
 
   test("generateStealthSeed draws only in-grid values (deterministic with injected random)", async () => {

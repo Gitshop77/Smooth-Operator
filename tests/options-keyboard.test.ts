@@ -1,5 +1,5 @@
 /**
- * Phase 12 — keyboard interaction (jsdom level).
+ * Keyboard interaction (jsdom level).
  *
  * Critical flows must work by keyboard with focus management:
  * - Stop (side panel): the button is keyboard-reachable exactly while a run
@@ -146,7 +146,7 @@ function setupOptionsDom(): {
   return { local, session };
 }
 
-describe("Phase 12 keyboard — Stop (side panel)", () => {
+describe("Keyboard — Stop (side panel)", () => {
   let h: StopHarness;
 
   beforeEach(() => {
@@ -196,7 +196,7 @@ describe("Phase 12 keyboard — Stop (side panel)", () => {
   });
 });
 
-describe("Phase 12 keyboard — provider selection + model search (Options)", () => {
+describe("Keyboard — provider selection + model search (Options)", () => {
   let stores: ReturnType<typeof setupOptionsDom>;
 
   beforeEach(() => {
@@ -275,7 +275,7 @@ describe("Phase 12 keyboard — provider selection + model search (Options)", ()
   });
 });
 
-describe("Phase 12 keyboard — schedule create/delete (Options)", () => {
+describe("Keyboard — schedule create/delete (Options)", () => {
   let h: { sent: Array<{ type: string; command?: { kind: string } }> };
 
   beforeEach(() => {
@@ -333,7 +333,7 @@ describe("Phase 12 keyboard — schedule create/delete (Options)", () => {
     delBtn?.click();
     await new Promise((r) => setTimeout(r, 0));
 
-    // Phase 14 destructive-action gate: the delete must NOT fire until the
+    // Destructive-action gate: the delete must NOT fire until the
     // user explicitly confirms in the danger modal.
     let deleteSent = h.sent.find(
       (m) => m.type === "SCHEDULED_TASK_COMMAND" && m.command?.kind === "delete",

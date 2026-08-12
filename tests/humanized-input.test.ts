@@ -1,5 +1,5 @@
 /**
- * Humanized input timing (S4):
+ * Humanized input timing:
  * - `cdpTypeText` — per-character `Input.dispatchKeyEvent` typing with
  *   bounded human-like delays (`max(0.02, interval + uniform(-0.03, 0.05))`
  *   seconds, interval default 0.08).

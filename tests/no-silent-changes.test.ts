@@ -1,5 +1,5 @@
 /**
- * Phase 14 — no silent changes.
+ * No silent changes.
  *
  * Destination (provider/baseUrl/webhook), permission (screenshots/stealth),
  * cost (cost cap), mode (agent mode), and retention/delivery (webhook) changes
@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { makeChromeStorageMock } from "./helpers/chrome-storage-mock";
 import { composeSettingsSaveSummary } from "../src/extension/options/settings-sync-utils";
 
-describe("Phase 14 — composeSettingsSaveSummary covers the sensitive categories", () => {
+describe("composeSettingsSaveSummary covers the sensitive categories", () => {
   test("includes mode, cost cap, destination, permissions, vision, webhook, and domain scope", () => {
     const summary = composeSettingsSaveSummary({
       agentMode: "full_agentic",
@@ -187,7 +187,7 @@ function setupSidepanelChrome(): { local: Map<string, unknown> } {
   return { local };
 }
 
-describe("Phase 14 — no silent settings writes (Options)", () => {
+describe("No silent settings writes (Options)", () => {
   beforeEach(() => {
     vi.resetModules();
     mountOptionsDom();
@@ -265,7 +265,7 @@ describe("Phase 14 — no silent settings writes (Options)", () => {
 });
 
 
-describe("Phase 14 — no silent mode changes (side panel)", () => {
+describe("No silent mode changes (side panel)", () => {
   beforeEach(() => {
     vi.resetModules();
     mountSidepanelDom();

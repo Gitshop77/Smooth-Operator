@@ -221,7 +221,7 @@ const STATIC_FILES = [
   "sidepanel.css",
   "options.html",
   "options.css",
-  // Phase 13 — shared visual layer imported by both surface stylesheets
+  // Shared visual layer imported by both surface stylesheets
   // (`@import url("tokens.css")` / `url("components.css")`).
   "tokens.css",
   "components.css",

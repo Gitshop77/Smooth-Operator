@@ -155,112 +155,117 @@ function pushConsoleLogEntry(entry: ConsoleLogEntry): void {
 }
 
 /**
- * Register the `chrome.webRequest.onCompleted` listener (idempotent). Records
- * main-frame 429/503 responses per tab; a subsequent successful main-frame load
- * clears any stale record for that tab. Also registers the network-log capture
- * listeners + the `NETWORK_LOG` runtime-message RPC. No-op when the API is
- * unavailable (the NETWORK_LOG message listener is registered first so the RPC
- * works even without webRequest support).
+ * Dispatch one NETWORK_LOG / CONSOLE_LOG / CONSOLE_LOG_ENTRY runtime message.
+ *
+ * Exported so `message-routing.ts` owns the single `chrome.runtime.onMessage`
+ * dispatch path; this module keeps only the ring-buffer state and the
+ * webRequest/tab listeners. Returns `true` when the message is consumed
+ * asynchronously, `false` otherwise (so other listeners may run).
  */
-export function registerRateLimitListener(): void {
-  if (registered) return;
-  registered = true;
-  // The NETWORK_LOG / CONSOLE_LOG RPC listeners. message-routing.ts does not
-  // know these types (it returns false for unknown messages), so this separate
-  // listener is the only responder. Registered at startup, idempotently —
-  // repeated SW wakes must not stack listeners.
-  if (chrome.runtime?.onMessage) {
-    chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-      if (sender.id !== chrome.runtime.id) return false;
-      const m = msg as {
-        type?: string;
-        verb?: string;
-        entry?: ConsoleLogEntry;
-        token?: PrivilegedDispatchToken;
-        effectCapability?: string;
-      } | null;
-      if (!m) return false;
-      if (m.type === "CONSOLE_LOG_ENTRY") {
-        if (consoleLogEnabled) pushConsoleLogEntry(m.entry as ConsoleLogEntry);
-        return false; // fire-and-forget push, no response
-      }
-      const logType = m.type;
-      if (logType !== "NETWORK_LOG" && logType !== "CONSOLE_LOG") return false;
-      // Ring-log commands mutate/read run-scoped diagnostic state. A delayed
-      // command from a predecessor must not affect or observe its successor.
-      void authorizeRunScopedDispatch(m.token).then((authorization) => {
-        if (!authorization.ok) {
-          sendResponse({ ok: false, error: authorization.error });
-          return;
-        }
-        const action = canonicalLogAction(logType, m.verb);
-        if (!action) {
-          sendResponse({ ok: false, error: `unknown ${logType === "CONSOLE_LOG" ? "console" : "network"} log verb: ${String(m.verb)}` });
-          return;
-        }
-        if (!consumeEffectCapability(m.effectCapability, m.token!, action)) {
-          sendResponse({ ok: false, error: "BLOCKED: missing or invalid action effect capability" });
-          return;
-        }
-        if (m.type === "CONSOLE_LOG") {
-        switch (m.verb) {
-          case "enable":
-            enableConsoleLog();
-            sendResponse({ ok: true, message: "console log enabled" });
-            break;
-          case "disable":
-            disableConsoleLog();
-            sendResponse({ ok: true, message: "console log disabled" });
-            break;
-          case "get": {
-            const { enabled, entries } = getConsoleLog();
-            sendResponse({ ok: true, enabled, entries });
-            break;
-          }
-          case "clear":
-            clearConsoleLog();
-            sendResponse({ ok: true, message: "console log cleared" });
-            break;
-          case "getclear": {
-            const { enabled, entries } = getclearConsoleLog();
-            sendResponse({ ok: true, enabled, entries });
-            break;
-          }
-          default:
-            sendResponse({ ok: false, error: `unknown console log verb: ${String(m.verb)}` });
-        }
-        return;
-        }
-        switch (m.verb) {
+export function handleLogRingMessage(
+  msg: unknown,
+  sender: chrome.runtime.MessageSender,
+  sendResponse: (response?: unknown) => void,
+): boolean {
+  if (sender.id !== chrome.runtime.id) return false;
+  const m = msg as {
+    type?: string;
+    verb?: string;
+    entry?: ConsoleLogEntry;
+    token?: PrivilegedDispatchToken;
+    effectCapability?: string;
+  } | null;
+  if (!m) return false;
+  if (m.type === "CONSOLE_LOG_ENTRY") {
+    if (consoleLogEnabled) pushConsoleLogEntry(m.entry as ConsoleLogEntry);
+    return false; // fire-and-forget push, no response
+  }
+  const logType = m.type;
+  if (logType !== "NETWORK_LOG" && logType !== "CONSOLE_LOG") return false;
+  // Ring-log commands mutate/read run-scoped diagnostic state. A delayed
+  // command from a predecessor must not affect or observe its successor.
+  void authorizeRunScopedDispatch(m.token).then((authorization) => {
+    if (!authorization.ok) {
+      sendResponse({ ok: false, error: authorization.error });
+      return;
+    }
+    const action = canonicalLogAction(logType, m.verb);
+    if (!action) {
+      sendResponse({ ok: false, error: `unknown ${logType === "CONSOLE_LOG" ? "console" : "network"} log verb: ${String(m.verb)}` });
+      return;
+    }
+    if (!consumeEffectCapability(m.effectCapability, m.token!, action)) {
+      sendResponse({ ok: false, error: "BLOCKED: missing or invalid action effect capability" });
+      return;
+    }
+    if (m.type === "CONSOLE_LOG") {
+      switch (m.verb) {
         case "enable":
-          enableNetworkLog();
-          sendResponse({ ok: true, message: "network log enabled" });
+          enableConsoleLog();
+          sendResponse({ ok: true, message: "console log enabled" });
           break;
         case "disable":
-          disableNetworkLog();
-          sendResponse({ ok: true, message: "network log disabled" });
+          disableConsoleLog();
+          sendResponse({ ok: true, message: "console log disabled" });
           break;
         case "get": {
-          const { enabled, entries } = getNetworkLog();
+          const { enabled, entries } = getConsoleLog();
           sendResponse({ ok: true, enabled, entries });
           break;
         }
         case "clear":
-          clearNetworkLog();
-          sendResponse({ ok: true, message: "network log cleared" });
+          clearConsoleLog();
+          sendResponse({ ok: true, message: "console log cleared" });
           break;
         case "getclear": {
-          const { enabled, entries } = getclearNetworkLog();
+          const { enabled, entries } = getclearConsoleLog();
           sendResponse({ ok: true, enabled, entries });
           break;
         }
         default:
-          sendResponse({ ok: false, error: `unknown network log verb: ${String(m?.verb)}` });
-        }
-      });
-      return true;
-    });
-  }
+          sendResponse({ ok: false, error: `unknown console log verb: ${String(m.verb)}` });
+      }
+      return;
+    }
+    switch (m.verb) {
+      case "enable":
+        enableNetworkLog();
+        sendResponse({ ok: true, message: "network log enabled" });
+        break;
+      case "disable":
+        disableNetworkLog();
+        sendResponse({ ok: true, message: "network log disabled" });
+        break;
+      case "get": {
+        const { enabled, entries } = getNetworkLog();
+        sendResponse({ ok: true, enabled, entries });
+        break;
+      }
+      case "clear":
+        clearNetworkLog();
+        sendResponse({ ok: true, message: "network log cleared" });
+        break;
+      case "getclear": {
+        const { enabled, entries } = getclearNetworkLog();
+        sendResponse({ ok: true, enabled, entries });
+        break;
+      }
+      default:
+        sendResponse({ ok: false, error: `unknown network log verb: ${String(m?.verb)}` });
+    }
+  });
+  return true;
+}
+
+/**
+ * Register the `chrome.webRequest.onCompleted` listener (idempotent). Records
+ * main-frame 429/503 responses per tab; a subsequent successful main-frame load
+ * clears any stale record for that tab. Also registers the network-log capture
+ * listeners. No-op when the API is unavailable.
+ */
+export function registerRateLimitListener(): void {
+  if (registered) return;
+  registered = true;
   if (!chrome.webRequest?.onCompleted) return;
   // Only the top-level document matters for "the page the agent acts on".
   chrome.webRequest.onCompleted.addListener(

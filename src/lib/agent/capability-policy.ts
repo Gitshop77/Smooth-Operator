@@ -53,7 +53,7 @@ function createModeTableCapabilityPolicy(): CapabilityPolicy {
 export const legacyCapabilityPolicy = createModeTableCapabilityPolicy();
 
 /**
- * Explicit Phase 5 shadow candidate. It intentionally starts at parity, but
+ * Explicit shadow candidate. It intentionally starts at parity, but
  * remains a distinct adapter invocation so future policy work is audited
  * before it receives authority.
  */

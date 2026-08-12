@@ -330,7 +330,7 @@ describe("content.ts message surface", () => {
   });
 
   /**
-   * These were intentional expected failures (Phase 10 spoofing residual): the
+   * These were intentional expected failures (spoofing residual): the
    * page shares the CustomEvent namespace with the MAIN-world capture, so a
    * forged entry used to reach the SW ring. The console-bridge admission gate
    * (`isValidConsoleBridgeEntry` in content-utils.ts) now rejects malformed

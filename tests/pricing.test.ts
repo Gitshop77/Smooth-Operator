@@ -58,7 +58,7 @@ describe("getPricingForModel — uncatalogued models are never free", () => {
   });
 });
 
-describe("getPricingForModel — DEFAULT_UNKNOWN_MODEL_PRICE constant (F-02a)", () => {
+describe("getPricingForModel — DEFAULT_UNKNOWN_MODEL_PRICE constant", () => {
   // Stub fetch to a benign empty catalog so the fire-and-forget catalog load
   // triggered by getPricingForModel is a no-op (deterministic, no network).
   // Once the prior block's fetch stub no longer leaks in (after the
@@ -95,7 +95,7 @@ describe("getPricingForModel — DEFAULT_UNKNOWN_MODEL_PRICE constant (F-02a)", 
   });
 });
 
-describe("refreshPricingFromCatalog — COWORK_MODEL_CATALOG_URL override (F-02b)", () => {
+describe("refreshPricingFromCatalog — COWORK_MODEL_CATALOG_URL override", () => {
   const ORIGINAL = process.env.COWORK_MODEL_CATALOG_URL;
   afterEach(() => {
     if (ORIGINAL === undefined) delete process.env.COWORK_MODEL_CATALOG_URL;
