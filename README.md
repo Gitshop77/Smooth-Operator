@@ -5,7 +5,7 @@
 <br/>
 
 <p align="center">
-  <img src="assets/terminal.svg" alt="Animated terminal showing: git clone, cd, npm install, and npm run build:all completing successfully" />
+  <img src="assets/terminal.svg" alt="Animated terminal showing: git clone, cd, npm ci, and npm run build:all completing successfully" />
 </p>
 
 ---
@@ -51,7 +51,14 @@ It works across all your open tabs and shows a live activity log while it runs. 
 
 ## Getting started
 
-You'll need [Node.js](https://nodejs.org/) 22+ and Chrome 116+. Open Cowork ships as source — you build it locally and load it as an unpacked extension.
+You'll need [Node.js](https://nodejs.org/) **22.23.2** (which bundles npm
+**10.9.8**) and a Chromium browser that can load unpacked MV3 extensions.
+The repository's `.nvmrc`, `package.json`, and verifier enforce that exact
+Node/npm pair. Chrome's manifest floor is 116, but the only tested browser is
+Chrome for Testing 151.0.7922.77 on ARM; Brave and Edge are unverified and
+unsupported. See the [browser support matrix](docs/redesign/BROWSER_SUPPORT_MATRIX.md).
+Open Cowork ships as source — you build it locally and load it as an unpacked
+extension.
 
 **1. Build it**
 
@@ -59,7 +66,9 @@ You'll need [Node.js](https://nodejs.org/) 22+ and Chrome 116+. Open Cowork ship
 git clone https://github.com/Gitshop77/open-cowork-chrome-extension.git
 cd open-cowork-chrome-extension
 
-npm install
+nvm install 22.23.2
+nvm use 22.23.2
+npm ci
 
 npm run build:all      # builds the extension
 ```
@@ -385,7 +394,7 @@ Other code-level backstops: a fail-closed domain list blocks navigation to attac
 > `evaluate` and custom tools run JavaScript through `new Function()` inside the page's isolated world. The secret store deliberately doesn't live there — it's kept in the service worker's `chrome.storage.session`, which MV3 keeps unreachable from content-script scope. Before any code runs, three gates apply: the mode must be Full Agentic, the target domain must pass a fail-closed allow list, and the code runs with `chrome`, `window`, `globalThis`, `self`, `Function`, and `eval` stubbed out to throw or deny. This sandbox is a second layer of defense, not a hard wall — known ways exist to escape it from untrusted pages. Use Full Agentic only on sites you trust, set a strict allowed-domain list, and rotate your API key if you suspect a Full Agentic run was compromised.
 
 > [!NOTE]
-> The manifest declares `host_permissions: ["http://*/*", "https://*/*"]` (deliberately NOT `file://` or `ftp://`) plus `debugger`, `scripting`, `webRequest`, and `dns` permissions. A supply-chain compromise (malicious update, compromised build artifact, or a third-party dependency that gains service-worker execution) would have access to every http(s) origin. This is inherent to the browser-automation model. The domain allow/block list and mode gating limit what the agent does at runtime, but cannot prevent a compromised extension from using its manifest permissions directly. See [PERMISSIONS.md](PERMISSIONS.md) for the full list.
+> The manifest declares `host_permissions: ["http://*/*", "https://*/*"]` (deliberately NOT `file://` or `ftp://`) plus `debugger`, `scripting`, and `webRequest` permissions. A supply-chain compromise (malicious update, compromised build artifact, or a third-party dependency that gains service-worker execution) would have access to every http(s) origin. This is inherent to the browser-automation model. The domain allow/block list and mode gating limit what the agent does at runtime, but cannot prevent a compromised extension from using its manifest permissions directly. Stable packaged browsers do not expose Chrome's Dev-channel-only `chrome.dns` API, so the package does not request or claim it; see [PERMISSIONS.md](PERMISSIONS.md) for the full permission and DNS capability boundary.
 
 ### How keys and secrets are stored
 
@@ -422,16 +431,26 @@ Privacy questions: **security@opencowork.dev**.
 
 ### Prerequisites
 
-- Node.js 22+
-- npm
-- Chrome 116+ (to load the extension)
+- Node.js **22.23.2** and npm **10.9.8** (use `.nvmrc` with `nvm install` / `nvm use`)
+- A browser that can load unpacked MV3 extensions. See the [browser support matrix](docs/redesign/BROWSER_SUPPORT_MATRIX.md) for the sole tested Chrome build and the unverified Brave/Edge status.
 
 ### Build from source
 
 ```bash
-npm install
+npm ci
 npm run build:all
 ```
+
+`npm ci` is the canonical dependency install: it fails if the exact committed
+lock cannot be installed. Before a release or CI-equivalent validation, run:
+
+```bash
+npm run verify:baseline
+```
+
+The verifier requires the exact Node/npm pair, performs its own clean install,
+and checks tests, the package, two isolated rebuilds, dependency provenance,
+licenses, secret shapes, and the diff.
 
 Then load `chrome-extension/` through `chrome://extensions` as described above.
 
@@ -461,9 +480,15 @@ npx tsc --noEmit                                # Type-check (no npm script — 
 npm run test                                     # Vitest suite at the root
 npm run test:watch                               # Vitest, watch mode
 npm run test:coverage                            # Vitest with coverage gate
+npm run test:budget                              # Full-suite duration budget gate
+npm run test:flake                               # 3× repeated flake-prone suite runs
+npm run test:mutation                            # Critical-control mutation verification
+npm run verify:baseline:installed                # Clean-install reproducibility verifier
 ```
 
 Coverage thresholds are pinned in `vitest.config.ts` with per-glob overrides for security-critical modules (`ssrf-ipv6.ts`, `ssrf-validate.ts`, `ssrf-dns.ts`, `security-injection.ts`, `auth.ts`, `endpoint.ts`, `anti-bot.ts`, `anti-detection.ts`). A PR that drops coverage below the baseline fails CI. If you see a coverage failure, check `vitest.config.ts` for the current thresholds — they are ratcheted upward over time, never downward.
+
+The Phase 15/16 gates are wired into CI: `test:budget` fails if the full suite exceeds its duration budget; `test:flake` runs the timer/async/mock suites three times with `--retry=2`; `test:mutation` weakens each critical control (cancellation, budget enforcement, credential redaction, SSRF, stale-element guard, run-store status, settings save summary) and fails if any mutation goes uncaught by the suite.
 
 ### Project layout
 
@@ -473,23 +498,25 @@ src/extension/            Chrome extension (bundled into chrome-extension/)
   background/             Service worker: agent loop, routing, state, tabs
   sidepanel/               Side panel UI, log, takeover, ask-human
   options/                 Settings: providers, secrets, skills, tools, and more
+    stores/                Reducer-style frontend stores + typed command acks
   vision-assistant/        On-device vision model (WebGPU)
 src/lib/agent/             The agent engine, independent of the browser
   llm/                     Provider layer: route, protocol, provider
-  loop/                    Planner and Navigator
-  tools/                   32 actions, executor, registry
+  loop/                    Planner and Navigator + run-phase state machine
+  prompts/                 Versioned V1 prompt compiler + token budgets
+  tools/                   61 canonical actions, executor, registry
   dom/                     Reading and marking the page
   security.ts              Injection defense and domain rules
 chrome-extension/          Build output (gitignored, regenerated on build)
 tests/                     Vitest suite
-scripts/                   Icon generation
+scripts/                   Icon generation, verifier, budget/flake/mutation gates
 ```
 
 ### Continuous integration
 
-`.github/workflows/ci.yml` runs two jobs (the test job on Node 22):
+`.github/workflows/ci.yml` runs two jobs (the test job pins Node 22.23.2 and npm 10.9.8):
 
-- **test** — install, lint, type-check, run the coverage suite, confirm the extension builds cleanly, and audit dependencies.
+- **test** — runs `npm run verify:baseline`: clean install, lint, type-check, coverage, exact package/rebuild verification, and audit/signature checks, followed by the Phase 15 gates: `test:budget` (full-suite duration budget), `test:flake` (3× repeated flake-prone runs), and `test:mutation` (critical-control mutation verification).
 - **secret-scan** — a full-history secret scan that fails the build if a real secret is committed.
 
 `.github/workflows/dependency-review.yml` blocks PRs that introduce dependencies with moderate+ vulnerability advisories or disallowed licenses (GPL-3.0, AGPL-3.0).
@@ -499,8 +526,8 @@ scripts/                   Icon generation
 ## Technology
 
 - TypeScript 5, strict mode
-- Node.js 22, npm
-- Chrome 116+
+- Node.js 22.23.2, npm 10.9.8
+- Manifest install floor: Chrome 116; tested browser evidence: Chrome for Testing 151.0.7922.77 ARM only (Brave and Edge unverified/unsupported)
 - esbuild (ESM for the service worker, IIFE for content/content-main/sidepanel/options; no code splitting — MV3 SW blocks native `import()`)
 - `chrome.storage.local` / `chrome.storage.session` for extension storage
 - Zod 4 for validation
@@ -510,7 +537,7 @@ scripts/                   Icon generation
 
 1. Fork the repo and create a feature branch.
 2. Add tests with your change, and keep each pull request focused on one thing.
-3. Run `npm run lint` and `npm run test` before opening the PR.
+3. Run `npm run verify:baseline` under Node 22.23.2/npm 10.9.8 before opening the PR.
 4. Open a pull request explaining what changed and why.
 
 Don't commit secrets or build output — `.env*`, `db/`, `chrome-extension/` (the whole build output directory), `node_modules/`, and `.next/` are gitignored. `chrome-extension/` assets and license files are regenerated by `npm run build:extension`.
@@ -525,3 +552,28 @@ Don't commit secrets or build output — `.env*`, `db/`, `chrome-extension/` (th
 [MIT](LICENSE), Copyright 2026 Open Cowork Contributors.
 
 The shipped extension also includes Apache-2.0 licensed code (`@huggingface/transformers`, used by the Local Vision Assistant). See `NOTICE` and `LICENSE-APACHE` inside `chrome-extension/`.
+
+## Release and rollback
+
+A release candidate must pass the full reproducibility gate before shipping:
+
+```bash
+npm run lint && npx tsc --noEmit          # static gates
+npx vitest run --coverage                  # full suite + coverage thresholds
+npm run test:budget && npm run test:flake && npm run test:mutation   # Phase 15 gates
+npm run verify:baseline:installed          # clean-install reproducibility + delta chain + ledger closure
+npm run build:extension                    # produce the exact chrome-extension/ artifact
+```
+
+The verifier pins: the sealed per-phase delta chain (PHASE2..PHASE19), the
+file-disposition ledger (zero Unreviewed rows — Phase 19 gate), the manifest
+permissions/CSP contract, the packaged artifact inventory, and the
+dependency audit. Rollback: a previously verified `chrome-extension/`
+artifact (or the last compatible git tag) is a drop-in replacement; every
+phase migration is reversible per `docs/redesign/MIGRATION_ROLLBACK_REGISTER.md`.
+
+Browser-real lanes that require a Chrome host (packaged E2E, screenshots,
+keyboard/screen-reader walks, alarm/webhook timing, vision download) run via
+`E2E_CHROME=1 npx vitest run tests/e2e-chrome.test.ts` and are documented as
+explicit pre-release residuals in `docs/redesign/PHASE_EVIDENCE.md`; they are
+never silently claimed.

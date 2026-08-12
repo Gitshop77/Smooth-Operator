@@ -24,7 +24,10 @@
  * double-register.
  */
 
-import type { ConsoleLogEntry, NetworkLogEntry } from "./message-types";
+import type { AgentAction } from "@/lib/agent/types";
+import type { ConsoleLogEntry, NetworkLogEntry, PrivilegedDispatchToken } from "./message-types";
+import { authorizeRunScopedDispatch } from "./run-dispatch-authorization";
+import { consumeEffectCapability } from "./privileged-action-policy";
 
 /** HTTP statuses that represent a network-layer throttle / back-off signal. */
 const RATE_LIMIT_STATUSES: ReadonlySet<number> = new Set<number>([429, 503]);
@@ -36,6 +39,28 @@ const RATE_LIMIT_TTL_MS = 30_000;
 const recentByTab = new Map<number, number>();
 
 let registered = false;
+
+const NETWORK_LOG_ACTIONS = {
+  enable: { type: "enable_network_log" },
+  disable: { type: "disable_network_log" },
+  get: { type: "get_network_log" },
+  clear: { type: "clear_network_log" },
+  getclear: { type: "getclear_network_log" },
+} as const satisfies Record<string, AgentAction>;
+
+const CONSOLE_LOG_ACTIONS = {
+  enable: { type: "enable_console_log" },
+  disable: { type: "disable_console_log" },
+  get: { type: "get_console_log" },
+  clear: { type: "clear_console_log" },
+  getclear: { type: "getclear_console_log" },
+} as const satisfies Record<string, AgentAction>;
+
+function canonicalLogAction(type: "NETWORK_LOG" | "CONSOLE_LOG", verb: unknown): AgentAction | null {
+  if (typeof verb !== "string") return null;
+  const actions = type === "NETWORK_LOG" ? NETWORK_LOG_ACTIONS : CONSOLE_LOG_ACTIONS;
+  return actions[verb as keyof typeof actions] ?? null;
+}
 
 // ─── Network log (agent-facing ring buffer) ─────────────────────────────────
 
@@ -147,13 +172,37 @@ export function registerRateLimitListener(): void {
   if (chrome.runtime?.onMessage) {
     chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (sender.id !== chrome.runtime.id) return false;
-      const m = msg as { type?: string; verb?: string; entry?: ConsoleLogEntry } | null;
-      if (m?.type === "CONSOLE_LOG_ENTRY") {
+      const m = msg as {
+        type?: string;
+        verb?: string;
+        entry?: ConsoleLogEntry;
+        token?: PrivilegedDispatchToken;
+        effectCapability?: string;
+      } | null;
+      if (!m) return false;
+      if (m.type === "CONSOLE_LOG_ENTRY") {
         if (consoleLogEnabled) pushConsoleLogEntry(m.entry as ConsoleLogEntry);
         return false; // fire-and-forget push, no response
       }
-      if (m?.type !== "NETWORK_LOG" && m?.type !== "CONSOLE_LOG") return false;
-      if (m.type === "CONSOLE_LOG") {
+      const logType = m.type;
+      if (logType !== "NETWORK_LOG" && logType !== "CONSOLE_LOG") return false;
+      // Ring-log commands mutate/read run-scoped diagnostic state. A delayed
+      // command from a predecessor must not affect or observe its successor.
+      void authorizeRunScopedDispatch(m.token).then((authorization) => {
+        if (!authorization.ok) {
+          sendResponse({ ok: false, error: authorization.error });
+          return;
+        }
+        const action = canonicalLogAction(logType, m.verb);
+        if (!action) {
+          sendResponse({ ok: false, error: `unknown ${logType === "CONSOLE_LOG" ? "console" : "network"} log verb: ${String(m.verb)}` });
+          return;
+        }
+        if (!consumeEffectCapability(m.effectCapability, m.token!, action)) {
+          sendResponse({ ok: false, error: "BLOCKED: missing or invalid action effect capability" });
+          return;
+        }
+        if (m.type === "CONSOLE_LOG") {
         switch (m.verb) {
           case "enable":
             enableConsoleLog();
@@ -180,9 +229,9 @@ export function registerRateLimitListener(): void {
           default:
             sendResponse({ ok: false, error: `unknown console log verb: ${String(m.verb)}` });
         }
-        return false; // synchronous response
-      }
-      switch (m.verb) {
+        return;
+        }
+        switch (m.verb) {
         case "enable":
           enableNetworkLog();
           sendResponse({ ok: true, message: "network log enabled" });
@@ -207,8 +256,9 @@ export function registerRateLimitListener(): void {
         }
         default:
           sendResponse({ ok: false, error: `unknown network log verb: ${String(m?.verb)}` });
-      }
-      return false; // synchronous response
+        }
+      });
+      return true;
     });
   }
   if (!chrome.webRequest?.onCompleted) return;

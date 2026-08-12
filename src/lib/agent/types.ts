@@ -71,6 +71,16 @@ export interface BrowserState {
   viewportHeight: number;
   /** Map of index -> opaque element handle (HTMLElement in content script). */
   selectorMap: Record<number, unknown>;
+  /**
+   * Per-index element identity fingerprint captured at extraction time
+   * (`elementIdentity(el)` in `dom/extraction/element-info.ts`). The executor
+   * re-verifies a live element against this before acting (stale-element
+   * guard) — a node replaced or re-ordered since the observation snapshot
+   * fail-closes with a "re-extract state" failure instead of being operated
+   * on. Optional so non-extension/in-page contexts (which never capture
+   * identities) keep the `isConnected`-only guard.
+   */
+  elementIdentities?: Record<number, string>;
   /** Optional screenshot (base64 data URL) for vision-capable models. */
   screenshot?: string;
   /** Optional AX tree (semantic accessibility tree) for vision/semantic models. */
@@ -359,6 +369,25 @@ export interface AgentConfig {
  * evaluator config may be stale or overly strict).
  */
   expectedOutcomes?: ExpectedOutcomes;
+  /**
+   * Phase 9 — measured simple-task fast path. When `true`, the orchestrator
+   * attempts a DETERMINISTIC pre-check (current-page title / URL metadata
+   * question) before the initial planner call; a matching read-only task
+   * completes on direct evidence without the initial planner LLM call and
+   * without a screenshot. Conservative default: `false` (off until
+   * measurement justifies enabling it). Never applies in `full_agentic`
+   * mode — safety modes are never silently downgraded.
+   */
+  enableFastPath?: boolean;
+  /**
+   * Optional model context-window size (tokens) known by the caller (e.g. from
+   * the provider/catalog). When set, the prompt-budget layer derives the
+   * effective `maxInputTokens` from THIS context instead of the fixed 128k
+   * profiles, so a 32k/64k-context model never receives an over-context
+   * prompt (fail-closed: the compiled prompt is rejected when it can't fit).
+   * Omitted → the fixed per-kind profiles apply.
+   */
+  contextTokens?: number;
 }
 
 /**

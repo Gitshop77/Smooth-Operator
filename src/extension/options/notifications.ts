@@ -10,6 +10,7 @@ import { $ } from "@/extension/shared";
 import { STORAGE_KEYS } from "./storage-keys";
 import { showSaved } from "./settings-sync-utils";
 import { resolveAndValidateWebhookUrl } from "@/lib/agent/llm/route/ssrf";
+import { clampWebhookUrl, MAX_WEBHOOK_URL_LENGTH } from "@/lib/agent/retention";
 import { alertModal } from "./modal";
 
 // `resolveAndValidateWebhookUrl` applies the same DNS-resolving SSRF guard the
@@ -116,6 +117,14 @@ document.getElementById("webhookUrl")?.addEventListener("change", async (e) => {
  // regardless of future consumers.
   const field = e.target as HTMLInputElement;
   const value = field.value.trim();
+  if (value.length > MAX_WEBHOOK_URL_LENGTH) {
+    void alertModal({
+      title: "Webhook URL too long",
+      message: `The webhook URL must be ${MAX_WEBHOOK_URL_LENGTH} characters or fewer; it was not saved.`,
+    });
+    field.value = lastKnownGoodWebhookUrl;
+    return;
+  }
   if (value !== "" && !(await resolveAndValidateWebhookUrl(value)).ok) {
     void alertModal({
       title: "Invalid webhook URL",
@@ -129,8 +138,10 @@ document.getElementById("webhookUrl")?.addEventListener("change", async (e) => {
     field.value = lastKnownGoodWebhookUrl;
     return;
   }
+ // Retention bound applied before persistence (defense-in-depth on top of the
+ // length pre-check above): a stored value can never exceed the cap.
  // The last-known-good cache is updated only after a successful persist
  // (see persist()'s success branch), so a failed write reverts the field
  // to the genuinely last-good URL rather than the unsaved one.
-  persist(STORAGE_KEYS.webhookUrl, value);
+  persist(STORAGE_KEYS.webhookUrl, clampWebhookUrl(value));
 });

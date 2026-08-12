@@ -178,7 +178,7 @@ describe("action execution behavior", () => {
       const result = await executeAction(action, makeState());
       expect(result.success).toBe(true);
       expect(result.message).toContain("Screenshot saved");
-      expect(sendMessage).toHaveBeenCalledWith({ type: "SCREENSHOT", fileName: undefined });
+      expect(sendMessage).toHaveBeenCalledWith({ type: "SCREENSHOT", fileName: undefined, action });
     } finally {
       delete (globalThis as Record<string, unknown>).chrome;
     }
@@ -208,7 +208,7 @@ describe("action execution behavior", () => {
       const result = await executeAction(action, makeState());
       expect(result.success).toBe(true);
       expect(result.message).toContain("PDF saved");
-      expect(sendMessage).toHaveBeenCalledWith({ type: "SAVE_AS_PDF", fileName: undefined });
+      expect(sendMessage).toHaveBeenCalledWith({ type: "SAVE_AS_PDF", fileName: undefined, action });
     } finally {
       delete (globalThis as Record<string, unknown>).chrome;
     }
@@ -225,7 +225,7 @@ describe("action execution behavior", () => {
       const action = { type: "save_as_pdf", file_name: "report.png" } as AgentAction;
       const result = await executeAction(action, makeState());
       expect(result.success).toBe(true);
-      expect(sendMessage).toHaveBeenCalledWith({ type: "SAVE_AS_PDF", fileName: "report.pdf" });
+      expect(sendMessage).toHaveBeenCalledWith({ type: "SAVE_AS_PDF", fileName: "report.pdf", action });
     } finally {
       delete (globalThis as Record<string, unknown>).chrome;
     }
@@ -240,7 +240,7 @@ describe("action execution behavior", () => {
       const action = { type: "save_as_pdf", file_name: "report" } as AgentAction;
       const result = await executeAction(action, makeState());
       expect(result.success).toBe(true);
-      expect(sendMessage).toHaveBeenCalledWith({ type: "SAVE_AS_PDF", fileName: "report.pdf" });
+      expect(sendMessage).toHaveBeenCalledWith({ type: "SAVE_AS_PDF", fileName: "report.pdf", action });
     } finally {
       delete (globalThis as Record<string, unknown>).chrome;
     }

@@ -15,6 +15,7 @@
 
 import { takeoverBanner, takeoverReason, resumeBtn } from "./elements";
 import { addSystemMessage } from "./chat-renderer";
+import { redactKeyLeak } from "@/extension/shared";
 
 // The persistent takeover banner is an alert region for urgent events.
 takeoverBanner?.setAttribute("role", "alert");
@@ -36,9 +37,12 @@ let activeFinish: ((value: unknown) => void) | null = null;
  * Show the takeover banner with the given reason.
  */
 export function showTakeoverBanner(reason: string): void {
-  lastTakeoverReason = reason;
+  // The banner is an assertive live region rendering agent-sourced strings
+  // that can embed provider keys — mask before they reach the DOM.
+  const safeReason = redactKeyLeak(reason);
+  lastTakeoverReason = safeReason;
   if (!takeoverBanner || !takeoverReason) return;
-  takeoverReason.textContent = reason;
+  takeoverReason.textContent = safeReason;
   takeoverBanner.hidden = false;
   if (resumeBtn) {
     resumeBtn.disabled = false;
@@ -69,6 +73,11 @@ function removeActiveOverlay(): void {
     activeDialogOverlay.remove();
     activeDialogOverlay = null;
   }
+}
+
+/** Cancel only the transient prompt; keep any independent takeover banner. */
+export function dismissActiveDialog(): void {
+  removeActiveOverlay();
 }
 
 // The Resume button sends a RESUME message to the background.
@@ -115,7 +124,9 @@ function buildDialogOverlay(message: string, okLabel: string) {
 
   const label = document.createElement("label");
   label.id = labelId;
-  label.textContent = message;
+  // The prompt message is agent-sourced and rendered into the ARIA-labelled
+  // dialog — mask credential-shaped text before it reaches the DOM.
+  label.textContent = redactKeyLeak(message);
 
   const btnRow = document.createElement("div");
   btnRow.className = "btn-row";

@@ -42,6 +42,37 @@ const MAX_NAV_SCREENSHOT_CHARS = 1_500_000;
 /** Hard char cap for the accessibility tree, a second large per-step payload. */
 const MAX_NAV_AXTREE_CHARS = 200_000;
 
+function abortError(signal?: AbortSignal): DOMException {
+  return signal?.reason instanceof DOMException
+    ? signal.reason
+    : new DOMException("Aborted", "AbortError");
+}
+
+/**
+ * LoopDeps are extension adapters and can include platform work that cannot be
+ * actively cancelled. Race them with the root signal so a non-cooperating
+ * adapter cannot delay the run's cancellation barrier.
+ */
+function awaitAbortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(abortError(signal));
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => finish(() => reject(abortError(signal)));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    );
+  });
+}
+
 /**
  * Prepare the navigator request for the current step: optionally run the
  * HTML-summarizer pre-pass, build the AgentStepRequest, and append the
@@ -167,14 +198,19 @@ export function appendPostObserveNudges(
  */
 export async function runChallengeDetection(
   state: LoopState
-): Promise<{ challenge: { kind: string; message: string } | null; timedOut: boolean }> {
+): Promise<{ challenge: { kind: string; message: string } | null; timedOut: boolean; aborted: boolean }> {
+  if (state.signal?.aborted) return { challenge: null, timedOut: false, aborted: true };
   if (!state.deps.detectChallenge) {
-    return { challenge: null, timedOut: false };
+    return { challenge: null, timedOut: false, aborted: false };
   }
   try {
-    const challenge = await state.deps.detectChallenge();
+    const challenge = await awaitAbortable(
+      state.deps.detectChallenge(state.signal),
+      state.signal,
+    );
+    if (state.signal?.aborted) return { challenge: null, timedOut: false, aborted: true };
     if (!challenge) {
-      return { challenge: null, timedOut: false };
+      return { challenge: null, timedOut: false, aborted: false };
     }
     state.onEvent({
       type: "challenge_detected", step: state.step,
@@ -187,19 +223,24 @@ export async function runChallengeDetection(
     let resolved = false;
     if (state.deps.waitForChallengeResolution) {
       try {
-        resolved = await state.deps.waitForChallengeResolution();
+        resolved = await awaitAbortable(
+          state.deps.waitForChallengeResolution(state.signal),
+          state.signal,
+        );
       } catch {
         resolved = false;
       }
     }
-    return { challenge, timedOut: !resolved };
+    if (state.signal?.aborted) return { challenge: null, timedOut: false, aborted: true };
+    return { challenge, timedOut: !resolved, aborted: false };
   } catch (e) {
+    if (state.signal?.aborted) return { challenge: null, timedOut: false, aborted: true };
     state.onEvent({
       type: "error", step: state.step,
       message: `detectChallenge failed: ${e instanceof Error ? e.message : String(e)}`,
       recoverable: true,
     });
-    return { challenge: null, timedOut: false };
+    return { challenge: null, timedOut: false, aborted: false };
   }
 }
 

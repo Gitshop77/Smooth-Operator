@@ -12,12 +12,25 @@ type EvaluatorResult = {
   reasons: string[];
 };
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException("Aborted", "AbortError");
+}
+
+function isAbort(error: unknown, signal?: AbortSignal): boolean {
+  void error;
+  return signal?.aborted === true;
+}
+
 export async function runDeterministicEvaluators(
   deps: LoopDeps,
   config: AgentConfig,
   agentText: string,
   state: LoopState,
 ): Promise<EvaluatorResult | null> {
+  throwIfAborted(state.signal);
   const eo = config.expectedOutcomes;
   if (!eo) return null;
   const kinds: EvaluatorKind[] = [];
@@ -40,8 +53,10 @@ export async function runDeterministicEvaluators(
   if (eo.url) {
     let url: string;
     try {
-      url = deps.getCurrentUrl ? await deps.getCurrentUrl() : (state.lastObservedUrl ?? "");
-    } catch {
+      url = deps.getCurrentUrl ? await deps.getCurrentUrl(state.signal) : (state.lastObservedUrl ?? "");
+      throwIfAborted(state.signal);
+    } catch (error) {
+      if (isAbort(error, state.signal)) throw error;
       url = state.lastObservedUrl ?? "";
     }
     input.url = {
@@ -54,8 +69,11 @@ export async function runDeterministicEvaluators(
     let pageHtml = "";
     if (deps.getPageHtml) {
       try {
-        pageHtml = await deps.getPageHtml();
-      } catch {
+        throwIfAborted(state.signal);
+        pageHtml = await deps.getPageHtml(state.signal);
+        throwIfAborted(state.signal);
+      } catch (error) {
+        if (isAbort(error, state.signal)) throw error;
         pageHtml = "";
       }
     }
@@ -68,7 +86,9 @@ export async function runDeterministicEvaluators(
     };
   }
 
+  throwIfAborted(state.signal);
   const result = await comb.evaluate(input);
+  throwIfAborted(state.signal);
   return {
     score: result.score,
     reasons: result.reasons,

@@ -6,6 +6,13 @@
  */
 
 import type { IncomingMessage } from "./message-types";
+import { authorizeRunScopedDispatch } from "./run-dispatch-authorization";
+import { consumeEffectCapability } from "./privileged-action-policy";
+import {
+  handleHumanInteractCancel,
+  handleHumanInteractRequest,
+  handleHumanInteractResponse,
+} from "./human-interaction-handler";
 import {
   handleRun,
   handleStop,
@@ -17,45 +24,17 @@ import {
   handleClearVisionCache,
   handleTabAction,
   handleDetectVisual,
+  handleAuthorizeActionEffect,
 } from "./message-handlers";
+import { handleScheduledTaskCommand } from "./scheduled-task-command";
+import { handleHistoryCommand } from "./history-command";
+import { sanitizeDownloadName } from "./download-name";
+import { handleOptionsPlatformCommand } from "./options-platform-command";
 
 export { isPrivilegedSender } from "./message-handlers";
+export { sanitizeDownloadName, truncateFilename } from "./download-name";
 
 // ─── Helpers (re-exported for tests) ────────────────────────────────────────
-
-/**
- * Truncate a filename to `maxLen` chars WITHOUT cutting off the file
- * extension. The original `slice(0, 120)` could split the extension — e.g.
- * `"super-long-report.pdf"` → `"super-long-report.pd"` — which on some OSes
- * makes the file unopenable or associates it with the wrong app. This helper
- * detects a trailing `.ext` (1–5 alphanumerics) and re-appends it after
- * truncating the base name. If there's no extension (or the extension itself
- * is longer than `maxLen`), falls back to a plain slice.
- */
-export function truncateFilename(name: string, maxLen = 120): string {
-  if (name.length <= maxLen) return name;
-  const extMatch = name.match(/\.([a-z0-9]{1,5})$/i);
-  if (!extMatch) return name.slice(0, maxLen);
-  const ext = extMatch[0]; // includes the leading dot, e.g. ".pdf"
-  const baseMax = maxLen - ext.length;
-  if (baseMax <= 0) {
-    return ext.slice(0, maxLen);
-  }
-  return name.slice(0, baseMax) + ext;
-}
-
-/**
- * Sanitize a resolved download filename before handing it to
- * `chrome.downloads.download`. Strips any non-path-safe character (turning
- * `/` and `\` into `_`) and collapses runs of two-or-more dots so a crafted
- * `fileName` can't be misinterpreted as a parent-directory traversal by the
- * downloads API, then caps length via `truncateFilename` while preserving the
- * extension.
- */
-export function sanitizeDownloadName(rawName: string): string {
-  const baseName = rawName.replace(/[^\p{L}\p{N}._-]+/gu, "_").replace(/\.{2,}/g, "_");
-  return truncateFilename(baseName, 120);
-}
 
 // ─── Download capture ───────────────────────────────────────────────────────
 
@@ -145,6 +124,27 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
   if (msg?.type === "STATUS") {
     return handleStatus(sendResponse);
   }
+  if (msg?.type === "OPTIONS_PLATFORM_COMMAND") {
+    return handleOptionsPlatformCommand(msg, sender, sendResponse);
+  }
+  if (msg?.type === "SCHEDULED_TASK_COMMAND") {
+    return handleScheduledTaskCommand(msg, sender, sendResponse);
+  }
+  if (msg?.type === "HISTORY_COMMAND") {
+    return handleHistoryCommand(msg, sender, sendResponse);
+  }
+  if (msg?.type === "AUTHORIZE_ACTION_EFFECT") {
+    return handleAuthorizeActionEffect(msg, sender, sendResponse);
+  }
+  if (msg?.type === "HUMAN_INTERACT_REQUEST") {
+    return handleHumanInteractRequest(msg, sender, sendResponse);
+  }
+  if (msg?.type === "HUMAN_INTERACT_RESPONSE") {
+    return handleHumanInteractResponse(msg, sender, sendResponse);
+  }
+  if (msg?.type === "HUMAN_INTERACT_CANCEL") {
+    return handleHumanInteractCancel(msg, sender, sendResponse);
+  }
   if (msg?.type === "CDP_CLICK") {
     return handleCdpClick(msg, sender, sendResponse);
   }
@@ -158,19 +158,30 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
     return handleScreenshot(msg, sender, sendResponse);
   }
   if (msg?.type === "CLEAR_VISION_CACHE") {
-    return handleClearVisionCache(sendResponse);
+    return handleClearVisionCache(msg, sender, sendResponse);
   }
   if (msg?.type === "TAB_ACTION") {
-    // list_downloads is answered straight from the capture ring — it needs no
-    // active run and no tab-manager delegation.
+    // list_downloads is answered straight from the capture ring rather than
+    // tab-manager, but it remains an agent action: consume its exact, one-time
+    // capability before exposing the run-scoped diagnostic data.
     if (msg.action?.type === "list_downloads") {
-      sendResponse({
-        ok: true,
-        success: true,
-        message: "downloads captured",
-        downloads: getCapturedDownloads(),
+      void authorizeRunScopedDispatch(msg.token).then((authorization) => {
+        if (!authorization.ok) {
+          sendResponse({ ok: false, error: authorization.error });
+          return;
+        }
+        if (!consumeEffectCapability(msg.effectCapability, msg.token!, msg.action)) {
+          sendResponse({ ok: false, error: "BLOCKED: missing or invalid action effect capability" });
+          return;
+        }
+        sendResponse({
+          ok: true,
+          success: true,
+          message: "downloads captured",
+          downloads: getCapturedDownloads(),
+        });
       });
-      return false;
+      return true;
     }
     return handleTabAction(msg, sender, sendResponse);
   }

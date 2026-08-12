@@ -13,16 +13,23 @@
  * No server, no env vars. The extension is fully self-contained.
  */
 
-import type { LLMProvider, LLMRequest, ChatMessage } from "../lib/agent/llm/provider";
-import { buildNavigatorPrompt } from "../lib/agent/prompts/navigator-prompt";
-import { buildPlannerPrompt } from "../lib/agent/prompts/planner-prompt";
-import { buildNavigatorUserMessage, buildPlannerUserMessage } from "../lib/agent/loop/messages";
+import type { LLMProvider, LLMRequest, LLMResponse, ChatMessage } from "../lib/agent/llm/provider";
+import {
+  compileNavigatorPromptV1,
+  compilePlannerPromptV1,
+} from "../lib/agent/prompts/prompt-compiler";
+import { assertCompiledPromptWithinProfileV1 } from "../lib/agent/prompts/prompt-token-budget";
 import { AgentOutputSchema, PlannerOutputSchema } from "../lib/agent/tools/schema";
 import { getFormatInstructions } from "../lib/agent/tools/registry";
-import type { AgentStepRequest, PlannerStepRequest } from "../lib/agent/types";
+import type { AgentStepRequest, PlannerStepRequest, TokenUsage } from "../lib/agent/types";
+import { primeLiveSecretRedaction } from "../lib/agent/secrets";
 import { buildProvider, readProviderConfig, resolveModel, type ProviderConfig } from "./provider-config";
 import { CATALOG_PROVIDER_ID_MAP } from "./provider-config-map";
 import { getModelsForProvider } from "../lib/agent/llm/catalog";
+import {
+  LLMTerminalDiagnosticError,
+  type LLMTerminalDiagnostic,
+} from "../lib/agent/llm/route/client";
 import { MAX_ACTIONS, MAX_ELEMENTS_CHARS } from "@/lib/validations";
 import {
   extractUsage,
@@ -47,6 +54,30 @@ let configEpoch = 0;
 
 /** Models already surfaced with an experimental-release warning (once per session). */
 const warnedExperimentalModels = new Set<string>();
+
+/** Race a caller-owned wait without cancelling the shared provider build. */
+export function raceWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    return Promise.reject(signal.reason instanceof Error
+      ? signal.reason
+      : new DOMException("Aborted", "AbortError"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(signal.reason instanceof Error
+        ? signal.reason
+        : new DOMException("Aborted", "AbortError"));
+    };
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    signal.addEventListener("abort", onAbort, { once: true });
+    void promise.then(
+      (value) => { cleanup(); resolve(value); },
+      (error) => { cleanup(); reject(error); },
+    );
+  });
+}
 
 /** Bound the warned-set growth, mirroring the pricing fallback warning. */
 function maybeClearWarnedExperimentalModels(): void {
@@ -239,6 +270,10 @@ async function getProvider(): Promise<LLMProvider> {
       "No LLM provider configured. Open the extension Options page, choose a provider, and enter your API key."
     );
   }
+  // Provider errors are surfaced through live run events. Prime the
+  // synchronous exact-value redactor with the selected key before any route
+  // can construct a non-2xx diagnostic; this cache remains memory-only.
+  await primeLiveSecretRedaction(config.apiKey);
  // Cache key: provider + apiKey + model + baseUrl + resourceName. If any
  // change, rebuild. `resourceName` is included so an Azure resource swap
  // (which changes the constructed endpoint) forces a provider rebuild rather
@@ -306,8 +341,36 @@ interface DirectCallResult {
   tokensOut?: number;
   reasoningTokens?: number;
   cachedInputTokens?: number;
+  cachedWriteInputTokens?: number;
   model?: string;
   costUsd?: number;
+}
+
+/**
+ * Direct agent calls require a visible, parseable completion. The lower route
+ * layer keeps its response-content contract compatible and attaches an additive
+ * diagnosis; this boundary turns that outcome into a typed actionable failure
+ * before the loop can mislabel it as ordinary malformed JSON.
+ */
+function requireDirectVisibleOutput(response: LLMResponse): void {
+  const diagnostic = (response as LLMResponse & {
+    terminalDiagnostic?: LLMTerminalDiagnostic;
+  }).terminalDiagnostic;
+  if (diagnostic) {
+    const error = new LLMTerminalDiagnosticError(diagnostic);
+    error.usage = extractUsage(response);
+    throw error;
+  }
+  if (response.content.trim().length === 0) {
+    const error = new LLMTerminalDiagnosticError({
+      code: "empty_visible_output",
+      protocol: "provider",
+      visibleContentChars: response.content.length,
+      terminalSeen: true,
+    });
+    error.usage = extractUsage(response);
+    throw error;
+  }
 }
 
 /**
@@ -340,7 +403,7 @@ export async function navigatorCallDirect(
  // malicious page) — strip any injected `<screenshot>` markers before render.
   const strippedHistory = stripHistoryScreenshotMarkers(req.history);
 
-  const userMessage = await buildNavigatorUserMessage({
+  const navigatorUser = {
     task: req.task,
     history: strippedHistory,
     currentGoal: req.currentGoal || req.task,
@@ -354,7 +417,7 @@ export async function navigatorCallDirect(
  // pass the loop-warning block (budget/replan/loop nudges, parse-error
  // retry feedback) so the navigator actually sees it.
     loopWarning: req.loopWarning,
-  });
+  };
 
  // load custom navigator prompt override (cached, invalidated on storage change).
  // These reads are independent — fetch them in parallel so a cache miss
@@ -364,10 +427,8 @@ export async function navigatorCallDirect(
     getVisionMode(),
     getAgentMode(),
     resolveReasoningConfig(),
-    getProvider(),
+    raceWithAbort(getProvider(), signal),
   ]);
-  let systemPrompt = buildNavigatorPrompt(MAX_ACTIONS, customNavigatorPrompt, visionMode, agentMode);
-
  // Embed screenshot marker ONLY for vision-capable models. Text-only models
  // would either error (HTTP 400 from the API) or waste tokens processing a
  // giant base64 string they can't interpret. The `provider.supportsVision`
@@ -386,10 +447,6 @@ export async function navigatorCallDirect(
  // step. Eliding an unchanged screenshot would leave the vision model with zero
  // pixels and a note referencing an image it was never shown. The screenshot
  // stays inside the untrusted wrapper exactly as before.
-  const fullUserContent = screenshot
-    ? `${userMessage}\n\n<untrusted_page_data><screenshot>${screenshot}</screenshot></untrusted_page_data>`
-    : userMessage;
-
  // Wire `getFormatInstructions` for providers that don't support structured
  // output natively (Ollama, OpenAI-compatible providers without
  // `response_format`, local models). Without the schema inlined into the
@@ -397,14 +454,27 @@ export async function navigatorCallDirect(
  // prompt examples — inlining the canonical JSON schema (via Zod 4's
  // `z.toJSONSchema`) gives the model a concrete contract to emit. The
  // format-instructions text is short and provider-agnostic.
-  if (!provider.supportsStructuredOutput) {
-    systemPrompt += "\n\n" + getFormatInstructions(AgentOutputSchema);
-  }
-
-  const messages: ChatMessage[] = [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: fullUserContent },
-  ];
+  const compiled = await compileNavigatorPromptV1({
+    maxActions: MAX_ACTIONS,
+    customPrompt: customNavigatorPrompt,
+    visionMode,
+    mode: agentMode,
+    user: navigatorUser,
+    systemSuffix: provider.supportsStructuredOutput
+      ? ""
+      : "\n\n" + getFormatInstructions(AgentOutputSchema),
+    userSuffix: screenshot
+      ? `\n\n<untrusted_page_data><screenshot>${screenshot}</screenshot></untrusted_page_data>`
+      : "",
+  });
+  const messages: ChatMessage[] = compiled.messages;
+  // Phase 8 budget guard: the fully assembled navigator prompt (system + user,
+  // including the injected screenshot marker and format instructions) must fit
+  // the navigator profile's conservative UTF-8-byte input budget before any
+  // tokens are spent. Failing closed here prevents an unbounded DOM/screenshot
+  // payload from ever crossing the network, even if every earlier cap is
+  // misconfigured.
+  assertCompiledPromptWithinProfileV1("navigator", "navigator", messages);
 
   const response = await provider.chat({
     messages,
@@ -412,10 +482,12 @@ export async function navigatorCallDirect(
     ...(reasoningConfig ? { reasoning: reasoningConfig } : {}),
     // Navigator steps reuse this exact system prompt across steps, so a
     // cache write is actually re-read — keep the Anthropic "1h" cache marker.
-    cacheEligible: true,
+    ...(compiled.cache.cacheEligible ? { cacheEligible: compiled.cache.cacheEligible } : {}),
     schema: provider.supportsStructuredOutput ? AgentOutputSchema : undefined,
     ...(signal ? { signal } : {}),
   });
+
+  requireDirectVisibleOutput(response);
 
  // The orchestrator re-parses `raw` itself, so we just return the raw content.
  // Return cachedInputTokens + the provider-bridge's pre-computed costUsd
@@ -439,7 +511,7 @@ export async function plannerCallDirect(
  // malicious page) — strip any injected `<screenshot>` markers before render,
  // mirroring the navigator path's defense against page-injected image attachment.
   const strippedHistory = stripHistoryScreenshotMarkers(req.history);
-  const userMessage = await buildPlannerUserMessage({
+  const plannerUser = {
     task: req.task,
     navigatorHistory: strippedHistory,
     plan: req.plan,
@@ -449,7 +521,7 @@ export async function plannerCallDirect(
     step: req.step,
     maxSteps: req.maxSteps,
     compactedMemory: req.compactedMemory,
-  });
+  };
 
  // load custom planner prompt override (cached, invalidated on storage change).
  // Planner prompt + reasoning config + provider are independent reads — fetch
@@ -457,28 +529,30 @@ export async function plannerCallDirect(
   const [customPlannerPrompt, reasoningConfig, provider] = await Promise.all([
     getCustomPlannerPrompt(),
     resolveReasoningConfig(),
-    getProvider(),
+    raceWithAbort(getProvider(), signal),
   ]);
-  let systemPrompt = buildPlannerPrompt(customPlannerPrompt);
-
  // Wire `getFormatInstructions` for providers without native structured
  // output. Symmetric with the navigator path above — without the JSON schema
  // inlined, non-structured-output providers may emit free-form text that
  // fails the planner parser. Inlining the schema gives the model a concrete
  // contract for the planner's `{thinking, decision, success, ...}` shape.
-  if (!provider.supportsStructuredOutput) {
-    systemPrompt += "\n\n" + getFormatInstructions(PlannerOutputSchema);
-  }
-
-  const messages: ChatMessage[] = [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: userMessage },
-  ];
+  const compiled = await compilePlannerPromptV1({
+    customPrompt: customPlannerPrompt,
+    user: plannerUser,
+    systemSuffix: provider.supportsStructuredOutput
+      ? ""
+      : "\n\n" + getFormatInstructions(PlannerOutputSchema),
+  });
+  const messages: ChatMessage[] = compiled.messages;
+  // Phase 8 budget guard: the assembled planner prompt must fit the planner
+  // profile's conservative UTF-8-byte input budget before tokens are spent.
+  assertCompiledPromptWithinProfileV1("planner", "planner", messages);
 
   const response = await provider.chat({
     messages,
     ...(provider.supportsReasoning ? {} : { temperature: 0 }),
     ...(reasoningConfig ? { reasoning: reasoningConfig } : {}),
+    ...(compiled.cache.cacheEligible ? { cacheEligible: compiled.cache.cacheEligible } : {}),
     // No cacheEligible: planner calls are one-shot, so the anthropic protocol
     // omits cache markers entirely (no cache-write premium for a cache the
     // call never re-reads).
@@ -486,6 +560,55 @@ export async function plannerCallDirect(
     ...(signal ? { signal } : {}),
   });
 
+  requireDirectVisibleOutput(response);
+
  // Return cachedInputTokens + pre-computed costUsd (see navigatorCallDirect).
   return extractUsage(response);
+}
+
+/**
+ * One compaction summarization call — direct call to the LLM provider.
+ *
+ * This is the production path the extension wires for `deps.summarizeCall`, so
+ * compaction's deterministic bounded summarization request (built and bounded
+ * in `runCompaction`) is what actually crosses the network. The combined
+ * system + user prompt is re-asserted against the compaction budget here as
+ * defense-in-depth, mirroring the navigator/planner guards.
+ */
+export async function summarizeCallDirect(
+  req: { systemPrompt: string; userPrompt: string; signal?: AbortSignal },
+): Promise<{ content: string; usage?: TokenUsage }> {
+  const provider = await raceWithAbort(getProvider(), req.signal);
+  assertCompiledPromptWithinProfileV1("compaction", "compaction", [
+    { content: req.systemPrompt },
+    { content: req.userPrompt },
+  ]);
+  const response = await provider.chat({
+    messages: [
+      { role: "system", content: req.systemPrompt },
+      { role: "user", content: req.userPrompt },
+    ],
+    temperature: 0,
+    // Compaction is a one-shot summarization; the compacted result is never
+    // cached by this call, so no cache marker is sent.
+    ...(req.signal ? { signal: req.signal } : {}),
+  });
+  requireDirectVisibleOutput(response);
+  const usage = extractUsage(response);
+  const tokenUsage: TokenUsage | undefined =
+    usage.tokensIn !== undefined && usage.tokensOut !== undefined && usage.model
+      ? {
+          tokensIn: usage.tokensIn,
+          tokensOut: usage.tokensOut,
+          model: usage.model,
+          reasoningTokens: usage.reasoningTokens,
+          cachedInputTokens: usage.cachedInputTokens,
+          cachedWriteInputTokens: usage.cachedWriteInputTokens,
+          costUsd: usage.costUsd,
+        }
+      : undefined;
+  return {
+    content: usage.raw,
+    usage: tokenUsage,
+  };
 }

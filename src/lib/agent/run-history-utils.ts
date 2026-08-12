@@ -1,5 +1,6 @@
 import type { LogEvent } from "./types";
 import type { LogEntry } from "./logging";
+import { isRunTerminalReason, type RunTerminalReason } from "./run-lifecycle-contract";
 import { getSecretSetVersion, redactSecrets } from "./secrets";
 import { redactKeyShapes } from "./key-shape-redact";
 
@@ -13,6 +14,8 @@ export interface RunRecord {
   /** Structured JSON-lines log entries (bounded ring, drained at finish). */
   logs: LogEntry[];
   result: { success: boolean; text: string } | null;
+  /** Additive V1 terminal reason; absent on legacy history records. */
+  terminalReason?: RunTerminalReason;
   totalTokensIn: number;
   totalTokensOut: number;
   totalCostUsd: number;
@@ -24,6 +27,13 @@ export const STORAGE_KEY = "open_cowork_run_history";
 export const MAX_RUNS = 50;
 export const RUN_HISTORY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 export const MAX_STEPS = 2000;
+/** Max serialized size of a single imported run entry (keeps storage quota safe). */
+export const MAX_RUN_ENTRY_BYTES = 2 * 1024 * 1024; // 2 MiB per entry
+/** Cumulative import budget across existing + imported entries (quota-safe). */
+export const CUMULATIVE_IMPORT_BUDGET_BYTES = 4 * 1024 * 1024; // 4 MiB total
+/** chrome.storage.local key holding the monotonic background-owned history
+ *  revision counter (guards concurrent whole-list mutations across contexts). */
+export const HISTORY_REVISION_KEY = "open_cowork_run_history_revision";
 
 export function isValidRunRecord(v: unknown): v is RunRecord {
   if (typeof v !== "object" || v === null) return false;
@@ -36,8 +46,23 @@ export function isValidRunRecord(v: unknown): v is RunRecord {
   );
 }
 
-export function writeLocalStorage(runs: RunRecord[]): void {
+function writeLocalStorage(runs: RunRecord[]): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(runs));
+}
+
+const textEncoder = new TextEncoder();
+
+/**
+ * Real byte measurement of a value's JSON serialization (UTF-8 bytes), matching
+ * chrome.storage quota accounting. `string.length` counts UTF-16 code units and
+ * under-estimates multi-byte text ~2× at budget boundaries.
+ */
+export function serializedByteSize(value: unknown): number {
+  try {
+    return textEncoder.encode(JSON.stringify(value)).byteLength;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
 }
 
 export function writeToLocalStorageWithRetry(runs: RunRecord[]): void {
@@ -67,6 +92,7 @@ export function normalizeRunRecord(r: RunRecord): RunRecord {
     stepCount: r.stepCount ?? 0,
     overflowCount: r.overflowCount ?? 0,
     endedAt: r.endedAt ?? 0,
+    terminalReason: isRunTerminalReason(r.terminalReason) ? r.terminalReason : undefined,
     result:
       r.result &&
       typeof r.result === "object" &&
@@ -84,6 +110,10 @@ function isPlainObject(val: object): val is Record<string, unknown> {
 
 const MAX_REDACT_DEPTH = 6;
 const MAX_REDACT_CACHE_ENTRIES = 1000;
+/** Skip caching strings longer than this — page-derived strings can run to MBs,
+ *  and 1000 large cached values would balloon the SW heap and make redaction
+ *  slower than recompute. */
+export const MAX_REDACT_CACHE_STRING_LENGTH = 1024;
 const redactCache = new Map<string, string>();
 let lastRedactCacheVersion = -1;
 
@@ -105,8 +135,19 @@ export const redactValue = async (val: unknown, depth = 0): Promise<unknown> => 
       redactCache.clear();
       lastRedactCacheVersion = version;
     }
+    // Oversized values are never cached: they are the common no-recompute-hit
+    // case, and caching them would defeat the entry-count bound on VALUE bytes.
+    if (val.length > MAX_REDACT_CACHE_STRING_LENGTH) {
+      return redactString(val);
+    }
     const cached = redactCache.get(val);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) {
+      // True LRU: a hit re-inserts the entry at the newest position so the
+      // entry-count eviction below drops genuinely-oldest entries, not FIFO.
+      redactCache.delete(val);
+      redactCache.set(val, cached);
+      return cached;
+    }
     const result = await redactString(val);
     redactCache.set(val, result);
     if (redactCache.size > MAX_REDACT_CACHE_ENTRIES) {

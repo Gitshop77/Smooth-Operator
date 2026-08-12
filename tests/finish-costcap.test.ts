@@ -23,6 +23,7 @@ function mkTerminalState() {
   const events: unknown[] = [];
   const runEnd = vi.fn(async (result: unknown) => { void result; });
   const state = {
+    phase: "init" as "init" | "plan" | "observe" | "act" | "verify" | "recover" | "terminal",
     step: 0,
     onEvent: (e: unknown) => events.push(e),
     dispatcher: { runEnd },

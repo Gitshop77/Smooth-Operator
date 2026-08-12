@@ -6,7 +6,7 @@
  */
 
 export type { ErrorCategory, ClassifiedError } from "./errors-utils";
-export { classifyError, friendlyErrorMessage, classifyActionError, formatErrorSuffix, MACHINE_CODES, RECOVERY_HINTS } from "./errors-utils";
+export { classifyError, friendlyErrorMessage, classifyActionError, formatErrorSuffix, MACHINE_CODES, RECOVERY_HINTS, isBudgetExceededError } from "./errors-utils";
 
 // ─── Typed error hierarchy ───────────────────────────────────────────────────
 

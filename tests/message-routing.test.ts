@@ -126,6 +126,41 @@ describe("sanitizeDownloadName", () => {
     expect(out.includes("/")).toBe(false);
     expect(out).toContain("résumé-äöü.txt");
   });
+
+  test("strips leading dots so the name is never a hidden file", async () => {
+    const { sanitizeDownloadName } = await import("../src/extension/background/message-routing");
+    expect(sanitizeDownloadName(".secret.txt")).toBe("secret.txt");
+    expect(sanitizeDownloadName("...hidden")).toBe("hidden");
+  });
+
+  test("trims trailing dots and spaces", async () => {
+    const { sanitizeDownloadName } = await import("../src/extension/background/message-routing");
+    expect(sanitizeDownloadName("report.pdf.")).toBe("report.pdf");
+    expect(sanitizeDownloadName("report. ")).toBe("report");
+    // A double-dot run collapses to a single underscore (matches the existing
+    // traversal-collapse contract: no `..` may survive).
+    expect(sanitizeDownloadName("name..")).toBe("name_");
+  });
+
+  test("prefixes NTFS-reserved device names so the downloads API accepts them", async () => {
+    const { sanitizeDownloadName } = await import("../src/extension/background/message-routing");
+    expect(sanitizeDownloadName("CON")).toBe("_CON");
+    expect(sanitizeDownloadName("con.txt")).toBe("_con.txt");
+    expect(sanitizeDownloadName("COM1")).toBe("_COM1");
+    expect(sanitizeDownloadName("LPT9.log")).toBe("_LPT9.log");
+    expect(sanitizeDownloadName("NUL")).toBe("_NUL");
+    // A non-reserved name with the same prefix is untouched.
+    expect(sanitizeDownloadName("concord.pdf")).toBe("concord.pdf");
+  });
+
+  test("drops C0 control characters entirely and falls back to file for empty input", async () => {
+    const { sanitizeDownloadName } = await import("../src/extension/background/message-routing");
+    expect(sanitizeDownloadName("bad\u0000name.txt")).toBe("badname.txt");
+    expect(sanitizeDownloadName("\u0001\u0002\u0003")).toBe("file");
+    expect(sanitizeDownloadName("...")).toBe("file");
+    expect(sanitizeDownloadName("   ")).toBe("file");
+    expect(sanitizeDownloadName("")).toBe("file");
+  });
 });
 
 describe("isPrivilegedSender", () => {

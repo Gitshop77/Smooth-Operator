@@ -74,7 +74,7 @@ export async function handleNavigate(
         const abort = rejectOnAbort(ctx.signal);
         try {
           res = (await Promise.race([
-            chrome.runtime.sendMessage({ type: "TAB_ACTION", action }),
+            chrome.runtime.sendMessage({ type: "TAB_ACTION", action, ...(ctx.dispatchToken ? { token: ctx.dispatchToken } : {}), ...(ctx.effectCapability ? { effectCapability: ctx.effectCapability } : {}) }),
             new Promise<never>((_, reject) => {
               t = setTimeout(() => reject(new Error("TAB_ACTION timeout")), SW_RPC_TIMEOUT_MS);
             }),

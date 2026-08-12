@@ -55,24 +55,101 @@ type DnsOutcome =
   | { kind: "error" }
   | { kind: "unavailable" };
 
+/** DNS callbacks are not cancellable, so never wait forever for one. */
+export const DNS_RESOLVE_TIMEOUT_MS = 5_000;
+
+export interface DnsResolveOptions {
+  /** Root run signal. Aborting rejects promptly even if Chrome DNS is stalled. */
+  signal?: AbortSignal;
+  /** Testable timeout override; clamped to keep the resolver bounded. */
+  timeoutMs?: number;
+}
+
+export type DnsResolverCapability = "available" | "permission-missing" | "api-unavailable";
+
+/**
+ * Report the packaged resolver capability truthfully. `chrome.dns` is a
+ * Dev-channel API: a namespace alone is insufficient unless the current
+ * extension manifest also declares the permission. Non-extension test hosts
+ * have no manifest and may provide an explicit resolver adapter directly.
+ */
+export function dnsResolverCapability(): DnsResolverCapability {
+  const chromeApi = (globalThis as {
+    chrome?: {
+      dns?: { resolve?: unknown };
+      runtime?: { getManifest?: () => { permissions?: string[] } };
+    };
+  }).chrome;
+  if (typeof chromeApi?.dns?.resolve !== "function") return "api-unavailable";
+  if (typeof chromeApi.runtime?.getManifest === "function") {
+    const permissions = chromeApi.runtime.getManifest().permissions;
+    if (!Array.isArray(permissions) || !permissions.includes("dns")) return "permission-missing";
+  }
+  return "available";
+}
+
+function abortError(signal?: AbortSignal): DOMException {
+  return signal?.reason instanceof DOMException
+    ? signal.reason
+    : new DOMException("Aborted", "AbortError");
+}
+
 /**
  * Resolve a hostname to its IP addresses using whatever DNS API is available.
  * Never returns null — it distinguishes "no resolver" from "resolver error".
  */
-export async function dnsResolve(hostname: string): Promise<DnsOutcome> {
-  const dnsResolveFn = (globalThis as { chrome?: { dns?: { resolve?: (h: string, cb: (r: { addresses?: string[] }) => void) => void } } }).chrome?.dns?.resolve;
-  if (dnsResolveFn) {
-    return await new Promise<DnsOutcome>((resolve) => {
+export async function dnsResolve(
+  hostname: string,
+  options: DnsResolveOptions = {},
+): Promise<DnsOutcome> {
+  type ResolveInfo = { address?: string; addresses?: string[]; resultCode?: number };
+  type ResolveFunction = (
+    host: string,
+    callback?: (result: ResolveInfo) => void,
+  ) => void | Promise<ResolveInfo>;
+  const chromeApi = (globalThis as {
+    chrome?: {
+      dns?: { resolve?: ResolveFunction };
+      runtime?: { lastError?: unknown };
+    };
+  }).chrome;
+  const dnsResolveFn = chromeApi?.dns?.resolve;
+  if (dnsResolveFn && dnsResolverCapability() === "available") {
+    if (options.signal?.aborted) throw abortError(options.signal);
+    const timeoutMs = Math.max(100, Math.min(DNS_RESOLVE_TIMEOUT_MS, options.timeoutMs ?? DNS_RESOLVE_TIMEOUT_MS));
+    return await new Promise<DnsOutcome>((resolve, reject) => {
+      let settled = false;
+      const onAbort = (): void => finish(abortError(options.signal));
+      const timer = setTimeout(() => finish({ kind: "error" }), timeoutMs);
+      const finish = (result: DnsOutcome | DOMException): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", onAbort);
+        if (result instanceof DOMException && result.name === "AbortError") reject(result);
+        else resolve(result as DnsOutcome);
+      };
+      options.signal?.addEventListener("abort", onAbort, { once: true });
       try {
-        dnsResolveFn(hostname, (result) => {
-          if (chrome.runtime.lastError) {
-            resolve({ kind: "error" });
+        const consume = (result: ResolveInfo): void => {
+          if (chromeApi?.runtime?.lastError ||
+              (typeof result?.resultCode === "number" && result.resultCode !== 0)) {
+            finish({ kind: "error" });
             return;
           }
-          resolve({ kind: "resolved", ips: result?.addresses ?? [] });
-        });
+          const ips = Array.isArray(result?.addresses)
+            ? result.addresses
+            : typeof result?.address === "string" && result.address.length > 0
+              ? [result.address]
+              : [];
+          finish({ kind: "resolved", ips });
+        };
+        const pending = dnsResolveFn(hostname, consume);
+        if (pending && typeof pending.then === "function") {
+          void pending.then(consume, () => finish({ kind: "error" }));
+        }
       } catch {
-        resolve({ kind: "error" });
+        finish({ kind: "error" });
       }
     });
   }

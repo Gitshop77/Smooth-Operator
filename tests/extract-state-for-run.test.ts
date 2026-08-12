@@ -21,6 +21,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { RunController } from "../src/extension/background/run-controller";
 
 // ─── Mock chrome global ──────────────────────────────────────────────────────
 
@@ -189,6 +190,7 @@ let captureTabScreenshotMock: ReturnType<typeof vi.fn>;
 let modelSupportsVisionMock: ReturnType<typeof vi.fn>;
 let mergeDetectionsMock: ReturnType<typeof vi.fn>;
 let renderMergedElementsTextMock: ReturnType<typeof vi.fn>;
+let getPageFingerprintMock: ReturnType<typeof vi.fn>;
 
 const MOCK_TABS = [{ id: 1, url: "https://example.com", title: "Test" }] as never[];
 
@@ -267,6 +269,7 @@ describe("extractStateForRun — vision-merge branches", () => {
 
     const catMod = await import("@/lib/agent/llm/catalog");
     modelSupportsVisionMock = catMod.modelSupportsVision as unknown as ReturnType<typeof vi.fn>;
+    getPageFingerprintMock = tabMod.getPageFingerprint as unknown as ReturnType<typeof vi.fn>;
 
     const mergerMod = await import("@/extension/vision-assistant/merger");
     mergeDetectionsMock = mergerMod.mergeDetections as unknown as ReturnType<typeof vi.fn>;
@@ -293,6 +296,12 @@ describe("extractStateForRun — vision-merge branches", () => {
     modelSupportsVisionMock.mockResolvedValue(false);
     mergeDetectionsMock.mockReturnValue([]);
     renderMergedElementsTextMock.mockReturnValue("");
+    getPageFingerprintMock.mockResolvedValue("fingerprint");
+    (globalThis.chrome.tabs.get as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 1,
+      url: "https://example.com",
+      title: "Test",
+    });
   });
 
   afterEach(() => {
@@ -313,7 +322,7 @@ describe("extractStateForRun — vision-merge branches", () => {
     // useAlwaysOnVision=false, useAdaptiveVision=false → DOM-only with screenshot
     const state = await extractStateForRun(1, MOCK_TABS);
     expect(state.url).toBe("https://example.com");
-    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, true);
+    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, true, undefined);
   });
 
   // ── Branch 2: Not always-on, not adaptive → DOM-only (no screenshot) ──────
@@ -328,7 +337,7 @@ describe("extractStateForRun — vision-merge branches", () => {
     // mainModelVision=false → effectiveTextOnly=true, includeScreenshot=false
     const state = await extractStateForRun(1, MOCK_TABS);
     expect(state.url).toBe("https://example.com");
-    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false);
+    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false, undefined);
   });
 
   // ── Branch 3: Adaptive mode, empty cache → clear cache, DOM-only ──────────
@@ -343,7 +352,7 @@ describe("extractStateForRun — vision-merge branches", () => {
 
     const state = await extractStateForRun(1, MOCK_TABS);
     expect(state.url).toBe("https://example.com");
-    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false);
+    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false, undefined);
   });
 
   // ── Branch 4: Always-on, vision assistant not ready → DOM-only ─────────────
@@ -359,7 +368,7 @@ describe("extractStateForRun — vision-merge branches", () => {
     // globalVisionAssistant is null → va?.isReady is falsy → return DOM-only
     const state = await extractStateForRun(1, MOCK_TABS);
     expect(state.url).toBe("https://example.com");
-    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false);
+    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false, undefined);
     // `captureTabScreenshot` is only reachable PAST the `!va?.isReady` guard
     // (the always-on merge block). Asserting it was NOT called discriminates
     // this branch from the ready-state merge path — deleting the guard would
@@ -414,7 +423,7 @@ describe("extractStateForRun — vision-merge branches", () => {
     const state = await extractStateForRun(1, MOCK_TABS);
 
     expect(state.url).toBe("https://example.com");
-    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false);
+    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false, undefined);
   });
 
   // ── Fallback tab id: used when run state has no currentTabId ───────────────
@@ -428,7 +437,7 @@ describe("extractStateForRun — vision-merge branches", () => {
 
     const state = await extractStateForRun(42, MOCK_TABS);
     expect(state.url).toBe("https://example.com");
-    expect(extractStateFromTabMock).toHaveBeenCalledWith(42, MOCK_TABS, false);
+    expect(extractStateFromTabMock).toHaveBeenCalledWith(42, MOCK_TABS, false, undefined);
   });
 
   // ── Vision mode resolution ─────────────────────────────────────────────────
@@ -445,7 +454,7 @@ describe("extractStateForRun — vision-merge branches", () => {
     // → useAlwaysOnVision=true → enters always-on path → not ready → DOM-only
     const state = await extractStateForRun(1, MOCK_TABS);
     expect(state.url).toBe("https://example.com");
-    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false);
+    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false, undefined);
   });
 
   test("vision mode fallback: unset visionMode + enableLocalVision=false → disabled", async () => {
@@ -459,7 +468,7 @@ describe("extractStateForRun — vision-merge branches", () => {
     // visionMode resolves to "disabled" → useAlwaysOnVision=false → DOM-only
     const state = await extractStateForRun(1, MOCK_TABS);
     expect(state.url).toBe("https://example.com");
-    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false);
+    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false, undefined);
   });
 
   // ── includeScreenshot logic ────────────────────────────────────────────────
@@ -475,7 +484,7 @@ describe("extractStateForRun — vision-merge branches", () => {
     // mainModelVision=true, enableScreenshots=undefined → Boolean(undefined ?? true) = true
     // includeScreenshot=true, effectiveTextOnly=false → DOM-only with screenshot
     await extractStateForRun(1, MOCK_TABS);
-    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, true);
+    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, true, undefined);
   });
 
   test("includeScreenshot: false when user explicitly disables screenshots", async () => {
@@ -489,7 +498,7 @@ describe("extractStateForRun — vision-merge branches", () => {
     // mainModelVision=true, enableScreenshots=false → includeScreenshot=false
     // effectiveTextOnly=true (because !includeScreenshot) → but not always-on/adaptive
     await extractStateForRun(1, MOCK_TABS);
-    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false);
+    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false, undefined);
   });
 
   // ── catalog/model load failure ─────────────────────────────────────────────
@@ -505,11 +514,12 @@ describe("extractStateForRun — vision-merge branches", () => {
     const state = await extractStateForRun(1, MOCK_TABS);
     expect(state.url).toBe("https://example.com");
     // effectiveTextOnly=true (mainModelVision=false) → DOM-only with screenshot=false
-    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false);
+    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false, undefined);
   });
 });
 
 describe("handleDetectVisualRequest abort signal", () => {
+  const visualIdentity = { runId: "vision-run" };
   beforeEach(async () => {
     vi.resetModules();
     const ssMod = await import("@/extension/background/screenshots");
@@ -519,6 +529,8 @@ describe("handleDetectVisualRequest abort signal", () => {
     renderMergedElementsTextMock = mergerMod.renderMergedElementsText as unknown as ReturnType<typeof vi.fn>;
     const catMod = await import("@/lib/agent/llm/catalog");
     modelSupportsVisionMock = catMod.modelSupportsVision as unknown as ReturnType<typeof vi.fn>;
+    const tabMod = await import("@/extension/background/tab-manager");
+    getPageFingerprintMock = tabMod.getPageFingerprint as unknown as ReturnType<typeof vi.fn>;
 
     for (const k of Object.keys(localStore)) delete localStore[k];
     for (const k of Object.keys(sessionStore)) delete sessionStore[k];
@@ -529,7 +541,7 @@ describe("handleDetectVisualRequest abort signal", () => {
     // it explicitly or a stray `{ step: 0 }` makes every DETECT_VISUAL request
     // fail with "no active run".
     const storeMod = await import("@/extension/background/state-store");
-    (storeMod.getRunState as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ currentTabId: 1, step: 0 });
+    (storeMod.getRunState as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ runId: visualIdentity.runId, currentTabId: 1, step: 0 });
     setVisionSettings({
       enableLocalVision: true,
       visionMode: "always",
@@ -544,6 +556,12 @@ describe("handleDetectVisualRequest abort signal", () => {
     modelSupportsVisionMock.mockResolvedValue(false);
     mergeDetectionsMock.mockReturnValue([]);
     renderMergedElementsTextMock.mockReturnValue("");
+    getPageFingerprintMock.mockResolvedValue("fingerprint");
+    (globalThis.chrome.tabs.get as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 1,
+      url: "https://example.com",
+      title: "Test",
+    });
   });
 
   afterEach(() => {
@@ -564,7 +582,7 @@ describe("handleDetectVisualRequest abort signal", () => {
     const mod = await primeReadyAssistant();
     const signal = new AbortController().signal;
 
-    const result = await mod.handleDetectVisualRequest("find buttons", signal);
+    const result = await mod.handleDetectVisualRequest("find buttons", visualIdentity, signal);
 
     expect(result.ok).toBe(true);
     expect(visionAssistantState.detect).toHaveBeenCalledTimes(1);
@@ -573,7 +591,12 @@ describe("handleDetectVisualRequest abort signal", () => {
 
   test("falls back to the active run's signal (set via buildLoopDeps)", async () => {
     const mod = await primeReadyAssistant();
-    const controller = new AbortController();
+    const controller = new RunController({
+      runId: "vision-signal",
+      task: "t",
+      maxSteps: 10,
+      mode: "standard",
+    });
     mod.buildLoopDeps({
       tab: { id: 1 } as chrome.tabs.Tab,
       sendEvent: vi.fn(),
@@ -589,7 +612,7 @@ describe("handleDetectVisualRequest abort signal", () => {
       mode: "standard",
     });
 
-    const result = await mod.handleDetectVisualRequest("find buttons");
+    const result = await mod.handleDetectVisualRequest("find buttons", visualIdentity);
 
     expect(result.ok).toBe(true);
     expect(visionAssistantState.detect.mock.calls[0]?.[1]).toBe(controller.signal);
@@ -598,7 +621,7 @@ describe("handleDetectVisualRequest abort signal", () => {
   test("with no signal available, detect is called with undefined (no crash)", async () => {
     const mod = await primeReadyAssistant();
 
-    const result = await mod.handleDetectVisualRequest("find buttons");
+    const result = await mod.handleDetectVisualRequest("find buttons", visualIdentity);
 
     expect(result.ok).toBe(true);
     expect(visionAssistantState.detect.mock.calls[0]?.[1]).toBeUndefined();
@@ -609,10 +632,70 @@ describe("handleDetectVisualRequest abort signal", () => {
     const { getRunState } = await import("@/extension/background/state-store");
     (getRunState as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(null);
 
-    const result = await mod.handleDetectVisualRequest("find buttons");
+    const result = await mod.handleDetectVisualRequest("find buttons", visualIdentity);
 
     expect(result.ok).toBe(false);
     expect(result.error).toContain("no active run");
+  });
+
+  test("does not swallow stale authority raised after tabs.get", async () => {
+    const mod = await primeReadyAssistant();
+    let checks = 0;
+    const assertAuthorized = vi.fn(() => {
+      checks++;
+      if (checks >= 6) throw new Error("run cancellation invalidated action dispatch");
+    });
+
+    const result = await mod.handleDetectVisualRequest(
+      "find buttons",
+      visualIdentity,
+      undefined,
+      assertAuthorized,
+    );
+
+    expect(result).toEqual({ ok: false, error: "run cancellation invalidated action dispatch" });
+    expect(globalThis.chrome.tabs.get).toHaveBeenCalledOnce();
+    expect(getPageFingerprintMock).not.toHaveBeenCalled();
+  });
+
+  test("does not swallow stale authority raised after fingerprinting", async () => {
+    const mod = await primeReadyAssistant();
+    let checks = 0;
+    const assertAuthorized = vi.fn(() => {
+      checks++;
+      if (checks >= 7) throw new Error("stale run token");
+    });
+
+    const result = await mod.handleDetectVisualRequest(
+      "find buttons",
+      visualIdentity,
+      undefined,
+      assertAuthorized,
+    );
+
+    expect(result).toEqual({ ok: false, error: "stale run token" });
+    expect(getPageFingerprintMock).toHaveBeenCalledOnce();
+  });
+
+  test("final authority check blocks detection/cache output invalidated after fingerprint", async () => {
+    const mod = await primeReadyAssistant();
+    let checks = 0;
+    const assertAuthorized = vi.fn(() => {
+      checks++;
+      if (checks >= 8) throw new Error("run state authority expired");
+    });
+
+    const result = await mod.handleDetectVisualRequest(
+      "find buttons",
+      visualIdentity,
+      undefined,
+      assertAuthorized,
+    );
+
+    expect(result).toEqual({ ok: false, error: "run state authority expired" });
+    expect(visionAssistantState.detect).toHaveBeenCalledOnce();
+    expect(globalThis.chrome.tabs.get).toHaveBeenCalledOnce();
+    expect(getPageFingerprintMock).toHaveBeenCalledOnce();
   });
 });
 

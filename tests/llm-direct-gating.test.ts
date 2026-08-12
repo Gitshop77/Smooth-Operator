@@ -21,9 +21,14 @@ const h = vi.hoisted(() => ({
   chatMessages: [] as { role: string; content: string }[][],
   chatRequests: [] as Record<string, unknown>[],
   chatUsage: undefined as
-    | { tokensIn: number; tokensOut: number; cachedInputTokens: number; costUsd: number }
+    | { tokensIn: number; tokensOut: number; cachedInputTokens: number; cachedWriteInputTokens?: number; costUsd: number }
+    | undefined,
+  chatContent: "{}",
+  chatTerminalDiagnostic: undefined as
+    | { code: string; protocol: string; visibleContentChars: number; terminalSeen: boolean }
     | undefined,
   buildCount: 0,
+  buildGate: undefined as Promise<void> | undefined,
   mockProviderId: "openai",
   mockModel: "m",
 }));
@@ -34,6 +39,7 @@ vi.mock("../src/extension/provider-config", () => ({
     c.model ?? "resolved-default",
   buildProvider: async () => {
     h.buildCount++;
+    await h.buildGate;
     return {
       id: h.mockProviderId,
       model: h.mockModel,
@@ -44,7 +50,11 @@ vi.mock("../src/extension/provider-config", () => ({
       chat: async (req: { messages: { role: string; content: string }[] }) => {
         h.chatMessages.push(req.messages);
         h.chatRequests.push(req as Record<string, unknown>);
-        return { content: "{}", ...(h.chatUsage ? { usage: h.chatUsage } : {}) };
+        return {
+          content: h.chatContent,
+          ...(h.chatUsage ? { usage: h.chatUsage } : {}),
+          ...(h.chatTerminalDiagnostic ? { terminalDiagnostic: h.chatTerminalDiagnostic } : {}),
+        };
       },
     };
   },
@@ -104,7 +114,10 @@ beforeEach(() => {
   h.chatMessages = [];
   h.chatRequests = [];
   h.chatUsage = undefined;
+  h.chatContent = "{}";
+  h.chatTerminalDiagnostic = undefined;
   h.buildCount = 0;
+  h.buildGate = undefined;
   installChrome();
 });
 
@@ -229,6 +242,37 @@ describe("navigatorCallDirect screenshot gating", () => {
   });
 });
 
+describe("provider initialization cancellation", () => {
+  test.each([
+    ["navigator", async (mod: typeof import("../src/extension/llm-direct"), signal: AbortSignal) => mod.navigatorCallDirect(makeRequest(), signal)],
+    ["planner", async (mod: typeof import("../src/extension/llm-direct"), signal: AbortSignal) => mod.plannerCallDirect({
+      task: "plan",
+      history: [],
+      plan: [],
+      currentPlanItem: 0,
+      url: "https://example.com",
+      tabs: [],
+      step: 0,
+      maxSteps: 10,
+    }, signal)],
+  ])("%s stops promptly while the shared provider build is cold", async (_name, call) => {
+    let release!: () => void;
+    h.buildGate = new Promise<void>((resolve) => { release = resolve; });
+    const mod = await import("../src/extension/llm-direct");
+    const controller = new AbortController();
+    const pending = call(mod, controller.signal);
+    await vi.waitFor(() => expect(h.buildCount).toBe(1));
+
+    controller.abort(new DOMException("Stopped", "AbortError"));
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+
+    // The caller is gone, but resolving the shared build remains safe and can
+    // populate the cache for a later run.
+    release();
+    await Promise.resolve();
+  });
+});
+
 describe("getReasoningEffort", () => {
   test("unset → undefined", async () => {
     const { getReasoningEffort } = await import("../src/extension/llm-direct");
@@ -343,6 +387,40 @@ describe("reasoning config + cache-eligibility wiring", () => {
   });
 });
 
+describe("direct completion diagnostics", () => {
+  test("navigator turns a blank provider completion into a typed actionable error", async () => {
+    h.chatContent = "";
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await expect(navigatorCallDirect(makeRequest())).rejects.toMatchObject({
+      name: "LLMTerminalDiagnosticError",
+      diagnostic: { code: "empty_visible_output", protocol: "provider" },
+    });
+  });
+
+  test("planner preserves the route's reasoning-only category instead of returning raw content", async () => {
+    h.chatContent = "partial-looking-but-unusable";
+    h.chatTerminalDiagnostic = {
+      code: "reasoning_only",
+      protocol: "openai-chat",
+      visibleContentChars: 0,
+      terminalSeen: true,
+    };
+    const { plannerCallDirect } = await import("../src/extension/llm-direct");
+    await expect(plannerCallDirect({
+      task: "plan",
+      history: [],
+      plan: [],
+      url: "https://example.com",
+      tabs: [],
+      step: 1,
+      maxSteps: 3,
+    })).rejects.toMatchObject({
+      name: "LLMTerminalDiagnosticError",
+      diagnostic: { code: "reasoning_only", protocol: "openai-chat" },
+    });
+  });
+});
+
 describe("provider cache invalidation", () => {
   test("a forceReasoning change rebuilds the cached provider", async () => {
     // buildProvider reads forceReasoning to patch supportsReasoning (the "on"
@@ -375,6 +453,20 @@ describe("cachedInputTokens + precomputed costUsd forwarding", () => {
     const result = await navigatorCallDirect(makeRequest());
     expect(result.cachedInputTokens).toBe(800);
     expect(result.costUsd).toBe(0.042);
+  });
+
+  test("navigator result preserves Anthropic cache-write tokens", async () => {
+    h.chatUsage = {
+      tokensIn: 1000,
+      tokensOut: 200,
+      cachedInputTokens: 800,
+      cachedWriteInputTokens: 120,
+      costUsd: 0.052,
+    };
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    const result = await navigatorCallDirect(makeRequest());
+    expect(result.cachedWriteInputTokens).toBe(120);
+    expect(result.costUsd).toBe(0.052);
   });
 });
 

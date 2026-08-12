@@ -14,6 +14,7 @@ import { wrapUntrusted, scanForInjection } from "../security";
 import { redactSecrets, getSecretSetVersion } from "../secrets";
 import { redactKeyShapes } from "../key-shape-redact";
 import { ELEMENTS_TEXT_CHAR_CAP, formatTab, renderPlan, renderHistory } from "./messages-utils";
+import { redactKeyLeak } from "../redact-shared";
 
 export { ELEMENTS_TEXT_CHAR_CAP };
 
@@ -101,7 +102,7 @@ const warnedModules = {
 function warnOnce(module: keyof typeof warnedModules, modulePath: string, label: string, e: unknown): void {
   if (warnedModules[module]) return;
   warnedModules[module] = true;
-  console.warn(`[messages] optional module ${modulePath} unavailable — skipping ${label}:`, e);
+  console.warn(`[messages] optional module ${modulePath} unavailable — skipping ${label}: ${redactKeyLeak(String(e))}`);
 }
 
 /** Render an `<injection_warnings>` block for the given scan warnings. */

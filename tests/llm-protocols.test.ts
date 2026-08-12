@@ -17,6 +17,7 @@ import { hasImageProvenance, isPlainJSONSchema } from "../src/lib/agent/llm/shar
 import { isValidCatalog, resolveVisionSupport, type CatalogModel } from "../src/lib/agent/llm/catalog";
 import { CACHE_KEY } from "../src/lib/agent/llm/catalog-data";
 import { configure as configureAzure } from "../src/lib/agent/llm/providers/azure";
+import { configure as configureAnthropic } from "../src/lib/agent/llm/providers/anthropic";
 import { generate } from "../src/lib/agent/llm/route/client";
 import type { LLMRequest } from "../src/lib/agent/llm/route/client";
 import { normalizeStrictSchema } from "../src/lib/agent/llm/protocols/openai-chat-utils";
@@ -281,6 +282,37 @@ describe("OpenAIChat.protocol — streaming truncation regression", () => {
     const { content, terminatedEarly } = reduceFrames(OpenAIChat.protocol, chunks, makeRequest());
     expect(content).toBe("Hi");
     expect(terminatedEarly).toBe(true);
+  });
+
+  test("records reasoning-only/budget evidence without retaining reasoning text", () => {
+    const frames = [
+      JSON.stringify({ choices: [{ delta: { reasoning_content: "private chain of thought" }, finish_reason: null }] }),
+      JSON.stringify({ choices: [{ delta: {}, finish_reason: "length" }] }),
+      JSON.stringify({ choices: [], usage: { prompt_tokens: 10, completion_tokens: 99, completion_tokens_details: { reasoning_tokens: 99 } } }),
+      "[DONE]",
+    ];
+    let state = OpenAIChat.protocol.stream.initial(makeRequest()) as OpenAIChat.StreamState;
+    for (const frame of frames) {
+      state = OpenAIChat.protocol.stream.step(state, frame).state as OpenAIChat.StreamState;
+    }
+    expect(state.content).toBe("");
+    expect(OpenAIChat.protocol.stream.completion?.(state)).toEqual({
+      reasoningObserved: true,
+      reasoningTokens: 99,
+      finishReason: "length",
+      droppedFrames: undefined,
+    });
+  });
+
+  test("records OpenRouter reasoning_details presence without exposing it as text", () => {
+    const state = OpenAIChat.protocol.stream.initial(makeRequest()) as OpenAIChat.StreamState;
+    const { state: next, events } = OpenAIChat.protocol.stream.step(
+      state,
+      JSON.stringify({ choices: [{ delta: { reasoning_details: [{ type: "reasoning.summary", text: "private" }] } }] }),
+    );
+    expect(events).toEqual([]);
+    expect((next as OpenAIChat.StreamState).reasoningObserved).toBe(true);
+    expect((next as OpenAIChat.StreamState).content).toBe("");
   });
 });
 
@@ -633,6 +665,22 @@ describe("AnthropicMessages.protocol — stream parsing", () => {
     expect((after as AnthropicMessages.StreamState).usage?.cachedInputTokens).toBe(150);
     expect((after as AnthropicMessages.StreamState).usage?.tokensOut).toBe(5);
   });
+
+  test("marks a thinking-only completion without retaining thinking content", () => {
+    let state = AnthropicMessages.protocol.stream.initial(makeRequest()) as AnthropicMessages.StreamState;
+    state = AnthropicMessages.protocol.stream.step(
+      state,
+      JSON.stringify({ type: "content_block_delta", delta: { type: "thinking_delta", thinking: "private" } }),
+    ).state as AnthropicMessages.StreamState;
+    const { events, state: stopped } = AnthropicMessages.protocol.stream.step(
+      state,
+      JSON.stringify({ type: "message_stop" }),
+    );
+    expect(events).toContainEqual({ type: "finish", usage: undefined });
+    expect(AnthropicMessages.protocol.stream.completion?.(stopped as AnthropicMessages.StreamState)).toMatchObject({
+      reasoningObserved: true,
+    });
+  });
 });
 
 // ─── Gemini protocol ────────────────────────────────────────────────────────
@@ -948,6 +996,26 @@ describe("Gemini.protocol — stream parsing", () => {
   test("terminal returns true on usageMetadata (fallback for older API versions)", async () => {
     expect(Gemini.protocol.stream.terminal?.(JSON.stringify({ usageMetadata: {} }))).toBe(true);
   });
+
+  test("does not treat Gemini thought text as visible output and records budget evidence", () => {
+    const state = Gemini.protocol.stream.initial(makeRequest());
+    const { state: next, events } = Gemini.protocol.stream.step(
+      state,
+      JSON.stringify({
+        candidates: [{
+          content: { parts: [{ text: "private reasoning", thought: true }] },
+          finishReason: "MAX_TOKENS",
+        }],
+        usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 32, thoughtsTokenCount: 32 },
+      }),
+    );
+    expect(events).toEqual([]);
+    expect(Gemini.protocol.stream.completion?.(next)).toMatchObject({
+      reasoningObserved: true,
+      reasoningTokens: 32,
+      finishReason: "MAX_TOKENS",
+    });
+  });
 });
 
 // ─── resolveVisionSupport (vision/screenshot gating) ────────────────────────
@@ -1154,5 +1222,150 @@ describe("azure facade baseURL path prefix", () => {
       if (savedChrome === undefined) delete g.chrome;
       else g.chrome = savedChrome;
     }
+  });
+});
+
+// ─── route terminal diagnostics ────────────────────────────────────────────
+
+describe("generate — additive terminal diagnostics", () => {
+  async function generateFromSse(sseBody: string) {
+    const g = globalThis as unknown as { chrome?: unknown };
+    const savedFetch = globalThis.fetch;
+    const savedChrome = g.chrome;
+    try {
+      g.chrome = {
+        runtime: {},
+        dns: { resolve: (_h: string, cb: (r: { addresses?: string[] }) => void) => cb({ addresses: ["93.184.216.34"] }) },
+      };
+      const encoder = new TextEncoder();
+      globalThis.fetch = vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        type: "basic",
+        headers: { get: (name: string) => name === "content-type" ? "text/event-stream" : null },
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(sseBody));
+            controller.close();
+          },
+        }),
+      })) as unknown as typeof fetch;
+      const cfg = configureAzure({ resourceName: "diagnostic-resource", apiKey: "k", apiVersion: "2024-10-21" });
+      return await generate({
+        model: cfg.model("gpt-4o"),
+        messages: [{ role: "user", content: "hi" }],
+      });
+    } finally {
+      globalThis.fetch = savedFetch;
+      if (savedChrome === undefined) delete g.chrome;
+      else g.chrome = savedChrome;
+    }
+  }
+
+  test("[DONE]-only completion remains content-compatible but is diagnosed", async () => {
+    const response = await generateFromSse("data: [DONE]\n\n");
+    expect(response.content).toBe("");
+    expect(response.terminalDiagnostic).toMatchObject({
+      code: "empty_visible_output",
+      protocol: "openai-chat",
+      terminalSeen: true,
+      visibleContentChars: 0,
+    });
+  });
+
+  test("OpenAI-compatible reasoning-only exhaustion is classified without exposing reasoning", async () => {
+    const response = await generateFromSse(
+      'data: {"choices":[{"delta":{"reasoning":"private"},"finish_reason":null}]}\n\n' +
+      'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n' +
+      'data: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":32,"completion_tokens_details":{"reasoning_tokens":32}}}\n\n' +
+      "data: [DONE]\n\n",
+    );
+    expect(response.content).toBe("");
+    expect(response.terminalDiagnostic).toMatchObject({
+      code: "reasoning_budget_exhausted",
+      protocol: "openai-chat",
+      reasoningObserved: true,
+      reasoningTokens: 32,
+      finishReason: "length",
+    });
+    expect(JSON.stringify(response.terminalDiagnostic)).not.toContain("private");
+  });
+
+  test("Anthropic message_delta max_tokens classifies a thinking-only response as budget exhaustion", async () => {
+    const g = globalThis as unknown as { chrome?: unknown };
+    const savedFetch = globalThis.fetch;
+    const savedChrome = g.chrome;
+    try {
+      g.chrome = {
+        runtime: {},
+        dns: { resolve: (_h: string, cb: (r: { addresses?: string[] }) => void) => cb({ addresses: ["93.184.216.34"] }) },
+      };
+      const encoder = new TextEncoder();
+      globalThis.fetch = vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        type: "basic",
+        headers: { get: (name: string) => name === "content-type" ? "text/event-stream" : null },
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(
+              'event: message_start\n' +
+              'data: {"type":"message_start","message":{"usage":{"input_tokens":2,"output_tokens":0}}}\n\n' +
+              'event: content_block_delta\n' +
+              'data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"private"}}\n\n' +
+              'event: message_delta\n' +
+              'data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":32}}\n\n' +
+              'event: message_stop\n' +
+              'data: {"type":"message_stop"}\n\n',
+            ));
+            controller.close();
+          },
+        }),
+      })) as unknown as typeof fetch;
+      const cfg = configureAnthropic({ apiKey: "k" });
+      const response = await generate({
+        model: cfg.model("claude-test"),
+        messages: [{ role: "user", content: "hi" }],
+      });
+      expect(response.content).toBe("");
+      expect(response.terminalDiagnostic).toMatchObject({
+        code: "reasoning_budget_exhausted",
+        protocol: "anthropic-messages",
+        reasoningObserved: true,
+        finishReason: "max_tokens",
+      });
+      expect(JSON.stringify(response.terminalDiagnostic)).not.toContain("private");
+    } finally {
+      globalThis.fetch = savedFetch;
+      if (savedChrome === undefined) delete g.chrome;
+      else g.chrome = savedChrome;
+    }
+  });
+
+  test("malformed stream frames are diagnosed even when no provider error is sent", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const response = await generateFromSse("data: this-is-not-json\n\n");
+      expect(response.content).toBe("");
+      expect(response.terminalDiagnostic).toMatchObject({
+        code: "malformed_stream",
+        terminalSeen: false,
+        droppedFrames: 1,
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("clean EOF before a provider terminal marker preserves content and diagnoses truncation", async () => {
+    const response = await generateFromSse(
+      'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n',
+    );
+    expect(response.content).toBe("partial");
+    expect(response.terminalDiagnostic).toMatchObject({
+      code: "no_terminal_stream",
+      terminalSeen: false,
+      visibleContentChars: 7,
+    });
   });
 });

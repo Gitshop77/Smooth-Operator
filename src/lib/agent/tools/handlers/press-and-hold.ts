@@ -11,7 +11,9 @@ import { moveCursorToElement } from "../../dom/phantom-cursor";
 import { TIMINGS, sleep, SW_RPC_TIMEOUT_MS } from "../constants";
 import { resolveElement, safeScrollIntoView } from "../helpers";
 import { type ActionContext, hasPageChanged, isExtensionContext } from "./types";
-import { rejectOnAbort } from "./abort";
+import { occlusionError } from "./click-utils";
+import { rejectOnAbort, throwIfAborted } from "./abort";
+import { redactKeyLeak } from "../../redact-shared";
 
 export async function handlePressAndHold(
   ctx: ActionContext,
@@ -38,6 +40,7 @@ export async function handlePressAndHold(
   highlightElement(el, `press_and_hold [${action.index}]`);
   safeScrollIntoView(el);
   await sleep(TIMINGS.clickScrollIntoView, ctx.signal);
+  throwIfAborted(ctx.signal);
   const rect = el.getBoundingClientRect();
   const vw = window.innerWidth || document.documentElement.clientWidth;
   const vh = window.innerHeight || document.documentElement.clientHeight;
@@ -49,8 +52,19 @@ export async function handlePressAndHold(
     };
   }
   await moveCursorToElement(el);
+  throwIfAborted(ctx.signal);
   const cx = rect.x + rect.width / 2;
   const cy = rect.y + rect.height / 2;
+  // Occlusion gate: a press-and-hold dispatched at a covered center would land
+  // on the covering overlay (modal/toast/cookie banner), never the target.
+  const blocked = occlusionError(el, cx, cy);
+  if (blocked) {
+    return {
+      action,
+      success: false,
+      message: `press_and_hold [${action.index}] blocked: ${blocked}`,
+    };
+  }
 
   const holdMs = action.hold_ms;
   const delayMs = action.delay_ms;
@@ -82,6 +96,9 @@ export async function handlePressAndHold(
           y: cy,
           holdMs,
           delayMs,
+          action,
+          ...(ctx.dispatchToken ? { token: ctx.dispatchToken } : {}),
+          ...(ctx.effectCapability ? { effectCapability: ctx.effectCapability } : {}),
         }),
         new Promise<never>((_, reject) => {
           timeoutId = setTimeout(
@@ -116,20 +133,21 @@ export async function handlePressAndHold(
           `anti-bot widgets will reject a synthetic click`,
       };
     } catch (e) {
+      if (ctx.signal?.aborted) throw e;
       // The CDP hold genuinely failed (debugger attach error, messaging error,
       // or cdpPressAndHold threw). Surface the real error instead of swallowing
       // it into a false success — the agent must know the hold didn't happen so
       // it can retry or escalate rather than proceed past a verification gate it
       // didn't actually satisfy.
       if (typeof console !== "undefined" && typeof console.error === "function") {
-        console.error("[press_and_hold] CDP hold failed:", e);
+        console.error(`[press_and_hold] CDP hold failed: ${redactKeyLeak(String(e))}`);
       }
       return {
         action,
         success: false,
         message:
           `press_and_hold failed: hold NOT performed ` +
-          `(${e instanceof Error ? e.message : String(e)}); ` +
+          `(${redactKeyLeak(e instanceof Error ? e.message : String(e))}); ` +
           `anti-bot widgets will reject a synthetic click`,
       };
     }
@@ -140,6 +158,7 @@ export async function handlePressAndHold(
   // the hold semantics can't be replicated without CDP. Real anti-bot widgets
   // will reject this, so the message says so explicitly.
   try {
+    throwIfAborted(ctx.signal);
     el.click();
     const changed = hasPageChanged(ctx);
     return {

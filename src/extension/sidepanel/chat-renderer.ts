@@ -5,8 +5,38 @@
 
 import { chatMessages } from "./elements";
 import { redactKeyLeak } from "@/extension/shared";
+import { prefersReducedMotion } from "../accessibility";
 
-const MAX_CHAT_NODES = 500;
+const MAX_CHAT_NODES = 2000;
+
+/**
+ * Microtask-coalesced DOM batching: bursty thinking/action/state events create
+ * one node each; appending through one DocumentFragment per tick collapses N
+ * appends + N scrollHeight layout reads into 1, without changing the
+ * synchronous-ish render contract the transcript tests rely on.
+ */
+const pendingNodes: HTMLElement[] = [];
+let flushScheduled = false;
+
+function scheduleFlush(): void {
+  if (flushScheduled) return;
+  flushScheduled = true;
+  queueMicrotask(() => {
+    flushScheduled = false;
+    if (pendingNodes.length === 0) return;
+    const fragment = document.createDocumentFragment();
+    for (const node of pendingNodes) fragment.appendChild(node);
+    pendingNodes.length = 0;
+    chatMessages.appendChild(fragment);
+    capNodes();
+    scrollToBottom();
+  });
+}
+
+function enqueueNode(node: HTMLElement): void {
+  pendingNodes.push(node);
+  scheduleFlush();
+}
 
 const COPY_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"
   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -47,7 +77,11 @@ function initScrollBehavior(): void {
 
   scrollBtn.addEventListener("click", () => {
     userScrolledUp = false;
-    chatMessages.scrollTo({ top: chatMessages.scrollHeight, behavior: "smooth" });
+    // Reduced-motion users get an instant jump instead of a smooth animation.
+    chatMessages.scrollTo({
+      top: chatMessages.scrollHeight,
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+    });
     scrollBtn.classList.remove("visible");
   });
 }
@@ -93,9 +127,7 @@ export function addUserMessage(text: string): void {
   el.className = "msg-user";
   el.textContent = text;
   addCopyButton(el, text);
-  chatMessages.appendChild(el);
-  capNodes();
-  scrollToBottom();
+  enqueueNode(el);
 }
 
 export function addSystemMessage(
@@ -121,9 +153,7 @@ export function addSystemMessage(
     el.appendChild(timeSpan);
   }
   addCopyButton(el, text);
-  chatMessages.appendChild(el);
-  capNodes();
-  scrollToBottom();
+  enqueueNode(el);
 }
 
 export function removeEmptyState(): void {

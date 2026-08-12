@@ -18,9 +18,15 @@ export interface ScheduledTask {
   schedule: ScheduledTaskSchedule;
   enabled: boolean;
   createdAt: number;
+  /** Monotonic background-owned mutation revision (legacy rows imply 0). */
+  revision?: number;
   lastRunAt?: number;
   nextRunAt?: number;
   mode?: "restricted" | "standard";
+  /** Epoch ms of the most recent skipped/missed fire slot (additive V1). */
+  lastMissedFireAt?: number;
+  /** Count of skipped/missed fire slots since the task was created. */
+  missedFires?: number;
 }
 
 /** Prefix for chrome.alarms names created by this module. */
@@ -83,6 +89,20 @@ export function isValidTaskEntry(t: unknown): t is ScheduledTask {
   // prompt. Require a non-empty id and task before trusting the entry.
   if (typeof task.id !== "string" || task.id.trim() === "") return false;
   if (typeof task.task !== "string" || task.task.trim() === "") return false;
+  if (typeof task.enabled !== "boolean") return false;
+  if (typeof task.createdAt !== "number" || !Number.isFinite(task.createdAt)) return false;
+  if (
+    task.revision !== undefined &&
+    (!Number.isSafeInteger(task.revision) || task.revision < 0)
+  ) return false;
+  if (
+    task.lastMissedFireAt !== undefined &&
+    (typeof task.lastMissedFireAt !== "number" || !Number.isFinite(task.lastMissedFireAt))
+  ) return false;
+  if (
+    task.missedFires !== undefined &&
+    (!Number.isSafeInteger(task.missedFires) || task.missedFires < 0)
+  ) return false;
   const schedule = task.schedule;
   // A torn/partial write or an older schema version can leave `schedule`
   // missing — validateSchedule would crash on `s.type` and take down the

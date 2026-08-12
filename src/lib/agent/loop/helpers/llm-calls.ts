@@ -23,7 +23,7 @@ import type {
 } from "../../callbacks";
 import type { LoopDeps, PlannerCallArgs } from "../types";
 import { MAX_PARSE_RETRIES } from "../constants";
-import { sumUsages, accountUsage } from "./llm-calls-utils";
+import { sumUsages, accountUsage, reportCostEvent, sanitizeUsageNumber, sleepParseRetryBackoff } from "./llm-calls-utils";
 
 /**
  * Account + report a single LLM call's token→cost→usage, shared by
@@ -53,15 +53,45 @@ function accountAndReportUsage(params: {
   const { cost, usage: u } = accounted;
   if (typeof cost === "number" && u) {
     onCost(cost, u.tokensIn, u.tokensOut);
-    deps.onEvent({
-      type: "cost", step, tokensIn: u.tokensIn, tokensOut: u.tokensOut,
-      costUsd: cost, model: model ?? "",
-      ...(u.reasoningTokens ? { reasoningTokens: u.reasoningTokens } : {}),
-      ...(u.cachedInputTokens ? { cachedInputTokens: u.cachedInputTokens } : {}),
-      ...(u.cachedWriteInputTokens ? { cachedWriteInputTokens: u.cachedWriteInputTokens } : {}),
-    });
+    reportCostEvent(deps.onEvent, step, u);
   }
   return u;
+}
+
+interface FailedCallUsage {
+  tokensIn?: number;
+  tokensOut?: number;
+  reasoningTokens?: number;
+  cachedInputTokens?: number;
+  cachedWriteInputTokens?: number;
+  model?: string;
+  costUsd?: number;
+}
+
+function getFailedCallUsage(error: unknown): FailedCallUsage | undefined {
+  const usage = (error as { usage?: unknown }).usage;
+  if (!usage || typeof usage !== "object") return undefined;
+  const raw = usage as Record<string, unknown>;
+  const sanitized: FailedCallUsage = {};
+  // Vet every numeric field before it can flow into onCost / dispatcher.cost:
+  // a malformed provider-bridge error with costUsd:-100 / tokensIn:NaN would
+  // otherwise corrupt the cost-cap ledger and per-run analytics.
+  const num = (k: keyof FailedCallUsage): number | undefined =>
+    sanitizeUsageNumber(raw[k] as number | undefined);
+  const tokensIn = num("tokensIn");
+  const tokensOut = num("tokensOut");
+  const reasoningTokens = num("reasoningTokens");
+  const cachedInputTokens = num("cachedInputTokens");
+  const cachedWriteInputTokens = num("cachedWriteInputTokens");
+  const costUsd = num("costUsd");
+  if (tokensIn !== undefined) sanitized.tokensIn = tokensIn;
+  if (tokensOut !== undefined) sanitized.tokensOut = tokensOut;
+  if (reasoningTokens !== undefined) sanitized.reasoningTokens = reasoningTokens;
+  if (cachedInputTokens !== undefined) sanitized.cachedInputTokens = cachedInputTokens;
+  if (cachedWriteInputTokens !== undefined) sanitized.cachedWriteInputTokens = cachedWriteInputTokens;
+  if (costUsd !== undefined) sanitized.costUsd = costUsd;
+  if (typeof raw.model === "string") sanitized.model = raw.model;
+  return Object.keys(sanitized).length > 0 ? sanitized : undefined;
 }
 
 /**
@@ -99,7 +129,29 @@ export async function runPlanner(
   let usage: LLMUsageInfo | undefined;
   let raw = "";
   try {
-    const result = await deps.plannerCall(plannerRequest, signal);
+    let result: Awaited<ReturnType<LoopDeps["plannerCall"]>>;
+    try {
+      result = await deps.plannerCall(plannerRequest, signal);
+    } catch (error) {
+      const failed = getFailedCallUsage(error);
+      if (failed) {
+        usage = accountAndReportUsage({
+          step: args.step,
+          onCost: args.onCost,
+          deps,
+          precomputedCost: failed.costUsd,
+          model: failed.model,
+          tokensIn: failed.tokensIn,
+          tokensOut: failed.tokensOut,
+          reasoningTokens: failed.reasoningTokens,
+          cachedInputTokens: failed.cachedInputTokens,
+          cachedWriteInputTokens: failed.cachedWriteInputTokens,
+          costCapUsd,
+        });
+        if (costCapCheck?.()) throw new Error("Budget exceeded: cost cap reached");
+      }
+      throw error;
+    }
     raw = result.raw;
     const { tokensIn, tokensOut, reasoningTokens, cachedInputTokens, model, costUsd: precomputedCost } = result;
  // Read cache-write (creation) tokens when the caller threads them through.
@@ -184,7 +236,31 @@ export async function callNavigatorWithRetry(
   try {
     let lastError: string | undefined;
     for (let retry = 0; retry <= MAX_PARSE_RETRIES; retry++) {
-      const navResult = await deps.navigatorCall(request, signal);
+      let navResult: Awaited<ReturnType<LoopDeps["navigatorCall"]>>;
+      try {
+        navResult = await deps.navigatorCall(request, signal);
+      } catch (error) {
+        const failed = getFailedCallUsage(error);
+        if (failed) {
+          const failedUsage = accountAndReportUsage({
+            step,
+            onCost,
+            deps,
+            precomputedCost: failed.costUsd,
+            model: failed.model,
+            tokensIn: failed.tokensIn,
+            tokensOut: failed.tokensOut,
+            reasoningTokens: failed.reasoningTokens,
+            cachedInputTokens: failed.cachedInputTokens,
+            cachedWriteInputTokens: failed.cachedWriteInputTokens,
+            costCapUsd,
+          });
+          lastUsage = failedUsage;
+          if (failedUsage) attemptUsages.push(failedUsage);
+          if (costCapCheck?.()) throw new Error("Budget exceeded: cost cap reached");
+        }
+        throw error;
+      }
       const { raw, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, model, costUsd: precomputedCost } = navResult;
  // Read cache-write (creation) tokens when the caller threads them through
  // (billed at the higher cache-write rate; omitted, it under-reports
@@ -251,6 +327,10 @@ export async function callNavigatorWithRetry(
           ? `${accumulatedWarning}\n${parseErrorBlock}`
           : parseErrorBlock;
         request = { ...navRequest, loopWarning: accumulatedWarning };
+        // Space parse-retry attempts with bounded full-jitter backoff: retries
+        // are full re-calls, and zero-delay lockstep retries re-saturate the
+        // exact provider overload that caused the failure. Abort-aware.
+        await sleepParseRetryBackoff(retry, signal);
       }
     }
     throw new Error(

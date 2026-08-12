@@ -15,4 +15,5 @@ export const DEFAULT_CONFIG: AgentConfig = {
   enableJudge: true,
   enableEarlyStop: true,
   enableHtmlSummarizer: true,
+  enableFastPath: true,
 };

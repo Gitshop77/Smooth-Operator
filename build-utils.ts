@@ -293,7 +293,7 @@ export async function assertOnlyEnZodLocales(
 /**
  * Validate a manifest field is an array of strings (or absent). A non-array or
  * array containing non-string entries (e.g. a nested object from a bad merge)
- * would be mis-filtered by the high-risk check, so we reject it loudly.
+ * would be mis-filtered by the allowlist check, so we reject it loudly.
  */
 function assertStringArray(value: unknown, field: string): string[] {
   if (value === undefined || value === null) return [];
@@ -305,14 +305,34 @@ function assertStringArray(value: unknown, field: string): string[] {
   return value;
 }
 
+// Exact reviewed permission vocabulary for the shipped manifest. Membership is
+// fail-closed: a future permission is rejected even when it is absent from a
+// hand-maintained "high risk" vocabulary. Optional permissions have a separate
+// (currently empty) allowlist because they can widen authority at runtime.
+const APPROVED_MANIFEST_PERMISSIONS = new Set([
+  "sidePanel",
+  "scripting",
+  "tabs",
+  "activeTab",
+  "storage",
+  "alarms",
+  "debugger",
+  "notifications",
+  "downloads",
+  "unlimitedStorage",
+  "power",
+  "webRequest",
+  "cookies",
+]);
+const APPROVED_OPTIONAL_MANIFEST_PERMISSIONS = new Set<string>();
+
 /**
- * SEC-1: surface high-risk manifest permissions during the build so silent
- * permission creep is visible. A MISSING or MALFORMED manifest is a hard
- * build error (fail-closed). High-risk permissions present in `permissions`
- * OR `optional_permissions`, plus universal host access, are surfaced as a
- * WARNING by default; set `MANIFEST_LINT_FAIL_HIGH_RISK=1` to promote the
- * warning to a hard build error (catches creep in CI without breaking the
- * already-reviewed local build).
+ * SEC-1: enforce the exact reviewed manifest-permission vocabulary during the
+ * build so silent permission creep is impossible. A MISSING or MALFORMED
+ * manifest is a hard build error (fail-closed). Unapproved entries in
+ * `permissions` OR `optional_permissions`, plus new universal host access, are
+ * hard build errors. Reviewed permissions continue to pass; new privilege
+ * cannot hide in a warning-only build path.
  *
  * `manifestPath` defaults to the real manifest; tests pass a fixture path.
  */
@@ -344,24 +364,10 @@ export function lintManifestPermissions(
     "optional_permissions",
   );
 
-  // Dangerous permissions that widen the extension's attack surface. Optional
-  // permissions can escalate privilege at runtime, so they are checked too.
-  const HIGH_RISK = new Set([
-    "debugger",
-    "scripting",
-    "nativeMessaging",
-    "management",
-    "cookies",
-    "tabs",
-    "history",
-    "bookmarks",
-    "proxy",
-    "webRequest",
-    "unlimitedStorage",
-    "dns",
-  ]);
-  const risky = perms.filter((p) => HIGH_RISK.has(p));
-  const riskyOptional = optional.filter((p) => HIGH_RISK.has(p));
+  const unapproved = perms.filter((p) => !APPROVED_MANIFEST_PERMISSIONS.has(p));
+  const unapprovedOptional = optional.filter(
+    (p) => !APPROVED_OPTIONAL_MANIFEST_PERMISSIONS.has(p),
+  );
   // Universal host patterns: match every (or every http/https) origin. Any
   // pattern in this set that is NOT in the reviewed baseline below is creep.
   const UNIVERSAL_HOST_PATTERNS: readonly string[] = [
@@ -370,52 +376,29 @@ export function lintManifestPermissions(
     "https://*/*",
   ];
 
-  // Reviewed baseline: the high-risk permissions + universal host access already
-  // present in the shipped manifest, each with an in-repo justification.
-  // The lint is a *creep* guard, not a presence check: it only fires when a NEW
-  // high-risk permission (or new universal-host pattern) is added BEYOND this
-  // baseline. That makes MANIFEST_LINT_FAIL_HIGH_RISK=1 safe to enable in CI.
-  const BASELINE_HIGH_RISK = new Set([
-    "debugger",
-    "scripting",
-    "tabs",
-    "webRequest",
-    "unlimitedStorage",
-    "dns",
-    // cookies: required by the get_cookies/set_cookie/delete_cookies actions.
-    // set_cookie's effective URL passes the same domain allow/blocklist gate
-    // as navigate/search before any write; reads are read-only.
-    "cookies",
-  ]);
   // The shipped manifest grants http/https everywhere (deliberately NOT
   // file:// or ftp://), so those two patterns are the reviewed baseline; any
   // other universal pattern (e.g. <all_urls>) extends access beyond it.
   const BASELINE_WIDE_HOST = new Set(["http://*/*", "https://*/*"]);
 
-  const newRisky = risky.filter((p) => !BASELINE_HIGH_RISK.has(p));
-  const newRiskyOptional = riskyOptional.filter((p) => !BASELINE_HIGH_RISK.has(p));
   const newWideHost = host.filter(
     (h) => UNIVERSAL_HOST_PATTERNS.includes(h) && !BASELINE_WIDE_HOST.has(h)
   );
 
-  if (newRisky.length || newRiskyOptional.length || newWideHost.length) {
+  if (unapproved.length || unapprovedOptional.length || newWideHost.length) {
     const items = [
-      ...newRisky,
-      ...newRiskyOptional,
+      ...unapproved.map((permission) => `permissions: ${permission}`),
+      ...unapprovedOptional.map(
+        (permission) => `optional_permissions: ${permission}`,
+      ),
       ...(newWideHost.length
         ? [`universal host_permissions: ${newWideHost.join(", ")}`]
         : []),
     ];
     const msg =
-      "[manifest-lint] NEW high-risk permission(s) added beyond the reviewed " +
-      "baseline: " +
+      "[manifest-lint] unapproved manifest permission or host access: " +
       items.join(", ") +
       " — confirm each is strictly necessary and has a documented justification.";
-    // Default: warn only. CI can promote this to a hard error via env flag so
-    // local builds with reviewed permissions still work.
-    if (process.env.MANIFEST_LINT_FAIL_HIGH_RISK === "1") {
-      throw new Error(msg);
-    }
-    console.warn(msg);
+    throw new Error(msg);
   }
 }

@@ -16,6 +16,7 @@ vi.mock("@/lib/agent/tools/helpers/domain-config", () => ({
 }));
 
 import { handleTabAction, executeActionsInTab } from "../src/extension/background/tab-manager";
+import { createTabActionService } from "../src/extension/background/tab-action-service";
 import { checkUrlAllowedWithDomainConfig } from "@/lib/agent/tools/helpers/domain-config";
 import type { RunState } from "../src/extension/background/state-store";
 import type { AgentAction } from "@/lib/agent/types";
@@ -147,6 +148,29 @@ describe("handleTabAction security gate", () => {
     expect(chromeMock.tabs.update).toHaveBeenCalled();
   });
 
+  test("Stop during navigation prevents the post-update load/content work", async () => {
+    let finishUpdate!: (value: { id: number }) => void;
+    chromeMock.tabs.update.mockImplementationOnce(() => new Promise((resolve) => {
+      finishUpdate = resolve;
+    }));
+    const controller = new AbortController();
+    const pending = handleTabAction(
+      { type: "navigate", url: "https://example.com/page" } as never,
+      runState,
+      undefined,
+      controller.signal,
+    );
+    controller.abort(new DOMException("Stop requested", "AbortError"));
+    finishUpdate({ id: 1 });
+
+    await expect(pending).resolves.toMatchObject({
+      success: false,
+      message: expect.stringMatching(/Abort|Stop requested/),
+    });
+    expect(chromeMock.tabs.onUpdated.addListener).not.toHaveBeenCalled();
+    expect(chromeMock.tabs.sendMessage).not.toHaveBeenCalled();
+  });
+
   test("search with a missing query is BLOCKED", async () => {
     const res = await handleTabAction(
       { type: "search", engine: "duckduckgo" } as never,
@@ -185,6 +209,33 @@ describe("handleTabAction security gate", () => {
     expect(notify).toHaveBeenCalledWith(
       expect.objectContaining({ type: "error", recoverable: false }),
     );
+  });
+
+  test("a stale predecessor token cannot commit a currentTabId write", async () => {
+    const patch = vi.fn(async (identity: { runId: string }) => {
+      if (identity.runId === "predecessor") {
+        throw new DOMException("Run state authority expired", "AbortError");
+      }
+    });
+    const service = createTabActionService({
+      listTabs: vi.fn(async () => [{ id: 2, label: "2", url: "https://example.com", title: "next", active: false }]),
+      waitForTabLoad: vi.fn(async () => undefined),
+      sessionState: { patch },
+    });
+    const isolatedState = { ...runState, currentTabId: 1 };
+
+    const result = await service.handleTabAction(
+      { type: "switch_tab", tab_id: 2 } as never,
+      isolatedState,
+      undefined,
+      undefined,
+      () => true,
+      { runId: "predecessor" },
+    );
+
+    expect(result).toMatchObject({ success: false, message: expect.stringContaining("authority expired") });
+    expect(patch).toHaveBeenCalledWith({ runId: "predecessor" }, { currentTabId: 2 });
+    expect(isolatedState.currentTabId).toBe(1);
   });
 });
 
@@ -235,5 +286,56 @@ describe("executeActionsInTab input message patch", () => {
     expect(results[0].success).toBe(false);
     expect(results[0].message).toBe("input failed: element not found");
     expect(results[0].message).not.toContain("Typed");
+  });
+});
+
+describe("close_tab active-tab preference", () => {
+  test("prefers Chrome's already-active tab after closing the run's tab", async () => {
+    const tabs = [
+      { id: 1, url: "https://a.test", active: false },
+      { id: 2, url: "https://b.test", active: true }, // Chrome auto-activated this one
+      { id: 3, url: "https://c.test", active: false },
+    ];
+    const update = vi.fn(async () => ({}));
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: { update, remove: vi.fn(async () => {}) },
+    };
+    const service = createTabActionService({
+      listTabs: async () => tabs as never,
+      waitForTabLoad: async () => {},
+      sessionState: { patch: vi.fn(async () => {}) } as never,
+    });
+    const state = { ...runState, currentTabId: 1 };
+    const res = await service.handleTabAction({ type: "close_tab", tab_id: 1 } as never, state, undefined, undefined, undefined, { runId: "r1" });
+    expect(res.success).toBe(true);
+    // The already-active tab (id 2) is preferred — no redundant tabs.update.
+    expect(update).not.toHaveBeenCalled();
+    expect(state.currentTabId).toBe(2);
+  });
+
+  test("falls back to the first remaining tab when none is active", async () => {
+    let closed = false;
+    let remaining = [
+      { id: 1, url: "https://a.test", active: false },
+      { id: 5, url: "https://e.test", active: false },
+    ];
+    const update = vi.fn(async () => ({}));
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: { update, remove: vi.fn(async () => { closed = true; }) },
+    };
+    const service = createTabActionService({
+      // The closed tab is gone from listings after the remove (mirrors Chrome).
+      listTabs: async () => {
+        if (closed) remaining = remaining.filter((t) => t.id !== 1);
+        return remaining as never;
+      },
+      waitForTabLoad: async () => {},
+      sessionState: { patch: vi.fn(async () => {}) } as never,
+    });
+    const state = { ...runState, currentTabId: 1 };
+    const res = await service.handleTabAction({ type: "close_tab", tab_id: 1 } as never, state, undefined, undefined, undefined, { runId: "r1" });
+    expect(res.success).toBe(true);
+    expect(update).toHaveBeenCalledWith(5, { active: true });
+    expect(state.currentTabId).toBe(5);
   });
 });

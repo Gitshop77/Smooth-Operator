@@ -13,16 +13,15 @@
 
 import { initElementMap } from "@/lib/agent/dom/ax-tree";
 import { installPopupHandler } from "@/lib/agent/dom/popup-handler";
-import {
-  CONSOLE_CAPTURE_EVENT,
-  type ConsoleLogEntry,
-} from "@/lib/agent/dom/console-capture";
+import { CONSOLE_CAPTURE_EVENT } from "@/lib/agent/dom/console-capture";
 import {
   log,
+  isValidConsoleBridgeEntry,
   type IncomingMessage,
   type Response,
   handleExtractState,
   handleExecuteActions,
+  handleCancelRun,
   handleExtractHtml,
   handleGetDomFingerprint,
 } from "./content-utils";
@@ -45,11 +44,15 @@ import {
 
   // Relay MAIN-world console captures to the SW console-log ring. The
   // CustomEvent crosses from the MAIN world (where console-capture overrides
-  // the page's console) into this isolated world. Best-effort — a sleeping SW
-  // or a rejected sendMessage must never throw here.
+  // the page's console) into this isolated world. The event namespace is
+  // SHARED with the page: any page script can dispatch a forged event with a
+  // fabricated entry, so every payload is admitted through
+  // `isValidConsoleBridgeEntry` (exact shape + byte bound) before it is
+  // forwarded. Best-effort — a sleeping SW or a rejected sendMessage must
+  // never throw here.
   window.addEventListener(CONSOLE_CAPTURE_EVENT, (e) => {
-    const entry = (e as CustomEvent<{ entry?: ConsoleLogEntry }>).detail?.entry;
-    if (!entry) return;
+    const entry = (e as CustomEvent<{ entry?: unknown }>).detail?.entry;
+    if (!isValidConsoleBridgeEntry(entry)) return;
     try {
       // `.catch` swallows async rejections (e.g. the SW sleeping between
       // wakes) — the try/catch alone only covers synchronous throws.
@@ -78,6 +81,11 @@ import {
 
         case "EXECUTE_ACTIONS": {
           return handleExecuteActions(msg, sendResponse);
+        }
+
+        case "CANCEL_RUN": {
+          handleCancelRun(msg, sendResponse);
+          return false;
         }
 
         case "EXTRACT_HTML": {

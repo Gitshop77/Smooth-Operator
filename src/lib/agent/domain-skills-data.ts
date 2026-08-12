@@ -799,6 +799,10 @@ async function loadCustomDomainSkills(): Promise<DomainSkill[]> {
     }
   } catch (e) {
     console.error("[domain-skills] Failed to load custom skills from storage:", e);
+    // Never cache a failure: MV3 workers restart often and a one-off storage
+    // read glitch must not strip the user's custom skills for the whole wake.
+    // The next getDomainSkills call retries storage.
+    return [];
   }
   customSkillsCache = [];
   return customSkillsCache;

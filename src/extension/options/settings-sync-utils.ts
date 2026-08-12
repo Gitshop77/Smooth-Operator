@@ -7,7 +7,9 @@ import {
 import { updateProviderUI, populateModelSuggestions } from "./provider-config-ui";
 import { PROVIDERS } from "./providers";
 import { STORAGE_KEYS } from "./storage-keys";
-import { alertModal } from "./modal";
+import { migrateRememberedCredential } from "../credential-service";
+import { alertModal, confirmModal } from "./modal";
+import { providerConfigStore } from "./stores";
 
 export function readInt(id: string, def: number, min: number, max: number, invalid: string[]): number {
   const el = $(id) as HTMLInputElement;
@@ -92,10 +94,54 @@ export function populateProviderSelect(): void {
 
 let savedTimer: ReturnType<typeof setTimeout> | null = null;
 export function showSaved(): void {
-  const saved = $("saved");
+  // Non-throwing: called from a dozen mutation paths, so a missing node must
+  // degrade rather than throw (same guard style as setVal/setChecked).
+  const saved = document.getElementById("saved");
+  if (!saved) return;
   saved.classList.add("show");
   if (savedTimer) clearTimeout(savedTimer);
   savedTimer = setTimeout(() => saved.classList.remove("show"), 1500);
+}
+
+/**
+ * Compose the confirmable save summary shown after every settings write
+ * (Phase 14 "no silent changes" invariant). The sensitive categories —
+ * mode, cost, destination (provider/baseUrl), data-collection permissions,
+ * vision, and delivery/retention (webhook) — must never change silently, so
+ * the summary states exactly what was persisted. Pure: no DOM, no storage.
+ */
+export function composeSettingsSaveSummary(data: Record<string, unknown>): string {
+  const parts: string[] = [];
+  const mode = data.agentMode;
+  if (typeof mode === "string" && mode.length > 0) parts.push(`mode: ${mode}`);
+  if (typeof data.costCap === "number") {
+    parts.push(data.costCap > 0 ? `cost cap: $${data.costCap.toFixed(2)}` : "cost cap: none");
+  }
+  if (typeof data.provider === "string" && data.provider.length > 0) {
+    const baseUrl = typeof data.baseUrl === "string" && data.baseUrl.length > 0 ? data.baseUrl : "default endpoint";
+    parts.push(`provider: ${data.provider} (${baseUrl})`);
+  }
+  if (typeof data.enableScreenshots === "boolean") {
+    parts.push(`screenshots: ${data.enableScreenshots ? "on" : "off"}`);
+  }
+  if (typeof data.stealthEnabled === "boolean") {
+    parts.push(`stealth: ${data.stealthEnabled ? "on" : "off"}`);
+  }
+  if (typeof data.visionMode === "string" && data.visionMode.length > 0) {
+    parts.push(`vision: ${data.visionMode}`);
+  }
+  const webhook = typeof data.webhookUrl === "string" ? data.webhookUrl : "";
+  parts.push(webhook.length > 0 ? `notify webhook: ${webhook}` : "notify webhook: none");
+  // ALWAYS emit the domain scope lines so clearing the allow-list (a
+  // security-scope widening) or adding blocked domains can never pass
+  // silently.
+  if (Array.isArray(data.allowedDomains)) {
+    parts.push(`allowed domains: ${data.allowedDomains.length > 0 ? data.allowedDomains.length : "none"}`);
+  }
+  if (Array.isArray(data.blockedDomains)) {
+    parts.push(`blocked domains: ${data.blockedDomains.length}`);
+  }
+  return parts.join(" · ");
 }
 
 export function initAutoSave(saveSettings: () => Promise<boolean>): void {
@@ -117,7 +163,15 @@ export function initAutoSave(saveSettings: () => Promise<boolean>): void {
     const el = document.getElementById(id);
     if (!el) continue;
     el.addEventListener("input", debouncedSave);
-    el.addEventListener("change", () => void saveSettings());
+    el.addEventListener("change", () => {
+      // Typing-then-tabbing fires `input`+`change` back-to-back; cancel the
+      // pending debounce so the immediate blur save is the ONLY write.
+      if (saveDebounceTimer) {
+        clearTimeout(saveDebounceTimer);
+        saveDebounceTimer = null;
+      }
+      void saveSettings();
+    });
   }
   const enableScreenshots = document.getElementById("enableScreenshots");
   if (enableScreenshots) enableScreenshots.addEventListener("change", () => void saveSettings());
@@ -127,6 +181,14 @@ export function initAutoSave(saveSettings: () => Promise<boolean>): void {
     radio.addEventListener("change", () => void saveSettings());
   });
   $("provider")?.addEventListener("change", () => {
+    // A real provider change funnels through the authoritative store first:
+    // the reducer clears the previous provider's model and bumps the
+    // generation so any in-flight connection test for the old selection is
+    // dropped when it resolves. updateProviderUI renders the new capabilities.
+    providerConfigStore.dispatch({
+      type: "PROVIDER_SELECTED",
+      provider: ($("provider") as HTMLSelectElement).value,
+    });
     updateProviderUI();
     void populateModelSuggestions();
     void saveSettings();
@@ -153,6 +215,10 @@ export async function migrateSecretsFromLocalToSession(): Promise<void> {
           // "remember on this device"; otherwise move the key out of disk.
           if (localRes[STORAGE_KEYS.rememberApiKey] !== true) {
             await chrome.storage.local.remove(STORAGE_KEYS.apiKey);
+          } else {
+            // Phase 7 legacy adapter: the source remains until the encrypted
+            // vault copy and session hydration have both round-tripped.
+            await migrateRememberedCredential();
           }
         }
       }
@@ -211,6 +277,16 @@ export async function renderSecrets(): Promise<void> {
       `<span class="value">${"•".repeat(Math.min(s.value.length, 20))}</span>` +
       `<button type="button" class="secret-delete" aria-label="Delete secret %${escapeHtml(s.name)}%">Delete</button>`;
     item.querySelector("button")!.addEventListener("click", async () => {
+      // Destructive-action gate (Phase 14): deleting a secret value requires
+      // explicit acknowledgement — prompts referencing %name% fail to resolve
+      // until the value is re-added.
+      const ok = await confirmModal({
+        title: "Delete secret",
+        message: `Delete secret %${s.name}%? Prompts using %${s.name}% will not resolve until you re-add the value.`,
+        confirmLabel: "Delete",
+        danger: true,
+      });
+      if (!ok) return;
       try {
         await deleteSecretFromStore(s.name);
       } catch (e) {

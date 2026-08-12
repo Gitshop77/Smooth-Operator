@@ -214,7 +214,7 @@ describe("handleTabAction macro expansion (SW path)", () => {
       },
       storage: {
         session: {
-          get: vi.fn(async () => ({})),
+          get: vi.fn(async () => ({ open_cowork_run_state: { ...runState } })),
           set: vi.fn(async () => {}),
         },
       },
@@ -223,6 +223,7 @@ describe("handleTabAction macro expansion (SW path)", () => {
   }
 
   const runState: RunState = {
+    runId: "macro-run",
     task: "t",
     maxSteps: 10,
     mode: "standard",
@@ -234,6 +235,7 @@ describe("handleTabAction macro expansion (SW path)", () => {
   };
 
   beforeEach(() => {
+    runState.currentTabId = 1;
     installChrome();
     (checkUrlAllowedWithDomainConfig as unknown as ReturnType<typeof vi.fn>).mockImplementation(
       () => ({ allowed: true }),
@@ -298,6 +300,10 @@ describe("handleTabAction macro expansion (SW path)", () => {
     const res = await handleTabAction(
       { type: "navigate", url: "@reddit_subreddit programming", new_tab: true } as never,
       runState,
+      undefined,
+      undefined,
+      undefined,
+      { runId: "macro-run" },
     );
     expect(res.success).toBe(true);
     expect(chromeMock.tabs.create).toHaveBeenCalledWith(

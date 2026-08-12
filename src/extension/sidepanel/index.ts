@@ -7,6 +7,7 @@
  */
 
 import { openOptionsLink } from "./elements";
+import { startKeepalivePort } from "./keepalive";
 
 // Import sibling modules for their top-level side effects (onMessage listener
 // registration + addEventListener calls). ES module evaluation order ensures
@@ -19,29 +20,10 @@ import "./lifecycle";
 import "./usage-panel";
 
 // ─── Port-based service-worker keepalive ──────────────────────────────────
-
-let keepaliveDelay = 1000;
-const KEEPALIVE_MAX_DELAY = 30_000;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-
-function connectKeepalivePort(): void {
-  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-  try {
-    const port = chrome.runtime.connect({ name: "keepalive" });
-    keepaliveDelay = 1000;
-    port.onDisconnect.addListener(() => {
-      // Back off on disconnect-driven reconnects too — a flapping port
-      // should not reconnect every second indefinitely (matches the catch
-      // path below).
-      keepaliveDelay = Math.min(keepaliveDelay * 2, KEEPALIVE_MAX_DELAY);
-      reconnectTimer = setTimeout(connectKeepalivePort, keepaliveDelay);
-    });
-  } catch {
-    reconnectTimer = setTimeout(connectKeepalivePort, keepaliveDelay);
-    keepaliveDelay = Math.min(keepaliveDelay * 2, KEEPALIVE_MAX_DELAY);
-  }
-}
-connectKeepalivePort();
+// The port keeps the MV3 worker alive while the panel is open; `resetKeepaliveBackoff`
+// (imported by log-renderer/controls on observed traffic) keeps the reconnect
+// delay at its baseline on a healthy worker.
+startKeepalivePort();
 
 // ─── Settings link ────────────────────────────────────────────────────────
 

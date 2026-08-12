@@ -137,6 +137,10 @@ interface StreamState {
   model?: string;
   /** Count of non-JSON SSE frames dropped this stream (see DROPPED_FRAME_WARN_THRESHOLD). */
   dropped?: number;
+  /** A thinking-only part was seen; its text is never treated as user-visible output. */
+  reasoningObserved?: boolean;
+  /** Last provider terminal reason, retained only as a machine-readable tag. */
+  finishReason?: string;
   usage?: { tokensIn: number; tokensOut: number; reasoningTokens?: number; cachedInputTokens?: number; model: string; costUsd: number };
 }
 
@@ -178,15 +182,28 @@ export const protocol: Protocol<GeminiBody, string, { type: string; content?: st
         const msg = typeof err === "string" ? err : (err.message ?? JSON.stringify(err));
         throw new Error(`Gemini API error: ${msg}`);
       }
-      const parts = (data as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> }).candidates?.[0]?.content?.parts;
+      const candidate = (data as {
+        candidates?: Array<{
+          content?: { parts?: Array<{ text?: string; thought?: boolean }> };
+          finishReason?: string;
+        }>;
+      }).candidates?.[0];
+      const parts = candidate?.content?.parts;
       if (parts) {
         for (const p of parts) {
+          if (p.thought === true) {
+            // Gemini thought text is internal reasoning, not a visible answer.
+            // Preserve only a boolean aggregate for safe terminal diagnostics.
+            state.reasoningObserved = true;
+            continue;
+          }
           if (p.text) {
             state.content += p.text;
             events.push({ type: "text", content: p.text });
           }
         }
       }
+      if (candidate?.finishReason) state.finishReason = candidate.finishReason;
       const usage = (data as { usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; cachedContentTokenCount?: number; thoughtsTokenCount?: number } }).usageMetadata;
       if (usage) {
  // Capture cachedContentTokenCount (cached → billed at cacheRead
@@ -195,6 +212,7 @@ export const protocol: Protocol<GeminiBody, string, { type: string; content?: st
  // 30-60%).
         const cached = usage.cachedContentTokenCount;
         const reasoning = usage.thoughtsTokenCount;
+        if (typeof reasoning === "number" && reasoning > 0) state.reasoningObserved = true;
         state.usage = {
           tokensIn: usage.promptTokenCount ?? 0,
           tokensOut: (usage.candidatesTokenCount ?? 0) + (typeof reasoning === "number" && reasoning > 0 ? reasoning : 0),
@@ -229,6 +247,12 @@ export const protocol: Protocol<GeminiBody, string, { type: string; content?: st
         return false;
       }
     },
+    completion: (state: StreamState) => ({
+      reasoningObserved: state.reasoningObserved,
+      reasoningTokens: state.usage?.reasoningTokens,
+      finishReason: state.finishReason,
+      droppedFrames: state.dropped,
+    }),
   },
 };
 

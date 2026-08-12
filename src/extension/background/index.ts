@@ -25,10 +25,29 @@
  */
 
 import { parseAlarmName, initScheduledTasks } from "@/lib/agent/scheduled-tasks";
+import {
+  assertStorageVersionSupported,
+} from "@/lib/agent/storage-version";
+import {
+  invalidateLiveSecretRedaction,
+  primeLiveSecretRedaction,
+} from "@/lib/agent/secrets";
+import { ensureApiKeyInSession } from "@/extension/api-key-storage";
+import { migrateRememberedCredential } from "@/extension/credential-service";
+import { restrictSessionStorageToTrustedContexts } from "@/extension/storage-access";
 import { getRunState, clearRunState, stopKeepalive, KEEPALIVE_ALARM, requestKeepAwake, safeLog } from "./state-store";
+import {
+  getPersistedRunSnapshot,
+  persistInterruptedRunHistory,
+  persistInterruptedRunSnapshot,
+} from "./run-snapshot-store";
+import { setRunRecoveryAudit } from "./run-recovery-gate";
+import { serializeEventTime } from "./run-event-projection";
 import { handleScheduledTaskFire } from "./task-queue";
 import { registerRateLimitListener } from "./rate-limit-tracker";
 import { startSwWatchdog } from "./watchdog";
+import { createProviderLifecycleService } from "./provider-lifecycle-service";
+import { installDefaultOptionsPlatformConnectionService } from "./options-platform-command";
 // Importing `./message-routing` registers the `chrome.runtime.onMessage`
 // listener as a top-level side effect. The listener depends on `startRun`
 // (from `./agent-bridge`), which depends on `./tab-manager` + `./state-store`.
@@ -48,6 +67,40 @@ registerRateLimitListener();
 // own guard, own notice path — independent of the pricing boot arm above).
 // MV3: the interval dies with the SW and is re-armed on the next load.
 startSwWatchdog();
+const providerLifecycleService = createProviderLifecycleService();
+providerLifecycleService.start();
+installDefaultOptionsPlatformConnectionService();
+
+// Legacy plaintext may be written by an older Options page while this worker
+// is already alive. Serialize only positive opt-in/source writes; migration's
+// own apiKey removal and manifest/journal writes therefore cannot form a
+// storage-change loop. Failures intentionally retain the legacy source for a
+// later startup/change retry and never include credential bytes in logs.
+let credentialMigrationQueue: Promise<void> = Promise.resolve();
+function queueLegacyCredentialMigration(): void {
+  credentialMigrationQueue = credentialMigrationQueue
+    .then(async () => {
+      await migrateRememberedCredential();
+      await primeLiveSecretRedaction(await ensureApiKeyInSession());
+    })
+    .catch(async () => {
+      // A vault retry may fail while a separately verified session credential
+      // remains usable. Prime from that trusted session; if it is unavailable,
+      // ensureApiKeyInSession returns empty and the cache contains no API key.
+      try {
+        await primeLiveSecretRedaction(await ensureApiKeyInSession());
+      } catch {
+        invalidateLiveSecretRedaction();
+      }
+      /* verified migration remains resumable */
+    });
+}
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local") return;
+  const apiKeyWrite = typeof changes.apiKey?.newValue === "string" && changes.apiKey.newValue.length > 0;
+  const consentGranted = changes.rememberApiKey?.newValue === true;
+  if (apiKeyWrite || consentGranted) queueLegacyCredentialMigration();
+});
 
 // Top-level safety net: rejections thrown outside any try/catch (e.g. an async
 // listener body or a late `import()` that rejects) are otherwise silently
@@ -60,26 +113,6 @@ self.addEventListener("error", (e: ErrorEvent) => {
   void safeLog("error", "[sw] uncaught error:", e.error ?? e.message);
 });
 
-// Warm the models.dev catalog (SDK snapshot + live /api.json refresh) so
-// cost tracking uses current rates. pricing.ts no longer has a static table —
-// rates come from the catalog. Lazy import keeps the (large) pricing module out
-// of the critical path.
-// NOTE: the catalog is sourced from @opencode-ai/models/snapshot and used
-// offline-first; the live https://models.dev/api.json fetch is only a
-// refresh/merge layer, so there is no runtime redistribution concern.
-function warmPricingCatalog(): void {
-  void import("../../lib/agent/llm/pricing")
-    .then((m) => m.refreshPricingFromCatalog())
-    .then(async () => {
-  // After the first successful live catalog load, arm the one-shot
-  // stale-while-refresh timer so a long-lived SW keeps picking up fresh rates
-  // (catalog.ts re-arms it on each subsequent successful load).
-      const catalog = await import("../../lib/agent/llm/catalog");
-      if (catalog.catalogFetchSucceeded()) catalog.scheduleRefresh();
-    })
-    .catch((e) => void safeLog("warn", "[pricing] live catalog refresh failed:", e));
-}
-
 // ─── Side panel wiring ──────────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -89,36 +122,7 @@ chrome.runtime.onInstalled.addListener(() => {
       /* setPanelBehavior can reject on unsupported Chrome versions — non-fatal */
     });
 
-  warmPricingCatalog();
-});
-
-// On browser/extension startup (a more reliable trigger than onInstalled for
-// resuming service-worker incarnations), also warm the catalog (bundled + live
-// refresh).
-chrome.runtime.onStartup.addListener(() => {
-  warmPricingCatalog();
-});
-
-// ─── Live pricing: refresh when provider/model/apiKey/baseUrl changes ────────
-// Best-effort: settings changes can alter which model is billable, so re-warm
-// the catalog. Guard with a short throttle so a burst of storage writes
-// (e.g. multiple key/value updates in one save) doesn't trigger redundant
-// refreshes back-to-back.
-let lastPricingRefreshAt = 0;
-const PRICING_REFRESH_THROTTLE_MS = 2000;
-
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== "local" && area !== "sync") return;
-  const relevant = Object.keys(changes).some((key) =>
-    /^(?:provider|model|apiKey|api_key|baseUrl|base_url|endpoint)/i.test(key),
-  );
-  if (!relevant) return;
-
-  const now = Date.now();
-  if (now - lastPricingRefreshAt < PRICING_REFRESH_THROTTLE_MS) return;
-  lastPricingRefreshAt = now;
-
-  warmPricingCatalog();
+  providerLifecycleService.warm();
 });
 
 // ─── Keyboard shortcut: open side panel (Ctrl+E / Cmd+E) ────────────────────
@@ -208,21 +212,76 @@ chrome.runtime.onConnect.addListener((port) => {
  * incarnation.
  */
 async function onServiceWorkerStartup(): Promise<void> {
+  // Fail closed before any credential or run-authority read if the browser
+  // cannot apply the strongest stable session-storage visibility restriction.
+  await restrictSessionStorageToTrustedContexts();
+
+  // Fail closed if persisted data claims a version this build cannot read: a
+  // future-version marker means a newer extension wrote incompatible records,
+  // and reading/mutating them could emit garbage. Legacy unmarked data (the
+  // pre-versioning baseline) passes through the migration window.
   try {
-    const state = await getRunState();
-    if (state?.active) {
+    await Promise.all([
+      assertStorageVersionSupported("settings"),
+      assertStorageVersionSupported("history"),
+      assertStorageVersionSupported("schedules"),
+    ]);
+  } catch (e) {
+    void safeLog("error", "[sw-startup] storage version gate failed (refusing admission):", e);
+    throw e;
+  }
+
+  // STATUS and recovery can expose a persisted snapshot before the first run
+  // starts. Prime the synchronous exact-value redactor behind the same startup
+  // gate those handlers await, so ordinary snapshot text is not fail-closed
+  // merely because this is a fresh worker incarnation.
+  try {
+    try { await migrateRememberedCredential(); } catch { /* retry via listener/next startup */ }
+    await primeLiveSecretRedaction(await ensureApiKeyInSession());
+  } catch {
+    invalidateLiveSecretRedaction();
+  }
+  let runRecoveryFailed = false;
+  let runRecoveryFailure: unknown;
+  try {
+    // Read both durability projections. A crash can land after the initial
+    // snapshot write but before initRunState, leaving no active RunState at
+    // all; treating that snapshot as a live run would authorize a zombie.
+    const [state, persistedSnapshot] = await Promise.all([
+      getRunState(),
+      getPersistedRunSnapshot(),
+    ]);
+    const snapshotActive = persistedSnapshot && (
+      persistedSnapshot.status === "starting" ||
+      persistedSnapshot.status === "running" ||
+      persistedSnapshot.status === "cancelling"
+    );
+    if (state?.active || snapshotActive) {
       const interruptedMessage =
         "Service worker was restarted mid-run. The previous run cannot be resumed — please start a new one.";
+      // Make the terminal projection and content-side cutoff durable before
+      // clearing RunState. This ordering closes the SW-restart action leak.
+      const interrupted = await persistInterruptedRunSnapshot(state?.active ? state : null, interruptedMessage);
+      try {
+        const { broadcastRunCancellation } = await import("./tab-manager");
+        await broadcastRunCancellation(interrupted);
+      } catch {
+        // The controller is gone, so failure to reach an individual tab can
+        // never reopen background authority; the persisted terminal cutoff is
+        // still the fail-closed source for subsequent recovery.
+      }
       chrome.runtime
         .sendMessage({
           type: "AGENT_EVENT",
           event: {
             type: "error",
-            step: state.step,
+            step: interrupted.step,
             message: interruptedMessage,
             recoverable: false,
           },
-          time: new Date().toLocaleTimeString("en-GB", { hour12: false }),
+          runId: interrupted.runId,
+          revision: interrupted.revision,
+          time: serializeEventTime(),
         })
         .catch(() => {
           /* side panel may not be open — non-fatal */
@@ -237,9 +296,12 @@ async function onServiceWorkerStartup(): Promise<void> {
       } catch {
         /* best-effort — the live broadcast still fires */
       }
+      try { await persistInterruptedRunHistory(interrupted); } catch { /* best-effort history */ }
       await clearRunState();
     }
   } catch (e) {
+    runRecoveryFailed = true;
+    runRecoveryFailure = e;
     void safeLog("error", "[sw-startup] run-state check failed (alarms still armed below):", e);
   }
  // A keepalive alarm leaks when the SW dies mid-run: it is armed by
@@ -277,6 +339,9 @@ async function onServiceWorkerStartup(): Promise<void> {
   } catch (e) {
     void safeLog("error", "[sw-startup] failed to acquire keep-awake lock:", e);
   }
+  if (runRecoveryFailed) throw runRecoveryFailure;
 }
 
-void onServiceWorkerStartup();
+// Install the gate synchronously during module evaluation, before Chrome can
+// dispatch RUN/STATUS to the listener registered above.
+setRunRecoveryAudit(onServiceWorkerStartup());

@@ -6,6 +6,14 @@
 
 import { injectAntiDetection, isStealthEnabled } from "@/lib/agent/anti-detection";
 
+function abortError(): DOMException {
+  return new DOMException("Aborted", "AbortError");
+}
+
+export function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : abortError();
+}
+
 // ─── Screenshot quality cache ───────────────────────────────────────────────
 
 let cachedScreenshotQuality: number | null = null;
@@ -129,8 +137,11 @@ export async function sendMessageWithTimeout<R = unknown>(
   tabId: number,
   message: unknown,
   timeoutMs: number = CONTENT_SCRIPT_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<R> {
+  throwIfAborted(signal);
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let abortListener: (() => void) | undefined;
   const send = chrome.tabs.sendMessage<R>(tabId, message as never);
   send.catch(() => {});
   try {
@@ -142,9 +153,17 @@ export async function sendMessageWithTimeout<R = unknown>(
           timeoutMs,
         );
       }),
+      ...(signal
+        ? [new Promise<never>((_, reject) => {
+            abortListener = () => reject(signal.reason instanceof Error ? signal.reason : abortError());
+            if (signal.aborted) abortListener();
+            else signal.addEventListener("abort", abortListener, { once: true });
+          })]
+        : []),
     ]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+    if (abortListener && signal) signal.removeEventListener("abort", abortListener);
   }
 }
 
@@ -161,18 +180,22 @@ export async function getPageFingerprint(tabId: number): Promise<string> {
   }
 }
 
-export async function ensureContent(tabId: number): Promise<void> {
+export async function ensureContent(tabId: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
   try {
     const res = await sendMessageWithTimeout<{ ok: boolean } | undefined>(
       tabId,
       { type: "PING" },
       PING_TIMEOUT_MS,
+      signal,
     );
     if (res?.ok) return;
-  } catch {
+  } catch (e) {
+    if (signal?.aborted) throw e;
     /* not injected yet — fall through to injection */
   }
   try {
+    throwIfAborted(signal);
     if (await isStealthEnabled()) {
       try {
         await injectAntiDetection(tabId);
@@ -186,20 +209,35 @@ export async function ensureContent(tabId: number): Promise<void> {
     }
     await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
     for (let i = 0; i < 10; i++) {
+      throwIfAborted(signal);
       try {
         const res = await sendMessageWithTimeout<{ ok: boolean } | undefined>(
           tabId,
-          { type: "PING" },
-          PING_POLL_TIMEOUT_MS,
+        { type: "PING" },
+        PING_POLL_TIMEOUT_MS,
+        signal,
         );
         if (res?.ok) return;
-      } catch {
+      } catch (e) {
+        if (signal?.aborted) throw e;
         /* keep polling */
       }
-      await new Promise((r) => setTimeout(r, 50));
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        }, 50);
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(signal?.reason instanceof Error ? signal.reason : abortError());
+        };
+        if (signal?.aborted) onAbort();
+        else signal?.addEventListener("abort", onAbort, { once: true });
+      });
     }
     throw new Error("content script did not become ready after injection");
   } catch (e) {
+    if (signal?.aborted) throw e;
     throw new Error(`Cannot inject into tab ${tabId}: ${e instanceof Error ? e.message : String(e)}`);
   }
 }

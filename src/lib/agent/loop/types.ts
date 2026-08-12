@@ -19,6 +19,64 @@ import type { AgentMode } from "../modes";
 import type { CallbackDispatcher, AsyncCallbackHandler } from "../callbacks";
 import type { LoopDetector } from "./loop-detector";
 
+// ─── Run-phase state machine (Phase 9) ───────────────────────────────────────
+
+/**
+ * Typed run phases of the agent loop's EXPLICIT state machine (Phase 9).
+ *
+ * The orchestrator's control flow is expressed as documented transitions
+ * between these phases instead of an implicit while-loop. Each phase owns a
+ * well-defined slice of the run:
+ *
+ * - `init` — config validation, state construction, `run-start` emission.
+ * - `plan` — a planner LLM phase: the initial planner call (with the
+ *   measured simple-task fast-path pre-check in front of it) or a periodic
+ *   re-evaluation. Transitions to `observe` on "continue", to `terminal`
+ *   when the planner finalizes/errors.
+ * - `observe` — page observation (getTabs + extractState, anti-bot challenge
+ *   detection, stagnation fingerprinting). Transitions to `act` when the
+ *   page state is ready, to `recover` on a non-fatal observation failure.
+ * - `act` — the navigator LLM call, action selection, and action execution.
+ *   Transitions to `verify` when the navigator emits `done`, to `recover`
+ *   on a non-fatal model/execution error.
+ * - `verify` — the planner verification of a navigator `done` + the judge
+ *   (completion-with-evidence). Transitions to `terminal` when finalized, to
+ *   `observe` when the judge routes the unverified claim back.
+ * - `recover` — non-terminal bookkeeping between steps: consecutive-failure
+ *   accounting, compaction, takeover waits, step rollover. Transitions to
+ *   `plan` (periodic planner due) or `observe` (next step).
+ * - `terminal` — the terminal `done` event + `runEnd` dispatch have been
+ *   emitted. Sticky: no outgoing transitions.
+ *
+ * The allowed transitions are enforced by the transition table in
+ * `run-state-machine.ts` (see {@link RUN_TRANSITIONS}); an illegal transition
+ * throws (fail-closed) instead of silently continuing.
+ */
+export type RunPhase =
+  | "init"
+  | "plan"
+  | "observe"
+  | "act"
+  | "verify"
+  | "recover"
+  | "terminal";
+
+/** A recorded run-phase transition (from → to + reason), for tests/docs. */
+export interface RunPhaseTransition {
+  /** The phase the run was in before the transition. */
+  from: RunPhase;
+  /** The phase the run moved into. */
+  to: RunPhase;
+  /** Why the transition happened (human-readable, includes the call site). */
+  reason: string;
+  /** The step number at the time of the transition. */
+  step: number;
+  /** Wall-clock timestamp (ms) when the transition was recorded. */
+  ts: number;
+  /** Milliseconds since the previous recorded transition (0 for the first). */
+  durationMs: number;
+}
+
 // ─── LLM call signatures ────────────────────────────────────────────────────
 
 /** Shared return shape for an LLM call that yields raw text + optional usage. */
@@ -113,11 +171,11 @@ export interface LoopDeps {
   /**
  * Optional anti-bot challenge detector.
  */
-  detectChallenge?: () => Promise<{ kind: string; message: string } | null>;
+  detectChallenge?: (signal?: AbortSignal) => Promise<{ kind: string; message: string } | null>;
   /**
  * Optional: wait for an anti-bot challenge to clear on its own.
  */
-  waitForChallengeResolution?: () => Promise<boolean>;
+  waitForChallengeResolution?: (signal?: AbortSignal) => Promise<boolean>;
   /**
  * Optional pause-check callback.
  */
@@ -125,11 +183,11 @@ export interface LoopDeps {
   /**
  * Optional page-HTML extractor for the HTML-content evaluator.
  */
-  getPageHtml?: () => Promise<string>;
+  getPageHtml?: (signal?: AbortSignal) => Promise<string>;
   /**
  * Optional current-URL fetcher for the URL evaluator.
  */
-  getCurrentUrl?: () => Promise<string>;
+  getCurrentUrl?: (signal?: AbortSignal) => Promise<string>;
   /**
  * Optional confirmation gate.
  */
@@ -184,6 +242,15 @@ export interface LoopState {
   /** Delay between steps when `deps.waitForSettled` is absent. */
   settleDelay: number;
  // ── Mutable ──
+  /** Current phase of the explicit run-state machine (Phase 9). Set to
+  * `"init"` by {@link initState}; advanced only through
+  * {@link transitionRunPhase} (which validates against the transition table).
+  * `"terminal"` is sticky — once the terminal event is emitted the phase never
+  * leaves `terminal`. */
+  phase: RunPhase;
+  /** True when the measured simple-task fast path (Phase 9) completed the run
+  * on direct current-page evidence (no initial planner call, no screenshot). */
+  fastPathUsed?: boolean;
   /** Accumulated navigator history (one entry per navigator step). */
   navigatorHistory: HistoryItem[];
   /** Loop detector (repetition + A,B,A,B alternation). */
@@ -229,6 +296,17 @@ export interface LoopState {
   terminalEmitted?: boolean;
   /** The last URL observed by `observeState`. */
   lastObservedUrl?: string;
+  /** Structured phase-transition log: every `transitionRunPhase` call appends
+   * one entry, so a run's whole phase path is reconstructable by replay. */
+  transitions: RunPhaseTransition[];
+  /** Consecutive judge rejections (verdict false OR null verdict) since the
+   * last agreement. Bounds the judge↔planner disagreement loop: when it
+   * reaches {@link JUDGE_CONSECUTIVE_REJECT_LIMIT} the next completion claim
+   * is forced through a planner re-plan instead of a plain re-observe. */
+  consecutiveJudgeRejections: number;
+  /** Set when the judge disagreement bound is exceeded; consumed by the
+   * navigator-done path to force a `recover → plan` re-plan. */
+  judgeReplanForced?: boolean;
  // ── Optional callback dispatcher ──
   /** The dispatcher (constructed iff `deps.callbacks` was provided). */
   dispatcher?: CallbackDispatcher;

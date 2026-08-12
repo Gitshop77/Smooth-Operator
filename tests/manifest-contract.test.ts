@@ -34,7 +34,6 @@ const BASELINE_PERMISSIONS = [
   "unlimitedStorage",
   "power",
   "webRequest",
-  "dns",
   "cookies",
 ] as const;
 
@@ -71,6 +70,10 @@ describe("manifest contract", () => {
 
   test("permission set matches the reviewed baseline (PERMISSIONS.md)", () => {
     expect([...manifest.permissions].sort()).toEqual([...BASELINE_PERMISSIONS].sort());
+    // chrome.dns is officially Dev-channel-only. Stable packaged candidates
+    // must not request it or claim that the permission enables full DNS
+    // rebinding validation.
+    expect(manifest.permissions).not.toContain("dns");
   });
 
   test("host permissions match the reviewed baseline", () => {
@@ -140,5 +143,31 @@ describe("meta CSP on extension pages", () => {
     );
     expect(csp).not.toBeNull();
     expect(csp![1]).toContain("script-src 'self' 'wasm-unsafe-eval'");
+  });
+
+  test("Options declares its direct-provider connect policy explicitly", () => {
+    const csp = read("options.html").match(
+      /<meta http-equiv="Content-Security-Policy" content="([^"]+)"/,
+    );
+    expect(csp).not.toBeNull();
+    // This is a characterization, not an endorsement of broad direct network
+    // access. Phase 4 owns replacing the current policy with a browser-valid,
+    // reviewed provider/loopback policy. Until then, do not let a markup edit
+    // silently delete the only declared connection boundary.
+    expect(csp![1]).toContain("connect-src");
+    expect(csp![1]).toContain("https://*");
+    expect(csp![1]).toContain("http://localhost:*");
+    expect(csp![1]).toContain("http://127.0.0.1:*");
+  });
+
+  test("Options CSP excludes Chromium's invalid IPv6 wildcard source", () => {
+    const csp = read("options.html").match(
+      /<meta http-equiv="Content-Security-Policy" content="([^"]+)"/,
+    );
+    expect(csp).not.toBeNull();
+    // Chromium rejects this IPv6 wildcard source in extension-page CSP. Keep
+    // the valid localhost/IPv4 loopback policy above and never reintroduce it
+    // as a false local-provider compatibility claim.
+    expect(csp![1]).not.toContain("http://[::1]:*");
   });
 });

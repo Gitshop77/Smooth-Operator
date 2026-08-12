@@ -13,6 +13,7 @@ import { describe, test, expect, vi } from "vitest";
 import { LoopDetector } from "../src/lib/agent/loop/loop-detector";
 import { shouldCompact, partitionHistory, buildCompactionRequest, sanitizeCompactedMemory } from "../src/lib/agent/loop/compaction";
 import { runAgentLoop } from "../src/lib/agent/loop/orchestrator";
+import { PromptBudgetExceededError } from "../src/lib/agent/prompts/prompt-token-budget";
 import type { LoopDeps } from "../src/lib/agent/loop/types";
 import type { HistoryItem, AgentAction, ActionResult, LogEvent, AgentOutput } from "../src/lib/agent/types";
 import { AgentOutputSchema } from "../src/lib/agent/tools/schema";
@@ -535,11 +536,15 @@ describe("runAgentLoop — hard maxSteps cap terminates a benign distinct-action
 // second, duplicate `done` with literal `success:false, text:""` that would
 // clobber a genuinely-successful completion in the UI.
 
-describe("runAgentLoop — terminal done matches planner/judge decision", () => {
-  test("emits exactly one terminal done equal to the planner/judge success", async () => {
-    const events: LogEvent[] = [];
+describe("runAgentLoop — terminal done + completion-with-evidence (Phase 9)", () => {
+  /** Build deps: navigator emits done, the verification planner says done(success=true). */
+  function makeDoneDeps(opts: {
+    events: LogEvent[];
+    plannerOutput: Record<string, unknown>;
+    summarizeCall?: LoopDeps["summarizeCall"];
+  }): LoopDeps {
     let plannerCalls = 0;
-    const deps: LoopDeps = {
+    return {
       task: "test task",
       navigatorCall: vi.fn(async () => ({
         raw: JSON.stringify({
@@ -564,17 +569,9 @@ describe("runAgentLoop — terminal done matches planner/judge decision", () => 
           };
         }
         // Verification planner after the navigator's done: confirm success.
-        return {
-          raw: JSON.stringify({
-            thinking: "x",
-            decision: "done",
-            success: true,
-            text: "planner confirms success",
-            plan: ["a"],
-            next_goal: "g",
-          }),
-        };
+        return { raw: JSON.stringify(opts.plannerOutput) };
       }),
+      summarizeCall: opts.summarizeCall,
       getTabs: vi.fn(async () => [
         { id: 1, label: "1", url: "https://example.com", title: "t", active: true },
       ]),
@@ -582,10 +579,73 @@ describe("runAgentLoop — terminal done matches planner/judge decision", () => 
       executeActions: vi.fn(async (actions: AgentAction[]) =>
         actions.map((action) => ({ action, success: true, message: "ok" } as ActionResult)),
       ),
-      onEvent: (e: LogEvent) => { events.push(e); },
+      onEvent: (e: LogEvent) => { opts.events.push(e); },
       settleDelay: 0,
       config: { ...BASE_CONFIG },
     };
+  }
+
+  test("in-run done(success=true) without evidence + judge disabled → routed back (unverified), never a bare-claim success", async () => {
+    // Phase 9 completion-with-evidence: the verification planner's bare
+    // done(success=true) has NO positive completion evidence (no
+    // expectedOutcomes) and the judge is disabled (BASE_CONFIG) — there is
+    // no verification path, so the claim must be routed back and the run
+    // must NOT finalize success. It continues to maxSteps and ends as an
+    // unverified FAILURE. (Pre-Phase-9 this finalized success on the bare
+    // planner claim.)
+    const events: LogEvent[] = [];
+    const deps = makeDoneDeps({
+      events,
+      plannerOutput: {
+        thinking: "x",
+        decision: "done",
+        success: true,
+        text: "planner confirms success",
+        plan: ["a"],
+        next_goal: "g",
+      },
+    });
+
+    await runAgentLoop(deps);
+
+    const doneEvents = events.filter((e) => e.type === "done");
+    expect(doneEvents).toHaveLength(1);
+    expect(doneEvents[0]).toMatchObject({ type: "done", success: false });
+    expect((doneEvents[0] as Extract<LogEvent, { type: "done" }>).text).toMatch(/max steps/i);
+    // The run continued past the unverified done attempt instead of
+    // finalizing on the bare claim.
+    const stepStarts = events.filter((e) => e.type === "navigator-step-start");
+    expect(stepStarts.length).toBeGreaterThan(1);
+  });
+
+  test("in-run done(success=true) + agreeing judge → finalizes success (judge is the evidence)", async () => {
+    // Phase 9 completion-with-evidence: with the judge ENABLED, the in-run
+    // done attempt now runs the LLM judge as the evidence source; an
+    // agreeing verdict finalizes success. (Pre-Phase-9 the judge was skipped
+    // for free-form in-run done attempts.)
+    const events: LogEvent[] = [];
+    const deps = makeDoneDeps({
+      events,
+      plannerOutput: {
+        thinking: "x",
+        decision: "done",
+        success: true,
+        text: "planner confirms success",
+        plan: ["a"],
+        next_goal: "g",
+      },
+      // The judge LLM (via summarizeCall) agrees with the completion.
+      summarizeCall: vi.fn(async () => ({
+        content: JSON.stringify({
+          reasoning: "The trajectory shows the task completed.",
+          verdict: true,
+          failureReason: null,
+          impossibleTask: false,
+          reachedCaptcha: false,
+        }),
+      })),
+    });
+    deps.config = { ...BASE_CONFIG, enableJudge: true };
 
     await runAgentLoop(deps);
 
@@ -765,6 +825,70 @@ describe("runAgentLoop — initial planner plan application", () => {
 // through the cost cap. The step must then exit immediately: the periodic
 // planner check right after it is an outbound LLM call that must not fire
 // after the run has ended (it would spend more budget on a dead run).
+
+describe("runAgentLoop — compaction budget exceeded finalizes as FAILURE", () => {
+  test("a typed PromptBudgetExceededError from the summarizer ends the run, not 'compaction skipped'", async () => {
+    const events: LogEvent[] = [];
+    const budgetError = new PromptBudgetExceededError("compaction", 30_000, 25_856);
+    const summarizeCall = vi.fn(async () => {
+      throw budgetError;
+    });
+    const plannerCall = vi.fn(async () => ({
+      raw: JSON.stringify({
+        thinking: "x",
+        decision: "continue",
+        plan: ["a"],
+        next_goal: `g${plannerCall.mock.calls.length}`,
+      }),
+    }));
+    const deps: LoopDeps = {
+      task: "test task",
+      navigatorCall: vi.fn(async () => ({
+        raw: JSON.stringify({
+          thinking: "x",
+          evaluation_previous_goal: "y",
+          memory: "z",
+          next_goal: "w",
+          action: [{ type: "scroll", down: true, pages: 1 } as AgentAction],
+        }),
+      })),
+      plannerCall,
+      summarizeCall,
+      getTabs: vi.fn(async () => [
+        { id: 1, label: "1", url: "https://example.com", title: "t", active: true },
+      ]),
+      extractState: vi.fn(async () => makeState()),
+      executeActions: vi.fn(async (actions: AgentAction[]) =>
+        actions.map((action) => ({
+          action,
+          success: true,
+          message: `ok ${"x".repeat(1200)}`,
+        } as ActionResult)),
+      ),
+      onEvent: (e: LogEvent) => { events.push(e); },
+      settleDelay: 0,
+      config: {
+        ...BASE_CONFIG,
+        maxSteps: 10,
+        enableCompaction: true,
+        compactionStepInterval: 1,
+        compactionCharThreshold: 1000,
+        plannerInterval: 1,
+        enableEarlyStop: false,
+      },
+    };
+
+    await runAgentLoop(deps);
+
+    const doneEvents = events.filter((e) => e.type === "done");
+    expect(doneEvents).toHaveLength(1);
+    // The typed budget error must surface as the terminal failure text (not the
+    // generic "Compaction skipped due to error" info event).
+    expect(doneEvents[0].success).toBe(false);
+    expect(doneEvents[0].text).toContain("Prompt budget exceeded");
+    expect(events.some((e) => e.type === "info" && e.message.includes("Compaction skipped"))).toBe(false);
+  });
+});
 
 describe("runAgentLoop — cost cap hit during compaction exits before the periodic planner check", () => {
   test("no planner call fires after compaction exceeds the cost cap", async () => {
@@ -1039,18 +1163,18 @@ describe("runAgentLoop — fatal error exit (exitWithFinish)", () => {
 
     const doneEvents = events.filter((e) => e.type === "done");
     expect(doneEvents).toHaveLength(1);
-    expect(doneEvents[0]).toMatchObject({ type: "done", success: false, step: 0 });
+    expect(doneEvents[0]).toMatchObject({ type: "done", success: false });
     expect(doneEvents[0].text).toBe("Fatal error (auth): 401 unauthorized");
   });
 });
 
-describe("runAgentLoop — user-stop exit (exitStoppedByUser)", () => {
-  test("cancelled-classified navigator error terminates with 'Agent stopped by user.'", async () => {
+describe("runAgentLoop — provider abort wording", () => {
+  test("provider abort prose without an aborted root is not reported as a user STOP", async () => {
     const events: LogEvent[] = [];
     const deps: LoopDeps = {
       task: "test task",
       navigatorCall: vi.fn(async () => {
-        throw new Error("request cancelled by user");
+        throw new Error("upstream connection aborted unexpectedly");
       }),
       plannerCall: vi.fn(async () => ({
         raw: JSON.stringify({
@@ -1073,8 +1197,13 @@ describe("runAgentLoop — user-stop exit (exitStoppedByUser)", () => {
 
     const doneEvents = events.filter((e) => e.type === "done");
     expect(doneEvents).toHaveLength(1);
-    expect(doneEvents[0]).toMatchObject({ type: "done", success: false, step: 0 });
-    expect(doneEvents[0].text).toBe("Agent stopped by user.");
+    expect(doneEvents[0]).toMatchObject({ type: "done", success: false });
+    expect(doneEvents[0].text).not.toBe("Agent stopped by user.");
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "error",
+      code: "network_error",
+      message: expect.stringMatching(/Network error/i),
+    }));
   });
 });
 

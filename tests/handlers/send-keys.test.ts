@@ -102,6 +102,26 @@ describe("keyEventCodes fidelity", () => {
       meta: false,
     });
   });
+
+  test("parseKeys normalizes function keys to their uppercase spec value (f1 → F1)", () => {
+    expect(parseKeys("f1")).toEqual(plain("F1"));
+    expect(parseKeys("F12")).toEqual(plain("F12"));
+    expect(parseKeys("ctrl+f5")).toEqual({
+      main: "F5",
+      ctrl: true,
+      shift: false,
+      alt: false,
+      meta: false,
+    });
+  });
+
+  test("parseKeys maps del/ins/numlock/scrolllock/pause aliases to canonical keys", () => {
+    expect(parseKeys("del").main).toBe("Delete");
+    expect(parseKeys("ins").main).toBe("Insert");
+    expect(parseKeys("numlock").main).toBe("NumLock");
+    expect(parseKeys("scrolllock").main).toBe("ScrollLock");
+    expect(parseKeys("pause").main).toBe("Pause");
+  });
 });
 
 describe("mutateTextInput caret placement", () => {

@@ -10,9 +10,11 @@
  */
 
 import { $, escapeHtml, redactKeyLeak } from "@/extension/shared";
+import { announce } from "../accessibility";
 import { PROVIDER_META, DEFAULT_PROVIDER_ID, catalogIdFor } from "./providers";
 import { STORAGE_KEYS } from "./storage-keys";
-import { testProviderConnection, type ConnectionTestResult } from "./connection-test";
+import { testSelectedModelConnection, type ConnectionTestResult } from "./connection-test";
+import { providerConfigStore, connectionDiagnosticsStore } from "./stores";
 import {
   fetchCatalog,
   getProviders,
@@ -91,7 +93,7 @@ export function updateProviderUI(): void {
   const apikeyHint = document.getElementById("apikey-hint");
   if (apikeyHint) {
     apikeyHint.textContent = meta.needsKey
-      ? `Get your key at ${meta.keyUrl}. Held in memory for this session — never written to disk unless you opt into "remember on this device" below.`
+      ? `Get your key at ${meta.keyUrl}. Held in memory for this session unless you opt into encrypted storage on this device below.`
       : "Local provider — no key required (leave as-is).";
   }
   const modelInput = document.getElementById("model") as HTMLInputElement | null;
@@ -207,59 +209,111 @@ export function populateReasoningControls(modelId?: string, providerId?: string)
 
 // ─── Provider health check ──────────────────────────────────────────────
 
-document.getElementById("testConnection")?.addEventListener("click", async () => {
-  const testBtn = $("testConnection") as HTMLButtonElement;
-  const testResult = $("testResult") as HTMLSpanElement;
+/**
+ * Render the diagnostic surface strictly from the connection-diagnostics
+ * store. The store is authoritative: button disabled/aria-busy, result text,
+ * and class all derive from the current diagnostic entry, so a stale response
+ * dropped by the generation guard also cannot corrupt the UI.
+ */
+export function renderDiagnosticsFromStore(): void {
+  const testBtn = document.getElementById("testConnection") as HTMLButtonElement | null;
+  const testResult = document.getElementById("testResult") as HTMLSpanElement | null;
+  if (!testBtn || !testResult) return;
   testResult.setAttribute("aria-live", "polite");
-  testBtn.disabled = true;
-  testBtn.setAttribute("aria-busy", "true");
-  testResult.className = "test-result pending";
-  testResult.textContent = "Testing…";
+  const { current, error } = connectionDiagnosticsStore.getState();
+  const pending = current.state === "pending";
+  testBtn.disabled = pending;
+  testBtn.setAttribute("aria-busy", String(pending));
+  switch (current.state) {
+    case "idle":
+      testResult.className = "test-result";
+      testResult.textContent = error ?? "";
+      break;
+    case "pending":
+      testResult.className = "test-result pending";
+      testResult.textContent = "Testing…";
+      break;
+    case "ok":
+      testResult.className = "test-result success";
+      testResult.textContent = `✓ ${current.result?.message ?? "Connected"}`;
+      break;
+    case "cancelled":
+      testResult.className = "test-result failure";
+      testResult.textContent = "✗ Cancelled";
+      announce("Connection test cancelled", { assertive: true });
+      break;
+    case "failed":
+      testResult.className = "test-result failure";
+      testResult.textContent = `✗ ${current.error ?? "Connection test failed"}`;
+      announce(`Connection test failed: ${current.error ?? "Connection test failed"}`, {
+        assertive: true,
+      });
+      break;
+  }
+}
 
+document.getElementById("testConnection")?.addEventListener("click", async () => {
   const provider = ($("provider") as HTMLSelectElement).value;
- // SECURITY: apiKey is read from the form here for a one-shot test. It
- // originates from chrome.storage.local (UNENCRYPTED, MV3 has no secret
- // store). Prefer OAuth where supported; never console.log it. Errors surfaced
- // below are redacted inside `testProviderConnection` (reuses `redactKeyLeak`).
-  const apiKey = ($("apiKey") as HTMLInputElement).value;
   const baseUrl = ($("baseUrl") as HTMLInputElement).value;
- // `resourceName` is only present for Azure; read it without the throwing `$`
- // helper so a missing field degrades to "" rather than crashing the handler.
+  const model = ($("model") as HTMLInputElement).value.trim();
+  // `resourceName` is only present for Azure; read it without the throwing `$`
+  // helper so a missing field degrades to "" rather than crashing the handler.
   const resourceNameEl = document.getElementById("resourceName") as HTMLInputElement | null;
   const resourceName = resourceNameEl?.value ?? "";
+  const effectiveModel = model || PROVIDER_META[provider]?.defaultModel || "";
 
   if (!provider) {
-    testResult.className = "test-result failure";
-    testResult.textContent = "✗ No provider selected.";
-    testBtn.disabled = false;
-    testBtn.setAttribute("aria-busy", "false");
+    connectionDiagnosticsStore.dispatch({ type: "DIAGNOSTICS_ERROR", error: "No provider selected." });
+    renderDiagnosticsFromStore();
     return;
   }
 
+  // Tag this test with the CURRENT selection generation. If the user changes
+  // provider/model while the request is in flight, DIAGNOSTICS_INVALIDATED
+  // bumps the generation and this late response is dropped on resolve.
+  const generation = connectionDiagnosticsStore.getState().current.generation;
+  connectionDiagnosticsStore.dispatch({
+    type: "DIAGNOSTICS_TEST_STARTED",
+    generation,
+    provider,
+    model: effectiveModel,
+  });
+  renderDiagnosticsFromStore();
+
   try {
-    const result: ConnectionTestResult = await testProviderConnection({
+    const result: ConnectionTestResult = await testSelectedModelConnection({
       provider,
-      apiKey,
+      model: effectiveModel,
       baseUrl: baseUrl || undefined,
       resourceName: resourceName || undefined,
+      provenance: "user",
     });
-    testResult.className = `test-result ${result.ok ? "success" : "failure"}`;
-    testResult.textContent = result.ok
-      ? `✓ ${result.message}`
-      : `✗ ${result.message}`;
+    // The generation guard decides whether this result is still current; the
+    // render pass below always reflects the store's (possibly dropped) state.
+    connectionDiagnosticsStore.dispatch({
+      type: "DIAGNOSTICS_TEST_RESOLVED",
+      generation,
+      result: {
+        version: 1,
+        ok: result.ok,
+        code: result.ok ? "ok" : "provider_error",
+        latencyMs: result.latencyMs,
+        provider,
+        model: effectiveModel,
+        message: result.message,
+      },
+    });
   } catch (e) {
- // Defensive: testProviderConnection normally never throws (it returns a result
- // object), but if something unexpected escapes we still redact + truncate.
-    testResult.className = "test-result failure";
-    const raw = e instanceof Error ? e.message : String(e);
-    let masked = raw;
-    if (apiKey) masked = masked.split(apiKey).join("[REDACTED]");
-    masked = redactKeyLeak(masked);
-    testResult.textContent = `✗ ${masked.slice(0, 240)}`;
-  } finally {
-    testBtn.disabled = false;
-    testBtn.setAttribute("aria-busy", "false");
+    // Defensive: testProviderConnection normally never throws (it returns a result
+    // object), but if something unexpected escapes we still redact + truncate.
+    const masked = redactKeyLeak(e instanceof Error ? e.message : String(e));
+    connectionDiagnosticsStore.dispatch({
+      type: "DIAGNOSTICS_TEST_FAILED",
+      generation,
+      error: masked.slice(0, 240),
+    });
   }
+  renderDiagnosticsFromStore();
 });
 
 // ─── Model search (models.dev catalog) ──────────────────────────────────────
@@ -422,6 +476,7 @@ document.getElementById("model-search-results")?.addEventListener("click", (e) =
   if (!target?.dataset.modelId) return;
   const modelInput = $("model") as HTMLInputElement;
   modelInput.value = target.dataset.modelId;
+  modelInput.dispatchEvent(new Event("input", { bubbles: true }));
   modelInput.setAttribute("aria-activedescendant", target.id);
   modelInput.setAttribute("aria-expanded", "false");
   const resultsDiv = $("model-search-results") as HTMLDivElement;
@@ -435,6 +490,10 @@ document.getElementById("model-search-results")?.addEventListener("click", (e) =
   // O1: a committed model may carry different reasoning options than the
   // previous one — refresh the reasoning section for it.
   populateReasoningControls(target.dataset.modelId);
+  // Commit the selection to the authoritative store: the reducer bumps the
+  // generation so any in-flight connection test for the previous model is
+  // dropped on resolve (no stale-cache leak across model changes).
+  providerConfigStore.dispatch({ type: "MODEL_SELECTED", model: target.dataset.modelId });
 });
 
 // ─── Keyboard navigation for model search results ──────────────────────────
@@ -542,3 +601,24 @@ document.getElementById("refreshModels")?.addEventListener("click", async () => 
   btn.disabled = false;
   btn.setAttribute("aria-busy", "false");
 });
+
+// ─── Diagnostics invalidation + rendering (Phase 12 store wiring) ───────────
+
+/**
+ * Whenever the authoritative provider/model selection changes, the diagnostic
+ * surface is invalidated (its generation advances) so an in-flight connection
+ * test for the previous selection cannot settle onto the new one. Rendering
+ * then happens strictly from the store.
+ */
+let lastSelectionKey = "";
+providerConfigStore.subscribe((state) => {
+  const key = `${state.provider}|${state.model}`;
+  if (key !== lastSelectionKey) {
+    lastSelectionKey = key;
+    connectionDiagnosticsStore.dispatch({ type: "DIAGNOSTICS_INVALIDATED" });
+  }
+  renderDiagnosticsFromStore();
+});
+
+// Initial render so the surface reflects the store before any user action.
+renderDiagnosticsFromStore();

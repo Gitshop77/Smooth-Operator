@@ -16,19 +16,19 @@ export async function handleGetCookies(
   ctx: ActionContext,
   action: Extract<Action, { type: "get_cookies" }>,
 ): Promise<ActionResult> {
-  return delegateTabAction(action, ctx.signal);
+  return delegateTabAction(action, ctx.signal, ctx.dispatchToken, ctx.effectCapability);
 }
 
 export async function handleSetCookie(
   ctx: ActionContext,
   action: Extract<Action, { type: "set_cookie" }>,
 ): Promise<ActionResult> {
-  return delegateTabAction(action, ctx.signal);
+  return delegateTabAction(action, ctx.signal, ctx.dispatchToken, ctx.effectCapability);
 }
 
 export async function handleDeleteCookies(
   ctx: ActionContext,
   action: Extract<Action, { type: "delete_cookies" }>,
 ): Promise<ActionResult> {
-  return delegateTabAction(action, ctx.signal);
+  return delegateTabAction(action, ctx.signal, ctx.dispatchToken, ctx.effectCapability);
 }

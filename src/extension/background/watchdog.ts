@@ -10,6 +10,7 @@
  */
 
 import { consumeMemoryWarning } from "../vision-assistant/memory-watchdog";
+import { broadcastTrustedInternalWarning } from "./run-event-broadcast";
 
 export interface StallNotice {
   kind: "stall";
@@ -116,17 +117,5 @@ export function stopSwWatchdog(): void {
 }
 
 function emitNotice(message: string): void {
-  try {
-    chrome.runtime
-      .sendMessage({
-        type: "AGENT_EVENT",
-        event: { type: "warn", message },
-        time: new Date().toTimeString().slice(0, 8),
-      })
-      .catch(() => {
-        /* side panel may be closed — non-fatal */
-      });
-  } catch {
-    /* chrome.runtime unavailable during teardown */
-  }
+  broadcastTrustedInternalWarning(message);
 }

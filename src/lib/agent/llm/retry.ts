@@ -42,12 +42,23 @@ import { MAX_RETRY_AFTER_MS } from "./constants";
 const MAX_RETRIES = 3;
 /** Base delay for exponential backoff (doubles each attempt, in ms). */
 const BASE_DELAY_MS = 1_500;
-/** Max jitter added to each backoff delay (ms). */
-const BACKOFF_JITTER_MS = 500;
+/** Absolute ceiling on a single backoff delay (ms) — AWS-style full jitter
+ * samples uniformly in [0, min(cap, base·2^attempt)). */
+const BACKOFF_CAP_MS = 10_000;
 /** Absolute ceiling (ms) on cumulative retry delay — breaks the loop even if individual retries haven't exhausted MAX_RETRIES. */
 const MAX_RETRY_TOTAL_MS = 60_000;
 /** Chunk size (ms) for the abort-aware sleep loop. */
 const SLEEP_CHUNK_MS = 100;
+
+/** AWS Full Jitter: uniform sample in [0, min(cap, base·2^attempt)). The old
+ * capped-exponential + fixed additive jitter left concurrent 429/5xx clients
+ * retrying in synchronized waves (the 500ms window is negligible against a
+ * 6-12s backoff); full jitter desynchronizes retries and roughly halves
+ * aggregate downstream load. */
+function fullJitterDelay(attempt: number): number {
+  const cap = Math.min(BACKOFF_CAP_MS, BASE_DELAY_MS * Math.pow(2, attempt));
+  return Math.floor(Math.random() * cap);
+}
 
 /** Compiled once — reused on every retry attempt instead of recompiled inline. */
 const ABORT_NAME_RE = /\b(abort|cancelled|canceled)/i;
@@ -310,10 +321,10 @@ export async function withLLMRetry<T>(
       if (typeof retryAfterMs === "number" && retryAfterMs >= 0) {
         const capped = Math.min(retryAfterMs, MAX_RETRY_AFTER_MS);
         delay = capped > 0
-          ? capped + Math.random() * BACKOFF_JITTER_MS
+          ? Math.floor(Math.random() * capped)
           : 0;
       } else {
-        delay = BASE_DELAY_MS * Math.pow(2, attempt) + Math.random() * BACKOFF_JITTER_MS;
+        delay = fullJitterDelay(attempt);
       }
       const statusStr = typeof status === "number" ? `status=${status}` : "no-status";
       const retryAfterStr = typeof retryAfterMs === "number" && retryAfterMs >= 0

@@ -1,8 +1,30 @@
 import { describe, test, expect, beforeEach } from "vitest";
 import { makeChromeStorageMock } from "./helpers/chrome-storage-mock";
+import type { CredentialVault } from "../src/extension/credential-vault";
+import type { CredentialHandleV1, CredentialReferenceV1 } from "../src/extension/credential-contract";
 
 let localStore: Map<string, unknown>;
 let sessionStore: Map<string, unknown>;
+
+class MemoryVault implements CredentialVault {
+  records = new Map<CredentialHandleV1, { value: string; revision: number }>();
+  async write(handle: CredentialHandleV1, providerId: string, value: string, expectedRevision: number): Promise<CredentialReferenceV1> {
+    const current = this.records.get(handle)?.revision ?? 0;
+    if (current !== expectedRevision) throw new Error("stale");
+    const revision = current + 1;
+    this.records.set(handle, { value, revision });
+    return { version: 1, handle, providerId, revision };
+  }
+  async read(ref: CredentialReferenceV1): Promise<string | null> {
+    const record = this.records.get(ref.handle);
+    return record?.revision === ref.revision ? record.value : null;
+  }
+  async delete(ref: CredentialReferenceV1): Promise<void> {
+    const record = this.records.get(ref.handle);
+    if (record?.revision !== ref.revision) throw new Error("stale");
+    this.records.delete(ref.handle);
+  }
+}
 
 function setupChrome(): void {
   localStore = new Map<string, unknown>();
@@ -19,6 +41,8 @@ describe("api-key-storage policy", () => {
     const mod = await import("../src/extension/api-key-storage");
     ensureApiKeyInSession = mod.ensureApiKeyInSession;
     syncRememberedApiKey = mod.syncRememberedApiKey;
+    const service = await import("../src/extension/credential-service");
+    service.setCredentialVaultForTests(new MemoryVault());
   });
 
   test("returns the session key when present, without touching local", async () => {
@@ -52,10 +76,13 @@ describe("api-key-storage policy", () => {
     expect(await ensureApiKeyInSession()).toBe("");
   });
 
-  test("syncRememberedApiKey(true, key) writes key + flag to local", async () => {
+  test("syncRememberedApiKey(true, key) migrates plaintext to an opaque local manifest", async () => {
     await syncRememberedApiKey("sk-new", true);
-    expect(localStore.get("apiKey")).toBe("sk-new");
+    expect(localStore.has("apiKey")).toBe(false);
     expect(localStore.get("rememberApiKey")).toBe(true);
+    expect(localStore.get("open_cowork_credential_manifest_v1")).toMatchObject({
+      version: 1, kind: "provider-api-key", revision: 1,
+    });
   });
 
   test("syncRememberedApiKey(false) removes key and clears flag", async () => {

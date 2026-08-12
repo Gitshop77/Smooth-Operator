@@ -299,6 +299,74 @@ describe("executor: CDP-first click cascade", () => {
     expect(result.message).not.toContain("CDP");
   });
 
+  test("STOP while CDP is pending never falls through to a native click", async () => {
+    let settleCdp!: (value: unknown) => void;
+    const sendMsg = vi.fn(() => new Promise((resolve) => { settleCdp = resolve; }));
+    installChromeMock(sendMsg);
+
+    const button = document.createElement("button");
+    document.body.appendChild(button);
+    const nativeClick = vi.spyOn(button, "click");
+    const controller = new AbortController();
+    const pending = executeAction({ type: "click", index: 1 }, stateWith(button), controller.signal);
+    await vi.waitFor(() => expect(sendMsg).toHaveBeenCalledTimes(1));
+
+    controller.abort(new DOMException("Stopped", "AbortError"));
+    settleCdp({ ok: false, error: "stale run dispatch token" });
+    const result = await pending;
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("AbortError");
+    expect(nativeClick).not.toHaveBeenCalled();
+  });
+
+  test("a vision-coordinate CDP click carries cancellation and dispatch identity", async () => {
+    let settleCdp!: (value: unknown) => void;
+    const sendMsg = vi.fn(() => new Promise((resolve) => { settleCdp = resolve; }));
+    installChromeMock(sendMsg);
+    const controller = new AbortController();
+    const token = { runId: "vision-run", dispatchRevision: 7 };
+    const pending = executeAction(
+      { type: "click", index: "v1" },
+      stateWith(),
+      controller.signal,
+      false,
+      undefined,
+      token,
+    );
+    await vi.waitFor(() => expect(sendMsg).toHaveBeenCalledTimes(1));
+    expect(sendMsg).toHaveBeenCalledWith(expect.objectContaining({
+      type: "CDP_CLICK",
+      visionIndex: "v1",
+      token,
+    }));
+
+    controller.abort(new DOMException("Stopped", "AbortError"));
+    settleCdp({ ok: true });
+    const result = await pending;
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("AbortError");
+  });
+
+  test("a pre-aborted direct action performs no synchronous DOM effect", async () => {
+    const controller = new AbortController();
+    controller.abort(new DOMException("Stopped", "AbortError"));
+    const scrollBy = vi.spyOn(window, "scrollBy").mockImplementation(() => {});
+
+    const result = await executeAction({ type: "scroll", down: true, pages: 1 }, stateWith());
+    const abortedResult = await executeAction(
+      { type: "scroll", down: true, pages: 1 },
+      stateWith(),
+      controller.signal,
+    );
+
+    expect(result).toBeDefined();
+    scrollBy.mockClear();
+    expect(abortedResult.success).toBe(false);
+    expect(abortedResult.message).toContain("AbortError");
+    expect(scrollBy).not.toHaveBeenCalled();
+  });
+
   test("when chrome.runtime.id is absent (test/demo context), CDP is skipped — native first (regression guard)", async () => {
  // The CDP guard is `chrome.runtime?.id`. In test/demo context (no chrome
  // global), CDP must be skipped entirely and native el.click() runs first.

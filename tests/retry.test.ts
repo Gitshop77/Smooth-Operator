@@ -120,9 +120,10 @@ describe("withLLMRetry — numeric-status classification", () => {
 
   test("a Retry-After value on the error is honored (delay is applied)", async () => {
     await withFakeTimers(async () => {
- // Pin jitter to 0 so the scheduled retry delay equals the Retry-After
- // value exactly, making the delay observable and deterministic.
-      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+ // Pin jitter to its max (1.0) so the scheduled retry delay equals the
+ // Retry-After value exactly under full jitter (delay = floor(1.0 × cap)),
+ // making the delay observable and deterministic.
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(1.0);
       try {
         let calls = 0;
         const fn = vi.fn(async () => {
@@ -203,7 +204,9 @@ describe("withLLMRetry — abort handling and retry budgets", () => {
   test("aborting during the backoff sleep aborts the retry (no further attempts)", async () => {
     await withFakeTimers(async () => {
       const controller = new AbortController();
-      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+      // Pin jitter to its max so the first backoff is the full 1500ms window
+      // (attempt 0: base 1500 → cap 1500) and stays mid-flight at +100ms.
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(1.0);
       try {
         const fn = vi.fn(async () => {
           throw statusError(503);
@@ -227,7 +230,9 @@ describe("withLLMRetry — abort handling and retry budgets", () => {
 
   test("a Retry-After value above MAX_RETRY_AFTER_MS is capped to the ceiling", async () => {
     await withFakeTimers(async () => {
-      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+      // Pin jitter to its max so the capped delay equals the 30s ceiling
+      // exactly (floor(1.0 × 30000)) — observable and deterministic.
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(1.0);
       try {
         let calls = 0;
         const fn = vi.fn(async () => {
@@ -250,7 +255,9 @@ describe("withLLMRetry — abort handling and retry budgets", () => {
 
   test("the cumulative-delay budget stops the retry loop before MAX_RETRIES", async () => {
     await withFakeTimers(async () => {
-      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+      // Pin jitter to its max so every retry sleeps the full 30s ceiling —
+      // two retries exhaust the 60s cumulative budget deterministically.
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(1.0);
       try {
         const fn = vi.fn(async () => {
           throw statusError(429, "LLM API 429: rate", 60_000);

@@ -51,6 +51,16 @@ describe("rate-limit-tracker: network log ring", () => {
 
   let listeners: FakeChromeListeners;
 
+  async function issueEffectCapability(
+    token: { runId: string; dispatchRevision: number },
+    action: { type: "enable_network_log" | "disable_network_log" | "get_network_log" | "clear_network_log" | "getclear_network_log" },
+  ): Promise<string> {
+    const policy = await import("../src/extension/background/privileged-action-policy");
+    const issued = policy.authorizeAndIssueEffectCapability(token, "standard", action);
+    if (!issued.ok) throw new Error(issued.error);
+    return issued.effectCapability;
+  }
+
   function installFakeChrome(): FakeChromeListeners {
     const ls: FakeChromeListeners = {
       onBeforeRequest: [],
@@ -183,34 +193,44 @@ describe("rate-limit-tracker: network log ring", () => {
 
   test("NETWORK_LOG message RPC drives the verbs", async () => {
     const mod = await loadTracker();
+    const controllers = await import("../src/extension/background/run-controller");
+    const controller = controllers.beginRunController({ runId: "network-rpc", task: "inspect", maxSteps: 1, mode: "standard" });
+    controller.markRunning();
+    const token = controller.dispatchToken;
     mod.registerRateLimitListener();
     const rpc = listeners.onMessage[0];
     const respond = (res?: unknown) => res;
 
     // unknown verb → error
-    rpc({ type: "NETWORK_LOG", verb: "bogus" }, { id: "test-ext" }, respond);
+    rpc({ type: "NETWORK_LOG", verb: "bogus", token }, { id: "test-ext" }, respond);
+    await Promise.resolve();
 
-    rpc({ type: "NETWORK_LOG", verb: "enable" }, { id: "test-ext" }, respond);
+    rpc({ type: "NETWORK_LOG", verb: "enable", token, effectCapability: await issueEffectCapability(token, { type: "enable_network_log" }) }, { id: "test-ext" }, respond);
+    await vi.waitFor(() => expect(mod.isNetworkLogEnabled()).toBe(true));
     startRequest({ url: "https://example.com/x", method: "GET", type: "image" });
 
     const getRes = { ok: false } as { ok: boolean; enabled?: boolean; entries?: unknown[] };
-    rpc({ type: "NETWORK_LOG", verb: "get" }, { id: "test-ext" }, (res) => {
+    rpc({ type: "NETWORK_LOG", verb: "get", token, effectCapability: await issueEffectCapability(token, { type: "get_network_log" }) }, { id: "test-ext" }, (res) => {
       Object.assign(getRes, res);
     });
+    await vi.waitFor(() => expect(getRes.ok).toBe(true));
     expect(getRes.ok).toBe(true);
     expect(getRes.enabled).toBe(true);
     expect((getRes.entries ?? []) as Array<{ url: string }>).toHaveLength(1);
     expect((getRes.entries as Array<{ url: string }>)[0].url).toBe("https://example.com/x");
 
-    rpc({ type: "NETWORK_LOG", verb: "getclear" }, { id: "test-ext" }, respond);
+    rpc({ type: "NETWORK_LOG", verb: "getclear", token, effectCapability: await issueEffectCapability(token, { type: "getclear_network_log" }) }, { id: "test-ext" }, respond);
+    await vi.waitFor(() => expect(mod.getNetworkLog().entries).toHaveLength(0));
     const afterGetclear = mod.getNetworkLog();
     expect(afterGetclear.entries).toHaveLength(0);
 
-    rpc({ type: "NETWORK_LOG", verb: "disable" }, { id: "test-ext" }, respond);
+    rpc({ type: "NETWORK_LOG", verb: "disable", token, effectCapability: await issueEffectCapability(token, { type: "disable_network_log" }) }, { id: "test-ext" }, respond);
+    await vi.waitFor(() => expect(mod.isNetworkLogEnabled()).toBe(false));
     startRequest({ url: "https://example.com/y", method: "GET", type: "image" });
     expect(mod.getNetworkLog().entries).toHaveLength(0);
 
-    rpc({ type: "NETWORK_LOG", verb: "clear" }, { id: "test-ext" }, respond);
+    rpc({ type: "NETWORK_LOG", verb: "clear", token, effectCapability: await issueEffectCapability(token, { type: "clear_network_log" }) }, { id: "test-ext" }, respond);
+    controllers.resetRunControllerForTests();
   });
 
   test("NETWORK_LOG from an unauthorized sender is ignored", async () => {
@@ -222,6 +242,74 @@ describe("rate-limit-tracker: network log ring", () => {
     expect(ret).toBe(false);
     expect(spy).not.toHaveBeenCalled();
     expect(mod.isNetworkLogEnabled()).toBe(false);
+  });
+
+  test("NETWORK_LOG rejects a missing run token while controller authority is active", async () => {
+    const tracker = await import("../src/extension/background/rate-limit-tracker");
+    const controllers = await import("../src/extension/background/run-controller");
+    controllers.resetRunControllerForTests();
+    tracker.registerRateLimitListener();
+    const controller = controllers.beginRunController({
+      runId: "network-run",
+      task: "inspect network",
+      maxSteps: 1,
+      mode: "standard",
+    });
+    controller.markRunning();
+    const rpc = listeners.onMessage[0];
+    const response = vi.fn();
+    try {
+      expect(rpc({ type: "NETWORK_LOG", verb: "enable" }, { id: "test-ext" }, response)).toBe(true);
+      await vi.waitFor(() => expect(response).toHaveBeenCalledWith(expect.objectContaining({ ok: false, error: "run is not authorized to dispatch actions" })));
+    } finally {
+      controllers.resetRunControllerForTests();
+    }
+  });
+
+  test("NETWORK_LOG rejects missing, wrong-action, and replayed capabilities", async () => {
+    const tracker = await import("../src/extension/background/rate-limit-tracker");
+    const controllers = await import("../src/extension/background/run-controller");
+    const policy = await import("../src/extension/background/privileged-action-policy");
+    controllers.resetRunControllerForTests();
+    policy.resetPrivilegedActionPolicyForTests();
+    tracker.registerRateLimitListener();
+    const controller = controllers.beginRunController({ runId: "network-effects", task: "inspect", maxSteps: 1, mode: "standard" });
+    controller.markRunning();
+    const rpc = listeners.onMessage[0];
+    const call = (message: Record<string, unknown>) => new Promise<unknown>((resolve) => rpc(message, { id: "test-ext" }, resolve));
+    try {
+      await expect(call({ type: "NETWORK_LOG", verb: "enable", token: controller.dispatchToken }))
+        .resolves.toEqual(expect.objectContaining({ ok: false, error: expect.stringMatching(/effect capability/i) }));
+      const wrong = policy.authorizeAndIssueEffectCapability(controller.dispatchToken, "standard", { type: "get_network_log" });
+      if (!wrong.ok) throw new Error(wrong.error);
+      await expect(call({ type: "NETWORK_LOG", verb: "enable", token: controller.dispatchToken, effectCapability: wrong.effectCapability }))
+        .resolves.toEqual(expect.objectContaining({ ok: false, error: expect.stringMatching(/effect capability/i) }));
+      const capability = await issueEffectCapability(controller.dispatchToken, { type: "enable_network_log" });
+      await expect(call({ type: "NETWORK_LOG", verb: "enable", token: controller.dispatchToken, effectCapability: capability }))
+        .resolves.toEqual(expect.objectContaining({ ok: true }));
+      await expect(call({ type: "NETWORK_LOG", verb: "enable", token: controller.dispatchToken, effectCapability: capability }))
+        .resolves.toEqual(expect.objectContaining({ ok: false, error: expect.stringMatching(/effect capability/i) }));
+    } finally {
+      policy.resetPrivilegedActionPolicyForTests();
+      controllers.resetRunControllerForTests();
+    }
+  });
+
+  test("NETWORK_LOG rejects a predecessor token after worker controller loss", async () => {
+    const tracker = await import("../src/extension/background/rate-limit-tracker");
+    const controllers = await import("../src/extension/background/run-controller");
+    controllers.resetRunControllerForTests();
+    tracker.registerRateLimitListener();
+    const response = vi.fn();
+    const rpc = listeners.onMessage[0];
+    expect(rpc({
+      type: "NETWORK_LOG",
+      verb: "get",
+      token: { runId: "pre-restart", dispatchRevision: 1 },
+    }, { id: "test-ext" }, response)).toBe(true);
+    await vi.waitFor(() => expect(response).toHaveBeenCalledWith(
+      expect.objectContaining({ ok: false, error: expect.stringMatching(/stale/i) }),
+    ));
   });
 });
 
@@ -248,6 +336,20 @@ describe("network-log action handlers", () => {
     expect(sendMessage()).toHaveBeenCalledWith({ type: "NETWORK_LOG", verb: "enable" });
     expect(result.success).toBe(true);
     expect(result.message).toMatch(/enabled/i);
+  });
+
+  test("carries the immutable run token and opaque effect capability to the diagnostic RPC", async () => {
+    sendMessage().mockResolvedValue({ ok: true });
+    const context = ctx();
+    context.dispatchToken = { runId: "run-network", dispatchRevision: 4 };
+    context.effectCapability = "network-effect-capability";
+    await handleEnableNetworkLog(context, { type: "enable_network_log" });
+    expect(sendMessage()).toHaveBeenCalledWith({
+      type: "NETWORK_LOG",
+      verb: "enable",
+      token: { runId: "run-network", dispatchRevision: 4 },
+      effectCapability: "network-effect-capability",
+    });
   });
 
   test("disable sends verb disable and reports success", async () => {

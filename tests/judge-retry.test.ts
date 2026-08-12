@@ -249,52 +249,70 @@ describe("withLLMRetry", () => {
   });
 
   test("honors the Retry-After delay when the error carries retryAfter", async () => {
-    const retryError = Object.assign(new Error("HTTP 429: Too many requests"), { retryAfter: 2500 });
-    const fn = vi.fn().mockRejectedValueOnce(retryError).mockResolvedValue("ok");
-    const promise = withLLMRetry(fn);
-    let settled = false;
-    promise.then(() => { settled = true; }, () => { settled = true; });
-    await vi.advanceTimersByTimeAsync(0);
-    // The retryAfter (2500ms) must win over the exponential base (1500ms):
-    // still sleeping at 2499ms means the base delay was NOT used.
-    await vi.advanceTimersByTimeAsync(2499);
-    expect(settled).toBe(false);
-    expect(fn).toHaveBeenCalledTimes(1);
-    for (let i = 0; i < 200 && !settled; i++) await vi.advanceTimersByTimeAsync(100);
-    expect(settled).toBe(true);
-    await promise;
-    expect(fn).toHaveBeenCalledTimes(2);
+    // Pin jitter to its max so the delay equals the full Retry-After (2500ms)
+    // deterministically under full jitter (floor(1.0 × 2500)).
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(1.0);
+    try {
+      const retryError = Object.assign(new Error("HTTP 429: Too many requests"), { retryAfter: 2500 });
+      const fn = vi.fn().mockRejectedValueOnce(retryError).mockResolvedValue("ok");
+      const promise = withLLMRetry(fn);
+      let settled = false;
+      promise.then(() => { settled = true; }, () => { settled = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      // The retryAfter (2500ms) must win over the exponential base (1500ms):
+      // still sleeping at 2499ms means the base delay was NOT used.
+      await vi.advanceTimersByTimeAsync(2499);
+      expect(settled).toBe(false);
+      expect(fn).toHaveBeenCalledTimes(1);
+      for (let i = 0; i < 200 && !settled; i++) await vi.advanceTimersByTimeAsync(100);
+      expect(settled).toBe(true);
+      await promise;
+      expect(fn).toHaveBeenCalledTimes(2);
+    } finally {
+      randomSpy.mockRestore();
+    }
   });
 
   test("caps retryAfter at MAX_RETRY_AFTER_MS (30s)", async () => {
-    const retryError = Object.assign(new Error("HTTP 429: Too many requests"), { retryAfter: 999999 });
-    const fn = vi.fn().mockRejectedValueOnce(retryError).mockResolvedValue("ok");
-    const promise = withLLMRetry(fn);
-    let settled = false;
-    promise.then(() => { settled = true; }, () => { settled = true; });
-    await vi.advanceTimersByTimeAsync(0);
-    // Un-capped, the 999999ms retryAfter would still be sleeping after 30s.
-    // The cap (30s + jitter) means the retry fires long before that.
-    for (let i = 0; i < 400 && !settled; i++) await vi.advanceTimersByTimeAsync(100);
-    expect(settled).toBe(true);
-    await promise;
-    expect(fn).toHaveBeenCalledTimes(2);
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(1.0);
+    try {
+      const retryError = Object.assign(new Error("HTTP 429: Too many requests"), { retryAfter: 999999 });
+      const fn = vi.fn().mockRejectedValueOnce(retryError).mockResolvedValue("ok");
+      const promise = withLLMRetry(fn);
+      let settled = false;
+      promise.then(() => { settled = true; }, () => { settled = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      // Un-capped, the 999999ms retryAfter would still be sleeping after 30s.
+      // The cap (30s under full jitter at max) means the retry fires long before that.
+      for (let i = 0; i < 400 && !settled; i++) await vi.advanceTimersByTimeAsync(100);
+      expect(settled).toBe(true);
+      await promise;
+      expect(fn).toHaveBeenCalledTimes(2);
+    } finally {
+      randomSpy.mockRestore();
+    }
   });
 
   test("total backoff delay is capped at MAX_RETRY_TOTAL_MS (60s)", async () => {
-    // Deterministic large delays via retryAfter: two sleeps of ~25s each are
-    // allowed, the third pushes totalDelay past the 60s ceiling, which throws
-    // immediately — before MAX_RETRIES would have been exhausted.
-    const retryError = Object.assign(new Error("HTTP 429: Too many requests"), { retryAfter: 25000 });
-    const fn = vi.fn().mockRejectedValue(retryError);
-    const promise = withLLMRetry(fn);
-    let settled = false;
-    promise.then(() => {}, () => { settled = true; });
-    for (let i = 0; i < 3000 && !settled; i++) await vi.advanceTimersByTimeAsync(100);
-    expect(settled).toBe(true);
-    await expect(promise).rejects.toThrow("429");
-    // 1 initial + 2 retries; the 3rd retry is suppressed by the total-delay cap.
-    expect(fn).toHaveBeenCalledTimes(3);
+    // Deterministic large delays via retryAfter pinned to the full jitter max:
+    // two sleeps of ~25s each are allowed, the third pushes totalDelay past the
+    // 60s ceiling, which throws immediately — before MAX_RETRIES would have
+    // been exhausted.
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(1.0);
+    try {
+      const retryError = Object.assign(new Error("HTTP 429: Too many requests"), { retryAfter: 25000 });
+      const fn = vi.fn().mockRejectedValue(retryError);
+      const promise = withLLMRetry(fn);
+      let settled = false;
+      promise.then(() => {}, () => { settled = true; });
+      for (let i = 0; i < 3000 && !settled; i++) await vi.advanceTimersByTimeAsync(100);
+      expect(settled).toBe(true);
+      await expect(promise).rejects.toThrow("429");
+      // 1 initial + 2 retries; the 3rd retry is suppressed by the total-delay cap.
+      expect(fn).toHaveBeenCalledTimes(3);
+    } finally {
+      randomSpy.mockRestore();
+    }
   });
 });
 
@@ -325,6 +343,7 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
       task: "test task",
       onEvent: () => {},
       settleDelay: 0,
+      phase: "init",
       navigatorHistory: [],
       loopDetector: new LoopDetector(),
       plan: undefined,
@@ -340,6 +359,8 @@ describe("maybeJudgeAndFinalize — judgeCachedInputTokens capture", () => {
       compactedMemory: undefined,
       pendingLoopWarning: undefined,
       budgetWarningFired: false,
+    transitions: [],
+    consecutiveJudgeRejections: 0,
       costBudgetWarningFired: false,
       currentGoal: "test",
       dispatcher,

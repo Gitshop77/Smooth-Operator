@@ -137,6 +137,60 @@ describe("LoopDetector action-repetition warnings", () => {
   });
 });
 
+describe("LoopDetector oscillation detection", () => {
+  test("period-2 ping-pong (A,B,A,B) is flagged after 2 full cycles", () => {
+    const det = new LoopDetector();
+    const a = act({ type: "click", index: 1 });
+    const b = act({ type: "click", index: 2 });
+    for (let i = 0; i < 2; i++) {
+      det.record(a);
+      det.record(b);
+    }
+    // 4 records = 2 full cycles — below the 2-cycle floor… wait, exactly 2
+    // cycles qualifies (isAlternatingCycle needs 2*period trailing, i.e. 4).
+    expect(det.shouldWarnOscillation()).toBe(2);
+    expect(LoopDetector.oscillationWarningText(2, 2)).toMatch(/OSCILLATION DETECTED/);
+  });
+
+  test("period-3 cycle (A,B,C,A,B,C) is flagged", () => {
+    const det = new LoopDetector();
+    const a = act({ type: "click", index: 1 });
+    const b = act({ type: "click", index: 2 });
+    const c = act({ type: "click", index: 3 });
+    for (let i = 0; i < 2; i++) {
+      det.record(a);
+      det.record(b);
+      det.record(c);
+    }
+    expect(det.shouldWarnOscillation()).toBeGreaterThanOrEqual(2);
+  });
+
+  test("a plain repeat (A,A,A,A) is NOT oscillation (exact-hash counter owns it)", () => {
+    const det = new LoopDetector();
+    const a = act({ type: "click", index: 1 });
+    for (let i = 0; i < 8; i++) det.record(a);
+    expect(det.shouldWarnOscillation()).toBe(0);
+    expect(det.shouldWarn()).toBe(8);
+  });
+
+  test("a short prefix that only resembles a cycle is not flagged", () => {
+    const det = new LoopDetector();
+    det.record(act({ type: "click", index: 1 }));
+    det.record(act({ type: "click", index: 2 }));
+    expect(det.shouldWarnOscillation()).toBe(0);
+  });
+
+  test("outcome-aware hashing: same action + same result-head repeats; a different outcome does not inflate the bucket", () => {
+    const det = new LoopDetector();
+    const click = act({ type: "click", index: 1 });
+    for (let i = 0; i < 3; i++) det.record(click, "BLOCKED: captcha");
+    // A different outcome for the same action lands in a different bucket.
+    det.record(click, "clicked OK");
+    const count = det.record(click, "BLOCKED: captcha");
+    expect(count).toBe(4); // 3 earlier + this one (the "clicked OK" is separate)
+  });
+});
+
 describe("LoopDetector goal-level thresholds", () => {
   test("recordGoal reaches the warn milestone before the top milestone", () => {
     const det = new LoopDetector();

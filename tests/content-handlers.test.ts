@@ -11,7 +11,8 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
-import { clampInt } from "../src/extension/content-utils";
+import { clampInt, isValidConsoleBridgeEntry } from "../src/extension/content-utils";
+import { CONSOLE_CAPTURE_EVENT } from "../src/lib/agent/dom/console-capture";
 
 type ListenerFn = (
   msg: unknown,
@@ -26,6 +27,8 @@ function installChromeMock(): void {
   (globalThis as unknown as { chrome?: unknown }).chrome = {
     runtime: {
       id: "test-extension-id",
+      // Test adapter for the authoritative background pre-effect boundary.
+      sendMessage: vi.fn().mockResolvedValue({ ok: true, effectCapability: "test-effect-capability" }),
       onMessage: {
         addListener: (fn: ListenerFn) => {
           listener = fn;
@@ -75,6 +78,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.doUnmock("@/lib/agent/dom/ax-tree");
+  vi.doUnmock("@/lib/agent/tools/executor");
   delete (globalThis as unknown as { chrome?: unknown }).chrome;
 });
 
@@ -198,7 +202,8 @@ describe("content.ts message surface", () => {
     const r = await new Promise<{ ok: boolean }>((resolve) => {
       const isAsync = listener!(
         {
-          type: "EXECUTE_ACTIONS",
+      type: "EXECUTE_ACTIONS",
+          token: { runId: "run-async", dispatchRevision: 1 },
           actions: [{ type: "navigate", url: "https://evil.example.com/" }],
         },
         EXT,
@@ -216,6 +221,7 @@ describe("content.ts message surface", () => {
     const r = (await sendAsync(
       {
         type: "EXECUTE_ACTIONS",
+        token: { runId: "run-no-policy", dispatchRevision: 1 },
         actions: [{ type: "navigate", url: "https://evil.example.com/" }],
       },
       EXT,
@@ -233,6 +239,7 @@ describe("content.ts message surface", () => {
     const r = (await sendAsync(
       {
         type: "EXECUTE_ACTIONS",
+        token: { runId: "run-skip", dispatchRevision: 1 },
         actions: [
           { type: "navigate", url: "https://evil.example.com/" },
           { type: "click", index: 3 },
@@ -244,6 +251,170 @@ describe("content.ts message surface", () => {
     expect(r.results).toHaveLength(2);
     expect(r.results[1].success).toBe(false);
     expect(r.results[1].message).toContain("1 remaining action(s) skipped");
+  });
+
+  test("CANCEL_RUN rejects an already-delayed token before it can execute", async () => {
+    await loadContentScript();
+    const token = { runId: "run-a", dispatchRevision: 2 };
+    expect(send({ type: "CANCEL_RUN", token }, EXT).response).toEqual({ ok: true });
+
+    const r = send({ type: "EXECUTE_ACTIONS", token, actions: [] }, EXT);
+    expect(r.response).toEqual({
+      ok: false,
+      error: "BLOCKED: dispatch cancelled or stale for run run-a",
+    });
+    expect(r.isAsync).toBe(false);
+  });
+
+  test("a cancellation cutoff does not block another run", async () => {
+    await loadContentScript();
+    expect(send({ type: "CANCEL_RUN", token: { runId: "run-a", dispatchRevision: 2 } }, EXT).response)
+      .toEqual({ ok: true });
+
+    const r = await sendAsync({
+      type: "EXECUTE_ACTIONS",
+      token: { runId: "run-b", dispatchRevision: 1 },
+      actions: [],
+    }, EXT) as { ok: boolean; results?: unknown[] };
+    expect(r).toEqual({ ok: true, results: [] });
+  });
+
+  test("a delayed tokenless EXECUTE_ACTIONS cannot resurrect after cancellation or successor dispatch", async () => {
+    await loadContentScript();
+    expect(send({ type: "CANCEL_RUN", token: { runId: "run-old", dispatchRevision: 2 } }, EXT).response)
+      .toEqual({ ok: true });
+
+    const tokenless = send({ type: "EXECUTE_ACTIONS", actions: [{ type: "click", index: 1 }] }, EXT);
+    expect(tokenless).toMatchObject({ isAsync: false, response: { ok: false, error: "invalid dispatch token" } });
+
+    const successor = await sendAsync({
+      type: "EXECUTE_ACTIONS",
+      token: { runId: "run-successor", dispatchRevision: 1 },
+      actions: [],
+    }, EXT);
+    expect(successor).toEqual({ ok: true, results: [] });
+  });
+
+  test("CANCEL_RUN aborts active matching work and never starts the remaining batch", async () => {
+    let actionStarted!: () => void;
+    const firstActionStarted = new Promise<void>((resolve) => { actionStarted = resolve; });
+    const executeAction = vi.fn((_action: unknown, _state: unknown, signal?: AbortSignal) =>
+      new Promise((resolve, reject) => {
+        actionStarted();
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      }),
+    );
+    vi.doMock("@/lib/agent/tools/executor", () => ({ executeAction }));
+    await loadContentScript();
+
+    const dispatchToken = { runId: "run-a", dispatchRevision: 1 };
+    const execution = sendAsync({
+      type: "EXECUTE_ACTIONS",
+      token: dispatchToken,
+      actions: [{ type: "click", index: 0 }, { type: "click", index: 1 }],
+    }, EXT);
+    await firstActionStarted;
+
+    expect(send({ type: "CANCEL_RUN", token: { runId: "run-a", dispatchRevision: 2 } }, EXT).response)
+      .toEqual({ ok: true });
+    const r = await execution as {
+      ok: boolean;
+      results: Array<{ success: boolean; message: string }>;
+    };
+
+    expect(executeAction).toHaveBeenCalledTimes(1);
+    expect(executeAction.mock.calls[0][2]).toBeInstanceOf(AbortSignal);
+    expect(r.ok).toBe(true);
+    expect(r.results).toHaveLength(2);
+    expect(r.results.every((result) => !result.success && /cancelled or stale/.test(result.message))).toBe(true);
+  });
+
+  /**
+   * These were intentional expected failures (Phase 10 spoofing residual): the
+   * page shares the CustomEvent namespace with the MAIN-world capture, so a
+   * forged entry used to reach the SW ring. The console-bridge admission gate
+   * (`isValidConsoleBridgeEntry` in content-utils.ts) now rejects malformed
+   * and oversized entries at the isolated-world boundary before forwarding —
+   * both cases are now ordinary passing tests.
+   */
+  test("ignores a page-forged malformed console bridge entry", async () => {
+    await loadContentScript();
+    window.dispatchEvent(new CustomEvent(CONSOLE_CAPTURE_EVENT, {
+      detail: { entry: { type: "not-a-console-level", message: 17, timestamp: "never" } },
+    }));
+    await Promise.resolve();
+
+    expect(chrome.runtime.sendMessage).not.toHaveBeenCalled();
+  });
+
+  test("rejects an oversized page-forged console bridge entry", async () => {
+    await loadContentScript();
+    window.dispatchEvent(new CustomEvent(CONSOLE_CAPTURE_EVENT, {
+      detail: {
+        entry: {
+          type: "warning",
+          message: "x".repeat(2_001),
+          timestamp: Date.now(),
+        },
+      },
+    }));
+    await Promise.resolve();
+
+    expect(chrome.runtime.sendMessage).not.toHaveBeenCalled();
+  });
+
+  test("forwards a well-formed console bridge entry to the SW ring", async () => {
+    await loadContentScript();
+    // Each loadContentScript re-imports content.ts, which registers one more
+    // listener on the shared window event — every accumulated listener hears
+    // the dispatch and forwards through the SAME admission gate. Assert every
+    // forwarded call carries exactly the validated entry (a forged shape would
+    // be rejected by every listener, so a mismatch anywhere fails the test).
+    const mock = chrome.runtime.sendMessage as ReturnType<typeof vi.fn>;
+    const entry = { type: "log" as const, message: "hello from the page", timestamp: 1234 };
+    window.dispatchEvent(new CustomEvent(CONSOLE_CAPTURE_EVENT, { detail: { entry } }));
+    await Promise.resolve();
+
+    expect(mock.mock.calls.length).toBeGreaterThanOrEqual(1);
+    for (const call of mock.mock.calls) {
+      expect(call[0]).toEqual({ type: "CONSOLE_LOG_ENTRY", entry });
+    }
+  });
+});
+
+describe("isValidConsoleBridgeEntry admission", () => {
+  const valid = { type: "log" as const, message: "ok", timestamp: 1 };
+
+  test("admits a well-formed entry", () => {
+    expect(isValidConsoleBridgeEntry(valid)).toBe(true);
+  });
+
+  test("rejects non-objects, arrays, and missing payloads", () => {
+    expect(isValidConsoleBridgeEntry(null)).toBe(false);
+    expect(isValidConsoleBridgeEntry(undefined)).toBe(false);
+    expect(isValidConsoleBridgeEntry("log")).toBe(false);
+    expect(isValidConsoleBridgeEntry([valid])).toBe(false);
+    expect(isValidConsoleBridgeEntry({})).toBe(false);
+  });
+
+  test("rejects unknown console levels and non-string messages", () => {
+    expect(isValidConsoleBridgeEntry({ ...valid, type: "debug" })).toBe(false);
+    expect(isValidConsoleBridgeEntry({ ...valid, type: 42 })).toBe(false);
+    expect(isValidConsoleBridgeEntry({ ...valid, message: 17 })).toBe(false);
+    expect(isValidConsoleBridgeEntry({ ...valid, message: undefined })).toBe(false);
+  });
+
+  test("rejects non-finite timestamps", () => {
+    expect(isValidConsoleBridgeEntry({ ...valid, timestamp: "never" })).toBe(false);
+    expect(isValidConsoleBridgeEntry({ ...valid, timestamp: Number.NaN })).toBe(false);
+    expect(isValidConsoleBridgeEntry({ ...valid, timestamp: Number.POSITIVE_INFINITY })).toBe(false);
+  });
+
+  test("enforces the capture byte bound code-point-aware", () => {
+    expect(isValidConsoleBridgeEntry({ ...valid, message: "x".repeat(2_000) })).toBe(true);
+    expect(isValidConsoleBridgeEntry({ ...valid, message: "x".repeat(2_001) })).toBe(false);
+    // A surrogate pair (2 UTF-16 units, 1 code point) inside the cap must pass.
+    expect(isValidConsoleBridgeEntry({ ...valid, message: "😀".repeat(1_000) })).toBe(true);
   });
 });
 

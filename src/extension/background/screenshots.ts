@@ -14,7 +14,7 @@
  */
 
 import { withPageDebugger, getScreenshotQuality } from "./tab-manager";
-import { sendDebuggerCommandWithTimeout } from "./tab-manager-utils";
+import { sendDebuggerCommandWithTimeout, throwIfAborted } from "./tab-manager-utils";
 import {
   createCompatibleCanvas,
   loadCompatibleImage,
@@ -128,15 +128,18 @@ export async function resizeScreenshotDataUrl(
  */
 export async function captureTabScreenshot(
   tabId: number,
-  opts?: { resize?: ResizeOptions },
+  opts?: { resize?: ResizeOptions; signal?: AbortSignal },
 ): Promise<string> {
  // Route through the same per-tab refcounted debugger session that
  // `extractStateFromTab` uses, so a concurrent per-step screenshot cannot
  // tear down this session mid-capture (and vice-versa). The session is only
  // detached when the last user releases it (guaranteed by `withPageDebugger`'s
  // `finally` even on error).
+  throwIfAborted(opts?.signal);
   const quality = await getScreenshotQuality();
+  throwIfAborted(opts?.signal);
   return withPageDebugger(tabId, async () => {
+    throwIfAborted(opts?.signal);
     const result = await sendDebuggerCommandWithTimeout<{ data?: string }>(
       tabId,
       "Page.captureScreenshot",
@@ -151,8 +154,11 @@ export async function captureTabScreenshot(
         captureBeyondViewport: false,
       },
     );
+    throwIfAborted(opts?.signal);
     if (!result?.data) throw new Error("Page.captureScreenshot returned no data");
     const dataUrl = `data:image/jpeg;base64,${result.data}`;
-    return opts?.resize ? await resizeScreenshotDataUrl(dataUrl, opts.resize) : dataUrl;
+    const resized = opts?.resize ? await resizeScreenshotDataUrl(dataUrl, opts.resize) : dataUrl;
+    throwIfAborted(opts?.signal);
+    return resized;
   });
 }

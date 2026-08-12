@@ -7,6 +7,8 @@
  */
 
 /** Categories an error can be classified into. */
+import { redactKeyLeak } from "./redact-shared";
+
 export type ErrorCategory =
   | "auth"          // 401 — API key invalid or expired. FATAL.
   | "forbidden"     // 403 — access denied. FATAL.
@@ -19,6 +21,7 @@ export type ErrorCategory =
   | "max_steps"     // reached max steps. FATAL.
   | "max_failures"  // too many consecutive failures. FATAL.
   | "programmer_error" // TypeError / ReferenceError / SyntaxError — FATAL (a bug).
+  | "model_output"  // empty/reasoning-only/incomplete provider completion. FATAL for this run.
   | "unknown";      // anything else. Bounded retry (at most once); repeats are fatal.
 
 /** Classified error with category + retry guidance. */
@@ -39,6 +42,19 @@ export interface ClassifiedError {
   originalError?: unknown;
 }
 
+/**
+ * Recognize a run-stopping budget/cost-cap error. Matches both the legacy
+ * cost-cap message (`Budget exceeded: …`) and the Phase 8 typed
+ * `PromptBudgetExceededError` (`Prompt budget exceeded …` or its
+ * `budgetExceeded === true` flag). All callers that finalize a run on a
+ * budget stop must use this so no budget class is silently misclassified.
+ */
+export function isBudgetExceededError(error: unknown): boolean {
+  if (error != null && (error as { budgetExceeded?: unknown }).budgetExceeded === true) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /^Budget exceeded:/i.test(message) || /^Prompt budget exceeded/i.test(message);
+}
+
 /** Stable machine code per category (shown in the UI transcript). */
 export const MACHINE_CODES: Record<ErrorCategory, string> = {
   auth: "auth_failed",
@@ -52,6 +68,7 @@ export const MACHINE_CODES: Record<ErrorCategory, string> = {
   max_steps: "max_steps_reached",
   max_failures: "max_failures_reached",
   programmer_error: "internal_error",
+  model_output: "model_output_unusable",
   unknown: "unknown_error",
 };
 
@@ -68,6 +85,7 @@ export const RECOVERY_HINTS: Record<ErrorCategory, string> = {
   max_steps: "Reached the step budget. Increase maxSteps or split the task.",
   max_failures: "Too many consecutive failures. Simplify the task or fix the blocker.",
   programmer_error: "An internal error occurred — report it.",
+  model_output: "Retry with a different provider/model or adjust the model output budget.",
   unknown: "The agent will retry; if it keeps failing, simplify the task.",
 };
 
@@ -108,7 +126,7 @@ const FIVE_XX_RE = /\b5\d\d\b/;
  * programmer_error → parse → max_steps → max_failures → unknown.
  */
 export function classifyError(error: unknown, attempt = 0): ClassifiedError {
-  const originalMessage = error instanceof Error ? error.message : String(error);
+  const originalMessage = redactKeyLeak(error instanceof Error ? error.message : String(error));
   const lower = toLowerMessage(error);
 
   const mk = (
@@ -124,6 +142,23 @@ export function classifyError(error: unknown, attempt = 0): ClassifiedError {
     recoveryHint: RECOVERY_HINTS[category],
     originalError: error,
   });
+
+  const typedCode = (error as { code?: unknown }).code;
+  if (
+    typedCode === "EMPTY_MODEL_OUTPUT" ||
+    typedCode === "REASONING_ONLY_OUTPUT" ||
+    typedCode === "PROTOCOL_STREAM_ERROR"
+  ) {
+    const classified = mk("model_output", true, false);
+    return {
+      ...classified,
+      machineCode: typedCode,
+      recoveryHint:
+        typeof (error as { recovery?: unknown }).recovery === "string"
+          ? (error as { recovery: string }).recovery
+          : RECOVERY_HINTS.model_output,
+    };
+  }
 
   if (containsStatus(lower, "401") || containsAny(lower, ["unauthorized", "invalid api key"])) {
     return mk("auth", true, false);
@@ -243,6 +278,8 @@ export function friendlyErrorMessage(error: ClassifiedError): string {
       return "Too many consecutive failures. The agent gave up.";
     case "programmer_error":
       return "An internal error occurred (this is likely a bug — please report it).";
+    case "model_output":
+      return error.message;
     default:
       return "An unexpected error occurred. The agent will retry.";
   }

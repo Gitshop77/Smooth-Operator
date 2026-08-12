@@ -18,8 +18,17 @@ Open Cowork is an agentic browser extension — it reads pages, reasons about th
 | `unlimitedStorage` | Run history grows without bound — `chrome.storage.local` has a default quota that would be hit quickly. |
 | `power` | Keeps the machine awake during long-running tasks via `chrome.power.requestKeepAwake`. |
 | `webRequest` | Monitors navigation requests for SSRF protection — blocks the agent from following attacker-supplied redirects. |
-| `dns` | Resolves hostnames during SSRF validation so the agent can verify a target isn't pointing at a private/internal IP. |
 | `cookies` | Enables the agent's cookie actions (`get_cookies` / `set_cookie` / `delete_cookies`). Reads are read-only; `set_cookie` requires `url` or `domain`, and the effective URL passes the same domain allow/blocklist gate as `navigate`/`search` before any write — a cookie can never be written to a disallowed host. |
+
+### DNS capability boundary
+
+The packaged stable-browser manifest does not request `dns`. Chrome documents
+`chrome.dns` as Dev-channel-only, so requesting it in a stable package would
+misrepresent the available SSRF protection. Literal IP, scheme, credential,
+and local/private target checks remain enforced. When no declared resolver is
+available, untrusted hostname destinations fail closed; explicitly
+user-configured provider/webhook hostname destinations retain the documented
+best-effort policy and are not reported as fully DNS-rebinding-validated.
 
 ## Host permissions
 
@@ -38,4 +47,4 @@ Open Cowork is an agentic browser extension — it reads pages, reasons about th
 
 ## Creep guard
 
-`build-utils.ts` contains `lintManifestPermissions` which runs at build time. It compares the current manifest's high-risk permissions and host patterns against a reviewed baseline. Any **new** high-risk permission or universal-host entry beyond the baseline is surfaced as a build warning; it is promoted to a hard error only when the build runs with `MANIFEST_LINT_FAIL_HIGH_RISK=1` set in the environment (not currently enabled in CI).
+`build-utils.ts` contains `lintManifestPermissions` which runs at build time. It compares the current manifest's high-risk permissions and host patterns against a reviewed baseline. Any **new** high-risk permission or universal-host entry beyond the baseline is a hard build error; permission creep cannot pass through a warning-only path.

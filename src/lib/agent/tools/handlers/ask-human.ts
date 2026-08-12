@@ -9,10 +9,66 @@ import type { Action } from "../schema";
 import { LIMITS } from "../constants";
 import type { ActionContext } from "./types";
 
+/**
+ * Hard cap on `ask_human` questions per run.
+ *
+ * A page (via prompt injection) can coax the model into repeatedly asking the
+ * user for input — every ask opens a side-panel modal and blocks the loop for
+ * up to the interaction timeout. The cap bounds interruption spam to a
+ * fixed budget per run; the handler fails CLOSED (no modal, explicit
+ * message) once the budget is spent, and a NEW run receives a fresh budget
+ * (keyed on the authoritative runId).
+ */
+export const MAX_ASK_HUMAN_PER_RUN = 8;
+
+/** Per-run ask counts keyed by runId (fallback key for tokenless contexts). */
+const ANONYMOUS_ASK_KEY = "__ask_human_anonymous__";
+const askCountByRun = new Map<string, number>();
+
+/** Defensive bound so a long-lived content-script instance cannot grow the
+ *  map without limit across many runs (each navigation re-injects and resets). */
+const MAX_TRACKED_RUNS = 128;
+
+/**
+ * Atomically consume one ask from the run's budget. Returns whether the ask
+ * is allowed and the remaining budget AFTER this ask.
+ */
+export function consumeAskHumanBudget(runId: string | undefined): { allowed: boolean; remaining: number } {
+  const key = runId ?? ANONYMOUS_ASK_KEY;
+  const used = askCountByRun.get(key) ?? 0;
+  if (used >= MAX_ASK_HUMAN_PER_RUN) {
+    return { allowed: false, remaining: 0 };
+  }
+  const next = used + 1;
+  askCountByRun.set(key, next);
+  if (askCountByRun.size > MAX_TRACKED_RUNS) {
+    // Overflow guard: drop tracking for every run except the current one.
+    for (const k of askCountByRun.keys()) {
+      if (k !== key) askCountByRun.delete(k);
+    }
+  }
+  return { allowed: true, remaining: Math.max(0, MAX_ASK_HUMAN_PER_RUN - next) };
+}
+
+/** Test-only reset of the per-run ask budget. */
+export function resetAskHumanBudgetForTests(): void {
+  askCountByRun.clear();
+}
+
 export async function handleAskHuman(
-  _ctx: ActionContext,
+  ctx: ActionContext,
   action: Extract<Action, { type: "ask_human" }>,
 ): Promise<ActionResult> {
+  const budget = consumeAskHumanBudget(ctx.dispatchToken?.runId);
+  if (!budget.allowed) {
+    return {
+      action,
+      success: false,
+      message:
+        `ask_human budget exhausted (max ${MAX_ASK_HUMAN_PER_RUN} questions per run) — ` +
+        "the run cannot ask the user more questions",
+    };
+  }
   // Call askHuman() and wait for the user's response. askHuman() auto-detects
   // context (extension: side-panel message; demo: window.prompt) and pauses
   // until the user responds or the 5-minute timeout fires.
@@ -31,7 +87,7 @@ export async function handleAskHuman(
     const response = await askHuman({
       mode: isPassword ? "password" : "input",
       message: action.question,
-    });
+    }, ctx.signal, ctx.dispatchToken);
     if (response.mode === "cancelled") {
       return {
         action,
@@ -74,6 +130,7 @@ export async function handleAskHuman(
       extractedContent: `User's answer to "${questionPreview}": ${answerPreview}`,
     };
   } catch (e) {
+    if (ctx.signal?.aborted) throw e;
     return {
       action,
       success: false,

@@ -49,6 +49,15 @@ export interface SiteMemory {
 /** Storage key under which the whole `{ domain -> SiteMemory }` map is persisted. */
 const STORAGE_KEY = "open_cowork_site_memories";
 
+/** Cap a single memory note — memory is injected every navigator step, so a
+ *  multi-MB un-capped note would balloon both the trusted prompt block and
+ *  whole-map storage. */
+export const MAX_MEMORY_NOTES_LENGTH = 4000;
+/** Cap the total stored memories; evict `updatedAt`-oldest first on overflow. */
+export const MAX_MEMORIES = 250;
+/** Cap the hostname-level result cache (distinct sites in one run). */
+export const MAX_HOSTNAME_CACHE_ENTRIES = 8;
+
 // Module-level cache. `getMemoriesForUrl` is called on every navigator step;
 // without caching, each step does a fresh chrome.storage.local round-trip.
 // Invalidated by `chrome.storage.onChanged` + every write.
@@ -56,14 +65,16 @@ let memoriesCache: Record<string, SiteMemory> | null = null;
 
 // Hostname-level cache for `getMemoriesForUrl`. Maps hostname → matching
 // memories so repeated steps on the same site skip the full linear scan.
-// Invalidated whenever the raw memories cache changes.
-let hostnameMemoriesCache: { hostname: string; memories: SiteMemory[] } | null = null;
+// Invalidated whenever the raw memories cache changes. Bounded to the most
+// recent distinct hostnames (LRU by insertion order) so a multi-site run
+// cannot grow the map without bound.
+const hostnameMemoriesCache = new Map<string, SiteMemory[]>();
 
 if (isExtensionWithLocal() && typeof chrome !== "undefined" && chrome.storage?.onChanged) {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && changes[STORAGE_KEY]) {
       memoriesCache = null;
-      hostnameMemoriesCache = null;
+      hostnameMemoriesCache.clear();
     }
   });
 }
@@ -75,7 +86,7 @@ if (typeof window !== "undefined") {
   window.addEventListener("storage", (e) => {
     if (e.key === STORAGE_KEY) {
       memoriesCache = null;
-      hostnameMemoriesCache = null;
+      hostnameMemoriesCache.clear();
     }
   });
 }
@@ -83,7 +94,7 @@ if (typeof window !== "undefined") {
 /** Test-only: clear the in-memory cache so the next read goes back to storage. */
 export function __resetMemoryCacheForTests(): void {
   memoriesCache = null;
-  hostnameMemoriesCache = null;
+  hostnameMemoriesCache.clear();
 }
 
 const withMemoryMutation = createMutex();
@@ -144,7 +155,7 @@ export async function loadAllMemories(): Promise<Record<string, SiteMemory>> {
 /** Internal: persist the full memory map back to storage + invalidate cache. */
 async function writeAllMemories(all: Record<string, SiteMemory>): Promise<void> {
   memoriesCache = null;
-  hostnameMemoriesCache = null;
+  hostnameMemoriesCache.clear();
   if (isExtensionWithLocal()) {
     try {
       await chrome.storage.local.set({ [STORAGE_KEY]: all });
@@ -161,7 +172,25 @@ async function writeAllMemories(all: Record<string, SiteMemory>): Promise<void> 
 }
 
 /**
+ * Bound the stored map to {@link MAX_MEMORIES}, evicting `updatedAt`-oldest
+ * entries first (most-relevant-first retention for the injected prompt).
+ */
+function capMemories(all: Record<string, SiteMemory>): Record<string, SiteMemory> {
+  const entries = Object.values(all);
+  if (entries.length <= MAX_MEMORIES) return all;
+  const sorted = entries
+    .slice()
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, MAX_MEMORIES);
+  const out: Record<string, SiteMemory> = {};
+  for (const memory of sorted) out[memory.domain] = memory;
+  return out;
+}
+
+/**
  * Save (or replace) a site memory for `domain`. Empty notes DELETE the entry.
+ * Notes longer than {@link MAX_MEMORY_NOTES_LENGTH} are truncated before store;
+ * the whole map is bounded to {@link MAX_MEMORIES} entries.
  */
 export async function saveMemory(domain: string, notes: string): Promise<void> {
   const d = domain.trim().toLowerCase();
@@ -171,9 +200,14 @@ export async function saveMemory(domain: string, notes: string): Promise<void> {
     if (!notes.trim()) {
       delete all[d];
     } else {
-      all[d] = { domain: d, notes: notes.trim(), updatedAt: Date.now() };
+      const trimmed = notes.trim();
+      const bounded =
+        trimmed.length > MAX_MEMORY_NOTES_LENGTH
+          ? trimmed.slice(0, MAX_MEMORY_NOTES_LENGTH)
+          : trimmed;
+      all[d] = { domain: d, notes: bounded, updatedAt: Date.now() };
     }
-    await writeAllMemories(all);
+    await writeAllMemories(capMemories(all));
   });
 }
 
@@ -205,9 +239,14 @@ export async function getMemoriesForUrl(url: string): Promise<SiteMemory[]> {
     return [];
   }
   if (!hostname) return [];
-  // Return cached result if the same hostname was queried recently.
-  if (hostnameMemoriesCache?.hostname === hostname) {
-    return hostnameMemoriesCache.memories;
+  // Return cached result if the same hostname was queried recently (bounded
+  // LRU map, so a multi-site run cannot grow the cache without bound).
+  const cached = hostnameMemoriesCache.get(hostname);
+  if (cached !== undefined) {
+    // Touch-on-get so the LRU eviction below drops genuinely-oldest hosts.
+    hostnameMemoriesCache.delete(hostname);
+    hostnameMemoriesCache.set(hostname, cached);
+    return cached;
   }
   const matches: SiteMemory[] = [];
   for (const memory of Object.values(all)) {
@@ -222,18 +261,26 @@ export async function getMemoriesForUrl(url: string): Promise<SiteMemory[]> {
     }
   }
   matches.sort((a, b) => a.domain.localeCompare(b.domain));
-  hostnameMemoriesCache = { hostname, memories: matches };
+  hostnameMemoriesCache.set(hostname, matches);
+  if (hostnameMemoriesCache.size > MAX_HOSTNAME_CACHE_ENTRIES) {
+    // Evict the oldest-inserted hostname (Map preserves insertion order).
+    const oldest = hostnameMemoriesCache.keys().next().value;
+    if (oldest !== undefined) hostnameMemoriesCache.delete(oldest);
+  }
   return matches;
 }
 
 /**
- * Format memories as a `<site_memory>` prompt block. Returns `""` when empty
- * (so the navigator message builder can `${formatMemories(...)}` without
- * emitting an empty tag).
+ * Format memories as a `<site_memory>` prompt block, most recently updated
+ * first. Returns `""` when empty (so the navigator message builder can
+ * `${formatMemories(...)}` without emitting an empty tag).
  */
 export function formatMemories(memories: SiteMemory[]): string {
   if (memories.length === 0) return "";
-  const lines = memories.map(
+  const ordered = memories
+    .slice()
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+  const lines = ordered.map(
     (m) =>
       `[${sanitizeMemoryText(m.domain)}]: ${sanitizeMemoryText(m.notes)}`,
   );

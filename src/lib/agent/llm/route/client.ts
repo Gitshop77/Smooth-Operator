@@ -27,7 +27,82 @@ export interface Protocol<Body = unknown, FrameType = string, EventType = unknow
     readonly initial: (request: LLMRequest) => State;
     readonly step: (state: State, frame: FrameType) => { state: State; events: EventType[] };
     readonly terminal?: (frame: FrameType, state?: State) => boolean;
+    /**
+     * Return safe, aggregate evidence about how a stream ended. Protocols must
+     * never put model reasoning, prompt text, page data, or credentials here.
+     */
+    readonly completion?: (state: State) => StreamCompletionEvidence | undefined;
   };
+}
+
+/** Safe protocol evidence used to classify a terminal stream outcome. */
+export interface StreamCompletionEvidence {
+  /** Whether the provider emitted a reasoning/thinking-only field. */
+  readonly reasoningObserved?: boolean;
+  /** Aggregate provider-reported reasoning tokens, if available. */
+  readonly reasoningTokens?: number;
+  /** Provider terminal reason, retained only as a short machine-readable tag. */
+  readonly finishReason?: string;
+  /** Number of malformed/non-JSON provider frames intentionally dropped. */
+  readonly droppedFrames?: number;
+}
+
+export type LLMTerminalDiagnosticCode =
+  | "empty_visible_output"
+  | "reasoning_only"
+  | "reasoning_budget_exhausted"
+  | "malformed_stream"
+  | "no_terminal_stream";
+
+/**
+ * Additive, non-sensitive completion diagnosis. Generic callers may continue
+ * to consume `content`; direct agent calls turn this into an actionable error.
+ */
+export interface LLMTerminalDiagnostic extends StreamCompletionEvidence {
+  readonly code: LLMTerminalDiagnosticCode;
+  readonly protocol: string;
+  readonly visibleContentChars: number;
+  readonly terminalSeen: boolean;
+}
+
+/** Typed error used by direct agent calls for unusable provider completions. */
+export class LLMTerminalDiagnosticError extends Error {
+  readonly diagnostic: LLMTerminalDiagnostic;
+  readonly code: string;
+  readonly recovery: string;
+  usage?: {
+    raw: string;
+    tokensIn?: number;
+    tokensOut?: number;
+    reasoningTokens?: number;
+    cachedInputTokens?: number;
+    model?: string;
+    costUsd?: number;
+  };
+
+  constructor(diagnostic: LLMTerminalDiagnostic) {
+    const reasoningOnly = diagnostic.code === "reasoning_only" || diagnostic.code === "reasoning_budget_exhausted";
+    const protocolFailure = diagnostic.code === "malformed_stream" || diagnostic.code === "no_terminal_stream";
+    super(
+      reasoningOnly
+        ? "The model used its response for reasoning but returned no visible answer."
+        : protocolFailure
+          ? "The provider stream ended before a complete answer could be read."
+          : "The model returned no visible answer.",
+    );
+    this.name = "LLMTerminalDiagnosticError";
+    this.diagnostic = diagnostic;
+    this.code = reasoningOnly
+      ? "REASONING_ONLY_OUTPUT"
+      : protocolFailure
+        ? "PROTOCOL_STREAM_ERROR"
+        : "EMPTY_MODEL_OUTPUT";
+    this.recovery = diagnostic.code === "reasoning_budget_exhausted"
+      ? "Increase the model output budget or choose a non-reasoning model, then retry."
+      : protocolFailure
+        ? "Retry once; if this repeats, test the connection or choose a different provider/model."
+        : "Retry once or choose a different provider/model. No browser action was started from this response.";
+  }
 }
 
 interface Route<Body = unknown, Prepared = unknown> {
@@ -122,6 +197,57 @@ interface LLMResponse {
     model: string;
     costUsd: number;
   };
+  /** Present only when the stream completed with unusable/suspect output. */
+  readonly terminalDiagnostic?: LLMTerminalDiagnostic;
+}
+
+function isBudgetLikeFinishReason(reason: string | undefined): boolean {
+  if (!reason) return false;
+  return /(?:length|max[_ -]?tokens?|token[_ -]?limit|reasoning|budget)/i.test(reason);
+}
+
+function classifyCompletion(params: {
+  protocol: string;
+  terminalSeen: boolean;
+  visibleContentChars: number;
+  hasVisibleNonWhitespace: boolean;
+  evidence?: StreamCompletionEvidence;
+}): LLMTerminalDiagnostic | undefined {
+  const { protocol, terminalSeen, visibleContentChars, hasVisibleNonWhitespace, evidence } = params;
+  const droppedFrames = evidence?.droppedFrames ?? 0;
+  if (droppedFrames > 0) {
+    return {
+      code: "malformed_stream",
+      protocol,
+      visibleContentChars,
+      terminalSeen,
+      ...(evidence ?? {}),
+    };
+  }
+  if (!terminalSeen) {
+    return {
+      code: "no_terminal_stream",
+      protocol,
+      visibleContentChars,
+      terminalSeen: false,
+      ...(evidence ?? {}),
+    };
+  }
+  if (hasVisibleNonWhitespace) return undefined;
+
+  const reasoningObserved = evidence?.reasoningObserved === true || (evidence?.reasoningTokens ?? 0) > 0;
+  const code: LLMTerminalDiagnosticCode = reasoningObserved
+    ? (isBudgetLikeFinishReason(evidence?.finishReason)
+      ? "reasoning_budget_exhausted"
+      : "reasoning_only")
+    : "empty_visible_output";
+  return {
+    code,
+    protocol,
+    visibleContentChars,
+    terminalSeen: true,
+    ...(evidence ?? {}),
+  };
 }
 
 // ─── Route factory ────────────────────────────────────────────────────────────
@@ -185,24 +311,46 @@ function makeFromTransport<Body, Prepared, FrameType, EventType, State>(
       }),
     streamPrepared: async function* (prepared: Prepared, request: LLMRequest, signal?: AbortSignal): AsyncIterable<unknown> {
       let state = protocol.stream.initial(request);
-      let emittedFinish = false;
+      let finishUsage: unknown;
+      let terminalSeen = false;
+      let visibleContentChars = 0;
+      let hasVisibleNonWhitespace = false;
       for await (const frame of input.transport.frames(prepared, signal)) {
         const { state: newState, events } = protocol.stream.step(state, frame as FrameType);
         state = newState;
         for (const event of events) {
-          if ((event as { type?: string }).type === "finish") emittedFinish = true;
+          const eventLike = event as { type?: string; content?: string; usage?: unknown };
+          if (eventLike.type === "finish") {
+            finishUsage = eventLike.usage;
+            continue;
+          }
+          if (eventLike.type === "text" && eventLike.content) {
+            visibleContentChars += eventLike.content.length;
+            if (eventLike.content.trim().length > 0) hasVisibleNonWhitespace = true;
+          }
           yield event;
         }
         if (protocol.stream.terminal?.(frame as FrameType, state)) {
+          terminalSeen = true;
           break;
         }
       }
- // If the protocol's `step` never emitted a `finish` event (truncated/
- // aborted streams, or Gemini whose step never emits finish), synthesize
- // one so `generate()` receives the accumulated usage.
-      if (!emittedFinish) {
-        yield { type: "finish", usage: (state as { usage?: unknown }).usage };
-      }
+ // Emit exactly one finish event after the stream ends so it can carry a
+ // normalized terminal diagnosis for every protocol. Abort errors are thrown
+ // by the transport before reaching this point and therefore preserve their
+ // native AbortError identity.
+      const completion = classifyCompletion({
+        protocol: protocol.id,
+        terminalSeen,
+        visibleContentChars,
+        hasVisibleNonWhitespace,
+        evidence: protocol.stream.completion?.(state),
+      });
+      yield {
+        type: "finish",
+        usage: finishUsage ?? (state as { usage?: unknown }).usage,
+        ...(completion ? { terminalDiagnostic: completion } : {}),
+      };
     },
   };
   routeRegistry.set(routeId, route as Route<unknown, unknown>);
@@ -240,10 +388,21 @@ export async function generate(
   const prepared = route.prepareTransport(body, request);
   const chunks: string[] = [];
   let usage: LLMResponse["usage"] | undefined;
+  let terminalDiagnostic: LLMTerminalDiagnostic | undefined;
   for await (const event of route.streamPrepared(prepared, request, signal)) {
-    const e = event as { type: string; content?: string; usage?: LLMResponse["usage"] };
+    const e = event as {
+      type: string;
+      content?: string;
+      usage?: LLMResponse["usage"];
+      terminalDiagnostic?: LLMTerminalDiagnostic;
+    };
     if (e.type === "text" && e.content) chunks.push(e.content);
     if (e.type === "finish" && e.usage) usage = e.usage;
+    if (e.type === "finish" && e.terminalDiagnostic) terminalDiagnostic = e.terminalDiagnostic;
   }
-  return { content: chunks.join(""), usage };
+  return {
+    content: chunks.join(""),
+    usage,
+    ...(terminalDiagnostic ? { terminalDiagnostic } : {}),
+  };
 }

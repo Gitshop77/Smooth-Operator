@@ -12,11 +12,30 @@
 
 import type { BrowserState } from "../../types";
 import { NoSuchElementException } from "../../errors";
+import { elementIdentity } from "../../dom/extraction/element-info";
 
 /**
  * Resolve an `[index]` to its live `HTMLElement` from the browser state's
  * selector map. Throws if the index is missing (the page may have changed
  * since extraction — the caller should re-extract state and retry).
+ *
+ * ## Stale-element guard (identity verification)
+ *
+ * Beyond the structural checks below, when the state carries the identities
+ * captured at OBSERVATION time (`state.elementIdentities[index]`), the live
+ * element's identity is recomputed and compared. `elementIdentity` covers the
+ * tag, key attributes (`role`/`type`/`name`/`id`/`placeholder`/`aria-label`/
+ * `href`/`for`) and the branch path (nth-of-type chain), so:
+ * - a node REPLACED since extraction fails the `isConnected` check above
+ *   (the old reference is detached); and
+ * - a node that is still connected but whose identity-affecting attributes or
+ *   position changed (SPA re-render, list re-order, button relabeled) fails
+ *   the identity comparison — the snapshot the agent saw no longer matches
+ *   the live element, so acting on it could target the wrong control.
+ *
+ * The identity guard is fail-closed: a mismatch throws the same
+ * `NoSuchElementException` the loop's retry contract expects ("extract state
+ * again"), never operating on a possibly-stale element.
  */
 export function resolveElement(state: BrowserState, index: number): HTMLElement {
   const el = state.selectorMap[index];
@@ -50,6 +69,27 @@ export function resolveElement(state: BrowserState, index: number): HTMLElement 
         `element [${index}] is detached from the document (page may have changed — extract state again)`,
       );
     }
+    // Identity fingerprint check: the element the agent referenced must be the
+    // SAME element it observed. A node that is still connected but has changed
+    // identity since extraction (relabeled / re-ordered / attribute-swapped by
+    // an SPA) must fail closed rather than receive the action.
+    const observed = state.elementIdentities?.[index];
+    if (observed !== undefined) {
+      try {
+        if (elementIdentity(el) !== observed) {
+          throw new NoSuchElementException(
+            `element [${index}] changed since extraction (page may have changed — extract state again)`,
+          );
+        }
+      } catch (e) {
+        // A DOM exception while recomputing identity (e.g. the node was
+        // invalidated mid-check) is treated as a stale element — fail closed.
+        if (e instanceof NoSuchElementException) throw e;
+        throw new NoSuchElementException(
+          `element [${index}] identity could not be verified (page may have changed — extract state again)`,
+        );
+      }
+    }
     return el;
   }
   // Non-DOM context (e.g. the MV3 service worker): this helper is only ever
@@ -57,6 +97,18 @@ export function resolveElement(state: BrowserState, index: number): HTMLElement 
   // validated here — return it as-is (the cast is safe because callers only
   // run this in a real page).
   return el as HTMLElement;
+}
+
+/** `checkVisibility` is Baseline since March 2024 and avoids the forced style
+ *  recalc of `getComputedStyle` in the `find_text`/`search_page` hot loops. */
+const SUPPORTS_CHECK_VISIBILITY =
+  typeof Element !== "undefined" && typeof Element.prototype.checkVisibility === "function";
+
+function styleHiddenByComputedStyle(el: HTMLElement): boolean {
+  const style = window.getComputedStyle(el);
+  if (style.display === "none" || style.visibility === "hidden") return true;
+  if (parseFloat(style.opacity) === 0) return true;
+  return false;
 }
 
 /** Local visibility check used by `find_text` and `search_page`. */
@@ -70,7 +122,7 @@ export function isVisible(el: HTMLElement): boolean {
  // `isVisible` always runs in a DOM context (it takes an `HTMLElement`), so the
  // viewport dimensions are always available. An off-screen element is not visible
  // regardless of its computed style, so we reject it BEFORE the (more expensive)
- // `getComputedStyle` call below — this trims forced style/layout flushes in the
+ // style check below — this trims forced style/layout flushes in the
  // `find_text`/`search_page` hot loops (and avoids a burst of `getComputedStyle`
  // calls that reads as an automation signal).
   const vh = window.innerHeight;
@@ -82,10 +134,12 @@ export function isVisible(el: HTMLElement): boolean {
  // correctness issue (clicks on inert elements are no-ops). A fast attribute
  // lookup (no style/layout flush) excludes only genuinely non-interactable nodes.
   if (el.closest("[inert]")) return false;
-  const style = window.getComputedStyle(el);
-  if (style.display === "none" || style.visibility === "hidden") return false;
-  if (parseFloat(style.opacity) === 0) return false;
-  return true;
+  if (SUPPORTS_CHECK_VISIBILITY) {
+    // Native style-skip check: display/visibility/opacity/hidden in one walk,
+    // without forcing per-element style recalc.
+    return el.checkVisibility({ opacityProperty: true, visibilityProperty: true });
+  }
+  return !styleHiddenByComputedStyle(el);
 }
 
 /**
@@ -100,10 +154,10 @@ export function isRendered(el: HTMLElement): boolean {
   const rect = el.getBoundingClientRect();
   if (rect.width <= 0 && rect.height <= 0) return false;
   if (el.closest("[inert]")) return false;
-  const style = window.getComputedStyle(el);
-  if (style.display === "none" || style.visibility === "hidden") return false;
-  if (parseFloat(style.opacity) === 0) return false;
-  return true;
+  if (SUPPORTS_CHECK_VISIBILITY) {
+    return el.checkVisibility({ opacityProperty: true, visibilityProperty: true });
+  }
+  return !styleHiddenByComputedStyle(el);
 }
 
 /**

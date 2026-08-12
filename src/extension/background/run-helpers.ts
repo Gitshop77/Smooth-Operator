@@ -6,16 +6,15 @@ import { stripUrlFragment } from "./vision";
 import { makeAntiBotHooks } from "./antibot";
 import { captureTabScreenshot } from "./screenshots";
 import {
-  saveRunState,
   getRunState,
-  clearRunState,
-  RUN_STATE_KEY,
   startKeepalive,
   stopKeepalive,
   maybeReleaseKeepAwake,
   safeLog,
   type RunState,
 } from "./state-store";
+import { runSessionState } from "./run-session-state";
+import { flushRunSnapshot } from "./run-snapshot-store";
 import {
   listTabs,
   ensureContent,
@@ -26,8 +25,9 @@ import {
   getPageFingerprint,
   sendMessageWithTimeout,
 } from "./tab-manager";
-import { navigatorCallDirect, plannerCallDirect } from "../llm-direct";
+import { navigatorCallDirect, plannerCallDirect, summarizeCallDirect } from "../llm-direct";
 import type { VisionAssistant } from "../vision-assistant";
+import { broadcastSupplementalRunEvent } from "./run-event-broadcast";
 import { resolveModel } from "../provider-config";
 import {
   confirmationMessage,
@@ -41,6 +41,13 @@ import {
   clearVisionCache,
   ADAPTIVE_VISION_IDLE_STEPS,
 } from "./run-helpers-utils";
+import {
+  getCurrentRunController,
+  isAuthoritativeRun,
+  type RunController,
+  type RunDispatchToken,
+  type RunSnapshotV1,
+} from "./run-controller";
 
 export { getVisionElementRect, isVisionCacheFresh };
 
@@ -115,6 +122,7 @@ let visionAssistantGeneration = -1;
 
 function ensureVisionAssistantInit(): void {
   if (globalVisionAssistant || visionInitPromise || visionInitFailed) return;
+  const originatingController = getCurrentRunController();
   const MAX_ATTEMPTS = 3;
   const BASE_DELAY_MS = 1000;
   const MAX_DELAY_MS = 8000;
@@ -138,13 +146,10 @@ function ensureVisionAssistantInit(): void {
         }
         void safeLog("warn", "[vision-assistant] init failed:", e);
         visionInitFailed = true;
-        try {
-          chrome.runtime.sendMessage({
-            type: "AGENT_EVENT",
-            event: { type: "info", message: "Local Vision init failed — vision detections disabled for this run." },
-            time: new Date().toLocaleTimeString("en-GB", { hour12: false }),
-          }).catch(() => {});
-        } catch { /* chrome.runtime may be unavailable during SW teardown */ }
+        broadcastSupplementalRunEvent(
+          { type: "info", message: "Local Vision init failed — vision detections disabled for this run." },
+          originatingController,
+        );
         return;
       }
     }
@@ -163,6 +168,10 @@ let currentRunAbortSignal: AbortSignal | null = null;
 
 export function setCurrentRunAbortSignal(signal: AbortSignal | null): void {
   currentRunAbortSignal = signal;
+}
+
+export function clearCurrentRunAbortSignal(signal: AbortSignal): void {
+  if (currentRunAbortSignal === signal) currentRunAbortSignal = null;
 }
 
 export function getCurrentRunAbortSignal(): AbortSignal | null {
@@ -225,7 +234,9 @@ function trackAdaptiveVisionStep(step: number): void {
 
 export async function handleDetectVisualRequest(
   query: string,
+  identity: Pick<RunDispatchToken, "runId">,
   signal?: AbortSignal,
+  assertAuthorized?: () => void,
 ): Promise<{
   ok: boolean;
   count?: number;
@@ -240,20 +251,42 @@ export async function handleDetectVisualRequest(
   if (!va?.isReady) {
     return { ok: false, error: "Vision assistant is still loading — try again on the next step" };
   }
+  const isAuthorityCancellation = (error: unknown): boolean => {
+    if (signal?.aborted) return true;
+    if (error instanceof DOMException && error.name === "AbortError") return true;
+    if (!(error instanceof Error)) return false;
+    return /abort|cancel|stale\s+(?:run\s+)?token|run\s+(?:state\s+)?authority|dispatch\s+authority|authority\s+expired|invalidated\s+action\s+dispatch/i
+      .test(`${error.name}: ${error.message}`);
+  };
+  const rethrowAuthorityCancellation = (error: unknown): void => {
+    if (isAuthorityCancellation(error)) throw error;
+  };
   try {
-    const s = await getRunState();
+    assertAuthorized?.();
+    const s = await runSessionState.readForRun(identity);
+    assertAuthorized?.();
     const tabId = s?.currentTabId;
     if (!tabId) {
       return { ok: false, error: "no active run — cannot determine agent tab for screenshot" };
     }
-    const screenshotDataUrl = await captureTabScreenshot(tabId);
+    const screenshotDataUrl = await captureTabScreenshot(tabId, { signal });
+    assertAuthorized?.();
     // Prefer the caller-supplied signal; fall back to the active run's signal
     // so a user STOP aborts an in-flight decode even when the request came
     // from the side panel (which has no LoopDeps context).
     const abortSignal = signal ?? getCurrentRunAbortSignal() ?? undefined;
-    const visionDetections = await va.detect(screenshotDataUrl, abortSignal).catch((e: unknown) => { void safeLog("warn", "[vision] detect failed:", e); return []; });
+    let visionDetections: Awaited<ReturnType<typeof va.detect>>;
+    try {
+      visionDetections = await va.detect(screenshotDataUrl, abortSignal);
+    } catch (e) {
+      rethrowAuthorityCancellation(e);
+      void safeLog("warn", "[vision] detect failed:", e);
+      visionDetections = [];
+    }
+    assertAuthorized?.();
     clearVisionCache();
     const { mergeDetections } = await loadVisionAssistant();
+    assertAuthorized?.();
     const merged = mergeDetections([], visionDetections, lastKnownDpr);
     for (const m of merged) {
       if (m.source === "vision" && m.pixelRect && m.visionId) {
@@ -262,11 +295,18 @@ export async function handleDetectVisualRequest(
     }
     try {
       const tab = await chrome.tabs.get(tabId);
+      assertAuthorized?.();
       setVisionCacheUrl(tab.url ?? "");
-    } catch { /* tab may have closed */ }
+    } catch (e) {
+      rethrowAuthorityCancellation(e);
+      /* tab may have closed */
+    }
     try {
-      setVisionCacheFingerprint(await getPageFingerprint(tabId));
-    } catch {
+      const fingerprint = await getPageFingerprint(tabId);
+      assertAuthorized?.();
+      setVisionCacheFingerprint(fingerprint);
+    } catch (e) {
+      rethrowAuthorityCancellation(e);
       setVisionCacheFingerprint("");
     }
     const visionEls = merged.filter((m) => m.source === "vision" && m.visionId && m.pixelRect);
@@ -278,6 +318,10 @@ export async function handleDetectVisualRequest(
     const description = descriptions.length > 0
       ? `Visual elements detected:\n${descriptions.join("\n")}\n\nUse {"type":"click","index":"v1"} to click them on the next step.`
       : `No visual elements detected for query: "${query}".`;
+    // This is the last synchronous boundary before the derived detection and
+    // cache state can escape to a caller. It complements the handler's final
+    // correlated state/token check across the async message boundary.
+    assertAuthorized?.();
     adaptiveVisionLastUsedStep = adaptiveVisionCurrentStep;
     return { ok: true, count: visionDetections.length, description };
   } catch (e) {
@@ -289,11 +333,25 @@ export async function extractStateForRun(
   fallbackTabId: number,
   tabs: TabInfo[],
   signal?: AbortSignal,
+  identity?: { runId: string },
 ): Promise<BrowserState> {
-  const s = await getRunState();
+  const checkAbort = (): void => {
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError");
+    }
+  };
+  checkAbort();
+  const s = identity
+    ? await runSessionState.readForRun(identity)
+    : await getRunState();
+  checkAbort();
+  if (identity && !s) {
+    throw new DOMException("Run state authority expired", "AbortError");
+  }
   const tabId = s?.currentTabId ? s.currentTabId : fallbackTabId;
   if (s) trackAdaptiveVisionStep(s.step);
   const vs = await getVisionSettings();
+  checkAbort();
   const model = vs.model;
   const providerId = vs.provider;
   const enableLocalVision = vs.enableLocalVision;
@@ -311,6 +369,7 @@ export async function extractStateForRun(
     });
     mainModelVision = await modelSupportsVision(resolvedModel, catId as string);
   } catch (e) { void safeLog("warn", "[vision] catalog/model load failed:", e); }
+  checkAbort();
 
   const includeScreenshot = mainModelVision && Boolean(storedEnableScreenshots ?? true);
   const visionMode = (storedVisionMode as string) ||
@@ -321,7 +380,7 @@ export async function extractStateForRun(
 
   if (!useAlwaysOnVision) {
     if (useAdaptiveVision && visionElementsCache.size > 0) {
-      const domState = await extractStateFromTab(tabId, tabs, false);
+      const domState = await extractStateFromTab(tabId, tabs, false, signal);
       const dpr = domState.devicePixelRatio ?? 1;
       lastKnownDpr = dpr;
       if (!getVisionCacheUrl() || (domState.url && stripUrlFragment(domState.url) !== stripUrlFragment(getVisionCacheUrl()))) {
@@ -362,7 +421,7 @@ export async function extractStateForRun(
     if (useAdaptiveVision) {
       clearVisionCache();
     }
-    const domStateNoVision = await extractStateFromTab(tabId, tabs, includeScreenshot);
+    const domStateNoVision = await extractStateFromTab(tabId, tabs, includeScreenshot, signal);
     lastKnownDpr = domStateNoVision.devicePixelRatio ?? 1;
     return domStateNoVision;
   }
@@ -370,15 +429,20 @@ export async function extractStateForRun(
   ensureVisionAssistantInit();
   const va = globalVisionAssistant;
   if (!va?.isReady) {
-    return extractStateFromTab(tabId, tabs, false);
+    return extractStateFromTab(tabId, tabs, false, signal);
   }
 
   try {
     const { mergeDetections, renderMergedElementsText } = await loadVisionAssistant();
     const screenshotDataUrl = await captureTabScreenshot(tabId);
+    checkAbort();
     const [domState, visionDetections] = await Promise.all([
-      extractStateFromTab(tabId, tabs, false),
-      va.detect(screenshotDataUrl, signal).catch((e: unknown) => { void safeLog("warn", "[vision] detect failed:", e); return []; }),
+      extractStateFromTab(tabId, tabs, false, signal),
+      va.detect(screenshotDataUrl, signal).catch((e: unknown) => {
+        if (signal?.aborted) throw e;
+        void safeLog("warn", "[vision] detect failed:", e);
+        return [];
+      }),
     ]);
     const dpr = domState.devicePixelRatio ?? 1;
     lastKnownDpr = dpr;
@@ -397,8 +461,9 @@ export async function extractStateForRun(
     }
     return domState;
   } catch (e) {
+    if (signal?.aborted) throw e;
     void safeLog("warn", "[vision-assistant] failed, falling back to DOM-only:", e);
-    return extractStateFromTab(tabId, tabs, false);
+    return extractStateFromTab(tabId, tabs, false, signal);
   }
 }
 
@@ -407,21 +472,18 @@ interface AbortWiring {
   onStorageChanged: (changes: { [k: string]: chrome.storage.StorageChange }, area: string) => void;
 }
 
-export function wireAbortController(): AbortWiring {
-  const controller = new AbortController();
-  const onStorageChanged = (changes: { [k: string]: chrome.storage.StorageChange }, area: string): void => {
-    if (area !== "session") return;
-    const c = changes[RUN_STATE_KEY];
-    if ((c?.newValue as { abortRequested?: boolean } | undefined)?.abortRequested) controller.abort();
-  };
-  chrome.storage.onChanged.addListener(onStorageChanged);
+export function wireAbortController(
+  controller: AbortController,
+  identity: { runId: string },
+): AbortWiring {
+  const { onStorageChanged } = runSessionState.wireAbort(controller, identity);
   return { controller, onStorageChanged };
 }
 
 interface LoopDepsContext {
   tab: chrome.tabs.Tab;
   sendEvent: (event: LogEvent) => void;
-  controller: AbortController;
+  controller: RunController;
   config: {
     maxSteps: number;
     maxActionsPerStep: number;
@@ -437,6 +499,19 @@ interface LoopDepsContext {
 export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
   const { tab, sendEvent, controller, config, task, mode, callbacks } = ctx;
   const fallbackTabId = tab.id!;
+  const dispatchToken = controller.dispatchToken;
+  const isOriginAuthoritative = (): boolean =>
+    isAuthoritativeRun(controller) && controller.canDispatch(dispatchToken);
+  const throwIfOriginUnauthorized = (): void => {
+    if (!isOriginAuthoritative()) {
+      throw new DOMException("Run dispatch authority expired", "AbortError");
+    }
+  };
+  const blockedActions = (actions: AgentAction[]): ActionResult[] => actions.map((action) => ({
+    action,
+    success: false,
+    message: "BLOCKED: run dispatch authority expired",
+  }));
   // Publish the run's abort signal for the on-demand DETECT_VISUAL path.
   setCurrentRunAbortSignal(controller.signal);
   return {
@@ -444,12 +519,20 @@ export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
     mode,
     callbacks,
     config,
-    extractState: async (tabs) => extractStateForRun(fallbackTabId, tabs, controller.signal),
+    extractState: async (tabs) => {
+      throwIfOriginUnauthorized();
+      const state = await extractStateForRun(fallbackTabId, tabs, controller.signal, dispatchToken);
+      throwIfOriginUnauthorized();
+      return state;
+    },
     executeActions: async (actions, _state): Promise<ActionResult[]> => {
-      const s = await getRunState();
+      if (!isOriginAuthoritative()) return blockedActions(actions);
+      const s = await runSessionState.readForRun(dispatchToken);
+      if (!s || !isOriginAuthoritative()) return blockedActions(actions);
       const tabId = s?.currentTabId ? s.currentTabId : fallbackTabId;
       const agentMode = s?.mode ?? mode;
-      const { checkActionAllowed, requiresConfirmation } = await import("@/lib/agent/modes");
+      const { currentCapabilityPolicy } = await import("@/lib/agent/capability-policy");
+      if (!isOriginAuthoritative()) return blockedActions(actions);
       const results: ActionResult[] = new Array(actions.length);
       const filtered: { action: AgentAction; i: number }[] = [];
       let aborted = false;
@@ -464,28 +547,44 @@ export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
           results[i] = { action, success: false, message: "BLOCKED: prior action in the queue was blocked or declined" };
           continue;
         }
-        const allowed = checkActionAllowed(action.type, agentMode);
-        if (!allowed.allowed) {
-          results[i] = { action, success: false, message: `BLOCKED: ${allowed.reason}` };
+        const capability = currentCapabilityPolicy.decide({
+          actionType: action.type,
+          mode: agentMode,
+          enforcementPoint: "extension-action-batch",
+        });
+        if (!capability.allowed) {
+          results[i] = { action, success: false, message: `BLOCKED: ${capability.reason}` };
           aborted = true;
           continue;
         }
-        if (requiresConfirmation(action.type, agentMode)) {
+        if (capability.requiresConfirmation) {
           try {
             const { askHuman } = await import("@/lib/agent/human-interaction");
-            const resp = await askHuman({ mode: "confirm", message: confirmationMessage(action) });
+            if (!isOriginAuthoritative()) return blockedActions(actions);
+            const resp = await askHuman(
+              { mode: "confirm", message: confirmationMessage(action) },
+              controller.signal,
+              dispatchToken,
+            );
+            if (!isOriginAuthoritative()) return blockedActions(actions);
             if (resp.mode !== "confirm" || !resp.confirmed) {
               results[i] = { action, success: false, message: `BLOCKED: user declined confirmation for ${action.type}` };
               aborted = true;
               continue;
             }
+            // The content/RPC token identifies this run, but it cannot stand
+            // in for a user approval. Record the exact approval in the
+            // background so the eventual privileged RPC can consume it.
+            const { grantPrivilegedActionConfirmation } = await import("./privileged-action-policy");
+            grantPrivilegedActionConfirmation(dispatchToken, action);
           } catch {
             results[i] = { action, success: false, message: `BLOCKED: confirmation request failed for ${action.type}` };
             aborted = true;
             continue;
           }
         }
-        if (controller.signal.aborted || (await getRunState())?.abortRequested) {
+        const latestState = await runSessionState.readForRun(dispatchToken);
+        if (!latestState || !isOriginAuthoritative() || controller.signal.aborted || latestState.abortRequested) {
           results[i] = { action, success: false, message: `BLOCKED: run aborted during confirmation for ${action.type}` };
           aborted = true;
           continue;
@@ -493,6 +592,16 @@ export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
         filtered.push({ action, i });
       }
       if (filtered.length === 0) return results;
+      if (!isOriginAuthoritative()) {
+        filtered.forEach((f) => {
+          results[f.i] = {
+            action: f.action,
+            success: false,
+            message: "BLOCKED: run cancellation invalidated action dispatch",
+          };
+        });
+        return results;
+      }
       // Mirror of the loop-side safeDispatch guard (action-queue.ts): a
       // throwing content-script round-trip (tab closed mid-step, script
       // unloaded) must not truncate the action queue. Mark every filtered
@@ -500,7 +609,12 @@ export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
       // of losing the whole result array to a rejected executeActions.
       let execResults: ActionResult[];
       try {
-        execResults = (await executeActionsInTab(tabId, filtered.map((f) => f.action), agentMode)) as ActionResult[];
+        execResults = (await executeActionsInTab(
+          tabId,
+          filtered.map((f) => f.action),
+          agentMode,
+          { token: dispatchToken, signal: controller.signal },
+        )) as ActionResult[];
       } catch (e) {
         void safeLog("warn", "[run-helpers] executeActionsInTab failed:", e);
         filtered.forEach((f) => {
@@ -512,6 +626,7 @@ export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
         });
         return results;
       }
+      if (!isOriginAuthoritative()) return blockedActions(actions);
       filtered.forEach((f, k) => { results[f.i] = execResults[k]; });
       for (let i = 0; i < results.length; i++) {
         if (!results[i]) {
@@ -520,54 +635,115 @@ export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
       }
       return results;
     },
-    navigatorCall: navigatorCallDirect,
-    plannerCall: plannerCallDirect,
-    getTabs: listTabs,
+    navigatorCall: async (request, signal) => {
+      throwIfOriginUnauthorized();
+      const response = await navigatorCallDirect(request, signal);
+      throwIfOriginUnauthorized();
+      return response;
+    },
+    plannerCall: async (request, signal) => {
+      throwIfOriginUnauthorized();
+      const response = await plannerCallDirect(request, signal);
+      throwIfOriginUnauthorized();
+      return response;
+    },
+    summarizeCall: async (request) => {
+      throwIfOriginUnauthorized();
+      const response = await summarizeCallDirect(request);
+      throwIfOriginUnauthorized();
+      return response;
+    },
+    getTabs: async () => {
+      throwIfOriginUnauthorized();
+      const tabs = await listTabs();
+      throwIfOriginUnauthorized();
+      return tabs;
+    },
     onEvent: sendEvent,
     signal: controller.signal,
     onTabAction: async (action) => {
-      const s = await getRunState();
-      if (!s) return { handled: false, pageChanged: false };
-      return handleTabAction(action, s, sendEvent);
+      if (!isOriginAuthoritative()) {
+        return { handled: true, success: false, message: "BLOCKED: run cancellation invalidated tab action", pageChanged: false };
+      }
+      const s = await runSessionState.readForRun(dispatchToken);
+      if (!s) {
+        return { handled: true, success: false, message: "BLOCKED: run state authority expired", pageChanged: false };
+      }
+      if (!isOriginAuthoritative()) {
+        return { handled: true, success: false, message: "BLOCKED: run cancellation invalidated tab action", pageChanged: false };
+      }
+      return handleTabAction(action, s, sendEvent, controller.signal, isOriginAuthoritative, dispatchToken);
     },
     waitForNavigation: async () => {
-      const s = await getRunState();
+      throwIfOriginUnauthorized();
+      const s = await runSessionState.readForRun(dispatchToken);
+      throwIfOriginUnauthorized();
       if (!s || !s.currentTabId) return;
-      await waitForTabLoad(s.currentTabId);
-      await ensureContent(s.currentTabId);
+      await waitForTabLoad(s.currentTabId, 8_000, controller.signal);
+      throwIfOriginUnauthorized();
+      await ensureContent(s.currentTabId, controller.signal);
+      throwIfOriginUnauthorized();
     },
     settleDelay: 500,
     requestConfirmation: async (action) => {
       try {
+        throwIfOriginUnauthorized();
         const { askHuman } = await import("@/lib/agent/human-interaction");
-        const resp = await askHuman({ mode: "confirm", message: confirmationMessage(action) });
-        if (controller.signal.aborted || (await getRunState())?.abortRequested) return false;
+        throwIfOriginUnauthorized();
+        const resp = await askHuman(
+          { mode: "confirm", message: confirmationMessage(action) },
+          controller.signal,
+          dispatchToken,
+        );
+        throwIfOriginUnauthorized();
+        const latest = await runSessionState.readForRun(dispatchToken);
+        if (!latest || !isOriginAuthoritative() || controller.signal.aborted || latest.abortRequested) return false;
         return resp.mode === "confirm" ? resp.confirmed : false;
       } catch { return false; }
     },
     ...makeAntiBotHooks(),
     checkPaused: async () => {
       try {
+        throwIfOriginUnauthorized();
         const res = await chrome.storage.session.get("open_cowork_paused");
+        throwIfOriginUnauthorized();
         return !!res.open_cowork_paused;
       } catch { return false; }
     },
-    getPageHtml: async () => {
+    getPageHtml: async (signal?: AbortSignal) => {
       try {
-        const s = await getRunState();
+        throwIfOriginUnauthorized();
+        if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError");
+        const s = await runSessionState.readForRun(dispatchToken);
+        throwIfOriginUnauthorized();
+        if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError");
         if (!s || !s.currentTabId) return "";
-        const res = await sendMessageWithTimeout<{ ok: boolean; html?: string }>(s.currentTabId, { type: "EXTRACT_HTML" });
+        const res = await sendMessageWithTimeout<{ ok: boolean; html?: string }>(s.currentTabId, { type: "EXTRACT_HTML" }, undefined, signal);
+        throwIfOriginUnauthorized();
+        if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError");
         if (res?.ok && typeof res.html === "string") return res.html;
         return "";
-      } catch { return ""; }
+      } catch (error) {
+        if (signal?.aborted || (error instanceof Error && (/abort/i.test(error.name) || /abort/i.test(error.message)))) throw error;
+        return "";
+      }
     },
-    getCurrentUrl: async () => {
+    getCurrentUrl: async (signal?: AbortSignal) => {
       try {
-        const s = await getRunState();
+        throwIfOriginUnauthorized();
+        if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError");
+        const s = await runSessionState.readForRun(dispatchToken);
+        throwIfOriginUnauthorized();
+        if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError");
         if (!s || !s.currentTabId) return "";
         const t = await chrome.tabs.get(s.currentTabId);
+        throwIfOriginUnauthorized();
+        if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError");
         return t.url ?? "";
-      } catch { return ""; }
+      } catch (error) {
+        if (signal?.aborted || (error instanceof Error && (/abort/i.test(error.name) || /abort/i.test(error.message)))) throw error;
+        return "";
+      }
     },
   };
 }
@@ -576,29 +752,44 @@ interface CleanupContext {
   runBuilder: RunBuilder;
   task: string;
   isScheduledTaskRun: boolean;
-  onStorageChanged: AbortWiring["onStorageChanged"];
+  onStorageChanged?: AbortWiring["onStorageChanged"];
   sendEvent: (event: LogEvent) => void;
+  /** Retained for callers during the migration; terminalSnapshot is authoritative. */
   runSucceeded: boolean;
   releaseRunGuard: () => void;
   teardownScheduledVision: () => Promise<void>;
+  abortSignal: AbortSignal;
+  terminalSnapshot: RunSnapshotV1;
 }
 
 export async function cleanupRun(ctx: CleanupContext): Promise<void> {
-  const { runBuilder, task, isScheduledTaskRun, onStorageChanged, sendEvent, runSucceeded, releaseRunGuard, teardownScheduledVision } = ctx;
+  const { runBuilder, task, isScheduledTaskRun, onStorageChanged, sendEvent, releaseRunGuard, teardownScheduledVision, abortSignal, terminalSnapshot } = ctx;
 
-  releaseRunGuard();
-
-  try { chrome.storage.onChanged.removeListener(onStorageChanged); } catch { void 0; }
+  if (onStorageChanged) {
+    try { chrome.storage.onChanged.removeListener(onStorageChanged); } catch { void 0; }
+  }
   try { await stopKeepalive(); } catch { void 0; }
-  try { await clearRunState(); } catch { void 0; }
+  try { await runSessionState.clear({ runId: terminalSnapshot.runId }); } catch { void 0; }
   try { void chrome.action.setBadgeText({ text: "" }); } catch { void 0; }
   try { sendEvent({ type: "info", message: "Run finished." }); } catch { void 0; }
   try {
-    const record = runBuilder.finish({ success: runSucceeded, text: "Run ended." });
+    // A nonrecoverable error may terminate through an `error` event rather
+    // than a `done` event. Use the authoritative terminal projection as the
+    // history fallback so history and panel never disagree about the outcome.
+    const record = runBuilder.finish({
+      // The terminal snapshot is the sole outcome authority. A stale success
+      // callback must never override cancellation/failure in persisted history.
+      success: terminalSnapshot.status === "succeeded",
+      text: terminalSnapshot.resultText ?? terminalSnapshot.terminalMessage ?? "Run ended.",
+      terminalReason: terminalSnapshot.terminalReason,
+    });
     try { await saveRun(record); } catch {
       try { await saveRun(record); } catch { /* give up after retry */ }
     }
   } catch { void 0; }
+  // Flush any snapshot still in the coalescing buffer so the panel's next
+  // open (and any crash recovery) sees the authoritative terminal state.
+  try { await flushRunSnapshot(); } catch { void 0; }
   try { void maybeReleaseKeepAwake(); } catch { void 0; }
   clearVisionCache();
   if (isScheduledTaskRun) {
@@ -610,15 +801,21 @@ export async function cleanupRun(ctx: CleanupContext): Promise<void> {
       if (mode !== "always") await teardownScheduledVision();
     } catch { void 0; }
   }
-  try { void import("./task-queue").then((m) => m.fireNotifications(task, runSucceeded)).catch(() => { void 0; }); } catch { void 0; }
+  try {
+    void import("./run-notifications")
+      .then((m) => m.fireNotifications(task, terminalSnapshot.status === "succeeded"))
+      .catch(() => { void 0; });
+  } catch { void 0; }
   // The run is over — stop publishing its abort signal so a DETECT_VISUAL
   // arriving between runs doesn't short-circuit against a stale controller.
-  setCurrentRunAbortSignal(null);
+  clearCurrentRunAbortSignal(abortSignal);
+  // A successor run may start only after predecessor teardown can no longer
+  // mutate shared vision/signal state.
+  releaseRunGuard();
 }
 
 export async function initRunState(runState: RunState): Promise<void> {
-  const existing = await getRunState();
-  const state = existing?.abortRequested ? { ...runState, abortRequested: true } : runState;
-  await saveRunState(state);
+  if (!runState.runId) throw new Error("run-state initialization requires runId");
+  await runSessionState.initialize(runState as RunState & { runId: string });
   await startKeepalive();
 }

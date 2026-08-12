@@ -17,19 +17,19 @@ export async function handleGetStorage(
   ctx: ActionContext,
   action: Extract<Action, { type: "get_storage" }>,
 ): Promise<ActionResult> {
-  return delegateTabAction(action, ctx.signal);
+  return delegateTabAction(action, ctx.signal, ctx.dispatchToken, ctx.effectCapability);
 }
 
 export async function handleSetStorage(
   ctx: ActionContext,
   action: Extract<Action, { type: "set_storage" }>,
 ): Promise<ActionResult> {
-  return delegateTabAction(action, ctx.signal);
+  return delegateTabAction(action, ctx.signal, ctx.dispatchToken, ctx.effectCapability);
 }
 
 export async function handleClearStorage(
   ctx: ActionContext,
   action: Extract<Action, { type: "clear_storage" }>,
 ): Promise<ActionResult> {
-  return delegateTabAction(action, ctx.signal);
+  return delegateTabAction(action, ctx.signal, ctx.dispatchToken, ctx.effectCapability);
 }

@@ -12,6 +12,7 @@ import {
   saveRunState,
   getRunState,
   clearRunState,
+  resetRunStateStoreForTests,
   loadAndSetDomainConfig,
   RUN_STATE_KEY,
   type RunState,
@@ -73,10 +74,13 @@ const baseState = (): RunState => ({
 });
 
 let restore: () => void;
+let sessionStore: Record<string, unknown>;
 
 beforeEach(() => {
   const { store } = installSessionStub();
+  sessionStore = store;
   store[RUN_STATE_KEY] = baseState();
+  resetRunStateStoreForTests();
   restore = () => {
     delete (globalThis as Record<string, unknown>).chrome;
   };
@@ -119,12 +123,46 @@ describe("saveRunState write serialization", () => {
     await clearRunState();
     expect(await getRunState()).toBeNull();
   });
+
+  test("writes the additive V1 marker while accepting legacy unversioned state", async () => {
+    expect((await getRunState())?.version).toBe(1);
+    await saveRunState({ step: 4 });
+    expect(sessionStore[RUN_STATE_KEY]).toMatchObject({ version: 1, step: 4 });
+  });
+
+  test("fails closed on unknown versions and malformed persisted records", async () => {
+    sessionStore[RUN_STATE_KEY] = { ...baseState(), version: 2 };
+    resetRunStateStoreForTests();
+    expect(await getRunState()).toBeNull();
+
+    sessionStore[RUN_STATE_KEY] = { ...baseState(), mode: "superuser" };
+    resetRunStateStoreForTests();
+    expect(await getRunState()).toBeNull();
+  });
+
+  test("persists a valid V1 abort latch when STOP precedes full run admission", async () => {
+    delete sessionStore[RUN_STATE_KEY];
+    resetRunStateStoreForTests();
+    await saveRunState({ abortRequested: true });
+    expect(sessionStore[RUN_STATE_KEY]).toMatchObject({
+      version: 1,
+      active: false,
+      abortRequested: true,
+    });
+    expect((await getRunState())?.abortRequested).toBe(true);
+  });
 });
 
 describe("initRunState abort-merge preservation", () => {
   test("a concurrent STOP (abortRequested:true) survives a fresh init write", async () => {
     const { store, chrome } = installSessionStub();
-    store[RUN_STATE_KEY] = { ...baseState(), active: true, abortRequested: true };
+    store[RUN_STATE_KEY] = {
+      ...baseState(),
+      task: "",
+      active: false,
+      abortRequested: true,
+    };
+    resetRunStateStoreForTests();
     let keepaliveCalled = false;
     chrome.alarms.create = vi.fn(() => {
       keepaliveCalled = true;
@@ -132,7 +170,7 @@ describe("initRunState abort-merge preservation", () => {
     // A fresh run-state arrives asserting abortRequested:false. It must NOT
     // clobber a STOP that landed between the RUN handler's sendResponse and
     // this call (the TOCTOU the guard exists for).
-    await initRunState(baseState());
+    await initRunState({ ...baseState(), runId: "init-run", dispatchRevision: 1 });
     const st = await getRunState();
     expect(st?.abortRequested).toBe(true);
     expect(st?.active).toBe(true);

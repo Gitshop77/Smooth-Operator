@@ -3,6 +3,7 @@ import type { Action } from "../schema";
 import { SW_RPC_TIMEOUT_MS, TIMINGS, sleep } from "../constants";
 import { generateCssSelector } from "../helpers";
 import { type ActionContext, hasPageChanged, isExtensionContext } from "./types";
+import { rejectOnAbort, throwIfAborted } from "./abort";
 
 type CdpClickResult = { ok?: boolean; error?: string } | undefined | null;
 
@@ -10,7 +11,44 @@ export type ClickStrategyResult = {
   clicked: boolean;
   strategyUsed: string;
   error?: string;
+  /** True when the target's center is covered by a DIFFERENT (higher)
+   *  element. The caller must NOT fall through to JS click strategies — they
+   *  would dispatch onto the covering overlay. Mirror of Playwright's
+   *  "Receives Events" actionability check. */
+  occluded?: boolean;
 };
+
+/**
+ * Hit-test the action point: when `document.elementFromPoint` returns a node
+ * that is neither the target nor a descendant, a covering overlay (modal,
+ * cookie banner, toast, sticky header) intercepts coordinate clicks. Returns
+ * the occlusion error string, or null when the point is reachable.
+ */
+export function occlusionError(
+  el: HTMLElement,
+  x: number,
+  y: number,
+): string | null {
+  try {
+    const hit = document.elementFromPoint(Math.round(x), Math.round(y));
+    if (hit && hit !== el && !el.contains(hit)) {
+      const tag = (hit as HTMLElement).tagName?.toLowerCase?.() || "unknown";
+      // Include an id/class hint so the LLM can name the covering overlay.
+      const hintEl = hit as HTMLElement;
+      const idHint = hintEl.id ? `#${hintEl.id}` : "";
+      const classHint = typeof hintEl.className === "string" && hintEl.className
+        ? `.${hintEl.className.trim().split(/\s+/).slice(0, 2).join(".")}`
+        : "";
+      return (
+        `element center (${Math.round(x)},${Math.round(y)}) is intercepted by <${tag}${idHint}${classHint}> — ` +
+        `an overlay/modal/toast likely covers the target; the click would land on the covering element`
+      );
+    }
+  } catch {
+    /* elementFromPoint can throw in exotic embeddings — treat as pass-through */
+  }
+  return null;
+}
 
 /** Send a CDP_CLICK to the background SW and return the normalized result.
  *
@@ -20,21 +58,28 @@ export type ClickStrategyResult = {
 async function sendCdpClick(
   rect: { x: number; y: number; width: number; height: number },
   visionIndex?: string,
+  token?: ActionContext["dispatchToken"],
+  signal?: AbortSignal,
+  action?: Extract<Action, { type: "click" }>,
+  effectCapability?: string,
 ): Promise<CdpClickResult> {
   let t: ReturnType<typeof setTimeout> | undefined;
+  const abort = rejectOnAbort(signal);
   try {
     return (await Promise.race([
       chrome.runtime.sendMessage(
         visionIndex !== undefined
-          ? { type: "CDP_CLICK", rect, visionIndex }
-          : { type: "CDP_CLICK", rect },
+          ? { type: "CDP_CLICK", rect, visionIndex, ...(action ? { action } : {}), ...(token ? { token } : {}), ...(effectCapability ? { effectCapability } : {}) }
+          : { type: "CDP_CLICK", rect, ...(action ? { action } : {}), ...(token ? { token } : {}), ...(effectCapability ? { effectCapability } : {}) },
       ),
       new Promise<never>((_, reject) => {
         t = setTimeout(() => reject(new Error("CDP_CLICK timeout")), SW_RPC_TIMEOUT_MS);
       }),
+      abort.promise,
     ])) as CdpClickResult;
   } finally {
     if (t) clearTimeout(t);
+    abort.cleanup();
   }
 }
 
@@ -58,15 +103,33 @@ export function tryCdpClick(el: HTMLElement): ClickStrategyResult {
       error: `element center (${Math.round(centerX)},${Math.round(centerY)}) is outside the viewport (${window.innerWidth}x${window.innerHeight}) — skipping CDP coordinate click`,
     };
   }
+  // Occlusion gate: a covered target must never silently report success, and
+  // the JS fallback strategies must not click through the covering overlay.
+  const blocked = occlusionError(el, centerX, centerY);
+  if (blocked) {
+    return { clicked: false, strategyUsed: "", error: blocked, occluded: true };
+  }
   return { clicked: false, strategyUsed: "CDP" };
 }
 
 export async function executeCdpClick(
   el: HTMLElement,
-): Promise<{ clicked: boolean; strategyUsed: string; error?: string; cdpUncertain?: boolean }> {
+  token?: ActionContext["dispatchToken"],
+  signal?: AbortSignal,
+  action?: Extract<Action, { type: "click" }>,
+  effectCapability?: string,
+): Promise<{ clicked: boolean; strategyUsed: string; error?: string; cdpUncertain?: boolean; occluded?: boolean }> {
+  throwIfAborted(signal);
   const r = el.getBoundingClientRect();
+  // Occlusion gate on the coordinate path (mirror of the sync tryCdpClick):
+  // a covered target must not be clicked through.
+  const blocked = occlusionError(el, r.x + r.width / 2, r.y + r.height / 2);
+  if (blocked) {
+    return { clicked: false, strategyUsed: "CDP", error: blocked, occluded: true };
+  }
   try {
-    const cdpResult = await sendCdpClick({ x: r.x, y: r.y, width: r.width, height: r.height });
+    const cdpResult = await sendCdpClick({ x: r.x, y: r.y, width: r.width, height: r.height }, undefined, token, signal, action, effectCapability);
+    throwIfAborted(signal);
     if (cdpResult?.ok) {
       return { clicked: true, strategyUsed: "CDP" };
     } else if (cdpResult?.error) {
@@ -75,6 +138,7 @@ export async function executeCdpClick(
       return { clicked: false, strategyUsed: "", error: "CDP click: no response from service worker", cdpUncertain: true };
     }
   } catch (e) {
+    if (signal?.aborted) throw e;
     const msg = (e as Error).message;
     return {
       clicked: false,
@@ -236,7 +300,16 @@ export async function handleVisionClick(
     };
   }
   try {
-    const result = await sendCdpClick({ x: 0, y: 0, width: 1, height: 1 }, indexStr);
+    throwIfAborted(ctx.signal);
+    const result = await sendCdpClick(
+      { x: 0, y: 0, width: 1, height: 1 },
+      indexStr,
+      ctx.dispatchToken,
+      ctx.signal,
+      action,
+      ctx.effectCapability,
+    );
+    throwIfAborted(ctx.signal);
     if (result?.ok) {
       await sleep(TIMINGS.clickAfterSettle, ctx.signal);
       const changed = hasPageChanged(ctx);
@@ -255,6 +328,7 @@ export async function handleVisionClick(
       } (result: ${JSON.stringify(result ?? null)})`,
     };
   } catch (e) {
+    if (ctx.signal?.aborted) throw e;
     return {
       action,
       success: false,

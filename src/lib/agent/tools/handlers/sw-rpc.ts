@@ -77,7 +77,12 @@ export function makeRingLogHandler<T extends Action["type"]>(config: {
       return { action, success: false, message: `${actionType} requires the extension context` };
     }
     try {
-      const res = await swRpc<RingLogRpcResponse>({ type: messageType, verb }, messageType, ctx.signal);
+      const res = await swRpc<RingLogRpcResponse>({
+        type: messageType,
+        verb,
+        ...(ctx.dispatchToken ? { token: ctx.dispatchToken } : {}),
+        ...(ctx.effectCapability ? { effectCapability: ctx.effectCapability } : {}),
+      }, messageType, ctx.signal);
       if (!res.ok) {
         return { action, success: false, message: `${actionType} failed: ${res.error ?? "no response"}` };
       }

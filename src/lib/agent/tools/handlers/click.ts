@@ -15,12 +15,14 @@ import {
   tryNativeClick,
   tryTextSearchClick,
 } from "./click-utils";
+import { throwIfAborted } from "./abort";
 
 export async function handleClick(
   ctx: ActionContext,
   action: Extract<Action, { type: "click" }>,
 ): Promise<ActionResult> {
   const { state } = ctx;
+  throwIfAborted(ctx.signal);
 
   if (typeof action.index === "string") {
     return handleVisionClick(ctx, action, action.index);
@@ -38,9 +40,12 @@ export async function handleClick(
   }
 
   highlightElement(el, `click [${numericIndex}]`);
+  throwIfAborted(ctx.signal);
   await moveCursorToElement(el);
+  throwIfAborted(ctx.signal);
   safeScrollIntoView(el);
   await sleep(TIMINGS.clickScrollIntoView, ctx.signal);
+  throwIfAborted(ctx.signal);
   if (typeof el.focus === "function") el.focus();
 
   const errors: string[] = [];
@@ -62,10 +67,20 @@ export async function handleClick(
   // Strategy 1: CDP coordinate click (extension context only).
   const cdpCheck = tryCdpClick(el);
   if (isExtensionContext()) {
+    if (cdpCheck.occluded) {
+      // A covering overlay intercepts the center. The JS strategies would
+      // dispatch onto the overlay (or "click through" visually) — hard-stop
+      // and surface the real cause to the LLM instead.
+      return {
+        action,
+        success: false,
+        message: `Click [${numericIndex}] blocked: ${cdpCheck.error}`,
+      };
+    }
     if (cdpCheck.error) {
       errors.push(cdpCheck.error);
     } else if (cdpCheck.strategyUsed === "CDP") {
-      const cdpResult = await executeCdpClick(el);
+      const cdpResult = await executeCdpClick(el, ctx.dispatchToken, ctx.signal, action, ctx.effectCapability);
       if (cdpResult.clicked) {
         clicked = true;
         strategyUsed = "CDP";
@@ -77,9 +92,13 @@ export async function handleClick(
   }
 
   // Strategies 2-5: fall back until one clicks.
+  throwIfAborted(ctx.signal);
   attempt(() => tryNativeClick(el));
+  throwIfAborted(ctx.signal);
   attempt(() => tryCssSelectorClick(el));
+  throwIfAborted(ctx.signal);
   attempt(() => tryTextSearchClick(el));
+  throwIfAborted(ctx.signal);
   attempt(() => tryDispatchedEventClick(el));
 
   await sleep(TIMINGS.clickAfterSettle, ctx.signal);

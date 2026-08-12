@@ -318,18 +318,20 @@ describe("wait_for_network_idle: activity window", () => {
    * idle-window math then sees a deterministic timeline without any manual
    * clock juggling in the tests.
    */
-  function stubPerformanceClock(): { setEntries: (v: number) => void } {
+  function stubPerformanceClock(): { setEntries: (v: number, completed?: boolean) => void } {
     let latestStart: number | null = null; // null = no entries
+    let completed = true;
     vi.stubGlobal("performance", {
       now: () => Date.now(),
       getEntriesByType: () =>
         latestStart === null
           ? []
-          : [{ startTime: latestStart } as PerformanceResourceTiming],
+          : [{ startTime: latestStart, responseEnd: completed ? latestStart + 1 : latestStart } as PerformanceResourceTiming],
     });
     return {
-      setEntries: (v: number) => {
+      setEntries: (v: number, done = true) => {
         latestStart = v;
+        completed = done;
       },
     };
   }
@@ -373,6 +375,25 @@ describe("wait_for_network_idle: activity window", () => {
     // polls at t=500..800: 100..400ms after the last entry → still waiting
     expect(await Promise.race([promise, Promise.resolve("pending")])).toBe("pending");
     await vi.advanceTimersByTimeAsync(200); // poll at t=900: 500ms after t=400 → idle
+    const result = await promise;
+    expect(result.success).toBe(true);
+  });
+
+  test("a still-in-flight newest entry (responseEnd === startTime) is NOT idle", async () => {
+    vi.useFakeTimers();
+    const clock = stubPerformanceClock();
+    clock.setEntries(Date.now(), false); // in-flight transfer (duration 0)
+    const promise = handleWaitForNetworkIdle(ctx(), {
+      type: "wait_for_network_idle",
+      timeout_seconds: 5,
+    });
+    // Even far past the 500ms window, an in-flight newest entry must keep the
+    // wait busy — the resource-timing buffer only contains completed entries,
+    // so a duration-0 newest entry is the reliable busy signal.
+    await vi.advanceTimersByTimeAsync(900);
+    expect(await Promise.race([promise, Promise.resolve("pending")])).toBe("pending");
+    clock.setEntries(Date.now(), true); // transfer completes now
+    await vi.advanceTimersByTimeAsync(600); // 500ms after completion → idle
     const result = await promise;
     expect(result.success).toBe(true);
   });

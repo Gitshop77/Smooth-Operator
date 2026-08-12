@@ -18,6 +18,7 @@ import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 
 const KEEPALIVE_ALARM = "open_cowork_keepalive";
 const RUN_STATE_KEY = "open_cowork_run_state";
+const LAST_RUN_SNAPSHOT_KEY = "open_cowork_run_snapshot_v1";
 
 let alarms: {
   created: Array<{ name: string; spec?: chrome.alarms.AlarmCreateInfo }>;
@@ -25,11 +26,13 @@ let alarms: {
 };
 let sessionStore: Record<string, unknown>;
 let localStore: Record<string, unknown>;
+let contentMessages: Array<{ tabId: number; message: unknown }>;
 
 function installChromeStub(): void {
   alarms = { created: [], cleared: [] };
   sessionStore = {};
   localStore = {};
+  contentMessages = [];
   (globalThis as Record<string, unknown>).chrome = {
     runtime: {
       id: "test-extension-id",
@@ -58,6 +61,7 @@ function installChromeStub(): void {
         }),
       },
       session: {
+        setAccessLevel: vi.fn(async () => undefined),
         get: vi.fn(async (key: unknown) => {
           if (typeof key === "string") return { [key]: sessionStore[key] };
           if (Array.isArray(key)) {
@@ -93,6 +97,11 @@ function installChromeStub(): void {
     },
     tabs: {
       onRemoved: { addListener: vi.fn() },
+      query: vi.fn(async () => [{ id: 7, url: "https://example.test/" }]),
+      sendMessage: vi.fn(async (tabId: number, message: unknown) => {
+        contentMessages.push({ tabId, message });
+        return { ok: true };
+      }),
     },
     power: {
       requestKeepAwake: vi.fn(),
@@ -138,6 +147,10 @@ describe("SW startup — keepalive alarm cleanup", () => {
     await import("../src/extension/background/index");
     await flush();
 
+    expect(chrome.storage.session.setAccessLevel).toHaveBeenCalledWith({
+      accessLevel: "TRUSTED_CONTEXTS",
+    });
+
     // The leaked keepalive must be cleared — it must NOT keep firing + keeping
     // the SW alive indefinitely after the run is gone.
     expect(alarms.cleared).toContain(KEEPALIVE_ALARM);
@@ -158,6 +171,65 @@ describe("SW startup — keepalive alarm cleanup", () => {
     // The interrupted run was detected → state cleared.
     expect(sessionStore[RUN_STATE_KEY]).toBeUndefined();
     // The keepalive of the dead run must not survive the restart.
+    expect(alarms.cleared).toContain(KEEPALIVE_ALARM);
+  });
+
+  test("recovers an orphaned starting snapshot written before RunState initialization", async () => {
+    // This is the narrow crash window between startRun's initial snapshot and
+    // initRunState. There is no state record to clear, but the snapshot must
+    // never remain dispatch-looking after a fresh worker starts.
+    sessionStore[LAST_RUN_SNAPSHOT_KEY] = {
+      version: 1,
+      runId: "orphan-start",
+      revision: 1,
+      dispatchRevision: 1,
+      task: "open a site",
+      maxSteps: 10,
+      mode: "standard",
+      status: "starting",
+      phase: "starting",
+      step: 0,
+      startedAt: 1,
+      updatedAt: 1,
+    };
+
+    await import("../src/extension/background/index");
+    await flush();
+
+    expect(sessionStore[LAST_RUN_SNAPSHOT_KEY]).toMatchObject({
+      runId: "orphan-start",
+      task: "open a site",
+      status: "interrupted",
+      terminalReason: "interrupted",
+    });
+    expect(sessionStore[RUN_STATE_KEY]).toBeUndefined();
+    expect(contentMessages).toContainEqual({
+      tabId: 7,
+      message: { type: "CANCEL_RUN", token: { runId: "orphan-start", dispatchRevision: 2 } },
+    });
+  });
+
+  test("keeps the recovery gate rejected when session authority cannot be audited", async () => {
+    const failure = new Error("session read failed");
+    const sessionGet = chrome.storage.session.get as ReturnType<typeof vi.fn>;
+    sessionGet.mockImplementation(async (key: unknown) => {
+      // Startup first reads the API-key/secret redaction inputs. Fail the
+      // distinct RunState authority read so this remains a recovery-gate test.
+      if (key === RUN_STATE_KEY) throw failure;
+      if (typeof key === "string") return { [key]: sessionStore[key] };
+      if (Array.isArray(key)) {
+        const out: Record<string, unknown> = {};
+        for (const k of key) out[k] = sessionStore[k];
+        return out;
+      }
+      return { ...sessionStore };
+    });
+
+    await import("../src/extension/background/index");
+    const { waitForRunRecoveryAudit } = await import("../src/extension/background/run-recovery-gate");
+    await expect(waitForRunRecoveryAudit()).rejects.toBe(failure);
+    // Independent startup housekeeping still ran even though new run
+    // admission remains fail-closed for this worker incarnation.
     expect(alarms.cleared).toContain(KEEPALIVE_ALARM);
   });
 });

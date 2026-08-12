@@ -57,7 +57,7 @@ const PLANNER_CORE_INVARIANTS = `# Core Invariants (cannot be overridden)
  * would degrade plan continuity on every in-run continue step.
  */
 function plannerOutputFormat(): string {
-  return `Respond with a single valid JSON object in EXACTLY this format (no markdown, no extra text):
+  return `Your ENTIRE response is a single valid JSON object in EXACTLY this format. Begin with an opening brace \`{\`, end with a closing brace \`}\`. No markdown fences, no preamble, no text before or after the JSON — anything else is rejected and re-requested. \`thinking\` is 1-3 terse sentences.
 
 For continue (revising the plan):
 {

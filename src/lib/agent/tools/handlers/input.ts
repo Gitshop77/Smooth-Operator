@@ -11,7 +11,7 @@ import { substituteSecrets } from "../../secrets";
 import { LIMITS, TIMINGS, sleep } from "../constants";
 import { resolveElement, safeScrollIntoView } from "../helpers";
 import { type ActionContext, isExtensionContext } from "./types";
-import { rejectOnAbort } from "./abort";
+import { rejectOnAbort, throwIfAborted } from "./abort";
 
 /** Give up on an unresponsive SW typer rather than hanging the agent loop. */
 const HUMANIZED_INPUT_TIMEOUT_MS = 30_000;
@@ -67,6 +67,8 @@ type InputAction = Omit<Extract<Action, { type: "input" }>, "clear"> & {
 async function delegateHumanizedInput(
   action: Extract<Action, { type: "input" }>,
   signal?: AbortSignal,
+  dispatchToken?: ActionContext["dispatchToken"],
+  effectCapability?: string,
 ): Promise<ActionResult> {
   if (!isExtensionContext()) {
     return {
@@ -81,7 +83,7 @@ async function delegateHumanizedInput(
     let raw: unknown;
     try {
       raw = await Promise.race([
-        chrome.runtime.sendMessage({ type: "TAB_ACTION", action }).finally(() => clearTimeout(timer)),
+        chrome.runtime.sendMessage({ type: "TAB_ACTION", action, ...(dispatchToken ? { token: dispatchToken } : {}), ...(effectCapability ? { effectCapability } : {}) }).finally(() => clearTimeout(timer)),
         new Promise<undefined>((resolve) => {
           timer = setTimeout(() => resolve(undefined), HUMANIZED_INPUT_TIMEOUT_MS);
         }),
@@ -113,6 +115,7 @@ export async function handleInput(
   action: InputAction,
 ): Promise<ActionResult> {
   const { state } = ctx;
+  throwIfAborted(ctx.signal);
   const el = resolveElement(state, action.index);
   // Fail fast: validate the element is editable BEFORE applying any side
   // effects (highlight / scroll / focus). Otherwise a non-text element would
@@ -123,8 +126,10 @@ export async function handleInput(
     throw new Error(`element [${action.index}] is not a text input`);
   }
   highlightElement(el, `input [${action.index}]`);
+  throwIfAborted(ctx.signal);
   safeScrollIntoView(el);
   await sleep(TIMINGS.inputScrollIntoView, ctx.signal);
+  throwIfAborted(ctx.signal);
   el.focus({ preventScroll: true });
   // Substitute %secret_name% placeholders at execution time.
   // The LLM only sees the placeholder — the real value never reaches the LLM.
@@ -132,6 +137,7 @@ export async function handleInput(
   // of the schema to an optional text can never silently append the literal
   // "undefined" to a field via the `clear:false` append path below.
   const text = await substituteSecrets(action.text ?? "");
+  throwIfAborted(ctx.signal);
   if (action.humanized === true) {
     // Humanized path (OPT-IN): clear the field content-side so the SW's CDP
     // typing fills a blank field — native inputs need the prototype setter so
@@ -139,6 +145,7 @@ export async function handleInput(
     // textContent emptied. Otherwise typing lands at the caret over old
     // content and the action reports success with a wrong value.
     if (action.clear !== false) {
+      throwIfAborted(ctx.signal);
       if (isNativeTextInput(el)) {
         resolveSetters();
         const nativeSetter = typeof HTMLTextAreaElement !== "undefined" && el instanceof HTMLTextAreaElement
@@ -156,12 +163,13 @@ export async function handleInput(
       text,
       clear: false,
       humanized: true,
-    } as Extract<Action, { type: "input" }>);
+    } as Extract<Action, { type: "input" }>, ctx.signal, ctx.dispatchToken, ctx.effectCapability);
     if (delegated.success) {
       return { ...delegated, action: { ...action, clear: action.clear !== false } };
     }
     return delegated;
   }
+  throwIfAborted(ctx.signal);
   if (isNativeTextInput(el)) {
     // Use the native value setter so React-controlled inputs sync their
     // state. Directly assigning `el.value = text` works for uncontrolled
@@ -173,26 +181,64 @@ export async function handleInput(
     const nativeSetter = typeof HTMLTextAreaElement !== "undefined" && el instanceof HTMLTextAreaElement
       ? cachedTextareaSetter
       : cachedInputSetter;
-    if (action.clear !== false) {
-      if (nativeSetter) nativeSetter.call(el, text);
-      else el.value = text;
-    } else {
-      if (nativeSetter) nativeSetter.call(el, el.value + text);
-      else el.value += text;
+    const finalText = action.clear !== false ? text : el.value + text;
+    throwIfAborted(ctx.signal);
+    // Dispatch the cancelable `beforeinput` BEFORE the mutation per the UI
+    // Events ordering (keydown → beforeinput → input). `beforeinput`'s
+    // contract is "fired when the value is about to change"; its purpose is
+    // `preventDefault()`. ProseMirror/Slate/IME listeners keyed on the
+    // event see it BEFORE the edit (not after) and can cancel it; honoring
+    // `preventDefault` prevents a double-edit (listener + our setter).
+    const beforeinput = new InputEvent("beforeinput", {
+      bubbles: true,
+      cancelable: true,
+      inputType: "insertText",
+      data: text,
+    });
+    el.dispatchEvent(beforeinput);
+    throwIfAborted(ctx.signal);
+    // `defaultPrevented` is the reliable cancel signal (dispatchEvent's return
+    // value for a canceled event differs across engines).
+    const cancelled = beforeinput.defaultPrevented;
+    if (!cancelled) {
+      if (nativeSetter) nativeSetter.call(el, finalText);
+      else el.value = finalText;
     }
-    el.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "insertText", data: text }));
+    // Re-sync the caret to the end of the value so a follow-up input /
+    // send_keys action types from the end instead of the (stale) start.
+    // Best-effort — selection APIs throw on some inputs.
+    try {
+      el.setSelectionRange(finalText.length, finalText.length);
+    } catch {
+      /* some input types (number/email) reject selection — ignore */
+    }
+    throwIfAborted(ctx.signal);
     el.dispatchEvent(new Event("input", { bubbles: true }));
+    throwIfAborted(ctx.signal);
     el.dispatchEvent(new Event("change", { bubbles: true }));
+    if (cancelled) {
+      // A page listener cancelled the edit via `preventDefault()` — the
+      // value did NOT change. Report the truth instead of a false success.
+      return {
+        action: { ...action, clear: action.clear !== false },
+        success: false,
+        message: `input [${action.index}] was cancelled by the page (beforeinput preventDefault) — the field was not modified`,
+      };
+    }
   } else if (el.isContentEditable) {
+    throwIfAborted(ctx.signal);
     if (action.clear !== false) el.textContent = text;
     else el.textContent = (el.textContent || "") + text;
+    throwIfAborted(ctx.signal);
     el.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "insertText", data: text }));
+    throwIfAborted(ctx.signal);
     el.dispatchEvent(new InputEvent("input", { bubbles: true }));
     // Mirror the native-input path above and also dispatch `change` so
     // contenteditable-aware frameworks (React onChange-wrapped
     // contentEditable, ProseMirror/Slate change observers, etc.) commit the
     // edit. Without it the host app may never register the change even though
     // this handler reports success.
+    throwIfAborted(ctx.signal);
     el.dispatchEvent(new Event("change", { bubbles: true }));
   } else {
     // Defensive: unreachable after the fail-fast check above (which guarantees

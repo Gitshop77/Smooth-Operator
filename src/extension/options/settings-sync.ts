@@ -5,18 +5,21 @@
 
 import { $ } from "@/extension/shared";
 import { syncRememberedApiKey } from "@/extension/api-key-storage";
+import { announce } from "../accessibility";
 import { updateProviderUI } from "./provider-config-ui";
 import { PROVIDER_META, DEFAULT_PROVIDER_ID } from "./providers";
 import { alertModal } from "./modal";
 import { validateWebhookUrl, resolveAndValidateWebhookUrl } from "@/lib/agent/llm/route/ssrf";
+import { clampWebhookUrl } from "@/lib/agent/retention";
 import type { SsrfCheckResult } from "@/lib/agent/llm/route/ssrf-constants";
 import { MAX_ACTIONS, DEFAULT_MAX_ACTIONS } from "@/lib/validations";
 import {
   readInt, isHttpUrl, isHostname, setVal, setChecked, parseDomains,
   populateProviderSelect, showSaved, initAutoSave as initAutoSaveImpl,
-  migrateSecretsFromLocalToSession, renderSecrets,
+  migrateSecretsFromLocalToSession, renderSecrets, composeSettingsSaveSummary,
 } from "./settings-sync-utils";
 import { STORAGE_KEYS } from "./storage-keys";
+import { providerConfigStore, settingsSyncStore } from "./stores";
 
 export { readInt, isHttpUrl, isHostname, showSaved, renderSecrets };
 
@@ -31,6 +34,7 @@ populateProviderSelect();
 // ─── Load settings ─────────────────────────────────────────────────────────
 
 if (typeof chrome !== "undefined" && chrome.storage?.local) {
+  settingsSyncStore.dispatch({ type: "SETTINGS_LOAD_START" });
   chrome.storage.local.get(
     [
       STORAGE_KEYS.provider, STORAGE_KEYS.apiKey, STORAGE_KEYS.rememberApiKey,
@@ -48,6 +52,10 @@ if (typeof chrome !== "undefined" && chrome.storage?.local) {
     (res) => {
       if (chrome.runtime.lastError) {
         console.warn("[options] storage.get failed:", chrome.runtime.lastError);
+        settingsSyncStore.dispatch({
+          type: "SETTINGS_LOAD_FAIL",
+          error: chrome.runtime.lastError.message || "Settings could not be loaded.",
+        });
         return;
       }
       const sel = document.getElementById("provider") as HTMLSelectElement | null;
@@ -143,7 +151,21 @@ if (typeof chrome !== "undefined" && chrome.storage?.local) {
         if (typeof nestedForProvider.resourceName === "string") setVal("resourceName", nestedForProvider.resourceName);
       }
 
-      updateProviderUI();    },
+      // Hydrate the authoritative provider-config store from exactly what the
+      // DOM now holds (the nested providerConfigs record already won over the
+      // flat mirror). PROVIDER_SELECTED is idempotent for the initial id, so a
+      // fresh page load never clears the hydrated model.
+      const modelEl = document.getElementById("model") as HTMLInputElement | null;
+      const baseUrlEl = document.getElementById("baseUrl") as HTMLInputElement | null;
+      const resourceNameEl = document.getElementById("resourceName") as HTMLInputElement | null;
+      providerConfigStore.dispatch({ type: "PROVIDER_SELECTED", provider: savedProvider });
+      providerConfigStore.dispatch({ type: "MODEL_SELECTED", model: modelEl?.value ?? "" });
+      providerConfigStore.dispatch({ type: "BASE_URL_CHANGED", baseUrl: baseUrlEl?.value ?? "" });
+      providerConfigStore.dispatch({ type: "RESOURCE_NAME_CHANGED", resourceName: resourceNameEl?.value ?? "" });
+
+      updateProviderUI();
+      settingsSyncStore.dispatch({ type: "SETTINGS_LOAD_OK" });
+    },
   );
 }
 
@@ -180,6 +202,7 @@ document.getElementById("agentMode")?.addEventListener("change", () => { agentMo
 document.getElementById("maxSteps")?.addEventListener("input", () => { maxStepsChanged = true; });
 
 export function saveSettings(): Promise<boolean> {
+  settingsSyncStore.dispatch({ type: "SETTINGS_SAVE_START" });
   const run = saveQueue.then(() => doSaveSettings(), () => doSaveSettings());
   saveQueue = run.catch(() => undefined);
   return run;
@@ -233,6 +256,10 @@ async function doSaveSettings(): Promise<boolean> {
     });
   }
 
+  // Retention bound: a stored webhook URL can never exceed the cap, so a
+  // pasted/hostile value cannot balloon storage or the SSRF input surface.
+  webhookPersist = clampWebhookUrl(webhookPersist);
+
   const droppedDomains: string[] = [];
   const sq = Math.min(100, Math.max(50, parseInt(($("screenshotQuality") as HTMLInputElement).value, 10) || 80));
   ($("screenshotQuality") as HTMLInputElement).value = String(sq);
@@ -260,7 +287,18 @@ async function doSaveSettings(): Promise<boolean> {
     }
   }
 
-  const providerId = ($("provider") as HTMLSelectElement).value;
+  const providerId = ($("provider") as HTMLSelectElement).value || DEFAULT_PROVIDER_ID;
+
+  // Sync the authoritative provider-config store with the values about to be
+  // persisted (the DOM is the render of the user's selection). This is the
+  // catch-all: every autosave path — provider change, model commit, baseUrl/
+  // resourceName edits — funnels through here, so the store cannot drift from
+  // what the user actually selected.
+  const resourceNameValue = (document.getElementById("resourceName") as HTMLInputElement | null)?.value.trim() ?? "";
+  providerConfigStore.dispatch({ type: "PROVIDER_SELECTED", provider: providerId });
+  providerConfigStore.dispatch({ type: "MODEL_SELECTED", model: ($("model") as HTMLInputElement).value });
+  providerConfigStore.dispatch({ type: "BASE_URL_CHANGED", baseUrl: baseUrlValid ? baseUrlRaw : "" });
+  providerConfigStore.dispatch({ type: "RESOURCE_NAME_CHANGED", resourceName: resourceNameValue });
 
   // O8: keep every provider's nested entry (so switching providers restores
   // each one's config) and mirror the ACTIVE provider's flat values into its
@@ -310,7 +348,16 @@ async function doSaveSettings(): Promise<boolean> {
       // resolves without calling finish), so a failed save reverts to the
       // genuinely last-good URL rather than the unsaved one.
       lastKnownGoodWebhookUrl = webhookPersist;
+      settingsSyncStore.dispatch({ type: "SETTINGS_SAVE_OK" });
       showSaved();
+      // Phase 14 "no silent changes": every successful write renders + announces
+      // a confirmable summary of the sensitive categories (mode, cost cap,
+      // provider/destination, screenshots, stealth, vision, webhook/retention)
+      // so a destination/permission/cost/mode/retention change is never silent.
+      const summary = composeSettingsSaveSummary(data);
+      const summaryEl = document.getElementById("saveSummary");
+      if (summaryEl) summaryEl.textContent = summary;
+      announce("Settings saved — " + summary);
       if (droppedDomains.length) {
         void alertModal({ title: "Invalid domain entries ignored", message: "The following domain lines were not valid bare hostnames and were dropped:\n" + droppedDomains.join("\n") });
       }
@@ -319,6 +366,13 @@ async function doSaveSettings(): Promise<boolean> {
     chrome.storage.local.set(data, async () => {
       if (chrome.runtime.lastError) {
         console.warn("[options] storage.set failed:", chrome.runtime.lastError);
+        settingsSyncStore.dispatch({
+          type: "SETTINGS_SAVE_FAIL",
+          error: chrome.runtime.lastError.message || "Settings could not be saved.",
+        });
+        announce("Failed to save settings: " + (chrome.runtime.lastError?.message || "unknown error"), {
+          assertive: true,
+        });
         void alertModal({ title: "Save failed", message: "Failed to save settings: " + (chrome.runtime.lastError?.message || "unknown error") });
         resolve(false);
         return;
@@ -336,32 +390,24 @@ async function doSaveSettings(): Promise<boolean> {
       const apiKeyValue = ($("apiKey") as HTMLInputElement).value;
       const rememberKey = (document.getElementById("rememberApiKey") as HTMLInputElement | null)?.checked ?? false;
       if (typeof chrome !== "undefined" && chrome.storage?.session) {
-        chrome.storage.session.set({ [STORAGE_KEYS.apiKey]: apiKeyValue }, async () => {
-          if (chrome.runtime.lastError) {
-            console.warn("[options] session key set failed:", chrome.runtime.lastError);
-          }
-          // Mirror sync runs REGARDLESS of the session-write outcome, so an
-          // un-checked box always removes the on-disk copy even when the
-          // session write failed.
-          try {
-            await syncRememberedApiKey(apiKeyValue, rememberKey);
-          } catch (e) {
-            console.warn("[options] remember-key mirror failed:", e);
-          }
-          finish();
-        });
+        try {
+          await syncRememberedApiKey(apiKeyValue, rememberKey, providerId);
+        } catch (e) {
+          console.warn("[options] credential save failed:", e);
+        }
+        finish();
       } else {
         // No session storage: the key cannot be held in memory. The checkbox
         // still governs the on-disk mirror, so an un-checked box removes any
         // previously remembered copy.
         try {
-          await syncRememberedApiKey(apiKeyValue, rememberKey);
+          await syncRememberedApiKey(apiKeyValue, rememberKey, providerId);
         } catch (e) {
           console.warn("[options] remember-key mirror failed:", e);
         }
         void alertModal({
           title: "API key not saved",
-          message: "This browser/profile does not support in-memory session storage, so your provider API key is NOT saved in memory. It is written to disk only if you opted into \"remember on this device\". Re-enter the key each session, or use a browser/profile that supports session storage.",
+          message: "This browser/profile does not support in-memory session storage, so your provider API key is NOT saved in memory. It is stored in the encrypted device vault only if you opted into \"remember on this device\". Re-enter the key each session, or use a browser/profile that supports session storage.",
         });
         finish();
       }

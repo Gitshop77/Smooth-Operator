@@ -15,6 +15,10 @@ import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import { httpJson, parseRetryAfterHeader, type HttpPrepared } from "../src/lib/agent/llm/route/transport-http";
 import { readErrorBodyPreview } from "../src/lib/agent/llm/route/transport-http-utils";
 import { sse } from "../src/lib/agent/llm/route/framing";
+import {
+  primeLiveSecretRedaction,
+  resetLiveSecretRedactionForTests,
+} from "../src/lib/agent/secrets";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -192,6 +196,39 @@ describe("httpJson.frames — opaqueredirect security", () => {
   });
 });
 
+describe("httpJson.frames — exact live-secret error redaction", () => {
+  test("redacts a non-key-shaped configured API key from a non-2xx preview", async () => {
+    const priorChrome = (globalThis as { chrome?: unknown }).chrome;
+    (globalThis as { chrome?: unknown }).chrome = {
+      ...(priorChrome as object),
+      storage: {
+        session: {
+          get: vi.fn(async () => ({ open_cowork_secrets: [] })),
+        },
+      },
+    };
+    resetLiveSecretRedactionForTests();
+    await primeLiveSecretRedaction("hunter2");
+    try {
+      globalThis.fetch = vi.fn(async () => makeFakeResponse({
+        status: 401,
+        ok: false,
+        text: () => Promise.resolve("Provider rejected hunter2"),
+      }) as unknown as Response) as typeof globalThis.fetch;
+      const iter = httpJson({ framing: sse }).frames(makePrepared())[Symbol.asyncIterator]();
+      const result = await iter.next().then(
+        () => null,
+        (error: Error) => error,
+      );
+      expect(result?.message).toContain("[REDACTED:provider_api_key]");
+      expect(result?.message).not.toContain("hunter2");
+    } finally {
+      resetLiveSecretRedactionForTests();
+      (globalThis as { chrome?: unknown }).chrome = priorChrome;
+    }
+  });
+});
+
 // ─── Retry-After header parsing ───────────────────────────────────────
 
 describe("parseRetryAfterHeader — seconds + HTTP-date", () => {
@@ -339,6 +376,22 @@ describe("httpJson.frames — Retry-After + SSRF guard", () => {
 // ─── Bounded error-body reads ────────────────────────────────────────────────
 
 describe("httpJson.frames — bounded error-body reads", () => {
+  test("rejects an oversized declared non-streaming response before calling text()", async () => {
+    // A body-less Response makes `text()` the only available read path. Honor
+    // Content-Length before that read so a provider cannot force an unbounded
+    // buffer allocation merely by omitting ReadableStream support.
+    const text = vi.fn(async () => "must not be buffered");
+    globalThis.fetch = vi.fn(async () => makeFakeResponse({
+      body: null,
+      headers: { get: (name: string) => name.toLowerCase() === "content-length" ? String(101 * 1024 * 1024) : null },
+      text,
+    }) as unknown as Response) as typeof globalThis.fetch;
+
+    const iterator = httpJson({ framing: sse }).frames(makePrepared())[Symbol.asyncIterator]();
+    await expect(iterator.next()).rejects.toThrow(/response too large/i);
+    expect(text).not.toHaveBeenCalled();
+  });
+
   test("a huge 4xx error body is consumed with a byte cap, not buffered whole via text()", async () => {
     // The old `r.text()` on 4xx/5xx buffered the ENTIRE (potentially
     // multi-GB) error body before slicing the first 100 chars. The fixed path
@@ -523,10 +576,12 @@ describe("httpJson.frames — abort-listener lifecycle", () => {
       expect(result.ok).toBe(false);
       expect(fetchMock).toHaveBeenCalledTimes(4);
  // The regression: each failed attempt leaked an abort listener on the
- // caller's signal (4 adds, 0 removes); after all attempts settle, every
- // added listener must have been removed.
-      expect(tracking.added()).toBe(4);
-      expect(tracking.removed()).toBe(4);
+ // caller's signal. DNS preflight and the bounded error-preview read are now
+ // also abort-aware, so the exact listener count is intentionally an
+ // implementation detail; the leak invariant is that every attachment is
+ // removed once all attempts settle.
+      expect(tracking.added()).toBeGreaterThanOrEqual(4);
+      expect(tracking.removed()).toBe(tracking.added());
     } finally {
       vi.useRealTimers();
     }

@@ -2,6 +2,7 @@ import type { PlannerOutput, LogEvent } from "../../types";
 import type { LoopState } from "../types";
 import { makeCtx } from "../helpers";
 import { classifyError, friendlyErrorMessage, MACHINE_CODES, RECOVERY_HINTS, type ClassifiedError } from "../../errors";
+import { redactKeyLeak } from "../../redact-shared";
 
 /**
  * Emit a `plannerStep` dispatcher event, swallowing any callback exception so a
@@ -14,7 +15,7 @@ export async function safeEmitPlannerStep(state: LoopState, plannerResult: Plann
       makeCtx(state), plannerResult.decision, state.currentGoal, state.plan
     );
   } catch (e) {
-    console.error("[planner-phases] dispatcher.plannerStep threw (continuing run):", e);
+    console.error(`[planner-phases] dispatcher.plannerStep threw (continuing run): ${redactKeyLeak(String(e))}`);
   }
 }
 
@@ -51,8 +52,7 @@ export async function safeWaitForSettled(state: LoopState): Promise<void> {
   } catch (e) {
     // An abort is not a settle failure: re-throw so the caller's stop-path
     // handling terminates the run instead of continuing into the next step.
-    const isAbort = signal?.aborted ||
-      (e instanceof Error && (/abort/i.test(e.name) || /abort/i.test(e.message)));
+    const isAbort = signal?.aborted === true;
     if (isAbort) throw e;
     onEvent({
       type: "error",

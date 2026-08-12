@@ -7,27 +7,66 @@
  * the dynamic import.
  */
 
-import { describe, test, expect, beforeAll } from "vitest";
+import { describe, test, expect, beforeAll, afterEach, vi } from "vitest";
 import type { CatalogModel } from "../src/lib/agent/llm/catalog";
 import type { ReasoningOption } from "../src/lib/agent/llm/catalog";
 import { renderModelResultItem } from "../src/extension/options/provider-config-ui-utils";
+import { makeChromeStorageMock } from "./helpers/chrome-storage-mock";
 import {
   reasoningEffortOptions,
   budgetTokensOption,
 } from "../src/extension/options/provider-config-ui-utils";
 
 function setupDom(): void {
+  const localStore = new Map<string, unknown>();
+  const sessionStore = new Map<string, unknown>();
+  modelPersistenceStores = { local: localStore, session: sessionStore };
+  (globalThis as unknown as { chrome: unknown }).chrome = makeChromeStorageMock(
+    localStore,
+    sessionStore,
+  );
+
   document.body.innerHTML = `
     <select id="provider"></select>
     <button id="testConnection"></button>
     <input id="model">
     <div id="model-search-results"></div>
+    <span id="provider-hint"></span>
+    <input id="apiKey">
+    <input type="checkbox" id="rememberApiKey">
+    <span id="apikey-hint"></span>
+    <label id="baseurl-label"></label>
+    <input id="baseUrl">
+    <input id="resourceName">
+    <input id="maxSteps">
+    <input id="maxActions">
+    <input id="plannerInterval">
+    <input id="maxFailures">
+    <input id="costCap">
+    <textarea id="defaultTask"></textarea>
+    <input id="screenshotQuality">
+    <input type="checkbox" id="enableScreenshots">
+    <input type="checkbox" id="enableStealth">
+    <textarea id="allowedDomains"></textarea>
+    <textarea id="blockedDomains"></textarea>
+    <input type="checkbox" id="notifyOnCompletion">
+    <input type="checkbox" id="notifyOnError">
+    <input type="checkbox" id="notifyOnTakeover">
+    <input id="webhookUrl">
+    <input type="radio" name="visionMode" value="disabled" checked>
+    <select id="agentMode"><option value="standard">standard</option></select>
     <select id="reasoningEffort"></select>
     <input id="reasoningBudget">
     <label id="reasoning-budget-label" class="is-hidden"></label>
-    <select id="forceReasoning"></select>
+    <select id="forceReasoning"><option value="auto">auto</option></select>
+    <div id="saved"></div>
   `;
 }
+
+let modelPersistenceStores: {
+  local: Map<string, unknown>;
+  session: Map<string, unknown>;
+};
 
 /** Minimal CatalogModel fixture — only the fields renderModelResultItem reads. */
 function makeModel(over: Partial<CatalogModel>): CatalogModel {
@@ -209,6 +248,125 @@ describe("experimental model badge + confirmation", () => {
     expect(document.querySelector(".experimental-notice")).not.toBeNull();
     commitModel("gpt-5.6", "");
     expect(document.querySelector(".experimental-notice")).toBeNull();
+  });
+});
+
+/**
+ * Phase 3 characterization for the model-persistence defect recorded in the
+ * modernization plan. These tests follow the Options runtime path through
+ * `settings-sync.initAutoSave()` and `saveSettings()` to the mocked
+ * `chrome.storage.local` persistence boundary. Typing persists both the flat
+ * model mirror and the active provider's nested model, but result commits
+ * Phase 7 commits a selected result through the same bubbling input boundary,
+ * so click and keyboard selection are ordinary persistence regressions.
+ */
+describe("Phase 3 model selection persistence characterization", () => {
+  beforeAll(async () => {
+    const { initAutoSave } = await import("../src/extension/options/settings-sync");
+    initAutoSave();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function resetPersistenceBoundary(): void {
+    modelPersistenceStores.local.clear();
+    modelPersistenceStores.session.clear();
+  }
+
+  function expectModelAtPersistenceBoundary(modelId: string): void {
+    expect(modelPersistenceStores.local.get("model")).toBe(modelId);
+    const providerId = (document.getElementById("provider") as HTMLSelectElement).value;
+    const providerConfigs = modelPersistenceStores.local.get("providerConfigs") as
+      | Record<string, { model?: unknown }>
+      | undefined;
+    expect(providerConfigs?.[providerId]?.model).toBe(modelId);
+  }
+
+  test("typing a model name reaches the debounced autosave boundary", async () => {
+    vi.useFakeTimers();
+    resetPersistenceBoundary();
+    const input = document.getElementById("model") as HTMLInputElement;
+    input.value = "typed-model";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await vi.advanceTimersByTimeAsync(300);
+    expectModelAtPersistenceBoundary("typed-model");
+  });
+
+  test("choosing a result by click updates the visible model value", () => {
+    const input = document.getElementById("model") as HTMLInputElement;
+    const results = document.getElementById("model-search-results") as HTMLDivElement;
+    const item = document.createElement("div");
+    item.className = "model-search-result-item";
+    item.dataset.modelId = "click-value-selected-model";
+    results.appendChild(item);
+
+    item.click();
+
+    expect(input.value).toBe("click-value-selected-model");
+    item.remove();
+  });
+
+  test("choosing the active result with Enter updates the visible model value", () => {
+    const input = document.getElementById("model") as HTMLInputElement;
+    const results = document.getElementById("model-search-results") as HTMLDivElement;
+    results.classList.remove("is-hidden");
+    const item = document.createElement("div");
+    item.className = "model-search-result-item";
+    item.dataset.modelId = "keyboard-value-selected-model";
+    results.appendChild(item);
+
+    input.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "ArrowDown", bubbles: true, cancelable: true,
+    }));
+    input.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Enter", bubbles: true, cancelable: true,
+    }));
+
+    expect(input.value).toBe("keyboard-value-selected-model");
+    item.remove();
+  });
+
+  test("choosing a result by click persists the selected model", async () => {
+    vi.useFakeTimers();
+    resetPersistenceBoundary();
+    const input = document.getElementById("model") as HTMLInputElement;
+    const results = document.getElementById("model-search-results") as HTMLDivElement;
+
+    const item = document.createElement("div");
+    item.className = "model-search-result-item";
+    item.dataset.modelId = "click-selected-model";
+    results.appendChild(item);
+    item.click();
+
+    expect(input.value).toBe("click-selected-model");
+    await vi.advanceTimersByTimeAsync(300);
+    expectModelAtPersistenceBoundary("click-selected-model");
+  });
+
+  test("choosing the active result with Enter persists the selected model", async () => {
+    vi.useFakeTimers();
+    resetPersistenceBoundary();
+    const input = document.getElementById("model") as HTMLInputElement;
+    const results = document.getElementById("model-search-results") as HTMLDivElement;
+
+    results.classList.remove("is-hidden");
+    const item = document.createElement("div");
+    item.className = "model-search-result-item";
+    item.dataset.modelId = "keyboard-selected-model";
+    results.appendChild(item);
+    input.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "ArrowDown", bubbles: true, cancelable: true,
+    }));
+    input.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Enter", bubbles: true, cancelable: true,
+    }));
+
+    expect(input.value).toBe("keyboard-selected-model");
+    await vi.advanceTimersByTimeAsync(300);
+    expectModelAtPersistenceBoundary("keyboard-selected-model");
   });
 });
 

@@ -123,6 +123,20 @@ describe("startSwWatchdog wiring", () => {
     expect(sendMessage).toHaveBeenCalledTimes(1);
   });
 
+  test("redacts credential-shaped text in an unscoped internal warning", () => {
+    startSwWatchdog({ checkIntervalMs: 1000, stallThresholdMs: 1000 });
+    pushMemoryWarning({
+      kind: "memory-growth",
+      message: "Vision diagnostic included Bearer secret-token-value",
+      growthMb: 400,
+      baselineMb: 100,
+      currentMb: 500,
+    });
+    vi.advanceTimersByTime(1000);
+    const [payload] = sendMessage.mock.calls[0];
+    expect(payload.event.message).toBe("Vision diagnostic included Bearer [REDACTED]");
+  });
+
   test("startSwWatchdog is idempotent — one interval only", () => {
     startSwWatchdog({ checkIntervalMs: 1000, stallThresholdMs: 1000 });
     startSwWatchdog({ checkIntervalMs: 1000, stallThresholdMs: 1000 });

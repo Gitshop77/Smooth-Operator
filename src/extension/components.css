@@ -1,0 +1,225 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Open Cowork — Shared component families
+
+   One consistent control language across BOTH panels (side panel + Options).
+   Imported by `sidepanel.css` and `options.css` AFTER `tokens.css`.
+
+   Families: buttons, notices, progress, empty states, form fields, dialogs.
+   All color/type/spacing values come from the `--oc-*` semantic tokens.
+   Focus rings come from the global `:focus-visible` rule in tokens.css;
+   surfaces may refine but must never remove it.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ─── Buttons ─────────────────────────────────────────────────────────────── */
+.btn {
+  font: inherit;
+  font-weight: var(--oc-weight-semibold);
+  font-size: var(--oc-text-base);
+  line-height: 1;
+  border: 1px solid transparent;
+  border-radius: var(--oc-radius-md);
+  padding: var(--oc-space-3) var(--oc-space-5);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--oc-space-2);
+  transition: background-color var(--oc-transition-fast),
+              border-color var(--oc-transition-fast),
+              color var(--oc-transition-fast),
+              box-shadow var(--oc-transition-fast);
+}
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn-primary {
+  background: var(--oc-btn-primary-bg);
+  color: var(--oc-btn-primary-text);
+  border-color: var(--oc-accent);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--oc-accent-hover);
+  border-color: var(--oc-accent-hover);
+}
+
+.btn-danger {
+  background: var(--oc-btn-danger-bg);
+  color: var(--oc-btn-danger-text);
+  border-color: var(--oc-status-danger-strong);
+}
+.btn-danger:hover:not(:disabled) {
+  /* Hover stays on the AA-strong danger FILL (white text ≥4.5:1 both themes) —
+     reverting to --oc-status-danger would drop dark-theme hover to 2.77:1. */
+  background: var(--oc-status-danger-strong);
+  border-color: var(--oc-status-danger-strong);
+}
+
+.btn-ghost {
+  background: var(--oc-surface-panel);
+  border-color: var(--oc-border-default);
+  color: var(--oc-text-primary);
+}
+.btn-ghost:hover:not(:disabled) {
+  border-color: var(--oc-border-strong);
+  background: var(--oc-surface-raised);
+}
+
+.btn-sm {
+  padding: var(--oc-space-2) var(--oc-space-4);
+  font-size: var(--oc-text-sm);
+}
+
+/* ─── Notices (role="alert"/"status" surfaces) ───────────────────────────── */
+.notice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--oc-space-2);
+  padding: var(--oc-space-4) var(--oc-space-5);
+  border-radius: var(--oc-radius-md);
+  border: 1px solid var(--oc-border-default);
+  background: var(--oc-surface-panel);
+  color: var(--oc-text-primary);
+  font-size: var(--oc-text-sm);
+  line-height: var(--oc-line-height-tight);
+}
+.notice-title {
+  font-weight: var(--oc-weight-semibold);
+}
+.notice-error {
+  background: var(--oc-status-danger-subtle);
+  border-color: var(--oc-status-danger-border);
+  color: var(--oc-status-danger);
+}
+.notice-warning {
+  background: var(--oc-status-warning-subtle);
+  border-color: var(--oc-status-warning-border);
+  color: var(--oc-status-warning);
+}
+.notice-success {
+  background: var(--oc-status-success-subtle);
+  color: var(--oc-status-success);
+}
+.notice-info {
+  background: var(--oc-accent-subtle);
+  color: var(--oc-accent-text);
+}
+
+/* ─── Progress (role="progressbar") ──────────────────────────────────────── */
+.progress-track {
+  position: relative;
+  height: 6px;
+  border-radius: var(--oc-radius-full);
+  background: var(--oc-surface-raised);
+  border: 1px solid var(--oc-border-default);
+  overflow: hidden;
+}
+.progress-bar {
+  height: 100%;
+  border-radius: var(--oc-radius-full);
+  background: var(--oc-accent);
+  transition: width var(--oc-transition-base);
+}
+.progress-label {
+  font-size: var(--oc-text-xs);
+  color: var(--oc-text-secondary);
+  margin-top: var(--oc-space-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── Empty states ───────────────────────────────────────────────────────── */
+.empty-state {
+  color: var(--oc-text-tertiary);
+  text-align: center;
+  padding: var(--oc-space-8) var(--oc-space-5);
+  font-size: var(--oc-text-base);
+}
+.empty-state-title {
+  font-size: var(--oc-text-lg);
+  font-weight: var(--oc-weight-semibold);
+  color: var(--oc-text-primary);
+  margin-bottom: var(--oc-space-2);
+}
+.empty-state-hint {
+  font-size: var(--oc-text-sm);
+  color: var(--oc-text-secondary);
+  line-height: var(--oc-line-height-tight);
+}
+
+/* ─── Form fields ────────────────────────────────────────────────────────── */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--oc-space-2);
+}
+.field-label {
+  font-weight: var(--oc-weight-medium);
+  color: var(--oc-text-primary);
+  font-size: var(--oc-text-sm);
+}
+.field-hint {
+  font-size: var(--oc-text-xs);
+  color: var(--oc-text-secondary);
+}
+.field-error {
+  font-size: var(--oc-text-xs);
+  color: var(--oc-status-danger);
+}
+
+.btn-block {
+  display: flex;
+  width: 100%;
+}
+
+/* ─── Dialogs (role="dialog" surfaces) ───────────────────────────────────── */
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--oc-surface-scrim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999999;
+}
+.dialog {
+  background: var(--oc-surface-panel);
+  border: 1px solid var(--oc-border-default);
+  border-radius: var(--oc-radius-lg);
+  box-shadow: var(--oc-elevation-3);
+  max-width: 440px;
+  width: 84%;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+.dialog-header {
+  padding: var(--oc-space-5) var(--oc-space-6) 0;
+}
+.dialog-title {
+  font-size: var(--oc-text-lg);
+  font-weight: var(--oc-weight-semibold);
+  color: var(--oc-text-primary);
+}
+.dialog-body {
+  padding: var(--oc-space-4) var(--oc-space-6);
+  font-size: var(--oc-text-sm);
+  color: var(--oc-text-secondary);
+  line-height: var(--oc-line-height-base);
+}
+.dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--oc-space-3);
+  padding: var(--oc-space-3) var(--oc-space-6) var(--oc-space-5);
+}
+
+/* ─── Narrow viewport (side panel 300–380px) ─────────────────────────────── */
+@media (max-width: 380px) {
+  .btn { padding: var(--oc-space-2) var(--oc-space-4); }
+  .dialog { width: 92%; }
+  .notice { padding: var(--oc-space-3) var(--oc-space-4); }
+}
+

@@ -10,15 +10,14 @@
  */
 
 import type { HistoryItem } from "./types";
-import { wrapUntrusted } from "./security";
 import { extractJson } from "./output-parser";
 import { estimateCost } from "./llm/pricing";
 import { redactKeyLeak } from "./redact-shared";
+import { compileJudgePromptV1 } from "./prompts/prompt-compiler";
+import { JUDGE_SYSTEM_PROMPT } from "./prompts/judge-prompt";
+import { assertCompiledPromptWithinProfileV1 } from "./prompts/prompt-token-budget";
 import {
   type JudgementResult,
-  MAX_SUMMARY_SNIPPET,
-  truncate,
-  renderHistoryItem,
   coerceJudgement,
 } from "./judge-helpers";
 export { coerceJudgement } from "./judge-helpers";
@@ -77,34 +76,7 @@ interface JudgeTaskArgs {
  * agent's claims) and to flag impossible tasks + CAPTCHAs separately from
  * the success verdict.
  */
-export const JUDGE_PROMPT = `You are a judge evaluating whether an autonomous browser agent successfully completed a task.
-
-You will see:
-1. The original task (what the user asked for)
-2. The agent's action history (what it did, step by step)
-3. The agent's final result (its self-reported success + summary)
-
-Your job is to INDEPENDENTLY evaluate whether the task was actually completed. Be initially doubtful of the agent's self-reported success — agents sometimes claim success when they didn't actually finish.
-
-Evaluate based on EVIDENCE in the action history, not the agent's claims. For example:
-- If the task was "fill the form and submit", verify that a submit action was taken AND no error was seen afterward.
-- If the task was "find the price", verify that the price was actually extracted and reported.
-- If the task was "answer all 8 questions", verify that 8 distinct answers were given.
-
-Return JSON:
-{
-  "reasoning": "Your step-by-step evaluation of the evidence",
-  "verdict": true/false,
-  "failureReason": "If verdict=false, explain why (max 5 sentences). If verdict=true, null.",
-  "impossibleTask": true/false,
-  "reachedCaptcha": true/false
-}
-
-Rules:
-- verdict=true ONLY if you have positive evidence the task was completed.
-- If the agent called done(success=true) but you can't find evidence of completion, set verdict=false.
-- If the task was impossible (broken site, login wall, CAPTCHA), set impossibleTask=true and verdict=false.
-- If the agent hit a CAPTCHA during execution, set reachedCaptcha=true (regardless of verdict).`;
+export const JUDGE_PROMPT = JUDGE_SYSTEM_PROMPT;
 
 /**
  * Run the judge on a completed task.
@@ -119,24 +91,19 @@ Rules:
 export async function judgeTask(args: JudgeTaskArgs): Promise<JudgementResult | null> {
   const { task, history, agentResult, llmCall, onCost, modelForCost } = args;
 
-  const historyText = history.map(renderHistoryItem).join("\n");
-
-  const truncatedSummary = truncate(agentResult.text, MAX_SUMMARY_SNIPPET);
-  const userMessage = `Task: ${task}
-
-Agent's final result:
-- Self-reported success: ${agentResult.success}
-- Summary: ${wrapUntrusted(truncatedSummary)}
-
-Action history:
-${historyText}
-
-Evaluate whether the task was actually completed.`;
+  const compiled = await compileJudgePromptV1({ task, history, agentResult });
+  // Phase 8 budget guard: the judge prompt (system + user) must fit the judge
+  // profile's conservative UTF-8-byte input budget before any tokens are spent.
+  // A failure here surfaces as a typed `PromptBudgetExceededError` and is
+  // classified by the caller exactly like a cost-cap stop.
+  assertCompiledPromptWithinProfileV1("judge", "judge", compiled.messages);
+  const systemPrompt = compiled.messages[0]?.content ?? "";
+  const userMessage = compiled.messages[1]?.content ?? "";
 
   let raw: string;
   let llmUsage: { model?: string; tokensIn?: number; tokensOut?: number; reasoningTokens?: number; cachedInputTokens?: number; cachedWriteInputTokens?: number } | undefined;
   try {
-    const res = await llmCall(JUDGE_PROMPT, userMessage);
+    const res = await llmCall(systemPrompt, userMessage);
     raw = res.content;
     llmUsage = res.usage;
   } catch {
@@ -144,7 +111,7 @@ Evaluate whether the task was actually completed.`;
   }
 
   if (onCost) {
-    const tokensIn = llmUsage?.tokensIn ?? Math.ceil((JUDGE_PROMPT.length + userMessage.length) / 4);
+    const tokensIn = llmUsage?.tokensIn ?? Math.ceil((systemPrompt.length + userMessage.length) / 4);
     const tokensOut = llmUsage?.tokensOut ?? Math.ceil(raw.length / 4);
     const resolvedModel = llmUsage?.model || modelForCost;
     let costUsd = 0;

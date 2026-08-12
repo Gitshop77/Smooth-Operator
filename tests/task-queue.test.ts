@@ -46,6 +46,15 @@ function stubChrome(webhookUrl: string | undefined, notify: boolean) {
 let fetchMock: ReturnType<typeof vi.fn>;
 let warnSpy: ReturnType<typeof vi.spyOn>;
 
+/**
+ * Drain the fire-and-forget webhook delivery: `fireNotifications` returns
+ * without awaiting the POST (SW fire-and-forget contract), so assertions on
+ * `fetchMock` must first let the async delivery settle.
+ */
+async function flushDelivery(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
 beforeEach(() => {
   fetchMock = vi.fn(() => Promise.resolve(new Response(null, { status: 200 })));
   (globalThis as Record<string, unknown>).fetch = fetchMock;
@@ -62,6 +71,7 @@ describe("fireNotifications webhook URL validation", () => {
   test("posts to a valid https webhook URL", async () => {
     stubChrome("https://hooks.example.com/notify", false);
     await fireNotifications("do the thing", true);
+    await flushDelivery();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const calledUrl = (fetchMock.mock.calls[0] as unknown[])[0] as string;
     expect(calledUrl).toBe("https://hooks.example.com/notify");
@@ -70,6 +80,7 @@ describe("fireNotifications webhook URL validation", () => {
   test("posts to a valid http webhook URL", async () => {
     stubChrome("http://localhost:8080/hook", false);
     await fireNotifications("task", false);
+    await flushDelivery();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect((fetchMock.mock.calls[0] as unknown[])[0]).toBe("http://localhost:8080/hook");
   });
@@ -77,6 +88,7 @@ describe("fireNotifications webhook URL validation", () => {
   test("does NOT post to a javascript: URL (skipped + warned)", async () => {
     stubChrome("javascript:alert(document.cookie)", false);
     await fireNotifications("secret task", true);
+    await flushDelivery();
     expect(fetchMock).not.toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalled();
   });
@@ -84,6 +96,7 @@ describe("fireNotifications webhook URL validation", () => {
   test("does NOT post to a data: URL (skipped + warned)", async () => {
     stubChrome("data:text/plain,hi", false);
     await fireNotifications("task", false);
+    await flushDelivery();
     expect(fetchMock).not.toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalled();
   });
@@ -91,6 +104,7 @@ describe("fireNotifications webhook URL validation", () => {
   test("does NOT post to a malformed/relative URL (skipped + warned)", async () => {
     stubChrome("/relative/path", false);
     await fireNotifications("task", false);
+    await flushDelivery();
     expect(fetchMock).not.toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalled();
   });
@@ -98,18 +112,21 @@ describe("fireNotifications webhook URL validation", () => {
   test("does NOT post when no webhookUrl is configured", async () => {
     stubChrome(undefined, false);
     await fireNotifications("task", false);
+    await flushDelivery();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   test("posts to an RFC1918 private IP when user-configured (local dev relay)", async () => {
     stubChrome("http://192.168.1.1/hook", false);
     await fireNotifications("task", false);
+    await flushDelivery();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   test("does NOT post to a cloud-metadata IP (skipped + warned)", async () => {
     stubChrome("http://169.254.169.254/latest/meta-data", false);
     await fireNotifications("task", false);
+    await flushDelivery();
     expect(fetchMock).not.toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalled();
   });
@@ -117,6 +134,7 @@ describe("fireNotifications webhook URL validation", () => {
   test("does NOT post to a link-local IPv6 address (skipped + warned)", async () => {
     stubChrome("http://[fe80::1]/hook", false);
     await fireNotifications("task", false);
+    await flushDelivery();
     expect(fetchMock).not.toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalled();
   });
@@ -124,6 +142,7 @@ describe("fireNotifications webhook URL validation", () => {
   test("does NOT post to a NAT64-embedded cloud-metadata IPv6 address (skipped + warned)", async () => {
     stubChrome("http://[64:ff9b::a9fe:a9fe]/hook", false);
     await fireNotifications("task", false);
+    await flushDelivery();
     expect(fetchMock).not.toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalled();
   });
@@ -131,6 +150,7 @@ describe("fireNotifications webhook URL validation", () => {
   test("does NOT post to a CGNAT range IP (skipped + warned)", async () => {
     stubChrome("http://100.64.0.1/hook", false);
     await fireNotifications("task", false);
+    await flushDelivery();
     expect(fetchMock).not.toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalled();
   });
@@ -138,6 +158,7 @@ describe("fireNotifications webhook URL validation", () => {
   test("does NOT post to an unspecified 0.0.0.0 IP (skipped + warned)", async () => {
     stubChrome("http://0.0.0.0/hook", false);
     await fireNotifications("task", false);
+    await flushDelivery();
     expect(fetchMock).not.toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalled();
   });
@@ -145,6 +166,7 @@ describe("fireNotifications webhook URL validation", () => {
   test("still fires the notification independently of the webhook check", async () => {
     const chrome = stubChrome("javascript:alert(1)", true);
     await fireNotifications("task", true);
+    await flushDelivery();
     expect(fetchMock).not.toHaveBeenCalled();
  // The notification path is exercised even though the webhook was rejected.
     expect(chrome.notifications.create).toHaveBeenCalled();
@@ -178,6 +200,7 @@ describe("fireNotifications webhook task redaction", () => {
 
     stubChrome("https://hooks.example.com/notify", false);
     await fireNotifications(`task contained ${SECRET} value`, true);
+    await flushDelivery();
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const body = (fetchMock.mock.calls[0] as unknown[])[1] as { body?: string };
@@ -194,9 +217,12 @@ describe("fireNotifications webhook task redaction", () => {
 
     const chrome = stubChrome(undefined, true);
     await fireNotifications(`task contained ${SECRET} value`, true);
+    await flushDelivery();
 
     expect(chrome.notifications.create).toHaveBeenCalledTimes(1);
-    const opts = (chrome.notifications.create.mock.calls[0] as unknown[])[0] as {
+    // Stable id first, options second.
+    expect((chrome.notifications.create.mock.calls[0] as unknown[])[0]).toBe("run-complete");
+    const opts = (chrome.notifications.create.mock.calls[0] as unknown[])[1] as {
       message?: string;
     };
     expect(opts.message).toBeDefined();
@@ -242,9 +268,12 @@ describe("fireNotifications webhook abort timeout", () => {
       if (raced === "escape") {
         expect.fail("fireNotifications awaited the webhook fetch — fire-and-forget contract broken");
       }
-  // fireNotifications returned; the 5s abort timer is still pending on the
-  // fake clock. Advance past the timeout so the hung connection is aborted.
-      vi.advanceTimersByTime(5000 + 10);
+  // fireNotifications returned; the fire-and-forget delivery's async SSRF
+  // check + abort-timer scheduling is still pending in the microtask queue.
+  // `advanceTimersByTimeAsync` flushes those microtasks (so the 5s timer is
+  // scheduled) before advancing the fake clock past the timeout, which aborts
+  // the hung connection.
+      await vi.advanceTimersByTimeAsync(5000 + 10);
     } catch {
       threw = true;
     } finally {

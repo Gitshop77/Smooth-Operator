@@ -24,6 +24,12 @@ import {
   redactUrl,
 } from "./ssrf-dns";
 
+/** Async SSRF validation options for transport cancellation and bounded DNS. */
+export interface SsrfResolveOptions {
+  signal?: AbortSignal;
+  dnsTimeoutMs?: number;
+}
+
 /**
  * Resolve provenance into an effective `exempt` boolean.
  */
@@ -90,6 +96,7 @@ export async function resolveAndValidateLlmBaseUrl(
   url: string,
   allowLocalExemption = false,
   provenance?: SsrfProvenance,
+  options: SsrfResolveOptions = {},
 ): Promise<SsrfCheckResult> {
   const exempt = resolveExempt(provenance, allowLocalExemption);
   const base = validateLlmBaseUrl(url, exempt, provenance);
@@ -103,12 +110,16 @@ export async function resolveAndValidateLlmBaseUrl(
 
   if (!isLikelyHostname(host)) return { ok: true };
 
-  const outcome = await dnsResolve(host);
+  const outcome = await dnsResolve(host, {
+    signal: options.signal,
+    timeoutMs: options.dnsTimeoutMs,
+  });
   if (outcome.kind === "unavailable") {
     if (provenance === "user-configured") {
       console.warn(
         `[ssrf] dnsResolve unavailable — allowing user-configured ${redactUrl(url)} ` +
-          `(best-effort SSRF guard). Install the "dns" permission (dev channel) for full validation.`,
+          `(best-effort SSRF guard). Full validation requires a Dev-channel build ` +
+          `that explicitly declares the "dns" permission; stable packages do not claim it.`,
       );
       return { ok: true };
     }
@@ -220,6 +231,7 @@ export function validateWebhookUrl(url: string, provenance?: SsrfProvenance): Ss
 export async function resolveAndValidateWebhookUrl(
   url: string,
   provenance?: SsrfProvenance,
+  options: SsrfResolveOptions = {},
 ): Promise<SsrfCheckResult> {
   const isUser = provenance === "user-configured";
   const base = validateWebhookUrl(url, provenance);
@@ -235,12 +247,16 @@ export async function resolveAndValidateWebhookUrl(
 
   if (!isLikelyHostname(host)) return { ok: true };
 
-  const outcome = await dnsResolve(host);
+  const outcome = await dnsResolve(host, {
+    signal: options.signal,
+    timeoutMs: options.dnsTimeoutMs,
+  });
   if (outcome.kind === "unavailable") {
     if (isUser) {
       console.warn(
         `[ssrf] dnsResolve unavailable — allowing user-configured ${redactUrl(url)} webhook ` +
-          `(best-effort SSRF guard). Install the "dns" permission (dev channel) for full validation.`,
+          `(best-effort SSRF guard). Full validation requires a Dev-channel build ` +
+          `that explicitly declares the "dns" permission; stable packages do not claim it.`,
       );
       return { ok: true };
     }

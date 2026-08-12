@@ -1,251 +1,127 @@
-/**
- * HUMAN_INTERACT payload validator in `sidepanel/human-interact.ts`.
- *
- * `human-interact.ts` imports `chat-renderer` (which pulls the side-panel
- * element refs via `elements.ts`) and registers a `chrome.runtime.onMessage`
- * listener at import time, so we stub `chrome` and create the required ids
- * before the dynamic import.
- */
+/** Side-panel projection tests for background-brokered human interactions. */
 
-import { describe, test, expect, vi, beforeAll } from "vitest";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import {
+  dismissActiveDialog,
   promptConfirm,
   promptText,
   promptPassword,
 } from "../src/extension/sidepanel/takeover";
 
 vi.mock("../src/extension/sidepanel/takeover", () => ({
+  dismissActiveDialog: vi.fn(),
   promptConfirm: vi.fn(),
   promptText: vi.fn(),
   promptPassword: vi.fn(),
 }));
 
 type Sender = { id?: string; tab?: unknown; url?: string };
-type Listener = (
-  msg: unknown,
-  sender: Sender,
-  sendResponse: (r: unknown) => void,
-) => unknown;
-
-// Captured at module-import time so the trust-boundary tests can drive the
-// listener directly with crafted senders.
+type Listener = (msg: unknown, sender: Sender, sendResponse: (r: unknown) => void) => unknown;
 let listener: Listener | null = null;
+let sent: unknown[] = [];
+
+const token = { runId: "run-1", dispatchRevision: 1 };
+const prompt = (request: Record<string, unknown>, interactionId = "interaction-1") => ({
+  type: "HUMAN_INTERACT_PROMPT",
+  interactionId,
+  token,
+  request,
+});
 
 function setupGlobals(): void {
+  sent = [];
   (globalThis as unknown as { chrome: unknown }).chrome = {
     runtime: {
       lastError: undefined,
       id: "test",
       onMessage: { addListener: (cb: Listener) => { listener = cb; } },
-      sendMessage: (_msg: unknown, cb?: (res: unknown) => void) => {
-        cb?.(undefined);
-      },
+      sendMessage: (message: unknown) => { sent.push(message); return Promise.resolve(); },
     },
-    storage: {
-      local: { get: () => {}, set: () => Promise.resolve(), remove: () => Promise.resolve() },
-      session: { get: () => {}, set: () => {}, remove: () => {} },
-    },
+    storage: { local: { get: () => {}, set: () => Promise.resolve(), remove: () => Promise.resolve() } },
   };
-
   document.body.innerHTML = `
-    <div id="chatMessages"></div>
-    <input id="messageInput" />
-    <button id="sendBtn"></button>
-    <button id="stopBtn"></button>
-    <span id="costLabel">$0.0000</span>
-    <span id="tokenLabel">0 tokens</span>
-    <span id="statusDot" data-status="idle"></span>
-    <span id="statusLabel">idle</span>
-    <div id="takeoverBanner" hidden></div>
-    <div id="takeoverReason"></div>
-    <button id="resumeBtn"></button>
-  `;
+    <div id="chatMessages"></div><input id="messageInput" /><button id="sendBtn"></button>
+    <button id="stopBtn"></button><span id="costLabel">$0.0000</span><span id="tokenLabel">0 tokens</span>
+    <span id="statusDot" data-status="idle"></span><span id="statusLabel">idle</span>
+    <div id="takeoverBanner" hidden></div><div id="takeoverReason"></div><button id="resumeBtn"></button>`;
 }
 
-describe("human-interact parseHumanRequest", () => {
-  let parseHumanRequest: (msg: unknown) => { mode: string; message: string } | null;
+async function flush(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
 
-  beforeAll(async () => {
-    setupGlobals();
-    const mod = await import("../src/extension/sidepanel/human-interact");
-    parseHumanRequest = mod.parseHumanRequest;
+beforeEach(async () => {
+  vi.resetModules();
+  vi.clearAllMocks();
+  setupGlobals();
+  await import("../src/extension/sidepanel/human-interact");
+});
+
+describe("parseHumanRequest", () => {
+  test("requires an interaction identity and run token", async () => {
+    const { parseHumanRequest } = await import("../src/extension/sidepanel/human-interact");
+    expect(parseHumanRequest({ interactionId: "i", request: { mode: "input" } })).toBeNull();
+    expect(parseHumanRequest({ interactionId: "i", token, request: { mode: 123 } })).toBeNull();
   });
 
-  test("rejects non-object / non-string mode", () => {
-    // Malformed / unusable payloads all yield null (treated as a no-op cancel).
-    expect(parseHumanRequest({ request: { mode: 123 } })).toBeNull();
-    expect(parseHumanRequest({})).toBeNull();
-    expect(parseHumanRequest(null)).toBeNull();
-    expect(parseHumanRequest(undefined)).toBeNull();
-    expect(parseHumanRequest("x")).toBeNull();
-    expect(parseHumanRequest(42)).toBeNull();
-    expect(parseHumanRequest({ request: "x" })).toBeNull();
+  test("keeps a valid prompt's token and default value", async () => {
+    const { parseHumanRequest } = await import("../src/extension/sidepanel/human-interact");
+    expect(parseHumanRequest(prompt({ mode: "input", message: "Email?", defaultValue: "me@example.com" }))).toEqual({
+      interactionId: "interaction-1",
+      token,
+      mode: "input",
+      message: "Email?",
+      defaultValue: "me@example.com",
+    });
   });
+});
 
-  test("coerces a non-string message to empty string", () => {
-    expect(parseHumanRequest({ request: { mode: "confirm", message: {} } })).toEqual({
-      mode: "confirm",
-      message: "",
+describe("HUMAN_INTERACT_PROMPT listener", () => {
+  test("forwards the first panel's confirm answer to the background broker", async () => {
+    vi.mocked(promptConfirm).mockResolvedValue(true);
+    expect(listener!(prompt({ mode: "confirm", message: "Continue?" }), { id: "test" }, vi.fn())).toBe(false);
+    await flush();
+    expect(sent).toContainEqual({
+      type: "HUMAN_INTERACT_RESPONSE",
+      interactionId: "interaction-1",
+      token,
+      response: { mode: "confirm", confirmed: true },
     });
   });
 
-  test("accepts a valid input request", () => {
-    const r = parseHumanRequest({ request: { mode: "input", message: "hi" } });
-    expect(r?.mode).toBe("input");
-    expect(r?.message).toBe("hi");
-  });
-
-  test("passes through a string defaultValue", () => {
-    expect(
-      parseHumanRequest({
-        request: { mode: "input", message: "email", defaultValue: "pre-filled" },
-      }),
-    ).toEqual({ mode: "input", message: "email", defaultValue: "pre-filled" });
-  });
-});
-
-async function flush(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 0));
-}
-
-describe("HUMAN_INTERACT listener success paths", () => {
-  beforeAll(async () => {
-    // Self-contained setup so this describe does not depend on earlier ones.
-    vi.resetModules();
-    setupGlobals();
-    await import("../src/extension/sidepanel/human-interact");
-  });
-
-  test("confirm mode resolves the prompt and replies confirmed: true", async () => {
-    vi.mocked(promptConfirm).mockResolvedValue(true);
-    const sendResponse = vi.fn();
-    const ret = listener!(
-      { type: "HUMAN_INTERACT", request: { mode: "confirm", message: "Submit?" } },
-      { id: "test" },
-      sendResponse,
-    );
-    expect(ret).toBe(true);
-    await flush();
-    expect(sendResponse).toHaveBeenCalledWith({ mode: "confirm", confirmed: true });
-  });
-
-  test("confirm declined replies confirmed: false", async () => {
-    vi.mocked(promptConfirm).mockResolvedValue(false);
-    const sendResponse = vi.fn();
-    listener!(
-      { type: "HUMAN_INTERACT", request: { mode: "confirm", message: "Submit?" } },
-      { id: "test" },
-      sendResponse,
-    );
-    await flush();
-    expect(sendResponse).toHaveBeenCalledWith({ mode: "confirm", confirmed: false });
-  });
-
-  test("input mode forwards defaultValue to the prompt and replies with the value", async () => {
-    vi.mocked(promptText).mockResolvedValue("typed-value");
-    const sendResponse = vi.fn();
-    listener!(
-      {
-        type: "HUMAN_INTERACT",
-        request: { mode: "input", message: "Email?", defaultValue: "pre" },
-      },
-      { id: "test" },
-      sendResponse,
-    );
+  test("forwards input/password cancellation and preserves default input", async () => {
+    vi.mocked(promptText).mockResolvedValue(null);
+    listener!(prompt({ mode: "input", message: "Email?", defaultValue: "pre" }), { id: "test" }, vi.fn());
     await flush();
     expect(promptText).toHaveBeenCalledWith("Email?", "pre");
-    expect(sendResponse).toHaveBeenCalledWith({ mode: "input", value: "typed-value" });
-  });
+    expect(sent.at(-1)).toEqual(expect.objectContaining({ response: { mode: "cancelled" } }));
 
-  test("password mode replies with the entered secret as an input value", async () => {
-    vi.mocked(promptPassword).mockResolvedValue("hunter2");
-    const sendResponse = vi.fn();
-    listener!(
-      { type: "HUMAN_INTERACT", request: { mode: "password", message: "Password?" } },
-      { id: "test" },
-      sendResponse,
-    );
+    vi.mocked(promptPassword).mockResolvedValue("secret");
+    listener!(prompt({ mode: "password", message: "Password?" }, "interaction-2"), { id: "test" }, vi.fn());
     await flush();
-    expect(sendResponse).toHaveBeenCalledWith({ mode: "input", value: "hunter2" });
+    expect(sent.at(-1)).toEqual(expect.objectContaining({
+      interactionId: "interaction-2",
+      // Password responses are tagged `password` (not `input`) so callers can
+      // distinguish a secret and never copy it into history/logs unredacted.
+      response: { mode: "password", value: "secret" },
+    }));
   });
 
-  test("a cancelled input replies { mode: 'cancelled' }", async () => {
-    vi.mocked(promptText).mockResolvedValue(null);
-    const sendResponse = vi.fn();
+  test("a broker dismiss broadcast closes this panel's matching dialog", () => {
+    vi.mocked(promptConfirm).mockReturnValue(new Promise(() => {}));
+    listener!(prompt({ mode: "confirm", message: "Continue?" }), { id: "test" }, vi.fn());
     listener!(
-      { type: "HUMAN_INTERACT", request: { mode: "input", message: "Email?" } },
+      { type: "HUMAN_INTERACT_DISMISS", interactionId: "interaction-1", token },
       { id: "test" },
-      sendResponse,
+      vi.fn(),
     );
-    await flush();
-    expect(sendResponse).toHaveBeenCalledWith({ mode: "cancelled" });
+    expect(dismissActiveDialog).toHaveBeenCalledTimes(1);
   });
 
-  test("a rejected prompt logs an error row and replies cancelled", async () => {
-    vi.mocked(promptConfirm).mockRejectedValue(new Error("modal exploded"));
-    const sendResponse = vi.fn();
-    listener!(
-      { type: "HUMAN_INTERACT", request: { mode: "confirm", message: "Submit?" } },
-      { id: "test" },
-      sendResponse,
-    );
-    await flush();
-    expect(sendResponse).toHaveBeenCalledWith({ mode: "cancelled" });
-  });
-});
-
-describe("HUMAN_INTERACT listener trust boundary", () => {
-  beforeAll(async () => {
-    // Self-contained setup: re-import the module against a fresh chrome stub so
-    // this describe block does not silently depend on the parseHumanRequest
-    // describe's beforeAll having run first.
-    vi.resetModules();
-    setupGlobals();
-    await import("../src/extension/sidepanel/human-interact");
-  });
-
-  test("rejects a sender whose id is not the extension id", () => {
-    const sendResponse = vi.fn();
-    const ret = listener!(
-      { type: "HUMAN_INTERACT", request: { mode: "confirm", message: "x" } },
-      { id: "other-ext" },
-      sendResponse,
-    );
-    expect(ret).toBe(false);
-    expect(sendResponse).not.toHaveBeenCalled();
-  });
-
-  test("rejects a sender carrying a tab (content script)", () => {
-    const sendResponse = vi.fn();
-    const ret = listener!(
-      { type: "HUMAN_INTERACT", request: { mode: "confirm", message: "x" } },
-      { id: "test", tab: { id: 1 } },
-      sendResponse,
-    );
-    expect(ret).toBe(false);
-    expect(sendResponse).not.toHaveBeenCalled();
-  });
-
-  test("rejects a sender carrying a url (options/popup/peer sidepanel)", () => {
-    const sendResponse = vi.fn();
-    const ret = listener!(
-      { type: "HUMAN_INTERACT", request: { mode: "confirm", message: "x" } },
-      { id: "test", url: "chrome-extension://test/options.html" },
-      sendResponse,
-    );
-    expect(ret).toBe(false);
-    expect(sendResponse).not.toHaveBeenCalled();
-  });
-
-  test("does not throw on a valid SW sender with a malformed payload", () => {
-    const sendResponse = vi.fn();
-    expect(() =>
-      listener!(
-        { type: "HUMAN_INTERACT", request: { mode: 123 } },
-        { id: "test" },
-        sendResponse,
-      ),
-    ).not.toThrow();
-    expect(sendResponse).toHaveBeenCalledWith({ mode: "cancelled" });
+  test("rejects content-originated prompt injection", () => {
+    const response = vi.fn();
+    expect(listener!(prompt({ mode: "confirm", message: "x" }), { id: "test", tab: { id: 1 } }, response)).toBe(false);
+    expect(promptConfirm).not.toHaveBeenCalled();
+    expect(response).not.toHaveBeenCalled();
   });
 });

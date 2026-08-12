@@ -1,4 +1,4 @@
-import { extractBrowserState, getSelectorMap } from "@/lib/agent/dom/extractor";
+import { extractBrowserState, getSelectorMap, getElementIdentities } from "@/lib/agent/dom/extractor";
 import { generateAccessibilityTree } from "@/lib/agent/dom/ax-tree";
 import { executeAction } from "@/lib/agent/tools/executor";
 import { setSecretsResolvedExternally } from "@/lib/agent/secrets";
@@ -11,6 +11,7 @@ import {
 import { domFingerprint } from "@/lib/agent/tools/helpers";
 import type { AgentAction, ActionResult, BrowserState, TabInfo } from "@/lib/agent/types";
 import type { AgentMode } from "@/lib/agent/modes";
+import { MAX_ENTRY_MESSAGE_CHARS, type ConsoleLogEntry } from "@/lib/agent/dom/console-capture";
 
 const AGENT_MODES: readonly AgentMode[] = ["restricted", "standard", "full_agentic"];
 function isAgentMode(value: unknown): value is AgentMode {
@@ -18,6 +19,36 @@ function isAgentMode(value: unknown): value is AgentMode {
 }
 
 export const log: (...args: unknown[]) => void = console.warn.bind(console, "[content]");
+
+// ─── Console-bridge admission (trust boundary) ──────────────────────────────
+
+/**
+ * Validate a value as a {@link ConsoleLogEntry} at the content-script bridge.
+ *
+ * The MAIN-world console capture dispatches entries via a `CustomEvent` on the
+ * page's shared `window` — and ANY page script can dispatch the same event
+ * with a forged `detail.entry`. The content script must therefore treat every
+ * bridge payload as untrusted and admit only entries that (a) have the exact
+ * shape the capture produces (known console level, string message, finite
+ * epoch-ms timestamp) and (b) fit the capture's own byte bound
+ * ({@link MAX_ENTRY_MESSAGE_CHARS}). A malformed or oversized entry is
+ * dropped BEFORE it crosses into the extension's isolated world, so a page can
+ * neither inject arbitrary shapes into the SW ring (type confusion in
+ * `rate-limit-tracker`) nor balloon the ring with a giant forged message.
+ */
+export function isValidConsoleBridgeEntry(value: unknown): value is ConsoleLogEntry {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const entry = value as Partial<ConsoleLogEntry>;
+  if (entry.type !== "log" && entry.type !== "error" && entry.type !== "warning" && entry.type !== "info") {
+    return false;
+  }
+  if (typeof entry.message !== "string") return false;
+  // Code-point-aware bound: a surrogate pair must never be split, and the
+  // bridge must never forward more chars than the capture itself would store.
+  if (Array.from(entry.message).length > MAX_ENTRY_MESSAGE_CHARS) return false;
+  if (typeof entry.timestamp !== "number" || !Number.isFinite(entry.timestamp)) return false;
+  return true;
+}
 
 // ─── Message contracts ─────────────────────────────────────────────────────
 
@@ -37,6 +68,13 @@ interface ExecuteActionsMessage {
   domainConfig?: unknown;
   secretsResolved?: boolean;
   agentMode?: string;
+  /** Authoritative background dispatch generation. */
+  token: DispatchToken;
+}
+interface CancelRunMessage {
+  type: "CANCEL_RUN";
+  /** The first dispatch revision that must no longer be accepted. */
+  token?: DispatchToken;
 }
 interface ExtractHtmlMessage {
   type: "EXTRACT_HTML";
@@ -49,6 +87,7 @@ export type IncomingMessage =
   | PingMessage
   | ExtractStateMessage
   | ExecuteActionsMessage
+  | CancelRunMessage
   | ExtractHtmlMessage
   | GetDomFingerprintMessage;
 
@@ -64,6 +103,97 @@ interface ErrorResponse {
   error: string;
 }
 export type Response<T = unknown> = OkResponse<T> | ErrorResponse;
+
+/** Kept structurally identical to the background RunDispatchToken without a runtime dependency. */
+export interface DispatchToken {
+  runId: string;
+  dispatchRevision: number;
+}
+
+interface ActiveExecution {
+  token: DispatchToken;
+  controller: AbortController;
+}
+
+// Content scripts can outlive a service-worker run. Remember a small, bounded
+// set of cancellation cutoffs so a delayed EXECUTE_ACTIONS message cannot
+// resurrect a dispatch after STOP. A runId is never reused by the controller.
+const MAX_CANCELLATION_CUTOFFS = 64;
+const cancellationCutoffs = new Map<string, number>();
+const activeExecutions = new Map<string, Set<ActiveExecution>>();
+
+function isDispatchToken(value: unknown): value is DispatchToken {
+  if (!value || typeof value !== "object") return false;
+  const token = value as Partial<DispatchToken>;
+  return (
+    typeof token.runId === "string" &&
+    token.runId.length > 0 &&
+    typeof token.dispatchRevision === "number" &&
+    Number.isSafeInteger(token.dispatchRevision) &&
+    token.dispatchRevision > 0
+  );
+}
+
+function tokenKey(token: DispatchToken): string {
+  return `${token.runId}:${token.dispatchRevision}`;
+}
+
+function cancellationReason(token: DispatchToken): string {
+  return `BLOCKED: dispatch cancelled or stale for run ${token.runId}`;
+}
+
+function isCancelledDispatch(token: DispatchToken): boolean {
+  const cutoff = cancellationCutoffs.get(token.runId);
+  return cutoff !== undefined && token.dispatchRevision <= cutoff;
+}
+
+function rememberCancellation(token: DispatchToken): void {
+  const existing = cancellationCutoffs.get(token.runId);
+  if (existing === undefined || token.dispatchRevision > existing) {
+    cancellationCutoffs.delete(token.runId);
+    cancellationCutoffs.set(token.runId, token.dispatchRevision);
+  }
+  while (cancellationCutoffs.size > MAX_CANCELLATION_CUTOFFS) {
+    const oldest = cancellationCutoffs.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    cancellationCutoffs.delete(oldest);
+  }
+}
+
+function registerExecution(execution: ActiveExecution): void {
+  const key = tokenKey(execution.token);
+  const executions = activeExecutions.get(key) ?? new Set<ActiveExecution>();
+  executions.add(execution);
+  activeExecutions.set(key, executions);
+}
+
+function unregisterExecution(execution: ActiveExecution): void {
+  const key = tokenKey(execution.token);
+  const executions = activeExecutions.get(key);
+  if (!executions) return;
+  executions.delete(execution);
+  if (executions.size === 0) activeExecutions.delete(key);
+}
+
+function blockRemainingActions(
+  actions: AgentAction[],
+  fromIndex: number,
+  reason: string,
+): ActionResult[] {
+  return actions.slice(fromIndex).map((action) => ({ action, success: false, message: reason }));
+}
+
+async function authorizeActionEffect(token: DispatchToken, action: AgentAction): Promise<string> {
+  const response = await chrome.runtime.sendMessage({ type: "AUTHORIZE_ACTION_EFFECT", token, action }) as {
+    ok?: boolean;
+    error?: string;
+    effectCapability?: string;
+  };
+  if (!response?.ok || typeof response.effectCapability !== "string") {
+    throw new Error(response?.error ?? "BLOCKED: action effect authorization failed");
+  }
+  return response.effectCapability;
+}
 
 // ─── Message handlers ──────────────────────────────────────────────────────
 
@@ -130,6 +260,7 @@ export function handleExecuteActions(
   // (user-authored loaders cannot bypass the capability boundary). Absent
   // mode keeps the direct content-script path unchanged.
   const agentMode = isAgentMode(msg.agentMode) ? msg.agentMode : undefined;
+  const token = msg.token;
   const safeRespond = (r: Response) => {
     if (responded) return;
     responded = true;
@@ -139,6 +270,18 @@ export function handleExecuteActions(
       /* channel already closed */
     }
   };
+
+  // EXECUTE_ACTIONS is a run-scoped mutation. Never preserve a tokenless
+  // compatibility path: a delayed first-party message after Stop/restart must
+  // fail before it can change policy or secret state in this content world.
+  if (!isDispatchToken(token)) {
+    safeRespond({ ok: false, error: "invalid dispatch token" });
+    return false;
+  }
+  if (token && isCancelledDispatch(token)) {
+    safeRespond({ ok: false, error: cancellationReason(token) });
+    return false;
+  }
 
   try {
     const incomingDomainConfig = msg.domainConfig;
@@ -162,8 +305,16 @@ export function handleExecuteActions(
   }
 
   (async () => {
+    const execution = { token, controller: new AbortController() };
     try {
       const actions: AgentAction[] = Array.isArray(msg.actions) ? msg.actions : [];
+      registerExecution(execution);
+      // A CANCEL_RUN can arrive between the preflight check and registration.
+      if (isCancelledDispatch(execution.token)) {
+        execution.controller.abort(new DOMException(cancellationReason(execution.token), "AbortError"));
+        safeRespond({ ok: false, error: cancellationReason(execution.token) });
+        return;
+      }
       const cachedMap = getSelectorMap();
       const state: BrowserState =
         Object.keys(cachedMap).length > 0
@@ -179,11 +330,20 @@ export function handleExecuteActions(
               scrollHeight: document.documentElement.scrollHeight,
               viewportHeight: window.innerHeight,
               selectorMap: cachedMap,
+              // The execution state reuses the OBSERVATION snapshot's element
+              // identities so `resolveElement` can reject actions whose target
+              // changed since extraction (stale-element guard).
+              elementIdentities: getElementIdentities(),
             }
           : extractBrowserState([]);
       const results: ActionResult[] = [];
       const policyEnforced = isDomainPolicyEnforced();
-      for (const action of actions) {
+      for (let index = 0; index < actions.length; index++) {
+        const action = actions[index];
+        if (execution.controller.signal.aborted || isCancelledDispatch(execution.token)) {
+          results.push(...blockRemainingActions(actions, index, cancellationReason(execution.token)));
+          break;
+        }
         let result: ActionResult | undefined;
         if (!policyEnforced && (action.type === "navigate" || action.type === "search")) {
           let sameOrigin = false;
@@ -204,9 +364,31 @@ export function handleExecuteActions(
           }
         }
         if (!result) {
-          result = await executeAction(action, state, undefined, undefined, agentMode);
+          // The immediate pre-dispatch check plus passing the signal makes an
+          // already-delivered CANCEL_RUN prevent this action and interrupts
+          // abort-aware handlers that are currently running.
+          if (execution.controller.signal.aborted || isCancelledDispatch(execution.token)) {
+            results.push(...blockRemainingActions(actions, index, cancellationReason(execution.token)));
+            break;
+          }
+          try {
+            result = await executeAction(
+              action, state, execution.controller.signal, undefined, agentMode, execution.token, undefined,
+              (candidate) => authorizeActionEffect(execution.token, candidate),
+            );
+          } catch (e) {
+            if (execution.controller.signal.aborted || isCancelledDispatch(execution.token)) {
+              result = { action, success: false, message: cancellationReason(execution.token) };
+            } else {
+              throw e;
+            }
+          }
         }
         results.push(result);
+        if (execution.controller.signal.aborted || isCancelledDispatch(execution.token)) {
+          results.push(...blockRemainingActions(actions, index + 1, cancellationReason(execution.token)));
+          break;
+        }
         if (!result.success || result.pageChanged || result.isDone) {
           const skipped = actions.length - results.length;
           if (skipped > 0) {
@@ -223,9 +405,35 @@ export function handleExecuteActions(
       safeRespond({ ok: true, results });
     } catch (e) {
       safeRespond(errorResponse(e));
+    } finally {
+      unregisterExecution(execution);
     }
   })();
   return true;
+}
+
+/** Record cancellation before replying so delayed dispatches are rejected. */
+export function handleCancelRun(
+  msg: CancelRunMessage,
+  sendResponse: (r: Response) => void,
+): void {
+  if (!isDispatchToken(msg.token)) {
+    sendResponse({ ok: false, error: "invalid cancellation token" });
+    return;
+  }
+  const cutoff = msg.token;
+  rememberCancellation(cutoff);
+  for (const executions of activeExecutions.values()) {
+    for (const execution of executions) {
+      if (
+        execution.token.runId === cutoff.runId &&
+        execution.token.dispatchRevision <= cutoff.dispatchRevision
+      ) {
+        execution.controller.abort(new DOMException(cancellationReason(execution.token), "AbortError"));
+      }
+    }
+  }
+  sendResponse({ ok: true });
 }
 
 export function handleExtractHtml(

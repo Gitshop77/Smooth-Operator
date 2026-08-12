@@ -27,65 +27,41 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # actions/setup-node v7.0.0 (full commit SHA pin)
         with:
-          node-version: '22'
+          node-version: '22.23.2'
           cache: 'npm'
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run lint
-        run: npm run lint
-
-      - name: Type-check root TypeScript
-        run: npx tsc --noEmit
-
-      - name: Run tests with coverage gate
-        # Run the test suite under v8 coverage and enforce the thresholds
-        # declared in vitest.config.ts; a PR that drops coverage below the
-        # baseline fails CI.
-        run: npx vitest run --coverage
-
-      - name: Build extension
-        run: npm run build:extension
-
-      - name: Verify build output
+      - name: Verify pinned toolchain
         run: |
-          cd chrome-extension
-          # JS entry bundles
-          for f in background.js content.js content-main.js sidepanel.js options.js; do
-            [ ! -s "$f" ] && echo "ERROR: $f missing or empty" && exit 1
-          done
-          # Static assets
-          for f in manifest.json sidepanel.html sidepanel.css options.html options.css; do
-            [ ! -s "$f" ] && echo "ERROR: $f missing or empty" && exit 1
-          done
-          # Icons
-          for s in 16 32 48 128; do
-            [ ! -s "icons/icon-${s}.png" ] && echo "ERROR: icons/icon-${s}.png missing or empty" && exit 1
-          done
-          # License files
-          for f in LICENSE LICENSE-APACHE LICENSE-MIT NOTICE; do
-            [ ! -s "$f" ] && echo "ERROR: $f missing or empty" && exit 1
-          done
-          # Manifest validity
-          node -e "const m=require('./manifest.json'); if(!m.background?.service_worker) process.exit(1)"
-          # MV3 module service workers disallow native import(); esbuild inlines
-          # every statically-resolvable import (splitting: false), but the
-          # transformers web-bundle loader's computed-specifier `import(a)`
-          # survives verbatim. It is never executed in the service worker (Local
-          # Vision runs in DOM contexts), but any ADDITIONAL dynamic import
-          # would throw at runtime — fail on a second occurrence.
-          if [ "$(grep -c 'await import(' background.js)" -gt 1 ]; then
-            echo "ERROR: background.js contains a native import() call" && exit 1
-          fi
+          test "$(node --version)" = "v22.23.2"
+          test "$(npm --version)" = "10.9.8"
 
-      - name: Audit root dependencies
-        # High-severity advisories intentionally FAIL CI (no `|| true`), so
-        # vulnerable dependencies cannot merge green. Moderate stays covered by
-        # dependency-review.yml. This is a hard gate; do not append `|| true`.
-        # `npm audit signatures` additionally verifies registry signatures so a
-        # tampered package with no published advisory is still blocked.
-        run: npm audit --audit-level=high && npm audit signatures
+      - name: Verify reproducible baseline
+        # This fail-closed release gate performs a clean root install, lint,
+        # type-check, coverage, package/manifest/license/secret verification,
+        # audit/signature verification, and two independent clean-install
+        # builds whose full artifact inventories must match the root build.
+        run: npm run verify:baseline
+
+      - name: Enforce the full-suite test-duration budget
+        # Phase 15 gate: the full vitest suite must finish under the budget
+        # (default 180s; measured baseline ~46s on a dev host). Catches
+        # cumulative regressions that per-test timeouts cannot.
+        run: npm run test:budget
+
+      - name: Flake hardening — repeated flake-prone suite runs
+        # Phase 15 gate: the timer/async/chrome-mock suites run 3 rounds with
+        # vitest --retry=2; a test that fails all three attempts in any round
+        # is a real flake and fails the build.
+        run: npm run test:flake
+
+      - name: Mutation verification — critical controls must be caught
+        # Phase 15 gate: the adversarial mutation harness weakens each critical
+        # control (cancellation, budget enforcement, credential redaction, SSRF,
+        # stale-element guard, run-store status, settings save summary) and
+        # asserts the suite FAILS; a control whose mutation goes uncaught fails
+        # the build. Wired here so a PR that weakens both a control and its
+        # adversarial test in one change still fails CI.
+        run: npm run test:mutation
 
   # Secret scanning — fail the build if a real secret is committed.
   # Runs gitleaks against the full git history on every PR and push.

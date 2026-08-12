@@ -34,6 +34,9 @@ export const takeoverBanner = document.getElementById("takeoverBanner") as HTMLD
 export const takeoverReason = document.getElementById("takeoverReason") as HTMLDivElement | null;
 export const resumeBtn = document.getElementById("resumeBtn") as HTMLButtonElement | null;
 export const statusCenter = document.getElementById("statusCenter") as HTMLDivElement | null;
+export const runSummary = document.getElementById("runSummary") as HTMLDivElement | null;
+export const runTaskLabel = document.getElementById("runTaskLabel") as HTMLDivElement | null;
+export const runPhaseLabel = document.getElementById("runPhaseLabel") as HTMLDivElement | null;
 
 sendBtn.disabled = true;
 
@@ -70,7 +73,9 @@ if (typeof chrome !== "undefined" && chrome.storage?.local) {
       maxSteps = s[STORAGE_KEYS.maxSteps] as number;
     }
     storageReady = true;
-    sendBtn.disabled = false;
+    // Hydration must not make an empty task sendable. Controls also applies
+    // this predicate on every run-state transition.
+    sendBtn.disabled = !messageInput.value.trim();
   });
 
   // Sync when settings change in another tab (e.g. Options page).

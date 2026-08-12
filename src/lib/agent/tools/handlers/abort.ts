@@ -30,3 +30,11 @@ export function rejectOnAbort(signal?: AbortSignal): {
   });
   return { promise, cleanup };
 }
+
+/** Fail before any privileged or DOM side effect when the run is cancelled. */
+export function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException("Aborted", "AbortError");
+}

@@ -118,12 +118,17 @@ function injectExplorationNudge(
 }
 
 /**
- * 4. Loop-detection nudge — wraps {@link LoopDetector.shouldWarn}.
+ * 4. Loop-detection nudge — wraps {@link LoopDetector.shouldWarn} plus the
+ * oscillation detector ({@link LoopDetector.shouldWarnOscillation}) so both
+ * stuck shapes (exact repeats AND A,B,A,B / A,B,C,A,B,C alternation) feed the
+ * pre-observe nudge layer. Only one warning fires per step (repeats win).
  */
 function injectLoopDetectionNudge(detector: LoopDetector): string | null {
   const count = detector.shouldWarn();
-  if (count === 0) return null;
-  return LoopDetector.warningText(count);
+  if (count > 0) return LoopDetector.warningText(count);
+  const cycles = detector.shouldWarnOscillation();
+  if (cycles > 0) return LoopDetector.oscillationWarningText(2, cycles);
+  return null;
 }
 
 /**

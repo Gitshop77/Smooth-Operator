@@ -17,23 +17,21 @@
  */
 
 import { runAgentLoop } from "@/lib/agent/loop/orchestrator";
-import type { LogEvent } from "@/lib/agent/types";
 import type { AgentMode } from "@/lib/agent/modes";
 import { MODE_CONFIGS } from "@/lib/agent/modes";
 import { DEFAULT_MAX_ACTIONS, MAX_ACTIONS } from "@/lib/validations";
 import { DEFAULT_COST_CAP } from "@/lib/agent/types-utils";
-import { RunBuilder } from "@/lib/agent/run-history";
+import { RunBuilder, saveRun } from "@/lib/agent/run-history";
 import {
-  saveRunState,
-  getRunState,
-  clearRunState,
+  invalidateLiveSecretRedaction,
+  primeLiveSecretRedaction,
+} from "@/lib/agent/secrets";
+import { ensureApiKeyInSession } from "@/extension/api-key-storage";
+import {
   stopKeepalive,
   loadAndSetDomainConfig,
   safeLog,
-  zeroRunUsage,
-  addCostEvent,
   type RunState,
-  type RunUsage,
 } from "./state-store";
 import {
   buildLoopDeps,
@@ -53,11 +51,20 @@ import {
   clampNumber,
   isRunStarting,
   setRunStarting,
+  requestRunStartCancellation,
+  isRunStartCancellationRequested,
   resetDownloadConsent,
   consumeDownloadConsentForMode,
   markDownloadConsentConsumed,
   releaseDownloadConsentReservation,
 } from "./agent-bridge-utils";
+import {
+  beginRunController,
+  type RunController,
+} from "./run-controller";
+import { persistRunSnapshot, flushRunSnapshot } from "./run-snapshot-store";
+import { runSessionState } from "./run-session-state";
+import { RunEventService } from "./run-event-service";
 
 // Re-export so existing importers (message-routing.ts dynamic import) keep
 // resolving. The implementation lives in run-helpers.ts.
@@ -71,14 +78,14 @@ export {
   clampNumber,
   isRunStarting,
   setRunStarting,
+  requestRunStartCancellation,
+  isRunStartCancellationRequested,
   consumeDownloadConsentForMode,
   markDownloadConsentConsumed,
   releaseDownloadConsentReservation,
   resetDownloadConsent,
 };
 
-/** No-op catch for fire-and-forget `sendMessage` calls (side panel may be closed). */
-const SWALLOW_CLOSED_PORT = (): void => {};
 const DEFAULT_PLANNER_INTERVAL = 5;
 const DEFAULT_MAX_FAILURES = 5;
 // Default cost cap in USD. 0 is still a valid EXPLICIT opt-out (a stored value
@@ -92,6 +99,76 @@ interface StartRunArgs {
   mode: AgentMode;
   /** True when called from a scheduled-task alarm fire (not a manual user run). */
   isScheduledTaskRun?: boolean;
+  /** Authority reserved by the admission path before any scheduled side effect. */
+  reservation?: RunAuthorityReservation;
+}
+
+export interface RunAuthorityReservation {
+  runBuilder: RunBuilder;
+  controller: RunController;
+}
+
+// A manual RUN reserves this synchronously before it performs any storage
+// read.  That makes STOP authoritative even in the historical RUN → storage
+// await → startRun gap.  Scheduled runs intentionally do not reserve early.
+let reservedManualRun: RunAuthorityReservation | null = null;
+
+function reserveRunAuthority(args: Pick<StartRunArgs, "task" | "maxSteps" | "mode">): RunAuthorityReservation {
+  const runBuilder = new RunBuilder(args.task);
+  const controller = beginRunController({
+    runId: runBuilder.id,
+    task: args.task,
+    maxSteps: args.maxSteps,
+    mode: args.mode,
+    now: runBuilder.startedAt,
+  });
+  return { runBuilder, controller };
+}
+
+export function reserveManualRunAuthority(args: Pick<StartRunArgs, "task" | "maxSteps" | "mode">): void {
+  // The caller owns the synchronous run-starting guard. Keeping this check
+  // defensive prevents an accidental direct use from replacing authority.
+  if (reservedManualRun || !isRunStarting()) {
+    throw new Error("a manual run is already reserved or was not guarded");
+  }
+  reservedManualRun = reserveRunAuthority(args);
+  // Do not persist until the service-worker recovery audit has finished. A
+  // prior worker may have left an orphan snapshot that recovery still needs
+  // to identify and revoke; overwriting it here would lose that identity.
+}
+
+/** Finish a reservation that could not be admitted without touching another run's state. */
+export async function discardReservedRunAuthority(
+  reservation: RunAuthorityReservation,
+  message: string,
+): Promise<void> {
+  const snapshot = reservation.controller.markTerminal("failed", message);
+  await persistRunSnapshot(snapshot).catch(() => { /* best-effort */ });
+  try {
+    await saveRun(reservation.runBuilder.finish({
+      success: false,
+      text: message,
+      terminalReason: "failed",
+    }));
+  } catch { /* history is best-effort for a rejected start */ }
+  setRunStarting(false);
+}
+
+export async function discardReservedManualRun(message: string): Promise<void> {
+  const reserved = reservedManualRun;
+  reservedManualRun = null;
+  if (!reserved) return;
+  await discardReservedRunAuthority(reserved, message);
+}
+
+/** Reserve the scheduled run before any browser-visible side effect. */
+export function reserveScheduledRunAuthority(
+  args: Pick<StartRunArgs, "task" | "maxSteps" | "mode">,
+): RunAuthorityReservation {
+  if (!isRunStarting()) {
+    throw new Error("a scheduled run was not guarded before reservation");
+  }
+  return reserveRunAuthority(args);
 }
 
 /**
@@ -103,7 +180,7 @@ interface StartRunArgs {
  * buildLoopDeps, cleanupRun) live in `./run-helpers` so this function is a
  * thin orchestrator — ~80 lines of setup + delegation.
  */
-export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = false }: StartRunArgs): Promise<void> {
+export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = false, reservation: suppliedReservation }: StartRunArgs): Promise<void> {
  // Set the synchronous concurrent-run guard at the very top (before any await)
  // so BOTH the manual RUN path and the scheduled-task path are protected
  // against the two-concurrent-loops TOCTOU window. Previously only the manual
@@ -119,6 +196,28 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  // here guarantees per-run isolation regardless of how the run was started
   // (scheduled full_agentic runs inherited a prior run's consent flag).
   resetDownloadConsent();
+ // Create the authoritative controller before the first await. STOP can then
+ // synchronously invalidate dispatch even during session-notice cleanup.
+  const reserved = suppliedReservation ?? (!isScheduledTaskRun ? reservedManualRun : null);
+  if (!suppliedReservation && reserved) reservedManualRun = null;
+  const runBuilder = reserved?.runBuilder ?? new RunBuilder(task);
+  const runController: RunController = reserved?.controller ?? beginRunController({
+    runId: runBuilder.id,
+    task,
+    maxSteps,
+    mode,
+    now: runBuilder.startedAt,
+  });
+  // Exact custom secret values and the configured provider key must be in a
+  // synchronous cache before any run event can cross into a transcript or
+  // snapshot. If either storage read fails, invalidate so every live string is
+  // masked rather than falling back to heuristic-only redaction.
+  try {
+    await primeLiveSecretRedaction(await ensureApiKeyInSession());
+  } catch {
+    invalidateLiveSecretRedaction();
+  }
+  void persistRunSnapshot(runController.snapshot).catch(() => { /* best-effort */ });
   // Clear any unconsumed interrupted-run notice (a panel that was closed
   // during a SW restart never rendered it). Without this, a stale "previous
   // run cannot be resumed" message could surface mid-run or on a later
@@ -129,88 +228,79 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     /* best-effort */
   }
 
- // Run-history persistence: a RunBuilder accumulates every LogEvent the
- // orchestrator emits. On run end, saveRun() persists the record to
- // chrome.storage.local so the Options → History tab can replay it.
-  const runBuilder = new RunBuilder(task);
- // Track the actual run outcome as `done` events flow through sendEvent.
- // The History tab reads `r.result.success` to render the ✓/✗ badge, so
- // the finally block needs the real value rather than a hardcoded default.
- // RunBuilder also captures `done` events internally as a belt-and-suspenders
- // path; this flag is the explicit, single source of truth passed to finish().
-  let runSucceeded = false;
- // Set true once cleanup has started so a transient `navigator-step-start`
- // event emitted after `cleanupRun`/`clearRunState` can't re-create the
-  // persisted run-state object (a late saveRunState({step}) could
-  // resurrect run state after clearRunState). The step-persist in sendEvent
- // below is gated on this flag.
-  let runFinished = false;
-
-  // `runState` is declared before the `sendEvent` closure below so the closure
-  // can read `runState.step` in its navigator-step-start branch without a TDZ
-  // ReferenceError if an early (pre-run-start) event ever touches it.
   let runState: RunState | null = null;
-  // Accumulated run usage (cost events). Mirrored into persisted run state so
-  // the side panel can render live totals; a late cost event after cleanup is
-  // dropped by the same `runFinished` gate as the step-persist below.
-  let usageAccum: RunUsage | undefined;
-  const sendEvent = (event: LogEvent): void => {
-    chrome.runtime
-      .sendMessage({
-        type: "AGENT_EVENT",
-        event,
-        time: new Date().toTimeString().slice(0, 8),
-      })
-      .catch(SWALLOW_CLOSED_PORT);
- // Feed every event into the RunBuilder so the persisted run record has
- // the full transcript for replay in the Options → History tab.
-    runBuilder.addEvent(event);
- // Capture the orchestrator's terminal verdict. Only a `done` event with
- // `success: true` flips the flag — every other terminal `done` (abort,
- // failure, max-steps, cost-cap, judge-rejection, …) leaves it false.
-    if (event.type === "done" && event.success) {
-      runSucceeded = true;
-    }
-    if (event.type === "cost") {
-      usageAccum = usageAccum ? addCostEvent(usageAccum, event) : addCostEvent(zeroRunUsage(), event);
-      if (runState && !runFinished) {
-        saveRunState({ usage: usageAccum }).catch(() => {
-          /* best-effort persistence */
-        });
-      }
-    }
-    if (event.type === "navigator-step-start") {
- // Keep the in-memory `runState.step` in sync with the persisted value
- // (runState.step is never updated in memory; only persisted via
- // delta). Otherwise `handleTabAction`'s notify events report step 0.
- // Gated on `runFinished` so a late step event after cleanup can't
- // resurrect the persisted run-state (late saveRunState). Also
- // guarded by `runState` being assigned, so an early (pre-run) event can
- // never dereference an undefined object.
-      if (runState && !runFinished) {
-        runState.step = event.step;
-        saveRunState({ step: event.step }).catch(() => {
-          /* best-effort persistence */
-        });
-      }
-    }
-  };
+  const runEvents = new RunEventService(runController, runBuilder);
+  const sendEvent = runEvents.emit;
+
+  const TOTAL_RUN_DEADLINE_MS = 15 * 60_000;
+  const totalRunTimer = setTimeout(() => {
+    if (runEvents.isFinished || runController.isTerminal) return;
+    sendEvent({
+      type: "error",
+      step: runEvents.currentStep,
+      message: "The run exceeded its 15-minute total deadline and was stopped before any later action could begin.",
+      recoverable: false,
+      code: "TOTAL_RUN_DEADLINE",
+      recovery: "Start a new run with a narrower task or fewer steps.",
+    });
+    const snapshot = runController.snapshot;
+    void import("./tab-manager").then(({ broadcastRunCancellation }) =>
+      broadcastRunCancellation(snapshot),
+    ).catch(() => { /* best-effort */ });
+    void runSessionState.patch(runController.dispatchToken, { abortRequested: true }).catch(() => { /* best-effort */ });
+  }, TOTAL_RUN_DEADLINE_MS);
+  if (typeof totalRunTimer === "object" && "unref" in totalRunTimer) totalRunTimer.unref();
 
   const releaseRunGuard = (): void => {
+    clearTimeout(totalRunTimer);
     setRunStarting(false);
   };
+
+  let onStorageChanged: ((changes: { [k: string]: chrome.storage.StorageChange }, area: string) => void) | undefined;
+  const finalizeEarly = async (
+    reason: "failed" | "cancelled",
+    message: string,
+  ): Promise<void> => {
+    runEvents.terminalize(reason, message);
+    await persistRunSnapshot(runController.snapshot).catch(() => { /* best-effort */ });
+    // The terminal snapshot must be durable before a successor run can be
+    // authorized — never leave it in the coalescing buffer.
+    await flushRunSnapshot().catch(() => { /* best-effort */ });
+    runEvents.markFinished();
+    await cleanupRun({
+      runBuilder, task, isScheduledTaskRun, onStorageChanged,
+      sendEvent, runSucceeded: runEvents.runSucceeded, releaseRunGuard, teardownScheduledVision,
+      abortSignal: runController.signal, terminalSnapshot: runController.snapshot,
+    });
+    try { await runSessionState.clear(runController.dispatchToken); } catch { /* cleanup already attempted this */ }
+    try { await stopKeepalive(); } catch { /* cleanup already attempted this */ }
+    // cleanupRun owns this in production; keep this idempotent fallback so a
+    // cleanup failure (or an intentionally minimal test adapter) cannot pin
+    // the synchronous admission guard forever.
+    releaseRunGuard();
+  };
+
+  const finishIfCancelledBeforeLoop = async (): Promise<boolean> => {
+    if (!runController.signal.aborted) return false;
+    runEvents.sendCancellationTranscript();
+    await finalizeEarly("cancelled", "Agent stopped by user.");
+    return true;
+  };
+
+  if (await finishIfCancelledBeforeLoop()) return;
 
   let tab: chrome.tabs.Tab | undefined;
   try {
     [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   } catch (e) {
     sendEvent({ type: "error", step: 0, message: `Tab query failed: ${errMsg(e)}`, recoverable: false });
-    releaseRunGuard();
+    await finalizeEarly("failed", `Tab query failed: ${errMsg(e)}`);
     return;
   }
+  if (await finishIfCancelledBeforeLoop()) return;
   if (!tab?.id) {
     sendEvent({ type: "error", step: 0, message: "No active tab", recoverable: false });
-    releaseRunGuard();
+    await finalizeEarly("failed", "No active tab");
     return;
   }
  // L23: refuse to attach the agent to a PRIVILEGED tab — browser internals
@@ -236,6 +326,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
    if (isPrivileged) {
      try {
        const newTab = await chrome.tabs.create({ active: true });
+       if (await finishIfCancelledBeforeLoop()) return;
        if (newTab?.id) {
          tab = newTab;
          sendEvent({
@@ -252,7 +343,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
            message: `Cannot run on a privileged page (${tabUrl}) and opening a new tab failed. Open a regular web page first.`,
            recoverable: false,
          });
-         releaseRunGuard();
+         await finalizeEarly("failed", `Cannot run on a privileged page (${tabUrl}) and opening a new tab failed.`);
          return;
        }
      } catch (e) {
@@ -262,7 +353,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
          message: `Cannot run on a privileged page (${tabUrl}); opening a new tab failed: ${errMsg(e)}. Open a regular web page first.`,
          recoverable: false,
        });
-       releaseRunGuard();
+       await finalizeEarly("failed", `Cannot run on a privileged page (${tabUrl}); opening a new tab failed.`);
        return;
      }
    }
@@ -277,7 +368,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
    const startTabId = tab.id;
    if (startTabId === undefined) {
      sendEvent({ type: "error", step: 0, message: "No active tab", recoverable: false });
-     releaseRunGuard();
+     await finalizeEarly("failed", "No active tab");
      return;
    }
 
@@ -291,9 +382,10 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     ]);
   } catch (e) {
     sendEvent({ type: "error", step: 0, message: `Settings load failed: ${errMsg(e)}`, recoverable: false });
-    releaseRunGuard();
+    await finalizeEarly("failed", `Settings load failed: ${errMsg(e)}`);
     return;
   }
+  if (await finishIfCancelledBeforeLoop()) return;
  // When the resolved mode allows JavaScript execution (full_agentic) but no
  // explicit domain allowlist is configured, `evaluate` will FAIL CLOSED — it
  // cannot run on any origin until `allowedDomains` is set. Emit a prominent
@@ -334,9 +426,10 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     await loadAndSetDomainConfig();
   } catch (e) {
     sendEvent({ type: "error", step: 0, message: `Domain config load failed: ${errMsg(e)}`, recoverable: false });
-    releaseRunGuard();
+    await finalizeEarly("failed", `Domain config load failed: ${errMsg(e)}`);
     return;
   }
+  if (await finishIfCancelledBeforeLoop()) return;
  // Validate / clamp run-time numeric overrides from storage (run-time
  // numeric/string inputs are not validated). A corrupted value (negative, NaN,
  // non-numeric string) is coerced to a sane bound instead of reaching the loop.
@@ -354,8 +447,13 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
   // only the user value (zombie maxSteps flag).
   const modeCap = MODE_CONFIGS[effectiveMode].maxSteps;
   const cfgMaxSteps = Math.min(clampInt(stored.maxSteps, maxSteps, 1, 1000), modeCap);
+  await persistRunSnapshot(
+    runController.updateConfiguration({ mode: effectiveMode, maxSteps: cfgMaxSteps }),
+  ).catch(() => { /* best-effort */ });
 
   runState = {
+    runId: runController.snapshot.runId,
+    dispatchRevision: runController.snapshot.dispatchRevision,
     task,
     maxSteps: cfgMaxSteps,
     mode: effectiveMode,
@@ -365,6 +463,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     active: true,
     abortRequested: false,
   };
+  runEvents.setRunState(runState);
   // Wrap `saveRunState` + `startKeepalive` in a try/catch — if either
   // throws (chrome.storage quota exceeded, alarms API unavailable in a
   // unit-test harness, SW termination mid-call), the `runStarting` guard
@@ -393,17 +492,12 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  // If saveRunState succeeded but startKeepalive threw inside initRunState,
  // state.active is persisted as true — clear it so future RUN messages
  // aren't rejected with "already running".
-    runFinished = true;
-    try { await clearRunState(); } catch { /* best-effort */ }
-    releaseRunGuard();
+    await finalizeEarly("failed", `Run state initialization failed: ${errMsg(e)}`);
     return;
   }
 
-  let controller: AbortController;
-  let onStorageChanged: (changes: { [k: string]: chrome.storage.StorageChange }, area: string) => void;
   try {
-    const wired = wireAbortController();
-    controller = wired.controller;
+    const wired = wireAbortController(runController.rootAbortController, runController.dispatchToken);
     onStorageChanged = wired.onStorageChanged;
   } catch (e) {
  // If wiring the abort controller throws (e.g. chrome.storage API
@@ -415,10 +509,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
       message: `Abort wiring failed: ${errMsg(e)}`,
       recoverable: false,
     });
-    runFinished = true;
-    try { await clearRunState(); } catch { /* best-effort */ }
-    try { await stopKeepalive(); } catch { /* best-effort */ }
-    releaseRunGuard();
+    await finalizeEarly("failed", `Abort wiring failed: ${errMsg(e)}`);
     return;
   }
 
@@ -429,15 +520,10 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  // that gap. cleanupRun is called on the early-return so the listener,
  // keepalive alarm, and persisted state are all cleaned up.
   try {
-    const afterWire = await getRunState();
+    const afterWire = await runSessionState.readForRun(runController.dispatchToken);
     if (afterWire?.abortRequested) {
-      sendEvent({ type: "info", message: "Agent stopped by user." });
-      sendEvent({ type: "done", step: 0, success: false, text: "Agent stopped by user." });
-      runFinished = true;
-      await cleanupRun({
-        runBuilder, task, isScheduledTaskRun, onStorageChanged,
-        sendEvent, runSucceeded, releaseRunGuard, teardownScheduledVision,
-      });
+      runEvents.sendCancellationTranscript();
+      await finalizeEarly("cancelled", "Agent stopped by user.");
       return;
     }
   } catch {
@@ -476,10 +562,12 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
       /* callback module unavailable — non-fatal, run without metrics */
     }
 
+    const runningSnapshot = runController.markRunning();
+    await persistRunSnapshot(runningSnapshot).catch(() => { /* best-effort */ });
     await runAgentLoop(buildLoopDeps({
       tab,
       sendEvent,
-      controller,
+      controller: runController,
       task,
       mode: effectiveMode,
       callbacks: metricsCallback ? [metricsCallback] : undefined,
@@ -492,24 +580,20 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
       },
     }));
   } catch (e) {
-    sendEvent({
-      type: "error",
-      step: 0,
-      message: errMsg(e),
-      recoverable: false,
-    });
+    if (runController.signal.aborted) {
+      runEvents.sendCancellationTranscript();
+    } else {
+      const typed = e as { code?: unknown; recovery?: unknown };
+      sendEvent({
+        type: "error",
+        step: runEvents.currentStep,
+        message: errMsg(e),
+        recoverable: false,
+        ...(typeof typed.code === "string" ? { code: typed.code } : {}),
+        ...(typeof typed.recovery === "string" ? { recovery: typed.recovery } : {}),
+      });
+    }
   } finally {
-    runFinished = true;
-    await cleanupRun({
-      runBuilder,
-      task,
-      isScheduledTaskRun,
-      onStorageChanged,
-      sendEvent,
-      runSucceeded,
-      releaseRunGuard,
-      teardownScheduledVision,
-    });
  // Surface the detailed run metrics so the AgentMetricsCallback is not an
  // orphaned accumulator: emit a concise summary to the side panel + run
  // record after every run. (getMetrics()/reset() had no consumer before —
@@ -527,5 +611,23 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
         /* metrics snapshot unavailable — non-fatal */
       }
     }
+    runEvents.terminalize(
+      runController.signal.aborted ? "cancelled" : runEvents.runSucceeded ? "succeeded" : "failed",
+      runController.signal.aborted ? "Agent stopped by user." : runEvents.runSucceeded ? "Run completed." : "Run ended without a successful result.",
+    );
+    await persistRunSnapshot(runController.snapshot).catch(() => { /* best-effort */ });
+    runEvents.markFinished();
+    await cleanupRun({
+      runBuilder,
+      task,
+      isScheduledTaskRun,
+      onStorageChanged,
+      sendEvent,
+      runSucceeded: runEvents.runSucceeded,
+      releaseRunGuard,
+      teardownScheduledVision,
+      abortSignal: runController.signal,
+      terminalSnapshot: runController.snapshot,
+    });
   }
 }

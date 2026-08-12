@@ -15,6 +15,7 @@
 import { estimateCost } from "./pricing";
 import { omitZero } from "./shared";
 import type { LLMProvider, LLMRequest, LLMResponse, LLMUsage } from "./provider";
+import type { LLMTerminalDiagnostic } from "./route/client";
 
 export interface ProviderBridgeConfig {
   /** Provider id prefix (e.g. "openai", "anthropic"). Combined with model name for the LLMProvider id. */
@@ -151,10 +152,18 @@ export function toLLMProvider(config: ProviderBridgeConfig): LLMProvider {
         }
         throw err;
       }
-      return {
+      const bridged = {
         content: response.content,
         usage: buildUsage(response, config.model, config.providerId),
       };
+      // Keep the public provider response shape compatible while preserving the
+      // route's additive, non-sensitive terminal diagnosis for direct callers.
+      // Avoid placing this in the shared LLMProvider interface until every
+      // non-bridged provider can honor the same contract.
+      const terminalDiagnostic = response.terminalDiagnostic as LLMTerminalDiagnostic | undefined;
+      return terminalDiagnostic
+        ? Object.assign(bridged, { terminalDiagnostic })
+        : bridged;
     },
   };
 }

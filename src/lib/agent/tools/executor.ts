@@ -49,15 +49,16 @@ import type { ActionResult, AgentAction, BrowserState } from "../types";
 import { describeAction } from "./describe";
 import { ActionSchema } from "./schema";
 import { parseScriptYaml, validateScript, runScript, type ScriptDispatchFn } from "../script-runner";
-import { domFingerprint } from "./helpers";
+import { makeLazyFingerprint } from "./handlers/types";
 import { detectChallenges } from "../dom/challenge-snapshot";
 import { tryExpandSearchMacro, SW_RPC_TIMEOUT_MS } from "./constants";
 import { classifyActionError, formatErrorSuffix } from "../errors";
-import { checkActionAllowed, type AgentMode } from "../modes";
+import type { AgentMode } from "../modes";
+import { currentCapabilityPolicy } from "../capability-policy";
 import { pageSnapshotChunk } from "../dom/extraction/page-state";
 import { readLoaderRegistry, runMatchedLoaders } from "../dom/navigation/url-loaders";
 import { isExtensionContext, type LoaderRunner } from "./handlers/types";
-import { rejectOnAbort } from "./handlers/abort";
+import { rejectOnAbort, throwIfAborted } from "./handlers/abort";
 import {
   handleAlertAccept,
   handleAlertDismiss,
@@ -117,6 +118,7 @@ import {
   handleGetComputedStyle,
   handleGetPageInfo,
   type ActionContext,
+  type ActionDispatchToken,
 } from "./handlers";
 
 export { describeAction };
@@ -167,19 +169,29 @@ class UnhandledActionError extends Error {
  * JS in standard mode) just because the loop gate lives one layer above the
  * executor. With no mode, steps dispatch ungated exactly as before.
  */
-function makeLoaderRunner(state: BrowserState, signal?: AbortSignal, agentMode?: AgentMode): LoaderRunner {
+function makeLoaderRunner(
+  state: BrowserState,
+  signal?: AbortSignal,
+  agentMode?: AgentMode,
+  dispatchToken?: ActionDispatchToken,
+  effectAuthorizer?: (action: AgentAction) => Promise<string>,
+): LoaderRunner {
   return async (url: string) =>
     runMatchedLoaders({
       url,
       readRegistry: readLoaderRegistry,
       dispatch: async (step) => {
         if (agentMode) {
-          const allowed = checkActionAllowed(step.type, agentMode);
-          if (!allowed.allowed) {
-            return { action: step, success: false, message: `BLOCKED: ${allowed.reason}` };
+          const capability = currentCapabilityPolicy.decide({
+            actionType: step.type,
+            mode: agentMode,
+            enforcementPoint: "loader-step",
+          });
+          if (!capability.allowed) {
+            return { action: step, success: false, message: `BLOCKED: ${capability.reason}` };
           }
         }
-        return executeAction(step, state, signal, true);
+        return executeAction(step, state, signal, true, agentMode, dispatchToken, undefined, effectAuthorizer);
       },
     });
 }
@@ -253,17 +265,45 @@ export async function executeAction(
   signal?: AbortSignal,
   fromLoader?: boolean,
   agentMode?: AgentMode,
+  dispatchToken?: ActionDispatchToken,
+  effectCapability?: string,
+  effectAuthorizer?: (action: AgentAction) => Promise<string>,
 ): Promise<ActionResult> {
   try {
+    // This is the universal action boundary. Loader and script recursion can
+    // enter the executor without passing through the loop queue, so every
+    // action must independently reject a pre-aborted run before even reading
+    // page state (domFingerprint) or invoking a synchronous handler.
+    throwIfAborted(signal);
+    const actionEffectCapability = effectAuthorizer
+      ? await effectAuthorizer(action)
+      : effectCapability;
   // Capture before-state once at the top — used by the click, go_back,
-  // and press_and_hold handlers for page-change detection.
+  // select_dropdown, press_and_hold, and evaluate handlers for page-change
+  // detection. The fingerprint is LAZY (memoized on first read) so actions
+  // that never check for page changes don't pay the O(interactive-elements)
+  // DOM scan. Handlers that DO check must see the PRE-effect fingerprint, so
+  // resolve it here (before dispatch) for exactly those action types — a
+  // lazy resolution inside the handler would capture the POST-effect DOM and
+  // report "no change" for a mutation the action actually caused.
     const ctx: ActionContext = {
       state,
       beforeUrl: location.href,
-      beforeFingerprint: domFingerprint(),
+      beforeFingerprint: makeLazyFingerprint() as unknown as string,
       signal,
+      dispatchToken,
+      effectCapability: actionEffectCapability,
       fromLoader: fromLoader ?? false,
     };
+    if (
+      action.type === "click" ||
+      action.type === "go_back" ||
+      action.type === "select_dropdown" ||
+      action.type === "press_and_hold" ||
+      action.type === "evaluate"
+    ) {
+      (ctx.beforeFingerprint as unknown as { get(): string }).get();
+    }
 
     switch (action.type) {
       case "click":           return await handleClick(ctx, action);
@@ -275,7 +315,7 @@ export async function executeAction(
       case "navigate": {
         const macroUrl = tryExpandSearchMacro(action.url)?.url;
         const navAction = macroUrl ? { ...action, url: macroUrl } : action;
-        return await handleNavigate(ctx, navAction, makeLoaderRunner(state, signal, agentMode));
+        return await handleNavigate(ctx, navAction, makeLoaderRunner(state, signal, agentMode, dispatchToken, effectAuthorizer));
       }
       case "switch_tab":      return await handleSwitchTab(ctx, action);
       case "close_tab":       return await handleCloseTab(ctx, action);
@@ -307,7 +347,7 @@ export async function executeAction(
       case "search": {
         const macroUrl = tryExpandSearchMacro(action.query)?.url;
         if (macroUrl) {
-          return await handleNavigate(ctx, { type: "navigate", url: macroUrl, new_tab: false }, makeLoaderRunner(state, signal, agentMode));
+          return await handleNavigate(ctx, { type: "navigate", url: macroUrl, new_tab: false }, makeLoaderRunner(state, signal, agentMode, dispatchToken, effectAuthorizer));
         }
         return await handleSearch(ctx, action);
       }
@@ -347,7 +387,7 @@ export async function executeAction(
               message: `unrecognized script step: ${String((step as { action?: unknown }).action ?? "")}`,
             };
           }
-          const result = await executeAction(parsed, state, signal, false);
+          const result = await executeAction(parsed, state, signal, false, agentMode, dispatchToken, undefined, effectAuthorizer);
           return {
             success: result.success,
             data: result.data,
@@ -406,7 +446,7 @@ export async function executeAction(
           const abort = rejectOnAbort(ctx.signal);
           try {
             res = (await Promise.race([
-              chrome.runtime.sendMessage({ type: "TAB_ACTION", action }),
+              chrome.runtime.sendMessage({ type: "TAB_ACTION", action, ...(ctx.dispatchToken ? { token: ctx.dispatchToken } : {}), ...(ctx.effectCapability ? { effectCapability: ctx.effectCapability } : {}) }),
               new Promise<never>((_, reject) => {
                 t = setTimeout(() => reject(new Error("TAB_ACTION timeout")), SW_RPC_TIMEOUT_MS);
               }),

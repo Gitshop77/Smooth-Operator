@@ -9,28 +9,34 @@ import type { HumanInteractionResponse } from "./human-interaction";
 
 /** Default response timeout for the extension prompt (5 min). */
 const DEFAULT_ASK_HUMAN_TIMEOUT_MS = 5 * 60 * 1000;
+/** Hard ceiling for a prompt wait (24 h) — `setTimeout` clamps values over
+ *  2^31-1 ms (~24.8 d) to ~1 ms, so an oversized override would cancel the
+ *  prompt almost instantly instead of granting a long wait. */
+const MAX_ASK_HUMAN_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Resolve the effective timeout for the extension prompt.
  *
  * A caller may set `req.timeoutMs` to override the default. We only accept a
  * positive, finite number; anything else (undefined, 0, negative, NaN,
- * Infinity) falls back to {@link DEFAULT_ASK_HUMAN_TIMEOUT_MS}. This prevents a
- * malformed value from disabling the timeout (0/negative) or producing a
- * nonsensical timer.
+ * Infinity) falls back to {@link DEFAULT_ASK_HUMAN_TIMEOUT_MS}. An accepted
+ * value is clamped to {@link MAX_ASK_HUMAN_TIMEOUT_MS} so `setTimeout`'s
+ * 2^31-1 ms clamp can never turn a long wait into an instant cancel.
  */
 export function resolveTimeoutMs(timeoutMs?: number): number {
-  return typeof timeoutMs === "number" &&
+  const base = typeof timeoutMs === "number" &&
     Number.isFinite(timeoutMs) &&
     timeoutMs > 0
     ? timeoutMs
     : DEFAULT_ASK_HUMAN_TIMEOUT_MS;
+  return Math.min(base, MAX_ASK_HUMAN_TIMEOUT_MS);
 }
 
 /** The known tagged-union response `mode` values. */
 const KNOWN_RESPONSE_MODES = new Set<HumanInteractionResponse["mode"]>([
   "confirm",
   "input",
+  "password",
   "select",
   "request_help",
   "cancelled",
@@ -73,6 +79,10 @@ export function sanitizeResponse(
         : invalid;
     case "input":
       return typeof r.value === "string" ? { mode: "input", value: r.value } : invalid;
+    case "password":
+      // Passwords are secrets: the tagged member must be a string, and the
+      // consumer decides redaction/refusal based on the `password` tag.
+      return typeof r.value === "string" ? { mode: "password", value: r.value } : invalid;
     case "select":
       return typeof r.value === "string" ? { mode: "select", value: r.value } : invalid;
     case "request_help":

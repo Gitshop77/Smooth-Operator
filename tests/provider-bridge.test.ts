@@ -94,6 +94,25 @@ describe("provider-bridge chat()", () => {
     expect(res.usage).toBeUndefined();
   });
 
+  test("preserves an additive route terminal diagnostic for direct callers", async () => {
+    mockedGenerate.mockResolvedValue({
+      content: "",
+      terminalDiagnostic: {
+        code: "reasoning_only",
+        protocol: "openai-chat",
+        visibleContentChars: 0,
+        terminalSeen: true,
+      },
+    });
+    const res = await makeProvider().chat({ messages: [{ role: "user", content: "hello" }] });
+    expect((res as typeof res & { terminalDiagnostic?: unknown }).terminalDiagnostic).toEqual({
+      code: "reasoning_only",
+      protocol: "openai-chat",
+      visibleContentChars: 0,
+      terminalSeen: true,
+    });
+  });
+
   test("enriches a 'No route registered' failure with the provider id", async () => {
     mockedGenerate.mockRejectedValue(
       new Error('No route registered for model "test/gpt-4o" (routeId "test::chat").'),

@@ -60,6 +60,8 @@ export async function handleDetectVisual(
         chrome.runtime.sendMessage({
           type: "DETECT_VISUAL",
           query: action.query,
+          ...(ctx.dispatchToken ? { token: ctx.dispatchToken } : {}),
+          ...(ctx.effectCapability ? { effectCapability: ctx.effectCapability } : {}),
         }),
         new Promise<never>((_, reject) => {
           t = setTimeout(

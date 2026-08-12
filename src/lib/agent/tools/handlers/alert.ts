@@ -13,6 +13,7 @@ import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import type { ActionContext } from "./types";
 import { redactDialogText } from "../../dom/popup-handler";
+import { throwIfAborted } from "./abort";
 
 /** Normalize an unknown thrown value into a human-readable message. */
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -43,6 +44,7 @@ function getPopupHandlerMod(): Promise<PopupHandler> {
  * success/failure result. Redaction behavior is preserved.
  */
 async function acceptOrDismiss(
+  ctx: ActionContext,
   action: Action,
   op: (mod: PopupHandler) => void,
   verb: string,
@@ -50,6 +52,7 @@ async function acceptOrDismiss(
 ): Promise<ActionResult> {
   try {
     const mod = await getPopupHandlerMod();
+    throwIfAborted(ctx.signal);
     const text = mod.getPendingAlertText();
     if (text === null) {
       return {
@@ -76,26 +79,26 @@ async function acceptOrDismiss(
 }
 
 export async function handleAlertAccept(
-  _ctx: ActionContext,
+  ctx: ActionContext,
   action: Extract<Action, { type: "alert_accept" }>,
 ): Promise<ActionResult> {
   // Accept the currently-open JS dialog. The popup-handler queues
   // every dialog so the agent can explicitly accept/dismiss it after
   // the auto-dismiss override has returned to the page. Returns
   // failure if no dialog is open.
-  return acceptOrDismiss(action, (mod) => mod.acceptAlert(), "accept", "Accepted");
+  return acceptOrDismiss(ctx, action, (mod) => mod.acceptAlert(), "accept", "Accepted");
 }
 
 export async function handleAlertDismiss(
-  _ctx: ActionContext,
+  ctx: ActionContext,
   action: Extract<Action, { type: "alert_dismiss" }>,
 ): Promise<ActionResult> {
   // Dismiss the currently-open JS dialog. Symmetric with `alert_accept`.
-  return acceptOrDismiss(action, (mod) => mod.dismissAlert(), "dismiss", "Dismissed");
+  return acceptOrDismiss(ctx, action, (mod) => mod.dismissAlert(), "dismiss", "Dismissed");
 }
 
 export async function handleAlertGetText(
-  _ctx: ActionContext,
+  ctx: ActionContext,
   action: Extract<Action, { type: "alert_get_text" }>,
 ): Promise<ActionResult> {
   // Get the text of the currently-open JS dialog. Returns empty
@@ -103,6 +106,7 @@ export async function handleAlertGetText(
   // on the extractedContent length.
   try {
     const mod = await getPopupHandlerMod();
+    throwIfAborted(ctx.signal);
     const text = mod.getPendingAlertText();
     if (text === null) {
       return {
@@ -133,7 +137,7 @@ export async function handleAlertGetText(
 }
 
 export async function handleAlertSendKeys(
-  _ctx: ActionContext,
+  ctx: ActionContext,
   action: Extract<Action, { type: "alert_send_keys" }>,
 ): Promise<ActionResult> {
   // Stage `text` to be returned by the NEXT `window.prompt()` call.
@@ -146,6 +150,7 @@ export async function handleAlertSendKeys(
   // (`alert`/`confirm`).
   try {
     const mod = await getPopupHandlerMod();
+    throwIfAborted(ctx.signal);
     const kind = mod.getPendingAlertKind();
     if (kind === null) {
       // No dialog currently open — stage the text for the NEXT prompt.

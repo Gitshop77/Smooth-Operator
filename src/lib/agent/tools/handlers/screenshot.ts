@@ -71,7 +71,7 @@ export async function handleScreenshot(
         timer = setTimeout(() => resolve(undefined), SCREENSHOT_TIMEOUT_MS);
       });
       raw = await Promise.race([
-        chrome.runtime.sendMessage({ type: "SCREENSHOT", fileName: safeFileName }),
+        chrome.runtime.sendMessage({ type: "SCREENSHOT", fileName: safeFileName, action, ...(ctx.dispatchToken ? { token: ctx.dispatchToken } : {}), ...(ctx.effectCapability ? { effectCapability: ctx.effectCapability } : {}) }),
         timeout,
         abort.promise,
       ]);

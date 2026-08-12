@@ -8,17 +8,16 @@
 
 export const STORAGE_KEYS = {
   provider: "provider",
-  /** Provider API key — held in chrome.storage.SESSION (memory-only, never
-   * written to disk in plaintext unless the user opts into "remember on this
-   * device", see api-key-storage.ts syncRememberedApiKey). Read by
-   * provider-config.ts readStoredApiKey; legacy `local["apiKey"]` values are
-   * migrated into session at Options load. */
+  /** Provider API key — held in chrome.storage.SESSION. A local value is a
+   * legacy migration source only; verified migration replaces it with an
+   * opaque credentialManifest backed by extension-origin IndexedDB. */
   apiKey: "apiKey",
-  /** Opt-in flag: persist the API key on disk (chrome.storage.local) and
-   * re-hydrate it into session storage after browser restarts. OFF by
-   * default — the key then lives only in memory. Read by
-   * api-key-storage.ts ensureApiKeyInSession. */
+  /** Exact opt-in flag for persistence in the credential vault. */
   rememberApiKey: "rememberApiKey",
+  /** Non-secret pointer to the extension-origin credential vault. */
+  credentialManifest: "open_cowork_credential_manifest_v1",
+  /** Non-secret, resumable legacy migration journal. */
+  credentialMigration: "open_cowork_credential_migration_v1",
   model: "model",
   baseUrl: "baseUrl",
   resourceName: "resourceName",
@@ -31,6 +30,11 @@ export const STORAGE_KEYS = {
   secrets: "open_cowork_secrets",
   scheduledTasks: "open_cowork_scheduled_tasks",
   runHistory: "open_cowork_run_history",
+  /** Monotonic background-owned revision counter for the run-history list
+   *  (guards concurrent whole-list mutations across contexts). */
+  historyRevision: "open_cowork_run_history_revision",
+  /** Storage-version marker map (settings/history/schedules), background-owned. */
+  storageVersion: "open_cowork_storage_version",
   // The custom-tools key intentionally keeps its legacy spelling: the runtime
   // loader (registry-data.ts CUSTOM_TOOLS_STORAGE_KEY) reads this exact key
   // and is not aligned for a rename yet — changing it here would silently

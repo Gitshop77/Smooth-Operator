@@ -22,6 +22,14 @@ import { escapeXml } from "./xml-escape";
 /** Number of recent steps to keep intact (not summarized). */
 const KEEP_RECENT = 6;
 
+/**
+ * Shared compaction preamble — the single source for the summarizer's role
+ * line. The compaction runner's `-1` byte reserve and the budget assertion
+ * both reference this so the system+user payload math cannot drift when one
+ * copy changes.
+ */
+export const COMPACTION_PREAMBLE = "You are summarizing agent history.";
+
 /** The system instruction prepended to the summarization request. */
 export const SUMMARIZE_PROMPT = `You are summarizing the history of an autonomous browser agent. Condense the following step history into a brief <compacted_memory> block. Rules:
 - Report ONLY what was confirmed (actions taken, results seen, pages visited, data found).

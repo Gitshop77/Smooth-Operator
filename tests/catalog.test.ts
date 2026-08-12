@@ -796,11 +796,26 @@ describe("testProviderConnection shape (mocked fetch)", () => {
   });
 
   function jsonResponse(status: number, body: unknown) {
+    const payload = JSON.stringify(body);
+    const encoder = new TextEncoder();
+    let pushed = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pushed) {
+          controller.close();
+          return;
+        }
+        pushed = true;
+        controller.enqueue(encoder.encode(payload));
+      },
+    });
     return {
       ok: status >= 200 && status < 300,
       status,
+      headers: new Headers({ "content-type": "application/json" }),
+      body: stream,
       json: async () => body,
-      text: async () => JSON.stringify(body),
+      text: async () => payload,
     };
   }
 
@@ -879,9 +894,19 @@ describe("catalogIdMatches", () => {
     expect(catalogIdMatches("gpt-4o-mini", "gpt-4o")).toBe(false);
   });
 
-  test("no false positive: gpt-4o does not match gpt-4o-2024-08-06", () => {
-    expect(catalogIdMatches("gpt-4o", "gpt-4o-2024-08-06")).toBe(false);
-    expect(catalogIdMatches("gpt-4o-2024-08-06", "gpt-4o")).toBe(false);
+  test("date-stamped and undated spellings of the same model canonicalize to one record", () => {
+    expect(catalogIdMatches("gpt-4o", "gpt-4o-2024-08-06")).toBe(true);
+    expect(catalogIdMatches("gpt-4o-2024-08-06", "gpt-4o")).toBe(true);
+    expect(catalogIdMatches("openai/gpt-4o-2024-11-20", "openai/gpt-4o")).toBe(true);
+    // …but a DIFFERENT model that merely shares a prefix still never matches.
+    expect(catalogIdMatches("gpt-4o", "gpt-4o-mini-2024-08-06")).toBe(false);
+  });
+
+  test("OpenRouter :variant suffixes are stripped on both sides", () => {
+    expect(catalogIdMatches("openai/gpt-oss-20b:free", "openai/gpt-oss-20b")).toBe(true);
+    expect(catalogIdMatches("nvidia/nemotron-3-nano-30b-a3b:free", "nvidia/nemotron-3-nano-30b-a3b")).toBe(true);
+    expect(catalogIdMatches("openai/gpt-5:thinking", "gpt-5")).toBe(true);
+    expect(catalogIdMatches("deepseek/deepseek-r1:free", "deepseek/deepseek-r1")).toBe(true);
   });
 
   test("no false positive: partial substring does not match", () => {

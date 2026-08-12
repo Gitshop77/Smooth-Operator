@@ -534,8 +534,13 @@ describe("preprocessor-utils loadImage", () => {
     const realFetch = globalThis.fetch;
     const realCib = (globalThis as { createImageBitmap?: unknown }).createImageBitmap;
     try {
+      // Use bytes directly: Node 22's undici Response does not accept jsdom's
+      // Blob implementation (`stream()` is absent), while the production
+      // contract under test only needs a response body that can become a Blob.
       globalThis.fetch = (async () =>
-        new Response(new Blob(["x"], { type: "image/png" }))) as typeof fetch;
+        new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), {
+          headers: { "content-type": "image/png" },
+        })) as typeof fetch;
       (globalThis as { createImageBitmap?: unknown }).createImageBitmap = async () => ({
         width: 4,
         height: 4,

@@ -1,41 +1,35 @@
 /**
  * options/scheduled-tasks.ts — schedule form + chrome.alarms arming.
  *
- * Reads/writes the persisted scheduled-task list and renders the existing-task
- * rows. All alarm arming is delegated to the canonical `saveScheduledTask` /
- * `listScheduledTasks` in src/lib/agent/scheduled-tasks.ts so the Options page
- * and the background service worker share ONE source of truth for arming
- * semantics (enabled check, clear-before-arm, keep-awake bookkeeping).
+ * Renders scheduled-task rows and sends typed commands to the background
+ * service worker. The Options page never writes task storage or alarms: the
+ * worker owns mutation serialization, revisions, arming, and rollback.
  *
- * This file deliberately keeps NO local copy of the arming logic: that was the
- * root cause of a prior disable-leak (a disabled task left its chrome.alarm
- * armed and a keep-awake lock held). Keeping arming canonical makes that class
- * of bug impossible.
+ * Keeping those effects background-only prevents cross-context lost updates
+ * and the prior disable-leak where storage and chrome.alarms diverged.
  *
  * P3: validation errors use the styled modal; visibility toggles use the
  * `is-hidden` class instead of inline `style.display`.
  */
 
 import type { ScheduledTask, ScheduledTaskSchedule } from "@/lib/agent/scheduled-tasks";
-import { listScheduledTasks, saveScheduledTask } from "@/lib/agent/scheduled-tasks";
+import type { ScheduledTaskCommand } from "@/extension/background/message-types";
 // Constants come from the lib (single source of truth) — a local
 // duplicate here is a drift hazard.
-import { ALARM_PREFIX, DEFAULT_HOUR, DEFAULT_MINUTE, DEFAULT_DAY_OF_WEEK } from "@/lib/agent/scheduled-tasks-utils";
-import { $, escapeHtml } from "@/extension/shared";
-import { STORAGE_KEYS } from "./storage-keys";
-import { alertModal } from "./modal";
-import { maybeReleaseKeepAwake } from "@/extension/background/state-store";
+import { DEFAULT_HOUR, DEFAULT_MINUTE, DEFAULT_DAY_OF_WEEK, isValidTaskEntry } from "@/lib/agent/scheduled-tasks-utils";
+import { $, escapeHtml, redactKeyLeak } from "@/extension/shared";
+import { alertModal, confirmModal } from "./modal";
+import { showSaved } from "./settings-sync-utils";
+import { announce, moveFocusToId } from "../accessibility";
+import { schedulesStore } from "./stores";
 
 /** Max characters allowed in a scheduled-task prompt (storage / UI sanity). */
 const MAX_SCHEDULED_TASK_PROMPT = 10_000;
 
 /**
- * Serialize Options-side scheduled-task mutations so rapid delete clicks in the
- * SAME context can't interleave their read-modify-write of the whole list and
- * resurrect a just-deleted task (lost-update / task-resurrection race).
- * This mirrors the `withTaskMutation` mutex in `lib/agent/scheduled-tasks.ts`.
- * The canonical delete should ultimately live in the lib (sharing ONE lock with
- * the SW context), but until then this prevents the same-context race.
+ * Preserve click ordering within this page. The service worker remains the
+ * only mutation authority; this lock merely prevents a later local render from
+ * racing ahead of an earlier command response.
  */
 let optionsTaskLock: Promise<void> = Promise.resolve();
 async function withTaskMutation<T>(fn: () => Promise<T>): Promise<T> {
@@ -74,11 +68,44 @@ $("scheduleType").addEventListener("change", () => {
 
 // ─── Scheduled tasks ───────────────────────────────────────────────────────
 
-/** Persist the full task list. Used by the delete path only — add/toggle go
- * through the canonical `saveScheduledTask`, which also arms/disarms the
- * alarm and manages the keep-awake lock. */
-async function writeScheduledTasks(tasks: ScheduledTask[]): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEYS.scheduledTasks]: tasks });
+type ScheduledTaskCommandResponse = {
+  ok?: boolean;
+  tasks?: ScheduledTask[];
+  exported?: ScheduledTask[];
+  added?: number;
+  updated?: number;
+  skipped?: number;
+  code?: string;
+  error?: string;
+};
+
+async function sendScheduledTaskCommand(command: ScheduledTaskCommand): Promise<ScheduledTaskCommandResponse> {
+  const response = await chrome.runtime.sendMessage({
+    type: "SCHEDULED_TASK_COMMAND",
+    version: 1,
+    command,
+  }) as ScheduledTaskCommandResponse | undefined;
+  if (!response?.ok) {
+    const prefix = response?.code === "SCHEDULED_TASK_REVISION_CONFLICT"
+      ? "Scheduled task changed in another window"
+      : "Scheduled task command failed";
+    throw new Error(`${prefix}: ${response?.error ?? "no response from background"}`);
+  }
+  return response;
+}
+
+async function listScheduledTasks(): Promise<ScheduledTask[]> {
+  const res = await sendScheduledTaskCommand({ kind: "list" });
+  return Array.isArray(res.tasks) ? res.tasks : [];
+}
+
+async function saveScheduledTask(task: ScheduledTask): Promise<ScheduledTask[]> {
+  const res = await sendScheduledTaskCommand({
+    kind: "save",
+    task,
+    expectedRevision: task.revision ?? null,
+  });
+  return Array.isArray(res.tasks) ? res.tasks : [];
 }
 
 /** Format a schedule spec into a human-readable string. */
@@ -97,12 +124,26 @@ function formatSchedule(s: ScheduledTaskSchedule): string {
   return `weekly ${days[dow]} ${hh}:${mm}`;
 }
 
-/** Render the scheduled tasks list. Call after every mutation. */
-export async function renderSchedule(): Promise<void> {
-  const tasks = await listScheduledTasks();
+/** Render the scheduled tasks list strictly from the schedules store. */
+function renderScheduleFromStore(): void {
+  const { tasks, listAck, mutationAck } = schedulesStore.getState();
   const list = $("scheduleList") as HTMLDivElement;
   list.setAttribute("role", "list");
   list.innerHTML = "";
+  if (listAck.state === "failed") {
+    list.innerHTML =
+      `<p class="empty-hint schedule-error" role="alert">` +
+      `Could not load scheduled tasks: ${escapeHtml(listAck.error ?? "unknown error")}` +
+      `</p>`;
+    announce(`Could not load scheduled tasks: ${listAck.error ?? "unknown error"}`, {
+      assertive: true,
+    });
+    return;
+  }
+  // While any command is awaiting its worker acknowledgement, disable the
+  // per-task controls so a keyboard/mouse double-action cannot race a
+  // revision-guarded mutation (the worker still rejects stale revisions).
+  const mutationPending = mutationAck.state === "pending";
   if (tasks.length === 0) {
     list.innerHTML = '<p class="empty-hint">No scheduled tasks.</p>';
     return;
@@ -115,81 +156,106 @@ export async function renderSchedule(): Promise<void> {
     item.innerHTML =
       `<span class="schedule-summary">${escapeHtml(preview)} — ${escapeHtml(formatSchedule(t.schedule))}</span>` +
       `<span class="schedule-controls">` +
-        `<button type="button" class="toggle-enable" data-enabled="${t.enabled}">${t.enabled ? "Disable" : "Enable"}</button>` +
-        `<button type="button" class="schedule-delete">Delete</button>` +
+        `<button type="button" class="toggle-enable" data-enabled="${t.enabled}" ${mutationPending ? "disabled" : ""}>${t.enabled ? "Disable" : "Enable"}</button>` +
+        `<button type="button" class="schedule-delete" ${mutationPending ? "disabled" : ""}>Delete</button>` +
       `</span>`;
     const enableBtn = item.querySelector("button.toggle-enable") as HTMLButtonElement;
     const delBtn = item.querySelector("button.schedule-delete") as HTMLButtonElement;
-    delBtn.addEventListener("click", async () => {
-      try {
-        await withTaskMutation(async () => {
- // Re-read the freshest list INSIDE the lock so two rapid deletes can't
- // each overwrite the other's write (task-resurrection race). Removing by
- // id (not by a stale render snapshot) is safe even if
- // another context mutated the list between renders.
-        const current = await listScheduledTasks();
-        const filtered = current.filter((x) => x.id !== t.id);
- // Make the delete transactional: clear the alarm BEFORE committing the
- // storage write. If the alarm cannot be cleared we roll the storage write
- // BACK (re-persist the original list) rather than leaving a
- // storage-less-but-still-armed chrome.alarm that could fire for a deleted
- // task (delete storage-write success was not matched by alarm-clear
- // success, so a deleted task's orphaned alarm could still fire).
- // `chrome.alarms.clear` resolves (not throws) when the alarm is already gone,
- // so `cleared` is only false after a genuine error.
-        let cleared = false;
-        try {
-          await chrome.alarms.clear(`${ALARM_PREFIX}${t.id}`);
-          cleared = true;
-        } catch (e) {
-          console.warn("[options] alarms.clear failed, retrying:", e);
-          try {
-            await chrome.alarms.clear(`${ALARM_PREFIX}${t.id}`);
-            cleared = true;
-          } catch (e2) {
-            console.warn("[options] alarms.clear retry failed (keeping task armed):", e2);
-          }
-        }
-        if (!cleared) {
-         // Roll back: keep the task armed + in storage instead of deleting it
-         // from storage while its alarm could still fire.
-          await writeScheduledTasks(current);
-          throw new Error("failed to clear the task alarm; the task was kept");
-        }
-        await writeScheduledTasks(filtered);
- // `maybeReleaseKeepAwake` internally checks whether any enabled task
- // remains armed before releasing the OS power lock.
-        maybeReleaseKeepAwake().catch((err) =>
-          console.warn("[options] keep-awake release failed:", err),
-        );
+    delBtn.addEventListener("click", () => {
+      // Destructive-action gate (Phase 14): deleting a scheduled task requires
+      // explicit acknowledgement through the danger-styled modal (anti-misclick
+      // delay included). Cancel leaves the list untouched.
+      void confirmModal({
+        title: "Delete scheduled task",
+        message: `Delete scheduled task "${preview}"? This cannot be undone.`,
+        confirmLabel: "Delete",
+        danger: true,
+      }).then((ok) => {
+        if (ok) void deleteTask(t);
       });
-      } catch (err) {
-        await alertModal({
-          title: "Delete failed",
-          message: `Could not delete scheduled task: ${err instanceof Error ? err.message : String(err)}`,
-        });
-      }
-      await renderSchedule().catch((err) => console.warn("[options] renderSchedule failed:", err));
     });
-    enableBtn.addEventListener("click", async () => {
-      await withTaskMutation(async () => {
- // Re-read the freshest list so a stale render-closure object can't resurrect
- // a task that was deleted in another context.
-        const current = await listScheduledTasks();
-        const target = current.find((x) => x.id === t.id);
-        if (!target) return; // deleted — do not re-persist
-        target.enabled = !target.enabled;
-        try {
-          await saveScheduledTask(target);
-        } catch (e) {
-          console.warn("[options] saveScheduledTask failed:", e);
-        }
-      });
-      await renderSchedule().catch((err) => console.warn("[options] renderSchedule failed:", err));
+    enableBtn.addEventListener("click", () => {
+      void toggleTask(t);
     });
     list.appendChild(item);
   }
 }
+
+/** Focus the schedule add-prompt after a delete so a keyboard user is not stranded. */
+function focusScheduleAddForm(): void {
+  if (moveFocusToId("scheduleTask")) return;
+  document.querySelector<HTMLButtonElement>("#scheduleList .schedule-delete")?.focus();
+}
+
+/** Load the authoritative task list into the store (explicit list ack). */
+export async function renderSchedule(): Promise<void> {
+  schedulesStore.dispatch({ type: "SCHEDULES_LIST_START" });
+  renderScheduleFromStore();
+  try {
+    const tasks = await listScheduledTasks();
+    schedulesStore.dispatch({ type: "SCHEDULES_LIST_OK", tasks });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    schedulesStore.dispatch({ type: "SCHEDULES_LIST_FAIL", error: message });
+    console.warn("[options] renderSchedule failed:", message);
+  }
+  renderScheduleFromStore();
+}
+
+async function deleteTask(task: ScheduledTask): Promise<void> {
+  schedulesStore.dispatch({ type: "SCHEDULES_MUTATION_START", kind: "delete", taskId: task.id });
+  try {
+    await withTaskMutation(async () => {
+      const res = await sendScheduledTaskCommand({
+        kind: "delete",
+        taskId: task.id,
+        expectedRevision: task.revision ?? 0,
+        expectedCreatedAt: task.createdAt,
+      });
+      // The worker's acknowledged task list is authoritative; render it.
+      schedulesStore.dispatch({ type: "SCHEDULES_MUTATION_OK", kind: "delete", tasks: res.tasks ?? [], taskId: task.id });
+    });
+    focusScheduleAddForm();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    schedulesStore.dispatch({ type: "SCHEDULES_MUTATION_FAIL", kind: "delete", error: message, taskId: task.id });
+    announce(`Could not delete scheduled task: ${message}`, { assertive: true });
+    await alertModal({
+      title: "Delete failed",
+      message: `Could not delete scheduled task: ${message}`,
+    });
+    // Recovery: re-list so the UI reflects the worker's authoritative state
+    // (a failed delete must not leave the previous list silently in the DOM).
+    await renderSchedule().catch((err2) => console.warn("[options] renderSchedule failed:", err2));
+  }
+}
+
+async function toggleTask(task: ScheduledTask): Promise<void> {
+  schedulesStore.dispatch({ type: "SCHEDULES_MUTATION_START", kind: "toggle", taskId: task.id });
+  try {
+    await withTaskMutation(async () => {
+      const res = await sendScheduledTaskCommand({
+        kind: "set_enabled",
+        taskId: task.id,
+        enabled: !task.enabled,
+        expectedRevision: task.revision ?? 0,
+        expectedEnabled: task.enabled,
+      });
+      schedulesStore.dispatch({ type: "SCHEDULES_MUTATION_OK", kind: "toggle", tasks: res.tasks ?? [], taskId: task.id });
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    schedulesStore.dispatch({ type: "SCHEDULES_MUTATION_FAIL", kind: "toggle", error: message, taskId: task.id });
+    await alertModal({
+      title: "Update failed",
+      message: `Could not update scheduled task: ${message}`,
+    });
+    await renderSchedule().catch((err2) => console.warn("[options] renderSchedule failed:", err2));
+  }
+}
+
+// Re-render whenever the store settles a list/mutation command.
+schedulesStore.subscribe(() => renderScheduleFromStore());
 
 $("addSchedule").addEventListener("click", async () => {
   // The add flow runs under the same page-local mutation lock as delete/toggle,
@@ -244,19 +310,21 @@ $("addSchedule").addEventListener("click", async () => {
       createdAt: Date.now(),
       ...(mode && { mode }),
     };
-    // Persist + arm via the canonical `saveScheduledTask` (single source of truth
-    // for arming). It validates the schedule, writes storage, and arms the alarm
-    // — rolling storage back if arming fails, so a half-committed state (task
-    // stored + enabled but no alarm) can never persist.
+    // Persist + arm through the typed background command. The worker validates
+    // the schedule and rolls storage back if alarm reconciliation fails.
+    schedulesStore.dispatch({ type: "SCHEDULES_MUTATION_START", kind: "save" });
     try {
-      await saveScheduledTask(scheduledTask);
+      const tasks = await saveScheduledTask(scheduledTask);
+      schedulesStore.dispatch({ type: "SCHEDULES_MUTATION_OK", kind: "save", tasks });
     } catch (e) {
-      console.warn("[options] saveScheduledTask failed:", e);
+      const message = e instanceof Error ? e.message : String(e);
+      console.warn("[options] saveScheduledTask failed:", message);
       // Surface the failure to the user instead of silently dropping the task
       // (addSchedule used to swallow saveScheduledTask failures).
+      schedulesStore.dispatch({ type: "SCHEDULES_MUTATION_FAIL", kind: "save", error: message });
       await alertModal({
         title: "Could not save scheduled task",
-        message: e instanceof Error ? e.message : String(e),
+        message,
       });
       await renderSchedule().catch((err) => console.warn("[options] renderSchedule failed:", err));
       return;
@@ -268,6 +336,79 @@ $("addSchedule").addEventListener("click", async () => {
     ($("scheduleMode") as HTMLSelectElement).value = "standard";
     // Re-sync the visible schedule sections to the now-reset form.
     ($("scheduleType") as HTMLSelectElement).dispatchEvent(new Event("change"));
-    await renderSchedule();
   });
+});
+
+// ─── A11: Scheduled-task Export/Import (background-owned) ───────────────────
+
+/** Reject import files larger than this before reading them into memory. */
+const MAX_SCHEDULE_IMPORT_BYTES = 4 * 1024 * 1024; // 4 MiB
+
+document.getElementById("exportSchedules")?.addEventListener("click", async () => {
+  let exported: ScheduledTask[];
+  try {
+    const res = await sendScheduledTaskCommand({ kind: "export" });
+    exported = Array.isArray(res.exported) ? res.exported : [];
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await alertModal({ title: "Export failed", message: `Could not export scheduled tasks: ${message}` });
+    return;
+  }
+  // Defense-in-depth key-shape masking on top of the worker's value-level
+  // redaction (prompts can carry pasted credentials).
+  const blob = new Blob([redactKeyLeak(JSON.stringify(exported, null, 2))], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `open-cowork-scheduled-tasks-${Date.now()}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+
+document.getElementById("importSchedules")?.addEventListener("click", () => {
+  ($("importSchedulesFile") as HTMLInputElement).click();
+});
+
+document.getElementById("importSchedulesFile")?.addEventListener("change", async (e) => {
+  const file = (e.target as HTMLInputElement).files?.[0];
+  if (!file) return;
+  if (file.size > MAX_SCHEDULE_IMPORT_BYTES) {
+    await alertModal({
+      title: "File too large",
+      message: `The selected file is ${(file.size / (1024 * 1024)).toFixed(1)} MiB; the import limit is ${MAX_SCHEDULE_IMPORT_BYTES / (1024 * 1024)} MiB.`,
+    });
+    (e.target as HTMLInputElement).value = "";
+    return;
+  }
+  try {
+    const text = await file.text();
+    const parsed: unknown = JSON.parse(text);
+    if (!Array.isArray(parsed)) {
+      await alertModal({ title: "Invalid file", message: "Invalid file: expected an array of scheduled tasks." });
+      return;
+    }
+    // Client pre-screen only; the background re-validates, re-redacts, and
+    // recomputes revisions/alarms as the single mutation authority.
+    const prevalidated = parsed.filter((entry) => isValidTaskEntry(entry));
+    const preSkipped = parsed.length - prevalidated.length;
+    const result = await sendScheduledTaskCommand({ kind: "import", tasks: prevalidated });
+    await renderSchedule();
+    showSaved();
+    const added = result.added ?? 0;
+    const updated = result.updated ?? 0;
+    const skipped = (result.skipped ?? 0) + preSkipped;
+    await alertModal({
+      title: "Import complete",
+      message: `Imported ${added} new task(s), updated ${updated} existing task(s).` +
+        (skipped > 0 ? ` Skipped ${skipped} invalid entr${skipped === 1 ? "y" : "ies"}.` : ""),
+    });
+  } catch (err) {
+    await alertModal({
+      title: "Import failed",
+      message: "Failed to import scheduled tasks: " + (err instanceof Error ? err.message : String(err)),
+    });
+    await renderSchedule().catch((err2) => console.warn("[options] renderSchedule failed:", err2));
+  } finally {
+    (e.target as HTMLInputElement).value = "";
+  }
 });

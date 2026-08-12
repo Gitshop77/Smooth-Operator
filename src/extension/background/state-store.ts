@@ -14,7 +14,11 @@ export {
   RUN_STATE_KEY,
   getRunState,
   saveRunState,
+  saveRunStateForRun,
+  initializeRunStateForRun,
   clearRunState,
+  clearRunStateForRun,
+  resetRunStateStoreForTests,
   zeroRunUsage,
   addCostEvent,
   requestKeepAwake,
@@ -27,7 +31,11 @@ import { safeLog } from "./state-store-utils";
 // ─── Keepalive alarm (MV3 SW lifecycle workaround) ──────────────────────────
 
 export const KEEPALIVE_ALARM = "open_cowork_keepalive";
-const KEEPALIVE_INTERVAL_MIN = 0.25; // 15s — the minimum MV3 alarm period
+// 30s — Chrome's actual alarm floor since Chrome 120 (1 min before that; any
+// sub-floor period is clamped with a console warning, so the intended 15s
+// cadence never happens). Matches the ~30s SW idle window; `chrome.debugger`
+// sessions already keep the SW alive while CDP is attached.
+const KEEPALIVE_INTERVAL_MIN = 0.5;
 
 /** Start a periodic alarm that touches the service worker to keep it alive. */
 export async function startKeepalive(): Promise<void> {

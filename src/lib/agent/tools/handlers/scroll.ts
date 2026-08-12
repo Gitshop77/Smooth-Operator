@@ -4,6 +4,8 @@ import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import { TIMINGS, sleep } from "../constants";
 import { type ActionContext, isExtensionContext } from "./types";
+import { throwIfAborted } from "./abort";
+import { swRpc } from "./sw-rpc";
 
 /**
  * Best-effort clear of the vision-elements cache in the service worker.
@@ -25,16 +27,23 @@ import { type ActionContext, isExtensionContext } from "./types";
  * the in-page demo), false if both attempts failed and the vision
  * cache may be stale.
  */
-async function clearVisionCache(): Promise<boolean> {
+async function clearVisionCache(ctx: ActionContext): Promise<boolean> {
   // No extension runtime — the in-page demo has no SW-managed vision cache, so
   // there is nothing to clear and no staleness to warn about.
   if (!isExtensionContext()) return true;
 
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      await chrome.runtime.sendMessage({ type: "CLEAR_VISION_CACHE" });
+      throwIfAborted(ctx.signal);
+      const response = await swRpc<{ ok?: boolean; error?: string }>({
+        type: "CLEAR_VISION_CACHE",
+        ...(ctx.dispatchToken ? { token: ctx.dispatchToken } : {}),
+      }, "CLEAR_VISION_CACHE", ctx.signal);
+      throwIfAborted(ctx.signal);
+      if (!response?.ok) throw new Error(response?.error || "vision cache clear rejected");
       return true;
     } catch (err) {
+      if (ctx.signal?.aborted) throw err;
       if (attempt === 1) continue; // retry once for a transiently-asleep SW
       console.warn(
         "CLEAR_VISION_CACHE failed twice; vision cache may be stale " +
@@ -48,9 +57,10 @@ async function clearVisionCache(): Promise<boolean> {
 }
 
 export async function handleScroll(
-  _ctx: ActionContext,
+  ctx: ActionContext,
   action: Extract<Action, { type: "scroll" }>,
 ): Promise<ActionResult> {
+  throwIfAborted(ctx.signal);
   const down = action.down !== false;
   const pages = action.pages ?? 1;
   // ~0.85 of a viewport height matches a typical "page down" feel; perturb the
@@ -68,21 +78,32 @@ export async function handleScroll(
   // Wait for the scroll to actually settle before the next action reads the
   // viewport. Prefer the `scrollend` event (scales with distance) and cap the
   // wait so a non-firing event can't hang the step.
-  await new Promise<void>((resolve) => {
+  await new Promise<void>((resolve, reject) => {
     let settled = false;
     const finish = () => {
       if (!settled) {
         settled = true;
         clearTimeout(t);
         window.removeEventListener("scrollend", finish);
+        ctx.signal?.removeEventListener("abort", abort);
         resolve();
       }
     };
+    const abort = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(t);
+      window.removeEventListener("scrollend", finish);
+      reject(ctx.signal?.reason instanceof Error ? ctx.signal.reason : new DOMException("Aborted", "AbortError"));
+    };
     window.addEventListener("scrollend", finish, { once: true });
+    ctx.signal?.addEventListener("abort", abort, { once: true });
     const t = setTimeout(finish, Math.min(TIMINGS.scrollSmooth * Math.max(pages, 1), 3000));
+    if (ctx.signal?.aborted) abort();
   });
 
-  const cacheCleared = await clearVisionCache();
+  const cacheCleared = await clearVisionCache(ctx);
+  throwIfAborted(ctx.signal);
 
   // The scroll itself always succeeds, so we never flip `success` to false for
   // a failed cache clear. But we surface the staleness in the message so the
@@ -116,6 +137,7 @@ export async function handleScrollToBottom(
   let steps = 0;
   let lastY = window.scrollY;
   for (;;) {
+    throwIfAborted(signal);
     window.scrollBy({ top: window.innerHeight });
     // Wait for lazy-loaded content to extend the page before checking whether
     // the viewport can still move.
@@ -127,9 +149,11 @@ export async function handleScrollToBottom(
   }
   // Restore the viewport to the top (matches the spec: scroll down, then back
   // to the top) so the next action starts from a known position.
+  throwIfAborted(signal);
   window.scrollTo(0, 0);
 
-  const cacheCleared = await clearVisionCache();
+  const cacheCleared = await clearVisionCache(ctx);
+  throwIfAborted(signal);
   const base = `Scrolled to bottom (${steps} steps) and restored the viewport to the top`;
   const message = cacheCleared
     ? base

@@ -19,16 +19,31 @@ const KEY_MAP: Record<string, string> = {
   arrowleft: "ArrowLeft",
   arrowright: "ArrowRight",
   backspace: "Backspace",
+  del: "Delete",
   delete: "Delete",
+  ins: "Insert",
+  insert: "Insert",
   home: "Home",
   end: "End",
   pageup: "PageUp",
   pagedown: "PageDown",
   capslock: "CapsLock",
-  insert: "Insert",
+  numlock: "NumLock",
+  scrolllock: "ScrollLock",
+  pause: "Pause",
   contextmenu: "ContextMenu",
   printscreen: "PrintScreen",
 };
+
+/**
+ * Normalize function-key spellings to the canonical `KeyboardEvent.key` value
+ * (`F1`–`F24` — spec values are uppercase; a lowercase `"f1"` is NOT a valid
+ * key and key handlers would not recognize it).
+ */
+function normalizeFunctionKey(main: string): string {
+  const m = /^f(\d{1,2})$/i.exec(main);
+  return m ? `F${m[1]}` : main;
+}
 
 /**
  * Shift → symbol map. When a caller uses the explicit `shift+<key>` form for a
@@ -146,6 +161,7 @@ export function parseKeys(keys: string): ParsedKeys {
   // / `"toString"` would otherwise resolve through Object.prototype to garbage
   // and be treated as a real key name.
   let main = Object.hasOwn(KEY_MAP, mainLower) ? KEY_MAP[mainLower] : mainRaw;
+  main = normalizeFunctionKey(main);
   const shift = modifierSet.has("shift");
 
 // Apply Shift to produce the correct literal character. This mirrors what a

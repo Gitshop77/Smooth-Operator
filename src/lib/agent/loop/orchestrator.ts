@@ -19,8 +19,11 @@ import {
   runNavigatorStep,
   finish,
   safeDispatch,
+  loopProgressStalled,
 } from "./orchestrator-helpers";
+import { transitionRunPhase } from "./run-state-machine";
 import { makeCtx } from "./helpers";
+import { redactKeyLeak } from "../redact-shared";
 
 /**
  * Run the full Planner + Navigator agent loop until the task completes, the
@@ -38,8 +41,8 @@ export async function runAgentLoop(deps: LoopDeps): Promise<void> {
     // (config validation / state init) — at that point no terminal event
     // could have been emitted, so a single raw `done` is safe, and the
     // dispatcher never saw `runStart`, so skipping `runEnd` is correct.
-    const message = e instanceof Error ? e.message : String(e);
-    console.error("[orchestrator] runAgentLoop failed before the loop started:", e);
+    const message = redactKeyLeak(e instanceof Error ? e.message : String(e));
+    console.error(`[orchestrator] runAgentLoop failed before the loop started: ${message}`);
     try {
       deps.onEvent({
         type: "done",
@@ -61,12 +64,26 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
   }
 
   try {
+    // Phase 9 state machine: init → plan (the initial planner phase begins).
+    transitionRunPhase(state, "plan", "initial planner phase begins");
     const initialResult = await runInitialPlannerPhase(state);
     if (initialResult.kind === "exit") return;
 
     while (state.step < config.maxSteps) {
+      // No-progress guard at the loop boundary: every step MUST advance the
+      // step counter (or terminate the run). If a regression ever returns
+      // "continue" without `step++`, the loop would spin forever burning
+      // provider tokens — terminate deterministically instead. The same guard
+      // covers the plateau shape: the delta-classifier in the loop detector
+      // (oscillation + stagnation warnings) feeds the pre-observe nudge layer,
+      // while this edge guard is the machine-enforced floor.
+      const before = state.step;
       const stepResult = await runNavigatorStep(state);
       if (stepResult.kind === "exit") return;
+      if (loopProgressStalled(state, before)) {
+        await finish(state, false, "No progress: the loop did not advance its step counter.");
+        return;
+      }
     }
 
     await finish(state, false, `Reached max steps (${config.maxSteps}) without the planner calling done.`);
@@ -76,8 +93,8 @@ async function runAgentLoopInner(deps: LoopDeps): Promise<void> {
     // terminal `done` is emitted at most once and the `runEnd` dispatcher
     // callback still fires. `finish` itself can throw only if `onEvent`
     // throws on the `done` event — nothing left to surface then.
-    const message = e instanceof Error ? e.message : String(e);
-    console.error("[orchestrator] runAgentLoop uncaught error:", e);
+    const message = redactKeyLeak(e instanceof Error ? e.message : String(e));
+    console.error(`[orchestrator] runAgentLoop uncaught error: ${message}`);
     try {
       await finish(state, false, `Uncaught error in agent loop: ${message}`);
     } catch { /* swallow — the terminal event could not be emitted */ }

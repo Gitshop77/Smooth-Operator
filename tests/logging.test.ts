@@ -134,6 +134,21 @@ describe("RunBuilder wiring", () => {
     }
   });
 
+  it("persists the authoritative terminal reason and exposes the shared start time", () => {
+    const builder = new RunBuilder("task");
+    expect(builder.startedAt).toEqual(expect.any(Number));
+    const run = builder.finish({
+      success: false,
+      text: "The model returned no visible answer.",
+      terminalReason: "empty_output",
+    });
+    expect(run).toMatchObject({
+      startedAt: builder.startedAt,
+      terminalReason: "empty_output",
+      result: { success: false, text: "The model returned no visible answer." },
+    });
+  });
+
   it("does not leak a previous run's lines into the next run", () => {
     const a = new RunBuilder("a");
     log("warn", "from-a");

@@ -8,6 +8,7 @@
 
 import { describe, test, expect, beforeAll, vi } from "vitest";
 import { makeChromeStorageMock } from "./helpers/chrome-storage-mock";
+import { IDBFactory } from "fake-indexeddb";
 
 // Shared spy over the SSRF webhook validator so tests can simulate transient
 // DNS failures without real chrome.dns. Defaults to the real implementation.
@@ -26,13 +27,14 @@ let sessionStore: Map<string, unknown>;
 /** The provider id currently selected in the (populated) provider <select>. */
 function activeProviderId(): string {
   const sel = document.getElementById("provider") as HTMLSelectElement;
-  return sel.options[sel.selectedIndex]?.value ?? sel.value;
+  return sel.options[sel.selectedIndex]?.value || sel.value || "openai";
 }
 
 function setupGlobals(): void {
   localStore = new Map<string, unknown>();
   sessionStore = new Map<string, unknown>();
   (globalThis as unknown as { chrome: unknown }).chrome = makeChromeStorageMock(localStore, sessionStore);
+  (globalThis as { indexedDB: IDBFactory }).indexedDB = new IDBFactory();
 
   // Elements touched during import-time load + updateProviderUI.
   document.body.innerHTML = `
@@ -161,7 +163,7 @@ describe("settings-sync stealthEnabled serialization", () => {
 });
 
 describe("settings-sync rememberApiKey round-trip", () => {
-  test("checked checkbox persists key + consent flag to local", async () => {
+  test("checked checkbox persists an opaque manifest without local plaintext", async () => {
     setupGlobals();
     const mod = await import("../src/extension/options/settings-sync");
     const keyInput = document.getElementById("apiKey") as HTMLInputElement;
@@ -169,8 +171,11 @@ describe("settings-sync rememberApiKey round-trip", () => {
     keyInput.value = "sk-remember";
     cb.checked = true;
     expect(await mod.saveSettings()).toBe(true);
-    expect(localStore.get("apiKey")).toBe("sk-remember");
+    expect(localStore.has("apiKey")).toBe(false);
     expect(localStore.get("rememberApiKey")).toBe(true);
+    expect(localStore.get("open_cowork_credential_manifest_v1")).toMatchObject({
+      version: 1, providerId: "openai", revision: 1,
+    });
   });
 
   test("unchecked checkbox removes key from local and clears flag", async () => {
@@ -206,7 +211,14 @@ describe("settings-sync rememberApiKey round-trip", () => {
 });
 
 describe("migrateSecretsFromLocalToSession consent behavior", () => {
-  test("keeps the local mirror when the consent flag is set", async () => {
+  test("showSaved is non-throwing when the #saved node is absent", async () => {
+    setupGlobals();
+    document.getElementById("saved")?.remove();
+    const { showSaved } = await import("../src/extension/options/settings-sync-utils");
+    expect(() => showSaved()).not.toThrow();
+  });
+
+  test("migrates a consented local mirror into the vault before removing plaintext", async () => {
     setupGlobals();
     localStore.set("apiKey", "sk-legacy");
     localStore.set("rememberApiKey", true);
@@ -214,7 +226,10 @@ describe("migrateSecretsFromLocalToSession consent behavior", () => {
       await import("../src/extension/options/settings-sync-utils");
     await migrateSecretsFromLocalToSession();
     expect(sessionStore.get("apiKey")).toBe("sk-legacy");
-    expect(localStore.get("apiKey")).toBe("sk-legacy");
+    expect(localStore.has("apiKey")).toBe(false);
+    expect(localStore.get("open_cowork_credential_manifest_v1")).toMatchObject({
+      version: 1, providerId: "openai", revision: 1,
+    });
   });
 
   test("moves the key out of local when consent is NOT set", async () => {

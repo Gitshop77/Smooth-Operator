@@ -36,7 +36,7 @@ vi.mock("../src/lib/agent/dom/overlay", async (importOriginal) => {
 const EVAL_LOADER = {
   "a.yaml": [
     "match:",
-    "  domain: example.com",
+    "  domain: open-cowork.test",
     "steps:",
     "  - type: evaluate",
     '    code: "1 + 1"',
@@ -46,7 +46,7 @@ const EVAL_LOADER = {
 const RUN_SCRIPT_LOADER = {
   "a.yaml": [
     "match:",
-    "  domain: example.com",
+    "  domain: open-cowork.test",
     "steps:",
     "  - type: run_script",
     "    script: '{\"name\":\"benign\",\"steps\":[{\"action\":\"get_page_info\"}]}'",
@@ -56,7 +56,7 @@ const RUN_SCRIPT_LOADER = {
 const CLICK_INPUT_LOADER = {
   "a.yaml": [
     "match:",
-    "  domain: example.com",
+    "  domain: open-cowork.test",
     "steps:",
     "  - type: click",
     "    index: 1",
@@ -70,7 +70,7 @@ const CLICK_INPUT_LOADER = {
 const GET_PAGE_INFO_LOADER = {
   "a.yaml": [
     "match:",
-    "  domain: example.com",
+    "  domain: open-cowork.test",
     "steps:",
     "  - type: get_page_info",
   ].join("\n"),
@@ -81,11 +81,11 @@ function installLoaderRegistry(registry: Record<string, string>): void {
   (globalThis as Record<string, unknown>).chrome = makeChromeStorageMock(local, new Map());
 }
 
-/** Run the loader matching https://example.com/x through an agent-driven navigate. */
+/** Run the loader through a same-document hash navigation supported by jsdom. */
 function runLoader(registry: Record<string, string>, mode?: "restricted" | "standard" | "full_agentic") {
   installLoaderRegistry(registry);
   return executeAction(
-    { type: "navigate", url: "https://example.com/x", new_tab: false },
+    { type: "navigate", url: "https://open-cowork.test/#loader", new_tab: false },
     makeState(),
     undefined,
     undefined,
@@ -155,7 +155,7 @@ describe("URL-loader steps respect the agent mode gate", () => {
       const state = makeState({ selectorMap: { 1: button, 2: input } }) as BrowserState;
 
       const res = await executeAction(
-        { type: "navigate", url: "https://example.com/x", new_tab: false },
+        { type: "navigate", url: "https://open-cowork.test/#loader", new_tab: false },
         state,
         undefined,
         undefined,

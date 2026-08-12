@@ -129,6 +129,65 @@ describe("usage-panel DOM mount", () => {
   });
 });
 
+describe("usage-panel sequencing", () => {
+  test("a new snapshot without usage clears and hides predecessor totals", async () => {
+    vi.resetModules();
+    document.body.innerHTML = `<div class="status-bar"></div>`;
+    (globalThis as { chrome?: unknown }).chrome = {
+      storage: {
+        local: { get: () => Promise.resolve({ provider: "" }) },
+        session: { get: () => Promise.resolve({}) },
+        onChanged: { addListener: () => {} },
+      },
+    };
+    const { renderUsageFromSnapshot } = await import("../src/extension/sidepanel/usage-panel");
+    await renderUsageFromSnapshot(
+      { tokensIn: 50, tokensOut: 10, costUsd: 0.005, model: "prior-model" },
+      false,
+    );
+    expect(document.getElementById("usagePanel")?.hidden).toBe(false);
+
+    await renderUsageFromSnapshot({ tokensIn: 0, tokensOut: 0, costUsd: 0, model: "" }, true);
+    expect(document.getElementById("usagePanel")?.hidden).toBe(true);
+  });
+
+  test("a delayed older model lookup cannot overwrite newer snapshot usage", async () => {
+    vi.resetModules();
+    document.body.innerHTML = `<div class="status-bar"></div>`;
+    const providerResolvers: Array<(value: Record<string, unknown>) => void> = [];
+    (globalThis as { chrome?: unknown }).chrome = {
+      storage: {
+        local: {
+          get: () => new Promise<Record<string, unknown>>((resolve) => providerResolvers.push(resolve)),
+        },
+        session: { get: () => Promise.resolve({}) },
+        onChanged: { addListener: () => {} },
+      },
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { renderUsageFromSnapshot } = await import("../src/extension/sidepanel/usage-panel");
+      const older = renderUsageFromSnapshot(
+        { tokensIn: 1, tokensOut: 1, costUsd: 0.001, model: "old-model" },
+        true,
+      );
+      const newer = renderUsageFromSnapshot(
+        { tokensIn: 9, tokensOut: 2, costUsd: 0.009, model: "new-model" },
+        true,
+      );
+      expect(providerResolvers).toHaveLength(2);
+      providerResolvers[1]!({ provider: "" });
+      await newer;
+      providerResolvers[0]!({ provider: "" });
+      await older;
+      expect(document.getElementById("usageTotals")?.textContent).toContain("9 in");
+      expect(document.getElementById("usageTotals")?.textContent).toContain("new-model");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
 describe("usage-panel catalog prime", () => {
   test("kicks the pricing refresh at import when chrome storage is available", async () => {
     vi.resetModules();

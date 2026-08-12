@@ -18,13 +18,13 @@
  * worker cannot provide. No caller in this codebase re-enters; sections must
  * stay free of same-mutex acquisitions.
  */
-export function createMutex<T = void>(): (fn: () => Promise<T>) => Promise<T> {
+export function createMutex<T = void>(): <U extends Promise<T>>(fn: () => U) => U {
   let chain: Promise<void> = Promise.resolve();
-  return (fn: () => Promise<T>): Promise<T> => {
+  return <U extends Promise<T>>(fn: () => U): U => {
     const prev = chain;
     let release!: () => void;
     chain = new Promise<void>((r) => (release = r));
-    const run = prev.then(fn, fn);
+    const run = prev.then(fn, fn) as U;
     // Release on BOTH paths. `run.then(ok, err)` (unlike `run.finally`) never
     // produces a discarded side-promise that rejects when `fn` rejects, so a
     // failed critical section can't leak an unhandled rejection.

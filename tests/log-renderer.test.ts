@@ -51,6 +51,9 @@ describe("log-renderer", () => {
   beforeAll(async () => {
     setupGlobals();
     const mod = await import("../src/extension/sidepanel/log-renderer");
+    // Production's sidepanel entry imports both siblings. Wire controls
+    // explicitly now that log-renderer no longer reaches it through a cycle.
+    await import("../src/extension/sidepanel/controls");
     clearRunTotals = mod.clearRunTotals;
     addLogRow = mod.addLogRow as unknown as (event: unknown, time: string) => void;
     costLabel = document.getElementById("costLabel") as HTMLElement;
@@ -63,39 +66,56 @@ describe("log-renderer", () => {
     chatMessages.innerHTML = "";
   });
 
+  /** Flush the chat renderer's microtask-batched DOM append. */
+  async function flushChat(): Promise<void> {
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+
   test("clearRunTotals resets cost and token labels", () => {
     expect(costLabel.textContent).toBe("$0.0000");
     expect(tokenLabel.textContent).toBe("0 tokens");
   });
 
-  test("renders run-start as a system message", () => {
+  test("renders run-start as a system message", async () => {
     addLogRow({ type: "run-start", task: "test task" }, "t0");
+    await flushChat();
     const msgs = chatMessages.querySelectorAll(".msg-system");
     expect(msgs.length).toBe(1);
     expect(msgs[0].textContent).toContain("test task");
   });
 
-  test("renders done event as a system message", () => {
+  test("renders the first zero-based loop event as user-visible step 1", async () => {
+    addLogRow({ type: "navigator-step-start", step: 0, goal: "read" }, "t0");
+    await flushChat();
+    expect(chatMessages.textContent).toContain("Step 1");
+    expect(chatMessages.textContent).not.toContain("Step 0");
+  });
+
+  test("renders done event as a system message", async () => {
     addLogRow({ type: "done", success: true, text: "completed" }, "t0");
+    await flushChat();
     const msgs = chatMessages.querySelectorAll(".msg-system");
     expect(msgs.length).toBe(1);
     expect(msgs[0].textContent).toContain("Task completed");
   });
 
-  test("renders error event as a system message", () => {
+  test("renders error event as a system message", async () => {
     addLogRow({ type: "error", step: 1, recoverable: false, message: "something broke" }, "t0");
+    await flushChat();
     const msgs = chatMessages.querySelectorAll(".msg-system");
     expect(msgs.length).toBe(1);
     expect(msgs[0].textContent).toContain("something broke");
   });
 
-  test("renders error event machine code + recovery hint when present", () => {
+  test("renders error event machine code + recovery hint when present", async () => {
     addLogRow({
       type: "error", step: 1, recoverable: true,
       message: "Rate limit hit. The agent will retry automatically.",
       code: "rate_limited",
       recovery: "Wait a few seconds; the agent will retry automatically.",
     }, "t0");
+    await flushChat();
     const msgs = chatMessages.querySelectorAll(".msg-system");
     expect(msgs.length).toBe(1);
     expect(msgs[0].textContent).toContain("Rate limit hit. The agent will retry automatically.");
@@ -103,34 +123,42 @@ describe("log-renderer", () => {
     expect(msgs[0].textContent).toContain("Wait a few seconds; the agent will retry automatically.");
   });
 
-  test("renders info event as a system message", () => {
+  test("renders info event as a system message", async () => {
     addLogRow({ type: "info", message: "hello" }, "t0");
+    await flushChat();
     const msgs = chatMessages.querySelectorAll(".msg-system");
     expect(msgs.length).toBe(1);
     expect(msgs[0].textContent).toContain("hello");
   });
 
-  test("renders action event as a system message", () => {
+  test("renders action event as a system message", async () => {
     addLogRow({ type: "action", step: 1, index: 1, total: 1, name: "click", description: "click the button" }, "t0");
+    await flushChat();
     const msgs = chatMessages.querySelectorAll(".msg-system");
     expect(msgs.length).toBe(1);
     expect(msgs[0].textContent).toContain("click the button");
   });
 
-  test("renders thinking event as a system message", () => {
+  test("renders thinking event as a system message", async () => {
     addLogRow({ type: "thinking", step: 1, nextGoal: "find the login button", text: "looking for it" }, "t0");
+    await flushChat();
     const msgs = chatMessages.querySelectorAll(".msg-system");
     expect(msgs.length).toBe(1);
     expect(msgs[0].textContent).toContain("find the login button");
   });
 
-  test("does not render empty thinking events", () => {
+  test("does not render empty thinking events", async () => {
     addLogRow({ type: "thinking", step: 1, nextGoal: "", text: "" }, "t0");
+    await flushChat();
     const msgs = chatMessages.querySelectorAll(".msg-system");
     expect(msgs.length).toBe(0);
   });
 
-  test("run-start marks the run as running (Stop enabled, input disabled)", () => {
+  test("run-start marks the run as running (Stop enabled, input disabled)", async () => {
+    const { hydrateLegacyStatus } = await import("../src/extension/sidepanel/run-store");
+    // Phase 12/18: the run-view store is the authority for control state. A
+    // running store status enables Stop and disables Send/input.
+    hydrateLegacyStatus(true);
     addLogRow({ type: "run-start", task: "scheduled task" }, "t0");
     const send = document.getElementById("sendBtn") as HTMLButtonElement;
     const stop = document.getElementById("stopBtn") as HTMLButtonElement;
@@ -138,21 +166,25 @@ describe("log-renderer", () => {
     expect(stop.disabled).toBe(false);
   });
 
-  test("done resets the running state", () => {
+  test("done resets the running state without enabling blank Send", async () => {
+    const { hydrateLegacyStatus } = await import("../src/extension/sidepanel/run-store");
+    hydrateLegacyStatus(true);
     addLogRow({ type: "run-start", task: "t" }, "t0");
     addLogRow({ type: "done", step: 1, success: true, text: "ok" }, "t1");
+    hydrateLegacyStatus(false);
     const send = document.getElementById("sendBtn") as HTMLButtonElement;
     const stop = document.getElementById("stopBtn") as HTMLButtonElement;
-    expect(send.disabled).toBe(false);
+    expect(send.disabled).toBe(true);
     expect(stop.disabled).toBe(true);
   });
 
-  test("error event text is key-redacted before rendering", () => {
+  test("error event text is key-redacted before rendering", async () => {
     const rawKey = "sk-ant-api03-abcdefghijklmnop";
     addLogRow(
       { type: "error", step: 1, recoverable: false, message: `401: Invalid API key: ${rawKey}` },
       "t0",
     );
+    await flushChat();
     const msgs = chatMessages.querySelectorAll(".msg-system");
     expect(msgs.length).toBe(1);
     expect(msgs[0].textContent).toContain("[REDACTED]");
@@ -160,13 +192,13 @@ describe("log-renderer", () => {
     expect(msgs[0].textContent).not.toContain("sk-ant-api03");
   });
 
-  test("cost events accumulate totals, render, and persist", () => {
+  test("cost events accumulate totals, render, and persist (debounced)", () => {
     addLogRow({ type: "cost", step: 1, tokensIn: 100, tokensOut: 50, costUsd: 0.5, model: "m" }, "t0");
     addLogRow({ type: "cost", step: 2, tokensIn: 10, tokensOut: 40, costUsd: 0.25, model: "m" }, "t1");
     expect(costLabel.textContent).toBe("$0.7500");
     expect(tokenLabel.textContent).toBe("200 tokens");
-    expect(store.__oc_costUsd).toBe(0.75);
-    expect(store.__oc_tokens).toBe(200);
+    // The storage IPC is trailing-debounced to one write per burst.
+    expect(store.__oc_costUsd).toBeUndefined();
     const center = document.getElementById("statusCenter") as HTMLElement;
     expect(center.hidden).toBe(false);
   });
@@ -242,13 +274,15 @@ describe("log-renderer listener gate", () => {
     chatMessages.innerHTML = "";
   });
 
-  test("accepts a valid AGENT_EVENT envelope from the extension", () => {
+  test("accepts a valid AGENT_EVENT envelope from the extension", async () => {
     const ret = gateListener!(
       { type: "AGENT_EVENT", event: { type: "info", message: "hello" }, time: "t0" },
       { id: "test" },
       () => {},
     );
     expect(ret).toBe(false);
+    await Promise.resolve();
+    await Promise.resolve();
     expect(countMsgs()).toBe(1);
     expect(chatMessages.textContent).toContain("hello");
   });

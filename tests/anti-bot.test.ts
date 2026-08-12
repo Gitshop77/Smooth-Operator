@@ -12,10 +12,13 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   detectChallengeInPage,
+  detectAuthWallInPage,
+  detectChallengeOrAuthWallInPage,
   isChallengeKind,
   parseChallengeResult,
   detectChallengeResult,
   waitForChallengeResolution,
+  _resetDetectionCacheForTests,
 } from "../src/lib/agent/anti-bot";
 
 function resetDom(): void {
@@ -163,13 +166,21 @@ describe("isChallengeKind — allowlist trust boundary", () => {
       "cloudflare-turnstile",
       "hcaptcha",
       "recaptcha",
-      "blocked",
+      "arkose",
+      "geetest",
+      "aws_waf",
+      "friendlycaptcha",
+      "altcha",
+      "datadome",
       "rate-limited",
       "auth-wall",
     ];
     for (const kind of allowlisted) {
       expect(isChallengeKind(kind)).toBe(true);
     }
+    // "blocked" was removed from the union: the content-side classifier
+    // refuses to emit it, so it is not a producible kind.
+    expect(isChallengeKind("blocked")).toBe(false);
   });
 
   test("rejects unknown / non-string values", () => {
@@ -182,12 +193,183 @@ describe("isChallengeKind — allowlist trust boundary", () => {
   });
 });
 
+describe("detectChallengeInPage — additional vendor interstitials", () => {
+  function stubBody(text: string): void {
+    document.body.innerHTML = "";
+    const el = document.createElement("div");
+    el.textContent = text;
+    document.body.appendChild(el);
+  }
+
+  test("Arkose iframe + interstitial shell → arkose", () => {
+    stubBody(".");
+    const iframe = document.createElement("iframe");
+    iframe.src = "https://client-api.arkoselabs.com/fc/api/";
+    document.body.appendChild(iframe);
+    expect(detectChallengeInPage()).toEqual({ kind: "arkose", message: "Arkose/FunCaptcha challenge" });
+  });
+
+  test("GeeTest widget + interstitial shell → geetest", () => {
+    stubBody(".");
+    const holder = document.createElement("div");
+    holder.className = "geetest_holder";
+    document.body.appendChild(holder);
+    expect(detectChallengeInPage()).toEqual({ kind: "geetest", message: "GeeTest challenge" });
+  });
+
+  test("AWS WAF captcha + interstitial shell → aws_waf", () => {
+    stubBody(".");
+    const token = document.createElement("input");
+    token.name = "aws-waf-token";
+    document.body.appendChild(token);
+    expect(detectChallengeInPage()).toEqual({ kind: "aws_waf", message: "AWS WAF challenge" });
+  });
+
+  test("Friendly Captcha widget + interstitial shell → friendlycaptcha", () => {
+    stubBody(".");
+    const frc = document.createElement("div");
+    frc.className = "frc-captcha";
+    document.body.appendChild(frc);
+    expect(detectChallengeInPage()).toEqual({ kind: "friendlycaptcha", message: "Friendly Captcha challenge" });
+  });
+
+  test("Altcha widget + interstitial shell → altcha", () => {
+    stubBody(".");
+    const altcha = document.createElement("altcha-widget");
+    document.body.appendChild(altcha);
+    expect(detectChallengeInPage()).toEqual({ kind: "altcha", message: "Altcha challenge" });
+  });
+
+  test("DataDome iframe + interstitial shell → datadome", () => {
+    stubBody(".");
+    const iframe = document.createElement("iframe");
+    iframe.src = "https://geo.captcha-delivery.com/captcha";
+    document.body.appendChild(iframe);
+    expect(detectChallengeInPage()).toEqual({ kind: "datadome", message: "DataDome challenge" });
+  });
+
+  test("widget present on a full content page (long body) → null (not stalling)", () => {
+    // A silent v2 checkbox embedded in a real content page must NOT pause the
+    // loop: the body is long, so `hasInterstitialCorroboration` is false.
+    stubBody("real article text ".repeat(40));
+    const turnstile = document.createElement("div");
+    turnstile.className = "cf-turnstile";
+    document.body.appendChild(turnstile);
+    expect(detectChallengeInPage()).toBeNull();
+  });
+});
+
+describe("detectAuthWallInPage — corroboration hardening", () => {
+  test("password field + attacker-settable login ANCHOR only → null", () => {
+    document.body.innerHTML = "<input type='password' /><a href='https://login.microsoftonline.com'>sign in</a>";
+    expect(detectAuthWallInPage()).toBeNull();
+  });
+
+  test("password field + login form action → auth-wall", () => {
+    const form = document.createElement("form");
+    form.action = "https://example.com/login";
+    form.innerHTML = "<input type='password' />";
+    document.body.replaceChildren(form);
+    expect(detectAuthWallInPage()).toEqual({
+      kind: "auth-wall",
+      message: "Authentication required (login page)",
+    });
+  });
+
+  test("password field + IdP iframe → auth-wall", () => {
+    document.body.innerHTML = "<input type='password' />";
+    const iframe = document.createElement("iframe");
+    iframe.src = "https://okta.com/signin";
+    document.body.appendChild(iframe);
+    expect(detectAuthWallInPage()).toEqual({
+      kind: "auth-wall",
+      message: "Authentication required (login page)",
+    });
+  });
+});
+
+describe("detectChallengeOrAuthWallInPage — merged single injection", () => {
+  test("challenge wins over auth-wall when both are present", () => {
+    document.body.innerHTML = "<input type='password' />";
+    const iframe = document.createElement("iframe");
+    iframe.src = "https://geo.captcha-delivery.com/captcha";
+    document.body.appendChild(iframe);
+    expect(detectChallengeOrAuthWallInPage()).toEqual({
+      kind: "datadome",
+      message: "DataDome challenge",
+    });
+  });
+
+  test("returns null on a clean page", () => {
+    document.body.innerHTML = "<p>welcome</p>";
+    expect(detectChallengeOrAuthWallInPage()).toBeNull();
+  });
+});
+
+describe("detectChallengeResult — no-challenge verdict cache", () => {
+  test("a cached no-challenge verdict within TTL is served without re-injection", async () => {
+    const script = vi.fn().mockResolvedValue([{ result: null }]);
+    (globalThis as { chrome?: unknown }).chrome = {
+      scripting: { executeScript: script },
+      tabs: { get: async () => ({ url: "https://example.test/" }) },
+    };
+    try {
+      const first = await detectChallengeResult(7);
+      expect(first.status).toBe("no-challenge");
+      expect(script).toHaveBeenCalledTimes(1);
+      const second = await detectChallengeResult(7);
+      expect(second.status).toBe("no-challenge");
+      // Same tab + same URL within the TTL → served from cache.
+      expect(script).toHaveBeenCalledTimes(1);
+    } finally {
+      _resetDetectionCacheForTests();
+    }
+  });
+
+  test("a URL change invalidates the cached verdict", async () => {
+    let url = "https://example.test/one";
+    const script = vi.fn().mockResolvedValue([{ result: null }]);
+    (globalThis as { chrome?: unknown }).chrome = {
+      scripting: { executeScript: script },
+      tabs: { get: async () => ({ url }) },
+    };
+    try {
+      await detectChallengeResult(8);
+      expect(script).toHaveBeenCalledTimes(1);
+      url = "https://example.test/two"; // navigation
+      await detectChallengeResult(8);
+      expect(script).toHaveBeenCalledTimes(2);
+    } finally {
+      _resetDetectionCacheForTests();
+    }
+  });
+
+  test("challenge verdicts are never cached", async () => {
+    const script = vi
+      .fn()
+      .mockResolvedValue([{ result: { kind: "recaptcha", message: "captcha" } }]);
+    (globalThis as { chrome?: unknown }).chrome = {
+      scripting: { executeScript: script },
+      tabs: { get: async () => ({ url: "https://example.test/" }) },
+    };
+    try {
+      await detectChallengeResult(9);
+      expect(script).toHaveBeenCalledTimes(1);
+      await detectChallengeResult(9);
+      expect(script).toHaveBeenCalledTimes(2);
+    } finally {
+      _resetDetectionCacheForTests();
+    }
+  });
+});
+
 // ─── chrome.scripting mocks (folded in from the former tests/agent/anti-bot.test.ts) ───
 
 let prevChrome: unknown;
 
 beforeEach(() => {
   prevChrome = (globalThis as { chrome?: unknown }).chrome;
+  _resetDetectionCacheForTests();
 });
 
 afterEach(() => {
@@ -283,8 +465,8 @@ describe("waitForChallengeResolution — poll loop and deadline (fake timers)", 
     expect(script).toHaveBeenCalledTimes(1); // no poll fired yet
     await vi.advanceTimersByTimeAsync(1); // poll at t=250: challenge cleared
     await expect(p).resolves.toEqual({ resolved: true, challenge: null });
-    // 1 initial + 2 for the clearing detect (challenge scan + auth-wall scan).
-    expect(script).toHaveBeenCalledTimes(3);
+    // 1 initial + 1 for the clearing detect (merged single injection).
+    expect(script).toHaveBeenCalledTimes(2);
   });
 
   test("challenge persists past the deadline → unresolved with the challenge info", async () => {
@@ -298,6 +480,7 @@ describe("waitForChallengeResolution — poll loop and deadline (fake timers)", 
       resolved: false,
       challenge: { kind: "cloudflare-js", message: "cf" },
     });
+    // 1 initial + polls at 250/500/750 + 1 final check (merged single injection).
     expect(script).toHaveBeenCalledTimes(5);
   });
 
@@ -312,8 +495,8 @@ describe("waitForChallengeResolution — poll loop and deadline (fake timers)", 
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(500); // poll 1 errors, poll 2 clears
     await expect(p).resolves.toEqual({ resolved: true, challenge: null });
-    // 1 initial + 1 error + 2 for the clearing detect (challenge + auth-wall).
-    expect(script).toHaveBeenCalledTimes(4);
+    // 1 initial + 1 error poll + 1 clearing detect (merged single injection).
+    expect(script).toHaveBeenCalledTimes(3);
   });
 
   test("persistent detection errors past the deadline → unresolved with null challenge", async () => {
@@ -327,6 +510,7 @@ describe("waitForChallengeResolution — poll loop and deadline (fake timers)", 
     await vi.advanceTimersByTimeAsync(500);
     // Deadline hit; the final check errors too, so the challenge is null.
     await expect(p).resolves.toEqual({ resolved: false, challenge: null });
+    // 1 initial + polls at 250/500 + 1 final check (merged single injection).
     expect(script).toHaveBeenCalledTimes(4);
   });
 
@@ -381,8 +565,8 @@ describe("waitForChallengeResolution — poll loop and deadline (fake timers)", 
     await vi.advanceTimersByTimeAsync(1);
     await p;
     expect(settled).toBe(true);
-    // 1 initial + 2 for the clearing detect (challenge + auth-wall).
-    expect(script).toHaveBeenCalledTimes(3);
+    // 1 initial + 1 for the clearing detect (merged single injection).
+    expect(script).toHaveBeenCalledTimes(2);
   });
 
   test("pollMs is clamped to a maximum of 5000", async () => {
@@ -397,7 +581,7 @@ describe("waitForChallengeResolution — poll loop and deadline (fake timers)", 
     expect(script).toHaveBeenCalledTimes(1); // clamped 5000ms poll not fired yet
     await vi.advanceTimersByTimeAsync(1);
     await p;
-    // 1 initial + 2 for the clearing detect (challenge + auth-wall).
-    expect(script).toHaveBeenCalledTimes(3);
+    // 1 initial + 1 for the clearing detect (merged single injection).
+    expect(script).toHaveBeenCalledTimes(2);
   });
 });

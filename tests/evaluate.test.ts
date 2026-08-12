@@ -215,3 +215,35 @@ describe("domFingerprint window hashing", () => {
     expect(domFingerprint()).toBe(before);
   });
 });
+
+describe("serializeEvaluateResult", () => {
+  test("undefined stays undefined (no extractedContent)", async () => {
+    const { serializeEvaluateResult } = await import("../src/lib/agent/tools/handlers/evaluate");
+    expect(serializeEvaluateResult(undefined, 2000)).toBeUndefined();
+  });
+
+  test("primitives stringify and truncate code-point-safe", async () => {
+    const { serializeEvaluateResult } = await import("../src/lib/agent/tools/handlers/evaluate");
+    expect(serializeEvaluateResult(42, 2000)).toBe("42");
+    expect(serializeEvaluateResult(null, 2000)).toBe("null");
+    // A surrogate pair must never be split by the truncation.
+    const emoji = "a\u{1F600}b";
+    const cut = serializeEvaluateResult(emoji, 2);
+    expect(Array.from(cut!)).toHaveLength(2);
+    expect(cut).not.toContain("\uFFFD");
+  });
+
+  test("serializable objects become bounded JSON", async () => {
+    const { serializeEvaluateResult } = await import("../src/lib/agent/tools/handlers/evaluate");
+    expect(serializeEvaluateResult({ a: 1, b: [2, 3] }, 2000)).toBe('{"a":1,"b":[2,3]}');
+    const big = serializeEvaluateResult({ long: "x".repeat(5000) }, 100);
+    expect(Array.from(big!)).toHaveLength(100);
+  });
+
+  test("circular / non-serializable objects degrade to a stable marker instead of throwing", async () => {
+    const { serializeEvaluateResult } = await import("../src/lib/agent/tools/handlers/evaluate");
+    const circular: { self?: unknown } = {};
+    circular.self = circular;
+    expect(serializeEvaluateResult(circular, 2000)).toBe("<<non-serializable>>");
+  });
+});

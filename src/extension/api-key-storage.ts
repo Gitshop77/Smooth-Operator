@@ -1,61 +1,55 @@
 /**
- * API-key storage policy.
- *
- * The provider API key is held in `chrome.storage.session` (in-memory, never
- * written to disk, cleared when the browser closes). Users can OPT IN to
- * persisting it on disk via the "remember on this device" checkbox in
- * Options; this module is the only place that decides where the key lives.
- *
- * - `ensureApiKeyInSession()` is the canonical read path. It returns the
- *   session key if present; otherwise, ONLY when the `rememberApiKey`
- *   consent flag is set, it re-hydrates the session from the local mirror
- *   and returns the key. A plaintext-disk key is never trusted without the
- *   flag.
- * - `syncRememberedApiKey()` applies the checkbox state: opted in → mirror
- *   key + flag to `chrome.storage.local`; opted out → remove the mirror and
- *   clear the flag.
- *
- * Trade-off (documented): the consent-gated mirror lives in
- * `chrome.storage.local`, which — unlike `chrome.storage.session` — is also
- * readable by the extension's content scripts on every page. That makes the
- * persisted key reachable through the content-script code-execution surface
- * (`evaluate`) if the sandbox is ever bypassed. The mirror is kept anyway
- * because persistence across browser restarts is a user-facing feature; the
- * evaluate sandbox is hardened against secret-store egress, and Options
- * discloses the at-rest trade-off. Do not add further content-script-visible
- * copies of the key.
+ * Compatibility boundary for callers that still consume provider keys as
+ * strings. Persistent keys are owned by the extension-origin credential vault;
+ * chrome.storage.local contains only consent plus a non-secret opaque handle.
  */
 
+import {
+  migrateRememberedCredential,
+  resolveCredential,
+  saveEnteredCredential,
+} from "./credential-service";
+import { decodeCredentialManifest } from "./credential-contract";
 import { STORAGE_KEYS } from "./options/storage-keys";
 
-/** Session-first key read; consent-gated re-hydration from the local mirror. */
+/** Session-first read; remembered credentials hydrate through the vault. */
 export async function ensureApiKeyInSession(): Promise<string> {
   if (typeof chrome === "undefined" || !chrome.storage?.session) return "";
   const sres = await chrome.storage.session.get([STORAGE_KEYS.apiKey]);
-  const sessionKey = sres[STORAGE_KEYS.apiKey] as string | undefined;
+  const sessionKey = sres[STORAGE_KEYS.apiKey];
   if (typeof sessionKey === "string" && sessionKey.length > 0) return sessionKey;
   if (!chrome.storage?.local) return "";
-  const lres = await chrome.storage.local.get([STORAGE_KEYS.rememberApiKey, STORAGE_KEYS.apiKey]);
+
+  const lres = await chrome.storage.local.get([
+    STORAGE_KEYS.rememberApiKey,
+    STORAGE_KEYS.apiKey,
+    STORAGE_KEYS.credentialManifest,
+  ]);
   if (lres[STORAGE_KEYS.rememberApiKey] !== true) return "";
-  // Reject a non-string mirror value (corrupt/legacy write) instead of
-  // forwarding a malformed key downstream. Inline check — normalizeString
-  // lives in provider-config.ts, which imports this module (a cycle).
-  const localKey = lres[STORAGE_KEYS.apiKey];
-  if (typeof localKey !== "string" || localKey.length === 0) return "";
-  await chrome.storage.session.set({ [STORAGE_KEYS.apiKey]: localKey });
-  return localKey;
+  try {
+    // This also performs/resumes the strict legacy plaintext migration.
+    const migrated = await migrateRememberedCredential();
+    const reference = migrated ?? decodeCredentialManifest(lres[STORAGE_KEYS.credentialManifest]);
+    if (!reference) return "";
+    const plaintext = await resolveCredential(reference);
+    await chrome.storage.session.set({ [STORAGE_KEYS.apiKey]: plaintext });
+    const verify = await chrome.storage.session.get([STORAGE_KEYS.apiKey]);
+    return verify[STORAGE_KEYS.apiKey] === plaintext ? plaintext : "";
+  } catch (error) {
+    console.warn("[credentials] remembered credential unavailable:", error);
+    return "";
+  }
 }
 
-/** Apply the checkbox state to the on-disk mirror + consent flag. */
-export async function syncRememberedApiKey(apiKeyValue: string, remember: boolean): Promise<void> {
-  if (typeof chrome === "undefined" || !chrome.storage?.local) return;
-  if (remember && apiKeyValue) {
-    await chrome.storage.local.set({
-      [STORAGE_KEYS.apiKey]: apiKeyValue,
-      [STORAGE_KEYS.rememberApiKey]: true,
-    });
-  } else {
-    await chrome.storage.local.remove(STORAGE_KEYS.apiKey);
-    await chrome.storage.local.set({ [STORAGE_KEYS.rememberApiKey]: false });
-  }
+/**
+ * Apply remember consent. A new opt-in first stages the legacy representation
+ * so any vault/write/crash failure retains a recoverable copy; migration only
+ * removes it after encrypted and session round-trip verification.
+ */
+export async function syncRememberedApiKey(
+  apiKeyValue: string,
+  remember: boolean,
+  providerId = "openai",
+): Promise<void> {
+  await saveEnteredCredential(apiKeyValue, providerId, remember);
 }

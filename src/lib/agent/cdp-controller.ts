@@ -44,6 +44,8 @@ interface CdpClickOptions {
   modifiers?: string;
   /** Approach the target through a human-like multi-step mouse path. */
   path?: boolean;
+  /** Background authorization fence, checked immediately before each CDP effect. */
+  assertAuthorized?: () => void;
 }
 
 /**
@@ -82,7 +84,7 @@ export async function cdpMoveMousePath(
   fromY: number,
   toX: number,
   toY: number,
-  opts: MousePathOptions = {}
+  opts: MousePathOptions & { assertAuthorized?: () => void } = {}
 ): Promise<{ x: number; y: number }> {
   const durationMs = opts.durationMs ?? 200 + Math.random() * 400;
   const distance = Math.hypot(toX - fromX, toY - fromY);
@@ -108,7 +110,7 @@ export async function cdpMoveMousePath(
       x: Math.round(x),
       y: Math.round(y),
       button: "none",
-    });
+    }, opts.assertAuthorized);
     await new Promise((r) => setTimeout(r, stepSleepMs));
   }
 
@@ -124,6 +126,8 @@ interface TypeTextOptions {
    * rhythm. Defaults to 80 ms.
    */
   intervalMs?: number;
+  /** Abort boundary for delegated run actions. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -146,15 +150,18 @@ export async function cdpTypeText(
   const intervalMs = opts.intervalMs ?? 80;
   const chars = Array.from(text);
   for (const char of chars) {
+    if (opts.signal?.aborted) throw opts.signal.reason instanceof Error ? opts.signal.reason : new DOMException("Aborted", "AbortError");
     // max(0.02, interval + uniform(-0.03, 0.05)) seconds — bounded so a
     // pathological random draw can never stall the action.
     const delayMs = Math.max(20, intervalMs + (Math.random() * 80 - 30));
     await new Promise((r) => setTimeout(r, delayMs));
+    if (opts.signal?.aborted) throw opts.signal.reason instanceof Error ? opts.signal.reason : new DOMException("Aborted", "AbortError");
     await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
       type: "keyDown",
       key: char,
       text: char,
     });
+    if (opts.signal?.aborted) throw opts.signal.reason instanceof Error ? opts.signal.reason : new DOMException("Aborted", "AbortError");
     await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
       type: "keyUp",
       key: char,
@@ -203,7 +210,9 @@ async function dispatchMouseEvent(
   tabId: number,
   type: MouseEventType,
   params: Record<string, unknown>,
+  assertAuthorized?: () => void,
 ): Promise<void> {
+  assertAuthorized?.();
   await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", { type, ...params });
 }
 
@@ -251,7 +260,7 @@ export async function cdpClick(
   y: number,
   options: CdpClickOptions = {}
 ): Promise<void> {
-  const { button = DEFAULT_BUTTON, clickCount = DEFAULT_CLICK_COUNT, modifiers = "", path = false } = options;
+  const { button = DEFAULT_BUTTON, clickCount = DEFAULT_CLICK_COUNT, modifiers = "", path = false, assertAuthorized } = options;
   const modifierMask = modifierBitmask(modifiers);
   const buttonMask = button === "right" ? 2 : button === "middle" ? 4 : 1;
 
@@ -260,13 +269,13 @@ export async function cdpClick(
   if (path) {
     // Approach from the last known cursor position through a human-like path;
     // press exactly where the path lands (the jittered target).
-    const landed = await cdpMoveMousePath(tabId, lastCursor.x, lastCursor.y, x, y);
+    const landed = await cdpMoveMousePath(tabId, lastCursor.x, lastCursor.y, x, y, { assertAuthorized });
     pressX = landed.x;
     pressY = landed.y;
   } else {
     lastCursor = { x, y };
     // Move mouse first (triggers mousemove/hover handlers).
-    await dispatchMouseEvent(tabId, "mouseMoved", { x, y, modifiers: modifierMask });
+    await dispatchMouseEvent(tabId, "mouseMoved", { x, y, modifiers: modifierMask }, assertAuthorized);
   }
 
   // Small delay between move and click (matches human behavior + lets hover handlers fire).
@@ -280,7 +289,7 @@ export async function cdpClick(
     buttons: buttonMask,
     clickCount,
     modifiers: modifierMask,
-  });
+  }, assertAuthorized);
 
   // Release.
   await dispatchMouseEvent(tabId, "mouseReleased", {
@@ -309,6 +318,8 @@ interface CdpPressAndHoldOptions {
  * to verify" widgets detect as a human gesture.
  */
   holdMs?: number;
+  /** Background authorization fence, checked until the mouse is pressed. */
+  assertAuthorized?: () => void;
 }
 
 /**
@@ -343,11 +354,11 @@ export async function cdpPressAndHold(
   y: number,
   opts: CdpPressAndHoldOptions = {}
 ): Promise<void> {
-  const { delay = 0, holdMs = 0 } = opts;
+  const { delay = 0, holdMs = 0, assertAuthorized } = opts;
 
  // 1. Move first — triggers mousemove/hover handlers and positions the cursor
  // so the subsequent mousePressed lands on the intended element.
-  await dispatchMouseEvent(tabId, "mouseMoved", { x, y, button: "none" });
+  await dispatchMouseEvent(tabId, "mouseMoved", { x, y, button: "none" }, assertAuthorized);
 
  // Optional pre-press delay (e.g. to let hover animations settle).
   if (delay > 0) {
@@ -362,7 +373,7 @@ export async function cdpPressAndHold(
     button: "left",
     buttons: 1,
     clickCount: 1,
-  });
+  }, assertAuthorized);
 
  // 3. Hold for holdMs — this is the actual "press and hold" duration that
  // anti-bot widgets measure. Skipping this (holdMs=0) degenerates to a

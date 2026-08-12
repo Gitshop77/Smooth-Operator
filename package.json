@@ -2,12 +2,19 @@
   "name": "open-cowork-chrome-extension",
   "version": "0.3.1",
   "private": true,
+  "packageManager": "npm@10.9.8",
   "scripts": {
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:budget": "node scripts/test-duration-budget.mjs",
+    "test:flake": "node scripts/flake-check.mjs",
+    "test:mutation": "node scripts/mutation-check.mjs",
+    "test:e2e-chrome": "E2E_CHROME=1 npx vitest run tests/e2e-chrome.test.ts",
     "build:extension": "tsx esbuild.config.ts",
+    "verify:baseline": "node scripts/verify-baseline.mjs --clean-install",
+    "verify:baseline:installed": "node scripts/verify-baseline.mjs --skip-install",
     "dev:ext": "tsx esbuild.config.ts --watch",
     "dev": "npm run dev:ext",
     "build:all": "npm run build:extension",
@@ -21,12 +28,15 @@
   },
   "devDependencies": {
     "@types/chrome": "^0.2.2",
+    "@types/css-tree": "^3.2.0",
     "@types/node": "^20",
     "@typescript-eslint/eslint-plugin": "^8.63.0",
     "@typescript-eslint/parser": "^8.63.0",
     "@vitest/coverage-v8": "^4.1.10",
+    "css-tree": "^3.2.1",
     "esbuild": "^0.28.1",
     "eslint": "^10.7.0",
+    "fake-indexeddb": "^6.2.5",
     "jsdom": "^29.1.1",
     "puppeteer-core": "^24.12.0",
     "tsx": "^4.23.1",
@@ -35,12 +45,16 @@
   },
   "description": "Open-source agentic browser control Chrome extension",
   "engines": {
-    "node": ">=22.0.0"
+    "node": "22.23.2",
+    "npm": "10.9.8"
   },
   "overrides": {
     "flatted": "^3.4.2",
     "adm-zip": "0.6.0",
     "sharp": ">=0.35.0",
-    "onnxruntime-web": "1.27.0"
+    "onnxruntime-web": "1.27.0",
+    "brace-expansion": "5.0.9",
+    "undici": "7.29.0",
+    "nanoid": "3.3.18"
   }
 }

@@ -24,6 +24,7 @@ import {
   partitionHistory,
   sanitizeCompactedMemory,
   SUMMARIZE_PROMPT,
+  COMPACTION_PREAMBLE,
   renderHistoryForSummarization,
 } from "../compaction";
 import { redactHistoryForPrompt } from "../messages";
@@ -31,6 +32,12 @@ import type { LoopDeps } from "../types";
 import type { CallbackDispatcher, CallbackContext } from "../../callbacks";
 import { estimateCost } from "../../llm/pricing";
 import { SECURITY_INSTRUCTION, wrapUntrusted } from "../../security";
+import { boundPromptTextV1 } from "../../prompts/bounded-prompt-text";
+import {
+  PROMPT_BUDGET_PROFILES_V1,
+  assertCompiledPromptWithinProfileV1,
+  utf8ByteLength,
+} from "../../prompts/prompt-token-budget";
 
 /**
  * Normalize a raw usage shape (from the summarize or planner call), compute the
@@ -132,12 +139,36 @@ export async function runCompaction(
     : "";
  // Inline the request build to avoid calling partitionHistory a second time
  // (buildCompactionRequest calls it internally).
-  const request = `${SUMMARIZE_PROMPT}\n\n${priorBlock}${renderHistoryForSummarization(redactedToSummarize)}`;
+  const rawRequest = `${SUMMARIZE_PROMPT}\n\n${priorBlock}${renderHistoryForSummarization(redactedToSummarize)}`;
+  // Phase 8 budget guard: deterministically bound the summarization request so
+  // the SYSTEM prompt + user request together fit the compaction profile's
+  // conservative UTF-8-byte input budget before any tokens are spent. The
+  // user-request bound reserves the system prompt's bytes; the prefix-bound
+  // keeps the summarizer's own instructions and the OLDEST summarized steps
+  // (the region this pass is meant to retire) and appends an explicit
+  // byte-count marker; the most recent steps are preserved verbatim in
+  // `toKeep`, so no context is silently lost.
+  const compactionSystemPrompt = `${SECURITY_INSTRUCTION}\n\n${COMPACTION_PREAMBLE}`;
+  const compactionMaxBytes = PROMPT_BUDGET_PROFILES_V1.compaction.maxInputTokens;
+  const systemBytes = utf8ByteLength(compactionSystemPrompt);
+  // Reserve one extra byte for the `\n` separator the conservative combined
+  // assertion (`assertCompiledPromptWithinProfileV1`) inserts between messages.
+  const userMaxBytes = Math.max(0, compactionMaxBytes - systemBytes - 1);
+  const bounded = boundPromptTextV1(rawRequest, { maxBytes: userMaxBytes, label: "compaction history" });
+  const request = bounded.text;
   try {
     let summary: string;
     if (deps.summarizeCall) {
+      // The system prompt + user request together must fit the compaction
+      // profile. The user request was already deterministically bounded to
+      // `maxInputTokens - systemBytes` above; this is the fail-closed guard
+      // covering the combined outbound input.
+      assertCompiledPromptWithinProfileV1("compaction", "compaction", [
+        { content: compactionSystemPrompt },
+        { content: request },
+      ]);
       const res = await deps.summarizeCall({
-        systemPrompt: `${SECURITY_INSTRUCTION}\n\nYou are summarizing agent history.`,
+        systemPrompt: compactionSystemPrompt,
         userPrompt: request,
         signal,
       });

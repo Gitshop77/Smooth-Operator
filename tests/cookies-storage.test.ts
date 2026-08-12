@@ -113,14 +113,15 @@ describe("handleTabAction — get_cookies", () => {
     installChrome();
   });
 
-  test("returns the full cookie projection with httpOnly/sameSite/session present", async () => {
+  test("returns the full cookie projection with VALUES REDACTED", async () => {
     const res = await handleTabAction({ type: "get_cookies" } as never, runState);
     expect(res.success).toBe(true);
     const data = res.data as { cookies: Array<Record<string, unknown>>; count: number };
     expect(data.count).toBe(2);
     expect(data.cookies[0]).toMatchObject({
       name: "session_id",
-      value: "abc",
+      // Session tokens are credentials — the value never reaches the model.
+      value: "[REDACTED]",
       domain: ".example.com",
       secure: true,
       httpOnly: true,

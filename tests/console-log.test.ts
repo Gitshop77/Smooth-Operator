@@ -61,6 +61,16 @@ describe("rate-limit-tracker: console log ring", () => {
 
   let listeners: FakeChromeListeners;
 
+  async function issueEffectCapability(
+    token: { runId: string; dispatchRevision: number },
+    action: { type: "enable_console_log" | "disable_console_log" | "get_console_log" | "clear_console_log" | "getclear_console_log" },
+  ): Promise<string> {
+    const policy = await import("../src/extension/background/privileged-action-policy");
+    const issued = policy.authorizeAndIssueEffectCapability(token, "standard", action);
+    if (!issued.ok) throw new Error(issued.error);
+    return issued.effectCapability;
+  }
+
   function installFakeChrome(): FakeChromeListeners {
     const ls: FakeChromeListeners = {
       onBeforeRequest: [],
@@ -175,38 +185,48 @@ describe("rate-limit-tracker: console log ring", () => {
 
   test("CONSOLE_LOG message RPC drives the verbs", async () => {
     const mod = await loadTracker();
+    const controllers = await import("../src/extension/background/run-controller");
+    const controller = controllers.beginRunController({ runId: "console-rpc", task: "inspect", maxSteps: 1, mode: "standard" });
+    controller.markRunning();
+    const token = controller.dispatchToken;
     mod.registerRateLimitListener();
     const rpc = listeners.onMessage[0];
     const respond = (res?: unknown) => res;
 
     // unknown verb → error
     const badRes = { ok: true } as { ok: boolean; error?: string };
-    rpc({ type: "CONSOLE_LOG", verb: "bogus" }, { id: "test-ext" }, (res) => {
+    rpc({ type: "CONSOLE_LOG", verb: "bogus", token }, { id: "test-ext" }, (res) => {
       Object.assign(badRes, res);
     });
+    await vi.waitFor(() => expect(badRes.ok).toBe(false));
     expect(badRes.ok).toBe(false);
     expect(badRes.error).toMatch(/verb/i);
 
-    rpc({ type: "CONSOLE_LOG", verb: "enable" }, { id: "test-ext" }, respond);
+    rpc({ type: "CONSOLE_LOG", verb: "enable", token, effectCapability: await issueEffectCapability(token, { type: "enable_console_log" }) }, { id: "test-ext" }, respond);
+    await vi.waitFor(() => expect(mod.isConsoleLogEnabled()).toBe(true));
     pushEntry({ type: "info", message: "hi", timestamp: 1 });
 
     const getRes = { ok: false } as { ok: boolean; enabled?: boolean; entries?: unknown[] };
-    rpc({ type: "CONSOLE_LOG", verb: "get" }, { id: "test-ext" }, (res) => {
+    rpc({ type: "CONSOLE_LOG", verb: "get", token, effectCapability: await issueEffectCapability(token, { type: "get_console_log" }) }, { id: "test-ext" }, (res) => {
       Object.assign(getRes, res);
     });
+    await vi.waitFor(() => expect(getRes.ok).toBe(true));
     expect(getRes.ok).toBe(true);
     expect(getRes.enabled).toBe(true);
     expect((getRes.entries ?? []) as Array<{ message: string }>).toHaveLength(1);
     expect((getRes.entries as Array<{ message: string }>)[0].message).toBe("hi");
 
-    rpc({ type: "CONSOLE_LOG", verb: "getclear" }, { id: "test-ext" }, respond);
+    rpc({ type: "CONSOLE_LOG", verb: "getclear", token, effectCapability: await issueEffectCapability(token, { type: "getclear_console_log" }) }, { id: "test-ext" }, respond);
+    await vi.waitFor(() => expect(mod.getConsoleLog().entries).toHaveLength(0));
     expect(mod.getConsoleLog().entries).toHaveLength(0);
 
-    rpc({ type: "CONSOLE_LOG", verb: "disable" }, { id: "test-ext" }, respond);
+    rpc({ type: "CONSOLE_LOG", verb: "disable", token, effectCapability: await issueEffectCapability(token, { type: "disable_console_log" }) }, { id: "test-ext" }, respond);
+    await vi.waitFor(() => expect(mod.isConsoleLogEnabled()).toBe(false));
     pushEntry({ type: "log", message: "x", timestamp: 2 });
     expect(mod.getConsoleLog().entries).toHaveLength(0);
 
-    rpc({ type: "CONSOLE_LOG", verb: "clear" }, { id: "test-ext" }, respond);
+    rpc({ type: "CONSOLE_LOG", verb: "clear", token, effectCapability: await issueEffectCapability(token, { type: "clear_console_log" }) }, { id: "test-ext" }, respond);
+    controllers.resetRunControllerForTests();
   });
 
   test("CONSOLE_LOG / CONSOLE_LOG_ENTRY from an unauthorized sender are ignored", async () => {
@@ -221,6 +241,52 @@ describe("rate-limit-tracker: console log ring", () => {
 
     rpc({ type: "CONSOLE_LOG_ENTRY", entry: { type: "log", message: "x", timestamp: 1 } }, { id: "other-ext" }, spy);
     expect(mod.getConsoleLog().entries).toHaveLength(0);
+  });
+
+  test("CONSOLE_LOG rejects a predecessor token after worker controller loss", async () => {
+    const mod = await loadTracker();
+    const controllers = await import("../src/extension/background/run-controller");
+    controllers.resetRunControllerForTests();
+    mod.registerRateLimitListener();
+    const response = vi.fn();
+    const rpc = listeners.onMessage[0];
+    expect(rpc({
+      type: "CONSOLE_LOG",
+      verb: "get",
+      token: { runId: "pre-restart", dispatchRevision: 1 },
+    }, { id: "test-ext" }, response)).toBe(true);
+    await vi.waitFor(() => expect(response).toHaveBeenCalledWith(
+      expect.objectContaining({ ok: false, error: expect.stringMatching(/stale/i) }),
+    ));
+  });
+
+  test("CONSOLE_LOG rejects missing, wrong-action, and replayed capabilities", async () => {
+    const tracker = await import("../src/extension/background/rate-limit-tracker");
+    const controllers = await import("../src/extension/background/run-controller");
+    const policy = await import("../src/extension/background/privileged-action-policy");
+    controllers.resetRunControllerForTests();
+    policy.resetPrivilegedActionPolicyForTests();
+    tracker.registerRateLimitListener();
+    const controller = controllers.beginRunController({ runId: "console-effects", task: "inspect", maxSteps: 1, mode: "standard" });
+    controller.markRunning();
+    const rpc = listeners.onMessage[0];
+    const call = (message: Record<string, unknown>) => new Promise<unknown>((resolve) => rpc(message, { id: "test-ext" }, resolve));
+    try {
+      await expect(call({ type: "CONSOLE_LOG", verb: "enable", token: controller.dispatchToken }))
+        .resolves.toEqual(expect.objectContaining({ ok: false, error: expect.stringMatching(/effect capability/i) }));
+      const wrong = policy.authorizeAndIssueEffectCapability(controller.dispatchToken, "standard", { type: "get_console_log" });
+      if (!wrong.ok) throw new Error(wrong.error);
+      await expect(call({ type: "CONSOLE_LOG", verb: "enable", token: controller.dispatchToken, effectCapability: wrong.effectCapability }))
+        .resolves.toEqual(expect.objectContaining({ ok: false, error: expect.stringMatching(/effect capability/i) }));
+      const capability = await issueEffectCapability(controller.dispatchToken, { type: "enable_console_log" });
+      await expect(call({ type: "CONSOLE_LOG", verb: "enable", token: controller.dispatchToken, effectCapability: capability }))
+        .resolves.toEqual(expect.objectContaining({ ok: true }));
+      await expect(call({ type: "CONSOLE_LOG", verb: "enable", token: controller.dispatchToken, effectCapability: capability }))
+        .resolves.toEqual(expect.objectContaining({ ok: false, error: expect.stringMatching(/effect capability/i) }));
+    } finally {
+      policy.resetPrivilegedActionPolicyForTests();
+      controllers.resetRunControllerForTests();
+    }
   });
 });
 
@@ -366,6 +432,20 @@ describe("console-log action handlers", () => {
     expect(sendMessage()).toHaveBeenCalledWith({ type: "CONSOLE_LOG", verb: "enable" });
     expect(result.success).toBe(true);
     expect(result.message).toMatch(/enabled/i);
+  });
+
+  test("forwards the immutable run token and opaque effect capability", async () => {
+    sendMessage().mockResolvedValue({ ok: true });
+    const context = ctx();
+    context.dispatchToken = { runId: "run-console", dispatchRevision: 4 };
+    context.effectCapability = "console-effect-capability";
+    await handleEnableConsoleLog(context, { type: "enable_console_log" });
+    expect(sendMessage()).toHaveBeenCalledWith({
+      type: "CONSOLE_LOG",
+      verb: "enable",
+      token: { runId: "run-console", dispatchRevision: 4 },
+      effectCapability: "console-effect-capability",
+    });
   });
 
   test("disable sends verb disable and reports success", async () => {

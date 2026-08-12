@@ -16,13 +16,15 @@ import {
   statusCenter,
   STORAGE_KEYS,
 } from "./elements";
-import { setLifecycle } from "./lifecycle";
 import {
   addSystemMessage,
 } from "./chat-renderer";
 import { showTakeoverBanner, hideTakeoverBanner } from "./takeover";
-import { setRunning, onAgentEvent } from "./controls";
+import { requestAgentEventReconciliation } from "./reconcile-port";
 import { formatTokens, isValidAgentEvent } from "./log-renderer-utils";
+import { applyRunEvent, type EventVersion } from "./run-store";
+import { announce } from "../accessibility";
+import { resetKeepaliveBackoff } from "./keepalive";
 
 // ─── State (owned by this module) ───────────────────────────────────────────
 
@@ -30,6 +32,21 @@ let totalCost = 0;
 let totalTokens = 0;
 let totalsRestored = false;
 let restoreGeneration = 0;
+/** Trailing debounce for the cost/token storage IPC (one write per burst). */
+let costStorageTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleCostStorageWrite(): void {
+  if (costStorageTimer) return;
+  costStorageTimer = setTimeout(() => {
+    costStorageTimer = null;
+    if (typeof chrome !== "undefined" && chrome.storage?.local) {
+      void chrome.storage.local.set({
+        [STORAGE_KEYS.costUsd]: totalCost,
+        [STORAGE_KEYS.tokens]: totalTokens,
+      });
+    }
+  }, 300);
+}
 
 // ─── Persistence ───────────────────────────────────────────────────────────
 
@@ -58,43 +75,45 @@ export function clearRunTotals(): void {
 /**
  * Render an AGENT_EVENT as a chat message.
  */
-export function addLogRow(event: LogEvent, time: string): void {
-  onAgentEvent();
+export function addLogRow(event: LogEvent, time: string, version: EventVersion = {}): void {
+  // Even a cross-run event that is not safe to render is evidence that this
+  // panel may have missed an authoritative snapshot (for example, another
+  // open side panel started the next run). Queue STATUS first, then retain
+  // the transcript admission check below as the boundary against stale text.
+  requestAgentEventReconciliation();
+  // A live AGENT_EVENT proves the worker is awake — keep the keepalive
+  // backoff at its baseline instead of climbing on a healthy worker.
+  resetKeepaliveBackoff();
+  if (!applyRunEvent(event, version)) return;
   let body = "";
 
   switch (event.type) {
     case "run-start":
-      setLifecycle("thinking");
-      setRunning(true);
       clearRunTotals();
       addSystemMessage("▶", `Task: ${event.task}`, undefined, time);
       break;
     case "planner-step":
-      setLifecycle("thinking");
       body = event.decision + (event.goal ? " → " + event.goal : "");
       addSystemMessage("🧭", body, undefined, time);
       break;
     case "navigator-step-start":
-      setLifecycle("thinking");
-      addSystemMessage("→", `Step ${event.step}`, undefined, time);
+      // Agent-loop indices are zero-based; transcript numbering matches the
+      // snapshot and history count that users see elsewhere.
+      addSystemMessage("→", `Step ${event.step + 1}`, undefined, time);
       break;
     case "state":
-      setLifecycle("thinking");
       body = `${event.elementCount} elements · ${event.pageInfo}`;
       addSystemMessage("👁", body, undefined, time);
       break;
     case "thinking":
-      setLifecycle("thinking");
       body = event.nextGoal || event.text || "";
       if (body) addSystemMessage("✦", body, undefined, time);
       break;
     case "action":
-      setLifecycle("acting");
       body = event.description || "";
       addSystemMessage("🖱", `Action ${event.index}/${event.total}: ${body}`, undefined, time);
       break;
     case "action-result":
-      setLifecycle(event.success ? "acting" : "error");
       body = event.message || "";
       addSystemMessage(event.success ? "✓" : "✗", `${event.name}: ${body}`, undefined, time);
       break;
@@ -105,8 +124,6 @@ export function addLogRow(event: LogEvent, time: string): void {
       addSystemMessage("⚠", `Loop detected: repeated ${event.count}x`, "warning", time);
       break;
     case "done":
-      setRunning(false);
-      setLifecycle(event.success ? "done" : "error");
       addSystemMessage(
         event.success ? "✅" : "❌",
         event.success ? "Task completed!" : `Task failed: ${event.text}`,
@@ -118,11 +135,9 @@ export function addLogRow(event: LogEvent, time: string): void {
       const parts = [event.code ? `[${event.code}]` : null, event.recovery ?? null].filter(Boolean).join(" ");
       const text = `${event.message}${parts ? ` — ${parts}` : ""}`;
       if (!event.recoverable) {
-        setRunning(false);
-        setLifecycle("error");
         addSystemMessage("❌", text, "error", time);
+        announce(text, { assertive: true });
       } else {
-        setLifecycle("error");
         addSystemMessage("⚠", text, "warning", time);
       }
       break;
@@ -139,13 +154,9 @@ export function addLogRow(event: LogEvent, time: string): void {
       totalTokens += ti + to;
       costLabel.textContent = `$${totalCost.toFixed(4)}`;
       tokenLabel.textContent = formatTokens(totalTokens);
-      // Persist so restoreTotalsFromStorage() works on panel reopen mid-run.
-      if (typeof chrome !== "undefined" && chrome.storage?.local) {
-        void chrome.storage.local.set({
-          [STORAGE_KEYS.costUsd]: totalCost,
-          [STORAGE_KEYS.tokens]: totalTokens,
-        });
-      }
+      // Persist (debounced) so restoreTotalsFromStorage() works on panel
+      // reopen mid-run — a burst of cost events settles into one IPC write.
+      scheduleCostStorageWrite();
       // Reveal telemetry on first cost event
       if (statusCenter) statusCenter.hidden = false;
       break;
@@ -160,22 +171,18 @@ export function addLogRow(event: LogEvent, time: string): void {
       addSystemMessage("↻", `Compacted ${event.compactedCount} steps`, undefined, time);
       break;
     case "challenge_detected":
-      setLifecycle("waiting");
       showTakeoverBanner(`Anti-bot challenge (${event.kind}): ${event.message}`);
       break;
     case "paused":
-      setLifecycle("waiting");
       addSystemMessage("⏸", "Agent paused by user", undefined, time);
       break;
     case "resumed":
-      setLifecycle("thinking");
       addSystemMessage("▶", "Agent resumed", undefined, time);
       hideTakeoverBanner();
       break;
     case "heartbeat":
       break; // internal keep-alive, not user-facing
     case "takeover":
-      setLifecycle("waiting");
       showTakeoverBanner(event.reason);
       break;
     default: {
@@ -200,10 +207,22 @@ chrome.runtime.onMessage.addListener((msg: unknown, sender) => {
   if (sender.id !== chrome.runtime.id) return false;
   if (sender.tab) return false;
   if (sender.url) return false;
-  const payload = msg as { type?: string; event?: LogEvent; time?: string };
+  const payload = msg as {
+    type?: string;
+    event?: LogEvent;
+    time?: string;
+    runId?: unknown;
+    revision?: unknown;
+  };
   if (payload?.type === "AGENT_EVENT") {
-    if (isValidAgentEvent(payload.event) && typeof payload.time === "string") {
-      addLogRow(payload.event, payload.time);
+    const hasVersionField = payload.runId !== undefined || payload.revision !== undefined;
+    const validVersion = !hasVersionField ||
+      (typeof payload.runId === "string" && typeof payload.revision === "number" && Number.isFinite(payload.revision));
+    if (isValidAgentEvent(payload.event) && typeof payload.time === "string" && validVersion) {
+      addLogRow(payload.event, payload.time, {
+        ...(typeof payload.runId === "string" ? { runId: payload.runId } : {}),
+        ...(typeof payload.revision === "number" ? { revision: payload.revision } : {}),
+      });
     } else {
       console.warn("[log-renderer] dropped malformed AGENT_EVENT envelope");
     }

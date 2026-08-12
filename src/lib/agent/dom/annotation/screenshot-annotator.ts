@@ -118,6 +118,12 @@ interface AnnotateOptions {
  * When omitted, the label is the bare index number (`"3"`). Default `""`.
  */
   refPrefix?: string;
+  /** Cap the OUTPUT image's long edge (CSS px, default 1800). At DPR≥2 a
+   *  1280×800 viewport becomes a 2560×1600 JPEG that VLM providers downscale
+   *  or tile anyway; capping output drops canvas memory + VLM image tokens
+   *  ~4× with zero grounding loss (grounding keys on the boxes/labels, which
+   *  are scaled alongside). */
+  maxDimension?: number;
 }
 
 /**
@@ -213,12 +219,20 @@ export async function annotateScreenshot(
   }
 
   try {
-    canvas.width = img.width;
-    canvas.height = img.height;
+    // Cap the output long edge (default 1800px). The source screenshot may be
+    // 2-3× the CSS viewport at high DPR; VLMs downscale/tile anyway, so render
+    // the annotated canvas at the capped resolution and scale every device
+    // coordinate + font by `outScale`.
+    const maxDim = options?.maxDimension ?? 1800;
+    const outScale = Math.min(1, maxDim / Math.max(img.width, img.height));
+    canvas.width = Math.max(1, Math.round(img.width * outScale));
+    canvas.height = Math.max(1, Math.round(img.height * outScale));
     const ctx = canvas.getContext("2d");
     if (!ctx) return screenshotDataUrl;
 
- // Draw the original screenshot as the base layer.
+    ctx.scale(outScale, outScale);
+
+    // Draw the original screenshot as the base layer.
     img.drawTo(ctx);
 
  // Draw numbered boxes on each element.
@@ -246,11 +260,14 @@ export async function annotateScreenshot(
       if (width <= 0 || height <= 0) continue;
       if (width < minSize || height < minSize) continue;
 
- // Scale CSS-pixel rect → device-pixel canvas coordinates.
-      const dx = x * scaleFactor;
-      const dy = y * scaleFactor;
-      const dw = width * scaleFactor;
-      const dh = height * scaleFactor;
+ // Scale CSS-pixel rect → device-pixel canvas coordinates, then snap to
+ // whole pixels and clamp on-canvas (fractional DPR coordinates force
+ // sub-pixel anti-aliasing on every stroke; a whole-pixel rect is crisp).
+      const dx = Math.round(x * scaleFactor * outScale);
+      const dy = Math.round(y * scaleFactor * outScale);
+      const dw = Math.round(width * scaleFactor * outScale);
+      const dh = Math.round(height * scaleFactor * outScale);
+      if (dw < 1 || dh < 1) continue;
 
  // Pick this element's color: cycle the palette by index in multi-color
  // mode, or use the single color otherwise. The palette is also used for
@@ -277,8 +294,8 @@ export async function annotateScreenshot(
  // `measureText` already reflects the scaled font; pad the box in
  // device pixels too so the label sits comfortably inside its box at
  // any DPR.
-      const labelWidth = ctx.measureText(label).width + 6 * scaleFactor;
-      const labelHeight = sFont + 4 * scaleFactor;
+      const labelWidth = ctx.measureText(label).width + 6 * scaleFactor * outScale;
+      const labelHeight = sFont * outScale + 4 * scaleFactor * outScale;
 
       ctx.fillStyle = labelBg;
       ctx.fillRect(dx, dy, labelWidth, labelHeight);
@@ -290,7 +307,7 @@ export async function annotateScreenshot(
         typeof options?.textColor === "string" && isHexColor(options.textColor.trim())
           ? textColor
           : pickReadableTextColor(labelBg);
-      ctx.fillText(label, dx + 3 * scaleFactor, dy + 2 * scaleFactor);
+      ctx.fillText(label, dx + 3 * scaleFactor * outScale, dy + 2 * scaleFactor * outScale);
     }
 
     return await canvasToDataUrl(canvas, screenshotDataUrl);

@@ -26,13 +26,23 @@ type ChallengeKind =
   | "cloudflare-turnstile"
   | "hcaptcha"
   | "recaptcha"
-  | "blocked"
+  | "arkose"
+  | "geetest"
+  | "aws_waf"
+  | "friendlycaptcha"
+  | "altcha"
+  | "datadome"
   | "rate-limited"
   | "auth-wall";
 
 /**
  * Allowed `ChallengeKind` literals, used to validate untrusted parse input at
  * the trust boundary. Stored as a `Set` for an O(1) membership check.
+ *
+ * NOTE: `"blocked"` was deliberately removed from the union — the content-side
+ * classifier refuses to emit block/rate-limit from page content (only the
+ * network layer at `background/antibot.ts` may emit `"rate-limited"`), so
+ * `"blocked"` was a type no emitter could produce.
  */
 const CHALLENGE_KINDS: ReadonlySet<ChallengeKind> = new Set<ChallengeKind>([
   "cloudflare-js",
@@ -40,7 +50,12 @@ const CHALLENGE_KINDS: ReadonlySet<ChallengeKind> = new Set<ChallengeKind>([
   "cloudflare-turnstile",
   "hcaptcha",
   "recaptcha",
-  "blocked",
+  "arkose",
+  "geetest",
+  "aws_waf",
+  "friendlycaptcha",
+  "altcha",
+  "datadome",
   "rate-limited",
   "auth-wall",
 ]);
@@ -82,6 +97,37 @@ type DetectChallengeOutcome =
   | { status: "no-challenge" }
   | { status: "error"; error: unknown };
 
+function abortError(signal?: AbortSignal): DOMException {
+  return signal?.reason instanceof DOMException
+    ? signal.reason
+    : new DOMException("Aborted", "AbortError");
+}
+
+/**
+ * Chrome scripting promises cannot be actively cancelled. This race still
+ * releases the loop immediately and removes its listener; late script results
+ * are deliberately ignored so they cannot resume a cancelled run.
+ */
+function awaitAbortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(abortError(signal));
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => finish(() => reject(abortError(signal)));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    );
+  });
+}
+
 /**
  * Parse the raw result returned by the detection script. The script returns
  * either `null` (no challenge) or `{kind, message}`. Any other shape is
@@ -114,7 +160,22 @@ export function parseChallengeResult(raw: unknown): ChallengeInfo | null {
  * heuristics are deliberately refused (see the trailing comment). Loosening any
  * of the AND-corroboration below re-opens a false-challenge stall vector.
  */
-export function detectChallengeInPage(): ChallengeInfo | null {
+/**
+ * Merged MAIN-world classifier — challenge OR auth wall, ONE injection.
+ *
+ * This is the ONLY detector passed to `chrome.scripting.executeScript` from
+ * {@link detectChallengeResult}: it runs the challenge classifier first, then
+ * the auth-wall classifier, and returns the first `{kind,message}` hit (or
+ * `null`). Serializing one function halves per-step injections and removes the
+ * navigation race between two separate reads (a nav landing between them could
+ * otherwise mask a live interstitial from the second detector).
+ *
+ * MUST stay self-contained: it may reference only `document` (and its own
+ * inner functions), never module-scope bindings, or serialization would drop
+ * them. `detectChallengeInPage` / `detectAuthWallInPage` delegate here for
+ * in-process tests.
+ */
+export function detectChallengeOrAuthWallInPage(): ChallengeInfo | null {
   const title = (document.title || "").toLowerCase();
 
   let body: string | null = null;
@@ -123,21 +184,7 @@ export function detectChallengeInPage(): ChallengeInfo | null {
     return body;
   };
 
- // Cloudflare JS challenge.
- // SECURITY: document.title and same-origin IDs/paths are attacker-controllable,
- // so a hostile page could set its title to "Just a moment…" or inject
- // #cf-chl-wrapper to force the agent into a Cloudflare-JS auto-wait stall
- // (false-positive availability vector). A genuine IUAM / "Checking your browser"
- // page loads Cloudflare's challenge script from a Cloudflare-owned origin — that
- // cross-origin script src is the ONLY signal we trust (see below). A title match
- // alone (or any same-origin marker) is NEVER sufficient.
- // The interstitial *must* contain a script tag pointing at Cloudflare's
- // challenge JS hosted on a Cloudflare-owned origin. Trust ONLY that
- // cross-origin signal: the #cf-chl-wrapper / #challenge-running IDs and the
- // /cdn-cgi/ path are attacker-settable in the page's own origin, so a hostile
- // page could inject them to force a false cloudflare-js stall. The title alone
- // is also never sufficient. cfJsSelector (same-origin IDs) is intentionally not
- // used as a trigger.
+  // Cloudflare JS challenge — trust ONLY the cross-origin script src.
   const cfJsScript = document.querySelector(
     'script[src^="https://challenges.cloudflare.com/"]',
   );
@@ -145,12 +192,7 @@ export function detectChallengeInPage(): ChallengeInfo | null {
     return { kind: "cloudflare-js", message: "Cloudflare JS challenge" };
   }
 
- // Cloudflare block page — require genuine corroboration, NOT the attacker-
- // settable `.cf-error-details` CSS class (a hostile page can add that class to
- // force a false stall). Require the "attention required" title AND the word
- // "blocked" in the body; the authoritative network-layer status is checked
- // upstream, but this content check at least forces the attacker to control
- // both title and body rather than just a single CSS class.
+  // Cloudflare block page — "attention required" title AND "blocked" body.
   const b = getBody();
   if (
     title.indexOf("attention required") !== -1 && b.toLowerCase().indexOf("blocked") !== -1
@@ -158,15 +200,11 @@ export function detectChallengeInPage(): ChallengeInfo | null {
     return { kind: "cloudflare-block", message: "Cloudflare block page" };
   }
 
- // Widget-only challenges — a widget selector alone is NOT sufficient:
- // contact/checkout/login pages legitimately embed Turnstile/hCaptcha/
- // reCAPTCHA and would otherwise stall every navigator step for 15s. Only
- // count the widget when corroborated by an interstitial signal: the
- // `#challenge-running` marker Cloudflare injects during a real challenge,
- // or a near-empty body (a genuine interstitial is a shell — a content page
- // has real text). A short body can never be forged by an attacker who wants
- // to AVOID a challenge, so this does not re-open a false-positive vector;
- // and the widget selector stays the primary trigger.
+  // Widget interstitials. Presence alone is NOT enough: every widget branch is
+  // gated by `hasInterstitialCorroboration` (a real #challenge-running marker
+  // Cloudflare injects during a genuine challenge, or a near-empty body — a
+  // genuine interstitial is a shell, a content page has real text), so a
+  // silent v2 checkbox embedded in a content page never stalls the loop.
   const hasInterstitialCorroboration = (): boolean => {
     return (
       document.querySelector("#challenge-running") !== null ||
@@ -194,74 +232,180 @@ export function detectChallengeInPage(): ChallengeInfo | null {
     return { kind: "recaptcha", message: "reCAPTCHA challenge" };
   }
 
-  // Genuine "access denied" / "rate limited" states are derived from the
-  // real HTTP response status at the network layer, not from page content.
-  // The document title, body text, and CSS classes are all attacker-
-  // settable, so classifying a block or rate-limit from them alone lets a
-  // hostile page force a false challenge and stall the agent. Do not
-  // reintroduce content-only heuristics here; the network status is the
-  // authoritative signal for these states.
+  // Additional vendor interstitials (Arkose/FunCaptcha, GeeTest, AWS WAF,
+  // Friendly Captcha, Altcha, DataDome), all corroboration-gated.
+  if (
+    document.querySelector('iframe[src*="arkoselabs.com"], iframe[src*="funcaptcha.com"]') &&
+    hasInterstitialCorroboration()
+  ) {
+    return { kind: "arkose", message: "Arkose/FunCaptcha challenge" };
+  }
 
+  if (
+    document.querySelector(".geetest_holder, .geetest-captcha, .geetest_panel") &&
+    hasInterstitialCorroboration()
+  ) {
+    return { kind: "geetest", message: "GeeTest challenge" };
+  }
+
+  if (
+    document.querySelector('#aws-waf-captcha, [name="aws-waf-token"], [name="aws-waf-challenge"]') &&
+    hasInterstitialCorroboration()
+  ) {
+    return { kind: "aws_waf", message: "AWS WAF challenge" };
+  }
+
+  if (
+    document.querySelector('.frc-captcha, [name="frc-captcha-response"]') &&
+    hasInterstitialCorroboration()
+  ) {
+    return { kind: "friendlycaptcha", message: "Friendly Captcha challenge" };
+  }
+
+  if (
+    document.querySelector("altcha-widget, [name='altcha'], [name='altcha-token']") &&
+    hasInterstitialCorroboration()
+  ) {
+    return { kind: "altcha", message: "Altcha challenge" };
+  }
+
+  if (
+    document.querySelector('iframe[src*="geo.captcha-delivery.com"]') &&
+    hasInterstitialCorroboration()
+  ) {
+    return { kind: "datadome", message: "DataDome challenge" };
+  }
+
+  // Genuine "access denied" / "rate limited" states are derived from the real
+  // HTTP response status at the network layer, not from page content. The
+  // document title, body text, and CSS classes are all attacker-settable, so
+  // classifying a block or rate-limit from them alone lets a hostile page
+  // force a false challenge and stall the agent. Do not reintroduce
+  // content-only heuristics here; the network status is the authoritative
+  // signal for these states.
+
+  // No challenge — check for an auth/login wall (the orchestrator must pause
+  // and request human takeover instead of acting on the login form).
+  // INLINE auth-wall body (self-contained — see the module-level twin
+  // `authWallBody()` for the in-process copy).
+  const passwordField = document.querySelector('input[type="password"]');
+  if (passwordField !== null) {
+    const authHref = (document.location && document.location.href) || "";
+    const authUrl = authHref.toLowerCase();
+    const loginUrl =
+      /(^|\/)(login|signin|sign-in|sign_in|auth|sso|oauth|oidc|authorize|connect\/authorize|account\/login)(\/|\?|#|$)/.test(
+        authUrl,
+      );
+
+    const form = passwordField.closest("form") as HTMLFormElement | null;
+    let loginFormAction = false;
+    if (form && form.action) {
+      const action = form.action.toLowerCase();
+      loginFormAction =
+        /(login|signin|sign-in|sign_in|auth|sso|oauth|oidc|authorize|token)/.test(action);
+    }
+
+    // Only non-attacker-settable IdP corroborators count (see authWallBody).
+    const idpMarker =
+      document.querySelector(
+        'iframe[src*="okta.com"], iframe[src*="login.microsoftonline.com"], ' +
+          'iframe[src*="auth0.com"], iframe[src*="accounts.google.com/o/"], ' +
+          'script[src*="okta.com"]',
+      ) !== null;
+
+    if (loginUrl || loginFormAction || idpMarker) {
+      return { kind: "auth-wall", message: "Authentication required (login page)" };
+    }
+  }
   return null;
 }
 
 /**
- * MAIN-world authentication-wall classifier. Runs inside the target page (in
- * the same injected script as `detectChallengeInPage`), so it MUST be
- * self-contained: it may reference only `document`, never module-scope
- * bindings. Returns `{kind:"auth-wall", message}` or `null`.
+ * MAIN-world challenge classifier (in-process twin of the merged detector's
+ * challenge section). Returns the detected `{kind, message}` or `null`.
  *
- * Unlike the CF/CAPTCHA challenges, an auth wall means the agent has landed on
- * a login/SSO page and must NOT be acted on by the model (typing credentials,
- * clicking "Sign in"). It surfaces as a challenge so the orchestrator pauses
- * and requests human takeover for credential entry.
+ * SECURITY: `document.title`/body/CSS are attacker-controllable. A title match
+ * alone is NEVER sufficient — it must be corroborated by an authoritative
+ * selector (or the challenge script) — and content-only block/rate-limit
+ * heuristics are deliberately refused. Loosening any of the AND-corroboration
+ * re-opens a false-challenge stall vector.
+ */
+export function detectChallengeInPage(): ChallengeInfo | null {
+  const r = detectChallengeOrAuthWallInPage();
+  return r !== null && r.kind !== "auth-wall" ? r : null;
+}
+
+/**
+ * MAIN-world auth-wall sub-classifier. Delegates to the merged classifier
+ * {@link detectChallengeOrAuthWallInPage} (the single serialized injection);
+ * this export exists for in-process tests and as a named semantic twin.
  *
  * SECURITY: `document.title`/body/CSS are attacker-controllable, so a title or
  * body match alone is NEVER sufficient (the same false-positive stall vector
- * defended against in `detectChallengeInPage`). A genuine auth wall is
+ * defended against in the challenge classifier). A genuine auth wall is
  * corroborated by a real `input[type=password]` PLUS an authoritative login
  * signal: a login/sign-in/SSO URL, a form action pointing at a login endpoint,
- * an identity-provider iframe/script, or a sign-in submit control. Without that
- * AND-corroboration an arbitrary password field (e.g. an account-recovery or
- * settings form) is NOT treated as an auth wall.
+ * or an identity-provider iframe/script. Without that AND-corroboration an
+ * arbitrary password field (e.g. an account-recovery or settings form) is NOT
+ * treated as an auth wall.
  */
-function detectAuthWallInPage(): ChallengeInfo | null {
-  const passwordField = document.querySelector('input[type="password"]');
-  if (passwordField === null) return null;
+export function detectAuthWallInPage(): ChallengeInfo | null {
+  const r = detectChallengeOrAuthWallInPage();
+  return r !== null && r.kind === "auth-wall"
+    ? { kind: "auth-wall", message: "Authentication required (login page)" }
+    : null;
+}
 
-  const href = (document.location && document.location.href) || "";
-  const url = href.toLowerCase();
-  const loginUrl =
-    /(^|\/)(login|signin|sign-in|sign_in|auth|sso|oauth|oidc|authorize|connect\/authorize|account\/login)(\/|\?|#|$)/.test(
-      url,
-    );
+/**
+ * Short-lived "no challenge" verdict cache. The orchestrator runs the detector
+ * at the start of every navigator step; on a static page the answer is
+ * unchanged between steps, so a fresh injection round-trip per step is pure
+ * overhead. Only *no-challenge* verdicts are cached, keyed by (tabId, URL),
+ * and only for {@link DETECTION_CACHE_TTL_MS} — a page that injects a
+ * challenge widget mid-session is re-detected at the next cache expiry, and a
+ * navigation (URL change) always invalidates the entry. Errors and challenge
+ * verdicts are never cached. If the tab URL cannot be verified (no
+ * `chrome.tabs` in the calling context), the cache is bypassed entirely
+ * (conservative: always re-detect).
+ */
+const DETECTION_CACHE_TTL_MS = 2000;
+const detectionCache = new Map<number, { url: string; at: number }>();
 
-  const form = passwordField.closest("form") as HTMLFormElement | null;
-  let loginFormAction = false;
-  if (form && form.action) {
-    const action = form.action.toLowerCase();
-    loginFormAction =
-      /(login|signin|sign-in|sign_in|auth|sso|oauth|oidc|authorize|token)/.test(action);
+async function isNoChallengeCached(tabId: number): Promise<boolean> {
+  const cached = detectionCache.get(tabId);
+  if (!cached) return false;
+  if (Date.now() - cached.at > DETECTION_CACHE_TTL_MS) {
+    detectionCache.delete(tabId);
+    return false;
   }
-
-  const idpMarker =
-    document.querySelector(
-      'iframe[src*="okta.com"], iframe[src*="login.microsoftonline.com"], ' +
-        'iframe[src*="auth0.com"], iframe[src*="accounts.google.com/o/"], ' +
-        'script[src*="okta.com"], a[href*="login.microsoftonline.com"]',
-    ) !== null;
-
- // Auth wall requires an authoritative login signal: a login/sign-in/SSO URL,
- // a form `action` pointing at a login endpoint, or an identity-provider
- // iframe/script. A bare password field plus a submit label of "continue"/
- // "verify" is NOT sufficient — arbitrary password+continue forms (account
- // recovery, newsletter signup) would otherwise force an unnecessary
- // human-takeover pause. submitLabel/submitLogin corroboration is intentionally
- // dropped.
-  if (loginUrl || loginFormAction || idpMarker) {
-    return { kind: "auth-wall", message: "Authentication required (login page)" };
+  try {
+    const tab = typeof chrome !== "undefined" ? await chrome.tabs?.get?.(tabId) : undefined;
+    if (tab?.url !== cached.url) {
+      detectionCache.delete(tabId);
+      return false;
+    }
+  } catch {
+    // URL unverifiable — treat the cache as stale (conservative re-detect).
+    detectionCache.delete(tabId);
+    return false;
   }
-  return null;
+  return true;
+}
+
+async function rememberNoChallenge(tabId: number): Promise<void> {
+  try {
+    const tab = typeof chrome !== "undefined" ? await chrome.tabs?.get?.(tabId) : undefined;
+    if (typeof tab?.url === "string") {
+      detectionCache.set(tabId, { url: tab.url, at: Date.now() });
+    }
+  } catch {
+    /* no cache on unverifiable URL — conservative */
+  }
+}
+
+/** Test hook: drop all cached verdicts (not used in production). */
+export function _resetDetectionCacheForTests(): void {
+  detectionCache.clear();
 }
 
 /**
@@ -272,36 +416,33 @@ function detectAuthWallInPage(): ChallengeInfo | null {
  * warning logged) so the orchestrator can retry or pause instead of
  * proceeding blindly onto a possibly-injected page.
  *
+ * Uses ONE combined injection (challenge classifier + auth-wall classifier)
+ * so a navigation cannot race between two reads, and serves recent
+ * "no-challenge" verdicts from the cache (see {@link isNoChallengeCached}).
+ *
  * @param tabId The tab to check.
  */
 export async function detectChallengeResult(
   tabId: number,
+  signal?: AbortSignal,
 ): Promise<DetectChallengeOutcome> {
+  if (await isNoChallengeCached(tabId)) return { status: "no-challenge" };
   try {
-    const results = await chrome.scripting.executeScript({
+    const results = await awaitAbortable(chrome.scripting.executeScript({
       target: { tabId },
       world: "MAIN",
-      func: detectChallengeInPage,
-    });
-    const result = results?.[0]?.result;
-    const info = parseChallengeResult(result);
+      func: detectChallengeOrAuthWallInPage,
+    }), signal);
+    const info = parseChallengeResult(results?.[0]?.result);
     if (info) {
+      // A challenge or auth wall is present — never cache this.
+      detectionCache.delete(tabId);
       return { status: "challenge", info };
     }
-    // No CF/CAPTCHA challenge — also check for a generic auth/login wall so
-    // the orchestrator can pause and request human takeover instead of acting
-    // on the login form. Two separate injections keep each detector
-    // self-contained; this one only runs when no challenge was found.
-    const authResults = await chrome.scripting.executeScript({
-      target: { tabId },
-      world: "MAIN",
-      func: detectAuthWallInPage,
-    });
-    const authInfo = parseChallengeResult(authResults?.[0]?.result);
-    return authInfo
-      ? { status: "challenge", info: authInfo }
-      : { status: "no-challenge" };
+    await rememberNoChallenge(tabId);
+    return { status: "no-challenge" };
   } catch (error) {
+    if (signal?.aborted) throw error;
  // Tab closed, permission denied, chrome:// URL, CSP, a racing navigation,
  // or any other injection failure. This is NOT the same as "no challenge":
  // log it so the orchestrator can observe the failure and choose to retry or
@@ -327,7 +468,10 @@ export async function detectChallengeResult(
  * challenge). If detection itself fails during polling, the failure is treated
  * conservatively: we do not report the challenge as resolved (which would let
  * the agent proceed blindly) — instead the wait reports unresolved so the
- * orchestrator can retry or surface the issue.
+ * orchestrator can retry or surface the issue. A transient failure of the
+ * INITIAL check (racing navigation, tab mid-load) is treated exactly like a
+ * during-poll failure: retry-first — keep polling to the deadline, and only
+ * fall back to `{resolved:false}` if every attempt keeps failing.
  *
  * @param tabId The tab to monitor.
  * @param opts.timeoutMs Max wait time (default 15000, clamped 500–120000).
@@ -335,31 +479,31 @@ export async function detectChallengeResult(
  */
 export async function waitForChallengeResolution(
   tabId: number,
-  opts: { timeoutMs?: number; pollMs?: number } = {},
+  opts: { timeoutMs?: number; pollMs?: number; signal?: AbortSignal } = {},
 ): Promise<ChallengeWaitResult> {
   const timeout = Math.max(500, Math.min(120000, opts.timeoutMs ?? 15000));
   const poll = Math.max(250, Math.min(5000, opts.pollMs ?? 500));
 
-  const initial = await detectChallengeResult(tabId);
+  const initial = await detectChallengeResult(tabId, opts.signal);
  // A genuine "no challenge" at the start means there's nothing to wait for.
   if (initial.status === "no-challenge") return { resolved: true, challenge: null };
- // A failed initial check can't be treated as "already resolved" — be
- // conservative and let the orchestrator retry / pause.
-  if (initial.status === "error") return { resolved: false, challenge: null };
- // initial.status === "challenge": fall through and wait for it to clear.
+ // initial "challenge" OR "error": retry-first — a single transient failure
+ // (or a challenge that clears right after the probe) must not abandon the
+ // window; keep polling to the deadline exactly like during-poll errors.
 
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, poll));
-    const current = await detectChallengeResult(tabId);
- // A genuine "no challenge" means the challenge cleared.
+    await awaitAbortable(new Promise<void>((resolve) => setTimeout(resolve, poll)), opts.signal);
+    const current = await detectChallengeResult(tabId, opts.signal);
+ // A genuine "no challenge" means the challenge cleared (or the transient
+ // failure recovered).
     if (current.status === "no-challenge") return { resolved: true, challenge: null };
  // A failed check can't be treated as "resolved" — keep waiting within the
  // timeout window rather than letting the agent proceed onto an
  // unverified page.
   }
 
-  const final = await detectChallengeResult(tabId);
+  const final = await detectChallengeResult(tabId, opts.signal);
   if (final.status === "no-challenge") return { resolved: true, challenge: null };
  // Either the challenge is still present, or we couldn't verify it cleared —
  // report unresolved so the orchestrator doesn't proceed blindly.

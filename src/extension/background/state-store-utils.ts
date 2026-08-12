@@ -9,6 +9,7 @@
 import type { AgentMode } from "@/lib/agent/modes";
 import { listScheduledTasks } from "@/lib/agent/scheduled-tasks";
 import { redactSecrets } from "@/lib/agent/secrets";
+import { redactKeyLeak } from "@/lib/agent/redact-shared";
 
 // ─── Safe log (redacts secrets before console output) ───────────────────────
 
@@ -19,7 +20,7 @@ export async function safeLog(
 ): Promise<void> {
   const raw = err == null ? msg : `${msg} ${err instanceof Error && err.stack ? err.stack : String(err)}`;
   try {
-    const redacted = await redactSecrets(raw);
+    const redacted = redactKeyLeak(await redactSecrets(raw));
     console[level](redacted);
   } catch {
     console[level]("[redacted log suppressed]");
@@ -79,6 +80,12 @@ export function addCostEvent(usage: RunUsage, event: CostEventLike): RunUsage {
 }
 
 export interface RunState {
+  /** Additive persisted contract version; absent is accepted only by the legacy reader. */
+  version?: 1;
+  /** Identity of the background authority that created this record (V1 additive). */
+  runId?: string;
+  /** Dispatch generation persisted with runId for restart cancellation. */
+  dispatchRevision?: number;
   task: string;
   maxSteps: number;
   mode: AgentMode;
@@ -103,28 +110,142 @@ if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
 
 let writeChain: Promise<unknown> = Promise.resolve();
 
+const RUN_STATE_MODES: ReadonlySet<string> = new Set(["restricted", "standard", "full_agentic"]);
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isRunUsage(value: unknown): value is RunUsage {
+  if (!value || typeof value !== "object") return false;
+  const usage = value as Record<string, unknown>;
+  return (
+    isFiniteNumber(usage.tokensIn) &&
+    isFiniteNumber(usage.tokensOut) &&
+    isFiniteNumber(usage.costUsd) &&
+    typeof usage.model === "string" &&
+    (usage.reasoningTokens === undefined || isFiniteNumber(usage.reasoningTokens)) &&
+    (usage.cachedInputTokens === undefined || isFiniteNumber(usage.cachedInputTokens)) &&
+    (usage.cachedWriteInputTokens === undefined || isFiniteNumber(usage.cachedWriteInputTokens))
+  );
+}
+
+/** Decode legacy unversioned state or V1 into one canonical V1 value. */
+function decodeRunState(value: unknown): RunState | null {
+  if (!value || typeof value !== "object") return null;
+  const state = value as Record<string, unknown>;
+  if (state.version !== undefined && state.version !== 1) return null;
+  if (
+    typeof state.task !== "string" ||
+    !Number.isSafeInteger(state.maxSteps) || (state.maxSteps as number) < 1 ||
+    typeof state.mode !== "string" || !RUN_STATE_MODES.has(state.mode) ||
+    !isNonNegativeInteger(state.startTabId) ||
+    !isNonNegativeInteger(state.currentTabId) ||
+    !isNonNegativeInteger(state.step) ||
+    typeof state.active !== "boolean" ||
+    typeof state.abortRequested !== "boolean" ||
+    (state.runId !== undefined && (typeof state.runId !== "string" || state.runId.length === 0)) ||
+    (state.dispatchRevision !== undefined && !isNonNegativeInteger(state.dispatchRevision)) ||
+    (state.usage !== undefined && !isRunUsage(state.usage))
+  ) return null;
+  return { ...(state as unknown as RunState), version: 1 };
+}
+
+function abortLatchState(): RunState {
+  return {
+    version: 1,
+    task: "",
+    maxSteps: 1,
+    mode: "standard",
+    startTabId: 0,
+    currentTabId: 0,
+    step: 0,
+    active: false,
+    abortRequested: true,
+  };
+}
+
 function enqueueWrite<T>(task: () => Promise<T>): Promise<T> {
   const run = writeChain.then(task);
   writeChain = run.catch(() => {});
   return run;
 }
 
+async function persistDecodedRunState(next: RunState): Promise<void> {
+  try {
+    await chrome.storage.session.set({ [RUN_STATE_KEY]: next });
+  } catch (e) {
+    cachedRunState = undefined;
+    throw e;
+  }
+  cachedRunState = next;
+}
+
 export async function saveRunState(state: Partial<RunState>): Promise<void> {
   return enqueueWrite(async () => {
-    cachedRunState = undefined;
-    const cur = (await getRunState()) ?? {};
-    const next = { ...cur, ...state } as RunState;
-    next.abortRequested = Boolean((cur as RunState).abortRequested) || Boolean(state.abortRequested);
-    try {
-      await chrome.storage.session.set({ [RUN_STATE_KEY]: next });
-    } catch (e) {
-      // A failed write must not leave the cache holding state storage never
-      // received: the abort listener (and every other consumer) reads via
-      // `getRunState`, so a divergent cache would skip the STOP signal.
-      cachedRunState = undefined;
-      throw e;
+    if (state.version !== undefined && state.version !== 1) {
+      throw new Error("unsupported run-state version");
     }
-    cachedRunState = next;
+    cachedRunState = undefined;
+    const cur = await getRunState();
+    const base = cur ?? (state.abortRequested === true ? abortLatchState() : {});
+    const candidate = {
+      ...base,
+      ...state,
+      version: 1,
+      abortRequested: Boolean(cur?.abortRequested) || Boolean(state.abortRequested),
+    };
+    const next = decodeRunState(candidate);
+    if (!next) throw new Error("invalid run-state update");
+    await persistDecodedRunState(next);
+  });
+}
+
+/** Atomically patch only the persisted state owned by `runId`. */
+export async function saveRunStateForRun(
+  runId: string,
+  state: Omit<Partial<RunState>, "runId" | "version">,
+): Promise<void> {
+  return enqueueWrite(async () => {
+    cachedRunState = undefined;
+    const cur = await getRunState();
+    if (!cur?.runId || cur.runId !== runId) {
+      throw new Error("run-state authority mismatch");
+    }
+    const next = decodeRunState({
+      ...cur,
+      ...state,
+      version: 1,
+      runId,
+      abortRequested: cur.abortRequested || Boolean(state.abortRequested),
+    });
+    if (!next) throw new Error("invalid run-state update");
+    await persistDecodedRunState(next);
+  });
+}
+
+/** Install one new run without inheriting predecessor fields other than STOP. */
+export async function initializeRunStateForRun(state: RunState & { runId: string }): Promise<void> {
+  return enqueueWrite(async () => {
+    cachedRunState = undefined;
+    const cur = await getRunState();
+    if (cur?.runId && cur.runId !== state.runId) {
+      throw new Error("run-state authority mismatch");
+    }
+    if (cur?.active && cur.runId !== state.runId) {
+      throw new Error("active legacy run-state cannot authorize a new run");
+    }
+    const next = decodeRunState({
+      ...state,
+      version: 1,
+      abortRequested: Boolean(cur?.abortRequested) || state.abortRequested,
+    });
+    if (!next) throw new Error("invalid run-state initialization");
+    await persistDecodedRunState(next);
   });
 }
 
@@ -132,7 +253,7 @@ export async function getRunState(): Promise<RunState | null> {
   if (cachedRunState !== undefined) return cachedRunState;
   const res = await chrome.storage.session.get(RUN_STATE_KEY);
   const raw = res[RUN_STATE_KEY];
-  const state = (raw && typeof raw === "object" && "active" in raw && "task" in raw) ? raw as RunState : null;
+  const state = decodeRunState(raw);
   cachedRunState = state;
   return state;
 }
@@ -142,6 +263,25 @@ export async function clearRunState(): Promise<void> {
     cachedRunState = undefined;
     await chrome.storage.session.remove(RUN_STATE_KEY);
   });
+}
+
+/** Clear only the named run; a predecessor cleanup cannot erase a successor. */
+export async function clearRunStateForRun(runId: string): Promise<void> {
+  return enqueueWrite(async () => {
+    cachedRunState = undefined;
+    const cur = await getRunState();
+    if (cur === null) return;
+    if (!cur.runId || cur.runId !== runId) {
+      throw new Error("run-state authority mismatch");
+    }
+    await chrome.storage.session.remove(RUN_STATE_KEY);
+    cachedRunState = null;
+  });
+}
+
+export function resetRunStateStoreForTests(): void {
+  cachedRunState = undefined;
+  writeChain = Promise.resolve();
 }
 
 // ─── System keep-awake (chrome.power) ────────────────────────────────────────

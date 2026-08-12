@@ -355,7 +355,8 @@ describe("executeAction recursion guard", () => {
   const registry = {
     "a.yaml": [
       "match:",
-      "  domain: example.com",
+      "  domain: open-cowork.test",
+      "  regex: '#matched'",
       "steps:",
       "  - type: get_page_info",
     ].join("\n"),
@@ -372,7 +373,7 @@ describe("executeAction recursion guard", () => {
 
   it("agent-driven navigate runs matched loader steps", async () => {
     const res = await executeAction(
-      { type: "navigate", url: "https://example.com/x", new_tab: false },
+      { type: "navigate", url: "https://open-cowork.test/#matched", new_tab: false },
       makeState(),
     );
 
@@ -382,7 +383,7 @@ describe("executeAction recursion guard", () => {
 
   it("loader-originated navigate (_fromLoader) does NOT re-trigger loaders", async () => {
     const res = await executeAction(
-      { type: "navigate", url: "https://example.com/x", new_tab: false },
+      { type: "navigate", url: "https://open-cowork.test/#matched", new_tab: false },
       makeState(),
       undefined,
       true,
@@ -394,7 +395,7 @@ describe("executeAction recursion guard", () => {
 
   it("no loader matches → message stays clean", async () => {
     const res = await executeAction(
-      { type: "navigate", url: "https://other.com/x", new_tab: false },
+      { type: "navigate", url: "https://open-cowork.test/#other", new_tab: false },
       makeState(),
     );
 

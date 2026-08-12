@@ -9,7 +9,7 @@
  * dispatcher.
  */
 
-export type { ActionContext } from "./types";
+export type { ActionContext, ActionDispatchToken } from "./types";
 
 export { handleClick } from "./click";
 export { handleInput } from "./input";

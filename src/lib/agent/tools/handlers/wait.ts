@@ -110,6 +110,94 @@ async function pollUntil<T extends Action>(
   }
 }
 
+/**
+ * Event-driven wait loop for DOM-condition waits (`wait_for_element`): a
+ * `MutationObserver` on the document root re-evaluates the condition the
+ * moment the DOM mutates, plus a `requestAnimationFrame` tick (with an
+ * interval fallback where rAF is unavailable) for style/layout-only changes
+ * the observer cannot see. DOM-driven waits resolve in ~1-3ms vs a ~100ms
+ * timer poll and stop waking the loop while the page is idle — the pattern
+ * Playwright/Puppeteer use for exactly this wait. The deadline + abort
+ * contract is identical to {@link pollUntil}: the timeout HARD-FAILS the
+ * action and an abort signal rejects the pending wait promptly.
+ */
+function pollUntilDom<T extends Action>(
+  action: T,
+  condition: () => boolean,
+  options: PollOptions,
+): Promise<ActionResult> {
+  return new Promise<ActionResult>((resolve, reject) => {
+    const remaining = options.deadline - Date.now();
+    if (remaining <= 0) {
+      resolve({ action, success: false, message: options.timeoutMessage });
+      return;
+    }
+    let settled = false;
+    let observer: MutationObserver | undefined;
+    let rafId: number | undefined;
+    let fallbackTimer: ReturnType<typeof setInterval> | undefined;
+    // eslint-disable-next-line prefer-const -- assigned inside the timeout closure below
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = (): void => {
+      reject(new DOMException("Aborted", "AbortError"));
+      cleanup();
+    };
+    const cleanup = (): void => {
+      if (settled) return;
+      settled = true;
+      if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
+      try { observer?.disconnect(); } catch { /* ignore */ }
+      if (rafId !== undefined && typeof cancelAnimationFrame === "function") cancelAnimationFrame(rafId);
+      if (fallbackTimer !== undefined) clearInterval(fallbackTimer);
+      options.signal?.removeEventListener("abort", onAbort);
+    };
+    const check = (): void => {
+      if (settled) return;
+      if (condition()) {
+        cleanup();
+        resolve({ action, success: true, message: options.successMessage });
+        return;
+      }
+      if (options.deadline - Date.now() <= 0) {
+        cleanup();
+        resolve({ action, success: false, message: options.timeoutMessage });
+        return;
+      }
+      rafId = typeof requestAnimationFrame === "function"
+        ? requestAnimationFrame(check)
+        : undefined;
+    };
+    timeoutTimer = setTimeout(() => {
+      if (settled) return;
+      cleanup();
+      resolve({ action, success: false, message: options.timeoutMessage });
+    }, remaining);
+    // Initial evaluation (a condition already true must resolve synchronously).
+    if (condition()) {
+      cleanup();
+      resolve({ action, success: true, message: options.successMessage });
+      return;
+    }
+    try {
+      observer = new MutationObserver(() => check());
+      observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        attributes: true,
+      });
+    } catch {
+      observer = undefined; // no observer support — the rAF/interval tick still drives the wait
+    }
+    if (typeof requestAnimationFrame === "function") {
+      rafId = requestAnimationFrame(check);
+    } else {
+      fallbackTimer = setInterval(() => check(), WAIT_POLL_MS);
+    }
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 /** Timeout fallback (seconds) for hand-built actions that bypassed the schema
  *  (the schema default for `timeout_seconds` is 30). */
 const DEFAULT_TIMEOUT_SECONDS = WAIT_TIMEOUT_MS / 1000;
@@ -161,7 +249,9 @@ export async function handleWaitForElement(
     state: action.state ?? "visible",
     timeout_seconds: action.timeout_seconds ?? DEFAULT_TIMEOUT_SECONDS,
   };
-  return pollUntil(
+  // DOM-driven wait (MutationObserver + rAF): resolves the instant the node
+  // appears instead of on the next 100ms timer poll.
+  return pollUntilDom(
     resolved,
     () => elementMatchesState(resolved.selector, resolved.state),
     {
@@ -236,14 +326,33 @@ export async function handleWaitForNetworkIdle(
 
 /** True when no resource has loaded within {@link NETWORK_IDLE_WINDOW_MS} —
  *  measured on the performance timeline so entry startTimes and `now()` share
- *  one clock. No resource-timing support → nothing to wait for → idle. */
+ *  one clock. No resource-timing support → nothing to wait for → idle. The
+ *  newest entry must also be a COMPLETED transfer (`responseEnd > startTime`):
+ *  `performance.getEntriesByType("resource")` only returns completed entries,
+ *  so a still-in-flight request is invisible — a `duration === 0` newest entry
+ *  is the reliable busy signal and must NOT be reported as idle. */
 function networkIsIdle(): boolean {
   try {
     const entries = performance.getEntriesByType("resource");
     if (!entries || entries.length === 0) return true;
-    const latest = entries[entries.length - 1].startTime;
-    return performance.now() - latest >= NETWORK_IDLE_WINDOW_MS;
+    const latestEntry = entries[entries.length - 1] as PerformanceResourceTiming;
+    const latest = latestEntry.startTime;
+    const completed = latestEntry.responseEnd > latestEntry.startTime;
+    return completed && performance.now() - latest >= NETWORK_IDLE_WINDOW_MS;
   } catch {
     return true;
   }
+}
+
+// The resource-timing buffer's spec minimum is 250 entries; busy pages evict
+// the NEWEST entries when the buffer fills, which silently hides the very
+// entries that prove the page is still loading. Raise it at module load and
+// keep the cap from ever silently dropping newer entries.
+try {
+  performance.setResourceTimingBufferSize(10_000);
+  performance.onresourcetimingbufferfull = () => {
+    performance.setResourceTimingBufferSize(10_000);
+  };
+} catch {
+  /* resource-timing unsupported — networkIsIdle stays permissive */
 }

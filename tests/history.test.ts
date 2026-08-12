@@ -9,6 +9,7 @@
 import { describe, test, expect, beforeAll, vi } from "vitest";
 import { makeChromeStorageMock } from "./helpers/chrome-storage-mock";
 import type { RunHistoryEntry } from "../src/extension/options/history-utils";
+import { normalizeRunRecord, type RunRecord } from "../src/lib/agent/run-history-utils";
 
 function setupGlobals(): void {
   const localStore = new Map<string, unknown>();
@@ -84,6 +85,11 @@ describe("history import validators", () => {
     expect(isRunHistoryEntry({ ...validEntry(), startedAt: "x" })).toBe(false);
   });
 
+  test("additive terminal reasons are accepted only as strings", () => {
+    expect(isRunHistoryEntry({ ...validEntry(), terminalReason: "cancelled" })).toBe(true);
+    expect(isRunHistoryEntry({ ...validEntry(), terminalReason: 7 })).toBe(false);
+  });
+
   test("oversized entry (3 MiB) is dropped but a valid entry passes", () => {
     const big = {
       ...validEntry(),
@@ -94,6 +100,30 @@ describe("history import validators", () => {
       isRunHistoryEntry(e) && JSON.stringify(e).length <= MAX_RUN_ENTRY_BYTES;
     expect(passes(small)).toBe(true);
     expect(passes(big)).toBe(false);
+  });
+});
+
+describe("run-history terminal-reason normalization", () => {
+  test("keeps known reasons and drops unknown legacy strings", () => {
+    const base = {
+      id: "legacy",
+      task: "task",
+      startedAt: 1,
+      endedAt: 2,
+      steps: [],
+      logs: [],
+      result: null,
+      totalTokensIn: 0,
+      totalTokensOut: 0,
+      totalCostUsd: 0,
+      stepCount: 0,
+      overflowCount: 0,
+    } satisfies RunRecord;
+    expect(normalizeRunRecord({ ...base, terminalReason: "cancelled" }).terminalReason).toBe("cancelled");
+    expect(normalizeRunRecord({
+      ...base,
+      terminalReason: "legacy-unknown",
+    } as unknown as RunRecord).terminalReason).toBeUndefined();
   });
 });
 
@@ -229,6 +259,7 @@ describe("history export", () => {
     const blobs: Blob[] = [];
     const origCreate = URL.createObjectURL;
     const origRevoke = URL.revokeObjectURL;
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
     URL.createObjectURL = (b: Blob) => {
       blobs.push(b);
       return "blob:history-export";
@@ -241,6 +272,7 @@ describe("history export", () => {
         await new Promise((r) => setTimeout(r, 10));
       }
     } finally {
+      anchorClick.mockRestore();
       URL.createObjectURL = origCreate;
       URL.revokeObjectURL = origRevoke;
     }

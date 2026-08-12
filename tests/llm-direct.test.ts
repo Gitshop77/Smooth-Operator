@@ -48,6 +48,7 @@ describe("extractUsage", () => {
           tokensOut: 20,
           reasoningTokens: 5,
           cachedInputTokens: 3,
+          cachedWriteInputTokens: 2,
           model: "gpt-5",
           costUsd: 0.01,
         },
@@ -58,6 +59,7 @@ describe("extractUsage", () => {
       tokensOut: 20,
       reasoningTokens: 5,
       cachedInputTokens: 3,
+      cachedWriteInputTokens: 2,
       model: "gpt-5",
       costUsd: 0.01,
     });
@@ -69,6 +71,7 @@ describe("extractUsage", () => {
     expect(out.tokensOut).toBeUndefined();
     expect(out.reasoningTokens).toBeUndefined();
     expect(out.cachedInputTokens).toBeUndefined();
+    expect(out.cachedWriteInputTokens).toBeUndefined();
     expect(out.model).toBeUndefined();
     expect(out.costUsd).toBeUndefined();
   });
@@ -80,6 +83,7 @@ describe("extractUsage", () => {
     expect(out.tokensOut).toBeUndefined();
     expect(out.reasoningTokens).toBeUndefined();
     expect(out.cachedInputTokens).toBeUndefined();
+    expect(out.cachedWriteInputTokens).toBeUndefined();
     expect(out.model).toBeUndefined();
     expect(out.costUsd).toBeUndefined();
   });

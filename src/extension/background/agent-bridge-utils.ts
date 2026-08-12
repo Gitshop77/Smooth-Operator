@@ -30,6 +30,7 @@ export function clampNumber(v: unknown, def: number, min: number): number {
 // ─── Synchronous RUN-guard flag ────────────────────────────────────────────
 
 let runStarting = false;
+let runStartCancellationRequested = false;
 
 /** Read the synchronous RUN-guard flag (used by the RUN message handler). */
 export function isRunStarting(): boolean {
@@ -39,6 +40,20 @@ export function isRunStarting(): boolean {
 /** Set the synchronous RUN-guard flag (used by the RUN message handler). */
 export function setRunStarting(v: boolean): void {
   runStarting = v;
+  // A cancellation request belongs to one admission attempt only. Retaining
+  // it after that attempt has released the guard would incorrectly cancel a
+  // later, independently admitted run.
+  if (!v) runStartCancellationRequested = false;
+}
+
+/** Latch STOP during an admission gap before a RunController exists. */
+export function requestRunStartCancellation(): void {
+  if (runStarting) runStartCancellationRequested = true;
+}
+
+/** True when STOP won an in-progress admission before the controller existed. */
+export function isRunStartCancellationRequested(): boolean {
+  return runStartCancellationRequested;
 }
 
 // ─── Per-run download consent (full_agentic) ──────────────────────────────

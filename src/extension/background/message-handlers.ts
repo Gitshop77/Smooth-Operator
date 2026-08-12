@@ -1,19 +1,24 @@
 import type { AgentMode } from "@/lib/agent/modes";
-import type { LogEvent } from "@/lib/agent/types";
-import { getRunState, saveRunState } from "./state-store";
+import type { AgentAction, LogEvent } from "@/lib/agent/types";
+import { ActionSchema } from "@/lib/agent/tools/schema";
 import {
-  startRun,
-  isRunStarting,
-  setRunStarting,
   consumeDownloadConsentForMode,
   markDownloadConsentConsumed,
   releaseDownloadConsentReservation,
-  DEFAULT_MAX_STEPS,
-  DEFAULT_MODE,
 } from "./agent-bridge";
-import type { CdpClickMessage, CdpPressAndHoldMessage, SaveAsPdfMessage, ScreenshotMessage, DetectVisualMessage, TabActionMessage } from "./message-types";
-import { KNOWN_MODES } from "./message-types";
+import type { ActionEffectAuthorizationMessage, CdpClickMessage, CdpPressAndHoldMessage, SaveAsPdfMessage, ScreenshotMessage, DetectVisualMessage, TabActionMessage, ClearVisionCacheMessage, PrivilegedDispatchToken } from "./message-types";
 import { sendDebuggerCommandWithTimeout } from "./tab-manager-utils";
+import {
+  canCurrentRunDispatch,
+  getCurrentRunController,
+  type RunDispatchToken,
+} from "./run-controller";
+import { authorizeRunScopedDispatch } from "./run-dispatch-authorization";
+import { broadcastSupplementalRunEvent } from "./run-event-broadcast";
+import { authorizeAndIssueEffectCapability, consumeEffectCapability } from "./privileged-action-policy";
+import { runCommandService } from "./run-command-service";
+import { sanitizeDownloadName } from "./download-name";
+import { runSessionState } from "./run-session-state";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -76,17 +81,103 @@ function requirePrivileged(
   return true;
 }
 
+interface PrivilegedAuthorization {
+  token: RunDispatchToken;
+  signal: AbortSignal;
+  mode: AgentMode;
+}
+
+/**
+ * Validate the original content dispatch against the current authority. A
+ * Every privileged run-scoped request needs a live controller and token.
+ */
+async function authorizePrivilegedDispatch(
+  supplied: PrivilegedDispatchToken | undefined,
+  sendResponse: (r?: unknown) => void,
+): Promise<PrivilegedAuthorization | null> {
+  const result = await authorizeRunScopedDispatch(supplied);
+  if (!result.ok) {
+    sendResponse({ ok: false, error: result.error });
+    return null;
+  }
+  if (!result.controller) {
+    sendResponse({ ok: false, error: "run controller unavailable" });
+    return null;
+  }
+  return {
+    token: supplied as RunDispatchToken,
+    signal: result.controller.signal,
+    mode: result.controller.snapshot.mode,
+  };
+}
+
+/** Recheck after each await and immediately before a privileged browser effect. */
+function assertPrivilegedDispatch(authorization: PrivilegedAuthorization): void {
+  if (!canCurrentRunDispatch(authorization.token)) {
+    throw new Error("run cancellation invalidated action dispatch");
+  }
+  if (authorization.signal?.aborted) {
+    throw authorization.signal.reason instanceof Error
+      ? authorization.signal.reason
+      : new DOMException("Aborted", "AbortError");
+  }
+}
+
+/** Enforce the controller-owned capability and confirmation policy at the effect boundary. */
+function requireEffectCapability(
+  authorization: PrivilegedAuthorization,
+  action: AgentAction,
+  effectCapability: unknown,
+  sendResponse: (r?: unknown) => void,
+): boolean {
+  if (!consumeEffectCapability(effectCapability, authorization.token, action)) {
+    sendResponse({ ok: false, error: "BLOCKED: missing or invalid action effect capability" });
+    return false;
+  }
+  return true;
+}
+
+/** Content must obtain this background-issued proof immediately before every action effect. */
+export function handleAuthorizeActionEffect(
+  msg: ActionEffectAuthorizationMessage,
+  sender: chrome.runtime.MessageSender,
+  sendResponse: (response?: unknown) => void,
+): boolean {
+  return bindHandler(sendResponse, async () => {
+    if (!requirePrivileged(sender, sendResponse)) return;
+    const authorization = await authorizePrivilegedDispatch(msg.token, sendResponse);
+    if (!authorization) return;
+    assertPrivilegedDispatch(authorization);
+    const parsed = ActionSchema.safeParse(msg.action);
+    if (!parsed.success) {
+      sendResponse({ ok: false, error: "BLOCKED: invalid action effect authorization payload" });
+      return;
+    }
+    const issued = authorizeAndIssueEffectCapability(authorization.token, authorization.mode, parsed.data);
+    sendResponse(issued.ok ? { ok: true, effectCapability: issued.effectCapability } : { ok: false, error: issued.error });
+  });
+}
+
 /** Resolve the active run's current tab id + mode, responding + returning null when there is none. */
 async function requireActiveTabId(
+  suppliedToken: PrivilegedDispatchToken | undefined,
   sendResponse: (r?: unknown) => void,
-): Promise<{ tabId: number; mode: string | undefined } | null> {
-  const runState = await getRunState();
+): Promise<{ tabId: number; mode: AgentMode; authorization: PrivilegedAuthorization } | null> {
+  const authorization = await authorizePrivilegedDispatch(suppliedToken, sendResponse);
+  if (!authorization) return null;
+  const runState = await runSessionState.readForRun(authorization.token);
+  try {
+    assertPrivilegedDispatch(authorization);
+  } catch {
+    sendResponse({ ok: false, error: "run cancellation invalidated action dispatch" });
+    return null;
+  }
   const tabId = runState?.currentTabId;
   if (!tabId) {
     sendResponse({ ok: false, error: "no active run" });
     return null;
   }
-  return { tabId, mode: runState?.mode };
+  return { tabId, mode: authorization.mode, authorization };
 }
 
 /**
@@ -99,17 +190,19 @@ async function requireActiveTabId(
 function bindPrivilegedTabHandler(
   sendResponse: (r?: unknown) => void,
   sender: chrome.runtime.MessageSender,
+  token: PrivilegedDispatchToken | undefined,
   fn: (
     tabId: number,
-    mode: string | undefined,
+    mode: AgentMode,
+    authorization: PrivilegedAuthorization,
     sendResponse: (r?: unknown) => void,
   ) => Promise<void>,
 ): boolean {
   return bindHandler(sendResponse, async () => {
     if (!requirePrivileged(sender, sendResponse)) return;
-    const tabRes = await requireActiveTabId(sendResponse);
+    const tabRes = await requireActiveTabId(token, sendResponse);
     if (tabRes === null) return;
-    await fn(tabRes.tabId, tabRes.mode, sendResponse);
+    await fn(tabRes.tabId, tabRes.mode, tabRes.authorization, sendResponse);
   });
 }
 
@@ -132,27 +225,33 @@ async function captureAndDownload(opts: {
   fallbackTitle: string;
   rawFileName: unknown;
   mode: string | undefined;
+  assertAuthorized: () => void;
 }): Promise<void> {
   const { withPageDebugger } = await import("./tab-manager");
+  opts.assertAuthorized();
   // Route through the refcounted per-tab session so a concurrent per-step
   // screenshot (extractStateForRun) cannot detach this session mid-capture.
   const dataUrl = await withPageDebugger(opts.tabId, async () => {
+    opts.assertAuthorized();
     const result = await opts.capture();
+    opts.assertAuthorized();
     if (!result?.data) throw new Error("capture returned no data");
     return `data:${opts.mime};base64,${result.data}`;
   });
   let title: string;
   try {
     const tab = await chrome.tabs.get(opts.tabId);
+    opts.assertAuthorized();
     title = (tab.title || opts.fallbackTitle).replace(/[^\w.-]+/g, "_").slice(0, 80);
   } catch {
     title = opts.fallbackTitle.replace(/[^\w.-]+/g, "_").slice(0, 80);
   }
   const rawName = (typeof opts.rawFileName === "string" && opts.rawFileName.trim()) ? opts.rawFileName : `${title}.${opts.extension}`;
-  const { sanitizeDownloadName } = await import("./message-routing");
+  opts.assertAuthorized();
   const filename = sanitizeDownloadName(rawName);
   const requireSaveAs = consumeDownloadConsentForMode(opts.mode);
   try {
+    opts.assertAuthorized();
     await chrome.downloads.download({ url: dataUrl, filename, saveAs: requireSaveAs });
     markDownloadConsentConsumed();
     opts.sendResponse({ ok: true, filename });
@@ -168,76 +267,19 @@ export function handleRun(
   msg: { task: string; maxSteps?: number; mode?: AgentMode },
   sendResponse: (response?: unknown) => void,
 ): boolean {
-  if (isRunStarting()) {
-    sendResponse({ ok: false, error: "already starting" });
-    return false;
-  }
-  setRunStarting(true);
-  let responded = false;
-  (async () => {
-    try {
-      if (typeof msg.task !== "string" || msg.task.trim().length === 0) {
-        setRunStarting(false);
-        sendResponse({ ok: false, error: "task required" });
-        responded = true;
-        return;
-      }
-      const MAX_TASK_LENGTH = 10_000;
-      if (msg.task.length > MAX_TASK_LENGTH) {
-        setRunStarting(false);
-        sendResponse({ ok: false, error: `Task too long (${msg.task.length} chars, max ${MAX_TASK_LENGTH})` });
-        responded = true;
-        return;
-      }
-      const existing = await getRunState();
-      if (existing?.active) {
-        setRunStarting(false);
-        sendResponse({ ok: false, error: "already running" });
-        responded = true;
-        return;
-      }
-      sendResponse({ ok: true });
-      responded = true;
-      const reqMaxSteps = (typeof msg.maxSteps === "number" && Number.isFinite(msg.maxSteps) && msg.maxSteps >= 1)
-        ? Math.max(1, Math.min(Math.floor(msg.maxSteps), 1000))
-        : DEFAULT_MAX_STEPS;
-      await startRun({
-        task: msg.task,
-        maxSteps: reqMaxSteps,
-        mode:
-          typeof msg.mode === "string" && KNOWN_MODES.has(msg.mode as AgentMode)
-            ? msg.mode
-            : DEFAULT_MODE,
-      });
-    } catch (e) {
-      setRunStarting(false);
-      if (!responded) {
-        sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });
-      }
-    }
-  })();
-  return true;
+  return runCommandService.handleRun(msg, sendResponse);
 }
 
 export function handleStop(
   sendResponse: (response?: unknown) => void,
 ): boolean {
-  return bindHandler(sendResponse, async () => {
-    const state = await getRunState();
-    if (state?.active || isRunStarting()) {
-      await saveRunState({ abortRequested: true });
-    }
-    sendResponse({ ok: true });
-  });
+  return runCommandService.handleStop(sendResponse);
 }
 
 export function handleStatus(
   sendResponse: (response?: unknown) => void,
 ): boolean {
-  return bindHandler(sendResponse, async () => {
-    const state = await getRunState();
-    sendResponse({ running: !!state?.active, state });
-  });
+  return runCommandService.handleStatus(sendResponse);
 }
 
 export function handleCdpClick(
@@ -245,10 +287,18 @@ export function handleCdpClick(
   sender: chrome.runtime.MessageSender,
   sendResponse: (response?: unknown) => void,
 ): boolean {
-  return bindPrivilegedTabHandler(sendResponse, sender, async (tabId) => {
+  return bindPrivilegedTabHandler(sendResponse, sender, msg.token, async (tabId, _mode, authorization) => {
+    if (!msg.action) {
+      sendResponse({ ok: false, error: "BLOCKED: missing CDP_CLICK action payload" });
+      return;
+    }
+    if (!requireEffectCapability(authorization, msg.action, msg.effectCapability, sendResponse)) return;
     const { withPageDebugger } = await import("./tab-manager");
+    assertPrivilegedDispatch(authorization);
     await withPageDebugger(tabId, async () => {
       const { cdpClick } = await import("@/lib/agent/cdp-controller");
+      const { rectCenter } = await import("./cdp-rect-utils");
+      assertPrivilegedDispatch(authorization);
       let cx: number, cy: number;
       if (msg.visionIndex) {
         const { getVisionElementRect, isVisionCacheFresh } = await import("./agent-bridge");
@@ -256,13 +306,13 @@ export function handleCdpClick(
           sendResponse({ ok: false, error: "vision cache stale, re-detect" });
           return;
         }
+        assertPrivilegedDispatch(authorization);
         const rect = getVisionElementRect(msg.visionIndex);
         if (!rect) {
           sendResponse({ ok: false, error: `vision element ${msg.visionIndex} not found in cache` });
           return;
         }
-        cx = rect.x + rect.width / 2;
-        cy = rect.y + rect.height / 2;
+        ({ x: cx, y: cy } = rectCenter(rect));
       } else {
         const rect = msg.rect;
         if (
@@ -275,11 +325,11 @@ export function handleCdpClick(
           sendResponse({ ok: false, error: "invalid CDP_CLICK rect payload" });
           return;
         }
-        cx = rect.x + rect.width / 2;
-        cy = rect.y + rect.height / 2;
+        ({ x: cx, y: cy } = rectCenter(rect));
       }
 
-      await cdpClick(tabId, cx, cy);
+      assertPrivilegedDispatch(authorization);
+      await cdpClick(tabId, cx, cy, { assertAuthorized: () => assertPrivilegedDispatch(authorization) });
       sendResponse({ ok: true });
     });
   });
@@ -290,10 +340,17 @@ export function handleCdpPressAndHold(
   sender: chrome.runtime.MessageSender,
   sendResponse: (response?: unknown) => void,
 ): boolean {
-  return bindPrivilegedTabHandler(sendResponse, sender, async (tabId) => {
+  return bindPrivilegedTabHandler(sendResponse, sender, msg.token, async (tabId, _mode, authorization) => {
+    if (!msg.action) {
+      sendResponse({ ok: false, error: "BLOCKED: missing CDP_PRESS_AND_HOLD action payload" });
+      return;
+    }
+    if (!requireEffectCapability(authorization, msg.action, msg.effectCapability, sendResponse)) return;
     const { withPageDebugger } = await import("./tab-manager");
+    assertPrivilegedDispatch(authorization);
     await withPageDebugger(tabId, async () => {
       const { cdpPressAndHold } = await import("@/lib/agent/cdp-controller");
+      assertPrivilegedDispatch(authorization);
       if (
         typeof msg.x !== "number" || !Number.isFinite(msg.x) ||
         typeof msg.y !== "number" || !Number.isFinite(msg.y) ||
@@ -303,7 +360,12 @@ export function handleCdpPressAndHold(
         sendResponse({ ok: false, error: "invalid CDP_PRESS_AND_HOLD payload" });
         return;
       }
-      await cdpPressAndHold(tabId, msg.x, msg.y, { holdMs: msg.holdMs, delay: msg.delayMs });
+      assertPrivilegedDispatch(authorization);
+      await cdpPressAndHold(tabId, msg.x, msg.y, {
+        holdMs: msg.holdMs,
+        delay: msg.delayMs,
+        assertAuthorized: () => assertPrivilegedDispatch(authorization),
+      });
       sendResponse({ ok: true });
     });
   });
@@ -314,20 +376,25 @@ export function handleSaveAsPdf(
   sender: chrome.runtime.MessageSender,
   sendResponse: (response?: unknown) => void,
 ): boolean {
-  return bindPrivilegedTabHandler(sendResponse, sender, async (tabId, mode) => {
+  return bindPrivilegedTabHandler(sendResponse, sender, msg.token, async (tabId, mode, authorization) => {
+    const action = msg.action ?? { type: "save_as_pdf", file_name: msg.fileName } as AgentAction;
+    if (!requireEffectCapability(authorization, action, msg.effectCapability, sendResponse)) return;
     await captureAndDownload({
       sendResponse,
       tabId,
-      capture: () =>
-        sendDebuggerCommandWithTimeout<{ data?: string }>(tabId, "Page.printToPDF", {
+      capture: () => {
+        assertPrivilegedDispatch(authorization);
+        return sendDebuggerCommandWithTimeout<{ data?: string }>(tabId, "Page.printToPDF", {
           printBackground: true,
           preferCSSPageSize: true,
-        }),
+        });
+      },
       mime: "application/pdf",
       extension: "pdf",
       fallbackTitle: "page",
       rawFileName: msg.fileName,
       mode,
+      assertAuthorized: () => assertPrivilegedDispatch(authorization),
     });
   });
 }
@@ -337,31 +404,43 @@ export function handleScreenshot(
   sender: chrome.runtime.MessageSender,
   sendResponse: (response?: unknown) => void,
 ): boolean {
-  return bindPrivilegedTabHandler(sendResponse, sender, async (tabId, mode) => {
+  return bindPrivilegedTabHandler(sendResponse, sender, msg.token, async (tabId, mode, authorization) => {
+    const action = msg.action ?? { type: "screenshot", file_name: msg.fileName } as AgentAction;
+    if (!requireEffectCapability(authorization, action, msg.effectCapability, sendResponse)) return;
     const { getScreenshotQuality } = await import("./tab-manager");
     const screenshotQuality = await getScreenshotQuality();
+    assertPrivilegedDispatch(authorization);
     await captureAndDownload({
       sendResponse,
       tabId,
-      capture: () =>
-        sendDebuggerCommandWithTimeout<{ data?: string }>(tabId, "Page.captureScreenshot", {
+      capture: () => {
+        assertPrivilegedDispatch(authorization);
+        return sendDebuggerCommandWithTimeout<{ data?: string }>(tabId, "Page.captureScreenshot", {
           format: "jpeg",
           quality: screenshotQuality,
-        }),
+        });
+      },
       mime: "image/jpeg",
       extension: "jpg",
       fallbackTitle: "screenshot",
       rawFileName: msg.fileName,
       mode,
+      assertAuthorized: () => assertPrivilegedDispatch(authorization),
     });
   });
 }
 
 export function handleClearVisionCache(
+  msg: ClearVisionCacheMessage,
+  sender: chrome.runtime.MessageSender,
   sendResponse: (response?: unknown) => void,
 ): boolean {
   return bindHandler(sendResponse, async () => {
+    if (!requirePrivileged(sender, sendResponse)) return;
+    const authorization = await authorizePrivilegedDispatch(msg.token, sendResponse);
+    if (!authorization) return;
     const { clearVisionElementsCacheForNewRun } = await import("./run-helpers");
+    assertPrivilegedDispatch(authorization);
     clearVisionElementsCacheForNewRun();
     sendResponse({ ok: true });
   });
@@ -374,21 +453,33 @@ export function handleTabAction(
 ): boolean {
   return bindHandler(sendResponse, async () => {
     if (!requirePrivileged(sender, sendResponse)) return;
-    const runState = await getRunState();
+    const authorization = await authorizePrivilegedDispatch(msg.token, sendResponse);
+    if (!authorization) return;
+    if (!requireEffectCapability(authorization, msg.action, msg.effectCapability, sendResponse)) return;
+    const runState = await runSessionState.readForRun(authorization.token);
     if (!runState) { sendResponse({ ok: false, error: "no active run" }); return; }
     const { handleTabAction: doTabAction } = await import("./tab-manager");
+    try {
+      assertPrivilegedDispatch(authorization);
+    } catch {
+      sendResponse({ ok: false, error: "run cancellation invalidated action dispatch" });
+      return;
+    }
     const notify = (event: LogEvent): void => {
-      chrome.runtime
-        .sendMessage({
-          type: "AGENT_EVENT",
-          event,
-          time: new Date().toLocaleTimeString("en-GB", { hour12: false }),
-        })
-        .catch(() => {
-          /* side panel may not be open — non-fatal */
-        });
+      const controller = getCurrentRunController();
+      if (!controller || !canCurrentRunDispatch(authorization.token)) return;
+      broadcastSupplementalRunEvent(event, controller);
     };
-    const result = await doTabAction(msg.action, runState, notify);
+    assertPrivilegedDispatch(authorization);
+    const result = await doTabAction(
+      msg.action,
+      runState,
+      notify,
+      authorization.signal,
+      () => canCurrentRunDispatch(authorization.token),
+      authorization.token,
+    );
+    assertPrivilegedDispatch(authorization);
     sendResponse({
       ok: true,
       handled: result.handled,
@@ -408,11 +499,34 @@ export function handleDetectVisual(
 ): boolean {
   return bindHandler(sendResponse, async () => {
     if (!requirePrivileged(sender, sendResponse)) return;
+    const authorization = await authorizePrivilegedDispatch(msg.token, sendResponse);
+    if (!authorization) return;
+    if (!requireEffectCapability(authorization, { type: "detect_visual", query: msg.query } as AgentAction, msg.effectCapability, sendResponse)) return;
     const query = typeof msg.query === "string" ? msg.query : "";
     const { handleDetectVisualRequest, getCurrentRunAbortSignal } = await import("./run-helpers");
+    try {
+      assertPrivilegedDispatch(authorization);
+    } catch {
+      sendResponse({ ok: false, error: "run cancellation invalidated action dispatch" });
+      return;
+    }
     // Thread the active run's abort signal so a user STOP short-circuits an
     // in-flight vision decode instead of letting it run to completion.
-    const result = await handleDetectVisualRequest(query, getCurrentRunAbortSignal() ?? undefined);
+    const result = await handleDetectVisualRequest(
+      query,
+      authorization.token,
+      authorization.signal ?? getCurrentRunAbortSignal() ?? undefined,
+      () => assertPrivilegedDispatch(authorization),
+    );
+    if (result.ok) {
+      const correlatedState = await runSessionState.readForRun(authorization.token);
+      assertPrivilegedDispatch(authorization);
+      if (!correlatedState) {
+        sendResponse({ ok: false, error: "run state authority expired" });
+        return;
+      }
+    }
+    assertPrivilegedDispatch(authorization);
     sendResponse(result);
   });
 }

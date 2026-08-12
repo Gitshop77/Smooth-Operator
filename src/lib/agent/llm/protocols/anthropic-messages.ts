@@ -49,6 +49,10 @@ export interface StreamState {
   dropped?: number;
   /** Type of the most recently parsed SSE frame (avoids re-parsing in terminal()). */
   lastFrameType?: string;
+  /** A thinking-only block was seen; its content is never retained or logged. */
+  reasoningObserved?: boolean;
+  /** Short provider terminal tag from message_delta; never model content. */
+  finishReason?: string;
   usage?: { tokensIn: number; tokensOut: number; model: string; costUsd: number; cachedInputTokens?: number; cachedWriteInputTokens?: number; reasoningTokens?: number };
 }
 
@@ -99,6 +103,14 @@ export const protocol: Protocol<AnthropicBody, string, { type: string; content?:
         state.content += data.delta.text;
         events.push({ type: "text", content: data.delta.text });
       }
+      if (
+        data.type === "content_block_delta" &&
+        (data.delta?.type === "thinking_delta" || data.delta?.type === "redacted_thinking_delta")
+      ) {
+        // Do not retain the thinking payload. Its presence is enough to
+        // classify a terminal reasoning-only response safely.
+        state.reasoningObserved = true;
+      }
       if (data.type === "content_block_delta" && data.delta?.type === "input_json_delta" && data.delta?.partial_json) {
         state.toolInput += data.delta.partial_json;
       }
@@ -114,6 +126,14 @@ export const protocol: Protocol<AnthropicBody, string, { type: string; content?:
       if (data.type === "message_delta" && data.usage) {
         state.usage = buildMessageDeltaUsage(data.usage, state.usage, state.model ?? "");
       }
+      if (data.type === "message_delta") {
+        const reason = data.delta?.stop_reason;
+        // Keep only a bounded machine-readable tag. Provider payloads can be
+        // malformed, and completion evidence must never become a text sink.
+        if (typeof reason === "string" && /^[a-z0-9_-]{1,64}$/i.test(reason)) {
+          state.finishReason = reason;
+        }
+      }
       return { state, events };
     },
     terminal: (frame: string, state?: StreamState): boolean => {
@@ -127,6 +147,11 @@ export const protocol: Protocol<AnthropicBody, string, { type: string; content?:
         return false;
       }
     },
+    completion: (state: StreamState) => ({
+      reasoningObserved: state.reasoningObserved,
+      reasoningTokens: state.usage?.reasoningTokens,
+      finishReason: state.finishReason,
+      droppedFrames: state.dropped,
+    }),
   },
 };
-

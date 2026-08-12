@@ -40,6 +40,7 @@ type MockContext = {
   fillText: ReturnType<typeof vi.fn>;
   measureText: ReturnType<typeof vi.fn>;
   drawImage: ReturnType<typeof vi.fn>;
+  scale: ReturnType<typeof vi.fn>;
 };
 
 function makeContext(): MockContext {
@@ -54,6 +55,7 @@ function makeContext(): MockContext {
     fillText: vi.fn(),
     measureText: vi.fn(() => ({ width: 20 })),
     drawImage: vi.fn(),
+    scale: vi.fn(),
   };
 }
 

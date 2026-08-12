@@ -22,7 +22,7 @@ import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import { TIMINGS, sleep } from "../constants";
 import { domFingerprint } from "../helpers";
-import type { ActionContext } from "./types";
+import { resolveBeforeFingerprint, type ActionContext } from "./types";
 
 export async function handleGoBack(
   ctx: ActionContext,
@@ -97,5 +97,5 @@ async function waitForPageSettle(ctx: ActionContext): Promise<boolean> {
     prevUrl = url;
     prevFp = fp;
   }
-  return prevUrl !== ctx.beforeUrl || prevFp !== ctx.beforeFingerprint;
+  return prevUrl !== ctx.beforeUrl || prevFp !== resolveBeforeFingerprint(ctx);
 }

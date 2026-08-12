@@ -23,6 +23,7 @@ export {
   extractBrowserState,
   resetDomBaseline,
   getSelectorMap,
+  getElementIdentities,
   isVisible,
 } from "./extraction/page-state";
 export { buildAttrs, hashElement, buildIdentityFallbacks, matchElementByFallbacks } from "./extraction/element-info";

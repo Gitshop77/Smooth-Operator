@@ -44,6 +44,81 @@ import {
 export { isStealthEnabled };
 
 /**
+ * Per-profile stealth parameter set (profile drift).
+ *
+ * Fixed fabrication values (hardwareConcurrency: 4, deviceMemory: 8, rtt: 50,
+ * downlink: 10 on EVERY install) create a single uniform automation
+ * fingerprint across every Open Cowork user — trivially correlated by an
+ * anti-bot vendor. Instead the profile resolves ONE random-but-plausible
+ * parameter set and reuses it for every injection of this browser profile
+ * (a real device does not change its core count between navigations, so the
+ * drift must be persistent, not per-page). Values stay on the grids real
+ * desktop Chrome reports.
+ */
+export interface StealthSeed {
+  hardwareConcurrency: number;
+  deviceMemory: number;
+  connectionRtt: number;
+  connectionDownlink: number;
+}
+
+export const DEFAULT_STEALTH_SEED: StealthSeed = {
+  hardwareConcurrency: 4,
+  deviceMemory: 8,
+  connectionRtt: 50,
+  connectionDownlink: 10,
+};
+
+/** Validates a candidate seed against the plausible-desktop grids. */
+export function isValidStealthSeed(value: unknown): value is StealthSeed {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const s = value as Partial<StealthSeed>;
+  return (
+    typeof s.hardwareConcurrency === "number" &&
+    [2, 4, 6, 8, 12, 16].includes(s.hardwareConcurrency) &&
+    typeof s.deviceMemory === "number" &&
+    [2, 4, 8].includes(s.deviceMemory) &&
+    typeof s.connectionRtt === "number" &&
+    s.connectionRtt >= 30 &&
+    s.connectionRtt <= 90 &&
+    typeof s.connectionDownlink === "number" &&
+    [5, 10, 20, 30].includes(s.connectionDownlink)
+  );
+}
+
+/** Draw one plausible seed. `random` is injectable for deterministic tests. */
+export function generateStealthSeed(random: () => number = Math.random): StealthSeed {
+  const pick = <T,>(arr: readonly T[]): T => arr[Math.floor(random() * arr.length) % arr.length];
+  return {
+    hardwareConcurrency: pick([2, 4, 6, 8, 12, 16] as const),
+    deviceMemory: pick([4, 8] as const),
+    connectionRtt: pick([40, 45, 50, 55, 60, 65] as const),
+    connectionDownlink: pick([10, 20, 30] as const),
+  };
+}
+
+const STEALTH_SEED_KEY = "stealth_profile_seed_v1";
+
+/**
+ * Resolve the profile's persistent stealth seed: reuse a stored valid seed,
+ * otherwise generate + persist one (so every injection of this browser
+ * profile reports ONE coherent device persona). Fails closed to the
+ * legacy defaults when storage is unavailable.
+ */
+export async function resolveStealthSeed(): Promise<StealthSeed> {
+  try {
+    const res = await chrome.storage.local.get(STEALTH_SEED_KEY);
+    const stored = res[STEALTH_SEED_KEY];
+    if (isValidStealthSeed(stored)) return stored;
+    const fresh = generateStealthSeed();
+    await chrome.storage.local.set({ [STEALTH_SEED_KEY]: fresh });
+    return fresh;
+  } catch {
+    return { ...DEFAULT_STEALTH_SEED };
+  }
+}
+
+/**
  * Inject the 13 anti-detection patches into a tab.
  *
  * Best called on tab creation / at navigation start. For an already-loaded
@@ -61,11 +136,13 @@ export { isStealthEnabled };
  */
 export async function injectAntiDetection(tabId: number): Promise<void> {
   try {
+    const seed = await resolveStealthSeed();
     await chrome.scripting.executeScript({
-      target: { tabId },
+      target: { tabId, allFrames: true },
       world: "MAIN",
       injectImmediately: true,
       func: stealthScriptBody,
+      args: [seed],
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -93,9 +170,16 @@ export async function injectAntiDetection(tabId: number): Promise<void> {
  * Runs as an IIFE inside the page's MAIN world. Each patch is wrapped in
  * try/catch via the `p()` helper so a single failure never breaks the rest.
  */
-export function stealthScriptBody(): void {
+export function stealthScriptBody(seed?: StealthSeed): void {
   (function () {
     "use strict";
+    // Inline seed resolution: this body is serialized via toString and runs in
+    // the page's MAIN world, so it must not reference module-level constants.
+    // The SW passes the profile's persistent seed via executeScript args.
+    const s: StealthSeed =
+      seed && typeof seed.hardwareConcurrency === "number" && typeof seed.deviceMemory === "number"
+        ? seed
+        : { hardwareConcurrency: 4, deviceMemory: 8, connectionRtt: 50, connectionDownlink: 10 };
     function p(fn: () => void) {
       try {
         fn();
@@ -105,12 +189,48 @@ export function stealthScriptBody(): void {
     }
 
     function patchWebdriver() {
-      Object.defineProperty(navigator, "webdriver", {
-        get: function () {
-          return false;
-        },
-        configurable: true,
-      });
+      // Real Chrome exposes `navigator.webdriver` ONLY as a prototype getter
+      // with NO own property on the instance. Restore that exact shape:
+      // delete any own property first (an own data property is itself a tell),
+      // then define the getter on `Navigator.prototype` — and mirror it on
+      // `WorkerNavigator.prototype` so worker-vs-main coherence probes see the
+      // same surface. The getter returns `false` (falsy like the native
+      // `undefined`) and keeps the value-probe answer identical to the old
+      // patch while fixing descriptor/own-property-based probes.
+      //
+      // Fallback: when the instance does NOT inherit from `Navigator.prototype`
+      // (plain-object shims / exotic embeddings — never real Chrome), define
+      // the getter on the instance too so value probes still read `false`.
+      try {
+        delete (navigator as unknown as Record<string, unknown>).webdriver;
+      } catch {
+        /* own property may be non-configurable on a hostile page — leave it */
+      }
+      const getter = function (this: unknown): boolean {
+        return false;
+      };
+      const navProto = typeof Navigator !== "undefined" ? Navigator.prototype : null;
+      const inherits = navProto ? Object.getPrototypeOf(navigator) === navProto : false;
+      if (navProto) {
+        Object.defineProperty(navProto, "webdriver", {
+          get: getter,
+          configurable: true,
+        });
+      }
+      const workerNavCtor = (globalThis as unknown as { WorkerNavigator?: { prototype?: object } })
+        .WorkerNavigator;
+      if (workerNavCtor?.prototype) {
+        Object.defineProperty(workerNavCtor.prototype, "webdriver", {
+          get: getter,
+          configurable: true,
+        });
+      }
+      if (!inherits) {
+        Object.defineProperty(navigator, "webdriver", {
+          get: getter,
+          configurable: true,
+        });
+      }
     }
 
     function patchPlugins() {
@@ -217,6 +337,16 @@ export function stealthScriptBody(): void {
         refresh: function () {},
       };
       makeIterable(pa, plugins);
+      // JS-built arrays stringify to `[object Array]` — a documented plugin-
+      // fabrication tell. `Symbol.toStringTag` restores the native
+      // stringification so `String(navigator.plugins)` reads `[object
+      // PluginArray]`. (The native PluginArray is populated → no-op path above
+      // keeps zero touch when a real plugin set already exists.)
+      try {
+        Object.defineProperty(pa, Symbol.toStringTag, { value: "PluginArray" });
+      } catch {
+        /* ignore — a hostile/frozen object must not break the patch */
+      }
       Object.defineProperty(navigator, "plugins", {
         get: function () {
           return pa;
@@ -243,6 +373,11 @@ export function stealthScriptBody(): void {
         },
       };
       makeIterable(ma, allMimes);
+      try {
+        Object.defineProperty(ma, Symbol.toStringTag, { value: "MimeTypeArray" });
+      } catch {
+        /* ignore */
+      }
       Object.defineProperty(navigator, "mimeTypes", {
         get: function () {
           return ma;
@@ -367,6 +502,12 @@ export function stealthScriptBody(): void {
     }
 
     function patchWebGL() {
+      // Coherence rule: only fabricate a vendor/renderer when the real GPU is
+      // missing or a known software renderer. A headed Chrome on real hardware
+      // already reports a plausible GPU (e.g. "Apple" / "Apple M-series"),
+      // and overriding it to Intel on macOS creates exactly the cross-attribute
+      // mismatch (Apple persona + Intel GPU) that detection scorers exploit.
+      const BAD_RENDERER_RE = /swiftshader|llvmpipe|software|basic render/i;
       const handler = {
         apply: function (
           target: (this: unknown, p: number) => unknown,
@@ -374,8 +515,13 @@ export function stealthScriptBody(): void {
           args: [number],
         ) {
           const param = args[0];
-          if (param === 0x9245) return "Intel Inc.";
-          if (param === 0x9246) return "Intel Iris OpenGL Engine";
+          if (param === 0x9245 || param === 0x9246) {
+            const real = Reflect.apply(target, thisArg, args);
+            if (real && !BAD_RENDERER_RE.test(String(real))) return real;
+            // Fabricate a coherent Intel/Apple-neutral persona for the
+            // software/empty case (headless Chrome reports SwiftShader).
+            return param === 0x9245 ? "Intel Inc." : "Intel Iris OpenGL Engine";
+          }
           return Reflect.apply(target, thisArg, args);
         },
       };
@@ -409,8 +555,8 @@ export function stealthScriptBody(): void {
       if (nav.connection) return;
       const conn = {
         effectiveType: "4g",
-        rtt: 50,
-        downlink: 10,
+        rtt: s.connectionRtt,
+        downlink: s.connectionDownlink,
         saveData: false,
         onchange: null,
         addEventListener: function () {},
@@ -469,22 +615,32 @@ export function stealthScriptBody(): void {
 
     function patchHardwareConcurrency() {
       const nav = navigator as Navigator & { hardwareConcurrency?: number };
-      if (!nav.hardwareConcurrency)
+      if (!nav.hardwareConcurrency) {
+        // Fabricated only when missing. Real hardwareConcurrency values sit on
+        // the physical-core grid (2/4/6/8/12/16…); pick from that grid so a
+        // headless value reads like a genuine device rather than a bare 1/0.
+        // The profile's persistent seed (resolved by the SW once per browser
+        // profile) — a stable, plausible core count that varies across
+        // installs instead of a single uniform fabrication value.
         Object.defineProperty(navigator, "hardwareConcurrency", {
           get: function () {
-            return 4;
+            return s.hardwareConcurrency;
           },
         });
+      }
     }
 
     function patchDeviceMemory() {
       const nav = navigator as Navigator & { deviceMemory?: number };
-      if (!nav.deviceMemory)
+      if (!nav.deviceMemory) {
+        // Fabricated only when missing. deviceMemory is a power-of-two grid
+        // (0.25/0.5/1/2/4/8) and never above 8 — the profile seed picks from it.
         Object.defineProperty(navigator, "deviceMemory", {
           get: function () {
-            return 8;
+            return s.deviceMemory;
           },
         });
+      }
     }
 
     p(patchWebdriver);

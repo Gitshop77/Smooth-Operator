@@ -15,10 +15,10 @@
 import { resolveTimeoutMs, sanitizeResponse } from "./human-interaction-utils";
 
 /** The 5 supported interaction modes. */
-type HumanInteractionMode = "confirm" | "input" | "password" | "select" | "request_help";
+export type HumanInteractionMode = "confirm" | "input" | "password" | "select" | "request_help";
 
 /** Request payload sent by the agent to the user. */
-interface HumanInteractionRequest {
+export interface HumanInteractionRequest {
   /** Which kind of prompt to display. */
   mode: HumanInteractionMode;
   /** Question or instruction to show the user. */
@@ -30,10 +30,17 @@ interface HumanInteractionRequest {
   timeoutMs?: number;
 }
 
+/** Immutable background authority carried across the content/runtime boundary. */
+export interface HumanInteractionDispatchToken {
+  runId: string;
+  dispatchRevision: number;
+}
+
 /** Tagged-union response from the user. */
 export type HumanInteractionResponse =
   | { mode: "confirm"; confirmed: boolean }
   | { mode: "input"; value: string }
+  | { mode: "password"; value: string }
   | { mode: "select"; value: string }
   | { mode: "request_help"; value: string }
   | { mode: "cancelled" }
@@ -46,22 +53,73 @@ export type HumanInteractionResponse =
  */
 async function askHumanExtension(
   req: HumanInteractionRequest,
-  timeoutMs: number
+  timeoutMs: number,
+  signal?: AbortSignal,
+  token?: HumanInteractionDispatchToken,
 ): Promise<HumanInteractionResponse> {
-  return new Promise<HumanInteractionResponse>((resolve) => {
+  return new Promise<HumanInteractionResponse>((resolve, reject) => {
     let settled = false;
+    // Cryptographically random correlation id: a page/extension must not be
+    // able to forge a HUMAN_INTERACT_CANCEL or spoof a response across the
+    // runtime boundary. randomUUID is available in MV3 SW + page contexts;
+    // the getRandomValues fallback covers older runtimes.
+    let interactionId: string;
+    try {
+      interactionId = globalThis.crypto?.randomUUID?.() ??
+        Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)))
+          .map((b) => b.toString(16).padStart(2, "0")).join("");
+    } catch {
+      interactionId = `human-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+    const cancelInBackground = () => {
+      if (!token) return;
+      try {
+        const cancellation = chrome.runtime.sendMessage({
+          type: "HUMAN_INTERACT_CANCEL",
+          interactionId,
+          token,
+        });
+        if (cancellation && typeof (cancellation as Promise<unknown>).catch === "function") {
+          void (cancellation as Promise<unknown>).catch(() => {});
+        }
+      } catch { /* background may already be unavailable */ }
+    };
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      cancelInBackground();
+      reject(signal?.reason instanceof Error
+        ? signal.reason
+        : new DOMException("Aborted", "AbortError"));
+    };
     const finish = (resp: HumanInteractionResponse) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       resolve(resp);
     };
 
-    const timer = setTimeout(() => finish({ mode: "cancelled" }), timeoutMs);
+    const timer = setTimeout(() => {
+      cancelInBackground();
+      finish({ mode: "cancelled" });
+    }, timeoutMs);
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+
+    if (!token) {
+      finish({ mode: "error", reason: "missing HUMAN_INTERACT run authority" });
+      return;
+    }
 
     try {
       void chrome.runtime.sendMessage(
-        { type: "HUMAN_INTERACT", request: req },
+        { type: "HUMAN_INTERACT_REQUEST", interactionId, token, request: req, timeoutMs },
         (response: HumanInteractionResponse | undefined) => {
           const lastError = chrome.runtime.lastError;
           if (lastError) {
@@ -91,9 +149,18 @@ const IS_DEMO = typeof chrome === "undefined" || !chrome.runtime?.id;
  * inside a Chrome extension context. Falls back to `window.confirm`/`window.prompt`
  * for test/non-extension contexts.
  */
-export async function askHuman(req: HumanInteractionRequest): Promise<HumanInteractionResponse> {
+export async function askHuman(
+  req: HumanInteractionRequest,
+  signal?: AbortSignal,
+  token?: HumanInteractionDispatchToken,
+): Promise<HumanInteractionResponse> {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new DOMException("Aborted", "AbortError");
+  }
   if (!IS_DEMO) {
-    return askHumanExtension(req, resolveTimeoutMs(req.timeoutMs));
+    return askHumanExtension(req, resolveTimeoutMs(req.timeoutMs), signal, token);
   }
   if (req.mode === "confirm") {
     return { mode: "confirm", confirmed: window.confirm(req.message) };
@@ -108,7 +175,11 @@ export async function askHuman(req: HumanInteractionRequest): Promise<HumanInter
     }
     const def = isSecret ? "" : (req.defaultValue ?? "");
     const value = window.prompt(req.message, def);
-    return value === null ? { mode: "cancelled" } : { mode: "input", value };
+    if (value === null) return { mode: "cancelled" };
+    // A password must be tagged `password` (not `input`) so callers can
+    // distinguish a secret from non-secret text and never copy it into
+    // history/logs unredacted.
+    return isSecret ? { mode: "password", value } : { mode: "input", value };
   }
   if (req.mode === "select") {
     const options = req.options ?? [];

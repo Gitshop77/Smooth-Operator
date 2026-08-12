@@ -54,7 +54,14 @@ export interface OpenAIChatBody {
 
 interface OpenAIChatChunk {
   choices?: Array<{
-    delta?: { content?: string; role?: string };
+    delta?: {
+      content?: string;
+      role?: string;
+      /** OpenRouter/OpenAI-compatible reasoning variants. Never retained/logged. */
+      reasoning?: unknown;
+      reasoning_content?: unknown;
+      reasoning_details?: unknown;
+    };
     finish_reason?: string | null;
   }>;
   usage?: {
@@ -185,6 +192,10 @@ export interface StreamState {
   model?: string;
   /** Number of non-JSON SSE frames dropped (logged, not forwarded). */
   droppedFrames?: number;
+  /** A provider emitted a reasoning-only field; content is deliberately not retained. */
+  reasoningObserved?: boolean;
+  /** Last provider terminal reason, retained as a safe machine-readable tag. */
+  finishReason?: string;
   usage?: {
     tokensIn: number;
     tokensOut: number;
@@ -248,10 +259,21 @@ export const protocol: Protocol<OpenAIChatBody, string, { type: string; content?
         throw new Error(`OpenAI API error: ${msg}`);
       }
       const delta = chunk.choices?.[0]?.delta;
+      if (
+        delta &&
+        ("reasoning" in delta || "reasoning_content" in delta || "reasoning_details" in delta)
+      ) {
+        // Reasoning text can contain sensitive model/page-derived material.
+        // Record only its presence so the route can distinguish a reasoning-only
+        // completion from an ordinary empty answer.
+        state.reasoningObserved = true;
+      }
       if (delta?.content) {
         state.content += delta.content;
         events.push({ type: "text", content: delta.content });
       }
+      const finishReason = chunk.choices?.[0]?.finish_reason;
+      if (finishReason) state.finishReason = finishReason;
       if (chunk.usage) {
         const reasoningTokens = chunk.usage.completion_tokens_details?.reasoning_tokens ?? 0;
         const cachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? 0;
@@ -286,5 +308,11 @@ export const protocol: Protocol<OpenAIChatBody, string, { type: string; content?
       if (frame === "[DONE]") return true;
       return false;
     },
+    completion: (state: StreamState) => ({
+      reasoningObserved: state.reasoningObserved,
+      reasoningTokens: state.usage?.reasoningTokens,
+      finishReason: state.finishReason,
+      droppedFrames: state.droppedFrames,
+    }),
   },
 };

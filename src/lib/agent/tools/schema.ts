@@ -388,9 +388,11 @@ const ListTabsSchema = z.object({
   type: z.literal("list_tabs").describe("List the open browser tabs (URL + active state). Read-only. The index is the tab ID you can switch to or close."),
 });
 
-/** Read cookies for the current site or the given URLs. Read-only. */
+/** Read cookies for the current site or the given URLs. Read-only. Cookie
+ *  values are redacted before the payload reaches the model (session tokens
+ *  are credentials). */
 const GetCookiesSchema = z.object({
-  type: z.literal("get_cookies").describe("Read cookies (name, value, domain, path, secure, httpOnly, sameSite, expiry, session, hostOnly). Read-only."),
+  type: z.literal("get_cookies").describe("Read cookies (name, domain, path, secure, httpOnly, sameSite, expiry, session, hostOnly; VALUES ARE REDACTED). Read-only."),
   urls: z.array(z.string().regex(/^https?:\/\//i)).max(20).optional().describe("Optional URLs to filter cookies by (http/https only). Defaults to all cookies."),
 });
 

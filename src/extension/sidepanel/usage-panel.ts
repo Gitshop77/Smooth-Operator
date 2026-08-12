@@ -22,6 +22,7 @@ import {
 import { getModelsForProvider } from "@/lib/agent/llm/catalog";
 import { getPricingForModel } from "@/lib/agent/llm/pricing";
 import { CATALOG_PROVIDER_ID_MAP } from "@/extension/provider-config-map";
+import { subscribeRunView } from "./run-store";
 
 // ─── Presentational helpers (pure) ─────────────────────────────────────────
 
@@ -66,7 +67,7 @@ const USAGE_PANEL_STYLES = `
 .usage-meter-row { display: flex; align-items: center; gap: 8px; }
 .usage-meter-label { flex: 0 0 auto; opacity: .7; }
 .usage-meter-track { flex: 1 1 auto; height: 4px; border-radius: 2px; background: rgba(128,128,128,.25); overflow: hidden; }
-.usage-meter-fill { height: 100%; width: 0; border-radius: 2px; background: #00b4d8; transition: width .3s ease; }
+.usage-meter-fill { height: 100%; border-radius: 2px; background: #00b4d8; transform: scaleX(0); transform-origin: left; transition: transform .3s ease; }
 .usage-meter-value { flex: 0 0 auto; min-width: 40px; text-align: right; opacity: .85; }
 .usage-totals { opacity: .75; overflow-wrap: anywhere; }
 `;
@@ -98,6 +99,10 @@ function createPanel(): HTMLDivElement {
 
 let panelEl: HTMLDivElement | null = null;
 let lastUsage: RunUsage | null = null;
+let renderGeneration = 0;
+let snapshotDriven = false;
+/** Memoized `provider` storage value — quasi-static, invalidated on change. */
+let cachedProvider: string | null = null;
 
 function usageHasContent(usage: RunUsage): boolean {
   return usage.model !== "" || usage.costUsd > 0;
@@ -113,30 +118,42 @@ function formatTokens(v: number): string {
 
 async function contextLimitFor(model: string): Promise<number | undefined> {
   if (!model) return undefined;
-  let provider = "";
-  if (typeof chrome !== "undefined" && chrome.storage?.local) {
+  if (typeof chrome === "undefined" || !chrome.storage?.local) return undefined;
+  if (cachedProvider === null) {
     try {
       const res = await chrome.storage.local.get("provider");
-      provider = typeof res.provider === "string" ? res.provider : "";
+      cachedProvider = typeof res.provider === "string" ? res.provider : "";
     } catch {
-      provider = "";
+      cachedProvider = "";
     }
   }
-  const catalogId = CATALOG_PROVIDER_ID_MAP[provider] ?? provider;
+  const catalogId = CATALOG_PROVIDER_ID_MAP[cachedProvider] ?? cachedProvider;
   return getModelsForProvider(catalogId, model)?.limit?.context;
 }
 
-async function renderUsage(usage: RunUsage, runActive: boolean): Promise<void> {
+async function renderUsage(usage: RunUsage, _runActive: boolean): Promise<void> {
   if (!panelEl) return;
+  const generation = ++renderGeneration;
+  // A new snapshot may legitimately have no usage yet. Replace the old run's
+  // cached totals before deciding visibility so a completed predecessor can
+  // never reappear through the storage fallback.
   lastUsage = usage;
-  const visible = runActive || usageHasContent(usage);
+  const visible = usageHasContent(usage);
   panelEl.hidden = !visible;
   if (!visible) return;
 
   const limit = await contextLimitFor(usage.model);
+  // The model lookup is asynchronous. A later snapshot/storage refresh wins;
+  // never let this older lookup repaint the newer run's totals.
+  if (generation !== renderGeneration || !panelEl) return;
   const pct = contextUsagePct(usage, limit);
   const meterFill = panelEl.querySelector<HTMLElement>("#usageMeterFill");
-  if (meterFill) meterFill.style.width = `${pct.toFixed(1)}%`;
+  if (meterFill) {
+    // Compositor-only animation: transform+origin skips layout/paint on the
+    // streaming path (CSS transition: transform .3s in the panel styles).
+    meterFill.style.transform = `scaleX(${(pct / 100).toFixed(3)})`;
+    meterFill.style.transformOrigin = "left";
+  }
   const meterValue = panelEl.querySelector<HTMLElement>("#usageMeterValue");
   if (meterValue) meterValue.textContent = limit ? `${pct.toFixed(0)}%` : "—";
 
@@ -156,13 +173,21 @@ async function renderUsage(usage: RunUsage, runActive: boolean): Promise<void> {
   }
 }
 
+/** Render usage carried by the authoritative V1 snapshot. */
+export function renderUsageFromSnapshot(usage: RunUsage, runActive: boolean): Promise<void> {
+  snapshotDriven = true;
+  return renderUsage(usage, runActive);
+}
+
 async function refreshFromRunState(): Promise<void> {
+  if (snapshotDriven) return;
   let state: RunState | null = null;
   try {
     state = await getRunState();
   } catch {
     state = null;
   }
+  if (snapshotDriven) return;
   if (!state) {
     // Run ended (state cleared): keep the last totals visible; if this panel
     // never saw a run, stay hidden.
@@ -184,9 +209,19 @@ function initUsagePanel(): void {
   if (typeof chrome === "undefined" || !chrome.storage?.onChanged) return;
   chrome.storage.onChanged.addListener((changes, _area) => {
     if (RUN_STATE_KEY in changes) void refreshFromRunState();
+    if ("provider" in changes) cachedProvider = null;
   });
   void refreshFromRunState();
 }
+
+subscribeRunView((view) => {
+  if (view.snapshot) {
+    void renderUsageFromSnapshot(
+      view.snapshot.usage ?? zeroRunUsage(),
+      view.status === "starting" || view.status === "running" || view.status === "cancelling",
+    );
+  }
+});
 
 /**
  * Prime the model catalog at sidepanel load so the first-paint

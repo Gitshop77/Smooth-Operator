@@ -13,13 +13,13 @@ import { escapeHtml } from "@/extension/shared";
 
 /** Vision-assistant status → badge display tokens (design-system vars). */
 export const STATUS_DISPLAY: Record<VisionStatus, { label: string; bg: string; color: string }> = {
-  uninitialized: { label: "Not loaded",          bg: "var(--cw-raised)",         color: "var(--cw-muted)" },
-  checking:      { label: "Checking cache…",     bg: "var(--cw-accent-subtle)",  color: "var(--cw-accent)" },
-  downloading:   { label: "Downloading model…",  bg: "var(--cw-accent-subtle)",  color: "var(--cw-accent)" },
-  compiling:     { label: "Compiling ONNX…",     bg: "var(--cw-warn-subtle)",    color: "var(--cw-warn)" },
-  ready:         { label: "✓ Ready",             bg: "var(--cw-success-subtle)", color: "var(--cw-success)" },
-  warning:       { label: "⚠ Unverified weights", bg: "var(--cw-warn-subtle)",  color: "var(--cw-warn)" },
-  error:         { label: "✗ Error",             bg: "var(--cw-danger-subtle)",  color: "var(--cw-danger)" },
+  uninitialized: { label: "Not loaded",          bg: "var(--oc-surface-raised)",      color: "var(--oc-text-secondary)" },
+  checking:      { label: "Checking cache…",     bg: "var(--oc-accent-subtle)",      color: "var(--oc-accent-text)" },
+  downloading:   { label: "Downloading model…",  bg: "var(--oc-accent-subtle)",      color: "var(--oc-accent-text)" },
+  compiling:     { label: "Compiling ONNX…",     bg: "var(--oc-status-warning-subtle)", color: "var(--oc-status-warning)" },
+  ready:         { label: "✓ Ready",             bg: "var(--oc-status-success-subtle)", color: "var(--oc-status-success)" },
+  warning:       { label: "⚠ Unverified weights", bg: "var(--oc-status-warning-subtle)", color: "var(--oc-status-warning)" },
+  error:         { label: "✗ Error",             bg: "var(--oc-status-danger-subtle)",  color: "var(--oc-status-danger)" },
 };
 
 /** Outcome of a single agent run. */

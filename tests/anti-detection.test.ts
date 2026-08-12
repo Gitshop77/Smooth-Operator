@@ -120,6 +120,22 @@ describe("anti-detection: stealth patches apply (headless shim)", () => {
     expect(shim.navigator.webdriver).toBe(false);
   });
 
+  test("1b. webdriver lives on Navigator.prototype, NOT as an own instance property (real-Chrome shape)", () => {
+    const shim = buildShim();
+    // Model a real navigator: an instance that INHERITS Navigator.prototype
+    // (plain-object shims take the own-getter fallback instead).
+    if (typeof Navigator !== "undefined" && Navigator.prototype) {
+      shim.navigator = Object.create(Navigator.prototype) as Record<string, unknown>;
+      runInIsolation(shim);
+      expect(shim.navigator.webdriver).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(shim.navigator, "webdriver")).toBe(false);
+      const desc = Object.getOwnPropertyDescriptor(Navigator.prototype, "webdriver");
+      expect(desc?.get).toBeTypeOf("function");
+      // Cleanup: remove the prototype getter so later tests aren't affected.
+      delete (Navigator.prototype as unknown as Record<string, unknown>).webdriver;
+    }
+  });
+
   test("2. navigator.plugins + mimeTypes populated", () => {
     const shim = buildShim();
     runInIsolation(shim);
@@ -127,6 +143,17 @@ describe("anti-detection: stealth patches apply (headless shim)", () => {
     const mimeTypes = shim.navigator.mimeTypes as { length: number };
     expect(plugins.length).toBeGreaterThan(0);
     expect(mimeTypes.length).toBeGreaterThan(0);
+  });
+
+  test("2b. fabricated PluginArray/MimeTypeArray stringify as their native tags", () => {
+    const shim = buildShim();
+    runInIsolation(shim);
+    const plugins = shim.navigator.plugins as object;
+    const mimeTypes = shim.navigator.mimeTypes as object;
+    // JS-built arrays would read `[object Array]` — a documented fabrication
+    // tell. Symbol.toStringTag restores `[object PluginArray]`/`[object MimeTypeArray]`.
+    expect(Object.prototype.toString.call(plugins)).toBe("[object PluginArray]");
+    expect(Object.prototype.toString.call(mimeTypes)).toBe("[object MimeTypeArray]");
   });
 
   test("3. navigator.languages set to a frozen ['en-US','en']", () => {
@@ -166,7 +193,7 @@ describe("anti-detection: stealth patches apply (headless shim)", () => {
     expect(st.state).toBe("default");
   });
 
-  test("6. WebGL vendor/renderer spoofed for 0x9245/0x9246", () => {
+  test("6. WebGL vendor/renderer spoofed for 0x9245/0x9246 when the real GPU is a software renderer", () => {
     const shim = buildShim();
     const proto = {
       getParameter(p: number) {
@@ -183,6 +210,27 @@ describe("anti-detection: stealth patches apply (headless shim)", () => {
     expect(glProto.getParameter(0x9245)).toBe("Intel Inc.");
     expect(glProto.getParameter(0x9246)).toBe("Intel Iris OpenGL Engine");
     expect(gl2Proto.getParameter(0x9245)).toBe("Intel Inc.");
+  });
+
+  test("6b. a plausible real GPU passes through untouched (coherence — no fake override)", () => {
+    const shim = buildShim();
+    const proto = {
+      getParameter(p: number) {
+        if (p === 0x9245) return "Apple";
+        if (p === 0x9246) return "Apple M-series";
+        return "opaque";
+      },
+    };
+    shim.WebGLRenderingContext = { prototype: proto };
+    runInIsolation(shim);
+    const glProto = (shim.WebGLRenderingContext as { prototype: { getParameter: (p: number) => string } })
+      .prototype;
+    // A headed device's real GPU is already coherent with the platform —
+    // overriding it to Intel would create the Apple-persona + Intel-GPU
+    // mismatch detection scorers exploit.
+    expect(glProto.getParameter(0x9245)).toBe("Apple");
+    expect(glProto.getParameter(0x9246)).toBe("Apple M-series");
+    expect(glProto.getParameter(0x1f01)).toBe("opaque");
   });
 
   test("7. Notification.permission coerced from 'denied' to 'default'", () => {
@@ -289,8 +337,8 @@ describe("anti-detection: real module execution", () => {
     }
   });
 
-  test("injectAntiDetection executes the stealth body in the MAIN world", async () => {
-    let captured: { target: { tabId: number }; world: string; injectImmediately: boolean; func: unknown } | undefined;
+  test("injectAntiDetection executes the stealth body in the MAIN world of every frame", async () => {
+    let captured: { target: { tabId: number; allFrames: boolean }; world: string; injectImmediately: boolean; func: unknown } | undefined;
     vi.stubGlobal("chrome", {
       scripting: {
         executeScript: async (opts: typeof captured) => {
@@ -299,7 +347,9 @@ describe("anti-detection: real module execution", () => {
       },
     });
     await injectAntiDetection(42);
-    expect(captured?.target).toEqual({ tabId: 42 });
+    // allFrames: true patches same- and cross-origin child frames so a session
+    // never claims two identities (top frame patched, worker/child frames raw).
+    expect(captured?.target).toEqual({ tabId: 42, allFrames: true });
     expect(captured?.world).toBe("MAIN");
     expect(captured?.injectImmediately).toBe(true);
     expect(captured?.func).toBe(stealthScriptBody);
@@ -334,5 +384,161 @@ describe("anti-detection: real module execution", () => {
     expect(warnSpy).toHaveBeenCalled();
     warnSpy.mockRestore();
     vi.unstubAllGlobals();
+  });
+});
+
+describe("anti-detection: per-profile stealth seed drift", () => {
+  // Run the serialized body with a caller-supplied seed (mirrors how the SW
+  // passes the profile seed via executeScript args).
+  function runInIsolationWithSeed(shim: Shim, seed: unknown): void {
+    const src = stealthScriptBody.toString();
+    const runner = new Function(
+      "navigator",
+      "window",
+      "screen",
+      "console",
+      "WebGLRenderingContext",
+      "WebGL2RenderingContext",
+      "Notification",
+      "seed",
+      "return (" + src + ")(seed);",
+    ) as (n: unknown, w: unknown, s: unknown, c: unknown, g: unknown, g2: unknown, nt: unknown, sd: unknown) => void;
+    runner(
+      shim.navigator,
+      shim.window,
+      shim.screen,
+      shim.console,
+      shim.WebGLRenderingContext,
+      shim.WebGL2RenderingContext,
+      shim.Notification,
+      seed,
+    );
+  }
+
+  test("a caller-supplied seed drives the fabricated persona (drift)", () => {
+    const shim = buildShim();
+    runInIsolationWithSeed(shim, {
+      hardwareConcurrency: 12,
+      deviceMemory: 4,
+      connectionRtt: 65,
+      connectionDownlink: 20,
+    });
+    expect(shim.navigator.hardwareConcurrency).toBe(12);
+    expect(shim.navigator.deviceMemory).toBe(4);
+    const connection = shim.navigator.connection as { rtt: number; downlink: number };
+    expect(connection.rtt).toBe(65);
+    expect(connection.downlink).toBe(20);
+  });
+
+  test("a malformed seed falls back to the legacy defaults (no throw)", () => {
+    const shim = buildShim();
+    runInIsolationWithSeed(shim, { hardwareConcurrency: "many", deviceMemory: null });
+    expect(shim.navigator.hardwareConcurrency).toBe(4);
+    expect(shim.navigator.deviceMemory).toBe(8);
+  });
+
+  test("isValidStealthSeed accepts only plausible desktop grids", async () => {
+    const { isValidStealthSeed, DEFAULT_STEALTH_SEED } = await import("../src/lib/agent/anti-detection");
+    expect(isValidStealthSeed(DEFAULT_STEALTH_SEED)).toBe(true);
+    expect(isValidStealthSeed({ hardwareConcurrency: 4, deviceMemory: 8, connectionRtt: 50, connectionDownlink: 10 })).toBe(true);
+    expect(isValidStealthSeed(null)).toBe(false);
+    expect(isValidStealthSeed({})).toBe(false);
+    // Out-of-grid values (a corrupted stored seed) are rejected so a corrupted
+    // profile never injects a tell-tale fabrication.
+    expect(isValidStealthSeed({ hardwareConcurrency: 1, deviceMemory: 8, connectionRtt: 50, connectionDownlink: 10 })).toBe(false);
+    expect(isValidStealthSeed({ hardwareConcurrency: 4, deviceMemory: 3, connectionRtt: 50, connectionDownlink: 10 })).toBe(false);
+    expect(isValidStealthSeed({ hardwareConcurrency: 4, deviceMemory: 8, connectionRtt: 999, connectionDownlink: 10 })).toBe(false);
+    expect(isValidStealthSeed({ hardwareConcurrency: 4, deviceMemory: 8, connectionRtt: 50, connectionDownlink: 7 })).toBe(false);
+  });
+
+  test("generateStealthSeed draws only in-grid values (deterministic with injected random)", async () => {
+    const { generateStealthSeed } = await import("../src/lib/agent/anti-detection");
+    // A sequence of randoms covering every index position.
+    const randoms = [0, 0.5, 0.999];
+    for (const r of randoms) {
+      const seed = generateStealthSeed(() => r);
+      expect([2, 4, 6, 8, 12, 16]).toContain(seed.hardwareConcurrency);
+      expect([4, 8]).toContain(seed.deviceMemory);
+      expect(seed.connectionRtt).toBeGreaterThanOrEqual(30);
+      expect(seed.connectionRtt).toBeLessThanOrEqual(90);
+      expect([10, 20, 30]).toContain(seed.connectionDownlink);
+    }
+    // Different random values must be able to produce different personas
+    // (the drift is real, not a constant).
+    const a = generateStealthSeed(() => 0);
+    const b = generateStealthSeed(() => 0.9);
+    expect(JSON.stringify(a) === JSON.stringify(b)).toBe(false);
+  });
+
+  test("resolveStealthSeed reuses a stored valid seed and persists a fresh one", async () => {
+    const { resolveStealthSeed } = await import("../src/lib/agent/anti-detection");
+    const store = new Map<string, unknown>();
+    const chromeStub = {
+      storage: {
+        local: {
+          get: async (keys: string) => {
+            const out: Record<string, unknown> = {};
+            if (store.has(keys)) out[keys] = store.get(keys);
+            return out;
+          },
+          set: async (obj: Record<string, unknown>) => {
+            for (const [k, v] of Object.entries(obj)) store.set(k, v);
+          },
+        },
+      },
+    };
+    vi.stubGlobal("chrome", chromeStub);
+    try {
+      const first = await resolveStealthSeed();
+      // Persisted under the profile key.
+      expect(store.size).toBe(1);
+      const second = await resolveStealthSeed();
+      expect(second).toEqual(first); // stable within the profile
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  test("resolveStealthSeed rejects a corrupted stored seed and re-draws", async () => {
+    const { resolveStealthSeed } = await import("../src/lib/agent/anti-detection");
+    const store = new Map<string, unknown>([["stealth_profile_seed_v1", { hardwareConcurrency: 99, deviceMemory: 8, connectionRtt: 50, connectionDownlink: 10 }]]);
+    vi.stubGlobal("chrome", {
+      storage: {
+        local: {
+          get: async (keys: string) => {
+            const out: Record<string, unknown> = {};
+            if (store.has(keys)) out[keys] = store.get(keys);
+            return out;
+          },
+          set: async (obj: Record<string, unknown>) => {
+            for (const [k, v] of Object.entries(obj)) store.set(k, v);
+          },
+        },
+      },
+    });
+    try {
+      const seed = await resolveStealthSeed();
+      expect([2, 4, 6, 8, 12, 16]).toContain(seed.hardwareConcurrency);
+      expect(seed.hardwareConcurrency).not.toBe(99);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  test("resolveStealthSeed fails closed to defaults when storage is unavailable", async () => {
+    const { resolveStealthSeed, DEFAULT_STEALTH_SEED } = await import("../src/lib/agent/anti-detection");
+    vi.stubGlobal("chrome", {
+      storage: {
+        local: {
+          get: () => Promise.reject(new Error("storage unavailable")),
+          set: () => Promise.reject(new Error("storage unavailable")),
+        },
+      },
+    });
+    try {
+      await expect(resolveStealthSeed()).resolves.toEqual(DEFAULT_STEALTH_SEED);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

@@ -13,6 +13,10 @@ import {
   extractStateFromTab,
   executeActionsInTab,
 } from "../src/extension/background/tab-manager";
+import {
+  beginRunController,
+  resetRunControllerForTests,
+} from "../src/extension/background/run-controller";
 
 let chromeMock: {
   tabs: {
@@ -37,6 +41,7 @@ const TABS = [
 
 beforeEach(() => {
   installChrome();
+  resetRunControllerForTests();
   vi.useFakeTimers();
 });
 
@@ -44,6 +49,7 @@ afterEach(() => {
   vi.useRealTimers();
   delete (globalThis as Record<string, unknown>).chrome;
   vi.clearAllMocks();
+  resetRunControllerForTests();
 });
 
 describe("content-script sendMessage timeout", () => {
@@ -124,5 +130,43 @@ describe("content-script sendMessage timeout", () => {
 
     await executeActionsInTab(1, []);
     expect(sent?.agentMode).toBeUndefined();
+  });
+
+  test("executeActionsInTab rejects an invalidated run token before sending a batch", async () => {
+    const controller = beginRunController({
+      runId: "run-a", task: "task", maxSteps: 1, mode: "standard",
+    });
+    controller.markRunning();
+    const token = controller.dispatchToken;
+    controller.requestCancellation();
+
+    await expect(executeActionsInTab(1, [], undefined, { token })).rejects.toThrow(
+      "BLOCKED: stale or cancelled action dispatch",
+    );
+    expect(chromeMock.tabs.sendMessage).not.toHaveBeenCalled();
+  });
+
+  test("executeActionsInTab aborts a pending content-script response", async () => {
+    chromeMock.tabs.sendMessage.mockImplementation((_tabId: number, msg: { type?: string }) => {
+      if (msg?.type === "PING") return Promise.resolve({ ok: true });
+      return new Promise<never>(() => {});
+    });
+    const controller = new AbortController();
+    const pending = executeActionsInTab(1, [], undefined, { signal: controller.signal });
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  test("extractStateFromTab aborts a pending observation response", async () => {
+    chromeMock.tabs.sendMessage.mockImplementation((_tabId: number, msg: { type?: string }) => {
+      if (msg?.type === "PING") return Promise.resolve({ ok: true });
+      return new Promise<never>(() => {});
+    });
+    const controller = new AbortController();
+    const pending = extractStateFromTab(1, TABS, false, controller.signal);
+    controller.abort(new DOMException("Stop requested", "AbortError"));
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
   });
 });

@@ -53,6 +53,8 @@ function fail(action: Action, msg: string): ActionResult {
 export async function delegateTabAction(
   action: SwDelegatedAction,
   signal?: AbortSignal,
+  dispatchToken?: ActionContext["dispatchToken"],
+  effectCapability?: string,
 ): Promise<ActionResult> {
   if (!isExtensionContext()) {
     return {
@@ -69,7 +71,7 @@ export async function delegateTabAction(
     let raw: unknown;
     try {
       raw = await Promise.race([
-        chrome.runtime.sendMessage({ type: "TAB_ACTION", action }).finally(() =>
+        chrome.runtime.sendMessage({ type: "TAB_ACTION", action, ...(dispatchToken ? { token: dispatchToken } : {}), ...(effectCapability ? { effectCapability } : {}) }).finally(() =>
           clearTimeout(timer),
         ),
         new Promise<undefined>((resolve) => {
@@ -112,6 +114,21 @@ export async function delegateTabAction(
     };
     // Structured payloads (tab listings, cookies, storage reads) ride along.
     if (res.data !== undefined) result.data = res.data;
+    // The LLM renders only `message` + `extractedContent` — a data-only
+    // payload would be a dead action whose result never reaches the planner.
+    // Serialize the list_tabs listing into extractedContent (bounded, with a
+    // per-entry URL — tab URLs are page-derived and may embed OAuth tokens, so
+    // the SW's executeActionsInTab redacts READ_ACTION_TYPES results after the
+    // batch; list_tabs is in that set).
+    if (res.data !== undefined && typeof res.data === "object" && res.data !== null) {
+      const tabs = (res.data as { tabs?: unknown }).tabs;
+      if (Array.isArray(tabs) && action.type === "list_tabs") {
+        const lines = (tabs as Array<{ url?: string; active?: boolean; index?: number }>)
+          .slice(0, 50)
+          .map((t) => `${t.url ?? "(no url)"} (active:${!!t.active}, id:${t.index ?? ""})`);
+        result.extractedContent = `<untrusted_tab_list>\n${lines.join("\n")}\n</untrusted_tab_list>`;
+      }
+    }
     return result;
   } catch (e) {
     return fail(action, e instanceof Error ? e.message : String(e));
@@ -122,19 +139,19 @@ export async function handleSwitchTab(
   ctx: ActionContext,
   action: Extract<Action, { type: "switch_tab" }>,
 ): Promise<ActionResult> {
-  return delegateTabAction(action, ctx.signal);
+  return delegateTabAction(action, ctx.signal, ctx.dispatchToken, ctx.effectCapability);
 }
 
 export async function handleCloseTab(
   ctx: ActionContext,
   action: Extract<Action, { type: "close_tab" }>,
 ): Promise<ActionResult> {
-  return delegateTabAction(action, ctx.signal);
+  return delegateTabAction(action, ctx.signal, ctx.dispatchToken, ctx.effectCapability);
 }
 
 export async function handleListTabs(
   ctx: ActionContext,
   action: Extract<Action, { type: "list_tabs" }>,
 ): Promise<ActionResult> {
-  return delegateTabAction(action, ctx.signal);
+  return delegateTabAction(action, ctx.signal, ctx.dispatchToken, ctx.effectCapability);
 }

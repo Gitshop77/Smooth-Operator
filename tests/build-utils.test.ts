@@ -141,7 +141,6 @@ describe("lintManifestPermissions", () => {
   });
   afterEach(() => {
     removeTmpDir(dir);
-    delete process.env.MANIFEST_LINT_FAIL_HIGH_RISK;
     vi.restoreAllMocks();
   });
 
@@ -152,7 +151,21 @@ describe("lintManifestPermissions", () => {
   }
 
   const BASELINE = {
-    permissions: ["debugger", "scripting", "tabs"],
+    permissions: [
+      "sidePanel",
+      "scripting",
+      "tabs",
+      "activeTab",
+      "storage",
+      "alarms",
+      "debugger",
+      "notifications",
+      "downloads",
+      "unlimitedStorage",
+      "power",
+      "webRequest",
+      "cookies",
+    ],
     host_permissions: ["http://*/*", "https://*/*"],
     optional_permissions: [],
   };
@@ -163,56 +176,45 @@ describe("lintManifestPermissions", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it("warns on a universal host pattern beyond the reviewed baseline", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    lintManifestPermissions(
+  it("fails closed on a universal host pattern beyond the reviewed baseline", () => {
+    expect(() => lintManifestPermissions(
       writeManifest({
         ...BASELINE,
         host_permissions: ["http://*/*", "https://*/*", "<all_urls>"],
       }),
-    );
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0][0]).toContain("universal host_permissions");
-    expect(warn.mock.calls[0][0]).toContain("<all_urls>");
+    )).toThrow(/universal host_permissions.*<all_urls>/);
   });
 
-  it("warns on a newly-added high-risk permission", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    lintManifestPermissions(
-      writeManifest({ ...BASELINE, permissions: ["debugger", "scripting", "tabs", "history"] }),
-    );
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0][0]).toContain("NEW high-risk");
-  });
-
-  it("throws on new high-risk permission when MANIFEST_LINT_FAIL_HIGH_RISK=1", () => {
-    process.env.MANIFEST_LINT_FAIL_HIGH_RISK = "1";
+  it.each([
+    "identity",
+    "declarativeNetRequestWithHostAccess",
+    "contextMenus",
+  ])("fails closed on unapproved required permission %s", (permission) => {
     expect(() =>
       lintManifestPermissions(
         writeManifest({
           ...BASELINE,
-          optional_permissions: ["history"],
+          permissions: [...BASELINE.permissions, permission],
         }),
       ),
-    ).toThrow(/NEW high-risk/);
+    ).toThrow(new RegExp(`unapproved manifest permission.*${permission}`));
   });
 
-  it("throws on a new universal host pattern when MANIFEST_LINT_FAIL_HIGH_RISK=1", () => {
-    process.env.MANIFEST_LINT_FAIL_HIGH_RISK = "1";
+  it.each(["identity", "declarativeNetRequestWithHostAccess"])(
+    "fails closed on unapproved optional permission %s",
+    (permission) => {
     expect(() =>
       lintManifestPermissions(
         writeManifest({
           ...BASELINE,
-          host_permissions: ["http://*/*", "https://*/*", "<all_urls>"],
+            optional_permissions: [permission],
         }),
       ),
-    ).toThrow(/NEW high-risk/);
-  });
+      ).toThrow(new RegExp(`optional_permissions: ${permission}`));
+    },
+  );
 
-  it("the shipped source manifest passes under MANIFEST_LINT_FAIL_HIGH_RISK=1", () => {
-    // The CI gate: the REAL manifest (default path) must not trip the
-    // fail-closed mode — a regression here breaks CI, not just a warning.
-    process.env.MANIFEST_LINT_FAIL_HIGH_RISK = "1";
+  it("the shipped source manifest passes the fail-closed gate", () => {
     expect(() => lintManifestPermissions()).not.toThrow();
   });
 

@@ -42,14 +42,14 @@ export const profiles = {
   baseten: { provider: "baseten", baseURL: "https://inference.baseten.co/v1", supportsStructuredOutput: true, supportsReasoningEffort: false },
   cerebras: { provider: "cerebras", baseURL: "https://api.cerebras.ai/v1", supportsStructuredOutput: true, supportsReasoningEffort: false },
   deepinfra: { provider: "deepinfra", baseURL: "https://api.deepinfra.com/v1/openai", supportsStructuredOutput: true, supportsReasoningEffort: false },
-  deepseek: { provider: "deepseek", baseURL: "https://api.deepseek.com", supportsStructuredOutput: true, supportsReasoningEffort: false },
+  deepseek: { provider: "deepseek", baseURL: "https://api.deepseek.com", supportsStructuredOutput: false, supportsReasoningEffort: true },
   fireworks: { provider: "fireworks", baseURL: "https://api.fireworks.ai/inference/v1", supportsStructuredOutput: true, supportsReasoningEffort: false },
   groq: { provider: "groq", baseURL: "https://api.groq.com/openai/v1", supportsStructuredOutput: true, supportsReasoningEffort: false },
   qwen: { provider: "qwen", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", supportsStructuredOutput: true, supportsReasoningEffort: false },
   mistral: { provider: "mistral", baseURL: "https://api.mistral.ai/v1", supportsStructuredOutput: true, supportsReasoningEffort: false },
   openrouter: { provider: "openrouter", baseURL: "https://openrouter.ai/api/v1", supportsStructuredOutput: true, supportsReasoningEffort: true },
   together: { provider: "together", baseURL: "https://api.together.ai/v1", supportsStructuredOutput: true, supportsReasoningEffort: false },
-  xai: { provider: "xai", baseURL: "https://api.x.ai/v1", supportsStructuredOutput: true, supportsReasoningEffort: false },
+  xai: { provider: "xai", baseURL: "https://api.x.ai/v1", supportsStructuredOutput: true, supportsReasoningEffort: true },
  // Ollama's OpenAI-compatible shim accepts `response_format: { type: "json_object" }`
  // but does NOT honor the full `json_schema` variant reliably across model
  // families. Default false so the in-prompt schema fallback fires.

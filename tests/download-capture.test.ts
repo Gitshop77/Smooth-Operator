@@ -57,6 +57,16 @@ function completeDelta(overrides: Record<string, unknown> = {}) {
   };
 }
 
+async function issueEffectCapability(
+  token: { runId: string; dispatchRevision: number },
+  action: { type: "list_downloads" },
+): Promise<string> {
+  const policy = await import("../src/extension/background/privileged-action-policy");
+  const issued = policy.authorizeAndIssueEffectCapability(token, "standard", action);
+  if (!issued.ok) throw new Error(issued.error);
+  return issued.effectCapability;
+}
+
 describe("download capture ring", () => {
   test("records a completed download with sanitized fields", async () => {
     const { recordDownload, getCapturedDownloads, clearCapturedDownloads } =
@@ -145,6 +155,10 @@ describe("download capture ring", () => {
 
 describe("list_downloads TAB_ACTION", () => {
   test("responds from the capture ring without delegating to tab-manager", async () => {
+    const controllerModule = await import("../src/extension/background/run-controller");
+    controllerModule.resetRunControllerForTests();
+    const controller = controllerModule.beginRunController({ runId: "downloads", task: "read", maxSteps: 1, mode: "standard" });
+    controller.markRunning();
     const { clearCapturedDownloads } = await import("../src/extension/background/message-routing");
     clearCapturedDownloads();
     onDownloadsChanged?.(completeDelta() as never);
@@ -152,13 +166,19 @@ describe("list_downloads TAB_ACTION", () => {
 
     const sendResponse = vi.fn();
     const handled = onMessage?.(
-      { type: "TAB_ACTION", action: { type: "list_downloads" } },
+      {
+        type: "TAB_ACTION",
+        action: { type: "list_downloads" },
+        token: controller.dispatchToken,
+        effectCapability: await issueEffectCapability(controller.dispatchToken, { type: "list_downloads" }),
+      },
       { id: "extid" },
       sendResponse,
     );
-    // Returning false = "response already sent synchronously".
-    expect(handled).toBe(false);
-    expect(sendResponse).toHaveBeenCalledOnce();
+    // Recovery authorization is asynchronous, so the listener keeps the
+    // response channel open until the audited decision completes.
+    expect(handled).toBe(true);
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledOnce());
     const response = sendResponse.mock.calls[0][0] as {
       ok: boolean;
       success?: boolean;
@@ -168,15 +188,92 @@ describe("list_downloads TAB_ACTION", () => {
     expect(response.success).toBe(true);
     expect(response.downloads).toHaveLength(2);
     expect(response.downloads![1].filename).toBe("b.png");
+    controllerModule.resetRunControllerForTests();
   });
 
   test("reports an empty list when nothing was captured", async () => {
+    const controllerModule = await import("../src/extension/background/run-controller");
+    controllerModule.resetRunControllerForTests();
+    const controller = controllerModule.beginRunController({ runId: "downloads-empty", task: "read", maxSteps: 1, mode: "standard" });
+    controller.markRunning();
     const { clearCapturedDownloads } = await import("../src/extension/background/message-routing");
     clearCapturedDownloads();
     const sendResponse = vi.fn();
-    onMessage?.({ type: "TAB_ACTION", action: { type: "list_downloads" } }, { id: "extid" }, sendResponse);
+    onMessage?.({
+      type: "TAB_ACTION",
+      action: { type: "list_downloads" },
+      token: controller.dispatchToken,
+      effectCapability: await issueEffectCapability(controller.dispatchToken, { type: "list_downloads" }),
+    }, { id: "extid" }, sendResponse);
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledOnce());
     const response = sendResponse.mock.calls[0][0] as { ok: boolean; downloads?: unknown[] };
     expect(response.ok).toBe(true);
     expect(response.downloads).toEqual([]);
+    controllerModule.resetRunControllerForTests();
+  });
+
+  test("rejects an untokened delayed read while a run controller is active", async () => {
+    const controllerModule = await import("../src/extension/background/run-controller");
+    controllerModule.resetRunControllerForTests();
+    const controller = controllerModule.beginRunController({
+      runId: "download-run",
+      task: "read downloads",
+      maxSteps: 1,
+      mode: "standard",
+    });
+    controller.markRunning();
+    const sendResponse = vi.fn();
+    try {
+      onMessage?.({ type: "TAB_ACTION", action: { type: "list_downloads" } }, { id: "extid" }, sendResponse);
+      await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith(expect.objectContaining({ ok: false })));
+    } finally {
+      controllerModule.resetRunControllerForTests();
+    }
+  });
+
+  test("rejects missing, wrong-action, and replayed list_downloads capabilities", async () => {
+    const controllerModule = await import("../src/extension/background/run-controller");
+    const policy = await import("../src/extension/background/privileged-action-policy");
+    controllerModule.resetRunControllerForTests();
+    policy.resetPrivilegedActionPolicyForTests();
+    const controller = controllerModule.beginRunController({ runId: "downloads-effects", task: "read", maxSteps: 1, mode: "standard" });
+    controller.markRunning();
+    const rpc = (message: Record<string, unknown>) => new Promise<unknown>((resolve) => {
+      onMessage?.(message, { id: "extid" }, resolve);
+    });
+    try {
+      await expect(rpc({ type: "TAB_ACTION", action: { type: "list_downloads" }, token: controller.dispatchToken }))
+        .resolves.toEqual(expect.objectContaining({ ok: false, error: expect.stringMatching(/effect capability/i) }));
+      const wrong = policy.authorizeAndIssueEffectCapability(controller.dispatchToken, "standard", { type: "get_network_log" });
+      if (!wrong.ok) throw new Error(wrong.error);
+      await expect(rpc({ type: "TAB_ACTION", action: { type: "list_downloads" }, token: controller.dispatchToken, effectCapability: wrong.effectCapability }))
+        .resolves.toEqual(expect.objectContaining({ ok: false, error: expect.stringMatching(/effect capability/i) }));
+      const capability = await issueEffectCapability(controller.dispatchToken, { type: "list_downloads" });
+      await expect(rpc({ type: "TAB_ACTION", action: { type: "list_downloads" }, token: controller.dispatchToken, effectCapability: capability }))
+        .resolves.toEqual(expect.objectContaining({ ok: true }));
+      await expect(rpc({ type: "TAB_ACTION", action: { type: "list_downloads" }, token: controller.dispatchToken, effectCapability: capability }))
+        .resolves.toEqual(expect.objectContaining({ ok: false, error: expect.stringMatching(/effect capability/i) }));
+    } finally {
+      policy.resetPrivilegedActionPolicyForTests();
+      controllerModule.resetRunControllerForTests();
+    }
+  });
+
+  test("rejects a predecessor token after worker memory loses its controller", async () => {
+    const controllerModule = await import("../src/extension/background/run-controller");
+    controllerModule.resetRunControllerForTests();
+    const sendResponse = vi.fn();
+    onMessage?.(
+      {
+        type: "TAB_ACTION",
+        action: { type: "list_downloads" },
+        token: { runId: "pre-restart", dispatchRevision: 1 },
+      },
+      { id: "extid" },
+      sendResponse,
+    );
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith(
+      expect.objectContaining({ ok: false, error: expect.stringMatching(/stale/i) }),
+    ));
   });
 });

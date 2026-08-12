@@ -229,6 +229,24 @@ const AgentConfigSchema = z.object({
   enableHtmlSummarizer: z.boolean().default(true),
   /** Optional expected-outcomes spec for deterministic evaluator fast-path. */
   expectedOutcomes: ExpectedOutcomesSchema.optional(),
+  /**
+   * Phase 9/16 — measured simple-task fast path. Enabled by default: the
+   * classifier is exact-match (enumerated current-page metadata questions),
+   * the answer is evidence-gated (empty title / non-http URL fall through),
+   * and the orchestrator additionally refuses the fast path in `full_agentic`
+   * mode (safety modes are never silently downgraded). Saves the initial
+   * planner call + screenshot for exact metadata questions with zero risk for
+   * non-matching tasks (they fall through to the full path).
+   */
+  enableFastPath: z.boolean().default(true),
+  /**
+   * Optional model context-window size (tokens). When set, the prompt-budget
+   * layer derives the effective maxInputTokens from this context instead of
+   * the fixed per-kind profiles (32k/64k models fail closed rather than
+   * receiving an over-context prompt). Validated as a positive safe integer;
+   * out-of-range values are rejected at the config boundary.
+   */
+  contextTokens: z.number().int().min(1).max(2_000_000).optional(),
 });
 
 /** Validated output type — compatible with, but not strictly identical to, {@link AgentConfig}. */

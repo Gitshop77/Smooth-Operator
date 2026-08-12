@@ -9,6 +9,10 @@ import {
   providerLabel,
 } from "./connection-test-utils";
 import { PROVIDER_META } from "./providers";
+import {
+  getProviderCredentialStatus,
+  testSelectedProviderConnection,
+} from "./options-platform-client";
 
 /** The result of a provider connection test. */
 export interface ConnectionTestResult {
@@ -32,6 +36,35 @@ interface ConnectionTestConfig {
   baseUrl?: string;
   /** Azure resource name (used to build the default Azure base URL). */
   resourceName?: string;
+}
+
+export interface PlatformConnectionTestConfig {
+  provider: string;
+  model: string;
+  baseUrl?: string;
+  resourceName?: string;
+  provenance: "user" | "injected";
+}
+
+/** Trusted background connection test; no plaintext credential crosses the message boundary. */
+export async function testSelectedModelConnection(
+  config: PlatformConnectionTestConfig,
+): Promise<ConnectionTestResult> {
+  const credentialStatus = await getProviderCredentialStatus();
+  const result = await testSelectedProviderConnection({
+    version: 1,
+    provider: config.provider,
+    model: config.model,
+    ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
+    ...(config.resourceName ? { resourceName: config.resourceName } : {}),
+    provenance: config.provenance,
+    credential: credentialStatus.status === "ready" ? credentialStatus.reference : null,
+  });
+  return {
+    ok: result.ok,
+    latencyMs: result.latencyMs,
+    message: result.message,
+  };
 }
 
 function rootOf(baseUrl: string | undefined, fallback: string): string {

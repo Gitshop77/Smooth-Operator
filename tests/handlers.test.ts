@@ -138,6 +138,28 @@ describe("handleInput", () => {
     expect(res.message).toContain("hello world");
   });
 
+  test("STOP during secret lookup prevents every typing mutation", async () => {
+    let release!: (value: string) => void;
+    vi.mocked(secrets.substituteSecrets).mockImplementationOnce(
+      () => new Promise((resolve) => { release = resolve; }),
+    );
+    const input = document.createElement("input");
+    input.value = "original";
+    document.body.appendChild(input);
+    const controller = new AbortController();
+    const pending = handleInput(
+      { ...ctxFor(input, 1), signal: controller.signal },
+      { type: "input", index: 1, text: "%email%" },
+    );
+    await vi.waitFor(() => expect(secrets.substituteSecrets).toHaveBeenCalledWith("%email%"));
+
+    controller.abort(new DOMException("Stopped", "AbortError"));
+    release("should-never-be-typed");
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(input.value).toBe("original");
+  });
+
   test("substituteSecrets is invoked and the REAL secret never leaks into the DOM or the LLM-facing message", async () => {
     await setSecret("email", "real-secret-value@x.com");
     const input = document.createElement("input");
@@ -193,6 +215,25 @@ describe("handleInput", () => {
     await expect(
       handleInput(ctxFor(div, 1), { type: "input", index: 1, text: "x" }),
     ).rejects.toThrow(/not a text input/);
+  });
+});
+
+describe("handleScroll cancellation", () => {
+  test("STOP aborts a pending vision-cache RPC instead of retrying or reporting success", async () => {
+    const sendMessage = vi.fn(() => new Promise(() => {}));
+    installExtensionMock(sendMessage);
+    const controller = new AbortController();
+    const pending = handleScroll(
+      { ...emptyCtx(), signal: controller.signal },
+      { type: "scroll", down: true, pages: 1 },
+    );
+    window.dispatchEvent(new Event("scrollend"));
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
+
+    controller.abort(new DOMException("Stopped", "AbortError"));
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(sendMessage).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -84,6 +84,31 @@ describe("classifyError — bounded unknown retry", () => {
   });
 });
 
+describe("classifyError — abort wording is not user authority", () => {
+  test("the generic taxonomy stays cancelled; the loop separately requires its root signal", () => {
+    const classified = classifyError(new Error("upstream connection aborted unexpectedly"));
+    expect(classified.category).toBe("cancelled");
+    expect(classified.machineCode).toBe("cancelled");
+  });
+});
+
+describe("classifyError — unusable model output", () => {
+  test("is terminal and preserves its actionable typed vocabulary", () => {
+    const error = Object.assign(new Error("The model returned no visible answer."), {
+      code: "EMPTY_MODEL_OUTPUT",
+      recovery: "Choose another model and retry.",
+    });
+    const classified = classifyError(error, 0);
+    expect(classified).toMatchObject({
+      category: "model_output",
+      fatal: true,
+      retryable: false,
+      machineCode: "EMPTY_MODEL_OUTPUT",
+      recoveryHint: "Choose another model and retry.",
+    });
+  });
+});
+
 describe("classifyActionError — action-level retryable taxonomy", () => {
   test("timeout errors are transient/retryable with a recovery hint", () => {
     const c = classifyActionError(new Error("TAB_ACTION timeout after 15000ms"));

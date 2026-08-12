@@ -19,6 +19,8 @@ interface StubState {
   sessionStore: Record<string, unknown>;
   localStore: Record<string, unknown>;
   sessionSet: ReturnType<typeof vi.fn>;
+  statusResponses: unknown[];
+  stopResponse: unknown;
 }
 
 let st: StubState;
@@ -32,6 +34,8 @@ function setupGlobals(): void {
     sessionStore: { apiKey: "sk-test-1234567890" },
     localStore: { provider: "openai" },
     sessionSet: vi.fn(() => Promise.resolve()),
+    statusResponses: [{ running: false }],
+    stopResponse: { ok: true, status: "cancelling" },
   };
   const chromeStub = {
     runtime: {
@@ -40,13 +44,13 @@ function setupGlobals(): void {
       onMessage: { addListener: () => {} },
       sendMessage: (msg: unknown, cb?: SendCb) => {
         const m = msg as { type: string };
-        if (m.type === "STATUS") cb?.({ running: false });
+        if (m.type === "STATUS") cb?.(st.statusResponses.length ? st.statusResponses.shift() : { running: false });
         else if (m.type === "RUN") {
           st.runCount++;
           st.lastRunTask = (msg as { task: string }).task;
           st.runCallback = cb ?? null;
         } else if (m.type === "STOP") {
-          cb?.({ ok: true });
+          cb?.(st.stopResponse);
         } else {
           cb?.(undefined);
         }
@@ -117,6 +121,11 @@ function messageInput(): HTMLTextAreaElement {
   return document.getElementById("messageInput") as HTMLTextAreaElement;
 }
 
+function setTask(value: string): void {
+  messageInput().value = value;
+  messageInput().dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 function sendBtn(): HTMLButtonElement {
   return document.getElementById("sendBtn") as HTMLButtonElement;
 }
@@ -141,7 +150,7 @@ describe("sidepanel controls", () => {
 
   test("send issues a RUN with the typed task", async () => {
     await loadControls();
-    messageInput().value = "do the thing";
+    setTask("do the thing");
     sendBtn().click();
     await flush();
     expect(st.runCount).toBe(1);
@@ -152,7 +161,7 @@ describe("sidepanel controls", () => {
     await loadControls();
     vi.useFakeTimers();
     const send = (t: string): void => {
-      messageInput().value = t;
+      setTask(t);
       sendBtn().click();
     };
 
@@ -183,14 +192,14 @@ describe("sidepanel controls", () => {
   test("a rejected send surfaces an error message and clears the debounce", async () => {
     await loadControls();
     st.failLocalGet = true;
-    messageInput().value = "task";
+    setTask("task");
     sendBtn().click();
     await flush();
     expect(chat().textContent).toContain("Send failed");
 
     // Debounce cleared: a later send works once storage recovers.
     st.failLocalGet = false;
-    messageInput().value = "task";
+    setTask("task");
     sendBtn().click();
     await flush();
     expect(st.runCount).toBe(1);
@@ -237,11 +246,146 @@ describe("sidepanel controls", () => {
   test("a stale clarify flag in session storage is ignored", async () => {
     st.sessionStore.open_cowork_clarify = "pending-question";
     await loadControls();
-    messageInput().value = "task";
+    setTask("task");
     sendBtn().click();
     await flush();
     // The clarify branch is dead: the message must go out as a RUN.
     expect(st.runCount).toBe(1);
     expect(st.sessionSet).not.toHaveBeenCalled();
+  });
+
+  test("terminal STATUS snapshot restores the result and leaves blank Send disabled", async () => {
+    st.statusResponses = [{
+      running: false,
+      snapshot: {
+        version: 1, runId: "done-1", revision: 3, dispatchRevision: 2,
+        task: "summarize", maxSteps: 10, mode: "standard", status: "succeeded",
+        phase: "terminal", step: 2, startedAt: 1, updatedAt: 2, endedAt: 2,
+        terminalMessage: "Completed", resultText: "A concise answer",
+      },
+    }];
+    await loadControls();
+    await flush();
+    expect(chat().textContent).toContain("A concise answer");
+    expect(sendBtn().disabled).toBe(true);
+
+    setTask("follow up");
+    expect(sendBtn().disabled).toBe(false);
+    sendBtn().click();
+    await flush();
+    expect(st.runCount).toBe(1);
+  });
+
+  test("an event reconciles a previously hydrated running snapshot to terminal", async () => {
+    const active = {
+      version: 1, runId: "event-run", revision: 1, dispatchRevision: 1,
+      task: "task", maxSteps: 10, mode: "standard", status: "running",
+      phase: "reasoning", step: 1, startedAt: 1, updatedAt: 1,
+    };
+    const terminal = {
+      ...active, revision: 2, dispatchRevision: 2, status: "succeeded",
+      phase: "terminal", updatedAt: 2, endedAt: 2,
+      terminalMessage: "Completed", resultText: "Authoritative result",
+    };
+    st.statusResponses = [{ running: true, snapshot: active }];
+    const controls = await import("../src/extension/sidepanel/controls");
+    await flush();
+    expect(document.querySelector(".empty-state")).toBeNull();
+
+    st.statusResponses = [{ running: false, snapshot: terminal }];
+    controls.onAgentEvent();
+    await flush();
+    await flush();
+
+    expect(chat().textContent).toContain("Authoritative result");
+    expect(messageInput().disabled).toBe(false);
+  });
+
+  test("Stop enters cancelling immediately and reconciles its terminal snapshot", async () => {
+    vi.useFakeTimers();
+    const active = {
+      version: 1, runId: "active-1", revision: 1, dispatchRevision: 1,
+      task: "task", maxSteps: 10, mode: "standard", status: "running",
+      phase: "reasoning", step: 1, startedAt: 1, updatedAt: 1,
+    };
+    const cancelling = { ...active, revision: 2, dispatchRevision: 2, status: "cancelling", phase: "cancelling" };
+    const terminal = { ...cancelling, revision: 3, status: "cancelled", phase: "terminal", terminalMessage: "Cancelled", endedAt: 3 };
+    st.statusResponses = [{ running: true, snapshot: active }, { running: false, snapshot: terminal }];
+    st.stopResponse = { ok: true, status: "cancelling", snapshot: cancelling };
+    await loadControls();
+    await vi.advanceTimersByTimeAsync(0);
+    const stop = document.getElementById("stopBtn") as HTMLButtonElement;
+    stop.click();
+    // Flush the chat renderer's microtask-batched append.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(chat().textContent).toContain("Cancellation requested immediately");
+    expect(stop.disabled).toBe(true);
+    await vi.advanceTimersByTimeAsync(125);
+    expect(chat().textContent).toContain("Cancelled");
+    expect(document.getElementById("statusLabel")?.textContent).toBe("Cancelled");
+    expect(stop.disabled).toBe(true);
+  });
+
+  test("session snapshot changes move an already-open panel to a successor run", async () => {
+    await loadControls();
+    const { handleRunSnapshotStorageChange } = await import("../src/extension/sidepanel/controls");
+    const successor = {
+      version: 1,
+      runId: "run-b",
+      revision: 1,
+      dispatchRevision: 1,
+      task: "Successor task",
+      maxSteps: 2,
+      mode: "standard",
+      status: "starting",
+      phase: "starting",
+      step: 0,
+      startedAt: 20,
+      updatedAt: 20,
+    };
+
+    expect(handleRunSnapshotStorageChange({
+      open_cowork_run_snapshot_v1: { newValue: successor },
+    }, "session")).toBe(true);
+    expect(document.getElementById("statusLabel")?.textContent).toBe("Thinking…");
+    expect((document.getElementById("stopBtn") as HTMLButtonElement).disabled).toBe(false);
+    expect(handleRunSnapshotStorageChange({
+      open_cowork_run_snapshot_v1: { newValue: successor },
+    }, "local")).toBe(false);
+  });
+
+  test("idle Stop response is explicit rather than pretending to cancel", async () => {
+    await loadControls();
+    const stop = document.getElementById("stopBtn") as HTMLButtonElement;
+    // A run can finish between the last render and the click; emulate that race.
+    stop.disabled = false;
+    st.stopResponse = { ok: true, status: "idle" };
+    stop.click();
+    await flush();
+    expect(chat().textContent).toContain("No active run to cancel");
+  });
+
+  test("Stop exposes an actionable timeout when cancellation remains unconfirmed", async () => {
+    vi.useFakeTimers();
+    const active = {
+      version: 1, runId: "active-timeout", revision: 1, dispatchRevision: 1,
+      task: "task", maxSteps: 10, mode: "standard", status: "running",
+      phase: "acting", step: 1, startedAt: 1, updatedAt: 1,
+    };
+    const cancelling = { ...active, revision: 2, dispatchRevision: 2, status: "cancelling", phase: "cancelling" };
+    st.statusResponses = [
+      { running: true, snapshot: active },
+      ...Array.from({ length: 5 }, () => ({ running: true, snapshot: cancelling })),
+    ];
+    st.stopResponse = { ok: true, status: "cancelling", snapshot: cancelling };
+    await loadControls();
+    await vi.advanceTimersByTimeAsync(0);
+    const stop = document.getElementById("stopBtn") as HTMLButtonElement;
+    stop.click();
+    // Each bounded poll confirms only the same cancelling snapshot, so the UI
+    // must expose the retry affordance instead of waiting forever.
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(chat().textContent).toContain("Cancellation has not been confirmed");
+    expect(stop.disabled).toBe(false);
   });
 });

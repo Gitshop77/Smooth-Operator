@@ -51,7 +51,7 @@ export const CONSOLE_CAPTURE_EVENT = "open-cowork-console-log";
  *  extractedContent is truncated at 2000 chars (loop/messages-utils), so a
  *  longer message is never visible to the agent — storing it would only let a
  *  chatty page balloon the SW ring (500 entries × unbounded messages). */
-const MAX_ENTRY_MESSAGE_CHARS = 2000;
+export const MAX_ENTRY_MESSAGE_CHARS = 2000;
 
 const METHODS: ReadonlyArray<[keyof Console, ConsoleLogEntry["type"]]> = [
   ["log", "log"],
@@ -64,7 +64,7 @@ let installed = false;
 /** Console implementations captured at install time; restored on reset. */
 const savedOriginals: Array<{ method: string; original: (...args: unknown[]) => void }> = [];
 
-function stringifyArg(arg: unknown): string {
+function stringifyArg(arg: unknown, cache: WeakMap<object, string>): string {
   if (typeof arg === "string") return arg;
   // Error instances stringify to "{}" via JSON.stringify — keep the useful
   // "Error: message" form. The duck-check covers cross-realm Error objects.
@@ -77,6 +77,21 @@ function stringifyArg(arg: unknown): string {
   ) {
     return String(arg);
   }
+  if (arg !== null && typeof arg === "object") {
+    // `console.log(obj, obj.name, obj)` on a chatty page would otherwise
+    // serialize the same object once per argument — one stringify per
+    // identity per capture call. Cache and REUSE the string so repeated
+    // (even non-circular) arguments render identically, not as a marker.
+    const cached = cache.get(arg);
+    if (cached !== undefined) return cached;
+    const s = stringifyOnce(arg);
+    cache.set(arg, s);
+    return s;
+  }
+  return stringifyOnce(arg);
+}
+
+function stringifyOnce(arg: unknown): string {
   try {
     const s = JSON.stringify(arg);
     return s === undefined ? String(arg) : s;
@@ -93,7 +108,8 @@ function capture(type: ConsoleLogEntry["type"], args: unknown[]): void {
   try {
     // Cap the stored message (code-point-aware so a surrogate pair is never
     // cut); see MAX_ENTRY_MESSAGE_CHARS.
-    const joined = Array.from(args.map(stringifyArg).join(" "));
+    const cache = new WeakMap<object, string>();
+    const joined = Array.from(args.map((arg) => stringifyArg(arg, cache)).join(" "));
     const entry: ConsoleLogEntry = {
       type,
       message: joined.length > MAX_ENTRY_MESSAGE_CHARS ? joined.slice(0, MAX_ENTRY_MESSAGE_CHARS).join("") : joined.join(""),

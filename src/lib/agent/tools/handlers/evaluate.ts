@@ -10,20 +10,49 @@ import type { Action } from "../schema";
 import { LIMITS } from "../constants";
 import type { ActionContext } from "./types";
 import { hasPageChanged } from "./types";
-import { rejectOnAbort } from "./abort";
+import { rejectOnAbort, throwIfAborted } from "./abort";
 import { checkUrlAllowed } from "../../security";
 import {
   getDomainConfig,
   isDomainConfigMissingButEnforced,
 } from "../helpers/domain-config";
 import { runSandboxedCode } from "./evaluate-utils";
+import { redactKeyLeak } from "../../redact-shared";
 export { runSandboxedCode };
+
+/**
+ * Serialize an evaluate result for the LLM-facing `extractedContent`.
+ *
+ * Code-point-aware truncation (a surrogate pair must never be split into the
+ * prompt) and a bounded `JSON.stringify` with a stable non-serializable
+ * fallback — a throwing `toString`/circular object must not fail the whole
+ * evaluate action, and a serialized object must not exceed the channel cap.
+ */
+export function serializeEvaluateResult(value: unknown, limit: number): string | undefined {
+  if (value === undefined) return undefined;
+  let text: string;
+  if (typeof value === "string") {
+    text = value;
+  } else if (typeof value === "object" && value !== null) {
+    try {
+      const json = JSON.stringify(value);
+      text = json === undefined ? String(value) : json;
+    } catch {
+      text = "<<non-serializable>>";
+    }
+  } else {
+    text = String(value);
+  }
+  const chars = Array.from(text);
+  return chars.length > limit ? chars.slice(0, limit).join("") : text;
+}
 
 export async function handleEvaluate(
   ctx: ActionContext,
   action: Extract<Action, { type: "evaluate" }>,
 ): Promise<ActionResult> {
   try {
+    throwIfAborted(ctx.signal);
     // Gate `evaluate` by the current page's domain. Unlike `navigate` (which
     // the extension's tab-level handler intercepts), `evaluate` runs in the
     // content script, so the domain check must happen here against the current
@@ -57,6 +86,7 @@ export async function handleEvaluate(
     try {
       const { substituteCustomToolCalls } = await import("../registry");
       code = await substituteCustomToolCalls(code);
+      throwIfAborted(ctx.signal);
     } catch (e) {
       // Substitution is a security-relevant transform: it inlines stored
       // custom-tool code in place of the LLM-authored `__opencowork_custom_tool()`
@@ -64,12 +94,12 @@ export async function handleEvaluate(
       // through to executing the UNMODIFIED LLM-authored code — that would run
       // raw model output and skip the substitution the caller expected. Fail
       // closed: block the evaluate action and report why.
-      console.error("[evaluate] substituteCustomToolCalls import failed:", e);
+      console.error(`[evaluate] substituteCustomToolCalls import failed: ${redactKeyLeak(String(e))}`);
       return {
         action,
         success: false,
         message: `BLOCKED evaluate: custom-tool substitution unavailable (${
-          e instanceof Error ? e.message : String(e)
+          redactKeyLeak(e instanceof Error ? e.message : String(e))
         }). Refusing to run unmodified LLM-authored code.`,
       };
     }
@@ -151,7 +181,7 @@ export async function handleEvaluate(
       // above), and we deliberately do NOT block legit DOM/localStorage reads
       // (only `chrome` is hardened). Documented here so the limitation is
       // visible at the egress point.
-      extractedContent: result !== undefined ? String(result).slice(0, LIMITS.evaluateResultChars) : undefined,
+      extractedContent: result !== undefined ? serializeEvaluateResult(result, LIMITS.evaluateResultChars) : undefined,
       pageChanged,
     };
   } catch (e) {

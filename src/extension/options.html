@@ -14,12 +14,15 @@
     exfiltration. CSP is defense-in-depth only; if the Options page's network
     calls can be routed through the background worker in a future refactor,
     restrict connect-src to 'self'.
-    Loopback (http://localhost:*, http://127.0.0.1:*, http://[::1]:*) is
-    additionally allowed so Test Connection can reach local providers (Ollama
-    on :11434, LiteLLM on :4000) directly from this page — matching the SSRF
-    guard's loopback exemption (both layers must agree on loopback).
+    Browser-valid loopback sources (http://localhost:* and
+    http://127.0.0.1:*) are additionally allowed so Test Connection can reach
+    local providers (Ollama on :11434, LiteLLM on :4000) directly from this
+    page. Chromium rejects the current IPv6 loopback wildcard host source in
+    extension-page CSP, so the package does not claim direct Options Test
+    Connection support for http://[::1]. Configured runtime destinations are
+    otherwise unchanged.
   -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src https://* http://localhost:* http://127.0.0.1:* http://[::1]:*;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src https://* http://localhost:* http://127.0.0.1:*;">
   <link rel="stylesheet" href="options.css" />
 </head>
 <body>
@@ -45,6 +48,7 @@
         <div class="view-header">
           <h2 class="view-title">Connection</h2>
           <p class="view-subtitle">Connect your LLM provider. The extension calls your provider directly — no server required.</p>
+          <p class="note">Stable packaged browsers do not expose the Dev-channel-only <code>chrome.dns</code> resolver. Literal private targets are still blocked; DNS-rebinding checks for explicitly configured hostname endpoints are best-effort and are not reported as fully active.</p>
         </div>
 
         <div class="section-group">
@@ -57,7 +61,7 @@
           <label for="apiKey">
             <span>API key</span>
             <input type="password" id="apiKey" placeholder="sk-…" autocomplete="new-password" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" />
-            <small id="apikey-hint">Held in memory for this session and never written to disk — unless you choose to remember it on this device below. Only sent to the provider you choose.</small>
+            <small id="apikey-hint">Held in memory for this session unless you choose encrypted storage on this device below. Only sent to the provider you choose.</small>
           </label>
 
           <label class="checkbox-row">
@@ -356,6 +360,11 @@
             <button type="button" id="addSchedule" class="btn btn-ghost">Schedule</button>
           </div>
           <div id="scheduleList"></div>
+          <div class="history-actions">
+            <button type="button" id="exportSchedules" class="btn btn-ghost">Export tasks (JSON)</button>
+            <button type="button" id="importSchedules" class="btn btn-ghost">Import tasks (JSON)</button>
+            <input type="file" id="importSchedulesFile" accept=".json" class="is-hidden" />
+          </div>
         </div>
 
         <!-- Custom Tools -->
@@ -467,7 +476,7 @@
           </p>
           <h4 class="subsection-title">License</h4>
           <p>Open-source under the MIT license.</p>
-          <p>This build also bundles third-party components under Apache-2.0 (HuggingFace Transformers) and MIT (onnxruntime-web); their license texts ship alongside this extension as LICENSE-APACHE and LICENSE-MIT.</p>
+          <p>This build also bundles third-party components under Apache-2.0 and MIT. A reviewed dependency-to-license inventory and every required notice ship alongside the extension in THIRD_PARTY_LICENSES.json and the referenced LICENSE-* files.</p>
           <h4 class="subsection-title">Permissions &amp; privacy</h4>
           <p>This extension requests powerful permissions so it can act on whatever page you point it at:</p>
           <ul>
@@ -483,7 +492,15 @@
       <!-- Save status cue -->
       <div class="actions">
         <span id="saved" class="saved" role="status" aria-live="polite">Saved!</span>
+        <!-- Phase 14: confirmable no-silent-changes summary (mode/cost/destination/
+             permissions/vision/retention) written by settings-sync.ts on save. -->
+        <span id="saveSummary" class="save-summary"></span>
       </div>
+
+      <!-- Phase 13: live regions for cross-surface status and error
+           announcements (populated via announce() in accessibility.ts). -->
+      <div id="statusMessage" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+      <div id="errorMessage" class="sr-only" role="alert" aria-live="assertive" aria-atomic="true"></div>
     </div>
   </div>
   <script src="options.js"></script>

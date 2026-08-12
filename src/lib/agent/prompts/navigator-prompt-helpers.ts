@@ -69,11 +69,11 @@ Use this SPARINGLY — it takes 2-5 seconds per call. Only use it when the DOM e
 /** Canonical Output Format block — shared by default and custom-prompt branches. */
 export const OUTPUT_FORMAT_BLOCK = `# Output Format
 
-Respond with a single valid JSON object in EXACTLY this format (no markdown, no extra text):
+Respond with a single valid JSON object in EXACTLY this format (no markdown, no extra text). Your ENTIRE response is ONLY the JSON: begin with an opening brace \`{\`, end with a closing brace \`}\`, no markdown fences, no text before or after — anything else is rejected and re-requested:
 {
-  "thinking": "Your step-by-step reasoning about the current state and what to do.",
-  "evaluation_previous_goal": "One sentence: did your last action succeed, fail, or is uncertain? End with 'Verdict: Success' or 'Verdict: Failure'.",
-  "memory": "1-3 sentences tracking progress (what's done, what's next, counts).",
+  "thinking": "1-3 terse sentences of step-by-step reasoning about the current state and what to do.",
+  "evaluation_previous_goal": "One sentence: did your last action succeed, fail, or is it uncertain? End with 'Verdict: Success' or 'Verdict: Failure'.",
+  "memory": "1-2 terse sentences tracking progress (what's done, what's next, counts).",
   "next_goal": "One clear sentence stating the immediate goal of this step.",
   "action": [
     {"type": "click", "index": 5},

@@ -10,6 +10,7 @@ export function extractUsage(r: {
     tokensOut?: number;
     reasoningTokens?: number;
     cachedInputTokens?: number;
+    cachedWriteInputTokens?: number;
     model?: string;
     costUsd?: number;
   };
@@ -20,6 +21,7 @@ export function extractUsage(r: {
     tokensOut: r.usage?.tokensOut,
     reasoningTokens: r.usage?.reasoningTokens,
     cachedInputTokens: r.usage?.cachedInputTokens,
+    cachedWriteInputTokens: r.usage?.cachedWriteInputTokens,
     model: r.usage?.model,
     costUsd: r.usage?.costUsd,
   };

@@ -25,15 +25,23 @@ vi.mock("@/lib/agent/human-interaction", () => ({
 }));
 
 import { buildLoopDeps } from "../src/extension/background/run-helpers";
-import { RUN_STATE_KEY } from "../src/extension/background/state-store";
+import {
+  RUN_STATE_KEY,
+  resetRunStateStoreForTests,
+} from "../src/extension/background/state-store";
 import { checkActionAllowed, requiresConfirmation } from "@/lib/agent/modes";
 import { askHuman } from "@/lib/agent/human-interaction";
 import type { AgentAction } from "@/lib/agent/types";
 import type { AgentMode } from "@/lib/agent/modes";
+import {
+  beginRunController,
+  requestCurrentRunCancellation,
+  resetRunControllerForTests,
+} from "../src/extension/background/run-controller";
 
 let sessionStore: Record<string, unknown> = {};
 let chromeMock: {
-  tabs: { sendMessage: ReturnType<typeof vi.fn> };
+  tabs: { sendMessage: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> };
   storage: { session: { get: ReturnType<typeof vi.fn>; set: ReturnType<typeof vi.fn>; remove: ReturnType<typeof vi.fn> } };
 };
 
@@ -51,7 +59,7 @@ function installChrome(): void {
     return { ok: true };
   });
   chromeMock = {
-    tabs: { sendMessage },
+    tabs: { sendMessage, update: vi.fn(async () => ({})) },
     storage: {
       session: {
         get: vi.fn(async (key: unknown) => {
@@ -75,8 +83,9 @@ function installChrome(): void {
   (globalThis as Record<string, unknown>).chrome = chromeMock;
 }
 
-function setRunState(mode: AgentMode): void {
+function setRunState(mode: AgentMode, runId = "execute-run"): void {
   sessionStore[RUN_STATE_KEY] = {
+    runId,
     task: "t",
     maxSteps: 10,
     mode,
@@ -90,10 +99,17 @@ function setRunState(mode: AgentMode): void {
 
 function makeExecuteActions(mode: AgentMode) {
   setRunState(mode);
+  const controller = beginRunController({
+    runId: "execute-run",
+    task: "task",
+    maxSteps: 10,
+    mode,
+  });
+  controller.markRunning();
   const deps = buildLoopDeps({
     tab: { id: 1 } as unknown as chrome.tabs.Tab,
     sendEvent: vi.fn(),
-    controller: new AbortController(),
+    controller,
     config: { maxSteps: 10, maxActionsPerStep: 10, plannerInterval: 1, maxFailures: 1, costCapUsd: 0 },
     task: "task",
     mode,
@@ -103,14 +119,129 @@ function makeExecuteActions(mode: AgentMode) {
 
 beforeEach(() => {
   installChrome();
+  resetRunStateStoreForTests();
   (checkActionAllowed as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({ allowed: true }));
   (requiresConfirmation as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => false);
   (askHuman as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ mode: "confirm", confirmed: true });
 });
 
 afterEach(() => {
+  resetRunControllerForTests();
   delete (globalThis as Record<string, unknown>).chrome;
   vi.clearAllMocks();
+});
+
+test("tab action is re-authorized after the run-state await", async () => {
+  setRunState("standard", "tab-race");
+  const controller = beginRunController({
+    runId: "tab-race",
+    task: "task",
+    maxSteps: 10,
+    mode: "standard",
+  });
+  controller.markRunning();
+  let releaseRead!: () => void;
+  const readBlocked = new Promise<void>((resolve) => { releaseRead = resolve; });
+  chromeMock.storage.session.get.mockImplementationOnce(async (key: unknown) => {
+    await readBlocked;
+    return typeof key === "string" ? { [key]: sessionStore[key] } : { ...sessionStore };
+  });
+  const deps = buildLoopDeps({
+    tab: { id: 1 } as unknown as chrome.tabs.Tab,
+    sendEvent: vi.fn(),
+    controller,
+    config: { maxSteps: 10, maxActionsPerStep: 10, plannerInterval: 1, maxFailures: 1, costCapUsd: 0 },
+    task: "task",
+    mode: "standard",
+  });
+
+  const pending = deps.onTabAction!({ type: "navigate", url: "https://example.com", new_tab: false });
+  requestCurrentRunCancellation();
+  releaseRead();
+
+  await expect(pending).resolves.toMatchObject({
+    handled: true,
+    success: false,
+    message: expect.stringContaining("cancellation invalidated"),
+  });
+});
+
+test("a successful predecessor cannot dispatch through a running successor", async () => {
+  setRunState("standard", "predecessor");
+  const predecessor = beginRunController({
+    runId: "predecessor",
+    task: "old task",
+    maxSteps: 10,
+    mode: "standard",
+  });
+  predecessor.markRunning();
+  const oldDeps = buildLoopDeps({
+    tab: { id: 1 } as unknown as chrome.tabs.Tab,
+    sendEvent: vi.fn(),
+    controller: predecessor,
+    config: { maxSteps: 10, maxActionsPerStep: 10, plannerInterval: 1, maxFailures: 1, costCapUsd: 0 },
+    task: "old task",
+    mode: "standard",
+  });
+  predecessor.markTerminal("succeeded", "done", "done");
+
+  const successor = beginRunController({
+    runId: "successor",
+    task: "new task",
+    maxSteps: 10,
+    mode: "standard",
+  });
+  successor.markRunning();
+  sessionStore[RUN_STATE_KEY] = {
+    ...sessionStore[RUN_STATE_KEY] as object,
+    runId: "successor",
+    dispatchRevision: successor.dispatchToken.dispatchRevision,
+  };
+
+  const actions = [{ type: "click", index: 0 } as AgentAction];
+  await expect(oldDeps.executeActions!(actions, {} as never)).resolves.toEqual([
+    expect.objectContaining({ success: false, message: expect.stringContaining("authority expired") }),
+  ]);
+  await expect(oldDeps.onTabAction!({
+    type: "navigate",
+    url: "https://example.com/late",
+    new_tab: false,
+  })).resolves.toMatchObject({ handled: true, success: false, pageChanged: false });
+  expect(chromeMock.tabs.sendMessage).not.toHaveBeenCalledWith(
+    expect.anything(),
+    expect.objectContaining({ type: "EXECUTE_ACTIONS" }),
+  );
+  expect(chromeMock.tabs.update).not.toHaveBeenCalled();
+});
+
+test("a live controller fails closed when persisted state belongs to another run", async () => {
+  setRunState("standard", "successor");
+  const controller = beginRunController({
+    runId: "predecessor",
+    task: "old task",
+    maxSteps: 10,
+    mode: "standard",
+  });
+  controller.markRunning();
+  const deps = buildLoopDeps({
+    tab: { id: 1 } as unknown as chrome.tabs.Tab,
+    sendEvent: vi.fn(),
+    controller,
+    config: { maxSteps: 10, maxActionsPerStep: 10, plannerInterval: 1, maxFailures: 1, costCapUsd: 0 },
+    task: "old task",
+    mode: "standard",
+  });
+
+  await expect(deps.executeActions!([{ type: "click", index: 0 } as AgentAction], {} as never))
+    .resolves.toEqual([expect.objectContaining({ success: false, message: expect.stringContaining("authority expired") })]);
+  await expect(deps.extractState!([])).rejects.toThrow("Run state authority expired");
+  await expect(deps.onTabAction!({
+    type: "navigate",
+    url: "https://example.com/late",
+    new_tab: false,
+  })).resolves.toMatchObject({ handled: true, success: false, pageChanged: false });
+  expect(chromeMock.tabs.sendMessage).not.toHaveBeenCalled();
+  expect(chromeMock.tabs.update).not.toHaveBeenCalled();
 });
 
 describe("executeActions mode/confirmation gate", () => {

@@ -30,8 +30,35 @@ function hasValidTab(s: { currentTabId?: unknown; active?: unknown } | null): s 
  * valid tab. Both antibot hooks share the identical `getRunState` +
  * `hasValidTab` preamble; this helper keeps them from drifting.
  */
-async function getActiveTabId(): Promise<number | null> {
-  const s = await getRunState();
+function abortError(signal?: AbortSignal): DOMException {
+  return signal?.reason instanceof DOMException
+    ? signal.reason
+    : new DOMException("Aborted", "AbortError");
+}
+
+/** Release the loop promptly if the storage lookup races a root Stop. */
+function awaitAbortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(abortError(signal));
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => finish(() => reject(abortError(signal)));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    );
+  });
+}
+
+async function getActiveTabId(signal?: AbortSignal): Promise<number | null> {
+  const s = await awaitAbortable(getRunState(), signal);
   if (!hasValidTab(s)) {
     console.warn("[antibot] RunState missing a valid currentTabId — skipping challenge hook.");
     return null;
@@ -49,8 +76,8 @@ async function getActiveTabId(): Promise<number | null> {
  * pause/retry on an unverified page instead of proceeding blindly.
  */
 export function makeAntiBotHooks(): {
-  detectChallenge: () => Promise<{ kind: string; message: string } | null>;
-  waitForChallengeResolution: () => Promise<boolean>;
+  detectChallenge: (signal?: AbortSignal) => Promise<{ kind: string; message: string } | null>;
+  waitForChallengeResolution: (signal?: AbortSignal) => Promise<boolean>;
 } {
   return {
  // Anti-bot challenge detection. The orchestrator calls this before each
@@ -58,9 +85,11 @@ export function makeAntiBotHooks(): {
  // it to resolve (Cloudflare JS challenges auto-resolve in ~5s; CAPTCHAs
  // need user takeover, which `waitForTakeoverResume` handles in the
  // orchestrator).
-    detectChallenge: async () => {
+    detectChallenge: async (signal?: AbortSignal) => {
       try {
-      const tabId = await getActiveTabId();
+      if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError");
+      const tabId = await getActiveTabId(signal);
+      if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError");
       if (tabId === null) return null;
  // Network-authoritative rate-limit signal (a real 429/503 main-frame
  // response recorded by the webRequest listener). This is the ONLY source
@@ -78,7 +107,7 @@ export function makeAntiBotHooks(): {
  // racing navigation) — is NOT treated as "all clear". We surface it as a
  // distinct, truthy sentinel the orchestrator treats as an unverified page
  // (it pauses/waitForChallengeResolution rather than proceeding blindly).
-      const outcome = await detectChallengeResult(tabId);
+      const outcome = await detectChallengeResult(tabId, signal);
       if (outcome.status === "challenge") return outcome.info;
       if (outcome.status === "error") {
         console.warn(
@@ -96,6 +125,7 @@ export function makeAntiBotHooks(): {
       }
       return null;
       } catch (err) {
+        if (signal?.aborted) throw err;
         console.warn("[antibot] detectChallenge threw — skipping challenge hook.", err);
         return null;
       }
@@ -106,18 +136,22 @@ export function makeAntiBotHooks(): {
  // polling conservatively (it does NOT report the challenge as resolved), so
  // a transient detection failure surfaces as "still present" rather than
  // "cleared".
-    waitForChallengeResolution: async () => {
+    waitForChallengeResolution: async (signal?: AbortSignal) => {
       try {
-      const tabId = await getActiveTabId();
+      if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError");
+      const tabId = await getActiveTabId(signal);
+      if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError");
       if (tabId === null) return false;
       const result = await waitForChallengeResolution(tabId, {
         timeoutMs: 15_000,
         // Jitter the poll cadence so the anti-bot challenge-resolution poll is
         // not a perfectly regular 500ms timer (a minor automation fingerprint).
         pollMs: 500 + Math.floor(Math.random() * 100),
+        signal,
       });
       return result.resolved;
       } catch (err) {
+        if (signal?.aborted) throw err;
         console.warn("[antibot] waitForChallengeResolution threw — treating as unresolved.", err);
         return false;
       }

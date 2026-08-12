@@ -16,12 +16,14 @@ import type {
 } from "../../types";
 import { executeAction, describeAction } from "../../tools/executor";
 import { resetDomBaseline } from "../../dom/extractor";
-import { checkActionAllowed, requiresConfirmation, type AgentMode } from "../../modes";
+import type { AgentMode } from "../../modes";
+import { currentCapabilityPolicy } from "../../capability-policy";
 import { formatErrorSuffix } from "../../errors";
 import type { CallbackDispatcher, CallbackContext } from "../../callbacks";
 import type { LoopDeps, ActionQueueResult } from "../types";
 import type { LoopDetector } from "../loop-detector";
 import { TAB_LEVEL_ACTIONS } from "../constants";
+import { redactKeyLeak } from "../../redact-shared";
 
 /** Build a uniform failure {@link ActionResult} for an exception. */
 const toActionError = (a: AgentAction, e: unknown): ActionResult => {
@@ -49,7 +51,7 @@ async function safeDispatcherCall(fn: () => Promise<void>): Promise<void> {
   try {
     await fn();
   } catch (e) {
-    console.error("[action-queue] dispatcher hook threw (continuing queue):", e);
+    console.error(`[action-queue] dispatcher hook threw (continuing queue): ${redactKeyLeak(String(e))}`);
   }
 }
 
@@ -103,12 +105,16 @@ export async function executeActionQueue(
     }
     const action = actions[i];
 
-    const allowed = checkActionAllowed(action.type, agentMode);
-    if (!allowed.allowed) {
+    const capability = currentCapabilityPolicy.decide({
+      actionType: action.type,
+      mode: agentMode,
+      enforcementPoint: "loop-action-queue",
+    });
+    if (!capability.allowed) {
       const blockedResult: ActionResult = {
         action,
         success: false,
-        message: `BLOCKED: ${allowed.reason}`,
+        message: `BLOCKED: ${capability.reason}`,
       };
       deps.onEvent({
         type: "action-result", step, name: action.type,
@@ -122,7 +128,7 @@ export async function executeActionQueue(
       break;
     }
 
-    if (deps.requestConfirmation && requiresConfirmation(action.type, agentMode)) {
+    if (deps.requestConfirmation && capability.requiresConfirmation) {
       let confirmed = false;
  // Distinguish a genuine infrastructure failure from a deliberate decline.
  // A thrown error is treated as a *failed request*, never as "user said no".

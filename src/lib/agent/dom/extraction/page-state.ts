@@ -8,7 +8,7 @@ import {
   endVisibilityCache,
   directText,
 } from "../utils";
-import { buildAttrs, hashElement, DOM_CONFIG, resetHashCaches } from "./element-info";
+import { buildAttrs, hashElement, elementIdentity, DOM_CONFIG, resetHashCaches } from "./element-info";
 import { redactUrlTokens } from "./element-info-utils";
 import { getShadowRoot } from "../annotation/shadow-piercer";
 import { escapeAttr, attrString, buildPageInfo, buildCompoundChildren } from "./page-state-utils";
@@ -93,6 +93,14 @@ function pushLine(acc: WalkAccumulator, line: string): void {
 interface WalkAccumulator {
   index: number;
   selectorMap: Record<number, HTMLElement>;
+  /**
+   * Per-index element identity (`elementIdentity(el)`) captured at the same
+   * moment the element enters the selector map. The executor re-verifies a
+   * live element against this at action time — see
+   * `tools/helpers/element-resolver.ts` — so a node that was replaced or
+   * re-ordered since extraction fail-closes instead of being operated on.
+   */
+  identities: Record<number, string>;
   elements: ExtractedElement[];
   lines: string[];
   prevHashes: Set<string>;
@@ -155,6 +163,7 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
       if (isNew) acc.newElementCount++;
       const text = directText(el) || el.getAttribute("aria-label") || "";
       acc.selectorMap[idx] = el;
+      acc.identities[idx] = elementIdentity(el, attrs);
       acc.elements.push({ index: idx, tag, text, attributes: attrs, hash, rect: el.getBoundingClientRect() });
       const prefix = isNew ? "*" : "";
       pushLine(acc, "\t".repeat(depth) + `${prefix}[${idx}]<${tag}${attrString(attrs)} />`);
@@ -180,6 +189,7 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
     if (isNew) acc.newElementCount++;
     const text = directText(el) || el.getAttribute("aria-label") || "";
     acc.selectorMap[idx] = el;
+    acc.identities[idx] = elementIdentity(el, attrs);
     acc.elements.push({ index: idx, tag, text, attributes: attrs, hash, rect: rect! });
     const prefix = isNew ? "*" : "";
     pushLine(acc, "\t".repeat(depth) + `${prefix}[${idx}]<${tag}${attrString(attrs)} />`);
@@ -203,6 +213,7 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
     const text = directText(el) || el.getAttribute("aria-label") || "";
     const containerRect = el.getBoundingClientRect();
     acc.selectorMap[idx] = el;
+    acc.identities[idx] = elementIdentity(el, attrs);
     acc.elements.push({ index: idx, tag, text, attributes: attrs, hash, rect: containerRect });
     const prefix = isNew ? "*" : "";
     pushLine(acc, "\t".repeat(depth) + `${prefix}[${idx}]<${tag}${attrString(attrs)} />`);
@@ -245,6 +256,7 @@ function walkNode(node: Node, depth: number, acc: WalkAccumulator): void {
 }
 
 let cachedSelectorMap: Record<number, HTMLElement> = {};
+let cachedIdentities: Record<number, string> = {};
 let cachedHashes: Set<string> = new Set();
 /** Full serialized snapshot from the last successful extract (paging cache). */
 let snapshotCacheText: string | null = null;
@@ -274,6 +286,7 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
   const acc: WalkAccumulator = {
     index: 0,
     selectorMap: {},
+    identities: {},
     elements: [],
     lines: [],
     prevHashes: cachedHashes,
@@ -294,6 +307,7 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
     } catch (e) {
       console.warn("[page-state] DOM walk threw mid-extract (resetting selectorMap to avoid stale indices):", e);
       acc.selectorMap = {};
+      acc.identities = {};
       acc.elements = [];
       acc.lines = [];
       walkFailed = true;
@@ -306,6 +320,7 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
   }
   cachedHashes = new Set(acc.elements.map((e) => e.hash));
   cachedSelectorMap = acc.selectorMap;
+  cachedIdentities = acc.identities;
   const scrollTop = window.scrollY || 0;
   const scrollHeight = document.documentElement.scrollHeight;
   const vh = window.innerHeight;
@@ -329,11 +344,23 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
     scrollHeight,
     viewportHeight: vh,
     selectorMap: acc.selectorMap,
+    elementIdentities: acc.identities,
   };
 }
 
 export function getSelectorMap(): Record<number, HTMLElement> {
   return cachedSelectorMap;
+}
+
+/**
+ * Per-index element identities captured with the last successful
+ * `extractBrowserState` walk. The content-script executor stitches these into
+ * the execution-time `BrowserState` so `resolveElement` can reject an action
+ * whose target element changed since the observation snapshot (stale-element
+ * guard) — see `tools/helpers/element-resolver.ts`.
+ */
+export function getElementIdentities(): Record<number, string> {
+  return cachedIdentities;
 }
 
 function serializeCompoundChildren(el: HTMLElement, depth: number, acc: WalkAccumulator): void {

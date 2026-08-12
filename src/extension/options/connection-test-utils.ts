@@ -128,46 +128,165 @@ export async function assertSsrfSafe(url: string): Promise<void> {
   }
 }
 
+const CONNECTION_RESPONSE_BYTES = 1024 * 1024;
+const CONNECTION_ERROR_PREVIEW_BYTES = 1024;
+const CONNECTION_CLEANUP_DEADLINE_MS = 50;
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("Test Connection aborted", "AbortError");
+}
+
+async function withAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw abortReason(signal);
+  return await new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(abortReason(signal));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
+/**
+ * Stream cancellation is cleanup, not part of the provider result. A browser
+ * implementation (or test double) is allowed to leave cancel() pending while
+ * its underlying source settles, so never let that promise extend the Test
+ * Connection deadline indefinitely.
+ */
+async function cancelWithDeadline(cancel: () => Promise<unknown>): Promise<void> {
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, CONNECTION_CLEANUP_DEADLINE_MS);
+    void Promise.resolve().then(cancel).catch(() => {}).then(finish);
+  });
+}
+
+/** Return a trustworthy, bounded integer Content-Length or null when absent/malformed. */
+function declaredContentLength(response: Response): number | null {
+  const raw = response.headers?.get?.("content-length");
+  if (typeof raw !== "string" || !/^\d+$/.test(raw.trim())) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+async function readBoundedBody(
+  response: Response,
+  byteCap: number,
+  signal: AbortSignal,
+): Promise<{ text: string; tooLarge: boolean }> {
+  const declared = declaredContentLength(response);
+  const body = response.body;
+  if (declared !== null && declared > byteCap) {
+    if (body) {
+      await cancelWithDeadline(() => body.cancel());
+    }
+    return { text: "", tooLarge: true };
+  }
+
+  if (!body) {
+    if (typeof response.text !== "function") return { text: "", tooLarge: false };
+    // Real fetch responses expose readable bodies. A bodyless text() fallback
+    // is therefore primarily a platform/test compatibility seam, and may only
+    // be used when a valid declared size proves the read is within this
+    // caller's budget. Missing/malformed lengths fail closed before text()
+    // could buffer an unbounded payload.
+    if (declared === null) {
+      throw new Error("response body unavailable for bounded read");
+    }
+    if (declared === 0) return { text: "", tooLarge: false };
+    const text = await withAbort(response.text(), signal);
+    return {
+      text,
+      tooLarge: new TextEncoder().encode(text).byteLength > byteCap,
+    };
+  }
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let bytes = 0;
+  let tooLarge = false;
+  try {
+    while (true) {
+      const { done, value } = await withAbort(reader.read(), signal);
+      if (done) break;
+      const remaining = byteCap - bytes;
+      if (value.byteLength > remaining) {
+        if (remaining > 0) text += decoder.decode(value.slice(0, remaining), { stream: true });
+        tooLarge = true;
+        await cancelWithDeadline(() => reader.cancel());
+        break;
+      }
+      bytes += value.byteLength;
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+  } catch (error) {
+    await cancelWithDeadline(() => reader.cancel());
+    throw error;
+  } finally {
+    try { reader.releaseLock(); } catch { /* already released */ }
+  }
+  return { text, tooLarge };
+}
+
 /**
  * Perform one authenticated `GET` to `url` and return the parsed JSON body.
  * Throws on network error or a non-2xx status (with a redacted, status-aware
  * message). The caller owns latency measurement + redaction of `apiKey`.
  */
 export async function getJson(url: string, headers: Record<string, string>): Promise<unknown> {
+  const deadline = AbortSignal.timeout(10_000);
   const res = await fetch(url, {
     method: "GET",
     headers,
     redirect: "manual",
-    signal: AbortSignal.timeout(10_000),
+    signal: deadline,
   });
   if (res.type === "opaqueredirect") {
     throw new Error("redirect refused by Test Connection");
   }
   if (!res.ok) {
-    let detail = "";
+    const body = await readBoundedBody(res, CONNECTION_ERROR_PREVIEW_BYTES, deadline);
+    if (body.tooLarge) throw new Error(`HTTP ${res.status}: response body too large`);
+    let detail = body.text.slice(0, 200);
     try {
-      const body = await res.json();
-      if (body && typeof body === "object") {
-        const b = body as Record<string, unknown>;
-        detail = typeof b.error === "string"
-          ? b.error
-          : typeof b.message === "string"
-            ? b.message
-            : JSON.stringify(b).slice(0, 200);
-      }
+      const parsed = JSON.parse(body.text) as Record<string, unknown>;
+      detail = typeof parsed.error === "string"
+        ? parsed.error
+        : typeof parsed.message === "string"
+          ? parsed.message
+          : JSON.stringify(parsed).slice(0, 200);
     } catch {
-      try {
-        detail = (await res.text()).slice(0, 200);
-      } catch {
-        detail = "";
-      }
+      // A plain-text provider error is already a useful bounded preview.
     }
     const suffix = detail ? `: ${detail}` : "";
     throw new Error(`HTTP ${res.status}${suffix}`);
   }
+
+  if (res.body || typeof res.text === "function") {
+    const body = await readBoundedBody(res, CONNECTION_RESPONSE_BYTES, deadline);
+    if (body.tooLarge) {
+      throw new Error(`response body too large: exceeded ${CONNECTION_RESPONSE_BYTES} bytes`);
+    }
+    if (!body.text.trim()) return {};
+    try {
+      return JSON.parse(body.text) as unknown;
+    } catch {
+      return {};
+    }
+  }
+
+  // Some browser/test response shims expose only json(). Keep that compatible,
+  // but do not turn a body deadline into the historical empty-success result.
   try {
-    return await res.json();
-  } catch {
+    return await withAbort(res.json(), deadline);
+  } catch (error) {
+    if (deadline.aborted) throw error;
     return {};
   }
 }

@@ -1,0 +1,313 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Open Cowork — Design tokens (shared layer)
+
+   Single source of truth for the product visual language. Imported by BOTH
+   `sidepanel.css` and `options.css` so the two surfaces share one palette,
+   type scale, spacing rhythm, radius set, elevation model, focus ring, and
+   motion vocabulary.
+
+   Structure:
+     1. Primitives  — `--oc-prim-*` raw values (dark theme default).
+     2. Semantics   — `--oc-*` aliases (components reference ONLY these).
+     3. Legacy      — `--cw-*` / `--gap-*` / `--pad-*` aliases so existing
+                      TS-rendered inline styles (e.g. options/status.ts) keep
+                      resolving during the token-alias cutover.
+     4. Foundation  — global :focus-visible, sr-only, reduced motion,
+                      selection, scrollbar, responsive primitives.
+     5. Theme       — @media (prefers-color-scheme: light) re-maps primitives;
+                      semantic aliases follow because they reference them.
+
+   Values mirror `tokens.ts` (checked by tests/phase13-tokens.test.ts).
+   AA contract: every text/background pair reaches ≥4.5:1; `--oc-accent-text`
+   is the AA-corrected accent for text; `--oc-status-danger-strong` is the
+   danger FILL (white text reaches ≥4.5:1 on it).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ─── 1. Primitives — dark theme (default) ──────────────────────────────── */
+:root {
+  /* Surfaces */
+  --oc-prim-bg-app:    #14161C;
+  --oc-prim-bg-panel:  #1C1F27;
+  --oc-prim-bg-raised: #232732;
+  --oc-prim-bg-input:  #0E1015;
+  --oc-prim-bg-scrim:  rgba(10, 12, 16, 0.62);
+
+  /* Borders */
+  --oc-prim-border:        #2A2E38;
+  --oc-prim-border-strong: #3A3F4D;
+
+  /* Text */
+  --oc-prim-text-primary:   #E7E9F0;
+  --oc-prim-text-secondary: #9AA0B0;
+  --oc-prim-text-tertiary:  #8890A3; /* AA-corrected from legacy #646B7A */
+  --oc-prim-text-on-accent: #FFFFFF;
+
+  /* Accent */
+  --oc-prim-accent:         #6C5CE7;
+  --oc-prim-accent-hover:   #5A49D6; /* AA: white text ≥4.5:1 on hover fill */
+  --oc-prim-accent-text:    #8F82F5; /* AA-corrected accent for text */
+  --oc-prim-accent-strong:  #8F82F5;
+  --oc-prim-accent-subtle:  rgba(108, 92, 231, 0.12);
+
+  /* Status */
+  --oc-prim-success:        #4ADE80;
+  --oc-prim-success-subtle: rgba(74, 222, 128, 0.14);
+  --oc-prim-warning:        #FBBF24;
+  --oc-prim-warning-subtle: rgba(251, 191, 36, 0.10);
+  --oc-prim-warning-border: rgba(251, 191, 36, 0.28);
+  --oc-prim-danger:         #F87171;
+  --oc-prim-danger-subtle:  rgba(248, 113, 113, 0.12);
+  --oc-prim-danger-border:  rgba(248, 113, 113, 0.40);
+  --oc-prim-danger-strong:  #DC2626; /* danger FILL (white text ≥4.5:1) */
+  --oc-prim-info:           #60A5FA;
+
+  /* Focus */
+  /* Solid accent-strong per theme (5.75:1 dark / 6.86:1 light vs app) so the
+     non-text indicator reaches WCAG 1.4.11 ≥3:1 (rgba 0.55 measured ~1.97:1). */
+  --oc-prim-focus-ring: #8F82F5;
+
+  /* Spacing scale (4px base) */
+  --oc-space-1: 4px;
+  --oc-space-2: 6px;
+  --oc-space-3: 8px;
+  --oc-space-4: 12px;
+  --oc-space-5: 16px;
+  --oc-space-6: 20px;
+  --oc-space-7: 24px;
+  --oc-space-8: 32px;
+
+  /* Radius */
+  --oc-radius-sm:   6px;
+  --oc-radius-md:   10px;
+  --oc-radius-lg:   16px;
+  --oc-radius-full: 999px;
+
+  /* Elevation */
+  --oc-elevation-1: 0 1px 2px rgba(0, 0, 0, 0.24);
+  --oc-elevation-2: 0 6px 20px rgba(0, 0, 0, 0.38);
+  --oc-elevation-3: 0 12px 32px rgba(0, 0, 0, 0.50);
+  --oc-glow-accent: 0 0 0 1px rgba(108, 92, 231, 0.45),
+                    0 8px 28px rgba(108, 92, 231, 0.22);
+
+  /* Type */
+  --oc-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                  "Public Sans", "Inter", system-ui, sans-serif;
+  --oc-font-mono: ui-monospace, "SF Mono", Menlo, Consolas,
+                  "Liberation Mono", monospace;
+  --oc-text-xs:   11px;
+  --oc-text-sm:   12px;
+  --oc-text-base: 13px;
+  --oc-text-md:   14px;
+  --oc-text-lg:   15px;
+  --oc-text-xl:   18px;
+  --oc-line-height-tight: 1.4;
+  --oc-line-height-base:  1.55;
+  --oc-weight-normal: 400;
+  --oc-weight-medium: 500;
+  --oc-weight-semibold: 600;
+  --oc-weight-bold: 700;
+
+  /* Motion */
+  --oc-duration-fast: 120ms;
+  --oc-duration-base: 160ms;
+  --oc-duration-slow: 240ms;
+  --oc-ease-standard:    ease;
+  --oc-ease-emphasized:  cubic-bezier(0.2, 0, 0, 1);
+  --oc-transition-fast:  160ms var(--oc-ease-standard);
+  --oc-transition-base:  200ms var(--oc-ease-standard);
+
+  /* Focus ring */
+  --oc-focus-ring-width:  2px;
+  --oc-focus-ring-offset: 2px;
+}
+
+
+/* ─── 2. Semantic aliases (components reference only these) ─────────────── */
+:root {
+  /* Surfaces */
+  --oc-surface-app:    var(--oc-prim-bg-app);
+  --oc-surface-panel:  var(--oc-prim-bg-panel);
+  --oc-surface-raised: var(--oc-prim-bg-raised);
+  --oc-surface-input:  var(--oc-prim-bg-input);
+  --oc-surface-scrim:  var(--oc-prim-bg-scrim);
+
+  /* Borders */
+  --oc-border-default: var(--oc-prim-border);
+  --oc-border-strong:  var(--oc-prim-border-strong);
+
+  /* Text */
+  --oc-text-primary:    var(--oc-prim-text-primary);
+  --oc-text-secondary:  var(--oc-prim-text-secondary);
+  --oc-text-tertiary:   var(--oc-prim-text-tertiary);
+  --oc-text-on-accent:  var(--oc-prim-text-on-accent);
+
+  /* Accent */
+  --oc-accent:        var(--oc-prim-accent);
+  --oc-accent-hover:  var(--oc-prim-accent-hover);
+  --oc-accent-text:   var(--oc-prim-accent-text);
+  --oc-accent-strong: var(--oc-prim-accent-strong);
+  --oc-accent-subtle: var(--oc-prim-accent-subtle);
+
+  /* Status */
+  --oc-status-success:        var(--oc-prim-success);
+  --oc-status-success-subtle: var(--oc-prim-success-subtle);
+  --oc-status-warning:        var(--oc-prim-warning);
+  --oc-status-warning-subtle: var(--oc-prim-warning-subtle);
+  --oc-status-warning-border: var(--oc-prim-warning-border);
+  --oc-status-danger:         var(--oc-prim-danger);
+  --oc-status-danger-subtle:  var(--oc-prim-danger-subtle);
+  --oc-status-danger-border:  var(--oc-prim-danger-border);
+  --oc-status-danger-strong:  var(--oc-prim-danger-strong);
+  --oc-status-info:           var(--oc-prim-info);
+
+  /* Focus ring */
+  --oc-focus-ring: var(--oc-prim-focus-ring);
+
+  /* Component spacing */
+  --oc-label-gap:    var(--oc-space-2);
+  --oc-field-gap:    18px; /* legacy rhythm value (kept for cutover parity) */
+  --oc-section-gap:  var(--oc-space-7);
+  --oc-control-pad:  10px 12px; /* legacy rhythm value (kept for cutover parity) */
+  --oc-card-pad:     16px 20px; /* legacy rhythm value (kept for cutover parity) */
+  --oc-control-height: 40px;
+
+  /* Component surfaces */
+  --oc-btn-primary-bg:   var(--oc-accent);
+  --oc-btn-primary-text: var(--oc-text-on-accent);
+  --oc-btn-danger-bg:    var(--oc-status-danger-strong);
+  --oc-btn-danger-text:  var(--oc-text-on-accent);
+}
+
+/* ─── 3. Legacy aliases (cutover compatibility) ─────────────────────────── */
+:root {
+  --cw-void:            var(--oc-surface-app);
+  --cw-surface:         var(--oc-surface-panel);
+  --cw-raised:          var(--oc-surface-raised);
+  --cw-input:           var(--oc-surface-input);
+  --cw-overlay:         var(--oc-surface-scrim);
+  --cw-border:          var(--oc-border-default);
+  --cw-border-hover:    var(--oc-border-strong);
+  --cw-text:            var(--oc-text-primary);
+  --cw-muted:           var(--oc-text-secondary);
+  --cw-dim:             var(--oc-text-tertiary);
+  --cw-accent:          var(--oc-accent);
+  --cw-accent-hover:    var(--oc-accent-hover);
+  --cw-accent-contrast: var(--oc-text-on-accent);
+  --cw-accent-subtle:   var(--oc-accent-subtle);
+  --cw-success:         var(--oc-status-success);
+  --cw-success-subtle:  var(--oc-status-success-subtle);
+  --cw-danger:          var(--oc-status-danger);
+  --cw-danger-subtle:   var(--oc-status-danger-subtle);
+  --cw-danger-border:   var(--oc-status-danger-border);
+  --cw-warn:            var(--oc-status-warning);
+  --cw-warn-subtle:     var(--oc-status-warning-subtle);
+  --cw-warn-border:     var(--oc-status-warning-border);
+  --cw-info:            var(--oc-status-info);
+  --cw-ring:            var(--oc-focus-ring);
+  --cw-glow:            var(--oc-glow-accent);
+  --cw-shadow-md:       var(--oc-elevation-2);
+  --cw-radius:          var(--oc-radius-md);
+  --cw-radius-sm:       var(--oc-radius-sm);
+  --cw-radius-lg:       var(--oc-radius-lg);
+  --cw-gap-label:       var(--oc-label-gap);
+  --cw-gap-field:       var(--oc-field-gap);
+  --cw-gap-section:     var(--oc-section-gap);
+  --cw-pad-input:       var(--oc-control-pad);
+  --cw-pad-card:        var(--oc-card-pad);
+  --cw-mono:            var(--oc-font-mono);
+  --cw-sans:            var(--oc-font-sans);
+  --cw-ease:            var(--oc-transition-fast);
+  --gap-label:          var(--oc-label-gap);
+  --gap-field:          var(--oc-field-gap);
+  --gap-section:        var(--oc-section-gap);
+  --pad-input:          var(--oc-control-pad);
+  --pad-card:           var(--oc-card-pad);
+}
+
+/* ─── 4. Foundation — focus, sr-only, reduced motion, responsive ────────── */
+
+/* Visible keyboard focus on every interactive control. Individual components
+   may refine this with more specific `:focus-visible` rules; this global rule
+   is the fallback that guarantees no control is ever left without a ring. */
+:focus-visible {
+  outline: var(--oc-focus-ring-width) solid var(--oc-focus-ring);
+  outline-offset: var(--oc-focus-ring-offset);
+}
+
+/* Screen-reader-only utility (both panels) */
+.sr-only,
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* Selection color contrast is preserved in both themes */
+::selection {
+  background: var(--oc-accent-subtle);
+  color: var(--oc-text-primary);
+}
+
+/* Reduced motion: honor the OS preference globally. Durations collapse to a
+   perceptually-instant 1ms (never 0ms, so transition end-events still fire). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ─── 5. Light theme — @media re-maps primitives; aliases follow ────────── */
+@media (prefers-color-scheme: light) {
+  :root {
+    --oc-prim-bg-app:    #F7F8FB;
+    --oc-prim-bg-panel:  #FFFFFF;
+    --oc-prim-bg-raised: #EEF0F5;
+    --oc-prim-bg-input:  #F0F1F5;
+    --oc-prim-bg-scrim:  rgba(10, 12, 16, 0.45);
+
+    --oc-prim-border:        #E2E5EC;
+    --oc-prim-border-strong: #D2D6E0;
+
+    --oc-prim-text-primary:   #1A1D26;
+    --oc-prim-text-secondary: #5C6273;
+    --oc-prim-text-tertiary:  #565E6E;
+    --oc-prim-text-on-accent: #FFFFFF;
+
+    --oc-prim-accent:         #6C5CE7;
+    --oc-prim-accent-hover:   #5A49D6;
+    --oc-prim-accent-text:    #5A49D6;
+    --oc-prim-accent-strong:  #4C3FCB;
+    --oc-prim-accent-subtle:  rgba(108, 92, 231, 0.12);
+
+    --oc-prim-success:        #166534; /* AA-corrected from legacy #16A34A */
+    --oc-prim-success-subtle: rgba(22, 163, 74, 0.12);
+    --oc-prim-warning:        #A1420A; /* AA-corrected: blended-subtle pair ≥4.5:1 (#B45309 was 4.36:1) */
+    --oc-prim-warning-subtle: rgba(217, 119, 6, 0.08);
+    --oc-prim-warning-border: rgba(217, 119, 6, 0.25);
+    --oc-prim-danger:         #B91C1C; /* AA-corrected from legacy #DC2626 */
+    --oc-prim-danger-subtle:  rgba(220, 38, 38, 0.10);
+    --oc-prim-danger-border:  rgba(220, 38, 38, 0.40);
+    --oc-prim-danger-strong:  #B91C1C;
+    --oc-prim-info:           #2563EB;
+
+    /* Solid accent-strong per theme (non-text ≥3:1, see dark section). */
+    --oc-prim-focus-ring: #4C3FCB;
+  }
+
+  body {
+    background: var(--oc-surface-app);
+    color: var(--oc-text-primary);
+  }
+}
+

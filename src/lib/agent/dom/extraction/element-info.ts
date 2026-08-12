@@ -99,7 +99,23 @@ export function buildAttrs(el: HTMLElement): Record<string, string> {
 
 // ─── Element hashing (for `isNew` tracking) ─────────────────────────────────
 
-function elementIdentity(el: HTMLElement, attrs?: Record<string, string>): string {
+/**
+ * Stable identity string for an element: `tag|keyAttrs|branch-path` (plus a
+ * collision-free uid when the element has no usable branch path).
+ *
+ * Exported so the stale-element execution guard (`tools/helpers/element-resolver.ts`)
+ * can recompute the identity of a live element at EXECUTION time and compare it
+ * against the identity captured at EXTRACTION time (`page-state.ts` records one
+ * per selector-map index). Two references to the SAME node produce the same
+ * string; a node replaced/re-ordered by the page produces a different one —
+ * which fail-closes the handler instead of operating on a stale element.
+ *
+ * SECRECY NOTE: identity inputs are `identityKeyAttrs` (role/type/name/id/
+ * placeholder/aria-label/href/for) + the tag + the branch path — never the
+ * value of a password field (password values never enter `buildAttrs`), never
+ * raw `textContent` (matching the `hashElement` contract the snapshot uses).
+ */
+export function elementIdentity(el: HTMLElement, attrs?: Record<string, string>): string {
   const tag = el.tagName.toLowerCase();
   const a = attrs ?? buildAttrs(el);
   const keyAttrs = DOM_CONFIG.identityKeyAttrs

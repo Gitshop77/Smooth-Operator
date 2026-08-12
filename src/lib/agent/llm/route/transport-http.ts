@@ -9,6 +9,7 @@ import type { Framing, Frame } from "./framing";
 import { buildURL } from "./endpoint";
 import { withLLMRetry } from "../retry";
 import { redactKeyShapes } from "../../key-shape-redact";
+import { redactProviderErrorPreview } from "../../secrets";
 import { MAX_RETRY_AFTER_MS } from "../constants";
 import type { SsrfProvenance } from "./ssrf";
 import {
@@ -104,13 +105,22 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: {
         // signal — an erroring endpoint would accumulate one per attempt for
         // the whole run. The success path keeps its detach until the stream
         // ends (mid-stream Stop must stay honored).
-        (r as Response & { __detachAbortListener?: () => void }).__detachAbortListener?.();
-        // Read the error body with a byte cap: the old `r.text()` path
-        // buffered the entire (potentially multi-GB) error payload before the
-        // 100-char slice; the preview reads bounded chunks and cancels once the
-        // cap is reached.
-        const txt = await readErrorBodyPreview(r).catch(() => "");
-        const err = new Error(`LLM API ${r.status}: ${redactKeyShapes(txt.slice(0, 100))}`);
+        let txt = "";
+        try {
+          // Keep the fetch listener attached while the preview is consumed: a
+          // Stop must cancel a stalled non-2xx body just as it cancels SSE.
+          txt = await readErrorBodyPreview(r, signal);
+        } catch (error) {
+          if (signal?.aborted) throw error;
+        } finally {
+          (r as Response & { __detachAbortListener?: () => void }).__detachAbortListener?.();
+        }
+        if (signal?.aborted) {
+          throw signal.reason instanceof Error
+            ? signal.reason
+            : new DOMException("Aborted", "AbortError");
+        }
+        const err = new Error(`LLM API ${r.status}: ${redactProviderErrorPreview(redactKeyShapes(txt.slice(0, 100)))}`);
  // Carry the numeric HTTP status so withLLMRetry can classify retryable
  // errors from the status code (429 / 5xx) instead of string-matching
  // the response body — which is fragile and language-dependent.

@@ -221,6 +221,10 @@ const STATIC_FILES = [
   "sidepanel.css",
   "options.html",
   "options.css",
+  // Phase 13 — shared visual layer imported by both surface stylesheets
+  // (`@import url("tokens.css")` / `url("components.css")`).
+  "tokens.css",
+  "components.css",
 ] as const;
 
 /** TypeScript entry points + their bundled output filenames. */
@@ -253,14 +257,15 @@ function assertZodLocalesStub(): void {
 
 /**
  * LIC-1: convey third-party license / attribution text WITH the distributed
- * extension bundle. The Local Vision Assistant bundles `@huggingface/transformers`
- * (Apache-2.0) and `onnxruntime-web` (MIT) into the shipped MV3 extension.
+ * extension bundle. The runtime directly bundles `@huggingface/transformers`
+ * (Apache-2.0), `onnxruntime-web`, `zod`, and `@opencode-ai/models` (MIT)
+ * into the shipped MV3 extension.
  * Apache-2.0 (S)4(a)-(c) requires the Apache License text (and any upstream
  * NOTICE) to travel with the redistribution; MIT requires reproduction of the
  * copyright/permission notice.
  *
- * We copy the full Apache-2.0 text shipped inside the transformers package
- * (best-effort). `onnxruntime-web` ships no `LICENSE` file in its package, so
+ * We copy the license texts shipped inside transformers, zod, and models.dev.
+ * `onnxruntime-web` ships no `LICENSE` file in its package, so
  * its MIT copyright + permission notice is reproduced inline below and written
  * to `LICENSE-MIT` in the shipped bundle.
  *
@@ -275,14 +280,23 @@ function assertZodLocalesStub(): void {
  * and `manifest.json` is tracked separately, outside this build file.
  */
 async function emitThirdPartyLicenses(): Promise<void> {
-  const targets: Array<[string, string]> = [];
- // The project's own MIT LICENSE (the Options/About page claims the extension
- // is MIT-licensed, so its own license text must travel with the bundle).
+  const rootPackage = JSON.parse(await readFile(path.resolve("package.json"), "utf8")) as {
+    dependencies?: Record<string, string>;
+  };
+  const reviewed = [
+    { name: "@huggingface/transformers", license: "Apache-2.0", source: "node_modules/@huggingface/transformers/LICENSE", artifact: "LICENSE-APACHE" },
+    { name: "onnxruntime-web", license: "MIT", source: null, artifact: "LICENSE-MIT" },
+    { name: "zod", license: "MIT", source: "node_modules/zod/LICENSE", artifact: "LICENSE-MIT-ZOD" },
+    { name: "@opencode-ai/models", license: "MIT", source: "node_modules/@opencode-ai/models/LICENSE", artifact: "LICENSE-MIT-OPENCODE-MODELS" },
+  ] as const;
+  const declared = Object.keys(rootPackage.dependencies ?? {}).sort();
+  const inventoried = reviewed.map((item) => item.name).sort();
+  if (JSON.stringify(declared) !== JSON.stringify(inventoried)) {
+    throw new Error(`[licenses] runtime dependency inventory drifted; declared=${declared.join(",")} reviewed=${inventoried.join(",")}`);
+  }
   const ownLicense = path.resolve("LICENSE");
-  if (existsSync(ownLicense)) targets.push([ownLicense, "LICENSE"]);
- // Full Apache-2.0 text from the transformers package (best-effort).
-  const apache = path.resolve("node_modules/@huggingface/transformers/LICENSE");
-  if (existsSync(apache)) targets.push([apache, "LICENSE-APACHE"]);
+  if (!existsSync(ownLicense)) throw new Error(`[licenses] missing project license: ${ownLicense}`);
+  await copyFile(ownLicense, path.join(OUT, "LICENSE"));
  // MIT notice for `onnxruntime-web` (ships no LICENSE file in its package).
   const ONX_MIT = [
     "MIT License",
@@ -308,14 +322,34 @@ async function emitThirdPartyLicenses(): Promise<void> {
     "SOFTWARE.",
     "",
   ].join("\n");
-  for (const [src, out] of targets) {
-    if (existsSync(src)) {
-      await copyFile(src, path.join(OUT, out));
-    } else {
-      console.warn(`[licenses] skipping missing license file: ${src}`);
+  const manifest: Array<{ name: string; version: string; license: string; artifact: string }> = [];
+  for (const item of reviewed) {
+    const dependencyPackagePath = path.resolve("node_modules", item.name, "package.json");
+    if (!existsSync(dependencyPackagePath)) {
+      throw new Error(`[licenses] missing installed package metadata: ${dependencyPackagePath}`);
     }
+    const dependencyPackage = JSON.parse(await readFile(dependencyPackagePath, "utf8")) as { version?: unknown };
+    if (typeof dependencyPackage.version !== "string" || dependencyPackage.version.length === 0) {
+      throw new Error(`[licenses] missing version metadata for ${item.name}`);
+    }
+    if (item.source) {
+      const source = path.resolve(item.source);
+      if (!existsSync(source)) throw new Error(`[licenses] missing license file for ${item.name}: ${source}`);
+      await copyFile(source, path.join(OUT, item.artifact));
+    }
+    manifest.push({
+      name: item.name,
+      version: dependencyPackage.version,
+      license: item.license,
+      artifact: item.artifact,
+    });
   }
   await writeFile(path.join(OUT, "LICENSE-MIT"), ONX_MIT, "utf8");
+  await writeFile(
+    path.join(OUT, "THIRD_PARTY_LICENSES.json"),
+    `${JSON.stringify({ formatVersion: 1, dependencies: manifest }, null, 2)}\n`,
+    "utf8",
+  );
  // Apache-2.0 §4(d): ship the NOTICE describing the bundled transformers.js
  // dependency. Written inline (not copied from a tracked source file) because
  // buildAll() clears the OUT dir every build — a copy-from-OUT source would be

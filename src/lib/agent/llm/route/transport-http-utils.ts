@@ -88,10 +88,41 @@ const ERROR_BODY_PREVIEW_BYTES = 1024;
  * `slice(0, 100)`; this reads bounded chunks and cancels the reader once the
  * cap is reached. Returns the (UTF-8 decoded) preview text.
  */
-export async function readErrorBodyPreview(res: Response): Promise<string> {
+function abortError(signal?: AbortSignal): DOMException {
+  return signal?.reason instanceof DOMException
+    ? signal.reason
+    : new DOMException("Aborted", "AbortError");
+}
+
+/** Race an uninterruptible platform promise with the root cancellation signal. */
+function awaitAbortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(abortError(signal));
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => finish(() => reject(abortError(signal)));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    );
+  });
+}
+
+export async function readErrorBodyPreview(res: Response, signal?: AbortSignal): Promise<string> {
   const cap = ERROR_BODY_PREVIEW_BYTES;
+  if (signal?.aborted) throw abortError(signal);
   if (!res.body) {
-    return (await res.text().catch(() => "")).slice(0, cap);
+    return (await awaitAbortable(res.text(), signal).catch((error: unknown) => {
+      if (signal?.aborted) throw error;
+      return "";
+    })).slice(0, cap);
   }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -106,15 +137,16 @@ export async function readErrorBodyPreview(res: Response): Promise<string> {
       // error message then carries just the status, and the empty string can
       // never match retry.ts's retryable network regex.
       const readPromise = reader.read();
-      const chunk = await Promise.race([
-        readPromise,
-        new Promise<"__stalled__">((resolve) => {
-          setTimeout(() => {
-            void readPromise.then(() => reader.cancel().catch(() => {}));
-            resolve("__stalled__");
-          }, CHUNK_TIMEOUT_MS);
-        }),
-      ]);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const stall = new Promise<"__stalled__">((resolve) => {
+        timer = setTimeout(() => {
+          void reader.cancel().catch(() => {});
+          resolve("__stalled__");
+        }, CHUNK_TIMEOUT_MS);
+      });
+      const chunk = await awaitAbortable(Promise.race([readPromise, stall]), signal).finally(() => {
+        if (timer) clearTimeout(timer);
+      });
       if (chunk === "__stalled__") return "";
       const { done, value } = chunk;
       if (done) break;
@@ -165,6 +197,7 @@ export async function fetchWithTimeout(
   userSignal: AbortSignal | undefined,
   provenance: SsrfProvenance
 ): Promise<Response> {
+  if (userSignal?.aborted) throw abortError(userSignal);
  // (SSRF guard) — defense-in-depth: refuse to fetch an LLM endpoint that
  // resolves to a loopback / private / link-local / cloud-metadata address.
  // `redirect: "manual"` already prevents body-forwarding via 3xx, but this
@@ -199,10 +232,13 @@ export async function fetchWithTimeout(
   // window; it is not a guarantee. Failures are thrown so a bad URL fails
   // closed. An unverifiable DNS result (unavailable / error) FAILS CLOSED
   // regardless of `exempt`.
-  const dnsCheck = await resolveAndValidateLlmBaseUrl(url, exempt, effectiveProvenance);
+  const dnsCheck = await resolveAndValidateLlmBaseUrl(url, exempt, effectiveProvenance, {
+    signal: userSignal,
+  });
   if (!dnsCheck.ok) {
     throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${redactUrl(url, false)} (${dnsCheck.reason})`);
   }
+  if (userSignal?.aborted) throw abortError(userSignal);
   const controller = new AbortController();
   let timedOut = false;
 
@@ -257,7 +293,18 @@ export async function fetchWithTimeout(
  // skipped, leaking the listener on the long-lived run signal.
     const detachAbortListener = () =>
       userSignal.removeEventListener("abort", onAbort);
-    return fetch(url, { ...init, redirect: "manual", signal: controller.signal })
+    return fetch(url, {
+      ...init,
+      redirect: "manual",
+      signal: controller.signal,
+      // Credential/cache-leak hardening: never send ambient cookies/HTTP-auth
+      // to a configured/redirected endpoint, never reuse a prior conversation's
+      // cached body, and never attach a Referer. (Redirects are already refused
+      // via `manual`; this closes the same leak class for cache/credentials.)
+      credentials: "omit",
+      cache: "no-store",
+      referrer: "",
+    })
       .then((r) => verifyNoRedirect(r))
       .then((res) => {
         (res as Response & { __detachAbortListener?: () => void }).__detachAbortListener = detachAbortListener;
@@ -272,7 +319,14 @@ export async function fetchWithTimeout(
       });
   }
 
-  return fetch(url, { ...init, redirect: "manual", signal: controller.signal })
+  return fetch(url, {
+    ...init,
+    redirect: "manual",
+    signal: controller.signal,
+    credentials: "omit",
+    cache: "no-store",
+    referrer: "",
+  })
     .then((r) => verifyNoRedirect(r))
     .finally(() => clearTimeout(timer))
     .catch(wrapTimeoutError);

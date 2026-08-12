@@ -32,7 +32,7 @@ describe("handleScreenshot filename normalization", () => {
     const sendMessage = vi.fn(async () => ({ ok: true, filename: "report.jpg" }));
     installExtensionMock(sendMessage);
     const res = await handleScreenshot(ctx, { type: "screenshot", file_name: "report" });
-    expect(sendMessage).toHaveBeenCalledWith({ type: "SCREENSHOT", fileName: "report.jpg" });
+    expect(sendMessage).toHaveBeenCalledWith({ type: "SCREENSHOT", fileName: "report.jpg", action: { type: "screenshot", file_name: "report" } });
     expect(res.success).toBe(true);
   });
 
@@ -40,7 +40,7 @@ describe("handleScreenshot filename normalization", () => {
     const sendMessage = vi.fn(async () => ({ ok: true, filename: "report.jpg" }));
     installExtensionMock(sendMessage);
     const res = await handleScreenshot(ctx, { type: "screenshot", file_name: "report.png" });
-    expect(sendMessage).toHaveBeenCalledWith({ type: "SCREENSHOT", fileName: "report.jpg" });
+    expect(sendMessage).toHaveBeenCalledWith({ type: "SCREENSHOT", fileName: "report.jpg", action: { type: "screenshot", file_name: "report.png" } });
     expect(res.success).toBe(true);
   });
 
@@ -48,7 +48,7 @@ describe("handleScreenshot filename normalization", () => {
     const sendMessage = vi.fn(async () => ({ ok: true, filename: "report.jpg" }));
     installExtensionMock(sendMessage);
     const res = await handleScreenshot(ctx, { type: "screenshot", file_name: "report.pdf" });
-    expect(sendMessage).toHaveBeenCalledWith({ type: "SCREENSHOT", fileName: "report.jpg" });
+    expect(sendMessage).toHaveBeenCalledWith({ type: "SCREENSHOT", fileName: "report.jpg", action: { type: "screenshot", file_name: "report.pdf" } });
     expect(res.success).toBe(true);
   });
 });

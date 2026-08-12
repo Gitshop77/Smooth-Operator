@@ -15,7 +15,7 @@
  * file sees a clean environment, exactly as it would under true isolation.
  */
 
-import { afterAll } from "vitest";
+import { afterAll, afterEach } from "vitest";
 
 // Install a functional Map-backed `localStorage` stub for the entire test file.
 //
@@ -74,6 +74,26 @@ if (g.__OC_ORIG_FETCH__ === undefined) {
   g.__OC_ORIG_FETCH__ = g.fetch;
 }
 const originalFetch = g.__OC_ORIG_FETCH__;
+
+function installJsdomScrollShims(): void {
+  // jsdom declares these methods but reports a noisy not-implemented error.
+  // A configurable no-op is deliberately used so individual tests can still
+  // spy on or replace them to assert real scroll semantics.
+  const testWindow = (globalThis as { window?: Window }).window;
+  if (testWindow) {
+    for (const method of ["scrollBy", "scrollTo"] as const) {
+      Object.defineProperty(testWindow, method, {
+        configurable: true,
+        writable: true,
+        value: () => undefined,
+      });
+    }
+  }
+}
+installJsdomScrollShims();
+// Some tests use vi.restoreAllMocks(), which can restore jsdom's noisy native
+// methods. Reapply only our test-environment shims after each completed test.
+afterEach(installJsdomScrollShims);
 
 afterAll(() => {
   // Drop any `globalThis.chrome` left behind by a test file that installed it

@@ -387,14 +387,32 @@ export function searchModels(
  * as fallback when the catalog is unavailable).                *
  * ============================================================= */
 
+/** OpenRouter `:variant` suffix (`:free`, `:nitro`, `:floor`, `:extended`,
+ * `:thinking`, or any `:[a-z0-9-]+`) — stripped before model-id comparison so
+ * `openai/gpt-oss-20b:free` resolves to the bare catalog record + real rates. */
+const OPENROUTER_VARIANT_SUFFIX_RE = /:(?:free|nitro|floor|extended|thinking|[a-z0-9-]+)$/;
+/** Trailing `-YYYYMMDD` snapshot suffix (e.g. `gpt-4o-2024-11-20`). */
+const DATESTAMP_SUFFIX_RE = /-\d{4}-\d{2}-\d{2}$/;
+
+/** Canonicalize a model id for comparison: lowercase, strip an OpenRouter
+ * `:variant` suffix, and strip a trailing date-stamp so undated vs dated
+ * spellings (`gpt-4o` vs `gpt-4o-2024-11-20`) collapse to one record. */
+export function canonicalizeModelId(s: string): string {
+  return s.toLowerCase().trim().replace(OPENROUTER_VARIANT_SUFFIX_RE, "").replace(DATESTAMP_SUFFIX_RE, "");
+}
+
 /**
  * Compare a requested model id against a catalog model id, tolerating the
- * OpenRouter-style `provider/` prefix. Uses exact segment matching (not
- * substring) to avoid false positives (e.g. `gpt-4o` must NOT match `gpt-4o-mini`).
+ * OpenRouter-style `provider/` prefix plus `:variant` and date-stamp suffixes.
+ * Uses exact segment matching (not substring) to avoid false positives
+ * (e.g. `gpt-4o` must NOT match `gpt-4o-mini`).
  */
 export function catalogIdMatches(requested: string, catalogId: string): boolean {
-  const req = requested.toLowerCase();
-  const cat = catalogId.toLowerCase();
+  const reqRaw = requested.toLowerCase();
+  const catRaw = catalogId.toLowerCase();
+  if (reqRaw === catRaw) return true;
+  const req = canonicalizeModelId(reqRaw);
+  const cat = canonicalizeModelId(catRaw);
   if (req === cat) return true;
   const strip = (s: string) => {
     const i = s.lastIndexOf("/");
