@@ -25,15 +25,6 @@ export function storageGet(keys: string | string[], area: "session" | "local"): 
   });
 }
 
-export function storageSet(items: Record<string, unknown>, area: "session" | "local"): Promise<void> {
-  return new Promise((resolve, reject) => {
-    (chrome.storage[area] as { set: (v: Record<string, unknown>, cb: () => void) => void }).set(items, () => {
-      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message || "chrome.storage.set failed"));
-      else resolve();
-    });
-  });
-}
-
 export function runtimeSendMessage(msg: unknown): Promise<unknown> {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage(msg, (res: unknown) => {

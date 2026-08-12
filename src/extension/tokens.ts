@@ -124,64 +124,6 @@ export const ocTokens: Record<"dark" | "light", OcColorTokens> = {
 };
 
 
-export const ocSpacing = {
-  "space-1": "4px",
-  "space-2": "6px",
-  "space-3": "8px",
-  "space-4": "12px",
-  "space-5": "16px",
-  "space-6": "20px",
-  "space-7": "24px",
-  "space-8": "32px",
-  "label-gap": "6px",
-  "field-gap": "18px",
-  "section-gap": "24px",
-  "control-pad": "10px 12px",
-  "card-pad": "16px 20px",
-} as const;
-
-export const ocRadius = {
-  sm: "6px",
-  md: "10px",
-  lg: "16px",
-  full: "999px",
-} as const;
-
-export const ocType = {
-  "font-sans":
-    "-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Public Sans\", \"Inter\", system-ui, sans-serif",
-  "font-mono": "ui-monospace, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
-  "text-xs": "11px",
-  "text-sm": "12px",
-  "text-base": "13px",
-  "text-md": "14px",
-  "text-lg": "15px",
-  "text-xl": "18px",
-  "line-height-tight": "1.4",
-  "line-height-base": "1.55",
-} as const;
-
-export const ocMotion = {
-  "duration-fast": "120ms",
-  "duration-base": "160ms",
-  "duration-slow": "240ms",
-  "ease-standard": "ease",
-  "ease-emphasized": "cubic-bezier(0.2, 0, 0, 1)",
-  "transition-fast": "160ms var(--oc-ease-standard)",
-} as const;
-
-export const ocElevation = {
-  "elevation-1": "0 1px 2px rgba(0, 0, 0, 0.24)",
-  "elevation-2": "0 6px 20px rgba(0, 0, 0, 0.38)",
-  "elevation-3": "0 12px 32px rgba(0, 0, 0, 0.50)",
-  "glow-accent": "0 0 0 1px rgba(108, 92, 231, 0.45), 0 8px 28px rgba(108, 92, 231, 0.22)",
-} as const;
-
-export const ocFocus = {
-  "ring-width": "2px",
-  "ring-offset": "2px",
-} as const;
-
 /**
  * AA pairs asserted by the test suite for BOTH themes. `bg` may be a hex or an
  * rgba() — rgba is blended over `app` first, mirroring how `*-subtle` colors

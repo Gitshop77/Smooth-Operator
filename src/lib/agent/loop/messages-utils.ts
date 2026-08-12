@@ -45,12 +45,9 @@ export function formatTab(t: TabInfo): string {
 /** Render the plan as a checklist with `[>]` for the current item. */
 export function renderPlan(plan: string[] | undefined, currentPlanItem: number | undefined): string {
   if (!plan || plan.length === 0) return "(no plan yet)";
+  const current = currentPlanItem ?? 0;
   return plan.map((item, i) => {
-    const marker = i === currentPlanItem
-      ? "[>]"
-      : i < (currentPlanItem ?? 0)
-        ? "[x]"
-        : "[ ]";
+    const marker = i === currentPlanItem ? "[>]" : i < current ? "[x]" : "[ ]";
     return `${marker} ${i}: ${wrapUntrusted(item)}`;
   }).join("\n");
 }
@@ -73,7 +70,8 @@ export function renderHistory(history: HistoryItem[], limit: number, total = his
   for (let i = 0; i < recent.length; i++) {
     const h = recent[i];
     const inRetention = i >= retentionStart;
-    out += `<step_${escapeXml(String(h.step), true)} agent="${escapeXml(h.agent, true)}">\n`;
+    const stepTag = escapeXml(String(h.step), true);
+    out += `<step_${stepTag} agent="${escapeXml(h.agent, true)}">\n`;
     if (h.evaluation) out += `Evaluation: ${wrapUntrusted(h.evaluation)}\n`;
     if (h.memory) out += `Memory: ${wrapUntrusted(h.memory)}\n`;
     if (h.goal) out += `Goal: ${wrapUntrusted(h.goal)}\n`;
@@ -93,7 +91,7 @@ export function renderHistory(history: HistoryItem[], limit: number, total = his
         }
       }
     }
-    out += `</step_${escapeXml(String(h.step), true)}>\n`;
+    out += `</step_${stepTag}>\n`;
   }
   return out.trim();
 }
