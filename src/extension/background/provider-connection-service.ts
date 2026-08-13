@@ -7,8 +7,10 @@ import type {
   ProviderConnectionResultV1,
 } from "../options-platform-contract";
 import { decodeCredentialReference, type CredentialReferenceV1 } from "../credential-contract";
+import { resolveAndValidateLlmBaseUrl } from "@/lib/agent/llm/route/ssrf";
 
 const CONNECTION_TIMEOUT_MS = 15_000;
+const LOCAL_CONNECTION_TIMEOUT_MS = 5 * 60_000;
 const CONNECTION_MAX_TOKENS = 8;
 const CONNECTION_PROMPT = "Reply with OK.";
 
@@ -22,6 +24,7 @@ export interface ProviderConnectionDependencies {
   now(): number;
   setTimer(callback: () => void, milliseconds: number): ReturnType<typeof setTimeout>;
   clearTimer(timer: ReturnType<typeof setTimeout>): void;
+  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
 }
 
 export interface ProviderConnectionService {
@@ -47,8 +50,14 @@ function defaultDependencies(resolveCredential: ProviderConnectionDependencies["
     resolveCredential,
     buildProvider,
     now: Date.now,
-    setTimer: setTimeout,
-    clearTimer: clearTimeout,
+    // Chromium Web APIs can enforce their native receiver. Storing the bare
+    // functions here and later invoking `dependencies.setTimer(...)` binds
+    // `this` to the dependencies object and throws "Illegal invocation" in
+    // the MV3 worker (Node's timers happen to tolerate it, hiding the defect
+    // from unit tests). Wrappers preserve an ordinary global invocation.
+    setTimer: (callback, milliseconds) => setTimeout(callback, milliseconds),
+    clearTimer: (timer) => clearTimeout(timer),
+    fetch: (input, init) => fetch(input, init),
   };
 }
 
@@ -82,10 +91,110 @@ function suppressLateSettlement<T>(promise: Promise<T>): Promise<T> {
 function validConfig(config: ProviderConnectionConfigV1): boolean {
   return config?.version === 1 &&
     typeof config.provider === "string" && config.provider.trim().length > 0 &&
-    typeof config.model === "string" && config.model.trim().length > 0 &&
+    typeof config.model === "string" &&
+    (config.model.trim().length > 0 || config.provider === "ollama") &&
     (config.provenance === "user" || config.provenance === "injected") &&
     (config.baseUrl === undefined || typeof config.baseUrl === "string") &&
-    (config.resourceName === undefined || typeof config.resourceName === "string");
+    (config.resourceName === undefined || typeof config.resourceName === "string") &&
+    (config.contextTokens === undefined ||
+      (Number.isSafeInteger(config.contextTokens) && config.contextTokens > 0));
+}
+
+/** Parse model ids from an OpenAI-compatible `/v1/models` response. */
+export function parseOpenAIModelIds(payload: unknown): string[] {
+  if (!payload || typeof payload !== "object") return [];
+  const data = (payload as Record<string, unknown>).data;
+  if (!Array.isArray(data)) return [];
+  return [...new Set(data.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const id = (entry as Record<string, unknown>).id;
+    return typeof id === "string" && id.trim() ? [id.trim()] : [];
+  }))];
+}
+
+function modelsUrl(baseUrl: string | undefined): string {
+  const url = new URL(baseUrl || "http://localhost:11434/v1");
+  url.hash = "";
+  url.search = "";
+  url.pathname = url.pathname.replace(/\/+$/, "") + "/models";
+  return url.toString();
+}
+
+async function discoverLocalModel(
+  config: ProviderConnectionConfigV1,
+  dependencies: ProviderConnectionDependencies,
+  signal: AbortSignal,
+): Promise<string> {
+  if (config.model.trim()) return config.model.trim();
+  const url = modelsUrl(config.baseUrl);
+  const provenance = config.provenance === "user" ? "user-configured" : "untrusted";
+  const safe = await resolveAndValidateLlmBaseUrl(url, config.provenance === "user", provenance);
+  if (!safe.ok) throw new Error(`Model discovery blocked: ${safe.reason}`);
+  const response = await dependencies.fetch(url, {
+    signal,
+    redirect: "error",
+    credentials: "omit",
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`Model discovery failed (HTTP ${response.status})`);
+  const ids = parseOpenAIModelIds(await response.json());
+  if (ids.length === 1) return ids[0];
+  if (ids.length === 0) throw new Error("No models were returned by the local endpoint.");
+  throw new Error(`The local endpoint returned ${ids.length} models. Select one in Agent settings.`);
+}
+
+interface LlamaCppProps {
+  totalSlots: number;
+  perSlotContext: number;
+  vision: boolean;
+}
+
+/** Parse only the stable llama.cpp `/props` fields used by connection diagnostics. */
+export function parseLlamaCppProps(payload: unknown): LlamaCppProps | null {
+  if (!payload || typeof payload !== "object") return null;
+  const obj = payload as Record<string, unknown>;
+  const generation = obj.default_generation_settings;
+  const nCtx = generation && typeof generation === "object"
+    ? (generation as Record<string, unknown>).n_ctx
+    : undefined;
+  if (!Number.isSafeInteger(obj.total_slots) || (obj.total_slots as number) < 1 ||
+      !Number.isSafeInteger(nCtx) || (nCtx as number) < 1) return null;
+  const modalities = obj.modalities;
+  const vision = !!(modalities && typeof modalities === "object" &&
+    (modalities as Record<string, unknown>).vision === true);
+  return {
+    totalSlots: obj.total_slots as number,
+    perSlotContext: nCtx as number,
+    vision,
+  };
+}
+
+function llamaCppPropsUrl(baseUrl: string | undefined): string {
+  const url = new URL(baseUrl || "http://localhost:11434/v1");
+  url.hash = "";
+  url.search = "";
+  url.pathname = url.pathname.replace(/\/+$/, "").replace(/\/v1$/, "") + "/props";
+  return url.toString();
+}
+
+async function probeLlamaCpp(
+  config: ProviderConnectionConfigV1,
+  dependencies: ProviderConnectionDependencies,
+  signal: AbortSignal,
+): Promise<LlamaCppProps | null> {
+  if (config.provider !== "ollama") return null;
+  const url = llamaCppPropsUrl(config.baseUrl);
+  const provenance = config.provenance === "user" ? "user-configured" : "untrusted";
+  const safe = await resolveAndValidateLlmBaseUrl(url, config.provenance === "user", provenance);
+  if (!safe.ok) return null;
+  try {
+    const response = await dependencies.fetch(url, { signal, redirect: "error" });
+    if (!response.ok) return null; // Ordinary Ollama does not expose `/props`.
+    return parseLlamaCppProps(await response.json());
+  } catch (error) {
+    if (signal.aborted) throw error;
+    return null; // Capability discovery is best-effort; generation stays authoritative.
+  }
 }
 
 export function createProviderConnectionService(
@@ -101,13 +210,14 @@ export function createProviderConnectionService(
         ok: boolean,
         code: ProviderConnectionDiagnosticCode,
         message: string,
+        resolvedModel = typeof config?.model === "string" ? config.model : "",
       ): ProviderConnectionResultV1 => ({
         version: 1,
         ok,
         code,
         latencyMs: Math.max(0, dependencies.now() - start),
         provider: typeof config?.provider === "string" ? config.provider : "",
-        model: typeof config?.model === "string" ? config.model : "",
+        model: resolvedModel,
         message: message.slice(0, 240),
       });
 
@@ -162,11 +272,14 @@ export function createProviderConnectionService(
       const deadlinePromise = new Promise<never>((_, reject) => {
         rejectDeadline = reject;
       });
+      const connectionTimeoutMs = config.provider === "ollama"
+        ? LOCAL_CONNECTION_TIMEOUT_MS
+        : CONNECTION_TIMEOUT_MS;
       const timer = dependencies.setTimer(() => {
         const error = new ConnectionDeadlineError();
         controller.abort(error);
         rejectDeadline(error);
-      }, CONNECTION_TIMEOUT_MS);
+      }, connectionTimeoutMs);
 
       let removeCallerAbortListener: (() => void) | undefined;
       let rejectCallerAbort: ((error: ConnectionCancelledError) => void) | undefined;
@@ -189,20 +302,53 @@ export function createProviderConnectionService(
         ...(callerAbortPromise ? [callerAbortPromise] : []),
       ]);
       try {
+        const effectiveModel = config.provider === "ollama"
+          ? await awaitStage(discoverLocalModel(config, dependencies, controller.signal))
+          : config.model;
         const provider = await awaitStage(dependencies.buildProvider({
           provider: config.provider,
-          model: config.model,
+          model: effectiveModel,
           apiKey,
           ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
           ...(config.resourceName ? { resourceName: config.resourceName } : {}),
           provenance: config.provenance,
         }));
+        const llamaCpp = await awaitStage(probeLlamaCpp(config, dependencies, controller.signal));
+        if (llamaCpp && config.contextTokens && config.contextTokens > llamaCpp.perSlotContext) {
+          return result(
+            false,
+            "context_mismatch",
+            `llama.cpp exposes ${llamaCpp.totalSlots} slot${llamaCpp.totalSlots === 1 ? "" : "s"} × ` +
+              `${llamaCpp.perSlotContext} context; configured ${config.contextTokens} exceeds each slot. ` +
+              `Reduce parallel slots or lower the context override.`,
+            effectiveModel,
+          );
+        }
         await awaitStage(provider.chat({
           messages: [{ role: "user", content: CONNECTION_PROMPT }],
           maxTokens: CONNECTION_MAX_TOKENS,
           signal: controller.signal,
         }));
-        return result(true, "ok", `Connected to ${config.provider} with ${config.model}.`);
+        const detail = llamaCpp
+          ? ` llama.cpp: ${llamaCpp.totalSlots} slot${llamaCpp.totalSlots === 1 ? "" : "s"} × ` +
+            `${llamaCpp.perSlotContext} context${llamaCpp.vision ? ", vision" : ""}.`
+          : "";
+        const discovered = !config.model.trim()
+          ? ` Auto-selected the only server model: ${effectiveModel}.`
+          : "";
+        return {
+          ...result(
+            true,
+            "ok",
+            `Connected to ${config.provider} with ${effectiveModel}.${detail}${discovered}`,
+            effectiveModel,
+          ),
+          ...(llamaCpp ? {
+            contextTokens: llamaCpp.perSlotContext,
+            slots: llamaCpp.totalSlots,
+            vision: llamaCpp.vision,
+          } : {}),
+        };
       } catch (error) {
         const code = classifyFailure(error);
         return result(false, code, sanitizedMessage(error, apiKey));

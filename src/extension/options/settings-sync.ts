@@ -94,7 +94,7 @@ if (typeof chrome !== "undefined" && chrome.storage?.local) {
 
       const numFields: Array<[string, string, number]> = [
         ["maxSteps", STORAGE_KEYS.maxSteps, 100], ["maxActions", STORAGE_KEYS.maxActions, 10],
-        ["plannerInterval", STORAGE_KEYS.plannerInterval, 5], ["maxFailures", STORAGE_KEYS.maxFailures, 5],
+        ["plannerInterval", STORAGE_KEYS.plannerInterval, 10], ["maxFailures", STORAGE_KEYS.maxFailures, 5],
       ];
       for (const [elId, key, def] of numFields) setVal(elId, String(res[key] ?? def));
 
@@ -110,10 +110,13 @@ if (typeof chrome !== "undefined" && chrome.storage?.local) {
       const costCap = typeof res[STORAGE_KEYS.costCap] === "number" ? Math.max(0, res[STORAGE_KEYS.costCap] as number) : 0;
       setVal("costCap", String(costCap));
       setVal("screenshotQuality", String(res[STORAGE_KEYS.screenshotQuality] ?? 80));
+      setVal("screenshotImageTokens", String(res[STORAGE_KEYS.screenshotImageTokens] ?? 4096));
+      setVal("screenshotMaxDimension", String(res[STORAGE_KEYS.screenshotMaxDimension] ?? 0));
+      setVal("screenshotMaxBytes", String(res[STORAGE_KEYS.screenshotMaxBytes] ?? 0));
       setChecked("enableScreenshots", res[STORAGE_KEYS.enableScreenshots] !== false);
       setChecked("enableStealth", res[STORAGE_KEYS.stealthEnabled] !== false);
 
-      const visionMode = (res[STORAGE_KEYS.visionMode] as string) || (res[STORAGE_KEYS.enableLocalVision] === true ? "always" : "disabled");
+      const visionMode = (res[STORAGE_KEYS.visionMode] as string) || (res[STORAGE_KEYS.enableLocalVision] === true ? "always" : "adaptive");
       const visionRadio = Array.from(
         document.querySelectorAll<HTMLInputElement>('input[name="visionMode"]'),
       ).find((r) => r.value === visionMode) ?? null;
@@ -222,7 +225,7 @@ async function doSaveSettings(): Promise<boolean> {
   const invalid: string[] = [];
   const maxSteps = readInt("maxSteps", 100, 1, 500, invalid);
   const maxActions = readInt("maxActions", DEFAULT_MAX_ACTIONS, 1, MAX_ACTIONS, invalid);
-  const plannerInterval = readInt("plannerInterval", 5, 1, 20, invalid);
+  const plannerInterval = readInt("plannerInterval", 10, 1, 20, invalid);
   const maxFailures = readInt("maxFailures", 5, 1, 10, invalid);
 
   const costCapRaw = ($("costCap") as HTMLInputElement).value.trim();
@@ -273,6 +276,42 @@ async function doSaveSettings(): Promise<boolean> {
   const droppedDomains: string[] = [];
   const sq = Math.min(100, Math.max(50, parseInt(($("screenshotQuality") as HTMLInputElement).value, 10) || 80));
   ($("screenshotQuality") as HTMLInputElement).value = String(sq);
+
+  const imageTokensRaw = ($("screenshotImageTokens") as HTMLInputElement).value.trim();
+  let screenshotImageTokens = 4096;
+  if (imageTokensRaw !== "") {
+    const parsed = Number(imageTokensRaw);
+    if (/^\d+$/.test(imageTokensRaw) && Number.isFinite(parsed) && parsed >= 256 && parsed <= 65536) {
+      screenshotImageTokens = Math.floor(parsed);
+    } else {
+      invalid.push("screenshotImageTokens");
+    }
+  }
+  ($("screenshotImageTokens") as HTMLInputElement).value = String(screenshotImageTokens);
+
+  const maxDimRaw = ($("screenshotMaxDimension") as HTMLInputElement).value.trim();
+  let screenshotMaxDimension = 0;
+  if (maxDimRaw !== "") {
+    const parsed = Number(maxDimRaw);
+    if (/^\d+$/.test(maxDimRaw) && Number.isFinite(parsed) && parsed >= 0 && parsed <= 4096) {
+      screenshotMaxDimension = Math.floor(parsed);
+    } else {
+      invalid.push("screenshotMaxDimension");
+    }
+  }
+  ($("screenshotMaxDimension") as HTMLInputElement).value = String(screenshotMaxDimension);
+
+  const maxBytesRaw = ($("screenshotMaxBytes") as HTMLInputElement).value.trim();
+  let screenshotMaxBytes = 0;
+  if (maxBytesRaw !== "") {
+    const parsed = Number(maxBytesRaw);
+    if (/^\d+$/.test(maxBytesRaw) && Number.isFinite(parsed) && parsed >= 0 && parsed <= 5_000_000) {
+      screenshotMaxBytes = Math.floor(parsed);
+    } else {
+      invalid.push("screenshotMaxBytes");
+    }
+  }
+  ($("screenshotMaxBytes") as HTMLInputElement).value = String(screenshotMaxBytes);
 
   // O1 reasoning settings. The effort/force selects only ever hold sanctioned
   // values (populateReasoningControls rebuilds them from the model catalog), so
@@ -354,9 +393,12 @@ async function doSaveSettings(): Promise<boolean> {
     ...(maxStepsChanged ? { maxSteps } : {}),
     defaultTask: ($("defaultTask") as HTMLTextAreaElement).value,
     [STORAGE_KEYS.screenshotQuality]: sq,
+    [STORAGE_KEYS.screenshotImageTokens]: screenshotImageTokens,
+    [STORAGE_KEYS.screenshotMaxDimension]: screenshotMaxDimension,
+    [STORAGE_KEYS.screenshotMaxBytes]: screenshotMaxBytes,
     [STORAGE_KEYS.enableScreenshots]: ($("enableScreenshots") as HTMLInputElement).checked,
     [STORAGE_KEYS.stealthEnabled]: ($("enableStealth") as HTMLInputElement).checked === true,
-    [STORAGE_KEYS.visionMode]: (document.querySelector('input[name="visionMode"]:checked') as HTMLInputElement | null)?.value || "disabled",
+    [STORAGE_KEYS.visionMode]: (document.querySelector('input[name="visionMode"]:checked') as HTMLInputElement | null)?.value || "adaptive",
     [STORAGE_KEYS.allowedDomains]: parseDomains(($("allowedDomains") as HTMLTextAreaElement).value, droppedDomains),
     [STORAGE_KEYS.blockedDomains]: parseDomains(($("blockedDomains") as HTMLTextAreaElement).value, droppedDomains),
     ...(agentModeChanged ? { [STORAGE_KEYS.agentMode]: (document.getElementById("agentMode") as HTMLSelectElement | null)?.value || "standard" } : {}),

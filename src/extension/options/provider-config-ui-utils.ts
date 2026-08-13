@@ -75,6 +75,20 @@ export function applyDefaultModelPlaceholder(): void {
 }
 
 /**
+ * Render the empty model-search state without treating models.dev as a
+ * validator. Local llama.cpp/Ollama servers and private gateways commonly use
+ * ids absent from the cloud catalog; the runtime still sends a typed id
+ * verbatim, so the UI must not make that valid configuration look rejected.
+ */
+export function emptyModelSearchHtml(provider: string, query: string): string {
+  const escaped = escapeHtml(query);
+  if (provider === "ollama" || provider === "litellm") {
+    return `<div class="model-search-empty">No cloud catalog match. The local model ID <code>${escaped}</code> will be used as typed.</div>`;
+  }
+  return `<div class="model-search-empty">No catalog match for <code>${escaped}</code>. You can still use this custom model ID if your provider supports it.</div>`;
+}
+
+/**
  * Highlight matched text in search results.
  *
  * The query regex is built from raw user input, but the display text is

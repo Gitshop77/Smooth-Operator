@@ -51,17 +51,17 @@ These are elements the vision model detected on the screenshot that have **no DO
 Vision elements are clicked via CDP coordinate dispatch (real OS-level mouse event at the element's center), so they work even on sites where JS click handlers are blocked. Use them when a DOM element is missing for something you can see on the page.`;
   }
   if (visionMode === "adaptive") {
-    return `## Visual Detection Tool (AI Adaptive Vision)
+    return `## Adaptive visual evidence
 
-When you can see a button, icon, or interactive element on the page but cannot find it in the elements tree (it may be a Canvas-rendered button, WebGL widget, or custom control with no DOM representation), use the \`detect_visual\` action to run local vision detection:
+Start with the current DOM + accessibility evidence; use \`extract\` for relevant full-document text outside the viewport. Do not request pixels routinely.
 
-\`{"type":"detect_visual","query":"what you're looking for"}\`
+Call \`inspect_visual\` when pixels materially resolve something text cannot: an image/chart/map/canvas, spatial layout or occlusion, visual-only state, or ambiguity after grounding. It captures the CURRENT viewport and attaches it ONCE to your next turn; wait for that observation before relying on visual evidence:
+\`{"type":"inspect_visual","reason":"Need to read the chart and verify its legend"}\`
 
-This runs a local vision model (LocateAnything-3B via WebGPU) on the current screenshot and returns detected UI elements as [v1], [v2] etc. You can then click them on the NEXT step with:
+For a DOM-invisible control that needs click coordinates, \`detect_visual\` runs the optional local detector and returns clickable [v1], [v2] entries:
+\`{"type":"detect_visual","query":"canvas submit button"}\`
 
-\`{"type":"click","index":"v1"}\`
-
-Use this SPARINGLY — it takes 2-5 seconds per call. Only use it when the DOM elements tree is missing something you can see visually. If the elements tree already has what you need, do NOT call detect_visual.`;
+Choose these tools yourself from the task and evidence. The user never needs to name a tool.`;
   }
   return "";
 }

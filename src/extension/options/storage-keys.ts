@@ -51,6 +51,15 @@ export const STORAGE_KEYS = {
   customSkills: "open_cowork_custom_skills",
   // General settings (settings-sync.ts load/save paths).
   screenshotQuality: "screenshotQuality",
+  /** Screenshot token budget (per image) for local vision models. Read by
+   * run-helpers (affordability) and llm-direct (assert). Default 4096. */
+  screenshotImageTokens: "screenshotImageTokens",
+  /** Max screenshot dimension in CSS px; 0 = keep the full viewport. Read by
+   * tab-manager normalizeScreenshotToViewport before annotation. */
+  screenshotMaxDimension: "screenshotMaxDimension",
+  /** Max screenshot byte size; 0 = off. Used for hosted API payload caps. Read
+   * by tab-manager normalizeScreenshotToViewport. */
+  screenshotMaxBytes: "screenshotMaxBytes",
   enableScreenshots: "enableScreenshots",
   stealthEnabled: "stealthEnabled",
   enableLocalVision: "enableLocalVision",
@@ -78,4 +87,7 @@ export const STORAGE_KEYS = {
   // top-level mirror); written only by settings-sync.ts doSaveSettings — the
   // record is never copied from an untrusted payload.
   providerConfigs: "providerConfigs",
+  /** Named, non-secret connection profiles and the default profile id. */
+  connectionProfiles: "open_cowork_connection_profiles_v1",
+  activeConnectionProfile: "open_cowork_active_connection_profile_v1",
 } as const;

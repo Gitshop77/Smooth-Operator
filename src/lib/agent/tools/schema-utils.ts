@@ -88,6 +88,7 @@ export const ACTION_METADATA: Record<string, ActionMeta> = {
   search:             { name: "search",             description: "Search the web (DuckDuckGo/Google/Bing).",             pageChanging: true,  exclusive: false, params: "query: string, engine?: 'duckduckgo'|'google'|'bing'|'yahoo'|'baidu'" },
   upload_file:        { name: "upload_file",        description: "Upload a file to a file input.",                       pageChanging: false, exclusive: false, params: "index: number, path: string" },
   screenshot:         { name: "screenshot",         description: "Take a screenshot of the page.",                       pageChanging: false, exclusive: false, params: "file_name?: string" },
+  inspect_visual:     { name: "inspect_visual",     description: "Attach one fresh viewport screenshot to the next model turn when pixels materially help (images, charts, canvas, layout, occlusion, or ambiguity). Never call routinely.", pageChanging: false, exclusive: true, params: "reason: string" },
   save_as_pdf:        { name: "save_as_pdf",        description: "Save the page as a PDF.",                              pageChanging: false, exclusive: false, params: "file_name?: string" },
   dropdown_options:   { name: "dropdown_options",   description: "List options of a <select>.",                          pageChanging: false, exclusive: false, params: "index: number" },
   page_next:          { name: "page_next",          description: "Continue reading a truncated page snapshot from a char offset (use the offset from the snapshot's marker).", pageChanging: false, exclusive: false, params: "offset?: number (default 0)" },
@@ -126,19 +127,31 @@ export const ACTION_METADATA: Record<string, ActionMeta> = {
  */
 const actionListCache = new Map<string, string>();
 
+/** Common browser actions keep their descriptions. Rare diagnostics and
+ * privileged utilities retain their exact parameter contracts but omit prose;
+ * this removes several thousand always-on prompt characters without hiding a
+ * capability or making a local model guess argument names. */
+const CORE_PROMPT_ACTIONS = new Set([
+  "click", "input", "select_dropdown", "send_keys", "scroll", "scroll_to_bottom",
+  "navigate", "search", "switch_tab", "new_tab", "close_tab", "go_back", "wait",
+  "extract", "search_page", "find_text", "find_elements", "list_interactive",
+  "done", "ask_human", "takeover", "verify", "load_skill", "inspect_visual", "detect_visual",
+]);
+
 export function actionListForPrompt(maxActions: number, visionMode: "disabled" | "always" | "adaptive" = "disabled"): string {
   const cacheKey = `${maxActions}:${visionMode}`;
   const cached = actionListCache.get(cacheKey);
   if (cached !== undefined) return cached;
   const lines: string[] = [];
   for (const meta of Object.values(ACTION_METADATA)) {
-    if (meta.name === "detect_visual" && visionMode !== "adaptive") continue;
+    if ((meta.name === "detect_visual" || meta.name === "inspect_visual") && visionMode !== "adaptive") continue;
     const tag = meta.pageChanging
       ? " [page-changing — put last]"
       : meta.exclusive
         ? " [must be the only action]"
         : "";
-    lines.push(`- ${meta.name}${tag} — ${meta.description} | params: { ${meta.params} }`);
+    const description = CORE_PROMPT_ACTIONS.has(meta.name) ? ` — ${meta.description}` : "";
+    lines.push(`- ${meta.name}${tag}${description} | params: { ${meta.params} }`);
   }
   const result = `You may output 1 to ${maxActions} actions per step. Available actions:\n${lines.join("\n")}`;
   actionListCache.set(cacheKey, result);
@@ -219,6 +232,8 @@ export function isEquivalentAction(a: Action, b: Action): boolean {
     case "screenshot":
     case "save_as_pdf":
       return (a.file_name ?? "") === ((b as Extract<Action, { type: "screenshot" | "save_as_pdf" }>).file_name ?? "");
+    case "inspect_visual":
+      return a.reason === (b as Extract<Action, { type: "inspect_visual" }>).reason;
     case "dropdown_options":
       return a.index === (b as Extract<Action, { type: "dropdown_options" }>).index;
     case "search_page":

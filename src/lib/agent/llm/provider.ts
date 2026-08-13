@@ -12,6 +12,14 @@ export interface ChatMessage {
   content: string;
 }
 
+/** Non-sensitive aggregate progress from an already-open provider stream. */
+export interface LLMStreamProgress {
+  outputChars: number;
+  deltaChars: number;
+  chunkCount: number;
+  at: number;
+}
+
 /** Request payload for {@link LLMProvider.chat}. */
 export interface LLMRequest {
   /** Conversation messages (system / user / assistant). */
@@ -41,6 +49,8 @@ export interface LLMRequest {
   /** Optional abort signal, honored by the underlying fetch so a run's STOP/cancel
    * is respected mid-generation rather than only after the request completes. */
   signal?: AbortSignal;
+  /** Reports aggregate stream movement only; never includes model text. */
+  onProgress?: (progress: LLMStreamProgress) => void;
 }
 
 /** Token-usage + cost information returned by a provider. */

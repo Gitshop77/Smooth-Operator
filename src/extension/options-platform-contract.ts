@@ -8,6 +8,8 @@ export interface ProviderConnectionConfigV1 {
   resourceName?: string;
   provenance: "user" | "injected";
   credential: CredentialReferenceV1 | null;
+  /** Optional manual context-window override currently configured by the user. */
+  contextTokens?: number;
 }
 
 export type ProviderConnectionDiagnosticCode =
@@ -17,6 +19,7 @@ export type ProviderConnectionDiagnosticCode =
   | "cancelled"
   | "timeout"
   | "policy_blocked"
+  | "context_mismatch"
   | "provider_error"
   | "internal_error";
 
@@ -28,6 +31,12 @@ export interface ProviderConnectionResultV1 {
   provider: string;
   model: string;
   message: string;
+  /** Server-reported per-slot context for a detected llama.cpp endpoint. */
+  contextTokens?: number;
+  /** Server-reported concurrent slot count, when available. */
+  slots?: number;
+  /** Whether the detected local endpoint advertises vision input. */
+  vision?: boolean;
 }
 
 export interface ProviderConnectionTestCommandV1 {

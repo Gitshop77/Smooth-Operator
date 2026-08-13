@@ -82,16 +82,24 @@ export function shouldCompact(
  * recent) and the items to keep intact (the most recent N). The very first
  * item (init) is always included in `toSummarize` so the summary has context.
  */
-export function partitionHistory(history: HistoryItem[]): {
+export function partitionHistory(
+  history: HistoryItem[],
+  keepRecent = KEEP_RECENT,
+  allowSingleOldest = false,
+): {
   toSummarize: HistoryItem[];
   toKeep: HistoryItem[];
 } {
-  if (history.length <= KEEP_RECENT + 1) {
+  const recentCount = Number.isInteger(keepRecent) && keepRecent >= 1
+    ? keepRecent
+    : KEEP_RECENT;
+  const minimumToCompact = recentCount + (allowSingleOldest ? 0 : 1);
+  if (history.length <= minimumToCompact) {
     return { toSummarize: [], toKeep: history };
   }
   const first = history[0];
-  const recent = history.slice(-KEEP_RECENT);
-  const middle = history.slice(1, -KEEP_RECENT);
+  const recent = history.slice(-recentCount);
+  const middle = history.slice(1, -recentCount);
   return { toSummarize: [first, ...middle], toKeep: recent };
 }
 

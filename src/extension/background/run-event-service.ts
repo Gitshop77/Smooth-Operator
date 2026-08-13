@@ -73,11 +73,16 @@ export class RunEventService {
     ) return;
 
     const safeEvent = redactLiveRunEvent(event);
+    // Stream progress is intentionally ephemeral: it animates the open panel,
+    // but persisting several updates per second would bloat run history and
+    // cause needless storage writes. The terminal call event retains duration,
+    // output size, tokens, model, and status as the durable audit record.
+    const ephemeralProgress = safeEvent.type === "llm-call-progress";
     const nextUsage = safeEvent.type === "cost"
       ? addCostEvent(this.usageAccum ?? zeroRunUsage(), safeEvent)
       : this.usageAccum;
     const snapshot = projectRunEvent(this.controller, safeEvent, nextUsage);
-    this.runBuilder.addEvent(safeEvent);
+    if (!ephemeralProgress) this.runBuilder.addEvent(safeEvent);
     if (safeEvent.type === "error" && !safeEvent.recoverable && snapshot.status === "failed") {
       this.awaitingFailedDone = true;
     } else if (isFailedDoneEnrichment) {
@@ -92,7 +97,7 @@ export class RunEventService {
         void runSessionState.patch(this.controller.dispatchToken, { usage: this.usageAccum }).catch(() => {});
       }
     }
-    void persistRunSnapshot(snapshot).catch(() => {});
+    if (!ephemeralProgress) void persistRunSnapshot(snapshot).catch(() => {});
     chrome.runtime.sendMessage({
       type: "AGENT_EVENT",
       event: safeEvent,

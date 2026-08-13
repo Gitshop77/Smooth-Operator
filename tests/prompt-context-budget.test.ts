@@ -2,16 +2,13 @@
  * Low-context (32k-64k) model effectiveness — the user's explicit question.
  *
  * Proves:
- *  1. A 64k-context model CAN run the navigator on a LARGE page: a ~120k-byte
- *     elementsText observation is bounded by the navigator message cap, the
- *     compiled prompt fits a 64k-model byte budget, and the compiler does not
- *     throw.
- *  2. A 32k-context model FAILS CLOSED for the navigator on the same large
+ *  1. A 64k-context model CAN run the navigator on a bounded large page using
+ *     the conservative two-byte/token fallback.
+ *  2. A 32k-context model FAILS CLOSED for that large prompt
  *     page: the model-context-aware budget rejects the over-context prompt
  *     (typed PromptBudgetExceededError) instead of shipping it.
  *  3. The model-context-aware budget port clamps `maxInputTokens` from the
- *     known context window (same output/reasoning reserves as the fixed
- *     profile) with an 8k floor.
+ *     known context window using a combined 15% output/reasoning allowance.
  */
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { buildNavigatorUserMessage } from "../src/lib/agent/loop/messages";
@@ -20,6 +17,7 @@ import {
   PROMPT_BUDGET_PROFILES_V1,
   PromptBudgetExceededError,
   assertCompiledPromptWithinContextBudgetV1,
+  estimatePromptTokensFallbackV1,
   promptBudgetProfileForContextV1,
   utf8ByteLength,
   CONTEXT_CLAMP_FLOOR_TOKENS,
@@ -51,7 +49,7 @@ const LARGE_PAGE_USER = {
 };
 
 describe("navigator on a 64k-context model with a large page", () => {
-  test("a ~120k-byte page is BOUNDED at the message level, then FAILS CLOSED for a 64k model (never ships over-context)", async () => {
+  test("a ~120k-byte page is bounded and admitted for a 64k model without treating bytes as tokens", async () => {
     // The user message caps elementsText at ELEMENTS_TEXT_CHAR_CAP (60k chars)
     // BEFORE the injection scan, so a ~120k-byte page is bounded on arrival.
     const userMessage = await buildNavigatorUserMessage(LARGE_PAGE_USER);
@@ -61,18 +59,13 @@ describe("navigator on a 64k-context model with a large page", () => {
     const compiled = await compileNavigatorPromptV1({ maxActions: 5, user: LARGE_PAGE_USER });
     expect(compiled.messages).toHaveLength(2);
 
-    // A 64k-context model: derive the navigator budget from its REAL context
-    // (64k − outputReserve 8192 − reasoningReserve 16384 = 39,424 bytes cap).
+    // A 64k context allows 85% input and retains 15% for the combined
+    // completion/reasoning stream.
     const profile64k = promptBudgetProfileForContextV1("navigator", 64_000);
-    expect(profile64k.maxInputTokens).toBe(64_000 - 8_192 - 16_384);
-    // FINDING: a full-size (60k-char) observation + the ~10k-byte system
-    // prompt ≈ 90k bytes ≈ 22.7k tokens — a 64k model with the SAME
-    // output/reasoning reserves rejects it. The admission clamp fails CLOSED
-    // (typed PromptBudgetExceededError) instead of shipping an over-context
-    // prompt; shrinking the observation (HTML summarizer) is the path to run.
+    expect(profile64k.maxInputTokens).toBe(54_400);
     expect(() =>
       assertCompiledPromptWithinContextBudgetV1("navigator", "navigator-64k", compiled.messages, 64_000),
-    ).toThrow(PromptBudgetExceededError);
+    ).not.toThrow();
   });
 
   test("a 64k model CAN run the navigator on a summarizer-shrunk page (fits the derived budget, no throw)", async () => {
@@ -88,43 +81,35 @@ describe("navigator on a 64k-context model with a large page", () => {
       },
     };
     const compiled = await compileNavigatorPromptV1({ maxActions: 5, user: shrunkUser });
-    expect(utf8ByteLength(compiled.messages[0].content + "\n" + compiled.messages[1].content))
+    expect(estimatePromptTokensFallbackV1(compiled.messages[0].content + "\n" + compiled.messages[1].content))
       .toBeLessThanOrEqual(promptBudgetProfileForContextV1("navigator", 64_000).maxInputTokens);
     expect(() =>
       assertCompiledPromptWithinContextBudgetV1("navigator", "navigator-64k-shrunk", compiled.messages, 64_000),
     ).not.toThrow();
   });
 
-  test("a 32k-context model cannot run the navigator even on a small page (documented safe-context guidance)", async () => {
-    const smallUser = {
-      ...LARGE_PAGE_USER,
-      browserState: { ...LARGE_PAGE_USER.browserState, elementsText: "[1]<button>Continue</button>" },
-    };
-    const compiled = await compileNavigatorPromptV1({ maxActions: 5, user: smallUser });
-    // The smallest navigator prompt (~31k bytes ≈ 7.7k tokens) still exceeds
-    // the 32k-derived input budget (32k − 24.5k reserves → 8k floor). The
-    // navigator profile therefore requires ≥64k context; a 32k model must use
-    // the planner/judge profiles, which ARE calibrated for 32k.
+  test("a 32k-context model fails closed on the same large bounded page", async () => {
+    const compiled = await compileNavigatorPromptV1({ maxActions: 5, user: LARGE_PAGE_USER });
     expect(() =>
-      assertCompiledPromptWithinContextBudgetV1("navigator", "navigator-32k-small", compiled.messages, 32_000),
+      assertCompiledPromptWithinContextBudgetV1("navigator", "navigator-32k-large", compiled.messages, 32_000),
     ).toThrow(PromptBudgetExceededError);
   });
 });
 
 describe("promptBudgetProfileForContextV1 (model-context-aware budget port)", () => {
-  test("derives maxInputTokens from the known context with the SAME reserves as the fixed profile", () => {
+  test("derives an 85/15 input/output profile without double-counting reasoning", () => {
     const base = PROMPT_BUDGET_PROFILES_V1.navigator;
     const derived = promptBudgetProfileForContextV1("navigator", 64_000);
-    expect(derived.outputReserveTokens).toBe(base.outputReserveTokens);
-    expect(derived.reasoningReserveTokens).toBe(base.reasoningReserveTokens);
-    expect(derived.maxInputTokens).toBe(64_000 - base.outputReserveTokens - base.reasoningReserveTokens);
+    expect(derived.outputReserveTokens).toBe(9_600);
+    expect(derived.reasoningReserveTokens).toBe(0);
+    expect(derived.maxInputTokens).toBe(54_400);
     expect(derived.maxInputTokens).toBeLessThan(base.maxInputTokens);
   });
 
   test("clamps to the 8k floor for degenerate context values", () => {
     const derived = promptBudgetProfileForContextV1("judge", 1_000);
     expect(derived.contextTokens).toBe(CONTEXT_CLAMP_FLOOR_TOKENS);
-    expect(derived.maxInputTokens).toBeGreaterThanOrEqual(CONTEXT_CLAMP_FLOOR_TOKENS);
+    expect(derived.maxInputTokens).toBe(Math.floor(CONTEXT_CLAMP_FLOOR_TOKENS * 0.85));
   });
 
   test("rejects non-positive / non-safe-integer context values at the boundary", () => {
@@ -142,4 +127,3 @@ describe("promptBudgetProfileForContextV1 (model-context-aware budget port)", ()
     expect(derived32k.maxInputTokens).toBeLessThan(fixed.maxInputTokens);
   });
 });
-

@@ -9,7 +9,7 @@
  * this module no longer keeps its own `PROVIDER_META` copy.
  */
 
-import { $, escapeHtml, redactKeyLeak } from "@/extension/shared";
+import { $, redactKeyLeak } from "@/extension/shared";
 import { announce } from "../accessibility";
 import { PROVIDER_META, DEFAULT_PROVIDER_ID, catalogIdFor } from "./providers";
 import { STORAGE_KEYS } from "./storage-keys";
@@ -34,6 +34,7 @@ import {
   updateOpencodeEndpointHint,
   applyDefaultModelPlaceholder,
   renderModelResultItem,
+  emptyModelSearchHtml,
   reasoningEffortOptions,
   budgetTokensOption,
 } from "./provider-config-ui-utils";
@@ -94,7 +95,7 @@ export function updateProviderUI(): void {
   if (apikeyHint) {
     apikeyHint.textContent = meta.needsKey
       ? `Get your key at ${meta.keyUrl}. Held in memory for this session unless you opt into encrypted storage on this device below.`
-      : "Local provider — no key required (leave as-is).";
+      : "Local provider — no key required. Leave this blank.";
   }
   const modelInput = document.getElementById("model") as HTMLInputElement | null;
   if (modelInput && !modelInput.value) applyDefaultModelPlaceholder();
@@ -260,7 +261,14 @@ document.getElementById("testConnection")?.addEventListener("click", async () =>
   // helper so a missing field degrades to "" rather than crashing the handler.
   const resourceNameEl = document.getElementById("resourceName") as HTMLInputElement | null;
   const resourceName = resourceNameEl?.value ?? "";
-  const effectiveModel = model || PROVIDER_META[provider]?.defaultModel || "";
+  // Blank is meaningful for a local endpoint: the background can query
+  // `/v1/models` and auto-select when the server exposes exactly one model.
+  const effectiveModel = model || (provider === "ollama" ? "" : PROVIDER_META[provider]?.defaultModel || "");
+  const contextTokensRaw = (document.getElementById("contextTokens") as HTMLInputElement | null)?.value ?? "";
+  const parsedContextTokens = Number(contextTokensRaw);
+  const contextTokens = Number.isSafeInteger(parsedContextTokens) && parsedContextTokens > 0
+    ? parsedContextTokens
+    : undefined;
 
   if (!provider) {
     connectionDiagnosticsStore.dispatch({ type: "DIAGNOSTICS_ERROR", error: "No provider selected." });
@@ -287,7 +295,27 @@ document.getElementById("testConnection")?.addEventListener("click", async () =>
       baseUrl: baseUrl || undefined,
       resourceName: resourceName || undefined,
       provenance: "user",
+      ...(contextTokens ? { contextTokens } : {}),
     });
+    if (result.ok && !model && result.model) {
+      const modelInput = document.getElementById("model") as HTMLInputElement | null;
+      if (modelInput) {
+        modelInput.value = result.model;
+        modelInput.dispatchEvent(new Event("input", { bubbles: true }));
+        modelInput.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    }
+    if (result.ok && result.contextTokens) {
+      const contextInput = document.getElementById("contextTokens") as HTMLInputElement | null;
+      // `/props` is authoritative for llama.cpp. Auto-fill a blank field but
+      // preserve an explicit user cap (for example, intentionally using less
+      // than the server's maximum context).
+      if (contextInput && !contextInput.value.trim()) {
+        contextInput.value = String(result.contextTokens);
+        contextInput.dispatchEvent(new Event("input", { bubbles: true }));
+        contextInput.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    }
     // The generation guard decides whether this result is still current; the
     // render pass below always reflects the store's (possibly dropped) state.
     connectionDiagnosticsStore.dispatch({
@@ -299,7 +327,7 @@ document.getElementById("testConnection")?.addEventListener("click", async () =>
         code: result.ok ? "ok" : "provider_error",
         latencyMs: result.latencyMs,
         provider,
-        model: effectiveModel,
+        model: result.model || effectiveModel,
         message: result.message,
       },
     });
@@ -391,7 +419,7 @@ document.getElementById("model")?.addEventListener("input", () => {
  // A newer keystroke has superseded this search — drop the stale result.
       if (myToken !== modelSearchToken) return;
       if (results.length === 0) {
-        resultsDiv.innerHTML = `<div class="model-search-empty">No models match \u201c${escapeHtml(query)}\u201d</div>`;
+        resultsDiv.innerHTML = emptyModelSearchHtml(provider, query);
         resultsDiv.classList.remove("is-hidden");
         modelInput.setAttribute("aria-expanded", "true");
         modelInput.removeAttribute("aria-activedescendant");

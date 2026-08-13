@@ -70,6 +70,9 @@ export function normalizeAction(action: AgentAction): string {
     case "detect_visual":
       parts.push(`query=${field(a.query)}`);
       break;
+    case "inspect_visual":
+      parts.push(`reason=${field(a.reason)}`);
+      break;
     case "detect_challenge":
       parts.push(`scroll=${a.scroll_into_view ?? false}`);
       break;

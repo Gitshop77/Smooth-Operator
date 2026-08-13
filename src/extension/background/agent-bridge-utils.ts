@@ -10,6 +10,17 @@ import type { AgentMode } from "@/lib/agent/modes";
 
 export const DEFAULT_MAX_STEPS = 100;
 export const DEFAULT_MODE: AgentMode = "standard";
+export const REMOTE_RUN_DEADLINE_MS = 15 * 60_000;
+export const LOCAL_RUN_DEADLINE_MS = 60 * 60_000;
+
+/** Local inference can take tens of seconds per step. A 15-minute global
+ * deadline contradicts the default 100-step allowance and terminates healthy
+ * llama.cpp/Ollama runs. Keep the tighter guard for paid remote providers. */
+export function runDeadlineForProvider(provider: unknown): number {
+  return provider === "ollama" || provider === "litellm"
+    ? LOCAL_RUN_DEADLINE_MS
+    : REMOTE_RUN_DEADLINE_MS;
+}
 
 // ─── Pure numeric helpers ──────────────────────────────────────────────────
 

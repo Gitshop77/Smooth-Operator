@@ -17,6 +17,7 @@ import type {
 import type { LoopState, CallPlannerResult, HandlePlannerDecisionResult, HandleNavigatorDoneResult, RunPeriodicPlannerCheckResult } from "../types";
 import { runPlanner, maybeJudgeAndFinalize, makeCtx, addCost, addTokens, costCapExceeded } from "../helpers";
 import { GOAL_WARN_THRESHOLD, GOAL_TOP_THRESHOLD } from "../loop-detector";
+import { redactKeyShapes } from "../../key-shape-redact";
 import {
   safeEmitPlannerStep,
   safeWaitForSettled,
@@ -203,6 +204,38 @@ export async function handleNavigatorDone(
     }],
   });
 
+  // A successful Navigator claim already contains its answer and trajectory.
+  // Sending that same evidence through a Planner and then through a Judge is
+  // duplicate verification. Verify it once with the evidence-focused Judge;
+  // only pay for a Planner re-plan when verification rejects or is unavailable.
+  // Failure claims keep the Planner recovery path because another strategy may
+  // still complete the task.
+  if (doneAction.success) {
+    const finalized = await maybeJudgeAndFinalize(
+      state.deps,
+      state.config,
+      {
+        step,
+        success: true,
+        text: doneAction.text,
+        navigatorHistory,
+        onCost: (usd, tokensIn, tokensOut) => {
+          addCost(state, usd);
+          addTokens(state, tokensIn, tokensOut);
+        },
+        finalAttempt: false,
+      },
+      state,
+      state.dispatcher,
+      makeCtx(state),
+    );
+    if (finalized) return { finalized: true };
+    onEvent({
+      type: "info",
+      message: "Direct completion verification did not pass — asking the Planner for a recovery plan.",
+    });
+  }
+
   const callResult = await callPlannerAndHandleError(state, { url: browserState.url, tabs }, state.signal);
   if (callResult.status === "abort") return { finalized: true };
   if (callResult.status === "continue") {
@@ -223,6 +256,9 @@ export async function handleNavigatorDone(
   onEvent({
     type: "planner-step", step, decision: decisionResult.plannerResult.decision,
     goal: state.currentGoal, plan: state.plan,
+    thinking: redactKeyShapes(decisionResult.plannerResult.thinking || ""),
+    text: redactKeyShapes(decisionResult.plannerResult.text || ""),
+    currentPlanItem: state.currentPlanItem,
   });
   await safeEmitPlannerStep(state, decisionResult.plannerResult);
   state.navigatorStepsSincePlanner = 0;
@@ -286,6 +322,9 @@ export async function runPeriodicPlannerCheck(
   onEvent({
     type: "planner-step", step, decision: decisionResult.plannerResult.decision,
     goal: state.currentGoal, plan: state.plan,
+    thinking: redactKeyShapes(decisionResult.plannerResult.thinking || ""),
+    text: redactKeyShapes(decisionResult.plannerResult.text || ""),
+    currentPlanItem: state.currentPlanItem,
   });
   await safeEmitPlannerStep(state, decisionResult.plannerResult);
   return { finalized: false };

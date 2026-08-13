@@ -15,7 +15,7 @@ import type { SsrfProvenance } from "./ssrf";
 import {
   parseRetryAfterHeader,
   TEXT_ENCODER,
-  CHUNK_TIMEOUT_MS,
+  streamChunkTimeoutFor,
   MAX_RESPONSE_BYTES,
   fetchWithTimeout,
   readErrorBodyPreview,
@@ -91,12 +91,14 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: {
     return { url, headers, body: bodyStr };
   },
   frames: async function* (prepared: HttpPrepared<FrameType>, signal?: AbortSignal): AsyncIterable<FrameType> {
+    const provenance = opts.provenance ?? "untrusted";
+    const chunkTimeoutMs = streamChunkTimeoutFor(prepared.url, provenance);
     const res = await withLLMRetry(async () => {
       const r = await fetchWithTimeout(prepared.url, {
         method: "POST",
         headers: prepared.headers,
         body: prepared.body,
-      }, signal, opts.provenance ?? "untrusted");
+      }, signal, provenance);
       if (!r.ok) {
         // Detach the user-abort listener BEFORE throwing: a non-ok response
         // resolves normally from fetchWithTimeout (its .catch detach only
@@ -202,8 +204,8 @@ export const httpJson = <Body = unknown, FrameType = Frame>(opts: {
             currentRead,
             new Promise<never>((_, reject) => {
               timer = setTimeout(
-                () => reject(new Error(`stream stall: no data for ${CHUNK_TIMEOUT_MS}ms`)),
-                CHUNK_TIMEOUT_MS,
+                () => reject(new Error(`stream stall: no data for ${chunkTimeoutMs}ms`)),
+                chunkTimeoutMs,
               );
             }),
           ]);

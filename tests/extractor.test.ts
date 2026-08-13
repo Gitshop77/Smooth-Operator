@@ -92,6 +92,27 @@ describe("extractBrowserState", () => {
     expect(state.elementsText).toContain("[5]<a");
   });
 
+  test("automatic observation excludes off-screen text and controls", () => {
+    const visible = document.createElement("button");
+    visible.textContent = "Visible action";
+    visible.getBoundingClientRect = () => ({
+      x: 10, y: 100, top: 100, left: 10, width: 100, height: 30,
+      right: 110, bottom: 130, toJSON: () => ({}),
+    }) as DOMRect;
+    const offscreen = document.createElement("button");
+    offscreen.textContent = "Far below action";
+    offscreen.getBoundingClientRect = () => ({
+      x: 10, y: 5000, top: 5000, left: 10, width: 100, height: 30,
+      right: 110, bottom: 5030, toJSON: () => ({}),
+    }) as DOMRect;
+    document.body.append(visible, offscreen);
+
+    const state = extractBrowserState(MOCK_TABS);
+    expect(state.elementsText).toContain("Visible action");
+    expect(state.elementsText).not.toContain("Far below action");
+    expect(state.elements).toHaveLength(1);
+  });
+
   test("4. non-interactive elements (div/p/span) are not indexed but their text is surfaced", () => {
     document.body.innerHTML = `<div><p>hello world</p><span>more text</span></div>`;
     const state = extractBrowserState(MOCK_TABS);

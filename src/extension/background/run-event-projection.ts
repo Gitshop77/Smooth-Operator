@@ -125,6 +125,36 @@ export function projectRunEvent(
         activeOperation: "Reasoning",
         usage,
       });
+    case "llm-call-start":
+      return controller.updateProgress({
+        phase: "reasoning",
+        step: displayStep(event.step),
+        activeOperation: `${event.role[0].toUpperCase()}${event.role.slice(1)} prompt processing`,
+        usage,
+      });
+    case "llm-call-progress":
+      return controller.updateProgress({
+        phase: "reasoning",
+        step: displayStep(event.step),
+        activeOperation: `${event.role[0].toUpperCase()}${event.role.slice(1)} generating · ${event.outputChars} chars`,
+        usage,
+      });
+    case "llm-call-end":
+      return controller.updateProgress({
+        phase: "reasoning",
+        step: displayStep(event.step),
+        activeOperation: event.status === "error"
+          ? `${event.role[0].toUpperCase()}${event.role.slice(1)} call failed`
+          : `${event.role[0].toUpperCase()}${event.role.slice(1)} response received`,
+        usage,
+      });
+    case "judge":
+      return controller.updateProgress({
+        phase: "reasoning",
+        step: displayStep(event.step),
+        activeOperation: event.stage === "start" ? "Judge verifying completion" : "Judge verdict received",
+        usage,
+      });
     case "action":
       return controller.updateProgress({
         phase: "acting",
@@ -137,6 +167,16 @@ export function projectRunEvent(
         phase: "observing",
         step: displayStep(event.step),
         activeOperation: "Verifying the action",
+        usage,
+      });
+    case "visual-inspection":
+      return controller.updateProgress({
+        phase: event.stage === "requested" || event.stage === "captured" ? "observing" : "reasoning",
+        step: displayStep(event.step),
+        activeOperation: event.stage === "requested" ? "Preparing visual inspection"
+          : event.stage === "captured" ? "Viewport captured"
+          : event.stage === "delivered" ? "Analyzing visual evidence"
+          : "Visual inspection unavailable",
         usage,
       });
     case "paused":

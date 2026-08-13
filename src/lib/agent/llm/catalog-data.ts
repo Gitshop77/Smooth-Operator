@@ -145,6 +145,7 @@ export const VISION_PATTERNS: RegExp[] = [
   /\bpixtral\b/i,
   /\bflorence\b/i,
   /\bcogvlm\b/i,
+  /\bqwen(?:3[._ -]?5)?[-_ ]*35b[-_ ]*a3b\b/i,
   /\bgpt-4o\b/i,
   /\bgpt-5\b/i,
   /\bclaude-3\b/i,

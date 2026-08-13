@@ -19,7 +19,7 @@ import * as Azure from "../lib/agent/llm/providers/azure";
 import * as OpenAICompatible from "../lib/agent/llm/providers/openai-compatible";
 import { makeOpenAIChatFacade } from "../lib/agent/llm/providers/openai";
 import * as OpenAICompatibleChat from "../lib/agent/llm/protocols/openai-compatible-chat";
-import { resolveAndValidateLlmBaseUrl, isCuratedLocalOrigin, type SsrfProvenance } from "../lib/agent/llm/route/ssrf";
+import { resolveAndValidateLlmBaseUrl, type SsrfProvenance } from "../lib/agent/llm/route/ssrf";
 import { redactUrl } from "../lib/agent/llm/route/url-redact";
 import { modelSupportsVision, modelSupportsReasoning, getDefaultModelForProvider, resolveVisionSupport, fetchCatalog } from "../lib/agent/llm/catalog";
 import { CATALOG_PROVIDER_ID_MAP } from "./provider-config-map";
@@ -166,22 +166,6 @@ export async function buildProvider(config: ProviderConfig): Promise<LLMProvider
       throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${redactUrl(baseUrl)} (${ssrf.reason})`);
     }
 
-    // Config-time narrowing for the curated local providers: the transport
-    // layer only ever permits Ollama/LiteLLM's curated loopback origins for
-    // local endpoints, so a local baseUrl outside that allowlist would fail on
-    // EVERY request with an opaque transport error. Reject it here instead,
-    // with a clear message.
-    if (
-      (provider === "ollama" || provider === "litellm") &&
-      isLocalUrl(baseUrl) &&
-      !isCuratedLocalOrigin(baseUrl)
-    ) {
-      throw new Error(
-        `LLM baseUrl rejected: local endpoints for "${provider}" are limited to the curated loopback origins ` +
-          `(http://localhost:11434, http://127.0.0.1:11434, http://[::1]:11434` +
-          `${provider === "litellm" ? ", http://localhost:4000, http://127.0.0.1:4000, http://[::1]:4000" : ""}).`,
-      );
-    }
   }
 
   // Companion guard against API-key exfiltration (ADDITIVE — does not weaken

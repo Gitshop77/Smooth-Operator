@@ -6,7 +6,8 @@
  * `10/8`/`172.16/12`/`192.168/16`, IPv6 ULA `fc00:/7`) — a user's Ollama /
  * LiteLLM server is their own host, not an SSRF target — while still rejecting
  * the genuine SSRF sinks: cloud-metadata / link-local `169.254.0.0/16` (+ IPv6
- * `fe80:/10`), unspecified `0.0.0.0/8` / `:`, and CGNAT `100.64.0.0/10`.
+ * `fe80:/10`) and unspecified `0.0.0.0/8` / `:`. CGNAT `100.64.0.0/10`
+ * (including Tailscale peers) is allowed only with explicit user provenance.
  */
 
 import { describe, test, expect, afterEach } from "vitest";
@@ -56,7 +57,8 @@ describe("validateLlmBaseUrl (SSRF guard)", () => {
   test("rejects CGNAT / link-local / unspecified but allows loopback + RFC1918", () => {
     expect(validateLlmBaseUrl("http://172.16.5.5/").ok).toBe(true); // RFC1918 allowed
     expect(validateLlmBaseUrl("http://127.0.0.1/").ok).toBe(true); // loopback allowed
-    assertRejected(validateLlmBaseUrl("http://100.64.0.1/"), /private\/loopback\/link-local/i);
+    assertRejected(validateLlmBaseUrl("http://100.64.0.1/"), /CGNAT|Tailscale/i);
+    expect(validateLlmBaseUrl("http://100.69.150.56:8080/v1", true, "user-configured").ok).toBe(true);
   });
 
   test("IPv6: allows loopback / ULA / mapped-v4 but rejects link-local", () => {
@@ -131,7 +133,7 @@ describe("validateLlmBaseUrl (SSRF guard)", () => {
     // "any loopback".
     expect(validateLlmBaseUrl("http://[::127.0.0.1]/").ok).toBe(true);
     expect(isAllowedLlmBaseUrl("http://[::127.0.0.1]:11434/v1", undefined, "user-configured")).toBe(true);
-    expect(isAllowedLlmBaseUrl("http://[::127.0.0.1]:9999/v1", undefined, "user-configured")).toBe(false);
+    expect(isAllowedLlmBaseUrl("http://[::127.0.0.1]:9999/v1", undefined, "user-configured")).toBe(true);
   });
 
   test("still allows a user-configured loopback local-provider URL", () => {
@@ -227,6 +229,7 @@ describe("isAllowedLlmBaseUrl (transport-layer SSRF guard)", () => {
     expect(isAllowedLlmBaseUrl("http://169.254.169.254/")).toBe(false);
     expect(isAllowedLlmBaseUrl("http://0.0.0.0/")).toBe(false);
     expect(isAllowedLlmBaseUrl("http://100.64.0.1/")).toBe(false);
+    expect(isAllowedLlmBaseUrl("http://100.69.150.56:8080/v1", true, "user-configured")).toBe(true);
     expect(isAllowedLlmBaseUrl("file:///etc/passwd")).toBe(false);
   });
 
@@ -245,7 +248,7 @@ describe("isAllowedLlmBaseUrl (transport-layer SSRF guard)", () => {
     expect(isAllowedLlmBaseUrl("http://169.254.169.254/", false)).toBe(false);
   });
 
-  test("IPv6 parity: transport guard rejects non-curated loopback/ULA/link-local/mapped regardless of exemption", () => {
+  test("IPv6 parity: untrusted transport rejects non-curated local targets", () => {
     // Unlike the parse-layer `validateLlmBaseUrl` (which ALLOWS IPv6 loopback
     // `:1` and ULA `fc00:/7` as self-hosted infra), the transport-layer guard
     // only exempts the CURATED local-provider origins (localhost / 127.0.0.1
@@ -280,15 +283,15 @@ describe("isAllowedLlmBaseUrl (transport-layer SSRF guard)", () => {
     expect(isAllowedLlmBaseUrl("http://[::ffff:127.0.0.1]:11434/v1", undefined, "user-configured")).toBe(true);
   });
 
-  test("non-curated IPv6 loopback ports are REJECTED even for a user-configured baseUrl", () => {
+  test("non-curated IPv6 loopback ports are allowed only for a user-configured baseUrl", () => {
     // The old fallback exempted ANY `::127.x`-embedded IPv6 on ANY port
     // (fail-open vs the curated-only policy) while rejecting `[::1]` on the
     // curated ports (fail-closed for a legit IPv6 Ollama user). The transport
     // policy is exact curated-origin equality: host AND port must match.
-    expect(isAllowedLlmBaseUrl("http://[::127.0.0.1]:9999/v1", undefined, "user-configured")).toBe(false);
-    expect(isAllowedLlmBaseUrl("http://[::1]:9999/v1", undefined, "user-configured")).toBe(false);
-    expect(isAllowedLlmBaseUrl("http://[::ffff:127.0.0.1]:9999/v1", undefined, "user-configured")).toBe(false);
-    expect(isAllowedLlmBaseUrl("http://[::127.0.0.1]:11435/v1", undefined, "user-configured")).toBe(false);
+    expect(isAllowedLlmBaseUrl("http://[::127.0.0.1]:9999/v1", undefined, "user-configured")).toBe(true);
+    expect(isAllowedLlmBaseUrl("http://[::1]:9999/v1", undefined, "user-configured")).toBe(true);
+    expect(isAllowedLlmBaseUrl("http://[::ffff:127.0.0.1]:9999/v1", undefined, "user-configured")).toBe(true);
+    expect(isAllowedLlmBaseUrl("http://[::127.0.0.1]:11435/v1", undefined, "user-configured")).toBe(true);
     expect(isAllowedLlmBaseUrl("http://[::1]:11434/v1", undefined, "untrusted")).toBe(false);
   });
 

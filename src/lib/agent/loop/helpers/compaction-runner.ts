@@ -36,6 +36,7 @@ import { boundPromptTextV1 } from "../../prompts/bounded-prompt-text";
 import {
   PROMPT_BUDGET_PROFILES_V1,
   assertCompiledPromptWithinProfileV1,
+  promptBudgetProfileForContextV1,
   utf8ByteLength,
 } from "../../prompts/prompt-token-budget";
 
@@ -107,6 +108,9 @@ async function reportUsage(
     tokensOut: usage.tokensOut,
     costUsd: usage.costUsd,
     model: usage.model,
+    reasoningTokens: usage.reasoningTokens,
+    cachedInputTokens: usage.cachedInputTokens,
+    cachedWriteInputTokens: usage.cachedWriteInputTokens,
   });
   if (dispatcher && ctx) await dispatcher.cost(ctx, usage);
 }
@@ -120,8 +124,17 @@ export async function runCompaction(
   ctx?: CallbackContext,
   priorCompactedMemory?: string,
   signal?: AbortSignal,
+  keepRecent?: number,
+  contextTokens?: number,
 ): Promise<{ keptRecent: HistoryItem[]; compactedMemory: string; compactedCount: number } | null> {
-  const { toSummarize, toKeep } = partitionHistory(navigatorHistory);
+  // Constrained-context callers pass an explicit smaller recent window and
+  // need to retire the oldest record as soon as that window is full. The
+  // default path preserves the historical "one middle item" threshold.
+  const { toSummarize, toKeep } = partitionHistory(
+    navigatorHistory,
+    keepRecent,
+    keepRecent !== undefined,
+  );
   if (toSummarize.length === 0) return null;
  // Value-based (stored-vault) secret redaction parity with the navigator/planner
  // prompt paths: apply redactHistoryForPrompt (redactSecrets + redactKeyShapes)
@@ -149,30 +162,57 @@ export async function runCompaction(
   // byte-count marker; the most recent steps are preserved verbatim in
   // `toKeep`, so no context is silently lost.
   const compactionSystemPrompt = `${SECURITY_INSTRUCTION}\n\n${COMPACTION_PREAMBLE}`;
-  const compactionMaxBytes = PROMPT_BUDGET_PROFILES_V1.compaction.maxInputTokens;
+  // Known-context calls use the same 85/15 policy as the provider adapter.
+  // The portable fallback estimates two UTF-8 bytes per token, so convert the
+  // token allowance back to bytes for this deterministic prefix bound.
+  const compactionMaxBytes = contextTokens !== undefined
+    ? promptBudgetProfileForContextV1("compaction", contextTokens).maxInputTokens * 2
+    : PROMPT_BUDGET_PROFILES_V1.compaction.maxInputTokens;
   const systemBytes = utf8ByteLength(compactionSystemPrompt);
   // Reserve one extra byte for the `\n` separator the conservative combined
   // assertion (`assertCompiledPromptWithinProfileV1`) inserts between messages.
   const userMaxBytes = Math.max(0, compactionMaxBytes - systemBytes - 1);
   const bounded = boundPromptTextV1(rawRequest, { maxBytes: userMaxBytes, label: "compaction history" });
   const request = bounded.text;
+  const callId = `compaction-${step}-${Date.now()}`;
+  const callStartedAt = Date.now();
+  deps.onEvent({
+    type: "llm-call-start", step, callId, role: "compaction", attempt: 1,
+    startedAt: callStartedAt,
+    prompt: {
+      historyItems: redactedToSummarize.length,
+      requestChars: request.length + compactionSystemPrompt.length,
+      compactedMemoryChars: priorCompactedMemory?.length ?? 0,
+    },
+  });
+  let callEventEnded = false;
   try {
     let summary: string;
+    let callUsage: {
+      tokensIn?: number; tokensOut?: number; model?: string; reasoningTokens?: number;
+      cachedInputTokens?: number; cachedWriteInputTokens?: number;
+    } | undefined;
     if (deps.summarizeCall) {
       // The system prompt + user request together must fit the compaction
       // profile. The user request was already deterministically bounded to
       // `maxInputTokens - systemBytes` above; this is the fail-closed guard
       // covering the combined outbound input.
-      assertCompiledPromptWithinProfileV1("compaction", "compaction", [
-        { content: compactionSystemPrompt },
-        { content: request },
-      ]);
+      // The provider-facing summarize adapter repeats the authoritative
+      // known-context assertion. Keep this legacy byte-exact assertion only
+      // when no effective context is available.
+      if (contextTokens === undefined) {
+        assertCompiledPromptWithinProfileV1("compaction", "compaction", [
+          { content: compactionSystemPrompt },
+          { content: request },
+        ]);
+      }
       const res = await deps.summarizeCall({
         systemPrompt: compactionSystemPrompt,
         userPrompt: request,
         signal,
       });
       summary = res.content;
+      callUsage = res.usage;
  // Surface the summarize-call cost + tokens to the caller (cost-cap +
  // token totals + live UI cost counter). Mirrors the pattern in
  // `runPlanner` / `callNavigatorWithRetry`.
@@ -188,6 +228,7 @@ export async function runCompaction(
         step,
         maxSteps: 0,
       }, signal);
+      callUsage = res;
 
  // The planner returns JSON — extract the text field for a clean summary.
       try {
@@ -199,6 +240,16 @@ export async function runCompaction(
  // Surface the planner-fallback cost + tokens to the caller.
       await reportUsage(step, res, onCost, deps, dispatcher, ctx);
     }
+    callEventEnded = true;
+    deps.onEvent({
+      type: "llm-call-end", step, callId, role: "compaction", attempt: 1,
+      status: "success", durationMs: Date.now() - callStartedAt,
+      outputChars: summary.length, parseValid: true, model: callUsage?.model,
+      tokensIn: callUsage?.tokensIn, tokensOut: callUsage?.tokensOut,
+      reasoningTokens: callUsage?.reasoningTokens,
+      cachedInputTokens: callUsage?.cachedInputTokens,
+      cachedWriteInputTokens: callUsage?.cachedWriteInputTokens,
+    });
     const safeMemory = sanitizeCompactedMemory(summary);
     return {
       keptRecent: toKeep,
@@ -206,6 +257,14 @@ export async function runCompaction(
       compactedCount: toSummarize.length,
     };
   } catch (e) {
+    if (!callEventEnded) {
+      callEventEnded = true;
+      deps.onEvent({
+        type: "llm-call-end", step, callId, role: "compaction", attempt: 1,
+        status: "error", durationMs: Date.now() - callStartedAt, outputChars: 0,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
  // re-throw budget-exceeded errors so the orchestrator can
  // finalize the run as FAILURE. Other
  // errors (LLM failures, parse errors, etc.) are still absorbed —

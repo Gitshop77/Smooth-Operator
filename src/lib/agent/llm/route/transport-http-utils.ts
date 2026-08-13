@@ -5,6 +5,7 @@ import {
   isAllowedLlmBaseUrl,
   resolveAndValidateLlmBaseUrl,
 } from "./ssrf";
+import { isLocalHostname, isUserLocalIp } from "./ssrf-ipv6";
 
 /**
  * Typed non-retryable rejection for transport SECURITY blocks (SSRF-guard
@@ -59,6 +60,27 @@ export function parseRetryAfterHeader(value: string): number | undefined {
  * other way to interrupt it. 60s matches the SSE route's documented maxDuration. */
 const REQUEST_TIMEOUT_MS = 60_000;
 
+/** Local llama.cpp/Ollama can spend minutes pre-filling a 64k prompt before
+ * producing response headers or the first SSE chunk. Keep the cloud timeout
+ * tight, but give an explicitly user-configured curated loopback endpoint a
+ * bounded 15-minute window so large local contexts are actually usable. */
+export const LOCAL_MODEL_TIMEOUT_MS = 15 * 60_000;
+
+function isUserLocalModelUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
+    return isLocalHostname(host) || isUserLocalIp(host);
+  } catch {
+    return false;
+  }
+}
+
+export function llmTimeoutFor(url: string, provenance: SsrfProvenance): number {
+  return provenance === "user-configured" && isUserLocalModelUrl(url)
+    ? LOCAL_MODEL_TIMEOUT_MS
+    : REQUEST_TIMEOUT_MS;
+}
+
 export const TEXT_ENCODER = new TextEncoder();
 
 /**
@@ -80,6 +102,12 @@ export const TEXT_ENCODER = new TextEncoder();
  * masquerade as a retryable network error.
  */
 export const CHUNK_TIMEOUT_MS = 30_000;
+
+export function streamChunkTimeoutFor(url: string, provenance: SsrfProvenance): number {
+  return provenance === "user-configured" && isUserLocalModelUrl(url)
+    ? LOCAL_MODEL_TIMEOUT_MS
+    : CHUNK_TIMEOUT_MS;
+}
 
 /**
  * Upper bound on the total decoded bytes read from a single upstream response
@@ -261,10 +289,11 @@ export async function fetchWithTimeout(
   const controller = new AbortController();
   let timedOut = false;
 
+  const requestTimeoutMs = llmTimeoutFor(url, provenance);
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, REQUEST_TIMEOUT_MS);
+  }, requestTimeoutMs);
 
  // Single source of truth for the terminal `.catch` on both fetch branches
  // (with / without a user signal). A timeout abort is surfaced as a retryable
@@ -273,7 +302,7 @@ export async function fetchWithTimeout(
  // this in one place stops the two branches from silently diverging.
   const wrapTimeoutError = (e: unknown): never => {
     if (timedOut) {
-      throw new Error(`Request timeout after ${REQUEST_TIMEOUT_MS}ms`);
+      throw new Error(`Request timeout after ${requestTimeoutMs}ms`);
     }
     throw e;
   };

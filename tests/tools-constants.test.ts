@@ -122,13 +122,16 @@ describe("sleep abort support", () => {
 });
 
 describe("actionListForPrompt vision-mode gating", () => {
-  test("detect_visual is listed only in adaptive vision mode", () => {
+  test("visual inspection tools are listed only in adaptive vision mode", () => {
     const disabled = actionListForPrompt(5, "disabled");
     expect(disabled).not.toContain("detect_visual");
+    expect(disabled).not.toContain("inspect_visual");
     const always = actionListForPrompt(5, "always");
     expect(always).not.toContain("detect_visual");
+    expect(always).not.toContain("inspect_visual");
     const adaptive = actionListForPrompt(5, "adaptive");
     expect(adaptive).toContain("detect_visual");
+    expect(adaptive).toContain("inspect_visual");
   });
 
   test("the action-count header reflects maxActions", () => {

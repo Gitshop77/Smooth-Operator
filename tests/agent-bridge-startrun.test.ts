@@ -325,7 +325,7 @@ describe("startRun privileged active tab handling", () => {
     chromeAny = {
       tabs: {
         query: vi.fn(async () => [{ id: 1, url: "chrome://newtab/" }]),
-        create: vi.fn(async () => ({ id: 99, url: "about:blank" })),
+        create: vi.fn(async () => ({ id: 99, url: "https://example.com/" })),
       },
     };
     (globalThis as Record<string, unknown>).chrome = {
@@ -351,9 +351,13 @@ describe("startRun privileged active tab handling", () => {
   test("auto-opens a fresh tab when active tab is chrome://newtab and proceeds (does not hard-fail)", async () => {
     await startRun({ task: "go to example.com", maxSteps: 10, mode: "standard" });
 
-    // Verify chrome.tabs.create was called with active:true (opens about:blank
-    // by default — Chrome's standard canvas for content scripts).
-    expect(chromeAny.tabs.create).toHaveBeenCalledWith({ active: true });
+    // The bootstrap must be an ordinary http(s) page matched by the manifest's
+    // content_scripts. about:blank cannot be observed and caused five repeated
+    // extractState failures in real Brave runs.
+    expect(chromeAny.tabs.create).toHaveBeenCalledWith({
+      active: true,
+      url: "https://example.com/",
+    });
 
     // The run MUST proceed — runAgentLoop was called (no hard-fail).
     expect(runAgentLoop).toHaveBeenCalledTimes(1);

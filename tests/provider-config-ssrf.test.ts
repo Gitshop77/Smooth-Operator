@@ -443,29 +443,35 @@ describe("buildProvider canonical-host port handling", () => {
 // failed on EVERY request with an opaque error; it must fail at configuration
 // time instead.
 
-describe("buildProvider curated local-origin narrowing (ollama/litellm)", () => {
-  test("user ollama on a non-curated loopback port is rejected at config time", async () => {
-    await expect(
-      buildProvider({
+describe("buildProvider explicit local-provider endpoints", () => {
+  test("user ollama on a non-default loopback port is allowed", async () => {
+    await expect(buildProvider({
         provider: "ollama",
         model: "llama3.3",
         apiKey: "",
         baseUrl: "http://127.0.0.1:9999",
         provenance: "user",
-      }),
-    ).rejects.toThrow(/curated|allowlist/i);
+      })).resolves.toBeTruthy();
   });
 
-  test("user ollama on a LAN host is rejected at config time", async () => {
-    await expect(
-      buildProvider({
+  test("user ollama on a LAN host is allowed", async () => {
+    await expect(buildProvider({
         provider: "ollama",
         model: "llama3.3",
         apiKey: "",
         baseUrl: "http://192.168.1.5:8080",
         provenance: "user",
-      }),
-    ).rejects.toThrow(/curated|allowlist/i);
+      })).resolves.toBeTruthy();
+  });
+
+  test("user ollama on a Tailscale CGNAT peer is allowed", async () => {
+    await expect(buildProvider({
+      provider: "ollama",
+      model: "qwen35b-a3b",
+      apiKey: "",
+      baseUrl: "http://100.69.150.56:8080/v1",
+      provenance: "user",
+    })).resolves.toBeTruthy();
   });
 
   test("user ollama IPv6 loopback spelling of the curated endpoint is allowed", async () => {

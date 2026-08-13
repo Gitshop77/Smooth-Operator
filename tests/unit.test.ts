@@ -718,6 +718,21 @@ describe("estimateCost", () => {
     );
   });
 
+  test("Ollama models are provider-scoped zero-cost without weakening unknown cloud fallback", () => {
+    expect(estimateCost({
+      model: "unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL",
+      providerId: "ollama",
+      tokensIn: 1_000_000,
+      tokensOut: 1_000_000,
+    })).toBe(0);
+    expect(estimateCost({
+      model: "same-unknown-model",
+      providerId: "litellm",
+      tokensIn: 1_000_000,
+      tokensOut: 1_000_000,
+    })).toBeGreaterThan(0);
+  });
+
   test("zero tokens → returns 0", () => {
     expect(estimateCost("gpt-4o", 0, 0)).toBe(0);
   });

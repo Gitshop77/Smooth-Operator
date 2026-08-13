@@ -171,7 +171,7 @@ const EarlyStopThresholdsSchema = z.object({
  * Zod schema for {@link AgentConfig}. Mirrors the interface in `../types.ts`.
  *
  * Defaults match {@link DEFAULT_CONFIG} from `../types.ts`:
- * maxSteps: 100, maxActionsPerStep: 10, plannerInterval: 5, maxFailures: 5,
+ * maxSteps: 100, maxActionsPerStep: 10, plannerInterval: 10, maxFailures: 5,
  * enableLoopDetection: true, enableCompaction: true,
  * compactionStepInterval: 20, compactionCharThreshold: 30_000,
  * enableJudge: true.
@@ -191,7 +191,7 @@ const AgentConfigSchema = z.object({
   /** Max actions the navigator can emit per step (1-50). */
   maxActionsPerStep: z.number().int().min(1).max(50).default(10),
   /** Run the planner every N navigator steps (>=1). */
-  plannerInterval: z.number().int().min(1).default(5),
+  plannerInterval: z.number().int().min(1).default(10),
   /** Max consecutive failures before giving up (>=1). */
   maxFailures: z.number().int().min(1).default(5),
   /** Whether to enable loop detection. */

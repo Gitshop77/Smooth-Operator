@@ -30,12 +30,10 @@ import { installJsdomLayoutMock, restoreJsdomLayoutMock } from "./helpers";
 
 // ─── jsdom-limitation mocks (installed in beforeEach) ───────────────────────
 //
-// The ax-tree path calls `isVisible` (= `isVisibleFull` from dom-utils) and
-// `getBoundingClientRect` only when `filter !== "all"` (see `shouldInclude`).
-// Most tests below use the default `filter="all"`, which skips both checks —
-// no mocking needed. The `filter="interactive"` test (test 10) DOES need the
-// mocks, so we install them unconditionally in `beforeEach` to keep the test
-// bodies uniform.
+// Both automatic filters are viewport-aware: `all` supplies the current
+// viewport's semantic context while `interactive` supplies actionable refs.
+// jsdom has no layout, so install the shared visibility/layout approximation
+// unconditionally.
 //
 // The shared `installJsdomLayoutMock` helper overrides `offsetParent` and
 // `getBoundingClientRect` so jsdom (which has no layout engine) reports
@@ -207,6 +205,26 @@ describe("generateAccessibilityTree (DOM walking)", () => {
     expect(result.pageContent).not.toContain('"Page Title"');
     // The div has no interactive role and no name worth surfacing — excluded.
     expect(result.pageContent).not.toContain("Some div text");
+  });
+
+  test("10b. filter=\"all\" follows the viewport instead of repeating off-screen page headers", () => {
+    const visible = document.createElement("h2");
+    visible.textContent = "Current viewport section";
+    visible.getBoundingClientRect = () => ({
+      x: 0, y: 100, top: 100, left: 0, width: 300, height: 40,
+      right: 300, bottom: 140, toJSON: () => ({}),
+    }) as DOMRect;
+    const above = document.createElement("h1");
+    above.textContent = "Off-screen page header";
+    above.getBoundingClientRect = () => ({
+      x: 0, y: -900, top: -900, left: 0, width: 300, height: 40,
+      right: 300, bottom: -860, toJSON: () => ({}),
+    }) as DOMRect;
+    document.body.append(above, visible);
+
+    const result = generateAccessibilityTree("all");
+    expect(result.pageContent).toContain("Current viewport section");
+    expect(result.pageContent).not.toContain("Off-screen page header");
   });
 
   test("11. maxLength cap is enforced — overflow returns a capped error, content fits under the cap", () => {

@@ -113,7 +113,12 @@ export async function compilePlannerPromptV1(
     kind: "planner",
     system: buildPlannerPrompt(input.customPrompt) + (input.systemSuffix ?? ""),
     user: await buildPlannerUserMessage(input.user),
-    cacheEligible: false,
+    // A planner call is two messages, but it is not one-use in an agent run:
+    // the identical ~9.5KB system prefix is revisited every planner interval.
+    // Mark only that stable prefix cacheable; the per-step user payload stays
+    // volatile. This enables explicit Anthropic caching and is harmless for
+    // providers with automatic/no prompt caching.
+    cacheEligible: true,
     systemProvenance: input.customPrompt?.trim() ? "settings" : "application",
     userTrust: "untrusted-model",
     invalidationKeys: ["prompt-contract-version", "customPlannerPrompt", "structured-output-support"],

@@ -69,19 +69,30 @@ describe("compact navigator prompt", () => {
     expect(COMPACT).toContain("injection");
   });
 
+  test("adaptive compact and full prompts teach autonomous one-shot visual escalation", () => {
+    for (const compact of [false, true]) {
+      const prompt = buildNavigatorPrompt(5, undefined, "adaptive", "standard", compact);
+      expect(prompt).toContain("inspect_visual");
+      expect(prompt).toContain("attaches it ONCE");
+      expect(prompt).toContain("The user never needs to name a tool");
+      expect(prompt).toContain("Do not request pixels routinely");
+    }
+  });
+
   test("128k+ models keep the FULL prompt (compact is opt-in for <128k)", () => {
     expect(buildNavigatorPrompt(5, undefined, "disabled", "standard", false)).toBe(FULL);
     expect(COMPACT).not.toBe(FULL);
   });
 
   test("a 64k model with the compact prompt fits a LARGE observation that the full prompt cannot", async () => {
-    // ~14k chars of elements text — with the FULL 30KB prompt this exceeds the
-    // 64k derived budget; with the compact prompt it fits comfortably.
-    const elementsText = "[1]<button>Compare plans</button>\n".repeat(450); // ~14.4k chars
+    // ~83k chars: under the corrected fallback allowance with the 22KB compact
+    // prompt, but over it with the 30KB full prompt.
+    const elementsText = "[1]<button>Compare plans</button>\n".repeat(2_600);
+    const axTree = "button Compare plans\n".repeat(1_000);
     const compiled = await compileNavigatorPromptV1({
       maxActions: 5,
       compact: true,
-      user: { ...USER, browserState: { ...USER.browserState, elementsText } },
+      user: { ...USER, browserState: { ...USER.browserState, elementsText, axTree } },
     });
     expect(() =>
       assertCompiledPromptWithinContextBudgetV1("navigator", "navigator-compact-64k", compiled.messages, 64_000),
@@ -92,7 +103,7 @@ describe("compact navigator prompt", () => {
     const fullCompiled = await compileNavigatorPromptV1({
       maxActions: 5,
       compact: false,
-      user: { ...USER, browserState: { ...USER.browserState, elementsText } },
+      user: { ...USER, browserState: { ...USER.browserState, elementsText, axTree } },
     });
     expect(() =>
       assertCompiledPromptWithinContextBudgetV1("navigator", "navigator-full-64k", fullCompiled.messages, 64_000),

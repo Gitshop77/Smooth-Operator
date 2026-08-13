@@ -148,9 +148,10 @@ export function initAutoSave(saveSettings: () => Promise<boolean>): void {
   const saveIds = [
     "apiKey", "model", "baseUrl", "resourceName",
     "maxSteps", "maxActions", "plannerInterval", "maxFailures", "costCap",
-    "defaultTask", "screenshotQuality", "allowedDomains", "blockedDomains", "enableStealth",
+    "defaultTask", "screenshotQuality", "screenshotImageTokens", "screenshotMaxDimension", "screenshotMaxBytes", "allowedDomains", "blockedDomains", "enableStealth",
     "agentMode",
     "reasoningEffort", "reasoningBudget", "forceReasoning",
+    "contextTokens",
   ];
 
   let saveDebounceTimer: ReturnType<typeof setTimeout> | null = null;

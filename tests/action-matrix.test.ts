@@ -68,6 +68,7 @@ const ACTION_FIXTURES = {
   search: { type: "search", query: "phase ten contract", engine: "duckduckgo" },
   upload_file: { type: "upload_file", index: 1, path: "/tmp/contract.txt" },
   screenshot: { type: "screenshot", file_name: "contract.jpg" },
+  inspect_visual: { type: "inspect_visual", reason: "read the chart" },
   save_as_pdf: { type: "save_as_pdf", file_name: "contract.pdf" },
   dropdown_options: { type: "dropdown_options", index: 1 },
   page_next: { type: "page_next", offset: 0 },
@@ -176,7 +177,7 @@ const HANDLER_BY_ACTION: Record<ActionType, string | undefined> = {
   get_console_log: "handleGetConsoleLog", clear_console_log: "handleClearConsoleLog",
   getclear_console_log: "handleGetclearConsoleLog", find_text: "handleFindText", extract: "handleExtract",
   done: "handleDone", search: "handleSearch", upload_file: "handleUploadFile",
-  screenshot: "handleScreenshot", save_as_pdf: "handleSaveAsPdf", dropdown_options: "handleDropdownOptions",
+  screenshot: "handleScreenshot", inspect_visual: "handleInspectVisual", save_as_pdf: "handleSaveAsPdf", dropdown_options: "handleDropdownOptions",
   page_next: undefined, list_downloads: undefined, search_page: "handleSearchPage",
   find_elements: "handleFindElements", list_interactive: "handleListInteractive",
   get_computed_style: "handleGetComputedStyle", get_page_info: "handleGetPageInfo",
@@ -433,4 +434,3 @@ describe("Action matrix — timeout + cleanup legs (real handlers)", () => {
     }
   });
 });
-

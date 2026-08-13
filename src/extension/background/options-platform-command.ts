@@ -8,6 +8,7 @@ import { resolveCredential } from "../credential-service";
 import { getCredentialStatus } from "../credential-service";
 import { ensureApiKeyInSession } from "../api-key-storage";
 import { isExactOptionsSender } from "./options-sender";
+import { redactKeyLeak } from "@/lib/agent/redact-shared";
 
 type SendResponse = (response: OptionsPlatformCommandResponseV1) => void;
 
@@ -42,7 +43,17 @@ export function createOptionsPlatformCommandHandler(services: OptionsPlatformSer
     }
     void services.connection.test(message.command.config).then(
       (result) => sendResponse({ ok: true, kind: "connection_test", result }),
-      () => sendResponse({ ok: false, error: "Connection service unavailable." }),
+      (error: unknown) => {
+        const detail = redactKeyLeak(
+          error instanceof Error ? error.message : String(error),
+        ).slice(0, 180);
+        sendResponse({
+          ok: false,
+          error: detail
+            ? `Connection service unavailable: ${detail}`
+            : "Connection service unavailable.",
+        });
+      },
     );
     return true;
   };

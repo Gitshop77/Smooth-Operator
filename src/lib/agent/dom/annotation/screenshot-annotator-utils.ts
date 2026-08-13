@@ -40,14 +40,20 @@ export function pickReadableTextColor(bg: string): string {
   return relativeLuminance(bg) > 0.5 ? "#000000" : "#ffffff";
 }
 
-/** Convert a canvas back to a JPEG data URL. */
-export async function canvasToDataUrl(canvas: CompatibleCanvas, fallback: string): Promise<string> {
+/** Convert a canvas back to a JPEG data URL. `quality` is the JPEG quality
+ * (0–1); callers that re-encode an already-captured screenshot should pass the
+ * original capture quality so round-tripping doesn't silently degrade it. */
+export async function canvasToDataUrl(
+  canvas: CompatibleCanvas,
+  fallback: string,
+  quality = 0.85,
+): Promise<string> {
   const oc = canvas as unknown as {
     convertToBlob?: (opts: { type: string; quality?: number }) => Promise<Blob>;
   };
   if (typeof oc.convertToBlob === "function") {
     try {
-      const blob = await oc.convertToBlob({ type: "image/jpeg", quality: 0.85 });
+      const blob = await oc.convertToBlob({ type: "image/jpeg", quality });
       return await blobToDataUrl(blob);
     } catch {
       return fallback;
@@ -56,7 +62,7 @@ export async function canvasToDataUrl(canvas: CompatibleCanvas, fallback: string
   const html = canvas as unknown as { toDataURL?: (type: string, quality?: number) => string };
   if (typeof html.toDataURL === "function") {
     try {
-      return html.toDataURL("image/jpeg", 0.85);
+      return html.toDataURL("image/jpeg", quality);
     } catch {
       return fallback;
     }

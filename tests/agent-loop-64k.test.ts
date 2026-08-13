@@ -326,9 +326,10 @@ describe("64k-context loop survival", () => {
     expect(profile.length).toBeGreaterThanOrEqual(20);
 
     // Documented per-turn input map for the milestone turns — each must fit the
-    // 64k derived input budget (39,424 bytes).
+    // 64k derived input budget (54,400 tokens; the portable conservative
+    // fallback permits at most two UTF-8 bytes per token).
     for (const turn of [0, 4, 9, 14, 19]) {
-      expect(profile[turn].total).toBeLessThanOrEqual(39_424);
+      expect(profile[turn].total).toBeLessThanOrEqual(108_800);
     }
 
     // History stays bounded (stale-observation masking): the <agent_history>
@@ -337,7 +338,7 @@ describe("64k-context loop survival", () => {
     expect(profile[19].history).toBeLessThan(profile[0].history * 3);
 
     // The observation is bounded by the context-derived caps (elements cap
-    // 2,910 + AX cap 514 for 64k), not shipped whole from the 64k-char page.
+    // DOM + viewport AX caps for 64k), not shipped whole from the page.
     expect(profile[0].obs).toBeLessThan(caps.elementsTextChars + caps.axTreeChars + 200);
   });
 

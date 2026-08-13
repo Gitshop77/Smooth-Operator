@@ -66,6 +66,7 @@ export function describeAction(a: AgentAction): string {
     case "search": return `search "${a.query}" (${a.engine ?? "duckduckgo"})`;
     case "upload_file": return `upload ${a.path ?? ""} to [${a.index}]`;
     case "screenshot": return `screenshot${a.file_name ? ` → ${a.file_name}` : ""}`;
+    case "inspect_visual": return `inspect_visual: ${slice(a.reason)}`;
     case "save_as_pdf": return `save as PDF${a.file_name ? ` → ${a.file_name}` : ""}`;
     case "dropdown_options": return `list options of [${a.index}]`;
     case "search_page": return `search page for "${a.pattern}"`;

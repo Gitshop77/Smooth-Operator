@@ -102,6 +102,14 @@ describe("action execution behavior", () => {
     expect(result.extractedContent).toContain("Login required");
   });
 
+  test("inspect_visual requests one future frame without embedding image data", async () => {
+    const action = { type: "inspect_visual", reason: "Read the chart" } as AgentAction;
+    const result = await executeAction(action, makeState());
+    expect(result).toMatchObject({ success: true, requestVisualInspection: true });
+    expect(result.message).toContain("Read the chart");
+    expect(result.extractedContent).toBeUndefined();
+  });
+
   test("verify: returns success with the expectation in extractedContent", async () => {
     const action = { type: "verify", expectation: "success message visible" } as AgentAction;
     const result = await executeAction(action, makeState());

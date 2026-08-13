@@ -190,10 +190,11 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // panel is closed but a scheduled task is running.
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === "keepalive") {
- // No-op: the port's existence is what keeps the SW alive. We just need
- // to acknowledge the connection. The port will be torn down when the
- // side panel closes (or when the SW is killed — the side panel's
- // `onDisconnect` listener reconnects).
+    // Chrome 114+ requires traffic on a long-lived port; opening the port by
+    // itself no longer resets service-worker idle timers. The side panel sends
+    // KEEPALIVE_PING every 20s. Registering the listener makes that traffic an
+    // explicit, observable extension event without generating response noise.
+    port.onMessage.addListener(() => { /* heartbeat */ });
     port.onDisconnect.addListener(() => {
       // side panel closed; SW keeps running on the alarms keepalive fallback
     });

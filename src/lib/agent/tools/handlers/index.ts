@@ -48,6 +48,7 @@ export { handleDone } from "./done";
 export { handleSearch } from "./search";
 export { handleUploadFile } from "./upload-file";
 export { handleScreenshot } from "./screenshot";
+export { handleInspectVisual } from "./inspect-visual";
 export { handleSaveAsPdf } from "./save-as-pdf";
 export { handleDropdownOptions } from "./dropdown-options";
 export { handleSearchPage } from "./search-page";

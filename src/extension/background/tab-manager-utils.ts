@@ -17,11 +17,23 @@ export function throwIfAborted(signal?: AbortSignal): void {
 // ─── Screenshot quality cache ───────────────────────────────────────────────
 
 let cachedScreenshotQuality: number | null = null;
+let cachedScreenshotImageTokens: number | null = null;
+let cachedScreenshotMaxDimension: number | null = null;
+let cachedScreenshotMaxBytes: number | null = null;
 
 if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === "local" && changes.screenshotQuality) {
+    if (
+      area === "local" &&
+      (changes.screenshotQuality ||
+        changes.screenshotImageTokens ||
+        changes.screenshotMaxDimension ||
+        changes.screenshotMaxBytes)
+    ) {
       cachedScreenshotQuality = null;
+      cachedScreenshotImageTokens = null;
+      cachedScreenshotMaxDimension = null;
+      cachedScreenshotMaxBytes = null;
     }
   });
 }
@@ -32,6 +44,39 @@ export async function getScreenshotQuality(): Promise<number> {
   cachedScreenshotQuality =
     typeof screenshotQuality === "number" ? Math.min(100, Math.max(0, screenshotQuality)) : 80;
   return cachedScreenshotQuality;
+}
+
+/** Per-image token budget for local vision models (default 4096). */
+export async function getScreenshotImageTokens(): Promise<number> {
+  if (cachedScreenshotImageTokens !== null) return cachedScreenshotImageTokens;
+  const { screenshotImageTokens } = await chrome.storage.local.get("screenshotImageTokens");
+  cachedScreenshotImageTokens =
+    typeof screenshotImageTokens === "number" && screenshotImageTokens >= 256 && screenshotImageTokens <= 65536
+      ? Math.floor(screenshotImageTokens)
+      : 4096;
+  return cachedScreenshotImageTokens;
+}
+
+/** Max screenshot dimension in CSS px; 0 keeps the full viewport. */
+export async function getScreenshotMaxDimension(): Promise<number> {
+  if (cachedScreenshotMaxDimension !== null) return cachedScreenshotMaxDimension;
+  const { screenshotMaxDimension } = await chrome.storage.local.get("screenshotMaxDimension");
+  cachedScreenshotMaxDimension =
+    typeof screenshotMaxDimension === "number" && screenshotMaxDimension >= 0 && screenshotMaxDimension <= 4096
+      ? Math.floor(screenshotMaxDimension)
+      : 0;
+  return cachedScreenshotMaxDimension;
+}
+
+/** Max screenshot byte size; 0 disables the byte cap. */
+export async function getScreenshotMaxBytes(): Promise<number> {
+  if (cachedScreenshotMaxBytes !== null) return cachedScreenshotMaxBytes;
+  const { screenshotMaxBytes } = await chrome.storage.local.get("screenshotMaxBytes");
+  cachedScreenshotMaxBytes =
+    typeof screenshotMaxBytes === "number" && screenshotMaxBytes >= 0 && screenshotMaxBytes <= 5_000_000
+      ? Math.floor(screenshotMaxBytes)
+      : 0;
+  return cachedScreenshotMaxBytes;
 }
 
 // ─── CDP debugger refcount ──────────────────────────────────────────────────

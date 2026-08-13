@@ -135,12 +135,13 @@ export function isLocalUrl(url: string): boolean {
       // IPv6 — simplified check for loopback (::1) and ULA (fc00::/7)
       return h === "::1" || h === "0:0:0:0:0:0:0:1" || h.startsWith("fc") || h.startsWith("fd");
     }
-    // IPv4 — check for loopback (127.0.0.0/8) and RFC1918 (10/8, 172.16/12, 192.168/16)
+    // IPv4 — loopback, RFC1918, and CGNAT/Tailscale (100.64.0.0/10).
     const parts = h.split(".");
     if (parts.length !== 4) return false;
     const a = Number(parts[0]);
     const b = Number(parts[1]);
     if (a === 127) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
     if (a === 10) return true;
     if (a === 172 && b >= 16 && b <= 31) return true;
     if (a === 192 && b === 168) return true;

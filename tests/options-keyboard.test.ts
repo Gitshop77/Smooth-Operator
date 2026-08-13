@@ -108,6 +108,9 @@ function setupOptionsDom(): {
     <input id="costCap">
     <textarea id="defaultTask"></textarea>
     <input id="screenshotQuality">
+    <input id="screenshotImageTokens">
+    <input id="screenshotMaxDimension">
+    <input id="screenshotMaxBytes">
     <input id="enableScreenshots">
     <input type="checkbox" id="enableStealth" />
     <textarea id="allowedDomains"></textarea>
@@ -240,6 +243,21 @@ describe("Keyboard — provider selection + model search (Options)", () => {
     // Diagnostics invalidated: a new test generation is in force.
     expect(connectionDiagnosticsStore.getState().current.generation).toBeGreaterThan(0);
     expect(saveSpy).toHaveBeenCalled();
+  });
+
+  test("changing only the context override triggers autosave", async () => {
+    const contextInput = document.createElement("input");
+    contextInput.id = "contextTokens";
+    document.body.appendChild(contextInput);
+    const { initAutoSave } = await import("../src/extension/options/settings-sync-utils");
+    const saveSpy = vi.fn(() => Promise.resolve(true));
+    initAutoSave(saveSpy);
+
+    contextInput.value = "64000";
+    contextInput.dispatchEvent(new Event("change", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(saveSpy).toHaveBeenCalledTimes(1);
   });
 
   test("model search commit via keyboard (ArrowDown + Enter) dispatches MODEL_SELECTED", async () => {
@@ -379,6 +397,5 @@ describe("Keyboard — schedule create/delete (Options)", () => {
     expect(saveSent).toBeDefined();
   });
 });
-
 
 

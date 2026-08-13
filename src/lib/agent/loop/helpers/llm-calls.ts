@@ -25,6 +25,77 @@ import type { LoopDeps, PlannerCallArgs } from "../types";
 import { MAX_PARSE_RETRIES } from "../constants";
 import { sumUsages, accountUsage, reportCostEvent, sanitizeUsageNumber, sleepParseRetryBackoff } from "./llm-calls-utils";
 
+let llmCallSequence = 0;
+
+function nextCallId(role: "planner" | "navigator", step: number): string {
+  llmCallSequence = (llmCallSequence + 1) % Number.MAX_SAFE_INTEGER;
+  return `${role}-${step}-${Date.now()}-${llmCallSequence}`;
+}
+
+function jsonChars(value: unknown): number {
+  try { return JSON.stringify(value).length; } catch { return 0; }
+}
+
+function plannerPromptStats(request: PlannerStepRequest) {
+  const requestChars = request.task.length + jsonChars(request.history) +
+    (request.plan?.reduce((sum, item) => sum + item.length, 0) ?? 0) +
+    request.url.length + jsonChars(request.tabs) + (request.compactedMemory?.length ?? 0);
+  return {
+    historyItems: request.history.length,
+    requestChars,
+    taskChars: request.task.length,
+    planItems: request.plan?.length ?? 0,
+    tabCount: request.tabs.length,
+    compactedMemoryChars: request.compactedMemory?.length ?? 0,
+  };
+}
+
+function navigatorPromptStats(request: AgentStepRequest) {
+  const browser = request.browserState;
+  // Sum the already-present string fields instead of JSON.stringify(request):
+  // the latter creates a second full copy of a base64 screenshot just to count
+  // it, causing a needless multi-megabyte allocation on vision steps.
+  const requestChars = (request.task?.length ?? 0) + jsonChars(request.history ?? []) +
+    (request.plan?.reduce((sum, item) => sum + item.length, 0) ?? 0) +
+    (request.currentGoal?.length ?? 0) + (request.compactedMemory?.length ?? 0) +
+    (request.loopWarning?.length ?? 0) + (browser?.url?.length ?? 0) +
+    (browser?.title?.length ?? 0) + jsonChars(browser?.tabs ?? []) +
+    (browser?.elementsText?.length ?? 0) + (browser?.pageInfo?.length ?? 0) +
+    (browser?.axTree?.length ?? 0) + (browser?.screenshot?.length ?? 0);
+  return {
+    historyItems: request.history?.length ?? 0,
+    requestChars,
+    taskChars: request.task?.length ?? 0,
+    planItems: request.plan?.length ?? 0,
+    tabCount: browser?.tabs?.length ?? 0,
+    elementsChars: browser?.elementsText?.length ?? 0,
+    axTreeChars: browser?.axTree?.length ?? 0,
+    screenshotChars: browser?.screenshot?.length ?? 0,
+    compactedMemoryChars: request.compactedMemory?.length ?? 0,
+  };
+}
+
+function safeErrorText(error: unknown): string {
+  return redactKeyShapes(error instanceof Error ? error.message : String(error)).slice(0, 1000);
+}
+
+function streamProgressEmitter(
+  deps: LoopDeps,
+  meta: { step: number; callId: string; role: "planner" | "navigator"; attempt: number; startedAt: number },
+) {
+  let lastEmissionAt = 0;
+  return (progress: { outputChars: number; chunkCount: number; at: number }) => {
+    if (progress.outputChars > 0 && (lastEmissionAt === 0 || progress.at - lastEmissionAt >= 500)) {
+      lastEmissionAt = progress.at;
+      deps.onEvent({
+        type: "llm-call-progress", step: meta.step, callId: meta.callId,
+        role: meta.role, attempt: meta.attempt, outputChars: progress.outputChars,
+        chunkCount: progress.chunkCount, elapsedMs: progress.at - meta.startedAt,
+      });
+    }
+  };
+}
+
 /**
  * Account + report a single LLM call's token→cost→usage, shared by
  * `runPlanner` and `callNavigatorWithRetry`. Prefers a pre-computed
@@ -121,6 +192,12 @@ export async function runPlanner(
     maxSteps: args.maxSteps,
     compactedMemory: args.compactedMemory,
   };
+  const callId = nextCallId("planner", args.step);
+  const callStartedAt = Date.now();
+  deps.onEvent({
+    type: "llm-call-start", step: args.step, callId, role: "planner",
+    attempt: 1, startedAt: callStartedAt, prompt: plannerPromptStats(plannerRequest),
+  });
   if (dispatcher && ctx) await dispatcher.llmStart(ctx, [plannerRequest]);
  // finally block guarantees `llmEnd` fires on every path after `llmStart`
  // (parse failure, transient LLM error, success). `fired` guards against
@@ -128,10 +205,14 @@ export async function runPlanner(
   let fired = false;
   let usage: LLMUsageInfo | undefined;
   let raw = "";
+  let callEventEnded = false;
+  let resultModel: string | undefined;
   try {
     let result: Awaited<ReturnType<LoopDeps["plannerCall"]>>;
     try {
-      result = await deps.plannerCall(plannerRequest, signal);
+      result = await deps.plannerCall(plannerRequest, signal, streamProgressEmitter(deps, {
+        step: args.step, callId, role: "planner", attempt: 1, startedAt: callStartedAt,
+      }));
     } catch (error) {
       const failed = getFailedCallUsage(error);
       if (failed) {
@@ -153,6 +234,7 @@ export async function runPlanner(
       throw error;
     }
     raw = result.raw;
+    resultModel = result.model;
     const { tokensIn, tokensOut, reasoningTokens, cachedInputTokens, model, costUsd: precomputedCost } = result;
  // Read cache-write (creation) tokens when the caller threads them through.
  // `cachedWriteInputTokens` is billed at the (higher) cache-write rate, so
@@ -171,6 +253,15 @@ export async function runPlanner(
     if (!parsed.ok || !parsed.output) {
       throw new Error(`Planner output parse failed: ${parsed.error}`);
     }
+    callEventEnded = true;
+    deps.onEvent({
+      type: "llm-call-end", step: args.step, callId, role: "planner", attempt: 1,
+      status: "success", durationMs: Date.now() - callStartedAt, outputChars: raw.length,
+      parseValid: true, model: resultModel, tokensIn: usage?.tokensIn,
+      tokensOut: usage?.tokensOut, reasoningTokens: usage?.reasoningTokens,
+      cachedInputTokens: usage?.cachedInputTokens,
+      cachedWriteInputTokens: usage?.cachedWriteInputTokens,
+    });
     if (dispatcher && ctx) {
  // Set the guard before the awaited dispatcher calls so a throwing
  // dispatcher on the success path does not get re-emitted by the finally
@@ -180,6 +271,19 @@ export async function runPlanner(
       if (usage) await dispatcher.cost(ctx, usage);
     }
     return parsed.output;
+  } catch (error) {
+    if (!callEventEnded) {
+      callEventEnded = true;
+      deps.onEvent({
+        type: "llm-call-end", step: args.step, callId, role: "planner", attempt: 1,
+        status: "error", durationMs: Date.now() - callStartedAt, outputChars: raw.length,
+        parseValid: raw ? false : undefined, model: resultModel,
+        tokensIn: usage?.tokensIn, tokensOut: usage?.tokensOut,
+        reasoningTokens: usage?.reasoningTokens, cachedInputTokens: usage?.cachedInputTokens,
+        cachedWriteInputTokens: usage?.cachedWriteInputTokens, error: safeErrorText(error),
+      });
+    }
+    throw error;
   } finally {
     if (dispatcher && ctx && !fired) {
       await dispatcher.llmEnd(ctx, { content: raw, usage });
@@ -236,10 +340,20 @@ export async function callNavigatorWithRetry(
   try {
     let lastError: string | undefined;
     for (let retry = 0; retry <= MAX_PARSE_RETRIES; retry++) {
+      const attempt = retry + 1;
+      const callId = nextCallId("navigator", step);
+      const callStartedAt = Date.now();
+      deps.onEvent({
+        type: "llm-call-start", step, callId, role: "navigator", attempt,
+        startedAt: callStartedAt, prompt: navigatorPromptStats(request),
+      });
       let navResult: Awaited<ReturnType<LoopDeps["navigatorCall"]>>;
       try {
-        navResult = await deps.navigatorCall(request, signal);
+        navResult = await deps.navigatorCall(request, signal, streamProgressEmitter(deps, {
+          step, callId, role: "navigator", attempt, startedAt: callStartedAt,
+        }));
       } catch (error) {
+        let budgetExceeded = false;
         const failed = getFailedCallUsage(error);
         if (failed) {
           const failedUsage = accountAndReportUsage({
@@ -257,8 +371,18 @@ export async function callNavigatorWithRetry(
           });
           lastUsage = failedUsage;
           if (failedUsage) attemptUsages.push(failedUsage);
-          if (costCapCheck?.()) throw new Error("Budget exceeded: cost cap reached");
+          budgetExceeded = costCapCheck?.() ?? false;
         }
+        deps.onEvent({
+          type: "llm-call-end", step, callId, role: "navigator", attempt,
+          status: "error", durationMs: Date.now() - callStartedAt, outputChars: 0,
+          tokensIn: lastUsage?.tokensIn, tokensOut: lastUsage?.tokensOut,
+          reasoningTokens: lastUsage?.reasoningTokens,
+          cachedInputTokens: lastUsage?.cachedInputTokens,
+          cachedWriteInputTokens: lastUsage?.cachedWriteInputTokens,
+          error: safeErrorText(error),
+        });
+        if (budgetExceeded) throw new Error("Budget exceeded: cost cap reached");
         throw error;
       }
       const { raw, tokensIn, tokensOut, reasoningTokens, cachedInputTokens, model, costUsd: precomputedCost } = navResult;
@@ -276,6 +400,14 @@ export async function callNavigatorWithRetry(
       // `if (dispatcher && ctx)` block below so the cap cannot be skipped.
       if (costCapCheck?.()) throw new Error("Budget exceeded: cost cap reached");
       const parsed = parseAgentOutput(raw);
+      deps.onEvent({
+        type: "llm-call-end", step, callId, role: "navigator", attempt,
+        status: "success", durationMs: Date.now() - callStartedAt, outputChars: raw.length,
+        parseValid: parsed.ok && !!parsed.output, model, tokensIn: usage?.tokensIn,
+        tokensOut: usage?.tokensOut, reasoningTokens: usage?.reasoningTokens,
+        cachedInputTokens: usage?.cachedInputTokens,
+        cachedWriteInputTokens: usage?.cachedWriteInputTokens,
+      });
       if (parsed.ok && parsed.output) {
         if (dispatcher && ctx) {
  // Set the guards before the awaited dispatcher calls so a throwing

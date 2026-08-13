@@ -192,6 +192,8 @@ export interface LLMRequest {
    * strict mode (DeepSeek, Ollama, Qwen, Fireworks, …).
    */
   readonly structuredOutputStrict?: boolean;
+  /** Aggregate visible-output progress. Model text is deliberately omitted. */
+  readonly onProgress?: (progress: { outputChars: number; deltaChars: number; chunkCount: number; at: number }) => void;
 }
 
 interface LLMResponse {
@@ -338,6 +340,12 @@ function makeFromTransport<Body, Prepared, FrameType, EventType, State>(
           if (eventLike.type === "text" && eventLike.content) {
             visibleContentChars += eventLike.content.length;
             if (eventLike.content.trim().length > 0) hasVisibleNonWhitespace = true;
+            request.onProgress?.({
+              outputChars: visibleContentChars,
+              deltaChars: eventLike.content.length,
+              chunkCount: framesSeen,
+              at: Date.now(),
+            });
           }
           yield event;
         }

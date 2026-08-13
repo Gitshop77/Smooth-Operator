@@ -277,10 +277,7 @@ function shouldInclude(
  // test so we don't call getBoundingClientRect twice on the hot path.
     const rect = el.getBoundingClientRect();
     if (!isVisible(el, rect)) return false;
-    if (!hasRefId) {
- // When not extracting a specific subtree, only include viewport-visible els.
-      if (!(rect.top < window.innerHeight && rect.bottom > 0 && rect.left < window.innerWidth && rect.right > 0)) return false;
-    }
+    if (!hasRefId && !intersectsViewport(rect)) return false;
     return true;
   }
 
@@ -294,6 +291,13 @@ function shouldInclude(
   const interactive = isInteractive(el);
   if (interactive || isStructural(el) || name.length > 0) {
     if (isLikelyHidden(el)) return false;
+    // The automatic per-step AX channel is a VIEWPORT observation. Without
+    // this gate, `filter="all"` serialized the whole document in DOM order;
+    // the low-context cap then kept the same page header on every step, so
+    // scrolling produced no new evidence and agents could loop indefinitely.
+    // Explicit ref_id reads remain subtree reads and intentionally bypass the
+    // viewport gate.
+    if (!hasRefId && !intersectsViewport(el.getBoundingClientRect())) return false;
     return true;
   }
   const role = getRole(el);
@@ -302,6 +306,11 @@ function shouldInclude(
     return true;
   }
   return false;
+}
+
+function intersectsViewport(rect: DOMRect | Pick<DOMRect, "top" | "bottom" | "left" | "right">): boolean {
+  return rect.top < window.innerHeight && rect.bottom > 0 &&
+    rect.left < window.innerWidth && rect.right > 0;
 }
 
 /**

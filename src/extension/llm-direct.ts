@@ -21,12 +21,17 @@ import {
 import {
   assertCompiledPromptWithinContextBudgetV1,
   assertCompiledPromptWithinProfileV1,
+  assertPromptWithinContextBudgetV1,
+  assertPromptWithinProfileV1,
+  promptBudgetProfileForContextV1,
+  PROMPT_BUDGET_PROFILES_V1,
 } from "../lib/agent/prompts/prompt-token-budget";
 import { AgentOutputSchema, PlannerOutputSchema } from "../lib/agent/tools/schema";
 import { getFormatInstructions } from "../lib/agent/tools/registry";
 import type { AgentStepRequest, PlannerStepRequest, TokenUsage } from "../lib/agent/types";
 import { primeLiveSecretRedaction } from "../lib/agent/secrets";
 import { buildProvider, readProviderConfig, resolveModel, type ProviderConfig } from "./provider-config";
+import { getScreenshotImageTokens } from "./background/tab-manager-utils";
 import { CATALOG_PROVIDER_ID_MAP } from "./provider-config-map";
 import { getModelsForProvider } from "../lib/agent/llm/catalog";
 import {
@@ -43,6 +48,18 @@ import {
 
 /** Cached provider instance + the config it was built from (rebuilt on config change). */
 let cachedProvider: LLMProvider | null = null;
+/** Explicit phase output caps keep provider defaults (4K OpenAI/Anthropic,
+ * 8K Gemini) from silently changing context headroom and pay-as-you-go cost. */
+// These are ceilings, not requested reasoning budgets. Local thinking models
+// can otherwise spend several thousand tokens before emitting a tiny JSON
+// action. The measured Qwen path stays comfortably below these bounds while
+// the tighter ceilings cut worst-case latency and reserve less context.
+const NAVIGATOR_MAX_OUTPUT_TOKENS = 2_048;
+const PLANNER_MAX_OUTPUT_TOKENS = 2_048;
+// Same-model local reasoning can consume ~1.5K hidden/visible tokens before
+// the judge JSON appears. Keep 2K here to avoid truncating the verdict; the
+// prompt itself is already tightly bounded.
+const SUMMARY_MAX_OUTPUT_TOKENS = 2_048;
 let cachedConfigKey: string | null = null;
 /** The full config object backing `cachedProvider` (used for the hot-path short-circuit). */
 let cachedProviderConfig: ProviderConfig | null = null;
@@ -176,10 +193,11 @@ export const getVisionMode = cachedSetting("visionMode", async () => {
   ]);
   return VISION_MODES.has(visionMode as string)
     ? (visionMode as "disabled" | "always" | "adaptive")
-    : (enableLocalVision === true ? "always" : "disabled");
+    : (enableLocalVision === true ? "always" : "adaptive");
 });
 
-/** Cached `enableScreenshots` setting (defaults to true). */
+/** Screenshot permission. Adaptive mode captures only after a model request;
+ * `always` mode is the sole every-step capture mode. */
 const getEnableScreenshots = cachedSetting("enableScreenshots", async () => {
   const { enableScreenshots } = await chrome.storage.local.get("enableScreenshots");
   return (enableScreenshots as boolean | undefined) ?? true;
@@ -398,18 +416,70 @@ export async function getEffectiveContextTokens(): Promise<number | undefined> {
  * known (catalog-derived or user override), else the fixed per-kind profile.
  * This is the fail-closed guard that makes the 32k/64k-model protection real
  * at runtime — previously only the fixed 128k (navigator) / 64k (planner)
- * profiles applied, so a 64k model could receive an over-context prompt. */
+ * profiles applied, so a 64k model could receive an over-context prompt.
+ *
+ * An `imageChars`/`imageTokens` pair treats an embedded screenshot as a FLAT
+ * token allowance (`imageTokens`, wired from the per-image budget setting)
+ * instead of its raw base64 char length — a full-viewport capture would
+ * otherwise look like hundreds of thousands of "tokens" and falsely trip the
+ * guard. `imageTokens` is clamped to a sane share of the input budget. */
 export function assertPromptBudget(
   kind: "navigator" | "planner" | "compaction" | "judge",
   label: string,
   messages: readonly { content: string }[],
   effectiveContextTokens: number | undefined,
+  opts?: { imageChars?: number; imageTokens?: number },
 ): void {
+  if (opts?.imageChars && opts.imageTokens != null && opts.imageTokens > 0) {
+    assertPromptBudgetWithImage(kind, label, messages, effectiveContextTokens, opts.imageChars, opts.imageTokens);
+    return;
+  }
   if (effectiveContextTokens !== undefined) {
     assertCompiledPromptWithinContextBudgetV1(kind, label, messages, effectiveContextTokens);
   } else {
     assertCompiledPromptWithinProfileV1(kind, label, messages);
   }
+}
+
+function assertPromptBudgetWithImage(
+  kind: "navigator" | "planner" | "compaction" | "judge",
+  label: string,
+  messages: readonly { content: string }[],
+  effectiveContextTokens: number | undefined,
+  imageChars: number,
+  imageTokens: number,
+): void {
+  const combined = messages.map((m) => m.content).join("\n");
+  const profile = effectiveContextTokens !== undefined
+    ? promptBudgetProfileForContextV1(kind, effectiveContextTokens)
+    : PROMPT_BUDGET_PROFILES_V1[kind];
+  const clampedImageTokens = Math.min(imageTokens, Math.floor(profile.maxInputTokens * 0.25));
+  // Subtract the base64 bytes (which the model never sees as text) and add the
+  // flat token allowance (×2 to approximate the chars/token ratio used by the
+  // other budget checks).
+  const adjustedChars = Math.max(0, combined.length - imageChars + clampedImageTokens * 2);
+  if (effectiveContextTokens !== undefined) {
+    assertPromptWithinContextBudgetV1(kind, label, " ".repeat(adjustedChars), effectiveContextTokens);
+  } else {
+    assertPromptWithinProfileV1(kind, label, " ".repeat(adjustedChars));
+  }
+}
+
+/**
+ * Non-structured providers normally receive the Zod JSON schema in the system
+ * prompt. The navigator/planner prompts already contain their complete output
+ * contracts, though, and the navigator schema alone is roughly 25 KB. On a
+ * sub-128k model that duplicate schema can consume the entire observation
+ * allowance and make even example.com fail the conservative byte budget.
+ * Keep the extra schema for roomy/unknown contexts, but rely on the built-in
+ * prompt contract for explicitly low-context models.
+ */
+export function shouldInlineFormatInstructions(
+  supportsStructuredOutput: boolean,
+  effectiveContextTokens: number | undefined,
+): boolean {
+  return !supportsStructuredOutput
+    && (effectiveContextTokens === undefined || effectiveContextTokens >= 128_000);
 }
 
 /**
@@ -447,6 +517,7 @@ function requireDirectVisibleOutput(response: LLMResponse): void {
 export async function navigatorCallDirect(
   req: AgentStepRequest,
   signal?: AbortSignal,
+  onProgress?: import("@/lib/agent/llm/provider").LLMRequest["onProgress"],
 ): Promise<DirectCallResult> {
  // Cap elementsText (same abuse-prevention as the Next.js route).
  // Strip any `<screenshot>…</screenshot>` markers from the UNTRUSTED page text
@@ -500,8 +571,8 @@ export async function navigatorCallDirect(
  // would either error (HTTP 400 from the API) or waste tokens processing a
  // giant base64 string they can't interpret. The `provider.supportsVision`
  // flag is set per-MODEL via the models.dev catalog lookup in buildProvider().
- // Also check the user's "enableScreenshots" setting (defaults to true for
- // vision models, false for text-only models).
+ // Also check the user's explicit "enableScreenshots" setting. It defaults
+ // off because DOM + viewport AX are sufficient for most pages.
   const enableScreenshots = provider.supportsVision && (await getEnableScreenshots());
   const screenshot = enableScreenshots ? req.browserState.screenshot : undefined;
  // The screenshot is raw, page-rendered pixels — it is NOT subject to the text
@@ -514,13 +585,10 @@ export async function navigatorCallDirect(
  // step. Eliding an unchanged screenshot would leave the vision model with zero
  // pixels and a note referencing an image it was never shown. The screenshot
  // stays inside the untrusted wrapper exactly as before.
- // Wire `getFormatInstructions` for providers that don't support structured
- // output natively (Ollama, OpenAI-compatible providers without
- // `response_format`, local models). Without the schema inlined into the
- // system prompt, those providers can only guess the JSON shape from the
- // prompt examples — inlining the canonical JSON schema (via Zod 4's
- // `z.toJSONSchema`) gives the model a concrete contract to emit. The
- // format-instructions text is short and provider-agnostic.
+ // Roomy non-structured providers receive the canonical JSON schema as an
+ // additional contract. Low-context models rely on the complete action/output
+ // contract already embedded in the compact prompt; duplicating the large Zod
+ // schema would crowd out even a tiny page observation.
   const compiled = await compileNavigatorPromptV1({
     maxActions: MAX_ACTIONS,
     customPrompt: customNavigatorPrompt,
@@ -531,9 +599,10 @@ export async function navigatorCallDirect(
     // blocks with prose compressed, so the derived input budget has ~3× more
     // room for the observation. 128k+ models keep the full prompt.
     compact: effectiveContextTokens !== undefined && effectiveContextTokens < 128_000,
-    systemSuffix: provider.supportsStructuredOutput
-      ? ""
-      : "\n\n" + getFormatInstructions(AgentOutputSchema),
+    systemSuffix: shouldInlineFormatInstructions(
+      provider.supportsStructuredOutput,
+      effectiveContextTokens,
+    ) ? "\n\n" + getFormatInstructions(AgentOutputSchema) : "",
     userSuffix: screenshot
       ? `\n\n<untrusted_page_data><screenshot>${screenshot}</screenshot></untrusted_page_data>`
       : "",
@@ -547,10 +616,14 @@ export async function navigatorCallDirect(
   // models fall back to the fixed 128k navigator profile. Failing closed here
   // prevents an unbounded DOM/screenshot payload from ever crossing the
   // network, even if every earlier cap is misconfigured.
-  assertPromptBudget("navigator", "navigator", messages, effectiveContextTokens);
+  assertPromptBudget("navigator", "navigator", messages, effectiveContextTokens, {
+    imageChars: screenshot ? screenshot.length : 0,
+    imageTokens: screenshot ? await getScreenshotImageTokens() : 0,
+  });
 
   const response = await provider.chat({
     messages,
+    maxTokens: NAVIGATOR_MAX_OUTPUT_TOKENS,
     ...(provider.supportsReasoning ? {} : { temperature: 0 }),
     ...(reasoningConfig ? { reasoning: reasoningConfig } : {}),
     // Navigator steps reuse this exact system prompt across steps, so a
@@ -558,6 +631,7 @@ export async function navigatorCallDirect(
     ...(compiled.cache.cacheEligible ? { cacheEligible: compiled.cache.cacheEligible } : {}),
     schema: provider.supportsStructuredOutput ? AgentOutputSchema : undefined,
     ...(signal ? { signal } : {}),
+    ...(onProgress ? { onProgress } : {}),
   });
 
   requireDirectVisibleOutput(response);
@@ -579,6 +653,7 @@ export async function navigatorCallDirect(
 export async function plannerCallDirect(
   req: PlannerStepRequest,
   signal?: AbortSignal,
+  onProgress?: import("@/lib/agent/llm/provider").LLMRequest["onProgress"],
 ): Promise<DirectCallResult> {
  // History can carry page-derived content (extract results, summaries of a
  // malicious page) — strip any injected `<screenshot>` markers before render,
@@ -599,10 +674,11 @@ export async function plannerCallDirect(
  // load custom planner prompt override (cached, invalidated on storage change).
  // Planner prompt + reasoning config + provider are independent reads — fetch
  // them in parallel.
-  const [customPlannerPrompt, reasoningConfig, provider] = await Promise.all([
+  const [customPlannerPrompt, reasoningConfig, provider, effectiveContextTokens] = await Promise.all([
     getCustomPlannerPrompt(),
     resolveReasoningConfig(),
     raceWithAbort(getProvider(), signal),
+    getEffectiveContextTokens(),
   ]);
  // Wire `getFormatInstructions` for providers without native structured
  // output. Symmetric with the navigator path above — without the JSON schema
@@ -612,28 +688,29 @@ export async function plannerCallDirect(
   const compiled = await compilePlannerPromptV1({
     customPrompt: customPlannerPrompt,
     user: plannerUser,
-    systemSuffix: provider.supportsStructuredOutput
-      ? ""
-      : "\n\n" + getFormatInstructions(PlannerOutputSchema),
+    systemSuffix: shouldInlineFormatInstructions(
+      provider.supportsStructuredOutput,
+      effectiveContextTokens,
+    ) ? "\n\n" + getFormatInstructions(PlannerOutputSchema) : "",
   });
   const messages: ChatMessage[] = compiled.messages;
   // Model-context-aware budget guard, mirroring the navigator path: the
   // assembled planner prompt must fit the model's DERIVED input budget when its
   // effective context is known (64k planner prompt on a 32k model fails closed
   // instead of shipping an over-context prompt).
-  const effectiveContextTokens = await getEffectiveContextTokens();
   assertPromptBudget("planner", "planner", messages, effectiveContextTokens);
 
   const response = await provider.chat({
     messages,
+    maxTokens: PLANNER_MAX_OUTPUT_TOKENS,
     ...(provider.supportsReasoning ? {} : { temperature: 0 }),
     ...(reasoningConfig ? { reasoning: reasoningConfig } : {}),
     ...(compiled.cache.cacheEligible ? { cacheEligible: compiled.cache.cacheEligible } : {}),
-    // No cacheEligible: planner calls are one-shot, so the anthropic protocol
-    // omits cache markers entirely (no cache-write premium for a cache the
-    // call never re-reads).
+    // The planner's stable system prefix is reused by periodic replans; only
+    // the volatile user/history message changes between calls.
     schema: provider.supportsStructuredOutput ? PlannerOutputSchema : undefined,
     ...(signal ? { signal } : {}),
+    ...(onProgress ? { onProgress } : {}),
   });
 
   requireDirectVisibleOutput(response);
@@ -670,6 +747,7 @@ export async function summarizeCallDirect(
       { role: "user", content: req.userPrompt },
     ],
     temperature: 0,
+    maxTokens: SUMMARY_MAX_OUTPUT_TOKENS,
     // Compaction is a one-shot summarization; the compacted result is never
     // cached by this call, so no cache marker is sent.
     ...(req.signal ? { signal: req.signal } : {}),

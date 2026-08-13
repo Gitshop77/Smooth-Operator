@@ -215,9 +215,9 @@ export interface NavigatorObservationCapsV1 {
  * defaults (`ELEMENTS_TEXT_CHAR_CAP` / `MAX_NAV_AXTREE_CHARS` /
  * `MAX_NAV_SCREENSHOT_CHARS`). A derived cap NEVER exceeds its base, so a
  * 128k+ model keeps today's exact behavior. */
-const BASE_OBS_ELEMENTS_CHARS = 60_000;
-const BASE_OBS_AXTREE_CHARS = 200_000;
-const BASE_OBS_SCREENSHOT_CHARS = 1_500_000;
+const BASE_OBS_ELEMENTS_CHARS = 24_000;
+const BASE_OBS_AXTREE_CHARS = 12_000;
+const BASE_OBS_SCREENSHOT_CHARS = 100_000;
 
 /**
  * Fixed non-observation navigator overhead (system prompt + base user-message
@@ -235,17 +235,6 @@ const NAVIGATOR_FIXED_OVERHEAD_BYTES = 32_000;
  * 20-step run's history/task/plan/wrapping reaches ~5,000 bytes vs the 4,000
  * reserve — the extra ~900 keeps the worst-case turn under the 39,424 budget).
  */
-const NAVIGATOR_COMPACT_FIXED_OVERHEAD_BYTES = 24_300;
-
-/**
- * Sub-128k regime: reserved bytes for the variable user-message content that
- * sits alongside the observation (task text, plan, `navigator_history`,
- * wrapping). The fitting allocation leaves this much budget empty on purpose so
- * a realistic task + short history still fits. Histories beyond this reserve
- * are the compaction layer's job; the fail-closed assert catches the residue.
- */
-const NAVIGATOR_USER_CONTENT_RESERVE_BYTES = 4_000;
-
 /** Absolute floor per channel so a degenerate tiny context can't derive
  * unusable 1-char caps. */
 const MIN_OBS_ELEMENTS_CHARS = 2_000;
@@ -255,10 +244,16 @@ const MIN_OBS_ELEMENTS_CHARS = 2_000;
  * grounding value, and keeping it would just trip the budget assert. */
 const MIN_USEFUL_SCREENSHOT_CHARS = 24_000;
 
-/** Share of the fitting observation budget given to elementsText (the primary
- * channel); the accessibility tree gets the remainder. Calibrated so the
- * sub-128k allocation leaves the DOM channel dominant and AX degradable. */
-const ELEMENTS_TEXT_FIT_SHARE = 0.85;
+/** Share of the economical text-observation budget given to elementsText. The
+ * viewport AX tree gets the remainder: enough semantic evidence to avoid blind
+ * scroll loops without duplicating the entire document. */
+const ELEMENTS_TEXT_FIT_SHARE = 0.75;
+
+/** Keep page evidence economical even when a model exposes a very large input
+ * window. This is a per-step quality budget, not permission to fill 85% of the
+ * context on every call. */
+const MAX_SUB_128K_TEXT_OBSERVATION_CHARS = 24_000;
+const MIN_SUB_128K_TEXT_OBSERVATION_CHARS = 8_000;
 
 /**
  * Derive the per-step navigator observation caps for a KNOWN model context
@@ -271,8 +266,8 @@ const ELEMENTS_TEXT_FIT_SHARE = 0.85;
  * instead of the current 1.5M hard cap that realistic captures always exceed —
  * replacing a silent step-killing assert with an observable drop.
  *
- * Regime <128k: `available = derivedMaxInput − compactFixedOverhead − userContentReserve`;
- * elementsText gets 85% of it (floored at MIN_OBS_ELEMENTS_CHARS), the AX tree
+ * Regime <128k: a bounded fraction of the derived input capacity is used for
+ * text observation; elementsText gets 75% and the viewport AX tree
  * gets the remainder (dropped when it would be useless), and the screenshot
  * channel is dropped — a screenshot is not affordable at these budgets.
  * The fixed overhead uses the COMPACT system prompt (sub-128k models receive
@@ -291,8 +286,8 @@ export function deriveNavigatorObservationCapsV1(
   const profile = promptBudgetProfileForContextV1("navigator", contextTokens);
   const baseProfile = PROMPT_BUDGET_PROFILES_V1.navigator;
 
-  // ≥128k-class model (or any context whose derived input budget is at least
-  // the 128k base): keep the exact current defaults.
+  // ≥128k-class model: use bounded quality caps rather than interpreting a
+  // larger context window as permission to ship the whole page every step.
   if (profile.maxInputTokens >= baseProfile.maxInputTokens) {
     const screenshotFit = profile.maxInputTokens - NAVIGATOR_FIXED_OVERHEAD_BYTES
       - MIN_OBS_ELEMENTS_CHARS - MIN_OBS_ELEMENTS_CHARS;
@@ -308,19 +303,32 @@ export function deriveNavigatorObservationCapsV1(
   // Sub-128k fitting regime. The fixed overhead uses the COMPACT system prompt
   // (these models get it — see llm-direct), converting prompt bytes into
   // observation headroom.
-  // Observation caps are an ECONOMIC/quality bound, not permission to fill
-  // the full 85% context target every step. Keep the prior conservative byte
-  // allocation for DOM/AX so pay-as-you-go calls do not balloon merely because
-  // the corrected token estimator made more context available.
-  const observationInputBytes = Math.max(
-    CONTEXT_CLAMP_FLOOR_TOKENS,
-    profile.contextTokens
-      - PROMPT_BUDGET_PROFILES_V1.navigator.outputReserveTokens
-      - PROMPT_BUDGET_PROFILES_V1.navigator.reasoningReserveTokens,
+  // The old calculation subtracted the legacy 128k profile's output AND
+  // reasoning reserves from a 64k context. That double-reserved generation
+  // space even though promptBudgetProfileForContextV1 intentionally uses one
+  // combined 15% reserve, leaving only 1,669 AX chars at 64k. Allocate a
+  // bounded fraction of the real derived input capacity instead. Characters
+  // are deliberately below the fallback estimator's 2 bytes/token allowance,
+  // leaving ample room for the compact prompt, task and recent history.
+  const available = Math.min(
+    MAX_SUB_128K_TEXT_OBSERVATION_CHARS,
+    Math.max(
+      MIN_SUB_128K_TEXT_OBSERVATION_CHARS,
+      Math.floor(profile.maxInputTokens * 0.65),
+    ),
   );
-  const available = observationInputBytes - NAVIGATOR_COMPACT_FIXED_OVERHEAD_BYTES
-    - NAVIGATOR_USER_CONTENT_RESERVE_BYTES;
   const elementsTextChars = Math.max(MIN_OBS_ELEMENTS_CHARS, Math.floor(available * ELEMENTS_TEXT_FIT_SHARE));
   const axTreeChars = Math.max(0, available - elementsTextChars);
   return { elementsTextChars, axTreeChars, screenshotChars: 0 };
+}
+
+/** A bounded image budget used only after the navigator explicitly requests
+ * visual evidence. Automatic sub-128k screenshots remain disabled, but a 64k
+ * multimodal model can deliberately trade some text observation for one useful
+ * frame instead of being permanently blind. */
+export function deriveOnDemandScreenshotCapV1(contextTokens: number | undefined): number {
+  if (contextTokens === undefined) return BASE_OBS_SCREENSHOT_CHARS;
+  if (contextTokens < 24_000) return 0;
+  if (contextTokens >= 128_000) return deriveNavigatorObservationCapsV1(contextTokens).screenshotChars;
+  return Math.min(56_000, Math.max(20_000, contextTokens - 8_000));
 }

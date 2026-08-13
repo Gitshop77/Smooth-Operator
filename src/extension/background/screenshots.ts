@@ -88,6 +88,7 @@ export function computeResizeDims(
 export async function resizeScreenshotDataUrl(
   dataUrl: string,
   opts: ResizeOptions,
+  quality?: number,
 ): Promise<string> {
   const canvas = createCompatibleCanvas();
   if (!canvas) return dataUrl;
@@ -104,7 +105,7 @@ export async function resizeScreenshotDataUrl(
     ctx.imageSmoothingEnabled = true;
     (ctx as { imageSmoothingQuality?: string }).imageSmoothingQuality = "high";
     img.drawTo(ctx, dims.width, dims.height);
-    return await canvasToDataUrl(canvas, dataUrl);
+    return await canvasToDataUrl(canvas, dataUrl, quality);
   } catch {
     return dataUrl;
   } finally {
@@ -112,27 +113,49 @@ export async function resizeScreenshotDataUrl(
   }
 }
 
+/** Number of decoded bytes in a `data:...;base64,...` URL (strips the header
+ * and accounts for padding). Returns 0 for malformed input. */
+export function base64ByteLength(dataUrl: string): number {
+  const comma = dataUrl.indexOf(",");
+  const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+  const padding = (b64.match(/=+$/) ?? [""])[0].length;
+  return Math.max(0, Math.floor((b64.length * 3) / 4) - padding);
+}
+
 /**
- * Resize a screenshot data URL to fit a max-length (chars) budget — the
- * capture-side half of the context-derived observation caps. A raw viewport
- * JPEG is typically 100-400k chars; a 128k-context model's navigator budget
- * fits only ~67k chars of screenshot, so the capture is downscaled to the
- * LARGEST whLargest candidate whose re-encoded length still fits. Falls back
- * to the smallest candidate (a tiny image beats a dropped one — the loop's
- * cap is the final gate). Graceful: on ANY resize failure the original is
- * returned unchanged (the loop cap still drops it if it's too big).
+ * Normalize a captured screenshot to a size that a vision backend can actually
+ * ingest — WITHOUT silently destroying information the way the old
+ * context-derived char cap did (it used to downscale a full 2560×1600 viewport
+ * to ~512px "because the token math said so", cropping away most of the page).
+ *
+ * The contract: by default we keep the FULL CSS-pixel viewport (the size the
+ * model will reason about), applying the user's JPEG `quality`. Only optional,
+ * explicit ceilings shrink it:
+ * - `maxDimension` (CSS px, 0 = off): scale so the longest side ≤ this.
+ * - `maxBytes` (0 = off): repeatedly re-encode at lower quality until the
+ *   decoded byte size fits. This is the knob for hosted APIs that cap payload
+ *   size while preserving the full field of view.
  */
-export async function resizeScreenshotToBudget(dataUrl: string, maxChars: number): Promise<string> {
-  if (dataUrl.length <= maxChars) return dataUrl;
-  const CANDIDATES = [1536, 1024, 768, 512, 384, 256];
-  let best = dataUrl;
-  for (const whLargest of CANDIDATES) {
-    const resized = await resizeScreenshotDataUrl(dataUrl, { whLargest });
-    if (resized === dataUrl) continue; // decode failed — cannot downscale
-    best = resized;
-    if (resized.length <= maxChars) return resized;
+export async function normalizeScreenshotToViewport(
+  dataUrl: string,
+  quality: number,
+  opts: { maxDimension?: number; maxBytes?: number } = {},
+): Promise<string> {
+  const maxDimension = opts.maxDimension ?? 0;
+  const maxBytes = opts.maxBytes ?? 0;
+  let working = dataUrl;
+
+  if (maxDimension > 0) {
+    working = await resizeScreenshotDataUrl(working, { whLargest: maxDimension }, quality);
   }
-  return best;
+  if (maxBytes > 0) {
+    let q = quality;
+    while (base64ByteLength(working) > maxBytes && q > 0.3) {
+      q = Math.max(0.3, q - 0.1);
+      working = await resizeScreenshotDataUrl(working, maxDimension > 0 ? { whLargest: maxDimension } : {}, q);
+    }
+  }
+  return working;
 }
 
 /**

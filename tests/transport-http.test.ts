@@ -13,7 +13,13 @@
 
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import { httpJson, parseRetryAfterHeader, type HttpPrepared } from "../src/lib/agent/llm/route/transport-http";
-import { readErrorBodyPreview } from "../src/lib/agent/llm/route/transport-http-utils";
+import {
+  CHUNK_TIMEOUT_MS,
+  LOCAL_MODEL_TIMEOUT_MS,
+  llmTimeoutFor,
+  readErrorBodyPreview,
+  streamChunkTimeoutFor,
+} from "../src/lib/agent/llm/route/transport-http-utils";
 import { sse } from "../src/lib/agent/llm/route/framing";
 import {
   primeLiveSecretRedaction,
@@ -30,6 +36,21 @@ function makePrepared(url = "https://evil.example.com/v1/chat"): HttpPrepared {
     body: JSON.stringify({ model: "x", messages: [] }),
   };
 }
+
+describe("local-model timeout policy", () => {
+  test("extends request and first-chunk windows for trusted local/Tailscale endpoints", () => {
+    const local = "http://localhost:11434/v1/chat/completions";
+    expect(llmTimeoutFor(local, "user-configured")).toBe(LOCAL_MODEL_TIMEOUT_MS);
+    expect(streamChunkTimeoutFor(local, "user-configured")).toBe(LOCAL_MODEL_TIMEOUT_MS);
+    expect(llmTimeoutFor(local, "untrusted")).toBe(60_000);
+    expect(streamChunkTimeoutFor(local, "untrusted")).toBe(CHUNK_TIMEOUT_MS);
+    expect(llmTimeoutFor("https://api.openai.com/v1/chat/completions", "user-configured")).toBe(60_000);
+    const tailscale = "http://100.69.150.56:8080/v1/chat/completions";
+    expect(llmTimeoutFor(tailscale, "user-configured")).toBe(LOCAL_MODEL_TIMEOUT_MS);
+    expect(streamChunkTimeoutFor(tailscale, "user-configured")).toBe(LOCAL_MODEL_TIMEOUT_MS);
+    expect(llmTimeoutFor(tailscale, "untrusted")).toBe(60_000);
+  });
+});
 
 /** Minimal Response-shaped object usable by the transport's response handler. */
 interface FakeResponse {

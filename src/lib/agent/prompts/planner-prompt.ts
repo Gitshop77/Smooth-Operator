@@ -166,6 +166,8 @@ You must output a \`decision\` field with one of:
 - Detect loops: if the Navigator has repeated the same action 5+ times without progress, revise the plan.
 - Be specific in \`next_goal\`: "Click the 'Add to Cart' button at index 5" is better than "add the item to cart".
 - For multi-item tasks (e.g. "fill all 8 questions"), track the count in the plan.
+- For multi-source research, track completed versus required source counts and domains explicitly. After the history contains one adequate finding and exact URL for a source, advance to the next source; do not assign another broad reading goal on the same unchanged page unless a named requirement is still missing.
+- A requested minimum step count requires distinct useful actions, not rereading or repeated extraction. Preserve coverage and evidence quality while moving forward.
 </reasoning_rules>
 
 <output>

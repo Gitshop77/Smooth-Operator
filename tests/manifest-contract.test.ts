@@ -87,6 +87,15 @@ describe("manifest contract", () => {
     expect(manifest.content_security_policy.extension_pages).toContain("script-src 'self'");
   });
 
+  test("extension_pages CSP permits configured direct-provider transports", () => {
+    const policy = manifest.content_security_policy.extension_pages;
+    expect(policy).toContain("connect-src");
+    expect(policy).toContain("http:");
+    expect(policy).toContain("https:");
+    expect(policy).toContain("ws:");
+    expect(policy).toContain("wss:");
+  });
+
   test("every referenced icon file exists on disk", () => {
     const refs = [
       ...Object.values(manifest.icons),

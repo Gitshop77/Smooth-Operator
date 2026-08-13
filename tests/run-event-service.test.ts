@@ -71,6 +71,20 @@ describe("RunEventService", () => {
     expect(service.currentStep).toBe(3);
   });
 
+  test("broadcasts stream progress without persisting or bloating run history", () => {
+    const { service, addEvent } = makeService();
+    service.emit({
+      type: "llm-call-progress", step: 1, callId: "nav-1", role: "navigator",
+      attempt: 1, outputChars: 512, chunkCount: 22, elapsedMs: 4500,
+    });
+
+    expect(addEvent).not.toHaveBeenCalled();
+    expect(persistSnapshot).not.toHaveBeenCalled();
+    expect(globalThis.chrome.runtime.sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      event: expect.objectContaining({ type: "llm-call-progress", outputChars: 512 }),
+    }));
+  });
+
   test("accepts one terminal result and rejects every late callback", () => {
     const { service, addEvent } = makeService();
 

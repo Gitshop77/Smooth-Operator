@@ -21,6 +21,7 @@ import { loadPrompts } from "./prompts";
 import { loadNotifications } from "./notifications";
 import "./provider-config-ui";
 import "./vision-status";
+import { initConnectionProfiles } from "./connection-profiles";
 
 // ─── Tab switching ─────────────────────────────────────────────────────────
 
@@ -120,6 +121,9 @@ if (tablist) tablist.addEventListener("keydown", (e) => {
 
 // Wire auto-save listeners (Connection + Agent fields persist on change).
 initAutoSave();
+void initConnectionProfiles().catch((error) => {
+  console.warn("[options] connection profiles unavailable:", error);
+});
 
 // ─── About tab — version from the manifest ───────────────────────────────────
 

@@ -15,7 +15,7 @@
 
 import { describe, test, expect, vi } from "vitest";
 import { runAgentLoop } from "../src/lib/agent/loop/orchestrator";
-import { classifyCurrentPageTask, buildFastPathAnswer } from "../src/lib/agent/loop/phases/fast-path";
+import { classifyCurrentPageTask, buildFastPathAnswer, shouldUseDirectNavigatorStart } from "../src/lib/agent/loop/phases/fast-path";
 import type { LoopDeps } from "../src/lib/agent/loop/types";
 import { type AgentConfig, type AgentAction, type ActionResult, type LogEvent } from "../src/lib/agent/types";
 import { makeState } from "./helpers";
@@ -124,6 +124,20 @@ describe("classifyCurrentPageTask (deterministic classifier)", () => {
     for (const task of NOT_ANSWERABLE) {
       expect(classifyCurrentPageTask(task)).toBeNull();
     }
+  });
+});
+
+describe("shouldUseDirectNavigatorStart", () => {
+  test("admits bounded read-only questions on the current page", () => {
+    expect(shouldUseDirectNavigatorStart("Report the duration and crew split on this page", "standard")).toBe(true);
+    expect(shouldUseDirectNavigatorStart("Summarize this article", "restricted")).toBe(true);
+    expect(shouldUseDirectNavigatorStart("On this current NASA page, report the crew split", "standard")).toBe(true);
+  });
+
+  test("keeps complex, mutating, and full-agentic tasks on the Planner path", () => {
+    expect(shouldUseDirectNavigatorStart("Research and compare three websites", "standard")).toBe(false);
+    expect(shouldUseDirectNavigatorStart("Fill and submit this form", "standard")).toBe(false);
+    expect(shouldUseDirectNavigatorStart("Summarize this page", "full_agentic")).toBe(false);
   });
 });
 
@@ -388,4 +402,3 @@ describe("runAgentLoop — simple-task fast path", () => {
     expect(deps.extractState).not.toHaveBeenCalled();
   });
 });
-

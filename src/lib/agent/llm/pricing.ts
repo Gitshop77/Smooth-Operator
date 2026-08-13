@@ -17,6 +17,11 @@ export const DEFAULT_UNKNOWN_MODEL_PRICE: ModelPricing = {
 
 export const CONSERVATIVE_DEFAULT_PRICING = DEFAULT_UNKNOWN_MODEL_PRICE;
 
+/** Ollama is an explicitly local execution provider. Keep this provider-scoped
+ * so an unknown model behind LiteLLM/custom OpenAI compatibility (which may
+ * proxy a paid upstream) still receives the conservative fallback. */
+export const ZERO_COST_LOCAL_PRICING: ModelPricing = { in: 0, out: 0 };
+
 let pricingOverride: Record<string, ModelPricing> = {};
 
 const pricingCache = new Map<string, ModelPricing>();
@@ -92,6 +97,12 @@ export function getPricingForModel(model: string, providerId?: string): ModelPri
   const cacheKey = providerId ? `${providerId}::${model}` : model;
   const cached = pricingCache.get(cacheKey);
   if (cached) return cached;
+
+  if (providerId?.toLowerCase() === "ollama") {
+    const local = { ...ZERO_COST_LOCAL_PRICING };
+    setPricingCache(cacheKey, local);
+    return local;
+  }
 
   const override = lookupPricing(pricingOverride, model, providerId);
   if (override) {

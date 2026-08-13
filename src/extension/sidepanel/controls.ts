@@ -20,11 +20,12 @@ import {
 import { setLifecycle } from "./lifecycle";
 import { announce } from "../accessibility";
 import { hideTakeoverBanner } from "./takeover";
-import { addUserMessage, addSystemMessage, removeEmptyState } from "./chat-renderer";
+import { addUserMessage, addSystemMessage, addAssistantMessage, removeEmptyState } from "./chat-renderer";
 import { restoreTotalsFromStorage, clearRunTotals, setRunTotalsFromUsage } from "./log-renderer";
 import { registerAgentEventReconciler } from "./reconcile-port";
 import { sanitizeLastError, storageGet, runtimeSendMessage } from "./controls-utils";
 import { ensureApiKeyInSession } from "../api-key-storage";
+import { PROVIDER_META } from "../options/providers";
 import { resetKeepaliveBackoff } from "./keepalive";
 import {
   beginLocalRun,
@@ -104,7 +105,7 @@ function renderTerminalSnapshot(view: RunViewState): void {
   const key = `${snapshot.runId}:${snapshot.revision}:${message}`;
   if (key === lastTerminalKey) return;
   lastTerminalKey = key;
-  if (view.status === "succeeded") addSystemMessage("✅", message);
+  if (view.status === "succeeded") addAssistantMessage(message);
   else if (view.status === "cancelled") addSystemMessage("⏹", message, "warning");
   else addSystemMessage("❌", message, "error");
 }
@@ -240,8 +241,9 @@ async function sendMessage(): Promise<void> {
   try {
     const localRes = await storageGet(["provider"], "local");
     const provider = (localRes?.provider as string) || "";
-    const apiKeyValue = await ensureApiKeyInSession();
-    if (!provider || !apiKeyValue) {
+    const needsKey = PROVIDER_META[provider]?.needsKey ?? true;
+    const apiKeyValue = needsKey ? await ensureApiKeyInSession() : "";
+    if (!provider || (needsKey && !apiKeyValue)) {
       clearSendDebounce();
       addSystemMessage("⚠", "No API key configured. Open Settings to add your provider key.");
       return;

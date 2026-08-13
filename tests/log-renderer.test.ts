@@ -93,11 +93,14 @@ describe("log-renderer", () => {
   });
 
   test("renders done event as a system message", async () => {
-    addLogRow({ type: "done", success: true, text: "completed" }, "t0");
+    addLogRow({ type: "done", step: 1, success: true, text: "## Result\n\n**completed**" }, "t0");
     await flushChat();
     const msgs = chatMessages.querySelectorAll(".msg-system");
     expect(msgs.length).toBe(1);
     expect(msgs[0].textContent).toContain("Task completed");
+    const answer = chatMessages.querySelector(".msg-assistant") as HTMLElement;
+    expect(answer.querySelector("h2")?.textContent).toBe("Result");
+    expect(answer.querySelector(".markdown-body strong")?.textContent).toBe("completed");
   });
 
   test("renders error event as a system message", async () => {
@@ -131,23 +134,28 @@ describe("log-renderer", () => {
     expect(msgs[0].textContent).toContain("hello");
   });
 
-  test("renders action event as a system message", async () => {
+  test("renders an action as a live tool activity card", async () => {
     addLogRow({ type: "action", step: 1, index: 1, total: 1, name: "click", description: "click the button" }, "t0");
     await flushChat();
-    const msgs = chatMessages.querySelectorAll(".msg-system");
+    const msgs = chatMessages.querySelectorAll(".activity-tool");
     expect(msgs.length).toBe(1);
     expect(msgs[0].textContent).toContain("click the button");
   });
 
-  test("renders thinking event as a system message (text = the real chain-of-thought)", async () => {
-    addLogRow({ type: "thinking", step: 1, nextGoal: "find the login button", text: "looking for it" }, "t0");
+  test("renders every navigator reasoning field in an expanded activity card", async () => {
+    addLogRow({
+      type: "thinking", step: 1, nextGoal: "find the login button",
+      text: "looking for it", evaluation: "page loaded", memory: "pricing found",
+    }, "t0");
     await flushChat();
-    const msgs = chatMessages.querySelectorAll(".msg-system");
+    const msgs = chatMessages.querySelectorAll(".activity-reasoning");
     expect(msgs.length).toBe(1);
     // The loop surfaces the model's redacted thinking in `text` — it takes
     // priority over `nextGoal` in the panel.
     expect(msgs[0].textContent).toContain("looking for it");
-    expect(msgs[0].textContent).toContain("🧠");
+    expect(msgs[0].textContent).toContain("page loaded");
+    expect(msgs[0].textContent).toContain("pricing found");
+    expect(msgs[0].textContent).toContain("find the login button");
   });
 
   test("does not render empty thinking events", async () => {
@@ -155,6 +163,59 @@ describe("log-renderer", () => {
     await flushChat();
     const msgs = chatMessages.querySelectorAll(".msg-system");
     expect(msgs.length).toBe(0);
+  });
+
+  test("updates a live LLM prompt-processing card in place with timing and usage", async () => {
+    addLogRow({
+      type: "llm-call-start", step: 0, callId: "nav-1", role: "navigator",
+      attempt: 1, startedAt: Date.now(),
+      prompt: { historyItems: 4, requestChars: 12000, elementsChars: 8000, axTreeChars: 2000 },
+    }, "t0");
+    await flushChat();
+    expect(chatMessages.querySelectorAll(".activity-card")).toHaveLength(1);
+    expect(chatMessages.textContent).toContain("Thinking · preparing context");
+    expect(chatMessages.textContent).toContain("DOM");
+
+    addLogRow({
+      type: "llm-call-progress", step: 0, callId: "nav-1", role: "navigator",
+      attempt: 1, outputChars: 320, chunkCount: 18, elapsedMs: 7200,
+    }, "t0");
+    expect(chatMessages.textContent).toContain("Thinking · generating · 320 chars · 7.2s");
+    expect(chatMessages.textContent).toContain("18 live chunks");
+
+    addLogRow({
+      type: "llm-call-end", step: 0, callId: "nav-1", role: "navigator",
+      attempt: 1, status: "success", durationMs: 12340, outputChars: 900,
+      parseValid: true, tokensIn: 6400, tokensOut: 420, reasoningTokens: 100,
+      cachedInputTokens: 3000, model: "local-model",
+    }, "t1");
+    await flushChat();
+    expect(chatMessages.querySelectorAll(".activity-card")).toHaveLength(1);
+    expect(chatMessages.textContent).toContain("Completed · 12.3s");
+    expect(chatMessages.textContent).toContain("reasoning");
+    expect(chatMessages.textContent).toContain("cache read");
+  });
+
+  test("renders planner reasoning and highlights the active plan item", async () => {
+    addLogRow({
+      type: "planner-step", step: 2, decision: "continue",
+      thinking: "Need evidence from two sources", goal: "Open the second source",
+      plan: ["Collect source one", "Collect source two", "Synthesize"], currentPlanItem: 1,
+    }, "t0");
+    await flushChat();
+    const card = chatMessages.querySelector(".activity-planner") as HTMLElement;
+    expect(card.textContent).toContain("Need evidence from two sources");
+    expect(card.querySelector(".activity-plan-current")?.textContent).toBe("Collect source two");
+  });
+
+  test("tool results update their matching call card instead of adding a duplicate", async () => {
+    addLogRow({ type: "action", step: 1, index: 1, total: 1, name: "click", description: "Open pricing" }, "t0");
+    await flushChat();
+    addLogRow({ type: "action-result", step: 1, name: "click", success: true, message: "Pricing opened" }, "t1");
+    await flushChat();
+    expect(chatMessages.querySelectorAll(".activity-tool")).toHaveLength(1);
+    expect(chatMessages.textContent).toContain("Succeeded");
+    expect(chatMessages.textContent).toContain("Pricing opened");
   });
 
   test("run-start marks the run as running (Stop enabled, input disabled)", async () => {
@@ -235,6 +296,7 @@ describe("log-renderer listener gate", () => {
       runtime: {
         lastError: undefined,
         id: "test",
+        getURL: (path: string) => `chrome-extension://test/${path}`,
         onMessage: { addListener: (cb: Listener) => { gateListener = cb; } },
         sendMessage: (_msg: unknown, _cb?: (res: unknown) => void) => {},
       },
@@ -288,6 +350,17 @@ describe("log-renderer listener gate", () => {
     await Promise.resolve();
     expect(countMsgs()).toBe(1);
     expect(chatMessages.textContent).toContain("hello");
+  });
+
+  test("accepts the exact MV3 background worker URL Brave supplies", async () => {
+    gateListener!(
+      { type: "AGENT_EVENT", event: { type: "info", message: "from worker" }, time: "t0" },
+      { id: "test", url: "chrome-extension://test/background.js" },
+      () => {},
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(chatMessages.textContent).toContain("from worker");
   });
 
   test("drops an envelope whose event fails the gate", () => {

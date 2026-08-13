@@ -310,7 +310,21 @@ describe("extractStateForRun — vision-merge branches", () => {
 
   // ── Branch 1: Not always-on, not adaptive → DOM-only (with screenshot) ────
 
-  test("DOM-only with screenshot: main model has vision, screenshots enabled", async () => {
+  test("always mode sends screenshots to a vision-capable main model", async () => {
+    modelSupportsVisionMock.mockResolvedValue(true);
+    setVisionSettings({
+      visionMode: "always",
+      enableScreenshots: true,
+      enableLocalVision: false,
+    });
+
+    // Main-model vision takes precedence over the optional local assistant.
+    const state = await extractStateForRun(1, MOCK_TABS);
+    expect(state.url).toBe("https://example.com");
+    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, true, undefined);
+  });
+
+  test("known 64k context skips screenshot capture when its derived cap is zero", async () => {
     modelSupportsVisionMock.mockResolvedValue(true);
     setVisionSettings({
       visionMode: "disabled",
@@ -318,11 +332,18 @@ describe("extractStateForRun — vision-merge branches", () => {
       enableLocalVision: false,
     });
 
-    // mainModelVision=true, includeScreenshot=true → effectiveTextOnly=false
-    // useAlwaysOnVision=false, useAdaptiveVision=false → DOM-only with screenshot
-    const state = await extractStateForRun(1, MOCK_TABS);
-    expect(state.url).toBe("https://example.com");
+    await extractStateForRun(1, MOCK_TABS, undefined, undefined, 64_000);
+    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false, undefined);
+  });
+
+  test("known 64k adaptive mode captures exactly one explicitly requested screenshot", async () => {
+    modelSupportsVisionMock.mockResolvedValue(true);
+    setVisionSettings({ visionMode: "adaptive", enableScreenshots: true, enableLocalVision: false });
+    extractStateFromTabMock.mockResolvedValueOnce({ ...makeDomState(), screenshot: "data:image/jpeg;base64,frame" });
+
+    const state = await extractStateForRun(1, MOCK_TABS, undefined, undefined, 64_000, { includeScreenshotOnce: true });
     expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, true, undefined);
+    expect(state.screenshotIsOneShot).toBe(true);
   });
 
   // ── Branch 2: Not always-on, not adaptive → DOM-only (no screenshot) ──────
@@ -473,18 +494,18 @@ describe("extractStateForRun — vision-merge branches", () => {
 
   // ── includeScreenshot logic ────────────────────────────────────────────────
 
-  test("includeScreenshot: enableScreenshots defaults to true when unset", async () => {
+  test("includeScreenshot: enableScreenshots defaults to false when unset", async () => {
     modelSupportsVisionMock.mockResolvedValue(true);
     setVisionSettings({
-      enableScreenshots: undefined, // unset, defaults to true
+      enableScreenshots: undefined, // unset, defaults to false
       visionMode: "disabled",
       enableLocalVision: false,
     });
 
-    // mainModelVision=true, enableScreenshots=undefined → Boolean(undefined ?? true) = true
-    // includeScreenshot=true, effectiveTextOnly=false → DOM-only with screenshot
+    // mainModelVision=true, enableScreenshots=undefined → default false
+    // includeScreenshot=false → DOM-only without screenshot
     await extractStateForRun(1, MOCK_TABS);
-    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, true, undefined);
+    expect(extractStateFromTabMock).toHaveBeenCalledWith(1, MOCK_TABS, false, undefined);
   });
 
   test("includeScreenshot: false when user explicitly disables screenshots", async () => {

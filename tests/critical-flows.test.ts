@@ -342,6 +342,9 @@ function mountOptionsDom(): void {
     <input id="costCap">
     <textarea id="defaultTask"></textarea>
     <input id="screenshotQuality">
+    <input id="screenshotImageTokens">
+    <input id="screenshotMaxDimension">
+    <input id="screenshotMaxBytes">
     <input type="checkbox" id="enableScreenshots">
     <input type="checkbox" id="enableStealth">
     <textarea id="allowedDomains"></textarea>
@@ -522,6 +525,8 @@ describe("Flow 2 — Options provider/key/model setup → connection test → sa
     expect(summary).toContain("mode: full_agentic");
     expect(summary).toContain("cost cap: none");
     expect(summary).toContain("provider: openai (default endpoint)");
+    // This is permission for model-requested one-shot frames; adaptive mode
+    // remains DOM + AX-only until the model explicitly asks for pixels.
     expect(summary).toContain("screenshots: on");
     expect(summary).toContain("notify webhook: none");
     expect((document.getElementById("statusMessage") as HTMLDivElement).textContent).toContain("Settings saved");

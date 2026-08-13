@@ -19,7 +19,7 @@ import { shouldCompact, renderHistoryForSummarization } from "./compaction";
 import { CallbackDispatcher } from "../callbacks";
 import type { LoopDeps, LoopState } from "./types";
 import { transitionRunPhase } from "./run-state-machine";
-import { buildFastPathAnswer } from "./phases/fast-path";
+import { buildFastPathAnswer, classifyCurrentPageTask, shouldUseDirectNavigatorStart } from "./phases/fast-path";
 import { BUDGET_WARNING_FRACTION } from "./constants";
 import { buildPreObserveNudges, appendPendingLoopWarning } from "./context/injection-points";
 import {
@@ -366,6 +366,7 @@ export function initState(
     lastCompactionStep: undefined,
     compactedMemory: undefined,
     pendingLoopWarning: undefined,
+    pendingVisualInspection: false,
     budgetWarningFired: false,
     costBudgetWarningFired: false,
     currentGoal: deps.task,
@@ -462,6 +463,27 @@ export async function runInitialPlannerPhase(
   // task).
   const fastPath = await maybeRunFastPath(state);
   if (fastPath.kind === "exit") return fastPath.result;
+
+  // Read-only current-page questions do not need a separate strategist call
+  // before the Navigator sees the page. Browser agents such as Browser Use
+  // follow the same economical pattern: one acting model starts directly and
+  // escalates to planning only when the task/trajectory warrants it. This
+  // removes a cold generation from the common path without weakening complex,
+  // mutating, multi-site, or full-agentic tasks.
+  if (
+    config.enableFastPath === true &&
+    classifyCurrentPageTask(task) === null &&
+    shouldUseDirectNavigatorStart(task, deps.mode)
+  ) {
+    state.currentGoal = task;
+    state.plan = [task];
+    state.currentPlanItem = 0;
+    onEvent({
+      type: "info",
+      message: "Fast start: read-only current-page task sent directly to the Navigator; Planner remains available for recovery.",
+    });
+    return { kind: "continue" };
+  }
 
   let plannerResult: PlannerOutput;
   try {
@@ -594,6 +616,9 @@ export async function runInitialPlannerPhase(
   onEvent({
     type: "planner-step", step: state.step, decision: plannerResult.decision,
     goal: state.currentGoal, plan: state.plan,
+    thinking: redactKeyShapes(plannerResult.thinking || ""),
+    text: redactKeyShapes(plannerResult.text || ""),
+    currentPlanItem: state.currentPlanItem,
   });
   if (state.dispatcher) {
     await dispatch(state, "plannerStep", (d) => d.plannerStep(makeCtx(state), plannerResult.decision, state.currentGoal, state.plan));
@@ -758,6 +783,12 @@ export async function runNavigatorStep(state: LoopState): Promise<StepResult> {
   if (execution.kind === "abort") return execution.result;
   const { results } = execution.data;
 
+  const visualRequest = results.find((result) => result.success && result.requestVisualInspection);
+  if (visualRequest) {
+    state.pendingVisualInspection = true;
+    state.onEvent({ type: "visual-inspection", step: state.step, stage: "requested", message: visualRequest.message });
+  }
+
   // Step-end dispatch + takeover resume wait.
   const stepEnd = await runNavigatorStepEnd(state, results);
   if (stepEnd.kind === "abort") return stepEnd.result;
@@ -820,6 +851,7 @@ async function runNavigatorObserve(
   const { config } = state;
   const { onEvent } = state;
 
+  const requestedVisual = state.pendingVisualInspection;
   const observed = await observeState(state);
   if (observed.status === "error") {
     onEvent({
@@ -838,6 +870,23 @@ async function runNavigatorObserve(
     return { kind: "abort", result: { kind: "continue" } };
   }
   const { state: browserState, tabs } = observed;
+  if (requestedVisual) {
+    state.pendingVisualInspection = false;
+    onEvent(browserState.screenshot
+      ? {
+          type: "visual-inspection",
+          step: state.step,
+          stage: "captured",
+          message: "Fresh viewport captured and queued for this model turn",
+          screenshotChars: browserState.screenshot.length,
+        }
+      : {
+          type: "visual-inspection",
+          step: state.step,
+          stage: "unavailable",
+          message: "Visual inspection was requested, but the configured model or screenshot permission is unavailable",
+        });
+  }
   state.lastObservedUrl = browserState.url;
 
   onEvent({
@@ -868,7 +917,6 @@ async function runNavigatorObserve(
     const screenshot = browserState.screenshot;
     await dispatch(state, "screenshot", (d) => d.screenshot(makeCtx(state), screenshot));
   }
-
   return { kind: "ok", data: { browserState, tabs } };
 }
 

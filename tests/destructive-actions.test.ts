@@ -32,6 +32,9 @@ function mountOptionsDom(): void {
     <input id="costCap">
     <textarea id="defaultTask"></textarea>
     <input id="screenshotQuality">
+    <input id="screenshotImageTokens">
+    <input id="screenshotMaxDimension">
+    <input id="screenshotMaxBytes">
     <input type="checkbox" id="enableScreenshots">
     <input type="checkbox" id="enableStealth">
     <textarea id="allowedDomains"></textarea>

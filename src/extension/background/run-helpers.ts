@@ -6,6 +6,12 @@ import { stripUrlFragment } from "./vision";
 import { makeAntiBotHooks } from "./antibot";
 import { captureTabScreenshot } from "./screenshots";
 import {
+  getScreenshotImageTokens,
+  getScreenshotQuality,
+  getScreenshotMaxDimension,
+  getScreenshotMaxBytes,
+} from "./tab-manager-utils";
+import {
   getRunState,
   startKeepalive,
   stopKeepalive,
@@ -335,6 +341,7 @@ export async function extractStateForRun(
   signal?: AbortSignal,
   identity?: { runId: string },
   contextTokens?: number,
+  options?: { includeScreenshotOnce?: boolean },
 ): Promise<BrowserState> {
   const checkAbort = (): void => {
     if (signal?.aborted) {
@@ -372,9 +379,26 @@ export async function extractStateForRun(
   } catch (e) { void safeLog("warn", "[vision] catalog/model load failed:", e); }
   checkAbort();
 
-  const includeScreenshot = mainModelVision && Boolean(storedEnableScreenshots ?? true);
+  const promptBudgets = await import("@/lib/agent/prompts/prompt-token-budget");
+  // Screenshots are bounded by the capture-side normalization in
+  // tab-manager.ts (full viewport by default, optional dimension/byte caps)
+  // and accounted for by a FLAT per-image token allowance (see settings-sync)
+  // instead of the old context-derived char cap. The flat allowance is small
+  // for any reasonable context, so a screenshot is "affordable" as long as it
+  // fits comfortably under the model's input budget — we never drop or crop it.
+  const screenshotImageTokens = await getScreenshotImageTokens();
+  const budgetProfile = contextTokens !== undefined
+    ? promptBudgets.promptBudgetProfileForContextV1("navigator", contextTokens)
+    : promptBudgets.PROMPT_BUDGET_PROFILES_V1.navigator;
+  const screenshotAffordable =
+    screenshotImageTokens > 0 &&
+    screenshotImageTokens <= Math.floor(budgetProfile.maxInputTokens * 0.25);
   const visionMode = (storedVisionMode as string) ||
-    (enableLocalVision === true ? "always" : "disabled");
+    (enableLocalVision === true ? "always" : "adaptive");
+  const includeScreenshot = mainModelVision
+    && Boolean(storedEnableScreenshots ?? true)
+    && (visionMode === "always" || options?.includeScreenshotOnce === true)
+    && screenshotAffordable;
   const effectiveTextOnly = !mainModelVision || !includeScreenshot;
   const useAlwaysOnVision = visionMode === "always" && effectiveTextOnly;
   const useAdaptiveVision = visionMode === "adaptive" && effectiveTextOnly;
@@ -423,23 +447,31 @@ export async function extractStateForRun(
       clearVisionCache();
     }
     const domStateNoVision = await extractStateFromTab(tabId, tabs, includeScreenshot, signal);
-    lastKnownDpr = domStateNoVision.devicePixelRatio ?? 1;
-    // Capture-side screenshot budget: when the run's model context is known,
-    // downscale the screenshot so it fits the model's derived screenshot cap
-    // (the loop then never has to drop it). Unknown context → unchanged.
-    if (domStateNoVision.screenshot && contextTokens !== undefined) {
+    if (domStateNoVision.screenshot && options?.includeScreenshotOnce) {
+      domStateNoVision.screenshotIsOneShot = true;
+    }
+    // Normalize (optional dimension / byte-cap) AFTER capture + annotation so
+    // the [vN] boxes scale with the image and stay aligned. With default 0/0
+    // settings this is a no-op that preserves the FULL device-pixel viewport —
+    // it never silently crops the page the way the old context-derived char cap
+    // did.
+    if (domStateNoVision.screenshot) {
       try {
-        const { deriveNavigatorObservationCapsV1 } = await import("@/lib/agent/prompts/prompt-token-budget");
-        const cap = deriveNavigatorObservationCapsV1(contextTokens).screenshotChars;
-        if (cap > 0) {
-          const { resizeScreenshotToBudget } = await import("./screenshots");
-          domStateNoVision.screenshot = await resizeScreenshotToBudget(domStateNoVision.screenshot, cap);
-          checkAbort();
-        }
+        const quality = await getScreenshotQuality();
+        const { normalizeScreenshotToViewport } = await import("./screenshots");
+        domStateNoVision.screenshot = await normalizeScreenshotToViewport(
+          domStateNoVision.screenshot,
+          quality,
+          {
+            maxDimension: await getScreenshotMaxDimension(),
+            maxBytes: await getScreenshotMaxBytes(),
+          },
+        );
       } catch (e) {
-        void safeLog("warn", "[run-helpers] screenshot budget resize skipped:", e);
+        void safeLog("warn", "[run-helpers] screenshot normalize failed:", e);
       }
     }
+    lastKnownDpr = domStateNoVision.devicePixelRatio ?? 1;
     return domStateNoVision;
   }
 
@@ -541,9 +573,9 @@ export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
     mode,
     callbacks,
     config,
-    extractState: async (tabs) => {
+    extractState: async (tabs, options) => {
       throwIfOriginUnauthorized();
-      const state = await extractStateForRun(fallbackTabId, tabs, controller.signal, dispatchToken, config.contextTokens);
+      const state = await extractStateForRun(fallbackTabId, tabs, controller.signal, dispatchToken, config.contextTokens, options);
       throwIfOriginUnauthorized();
       return state;
     },
@@ -657,15 +689,15 @@ export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
       }
       return results;
     },
-    navigatorCall: async (request, signal) => {
+    navigatorCall: async (request, signal, onProgress) => {
       throwIfOriginUnauthorized();
-      const response = await navigatorCallDirect(request, signal);
+      const response = await navigatorCallDirect(request, signal, onProgress);
       throwIfOriginUnauthorized();
       return response;
     },
-    plannerCall: async (request, signal) => {
+    plannerCall: async (request, signal, onProgress) => {
       throwIfOriginUnauthorized();
-      const response = await plannerCallDirect(request, signal);
+      const response = await plannerCallDirect(request, signal, onProgress);
       throwIfOriginUnauthorized();
       return response;
     },
@@ -819,7 +851,7 @@ export async function cleanupRun(ctx: CleanupContext): Promise<void> {
   } else {
     try {
       const { visionMode, enableLocalVision } = await chrome.storage.local.get(["visionMode", "enableLocalVision"]);
-      const mode = (visionMode as string) || (enableLocalVision === true ? "always" : "disabled");
+      const mode = (visionMode as string) || (enableLocalVision === true ? "always" : "adaptive");
       if (mode !== "always") await teardownScheduledVision();
     } catch { void 0; }
   }

@@ -654,7 +654,7 @@ describe("runAgentLoop — terminal done + completion-with-evidence", () => {
     expect(doneEvents[0]).toMatchObject({
       type: "done",
       success: true,
-      text: "planner confirms success",
+      text: "nav done",
     });
   });
 });

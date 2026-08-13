@@ -43,6 +43,11 @@ export interface UsageTotals {
 /** Accumulated usage attached to a run, keyed by the last-reported model. */
 export interface RunUsage extends UsageTotals {
   model: string;
+  /** Per-call usage from the most recent LLM request. Unlike the accumulated
+   * totals above, these fields can be compared with a context window. */
+  lastTokensIn?: number;
+  lastTokensOut?: number;
+  lastReasoningTokens?: number;
 }
 
 /** Shape of a `cost` LogEvent that feeds the run-usage accumulator. */
@@ -73,6 +78,9 @@ export function addCostEvent(usage: RunUsage, event: CostEventLike): RunUsage {
     tokensOut: usage.tokensOut + event.tokensOut,
     costUsd: usage.costUsd + event.costUsd,
     model: event.model,
+    lastTokensIn: event.tokensIn,
+    lastTokensOut: event.tokensOut,
+    ...(event.reasoningTokens !== undefined ? { lastReasoningTokens: event.reasoningTokens } : {}),
     ...(usage.reasoningTokens || event.reasoningTokens ? { reasoningTokens: reasoning } : {}),
     ...(usage.cachedInputTokens || event.cachedInputTokens ? { cachedInputTokens: cachedInput } : {}),
     ...(usage.cachedWriteInputTokens || event.cachedWriteInputTokens ? { cachedWriteInputTokens: cachedWrite } : {}),
@@ -131,6 +139,9 @@ function isRunUsage(value: unknown): value is RunUsage {
     (usage.reasoningTokens === undefined || isFiniteNumber(usage.reasoningTokens)) &&
     (usage.cachedInputTokens === undefined || isFiniteNumber(usage.cachedInputTokens)) &&
     (usage.cachedWriteInputTokens === undefined || isFiniteNumber(usage.cachedWriteInputTokens))
+    && (usage.lastTokensIn === undefined || isFiniteNumber(usage.lastTokensIn))
+    && (usage.lastTokensOut === undefined || isFiniteNumber(usage.lastTokensOut))
+    && (usage.lastReasoningTokens === undefined || isFiniteNumber(usage.lastReasoningTokens))
   );
 }
 

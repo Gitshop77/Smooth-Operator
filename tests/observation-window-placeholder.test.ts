@@ -1,5 +1,5 @@
 /**
- * Observation-window placeholders — stale observations (outside the last 3
+ * Observation-window placeholders — stale observations (outside the last 2
  * retention items) render a fixed structural placeholder ("what was called +
  * args") instead of the full message/extracted content, so the context stays
  * bounded without silently dropping the action history.
@@ -27,31 +27,29 @@ function item(step: number, text: string): HistoryItem {
 }
 
 describe("renderHistory — stale observation masking", () => {
-  test("the last 3 items keep full content; older items render the structural placeholder", () => {
+  test("the last 2 items keep full content; older items render the structural placeholder", () => {
     const history = [item(0, "a"), item(1, "b"), item(2, "c"), item(3, "d"), item(4, "e")];
     const out = renderHistory(history, 5);
 
-    // Recent items (steps 2,3,4) keep their full message + extracted content.
-    expect(out).toContain("message-c");
-    expect(out).toContain("extracted-c");
+    // Recent items (steps 3,4) keep their full message + extracted content.
     expect(out).toContain("message-d");
     expect(out).toContain("extracted-d");
     expect(out).toContain("message-e");
     expect(out).toContain("extracted-e");
-    // Stale items (steps 0,1) render "what was called + args" only — no
+    // Stale items (steps 0,1,2) render "what was called + args" only — no
     // extracted blob, no full message — and keep the FAILED marker semantics.
     expect(out).toContain("- click [index=7]: (details omitted — older step)");
     expect(out).not.toContain("extracted-a");
     expect(out).not.toContain("extracted-b");
+    expect(out).not.toContain("extracted-c");
     expect(out).not.toContain("message-a");
   });
 
-  test("a small history (≤ 3) is never masked", () => {
-    const history = [item(0, "a"), item(1, "b"), item(2, "c")];
-    const out = renderHistory(history, 3);
+  test("a small history (≤ 2) is never masked", () => {
+    const history = [item(0, "a"), item(1, "b")];
+    const out = renderHistory(history, 2);
     expect(out).toContain("extracted-a");
     expect(out).toContain("extracted-b");
-    expect(out).toContain("extracted-c");
     expect(out).not.toContain("details omitted");
   });
 

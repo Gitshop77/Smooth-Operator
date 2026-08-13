@@ -145,9 +145,9 @@ function makeRequest(): AgentStepRequest {
 }
 
 describe("getVisionMode", () => {
-  test("both keys unset → 'disabled'", async () => {
+  test("both keys unset → 'adaptive'", async () => {
     const { getVisionMode } = await import("../src/extension/llm-direct");
-    expect(await getVisionMode()).toBe("disabled");
+    expect(await getVisionMode()).toBe("adaptive");
   });
 
   test("legacy enableLocalVision===true (visionMode unset) → 'always'", async () => {
@@ -369,7 +369,7 @@ describe("reasoning config + cache-eligibility wiring", () => {
     expect(h.chatRequests[0]).toMatchObject({ reasoning: { enabled: true } });
   });
 
-  test("planner passes the reasoning config but never cacheEligible", async () => {
+  test("planner passes the reasoning config and caches its repeated system prefix", async () => {
     store.reasoningEffort = "medium";
     const { plannerCallDirect } = await import("../src/extension/llm-direct");
     await plannerCallDirect({
@@ -383,7 +383,7 @@ describe("reasoning config + cache-eligibility wiring", () => {
       maxSteps: 10,
     });
     expect(h.chatRequests[0]).toMatchObject({ reasoning: { effort: "medium" } });
-    expect(h.chatRequests[0].cacheEligible).toBeUndefined();
+    expect(h.chatRequests[0].cacheEligible).toBe(true);
   });
 });
 

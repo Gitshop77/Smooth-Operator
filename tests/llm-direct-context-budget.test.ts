@@ -163,11 +163,12 @@ describe("getEffectiveContextTokens", () => {
 });
 
 describe("assertPromptBudget", () => {
-  const messages = [{ content: "x".repeat(50_000) }];
+  const messages = [{ content: "x".repeat(120_000) }];
 
   test("fails closed against the DERIVED budget when a context is known (64k)", async () => {
     const { assertPromptBudget } = await import("../src/extension/llm-direct");
-    // 64k navigator → maxInput = 64k − 8k output − 16k reasoning = 39,424 < 50,000.
+    // 64k navigator target = 85% = 54,400 estimated tokens. The portable
+    // fallback estimates 120k UTF-8 bytes at 60k tokens, so it fails closed.
     expect(() => assertPromptBudget("navigator", "navigator-64k", messages, 64_000)).toThrow(
       /Prompt budget exceeded/,
     );
@@ -175,17 +176,63 @@ describe("assertPromptBudget", () => {
 
   test("passes the same prompt under a larger context", async () => {
     const { assertPromptBudget } = await import("../src/extension/llm-direct");
-    // 200k navigator → maxInput = 200k − 8k − 16k = 176,000 > 50,000.
+    // 200k navigator target = 170k estimated tokens > the same 60k estimate.
     expect(() => assertPromptBudget("navigator", "navigator-200k", messages, 200_000)).not.toThrow();
   });
 
   test("falls back to the fixed profile when the context is unknown", async () => {
     const { assertPromptBudget } = await import("../src/extension/llm-direct");
     // 50k < fixed 128k navigator maxInput (103,424) → passes; 110k would fail.
-    expect(() => assertPromptBudget("navigator", "navigator-fixed", messages, undefined)).not.toThrow();
+    expect(() => assertPromptBudget("navigator", "navigator-fixed", [{ content: "x".repeat(50_000) }], undefined)).not.toThrow();
     expect(() =>
       assertPromptBudget("navigator", "navigator-fixed-over", [{ content: "x".repeat(110_000) }], undefined),
     ).toThrow(/Prompt budget exceeded/);
+  });
+
+  test("counts an embedded screenshot as a flat token allowance, not base64 length", async () => {
+    const { assertPromptBudget } = await import("../src/extension/llm-direct");
+    // 600k chars of "base64" presented as plain text would estimate ~300k
+    // tokens and fail closed at 64k. The image path subtracts the base64 length
+    // and adds only the flat per-image token allowance (×2 ≈ chars/token).
+    const bigScreenshot = "x".repeat(600_000);
+    const messages = [{ content: `<untrusted_page_data><screenshot>${bigScreenshot}</screenshot></untrusted_page_data>` }];
+    expect(() =>
+      assertPromptBudget("navigator", "nav-image", messages, 64_000, {
+        imageChars: bigScreenshot.length,
+        imageTokens: 4096,
+      }),
+    ).not.toThrow();
+    // The SAME payload without image accounting still fails closed — proving
+    // the flat-allowance path is what keeps the full viewport from tripping.
+    expect(() => assertPromptBudget("navigator", "nav-plain", messages, 64_000)).toThrow(/Prompt budget exceeded/);
+  });
+
+  test("clamps the per-image token allowance to a share of the input budget", async () => {
+    const { assertPromptBudget } = await import("../src/extension/llm-direct");
+    // imageTokens=1_000_000 would, if unclamped, add 2M chars; clamped to 25% of
+    // the 64k input budget (~13.6k tokens → ~27.2k chars), so a 100k-char
+    // payload stays within budget.
+    const img = "x".repeat(100_000);
+    expect(() =>
+      assertPromptBudget("navigator", "nav-clamp", [{ content: img }], 64_000, {
+        imageChars: 100_000,
+        imageTokens: 1_000_000,
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe("shouldInlineFormatInstructions", () => {
+  test("omits the duplicate schema for explicitly low-context models", async () => {
+    const { shouldInlineFormatInstructions } = await import("../src/extension/llm-direct");
+    expect(shouldInlineFormatInstructions(false, 64_000)).toBe(false);
+  });
+
+  test("keeps the fallback for roomy or unknown non-structured providers", async () => {
+    const { shouldInlineFormatInstructions } = await import("../src/extension/llm-direct");
+    expect(shouldInlineFormatInstructions(false, 128_000)).toBe(true);
+    expect(shouldInlineFormatInstructions(false, undefined)).toBe(true);
+    expect(shouldInlineFormatInstructions(true, 64_000)).toBe(false);
   });
 });
 
@@ -193,9 +240,10 @@ describe("navigatorCallDirect fail-closed at runtime", () => {
   test("an oversized navigator prompt never reaches the provider (64k model)", async () => {
     store.contextTokens = 64_000;
     // Simulate a large page: the user message alone exceeds the 64k-derived
-    // maxInput (39,424), so the assembled prompt must be rejected before any
+    // 85% input target (54,400 estimated tokens), so the assembled prompt must
+    // be rejected before any
     // provider round-trip.
-    h.navigatorUserContent = "PAGE_CONTENT_" + "x".repeat(50_000);
+    h.navigatorUserContent = "PAGE_CONTENT_" + "x".repeat(120_000);
 
     const { navigatorCallDirect } = await import("../src/extension/llm-direct");
     await expect(navigatorCallDirect(makeRequest())).rejects.toThrow(/Prompt budget exceeded/);
@@ -212,4 +260,3 @@ describe("navigatorCallDirect fail-closed at runtime", () => {
     expect(result).toBeDefined();
   });
 });
-

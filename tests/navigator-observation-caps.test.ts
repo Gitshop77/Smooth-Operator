@@ -8,9 +8,12 @@
  *     sub-128k models (observation shrinks so the prompt fits the derived
  *     input budget instead of tripping the fail-closed assert on every step).
  *  2. `prepareNavigatorRequest` applies the derived caps: a 64k run truncates
- *     the DOM text, drops the AX tree when it is not affordable, and drops the
- *     screenshot, emitting observable info events — the loop degrades the
- *     OBSERVATION instead of failing the STEP.
+ *     the DOM text and the AX tree to their viewport-evidence budgets, and
+ *     delivers the screenshot WHOLE — it is now accounted as a flat per-image
+ *     token allowance (see llm-direct's assertPromptBudget) instead of being
+ *     dropped for exceeding a context-derived char cap. Only a wildly-oversized
+ *     / corrupt capture is dropped. The loop degrades the OBSERVATION instead of
+ *     failing the STEP.
  *  3. End-to-end: a realistic navigator prompt built from the 64k-derived caps
  *     fits the 64k-model derived input budget (assert does NOT throw), while
  *     the same page with the fixed 128k caps would throw — the caps are what
@@ -19,6 +22,7 @@
 import { describe, expect, test, vi } from "vitest";
 import {
   deriveNavigatorObservationCapsV1,
+  deriveOnDemandScreenshotCapV1,
   assertCompiledPromptWithinContextBudgetV1,
 } from "../src/lib/agent/prompts/prompt-token-budget";
 import { prepareNavigatorRequest } from "../src/lib/agent/loop/phases/navigator";
@@ -54,13 +58,13 @@ const BIG_OBSERVATION: BrowserState = {
 describe("deriveNavigatorObservationCapsV1", () => {
   test("unknown context returns the exact current defaults (zero behavior change)", () => {
     const caps = deriveNavigatorObservationCapsV1(undefined);
-    expect(caps).toEqual({ elementsTextChars: 60_000, axTreeChars: 200_000, screenshotChars: 1_500_000 });
+    expect(caps).toEqual({ elementsTextChars: 24_000, axTreeChars: 12_000, screenshotChars: 100_000 });
   });
 
   test("a 128k-context model keeps the exact current text-channel defaults", () => {
     const caps = deriveNavigatorObservationCapsV1(128_000);
-    expect(caps.elementsTextChars).toBe(60_000);
-    expect(caps.axTreeChars).toBe(200_000);
+    expect(caps.elementsTextChars).toBe(24_000);
+    expect(caps.axTreeChars).toBe(12_000);
     // The screenshot cap becomes its FIT budget (72,800 = 85% of 128k
     // − 32k fixed overhead − 2×2k min text observation) — not the aspirational
     // 1.5M hard cap that realistic captures always exceed and that always
@@ -70,13 +74,18 @@ describe("deriveNavigatorObservationCapsV1", () => {
 
   test("a 64k-context model gets a fitting observation and no screenshot", () => {
     const caps = deriveNavigatorObservationCapsV1(64_000);
-    // 64k derived maxInput = 64,000 − 8,192 − 16,384 = 39,424.
-    // Sub-128k models get the COMPACT system prompt, so the fixed overhead is
-    // 23,000 (vs 32,000 for the full prompt):
-    //   available = 39,424 − 23,000 (compact overhead) − 4,000 (user content) = 11,124.
-    expect(caps.elementsTextChars).toBe(Math.floor(11_124 * 0.85));
-    expect(caps.axTreeChars).toBe(11_124 - Math.floor(11_124 * 0.85));
+    // 64k derived maxInput = 54,400 (85%). The economical text evidence
+    // allowance is economically capped at 24,000 chars, split 75/25
+    // DOM/viewport AX.
+    const available = 24_000;
+    expect(caps.elementsTextChars).toBe(Math.floor(available * 0.75));
+    expect(caps.axTreeChars).toBe(available - Math.floor(available * 0.75));
     expect(caps.screenshotChars).toBe(0); // not affordable at 64k
+  });
+
+  test("a 64k model has a bounded one-shot visual budget without enabling automatic screenshots", () => {
+    expect(deriveNavigatorObservationCapsV1(64_000).screenshotChars).toBe(0);
+    expect(deriveOnDemandScreenshotCapV1(64_000)).toBe(56_000);
   });
 
   test("a 32k-context model is floored but never produces unusable caps", () => {
@@ -86,46 +95,69 @@ describe("deriveNavigatorObservationCapsV1", () => {
     expect(caps.screenshotChars).toBe(0);
   });
 
-  test("caps are monotonic in context within the sub-128k regime", () => {
+  test("caps are monotonic but plateau at the economical ceiling", () => {
     const a = deriveNavigatorObservationCapsV1(64_000);
     const b = deriveNavigatorObservationCapsV1(96_000);
-    expect(b.elementsTextChars).toBeGreaterThan(a.elementsTextChars);
-    expect(b.axTreeChars).toBeGreaterThan(a.axTreeChars);
+    expect(b.elementsTextChars).toBeGreaterThanOrEqual(a.elementsTextChars);
+    expect(b.axTreeChars).toBeGreaterThanOrEqual(a.axTreeChars);
+    expect(b.elementsTextChars + b.axTreeChars).toBe(24_000);
   });
 
   test("caps never exceed the base (128k) defaults", () => {
     for (const ctx of [64_000, 96_000, 128_000, 200_000, 1_000_000]) {
       const caps = deriveNavigatorObservationCapsV1(ctx);
-      expect(caps.elementsTextChars).toBeLessThanOrEqual(60_000);
-      expect(caps.axTreeChars).toBeLessThanOrEqual(200_000);
-      expect(caps.screenshotChars).toBeLessThanOrEqual(1_500_000);
+      expect(caps.elementsTextChars).toBeLessThanOrEqual(24_000);
+      expect(caps.axTreeChars).toBeLessThanOrEqual(12_000);
+      expect(caps.screenshotChars).toBeLessThanOrEqual(100_000);
     }
   });
 });
 
 describe("prepareNavigatorRequest applies context-derived caps", () => {
-  test("a 64k run truncates DOM text, drops the AX tree, and drops the screenshot", async () => {
+  test("a 64k run truncates DOM text and AX tree but keeps the screenshot", async () => {
     const { state, events } = makeStateWithContext(64_000);
     const req = await prepareNavigatorRequest(state, BIG_OBSERVATION);
 
     const caps = deriveNavigatorObservationCapsV1(64_000);
     expect(req.browserState.elementsText.length).toBeLessThanOrEqual(caps.elementsTextChars);
-    // The AX tree channel is truncated (not dropped): at 64k its cap is 514
-    // chars, so a huge tree is cut to that.
+    // The AX tree channel is truncated (not dropped) to its viewport evidence
+    // budget, which remains large enough to preserve useful semantics.
     expect((req.browserState.axTree ?? "").length).toBeLessThanOrEqual(caps.axTreeChars);
-    expect(req.browserState.screenshot).toBeUndefined(); // dropped (channel not affordable)
+    // The screenshot is delivered WHOLE now: it is accounted as a flat per-image
+    // token allowance (llm-direct assertPromptBudget) instead of being dropped
+    // for exceeding a context-derived char cap. Only a corrupt/hostile capture
+    // (≈3M chars) would be dropped.
+    expect(req.browserState.screenshot).toBeDefined();
 
     const messages = events
       .filter((e): e is LogEvent & { type: "info" } => e.type === "info")
       .map((e) => e.message);
     expect(messages.some((m) => m.includes("Navigator DOM truncated"))).toBe(true);
-    expect(messages.some((m) => m.includes("screenshot dropped"))).toBe(true);
+    // The screenshot is no longer dropped at 64k, so no "screenshot dropped" event.
+    expect(messages.some((m) => m.includes("screenshot dropped"))).toBe(false);
+  });
+
+  test("a requested 64k visual turn keeps one full frame and shrinks duplicate text", async () => {
+    const { state, events } = makeStateWithContext(64_000);
+    const req = await prepareNavigatorRequest(state, {
+      ...BIG_OBSERVATION,
+      screenshot: "data:image/jpeg;base64," + "A".repeat(50_000),
+      screenshotIsOneShot: true,
+    });
+
+    expect(req.browserState.screenshot?.length).toBeLessThanOrEqual(56_000);
+    // One-shot inspection no longer guts the duplicate text/AX to 8k/4k — that
+    // was sized for a 30k-token image that no longer exists. The frame is kept
+    // whole and the text channels keep a useful (16k/8k) share.
+    expect(req.browserState.elementsText.length).toBeLessThanOrEqual(16_000);
+    expect((req.browserState.axTree ?? "").length).toBeLessThanOrEqual(8_000);
+    expect(events).toContainEqual(expect.objectContaining({ type: "visual-inspection", stage: "delivered" }));
   });
 
   test("an unknown-context run keeps the current 60k elements cap (no regression)", async () => {
     const { state } = makeStateWithContext(undefined);
     const req = await prepareNavigatorRequest(state, BIG_OBSERVATION);
-    expect(req.browserState.elementsText.length).toBe(60_000); // truncated at the base cap only
+    expect(req.browserState.elementsText.length).toBe(24_000); // truncated at the economical base cap
   });
 });
 

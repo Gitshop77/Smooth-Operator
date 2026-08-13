@@ -55,6 +55,9 @@ import {
   requestRunStartCancellation,
   isRunStartCancellationRequested,
   resetDownloadConsent,
+  runDeadlineForProvider,
+  LOCAL_RUN_DEADLINE_MS,
+  REMOTE_RUN_DEADLINE_MS,
   consumeDownloadConsentForMode,
   markDownloadConsentConsumed,
   releaseDownloadConsentReservation,
@@ -85,9 +88,12 @@ export {
   markDownloadConsentConsumed,
   releaseDownloadConsentReservation,
   resetDownloadConsent,
+  runDeadlineForProvider,
+  LOCAL_RUN_DEADLINE_MS,
+  REMOTE_RUN_DEADLINE_MS,
 };
 
-const DEFAULT_PLANNER_INTERVAL = 5;
+const DEFAULT_PLANNER_INTERVAL = 10;
 const DEFAULT_MAX_FAILURES = 5;
 // Default cost cap in USD. 0 is still a valid EXPLICIT opt-out (a stored value
 // of 0 is preserved by clampNumber); only the unset/undef case adopts this
@@ -239,13 +245,20 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
   const runEvents = new RunEventService(runController, runBuilder);
   const sendEvent = runEvents.emit;
 
-  const TOTAL_RUN_DEADLINE_MS = 15 * 60_000;
+  let deadlineProvider: unknown;
+  try {
+    deadlineProvider = (await chrome.storage.local.get("provider")).provider;
+  } catch {
+    deadlineProvider = undefined;
+  }
+  const totalRunDeadlineMs = runDeadlineForProvider(deadlineProvider);
+  const totalRunDeadlineMinutes = Math.round(totalRunDeadlineMs / 60_000);
   const totalRunTimer = setTimeout(() => {
     if (runEvents.isFinished || runController.isTerminal) return;
     sendEvent({
       type: "error",
       step: runEvents.currentStep,
-      message: "The run exceeded its 15-minute total deadline and was stopped before any later action could begin.",
+      message: `The run exceeded its ${totalRunDeadlineMinutes}-minute total deadline and was stopped before any later action could begin.`,
       recoverable: false,
       code: "TOTAL_RUN_DEADLINE",
       recovery: "Start a new run with a narrower task or fewer steps.",
@@ -255,7 +268,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
       broadcastRunCancellation(snapshot),
     ).catch(() => { /* best-effort */ });
     void runSessionState.patch(runController.dispatchToken, { abortRequested: true }).catch(() => { /* best-effort */ });
-  }, TOTAL_RUN_DEADLINE_MS);
+  }, totalRunDeadlineMs);
   if (typeof totalRunTimer === "object" && "unref" in totalRunTimer) totalRunTimer.unref();
 
   const releaseRunGuard = (): void => {
@@ -317,10 +330,12 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  //
  // Rather than hard-failing the run (which made the extension unusable from
  // the new-tab page — a common "agent ai extension" entry point), AUTO-OPEN
- // a fresh `about:blank` tab and proceed on it. `about:blank` is the one URL
- // Chrome universally permits for content scripts across versions, and the
- // agent's `navigate` action can then go to whatever target the user asked
- // for. Surfaces an info event so the user understands what happened. The
+ // a fresh ordinary HTTPS tab and proceed on it. The previous implementation
+ // created `about:blank`, but this extension's manifest only injects content
+ // scripts into http(s) pages; every initial observation therefore failed and
+ // the run aborted after maxFailures. example.com is a stable, script-light
+ // bootstrap page that the observer can read before the agent navigates to the
+ // user's target. Surfaces an info event so the user understands what happened. The
  // `chrome://newtab/` "home page" case (the most common miss) is covered by
  // this branch — `chrome://newtab/` matches the `chrome://` rule below.
    const tabUrl = tab.url ?? "";
@@ -332,7 +347,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
      /chromewebstore\.google\.com/i.test(tabUrl);
    if (isPrivileged) {
      try {
-       const newTab = await chrome.tabs.create({ active: true });
+       const newTab = await chrome.tabs.create({ active: true, url: "https://example.com/" });
        if (await finishIfCancelledBeforeLoop()) return;
        if (newTab?.id) {
          tab = newTab;

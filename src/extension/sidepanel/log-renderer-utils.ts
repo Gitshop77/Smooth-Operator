@@ -25,6 +25,22 @@ export function isValidAgentEvent(ev: unknown): ev is LogEvent {
       return typeof e.step === "number" && typeof e.elementCount === "number" && typeof e.pageInfo === "string";
     case "thinking":
       return typeof e.step === "number";
+    case "llm-call-start":
+      return typeof e.step === "number" && typeof e.callId === "string" &&
+        typeof e.role === "string" && typeof e.attempt === "number" &&
+        typeof e.startedAt === "number" && typeof e.prompt === "object" && e.prompt !== null;
+    case "llm-call-progress":
+      return typeof e.step === "number" && typeof e.callId === "string" &&
+        typeof e.role === "string" && typeof e.attempt === "number" &&
+        typeof e.outputChars === "number" && typeof e.chunkCount === "number" &&
+        typeof e.elapsedMs === "number";
+    case "llm-call-end":
+      return typeof e.step === "number" && typeof e.callId === "string" &&
+        typeof e.role === "string" && typeof e.attempt === "number" &&
+        typeof e.status === "string" && typeof e.durationMs === "number" &&
+        typeof e.outputChars === "number";
+    case "judge":
+      return typeof e.step === "number" && typeof e.stage === "string";
     case "action":
       return typeof e.step === "number" && typeof e.index === "number" && typeof e.total === "number" && typeof e.name === "string";
     case "action-result":

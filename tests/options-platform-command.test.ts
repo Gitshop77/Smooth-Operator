@@ -53,6 +53,28 @@ describe("Options platform command admission", () => {
     expect(service.test).toHaveBeenCalledWith(expect.objectContaining({ model: "gpt-selected" }));
   });
 
+  test("surfaces a redacted connection-service rejection instead of an opaque failure", async () => {
+    const service = {
+      test: vi.fn(async () => {
+        throw new Error("adapter crashed with sk-proj-abcdefghijklmnopqrstuvwxyz123456");
+      }),
+    };
+    const handler = createOptionsPlatformCommandHandler({
+      connection: service,
+      getCredentialStatus: vi.fn(async () => ({ status: "none" as const })),
+    });
+    const sendResponse = vi.fn();
+
+    expect(handler(message, {
+      id: "extension-id",
+      url: "chrome-extension://extension-id/options.html",
+    }, sendResponse)).toBe(true);
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({
+      ok: false,
+      error: "Connection service unavailable: adapter crashed with sk-[REDACTED]",
+    }));
+  });
+
   test.each([
     { id: "foreign", url: "chrome-extension://extension-id/options.html" },
     { id: "extension-id", url: "https://example.com/options.html" },

@@ -68,8 +68,9 @@ export const NETWORK_IDLE_WINDOW_MS = 500;
  * Centralized so tuners can find every cap in one place.
  */
 export const LIMITS = {
-  /** Max chars of body text returned by the `extract` action. */
-  extractBodyChars: 12_000,
+  /** Max full-page characters scanned locally by `extract`. The focused result
+   * returned to the LLM is independently capped at about 8k characters. */
+  extractBodyChars: 200_000,
   /** Max chars of an `evaluate` action's return value surfaced in extractedContent. */
   evaluateResultChars: 2000,
   /** Max chars of the input echo in the `input` action's success message. */

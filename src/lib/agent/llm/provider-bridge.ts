@@ -140,6 +140,7 @@ export function toLLMProvider(config: ProviderBridgeConfig): LLMProvider {
             // cache markers while reused prompts keep their "1h" cache.
             ...(req.cacheEligible ? { cacheEligible: true } : {}),
             ...(config.structuredOutputStrict ? { structuredOutputStrict: true } : {}),
+            ...(req.onProgress ? { onProgress: req.onProgress } : {}),
           },
           req.signal,
         );

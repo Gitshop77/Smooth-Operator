@@ -81,6 +81,29 @@ describe("runCompaction prompt budget", () => {
     expect(combined).toBeLessThanOrEqual(COMPACTION_MAX_INPUT);
   });
 
+  test("a known 64k context uses the 85% input allowance instead of the fixed 32k guard", async () => {
+    const history = Array.from({ length: 80 }, (_, i) =>
+      makeHistoryItem(i, { evaluation: `evidence-${i} ${"q".repeat(900)}` }),
+    );
+    const { deps, prompt } = runWithCapturedPrompt(history);
+    const result = await runCompaction(
+      deps,
+      history,
+      80,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      64_000,
+    );
+
+    expect(result).not.toBeNull();
+    expect(utf8ByteLength(prompt())).toBeGreaterThan(COMPACTION_MAX_INPUT);
+    expect(utf8ByteLength(prompt())).toBeLessThanOrEqual(64_000 * 0.85 * 2);
+  });
+
   test("planner-fallback path (no summarizeCall wired) still returns a compacted summary", async () => {
     // Legacy/compatibility callers that don't wire `summarizeCall` fall back
     // to `deps.plannerCall`. Production wires `summarizeCall` (the bounded

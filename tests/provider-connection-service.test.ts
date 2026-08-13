@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { createProviderConnectionService } from "../src/extension/background/provider-connection-service";
+import { createProviderConnectionService, parseLlamaCppProps, parseOpenAIModelIds } from "../src/extension/background/provider-connection-service";
 import type { ProviderConnectionConfigV1 } from "../src/extension/options-platform-contract";
 import { decodeCredentialReference } from "../src/extension/credential-contract";
 
@@ -37,6 +37,112 @@ afterEach(() => {
 });
 
 describe("ProviderConnectionService", () => {
+  test("parses bounded llama.cpp slot/context capabilities", () => {
+    expect(parseLlamaCppProps({
+      total_slots: 2,
+      default_generation_settings: { n_ctx: 32768 },
+      modalities: { vision: true },
+    })).toEqual({ totalSlots: 2, perSlotContext: 32768, vision: true });
+    expect(parseLlamaCppProps({ total_slots: 0, default_generation_settings: { n_ctx: 32768 } })).toBeNull();
+  });
+
+  test("parses and deduplicates OpenAI-compatible model ids", () => {
+    expect(parseOpenAIModelIds({ data: [
+      { id: "unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL" },
+      { id: "unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL" },
+      { id: "" },
+      null,
+    ] })).toEqual(["unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL"]);
+    expect(parseOpenAIModelIds({ data: "bad" })).toEqual([]);
+  });
+
+  test("auto-discovers the only llama.cpp model when Model is blank", async () => {
+    const chat = vi.fn(async () => ({ content: "OK" }));
+    const buildProvider = vi.fn(async () => ({ chat }));
+    const exactModel = "unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/models")) {
+        return new Response(JSON.stringify({ data: [{ id: exactModel }] }), { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const service = createProviderConnectionService(
+      vi.fn(async () => ({ ok: true as const, value: "" })),
+      { buildProvider: buildProvider as never, fetch: fetchMock as never },
+    );
+
+    const result = await service.test({
+      version: 1,
+      provider: "ollama",
+      model: "",
+      baseUrl: "http://100.69.150.56:8080/v1",
+      provenance: "user",
+      credential: null,
+      contextTokens: 64_000,
+    });
+
+    expect(result).toMatchObject({ ok: true, model: exactModel });
+    expect(result.message).toContain("Auto-selected the only server model");
+    expect(buildProvider).toHaveBeenCalledWith(expect.objectContaining({ model: exactModel, apiKey: "" }));
+  });
+
+  test("rejects a llama.cpp per-slot context mismatch before generation", async () => {
+    const chat = vi.fn();
+    const service = createProviderConnectionService(
+      vi.fn(async () => ({ ok: true as const, value: "" })),
+      {
+        buildProvider: vi.fn(async () => ({ chat })) as never,
+        fetch: vi.fn(async () => new Response(JSON.stringify({
+          total_slots: 2,
+          default_generation_settings: { n_ctx: 32768 },
+          modalities: { vision: true },
+        }), { status: 200 })) as never,
+      },
+    );
+
+    const result = await service.test({
+      version: 1,
+      provider: "ollama",
+      model: "local-model",
+      baseUrl: "http://localhost:11434/v1",
+      provenance: "user",
+      credential: null,
+      contextTokens: 64_000,
+    });
+
+    expect(result).toMatchObject({ ok: false, code: "context_mismatch" });
+    expect(result.message).toContain("2 slots × 32768");
+    expect(chat).not.toHaveBeenCalled();
+  });
+
+  test("reports matching llama.cpp slot, context, and vision after generation", async () => {
+    const chat = vi.fn(async () => ({ content: "OK" }));
+    const service = createProviderConnectionService(
+      vi.fn(async () => ({ ok: true as const, value: "" })),
+      {
+        buildProvider: vi.fn(async () => ({ chat })) as never,
+        fetch: vi.fn(async () => new Response(JSON.stringify({
+          total_slots: 1,
+          default_generation_settings: { n_ctx: 65536 },
+          modalities: { vision: true },
+        }), { status: 200 })) as never,
+      },
+    );
+    const result = await service.test({
+      version: 1,
+      provider: "ollama",
+      model: "local-model",
+      baseUrl: "http://localhost:11434/v1",
+      provenance: "user",
+      credential: null,
+      contextTokens: 64_000,
+    });
+    expect(result).toMatchObject({ ok: true, code: "ok" });
+    expect(result.message).toContain("1 slot × 65536 context, vision");
+    expect(chat).toHaveBeenCalledTimes(1);
+  });
+
   test("runs a bounded minimal generation through the selected runtime model and discards content", async () => {
     const chat = vi.fn(async () => ({ content: "sensitive generated diagnostic body" }));
     const buildProvider = vi.fn(async () => ({ chat }));

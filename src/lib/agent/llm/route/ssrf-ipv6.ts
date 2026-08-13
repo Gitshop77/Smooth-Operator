@@ -22,7 +22,6 @@ function parseIPv4Octets(host: string): number[] | null {
 function isSsrfSinkIpv4(a: number, b: number): boolean {
   if (a === 0) return true;                              // 0.0.0.0/8 unspecified
   if (a === 169 && b === 254) return true;               // 169.254.0.0/16 link-local / cloud metadata
-  if (a === 100 && b >= 64 && b <= 127) return true;     // 100.64.0.0/10 CGNAT
   return false;
 }
 
@@ -32,6 +31,12 @@ function isRfc1918Ipv4(a: number, b: number): boolean {
   if (a === 172 && b >= 16 && b <= 31) return true;      // RFC1918 172.16.0.0/12
   if (a === 192 && b === 168) return true;               // RFC1918 192.168.0.0/16
   return false;
+}
+
+/** True for the shared-address range used by CGNAT and Tailscale. */
+export function isCgnatIpv4(host: string): boolean {
+  const o = parseIPv4Octets(host);
+  return !!o && o[0] === 100 && o[1] >= 64 && o[1] <= 127;
 }
 
 export function isDangerousIpv4(host: string): boolean {
@@ -46,6 +51,7 @@ function isLocalIpv4(host: string): boolean {
   if (!o) return false;
   const [a, b] = o;
   if (a === 127) return true;
+  if (isCgnatIpv4(host)) return true;                    // 100.64.0.0/10 CGNAT / Tailscale
   return isRfc1918Ipv4(a, b);
 }
 
@@ -216,7 +222,8 @@ export function isDangerousIpv6(host: string): boolean {
 
 /**
  * True if `host` is an IP literal in a user-local range that the DEFAULT
- * policy ALLOWS (loopback, RFC1918, IPv6 ULA).
+ * policy ALLOWS for explicitly user-configured endpoints (loopback, RFC1918,
+ * CGNAT/Tailscale, IPv6 ULA).
  */
 export function isUserLocalIp(host: string): boolean {
   if (!host) return false;
@@ -257,6 +264,7 @@ function isBlockedWebhookIpv4(host: string): boolean {
   if (!o) return false;
   const [a, b] = o;
   if (a === 127) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
   return isSsrfSinkIpv4(a, b) || isRfc1918Ipv4(a, b);
 }
 

@@ -400,18 +400,6 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
 ${task}
 </user_request>
 
-<current_goal>
-${wrapUntrusted(currentGoal)}
-</current_goal>
-
-<plan>
-${planBlock}
-</plan>
-
-<agent_history>
-${renderHistory(redactedHistory, NAVIGATOR_HISTORY_LIMIT, history.length)}
-</agent_history>
-
 <browser_state>
 Current URL: ${wrapUntrusted(redactedUrl)}
 Page title: ${wrapUntrusted(redactedTitle)}
@@ -427,7 +415,19 @@ ${redactedAxTree !== undefined ? `
 <accessibility_tree>
 ${wrapUntrusted(redactedAxTree)}
 </accessibility_tree>
-` : ""}${compactedMemoryBlock}${skillsBlock}${injectionWarningsBlock}${loopWarningBlock}${memoryBlock}${customToolsBlock}
+` : ""}
+<current_goal>
+${wrapUntrusted(currentGoal)}
+</current_goal>
+
+<plan>
+${planBlock}
+</plan>
+
+<agent_history>
+${renderHistory(redactedHistory, NAVIGATOR_HISTORY_LIMIT, history.length)}
+</agent_history>
+${compactedMemoryBlock}${skillsBlock}${injectionWarningsBlock}${loopWarningBlock}${memoryBlock}${customToolsBlock}
 <step_info>Navigator step ${step + 1} of ${maxSteps}</step_info>`;
 }
 

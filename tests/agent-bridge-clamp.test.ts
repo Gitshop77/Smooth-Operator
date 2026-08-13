@@ -7,9 +7,21 @@
 
 import { describe, test, expect } from "vitest";
 
-const { clampInt, clampNumber } = await import(
+const { clampInt, clampNumber, runDeadlineForProvider, LOCAL_RUN_DEADLINE_MS, REMOTE_RUN_DEADLINE_MS } = await import(
   "../src/extension/background/agent-bridge"
 );
+
+describe("runDeadlineForProvider", () => {
+  test("allows slow local providers to use the default 100-step run", () => {
+    expect(runDeadlineForProvider("ollama")).toBe(LOCAL_RUN_DEADLINE_MS);
+    expect(runDeadlineForProvider("litellm")).toBe(LOCAL_RUN_DEADLINE_MS);
+  });
+
+  test("keeps the tighter paid-provider deadline", () => {
+    expect(runDeadlineForProvider("openai")).toBe(REMOTE_RUN_DEADLINE_MS);
+    expect(runDeadlineForProvider(undefined)).toBe(REMOTE_RUN_DEADLINE_MS);
+  });
+});
 
 describe("clampInt", () => {
   test("NaN -> def", () => {

@@ -19,6 +19,7 @@ import type { LoopDeps, LoopState } from "../types";
 import { runDeterministicEvaluators } from "./evaluator-runner";
 import { isBudgetExceededError } from "../../errors";
 import { reportCostEvent } from "./llm-calls-utils";
+import { redactKeyShapes } from "../../key-shape-redact";
 
 /** Bound on consecutive judge rejections (verdict false OR null verdict)
  * before the run FORCES a planner re-plan instead of a plain re-observe —
@@ -183,6 +184,13 @@ export async function maybeJudgeAndFinalize(
     return finalize(true, text);
   }
 
+  let judgeCallId: string | undefined;
+  let judgeStartedAt = 0;
+  let judgeCallActive = false;
+  let judgeUsage: {
+    tokensIn: number; tokensOut: number; model: string; reasoningTokens?: number;
+    cachedInputTokens?: number; cachedWriteInputTokens?: number;
+  } | undefined;
   try {
   // Redact secret values from the history BEFORE it crosses the network to
   // the judge. The judge prompt renders `message` / `extractedContent` /
@@ -222,6 +230,19 @@ export async function maybeJudgeAndFinalize(
       type: "info",
       message: "Running the LLM judge to verify the completion claim.",
     });
+    judgeCallId = `judge-${step}-${Date.now()}`;
+    judgeStartedAt = Date.now();
+    judgeCallActive = true;
+    deps.onEvent({ type: "judge", step, stage: "start" });
+    deps.onEvent({
+      type: "llm-call-start", step, callId: judgeCallId, role: "judge", attempt: 1,
+      startedAt: judgeStartedAt,
+      prompt: {
+        historyItems: redactedHistory.length,
+        requestChars: JSON.stringify(redactedHistory).length + deps.task.length + text.length,
+        taskChars: deps.task.length,
+      },
+    });
     const verdict = await judgeTask({
       task: deps.task,
       history: redactedHistory,
@@ -229,6 +250,7 @@ export async function maybeJudgeAndFinalize(
       llmCall: judgeLlmCall,
       modelForCost: undefined,
       onCost: async (usage) => {
+        judgeUsage = usage;
         // Shared cost-event shape: includes reasoning/cache tokens that the
         // old inline event dropped (under-reporting cache-write spend).
         reportCostEvent(deps.onEvent, step, usage);
@@ -238,6 +260,17 @@ export async function maybeJudgeAndFinalize(
     });
 
     if (verdict === null) {
+      judgeCallActive = false;
+      deps.onEvent({
+        type: "llm-call-end", step, callId: judgeCallId, role: "judge", attempt: 1,
+        status: "error", durationMs: Date.now() - judgeStartedAt, outputChars: 0,
+        model: judgeUsage?.model, tokensIn: judgeUsage?.tokensIn,
+        tokensOut: judgeUsage?.tokensOut, reasoningTokens: judgeUsage?.reasoningTokens,
+        cachedInputTokens: judgeUsage?.cachedInputTokens,
+        cachedWriteInputTokens: judgeUsage?.cachedWriteInputTokens,
+        error: "Judge returned no parseable verdict",
+      });
+      deps.onEvent({ type: "judge", step, stage: "error", reason: "No parseable verdict" });
  // The judge could not be reached (LLM error / unparseable response).
  // This is UNVERIFIED — NEVER treat a missing verdict as agreement.
  // Route the run back to the planner for re-evaluation (same as an
@@ -249,6 +282,21 @@ export async function maybeJudgeAndFinalize(
       });
       return false;
     }
+
+    judgeCallActive = false;
+    deps.onEvent({
+      type: "llm-call-end", step, callId: judgeCallId, role: "judge", attempt: 1,
+      status: "success", durationMs: Date.now() - judgeStartedAt,
+      outputChars: (verdict.failureReason || "").length, parseValid: true,
+      model: judgeUsage?.model, tokensIn: judgeUsage?.tokensIn,
+      tokensOut: judgeUsage?.tokensOut, reasoningTokens: judgeUsage?.reasoningTokens,
+      cachedInputTokens: judgeUsage?.cachedInputTokens,
+      cachedWriteInputTokens: judgeUsage?.cachedWriteInputTokens,
+    });
+    deps.onEvent({
+      type: "judge", step, stage: "verdict", verdict: verdict.verdict,
+      reason: redactKeyShapes(verdict.failureReason || (verdict.verdict ? "Completion verified" : "Task incomplete")),
+    });
 
     if (verdict.verdict) {
  // A passing LLM judge must not override a failing deterministic evaluator.
@@ -275,6 +323,23 @@ export async function maybeJudgeAndFinalize(
     return false;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    if (judgeCallActive && judgeCallId) {
+      judgeCallActive = false;
+      deps.onEvent({
+        type: "llm-call-end", step, callId: judgeCallId, role: "judge", attempt: 1,
+        status: "error", durationMs: Date.now() - judgeStartedAt, outputChars: 0,
+        model: judgeUsage?.model, tokensIn: judgeUsage?.tokensIn,
+        tokensOut: judgeUsage?.tokensOut, reasoningTokens: judgeUsage?.reasoningTokens,
+        cachedInputTokens: judgeUsage?.cachedInputTokens,
+        cachedWriteInputTokens: judgeUsage?.cachedWriteInputTokens,
+        error: redactKeyShapes(msg),
+      });
+    }
+    // The judge helper can throw before producing a verdict (transport,
+    // budget, or protocol failure). Its own scoped call lifecycle may not
+    // have been created yet, but the explicit judge event still prevents a
+    // silent transition back to planning.
+    deps.onEvent({ type: "judge", step, stage: "error", reason: redactKeyShapes(msg) });
  // If the cost callback throws "Budget exceeded" (from a custom budget
  // handler) or the judge's compiled prompt exceeds its V1 budget profile
  // (typed `PromptBudgetExceededError`), finalize as FAILURE. In the default

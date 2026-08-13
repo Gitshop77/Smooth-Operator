@@ -10,7 +10,10 @@
 import { describe, test, expect, beforeAll, afterEach, vi } from "vitest";
 import type { CatalogModel } from "../src/lib/agent/llm/catalog";
 import type { ReasoningOption } from "../src/lib/agent/llm/catalog";
-import { renderModelResultItem } from "../src/extension/options/provider-config-ui-utils";
+import {
+  emptyModelSearchHtml,
+  renderModelResultItem,
+} from "../src/extension/options/provider-config-ui-utils";
 import { makeChromeStorageMock } from "./helpers/chrome-storage-mock";
 import {
   reasoningEffortOptions,
@@ -45,6 +48,9 @@ function setupDom(): void {
     <input id="costCap">
     <textarea id="defaultTask"></textarea>
     <input id="screenshotQuality">
+    <input id="screenshotImageTokens">
+    <input id="screenshotMaxDimension">
+    <input id="screenshotMaxBytes">
     <input type="checkbox" id="enableScreenshots">
     <input type="checkbox" id="enableStealth">
     <textarea id="allowedDomains"></textarea>
@@ -80,6 +86,21 @@ function makeModel(over: Partial<CatalogModel>): CatalogModel {
     ...over,
   } as CatalogModel;
 }
+
+describe("custom/local model search empty state", () => {
+  test("tells Ollama users an uncatalogued server model id remains valid", () => {
+    const html = emptyModelSearchHtml("ollama", "org/Qwen-local:Q4");
+    expect(html).toContain("will be used as typed");
+    expect(html).toContain("org&#47;Qwen-local:Q4");
+    expect(html).not.toContain("No models match");
+  });
+
+  test("escapes a custom model id before rendering it", () => {
+    const html = emptyModelSearchHtml("ollama", "<img src=x onerror=alert(1)>");
+    expect(html).toContain("&lt;img");
+    expect(html).not.toContain("<img");
+  });
+});
 
 describe("redactKeyLeak", () => {
   let redactKeyLeak: (s: string) => string;

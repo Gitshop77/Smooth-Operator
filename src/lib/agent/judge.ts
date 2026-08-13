@@ -40,6 +40,8 @@ interface JudgeTaskArgs {
       reasoningTokens?: number;
       cachedInputTokens?: number;
       cachedWriteInputTokens?: number;
+      /** Provider-computed charge; local providers return exactly zero. */
+      costUsd?: number;
     };
   }>;
   /** Optional cost callback fired once per judge LLM call. Lets the agent
@@ -101,7 +103,7 @@ export async function judgeTask(args: JudgeTaskArgs): Promise<JudgementResult | 
   const userMessage = compiled.messages[1]?.content ?? "";
 
   let raw: string;
-  let llmUsage: { model?: string; tokensIn?: number; tokensOut?: number; reasoningTokens?: number; cachedInputTokens?: number; cachedWriteInputTokens?: number } | undefined;
+  let llmUsage: { model?: string; tokensIn?: number; tokensOut?: number; reasoningTokens?: number; cachedInputTokens?: number; cachedWriteInputTokens?: number; costUsd?: number } | undefined;
   try {
     const res = await llmCall(systemPrompt, userMessage);
     raw = res.content;
@@ -114,12 +116,14 @@ export async function judgeTask(args: JudgeTaskArgs): Promise<JudgementResult | 
     const tokensIn = llmUsage?.tokensIn ?? Math.ceil((systemPrompt.length + userMessage.length) / 4);
     const tokensOut = llmUsage?.tokensOut ?? Math.ceil(raw.length / 4);
     const resolvedModel = llmUsage?.model || modelForCost;
-    let costUsd = 0;
+    let costUsd = typeof llmUsage?.costUsd === "number" && Number.isFinite(llmUsage.costUsd)
+      ? llmUsage.costUsd
+      : 0;
     try {
       const judgeProviderId = resolvedModel?.includes("/")
         ? resolvedModel.split("/")[0]
         : undefined;
-      costUsd = resolvedModel
+      costUsd = llmUsage?.costUsd === undefined && resolvedModel
         ? estimateCost({
             model: resolvedModel,
             tokensIn,
@@ -129,7 +133,7 @@ export async function judgeTask(args: JudgeTaskArgs): Promise<JudgementResult | 
             cachedWriteInputTokens: llmUsage?.cachedWriteInputTokens,
             providerId: judgeProviderId,
           })
-        : 0;
+        : costUsd;
     } catch (err) {
       // Mask any key-shaped secret that could have leaked into the pricing
       // error before it reaches the console / run log.

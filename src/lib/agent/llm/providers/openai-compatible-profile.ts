@@ -18,7 +18,6 @@
 
 import {
   isAllowedLlmBaseUrl,
-  isCuratedLocalOrigin,
   validateLlmBaseUrl,
 } from "../route/ssrf";
 import { redactUrl } from "../route/url-redact";
@@ -122,7 +121,7 @@ export const assertSafeUserBaseURL = (
   allowLocalExemption: boolean = false,
 ): void => {
   if (!baseURL) return; // no user-supplied override → use the curated profile
-  if (allowLocalExemption && provider && LOCAL_PROVIDER_IDS.has(provider) && isCuratedLocalOrigin(baseURL)) {
+  if (allowLocalExemption && provider && LOCAL_PROVIDER_IDS.has(provider)) {
     // The curated-local exemption is scoped to the exact ollama/litellm origins
     // and to a USER-configured `baseURL` (provenance === "user", i.e.
     // `allowLocalExemption === true`). An injected / untrusted `baseURL` must
@@ -131,7 +130,7 @@ export const assertSafeUserBaseURL = (
     // loopback / RFC1918 `baseURL` is rejected. Thread `allowLocalExemption`
     // through so `isAllowedLlmBaseUrl` cannot re-grant the exemption for an
     // untrusted origin.
-    if (!isAllowedLlmBaseUrl(baseURL, allowLocalExemption)) {
+    if (!isAllowedLlmBaseUrl(baseURL, allowLocalExemption, "user-configured")) {
       throw new UnsafeBaseUrlError(`Unsafe LLM baseUrl rejected (SSRF guard): ${redactUrl(baseURL)}`);
     }
     return;

@@ -219,6 +219,12 @@ const ScreenshotSchema = z.object({
   file_name: z.string().max(MAX_SHORT_TEXT_CHARS).optional().describe("Optional filename for the screenshot."),
 });
 
+/** Ask the main multimodal model to inspect one fresh viewport frame next turn. */
+const InspectVisualSchema = z.object({
+  type: z.literal("inspect_visual").describe("Capture the current viewport and attach it once to your next turn. Use only when pixels add material evidence that DOM/accessibility text cannot provide: images, charts, canvas, maps, layout, occlusion, or visual ambiguity. Do not use routinely."),
+  reason: boundedText(MAX_SHORT_TEXT_CHARS).describe("Briefly state what visual evidence you need."),
+});
+
 /** Save the current page as a PDF. */
 const SaveAsPdfSchema = z.object({
   type: z.literal("save_as_pdf").describe("Save the current page as a PDF."),
@@ -486,6 +492,7 @@ export const ActionSchema = z.discriminatedUnion("type", [
   SearchSchema,
   UploadFileSchema,
   ScreenshotSchema,
+  InspectVisualSchema,
   SaveAsPdfSchema,
   DropdownOptionsSchema,
   PageNextSchema,

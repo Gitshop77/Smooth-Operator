@@ -288,7 +288,7 @@ export const protocol: Protocol<OpenAIChatBody, string, { type: string; content?
       }
       return { state, events };
     },
-    terminal: (frame: string): boolean => {
+    terminal: (frame: string, state?: StreamState): boolean => {
  // OpenAI sends `usage` in a SEPARATE chunk AFTER `finish_reason`
  // (with empty `choices: []`), and then a final `[DONE]` sentinel. The
  // previous implementation returned `true` on a non-null `finish_reason`,
@@ -302,11 +302,20 @@ export const protocol: Protocol<OpenAIChatBody, string, { type: string; content?
  // preceding usage chunk). Returning `true` ONLY on `[DONE]` lets the
  // loop continue reading the usage chunk so cost tracking works.
  //
+ // Some OpenAI-compatible servers (observed with llama.cpp) occasionally
+ // finish generation and emit the final usage chunk but leave the SSE body
+ // open without a literal `[DONE]`. At that point there can be no more answer
+ // text: a non-null finish_reason has already arrived and the post-finish
+ // usage record is present. Treat that pair as equivalent terminal evidence
+ // so the client cancels the idle reader instead of waiting for the long local
+ // stream-stall timeout. This retains usage accounting while remaining later
+ // than the old, unsafe "finish_reason alone" early-exit behavior.
+ //
  // The earlier streaming-truncation regression is preserved: every
  // delta chunk still carries `finish_reason: null`, which is neither
  // `[DONE]` nor a non-null value, so `terminal()` returns `false` for it.
       if (frame === "[DONE]") return true;
-      return false;
+      return state?.finishReason !== undefined && state.usage !== undefined;
     },
     completion: (state: StreamState) => ({
       reasoningObserved: state.reasoningObserved,

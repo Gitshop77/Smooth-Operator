@@ -18,7 +18,7 @@ const { pricingMock, refreshPricingMock } = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/agent/llm/pricing", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/agent/llm/pricing")>();
-  pricingMock.mockImplementation((model: string) => actual.getPricingForModel(model));
+  pricingMock.mockImplementation((model: string, providerId?: string) => actual.getPricingForModel(model, providerId));
   return { ...actual, getPricingForModel: pricingMock, refreshPricingFromCatalog: refreshPricingMock };
 });
 
@@ -109,6 +109,7 @@ describe("usage-panel presentation helpers", () => {
     expect(isUncataloguedModel("totally-unknown-model-xyz")).toBe(true);
     pricingMock.mockReturnValueOnce({ uncatalogued: false } as never);
     expect(isUncataloguedModel("gpt-5.4")).toBe(false);
+    expect(isUncataloguedModel("any-local-model", "ollama")).toBe(false);
     expect(isUncataloguedModel("")).toBe(false);
   });
 });

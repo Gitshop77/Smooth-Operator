@@ -81,6 +81,7 @@ import {
   handleGetStorage,
   handleGoBack,
   handleHover,
+  handleInspectVisual,
   handleInput,
   handleListTabs,
   handleLoadSkill,
@@ -353,6 +354,7 @@ export async function executeAction(
       }
       case "upload_file":     return await handleUploadFile(ctx, action);
       case "screenshot":      return await handleScreenshot(ctx, action);
+      case "inspect_visual":  return handleInspectVisual(ctx, action);
       case "save_as_pdf":     return await handleSaveAsPdf(ctx, action);
       case "dropdown_options":return await handleDropdownOptions(ctx, action);
       case "search_page":     return await handleSearchPage(ctx, action);

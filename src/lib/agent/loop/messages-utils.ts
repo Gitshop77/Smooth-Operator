@@ -6,7 +6,21 @@ import { escapeXml } from "./xml-escape";
 export const ELEMENTS_TEXT_CHAR_CAP = 60_000;
 
 /** Max chars of extracted content surfaced inline per action result. */
-const EXTRACTED_CONTENT_INLINE_LIMIT = 2000;
+const EXTRACTED_CONTENT_INLINE_LIMIT = 8_500;
+
+/** Model-authored bookkeeping is prompted to be terse, but local/open models
+ * can ignore that request and return paragraphs. Bound it at the render seam
+ * (not the parser) so the action still executes and the full in-memory record
+ * remains available to compaction, while one verbose turn cannot crowd the
+ * next page observation out of a constrained context window. */
+const EVALUATION_INLINE_LIMIT = 600;
+const MEMORY_INLINE_LIMIT = 1600;
+const GOAL_INLINE_LIMIT = 600;
+
+function boundModelNote(text: string, maxChars: number, label: string): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n…[truncated verbose ${label}]`;
+}
 
 /**
  * Recent observations keep their full content; observations outside the
@@ -14,7 +28,7 @@ const EXTRACTED_CONTENT_INLINE_LIMIT = 2000;
  * so context stays bounded without silently dropping the action history —
  * WebVoyager-style masking at the safe mid-capacity regime.
  */
-const OBSERVATION_RETENTION_WINDOW = 3;
+const OBSERVATION_RETENTION_WINDOW = 2;
 
 /** Max chars of the action-args placeholder rendered for stale observations. */
 const STALE_ACTION_ARGS_LIMIT = 80;
@@ -72,9 +86,9 @@ export function renderHistory(history: HistoryItem[], limit: number, total = his
     const inRetention = i >= retentionStart;
     const stepTag = escapeXml(String(h.step), true);
     out += `<step_${stepTag} agent="${escapeXml(h.agent, true)}">\n`;
-    if (h.evaluation) out += `Evaluation: ${wrapUntrusted(h.evaluation)}\n`;
-    if (h.memory) out += `Memory: ${wrapUntrusted(h.memory)}\n`;
-    if (h.goal) out += `Goal: ${wrapUntrusted(h.goal)}\n`;
+    if (h.evaluation) out += `Evaluation: ${wrapUntrusted(boundModelNote(h.evaluation, EVALUATION_INLINE_LIMIT, "evaluation"))}\n`;
+    if (h.memory) out += `Memory: ${wrapUntrusted(boundModelNote(h.memory, MEMORY_INLINE_LIMIT, "memory"))}\n`;
+    if (h.goal) out += `Goal: ${wrapUntrusted(boundModelNote(h.goal, GOAL_INLINE_LIMIT, "goal"))}\n`;
     if (h.results.length) {
       out += `Action Results:\n`;
       for (const r of h.results) {

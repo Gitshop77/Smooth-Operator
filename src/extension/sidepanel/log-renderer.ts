@@ -18,6 +18,16 @@ import {
 } from "./elements";
 import {
   addSystemMessage,
+  addAssistantMessage,
+  addLLMCallStart,
+  updateLLMCallProgress,
+  finishLLMCall,
+  addReasoningActivity,
+  addPlannerActivity,
+  addActionActivity,
+  finishActionActivity,
+  addJudgeActivity,
+  resetActivityRenderState,
 } from "./chat-renderer";
 import { showTakeoverBanner, hideTakeoverBanner } from "./takeover";
 import { requestAgentEventReconciliation } from "./reconcile-port";
@@ -55,6 +65,7 @@ function scheduleCostStorageWrite(): void {
  * new run so counters don't carry over from a previous run.
  */
 export function clearRunTotals(): void {
+  resetActivityRenderState();
   totalCost = 0;
   totalTokens = 0;
   totalsRestored = true;
@@ -94,7 +105,17 @@ export function addLogRow(event: LogEvent, time: string, version: EventVersion =
   // panel may have missed an authoritative snapshot (for example, another
   // open side panel started the next run). Queue STATUS first, then retain
   // the transcript admission check below as the boundary against stale text.
-  requestAgentEventReconciliation();
+  // Progress frames are ephemeral UI animation, not authoritative lifecycle
+  // transitions. Re-requesting STATUS for every SSE chunk would create an IPC
+  // storm and erase the efficiency gained by keeping them out of storage.
+  // Durable snapshots already arrive through chrome.storage.session. STATUS
+  // reconciliation is only useful at lifecycle boundaries; requesting it for
+  // every reasoning/tool/cost row creates avoidable worker IPC on long runs.
+  if (
+    event.type === "run-start" || event.type === "done" ||
+    (event.type === "error" && !event.recoverable) ||
+    event.type === "paused" || event.type === "resumed" || event.type === "takeover"
+  ) requestAgentEventReconciliation();
   // A live AGENT_EVENT proves the worker is awake — keep the keepalive
   // backoff at its baseline instead of climbing on a healthy worker.
   resetKeepaliveBackoff();
@@ -107,8 +128,7 @@ export function addLogRow(event: LogEvent, time: string, version: EventVersion =
       addSystemMessage("▶", `Task: ${event.task}`, undefined, time);
       break;
     case "planner-step":
-      body = event.decision + (event.goal ? " → " + event.goal : "");
-      addSystemMessage("🧭", body, undefined, time);
+      addPlannerActivity(event, time);
       break;
     case "navigator-step-start":
       // Agent-loop indices are zero-based; transcript numbering matches the
@@ -120,18 +140,34 @@ export function addLogRow(event: LogEvent, time: string, version: EventVersion =
       addSystemMessage("👁", body, undefined, time);
       break;
     case "thinking":
-      // The loop surfaces the model's redacted chain-of-thought in `text`.
-      body = event.text || event.nextGoal || "";
-      if (body) addSystemMessage("🧠", body, undefined, time);
+      if (event.text || event.evaluation || event.memory || event.nextGoal) {
+        addReasoningActivity(event, time);
+      }
+      break;
+    case "llm-call-start":
+      addLLMCallStart(event, time);
+      break;
+    case "llm-call-progress":
+      updateLLMCallProgress(event);
+      break;
+    case "llm-call-end":
+      finishLLMCall(event, time);
+      break;
+    case "judge":
+      addJudgeActivity(event, time);
       break;
     case "action":
-      body = event.description || "";
-      addSystemMessage("🖱", `Action ${event.index}/${event.total}: ${body}`, undefined, time);
+      addActionActivity(event, time);
       break;
     case "action-result":
-      body = event.message || "";
-      addSystemMessage(event.success ? "✓" : "✗", `${event.name}: ${body}`, undefined, time);
+      finishActionActivity(event, time);
       break;
+    case "visual-inspection": {
+      const size = event.screenshotChars ? ` · ${Math.round(event.screenshotChars / 1024)} KB` : "";
+      const icon = event.stage === "unavailable" ? "⚠" : "◉";
+      addSystemMessage(icon, `Vision ${event.stage}${size} — ${event.message}`, event.stage === "unavailable" ? "warning" : undefined, time);
+      break;
+    }
     case "budget-warning":
       addSystemMessage("⚠", `${event.pct}% of steps used`, "warning", time);
       break;
@@ -145,6 +181,7 @@ export function addLogRow(event: LogEvent, time: string, version: EventVersion =
         event.success ? undefined : "error",
         time,
       );
+      if (event.success && event.text) addAssistantMessage(event.text, time);
       break;
     case "error": {
       const parts = [event.code ? `[${event.code}]` : null, event.recovery ?? null].filter(Boolean).join(" ");
@@ -228,7 +265,11 @@ chrome.runtime.onMessage.addListener((msg: unknown, sender) => {
   // fire-and-forget AGENT_EVENT broadcasts don't get re-rendered.
   if (sender.id !== chrome.runtime.id) return false;
   if (sender.tab) return false;
-  if (sender.url) return false;
+  // Brave/Chromium includes the MV3 service worker URL in sender.url. The old
+  // blanket rejection silently dropped every real background event while
+  // URL-less test mocks passed. Admit only the exact packaged worker URL;
+  // options/sidepanel/other extension pages remain rejected.
+  if (sender.url && sender.url !== chrome.runtime.getURL("background.js")) return false;
   const payload = msg as {
     type?: string;
     event?: LogEvent;

@@ -19,7 +19,9 @@ import {
   DEFAULT_MIN_HTML_LENGTH,
 } from "../../html-summarizer";
 import { buildPostObserveNudges, appendPendingLoopWarning } from "../context/injection-points";
-import { deriveNavigatorObservationCapsV1 } from "../../prompts/prompt-token-budget";
+import {
+  deriveNavigatorObservationCapsV1,
+} from "../../prompts/prompt-token-budget";
 
 /**
  * Per-step observation payloads (interactive-element DOM text, accessibility
@@ -111,6 +113,13 @@ export async function prepareNavigatorRequest(
   // failure in the provider layer. Unknown context → the fixed 128k defaults
   // (identical behavior to the previous hard-coded constants).
   const caps = deriveNavigatorObservationCapsV1(state.config.contextTokens);
+  const oneShotVisual = browserState.screenshotIsOneShot === true;
+  // A screenshot should ALWAYS be delivered whole — we never crop the page the
+  // model is reasoning about. The only safety gate is a wildly-oversized image
+  // (corrupt capture / hostile payload); that is dropped rather than silently
+  // truncating the viewport. The per-image token cost is accounted as a flat
+  // allowance in llm-direct's budget assert, not via a char cap here.
+  const SCREENSHOT_SAFETY_CHAR_CAP = 3_000_000;
   const capPayload = (
     value: string | undefined,
     max: number,
@@ -124,26 +133,42 @@ export async function prepareNavigatorRequest(
 
   navElementsText = capPayload(
     navElementsText,
-    caps.elementsTextChars,
+    oneShotVisual ? Math.min(caps.elementsTextChars, 16_000) : caps.elementsTextChars,
     "truncate",
     () =>
-      `Navigator DOM truncated to ${caps.elementsTextChars} chars ` +
+      `Navigator DOM truncated for this observation ` +
       `(raw/fallback was ${navElementsText.length}).`,
   ) ?? navElementsText;
 
   const screenshot = capPayload(
     browserState.screenshot,
-    caps.screenshotChars,
+    SCREENSHOT_SAFETY_CHAR_CAP,
     "drop",
     () =>
       `Navigator screenshot dropped (${browserState.screenshot?.length} chars exceeds ` +
-      `the ${caps.screenshotChars}-char cap for this model's context window) to ` +
-      `keep the prompt within the model's input budget.`,
+      `the ${SCREENSHOT_SAFETY_CHAR_CAP}-char safety cap) — likely a corrupt or ` +
+      `hostile capture; keeping the prompt within the model's input budget.`,
   );
+  if (oneShotVisual) {
+    state.onEvent(screenshot
+      ? {
+          type: "visual-inspection",
+          step: state.step,
+          stage: "delivered",
+          message: "One-shot viewport attached to this model turn; it will not persist",
+          screenshotChars: screenshot.length,
+        }
+      : {
+          type: "visual-inspection",
+          step: state.step,
+          stage: "unavailable",
+          message: "Captured viewport could not fit the model's visual observation budget",
+        });
+  }
 
   const axTree = capPayload(
     browserState.axTree,
-    caps.axTreeChars,
+    oneShotVisual ? Math.min(caps.axTreeChars, 8_000) : caps.axTreeChars,
     "truncate",
     () =>
       `Navigator axTree truncated to ${caps.axTreeChars} chars ` +

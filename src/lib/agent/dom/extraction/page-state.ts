@@ -111,6 +111,18 @@ interface WalkAccumulator {
 
 let visibilityCache: WeakMap<HTMLElement, boolean> = new WeakMap<HTMLElement, boolean>();
 
+/** Automatic observations describe the current viewport, not the whole
+ * document. Full-page evidence is available through extract/search_page and
+ * paged snapshots. A one-quarter viewport margin prevents elements at the
+ * fold from flickering in and out because of fractional layout changes. */
+function intersectsObservationViewport(el: HTMLElement, rect?: DOMRect): boolean {
+  const r = rect ?? el.getBoundingClientRect();
+  const marginY = Math.max(100, window.innerHeight * 0.25);
+  const marginX = Math.max(50, window.innerWidth * 0.1);
+  return r.bottom >= -marginY && r.top <= window.innerHeight + marginY &&
+    r.right >= -marginX && r.left <= window.innerWidth + marginX;
+}
+
 function serializeText(node: Text, depth: number, acc: WalkAccumulator): void {
   const parent = node.parentElement;
   if (!parent) return;
@@ -120,6 +132,7 @@ function serializeText(node: Text, depth: number, acc: WalkAccumulator): void {
     visibilityCache.set(parent, visible);
   }
   if (!visible) return;
+  if (!intersectsObservationViewport(parent)) return;
 
   const t = (node.textContent || "").replace(/\s+/g, " ").trim();
   if (t.length >= DOM_CONFIG.minTextLength) {
@@ -175,7 +188,7 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
   let interactive = false;
   if (isInteractive(el)) {
     rect = el.getBoundingClientRect();
-    const visible = isVisibleFull(el, rect);
+    const visible = isVisibleFull(el, rect) && intersectsObservationViewport(el, rect);
     visibilityCache.set(el, visible);
     if (!visible) return;
     interactive = true;
@@ -225,7 +238,7 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
       containerVisible = isVisibleFull(el);
       visibilityCache.set(el, containerVisible);
     }
-    if (containerVisible) {
+    if (containerVisible && intersectsObservationViewport(el)) {
       const idx = ++acc.index;
       const attrs = buildAttrs(el);
       const hash = hashElement(el, attrs);

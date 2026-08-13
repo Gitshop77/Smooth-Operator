@@ -5,7 +5,7 @@ export const DEFAULT_CONFIG: AgentConfig = {
   costCapUsd: DEFAULT_COST_CAP,
   maxSteps: 100,
   maxActionsPerStep: 10,
-  plannerInterval: 5,
+  plannerInterval: 10,
   maxFailures: 5,
   enableLoopDetection: true,
   enableCompaction: true,

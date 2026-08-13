@@ -32,6 +32,38 @@
  */
 export type CurrentPageTaskKind = "title" | "url" | "page";
 
+/**
+ * Decide whether a task can start with the Navigator instead of paying for a
+ * separate planning call. This is deliberately narrower than a generic task
+ * classifier: it admits only read-only, current-page questions and rejects
+ * anything that implies mutation, transactions, multi-site research, or an
+ * explicitly sequenced workflow. The Navigator still plans its immediate
+ * action in its structured response; the Planner remains available on the
+ * periodic/recovery paths.
+ */
+export function shouldUseDirectNavigatorStart(
+  task: string,
+  mode: "restricted" | "standard" | "full_agentic" | string | undefined,
+): boolean {
+  if (mode === "full_agentic" || typeof task !== "string") return false;
+  const normalized = task.toLowerCase().replace(/\s+/g, " ").trim();
+  if (!normalized || normalized.length > 420) return false;
+
+  const readOnlyIntent = /\b(what|which|who|when|where|how|find|report|tell|summari[sz]e|explain|identify|extract|read|list)\b/.test(normalized);
+  if (!readOnlyIntent) return false;
+  const currentPageAnchor = /\b(?:this|current)\b.{0,40}\b(?:page|article|site|document)\b/.test(normalized);
+  if (!currentPageAnchor) return false;
+
+  // These intents benefit materially from an up-front global plan or can
+  // change external state. False negatives only cost one planner call; false
+  // positives would reduce reliability, so keep this list conservative.
+  const complexOrMutating = /\b(click|type|enter|fill|submit|send|post|publish|upload|download|delete|remove|edit|change|create|book|buy|purchase|pay|sign|log\s?in|register|apply|schedule|email|message|reply|compare|research|investigate|across|multiple|several|websites?|sources?|tabs?|then|after that|finally|spreadsheet|presentation|document|report\s+(?:with|from)\s+(?:multiple|several))\b/.test(normalized);
+  if (complexOrMutating) return false;
+  if (/\b(?:step\s*\d+|first\b.*\bthen\b|second\b.*\bthird\b)/.test(normalized)) return false;
+
+  return true;
+}
+
 /** Positive fast-path verdict: direct evidence answers the task. */
 export interface FastPathAnswer {
   answerable: true;

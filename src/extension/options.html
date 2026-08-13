@@ -52,6 +52,24 @@
         </div>
 
         <div class="section-group">
+          <h3 class="section-title">Connection profile</h3>
+          <p class="section-desc">Save a friendly name while keeping the exact provider model id internally. The selected profile is the default and survives extension reloads and updates.</p>
+          <div class="row2">
+            <label for="connectionProfile">
+              <span>Default profile</span>
+              <select id="connectionProfile"><option value="">Current settings (not saved as a profile)</option></select>
+            </label>
+            <label for="connectionProfileName">
+              <span>Profile name</span>
+              <input type="text" id="connectionProfileName" placeholder="Qwen 35B A3B" maxlength="80" autocomplete="off" />
+            </label>
+          </div>
+          <div class="test-connection">
+            <button type="button" id="saveConnectionProfile" class="btn btn-primary">Save as default profile</button>
+            <button type="button" id="deleteConnectionProfile" class="btn btn-ghost">Delete profile</button>
+            <span id="connectionProfileStatus" class="test-result" role="status" aria-live="polite"></span>
+          </div>
+
           <label for="provider">
             <span>Provider</span>
             <select id="provider"></select>
@@ -69,9 +87,8 @@
             <span>
               Remember API key on this device —
               <strong>off by default</strong>. Keeps the key available after
-              browser restarts by storing it unencrypted in this browser's
-              local storage, where it remains readable to extension code on
-              every page you visit — not just this page.
+              browser restarts in this extension's encrypted device vault.
+              Local providers such as llama.cpp/Ollama do not need a key.
             </span>
           </label>
 
@@ -190,23 +207,23 @@
 
         <!-- Vision Assistant -->
         <div class="section-group">
-          <h3 class="section-title">Local Vision Assistant (WebGPU)</h3>
+          <h3 class="section-title">Visual intelligence</h3>
           <p class="section-desc">
-            Runs a vision model entirely in your browser via WebGPU — zero API cost, fully private.
-            It uses ~2.5&nbsp;GB of memory and is recommended for text-only LLMs (DeepSeek, Llama, Qwen, etc.);
-            it adds visual element detection the DOM can&rsquo;t see (Canvas, WebGL, visual layout).
+            Adaptive mode keeps fast DOM + accessibility observations as the baseline, then lets the agent request
+            one fresh viewport frame when pixels improve accuracy. Text-only models can also use the optional local
+            WebGPU detector for Canvas/WebGL controls; it loads only when called.
           </p>
           <label class="radio-row">
-            <input type="radio" name="visionMode" id="visionMode_disabled" value="disabled" checked />
-            <span>Off — text-only LLMs only (no local vision)</span>
+            <input type="radio" name="visionMode" id="visionMode_disabled" value="disabled" />
+            <span>Off — do not offer visual inspection tools</span>
           </label>
           <label class="radio-row">
             <input type="radio" name="visionMode" id="visionMode_always" value="always" />
-            <span>On — always running (~2.5&nbsp;GB of memory, best for Canvas/WebGL pages)</span>
+            <span>Always — attach vision every step (slowest; use only for highly visual Canvas/WebGL tasks)</span>
           </label>
           <label class="radio-row">
-            <input type="radio" name="visionMode" id="visionMode_adaptive" value="adaptive" />
-            <span>Local — adaptive, the LLM calls vision on-demand (saves memory + inference time)</span>
+            <input type="radio" name="visionMode" id="visionMode_adaptive" value="adaptive" checked />
+            <span>Adaptive — the LLM requests main-model screenshots or local detection only when useful (recommended)</span>
           </label>
           <div id="localVisionStatus" class="vision-status is-hidden">
             <span id="localVisionBadge" class="vision-badge">Not loaded</span>
@@ -240,7 +257,7 @@
               </label>
               <label>
                 <span>Planner interval (steps)</span>
-                <input type="number" id="plannerInterval" min="1" max="20" value="5" />
+                <input type="number" id="plannerInterval" min="1" max="20" value="10" />
               </label>
               <label>
                 <span>Max consecutive failures</span>
@@ -254,9 +271,21 @@
                 <span>Screenshot quality (JPEG, 50–100)</span>
                 <input type="number" id="screenshotQuality" min="50" max="100" value="80" />
               </label>
+              <label>
+                <span>Screenshot token budget (per image, local vision models)</span>
+                <input type="number" id="screenshotImageTokens" min="256" max="65536" value="4096" />
+              </label>
+              <label>
+                <span>Max screenshot dimension (CSS px, 0 = full viewport)</span>
+                <input type="number" id="screenshotMaxDimension" min="0" max="4096" value="0" />
+              </label>
+              <label>
+                <span>Max screenshot size in bytes (0 = off; for hosted APIs)</span>
+                <input type="number" id="screenshotMaxBytes" min="0" max="5000000" value="0" />
+              </label>
               <label class="checkbox-row">
                 <input type="checkbox" id="enableScreenshots" checked />
-                <span>Enable screenshots for vision models</span>
+                <span>Allow visual models to request one-shot viewport screenshots (always mode still sends every step)</span>
               </label>
               <label class="checkbox-row">
                 <input type="checkbox" id="enableStealth" checked />

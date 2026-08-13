@@ -24,6 +24,11 @@ export interface ConnectionTestResult {
   modelCount?: number;
   /** Human-readable, already-redacted message (≤240 chars on failure). */
   message: string;
+  /** Exact model id accepted by the endpoint (may be auto-discovered). */
+  model?: string;
+  contextTokens?: number;
+  slots?: number;
+  vision?: boolean;
 }
 
 /** Inputs for {@link testProviderConnection}. */
@@ -44,6 +49,7 @@ export interface PlatformConnectionTestConfig {
   baseUrl?: string;
   resourceName?: string;
   provenance: "user" | "injected";
+  contextTokens?: number;
 }
 
 /** Trusted background connection test; no plaintext credential crosses the message boundary. */
@@ -59,11 +65,16 @@ export async function testSelectedModelConnection(
     ...(config.resourceName ? { resourceName: config.resourceName } : {}),
     provenance: config.provenance,
     credential: credentialStatus.status === "ready" ? credentialStatus.reference : null,
+    ...(config.contextTokens ? { contextTokens: config.contextTokens } : {}),
   });
   return {
     ok: result.ok,
     latencyMs: result.latencyMs,
     message: result.message,
+    model: result.model,
+    contextTokens: result.contextTokens,
+    slots: result.slots,
+    vision: result.vision,
   };
 }
 

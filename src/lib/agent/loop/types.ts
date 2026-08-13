@@ -80,7 +80,7 @@ export interface RunPhaseTransition {
 // ─── LLM call signatures ────────────────────────────────────────────────────
 
 /** Shared return shape for an LLM call that yields raw text + optional usage. */
-type LLMCall<Req> = (req: Req, signal?: AbortSignal) => Promise<{
+type LLMCall<Req> = (req: Req, signal?: AbortSignal, onProgress?: (progress: { outputChars: number; deltaChars: number; chunkCount: number; at: number }) => void) => Promise<{
   raw: string;
   tokensIn?: number;
   tokensOut?: number;
@@ -153,7 +153,7 @@ export interface LoopDeps {
  * extraction through a content-script bridge). When absent the orchestrator
  * calls {@link extractBrowserState} directly (in-page demo mode).
  */
-  extractState?: (tabs: TabInfo[]) => Promise<BrowserState>;
+  extractState?: (tabs: TabInfo[], options?: { includeScreenshotOnce?: boolean }) => Promise<BrowserState>;
   /**
  * Optional override for action-queue execution. When absent the orchestrator
  * uses the built-in {@link executeActionQueue}.
@@ -273,12 +273,18 @@ export interface LoopState {
   totalTokensIn: number;
   /** Total output tokens consumed (for the `runEnd` callback hook). */
   totalTokensOut: number;
+  /** Provider-reported input tokens for the most recent successful Navigator
+   * request. Drives the 85%-of-context compaction trigger; unlike cumulative
+   * run totals, this is the actual occupancy of one stateless model call. */
+  lastNavigatorInputTokens?: number;
   /** Last step at which compaction ran (used by `shouldCompact`). */
   lastCompactionStep: number | undefined;
   /** Compacted-memory text (replaces older history items when compaction fires). */
   compactedMemory: string | undefined;
   /** Loop-warning text from the previous step (prepended to the next nav request). */
   pendingLoopWarning: string | undefined;
+  /** One-shot visual request. Set by inspect_visual, consumed by the next observation. */
+  pendingVisualInspection?: boolean;
   /** Track whether the step-budget warning has already fired so it doesn't
  * repeat on every step from 75% to maxSteps-2 (context bloat). */
   budgetWarningFired: boolean;

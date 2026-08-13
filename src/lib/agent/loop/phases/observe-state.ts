@@ -37,7 +37,7 @@ export async function observeState(state: LoopState): Promise<ObserveStateResult
   const usedOverride = !!state.deps.extractState;
   try {
     const browserState = usedOverride
-      ? await state.deps.extractState!(tabs)
+      ? await state.deps.extractState!(tabs, { includeScreenshotOnce: state.pendingVisualInspection })
       : extractBrowserState(tabs);
     return { status: "ok", state: browserState, tabs };
   } catch (e) {

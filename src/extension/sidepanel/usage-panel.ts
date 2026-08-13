@@ -56,9 +56,9 @@ export function contextUsagePct(
  * estimated at the unknown-model fallback rate). Surfaces the fallback to the
  * user so a flat $ estimate isn't mistaken for provider pricing.
  */
-export function isUncataloguedModel(model: string): boolean {
+export function isUncataloguedModel(model: string, providerId?: string): boolean {
   if (!model) return false;
-  return getPricingForModel(model).uncatalogued === true;
+  return getPricingForModel(model, providerId).uncatalogued === true;
 }
 
 // ─── DOM surface ───────────────────────────────────────────────────────────
@@ -106,6 +106,7 @@ let snapshotDriven = false;
 /** Memoized `provider` storage value — quasi-static, invalidated on change. */
 let cachedProvider: string | null = null;
 let cachedContextOverride: number | null | undefined;
+let cachedModelDisplay: { model: string; label: string } | null | undefined;
 
 function usageHasContent(usage: RunUsage): boolean {
   return usage.model !== "" || usage.costUsd > 0;
@@ -124,11 +125,26 @@ async function contextLimitFor(model: string): Promise<number | undefined> {
   if (typeof chrome === "undefined" || !chrome.storage?.local) return undefined;
   if (cachedProvider === null) {
     try {
-      const res = await chrome.storage.local.get(["provider", "contextTokens"]);
+      const res = await chrome.storage.local.get([
+        "provider",
+        "contextTokens",
+        "open_cowork_connection_profiles_v1",
+        "open_cowork_active_connection_profile_v1",
+      ]);
       cachedProvider = typeof res.provider === "string" ? res.provider : "";
       cachedContextOverride = typeof res.contextTokens === "number" && res.contextTokens > 0
         ? res.contextTokens
         : null;
+      const profiles = Array.isArray(res.open_cowork_connection_profiles_v1)
+        ? res.open_cowork_connection_profiles_v1 as Array<Record<string, unknown>>
+        : [];
+      const active = profiles.find((profile) =>
+        profile.id === res.open_cowork_active_connection_profile_v1 &&
+        profile.model === model && typeof profile.name === "string");
+      cachedModelDisplay = {
+        model,
+        label: typeof active?.name === "string" && active.name.trim() ? active.name.trim() : model,
+      };
     } catch {
       cachedProvider = "";
       cachedContextOverride = null;
@@ -137,6 +153,12 @@ async function contextLimitFor(model: string): Promise<number | undefined> {
   if (cachedContextOverride) return cachedContextOverride;
   const catalogId = CATALOG_PROVIDER_ID_MAP[cachedProvider] ?? cachedProvider;
   return getModelsForProvider(catalogId, model)?.limit?.context;
+}
+
+async function displayModelFor(model: string): Promise<string> {
+  if (!model || typeof chrome === "undefined" || !chrome.storage?.local) return model;
+  if (cachedModelDisplay?.model === model) return cachedModelDisplay.label;
+  return model;
 }
 
 async function renderUsage(usage: RunUsage, _runActive: boolean): Promise<void> {
@@ -151,6 +173,7 @@ async function renderUsage(usage: RunUsage, _runActive: boolean): Promise<void> 
   if (!visible) return;
 
   const limit = await contextLimitFor(usage.model);
+  const displayModel = await displayModelFor(usage.model);
   // The model lookup is asynchronous. A later snapshot/storage refresh wins;
   // never let this older lookup repaint the newer run's totals.
   if (generation !== renderGeneration || !panelEl) return;
@@ -180,8 +203,8 @@ async function renderUsage(usage: RunUsage, _runActive: boolean): Promise<void> 
     if (usage.cachedInputTokens || usage.cachedWriteInputTokens) {
       parts.push(`${formatTokens(usage.cachedInputTokens ?? 0)} cache`);
     }
-    if (usage.model) parts.push(usage.model);
-    if (isUncataloguedModel(usage.model)) parts.push("uncatalogued price");
+    if (usage.model) parts.push(displayModel);
+    if (isUncataloguedModel(usage.model, cachedProvider ?? undefined)) parts.push("uncatalogued price");
     totals.textContent = `${parts.join(" · ")} · ${formatUsd(usage.costUsd)}`;
   }
 }
@@ -225,6 +248,10 @@ function initUsagePanel(): void {
     if ("provider" in changes || "contextTokens" in changes) {
       cachedProvider = null;
       cachedContextOverride = undefined;
+    }
+    if ("open_cowork_connection_profiles_v1" in changes ||
+        "open_cowork_active_connection_profile_v1" in changes) {
+      cachedModelDisplay = undefined;
     }
   });
   void refreshFromRunState();

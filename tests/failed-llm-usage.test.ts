@@ -54,6 +54,15 @@ describe("usage accounting for unusable model completions", () => {
       tokensOut: 50,
       reasoningTokens: 50,
     }));
+    const lifecycle = onEvent.mock.calls.map(([event]) => event.type);
+    expect(lifecycle).toContain("llm-call-start");
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: "llm-call-end",
+      role: "navigator",
+      status: "error",
+      tokensIn: 100,
+      reasoningTokens: 50,
+    }));
   });
 
   test("planner accounts usage on the same typed terminal path", async () => {
@@ -76,5 +85,16 @@ describe("usage accounting for unusable model completions", () => {
 
     expect(plannerCall).toHaveBeenCalledTimes(1);
     expect(onCost).toHaveBeenCalledWith(0.01, 100, 50);
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: "llm-call-start",
+      role: "planner",
+      prompt: expect.objectContaining({ historyItems: 0 }),
+    }));
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: "llm-call-end",
+      role: "planner",
+      status: "error",
+      reasoningTokens: 50,
+    }));
   });
 });

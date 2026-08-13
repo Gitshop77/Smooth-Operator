@@ -75,7 +75,7 @@ describe("V1 prompt compiler byte identity", () => {
     ]);
   });
 
-  test("preserves planner and judge bytes while keeping them cache-ineligible", async () => {
+  test("preserves planner and judge bytes while caching only the repeated planner prefix", async () => {
     const plannerSuffix = "\n\nPLANNER-FORMAT";
     const planner = await compilePlannerPromptV1({
       customPrompt: "Plan tersely.",
@@ -86,7 +86,11 @@ describe("V1 prompt compiler byte identity", () => {
       { role: "system", content: buildPlannerPrompt("Plan tersely.") + plannerSuffix },
       { role: "user", content: await buildPlannerUserMessage(plannerUser) },
     ]);
-    expect(planner.cache).toMatchObject({ cacheEligible: false, stableKey: null });
+    expect(planner.cache).toMatchObject({
+      cacheEligible: true,
+      stableSectionIds: ["planner.system"],
+      volatileSectionIds: ["planner.user"],
+    });
 
     const judgeInput = {
       task: "Submit the form",

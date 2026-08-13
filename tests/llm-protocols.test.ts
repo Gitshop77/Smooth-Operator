@@ -232,6 +232,13 @@ describe("OpenAIChat.protocol — streaming truncation regression", () => {
     expect(OpenAIChat.protocol.stream.terminal?.(realisticChunks[5])).toBe(false);
   });
 
+  test("terminates after finish_reason + usage when a compatible server omits [DONE]", () => {
+    let state = OpenAIChat.protocol.stream.initial(makeRequest()) as OpenAIChat.StreamState;
+    state = OpenAIChat.protocol.stream.step(state, realisticChunks[4]).state as OpenAIChat.StreamState;
+    state = OpenAIChat.protocol.stream.step(state, realisticChunks[5]).state as OpenAIChat.StreamState;
+    expect(OpenAIChat.protocol.stream.terminal?.(realisticChunks[5], state)).toBe(true);
+  });
+
   test("terminates on the [DONE] sentinel", async () => {
     expect(OpenAIChat.protocol.stream.terminal?.("[DONE]")).toBe(true);
   });
@@ -1075,6 +1082,11 @@ describe("resolveVisionSupport — modelSupportsVision gating logic", () => {
     expect(resolveVisionSupport("claude-3-opus", [])).toBe(true);
   });
 
+  test("local Qwen 3.5 35B A3B aliases resolve as multimodal", () => {
+    expect(resolveVisionSupport("qwen 35b a3b", [])).toBe(true);
+    expect(resolveVisionSupport("Qwen3.5-35B-A3B", [])).toBe(true);
+  });
+
   test("non-vision name with no catalog falls back to the heuristic (false)", () => {
     expect(resolveVisionSupport("text-embedding-3-small", [])).toBe(false);
   });
@@ -1228,7 +1240,11 @@ describe("azure facade baseURL path prefix", () => {
 // ─── route terminal diagnostics ────────────────────────────────────────────
 
 describe("generate — additive terminal diagnostics", () => {
-  async function generateFromSse(sseBody: string) {
+  async function generateFromSse(
+    sseBody: string,
+    closeStream = true,
+    onProgress?: (progress: { outputChars: number; deltaChars: number; chunkCount: number; at: number }) => void,
+  ) {
     const g = globalThis as unknown as { chrome?: unknown };
     const savedFetch = globalThis.fetch;
     const savedChrome = g.chrome;
@@ -1246,7 +1262,7 @@ describe("generate — additive terminal diagnostics", () => {
         body: new ReadableStream<Uint8Array>({
           start(controller) {
             controller.enqueue(encoder.encode(sseBody));
-            controller.close();
+            if (closeStream) controller.close();
           },
         }),
       })) as unknown as typeof fetch;
@@ -1254,6 +1270,7 @@ describe("generate — additive terminal diagnostics", () => {
       return await generate({
         model: cfg.model("gpt-4o"),
         messages: [{ role: "user", content: "hi" }],
+        ...(onProgress ? { onProgress } : {}),
       });
     } finally {
       globalThis.fetch = savedFetch;
@@ -1271,6 +1288,37 @@ describe("generate — additive terminal diagnostics", () => {
       terminalSeen: true,
       visibleContentChars: 0,
     });
+  });
+
+  test("finish_reason + usage resolves even when the SSE body stays open without [DONE]", async () => {
+    const response = await generateFromSse(
+      'data: {"choices":[{"delta":{"content":"complete"},"finish_reason":null}]}\n\n' +
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n' +
+      'data: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":1}}\n\n',
+      false,
+    );
+    expect(response.content).toBe("complete");
+    expect(response.usage).toMatchObject({ tokensIn: 2, tokensOut: 1 });
+    expect(response.terminalDiagnostic).toBeUndefined();
+  });
+
+  test("reports aggregate stream progress without forwarding model text", async () => {
+    const progress = vi.fn();
+    const response = await generateFromSse(
+      'data: {"choices":[{"delta":{"content":"secret "},"finish_reason":null}]}\n\n' +
+      'data: {"choices":[{"delta":{"content":"answer"},"finish_reason":null}]}\n\n' +
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n' +
+      "data: [DONE]\n\n",
+      true,
+      progress,
+    );
+    expect(response.content).toBe("secret answer");
+    expect(progress).toHaveBeenLastCalledWith(expect.objectContaining({
+      outputChars: 13,
+      deltaChars: 6,
+    }));
+    expect(JSON.stringify(progress.mock.calls)).not.toContain("secret");
+    expect(JSON.stringify(progress.mock.calls)).not.toContain("answer");
   });
 
   test("OpenAI-compatible reasoning-only exhaustion is classified without exposing reasoning", async () => {

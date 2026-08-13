@@ -176,6 +176,7 @@ const UNGATED_ACTION_TYPES = [
   "alert_send_keys",
   // Vision detection: read-only observation (like find_elements), no page
   // mutation. Safe in every mode including restricted.
+  "inspect_visual",
   "detect_visual",
   // Challenge detection: read-only DOM classifier (no DOM mutation, no
   // network requests). Safe in every mode including restricted.

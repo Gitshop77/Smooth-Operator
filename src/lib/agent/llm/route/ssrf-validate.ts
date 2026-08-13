@@ -12,6 +12,7 @@ import {
   isDangerousIpv4,
   isDangerousIpv6,
   isDangerousSinkIp,
+  isCgnatIpv4,
   isLocalHostname,
   isUserLocalIp,
   isBlockedWebhookHost,
@@ -71,6 +72,15 @@ export function validateLlmBaseUrl(
     return {
       ok: false,
       reason: `host resolves to a private/loopback/link-local address: ${normalizedHost}`,
+    };
+  }
+  // CGNAT is commonly a Tailscale peer address. It is reachable only when the
+  // endpoint was explicitly saved by the user; legacy/default boolean
+  // exemptions are deliberately insufficient.
+  if (isCgnatIpv4(normalizedHost) && provenance !== "user-configured") {
+    return {
+      ok: false,
+      reason: `host is a CGNAT/Tailscale endpoint not allowed for a non-user-configured baseUrl: ${normalizedHost}`,
     };
   }
   const h = normalizedHost.toLowerCase().replace(/\.$/, "");
@@ -176,20 +186,19 @@ export function isAllowedLlmBaseUrl(
   provenance?: SsrfProvenance,
 ): boolean {
   const exempt = resolveExempt(provenance, allowLocalExemption);
-  const res = validateLlmBaseUrl(url, false);
+  const res = validateLlmBaseUrl(url, false, "untrusted");
   if (res.ok) return true;
+  if (provenance === "user-configured") {
+    return validateLlmBaseUrl(url, true, provenance).ok;
+  }
   if (!exempt) return false;
   try {
     const targetOrigin = new URL(url).origin;
-    if (
-      LOCAL_PROVIDER_BASE_URLS.some(
-        (curated) => new URL(curated).origin === targetOrigin,
-      )
-    ) {
+    if (LOCAL_PROVIDER_BASE_URLS.some((curated) => new URL(curated).origin === targetOrigin)) {
       return true;
     }
   } catch {
-    // Invalid URL → not a curated local provider; leave it rejected.
+    // Invalid URL remains rejected.
   }
   return false;
 }
@@ -216,7 +225,8 @@ export function validateWebhookUrl(url: string, provenance?: SsrfProvenance): Ss
   if (!host) {
     return { ok: false, reason: `missing host in URL: ${redactUrl(url)}` };
   }
-  if (provenance === "user-configured" && (isLocalHostname(host) || isUserLocalIp(host))) {
+  if (provenance === "user-configured" && !isCgnatIpv4(host) &&
+      (isLocalHostname(host) || isUserLocalIp(host))) {
     return { ok: true };
   }
   if (isBlockedWebhookHost(host)) {

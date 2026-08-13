@@ -83,6 +83,8 @@ export interface BrowserState {
   elementIdentities?: Record<number, string>;
   /** Optional screenshot (base64 data URL) for vision-capable models. */
   screenshot?: string;
+  /** Internal marker: screenshot was explicitly requested for one model turn. */
+  screenshotIsOneShot?: boolean;
   /** Optional AX tree (semantic accessibility tree) for vision/semantic models. */
   axTree?: string;
   /** Device pixel ratio of the tab (for screenshot/vision coordinate scaling).
@@ -172,6 +174,8 @@ export interface ActionResult {
   data?: unknown;
   /** Set true ONLY for the `done` action. */
   isDone?: boolean;
+  /** Requests one bounded viewport image on the next navigator observation. */
+  requestVisualInspection?: boolean;
 }
 
 // ─── History ────────────────────────────────────────────────────────────────
@@ -194,15 +198,37 @@ export interface HistoryItem {
 
 // ─── Loop events (streamed to the UI) ───────────────────────────────────────
 
+export type LLMCallRole = "planner" | "navigator" | "judge" | "compaction";
+
+/** Content-free prompt telemetry. Counts make a large request explainable
+ * without copying page text, screenshots, user data, or system prompts into
+ * the persisted UI event stream. */
+export interface LLMPromptStats {
+  historyItems: number;
+  requestChars: number;
+  taskChars?: number;
+  planItems?: number;
+  tabCount?: number;
+  elementsChars?: number;
+  axTreeChars?: number;
+  screenshotChars?: number;
+  compactedMemoryChars?: number;
+}
+
 /** Tagged union of all events the agent loop emits to the UI. */
 export type LogEvent =
   | { type: "run-start"; task: string; maxSteps: number }
-  | { type: "planner-step"; step: number; decision: "continue" | "done" | "web_task"; goal?: string; plan?: string[] }
+  | { type: "planner-step"; step: number; decision: "continue" | "done" | "web_task"; goal?: string; plan?: string[]; thinking?: string; text?: string; currentPlanItem?: number }
   | { type: "navigator-step-start"; step: number }
   | { type: "state"; step: number; url: string; elementCount: number; newElementCount: number; pageInfo: string }
   | { type: "thinking"; step: number; text: string; evaluation: string; memory: string; nextGoal: string }
+  | { type: "llm-call-start"; step: number; callId: string; role: LLMCallRole; attempt: number; startedAt: number; prompt: LLMPromptStats }
+  | { type: "llm-call-progress"; step: number; callId: string; role: LLMCallRole; attempt: number; outputChars: number; chunkCount: number; elapsedMs: number }
+  | { type: "llm-call-end"; step: number; callId: string; role: LLMCallRole; attempt: number; status: "success" | "error"; durationMs: number; outputChars: number; parseValid?: boolean; model?: string; tokensIn?: number; tokensOut?: number; reasoningTokens?: number; cachedInputTokens?: number; cachedWriteInputTokens?: number; error?: string }
+  | { type: "judge"; step: number; stage: "start" | "verdict" | "error"; verdict?: boolean; reason?: string }
   | { type: "action"; step: number; index: number; total: number; name: string; description: string }
   | { type: "action-result"; step: number; name: string; success: boolean; message: string }
+  | { type: "visual-inspection"; step: number; stage: "requested" | "captured" | "delivered" | "unavailable"; message: string; screenshotChars?: number }
   | { type: "budget-warning"; step: number; pct: number }
   | { type: "loop-warning"; step: number; count: number }
   | { type: "compaction"; step: number; compactedCount: number }
