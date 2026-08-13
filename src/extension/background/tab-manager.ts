@@ -116,7 +116,12 @@ export async function extractStateFromTab(
           const dpr = (res.state as { devicePixelRatio?: number }).devicePixelRatio ?? 1;
           const annotated = await annotateScreenshot(dataUrl, elementRects as never, {
             scaleFactor: dpr,
-            refPrefix: "e",
+            // NO refPrefix: the annotator's default label is the bare element
+            // index (`refPrefix + String(el.index)`), which is exactly what the
+            // navigator prompt promises — "numbered colored labels ... match the
+            // [index] numbers in the elements tree". A prefix like "e" made the
+            // drawn labels (`e7`) diverge from the prompt contract and forced
+            // every vision model to infer the mapping on every step.
             boxColors: [...DEFAULT_ANNOTATE_PALETTE],
           });
           throwIfAborted(signal);
@@ -256,6 +261,17 @@ export function waitForTabLoad(tabId: number, timeoutMs = 8000, signal?: AbortSi
     const listener = (id: number, info: chrome.tabs.OnUpdatedInfo) => {
       if (id === tabId && info.status === "complete") finish();
     };
+    // A closed tab can never finish loading. Without this, a tab closed right
+    // after navigation resolves the wait silently (the `.catch(() => finish())`
+    // on tabs.get below), and the caller proceeds against a dead tab — burning
+    // agent steps on "extract failed: no such tab" until maxFailures. Reject
+    // with a distinct error instead so the step fails fast and the loop can
+    // re-plan (switch to a surviving tab).
+    const onRemoved = (removedId: number) => {
+      if (removedId === tabId) {
+        finish(new Error(`waitForTabLoad: tab ${tabId} was closed before it finished loading`));
+      }
+    };
     const onAbort = () => finish(
       signal?.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError"),
     );
@@ -264,6 +280,9 @@ export function waitForTabLoad(tabId: number, timeoutMs = 8000, signal?: AbortSi
         done = true;
         clearTimeout(timeoutId);
         chrome.tabs.onUpdated.removeListener(listener);
+        // Defensive guard: the API is always present in Chrome, but test stubs
+        // and degraded environments may omit it — registration must not throw.
+        if (chrome.tabs.onRemoved) chrome.tabs.onRemoved.removeListener(onRemoved);
         signal?.removeEventListener("abort", onAbort);
         if (error) reject(error);
         else resolve();
@@ -276,12 +295,25 @@ export function waitForTabLoad(tabId: number, timeoutMs = 8000, signal?: AbortSi
     }
     signal?.addEventListener("abort", onAbort, { once: true });
     chrome.tabs.onUpdated.addListener(listener);
+    // Defensive guard: the API is always present in Chrome, but test stubs and
+    // degraded environments may omit it — registration must not throw.
+    if (chrome.tabs.onRemoved) chrome.tabs.onRemoved.addListener(onRemoved);
     chrome.tabs
       .get(tabId)
       .then((t) => {
         if (t.status === "complete") finish();
       })
-      .catch(() => finish());
+      .catch((e) => {
+        // A missing tab is a hard failure (reject); a transient chrome error
+        // keeps the historical resolve-on-error behavior (the tab may still
+        // load and the onUpdated listener will fire).
+        const message = e instanceof Error ? e.message : String(e);
+        if (/no tab with id/i.test(message)) {
+          finish(new Error(`waitForTabLoad: tab ${tabId} was closed before it finished loading`));
+        } else {
+          finish();
+        }
+      });
   });
 }
 

@@ -24,6 +24,7 @@ export const chatMessages = $<HTMLDivElement>("chatMessages");
 export const messageInput = $<HTMLTextAreaElement>("messageInput");
 export const sendBtn = $<HTMLButtonElement>("sendBtn");
 export const stopBtn = $<HTMLButtonElement>("stopBtn");
+export const pauseBtn = document.getElementById("pauseBtn") as HTMLButtonElement | null;
 export const costLabel = $<HTMLSpanElement>("costLabel");
 export const tokenLabel = $<HTMLSpanElement>("tokenLabel");
 export const statusLabel = $<HTMLSpanElement>("statusLabel");

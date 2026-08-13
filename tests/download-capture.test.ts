@@ -84,6 +84,25 @@ describe("download capture ring", () => {
     });
   });
 
+  test("strips signed query strings / tokens from the captured URL before the agent can read it", async () => {
+    const { recordDownload, getCapturedDownloads, clearCapturedDownloads } =
+      await import("../src/extension/background/message-routing");
+    clearCapturedDownloads();
+    // Authenticated download URLs embed signed query strings; list_downloads
+    // ships the ring verbatim to the agent, so the secret must be stripped at
+    // capture time.
+    recordDownload(completeDelta({
+      url: { current: "https://example.com/export.csv?X-Amz-Signature=abc123def456&token=s3cr3t" },
+    }) as never);
+    const list = getCapturedDownloads();
+    expect(list).toHaveLength(1);
+    expect(list[0].url).not.toContain("X-Amz-Signature");
+    expect(list[0].url).not.toContain("token=");
+    expect(list[0].url).not.toContain("s3cr3t");
+    expect(list[0].url).toBe("https://example.com/export.csv");
+  });
+
+
   test("ignores non-complete transitions", async () => {
     const { recordDownload, getCapturedDownloads, clearCapturedDownloads } =
       await import("../src/extension/background/message-routing");

@@ -1,6 +1,6 @@
 import type { Catalog } from "./catalog";
 import { isValidCatalog } from "./catalog";
-import { validateLlmBaseUrl } from "./route/ssrf";
+import { validateLlmBaseUrl, resolveAndValidateLlmBaseUrl } from "./route/ssrf";
 
 /** A context-tier pricing block (models.dev `CostTier` shape, verbatim). */
 export interface CostTier {
@@ -245,11 +245,36 @@ export async function fetchCustomCatalog(url: string): Promise<Record<string, Mo
   if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
     throw new Error(`refusing to fetch non-HTTP catalog URL: ${parsedUrl.protocol}`);
   }
+  // Strict SYNCHRONOUS posture first (unchanged from before): loopback /
+  // private / link-local / metadata hosts are rejected even for a catalog URL,
+  // preserving the exact pre-existing allowlist.
   const ssrf = validateLlmBaseUrl(url, false);
   if (!ssrf.ok) {
     throw new Error(`refusing to fetch catalog URL: ${ssrf.reason}`);
   }
-  const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+  // Best-effort DNS validation (DNS-rebinding defense-in-depth): the catalog
+  // URL is operator-configured, so `"user-configured"` provenance applies —
+  // when a resolver IS available (Dev-channel builds that declare the "dns"
+  // permission) a hostname resolving to an internal/metadata address is
+  // rejected before any fetch; when no resolver is available (packaged stable
+  // builds have no `dns` permission and no Node fallback) the guard degrades
+  // to the sync check above + a warning, so custom catalogs keep working. The
+  // sync check runs FIRST and is never weakened by this step.
+  const dns = await resolveAndValidateLlmBaseUrl(url, false, "user-configured");
+  if (!dns.ok) {
+    throw new Error(`refusing to fetch catalog URL: ${dns.reason}`);
+  }
+  // Hardening mirroring the route transport: never follow redirects (a 3xx
+  // could bounce the catalog request — and any ambient context — to an
+  // attacker origin), never send ambient credentials/cookies, never reuse a
+  // cached response, and attach no Referer.
+  const res = await fetch(url, {
+    redirect: "error",
+    credentials: "omit",
+    cache: "no-store",
+    referrer: "",
+    signal: AbortSignal.timeout(10_000),
+  });
   if (!res.ok) throw new Error(`catalog ${res.status}`);
   const raw = await res.json();
   if (!isValidCatalog(raw)) {

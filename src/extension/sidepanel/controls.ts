@@ -5,6 +5,7 @@ import {
   messageInput,
   sendBtn,
   stopBtn,
+  pauseBtn,
   modeSelect,
   currentMode,
   maxSteps,
@@ -110,11 +111,18 @@ function renderTerminalSnapshot(view: RunViewState): void {
 
 function renderRunView(view: RunViewState): void {
   running = isActiveStatus(view.status);
+  // A terminal/idle run can never be paused — drop any stale pause flag and
+  // reset the button to its idle state.
+  if (!running && paused) {
+    paused = false;
+    void clearPauseFlag();
+  }
   if (view.status !== "idle") removeEmptyState();
   messageInput.disabled = running;
   // Never re-enable a blank Send button after terminal/error reconciliation.
   sendBtn.disabled = !storageReady || !messageInput.value.trim() || running;
   stopBtn.disabled = view.status !== "starting" && view.status !== "running";
+  updatePauseBtn();
   stopBtn.setAttribute("aria-label", view.status === "cancelling" ? "Cancellation in progress" : "Stop agent");
   if (!running) hideTakeoverBanner();
   setLifecycle(lifecycleFor(view));
@@ -304,6 +312,36 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
   if (document.activeElement === messageInput) return;
   e.preventDefault();
   messageInput.focus();
+});
+
+// ─── Manual pause / resume ──────────────────────────────────────────────────
+
+/** Whether a manual pause is currently requested (mirrors the session flag). */
+let paused = false;
+
+async function clearPauseFlag(): Promise<void> {
+  try { await chrome.storage.session.set({ open_cowork_paused: false }); } catch { /* best-effort */ }
+}
+
+function updatePauseBtn(): void {
+  if (!pauseBtn) return;
+  pauseBtn.disabled = !running;
+  const label = pauseBtn.querySelector("span");
+  if (label) label.textContent = paused ? "Resume" : "Pause";
+  pauseBtn.setAttribute("aria-label", paused ? "Resume agent" : "Pause agent");
+}
+
+pauseBtn?.addEventListener("click", () => {
+  if (!running || !pauseBtn || pauseBtn.disabled) return;
+  paused = !paused;
+  try {
+    // Best-effort write; the loop polls this flag each step.
+    void chrome.storage.session.set({ open_cowork_paused: paused });
+  } catch { /* best-effort */ }
+  updatePauseBtn();
+  addSystemMessage(paused ? "⏸" : "▶", paused
+    ? "Pause requested — the agent will pause at the next step."
+    : "Resume requested — the agent will continue.", paused ? "warning" : undefined);
 });
 
 stopBtn.addEventListener("click", () => {

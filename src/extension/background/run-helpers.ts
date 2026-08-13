@@ -334,6 +334,7 @@ export async function extractStateForRun(
   tabs: TabInfo[],
   signal?: AbortSignal,
   identity?: { runId: string },
+  contextTokens?: number,
 ): Promise<BrowserState> {
   const checkAbort = (): void => {
     if (signal?.aborted) {
@@ -423,6 +424,22 @@ export async function extractStateForRun(
     }
     const domStateNoVision = await extractStateFromTab(tabId, tabs, includeScreenshot, signal);
     lastKnownDpr = domStateNoVision.devicePixelRatio ?? 1;
+    // Capture-side screenshot budget: when the run's model context is known,
+    // downscale the screenshot so it fits the model's derived screenshot cap
+    // (the loop then never has to drop it). Unknown context → unchanged.
+    if (domStateNoVision.screenshot && contextTokens !== undefined) {
+      try {
+        const { deriveNavigatorObservationCapsV1 } = await import("@/lib/agent/prompts/prompt-token-budget");
+        const cap = deriveNavigatorObservationCapsV1(contextTokens).screenshotChars;
+        if (cap > 0) {
+          const { resizeScreenshotToBudget } = await import("./screenshots");
+          domStateNoVision.screenshot = await resizeScreenshotToBudget(domStateNoVision.screenshot, cap);
+          checkAbort();
+        }
+      } catch (e) {
+        void safeLog("warn", "[run-helpers] screenshot budget resize skipped:", e);
+      }
+    }
     return domStateNoVision;
   }
 
@@ -490,6 +507,11 @@ interface LoopDepsContext {
     plannerInterval: number;
     maxFailures: number;
     costCapUsd: number;
+    /** Effective model context window (tokens), when known — drives the
+     * context-adaptive observation caps in the loop (see
+     * `deriveNavigatorObservationCapsV1`). Optional: `undefined` keeps the
+     * fixed per-kind prompt budgets / observation caps. */
+    contextTokens?: number;
   };
   task: string;
   mode: AgentMode;
@@ -521,7 +543,7 @@ export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
     config,
     extractState: async (tabs) => {
       throwIfOriginUnauthorized();
-      const state = await extractStateForRun(fallbackTabId, tabs, controller.signal, dispatchToken);
+      const state = await extractStateForRun(fallbackTabId, tabs, controller.signal, dispatchToken, config.contextTokens);
       throwIfOriginUnauthorized();
       return state;
     },

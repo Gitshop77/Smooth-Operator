@@ -44,6 +44,15 @@ function createSSEFramer(): Framing {
 
   return {
     parse: (chunk: string): Frame[] => {
+ // Strip a UTF-8 BOM (U+FEFF) that may legally prefix the stream (RFC 3629).
+ // When it lands at the start of the first chunk it would otherwise glue to
+ // the first `data:` field name (`\uFEFFdata` !== `data`) and silently drop
+ // the first event's line. Only the stream's FIRST chunk can begin with a
+ // BOM (the SSE spec forbids stray BOMs mid-stream; a data VALUE containing
+ // one sits after `data: ` and is untouched), so stripping from each chunk
+ // start is exactly "first chunk only" for the transport's per-event parse
+ // calls.
+      if (chunk.charCodeAt(0) === 0xfeff) chunk = chunk.slice(1);
       const frames: Frame[] = [];
  // A chunk that does not end in "\n" is the transport's final flush of a
  // partial tail (truncated / idle-close stream); treat end-of-input as an

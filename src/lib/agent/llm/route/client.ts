@@ -139,6 +139,15 @@ interface Model {
  */
 const routeRegistry = new Map<string, Route<unknown, unknown>>();
 
+/** Cap on registered routes — a long-lived service worker with provider churn
+ * (re-configures, many models/endpoints/credentials) would otherwise grow this
+ * map without bound. Routes are re-registered on every `make()`/configure
+ * call, so FIFO eviction of the OLDEST entry only drops a route whose model
+ * handle was created before the most recent re-configure of that key; the next
+ * `generate()` for that key re-registers it through the normal provider
+ * bootstrap. Minimal max-size eviction — no LRU library. */
+const ROUTE_REGISTRY_MAX = 256;
+
 interface GenerationOptions {
   readonly temperature?: number;
   readonly maxTokens?: number;
@@ -315,7 +324,9 @@ function makeFromTransport<Body, Prepared, FrameType, EventType, State>(
       let terminalSeen = false;
       let visibleContentChars = 0;
       let hasVisibleNonWhitespace = false;
+      let framesSeen = 0;
       for await (const frame of input.transport.frames(prepared, signal)) {
+        framesSeen++;
         const { state: newState, events } = protocol.stream.step(state, frame as FrameType);
         state = newState;
         for (const event of events) {
@@ -339,9 +350,18 @@ function makeFromTransport<Body, Prepared, FrameType, EventType, State>(
  // normalized terminal diagnosis for every protocol. Abort errors are thrown
  // by the transport before reaching this point and therefore preserve their
  // native AbortError identity.
+ //
+ // A clean EOF after at least one data frame is a NORMAL terminal event: some
+ // providers (and transparent proxies) close the stream without the literal
+ // `[DONE]`/`message_stop` sentinel, and mislabeling that as
+ // `no_terminal_stream` turned a healthy completion into a hard failure.
+ // Truncated streams are still caught elsewhere: a frame cut mid-stream
+ // surfaces as `malformed_stream` (via droppedFrames), and a transport stall /
+ // abort throws before this point. Only a stream that ended with ZERO frames
+ // (no terminal evidence at all) is still reported as `no_terminal_stream`.
       const completion = classifyCompletion({
         protocol: protocol.id,
-        terminalSeen,
+        terminalSeen: terminalSeen || framesSeen > 0,
         visibleContentChars,
         hasVisibleNonWhitespace,
         evidence: protocol.stream.completion?.(state),
@@ -353,6 +373,10 @@ function makeFromTransport<Body, Prepared, FrameType, EventType, State>(
       };
     },
   };
+  if (routeRegistry.size >= ROUTE_REGISTRY_MAX) {
+    const oldest = routeRegistry.keys().next().value;
+    if (oldest !== undefined) routeRegistry.delete(oldest);
+  }
   routeRegistry.set(routeId, route as Route<unknown, unknown>);
   return route;
 }

@@ -2,6 +2,8 @@
  * Backdoor helpers, constants, and shared types for the shadow-piercer module.
  */
 
+import { isStealthEnabledSync } from "../../anti-detection-utils";
+
 // ─── Internal constants ─────────────────────────────────────────────────────
 
 /** Obscure internal property names — avoid the product name as a detectable fingerprint. */
@@ -48,12 +50,20 @@ export interface ShadowPiercerBackdoor {
 
 /** Read the cross-world backdoor from `window`, if present. */
 export function readBackdoor(): ShadowPiercerBackdoor | undefined {
+  // Stealth gate: the backdoor is a page-observable artifact
+  // (`window[Symbol.for("__open_cowork_piercer_bd__")]` — any page script can
+  // enumerate it). It is published in NORMAL mode (closed-shadow piercing is a
+  // core extraction capability) and SUPPRESSED when stealth mode is on, so a
+  // stealth user's page sees no bridge artifact; the piercer then degrades to
+  // open shadow roots only (`el.shadowRoot`).
+  if (isStealthEnabledSync()) return undefined;
   if (typeof window === "undefined") return undefined;
   return (window as any)[PIERCER_BACKDOOR_KEY] as ShadowPiercerBackdoor | undefined;
 }
 
 /** Publish the cross-world backdoor on `window` (best-effort). */
 function writeBackdoor(b: ShadowPiercerBackdoor): void {
+  if (isStealthEnabledSync()) return;
   try {
     (window as any)[PIERCER_BACKDOOR_KEY] = b;
   } catch {
@@ -78,6 +88,10 @@ export function bindBackdoor(
   newState: PiercerState,
   existingBackdoor: ShadowPiercerBackdoor | undefined,
 ): void {
+  // Stealth gate — see `writeBackdoor`. The backdoor is suppressed when
+  // stealth mode is on; skipping here leaves the attachShadow patch (which
+  // records roots in this world's local state) fully functional.
+  if (isStealthEnabledSync()) return;
   if (typeof window === "undefined") return;
 
   // Idempotency guard: if the live backdoor was already built from

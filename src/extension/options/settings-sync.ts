@@ -111,7 +111,7 @@ if (typeof chrome !== "undefined" && chrome.storage?.local) {
       setVal("costCap", String(costCap));
       setVal("screenshotQuality", String(res[STORAGE_KEYS.screenshotQuality] ?? 80));
       setChecked("enableScreenshots", res[STORAGE_KEYS.enableScreenshots] !== false);
-      setChecked("enableStealth", res[STORAGE_KEYS.stealthEnabled] === true);
+      setChecked("enableStealth", res[STORAGE_KEYS.stealthEnabled] !== false);
 
       const visionMode = (res[STORAGE_KEYS.visionMode] as string) || (res[STORAGE_KEYS.enableLocalVision] === true ? "always" : "disabled");
       const visionRadio = Array.from(

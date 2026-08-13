@@ -210,6 +210,14 @@ export const protocol: Protocol<GeminiBody, string, { type: string; content?: st
  // rate) + thoughtsTokenCount (Gemini 2.5 Flash/Pro Thinking
  // reasoning tokens, billed at $0 without this → under-reporting
  // 30-60%).
+ //
+ // tokensOut semantics (verified against the upstream opencode
+ // `packages/llm/src/protocols/gemini.ts` `mapUsage`, which this protocol
+ // mirrors): `candidatesTokenCount` is VISIBLE-ONLY — Gemini counts thinking
+ // parts separately from candidate content parts — so summing
+ // `candidatesTokenCount + thoughtsTokenCount` is the inclusive output total
+ // and does NOT double-count. Google's pricing docs likewise state response
+ // pricing is "the sum of output tokens and thinking tokens".
         const cached = usage.cachedContentTokenCount;
         const reasoning = usage.thoughtsTokenCount;
         if (typeof reasoning === "number" && reasoning > 0) state.reasoningObserved = true;

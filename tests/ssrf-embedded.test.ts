@@ -117,6 +117,27 @@ describe("resolveAndValidateLlmBaseUrl DNS outcome branches", () => {
     }
   });
 
+  test("packaged posture: no chrome.dns (no 'dns' permission) + no Node fallback → fail CLOSED for hostname URLs", async () => {
+    // The packaged extension manifest declares NO `dns` permission and the
+    // service-worker runtime has no Node `require("dns")` fallback, so
+    // `dnsResolve` reports "unavailable". The async guard must FAIL CLOSED
+    // for an untrusted hostname (a rebind to an internal address would be a
+    // live exfil path) — never silently allow. This pins the no-permission
+    // posture; if a future manifest change adds "dns", this test keeps the
+    // fail-closed branch honest by simulating the permission-less runtime.
+    const savedRequire = g.require;
+    delete g.chrome;
+    delete g.require;
+    try {
+      const res = await resolveAndValidateLlmBaseUrl("http://rebind.example.com", false);
+      expect(res.ok).toBe(false);
+      if (res.ok) throw new Error("expected rejection");
+      expect(res.reason).toMatch(/DNS/i);
+    } finally {
+      if (savedRequire !== undefined) g.require = savedRequire;
+    }
+  });
+
   test("no resolver + local-exempt provenance → fail CLOSED (absent explicit user-configured provenance)", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const savedRequire = g.require;

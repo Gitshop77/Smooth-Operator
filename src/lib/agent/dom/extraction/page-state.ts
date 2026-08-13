@@ -204,19 +204,41 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
     }
   }
 
+  // Populate the per-extract visibility cache for EVERY element we walk (not
+  // just interactive ones and text parents) so `serializeText`'s per-text-node
+  // parent lookup and the container branch below hit the cache instead of
+  // re-running the expensive `isVisibleFull` (computed-style resolution +
+  // layout flush). The walk is depth-first, so a parent element is always
+  // serialized before its text children — every `serializeText` lookup finds
+  // its parent already cached.
+  if (!interactive && visibilityCache.get(el) === undefined) {
+    visibilityCache.set(el, isVisibleFull(el));
+  }
+
   if (isInteractiveContainer(el)) {
-    const idx = ++acc.index;
-    const attrs = buildAttrs(el);
-    const hash = hashElement(el, attrs);
-    const isNew = !acc.prevHashes.has(hash);
-    if (isNew) acc.newElementCount++;
-    const text = directText(el) || el.getAttribute("aria-label") || "";
-    const containerRect = el.getBoundingClientRect();
-    acc.selectorMap[idx] = el;
-    acc.identities[idx] = elementIdentity(el, attrs);
-    acc.elements.push({ index: idx, tag, text, attributes: attrs, hash, rect: containerRect });
-    const prefix = isNew ? "*" : "";
-    pushLine(acc, "\t".repeat(depth) + `${prefix}[${idx}]<${tag}${attrString(attrs)} />`);
+    // Full visibility check before indexing: a container that is hidden
+    // (opacity:0, aria-hidden, zero-size rect, clipped, …) must not surface as
+    // a phantom click target. Children are still walked — their own visibility
+    // checks decide what they contribute.
+    let containerVisible = visibilityCache.get(el);
+    if (containerVisible === undefined) {
+      containerVisible = isVisibleFull(el);
+      visibilityCache.set(el, containerVisible);
+    }
+    if (containerVisible) {
+      const idx = ++acc.index;
+      const attrs = buildAttrs(el);
+      const hash = hashElement(el, attrs);
+      const isNew = !acc.prevHashes.has(hash);
+      if (isNew) acc.newElementCount++;
+      const text = directText(el) || el.getAttribute("aria-label") || "";
+      const containerRect = el.getBoundingClientRect();
+      acc.selectorMap[idx] = el;
+      acc.identities[idx] = elementIdentity(el, attrs);
+      acc.elements.push({ index: idx, tag, text, attributes: attrs, hash, rect: containerRect });
+      const prefix = isNew ? "*" : "";
+      pushLine(acc, "\t".repeat(depth) + `${prefix}[${idx}]<${tag}${attrString(attrs)} />`);
+    }
   }
 
   walkLightAndShadowChildren(el, depth + 1, acc);
@@ -335,9 +357,7 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
     title: document.title,
     tabs: redactedTabs,
     elements: acc.elements,
-    elementsText: windowedText.trim().length > 0
-      ? `<untrusted_page_state>\n${windowedText}\n</untrusted_page_state>`
-      : "[empty page]",
+    elementsText: windowedText.trim().length > 0 ? windowedText : "[empty page]",
     pageInfo: buildPageInfo(scrollTop, scrollHeight, vh),
     newElementCount: acc.newElementCount,
     scrollTop,

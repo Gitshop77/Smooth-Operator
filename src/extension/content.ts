@@ -13,6 +13,7 @@
 
 import { initElementMap } from "@/lib/agent/dom/ax-tree";
 import { installPopupHandler } from "@/lib/agent/dom/popup-handler";
+import { refreshStealthEnabledCache } from "@/lib/agent/anti-detection-utils";
 import { CONSOLE_CAPTURE_EVENT } from "@/lib/agent/dom/console-capture";
 import {
   log,
@@ -41,6 +42,12 @@ import {
   } catch (e) {
     log("installPopupHandler failed:", e);
   }
+
+  // Prime the sync stealth flag so the page-artifact gates (phantom cursor,
+  // overlay renderer, piercer backdoor read) resolve correctly from the very
+  // first action. Fire-and-forget: a slow storage read must never block the
+  // message listener; the gate fails closed until the cache is populated.
+  void refreshStealthEnabledCache().catch(() => {});
 
   // Relay MAIN-world console captures to the SW console-log ring. The
   // CustomEvent crosses from the MAIN world (where console-capture overrides
@@ -80,6 +87,9 @@ import {
         }
 
         case "EXECUTE_ACTIONS": {
+          // Re-prime the stealth cache so a mid-session settings toggle takes
+          // effect on the next action (the running action uses the prior value).
+          void refreshStealthEnabledCache().catch(() => {});
           return handleExecuteActions(msg, sendResponse);
         }
 

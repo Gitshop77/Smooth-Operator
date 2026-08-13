@@ -113,6 +113,29 @@ export async function resizeScreenshotDataUrl(
 }
 
 /**
+ * Resize a screenshot data URL to fit a max-length (chars) budget — the
+ * capture-side half of the context-derived observation caps. A raw viewport
+ * JPEG is typically 100-400k chars; a 128k-context model's navigator budget
+ * fits only ~67k chars of screenshot, so the capture is downscaled to the
+ * LARGEST whLargest candidate whose re-encoded length still fits. Falls back
+ * to the smallest candidate (a tiny image beats a dropped one — the loop's
+ * cap is the final gate). Graceful: on ANY resize failure the original is
+ * returned unchanged (the loop cap still drops it if it's too big).
+ */
+export async function resizeScreenshotToBudget(dataUrl: string, maxChars: number): Promise<string> {
+  if (dataUrl.length <= maxChars) return dataUrl;
+  const CANDIDATES = [1536, 1024, 768, 512, 384, 256];
+  let best = dataUrl;
+  for (const whLargest of CANDIDATES) {
+    const resized = await resizeScreenshotDataUrl(dataUrl, { whLargest });
+    if (resized === dataUrl) continue; // decode failed — cannot downscale
+    best = resized;
+    if (resized.length <= maxChars) return resized;
+  }
+  return best;
+}
+
+/**
  * Capture a JPEG screenshot of the given tab via `chrome.debugger`. Attaches
  * the debugger, issues `Page.captureScreenshot`, and ALWAYS detaches (even on
  * error) — mirroring the CDP_CLICK / SCREENSHOT handler patterns. Returns a

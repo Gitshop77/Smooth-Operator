@@ -10,6 +10,8 @@
  * in `dom/overlay.ts`.
  */
 
+import { isStealthEnabledSync } from "../../anti-detection-utils";
+
 /** Color used for highlight outlines + badge backgrounds. */
 const HIGHLIGHT_COLOR = "#f97316";
 /** Background tint applied to a highlighted element. */
@@ -89,7 +91,15 @@ function announceAction(label: string): void {
  * @returns A handle whose `remove()` clears the highlight immediately.
  */
 export function highlightElement(el: HTMLElement, label: string): OverlayHandle {
- // Track ownership per element so overlapping highlights don't corrupt style
+  // Stealth gate: the overlay is page-visible chrome (outline styles, floating
+  // badges, an aria-live region — all observable by page scripts). It renders
+  // in NORMAL mode (the user's visual + assistive feedback for "the agent is
+  // acting on this element") and is SUPPRESSED when stealth mode is on, so a
+  // stealth user's page sees no automation artifacts. When suppressed, return
+  // a no-op handle so the caller contract (OverlayHandle) is preserved without
+  // touching the page.
+  if (isStealthEnabledSync()) return { remove: () => { /* no-op */ } };
+  // Track ownership per element so overlapping highlights don't corrupt style
  // restoration. The first highlight captures + applies the styles; later
  // highlights on the same element reuse the applied styles and only restore
  // the originals once the last highlight for that element is removed.

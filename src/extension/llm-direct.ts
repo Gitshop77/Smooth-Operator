@@ -488,12 +488,13 @@ export async function navigatorCallDirect(
  // load custom navigator prompt override (cached, invalidated on storage change).
  // These reads are independent — fetch them in parallel so a cache miss
  // doesn't serialize extra chrome.storage.local.get round-trips per step.
-  const [customNavigatorPrompt, visionMode, agentMode, reasoningConfig, provider] = await Promise.all([
+  const [customNavigatorPrompt, visionMode, agentMode, reasoningConfig, provider, effectiveContextTokens] = await Promise.all([
     getCustomNavigatorPrompt(),
     getVisionMode(),
     getAgentMode(),
     resolveReasoningConfig(),
     raceWithAbort(getProvider(), signal),
+    getEffectiveContextTokens(),
   ]);
  // Embed screenshot marker ONLY for vision-capable models. Text-only models
  // would either error (HTTP 400 from the API) or waste tokens processing a
@@ -526,6 +527,10 @@ export async function navigatorCallDirect(
     visionMode,
     mode: agentMode,
     user: navigatorUser,
+    // Sub-128k models get the COMPACT system prompt: the same security/schema
+    // blocks with prose compressed, so the derived input budget has ~3× more
+    // room for the observation. 128k+ models keep the full prompt.
+    compact: effectiveContextTokens !== undefined && effectiveContextTokens < 128_000,
     systemSuffix: provider.supportsStructuredOutput
       ? ""
       : "\n\n" + getFormatInstructions(AgentOutputSchema),
@@ -542,7 +547,6 @@ export async function navigatorCallDirect(
   // models fall back to the fixed 128k navigator profile. Failing closed here
   // prevents an unbounded DOM/screenshot payload from ever crossing the
   // network, even if every earlier cap is misconfigured.
-  const effectiveContextTokens = await getEffectiveContextTokens();
   assertPromptBudget("navigator", "navigator", messages, effectiveContextTokens);
 
   const response = await provider.chat({

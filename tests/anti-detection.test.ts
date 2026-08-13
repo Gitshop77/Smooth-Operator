@@ -15,11 +15,17 @@
 
 import { describe, test, expect, vi, beforeEach } from "vitest";
 import { stealthScriptBody, isStealthEnabled, injectAntiDetection } from "../src/lib/agent/anti-detection";
+import {
+  isStealthEnabledSync,
+  refreshStealthEnabledCache,
+  _setStealthEnabledCacheForTests,
+} from "../src/lib/agent/anti-detection-utils";
 
-// ─── Opt-in gate (stealthEnabled) ──────────────────────────────────────────
-// The 13 MAIN-world patches are ToS-sensitive (bot-detection circumvention) and
-// must be OFF unless the user explicitly opts in via chrome.storage.local.
-// `isStealthEnabled` is the single source of truth read by ensureContent().
+// ─── Stealth gate (stealthEnabled) ────────────────────────────────────────
+// The 13 MAIN-world patches are ToS-sensitive (bot-detection circumvention).
+// DEFAULT-ON: the product stance is full stealth unless the user explicitly
+// opts OUT via chrome.storage.local (`false`). `isStealthEnabled` is the
+// single source of truth read by ensureContent().
 
 type LocalGet = (keys: string | string[]) => Promise<Record<string, unknown>>;
 
@@ -34,9 +40,9 @@ describe("anti-detection: opt-in gate (stealthEnabled)", () => {
     vi.unstubAllGlobals();
   });
 
-  test("default (no flag) → disabled", async () => {
+  test("default (no flag) → ENABLED (default-on posture)", async () => {
     mockStorageLocal(async () => ({}));
-    expect(await isStealthEnabled()).toBe(false);
+    expect(await isStealthEnabled()).toBe(true);
   });
 
   test("explicit true → enabled", async () => {
@@ -44,20 +50,62 @@ describe("anti-detection: opt-in gate (stealthEnabled)", () => {
     expect(await isStealthEnabled()).toBe(true);
   });
 
-  test("false / falsy / non-boolean → disabled (fail-safe)", async () => {
+  test("explicit false → disabled (opt-out); non-boolean truthy → enabled", async () => {
     mockStorageLocal(async () => ({ stealthEnabled: false }));
     expect(await isStealthEnabled()).toBe(false);
+    // Non-boolean truthy values still enable (only an explicit false opts out).
     mockStorageLocal(async () => ({ stealthEnabled: "true" }));
-    expect(await isStealthEnabled()).toBe(false);
+    expect(await isStealthEnabled()).toBe(true);
     mockStorageLocal(async () => ({ stealthEnabled: 1 }));
-    expect(await isStealthEnabled()).toBe(false);
+    expect(await isStealthEnabled()).toBe(true);
   });
 
-  test("storage unavailable → disabled (fail-safe)", async () => {
+  test("storage unavailable → ENABLED (fail toward stealth — never leak artifacts)", async () => {
     vi.stubGlobal("chrome", {
       storage: { local: { get: () => Promise.reject(new Error("boom")) } },
     });
-    expect(await isStealthEnabled()).toBe(false);
+    expect(await isStealthEnabled()).toBe(true);
+  });
+});
+
+describe("anti-detection: sync stealth cache (page-artifact gates)", () => {
+  // The cache is module state shared within a test file — reset it so every
+  // test starts from the unknown (fail-closed) default.
+  beforeEach(() => {
+    _setStealthEnabledCacheForTests(null);
+  });
+
+  test("unknown (never primed) → ENABLED (artifacts suppressed by default)", () => {
+    expect(isStealthEnabledSync()).toBe(true);
+  });
+
+  test("_setStealthEnabledCacheForTests(true) enables the sync gate", () => {
+    _setStealthEnabledCacheForTests(true);
+    expect(isStealthEnabledSync()).toBe(true);
+  });
+
+  test("explicit false → disabled", () => {
+    _setStealthEnabledCacheForTests(true);
+    _setStealthEnabledCacheForTests(false);
+    expect(isStealthEnabledSync()).toBe(false);
+  });
+
+  test("refreshStealthEnabledCache primes the sync gate from storage", async () => {
+    mockStorageLocal(async () => ({ stealthEnabled: true }));
+    await expect(refreshStealthEnabledCache()).resolves.toBe(true);
+    expect(isStealthEnabledSync()).toBe(true);
+
+    mockStorageLocal(async () => ({ stealthEnabled: false }));
+    await expect(refreshStealthEnabledCache()).resolves.toBe(false);
+    expect(isStealthEnabledSync()).toBe(false);
+  });
+
+  test("refreshStealthEnabledCache fails toward stealth when storage is unavailable", async () => {
+    vi.stubGlobal("chrome", {
+      storage: { local: { get: () => Promise.reject(new Error("boom")) } },
+    });
+    await expect(refreshStealthEnabledCache()).resolves.toBe(true);
+    expect(isStealthEnabledSync()).toBe(true);
   });
 });
 

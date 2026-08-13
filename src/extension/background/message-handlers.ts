@@ -30,16 +30,28 @@ import { runSessionState } from "./run-session-state";
  * paths; this wrapper is the safety net that turns any thrown error into an
  * `{ ok: false, error }` response. The message channel is kept open (`return
  * true`) so the async `sendResponse` resolves the caller.
+ *
+ * The wrapper ALSO guards against double-response: a handler that calls
+ * `sendResponse` and THEN throws (or resolves a second path) would otherwise
+ * send a second response into a closed port — the response is silently lost
+ * and Chrome logs "The message port closed before a response was received".
+ * Only the FIRST response wins.
  */
 function bindHandler(
   sendResponse: (response?: unknown) => void,
   fn: (sendResponse: (response?: unknown) => void) => Promise<void>,
 ): boolean {
+  let responded = false;
+  const once: (response?: unknown) => void = (response) => {
+    if (responded) return;
+    responded = true;
+    sendResponse(response);
+  };
   (async () => {
     try {
-      await fn(sendResponse);
+      await fn(once);
     } catch (e) {
-      sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });
+      once({ ok: false, error: e instanceof Error ? e.message : String(e) });
     }
   })();
   return true; // keep the message channel open for the async sendResponse
@@ -418,6 +430,12 @@ export function handleScreenshot(
         return sendDebuggerCommandWithTimeout<{ data?: string }>(tabId, "Page.captureScreenshot", {
           format: "jpeg",
           quality: screenshotQuality,
+          // Capture only the VISIBLE viewport — CDP defaults
+          // `captureBeyondViewport` to true (full scrollable page). This
+          // handler's screenshot is a human-facing artifact; keeping it
+          // consistent with the agent observation + vision captures avoids an
+          // unexpected full-page image for a "screenshot the page" request.
+          captureBeyondViewport: false,
         });
       },
       mime: "image/jpeg",

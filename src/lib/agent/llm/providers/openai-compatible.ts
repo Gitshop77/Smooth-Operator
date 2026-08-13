@@ -104,16 +104,23 @@ function authKey(value: unknown): string {
 // payloads is a brute-force oracle). The counter mirrors the `authIdCounter`
 // precedent: ids are per-process and non-secret.
 //
-// The global route registry (route/client.ts) NEVER evicts entries, so a fresh
-// nonce per call would leak one dead route per configure()/toLLMProvider()
-// call for the life of the service worker. Memoize the nonce per effective
-// config: repeated calls with identical (provider, baseURL, auth, apiKey)
-// reuse the same route id (the registry's Map.set overwrites in place), while
-// a genuinely different credential still gets a fresh nonce and its own route.
-// The memo key holds the raw apiKey only in memory — nothing derived from it
-// is ever serialized into ids, errors, or payloads.
+// The global route registry (route/client.ts) evicts oldest entries past a
+// bound (ROUTE_REGISTRY_MAX), so a fresh nonce per call would still churn dead
+// routes. Memoize the nonce per effective config: repeated calls with
+// identical (provider, baseURL, auth, apiKey) reuse the same route id (the
+// registry's Map.set overwrites in place), while a genuinely different
+// credential still gets a fresh nonce and its own route. The memo key holds
+// the raw apiKey only in memory — nothing derived from it is ever serialized
+// into ids, errors, or payloads.
 const nonceCache = new Map<string, number>();
 let configNonce = 0;
+
+/** Cap on memoized config nonces — a long-lived worker with provider churn
+ * would otherwise accumulate one entry per distinct (provider, baseURL, auth,
+ * apiKey) combination forever. FIFO eviction (Map preserves insertion order)
+ * bounds memory; a re-configure of an evicted config simply gets a fresh nonce
+ * and its own new route id. */
+const NONCE_CACHE_MAX = 128;
 
 function configNonceFor(input: Config, baseURL: string, provider: string): number {
   const apiKey = "apiKey" in input ? input.apiKey : undefined;
@@ -122,6 +129,10 @@ function configNonceFor(input: Config, baseURL: string, provider: string): numbe
   let nonce = nonceCache.get(key);
   if (nonce === undefined) {
     nonce = configNonce++;
+    if (nonceCache.size >= NONCE_CACHE_MAX) {
+      const oldest = nonceCache.keys().next().value;
+      if (oldest !== undefined) nonceCache.delete(oldest);
+    }
     nonceCache.set(key, nonce);
   }
   return nonce;

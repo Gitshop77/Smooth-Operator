@@ -19,6 +19,24 @@ export type ClickStrategyResult = {
 };
 
 /**
+ * True when `hit` lives inside a shadow root hosted by `el` or one of its
+ * descendants. `document.elementFromPoint` returns such nodes for closed-shadow
+ * custom elements, and `el.contains(hit)` does NOT cross shadow boundaries —
+ * without this exception a self-contained custom element's own internals would
+ * be misread as a covering overlay and every legitimate click on it would be
+ * hard-blocked as "occluded".
+ */
+function isInsideOwnShadowTree(hit: Node, el: HTMLElement): boolean {
+  let root: Node = hit.getRootNode();
+  while (root instanceof ShadowRoot) {
+    const host = root.host;
+    if (host === el || el.contains(host)) return true;
+    root = host.getRootNode();
+  }
+  return false;
+}
+
+/**
  * Hit-test the action point: when `document.elementFromPoint` returns a node
  * that is neither the target nor a descendant, a covering overlay (modal,
  * cookie banner, toast, sticky header) intercepts coordinate clicks. Returns
@@ -31,7 +49,7 @@ export function occlusionError(
 ): string | null {
   try {
     const hit = document.elementFromPoint(Math.round(x), Math.round(y));
-    if (hit && hit !== el && !el.contains(hit)) {
+    if (hit && hit !== el && !el.contains(hit) && !isInsideOwnShadowTree(hit, el)) {
       const tag = (hit as HTMLElement).tagName?.toLowerCase?.() || "unknown";
       // Include an id/class hint so the LLM can name the covering overlay.
       const hintEl = hit as HTMLElement;

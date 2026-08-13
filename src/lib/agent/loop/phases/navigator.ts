@@ -19,28 +19,19 @@ import {
   DEFAULT_MIN_HTML_LENGTH,
 } from "../../html-summarizer";
 import { buildPostObserveNudges, appendPendingLoopWarning } from "../context/injection-points";
-import { ELEMENTS_TEXT_CHAR_CAP } from "../messages";
+import { deriveNavigatorObservationCapsV1 } from "../../prompts/prompt-token-budget";
 
 /**
- * Hard upper bound on the DOM text shipped to the navigator model per step,
- * independent of the HTML summarizer. This guarantees a misconfigured run
- * (summarizer disabled or falling back) can NEVER send an unbounded DOM to the
- * provider — the single largest per-action cost lever in a paid LLM product.
- * When the raw/summarized DOM exceeds this, it is truncated and an info event
- * is emitted so the truncation is observable.
+ * Per-step observation payloads (interactive-element DOM text, accessibility
+ * tree, screenshot) are bounded by hard caps so a misconfigured run can NEVER
+ * send an unbounded payload to the provider. The cap VALUES live in
+ * `deriveNavigatorObservationCapsV1` (prompt-token-budget.ts): the 128k
+ * calibration defaults match `ELEMENTS_TEXT_CHAR_CAP` (60k chars), a 200k-char
+ * AX tree cap, and a 1.5M-char screenshot cap; when the run's model context is
+ * known (`config.contextTokens`), the caps are scaled down so a 64k-class model
+ * degrades the OBSERVATION (truncate / drop + info event) instead of tripping
+ * the fail-closed prompt-budget assert in the provider layer on every step.
  */
-const MAX_NAV_ELEMENTS_TEXT_CHARS = ELEMENTS_TEXT_CHAR_CAP;
-
-/**
- * Hard byte budget for the vision `screenshot` shipped to the navigator per
- * step. A full-DPR viewport can be a multi-megabyte base64 blob; bounding it
- * keeps the "a misconfigured run can NEVER send an unbounded payload" promise
- * true for the screenshot lever too (not just `elementsText`).
- */
-const MAX_NAV_SCREENSHOT_CHARS = 1_500_000;
-
-/** Hard char cap for the accessibility tree, a second large per-step payload. */
-const MAX_NAV_AXTREE_CHARS = 200_000;
 
 function abortError(signal?: AbortSignal): DOMException {
   return signal?.reason instanceof DOMException
@@ -108,11 +99,18 @@ export async function prepareNavigatorRequest(
 
   // Hard cap applied REGARDLESS of the summarizer path: whether the summarizer
   // is disabled, or it ran but fell back to the full DOM (low keyword
-  // coverage), `navElementsText` must never exceed `MAX_NAV_ELEMENTS_TEXT_CHARS`.
-  // Returning the full DOM on fallback would pay full-DOM token cost for zero
-  // savings; truncating bounds the worst case deterministically.
+  // coverage), `navElementsText` must never exceed the (possibly context-derived)
+  // elements cap. Returning the full DOM on fallback would pay full-DOM token
+  // cost for zero savings; truncating bounds the worst case deterministically.
   // Bound the other two large per-step payloads (vision screenshot + a11y tree)
   // so the "never an unbounded payload" guarantee holds for them as well.
+  //
+  // When the run's model context is known (config.contextTokens), the caps are
+  // DERIVED from the model's input budget so a 64k-class model gets a
+  // proportionally smaller observation instead of a step-killing budget-assert
+  // failure in the provider layer. Unknown context → the fixed 128k defaults
+  // (identical behavior to the previous hard-coded constants).
+  const caps = deriveNavigatorObservationCapsV1(state.config.contextTokens);
   const capPayload = (
     value: string | undefined,
     max: number,
@@ -126,28 +124,29 @@ export async function prepareNavigatorRequest(
 
   navElementsText = capPayload(
     navElementsText,
-    MAX_NAV_ELEMENTS_TEXT_CHARS,
+    caps.elementsTextChars,
     "truncate",
     () =>
-      `Navigator DOM truncated to ${MAX_NAV_ELEMENTS_TEXT_CHARS} chars ` +
+      `Navigator DOM truncated to ${caps.elementsTextChars} chars ` +
       `(raw/fallback was ${navElementsText.length}).`,
   ) ?? navElementsText;
 
   const screenshot = capPayload(
     browserState.screenshot,
-    MAX_NAV_SCREENSHOT_CHARS,
+    caps.screenshotChars,
     "drop",
     () =>
       `Navigator screenshot dropped (${browserState.screenshot?.length} chars exceeds ` +
-      `the ${MAX_NAV_SCREENSHOT_CHARS}-char cap) to bound vision-token cost.`,
+      `the ${caps.screenshotChars}-char cap for this model's context window) to ` +
+      `keep the prompt within the model's input budget.`,
   );
 
   const axTree = capPayload(
     browserState.axTree,
-    MAX_NAV_AXTREE_CHARS,
+    caps.axTreeChars,
     "truncate",
     () =>
-      `Navigator axTree truncated to ${MAX_NAV_AXTREE_CHARS} chars ` +
+      `Navigator axTree truncated to ${caps.axTreeChars} chars ` +
       `(was ${browserState.axTree?.length}).`,
   );
 

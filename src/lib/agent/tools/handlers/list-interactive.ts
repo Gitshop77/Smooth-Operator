@@ -18,9 +18,8 @@
 import type { ActionResult } from "../../types";
 import type { Action } from "../schema";
 import type { ActionContext } from "./types";
-import { generateCssSelector } from "../helpers";
+import { generateCssSelector, redactBatch } from "../helpers";
 import { isSensitive } from "../../dom/utils/classification";
-import { redactSecrets } from "../../secrets";
 import { scanForInjection } from "../../security";
 
 /** 16 grouped selector patterns from get_elements.js:16-33. */
@@ -45,18 +44,6 @@ const INTERACTIVE_SELECTOR = [
 
 /** get_elements.js caps descriptor text at 60 chars. */
 const MAX_DESCRIPTOR_TEXT_CHARS = 60;
-
-/** Stand-in when batch redaction cannot be aligned back to the originals. */
-const REDACTION_FAILURE_MASK = "[REDACTED: secret store unavailable]";
-
-const BATCH_DELIM = "\x00";
-
-async function redactBatch(parts: string[]): Promise<string[]> {
-  if (parts.length === 0) return parts;
-  const redacted = (await redactSecrets(parts.join(BATCH_DELIM))).split(BATCH_DELIM);
-  if (redacted.length !== parts.length) return parts.map(() => REDACTION_FAILURE_MASK);
-  return redacted;
-}
 
 /** Rendered (non-zero box, not hidden by display/visibility/opacity/inert). */
 function isRenderedForListing(el: Element): boolean {

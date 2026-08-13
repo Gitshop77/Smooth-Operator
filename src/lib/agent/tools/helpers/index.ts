@@ -11,6 +11,7 @@ export {
   resolveElement,
   safeScrollIntoView,
 } from "./element-resolver";
+export { redactBatch } from "./redact-batch";
 export {
   type ParsedKeys,
   parseKeys,

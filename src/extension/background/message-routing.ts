@@ -31,6 +31,26 @@ import { handleHistoryCommand } from "./history-command";
 import { sanitizeDownloadName } from "./download-name";
 import { handleOptionsPlatformCommand } from "./options-platform-command";
 import { handleLogRingMessage } from "./rate-limit-tracker";
+import { hasActiveTakeoverPause } from "@/lib/agent/loop/helpers/takeover";
+import { redactUrlTokens } from "@/lib/agent/dom/extraction/element-info-utils";
+
+/**
+ * Sanitize a download's source URL BEFORE it enters the capture ring and can
+ * reach the agent via `list_downloads`. Authenticated download URLs carry
+ * signed query strings (`?X-Amz-Signature=…`, `?token=…`, signed CDN paths) —
+ * the same leak class as the network-log channel (see rate-limit-tracker).
+ * `redactUrlTokens` strips the query/fragment, userinfo, secret-shaped path
+ * segments, and secret host labels.
+ */
+function sanitizeDownloadUrl(url: string): string {
+  if (!url) return "";
+  try {
+    return redactUrlTokens(url);
+  } catch {
+    // Never let a redaction failure leak the raw URL — fail to a marker.
+    return "[url redaction failed]";
+  }
+}
 
 export { isPrivilegedSender } from "./message-handlers";
 export { sanitizeDownloadName, truncateFilename } from "./download-name";
@@ -81,7 +101,7 @@ export function recordDownload(delta: chrome.downloads.DownloadDelta): DownloadR
   const filename = sanitizeDownloadName(delta.filename?.current || "download.bin");
   const rec: DownloadRecord = {
     filename,
-    url: delta.url?.current ?? "",
+    url: sanitizeDownloadUrl(delta.url?.current ?? ""),
     mime: delta.mime?.current || guessMimeTypeFromName(filename),
     sizeBytes: bytes,
     receivedAt: Date.now(),
@@ -196,7 +216,28 @@ chrome.runtime.onMessage.addListener((msg: IncomingMessage, sender, sendResponse
     const fromExtensionPage = Boolean(
       sender.url?.startsWith(`chrome-extension://${chrome.runtime.id}`),
     );
-    sendResponse(fromExtensionPage ? { ok: true } : { ok: false, error: "unauthorized sender" });
+    if (!fromExtensionPage) {
+      sendResponse({ ok: false, error: "unauthorized sender" });
+      return false;
+    }
+    // Truthful ack: a RESUME with nothing actively paused is a false ack that
+    // hides the banner / shows "Resuming agent…" for a resume that never
+    // happens. The takeover registry (lib/agent/loop/helpers/takeover.ts) holds
+    // the currently-paused waits; this listener runs BEFORE that module's lazy
+    // onMessage listener (registered at SW startup vs. on first pause), so the
+    // active pause is still visible here when the message is processed.
+    // The actual un-pause is done by the takeover registry's own RESUME
+    // listener (latest-wins), not by this handler.
+    //
+    // Also clear the MANUAL-pause flag (`open_cowork_paused`, polled by the
+    // loop's runPauseCheck) so a single Resume action continues the agent
+    // regardless of which pause mechanism is active.
+    void chrome.storage.session.set({ open_cowork_paused: false }).catch(() => {});
+    sendResponse(
+      hasActiveTakeoverPause()
+        ? { ok: true }
+        : { ok: false, error: "no active takeover pause to resume" },
+    );
     return false;
   }
   return false;

@@ -120,9 +120,10 @@ describe("withLLMRetry — numeric-status classification", () => {
 
   test("a Retry-After value on the error is honored (delay is applied)", async () => {
     await withFakeTimers(async () => {
- // Pin jitter to its max (1.0) so the scheduled retry delay equals the
- // Retry-After value exactly under full jitter (delay = floor(1.0 × cap)),
- // making the delay observable and deterministic.
+ // The Retry-After delay is the capped header value exactly (deterministic —
+ // RFC 7231: never before the server's requested window). The jitter spy only
+ // guards against a regression that reintroduces sampling in [0, cap), which
+ // could retry early.
       const randomSpy = vi.spyOn(Math, "random").mockReturnValue(1.0);
       try {
         let calls = 0;
@@ -133,14 +134,41 @@ describe("withLLMRetry — numeric-status classification", () => {
         });
         const p = withLLMRetry(fn);
  // The first attempt fails and schedules the retry after exactly 1000ms
- // (Retry-After honored, jitter = 0). Advancing 999ms must NOT have
- // retried yet — proving the real delay is applied rather than skipped.
+ // (Retry-After honored). Advancing 999ms must NOT have retried yet —
+ // proving the real delay is applied rather than skipped.
         await vi.advanceTimersByTimeAsync(999);
         expect(fn).toHaveBeenCalledTimes(1);
  // Advancing the final 1ms fires the scheduled retry.
         await vi.advanceTimersByTimeAsync(1);
         const result = await p;
         expect(result).toBe("ok");
+        expect(fn).toHaveBeenCalledTimes(2);
+      } finally {
+        randomSpy.mockRestore();
+      }
+    });
+  });
+
+  test("a Retry-After delay never fires BEFORE the header value (jitter floor regression)", async () => {
+    await withFakeTimers(async () => {
+ // Pin jitter to its MIN (0.0) — the worst case for the OLD code, which
+ // sampled uniformly in [0, capped): floor(0 × 1000) = 0 would have retried
+ // IMMEDIATELY, slamming a rate-limited endpoint before the server's
+ // requested 1000ms window. The fixed path must still wait the full capped
+ // Retry-After even when jitter is zero.
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.0);
+      try {
+        let calls = 0;
+        const fn = vi.fn(async () => {
+          calls++;
+          if (calls < 2) throw statusError(429, "LLM API 429: rate", 1000);
+          return "ok";
+        });
+        const p = withLLMRetry(fn);
+        await vi.advanceTimersByTimeAsync(999);
+        expect(fn).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await p).toBe("ok");
         expect(fn).toHaveBeenCalledTimes(2);
       } finally {
         randomSpy.mockRestore();
@@ -192,6 +220,60 @@ describe("withLLMRetry — message-based fallback classification (no numeric sta
   });
 });
 
+describe("withLLMRetry — typed non-retryable security blocks (SSRF / redirect) and 429 word boundary", () => {
+  test("an error carrying the SsfrBlockError name is NEVER retried, even when its URL-ish message matches the network regex and a :4290 port", async () => {
+ // Regression (fix 1): the transport's SSRF-guard / redirect-refusal errors
+ // embed the rejected URL. A plain Error whose message contains "fetch"
+ // (hostname) AND "429" (port) matched retry.ts's message heuristics and was
+ // retried 4× (~10.5s wasted) before failing. The typed marker must
+ // short-circuit BEFORE those heuristics — single attempt.
+    const fn = vi.fn(async () => {
+      const e = new Error("Unsafe LLM baseUrl rejected (SSRF guard): https://api.fetch.example.com:4290/v1");
+      e.name = "SsfrBlockError";
+      throw e;
+    });
+    await expect(withLLMRetry(fn)).rejects.toThrow(/SSRF/);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  test("an error with nonRetryable: true is NEVER retried", async () => {
+    const fn = vi.fn(async () => {
+      const e = new Error("security block") as Error & { nonRetryable?: boolean };
+      e.nonRetryable = true;
+      throw e;
+    });
+    await expect(withLLMRetry(fn)).rejects.toThrow(/security block/);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  test("a plain error whose message contains a :4290 port is NOT classified as 429 (word-boundary only)", async () => {
+ // The old classifier used `msg.includes("429")`, so "upstream port 4290
+ // unreachable" matched and triggered a retry storm. The 429 classifier now
+ // requires a numeric `status === 429` or a word-boundary `\b429\b`, so a
+ // port number can't trip it.
+    const fn = vi.fn(async () => {
+      throw new Error("upstream port 4290 unreachable");
+    });
+    await expect(withLLMRetry(fn)).rejects.toThrow(/4290/);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  test("a genuine word-bounded 429 in a plain message IS still retried", async () => {
+    await withFakeTimers(async () => {
+      let calls = 0;
+      const fn = vi.fn(async () => {
+        calls++;
+        if (calls < 2) throw new Error("LLM API 429: rate limited");
+        return "ok";
+      });
+      const p = withLLMRetry(fn);
+      await vi.runAllTimersAsync();
+      expect(await p).toBe("ok");
+      expect(fn).toHaveBeenCalledTimes(2);
+    });
+  });
+});
+
 describe("withLLMRetry — abort handling and retry budgets", () => {
   test("a pre-aborted signal throws AbortError without attempting fn", async () => {
     const controller = new AbortController();
@@ -230,8 +312,10 @@ describe("withLLMRetry — abort handling and retry budgets", () => {
 
   test("a Retry-After value above MAX_RETRY_AFTER_MS is capped to the ceiling", async () => {
     await withFakeTimers(async () => {
-      // Pin jitter to its max so the capped delay equals the 30s ceiling
-      // exactly (floor(1.0 × 30000)) — observable and deterministic.
+      // The Retry-After delay is now the capped header value deterministically
+      // (no sampling), so the 30s ceiling is hit exactly — observable and
+      // deterministic. The jitter spy guards against a regression that
+      // reintroduces sampling in [0, cap).
       const randomSpy = vi.spyOn(Math, "random").mockReturnValue(1.0);
       try {
         let calls = 0;

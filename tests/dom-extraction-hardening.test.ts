@@ -18,6 +18,7 @@ import {
   installShadowPiercer,
 } from "../src/lib/agent/dom/shadow-piercer";
 import { redactUrlTokens } from "../src/lib/agent/dom/extraction/element-info-utils";
+import { _setStealthEnabledCacheForTests } from "../src/lib/agent/anti-detection-utils";
 import {
   generateAccessibilityTree,
   __test_resetRegistry,
@@ -36,6 +37,10 @@ beforeEach(() => {
   _resetShadowPiercerForTests();
   installShadowPiercer({ tagExisting: true });
   installJsdomLayoutMock();
+  // The cross-world backdoor is gated behind stealth mode — enable it so the
+  // hostile-backdoor rejection path below is exercised (readBackdoor consults
+  // window only when stealth is on).
+  _setStealthEnabledCacheForTests(true);
 });
 
 describe("shadow-piercer backdoor hardening", () => {
@@ -65,6 +70,31 @@ describe("shadow-piercer backdoor hardening", () => {
 
     // The full page-state walk must not throw either.
     expect(() => extractBrowserState(MOCK_TABS)).not.toThrow();
+  });
+});
+
+describe("interactive-container visibility", () => {
+  test("a hidden onclick container is NOT indexed as a phantom click target", () => {
+    const visible = document.createElement("div");
+    visible.setAttribute("onclick", "doThing()");
+    visible.textContent = "Visible container";
+    document.body.appendChild(visible);
+
+    const hidden = document.createElement("div");
+    hidden.setAttribute("onclick", "doThing()");
+    hidden.textContent = "Hidden container";
+    hidden.style.opacity = "0";
+    document.body.appendChild(hidden);
+
+    const state = extractBrowserState(MOCK_TABS);
+    // Only the visible container is indexed; the opacity:0 one is skipped by
+    // the full visibility check before indexing.
+    expect(state.elementsText).toContain("[1]<div");
+    expect(state.elementsText).not.toContain("[2]<div");
+    expect(Object.keys(state.selectorMap)).toHaveLength(1);
+    // The hidden container's text is dropped too (parent visibility cached as
+    // false by the element walk).
+    expect(state.elementsText).not.toContain("Hidden container");
   });
 });
 

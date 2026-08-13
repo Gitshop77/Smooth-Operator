@@ -147,6 +147,10 @@ describe("httpJson.frames — opaqueredirect security", () => {
     const msg = caught!.message.toLowerCase();
     expect(msg).not.toMatch(/fetch|network|econn|timeout/);
     expect(msg).toMatch(/redirect/);
+ // The typed marker (fix 1) is the authoritative non-retryable signal — it
+ // short-circuits BEFORE the message heuristics, so even a redirect URL that
+ // happens to contain "fetch"/":4290"-shaped text can never be retried.
+    expect(caught!.name).toBe("SsfrBlockError");
  // Non-retryable ⇒ fetch must be called EXACTLY once (no retries).
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -316,7 +320,18 @@ describe("httpJson.frames — Retry-After + SSRF guard", () => {
     const iter = transport
       .frames(makePrepared("http://169.254.169.254/"))[Symbol.asyncIterator]();
 
-    await expect(iter.next()).rejects.toThrow(/SSRF guard/i);
+    let caught: Error | undefined;
+    try {
+      await iter.next();
+    } catch (e) {
+      caught = e as Error;
+    }
+    expect(caught).toBeDefined();
+    expect(caught!.message).toMatch(/SSRF guard/i);
+ // The typed marker (fix 1) keeps retry.ts from re-attempting this
+ // fail-closed security block — its message can accidentally match the
+ // network/"429" heuristics (e.g. a blocked URL containing "fetch" or ":4290").
+    expect(caught!.name).toBe("SsfrBlockError");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

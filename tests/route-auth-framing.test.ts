@@ -184,6 +184,18 @@ describe("sse framing", () => {
   test("two complete events in a single chunk are emitted as two frames", () => {
     expect(sse.parse("data: a\n\ndata: b\n\n")).toEqual(["a", "b"]);
   });
+
+  test("a leading UTF-8 BOM on the first chunk is stripped (first event survives)", () => {
+ // A BOM (U+FEFF) legally prefixes a UTF-8 stream; without stripping it the
+ // first line becomes "\uFEFFdata: …" whose field name fails the `data`
+ // comparison and silently drops the first event.
+    expect(sse.parse("\uFEFFdata: hello\n\n")).toEqual(["hello"]);
+    expect(sse.parse("\uFEFFdata: a\n\ndata: b\n\n")).toEqual(["a", "b"]);
+  });
+
+  test("a BOM inside a data VALUE is preserved (only a leading BOM is stripped)", () => {
+    expect(sse.parse("data: \uFEFFhello\n\n")).toEqual(["\uFEFFhello"]);
+  });
 });
 
 describe("endpoint fragment preservation", () => {

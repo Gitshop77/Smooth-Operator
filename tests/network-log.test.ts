@@ -143,6 +143,35 @@ describe("rate-limit-tracker: network log ring", () => {
     expect(typeof entries[1].timestamp).toBe("number");
   });
 
+  test("signed query strings / tokens are stripped from captured URLs before the agent can read them", async () => {
+    const mod = await loadTracker();
+    mod.registerRateLimitListener();
+    mod.enableNetworkLog();
+    // Secret-shaped query params (signed CDN/blob URLs, OAuth state) must never
+    // reach the agent-facing ring: the entries are shipped verbatim to the LLM
+    // provider via get_network_log.
+    startRequest({
+      url: "https://example.com/private/blob?X-Amz-Signature=abc123def456&token=s3cr3t&state=0xdead",
+      method: "GET",
+      type: "xmlhttprequest",
+      tabId: 2,
+    });
+    completeRequest({
+      url: "https://example.com/private/blob?X-Amz-Signature=abc123def456&token=s3cr3t&state=0xdead",
+      statusCode: 200,
+      tabId: 2,
+    });
+    const entries = mod.getNetworkLog().entries;
+    expect(entries).toHaveLength(2);
+    for (const entry of entries) {
+      expect(entry.url).not.toContain("X-Amz-Signature");
+      expect(entry.url).not.toContain("token=");
+      expect(entry.url).not.toContain("state=");
+      expect(entry.url).not.toContain("s3cr3t");
+      expect(entry.url).toBe("https://example.com/private/blob");
+    }
+  });
+
   test("disabled → nothing is captured; re-enabling resumes", async () => {
     const mod = await loadTracker();
     mod.registerRateLimitListener();

@@ -168,3 +168,139 @@ export function assertCompiledPromptWithinProfileV1(
   const combined = messages.map((message) => message.content).join("\n");
   assertPromptWithinProfileV1(kind, label, combined);
 }
+
+// ─── Context-adaptive per-step observation caps ─────────────────────────────
+//
+// The navigator's per-step observation payloads (interactive-element DOM text,
+// accessibility tree, screenshot) are bounded by HARD caps so a misconfigured
+// run can never ship an unbounded payload. Those caps were calibrated for a
+// 128k-context model. A 64k-class model with the SAME caps receives an
+// over-context prompt and the fail-closed budget assert (in llm-direct) kills
+// the step — so "works at 128k, breaks at 64k" with no graceful path.
+//
+// These derived caps are two-regime:
+// - ≥128k context (or unknown): the exact current defaults — zero behavior
+//   change for every model the current caps were calibrated for.
+// - <128k context: a FITTING allocation — the observation channels are sized so
+//   the text observation fits the model's derived input budget alongside the
+//   fixed prompt overhead and a modest task/history payload. A smaller-context
+//   model degrades the OBSERVATION instead of failing the STEP.
+//
+// The fail-closed assert remains the shared-resource backstop: a prompt that
+// also carries a very large task/history payload (or fills several channels
+// simultaneously) still fails closed rather than shipping over-context — that
+// residual case is the compaction layer's job.
+
+/** Per-channel observation caps for one navigator step. */
+export interface NavigatorObservationCapsV1 {
+  /** Cap on interactive-element DOM text chars. */
+  elementsTextChars: number;
+  /** Cap on accessibility-tree chars. 0 → the loop drops the AX channel. */
+  axTreeChars: number;
+  /** Cap on screenshot data-URL chars. 0 → the loop drops the screenshot
+   * entirely (the channel is not affordable at this context). */
+  screenshotChars: number;
+}
+
+/** Base per-channel caps at the 128k calibration point — the current loop
+ * defaults (`ELEMENTS_TEXT_CHAR_CAP` / `MAX_NAV_AXTREE_CHARS` /
+ * `MAX_NAV_SCREENSHOT_CHARS`). A derived cap NEVER exceeds its base, so a
+ * 128k+ model keeps today's exact behavior. */
+const BASE_OBS_ELEMENTS_CHARS = 60_000;
+const BASE_OBS_AXTREE_CHARS = 200_000;
+const BASE_OBS_SCREENSHOT_CHARS = 1_500_000;
+
+/**
+ * Fixed non-observation navigator overhead (system prompt + base user-message
+ * framing) in UTF-8 bytes. Measured ≈30.7k with the stock system prompt
+ * (30,092 system + ~600 base user); the margin absorbs prompt-version drift.
+ */
+const NAVIGATOR_FIXED_OVERHEAD_BYTES = 32_000;
+
+/**
+ * Sub-128k models receive the COMPACT system prompt (~22.1KB measured vs
+ * 30.1KB full), so their fixed overhead is correspondingly lower — the entire
+ * point of the compact variant is to convert prompt bytes into observation
+ * headroom for low-context models. 22,101 measured system + ~600 base user +
+ * a margin for history growth past the user-content reserve (measured: a
+ * 20-step run's history plateaus ~350 bytes over the 4k reserve).
+ */
+const NAVIGATOR_COMPACT_FIXED_OVERHEAD_BYTES = 23_300;
+
+/**
+ * Sub-128k regime: reserved bytes for the variable user-message content that
+ * sits alongside the observation (task text, plan, `navigator_history`,
+ * wrapping). The fitting allocation leaves this much budget empty on purpose so
+ * a realistic task + short history still fits. Histories beyond this reserve
+ * are the compaction layer's job; the fail-closed assert catches the residue.
+ */
+const NAVIGATOR_USER_CONTENT_RESERVE_BYTES = 4_000;
+
+/** Absolute floor per channel so a degenerate tiny context can't derive
+ * unusable 1-char caps. */
+const MIN_OBS_ELEMENTS_CHARS = 2_000;
+
+/** Smallest screenshot (data-URL chars) that is worth sending at all. Below
+ * this the channel is dropped: sending a 3k-char image is pure cost with no
+ * grounding value, and keeping it would just trip the budget assert. */
+const MIN_USEFUL_SCREENSHOT_CHARS = 24_000;
+
+/** Share of the fitting observation budget given to elementsText (the primary
+ * channel); the accessibility tree gets the remainder. Calibrated so the
+ * sub-128k allocation leaves the DOM channel dominant and AX degradable. */
+const ELEMENTS_TEXT_FIT_SHARE = 0.85;
+
+/**
+ * Derive the per-step navigator observation caps for a KNOWN model context
+ * window. `undefined` (unknown model / fixed-profile path) returns the exact
+ * current defaults — zero behavior change for unknown-context runs.
+ *
+ * Regime ≥128k (or unknown): the base caps unchanged; the screenshot cap
+ * becomes its FIT budget — what remains after the fixed overhead and a minimum
+ * usable text observation. At 128k that is 67,424 chars (≈50KB image, ~640px)
+ * instead of the current 1.5M hard cap that realistic captures always exceed —
+ * replacing a silent step-killing assert with an observable drop.
+ *
+ * Regime <128k: `available = derivedMaxInput − compactFixedOverhead − userContentReserve`;
+ * elementsText gets 85% of it (floored at MIN_OBS_ELEMENTS_CHARS), the AX tree
+ * gets the remainder (dropped when it would be useless), and the screenshot
+ * channel is dropped — a screenshot is not affordable at these budgets.
+ * The fixed overhead uses the COMPACT system prompt (sub-128k models receive
+ * it), which is what converts prompt bytes into observation headroom.
+ */
+export function deriveNavigatorObservationCapsV1(
+  contextTokens: number | undefined,
+): NavigatorObservationCapsV1 {
+  if (contextTokens === undefined) {
+    return {
+      elementsTextChars: BASE_OBS_ELEMENTS_CHARS,
+      axTreeChars: BASE_OBS_AXTREE_CHARS,
+      screenshotChars: BASE_OBS_SCREENSHOT_CHARS,
+    };
+  }
+  const profile = promptBudgetProfileForContextV1("navigator", contextTokens);
+  const baseProfile = PROMPT_BUDGET_PROFILES_V1.navigator;
+
+  // ≥128k-class model (or any context whose derived input budget is at least
+  // the 128k base): keep the exact current defaults.
+  if (profile.maxInputTokens >= baseProfile.maxInputTokens) {
+    const screenshotFit = profile.maxInputTokens - NAVIGATOR_FIXED_OVERHEAD_BYTES
+      - MIN_OBS_ELEMENTS_CHARS - MIN_OBS_ELEMENTS_CHARS;
+    return {
+      elementsTextChars: BASE_OBS_ELEMENTS_CHARS,
+      axTreeChars: BASE_OBS_AXTREE_CHARS,
+      screenshotChars: screenshotFit >= MIN_USEFUL_SCREENSHOT_CHARS
+        ? Math.min(BASE_OBS_SCREENSHOT_CHARS, screenshotFit)
+        : 0,
+    };
+  }
+
+  // Sub-128k fitting regime. The fixed overhead uses the COMPACT system prompt
+  // (these models get it — see llm-direct), converting prompt bytes into
+  // observation headroom.
+  const available = profile.maxInputTokens - NAVIGATOR_COMPACT_FIXED_OVERHEAD_BYTES
+    - NAVIGATOR_USER_CONTENT_RESERVE_BYTES;
+  const elementsTextChars = Math.max(MIN_OBS_ELEMENTS_CHARS, Math.floor(available * ELEMENTS_TEXT_FIT_SHARE));
+  const axTreeChars = Math.max(0, available - elementsTextChars);
+  return { elementsTextChars, axTreeChars, screenshotChars: 0 };
+}

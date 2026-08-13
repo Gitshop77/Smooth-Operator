@@ -9,7 +9,11 @@ const h = vi.hoisted(() => {
     waitForRunRecoveryAudit: vi.fn<() => Promise<void>>(),
     reserveManualRunAuthority: vi.fn(),
     discardReservedManualRun: vi.fn(async () => {}),
-    startRun: vi.fn(async () => {}),
+    startRun: vi.fn(async ({ onAdmitted }: { onAdmitted?: () => void } = {}) => {
+      // Production startRun invokes onAdmitted once the run has passed every
+      // admission gate — simulate that so the RUN ack path is exercised.
+      onAdmitted?.();
+    }),
     setRunStarting: vi.fn(),
     requestRunStartCancellation: vi.fn(),
     isRunStarting: vi.fn(() => false),

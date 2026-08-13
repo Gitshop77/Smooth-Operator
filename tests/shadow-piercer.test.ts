@@ -20,10 +20,15 @@ import {
   getShadowRoot,
   _resetShadowPiercerForTests,
 } from "../src/lib/agent/dom/shadow-piercer";
+import { _setStealthEnabledCacheForTests } from "../src/lib/agent/anti-detection-utils";
 
 beforeEach(() => {
   document.body.innerHTML = "";
   _resetShadowPiercerForTests();
+  // The cross-world backdoor is a page-observable artifact that is published
+  // in NORMAL mode and suppressed when stealth mode is on — ensure stealth is
+  // OFF so the backdoor surface is published.
+  _setStealthEnabledCacheForTests(false);
 });
 
 describe("shim parity", () => {
@@ -83,5 +88,21 @@ describe("backdoor surface", () => {
     expect(typeof bd.stats).toBe("function");
     // The unused hasShadowRoot member was removed from the surface.
     expect(bd.hasShadowRoot).toBeUndefined();
+  });
+
+  test("the backdoor is NOT published when stealth mode is on", () => {
+    _setStealthEnabledCacheForTests(true);
+    installShadowPiercer();
+    // The attachShadow patch still captures roots locally…
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = host.attachShadow({ mode: "closed" });
+    expect(getShadowRoot(host)).toBe(root); // module-local state, not the backdoor
+    // …but no page-observable backdoor exists on window.
+    expect(
+      (window as unknown as Record<symbol, unknown>)[
+        Symbol.for("__open_cowork_piercer_bd__")
+      ],
+    ).toBeUndefined();
   });
 });

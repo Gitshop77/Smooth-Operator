@@ -100,6 +100,7 @@ function setupGlobals(): void {
     <textarea id="messageInput"></textarea>
     <button id="sendBtn"></button>
     <button id="stopBtn"></button>
+    <button id="pauseBtn"><span>Pause</span></button>
     <span id="costLabel">$0.0000</span>
     <span id="tokenLabel">0 tokens</span>
     <span id="statusDot" data-status="idle"></span>
@@ -354,6 +355,31 @@ describe("sidepanel controls", () => {
     }, "local")).toBe(false);
   });
 
+  test("Pause button sets the manual-pause flag and toggles to Resume", async () => {
+    await loadControls();
+    const { handleRunSnapshotStorageChange } = await import("../src/extension/sidepanel/controls");
+    const running = {
+      version: 1, runId: "run-pause", revision: 1, dispatchRevision: 1,
+      task: "task", maxSteps: 10, mode: "standard", status: "running",
+      phase: "acting", step: 1, startedAt: 1, updatedAt: 1,
+    };
+    expect(handleRunSnapshotStorageChange({ open_cowork_run_snapshot_v1: { newValue: running } }, "session")).toBe(true);
+    const pause = document.getElementById("pauseBtn") as HTMLButtonElement;
+    expect(pause.disabled).toBe(false);
+    expect(pause.textContent).toContain("Pause");
+
+    pause.click();
+    await flush();
+    expect(st.sessionSet).toHaveBeenCalledWith({ open_cowork_paused: true });
+    expect(pause.textContent).toContain("Resume");
+    expect(pause.getAttribute("aria-label")).toBe("Resume agent");
+
+    // Click again to resume: the flag is cleared.
+    pause.click();
+    await flush();
+    expect(st.sessionSet).toHaveBeenLastCalledWith({ open_cowork_paused: false });
+    expect(pause.textContent).toContain("Pause");
+  });
   test("idle Stop response is explicit rather than pretending to cancel", async () => {
     await loadControls();
     const stop = document.getElementById("stopBtn") as HTMLButtonElement;

@@ -56,7 +56,7 @@ You'll need [Node.js](https://nodejs.org/) **22.23.2** (which bundles npm
 The repository's `.nvmrc`, `package.json`, and verifier enforce that exact
 Node/npm pair. Chrome's manifest floor is 116, but the only tested browser is
 Chrome for Testing 151.0.7922.77 on ARM; Brave and Edge are unverified and
-unsupported. See the [browser support matrix](docs/redesign/BROWSER_SUPPORT_MATRIX.md).
+unsupported.
 Open Cowork ships as source — you build it locally and load it as an unpacked
 extension.
 
@@ -180,6 +180,30 @@ flowchart TD
 8. When the task is done, the Planner signals completion.
 9. The optional Judge independently verifies the result.
 
+### Context budgets — the harness fits your model, not the other way around
+
+Every per-step payload is sized against the model's real context window
+(resolved from the models.dev catalog, or your manual **Context window
+override** in Options):
+
+- **Context-derived observation caps.** A 128k+ model keeps the full
+  observation (up to 60k chars of interactive-element text, 200k of AX tree).
+  A 64k-class model gets a *fitting* allocation — enough to see the page
+  without ever shipping an over-context prompt. Unknown models keep the
+  fixed 128k defaults.
+- **Compact system prompt for <128k models.** The navigator system prompt has
+  a compact variant (~22KB vs ~30KB) that preserves every security rule,
+  action schema, and output-format contract verbatim while compressing prose —
+  giving a 64k model roughly **3.5× more page-observation headroom** per step.
+- **Screenshot fit budgets.** Screenshots are downscaled at capture to fit the
+  model's budget (a 128k model gets ~50KB images instead of raw captures that
+  used to trip the budget guard).
+- **Bounded history.** Only the last few observations keep full content; older
+  steps render as compact structural placeholders, and auto-compaction
+  summarizes long histories into `<compacted_memory>` so long-running tasks
+  stay coherent and context stays flat. Loop-level tests prove 64k survival
+  across 20, 50, and 100 steps with repeated compactions.
+
 Three roles share the work:
 
 - **Planner** — breaks the task into steps, and rechecks progress every few navigator moves.
@@ -202,7 +226,7 @@ The navigator reads each page through three channels at once:
 
 ### Handling real-world pages
 
-It also deals with the friction of real sites: it detects bot challenges (Cloudflare, hCaptcha, reCAPTCHA) and pauses for you to solve them, and applies stealth patches (like hiding `navigator.webdriver`) so sites don't flag it as automation. For pixel-accurate control, it can drive the page through Chrome's DevTools Protocol.
+It also deals with the friction of real sites: it detects bot challenges (Cloudflare, hCaptcha, reCAPTCHA) and pauses for you to solve them, and applies stealth patches (like hiding `navigator.webdriver`) so sites don't flag it as automation. Stealth is ON by default — the agent never exposes visible automation artifacts to the page unless you disable it in Options. For pixel-accurate control, it can drive the page through Chrome's DevTools Protocol.
 
 ## Operating modes
 
@@ -432,7 +456,7 @@ Privacy questions: **security@opencowork.dev**.
 ### Prerequisites
 
 - Node.js **22.23.2** and npm **10.9.8** (use `.nvmrc` with `nvm install` / `nvm use`)
-- A browser that can load unpacked MV3 extensions. See the [browser support matrix](docs/redesign/BROWSER_SUPPORT_MATRIX.md) for the sole tested Chrome build and the unverified Brave/Edge status.
+- A browser that can load unpacked MV3 extensions. The only tested browser is Chrome for Testing 151.0.7922.77 on ARM (Chrome's manifest floor is 116); Brave and Edge are unverified and unsupported.
 
 ### Build from source
 
@@ -546,6 +570,7 @@ Don't commit secrets or build output — `.env*`, `db/`, `chrome-extension/` (th
 
 - The `evaluate` sandbox is a second layer of defense, not a hard wall — use Full Agentic mode only on sites you trust.
 - Run history has no automatic expiry — clear it yourself in **Options**.
+- A 64k-class model is kept *reliably* within its context budget (proven by loop-level tests), but page-observation quality is proportionally smaller than on a 128k+ model — for the hardest tasks, prefer a 128k+ model. The compact system prompt trades prose for observation room, never security.
 
 ## License
 
@@ -573,5 +598,4 @@ replacement.
 Browser-real lanes that require a Chrome host (packaged E2E, screenshots,
 keyboard/screen-reader walks, alarm/webhook timing, vision download) run via
 `E2E_CHROME=1 npx vitest run tests/e2e-chrome.test.ts` and are documented as
-explicit pre-release residuals in `docs/redesign/PHASE_EVIDENCE.md`; they are
-never silently claimed.
+explicit pre-release residuals; they are never silently claimed.

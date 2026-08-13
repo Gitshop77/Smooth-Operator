@@ -41,10 +41,13 @@ export async function handleClick(
 
   highlightElement(el, `click [${numericIndex}]`);
   throwIfAborted(ctx.signal);
-  await moveCursorToElement(el);
-  throwIfAborted(ctx.signal);
+  // Scroll + settle BEFORE moving the phantom cursor (mirrors the hover
+  // contract): the cursor must target the element's POST-scroll viewport
+  // position, and the visual feedback should match what the user sees.
   safeScrollIntoView(el);
   await sleep(TIMINGS.clickScrollIntoView, ctx.signal);
+  throwIfAborted(ctx.signal);
+  await moveCursorToElement(el);
   throwIfAborted(ctx.signal);
   if (typeof el.focus === "function") el.focus();
 

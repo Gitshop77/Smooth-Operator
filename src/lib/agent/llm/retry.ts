@@ -16,7 +16,8 @@
  * propagates all other errors immediately (including 4xx except 429 and the
  * OpenAI-404 quirk below). Cancelled/aborted errors propagate without retry.
  * When a 429 response carries a `Retry-After` header, the header's value (in
- * ms) replaces the exponential backoff delay.
+ * ms) replaces the exponential backoff delay and is honored as a FLOOR — the
+ * retry never fires before the server's requested window (RFC 7231 §7.1.3).
  *
  * Provider error taxonomy (opencode parity):
  * - Context-overflow has THREE independent triggers: an overflow phrase in
@@ -263,7 +264,7 @@ function classifyError(
     hasStatus && status >= 400 && status < 500 && status !== 429;
   const is429 = hasStatus
     ? status === 429
-    : msg.includes("429") || TOO_MANY_RE.test(msg);
+    : /\b429\b/.test(msg) || TOO_MANY_RE.test(msg);
   const is5xx = hasStatus
     ? status >= 500 && status < 600
     : STATUS_5XX_RE.test(msg);
@@ -299,30 +300,51 @@ export async function withLLMRetry<T>(
       const msg = err.message;
       const status = (e as Error & { status?: number }).status;
       if (signal?.aborted) {
-        const norm = e instanceof Error ? e : new Error(String(e));
-        norm.name = "AbortError";
-        throw norm;
+        // The failure is irrelevant — the run was cancelled. Reuse the
+        // already-normalized `err` (a second normalization existed here
+        // before; nothing can mutate `e` between the two blocks) and force
+        // the AbortError identity so every cancellation path is recognizable.
+        err.name = "AbortError";
+        throw err;
       }
       if (
         err.name === "AbortError" ||
         err.name === "TimeoutError" ||
         ABORT_NAME_RE.test(err.name)
       ) throw e;
+      // Typed non-retryable marker (SSRF-block / redirect-refusal security
+      // rejections from the transport): checked BEFORE the message/status
+      // heuristics below. A plain Error whose message embeds the rejected URL
+      // can accidentally match them — a host/path containing "fetch" trips the
+      // network regex and a port like `:4290` tripped the old "429" substring
+      // check — turning a fail-closed security block into a ~10.5s retry storm.
+      if (
+        err.name === "SsfrBlockError" ||
+        (err as { nonRetryable?: boolean }).nonRetryable === true
+      ) throw e;
       const { is429, is5xx, isNetwork, isContextOverflow } = classifyError(err, status, msg);
+      // `signal.aborted` was already handled above and cannot change before
+      // this check (no awaits in between), so the old
+      // `isNetwork && !signal?.aborted` guard was always true — dropped.
       const retryable =
         is429 ||
         is5xx ||
         isContextOverflow ||
-        (isNetwork && !signal?.aborted) ||
+        isNetwork ||
         isRetryableOpenAI404(status, providerId);
       if (!retryable || attempt >= MAX_RETRIES) throw e;
       const retryAfterMs = (e as Error & { retryAfter?: number }).retryAfter;
       let delay: number;
       if (typeof retryAfterMs === "number" && retryAfterMs >= 0) {
         const capped = Math.min(retryAfterMs, MAX_RETRY_AFTER_MS);
-        delay = capped > 0
-          ? Math.floor(Math.random() * capped)
-          : 0;
+        // RFC 7231 §7.1.3: never retry BEFORE the server's requested
+        // Retry-After window. The old code sampled uniformly in [0, capped),
+        // so `Retry-After: 30` could be retried at t≈0 — slamming a
+        // rate-limited endpoint before the server's requested time. The delay
+        // is now the capped value exactly (no downward jitter); the
+        // non-Retry-After path keeps full jitter for its own
+        // desynchronization. `Retry-After: 0` still means "retry immediately".
+        delay = capped > 0 ? capped : 0;
       } else {
         delay = fullJitterDelay(attempt);
       }

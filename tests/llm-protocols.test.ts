@@ -1349,7 +1349,11 @@ describe("generate — additive terminal diagnostics", () => {
       expect(response.content).toBe("");
       expect(response.terminalDiagnostic).toMatchObject({
         code: "malformed_stream",
-        terminalSeen: false,
+ // A frame WAS received and the stream then ended, so the terminal state is
+ // now `true` (fix 4: EOF after ≥1 data frame is a normal terminal event).
+ // The frames themselves were malformed — that is what `malformed_stream`
+ // diagnoses.
+        terminalSeen: true,
         droppedFrames: 1,
       });
     } finally {
@@ -1357,15 +1361,18 @@ describe("generate — additive terminal diagnostics", () => {
     }
   });
 
-  test("clean EOF before a provider terminal marker preserves content and diagnoses truncation", async () => {
+  test("clean EOF after the last data frame is a normal terminal event (no no_terminal_stream)", async () => {
+ // Regression (fix 4): the OLD behavior reported `no_terminal_stream` — a
+ // hard failure in direct-call consumers — for a CLEAN stream that simply
+ // ended without the literal `[DONE]` sentinel. A clean EOF after ≥1 data
+ // frame is now a normal terminal event, so no diagnostic is attached and the
+ // visible content is used as-is. Truncation is still caught via
+ // `malformed_stream` (dropped partial frames) and the transport stall/abort
+ // error paths.
     const response = await generateFromSse(
       'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n',
     );
     expect(response.content).toBe("partial");
-    expect(response.terminalDiagnostic).toMatchObject({
-      code: "no_terminal_stream",
-      terminalSeen: false,
-      visibleContentChars: 7,
-    });
+    expect(response.terminalDiagnostic).toBeUndefined();
   });
 });

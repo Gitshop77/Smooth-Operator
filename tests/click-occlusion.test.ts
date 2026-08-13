@@ -46,6 +46,33 @@ describe("occlusionError", () => {
     expect(occlusionError(el, 60, 30)).toBeNull();
   });
 
+  test("returns null when the hit is inside the TARGET's OWN shadow tree (closed-shadow custom element)", () => {
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    const root = el.attachShadow({ mode: "closed" });
+    const inner = document.createElement("button");
+    root.appendChild(inner);
+    // `elementFromPoint` returns a node inside el's closed shadow root;
+    // `el.contains(inner)` is false across the shadow boundary, so without the
+    // shadow-tree exception this would be misread as a covering overlay.
+    stubElementFromPoint(inner);
+    expect(occlusionError(el, 60, 30)).toBeNull();
+  });
+
+  test("returns an error when the hit is inside a DIFFERENT element's shadow tree", () => {
+    const el = document.createElement("button");
+    document.body.appendChild(el);
+    const other = document.createElement("div");
+    document.body.appendChild(other);
+    const root = other.attachShadow({ mode: "closed" });
+    const inner = document.createElement("button");
+    root.appendChild(inner);
+    stubElementFromPoint(inner);
+    const err = occlusionError(el, 60, 30);
+    expect(err).toBeTruthy();
+    expect(err).toContain("intercepted by <button>");
+  });
+
   test("returns an error when a DIFFERENT element intercepts the center", () => {
     const el = document.createElement("button");
     const overlay = document.createElement("div");

@@ -15,7 +15,7 @@ import {
   getLastPricingError,
   __resetPricingForTests,
 } from "../src/lib/agent/llm/pricing";
-import { convertCatalog } from "../src/lib/agent/llm/pricing-utils";
+import { convertCatalog, fetchCustomCatalog } from "../src/lib/agent/llm/pricing-utils";
 import type { Catalog } from "../src/lib/agent/llm/catalog";
 
 // Reset all mutable pricing module state before each test so stubbed catalog
@@ -792,5 +792,41 @@ describe("estimateCost — multi-tier selection (highest qualifying tier)", () =
     expect(
       estimateCost({ model: "multi-tier", tokensIn: 1_000_000, tokensOut: 0, contextTokens: 250_000 }),
     ).toBeCloseTo(3, 6);
+  });
+});
+
+// ─── fetchCustomCatalog hardening (fix 3) ────────────────────────────────────
+
+describe("fetchCustomCatalog — fetch hardening", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  test("fetch is called with redirect:'error', credentials:'omit', cache:'no-store', and no referrer", async () => {
+    // The catalog fetch must never follow a redirect (a 3xx could bounce the
+    // request to an attacker origin), never send ambient credentials/cookies,
+    // and never reuse a cached response — mirroring the route transport's
+    // hardening. No resolver exists in this runtime, so the DNS step degrades
+    // to best-effort and the fetch proceeds.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const fetchMock = vi.fn(
+        async (_input: RequestInfo | URL, _init?: RequestInit) => ({ ok: true, status: 200, json: async () => ({}) }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      await fetchCustomCatalog("https://catalog.example.com/models.json");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const init = fetchMock.mock.calls[0]?.[1];
+      expect(init?.redirect).toBe("error");
+      expect(init?.credentials).toBe("omit");
+      expect(init?.cache).toBe("no-store");
+      expect(init?.referrer).toBe("");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("a non-HTTP scheme is refused before any fetch (redirect:'error' is asserted above)", async () => {
+    await expect(fetchCustomCatalog("ftp://catalog.example.com/x.json")).rejects.toThrow(/non-HTTP/);
   });
 });

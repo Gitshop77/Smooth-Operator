@@ -90,6 +90,12 @@ export class BackgroundRunCommandService implements RunCommandService {
       return false;
     }
     let responded = false;
+    const ack = (): void => {
+      if (!responded) {
+        responded = true;
+        respond({ ok: true });
+      }
+    };
     void (async () => {
       try {
         await waitForRunRecoveryAudit();
@@ -102,9 +108,14 @@ export class BackgroundRunCommandService implements RunCommandService {
           responded = true;
           return;
         }
-        respond({ ok: true });
-        responded = true;
-        await startRun({ task: command.task, maxSteps, mode });
+        // ACK only after the run has PASSED admission (see startRun's
+        // onAdmitted) — an early `{ok:true}` here would let the panel show a
+        // "started" run that never actually started (e.g. domain-config load
+        // failure finalizes the run as failed before the loop begins).
+        await startRun({ task: command.task, maxSteps, mode, onAdmitted: ack });
+        // If the loop ends without ever having admitted (rare early failure
+        // path), make sure the caller still gets a response.
+        if (!responded) respond({ ok: false, error: "run failed before admission" });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         await discardReservedManualRun(message).catch(() => {});

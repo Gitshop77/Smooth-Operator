@@ -13,6 +13,8 @@
  * shim in `dom/phantom-cursor.ts`.
  */
 
+import { isStealthEnabledSync } from "../../anti-detection-utils";
+
 /** The cursor SVG markup (a pointer arrow with a white outline). */
 const CURSOR_SVG = `
 <svg width="20" height="26" viewBox="0 0 20 26" style="position:absolute; top:0; left:0; overflow:visible;">
@@ -76,9 +78,19 @@ function ensureCursor(x: number, y: number): HTMLDivElement {
 }
 
 export function movePhantomCursor(x: number, y: number): Promise<void> {
+  // Stealth gate: the phantom cursor is a page-visible artifact (an SVG overlay
+  // appended to `document.body` that any page script can observe). It moves in
+  // NORMAL mode (the user's visual "where is the agent pointing" indicator) and
+  // is suppressed when stealth mode is on — see
+  // `anti-detection-utils.isStealthEnabledSync`.
+  if (isStealthEnabledSync()) return Promise.resolve();
   if (document.hidden) return Promise.resolve();
 
-  if (!cursorEl) {
+  if (!cursorEl || !cursorEl.isConnected) {
+    // Re-create when the page detached it (e.g. a page framework replaced
+    // `document.body` mid-session) — a stale reference to a removed node would
+    // otherwise silently swallow every later move, mirroring the live-region
+    // re-creation pattern in overlay-renderer.ts.
     cursorEl = ensureCursor(x, y);
     return Promise.resolve();
   }

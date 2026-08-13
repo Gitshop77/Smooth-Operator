@@ -71,12 +71,16 @@ export interface CompileNavigatorPromptV1Input {
   /** Exact suffixes applied by the provider-facing adapter. */
   systemSuffix?: string;
   userSuffix?: string;
+  /** When true, use the COMPACT navigator system prompt for low-context
+   * (<128k) models — every security/schema/behavior block is preserved, only
+   * prose is compressed (see `buildNavigatorPrompt(..., compact)`). */
+  compact?: boolean;
 }
 
 export async function compileNavigatorPromptV1(
   input: CompileNavigatorPromptV1Input,
 ): Promise<CompiledPromptV1> {
-  const system = buildNavigatorPrompt(input.maxActions, input.customPrompt, input.visionMode, input.mode) +
+  const system = buildNavigatorPrompt(input.maxActions, input.customPrompt, input.visionMode, input.mode, input.compact) +
     (input.systemSuffix ?? "");
   const user = await buildNavigatorUserMessage(input.user) + (input.userSuffix ?? "");
   return compileLegacyPairV1({

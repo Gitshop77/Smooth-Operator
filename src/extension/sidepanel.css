@@ -470,6 +470,29 @@ header h1 {
   opacity: 0.4;
   cursor: not-allowed;
 }
+.btn-pause {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  font-family: inherit;
+  background: transparent;
+  border: 1px solid var(--oc-border-default);
+  border-radius: var(--oc-radius-sm);
+  color: var(--oc-status-warning);
+  cursor: pointer;
+  transition: background-color var(--oc-transition-fast), border-color var(--oc-transition-fast);
+}
+.btn-pause:hover:not(:disabled) {
+  background: var(--oc-status-warning-subtle);
+  border-color: var(--oc-status-warning-border);
+}
+.btn-pause:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 
 /* ─── Takeover banner ─────────────────────────────────────────────────────── */
 .takeover-banner {

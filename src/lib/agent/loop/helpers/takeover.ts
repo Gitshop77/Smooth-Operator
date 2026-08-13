@@ -106,6 +106,13 @@ const MAX_ACTIVE_RESUME_FINISHERS = 10;
 // distinct `onMessage` instance.
 let attachedOnMessage: unknown = null;
 
+/** Whether at least one takeover pause is currently waiting for RESUME. Lets
+ * the background's RESUME handler ack truthfully (a RESUME with nothing to
+ * resume is a false ack). */
+export function hasActiveTakeoverPause(): boolean {
+  return activeResumeFinishers.length > 0;
+}
+
 function attachResumeListener(): void {
   const om = chrome.runtime?.onMessage;
   if (!om || attachedOnMessage === om) return;

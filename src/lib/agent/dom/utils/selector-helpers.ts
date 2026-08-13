@@ -68,3 +68,19 @@ export function escapeCss(css: string): string {
   }
   return out.join("");
 }
+
+/**
+ * Escape a value for a DOUBLE-QUOTED CSS attribute selector (`[id="…"]`,
+ * `[name="…"]`, `[data-testid="…"]`). Only the characters that terminate or
+ * escape a CSS string need escaping here (backslash, double quote, newline,
+ * carriage return, NUL); identifier-context escaping (see {@link escapeCss})
+ * would over-escape and change the generated selector text.
+ */
+export function escapeCssString(s: string): string {
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\A ")
+    .replace(/\r/g, "\\D ")
+    .replace(/\0/g, "\\0 ");
+}

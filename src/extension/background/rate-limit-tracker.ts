@@ -28,6 +28,25 @@ import type { AgentAction } from "@/lib/agent/types";
 import type { ConsoleLogEntry, NetworkLogEntry, PrivilegedDispatchToken } from "./message-types";
 import { authorizeRunScopedDispatch } from "./run-dispatch-authorization";
 import { consumeEffectCapability } from "./privileged-action-policy";
+import { redactUrlTokens } from "@/lib/agent/dom/extraction/element-info-utils";
+
+/**
+ * Sanitize a captured request/response URL BEFORE it enters the agent-facing
+ * ring. URLs routinely embed signed query strings (`?X-Amz-Signature=…`,
+ * `?token=…`), OAuth `state`/`code`, and session ids (blob/CDN/signed paths) —
+ * and `get_network_log` hands every entry to the LLM provider. The redaction
+ * discipline that protects every other egress (snapshots, events, history)
+ * must cover this channel too: `redactUrlTokens` strips the query/fragment,
+ * userinfo, secret-shaped path segments, and secret host labels.
+ */
+function sanitizeNetworkUrl(url: string): string {
+  try {
+    return redactUrlTokens(url);
+  } catch {
+    // Never let a redaction failure leak the raw URL — fail to a marker.
+    return "[url redaction failed]";
+  }
+}
 
 /** HTTP statuses that represent a network-layer throttle / back-off signal. */
 const RATE_LIMIT_STATUSES: ReadonlySet<number> = new Set<number>([429, 503]);
@@ -288,7 +307,7 @@ export function registerRateLimitListener(): void {
         if (!networkLogEnabled) return undefined;
         pushNetworkLogEntry({
           type: "request",
-          url: details.url,
+          url: sanitizeNetworkUrl(details.url),
           method: details.method,
           resource_type: details.type,
           timestamp: Date.now(),
@@ -303,7 +322,7 @@ export function registerRateLimitListener(): void {
       if (!networkLogEnabled) return;
       pushNetworkLogEntry({
         type: "response",
-        url: details.url,
+        url: sanitizeNetworkUrl(details.url),
         status: details.statusCode,
         timestamp: Date.now(),
       });

@@ -1,9 +1,28 @@
 import { redactUrl } from "./url-redact";
+import { redactKeyShapes } from "../../key-shape-redact";
 import {
   type SsrfProvenance,
   isAllowedLlmBaseUrl,
   resolveAndValidateLlmBaseUrl,
 } from "./ssrf";
+
+/**
+ * Typed non-retryable rejection for transport SECURITY blocks (SSRF-guard
+ * rejections and opaque-redirect refusals). Plain `Error`s whose message
+ * embeds the rejected URL were misclassified by retry.ts's message heuristics:
+ * a host/path containing "fetch" matched the network regex and a port like
+ * `:4290` matched the old "429" substring check — turning a fail-closed
+ * security block into a ~10.5s retry storm (4 attempts). retry.ts checks
+ * `name === "SsfrBlockError"` / `nonRetryable` BEFORE any message/status
+ * heuristic and propagates immediately.
+ */
+export class SsfrBlockError extends Error {
+  readonly nonRetryable = true as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "SsfrBlockError";
+  }
+}
 
 /**
  * Parse an HTTP `Retry-After` header value into a delay in milliseconds.
@@ -215,7 +234,7 @@ export async function fetchWithTimeout(
   const effectiveProvenance: SsrfProvenance = provenance;
   const exempt = effectiveProvenance === "user-configured";
   if (!isAllowedLlmBaseUrl(url, exempt, effectiveProvenance)) {
-    throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${redactUrl(url, false)}`);
+    throw new SsfrBlockError(`Unsafe LLM baseUrl rejected (SSRF guard): ${redactKeyShapes(redactUrl(url, false))}`);
   }
   // (SSRF guard, DNS-rebinding) — re-validate the real target at fetch time.
   // `isAllowedLlmBaseUrl` above only inspects the parsed HOST, so a public
@@ -236,7 +255,7 @@ export async function fetchWithTimeout(
     signal: userSignal,
   });
   if (!dnsCheck.ok) {
-    throw new Error(`Unsafe LLM baseUrl rejected (SSRF guard): ${redactUrl(url, false)} (${dnsCheck.reason})`);
+    throw new SsfrBlockError(`Unsafe LLM baseUrl rejected (SSRF guard): ${redactKeyShapes(redactUrl(url, false))} (${redactKeyShapes(dnsCheck.reason)})`);
   }
   if (userSignal?.aborted) throw abortError(userSignal);
   const controller = new AbortController();
@@ -265,9 +284,13 @@ export async function fetchWithTimeout(
  // 3xx. The body was NOT forwarded (the redirect was not followed). Throw
  // a NON-retryable error so withLLMRetry doesn't waste 10.5s re-attempting.
  // The "redirect" keyword deliberately doesn't match retry.ts's
- // /fetch|network|econn|timeout/i regex.
+ // /fetch|network|econn|timeout/i regex — and the SsfrBlockError marker
+ // makes it non-retryable even when the embedded URL happens to contain
+ // "fetch"/":4290"-shaped text (fix 1). redactKeyShapes masks
+ // credential-shaped material in the URL path before it enters the error
+ // message (fix 5).
     if (res.type === "opaqueredirect") {
-      throw new Error(`LLM endpoint returned a redirect — refused to follow (potential request-body exfiltration). URL: ${redactUrl(url, false)}`);
+      throw new SsfrBlockError(`LLM endpoint returned a redirect — refused to follow (potential request-body exfiltration). URL: ${redactKeyShapes(redactUrl(url, false))}`);
     }
     return res;
   };

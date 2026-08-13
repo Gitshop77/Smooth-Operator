@@ -11,16 +11,22 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import * as overlayModule from "../src/lib/agent/dom/annotation/overlay-renderer";
 import { highlightElement } from "../src/lib/agent/dom/annotation/overlay-renderer";
+import { _setStealthEnabledCacheForTests } from "../src/lib/agent/anti-detection-utils";
 import { installJsdomLayoutMock, restoreJsdomLayoutMock } from "./helpers";
 
 beforeEach(() => {
   document.body.innerHTML = "";
   installJsdomLayoutMock();
+  // The overlay is a page-visible artifact that renders in NORMAL mode and
+  // is suppressed when stealth mode is on — ensure stealth is OFF so the
+  // highlight path actually runs.
+  _setStealthEnabledCacheForTests(false);
 });
 
 afterEach(() => {
   restoreJsdomLayoutMock();
   vi.useRealTimers();
+  _setStealthEnabledCacheForTests(null);
 });
 
 function makeButton(): HTMLButtonElement {
@@ -130,5 +136,24 @@ describe("public API surface", () => {
     expect(
       (overlayModule as unknown as Record<string, unknown>).setPersistentHighlight,
     ).toBeUndefined();
+  });
+});
+
+describe("stealth gate", () => {
+  test("highlightElement is a no-op when stealth mode is on (no page mutation)", () => {
+    _setStealthEnabledCacheForTests(true);
+    const btn = makeButton();
+    const handle = highlightElement(btn, "Should not render");
+    // The handle contract is preserved…
+    expect(typeof handle.remove).toBe("function");
+    handle.remove();
+    // …but the page is untouched: no outline style, no badge, no aria-live region.
+    expect(btn.style.outline).toBe("");
+    expect(document.querySelectorAll('[aria-live="polite"]')).toHaveLength(0);
+    expect(
+      Array.from(document.querySelectorAll("div")).filter(
+        (d) => d.getAttribute("aria-hidden") === "true",
+      ),
+    ).toHaveLength(0);
   });
 });

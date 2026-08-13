@@ -13,6 +13,7 @@
 import type { BrowserState } from "../../types";
 import { NoSuchElementException } from "../../errors";
 import { elementIdentity } from "../../dom/extraction/element-info";
+import { escapeCss, escapeCssString } from "../../dom/utils/selector-helpers";
 
 /**
  * Resolve an `[index]` to its live `HTMLElement` from the browser state's
@@ -220,23 +221,18 @@ export function generateCssSelector(el: Element): string {
   if (el.id) {
   // The id is interpolated into a DOUBLE-QUOTED attribute string
   // (`*[id="…"]`), so it must be escaped for STRING context, not identifier
-  // context — `CSS.escape` (used by `cssEscape` for the class branch below)
+  // context — `CSS.escape` (used by `escapeCss` for the class branch below)
   // is for identifier context and would mis-escape an id whose escaped form is
   // immediately followed by a hex digit (e.g. id `"b` → `\22b` parses as
   // U+022B, not `"` + `b`). Escape only the characters that are special
   // inside a CSS string: backslash and double-quote.
-    const id = el.id
-      .replace(/\\/g, "\\\\")
-      .replace(/"/g, '\\"')
-      .replace(/\n/g, "\\A ")
-      .replace(/\r/g, "\\D ")
-      .replace(/\0/g, "\\0 ");
+    const id = escapeCssString(el.id);
     return `*[id="${id}"]`;
   }
   const tag = el.tagName.toLowerCase();
   const classes = Array.from(el.classList);
   if (classes.length > 0) {
-    const classSel = `${tag}${classes.map((c) => `.${cssEscape(c)}`).join("")}`;
+    const classSel = `${tag}${classes.map((c) => `.${escapeCss(c)}`).join("")}`;
     if (isUnique(classSel)) return classSel;
   }
   const name = el.getAttribute("name");
@@ -265,16 +261,6 @@ function isUnique(selector: string): boolean {
   }
 }
 
-/** Escape a value for a DOUBLE-QUOTED CSS attribute selector. */
-function escapeCssString(s: string): string {
-  return s
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, "\\A ")
-    .replace(/\r/g, "\\D ")
-    .replace(/\0/g, "\\0 ");
-}
-
 /**
  * Sibling-count walk (the XPath `/html[1]/body[1]/div[2]/button[1]` pattern)
  * expressed as a CSS selector: each ancestor becomes `tag:nth-of-type(i)`
@@ -300,30 +286,4 @@ function toCssSiblingChain(el: Element): string {
     node = parent;
   }
   return parts.join(" > ");
-}
-
-/**
- * CSS-identifier escaper (defers to the platform `CSS.escape` when
- * available). Mirrors the `escapeCss` helper from `dom/dom-utils.ts` — kept
- * local to this module so the executor doesn't grow a cross-module import
- * for a 5-line helper.
- *
- * Module-private: `generateCssSelector` is the only consumer and is the
- * public entry point; `cssEscape` is not re-exported from the barrel.
- */
-function cssEscape(s: string): string {
-  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
-    return CSS.escape(s);
-  }
- // Minimal hand-rolled fallback (sufficient for typical id/class values).
- // Escape special characters the simple way.
-  let escaped = s.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
- // A CSS identifier must not begin with a digit. `CSS.escape` emits a hex
- // code point followed by a space for a leading digit (e.g. "5item" ->
- // "\35 item"); mirror that here so jsdom/test environments (which lack
- // CSS.escape) still produce a valid, parseable selector.
-  if (/^[0-9]/.test(escaped)) {
-    escaped = "\\3" + escaped[0] + " " + escaped.slice(1);
-  }
-  return escaped;
 }

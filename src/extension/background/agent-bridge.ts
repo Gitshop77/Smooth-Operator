@@ -27,6 +27,7 @@ import {
   primeLiveSecretRedaction,
 } from "@/lib/agent/secrets";
 import { ensureApiKeyInSession } from "@/extension/api-key-storage";
+import { getEffectiveContextTokens } from "../llm-direct";
 import {
   stopKeepalive,
   loadAndSetDomainConfig,
@@ -101,6 +102,12 @@ interface StartRunArgs {
   isScheduledTaskRun?: boolean;
   /** Authority reserved by the admission path before any scheduled side effect. */
   reservation?: RunAuthorityReservation;
+  /** Invoked once the run has PASSED every admission gate (recovery audit,
+   * existing-run check, domain-config load, pre-loop cancellation check) and is
+   * guaranteed to proceed to the loop. Used by the RUN service to ACK the
+   * panel only after the run is actually admitted — an early ack would let the
+   * panel show a "started" run that never runs. */
+  onAdmitted?: () => void;
 }
 
 export interface RunAuthorityReservation {
@@ -180,7 +187,7 @@ export function reserveScheduledRunAuthority(
  * buildLoopDeps, cleanupRun) live in `./run-helpers` so this function is a
  * thin orchestrator — ~80 lines of setup + delegation.
  */
-export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = false, reservation: suppliedReservation }: StartRunArgs): Promise<void> {
+export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = false, reservation: suppliedReservation, onAdmitted }: StartRunArgs): Promise<void> {
  // Set the synchronous concurrent-run guard at the very top (before any await)
  // so BOTH the manual RUN path and the scheduled-task path are protected
  // against the two-concurrent-loops TOCTOU window. Previously only the manual
@@ -430,6 +437,11 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     return;
   }
   if (await finishIfCancelledBeforeLoop()) return;
+  // The run is now ADMITTED: recovery audit passed, no active run, domain
+  // config loaded, and the pre-loop cancellation check passed. Notify the
+  // caller (the RUN service acks the panel here) so the panel never shows a
+  // "started" run that was actually rejected at admission.
+  onAdmitted?.();
  // Validate / clamp run-time numeric overrides from storage (run-time
  // numeric/string inputs are not validated). A corrupted value (negative, NaN,
  // non-numeric string) is coerced to a sane bound instead of reaching the loop.
@@ -564,6 +576,18 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
 
     const runningSnapshot = runController.markRunning();
     await persistRunSnapshot(runningSnapshot).catch(() => { /* best-effort */ });
+    // Resolve the effective model context window (catalog `limit.context` or the
+    // user's `contextTokens` override) once at run start. The loop derives its
+    // per-step observation caps from it, so a 64k-class model degrades the
+    // observation instead of tripping the fail-closed prompt-budget assert on
+    // every step. Best-effort: a resolution failure must never block a run start
+    // (the provider layer re-derives the budget per call as its own backstop).
+    let contextTokens: number | undefined;
+    try {
+      contextTokens = await getEffectiveContextTokens();
+    } catch (e) {
+      void safeLog("warn", "[agent-bridge] context-token resolution failed, using fixed prompt budgets:", e);
+    }
     await runAgentLoop(buildLoopDeps({
       tab,
       sendEvent,
@@ -577,6 +601,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
         plannerInterval: cfgPlannerInterval,
         maxFailures: cfgMaxFailures,
         costCapUsd: cfgCostCap,
+        contextTokens,
       },
     }));
   } catch (e) {

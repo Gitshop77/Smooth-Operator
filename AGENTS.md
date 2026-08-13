@@ -36,6 +36,11 @@ Build first, then load `chrome-extension/` as an unpacked extension at `chrome:/
 - **Path alias**: `@/*` → `./src/*` (tsconfig + vitest resolve alias).
 - **`src/extension/manifest.json`** is the source of truth; it's copied to `chrome-extension/` by the build. Don't edit `chrome-extension/manifest.json` directly.
 - The **model catalog** is sourced from the `@opencode-ai/models` SDK's snapshot entrypoint, which contains **173+ providers** with thousands of models. Updated automatically via `npm update`.
+- **Context-adaptive budgets** (`src/lib/agent/prompts/prompt-token-budget.ts`): `deriveNavigatorObservationCapsV1` sizes the per-step observation (elements text / AX tree / screenshot) against the model's effective context. Unknown/≥128k models get the fixed 128k defaults; sub-128k models get a fitting allocation using the COMPACT system prompt overhead. The effective context flows from `getEffectiveContextTokens()` (llm-direct) → `config.contextTokens` (agent-bridge run start) → the loop.
+- **Compact system prompt** (`src/lib/agent/prompts/navigator-prompt.ts`, `buildNavigatorPrompt(..., compact)`): used for <128k models. Every security/schema/behavior block is byte-identical to the full prompt; only prose is compressed. Chosen in `llm-direct.ts`'s navigator compile when the effective context is <128k.
+- **Stealth is DEFAULT-ON** (`src/lib/agent/anti-detection-utils.ts`): `isStealthEnabled()` returns true unless storage explicitly says `false`, and `isStealthEnabledSync()` fails toward stealth. Page-visible artifacts (phantom cursor, click highlight, piercer backdoor) are suppressed in stealth mode and run only when stealth is explicitly disabled.
+- **Manual pause/resume** is wired end-to-end: the sidepanel Pause button writes `open_cowork_paused` to `chrome.storage.session`; the loop's `runPauseCheck` polls it; the Resume button (or any RESUME message) clears it in `message-routing.ts`.
+- **64k survival is a tested invariant** — `tests/agent-loop-64k.test.ts` drives the real loop at 20/50/100 steps with repeated compactions and per-turn input accounting; `tests/compact-prompt.test.ts` and `tests/navigator-observation-caps.test.ts` pin the budget derivation.
 
 ## Testing
 
