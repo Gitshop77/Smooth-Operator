@@ -45,7 +45,10 @@ describe("run-usage accumulation (service-worker side)", () => {
   test("addCostEvent sums tokens + cost and keeps the latest model", () => {
     const a = addCostEvent(zeroRunUsage(), costEvent({ tokensIn: 100, tokensOut: 50, costUsd: 0.001, model: "gpt-5.4" }));
     const b = addCostEvent(a, costEvent({ tokensIn: 300, tokensOut: 200, costUsd: 0.004, model: "gpt-5.4" }));
-    expect(b).toEqual({ tokensIn: 400, tokensOut: 250, costUsd: 0.005, model: "gpt-5.4" });
+    expect(b).toEqual({
+      tokensIn: 400, tokensOut: 250, costUsd: 0.005, model: "gpt-5.4",
+      lastTokensIn: 300, lastTokensOut: 200,
+    });
   });
 
   test("addCostEvent carries reasoning/cache token fields", () => {
@@ -61,6 +64,8 @@ describe("run-usage accumulation (service-worker side)", () => {
     expect(a.reasoningTokens).toBeUndefined();
     expect(a.cachedInputTokens).toBeUndefined();
     expect(a.cachedWriteInputTokens).toBeUndefined();
+    expect(a.lastTokensIn).toBe(10);
+    expect(a.lastTokensOut).toBe(20);
   });
 
   test("addCostEvent is immutable (input record unchanged)", () => {
@@ -81,23 +86,22 @@ describe("usage-panel presentation helpers", () => {
   });
 
   test("contextUsagePct returns 0 when no limit is available", () => {
-    expect(contextUsagePct({ tokensIn: 1000, tokensOut: 1000 }, undefined)).toBe(0);
-    expect(contextUsagePct({ tokensIn: 1000, tokensOut: 1000 }, 0)).toBe(0);
+    expect(contextUsagePct({ tokensIn: 1000 }, undefined)).toBe(0);
+    expect(contextUsagePct({ tokensIn: 1000 }, 0)).toBe(0);
   });
 
-  test("contextUsagePct computes the share of the context window", () => {
-    const usage = { tokensIn: 40_000, tokensOut: 10_000 };
-    expect(contextUsagePct(usage, 200_000)).toBeCloseTo(25, 5);
-  });
-
-  test("contextUsagePct uses completion-adjusted output (reasoning tokens not double-counted)", () => {
-    const usage = { tokensIn: 40_000, tokensOut: 30_000, reasoningTokens: 20_000 };
-    expect(contextUsagePct(usage, 200_000)).toBeCloseTo(25, 5);
+  test("contextUsagePct is the CURRENT prompt's share of the context window (input tokens only)", () => {
+    // The provider's input-token count IS the prompt's context consumption.
+    expect(contextUsagePct({ tokensIn: 40_000 }, 200_000)).toBeCloseTo(20, 5);
+    // Output/reasoning tokens do not consume the input context — pass a wider
+    // object (as the render path does) and confirm only tokensIn is used.
+    const wide = { tokensIn: 40_000, tokensOut: 30_000, reasoningTokens: 20_000 };
+    expect(contextUsagePct(wide, 200_000)).toBeCloseTo(20, 5);
   });
 
   test("contextUsagePct clamps at 100 and never below 0", () => {
-    expect(contextUsagePct({ tokensIn: 999_999, tokensOut: 999_999 }, 10_000)).toBe(100);
-    expect(contextUsagePct({ tokensIn: 0, tokensOut: 0 }, 10_000)).toBe(0);
+    expect(contextUsagePct({ tokensIn: 999_999 }, 10_000)).toBe(100);
+    expect(contextUsagePct({ tokensIn: 0 }, 10_000)).toBe(0);
   });
 
   test("isUncataloguedModel delegates to the pricing flag", () => {

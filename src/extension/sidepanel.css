@@ -423,10 +423,6 @@ header h1 {
   font-variant-numeric: tabular-nums;
 }
 
-.telemetry-sep {
-  color: var(--oc-border-strong);
-}
-
 .mode-select {
   font-family: inherit;
   font-size: 11px;

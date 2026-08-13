@@ -4,11 +4,9 @@ import {
   type PromptKindV1,
 } from "./prompt-contract";
 
-/**
- * V1 is deliberately conservative: one UTF-8 byte is counted as one possible
- * input token. Provider tokenizers can combine bytes, so this is a deterministic
- * upper bound that never depends on a provider package or mutable catalog data.
- */
+/** V1 keeps a byte-exact guard for the legacy unknown-context path. Runs with
+ * a known effective context use the portable token fallback below and then
+ * replace it with provider-reported usage after every successful request. */
 export const PROMPT_BUDGET_VERSION = PROMPT_CONTRACT_VERSION;
 
 const encoder = new TextEncoder();
@@ -28,7 +26,7 @@ export class PromptBudgetExceededError extends Error {
     readonly estimatedTokens: number,
     readonly maxTokens: number,
   ) {
-    super(`Prompt budget exceeded for ${label}: ${estimatedTokens} > ${maxTokens} UTF-8-byte tokens`);
+    super(`Prompt budget exceeded for ${label}: ${estimatedTokens} > ${maxTokens} estimated tokens`);
   }
 }
 
@@ -57,7 +55,8 @@ function profile(
   });
 }
 
-/** Fixed, catalog-independent safety floors. Provider usage remains authoritative for billing. */
+/** Fixed, catalog-independent guards used only when the model context is
+ * genuinely unknown. Known-context runs derive an 85/15 profile below. */
 export const PROMPT_BUDGET_PROFILES_V1: Readonly<Record<PromptKindV1, PromptBudgetProfileV1>> =
   Object.freeze({
     navigator: profile("navigator", 128_000, 8_192, 16_384),
@@ -97,14 +96,10 @@ export function assertPromptWithinProfileV1(kind: PromptKindV1, label: string, t
 export const CONTEXT_CLAMP_FLOOR_TOKENS = 8_000;
 
 /**
- * Derive a budget profile for a KNOWN model context window. The fixed V1
- * profiles assume a 128k context (navigator) / 64k (planner) / 32k
- * (judge+compaction); a 32k/64k-class model must never receive an
- * over-context prompt, so this recomputes `maxInputTokens` as
- * `contextTokens − outputReserve − reasoningReserve` (same reserves as the
- * base profile), clamped to an 8k floor. The estimator stays the
- * conservative UTF-8-byte upper bound (bytes≈tokens — safe for every
- * tokenizer), so a profile derived here is a deterministic over-estimate.
+ * Derive a budget profile for a KNOWN model context window. Input may occupy
+ * at most 85%; the remaining 15% is the combined visible-output + hidden
+ * reasoning allowance because provider protocols account both under the same
+ * completion/output ceiling.
  */
 export function promptBudgetProfileForContextV1(
   kind: PromptKindV1,
@@ -115,17 +110,28 @@ export function promptBudgetProfileForContextV1(
   }
   const base = PROMPT_BUDGET_PROFILES_V1[kind];
   const effective = Math.max(CONTEXT_CLAMP_FLOOR_TOKENS, contextTokens);
+  const maxInputTokens = Math.floor(effective * 0.85);
   return Object.freeze({
     version: base.version,
     kind,
     contextTokens: effective,
-    outputReserveTokens: base.outputReserveTokens,
-    reasoningReserveTokens: base.reasoningReserveTokens,
-    maxInputTokens: Math.max(
-      CONTEXT_CLAMP_FLOOR_TOKENS,
-      effective - base.outputReserveTokens - base.reasoningReserveTokens,
-    ),
+    // The remaining 15% is one COMBINED generation allowance. Provider
+    // protocols count hidden reasoning inside completion/output tokens, so a
+    // second hardcoded reasoning reserve would double-count the same capacity.
+    outputReserveTokens: effective - maxInputTokens,
+    reasoningReserveTokens: 0,
+    maxInputTokens,
   });
+}
+
+/** Portable fallback for providers that expose no tokenizer/count endpoint.
+ * Natural-language, code, and DOM prompts commonly encode at 2-4 UTF-8 bytes
+ * per token; 2 bytes/token is deliberately conservative without the extreme
+ * 1-byte/token under-utilization that rejected a real 7.8K-token llama.cpp
+ * prompt as if it were 40K tokens. Provider-reported input usage remains the
+ * authority for the 85% compaction trigger after each successful call. */
+export function estimatePromptTokensFallbackV1(text: string): number {
+  return Math.ceil(utf8ByteLength(text) / 2);
 }
 
 /** Assert a single text body stays within a model-context-aware budget. */
@@ -136,7 +142,10 @@ export function assertPromptWithinContextBudgetV1(
   contextTokens: number,
 ): void {
   const profile = promptBudgetProfileForContextV1(kind, contextTokens);
-  UTF8_PROMPT_BUDGET_V1.assertWithinBudget(label, text, profile.maxInputTokens);
+  const estimate = estimatePromptTokensFallbackV1(text);
+  if (estimate > profile.maxInputTokens) {
+    throw new PromptBudgetExceededError(label, estimate, profile.maxInputTokens);
+  }
 }
 
 /** Assert a compiled prompt's combined message bodies stay within a
@@ -223,9 +232,10 @@ const NAVIGATOR_FIXED_OVERHEAD_BYTES = 32_000;
  * point of the compact variant is to convert prompt bytes into observation
  * headroom for low-context models. 22,101 measured system + ~600 base user +
  * a margin for history growth past the user-content reserve (measured: a
- * 20-step run's history plateaus ~350 bytes over the 4k reserve).
+ * 20-step run's history/task/plan/wrapping reaches ~5,000 bytes vs the 4,000
+ * reserve — the extra ~900 keeps the worst-case turn under the 39,424 budget).
  */
-const NAVIGATOR_COMPACT_FIXED_OVERHEAD_BYTES = 23_300;
+const NAVIGATOR_COMPACT_FIXED_OVERHEAD_BYTES = 24_300;
 
 /**
  * Sub-128k regime: reserved bytes for the variable user-message content that
@@ -298,7 +308,17 @@ export function deriveNavigatorObservationCapsV1(
   // Sub-128k fitting regime. The fixed overhead uses the COMPACT system prompt
   // (these models get it — see llm-direct), converting prompt bytes into
   // observation headroom.
-  const available = profile.maxInputTokens - NAVIGATOR_COMPACT_FIXED_OVERHEAD_BYTES
+  // Observation caps are an ECONOMIC/quality bound, not permission to fill
+  // the full 85% context target every step. Keep the prior conservative byte
+  // allocation for DOM/AX so pay-as-you-go calls do not balloon merely because
+  // the corrected token estimator made more context available.
+  const observationInputBytes = Math.max(
+    CONTEXT_CLAMP_FLOOR_TOKENS,
+    profile.contextTokens
+      - PROMPT_BUDGET_PROFILES_V1.navigator.outputReserveTokens
+      - PROMPT_BUDGET_PROFILES_V1.navigator.reasoningReserveTokens,
+  );
+  const available = observationInputBytes - NAVIGATOR_COMPACT_FIXED_OVERHEAD_BYTES
     - NAVIGATOR_USER_CONTENT_RESERVE_BYTES;
   const elementsTextChars = Math.max(MIN_OBS_ELEMENTS_CHARS, Math.floor(available * ELEMENTS_TEXT_FIT_SHARE));
   const axTreeChars = Math.max(0, available - elementsTextChars);

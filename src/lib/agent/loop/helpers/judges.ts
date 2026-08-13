@@ -218,6 +218,10 @@ export async function maybeJudgeAndFinalize(
       };
     };
 
+    deps.onEvent({
+      type: "info",
+      message: "Running the LLM judge to verify the completion claim.",
+    });
     const verdict = await judgeTask({
       task: deps.task,
       history: redactedHistory,

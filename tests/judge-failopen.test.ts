@@ -147,9 +147,10 @@ describe("null judge verdict must NOT fail open", () => {
     expect(successDone).toBeUndefined();
 
     // An info event must explain the judge was unverified.
-    const infoEvent = events.find((e) => e.type === "info");
+    const infoEvent = events.filter((e) => e.type === "info")
+      .map((e) => (e as { message: string }).message)
+      .find((m) => /judge could not be reached/i.test(m));
     expect(infoEvent).toBeDefined();
-    expect((infoEvent as { message: string }).message).toMatch(/judge could not be reached/i);
   });
 
   test("judge LLM throws → null verdict → run is NOT finalized as success", async () => {

@@ -119,6 +119,9 @@ export function projectRunEvent(
       return controller.updateProgress({
         phase: "reasoning",
         step: displayStep(event.step),
+        // The PERSISTED snapshot deliberately does not retain the model's raw
+        // reasoning (it can echo page content) — the live chat area renders
+        // the full redacted thinking via the AGENT_EVENT broadcast instead.
         activeOperation: "Reasoning",
         usage,
       });

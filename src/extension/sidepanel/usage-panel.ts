@@ -2,7 +2,7 @@
  * sidepanel/usage-panel.ts — run usage/cost surface for the side panel.
  *
  * Renders the run's accumulated usage (tokens in/out, reasoning tokens, cache
- * tokens, USD) plus a context-window meter against the model's catalog context
+ * tokens, USD) plus the latest call against the effective context
  * limit. The service worker accumulates `cost` events into `RunState.usage`
  * (see agent-bridge.ts + state-store-utils.ts); this panel is render-only — it
  * reads run state from chrome.storage.session and re-renders on storage change,
@@ -36,16 +36,18 @@ export function completionTokens(usage: { tokensOut: number; reasoningTokens?: n
 }
 
 /**
- * Share of the model's context window consumed by the run (0..100). Returns 0
- * when no context limit is available. Uses completion-adjusted output tokens.
+ * Share of the model's context window consumed by the CURRENT (last) prompt:
+ * `lastTokensIn / contextLimit`. The provider's input-token count IS the
+ * prompt's context consumption — after compaction the next navigator call
+ * sends a smaller prompt, so the meter drops live. Returns 0 when no context
+ * limit is available.
  */
 export function contextUsagePct(
-  usage: { tokensIn: number; tokensOut: number; reasoningTokens?: number },
+  usage: { tokensIn: number },
   contextLimit: number | undefined,
 ): number {
   if (typeof contextLimit !== "number" || !Number.isFinite(contextLimit) || contextLimit <= 0) return 0;
-  const used = usage.tokensIn + completionTokens(usage);
-  const pct = (used / contextLimit) * 100;
+  const pct = (usage.tokensIn / contextLimit) * 100;
   return Math.min(100, Math.max(0, pct));
 }
 
@@ -88,7 +90,7 @@ function createPanel(): HTMLDivElement {
   panel.setAttribute("aria-label", "Run usage");
   panel.innerHTML = `
     <div class="usage-meter-row">
-      <span class="usage-meter-label">Context</span>
+      <span class="usage-meter-label">Context window</span>
       <div class="usage-meter-track"><div class="usage-meter-fill" id="usageMeterFill"></div></div>
       <span class="usage-meter-value" id="usageMeterValue"></span>
     </div>
@@ -103,6 +105,7 @@ let renderGeneration = 0;
 let snapshotDriven = false;
 /** Memoized `provider` storage value — quasi-static, invalidated on change. */
 let cachedProvider: string | null = null;
+let cachedContextOverride: number | null | undefined;
 
 function usageHasContent(usage: RunUsage): boolean {
   return usage.model !== "" || usage.costUsd > 0;
@@ -121,12 +124,17 @@ async function contextLimitFor(model: string): Promise<number | undefined> {
   if (typeof chrome === "undefined" || !chrome.storage?.local) return undefined;
   if (cachedProvider === null) {
     try {
-      const res = await chrome.storage.local.get("provider");
+      const res = await chrome.storage.local.get(["provider", "contextTokens"]);
       cachedProvider = typeof res.provider === "string" ? res.provider : "";
+      cachedContextOverride = typeof res.contextTokens === "number" && res.contextTokens > 0
+        ? res.contextTokens
+        : null;
     } catch {
       cachedProvider = "";
+      cachedContextOverride = null;
     }
   }
+  if (cachedContextOverride) return cachedContextOverride;
   const catalogId = CATALOG_PROVIDER_ID_MAP[cachedProvider] ?? cachedProvider;
   return getModelsForProvider(catalogId, model)?.limit?.context;
 }
@@ -146,7 +154,12 @@ async function renderUsage(usage: RunUsage, _runActive: boolean): Promise<void> 
   // The model lookup is asynchronous. A later snapshot/storage refresh wins;
   // never let this older lookup repaint the newer run's totals.
   if (generation !== renderGeneration || !panelEl) return;
-  const pct = contextUsagePct(usage, limit);
+  const latestUsage = {
+    tokensIn: usage.lastTokensIn ?? usage.tokensIn,
+    tokensOut: usage.lastTokensOut ?? usage.tokensOut,
+    reasoningTokens: usage.lastReasoningTokens,
+  };
+  const pct = contextUsagePct(latestUsage, limit);
   const meterFill = panelEl.querySelector<HTMLElement>("#usageMeterFill");
   if (meterFill) {
     // Compositor-only animation: transform+origin skips layout/paint on the
@@ -209,7 +222,10 @@ function initUsagePanel(): void {
   if (typeof chrome === "undefined" || !chrome.storage?.onChanged) return;
   chrome.storage.onChanged.addListener((changes, _area) => {
     if (RUN_STATE_KEY in changes) void refreshFromRunState();
-    if ("provider" in changes) cachedProvider = null;
+    if ("provider" in changes || "contextTokens" in changes) {
+      cachedProvider = null;
+      cachedContextOverride = undefined;
+    }
   });
   void refreshFromRunState();
 }

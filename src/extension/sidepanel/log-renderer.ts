@@ -63,7 +63,7 @@ export function clearRunTotals(): void {
   // restore callback).
   restoreGeneration++;
   costLabel.textContent = "$0.0000";
-  tokenLabel.textContent = formatTokens(0);
+  if (tokenLabel) tokenLabel.textContent = formatTokens(0);
   // Clear persisted snapshot so restoreTotalsFromStorage doesn't read stale
   // values from a prior run back into the fresh counters. Setting
   // totalsRestored = true above ensures any in-flight restore skips its read.
@@ -80,7 +80,7 @@ export function setRunTotalsFromUsage(usage: { tokensIn: number; tokensOut: numb
   totalTokens = (Number(usage.tokensIn) || 0) + (Number(usage.tokensOut) || 0);
   totalsRestored = true;
   costLabel.textContent = `$${totalCost.toFixed(4)}`;
-  tokenLabel.textContent = formatTokens(totalTokens);
+  if (tokenLabel) tokenLabel.textContent = formatTokens(totalTokens);
   scheduleCostStorageWrite();
 }
 
@@ -120,8 +120,9 @@ export function addLogRow(event: LogEvent, time: string, version: EventVersion =
       addSystemMessage("👁", body, undefined, time);
       break;
     case "thinking":
-      body = event.nextGoal || event.text || "";
-      if (body) addSystemMessage("✦", body, undefined, time);
+      // The loop surfaces the model's redacted chain-of-thought in `text`.
+      body = event.text || event.nextGoal || "";
+      if (body) addSystemMessage("🧠", body, undefined, time);
       break;
     case "action":
       body = event.description || "";
@@ -166,13 +167,20 @@ export function addLogRow(event: LogEvent, time: string, version: EventVersion =
       }
       totalCost += c;
       totalTokens += ti + to;
-      costLabel.textContent = `$${totalCost.toFixed(4)}`;
-      tokenLabel.textContent = formatTokens(totalTokens);
+      if (costLabel) costLabel.textContent = `$${totalCost.toFixed(4)}`;
+      if (tokenLabel) tokenLabel.textContent = formatTokens(totalTokens);
       // Persist (debounced) so restoreTotalsFromStorage() works on panel
       // reopen mid-run — a burst of cost events settles into one IPC write.
       scheduleCostStorageWrite();
       // Reveal telemetry on first cost event
       if (statusCenter) statusCenter.hidden = false;
+      // Render EVERY LLM call as a compact per-call usage line (the user asked
+      // for full event visibility). The run totals live in the usage panel.
+      const parts = [`${formatTokens(ti)} in`, `${formatTokens(to)} out`];
+      if (event.reasoningTokens) parts.push(`${formatTokens(event.reasoningTokens)} reasoning`);
+      if (event.cachedInputTokens) parts.push(`${formatTokens(event.cachedInputTokens)} cache`);
+      if (event.model) parts.push(event.model);
+      addSystemMessage("⚡", `${parts.join(" · ")} · $${c.toFixed(4)}`, undefined, time);
       break;
     }
     case "info":
@@ -266,7 +274,7 @@ export function restoreTotalsFromStorage(): void {
     }
     if (Number.isFinite(storedTokens)) {
       totalTokens = Math.max(totalTokens, storedTokens as number);
-      tokenLabel.textContent = formatTokens(totalTokens);
+      if (tokenLabel) tokenLabel.textContent = formatTokens(totalTokens);
     }
     if (Number.isFinite(storedCost) || Number.isFinite(storedTokens)) {
       if (statusCenter) statusCenter.hidden = false;

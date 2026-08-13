@@ -61,11 +61,11 @@ describe("deriveNavigatorObservationCapsV1", () => {
     const caps = deriveNavigatorObservationCapsV1(128_000);
     expect(caps.elementsTextChars).toBe(60_000);
     expect(caps.axTreeChars).toBe(200_000);
-    // The screenshot cap becomes its FIT budget (67,424 = 128k maxInput 103,424
+    // The screenshot cap becomes its FIT budget (72,800 = 85% of 128k
     // − 32k fixed overhead − 2×2k min text observation) — not the aspirational
     // 1.5M hard cap that realistic captures always exceed and that always
     // tripped the fail-closed assert.
-    expect(caps.screenshotChars).toBe(103_424 - 32_000 - 2_000 - 2_000);
+    expect(caps.screenshotChars).toBe(108_800 - 32_000 - 2_000 - 2_000);
   });
 
   test("a 64k-context model gets a fitting observation and no screenshot", () => {
@@ -73,9 +73,9 @@ describe("deriveNavigatorObservationCapsV1", () => {
     // 64k derived maxInput = 64,000 − 8,192 − 16,384 = 39,424.
     // Sub-128k models get the COMPACT system prompt, so the fixed overhead is
     // 23,000 (vs 32,000 for the full prompt):
-    //   available = 39,424 − 23,000 (compact overhead) − 4,000 (user content) = 12,424.
-    expect(caps.elementsTextChars).toBe(Math.floor(12_124 * 0.85));
-    expect(caps.axTreeChars).toBe(12_124 - Math.floor(12_124 * 0.85));
+    //   available = 39,424 − 23,000 (compact overhead) − 4,000 (user content) = 11,124.
+    expect(caps.elementsTextChars).toBe(Math.floor(11_124 * 0.85));
+    expect(caps.axTreeChars).toBe(11_124 - Math.floor(11_124 * 0.85));
     expect(caps.screenshotChars).toBe(0); // not affordable at 64k
   });
 
@@ -201,6 +201,7 @@ describe("64k-model survival proof (end-to-end)", () => {
           title: "T",
           tabs: [],
           elementsText: BIG_OBSERVATION.elementsText,
+          axTree: BIG_OBSERVATION.axTree,
           pageInfo: "",
           newElementCount: 0,
         },

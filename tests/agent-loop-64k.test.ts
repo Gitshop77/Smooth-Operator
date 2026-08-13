@@ -107,8 +107,8 @@ function buildDeps(opts: {
       actions.map((action) => ({ ...RESULT, action }))),
     onEvent: opts.onEvent,
     plannerCall: vi.fn(async (req) => {
-      // Replicate the production llm-direct planner compile+assert boundary
-      // (planner derived budget for 64k = 64k − 8k output − 8k reasoning).
+      // Replicate the production planner compile boundary. The known-context
+      // adapter uses the same 85/15 combined input/output policy.
       const { buildPlannerUserMessage } = await import("../src/lib/agent/loop/messages");
       const userMsg = await buildPlannerUserMessage({
         task: req.task,
@@ -125,7 +125,7 @@ function buildDeps(opts: {
       const system = buildPlannerPrompt(undefined);
       const bytes = utf8ByteLength(system + "\n" + userMsg);
       plannerSizes.push(bytes);
-      expect(bytes).toBeLessThanOrEqual(64_000 - 8_192 - 8_192);
+      expect(bytes).toBeLessThanOrEqual(64_000 * 0.85 * 2);
       return {
         raw: JSON.stringify({ thinking: "x", decision: "continue", plan: ["a", "b", "c"], next_goal: "g" }),
       };
@@ -154,13 +154,49 @@ function buildDeps(opts: {
       });
       promptSizes.push(utf8ByteLength(compiled.messages[0].content + "\n" + compiled.messages[1].content));
       assertCompiledPromptWithinContextBudgetV1("navigator", "navigator-64k", compiled.messages, CONTEXT);
-      return { raw: NAVIGATOR_JSON(req.step) };
+      return {
+        raw: NAVIGATOR_JSON(req.step),
+        // Production compaction is driven by provider-reported occupancy.
+        // Simulate crossing 85% of 64k every 20 steps; ordinary turns remain
+        // well below pressure even when rendered byte counts are large.
+        tokensIn: opts.enableCompaction && req.step > 0 && req.step % 20 === 0
+          ? 55_000
+          : Math.ceil(promptSizes[promptSizes.length - 1] / 4),
+        tokensOut: 300,
+        model: "test/64k-model",
+        costUsd: 0,
+      };
     }),
   };
   return { deps, promptSizes, plannerSizes, navigatorCalls };
 }
 
 describe("64k-context loop survival", () => {
+  test("does not waste a compaction call at ~12% real occupancy despite large rendered history", async () => {
+    const events: LogEvent[] = [];
+    const { deps, promptSizes } = buildDeps({
+      enableCompaction: true,
+      maxSteps: 7,
+      onEvent: (e) => events.push(e),
+    });
+    // Exercise the shipped character thresholds with the same ~7.8K actual
+    // prompt-token occupancy seen in the live llama.cpp log.
+    deps.config!.compactionStepInterval = 20;
+    deps.config!.compactionCharThreshold = 30_000;
+    deps.executeActions = vi.fn(async (actions: AgentStepRequest["history"][number]["results"][number]["action"][]) => actions.map((action) => ({
+      ...RESULT,
+      action,
+      extractedContent: `Authoritative source evidence: ${"fact ".repeat(900)}`,
+    })));
+
+    await runAgentLoop(deps);
+
+    const compactions = events.filter((e) => e.type === "compaction");
+    expect(compactions).toHaveLength(0);
+    expect((deps.navigatorCall as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(3);
+    for (const bytes of promptSizes) expect(bytes).toBeLessThanOrEqual(108_800);
+  });
+
   test("20+ browser steps on a large page, every navigator prompt within the 64k budget", async () => {
     const events: LogEvent[] = [];
     const { deps, promptSizes, navigatorCalls } = buildDeps({ enableCompaction: false, onEvent: (e) => events.push(e) });
@@ -178,7 +214,7 @@ describe("64k-context loop survival", () => {
     // assert inside the mock threw otherwise).
     expect(promptSizes.length).toBeGreaterThanOrEqual(20);
     for (const bytes of promptSizes) {
-      expect(bytes).toBeLessThanOrEqual(39_424);
+      expect(bytes).toBeLessThanOrEqual(108_800);
     }
 
     // The big-page observation was DEGRADED by the caps, not shipped whole.
@@ -203,7 +239,7 @@ describe("64k-context loop survival", () => {
     const navigatorSteps = (deps.navigatorCall as ReturnType<typeof vi.fn>).mock.calls.length;
     expect(navigatorSteps).toBeGreaterThanOrEqual(20);
     for (const bytes of promptSizes) {
-      expect(bytes).toBeLessThanOrEqual(39_424);
+      expect(bytes).toBeLessThanOrEqual(108_800);
     }
     // The run continued AFTER compaction (navigator calls beyond the
     // compaction point exist) — compaction did not break the run.
@@ -220,8 +256,8 @@ describe("64k-context loop survival", () => {
 
     await runAgentLoop(deps);
 
-    // Repeated compaction: history crosses the threshold several times over
-    // 50 steps (interval 3, threshold 5k chars — realistic per-step results).
+    // Repeated compaction: provider-reported input occupancy crosses 85% at
+    // steps 20 and 40.
     const compactions = events.filter((e) => e.type === "compaction");
     expect(compactions.length).toBeGreaterThanOrEqual(2);
 
@@ -233,7 +269,7 @@ describe("64k-context loop survival", () => {
     // prompt fits the planner derived budget.
     expect(promptSizes.length).toBe(navigatorSteps);
     for (const bytes of promptSizes) {
-      expect(bytes).toBeLessThanOrEqual(39_424);
+      expect(bytes).toBeLessThanOrEqual(108_800);
     }
     expect(plannerSizes.length).toBeGreaterThan(0);
     for (const bytes of plannerSizes) {
@@ -319,14 +355,14 @@ describe("64k-context loop survival", () => {
     const navigatorSteps = (deps.navigatorCall as ReturnType<typeof vi.fn>).mock.calls.length;
     expect(navigatorSteps).toBeGreaterThanOrEqual(100);
 
-    // ~5 compactions across 100 steps (threshold 5k, interval 3).
+    // ~5 compactions across 100 steps (simulated 85% occupancy every 20 turns).
     const compactions = events.filter((e) => e.type === "compaction");
     expect(compactions.length).toBeGreaterThanOrEqual(4);
 
     // EVERY navigator prompt across all 100 steps fits the 64k budget.
     expect(promptSizes.length).toBe(navigatorSteps);
     for (const bytes of promptSizes) {
-      expect(bytes).toBeLessThanOrEqual(39_424);
+      expect(bytes).toBeLessThanOrEqual(108_800);
     }
 
     // No context drift: the final prompt is not meaningfully larger than the

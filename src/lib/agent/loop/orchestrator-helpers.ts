@@ -12,6 +12,7 @@ import type {
 import { DEFAULT_CONFIG } from "../types";
 import { classifyError, friendlyErrorMessage, MACHINE_CODES, RECOVERY_HINTS, isBudgetExceededError } from "../errors";
 import { redactKeyLeak } from "../redact-shared";
+import { redactKeyShapes } from "../key-shape-redact";
 import { LoopDetector, LOOP_TOP_THRESHOLD } from "./loop-detector";
 import { earlyStop, DEFAULT_EARLY_STOP_THRESHOLDS } from "./early-stop";
 import { shouldCompact, renderHistoryForSummarization } from "./compaction";
@@ -54,6 +55,10 @@ import {
 const HEARTBEAT_INTERVAL_MS = 20_000;
 const CONTEXT_SOFT_CAP_CHARS = 400_000;
 const SETTLE_SLA_MS = 30_000;
+/** Compact after a successful request reaches 85% of the configured model
+ * window. The provider-reported prompt token count is authoritative; the
+ * remaining 15% is generation/reasoning headroom for that call. */
+const CONTEXT_COMPACTION_FRACTION = 0.85;
 
 // ─── Control-flow result types ─────────────────────────────────────────────
 
@@ -357,6 +362,7 @@ export function initState(
     totalCostUsd: 0,
     totalTokensIn: 0,
     totalTokensOut: 0,
+    lastNavigatorInputTokens: undefined,
     lastCompactionStep: undefined,
     compactedMemory: undefined,
     pendingLoopWarning: undefined,
@@ -610,7 +616,14 @@ async function checkAndRunCompaction(
   if (!config.enableCompaction) return;
 
   const stepGap = state.step - (state.lastCompactionStep ?? 0);
-  const compactionGateReady = stepGap >= Math.min(config.compactionStepInterval, 3);
+  const contextPressure =
+    Number.isFinite(config.contextTokens) &&
+    (config.contextTokens as number) > 0 &&
+    Number.isFinite(state.lastNavigatorInputTokens) &&
+    (state.lastNavigatorInputTokens as number) >=
+      Math.floor((config.contextTokens as number) * CONTEXT_COMPACTION_FRACTION);
+  const compactionGateReady =
+    contextPressure || stepGap >= Math.min(config.compactionStepInterval, 3);
   let historyLen = 0;
   let approachingContextLimit = false;
   if (compactionGateReady) {
@@ -622,13 +635,26 @@ async function checkAndRunCompaction(
       type: "info", message: `Context approaching limit (${(historyLen / 1000).toFixed(0)}K chars) — triggering early compaction.`,
     });
   }
-  if (shouldCompact(
+  if (contextPressure) {
+    state.onEvent({
+      type: "info",
+      message:
+        `Navigator context reached ${state.lastNavigatorInputTokens} / ${config.contextTokens} tokens ` +
+        `(${((state.lastNavigatorInputTokens! / config.contextTokens!) * 100).toFixed(1)}%) — compacting before the next model call.`,
+    });
+  }
+  // The configured cadence remains an economic rolling-memory compaction: it
+  // prevents repeatedly billing old history and preserves facts before the
+  // inline render window omits them. Context pressure is a separate emergency
+  // trigger based on authoritative provider token usage.
+  const legacyThresholdReached = shouldCompact(
     state.step,
     state.lastCompactionStep,
     historyLen,
     config.compactionStepInterval,
-    config.compactionCharThreshold
-  ) || approachingContextLimit) {
+    config.compactionCharThreshold,
+  );
+  if (legacyThresholdReached || approachingContextLimit || contextPressure) {
     let compacted: Awaited<ReturnType<typeof runCompaction>> | null = null;
     try {
       compacted = await withHeartbeat(state.step, state.onEvent, (signal) => runCompaction(
@@ -643,6 +669,8 @@ async function checkAndRunCompaction(
         makeCtx(state),
         state.compactedMemory,
         signal,
+        contextPressure ? 2 : undefined,
+        config.contextTokens,
       ), { signal: deps.signal, timeoutMs: config.llmCallTimeoutMs ?? 0 });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -651,6 +679,7 @@ async function checkAndRunCompaction(
         return;
       }
       state.lastCompactionStep = state.step;
+      state.lastNavigatorInputTokens = undefined;
       state.onEvent({ type: "info", message: `Compaction skipped due to error: ${msg}` });
     }
     if (compacted) {
@@ -917,6 +946,9 @@ async function runNavigatorModelCall(
       deps, navRequest, state.step, (usd, tokensIn, tokensOut) => {
         addCost(state, usd);
         addTokens(state, tokensIn, tokensOut);
+        if (typeof tokensIn === "number" && Number.isFinite(tokensIn) && tokensIn >= 0) {
+          state.lastNavigatorInputTokens = tokensIn;
+        }
       },
       state.dispatcher, makeCtx(state), signal, state.config.costCapUsd, () => costCapExceeded(state)
     ), { signal, timeoutMs: config.llmCallTimeoutMs ?? 0 });
@@ -1006,17 +1038,24 @@ async function runNavigatorActionSelection(
   }
 
   // Navigator chain-of-thought, retrospective evaluation, and memory can
-  // contain page-derived content. They are useful internally for the next
-  // prompt/history, but must never be emitted to the panel, callbacks, or
-  // persisted run transcript. Surface one bounded, non-model status instead.
-  const safeStatus = "Choosing the next action.";
+  // contain page-derived content (and a model may echo credentials). The
+  // side panel explicitly WANTS the reasoning visible, so it is surfaced with
+  // key-shape redaction applied HERE (defense in depth) and the extension
+  // boundary re-redacts live secrets (`redactLiveRunEvent`) before any
+  // broadcast or persistence. Fall back to a bounded status when the model
+  // produced no thinking text.
+  const safeThinking = redactKeyShapes(output.thinking ?? "").trim();
+  const safeGoal = redactKeyShapes(output.next_goal ?? "").trim();
+  const safeStatus = safeThinking || "Choosing the next action.";
   onEvent({
-    type: "thinking", step: state.step, text: safeStatus,
-    evaluation: "", memory: "", nextGoal: safeStatus,
+    type: "thinking", step: state.step, text: safeThinking || safeStatus,
+    evaluation: redactKeyShapes(output.evaluation_previous_goal ?? ""),
+    memory: redactKeyShapes(output.memory ?? ""),
+    nextGoal: safeGoal || safeStatus,
   });
   if (state.dispatcher) {
     await dispatch(state, "thinking", (d) => d.thinking(
-      makeCtx(state), safeStatus, "", "", safeStatus
+      makeCtx(state), safeStatus, "", "", safeGoal || safeStatus
     ));
   }
 

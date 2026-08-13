@@ -139,12 +139,15 @@ describe("log-renderer", () => {
     expect(msgs[0].textContent).toContain("click the button");
   });
 
-  test("renders thinking event as a system message", async () => {
+  test("renders thinking event as a system message (text = the real chain-of-thought)", async () => {
     addLogRow({ type: "thinking", step: 1, nextGoal: "find the login button", text: "looking for it" }, "t0");
     await flushChat();
     const msgs = chatMessages.querySelectorAll(".msg-system");
     expect(msgs.length).toBe(1);
-    expect(msgs[0].textContent).toContain("find the login button");
+    // The loop surfaces the model's redacted thinking in `text` — it takes
+    // priority over `nextGoal` in the panel.
+    expect(msgs[0].textContent).toContain("looking for it");
+    expect(msgs[0].textContent).toContain("🧠");
   });
 
   test("does not render empty thinking events", async () => {
