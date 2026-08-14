@@ -14,10 +14,7 @@
 import { describe, expect, it, test } from "vitest";
 import { buildNavigatorPrompt } from "../src/lib/agent/prompts/navigator-prompt";
 import { compileNavigatorPromptV1 } from "../src/lib/agent/prompts/prompt-compiler";
-import {
-  assertCompiledPromptWithinContextBudgetV1,
-  utf8ByteLength,
-} from "../src/lib/agent/prompts/prompt-token-budget";
+import { assertCompiledPromptWithinContextBudgetV1 } from "../src/lib/agent/prompts/prompt-token-budget";
 import { SECURITY_INSTRUCTION } from "../src/lib/agent/security";
 import {
   ACTION_STEERING_BLOCK,
@@ -50,10 +47,15 @@ const USER = {
 
 describe("compact navigator prompt", () => {
   test("is meaningfully smaller than the full prompt", () => {
-    const full = utf8ByteLength(FULL);
-    const compact = utf8ByteLength(COMPACT);
+    const full = Buffer.byteLength(FULL);
+    const compact = Buffer.byteLength(COMPACT);
+    // Size pins freeze the measured baseline (28.2KB full / 20.1KB compact):
+    // full between 25,000 and 31,000; compact between 17,000 and 23,000.
+    expect(full).toBeGreaterThanOrEqual(25_000);
+    expect(full).toBeLessThanOrEqual(31_000);
+    expect(compact).toBeGreaterThanOrEqual(17_000);
+    expect(compact).toBeLessThanOrEqual(23_000);
     expect(compact).toBeLessThan(full * 0.8); // ≥20% smaller
-    expect(compact).toBeLessThan(25_000); // hard ceiling keeps the 64k budget usable
   });
 
   test("preserves every security / schema / behavior block verbatim", () => {

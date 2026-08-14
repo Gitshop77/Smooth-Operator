@@ -33,9 +33,9 @@ import {
  * (<128k): every security/schema/behavior block (SECURITY_INSTRUCTION, safety
  * guidance, action set, output format, action steering, evaluate guidance) is
  * preserved VERBATIM; only redundant prose (input descriptions, recovery
- * patterns, reasoning rules, worked examples) is compressed. Measured ~15KB
- * vs ~30KB for the full prompt, giving a 64k model roughly 3× the observation
- * headroom for the same budget.
+ * patterns, reasoning rules, worked examples) is compressed. Measured 20.1KB
+ * vs 28.2KB for the full prompt (pinned in tests/compact-prompt.test.ts),
+ * freeing ~8KB of a 64k model's input budget for observations.
  * @returns The full system prompt string.
  */
 export function buildNavigatorPrompt(

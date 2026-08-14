@@ -227,10 +227,10 @@ const BASE_OBS_SCREENSHOT_CHARS = 100_000;
 const NAVIGATOR_FIXED_OVERHEAD_BYTES = 32_000;
 
 /**
- * Sub-128k models receive the COMPACT system prompt (~22.1KB measured vs
- * 30.1KB full), so their fixed overhead is correspondingly lower — the entire
+ * Sub-128k models receive the COMPACT system prompt (~20.1KB measured vs
+ * 28.2KB full), so their fixed overhead is correspondingly lower — the entire
  * point of the compact variant is to convert prompt bytes into observation
- * headroom for low-context models. 22,101 measured system + ~600 base user +
+ * headroom for low-context models. 20,124 measured system + ~600 base user +
  * a margin for history growth past the user-content reserve (measured: a
  * 20-step run's history/task/plan/wrapping reaches ~5,000 bytes vs the 4,000
  * reserve — the extra ~900 keeps the worst-case turn under the 39,424 budget).
