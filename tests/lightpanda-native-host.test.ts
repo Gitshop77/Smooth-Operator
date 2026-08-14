@@ -83,6 +83,25 @@ describe("lightpanda native host protocol", () => {
     host.close();
   });
 
+  it("serves sequential runs (host is not one-shot)", async () => {
+    const host = startHost();
+    host.send({ id: "s1", type: "agent", binary: process.execPath, args: ["-e", "console.log('first')"] });
+    let done1: Record<string, unknown> | undefined;
+    for (let i = 0; i < 3; i++) {
+      const m = await host.next();
+      if (m.type === "done") { done1 = m; break; }
+    }
+    expect(done1?.exitCode).toBe(0);
+    host.send({ id: "s2", type: "agent", binary: process.execPath, args: ["-e", "console.log('second')"] });
+    let done2: Record<string, unknown> | undefined;
+    for (let i = 0; i < 3; i++) {
+      const m = await host.next();
+      if (m.type === "done") { done2 = m; break; }
+    }
+    expect(done2?.exitCode).toBe(0);
+    host.close();
+  });
+
   it("kills on cancel (exactly one terminal message)", async () => {
     const host = startHost();
     // The child must emit SOMETHING first — awaiting host.next() on a silent

@@ -124,6 +124,7 @@ function handleAgent(msg, id) {
     if (run.finished) return;
     run.finished = true;
     stopChild();
+    currentRun = null;
     send({ id, ...payload });
   };
   // SCRUBBED base env: never spread process.env into the child (ambient
