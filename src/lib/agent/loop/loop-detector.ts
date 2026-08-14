@@ -137,6 +137,17 @@ export class LoopDetector {
       : 0;
   }
 
+  /**
+   * True when the most recent {@link recordPageState} saw the same fingerprint
+   * as the previous one — i.e. the page did NOT change after the last step.
+   * Unlike {@link shouldWarnStagnant} (which only fires once the count crosses
+   * the warn threshold), this reports the raw no-change condition immediately,
+   * so the orchestrator can nudge the model before it repeats a no-op action.
+   */
+  hasStagnantSnapshot(): boolean {
+    return this.consecutiveStagnantPages >= 1;
+  }
+
   static stagnantWarningText(count: number): string {
     return `<sys>STAGNANT PAGE: the page content has not changed across the last ${count} consecutive snapshots. Your actions might not be having the intended effect. Try a different element, scroll to find new content, or reconsider your approach.</sys>`;
   }

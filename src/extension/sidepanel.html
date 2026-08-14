@@ -4,7 +4,15 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="dark light" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'" />
+  <!--
+    CSP: connect-src must be set here because this meta policy REPLACES the
+    manifest's extension_pages policy for the side panel document (the two do
+    not merge). The panel's only remote fetch is the models.dev catalog prime
+    (usage-panel primeCatalogRefresh → fetchCatalog); allow exactly that host,
+    not the broad http:/https: the manifest needs for the service worker's
+    direct LLM-provider calls.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://models.dev" />
   <title>Open Cowork</title>
   <link rel="stylesheet" href="sidepanel.css" />
 </head>
@@ -74,7 +82,7 @@
   </main>
 
   <div class="input-bar">
-    <textarea id="messageInput" class="message-input" placeholder="Type a message... (Shift+Enter for newline)" rows="1" autocomplete="off" aria-label="Message input" aria-describedby="input-hint"></textarea>
+    <textarea id="messageInput" class="message-input" placeholder="Type a message…" rows="1" autocomplete="off" aria-label="Message input" aria-describedby="input-hint"></textarea>
     <span id="input-hint" class="sr-only">Press Shift+Enter for newline</span>
     <button type="button" id="sendBtn" class="btn-send" disabled aria-label="Send message">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

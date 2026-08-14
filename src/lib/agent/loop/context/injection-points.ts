@@ -171,8 +171,9 @@ function injectCaptchaWaitNudge(url: string, title: string = ""): string | null 
   if (!CAPTCHA_URL_HINTS.some((h) => hay.includes(h))) return null;
   return (
     `CAPTCHA DETECTED: this page appears to be showing a captcha challenge. ` +
-    `Do NOT attempt to solve it programmatically — call the "takeover" action ` +
-    `with reason="captcha" so the user can solve it manually, then the run will resume.`
+    `ATTEMPT TO SOLVE IT YOURSELF: use detect_challenge (scroll_into_view: true) ` +
+    `to locate the widget, then click/interact like a human, wait, and verify it ` +
+    `clears. Only call "takeover" with reason="captcha" after several genuine attempts fail.`
   );
 }
 

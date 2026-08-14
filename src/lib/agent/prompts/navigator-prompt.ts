@@ -129,7 +129,7 @@ ${actionListForPrompt(safeMax, visionMode)}
 - Element not found after click: use wait (2s), then re-observe — indexes may shift.
 - Input didn't take effect: some React/Vue inputs need evaluate to set el.value + dispatch an input event.
 - Page didn't navigate after click: check for [role=dialog] modals blocking.
-- Login wall / captcha not mentioned in the task: call done(success=false) explaining the blocker.
+- Login wall / captcha: TRY to resolve it yourself FIRST — detect_challenge (scroll_into_view: true) to locate the widget, then click/interact like a human, wait, and verify it clears. Escalate to takeover (manual step) or done(success=false) (captcha not part of the task) only after several genuine attempts fail.
 - 404: go_back or navigate to a known-good URL from the task.
 
 # Reasoning Rules
@@ -233,7 +233,7 @@ When something goes wrong, use these proven recovery strategies:
 - **Select dropdown didn't change**: use \`select_dropdown\` (with \`text\` or \`option_index\`) instead of \`click\` — clicking a <select> opens it but doesn't choose an option.
 - **Page didn't navigate after click**: check for popups/modals blocking. Use \`find_elements\` with selector \`[role=dialog]\` to detect modals.
 - **Stuck in a loop (same action 3+ times)**: STOP repeating. Use \`extract\` to read the full page text. Re-read the user request. Try a COMPLETELY different approach: scroll, search_page, or use evaluate to interact differently.
-- **Login wall / captcha**: if you encounter a login form or captcha that wasn't mentioned in the task, call \`done(success=false)\` explaining the blocker. Don't try to log in or solve captchas.
+- **Login wall / captcha**: attempt to resolve it yourself FIRST — locate the widget with \`detect_challenge\` (scroll_into_view: true), then interact like a human (click the checkbox, \`press_and_hold\` for sliders, \`detect_visual\` for iframe/canvas-rendered widgets), wait, and verify it clears. Only after several genuine attempts fail, escalate to \`takeover\` (manual step) or \`done(success=false)\` (captcha was not part of the task).
 - **404 / page not found**: use \`go_back\` or \`navigate\` to a known-good URL from the task.
 - **Element is off-screen**: use \`scroll\` to bring it into view before clicking. Check the "pages above/below" indicator in <browser_state>.
 - **Need user input**: if you're genuinely stuck, confused about which option to choose, or need a decision from the user, use \`ask_human\` with a clear question. The user will respond and you can continue.

@@ -181,11 +181,11 @@ const sharedConfig: BuildOptions = {
  * hold is "no additional dynamic import may appear": CI greps background.js
  * for `await import(` and fails the build on a second occurrence.
  *
- * Trade-off: the 2.6 MB vision stack (`@huggingface/transformers` +
- * `onnxruntime-web`) is now parsed as part of the SW bundle instead of loaded
- * on demand. Correctness (no SW crash) beats the startup win; Local Vision only
- * runs where WebGPU exists (a DOM context), so the inlined vision code is
- * effectively dead weight in the SW and is never executed there.
+ * Trade-off: the ~6 MB vision stack (`@huggingface/transformers` with the full
+ * image-text-to-text modeling code + `onnxruntime-web`) is parsed as part of the
+ * SW bundle instead of loaded on demand. Correctness (no SW crash) beats the
+ * startup win; Local Vision only runs where WebGPU exists, so the inlined vision
+ * code is effectively dead weight in the SW and is never executed there.
  *
  * Why not `external: ["@huggingface/transformers", "onnxruntime-web"]`?
  * Marking these packages external tells esbuild NOT to bundle them — the

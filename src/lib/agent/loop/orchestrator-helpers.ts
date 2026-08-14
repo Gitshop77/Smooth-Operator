@@ -22,6 +22,7 @@ import { transitionRunPhase } from "./run-state-machine";
 import { buildFastPathAnswer, classifyCurrentPageTask, shouldUseDirectNavigatorStart } from "./phases/fast-path";
 import { BUDGET_WARNING_FRACTION } from "./constants";
 import { buildPreObserveNudges, appendPendingLoopWarning } from "./context/injection-points";
+import { escapeXml } from "./xml-escape";
 import {
   runPlanner,
   callNavigatorWithRetry,
@@ -59,6 +60,20 @@ const SETTLE_SLA_MS = 30_000;
  * window. The provider-reported prompt token count is authoritative; the
  * remaining 15% is generation/reasoning headroom for that call. */
 const CONTEXT_COMPACTION_FRACTION = 0.85;
+
+/** Action types that SHOULD change the page state. When the page fingerprint
+ * is unchanged after a step whose executed actions included one of these, the
+ * action likely no-oped (or hit content the DOM walker cannot see — an
+ * iframe/web-component/canvas) — the model must switch strategy instead of
+ * repeating the identical action until early-stop kills the run. Read-only
+ * actions (scroll, extract, verify, find_elements, …) are deliberately
+ * EXEMPT: they legitimately leave the page unchanged while making progress. */
+const NOOP_SENSITIVE_ACTION_TYPES = new Set([
+  "click", "input", "select_dropdown", "send_keys", "press_and_hold",
+  "navigate", "search", "switch_tab", "new_tab", "close_tab",
+  "upload_file", "evaluate", "run_script", "set_cookie", "set_storage",
+  "clear_storage", "alert_accept", "alert_dismiss", "alert_send_keys",
+]);
 
 // ─── Control-flow result types ─────────────────────────────────────────────
 
@@ -872,20 +887,41 @@ async function runNavigatorObserve(
   const { state: browserState, tabs } = observed;
   if (requestedVisual) {
     state.pendingVisualInspection = false;
-    onEvent(browserState.screenshot
-      ? {
-          type: "visual-inspection",
-          step: state.step,
-          stage: "captured",
-          message: "Fresh viewport captured and queued for this model turn",
-          screenshotChars: browserState.screenshot.length,
-        }
-      : {
-          type: "visual-inspection",
-          step: state.step,
-          stage: "unavailable",
-          message: "Visual inspection was requested, but the configured model or screenshot permission is unavailable",
-        });
+    if (browserState.screenshot) {
+      onEvent({
+        type: "visual-inspection",
+        step: state.step,
+        stage: "captured",
+        message: "Fresh viewport captured and queued for this model turn",
+        screenshotChars: browserState.screenshot.length,
+      });
+      // Tell the MODEL (not just the UI) that its one-shot frame is live in
+      // this very observation. Without this, a model that requested pixels
+      // can re-issue inspect_visual every step while waiting — identical
+      // reason → identical loop-detector hash → spurious "LOOP DETECTED:
+      // repeated Nx" warnings even though the image already arrived.
+      appendPendingLoopWarning(
+        state,
+        `<sys>The fresh viewport you requested via inspect_visual is attached to this observation. Read it now; do not request pixels again unless genuinely new visual evidence is needed.</sys>`,
+      );
+    } else {
+      onEvent({
+        type: "visual-inspection",
+        step: state.step,
+        stage: "unavailable",
+        message: "Visual inspection was requested, but the configured model or screenshot permission is unavailable",
+      });
+      // The killer loop driver: the model sees "Visual inspection requested"
+      // as a success and keeps re-issuing the SAME request because nothing
+      // ever tells it the pixels will not arrive — the ⚠ UI log is not part
+      // of the model's input. Break the loop with a trusted `<sys>` directive
+      // so it switches strategy instead of burning steps and tripping the
+      // loop detector.
+      appendPendingLoopWarning(
+        state,
+        `<sys>Your inspect_visual request could NOT be delivered: the active model/provider cannot receive images (no vision support, screenshots disabled, or the capture failed). STOP calling inspect_visual — it will never return pixels. Use the DOM/accessibility tree, extract, find_elements, or detect_visual instead.</sys>`,
+      );
+    }
   }
   state.lastObservedUrl = browserState.url;
 
@@ -900,6 +936,23 @@ async function runNavigatorObserve(
         browserState.elementsText,
         browserState.elements.length,
       );
+      // No-op feedback: when the page did NOT change after a step whose
+      // executed actions were supposed to change it, the model is likely
+      // re-issuing an identical click/input that silently no-ops (iframe /
+      // web-component / canvas content the DOM walker cannot see). Tell it in
+      // THIS step (pendingLoopWarning is consumed by prepareNavigatorRequest
+      // right after observe) so it switches strategy instead of repeating the
+      // same action until early-stop kills the run.
+      const prevResults = state.navigatorHistory.at(-1)?.results ?? [];
+      if (
+        state.loopDetector.hasStagnantSnapshot() &&
+        prevResults.some((r) => NOOP_SENSITIVE_ACTION_TYPES.has(r.action.type))
+      ) {
+        appendPendingLoopWarning(
+          state,
+          `<sys>WARNING: the page state did not change after your last action — it may have been a no-op or the content may be inside an iframe/web-component the DOM walker cannot see. Do NOT repeat the same action. Use verify, extract, scroll, or detect_visual (for canvas/iframe-rendered UI) instead.</sys>`,
+        );
+      }
       const stagnantCount = state.loopDetector.shouldWarnStagnant();
       if (stagnantCount > 0) {
         appendPendingLoopWarning(state, LoopDetector.stagnantWarningText(stagnantCount));
@@ -938,17 +991,38 @@ async function runNavigatorChallenge(
     return { kind: "abort", result: await exitStoppedByUser(state) };
   }
   if (challengeResult.challenge) {
-    if (challengeResult.timedOut) {
-      const resumeResult = await waitForTakeoverResume(
-        deps, `Anti-bot challenge (${challengeResult.challenge.kind}): ${challengeResult.challenge.message}`, state.step,
+    const kind = challengeResult.challenge.kind;
+    // Unverifiable page (detection injection failed) or a server rate-limit
+    // (429/503): there is nothing for the agent to click or bypass — keep the
+    // conservative pause → human takeover.
+    if (kind === "detection-error" || kind === "rate-limited") {
+      if (challengeResult.timedOut) {
+        const resumeResult = await waitForTakeoverResume(
+          deps, `Anti-bot challenge (${challengeResult.challenge.kind}): ${challengeResult.challenge.message}`, state.step,
+        );
+        if (state.signal?.aborted) {
+          return { kind: "abort", result: await exitStoppedByUser(state) };
+        }
+        if (resumeResult === "timeout") {
+          const text = `Timed out waiting for anti-bot challenge to resolve.`;
+          return { kind: "abort", result: await exitWithFinish(state, text) };
+        }
+      }
+    } else if (challengeResult.timedOut) {
+      // Interactive challenge still present (auto-resolve window elapsed or
+      // skipped for non-auto kinds). ATTEMPT-FIRST policy: do NOT pause for
+      // the user — inject an attempt-first nudge and let the navigator try to
+      // resolve the challenge itself (detect_challenge, clicks, stealth
+      // interactions, verify). Takeover remains the model's own escalation
+      // path when it truly cannot fix itself.
+      appendPendingLoopWarning(
+        state,
+        `<sys>ANTI-BOT CHALLENGE DETECTED (${escapeXml(kind)}): ${escapeXml(challengeResult.challenge.message)}. ` +
+        `ATTEMPT TO RESOLVE IT YOURSELF: use detect_challenge (scroll_into_view: true) to locate the widget, ` +
+        `then click/interact like a human (click the checkbox, press_and_hold for sliders, ` +
+        `detect_visual for iframe/canvas-rendered widgets), wait, and verify it clears. ` +
+        `ONLY after several genuine attempts that all fail, call takeover with reason="captcha" for manual help.</sys>`,
       );
-      if (state.signal?.aborted) {
-        return { kind: "abort", result: await exitStoppedByUser(state) };
-      }
-      if (resumeResult === "timeout") {
-        const text = `Timed out waiting for anti-bot challenge to resolve.`;
-        return { kind: "abort", result: await exitWithFinish(state, text) };
-      }
     }
     if (state.signal?.aborted) {
       return { kind: "abort", result: await exitStoppedByUser(state) };

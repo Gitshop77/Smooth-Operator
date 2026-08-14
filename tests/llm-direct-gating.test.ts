@@ -509,3 +509,65 @@ describe("experimental (alpha/beta) model one-time warning", () => {
     warn.mockRestore();
   });
 });
+
+describe("reasoning-only completion retry", () => {
+  test("a reasoning-only completion retries once with an expanded budget and reasoning disabled", async () => {
+    h.supportsVision = false;
+    store.reasoningEffort = "medium";
+    // First chat call returns a reasoning-only terminal diagnostic (no visible
+    // content); the self-healing retry must then succeed. The mock's spread
+    // `...(h.chatTerminalDiagnostic ? { terminalDiagnostic: h.chatTerminalDiagnostic } : {})`
+    // reads the property TWICE per call (condition + value), so serve the
+    // diagnostic for the first two reads, then clear.
+    let diagnosticReads = 0;
+    Object.defineProperty(h, "chatTerminalDiagnostic", {
+      configurable: true,
+      get: () =>
+        diagnosticReads++ < 2
+          ? { code: "reasoning_only", protocol: "openai-compatible", visibleContentChars: 0, terminalSeen: true }
+          : undefined,
+      set: () => undefined,
+    });
+    try {
+      h.chatContent = JSON.stringify({
+        thinking: "x",
+        evaluation_previous_goal: "y",
+        memory: "z",
+        next_goal: "w",
+        action: [],
+      });
+      const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+      const result = await navigatorCallDirect(makeRequest());
+
+      // Exactly two calls: the failed reasoning-only attempt + the expanded retry.
+      expect(h.chatRequests).toHaveLength(2);
+      // First attempt: the normal 2K phase cap with the configured effort.
+      expect(h.chatRequests[0].maxTokens).toBe(2048);
+      expect(h.chatRequests[0].reasoning).toEqual({ effort: "medium" });
+      // Retry: doubled budget + reasoning disabled so it can't re-burn it.
+      expect(h.chatRequests[1].maxTokens).toBe(4096);
+      expect((h.chatRequests[1].reasoning as { enabled?: boolean }).enabled).toBe(false);
+      expect(result.raw).toContain('"action"');
+    } finally {
+      delete h.chatTerminalDiagnostic;
+    }
+  });
+
+  test("non-reasoning failures are NOT retried (only reasoning-only is self-healing)", async () => {
+    h.supportsVision = false;
+    store.reasoningEffort = undefined;
+    h.chatTerminalDiagnostic = {
+      code: "malformed_stream",
+      protocol: "openai-compatible",
+      visibleContentChars: 0,
+      terminalSeen: false,
+    };
+    h.chatContent = "";
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await expect(navigatorCallDirect(makeRequest())).rejects.toThrow(
+      /provider stream ended before a complete answer/,
+    );
+    // Only ONE chat call — the malformed-stream diagnostic must not retry.
+    expect(h.chatRequests).toHaveLength(1);
+  });
+});

@@ -76,6 +76,10 @@ export function clampPlanItem(
   if (value === undefined) return undefined;
   const planLen = plan?.length ?? 0;
   if (planLen === 0) {
+    // Silent no-op for the default value: currentPlanItem already defaults to
+    // 0, so a planner echoing `current_plan_item: 0` with no plan loaded
+    // (common with local models) must not spam an info event every step.
+    if (value === 0) return undefined;
     onEvent({
       type: "info",
       message: `Planner sent current_plan_item=${value} but no plan is loaded; leaving currentPlanItem unchanged.`,

@@ -60,6 +60,12 @@ const PLANNER_MAX_OUTPUT_TOKENS = 2_048;
 // the judge JSON appears. Keep 2K here to avoid truncating the verdict; the
 // prompt itself is already tightly bounded.
 const SUMMARY_MAX_OUTPUT_TOKENS = 2_048;
+// Output budget for the one-shot retry after a reasoning-only completion: a
+// thinking model spent the ENTIRE normal output window on its trace and emitted
+// no visible JSON, so the retry gives it room to finish thinking AND produce
+// the answer. 4K is enough for typical local-model traces (~2-3K) plus the
+// small structured action JSON.
+const REASONING_RETRY_MAX_OUTPUT_TOKENS = 4_096;
 let cachedConfigKey: string | null = null;
 /** The full config object backing `cachedProvider` (used for the hot-path short-circuit). */
 let cachedProviderConfig: ProviderConfig | null = null;
@@ -510,6 +516,47 @@ function requireDirectVisibleOutput(response: LLMResponse): void {
 }
 
 /**
+ * Chat + require visible output, retrying ONCE with an expanded output budget
+ * (and reasoning disabled when a config was set) when the model consumes its
+ * whole output window on a reasoning/thinking trace and returns no visible
+ * content.
+ *
+ * Small local "thinking" GGUF models (Ollama / LM Studio — e.g. LiquidAI LFM,
+ * Qwen3-thinking) do this routinely: the normal 2K phase cap is tighter than
+ * their thinking trace, so they burn every token reasoning and the provider
+ * returns zero visible JSON. Without this retry the run would hard-fail (e.g.
+ * "The initial planner request failed") even though the connection works.
+ * The retry doubles the budget so the trace can finish AND the action JSON can
+ * follow; a reasoning config is also disabled to stop the model re-spending
+ * the new budget the same way.
+ */
+async function chatWithVisibleOutputRetry(
+  chat: (opts: { maxTokens: number; reasoning?: LLMRequest["reasoning"] }) => Promise<LLMResponse>,
+  reasoningConfig: LLMRequest["reasoning"],
+  maxTokens: number,
+): Promise<LLMResponse> {
+  const attempt = async (opts: { maxTokens: number; reasoning?: LLMRequest["reasoning"] }): Promise<LLMResponse> => {
+    const response = await chat(opts);
+    requireDirectVisibleOutput(response);
+    return response;
+  };
+  try {
+    return await attempt({ maxTokens, reasoning: reasoningConfig });
+  } catch (e) {
+    if (!(e instanceof LLMTerminalDiagnosticError) || e.code !== "REASONING_ONLY_OUTPUT") throw e;
+    console.warn(
+      `[llm-direct] Model spent its ${maxTokens}-token output budget on reasoning with no visible answer — ` +
+        `retrying once with ${REASONING_RETRY_MAX_OUTPUT_TOKENS} tokens` +
+        `${reasoningConfig ? " and reasoning disabled" : ""}.`,
+    );
+    return await attempt({
+      maxTokens: REASONING_RETRY_MAX_OUTPUT_TOKENS,
+      reasoning: reasoningConfig ? { ...reasoningConfig, enabled: false } : undefined,
+    });
+  }
+}
+
+/**
  * One navigator step — direct call to the LLM provider. Returns
  * `{ raw, tokensIn, tokensOut, model, ... }` — the shape the orchestrator
  * expects from `navigatorCall`.
@@ -621,20 +668,22 @@ export async function navigatorCallDirect(
     imageTokens: screenshot ? await getScreenshotImageTokens() : 0,
   });
 
-  const response = await provider.chat({
-    messages,
-    maxTokens: NAVIGATOR_MAX_OUTPUT_TOKENS,
-    ...(provider.supportsReasoning ? {} : { temperature: 0 }),
-    ...(reasoningConfig ? { reasoning: reasoningConfig } : {}),
-    // Navigator steps reuse this exact system prompt across steps, so a
-    // cache write is actually re-read — keep the Anthropic "1h" cache marker.
-    ...(compiled.cache.cacheEligible ? { cacheEligible: compiled.cache.cacheEligible } : {}),
-    schema: provider.supportsStructuredOutput ? AgentOutputSchema : undefined,
-    ...(signal ? { signal } : {}),
-    ...(onProgress ? { onProgress } : {}),
-  });
-
-  requireDirectVisibleOutput(response);
+  const response = await chatWithVisibleOutputRetry(
+    (opts) => provider.chat({
+      messages,
+      maxTokens: opts.maxTokens,
+      ...(provider.supportsReasoning ? {} : { temperature: 0 }),
+      ...(opts.reasoning ? { reasoning: opts.reasoning } : {}),
+      // Navigator steps reuse this exact system prompt across steps, so a
+      // cache write is actually re-read — keep the Anthropic "1h" cache marker.
+      ...(compiled.cache.cacheEligible ? { cacheEligible: compiled.cache.cacheEligible } : {}),
+      schema: provider.supportsStructuredOutput ? AgentOutputSchema : undefined,
+      ...(signal ? { signal } : {}),
+      ...(onProgress ? { onProgress } : {}),
+    }),
+    reasoningConfig,
+    NAVIGATOR_MAX_OUTPUT_TOKENS,
+  );
 
  // The orchestrator re-parses `raw` itself, so we just return the raw content.
  // Return cachedInputTokens + the provider-bridge's pre-computed costUsd
@@ -700,20 +749,22 @@ export async function plannerCallDirect(
   // instead of shipping an over-context prompt).
   assertPromptBudget("planner", "planner", messages, effectiveContextTokens);
 
-  const response = await provider.chat({
-    messages,
-    maxTokens: PLANNER_MAX_OUTPUT_TOKENS,
-    ...(provider.supportsReasoning ? {} : { temperature: 0 }),
-    ...(reasoningConfig ? { reasoning: reasoningConfig } : {}),
-    ...(compiled.cache.cacheEligible ? { cacheEligible: compiled.cache.cacheEligible } : {}),
-    // The planner's stable system prefix is reused by periodic replans; only
-    // the volatile user/history message changes between calls.
-    schema: provider.supportsStructuredOutput ? PlannerOutputSchema : undefined,
-    ...(signal ? { signal } : {}),
-    ...(onProgress ? { onProgress } : {}),
-  });
-
-  requireDirectVisibleOutput(response);
+  const response = await chatWithVisibleOutputRetry(
+    (opts) => provider.chat({
+      messages,
+      maxTokens: opts.maxTokens,
+      ...(provider.supportsReasoning ? {} : { temperature: 0 }),
+      ...(opts.reasoning ? { reasoning: opts.reasoning } : {}),
+      // The planner's stable system prefix is reused by periodic replans; only
+      // the volatile user/history message changes between calls.
+      ...(compiled.cache.cacheEligible ? { cacheEligible: compiled.cache.cacheEligible } : {}),
+      schema: provider.supportsStructuredOutput ? PlannerOutputSchema : undefined,
+      ...(signal ? { signal } : {}),
+      ...(onProgress ? { onProgress } : {}),
+    }),
+    reasoningConfig,
+    PLANNER_MAX_OUTPUT_TOKENS,
+  );
 
  // Return cachedInputTokens + pre-computed costUsd (see navigatorCallDirect).
   return extractUsage(response);

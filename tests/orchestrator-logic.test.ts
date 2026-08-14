@@ -15,9 +15,10 @@ import { shouldCompact, partitionHistory, buildCompactionRequest, sanitizeCompac
 import { runAgentLoop } from "../src/lib/agent/loop/orchestrator";
 import { PromptBudgetExceededError } from "../src/lib/agent/prompts/prompt-token-budget";
 import type { LoopDeps } from "../src/lib/agent/loop/types";
-import type { HistoryItem, AgentAction, ActionResult, LogEvent, AgentOutput } from "../src/lib/agent/types";
+import type { HistoryItem, AgentAction, ActionResult, LogEvent, AgentOutput, AgentStepRequest } from "../src/lib/agent/types";
 import { AgentOutputSchema } from "../src/lib/agent/tools/schema";
 import { makeHistoryItem, makeState } from "./helpers";
+import { clampPlanItem } from "../src/lib/agent/loop/phases/planner-phases-utils";
 
 // Records an action n times into a LoopDetector. Centralizes the
 // `as AgentAction` cast so the loop-detector tests stay uniform and
@@ -1332,7 +1333,10 @@ describe("runAgentLoop — anti-bot challenge timeout exit (exitWithFinish)", ()
         actions.map((action) => ({ action, success: true, message: "ok" } as ActionResult)),
       ),
       // A challenge is detected but never resolves within the wait window.
-      detectChallenge: vi.fn(async () => ({ kind: "captcha", message: "verify you are human" })),
+      // Use the unverifiable-page kind so the conservative pause → takeover
+      // path is exercised (interactive kinds now use the attempt-first path
+      // instead — see the test below).
+      detectChallenge: vi.fn(async () => ({ kind: "detection-error", message: "challenge detection could not be verified" })),
       requestTakeoverResume: vi.fn(async () => {
         throw new Error("no resume available");
       }),
@@ -1347,5 +1351,117 @@ describe("runAgentLoop — anti-bot challenge timeout exit (exitWithFinish)", ()
     expect(doneEvents).toHaveLength(1);
     expect(doneEvents[0]).toMatchObject({ type: "done", success: false });
     expect(doneEvents[0].text).toBe("Timed out waiting for anti-bot challenge to resolve.");
+  });
+});
+
+describe("runAgentLoop — attempt-first interactive challenge policy", () => {
+  test("an interactive captcha injects an attempt-first nudge instead of pausing for the user", async () => {
+    const events: LogEvent[] = [];
+    const navReqs: AgentStepRequest[] = [];
+    const deps: LoopDeps = {
+      task: "solve the captcha",
+      navigatorCall: vi.fn(async (req: AgentStepRequest) => {
+        navReqs.push(req);
+        return {
+          raw: JSON.stringify({
+            thinking: "x",
+            evaluation_previous_goal: "y",
+            memory: "z",
+            next_goal: "w",
+            action: [{ type: "detect_challenge", scroll_into_view: true } as AgentAction],
+          }),
+        };
+      }),
+      plannerCall: vi.fn(async () => ({
+        raw: JSON.stringify({
+          thinking: "x",
+          decision: "continue",
+          plan: ["a"],
+          next_goal: "g",
+        }),
+      })),
+      getTabs: vi.fn(async () => [
+        { id: 1, label: "1", url: "https://example.com", title: "t", active: true },
+      ]),
+      extractState: vi.fn(async () => makeState()),
+      executeActions: vi.fn(async (actions: AgentAction[]) =>
+        actions.map((action) => ({ action, success: true, message: "ok" } as ActionResult)),
+      ),
+      // An interactive captcha: the new policy must NOT pause for the user —
+      // the navigator gets an attempt-first nudge and is allowed to try.
+      detectChallenge: vi.fn(async () => ({ kind: "recaptcha", message: "reCAPTCHA challenge" })),
+      onEvent: (e: LogEvent) => { events.push(e); },
+      settleDelay: 0,
+      config: { ...BASE_CONFIG },
+    };
+
+    await runAgentLoop(deps);
+
+    // No takeover pause: the challenge is the navigator's to attempt.
+    expect(events.some((e) => e.type === "takeover")).toBe(false);
+    expect(events.some((e) => e.type === "challenge_detected")).toBe(true);
+    const firstNav = navReqs[0];
+    expect(firstNav).toBeDefined();
+    expect(firstNav.loopWarning).toContain("ANTI-BOT CHALLENGE DETECTED");
+    expect(firstNav.loopWarning).toContain("ATTEMPT TO RESOLVE IT YOURSELF");
+    expect(firstNav.loopWarning).toContain('takeover with reason="captcha"');
+  });
+});
+
+// ─── clampPlanItem ───────────────────────────────────────────────────────────
+//
+// Planner current_plan_item validation. Local models commonly echo
+// `current_plan_item: 0` with no plan loaded — the default cpi is already 0,
+// so that combination must be a SILENT no-op (no info event spam per step).
+
+describe("clampPlanItem", () => {
+  test("empty plan + value 0 is a silent no-op (no info event)", () => {
+    const events: LogEvent[] = [];
+    const result = clampPlanItem([], 0, (e) => events.push(e));
+    expect(result).toBeUndefined();
+    expect(events).toHaveLength(0);
+  });
+
+  test("no plan (undefined) + value 0 is a silent no-op", () => {
+    const events: LogEvent[] = [];
+    const result = clampPlanItem(undefined, 0, (e) => events.push(e));
+    expect(result).toBeUndefined();
+    expect(events).toHaveLength(0);
+  });
+
+  test("empty plan + value undefined is a silent no-op", () => {
+    const events: LogEvent[] = [];
+    const result = clampPlanItem([], undefined, (e) => events.push(e));
+    expect(result).toBeUndefined();
+    expect(events).toHaveLength(0);
+  });
+
+  test("empty plan + non-zero value keeps the 'no plan is loaded' info event", () => {
+    const events: LogEvent[] = [];
+    const result = clampPlanItem([], 3, (e) => events.push(e));
+    expect(result).toBeUndefined();
+    expect(events).toHaveLength(1);
+    expect(events.find((e) => e.type === "info")?.message).toContain("no plan is loaded");
+  });
+
+  test("plan present + in-range value is returned unchanged without an event", () => {
+    const events: LogEvent[] = [];
+    const result = clampPlanItem(["a", "b", "c"], 1, (e) => events.push(e));
+    expect(result).toBe(1);
+    expect(events).toHaveLength(0);
+  });
+
+  test("plan present + out-of-range value is clamped with an info event", () => {
+    const events: LogEvent[] = [];
+    const result = clampPlanItem(["a", "b", "c"], 5, (e) => events.push(e));
+    expect(result).toBe(2);
+    expect(events.find((e) => e.type === "info")?.message).toContain("clamped to 2");
+  });
+
+  test("plan present + undefined value is a silent no-op", () => {
+    const events: LogEvent[] = [];
+    const result = clampPlanItem(["a"], undefined, (e) => events.push(e));
+    expect(result).toBeUndefined();
+    expect(events).toHaveLength(0);
   });
 });

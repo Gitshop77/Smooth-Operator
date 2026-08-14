@@ -48,12 +48,12 @@
         <div class="view-header">
           <h2 class="view-title">Connection</h2>
           <p class="view-subtitle">Connect your LLM provider. The extension calls your provider directly — no server required.</p>
-          <p class="note">Stable packaged browsers do not expose the Dev-channel-only <code>chrome.dns</code> resolver. Literal private targets are still blocked; DNS-rebinding checks for explicitly configured hostname endpoints are best-effort and are not reported as fully active.</p>
+          <p class="note">Stable packaged browsers do not expose the Dev-channel-only <code>chrome.dns</code> resolver. Literal private targets are still blocked; DNS-rebinding checks for explicitly configured hostname endpoints are best-effort, and full DNS-rebinding protection is not claimed.</p>
         </div>
 
         <div class="section-group">
           <h3 class="section-title">Connection profile</h3>
-          <p class="section-desc">Save a friendly name while keeping the exact provider model id internally. The selected profile is the default and survives extension reloads and updates.</p>
+          <p class="section-desc">Profiles store your provider, model, and endpoint settings under a friendly name. The selected profile becomes the default and survives extension reloads and updates.</p>
           <div class="row2">
             <label for="connectionProfile">
               <span>Default profile</span>
@@ -210,24 +210,26 @@
           <h3 class="section-title">Visual intelligence</h3>
           <p class="section-desc">
             Adaptive mode keeps fast DOM + accessibility observations as the baseline, then lets the agent request
-            one fresh viewport frame when pixels improve accuracy. Text-only models can also use the optional local
+            one fresh viewport frame when pixels improve accuracy. Main models without vision use the optional local
             WebGPU detector for Canvas/WebGL controls; it loads only when called.
           </p>
           <label class="radio-row">
             <input type="radio" name="visionMode" id="visionMode_disabled" value="disabled" />
-            <span>Off — do not offer visual inspection tools</span>
+            <span>Off — no screenshots or local vision; the agent works from DOM + accessibility observations only</span>
           </label>
           <label class="radio-row">
             <input type="radio" name="visionMode" id="visionMode_always" value="always" />
-            <span>Always — attach vision every step (slowest; use only for highly visual Canvas/WebGL tasks)</span>
+            <span>Always — send a screenshot every step (slowest; only for highly visual Canvas/WebGL tasks); the local WebGPU detector covers main models without vision</span>
           </label>
           <label class="radio-row">
             <input type="radio" name="visionMode" id="visionMode_adaptive" value="adaptive" checked />
-            <span>Adaptive — the LLM requests main-model screenshots or local detection only when useful (recommended)</span>
+            <span>Adaptive — the LLM requests screenshots, or the local WebGPU detector when the main model has no vision, only when useful (recommended)</span>
           </label>
           <div id="localVisionStatus" class="vision-status is-hidden">
             <span id="localVisionBadge" class="vision-badge">Not loaded</span>
             <progress id="localVisionProgress" class="vision-progress is-hidden" value="0" max="100"></progress>
+            <span id="localVisionEta" class="vision-eta is-hidden"></span>
+            <pre id="localVisionLog" class="vision-log is-hidden" role="log" aria-live="off" aria-label="Vision model download log"></pre>
           </div>
         </div>
 
@@ -302,10 +304,12 @@
           </details>
         </div>
 
-        <!-- Prompts -->
-        <div class="section-group">
+        <!-- Prompts (behind the Advanced disclosure) -->
+        <details class="section-group advanced-section">
+          <summary>Advanced — system prompt overrides</summary>
+          <p class="advanced-hint">Only for expert users. Changes save automatically. Leave empty to use the built-in prompts.</p>
           <h3 class="section-title">Prompts</h3>
-          <p class="section-desc">Override the default system prompts. Changes save automatically.</p>
+          <p class="section-desc">Override the built-in navigator, planner, and default system prompts.</p>
           <label>
             <span>Default system prompt</span>
             <textarea id="defaultTask" rows="3" placeholder="Solve all questions on this page and submit…"></textarea>
@@ -328,7 +332,7 @@
             <button type="button" id="addQuickPrompt" class="btn btn-ghost">Add</button>
           </div>
           <div id="quickPromptsList"></div>
-        </div>
+        </details>
       </section>
 
       <!-- ═══════════════════════════════════════════════════════════════════ -->

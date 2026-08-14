@@ -1,7 +1,7 @@
 /**
  * Vision Assistant — merger.
  *
- * Merges DOM-walker elements with LocateAnything vision detections.
+ * Merges DOM-walker elements with LFM2.5-VL vision detections.
  * Deduplicates by IoU (Intersection over Union) — if a vision box overlaps
  * >50% with a DOM element's rect, the DOM element wins (it's more precise).
  * Vision-only elements get [v-N] indices and are clickable via CDP coords.
@@ -22,7 +22,7 @@ import type { ExtractedElement } from "@/lib/agent/types";
 import type { PixelDetection } from "./types";
 
 export interface MergedElement extends ExtractedElement {
-  /** "dom" if from DOM walker, "vision" if from LocateAnything only */
+  /** "dom" if from DOM walker, "vision" if from LFM2.5-VL grounding only */
   source: "dom" | "vision";
   /**
  * Pixel coordinates for CDP clicks, in **CSS pixels** (viewport-relative).
@@ -98,7 +98,7 @@ function iou(
  *
  * @param domElements Interactive elements extracted by the DOM walker.
  * Their `rect`s are in CSS pixels, viewport-relative.
- * @param visionDetections Detections from LocateAnything. Their `pixelBox`es
+ * @param visionDetections Detections from LFM2.5-VL. Their `pixelBox`es
  * are in device pixels (= CSS × DPR), viewport-relative.
  * @param devicePixelRatio The tab's `window.devicePixelRatio`. Used to scale
  * vision rects DOWN to CSS pixels for both (a) the IoU

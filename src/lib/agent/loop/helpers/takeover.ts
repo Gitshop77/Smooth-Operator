@@ -147,7 +147,7 @@ export async function waitForTakeoverResume(
   deps.onEvent({ type: "takeover", step, reason });
   deps.onEvent({
     type: "info",
-    message: `Agent paused: ${reason}. Please perform the action manually, then click Resume.`,
+    message: `Agent paused — ${reason}. Perform the action manually, then click Resume in the panel.`,
   });
 
   if (deps.requestTakeoverResume) {

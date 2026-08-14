@@ -11,6 +11,7 @@ import {
   DOWNLOAD_STALL_MS,
 } from "./constants";
 import type { DownloadProgress } from "./types";
+import { createProgressThrottle, nowMs } from "./progress-metrics";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -65,7 +66,9 @@ export async function sha256(buf: Uint8Array): Promise<string> {
  * server accepts the connection but never sends response headers — is also
  * aborted. The timer is reset on every `reader.read()` so a slow but live
  * stream is never mistaken for a stall. `onProgress` (when provided) is fed
- * with the running byte count and, if known, the declared Content-Length.
+ * with the running byte count and, if known, the declared Content-Length,
+ * throttled to at most every ~1 percentage point OR every ~400 ms (whichever
+ * comes first) so a slow stream still ticks without spamming the UI.
  */
 async function fetchToBuffer(
   url: string,
@@ -86,7 +89,10 @@ async function fetchToBuffer(
     let got = 0;
     const clHeader = r.headers.get("content-length");
     const cl = clHeader ? Number(clHeader) : NaN;
-    let lastPct = -1;
+    // Granular throttle: ~1 percentage point OR ~400 ms, whichever comes first
+    // (replaces the old 10-point granularity so slow single-stream downloads
+    // still move the bar).
+    const throttle = createProgressThrottle();
     for (;;) {
       clearTimeout(timer);
       timer = setTimeout(() => ctrl.abort(), stallMs);
@@ -108,8 +114,7 @@ async function fetchToBuffer(
       got += value.length;
       if (onProgress && Number.isFinite(cl) && cl > 0) {
         const pct = Math.floor((got / cl) * 100);
-        if (pct >= lastPct + 10) {
-          lastPct = pct;
+        if (throttle.shouldEmit(pct, nowMs())) {
           onProgress(got, cl);
         }
       }
@@ -223,7 +228,10 @@ async function downloadChunks(
   const buf = new Uint8Array(total);
   buf.set(firstBuf, 0);
   let off = firstBuf.length;
-  let lastPct = -1;
+  // Granular throttle: ~1 percentage point OR ~400 ms, whichever comes first
+  // (replaces the old 10-point granularity; chunked downloads still emit once
+  // per ~48 MB chunk since each chunk advances ~10 points).
+  const throttle = createProgressThrottle();
 
   while (off < total) {
     const end = Math.min(off + chunkSize, total) - 1;
@@ -260,8 +268,7 @@ async function downloadChunks(
     buf.set(part, off);
     off += part.length;
     const pct = Math.floor((off / total) * 100);
-    if (pct >= lastPct + 10 && onProgress) {
-      lastPct = pct;
+    if (onProgress && throttle.shouldEmit(pct, nowMs())) {
       onProgress({ file: label, downloaded: off, total, percent: pct });
     }
   }

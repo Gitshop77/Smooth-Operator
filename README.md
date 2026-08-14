@@ -368,9 +368,9 @@ The navigator has 32 actions. The planner doesn't use navigator actions — it s
 
 ## Local Vision Assistant
 
-Runs a model called **LocateAnything-3B** entirely inside your browser using WebGPU — no data leaves your machine.
+Runs **LiquidAI LFM2.5-VL-3B** (ONNX Q4 export) entirely inside your browser using WebGPU — no data leaves your machine.
 
-- About 2 GB of weights on first download, then cached in the browser. The code itself is bundled into the extension (no separate chunk — esbuild runs with `splitting: false`), but the model weights download separately and inference is initialized lazily, so the extension stays responsive without the model.
+- About 3.5 GB of weights on first download, then cached in the browser's Cache Storage (the cache survives browser restarts *and* extension updates — only uninstalling the extension clears it). The code itself is bundled into the extension (no separate chunk — esbuild runs with `splitting: false`), but the model weights download separately and inference is initialized lazily, so the extension stays responsive without the model.
 - Powers `detect_visual` and the merge between marked-up screenshots and page elements.
 - **Options** shows its download status and progress.
 

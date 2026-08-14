@@ -23,6 +23,10 @@ import {
   deriveNavigatorObservationCapsV1,
 } from "../../prompts/prompt-token-budget";
 
+/** Identity of the last challenge whose info line was surfaced, so a captcha
+ * that persists across steps doesn't spam the panel with one line per step. */
+let lastChallengeKey: string | null = null;
+
 /**
  * Per-step observation payloads (interactive-element DOM text, accessibility
  * tree, screenshot) are bounded by hard caps so a misconfigured run can NEVER
@@ -234,18 +238,30 @@ export async function runChallengeDetection(
     );
     if (state.signal?.aborted) return { challenge: null, timedOut: false, aborted: true };
     if (!challenge) {
+      // A cleared challenge re-arms the info line so a NEW challenge kind is
+      // surfaced again rather than being swallowed by the dedupe.
+      lastChallengeKey = null;
       return { challenge: null, timedOut: false, aborted: false };
     }
     state.onEvent({
       type: "challenge_detected", step: state.step,
       kind: challenge.kind, message: challenge.message,
     });
-    state.onEvent({
-      type: "info",
-      message: `Anti-bot challenge detected (${challenge.kind}): ${challenge.message}. Pausing while it resolves.`,
-    });
+    // Dedupe the human-readable info line per challenge identity so a captcha
+    // that persists across steps doesn't spam the panel with one line per step.
+    if (lastChallengeKey !== challenge.kind) {
+      lastChallengeKey = challenge.kind;
+      state.onEvent({
+        type: "info",
+        message: `Anti-bot challenge detected (${challenge.kind}): ${challenge.message}. The agent will attempt to resolve it; if it cannot, it will hand over to you.`,
+      });
+    }
+    // Only Cloudflare JS challenges auto-resolve on their own (via navigation).
+    // Interactive CAPTCHAs (reCAPTCHA / hCaptcha / Turnstile / …) need the agent
+    // or the user to act — skip the blind wait and let the caller decide whether
+    // to have the navigator ATTEMPT the challenge or pause for the user.
     let resolved = false;
-    if (state.deps.waitForChallengeResolution) {
+    if (challenge.kind === "cloudflare-js" && state.deps.waitForChallengeResolution) {
       try {
         resolved = await awaitAbortable(
           state.deps.waitForChallengeResolution(state.signal),

@@ -1,99 +1,25 @@
 /**
- * Vision Assistant — box parser.
+ * Vision Assistant — detection coordinate mapping.
  *
- * Parses LocateAnything's text output (<ref>label</ref><box>x1,y1,x2,y2</box>)
- * into structured Detection objects with pixel coordinates.
+ * LFM2.5-VL emits grounding coordinates normalized to [0, 1000] over the full
+ * input image (matching the LFM Space's `left: xmin/10%` overlay math). This
+ * module converts those normalized boxes into pixel coordinates in the
+ * original screenshot.
  */
 
 import type { Detection, PixelDetection } from "./types";
 
-/** Fresh instance per use so `lastIndex` state never leaks between loops. */
-const makeBoxRe = (): RegExp => /<box>([\s\S]*?)<\/box>/gi;
-
 /**
- * Strictly parse a single <box> body into four numbers.
- *
- * Requires the body to consist of exactly four numeric tokens (no stray
- * characters, no extra/fewer tokens). Tokens may be separated by commas
- * and/or whitespace. This rejects noisy or malformed model output — a loose
- * number scan would happily accept `1.2.3` or `a1b2c3d4` as a spurious
- * detection.
- *
- * Returns null when the body does not match the expected format.
- */
-function parseBoxBody(body: string): [number, number, number, number] | null {
-  const trimmed = body.trim();
-  const tokens = trimmed.split(/[\s,]+/).filter((t) => t.length > 0);
-  if (tokens.length === 4) {
-    const nums = tokens.map(Number);
-    if (nums.every((n) => Number.isFinite(n))) {
-      return [nums[0], nums[1], nums[2], nums[3]];
-    }
-  }
-  const angleNums: number[] = [];
-  const angleRe = /<(\d+(?:\.\d+)?)>/g;
-  let am: RegExpExecArray | null;
-  while ((am = angleRe.exec(trimmed)) !== null) {
-    angleNums.push(Number(am[1]));
-  }
-  if (angleNums.length === 4 && angleNums.every((n) => Number.isFinite(n))) {
-    return [angleNums[0], angleNums[1], angleNums[2], angleNums[3]];
-  }
-  return null;
-}
-
-/** Parse <ref>label</ref><box>...</box> from model output text. */
-export function parseBoxes(text: string): Detection[] {
-  const out: Detection[] = [];
-  const re = /<ref>([\s\S]*?)<\/ref>((?:\s*<box>[\s\S]*?<\/box>)+)/gi;
-  const refRanges: Array<[number, number]> = [];
-  let m: RegExpExecArray | null;
-
-  while ((m = re.exec(text)) !== null) {
-    refRanges.push([m.index, m.index + m[0].length]);
-    const label = m[1].trim();
-    const boxRe = makeBoxRe();
-    let b: RegExpExecArray | null;
-    while ((b = boxRe.exec(m[2])) !== null) {
-      const box = parseBoxBody(b[1]);
-      if (box) {
-        out.push({ label, box });
-      }
-    }
-  }
-
- // Recover bare <box>es that have no preceding <ref>. Strictly additive: a box
- // is only added when its offset falls OUTSIDE every ref'd match range, so we
- // never duplicate a box already captured above (and never drop a valid one
- // that follows a ref'd box in the same output).
-  const boxRe = makeBoxRe();
-  let b: RegExpExecArray | null;
-  while ((b = boxRe.exec(text)) !== null) {
-    const start = b.index;
-    const end = start + b[0].length;
-    if (refRanges.some(([rs, re2]) => start >= rs && end <= re2)) continue;
-    const box = parseBoxBody(b[1]);
-    if (box) {
-      out.push({ label: "", box });
-    }
-  }
-
-  return out;
-}
-
-/** Convert normalized 0-1000 coordinates to pixel coordinates.
+ * Convert normalized 0-1000 coordinates to pixel coordinates.
  * Clamps to image bounds to prevent out-of-bounds boxes from the model
- * placing detections in the padded region of the preprocessor canvas.
+ * placing detections in a padded/resized region.
  *
  * `clampWidth`/`clampHeight` (defaulting to `imageWidth`/`imageHeight`)
- * let the caller clamp to the ORIGINAL screenshot bounds rather than the
- * PADDED canvas bounds. The model normalizes over the padded canvas, so
- * `imageWidth` = `effectiveWidth` ≥ `originalWidth`. Clamping to
- * `effectiveWidth - 1` would allow coords 3-6 CSS px beyond the viewport.
- *
- * Inverted boxes (where the model emits x2 < x1 or y2 < y1) are normalized
- * to (left, top, right, bottom) before conversion so the box is anchored at
- * the correct corner instead of the smaller coordinate. */
+ * let the caller clamp to the ORIGINAL screenshot bounds rather than any
+ * PADDED canvas bounds. Inverted boxes (where the model emits x2 < x1 or
+ * y2 < y1) are normalized to (left, top, right, bottom) before conversion so
+ * the box is anchored at the correct corner instead of the smaller coordinate.
+ */
 export function toPixelCoords(
   detections: Detection[],
   imageWidth: number,
@@ -116,8 +42,7 @@ export function toPixelCoords(
     let py = (y1 * imageHeight) / 1000;
     let pw = ((x2 - x1) * imageWidth) / 1000;
     let ph = ((y2 - y1) * imageHeight) / 1000;
- // Clamp to the ORIGINAL screenshot bounds (cw × ch), not the padded
- // canvas bounds (imageWidth × imageHeight).
+ // Clamp to the ORIGINAL screenshot bounds (cw × ch).
     px = Math.max(0, Math.min(px, cw - 1));
     py = Math.max(0, Math.min(py, ch - 1));
     pw = Math.max(1, Math.min(pw, cw - px));
@@ -128,3 +53,4 @@ export function toPixelCoords(
     };
   });
 }
+

@@ -743,6 +743,30 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
   margin-top: 8px;
   accent-color: var(--oc-accent);
 }
+.vision-eta {
+  display: block;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--oc-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.vision-log {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--oc-border-default);
+  border-radius: var(--oc-radius-sm);
+  background: var(--oc-surface-input);
+  font-family: var(--oc-font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--oc-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px; /* ≈ last 12 lines */
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--oc-border-strong) var(--oc-surface-input);
+}
 .vision-unpinned-warning {
   margin-top: 10px;
   padding: 10px 12px;
@@ -798,6 +822,44 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 .adv-body {
   padding-top: 4px;
 }
+
+/* ─── Advanced disclosure as a bordered section-group (<details>) ─────────── */
+details.section-group.advanced-section {
+  /* Reuses the .section-group panel styling; tighten the vertical rhythm so
+     the summary reads as the disclosure header inside the border. */
+  padding: 12px 20px 16px;
+}
+.advanced-section summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: var(--oc-space-2);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--oc-text-primary);
+  user-select: none;
+}
+.advanced-section summary::-webkit-details-marker { display: none; }
+.advanced-section summary::before {
+  content: "▸";
+  display: inline-block;
+  width: 14px;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--oc-accent-text);
+  transition: transform var(--oc-transition-fast);
+}
+.advanced-section[open] summary::before { transform: rotate(90deg); }
+.advanced-section summary:hover,
+.advanced-section summary:focus-visible { color: var(--oc-accent-hover); }
+.advanced-section .advanced-hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--oc-text-tertiary);
+  line-height: 1.5;
+}
+.advanced-section > .section-title { margin-top: 16px; }
 
 /* ─── Skills list ─────────────────────────────────────────────────────────── */
 .skill-item {

@@ -228,6 +228,12 @@ function decodeJson(
  * the object is automatically wrapped in `[{...}]` before validation. This
  * covers the common case where the model returns `{"action": [...]}` instead
  * of `[{"action": [...]}]`.
+ *
+ * The mirror-image tolerance also applies: when the schema expects a single
+ * object but the model wraps it in a 1-element array (`[{...}]`), the array is
+ * unwrapped before validation. Only a 1-element array whose sole element is a
+ * non-null, non-array object is unwrapped — multi-element arrays are a genuine
+ * schema mismatch and still fail.
  */
 export function parseOutput<T>(schema: ZodType<T>, raw: string): ParseResult<T> {
   const oversize = guardRawLength(raw);
@@ -243,6 +249,22 @@ export function parseOutput<T>(schema: ZodType<T>, raw: string): ParseResult<T> 
     !Array.isArray(decoded.parsed)
   ) {
     decoded.parsed = [decoded.parsed];
+  }
+
+  // Reverse wrap: local models sometimes return `[{...}]` (a 1-element array)
+  // when the schema expects a single object — observed live with a local Qwen
+  // model ("expected single object, received array (1 items)"). Unwrap only
+  // when the array has EXACTLY one element that is a non-null object (and not
+  // itself an array, e.g. `[["a"]]`). Multi-element arrays are never unwrapped.
+  if (
+    schema instanceof ZodObject &&
+    Array.isArray(decoded.parsed) &&
+    decoded.parsed.length === 1 &&
+    decoded.parsed[0] !== null &&
+    typeof decoded.parsed[0] === "object" &&
+    !Array.isArray(decoded.parsed[0])
+  ) {
+    decoded.parsed = decoded.parsed[0];
   }
 
   const result = schema.safeParse(decoded.parsed);

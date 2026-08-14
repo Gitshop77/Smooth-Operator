@@ -445,8 +445,8 @@ body {
 .input-bar {
   display: flex;
   align-items: flex-end;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: var(--oc-space-3);
+  padding: var(--oc-space-3) var(--oc-space-4);
   border-top: 1px solid var(--oc-border-default);
   background: var(--oc-surface-app);
   flex-shrink: 0;
@@ -461,7 +461,7 @@ body {
   max-height: 120px;
   border: 1px solid var(--oc-border-default);
   border-radius: var(--oc-radius-md);
-  padding: 8px 12px;
+  padding: var(--oc-space-3) var(--oc-space-4);
   font: inherit;
   font-size: 13px;
   color: var(--oc-text-primary);
@@ -496,7 +496,7 @@ body {
   width: 40px;
   height: 40px;
   border: none;
-  border-radius: 10px;
+  border-radius: var(--oc-radius-md);
   background: var(--oc-accent);
   color: var(--oc-text-on-accent);
   cursor: pointer;
@@ -528,7 +528,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 16px;
+  padding: 0 var(--oc-space-5);
   border-top: 1px solid var(--oc-border-default);
   background: var(--oc-surface-app);
   flex-shrink: 0;
@@ -540,7 +540,7 @@ body {
 .status-left {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--oc-space-2);
 }
 
 .status-dot {
@@ -596,7 +596,7 @@ body {
 .status-center {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--oc-space-1);
 }
 .status-center[hidden] { display: none; }
 

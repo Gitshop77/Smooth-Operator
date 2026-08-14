@@ -42,6 +42,8 @@ let totalCost = 0;
 let totalTokens = 0;
 let totalsRestored = false;
 let restoreGeneration = 0;
+/** Last challenge identity shown, so a persistent captcha doesn't spam the log. */
+let lastChallengeKey: string | null = null;
 /** Trailing debounce for the cost/token storage IPC (one write per burst). */
 let costStorageTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -230,7 +232,20 @@ export function addLogRow(event: LogEvent, time: string, version: EventVersion =
       addSystemMessage("↻", `Compacted ${event.compactedCount} steps`, undefined, time);
       break;
     case "challenge_detected":
-      showTakeoverBanner(`Anti-bot challenge (${event.kind}): ${event.message}`);
+      // Attempt-first policy: a detected challenge is now the navigator's to
+      // resolve, not an automatic pause. Show an informational line (deduped
+      // by challenge identity) instead of the takeover banner — the banner
+      // only appears on a real `takeover` event (model-escalated or an
+      // unverifiable-page pause).
+      if (lastChallengeKey !== `${event.kind}:${event.message}`) {
+        lastChallengeKey = `${event.kind}:${event.message}`;
+        addSystemMessage(
+          "⚠",
+          `Anti-bot challenge (${event.kind}): ${event.message}. The agent will attempt to resolve it — if it cannot, it will hand over to you.`,
+          "warning",
+          time,
+        );
+      }
       break;
     case "paused":
       addSystemMessage("⏸", "Agent paused by user", undefined, time);

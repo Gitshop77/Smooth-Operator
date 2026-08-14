@@ -8,7 +8,13 @@
  */
 
 import { describe, test, expect } from "vitest";
-import { extractJson, parseAgentOutput } from "../src/lib/agent/output-parser";
+import { z } from "zod";
+import {
+  extractJson,
+  parseAgentOutput,
+  parsePlannerOutput,
+} from "../src/lib/agent/output-parser";
+import { parseOutput } from "../src/lib/agent/output-parser-utils";
 
 const VALID_DONE = JSON.stringify({
   thinking: "done",
@@ -58,5 +64,73 @@ ${VALID_DONE}`;
     // it and return the genuine payload instead of the prose fragment.
     expect(result).toBe(`{"thinking":"...","action":[{"type":"done"}]}`);
     expect(() => JSON.parse(result)).not.toThrow();
+  });
+});
+
+// ─── Single-object-array tolerance (parseOutput reverse wrap) ────────────────
+//
+// Local models (observed live with Qwen) sometimes wrap a single object in a
+// 1-element array (`[{...}]`) when the schema expects a single object. The
+// parser must unwrap exactly ONE element that is a non-null, non-array object;
+// multi-element arrays remain a genuine schema mismatch and must still fail.
+
+describe("output-parser single-object-array tolerance", () => {
+  test("agent output: a 1-element array wrapping the object is unwrapped and validates", () => {
+    const raw = JSON.stringify([{
+      thinking: "done",
+      evaluation_previous_goal: "Verdict: Success",
+      memory: "",
+      next_goal: "finished",
+      action: [{ type: "done", text: "done", success: true }],
+    }]);
+    const result = parseAgentOutput(raw);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect((result.output.action[0] as { type: string }).type).toBe("done");
+    }
+  });
+
+  test("planner output: a 1-element array wrapping the object is unwrapped and validates", () => {
+    const raw = JSON.stringify([{
+      thinking: "x",
+      decision: "continue",
+      plan: ["a", "b"],
+      current_plan_item: 0,
+      next_goal: "do a",
+    }]);
+    const result = parsePlannerOutput(raw);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.output.decision).toBe("continue");
+      expect(result.output.plan).toEqual(["a", "b"]);
+    }
+  });
+
+  test("multi-element arrays are NOT unwrapped — the schema error is preserved", () => {
+    const raw = JSON.stringify([
+      { thinking: "a", decision: "continue", next_goal: "x" },
+      { thinking: "b", decision: "continue", next_goal: "y" },
+    ]);
+    const result = parsePlannerOutput(raw);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/expected single object, received array \(2 items\)/);
+  });
+
+  test("a 1-element array whose element is itself an array is NOT unwrapped", () => {
+    // `[["not-an-object"]]` has length 1, but the sole element is an array —
+    // the "non-array object" guard must keep it as a mismatch.
+    const schema = z.object({ type: z.string() });
+    const result = parseOutput(schema, JSON.stringify([["not-an-object"]]));
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/expected single object, received array \(1 items\)/);
+  });
+
+  test("existing array-schema wrap still works (bare object → 1-element array)", () => {
+    const schema = z.array(z.object({ type: z.string() }));
+    const result = parseOutput(schema, JSON.stringify({ type: "click" }));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.output).toEqual([{ type: "click" }]);
+    }
   });
 });
