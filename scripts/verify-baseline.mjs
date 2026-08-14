@@ -56,6 +56,7 @@ export const EXPECTED_BUNDLE_FILES = [
 const EXPECTED_CSP = "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; base-uri 'self'; frame-ancestors 'none';";
 const REVIEWED_PERMISSIONS = [
   "sidePanel", "scripting", "tabs", "activeTab", "storage", "alarms", "debugger",
+  "nativeMessaging",
   "notifications", "downloads", "unlimitedStorage", "power", "webRequest", "cookies",
 ].sort();
 const REVIEWED_HOST_PERMISSIONS = ["http://*/*", "https://*/*"];

@@ -64,6 +64,7 @@ export function describeAction(a: AgentAction): string {
     case "extract": return `extract: ${slice(a.query)}`;
     case "done": return `done (${a.success ? "success" : "incomplete"})`;
     case "search": return `search "${a.query}" (${a.engine ?? "duckduckgo"})`;
+    case "research": return `research: ${slice(a.query)}`;
     case "upload_file": return `upload ${a.path ?? ""} to [${a.index}]`;
     case "screenshot": return `screenshot${a.file_name ? ` → ${a.file_name}` : ""}`;
     case "inspect_visual": return `inspect_visual: ${slice(a.reason)}`;

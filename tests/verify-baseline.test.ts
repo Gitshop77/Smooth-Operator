@@ -24,6 +24,7 @@ const manifest = {
   version: "1.2.3",
   permissions: [
     "sidePanel", "scripting", "tabs", "activeTab", "storage", "alarms", "debugger",
+    "nativeMessaging",
     "notifications", "downloads", "unlimitedStorage", "power", "webRequest", "cookies",
   ],
   host_permissions: ["http://*/*", "https://*/*"],

@@ -18,7 +18,8 @@
     "dev:ext": "tsx esbuild.config.ts --watch",
     "dev": "npm run dev:ext",
     "build:all": "npm run build:extension",
-    "icons": "node scripts/generate-icons.mjs"
+    "icons": "node scripts/generate-icons.mjs",
+    "setup:lightpanda-host": "node scripts/setup-lightpanda-host.mjs"
   },
   "dependencies": {
     "@huggingface/transformers": "4.2.0",

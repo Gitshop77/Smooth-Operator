@@ -1,6 +1,7 @@
 import { checkUrlAllowedWithDomainConfig } from "@/lib/agent/tools/helpers/domain-config";
 import { SEARCH_ENGINE_URLS, getSearchEngineUrl, tryExpandSearchMacro } from "@/lib/agent/tools/constants";
 import type { AgentAction, LogEvent, TabInfo } from "@/lib/agent/types";
+import { runResearch, ResearchError } from "./lightpanda/research-service";
 import type { RunState } from "./state-store";
 import type { RunDispatchToken } from "./run-controller";
 import type { RunSessionStateService } from "./run-session-state";
@@ -437,6 +438,29 @@ export function createTabActionService(
           return { handled: true, pageChanged: false, success: true, message: `cleared ${keys!.length} keys (${storageType})`, data: { removed: keys!.length, type: storageType } };
         }
         throw new Error("unreachable: storage action type");
+      }
+      case "research": {
+        try {
+          const result = await runResearch(action.query, { signal });
+          return {
+            handled: true,
+            pageChanged: false,
+            success: true,
+            message: `Research complete${result.timedOut ? " (timed out)" : ""}`,
+            data: {
+              answer: result.answer,
+              tokensIn: result.usage?.tokensIn ?? 0,
+              tokensOut: result.usage?.tokensOut ?? 0,
+            },
+          };
+        } catch (e) {
+          // Realm-agnostic AbortError check (name-based) — rethrow so the loop
+          // cancels instead of treating the abort as an action failure.
+          if (typeof e === "object" && e !== null && (e as { name?: string }).name === "AbortError") throw e;
+          const message = e instanceof ResearchError ? e.message : `research failed: ${e instanceof Error ? e.message : String(e)}`;
+          notify?.({ type: "error", step: runState.step, message, recoverable: false });
+          return { handled: true, pageChanged: false, success: false, message };
+        }
       }
       default:
         return { handled: false, pageChanged: false, success: false, message: "" };

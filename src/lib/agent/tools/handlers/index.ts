@@ -46,6 +46,7 @@ export { handleFindText } from "./find-text";
 export { handleExtract } from "./extract";
 export { handleDone } from "./done";
 export { handleSearch } from "./search";
+export { handleResearch } from "./research";
 export { handleUploadFile } from "./upload-file";
 export { handleScreenshot } from "./screenshot";
 export { handleInspectVisual } from "./inspect-visual";

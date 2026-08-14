@@ -13,6 +13,7 @@ Open Cowork is an agentic browser extension — it reads pages, reasons about th
 | `storage` | Stores run history, scheduled tasks, custom tools, and per-site memory; API keys and secrets are session-scoped (`chrome.storage.session`, cleared when the browser closes). The API key can optionally be remembered on this device via an opt-in checkbox (persisted unencrypted in `chrome.storage.local`); secrets always stay session-only. |
 | `alarms` | Fires scheduled-task alarms; also used as a keepalive while a run is active. |
 | `debugger` | Attaches Chrome DevTools Protocol to a tab for pixel-accurate input (click, press-and-hold, screenshot). Only available in the service worker. |
+| `nativeMessaging` | Launches the external `lightpanda` browser for the `research` action. MV3 service workers cannot spawn processes, so native messaging is the launch bridge; available in the service worker and options page only. |
 | `notifications` | Shows a desktop notification when a scheduled or background run completes. |
 | `downloads` | Saves files the agent downloads (Full Agentic save-as-PDF / screenshot export). |
 | `unlimitedStorage` | Run history grows without bound — `chrome.storage.local` has a default quota that would be hit quickly. |

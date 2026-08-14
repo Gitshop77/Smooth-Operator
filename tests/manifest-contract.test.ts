@@ -29,6 +29,7 @@ const BASELINE_PERMISSIONS = [
   "storage",
   "alarms",
   "debugger",
+  "nativeMessaging",
   "notifications",
   "downloads",
   "unlimitedStorage",
