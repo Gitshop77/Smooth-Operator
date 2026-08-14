@@ -25,6 +25,7 @@ import { handleClick } from "../src/lib/agent/tools/handlers/click";
 import { handleInput } from "../src/lib/agent/tools/handlers/input";
 import { handleScroll, handleScrollToBottom } from "../src/lib/agent/tools/handlers/scroll";
 import { handlePressAndHold } from "../src/lib/agent/tools/handlers/press-and-hold";
+import { handleResearch } from "../src/lib/agent/tools/handlers/research";
 import { handleScreenshot } from "../src/lib/agent/tools/handlers/screenshot";
 import { handleSaveAsPdf } from "../src/lib/agent/tools/handlers/save-as-pdf";
 import { handleDetectVisual } from "../src/lib/agent/tools/handlers/detect-visual";
@@ -78,6 +79,7 @@ const ACTION_FIXTURES = {
   extract: { type: "extract", query: "the title" },
   done: { type: "done", text: "complete", success: true },
   search: { type: "search", query: "phase three contract", engine: "duckduckgo" },
+  research: { type: "research", query: "contract research query" },
   upload_file: { type: "upload_file", index: 1, path: "/tmp/contract.txt" },
   screenshot: { type: "screenshot", file_name: "contract.jpg" },
   inspect_visual: { type: "inspect_visual", reason: "read the chart" },
@@ -137,7 +139,7 @@ const PARSED_ACTIONS = Object.fromEntries(
 
 const MODES: AgentMode[] = ["restricted", "standard", "full_agentic"];
 const RESTRICTED_BLOCKED = new Set<ActionType>([
-  "navigate", "switch_tab", "close_tab", "search", "evaluate", "run_script",
+  "navigate", "switch_tab", "close_tab", "search", "research", "evaluate", "run_script",
   "upload_file", "screenshot", "save_as_pdf", "set_cookie", "delete_cookies",
   "set_storage", "clear_storage",
 ]);
@@ -172,7 +174,7 @@ type BackgroundRoute =
 
 const BACKGROUND_ROUTE: Record<ActionType, BackgroundRoute> = {
   click: "conditional:CDP_CLICK", input: "conditional:TAB_ACTION", select_dropdown: "none", scroll: "conditional:CLEAR_VISION_CACHE", scroll_to_bottom: "conditional:CLEAR_VISION_CACHE",
-  send_keys: "none", navigate: "conditional:TAB_ACTION", switch_tab: "TAB_ACTION", close_tab: "TAB_ACTION", go_back: "none",
+  send_keys: "none", navigate: "conditional:TAB_ACTION", switch_tab: "TAB_ACTION", close_tab: "TAB_ACTION", research: "TAB_ACTION", go_back: "none",
   wait: "none", wait_for_element: "none", wait_for_text: "none", wait_for_url: "none", wait_for_network_idle: "none",
   enable_network_log: "NETWORK_LOG", disable_network_log: "NETWORK_LOG", get_network_log: "NETWORK_LOG", clear_network_log: "NETWORK_LOG", getclear_network_log: "NETWORK_LOG",
   enable_console_log: "CONSOLE_LOG", disable_console_log: "CONSOLE_LOG", get_console_log: "CONSOLE_LOG", clear_console_log: "CONSOLE_LOG", getclear_console_log: "CONSOLE_LOG",
@@ -239,7 +241,7 @@ const HANDLER_BY_ACTION: Partial<Record<ActionType, string>> = {
   enable_console_log: "handleEnableConsoleLog", disable_console_log: "handleDisableConsoleLog",
   get_console_log: "handleGetConsoleLog", clear_console_log: "handleClearConsoleLog",
   getclear_console_log: "handleGetclearConsoleLog", find_text: "handleFindText", extract: "handleExtract",
-  done: "handleDone", search: "handleSearch", upload_file: "handleUploadFile",
+  done: "handleDone", search: "handleSearch", research: "handleResearch", upload_file: "handleUploadFile",
   screenshot: "handleScreenshot", save_as_pdf: "handleSaveAsPdf", dropdown_options: "handleDropdownOptions",
   search_page: "handleSearchPage", find_elements: "handleFindElements", list_interactive: "handleListInteractive",
   get_computed_style: "handleGetComputedStyle", get_page_info: "handleGetPageInfo", evaluate: "handleEvaluate",
@@ -642,6 +644,7 @@ describe("AgentAction background-routing parity", () => {
       screenshot: handleScreenshot as never,
       save_as_pdf: handleSaveAsPdf as never,
       detect_visual: handleDetectVisual as never,
+      research: handleResearch as never,
     };
     const ringVerb: Partial<Record<ActionType, string>> = {
       enable_network_log: "enable", disable_network_log: "disable", get_network_log: "get",
