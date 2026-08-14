@@ -39,6 +39,17 @@ interface ReadCacheEntry {
 export class ReadCache {
   private entries = new Map<Element, ReadCacheEntry>();
 
+  /**
+   * Per-walk memo of "this element is aria-hidden or sits inside an
+   * aria-hidden subtree" (the result of the ancestor scan in
+   * `isVisibleFull`). Stored here so it follows the cache's lifecycle: it is
+   * cleared by {@link clear()} and rebuilt whenever the epoch moves (a fresh
+   * instance from `getSharedReadCache`), so it can never serve stale ancestry
+   * across steps. Cache-correct because the ancestor chain is immutable
+   * during a walk.
+   */
+  private ariaHiddenAncestry = new WeakMap<Element, boolean>();
+
   /** Read the element's bounding rect + computed style once and store them.
    * No-op when the element is already cached (cross-walk reuse serves it). */
   batchRead(el: Element): void {
@@ -70,7 +81,7 @@ export class ReadCache {
     if (entry.visible === undefined) {
       const style = entry.style;
       if (!style) return undefined;
-      entry.visible = isVisibleFull(el, rect ?? entry.rect, style);
+      entry.visible = isVisibleFull(el, rect ?? entry.rect, style, this.ariaHiddenAncestry);
     }
     return entry.visible;
   }
@@ -78,6 +89,9 @@ export class ReadCache {
   /** Drop all cached entries — call at the start of a walk. */
   clear(): void {
     this.entries.clear();
+    // WeakMap has no `clear()` — reassign so the per-walk aria-hidden
+    // ancestry memo dies with the walk's read cache.
+    this.ariaHiddenAncestry = new WeakMap<Element, boolean>();
   }
 }
 

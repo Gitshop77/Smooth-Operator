@@ -187,6 +187,57 @@ function isAriaHidden(el: Element): boolean {
 }
 
 /**
+ * True when the element itself or any ancestor is `aria-hidden` — the
+ * ancestor scan `isVisibleFull` performs for every element it classifies.
+ *
+ * Memoized per element in the optional per-walk {@link WeakMap} (owned by
+ * `ReadCache`): the first call walks the whole chain and records every
+ * visited element; later calls — the remaining siblings under the same
+ * ancestors — hit the memo at the first already-computed element, collapsing
+ * the walk from O(sum of chain depths) to O(1) amortized per element. The
+ * memo is per-walk because the ancestor chain is immutable during a walk;
+ * when no memo is supplied (out-of-walk callers) the scan runs directly.
+ *
+ * Crosses shadow-tree boundaries via `parentNode` → `ShadowRoot` → `host`,
+ * mirroring the `isVisibleFull` ancestor walk.
+ */
+function isAriaHiddenInChain(el: Element, memo?: WeakMap<Element, boolean>): boolean {
+  const cached = memo?.get(el);
+  if (cached !== undefined) return cached;
+  // Iterative (not recursive) so a hostile arbitrarily-deep chain can't
+  // overflow the stack. Collect the visited elements so the memo is backfilled
+  // in one pass when the walk completes.
+  const visited: Element[] = [];
+  let current: Element | null = el;
+  let result: boolean | undefined;
+  while (current) {
+    const hit = memo?.get(current);
+    if (hit !== undefined) {
+      result = hit;
+      break;
+    }
+    visited.push(current);
+    if (isAriaHidden(current)) {
+      result = true;
+      break;
+    }
+    const parent: Node | null = current.parentNode;
+    if (parent instanceof ShadowRoot) {
+      current = parent.host;
+    } else if (parent instanceof Element) {
+      current = parent;
+    } else {
+      break; // Document or detached — no more element ancestors.
+    }
+  }
+  if (result === undefined) result = false;
+  if (memo) {
+    for (const n of visited) memo.set(n, result);
+  }
+  return result;
+}
+
+/**
  * Determine whether an element is *actually* visible to the user. Combines
  * computed style (display / visibility / opacity), bounding-box, and
  * `aria-hidden` checks.
@@ -208,8 +259,16 @@ function isAriaHidden(el: Element): boolean {
  * `getBoundingClientRect()` is called.
  * @param style optional pre-computed computed style; if omitted, a fresh
  * `window.getComputedStyle()` is called.
+ * @param ariaHiddenMemo optional per-walk memo (owned by `ReadCache`) for
+ * the `aria-hidden` ancestor scan; when supplied, the scan result is cached
+ * per element for the rest of the walk.
  */
-export function isVisibleFull(el: HTMLElement, rect?: DOMRect, style?: CSSStyleDeclaration): boolean {
+export function isVisibleFull(
+  el: HTMLElement,
+  rect?: DOMRect,
+  style?: CSSStyleDeclaration,
+  ariaHiddenMemo?: WeakMap<Element, boolean>,
+): boolean {
   const s = style ?? window.getComputedStyle(el);
   if (s.display === "none" || s.visibility === "hidden" || s.visibility === "collapse") return false;
   if (parseFloat(s.opacity) === 0) return false;
@@ -237,11 +296,11 @@ export function isVisibleFull(el: HTMLElement, rect?: DOMRect, style?: CSSStyleD
     }
     if (ancestor instanceof Element) {
       if (isFullyTransparent(ancestor as HTMLElement)) return false;
-      if (isAriaHidden(ancestor)) return false;
+      if (isAriaHiddenInChain(ancestor as Element, ariaHiddenMemo)) return false;
     }
     ancestor = ancestor.parentNode;
   }
-  if (isAriaHidden(el)) return false;
+  if (isAriaHiddenInChain(el, ariaHiddenMemo)) return false;
  // `aria-hidden` is commonly set on an ancestor to prune a decorative subtree
  // from the accessibility tree while keeping it visible. An element inside such
  // a subtree is not a legitimate interaction target for an AT-driven agent, so

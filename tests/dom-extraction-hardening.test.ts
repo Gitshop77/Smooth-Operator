@@ -98,6 +98,27 @@ describe("interactive-container visibility", () => {
   });
 });
 
+describe("aria-hidden ancestor gating", () => {
+  test("elements under an aria-hidden ancestor are excluded; a visible sibling stays included", () => {
+    const hiddenWrapper = document.createElement("div");
+    hiddenWrapper.setAttribute("aria-hidden", "true");
+    const hiddenChild = document.createElement("button");
+    hiddenChild.textContent = "Hidden subtree button";
+    hiddenWrapper.appendChild(hiddenChild);
+    document.body.appendChild(hiddenWrapper);
+
+    const visibleSibling = document.createElement("button");
+    visibleSibling.textContent = "Visible sibling button";
+    document.body.appendChild(visibleSibling);
+
+    const state = extractBrowserState(MOCK_TABS);
+    expect(state.elementsText).toContain("Visible sibling button");
+    expect(state.elementsText).not.toContain("Hidden subtree button");
+    // Only the visible sibling is indexed as an interactive element.
+    expect(Object.keys(state.selectorMap)).toHaveLength(1);
+  });
+});
+
 describe("AX-tree heading escaping", () => {
   test("heading text with & is escaped exactly once", () => {
     const h = document.createElement("h1");
