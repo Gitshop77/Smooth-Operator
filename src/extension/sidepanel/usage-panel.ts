@@ -36,18 +36,20 @@ export function completionTokens(usage: { tokensOut: number; reasoningTokens?: n
 }
 
 /**
- * Share of the model's context window consumed by the CURRENT (last) prompt:
- * `lastTokensIn / contextLimit`. The provider's input-token count IS the
- * prompt's context consumption — after compaction the next navigator call
- * sends a smaller prompt, so the meter drops live. Returns 0 when no context
- * limit is available.
+ * Share of the model's context window consumed by the CURRENT (last) call:
+ * `(lastTokensIn + lastTokensOut) / contextLimit`. A model's window holds BOTH
+ * the prompt AND its response while generating (and the response becomes part
+ * of the next prompt's history), so input-only under-reports real occupancy.
+ * After compaction the next call sends a smaller prompt, so the meter drops
+ * live. Returns 0 when no context limit is available.
  */
 export function contextUsagePct(
-  usage: { tokensIn: number },
+  usage: { tokensIn: number; tokensOut: number },
   contextLimit: number | undefined,
 ): number {
   if (typeof contextLimit !== "number" || !Number.isFinite(contextLimit) || contextLimit <= 0) return 0;
-  const pct = (usage.tokensIn / contextLimit) * 100;
+  const consumed = Math.max(0, (usage.tokensIn || 0) + (usage.tokensOut || 0));
+  const pct = (consumed / contextLimit) * 100;
   return Math.min(100, Math.max(0, pct));
 }
 
@@ -175,7 +177,14 @@ async function renderUsage(usage: RunUsage, _runActive: boolean): Promise<void> 
     meterFill.style.transformOrigin = "left";
   }
   const meterValue = panelEl.querySelector<HTMLElement>("#usageMeterValue");
-  if (meterValue) meterValue.textContent = limit ? `${pct.toFixed(0)}%` : "—";
+  if (meterValue) {
+    const consumed = (latestUsage.tokensIn || 0) + (latestUsage.tokensOut || 0);
+    // "37%" at the end of the meter; tooltip carries the exact token numbers.
+    meterValue.textContent = limit ? `${pct.toFixed(0)}%` : "—";
+    meterValue.title = limit
+      ? `${consumed.toLocaleString("en-US")} of ${limit.toLocaleString("en-US")} context tokens used`
+      : "Context limit unknown for this model";
+  }
 
   const totals = panelEl.querySelector<HTMLElement>("#usageTotals");
   if (totals) {
@@ -186,6 +195,11 @@ async function renderUsage(usage: RunUsage, _runActive: boolean): Promise<void> 
     if (usage.reasoningTokens) parts.push(`${formatTokens(usage.reasoningTokens)} reasoning`);
     if (usage.cachedInputTokens || usage.cachedWriteInputTokens) {
       parts.push(`${formatTokens(usage.cachedInputTokens ?? 0)} cache`);
+    }
+    // Latest-call context occupancy — makes the meter's % concrete.
+    if (limit) {
+      const consumed = (latestUsage.tokensIn || 0) + (latestUsage.tokensOut || 0);
+      parts.push(`${formatTokens(consumed)} / ${formatTokens(limit)} context`);
     }
     if (usage.model) parts.push(displayModel);
     if (isUncataloguedModel(usage.model, cachedProvider ?? undefined)) parts.push("uncatalogued price");

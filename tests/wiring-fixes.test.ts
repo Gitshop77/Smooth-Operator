@@ -137,7 +137,7 @@ describe("press_and_hold action wiring", () => {
 
   test("describeAction formats press_and_hold with hold_ms", () => {
     const a = { type: "press_and_hold", index: 7, hold_ms: 2000, delay_ms: 0 } as AgentAction;
-    expect(describeAction(a)).toContain("press_and_hold [7]");
+    expect(describeAction(a)).toContain("press_and_hold element [7]");
     expect(describeAction(a)).toContain("2000ms");
   });
 

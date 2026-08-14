@@ -23,7 +23,7 @@ function slice(s: unknown): string {
 
 export function describeAction(a: AgentAction): string {
   switch (a.type) {
-    case "click": return `click [${a.index}]`;
+    case "click": return `click element [${a.index}]`;
     case "input": return `type "${slice(a.text)}" into [${a.index}]`;
     case "select_dropdown": {
  // `select_dropdown` accepts EITHER `text` (a visible option label)
@@ -78,8 +78,8 @@ export function describeAction(a: AgentAction): string {
     case "list_downloads": return "list captured downloads";
     case "evaluate": return `evaluate JS (${slice(a.code)})`;
     case "run_script": return `run script (${slice(a.script)})`;
-    case "hover": return `hover [${a.index}]`;
-    case "press_and_hold": return `press_and_hold [${a.index}] (${a.hold_ms}ms)`;
+    case "hover": return `hover element [${a.index}]`;
+    case "press_and_hold": return `press_and_hold element [${a.index}] (${a.hold_ms}ms)`;
     case "ask_human": return `ask_human: ${slice(a.question)}`;
     case "takeover": return `takeover: ${slice(a.reason)}`;
     case "verify": return `verify: ${slice(a.expectation)}`;

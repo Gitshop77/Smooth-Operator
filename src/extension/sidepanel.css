@@ -114,6 +114,9 @@ body {
   flex-direction: column;
   gap: 10px;
   position: relative;
+  /* Let the programmatic pin-to-bottom own the scroll position — native
+     scroll anchoring would fight the live-stream glides. */
+  overflow-anchor: none;
 }
 
 .empty-state {
@@ -287,6 +290,33 @@ body {
   color: var(--oc-text-primary);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+.activity-reasoning-text {
+  color: var(--oc-text-primary);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 2px 0;
+}
+.activity-reasoning-text:empty { display: none; }
+.activity-next-goal {
+  margin-top: -2px;
+  color: color-mix(in srgb, var(--activity-accent) 80%, var(--oc-text-primary));
+  font-weight: 600;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.activity-tool-call {
+  color: var(--oc-text-secondary);
+  font-family: var(--oc-font-mono);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+  padding: 1px 0;
+}
+.activity-prompt-details > summary {
+  color: var(--oc-text-tertiary);
 }
 .activity-plan {
   margin: 0;

@@ -55,7 +55,8 @@ describe("describeAction", () => {
   });
 
   test("describeAction includes the action's key details, not just non-empty text", () => {
-    expect(describeAction({ type: "click", index: 1 } as AgentAction)).toContain("click [1]");
+    expect(describeAction({ type: "click", index: 1 } as AgentAction)).toContain("click element [1]");
+    expect(describeAction({ type: "click", index: 1 } as AgentAction)).toContain("[1]");
     expect(
       describeAction({ type: "input", index: 2, text: "hello", clear: true } as AgentAction),
     ).toContain("hello");

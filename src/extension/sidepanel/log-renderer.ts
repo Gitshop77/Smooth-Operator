@@ -44,6 +44,10 @@ let totalsRestored = false;
 let restoreGeneration = 0;
 /** Last challenge identity shown, so a persistent captcha doesn't spam the log. */
 let lastChallengeKey: string | null = null;
+/** Last rendered observation identity, so repeated identical page states collapse. */
+let lastObservationKey = "";
+/** Last observed page URL, so a changed URL is surfaced once as a breadcrumb. */
+let lastObservedUrl = "";
 /** Trailing debounce for the cost/token storage IPC (one write per burst). */
 let costStorageTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -75,6 +79,8 @@ export function clearRunTotals(): void {
   // after the counters were reset (restoreGeneration is re-checked in the
   // restore callback).
   restoreGeneration++;
+  lastObservationKey = "";
+  lastObservedUrl = "";
   costLabel.textContent = "$0.0000";
   if (tokenLabel) tokenLabel.textContent = formatTokens(0);
   // Clear persisted snapshot so restoreTotalsFromStorage doesn't read stale
@@ -141,10 +147,23 @@ export function addLogRow(event: LogEvent, time: string, version: EventVersion =
       // snapshot and history count that users see elsewhere.
       addSystemMessage("→", `Step ${event.step + 1}`, undefined, time);
       break;
-    case "state":
+    case "state": {
+      // Repeated identical observations (same element count + page title) are
+      // noise — the page didn't change, so don't re-log it every step.
+      const stateKey = `${event.elementCount}:${event.pageInfo}`;
+      if (stateKey === lastObservationKey) break;
+      lastObservationKey = stateKey;
       body = `${event.elementCount} elements · ${event.pageInfo}`;
+      // Surface the page URL when it actually changes (helpful "where are we"
+      // breadcrumb without spamming every step).
+      if (event.url && event.url !== lastObservedUrl) {
+        lastObservedUrl = event.url;
+        const shown = event.url.length > 80 ? `${event.url.slice(0, 80)}…` : event.url;
+        body += ` · ${shown}`;
+      }
       addSystemMessage("👁", body, undefined, time);
       break;
+    }
     case "thinking":
       if (event.text || event.evaluation || event.memory || event.nextGoal) {
         addReasoningActivity(event, time);
@@ -217,13 +236,9 @@ export function addLogRow(event: LogEvent, time: string, version: EventVersion =
       scheduleCostStorageWrite();
       // Reveal telemetry on first cost event
       if (statusCenter) statusCenter.hidden = false;
-      // Render EVERY LLM call as a compact per-call usage line (the user asked
-      // for full event visibility). The run totals live in the usage panel.
-      const parts = [`${formatTokens(ti)} in`, `${formatTokens(to)} out`];
-      if (event.reasoningTokens) parts.push(`${formatTokens(event.reasoningTokens)} reasoning`);
-      if (event.cachedInputTokens) parts.push(`${formatTokens(event.cachedInputTokens)} cache`);
-      if (event.model) parts.push(event.model);
-      addSystemMessage("⚡", `${parts.join(" · ")} · $${c.toFixed(4)}`, undefined, time);
+      // NOTE: no chat line here. Per-call token in/out is already summarized
+      // on the LLM call card (finishLLMCall) and accumulated in the usage
+      // panel; a separate ⚡ row per call is noise on long runs.
       break;
     }
     case "info":

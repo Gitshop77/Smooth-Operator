@@ -65,6 +65,74 @@ function roleLabel(role: string): string {
   return role.charAt(0).toUpperCase() + role.slice(1);
 }
 
+/**
+ * Per-action presentation: emoji icon, friendly label, and accent color so the
+ * live activity timeline reads at a glance ("Click", "Type", "Navigate", …).
+ * Unknown/new action types fall back to a neutral bolt + capitalized name.
+ */
+const ACTION_META: Record<string, { icon: string; label: string; accent: string }> = {
+  click: { icon: "🖱️", label: "Click", accent: "#f59e0b" },
+  hover: { icon: "✋", label: "Hover", accent: "#f59e0b" },
+  press_and_hold: { icon: "👆", label: "Press & hold", accent: "#f59e0b" },
+  input: { icon: "⌨️", label: "Type", accent: "#38bdf8" },
+  send_keys: { icon: "🔑", label: "Press keys", accent: "#38bdf8" },
+  select_dropdown: { icon: "📑", label: "Select option", accent: "#a78bfa" },
+  dropdown_options: { icon: "📋", label: "List options", accent: "#a78bfa" },
+  scroll: { icon: "🖱️", label: "Scroll", accent: "#94a3b8" },
+  scroll_to_bottom: { icon: "⏬", label: "Scroll to bottom", accent: "#94a3b8" },
+  navigate: { icon: "🧭", label: "Navigate", accent: "#60a5fa" },
+  switch_tab: { icon: "🔄", label: "Switch tab", accent: "#60a5fa" },
+  close_tab: { icon: "✖️", label: "Close tab", accent: "#f87171" },
+  go_back: { icon: "↩️", label: "Go back", accent: "#60a5fa" },
+  wait: { icon: "⏳", label: "Wait", accent: "#a3a3a3" },
+  wait_for_element: { icon: "⏳", label: "Wait for element", accent: "#a3a3a3" },
+  wait_for_text: { icon: "⏳", label: "Wait for text", accent: "#a3a3a3" },
+  wait_for_url: { icon: "⏳", label: "Wait for URL", accent: "#a3a3a3" },
+  wait_for_network_idle: { icon: "🌐", label: "Wait for network idle", accent: "#a3a3a3" },
+  extract: { icon: "📤", label: "Extract data", accent: "#34d399" },
+  find_text: { icon: "🔍", label: "Find text", accent: "#22d3ee" },
+  search: { icon: "🔎", label: "Search web", accent: "#22d3ee" },
+  search_page: { icon: "🔍", label: "Search page", accent: "#22d3ee" },
+  find_elements: { icon: "🧩", label: "Find elements", accent: "#34d399" },
+  list_interactive: { icon: "🧾", label: "List interactive elements", accent: "#34d399" },
+  list_tabs: { icon: "🗂️", label: "List tabs", accent: "#60a5fa" },
+  evaluate: { icon: "⚙️", label: "Run JavaScript", accent: "#c084fc" },
+  run_script: { icon: "⚙️", label: "Run script", accent: "#c084fc" },
+  screenshot: { icon: "📸", label: "Take screenshot", accent: "#c084fc" },
+  save_as_pdf: { icon: "📄", label: "Save as PDF", accent: "#c084fc" },
+  inspect_visual: { icon: "👁️", label: "Inspect visually", accent: "#c084fc" },
+  detect_visual: { icon: "🔭", label: "Detect visually", accent: "#c084fc" },
+  detect_challenge: { icon: "🛡️", label: "Detect challenge", accent: "#fbbf24" },
+  upload_file: { icon: "📤", label: "Upload file", accent: "#f472b6" },
+  done: { icon: "✅", label: "Finish", accent: "#4ade80" },
+  verify: { icon: "🧪", label: "Verify", accent: "#2dd4bf" },
+  ask_human: { icon: "🙋", label: "Ask you", accent: "#fbbf24" },
+  takeover: { icon: "🤝", label: "Takeover", accent: "#fbbf24" },
+  alert_accept: { icon: "🟢", label: "Accept alert", accent: "#4ade80" },
+  alert_dismiss: { icon: "⚪", label: "Dismiss alert", accent: "#94a3b8" },
+  alert_get_text: { icon: "💬", label: "Read alert", accent: "#94a3b8" },
+  alert_send_keys: { icon: "⌨️", label: "Type into alert", accent: "#38bdf8" },
+  get_cookies: { icon: "🍪", label: "Read cookies", accent: "#fbbf24" },
+  set_cookie: { icon: "🍪", label: "Set cookie", accent: "#fbbf24" },
+  delete_cookies: { icon: "🍪", label: "Delete cookies", accent: "#f87171" },
+  get_storage: { icon: "🗄️", label: "Read storage", accent: "#94a3b8" },
+  set_storage: { icon: "🗄️", label: "Write storage", accent: "#94a3b8" },
+  clear_storage: { icon: "🗄️", label: "Clear storage", accent: "#f87171" },
+  get_page_info: { icon: "ℹ️", label: "Page info", accent: "#94a3b8" },
+  page_next: { icon: "⏭️", label: "Next page", accent: "#60a5fa" },
+  list_downloads: { icon: "📥", label: "List downloads", accent: "#60a5fa" },
+};
+
+function actionMeta(name: string): { icon: string; label: string; accent: string } {
+  const known = ACTION_META[name];
+  if (known) return known;
+  return {
+    icon: "⚡",
+    label: name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+    accent: "#f59e0b",
+  };
+}
+
 function activityCard(icon: string, title: string, status: string, time?: string): {
   card: HTMLElement; status: HTMLElement; body: HTMLElement;
 } {
@@ -148,13 +216,19 @@ export function addLLMCallStart(event: Extract<LogEvent, { type: "llm-call-start
   const view = activityCard("✦", title, "Thinking · preparing context · 0.0s", time);
   view.card.classList.add("activity-live", `activity-${event.role}`);
   view.card.dataset.callId = event.callId;
-  const prompt = document.createElement("div");
-  prompt.className = "activity-prompt-stats";
-  prompt.textContent = promptSummary(event.prompt);
   const phaseRail = document.createElement("div");
   phaseRail.className = "thinking-rail";
   phaseRail.setAttribute("aria-hidden", "true");
   phaseRail.appendChild(document.createElement("span"));
+  // Prompt composition is dev-facing noise — keep it one click away.
+  const prompt = document.createElement("details");
+  prompt.className = "activity-detail activity-prompt-details";
+  const summary = document.createElement("summary");
+  summary.textContent = "Prompt composition";
+  const content = document.createElement("div");
+  content.className = "activity-detail-content";
+  content.textContent = promptSummary(event.prompt);
+  prompt.append(summary, content);
   view.body.append(phaseRail, prompt);
   const updateElapsed = () => {
     const seconds = Math.max(0, Date.now() - event.startedAt) / 1000;
@@ -217,12 +291,25 @@ export function finishLLMCall(event: Extract<LogEvent, { type: "llm-call-end" }>
 }
 
 export function addReasoningActivity(event: Extract<LogEvent, { type: "thinking" }>, time?: string): void {
-  const view = activityCard("✦", `Navigator reasoning · step ${event.step + 1}`, "Thinking…", time);
+  const view = activityCard("💭", `Thinking · step ${event.step + 1}`, "Model reasoning", time);
   view.card.classList.add("activity-reasoning");
-  addActivityField(view.body, "Reasoning", event.text);
-  addActivityField(view.body, "Previous-goal evaluation", event.evaluation);
-  addActivityField(view.body, "Working memory", event.memory);
-  addActivityField(view.body, "Next goal", event.nextGoal);
+  // The model's chain of thought is the star of the card — show it as primary
+  // content instead of burying it inside a <details>.
+  if (event.text) {
+    const text = document.createElement("div");
+    text.className = "activity-reasoning-text";
+    text.textContent = safeText(event.text);
+    view.body.appendChild(text);
+  }
+  if (event.nextGoal) {
+    const goal = document.createElement("div");
+    goal.className = "activity-next-goal";
+    goal.textContent = `🎯 ${safeText(event.nextGoal)}`;
+    view.body.appendChild(goal);
+  }
+  // Secondary reasoning context stays one click away (collapsed).
+  addActivityField(view.body, "Previous-goal evaluation", event.evaluation, false);
+  addActivityField(view.body, "Working memory", event.memory, false);
   enqueueNode(view.card);
 }
 
@@ -248,10 +335,26 @@ export function addPlannerActivity(event: Extract<LogEvent, { type: "planner-ste
 
 export function addActionActivity(event: Extract<LogEvent, { type: "action" }>, time?: string): void {
   const isVisual = event.name === "inspect_visual" || event.name === "detect_visual";
-  const view = activityCard(isVisual ? "◉" : "↗", `${event.name} · ${event.index}/${event.total}`, "Running", time);
+  const meta = actionMeta(event.name);
+  const view = activityCard(meta.icon, `${meta.label} · ${event.index}/${event.total}`, "Running", time);
   view.card.classList.add("activity-tool", "activity-live");
+  view.card.style.setProperty("--activity-accent", meta.accent);
   if (isVisual) view.card.classList.add("activity-vision");
-  addActivityField(view.body, "Tool call", event.description || event.name);
+  // Resolve the element index from the description (e.g. "click [5]" → [5]) so
+  // pointer actions read like "Click element [5]" — a cursor/click log.
+  const target = /\[([^\]]+)\]/.exec(event.description ?? "")?.[1];
+  const targetLabel = target
+    ? target.startsWith("v")
+      ? `visual element [${target}]`
+      : `element [${target}]`
+    : undefined;
+  const call = document.createElement("div");
+  call.className = "activity-tool-call";
+  call.textContent =
+    (event.name === "click" || event.name === "hover" || event.name === "press_and_hold")
+      ? (targetLabel ?? (event.description || event.name))
+      : (event.description || event.name);
+  view.body.appendChild(call);
   const key = `${event.step}:${event.name}`;
   const queue = pendingActionCards.get(key) ?? [];
   queue.push(view.card);
@@ -331,7 +434,11 @@ function initScrollBehavior(): void {
   // Place FAB as sibling of chatMessages, inside the same parent
   chatMessages.parentElement?.appendChild(scrollBtn);
 
-  chatMessages.addEventListener("scroll", () => {
+  chatMessages.addEventListener("scroll", (e) => {
+    // Only USER-initiated scrolls (wheel/touch/keyboard) flip the pin state.
+    // Programmatic scrollTo() calls fire untrusted events — ignoring them keeps
+    // an in-progress smooth glide from re-pinning to "user scrolled up".
+    if (!e.isTrusted) return;
     const distFromBottom =
       chatMessages.scrollHeight -
       chatMessages.scrollTop -
@@ -354,9 +461,21 @@ function initScrollBehavior(): void {
 // Initialize on module load
 initScrollBehavior();
 
+/**
+ * Keep the feed pinned to the bottom while the user is down there. Glide
+ * smoothly when only a little content is below the fold (the common live
+ * case), and jump instantly for a giant flush so the panel never chases a
+ * long animation. Never overrides an intentional scroll-up.
+ */
 function scrollToBottom(): void {
-  if (!userScrolledUp) {
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+  if (userScrolledUp) return;
+  const target = chatMessages.scrollHeight;
+  const remaining = target - chatMessages.scrollTop - chatMessages.clientHeight;
+  if (remaining <= 0) return;
+  if (prefersReducedMotion() || remaining > chatMessages.clientHeight * 2) {
+    chatMessages.scrollTop = target;
+  } else {
+    chatMessages.scrollTo({ top: target, behavior: "smooth" });
   }
 }
 

@@ -267,6 +267,53 @@ describe("log-renderer", () => {
     expect(center.hidden).toBe(false);
   });
 
+  test("cost events do not spam the transcript with per-call token lines", async () => {
+    addLogRow({ type: "cost", step: 1, tokensIn: 100, tokensOut: 50, costUsd: 0.5, model: "m" }, "t0");
+    await flushChat();
+    expect(chatMessages.querySelectorAll(".msg-system").length).toBe(0);
+  });
+
+  test("repeated identical observations collapse to one line", async () => {
+    addLogRow({ type: "state", step: 0, url: "u", elementCount: 34, newElementCount: 5, pageInfo: "Pricing" }, "t0");
+    await flushChat();
+    addLogRow({ type: "state", step: 1, url: "u", elementCount: 34, newElementCount: 0, pageInfo: "Pricing" }, "t1");
+    await flushChat();
+    expect(chatMessages.querySelectorAll(".msg-system").length).toBe(1);
+    // A genuinely different observation renders again.
+    addLogRow({ type: "state", step: 2, url: "u", elementCount: 41, newElementCount: 7, pageInfo: "Pricing" }, "t2");
+    await flushChat();
+    expect(chatMessages.querySelectorAll(".msg-system").length).toBe(2);
+  });
+
+  test("action cards use a friendly label, icon, and element target", async () => {
+    addLogRow({ type: "action", step: 1, index: 1, total: 2, name: "click", description: "click element [5]" }, "t0");
+    await flushChat();
+    const card = chatMessages.querySelector(".activity-tool") as HTMLElement;
+    expect(card).not.toBeNull();
+    // Friendly label ("Click · 1/2") not the raw snake-case name.
+    expect(card.textContent).toContain("Click · 1/2");
+    expect(card.textContent).not.toContain("click · 1/2");
+    // Element target extracted from the description.
+    expect(card.textContent).toContain("element [5]");
+    // Cursor/pointer glyph for click actions.
+    expect(card.querySelector(".activity-icon")?.textContent).toBe("🖱️");
+  });
+
+  test("thinking card shows reasoning text as primary content and goal as a highlight", async () => {
+    addLogRow({
+      type: "thinking", step: 1, nextGoal: "find the login button",
+      text: "looking for it", evaluation: "page loaded", memory: "pricing found",
+    }, "t0");
+    await flushChat();
+    const card = chatMessages.querySelector(".activity-reasoning") as HTMLElement;
+    expect(card.querySelector(".activity-reasoning-text")?.textContent).toBe("looking for it");
+    expect(card.querySelector(".activity-next-goal")?.textContent).toContain("find the login button");
+    // Secondary fields stay in the DOM (collapsed <details>), so the transcript
+    // still carries the full reasoning context.
+    expect(card.textContent).toContain("page loaded");
+    expect(card.textContent).toContain("pricing found");
+  });
+
   test("malformed cost events are dropped without touching the totals", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
