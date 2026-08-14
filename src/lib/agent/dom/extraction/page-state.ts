@@ -339,6 +339,36 @@ let cachedHashes: Set<string> = new Set();
 /** Full serialized snapshot from the last successful extract (paging cache). */
 let snapshotCacheText: string | null = null;
 
+/**
+ * Merge a fresh walk's indexed cache (`next`) into the persistent cache
+ * (`previous`) IN PLACE instead of replacing it wholesale, so the cached
+ * object's identity survives across extractions (the walk accumulator is
+ * ephemeral; the cache is the long-lived copy). Elements are indexed by walk
+ * order, so a removed element's index is simply absent from `next` — delete
+ * those indices once, keep the still-present entries on the same object, then
+ * assign the new walk's entries. A fresh object is only built when the
+ * previous cache is empty (first extraction or a prior full eviction).
+ *
+ * Stale entries are harmless by design: `selectorMap` never crosses IPC
+ * (content-utils.ts) and the executor re-verifies a live element's identity
+ * at action time (stale-element-guard) — no invalidation beyond the delete.
+ */
+function commitIndexedCache<T>(previous: Record<number, T>, next: Record<number, T>): Record<number, T> {
+  if (Object.keys(previous).length === 0) {
+    return { ...next };
+  }
+  const prevKeys = Object.keys(previous);
+  for (const key of prevKeys) {
+    if (!(key in next)) {
+      delete previous[Number(key)];
+    }
+  }
+  for (const key of Object.keys(next)) {
+    previous[Number(key)] = next[Number(key)];
+  }
+  return previous;
+}
+
 export function resetDomBaseline(): void {
   cachedHashes = new Set();
   // The DOM baseline changed (e.g. after pageChanged) — drop the identity
@@ -412,8 +442,8 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
     endVisibilityCache();
   }
   cachedHashes = new Set(acc.elements.map((e) => e.hash));
-  cachedSelectorMap = acc.selectorMap;
-  cachedIdentities = acc.identities;
+  cachedSelectorMap = commitIndexedCache(cachedSelectorMap, acc.selectorMap);
+  cachedIdentities = commitIndexedCache(cachedIdentities, acc.identities);
   const scrollTop = window.scrollY || 0;
   const scrollHeight = document.documentElement.scrollHeight;
   const vh = window.innerHeight;
