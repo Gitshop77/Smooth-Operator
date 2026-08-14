@@ -1,0 +1,19 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`generateAccessibilityTree (DOM walking) > 12. AX output is byte-identical with hoisted role computation (pin test) 1`] = `
+"<untrusted_page_state>
+navigation "Main nav" [ref_1]
+ link "Home" [ref_2] href="/home"
+ button "Sign in" [ref_3] type="button"
+ textbox "[value redacted]" [ref_4]
+heading "Dashboard" [ref_5]
+generic "Welcome back" [ref_6]
+textbox "Search the site" [ref_7] type="text" placeholder="Search the site"
+combobox "Beta" [ref_8]
+ option "Alpha" value="a"
+ option "Beta" (selected) value="b"
+button "Invisible" [ref_9]
+list [ref_10]
+ listitem "Alpha" [ref_11]
+</untrusted_page_state>"
+`;

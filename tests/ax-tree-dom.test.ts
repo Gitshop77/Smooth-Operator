@@ -251,6 +251,36 @@ describe("generateAccessibilityTree (DOM walking)", () => {
     expect(uncapped.pageContent.length).toBeGreaterThan(50);
     expect(uncapped.pageContent.length).toBeLessThanOrEqual(100000);
   });
+
+  test("12. AX output is byte-identical with hoisted role computation (pin test)", () => {
+    // Pins the full serialized `"all"` tree for a fixture exercising every
+    // inclusion path: interactive (link/button/input/select), structural
+    // (nav/heading), generic-with-name (the `name.length > 0` gate), generic
+    // unnamed wrappers (excluded), sensitive redaction (password), and
+    // aria-hidden content. The snapshot is the behavior contract for the
+    // getRole/isInteractive hoist — it must not change.
+    document.body.innerHTML = `
+      <nav aria-label="Main nav">
+        <a href="/home">Home</a>
+        <button type="button">Sign in</button>
+        <input type="password" placeholder="Password" value="s3cr3t">
+      </nav>
+      <h1>Dashboard</h1>
+      <div class="card">
+        <p>Welcome back</p>
+        <input type="text" placeholder="Search the site">
+        <select aria-label="Sort">
+          <option value="a">Alpha</option>
+          <option value="b" selected>Beta</option>
+        </select>
+        <div aria-hidden="true"><button>Invisible</button></div>
+      </div>
+      <ul><li>Alpha</li></ul>
+    `;
+    const axTree = generateAccessibilityTree("all");
+    expect(axTree.error).toBeUndefined();
+    expect(axTree.pageContent).toMatchSnapshot();
+  });
 });
 
 // ─── Regression: secret redaction + AX-tree hardening ────────────────────────
