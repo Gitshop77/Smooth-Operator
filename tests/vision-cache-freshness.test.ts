@@ -2,14 +2,18 @@
  * Vision cache fingerprint freshness.
  *
  * `isVisionCacheFresh` compares the current page fingerprint against the
- * fingerprint stored when the cached vision rects were CAPTURED. The
- * adaptive-vision warm-cache path in `extractStateForRun` reuses the cached
- * rects but used to re-stamp the stored fingerprint with the CURRENT
- * extraction's EXTRACT_STATE fingerprint — re-baselining the freshness check
- * to "now" and making a stale cache (page changed since capture) look fresh.
+ * fingerprint stored when the cached vision rects were CAPTURED. Both the
+ * adaptive warm-cache path and the always-on path in `extractStateForRun`
+ * reuse the cached rects ONLY when that freshness check passes (URL +
+ * fingerprint), and the adaptive branch re-stamps the stored fingerprint on
+ * reuse so the gate stays pinned to the current page. A page whose
+ * fingerprint changed since capture (same URL) is therefore rejected: the
+ * cache is cleared and vision re-detects instead of serving stale [vN] boxes.
  *
- * The fingerprint must only be stamped when the cache entry is actually
- * written (fresh detect); a warm-branch reuse must not overwrite it.
+ * Accepted staleness caveat: viewport resize/scroll between steps changes the
+ * cached [vN] pixel rects even with an unchanged DOM fingerprint — the click
+ * path re-validates via `isVisionCacheFresh` (message-handlers.ts) before any
+ * CDP click, so a mislocated rect is rejected and re-detected, not clicked.
  *
  * These tests drive the REAL `extractStateForRun` + `isVisionCacheFresh`
  * (mocking only the tab-manager / catalog / vision-assistant dependencies,
@@ -181,7 +185,7 @@ function setVisionSettings(settings: {
   });
 }
 
-describe("adaptive vision — warm-cache fingerprint freshness", () => {
+describe("vision cache freshness — adaptive warm reuse + always-on reuse", () => {
   beforeEach(async () => {
     vi.resetModules();
     const mod = await import("@/extension/background/run-helpers");
@@ -209,37 +213,66 @@ describe("adaptive vision — warm-cache fingerprint freshness", () => {
     vi.clearAllMocks();
   });
 
-  test("EXTRACT_STATE fingerprint does not mark a stale warm cache as fresh", async () => {
+  test("adaptive reuse branch rejects a changed page (fingerprint check), not just URL", async () => {
     // Capture-time cache state: rects + fingerprint captured when the DOM
     // fingerprint was "FP-OLD".
     visionElementsCache.set("v1", { x: 10, y: 10, width: 100, height: 50, label: "login" });
     setVisionCacheUrl("https://example.com");
     setVisionCacheFingerprint("FP-OLD");
 
-    // The page changed since capture (EXTRACT_STATE now reports "FP-NEW") but
-    // the URL is unchanged, so the adaptive warm branch runs: it reuses the
-    // cached rects instead of re-detecting.
+    // The page changed since capture (the freshness check AND EXTRACT_STATE
+    // both report "FP-NEW") but the URL is unchanged: the adaptive warm
+    // branch must NOT reuse the stale rects — it must clear and re-detect.
+    getPageFingerprintMock.mockResolvedValue("FP-NEW");
     extractStateFromTabMock.mockResolvedValue(makeDomState({ fingerprint: "FP-NEW" }));
     const state = await extractStateForRun(1, MOCK_TABS);
 
-    // Sanity: the warm branch actually ran (cached rect merged into state).
-    expect(state.newElementCount).toBe(1);
-
-    // The cached rects are STALE (page fingerprint changed since capture) —
-    // clicking them must be rejected by the freshness guard.
+    // No cached rect was merged (fresh detect or empty), the cache was
+    // cleared, and the freshness guard still rejects the stale rects.
+    expect(state.newElementCount).toBe(0);
+    expect(visionElementsCache.size).toBe(0);
     expect(await isVisionCacheFresh(1)).toBe(false);
   });
 
   test("warm-cache reuse with an unchanged page stays fresh", async () => {
-    // Page did NOT change since capture: EXTRACT_STATE fingerprint matches.
+    // Page did NOT change since capture: the freshness-check fingerprint AND
+    // the EXTRACT_STATE fingerprint both match the stored one.
     visionElementsCache.set("v1", { x: 10, y: 10, width: 100, height: 50, label: "login" });
     setVisionCacheUrl("https://example.com");
     setVisionCacheFingerprint("FP-OLD");
 
+    getPageFingerprintMock.mockResolvedValue("FP-OLD");
     extractStateFromTabMock.mockResolvedValue(makeDomState({ fingerprint: "FP-OLD" }));
     await extractStateForRun(1, MOCK_TABS);
-    getPageFingerprintMock.mockResolvedValue("FP-OLD");
 
+    expect(await isVisionCacheFresh(1)).toBe(true);
+  });
+
+  test("always-on vision reuses cached rects when the page fingerprint is unchanged", async () => {
+    // Prime the cache as if a fresh detect just captured these rects under
+    // fingerprint "FP-OLD" on the current page.
+    visionElementsCache.set("v1", { x: 10, y: 10, width: 100, height: 50, label: "login" });
+    setVisionCacheUrl("https://example.com");
+    setVisionCacheFingerprint("FP-OLD");
+    getPageFingerprintMock.mockResolvedValue("FP-OLD");
+    extractStateFromTabMock.mockResolvedValue(makeDomState({ fingerprint: "FP-OLD" }));
+    setVisionSettings({ enableLocalVision: true, visionMode: "always", enableScreenshots: true });
+
+    const { captureTabScreenshot } = await import("@/extension/background/screenshots");
+    const captureMock = captureTabScreenshot as unknown as ReturnType<typeof vi.fn>;
+    const { VisionAssistant: VA } = await import("@/extension/vision-assistant");
+    const vaCtor = VA as unknown as ReturnType<typeof vi.fn>;
+
+    const state = await extractStateForRun(1, MOCK_TABS);
+
+    // No re-detection: no screenshot capture, no assistant construction —
+    // the cached [vN] rects are merged straight into the state.
+    expect(captureMock).not.toHaveBeenCalled();
+    expect(vaCtor).not.toHaveBeenCalled();
+    expect(state.newElementCount).toBe(1);
+    expect(state.elements).toContainEqual(expect.objectContaining({ visionId: "v1", indexStr: "[v1]" }));
+    // The cache is retained (not cleared) and stays fresh for the click path.
+    expect(visionElementsCache.size).toBe(1);
     expect(await isVisionCacheFresh(1)).toBe(true);
   });
 

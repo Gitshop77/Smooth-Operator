@@ -2,7 +2,6 @@ import type { LoopDeps } from "@/lib/agent/loop/types";
 import type { ActionResult, AgentAction, BrowserState, LogEvent, TabInfo } from "@/lib/agent/types";
 import type { AgentMode } from "@/lib/agent/modes";
 import { RunBuilder, saveRun } from "@/lib/agent/run-history";
-import { stripUrlFragment } from "./vision";
 import { makeAntiBotHooks } from "./antibot";
 import { captureTabScreenshot } from "./screenshots";
 import {
@@ -43,7 +42,6 @@ import {
   visionElementsCache,
   getVisionElementRect,
   isVisionCacheFresh,
-  getVisionCacheUrl,
   setVisionCacheUrl,
   setVisionCacheFingerprint,
   clearVisionCache,
@@ -388,6 +386,35 @@ export async function handleDetectVisualRequest(
   }
 }
 
+// Merge the cached [vN] vision rects into a freshly-extracted DOM state.
+// Shared by the adaptive warm-cache branch and the always-on reuse branch:
+// the cached rects are converted back into vision elements and merged with
+// the DOM elements exactly like a fresh detect's output would be.
+async function mergeCachedVisionRects(domState: BrowserState): Promise<void> {
+  const { mergeDetections, renderMergedElementsText } = await loadVisionAssistant();
+  const visionEntries = Array.from(visionElementsCache.entries()).map(([id, data]) => ({
+    index: -1,
+    tag: "vision_element",
+    text: data.label,
+    attributes: { "data-vision-label": data.label },
+    hash: `vision_${id}`,
+    rect: { x: data.x, y: data.y, width: data.width, height: data.height },
+    source: "vision" as const,
+    pixelRect: { x: data.x, y: data.y, width: data.width, height: data.height },
+    indexStr: `[${id}]`,
+    visionId: id,
+  }));
+  const merged = mergeDetections(domState.elements, [], 1);
+  for (const entry of visionEntries) {
+    if (!merged.some((m) => m.visionId === entry.visionId)) {
+      merged.push(entry);
+    }
+  }
+  domState.elements = merged as unknown as typeof domState.elements;
+  domState.elementsText = renderMergedElementsText(merged);
+  domState.newElementCount += visionEntries.length;
+}
+
 export async function extractStateForRun(
   fallbackTabId: number,
   tabs: TabInfo[],
@@ -461,38 +488,22 @@ export async function extractStateForRun(
       const domState = await extractStateFromTab(tabId, tabs, false, signal);
       const dpr = domState.devicePixelRatio ?? 1;
       lastKnownDpr = dpr;
-      if (!getVisionCacheUrl() || (domState.url && stripUrlFragment(domState.url) !== stripUrlFragment(getVisionCacheUrl()))) {
+      if (!(await isVisionCacheFresh(tabId))) {
+        // URL moved or the DOM fingerprint changed since capture: the cached
+        // rects are stale — drop them and re-detect instead of serving stale
+        // [vN] boxes in the observation.
         clearVisionCache();
       } else {
-        // NOTE: deliberately does NOT re-stamp the cache fingerprint here.
-        // The cached rects were captured when the fingerprint was set (in
-        // handleDetectVisualRequest / the always-on path below); `isVisionCacheFresh`
-        // compares the CURRENT page fingerprint against that capture-time value.
-        // Re-stamping with this extraction's EXTRACT_STATE fingerprint would
-        // re-baseline the freshness check to "now" and hide DOM changes since
-        // the rects were captured.
-        const { mergeDetections, renderMergedElementsText } = await loadVisionAssistant();
-        const visionEntries = Array.from(visionElementsCache.entries()).map(([id, data]) => ({
-          index: -1,
-          tag: "vision_element",
-          text: data.label,
-          attributes: { "data-vision-label": data.label },
-          hash: `vision_${id}`,
-          rect: { x: data.x, y: data.y, width: data.width, height: data.height },
-          source: "vision" as const,
-          pixelRect: { x: data.x, y: data.y, width: data.width, height: data.height },
-          indexStr: `[${id}]`,
-          visionId: id,
-        }));
-        const merged = mergeDetections(domState.elements, [], 1);
-        for (const entry of visionEntries) {
-          if (!merged.some(m => m.visionId === entry.visionId)) {
-            merged.push(entry);
-          }
-        }
-        domState.elements = merged as unknown as typeof domState.elements;
-        domState.elementsText = renderMergedElementsText(merged);
-        domState.newElementCount += visionEntries.length;
+        // Re-stamp the fingerprint: `isVisionCacheFresh` has just confirmed
+        // the CURRENT page fingerprint matches the one the cached rects were
+        // captured under, so pinning the stored fingerprint to this
+        // extraction's fingerprint keeps the freshness gate active for future
+        // steps. Staleness caveat: viewport resize/scroll between steps
+        // changes the cached [vN] pixel rects even with an unchanged DOM
+        // fingerprint — accepted, because the click path re-validates via
+        // `isVisionCacheFresh` (message-handlers.ts) before any CDP click.
+        setVisionCacheFingerprint((domState as { fingerprint?: string }).fingerprint ?? "");
+        await mergeCachedVisionRects(domState);
       }
       return domState;
     }
@@ -526,6 +537,23 @@ export async function extractStateForRun(
     }
     lastKnownDpr = domStateNoVision.devicePixelRatio ?? 1;
     return domStateNoVision;
+  }
+
+  // Cache reuse needs no vision assistant: when the page URL AND fingerprint
+  // still match capture time (static page), merge the cached [vN] rects into
+  // the state instead of re-detecting every step. Vision re-detects only on
+  // meaningful change (URL moved or DOM fingerprint changed).
+  if (await isVisionCacheFresh(tabId)) {
+    try {
+      const domState = await extractStateFromTab(tabId, tabs, false, signal);
+      lastKnownDpr = domState.devicePixelRatio ?? 1;
+      await mergeCachedVisionRects(domState);
+      return domState;
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      void safeLog("warn", "[vision-assistant] cache reuse failed, falling back to DOM-only:", e);
+      return extractStateFromTab(tabId, tabs, false, signal);
+    }
   }
 
   ensureVisionAssistantInit();
