@@ -195,8 +195,17 @@ function collisionFreeId(el: HTMLElement): string {
   return id;
 }
 
-export function hashElement(el: HTMLElement, attrs?: Record<string, string>): string {
-  return fnv1aHash(elementIdentity(el, attrs), DOM_CONFIG.fnvOffsetBasis, DOM_CONFIG.fnvPrime);
+/**
+ * Stable FNV-1a hash of an element's identity string (see {@link elementIdentity}).
+ *
+ * `identity` is an optional precomputed identity: the walker computes
+ * `elementIdentity(el, attrs)` once per element and threads it into both this
+ * hash and the per-index `elementIdentities` record instead of paying for the
+ * identity derivation twice. External callers may omit it — it is then
+ * computed internally with the exact same result.
+ */
+export function hashElement(el: HTMLElement, attrs?: Record<string, string>, identity?: string): string {
+  return fnv1aHash(identity ?? elementIdentity(el, attrs), DOM_CONFIG.fnvOffsetBasis, DOM_CONFIG.fnvPrime);
 }
 
 // ─── Fallback identity matching ────────────────────────────────────────────

@@ -213,12 +213,13 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator, 
     if (tag === "svg" && isInteractive(el)) {
       const idx = ++acc.index;
       const attrs = buildAttrs(el);
-      const hash = hashElement(el, attrs);
+      const identity = elementIdentity(el, attrs);
+      const hash = hashElement(el, attrs, identity);
       const isNew = !acc.prevHashes.has(hash);
       if (isNew) acc.newElementCount++;
       const text = directText(el) || el.getAttribute("aria-label") || "";
       acc.selectorMap[idx] = el;
-      acc.identities[idx] = elementIdentity(el, attrs);
+      acc.identities[idx] = identity;
       acc.elements.push({ index: idx, tag, text, attributes: attrs, hash, rect: readCache.getRect(el)! });
       const prefix = isNew ? "*" : "";
       pushLine(acc, "\t".repeat(depth) + `${prefix}[${idx}]<${tag}${attrString(attrs)} />`);
@@ -239,12 +240,13 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator, 
   if (interactive) {
     const idx = ++acc.index;
     const attrs = buildAttrs(el);
-    const hash = hashElement(el, attrs);
+    const identity = elementIdentity(el, attrs);
+    const hash = hashElement(el, attrs, identity);
     const isNew = !acc.prevHashes.has(hash);
     if (isNew) acc.newElementCount++;
     const text = directText(el) || el.getAttribute("aria-label") || "";
     acc.selectorMap[idx] = el;
-    acc.identities[idx] = elementIdentity(el, attrs);
+    acc.identities[idx] = identity;
     acc.elements.push({ index: idx, tag, text, attributes: attrs, hash, rect: rect! });
     const prefix = isNew ? "*" : "";
     pushLine(acc, "\t".repeat(depth) + `${prefix}[${idx}]<${tag}${attrString(attrs)} />`);
@@ -284,13 +286,14 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator, 
     if (containerVisible && intersectsObservationViewport(el, readCache.getRect(el))) {
       const idx = ++acc.index;
       const attrs = buildAttrs(el);
-      const hash = hashElement(el, attrs);
+      const identity = elementIdentity(el, attrs);
+      const hash = hashElement(el, attrs, identity);
       const isNew = !acc.prevHashes.has(hash);
       if (isNew) acc.newElementCount++;
       const text = directText(el) || el.getAttribute("aria-label") || "";
       const containerRect = readCache.getRect(el)!;
       acc.selectorMap[idx] = el;
-      acc.identities[idx] = elementIdentity(el, attrs);
+      acc.identities[idx] = identity;
       acc.elements.push({ index: idx, tag, text, attributes: attrs, hash, rect: containerRect });
       const prefix = isNew ? "*" : "";
       pushLine(acc, "\t".repeat(depth) + `${prefix}[${idx}]<${tag}${attrString(attrs)} />`);
