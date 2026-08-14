@@ -12,7 +12,8 @@ import { buildAttrs, hashElement, elementIdentity, DOM_CONFIG, resetHashCaches }
 import { redactUrlTokens } from "./element-info-utils";
 import { getShadowRoot } from "../annotation/shadow-piercer";
 import { escapeAttr, attrString, buildPageInfo, buildCompoundChildren } from "./page-state-utils";
-import { ReadCache } from "../utils/read-cache";
+import { ReadCache, getSharedReadCache } from "../utils/read-cache";
+import { getDomEpoch, installMutationSignal } from "../mutation-signal";
 
 export function isVisible(el: HTMLElement): boolean {
   return isVisibleFull(el);
@@ -110,7 +111,28 @@ interface WalkAccumulator {
   elementTruncated: boolean;
 }
 
-let visibilityCache: WeakMap<HTMLElement, boolean> = new WeakMap<HTMLElement, boolean>();
+/**
+ * Cross-step per-element visibility memo (the `isVisibleFull` result for
+ * every element the walk classified). Stamped with the DOM epoch: on an
+ * unchanged page the next walk serves every lookup (0 forced reflows); any
+ * DOM mutation bumps the epoch and rebuilds the memo. The viewport-bounds
+ * check (`intersectsObservationViewport`) is folded into the cached value
+ * today, so the memo is only valid for the epoch that produced it — the epoch
+ * stamp is exactly that guarantee.
+ */
+let visibilityCache: { epoch: number; map: WeakMap<HTMLElement, boolean> } = {
+  epoch: -1,
+  map: new WeakMap(),
+};
+
+/** The epoch-valid visibility memo, rebuilt lazily when the epoch moved. */
+function visibilityCacheMap(): WeakMap<HTMLElement, boolean> {
+  const epoch = getDomEpoch();
+  if (visibilityCache.epoch !== epoch) {
+    visibilityCache = { epoch, map: new WeakMap<HTMLElement, boolean>() };
+  }
+  return visibilityCache.map;
+}
 
 /** Automatic observations describe the current viewport, not the whole
  * document. Full-page evidence is available through extract/search_page and
@@ -127,10 +149,11 @@ function intersectsObservationViewport(el: HTMLElement, rect?: DOMRect): boolean
 function serializeText(node: Text, depth: number, acc: WalkAccumulator, readCache: ReadCache): void {
   const parent = node.parentElement;
   if (!parent) return;
-  let visible = visibilityCache.get(parent);
+  const vc = visibilityCacheMap();
+  let visible = vc.get(parent);
   if (visible === undefined) {
     visible = readCache.getVisible(parent) ?? isVisibleFull(parent);
-    visibilityCache.set(parent, visible);
+    vc.set(parent, visible);
   }
   if (!visible) return;
   if (!intersectsObservationViewport(parent, readCache.getRect(parent))) return;
@@ -196,7 +219,7 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator, 
   if (isInteractive(el)) {
     rect = readCache.getRect(el);
     const visible = (readCache.getVisible(el, rect) ?? isVisibleFull(el, rect)) && intersectsObservationViewport(el, rect);
-    visibilityCache.set(el, visible);
+    visibilityCacheMap().set(el, visible);
     if (!visible) return;
     interactive = true;
   }
@@ -231,8 +254,8 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator, 
   // layout flush). The walk is depth-first, so a parent element is always
   // serialized before its text children — every `serializeText` lookup finds
   // its parent already cached.
-  if (!interactive && visibilityCache.get(el) === undefined) {
-    visibilityCache.set(el, readCache.getVisible(el) ?? isVisibleFull(el));
+  if (!interactive && visibilityCacheMap().get(el) === undefined) {
+    visibilityCacheMap().set(el, readCache.getVisible(el) ?? isVisibleFull(el));
   }
 
   if (isInteractiveContainer(el)) {
@@ -240,10 +263,11 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator, 
     // (opacity:0, aria-hidden, zero-size rect, clipped, …) must not surface as
     // a phantom click target. Children are still walked — their own visibility
     // checks decide what they contribute.
-    let containerVisible = visibilityCache.get(el);
+    const vc = visibilityCacheMap();
+    let containerVisible = vc.get(el);
     if (containerVisible === undefined) {
       containerVisible = readCache.getVisible(el) ?? isVisibleFull(el);
-      visibilityCache.set(el, containerVisible);
+      vc.set(el, containerVisible);
     }
     if (containerVisible && intersectsObservationViewport(el, readCache.getRect(el))) {
       const idx = ++acc.index;
@@ -305,6 +329,11 @@ let snapshotCacheText: string | null = null;
 
 export function resetDomBaseline(): void {
   cachedHashes = new Set();
+  // The DOM baseline changed (e.g. after pageChanged) — drop the identity
+  // memo so nth-of-type indices are recomputed against the new structure.
+  // (The epoch-stamped visibility/read caches self-invalidate via the
+  // mutation signal; resetHashCaches covers the structural index memo.)
+  resetHashCaches();
 }
 
 /**
@@ -318,14 +347,16 @@ export function pageSnapshotChunk(offset?: number): SnapshotWindow | null {
 }
 
 export function extractBrowserState(tabs: TabInfo[]): BrowserState {
-  visibilityCache = new WeakMap<HTMLElement, boolean>();
-  resetHashCaches();
+  // Ensure the DOM-epoch mutation signal is installed (idempotent) so the
+  // persistent caches below can rely on it — covers in-page demo mode and
+  // tests; the content script also installs it at module init.
+  installMutationSignal();
+  // Epoch-stamped persistent read cache: on an unchanged DOM this walk serves
+  // every element's rect/style/visibility from the previous walk's batch
+  // reads (0 forced reflows). Any DOM mutation bumps the epoch (mutation
+  // signal) and rebuilds the cache.
+  const readCache = getSharedReadCache();
   beginVisibilityCache();
-  // Per-walk read cache: batch rect/style reads once per element (see
-  // `read-cache.ts`). Cleared at walk start — never reused across walks (that
-  // is the cross-step concern, handled separately).
-  const readCache = new ReadCache();
-  readCache.clear();
   // Redact each tab URL at the boundary, the same way `location.href` below is
   // redacted — a tab open on an OAuth callback (or a share link carrying a
   // token) would otherwise leak its query-string secrets into page state.

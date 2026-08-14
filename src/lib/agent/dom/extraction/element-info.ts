@@ -20,6 +20,7 @@ import {
   implicitRole,
   fnv1aHash,
 } from "./element-info-utils";
+import { getDomEpoch } from "../mutation-signal";
 
 // ─── Configuration constants ────────────────────────────────────────────────
 
@@ -143,16 +144,30 @@ export function elementIdentity(el: HTMLElement, attrs?: Record<string, string>)
 const uidMap = new WeakMap<HTMLElement, string>();
 let uidCounter = 0;
 
-let nthOfTypeCache: WeakMap<Element, Map<Element, number>> = new WeakMap();
+/**
+ * Cross-step memo of per-parent nth-of-type indices, stamped with the DOM
+ * epoch: on an unchanged page the next extraction reuses the indices (the
+ * sibling-order scan is O(children) per parent on first touch only); any DOM
+ * mutation bumps the epoch and rebuilds the memo.
+ */
+let nthOfTypeCache: { epoch: number; map: WeakMap<Element, Map<Element, number>> } = {
+  epoch: -1,
+  map: new WeakMap(),
+};
 
 export function resetHashCaches(): void {
-  nthOfTypeCache = new WeakMap();
+  nthOfTypeCache = { epoch: -1, map: new WeakMap() };
 }
 
 function nthOfTypeIndex(el: Element): number {
   const parent = el.parentElement;
   if (!parent) return 1;
-  let perParent = nthOfTypeCache.get(parent);
+  const epoch = getDomEpoch();
+  if (nthOfTypeCache.epoch !== epoch) {
+    nthOfTypeCache = { epoch, map: new WeakMap() };
+  }
+  const map = nthOfTypeCache.map;
+  let perParent = map.get(parent);
   if (!perParent) {
     perParent = new Map<Element, number>();
     const counts = new Map<string, number>();
@@ -167,7 +182,7 @@ function nthOfTypeIndex(el: Element): number {
       counts.set(tag, next);
       perParent.set(sib as Element, next);
     }
-    nthOfTypeCache.set(parent, perParent);
+    map.set(parent, perParent);
   }
   return perParent.get(el) ?? 1;
 }

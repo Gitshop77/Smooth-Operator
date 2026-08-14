@@ -20,8 +20,15 @@
  * clears it) at walk start, and the AX-tree builder creates its own. `clear()`
  * exists so a walk can explicitly reset the container (e.g. between the two
  * walks of a step); it must never outlive a synchronous walk.
+ *
+ * Since A2 the walkers ALSO share an epoch-stamped persistent instance via
+ * {@link getSharedReadCache}: on an unchanged DOM (same epoch) the second
+ * walk of a step — and the next step's walks — serve every element from the
+ * previous walk's reads (0 forced reflows). Any DOM mutation bumps the epoch
+ * (see `../mutation-signal`), which rebuilds the shared cache.
  */
 import { isVisibleFull } from "./visibility";
+import { getDomEpoch } from "../mutation-signal";
 
 interface ReadCacheEntry {
   rect: DOMRect | undefined;
@@ -32,8 +39,10 @@ interface ReadCacheEntry {
 export class ReadCache {
   private entries = new Map<Element, ReadCacheEntry>();
 
-  /** Read the element's bounding rect + computed style once and store them. */
+  /** Read the element's bounding rect + computed style once and store them.
+   * No-op when the element is already cached (cross-walk reuse serves it). */
   batchRead(el: Element): void {
+    if (this.entries.has(el)) return;
     this.entries.set(el, {
       rect: el.getBoundingClientRect(),
       style: el instanceof HTMLElement ? window.getComputedStyle(el) : undefined,
@@ -70,4 +79,23 @@ export class ReadCache {
   clear(): void {
     this.entries.clear();
   }
+}
+
+let sharedReadCache: { epoch: number; cache: ReadCache } | null = null;
+
+/**
+ * The epoch-stamped persistent ReadCache shared by both extraction walks.
+ *
+ * Rebuilds only when the DOM epoch moved; otherwise the walkers serve every
+ * element's rect/style/visibility from the previous walk's batch reads — on
+ * an unchanged page the second walk of a step (and subsequent steps) performs
+ * zero forced layout reads. The DOM is never written during a walk, so cached
+ * values stay fresh for the whole epoch.
+ */
+export function getSharedReadCache(): ReadCache {
+  const epoch = getDomEpoch();
+  if (!sharedReadCache || sharedReadCache.epoch !== epoch) {
+    sharedReadCache = { epoch, cache: new ReadCache() };
+  }
+  return sharedReadCache.cache;
 }

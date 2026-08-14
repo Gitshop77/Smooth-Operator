@@ -12,6 +12,8 @@
  * style-recalc cost on every visited node.
  */
 
+import { getDomEpoch } from "../mutation-signal";
+
 /**
  * Cheap visibility pre-check. Catches `display:none`, detached elements, and
  * most hidden cases WITHOUT forcing a style recalc.
@@ -113,27 +115,50 @@ function isZeroSize(token: string): boolean {
 }
 
 /**
- * Per-extract memo of "this ancestor is fully transparent" (`opacity: 0`).
+ * Cross-step memo of "this ancestor is fully transparent" (`opacity: 0`).
  *
  * `isVisibleFull` walks the ancestor chain of every interactive element, and
  * `getComputedStyle` is the single most expensive operation in the walker.
  * On a page with thousands of siblings under one `<body>`, the same ancestors
- * are re-resolved for every sibling; memoizing per ancestor within one
- * extraction collapses that to one style resolution per ancestor.
+ * are re-resolved for every sibling; memoizing per ancestor collapses that to
+ * one style resolution per ancestor.
  *
- * The memo is only active while a walker is running (`beginVisibilityCache` /
- * `endVisibilityCache`): `isVisibleFull` is also called outside extractions
- * (e.g. `find_text`'s action-time visibility probe), and the DOM can change
- * between those calls, so the cache must never outlive the synchronous walk.
+ * The memo is PERSISTENT across walks, invalidated by the DOM-epoch signal
+ * (`getDomEpoch` in `../mutation-signal`): the epoch-stamped stamp layer
+ * survives between walks and is only rebuilt when a mutation bumped the
+ * epoch. The ACTIVE layer (`transparentAncestorCache`) is non-null only while
+ * a walker is running (`beginVisibilityCache` / `endVisibilityCache`), so
+ * `isFullyTransparent` calls outside extractions (e.g. `find_text`'s
+ * action-time visibility probe) always take the direct computation path and
+ * can never be served stale data — the DOM can change between those calls and
+ * they must not depend on the observer being installed.
  */
 let transparentAncestorCache: WeakMap<HTMLElement, boolean> | null = null;
+let transparentAncestorStamp: { epoch: number; cache: WeakMap<HTMLElement, boolean> } | null = null;
 
-/** Start a memoized walk — call at the beginning of every DOM extraction. */
+/**
+ * Start a memoized walk — call at the beginning of every DOM extraction.
+ *
+ * Persistent mode: reuses the previous walk's memo when the DOM epoch is
+ * unchanged (a static page becomes a 0-cost lookup); rebuilds it only when
+ * the epoch moved. In-walk calls only — out-of-walk `isVisibleFull` callers
+ * must not begin a cache.
+ */
 export function beginVisibilityCache(): void {
-  transparentAncestorCache = new WeakMap<HTMLElement, boolean>();
+  const epoch = getDomEpoch();
+  if (!transparentAncestorStamp || transparentAncestorStamp.epoch !== epoch) {
+    transparentAncestorStamp = { epoch, cache: new WeakMap<HTMLElement, boolean>() };
+  }
+  transparentAncestorCache = transparentAncestorStamp.cache;
 }
 
-/** End the memoized walk — call when the extraction finishes (even on error). */
+/**
+ * End the memoized walk — call when the extraction finishes (even on error).
+ *
+ * Restores the pre-walk state instead of a hard null: the active layer is
+ * deactivated (out-of-walk callers keep the null-cache path) while the
+ * epoch-stamped persistent layer survives for the next walk's reuse.
+ */
 export function endVisibilityCache(): void {
   transparentAncestorCache = null;
 }

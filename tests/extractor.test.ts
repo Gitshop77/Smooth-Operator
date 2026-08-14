@@ -132,7 +132,7 @@ describe("extractBrowserState", () => {
     expect(state.elements.map((e) => e.tag).sort()).toEqual(["button", "input"]);
   });
 
-  test("6. isNew tracking — first call all new, second call none new, added element is new", () => {
+  test("6. isNew tracking — first call all new, second call none new, added element is new", async () => {
     document.body.innerHTML = `<button>A</button>`;
     const first = extractBrowserState(MOCK_TABS);
     expect(first.newElementCount).toBe(1);
@@ -144,9 +144,12 @@ describe("extractBrowserState", () => {
     expect(second.elementsText).not.toContain("*[1]");
 
     // Add a new element between calls — only the new one is marked new.
+    // The epoch invalidation is microtask-delivered (MutationObserver), so
+    // the re-extract must wait a tick for the epoch bump to land.
     const btn2 = document.createElement("button");
     btn2.textContent = "B";
     document.body.appendChild(btn2);
+    await new Promise((r) => setTimeout(r, 10));
     const third = extractBrowserState(MOCK_TABS);
     expect(third.newElementCount).toBe(1);
     // The new button gets index 2 (after the existing one at index 1).

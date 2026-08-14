@@ -41,7 +41,7 @@ import {
 import { getRole, escapeAttributeValue, isStructural } from "./ax-tree-utils";
 import { redactUrlTokens } from "./element-info-utils";
 import { getShadowRoot } from "../annotation/shadow-piercer";
-import { ReadCache } from "../utils/read-cache";
+import { getSharedReadCache, type ReadCache } from "../utils/read-cache";
 
 /**
  * Module-scoped element-ref registry.
@@ -503,9 +503,10 @@ export function generateAccessibilityTree(
     const lines: string[] = [];
     const counter = { count: 0 };
     beginVisibilityCache();
-    // Per-walk read cache: batch rect/style reads once per element (see
-    // `read-cache.ts`). Scoped to this call — never reused across calls.
-    const readCache = new ReadCache();
+    // Epoch-stamped persistent read cache (shared with the indexed walk):
+    // on an unchanged DOM this walk serves every element's rect/style from
+    // the previous walk's batch reads instead of forcing fresh layout reads.
+    const readCache = getSharedReadCache();
 
  // pre-build a Map of all <label for="..."> elements ONCE per
  // generateAccessibilityTree call. Previously, getName() called
