@@ -308,4 +308,28 @@ describe("partial re-walk (dirty-subtree splice)", () => {
     expect(second.elementsText).not.toContain("\t\t*[2]<button");
     expect(second.elementsText).toContain("\t\t\t\tBravo");
   });
+
+  it("a cached TEXT line starting with '*' survives a partial re-walk unmodified", async () => {
+    document.body.innerHTML =
+      '<button id="a">Alpha</button><div id="r"><span id="s">*note: keep me</span><button id="b">Bravo</button></div>';
+    const first = extractBrowserState([]);
+    // The span's text serializes with its leading '*' intact — escapeAttr does
+    // not escape '*' and serializeText emits text verbatim (only NEW-element
+    // marker lines carry a '*' prefix, and only before `[index]<`).
+    expect(first.elementsText).toContain("\t*note: keep me");
+    await settleDom();
+
+    // Mutate the OTHER subtree (button #a) — a partial re-walk of #a only.
+    document.getElementById("a")!.textContent = "Alpha2";
+    await tick();
+
+    const batchSpy = vi.spyOn(ReadCache.prototype, "batchRead");
+    const second = extractBrowserState([]);
+    // Partial re-walk happened (only #a's subtree visited).
+    expect(batchSpy).toHaveBeenCalledTimes(1);
+    // The untouched span line keeps its leading '*' — it is TEXT, not a
+    // new-element marker, and must not be re-emitted without its star.
+    expect(second.elementsText).toContain("\t*note: keep me");
+    expect(second.elementsText).not.toContain("\tnote: keep me");
+  });
 });

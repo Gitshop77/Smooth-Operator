@@ -26,6 +26,12 @@ import {
   hashElement,
   getSelectorMap,
 } from "../src/lib/agent/dom/extractor";
+import {
+  pageSnapshotChunk,
+  windowSnapshot,
+  MAX_SNAPSHOT_CHARS,
+  SNAPSHOT_TAIL_CHARS,
+} from "../src/lib/agent/dom/extraction/page-state";
 import type { TabInfo } from "../src/lib/agent/types";
 import { installJsdomLayoutMock, restoreJsdomLayoutMock, installViewportMock, restoreViewportMock } from "./helpers";
 
@@ -422,5 +428,65 @@ describe("extractBrowserState", () => {
 
     const state = extractBrowserState(MOCK_TABS);
     expect(state.elementsText).not.toContain(sentinel);
+  });
+});
+
+// ─── Stream-windowed snapshot pins (task B3) ─────────────────────────────────
+//
+// The per-step `elementsText` is assembled from rolling head/tail windows fed
+// by the walk (no full-join materialization of the serialized text);
+// `pageSnapshotChunk` pages the cached serialization at arbitrary offsets.
+// These pins freeze the PUBLIC BYTE contract: `elementsText` must equal
+// `windowSnapshot(fullText, 0).text` (the reference windowing) and window 0 +
+// the first continuation window must together cover the full serialized text.
+
+const B3_LINE = "\t\t" + "A".repeat(60);
+const B3_LINE_COUNT = 2000;
+
+/** Build a fixture whose serialized text is deterministic and computable:
+ * 2000 text lines of "\t\t" + 60×"A" (~126k chars — well past the 80k
+ * snapshot cap; body-level spans serialize their text at depth 2). Returns
+ * the exact raw join the walk must produce. */
+function buildStreamWindowFixture(): string {
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < B3_LINE_COUNT; i++) {
+    const span = document.createElement("span");
+    span.textContent = "A".repeat(60);
+    frag.appendChild(span);
+  }
+  document.body.appendChild(frag);
+  return Array.from({ length: B3_LINE_COUNT }, () => B3_LINE).join("\n");
+}
+
+const B3_MARKER_RE =
+  /\[\.\.\. truncated at char \d+ of \d+\. Call page_next with offset=\d+ to see more\. Pagination links below\. \.\.\.\]\n/;
+
+describe("stream-windowed snapshot (B3)", () => {
+  test("(a) on a >80k-char page, elementsText equals windowSnapshot(fullText, 0).text", () => {
+    const raw = buildStreamWindowFixture();
+    expect(raw.length).toBeGreaterThan(MAX_SNAPSHOT_CHARS);
+    const state = extractBrowserState(MOCK_TABS);
+    const reference = windowSnapshot(raw, 0).text;
+    expect(state.elementsText).toBe(reference);
+    expect(state.elementsText).toContain("Call page_next with offset=");
+  });
+
+  test("(b) window 0 + the first continuation window cover the full text (raw minus markers)", () => {
+    const raw = buildStreamWindowFixture();
+    extractBrowserState(MOCK_TABS);
+    const w0 = pageSnapshotChunk(0);
+    expect(w0).not.toBeNull();
+    expect(w0!.hasMore).toBe(true);
+    // "chunk(1)" = the first continuation window at window 0's resume offset.
+    const w1 = pageSnapshotChunk(w0!.nextOffset!);
+    expect(w1).not.toBeNull();
+    expect(w1!.hasMore).toBe(false);
+    const stripMarker = (t: string) => t.replace(B3_MARKER_RE, "");
+    // Each window is `marker + tail + "\n" + chunk`; the two chunks are
+    // contiguous and together reproduce the raw text exactly.
+    const contentBudget = MAX_SNAPSHOT_CHARS - SNAPSHOT_TAIL_CHARS - 200;
+    const headChunk = stripMarker(w0!.text).slice(-contentBudget);
+    const continuationChunk = stripMarker(w1!.text).slice(-(raw.length - contentBudget));
+    expect(headChunk + continuationChunk).toBe(raw);
   });
 });

@@ -97,15 +97,70 @@ export function windowSnapshot(yaml: string, offset = 0): SnapshotWindow {
   };
 }
 
-function pushLine(acc: WalkAccumulator, line: string): void {
-  if (acc.lines.length >= MAX_LINES) {
+/**
+ * Rolling windowed-snapshot buffers fed one line at a time by
+ * {@link appendWindowLine}: `head` holds the first MAX_SNAPSHOT_CHARS chars of
+ * the joined serialization (the FULL text on sub-cap pages, so
+ * windowSnapshot's raw-return case is reproduced byte-for-byte), `tail` the
+ * last SNAPSHOT_TAIL_CHARS, `totalChars` the running joined length. The
+ * per-step `elementsText` is assembled from these buffers instead of joining
+ * the full text, so a huge page never materializes its full serialization on
+ * the hot path.
+ */
+interface SnapshotWindowBuffer {
+  head: string;
+  tail: string;
+  totalChars: number;
+}
+
+/** Append one serialized line to a {@link SnapshotWindowBuffer} — byte-identical
+ * to appending `line` (first line) or `"\n" + line` (later lines) to the joined
+ * text, with the head capped at MAX_SNAPSHOT_CHARS and the tail keeping the
+ * last SNAPSHOT_TAIL_CHARS. */
+function appendWindowLine(w: SnapshotWindowBuffer, line: string, isFirstLine: boolean): void {
+  if (w.head.length < MAX_SNAPSHOT_CHARS) {
+    w.head = isFirstLine ? line : w.head + "\n" + line;
+    if (w.head.length > MAX_SNAPSHOT_CHARS) w.head = w.head.slice(0, MAX_SNAPSHOT_CHARS);
+  }
+  if (line.length >= SNAPSHOT_TAIL_CHARS) {
+    w.tail = line.slice(-SNAPSHOT_TAIL_CHARS);
+  } else if (isFirstLine) {
+    w.tail = line;
+  } else {
+    w.tail = (w.tail + "\n" + line).slice(-SNAPSHOT_TAIL_CHARS);
+  }
+  w.totalChars += line.length + (isFirstLine ? 0 : 1);
+}
+
+/** Assemble the windowed slice from a {@link SnapshotWindowBuffer} —
+ * byte-identical to `windowSnapshot(joinedText, 0).text`: the raw join for
+ * sub-cap pages, otherwise `marker + tail + "\n" + head-chunk` with the
+ * marker at the HEAD (the message layer re-caps `elementsText` at 60k from
+ * the start, which would otherwise cut a mid-window marker and hide the
+ * resume offset from the model — see `windowSnapshot`). */
+function assembleWindowedText(w: SnapshotWindowBuffer): string {
+  if (w.totalChars <= MAX_SNAPSHOT_CHARS) return w.head;
+  const contentBudget = MAX_SNAPSHOT_CHARS - SNAPSHOT_TAIL_CHARS - SNAPSHOT_MARKER_ROOM;
+  return (
+    `[... truncated at char ${contentBudget} of ${w.totalChars}. Call page_next with offset=${contentBudget} to see more. Pagination links below. ...]\n` +
+    w.tail + "\n" + w.head.slice(0, contentBudget)
+  );
+}
+
+function pushLine(acc: WalkAccumulator, line: string, force = false): void {
+  if (!force && acc.lines.length >= MAX_LINES) {
     if (!acc.truncated) {
       acc.truncated = true;
-      acc.lines.push(`\t[truncated at ${MAX_LINES} lines — page is very large; focus on a more specific element]`);
+      const marker = `\t[truncated at ${MAX_LINES} lines — page is very large; focus on a more specific element]`;
+      acc.lines.push(marker);
+      acc.linesWritten++;
+      appendWindowLine(acc.window, marker, acc.linesWritten === 1);
     }
     return;
   }
   acc.lines.push(line);
+  acc.linesWritten++;
+  appendWindowLine(acc.window, line, acc.linesWritten === 1);
 }
 
 /**
@@ -150,6 +205,17 @@ interface WalkAccumulator {
   identities: Record<number, string>;
   elements: ExtractedElement[];
   lines: string[];
+  /**
+   * Rolling windowed-snapshot buffers fed by pushLine (see
+   * {@link appendWindowLine}): `head` holds the first MAX_SNAPSHOT_CHARS chars
+   * of the serialized text (the full text on sub-cap pages — byte-identical to
+   * windowSnapshot's raw return), `tail` the last SNAPSHOT_TAIL_CHARS. The
+   * per-step `elementsText` is assembled from these instead of joining the
+   * full text.
+   */
+  window: SnapshotWindowBuffer;
+  /** Running line count (separator bookkeeping for the window buffers). */
+  linesWritten: number;
   prevHashes: Set<string>;
   newElementCount: number;
   truncated: boolean;
@@ -268,7 +334,11 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator, 
   if (acc.elements.length >= MAX_ELEMENTS) {
     if (!acc.elementTruncated) {
       acc.elementTruncated = true;
-      acc.lines.push(`\t[truncated at ${MAX_ELEMENTS} elements — page is very large; focus on a more specific element]`);
+      // `force` bypasses the MAX_LINES gate exactly as the pre-B3 direct
+      // `acc.lines.push` did — the element cap can trip with lines already at
+      // MAX_LINES, and the marker must still land (and reach the window
+      // buffers) byte-for-byte.
+      pushLine(acc, `\t[truncated at ${MAX_ELEMENTS} elements — page is very large; focus on a more specific element]`, true);
     }
     return;
   }
@@ -404,16 +474,15 @@ function walkNode(node: Node, depth: number, acc: WalkAccumulator, readCache: Re
 let cachedSelectorMap: Record<number, HTMLElement> = {};
 let cachedIdentities: Record<number, string> = {};
 let cachedHashes: Set<string> = new Set();
-/** Full serialized snapshot from the last successful extract (paging cache). */
-let snapshotCacheText: string | null = null;
 /**
  * The last successful walk's raw outputs — the splice base of a partial
  * re-walk. `cachedElements` mirrors `cachedSelectorMap`'s indices,
- * `cachedLines` is the unwindowed lines array (`snapshotCacheText` is its
- * join). Kept here (not in the B1 skip-if-unchanged cache) because the raw
- * loop path (`observe-state.ts`) and the cached path interleave: the
- * previous walk's arrays must always be THIS walk's predecessor, and the
- * cache's JSON-safe snapshot may be older.
+ * `cachedLines` is the unwindowed lines array; `pageSnapshotChunk` joins it
+ * on demand for paging (the join is only materialized when the model actually
+ * pages, never per extraction step). Kept here (not in the B1 skip-if-unchanged
+ * cache) because the raw loop path (`observe-state.ts`) and the cached path
+ * interleave: the previous walk's arrays must always be THIS walk's
+ * predecessor, and the cache's JSON-safe snapshot may be older.
  */
 let cachedElements: ExtractedElement[] = [];
 let cachedLines: string[] = [];
@@ -489,8 +558,8 @@ export function resetDomBaseline(): void {
  * `page_next` action consumes this to page through a truncated page.
  */
 export function pageSnapshotChunk(offset?: number): SnapshotWindow | null {
-  if (snapshotCacheText === null) return null;
-  return windowSnapshot(snapshotCacheText, offset ?? 0);
+  if (cachedLines.length === 0) return null;
+  return windowSnapshot(cachedLines.join("\n"), offset ?? 0);
 }
 
 export function extractBrowserState(tabs: TabInfo[]): BrowserState {
@@ -534,12 +603,13 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
     identities: {},
     elements: [],
     lines: [],
+    window: { head: "", tail: "", totalChars: 0 },
+    linesWritten: 0,
     prevHashes: cachedHashes,
     newElementCount: 0,
     truncated: false,
     elementTruncated: false,
   };
-  let walkFailed = false;
   if (document.body) {
     try {
       // Iterate via firstChild/nextSibling instead of `document.body.childNodes`:
@@ -555,12 +625,12 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
       acc.identities = {};
       acc.elements = [];
       acc.lines = [];
-      walkFailed = true;
+      acc.window = { head: "", tail: "", totalChars: 0 };
+      acc.linesWritten = 0;
     } finally {
       endVisibilityCache();
     }
   } else {
-    walkFailed = true;
     endVisibilityCache();
   }
   cachedHashes = new Set(acc.elements.map((e) => e.hash));
@@ -574,12 +644,10 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
   const scrollTop = window.scrollY || 0;
   const scrollHeight = document.documentElement.scrollHeight;
   const vh = window.innerHeight;
-  const rawElementsText = acc.lines.join("\n");
-  // Cache only SUCCESSFUL serializations. A failed walk (or a missing body)
-  // leaves the page-state degraded; page_next must surface "extract first"
-  // instead of paging an empty or stale snapshot.
-  snapshotCacheText = walkFailed ? null : rawElementsText;
-  const windowedText = windowSnapshot(rawElementsText, 0).text;
+  // A failed walk (or a missing body) leaves the page-state degraded: the
+  // window buffers were reset, so the slice is empty and page_next must
+  // surface "extract first" instead of paging an empty or stale snapshot.
+  const windowedText = assembleWindowedText(acc.window);
   return {
     url: redactUrlTokens(location.href),
     title: document.title,
@@ -691,6 +759,8 @@ function tryPartialExtract(
         identities: {},
         elements: [],
         lines: [],
+        window: { head: "", tail: "", totalChars: 0 },
+        linesWritten: 0,
         prevHashes: cachedHashes,
         newElementCount: 0,
         truncated: false,
@@ -728,9 +798,12 @@ function tryPartialExtract(
   // existed in the previous walk is definitionally not new (a line written
   // while it was then-new would otherwise scream "new" every step forever);
   // the freshly re-serialized sub-walk lines carry their naturally-computed
-  // markers and are spliced in afterwards.
+  // markers and are spliced in afterwards. The strip matches ONLY the
+  // element-line shape (`\t*[index]<…` — the marker always precedes the
+  // display index) so a TEXT line whose content begins with `*` (escapeAttr
+  // doesn't escape it) is never rewritten.
   for (let i = 0; i < cachedLines.length; i++) {
-    cachedLines[i] = cachedLines[i].replace(/^(\t*)\*/, "$1");
+    cachedLines[i] = cachedLines[i].replace(/^(\t*)\*(\[\d+\]<)/, "$1$2");
   }
   subWalks.sort((a, b) => b.range.startLine - a.range.startLine);
   for (const s of subWalks) {
@@ -751,9 +824,14 @@ function tryPartialExtract(
   const scrollTop = window.scrollY || 0;
   const scrollHeight = document.documentElement.scrollHeight;
   const vh = window.innerHeight;
-  const rawElementsText = cachedLines.join("\n");
-  snapshotCacheText = rawElementsText;
-  const windowedText = windowSnapshot(rawElementsText, 0).text;
+  // Stream the spliced lines into the windowed slice — byte-identical to
+  // `windowSnapshot(cachedLines.join("\n"), 0).text` but without materializing
+  // the full joined string (the paging cache below joins on demand instead).
+  const windowBuf: SnapshotWindowBuffer = { head: "", tail: "", totalChars: 0 };
+  for (let i = 0; i < cachedLines.length; i++) {
+    appendWindowLine(windowBuf, cachedLines[i], i === 0);
+  }
+  const windowedText = assembleWindowedText(windowBuf);
   return {
     url: redactUrlTokens(location.href),
     title: document.title,
