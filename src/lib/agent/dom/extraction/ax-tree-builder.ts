@@ -56,6 +56,20 @@ import { getViewportTracker } from "../viewport-tracker";
 let elementMap: Record<string, WeakRef<HTMLElement>> | null = null;
 let elementReverseMap: WeakMap<HTMLElement, string> | null = null;
 let refCounter = 0;
+/** Live entry count mirroring `Object.keys(elementMap).length`, tracked as a
+ * counter so the prune bound gate never needs an O(n) key scan. */
+let registrySize = 0;
+/** `generateAccessibilityTree` calls since the last registry prune. */
+let registryPruneCounter = 0;
+
+/**
+ * Registry prune throttling: the full-map WeakRef scan runs at most once per
+ * {@link AX_REGISTRY_PRUNE_INTERVAL} generations, or immediately once the
+ * registry exceeds {@link AX_REGISTRY_PRUNE_BOUND} entries, whichever comes
+ * first. Before this throttle every AX generation paid an O(entries) scan.
+ */
+const AX_REGISTRY_PRUNE_INTERVAL = 25;
+const AX_REGISTRY_PRUNE_BOUND = 5_000;
 
 /** Result of {@link generateAccessibilityTree}. */
 export interface AXTreeResult {
@@ -76,6 +90,8 @@ export function initElementMap(): void {
     elementMap = {};
     elementReverseMap = new WeakMap();
     refCounter = 0;
+    registrySize = 0;
+    registryPruneCounter = 0;
   }
 }
 
@@ -93,6 +109,7 @@ export function resolveRef(refId: string): HTMLElement | null {
   if (!el) {
  // Clean up dead ref.
     delete map[refId];
+    registrySize--;
     return null;
   }
   return el;
@@ -463,6 +480,7 @@ function buildTree(
       ref = "ref_" + ++refCounter;
       elementMap![ref] = new WeakRef(el);
       elementReverseMap!.set(el, ref);
+      registrySize++;
     }
     counter.count++;
 
@@ -630,10 +648,26 @@ export function generateAccessibilityTree(
       buildTree(document.body, 0, 0, filter, undefined, maxDepth, lines, counter, labelMap, readCache);
     }
 
- // Cleanup dead WeakRefs to avoid unbounded map growth.
-    for (const key of Object.keys(elementMap!)) {
-      if (!elementMap![key].deref()) {
-        delete elementMap![key];
+ // Cleanup dead WeakRefs to avoid unbounded map growth. Throttled: the
+ // full-map scan runs at most once per AX_REGISTRY_PRUNE_INTERVAL
+ // generations, or immediately once the live registry exceeds
+ // AX_REGISTRY_PRUNE_BOUND entries (whichever comes first), instead of on
+ // every AX generation — `registrySize` is a counter, so neither gate
+ // costs an Object.keys scan.
+    registryPruneCounter++;
+    if (
+      registryPruneCounter >= AX_REGISTRY_PRUNE_INTERVAL ||
+      registrySize > AX_REGISTRY_PRUNE_BOUND
+    ) {
+      registryPruneCounter = 0;
+      for (const key of Object.keys(elementMap!)) {
+        // Single map read per key — the old loop re-read `elementMap[key]`
+        // for the `delete`, doubling the per-key lookup on a hot path.
+        const ref = elementMap![key];
+        if (!ref.deref()) {
+          delete elementMap![key];
+          registrySize--;
+        }
       }
     }
 
@@ -708,6 +742,7 @@ export function __test_registerElement(refId: string, el: HTMLElement): void {
   initElementMap();
   elementMap![refId] = new WeakRef(el);
   elementReverseMap!.set(el, refId);
+  registrySize++;
 }
 
 /** @internal Test-only: reset the registry (so ref_N assignments are deterministic across tests). */
@@ -715,4 +750,6 @@ export function __test_resetRegistry(): void {
   elementMap = null;
   elementReverseMap = null;
   refCounter = 0;
+  registrySize = 0;
+  registryPruneCounter = 0;
 }

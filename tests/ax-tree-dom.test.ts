@@ -281,6 +281,30 @@ describe("generateAccessibilityTree (DOM walking)", () => {
     expect(axTree.error).toBeUndefined();
     expect(axTree.pageContent).toMatchSnapshot();
   });
+
+  test("13. identity fallback — removed-but-live element still resolves across a prune", () => {
+    const btn = document.createElement("button");
+    btn.textContent = "Go";
+    document.body.appendChild(btn);
+    generateAccessibilityTree();
+    expect(resolveRef("ref_1")).toBe(btn);
+
+    // Detach the element from the DOM. jsdom has no real GC, so the WeakRef
+    // target stays alive — the registry must keep resolving the ref by
+    // identity instead of treating "removed" as "dead".
+    btn.remove();
+
+    // Force the prune scan to actually run (25 generations crosses
+    // AX_REGISTRY_PRUNE_INTERVAL). The scan deletes only refs whose WeakRef
+    // target has been reclaimed — a removed-but-live node must survive it.
+    document.body.innerHTML = "";
+    for (let i = 0; i < 25; i++) {
+      generateAccessibilityTree();
+    }
+
+    expect(resolveRef("ref_1")).toBe(btn);
+    expect(btn.parentElement).toBeNull();
+  });
 });
 
 // ─── Regression: secret redaction + AX-tree hardening ────────────────────────
