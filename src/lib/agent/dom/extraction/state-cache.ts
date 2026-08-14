@@ -3,7 +3,7 @@
  *
  * `cachedExtractBrowserState` serves the LAST successful extraction's
  * serialized snapshot when the page is provably unchanged since then. The
- * gate (ALL THREE legs must hold):
+ * gate (ALL FOUR legs must hold):
  *
  *   1. the DOM-epoch mutation signal has not moved since the snapshot was
  *      taken (`lastEpoch === getDomEpoch()`) AND is armed — an unarmed epoch
@@ -12,17 +12,39 @@
  *   2. `domFingerprint()` still equals the fingerprint captured at extract
  *      time (defense-in-depth against observer delivery gaps, and the exact
  *      `GET_DOM_FINGERPRINT` value the vision path uses);
- *   3. `tabs`/`url`/`title` are unchanged (cheap reads, compared by value).
+ *   3. `tabs`/`url`/`title` are unchanged (cheap reads, compared by value);
+ *   4. scroll metrics (scrollTop / scrollHeight / viewportHeight) are
+ *      unchanged. Scroll mutates no DOM and no fingerprint, but a stale
+ *      scrollTop would mis-position the snapshot's viewport-relative
+ *      elementRects against a freshly captured screenshot (mislabeling every
+ *      annotation box and steering the vision path at wrong click targets)
+ *      and stale pageInfo/scrollTop would lie to the model — so scroll
+ *      staleness is NOT accepted and the scroll legs are part of the gate
+ *      (plain reads, no layout beyond a fresh extract).
  *
  * The cache stores ONLY JSON-safe serialized state — elements with plain
- * rects, elementsText, pageInfo, tabs, url, title, scroll metrics. Live
- * runtime-only fields (`selectorMap`, `elementIdentities`) never enter the
- * cache: the executor recomputes them from the live DOM when it needs them
- * (`getSelectorMap()`/`getElementIdentities()`, the A5 incremental caches —
- * still epoch-valid because the gate proves the DOM unchanged), and
- * `handleExtractState` builds `elementRects` from the cached plain rects.
- * A cache-served state is DEEP-FROZEN (a single frozen object is reused
- * across hits) so no caller can mutate a snapshot shared between steps.
+ * rects, elementsText, pageInfo, tabs, url, title, scroll metrics — plus the
+ * serialized AX tree from the last successful EXTRACT_STATE accessibility
+ * walk (`setCachedAxTree`). Live runtime-only fields (`selectorMap`,
+ * `elementIdentities`) never enter the cache: the ONLY consumer of
+ * `cachedExtractBrowserState` is the extension's EXTRACT_STATE handler
+ * (content-utils.ts), which strips `selectorMap` before messaging and builds
+ * `elementRects` from the cached plain rects. The built-in loop path uses the
+ * RAW `extractBrowserState` (observe-state.ts — its state flows into the
+ * built-in executor, which resolves action indices through the state's live
+ * `selectorMap`), and the extension executor path rebuilds `selectorMap`
+ * from `getSelectorMap()` — neither ever receives a cache-served state. A
+ * cache-served state is DEEP-FROZEN (a single frozen object is reused across
+ * hits) so no caller can mutate a snapshot shared between steps.
+ *
+ * On a cache hit NOTHING is walked: neither the elements DOM walk nor the
+ * accessibility-tree walk runs (handleExtractState serves the stashed tree,
+ * which is valid because the gate proves the DOM unchanged since it was
+ * generated in the same synchronous flow that populated the snapshot). The
+ * stash is cleared on every fresh extract and on `invalidateStateCache()`,
+ * so it can never outlive its snapshot: an extract that produced no tree
+ * (includeAxTree=false) or any DOM/tab/url/title/scroll change drops it, and
+ * the next includeAxTree=true extract regenerates.
  *
  * STALE-OBSERVATION IS DELIBERATE for changes that mutate neither the DOM
  * structure the observer tracks nor the fingerprint's hashed surface: text
@@ -33,6 +55,7 @@
  * what a human would describe as "nothing changed". JS-driven `style`
  * attribute writes DO fire `attributes` mutations, so those re-extract; only
  * changes invisible to BOTH the observer and the fingerprint serve stale.
+ * Scroll changes are NOT in this class — see gate leg 4.
  *
  * Invalidation points: `resetDomBaseline()` (page-state.ts, runs after
  * `pageChanged`), and the RAW `extractBrowserState([])` path — a caller
@@ -60,16 +83,21 @@ interface StateSnapshot {
 }
 
 /** Cache-served states carry no live DOM references — an empty map stands in
- * for `selectorMap` (the executor uses `getSelectorMap()` when it needs one). */
+ * for `selectorMap` (the EXTRACT_STATE consumer strips it; the executors
+ * rebuild live maps via `getSelectorMap()` and never see this object). */
 const EMPTY_SELECTOR_MAP: Record<number, unknown> = Object.freeze({});
 
 let snapshot: StateSnapshot | null = null;
 let cachedState: BrowserState | null = null;
+let stashedAxTree: string | null = null;
 let lastFingerprint: string | null = null;
 let lastEpoch = -1;
 let lastTabs: TabInfo[] | null = null;
 let lastUrl: string | null = null;
 let lastTitle: string | null = null;
+let lastScrollTop = -1;
+let lastScrollHeight = -1;
+let lastViewportHeight = -1;
 
 /** Value-equality over the JSON-safe {@link TabInfo} shape. */
 function tabsEqual(a: TabInfo[], b: TabInfo[]): boolean {
@@ -95,17 +123,19 @@ function deepFreeze<T>(value: T): T {
 }
 
 /** Project a fresh extraction's live state into the JSON-safe snapshot shape
- * (DOMRect instances become plain x/y/width/height objects). */
+ * (DOMRect instances become plain x/y/width/height objects). Every array and
+ * record is defensively copied so an in-place mutation by a caller (e.g. of
+ * its own `tabs` array) can never silently alter a stored snapshot. */
 function toSnapshot(state: BrowserState): StateSnapshot {
   return {
     url: state.url,
     title: state.title,
-    tabs: state.tabs,
+    tabs: state.tabs.map((t) => ({ ...t })),
     elements: state.elements.map((el) => ({
       index: el.index,
       tag: el.tag,
       text: el.text,
-      attributes: el.attributes,
+      attributes: { ...el.attributes },
       hash: el.hash,
       rect: { x: el.rect.x, y: el.rect.y, width: el.rect.width, height: el.rect.height },
     })),
@@ -122,9 +152,10 @@ function toSnapshot(state: BrowserState): StateSnapshot {
  * Extract browser state, serving the deep-frozen cached snapshot when the
  * page is provably unchanged (see module comment for the gate and the
  * deliberate stale-observation semantics). On any doubt — mutation observed,
- * fingerprint moved, tabs/url/title changed, or the signal unarmed — a fresh
- * extraction runs, its snapshot replaces the cache, and the live state is
- * returned.
+ * fingerprint moved, tabs/url/title changed, scroll moved, or the signal
+ * unarmed — a fresh extraction runs, its snapshot replaces the cache (and
+ * the stashed AX tree is cleared, since it can never outlive its snapshot),
+ * and the live state is returned.
  */
 export function cachedExtractBrowserState(tabs: TabInfo[]): BrowserState {
   const unchanged =
@@ -138,14 +169,19 @@ export function cachedExtractBrowserState(tabs: TabInfo[]): BrowserState {
     lastFingerprint === domFingerprint() &&
     tabsEqual(lastTabs, tabs) &&
     lastUrl === location.href &&
-    lastTitle === document.title;
+    lastTitle === document.title &&
+    lastScrollTop === (window.scrollY || 0) &&
+    lastScrollHeight === document.documentElement.scrollHeight &&
+    lastViewportHeight === window.innerHeight;
 
   if (unchanged && snapshot !== null) {
     if (cachedState === null) {
-      cachedState = deepFreeze({
+      const served: BrowserState = {
         ...snapshot,
         selectorMap: EMPTY_SELECTOR_MAP,
-      });
+      };
+      if (stashedAxTree !== null) served.axTree = stashedAxTree;
+      cachedState = deepFreeze(served);
     }
     return cachedState;
   }
@@ -153,12 +189,26 @@ export function cachedExtractBrowserState(tabs: TabInfo[]): BrowserState {
   const fresh = extractBrowserState(tabs);
   lastEpoch = getDomEpoch();
   lastFingerprint = domFingerprint();
-  lastTabs = tabs;
+  lastTabs = tabs.map((t) => ({ ...t }));
   lastUrl = location.href;
   lastTitle = document.title;
+  lastScrollTop = fresh.scrollTop;
+  lastScrollHeight = fresh.scrollHeight;
+  lastViewportHeight = fresh.viewportHeight;
   snapshot = toSnapshot(fresh);
   cachedState = null;
+  stashedAxTree = null;
   return fresh;
+}
+
+/** Stash the serialized accessibility tree produced for the CURRENT
+ * snapshot's DOM so a later cache hit can serve it instead of re-walking the
+ * page (the gate proves the DOM unchanged since the tree was built in the
+ * same synchronous flow that populated the snapshot). The next fresh extract
+ * or `invalidateStateCache()` clears it. */
+export function setCachedAxTree(axTree: string): void {
+  stashedAxTree = axTree;
+  cachedState = null;
 }
 
 /** Drop the cached snapshot so the next `cachedExtractBrowserState` call
@@ -169,9 +219,13 @@ export function cachedExtractBrowserState(tabs: TabInfo[]): BrowserState {
 export function invalidateStateCache(): void {
   snapshot = null;
   cachedState = null;
+  stashedAxTree = null;
   lastFingerprint = null;
   lastEpoch = -1;
   lastTabs = null;
   lastUrl = null;
   lastTitle = null;
+  lastScrollTop = -1;
+  lastScrollHeight = -1;
+  lastViewportHeight = -1;
 }

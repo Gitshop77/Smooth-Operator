@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   cachedExtractBrowserState,
   invalidateStateCache,
+  setCachedAxTree,
 } from "../src/lib/agent/dom/extraction/state-cache";
 import { ReadCache } from "../src/lib/agent/dom/utils/read-cache";
 import {
@@ -100,6 +101,60 @@ describe("state-cache", () => {
     const second = cachedExtractBrowserState([]);
     expect(walkSpy).toHaveBeenCalled();
     expect(second.elements.length).toBeGreaterThan(0);
+  });
+
+  it("defends the tabs leg against in-place caller mutation", () => {
+    document.body.innerHTML = "<button id='b'>Go</button>";
+    const tabs = [makeTab()];
+    cachedExtractBrowserState(tabs);
+    tabs[0].url = "https://changed.example/";
+    const walkSpy = vi.spyOn(ReadCache.prototype, "batchRead");
+    const second = cachedExtractBrowserState(tabs);
+    expect(walkSpy).toHaveBeenCalled();
+    expect(second.elements.length).toBeGreaterThan(0);
+  });
+
+  it("re-extracts after a scroll (scroll legs are part of the gate)", () => {
+    document.body.innerHTML = "<button id='b'>Go</button>";
+    cachedExtractBrowserState([]);
+    installViewportMock({ innerHeight: 800, scrollHeight: 1600, scrollY: 120 });
+    const walkSpy = vi.spyOn(ReadCache.prototype, "batchRead");
+    const second = cachedExtractBrowserState([]);
+    expect(walkSpy).toHaveBeenCalled();
+    expect(second.scrollTop).toBe(120);
+    expect(second.elements.length).toBeGreaterThan(0);
+  });
+
+  it("serves the stashed axTree on a cache hit without re-extracting", () => {
+    document.body.innerHTML = "<button id='b'>Go</button>";
+    cachedExtractBrowserState([]);
+    setCachedAxTree("AX-TREE-A");
+    const walkSpy = vi.spyOn(ReadCache.prototype, "batchRead");
+    const served = cachedExtractBrowserState([]);
+    expect(walkSpy).not.toHaveBeenCalled();
+    expect(served.axTree).toBe("AX-TREE-A");
+    expect(Object.isFrozen(served)).toBe(true);
+  });
+
+  it("a fresh extract clears the stashed axTree (never outlives its snapshot)", async () => {
+    document.body.innerHTML = "<button id='b'>Go</button>";
+    cachedExtractBrowserState([]);
+    setCachedAxTree("AX-TREE-A");
+    document.body.appendChild(document.createElement("a"));
+    await new Promise((r) => setTimeout(r, 10));
+    cachedExtractBrowserState([]); // miss — stash cleared
+    const served = cachedExtractBrowserState([]); // hit on the new snapshot
+    expect(served.axTree).toBeUndefined();
+  });
+
+  it("invalidateStateCache drops the stashed axTree too", () => {
+    document.body.innerHTML = "<button id='b'>Go</button>";
+    cachedExtractBrowserState([]);
+    setCachedAxTree("AX-TREE-A");
+    invalidateStateCache();
+    cachedExtractBrowserState([]); // miss
+    const served = cachedExtractBrowserState([]); // hit
+    expect(served.axTree).toBeUndefined();
   });
 
   it("invalidateStateCache forces a fresh extract", () => {

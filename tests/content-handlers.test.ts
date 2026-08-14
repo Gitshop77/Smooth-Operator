@@ -147,6 +147,38 @@ describe("content.ts message surface", () => {
     expect(r.state!.elementRects).toHaveLength(r.state!.elements.length);
   });
 
+  test("EXTRACT_STATE serves the cached AX tree on an unchanged page (no regeneration)", async () => {
+    let axCalls = 0;
+    vi.doMock("@/lib/agent/dom/ax-tree", () => ({
+      initElementMap: () => {},
+      generateAccessibilityTree: () => {
+        axCalls++;
+        return { pageContent: "AX-TREE-FIXTURE" };
+      },
+    }));
+    // Fixture DOM is set BEFORE the content script loads: the script's
+    // MutationObserver (installed at init) then never records a mutation, so
+    // the epoch stays stable across both sends and the second one is a cache
+    // hit. Setting innerHTML after load would bump the epoch in a microtask
+    // after the first send and turn the second send into a (correct) miss.
+    document.body.innerHTML = "<button id='b'>Go</button>";
+    await loadContentScript();
+    const first = (await sendAsync({ type: "EXTRACT_STATE", tabs: [] }, EXT)) as {
+      ok: boolean;
+      state?: { axTree: string };
+    };
+    const second = (await sendAsync({ type: "EXTRACT_STATE", tabs: [] }, EXT)) as {
+      ok: boolean;
+      state?: { axTree: string };
+    };
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    // The second EXTRACT_STATE is a cache hit (DOM/fingerprint/tabs/scroll
+    // unchanged): the stashed tree is served without a second AX walk.
+    expect(axCalls).toBe(1);
+    expect(second.state!.axTree).toBe(first.state!.axTree);
+  });
+
   test("EXTRACT_STATE surfaces an error response when AX tree generation throws", async () => {
     vi.doMock("@/lib/agent/dom/ax-tree", () => ({
       initElementMap: () => {},
