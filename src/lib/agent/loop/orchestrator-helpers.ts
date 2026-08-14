@@ -966,7 +966,7 @@ async function runNavigatorObserve(
       console.warn(`[orchestrator] recordPageState failed (stagnation detection may be inactive): ${redactKeyLeak(String(e))}`);
     }
   }
-  if (browserState.screenshot && state.dispatcher) {
+  if (browserState.screenshot && state.dispatcher?.hasHandler("onScreenshot")) {
     const screenshot = browserState.screenshot;
     await dispatch(state, "screenshot", (d) => d.screenshot(makeCtx(state), screenshot));
   }

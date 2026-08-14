@@ -85,6 +85,18 @@ export class CallbackDispatcher {
   }
 
   /**
+   * True iff at least one registered handler implements the given hook method
+   * (e.g. `"onScreenshot"`). Lets callers skip building payloads that no
+   * handler would consume — the screenshot dataUrl is constructed and dropped
+   * every step when only metrics-style handlers are registered.
+   */
+  hasHandler(method: string): boolean {
+    return this.handlers.some(
+      (h) => typeof h[method as keyof AsyncCallbackHandler] === "function",
+    );
+  }
+
+  /**
    * Call a handler method safely — errors are logged and skipped so a buggy
    * callback can't crash the run. The rationale (from the original `cost()`
    * wrapper) applies equally to all hooks: callbacks are observational
