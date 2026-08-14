@@ -11,7 +11,7 @@
  *     low-context models in long-running tasks).
  *  4. 128k+ models keep the FULL prompt (no behavior change for them).
  */
-import { describe, expect, test } from "vitest";
+import { describe, expect, it, test } from "vitest";
 import { buildNavigatorPrompt } from "../src/lib/agent/prompts/navigator-prompt";
 import { compileNavigatorPromptV1 } from "../src/lib/agent/prompts/prompt-compiler";
 import {
@@ -23,6 +23,7 @@ import {
   ACTION_STEERING_BLOCK,
   OUTPUT_FORMAT_BLOCK,
   sharedSafetyGuidance,
+  evaluateGuidance,
 } from "../src/lib/agent/prompts/navigator-prompt-helpers";
 import { actionListForPrompt } from "../src/lib/agent/tools/schema-utils";
 
@@ -108,5 +109,25 @@ describe("compact navigator prompt", () => {
     expect(() =>
       assertCompiledPromptWithinContextBudgetV1("navigator", "navigator-full-64k", fullCompiled.messages, 64_000),
     ).toThrow(/Prompt budget exceeded/);
+  });
+});
+
+describe("full/compact block equality", () => {
+  const full = buildNavigatorPrompt(5, undefined, "adaptive", "standard", false);
+  const compact = buildNavigatorPrompt(5, undefined, "adaptive", "standard", true);
+
+  it("full and compact embed byte-identical security/schema blocks", () => {
+    const blocks = [
+      SECURITY_INSTRUCTION,
+      sharedSafetyGuidance(),
+      OUTPUT_FORMAT_BLOCK,
+      ACTION_STEERING_BLOCK,
+      evaluateGuidance("standard"),
+      actionListForPrompt(5, "adaptive"),
+    ];
+    for (const block of blocks) {
+      expect(full).toContain(block);
+      expect(compact).toContain(block);
+    }
   });
 });
