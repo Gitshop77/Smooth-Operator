@@ -14,6 +14,7 @@ import { getShadowRoot } from "../annotation/shadow-piercer";
 import { escapeAttr, attrString, buildPageInfo, buildCompoundChildren } from "./page-state-utils";
 import { ReadCache, getSharedReadCache } from "../utils/read-cache";
 import { bumpDomEpoch, getDomEpoch, installMutationSignal, isMutationSignalArmed } from "../mutation-signal";
+import { getViewportTracker } from "../viewport-tracker";
 
 export function isVisible(el: HTMLElement): boolean {
   return isVisibleFull(el);
@@ -139,8 +140,17 @@ function visibilityCacheMap(): WeakMap<HTMLElement, boolean> {
 /** Automatic observations describe the current viewport, not the whole
  * document. Full-page evidence is available through extract/search_page and
  * paged snapshots. A one-quarter viewport margin prevents elements at the
- * fold from flickering in and out because of fractional layout changes. */
+ * fold from flickering in and out because of fractional layout changes.
+ *
+ * The IntersectionObserver membership cache (one IO on the document root)
+ * short-circuits the rect math once the browser has reported the element's
+ * viewport membership; while membership is unknown (not yet observed, or IO
+ * unavailable) the gate falls back to the exact rect math below. */
 function intersectsObservationViewport(el: HTMLElement, rect?: DOMRect): boolean {
+  const tracker = getViewportTracker();
+  const membership = tracker.isInViewport(el);
+  if (membership !== undefined) return membership;
+  tracker.observe(el);
   const r = rect ?? el.getBoundingClientRect();
   const marginY = Math.max(100, window.innerHeight * 0.25);
   const marginX = Math.max(50, window.innerWidth * 0.1);

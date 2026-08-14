@@ -58,6 +58,73 @@ import { afterAll, afterEach } from "vitest";
   }
 })();
 
+// Install a no-op IntersectionObserver stub.
+//
+// jsdom implements no IntersectionObserver (jsdom#2032), but the
+// ViewportTracker (src/lib/agent/dom/viewport-tracker.ts) constructs one per
+// tracker to cache viewport membership across extraction steps. This stub
+// keeps the tracker constructible in every test file while doing nothing:
+// `observe`/`unobserve`/`disconnect` never fire the callback, so
+// `isInViewport` stays `undefined` (unknown) everywhere except the tracker
+// tests, which retrieve the last-constructed stub via the `__ocLastIO` handle
+// and drive its stored callback with fake `isIntersecting` entries.
+//
+// Safety for ALL test files: the constructor stores the callback and does not
+// invoke it; no other module in the suite uses IntersectionObserver, so the
+// stub can neither fire spurious entries nor change fallback behavior. The
+// property is configurable/writable so a test can delete it to exercise the
+// IO-unavailable path and restore it afterwards.
+interface IOStubInstance {
+  callback: IntersectionObserverCallback;
+  root: Element | Document | null;
+  observed: Element[];
+}
+class IntersectionObserverStub implements IntersectionObserver {
+  readonly root: Element | Document | null;
+  readonly rootMargin = "0px";
+  readonly thresholds: ReadonlyArray<number> = [0];
+  readonly callback: IntersectionObserverCallback;
+  readonly observed: Element[] = [];
+
+  constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+    this.callback = callback;
+    this.root = options?.root ?? null;
+    // Expose the instance so tracker tests can drive `callback` with fake
+    // intersection entries (`isIntersecting: true/false`).
+    (globalThis as { __ocLastIO?: IOStubInstance }).__ocLastIO = this;
+  }
+
+  observe(target: Element): void {
+    if (!this.observed.includes(target)) this.observed.push(target);
+  }
+
+  unobserve(target: Element): void {
+    const i = this.observed.indexOf(target);
+    if (i !== -1) this.observed.splice(i, 1);
+  }
+
+  disconnect(): void {
+    this.observed.length = 0;
+  }
+
+  takeRecords(): IntersectionObserverEntry[] {
+    return [];
+  }
+}
+(function installIntersectionObserverStub() {
+  Object.defineProperty(globalThis, "IntersectionObserver", {
+    value: IntersectionObserverStub,
+    configurable: true,
+    writable: true,
+    enumerable: true,
+  });
+})();
+// Drop the last-stub handle after each test so a test that constructs a
+// tracker can never reach the previous test's stub instance.
+afterEach(() => {
+  delete (globalThis as { __ocLastIO?: unknown }).__ocLastIO;
+});
+
 // Capture the ambient `fetch` once, from a PRISTINE source, so we can
 // restore it after the file runs. Some test files install a `globalThis.fetch`
 // mock; if they don't fully clean it up, the mock leaks into later files and

@@ -42,6 +42,7 @@ import { getRole, escapeAttributeValue, isStructural } from "./ax-tree-utils";
 import { redactUrlTokens } from "./element-info-utils";
 import { getShadowRoot } from "../annotation/shadow-piercer";
 import { getSharedReadCache, type ReadCache } from "../utils/read-cache";
+import { getViewportTracker } from "../viewport-tracker";
 
 /**
  * Module-scoped element-ref registry.
@@ -281,7 +282,7 @@ function shouldInclude(
     readCache.batchRead(el);
     const rect = readCache.getRect(el);
     if (!(readCache.getVisible(el, rect) ?? isVisible(el, rect))) return false;
-    if (!hasRefId && !intersectsViewport(rect!)) return false;
+    if (!hasRefId && !intersectsViewport(el, rect!)) return false;
     return true;
   }
 
@@ -302,7 +303,7 @@ function shouldInclude(
     // Explicit ref_id reads remain subtree reads and intentionally bypass the
     // viewport gate.
     readCache.batchRead(el);
-    if (!hasRefId && !intersectsViewport(readCache.getRect(el)!)) return false;
+    if (!hasRefId && !intersectsViewport(el, readCache.getRect(el)!)) return false;
     return true;
   }
   const role = getRole(el);
@@ -313,7 +314,19 @@ function shouldInclude(
   return false;
 }
 
-function intersectsViewport(rect: DOMRect | Pick<DOMRect, "top" | "bottom" | "left" | "right">): boolean {
+/** Viewport gate for the automatic AX channel. The IntersectionObserver
+ * membership cache (shared with the indexed-tree walk, one IO on the document
+ * root) short-circuits the rect math once the browser has reported the
+ * element's membership; while membership is unknown the gate falls back to
+ * the exact rect math below. */
+function intersectsViewport(
+  el: HTMLElement,
+  rect: DOMRect | Pick<DOMRect, "top" | "bottom" | "left" | "right">,
+): boolean {
+  const tracker = getViewportTracker();
+  const membership = tracker.isInViewport(el);
+  if (membership !== undefined) return membership;
+  tracker.observe(el);
   return rect.top < window.innerHeight && rect.bottom > 0 &&
     rect.left < window.innerWidth && rect.right > 0;
 }
