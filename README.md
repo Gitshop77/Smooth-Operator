@@ -302,7 +302,7 @@ Turn on completion notifications in **Options**, and optionally send chosen even
 
 ## What the agent can do
 
-The navigator has 32 actions. The planner doesn't use navigator actions — it speaks its own decisions (`continue`, `done`, `web_task`).
+The navigator has 33 actions. The planner doesn't use navigator actions — it speaks its own decisions (`continue`, `done`, `web_task`).
 
 **Page interaction**
 
@@ -335,6 +335,7 @@ The navigator has 32 actions. The planner doesn't use navigator actions — it s
 | `find_elements` | Find elements by a rule |
 | `search_page` | Search within the page |
 | `search` | Run a search |
+| `research` | Research the web with the headless Lightpanda browser (same AI as the main agent); requires the one-time native-host setup (`npm run setup:lightpanda-host -- --extension-id <id>`) |
 | `extract` | Pull structured content out of the page |
 | `detect_visual` | Locate an element using the on-device vision model |
 

@@ -20,6 +20,7 @@ Build output `chrome-extension/` is gitignored and regenerated on every build.
 | `npm run test` | Vitest suite |
 | `npm run test:coverage` | Vitest with coverage gate (pinned thresholds) |
 | `npm run test:watch` | Vitest watch mode |
+| `npm run setup:lightpanda-host -- --extension-id <id>` | Install the Lightpanda native messaging host (one-time, per browser) |
 
 **Type-checking** has no npm script — CI runs `npx tsc --noEmit` directly. Running it locally: `npx tsc --noEmit`.
 
@@ -41,6 +42,7 @@ Build first, then load `chrome-extension/` as an unpacked extension at `chrome:/
 - **Stealth is DEFAULT-ON** (`src/lib/agent/anti-detection-utils.ts`): `isStealthEnabled()` returns true unless storage explicitly says `false`, and `isStealthEnabledSync()` fails toward stealth. Page-visible artifacts (phantom cursor, click highlight, piercer backdoor) are suppressed in stealth mode and run only when stealth is explicitly disabled.
 - **Manual pause/resume** is wired end-to-end: the sidepanel Pause button writes `open_cowork_paused` to `chrome.storage.session`; the loop's `runPauseCheck` polls it; the Resume button (or any RESUME message) clears it in `message-routing.ts`.
 - **64k survival is a tested invariant** — `tests/agent-loop-64k.test.ts` drives the real loop at 20/50/100 steps with repeated compactions and per-turn input accounting; `tests/compact-prompt.test.ts` and `tests/navigator-observation-caps.test.ts` pin the budget derivation.
+- **Lightpanda research** — the `research` action launches the external `lightpanda` binary via the Node native host (`scripts/lightpanda-native-host.mjs`, spawned through the generated launcher `~/.open-cowork/bin/lightpanda-host`) with the SAME provider config as the main agent (`buildLightpandaLaunch` in `src/lib/agent/lightpanda/`); the answer is bounded/redacted/injection-scanned and wrapped in `<untrusted_research>`; the model must exist in the provider's catalog (Azure deployment names must match; Ollama models must be pulled); known limitations: Lightpanda Beta, text-only (no screenshots), hardcoded 100-turn/4096-token loop, `research` refuses to run while a non-`*` allowed-domains allowlist is active, without Brave/Tavily keys search falls back to DuckDuckGo, restricted mode blocks research, host setup must be re-run after extension re-key.
 
 ## Testing
 
