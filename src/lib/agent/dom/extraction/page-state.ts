@@ -14,6 +14,7 @@ import { getShadowRoot } from "../annotation/shadow-piercer";
 import { escapeAttr, attrString, buildPageInfo, buildCompoundChildren } from "./page-state-utils";
 import { ReadCache, getSharedReadCache } from "../utils/read-cache";
 import { bumpDomEpoch, getDomEpoch, installMutationSignal, isMutationSignalArmed } from "../mutation-signal";
+import { clearDirtyRoots, getDirtyRoots } from "../dirty-subtrees";
 import { getViewportTracker } from "../viewport-tracker";
 
 /**
@@ -107,6 +108,35 @@ function pushLine(acc: WalkAccumulator, line: string): void {
   acc.lines.push(line);
 }
 
+/**
+ * Index an element into the walk: bump the (relative) index counter, record
+ * the selector-map entry + identity, push the element and its serialized
+ * line. In a partial re-walk the display index is remapped by the
+ * accumulator's `indexAssigner` (identity match / freed slot / appended) so
+ * the merged arrays keep stable indices for untouched elements.
+ */
+function pushIndexedElement(
+  acc: WalkAccumulator,
+  el: HTMLElement,
+  tag: string,
+  attrs: Record<string, string>,
+  identity: string,
+  hash: string,
+  depth: number,
+  rect: DOMRect,
+): void {
+  const idx = ++acc.index;
+  const isNew = !acc.prevHashes.has(hash);
+  if (isNew) acc.newElementCount++;
+  const text = directText(el) || el.getAttribute("aria-label") || "";
+  const displayIdx = acc.indexAssigner ? acc.indexAssigner(idx, identity) : idx;
+  acc.selectorMap[displayIdx] = el;
+  acc.identities[displayIdx] = identity;
+  acc.elements.push({ index: displayIdx, tag, text, attributes: attrs, hash, rect });
+  const prefix = isNew ? "*" : "";
+  pushLine(acc, "\t".repeat(depth) + `${prefix}[${displayIdx}]<${tag}${attrString(attrs)} />`);
+}
+
 interface WalkAccumulator {
   index: number;
   selectorMap: Record<number, HTMLElement>;
@@ -124,6 +154,36 @@ interface WalkAccumulator {
   newElementCount: number;
   truncated: boolean;
   elementTruncated: boolean;
+  /**
+   * Partial re-walk support: when set, line/element positions recorded for
+   * this walk are offset by these amounts so `currentWalkRanges` entries
+   * stay in GLOBAL coordinates (the sub-walker's accumulator is relative to
+   * its dirty root's splice region).
+   */
+  rangeOffset?: { line: number; el: number };
+  /**
+   * Partial re-walk support: maps a sub-walk's relative element index to the
+   * index the element keeps in the merged arrays (identity match against the
+   * previous walk, a freed slot inside the dirty root's range, or an
+   * appended index). Absent in full walks — indices are then the walk order.
+   */
+  indexAssigner?: (relativeIndex: number, identity: string) => number;
+}
+
+/**
+ * The output region of one element's subtree in the arrays of the walk that
+ * visited it: half-open `[startLine, endLine)` into the walk's lines array
+ * and `[startEl, endEl)` into its elements array (element indices within the
+ * region are `startEl+1 .. endEl`), plus the depth the element was walked at.
+ * Recorded for every element node of every walk; the partial re-walk uses a
+ * dirty root's region to splice fresh serialization in place.
+ */
+interface WalkRange {
+  startLine: number;
+  endLine: number;
+  startEl: number;
+  endEl: number;
+  depth: number;
 }
 
 /**
@@ -225,18 +285,10 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator, 
   if (DOM_CONFIG.skipTags.has(tag) || tag === "iframe") {
     if (tag === "iframe") trySerializeIframe(el as HTMLIFrameElement, depth, acc, readCache);
     if (tag === "svg" && isInteractive(el)) {
-      const idx = ++acc.index;
       const attrs = buildAttrs(el);
       const identity = elementIdentity(el, attrs);
       const hash = hashElement(el, attrs, identity);
-      const isNew = !acc.prevHashes.has(hash);
-      if (isNew) acc.newElementCount++;
-      const text = directText(el) || el.getAttribute("aria-label") || "";
-      acc.selectorMap[idx] = el;
-      acc.identities[idx] = identity;
-      acc.elements.push({ index: idx, tag, text, attributes: attrs, hash, rect: readCache.getRect(el)! });
-      const prefix = isNew ? "*" : "";
-      pushLine(acc, "\t".repeat(depth) + `${prefix}[${idx}]<${tag}${attrString(attrs)} />`);
+      pushIndexedElement(acc, el, tag, attrs, identity, hash, depth, readCache.getRect(el)!);
     }
     return;
   }
@@ -252,18 +304,10 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator, 
   }
 
   if (interactive) {
-    const idx = ++acc.index;
     const attrs = buildAttrs(el);
     const identity = elementIdentity(el, attrs);
     const hash = hashElement(el, attrs, identity);
-    const isNew = !acc.prevHashes.has(hash);
-    if (isNew) acc.newElementCount++;
-    const text = directText(el) || el.getAttribute("aria-label") || "";
-    acc.selectorMap[idx] = el;
-    acc.identities[idx] = identity;
-    acc.elements.push({ index: idx, tag, text, attributes: attrs, hash, rect: rect! });
-    const prefix = isNew ? "*" : "";
-    pushLine(acc, "\t".repeat(depth) + `${prefix}[${idx}]<${tag}${attrString(attrs)} />`);
+    pushIndexedElement(acc, el, tag, attrs, identity, hash, depth, rect!);
     serializeCompoundChildren(el, depth, acc);
     if (tag === "select") return;
     if (tag === "details") {
@@ -298,19 +342,11 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator, 
       vc.set(el, containerVisible);
     }
     if (containerVisible && intersectsObservationViewport(el, readCache.getRect(el))) {
-      const idx = ++acc.index;
       const attrs = buildAttrs(el);
       const identity = elementIdentity(el, attrs);
       const hash = hashElement(el, attrs, identity);
-      const isNew = !acc.prevHashes.has(hash);
-      if (isNew) acc.newElementCount++;
-      const text = directText(el) || el.getAttribute("aria-label") || "";
       const containerRect = readCache.getRect(el)!;
-      acc.selectorMap[idx] = el;
-      acc.identities[idx] = identity;
-      acc.elements.push({ index: idx, tag, text, attributes: attrs, hash, rect: containerRect });
-      const prefix = isNew ? "*" : "";
-      pushLine(acc, "\t".repeat(depth) + `${prefix}[${idx}]<${tag}${attrString(attrs)} />`);
+      pushIndexedElement(acc, el, tag, attrs, identity, hash, depth, containerRect);
     }
   }
 
@@ -344,7 +380,22 @@ function trySerializeIframe(iframe: HTMLIFrameElement, depth: number, acc: WalkA
 function walkNode(node: Node, depth: number, acc: WalkAccumulator, readCache: ReadCache): void {
   if (acc.elementTruncated) return;
   if (node.nodeType === Node.ELEMENT_NODE) {
-    serializeElement(node as HTMLElement, depth, acc, readCache);
+    const el = node as HTMLElement;
+    const offset = acc.rangeOffset ?? { line: 0, el: 0 };
+    const startLine = offset.line + acc.lines.length;
+    const startEl = offset.el + acc.elements.length;
+    serializeElement(el, depth, acc, readCache);
+    // Record the element's output region in GLOBAL coordinates so a later
+    // partial re-walk can splice this subtree's output in place. In a partial
+    // walk the sub-accumulator's offset keeps the recorded positions aligned
+    // with the merged arrays.
+    currentWalkRanges.set(el, {
+      startLine,
+      endLine: offset.line + acc.lines.length,
+      startEl,
+      endEl: offset.el + acc.elements.length,
+      depth,
+    });
   } else if (node.nodeType === Node.TEXT_NODE) {
     serializeText(node as Text, depth, acc, readCache);
   }
@@ -355,6 +406,23 @@ let cachedIdentities: Record<number, string> = {};
 let cachedHashes: Set<string> = new Set();
 /** Full serialized snapshot from the last successful extract (paging cache). */
 let snapshotCacheText: string | null = null;
+/**
+ * The last successful walk's raw outputs — the splice base of a partial
+ * re-walk. `cachedElements` mirrors `cachedSelectorMap`'s indices,
+ * `cachedLines` is the unwindowed lines array (`snapshotCacheText` is its
+ * join). Kept here (not in the B1 skip-if-unchanged cache) because the raw
+ * loop path (`observe-state.ts`) and the cached path interleave: the
+ * previous walk's arrays must always be THIS walk's predecessor, and the
+ * cache's JSON-safe snapshot may be older.
+ */
+let cachedElements: ExtractedElement[] = [];
+let cachedLines: string[] = [];
+/** Output regions recorded by the last walk (see {@link WalkRange}). */
+let previousRanges: WeakMap<Element, WalkRange> = new WeakMap();
+/** Regions being recorded by the walk in progress (published on completion). */
+let currentWalkRanges: WeakMap<Element, WalkRange> = new WeakMap();
+/** The DOM epoch at the end of the last walk (full or partial). */
+let lastExtractEpoch = -1;
 
 /**
  * Merge a fresh walk's indexed cache (`next`) into the persistent cache
@@ -401,6 +469,10 @@ export function resetDomBaseline(): void {
   // delivery, and there may be nothing to deliver when the baseline was
   // replaced wholesale).
   bumpDomEpoch();
+  // The bump carries no mutation records (a wholesale replacement) — drop any
+  // pending dirty-root buckets so the next extraction runs a full walk
+  // instead of splicing pre-change records into post-change arrays.
+  clearDirtyRoots(getDomEpoch());
   resetHashCaches();
 }
 
@@ -433,11 +505,22 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
   // reads (0 forced reflows). Any DOM mutation bumps the epoch (mutation
   // signal) and rebuilds the cache.
   const readCache = getSharedReadCache();
-  beginVisibilityCache();
   // Redact each tab URL at the boundary, the same way `location.href` below is
   // redacted — a tab open on an OAuth callback (or a share link carrying a
   // token) would otherwise leak its query-string secrets into page state.
   const redactedTabs = tabs.map((t) => (t.url ? { ...t, url: redactUrlTokens(t.url) } : t));
+
+  // Partial re-walk (B2): when the page changed in a bounded set of subtrees,
+  // re-serialize ONLY those and splice the results into the previous walk's
+  // arrays instead of re-walking the document. Falls back to a full walk on
+  // any doubt (unarmed signal, empty dirty-root set with a moved epoch,
+  // >50% of elements dirty, missing/overlapping regions, or any sub-walk
+  // error) — the partial path must never serve a corrupt splice.
+  const partial = tryPartialExtract(getDomEpoch(), redactedTabs, readCache);
+  if (partial) return partial;
+
+  currentWalkRanges = new WeakMap();
+  beginVisibilityCache();
   const acc: WalkAccumulator = {
     index: 0,
     selectorMap: {},
@@ -476,6 +559,11 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
   cachedHashes = new Set(acc.elements.map((e) => e.hash));
   cachedSelectorMap = commitIndexedCache(cachedSelectorMap, acc.selectorMap);
   cachedIdentities = commitIndexedCache(cachedIdentities, acc.identities);
+  cachedElements = acc.elements;
+  cachedLines = acc.lines;
+  previousRanges = currentWalkRanges;
+  lastExtractEpoch = getDomEpoch();
+  clearDirtyRoots(lastExtractEpoch);
   const scrollTop = window.scrollY || 0;
   const scrollHeight = document.documentElement.scrollHeight;
   const vh = window.innerHeight;
@@ -498,6 +586,203 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
     viewportHeight: vh,
     selectorMap: acc.selectorMap,
     elementIdentities: acc.identities,
+  };
+}
+
+/**
+ * Partial re-walk: re-serialize only the subtrees mutated since the last walk
+ * and splice the results into the cached elements/lines arrays, rebuilding
+ * `elementsText` by concatenation. Returns null (→ full walk) unless every
+ * gate below holds:
+ *
+ *  - the mutation signal is armed (an unarmed epoch/dirty-set proves nothing);
+ *  - the epoch moved since the last walk AND dirty roots were recorded for
+ *    the window (an explicit bump or an observer delivery gap leaves an empty
+ *    set — fail closed);
+ *  - the previous walk produced elements/lines to splice into;
+ *  - every dirty root has a recorded previous output region, and the regions
+ *    are pairwise disjoint (a root whose region nests inside another's is
+ *    skipped — its subtree's re-walk covers it; overlapping regions — e.g. a
+ *    detached fragment mutated after removal — fail closed);
+ *  - the dirty element share is ≤50% (beyond that a full rebuild is cheaper);
+ *  - the merged result stays within the walk limits.
+ */
+function tryPartialExtract(
+  epoch: number,
+  redactedTabs: TabInfo[],
+  readCache: ReadCache,
+): BrowserState | null {
+  if (!isMutationSignalArmed()) return null;
+  if (epoch === lastExtractEpoch) return null;
+  const dirtyRoots = getDirtyRoots(epoch);
+  if (dirtyRoots.length === 0) return null;
+  if (cachedElements.length === 0 || cachedLines.length === 0) return null;
+
+  const withRanges: { root: Element; range: WalkRange }[] = [];
+  for (const root of dirtyRoots) {
+    const range = previousRanges.get(root);
+    if (!range) return null;
+    withRanges.push({ root, range });
+  }
+  // Drop roots whose region nests inside another root's (their re-walk is
+  // covered by the outer root); sorted so the outer region is kept first.
+  withRanges.sort((a, b) => a.range.startLine - b.range.startLine || a.range.endLine - b.range.endLine);
+  const kept: { root: Element; range: WalkRange }[] = [];
+  for (const candidate of withRanges) {
+    const nested = kept.some(
+      (k) =>
+        candidate.range.startLine >= k.range.startLine &&
+        candidate.range.endLine <= k.range.endLine,
+    );
+    if (!nested) kept.push(candidate);
+  }
+  if (kept.length === 0) return null;
+
+  // >50% of elements dirty → a splice costs more than a full rebuild.
+  const dirtyElementCount = kept.reduce((sum, k) => sum + (k.range.endEl - k.range.startEl), 0);
+  if (dirtyElementCount > cachedElements.length / 2) return null;
+
+  // Identity → previous index map of the LAST walk (cachedIdentities is
+  // committed per walk, so it maps exactly the cached elements' indices).
+  const identityToIndex = new Map<string, number>();
+  for (const [idx, identity] of Object.entries(cachedIdentities)) {
+    if (!identityToIndex.has(identity)) identityToIndex.set(identity, Number(idx));
+  }
+  const maxPrevIndex = cachedElements.reduce((max, e) => Math.max(max, e.index), 0);
+
+  // Re-walk every kept dirty root with the same serializers. Sub-walks run
+  // BEFORE any splice (they read the cached arrays only through the offsets),
+  // ordered by ascending position so the recorded ranges account for the
+  // position shifts that earlier splices will introduce.
+  interface SubWalk {
+    range: WalkRange;
+    elements: ExtractedElement[];
+    lines: string[];
+    selectorMap: Record<number, HTMLElement>;
+    identities: Record<number, string>;
+    newElementCount: number;
+  }
+  const subWalks: SubWalk[] = [];
+  let lineShift = 0;
+  let elShift = 0;
+  beginVisibilityCache();
+  try {
+    for (const { root, range } of kept) {
+      const offset = { line: range.startLine + lineShift, el: range.startEl + elShift };
+      const subAcc: WalkAccumulator = {
+        index: 0,
+        selectorMap: {},
+        identities: {},
+        elements: [],
+        lines: [],
+        prevHashes: cachedHashes,
+        newElementCount: 0,
+        truncated: false,
+        elementTruncated: false,
+        rangeOffset: offset,
+        indexAssigner: makeIndexAssigner(range, identityToIndex, maxPrevIndex),
+      };
+      walkNode(root, range.depth, subAcc, readCache);
+      lineShift += subAcc.lines.length - (range.endLine - range.startLine);
+      elShift += subAcc.elements.length - (range.endEl - range.startEl);
+      subWalks.push({
+        range,
+        elements: subAcc.elements,
+        lines: subAcc.lines,
+        selectorMap: subAcc.selectorMap,
+        identities: subAcc.identities,
+        newElementCount: subAcc.newElementCount,
+      });
+    }
+  } catch {
+    return null;
+  } finally {
+    endVisibilityCache();
+  }
+
+  const projectedLines =
+    cachedLines.length + subWalks.reduce((d, s) => d + s.lines.length - (s.range.endLine - s.range.startLine), 0);
+  const projectedElements =
+    cachedElements.length + subWalks.reduce((d, s) => d + s.elements.length - (s.range.endEl - s.range.startEl), 0);
+  if (projectedLines > MAX_LINES || projectedElements > MAX_ELEMENTS) return null;
+
+  // Splice back-to-front so an earlier splice never shifts a later region's
+  // insertion point (regions are pairwise disjoint).
+  subWalks.sort((a, b) => b.range.startLine - a.range.startLine);
+  for (const s of subWalks) {
+    cachedLines.splice(s.range.startLine, s.range.endLine - s.range.startLine, ...s.lines);
+    cachedElements.splice(s.range.startEl, s.range.endEl - s.range.startEl, ...s.elements);
+    for (let idx = s.range.startEl + 1; idx <= s.range.endEl; idx++) {
+      delete cachedSelectorMap[idx];
+      delete cachedIdentities[idx];
+    }
+    Object.assign(cachedSelectorMap, s.selectorMap);
+    Object.assign(cachedIdentities, s.identities);
+  }
+  cachedHashes = new Set(cachedElements.map((e) => e.hash));
+  previousRanges = currentWalkRanges;
+  lastExtractEpoch = epoch;
+  clearDirtyRoots(epoch);
+
+  const scrollTop = window.scrollY || 0;
+  const scrollHeight = document.documentElement.scrollHeight;
+  const vh = window.innerHeight;
+  const rawElementsText = cachedLines.join("\n");
+  snapshotCacheText = rawElementsText;
+  const windowedText = windowSnapshot(rawElementsText, 0).text;
+  return {
+    url: redactUrlTokens(location.href),
+    title: document.title,
+    tabs: redactedTabs,
+    elements: cachedElements,
+    elementsText: windowedText.trim().length > 0 ? windowedText : "[empty page]",
+    pageInfo: buildPageInfo(scrollTop, scrollHeight, vh),
+    newElementCount: subWalks.reduce((sum, s) => sum + s.newElementCount, 0),
+    scrollTop,
+    scrollHeight,
+    viewportHeight: vh,
+    selectorMap: cachedSelectorMap,
+    elementIdentities: cachedIdentities,
+  };
+}
+
+/**
+ * Per-dirty-root index assignment for a partial re-walk. Each re-walked
+ * element's display index is:
+ *  1. its previous index when its identity matches a previous element within
+ *     the root's region (unchanged elements keep their indices);
+ *  2. otherwise the next free slot inside the region (a removed element's
+ *     index, reused by a new element in walk order);
+ *  3. otherwise an appended index beyond the previous maximum.
+ */
+function makeIndexAssigner(
+  range: WalkRange,
+  identityToIndex: Map<string, number>,
+  maxPrevIndex: number,
+): (relativeIndex: number, identity: string) => number {
+  let nextFree = range.startEl + 1;
+  let appendNext = maxPrevIndex + 1;
+  const claimed = new Set<number>();
+  return (_relativeIndex, identity) => {
+    const prevIdx = identityToIndex.get(identity);
+    if (
+      prevIdx !== undefined &&
+      !claimed.has(prevIdx) &&
+      prevIdx > range.startEl &&
+      prevIdx <= range.endEl
+    ) {
+      claimed.add(prevIdx);
+      return prevIdx;
+    }
+    while (nextFree <= range.endEl && claimed.has(nextFree)) nextFree++;
+    if (nextFree <= range.endEl) {
+      const index = nextFree++;
+      claimed.add(index);
+      return index;
+    }
+    const index = appendNext++;
+    claimed.add(index);
+    return index;
   };
 }
 
