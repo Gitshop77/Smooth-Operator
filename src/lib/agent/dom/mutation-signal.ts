@@ -20,10 +20,19 @@
  * themselves — `isFullyTransparent` only consults its memo while a walk is
  * active (`beginVisibilityCache`/`endVisibilityCache`), and every persistent
  * cache revalidates its epoch stamp at use.
+ *
+ * The epoch is only a trustworthy "the DOM is unchanged" signal while the
+ * observer is actually installed and observing the current root. When the
+ * signal is UNARMED (no `MutationObserver` in the environment, no document
+ * root at install time, or the observed root was replaced), the epoch may
+ * freeze while the DOM still changes — the caches must then fail closed and
+ * rebuild per walk instead of serving. The stamp sites consult
+ * `isMutationSignalArmed()` for exactly that.
  */
 
 let epoch = 0;
 let observer: MutationObserver | null = null;
+let observedRoot: Node | null = null;
 
 /** The current DOM epoch. Any DOM mutation observed since install bumps it. */
 export function getDomEpoch(): number {
@@ -36,13 +45,25 @@ export function bumpDomEpoch(): void {
 }
 
 /**
- * Install the mutation observer — idempotent (no-op when already installed).
+ * Whether the signal is armed: the observer is installed AND still observing
+ * the current `document.documentElement`. Only then can `getDomEpoch()` be
+ * trusted to move on any DOM mutation. When unarmed, the epoch may be frozen
+ * while the DOM still changes, so cache stamp sites must rebuild per use
+ * instead of serving the last epoch's memo.
+ */
+export function isMutationSignalArmed(): boolean {
+  return observer !== null && observedRoot === document.documentElement;
+}
+
+/**
+ * Install the mutation observer — idempotent (no-op when already installed
+ * on the current root; re-installs when the observed root was replaced).
  * Guards `typeof MutationObserver !== "undefined"` (jsdom ≥13.2 supports MO
  * with real records and microtask delivery, so tests need no stub; other
  * environments may not).
  */
 export function installMutationSignal(): void {
-  if (observer) return;
+  if (observer && observedRoot === document.documentElement) return;
   if (typeof MutationObserver === "undefined") return;
   if (typeof document === "undefined" || !document.documentElement) return;
   observer = new MutationObserver(() => {
@@ -54,4 +75,15 @@ export function installMutationSignal(): void {
     characterData: true,
     attributes: true,
   });
+  observedRoot = document.documentElement;
+}
+
+/**
+ * @internal Test-only: disarm the signal, simulating an environment where
+ * `installMutationSignal()` cannot arm (e.g. no `MutationObserver`).
+ * Re-arming happens automatically on the next `installMutationSignal()`.
+ */
+export function __test_disarmMutationSignalForTests(): void {
+  observer = null;
+  observedRoot = null;
 }

@@ -13,7 +13,7 @@ import { redactUrlTokens } from "./element-info-utils";
 import { getShadowRoot } from "../annotation/shadow-piercer";
 import { escapeAttr, attrString, buildPageInfo, buildCompoundChildren } from "./page-state-utils";
 import { ReadCache, getSharedReadCache } from "../utils/read-cache";
-import { getDomEpoch, installMutationSignal } from "../mutation-signal";
+import { bumpDomEpoch, getDomEpoch, installMutationSignal, isMutationSignalArmed } from "../mutation-signal";
 
 export function isVisible(el: HTMLElement): boolean {
   return isVisibleFull(el);
@@ -125,10 +125,12 @@ let visibilityCache: { epoch: number; map: WeakMap<HTMLElement, boolean> } = {
   map: new WeakMap(),
 };
 
-/** The epoch-valid visibility memo, rebuilt lazily when the epoch moved. */
+/** The epoch-valid visibility memo, rebuilt lazily when the epoch moved
+ * (or always, when the mutation signal is unarmed — a frozen epoch then
+ * can't be trusted, so each use gets a fresh memo). */
 function visibilityCacheMap(): WeakMap<HTMLElement, boolean> {
   const epoch = getDomEpoch();
-  if (visibilityCache.epoch !== epoch) {
+  if (!isMutationSignalArmed() || visibilityCache.epoch !== epoch) {
     visibilityCache = { epoch, map: new WeakMap<HTMLElement, boolean>() };
   }
   return visibilityCache.map;
@@ -330,9 +332,12 @@ let snapshotCacheText: string | null = null;
 export function resetDomBaseline(): void {
   cachedHashes = new Set();
   // The DOM baseline changed (e.g. after pageChanged) — drop the identity
-  // memo so nth-of-type indices are recomputed against the new structure.
-  // (The epoch-stamped visibility/read caches self-invalidate via the
-  // mutation signal; resetHashCaches covers the structural index memo.)
+  // memo so nth-of-type indices are recomputed against the new structure,
+  // and bump the epoch so the epoch-stamped visibility/read caches
+  // invalidate synchronously (they can't wait for the observer's record
+  // delivery, and there may be nothing to deliver when the baseline was
+  // replaced wholesale).
+  bumpDomEpoch();
   resetHashCaches();
 }
 

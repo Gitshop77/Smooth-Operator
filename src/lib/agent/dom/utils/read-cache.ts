@@ -28,7 +28,7 @@
  * (see `../mutation-signal`), which rebuilds the shared cache.
  */
 import { isVisibleFull } from "./visibility";
-import { getDomEpoch } from "../mutation-signal";
+import { getDomEpoch, isMutationSignalArmed } from "../mutation-signal";
 
 interface ReadCacheEntry {
   rect: DOMRect | undefined;
@@ -86,7 +86,9 @@ let sharedReadCache: { epoch: number; cache: ReadCache } | null = null;
 /**
  * The epoch-stamped persistent ReadCache shared by both extraction walks.
  *
- * Rebuilds only when the DOM epoch moved; otherwise the walkers serve every
+ * Rebuilds only when the DOM epoch moved — or when the mutation signal is
+ * unarmed (the epoch then can't be trusted to move, so the cache fails closed
+ * and a fresh instance is served instead). Otherwise the walkers serve every
  * element's rect/style/visibility from the previous walk's batch reads — on
  * an unchanged page the second walk of a step (and subsequent steps) performs
  * zero forced layout reads. The DOM is never written during a walk, so cached
@@ -94,7 +96,7 @@ let sharedReadCache: { epoch: number; cache: ReadCache } | null = null;
  */
 export function getSharedReadCache(): ReadCache {
   const epoch = getDomEpoch();
-  if (!sharedReadCache || sharedReadCache.epoch !== epoch) {
+  if (!isMutationSignalArmed() || !sharedReadCache || sharedReadCache.epoch !== epoch) {
     sharedReadCache = { epoch, cache: new ReadCache() };
   }
   return sharedReadCache.cache;

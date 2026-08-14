@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { extractBrowserState } from "../src/lib/agent/dom/extraction/page-state";
 import {
+  __test_disarmMutationSignalForTests,
+  installMutationSignal,
+} from "../src/lib/agent/dom/mutation-signal";
+import {
   installJsdomLayoutMock,
   restoreJsdomLayoutMock,
   installViewportMock,
@@ -16,6 +20,8 @@ describe("cross-step caches", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    installMutationSignal();
     restoreJsdomLayoutMock();
     restoreViewportMock();
   });
@@ -49,5 +55,28 @@ describe("cross-step caches", () => {
 
     const state = extractBrowserState([]);
     expect(state.elementsText).toContain("Added later");
+  });
+
+  it("fail-closed: an unarmed mutation signal never serves cross-walk caches (second extraction re-reads)", () => {
+    const btn = document.createElement("button");
+    btn.textContent = "Click me";
+    document.body.appendChild(btn);
+    installMutationSignal();
+    extractBrowserState([]);
+
+    __test_disarmMutationSignalForTests();
+    // Simulate an environment without MutationObserver so the re-extract's
+    // installMutationSignal() cannot re-arm the signal.
+    vi.stubGlobal("MutationObserver", undefined);
+    try {
+      const spyRect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect");
+      const spyStyle = vi.spyOn(window, "getComputedStyle");
+      const second = extractBrowserState([]);
+      expect(spyRect).toHaveBeenCalled();
+      expect(spyStyle).toHaveBeenCalled();
+      expect(second.elements.length).toBeGreaterThan(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

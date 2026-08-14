@@ -20,7 +20,7 @@ import {
   implicitRole,
   fnv1aHash,
 } from "./element-info-utils";
-import { getDomEpoch } from "../mutation-signal";
+import { getDomEpoch, isMutationSignalArmed } from "../mutation-signal";
 
 // ─── Configuration constants ────────────────────────────────────────────────
 
@@ -163,7 +163,7 @@ function nthOfTypeIndex(el: Element): number {
   const parent = el.parentElement;
   if (!parent) return 1;
   const epoch = getDomEpoch();
-  if (nthOfTypeCache.epoch !== epoch) {
+  if (!isMutationSignalArmed() || nthOfTypeCache.epoch !== epoch) {
     nthOfTypeCache = { epoch, map: new WeakMap() };
   }
   const map = nthOfTypeCache.map;

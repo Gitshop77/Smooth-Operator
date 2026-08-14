@@ -12,7 +12,7 @@
  * style-recalc cost on every visited node.
  */
 
-import { getDomEpoch } from "../mutation-signal";
+import { getDomEpoch, isMutationSignalArmed } from "../mutation-signal";
 
 /**
  * Cheap visibility pre-check. Catches `display:none`, detached elements, and
@@ -146,7 +146,7 @@ let transparentAncestorStamp: { epoch: number; cache: WeakMap<HTMLElement, boole
  */
 export function beginVisibilityCache(): void {
   const epoch = getDomEpoch();
-  if (!transparentAncestorStamp || transparentAncestorStamp.epoch !== epoch) {
+  if (!isMutationSignalArmed() || !transparentAncestorStamp || transparentAncestorStamp.epoch !== epoch) {
     transparentAncestorStamp = { epoch, cache: new WeakMap<HTMLElement, boolean>() };
   }
   transparentAncestorCache = transparentAncestorStamp.cache;
