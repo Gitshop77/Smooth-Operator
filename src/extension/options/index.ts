@@ -19,6 +19,7 @@ import { renderSkills } from "./skills";
 import { renderHistory } from "./history";
 import { loadPrompts } from "./prompts";
 import { loadNotifications } from "./notifications";
+import { renderLightpanda } from "./lightpanda";
 import "./provider-config-ui";
 import "./vision-status";
 import { initConnectionProfiles } from "./connection-profiles";
@@ -47,6 +48,7 @@ const renderers: Record<string, () => void | Promise<void>> = {
       renderTools(),
       renderSkills(),
       loadNotifications(),
+      renderLightpanda(),
     ]);
   },
   history: renderHistory,
