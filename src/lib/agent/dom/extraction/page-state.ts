@@ -12,6 +12,7 @@ import { buildAttrs, hashElement, elementIdentity, DOM_CONFIG, resetHashCaches }
 import { redactUrlTokens } from "./element-info-utils";
 import { getShadowRoot } from "../annotation/shadow-piercer";
 import { escapeAttr, attrString, buildPageInfo, buildCompoundChildren } from "./page-state-utils";
+import { ReadCache } from "../utils/read-cache";
 
 export function isVisible(el: HTMLElement): boolean {
   return isVisibleFull(el);
@@ -123,16 +124,16 @@ function intersectsObservationViewport(el: HTMLElement, rect?: DOMRect): boolean
     r.right >= -marginX && r.left <= window.innerWidth + marginX;
 }
 
-function serializeText(node: Text, depth: number, acc: WalkAccumulator): void {
+function serializeText(node: Text, depth: number, acc: WalkAccumulator, readCache: ReadCache): void {
   const parent = node.parentElement;
   if (!parent) return;
   let visible = visibilityCache.get(parent);
   if (visible === undefined) {
-    visible = isVisibleFull(parent);
+    visible = readCache.getVisible(parent) ?? isVisibleFull(parent);
     visibilityCache.set(parent, visible);
   }
   if (!visible) return;
-  if (!intersectsObservationViewport(parent)) return;
+  if (!intersectsObservationViewport(parent, readCache.getRect(parent))) return;
 
   const t = (node.textContent || "").replace(/\s+/g, " ").trim();
   if (t.length >= DOM_CONFIG.minTextLength) {
@@ -141,19 +142,19 @@ function serializeText(node: Text, depth: number, acc: WalkAccumulator): void {
 }
 
 /** Walk an element's light-DOM children then pierce into its shadow root. */
-function walkLightAndShadowChildren(el: HTMLElement, depth: number, acc: WalkAccumulator): void {
+function walkLightAndShadowChildren(el: HTMLElement, depth: number, acc: WalkAccumulator, readCache: ReadCache): void {
   for (let child = el.firstChild; child; child = child.nextSibling) {
-    walkNode(child, depth + 1, acc);
+    walkNode(child, depth + 1, acc, readCache);
   }
   const sr = getShadowRoot(el);
   if (sr) {
     for (let child = sr.firstChild; child; child = child.nextSibling) {
-      walkNode(child, depth + 1, acc);
+      walkNode(child, depth + 1, acc, readCache);
     }
   }
 }
 
-function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator): void {
+function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator, readCache: ReadCache): void {
   if (depth > MAX_WALK_DEPTH) return;
   if (acc.elements.length >= MAX_ELEMENTS) {
     if (!acc.elementTruncated) {
@@ -166,8 +167,14 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
 
   if (isLikelyHidden(el)) return;
 
+  // Batch this element's rect + computed-style reads once, before any
+  // classification; every consumer below (and later serializeText lookups for
+  // this element as a parent) serves from the cache. The walk never writes the
+  // DOM, so the cached values stay fresh for its whole duration.
+  readCache.batchRead(el);
+
   if (DOM_CONFIG.skipTags.has(tag) || tag === "iframe") {
-    if (tag === "iframe") trySerializeIframe(el as HTMLIFrameElement, depth, acc);
+    if (tag === "iframe") trySerializeIframe(el as HTMLIFrameElement, depth, acc, readCache);
     if (tag === "svg" && isInteractive(el)) {
       const idx = ++acc.index;
       const attrs = buildAttrs(el);
@@ -177,7 +184,7 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
       const text = directText(el) || el.getAttribute("aria-label") || "";
       acc.selectorMap[idx] = el;
       acc.identities[idx] = elementIdentity(el, attrs);
-      acc.elements.push({ index: idx, tag, text, attributes: attrs, hash, rect: el.getBoundingClientRect() });
+      acc.elements.push({ index: idx, tag, text, attributes: attrs, hash, rect: readCache.getRect(el)! });
       const prefix = isNew ? "*" : "";
       pushLine(acc, "\t".repeat(depth) + `${prefix}[${idx}]<${tag}${attrString(attrs)} />`);
     }
@@ -187,8 +194,8 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
   let rect: DOMRect | undefined;
   let interactive = false;
   if (isInteractive(el)) {
-    rect = el.getBoundingClientRect();
-    const visible = isVisibleFull(el, rect) && intersectsObservationViewport(el, rect);
+    rect = readCache.getRect(el);
+    const visible = (readCache.getVisible(el, rect) ?? isVisibleFull(el, rect)) && intersectsObservationViewport(el, rect);
     visibilityCache.set(el, visible);
     if (!visible) return;
     interactive = true;
@@ -211,7 +218,7 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
     if (tag === "details") {
       for (let child = el.firstChild; child; child = child.nextSibling) {
         if ((child as HTMLElement)?.tagName?.toLowerCase?.() === "summary") continue;
-        walkNode(child, depth + 1, acc);
+        walkNode(child, depth + 1, acc, readCache);
       }
       return;
     }
@@ -225,7 +232,7 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
   // serialized before its text children — every `serializeText` lookup finds
   // its parent already cached.
   if (!interactive && visibilityCache.get(el) === undefined) {
-    visibilityCache.set(el, isVisibleFull(el));
+    visibilityCache.set(el, readCache.getVisible(el) ?? isVisibleFull(el));
   }
 
   if (isInteractiveContainer(el)) {
@@ -235,17 +242,17 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
     // checks decide what they contribute.
     let containerVisible = visibilityCache.get(el);
     if (containerVisible === undefined) {
-      containerVisible = isVisibleFull(el);
+      containerVisible = readCache.getVisible(el) ?? isVisibleFull(el);
       visibilityCache.set(el, containerVisible);
     }
-    if (containerVisible && intersectsObservationViewport(el)) {
+    if (containerVisible && intersectsObservationViewport(el, readCache.getRect(el))) {
       const idx = ++acc.index;
       const attrs = buildAttrs(el);
       const hash = hashElement(el, attrs);
       const isNew = !acc.prevHashes.has(hash);
       if (isNew) acc.newElementCount++;
       const text = directText(el) || el.getAttribute("aria-label") || "";
-      const containerRect = el.getBoundingClientRect();
+      const containerRect = readCache.getRect(el)!;
       acc.selectorMap[idx] = el;
       acc.identities[idx] = elementIdentity(el, attrs);
       acc.elements.push({ index: idx, tag, text, attributes: attrs, hash, rect: containerRect });
@@ -254,14 +261,14 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator):
     }
   }
 
-  walkLightAndShadowChildren(el, depth + 1, acc);
+  walkLightAndShadowChildren(el, depth + 1, acc, readCache);
 }
 
 function redactIframeSrc(src: string): string {
   return redactUrlTokens(src);
 }
 
-function trySerializeIframe(iframe: HTMLIFrameElement, depth: number, acc: WalkAccumulator): void {
+function trySerializeIframe(iframe: HTMLIFrameElement, depth: number, acc: WalkAccumulator, readCache: ReadCache): void {
   try {
     const doc = iframe.contentDocument;
     if (!doc || !doc.body) {
@@ -271,7 +278,7 @@ function trySerializeIframe(iframe: HTMLIFrameElement, depth: number, acc: WalkA
     pushLine(acc, "\t".repeat(depth) + `|IFRAME src=${escapeAttr(redactIframeSrc(iframe.src || "same-origin"))}|`);
     try {
       for (let child = doc.body.firstChild; child; child = child.nextSibling) {
-        walkNode(child, depth + 1, acc);
+        walkNode(child, depth + 1, acc, readCache);
       }
     } catch {
       pushLine(acc, "\t".repeat(depth) + `|IFRAME src=${escapeAttr(redactIframeSrc(iframe.src || "same-origin"))} (error reading contents)|`);
@@ -281,12 +288,12 @@ function trySerializeIframe(iframe: HTMLIFrameElement, depth: number, acc: WalkA
   }
 }
 
-function walkNode(node: Node, depth: number, acc: WalkAccumulator): void {
+function walkNode(node: Node, depth: number, acc: WalkAccumulator, readCache: ReadCache): void {
   if (acc.elementTruncated) return;
   if (node.nodeType === Node.ELEMENT_NODE) {
-    serializeElement(node as HTMLElement, depth, acc);
+    serializeElement(node as HTMLElement, depth, acc, readCache);
   } else if (node.nodeType === Node.TEXT_NODE) {
-    serializeText(node as Text, depth, acc);
+    serializeText(node as Text, depth, acc, readCache);
   }
 }
 
@@ -314,6 +321,11 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
   visibilityCache = new WeakMap<HTMLElement, boolean>();
   resetHashCaches();
   beginVisibilityCache();
+  // Per-walk read cache: batch rect/style reads once per element (see
+  // `read-cache.ts`). Cleared at walk start — never reused across walks (that
+  // is the cross-step concern, handled separately).
+  const readCache = new ReadCache();
+  readCache.clear();
   // Redact each tab URL at the boundary, the same way `location.href` below is
   // redacted — a tab open on an OAuth callback (or a share link carrying a
   // token) would otherwise leak its query-string secrets into page state.
@@ -337,7 +349,7 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
       // re-snapshots that list on every child insert/removal (O(children) each),
       // making bulk appends quadratic — see extractor.test.ts test 19.
       for (let child = document.body.firstChild; child; child = child.nextSibling) {
-        walkNode(child, 0, acc);
+        walkNode(child, 0, acc, readCache);
       }
     } catch (e) {
       console.warn("[page-state] DOM walk threw mid-extract (resetting selectorMap to avoid stale indices):", e);

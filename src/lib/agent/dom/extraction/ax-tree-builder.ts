@@ -41,6 +41,7 @@ import {
 import { getRole, escapeAttributeValue, isStructural } from "./ax-tree-utils";
 import { redactUrlTokens } from "./element-info-utils";
 import { getShadowRoot } from "../annotation/shadow-piercer";
+import { ReadCache } from "../utils/read-cache";
 
 /**
  * Module-scoped element-ref registry.
@@ -259,6 +260,7 @@ function shouldInclude(
   filter: string,
   hasRefId: boolean,
   name: string,
+  readCache: ReadCache,
 ): boolean {
   const tag = el.tagName.toLowerCase();
   if (SKIP_TAGS.has(tag)) return false;
@@ -273,11 +275,13 @@ function shouldInclude(
     // Visibility gate (same as the "all" path below): a hidden element is
     // never included, even when interactive.
     if (isLikelyHidden(el)) return false;
- // Reuse a single rect for both the visibility check and the viewport-bounds
- // test so we don't call getBoundingClientRect twice on the hot path.
-    const rect = el.getBoundingClientRect();
-    if (!isVisible(el, rect)) return false;
-    if (!hasRefId && !intersectsViewport(rect)) return false;
+    // Batch this element's rect + style reads once, then reuse a single rect
+    // for both the visibility check and the viewport-bounds test so we never
+    // call getBoundingClientRect more than once per element.
+    readCache.batchRead(el);
+    const rect = readCache.getRect(el);
+    if (!(readCache.getVisible(el, rect) ?? isVisible(el, rect))) return false;
+    if (!hasRefId && !intersectsViewport(rect!)) return false;
     return true;
   }
 
@@ -297,7 +301,8 @@ function shouldInclude(
     // scrolling produced no new evidence and agents could loop indefinitely.
     // Explicit ref_id reads remain subtree reads and intentionally bypass the
     // viewport gate.
-    if (!hasRefId && !intersectsViewport(el.getBoundingClientRect())) return false;
+    readCache.batchRead(el);
+    if (!hasRefId && !intersectsViewport(readCache.getRect(el)!)) return false;
     return true;
   }
   const role = getRole(el);
@@ -354,7 +359,8 @@ function buildTree(
   maxDepth: number,
   lines: string[],
   counter: { count: number },
-  labelMap: Map<string, HTMLLabelElement>
+  labelMap: Map<string, HTMLLabelElement>,
+  readCache: ReadCache,
 ): void {
   if (counter.count >= MAX_ELEMENTS) return;
   if (absDepth > MAX_ABSOLUTE_DEPTH) return;
@@ -362,7 +368,7 @@ function buildTree(
   if (!el || !el.tagName) return;
 
   const name = getName(el, labelMap);
-  const included = shouldInclude(el, filter, !!refId, name) || (!!refId && depth === 0);
+  const included = shouldInclude(el, filter, !!refId, name, readCache) || (!!refId && depth === 0);
 
   if (included) {
     const role = getRole(el);
@@ -438,7 +444,7 @@ function buildTree(
       // extractor.test.ts test 19).
       for (let child = el.firstChild; child; child = child.nextSibling) {
         if (child.nodeType !== 1) continue;
-        buildTree(child as HTMLElement, included ? depth + 1 : depth, absDepth + 1, filter, refId, maxDepth, lines, counter, labelMap);
+        buildTree(child as HTMLElement, included ? depth + 1 : depth, absDepth + 1, filter, refId, maxDepth, lines, counter, labelMap, readCache);
       }
     }
  // Pierce shadow DOM so controls rendered inside open/closed shadow roots
@@ -448,7 +454,7 @@ function buildTree(
     const sr = getShadowRoot(el);
     if (sr) {
       for (const child of Array.from(sr.children)) {
-        buildTree(child as HTMLElement, included ? depth + 1 : depth, absDepth + 1, filter, refId, maxDepth, lines, counter, labelMap);
+        buildTree(child as HTMLElement, included ? depth + 1 : depth, absDepth + 1, filter, refId, maxDepth, lines, counter, labelMap, readCache);
       }
     }
   }
@@ -497,6 +503,9 @@ export function generateAccessibilityTree(
     const lines: string[] = [];
     const counter = { count: 0 };
     beginVisibilityCache();
+    // Per-walk read cache: batch rect/style reads once per element (see
+    // `read-cache.ts`). Scoped to this call — never reused across calls.
+    const readCache = new ReadCache();
 
  // pre-build a Map of all <label for="..."> elements ONCE per
  // generateAccessibilityTree call. Previously, getName() called
@@ -535,9 +544,9 @@ export function generateAccessibilityTree(
       if (!el) {
         return refNotFound(refId, "no longer exists. It may have been removed from the page.");
       }
-      buildTree(el as HTMLElement, 0, 0, filter, refId, maxDepth, lines, counter, labelMap);
+      buildTree(el as HTMLElement, 0, 0, filter, refId, maxDepth, lines, counter, labelMap, readCache);
     } else if (document.body) {
-      buildTree(document.body, 0, 0, filter, undefined, maxDepth, lines, counter, labelMap);
+      buildTree(document.body, 0, 0, filter, undefined, maxDepth, lines, counter, labelMap, readCache);
     }
 
  // Cleanup dead WeakRefs to avoid unbounded map growth.

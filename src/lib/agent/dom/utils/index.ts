@@ -27,3 +27,4 @@ export * from "./classification";
 export * from "./visibility";
 export * from "./tree-walker";
 export * from "./selectors";
+export * from "./read-cache";

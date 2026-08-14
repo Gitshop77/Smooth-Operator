@@ -175,17 +175,27 @@ function isAriaHidden(el: Element): boolean {
  * uses `getBoundingClientRect` (more accurate than `offsetWidth/offsetHeight`
  * for rotated/transformed elements). Also folds in the `aria-hidden` check
  * that the historical `ax-tree.ts` was missing inside its `isVisible`. The
- * rect parameter lets callers reuse a rect they already fetched (e.g. the
- * extractor computes it once for the `ExtractedElement` payload and passes it
- * here for the visibility check, avoiding a second layout flush).
+ * rect and style parameters let callers reuse values they already fetched
+ * (e.g. the extractor's `ReadCache` batch-reads both once per element and
+ * passes them here, avoiding a second layout flush and a second style recalc).
  *
  * @param rect optional pre-computed bounding rect; if omitted, a fresh
  * `getBoundingClientRect()` is called.
+ * @param style optional pre-computed computed style; if omitted, a fresh
+ * `window.getComputedStyle()` is called.
  */
-export function isVisibleFull(el: HTMLElement, rect?: DOMRect): boolean {
-  const style = window.getComputedStyle(el);
-  if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return false;
-  if (parseFloat(style.opacity) === 0) return false;
+export function isVisibleFull(el: HTMLElement, rect?: DOMRect, style?: CSSStyleDeclaration): boolean {
+  const s = style ?? window.getComputedStyle(el);
+  if (s.display === "none" || s.visibility === "hidden" || s.visibility === "collapse") return false;
+  if (parseFloat(s.opacity) === 0) return false;
+  // Zero-size check first: every check below is conjunctive, so the outcome is
+  // identical regardless of order — and a zero-size element (the common hidden
+  // case in jsdom, and the cheapest to prove hidden in a real browser)
+  // short-circuits before the ancestor style walk. Callers that batch their
+  // reads can therefore serve a hidden element without touching the style
+  // system again.
+  const r = rect ?? el.getBoundingClientRect();
+  if (r.width === 0 && r.height === 0) return false;
  // `opacity` is NOT an inherited property, so a child of an `opacity:0`
  // ancestor computes its own opacity as `"1"` even though it is visually
  // invisible. Walk the ancestor chain (up to the document root) and treat the
@@ -206,8 +216,6 @@ export function isVisibleFull(el: HTMLElement, rect?: DOMRect): boolean {
     }
     ancestor = ancestor.parentNode;
   }
-  const r = rect ?? el.getBoundingClientRect();
-  if (r.width === 0 && r.height === 0) return false;
   if (isAriaHidden(el)) return false;
  // `aria-hidden` is commonly set on an ancestor to prune a decorative subtree
  // from the accessibility tree while keeping it visible. An element inside such
@@ -221,9 +229,9 @@ export function isVisibleFull(el: HTMLElement, rect?: DOMRect): boolean {
  // `inset(0)`, `polygon(...)`) must NOT be treated as hidden, or legitimately
  // visible, clickable elements are wrongly pruned and become phantom/missing
  // targets. So we only fail closed on clips that collapse to zero area.
-  const clip = style.clip;
+  const clip = s.clip;
   if (clip && clip !== "auto" && clipCollapsesToZero(clip)) return false;
-  const clipPath = style.clipPath;
+  const clipPath = s.clipPath;
   if (clipPath && clipPath !== "none" && clipPath !== "auto" && clipCollapsesToZero(clipPath)) return false;
   return true;
 }
