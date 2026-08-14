@@ -605,6 +605,24 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* ─── Usage panel (created by usage-panel.ts; styles live here, not runtime) ─ */
+#usagePanel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--oc-space-1);
+  padding: var(--oc-space-2) var(--oc-space-4);
+  border-top: 1px solid var(--oc-border-default);
+  font-size: var(--oc-text-xs);
+  line-height: 1.4;
+}
+#usagePanel[hidden] { display: none; }
+.usage-meter-row { display: flex; align-items: center; gap: var(--oc-space-2); }
+.usage-meter-label { flex: 0 0 auto; opacity: .7; }
+.usage-meter-track { flex: 1 1 auto; height: 4px; border-radius: var(--oc-radius-full); background: var(--oc-surface-raised); overflow: hidden; }
+.usage-meter-fill { height: 100%; border-radius: var(--oc-radius-full); background: var(--oc-accent); transform: scaleX(0); transform-origin: left; transition: transform var(--oc-transition-base); }
+.usage-meter-value { flex: 0 0 auto; min-width: 40px; text-align: right; opacity: .85; }
+.usage-totals { opacity: .75; overflow-wrap: anywhere; }
+
 .mode-select {
   font-family: inherit;
   font-size: 11px;
@@ -729,8 +747,6 @@ body {
   outline: 2px solid var(--oc-focus-ring);
   outline-offset: 2px;
 }
-.btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.btn:active:not(:disabled) { transform: translateY(1px); }
 
 /* Non-class buttons get base styling without forced bold */
 button:not(.btn) {
@@ -826,19 +842,6 @@ button:not(.btn):focus-visible {
 .password-prompt-box .btn-row .btn-ok:hover:not(:disabled) {
   background: var(--oc-accent-hover);
   border-color: var(--oc-accent-hover);
-}
-
-/* ─── Screen reader only ──────────────────────────────────────────────────── */
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border-width: 0;
 }
 
 /* ─── Reduced motion ──────────────────────────────────────────────────────── */

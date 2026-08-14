@@ -81,6 +81,28 @@ function clearSendDebounce(): void {
   }
 }
 
+/** Max visual rows the message input grows to before scrolling internally. */
+const MESSAGE_INPUT_MAX_ROWS = 6;
+
+/**
+ * Auto-grow the message input to fit multi-line prompts, shrinking back when
+ * the text is cleared. Pure DOM helper (exported for tests): the classic
+ * reset-to-auto → read scrollHeight → clamp pattern. `getComputedStyle`
+ * returns empty values in jsdom, so the fallback line height keeps the math
+ * sane in every environment.
+ */
+export function autosizeMessageInput(
+  el: HTMLTextAreaElement,
+  maxRows = MESSAGE_INPUT_MAX_ROWS,
+): void {
+  el.style.height = "auto";
+  const lineHeight = Number.parseFloat(getComputedStyle(el).lineHeight) || 20;
+  const maxHeight = Math.max(lineHeight * maxRows, 48);
+  const contentHeight = el.scrollHeight;
+  el.style.height = `${Math.min(contentHeight, maxHeight)}px`;
+  el.style.overflowY = contentHeight > maxHeight ? "auto" : "hidden";
+}
+
 function clearPendingRunTimeout(): void {
   if (pendingRunTimeout) {
     clearTimeout(pendingRunTimeout);
@@ -110,6 +132,16 @@ function renderTerminalSnapshot(view: RunViewState): void {
   else addSystemMessage("❌", message, "error");
 }
 
+/**
+ * User-facing phase labels for the run-summary bar. Run phases are
+ * development vocabulary ("terminal", "observing", …); only "terminal" reads
+ * as jargon to end users, so it gets a friendly label — the rest are already
+ * plain-enough action words.
+ */
+const PHASE_LABELS: Record<string, string> = {
+  terminal: "Finished",
+};
+
 function renderRunView(view: RunViewState): void {
   running = isActiveStatus(view.status);
   // A terminal/idle run can never be paused — drop any stale pause flag and
@@ -134,7 +166,7 @@ function renderRunView(view: RunViewState): void {
     runTaskLabel.title = view.task;
   }
   if (runPhaseLabel) {
-    const phase = view.phase ? `${view.phase} · step ${view.step ?? 0}` : "";
+    const phase = view.phase ? `${PHASE_LABELS[view.phase] ?? view.phase} · step ${view.step ?? 0}` : "";
     runPhaseLabel.textContent = phase;
     runPhaseLabel.title = view.activeOperation ?? phase;
   }
@@ -256,6 +288,7 @@ async function sendMessage(): Promise<void> {
     removeEmptyState();
     addUserMessage(text);
     messageInput.value = "";
+    autosizeMessageInput(messageInput);
     beginLocalRun(text);
     clearRunTotals();
 
@@ -302,6 +335,7 @@ messageInput.addEventListener("keydown", (e: KeyboardEvent) => {
   }
 });
 messageInput.addEventListener("input", () => {
+  autosizeMessageInput(messageInput);
   sendBtn.disabled = !storageReady || !messageInput.value.trim() || running;
 });
 

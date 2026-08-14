@@ -217,7 +217,7 @@ export function finishLLMCall(event: Extract<LogEvent, { type: "llm-call-end" }>
 }
 
 export function addReasoningActivity(event: Extract<LogEvent, { type: "thinking" }>, time?: string): void {
-  const view = activityCard("✦", `Navigator reasoning · step ${event.step + 1}`, "Secret-safe model output", time);
+  const view = activityCard("✦", `Navigator reasoning · step ${event.step + 1}`, "Thinking…", time);
   view.card.classList.add("activity-reasoning");
   addActivityField(view.body, "Reasoning", event.text);
   addActivityField(view.body, "Previous-goal evaluation", event.evaluation);

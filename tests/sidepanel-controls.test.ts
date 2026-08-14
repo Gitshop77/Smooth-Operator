@@ -414,4 +414,24 @@ describe("sidepanel controls", () => {
     expect(chat().textContent).toContain("Cancellation has not been confirmed");
     expect(stop.disabled).toBe(false);
   });
+
+  test("message input auto-grows for multi-line prompts and shrinks when cleared", async () => {
+    await loadControls();
+    const input = messageInput();
+
+    // jsdom cannot lay out real content, so emulate a tall prompt via the
+    // scrollHeight the browser would report.
+    Object.defineProperty(input, "scrollHeight", { configurable: true, value: 300 });
+    setTask("line one\nline two\nline three");
+    // 300px of content exceeds any 6-row cap (≥48px), so the input must clamp.
+    expect(input.style.overflowY).toBe("auto");
+    expect(Number.parseInt(input.style.height, 10)).toBeLessThan(300);
+
+    // Clearing the task resizes back down to fit the (empty) content — the
+    // height always equals the content height below the 48px floor.
+    Object.defineProperty(input, "scrollHeight", { configurable: true, value: 20 });
+    setTask("");
+    expect(input.style.overflowY).toBe("hidden");
+    expect(input.style.height).toBe("20px");
+  });
 });

@@ -16,13 +16,20 @@ function safeLink(raw: string): string | null {
 }
 
 function appendInline(parent: HTMLElement, source: string): void {
-  const token = /(\*\*[^*\n]+\*\*|__[^_\n]+__|`[^`\n]+`|\[[^\]\n]+\]\([^\s)]+\)|\*[^*\n]+\*)/g;
+  const token = /(\*\*\*[^*\n]+\*\*\*|\*\*[^*\n]+\*\*|__[^_\n]+__|`[^`\n]+`|\[[^\]\n]+\]\([^\s)]+\)|\*[^*\n]+\*)/g;
   let cursor = 0;
   for (const match of source.matchAll(token)) {
     const index = match.index ?? 0;
     if (index > cursor) parent.append(document.createTextNode(source.slice(cursor, index)));
     const value = match[0];
-    if (value.startsWith("**") || value.startsWith("__")) {
+    if (value.startsWith("***")) {
+      // `***bold italic***` — bold-wrapped emphasis (strong > em).
+      const strong = document.createElement("strong");
+      const emphasis = document.createElement("em");
+      appendInline(emphasis, value.slice(3, -3));
+      strong.append(emphasis);
+      parent.append(strong);
+    } else if (value.startsWith("**") || value.startsWith("__")) {
       const strong = document.createElement("strong");
       appendInline(strong, value.slice(2, -2));
       parent.append(strong);

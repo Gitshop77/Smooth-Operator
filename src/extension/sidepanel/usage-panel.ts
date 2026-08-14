@@ -62,25 +62,9 @@ export function isUncataloguedModel(model: string, providerId?: string): boolean
 }
 
 // ─── DOM surface ───────────────────────────────────────────────────────────
-
-const USAGE_PANEL_STYLES = `
-#usagePanel { display: flex; flex-direction: column; gap: 4px; padding: 8px 12px; border-top: 1px solid rgba(128,128,128,.25); font-size: 11px; line-height: 1.4; }
-#usagePanel[hidden] { display: none; }
-.usage-meter-row { display: flex; align-items: center; gap: 8px; }
-.usage-meter-label { flex: 0 0 auto; opacity: .7; }
-.usage-meter-track { flex: 1 1 auto; height: 4px; border-radius: 2px; background: rgba(128,128,128,.25); overflow: hidden; }
-.usage-meter-fill { height: 100%; border-radius: 2px; background: #00b4d8; transform: scaleX(0); transform-origin: left; transition: transform .3s ease; }
-.usage-meter-value { flex: 0 0 auto; min-width: 40px; text-align: right; opacity: .85; }
-.usage-totals { opacity: .75; overflow-wrap: anywhere; }
-`;
-
-function injectStyles(): void {
-  if (document.getElementById("usagePanelStyles")) return;
-  const style = document.createElement("style");
-  style.id = "usagePanelStyles";
-  style.textContent = USAGE_PANEL_STYLES;
-  document.head.appendChild(style);
-}
+// The panel's styles live in sidepanel.css (design tokens), NOT runtime
+// injection, so the panel paints with the stylesheet on first render (no FOUC)
+// and stays on the shared token palette.
 
 function createPanel(): HTMLDivElement {
   const panel = document.createElement("div");
@@ -235,7 +219,6 @@ async function refreshFromRunState(): Promise<void> {
 
 function initUsagePanel(): void {
   if (!panelEl) panelEl = createPanel();
-  injectStyles();
   const statusBar = document.querySelector<HTMLElement>(".status-bar");
   if (statusBar?.parentElement) {
     statusBar.insertAdjacentElement("afterend", panelEl);

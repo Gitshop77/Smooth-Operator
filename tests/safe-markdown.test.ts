@@ -16,6 +16,17 @@ describe("safe Markdown renderer", () => {
     expect(host.querySelectorAll("ol li")).toHaveLength(2);
   });
 
+  test("renders ***bold italic*** as strong-wrapped emphasis", () => {
+    const host = render("This is ***very important*** work.");
+    const strong = host.querySelector("strong");
+    const em = host.querySelector("em");
+    expect(em).not.toBeNull();
+    expect(strong?.contains(em)).toBe(true);
+    expect(em?.textContent).toBe("very important");
+    // Plain **bold** and *emphasis* still resolve independently.
+    expect(render("**a** and *b*").querySelector("em")?.textContent).toBe("b");
+  });
+
   test("never interprets raw HTML or unsafe links", () => {
     const host = render('<img src=x onerror=alert(1)> [bad](javascript:alert(1)) [good](https://example.com)');
     expect(host.querySelector("img")).toBeNull();

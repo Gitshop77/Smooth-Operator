@@ -94,6 +94,10 @@ export function setRunTotalsFromUsage(usage: { tokensIn: number; tokensOut: numb
   totalsRestored = true;
   costLabel.textContent = `$${totalCost.toFixed(4)}`;
   if (tokenLabel) tokenLabel.textContent = formatTokens(totalTokens);
+  // A panel that opens mid-run receives the authoritative usage snapshot via
+  // STATUS/reconcile, not live `cost` events — reveal the telemetry center
+  // here too so the cost/token labels are never stranded hidden.
+  if (statusCenter && (totalCost > 0 || totalTokens > 0)) statusCenter.hidden = false;
   scheduleCostStorageWrite();
 }
 
