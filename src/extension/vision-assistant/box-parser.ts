@@ -54,3 +54,56 @@ export function toPixelCoords(
   });
 }
 
+/**
+ * Capture dimensions needed to invert a pre-resize. `width`/`height` are the
+ * FINAL (post-resize) image dimensions, `sourceWidth`/`sourceHeight` the
+ * PRE-RESIZE capture dimensions (device pixels). Optional because a capture
+ * without a resize reports no dims — see `CapturedScreenshot`.
+ */
+export interface CaptureDims {
+  width?: number;
+  height?: number;
+  sourceWidth?: number;
+  sourceHeight?: number;
+}
+
+/**
+ * Re-scale detections from a PRE-RESIZED input image back to the FULL capture
+ * (device-pixel) space.
+ *
+ * The always-on vision path pre-resizes the capture to the VLM decode edge
+ * (`VLM_DECODE_MAX_EDGE`) before `RawImage.read`; the model's 0-1000 boxes
+ * then map (via {@link toPixelCoords}) to the RESIZED image's pixel space,
+ * not the full viewport's device pixels. `mergeDetections` divides by the tab
+ * DPR assuming full-viewport device pixels — feeding it resized-space boxes
+ * would mislocalize every vision-guided click. This inverts the resize before
+ * the merge: multiply by `sourceWidth/width` (same ratio for height; an
+ * aspect-preserving resize keeps both axes' factors equal).
+ *
+ * No-op (returns the input array unchanged) when the dims are missing — a
+ * capture with no resize — or when the resize was a no-op (ratio 1).
+ */
+export function rescaleDetectionsToCapture(
+  detections: PixelDetection[],
+  capture: CaptureDims,
+): PixelDetection[] {
+  const { width, height, sourceWidth, sourceHeight } = capture;
+  if (
+    !width || !height || !sourceWidth || !sourceHeight ||
+    (width === sourceWidth && height === sourceHeight)
+  ) {
+    return detections;
+  }
+  const sx = sourceWidth / width;
+  const sy = sourceHeight / height;
+  return detections.map((d) => ({
+    ...d,
+    pixelBox: {
+      x: d.pixelBox.x * sx,
+      y: d.pixelBox.y * sy,
+      width: d.pixelBox.width * sx,
+      height: d.pixelBox.height * sy,
+    },
+  }));
+}
+

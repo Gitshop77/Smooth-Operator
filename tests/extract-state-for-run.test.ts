@@ -22,6 +22,7 @@
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { RunController } from "../src/extension/background/run-controller";
+import { VLM_DECODE_MAX_EDGE } from "../src/extension/vision-assistant/constants";
 
 // ─── Mock chrome global ──────────────────────────────────────────────────────
 
@@ -100,7 +101,7 @@ vi.mock("@/extension/background/tab-manager", () => ({
 }));
 
 vi.mock("@/extension/background/screenshots", () => ({
-  captureTabScreenshot: vi.fn().mockResolvedValue("data:image/png;base64,abc"),
+  captureTabScreenshot: vi.fn().mockResolvedValue({ dataUrl: "data:image/png;base64,abc" }),
 }));
 
 vi.mock("@/extension/llm-direct", () => ({
@@ -292,7 +293,7 @@ describe("extractStateForRun — vision-merge branches", () => {
 
     // Default mocks
     extractStateFromTabMock.mockResolvedValue(makeDomState());
-    captureTabScreenshotMock.mockResolvedValue("data:image/png;base64,abc");
+    captureTabScreenshotMock.mockResolvedValue({ dataUrl: "data:image/png;base64,abc" });
     modelSupportsVisionMock.mockResolvedValue(false);
     mergeDetectionsMock.mockReturnValue([]);
     renderMergedElementsTextMock.mockReturnValue("");
@@ -424,6 +425,48 @@ describe("extractStateForRun — vision-merge branches", () => {
     expect(visionAssistantState.detect).toHaveBeenCalled();
     expect(mergeDetectionsMock).toHaveBeenCalled();
     expect(state.url).toBe("https://example.com");
+  });
+
+  test("always-on vision hands the VLM a ≤VLM_DECODE_MAX_EDGE capture (pre-resized, no full-res decode)", async () => {
+    modelSupportsVisionMock.mockResolvedValue(false);
+    setVisionSettings({
+      enableLocalVision: true,
+      visionMode: "always",
+      enableScreenshots: true,
+    });
+    visionAssistantState.isReady = true;
+    // The mock capture simulates the always-on pre-resize: a 2560×1600
+    // device-pixel viewport squeezed to the 512×320 VLM decode edge. The
+    // model's boxes therefore come back in the RESIZED image's pixel space.
+    captureTabScreenshotMock.mockResolvedValue({
+      dataUrl: "data:image/jpeg;base64,resized",
+      width: 512,
+      height: 320,
+      sourceWidth: 2560,
+      sourceHeight: 1600,
+    });
+    visionAssistantState.detect = vi.fn().mockResolvedValue([
+      { label: "btn", box: [100, 100, 200, 200], pixelBox: { x: 51.2, y: 32, width: 51.2, height: 32 } },
+    ]);
+
+    await extractStateForRun(1, MOCK_TABS); // prime init
+    await flushAsync();
+    captureTabScreenshotMock.mockClear();
+    await extractStateForRun(1, MOCK_TABS);
+
+    // The always-on capture requests the decode-edge pre-resize...
+    expect(captureTabScreenshotMock).toHaveBeenCalledWith(1, { resize: { whLargest: VLM_DECODE_MAX_EDGE } });
+    // ...and va.detect receives the RESIZED data URL (long edge ≤ 512) — not
+    // a 2560×1600 full-res JPEG that RawImage.read would decode.
+    expect(visionAssistantState.detect.mock.calls.at(-1)?.[0]).toBe("data:image/jpeg;base64,resized");
+    // The VLM's boxes (resized space) are re-scaled to the full capture
+    // (device-pixel) space BEFORE mergeDetections, so the merger's DPR
+    // division lands clicks on the full-viewport element the model saw.
+    expect(mergeDetectionsMock).toHaveBeenCalledWith(
+      [],
+      [{ label: "btn", box: [100, 100, 200, 200], pixelBox: { x: 256, y: 160, width: 256, height: 160 } }],
+      1,
+    );
   });
 
   // ── Branch 6: Always-on, vision ready, detect fails → DOM-only fallback ────
@@ -573,7 +616,7 @@ describe("handleDetectVisualRequest abort signal", () => {
     visionAssistantState.cleanup = vi.fn().mockResolvedValue(undefined);
     visionAssistantState.mergeDetections!.mockReset().mockReturnValue([]);
     visionAssistantState.renderMergedElementsText!.mockReset().mockReturnValue("");
-    captureTabScreenshotMock.mockResolvedValue("data:image/png;base64,abc");
+    captureTabScreenshotMock.mockResolvedValue({ dataUrl: "data:image/png;base64,abc" });
     modelSupportsVisionMock.mockResolvedValue(false);
     mergeDetectionsMock.mockReturnValue([]);
     renderMergedElementsTextMock.mockReturnValue("");
@@ -741,7 +784,7 @@ describe("vision assistant generation ownership", () => {
     visionAssistantState.cleanup = vi.fn().mockResolvedValue(undefined);
     visionAssistantState.mergeDetections!.mockReset().mockReturnValue([]);
     visionAssistantState.renderMergedElementsText!.mockReset().mockReturnValue("");
-    captureTabScreenshotMock.mockResolvedValue("data:image/png;base64,abc");
+    captureTabScreenshotMock.mockResolvedValue({ dataUrl: "data:image/png;base64,abc" });
     modelSupportsVisionMock.mockResolvedValue(false);
   });
 

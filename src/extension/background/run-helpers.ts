@@ -33,6 +33,8 @@ import {
 } from "./tab-manager";
 import { navigatorCallDirect, plannerCallDirect, summarizeCallDirect } from "../llm-direct";
 import type { VisionAssistant } from "../vision-assistant";
+import { rescaleDetectionsToCapture } from "../vision-assistant/box-parser";
+import { VLM_DECODE_MAX_EDGE } from "../vision-assistant/constants";
 import { broadcastSupplementalRunEvent } from "./run-event-broadcast";
 import { resolveModel } from "../provider-config";
 import {
@@ -320,7 +322,7 @@ export async function handleDetectVisualRequest(
     if (!tabId) {
       return { ok: false, error: "no active run — cannot determine agent tab for screenshot" };
     }
-    const screenshotDataUrl = await captureTabScreenshot(tabId, { signal });
+    const screenshotDataUrl = (await captureTabScreenshot(tabId, { signal })).dataUrl;
     assertAuthorized?.();
     // Prefer the caller-supplied signal; fall back to the active run's signal
     // so a user STOP aborts an in-flight decode even when the request came
@@ -534,11 +536,15 @@ export async function extractStateForRun(
 
   try {
     const { mergeDetections, renderMergedElementsText } = await loadVisionAssistant();
-    const screenshotDataUrl = await captureTabScreenshot(tabId);
+    // Pre-resize the capture to the VLM decode edge so `RawImage.read` inside
+    // detect() never decodes a full-resolution viewport JPEG (e.g. 2560×1600):
+    // the pinned LFM2.5-VL-450M processor squashes every input ≥512 to a
+    // single 512×512 tile anyway, so this is a pure decode/base64 win.
+    const capture = await captureTabScreenshot(tabId, { resize: { whLargest: VLM_DECODE_MAX_EDGE } });
     checkAbort();
     const [domState, visionDetections] = await Promise.all([
       extractStateFromTab(tabId, tabs, false, signal),
-      va.detect(screenshotDataUrl, signal).catch((e: unknown) => {
+      va.detect(capture.dataUrl, signal).catch((e: unknown) => {
         if (signal?.aborted) throw e;
         void safeLog("warn", "[vision] detect failed:", e);
         return [];
@@ -546,7 +552,13 @@ export async function extractStateForRun(
     ]);
     const dpr = domState.devicePixelRatio ?? 1;
     lastKnownDpr = dpr;
-    const merged = mergeDetections(domState.elements, visionDetections, dpr);
+    // Because the capture was pre-resized, the model's boxes come back in the
+    // RESIZED image's pixel space — not full-viewport device pixels. Scale
+    // them back to the capture space BEFORE mergeDetections (whose DPR
+    // division assumes full-viewport device pixels) or every vision-guided
+    // click mislocalizes.
+    const rescaled = rescaleDetectionsToCapture(visionDetections, capture);
+    const merged = mergeDetections(domState.elements, rescaled, dpr);
     const visionNewCount = merged.filter((m) => m.source === "vision").length;
     domState.elements = merged as unknown as typeof domState.elements;
     domState.elementsText = renderMergedElementsText(merged);

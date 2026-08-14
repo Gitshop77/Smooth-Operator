@@ -203,6 +203,24 @@ export const DETECTION_USER_PROMPT =
 // JSON array for a dense page while the eos token (`<|im_end|>`) stops early.
 export const MAX_NEW_TOKENS = 384;
 
+// ─── VLM input sizing ─────────────────────────────────────────────────────────
+/**
+ * Maximum long edge (px) of the screenshot handed to the VLM before decode.
+ *
+ * The pinned LFM2.5-VL-450M processor (`preprocessor_config.json` at
+ * `MODEL_REVISION`) squashes EVERY input with a long edge ≥ 512 into a single
+ * 512×512 tile (`size: {height: 512, width: 512}`, `tile_size: 512`,
+ * `max_tiles: 10`, `max_num_patches: 1024`) in transformers.js v4.2.0 — there
+ * is no 1024 anywhere in the pipeline. Decoding a full-resolution viewport
+ * JPEG (e.g. 2560×1600) just to downscale it is pure waste, so the always-on
+ * capture path pre-resizes to this edge BEFORE `RawImage.read`.
+ *
+ * This is a DECODE/BASE64 budget (skip decoding a 2560×1600 JPEG that the
+ * processor would squash anyway), NOT a model-input tuning knob: the processor
+ * applies the same 512×512 tile regardless of the input size.
+ */
+export const VLM_DECODE_MAX_EDGE = 512;
+
 // ─── Download settings ────────────────────────────────────────────────────────
 export const DOWNLOAD_CHUNK_SIZE = 48 * 1024 * 1024; // 48 MB
 export const DOWNLOAD_MAX_RETRIES = 5;

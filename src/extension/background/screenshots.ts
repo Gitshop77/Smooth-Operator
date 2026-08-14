@@ -78,39 +78,80 @@ export function computeResizeDims(
 }
 
 /**
+ * Result of a resize: the (possibly unchanged) data URL plus the dimensions of
+ * the RETURNED image and the pre-resize SOURCE dimensions. `0` for a dimension
+ * means "unknown" (the decode/resize never ran, e.g. canvas unavailable).
+ * Callers that re-scale coordinates from the resized image back to the source
+ * (capture) space use `sourceWidth/width` (same ratio for height).
+ */
+export interface ResizedScreenshot {
+  dataUrl: string;
+  width: number;
+  height: number;
+  sourceWidth: number;
+  sourceHeight: number;
+}
+
+/**
  * Resize a screenshot data URL to the requested dimensions via canvas
  * re-encode. `imageSmoothingQuality: "high"` is the MV3 substitute for the
  * upstream LANCZOS filter. Graceful-degradation contract (mirrors
  * `annotateScreenshot`): on ANY failure — canvas unavailable, decode error,
- * missing 2D context — the ORIGINAL data URL is returned unchanged, so the
- * caller always has a usable image.
+ * missing 2D context — the ORIGINAL data URL is returned unchanged (with
+ * unknown/`0` dims), so the caller always has a usable image. Same behavior
+ * and semantics as {@link resizeScreenshotDataUrl}, but also reports the
+ * returned + source dimensions so downstream coordinate mapping can invert
+ * the resize.
+ */
+export async function resizeScreenshotDataUrlWithDims(
+  dataUrl: string,
+  opts: ResizeOptions,
+  quality?: number,
+): Promise<ResizedScreenshot> {
+  const canvas = createCompatibleCanvas();
+  if (!canvas) return { dataUrl, width: 0, height: 0, sourceWidth: 0, sourceHeight: 0 };
+  let img: CompatibleLoadedImage | undefined;
+  try {
+    img = await loadCompatibleImage(dataUrl);
+    if (!img.width || !img.height) return { dataUrl, width: 0, height: 0, sourceWidth: 0, sourceHeight: 0 };
+    const dims = computeResizeDims(img.width, img.height, opts);
+    if (dims.width === img.width && dims.height === img.height) {
+      // Already at/under the target — the data URL is returned unchanged, so
+      // its dimensions ARE the source dimensions (ratio 1 for any re-scale).
+      return { dataUrl, width: img.width, height: img.height, sourceWidth: img.width, sourceHeight: img.height };
+    }
+    canvas.width = dims.width;
+    canvas.height = dims.height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return { dataUrl, width: img.width, height: img.height, sourceWidth: img.width, sourceHeight: img.height };
+    ctx.imageSmoothingEnabled = true;
+    (ctx as { imageSmoothingQuality?: string }).imageSmoothingQuality = "high";
+    img.drawTo(ctx, dims.width, dims.height);
+    return {
+      dataUrl: await canvasToDataUrl(canvas, dataUrl, quality),
+      width: dims.width,
+      height: dims.height,
+      sourceWidth: img.width,
+      sourceHeight: img.height,
+    };
+  } catch {
+    return { dataUrl, width: 0, height: 0, sourceWidth: 0, sourceHeight: 0 };
+  } finally {
+    img?.cleanup?.();
+  }
+}
+
+/**
+ * Resize a screenshot data URL to the requested dimensions via canvas
+ * re-encode. See {@link resizeScreenshotDataUrlWithDims} for the full
+ * graceful-degradation contract; this wrapper returns just the data URL.
  */
 export async function resizeScreenshotDataUrl(
   dataUrl: string,
   opts: ResizeOptions,
   quality?: number,
 ): Promise<string> {
-  const canvas = createCompatibleCanvas();
-  if (!canvas) return dataUrl;
-  let img: CompatibleLoadedImage | undefined;
-  try {
-    img = await loadCompatibleImage(dataUrl);
-    if (!img.width || !img.height) return dataUrl;
-    const dims = computeResizeDims(img.width, img.height, opts);
-    if (dims.width === img.width && dims.height === img.height) return dataUrl;
-    canvas.width = dims.width;
-    canvas.height = dims.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return dataUrl;
-    ctx.imageSmoothingEnabled = true;
-    (ctx as { imageSmoothingQuality?: string }).imageSmoothingQuality = "high";
-    img.drawTo(ctx, dims.width, dims.height);
-    return await canvasToDataUrl(canvas, dataUrl, quality);
-  } catch {
-    return dataUrl;
-  } finally {
-    img?.cleanup?.();
-  }
+  return (await resizeScreenshotDataUrlWithDims(dataUrl, opts, quality)).dataUrl;
 }
 
 /** Number of decoded bytes in a `data:...;base64,...` URL (strips the header
@@ -159,12 +200,31 @@ export async function normalizeScreenshotToViewport(
 }
 
 /**
+ * A captured screenshot: the data URL plus — when a resize was requested and
+ * its dims are known — the FINAL (post-resize) image dimensions and the
+ * PRE-RESIZE capture dimensions (device pixels). Callers that hand the resized
+ * image to a model whose boxes land in the resized space use the dims to
+ * re-scale those boxes back to the full capture space.
+ */
+export interface CapturedScreenshot {
+  dataUrl: string;
+  /** Final (post-resize) image dimensions. Present only when known. */
+  width?: number;
+  height?: number;
+  /** Pre-resize capture dimensions in device pixels. Present only when known. */
+  sourceWidth?: number;
+  sourceHeight?: number;
+}
+
+/**
  * Capture a JPEG screenshot of the given tab via `chrome.debugger`. Attaches
  * the debugger, issues `Page.captureScreenshot`, and ALWAYS detaches (even on
  * error) — mirroring the CDP_CLICK / SCREENSHOT handler patterns. Returns a
  * `data:image/jpeg;base64,...` data URL. When `opts.resize` is provided, the
- * captured screenshot is resized (see {@link resizeScreenshotDataUrl})
- * before being returned; the default applies no resize.
+ * captured screenshot is resized (see {@link resizeScreenshotDataUrlWithDims})
+ * before being returned and the final + source dimensions are reported (see
+ * {@link CapturedScreenshot}); the default applies no resize and reports no
+ * dimensions.
  *
  * The agent's tab (`tabId`) is passed explicitly so we never capture the
  * user's *visible* tab. Using `captureVisibleTab(WINDOW_ID_CURRENT)` would
@@ -175,7 +235,7 @@ export async function normalizeScreenshotToViewport(
 export async function captureTabScreenshot(
   tabId: number,
   opts?: { resize?: ResizeOptions; signal?: AbortSignal },
-): Promise<string> {
+): Promise<CapturedScreenshot> {
  // Route through the same per-tab refcounted debugger session that
  // `extractStateFromTab` uses, so a concurrent per-step screenshot cannot
  // tear down this session mid-capture (and vice-versa). The session is only
@@ -205,8 +265,15 @@ export async function captureTabScreenshot(
     throwIfAborted(opts?.signal);
     if (!result?.data) throw new Error("Page.captureScreenshot returned no data");
     const dataUrl = `data:image/jpeg;base64,${result.data}`;
-    const resized = opts?.resize ? await resizeScreenshotDataUrl(dataUrl, opts.resize) : dataUrl;
+    if (!opts?.resize) return { dataUrl };
+    const resized = await resizeScreenshotDataUrlWithDims(dataUrl, opts.resize, quality);
     throwIfAborted(opts?.signal);
-    return resized;
+    return {
+      dataUrl: resized.dataUrl,
+      width: resized.width > 0 ? resized.width : undefined,
+      height: resized.height > 0 ? resized.height : undefined,
+      sourceWidth: resized.sourceWidth > 0 ? resized.sourceWidth : undefined,
+      sourceHeight: resized.sourceHeight > 0 ? resized.sourceHeight : undefined,
+    };
   });
 }
