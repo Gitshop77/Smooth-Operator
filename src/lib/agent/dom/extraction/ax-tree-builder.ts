@@ -252,38 +252,74 @@ function getName(el: HTMLElement, labelMap: Map<string, HTMLLabelElement>): stri
 // `SKIP_TAGS` (used below in `shouldInclude`) is imported from ../utils.
 
 /**
+ * Per-node classification computed ONCE during the AX walk and threaded into
+ * {@link buildTree} so `getRole` / `isInteractive` / `tagName` are never
+ * re-derived for included elements.
+ *
+ * `include` is the final decision; `role`/`interactive`/`tag` are the honest
+ * per-element values (computed even when a later visibility gate excludes the
+ * element) so the forced-inclusion refId root in `buildTree` emits the same
+ * state attributes and role as the pre-refactor builder.
+ */
+interface NodeInfo {
+  include: boolean;
+  role: string | null;
+  interactive: boolean;
+  tag: string;
+}
+
+/**
  * Decide whether to include an element in the AX tree. Honors the `filter`
  * mode (all vs interactive), visibility, viewport bounds, and the element's
- * role / name significance.
+ * role / name significance. Returns the per-node classification struct so
+ * `buildTree` never re-derives role/interactivity for included elements.
+ *
+ * The accessible name is fetched lazily via `computeName` (a memoized thunk
+ * provided by `buildTree`): the "all" mode's name gate needs it to decide
+ * text-bearing generic elements, and the same value is reused for line
+ * emission — so `getName` never runs for elements excluded by the cheap gates
+ * (skip-tags, aria-hidden, non-interactive/non-structural, role-decisive).
  */
 function shouldInclude(
   el: HTMLElement,
   filter: string,
   hasRefId: boolean,
-  name: string,
   readCache: ReadCache,
-): boolean {
+  computeName: () => string,
+): NodeInfo {
   const tag = el.tagName.toLowerCase();
-  if (SKIP_TAGS.has(tag)) return false;
+ // Cold exits — these elements are excluded from the walk, but the struct
+ // must still carry the HONEST `interactive` value: a force-included refId
+ // root (`buildTree`'s `!!refId && depth === 0` escape) falls through to the
+ // state-attribute emission, which pre-refactor re-checked `isInteractive`
+ // per included node. Hardcoding `false` here would silently drop those
+ // attributes for an aria-hidden (or skip-tag) interactive element read via
+ // ref_id. The extra call on excluded nodes is negligible.
+  if (SKIP_TAGS.has(tag)) {
+    return { include: false, role: null, interactive: isInteractive(el), tag };
+  }
  // apply visibility + aria-hidden gating even in "all" mode so
  // hidden modals, off-screen duplicates, and aria-hidden decorative elements
  // don't inflate the AX payload with content the user can't see. `aria-hidden`
  // is matched case-insensitively (ARIA attribute values are ASCII case-insensitive).
-  if ((el.getAttribute("aria-hidden") || "").toLowerCase() === "true") return false;
+  if ((el.getAttribute("aria-hidden") || "").toLowerCase() === "true") {
+    return { include: false, role: null, interactive: isInteractive(el), tag };
+  }
 
   if (filter === "interactive") {
-    if (!isInteractive(el)) return false;
+    const interactive = isInteractive(el);
+    if (!interactive) return { include: false, role: null, interactive, tag };
     // Visibility gate (same as the "all" path below): a hidden element is
     // never included, even when interactive.
-    if (isLikelyHidden(el)) return false;
+    if (isLikelyHidden(el)) return { include: false, role: null, interactive, tag };
     // Batch this element's rect + style reads once, then reuse a single rect
     // for both the visibility check and the viewport-bounds test so we never
     // call getBoundingClientRect more than once per element.
     readCache.batchRead(el);
     const rect = readCache.getRect(el);
-    if (!(readCache.getVisible(el, rect) ?? isVisible(el, rect))) return false;
-    if (!hasRefId && !intersectsViewport(el, rect!)) return false;
-    return true;
+    if (!(readCache.getVisible(el, rect) ?? isVisible(el, rect))) return { include: false, role: null, interactive, tag };
+    if (!hasRefId && !intersectsViewport(el, rect!)) return { include: false, role: null, interactive, tag };
+    return { include: true, role: getRole(el), interactive, tag };
   }
 
  // "all" mode: cheap classification first, visibility last. `isLikelyHidden`
@@ -294,8 +330,8 @@ function shouldInclude(
  // excluded without ever consulting the style system, so a hostile page's
  // arbitrarily deep excluded chain costs O(cap) instead of O(cap² × rules).
   const interactive = isInteractive(el);
-  if (interactive || isStructural(el) || name.length > 0) {
-    if (isLikelyHidden(el)) return false;
+  if (interactive || isStructural(el)) {
+    if (isLikelyHidden(el)) return { include: false, role: null, interactive, tag };
     // The automatic per-step AX channel is a VIEWPORT observation. Without
     // this gate, `filter="all"` serialized the whole document in DOM order;
     // the low-context cap then kept the same page header on every step, so
@@ -303,15 +339,26 @@ function shouldInclude(
     // Explicit ref_id reads remain subtree reads and intentionally bypass the
     // viewport gate.
     readCache.batchRead(el);
-    if (!hasRefId && !intersectsViewport(el, readCache.getRect(el)!)) return false;
-    return true;
+    if (!hasRefId && !intersectsViewport(el, readCache.getRect(el)!)) return { include: false, role: null, interactive, tag };
+    return { include: true, role: getRole(el), interactive, tag };
+  }
+ // Only elements that fail every cheap gate consult the accessible name —
+ // for a typical excluded wrapper (plain div with no text/role) this branch
+ // is exactly what decides exclusion, and for a text-bearing generic element
+ // it is what includes it (both deferred until here, not for every node).
+  const name = computeName();
+  if (name.length > 0) {
+    if (isLikelyHidden(el)) return { include: false, role: null, interactive, tag };
+    readCache.batchRead(el);
+    if (!hasRefId && !intersectsViewport(el, readCache.getRect(el)!)) return { include: false, role: null, interactive, tag };
+    return { include: true, role: getRole(el), interactive, tag };
   }
   const role = getRole(el);
   if (role !== "generic" && role !== "image") {
-    if (isLikelyHidden(el)) return false;
-    return true;
+    if (isLikelyHidden(el)) return { include: false, role, interactive, tag };
+    return { include: true, role, interactive, tag };
   }
-  return false;
+  return { include: false, role, interactive, tag };
 }
 
 /** Viewport gate for the automatic AX channel. The IntersectionObserver
@@ -380,11 +427,28 @@ function buildTree(
   if (depth > maxDepth) return;
   if (!el || !el.tagName) return;
 
-  const name = getName(el, labelMap);
-  const included = shouldInclude(el, filter, !!refId, name, readCache) || (!!refId && depth === 0);
+ // Compute role/interactivity/tag once per node inside `shouldInclude` and
+ // thread the struct through — `getRole`/`isInteractive` are NOT called again
+ // below for included nodes (each was 1 extra call per element before the
+ // hoist). The name is fetched lazily via the memoized `computeName` thunk so
+ // `getName` never runs for elements excluded by the cheap gates; it runs at
+ // most once per node (either for the name-gate decision or for emission).
+  let name = "";
+  let nameComputed = false;
+  const computeName = () => {
+    name = getName(el, labelMap);
+    nameComputed = true;
+    return name;
+  };
+  const info = shouldInclude(el, filter, !!refId, readCache, computeName);
+  const included = info.include || (!!refId && depth === 0);
 
   if (included) {
-    const role = getRole(el);
+    if (!nameComputed) computeName();
+    // The refId-root escape below forces inclusion even when `info.include`
+    // is false, in which case `info.role` was intentionally not computed —
+    // derive it here (single element, not the hot path).
+    const role = info.role ?? getRole(el);
     const displayName = escapeAttributeValue(name.substring(0, NAME_MAX_LENGTH));
     const indent = " ".repeat(depth);
 
@@ -424,7 +488,10 @@ function buildTree(
  // Surface a curated set of interactive state attributes so the navigator LLM
  // can avoid clicking disabled controls or mishandling collapsed/expanded
  // elements. Additive — emitted only when present (mirrors the indexed tree).
-    if (isInteractive(el)) {
+ // `info.interactive` is the hoisted `isInteractive` result — computed once
+ // per node in `shouldInclude` (it is the honest value even for the
+ // forced-inclusion refId root, matching the pre-refactor re-check).
+    if (info.interactive) {
       for (const stateAttr of ["disabled", "aria-disabled", "aria-expanded", "aria-checked", "aria-selected", "readonly"] as const) {
         if (!el.hasAttribute(stateAttr)) continue;
         const raw = el.getAttribute(stateAttr) ?? "";
@@ -434,7 +501,7 @@ function buildTree(
     lines.push(line);
 
  // For <select> (non-sensitive), emit child <option> elements.
-    if (el.tagName.toLowerCase() === "select" && !isSensitive(el)) {
+    if (info.tag === "select" && !isSensitive(el)) {
       const select = el as HTMLSelectElement;
       for (const option of Array.from(select.options)) {
         let optLine = " ".repeat(depth + 1) + "option";
@@ -450,7 +517,7 @@ function buildTree(
   // Recurse into children (skip <option> children of non-sensitive <select> —
   // they were already emitted explicitly above to avoid duplication).
   if (depth < maxDepth && absDepth < MAX_ABSOLUTE_DEPTH) {
-    if (el.tagName.toLowerCase() !== "select") {
+    if (info.tag !== "select") {
       // firstChild/nextSibling instead of `el.children` so we never
       // instantiate the live children collection on body (jsdom re-snapshots
       // it on every child mutation — O(n^2) for bulk appends, see
