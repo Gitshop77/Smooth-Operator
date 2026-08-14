@@ -6,7 +6,12 @@
  * `extractBrowserState` consumes them on the next extraction to re-serialize
  * ONLY the dirty subtrees and splice the results into the previous walk's
  * elements/lines arrays — non-dirty regions keep their cached serialization
- * byte-for-byte (and their element indices).
+ * (and element indices), modulo the new-element `*` marker: a cached line is
+ * re-emitted with its `*` stripped, since an element that existed in the
+ * previous walk is definitionally not new. After a partial walk, only the
+ * re-walked subtrees' regions remain valid (a size-changing splice
+ * invalidates the older coordinates of every untouched region), so a later
+ * mutation elsewhere fails closed to a full walk.
  *
  * Fallbacks (fail-closed):
  *  - epoch changed but NO dirty roots recorded (explicit bump / observer gap)
@@ -143,10 +148,11 @@ describe("partial re-walk (dirty-subtree splice)", () => {
     // The changed text is present, the old one gone.
     expect(second.elementsText).toContain("New text");
     expect(second.elementsText).not.toContain("Old text");
-    // Untouched regions are byte-identical (substring equality against the
-    // previous serialization) and keep their element indices.
+    // Untouched regions keep their cached bytes — modulo the new-element `*`
+    // marker, which is stripped from re-emitted cached lines (b1 existed in
+    // the previous walk, so it is not new) — and their element indices.
     const secondLines = second.elementsText.split("\n");
-    expect(secondLines[0]).toBe(firstLines[0]);
+    expect(secondLines[0]).toBe('[1]<button id="b1" role="button" />');
     expect(secondLines[1]).toBe(firstLines[1]);
     expect(second.elements.map((e) => e.index)).toEqual([1, 2]);
     expect(second.elements.map((e) => e.tag)).toEqual(["button", "button"]);
@@ -172,25 +178,70 @@ describe("partial re-walk (dirty-subtree splice)", () => {
     expect(second.elementsText).not.toContain("[1]<button");
   });
 
-  it("supports repeated partial re-walks targeting previously spliced subtrees", async () => {
+  it("a size-changing partial invalidates stale ranges; a later mutation elsewhere fails closed to a full walk", async () => {
     document.body.innerHTML =
-      '<div id="l"><button id="a">A</button></div><div id="r"><button id="b">B</button></div>';
+      '<div id="l"><button id="a">Alpha</button></div><div id="r"><button id="b">Bravo</button></div>';
     extractBrowserState([]);
     await settleDom();
 
-    document.getElementById("a")!.textContent = "A2";
+    // SIZE-CHANGING partial first: a new button grows div#l's subtree
+    // (1 of 2 elements dirty → 50% → partial re-walk). The splice shifts
+    // every later region's coordinates.
+    const fresh = document.createElement("button");
+    fresh.id = "f";
+    fresh.textContent = "Fresh";
+    document.getElementById("l")!.appendChild(fresh);
     await tick();
     const second = extractBrowserState([]);
-    expect(second.elementsText).toContain("A2");
+    expect(second.elementsText).toContain("Fresh");
+    expect(second.elements.map((e) => e.index)).toEqual([1, 3, 2]);
 
-    // A later mutation in the OTHER subtree is still a partial re-walk.
-    document.getElementById("b")!.textContent = "B2";
+    // A later mutation in the OTHER subtree: its range was recorded in the
+    // OLD arrays' coordinates and is now stale — splicing at it would corrupt
+    // the arrays (lost/duplicated subtrees). It must fail closed to a full
+    // walk, whose output is correct by construction.
+    document.getElementById("b")!.textContent = "Bravo2";
     await tick();
     const batchSpy = vi.spyOn(ReadCache.prototype, "batchRead");
     const third = extractBrowserState([]);
-    expect(batchSpy).toHaveBeenCalledTimes(1);
-    expect(third.elementsText).toContain("B2");
+    // Full walk: every element node visited (div#l, a, f, div#r, b).
+    expect(batchSpy).toHaveBeenCalledTimes(5);
+    expect(third.elements.map((e) => e.index)).toEqual([1, 2, 3]);
+    expect(third.elementsText).toContain("Bravo2");
+    expect(third.elementsText).toContain("Fresh");
+    expect(third.elementsText.match(/id="b"/g)).toHaveLength(1);
+    expect(third.elementsText.match(/id="f"/g)).toHaveLength(1);
+  });
+
+  it("a shrink partial also invalidates later regions (no duplicates, no lost subtrees)", async () => {
+    document.body.innerHTML =
+      '<div id="l"><button id="a">Alpha</button></div><div id="m"><button id="c">Gamma</button></div><div id="r"><button id="b">Bravo</button></div>';
+    extractBrowserState([]);
+    await settleDom();
+
+    // SHRINK partial: removing #a shrinks div#l's subtree (1 of 3 elements
+    // dirty → ≤50% → partial re-walk).
+    document.getElementById("a")!.remove();
+    await tick();
+    const batchSpy2 = vi.spyOn(ReadCache.prototype, "batchRead");
+    const second = extractBrowserState([]);
+    expect(batchSpy2).toHaveBeenCalledTimes(1);
+    expect(second.elements.map((e) => e.index)).toEqual([2, 3]);
+    expect(second.elementsText).not.toContain("Alpha");
+
+    // Mutation in the LAST subtree: its range is stale (recorded when the
+    // lines array was longer); splicing there would duplicate #b. Fail
+    // closed to a full walk.
+    document.getElementById("b")!.textContent = "Bravo2";
+    await tick();
+    batchSpy2.mockClear();
+    const batchSpy = vi.spyOn(ReadCache.prototype, "batchRead");
+    const third = extractBrowserState([]);
+    expect(batchSpy).toHaveBeenCalledTimes(5);
     expect(third.elements.map((e) => e.index)).toEqual([1, 2]);
+    expect(third.elementsText).toContain("Bravo2");
+    expect(third.elementsText).toContain("Gamma");
+    expect(third.elementsText.match(/id="b"/g)).toHaveLength(1);
   });
 
   it("falls back to a full walk when more than half of the elements are dirty", async () => {
@@ -245,12 +296,16 @@ describe("partial re-walk (dirty-subtree splice)", () => {
 
     const second = extractBrowserState([]);
     // The new button is the only new element, marked * at its appended index;
-    // the re-serialized #a keeps its index without a stale *; the untouched
-    // #b line is byte-identical to the previous walk's.
+    // the re-serialized #a keeps its index without a * (hash matched); the
+    // untouched #b line is re-emitted WITHOUT the stale * it was written with
+    // (it existed in the previous walk, so it is not new) — but is otherwise
+    // unchanged.
     expect(second.newElementCount).toBe(1);
     expect(second.elementsText).toContain("*[3]<button role=\"button\" />");
     expect(second.elementsText).toContain("\t\t[1]<button id=\"a\" role=\"button\" />");
     expect(second.elementsText).not.toContain("*[1]<button");
-    expect(second.elementsText).toContain(first.elementsText.split("\n")[1]);
+    expect(second.elementsText).toContain('\t\t[2]<button id="b" role="button" />');
+    expect(second.elementsText).not.toContain("\t\t*[2]<button");
+    expect(second.elementsText).toContain("\t\t\t\tBravo");
   });
 });

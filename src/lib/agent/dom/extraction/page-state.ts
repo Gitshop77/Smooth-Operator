@@ -417,7 +417,14 @@ let snapshotCacheText: string | null = null;
  */
 let cachedElements: ExtractedElement[] = [];
 let cachedLines: string[] = [];
-/** Output regions recorded by the last walk (see {@link WalkRange}). */
+/**
+ * Output regions recorded by the last walk (see {@link WalkRange}). After a
+ * FULL walk this covers every element (all coordinates current). After a
+ * PARTIAL walk it covers ONLY the re-walked dirty subtrees — a size-changing
+ * splice invalidates the older coordinates of every untouched region, so
+ * they are deliberately dropped (fail closed: a later mutation inside one
+ * hits the `previousRanges` gate and falls back to a full walk).
+ */
 let previousRanges: WeakMap<Element, WalkRange> = new WeakMap();
 /** Regions being recorded by the walk in progress (published on completion). */
 let currentWalkRanges: WeakMap<Element, WalkRange> = new WeakMap();
@@ -618,6 +625,15 @@ function tryPartialExtract(
   if (dirtyRoots.length === 0) return null;
   if (cachedElements.length === 0 || cachedLines.length === 0) return null;
 
+  // Fresh range map for this attempt: a partial splice with a size delta
+  // invalidates every range recorded in the older arrays' coordinates
+  // (sub-walks only refresh the re-walked elements' regions). Reusing the
+  // stale map would let a later partial splice at a wrong position pass the
+  // `previousRanges` gate, so fail closed instead — untouched subtrees lose
+  // their ranges and fall back to a full walk. The full-walk path also
+  // resets it (its own fresh map).
+  currentWalkRanges = new WeakMap();
+
   const withRanges: { root: Element; range: WalkRange }[] = [];
   for (const root of dirtyRoots) {
     const range = previousRanges.get(root);
@@ -707,7 +723,15 @@ function tryPartialExtract(
   if (projectedLines > MAX_LINES || projectedElements > MAX_ELEMENTS) return null;
 
   // Splice back-to-front so an earlier splice never shifts a later region's
-  // insertion point (regions are pairwise disjoint).
+  // insertion point (regions are pairwise disjoint). Cached lines are
+  // re-emitted WITHOUT the `*` new-element marker first: an element that
+  // existed in the previous walk is definitionally not new (a line written
+  // while it was then-new would otherwise scream "new" every step forever);
+  // the freshly re-serialized sub-walk lines carry their naturally-computed
+  // markers and are spliced in afterwards.
+  for (let i = 0; i < cachedLines.length; i++) {
+    cachedLines[i] = cachedLines[i].replace(/^(\t*)\*/, "$1");
+  }
   subWalks.sort((a, b) => b.range.startLine - a.range.startLine);
   for (const s of subWalks) {
     cachedLines.splice(s.range.startLine, s.range.endLine - s.range.startLine, ...s.lines);
