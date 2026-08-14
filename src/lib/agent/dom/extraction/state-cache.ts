@@ -65,7 +65,7 @@
  */
 import { getDomEpoch, isMutationSignalArmed } from "../mutation-signal";
 import { domFingerprint } from "../../tools/helpers/dom-fingerprint";
-import { extractBrowserState } from "./page-state";
+import { extractBrowserState, setStateCacheInvalidator } from "./page-state";
 import type { BrowserState, ExtractedElement, TabInfo } from "../../types";
 
 /** The JSON-safe subset of {@link BrowserState} the cache holds. */
@@ -229,3 +229,12 @@ export function invalidateStateCache(): void {
   lastScrollHeight = -1;
   lastViewportHeight = -1;
 }
+
+// The cache layer depends on the raw extractor (`./page-state`), so the
+// invalidation direction is inverted to keep the graph acyclic: register this
+// module's invalidator into page-state's hook at module init. Module
+// evaluation order guarantees the registration runs before any call into the
+// extractor (imports evaluate before this module's body; both modules share
+// one instance per graph). In raw-only graphs page-state's hook stays null
+// and invalidation is a no-op — there is no snapshot to drop there anyway.
+setStateCacheInvalidator(invalidateStateCache);

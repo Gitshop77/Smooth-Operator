@@ -15,7 +15,20 @@ import { escapeAttr, attrString, buildPageInfo, buildCompoundChildren } from "./
 import { ReadCache, getSharedReadCache } from "../utils/read-cache";
 import { bumpDomEpoch, getDomEpoch, installMutationSignal, isMutationSignalArmed } from "../mutation-signal";
 import { getViewportTracker } from "../viewport-tracker";
-import { invalidateStateCache } from "./state-cache";
+
+/**
+ * Inversion of the state-cache dependency: the skip-if-unchanged cache
+ * (`./state-cache`) registers its invalidator here, so this extraction-base
+ * module never imports the cache layer (a `state-cache -> page-state`
+ * dependency already exists for the raw extractor — importing back would form
+ * a runtime import cycle). Null in graphs where the cache is not loaded
+ * (raw-only callers): invalidation is then a no-op, which is correct because
+ * there is no snapshot to drop.
+ */
+let invalidateStateCacheHook: (() => void) | null = null;
+export function setStateCacheInvalidator(invalidator: () => void): void {
+  invalidateStateCacheHook = invalidator;
+}
 
 export function isVisible(el: HTMLElement): boolean {
   return isVisibleFull(el);
@@ -379,7 +392,7 @@ export function resetDomBaseline(): void {
   // observer's records land (the epoch bump below also invalidates it, but
   // the explicit drop covers the unarmed-signal case where the epoch is
   // frozen).
-  invalidateStateCache();
+  invalidateStateCacheHook?.();
   cachedHashes = new Set();
   // The DOM baseline changed (e.g. after pageChanged) — drop the identity
   // memo so nth-of-type indices are recomputed against the new structure,
@@ -409,7 +422,7 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
     // observation cache's tabs/url/title legs — drop the snapshot so the
     // next cachedExtractBrowserState falls back to a fresh extract instead
     // of serving a state whose tab evidence was never re-verified.
-    invalidateStateCache();
+    invalidateStateCacheHook?.();
   }
   // Ensure the DOM-epoch mutation signal is installed (idempotent) so the
   // persistent caches below can rely on it — covers in-page demo mode and
