@@ -1,7 +1,7 @@
 /**
  * Vision Assistant — pure download-progress metrics.
  *
- * Small, dependency-free helpers for the model-download UX (the ~3.5 GB,
+ * Small, dependency-free helpers for the model-download UX (the ~649 MB,
  * multi-file Local Vision download): a rolling-window transfer-rate/ETA tracker, a
  * monotonic global-percent helper, and a percentage/time emission throttle.
  *

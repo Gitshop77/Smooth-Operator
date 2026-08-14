@@ -46,6 +46,7 @@ import {
   setVisionCacheFingerprint,
   clearVisionCache,
   ADAPTIVE_VISION_IDLE_STEPS,
+  computeVisionWarmHoldMs,
 } from "./run-helpers-utils";
 import {
   getCurrentRunController,
@@ -185,6 +186,9 @@ export function getCurrentRunAbortSignal(): AbortSignal | null {
 }
 
 export function resetVisionInitFlagForNewRun(): void {
+  // A new run takes over; cancel any pending idle-offload timer from a prior
+  // run's warm-hold so it cannot tear down an assistant this run may use.
+  clearVisionWarmHold();
   // Claim ownership of the (possibly still-initialized) shared assistant:
   // any in-flight teardown from a previous run sees the generation change and
   // leaves the instance in place for this run.
@@ -199,6 +203,8 @@ export function clearVisionElementsCacheForNewRun(): void {
 }
 
 export async function teardownScheduledVision(): Promise<void> {
+  // Explicit teardown: cancel any pending idle-offload timer first.
+  clearVisionWarmHold();
   if (visionInitPromise) {
     await visionInitPromise.catch(() => {});
   }
@@ -217,6 +223,45 @@ export async function teardownScheduledVision(): Promise<void> {
   if (va) {
     await va.cleanup();
   }
+}
+
+// ─── Warm-hold / auto-offload ─────────────────────────────────────────────────
+// The 450M model is small and fast, so it can be kept resident while in use,
+// then released after a short idle window. Each detection re-arms the timer;
+// if nothing uses vision for `computeVisionWarmHoldMs(detectLatency)` a cleanup
+// is scheduled. A slow (expensive) load yields a longer hold so the offload/
+// reload tax is amortized; a fast load offloads sooner.
+let visionWarmHoldTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function clearVisionWarmHold(): void {
+  if (visionWarmHoldTimer) {
+    clearTimeout(visionWarmHoldTimer);
+    visionWarmHoldTimer = null;
+  }
+}
+
+/** Schedule an idle offload after `computeVisionWarmHoldMs(loadMs)`. */
+export function armVisionWarmHold(loadMs: number): void {
+  clearVisionWarmHold();
+  // Nothing to hold if there is no assistant to keep warm.
+  if (!globalVisionAssistant || visionAssistantGeneration !== visionGeneration) return;
+  const holdMs = computeVisionWarmHoldMs(loadMs);
+  visionWarmHoldTimer = setTimeout(() => {
+    visionWarmHoldTimer = null;
+    offloadIdleVision();
+  }, holdMs);
+}
+
+/** Release the assistant after an idle window, guarded by generation ownership. */
+function offloadIdleVision(): void {
+  if (visionAssistantGeneration !== visionGeneration) return; // a newer run owns it
+  const va = globalVisionAssistant;
+  if (!va) return;
+  globalVisionAssistant = null;
+  visionAssistantGeneration = -1;
+  visionInitPromise = null;
+  visionInitFailed = false;
+  void va.cleanup().catch((e) => void safeLog("warn", "[vision] idle offload cleanup failed:", e));
 }
 
 let adaptiveVisionLastUsedStep = -1;
@@ -282,6 +327,9 @@ export async function handleDetectVisualRequest(
     // from the side panel (which has no LoopDeps context).
     const abortSignal = signal ?? getCurrentRunAbortSignal() ?? undefined;
     let visionDetections: Awaited<ReturnType<typeof va.detect>>;
+    // Time the detection so the warm-hold (idle-offload) window scales with the
+    // reload cost: a fast run offloads sooner, a slow one stays warm longer.
+    const detectStart = performance.now();
     try {
       visionDetections = await va.detect(screenshotDataUrl, abortSignal);
     } catch (e) {
@@ -289,6 +337,9 @@ export async function handleDetectVisualRequest(
       void safeLog("warn", "[vision] detect failed:", e);
       visionDetections = [];
     }
+    // Vision was used — keep it warm for an idle window proportional to how long
+    // (re)loading costs, then auto-offload (each later detection re-arms it).
+    armVisionWarmHold(performance.now() - detectStart);
     assertAuthorized?.();
     clearVisionCache();
     const { mergeDetections } = await loadVisionAssistant();

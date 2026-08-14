@@ -80,3 +80,27 @@ export function clearVisionCache(): void {
 }
 
 export const ADAPTIVE_VISION_IDLE_STEPS = 5;
+
+// ─── Warm-hold / auto-offload policy ─────────────────────────────────────────
+// Local Vision is fast enough now (LFM2.5-VL-450M q4, ~649 MB) that it can be
+// kept resident while in use, but it should still release the WebGPU sessions
+// after a short idle window so it is not held forever. The hold length scales
+// with how expensive a reload is: a slow load pays a high offload/reload tax,
+// so it stays warm longer; a fast load can offload sooner.
+
+export const VISION_WARM_HOLD_DEFAULT_MS = 120_000; // 2 minutes
+const VISION_WARM_HOLD_SLOW_LOAD_MS = 300_000; // 5 minutes when (re)load is expensive
+const VISION_SLOW_LOAD_THRESHOLD_MS = 4_000; // init/detect > 4s → treat as slow
+
+/**
+ * How long to keep the Local Vision assistant resident after its last use
+ * before auto-offloading, scaled by how expensive a (re)load is. A load at or
+ * below `VISION_SLOW_LOAD_THRESHOLD_MS` is the cheap fast path, so the 2-minute
+ * hold is used; a slower load gets the longer hold to amortize the reload tax.
+ */
+export function computeVisionWarmHoldMs(loadMs: number | null): number {
+  if (loadMs !== null && loadMs > VISION_SLOW_LOAD_THRESHOLD_MS) {
+    return VISION_WARM_HOLD_SLOW_LOAD_MS;
+  }
+  return VISION_WARM_HOLD_DEFAULT_MS;
+}

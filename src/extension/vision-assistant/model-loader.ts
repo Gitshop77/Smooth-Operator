@@ -1,7 +1,7 @@
 /**
  * Vision Assistant — model loader.
  *
- * Downloads the ~3.5 GB LFM2.5-VL-3B Q4 ONNX model in 48 MB chunks with retry.
+ * Downloads the ~649 MB LFM2.5-VL-450M Q4 ONNX model in 48 MB chunks with retry.
  * Caches in the browser Cache Storage API (persists across browser restarts
  * AND extension updates — the cache is scoped to the extension origin).
  *
@@ -177,7 +177,7 @@ export class ModelLoader {
     // global fields below.
     const totalFiles = pending.length;
     // Best-effort per-file size used BEFORE a file's probe reveals its exact
-    // total (Content-Range). ~210 MB ≈ the ~3.5 GB model spread over up to 17 files;
+    // total (Content-Range). ~210 MB ≈ the ~649 MB model spread over up to 13 files;
     // the estimate is refined to the average of known totals as soon as each
     // probe returns, and becomes exact once every file has been probed.
     const UNKNOWN_FILE_BYTES = 210 * 1024 * 1024;

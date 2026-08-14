@@ -377,7 +377,7 @@ const AlertSendKeysSchema = z.object({
   text: boundedText(MAX_FREE_TEXT_CHARS).describe("The text to stage for the next prompt dialog."),
 });
 
-/** Run local vision detection (LFM2.5-VL-3B) on the current screenshot. */
+/** Run local vision detection (LFM2.5-VL-450M) on the current screenshot. */
 const DetectVisualSchema = z.object({
   type: z.literal("detect_visual").describe("Run local vision detection on the current screenshot to find UI elements that aren't in the DOM tree (Canvas, WebGL, custom widgets, image-based buttons). Returns [v1], [v2] etc. entries you can click with {\"type\":\"click\",\"index\":\"v1\"}. Use ONLY when you can see something visually on the page but can't find it in the elements list. Takes 2-5 seconds. Only available when Local Vision Assistant is enabled in AI Adaptive mode."),
   query: boundedText(MAX_FREE_TEXT_CHARS).describe("What you're looking for (e.g. 'submit button', 'login form', 'canvas dropdown')."),

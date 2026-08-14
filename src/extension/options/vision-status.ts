@@ -5,7 +5,7 @@
  * a badge + progress bar. Previously DEAD UI (permanently `display:none`) — now
  * driven by the radio group in the Agent tab.
  *
- * P3: the 3.5 GB download confirmation uses the styled modal (not native
+ * P3: the model download confirmation uses the styled modal (not native
  * `confirm()`); the status palette is imported from `./status` (single source);
  * visibility uses the `is-hidden` class instead of inline `style.display`.
  */
@@ -353,7 +353,7 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage?.addListener) {
     const { visionMode, enableLocalVision } = await chrome.storage.local.get(["visionMode", "enableLocalVision"]);
     const mode = (visionMode as string) || (enableLocalVision === true ? "always" : "disabled");
     if (mode === "disabled") return;
- // Do NOT auto-download the ~3.5 GB model purely because the options page
+ // Do NOT auto-download the ~649 MB model purely because the options page
  // loaded with Local Vision enabled. Only initialize when the model is
  // already cached — loading the cached ONNX sessions is cheap and has no
  // bandwidth/disk cost. The actual download stays gated behind the

@@ -1,5 +1,5 @@
 /**
- * Vision Assistant — regression tests for the LFM2.5-VL-3B (ONNX Q4 WebGPU)
+ * Vision Assistant — regression tests for the LFM2.5-VL-450M (ONNX Q4 WebGPU)
  * engine: grounding parsing, coordinate mapping, the model-weight integrity
  * guard (hash + size pins), download primitives, and the serialization guards
  * that feed CDP click coordinates.
@@ -719,7 +719,7 @@ describe("VisionAssistant init", () => {
 
       const mod = await import("@huggingface/transformers");
       expect(mod.AutoConfig.from_pretrained).toHaveBeenCalledWith(
-        expect.stringContaining("LFM2.5-VL-3B-ONNX"),
+        expect.stringContaining("LFM2.5-VL-450M-ONNX"),
         expect.objectContaining({ revision: expect.any(String), device: "webgpu" }),
       );
       // Fail-closed: nothing may be fetched from the network.

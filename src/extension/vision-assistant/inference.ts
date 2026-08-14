@@ -1,11 +1,11 @@
 /**
  * Vision Assistant — main inference engine.
  *
- * Runs LiquidAI LFM2.5-VL-3B (ONNX Q4) locally on WebGPU via transformers.js
+ * Runs LiquidAI LFM2.5-VL-450M (ONNX Q4) locally on WebGPU via transformers.js
  * and answers grounding queries on screenshots, returning 0-1000-normalized
  * bounding boxes converted to pixel coordinates.
  *
- * Ported from the LiquidAI/LFM2.5-VL-3B-WebGPU Space engine
+ * Ported from the LiquidAI/LFM2.5-VL-450M-WebGPU Space engine
  * (`src/engines/onnx-transformers-engine.js`) and adapted to this extension's
  * model loader (SHA-256/size-verified, Cache-Storage-persisted weights) and the
  * existing `VisionAssistant` public API.
@@ -96,6 +96,37 @@ async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
   }
 }
 
+/**
+ * Map opaque transformers.js / onnxruntime failure messages to actionable ones
+ * for a human, so a supply-chain-fail-closed or cache mismatch surfaces as a
+ * clear, recoverable error instead of a raw library message.
+ */
+export function friendlyVisionInitError(e: unknown): Error {
+  const raw = e instanceof Error ? e.message : String(e);
+  const m = raw.toLowerCase();
+  // transformers.js raises "both local and remote models are disabled" when it
+  // needs a file that is NOT in our verified custom cache and remote fetches are
+  // turned off (fail-closed). That means the download set is incomplete or the
+  // cache was partially wiped — the fix is a clean re-download of every pinned
+  // file, not a silent fetch of unverified weights.
+  if (/models (are|is) disabled|local models? is disabled|remote models? is disabled/i.test(m)) {
+    return new Error(
+      "Local Vision hit transformers.js' fail-closed guard: it tried to load a model file " +
+        "that is not in the verified cache (and network fetches are disabled). This is usually a " +
+        "partial/missing download for LFM2.5-VL-450M-ONNX (q4). Clear the model cache and retry, " +
+        "or re-select the vision mode in Options to re-download every pinned file.",
+    );
+  }
+  if (/404|not found|not cached|resolve|revision/i.test(m)) {
+    return new Error(
+      "Local Vision could not load a pinned LFM2.5-VL-450M-ONNX file (not cached / wrong revision). " +
+        "Re-select the vision mode in Options to re-download, or clear the extension's site data if " +
+        "a stale cache (from the older 3B model) is present.",
+    );
+  }
+  return e instanceof Error ? e : new Error(raw);
+}
+
 export class VisionAssistant {
   private model: ModelLike | null = null;
   private processor: ProcessorLike | null = null;
@@ -105,7 +136,7 @@ export class VisionAssistant {
   private statusCallback: StatusCallback | null = null;
   /**
    * Re-entrancy guard for `init()`. Two concurrent `init()` callers would both
-   * pass the `isReady` check (neither is ready yet) and duplicate the ~3.5 GB
+   * pass the `isReady` check (neither is ready yet) and duplicate the ~649 MB
    * download + leak a WebGPU session. We cache the in-flight promise and return
    * it; the promise is cleared on settle (success or failure) so a failed init
    * can be retried.
@@ -232,7 +263,7 @@ export class VisionAssistant {
         embed_tokens: this.embeddingPrecision,
       };
       const use_external_data_format: Record<string, number> = {
-        "decoder_model_merged_q4.onnx": 5,
+        "decoder_model_merged_q4.onnx": 1,
         "vision_encoder_q4.onnx": 1,
         ...(this.embeddingPrecision === "fp16" ? { "embed_tokens_fp16.onnx": 1 } : {}),
       };
@@ -278,12 +309,12 @@ export class VisionAssistant {
         AutoModelForImageTextToText.from_pretrained(MODEL_REPO, options),
       ]) as unknown as [ProcessorLike, ModelLike];
 
-      this.setStatus("ready", "Local Vision model ready (LFM2.5-VL-3B · Q4 · WebGPU)");
+      this.setStatus("ready", "Local Vision model ready (LFM2.5-VL-450M · Q4 · WebGPU)");
     } catch (e) {
       // If init() threw partway through, a partially-created session/model
       // would leak GPU memory. cleanup() is idempotent and releases sessions.
       await this.cleanup();
-      this.setStatus("error", e instanceof Error ? e.message : String(e));
+      this.setStatus("error", friendlyVisionInitError(e).message);
       throw e;
     }
   }

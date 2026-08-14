@@ -7,7 +7,7 @@
  * fallback for runs where the model skips the JSON wrapper — and normalizes
  * 0-1 and 0-1000 coordinates to canonical 0-1000 ints.
  *
- * Ported from the LiquidAI/LFM2.5-VL-3B-WebGPU Space (`src/grounding.js`) so
+ * Ported from the LiquidAI/LFM2.5-VL-450M-WebGPU Space (`src/grounding.js`) so
  * the behavior matches the model's reference implementation exactly.
  */
 
