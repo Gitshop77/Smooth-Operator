@@ -15,6 +15,7 @@ import { escapeAttr, attrString, buildPageInfo, buildCompoundChildren } from "./
 import { ReadCache, getSharedReadCache } from "../utils/read-cache";
 import { bumpDomEpoch, getDomEpoch, installMutationSignal, isMutationSignalArmed } from "../mutation-signal";
 import { getViewportTracker } from "../viewport-tracker";
+import { invalidateStateCache } from "./state-cache";
 
 export function isVisible(el: HTMLElement): boolean {
   return isVisibleFull(el);
@@ -373,6 +374,12 @@ function commitIndexedCache<T>(previous: Record<number, T>, next: Record<number,
 }
 
 export function resetDomBaseline(): void {
+  // The DOM baseline changed (e.g. after pageChanged) — the skip-if-unchanged
+  // observation cache must not serve its pre-change snapshot even before the
+  // observer's records land (the epoch bump below also invalidates it, but
+  // the explicit drop covers the unarmed-signal case where the epoch is
+  // frozen).
+  invalidateStateCache();
   cachedHashes = new Set();
   // The DOM baseline changed (e.g. after pageChanged) — drop the identity
   // memo so nth-of-type indices are recomputed against the new structure,
@@ -395,6 +402,15 @@ export function pageSnapshotChunk(offset?: number): SnapshotWindow | null {
 }
 
 export function extractBrowserState(tabs: TabInfo[]): BrowserState {
+  if (tabs.length === 0) {
+    // A caller invoking the RAW extractor with empty tab evidence (the
+    // executor's action-time fallback in content-utils, in-page contexts
+    // without a tab source) is a context that proves nothing about the
+    // observation cache's tabs/url/title legs — drop the snapshot so the
+    // next cachedExtractBrowserState falls back to a fresh extract instead
+    // of serving a state whose tab evidence was never re-verified.
+    invalidateStateCache();
+  }
   // Ensure the DOM-epoch mutation signal is installed (idempotent) so the
   // persistent caches below can rely on it — covers in-page demo mode and
   // tests; the content script also installs it at module init.

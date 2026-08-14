@@ -1041,7 +1041,11 @@ async function runNavigatorChallenge(
       state.step++;
       return { kind: "abort", result: { kind: "continue" } };
     }
-    Object.assign(browserState, reObserved.state);
+    // REBIND instead of Object.assign: a cache-served re-observation is a
+    // DEEP-FROZEN snapshot (skip-if-unchanged extraction), and assigning into
+    // a frozen target throws. The caller below re-reads challenge.data, so
+    // the rebind is the only consumer of the merged object.
+    browserState = reObserved.state;
     tabs = reObserved.tabs;
     onEvent({ type: "resumed", step: state.step });
     onEvent({ type: "info", message: `Anti-bot challenge cleared — resuming.` });

@@ -1,4 +1,5 @@
 import { extractBrowserState, getSelectorMap, getElementIdentities } from "@/lib/agent/dom/extractor";
+import { cachedExtractBrowserState } from "@/lib/agent/dom/extraction/state-cache";
 import { generateAccessibilityTree } from "@/lib/agent/dom/ax-tree";
 import { executeAction } from "@/lib/agent/tools/executor";
 import { setSecretsResolvedExternally } from "@/lib/agent/secrets";
@@ -215,7 +216,13 @@ export function handleExtractState(
 ): void {
   try {
     const tabs: TabInfo[] = msg.tabs || [];
-    const state = extractBrowserState(tabs);
+    // Skip-if-unchanged extraction: on a page the mutation signal AND the
+    // fingerprint prove unchanged since the last extract, the deep-frozen
+    // cached snapshot is served without a DOM walk (see
+    // `extraction/state-cache.ts` — stale observation is deliberate for
+    // style-only/selection/hover/input-value changes). elementRects below are
+    // built from the snapshot's JSON-safe rects, never by re-reading the DOM.
+    const state = cachedExtractBrowserState(tabs);
     const depth = clampInt(msg.depth, 15, 1, 50);
     const maxLength = clampInt(msg.maxLength, 50_000, 1, 1_000_000);
     const includeAxTree = msg.includeAxTree ?? true;
