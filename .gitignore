@@ -62,3 +62,4 @@ Thumbs.db
 
 # git worktrees (never commit worktree contents)
 .worktrees/
+node_modules
