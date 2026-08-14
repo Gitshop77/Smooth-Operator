@@ -10,6 +10,7 @@ import { substituteSecrets, redactSecrets } from "@/lib/agent/secrets";
 import type { ActionResult, AgentAction, BrowserState, LogEvent, TabInfo } from "@/lib/agent/types";
 import type { AgentMode } from "@/lib/agent/modes";
 import { getDomainConfig, type RunState } from "./state-store";
+import { resolveScreenshotPolicy } from "./screenshot-policy";
 import {
   canCurrentRunDispatch,
   type RunDispatchToken,
@@ -18,7 +19,6 @@ import {
 import {
   ensureContent,
   sendMessageWithTimeout,
-  getScreenshotQuality,
   withPageDebugger,
   sendDebuggerCommandWithTimeout,
   throwIfAborted,
@@ -92,13 +92,16 @@ export async function extractStateFromTab(
   if (includeScreenshot) {
     try {
       throwIfAborted(signal);
-      const screenshotFormat = await getScreenshotQuality();
+      // One policy for capture AND annotation: the CDP quality (0-100) that
+      // captured the JPEG and the dimension cap the annotator re-encodes at,
+      // so a configured quality/maxDimension can't drift between the two.
+      const policy = await resolveScreenshotPolicy();
       throwIfAborted(signal);
       const dataUrl = await withPageDebugger(tabId, async () => {
         const result = await sendDebuggerCommandWithTimeout<{ data?: string }>(
           tabId,
           "Page.captureScreenshot",
-          { format: "jpeg", quality: screenshotFormat, captureBeyondViewport: false },
+          { format: "jpeg", quality: policy.quality, captureBeyondViewport: false },
         );
         if (!result?.data) throw new Error("Page.captureScreenshot returned no data");
         return `data:image/jpeg;base64,${result.data}`;
@@ -116,6 +119,11 @@ export async function extractStateFromTab(
           const dpr = (res.state as { devicePixelRatio?: number }).devicePixelRatio ?? 1;
           const annotated = await annotateScreenshot(dataUrl, elementRects as never, {
             scaleFactor: dpr,
+            // Settings store JPEG quality 0-100; canvasToDataUrl takes 0-1,
+            // so divide by 100 here. maxDimension applies the policy cap at
+            // annotation time, making any later normalize step a true no-op.
+            quality: policy.quality / 100,
+            maxDimension: policy.annotateMaxDimension,
             // NO refPrefix: the annotator's default label is the bare element
             // index (`refPrefix + String(el.index)`), which is exactly what the
             // navigator prompt promises — "numbered colored labels ... match the

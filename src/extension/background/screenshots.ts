@@ -192,11 +192,13 @@ export async function captureTabScreenshot(
       {
         format: "jpeg",
         quality,
-        // Capture only the VISIBLE viewport. CDP defaults `captureBeyondViewport`
-        // to true (full scrollable page) when not specified; the vision flow
-        // matches screenshots against `pixelRects` expressed in VIEWPORT coords,
-        // so a full-page image would misalign clicks (see header warning). Mirror
-        // the sibling capture in tab-manager.ts which passes the same flag.
+        // Capture only the VISIBLE viewport. CDP's protocol default for
+        // `captureBeyondViewport` is false (viewport-only); we pass it
+        // explicitly so the behavior is pinned. The vision flow matches
+        // screenshots against `pixelRects` expressed in VIEWPORT coords,
+        // so a full-page image would misalign clicks (see header warning).
+        // Mirror the sibling capture in tab-manager.ts which passes the same
+        // flag.
         captureBeyondViewport: false,
       },
     );

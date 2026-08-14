@@ -238,6 +238,35 @@ describe("drawing path", () => {
     expect(ctx.strokeStyle).toBe("#00ff00");
   });
 
+  test("re-encodes at the caller-provided JPEG quality (policy quality / 100)", async () => {
+    const ctx = makeContext();
+    const canvas = makeCanvas(ctx);
+    mockCreateCanvas.mockReturnValue(canvas as never);
+    mockLoadImage.mockResolvedValue(makeImage(200, 100));
+    const elements: AnnotatableElement[] = [
+      { index: 1, rect: { x: 0, y: 0, width: 50, height: 50 } },
+    ];
+
+    await annotateScreenshot(RAW, elements, { quality: 0.8 });
+
+    expect(canvas.convertToBlob).toHaveBeenCalledWith({ type: "image/jpeg", quality: 0.8 });
+  });
+
+  test("maxDimension option caps the canvas long edge at annotation time", async () => {
+    const ctx = makeContext();
+    const canvas = makeCanvas(ctx);
+    mockCreateCanvas.mockReturnValue(canvas as never);
+    mockLoadImage.mockResolvedValue(makeImage(400, 200));
+    const elements: AnnotatableElement[] = [
+      { index: 1, rect: { x: 0, y: 0, width: 50, height: 50 } },
+    ];
+
+    await annotateScreenshot(RAW, elements, { maxDimension: 100 });
+
+    expect(canvas.width).toBe(100);
+    expect(canvas.height).toBe(50);
+  });
+
   test("DEFAULT_ANNOTATE_PALETTE entries are all valid hex colors", () => {
     expect(DEFAULT_ANNOTATE_PALETTE).toHaveLength(12);
     for (const c of DEFAULT_ANNOTATE_PALETTE) {

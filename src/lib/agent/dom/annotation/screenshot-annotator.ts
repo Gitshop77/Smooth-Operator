@@ -124,6 +124,12 @@ interface AnnotateOptions {
    *  ~4× with zero grounding loss (grounding keys on the boxes/labels, which
    *  are scaled alongside). */
   maxDimension?: number;
+  /** JPEG quality (0–1) for the re-encode step. The settings store the
+   *  screenshot quality as 0–100 (`getScreenshotQuality`), so callers must
+   *  divide by 100 here — see `resolveScreenshotPolicy` in the background.
+   *  Default 0.85 when omitted (keeps the historical fixed quality for
+   *  callers that don't pass a policy). */
+  quality?: number;
 }
 
 /**
@@ -167,6 +173,17 @@ export async function annotateScreenshot(
       ? options.minSize
       : 5;
   const refPrefix = options?.refPrefix ?? "";
+ // Re-encode quality: must be a finite 0-1 value. A malformed caller (NaN,
+ // out-of-range) falls back to `undefined` so `canvasToDataUrl` keeps its
+ // 0.85 default rather than handing the encoder garbage.
+  const rawQuality = options?.quality;
+  const quality =
+    typeof rawQuality === "number" &&
+    Number.isFinite(rawQuality) &&
+    rawQuality > 0 &&
+    rawQuality <= 1
+      ? rawQuality
+      : undefined;
  // Multi-color mode: cycle through `boxColors` by index. Single-color mode:
  // use `boxColor` for every box. An empty / all-invalid `boxColors` array is
  // "no palette" (not a palette of length 0, which would yield `NaN` indices →
@@ -310,7 +327,7 @@ export async function annotateScreenshot(
       ctx.fillText(label, dx + 3 * scaleFactor * outScale, dy + 2 * scaleFactor * outScale);
     }
 
-    return await canvasToDataUrl(canvas, screenshotDataUrl);
+    return await canvasToDataUrl(canvas, screenshotDataUrl, quality);
   } catch {
  // Any drawing / encoding error → return the raw screenshot.
     return screenshotDataUrl;
