@@ -31,12 +31,14 @@ let lastChallengeKey: string | null = null;
  * Per-step observation payloads (interactive-element DOM text, accessibility
  * tree, screenshot) are bounded by hard caps so a misconfigured run can NEVER
  * send an unbounded payload to the provider. The cap VALUES live in
- * `deriveNavigatorObservationCapsV1` (prompt-token-budget.ts): the 128k
- * calibration defaults match `ELEMENTS_TEXT_CHAR_CAP` (60k chars), a 200k-char
- * AX tree cap, and a 1.5M-char screenshot cap; when the run's model context is
- * known (`config.contextTokens`), the caps are scaled down so a 64k-class model
- * degrades the OBSERVATION (truncate / drop + info event) instead of tripping
- * the fail-closed prompt-budget assert in the provider layer on every step.
+ * `deriveNavigatorObservationCapsV1` (prompt-token-budget.ts): the base caps
+ * are 24k chars of elements text, a 12k-char AX tree, and a 100k-char
+ * screenshot cap (the derived 128k FIT budget is 72,800 chars); when the run's
+ * model context is known (`config.contextTokens`), the caps are scaled down so
+ * a 64k-class model degrades the OBSERVATION (truncate / drop + info event)
+ * instead of tripping the fail-closed prompt-budget assert in the provider
+ * layer on every step. A 3M-char screenshot safety cap stays as the outer
+ * drop guard (corrupt/hostile captures are never re-encoded).
  */
 
 function abortError(signal?: AbortSignal): DOMException {
@@ -118,11 +120,26 @@ export async function prepareNavigatorRequest(
   // (identical behavior to the previous hard-coded constants).
   const caps = deriveNavigatorObservationCapsV1(state.config.contextTokens);
   const oneShotVisual = browserState.screenshotIsOneShot === true;
-  // A screenshot should ALWAYS be delivered whole — we never crop the page the
-  // model is reasoning about. The only safety gate is a wildly-oversized image
-  // (corrupt capture / hostile payload); that is dropped rather than silently
-  // truncating the viewport. The per-image token cost is accounted as a flat
-  // allowance in llm-direct's budget assert, not via a char cap here.
+  // The derived per-channel screenshot budget (caps.screenshotChars) is
+  // ENFORCED at every regime:
+  //  - 0 (sub-128k) → the screenshot is DROPPED from the main-LLM message (the
+  //    local-VLM path is unaffected — it is fed upstream of this loop). A
+  //    one-shot visual inspection is exempt: a model that explicitly asked for
+  //    pixels gets its frame, bounded at capture by the on-demand cap.
+  //  - 0 < caps.screenshotChars < screenshot.length (128k: 72,800; unknown:
+  //    100,000) → the screenshot is RESIZED to fit instead of shipped whole:
+  //    `normalizeScreenshotToViewport(dataUrl, quality, { maxBytes })` with
+  //    `maxBytes = floor(screenshotChars × 3/4)` (base64 is 4/3 chars per
+  //    byte) iterates JPEG quality down to 0.3 while keeping the full viewport
+  //    field of view. The real budget stays the flat `imageTokens` allowance
+  //    in llm-direct's assertPromptBudgetWithImage (default 4096); the resize
+  //    keeps shipped images inside it. The resize hook is `deps.normalizeScreenshot`
+  //    (extension: wraps normalizeScreenshotToViewport); when it is absent or
+  //    fails to shrink the frame, the screenshot is DROPPED — never shipped
+  //    over its derived cap.
+  //  - screenshot.length ≤ caps.screenshotChars → shipped whole, as before.
+  // The 3M-char safety cap is the OUTER guard: a wildly-oversized image
+  // (corrupt capture / hostile payload) is dropped rather than resized.
   const SCREENSHOT_SAFETY_CHAR_CAP = 3_000_000;
   const capPayload = (
     value: string | undefined,
@@ -144,15 +161,57 @@ export async function prepareNavigatorRequest(
       `(raw/fallback was ${navElementsText.length}).`,
   ) ?? navElementsText;
 
-  const screenshot = capPayload(
-    browserState.screenshot,
-    SCREENSHOT_SAFETY_CHAR_CAP,
-    "drop",
-    () =>
-      `Navigator screenshot dropped (${browserState.screenshot?.length} chars exceeds ` +
-      `the ${SCREENSHOT_SAFETY_CHAR_CAP}-char safety cap) — likely a corrupt or ` +
-      `hostile capture; keeping the prompt within the model's input budget.`,
-  );
+  let screenshot = browserState.screenshot;
+  if (screenshot && screenshot.length > SCREENSHOT_SAFETY_CHAR_CAP) {
+    state.onEvent({
+      type: "info",
+      message:
+        `Navigator screenshot dropped (${screenshot.length} chars exceeds ` +
+        `the ${SCREENSHOT_SAFETY_CHAR_CAP}-char safety cap) — likely a corrupt or ` +
+        `hostile capture; keeping the prompt within the model's input budget.`,
+    });
+    screenshot = undefined;
+  }
+  if (screenshot && !oneShotVisual && caps.screenshotChars === 0) {
+    state.onEvent({
+      type: "info",
+      message:
+        `Navigator screenshot dropped (the ${state.config.contextTokens ?? "known"}-token ` +
+        `model's context-fitted observation budget has no screenshot allowance — ` +
+        `the text channels carry this step).`,
+    });
+    screenshot = undefined;
+  } else if (screenshot && caps.screenshotChars > 0 && screenshot.length > caps.screenshotChars) {
+    // Over the derived char budget — re-encode down to fit (iterative quality
+    // down, full viewport preserved), via the extension's resize hook.
+    const maxBytes = Math.floor(caps.screenshotChars * (3 / 4));
+    let resized: string | undefined;
+    if (state.deps.normalizeScreenshot) {
+      try {
+        resized = await state.deps.normalizeScreenshot(screenshot, { maxBytes });
+      } catch {
+        resized = undefined;
+      }
+    }
+    if (resized && resized.length < screenshot.length) {
+      state.onEvent({
+        type: "info",
+        message:
+          `Navigator screenshot resized to fit the model's observation budget ` +
+          `(${screenshot.length} → ${resized.length} chars).`,
+      });
+      screenshot = resized;
+    } else {
+      state.onEvent({
+        type: "info",
+        message:
+          `Navigator screenshot dropped (${screenshot.length} chars exceeds the ` +
+          `${caps.screenshotChars}-char context-fitted budget and the resize helper ` +
+          `could not shrink it).`,
+      });
+      screenshot = undefined;
+    }
+  }
   if (oneShotVisual) {
     state.onEvent(screenshot
       ? {

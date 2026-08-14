@@ -181,6 +181,17 @@ export interface LoopDeps {
  */
   checkPaused?: () => Promise<boolean>;
   /**
+ * Optional screenshot re-encode hook (extension: wraps
+ * `normalizeScreenshotToViewport` from background/screenshots.ts with the
+ * capture quality). The loop uses it to enforce the context-derived
+ * screenshot char cap by iteratively re-encoding the data URL down to
+ * `opts.maxBytes` (base64 is 4/3 chars per byte, so the caller derives
+ * `maxBytes = floor(cap × 3/4)`). When absent (in-page demo mode — no
+ * screenshots exist there), an over-cap screenshot is DROPPED instead of
+ * shipped whole, fail-safe.
+ */
+  normalizeScreenshot?: (dataUrl: string, opts: { maxBytes: number }) => Promise<string>;
+  /**
  * Optional page-HTML extractor for the HTML-content evaluator.
  */
   getPageHtml?: (signal?: AbortSignal) => Promise<string>;

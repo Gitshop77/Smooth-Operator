@@ -7,13 +7,13 @@
  *     model the current caps were calibrated for), and a FITTING allocation for
  *     sub-128k models (observation shrinks so the prompt fits the derived
  *     input budget instead of tripping the fail-closed assert on every step).
- *  2. `prepareNavigatorRequest` applies the derived caps: a 64k run truncates
- *     the DOM text and the AX tree to their viewport-evidence budgets, and
- *     delivers the screenshot WHOLE — it is now accounted as a flat per-image
- *     token allowance (see llm-direct's assertPromptBudget) instead of being
- *     dropped for exceeding a context-derived char cap. Only a wildly-oversized
- *     / corrupt capture is dropped. The loop degrades the OBSERVATION instead of
- *     failing the STEP.
+ *  2. `prepareNavigatorRequest` applies the derived caps at every regime: a
+ *     64k run truncates the DOM text and the AX tree to their viewport-evidence
+ *     budgets and DROPS the screenshot (no screenshot allowance at that
+ *     context); a 128k/unknown-context run RESIZES an over-budget screenshot
+ *     down to the fitted char budget instead of shipping it whole (only a
+ *     wildly-oversized / corrupt capture is dropped by the 3M safety guard).
+ *     The loop degrades the OBSERVATION instead of failing the STEP.
  *  3. End-to-end: a realistic navigator prompt built from the 64k-derived caps
  *     fits the 64k-model derived input budget (assert does NOT throw), while
  *     the same page with the fixed 128k caps would throw — the caps are what
@@ -114,7 +114,7 @@ describe("deriveNavigatorObservationCapsV1", () => {
 });
 
 describe("prepareNavigatorRequest applies context-derived caps", () => {
-  test("a 64k run truncates DOM text and AX tree but keeps the screenshot", async () => {
+  test("a 64k run truncates DOM text and AX tree but DROPS the screenshot", async () => {
     const { state, events } = makeStateWithContext(64_000);
     const req = await prepareNavigatorRequest(state, BIG_OBSERVATION);
 
@@ -123,18 +123,19 @@ describe("prepareNavigatorRequest applies context-derived caps", () => {
     // The AX tree channel is truncated (not dropped) to its viewport evidence
     // budget, which remains large enough to preserve useful semantics.
     expect((req.browserState.axTree ?? "").length).toBeLessThanOrEqual(caps.axTreeChars);
-    // The screenshot is delivered WHOLE now: it is accounted as a flat per-image
-    // token allowance (llm-direct assertPromptBudget) instead of being dropped
-    // for exceeding a context-derived char cap. Only a corrupt/hostile capture
-    // (≈3M chars) would be dropped.
-    expect(req.browserState.screenshot).toBeDefined();
+    // The derived 64k budget has NO screenshot allowance (screenshotChars = 0),
+    // so the screenshot is dropped from the main-LLM message instead of being
+    // delivered whole (the local-VLM path is unaffected — it is fed upstream).
+    expect(req.browserState.screenshot).toBeUndefined();
 
     const messages = events
       .filter((e): e is LogEvent & { type: "info" } => e.type === "info")
       .map((e) => e.message);
     expect(messages.some((m) => m.includes("Navigator DOM truncated"))).toBe(true);
-    // The screenshot is no longer dropped at 64k, so no "screenshot dropped" event.
-    expect(messages.some((m) => m.includes("screenshot dropped"))).toBe(false);
+    // The drop is observable: the existing info event fires.
+    expect(messages.some((m) => m.includes("screenshot dropped"))).toBe(true);
+    // ...but no visual-inspection DELIVERY event (this was not a one-shot turn).
+    expect(events.some((e) => e.type === "visual-inspection" && e.stage === "delivered")).toBe(false);
   });
 
   test("a requested 64k visual turn keeps one full frame and shrinks duplicate text", async () => {
@@ -152,6 +153,51 @@ describe("prepareNavigatorRequest applies context-derived caps", () => {
     expect(req.browserState.elementsText.length).toBeLessThanOrEqual(16_000);
     expect((req.browserState.axTree ?? "").length).toBeLessThanOrEqual(8_000);
     expect(events).toContainEqual(expect.objectContaining({ type: "visual-inspection", stage: "delivered" }));
+  });
+
+  test("a 128k run RESIZES an over-budget screenshot to the fitted cap instead of shipping it whole", async () => {
+    const { state, events } = makeStateWithContext(128_000);
+    const resized = "data:image/jpeg;base64," + "B".repeat(30_000);
+    const overBudget = BIG_OBSERVATION.screenshot ?? "";
+    const normalizeCalls: { dataUrl: string; opts: { maxBytes: number } }[] = [];
+    state.deps.normalizeScreenshot = vi.fn(async (dataUrl, opts) => {
+      normalizeCalls.push({ dataUrl, opts });
+      return resized;
+    });
+
+    const req = await prepareNavigatorRequest(state, BIG_OBSERVATION);
+
+    // The resize primitive was invoked exactly once with maxBytes =
+    // floor(72,800 × 3/4) — base64 is 4/3 chars per byte, so the byte budget
+    // corresponds to the fitted 72,800-char cap.
+    expect(normalizeCalls).toHaveLength(1);
+    expect(normalizeCalls[0].dataUrl).toBe(overBudget);
+    expect(normalizeCalls[0].opts.maxBytes).toBe(Math.floor(72_800 * (3 / 4)));
+    // The resized frame is what ships to the model.
+    expect(req.browserState.screenshot).toBe(resized);
+
+    // A resize event (info) with the before/after sizes fired — not a drop.
+    const messages = events
+      .filter((e): e is LogEvent & { type: "info" } => e.type === "info")
+      .map((e) => e.message);
+    const resizeInfo = messages.find((m) => m.includes("resized"));
+    expect(resizeInfo).toBeDefined();
+    expect(resizeInfo).toContain(String(overBudget.length));
+    expect(resizeInfo).toContain(String(resized.length));
+    expect(messages.some((m) => m.includes("screenshot dropped"))).toBe(false);
+  });
+
+  test("a 128k run drops the screenshot when the resize helper is unavailable", async () => {
+    const { state, events } = makeStateWithContext(128_000);
+    // No normalizeScreenshot hook (in-page demo mode) — an over-cap screenshot
+    // must never be shipped whole: it is dropped, fail-safe.
+    const req = await prepareNavigatorRequest(state, BIG_OBSERVATION);
+
+    expect(req.browserState.screenshot).toBeUndefined();
+    const messages = events
+      .filter((e): e is LogEvent & { type: "info" } => e.type === "info")
+      .map((e) => e.message);
+    expect(messages.some((m) => m.includes("screenshot dropped"))).toBe(true);
   });
 
   test("an unknown-context run keeps the current 60k elements cap (no regression)", async () => {

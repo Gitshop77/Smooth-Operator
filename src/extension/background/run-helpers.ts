@@ -664,6 +664,16 @@ export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
     mode,
     callbacks,
     config,
+    // Budget-fitted screenshot resize: the loop enforces its context-derived
+    // screenshot cap by re-encoding the frame down to `opts.maxBytes`
+    // (iterative quality down via normalizeScreenshotToViewport — the full
+    // viewport field of view is preserved). Lazy imports keep the hot
+    // extractState path free of the screenshot module.
+    normalizeScreenshot: async (dataUrl, opts) => {
+      const quality = await getScreenshotQuality();
+      const { normalizeScreenshotToViewport } = await import("./screenshots");
+      return normalizeScreenshotToViewport(dataUrl, quality, opts);
+    },
     extractState: async (tabs, options) => {
       throwIfOriginUnauthorized();
       const state = await extractStateForRun(fallbackTabId, tabs, controller.signal, dispatchToken, config.contextTokens, options);
