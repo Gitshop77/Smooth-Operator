@@ -53,7 +53,7 @@ export const EXPECTED_BUNDLE_FILES = [
   "NOTICE",
   "THIRD_PARTY_LICENSES.json",
 ];
-const EXPECTED_CSP = "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; base-uri 'self'; frame-ancestors 'none';";
+const EXPECTED_CSP = "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; base-uri 'self'; frame-ancestors 'none'; connect-src 'self' http: https: ws: wss:;";
 const REVIEWED_PERMISSIONS = [
   "sidePanel", "scripting", "tabs", "activeTab", "storage", "alarms", "debugger",
   "nativeMessaging",

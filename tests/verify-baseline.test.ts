@@ -29,7 +29,7 @@ const manifest = {
   ],
   host_permissions: ["http://*/*", "https://*/*"],
   content_security_policy: {
-    extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; base-uri 'self'; frame-ancestors 'none';",
+    extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; base-uri 'self'; frame-ancestors 'none'; connect-src 'self' http: https: ws: wss:;",
   },
   background: { service_worker: "background.js" },
   side_panel: { default_path: "sidepanel.html" },
