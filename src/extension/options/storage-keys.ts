@@ -90,4 +90,11 @@ export const STORAGE_KEYS = {
   /** Named, non-secret connection profiles and the default profile id. */
   connectionProfiles: "open_cowork_connection_profiles_v1",
   activeConnectionProfile: "open_cowork_active_connection_profile_v1",
+  // Lightpanda research (Options → Automation → Lightpanda research).
+  lightpandaEnabled: "lightpandaEnabled",
+  lightpandaBinaryPath: "lightpandaBinaryPath",
+  lightpandaBraveKey: "lightpandaBraveKey",
+  lightpandaTavilyKey: "lightpandaTavilyKey",
+  lightpandaTimeoutSeconds: "lightpandaTimeoutSeconds",
+  lightpandaMaxResultChars: "lightpandaMaxResultChars",
 } as const;

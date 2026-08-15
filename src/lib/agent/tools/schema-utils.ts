@@ -86,6 +86,7 @@ export const ACTION_METADATA: Record<string, ActionMeta> = {
   extract:            { name: "extract",            description: "Extract info from page text via a query.",             pageChanging: false, exclusive: false, params: "query: string" },
   done:               { name: "done",               description: "Finish the task.",                                     pageChanging: false, exclusive: true,  params: "text: string (summary), success: boolean" },
   search:             { name: "search",             description: "Search the web (DuckDuckGo/Google/Bing).",             pageChanging: true,  exclusive: false, params: "query: string, engine?: 'duckduckgo'|'google'|'bing'|'yahoo'|'baidu'" },
+  research:           { name: "research",           description: "Research the web in the fast headless Lightpanda browser with the same AI — returns a synthesized answer for fresh/multi-site questions. Runs outside the current tab.", pageChanging: false, exclusive: true, params: "query: string" },
   upload_file:        { name: "upload_file",        description: "Upload a file to a file input.",                       pageChanging: false, exclusive: false, params: "index: number, path: string" },
   screenshot:         { name: "screenshot",         description: "Take a screenshot of the page.",                       pageChanging: false, exclusive: false, params: "file_name?: string" },
   inspect_visual:     { name: "inspect_visual",     description: "Attach one fresh viewport screenshot to the next model turn when pixels materially help (images, charts, canvas, layout, occlusion, or ambiguity). Never call routinely.", pageChanging: false, exclusive: true, params: "reason: string" },
@@ -133,7 +134,7 @@ const actionListCache = new Map<string, string>();
  * capability or making a local model guess argument names. */
 const CORE_PROMPT_ACTIONS = new Set([
   "click", "input", "select_dropdown", "send_keys", "scroll", "scroll_to_bottom",
-  "navigate", "search", "switch_tab", "new_tab", "close_tab", "go_back", "wait",
+  "navigate", "search", "research", "switch_tab", "new_tab", "close_tab", "go_back", "wait",
   "extract", "search_page", "find_text", "find_elements", "list_interactive",
   "done", "ask_human", "takeover", "verify", "load_skill", "inspect_visual", "detect_visual",
 ]);
@@ -326,6 +327,10 @@ export function isEquivalentAction(a: Action, b: Action): boolean {
         (a.all ?? false) === (bb.all ?? false) &&
         JSON.stringify(a.keys ?? []) === JSON.stringify(bb.keys ?? [])
       );
+    }
+    case "research": {
+      const bb = b as Extract<Action, { type: "research" }>;
+      return a.query === bb.query;
     }
     case "page_next":
       return (a.offset ?? 0) === ((b as Extract<Action, { type: "page_next" }>).offset ?? 0);

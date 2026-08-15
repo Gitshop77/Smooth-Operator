@@ -457,9 +457,15 @@ const ClearStorageSchema = z
     message: "clear_storage requires at least one key or explicit all:true",
   });
 
+/** Research the web with Lightpanda's headless browser (same AI as the main agent). */
+const ResearchSchema = z.object({
+  type: z.literal("research").describe("Research a question on the web using the fast headless Lightpanda browser with the same AI as you. Runs OUTSIDE the current tab and returns a synthesized answer. Use for fresh/latest information or anything needing info the current page doesn't have."),
+  query: boundedText(MAX_FREE_TEXT_CHARS).describe("The research question or topic to investigate."),
+});
+
 // ─── Union + helpers ────────────────────────────────────────────────────────
 
-/** Discriminated union of all action schemas (60 actions). */
+/** Discriminated union of all action schemas (63 actions). */
 export const ActionSchema = z.discriminatedUnion("type", [
   ClickSchema,
   InputSchema,
@@ -490,6 +496,7 @@ export const ActionSchema = z.discriminatedUnion("type", [
   ExtractSchema,
   DoneSchema,
   SearchSchema,
+  ResearchSchema,
   UploadFileSchema,
   ScreenshotSchema,
   InspectVisualSchema,

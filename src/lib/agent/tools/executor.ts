@@ -87,6 +87,7 @@ import {
   handleLoadSkill,
   handleNavigate,
   handlePressAndHold,
+  handleResearch,
   handleSaveAsPdf,
   handleScreenshot,
   handleScroll,
@@ -498,6 +499,7 @@ export async function executeAction(
             : "[empty page]",
         };
       }
+      case "research":    return await handleResearch(ctx, action);
       case "done":            return await handleDone(ctx, action);
 
       default: {

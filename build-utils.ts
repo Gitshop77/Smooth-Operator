@@ -317,6 +317,7 @@ const APPROVED_MANIFEST_PERMISSIONS = new Set([
   "storage",
   "alarms",
   "debugger",
+  "nativeMessaging",
   "notifications",
   "downloads",
   "unlimitedStorage",

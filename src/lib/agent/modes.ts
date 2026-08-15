@@ -293,6 +293,14 @@ export function checkActionAllowed(actionType: string, mode: AgentMode): ActionP
         return deny("Cookie/storage mutation");
       }
       return { allowed: true };
+    case "research":
+      // Research launches an EXTERNAL browser with its own network access —
+      // restricted mode's "current tab only" confinement must not be
+      // bypassed. Read-only on the user's tabs, so standard mode allows it.
+      if (mode === "restricted") {
+        return deny("Research");
+      }
+      return { allowed: true };
     default:
  // Explicit allow-list for known-but-ungated action types.
       if ((UNGATED_ACTION_TYPES as readonly string[]).includes(actionType)) {
