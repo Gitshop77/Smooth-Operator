@@ -16,6 +16,13 @@ import { redactKeyShapes } from "../key-shape-redact";
 import { memoizedRedact, memoizedInjectionScan, clearRedactionMemo, REDACTION_FAILED } from "../redaction-memo";
 import { ELEMENTS_TEXT_CHAR_CAP, formatTab, renderPlan, renderHistory } from "./messages-utils";
 import { redactKeyLeak } from "../redact-shared";
+// Statically imported so the modules load once at module top instead of being
+// re-resolved via `await import(...)` on every navigator step. The call sites
+// below still guard with try/catch + warnOnce — the modules are optional in
+// test/dev contexts, but the import itself happens exactly once.
+import { getSkillFrontmatter } from "../domain-skills";
+import { getMemoriesForUrl, formatMemories } from "../persistent-memory";
+import { formatCustomToolsBlock } from "../tools/registry";
 
 export { ELEMENTS_TEXT_CHAR_CAP };
 
@@ -271,7 +278,6 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
  // action — saves ~500 tokens/step on sites with a matching skill.
   let skillsBlock = "";
   try {
-    const { getSkillFrontmatter } = await import("../domain-skills");
     const frontmatters = await getSkillFrontmatter(browserState.url);
     if (frontmatters.length > 0) {
       const lines = frontmatters.map((s) => `- ${s.name}: ${s.description}`).join("\n");
@@ -281,7 +287,7 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
  // The optional module is genuinely unavailable (test/dev context) — skip.
  // Any OTHER throw (e.g. a regression in domain-skills) is surfaced rather
  // than swallowed so it's debuggable instead of silently dropping skills
- // (optional dynamic-import blocks swallow all errors).
+ // (the statically-imported module is loaded once, but calls stay guarded).
     warnOnce("domainSkills", "../domain-skills", "skills block", e);
   }
 
@@ -362,22 +368,20 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
  // These are TRUSTED (user-authored via options page) — NOT wrapped in wrapUntrusted.
   let memoryBlock = "";
   try {
-    const { getMemoriesForUrl, formatMemories } = await import("../persistent-memory");
     const memories = await getMemoriesForUrl(browserState.url);
     if (memories.length > 0) {
       memoryBlock = `\n${formatMemories(memories)}`;
     }
   } catch (e) {
  // persistence-memory module genuinely unavailable — skip. Other throws
- // (regression) are surfaced, not swallowed (optional dynamic-import
- // blocks swallow all errors).
+ // (regression) are surfaced, not swallowed (the statically-imported
+ // module is loaded once, but calls stay guarded).
     warnOnce("persistentMemory", "../persistent-memory", "memory block", e);
   }
 
  // Custom tools: inject descriptions so the agent knows what's available.
   let customToolsBlock = "";
   try {
-    const { formatCustomToolsBlock } = await import("../tools/registry");
     const toolsBlock = await formatCustomToolsBlock();
     if (toolsBlock) {
       customToolsBlock = `\n${toolsBlock}`;
