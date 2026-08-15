@@ -18,6 +18,10 @@
  *     fits the 64k-model derived input budget (assert does NOT throw), while
  *     the same page with the fixed 128k caps would throw — the caps are what
  *     makes 64k survival possible, not luck.
+ *  4. The HTML summarizer is DEFAULT-ON: a default config on a >10k-char page
+ *     yields a ≤30-element navigation observation (the summarizer render),
+ *     and the `*` new-element markers stay dropped while `newElementCount`
+ *     survives on the request.
  */
 import { describe, expect, test, vi } from "vitest";
 import {
@@ -29,9 +33,11 @@ import { prepareNavigatorRequest } from "../src/lib/agent/loop/phases/navigator"
 import { initState } from "../src/lib/agent/loop/orchestrator-helpers";
 import { compileNavigatorPromptV1 } from "../src/lib/agent/prompts/prompt-compiler";
 import { DEFAULT_CONFIG } from "../src/lib/agent/types-utils";
+import { DEFAULT_MIN_HTML_LENGTH } from "../src/lib/agent/html-summarizer";
+import { validateConfig } from "../src/lib/agent/config/schema";
 import { makeState } from "./helpers";
 import type { LoopDeps, LoopState } from "../src/lib/agent/loop/types";
-import type { AgentConfig, BrowserState, LogEvent } from "../src/lib/agent/types";
+import type { AgentConfig, BrowserState, ExtractedElement, LogEvent } from "../src/lib/agent/types";
 
 /** Build a minimal LoopState around a context-aware config. */
 function makeStateWithContext(contextTokens: number | undefined): { state: LoopState; events: LogEvent[] } {
@@ -204,6 +210,76 @@ describe("prepareNavigatorRequest applies context-derived caps", () => {
     const { state } = makeStateWithContext(undefined);
     const req = await prepareNavigatorRequest(state, BIG_OBSERVATION);
     expect(req.browserState.elementsText.length).toBe(24_000); // truncated at the economical base cap
+  });
+});
+
+describe("HTML summarizer is DEFAULT-ON for large pages", () => {
+  /**
+   * 200 interactive elements whose text ALL matches the task keyword
+   * ("pricing"): the summarizer does NOT fall back (≥5 non-zero scores), so
+   * exactly the top-30 by score survive. The raw `elementsText` (with the
+   * extractor's `*` new-element markers) must exceed the summarizer's
+   * 10k-char trigger.
+   */
+  const LARGE_PAGE: BrowserState = (() => {
+    const elements: ExtractedElement[] = Array.from({ length: 200 }, (_, i) => ({
+      index: i + 1,
+      tag: "button",
+      text: `pricing option number ${i + 1} with extra details`,
+      attributes: { id: `opt-${i + 1}` },
+      hash: `h${i + 1}`,
+      rect: { x: 0, y: 0, width: 10, height: 10 },
+    }));
+    return {
+      ...makeState(),
+      elements,
+      elementsText: elements
+        .map((el) => `*[${el.index}]<button id="opt-${el.index}" /> ${el.text}`)
+        .join("\n"),
+      newElementCount: 200,
+    };
+  })();
+
+  test("the default config enables the HTML summarizer (schema default + DEFAULT_CONFIG)", () => {
+    expect(validateConfig({}).enableHtmlSummarizer).toBe(true);
+    expect(DEFAULT_CONFIG.enableHtmlSummarizer).toBe(true);
+  });
+
+  test("a >10k-char, 200-element page yields a ≤30-element navigation observation by default", async () => {
+    expect(LARGE_PAGE.elementsText.length).toBeGreaterThan(DEFAULT_MIN_HTML_LENGTH);
+    const { state, events } = makeStateWithContext(undefined);
+    const req = await prepareNavigatorRequest(state, LARGE_PAGE);
+
+    const lines = req.browserState.elementsText.split("\n");
+    expect(lines.length).toBe(30); // exactly the summarizer's top-30 render
+    expect(req.browserState.elementsText.length).toBeLessThan(LARGE_PAGE.elementsText.length);
+    // The `*` new-element markers stay dropped in the summary render…
+    expect(req.browserState.elementsText).not.toContain("*");
+    // …while the count still rides the request for the state event.
+    expect(req.browserState.newElementCount).toBe(200);
+    const messages = events
+      .filter((e): e is LogEvent & { type: "info" } => e.type === "info")
+      .map((e) => e.message);
+    expect(messages.some((m) => m.includes("HTML summarizer: kept 30/200"))).toBe(true);
+  });
+
+  test("disabling the summarizer ships the full DOM instead (hard cap still bounds it)", async () => {
+    const events: LogEvent[] = [];
+    const deps: LoopDeps = {
+      task: "Find the pricing",
+      onEvent: (e: LogEvent) => { events.push(e); },
+      config: { maxSteps: 20, enableHtmlSummarizer: false },
+      plannerCall: vi.fn() as never,
+      navigatorCall: vi.fn() as never,
+      getTabs: vi.fn(async () => []) as never,
+    };
+    const state = initState(deps, { ...DEFAULT_CONFIG, maxSteps: 20, enableHtmlSummarizer: false });
+    const req = await prepareNavigatorRequest(state, LARGE_PAGE);
+    // All 200 elements survive intact (~13.6k chars — under the 24k base cap,
+    // so no truncation either): only the flag change flips the observation.
+    expect(req.browserState.elementsText).toBe(LARGE_PAGE.elementsText);
+    expect(req.browserState.elementsText.split("\n").length).toBe(200);
+    expect(events.some((e) => e.type === "info" && e.message.includes("HTML summarizer"))).toBe(false);
   });
 });
 
