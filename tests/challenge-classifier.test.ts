@@ -26,6 +26,9 @@ import { ActionSchema } from "../src/lib/agent/tools/schema";
 import { executeAction } from "../src/lib/agent/tools/executor";
 import { makeState } from "./helpers/make-state";
 import { installJsdomLayoutMock, restoreJsdomLayoutMock } from "./helpers/jsdom-layout-mock";
+import { runAgentLoop } from "../src/lib/agent/loop/orchestrator";
+import type { LoopDeps } from "../src/lib/agent/loop/types";
+import type { AgentAction, ActionResult, LogEvent } from "../src/lib/agent/types";
 
 const ABSENT_RESULT = { detected: false, status: "absent", matches: [] as ChallengeMatch[] };
 const UNKNOWN_RESULT = { detected: false, status: "unknown", matches: [] as ChallengeMatch[] };
@@ -586,5 +589,67 @@ describe("detect_challenge — schema and executor wiring", () => {
     expect(result.success).toBe(true);
     const parsed = JSON.parse(result.extractedContent ?? "{}");
     expect(parsed).toEqual({ detected: false, status: "absent", matches: [] });
+  });
+});
+
+describe("runAgentLoop — challenge info-line dedupe is per-run", () => {
+  test("a second run hitting the same challenge kind surfaces its info line again", async () => {
+    const run = async (): Promise<LogEvent[]> => {
+      const events: LogEvent[] = [];
+      const deps: LoopDeps = {
+        task: "cross the captcha",
+        config: {
+          maxSteps: 3,
+          maxActionsPerStep: 10,
+          plannerInterval: 100,
+          maxFailures: 5,
+          enableLoopDetection: false,
+          enableCompaction: false,
+          compactionStepInterval: 1000,
+          compactionCharThreshold: 1_000_000,
+          enableJudge: false,
+        },
+        navigatorCall: vi.fn(async () => ({
+          raw: JSON.stringify({
+            thinking: "x",
+            evaluation_previous_goal: "y",
+            memory: "z",
+            next_goal: "w",
+            action: [{ type: "click", index: 1 } as AgentAction],
+          }),
+        })),
+        plannerCall: vi.fn(async () => ({
+          raw: JSON.stringify({ thinking: "x", decision: "continue", plan: ["a"], next_goal: "g" }),
+        })),
+        getTabs: vi.fn(async () => [
+          { id: 1, label: "1", url: "https://example.com", title: "t", active: true },
+        ]),
+        extractState: vi.fn(async () => makeState()),
+        executeActions: vi.fn(async (actions: AgentAction[]) =>
+          actions.map((action) => ({ action, success: true, message: "ok" } as ActionResult)),
+        ),
+        // An interactive captcha that never clears: the challenge path runs on
+        // every step (attempt-first, no takeover), exercising the info-line
+        // dedupe across BOTH runs.
+        detectChallenge: vi.fn(async () => ({ kind: "recaptcha", message: "reCAPTCHA challenge" })),
+        onEvent: (e: LogEvent) => { events.push(e); },
+        settleDelay: 0,
+      };
+      await runAgentLoop(deps);
+      return events;
+    };
+
+    const infoLines = (events: LogEvent[]) =>
+      events.filter((e) => e.type === "info" && String(e.message).startsWith("Anti-bot challenge detected"));
+
+    const first = await run();
+    const second = await run();
+
+    // Run 1 surfaces the info line (per-step dedupe suppresses it on later
+    // steps of the SAME run — at least one occurrence is the contract).
+    expect(infoLines(first).length).toBeGreaterThanOrEqual(1);
+    // Finding 6: `lastChallengeKey` survived across runs, so run 2's info
+    // line was suppressed. A fresh run must re-arm the dedupe and surface it.
+    expect(infoLines(second).length).toBeGreaterThanOrEqual(1);
   });
 });

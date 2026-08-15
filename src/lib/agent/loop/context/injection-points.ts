@@ -126,8 +126,10 @@ function injectExplorationNudge(
 function injectLoopDetectionNudge(detector: LoopDetector): string | null {
   const count = detector.shouldWarn();
   if (count > 0) return LoopDetector.warningText(count);
-  const cycles = detector.shouldWarnOscillation();
-  if (cycles > 0) return LoopDetector.oscillationWarningText(2, cycles);
+  const oscillation = detector.shouldWarnOscillation();
+  if (oscillation.cycles > 0) {
+    return LoopDetector.oscillationWarningText(oscillation.period, oscillation.cycles);
+  }
   return null;
 }
 

@@ -321,6 +321,12 @@ export interface LoopState {
    * reaches {@link JUDGE_CONSECUTIVE_REJECT_LIMIT} the next completion claim
    * is forced through a planner re-plan instead of a plain re-observe. */
   consecutiveJudgeRejections: number;
+  /** Step of the last recorded judge rejection. A rejection on a NON-done
+   * step more than one step removed (or a same-step re-invocation) keeps the
+   * streak; a wider step gap breaks it, so `consecutiveJudgeRejections` only
+   * ever counts the current consecutive episode. Init -1 (no episode yet);
+   * `undefined` in hand-built states is treated as -1. */
+  lastJudgeStep?: number;
   /** Set when the judge disagreement bound is exceeded; consumed by the
    * navigator-done path to force a `recover → plan` re-plan. */
   judgeReplanForced?: boolean;

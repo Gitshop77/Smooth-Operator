@@ -30,7 +30,16 @@ export const JUDGE_CONSECUTIVE_REJECT_LIMIT = 3;
 /** Record one judge rejection on the run state; when the bound is exceeded,
  * flag the run to force a planner re-plan. */
 function recordJudgeDisagreement(state: LoopState): void {
+  // A rejection whose last-recorded rejection was neither on this step nor on
+  // the immediately-previous one had a non-done step intervene (or a fresh
+  // run began) — the "consecutive" contract no longer holds, so the streak
+  // resets before counting. Same-step re-invocations (judge+planner cycling
+  // within one step) and previous-step rejections keep the streak.
+  if ((state.lastJudgeStep ?? -1) < state.step - 1) {
+    state.consecutiveJudgeRejections = 0;
+  }
   state.consecutiveJudgeRejections += 1;
+  state.lastJudgeStep = state.step;
   if (state.consecutiveJudgeRejections >= JUDGE_CONSECUTIVE_REJECT_LIMIT) {
     state.judgeReplanForced = true;
     state.consecutiveJudgeRejections = 0;

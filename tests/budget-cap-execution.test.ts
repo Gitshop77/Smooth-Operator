@@ -21,7 +21,7 @@ import { executeActionQueue } from "../src/lib/agent/loop/helpers/action-queue";
 import { LoopDetector } from "../src/lib/agent/loop/loop-detector";
 import type { LoopDeps } from "../src/lib/agent/loop/types";
 import type { CallbackDispatcher, CallbackContext } from "../src/lib/agent/callbacks";
-import type { AgentAction, AgentConfig } from "../src/lib/agent/types";
+import type { AgentAction, AgentConfig, ActionResult } from "../src/lib/agent/types";
 import { makeState } from "./helpers";
 
 const BASE_CONFIG = {
@@ -172,5 +172,54 @@ describe("executeActionQueue — clean stop when the cap trips mid-queue", () =>
     expect(queueResult.results).toHaveLength(3);
     expect(queueResult.results.every((r) => r.success)).toBe(true);
     expect(dispatcher.actionEnd).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("budget-warning event — suppressed on the final step", () => {
+  // Finding 7: the budget-warning event fired at step === floor(maxSteps*0.75)
+  // even when that step is the LAST step (tiny runs), emitting a "75%" UI
+  // warning with zero steps remaining while the matching prompt nudge
+  // (injection-points.ts) is suppressed. The event must reuse the nudge's
+  // is-last-step condition.
+  function makeRunDeps(maxSteps: number, events: unknown[]) {
+    return {
+      task: "test task",
+      config: { ...BASE_CONFIG, maxSteps },
+      plannerCall: vi.fn(async () => ({
+        raw: JSON.stringify({ thinking: "x", decision: "continue", plan: ["a"], next_goal: "g" }),
+      })),
+      navigatorCall: vi.fn(async () => ({
+        raw: JSON.stringify({
+          thinking: "x",
+          evaluation_previous_goal: "",
+          memory: "",
+          next_goal: "g",
+          action: [{ type: "scroll", down: true, pages: 1 }],
+        }),
+      })),
+      getTabs: vi.fn(async () => [
+        { id: 1, label: "1", url: "https://example.com", title: "t", active: true },
+      ]),
+      extractState: vi.fn(async () => makeState()),
+      executeActions: vi.fn(async (actions: AgentAction[]) =>
+        actions.map((action) => ({ action, success: true, message: "ok" } as ActionResult)),
+      ),
+      onEvent: (e: unknown) => { events.push(e); },
+      settleDelay: 0,
+    } as LoopDeps;
+  }
+
+  test("maxSteps=4: no budget-warning event (the 75% step IS the final step)", async () => {
+    const events: unknown[] = [];
+    await runAgentLoop(makeRunDeps(4, events));
+    expect(events.filter((e) => (e as { type: string }).type === "budget-warning")).toHaveLength(0);
+  });
+
+  test("maxSteps=8: budget-warning event fires exactly once at step 6", async () => {
+    const events: unknown[] = [];
+    await runAgentLoop(makeRunDeps(8, events));
+    const warnings = events.filter((e) => (e as { type: string }).type === "budget-warning");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({ type: "budget-warning", step: 6, pct: 75 });
   });
 });

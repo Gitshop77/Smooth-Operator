@@ -387,6 +387,7 @@ export function initState(
     currentGoal: deps.task,
     transitions: [],
     consecutiveJudgeRejections: 0,
+    lastJudgeStep: -1,
     dispatcher,
   };
 }
@@ -835,7 +836,14 @@ async function runNavigatorPreflight(state: LoopState): Promise<StepResult | nul
   if (costCapExceeded(state)) {
     return exitCostCap(state, config);
   }
-  if (state.step === Math.max(1, Math.floor(config.maxSteps * BUDGET_WARNING_FRACTION))) {
+  // Budget-warning event: fires once at the 75% step. Mirror
+  // `injectBudgetWarning`'s is-last-step suppression so a tiny-budget run
+  // (maxSteps 2-4) never emits a "75%" warning with zero steps remaining
+  // while the model sees no matching nudge.
+  if (
+    state.step === Math.max(1, Math.floor(config.maxSteps * BUDGET_WARNING_FRACTION)) &&
+    state.step < config.maxSteps - 1
+  ) {
     onEvent({ type: "budget-warning", step: state.step, pct: Math.floor(BUDGET_WARNING_FRACTION * 100) });
   }
   return null;
@@ -1118,9 +1126,6 @@ async function runNavigatorModelCall(
     if (classified.fatal) {
       const text = `Fatal error (${classified.category}): ${classified.message}`;
       return { kind: "abort", result: await exitWithFinish(state, text) };
-    }
-    if (classified.category === "cancelled") {
-      return { kind: "abort", result: await exitStoppedByUser(state) };
     }
     state.consecutiveFailures++;
     if (/\b(parse|unparseable)\b/i.test(msg)) {

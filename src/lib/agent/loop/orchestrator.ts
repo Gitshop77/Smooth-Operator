@@ -24,6 +24,7 @@ import {
 import { transitionRunPhase } from "./run-state-machine";
 import { makeCtx } from "./helpers";
 import { redactKeyLeak } from "../redact-shared";
+import { resetNavigatorRunState } from "./phases/navigator";
 
 /**
  * Run the full Planner + Navigator agent loop until the task completes, the
@@ -34,6 +35,9 @@ import { redactKeyLeak } from "../redact-shared";
  * `done` or `error` events.
  */
 export async function runAgentLoop(deps: LoopDeps): Promise<void> {
+  // Lib-side per-run init: navigator module state (challenge info-line dedupe)
+  // must not leak across runs in the same service-worker lifetime.
+  resetNavigatorRunState();
   try {
     await runAgentLoopInner(deps);
   } catch (e) {

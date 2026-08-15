@@ -113,10 +113,13 @@ export class LoopDetector {
   /**
    * Oscillation detection — the stuck shapes an exact-repeat counter misses:
    * period-2 ping-pong (A,B,A,B) and period-3 cycles (A,B,C,A,B,C) between
-   * equal-but-distinct actions. Returns the number of full cycles observed in
-   * the trailing alternating run (0 when no oscillation is present).
+   * equal-but-distinct actions. Returns `{ cycles, period }` where `period` is
+   * the {@link OSCILLATION_PERIODS} entry that matched (the two detection
+   * windows are tried in ascending order, so a period-2 match wins) and
+   * `cycles` is the number of full cycles in the trailing alternating run.
+   * `{ cycles: 0, period: 0 }` when no oscillation is present.
    */
-  shouldWarnOscillation(): number {
+  shouldWarnOscillation(): { cycles: number; period: number } {
     const hashes = this.window.map((r) => r.hash);
     for (const period of OSCILLATION_PERIODS) {
       if (hashes.length < period * 2) continue;
@@ -131,9 +134,9 @@ export class LoopDetector {
       }
       const runLength = hashes.length - (i + 1);
       const cycles = Math.floor(runLength / period);
-      if (cycles >= OSCILLATION_MIN_CYCLES) return cycles;
+      if (cycles >= OSCILLATION_MIN_CYCLES) return { cycles, period };
     }
-    return 0;
+    return { cycles: 0, period: 0 };
   }
 
   static oscillationWarningText(period: number, cycles: number): string {

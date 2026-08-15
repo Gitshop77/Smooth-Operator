@@ -28,6 +28,15 @@ import { currentCapabilityPolicy } from "../../capability-policy";
  * that persists across steps doesn't spam the panel with one line per step. */
 let lastChallengeKey: string | null = null;
 
+/** Per-run init for navigator module state: re-arms the challenge info-line
+ * dedupe so a NEW run hitting the same challenge kind surfaces its
+ * human-readable line again (the module-level dedupe must not leak across
+ * runs in the same service-worker lifetime). Called at the top of
+ * `runAgentLoop`. */
+export function resetNavigatorRunState(): void {
+  lastChallengeKey = null;
+}
+
 /** History window scanned for already-used actions (mirrors the navigator
  * prompt's history render window in loop/messages.ts). */
 const ENABLED_ACTIONS_HISTORY_WINDOW = 12;

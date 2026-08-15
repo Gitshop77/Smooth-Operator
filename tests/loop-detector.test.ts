@@ -149,8 +149,10 @@ describe("LoopDetector oscillation detection", () => {
     }
     // 4 records = 2 full cycles — below the 2-cycle floor… wait, exactly 2
     // cycles qualifies (isAlternatingCycle needs 2*period trailing, i.e. 4).
-    expect(det.shouldWarnOscillation()).toBe(2);
-    expect(LoopDetector.oscillationWarningText(2, 2)).toMatch(/OSCILLATION DETECTED/);
+    const osc = det.shouldWarnOscillation();
+    expect(osc.cycles).toBe(2);
+    expect(osc.period).toBe(2);
+    expect(LoopDetector.oscillationWarningText(osc.period, osc.cycles)).toMatch(/OSCILLATION DETECTED/);
   });
 
   test("period-3 cycle (A,B,C,A,B,C) is flagged", () => {
@@ -163,14 +165,34 @@ describe("LoopDetector oscillation detection", () => {
       det.record(b);
       det.record(c);
     }
-    expect(det.shouldWarnOscillation()).toBeGreaterThanOrEqual(2);
+    const osc = det.shouldWarnOscillation();
+    expect(osc.cycles).toBeGreaterThanOrEqual(2);
+    expect(osc.period).toBe(3);
+  });
+
+  test("a period-3 run warns with the REAL period in the text (not hardcoded 2)", () => {
+    // The injection seam must thread the detected period into the warning
+    // text — a period-3 stuck run must be told "3 distinct states", not the
+    // hardcoded period-2 wording.
+    const det = new LoopDetector();
+    const a = act({ type: "click", index: 1 });
+    const b = act({ type: "click", index: 2 });
+    const c = act({ type: "click", index: 3 });
+    for (let i = 0; i < 2; i++) {
+      det.record(a);
+      det.record(b);
+      det.record(c);
+    }
+    const osc = det.shouldWarnOscillation();
+    expect(LoopDetector.oscillationWarningText(osc.period, osc.cycles))
+      .toContain("alternating between 3 distinct states");
   });
 
   test("a plain repeat (A,A,A,A) is NOT oscillation (exact-hash counter owns it)", () => {
     const det = new LoopDetector();
     const a = act({ type: "click", index: 1 });
     for (let i = 0; i < 8; i++) det.record(a);
-    expect(det.shouldWarnOscillation()).toBe(0);
+    expect(det.shouldWarnOscillation().cycles).toBe(0);
     expect(det.shouldWarn()).toBe(8);
   });
 
@@ -178,7 +200,7 @@ describe("LoopDetector oscillation detection", () => {
     const det = new LoopDetector();
     det.record(act({ type: "click", index: 1 }));
     det.record(act({ type: "click", index: 2 }));
-    expect(det.shouldWarnOscillation()).toBe(0);
+    expect(det.shouldWarnOscillation().cycles).toBe(0);
   });
 
   test("outcome-aware hashing: same action + same result-head repeats; a different outcome does not inflate the bucket", () => {
