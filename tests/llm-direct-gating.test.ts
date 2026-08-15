@@ -34,6 +34,15 @@ const h = vi.hoisted(() => ({
   mockModel: "m",
 }));
 
+/** Spy-able stand-in for buildNavigatorPrompt so the compact flag the
+ * navigator call compiles with is observable (5th positional arg). */
+const navPromptMock = vi.hoisted(() => ({
+  buildNavigatorPrompt: vi.fn(
+    (_maxActions?: unknown, _customPrompt?: unknown, _visionMode?: unknown, _mode?: unknown, compact?: boolean) =>
+      "SYSTEM_PROMPT",
+  ),
+}));
+
 vi.mock("../src/extension/provider-config", () => ({
   readProviderConfig: async () => ({ provider: h.mockProviderId, apiKey: "k", model: h.mockModel }),
   resolveModel: (c: { provider?: string; model?: string; catalogId?: string }) =>
@@ -62,7 +71,7 @@ vi.mock("../src/extension/provider-config", () => ({
 }));
 
 vi.mock("../src/lib/agent/prompts/navigator-prompt", () => ({
-  buildNavigatorPrompt: () => "SYSTEM_PROMPT",
+  buildNavigatorPrompt: navPromptMock.buildNavigatorPrompt,
 }));
 
 vi.mock("../src/lib/agent/loop/messages", () => ({
@@ -119,6 +128,7 @@ beforeEach(() => {
   h.chatTerminalDiagnostic = undefined;
   h.buildCount = 0;
   h.buildGate = undefined;
+  navPromptMock.buildNavigatorPrompt.mockClear();
   installChrome();
 });
 
@@ -180,6 +190,57 @@ describe("getAgentMode", () => {
     store.agentMode = "full_agentic";
     const { getAgentMode } = await import("../src/extension/llm-direct");
     expect(await getAgentMode()).toBe("full_agentic");
+  });
+});
+
+describe("getEnableVerboseNavigatorPrompt", () => {
+  test("unset → false (the COMPACT navigator prompt is the default)", async () => {
+    const { getEnableVerboseNavigatorPrompt } = await import("../src/extension/llm-direct");
+    expect(await getEnableVerboseNavigatorPrompt()).toBe(false);
+  });
+
+  test("explicit true passes through", async () => {
+    store.enableVerboseNavigatorPrompt = true;
+    const { getEnableVerboseNavigatorPrompt } = await import("../src/extension/llm-direct");
+    expect(await getEnableVerboseNavigatorPrompt()).toBe(true);
+  });
+
+  test("explicit false stays false", async () => {
+    store.enableVerboseNavigatorPrompt = false;
+    const { getEnableVerboseNavigatorPrompt } = await import("../src/extension/llm-direct");
+    expect(await getEnableVerboseNavigatorPrompt()).toBe(false);
+  });
+});
+
+describe("navigator compact selection (compact is the default for every model)", () => {
+  test("128k+ context WITHOUT the opt-in compiles the COMPACT prompt", async () => {
+    store.contextTokens = 128_000;
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest());
+    expect(navPromptMock.buildNavigatorPrompt).toHaveBeenCalled();
+    expect(navPromptMock.buildNavigatorPrompt.mock.calls.at(-1)![4]).toBe(true);
+  });
+
+  test("128k+ context WITH enableVerboseNavigatorPrompt compiles the FULL prompt", async () => {
+    store.contextTokens = 128_000;
+    store.enableVerboseNavigatorPrompt = true;
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest());
+    expect(navPromptMock.buildNavigatorPrompt.mock.calls.at(-1)![4]).toBe(false);
+  });
+
+  test("sub-128k context compiles the COMPACT prompt even with the opt-in", async () => {
+    store.contextTokens = 64_000;
+    store.enableVerboseNavigatorPrompt = true;
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest());
+    expect(navPromptMock.buildNavigatorPrompt.mock.calls.at(-1)![4]).toBe(true);
+  });
+
+  test("unknown context compiles the COMPACT prompt (compact is the default)", async () => {
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest());
+    expect(navPromptMock.buildNavigatorPrompt.mock.calls.at(-1)![4]).toBe(true);
   });
 });
 

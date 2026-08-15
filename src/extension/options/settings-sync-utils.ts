@@ -148,7 +148,7 @@ export function initAutoSave(saveSettings: () => Promise<boolean>): void {
   const saveIds = [
     "apiKey", "model", "baseUrl", "resourceName",
     "maxSteps", "maxActions", "plannerInterval", "maxFailures", "costCap",
-    "defaultTask", "screenshotQuality", "screenshotImageTokens", "screenshotMaxDimension", "screenshotMaxBytes", "allowedDomains", "blockedDomains", "enableStealth",
+    "defaultTask", "screenshotQuality", "screenshotImageTokens", "screenshotMaxDimension", "screenshotMaxBytes", "allowedDomains", "blockedDomains", "enableStealth", "enableVerboseNavigatorPrompt",
     "agentMode",
     "reasoningEffort", "reasoningBudget", "forceReasoning",
     "contextTokens",

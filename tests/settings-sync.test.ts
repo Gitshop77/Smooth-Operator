@@ -59,6 +59,7 @@ function setupGlobals(): void {
     <input id="screenshotMaxBytes">
     <input id="enableScreenshots">
     <input type="checkbox" id="enableStealth" />
+    <input type="checkbox" id="enableVerboseNavigatorPrompt" />
     <textarea id="allowedDomains"></textarea>
     <textarea id="blockedDomains"></textarea>
     <input id="notifyOnCompletion">

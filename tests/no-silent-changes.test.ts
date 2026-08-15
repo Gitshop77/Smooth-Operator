@@ -85,6 +85,7 @@ function mountOptionsDom(): void {
     <input id="screenshotMaxBytes">
     <input type="checkbox" id="enableScreenshots">
     <input type="checkbox" id="enableStealth">
+    <input type="checkbox" id="enableVerboseNavigatorPrompt">
     <textarea id="allowedDomains"></textarea>
     <textarea id="blockedDomains"></textarea>
     <select id="agentMode"><option value="standard" selected>Standard</option><option value="full_agentic">Full agentic</option></select>

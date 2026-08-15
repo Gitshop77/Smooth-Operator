@@ -9,12 +9,14 @@
  *  3. The 64k model with the compact prompt can fit a MUCH larger observation
  *     than with the full prompt (the whole point: quality headroom for
  *     low-context models in long-running tasks).
- *  4. 128k+ models keep the FULL prompt (no behavior change for them).
+ *  4. COMPACT is the DEFAULT for every model: a ≥128k model keeps the FULL
+ *     prompt only when the user opts in via `enableVerboseNavigatorPrompt`.
  */
 import { describe, expect, it, test } from "vitest";
 import { buildNavigatorPrompt } from "../src/lib/agent/prompts/navigator-prompt";
 import { compileNavigatorPromptV1 } from "../src/lib/agent/prompts/prompt-compiler";
 import { assertCompiledPromptWithinContextBudgetV1 } from "../src/lib/agent/prompts/prompt-token-budget";
+import { selectNavigatorCompact } from "../src/extension/llm-direct";
 import { SECURITY_INSTRUCTION } from "../src/lib/agent/security";
 import {
   ACTION_STEERING_BLOCK,
@@ -82,7 +84,15 @@ describe("compact navigator prompt", () => {
     }
   });
 
-  test("128k+ models keep the FULL prompt (compact is opt-in for <128k)", () => {
+  test("128k+ models keep the FULL prompt ONLY when enableVerboseNavigatorPrompt is set", () => {
+    // Default path (opt-in unset/false): even a 128k+ model gets COMPACT.
+    expect(selectNavigatorCompact(128_000, false)).toBe(true);
+    // The full branch is opt-in only for a KNOWN ≥128k effective context…
+    expect(selectNavigatorCompact(128_000, true)).toBe(false);
+    expect(selectNavigatorCompact(200_000, true)).toBe(false);
+    // …and never for sub-128k / unknown contexts, even when opted in.
+    expect(selectNavigatorCompact(64_000, true)).toBe(true);
+    expect(selectNavigatorCompact(undefined, true)).toBe(true);
     expect(buildNavigatorPrompt(5, undefined, "disabled", "standard", false)).toBe(FULL);
     expect(COMPACT).not.toBe(FULL);
   });

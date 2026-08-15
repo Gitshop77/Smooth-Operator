@@ -155,6 +155,7 @@ const PROMPT_MEMO_INVALIDATION_KEYS = [
   "enableScreenshots",
   "agentMode",
   "contextTokens",
+  "enableVerboseNavigatorPrompt",
   "maxActions",
 ];
 
@@ -181,6 +182,7 @@ if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
     if (changes.reasoningBudget) settingCache.delete("reasoningBudget");
     if (changes.forceReasoning) settingCache.delete("forceReasoning");
     if (changes.contextTokens) settingCache.delete("contextTokens");
+    if (changes.enableVerboseNavigatorPrompt) settingCache.delete("enableVerboseNavigatorPrompt");
   });
 }
 
@@ -225,6 +227,14 @@ export const getVisionMode = cachedSetting("visionMode", async () => {
 const getEnableScreenshots = cachedSetting("enableScreenshots", async () => {
   const { enableScreenshots } = await chrome.storage.local.get("enableScreenshots");
   return (enableScreenshots as boolean | undefined) ?? true;
+});
+
+/** Memoized `enableVerboseNavigatorPrompt` setting — explicit opt-in to the
+ * FULL (verbose) navigator system prompt for ≥128k models. Default false:
+ * every model gets the COMPACT prompt unless the user opts in. */
+export const getEnableVerboseNavigatorPrompt = cachedSetting("enableVerboseNavigatorPrompt", async () => {
+  const { enableVerboseNavigatorPrompt } = await chrome.storage.local.get("enableVerboseNavigatorPrompt");
+  return enableVerboseNavigatorPrompt === true;
 });
 
 /**
@@ -515,6 +525,20 @@ function assertPromptBudgetWithImage(
 }
 
 /**
+ * Compact navigator prompt selection. The COMPACT prompt is the DEFAULT for
+ * every model; the full (verbose) prompt is used only when the effective
+ * context is a KNOWN ≥128k AND the user explicitly opted in via
+ * `enableVerboseNavigatorPrompt`. Unknown contexts (no catalog entry, no
+ * override) also get the compact prompt.
+ */
+export function selectNavigatorCompact(
+  effectiveContextTokens: number | undefined,
+  verboseOptIn: boolean,
+): boolean {
+  return !(effectiveContextTokens !== undefined && effectiveContextTokens >= 128_000 && verboseOptIn);
+}
+
+/**
  * Non-structured providers normally receive the Zod JSON schema in the system
  * prompt. The navigator/planner prompts already contain their complete output
  * contracts, though, and the navigator schema alone is roughly 25 KB. On a
@@ -655,13 +679,14 @@ export async function navigatorCallDirect(
  // load custom navigator prompt override (cached, invalidated on storage change).
  // These reads are independent — fetch them in parallel so a cache miss
  // doesn't serialize extra chrome.storage.local.get round-trips per step.
-  const [customNavigatorPrompt, visionMode, agentMode, reasoningConfig, provider, effectiveContextTokens] = await Promise.all([
+  const [customNavigatorPrompt, visionMode, agentMode, reasoningConfig, provider, effectiveContextTokens, verboseNavigatorPrompt] = await Promise.all([
     getCustomNavigatorPrompt(),
     getVisionMode(),
     getAgentMode(),
     resolveReasoningConfig(),
     raceWithAbort(getProvider(), signal),
     getEffectiveContextTokens(),
+    getEnableVerboseNavigatorPrompt(),
   ]);
  // Embed screenshot marker ONLY for vision-capable models. Text-only models
  // would either error (HTTP 400 from the API) or waste tokens processing a
@@ -701,10 +726,11 @@ const enableScreenshots = provider.supportsVision && (await getEnableScreenshots
     visionMode,
     mode: agentMode,
     user: navigatorUser,
-    // Sub-128k models get the COMPACT system prompt: the same security/schema
-    // blocks with prose compressed, so the derived input budget has ~3× more
-    // room for the observation. 128k+ models keep the full prompt.
-    compact: effectiveContextTokens !== undefined && effectiveContextTokens < 128_000,
+    // The COMPACT system prompt is the DEFAULT for every model: the same
+    // security/schema blocks with prose compressed, so the derived input
+    // budget has ~3× more room for the observation. Only a ≥128k model with
+    // the explicit `enableVerboseNavigatorPrompt` opt-in keeps the full prompt.
+    compact: selectNavigatorCompact(effectiveContextTokens, verboseNavigatorPrompt),
     systemSuffix: shouldInlineFormatInstructions(
       provider.supportsStructuredOutput,
       effectiveContextTokens,

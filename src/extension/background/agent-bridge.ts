@@ -403,6 +403,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     stored = await chrome.storage.local.get([
       "maxActions", "plannerInterval", "maxFailures", "costCap", "maxSteps",
       "allowedDomains", "blockedDomains",
+      "enableVerboseNavigatorPrompt",
     ]);
   } catch (e) {
     sendEvent({ type: "error", step: 0, message: `Settings load failed: ${errMsg(e)}`, recoverable: false });
