@@ -92,6 +92,30 @@ describe("classifyError — abort wording is not user authority", () => {
   });
 });
 
+describe("classifyError — transport aborts are network, not user cancelled", () => {
+  test("'The request was aborted' (ECONNABORTED-class) → network / retryable, not user cancelled", () => {
+    const classified = classifyError(new Error("The request was aborted"));
+    expect(classified.category).toBe("network");
+    expect(classified.retryable).toBe(true);
+    expect(classified.fatal).toBe(false);
+    expect(classified.machineCode).toBe("network_error");
+  });
+
+  test("'fetch aborted' → network / retryable, not user cancelled", () => {
+    const classified = classifyError(new Error("fetch aborted"));
+    expect(classified.category).toBe("network");
+    expect(classified.retryable).toBe(true);
+    expect(classified.fatal).toBe(false);
+    expect(classified.machineCode).toBe("network_error");
+  });
+
+  test("genuine user-cancel wording stays cancelled (non-retryable)", () => {
+    const classified = classifyError(new Error("cancelled by user"));
+    expect(classified.category).toBe("cancelled");
+    expect(classified.retryable).toBe(false);
+  });
+});
+
 describe("classifyError — unusable model output", () => {
   test("is terminal and preserves its actionable typed vocabulary", () => {
     const error = Object.assign(new Error("The model returned no visible answer."), {

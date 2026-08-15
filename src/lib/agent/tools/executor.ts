@@ -470,7 +470,7 @@ export async function executeAction(
             action,
             success: !!res.success,
             message: res.message || `list_downloads: ${downloads.length} captured`,
-            extractedContent: `<untrusted_downloads>\n${listing}\n</untrusted_downloads>`,
+            extractedContent: listing,
           };
         } catch (e) {
           return { action, success: false, message: `list_downloads failed: ${e instanceof Error ? e.message : String(e)}` };

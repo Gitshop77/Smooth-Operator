@@ -33,6 +33,21 @@ interface MemoEntry<T> {
 let redactionMemo = new Map<string, MemoEntry<string>>();
 let injectionMemo = new Map<string, MemoEntry<{ safe: boolean; warnings: string[] }>>();
 
+/** Cap on memoized entries per map (mirrors run-history-utils' redact cache). */
+const MAX_MEMO_ENTRIES = 1000;
+
+/**
+ * Bound a memo at {@link MAX_MEMO_ENTRIES} entries. Map keys iterate in
+ * insertion order, so evicting the first key drops the OLDEST entry — on a
+ * dynamic page a long run's unique strings can't accumulate without bound.
+ */
+function evictOldestIfOverCap<T>(map: Map<string, T>): void {
+  if (map.size > MAX_MEMO_ENTRIES) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+}
+
 /**
  * Apply BOTH redactors — the stored-secret redactor (`redactSecrets`, by
  * value) and the key-shape redactor (`redactKeyShapes`, by credential
@@ -61,6 +76,7 @@ export function memoizedRedact(text: string): Promise<string> {
   return redactBoth(text).then(
     (value) => {
       redactionMemo.set(text, { version, value });
+      evictOldestIfOverCap(redactionMemo);
       return value;
     },
     () => REDACTION_FAILED,
@@ -80,6 +96,7 @@ export function memoizedInjectionScan(text: string): { safe: boolean; warnings: 
   }
   const value = scanForInjection(text);
   injectionMemo.set(text, { version, value });
+  evictOldestIfOverCap(injectionMemo);
   return value;
 }
 
@@ -91,4 +108,15 @@ export function memoizedInjectionScan(text: string): { safe: boolean; warnings: 
 export function clearRedactionMemo(): void {
   redactionMemo = new Map();
   injectionMemo = new Map();
+}
+
+/**
+ * Test-only accessor for the current memo sizes (repo `__test_*` pattern).
+ * Reads the live bindings because `clearRedactionMemo` reassigns the maps.
+ */
+export function __test_memoSizesForTests(): {
+  redaction: number;
+  injection: number;
+} {
+  return { redaction: redactionMemo.size, injection: injectionMemo.size };
 }

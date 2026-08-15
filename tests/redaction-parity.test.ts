@@ -81,6 +81,19 @@ describe("redactKeyShapes (canonical) vs redactKeyLeak — shared shape coverage
       input: "redis://:p@ss@127.0.0.1:6379/0",
       secret: "p@ss",
     },
+    {
+      // Passwordless connection string (A5): the password group is optional,
+      // so the userinfo must still be fully masked.
+      name: "postgres connection string without password",
+      input: "postgres://user@host:5432/db",
+      secret: "user@host:5432/db",
+    },
+    {
+      // Passwordless MongoDB SRV connection string (A5).
+      name: "mongodb+srv connection string without password",
+      input: "mongodb+srv://user@host/db",
+      secret: "user@host/db",
+    },
   ];
 
   for (const s of SHARED) {
@@ -96,6 +109,25 @@ describe("redactKeyShapes (canonical) vs redactKeyLeak — shared shape coverage
       expect(out).not.toBe(s.input);
     });
   }
+});
+
+describe("redactKeyLeak JWT prefix masking (A4)", () => {
+  test("a JWT whose signature contains a dash is masked to a short prefix — header+payload never survive", () => {
+    const input =
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyQGV4YW1wbGUuY29tIn0.abc-defghijklmnop";
+    const out = redactKeyLeak(input);
+    // The prefix slice must NOT follow the dash in the signature, which would
+    // expose the entire header+payload (e.g. `eyJ...In0.abc-[REDACTED]`).
+    expect(out).not.toContain("eyJhbGci");
+    expect(out).not.toContain("abc-");
+    expect(out).toBe("eyJh[REDACTED]");
+  });
+
+  test("a dash-free JWT still masks to the same short prefix", () => {
+    const input =
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
+    expect(redactKeyLeak(input)).toBe("eyJh[REDACTED]");
+  });
 });
 
 describe("redactKeyLeak UI-only extras (intentionally absent from conservative agent redactor)", () => {

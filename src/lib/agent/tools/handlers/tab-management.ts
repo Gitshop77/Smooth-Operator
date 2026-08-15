@@ -126,7 +126,7 @@ export async function delegateTabAction(
         const lines = (tabs as Array<{ url?: string; active?: boolean; index?: number }>)
           .slice(0, 50)
           .map((t) => `${t.url ?? "(no url)"} (active:${!!t.active}, id:${t.index ?? ""})`);
-        result.extractedContent = `<untrusted_tab_list>\n${lines.join("\n")}\n</untrusted_tab_list>`;
+        result.extractedContent = lines.join("\n");
       }
     }
     return result;

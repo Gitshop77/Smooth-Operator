@@ -5,7 +5,7 @@
  * loop receives, so it gets the full treatment.
  */
 import { redactSecrets } from "../secrets";
-import { scanForInjection } from "../security";
+import { sanitizeUntrusted, scanForInjection } from "../security";
 
 export const RESEARCH_MAX_RESULT_CHARS = 32_000;
 
@@ -20,13 +20,25 @@ export async function sanitizeResearchResult(
   maxChars: number = RESEARCH_MAX_RESULT_CHARS,
 ): Promise<SanitizedResearchResult> {
   const truncated = raw.length > maxChars;
+  // Never slice mid-surrogate-pair: back the boundary up past any high
+  // surrogate so the pair is dropped whole instead of leaving a lone one.
+  let end = maxChars;
+  while (end > 0 && raw.charCodeAt(end - 1) >= 0xd800 && raw.charCodeAt(end - 1) <= 0xdbff) end--;
   const bounded = truncated
-    ? `${raw.slice(0, maxChars)}\n\n[truncated: research output exceeded ${maxChars} chars]`
+    ? `${raw.slice(0, end)}\n\n[truncated: research output exceeded ${maxChars} chars]`
     : raw;
-  const redacted = await redactSecrets(bounded);
-  const scan = scanForInjection(redacted);
+  // Flag injection in the RAW bounded text: the sanitizer below redacts the
+  // patterns the scan must report, so scanning the sanitized text would miss
+  // them. Mirrors sanitizeCompactedMemory (compaction.ts).
+  const scan = scanForInjection(bounded);
+  // Run the shared untrusted sanitizer at the source: a forged prompt tag
+  // (e.g. <site_memory>) or %secret% placeholder must not survive here — it
+  // is only contained downstream at the prompt render seam otherwise.
+  const sanitized = sanitizeUntrusted(bounded);
+  const redacted = await redactSecrets(sanitized);
   // NOTE: no leading newline — the warnings block must START the result text
   // so downstream parsing/tests can rely on text.startsWith("<injection_warnings>").
+  // Built AFTER sanitization so the advisory is never self-redacted.
   const injectionWarnings = scan.safe
     ? ""
     : `<injection_warnings>\nPotential prompt injection detected in research output. Patterns found:\n${scan.warnings

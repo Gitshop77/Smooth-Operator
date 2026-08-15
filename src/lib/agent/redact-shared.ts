@@ -109,6 +109,12 @@ function looksLikeSecret(v: string): boolean {
  */
 export function redactKeyLeak(s: string): string {
   let out = s.replace(keyRe(), (m) => {
+    // JWT-shaped tokens (dot-separated base64url segments) are masked to a
+    // fixed short prefix: slicing on a `-` inside the signature would expose
+    // the entire header+payload (e.g. `eyJ...In0.abc-[REDACTED]`).
+    if (m.includes(".")) {
+      return `${m.slice(0, 4)}[REDACTED]`;
+    }
     const dash = m.indexOf("-");
     const prefix = dash > 0 ? m.slice(0, dash + 1) : m.slice(0, 4);
     return `${prefix}[REDACTED]`;

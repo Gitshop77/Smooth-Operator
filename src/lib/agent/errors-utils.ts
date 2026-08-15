@@ -121,9 +121,16 @@ const FIVE_XX_RE = /\b5\d\d\b/;
  * Classify an error into one of {@link ErrorCategory}.
  *
  * Classification is substring-based on the error message. Categories are
- * checked in priority order: auth → forbidden → bad_request → cancelled →
- * server_error → rate_limit → network → <structured status> →
- * programmer_error → parse → max_steps → max_failures → unknown.
+ * checked in priority order: auth → forbidden → bad_request → <structured
+ * status> → server_error → rate_limit → network → programmer_error → parse →
+ * max_steps → max_failures → cancelled → unknown.
+ *
+ * The cancelled check runs LAST on purpose: a message containing "abort" is
+ * not by itself proof the user pressed Stop — transient transport failures
+ * ("The request was aborted", ECONNABORTED-class) carry the same wording.
+ * Only messages that survive every other branch (genuine user-cancel phrasing
+ * like "cancelled by user", or a plain AbortError with no transport markers)
+ * classify as cancelled.
  */
 export function classifyError(error: unknown, attempt = 0): ClassifiedError {
   const originalMessage = redactKeyLeak(error instanceof Error ? error.message : String(error));
@@ -194,10 +201,6 @@ export function classifyError(error: unknown, attempt = 0): ClassifiedError {
     }
   }
 
-  if (containsAny(lower, ["abort", "cancelled", "canceled"])) {
-    return mk("cancelled", false, false);
-  }
-
   if (FIVE_XX_RE.test(lower) || containsAny(lower, ["server error", "internal error", "bad gateway", "service unavailable", "gateway timeout"])) {
     return mk("server_error", false, true);
   }
@@ -213,9 +216,14 @@ export function classifyError(error: unknown, attempt = 0): ClassifiedError {
     return mk("network", false, true);
   }
 
+  // Transport-level aborts ("The request was aborted", "fetch aborted",
+  // ECONNABORTED-class) are transient network failures — NOT user
+  // cancellation. They must be caught here, BEFORE the generic
+  // abort/cancelled substring check at the end of the chain, so a server that
+  // kills the connection mid-request retries instead of terminating the run.
   if (
     !(error instanceof TypeError || error instanceof ReferenceError || error instanceof SyntaxError) &&
-    containsAny(lower, ["fetch failed", "econnreset", "econnrefused", "etimedout"])
+    containsAny(lower, ["fetch failed", "econnreset", "econnrefused", "etimedout", "econnaborted", "request was aborted", "request aborted", "fetch aborted"])
   ) {
     return mk("network", false, true);
   }
@@ -242,6 +250,15 @@ export function classifyError(error: unknown, attempt = 0): ClassifiedError {
 
   if (containsAny(lower, ["max failures", "consecutive failures"])) {
     return mk("max_failures", true, false);
+  }
+
+  // Deliberately LAST: "abort" wording alone is not user authority — the
+  // network branches above already claimed the transport-abort phrasings
+  // ("request aborted", "fetch aborted", ECONNABORTED-class). Whatever
+  // survives here is genuine user-cancel wording ("cancelled by user") or a
+  // bare AbortError with no transport markers.
+  if (containsAny(lower, ["abort", "cancelled", "canceled"])) {
+    return mk("cancelled", false, false);
   }
 
   if (attempt >= 1) {

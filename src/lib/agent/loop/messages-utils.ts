@@ -3,6 +3,7 @@ import { wrapUntrusted } from "../security";
 import { getSecretSetVersion } from "../secrets";
 import { BASE_OBS_ELEMENTS_CHARS } from "../prompts/prompt-token-budget";
 import { escapeXml } from "./xml-escape";
+import { redactKeyShapes } from "../key-shape-redact";
 
 /** Max chars of interactive-element text shipped to the navigator per step —
  * derived from the observation-budget base cap (prompt-token-budget.ts) so it
@@ -56,12 +57,24 @@ export const PLANNER_HISTORY_LIMIT = 8;
 /** Max chars of the action-args placeholder rendered for stale observations. */
 const STALE_ACTION_ARGS_LIMIT = 80;
 
-/** Stable-key-ordered, bounded render of an action's own enumerable params. */
+/**
+ * Stable-key-ordered, bounded render of an action's own enumerable params.
+ *
+ * The args render OUTSIDE `wrapUntrusted` (mid-line inside the `<step_…>`
+ * block), so they are the one history channel that never passes through the
+ * sanitizer: a model-echoed credential in an arg (a key-shaped token the task
+ * text contained, echoed into `navigate(url=…)` / `evaluate(code=…)`) would
+ * round-trip to the provider on every subsequent step, and a forged
+ * `</step_…>` / `<` payload in an arg could break out of the step block.
+ * Key-shape redaction (fail-closed: a throw masks the whole value) + XML
+ * escaping close both channels at the render seam, mirroring the treatment
+ * the message/extracted-content channels get from `redactHistoryForPrompt`.
+ */
 function actionArgsPlaceholder(action: { type: string }): string {
   const own = Object.entries(action)
     .filter(([k]) => k !== "type")
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([k, v]) => `${k}=${String(v) ?? ""}`)
+    .map(([k, v]) => `${k}=${escapeXml(redactKeyShapes(String(v)), true)}`)
     .join(" ");
   if (own.length === 0) return "";
   const truncated = own.length > STALE_ACTION_ARGS_LIMIT

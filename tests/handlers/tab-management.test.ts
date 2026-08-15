@@ -50,7 +50,12 @@ describe("list_tabs payload serialization", () => {
     expect(result.success).toBe(true);
     expect(result.extractedContent).toContain("https://a.example/x (active:true, id:0)");
     expect(result.extractedContent).toContain("https://b.example/y?t=secret-token (active:false, id:1)");
-    expect(result.extractedContent).toMatch(/^<untrusted_tab_list>/);
+    // Emit contract: extractedContent is PLAIN — baking `<untrusted_tab_list>`
+    // markup here would be destroyed (wrapper + content → [redacted]) by the
+    // render seam's wrapUntrusted once untrusted_tab_list joined the redaction
+    // lists. The <untrusted_page_data> wrapper at the render seam carries the
+    // untrusted semantics.
+    expect(result.extractedContent).not.toContain("<untrusted_tab_list>");
   });
 
   test("list_tabs bounds the serialized listing to 50 tabs", async () => {

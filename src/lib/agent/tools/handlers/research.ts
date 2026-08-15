@@ -68,7 +68,7 @@ export async function handleResearch(
       action,
       success: true,
       message: res.message || "research complete",
-      extractedContent: `<untrusted_research>\n${answer}${usageNote}\n</untrusted_research>`,
+      extractedContent: `${answer}${usageNote}`,
     };
   } catch (e) {
     return { action, success: false, message: `research failed: ${e instanceof Error ? e.message : String(e)}` };

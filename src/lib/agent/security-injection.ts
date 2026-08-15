@@ -43,6 +43,11 @@ export const PROMPT_TAGS = [
   "action_set", "action_categories",
   "untrusted_page_data", "untrusted_page_state", "accessibility_tree", "injection_warnings",
   "compacted_memory", "untrusted_injection_warning",
+ // Tool-emitted untrusted-content wrappers (research / tab-list / downloads) —
+ // a forged half (e.g. `</untrusted_research>`) in page text could prematurely
+ // close a legitimate wrapper; handlers now emit the content plain and the
+ // render seam's <untrusted_page_data> wrapper carries the untrusted semantics.
+  "untrusted_research", "untrusted_tab_list", "untrusted_downloads",
  // Trusted blocks (site_memory is the most critical — explicitly honored)
   "site_memory", "available_skills", "custom_tools",
  // Security/safety blocks
@@ -85,6 +90,7 @@ const BARE_TAG_REDACTION_TAGS = [
   "action_categories",
   "untrusted_page_data", "untrusted_page_state", "accessibility_tree", "injection_warnings",
   "compacted_memory", "untrusted_injection_warning",
+  "untrusted_research", "untrusted_tab_list", "untrusted_downloads",
   "system", "sys",
   "site_memory",
   "security_rules", "content_isolation", "instruction_detection",
@@ -258,6 +264,23 @@ interface InjectionDetector {
  * legitimately need), so we only redact the highest-confidence patterns.
  * Flagging is non-destructive, so we can afford a wider net.
  */
+// Agent-internal tag injection (overlap with the redaction layer — flag in
+// addition to redacting so the LLM knows the page tried to forge tags).
+// Sourced from BARE_TAG_REDACTION_TAGS (the bare-tag redaction list — the
+// natural source of truth for "clearly agent-internal" tags, which now also
+// includes the three tool-emitted untrusted_* wrapper tags) so future
+// bare-redaction tags are auto-covered here. BARE_TAG_PATTERN entries are
+// plain names (`step_\d+` is intentionally NOT in the bare list).
+//
+// `injection_warnings` is deliberately EXCLUDED: the sanitizers' own advisory
+// blocks open with that literal tag (`sanitizeCompactedMemory`,
+// `sanitizeResearchResult`), so flagging it would self-flag every advisory
+// the harness emits — the exact false-positive class the advisory layer must
+// avoid. A forged `<injection_warnings>` in untrusted content is already
+// destroyed by the pair/bare redaction lists, so nothing is lost by not
+// flagging it.
+const TAG_INJECTION_DETECTOR_TAGS = BARE_TAG_REDACTION_TAGS.filter((t) => t !== "injection_warnings");
+
 const INJECTION_DETECTORS: readonly InjectionDetector[] = [
   { source: "ignore\\s+(all\\s+)?previous\\s+instructions", flags: "gi", label: "ignore-previous-instructions" },
   { source: "ignore\\s+all\\s+previous", flags: "gi", label: "ignore-previous-instructions" },
@@ -274,9 +297,7 @@ const INJECTION_DETECTORS: readonly InjectionDetector[] = [
   { source: "(?:^|\\s)(system|assistant)\\s*:", flags: "gim", label: "role-tag-impersonation" },
  // Premature-done trick — page text that tries to make the agent emit `done`.
   { source: "\\b(call|emit|return|send)\\s+done\\b", flags: "gi", label: "premature-done" },
- // Agent-internal tag injection (overlap with the redaction layer — flag in
- // addition to redacting so the LLM knows the page tried to forge tags).
-  { source: "<\\/?(?:system|assistant|user_request|agent_history|agent_state|browser_state|step_info|action_set|untrusted_page_data|compacted_memory|current_goal|plan)\\s*>", flags: "gi", label: "tag-injection" },
+  { source: `<\\/?(?:${TAG_INJECTION_DETECTOR_TAGS.join("|")})\\s*>`, flags: "gi", label: "tag-injection" },
   // "New instructions:" / "new task:" — classic injection preamble.
   { source: "new\\s+(instructions?|task)\\s*:", flags: "gi", label: "new-instructions-preamble" },
   // Polite imperative requests — social-engineering phrasings that ask for
@@ -287,7 +308,6 @@ const INJECTION_DETECTORS: readonly InjectionDetector[] = [
   // in untrusted page content. Flags rather than redacts so the LLM retains
   // the surrounding context for task completion.
   { source: "\\b(?:glcbt-|glpat-|glrt-|gloas-|glfs-|shpat_|shpca_|shppa_|shpss_|nrjs-|NRI-|doo_v1_|DO_V1_)\\b", flags: "g", label: "token-prefix-detected" },
-  { source: "\\b(?:twitter|cloudflare|discord|dropbox|plaid)\\b", flags: "gi", label: "token-prefix-detected" },
 ];
 
 /**
