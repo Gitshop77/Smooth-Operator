@@ -475,9 +475,20 @@ export async function extractStateForRun(
     screenshotImageTokens <= Math.floor(budgetProfile.maxInputTokens * 0.25);
   const visionMode = (storedVisionMode as string) ||
     (enableLocalVision === true ? "always" : "adaptive");
+  // The main-LLM screenshot ships ONLY on explicit one-shot requests
+  // (inspect_visual → includeScreenshotOnce) — never automatically on
+  // `visionMode === "always"` when the model is vision-capable: with the
+  // local VLM ready, the always-on branch below grounds the agent locally
+  // (capture + detect + merge boxes), so per-step image tokens on the main
+  // channel drop to zero. The legacy "always" disjunct survives ONLY while
+  // the VLM cannot ground yet (disabled or init pending): dropping it then
+  // would throw the run into the always-on branch's dead-VLM fallback —
+  // extractStateFromTab(..., false, ...) — silently degrading a
+  // screenshot-capable run to DOM-only with NO pixels at all.
+  const vlmReady = globalVisionAssistant?.isReady === true;
   const includeScreenshot = mainModelVision
     && Boolean(storedEnableScreenshots ?? true)
-    && (visionMode === "always" || options?.includeScreenshotOnce === true)
+    && ((visionMode === "always" && !vlmReady) || options?.includeScreenshotOnce === true)
     && screenshotAffordable;
   const effectiveTextOnly = !mainModelVision || !includeScreenshot;
   const useAlwaysOnVision = visionMode === "always" && effectiveTextOnly;
