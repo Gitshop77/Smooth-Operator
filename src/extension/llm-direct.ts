@@ -610,6 +610,10 @@ export async function navigatorCallDirect(
   onProgress?: import("@/lib/agent/llm/provider").LLMRequest["onProgress"],
 ): Promise<DirectCallResult> {
  // Cap elementsText (same abuse-prevention as the Next.js route).
+ // MAX_ELEMENTS_CHARS is DERIVED from the observation-budget base
+ // (prompt-token-budget.ts); the loop truncates elementsText to its per-step
+ // derived budget (≤ that base) before this point, so this capText call is a
+ // fail-closed backstop — unreachable by construction.
  // Strip any `<screenshot>…</screenshot>` markers from the UNTRUSTED page text
  // BEFORE it is composed into the model input — see `stripScreenshotMarkers`.
  // The real screenshot is injected later from `req.browserState.screenshot`, so
@@ -618,7 +622,9 @@ export async function navigatorCallDirect(
     capText(req.browserState.elementsText, MAX_ELEMENTS_CHARS),
   );
 
- // Cap axTree symmetrically to elementsText. On large pages the AX tree can be
+ // Cap axTree symmetrically to elementsText (same derived, unreachable-by-
+ // construction backstop: the loop truncates axTree to its per-step derived
+ // budget first). On large pages the AX tree can be
  // very large and is re-sent on every navigator step; leaving it uncapped both
  // inflates per-step input tokens and risks message-size limits. The truncation
  // marker tells the model data was dropped. Also strip forged screenshot markers.

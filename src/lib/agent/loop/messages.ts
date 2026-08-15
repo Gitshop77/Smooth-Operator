@@ -292,6 +292,12 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
   // (possibly huge) elementsText then truncating wastes work on the discarded
   // tail, and flagging patterns that were truncated out of the message would
   // be misleading.
+  //
+  // ELEMENTS_TEXT_CHAR_CAP is DERIVED from the observation-budget base
+  // (prompt-token-budget.ts). The loop's prepareNavigatorRequest already
+  // truncates elementsText to its per-step derived budget (≤ this base), so
+  // this branch is a fail-closed backstop — unreachable by construction, kept
+  // for hypothetical direct callers.
   const rawElementsText = browserState.elementsText;
   let elementsText = rawElementsText;
   if (elementsText.length > ELEMENTS_TEXT_CHAR_CAP) {

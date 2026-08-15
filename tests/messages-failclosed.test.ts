@@ -14,7 +14,7 @@
  */
 
 import { describe, test, expect, vi, beforeAll, afterAll } from "vitest";
-import { buildNavigatorUserMessage } from "../src/lib/agent/loop/messages";
+import { buildNavigatorUserMessage, ELEMENTS_TEXT_CHAR_CAP } from "../src/lib/agent/loop/messages";
 import { installLocalStorageStub, restoreLocalStorageStub } from "./helpers";
 import type { HistoryItem } from "../src/lib/agent/types";
 
@@ -98,5 +98,25 @@ describe("redactHistoryForPrompt fail-closed", () => {
     const msg = await buildNavigatorUserMessage(baseArgs({ history }));
     expect(msg).toContain("the page loaded successfully");
     expect(msg).not.toContain("[REDACTED: redaction failed]");
+  });
+});
+
+describe("buildNavigatorUserMessage elementsText cap", () => {
+  test("slices a synthetic oversized elementsText (>24k) to ELEMENTS_TEXT_CHAR_CAP with the truncation marker", async () => {
+    // The synthetic input must sit BETWEEN the legacy 60k message cap and the
+    // 24k observation-budget base the constant is derived from: 30k chars is
+    // oversized (>24k) but not over the old cap, so this test goes RED until
+    // ELEMENTS_TEXT_CHAR_CAP is derived from BASE_OBS_ELEMENTS_CHARS. The
+    // slice assertions reference the constant, not a literal, so they track
+    // the derived value rather than pinning one behavior forever.
+    const tail = "TAIL-SENTINEL-PAST-THE-CAP";
+    const oversized = "a".repeat(30_000) + tail;
+    const msg = await buildNavigatorUserMessage(
+      baseArgs({ browserState: { ...baseBrowserState, elementsText: oversized } }),
+    );
+    expect(msg).toContain("[truncated");
+    expect(msg).not.toContain(tail);
+    // The full cap width of elements survives the slice (constant-referenced).
+    expect(msg).toContain("a".repeat(ELEMENTS_TEXT_CHAR_CAP));
   });
 });

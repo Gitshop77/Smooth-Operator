@@ -63,12 +63,12 @@ export interface SnapshotWindow {
  * included so pagination/nav links stay available in every window.
  *
  * The marker sits at the HEAD of the window: the message layer re-caps
- * `elementsText` at 60k from the start (loop/messages.ts), which would
- * otherwise cut a mid-window marker and hide the resume offset from the model.
- * The tail is placed BEFORE the chunk for the same reason — a trailing tail
- * falls outside the 60k visible budget (and outside the history render
- * window for `page_next` results), which would silently drop the nav links
- * the tail exists to preserve.
+ * `elementsText` at the derived cap from the start (ELEMENTS_TEXT_CHAR_CAP,
+ * loop/messages.ts), which would otherwise cut a mid-window marker and hide
+ * the resume offset from the model. The tail is placed BEFORE the chunk for
+ * the same reason — a trailing tail falls outside the visible budget (and
+ * outside the history render window for `page_next` results), which would
+ * silently drop the nav links the tail exists to preserve.
  */
 export function windowSnapshot(yaml: string, offset = 0): SnapshotWindow {
   if (!yaml) {
@@ -135,9 +135,10 @@ function appendWindowLine(w: SnapshotWindowBuffer, line: string, isFirstLine: bo
 /** Assemble the windowed slice from a {@link SnapshotWindowBuffer} —
  * byte-identical to `windowSnapshot(joinedText, 0).text`: the raw join for
  * sub-cap pages, otherwise `marker + tail + "\n" + head-chunk` with the
- * marker at the HEAD (the message layer re-caps `elementsText` at 60k from
- * the start, which would otherwise cut a mid-window marker and hide the
- * resume offset from the model — see `windowSnapshot`). */
+ * marker at the HEAD (the message layer re-caps `elementsText` at the derived
+ * cap from the start — ELEMENTS_TEXT_CHAR_CAP, loop/messages.ts — which would
+ * otherwise cut a mid-window marker and hide the resume offset from the model;
+ * see `windowSnapshot`). */
 function assembleWindowedText(w: SnapshotWindowBuffer): string {
   if (w.totalChars <= MAX_SNAPSHOT_CHARS) return w.head;
   const contentBudget = MAX_SNAPSHOT_CHARS - SNAPSHOT_TAIL_CHARS - SNAPSHOT_MARKER_ROOM;

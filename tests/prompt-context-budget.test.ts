@@ -11,7 +11,7 @@
  *     known context window using a combined 15% output/reasoning allowance.
  */
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { buildNavigatorUserMessage } from "../src/lib/agent/loop/messages";
+import { buildNavigatorUserMessage, ELEMENTS_TEXT_CHAR_CAP } from "../src/lib/agent/loop/messages";
 import { compileNavigatorPromptV1 } from "../src/lib/agent/prompts/prompt-compiler";
 import {
   PROMPT_BUDGET_PROFILES_V1,
@@ -50,11 +50,14 @@ const LARGE_PAGE_USER = {
 
 describe("navigator on a 64k-context model with a large page", () => {
   test("a ~120k-byte page is bounded and admitted for a 64k model without treating bytes as tokens", async () => {
-    // The user message caps elementsText at ELEMENTS_TEXT_CHAR_CAP (60k chars)
-    // BEFORE the injection scan, so a ~120k-byte page is bounded on arrival.
+    // The user message caps elementsText at ELEMENTS_TEXT_CHAR_CAP (derived
+    // from the observation-budget base) BEFORE the injection scan, so a
+    // ~120k-byte page is bounded on arrival.
     const userMessage = await buildNavigatorUserMessage(LARGE_PAGE_USER);
     expect(userMessage.length).toBeLessThan(75_000);
-    expect(utf8ByteLength(userMessage)).toBeGreaterThan(60_000); // genuinely large
+    // Genuinely large: bigger than the elements cap alone, so the cap (not a
+    // small page) is what bounded it.
+    expect(utf8ByteLength(userMessage)).toBeGreaterThan(ELEMENTS_TEXT_CHAR_CAP);
 
     const compiled = await compileNavigatorPromptV1({ maxActions: 5, user: LARGE_PAGE_USER });
     expect(compiled.messages).toHaveLength(2);
@@ -88,8 +91,21 @@ describe("navigator on a 64k-context model with a large page", () => {
     ).not.toThrow();
   });
 
-  test("a 32k-context model fails closed on the same large bounded page", async () => {
-    const compiled = await compileNavigatorPromptV1({ maxActions: 5, user: LARGE_PAGE_USER });
+  test("a 32k-context model fails closed on a large page that fits the message cap", async () => {
+    // elementsText at the derived cap alone no longer exceeds the 32k derived
+    // input budget (27,200 bytes ≈ cap + framing); a large AX tree — capped
+    // only at the loop/llm-direct seam, not in buildNavigatorUserMessage —
+    // pushes the bounded message back over it, so the fail-closed assert still
+    // fires for a genuinely large page on a 32k model.
+    const largeUser = {
+      ...LARGE_PAGE_USER,
+      browserState: {
+        ...LARGE_PAGE_USER.browserState,
+        elementsText: "a".repeat(ELEMENTS_TEXT_CHAR_CAP),
+        axTree: "button Continue\n".repeat(3_000), // ~30k chars
+      },
+    };
+    const compiled = await compileNavigatorPromptV1({ maxActions: 5, user: largeUser });
     expect(() =>
       assertCompiledPromptWithinContextBudgetV1("navigator", "navigator-32k-large", compiled.messages, 32_000),
     ).toThrow(PromptBudgetExceededError);

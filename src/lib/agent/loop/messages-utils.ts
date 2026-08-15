@@ -1,9 +1,15 @@
 import type { HistoryItem, TabInfo } from "../types";
 import { wrapUntrusted } from "../security";
+import { BASE_OBS_ELEMENTS_CHARS } from "../prompts/prompt-token-budget";
 import { escapeXml } from "./xml-escape";
 
-/** Max chars of interactive-element text shipped to the navigator per step. */
-export const ELEMENTS_TEXT_CHAR_CAP = 60_000;
+/** Max chars of interactive-element text shipped to the navigator per step —
+ * derived from the observation-budget base cap (prompt-token-budget.ts) so it
+ * can never drift from the budget module. The loop already truncates
+ * elementsText to its per-step derived budget (≤ this base), so the fail-closed
+ * slice in `buildNavigatorUserMessage` is unreachable by construction — kept
+ * for hypothetical direct callers. */
+export const ELEMENTS_TEXT_CHAR_CAP = BASE_OBS_ELEMENTS_CHARS;
 
 /** Max chars of extracted content surfaced inline per action result. */
 const EXTRACTED_CONTENT_INLINE_LIMIT = 8_500;

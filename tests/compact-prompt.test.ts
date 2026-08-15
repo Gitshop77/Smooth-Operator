@@ -88,10 +88,14 @@ describe("compact navigator prompt", () => {
   });
 
   test("a 64k model with the compact prompt fits a LARGE observation that the full prompt cannot", async () => {
-    // ~83k chars: under the corrected fallback allowance with the 22KB compact
-    // prompt, but over it with the 30KB full prompt.
+    // The message layer slices elementsText at the derived cap (24k), so the
+    // AX tree (capped only at the loop/llm-direct seam, not in
+    // buildNavigatorUserMessage) carries the observation weight: a ~59k-char
+    // AX tree puts the full-prompt message at ~112KB (≈56k tokens — over the
+    // 64k derived input budget of 54,400), while the compact prompt stays
+    // ~104KB (≈52k tokens — fits).
     const elementsText = "[1]<button>Compare plans</button>\n".repeat(2_600);
-    const axTree = "button Compare plans\n".repeat(1_000);
+    const axTree = "button Compare plans\n".repeat(2_800);
     const compiled = await compileNavigatorPromptV1({
       maxActions: 5,
       compact: true,

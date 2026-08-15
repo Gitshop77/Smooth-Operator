@@ -228,11 +228,13 @@ export interface NavigatorObservationCapsV1 {
   screenshotChars: number;
 }
 
-/** Base per-channel caps at the 128k calibration point — the current loop
- * defaults (`ELEMENTS_TEXT_CHAR_CAP` / `MAX_NAV_AXTREE_CHARS` /
- * `MAX_NAV_SCREENSHOT_CHARS`). A derived cap NEVER exceeds its base, so a
- * 128k+ model keeps today's exact behavior. */
-const BASE_OBS_ELEMENTS_CHARS = 24_000;
+/** Base per-channel caps at the 128k calibration point — the exact per-step
+ * caps for unknown/≥128k-context runs. `ELEMENTS_TEXT_CHAR_CAP`
+ * (messages-utils.ts) and `MAX_ELEMENTS_CHARS` (validations.ts) are DERIVED
+ * from `BASE_OBS_ELEMENTS_CHARS`, so the message-layer and llm-direct caps can
+ * never drift from the budget module. A derived cap NEVER exceeds its base, so
+ * a 128k+ model keeps today's exact behavior. */
+export const BASE_OBS_ELEMENTS_CHARS = 24_000;
 const BASE_OBS_AXTREE_CHARS = 12_000;
 const BASE_OBS_SCREENSHOT_CHARS = 100_000;
 
@@ -279,9 +281,11 @@ const MIN_SUB_128K_TEXT_OBSERVATION_CHARS = 8_000;
  *
  * Regime ≥128k (or unknown): the base caps unchanged; the screenshot cap
  * becomes its FIT budget — what remains after the fixed overhead and a minimum
- * usable text observation. At 128k that is 67,424 chars (≈50KB image, ~640px)
- * instead of the current 1.5M hard cap that realistic captures always exceed —
- * replacing a silent step-killing assert with an observable drop.
+ * usable text observation. At 128k that is 72,800 chars (≈50KB image, ~640px) —
+ * a bounded per-step quality budget. A 3M-char screenshot safety cap stays in
+ * the loop as the OUTER drop guard (corrupt/hostile captures are never
+ * re-encoded); over-budget frames are resized down to this fitted budget
+ * instead of being shipped whole.
  *
  * Regime <128k: a bounded fraction of the derived input capacity is used for
  * text observation; elementsText gets 75% and the viewport AX tree

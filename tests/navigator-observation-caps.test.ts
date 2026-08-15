@@ -66,9 +66,9 @@ describe("deriveNavigatorObservationCapsV1", () => {
     expect(caps.elementsTextChars).toBe(24_000);
     expect(caps.axTreeChars).toBe(12_000);
     // The screenshot cap becomes its FIT budget (72,800 = 85% of 128k
-    // − 32k fixed overhead − 2×2k min text observation) — not the aspirational
-    // 1.5M hard cap that realistic captures always exceed and that always
-    // tripped the fail-closed assert.
+    // − 32k fixed overhead − 2×2k min text observation) — a bounded per-step
+    // quality budget; the loop keeps a 3M-char safety cap as the outer drop
+    // guard and resizes over-budget frames down to this fitted budget.
     expect(caps.screenshotChars).toBe(108_800 - 32_000 - 2_000 - 2_000);
   });
 
@@ -200,7 +200,7 @@ describe("prepareNavigatorRequest applies context-derived caps", () => {
     expect(messages.some((m) => m.includes("screenshot dropped"))).toBe(true);
   });
 
-  test("an unknown-context run keeps the current 60k elements cap (no regression)", async () => {
+  test("an unknown-context run keeps the 24k elements base cap (no regression)", async () => {
     const { state } = makeStateWithContext(undefined);
     const req = await prepareNavigatorRequest(state, BIG_OBSERVATION);
     expect(req.browserState.elementsText.length).toBe(24_000); // truncated at the economical base cap
