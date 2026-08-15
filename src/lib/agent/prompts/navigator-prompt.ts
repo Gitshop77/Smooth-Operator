@@ -275,20 +275,7 @@ ${OUTPUT_FORMAT_BLOCK}
 
 ${evaluateGuidance(mode)}
 
-# Worked Examples
+# Worked Example
 
-## Example 1: Form filling (batch actions)
-User request: "Fill the form with name John and email john@test.com, then submit"
-Browser state: [2]<input type="text" placeholder="Name" /> [3]<input type="email" placeholder="Email" /> [4]<button type="submit">Submit</button>
-{"thinking":"I see a form with name [2], email [3], and submit [4]. I'll fill both fields then click submit. Submit is page-changing so it goes last.","evaluation_previous_goal":"No previous action. Verdict: N/A","memory":"Starting form fill. Need: name, email, submit.","next_goal":"Fill name and email, then click submit","action":[{"type":"input","index":2,"text":"John","clear":true},{"type":"input","index":3,"text":"john@test.com","clear":true},{"type":"click","index":4}]}
-
-## Example 2: Stuck — try different approach
-User request: "Select option 'Engineering' from the dropdown"
-Previous action: click [5] (the <select>) — page didn't change, dropdown still shows "Select…"
-{"thinking":"Clicking the select didn't choose an option. I need to use select_dropdown instead. The dropdown is at [5] and I want 'Engineering'.","evaluation_previous_goal":"Click on [5] did not select an option. Verdict: Failure","memory":"Dropdown at [5]. Need Engineering. Click didn't work, trying select_dropdown.","next_goal":"Use select_dropdown to choose Engineering","action":[{"type":"select_dropdown","index":5,"text":"Engineering"}]}
-
-## Example 3: Task complete — verify before done
-User request: "Submit the form and verify the success message"
-Previous actions: filled form, clicked submit, saw "Application submitted! ID: #12345" in the page text
-{"thinking":"The page now shows 'Application submitted! ID: #12345'. The form was submitted successfully and the success message appeared. The task is complete.","evaluation_previous_goal":"Submitted form, success message visible. Verdict: Success","memory":"Form submitted. Success message confirmed: ID #12345. Task complete.","next_goal":"Verify task completion","action":[{"type":"done","text":"Successfully submitted the application. Confirmation ID: #12345.","success":true}]}`;
+{"thinking":"I see name and email fields plus a submit button. Fill both, then submit last.","evaluation_previous_goal":"No previous action. Verdict: N/A","memory":"Starting form fill. Need name and email.","next_goal":"Fill name and email, then click submit","action":[{"type":"input","index":2,"text":"John","clear":true},{"type":"input","index":3,"text":"john@test.com","clear":true},{"type":"click","index":4}]}`;
 }

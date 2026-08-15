@@ -51,10 +51,11 @@ describe("compact navigator prompt", () => {
   test("is meaningfully smaller than the full prompt", () => {
     const full = Buffer.byteLength(FULL);
     const compact = Buffer.byteLength(COMPACT);
-    // Size pins freeze the measured baseline (28.2KB full / 20.1KB compact):
-    // full between 25,000 and 31,000; compact between 17,000 and 23,000.
-    expect(full).toBeGreaterThanOrEqual(25_000);
-    expect(full).toBeLessThanOrEqual(31_000);
+    // Size pins freeze the measured baseline (25.4KB full / 19.6KB compact,
+    // after the full branch collapsed to the single worked example):
+    // full between 23,000 and 26,500; compact between 17,000 and 23,000.
+    expect(full).toBeGreaterThanOrEqual(23_000);
+    expect(full).toBeLessThanOrEqual(26_500);
     expect(compact).toBeGreaterThanOrEqual(17_000);
     expect(compact).toBeLessThanOrEqual(23_000);
     expect(compact).toBeLessThan(full * 0.8); // ≥20% smaller
