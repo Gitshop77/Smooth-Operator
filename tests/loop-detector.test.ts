@@ -15,6 +15,7 @@ import { describe, test, expect } from "vitest";
 import {
   LoopDetector,
   normalizeAction,
+  resultClassForResult,
   GOAL_WARN_THRESHOLD,
   GOAL_TOP_THRESHOLD,
   LOOP_TOP_THRESHOLD,
@@ -188,6 +189,59 @@ describe("LoopDetector oscillation detection", () => {
     det.record(click, "clicked OK");
     const count = det.record(click, "BLOCKED: captcha");
     expect(count).toBe(4); // 3 earlier + this one (the "clicked OK" is separate)
+  });
+
+  test("blocked outcomes with DIFFERENT signatures aggregate into one bucket", () => {
+    // Regression: the stuck-run transcript tried navigate(URL1/URL2/URL3…) —
+    // each blocked. Signature hashing (URL included) never counted them as
+    // repeats, so no loop warning ever fired. An outcome-class head must
+    // aggregate all blocked navigations regardless of the target URL.
+    const det = new LoopDetector();
+    det.record(act({ type: "navigate", url: "https://a.example.com/" }), "BLOCKED: URL domain not in allowlist");
+    det.record(act({ type: "navigate", url: "https://b.example.com/" }), "BLOCKED: URL domain not in allowlist");
+    const count = det.record(act({ type: "navigate", url: "https://c.example.com/" }), "BLOCKED: URL domain not in allowlist");
+    expect(count).toBe(3);
+  });
+
+  test("a successful outcome does NOT aggregate across signatures (signature hashing preserved)", () => {
+    const det = new LoopDetector();
+    det.record(act({ type: "navigate", url: "https://a.example.com/" }), undefined);
+    det.record(act({ type: "navigate", url: "https://b.example.com/" }), undefined);
+    expect(det.record(act({ type: "navigate", url: "https://c.example.com/" }), undefined)).toBe(1);
+  });
+});
+
+describe("resultClassForResult — loop outcome classification", () => {
+  const result = (over: Partial<{ success: boolean; message: string }>) =>
+    ({ action: act({ type: "navigate", url: "https://x.test/" }), success: true, message: "ok", ...over });
+
+  test("successful results return undefined (signature hashing)", () => {
+    expect(resultClassForResult(result({}))).toBeUndefined();
+  });
+
+  test("blocked outcomes normalize URL-independent (same class for different targets)", () => {
+    const a = resultClassForResult(result({
+      success: false,
+      message: "BLOCKED: URL domain not in allowlist (https://a.example.com/x) — configure allowedDomains in options",
+    }));
+    const b = resultClassForResult(result({
+      success: false,
+      message: "BLOCKED: URL domain not in allowlist (https://b.example.org/y) — configure allowedDomains in options",
+    }));
+    expect(a).toBeDefined();
+    expect(a).toBe(b);
+    expect(a).toContain("blocked");
+    expect(a).not.toMatch(/https?:\/\//);
+  });
+
+  test("different blocked causes stay in different buckets", () => {
+    const captcha = resultClassForResult(result({ success: false, message: "BLOCKED: captcha required" }));
+    const domain = resultClassForResult(result({ success: false, message: "BLOCKED: URL domain is blocked" }));
+    expect(captcha).not.toBe(domain);
+  });
+
+  test("undefined result (missing alignment) classifies as a failure", () => {
+    expect(resultClassForResult(undefined)).toBeDefined();
   });
 });
 

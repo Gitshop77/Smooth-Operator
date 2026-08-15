@@ -14,7 +14,7 @@ import { wrapUntrusted } from "../security";
 import { redactSecrets, getSecretSetVersion } from "../secrets";
 import { redactKeyShapes } from "../key-shape-redact";
 import { memoizedRedact, memoizedInjectionScan, clearRedactionMemo, REDACTION_FAILED } from "../redaction-memo";
-import { ELEMENTS_TEXT_CHAR_CAP, formatTab, renderPlan, renderHistory } from "./messages-utils";
+import { ELEMENTS_TEXT_CHAR_CAP, formatTab, renderPlan, renderHistory, NAVIGATOR_HISTORY_LIMIT } from "./messages-utils";
 import { redactKeyLeak } from "../redact-shared";
 // Statically imported so the modules load once at module top instead of being
 // re-resolved via `await import(...)` on every navigator step. The call sites
@@ -24,10 +24,8 @@ import { getSkillFrontmatter } from "../domain-skills";
 import { getMemoriesForUrl, formatMemories } from "../persistent-memory";
 import { formatCustomToolsBlock } from "../tools/registry";
 
-export { ELEMENTS_TEXT_CHAR_CAP };
+export { ELEMENTS_TEXT_CHAR_CAP, NAVIGATOR_HISTORY_LIMIT };
 
-/** Max history items rendered inline in the navigator message. */
-const NAVIGATOR_HISTORY_LIMIT = 12;
 /** Max history items rendered inline in the planner message. */
 const PLANNER_HISTORY_LIMIT = 8;
 

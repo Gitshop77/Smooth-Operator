@@ -31,10 +31,18 @@ export async function handleNavigate(
   // Enforce domain restrictions before navigating.
   const urlCheck = checkUrlAllowedWithDomainConfig(action.url);
   if (!urlCheck.allowed) {
+    // Make the block actionable: name the remedy + escape hatch so the model
+    // surfaces it to the user instead of retrying blindly (the no-policy
+    // allow-all default means only an EXPLICIT allowlist/blocklist lands
+    // here).
+    const remedy =
+      urlCheck.reason === "URL domain not in allowlist"
+        ? " — configure allowedDomains in options to permit this domain, or call ask_human"
+        : "";
     return {
       action,
       success: false,
-      message: `BLOCKED: ${urlCheck.reason} (${action.url})`,
+      message: `BLOCKED: ${urlCheck.reason} (${action.url})${remedy}`,
     };
   }
   // URL loaders: after a SUCCESSFUL navigation, run the loader steps

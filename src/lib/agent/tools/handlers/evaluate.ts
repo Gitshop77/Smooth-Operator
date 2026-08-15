@@ -77,7 +77,10 @@ export async function handleEvaluate(
       return {
         action,
         success: false,
-        message: `BLOCKED evaluate on ${location.href}: ${urlCheck.reason}`,
+        // Actionable: name the remedy so the model surfaces it to the user
+        // instead of retrying blindly (evaluate is the fail-closed RCE path —
+        // it always requires an explicit allowlist).
+        message: `BLOCKED evaluate on ${location.href}: ${urlCheck.reason} — configure allowedDomains in options to permit JS execution, or call ask_human`,
       };
     }
     // Substitute custom tool calls: replace __opencowork_custom_tool('name')

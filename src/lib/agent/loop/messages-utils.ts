@@ -15,6 +15,11 @@ export const ELEMENTS_TEXT_CHAR_CAP = BASE_OBS_ELEMENTS_CHARS;
 /** Max chars of extracted content surfaced inline per action result. */
 const EXTRACTED_CONTENT_INLINE_LIMIT = 8_500;
 
+/** Max chars of a result message surfaced inline per action result (parity
+ * with {@link EXTRACTED_CONTENT_INLINE_LIMIT}); a handler/model that stuffs
+ * page dumps into the message cannot crowd the next observation out. */
+const RESULT_MESSAGE_INLINE_LIMIT = 8_500;
+
 /** Model-authored bookkeeping is prompted to be terse, but local/open models
  * can ignore that request and return paragraphs. Bound it at the render seam
  * (not the parser) so the action still executes and the full in-memory record
@@ -36,6 +41,11 @@ function boundModelNote(text: string, maxChars: number, label: string): string {
  * WebVoyager-style masking at the safe mid-capacity regime.
  */
 const OBSERVATION_RETENTION_WINDOW = 2;
+
+/** Max history items rendered inline in the navigator message. Shared by the
+ * renderer (messages.ts) and the prompt-size stats (llm-calls.ts) so the
+ * metric measures exactly what the model sees. */
+export const NAVIGATOR_HISTORY_LIMIT = 12;
 
 /** Max chars of the action-args placeholder rendered for stale observations. */
 const STALE_ACTION_ARGS_LIMIT = 80;
@@ -84,14 +94,23 @@ export function renderPlan(plan: string[] | undefined, currentPlanItem: number |
 export function renderHistoryItem(h: HistoryItem, inRetention: boolean): string {
   const stepTag = escapeXml(String(h.step), true);
   let out = `<step_${stepTag} agent="${escapeXml(h.agent, true)}">\n`;
-  if (h.evaluation) out += `Evaluation: ${wrapUntrusted(boundModelNote(h.evaluation, EVALUATION_INLINE_LIMIT, "evaluation"))}\n`;
-  if (h.memory) out += `Memory: ${wrapUntrusted(boundModelNote(h.memory, MEMORY_INLINE_LIMIT, "memory"))}\n`;
-  if (h.goal) out += `Goal: ${wrapUntrusted(boundModelNote(h.goal, GOAL_INLINE_LIMIT, "goal"))}\n`;
+  if (inRetention) {
+    // The model notes (Evaluation/Memory/Goal) ride along with the retained
+    // observation; stale items mask them like the messages — otherwise a long
+    // run ships up to ~2,800 chars of notes per stale step (the dominant
+    // per-step prompt growth). The newest item always carries the current
+    // Memory, so masking the older ones costs nothing but history.
+    if (h.evaluation) out += `Evaluation: ${wrapUntrusted(boundModelNote(h.evaluation, EVALUATION_INLINE_LIMIT, "evaluation"))}\n`;
+    if (h.memory) out += `Memory: ${wrapUntrusted(boundModelNote(h.memory, MEMORY_INLINE_LIMIT, "memory"))}\n`;
+    if (h.goal) out += `Goal: ${wrapUntrusted(boundModelNote(h.goal, GOAL_INLINE_LIMIT, "goal"))}\n`;
+  }
   if (h.results.length) {
     out += `Action Results:\n`;
     for (const r of h.results) {
       if (inRetention) {
-        out += `- ${r.action.type}: ${wrapUntrusted(r.message ?? "")}${r.success ? "" : " (FAILED)"}\n`;
+        // Bound the message at the render seam (like extractedContent) so one
+        // verbose result cannot crowd the next observation out of context.
+        out += `- ${r.action.type}: ${wrapUntrusted(boundModelNote(r.message ?? "", RESULT_MESSAGE_INLINE_LIMIT, "result message"))}${r.success ? "" : " (FAILED)"}\n`;
         if (r.extractedContent) {
           out += `  Extracted: ${wrapUntrusted(r.extractedContent.slice(0, EXTRACTED_CONTENT_INLINE_LIMIT))}\n`;
         }

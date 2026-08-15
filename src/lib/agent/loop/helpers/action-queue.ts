@@ -22,6 +22,7 @@ import { formatErrorSuffix } from "../../errors";
 import type { CallbackDispatcher, CallbackContext } from "../../callbacks";
 import type { LoopDeps, ActionQueueResult } from "../types";
 import type { LoopDetector } from "../loop-detector";
+import { resultClassForResult } from "../loop-detector";
 import { TAB_LEVEL_ACTIONS } from "../constants";
 import { redactKeyLeak } from "../../redact-shared";
 
@@ -172,15 +173,6 @@ export async function executeActionQueue(
     });
     if (dispatcher && ctx) await safeDispatcherCall(() => dispatcher.actionStart(ctx, action));
 
-    if (config.enableLoopDetection) {
-      loopDetector.record(action);
-      const warnCount = loopDetector.shouldWarn();
-      if (warnCount > 0) {
-        deps.onEvent({ type: "loop-warning", step, count: warnCount });
-        if (dispatcher && ctx) await safeDispatcherCall(() => dispatcher.loopWarning(ctx, warnCount));
-      }
-    }
-
     if (costCapExceeded?.()) {
       deps.onEvent({ type: "info", message: "Cost cap exceeded mid-step. Stopping." });
       results.push({
@@ -257,6 +249,20 @@ export async function executeActionQueue(
     });
     if (dispatcher && ctx) await safeDispatcherCall(() => dispatcher.actionEnd(ctx, action, result));
     results.push(result);
+
+    // Record the OUTCOME (not the bare signature): the detector aggregates
+    // same-cause failures even when the call signature alternates (blocked
+    // navigations to different URLs), while successful results keep
+    // signature hashing. Recording after the result means the warning (and
+    // the detector count) reflects what actually happened.
+    if (config.enableLoopDetection) {
+      loopDetector.record(action, resultClassForResult(result));
+      const warnCount = loopDetector.shouldWarn();
+      if (warnCount > 0) {
+        deps.onEvent({ type: "loop-warning", step, count: warnCount });
+        if (dispatcher && ctx) await safeDispatcherCall(() => dispatcher.loopWarning(ctx, warnCount));
+      }
+    }
 
     if (result.isDone || !result.success || result.pageChanged) {
       failQueue(i);

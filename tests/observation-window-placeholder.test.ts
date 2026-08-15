@@ -12,9 +12,10 @@ function item(step: number, text: string): HistoryItem {
   return {
     step,
     agent: "navigator",
-    evaluation: "eval",
-    memory: "mem",
-    goal: "goal",
+    // Per-item notes so the masking assertions can tell retained from stale.
+    evaluation: `eval-${text}`,
+    memory: `mem-${text}`,
+    goal: `goal-${text}`,
     results: [
       {
         action: { type: "click", index: 7 },
@@ -43,6 +44,42 @@ describe("renderHistory — stale observation masking", () => {
     expect(out).not.toContain("extracted-b");
     expect(out).not.toContain("extracted-c");
     expect(out).not.toContain("message-a");
+  });
+
+  test("stale items ALSO mask the model notes (Evaluation/Memory/Goal)", () => {
+    // Regression: the notes rendered unconditionally, so a stale item still
+    // shipped up to ~2,800 chars of Evaluation/Memory/Goal per step — the
+    // dominant per-step prompt growth over a long run. Stale items must mask
+    // the notes too (the retention window already masks messages/extracted).
+    const history = [item(0, "a"), item(1, "b"), item(2, "c"), item(3, "d"), item(4, "e")];
+    const out = renderHistory(history, 5);
+
+    // Retained items (steps 3,4) keep the notes (wrapped untrusted).
+    expect(out).toContain("eval-d");
+    expect(out).toContain("mem-d");
+    expect(out).toContain("goal-e");
+    // Stale items (steps 0,1,2) mask them.
+    expect(out).not.toContain("eval-a");
+    expect(out).not.toContain("mem-b");
+    expect(out).not.toContain("goal-c");
+  });
+
+  test("retained result messages are bounded at the render seam", () => {
+    // A verbose handler/model can put an unbounded message on a result; the
+    // render seam must cap it (extractedContent already has its own 8.5k cap).
+    const big = {
+      ...item(0, "x"),
+      results: [{
+        action: { type: "click", index: 1 } as const,
+        success: true,
+        message: "m".repeat(20_000),
+      }],
+    };
+    const out = renderHistory([big], 1);
+    // wrapUntrusted converts the ellipsis to "..." — assert the marker's tail.
+    expect(out).toContain("[truncated verbose result message]");
+    // The full 20k message must not be shipped.
+    expect(out).not.toContain("m".repeat(10_000));
   });
 
   test("a small history (≤ 2) is never masked", () => {

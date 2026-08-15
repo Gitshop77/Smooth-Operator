@@ -134,6 +134,23 @@ describe("RunBuilder wiring", () => {
     }
   });
 
+  it("run-ended log reports the STEP COUNT, not the raw event count", () => {
+    const builder = new RunBuilder("task");
+    // 3 navigator steps advance stepCount to 3…
+    builder.addEvent({ type: "navigator-step-start", step: 0 });
+    builder.addEvent({ type: "navigator-step-start", step: 1 });
+    builder.addEvent({ type: "navigator-step-start", step: 2 });
+    // …while non-step events inflate steps[] beyond stepCount.
+    builder.addEvent({ type: "state", step: 3, url: "https://example.com", elementCount: 1, newElementCount: 0, pageInfo: "" });
+    builder.addEvent({ type: "state", step: 4, url: "https://example.com/2", elementCount: 1, newElementCount: 0, pageInfo: "" });
+    const run = builder.finish({ success: true, text: "done" });
+    const ended = run.logs.find((l) => l.msg === "run ended");
+    expect(ended).toBeDefined();
+    // The history UI uses this number as the step total — a raw event count
+    // mislabels a 20-step run as "142 steps" (regression: steps.length).
+    expect(ended!.steps).toBe(3);
+  });
+
   it("persists the authoritative terminal reason and exposes the shared start time", () => {
     const builder = new RunBuilder("task");
     expect(builder.startedAt).toEqual(expect.any(Number));

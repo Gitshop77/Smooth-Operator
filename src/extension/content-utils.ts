@@ -363,7 +363,6 @@ export function handleExecuteActions(
             }
           : extractBrowserState([]);
       const results: ActionResult[] = [];
-      const policyEnforced = isDomainPolicyEnforced();
       for (let index = 0; index < actions.length; index++) {
         const action = actions[index];
         if (execution.controller.signal.aborted || isCancelledDispatch(execution.token)) {
@@ -371,24 +370,6 @@ export function handleExecuteActions(
           break;
         }
         let result: ActionResult | undefined;
-        if (!policyEnforced && (action.type === "navigate" || action.type === "search")) {
-          let sameOrigin = false;
-          if (action.type === "navigate") {
-            try {
-              sameOrigin = new URL(action.url, location.href).origin === location.origin;
-            } catch {
-              sameOrigin = false;
-            }
-          }
-          if (!sameOrigin) {
-            result = {
-              action,
-              success: false,
-              message:
-                "BLOCKED: no domain policy enforced — only same-origin navigation is permitted",
-            };
-          }
-        }
         if (!result) {
           // The immediate pre-dispatch check plus passing the signal makes an
           // already-delivered CANCEL_RUN prevent this action and interrupts

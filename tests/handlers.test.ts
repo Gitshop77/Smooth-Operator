@@ -279,6 +279,10 @@ describe("handleNavigate", () => {
     });
     expect(res.success).toBe(false);
     expect(res.message).toContain("BLOCKED");
+    // The block must be actionable: name the remedy (and the escape hatch) so
+    // the model can surface it to the user instead of retrying blindly.
+    expect(res.message).toContain("allowedDomains");
+    expect(res.message).toContain("ask_human");
   });
 
   test("blocked by the domain allowlist even via the extension runtime (CDP/TAB_ACTION path)", async () => {

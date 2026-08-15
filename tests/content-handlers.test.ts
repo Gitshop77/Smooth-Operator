@@ -248,7 +248,7 @@ describe("content.ts message surface", () => {
     expect(r.ok).toBe(true);
   });
 
-  test("no-policy same-origin navigation guard blocks cross-origin navigate", async () => {
+  test("no-policy cross-origin navigate is permitted (allow-all default)", async () => {
     await loadContentScript();
     const r = (await sendAsync(
       {
@@ -260,18 +260,24 @@ describe("content.ts message surface", () => {
     )) as { ok: boolean; results: Array<{ success: boolean; message: string }> };
     expect(r.ok).toBe(true);
     expect(r.results).toHaveLength(1);
-    expect(r.results[0].success).toBe(false);
-    expect(r.results[0].message).toContain(
-      "BLOCKED: no domain policy enforced — only same-origin navigation is permitted",
-    );
+    // The content layer must NOT impose a same-origin gate when no domain
+    // policy is configured: navigate/search keep the documented allow-all
+    // default (security-url-policy.ts) and policy enforcement lives in the
+    // handlers (navigate.ts) and the SW tab layer. Without this, a fresh
+    // install can never leave the first page.
+    expect(r.results[0].success).toBe(true);
+    expect(r.results[0].message).not.toContain("BLOCKED");
   });
 
-  test("skip-marker is appended after a blocked action", async () => {
+  test("skip-marker is appended after a policy-blocked action", async () => {
     await loadContentScript();
     const r = (await sendAsync(
       {
         type: "EXECUTE_ACTIONS",
         token: { runId: "run-skip", dispatchRevision: 1 },
+        // A CONFIGURED policy (not the removed no-policy gate) blocks the
+        // cross-origin navigate; the queue then skips the remaining actions.
+        domainConfig: { blockedDomains: ["evil.example.com"] },
         actions: [
           { type: "navigate", url: "https://evil.example.com/" },
           { type: "click", index: 3 },
@@ -281,6 +287,8 @@ describe("content.ts message surface", () => {
     )) as { ok: boolean; results: Array<{ success: boolean; message: string }> };
     expect(r.ok).toBe(true);
     expect(r.results).toHaveLength(2);
+    expect(r.results[0].success).toBe(false);
+    expect(r.results[0].message).toContain("BLOCKED");
     expect(r.results[1].success).toBe(false);
     expect(r.results[1].message).toContain("1 remaining action(s) skipped");
   });

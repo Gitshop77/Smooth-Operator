@@ -129,6 +129,17 @@ describe("LoopDetector", () => {
     expect(text).toContain("DIFFERENT approach");
   });
 
+  test("warningText escalates at the mid threshold with the ask_human escape hatch", () => {
+    const escalated = LoopDetector.warningText(8);
+    expect(escalated).toContain("LOOP DETECTED");
+    expect(escalated).toContain("8");
+    expect(escalated).toContain("STOP retrying");
+    expect(escalated).toContain("ask_human");
+    expect(escalated).toContain("done(success=false)");
+    // The base nudge's vague "switch strategy" is gone once we name the hatch.
+    expect(escalated).not.toContain("DIFFERENT approach");
+  });
+
   test("normalizes equivalent scroll actions to the same hash", () => {
     const det = new LoopDetector();
  // Mix the two source forms: `{down:true,pages:1}` and the all-defaults
@@ -419,11 +430,51 @@ describe("runAgentLoop — executeActions branch loop-detector integration", () 
     expect(doneEvent!.success).toBe(false);
   });
 
+test("blocked outcomes with DIFFERENT URLs aggregate into one bucket (outcome-aware)", async () => {
+    // Regression: the stuck-run transcript tried navigate(URL1/URL2/URL3…),
+    // each blocked by policy. Signature-only hashing (URL included) never
+    // counted them as repeats → no loop warning ever fired. Outcome-class
+    // hashing must aggregate all blocked navigations into one bucket so the
+    // warning (and eventual early-stop) actually fires.
+    const events: LogEvent[] = [];
+    const urls = [
+      "https://a.example.com/",
+      "https://b.example.com/",
+      "https://c.example.com/",
+      "https://d.example.com/",
+      "https://e.example.com/",
+    ];
+    const deps = makeDeps({
+      navigatorOutput: {
+        thinking: "x",
+        evaluation_previous_goal: "y",
+        memory: "z",
+        next_goal: "w",
+        action: urls.map((url) => ({ type: "navigate", url })) as AgentAction[],
+      },
+      executeActionsResult: (actions) =>
+        actions.map((action) => ({
+          action,
+          success: false,
+          message: `BLOCKED: URL domain not in allowlist (${(action as { url?: string }).url}) — configure allowedDomains in options`,
+        }) as ActionResult),
+      events,
+    });
+
+    await runAgentLoop(deps);
+
+    const warnings = events.filter(isLoopWarning);
+    expect(warnings.length).toBeGreaterThan(0);
+    // All 5 blocked navigations (5 different URLs) share the outcome bucket →
+    // the FIRST warning already shows count=5 (signature hashing would max at 1).
+    expect(warnings[0].count).toBe(5);
+  });
+
   test("done paired with a sibling is rejected at parse time (never reaches a dropped step)", async () => {
- // The fix enforces `done`-exclusivity at PARSE time: a step pairing `done`
- // with a sibling action (e.g. a final `input`) is rejected by
- // AgentOutputSchema, so it can never reach the orchestrator as a silently
- // dropped step. A single `done` (the valid case) still finalizes the run.
+  // The fix enforces `done`-exclusivity at PARSE time: a step pairing `done`
+  // with a sibling action (e.g. a final `input`) is rejected by
+  // AgentOutputSchema, so it can never reach the orchestrator as a silently
+  // dropped step. A single `done` (the valid case) still finalizes the run.
     const bad = AgentOutputSchema.safeParse({
       thinking: "x",
       evaluation_previous_goal: "y",

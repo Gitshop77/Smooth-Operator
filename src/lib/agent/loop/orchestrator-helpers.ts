@@ -13,7 +13,7 @@ import { DEFAULT_CONFIG } from "../types";
 import { classifyError, friendlyErrorMessage, MACHINE_CODES, RECOVERY_HINTS, isBudgetExceededError } from "../errors";
 import { redactKeyLeak } from "../redact-shared";
 import { redactKeyShapes } from "../key-shape-redact";
-import { LoopDetector, LOOP_TOP_THRESHOLD } from "./loop-detector";
+import { LoopDetector, LOOP_TOP_THRESHOLD, resultClassForResult } from "./loop-detector";
 import { earlyStop, DEFAULT_EARLY_STOP_THRESHOLDS } from "./early-stop";
 import { shouldCompact, renderHistoryForSummarization } from "./compaction";
 import { CallbackDispatcher } from "../callbacks";
@@ -1270,9 +1270,18 @@ async function runNavigatorActionExecution(
   let results: ActionResult[];
   if (deps.executeActions) {
     try {
+      results = await deps.executeActions(actions, browserState);
+      if (costCapExceeded(state)) {
+        onEvent({ type: "info", message: "Cost cap exceeded mid-step. Stopping." });
+        return { kind: "abort", result: await exitCostCap(state, config) };
+      }
       if (config.enableLoopDetection) {
-        for (const action of actions) {
-          state.loopDetector.record(action);
+        for (let i = 0; i < actions.length; i++) {
+          // Record the OUTCOME (not the bare signature): the detector
+          // aggregates same-cause failures even when the call signature
+          // alternates (the stuck-run shape — blocked navigations to
+          // different URLs), while successful results keep signature hashing.
+          state.loopDetector.record(actions[i], resultClassForResult(results[i]));
           const warnCount = state.loopDetector.shouldWarn();
           if (warnCount > 0) {
             onEvent({ type: "loop-warning", step: state.step, count: warnCount });
@@ -1283,11 +1292,6 @@ async function runNavigatorActionExecution(
             }
           }
         }
-      }
-      results = await deps.executeActions(actions, browserState);
-      if (costCapExceeded(state)) {
-        onEvent({ type: "info", message: "Cost cap exceeded mid-step. Stopping." });
-        return { kind: "abort", result: await exitCostCap(state, config) };
       }
       if (config.enableLoopDetection && results.some((r) => r.pageChanged)) {
         state.loopDetector.reset();

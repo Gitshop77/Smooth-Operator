@@ -1,4 +1,4 @@
-import type { AgentAction } from "../types";
+import type { AgentAction, ActionResult } from "../types";
 import { PageFingerprint } from "./page-fingerprint";
 import { normalizeAction } from "./normalize-action";
 
@@ -48,6 +48,31 @@ function isAlternatingCycle(seq: string[], period: number): boolean {
   return true;
 }
 
+/**
+ * Coarse outcome class for loop-detection hashing. Successful results return
+ * `undefined` (the bucket stays the action signature — identical calls
+ * repeat); FAILING results return a URL-independent normalized class so
+ * same-cause failures aggregate even when the call signature alternates
+ * (different URLs, rephrased JS) — the shape a stuck run shows when every
+ * workaround hits the same block (e.g. 20 blocked navigations to different
+ * URLs that never counted as repeats).
+ */
+export function resultClassForResult(result: ActionResult | undefined): string | undefined {
+  // A missing result (results/actions misalignment) must still feed the
+  // detector as a failure rather than silently dropping the record — an
+  // action that produced no successful outcome is a failed action.
+  if (!result) return "error:failed";
+  if (result.success) return undefined;
+  const message = result.message ?? "";
+  const raw = message.startsWith("BLOCKED")
+    ? `blocked:${message.replace(/^BLOCKED[: ]*/, "")}`
+    : `error:${message}`;
+  // URLs are the dynamic part of block messages ("(https://a.example.com/)")
+  // and must not split one cause into many buckets.
+  const normalized = raw.replace(/https?:\/\/[^\s)]+/g, "url").slice(0, 80).trim();
+  return normalized || "error:failed";
+}
+
 export class LoopDetector {
   private window: ActionRecord[] = [];
   private goalWindow: string[] = [];
@@ -58,11 +83,12 @@ export class LoopDetector {
 
   record(action: AgentAction, resultHead?: string): number {
     const base = normalizeAction(action);
-    // Outcome-aware hashing: when the caller supplies a result-head (the
-    // leading slice of the action's result message), identical outcomes from
-    // slightly-rephrased calls still share a bucket — blocked or erroring
-    // repeats are counted even when the call signature alternates.
-    const hash = fnv1a(resultHead ? `${base}|result=${resultHead}` : base);
+    // Outcome-aware hashing: when the caller supplies a result-head (a coarse
+    // outcome class from {@link resultClassForResult}), the OUTCOME becomes
+    // the bucket key — same-cause failures aggregate even when the call
+    // signature alternates (different URLs, rephrased JS). Successful
+    // outcomes carry no head and keep the exact action signature as the key.
+    const hash = fnv1a(resultHead ? `result=${resultHead}` : base);
     this.window.push({ hash });
     if (this.window.length > LOOP_WINDOW_SIZE) {
       this.window.shift();
@@ -112,6 +138,13 @@ export class LoopDetector {
   }
 
   static warningText(count: number): string {
+    if (count >= WARN_THRESHOLDS[1]) {
+      // Escalated: the base nudge ("switch strategy") disarms the counter by
+      // telling the model to try another approach that hashes differently.
+      // At the mid threshold, name the escape hatch explicitly so a stuck run
+      // stops retrying and asks the user before the hard 12-abort.
+      return `<sys>LOOP DETECTED: you have taken an equivalent failing action ${count} times in the recent window. STOP retrying — repeating will not succeed. Reconsider the approach, call ask_human for guidance, or call done(success=false) if the task is impossible.</sys>`;
+    }
     return `<sys>LOOP DETECTED: you have taken an equivalent action ${count} times in the recent window without making progress. Try a DIFFERENT approach: scroll to find new elements, switch strategy, or if truly stuck, call done(success=false) with an explanation.</sys>`;
   }
 

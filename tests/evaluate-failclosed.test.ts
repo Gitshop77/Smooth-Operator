@@ -69,6 +69,9 @@ describe("evaluate fail-closed gates", () => {
 
     expect(res.success).toBe(false);
     expect(res.message).toContain("BLOCKED evaluate");
+    // The block must be actionable: name the remedy so the model can surface
+    // it to the user instead of retrying blindly.
+    expect(res.message).toContain("allowedDomains");
     // The offending code must NOT have been executed.
     expect((globalThis as Record<string, unknown>).openCowork_secret_probe).toBeUndefined();
   });

@@ -400,7 +400,7 @@ export class RunBuilder {
     // legacy result contract. Keep the nested result shape stable.
     this.run.result = this.capturedResult ?? { success: result.success, text: result.text };
     this.run.terminalReason = result.terminalReason;
-    log("info", "run ended", { success: this.run.result.success, steps: this.run.steps.length });
+    log("info", "run ended", { success: this.run.result.success, steps: this.run.stepCount });
     this.run.logs = drainLogRing();
     setActiveRunId(null);
     return this.run;

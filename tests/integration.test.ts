@@ -477,16 +477,52 @@ describe("buildNavigatorUserMessage", () => {
 
     // First 3 steps are omitted (15 - 12 = 3).
     expect(msg).toContain("<sys>[3 previous steps omitted]</sys>");
-    // The last step (index 14, "Goal 14") is present.
+    // The last step (index 14, "Goal 14") is present — it is inside the
+    // 2-item observation-retention window, so its notes render.
     expect(msg).toContain("Goal 14");
     // The first step (index 0, "Goal 0") is NOT present inline.
     expect(msg).not.toContain("Goal 0");
     // History is wrapped in <agent_history>.
     expect(msg).toContain("<agent_history>");
     // Pin the exact truncation boundary (15 in → last 12 rendered), not just one
-    // present + one absent item, so an off-by-one would be caught.
+    // present + one absent item, so an off-by-one would be caught. The goal
+    // notes count is the retention-window size (2), NOT the window size — see
+    // the note-masking test below.
     const histBlock = msg.slice(msg.indexOf("<agent_history>"), msg.indexOf("</agent_history>"));
-    expect((histBlock.match(/Goal /g) ?? []).length).toBe(12);
+    expect((histBlock.match(/Goal /g) ?? []).length).toBe(2);
+  });
+
+  test("renders model notes (Evaluation/Memory/Goal) only for the observation-retention window", async () => {
+    // Notes ride along with the retained observation (OBSERVATION_RETENTION_WINDOW
+    // = 2): the model's current Memory is always on the NEWEST item, so masking
+    // the older notes is free history — and it's the dominant per-step prompt
+    // growth in a long run (~2,800 chars × stale steps).
+    const history: HistoryItem[] = [];
+    for (let i = 0; i < 15; i++) {
+      history.push(
+        makeHistoryItem(i, {
+          goal: `Goal ${i}`,
+          results: [
+            {
+              action: { type: "click", index: i + 1 },
+              success: true,
+              message: `clicked ${i + 1}`,
+            },
+          ],
+        })
+      );
+    }
+    const msg = await buildNavigatorUserMessage({ ...baseArgs, history });
+    // The two newest items keep their notes.
+    expect(msg).toContain("Goal 14");
+    expect(msg).toContain("Goal 13");
+    // Items inside the 12-item window but OUTSIDE the retention window are
+    // still rendered as structural placeholders — their notes AND messages
+    // are masked, but the action call survives.
+    expect(msg).toContain("click [index=13]: (details omitted — older step)");
+    expect(msg).not.toContain("Goal 12");
+    expect(msg).not.toContain("Goal 4");
+    expect(msg).not.toContain("clicked 12");
   });
 
   test("includes <available_skills> block (frontmatter-first) when URL matches a built-in skill", async () => {
@@ -674,9 +710,14 @@ describe("buildPlannerUserMessage", () => {
 
     const msg = await buildPlannerUserMessage({ ...baseArgs, navigatorHistory: history });
 
-    // The last 8 items (indices 4..11) are present inline.
+    // The last 2 items (indices 10,11) are inside the observation-retention
+    // window — their notes render inline.
     expect(msg).toContain("PlannerGoal 11");
-    expect(msg).toContain("PlannerGoal 4");
+    expect(msg).toContain("PlannerGoal 10");
+    // Items rendered but outside the retention window (indices 4..9) keep the
+    // structural placeholder only — their notes are masked.
+    expect(msg).not.toContain("PlannerGoal 4");
+    expect(msg).not.toContain("PlannerGoal 9");
     // The omitted first 4 items (indices 0..3) are NOT present.
     expect(msg).not.toContain("PlannerGoal 0");
     expect(msg).not.toContain("PlannerGoal 3");
@@ -684,7 +725,7 @@ describe("buildPlannerUserMessage", () => {
     expect(msg).toContain("<sys>[4 previous steps omitted]</sys>");
     // Pin the exact planner-history truncation boundary (12 in → last 8 rendered).
     const planHistBlock = msg.slice(msg.indexOf("<navigator_history>"), msg.indexOf("</navigator_history>"));
-    expect((planHistBlock.match(/PlannerGoal /g) ?? []).length).toBe(8);
+    expect((planHistBlock.match(/PlannerGoal /g) ?? []).length).toBe(2);
   });
 
   test("flags injection patterns in page-derived planner content via <injection_warnings>", async () => {
