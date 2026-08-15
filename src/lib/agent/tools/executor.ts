@@ -147,7 +147,7 @@ type TabActionRpcResponse = {
  * unhandled type, but the guarantee does not extend to a queue-level hard stop.
  */
 class UnhandledActionError extends Error {
-  /** Stable machine code for the error vocabulary (P2/E7). */
+  /** Stable machine code for the error vocabulary. */
   readonly machineCode = "action_unsupported";
   /** Programming errors are never retried. */
   readonly retryable = false;

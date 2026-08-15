@@ -285,11 +285,11 @@ export function friendlyErrorMessage(error: ClassifiedError): string {
   }
 }
 
-// ─── Action-level error taxonomy (P2) ───────────────────────────────────────
+// ─── Action-level error taxonomy ────────────────────────────────────────────
 
 /** Classification of a failed action, consumed by the loop/LLM error output. */
 export interface ActionErrorClassification {
-  /** Stable machine code (shared with the E7 UI vocabulary). */
+  /** Stable machine code (shared with the UI error vocabulary). */
   machineCode: string;
   /** Whether the failure is transient and worth retrying. */
   retryable: boolean;

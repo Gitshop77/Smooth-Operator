@@ -152,7 +152,7 @@ describe("classifyActionError — action-level retryable taxonomy", () => {
   });
 });
 
-describe("formatErrorSuffix — P2 error output vocabulary", () => {
+describe("formatErrorSuffix — error output vocabulary", () => {
   test("builds a parseable [code; retryable] (recovery) suffix", () => {
     expect(formatErrorSuffix("action_timeout", true, "Wait for the page to settle."))
       .toBe("[code: action_timeout; retryable: yes] (recovery: Wait for the page to settle.)");
@@ -164,7 +164,7 @@ describe("formatErrorSuffix — P2 error output vocabulary", () => {
   });
 });
 
-describe("classifyError — E7 machine code + recovery vocabulary", () => {
+describe("classifyError — machine code + recovery vocabulary", () => {
   test("every category carries a stable machine code", () => {
     const cases: Array<[unknown, string]> = [
       [new Error("401 Unauthorized: invalid API key"), "auth_failed"],

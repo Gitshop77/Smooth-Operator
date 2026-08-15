@@ -1,6 +1,6 @@
 /**
- * Snapshot windowing tests — char-capped serialization with offset paging
- * (P1: snapshot token budgeting). Covers the pure `windowSnapshot` helper in
+ * Snapshot windowing tests — char-capped serialization with offset paging.
+ * Covers the pure `windowSnapshot` helper in
  * page-state.ts: truncation boundary, marker text, offset resume, clamping.
  */
 

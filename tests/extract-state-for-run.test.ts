@@ -13,7 +13,7 @@
  *  5. useAlwaysOnVision=true, vision assistant ready, try succeeds → parallel merge
  *  6. useAlwaysOnVision=true, try fails (catch) → DOM-only fallback
  *
- * F2 (main-LLM screenshots on demand): in "always" mode the main-LLM screenshot
+ * Main-LLM screenshots on demand: in "always" mode the main-LLM screenshot
  * ships ONLY on explicit one-shot requests (includeScreenshotOnce). The "always"
  * disjunct survives while the local VLM cannot ground yet (disabled or init
  * pending) — dropping it then would fall into branch 4's dead-VLM DOM-only
@@ -327,9 +327,9 @@ describe("extractStateForRun — vision-merge branches", () => {
       enableLocalVision: false,
     });
 
-    // F2 drops "always" from the main-LLM branch ONLY when the always-on VLM
-    // path can actually supply grounding. With the VLM disabled there is NO
-    // local grounding: dropping the screenshot then would throw the run into
+    // The "always" disjunct drops from the main-LLM branch ONLY when the
+    // always-on VLM path can actually supply grounding. With the VLM disabled
+    // there is NO local grounding: dropping the screenshot then would throw the run into
     // the always-on branch's dead-VLM fallback — DOM-only with NO pixels at
     // all. The main-LLM screenshot must keep shipping (degradation-trap guard).
     const state = await extractStateForRun(1, MOCK_TABS);
@@ -371,7 +371,7 @@ describe("extractStateForRun — vision-merge branches", () => {
     modelSupportsVisionMock.mockResolvedValue(false);
     await extractStateForRun(1, MOCK_TABS);
     await flushAsync();
-    // Now the main model is vision-capable: F2 must NOT ship a per-step
+    // Now the main model is vision-capable: it must NOT ship a per-step
     // main-LLM screenshot when the local VLM is ready — the always-on path
     // captures + detects + merges boxes locally instead.
     modelSupportsVisionMock.mockResolvedValue(true);

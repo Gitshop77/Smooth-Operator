@@ -145,7 +145,7 @@ export const ocContrastPairs: ReadonlyArray<{
   { theme: "dark", name: "text-tertiary / raised", fg: "textTertiary", bg: "raised" },
   { theme: "dark", name: "text-on-accent / accent", fg: "textOnAccent", bg: "accent" },
   { theme: "dark", name: "text-on-accent / dangerStrong", fg: "textOnAccent", bg: "dangerStrong" },
-  // Hover fills (M2): `.btn-primary:hover` and `.btn-danger:hover` must keep
+  // Hover fills: `.btn-primary:hover` and `.btn-danger:hover` must keep
   // white text ≥4.5:1 — the hover tokens are enforced exactly like base pairs.
   { theme: "dark", name: "text-on-accent / accent-hover (btn-primary:hover)", fg: "textOnAccent", bg: "accentHover" },
   { theme: "dark", name: "text-on-accent / danger-strong (btn-danger:hover)", fg: "textOnAccent", bg: "dangerStrong" },

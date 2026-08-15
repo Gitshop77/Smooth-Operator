@@ -1,5 +1,5 @@
 /**
- * Structured image attachment (C6) — a screenshot attached to a user message
+ * Structured image attachment — a screenshot attached to a user message
  * as a typed part instead of an interpolated `<screenshot>` text marker.
  *
  * The base64 lives ONLY in this structured part: protocol adapters emit it as

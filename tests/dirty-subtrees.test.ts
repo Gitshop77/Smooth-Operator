@@ -1,5 +1,5 @@
 /**
- * Dirty-subtree re-walk tests (task B2).
+ * Dirty-subtree re-walk tests.
  *
  * `mutation-signal.ts` records the TOPMOST mutated subtrees per DOM epoch
  * (exposed via `dirty-subtrees.ts`'s `getDirtyRoots`/`clearDirtyRoots`).

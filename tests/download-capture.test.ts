@@ -1,5 +1,5 @@
 /**
- * Download-capture tests (P5) — the SW-side download ring in
+ * Download-capture tests — the SW-side download ring in
  * message-routing.ts: recording completed `chrome.downloads.onChanged` deltas,
  * sanitization, mime guessing, ring cap, and the `list_downloads` TAB_ACTION
  * response. The module is imported dynamically so its top-level listener

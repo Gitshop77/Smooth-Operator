@@ -1,5 +1,5 @@
 /**
- * Screenshot policy (C1) — `resolveScreenshotPolicy()` is the single source of
+ * Screenshot policy — `resolveScreenshotPolicy()` is the single source of
  * truth for capture + annotation:
  * - `quality` = `getScreenshotQuality()` (0-100, the CDP JPEG quality; the
  *   annotator divides by 100 at the call site because `canvasToDataUrl` takes

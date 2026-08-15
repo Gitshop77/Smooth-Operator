@@ -431,7 +431,7 @@ describe("extractBrowserState", () => {
   });
 });
 
-// ─── Stream-windowed snapshot pins (task B3) ─────────────────────────────────
+// ─── Stream-windowed snapshot pins ───────────────────────────────────────────
 //
 // The per-step `elementsText` is assembled from rolling head/tail windows fed
 // by the walk (no full-join materialization of the serialized text);
@@ -440,8 +440,8 @@ describe("extractBrowserState", () => {
 // `windowSnapshot(fullText, 0).text` (the reference windowing) and window 0 +
 // the first continuation window must together cover the full serialized text.
 
-const B3_LINE = "\t\t" + "A".repeat(60);
-const B3_LINE_COUNT = 2000;
+const STREAM_WINDOW_LINE = "\t\t" + "A".repeat(60);
+const STREAM_WINDOW_LINE_COUNT = 2000;
 
 /** Build a fixture whose serialized text is deterministic and computable:
  * 2000 text lines of "\t\t" + 60×"A" (~126k chars — well past the 80k
@@ -449,19 +449,19 @@ const B3_LINE_COUNT = 2000;
  * the exact raw join the walk must produce. */
 function buildStreamWindowFixture(): string {
   const frag = document.createDocumentFragment();
-  for (let i = 0; i < B3_LINE_COUNT; i++) {
+  for (let i = 0; i < STREAM_WINDOW_LINE_COUNT; i++) {
     const span = document.createElement("span");
     span.textContent = "A".repeat(60);
     frag.appendChild(span);
   }
   document.body.appendChild(frag);
-  return Array.from({ length: B3_LINE_COUNT }, () => B3_LINE).join("\n");
+  return Array.from({ length: STREAM_WINDOW_LINE_COUNT }, () => STREAM_WINDOW_LINE).join("\n");
 }
 
-const B3_MARKER_RE =
+const STREAM_WINDOW_MARKER_RE =
   /\[\.\.\. truncated at char \d+ of \d+\. Call page_next with offset=\d+ to see more\. Pagination links below\. \.\.\.\]\n/;
 
-describe("stream-windowed snapshot (B3)", () => {
+describe("stream-windowed snapshot", () => {
   test("(a) on a >80k-char page, elementsText equals windowSnapshot(fullText, 0).text", () => {
     const raw = buildStreamWindowFixture();
     expect(raw.length).toBeGreaterThan(MAX_SNAPSHOT_CHARS);
@@ -481,7 +481,7 @@ describe("stream-windowed snapshot (B3)", () => {
     const w1 = pageSnapshotChunk(w0!.nextOffset!);
     expect(w1).not.toBeNull();
     expect(w1!.hasMore).toBe(false);
-    const stripMarker = (t: string) => t.replace(B3_MARKER_RE, "");
+    const stripMarker = (t: string) => t.replace(STREAM_WINDOW_MARKER_RE, "");
     // Each window is `marker + tail + "\n" + chunk`; the two chunks are
     // contiguous and together reproduce the raw text exactly.
     const contentBudget = MAX_SNAPSHOT_CHARS - SNAPSHOT_TAIL_CHARS - 200;

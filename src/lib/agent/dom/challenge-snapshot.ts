@@ -6,18 +6,18 @@
  * The detector mirrors the challenge-detector contract of the upstream
  * stealthy-browser project (ported, not copied): a bounded page snapshot is
  * collected with five signal classes —
- *   M1  known DOM widget markers (`.cf-turnstile`, `.g-recaptcha` /
+ *   known DOM widget markers (`.cf-turnstile`, `.g-recaptcha` /
  *       `[name='g-recaptcha-response']`, `.h-captcha`, `.frc-captcha`,
  *       `altcha-widget`);
- *   M2  generic visibility-gated markers (captcha/challenge titled iframes,
+ *   generic visibility-gated markers (captcha/challenge titled iframes,
  *       captcha/verification dialogs, `[data-captcha]` / `[data-challenge]`);
- *   M3  documented resource hosts/paths (cloudflare turnstile +
+ *   documented resource hosts/paths (cloudflare turnstile +
  *       challenge-platform, google/recaptcha, hcaptcha api.js, arkoselabs —
  *       site-key path redacted to `/redacted` — and `@friendlycaptcha/`
  *       script paths);
- *   M4  window globals probed via `hasOwnProperty` (`AwsWafCaptcha`,
+ *   window globals probed via `hasOwnProperty` (`AwsWafCaptcha`,
  *       `initGeetest4`);
- *   M5  nothing found.
+ *   nothing found.
  *
  * Output is bounded (20 matches / 8 evidence strings / 8 frames / 8 elements
  * per match / 100 snapshot items / 256-char resource paths) and never echoes

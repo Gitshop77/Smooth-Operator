@@ -1,5 +1,5 @@
 /**
- * Dirty-subtree tracking for partial (B2) re-walks.
+ * Dirty-subtree tracking for partial re-walks.
  *
  * The DOM-epoch mutation signal (`./mutation-signal`) records the TOPMOST
  * mutated subtrees per epoch window. `extractBrowserState` (page-state.ts)

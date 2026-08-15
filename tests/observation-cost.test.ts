@@ -1,31 +1,31 @@
 /**
- * Behavioral observation-cost bounds (task F3).
+ * Behavioral observation-cost bounds.
  *
- * This suite pins the efficiency plan's steady-state wins as DETERMINISTIC
+ * This suite pins the observation pipeline's steady-state wins as DETERMINISTIC
  * behavioral counters — no timers, no wall-clock, no flaky measurements. Each
  * counter is a spy over repeated IDENTICAL work:
  *
- * (a) `cachedExtractBrowserState` (B1 skip-if-unchanged gate): on an
+ * (a) `cachedExtractBrowserState` (skip-if-unchanged gate): on an
  *     unchanged fixture, extractions 2 and 3 perform ZERO layout reads
  *     (`getBoundingClientRect` / `getComputedStyle`) and ZERO element
  *     serializations. `serializeElement` is module-private in page-state.ts,
  *     so its invocation count is observed through
  *     `ReadCache.prototype.batchRead` — its ONLY per-element call
  *     (page-state.ts:354), the same "no DOM walk" marker state-cache.test.ts
- *     uses. A mere A2 cross-step cache would zero the layout reads but still
- *     walk (batchRead > 0); only the B1 gate zeroes both.
- * (b) `compileNavigatorPromptV1` (D1 system memo / D3 redaction+scan memo /
- *     D5 incremental history): 3 compiles with byte-identical inputs rebuild
+ *     uses. A mere cross-step read cache would zero the layout reads but still
+ *     walk (batchRead > 0); only the skip-if-unchanged gate zeroes both.
+ * (b) `compileNavigatorPromptV1` (system-prompt memo / redaction+scan memo /
+ *     incremental history): 3 compiles with byte-identical inputs rebuild
  *     the system prompt ONCE, re-redact/re-scan NOTHING, and re-render no
  *     masked history item.
- * (c) 64k-context compile with a screenshot (C6 structured image part):
+ * (c) 64k-context compile with a screenshot (structured image part):
  *     `assertPromptBudgetWithImage` receives `imageChars` NUMERICALLY and the
  *     old `" ".repeat(adjustedChars)` padding allocation is gone —
  *     `String.prototype.repeat` is never invoked on the whole
  *     `navigatorCallDirect` path.
  *
- * Any counter that regresses here is a REAL finding: the owning task's memo
- * key no longer covers the repeated work.
+ * Any counter that regresses here is a REAL finding: the owning memo key no
+ * longer covers the repeated work.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { cachedExtractBrowserState, invalidateStateCache } from "../src/lib/agent/dom/extraction/state-cache";
@@ -52,7 +52,7 @@ import {
 
 // Spy at the module boundary: wrap the REAL builders/redactors (so the
 // byte-identity of every path stays real) while making each invocation
-// countable through the whole import graph (D1/D3).
+// countable through the whole import graph.
 vi.mock("../src/lib/agent/prompts/navigator-prompt", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/agent/prompts/navigator-prompt")>();
   return {
@@ -98,7 +98,7 @@ afterAll(() => restoreLocalStorageStub());
 
 // ─── (a) cachedExtractBrowserState: skip-if-unchanged cost bounds ────────────
 
-describe("cachedExtractBrowserState — no re-walk, no re-layout (B1)", () => {
+describe("cachedExtractBrowserState — no re-walk, no re-layout", () => {
   beforeEach(() => {
     document.body.innerHTML = "";
     installJsdomLayoutMock();
@@ -145,9 +145,9 @@ describe("cachedExtractBrowserState — no re-walk, no re-layout (B1)", () => {
   });
 });
 
-// ─── (b) compileNavigatorPromptV1: D1/D3/D5 memo cost bounds ─────────────────
+// ─── (b) compileNavigatorPromptV1: memo cost bounds ──────────────────────────
 
-describe("compileNavigatorPromptV1 — memo cost bounds (D1/D3/D5)", () => {
+describe("compileNavigatorPromptV1 — memo cost bounds", () => {
   const history = Array.from({ length: 6 }, (_, i) =>
     makeHistoryItem(i, {
       results: i % 2 === 0
@@ -211,17 +211,17 @@ describe("compileNavigatorPromptV1 — memo cost bounds (D1/D3/D5)", () => {
       const second = await compileNavigatorPromptV1(input);
       const third = await compileNavigatorPromptV1(input);
 
-      // D1 — the system prompt (build + provider suffix) is rebuilt ONCE;
+      // The system prompt (build + provider suffix) is rebuilt ONCE;
       // compiles 2-3 are pure memo hits.
       expect(systemSpy).toHaveBeenCalledTimes(1);
 
-      // D3 — compiles 2-3 redact and injection-scan NOTHING: every page field
+      // Compiles 2-3 redact and injection-scan NOTHING: every page field
       // (elementsText/title/url/tabs/pageInfo/axTree), the compacted-memory
       // block, and every history item are memo hits.
       expect(redactSpy.mock.calls.length).toBe(redactionsAfterFirst);
       expect(scanSpy.mock.calls.length).toBe(scansAfterFirst);
 
-      // D5 — the 4 masked (stale-observation) history items render exactly
+      // The 4 masked (stale-observation) history items render exactly
       // ONCE across all 3 compiles (memoized masked prefix + per-item cache);
       // only the 2 retention-window items re-render per compile.
       const byStep = new Map<number, number>();
@@ -250,7 +250,7 @@ describe("compileNavigatorPromptV1 — memo cost bounds (D1/D3/D5)", () => {
 
 // ─── (c) 64k-context compile with a screenshot: structured image budget ──────
 
-describe("64k-context compile with a screenshot — numeric image budget (C6)", () => {
+describe("64k-context compile with a screenshot — numeric image budget", () => {
   beforeEach(() => {
     providerH.chatRequests = [];
   });
@@ -276,7 +276,7 @@ describe("64k-context compile with a screenshot — numeric image budget (C6)", 
     };
 
     const llmDirect = await import("../src/extension/llm-direct");
-    // A full-viewport base64 payload: ~700k chars. C6's flat token allowance
+    // A full-viewport base64 payload: ~700k chars. The flat token allowance
     // keeps this inside the 64k-derived input budget — and the old
     // `" ".repeat(adjustedChars)` measurement would have allocated a ~700k-char
     // string per step for it.
@@ -307,8 +307,9 @@ describe("64k-context compile with a screenshot — numeric image budget (C6)", 
     // of the two ran identifies which budget path was taken.
     const profileSpy = vi.spyOn(promptTokenBudgetModule, "promptBudgetProfileForContextV1");
     const plainAssertSpy = vi.spyOn(promptTokenBudgetModule, "assertCompiledPromptWithinContextBudgetV1");
-    // The `" ".repeat(adjustedChars)` allocation C6 removed: any call here is a
-    // cost regression regardless of whether the guard still passes.
+    // The `" ".repeat(adjustedChars)` allocation removed with the numeric
+    // image budget: any call here is a cost regression regardless of whether
+    // the guard still passes.
     const repeatSpy = vi.spyOn(String.prototype, "repeat");
     try {
       const result = await llmDirect.navigatorCallDirect(request);
@@ -332,7 +333,7 @@ describe("64k-context compile with a screenshot — numeric image budget (C6)", 
       const lastPart = (userContent as { type?: string }[]).at(-1);
       expect(lastPart?.type).toBe("image");
 
-      // C6: no " ".repeat padding allocation on the whole compile+budget path.
+      // No " ".repeat padding allocation on the whole compile+budget path.
       expect(repeatSpy).not.toHaveBeenCalled();
     } finally {
       profileSpy.mockRestore();

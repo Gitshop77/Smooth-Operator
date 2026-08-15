@@ -184,7 +184,7 @@ describe("Reduced motion + focus + live regions", () => {
     expect(document.activeElement).toBe(container);
   });
 
-  test("trapTab honors an injected doc (M6: no ambient-document dependency)", () => {
+  test("trapTab honors an injected doc (no ambient-document dependency)", () => {
     // A detached createHTMLDocument ignores focus(); an iframe document keeps
     // a real browsing context so focus() resolves inside it.
     const iframe = document.createElement("iframe");

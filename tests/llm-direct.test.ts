@@ -27,7 +27,7 @@ import { makeHistoryItem, installLocalStorageStub, restoreLocalStorageStub } fro
 
 // Wrap the REAL buildNavigatorPrompt (so byte-identity flows through the whole
 // import graph) while making every invocation countable at the module boundary
-// — including the prompt-memo module that memoizes it (D1).
+// — including the prompt-memo module that memoizes it.
 vi.mock("../src/lib/agent/prompts/navigator-prompt", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/agent/prompts/navigator-prompt")>();
   return {
@@ -36,7 +36,7 @@ vi.mock("../src/lib/agent/prompts/navigator-prompt", async (importOriginal) => {
   };
 });
 
-// Wrap the REAL redactSecrets so the memoized-redaction layer (D3) stays
+// Wrap the REAL redactSecrets so the memoized-redaction layer stays
 // functionally intact while its underlying redactor is countable.
 vi.mock("../src/lib/agent/secrets", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/agent/secrets")>();
@@ -215,7 +215,7 @@ describe("stripHistoryScreenshotMarkers", () => {
   });
 });
 
-describe("callNavigatorWithRetry — parse-retry recompiles hit the D1/D3/D5 memos", () => {
+describe("callNavigatorWithRetry — parse-retry recompiles hit the system/redaction/history memos", () => {
   const VALID_OUTPUT = JSON.stringify({
     thinking: "x",
     evaluation_previous_goal: "y",
@@ -228,9 +228,9 @@ describe("callNavigatorWithRetry — parse-retry recompiles hit the D1/D3/D5 mem
   afterAll(() => restoreLocalStorageStub());
 
   test("a 2-retry cycle compiles the navigator prompt 3 times but rebuilds nothing expensive", async () => {
-    // Fresh memos so the counters below measure exactly this cycle (D1/D3
-    // memos are module state; the history caches are keyed by item identity
-    // and the fresh fixtures below cannot collide with prior tests).
+    // Fresh memos so the counters below measure exactly this cycle (system/
+    // redaction memos are module state; the history caches are keyed by item
+    // identity and the fresh fixtures below cannot collide with prior tests).
     clearPromptMemo();
     clearRedactionMemo();
 
@@ -319,17 +319,17 @@ describe("callNavigatorWithRetry — parse-retry recompiles hit the D1/D3/D5 mem
       expect(navigatorCall).toHaveBeenCalledTimes(3);
       expect(out).toBeDefined();
 
-      // D1 — system-prompt memo: 3 compiles, ONE buildNavigatorPrompt
+      // System-prompt memo: 3 compiles, ONE buildNavigatorPrompt
       // invocation; attempts 2-3 are cache hits.
       expect(systemSpy).toHaveBeenCalledTimes(1);
 
-      // D3 — redaction memo: across the WHOLE cycle every unique string is
+      // Redaction memo: across the WHOLE cycle every unique string is
       // redacted exactly once (the retry compiles re-use the memoized
       // redactions instead of re-scanning the page content / history).
       const redactedArgs = vi.mocked(secretsModule.redactSecrets).mock.calls.map((c) => c[0]);
       expect(new Set(redactedArgs).size).toBe(redactedArgs.length);
 
-      // D5 — history prefix cache: the 2 masked (stale-observation) items
+      // History prefix cache: the 2 masked (stale-observation) items
       // render exactly ONCE across all 3 compiles; only the 2 retention-window
       // items re-render per compile.
       const byStep = new Map<number, number>();

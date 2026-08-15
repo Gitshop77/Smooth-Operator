@@ -1,5 +1,5 @@
 /**
- * P3 — search macros (14 site templates).
+ * Search macros (14 site templates).
  *
  * Mirrors camofox's macros.test.js behavior pins, with every macro encoding
  * the query via `encodeURIComponent` uniformly (no wikipedia exception).

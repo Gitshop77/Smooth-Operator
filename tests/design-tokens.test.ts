@@ -203,7 +203,7 @@ describe("Custom property integrity", () => {
   });
 });
 
-describe("Components.css parse structure + AA hover/render contract (B1/M1/M2 regressions)", () => {
+describe("Components.css parse structure + AA hover/render contract", () => {
   /** Collect top-level rule selectors via a css-tree walk of the stylesheet. */
   function topLevelSelectors(css: string): Set<string> {
     const ast = csstree.parse(css, { positions: false });
@@ -220,7 +220,7 @@ describe("Components.css parse structure + AA hover/render contract (B1/M1/M2 re
     return selectors;
   }
 
-  test("B1: shared component families exist as top-level rules in components.css (no nesting leak)", () => {
+  test("shared component families exist as top-level rules in components.css (no nesting leak)", () => {
     const top = topLevelSelectors(componentsCss);
     for (const selector of [
       ".btn", ".btn-primary", ".btn-danger", ".btn-ghost", ".btn-sm", ".btn-block",
@@ -234,7 +234,7 @@ describe("Components.css parse structure + AA hover/render contract (B1/M1/M2 re
     }
   });
 
-  test("M2: hover fills referenced by the shared layer keep white text ≥4.5:1 and never revert to the uncorrected danger fill", () => {
+  test("hover fills referenced by the shared layer keep white text ≥4.5:1 and never revert to the uncorrected danger fill", () => {
     // The hover tokens are already enforced through ocContrastPairs; this test
     // asserts the RENDER paths actually use those tokens (not a stray literal).
     // `[^}]*` keeps the match inside the rule's own block.
@@ -244,7 +244,7 @@ describe("Components.css parse structure + AA hover/render contract (B1/M1/M2 re
     expect(componentsCss).not.toMatch(/\.btn-danger:hover[^{]*\{[^}]*var\(--oc-status-danger\)/);
   });
 
-  test("M1: the AA-corrected warning token reaches the light-theme warning surfaces (takeover banner, vision badges, notices)", () => {
+  test("the AA-corrected warning token reaches the light-theme warning surfaces (takeover banner, vision badges, notices)", () => {
     // The takeover banner (side panel), vision-status badges (status.ts) and
     // .notice-warning (components.css) all paint --oc-status-warning text on
     // --oc-status-warning-subtle. The corrected token must be what they use.
@@ -260,7 +260,7 @@ describe("Components.css parse structure + AA hover/render contract (B1/M1/M2 re
     expect(ocTokens.light.warning).toBe("#A1420A");
   });
 
-  test("M2: dark accent-hover is AA-safe in both the stylesheet and the TS mirror", () => {
+  test("dark accent-hover is AA-safe in both the stylesheet and the TS mirror", () => {
     expect(tokensCss).toContain("--oc-prim-accent-hover:   #5A49D6");
     expect(ocTokens.dark.accentHover).toBe("#5A49D6");
     expect(contrastRatio(ocTokens.dark.textOnAccent, ocTokens.dark.accentHover)).toBeGreaterThanOrEqual(4.5);
@@ -269,7 +269,7 @@ describe("Components.css parse structure + AA hover/render contract (B1/M1/M2 re
     expect(contrastRatio(ocTokens.light.textOnAccent, ocTokens.light.dangerStrong)).toBeGreaterThanOrEqual(4.5);
   });
 
-  test("M3: the focus ring is a non-text indicator ≥3:1 vs the app surface in both themes", () => {
+  test("the focus ring is a non-text indicator ≥3:1 vs the app surface in both themes", () => {
     expect(contrastRatio(ocTokens.dark.focusRing, ocTokens.dark.app)).toBeGreaterThanOrEqual(3);
     expect(contrastRatio(ocTokens.light.focusRing, ocTokens.light.app)).toBeGreaterThanOrEqual(3);
     // Solid accent-strong per theme in the runtime stylesheet (drift guard).
@@ -277,7 +277,7 @@ describe("Components.css parse structure + AA hover/render contract (B1/M1/M2 re
     expect(tokensCss).toContain("--oc-prim-focus-ring: #4C3FCB");
   });
 
-  test("M5: announce() re-announces an identical message by clearing the region first", async () => {
+  test("announce() re-announces an identical message by clearing the region first", async () => {
     document.body.innerHTML = '<div id="statusMessage" role="status" aria-live="polite"></div>';
     const { announce } = await import("../src/extension/accessibility");
     announce("Settings saved — mode: standard");

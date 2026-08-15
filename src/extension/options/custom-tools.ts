@@ -6,7 +6,7 @@
  * as `CustomTool` in `src/lib/agent/tools/registry.ts`). The agent runtime
  * loads them at extension startup.
  *
- * P3: delete confirmation + validation errors use the styled modal; the Tools
+ * Delete confirmation + validation errors use the styled modal; the Tools
  * tab also renders the extension's manifest permission set as badges.
  *
  * TRUST BOUNDARY: the `code` string is persisted to `chrome.storage.local` and

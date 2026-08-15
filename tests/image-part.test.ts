@@ -1,5 +1,5 @@
 /**
- * ImagePartV1 — structured screenshot parts (C6).
+ * ImagePartV1 — structured screenshot parts.
  *
  * Locks:
  * - `isImagePartV1` type guard distinguishes a structured image part from

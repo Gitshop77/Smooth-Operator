@@ -115,13 +115,13 @@ export function moveFocusTo(el: HTMLElement | null, container?: HTMLElement): bo
  * Trap Tab/Shift+Tab inside `container` (ARIA dialog pattern). Used by dialog
  * surfaces that render focusables dynamically; a no-op for every other key.
  *
- * RESERVED (M4): the Options modal (`options/modal.ts`) currently implements
+ * RESERVED: the Options modal (`options/modal.ts`) currently implements
  * its own inline Tab trap with live recomputation, so no production caller
  * uses this helper yet. It is kept for future dialog surfaces (side-panel
  * takeover dialogs, transcript viewers) and remains covered by
  * tests/panel-accessibility.test.ts.
  *
- * `doc` is injectable (M6) so tests never depend on the ambient `document`;
+ * `doc` is injectable so tests never depend on the ambient `document`;
  * callers in production omit it and get the real document.
  */
 export function trapTab(

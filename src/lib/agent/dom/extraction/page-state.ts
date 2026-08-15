@@ -335,8 +335,9 @@ function serializeElement(el: HTMLElement, depth: number, acc: WalkAccumulator, 
   if (acc.elements.length >= MAX_ELEMENTS) {
     if (!acc.elementTruncated) {
       acc.elementTruncated = true;
-      // `force` bypasses the MAX_LINES gate exactly as the pre-B3 direct
-      // `acc.lines.push` did — the element cap can trip with lines already at
+      // `force` bypasses the MAX_LINES gate exactly as the direct
+      // `acc.lines.push` did before stream-windowed assembly — the element
+      // cap can trip with lines already at
       // MAX_LINES, and the marker must still land (and reach the window
       // buffers) byte-for-byte.
       pushLine(acc, `\t[truncated at ${MAX_ELEMENTS} elements — page is very large; focus on a more specific element]`, true);
@@ -480,8 +481,8 @@ let cachedHashes: Set<string> = new Set();
  * re-walk. `cachedElements` mirrors `cachedSelectorMap`'s indices,
  * `cachedLines` is the unwindowed lines array; `pageSnapshotChunk` joins it
  * on demand for paging (the join is only materialized when the model actually
- * pages, never per extraction step). Kept here (not in the B1 skip-if-unchanged
- * cache) because the raw loop path (`observe-state.ts`) and the cached path
+ * pages, never per extraction step). Kept here (not in the skip-if-unchanged
+ * extraction cache) because the raw loop path (`observe-state.ts`) and the cached path
  * interleave: the previous walk's arrays must always be THIS walk's
  * predecessor, and the cache's JSON-safe snapshot may be older.
  */
@@ -587,7 +588,7 @@ export function extractBrowserState(tabs: TabInfo[]): BrowserState {
   // token) would otherwise leak its query-string secrets into page state.
   const redactedTabs = tabs.map((t) => (t.url ? { ...t, url: redactUrlTokens(t.url) } : t));
 
-  // Partial re-walk (B2): when the page changed in a bounded set of subtrees,
+  // Partial re-walk: when the page changed in a bounded set of subtrees,
   // re-serialize ONLY those and splice the results into the previous walk's
   // arrays instead of re-walking the document. Falls back to a full walk on
   // any doubt (unarmed signal, empty dirty-root set with a moved epoch,

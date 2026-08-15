@@ -1,5 +1,5 @@
 /**
- * Skip-if-unchanged extraction cache tests (task B1).
+ * Skip-if-unchanged extraction cache tests.
  *
  * `cachedExtractBrowserState` serves the last successful extraction's
  * serialized snapshot when the page is provably unchanged since then:
@@ -8,7 +8,7 @@
  * returned WITHOUT walking the DOM.
  *
  * The "no DOM walk" marker is `ReadCache.prototype.batchRead`: every walker
- * element visit calls it (the A1/A2 epoch-stamped read cache makes the
+ * element visit calls it (the epoch-stamped read cache makes the
  * underlying rect/style reads zero-cost, but the METHOD is still invoked per
  * element), while the epoch/fingerprint/tabs gate never touches it.
  */

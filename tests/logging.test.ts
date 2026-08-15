@@ -1,5 +1,5 @@
 /**
- * E1 — structured JSON-lines logging with run IDs.
+ * Structured JSON-lines logging with run IDs.
  *
  * The logger emits one JSON line per event ({ts, level, msg, runId, ...fields}),
  * keeps a bounded in-memory ring, and the run builder drains the ring into the

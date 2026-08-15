@@ -1,5 +1,5 @@
 /**
- * Skip-if-unchanged extraction cache (B1).
+ * Skip-if-unchanged extraction cache.
  *
  * `cachedExtractBrowserState` serves the LAST successful extraction's
  * serialized snapshot when the page is provably unchanged since then. The

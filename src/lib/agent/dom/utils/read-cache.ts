@@ -21,7 +21,7 @@
  * exists so a walk can explicitly reset the container (e.g. between the two
  * walks of a step); it must never outlive a synchronous walk.
  *
- * Since A2 the walkers ALSO share an epoch-stamped persistent instance via
+ * The walkers ALSO share an epoch-stamped persistent instance via
  * {@link getSharedReadCache}: on an unchanged DOM (same epoch) the second
  * walk of a step — and the next step's walks — serve every element from the
  * previous walk's reads (0 forced reflows). Any DOM mutation bumps the epoch

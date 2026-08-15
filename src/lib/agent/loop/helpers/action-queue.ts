@@ -28,7 +28,7 @@ import { redactKeyLeak } from "../../redact-shared";
 /** Build a uniform failure {@link ActionResult} for an exception. */
 const toActionError = (a: AgentAction, e: unknown): ActionResult => {
   let message = `Error: ${e instanceof Error ? e.message : String(e)}`;
-  // Errors that carry the P2 vocabulary (e.g. the executor's
+  // Errors that carry the machine error vocabulary (e.g. the executor's
   // UnhandledActionError, flattened by the catch-all here) keep their code +
   // recovery hint so the LLM still sees the guidance.
   const err = e instanceof Error ? e : null;

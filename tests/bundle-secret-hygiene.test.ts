@@ -1,5 +1,5 @@
 /**
- * Bundle secret-hygiene test (E5) — builds the extension bundles the same way
+ * Bundle secret-hygiene test — builds the extension bundles the same way
  * CI's `npm run build:extension` does (esbuild CLI, production define, tmp
  * outdir) and asserts no secret-shaped literals survive into the emitted JS.
  * Runs standalone because CI executes vitest BEFORE the real build, so

@@ -5,7 +5,7 @@
  * a badge + progress bar. Previously DEAD UI (permanently `display:none`) — now
  * driven by the radio group in the Agent tab.
  *
- * P3: the model download confirmation uses the styled modal (not native
+ * The model download confirmation uses the styled modal (not native
  * `confirm()`); the status palette is imported from `./status` (single source);
  * visibility uses the `is-hidden` class instead of inline `style.display`.
  */

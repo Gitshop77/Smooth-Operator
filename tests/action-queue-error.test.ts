@@ -1,5 +1,5 @@
 /**
- * P2 — the loop's action-queue surfaces the retryable/recovery vocabulary
+ * The loop's action-queue surfaces the retryable/recovery vocabulary
  * when a tab-level action delegation throws an error that carries
  * machineCode/recoveryHint (e.g. the executor's UnhandledActionError, which
  * `runLocalAction` flattens into a routine failed ActionResult).

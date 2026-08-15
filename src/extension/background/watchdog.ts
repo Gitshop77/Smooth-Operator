@@ -78,7 +78,7 @@ export class SwWatchdog {
 
 /**
  * Decide what to surface this cycle: a stall first, then any pending
- * vision-model memory warning (P4 correlation — a one-line read of the
+ * vision-model memory warning (a one-line read of the
  * vision assistant's exported registry).
  */
 export function runWatchdogCycle(wd: SwWatchdog, now: number): string | null {

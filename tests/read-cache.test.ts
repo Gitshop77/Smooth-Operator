@@ -105,7 +105,7 @@ describe("extractBrowserState walk read batching", () => {
     // offsetParent display lookups) — only walk 2 is asserted to be free.
     expect(firstStyleReads).toBeGreaterThan(0);
 
-    // Cross-walk reuse (A2): the epoch-stamped shared cache serves every
+    // Cross-walk reuse: the epoch-stamped shared cache serves every
     // element from walk 1, so walk 2 performs ZERO forced layout reads.
     expect(secondRectReads).toBe(0);
     expect(secondStyleReads).toBe(0);

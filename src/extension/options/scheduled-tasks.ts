@@ -8,7 +8,7 @@
  * Keeping those effects background-only prevents cross-context lost updates
  * and the prior disable-leak where storage and chrome.alarms diverged.
  *
- * P3: validation errors use the styled modal; visibility toggles use the
+ * Validation errors use the styled modal; visibility toggles use the
  * `is-hidden` class instead of inline `style.display`.
  */
 
