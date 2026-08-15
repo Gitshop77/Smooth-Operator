@@ -67,7 +67,7 @@ export const STORAGE_KEYS = {
   allowedDomains: "allowedDomains",
   blockedDomains: "blockedDomains",
   agentMode: "agentMode",
-  // Reasoning-effort config (O1): read by llm-direct.ts getReasoningEffort /
+  // Reasoning-effort config: read by llm-direct.ts getReasoningEffort /
   // getReasoningBudget / getForceReasoning; written by settings-sync.ts
   // doSaveSettings (from the options UI). Key literals match the llm-direct
   // reads exactly — do not rename without updating both sides.
@@ -81,7 +81,7 @@ export const STORAGE_KEYS = {
   contextTokens: "contextTokens",
   // Provider-config UI warning banner state (provider-config-ui.ts).
   providerResetWarning: "provider_reset_warning",
-  // Provider-scoped config record (O8): chrome.storage.local["providerConfigs"]
+  // Provider-scoped config record: chrome.storage.local["providerConfigs"]
   // keyed by provider id (model/baseUrl/resourceName/provenance per provider).
   // Read by provider-config.ts readProviderConfig (nested wins over the flat
   // top-level mirror); written only by settings-sync.ts doSaveSettings — the

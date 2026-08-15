@@ -67,7 +67,7 @@ export function renderLightpanda(): void {
       status("No response (timeout).");
       try { port.disconnect(); } catch { /* ignore */ }
     }, 8_000);
-    // chrome.runtime.Port events: addListener/removeListener only (H26).
+    // chrome.runtime.Port events: addListener/removeListener only.
     const onMessage = (m: unknown): void => {
       if ((m as { type?: string }).type === "pong") {
         clearTimeout(timer);

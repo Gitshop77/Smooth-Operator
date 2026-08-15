@@ -82,14 +82,14 @@ describe("redactKeyShapes (canonical) vs redactKeyLeak — shared shape coverage
       secret: "p@ss",
     },
     {
-      // Passwordless connection string (A5): the password group is optional,
+      // Passwordless connection string: the password group is optional,
       // so the userinfo must still be fully masked.
       name: "postgres connection string without password",
       input: "postgres://user@host:5432/db",
       secret: "user@host:5432/db",
     },
     {
-      // Passwordless MongoDB SRV connection string (A5).
+      // Passwordless MongoDB SRV connection string.
       name: "mongodb+srv connection string without password",
       input: "mongodb+srv://user@host/db",
       secret: "user@host/db",
@@ -111,7 +111,7 @@ describe("redactKeyShapes (canonical) vs redactKeyLeak — shared shape coverage
   }
 });
 
-describe("redactKeyLeak JWT prefix masking (A4)", () => {
+describe("redactKeyLeak JWT prefix masking", () => {
   test("a JWT whose signature contains a dash is masked to a short prefix — header+payload never survive", () => {
     const input =
       "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyQGV4YW1wbGUuY29tIn0.abc-defghijklmnop";

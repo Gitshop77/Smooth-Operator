@@ -648,7 +648,7 @@ describe("runAgentLoop — challenge info-line dedupe is per-run", () => {
     // Run 1 surfaces the info line (per-step dedupe suppresses it on later
     // steps of the SAME run — at least one occurrence is the contract).
     expect(infoLines(first).length).toBeGreaterThanOrEqual(1);
-    // Finding 6: `lastChallengeKey` survived across runs, so run 2's info
+    // `lastChallengeKey` survived across runs, so run 2's info
     // line was suppressed. A fresh run must re-arm the dedupe and surface it.
     expect(infoLines(second).length).toBeGreaterThanOrEqual(1);
   });

@@ -97,7 +97,7 @@ describe("judge disagreement bound", () => {
   });
 
   test("rejections separated by many steps (5, 45, 46) do NOT accumulate toward the replan threshold", async () => {
-    // Finding 5: rejections at steps 5, 45, 46 previously tripped the
+    // rejections at steps 5, 45, 46 previously tripped the
     // "consecutive" bound even though a gap intervened. Only rejections on the
     // SAME step or the immediately-previous step are consecutive; a wider gap
     // breaks the streak.

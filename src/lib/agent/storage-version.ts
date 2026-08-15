@@ -18,8 +18,8 @@
  * - Readers accept the current version plus any version listed as previous-
  *   supported for that domain (the migration window).
  *
- * The migration register (docs/redesign/MIGRATION_ROLLBACK_REGISTER.md) is the
- * authoritative ledger; a marker bump must always be registered there first.
+ * The migration register is the authoritative ledger; a marker bump must
+ * always be registered there first.
  */
 
 /** chrome.storage.local key holding the version marker map. */

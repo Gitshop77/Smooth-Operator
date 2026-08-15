@@ -54,11 +54,6 @@ function refreshConsoleForwardingEnabled(): void {
   }
 }
 
-/** Test hook — set/clear the cached flag without touching chrome.storage. */
-function _setConsoleForwardingEnabledForTests(value: boolean | null): void {
-  consoleForwardingEnabled = value;
-}
-
 /** Entry point. Idempotent — re-injection is a no-op. */
 (() => {
   if ((window as unknown as { __openCoworkInjected?: boolean }).__openCoworkInjected) return;

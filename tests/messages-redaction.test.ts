@@ -641,7 +641,7 @@ describe("maybeJudgeAndFinalize — history redaction before the judge LLM call"
   });
 });
 
-describe("memoized redaction / injection memo bounded size (A7)", () => {
+describe("memoized redaction / injection memo bounded size", () => {
   test("memoizedRedact evicts the oldest entry so the memo stays at 1000 entries and the newest still resolves from the memo", async () => {
     clearRedactionMemo();
     const inputs = Array.from({ length: 1001 }, (_, i) => `memo-distinct-${i}`);

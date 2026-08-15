@@ -134,7 +134,7 @@ if (typeof chrome !== "undefined" && chrome.storage?.local) {
       // a later save cannot wipe it (mirrors notifications.ts last-known-good).
       lastKnownGoodWebhookUrl = (res[STORAGE_KEYS.webhookUrl] as string) || "";
 
-      // O1 reasoning settings: effort/force are enums with form defaults; the
+      // Reasoning settings: effort/force are enums with form defaults; the
       // budget is only persisted when the user set it (llm-direct reads it as
       // a positive integer and treats absence as "no override").
       setVal("reasoningEffort", (res[STORAGE_KEYS.reasoningEffort] as string) ?? "medium");
@@ -147,7 +147,7 @@ if (typeof chrome !== "undefined" && chrome.storage?.local) {
       );
       setVal("forceReasoning", (res[STORAGE_KEYS.forceReasoning] as string) ?? "auto");
 
-      // O8: the provider-scoped record wins over the flat mirror when the
+      // The provider-scoped record wins over the flat mirror when the
       // saved provider has one (mirrors readProviderConfig's nested-first read
       // so the Options UI shows exactly what the runtime will use).
       const providerConfigs = res[STORAGE_KEYS.providerConfigs];
@@ -315,7 +315,7 @@ async function doSaveSettings(): Promise<boolean> {
   }
   ($("screenshotMaxBytes") as HTMLInputElement).value = String(screenshotMaxBytes);
 
-  // O1 reasoning settings. The effort/force selects only ever hold sanctioned
+  // Reasoning settings. The effort/force selects only ever hold sanctioned
   // values (populateReasoningControls rebuilds them from the model catalog), so
   // an out-of-set value can only come from tampering — fall back to the default
   // instead of persisting junk. The budget is an optional positive integer; an
@@ -369,7 +369,7 @@ async function doSaveSettings(): Promise<boolean> {
   providerConfigStore.dispatch({ type: "BASE_URL_CHANGED", baseUrl: baseUrlValid ? baseUrlRaw : "" });
   providerConfigStore.dispatch({ type: "RESOURCE_NAME_CHANGED", resourceName: resourceNameValue });
 
-  // O8: keep every provider's nested entry (so switching providers restores
+  // Keep every provider's nested entry (so switching providers restores
   // each one's config) and mirror the ACTIVE provider's flat values into its
   // entry. `provenance: "user"` marks the nested values as user-set (trusted).
   const storedConfigsRes = await chrome.storage.local.get(STORAGE_KEYS.providerConfigs);

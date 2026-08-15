@@ -47,7 +47,7 @@ export interface ResearchDeps {
  * `--block-urls` takes comma-separated `*`-wildcard globs matched against the
  * full URL (UrlBlocklist.zig:95-139). `--verbosity low` silences the default
  * `.high` piped chatter; the unconditional `$usage` line still arrives.
- * `--watchdog-ms 0` disables the 30s JS-stall watchdog (L15) — pathological
+ * `--watchdog-ms 0` disables the 30s JS-stall watchdog — pathological
  * pages must not kill valid runs; the host timeout bounds the run instead.
  */
 export function buildAgentArgs(params: {
@@ -91,7 +91,7 @@ export function createResearchRunner(deps: ResearchDeps) {
       throw new ResearchError("research is disabled while an explicit allowed-domains allowlist is configured (fail-closed)");
     }
     const env: Record<string, string> = {
-      // Telemetry is default-ON upstream (L14) — always opt out.
+      // Telemetry is default-ON upstream — always opt out.
       LIGHTPANDA_DISABLE_TELEMETRY: "true",
       ...built.launch.env,
     };

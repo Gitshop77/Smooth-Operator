@@ -148,13 +148,13 @@ export function updateProviderUI(): void {
     }
   }
 
-  // O1: re-render the reasoning section for the current provider/model. Keeps
+  // Re-render the reasoning section for the current provider/model. Keeps
   // the effort list + budget range in sync when the provider changes.
   populateReasoningControls();
 }
 
 /**
- * Render the reasoning (O1) section for the selected provider/model. The
+ * Render the reasoning section for the selected provider/model. The
  * effort levels come from the model's `reasoning_options` intersected with the
  * safe low/medium/high set; the thinking-budget field appears only for models
  * that declare a token range. Explicit args override DOM reads so callers can
@@ -388,7 +388,7 @@ document.getElementById("model")?.addEventListener("input", () => {
   const query = ($("model") as HTMLInputElement).value.trim();
   const resultsDiv = document.getElementById("model-search-results") as HTMLDivElement | null;
   if (!resultsDiv) return;
- // L13: expose the search results as a listbox so assistive tech can
+ // Expose the search results as a listbox so assistive tech can
  // announce + navigate them. The input owns the popup via aria-owns and
  // reflects open state via aria-expanded.
   resultsDiv.setAttribute("role", "listbox");
@@ -520,7 +520,7 @@ document.getElementById("model-search-results")?.addEventListener("click", (e) =
   } else {
     clearExperimentalModelNotice();
   }
-  // O1: a committed model may carry different reasoning options than the
+  // A committed model may carry different reasoning options than the
   // previous one — refresh the reasoning section for it.
   populateReasoningControls(target.dataset.modelId);
   // Commit the selection to the authoritative store: the reducer bumps the

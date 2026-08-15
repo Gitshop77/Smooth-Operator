@@ -46,9 +46,7 @@ export {
   recordDownload,
   getCapturedDownloads,
   clearCapturedDownloads,
-  MAX_DOWNLOAD_RECORDS,
 } from "./download-capture";
-export type { DownloadRecord } from "./download-capture";
 
 // ─── Listener ───────────────────────────────────────────────────────────────
 

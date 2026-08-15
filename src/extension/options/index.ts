@@ -70,7 +70,7 @@ function activateTab(tab: HTMLButtonElement, focus = true): void {
     const isActive = c.dataset.tab === target;
     c.classList.toggle("active", isActive);
     c.hidden = !isActive;
- // L12: only the active panel is in the tab order.
+    // Only the active panel is in the tab order.
     c.tabIndex = isActive ? 0 : -1;
   });
  // Lazily render dynamic tab content on first activation. A renderer that

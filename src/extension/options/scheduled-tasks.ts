@@ -339,7 +339,7 @@ $("addSchedule").addEventListener("click", async () => {
   });
 });
 
-// ─── A11: Scheduled-task Export/Import (background-owned) ───────────────────
+// ─── Scheduled-task Export/Import (background-owned) ───────────────────
 
 /** Reject import files larger than this before reading them into memory. */
 const MAX_SCHEDULE_IMPORT_BYTES = 4 * 1024 * 1024; // 4 MiB

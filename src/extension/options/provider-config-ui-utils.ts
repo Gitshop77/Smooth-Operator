@@ -134,7 +134,7 @@ export function renderModelResultItem(
   const item = document.createElement("div");
   item.className = "model-search-result-item";
   item.tabIndex = -1;
-  // L13: each result is a listbox option with a stable id so the input's
+  // Each result is a listbox option with a stable id so the input's
   // aria-activedescendant can point at the focused/hovered one.
   item.setAttribute("role", "option");
   item.id = `model-search-opt-${optIdx}`;

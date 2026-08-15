@@ -441,7 +441,7 @@ async function readStoredApiKey(): Promise<string> {
  * Read the provider config from `chrome.storage.local`. Returns null if the
  * provider hasn't been configured yet.
  *
- * Provider-scoped config record (O8): `chrome.storage.local["providerConfigs"]`
+ * Provider-scoped config record: `chrome.storage.local["providerConfigs"]`
  * is keyed by provider id and holds per-provider model/baseUrl/resourceName. A
  * nested entry for the RESOLVED provider wins over the flat top-level keys,
  * which stay as the active back-compat mirror (so older tooling that only

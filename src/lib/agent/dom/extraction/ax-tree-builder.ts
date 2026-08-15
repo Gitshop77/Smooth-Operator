@@ -701,7 +701,7 @@ export function generateAccessibilityTree(
       // payload (e.g. the content script → orchestrator) can surface a
       // truncation/ref error uniformly without special-casing. The `pageContent`
       // shape is unchanged (still `""` when `error` is set) so existing readers
-      // that depend on `axTree.pageContent` keep working (see L9).
+      // that depend on `axTree.pageContent` keep working.
       error: undefined,
     };
   } catch (e) {

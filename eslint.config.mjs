@@ -97,7 +97,6 @@ export default [
       "out/**",
       "build/**",
       "coverage/**",
-      ".audit/**",
       "chrome-extension/**",
     ],
   },

@@ -371,7 +371,7 @@ describe("list_downloads TAB_ACTION", () => {
 });
 
 describe("download ring run-lifecycle reset", () => {
-  // D1 finding 11: the capture ring is module state that previously survived
+  // the capture ring is module state that previously survived
   // across runs — a prior run's downloads leaked into the next run's
   // list_downloads. startRun must clear the ring at the run-start seam.
   test("startRun clears the capture ring so list_downloads sees an empty ring", async () => {
@@ -413,8 +413,8 @@ describe("download ring run-lifecycle reset", () => {
   });
 });
 
-describe("download consent lifecycle (D5 finding 15)", () => {
-  // D5: `chrome.downloads.download()` resolves at INITIATION, not success, so
+describe("download consent lifecycle", () => {
+  // `chrome.downloads.download()` resolves at INITIATION, not success, so
   // the one-time full-agentic consent must be consumed only on a terminal
   // "complete" delta — not when the download starts. Pending ids are tracked
   // in agent-bridge-utils; the message-routing onDownloadsChanged listener

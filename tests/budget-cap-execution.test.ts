@@ -176,7 +176,7 @@ describe("executeActionQueue — clean stop when the cap trips mid-queue", () =>
 });
 
 describe("budget-warning event — suppressed on the final step", () => {
-  // Finding 7: the budget-warning event fired at step === floor(maxSteps*0.75)
+  // the budget-warning event fired at step === floor(maxSteps*0.75)
   // even when that step is the LAST step (tiny runs), emitting a "75%" UI
   // warning with zero steps remaining while the matching prompt nudge
   // (injection-points.ts) is suppressed. The event must reuse the nudge's

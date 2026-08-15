@@ -104,7 +104,7 @@ export function runAgentProcess(
       finish(() => reject(new NativeHostError(`lightpanda research timed out after ${Math.round(timeoutMs / 1000)}s`)));
     }, timeoutMs + 5_000);
 
-    // chrome.runtime.Port.onMessage/onDisconnect are events (H26):
+    // chrome.runtime.Port.onMessage/onDisconnect are events:
     // addListener/removeListener only.
     port.onMessage.addListener(onMessage);
     port.onDisconnect.addListener(onDisconnect);

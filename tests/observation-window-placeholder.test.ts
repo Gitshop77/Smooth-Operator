@@ -106,7 +106,7 @@ describe("renderHistory — stale observation masking", () => {
   });
 
   test("stale action args are key-shape-redacted at the placeholder", () => {
-    // Finding A11: the stale-observation placeholder rendered action args RAW
+    // the stale-observation placeholder rendered action args RAW
     // (outside wrapUntrusted) — a model-echoed credential in an arg (key-shaped
     // token the task text contained, echoed into navigate/evaluate) round-trips
     // to the provider on every subsequent step. redactKeyShapes must mask it.
@@ -141,7 +141,7 @@ describe("renderHistory — stale observation masking", () => {
   });
 
   test("stale action args are XML-escaped at the placeholder", () => {
-    // Finding A11: unescaped args could break out of the <step_…> block
+    // unescaped args could break out of the <step_…> block
     // (a forged `</step_1>` / `<` / `&` in an arg). The placeholder must escape.
     const hostile = {
       ...item(0, "hostile"),

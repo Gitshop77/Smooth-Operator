@@ -187,7 +187,7 @@ export async function runPlanner(
   signal?: AbortSignal,
   /** Active cost cap (if any) — enables the missing-usage floor. */
   costCapUsd?: number,
-  /** Returns true when the run's cost cap is exceeded (C17) — checked right
+  /** Returns true when the run's cost cap is exceeded — checked right
    * after cost accrues so a single overshoot call is caught immediately. */
   costCapCheck?: () => boolean
 ): Promise<PlannerOutput> {
@@ -318,7 +318,7 @@ export async function callNavigatorWithRetry(
   signal?: AbortSignal,
   /** Active cost cap (if any) — enables the missing-usage floor. */
   costCapUsd?: number,
-  /** Returns true when the run's cost cap is exceeded (C17) — checked right
+  /** Returns true when the run's cost cap is exceeded — checked right
    * after cost accrues so a single overshoot call is caught immediately. */
   costCapCheck?: () => boolean
 ): Promise<AgentOutput> {

@@ -330,10 +330,10 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     await finalizeEarly("failed", "No active tab");
     return;
   }
- // L23: refuse to attach the agent to a PRIVILEGED tab — browser internals
- // (`chrome://`), extension pages (`chrome-extension://`), the Chrome Web
- // Store, or `about:` pages. The content script + debugger cannot operate
- // there and driving them would be unsafe.
+  // Refuse to attach the agent to a PRIVILEGED tab — browser internals
+  // (`chrome://`), extension pages (`chrome-extension://`), the Chrome Web
+  // Store, or `about:` pages. The content script + debugger cannot operate
+  // there and driving them would be unsafe.
  //
  // Rather than hard-failing the run (which made the extension unusable from
  // the new-tab page — a common "agent ai extension" entry point), AUTO-OPEN

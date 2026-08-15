@@ -42,8 +42,6 @@ coverage/
 .cache/
 dist/
 build/
-.audit/
-FULL-REVIEW.md
 
 # os
 .DS_Store
@@ -56,9 +54,6 @@ Thumbs.db
 # ai
 .claude
 .opencode/
-
-# review scaffolding (never commit)
-.review/
 
 # git worktrees (never commit worktree contents)
 .worktrees/

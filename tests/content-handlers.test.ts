@@ -467,7 +467,7 @@ describe("content.ts message surface", () => {
   });
 
   test("forwards a well-formed console bridge entry to the SW ring", async () => {
-    // Enable the ring (D6) and disable stealth — both are required for a
+    // Enable the ring and disable stealth — both are required for a
     // forward. Each loadContentScript re-imports content.ts, which registers
     // one more listener on the shared window event — every accumulated
     // listener hears the dispatch and forwards through the SAME admission
