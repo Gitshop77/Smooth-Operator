@@ -463,10 +463,11 @@ export async function readProviderConfig(): Promise<ProviderConfig | null> {
   const provider = normalizeString(res.provider);
   if (!provider) return null; // no provider set → unconfigured user
  // Defense-in-depth: a corrupted / injected `chrome.storage.local` payload
- // could carry an arbitrary provider id. Fall back to the default so the
- // agent can still make LLM calls instead of being locked out until manual
- // reconfiguration. Write a one-time flag so the Options UI can surface a
- // warning.
+ // could carry an arbitrary provider id. Fall back to the default. The
+ // fallback deliberately CLEARS the stored API key (below) to prevent
+ // cross-provider exfiltration, so the agent IS locked out until the user
+ // re-enters the key — that is the intent. Write a one-time flag so the
+ // Options UI can surface a warning.
   let resolvedProvider = provider;
   if (!KNOWN_PROVIDERS.has(provider)) {
     console.warn(

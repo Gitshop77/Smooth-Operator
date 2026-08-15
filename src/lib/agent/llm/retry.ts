@@ -244,9 +244,9 @@ async function abortAwareSleep(ms: number, signal?: AbortSignal): Promise<void> 
  * caller may omit it.
  * @param providerId Optional provider id scoping the OpenAI-404 quirk
  * ("openai"/"azure"/"openrouter" treat a 404 as retryable). When
- * omitted, a 404 is never retried. The HTTP transport does not
- * pass it today; wire it from the calling layer when the provider
- * is known.
+ * omitted, a 404 is never retried. The provider id is wired
+ * end-to-end from the providers' `make()` via route/client.ts into
+ * the HTTP transport, so a known provider always scopes the quirk.
  */
 function classifyError(
   err: Error,

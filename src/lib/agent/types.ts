@@ -413,8 +413,8 @@ export interface AgentConfig {
    * attempts a DETERMINISTIC pre-check (current-page title / URL metadata
    * question) before the initial planner call; a matching read-only task
    * completes on direct evidence without the initial planner LLM call and
-   * without a screenshot. Conservative default: `false` (off until
-   * measurement justifies enabling it). Never applies in `full_agentic`
+   * without a screenshot. Default: `true` (types-utils.ts), so the fast path
+   * is on unless explicitly disabled. Never applies in `full_agentic`
    * mode — safety modes are never silently downgraded.
    */
   enableFastPath?: boolean;

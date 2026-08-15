@@ -693,8 +693,9 @@ export async function navigatorCallDirect(
  // would either error (HTTP 400 from the API) or waste tokens processing a
  // giant base64 string they can't interpret. The `provider.supportsVision`
  // flag is set per-MODEL via the models.dev catalog lookup in buildProvider().
- // Also check the user's explicit "enableScreenshots" setting. It defaults
- // off because DOM + viewport AX are sufficient for most pages.
+  // Also check the user's explicit "enableScreenshots" setting. It defaults
+  // ON (`getEnableScreenshots()` falls back to `true` when unset), matching
+  // the options UI's default.
 const enableScreenshots = provider.supportsVision && (await getEnableScreenshots());
   const screenshot = enableScreenshots ? req.browserState.screenshot : undefined;
   // The screenshot is raw, page-rendered pixels — it is NOT subject to the text
