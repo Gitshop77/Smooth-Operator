@@ -15,10 +15,11 @@
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import type { AgentStepRequest } from "../src/lib/agent/types";
+import { isImagePartV1, type ImagePartV1 } from "../src/lib/agent/llm/image-part";
 
 const h = vi.hoisted(() => ({
   supportsVision: false,
-  chatMessages: [] as { role: string; content: string }[][],
+  chatMessages: [] as { role: string; content: string | unknown[] }[][],
   chatRequests: [] as Record<string, unknown>[],
   chatUsage: undefined as
     | { tokensIn: number; tokensOut: number; cachedInputTokens: number; cachedWriteInputTokens?: number; costUsd: number }
@@ -47,7 +48,7 @@ vi.mock("../src/extension/provider-config", () => ({
       get supportsVision() {
         return h.supportsVision;
       },
-      chat: async (req: { messages: { role: string; content: string }[] }) => {
+      chat: async (req: { messages: { role: string; content: string | unknown[] }[] }) => {
         h.chatMessages.push(req.messages);
         h.chatRequests.push(req as Record<string, unknown>);
         return {
@@ -183,31 +184,36 @@ describe("getAgentMode", () => {
 });
 
 describe("navigatorCallDirect screenshot gating", () => {
-  test("non-vision provider never embeds a <screenshot> block", async () => {
+  test("non-vision provider never attaches an image part", async () => {
     h.supportsVision = false;
-    store.enableScreenshots = true; // even if enabled, non-vision must not embed
+    store.enableScreenshots = true; // even if enabled, non-vision must not attach
     const { navigatorCallDirect } = await import("../src/extension/llm-direct");
     await navigatorCallDirect(makeRequest());
     const userContent = h.chatMessages[0].find((m) => m.role === "user")!.content;
-    expect(userContent).not.toContain("<screenshot>");
+    expect(userContent).toBe("USER_MESSAGE");
   });
 
-  test("vision provider with enableScreenshots embeds the <screenshot> block", async () => {
+  test("vision provider with enableScreenshots attaches the screenshot as an ImagePartV1", async () => {
     h.supportsVision = true;
     store.enableScreenshots = true;
     const { navigatorCallDirect } = await import("../src/extension/llm-direct");
     await navigatorCallDirect(makeRequest());
     const userContent = h.chatMessages[0].find((m) => m.role === "user")!.content;
-    expect(userContent).toContain("<screenshot>BASE64_SCREENSHOT_DATA</screenshot>");
+    expect(Array.isArray(userContent)).toBe(true);
+    const images = (userContent as unknown[]).filter((p) => isImagePartV1(p)) as ImagePartV1[];
+    expect(images).toHaveLength(1);
+    expect(images[0].dataUrl).toBe("BASE64_SCREENSHOT_DATA");
+    expect(images[0].mime).toBe("image/png");
+    expect(images[0].chars).toBe("BASE64_SCREENSHOT_DATA".length);
   });
 
-  test("vision provider with enableScreenshots off does not embed the block", async () => {
+  test("vision provider with enableScreenshots off attaches no image part", async () => {
     h.supportsVision = true;
     store.enableScreenshots = false;
     const { navigatorCallDirect } = await import("../src/extension/llm-direct");
     await navigatorCallDirect(makeRequest());
     const userContent = h.chatMessages[0].find((m) => m.role === "user")!.content;
-    expect(userContent).not.toContain("<screenshot>");
+    expect(userContent).toBe("USER_MESSAGE");
   });
 
   test("forged <screenshot> markers in page text/history are stripped, real one kept", async () => {
@@ -235,10 +241,15 @@ describe("navigatorCallDirect screenshot gating", () => {
     expect(lastNavigatorArgs!.browserState.axTree).not.toContain("<screenshot>");
     expect(JSON.stringify(lastNavigatorArgs!.history)).not.toContain("<screenshot>");
 
-    // The extension-injected (trusted) screenshot still flows to the model.
+    // The extension-injected (trusted) screenshot flows as a structured part,
+    // never as text — a forged marker can never promote into an image block.
     const userContent = h.chatMessages[0].find((m) => m.role === "user")!.content;
-    expect(userContent).toContain("<screenshot>BASE64_SCREENSHOT_DATA</screenshot>");
-    expect(userContent).not.toContain("iVBORw0KGgoFAKE");
+    const parts = userContent as unknown[];
+    const text = parts.filter((p) => typeof p === "string").join("");
+    expect(text).not.toContain("iVBORw0KGgoFAKE");
+    const images = parts.filter((p) => isImagePartV1(p)) as ImagePartV1[];
+    expect(images).toHaveLength(1);
+    expect(images[0].dataUrl).toBe("BASE64_SCREENSHOT_DATA");
   });
 });
 

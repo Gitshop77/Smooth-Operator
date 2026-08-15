@@ -12,6 +12,7 @@ import { type Endpoint } from "./endpoint";
 import { type Framing } from "./framing";
 import { type Transport, httpJson, type HttpPrepared } from "./transport-http";
 import type { SsrfProvenance } from "./ssrf";
+import type { ImagePartV1 } from "../image-part";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -156,7 +157,10 @@ interface GenerationOptions {
 
 export interface LLMRequest {
   readonly model: Model;
-  readonly messages: ReadonlyArray<{ role: "system" | "user" | "assistant"; content: string }>;
+  readonly messages: ReadonlyArray<{
+    role: "system" | "user" | "assistant";
+    content: string | Array<string | ImagePartV1>;
+  }>;
   readonly generation?: GenerationOptions;
   readonly providerOptions?: Record<string, unknown>;
   readonly schema?: unknown;

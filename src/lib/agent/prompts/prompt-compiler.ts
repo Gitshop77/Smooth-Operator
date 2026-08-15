@@ -1,4 +1,5 @@
 import type { ChatMessage } from "../llm/provider";
+import type { ImagePartV1 } from "../llm/image-part";
 import { buildNavigatorUserMessage, buildPlannerUserMessage } from "../loop/messages";
 import { buildNavigatorPrompt } from "./navigator-prompt";
 import { buildPlannerPrompt } from "./planner-prompt";
@@ -22,6 +23,12 @@ interface CompileLegacyPairV1 {
   systemProvenance: PromptSectionV1["provenance"];
   userTrust: PromptSectionV1["trust"];
   invalidationKeys: string[];
+  /** Extra user-message parts appended AFTER the sections-derived text.
+   * NEVER rendered into a section: the cache descriptor hashes `section.text`
+   * (prompt-cache-descriptor.ts), so a structured image part — which is
+   * volatile per step and must not shape the stable cache key — stays a
+   * separate content part in `messages` only. */
+  extraUserParts?: Array<string | ImagePartV1>;
 }
 
 async function compileLegacyPairV1(input: CompileLegacyPairV1): Promise<CompiledPromptV1> {
@@ -50,6 +57,18 @@ async function compileLegacyPairV1(input: CompileLegacyPairV1): Promise<Compiled
     },
   ];
   const messages: ChatMessage[] = sections.map(({ role, text: content }) => ({ role, content }));
+  if (input.extraUserParts && input.extraUserParts.length > 0) {
+    // The user message becomes a parts array: the sections-derived text first,
+    // then the appended parts. `sections` stay text-only (see the interface
+    // contract above), so the cache descriptor never hashes the screenshot.
+    messages[1] = {
+      role: "user",
+      content: [
+        ...(typeof messages[1].content === "string" ? [messages[1].content] : messages[1].content),
+        ...input.extraUserParts,
+      ],
+    };
+  }
   return {
     version: PROMPT_CONTRACT_VERSION,
     kind: input.kind,
@@ -71,6 +90,11 @@ export interface CompileNavigatorPromptV1Input {
   /** Exact suffixes applied by the provider-facing adapter. */
   systemSuffix?: string;
   userSuffix?: string;
+  /** Structured screenshot part appended to the user message as a content
+   * part (never rendered as text — see `CompileLegacyPairV1.extraUserParts`).
+   * The base64 lives only in this part, so forged `<screenshot>` markers in
+   * page text can never be promoted into an image block. */
+  screenshot?: ImagePartV1;
   /** When true, use the COMPACT navigator system prompt for low-context
    * (<128k) models — every security/schema/behavior block is preserved, only
    * prose is compressed (see `buildNavigatorPrompt(..., compact)`). */
@@ -97,6 +121,7 @@ export async function compileNavigatorPromptV1(
       "agentMode",
       "structured-output-support",
     ],
+    ...(input.screenshot ? { extraUserParts: [input.screenshot] } : {}),
   });
 }
 

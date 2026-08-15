@@ -9,6 +9,7 @@
 import { Protocol, type LLMRequest } from "../route/client";
 import { zodToJsonSchema } from "../zod-json-schema";
 import { omitZero } from "../shared";
+import { isImagePartV1 } from "../image-part";
 import {
   isZodSchema,
   isPlainJSONSchema,
@@ -100,17 +101,50 @@ async function fromRequest(request: LLMRequest): Promise<OpenAIChatBody> {
   }
   const messages = request.messages.map((m) => {
     if (m.role === "user") {
-      const { text: textContent, dataUris } = extractScreenshots(m.content);
-      if (dataUris.length > 0) {
+      // Structured image parts (the navigator's screenshot): emit image_url
+      // parts directly and SKIP the regex scan — the base64 lives only in the
+      // part, so a forged `<screenshot>` marker in text can never be promoted
+      // into an image block.
+      if (Array.isArray(m.content) && m.content.some(isImagePartV1)) {
         const parts: OpenAIContentPart[] = [];
-        if (textContent) parts.push({ type: "text", text: textContent });
-        for (const dataUri of dataUris) {
-          parts.push({ type: "image_url", image_url: { url: dataUri } });
+        for (const part of m.content) {
+          if (typeof part === "string") {
+            if (part) parts.push({ type: "text", text: part });
+          } else {
+            parts.push({ type: "image_url", image_url: { url: part.dataUrl } });
+          }
         }
         return { role: m.role, content: parts };
       }
+      // Legacy STRING content: extract `<screenshot>` markers as defense-
+      // in-depth for callers that still interpolate them into text. Parts
+      // arrays without an image part flatten to text parts (never scanned).
+      if (typeof m.content === "string") {
+        const { text: textContent, dataUris } = extractScreenshots(m.content);
+        if (dataUris.length > 0) {
+          const parts: OpenAIContentPart[] = [];
+          if (textContent) parts.push({ type: "text", text: textContent });
+          for (const dataUri of dataUris) {
+            parts.push({ type: "image_url", image_url: { url: dataUri } });
+          }
+          return { role: m.role, content: parts };
+        }
+        return { role: m.role, content: m.content };
+      }
+      const textParts: OpenAIContentPart[] = [];
+      for (const part of m.content) {
+        if (typeof part === "string" && part) textParts.push({ type: "text", text: part });
+      }
+      return { role: m.role, content: textParts };
     }
-    return { role: m.role, content: m.content };
+    // Non-user messages never carry image parts — flatten any parts array to
+    // its text defensively.
+    return {
+      role: m.role,
+      content: typeof m.content === "string"
+        ? m.content
+        : m.content.filter((part): part is string => typeof part === "string").join(""),
+    };
   });
   const body: OpenAIChatBody = {
     model: request.model.id,

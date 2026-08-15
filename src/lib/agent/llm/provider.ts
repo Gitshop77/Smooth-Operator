@@ -4,12 +4,15 @@
  * run with OpenAI, Anthropic, Gemini, or any OpenAI-compatible endpoint.
  */
 
+import type { ImagePartV1 } from "./image-part";
+
 /** A single chat message in the conversation. */
 export interface ChatMessage {
   /** Message role: system, user, or assistant. */
   role: "system" | "user" | "assistant";
-  /** Message content (text). */
-  content: string;
+  /** Message content — plain text, or a parts array mixing text with
+   * structured image parts (the navigator's screenshot attachment). */
+  content: string | Array<string | ImagePartV1>;
 }
 
 /** Non-sensitive aggregate progress from an already-open provider stream. */

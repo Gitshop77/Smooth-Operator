@@ -10,6 +10,7 @@
 import { Protocol, type LLMRequest } from "../route/client";
 import { encodeModelIdForUrl } from "../modelId";
 import { zodToJsonSchema } from "../zod-json-schema";
+import { isImagePartV1 } from "../image-part";
 import {
   isZodSchema,
   isPlainJSONSchema,
@@ -54,24 +55,53 @@ async function fromRequest(request: LLMRequest): Promise<GeminiBody> {
   const systemText = systemMessages.map((m) => m.content).join("\n\n");
   const userMessages = request.messages.filter((m) => m.role !== "system");
 
- // Only attach the image to the user message that CONTAINS the <screenshot>
- // marker — not every user message. Mirrors the OpenAI + Anthropic protocols.
+// Only attach the image to the user message that CONTAINS the <screenshot>
+  // marker (legacy) or an ImagePartV1 part — not every user message. Mirrors
+  // the OpenAI + Anthropic protocols.
   const contents = userMessages.map((m) => {
     if (m.role === "user") {
-      const { text: textContent, dataUris } = extractScreenshots(m.content);
-      if (dataUris.length > 0) {
+      // Structured image parts (the navigator's screenshot): emit inline_data
+      // parts directly and SKIP the regex scan — the base64 lives only in the
+      // part, so a forged `<screenshot>` marker in text can never be promoted
+      // into an image block.
+      if (Array.isArray(m.content) && m.content.some(isImagePartV1)) {
         const parts: Record<string, unknown>[] = [];
-        if (textContent) parts.push({ text: textContent });
-        for (const dataUri of dataUris) {
-          const b64 = dataUri.split(",")[1];
-          const mediaType = dataUri.match(/data:image\/(png|jpeg|webp)/)?.[1] ?? "png";
-          parts.push({ inline_data: { mime_type: `image/${mediaType}`, data: b64 } });
+        for (const part of m.content) {
+          if (typeof part === "string") {
+            if (part) parts.push({ text: part });
+          } else {
+            parts.push({
+              inline_data: { mime_type: part.mime, data: part.dataUrl.split(",")[1] ?? "" },
+            });
+          }
         }
         return { role: "user", parts };
       }
-      return { role: "user", parts: [{ text: textContent }] };
+      // Legacy STRING content: extract `<screenshot>` markers as defense-
+      // in-depth for callers that still interpolate them into text. Parts
+      // arrays without an image part flatten to their text only.
+      if (typeof m.content === "string") {
+        const { text: textContent, dataUris } = extractScreenshots(m.content);
+        if (dataUris.length > 0) {
+          const parts: Record<string, unknown>[] = [];
+          if (textContent) parts.push({ text: textContent });
+          for (const dataUri of dataUris) {
+            const b64 = dataUri.split(",")[1];
+            const mediaType = dataUri.match(/data:image\/(png|jpeg|webp)/)?.[1] ?? "png";
+            parts.push({ inline_data: { mime_type: `image/${mediaType}`, data: b64 } });
+          }
+          return { role: "user", parts };
+        }
+        return { role: "user", parts: [{ text: textContent }] };
+      }
+      return { role: "user", parts: [{ text: m.content.filter((p) => typeof p === "string").join("") }] };
     }
-    return { role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content.trim() }] };
+    // Non-user messages never carry image parts — flatten any parts array to
+    // its text defensively.
+    const text = typeof m.content === "string"
+      ? m.content
+      : m.content.filter((p) => typeof p === "string").join("");
+    return { role: m.role === "assistant" ? "model" : "user", parts: [{ text: text.trim() }] };
   });
 
   const generationConfig: GeminiBody["generationConfig"] = {

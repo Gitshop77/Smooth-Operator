@@ -3,6 +3,7 @@ import {
   type PromptBudgetPortV1,
   type PromptKindV1,
 } from "./prompt-contract";
+import type { ImagePartV1 } from "../llm/image-part";
 
 /** V1 keeps a byte-exact guard for the legacy unknown-context path. Runs with
  * a known effective context use the portable token fallback below and then
@@ -148,16 +149,32 @@ export function assertPromptWithinContextBudgetV1(
   }
 }
 
+/** Message body type accepted by the compiled-prompt budget asserts: plain
+ * text or a parts array (text + structured image parts). */
+export type PromptMessageBodyV1 = string | Array<string | ImagePartV1>;
+
+/**
+ * Flatten a (possibly structured) message body to its TEXT representation for
+ * the byte-budget join. Image parts are represented by their full base64
+ * payload: the plain (no-accounting) path is deliberately conservative — it
+ * has no flat per-image token allowance to substitute, so a screenshot-heavy
+ * prompt must fail closed rather than pass on a false text-only estimate.
+ */
+function messageBodyText(content: PromptMessageBodyV1): string {
+  if (typeof content === "string") return content;
+  return content.map((part) => (typeof part === "string" ? part : part.dataUrl)).join("");
+}
+
 /** Assert a compiled prompt's combined message bodies stay within a
  * model-context-aware budget (same `\n` framing reserve as
  * {@link assertCompiledPromptWithinProfileV1}). */
 export function assertCompiledPromptWithinContextBudgetV1(
   kind: PromptKindV1,
   label: string,
-  messages: readonly { content: string }[],
+  messages: readonly { content: PromptMessageBodyV1 }[],
   contextTokens: number,
 ): void {
-  const combined = messages.map((message) => message.content).join("\n");
+  const combined = messages.map((message) => messageBodyText(message.content)).join("\n");
   assertPromptWithinContextBudgetV1(kind, label, combined, contextTokens);
 }
 
@@ -172,9 +189,9 @@ export function assertCompiledPromptWithinContextBudgetV1(
 export function assertCompiledPromptWithinProfileV1(
   kind: PromptKindV1,
   label: string,
-  messages: readonly { content: string }[],
+  messages: readonly { content: PromptMessageBodyV1 }[],
 ): void {
-  const combined = messages.map((message) => message.content).join("\n");
+  const combined = messages.map((message) => messageBodyText(message.content)).join("\n");
   assertPromptWithinProfileV1(kind, label, combined);
 }
 

@@ -14,6 +14,7 @@
  */
 
 import type { LLMProvider, LLMRequest, LLMResponse, ChatMessage } from "../lib/agent/llm/provider";
+import { type ImagePartV1, mimeFromDataUrl } from "../lib/agent/llm/image-part";
 import {
   compileNavigatorPromptV1,
   compilePlannerPromptV1,
@@ -21,10 +22,10 @@ import {
 import {
   assertCompiledPromptWithinContextBudgetV1,
   assertCompiledPromptWithinProfileV1,
-  assertPromptWithinContextBudgetV1,
-  assertPromptWithinProfileV1,
   promptBudgetProfileForContextV1,
   PROMPT_BUDGET_PROFILES_V1,
+  PromptBudgetExceededError,
+  type PromptMessageBodyV1,
 } from "../lib/agent/prompts/prompt-token-budget";
 import { AgentOutputSchema, PlannerOutputSchema } from "../lib/agent/tools/schema";
 import { getFormatInstructions } from "../lib/agent/tools/registry";
@@ -432,7 +433,7 @@ export async function getEffectiveContextTokens(): Promise<number | undefined> {
 export function assertPromptBudget(
   kind: "navigator" | "planner" | "compaction" | "judge",
   label: string,
-  messages: readonly { content: string }[],
+  messages: readonly { content: PromptMessageBodyV1 }[],
   effectiveContextTokens: number | undefined,
   opts?: { imageChars?: number; imageTokens?: number },
 ): void {
@@ -447,27 +448,52 @@ export function assertPromptBudget(
   }
 }
 
+/**
+ * Sum the chars a message body contributes to the wire payload: text parts
+ * count verbatim; a structured image part counts its `chars` (the base64 it
+ * occupies) — NOT its bytes as "text". Legacy string bodies count verbatim.
+ */
+function contentChars(content: PromptMessageBodyV1): number {
+  if (typeof content === "string") return content.length;
+  let n = 0;
+  for (const part of content) {
+    n += typeof part === "string" ? part.length : part.chars;
+  }
+  return n;
+}
+
 function assertPromptBudgetWithImage(
   kind: "navigator" | "planner" | "compaction" | "judge",
   label: string,
-  messages: readonly { content: string }[],
+  messages: readonly { content: PromptMessageBodyV1 }[],
   effectiveContextTokens: number | undefined,
   imageChars: number,
   imageTokens: number,
 ): void {
-  const combined = messages.map((m) => m.content).join("\n");
+  // Char sum replaces the old `messages.map((m) => m.content).join("\n")` —
+  // branch on `string | ImagePartV1[]` so array bodies count their parts
+  // instead of joining into "[object Object]".
+  let combined = 0;
+  for (const m of messages) combined += contentChars(m.content);
+  combined += Math.max(0, messages.length - 1); // the `\n` framing of the old join
   const profile = effectiveContextTokens !== undefined
     ? promptBudgetProfileForContextV1(kind, effectiveContextTokens)
     : PROMPT_BUDGET_PROFILES_V1[kind];
   const clampedImageTokens = Math.min(imageTokens, Math.floor(profile.maxInputTokens * 0.25));
-  // Subtract the base64 bytes (which the model never sees as text) and add the
+  // Subtract the base64 chars (which the model never sees as text) and add the
   // flat token allowance (×2 to approximate the chars/token ratio used by the
   // other budget checks).
-  const adjustedChars = Math.max(0, combined.length - imageChars + clampedImageTokens * 2);
+  const adjustedChars = Math.max(0, combined - imageChars + clampedImageTokens * 2);
+  // The old path measured `" ".repeat(adjustedChars)` — a tens-of-KB
+  // allocation per step whose UTF-8 byte length is exactly `adjustedChars`.
+  // Assert against the length directly instead of allocating the string.
   if (effectiveContextTokens !== undefined) {
-    assertPromptWithinContextBudgetV1(kind, label, " ".repeat(adjustedChars), effectiveContextTokens);
-  } else {
-    assertPromptWithinProfileV1(kind, label, " ".repeat(adjustedChars));
+    const estimate = Math.ceil(adjustedChars / 2);
+    if (estimate > profile.maxInputTokens) {
+      throw new PromptBudgetExceededError(label, estimate, profile.maxInputTokens);
+    }
+  } else if (adjustedChars > profile.maxInputTokens) {
+    throw new PromptBudgetExceededError(label, adjustedChars, profile.maxInputTokens);
   }
 }
 
@@ -620,22 +646,32 @@ export async function navigatorCallDirect(
  // flag is set per-MODEL via the models.dev catalog lookup in buildProvider().
  // Also check the user's explicit "enableScreenshots" setting. It defaults
  // off because DOM + viewport AX are sufficient for most pages.
-  const enableScreenshots = provider.supportsVision && (await getEnableScreenshots());
+const enableScreenshots = provider.supportsVision && (await getEnableScreenshots());
   const screenshot = enableScreenshots ? req.browserState.screenshot : undefined;
- // The screenshot is raw, page-rendered pixels — it is NOT subject to the text
- // sanitizer (which only inspects DOM/AX text) and must be treated as untrusted
- // page data, exactly like <untrusted_page_data>. The navigator prompt already
- // tells the model the screenshot is untrusted evidence, never an instruction.
- //
- // Each navigator step is a stateless, two-message call with no prior image
- // retained in the outgoing messages, so the screenshot must be sent on every
- // step. Eliding an unchanged screenshot would leave the vision model with zero
- // pixels and a note referencing an image it was never shown. The screenshot
- // stays inside the untrusted wrapper exactly as before.
- // Roomy non-structured providers receive the canonical JSON schema as an
- // additional contract. Low-context models rely on the complete action/output
- // contract already embedded in the compact prompt; duplicating the large Zod
- // schema would crowd out even a tiny page observation.
+  // The screenshot is raw, page-rendered pixels — it is NOT subject to the text
+  // sanitizer (which only inspects DOM/AX text) and must be treated as untrusted
+  // page data, exactly like <untrusted_page_data>. The navigator prompt already
+  // tells the model the screenshot is untrusted evidence, never an instruction.
+  //
+  // Each navigator step is a stateless, two-message call with no prior image
+  // retained in the outgoing messages, so the screenshot must be sent on every
+  // step. Eliding an unchanged screenshot would leave the vision model with zero
+  // pixels and a note referencing an image it was never shown.
+  //
+  // The screenshot now travels as a STRUCTURED image part (`ImagePartV1`) — a
+  // separate content part appended after the sections-derived text, never a
+  // `<screenshot>` marker interpolated into the user text. The base64 lives only
+  // in the part: protocol adapters emit it as a provider-native image block
+  // without any regex scan, so a forged marker in untrusted page text can never
+  // be promoted into an image block (stripScreenshotMarkers above remains the
+  // defense for legacy string content).
+  const screenshotPart: ImagePartV1 | undefined = screenshot
+    ? { type: "image", dataUrl: screenshot, mime: mimeFromDataUrl(screenshot), chars: screenshot.length }
+    : undefined;
+  // Roomy non-structured providers receive the canonical JSON schema as an
+  // additional contract. Low-context models rely on the complete action/output
+  // contract already embedded in the compact prompt; duplicating the large Zod
+  // schema would crowd out even a tiny page observation.
   const compiled = await compileNavigatorPromptV1({
     maxActions: MAX_ACTIONS,
     customPrompt: customNavigatorPrompt,
@@ -650,9 +686,7 @@ export async function navigatorCallDirect(
       provider.supportsStructuredOutput,
       effectiveContextTokens,
     ) ? "\n\n" + getFormatInstructions(AgentOutputSchema) : "",
-    userSuffix: screenshot
-      ? `\n\n<untrusted_page_data><screenshot>${screenshot}</screenshot></untrusted_page_data>`
-      : "",
+    screenshot: screenshotPart,
   });
   const messages: ChatMessage[] = compiled.messages;
   // Model-context-aware budget guard: when the model's effective context is
@@ -664,8 +698,8 @@ export async function navigatorCallDirect(
   // prevents an unbounded DOM/screenshot payload from ever crossing the
   // network, even if every earlier cap is misconfigured.
   assertPromptBudget("navigator", "navigator", messages, effectiveContextTokens, {
-    imageChars: screenshot ? screenshot.length : 0,
-    imageTokens: screenshot ? await getScreenshotImageTokens() : 0,
+    imageChars: screenshotPart?.chars ?? 0,
+    imageTokens: screenshotPart ? await getScreenshotImageTokens() : 0,
   });
 
   const response = await chatWithVisibleOutputRetry(

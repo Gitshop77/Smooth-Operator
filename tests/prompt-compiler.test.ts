@@ -136,7 +136,10 @@ describe("V1 prompt cache descriptor", () => {
 
   test("uses the canonical length-framed SHA-256 stable-section key", async () => {
     const compiled = await compileNavigatorPromptV1({ maxActions: 5, user: navigatorUser });
-    const system = compiled.messages[0].content;
+    // The system message is always plain text (image parts attach only to the
+    // navigator's user message), so narrow the widened content type.
+    const systemContent = compiled.messages[0].content;
+    const system = typeof systemContent === "string" ? systemContent : "";
     const id = "navigator.system";
     const encoder = new TextEncoder();
     const framed = `${PROMPT_CACHE_KEY_VERSION}\0${encoder.encode(id).byteLength}:${id}${encoder.encode(system).byteLength}:${system}`;
