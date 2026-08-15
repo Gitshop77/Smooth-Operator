@@ -10,9 +10,10 @@
  */
 
 import type { HistoryItem, TabInfo, ActionResult } from "../types";
-import { wrapUntrusted, scanForInjection } from "../security";
+import { wrapUntrusted } from "../security";
 import { redactSecrets, getSecretSetVersion } from "../secrets";
 import { redactKeyShapes } from "../key-shape-redact";
+import { memoizedRedact, memoizedInjectionScan, clearRedactionMemo, REDACTION_FAILED } from "../redaction-memo";
 import { ELEMENTS_TEXT_CHAR_CAP, formatTab, renderPlan, renderHistory } from "./messages-utils";
 import { redactKeyLeak } from "../redact-shared";
 
@@ -50,6 +51,10 @@ function syncSecretVersion(): void {
     // WeakMap has no `.clear()` — replace with a fresh instance.
     redactionCache = new WeakMap();
     itemCache = new WeakMap();
+    // Drop the string-keyed redaction/injection memos too: their entries are
+    // keyed by the current secrets version, so a bump invalidates them — and
+    // clearing here bounds their memory to the current secret set.
+    clearRedactionMemo();
   }
 }
 async function redactExtractedCached(r: ActionResult): Promise<ActionResult> {
@@ -61,9 +66,6 @@ async function redactExtractedCached(r: ActionResult): Promise<ActionResult> {
   redactionCache.set(r, redacted);
   return { ...r, extractedContent: redacted };
 }
-
-/** Marker substituted for text whose redaction threw. */
-const REDACTION_FAILED = "[REDACTED: redaction failed]";
 
 /**
  * Apply BOTH redactors to page-derived content: the stored-secret redactor
@@ -83,11 +85,6 @@ async function redactBoth(s: string): Promise<string> {
   const str = typeof s === "string" ? s : "";
   const stored = await redactSecrets(str).catch(() => REDACTION_FAILED);
   return redactKeyShapes(stored);
-}
-
-/** `redactBoth` that degrades to the fail-closed marker instead of throwing. */
-function safeRedactBoth(s: string): Promise<string> {
-  return redactBoth(s).catch(() => REDACTION_FAILED);
 }
 
 /**
@@ -113,7 +110,7 @@ function formatInjectionWarnings(warnings: string[]): string {
 
 /** Render the `<compacted_memory>` block (redacted) when a summary exists. */
 async function buildCompactedMemoryBlock(memory: string | undefined): Promise<string> {
-  const redacted = memory ? await safeRedactBoth(memory) : undefined;
+  const redacted = memory ? await memoizedRedact(memory) : undefined;
   return redacted
     ? `\n<compacted_memory>\n${wrapUntrusted(redacted)}\n</compacted_memory>`
     : "";
@@ -325,7 +322,7 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
     + "\n" + browserState.pageInfo
     + "\n" + tabsBlock
     + (browserState.axTree ? "\n" + browserState.axTree : "");
-  const injectionScan = scanForInjection(injectionScanText);
+  const injectionScan = memoizedInjectionScan(injectionScanText);
   if (!injectionScan.safe) {
     injectionWarningsBlock = formatInjectionWarnings(injectionScan.warnings);
   }
@@ -343,12 +340,12 @@ export async function buildNavigatorUserMessage(args: NavigatorMessageArgs): Pro
  // Fail CLOSED like `redactHistoryForPrompt`: a key-shape redaction throw must
  // not abort the whole navigator message build. Each redaction degrades to the
  // `REDACTION_FAILED` placeholder rather than emitting unredacted content.
-  const redactedElementsText = await safeRedactBoth(elementsText);
-  const redactedTitle = await safeRedactBoth(browserState.title);
-  const redactedUrl = await safeRedactBoth(browserState.url);
-  const redactedTabsBlock = await safeRedactBoth(tabsBlock);
-  const redactedAxTree = browserState.axTree ? await safeRedactBoth(browserState.axTree) : undefined;
-  const redactedPageInfo = await safeRedactBoth(browserState.pageInfo);
+  const redactedElementsText = await memoizedRedact(elementsText);
+  const redactedTitle = await memoizedRedact(browserState.title);
+  const redactedUrl = await memoizedRedact(browserState.url);
+  const redactedTabsBlock = await memoizedRedact(tabsBlock);
+  const redactedAxTree = browserState.axTree ? await memoizedRedact(browserState.axTree) : undefined;
+  const redactedPageInfo = await memoizedRedact(browserState.pageInfo);
 
  // Redact secret values from any history-extracted content the agent captured
  // in a previous step (e.g. via the `extract` action) before it is wrapped and
@@ -490,8 +487,8 @@ export async function buildPlannerUserMessage(args: PlannerMessageArgs): Promise
  // wrapped and sent to the planner provider. The navigator path redacts these
  // same values via `redactSecrets`; the planner must stay symmetric so secret
  // URLs (token/basic-auth) never cross the network.
-  const redactedUrl = await safeRedactBoth(url);
-  const redactedTabsBlock = await safeRedactBoth(tabsBlock);
+  const redactedUrl = await memoizedRedact(url);
+  const redactedTabsBlock = await memoizedRedact(tabsBlock);
 
  // Pass the FULL redacted navigator history to renderHistory — it slices to
  // the last PLANNER_HISTORY_LIMIT items AND emits a `<sys>[N previous steps
@@ -505,7 +502,7 @@ export async function buildPlannerUserMessage(args: PlannerMessageArgs): Promise
  // — clean pages pay zero token overhead.
   let injectionWarningsBlock = "";
   const plannerScanText = redactedUrl + "\n" + redactedTabsBlock + "\n" + historyBlock;
-  const plannerScan = scanForInjection(plannerScanText);
+  const plannerScan = memoizedInjectionScan(plannerScanText);
   if (!plannerScan.safe) {
     injectionWarningsBlock = formatInjectionWarnings(plannerScan.warnings);
   }
