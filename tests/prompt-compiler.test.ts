@@ -116,7 +116,15 @@ describe("V1 prompt compiler byte identity", () => {
       { role: "system", content: JUDGE_SYSTEM_PROMPT },
       { role: "user", content: buildJudgeUserMessage(judgeInput) },
     ]);
-    expect(judge.cache).toMatchObject({ cacheEligible: false, stableKey: null });
+    expect(judge.cache).toMatchObject({
+      cacheEligible: true,
+      stableSectionIds: ["judge.system"],
+      volatileSectionIds: ["judge.user"],
+    });
+    expect(judge.sections.map(({ id, cache }) => ({ id, cache }))).toEqual([
+      { id: "judge.system", cache: "stable" },
+      { id: "judge.user", cache: "volatile" },
+    ]);
   });
 });
 

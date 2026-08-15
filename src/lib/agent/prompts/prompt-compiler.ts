@@ -169,7 +169,14 @@ export async function compileJudgePromptV1(input: JudgePromptInputV1): Promise<C
     kind: "judge",
     system: JUDGE_SYSTEM_PROMPT,
     user: buildJudgeUserMessage(input),
-    cacheEligible: false,
+    // A judge call is two messages, but it is not one-use in an agent run:
+    // the byte-stable system prefix is revisited by every judge invocation
+    // (disagreement checks and done-claim audits). Mark only that stable
+    // prefix cacheable; the user section carries the per-call history and
+    // stays volatile. No staleness risk since the history is per-call. This
+    // enables explicit Anthropic caching and is harmless for providers with
+    // automatic/no prompt caching.
+    cacheEligible: true,
     systemProvenance: "application",
     userTrust: "untrusted-model",
     invalidationKeys: ["prompt-contract-version"],
