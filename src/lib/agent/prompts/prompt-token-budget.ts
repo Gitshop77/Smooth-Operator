@@ -240,8 +240,8 @@ const BASE_OBS_SCREENSHOT_CHARS = 100_000;
 
 /**
  * Fixed non-observation navigator overhead (system prompt + base user-message
- * framing) in UTF-8 bytes. Measured ≈30.7k with the stock system prompt
- * (30,092 system + ~600 base user); the margin absorbs prompt-version drift.
+ * framing) in UTF-8 bytes. Measured ≈28.8k with the stock system prompt
+ * (28,188 system + ~600 base user); the margin absorbs prompt-version drift.
  */
 const NAVIGATOR_FIXED_OVERHEAD_BYTES = 32_000;
 
