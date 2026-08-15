@@ -12,6 +12,7 @@
  */
 
 import { initElementMap } from "@/lib/agent/dom/ax-tree";
+import { installMutationSignal } from "@/lib/agent/dom/mutation-signal";
 import { installPopupHandler } from "@/lib/agent/dom/popup-handler";
 import { refreshStealthEnabledCache } from "@/lib/agent/anti-detection-utils";
 import { CONSOLE_CAPTURE_EVENT } from "@/lib/agent/dom/console-capture";
@@ -36,6 +37,14 @@ import {
     initElementMap();
   } catch (e) {
     log("initElementMap failed:", e);
+  }
+  try {
+    // DOM-epoch mutation signal: one invisible MutationObserver bumps the
+    // epoch on any DOM mutation so the extraction caches invalidate. No-op
+    // when already installed (re-injection is a no-op here anyway).
+    installMutationSignal();
+  } catch (e) {
+    log("installMutationSignal failed:", e);
   }
   try {
     installPopupHandler();

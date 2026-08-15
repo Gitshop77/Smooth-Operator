@@ -27,6 +27,8 @@ import {
   primeLiveSecretRedaction,
 } from "@/lib/agent/secrets";
 import { ensureApiKeyInSession } from "@/extension/api-key-storage";
+import { clearPromptMemo } from "@/lib/agent/prompts/prompt-memo";
+import { clearRedactionMemo } from "@/lib/agent/redaction-memo";
 import { getEffectiveContextTokens } from "../llm-direct";
 import {
   stopKeepalive,
@@ -401,6 +403,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     stored = await chrome.storage.local.get([
       "maxActions", "plannerInterval", "maxFailures", "costCap", "maxSteps",
       "allowedDomains", "blockedDomains",
+      "enableVerboseNavigatorPrompt",
     ]);
   } catch (e) {
     sendEvent({ type: "error", step: 0, message: `Settings load failed: ${errMsg(e)}`, recoverable: false });
@@ -581,6 +584,20 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
  // clean slate regardless of whether the prior run's cleanup finished.
  // Idempotent with the cleanupRun clear — double-clear is a no-op.
     clearVisionElementsCacheForNewRun();
+
+  // Drop the compiled-prompt memo at run START (run-lifecycle): the memo is
+  // module state in the MV3 service worker, so clearing guarantees this run
+  // compiles from CURRENT settings even if a storage change landed while the
+  // worker was asleep (no onChanged fired). Idempotent and cheap — clearing
+  // empty maps is a no-op on SW wake.
+    clearPromptMemo();
+
+  // Drop the redaction/injection memo at run START (run-lifecycle): the memo
+  // is module state in the MV3 service worker, so clearing guarantees this
+  // run redacts from CURRENT settings even if a storage change landed while
+  // the worker was asleep (no onChanged fired). Idempotent and cheap —
+  // clearing empty maps is a no-op on SW wake.
+    clearRedactionMemo();
 
     try {
       const { AgentMetricsCallback } = await import("@/lib/agent/callbacks/metrics");

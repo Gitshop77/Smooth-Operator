@@ -10,6 +10,7 @@
  */
 
 import { describe, test, expect, vi } from "vitest";
+import { CallbackDispatcher } from "../src/lib/agent/callbacks";
 import { LoopDetector } from "../src/lib/agent/loop/loop-detector";
 import { shouldCompact, partitionHistory, buildCompactionRequest, sanitizeCompactedMemory } from "../src/lib/agent/loop/compaction";
 import { runAgentLoop } from "../src/lib/agent/loop/orchestrator";
@@ -19,6 +20,7 @@ import type { HistoryItem, AgentAction, ActionResult, LogEvent, AgentOutput, Age
 import { AgentOutputSchema } from "../src/lib/agent/tools/schema";
 import { makeHistoryItem, makeState } from "./helpers";
 import { clampPlanItem } from "../src/lib/agent/loop/phases/planner-phases-utils";
+import { renderHistory, historyItemRenderer } from "../src/lib/agent/loop/messages-utils";
 
 // Records an action n times into a LoopDetector. Centralizes the
 // `as AgentAction` cast so the loop-detector tests stay uniform and
@@ -1463,5 +1465,172 @@ describe("clampPlanItem", () => {
     const result = clampPlanItem(["a"], undefined, (e) => events.push(e));
     expect(result).toBeUndefined();
     expect(events).toHaveLength(0);
+  });
+});
+
+// ─── Screenshot dispatch skips payload construction with no consumer ────────
+//
+// Production registers only AgentMetricsCallback (no `onScreenshot`), so the
+// base64 dataUrl is built and passed to the dispatcher every step and dropped.
+// The dispatcher must only materialize the screenshot payload when at least one
+// registered handler implements `onScreenshot`. `dispatch` (in
+// orchestrator-helpers.ts) invokes its factory eagerly — NOT deferred — so the
+// assertion is that the dispatcher's `screenshot` method is never invoked at
+// all when no handler consumes it. The positive control pins that a handler
+// WITH `onScreenshot` still receives the full dataUrl (the side panel keeps
+// receiving screenshotChars — no UI change).
+
+describe("runAgentLoop — screenshot dispatch is skipped when no handler implements onScreenshot", () => {
+  /** Build deps whose observe step yields a screenshot every step. */
+  function makeScreenshotDeps(opts: {
+    events: LogEvent[];
+    callbacks: LoopDeps["callbacks"];
+  }): LoopDeps {
+    return {
+      task: "test task",
+      navigatorCall: vi.fn(async () => ({
+        raw: JSON.stringify({
+          thinking: "x",
+          evaluation_previous_goal: "y",
+          memory: "z",
+          next_goal: "w",
+          action: [{ type: "click", index: 1 } as AgentAction],
+        }),
+      })),
+      plannerCall: vi.fn(async () => ({
+        raw: JSON.stringify({
+          thinking: "x",
+          decision: "continue",
+          plan: ["a"],
+          next_goal: "g",
+        }),
+      })),
+      getTabs: vi.fn(async () => [
+        { id: 1, label: "1", url: "https://example.com", title: "t", active: true },
+      ]),
+      extractState: vi.fn(async () => makeState({
+        screenshot: "data:image/png;base64,QUFBQUFBQUE=",
+      })),
+      executeActions: vi.fn(async (actions: AgentAction[]) =>
+        actions.map((action) => ({ action, success: true, message: "ok" } as ActionResult)),
+      ),
+      callbacks: opts.callbacks,
+      onEvent: (e: LogEvent) => { opts.events.push(e); },
+      settleDelay: 0,
+      config: { ...BASE_CONFIG, enableEarlyStop: false },
+    };
+  }
+
+  test("a dispatcher with no onScreenshot handler never materializes the dataUrl", async () => {
+    const events: LogEvent[] = [];
+    const deps = makeScreenshotDeps({
+      events,
+      // Only a metrics-style handler (no onScreenshot) — the production shape.
+      callbacks: [{ onRunStart: vi.fn(), onRunEnd: vi.fn() }],
+    });
+    // `dispatch` invokes its factory eagerly, so "the payload is not built"
+    // means the dispatcher's `screenshot` method is never invoked at all.
+    const screenshotSpy = vi.spyOn(CallbackDispatcher.prototype, "screenshot");
+    try {
+      await runAgentLoop(deps);
+
+      expect(screenshotSpy).not.toHaveBeenCalled();
+      // The observe phase genuinely ran with a screenshot in state (sanity:
+      // the assertion above would be vacuous if the branch were never reached).
+      expect(deps.extractState).toHaveBeenCalled();
+      expect(events.some((e) => e.type === "state")).toBe(true);
+    } finally {
+      screenshotSpy.mockRestore();
+    }
+  });
+
+  test("a dispatcher WITH an onScreenshot handler still receives the full dataUrl", async () => {
+    const events: LogEvent[] = [];
+    const onScreenshot = vi.fn();
+    const deps = makeScreenshotDeps({
+      events,
+      callbacks: [{ onScreenshot }],
+    });
+
+    await runAgentLoop(deps);
+
+    expect(onScreenshot).toHaveBeenCalled();
+    for (const args of onScreenshot.mock.calls) {
+      expect(args[1]).toBe("data:image/png;base64,QUFBQUFBQUE=");
+    }
+  });
+});
+
+// ─── renderHistory: incremental prefix caching ──────────────────────────────
+//
+// `renderHistory` must keep its EXACT signature and byte-identical output
+// while memoizing the serialization of the stable masked prefix (items
+// [0, n-2] of the window — the retention window masks the last 2). Only the
+// final 2 items re-render per call; when the window slides (one appended
+// item), the previously-masked items must NOT re-render — only the item that
+// just left the retention window (masked for the first time) and the final 2.
+// Per-item render counts are observed through `historyItemRenderer` (the
+// indirection `renderHistory` calls items through — ESM internal calls bind
+// to the module-local function, so a spy on the namespace export alone could
+// not intercept them).
+
+describe("renderHistory — incremental prefix caching", () => {
+  test("same window rendered twice: masked prefix renders once, final 2 re-render, output byte-identical", () => {
+    const history = Array.from({ length: 12 }, (_, i) => makeHistoryItem(i));
+    const renderSpy = vi.spyOn(historyItemRenderer, "render");
+    try {
+      const first = renderHistory(history, 12, 12);
+      const second = renderHistory(history, 12, 12);
+      // Byte-identical output across calls (the caching must not change
+      // anything observable in the prompt).
+      expect(second).toBe(first);
+
+      const byStep = new Map<number, number>();
+      for (const [h] of renderSpy.mock.calls) {
+        byStep.set(h.step, (byStep.get(h.step) ?? 0) + 1);
+      }
+      // The 10 masked (stale-observation) items render exactly ONCE across
+      // both calls — the serialized prefix is cached.
+      for (let i = 0; i < 10; i++) {
+        expect(byStep.get(i)).toBe(1);
+      }
+      // Only the final 2 items (retention window) re-render per call.
+      expect(byStep.get(10)).toBe(2);
+      expect(byStep.get(11)).toBe(2);
+    } finally {
+      renderSpy.mockRestore();
+    }
+  });
+
+  test("one appended item slides the window: the stable prefix is reused, only the newly-masked tail + final 2 re-render", () => {
+    const history = Array.from({ length: 12 }, (_, i) => makeHistoryItem(i));
+    const renderSpy = vi.spyOn(historyItemRenderer, "render");
+    try {
+      renderHistory(history, 12, 12);
+      history.push(makeHistoryItem(12));
+      const second = renderHistory(history, 12, 13);
+      // The omitted-steps header interpolates the CURRENT total (grows every
+      // step) — re-rendered per call, not part of the cached prefix.
+      expect(second).toContain("<sys>[1 previous steps omitted]</sys>");
+
+      const byStep = new Map<number, number>();
+      for (const [h] of renderSpy.mock.calls) {
+        byStep.set(h.step, (byStep.get(h.step) ?? 0) + 1);
+      }
+      // Items 0..9 were masked in call 1 and remain masked in the slid window
+      // (items 1..10) — the cached prefix reuse means they render exactly ONCE.
+      for (let i = 0; i < 10; i++) {
+        expect(byStep.get(i)).toBe(1);
+      }
+      // Item 10: full in call 1, newly-masked (leaves the retention window) in
+      // call 2 — the only prefix item that re-renders.
+      expect(byStep.get(10)).toBe(2);
+      // Item 11: full in both calls (final-2 re-render per call).
+      expect(byStep.get(11)).toBe(2);
+      // Item 12: the appended item, rendered once (final 2 of call 2).
+      expect(byStep.get(12)).toBe(1);
+    } finally {
+      renderSpy.mockRestore();
+    }
   });
 });

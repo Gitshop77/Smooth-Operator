@@ -19,6 +19,7 @@
 
 import { describe, test, expect, vi, afterEach } from "vitest";
 import { mergeDetections, renderMergedElementsText } from "../src/extension/vision-assistant/merger";
+import { rescaleDetectionsToCapture } from "../src/extension/vision-assistant/box-parser";
 import { rectCenter } from "../src/extension/background/cdp-rect-utils";
 import { executeAction } from "../src/lib/agent/tools/executor";
 import { makeState } from "./helpers";
@@ -78,6 +79,34 @@ describe("vision detection → CSS-pixel mapping (DPR division)", () => {
     const merged = mergeDetections([], [detection(400, 200, 80, 40)], 2);
     const text = renderMergedElementsText(merged);
     expect(text).toContain("[v1]<vision_element label=\"button\" x=\"200\" y=\"100\" w=\"40\" h=\"20\" />");
+  });
+});
+
+// ─── Pre-resized VLM captures: boxes re-scaled to full capture space ────────
+
+describe("pre-resized VLM captures: re-scale boxes to full capture space before merge", () => {
+  test("boxes in the resized image's pixel space land on full-viewport CSS coords after re-scale + DPR division", () => {
+    // 1280×800 CSS viewport at DPR 2 → 2560×1600 device-pixel capture,
+    // pre-resized to the VLM decode edge (whLargest=512) → 512×320 input.
+    const resized = [detection(51.2, 32, 51.2, 32)];
+    const capture = { sourceWidth: 2560, sourceHeight: 1600, width: 512, height: 320 };
+    const rescaled = rescaleDetectionsToCapture(resized, capture);
+    // scale = sourceWidth/width = 2560/512 = 5 (same ratio for height).
+    expect(rescaled[0].pixelBox).toEqual({ x: 256, y: 160, width: 256, height: 160 });
+    // mergeDetections then divides by DPR as before (full-viewport device px).
+    const merged = mergeDetections([], rescaled, 2);
+    expect(merged[0].pixelRect).toEqual({ x: 128, y: 80, width: 128, height: 80 });
+  });
+
+  test("the re-scale is a no-op when the capture was already at/below the decode edge", () => {
+    const dets = [detection(10, 20, 30, 40)];
+    const capture = { sourceWidth: 800, sourceHeight: 600, width: 800, height: 600 };
+    expect(rescaleDetectionsToCapture(dets, capture)).toBe(dets);
+  });
+
+  test("the re-scale is a no-op when the resize dims are unknown (no resize applied)", () => {
+    const dets = [detection(10, 20, 30, 40)];
+    expect(rescaleDetectionsToCapture(dets, {})).toBe(dets);
   });
 });
 

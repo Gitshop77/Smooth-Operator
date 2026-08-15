@@ -1,5 +1,7 @@
 import { extractBrowserState, getSelectorMap, getElementIdentities } from "@/lib/agent/dom/extractor";
+import { cachedExtractBrowserState, setCachedAxTree } from "@/lib/agent/dom/extraction/state-cache";
 import { generateAccessibilityTree } from "@/lib/agent/dom/ax-tree";
+import type { AXTreeResult } from "@/lib/agent/dom/ax-tree";
 import { executeAction } from "@/lib/agent/tools/executor";
 import { setSecretsResolvedExternally } from "@/lib/agent/secrets";
 import { redactKeyShapes } from "@/lib/agent/key-shape-redact";
@@ -215,18 +217,42 @@ export function handleExtractState(
 ): void {
   try {
     const tabs: TabInfo[] = msg.tabs || [];
-    const state = extractBrowserState(tabs);
+    // Skip-if-unchanged extraction: on a page the mutation signal AND the
+    // fingerprint (plus tabs/url/title/scroll) prove unchanged since the last
+    // extract, the deep-frozen cached snapshot is served WITHOUT a DOM walk
+    // AND without rebuilding the AX tree (the stashed tree is served with
+    // it) — stale observation is deliberate only for style-only/selection/
+    // hover/input-value changes, see `extraction/state-cache.ts`.
+    const state = cachedExtractBrowserState(tabs);
     const depth = clampInt(msg.depth, 15, 1, 50);
     const maxLength = clampInt(msg.maxLength, 50_000, 1, 1_000_000);
     const includeAxTree = msg.includeAxTree ?? true;
-    const axTree = includeAxTree
-      ? generateAccessibilityTree("all", depth, maxLength)
-      : {
-          pageContent: "",
-          viewport: { width: window.innerWidth, height: window.innerHeight },
-        };
-    if (includeAxTree && axTree.error) {
-      log(`AX tree generation warning: ${axTree.error}`);
+    let axTree: AXTreeResult;
+    if (includeAxTree && state.axTree !== undefined) {
+      // Cache hit: the gate proved the DOM unchanged since the stashed tree
+      // was built (same synchronous flow that populated the snapshot), so
+      // this page's accessibility tree already exists — no walk at all.
+      axTree = {
+        pageContent: state.axTree,
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+      };
+    } else {
+      axTree = includeAxTree
+        ? generateAccessibilityTree("all", depth, maxLength)
+        : {
+            pageContent: "",
+            viewport: { width: window.innerWidth, height: window.innerHeight },
+          };
+      if (axTree.error) {
+        log(`AX tree generation warning: ${axTree.error}`);
+      }
+      // Stash the serialized tree with the snapshot so subsequent cache hits
+      // skip the accessibility walk too. A no-tree extract (includeAxTree
+      // false) leaves the stash cleared (a fresh extract cleared it, and a
+      // tree from an older snapshot must never be served for this one).
+      if (includeAxTree) {
+        setCachedAxTree(axTree.pageContent);
+      }
     }
     const { selectorMap: _sm, ...serializable } = state;
     void _sm;

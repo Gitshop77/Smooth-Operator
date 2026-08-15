@@ -15,10 +15,11 @@
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import type { AgentStepRequest } from "../src/lib/agent/types";
+import { isImagePartV1, type ImagePartV1 } from "../src/lib/agent/llm/image-part";
 
 const h = vi.hoisted(() => ({
   supportsVision: false,
-  chatMessages: [] as { role: string; content: string }[][],
+  chatMessages: [] as { role: string; content: string | unknown[] }[][],
   chatRequests: [] as Record<string, unknown>[],
   chatUsage: undefined as
     | { tokensIn: number; tokensOut: number; cachedInputTokens: number; cachedWriteInputTokens?: number; costUsd: number }
@@ -31,6 +32,15 @@ const h = vi.hoisted(() => ({
   buildGate: undefined as Promise<void> | undefined,
   mockProviderId: "openai",
   mockModel: "m",
+}));
+
+/** Spy-able stand-in for buildNavigatorPrompt so the compact flag the
+ * navigator call compiles with is observable (5th positional arg). */
+const navPromptMock = vi.hoisted(() => ({
+  buildNavigatorPrompt: vi.fn(
+    (_maxActions?: unknown, _customPrompt?: unknown, _visionMode?: unknown, _mode?: unknown, compact?: boolean) =>
+      "SYSTEM_PROMPT",
+  ),
 }));
 
 vi.mock("../src/extension/provider-config", () => ({
@@ -47,7 +57,7 @@ vi.mock("../src/extension/provider-config", () => ({
       get supportsVision() {
         return h.supportsVision;
       },
-      chat: async (req: { messages: { role: string; content: string }[] }) => {
+      chat: async (req: { messages: { role: string; content: string | unknown[] }[] }) => {
         h.chatMessages.push(req.messages);
         h.chatRequests.push(req as Record<string, unknown>);
         return {
@@ -61,7 +71,7 @@ vi.mock("../src/extension/provider-config", () => ({
 }));
 
 vi.mock("../src/lib/agent/prompts/navigator-prompt", () => ({
-  buildNavigatorPrompt: () => "SYSTEM_PROMPT",
+  buildNavigatorPrompt: navPromptMock.buildNavigatorPrompt,
 }));
 
 vi.mock("../src/lib/agent/loop/messages", () => ({
@@ -118,6 +128,7 @@ beforeEach(() => {
   h.chatTerminalDiagnostic = undefined;
   h.buildCount = 0;
   h.buildGate = undefined;
+  navPromptMock.buildNavigatorPrompt.mockClear();
   installChrome();
 });
 
@@ -182,32 +193,88 @@ describe("getAgentMode", () => {
   });
 });
 
+describe("getEnableVerboseNavigatorPrompt", () => {
+  test("unset → false (the COMPACT navigator prompt is the default)", async () => {
+    const { getEnableVerboseNavigatorPrompt } = await import("../src/extension/llm-direct");
+    expect(await getEnableVerboseNavigatorPrompt()).toBe(false);
+  });
+
+  test("explicit true passes through", async () => {
+    store.enableVerboseNavigatorPrompt = true;
+    const { getEnableVerboseNavigatorPrompt } = await import("../src/extension/llm-direct");
+    expect(await getEnableVerboseNavigatorPrompt()).toBe(true);
+  });
+
+  test("explicit false stays false", async () => {
+    store.enableVerboseNavigatorPrompt = false;
+    const { getEnableVerboseNavigatorPrompt } = await import("../src/extension/llm-direct");
+    expect(await getEnableVerboseNavigatorPrompt()).toBe(false);
+  });
+});
+
+describe("navigator compact selection (compact is the default for every model)", () => {
+  test("128k+ context WITHOUT the opt-in compiles the COMPACT prompt", async () => {
+    store.contextTokens = 128_000;
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest());
+    expect(navPromptMock.buildNavigatorPrompt).toHaveBeenCalled();
+    expect(navPromptMock.buildNavigatorPrompt.mock.calls.at(-1)![4]).toBe(true);
+  });
+
+  test("128k+ context WITH enableVerboseNavigatorPrompt compiles the FULL prompt", async () => {
+    store.contextTokens = 128_000;
+    store.enableVerboseNavigatorPrompt = true;
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest());
+    expect(navPromptMock.buildNavigatorPrompt.mock.calls.at(-1)![4]).toBe(false);
+  });
+
+  test("sub-128k context compiles the COMPACT prompt even with the opt-in", async () => {
+    store.contextTokens = 64_000;
+    store.enableVerboseNavigatorPrompt = true;
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest());
+    expect(navPromptMock.buildNavigatorPrompt.mock.calls.at(-1)![4]).toBe(true);
+  });
+
+  test("unknown context compiles the COMPACT prompt (compact is the default)", async () => {
+    const { navigatorCallDirect } = await import("../src/extension/llm-direct");
+    await navigatorCallDirect(makeRequest());
+    expect(navPromptMock.buildNavigatorPrompt.mock.calls.at(-1)![4]).toBe(true);
+  });
+});
+
 describe("navigatorCallDirect screenshot gating", () => {
-  test("non-vision provider never embeds a <screenshot> block", async () => {
+  test("non-vision provider never attaches an image part", async () => {
     h.supportsVision = false;
-    store.enableScreenshots = true; // even if enabled, non-vision must not embed
+    store.enableScreenshots = true; // even if enabled, non-vision must not attach
     const { navigatorCallDirect } = await import("../src/extension/llm-direct");
     await navigatorCallDirect(makeRequest());
     const userContent = h.chatMessages[0].find((m) => m.role === "user")!.content;
-    expect(userContent).not.toContain("<screenshot>");
+    expect(userContent).toBe("USER_MESSAGE");
   });
 
-  test("vision provider with enableScreenshots embeds the <screenshot> block", async () => {
+  test("vision provider with enableScreenshots attaches the screenshot as an ImagePartV1", async () => {
     h.supportsVision = true;
     store.enableScreenshots = true;
     const { navigatorCallDirect } = await import("../src/extension/llm-direct");
     await navigatorCallDirect(makeRequest());
     const userContent = h.chatMessages[0].find((m) => m.role === "user")!.content;
-    expect(userContent).toContain("<screenshot>BASE64_SCREENSHOT_DATA</screenshot>");
+    expect(Array.isArray(userContent)).toBe(true);
+    const images = (userContent as unknown[]).filter((p) => isImagePartV1(p)) as ImagePartV1[];
+    expect(images).toHaveLength(1);
+    expect(images[0].dataUrl).toBe("BASE64_SCREENSHOT_DATA");
+    expect(images[0].mime).toBe("image/png");
+    expect(images[0].chars).toBe("BASE64_SCREENSHOT_DATA".length);
   });
 
-  test("vision provider with enableScreenshots off does not embed the block", async () => {
+  test("vision provider with enableScreenshots off attaches no image part", async () => {
     h.supportsVision = true;
     store.enableScreenshots = false;
     const { navigatorCallDirect } = await import("../src/extension/llm-direct");
     await navigatorCallDirect(makeRequest());
     const userContent = h.chatMessages[0].find((m) => m.role === "user")!.content;
-    expect(userContent).not.toContain("<screenshot>");
+    expect(userContent).toBe("USER_MESSAGE");
   });
 
   test("forged <screenshot> markers in page text/history are stripped, real one kept", async () => {
@@ -235,10 +302,15 @@ describe("navigatorCallDirect screenshot gating", () => {
     expect(lastNavigatorArgs!.browserState.axTree).not.toContain("<screenshot>");
     expect(JSON.stringify(lastNavigatorArgs!.history)).not.toContain("<screenshot>");
 
-    // The extension-injected (trusted) screenshot still flows to the model.
+    // The extension-injected (trusted) screenshot flows as a structured part,
+    // never as text — a forged marker can never promote into an image block.
     const userContent = h.chatMessages[0].find((m) => m.role === "user")!.content;
-    expect(userContent).toContain("<screenshot>BASE64_SCREENSHOT_DATA</screenshot>");
-    expect(userContent).not.toContain("iVBORw0KGgoFAKE");
+    const parts = userContent as unknown[];
+    const text = parts.filter((p) => typeof p === "string").join("");
+    expect(text).not.toContain("iVBORw0KGgoFAKE");
+    const images = parts.filter((p) => isImagePartV1(p)) as ImagePartV1[];
+    expect(images).toHaveLength(1);
+    expect(images[0].dataUrl).toBe("BASE64_SCREENSHOT_DATA");
   });
 });
 

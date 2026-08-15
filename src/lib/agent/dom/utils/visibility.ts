@@ -12,6 +12,8 @@
  * style-recalc cost on every visited node.
  */
 
+import { getDomEpoch, isMutationSignalArmed } from "../mutation-signal";
+
 /**
  * Cheap visibility pre-check. Catches `display:none`, detached elements, and
  * most hidden cases WITHOUT forcing a style recalc.
@@ -113,27 +115,50 @@ function isZeroSize(token: string): boolean {
 }
 
 /**
- * Per-extract memo of "this ancestor is fully transparent" (`opacity: 0`).
+ * Cross-step memo of "this ancestor is fully transparent" (`opacity: 0`).
  *
  * `isVisibleFull` walks the ancestor chain of every interactive element, and
  * `getComputedStyle` is the single most expensive operation in the walker.
  * On a page with thousands of siblings under one `<body>`, the same ancestors
- * are re-resolved for every sibling; memoizing per ancestor within one
- * extraction collapses that to one style resolution per ancestor.
+ * are re-resolved for every sibling; memoizing per ancestor collapses that to
+ * one style resolution per ancestor.
  *
- * The memo is only active while a walker is running (`beginVisibilityCache` /
- * `endVisibilityCache`): `isVisibleFull` is also called outside extractions
- * (e.g. `find_text`'s action-time visibility probe), and the DOM can change
- * between those calls, so the cache must never outlive the synchronous walk.
+ * The memo is PERSISTENT across walks, invalidated by the DOM-epoch signal
+ * (`getDomEpoch` in `../mutation-signal`): the epoch-stamped stamp layer
+ * survives between walks and is only rebuilt when a mutation bumped the
+ * epoch. The ACTIVE layer (`transparentAncestorCache`) is non-null only while
+ * a walker is running (`beginVisibilityCache` / `endVisibilityCache`), so
+ * `isFullyTransparent` calls outside extractions (e.g. `find_text`'s
+ * action-time visibility probe) always take the direct computation path and
+ * can never be served stale data — the DOM can change between those calls and
+ * they must not depend on the observer being installed.
  */
 let transparentAncestorCache: WeakMap<HTMLElement, boolean> | null = null;
+let transparentAncestorStamp: { epoch: number; cache: WeakMap<HTMLElement, boolean> } | null = null;
 
-/** Start a memoized walk — call at the beginning of every DOM extraction. */
+/**
+ * Start a memoized walk — call at the beginning of every DOM extraction.
+ *
+ * Persistent mode: reuses the previous walk's memo when the DOM epoch is
+ * unchanged (a static page becomes a 0-cost lookup); rebuilds it only when
+ * the epoch moved. In-walk calls only — out-of-walk `isVisibleFull` callers
+ * must not begin a cache.
+ */
 export function beginVisibilityCache(): void {
-  transparentAncestorCache = new WeakMap<HTMLElement, boolean>();
+  const epoch = getDomEpoch();
+  if (!isMutationSignalArmed() || !transparentAncestorStamp || transparentAncestorStamp.epoch !== epoch) {
+    transparentAncestorStamp = { epoch, cache: new WeakMap<HTMLElement, boolean>() };
+  }
+  transparentAncestorCache = transparentAncestorStamp.cache;
 }
 
-/** End the memoized walk — call when the extraction finishes (even on error). */
+/**
+ * End the memoized walk — call when the extraction finishes (even on error).
+ *
+ * Restores the pre-walk state instead of a hard null: the active layer is
+ * deactivated (out-of-walk callers keep the null-cache path) while the
+ * epoch-stamped persistent layer survives for the next walk's reuse.
+ */
 export function endVisibilityCache(): void {
   transparentAncestorCache = null;
 }
@@ -162,6 +187,57 @@ function isAriaHidden(el: Element): boolean {
 }
 
 /**
+ * True when the element itself or any ancestor is `aria-hidden` — the
+ * ancestor scan `isVisibleFull` performs for every element it classifies.
+ *
+ * Memoized per element in the optional per-walk {@link WeakMap} (owned by
+ * `ReadCache`): the first call walks the whole chain and records every
+ * visited element; later calls — the remaining siblings under the same
+ * ancestors — hit the memo at the first already-computed element, collapsing
+ * the walk from O(sum of chain depths) to O(1) amortized per element. The
+ * memo is per-walk because the ancestor chain is immutable during a walk;
+ * when no memo is supplied (out-of-walk callers) the scan runs directly.
+ *
+ * Crosses shadow-tree boundaries via `parentNode` → `ShadowRoot` → `host`,
+ * mirroring the `isVisibleFull` ancestor walk.
+ */
+function isAriaHiddenInChain(el: Element, memo?: WeakMap<Element, boolean>): boolean {
+  const cached = memo?.get(el);
+  if (cached !== undefined) return cached;
+  // Iterative (not recursive) so a hostile arbitrarily-deep chain can't
+  // overflow the stack. Collect the visited elements so the memo is backfilled
+  // in one pass when the walk completes.
+  const visited: Element[] = [];
+  let current: Element | null = el;
+  let result: boolean | undefined;
+  while (current) {
+    const hit = memo?.get(current);
+    if (hit !== undefined) {
+      result = hit;
+      break;
+    }
+    visited.push(current);
+    if (isAriaHidden(current)) {
+      result = true;
+      break;
+    }
+    const parent: Node | null = current.parentNode;
+    if (parent instanceof ShadowRoot) {
+      current = parent.host;
+    } else if (parent instanceof Element) {
+      current = parent;
+    } else {
+      break; // Document or detached — no more element ancestors.
+    }
+  }
+  if (result === undefined) result = false;
+  if (memo) {
+    for (const n of visited) memo.set(n, result);
+  }
+  return result;
+}
+
+/**
  * Determine whether an element is *actually* visible to the user. Combines
  * computed style (display / visibility / opacity), bounding-box, and
  * `aria-hidden` checks.
@@ -175,17 +251,35 @@ function isAriaHidden(el: Element): boolean {
  * uses `getBoundingClientRect` (more accurate than `offsetWidth/offsetHeight`
  * for rotated/transformed elements). Also folds in the `aria-hidden` check
  * that the historical `ax-tree.ts` was missing inside its `isVisible`. The
- * rect parameter lets callers reuse a rect they already fetched (e.g. the
- * extractor computes it once for the `ExtractedElement` payload and passes it
- * here for the visibility check, avoiding a second layout flush).
+ * rect and style parameters let callers reuse values they already fetched
+ * (e.g. the extractor's `ReadCache` batch-reads both once per element and
+ * passes them here, avoiding a second layout flush and a second style recalc).
  *
  * @param rect optional pre-computed bounding rect; if omitted, a fresh
  * `getBoundingClientRect()` is called.
+ * @param style optional pre-computed computed style; if omitted, a fresh
+ * `window.getComputedStyle()` is called.
+ * @param ariaHiddenMemo optional per-walk memo (owned by `ReadCache`) for
+ * the `aria-hidden` ancestor scan; when supplied, the scan result is cached
+ * per element for the rest of the walk.
  */
-export function isVisibleFull(el: HTMLElement, rect?: DOMRect): boolean {
-  const style = window.getComputedStyle(el);
-  if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return false;
-  if (parseFloat(style.opacity) === 0) return false;
+export function isVisibleFull(
+  el: HTMLElement,
+  rect?: DOMRect,
+  style?: CSSStyleDeclaration,
+  ariaHiddenMemo?: WeakMap<Element, boolean>,
+): boolean {
+  const s = style ?? window.getComputedStyle(el);
+  if (s.display === "none" || s.visibility === "hidden" || s.visibility === "collapse") return false;
+  if (parseFloat(s.opacity) === 0) return false;
+  // Zero-size check first: every check below is conjunctive, so the outcome is
+  // identical regardless of order — and a zero-size element (the common hidden
+  // case in jsdom, and the cheapest to prove hidden in a real browser)
+  // short-circuits before the ancestor style walk. Callers that batch their
+  // reads can therefore serve a hidden element without touching the style
+  // system again.
+  const r = rect ?? el.getBoundingClientRect();
+  if (r.width === 0 && r.height === 0) return false;
  // `opacity` is NOT an inherited property, so a child of an `opacity:0`
  // ancestor computes its own opacity as `"1"` even though it is visually
  // invisible. Walk the ancestor chain (up to the document root) and treat the
@@ -202,13 +296,11 @@ export function isVisibleFull(el: HTMLElement, rect?: DOMRect): boolean {
     }
     if (ancestor instanceof Element) {
       if (isFullyTransparent(ancestor as HTMLElement)) return false;
-      if (isAriaHidden(ancestor)) return false;
+      if (isAriaHiddenInChain(ancestor as Element, ariaHiddenMemo)) return false;
     }
     ancestor = ancestor.parentNode;
   }
-  const r = rect ?? el.getBoundingClientRect();
-  if (r.width === 0 && r.height === 0) return false;
-  if (isAriaHidden(el)) return false;
+  if (isAriaHiddenInChain(el, ariaHiddenMemo)) return false;
  // `aria-hidden` is commonly set on an ancestor to prune a decorative subtree
  // from the accessibility tree while keeping it visible. An element inside such
  // a subtree is not a legitimate interaction target for an AT-driven agent, so
@@ -221,9 +313,9 @@ export function isVisibleFull(el: HTMLElement, rect?: DOMRect): boolean {
  // `inset(0)`, `polygon(...)`) must NOT be treated as hidden, or legitimately
  // visible, clickable elements are wrongly pruned and become phantom/missing
  // targets. So we only fail closed on clips that collapse to zero area.
-  const clip = style.clip;
+  const clip = s.clip;
   if (clip && clip !== "auto" && clipCollapsesToZero(clip)) return false;
-  const clipPath = style.clipPath;
+  const clipPath = s.clipPath;
   if (clipPath && clipPath !== "none" && clipPath !== "auto" && clipCollapsesToZero(clipPath)) return false;
   return true;
 }

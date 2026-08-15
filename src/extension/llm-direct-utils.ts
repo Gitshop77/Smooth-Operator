@@ -74,9 +74,30 @@ export function stripScreenshotMarkers(text: string): string {
  * evaluation/memory/goal summaries of a malicious page) that may contain an
  * injected `<screenshot>` marker. Returns a stripped COPY; the caller's history
  * array is never mutated.
+ *
+ * The copied (stripped) history is memoized by the input array's identity so a
+ * step that re-renders the same history — the loop passes the same
+ * `state.navigatorHistory` reference every step — does not re-scan every field
+ * of every item. The loop MUTATES that array in place (`.push` per step;
+ * compaction does `length = 0` + `push(...keptRecent)`), so an identity-keyed
+ * cache would silently go stale. Entries therefore also record the length and
+ * first-item identity observed at memo time and are reused only when both still
+ * match — push changes the length, compaction replaces the head, and the
+ * WeakMap key keeps the cache bounded + GC-friendly.
  */
+interface StrippedHistoryEntry {
+  length: number;
+  first: HistoryItem | undefined;
+  stripped: HistoryItem[];
+}
+const strippedHistoryCache = new WeakMap<HistoryItem[], StrippedHistoryEntry>();
+
 export function stripHistoryScreenshotMarkers(history: HistoryItem[]): HistoryItem[] {
-  return history.map((h) => ({
+  const cached = strippedHistoryCache.get(history);
+  if (cached !== undefined && cached.length === history.length && cached.first === history[0]) {
+    return cached.stripped;
+  }
+  const stripped = history.map((h) => ({
     ...h,
     evaluation: stripScreenshotMarkers(h.evaluation),
     memory: stripScreenshotMarkers(h.memory),
@@ -89,4 +110,6 @@ export function stripHistoryScreenshotMarkers(history: HistoryItem[]): HistoryIt
         : r.extractedContent,
     })),
   }));
+  strippedHistoryCache.set(history, { length: history.length, first: history[0], stripped });
+  return stripped;
 }

@@ -20,6 +20,7 @@ import {
   implicitRole,
   fnv1aHash,
 } from "./element-info-utils";
+import { getDomEpoch, isMutationSignalArmed } from "../mutation-signal";
 
 // ─── Configuration constants ────────────────────────────────────────────────
 
@@ -143,16 +144,30 @@ export function elementIdentity(el: HTMLElement, attrs?: Record<string, string>)
 const uidMap = new WeakMap<HTMLElement, string>();
 let uidCounter = 0;
 
-let nthOfTypeCache: WeakMap<Element, Map<Element, number>> = new WeakMap();
+/**
+ * Cross-step memo of per-parent nth-of-type indices, stamped with the DOM
+ * epoch: on an unchanged page the next extraction reuses the indices (the
+ * sibling-order scan is O(children) per parent on first touch only); any DOM
+ * mutation bumps the epoch and rebuilds the memo.
+ */
+let nthOfTypeCache: { epoch: number; map: WeakMap<Element, Map<Element, number>> } = {
+  epoch: -1,
+  map: new WeakMap(),
+};
 
 export function resetHashCaches(): void {
-  nthOfTypeCache = new WeakMap();
+  nthOfTypeCache = { epoch: -1, map: new WeakMap() };
 }
 
 function nthOfTypeIndex(el: Element): number {
   const parent = el.parentElement;
   if (!parent) return 1;
-  let perParent = nthOfTypeCache.get(parent);
+  const epoch = getDomEpoch();
+  if (!isMutationSignalArmed() || nthOfTypeCache.epoch !== epoch) {
+    nthOfTypeCache = { epoch, map: new WeakMap() };
+  }
+  const map = nthOfTypeCache.map;
+  let perParent = map.get(parent);
   if (!perParent) {
     perParent = new Map<Element, number>();
     const counts = new Map<string, number>();
@@ -167,7 +182,7 @@ function nthOfTypeIndex(el: Element): number {
       counts.set(tag, next);
       perParent.set(sib as Element, next);
     }
-    nthOfTypeCache.set(parent, perParent);
+    map.set(parent, perParent);
   }
   return perParent.get(el) ?? 1;
 }
@@ -180,8 +195,17 @@ function collisionFreeId(el: HTMLElement): string {
   return id;
 }
 
-export function hashElement(el: HTMLElement, attrs?: Record<string, string>): string {
-  return fnv1aHash(elementIdentity(el, attrs), DOM_CONFIG.fnvOffsetBasis, DOM_CONFIG.fnvPrime);
+/**
+ * Stable FNV-1a hash of an element's identity string (see {@link elementIdentity}).
+ *
+ * `identity` is an optional precomputed identity: the walker computes
+ * `elementIdentity(el, attrs)` once per element and threads it into both this
+ * hash and the per-index `elementIdentities` record instead of paying for the
+ * identity derivation twice. External callers may omit it — it is then
+ * computed internally with the exact same result.
+ */
+export function hashElement(el: HTMLElement, attrs?: Record<string, string>, identity?: string): string {
+  return fnv1aHash(identity ?? elementIdentity(el, attrs), DOM_CONFIG.fnvOffsetBasis, DOM_CONFIG.fnvPrime);
 }
 
 // ─── Fallback identity matching ────────────────────────────────────────────

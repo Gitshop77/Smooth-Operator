@@ -10,6 +10,7 @@
  */
 
 import type { HistoryItem } from "./types";
+import type { ImagePartV1 } from "./llm/image-part";
 import { extractJson } from "./output-parser";
 import { estimateCost } from "./llm/pricing";
 import { redactKeyLeak } from "./redact-shared";
@@ -99,8 +100,15 @@ export async function judgeTask(args: JudgeTaskArgs): Promise<JudgementResult | 
   // A failure here surfaces as a typed `PromptBudgetExceededError` and is
   // classified by the caller exactly like a cost-cap stop.
   assertCompiledPromptWithinProfileV1("judge", "judge", compiled.messages);
-  const systemPrompt = compiled.messages[0]?.content ?? "";
-  const userMessage = compiled.messages[1]?.content ?? "";
+  // The compiled messages are plain text for the judge (no image parts), but
+  // `ChatMessage.content` is `string | Array<string | ImagePartV1>` — branch
+  // so a widened content type can never leak an object into llmCall.
+  const messageText = (content: string | Array<string | ImagePartV1>): string =>
+    typeof content === "string"
+      ? content
+      : content.filter((part): part is string => typeof part === "string").join("");
+  const systemPrompt = messageText(compiled.messages[0]?.content ?? "");
+  const userMessage = messageText(compiled.messages[1]?.content ?? "");
 
   let raw: string;
   let llmUsage: { model?: string; tokensIn?: number; tokensOut?: number; reasoningTokens?: number; cachedInputTokens?: number; cachedWriteInputTokens?: number; costUsd?: number } | undefined;

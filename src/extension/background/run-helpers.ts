@@ -2,7 +2,6 @@ import type { LoopDeps } from "@/lib/agent/loop/types";
 import type { ActionResult, AgentAction, BrowserState, LogEvent, TabInfo } from "@/lib/agent/types";
 import type { AgentMode } from "@/lib/agent/modes";
 import { RunBuilder, saveRun } from "@/lib/agent/run-history";
-import { stripUrlFragment } from "./vision";
 import { makeAntiBotHooks } from "./antibot";
 import { captureTabScreenshot } from "./screenshots";
 import {
@@ -33,6 +32,8 @@ import {
 } from "./tab-manager";
 import { navigatorCallDirect, plannerCallDirect, summarizeCallDirect } from "../llm-direct";
 import type { VisionAssistant } from "../vision-assistant";
+import { rescaleDetectionsToCapture } from "../vision-assistant/box-parser";
+import { VLM_DECODE_MAX_EDGE } from "../vision-assistant/constants";
 import { broadcastSupplementalRunEvent } from "./run-event-broadcast";
 import { resolveModel } from "../provider-config";
 import {
@@ -41,7 +42,6 @@ import {
   visionElementsCache,
   getVisionElementRect,
   isVisionCacheFresh,
-  getVisionCacheUrl,
   setVisionCacheUrl,
   setVisionCacheFingerprint,
   clearVisionCache,
@@ -320,7 +320,7 @@ export async function handleDetectVisualRequest(
     if (!tabId) {
       return { ok: false, error: "no active run — cannot determine agent tab for screenshot" };
     }
-    const screenshotDataUrl = await captureTabScreenshot(tabId, { signal });
+    const screenshotDataUrl = (await captureTabScreenshot(tabId, { signal })).dataUrl;
     assertAuthorized?.();
     // Prefer the caller-supplied signal; fall back to the active run's signal
     // so a user STOP aborts an in-flight decode even when the request came
@@ -386,6 +386,35 @@ export async function handleDetectVisualRequest(
   }
 }
 
+// Merge the cached [vN] vision rects into a freshly-extracted DOM state.
+// Shared by the adaptive warm-cache branch and the always-on reuse branch:
+// the cached rects are converted back into vision elements and merged with
+// the DOM elements exactly like a fresh detect's output would be.
+async function mergeCachedVisionRects(domState: BrowserState): Promise<void> {
+  const { mergeDetections, renderMergedElementsText } = await loadVisionAssistant();
+  const visionEntries = Array.from(visionElementsCache.entries()).map(([id, data]) => ({
+    index: -1,
+    tag: "vision_element",
+    text: data.label,
+    attributes: { "data-vision-label": data.label },
+    hash: `vision_${id}`,
+    rect: { x: data.x, y: data.y, width: data.width, height: data.height },
+    source: "vision" as const,
+    pixelRect: { x: data.x, y: data.y, width: data.width, height: data.height },
+    indexStr: `[${id}]`,
+    visionId: id,
+  }));
+  const merged = mergeDetections(domState.elements, [], 1);
+  for (const entry of visionEntries) {
+    if (!merged.some((m) => m.visionId === entry.visionId)) {
+      merged.push(entry);
+    }
+  }
+  domState.elements = merged as unknown as typeof domState.elements;
+  domState.elementsText = renderMergedElementsText(merged);
+  domState.newElementCount += visionEntries.length;
+}
+
 export async function extractStateForRun(
   fallbackTabId: number,
   tabs: TabInfo[],
@@ -446,9 +475,20 @@ export async function extractStateForRun(
     screenshotImageTokens <= Math.floor(budgetProfile.maxInputTokens * 0.25);
   const visionMode = (storedVisionMode as string) ||
     (enableLocalVision === true ? "always" : "adaptive");
+  // The main-LLM screenshot ships ONLY on explicit one-shot requests
+  // (inspect_visual → includeScreenshotOnce) — never automatically on
+  // `visionMode === "always"` when the model is vision-capable: with the
+  // local VLM ready, the always-on branch below grounds the agent locally
+  // (capture + detect + merge boxes), so per-step image tokens on the main
+  // channel drop to zero. The legacy "always" disjunct survives ONLY while
+  // the VLM cannot ground yet (disabled or init pending): dropping it then
+  // would throw the run into the always-on branch's dead-VLM fallback —
+  // extractStateFromTab(..., false, ...) — silently degrading a
+  // screenshot-capable run to DOM-only with NO pixels at all.
+  const vlmReady = globalVisionAssistant?.isReady === true;
   const includeScreenshot = mainModelVision
     && Boolean(storedEnableScreenshots ?? true)
-    && (visionMode === "always" || options?.includeScreenshotOnce === true)
+    && ((visionMode === "always" && !vlmReady) || options?.includeScreenshotOnce === true)
     && screenshotAffordable;
   const effectiveTextOnly = !mainModelVision || !includeScreenshot;
   const useAlwaysOnVision = visionMode === "always" && effectiveTextOnly;
@@ -459,38 +499,22 @@ export async function extractStateForRun(
       const domState = await extractStateFromTab(tabId, tabs, false, signal);
       const dpr = domState.devicePixelRatio ?? 1;
       lastKnownDpr = dpr;
-      if (!getVisionCacheUrl() || (domState.url && stripUrlFragment(domState.url) !== stripUrlFragment(getVisionCacheUrl()))) {
+      if (!(await isVisionCacheFresh(tabId))) {
+        // URL moved or the DOM fingerprint changed since capture: the cached
+        // rects are stale — drop them and re-detect instead of serving stale
+        // [vN] boxes in the observation.
         clearVisionCache();
       } else {
-        // NOTE: deliberately does NOT re-stamp the cache fingerprint here.
-        // The cached rects were captured when the fingerprint was set (in
-        // handleDetectVisualRequest / the always-on path below); `isVisionCacheFresh`
-        // compares the CURRENT page fingerprint against that capture-time value.
-        // Re-stamping with this extraction's EXTRACT_STATE fingerprint would
-        // re-baseline the freshness check to "now" and hide DOM changes since
-        // the rects were captured.
-        const { mergeDetections, renderMergedElementsText } = await loadVisionAssistant();
-        const visionEntries = Array.from(visionElementsCache.entries()).map(([id, data]) => ({
-          index: -1,
-          tag: "vision_element",
-          text: data.label,
-          attributes: { "data-vision-label": data.label },
-          hash: `vision_${id}`,
-          rect: { x: data.x, y: data.y, width: data.width, height: data.height },
-          source: "vision" as const,
-          pixelRect: { x: data.x, y: data.y, width: data.width, height: data.height },
-          indexStr: `[${id}]`,
-          visionId: id,
-        }));
-        const merged = mergeDetections(domState.elements, [], 1);
-        for (const entry of visionEntries) {
-          if (!merged.some(m => m.visionId === entry.visionId)) {
-            merged.push(entry);
-          }
-        }
-        domState.elements = merged as unknown as typeof domState.elements;
-        domState.elementsText = renderMergedElementsText(merged);
-        domState.newElementCount += visionEntries.length;
+        // Re-stamp the fingerprint: `isVisionCacheFresh` has just confirmed
+        // the CURRENT page fingerprint matches the one the cached rects were
+        // captured under, so pinning the stored fingerprint to this
+        // extraction's fingerprint keeps the freshness gate active for future
+        // steps. Staleness caveat: viewport resize/scroll between steps
+        // changes the cached [vN] pixel rects even with an unchanged DOM
+        // fingerprint — accepted, because the click path re-validates via
+        // `isVisionCacheFresh` (message-handlers.ts) before any CDP click.
+        setVisionCacheFingerprint((domState as { fingerprint?: string }).fingerprint ?? "");
+        await mergeCachedVisionRects(domState);
       }
       return domState;
     }
@@ -526,6 +550,23 @@ export async function extractStateForRun(
     return domStateNoVision;
   }
 
+  // Cache reuse needs no vision assistant: when the page URL AND fingerprint
+  // still match capture time (static page), merge the cached [vN] rects into
+  // the state instead of re-detecting every step. Vision re-detects only on
+  // meaningful change (URL moved or DOM fingerprint changed).
+  if (await isVisionCacheFresh(tabId)) {
+    try {
+      const domState = await extractStateFromTab(tabId, tabs, false, signal);
+      lastKnownDpr = domState.devicePixelRatio ?? 1;
+      await mergeCachedVisionRects(domState);
+      return domState;
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      void safeLog("warn", "[vision-assistant] cache reuse failed, falling back to DOM-only:", e);
+      return extractStateFromTab(tabId, tabs, false, signal);
+    }
+  }
+
   ensureVisionAssistantInit();
   const va = globalVisionAssistant;
   if (!va?.isReady) {
@@ -534,11 +575,15 @@ export async function extractStateForRun(
 
   try {
     const { mergeDetections, renderMergedElementsText } = await loadVisionAssistant();
-    const screenshotDataUrl = await captureTabScreenshot(tabId);
+    // Pre-resize the capture to the VLM decode edge so `RawImage.read` inside
+    // detect() never decodes a full-resolution viewport JPEG (e.g. 2560×1600):
+    // the pinned LFM2.5-VL-450M processor squashes every input ≥512 to a
+    // single 512×512 tile anyway, so this is a pure decode/base64 win.
+    const capture = await captureTabScreenshot(tabId, { resize: { whLargest: VLM_DECODE_MAX_EDGE } });
     checkAbort();
     const [domState, visionDetections] = await Promise.all([
       extractStateFromTab(tabId, tabs, false, signal),
-      va.detect(screenshotDataUrl, signal).catch((e: unknown) => {
+      va.detect(capture.dataUrl, signal).catch((e: unknown) => {
         if (signal?.aborted) throw e;
         void safeLog("warn", "[vision] detect failed:", e);
         return [];
@@ -546,7 +591,13 @@ export async function extractStateForRun(
     ]);
     const dpr = domState.devicePixelRatio ?? 1;
     lastKnownDpr = dpr;
-    const merged = mergeDetections(domState.elements, visionDetections, dpr);
+    // Because the capture was pre-resized, the model's boxes come back in the
+    // RESIZED image's pixel space — not full-viewport device pixels. Scale
+    // them back to the capture space BEFORE mergeDetections (whose DPR
+    // division assumes full-viewport device pixels) or every vision-guided
+    // click mislocalizes.
+    const rescaled = rescaleDetectionsToCapture(visionDetections, capture);
+    const merged = mergeDetections(domState.elements, rescaled, dpr);
     const visionNewCount = merged.filter((m) => m.source === "vision").length;
     domState.elements = merged as unknown as typeof domState.elements;
     domState.elementsText = renderMergedElementsText(merged);
@@ -624,6 +675,16 @@ export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
     mode,
     callbacks,
     config,
+    // Budget-fitted screenshot resize: the loop enforces its context-derived
+    // screenshot cap by re-encoding the frame down to `opts.maxBytes`
+    // (iterative quality down via normalizeScreenshotToViewport — the full
+    // viewport field of view is preserved). Lazy imports keep the hot
+    // extractState path free of the screenshot module.
+    normalizeScreenshot: async (dataUrl, opts) => {
+      const quality = await getScreenshotQuality();
+      const { normalizeScreenshotToViewport } = await import("./screenshots");
+      return normalizeScreenshotToViewport(dataUrl, quality, opts);
+    },
     extractState: async (tabs, options) => {
       throwIfOriginUnauthorized();
       const state = await extractStateForRun(fallbackTabId, tabs, controller.signal, dispatchToken, config.contextTokens, options);

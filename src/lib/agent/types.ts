@@ -282,9 +282,15 @@ export interface AgentStepRequest {
   /** Loop-warning text from the previous step's loop detector (prepended to
  * the next nav request so the navigator sees the repetition nudge). */
   loopWarning?: string;
-  /** Compacted-memory block from history compaction (replaces older history
- * items with a summarized block when the threshold fires). */
+/** Compacted-memory block from history compaction (replaces older history
+  * items with a summarized block when the threshold fires). */
   compactedMemory?: string;
+  /** Capability-gated action names for this step's PROMPT LISTING ONLY: the
+  * system prompt renders the core actions + this set (seeded from the run's
+  * capability policy + actions already executed). The executor's Zod schema
+  * is unchanged — the agent can still emit any action; the listing guides it.
+  * Omitted → the full action set is listed (pre-gating behavior). */
+  enabledActions?: ReadonlySet<string>;
 }
 
 /** LLM token usage for a single API call. */

@@ -14,17 +14,19 @@
  */
 
 import type { LLMProvider, LLMRequest, LLMResponse, ChatMessage } from "../lib/agent/llm/provider";
+import { type ImagePartV1, mimeFromDataUrl } from "../lib/agent/llm/image-part";
 import {
   compileNavigatorPromptV1,
   compilePlannerPromptV1,
 } from "../lib/agent/prompts/prompt-compiler";
+import { clearPromptMemo } from "../lib/agent/prompts/prompt-memo";
 import {
   assertCompiledPromptWithinContextBudgetV1,
   assertCompiledPromptWithinProfileV1,
-  assertPromptWithinContextBudgetV1,
-  assertPromptWithinProfileV1,
   promptBudgetProfileForContextV1,
   PROMPT_BUDGET_PROFILES_V1,
+  PromptBudgetExceededError,
+  type PromptMessageBodyV1,
 } from "../lib/agent/prompts/prompt-token-budget";
 import { AgentOutputSchema, PlannerOutputSchema } from "../lib/agent/tools/schema";
 import { getFormatInstructions } from "../lib/agent/tools/registry";
@@ -141,6 +143,22 @@ const settingCache = new Map<string, unknown>();
 /** Provider-config storage keys whose change must invalidate the cached provider. */
 const PROVIDER_CONFIG_KEYS = ["provider", "model", "baseUrl", "resourceName", "apiKey", "provenance"];
 
+/** Storage keys that feed the compiled navigator/planner system prompt or its
+ * cache descriptor (custom prompts, vision mode, screenshots, agent mode,
+ * effective context, max actions). Any change must drop the prompt memo so the
+ * next compile is built from CURRENT settings. */
+const PROMPT_MEMO_INVALIDATION_KEYS = [
+  "customNavigatorPrompt",
+  "customPlannerPrompt",
+  "visionMode",
+  "enableLocalVision",
+  "enableScreenshots",
+  "agentMode",
+  "contextTokens",
+  "enableVerboseNavigatorPrompt",
+  "maxActions",
+];
+
 if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
   chrome.storage.onChanged.addListener((changes, _area) => {
     // `forceReasoning` is read by buildProvider to patch supportsReasoning, so
@@ -154,6 +172,7 @@ if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
       cachedProviderConfig = null;
       configEpoch++;
     }
+    if (PROMPT_MEMO_INVALIDATION_KEYS.some((k) => k in changes)) clearPromptMemo();
     if (changes.customNavigatorPrompt) settingCache.delete("customNavigatorPrompt");
     if (changes.customPlannerPrompt) settingCache.delete("customPlannerPrompt");
     if (changes.visionMode || changes.enableLocalVision) settingCache.delete("visionMode");
@@ -163,6 +182,7 @@ if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
     if (changes.reasoningBudget) settingCache.delete("reasoningBudget");
     if (changes.forceReasoning) settingCache.delete("forceReasoning");
     if (changes.contextTokens) settingCache.delete("contextTokens");
+    if (changes.enableVerboseNavigatorPrompt) settingCache.delete("enableVerboseNavigatorPrompt");
   });
 }
 
@@ -207,6 +227,14 @@ export const getVisionMode = cachedSetting("visionMode", async () => {
 const getEnableScreenshots = cachedSetting("enableScreenshots", async () => {
   const { enableScreenshots } = await chrome.storage.local.get("enableScreenshots");
   return (enableScreenshots as boolean | undefined) ?? true;
+});
+
+/** Memoized `enableVerboseNavigatorPrompt` setting — explicit opt-in to the
+ * FULL (verbose) navigator system prompt for ≥128k models. Default false:
+ * every model gets the COMPACT prompt unless the user opts in. */
+export const getEnableVerboseNavigatorPrompt = cachedSetting("enableVerboseNavigatorPrompt", async () => {
+  const { enableVerboseNavigatorPrompt } = await chrome.storage.local.get("enableVerboseNavigatorPrompt");
+  return enableVerboseNavigatorPrompt === true;
 });
 
 /**
@@ -432,7 +460,7 @@ export async function getEffectiveContextTokens(): Promise<number | undefined> {
 export function assertPromptBudget(
   kind: "navigator" | "planner" | "compaction" | "judge",
   label: string,
-  messages: readonly { content: string }[],
+  messages: readonly { content: PromptMessageBodyV1 }[],
   effectiveContextTokens: number | undefined,
   opts?: { imageChars?: number; imageTokens?: number },
 ): void {
@@ -447,28 +475,67 @@ export function assertPromptBudget(
   }
 }
 
+/**
+ * Sum the chars a message body contributes to the wire payload: text parts
+ * count verbatim; a structured image part counts its `chars` (the base64 it
+ * occupies) — NOT its bytes as "text". Legacy string bodies count verbatim.
+ */
+function contentChars(content: PromptMessageBodyV1): number {
+  if (typeof content === "string") return content.length;
+  let n = 0;
+  for (const part of content) {
+    n += typeof part === "string" ? part.length : part.chars;
+  }
+  return n;
+}
+
 function assertPromptBudgetWithImage(
   kind: "navigator" | "planner" | "compaction" | "judge",
   label: string,
-  messages: readonly { content: string }[],
+  messages: readonly { content: PromptMessageBodyV1 }[],
   effectiveContextTokens: number | undefined,
   imageChars: number,
   imageTokens: number,
 ): void {
-  const combined = messages.map((m) => m.content).join("\n");
+  // Char sum replaces the old `messages.map((m) => m.content).join("\n")` —
+  // branch on `string | ImagePartV1[]` so array bodies count their parts
+  // instead of joining into "[object Object]".
+  let combined = 0;
+  for (const m of messages) combined += contentChars(m.content);
+  combined += Math.max(0, messages.length - 1); // the `\n` framing of the old join
   const profile = effectiveContextTokens !== undefined
     ? promptBudgetProfileForContextV1(kind, effectiveContextTokens)
     : PROMPT_BUDGET_PROFILES_V1[kind];
   const clampedImageTokens = Math.min(imageTokens, Math.floor(profile.maxInputTokens * 0.25));
-  // Subtract the base64 bytes (which the model never sees as text) and add the
+  // Subtract the base64 chars (which the model never sees as text) and add the
   // flat token allowance (×2 to approximate the chars/token ratio used by the
   // other budget checks).
-  const adjustedChars = Math.max(0, combined.length - imageChars + clampedImageTokens * 2);
+  const adjustedChars = Math.max(0, combined - imageChars + clampedImageTokens * 2);
+  // The old path measured `" ".repeat(adjustedChars)` — a tens-of-KB
+  // allocation per step whose UTF-8 byte length is exactly `adjustedChars`.
+  // Assert against the length directly instead of allocating the string.
   if (effectiveContextTokens !== undefined) {
-    assertPromptWithinContextBudgetV1(kind, label, " ".repeat(adjustedChars), effectiveContextTokens);
-  } else {
-    assertPromptWithinProfileV1(kind, label, " ".repeat(adjustedChars));
+    const estimate = Math.ceil(adjustedChars / 2);
+    if (estimate > profile.maxInputTokens) {
+      throw new PromptBudgetExceededError(label, estimate, profile.maxInputTokens);
+    }
+  } else if (adjustedChars > profile.maxInputTokens) {
+    throw new PromptBudgetExceededError(label, adjustedChars, profile.maxInputTokens);
   }
+}
+
+/**
+ * Compact navigator prompt selection. The COMPACT prompt is the DEFAULT for
+ * every model; the full (verbose) prompt is used only when the effective
+ * context is a KNOWN ≥128k AND the user explicitly opted in via
+ * `enableVerboseNavigatorPrompt`. Unknown contexts (no catalog entry, no
+ * override) also get the compact prompt.
+ */
+export function selectNavigatorCompact(
+  effectiveContextTokens: number | undefined,
+  verboseOptIn: boolean,
+): boolean {
+  return !(effectiveContextTokens !== undefined && effectiveContextTokens >= 128_000 && verboseOptIn);
 }
 
 /**
@@ -567,6 +634,10 @@ export async function navigatorCallDirect(
   onProgress?: import("@/lib/agent/llm/provider").LLMRequest["onProgress"],
 ): Promise<DirectCallResult> {
  // Cap elementsText (same abuse-prevention as the Next.js route).
+ // MAX_ELEMENTS_CHARS is DERIVED from the observation-budget base
+ // (prompt-token-budget.ts); the loop truncates elementsText to its per-step
+ // derived budget (≤ that base) before this point, so this capText call is a
+ // fail-closed backstop — unreachable by construction.
  // Strip any `<screenshot>…</screenshot>` markers from the UNTRUSTED page text
  // BEFORE it is composed into the model input — see `stripScreenshotMarkers`.
  // The real screenshot is injected later from `req.browserState.screenshot`, so
@@ -575,7 +646,9 @@ export async function navigatorCallDirect(
     capText(req.browserState.elementsText, MAX_ELEMENTS_CHARS),
   );
 
- // Cap axTree symmetrically to elementsText. On large pages the AX tree can be
+ // Cap axTree symmetrically to elementsText (same derived, unreachable-by-
+ // construction backstop: the loop truncates axTree to its per-step derived
+ // budget first). On large pages the AX tree can be
  // very large and is re-sent on every navigator step; leaving it uncapped both
  // inflates per-step input tokens and risks message-size limits. The truncation
  // marker tells the model data was dropped. Also strip forged screenshot markers.
@@ -606,13 +679,14 @@ export async function navigatorCallDirect(
  // load custom navigator prompt override (cached, invalidated on storage change).
  // These reads are independent — fetch them in parallel so a cache miss
  // doesn't serialize extra chrome.storage.local.get round-trips per step.
-  const [customNavigatorPrompt, visionMode, agentMode, reasoningConfig, provider, effectiveContextTokens] = await Promise.all([
+  const [customNavigatorPrompt, visionMode, agentMode, reasoningConfig, provider, effectiveContextTokens, verboseNavigatorPrompt] = await Promise.all([
     getCustomNavigatorPrompt(),
     getVisionMode(),
     getAgentMode(),
     resolveReasoningConfig(),
     raceWithAbort(getProvider(), signal),
     getEffectiveContextTokens(),
+    getEnableVerboseNavigatorPrompt(),
   ]);
  // Embed screenshot marker ONLY for vision-capable models. Text-only models
  // would either error (HTTP 400 from the API) or waste tokens processing a
@@ -620,39 +694,52 @@ export async function navigatorCallDirect(
  // flag is set per-MODEL via the models.dev catalog lookup in buildProvider().
  // Also check the user's explicit "enableScreenshots" setting. It defaults
  // off because DOM + viewport AX are sufficient for most pages.
-  const enableScreenshots = provider.supportsVision && (await getEnableScreenshots());
+const enableScreenshots = provider.supportsVision && (await getEnableScreenshots());
   const screenshot = enableScreenshots ? req.browserState.screenshot : undefined;
- // The screenshot is raw, page-rendered pixels — it is NOT subject to the text
- // sanitizer (which only inspects DOM/AX text) and must be treated as untrusted
- // page data, exactly like <untrusted_page_data>. The navigator prompt already
- // tells the model the screenshot is untrusted evidence, never an instruction.
- //
- // Each navigator step is a stateless, two-message call with no prior image
- // retained in the outgoing messages, so the screenshot must be sent on every
- // step. Eliding an unchanged screenshot would leave the vision model with zero
- // pixels and a note referencing an image it was never shown. The screenshot
- // stays inside the untrusted wrapper exactly as before.
- // Roomy non-structured providers receive the canonical JSON schema as an
- // additional contract. Low-context models rely on the complete action/output
- // contract already embedded in the compact prompt; duplicating the large Zod
- // schema would crowd out even a tiny page observation.
+  // The screenshot is raw, page-rendered pixels — it is NOT subject to the text
+  // sanitizer (which only inspects DOM/AX text) and must be treated as untrusted
+  // page data, exactly like <untrusted_page_data>. The navigator prompt already
+  // tells the model the screenshot is untrusted evidence, never an instruction.
+  //
+  // Each navigator step is a stateless, two-message call with no prior image
+  // retained in the outgoing messages, so the screenshot must be sent on every
+  // step. Eliding an unchanged screenshot would leave the vision model with zero
+  // pixels and a note referencing an image it was never shown.
+  //
+  // The screenshot now travels as a STRUCTURED image part (`ImagePartV1`) — a
+  // separate content part appended after the sections-derived text, never a
+  // `<screenshot>` marker interpolated into the user text. The base64 lives only
+  // in the part: protocol adapters emit it as a provider-native image block
+  // without any regex scan, so a forged marker in untrusted page text can never
+  // be promoted into an image block (stripScreenshotMarkers above remains the
+  // defense for legacy string content).
+  const screenshotPart: ImagePartV1 | undefined = screenshot
+    ? { type: "image", dataUrl: screenshot, mime: mimeFromDataUrl(screenshot), chars: screenshot.length }
+    : undefined;
+  // Roomy non-structured providers receive the canonical JSON schema as an
+  // additional contract. Low-context models rely on the complete action/output
+  // contract already embedded in the compact prompt; duplicating the large Zod
+  // schema would crowd out even a tiny page observation.
   const compiled = await compileNavigatorPromptV1({
     maxActions: MAX_ACTIONS,
     customPrompt: customNavigatorPrompt,
     visionMode,
     mode: agentMode,
     user: navigatorUser,
-    // Sub-128k models get the COMPACT system prompt: the same security/schema
-    // blocks with prose compressed, so the derived input budget has ~3× more
-    // room for the observation. 128k+ models keep the full prompt.
-    compact: effectiveContextTokens !== undefined && effectiveContextTokens < 128_000,
+    // The COMPACT system prompt is the DEFAULT for every model: the same
+    // security/schema blocks with prose compressed, so the derived input
+    // budget has ~3× more room for the observation. Only a ≥128k model with
+    // the explicit `enableVerboseNavigatorPrompt` opt-in keeps the full prompt.
+    compact: selectNavigatorCompact(effectiveContextTokens, verboseNavigatorPrompt),
     systemSuffix: shouldInlineFormatInstructions(
       provider.supportsStructuredOutput,
       effectiveContextTokens,
     ) ? "\n\n" + getFormatInstructions(AgentOutputSchema) : "",
-    userSuffix: screenshot
-      ? `\n\n<untrusted_page_data><screenshot>${screenshot}</screenshot></untrusted_page_data>`
-      : "",
+    screenshot: screenshotPart,
+    // Capability-gated action listing (core + used + policy-allowed): shrinks
+    // the action-set block from ~5.1KB to ~25 lines while the executor's
+    // schema stays untouched.
+    enabledActions: req.enabledActions,
   });
   const messages: ChatMessage[] = compiled.messages;
   // Model-context-aware budget guard: when the model's effective context is
@@ -664,8 +751,8 @@ export async function navigatorCallDirect(
   // prevents an unbounded DOM/screenshot payload from ever crossing the
   // network, even if every earlier cap is misconfigured.
   assertPromptBudget("navigator", "navigator", messages, effectiveContextTokens, {
-    imageChars: screenshot ? screenshot.length : 0,
-    imageTokens: screenshot ? await getScreenshotImageTokens() : 0,
+    imageChars: screenshotPart?.chars ?? 0,
+    imageTokens: screenshotPart ? await getScreenshotImageTokens() : 0,
   });
 
   const response = await chatWithVisibleOutputRetry(

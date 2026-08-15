@@ -74,6 +74,32 @@ describe("security guard drift-guard", () => {
     expect(src).toContain("SECURITY_INSTRUCTION");
   });
 
+  it("keeps <core_invariants> as the single precedence authority (SECURITY_INSTRUCTION only)", () => {
+    const security = readSrc("src/lib/agent/security.ts");
+    // The definition exists (opening + closing tags).
+    expect(security).toContain("<core_invariants>");
+    expect(security).toContain("</core_invariants>");
+    // Prompt templates may only REFERENCE the marker (e.g. "see
+    // <core_invariants> in SECURITY_INSTRUCTION"), never re-define it or
+    // restate the precedence list — a duplicate authority can drift apart
+    // from the enforced security rules.
+    const promptModules = [
+      "src/lib/agent/prompts/navigator-prompt.ts",
+      "src/lib/agent/prompts/planner-prompt.ts",
+      "src/lib/agent/prompts/navigator-prompt-helpers.ts",
+    ];
+    for (const rel of promptModules) {
+      const src = readSrc(rel);
+      // The closing tag exists only in the SECURITY_INSTRUCTION definition —
+      // a second <core_invariants>...</core_invariants> block would add a
+      // definition the drift guard catches here.
+      expect(src).not.toContain("</core_invariants>");
+      // Precedence-restatement markers: gone from the prompt modules.
+      expect(src).not.toContain("in order of precedence");
+      expect(src).not.toContain("highest-priority authority");
+    }
+  });
+
   // A marker that exists in security.ts but is never injected into a prompt
   // template is dead weight — a refactor dropping the imports would not fail
   // the marker-presence guard above. Assert at least one prompt module still

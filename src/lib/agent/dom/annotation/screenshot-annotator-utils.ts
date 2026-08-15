@@ -42,7 +42,11 @@ export function pickReadableTextColor(bg: string): string {
 
 /** Convert a canvas back to a JPEG data URL. `quality` is the JPEG quality
  * (0–1); callers that re-encode an already-captured screenshot should pass the
- * original capture quality so round-tripping doesn't silently degrade it. */
+ * original capture quality so round-tripping doesn't silently degrade it.
+ * `annotateScreenshot` forwards `options.quality` — the screenshot policy's
+ * 0–100 setting divided by 100 at the call site (see `resolveScreenshotPolicy`
+ * in the background) — so annotation re-encodes at the SAME quality the
+ * capture used instead of the fixed 0.85 default. */
 export async function canvasToDataUrl(
   canvas: CompatibleCanvas,
   fallback: string,

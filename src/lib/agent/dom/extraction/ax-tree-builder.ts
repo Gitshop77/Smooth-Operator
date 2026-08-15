@@ -41,6 +41,8 @@ import {
 import { getRole, escapeAttributeValue, isStructural } from "./ax-tree-utils";
 import { redactUrlTokens } from "./element-info-utils";
 import { getShadowRoot } from "../annotation/shadow-piercer";
+import { getSharedReadCache, type ReadCache } from "../utils/read-cache";
+import { getViewportTracker } from "../viewport-tracker";
 
 /**
  * Module-scoped element-ref registry.
@@ -54,6 +56,20 @@ import { getShadowRoot } from "../annotation/shadow-piercer";
 let elementMap: Record<string, WeakRef<HTMLElement>> | null = null;
 let elementReverseMap: WeakMap<HTMLElement, string> | null = null;
 let refCounter = 0;
+/** Live entry count mirroring `Object.keys(elementMap).length`, tracked as a
+ * counter so the prune bound gate never needs an O(n) key scan. */
+let registrySize = 0;
+/** `generateAccessibilityTree` calls since the last registry prune. */
+let registryPruneCounter = 0;
+
+/**
+ * Registry prune throttling: the full-map WeakRef scan runs at most once per
+ * {@link AX_REGISTRY_PRUNE_INTERVAL} generations, or immediately once the
+ * registry exceeds {@link AX_REGISTRY_PRUNE_BOUND} entries, whichever comes
+ * first. Before this throttle every AX generation paid an O(entries) scan.
+ */
+const AX_REGISTRY_PRUNE_INTERVAL = 25;
+const AX_REGISTRY_PRUNE_BOUND = 5_000;
 
 /** Result of {@link generateAccessibilityTree}. */
 export interface AXTreeResult {
@@ -74,6 +90,8 @@ export function initElementMap(): void {
     elementMap = {};
     elementReverseMap = new WeakMap();
     refCounter = 0;
+    registrySize = 0;
+    registryPruneCounter = 0;
   }
 }
 
@@ -91,6 +109,7 @@ export function resolveRef(refId: string): HTMLElement | null {
   if (!el) {
  // Clean up dead ref.
     delete map[refId];
+    registrySize--;
     return null;
   }
   return el;
@@ -250,35 +269,74 @@ function getName(el: HTMLElement, labelMap: Map<string, HTMLLabelElement>): stri
 // `SKIP_TAGS` (used below in `shouldInclude`) is imported from ../utils.
 
 /**
+ * Per-node classification computed ONCE during the AX walk and threaded into
+ * {@link buildTree} so `getRole` / `isInteractive` / `tagName` are never
+ * re-derived for included elements.
+ *
+ * `include` is the final decision; `role`/`interactive`/`tag` are the honest
+ * per-element values (computed even when a later visibility gate excludes the
+ * element) so the forced-inclusion refId root in `buildTree` emits the same
+ * state attributes and role as the pre-refactor builder.
+ */
+interface NodeInfo {
+  include: boolean;
+  role: string | null;
+  interactive: boolean;
+  tag: string;
+}
+
+/**
  * Decide whether to include an element in the AX tree. Honors the `filter`
  * mode (all vs interactive), visibility, viewport bounds, and the element's
- * role / name significance.
+ * role / name significance. Returns the per-node classification struct so
+ * `buildTree` never re-derives role/interactivity for included elements.
+ *
+ * The accessible name is fetched lazily via `computeName` (a memoized thunk
+ * provided by `buildTree`): the "all" mode's name gate needs it to decide
+ * text-bearing generic elements, and the same value is reused for line
+ * emission — so `getName` never runs for elements excluded by the cheap gates
+ * (skip-tags, aria-hidden, non-interactive/non-structural, role-decisive).
  */
 function shouldInclude(
   el: HTMLElement,
   filter: string,
   hasRefId: boolean,
-  name: string,
-): boolean {
+  readCache: ReadCache,
+  computeName: () => string,
+): NodeInfo {
   const tag = el.tagName.toLowerCase();
-  if (SKIP_TAGS.has(tag)) return false;
+ // Cold exits — these elements are excluded from the walk, but the struct
+ // must still carry the HONEST `interactive` value: a force-included refId
+ // root (`buildTree`'s `!!refId && depth === 0` escape) falls through to the
+ // state-attribute emission, which pre-refactor re-checked `isInteractive`
+ // per included node. Hardcoding `false` here would silently drop those
+ // attributes for an aria-hidden (or skip-tag) interactive element read via
+ // ref_id. The extra call on excluded nodes is negligible.
+  if (SKIP_TAGS.has(tag)) {
+    return { include: false, role: null, interactive: isInteractive(el), tag };
+  }
  // apply visibility + aria-hidden gating even in "all" mode so
  // hidden modals, off-screen duplicates, and aria-hidden decorative elements
  // don't inflate the AX payload with content the user can't see. `aria-hidden`
  // is matched case-insensitively (ARIA attribute values are ASCII case-insensitive).
-  if ((el.getAttribute("aria-hidden") || "").toLowerCase() === "true") return false;
+  if ((el.getAttribute("aria-hidden") || "").toLowerCase() === "true") {
+    return { include: false, role: null, interactive: isInteractive(el), tag };
+  }
 
   if (filter === "interactive") {
-    if (!isInteractive(el)) return false;
+    const interactive = isInteractive(el);
+    if (!interactive) return { include: false, role: null, interactive, tag };
     // Visibility gate (same as the "all" path below): a hidden element is
     // never included, even when interactive.
-    if (isLikelyHidden(el)) return false;
- // Reuse a single rect for both the visibility check and the viewport-bounds
- // test so we don't call getBoundingClientRect twice on the hot path.
-    const rect = el.getBoundingClientRect();
-    if (!isVisible(el, rect)) return false;
-    if (!hasRefId && !intersectsViewport(rect)) return false;
-    return true;
+    if (isLikelyHidden(el)) return { include: false, role: null, interactive, tag };
+    // Batch this element's rect + style reads once, then reuse a single rect
+    // for both the visibility check and the viewport-bounds test so we never
+    // call getBoundingClientRect more than once per element.
+    readCache.batchRead(el);
+    const rect = readCache.getRect(el);
+    if (!(readCache.getVisible(el, rect) ?? isVisible(el, rect))) return { include: false, role: null, interactive, tag };
+    if (!hasRefId && !intersectsViewport(el, rect!)) return { include: false, role: null, interactive, tag };
+    return { include: true, role: getRole(el), interactive, tag };
   }
 
  // "all" mode: cheap classification first, visibility last. `isLikelyHidden`
@@ -289,26 +347,50 @@ function shouldInclude(
  // excluded without ever consulting the style system, so a hostile page's
  // arbitrarily deep excluded chain costs O(cap) instead of O(cap² × rules).
   const interactive = isInteractive(el);
-  if (interactive || isStructural(el) || name.length > 0) {
-    if (isLikelyHidden(el)) return false;
+  if (interactive || isStructural(el)) {
+    if (isLikelyHidden(el)) return { include: false, role: null, interactive, tag };
     // The automatic per-step AX channel is a VIEWPORT observation. Without
     // this gate, `filter="all"` serialized the whole document in DOM order;
     // the low-context cap then kept the same page header on every step, so
     // scrolling produced no new evidence and agents could loop indefinitely.
     // Explicit ref_id reads remain subtree reads and intentionally bypass the
     // viewport gate.
-    if (!hasRefId && !intersectsViewport(el.getBoundingClientRect())) return false;
-    return true;
+    readCache.batchRead(el);
+    if (!hasRefId && !intersectsViewport(el, readCache.getRect(el)!)) return { include: false, role: null, interactive, tag };
+    return { include: true, role: getRole(el), interactive, tag };
+  }
+ // Only elements that fail every cheap gate consult the accessible name —
+ // for a typical excluded wrapper (plain div with no text/role) this branch
+ // is exactly what decides exclusion, and for a text-bearing generic element
+ // it is what includes it (both deferred until here, not for every node).
+  const name = computeName();
+  if (name.length > 0) {
+    if (isLikelyHidden(el)) return { include: false, role: null, interactive, tag };
+    readCache.batchRead(el);
+    if (!hasRefId && !intersectsViewport(el, readCache.getRect(el)!)) return { include: false, role: null, interactive, tag };
+    return { include: true, role: getRole(el), interactive, tag };
   }
   const role = getRole(el);
   if (role !== "generic" && role !== "image") {
-    if (isLikelyHidden(el)) return false;
-    return true;
+    if (isLikelyHidden(el)) return { include: false, role, interactive, tag };
+    return { include: true, role, interactive, tag };
   }
-  return false;
+  return { include: false, role, interactive, tag };
 }
 
-function intersectsViewport(rect: DOMRect | Pick<DOMRect, "top" | "bottom" | "left" | "right">): boolean {
+/** Viewport gate for the automatic AX channel. The IntersectionObserver
+ * membership cache (shared with the indexed-tree walk, one IO on the document
+ * root) short-circuits the rect math once the browser has reported the
+ * element's membership; while membership is unknown the gate falls back to
+ * the exact rect math below. */
+function intersectsViewport(
+  el: HTMLElement,
+  rect: DOMRect | Pick<DOMRect, "top" | "bottom" | "left" | "right">,
+): boolean {
+  const tracker = getViewportTracker();
+  const membership = tracker.isInViewport(el);
+  if (membership !== undefined) return membership;
+  tracker.observe(el);
   return rect.top < window.innerHeight && rect.bottom > 0 &&
     rect.left < window.innerWidth && rect.right > 0;
 }
@@ -354,18 +436,36 @@ function buildTree(
   maxDepth: number,
   lines: string[],
   counter: { count: number },
-  labelMap: Map<string, HTMLLabelElement>
+  labelMap: Map<string, HTMLLabelElement>,
+  readCache: ReadCache,
 ): void {
   if (counter.count >= MAX_ELEMENTS) return;
   if (absDepth > MAX_ABSOLUTE_DEPTH) return;
   if (depth > maxDepth) return;
   if (!el || !el.tagName) return;
 
-  const name = getName(el, labelMap);
-  const included = shouldInclude(el, filter, !!refId, name) || (!!refId && depth === 0);
+ // Compute role/interactivity/tag once per node inside `shouldInclude` and
+ // thread the struct through — `getRole`/`isInteractive` are NOT called again
+ // below for included nodes (each was 1 extra call per element before the
+ // hoist). The name is fetched lazily via the memoized `computeName` thunk so
+ // `getName` never runs for elements excluded by the cheap gates; it runs at
+ // most once per node (either for the name-gate decision or for emission).
+  let name = "";
+  let nameComputed = false;
+  const computeName = () => {
+    name = getName(el, labelMap);
+    nameComputed = true;
+    return name;
+  };
+  const info = shouldInclude(el, filter, !!refId, readCache, computeName);
+  const included = info.include || (!!refId && depth === 0);
 
   if (included) {
-    const role = getRole(el);
+    if (!nameComputed) computeName();
+    // The refId-root escape below forces inclusion even when `info.include`
+    // is false, in which case `info.role` was intentionally not computed —
+    // derive it here (single element, not the hot path).
+    const role = info.role ?? getRole(el);
     const displayName = escapeAttributeValue(name.substring(0, NAME_MAX_LENGTH));
     const indent = " ".repeat(depth);
 
@@ -380,6 +480,7 @@ function buildTree(
       ref = "ref_" + ++refCounter;
       elementMap![ref] = new WeakRef(el);
       elementReverseMap!.set(el, ref);
+      registrySize++;
     }
     counter.count++;
 
@@ -405,7 +506,10 @@ function buildTree(
  // Surface a curated set of interactive state attributes so the navigator LLM
  // can avoid clicking disabled controls or mishandling collapsed/expanded
  // elements. Additive — emitted only when present (mirrors the indexed tree).
-    if (isInteractive(el)) {
+ // `info.interactive` is the hoisted `isInteractive` result — computed once
+ // per node in `shouldInclude` (it is the honest value even for the
+ // forced-inclusion refId root, matching the pre-refactor re-check).
+    if (info.interactive) {
       for (const stateAttr of ["disabled", "aria-disabled", "aria-expanded", "aria-checked", "aria-selected", "readonly"] as const) {
         if (!el.hasAttribute(stateAttr)) continue;
         const raw = el.getAttribute(stateAttr) ?? "";
@@ -415,7 +519,7 @@ function buildTree(
     lines.push(line);
 
  // For <select> (non-sensitive), emit child <option> elements.
-    if (el.tagName.toLowerCase() === "select" && !isSensitive(el)) {
+    if (info.tag === "select" && !isSensitive(el)) {
       const select = el as HTMLSelectElement;
       for (const option of Array.from(select.options)) {
         let optLine = " ".repeat(depth + 1) + "option";
@@ -431,14 +535,14 @@ function buildTree(
   // Recurse into children (skip <option> children of non-sensitive <select> —
   // they were already emitted explicitly above to avoid duplication).
   if (depth < maxDepth && absDepth < MAX_ABSOLUTE_DEPTH) {
-    if (el.tagName.toLowerCase() !== "select") {
+    if (info.tag !== "select") {
       // firstChild/nextSibling instead of `el.children` so we never
       // instantiate the live children collection on body (jsdom re-snapshots
       // it on every child mutation — O(n^2) for bulk appends, see
       // extractor.test.ts test 19).
       for (let child = el.firstChild; child; child = child.nextSibling) {
         if (child.nodeType !== 1) continue;
-        buildTree(child as HTMLElement, included ? depth + 1 : depth, absDepth + 1, filter, refId, maxDepth, lines, counter, labelMap);
+        buildTree(child as HTMLElement, included ? depth + 1 : depth, absDepth + 1, filter, refId, maxDepth, lines, counter, labelMap, readCache);
       }
     }
  // Pierce shadow DOM so controls rendered inside open/closed shadow roots
@@ -448,7 +552,7 @@ function buildTree(
     const sr = getShadowRoot(el);
     if (sr) {
       for (const child of Array.from(sr.children)) {
-        buildTree(child as HTMLElement, included ? depth + 1 : depth, absDepth + 1, filter, refId, maxDepth, lines, counter, labelMap);
+        buildTree(child as HTMLElement, included ? depth + 1 : depth, absDepth + 1, filter, refId, maxDepth, lines, counter, labelMap, readCache);
       }
     }
   }
@@ -497,6 +601,10 @@ export function generateAccessibilityTree(
     const lines: string[] = [];
     const counter = { count: 0 };
     beginVisibilityCache();
+    // Epoch-stamped persistent read cache (shared with the indexed walk):
+    // on an unchanged DOM this walk serves every element's rect/style from
+    // the previous walk's batch reads instead of forcing fresh layout reads.
+    const readCache = getSharedReadCache();
 
  // pre-build a Map of all <label for="..."> elements ONCE per
  // generateAccessibilityTree call. Previously, getName() called
@@ -535,15 +643,31 @@ export function generateAccessibilityTree(
       if (!el) {
         return refNotFound(refId, "no longer exists. It may have been removed from the page.");
       }
-      buildTree(el as HTMLElement, 0, 0, filter, refId, maxDepth, lines, counter, labelMap);
+      buildTree(el as HTMLElement, 0, 0, filter, refId, maxDepth, lines, counter, labelMap, readCache);
     } else if (document.body) {
-      buildTree(document.body, 0, 0, filter, undefined, maxDepth, lines, counter, labelMap);
+      buildTree(document.body, 0, 0, filter, undefined, maxDepth, lines, counter, labelMap, readCache);
     }
 
- // Cleanup dead WeakRefs to avoid unbounded map growth.
-    for (const key of Object.keys(elementMap!)) {
-      if (!elementMap![key].deref()) {
-        delete elementMap![key];
+ // Cleanup dead WeakRefs to avoid unbounded map growth. Throttled: the
+ // full-map scan runs at most once per AX_REGISTRY_PRUNE_INTERVAL
+ // generations, or immediately once the live registry exceeds
+ // AX_REGISTRY_PRUNE_BOUND entries (whichever comes first), instead of on
+ // every AX generation — `registrySize` is a counter, so neither gate
+ // costs an Object.keys scan.
+    registryPruneCounter++;
+    if (
+      registryPruneCounter >= AX_REGISTRY_PRUNE_INTERVAL ||
+      registrySize > AX_REGISTRY_PRUNE_BOUND
+    ) {
+      registryPruneCounter = 0;
+      for (const key of Object.keys(elementMap!)) {
+        // Single map read per key — the old loop re-read `elementMap[key]`
+        // for the `delete`, doubling the per-key lookup on a hot path.
+        const ref = elementMap![key];
+        if (!ref.deref()) {
+          delete elementMap![key];
+          registrySize--;
+        }
       }
     }
 
@@ -618,6 +742,7 @@ export function __test_registerElement(refId: string, el: HTMLElement): void {
   initElementMap();
   elementMap![refId] = new WeakRef(el);
   elementReverseMap!.set(el, refId);
+  registrySize++;
 }
 
 /** @internal Test-only: reset the registry (so ref_N assignments are deterministic across tests). */
@@ -625,4 +750,6 @@ export function __test_resetRegistry(): void {
   elementMap = null;
   elementReverseMap = null;
   refCounter = 0;
+  registrySize = 0;
+  registryPruneCounter = 0;
 }

@@ -191,14 +191,17 @@ describe("assertPromptBudget", () => {
 
   test("counts an embedded screenshot as a flat token allowance, not base64 length", async () => {
     const { assertPromptBudget } = await import("../src/extension/llm-direct");
-    // 600k chars of "base64" presented as plain text would estimate ~300k
-    // tokens and fail closed at 64k. The image path subtracts the base64 length
-    // and adds only the flat per-image token allowance (×2 ≈ chars/token).
+    // 600k chars of "base64" as a STRUCTURED image part would estimate ~300k
+    // tokens if counted as text and fail closed at 64k. The image path
+    // subtracts the part's chars and adds only the flat per-image token
+    // allowance (×2 ≈ chars/token), so the payload passes with imageTokens
+    // 4096 exactly as pinned.
     const bigScreenshot = "x".repeat(600_000);
-    const messages = [{ content: `<untrusted_page_data><screenshot>${bigScreenshot}</screenshot></untrusted_page_data>` }];
+    const imagePart = { type: "image", dataUrl: bigScreenshot, mime: "image/png", chars: bigScreenshot.length } as const;
+    const messages = [{ content: [imagePart] }];
     expect(() =>
       assertPromptBudget("navigator", "nav-image", messages, 64_000, {
-        imageChars: bigScreenshot.length,
+        imageChars: imagePart.chars,
         imageTokens: 4096,
       }),
     ).not.toThrow();

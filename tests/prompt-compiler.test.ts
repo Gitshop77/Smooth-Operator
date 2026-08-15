@@ -1,7 +1,9 @@
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { buildNavigatorUserMessage, buildPlannerUserMessage } from "../src/lib/agent/loop/messages";
+import * as navigatorPromptModule from "../src/lib/agent/prompts/navigator-prompt";
 import { buildNavigatorPrompt } from "../src/lib/agent/prompts/navigator-prompt";
 import { buildPlannerPrompt } from "../src/lib/agent/prompts/planner-prompt";
+import { clearPromptMemo } from "../src/lib/agent/prompts/prompt-memo";
 import {
   compileJudgePromptV1,
   compileNavigatorPromptV1,
@@ -13,6 +15,18 @@ import {
   PROMPT_CACHE_KEY_VERSION,
 } from "../src/lib/agent/prompts/prompt-contract";
 import { installLocalStorageStub, restoreLocalStorageStub } from "./helpers";
+
+// Spy at the module boundary: the mock wraps the REAL buildNavigatorPrompt (so
+// byte-identity expectations above still exercise real prompt bytes) while
+// recording every invocation through the whole import graph — including the
+// prompt-memo module that memoizes it.
+vi.mock("../src/lib/agent/prompts/navigator-prompt", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/agent/prompts/navigator-prompt")>();
+  return {
+    ...actual,
+    buildNavigatorPrompt: vi.fn(actual.buildNavigatorPrompt),
+  };
+});
 
 beforeAll(() => installLocalStorageStub());
 afterAll(() => restoreLocalStorageStub());
@@ -102,7 +116,15 @@ describe("V1 prompt compiler byte identity", () => {
       { role: "system", content: JUDGE_SYSTEM_PROMPT },
       { role: "user", content: buildJudgeUserMessage(judgeInput) },
     ]);
-    expect(judge.cache).toMatchObject({ cacheEligible: false, stableKey: null });
+    expect(judge.cache).toMatchObject({
+      cacheEligible: true,
+      stableSectionIds: ["judge.system"],
+      volatileSectionIds: ["judge.user"],
+    });
+    expect(judge.sections.map(({ id, cache }) => ({ id, cache }))).toEqual([
+      { id: "judge.system", cache: "stable" },
+      { id: "judge.user", cache: "volatile" },
+    ]);
   });
 });
 
@@ -136,7 +158,10 @@ describe("V1 prompt cache descriptor", () => {
 
   test("uses the canonical length-framed SHA-256 stable-section key", async () => {
     const compiled = await compileNavigatorPromptV1({ maxActions: 5, user: navigatorUser });
-    const system = compiled.messages[0].content;
+    // The system message is always plain text (image parts attach only to the
+    // navigator's user message), so narrow the widened content type.
+    const systemContent = compiled.messages[0].content;
+    const system = typeof systemContent === "string" ? systemContent : "";
     const id = "navigator.system";
     const encoder = new TextEncoder();
     const framed = `${PROMPT_CACHE_KEY_VERSION}\0${encoder.encode(id).byteLength}:${id}${encoder.encode(system).byteLength}:${system}`;
@@ -151,5 +176,35 @@ describe("V1 prompt cache descriptor", () => {
     expect(decodePromptCacheDescriptorV1({ ...descriptor, version: 2 })).toBeNull();
     expect(decodePromptCacheDescriptorV1({ ...descriptor, plaintext: "must reject" })).toBeNull();
     expect(decodePromptCacheDescriptorV1({ ...descriptor, stableKey: "sha256:not-a-digest" })).toBeNull();
+  });
+});
+
+describe("navigator system prompt memoization", () => {
+  const input = {
+    maxActions: 5,
+    customPrompt: undefined,
+    visionMode: "disabled" as const,
+    mode: "standard",
+    compact: true,
+    user: navigatorUser,
+  };
+
+  test("buildNavigatorPrompt is invoked once across repeated compiles with identical inputs", async () => {
+    const spy = vi.spyOn(navigatorPromptModule, "buildNavigatorPrompt");
+    spy.mockClear();
+    clearPromptMemo();
+    await compileNavigatorPromptV1(input);
+    await compileNavigatorPromptV1(input);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  test("clearPromptMemo forces a rebuild", async () => {
+    const spy = vi.spyOn(navigatorPromptModule, "buildNavigatorPrompt");
+    spy.mockClear();
+    clearPromptMemo();
+    await compileNavigatorPromptV1(input);
+    clearPromptMemo();
+    await compileNavigatorPromptV1(input);
+    expect(spy).toHaveBeenCalledTimes(2);
   });
 });

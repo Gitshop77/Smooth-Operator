@@ -21,6 +21,15 @@ import type { LoopState, ObserveStateResult } from "../types";
  * orchestrator/navigator reading only the `elementsText` string. If a future
  * caller needs to serialize it, project to a plain shape first (or expose
  * `getSelectorMap()` separately).
+ *
+ * NOTE: this path deliberately uses the RAW `extractBrowserState`, not the
+ * skip-if-unchanged cache (`dom/extraction/state-cache.ts`). The returned
+ * state flows into the BUILT-IN action executor, which resolves action
+ * indices through the state's live `selectorMap`
+ * (`tools/helpers/element-resolver.ts`) — a cache-served snapshot carries no
+ * live map, so every indexed action would fail. The skip-if-unchanged cache
+ * is consumed only by the extension's EXTRACT_STATE handler, where
+ * `selectorMap` is stripped before the state crosses IPC.
  */
 export async function observeState(state: LoopState): Promise<ObserveStateResult> {
   let tabs: TabInfo[];

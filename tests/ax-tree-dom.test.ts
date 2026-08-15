@@ -251,6 +251,60 @@ describe("generateAccessibilityTree (DOM walking)", () => {
     expect(uncapped.pageContent.length).toBeGreaterThan(50);
     expect(uncapped.pageContent.length).toBeLessThanOrEqual(100000);
   });
+
+  test("12. AX output is byte-identical with hoisted role computation (pin test)", () => {
+    // Pins the full serialized `"all"` tree for a fixture exercising every
+    // inclusion path: interactive (link/button/input/select), structural
+    // (nav/heading), generic-with-name (the `name.length > 0` gate), generic
+    // unnamed wrappers (excluded), sensitive redaction (password), and
+    // aria-hidden content. The snapshot is the behavior contract for the
+    // getRole/isInteractive hoist — it must not change.
+    document.body.innerHTML = `
+      <nav aria-label="Main nav">
+        <a href="/home">Home</a>
+        <button type="button">Sign in</button>
+        <input type="password" placeholder="Password" value="s3cr3t">
+      </nav>
+      <h1>Dashboard</h1>
+      <div class="card">
+        <p>Welcome back</p>
+        <input type="text" placeholder="Search the site">
+        <select aria-label="Sort">
+          <option value="a">Alpha</option>
+          <option value="b" selected>Beta</option>
+        </select>
+        <div aria-hidden="true"><button>Invisible</button></div>
+      </div>
+      <ul><li>Alpha</li></ul>
+    `;
+    const axTree = generateAccessibilityTree("all");
+    expect(axTree.error).toBeUndefined();
+    expect(axTree.pageContent).toMatchSnapshot();
+  });
+
+  test("13. identity fallback — removed-but-live element still resolves across a prune", () => {
+    const btn = document.createElement("button");
+    btn.textContent = "Go";
+    document.body.appendChild(btn);
+    generateAccessibilityTree();
+    expect(resolveRef("ref_1")).toBe(btn);
+
+    // Detach the element from the DOM. jsdom has no real GC, so the WeakRef
+    // target stays alive — the registry must keep resolving the ref by
+    // identity instead of treating "removed" as "dead".
+    btn.remove();
+
+    // Force the prune scan to actually run (25 generations crosses
+    // AX_REGISTRY_PRUNE_INTERVAL). The scan deletes only refs whose WeakRef
+    // target has been reclaimed — a removed-but-live node must survive it.
+    document.body.innerHTML = "";
+    for (let i = 0; i < 25; i++) {
+      generateAccessibilityTree();
+    }
+
+    expect(resolveRef("ref_1")).toBe(btn);
+    expect(btn.parentElement).toBeNull();
+  });
 });
 
 // ─── Regression: secret redaction + AX-tree hardening ────────────────────────

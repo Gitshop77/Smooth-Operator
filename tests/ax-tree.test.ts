@@ -14,7 +14,7 @@
  * `window.__openCowork*` global that no longer exists.
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   generateAccessibilityTree,
   initElementMap,
@@ -144,6 +144,89 @@ describe("resolveRef", () => {
     const fakeEl = makeFakeButton();
     __test_registerElement("ref_1", fakeEl);
     expect(resolveRef("ref_1")).toBe(fakeEl);
+  });
+});
+
+describe("AX WeakRef registry pruning throttle", () => {
+  withWindowStub();
+
+  // Prune thresholds in ax-tree-builder.ts (module-private consts):
+  // AX_REGISTRY_PRUNE_INTERVAL = 25 calls, AX_REGISTRY_PRUNE_BOUND = 5_000.
+  // jsdom has no real GC, so WeakRef targets never get reclaimed — these
+  // tests assert the prune *decision* (a spy on Object.keys, which the prune
+  // scan is the only module code to call) and the identity fallback
+  // (removed-but-live refs still resolve), never that a ref was reclaimed.
+  //
+  // The fake document keeps jsdom internals out of the walk so the spy sees
+  // ONLY the AX module's own Object.keys calls.
+  function runGeneration(): void {
+    (globalThis as unknown as { document: unknown }).document = makeFakeDocument().document;
+    try {
+      generateAccessibilityTree("all", 15, 1000);
+    } finally {
+      delete (globalThis as unknown as { document?: unknown }).document;
+    }
+  }
+
+  test("freshly-registered refs still resolve", () => {
+    initElementMap();
+    const fakeEl = makeFakeButton();
+    __test_registerElement("ref_1", fakeEl);
+    expect(resolveRef("ref_1")).toBe(fakeEl);
+  });
+
+  test("registry prune does NOT run on every generation (Object.keys spy)", () => {
+    initElementMap();
+    __test_registerElement("ref_1", makeFakeButton());
+    expect(resolveRef("ref_1")).not.toBeNull();
+    const keysSpy = vi.spyOn(Object, "keys");
+    try {
+      const before = keysSpy.mock.calls.length;
+      // 5 generations — well under the 25-call prune interval, and the
+      // registry stays far below the 5_000-entry bound, so the full-map
+      // prune scan must not run at all.
+      for (let i = 0; i < 5; i++) runGeneration();
+      expect(keysSpy.mock.calls.length - before).toBe(0);
+    } finally {
+      keysSpy.mockRestore();
+    }
+  });
+
+  test("registry prune DOES run once the 25-call interval is reached", () => {
+    initElementMap();
+    const keysSpy = vi.spyOn(Object, "keys");
+    try {
+      const before = keysSpy.mock.calls.length;
+      // 25 generations — the 25th call crosses AX_REGISTRY_PRUNE_INTERVAL,
+      // so exactly one full-map scan must happen (not zero, not 25).
+      for (let i = 0; i < 25; i++) runGeneration();
+      expect(keysSpy.mock.calls.length - before).toBe(1);
+    } finally {
+      keysSpy.mockRestore();
+    }
+  });
+
+  test("registry prune runs early when the 5_000-entry bound is exceeded", () => {
+    initElementMap();
+    const first = makeFakeButton();
+    __test_registerElement("ref_bound_0", first);
+    for (let i = 1; i <= 5_000; i++) {
+      __test_registerElement(`ref_bound_${i}`, makeFakeButton());
+    }
+    const keysSpy = vi.spyOn(Object, "keys");
+    try {
+      const before = keysSpy.mock.calls.length;
+      // One generation — far below the interval, but the registry already
+      // exceeds AX_REGISTRY_PRUNE_BOUND, so the bound gate must fire.
+      runGeneration();
+      expect(keysSpy.mock.calls.length - before).toBe(1);
+    } finally {
+      keysSpy.mockRestore();
+    }
+    // No real GC in jsdom: every entry is still live, so the scan prunes
+    // nothing and every ref still resolves by identity.
+    expect(__test_registry().size).toBe(5_001);
+    expect(resolveRef("ref_bound_0")).toBe(first);
   });
 });
 

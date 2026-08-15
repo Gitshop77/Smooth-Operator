@@ -3,6 +3,7 @@ import {
   type PromptBudgetPortV1,
   type PromptKindV1,
 } from "./prompt-contract";
+import type { ImagePartV1 } from "../llm/image-part";
 
 /** V1 keeps a byte-exact guard for the legacy unknown-context path. Runs with
  * a known effective context use the portable token fallback below and then
@@ -148,16 +149,32 @@ export function assertPromptWithinContextBudgetV1(
   }
 }
 
+/** Message body type accepted by the compiled-prompt budget asserts: plain
+ * text or a parts array (text + structured image parts). */
+export type PromptMessageBodyV1 = string | Array<string | ImagePartV1>;
+
+/**
+ * Flatten a (possibly structured) message body to its TEXT representation for
+ * the byte-budget join. Image parts are represented by their full base64
+ * payload: the plain (no-accounting) path is deliberately conservative — it
+ * has no flat per-image token allowance to substitute, so a screenshot-heavy
+ * prompt must fail closed rather than pass on a false text-only estimate.
+ */
+function messageBodyText(content: PromptMessageBodyV1): string {
+  if (typeof content === "string") return content;
+  return content.map((part) => (typeof part === "string" ? part : part.dataUrl)).join("");
+}
+
 /** Assert a compiled prompt's combined message bodies stay within a
  * model-context-aware budget (same `\n` framing reserve as
  * {@link assertCompiledPromptWithinProfileV1}). */
 export function assertCompiledPromptWithinContextBudgetV1(
   kind: PromptKindV1,
   label: string,
-  messages: readonly { content: string }[],
+  messages: readonly { content: PromptMessageBodyV1 }[],
   contextTokens: number,
 ): void {
-  const combined = messages.map((message) => message.content).join("\n");
+  const combined = messages.map((message) => messageBodyText(message.content)).join("\n");
   assertPromptWithinContextBudgetV1(kind, label, combined, contextTokens);
 }
 
@@ -172,9 +189,9 @@ export function assertCompiledPromptWithinContextBudgetV1(
 export function assertCompiledPromptWithinProfileV1(
   kind: PromptKindV1,
   label: string,
-  messages: readonly { content: string }[],
+  messages: readonly { content: PromptMessageBodyV1 }[],
 ): void {
-  const combined = messages.map((message) => message.content).join("\n");
+  const combined = messages.map((message) => messageBodyText(message.content)).join("\n");
   assertPromptWithinProfileV1(kind, label, combined);
 }
 
@@ -211,26 +228,28 @@ export interface NavigatorObservationCapsV1 {
   screenshotChars: number;
 }
 
-/** Base per-channel caps at the 128k calibration point — the current loop
- * defaults (`ELEMENTS_TEXT_CHAR_CAP` / `MAX_NAV_AXTREE_CHARS` /
- * `MAX_NAV_SCREENSHOT_CHARS`). A derived cap NEVER exceeds its base, so a
- * 128k+ model keeps today's exact behavior. */
-const BASE_OBS_ELEMENTS_CHARS = 24_000;
+/** Base per-channel caps at the 128k calibration point — the exact per-step
+ * caps for unknown/≥128k-context runs. `ELEMENTS_TEXT_CHAR_CAP`
+ * (messages-utils.ts) and `MAX_ELEMENTS_CHARS` (validations.ts) are DERIVED
+ * from `BASE_OBS_ELEMENTS_CHARS`, so the message-layer and llm-direct caps can
+ * never drift from the budget module. A derived cap NEVER exceeds its base, so
+ * a 128k+ model keeps today's exact behavior. */
+export const BASE_OBS_ELEMENTS_CHARS = 24_000;
 const BASE_OBS_AXTREE_CHARS = 12_000;
 const BASE_OBS_SCREENSHOT_CHARS = 100_000;
 
 /**
  * Fixed non-observation navigator overhead (system prompt + base user-message
- * framing) in UTF-8 bytes. Measured ≈30.7k with the stock system prompt
- * (30,092 system + ~600 base user); the margin absorbs prompt-version drift.
+ * framing) in UTF-8 bytes. Measured ≈28.8k with the stock system prompt
+ * (28,188 system + ~600 base user); the margin absorbs prompt-version drift.
  */
 const NAVIGATOR_FIXED_OVERHEAD_BYTES = 32_000;
 
 /**
- * Sub-128k models receive the COMPACT system prompt (~22.1KB measured vs
- * 30.1KB full), so their fixed overhead is correspondingly lower — the entire
+ * Sub-128k models receive the COMPACT system prompt (~20.1KB measured vs
+ * 28.2KB full), so their fixed overhead is correspondingly lower — the entire
  * point of the compact variant is to convert prompt bytes into observation
- * headroom for low-context models. 22,101 measured system + ~600 base user +
+ * headroom for low-context models. 20,124 measured system + ~600 base user +
  * a margin for history growth past the user-content reserve (measured: a
  * 20-step run's history/task/plan/wrapping reaches ~5,000 bytes vs the 4,000
  * reserve — the extra ~900 keeps the worst-case turn under the 39,424 budget).
@@ -262,9 +281,11 @@ const MIN_SUB_128K_TEXT_OBSERVATION_CHARS = 8_000;
  *
  * Regime ≥128k (or unknown): the base caps unchanged; the screenshot cap
  * becomes its FIT budget — what remains after the fixed overhead and a minimum
- * usable text observation. At 128k that is 67,424 chars (≈50KB image, ~640px)
- * instead of the current 1.5M hard cap that realistic captures always exceed —
- * replacing a silent step-killing assert with an observable drop.
+ * usable text observation. At 128k that is 72,800 chars (≈50KB image, ~640px) —
+ * a bounded per-step quality budget. A 3M-char screenshot safety cap stays in
+ * the loop as the OUTER drop guard (corrupt/hostile captures are never
+ * re-encoded); over-budget frames are resized down to this fitted budget
+ * instead of being shipped whole.
  *
  * Regime <128k: a bounded fraction of the derived input capacity is used for
  * text observation; elementsText gets 75% and the viewport AX tree

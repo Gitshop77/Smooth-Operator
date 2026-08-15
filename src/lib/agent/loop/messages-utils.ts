@@ -1,9 +1,16 @@
 import type { HistoryItem, TabInfo } from "../types";
 import { wrapUntrusted } from "../security";
+import { getSecretSetVersion } from "../secrets";
+import { BASE_OBS_ELEMENTS_CHARS } from "../prompts/prompt-token-budget";
 import { escapeXml } from "./xml-escape";
 
-/** Max chars of interactive-element text shipped to the navigator per step. */
-export const ELEMENTS_TEXT_CHAR_CAP = 60_000;
+/** Max chars of interactive-element text shipped to the navigator per step —
+ * derived from the observation-budget base cap (prompt-token-budget.ts) so it
+ * can never drift from the budget module. The loop already truncates
+ * elementsText to its per-step derived budget (≤ this base), so the fail-closed
+ * slice in `buildNavigatorUserMessage` is unreachable by construction — kept
+ * for hypothetical direct callers. */
+export const ELEMENTS_TEXT_CHAR_CAP = BASE_OBS_ELEMENTS_CHARS;
 
 /** Max chars of extracted content surfaced inline per action result. */
 const EXTRACTED_CONTENT_INLINE_LIMIT = 8_500;
@@ -67,8 +74,120 @@ export function renderPlan(plan: string[] | undefined, currentPlanItem: number |
 }
 
 /**
+ * Render a single history item as an XML-tagged `<step_…>` block. With
+ * `inRetention` the item renders its full result content (message + extracted
+ * content); otherwise the results degrade to the stale-observation structural
+ * placeholder ("what was called + args") — see {@link renderHistory}.
+ *
+ * Exported so tests can drive/observe the per-item renderer directly.
+ */
+export function renderHistoryItem(h: HistoryItem, inRetention: boolean): string {
+  const stepTag = escapeXml(String(h.step), true);
+  let out = `<step_${stepTag} agent="${escapeXml(h.agent, true)}">\n`;
+  if (h.evaluation) out += `Evaluation: ${wrapUntrusted(boundModelNote(h.evaluation, EVALUATION_INLINE_LIMIT, "evaluation"))}\n`;
+  if (h.memory) out += `Memory: ${wrapUntrusted(boundModelNote(h.memory, MEMORY_INLINE_LIMIT, "memory"))}\n`;
+  if (h.goal) out += `Goal: ${wrapUntrusted(boundModelNote(h.goal, GOAL_INLINE_LIMIT, "goal"))}\n`;
+  if (h.results.length) {
+    out += `Action Results:\n`;
+    for (const r of h.results) {
+      if (inRetention) {
+        out += `- ${r.action.type}: ${wrapUntrusted(r.message ?? "")}${r.success ? "" : " (FAILED)"}\n`;
+        if (r.extractedContent) {
+          out += `  Extracted: ${wrapUntrusted(r.extractedContent.slice(0, EXTRACTED_CONTENT_INLINE_LIMIT))}\n`;
+        }
+      } else {
+        // Stale observation: fixed structural placeholder (what was called +
+        // args) instead of the full message/extracted content — the action
+        // history stays, the token-heavy observation payload is masked.
+        out += `- ${r.action.type}${actionArgsPlaceholder(r.action)}: (details omitted — older step)${r.success ? "" : " (FAILED)"}\n`;
+      }
+    }
+  }
+  out += `</step_${stepTag}>\n`;
+  return out;
+}
+
+/**
+ * Indirection `renderHistory` renders items through, so per-item render counts
+ * stay observable in tests (`vi.spyOn(historyItemRenderer, "render")`). ESM
+ * internal calls bind to the module-local function directly, which a spy on
+ * the namespace export cannot intercept.
+ */
+export const historyItemRenderer: { render: typeof renderHistoryItem } = { render: renderHistoryItem };
+
+/**
+ * Incremental render memoization for {@link renderHistory}.
+ *
+ * The masked (stale-observation) serialization of an item depends only on the
+ * item itself, and history items are stable object references across steps
+ * (messages.ts's `redactHistoryForPrompt` memoizes the redacted item per
+ * original identity + secret-set version, so the same redacted objects are
+ * re-rendered on every step). Two layers:
+ *
+ * - `maskedItemRenderCache` — the masked serialization of each item, keyed by
+ *   item identity + redaction version. A window slide re-renders only the one
+ *   item that just left the retention window; everything else is a lookup.
+ * - `prefixRenderCache` — the joined masked-prefix string, keyed by the
+ *   covered item identities + redaction version. Reused only when the covered
+ *   items are the SAME objects in the same positions, so an in-place history
+ *   mutation (the loop pushes per step; compaction replaces the head via
+ *   `length = 0` + push of the retained items) misses the cache and rebuilds.
+ *
+ * The `<sys>[N previous steps omitted]</sys>` header interpolates the TOTAL,
+ * which grows every step — it is re-rendered per call and excluded from both
+ * caches. The caches never see the header.
+ */
+interface MaskedItemEntry {
+  version: number;
+  text: string;
+}
+const maskedItemRenderCache = new WeakMap<HistoryItem, MaskedItemEntry>();
+interface PrefixEntry {
+  version: number;
+  items: readonly HistoryItem[];
+  text: string;
+}
+let prefixRenderCache: PrefixEntry | null = null;
+
+/** Masked (stale-observation) render of `h`, memoized by identity + version. */
+function renderMaskedItemCached(h: HistoryItem, version: number): string {
+  const cached = maskedItemRenderCache.get(h);
+  if (cached !== undefined && cached.version === version) return cached.text;
+  const text = historyItemRenderer.render(h, false);
+  maskedItemRenderCache.set(h, { version, text });
+  return text;
+}
+
+/** Serialize the masked prefix items `[0, maskedCount)` of the window. */
+function renderMaskedPrefix(recent: HistoryItem[], maskedCount: number, version: number): string {
+  if (maskedCount <= 0) return "";
+  const cached = prefixRenderCache;
+  if (
+    cached !== null
+    && cached.version === version
+    && cached.items.length === maskedCount
+    && cached.items.every((it, i) => it === recent[i])
+  ) {
+    return cached.text;
+  }
+  let text = "";
+  for (let i = 0; i < maskedCount; i++) text += renderMaskedItemCached(recent[i], version);
+  prefixRenderCache = { version, items: recent.slice(0, maskedCount), text };
+  return text;
+}
+
+/**
  * Render history items as XML-tagged blocks. Truncates to the last `limit`
  * items and emits a `<sys>` marker if older items were omitted.
+ *
+ * Keeps its exact signature and byte-identical output; internally the stable
+ * masked prefix (all window items except the last OBSERVATION_RETENTION_WINDOW)
+ * is memoized (see {@link renderMaskedPrefix}), so repeated renders of the
+ * same window — the navigator/planner re-render the same redacted items every
+ * step — skip the per-item serialization. Only the final 2 items (the
+ * retention window, whose content is re-redacted per step anyway) re-render
+ * per call, plus the single item that leaves the retention window when the
+ * window slides.
  */
 export function renderHistory(history: HistoryItem[], limit: number, total = history.length): string {
   if (history.length === 0) return "Agent initialized.";
@@ -77,35 +196,14 @@ export function renderHistory(history: HistoryItem[], limit: number, total = his
   // items render their full result content (message + extracted content);
   // older items keep the structural "what was called + args" placeholder.
   const retentionStart = Math.max(0, recent.length - OBSERVATION_RETENTION_WINDOW);
+  const version = getSecretSetVersion();
   let out = "";
   if (total > limit) {
     out += `<sys>[${total - limit} previous steps omitted]</sys>\n`;
   }
-  for (let i = 0; i < recent.length; i++) {
-    const h = recent[i];
-    const inRetention = i >= retentionStart;
-    const stepTag = escapeXml(String(h.step), true);
-    out += `<step_${stepTag} agent="${escapeXml(h.agent, true)}">\n`;
-    if (h.evaluation) out += `Evaluation: ${wrapUntrusted(boundModelNote(h.evaluation, EVALUATION_INLINE_LIMIT, "evaluation"))}\n`;
-    if (h.memory) out += `Memory: ${wrapUntrusted(boundModelNote(h.memory, MEMORY_INLINE_LIMIT, "memory"))}\n`;
-    if (h.goal) out += `Goal: ${wrapUntrusted(boundModelNote(h.goal, GOAL_INLINE_LIMIT, "goal"))}\n`;
-    if (h.results.length) {
-      out += `Action Results:\n`;
-      for (const r of h.results) {
-        if (inRetention) {
-          out += `- ${r.action.type}: ${wrapUntrusted(r.message ?? "")}${r.success ? "" : " (FAILED)"}\n`;
-          if (r.extractedContent) {
-            out += `  Extracted: ${wrapUntrusted(r.extractedContent.slice(0, EXTRACTED_CONTENT_INLINE_LIMIT))}\n`;
-          }
-        } else {
-          // Stale observation: fixed structural placeholder (what was called +
-          // args) instead of the full message/extracted content — the action
-          // history stays, the token-heavy observation payload is masked.
-          out += `- ${r.action.type}${actionArgsPlaceholder(r.action)}: (details omitted — older step)${r.success ? "" : " (FAILED)"}\n`;
-        }
-      }
-    }
-    out += `</step_${stepTag}>\n`;
+  out += renderMaskedPrefix(recent, retentionStart, version);
+  for (let i = retentionStart; i < recent.length; i++) {
+    out += historyItemRenderer.render(recent[i], true);
   }
   return out.trim();
 }

@@ -53,6 +53,7 @@ function setupDom(): void {
     <input id="screenshotMaxBytes">
     <input type="checkbox" id="enableScreenshots">
     <input type="checkbox" id="enableStealth">
+    <input type="checkbox" id="enableVerboseNavigatorPrompt">
     <textarea id="allowedDomains"></textarea>
     <textarea id="blockedDomains"></textarea>
     <input type="checkbox" id="notifyOnCompletion">

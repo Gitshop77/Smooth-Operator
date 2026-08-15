@@ -1,15 +1,19 @@
 import type { ChatMessage } from "../llm/provider";
+import type { ImagePartV1 } from "../llm/image-part";
 import { buildNavigatorUserMessage, buildPlannerUserMessage } from "../loop/messages";
-import { buildNavigatorPrompt } from "./navigator-prompt";
-import { buildPlannerPrompt } from "./planner-prompt";
+import type { buildNavigatorPrompt } from "./navigator-prompt";
 import { buildJudgeUserMessage, JUDGE_SYSTEM_PROMPT, type JudgePromptInputV1 } from "./judge-prompt";
+import {
+  memoizedCacheDescriptorV1,
+  memoizedNavigatorSystem,
+  memoizedPlannerSystem,
+} from "./prompt-memo";
 import {
   PROMPT_CONTRACT_VERSION,
   type CompiledPromptV1,
   type PromptKindV1,
   type PromptSectionV1,
 } from "./prompt-contract";
-import { createPromptCacheDescriptorV1 } from "./prompt-cache-descriptor";
 
 type NavigatorUserArgs = Parameters<typeof buildNavigatorUserMessage>[0];
 type PlannerUserArgs = Parameters<typeof buildPlannerUserMessage>[0];
@@ -22,6 +26,12 @@ interface CompileLegacyPairV1 {
   systemProvenance: PromptSectionV1["provenance"];
   userTrust: PromptSectionV1["trust"];
   invalidationKeys: string[];
+  /** Extra user-message parts appended AFTER the sections-derived text.
+   * NEVER rendered into a section: the cache descriptor hashes `section.text`
+   * (prompt-cache-descriptor.ts), so a structured image part — which is
+   * volatile per step and must not shape the stable cache key — stays a
+   * separate content part in `messages` only. */
+  extraUserParts?: Array<string | ImagePartV1>;
 }
 
 async function compileLegacyPairV1(input: CompileLegacyPairV1): Promise<CompiledPromptV1> {
@@ -50,12 +60,24 @@ async function compileLegacyPairV1(input: CompileLegacyPairV1): Promise<Compiled
     },
   ];
   const messages: ChatMessage[] = sections.map(({ role, text: content }) => ({ role, content }));
+  if (input.extraUserParts && input.extraUserParts.length > 0) {
+    // The user message becomes a parts array: the sections-derived text first,
+    // then the appended parts. `sections` stay text-only (see the interface
+    // contract above), so the cache descriptor never hashes the screenshot.
+    messages[1] = {
+      role: "user",
+      content: [
+        ...(typeof messages[1].content === "string" ? [messages[1].content] : messages[1].content),
+        ...input.extraUserParts,
+      ],
+    };
+  }
   return {
     version: PROMPT_CONTRACT_VERSION,
     kind: input.kind,
     sections,
     messages,
-    cache: await createPromptCacheDescriptorV1(sections, {
+    cache: await memoizedCacheDescriptorV1(sections, {
       cacheEligible: input.cacheEligible,
       invalidationKeys: input.invalidationKeys,
     }),
@@ -71,17 +93,33 @@ export interface CompileNavigatorPromptV1Input {
   /** Exact suffixes applied by the provider-facing adapter. */
   systemSuffix?: string;
   userSuffix?: string;
+  /** Structured screenshot part appended to the user message as a content
+   * part (never rendered as text — see `CompileLegacyPairV1.extraUserParts`).
+   * The base64 lives only in this part, so forged `<screenshot>` markers in
+   * page text can never be promoted into an image block. */
+  screenshot?: ImagePartV1;
   /** When true, use the COMPACT navigator system prompt for low-context
    * (<128k) models — every security/schema/behavior block is preserved, only
    * prose is compressed (see `buildNavigatorPrompt(..., compact)`). */
   compact?: boolean;
+  /** Capability-gated action names — when present the system prompt's action
+   * listing shows only the core actions + this set (executor schema unchanged;
+   * see `buildNavigatorPrompt(..., enabledActions)`). */
+  enabledActions?: ReadonlySet<string>;
 }
 
 export async function compileNavigatorPromptV1(
   input: CompileNavigatorPromptV1Input,
 ): Promise<CompiledPromptV1> {
-  const system = buildNavigatorPrompt(input.maxActions, input.customPrompt, input.visionMode, input.mode, input.compact) +
-    (input.systemSuffix ?? "");
+  const system = memoizedNavigatorSystem(
+    input.maxActions,
+    input.customPrompt,
+    input.visionMode,
+    input.mode,
+    input.compact,
+    input.systemSuffix,
+    input.enabledActions,
+  );
   const user = await buildNavigatorUserMessage(input.user) + (input.userSuffix ?? "");
   return compileLegacyPairV1({
     kind: "navigator",
@@ -97,6 +135,7 @@ export async function compileNavigatorPromptV1(
       "agentMode",
       "structured-output-support",
     ],
+    ...(input.screenshot ? { extraUserParts: [input.screenshot] } : {}),
   });
 }
 
@@ -111,7 +150,7 @@ export async function compilePlannerPromptV1(
 ): Promise<CompiledPromptV1> {
   return compileLegacyPairV1({
     kind: "planner",
-    system: buildPlannerPrompt(input.customPrompt) + (input.systemSuffix ?? ""),
+    system: memoizedPlannerSystem(input.customPrompt, input.systemSuffix),
     user: await buildPlannerUserMessage(input.user),
     // A planner call is two messages, but it is not one-use in an agent run:
     // the identical ~9.5KB system prefix is revisited every planner interval.
@@ -130,7 +169,14 @@ export async function compileJudgePromptV1(input: JudgePromptInputV1): Promise<C
     kind: "judge",
     system: JUDGE_SYSTEM_PROMPT,
     user: buildJudgeUserMessage(input),
-    cacheEligible: false,
+    // A judge call is two messages, but it is not one-use in an agent run:
+    // the byte-stable system prefix is revisited by every judge invocation
+    // (disagreement checks and done-claim audits). Mark only that stable
+    // prefix cacheable; the user section carries the per-call history and
+    // stays volatile. No staleness risk since the history is per-call. This
+    // enables explicit Anthropic caching and is harmless for providers with
+    // automatic/no prompt caching.
+    cacheEligible: true,
     systemProvenance: "application",
     userTrust: "untrusted-model",
     invalidationKeys: ["prompt-contract-version"],

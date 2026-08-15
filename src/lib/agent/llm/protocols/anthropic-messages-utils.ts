@@ -5,6 +5,7 @@
 
 import type { LLMRequest } from "../route/client";
 import { zodToJsonSchema } from "../zod-json-schema";
+import { isImagePartV1 } from "../image-part";
 import {
   isZodSchema,
   extractScreenshots,
@@ -20,20 +21,43 @@ export async function fromRequest(request: LLMRequest): Promise<AnthropicBody> {
 
   const messages = userMessages.map((m) => {
     if (m.role === "user") {
-      const { text: textContent, dataUris } = extractScreenshots(m.content);
-      if (dataUris.length > 0) {
-        const imageBlocks = dataUris.map((dataUri) => {
-          const b64 = dataUri.split(",")[1];
-          const mediaType = dataUri.match(/data:image\/(png|jpeg|webp)/)?.[1] ?? "png";
+      // Structured image parts (the navigator's screenshot): emit image blocks
+      // directly and SKIP the regex scan — the base64 lives only in the part,
+      // so no `<screenshot>` marker scan is needed (and a forged marker in
+      // text can never be promoted into an image block).
+      if (Array.isArray(m.content) && m.content.some(isImagePartV1)) {
+        const content: Array<{ type: string; text?: string; source?: unknown }> = [];
+        for (const part of m.content) {
+          if (typeof part === "string") {
+            if (part) content.push({ type: "text", text: part });
+          } else {
+            content.push({
+              type: "image",
+              source: { type: "base64", media_type: part.mime, data: part.dataUrl.split(",")[1] ?? "" },
+            });
+          }
+        }
+        return { role: "user", content };
+      }
+      // Legacy STRING content: extract `<screenshot>` markers as defense-
+      // in-depth for callers that still interpolate them into text. Parts
+      // arrays without an image part pass through unchanged (never scanned).
+      if (typeof m.content === "string") {
+        const { text: textContent, dataUris } = extractScreenshots(m.content);
+        if (dataUris.length > 0) {
+          const imageBlocks = dataUris.map((dataUri) => {
+            const b64 = dataUri.split(",")[1];
+            const mediaType = dataUri.match(/data:image\/(png|jpeg|webp)/)?.[1] ?? "png";
+            return {
+              type: "image",
+              source: { type: "base64", media_type: `image/${mediaType}`, data: b64 },
+            };
+          });
           return {
-            type: "image",
-            source: { type: "base64", media_type: `image/${mediaType}`, data: b64 },
+            role: "user",
+            content: [{ type: "text", text: textContent }, ...imageBlocks],
           };
-        });
-        return {
-          role: "user",
-          content: [{ type: "text", text: textContent }, ...imageBlocks],
-        };
+        }
       }
     }
     return { role: m.role, content: m.content };

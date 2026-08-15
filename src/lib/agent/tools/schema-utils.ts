@@ -139,13 +139,25 @@ const CORE_PROMPT_ACTIONS = new Set([
   "done", "ask_human", "takeover", "verify", "load_skill", "inspect_visual", "detect_visual",
 ]);
 
-export function actionListForPrompt(maxActions: number, visionMode: "disabled" | "always" | "adaptive" = "disabled"): string {
-  const cacheKey = `${maxActions}:${visionMode}`;
+export function actionListForPrompt(
+  maxActions: number,
+  visionMode: "disabled" | "always" | "adaptive" = "disabled",
+  enabledActions?: ReadonlySet<string>,
+): string {
+  const cacheKey = enabledActions
+    ? `${maxActions}:${visionMode}:gated:[${[...enabledActions].sort().join(",")}]`
+    : `${maxActions}:${visionMode}`;
   const cached = actionListCache.get(cacheKey);
   if (cached !== undefined) return cached;
   const lines: string[] = [];
   for (const meta of Object.values(ACTION_METADATA)) {
     if ((meta.name === "detect_visual" || meta.name === "inspect_visual") && visionMode !== "adaptive") continue;
+    // Capability gating: when an enabled set is provided, the listing renders
+    // ONLY the always-on core actions + the enabled set (plus the vision pair
+    // above). This is a PROMPT-LISTING-ONLY filter — the executor's Zod schema
+    // (tools/schema.ts) and ACTION_METADATA are unchanged, so the agent can
+    // still emit any action; the listing merely guides it.
+    if (enabledActions && !CORE_PROMPT_ACTIONS.has(meta.name) && !enabledActions.has(meta.name)) continue;
     const tag = meta.pageChanging
       ? " [page-changing — put last]"
       : meta.exclusive

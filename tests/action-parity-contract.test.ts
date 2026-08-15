@@ -227,6 +227,23 @@ describe("AgentAction canonical-set parity", () => {
       expect(BACKGROUND_ROUTE[type], type).not.toBeUndefined();
     }
   });
+
+  test("every ACTION_METADATA action remains in the executor schema regardless of prompt listing", () => {
+    // The prompt listing is a GUIDANCE surface only: capability gating must
+    // never change the executor's canonical schema. Every metadata action
+    // stays parseable even when a gated listing omits its name.
+    const schemaTypes = new Set(schemaActionTypes());
+    for (const name of Object.keys(ACTION_METADATA)) {
+      expect(schemaTypes.has(name), name).toBe(true);
+    }
+    const gatedPrompt = actionListForPrompt(50, "adaptive", new Set(["list_tabs"]));
+    for (const type of ACTION_TYPES) {
+      expect(ActionSchema.safeParse(ACTION_FIXTURES[type]).success, type).toBe(true);
+      expect(ACTION_METADATA[type], type).toMatchObject({ name: type });
+    }
+    expect(gatedPrompt).not.toContain("- evaluate");
+    expect(gatedPrompt).not.toContain("- get_cookies");
+  });
 });
 
 const HANDLER_BY_ACTION: Partial<Record<ActionType, string>> = {
