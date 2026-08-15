@@ -238,8 +238,8 @@ export async function annotateScreenshot(
   try {
     // Cap the output long edge (default 1800px). The source screenshot may be
     // 2-3× the CSS viewport at high DPR; VLMs downscale/tile anyway, so render
-    // the annotated canvas at the capped resolution and scale every device
-    // coordinate + font by `outScale`.
+    // the annotated canvas at the capped resolution and pre-multiply every
+    // device coordinate + font by `outScale`.
     const maxDim = options?.maxDimension ?? 1800;
     const outScale = Math.min(1, maxDim / Math.max(img.width, img.height));
     canvas.width = Math.max(1, Math.round(img.width * outScale));
@@ -247,16 +247,22 @@ export async function annotateScreenshot(
     const ctx = canvas.getContext("2d");
     if (!ctx) return screenshotDataUrl;
 
-    ctx.scale(outScale, outScale);
-
-    // Draw the original screenshot as the base layer.
-    img.drawTo(ctx);
+    // Draw the original screenshot as the base layer at the canvas' explicit
+    // dest size (scaled inside the draw call). NO `ctx.scale(outScale, …)`
+    // transform: the box coordinates below are already pre-multiplied by
+    // `scaleFactor * outScale` into device px, so a lingering transform would
+    // apply the downscale a SECOND time at render, squishing every box toward
+    // the origin whenever outScale < 1.
+    img.drawTo(ctx, canvas.width, canvas.height);
 
  // Draw numbered boxes on each element.
  // The canvas is at device resolution, so scale the label font by
- // `scaleFactor` to match the boxes; otherwise the label text renders at
- // ~1/scaleFactor of the intended visual size on high-DPR screenshots.
-    const sFont = fontSize * scaleFactor;
+ // `scaleFactor` (to match the boxes at DPR 1) AND by `outScale` (the
+ // canvas is capped below the source size; with the transform gone, a
+ // font at fontSize×scaleFactor alone would render 1/outScale too big,
+ // taller than its own pill). Visual size stays fontSize CSS px at any
+ // DPR and any cap.
+    const sFont = fontSize * scaleFactor * outScale;
     ctx.font = `bold ${sFont}px sans-serif`;
     ctx.textBaseline = "top";
 

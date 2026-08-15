@@ -28,11 +28,37 @@
  * (see `../mutation-signal`), which rebuilds the shared cache. A pure scroll
  * or viewport resize does NOT bump the epoch but DOES invalidate every cached
  * `getBoundingClientRect` (scroll-relative coordinates), so the cache is keyed
- * on the viewport signature too (see `../utils/viewport-signature`).
+ * on the viewport signature too (see `../utils/viewport-signature`). CSS
+ * @keyframes/WAAPI animations move rects/opacity WITHOUT firing
+ * MutationRecords, so the stamp additionally carries the animation clock
+ * (`document.timeline.currentTime`): when the clock advances the geometry may
+ * have changed and the cache rebuilds; a stable clock (idle page) keeps
+ * serving — the whole point of the cache.
  */
 import { isVisibleFull } from "./visibility";
 import { getDomEpoch, isMutationSignalArmed } from "../mutation-signal";
 import { viewportSignature } from "./viewport-signature";
+
+/**
+ * The document timeline's animation clock, or 0 when there is none. CSS
+ * animations (via `@keyframes` or WAAPI) advance this clock without firing
+ * MutationRecords, so it detects "geometry may have changed" on an otherwise
+ * mutation-silent page.
+ */
+export function animationClockFrom(
+  timeline: { currentTime?: number | null } | undefined | null,
+): number {
+  const currentTime = timeline?.currentTime;
+  return typeof currentTime === "number" && Number.isFinite(currentTime) ? currentTime : 0;
+}
+
+/** The current document's animation clock (0 in non-browser environments). */
+function animationClock(): number {
+  if (typeof document === "undefined") return 0;
+  return animationClockFrom(
+    (document as { timeline?: { currentTime?: number | null } }).timeline,
+  );
+}
 
 interface ReadCacheEntry {
   rect: DOMRect | undefined;
@@ -99,30 +125,39 @@ export class ReadCache {
   }
 }
 
-let sharedReadCache: { epoch: number; viewport: string; cache: ReadCache } | null = null;
+let sharedReadCache: {
+  epoch: number;
+  viewport: string;
+  anim: number;
+  cache: ReadCache;
+} | null = null;
 
 /**
  * The epoch-stamped persistent ReadCache shared by both extraction walks.
  *
  * Rebuilds only when the DOM epoch moved, the viewport signature changed
- * (scroll/resize reflows the rect cache even with an untouched DOM), or when
- * the mutation signal is unarmed (the epoch then can't be trusted to move, so
- * the cache fails closed and a fresh instance is served instead). Otherwise
- * the walkers serve every element's rect/style/visibility from the previous
- * walk's batch reads — on an unchanged page the second walk of a step (and
- * subsequent steps) performs zero forced layout reads. The DOM is never
- * written during a walk, so cached values stay fresh for the whole epoch.
+ * (scroll/resize reflows the rect cache even with an untouched DOM), the
+ * animation clock advanced (CSS animations move rects/opacity without
+ * MutationRecords), or when the mutation signal is unarmed (the epoch then
+ * can't be trusted to move, so the cache fails closed and a fresh instance is
+ * served instead). Otherwise the walkers serve every element's
+ * rect/style/visibility from the previous walk's batch reads — on an unchanged
+ * page the second walk of a step (and subsequent steps) performs zero forced
+ * layout reads. The DOM is never written during a walk, so cached values stay
+ * fresh for the whole epoch.
  */
 export function getSharedReadCache(): ReadCache {
   const epoch = getDomEpoch();
   const viewport = viewportSignature();
+  const anim = animationClock();
   if (
     !isMutationSignalArmed() ||
     !sharedReadCache ||
     sharedReadCache.epoch !== epoch ||
-    sharedReadCache.viewport !== viewport
+    sharedReadCache.viewport !== viewport ||
+    sharedReadCache.anim !== anim
   ) {
-    sharedReadCache = { epoch, viewport, cache: new ReadCache() };
+    sharedReadCache = { epoch, viewport, anim, cache: new ReadCache() };
   }
   return sharedReadCache.cache;
 }

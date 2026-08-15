@@ -267,6 +267,63 @@ describe("drawing path", () => {
     expect(canvas.height).toBe(50);
   });
 
+  test("outScale < 1 draws boxes at pre-multiplied device px with no extra transform (no double-scale)", async () => {
+    const ctx = makeContext();
+    const canvas = makeCanvas(ctx);
+    mockCreateCanvas.mockReturnValue(canvas as never);
+    // A 2400x1600 source (full-res capture) capped to maxDimension 1800 →
+    // outScale 0.75. Coordinates are pre-multiplied by scaleFactor * outScale
+    // into device px; a lingering ctx.scale(outScale, outScale) transform
+    // would apply the downscale a SECOND time at render (squishing every box
+    // toward the origin), so the transform must NOT be set and the base image
+    // must be drawn at the canvas' explicit dest size instead.
+    const img = makeImage(2400, 1600);
+    mockLoadImage.mockResolvedValue(img);
+    const elements: AnnotatableElement[] = [
+      { index: 1, rect: { x: 100, y: 100, width: 200, height: 100 } },
+    ];
+
+    await annotateScreenshot(RAW, elements, { maxDimension: 1800, scaleFactor: 2 });
+
+    expect(canvas.width).toBe(1800);
+    expect(canvas.height).toBe(1200);
+    expect(ctx.scale).not.toHaveBeenCalled();
+    // Base layer drawn at the canvas' dest size (scaled down in the draw call,
+    // not by a context transform).
+    expect(img.drawTo).toHaveBeenCalledWith(ctx, 1800, 1200);
+    // Device px: CSS (100,100,200,100) x DPR 2 x outScale 0.75, rounded.
+    expect(ctx.strokeRect).toHaveBeenCalledWith(150, 150, 300, 150);
+  });
+
+  test("outScale < 1 scales the label font by outScale so the label stays inside its box", async () => {
+    // Regression: the removed ctx.scale transform used to scale EVERYTHING
+    // (including the label font) by outScale at render time. With the
+    // transform gone, a font at fontSize x scaleFactor alone renders
+    // 1/outScale too big — taller than its own pill and overflowing the box.
+    // The label font must be fontSize x scaleFactor x outScale; the pill
+    // (sFont * outScale + padding) then fits it exactly.
+    const ctx = makeContext();
+    const canvas = makeCanvas(ctx);
+    mockCreateCanvas.mockReturnValue(canvas as never);
+    // Same downscaled path as the double-scale regression test.
+    mockLoadImage.mockResolvedValue(makeImage(2400, 1600));
+    const elements: AnnotatableElement[] = [
+      { index: 1, rect: { x: 100, y: 100, width: 200, height: 100 } },
+    ];
+
+    await annotateScreenshot(RAW, elements, { maxDimension: 1800, scaleFactor: 2 });
+
+    // Default fontSize(14) x scaleFactor(2) x outScale(0.75) = 21 device px —
+    // NOT the 28 px the pre-fix code would emit (1/outScale too big).
+    expect(ctx.font).toBe("bold 21px sans-serif");
+    // The label pill: text at sFont x outScale + 4 x scaleFactor x outScale
+    // tall and 6 x scaleFactor x outScale wider than the measured text —
+    // single-factor math, so the text fits inside its own pill.
+    expect(ctx.fillRect).toHaveBeenCalledWith(150, 150, 20 + 9, 21 * 0.75 + 6);
+    // measureText reflects the scaled font; text baseline is top of pill.
+    expect(ctx.textBaseline).toBe("top");
+  });
+
   test("DEFAULT_ANNOTATE_PALETTE entries are all valid hex colors", () => {
     expect(DEFAULT_ANNOTATE_PALETTE).toHaveLength(12);
     for (const c of DEFAULT_ANNOTATE_PALETTE) {

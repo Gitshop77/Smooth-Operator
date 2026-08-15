@@ -268,8 +268,13 @@ describe("screenshot annotation scales CSS rects by DPR (device-pixel drawing)",
     // outScale = 1800/2560 = 0.703125 → canvas 1800x1125.
     expect(canvas.width).toBe(1800);
     expect(canvas.height).toBe(1125);
-    // The 2D context is scaled so coordinates are authored in capped-device px.
-    expect(scale).toHaveBeenCalledWith(0.703125, 0.703125);
+    // No 2D transform is applied — boxes are authored in pre-multiplied
+    // capped-device px (regression pin for the removed ctx.scale double-scale
+    // bug: a transform on top of pre-multiplied coords squished boxes toward
+    // the origin whenever outScale < 1). The base layer is drawn at the
+    // explicit dest size instead.
+    expect(scale).not.toHaveBeenCalled();
+    expect(image.drawTo).toHaveBeenCalledWith(ctx, 1800, 1125);
     // CSS (100,100,100,100) × DPR2 × outScale, rounded.
     expect(strokeRect).toHaveBeenCalledWith(141, 141, 141, 141);
   });

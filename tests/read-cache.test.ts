@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ReadCache } from "../src/lib/agent/dom/utils/read-cache";
+import {
+  ReadCache,
+  getSharedReadCache,
+  animationClockFrom,
+} from "../src/lib/agent/dom/utils/read-cache";
+import { installMutationSignal } from "../src/lib/agent/dom/mutation-signal";
 import { extractBrowserState } from "../src/lib/agent/dom/extraction/page-state";
 import {
   installJsdomLayoutMock,
@@ -44,6 +49,47 @@ describe("ReadCache", () => {
     expect(cache.getVisible(div)).toBe(false);
     expect(cache.getVisible(div)).toBe(false);
     expect(spyStyle).not.toHaveBeenCalled();
+  });
+});
+
+describe("animation-clock keyed shared read cache", () => {
+  afterEach(() => {
+    // jsdom has no document.timeline by default; restore the pristine state
+    // so later tests in this file see the constant-0 clock again.
+    delete (document as { timeline?: unknown }).timeline;
+    vi.restoreAllMocks();
+  });
+
+  it("animationClockFrom reads a number timeline clock, 0 for null/undefined/missing", () => {
+    expect(animationClockFrom({ currentTime: 123.5 })).toBe(123.5);
+    expect(animationClockFrom({ currentTime: 0 })).toBe(0);
+    expect(animationClockFrom({ currentTime: null })).toBe(0);
+    expect(animationClockFrom({})).toBe(0);
+    expect(animationClockFrom(undefined)).toBe(0);
+    expect(animationClockFrom(null)).toBe(0);
+  });
+
+  it("rebuilds the shared cache when the animation clock advances, serves the same instance when it is stable", () => {
+    installMutationSignal();
+    // A controllable CSS-animation timeline: @keyframes/WAAPI geometry changes
+    // advance the clock WITHOUT firing MutationRecords, so the cache stamp
+    // must move with it (a changed clock may mean changed rects/visibility).
+    let clock: number | null = 0;
+    Object.defineProperty(document, "timeline", {
+      configurable: true,
+      value: { get currentTime() { return clock; } },
+    });
+
+    const first = getSharedReadCache();
+    const sameClockAgain = getSharedReadCache();
+    expect(sameClockAgain).toBe(first); // stable clock → same instance served
+
+    clock = 500; // animation advanced between walks
+    const rebuilt = getSharedReadCache();
+    expect(rebuilt).not.toBe(first);
+
+    const stableAfterRebuild = getSharedReadCache();
+    expect(stableAfterRebuild).toBe(rebuilt);
   });
 });
 

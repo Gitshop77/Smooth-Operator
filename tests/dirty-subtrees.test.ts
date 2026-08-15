@@ -35,6 +35,9 @@ import {
   getDomEpoch,
   installMutationSignal,
   DIRTY_ROOTS_BUCKET_CAP,
+  DIRTY_EPOCH_BUCKET_CAP,
+  __test_dirtyBucketCountForTests,
+  isDirtyWindowGapPruned,
 } from "../src/lib/agent/dom/mutation-signal";
 import {
   installJsdomLayoutMock,
@@ -125,6 +128,77 @@ describe("dirty-root recording (mutation-signal)", () => {
     expect(roots).toContain(left);
     expect(roots).toContain(right);
     clearDirtyRoots(getDomEpoch());
+  });
+});
+
+describe("epoch-bucket pruning (idle-page bound)", () => {
+  it("keeps the bucket COUNT bounded when epochs advance with no consuming walk", async () => {
+    // An idle-but-active page (background tab, paused loop) mutates without
+    // any extraction walk calling clearDirtyRoots — each mutation batch bumps
+    // the epoch and allocates one bucket. Without pruning the map would grow
+    // one entry per batch for the life of the content-script instance.
+    const targets: HTMLElement[] = [];
+    for (let i = 0; i < DIRTY_EPOCH_BUCKET_CAP + 9; i++) {
+      const div = document.createElement("div");
+      div.id = `epoch-target-${i}`;
+      document.body.appendChild(div);
+      targets.push(div);
+    }
+    await settleDom(); // flush + consume the setup batch
+
+    // One attribute mutation per macrotask → one MutationObserver batch per
+    // epoch → one bucket per epoch, never consumed by a walk.
+    for (let i = 0; i < targets.length; i++) {
+      targets[i].setAttribute("data-i", String(i));
+      await tick();
+    }
+
+    // Bounded: the oldest superseded buckets were pruned at creation time.
+    expect(__test_dirtyBucketCountForTests()).toBeLessThanOrEqual(DIRTY_EPOCH_BUCKET_CAP);
+    const roots = getDirtyRoots(getDomEpoch());
+    // The oldest target's bucket is gone (pruned), the newest still served.
+    expect(roots).not.toContain(targets[0]);
+    expect(roots).toContain(targets[targets.length - 1]);
+
+    // Consumption semantics for in-range epochs are untouched: a walk still
+    // clears every remaining bucket.
+    clearDirtyRoots(getDomEpoch());
+    expect(__test_dirtyBucketCountForTests()).toBe(0);
+  });
+
+  it("flags a pruned un-consumed window so partial-splice consumers fail closed", async () => {
+    // The prune caveat: a walk that lags more than DIRTY_EPOCH_BUCKET_CAP
+    // behind the observer never sees the pruned buckets' mutations, so the
+    // dirty set cannot cover the whole un-consumed window. isDirtyWindowGapPruned
+    // must report true BEFORE getDirtyRoots consumes, and false again after a
+    // walk at the current epoch.
+    expect(isDirtyWindowGapPruned(getDomEpoch())).toBe(false);
+
+    const targets: HTMLElement[] = [];
+    for (let i = 0; i < DIRTY_EPOCH_BUCKET_CAP + 9; i++) {
+      const div = document.createElement("div");
+      div.id = `gap-target-${i}`;
+      document.body.appendChild(div);
+      targets.push(div);
+    }
+    await settleDom(); // flush + consume the setup batch
+
+    for (let i = 0; i < targets.length; i++) {
+      targets[i].setAttribute("data-i", String(i));
+      await tick();
+    }
+
+    // The un-consumed window is wider than the cap → pruning ran → the
+    // window is incomplete. Must be reported BEFORE any getDirtyRoots call
+    // (which would consume and mask the gap).
+    expect(isDirtyWindowGapPruned(getDomEpoch())).toBe(true);
+
+    // A walk at the current epoch consumes the remaining window...
+    const roots = getDirtyRoots(getDomEpoch());
+    expect(roots.length).toBeGreaterThan(0);
+    clearDirtyRoots(getDomEpoch());
+    // ...and the next window starts fresh: no gap.
+    expect(isDirtyWindowGapPruned(getDomEpoch())).toBe(false);
   });
 });
 

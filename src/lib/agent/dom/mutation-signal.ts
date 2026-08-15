@@ -72,6 +72,20 @@ function recordTargetElement(record: MutationRecord): Element | null {
 export const DIRTY_ROOTS_BUCKET_CAP = 128;
 
 /**
+ * Cap on the number of epoch buckets retained when no walk consumes them. On
+ * an idle-but-active page (background tab, paused loop) the observer keeps
+ * recording — one bucket per mutation batch — while `clearDirtyRoots` (which
+ * runs from walks) never fires, so bucket CONTENT is capped by
+ * {@link DIRTY_ROOTS_BUCKET_CAP} but bucket COUNT would otherwise grow for the
+ * life of the content-script instance. Pruning on new-bucket creation bounds
+ * the count. NOTE: a walk that lags more than the cap behind the observer
+ * never sees the pruned buckets' mutations — consumers whose correctness
+ * depends on the dirty set covering the whole un-consumed window must check
+ * {@link isDirtyWindowGapPruned} and fail closed.
+ */
+export const DIRTY_EPOCH_BUCKET_CAP = 16;
+
+/**
  * Append a record batch's targets to the current epoch's bucket, keeping only
  * TOPMOST elements: a target whose ancestor is already in the bucket is
  * dropped (the ancestor's re-walk covers it), and a new target drops any
@@ -85,6 +99,12 @@ function recordDirtyTargets(records: MutationRecord[]): void {
   const bucketEpoch = epoch;
   let bucket = dirtyRootsByEpoch.get(bucketEpoch);
   if (!bucket) {
+    // Prune buckets older than DIRTY_EPOCH_BUCKET_CAP epochs before adding a
+    // new one (see the const's comment for why that is safe) — bounds the
+    // bucket COUNT on idle-but-active pages where no walk consumes them.
+    for (const key of Array.from(dirtyRootsByEpoch.keys())) {
+      if (key <= bucketEpoch - DIRTY_EPOCH_BUCKET_CAP) dirtyRootsByEpoch.delete(key);
+    }
     bucket = [];
     dirtyRootsByEpoch.set(bucketEpoch, bucket);
   }
@@ -235,4 +255,28 @@ export function clearDirtyRoots(epoch: number): void {
     if (bucketEpoch <= epoch) dirtyRootsByEpoch.delete(bucketEpoch);
   }
   if (epoch > lastConsumedEpoch) lastConsumedEpoch = epoch;
+}
+
+/**
+ * True when pruning may have removed dirty buckets the current walk has never
+ * seen: the un-consumed window `(lastConsumedEpoch, epoch]` is wider than
+ * {@link DIRTY_EPOCH_BUCKET_CAP}. Bucket pruning only happens when a NEW
+ * bucket is created, so on a chatty page where a walk lags 16+ observer
+ * batches, buckets for the window's oldest epochs are deleted BEFORE the walk
+ * runs — the dirty set then cannot cover the whole un-consumed window.
+ * Consumers that splice on that invariant (partial re-serialization) MUST
+ * fail closed on this (full walk); splicing on an incomplete dirty set would
+ * serve stale serialized text for the pruned subtrees.
+ */
+export function isDirtyWindowGapPruned(epoch: number): boolean {
+  return epoch - lastConsumedEpoch > DIRTY_EPOCH_BUCKET_CAP;
+}
+
+/**
+ * @internal Test-only: number of epoch buckets currently retained. Exposes the
+ * otherwise-private map's size so tests can assert the bucket-COUNT bound
+ * (`DIRTY_EPOCH_BUCKET_CAP`) holds on idle-but-active pages.
+ */
+export function __test_dirtyBucketCountForTests(): number {
+  return dirtyRootsByEpoch.size;
 }

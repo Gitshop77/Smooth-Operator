@@ -15,6 +15,7 @@ import { escapeAttr, attrString, buildPageInfo, buildCompoundChildren } from "./
 import { ReadCache, getSharedReadCache } from "../utils/read-cache";
 import { bumpDomEpoch, getDomEpoch, installMutationSignal, isMutationSignalArmed } from "../mutation-signal";
 import { clearDirtyRoots, getDirtyRoots } from "../dirty-subtrees";
+import { isDirtyWindowGapPruned } from "../mutation-signal";
 import { getViewportTracker } from "../viewport-tracker";
 
 /**
@@ -691,6 +692,14 @@ function tryPartialExtract(
 ): BrowserState | null {
   if (!isMutationSignalArmed()) return null;
   if (epoch === lastExtractEpoch) return null;
+  // Pruning gap: the mutation signal prunes buckets older than
+  // DIRTY_EPOCH_BUCKET_CAP epochs when a new bucket is created, so if the
+  // un-consumed window is wider than the cap, buckets for the window's
+  // oldest epochs may have been deleted BEFORE this walk — the dirty set
+  // cannot cover the whole window and a splice could serve stale serialized
+  // text for those subtrees. Fail closed (full walk); the window is fresh
+  // again once this walk consumes it.
+  if (isDirtyWindowGapPruned(epoch)) return null;
   const dirtyRoots = getDirtyRoots(epoch);
   if (dirtyRoots.length === 0) return null;
   if (cachedElements.length === 0 || cachedLines.length === 0) return null;
