@@ -14,6 +14,37 @@ import {
   stripHistoryScreenshotMarkers,
 } from "../src/extension/llm-direct-utils";
 import type { HistoryItem } from "../src/lib/agent/types";
+import type { AgentStepRequest } from "../src/lib/agent/types";
+import type { LoopDeps } from "../src/lib/agent/loop/types";
+import { callNavigatorWithRetry } from "../src/lib/agent/loop/helpers/llm-calls";
+import { compileNavigatorPromptV1 } from "../src/lib/agent/prompts/prompt-compiler";
+import * as navigatorPromptModule from "../src/lib/agent/prompts/navigator-prompt";
+import { historyItemRenderer } from "../src/lib/agent/loop/messages-utils";
+import { clearPromptMemo } from "../src/lib/agent/prompts/prompt-memo";
+import * as secretsModule from "../src/lib/agent/secrets";
+import { clearRedactionMemo } from "../src/lib/agent/redaction-memo";
+import { makeHistoryItem, installLocalStorageStub, restoreLocalStorageStub } from "./helpers";
+
+// Wrap the REAL buildNavigatorPrompt (so byte-identity flows through the whole
+// import graph) while making every invocation countable at the module boundary
+// — including the prompt-memo module that memoizes it (D1).
+vi.mock("../src/lib/agent/prompts/navigator-prompt", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/agent/prompts/navigator-prompt")>();
+  return {
+    ...actual,
+    buildNavigatorPrompt: vi.fn(actual.buildNavigatorPrompt),
+  };
+});
+
+// Wrap the REAL redactSecrets so the memoized-redaction layer (D3) stays
+// functionally intact while its underlying redactor is countable.
+vi.mock("../src/lib/agent/secrets", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/agent/secrets")>();
+  return {
+    ...actual,
+    redactSecrets: vi.fn(actual.redactSecrets),
+  };
+});
 
 describe("capText", () => {
   test("undefined -> empty string (no crash on missing field)", () => {
@@ -181,6 +212,139 @@ describe("stripHistoryScreenshotMarkers", () => {
     const second = stripHistoryScreenshotMarkers(history);
     expect(second).not.toBe(first);
     expect(second).toHaveLength(2);
+  });
+});
+
+describe("callNavigatorWithRetry — parse-retry recompiles hit the D1/D3/D5 memos", () => {
+  const VALID_OUTPUT = JSON.stringify({
+    thinking: "x",
+    evaluation_previous_goal: "y",
+    memory: "z",
+    next_goal: "w",
+    action: [{ type: "scroll", down: true, pages: 1 }],
+  });
+
+  beforeAll(() => installLocalStorageStub());
+  afterAll(() => restoreLocalStorageStub());
+
+  test("a 2-retry cycle compiles the navigator prompt 3 times but rebuilds nothing expensive", async () => {
+    // Fresh memos so the counters below measure exactly this cycle (D1/D3
+    // memos are module state; the history caches are keyed by item identity
+    // and the fresh fixtures below cannot collide with prior tests).
+    clearPromptMemo();
+    clearRedactionMemo();
+
+    // Every redacted string is unique (each history item carries distinct
+    // evaluation/memory/goal/result strings), so "each unique string redacted
+    // at most once" ⟺ "redactSecrets called once per unique input" — a miss
+    // on any retry compile would double a string and break the equality.
+    const history = Array.from({ length: 4 }, (_, i) =>
+      makeHistoryItem(i, {
+        evaluation: `evaluation-${i}`,
+        memory: `memory-${i}`,
+        goal: `goal-${i}`,
+        results: i % 2 === 0
+          ? [{
+              action: { type: "click", index: i } as AgentStepRequest["history"][number]["results"][number]["action"],
+              success: true,
+              message: `message-${i}`,
+              extractedContent: `extracted-${i}`,
+            }]
+          : [],
+      }),
+    );
+
+    const request: AgentStepRequest = {
+      task: "Retry-memo verification task",
+      history,
+      currentGoal: "current goal",
+      plan: ["plan a", "plan b"],
+      currentPlanItem: 0,
+      browserState: {
+        url: "https://example.com",
+        title: "Example page",
+        tabs: [{ id: 1, label: "tab", url: "https://example.com/tab", title: "Tab title", active: true }],
+        elementsText: "[1]<button>Continue</button>[2]<input name=q>",
+        pageInfo: "0 pages above, 1 page below",
+        newElementCount: 0,
+        axTree: "button Continue, input q",
+      },
+      step: 0,
+      maxSteps: 10,
+      compactedMemory: "compacted summary of earlier steps",
+    };
+
+    // Provider returns invalid JSON twice, then valid — exactly the retry
+    // cycle this task verifies.
+    const raws = ["this is not valid agent output json", "{also broken: [", VALID_OUTPUT];
+
+    const systemSpy = vi.spyOn(navigatorPromptModule, "buildNavigatorPrompt");
+    const renderSpy = vi.spyOn(historyItemRenderer, "render");
+    // Zero the full-jitter backoff so the retry cycle runs in ~0ms.
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const navigatorCall = vi.fn(async (req: AgentStepRequest) => {
+        // Mirror navigatorCallDirect's compile: every attempt re-compiles the
+        // full navigator prompt (system + user message) from the request.
+        await compileNavigatorPromptV1({
+          maxActions: 5,
+          user: {
+            task: req.task,
+            history: req.history ?? [],
+            currentGoal: req.currentGoal || req.task,
+            plan: req.plan,
+            currentPlanItem: req.currentPlanItem,
+            browserState: req.browserState,
+            step: req.step,
+            maxSteps: req.maxSteps,
+            compactedMemory: req.compactedMemory,
+            loopWarning: req.loopWarning,
+          },
+        });
+        return { raw: raws.shift()!, tokensIn: 10, tokensOut: 5, model: "test-model" };
+      });
+
+      const deps: LoopDeps = {
+        task: "t",
+        navigatorCall: navigatorCall as unknown as LoopDeps["navigatorCall"],
+        plannerCall: vi.fn(async () => ({ raw: "{}" })),
+        getTabs: vi.fn(async () => []),
+        onEvent: () => {},
+      };
+
+      const out = await callNavigatorWithRetry(deps, request, 0, () => {});
+
+      // The retry cycle: 1 original call + 2 parse retries = 3 full
+      // navigator-prompt compiles.
+      expect(navigatorCall).toHaveBeenCalledTimes(3);
+      expect(out).toBeDefined();
+
+      // D1 — system-prompt memo: 3 compiles, ONE buildNavigatorPrompt
+      // invocation; attempts 2-3 are cache hits.
+      expect(systemSpy).toHaveBeenCalledTimes(1);
+
+      // D3 — redaction memo: across the WHOLE cycle every unique string is
+      // redacted exactly once (the retry compiles re-use the memoized
+      // redactions instead of re-scanning the page content / history).
+      const redactedArgs = vi.mocked(secretsModule.redactSecrets).mock.calls.map((c) => c[0]);
+      expect(new Set(redactedArgs).size).toBe(redactedArgs.length);
+
+      // D5 — history prefix cache: the 2 masked (stale-observation) items
+      // render exactly ONCE across all 3 compiles; only the 2 retention-window
+      // items re-render per compile.
+      const byStep = new Map<number, number>();
+      for (const [h] of renderSpy.mock.calls) {
+        byStep.set(h.step, (byStep.get(h.step) ?? 0) + 1);
+      }
+      expect(byStep.get(0)).toBe(1);
+      expect(byStep.get(1)).toBe(1);
+      expect(byStep.get(2)).toBe(3);
+      expect(byStep.get(3)).toBe(3);
+    } finally {
+      systemSpy.mockClear();
+      renderSpy.mockRestore();
+      randomSpy.mockRestore();
+    }
   });
 });
 

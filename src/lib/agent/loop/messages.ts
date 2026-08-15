@@ -54,14 +54,23 @@ let cachedSecretVersion = -1;
 function syncSecretVersion(): void {
   const v = getSecretSetVersion();
   if (v !== cachedSecretVersion) {
+    // The -1 sentinel means "never synced": the FIRST sync is not a version
+    // bump. The string-keyed memos (redaction-memo.ts) may already hold
+    // entries for the CURRENT version (buildNavigatorUserMessage memoizes the
+    // page strings before redactHistoryForPrompt runs its first sync), so
+    // clearing them on the first sync would discard valid entries and force a
+    // redundant re-redaction pass on the next compile. Their entries carry the
+    // version and self-invalidate on a genuine bump — clearing only bounds
+    // their memory. Skip it until the version really changes.
+    const versionChanged = cachedSecretVersion !== -1;
     cachedSecretVersion = v;
     // WeakMap has no `.clear()` — replace with a fresh instance.
     redactionCache = new WeakMap();
     itemCache = new WeakMap();
-    // Drop the string-keyed redaction/injection memos too: their entries are
-    // keyed by the current secrets version, so a bump invalidates them — and
-    // clearing here bounds their memory to the current secret set.
-    clearRedactionMemo();
+    // Drop the string-keyed redaction/injection memos on a genuine bump: their
+    // entries are keyed by the current secrets version, so a bump invalidates
+    // them — and clearing here bounds their memory to the current secret set.
+    if (versionChanged) clearRedactionMemo();
   }
 }
 async function redactExtractedCached(r: ActionResult): Promise<ActionResult> {
