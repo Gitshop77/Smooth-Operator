@@ -108,6 +108,7 @@ describe("actionListForPrompt capability gating", () => {
 - extract — Extract info from page text via a query. | params: { query: string }
 - done [must be the only action] — Finish the task. | params: { text: string (summary), success: boolean }
 - search [page-changing — put last] — Search the web (DuckDuckGo/Google/Bing). | params: { query: string, engine?: 'duckduckgo'|'google'|'bing'|'yahoo'|'baidu' }
+- research [must be the only action] — Research the web in the fast headless Lightpanda browser with the same AI — returns a synthesized answer for fresh/multi-site questions. Runs outside the current tab. | params: { query: string }
 - upload_file | params: { index: number, path: string }
 - screenshot | params: { file_name?: string }
 - inspect_visual [must be the only action] — Attach one fresh viewport screenshot to the next model turn when pixels materially help (images, charts, canvas, layout, occlusion, or ambiguity). Never call routinely. | params: { reason: string }
