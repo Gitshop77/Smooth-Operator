@@ -19,6 +19,7 @@ import {
   compileNavigatorPromptV1,
   compilePlannerPromptV1,
 } from "../lib/agent/prompts/prompt-compiler";
+import { clearPromptMemo } from "../lib/agent/prompts/prompt-memo";
 import {
   assertCompiledPromptWithinContextBudgetV1,
   assertCompiledPromptWithinProfileV1,
@@ -142,6 +143,21 @@ const settingCache = new Map<string, unknown>();
 /** Provider-config storage keys whose change must invalidate the cached provider. */
 const PROVIDER_CONFIG_KEYS = ["provider", "model", "baseUrl", "resourceName", "apiKey", "provenance"];
 
+/** Storage keys that feed the compiled navigator/planner system prompt or its
+ * cache descriptor (custom prompts, vision mode, screenshots, agent mode,
+ * effective context, max actions). Any change must drop the prompt memo so the
+ * next compile is built from CURRENT settings. */
+const PROMPT_MEMO_INVALIDATION_KEYS = [
+  "customNavigatorPrompt",
+  "customPlannerPrompt",
+  "visionMode",
+  "enableLocalVision",
+  "enableScreenshots",
+  "agentMode",
+  "contextTokens",
+  "maxActions",
+];
+
 if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
   chrome.storage.onChanged.addListener((changes, _area) => {
     // `forceReasoning` is read by buildProvider to patch supportsReasoning, so
@@ -155,6 +171,7 @@ if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
       cachedProviderConfig = null;
       configEpoch++;
     }
+    if (PROMPT_MEMO_INVALIDATION_KEYS.some((k) => k in changes)) clearPromptMemo();
     if (changes.customNavigatorPrompt) settingCache.delete("customNavigatorPrompt");
     if (changes.customPlannerPrompt) settingCache.delete("customPlannerPrompt");
     if (changes.visionMode || changes.enableLocalVision) settingCache.delete("visionMode");

@@ -1,16 +1,19 @@
 import type { ChatMessage } from "../llm/provider";
 import type { ImagePartV1 } from "../llm/image-part";
 import { buildNavigatorUserMessage, buildPlannerUserMessage } from "../loop/messages";
-import { buildNavigatorPrompt } from "./navigator-prompt";
-import { buildPlannerPrompt } from "./planner-prompt";
+import type { buildNavigatorPrompt } from "./navigator-prompt";
 import { buildJudgeUserMessage, JUDGE_SYSTEM_PROMPT, type JudgePromptInputV1 } from "./judge-prompt";
+import {
+  memoizedCacheDescriptorV1,
+  memoizedNavigatorSystem,
+  memoizedPlannerSystem,
+} from "./prompt-memo";
 import {
   PROMPT_CONTRACT_VERSION,
   type CompiledPromptV1,
   type PromptKindV1,
   type PromptSectionV1,
 } from "./prompt-contract";
-import { createPromptCacheDescriptorV1 } from "./prompt-cache-descriptor";
 
 type NavigatorUserArgs = Parameters<typeof buildNavigatorUserMessage>[0];
 type PlannerUserArgs = Parameters<typeof buildPlannerUserMessage>[0];
@@ -74,7 +77,7 @@ async function compileLegacyPairV1(input: CompileLegacyPairV1): Promise<Compiled
     kind: input.kind,
     sections,
     messages,
-    cache: await createPromptCacheDescriptorV1(sections, {
+    cache: await memoizedCacheDescriptorV1(sections, {
       cacheEligible: input.cacheEligible,
       invalidationKeys: input.invalidationKeys,
     }),
@@ -104,8 +107,14 @@ export interface CompileNavigatorPromptV1Input {
 export async function compileNavigatorPromptV1(
   input: CompileNavigatorPromptV1Input,
 ): Promise<CompiledPromptV1> {
-  const system = buildNavigatorPrompt(input.maxActions, input.customPrompt, input.visionMode, input.mode, input.compact) +
-    (input.systemSuffix ?? "");
+  const system = memoizedNavigatorSystem(
+    input.maxActions,
+    input.customPrompt,
+    input.visionMode,
+    input.mode,
+    input.compact,
+    input.systemSuffix,
+  );
   const user = await buildNavigatorUserMessage(input.user) + (input.userSuffix ?? "");
   return compileLegacyPairV1({
     kind: "navigator",
@@ -136,7 +145,7 @@ export async function compilePlannerPromptV1(
 ): Promise<CompiledPromptV1> {
   return compileLegacyPairV1({
     kind: "planner",
-    system: buildPlannerPrompt(input.customPrompt) + (input.systemSuffix ?? ""),
+    system: memoizedPlannerSystem(input.customPrompt, input.systemSuffix),
     user: await buildPlannerUserMessage(input.user),
     // A planner call is two messages, but it is not one-use in an agent run:
     // the identical ~9.5KB system prefix is revisited every planner interval.

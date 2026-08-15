@@ -6,7 +6,7 @@
  * content and history).
  */
 
-import { describe, test, expect } from "vitest";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import {
   capText,
   extractUsage,
@@ -163,5 +163,55 @@ describe("stripHistoryScreenshotMarkers", () => {
     (item.results[0] as { extractedContent: string | null }).extractedContent = null;
     const out = stripHistoryScreenshotMarkers([item]);
     expect(out[0].results[0].extractedContent).toBeNull();
+  });
+});
+
+describe("storage.onChanged prompt-memo invalidation", () => {
+  let listener: ((changes: Record<string, unknown>, area: string) => void) | null = null;
+
+  beforeAll(() => {
+    (globalThis as unknown as { chrome: unknown }).chrome = {
+      storage: {
+        local: { get: () => Promise.resolve({}), set: () => Promise.resolve() },
+        onChanged: {
+          addListener: (l: (changes: Record<string, unknown>, area: string) => void) => {
+            listener = l;
+          },
+        },
+      },
+    };
+  });
+
+  afterAll(() => {
+    delete (globalThis as unknown as { chrome?: unknown }).chrome;
+    vi.resetModules();
+  });
+
+  test("every prompt-affecting storage key clears the compiled-prompt memo", async () => {
+    // Fresh module import so the onChanged listener registers against the stub.
+    await import("../src/extension/llm-direct");
+    const memoModule = await import("../src/lib/agent/prompts/prompt-memo");
+    const clearSpy = vi.spyOn(memoModule, "clearPromptMemo");
+
+    const invalidationKeys = [
+      "customNavigatorPrompt",
+      "customPlannerPrompt",
+      "visionMode",
+      "enableLocalVision",
+      "enableScreenshots",
+      "agentMode",
+      "contextTokens",
+      "maxActions",
+    ];
+    for (const key of invalidationKeys) {
+      clearSpy.mockClear();
+      listener?.({ [key]: { newValue: "x" } }, "local");
+      expect(clearSpy, `expected clearPromptMemo on ${key}`).toHaveBeenCalledTimes(1);
+    }
+
+    // Keys that only affect per-call reasoning config must NOT drop the memo.
+    clearSpy.mockClear();
+    listener?.({ reasoningEffort: { newValue: "high" } }, "local");
+    expect(clearSpy).not.toHaveBeenCalled();
   });
 });
