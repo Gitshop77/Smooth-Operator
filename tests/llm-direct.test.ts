@@ -383,7 +383,6 @@ describe("storage.onChanged prompt-memo invalidation", () => {
       "enableScreenshots",
       "agentMode",
       "contextTokens",
-      "enableVerboseNavigatorPrompt",
       "maxActions",
     ];
     for (const key of invalidationKeys) {

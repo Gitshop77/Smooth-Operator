@@ -355,8 +355,6 @@ describe("64k-model survival proof (end-to-end)", () => {
     // assert it fits the 64k-derived input budget.
     const compiled = await compileNavigatorPromptV1({
       maxActions: 5,
-      // llm-direct uses the compact system prompt for <128k models.
-      compact: true,
       user: {
         task: "Research the pricing for the enterprise plan and report the annual cost. ".repeat(3),
         history,
@@ -411,7 +409,7 @@ describe("64k-model survival proof (end-to-end)", () => {
   });
 
   test("a KNOWN context below the navigator floor is rejected at run start (no silent per-step failures)", () => {
-    // The compact system prompt alone is ~21KB ≈ 10.6k estimated tokens; at an
+    // The system prompt alone is ~21KB ≈ 10.6k estimated tokens; at an
     // 8k context the derived input budget is ~6.8k tokens, so EVERY step would
     // throw PromptBudgetExceededError. The pre-flight assert turns that into a
     // clear run-start error instead of a step-1 failure.
@@ -421,7 +419,7 @@ describe("64k-model survival proof (end-to-end)", () => {
 
   test("the floor is exactly the on-demand screenshot cutoff (24k) — same usability definition", () => {
     expect(MIN_NAVIGATOR_CONTEXT_TOKENS).toBe(24_000);
-    // At the floor the navigator MAY run (the compact prompt + minimum
+    // At the floor the navigator MAY run (the system prompt + minimum
     // observation still fit the derived input budget), and at the floor the
     // on-demand screenshot cap becomes affordable (24_000 → 16_000 chars).
     expect(() => assertUsableContextTokens(24_000)).not.toThrow();

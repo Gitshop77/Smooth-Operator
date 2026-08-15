@@ -138,8 +138,6 @@ function buildDeps(opts: {
       // the test fails — this is the survival proof.
       const compiled = await compileNavigatorPromptV1({
         maxActions: 5,
-        // llm-direct uses the COMPACT system prompt for <128k models — replicate.
-        compact: true,
         user: {
           task: req.task,
           history: req.history,
@@ -297,8 +295,8 @@ describe("64k-context loop survival", () => {
     const { buildNavigatorUserMessage } = await import("../src/lib/agent/loop/messages");
     const { buildNavigatorPrompt } = await import("../src/lib/agent/prompts/navigator-prompt");
 
-    // llm-direct uses the COMPACT system prompt for <128k models.
-    const systemBytes = utf8ByteLength(buildNavigatorPrompt(5, undefined, "disabled", "standard", true));
+    // Every model receives the SAME single system prompt.
+    const systemBytes = utf8ByteLength(buildNavigatorPrompt(5, undefined, "disabled", "standard"));
     const profile: Array<Record<string, number>> = [];
     const mock = deps.navigatorCall as ReturnType<typeof vi.fn>;
     const original = mock.getMockImplementation() as ((req: AgentStepRequest) => Promise<unknown>) | undefined;

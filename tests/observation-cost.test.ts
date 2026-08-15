@@ -165,7 +165,6 @@ describe("compileNavigatorPromptV1 — memo cost bounds", () => {
   // references, same browserState strings.
   const input = {
     maxActions: 5,
-    compact: true,
     user: {
       task: "Verify the memo cost bounds",
       history,
@@ -343,7 +342,7 @@ describe("64k-context compile with a screenshot — numeric image budget", () =>
   });
 
   it("assertPromptBudget with a numeric imageChars subtracts the base64 without allocating padding", async () => {
-    // Drive the compile seam directly: a 64k-compact navigator compile carrying
+    // Drive the compile seam directly: a 64k navigator compile carrying
     // a structured screenshot part (the exact shape navigatorCallDirect builds).
     const screenshot = "data:image/png;base64," + "B".repeat(700_000);
     const imagePart = {
@@ -354,7 +353,6 @@ describe("64k-context compile with a screenshot — numeric image budget", () =>
     };
     const compiled = await compileNavigatorPromptV1({
       maxActions: 5,
-      compact: true,
       screenshot: imagePart,
       user: {
         task: "Observe",

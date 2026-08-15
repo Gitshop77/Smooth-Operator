@@ -3,7 +3,7 @@
  * their cache descriptors for the duration of an agent run.
  *
  * The system prompt is a pure function of (maxActions, customPrompt,
- * visionMode, mode, compact, systemSuffix) — byte-deterministic across steps,
+ * visionMode, mode, systemSuffix) — byte-deterministic across steps,
  * retries, and replans. Memoizing removes the per-step ~28KB string build and
  * the per-step encode+SHA-256 in `createPromptCacheDescriptorV1`; retries
  * (up to 3×/step) become nearly free.
@@ -35,7 +35,6 @@ function navigatorSystemKey(
   customPrompt: string | undefined,
   visionMode: VisionMode | undefined,
   mode: string | undefined,
-  compact: boolean | undefined,
   systemSuffix: string | undefined,
   enabledActions: ReadonlySet<string> | undefined,
 ): string {
@@ -44,7 +43,6 @@ function navigatorSystemKey(
     customPrompt ?? null,
     visionMode ?? "disabled",
     mode ?? "standard",
-    compact ?? false,
     systemSuffix ?? null,
     enabledActions ? [...enabledActions].sort() : null,
   ]);
@@ -60,14 +58,13 @@ export function memoizedNavigatorSystem(
   customPrompt?: string,
   visionMode?: VisionMode,
   mode?: string,
-  compact?: boolean,
   systemSuffix?: string,
   enabledActions?: ReadonlySet<string>,
 ): string {
-  const key = navigatorSystemKey(maxActions, customPrompt, visionMode, mode, compact, systemSuffix, enabledActions);
+  const key = navigatorSystemKey(maxActions, customPrompt, visionMode, mode, systemSuffix, enabledActions);
   let system = navigatorSystemMemo.get(key);
   if (system === undefined) {
-    system = buildNavigatorPrompt(maxActions, customPrompt, visionMode, mode, compact, enabledActions) + (systemSuffix ?? "");
+    system = buildNavigatorPrompt(maxActions, customPrompt, visionMode, mode, enabledActions) + (systemSuffix ?? "");
     navigatorSystemMemo.set(key, system);
   }
   return system;

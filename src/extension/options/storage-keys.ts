@@ -62,11 +62,6 @@ export const STORAGE_KEYS = {
   screenshotMaxBytes: "screenshotMaxBytes",
   enableScreenshots: "enableScreenshots",
   stealthEnabled: "stealthEnabled",
-  /** Opt-in to the FULL (verbose) navigator system prompt for ≥128k models.
-   * Default false: the COMPACT prompt is used for every model. Read by
-   * llm-direct.ts getEnableVerboseNavigatorPrompt; written by settings-sync.ts
-   * from the options UI. Key literal matches the llm-direct read exactly. */
-  enableVerboseNavigatorPrompt: "enableVerboseNavigatorPrompt",
   enableLocalVision: "enableLocalVision",
   visionMode: "visionMode",
   allowedDomains: "allowedDomains",

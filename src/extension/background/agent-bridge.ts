@@ -404,7 +404,6 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     stored = await chrome.storage.local.get([
       "maxActions", "plannerInterval", "maxFailures", "costCap", "maxSteps",
       "allowedDomains", "blockedDomains",
-      "enableVerboseNavigatorPrompt",
     ]);
   } catch (e) {
     sendEvent({ type: "error", step: 0, message: `Settings load failed: ${errMsg(e)}`, recoverable: false });
@@ -622,7 +621,7 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
       void safeLog("warn", "[agent-bridge] context-token resolution failed, using fixed prompt budgets:", e);
     }
     // Pre-flight usability floor: a KNOWN context below the navigator minimum
-    // can never produce one observation (compact prompt alone exceeds the
+    // can never produce one observation (the system prompt alone exceeds the
     // derived input budget — every step would throw PromptBudgetExceededError
     // and the run would fail on step 1). Rejecting here surfaces a clear,
     // non-recoverable run error instead of a per-step budget exception.

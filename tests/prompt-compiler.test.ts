@@ -185,7 +185,6 @@ describe("navigator system prompt memoization", () => {
     customPrompt: undefined,
     visionMode: "disabled" as const,
     mode: "standard",
-    compact: true,
     user: navigatorUser,
   };
 

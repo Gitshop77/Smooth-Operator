@@ -43,7 +43,6 @@ if (typeof chrome !== "undefined" && chrome.storage?.local) {
       STORAGE_KEYS.maxActions, STORAGE_KEYS.plannerInterval,
       STORAGE_KEYS.maxFailures, STORAGE_KEYS.costCap, STORAGE_KEYS.defaultTask,
       STORAGE_KEYS.screenshotQuality, STORAGE_KEYS.enableScreenshots, STORAGE_KEYS.stealthEnabled,
-      STORAGE_KEYS.enableVerboseNavigatorPrompt,
       STORAGE_KEYS.enableLocalVision, STORAGE_KEYS.visionMode, STORAGE_KEYS.allowedDomains, STORAGE_KEYS.blockedDomains,
       STORAGE_KEYS.notifyOnCompletion, STORAGE_KEYS.notifyOnError,
       STORAGE_KEYS.notifyOnTakeover, STORAGE_KEYS.webhookUrl, STORAGE_KEYS.agentMode,
@@ -116,7 +115,6 @@ if (typeof chrome !== "undefined" && chrome.storage?.local) {
       setVal("screenshotMaxBytes", String(res[STORAGE_KEYS.screenshotMaxBytes] ?? 0));
       setChecked("enableScreenshots", res[STORAGE_KEYS.enableScreenshots] !== false);
       setChecked("enableStealth", res[STORAGE_KEYS.stealthEnabled] !== false);
-      setChecked("enableVerboseNavigatorPrompt", res[STORAGE_KEYS.enableVerboseNavigatorPrompt] === true);
 
       const visionMode = (res[STORAGE_KEYS.visionMode] as string) || (res[STORAGE_KEYS.enableLocalVision] === true ? "always" : "adaptive");
       const visionRadio = Array.from(
@@ -400,7 +398,6 @@ async function doSaveSettings(): Promise<boolean> {
     [STORAGE_KEYS.screenshotMaxBytes]: screenshotMaxBytes,
     [STORAGE_KEYS.enableScreenshots]: ($("enableScreenshots") as HTMLInputElement).checked,
     [STORAGE_KEYS.stealthEnabled]: ($("enableStealth") as HTMLInputElement).checked === true,
-    [STORAGE_KEYS.enableVerboseNavigatorPrompt]: ($("enableVerboseNavigatorPrompt") as HTMLInputElement).checked === true,
     [STORAGE_KEYS.visionMode]: (document.querySelector('input[name="visionMode"]:checked') as HTMLInputElement | null)?.value || "adaptive",
     [STORAGE_KEYS.allowedDomains]: parseDomains(($("allowedDomains") as HTMLTextAreaElement).value, droppedDomains),
     [STORAGE_KEYS.blockedDomains]: parseDomains(($("blockedDomains") as HTMLTextAreaElement).value, droppedDomains),

@@ -240,18 +240,16 @@ const BASE_OBS_SCREENSHOT_CHARS = 100_000;
 
 /**
  * Fixed non-observation navigator overhead (system prompt + base user-message
- * framing) in UTF-8 bytes. Measured ≈20.2k (19,576 system + ~600 base user
- * after the compact/full prose convergence); the margin absorbs prompt-version
- * drift.
+ * framing) in UTF-8 bytes. Measured ≈20.2k (19,576 system + ~600 base user);
+ * the margin absorbs prompt-version drift.
  */
 const NAVIGATOR_FIXED_OVERHEAD_BYTES = 32_000;
 
 /**
- * Sub-128k models receive the COMPACT system prompt (~19.5KB measured — the
- * full and compact variants converged to within a few dozen bytes), so their
- * fixed overhead is correspondingly lower — the entire point of the compact
- * variant is to convert prompt bytes into observation headroom for
- * low-context models. 19,561 measured system + ~600 base user + a margin for
+ * Every model receives the SAME single system prompt (~19.5KB measured — the
+ * former full/compact variants converged, then the two-variant machinery was
+ * removed), so the fixed overhead is uniform. 19,561 measured system + ~600
+ * base user + a margin for
  * history growth past the user-content reserve (measured: a 20-step run's
  * history/task/plan/wrapping reaches ~5,000 bytes vs the 4,000 reserve — the
  * extra ~900 keeps the worst-case turn under the 39,424 budget).
@@ -332,7 +330,7 @@ export function deriveNavigatorObservationCapsV1(
   // combined 15% reserve, leaving only 1,669 AX chars at 64k. Allocate a
   // bounded fraction of the real derived input capacity instead. Characters
   // are deliberately below the fallback estimator's 2 bytes/token allowance,
-  // leaving ample room for the compact prompt, task and recent history.
+  // leaving ample room for the system prompt, task and recent history.
   const available = Math.min(
     MAX_SUB_128K_TEXT_OBSERVATION_CHARS,
     Math.max(
@@ -357,7 +355,7 @@ export function deriveOnDemandScreenshotCapV1(contextTokens: number | undefined)
 }
 
 /** Below this known context window the navigator cannot run AT ALL: the
- * compact system prompt (~21KB ≈ 10.6k estimated tokens) plus the minimum
+ * system prompt (~21KB ≈ 10.6k estimated tokens) plus the minimum
  * text observation plus the output reserve exceeds the derived input budget,
  * so every step would throw `PromptBudgetExceededError` and the run fails
  * immediately. Same cutoff the on-demand screenshot cap uses. Unknown
@@ -373,7 +371,7 @@ export function assertUsableContextTokens(contextTokens: number | undefined): vo
   if (contextTokens !== undefined && contextTokens < MIN_NAVIGATOR_CONTEXT_TOKENS) {
     throw new Error(
       `Model context window (${contextTokens} tokens) is below the navigator minimum (${MIN_NAVIGATOR_CONTEXT_TOKENS}): ` +
-        "the compact system prompt alone exceeds the usable input budget. " +
+        "the system prompt alone exceeds the usable input budget. " +
         `Select a model with at least ${MIN_NAVIGATOR_CONTEXT_TOKENS} tokens of context.`,
     );
   }
