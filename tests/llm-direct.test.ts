@@ -164,6 +164,24 @@ describe("stripHistoryScreenshotMarkers", () => {
     const out = stripHistoryScreenshotMarkers([item]);
     expect(out[0].results[0].extractedContent).toBeNull();
   });
+
+  test("the stripped copy is memoized per history-array identity (no per-step re-scan)", () => {
+    const history = [historyItem(), historyItem()];
+    const first = stripHistoryScreenshotMarkers(history);
+    const second = stripHistoryScreenshotMarkers(history);
+    // Same array identity → the SAME stripped copy is reused (the loop passes
+    // the same `state.navigatorHistory` reference every step).
+    expect(second).toBe(first);
+  });
+
+  test("an in-place push invalidates the memoized copy (stale copy never reused)", () => {
+    const history = [historyItem()];
+    const first = stripHistoryScreenshotMarkers(history);
+    history.push(historyItem());
+    const second = stripHistoryScreenshotMarkers(history);
+    expect(second).not.toBe(first);
+    expect(second).toHaveLength(2);
+  });
 });
 
 describe("storage.onChanged prompt-memo invalidation", () => {
