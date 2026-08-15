@@ -97,4 +97,63 @@ describe("usage accounting for unusable model completions", () => {
       reasoningTokens: 50,
     }));
   });
+
+  test("a no-usage provider error after a used parse-fail attempt reports undefined tokens", async () => {
+    const onEvent = vi.fn();
+    const onCost = vi.fn();
+    let call = 0;
+    const navigatorCall = vi.fn(async () => {
+      call++;
+      if (call === 1) return { raw: "not valid agent output json", tokensIn: 10, tokensOut: 5, model: "m" };
+      throw new Error("network down");
+    });
+    const deps = { navigatorCall, onEvent } as unknown as LoopDeps;
+    // Zero the full-jitter backoff so the retry cycle runs in ~0ms.
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      await expect(callNavigatorWithRetry(
+        deps,
+        {
+          task: "hey",
+          history: [],
+          browserState: {
+            url: "https://example.com",
+            title: "Example",
+            tabs: [],
+            elementsText: "",
+            pageInfo: "",
+            newElementCount: 0,
+          },
+          step: 0,
+          maxSteps: 3,
+        },
+        0,
+        onCost,
+      )).rejects.toThrow("network down");
+
+      // Attempt 1's usage was already reported by its own success event; the
+      // attempt-2 error event must NOT re-report attempt 1's tokens.
+      const errorEnd = onEvent.mock.calls
+        .map(([e]) => e as {
+          type: string;
+          status?: string;
+          attempt?: number;
+          tokensIn?: number;
+          tokensOut?: number;
+          reasoningTokens?: number;
+        })
+        .find((e) => e.type === "llm-call-end" && e.status === "error" && e.attempt === 2);
+      expect(errorEnd).toBeDefined();
+      const errEnd = errorEnd!;
+      expect(errEnd.tokensIn).toBeUndefined();
+      expect(errEnd.tokensOut).toBeUndefined();
+      expect(errEnd.reasoningTokens).toBeUndefined();
+      // The cost ledger is untouched by the no-usage attempt: only attempt 1
+      // accrued cost (via estimateCost on its 10/5 tokens).
+      expect(onCost).toHaveBeenCalledTimes(1);
+      expect(onCost).toHaveBeenCalledWith(expect.any(Number), 10, 5);
+    } finally {
+      randomSpy.mockRestore();
+    }
+  });
 });

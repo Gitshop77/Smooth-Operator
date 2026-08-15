@@ -19,6 +19,7 @@ import { isImagePartV1, type ImagePartV1 } from "../src/lib/agent/llm/image-part
 
 const h = vi.hoisted(() => ({
   supportsVision: false,
+  supportsReasoning: false,
   chatMessages: [] as { role: string; content: string | unknown[] }[][],
   chatRequests: [] as Record<string, unknown>[],
   chatUsage: undefined as
@@ -56,6 +57,9 @@ vi.mock("../src/extension/provider-config", () => ({
       supportsStructuredOutput: true,
       get supportsVision() {
         return h.supportsVision;
+      },
+      get supportsReasoning() {
+        return h.supportsReasoning;
       },
       chat: async (req: { messages: { role: string; content: string | unknown[] }[] }) => {
         h.chatMessages.push(req.messages);
@@ -121,6 +125,7 @@ function installChrome() {
 
 beforeEach(() => {
   h.supportsVision = false;
+  h.supportsReasoning = false;
   h.chatMessages = [];
   h.chatRequests = [];
   h.chatUsage = undefined;
@@ -608,5 +613,72 @@ describe("reasoning-only completion retry", () => {
     );
     // Only ONE chat call — the malformed-stream diagnostic must not retry.
     expect(h.chatRequests).toHaveLength(1);
+  });
+});
+
+describe("summarizeCallDirect reasoning adaptation", () => {
+  test("reasoning-capable provider: no temperature key, reasoning config forwarded", async () => {
+    h.supportsReasoning = true;
+    store.reasoningEffort = "high";
+    const { summarizeCallDirect } = await import("../src/extension/llm-direct");
+    const result = await summarizeCallDirect({
+      systemPrompt: "SYSTEM",
+      userPrompt: "USER",
+    });
+    expect(h.chatRequests).toHaveLength(1);
+    // A reasoning model rejects `temperature` (HTTP 400) — it must be omitted,
+    // exactly like the navigator/planner paths.
+    expect(h.chatRequests[0]).not.toHaveProperty("temperature");
+    expect(h.chatRequests[0]).toMatchObject({
+      maxTokens: 2048,
+      reasoning: { effort: "high" },
+    });
+    expect(result.content).toBe("{}");
+  });
+
+  test("non-reasoning provider keeps the deterministic temperature: 0", async () => {
+    h.supportsReasoning = false;
+    const { summarizeCallDirect } = await import("../src/extension/llm-direct");
+    await summarizeCallDirect({ systemPrompt: "SYSTEM", userPrompt: "USER" });
+    expect(h.chatRequests[0].temperature).toBe(0);
+  });
+
+  test("a reasoning-only summarization retries once and returns the visible content", async () => {
+    h.supportsReasoning = true;
+    store.reasoningEffort = "medium";
+    // First chat call returns a reasoning-only terminal diagnostic (no visible
+    // content); the self-healing retry must then succeed. The mock's spread
+    // `...(h.chatTerminalDiagnostic ? { terminalDiagnostic: h.chatTerminalDiagnostic } : {})`
+    // reads the property TWICE per call (condition + value), so serve the
+    // diagnostic for the first two reads, then clear.
+    let diagnosticReads = 0;
+    Object.defineProperty(h, "chatTerminalDiagnostic", {
+      configurable: true,
+      get: () =>
+        diagnosticReads++ < 2
+          ? { code: "reasoning_only", protocol: "openai-compatible", visibleContentChars: 0, terminalSeen: true }
+          : undefined,
+      set: () => undefined,
+    });
+    try {
+      h.chatContent = "compacted summary of the run so far";
+      const { summarizeCallDirect } = await import("../src/extension/llm-direct");
+      const result = await summarizeCallDirect({
+        systemPrompt: "SYSTEM",
+        userPrompt: "USER",
+      });
+
+      // Exactly two calls: the failed reasoning-only attempt + the expanded retry.
+      expect(h.chatRequests).toHaveLength(2);
+      // First attempt: the normal 2K summary cap with the configured effort.
+      expect(h.chatRequests[0].maxTokens).toBe(2048);
+      expect(h.chatRequests[0].reasoning).toEqual({ effort: "medium" });
+      // Retry: doubled budget + reasoning disabled so it can't re-burn it.
+      expect(h.chatRequests[1].maxTokens).toBe(4096);
+      expect((h.chatRequests[1].reasoning as { enabled?: boolean }).enabled).toBe(false);
+      expect(result.content).toBe("compacted summary of the run so far");
+    } finally {
+      delete h.chatTerminalDiagnostic;
+    }
   });
 });

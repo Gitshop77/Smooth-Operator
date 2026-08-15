@@ -13,7 +13,7 @@
  * No server, no env vars. The extension is fully self-contained.
  */
 
-import type { LLMProvider, LLMRequest, LLMResponse, ChatMessage } from "../lib/agent/llm/provider";
+import type { LLMProvider, LLMRequest, LLMResponse, ChatMessage, LLMUsage } from "../lib/agent/llm/provider";
 import { type ImagePartV1, mimeFromDataUrl } from "../lib/agent/llm/image-part";
 import {
   compileNavigatorPromptV1,
@@ -558,6 +558,30 @@ function requireDirectVisibleOutput(response: LLMResponse): void {
   }
 }
 
+/** Additive merge of two optional usage numbers (undefined when both absent). */
+function addUsageNumbers(a: number | undefined, b: number | undefined): number | undefined {
+  return a !== undefined || b !== undefined ? (a ?? 0) + (b ?? 0) : undefined;
+}
+
+/**
+ * Merge the discarded first (reasoning-only) attempt's usage into the retried
+ * response's usage so reasoning-model steps don't under-report up to maxTokens
+ * of tokens/cost on every retried call. Numeric fields add; the retried
+ * response's model wins.
+ */
+function mergeRetriedUsage(first: LLMUsage, retried: LLMUsage): LLMUsage {
+  return {
+    tokensIn: first.tokensIn + retried.tokensIn,
+    tokensOut: first.tokensOut + retried.tokensOut,
+    reasoningTokens: addUsageNumbers(first.reasoningTokens, retried.reasoningTokens),
+    cachedInputTokens: addUsageNumbers(first.cachedInputTokens, retried.cachedInputTokens),
+    cachedWriteInputTokens: addUsageNumbers(first.cachedWriteInputTokens, retried.cachedWriteInputTokens),
+    contextTokens: addUsageNumbers(first.contextTokens, retried.contextTokens),
+    model: retried.model,
+    costUsd: first.costUsd + retried.costUsd,
+  };
+}
+
 /**
  * Chat + require visible output, retrying ONCE with an expanded output budget
  * (and reasoning disabled when a config was set) when the model consumes its
@@ -578,13 +602,10 @@ async function chatWithVisibleOutputRetry(
   reasoningConfig: LLMRequest["reasoning"],
   maxTokens: number,
 ): Promise<LLMResponse> {
-  const attempt = async (opts: { maxTokens: number; reasoning?: LLMRequest["reasoning"] }): Promise<LLMResponse> => {
-    const response = await chat(opts);
-    requireDirectVisibleOutput(response);
-    return response;
-  };
+  const firstResponse = await chat({ maxTokens, reasoning: reasoningConfig });
   try {
-    return await attempt({ maxTokens, reasoning: reasoningConfig });
+    requireDirectVisibleOutput(firstResponse);
+    return firstResponse;
   } catch (e) {
     if (!(e instanceof LLMTerminalDiagnosticError) || e.code !== "REASONING_ONLY_OUTPUT") throw e;
     console.warn(
@@ -592,10 +613,15 @@ async function chatWithVisibleOutputRetry(
         `retrying once with ${REASONING_RETRY_MAX_OUTPUT_TOKENS} tokens` +
         `${reasoningConfig ? " and reasoning disabled" : ""}.`,
     );
-    return await attempt({
+    const retried = await chat({
       maxTokens: REASONING_RETRY_MAX_OUTPUT_TOKENS,
       reasoning: reasoningConfig ? { ...reasoningConfig, enabled: false } : undefined,
     });
+    requireDirectVisibleOutput(retried);
+    if (retried.usage && firstResponse.usage) {
+      retried.usage = mergeRetriedUsage(firstResponse.usage, retried.usage);
+    }
+    return retried;
   }
 }
 
@@ -845,23 +871,32 @@ export async function summarizeCallDirect(
   // the compaction request must fit the model's DERIVED input budget when its
   // effective context is known (defense-in-depth — the request is already
   // deterministically bounded in `runCompaction`).
-  const effectiveContextTokens = await getEffectiveContextTokens();
+  const [effectiveContextTokens, reasoningConfig] = await Promise.all([
+    getEffectiveContextTokens(),
+    resolveReasoningConfig(),
+  ]);
   assertPromptBudget("compaction", "compaction", [
     { content: req.systemPrompt },
     { content: req.userPrompt },
   ], effectiveContextTokens);
-  const response = await provider.chat({
-    messages: [
-      { role: "system", content: req.systemPrompt },
-      { role: "user", content: req.userPrompt },
-    ],
-    temperature: 0,
-    maxTokens: SUMMARY_MAX_OUTPUT_TOKENS,
-    // Compaction is a one-shot summarization; the compacted result is never
-    // cached by this call, so no cache marker is sent.
-    ...(req.signal ? { signal: req.signal } : {}),
-  });
-  requireDirectVisibleOutput(response);
+  const response = await chatWithVisibleOutputRetry(
+    (opts) => provider.chat({
+      messages: [
+        { role: "system", content: req.systemPrompt },
+        { role: "user", content: req.userPrompt },
+      ],
+      maxTokens: opts.maxTokens,
+      // Reasoning models reject `temperature` (HTTP 400) — omit it for them,
+      // mirroring the navigator/planner paths. Compaction is one-shot; the
+      // compacted result is never cached by this call, so no cache marker is
+      // sent.
+      ...(provider.supportsReasoning ? {} : { temperature: 0 }),
+      ...(opts.reasoning ? { reasoning: opts.reasoning } : {}),
+      ...(req.signal ? { signal: req.signal } : {}),
+    }),
+    reasoningConfig,
+    SUMMARY_MAX_OUTPUT_TOKENS,
+  );
   const usage = extractUsage(response);
   const tokenUsage: TokenUsage | undefined =
     usage.tokensIn !== undefined && usage.tokensOut !== undefined && usage.model

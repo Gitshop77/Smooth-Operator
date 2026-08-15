@@ -6,7 +6,7 @@
  * content and history).
  */
 
-import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, test, vi } from "vitest";
 import {
   capText,
   extractUsage,
@@ -45,6 +45,53 @@ vi.mock("../src/lib/agent/secrets", async (importOriginal) => {
     redactSecrets: vi.fn(actual.redactSecrets),
   };
 });
+
+// Stub provider for the reasoning-only retry usage-merge tests: per-call
+// usage + a reasoning-only terminal diagnostic on the FIRST chat call only.
+const retryH = vi.hoisted(() => ({
+  usageByCall: [] as {
+    tokensIn: number;
+    tokensOut: number;
+    reasoningTokens?: number;
+    cachedInputTokens?: number;
+    cachedWriteInputTokens?: number;
+    costUsd: number;
+    model: string;
+  }[],
+  chatRequests: [] as Record<string, unknown>[],
+  chatContent: "{}",
+}));
+
+vi.mock("../src/extension/provider-config", () => ({
+  readProviderConfig: async () => ({ provider: "openai", apiKey: "k", model: "gpt-4o-mini" }),
+  resolveModel: (c: { provider?: string; model?: string; catalogId?: string }) =>
+    c.model ?? "resolved-default",
+  buildProvider: async () => ({
+    id: "openai",
+    model: "gpt-4o-mini",
+    supportsStructuredOutput: true,
+    supportsVision: false,
+    supportsReasoning: true,
+    chat: async (req: Record<string, unknown>) => {
+      retryH.chatRequests.push(req);
+      const i = retryH.chatRequests.length - 1;
+      return {
+        content: i === 0 ? "" : retryH.chatContent,
+        ...(retryH.usageByCall[i] ? { usage: retryH.usageByCall[i] } : {}),
+        ...(i === 0
+          ? {
+              terminalDiagnostic: {
+                code: "reasoning_only",
+                protocol: "openai-compatible",
+                visibleContentChars: 0,
+                terminalSeen: true,
+              },
+            }
+          : {}),
+      };
+    },
+  }),
+}));
 
 describe("capText", () => {
   test("undefined -> empty string (no crash on missing field)", () => {
@@ -395,5 +442,61 @@ describe("storage.onChanged prompt-memo invalidation", () => {
     clearSpy.mockClear();
     listener?.({ reasoningEffort: { newValue: "high" } }, "local");
     expect(clearSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("reasoning-only retry merges usage across attempts", () => {
+  let store: Record<string, unknown>;
+
+  function installChrome() {
+    store = {};
+    const get = (keys: string | string[]) => {
+      const arr = Array.isArray(keys) ? keys : [keys];
+      const result: Record<string, unknown> = {};
+      for (const k of arr) if (k in store) result[k] = store[k];
+      return Promise.resolve(result);
+    };
+    (globalThis as unknown as { chrome: unknown }).chrome = {
+      storage: {
+        local: { get, set: () => Promise.resolve() },
+        onChanged: { addListener: () => undefined },
+      },
+    };
+  }
+
+  beforeEach(() => {
+    retryH.usageByCall = [];
+    retryH.chatRequests = [];
+    retryH.chatContent = "{}";
+    installChrome();
+  });
+
+  afterEach(() => {
+    delete (globalThis as unknown as { chrome?: unknown }).chrome;
+    vi.resetModules();
+  });
+
+  test("a retried step reports the SUM of both attempts' token usage", async () => {
+    store.reasoningEffort = "medium";
+    retryH.usageByCall = [
+      // First (reasoning-only) attempt burns the whole output window thinking.
+      { tokensIn: 1000, tokensOut: 2048, reasoningTokens: 2000, costUsd: 0.03, model: "gpt-4o-mini" },
+      // The visible-output retry.
+      { tokensIn: 1200, tokensOut: 150, costUsd: 0.02, model: "gpt-4o-mini" },
+    ];
+    const { summarizeCallDirect } = await import("../src/extension/llm-direct");
+    const result = await summarizeCallDirect({ systemPrompt: "SYSTEM", userPrompt: "USER" });
+
+    // Both calls happened: the failed reasoning-only attempt + the retry.
+    expect(retryH.chatRequests).toHaveLength(2);
+    // The returned usage must include the discarded first attempt's tokens,
+    // so reasoning-model steps don't under-report up to maxTokens per retry.
+    expect(result.usage).toMatchObject({
+      tokensIn: 2200,
+      tokensOut: 2198,
+      reasoningTokens: 2000,
+      costUsd: 0.05,
+      model: "gpt-4o-mini",
+    });
   });
 });

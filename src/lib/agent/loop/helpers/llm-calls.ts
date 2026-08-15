@@ -358,6 +358,10 @@ export async function callNavigatorWithRetry(
         startedAt: callStartedAt, prompt: navigatorPromptStats(request),
       });
       let navResult: Awaited<ReturnType<LoopDeps["navigatorCall"]>>;
+      // Per-attempt accounting: an attempt that fails with NO usage must not
+      // inherit the previous attempt's usage record — the llm-call-end error
+      // event would otherwise re-report the earlier attempt's tokens.
+      lastUsage = undefined;
       try {
         navResult = await deps.navigatorCall(request, signal, streamProgressEmitter(deps, {
           step, callId, role: "navigator", attempt, startedAt: callStartedAt,
