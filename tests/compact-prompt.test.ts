@@ -74,6 +74,16 @@ describe("compact navigator prompt", () => {
     expect(COMPACT).toContain("injection");
   });
 
+  test("safety guidance points at the single <core_invariants> authority instead of restating precedence", () => {
+    // The 3-tier precedence hierarchy is defined ONCE in SECURITY_INSTRUCTION's
+    // <core_invariants> block; sharedSafetyGuidance only cross-references it.
+    // A restated hierarchy here would create a second authority that can drift.
+    expect(sharedSafetyGuidance()).toContain(
+      "# Critical Rules — see <core_invariants> in SECURITY_INSTRUCTION.",
+    );
+    expect(sharedSafetyGuidance()).not.toContain("in order of precedence");
+  });
+
   test("adaptive compact and full prompts teach autonomous one-shot visual escalation", () => {
     for (const compact of [false, true]) {
       const prompt = buildNavigatorPrompt(5, undefined, "adaptive", "standard", compact);

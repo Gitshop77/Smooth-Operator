@@ -68,6 +68,16 @@ describe("buildPlannerPrompt — custom-prompt branch", () => {
     expect(prompt).toContain("Do not rubber-stamp it");
   });
 
+  test("core invariants point at <core_invariants> instead of restating precedence", () => {
+    // The 3-tier precedence hierarchy is defined ONCE in SECURITY_INSTRUCTION
+    // (always prepended, even to overrides); the invariants only cross-reference
+    // it. A restated hierarchy here would create a second authority that can drift.
+    const prompt = buildPlannerPrompt(custom);
+    expect(prompt).toContain("see <core_invariants> in SECURITY_INSTRUCTION");
+    expect(prompt).not.toContain("highest-priority authority");
+    expect(prompt).not.toContain("in order of precedence");
+  });
+
   test("re-appends the required Output Format on every branch", () => {
     const prompt = buildPlannerPrompt(custom);
     expect(prompt).toContain(CUSTOM_OUTPUT_HEADING);
