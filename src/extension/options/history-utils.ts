@@ -141,7 +141,7 @@ async function readRunHistory(): Promise<
       return { ok: true, runs: Array.isArray(runs) ? runs.filter(isRunHistoryEntry) : [] };
     } catch (err2) {
       console.error("[history] failed to read run history:", err2);
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      return { ok: false, error: err2 instanceof Error ? err2.message : String(err2) };
     }
   }
 }

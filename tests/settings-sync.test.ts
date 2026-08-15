@@ -166,6 +166,42 @@ describe("settings-sync stealthEnabled serialization", () => {
   });
 });
 
+describe("settings-sync screenshot budget round-trip", () => {
+  // The three screenshot-budget fields are written by saveSettings and read at
+  // load, but for a long time they were missing from the import-time
+  // `chrome.storage.local.get` key list — the mock returns ONLY requested
+  // keys, so a stored budget was silently replaced by the default (4096/0/0)
+  // on the next autosave. This pins the load side of the round-trip.
+
+  test("saveSettings persists the screenshot budget fields", async () => {
+    setupGlobals();
+    const mod = await import("../src/extension/options/settings-sync");
+    const tokens = document.getElementById("screenshotImageTokens") as HTMLInputElement;
+    const dim = document.getElementById("screenshotMaxDimension") as HTMLInputElement;
+    const bytes = document.getElementById("screenshotMaxBytes") as HTMLInputElement;
+    tokens.value = "8192";
+    dim.value = "1920";
+    bytes.value = "1048576";
+    expect(await mod.saveSettings()).toBe(true);
+    expect(localStore.get("screenshotImageTokens")).toBe(8192);
+    expect(localStore.get("screenshotMaxDimension")).toBe(1920);
+    expect(localStore.get("screenshotMaxBytes")).toBe(1048576);
+  });
+
+  test("import-time load restores stored budget values into the fields", async () => {
+    setupGlobals();
+    // Seed the persisted values BEFORE the module's import-time load callback runs.
+    localStore.set("screenshotImageTokens", 8192);
+    localStore.set("screenshotMaxDimension", 1920);
+    localStore.set("screenshotMaxBytes", 1048576);
+    vi.resetModules();
+    await import("../src/extension/options/settings-sync");
+    expect((document.getElementById("screenshotImageTokens") as HTMLInputElement).value).toBe("8192");
+    expect((document.getElementById("screenshotMaxDimension") as HTMLInputElement).value).toBe("1920");
+    expect((document.getElementById("screenshotMaxBytes") as HTMLInputElement).value).toBe("1048576");
+  });
+});
+
 describe("settings-sync rememberApiKey round-trip", () => {
   test("checked checkbox persists an opaque manifest without local plaintext", async () => {
     setupGlobals();

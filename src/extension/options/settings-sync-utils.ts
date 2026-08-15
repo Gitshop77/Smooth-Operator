@@ -181,14 +181,14 @@ export function initAutoSave(saveSettings: () => Promise<boolean>): void {
   document.querySelectorAll<HTMLInputElement>('input[name="visionMode"]').forEach((radio) => {
     radio.addEventListener("change", () => void saveSettings());
   });
-  $("provider")?.addEventListener("change", () => {
+  document.getElementById("provider")?.addEventListener("change", () => {
     // A real provider change funnels through the authoritative store first:
     // the reducer clears the previous provider's model and bumps the
     // generation so any in-flight connection test for the old selection is
     // dropped when it resolves. updateProviderUI renders the new capabilities.
     providerConfigStore.dispatch({
       type: "PROVIDER_SELECTED",
-      provider: ($("provider") as HTMLSelectElement).value,
+      provider: (document.getElementById("provider") as HTMLSelectElement).value,
     });
     updateProviderUI();
     void populateModelSuggestions();

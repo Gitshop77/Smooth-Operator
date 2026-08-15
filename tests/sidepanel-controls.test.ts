@@ -13,6 +13,7 @@ type SendCb = (res: unknown) => void;
 
 interface StubState {
   failLocalGet: boolean;
+  failRunSend: boolean;
   runCount: number;
   lastRunTask: string | null;
   runCallback: SendCb | null;
@@ -28,6 +29,7 @@ let st: StubState;
 function setupGlobals(): void {
   st = {
     failLocalGet: false,
+    failRunSend: false,
     runCount: 0,
     lastRunTask: null,
     runCallback: null,
@@ -48,7 +50,15 @@ function setupGlobals(): void {
         else if (m.type === "RUN") {
           st.runCount++;
           st.lastRunTask = (msg as { task: string }).task;
-          st.runCallback = cb ?? null;
+          if (st.failRunSend) {
+            (chromeStub.runtime as { lastError?: { message: string } }).lastError = {
+              message: "Extension context invalidated.",
+            };
+            cb?.(undefined);
+            (chromeStub.runtime as { lastError?: { message: string } }).lastError = undefined;
+          } else {
+            st.runCallback = cb ?? null;
+          }
         } else if (m.type === "STOP") {
           cb?.(st.stopResponse);
         } else {
@@ -204,6 +214,22 @@ describe("sidepanel controls", () => {
     sendBtn().click();
     await flush();
     expect(st.runCount).toBe(1);
+  });
+
+  test("a rejected RUN send cancels the in-flight timeout instead of double-reporting", async () => {
+    vi.useFakeTimers();
+    await loadControls();
+    st.failRunSend = true;
+    setTask("task");
+    sendBtn().click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(chat().textContent).toContain("Send failed");
+    // The 10s RUN fallback must be cancelled by the catch path — otherwise a
+    // second, misleading "No response from background" error would clobber the
+    // real failure already shown above.
+    await vi.advanceTimersByTimeAsync(10_100);
+    expect(chat().textContent).toContain("Send failed");
+    expect(chat().textContent).not.toContain("No response from background");
   });
 
   test("/ shortcut does not fire inside inputs or textareas", async () => {

@@ -98,6 +98,11 @@ export function updateProviderUI(): void {
       : "Local provider — no key required. Leave this blank.";
   }
   const modelInput = document.getElementById("model") as HTMLInputElement | null;
+  // A *real* provider change must not leak the previous provider's model into
+  // the new selection (the authoritative provider-config store clears its
+  // model on PROVIDER_SELECTED; the DOM render must match, or connection tests
+  // and saveSettings would keep using the old provider's model id).
+  if (providerChanged && modelInput) modelInput.value = "";
   if (modelInput && !modelInput.value) applyDefaultModelPlaceholder();
   const baseUrlLabel = document.getElementById("baseurl-label");
   const baseUrlInput = document.getElementById("baseUrl") as HTMLInputElement | null;

@@ -321,6 +321,11 @@ async function sendMessage(): Promise<void> {
     }
   } catch (err) {
     clearSendDebounce();
+    // A rejected send must also cancel the in-flight RUN timeout: without
+    // this, the 10s "No response from background" fallback would fire after
+    // the real failure was already reported, clobbering the message above
+    // with a second, misleading error row.
+    clearPendingRunTimeout();
     const message = `Send failed: ${sanitizeLastError(err instanceof Error ? err.message : undefined)}`;
     failLocalRun(message);
     addSystemMessage("❌", message, "error");

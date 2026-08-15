@@ -45,6 +45,10 @@ export function isValidAgentEvent(ev: unknown): ev is LogEvent {
       return typeof e.step === "number" && typeof e.index === "number" && typeof e.total === "number" && typeof e.name === "string";
     case "action-result":
       return typeof e.step === "number" && typeof e.name === "string" && typeof e.success === "boolean" && typeof e.message === "string";
+    case "visual-inspection":
+      return typeof e.step === "number" && typeof e.message === "string" &&
+        (e.stage === "requested" || e.stage === "captured" ||
+          e.stage === "delivered" || e.stage === "unavailable");
     case "budget-warning":
       return typeof e.step === "number" && typeof e.pct === "number";
     case "loop-warning":

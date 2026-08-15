@@ -83,7 +83,7 @@ export function dismissActiveDialog(): void {
 // The Resume button sends a RESUME message to the background.
 resumeBtn?.addEventListener("click", () => {
   if (resumeBtn) resumeBtn.disabled = true;
-  chrome.runtime.sendMessage({ type: "RESUME" }, () => {
+  chrome.runtime.sendMessage({ type: "RESUME" }, (res) => {
     if (chrome.runtime.lastError) {
       if (resumeBtn) resumeBtn.disabled = false;
       if (lastTakeoverReason) showTakeoverBanner(lastTakeoverReason);
@@ -91,10 +91,23 @@ resumeBtn?.addEventListener("click", () => {
         "❌",
         "RESUME not delivered: " + (chrome.runtime.lastError?.message || "unknown error")
       );
-    } else {
-      hideTakeoverBanner();
-      addSystemMessage("▶", "Resuming agent…");
+      return;
     }
+    // The background acks truthfully: `{ ok: false }` means no takeover pause
+    // was active (the run already ended/timed out). Never claim a resume that
+    // did not happen, and re-offer the retry affordance.
+    if (res && typeof res === "object" && (res as { ok?: boolean }).ok === false) {
+      if (resumeBtn) resumeBtn.disabled = false;
+      hideTakeoverBanner();
+      addSystemMessage(
+        "⚠",
+        "Nothing to resume — the agent is no longer paused. Start a new run if you want to continue.",
+        "warning",
+      );
+      return;
+    }
+    hideTakeoverBanner();
+    addSystemMessage("▶", "Resuming agent…");
   });
 });
 

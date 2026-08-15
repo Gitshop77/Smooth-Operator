@@ -201,4 +201,27 @@ describe("options provider fixes", () => {
       expect(err).not.toBeNull();
     });
   });
+
+  describe("model id never leaks across a provider change", () => {
+    test("switching provider clears the previous provider's model id", () => {
+      const provider = document.getElementById("provider") as HTMLSelectElement;
+      const model = document.getElementById("model") as HTMLInputElement;
+      provider.value = "openai";
+      updateProviderUI();
+      model.value = "gpt-5.5";
+      provider.value = "opencode";
+      updateProviderUI();
+      expect(model.value).toBe("");
+    });
+
+    test("same-provider re-render keeps a user-entered model id", () => {
+      const provider = document.getElementById("provider") as HTMLSelectElement;
+      const model = document.getElementById("model") as HTMLInputElement;
+      provider.value = "openai";
+      updateProviderUI();
+      model.value = "gpt-4o";
+      updateProviderUI();
+      expect(model.value).toBe("gpt-4o");
+    });
+  });
 });

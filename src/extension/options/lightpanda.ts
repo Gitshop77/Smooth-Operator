@@ -57,11 +57,22 @@ export function renderLightpanda(): void {
       status("Native host not found — run the setup command above, then reload the extension.");
       return;
     }
-    const timer = setTimeout(() => status("No response (timeout)."), 8_000);
+    // A successful pong (or a timeout) deliberately disconnects the port, which
+    // fires onDisconnect; the settled guard keeps that callback from
+    // overwriting the success/timeout verdict with the not-found message.
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      status("No response (timeout).");
+      try { port.disconnect(); } catch { /* ignore */ }
+    }, 8_000);
     // chrome.runtime.Port events: addListener/removeListener only (H26).
     const onMessage = (m: unknown): void => {
       if ((m as { type?: string }).type === "pong") {
         clearTimeout(timer);
+        if (settled) return;
+        settled = true;
         status("OK — Lightpanda host is reachable.");
       }
       try { port.disconnect(); } catch { /* ignore */ }
@@ -69,6 +80,8 @@ export function renderLightpanda(): void {
     const onDisconnect = (): void => {
       clearTimeout(timer);
       try { port.onMessage.removeListener(onMessage); } catch { /* ignore */ }
+      if (settled) return;
+      settled = true;
       status("Native host not found — run the setup command above, then reload the extension.");
     };
     port.onMessage.addListener(onMessage);

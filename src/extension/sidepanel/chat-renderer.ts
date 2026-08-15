@@ -431,7 +431,9 @@ function initScrollBehavior(): void {
     <polyline points="6 9 12 15 18 9"/>
   </svg>`;
 
-  // Place FAB as sibling of chatMessages, inside the same parent
+  // Place FAB as sibling of chatMessages, inside the same parent. The parent
+  // is the positioned `#chatRegion` wrapper (sidepanel.html), so the button
+  // floats at the chat area's bottom edge — never over the status bar.
   chatMessages.parentElement?.appendChild(scrollBtn);
 
   chatMessages.addEventListener("scroll", (e) => {

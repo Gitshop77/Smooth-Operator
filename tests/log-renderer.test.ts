@@ -399,6 +399,45 @@ describe("log-renderer listener gate", () => {
     expect(chatMessages.textContent).toContain("hello");
   });
 
+  test("accepts a valid visual-inspection envelope", async () => {
+    gateListener!(
+      {
+        type: "AGENT_EVENT",
+        event: {
+          type: "visual-inspection", step: 1, stage: "captured",
+          screenshotChars: 20480, message: "overlay rendered",
+        },
+        time: "t0",
+      },
+      { id: "test" },
+      () => {},
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(chatMessages.textContent).toContain("Vision captured");
+    expect(chatMessages.textContent).toContain("overlay rendered");
+    expect(chatMessages.textContent).toContain("20 KB");
+  });
+
+  test("drops a malformed visual-inspection envelope", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      gateListener!(
+        {
+          type: "AGENT_EVENT",
+          event: { type: "visual-inspection", step: 1, stage: "skipped" },
+          time: "t0",
+        },
+        { id: "test" },
+        () => {},
+      );
+      expect(countMsgs()).toBe(0);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   test("accepts the exact MV3 background worker URL Brave supplies", async () => {
     gateListener!(
       { type: "AGENT_EVENT", event: { type: "info", message: "from worker" }, time: "t0" },

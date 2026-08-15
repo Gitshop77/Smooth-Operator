@@ -16,6 +16,7 @@ type Listener = (
 ) => unknown;
 
 let sessionSet: ReturnType<typeof vi.fn>;
+let resumeResponse: unknown = { ok: true };
 
 function setupGlobals(): void {
   sessionSet = vi.fn(() => Promise.resolve());
@@ -24,8 +25,8 @@ function setupGlobals(): void {
       lastError: undefined,
       id: "test",
       onMessage: { addListener: (_cb: Listener) => {} },
-      sendMessage: (_msg: unknown, cb?: (res: unknown) => void) => {
-        cb?.({ ok: true });
+      sendMessage: (msg: unknown, cb?: (res: unknown) => void) => {
+        cb?.((msg as { type: string }).type === "RESUME" ? resumeResponse : { ok: true });
         return Promise.resolve();
       },
     },
@@ -81,7 +82,10 @@ describe("sidepanel takeover modals", () => {
   });
 
   beforeEach(() => {
+    resumeResponse = { ok: true };
     document.querySelector(".password-prompt-overlay")?.remove();
+    const chat = document.getElementById("chatMessages") as HTMLElement;
+    chat.innerHTML = "<div class=\"empty-state\"></div>";
     const banner = document.getElementById("takeoverBanner") as HTMLElement;
     banner.hidden = true;
     const reason = document.getElementById("takeoverReason") as HTMLElement;
@@ -149,5 +153,20 @@ describe("sidepanel takeover modals", () => {
     resume.click();
     await flush();
     expect(sessionSet).not.toHaveBeenCalled();
+  });
+
+  test("a truthful RESUME rejection is not presented as a success", async () => {
+    resumeResponse = { ok: false, error: "no active takeover pause to resume" };
+    showTakeoverBanner("need login");
+    const banner = document.getElementById("takeoverBanner") as HTMLElement;
+    const resume = document.getElementById("resumeBtn") as HTMLButtonElement;
+    resume.click();
+    await flush();
+    // The banner is dismissed and the affordance re-offered, but the transcript
+    // must not claim a resume that the background explicitly rejected.
+    expect(banner.hidden).toBe(true);
+    expect(resume.disabled).toBe(false);
+    expect(document.getElementById("chatMessages")?.textContent).toContain("Nothing to resume");
+    expect(document.getElementById("chatMessages")?.textContent).not.toContain("Resuming agent");
   });
 });

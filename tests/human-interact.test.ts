@@ -34,6 +34,7 @@ function setupGlobals(): void {
     runtime: {
       lastError: undefined,
       id: "test",
+      getURL: (path: string) => `chrome-extension://test/${path}`,
       onMessage: { addListener: (cb: Listener) => { listener = cb; } },
       sendMessage: (message: unknown) => { sent.push(message); return Promise.resolve(); },
     },
@@ -118,10 +119,29 @@ describe("HUMAN_INTERACT_PROMPT listener", () => {
     expect(dismissActiveDialog).toHaveBeenCalledTimes(1);
   });
 
-  test("rejects content-originated prompt injection", () => {
+  test("accepts a broker broadcast from the exact MV3 worker URL (Brave/Chromium)", async () => {
+    vi.mocked(promptConfirm).mockResolvedValue(false);
+    expect(listener!(
+      prompt({ mode: "confirm", message: "Continue?" }),
+      { id: "test", url: "chrome-extension://test/background.js" },
+      vi.fn(),
+    )).toBe(false);
+    await flush();
+    expect(promptConfirm).toHaveBeenCalledWith("Continue?");
+  });
+
+  test("rejects prompt injection from content-originated or other extension pages", () => {
     const response = vi.fn();
     expect(listener!(prompt({ mode: "confirm", message: "x" }), { id: "test", tab: { id: 1 } }, response)).toBe(false);
     expect(promptConfirm).not.toHaveBeenCalled();
     expect(response).not.toHaveBeenCalled();
+
+    // An options-page sender is not the broker and must also be rejected.
+    expect(listener!(
+      prompt({ mode: "confirm", message: "x" }),
+      { id: "test", url: "chrome-extension://test/options.html" },
+      response,
+    )).toBe(false);
+    expect(promptConfirm).not.toHaveBeenCalled();
   });
 });

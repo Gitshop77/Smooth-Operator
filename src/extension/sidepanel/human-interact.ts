@@ -110,7 +110,12 @@ chrome.runtime.onMessage.addListener((msg: unknown, sender, sendResponse) => {
   // The broker is the only authority allowed to ask a panel to open UI. A
   // content script (including one injected into another tab) must never be
   // able to bypass its run-token admission check.
-  if (sender.tab || sender.url) return false;
+  if (sender.tab) return false;
+  // Brave/Chromium includes the MV3 service worker URL in sender.url for
+  // runtime.sendMessage broadcasts (see the same gate in log-renderer.ts).
+  // Admit only the exact packaged worker URL — other extension pages remain
+  // rejected, since only the broker broadcasts prompts/dismissals.
+  if (sender.url && sender.url !== chrome.runtime.getURL("background.js")) return false;
 
   if ((msg as { type?: string } | null)?.type === "HUMAN_INTERACT_CANCEL" ||
     (msg as { type?: string } | null)?.type === "HUMAN_INTERACT_DISMISS") {

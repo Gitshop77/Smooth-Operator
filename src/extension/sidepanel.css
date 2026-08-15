@@ -106,6 +106,17 @@ body {
 }
 
 /* ─── Chat messages area ──────────────────────────────────────────────────── */
+/* The scroll-to-bottom FAB is absolutely positioned inside this region (it
+   must NOT escape to the body, whose static positioning would place the button
+   over the bottom status bar's Stop/Pause controls). */
+.chat-region {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
 .chat-messages {
   flex: 1;
   overflow-y: auto;

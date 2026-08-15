@@ -74,12 +74,14 @@
        so the region exists before any JS wiring. -->
   <div id="runErrorLive" class="sr-only" role="alert" aria-live="assertive" aria-atomic="true"></div>
 
-  <main id="chatMessages" class="chat-messages" role="log" aria-label="Chat messages">
-    <div class="empty-state">
-      <div class="empty-state-title">What can I help you with?</div>
-      <div class="empty-state-hint">Describe a task and I'll autonomously navigate, read, and act on web pages for you.</div>
-    </div>
-  </main>
+  <div id="chatRegion" class="chat-region">
+    <main id="chatMessages" class="chat-messages" role="log" aria-label="Chat messages">
+      <div class="empty-state">
+        <div class="empty-state-title">What can I help you with?</div>
+        <div class="empty-state-hint">Describe a task and I'll autonomously navigate, read, and act on web pages for you.</div>
+      </div>
+    </main>
+  </div>
 
   <div class="input-bar">
     <textarea id="messageInput" class="message-input" placeholder="Type a message…" rows="1" autocomplete="off" aria-label="Message input" aria-describedby="input-hint"></textarea>
@@ -95,7 +97,7 @@
   <div class="status-bar" role="status" aria-label="Agent status">
     <div class="status-left">
       <span class="status-dot" id="statusDot" data-status="idle" aria-hidden="true"></span>
-      <span class="status-label" id="statusLabel" aria-live="polite">idle</span>
+      <span class="status-label" id="statusLabel" aria-live="polite">Ready</span>
       <label for="modeSelect" class="sr-only">Agent mode</label>
       <select id="modeSelect" class="mode-select" aria-label="Agent mode">
         <option value="restricted">🔒 Restricted</option>
