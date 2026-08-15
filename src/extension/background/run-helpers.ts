@@ -360,7 +360,7 @@ export async function handleDetectVisualRequest(
       /* tab may have closed */
     }
     try {
-      const snap = await getPageSnapshot(tabId);
+      const snap = await getPageSnapshot(tabId, { signal });
       assertAuthorized?.();
       setVisionCacheFingerprint(snap.fingerprint);
       setVisionCacheViewport(snap.viewport);
@@ -502,7 +502,7 @@ export async function extractStateForRun(
       const domState = await extractStateFromTab(tabId, tabs, false, signal);
       const dpr = domState.devicePixelRatio ?? 1;
       lastKnownDpr = dpr;
-      if (!(await isVisionCacheFresh(tabId))) {
+      if (!(await isVisionCacheFresh(tabId, { signal }))) {
         // URL moved or the DOM fingerprint changed since capture: the cached
         // rects are stale — drop them and re-detect instead of serving stale
         // [vN] boxes in the observation.
@@ -935,7 +935,7 @@ interface CleanupContext {
 }
 
 export async function cleanupRun(ctx: CleanupContext): Promise<void> {
-  const { runBuilder, task, isScheduledTaskRun, onStorageChanged, sendEvent, releaseRunGuard, teardownScheduledVision, abortSignal, terminalSnapshot } = ctx;
+  const { runBuilder, task, isScheduledTaskRun, onStorageChanged, releaseRunGuard, teardownScheduledVision, abortSignal, terminalSnapshot } = ctx;
 
   if (onStorageChanged) {
     try { chrome.storage.onChanged.removeListener(onStorageChanged); } catch { void 0; }
@@ -943,7 +943,6 @@ export async function cleanupRun(ctx: CleanupContext): Promise<void> {
   try { await stopKeepalive(); } catch { void 0; }
   try { await runSessionState.clear({ runId: terminalSnapshot.runId }); } catch { void 0; }
   try { void chrome.action.setBadgeText({ text: "" }); } catch { void 0; }
-  try { sendEvent({ type: "info", message: "Run finished." }); } catch { void 0; }
   try {
     // A nonrecoverable error may terminate through an `error` event rather
     // than a `done` event. Use the authoritative terminal projection as the

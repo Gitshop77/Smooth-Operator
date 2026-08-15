@@ -12,7 +12,8 @@
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { clampInt, isValidConsoleBridgeEntry } from "../src/extension/content-utils";
-import { CONSOLE_CAPTURE_EVENT } from "../src/lib/agent/dom/console-capture";
+import { CONSOLE_CAPTURE_EVENT, CONSOLE_LOG_ENABLED_KEY } from "../src/lib/agent/dom/console-capture";
+import { _setStealthEnabledCacheForTests } from "../src/lib/agent/anti-detection-utils";
 
 type ListenerFn = (
   msg: unknown,
@@ -22,8 +23,21 @@ type ListenerFn = (
 
 let listener: ListenerFn | undefined;
 
-function installChromeMock(): void {
+/** In-memory `chrome.storage.local` backing + the registered onChanged fn. */
+let storageStore: Record<string, unknown> = {};
+let storageOnChanged: ((changes: Record<string, { newValue?: unknown }>, area: string) => void) | undefined;
+
+/** CONSOLE_CAPTURE_EVENT listeners each content.ts load registers on the
+ *  shared window. The window (and its listeners) persists across
+ *  `vi.resetModules`, so stale forwarding listeners from a previous load would
+ *  fire against the NEXT test's dispatch — track them so afterEach can remove
+ *  them and keep every test hermetic. */
+const consoleCaptureListeners: EventListener[] = [];
+
+function installChromeMock(initialStorage: Record<string, unknown> = {}): void {
   listener = undefined;
+  storageStore = { ...initialStorage };
+  storageOnChanged = undefined;
   (globalThis as unknown as { chrome?: unknown }).chrome = {
     runtime: {
       id: "test-extension-id",
@@ -35,13 +49,40 @@ function installChromeMock(): void {
         },
       },
     },
+    storage: {
+      local: {
+        get: vi.fn((keys: string | Record<string, unknown>) => {
+          const wanted = typeof keys === "string" ? [keys] : Object.keys(keys);
+          const result: Record<string, unknown> = {};
+          for (const key of wanted) {
+            if (key in storageStore) result[key] = storageStore[key];
+            else if (typeof keys === "object" && keys !== null && key in keys) {
+              result[key] = (keys as Record<string, unknown>)[key];
+            }
+          }
+          return Promise.resolve(result);
+        }),
+        set: vi.fn((values: Record<string, unknown>) => {
+          Object.assign(storageStore, values);
+          const changes: Record<string, { newValue?: unknown }> = {};
+          for (const [key, newValue] of Object.entries(values)) changes[key] = { newValue };
+          storageOnChanged?.(changes, "local");
+          return Promise.resolve();
+        }),
+      },
+      onChanged: {
+        addListener: (fn: typeof storageOnChanged) => {
+          storageOnChanged = fn;
+        },
+      },
+    },
   };
 }
 
 /** Register the real content script (fresh module graph + mock per call). */
-async function loadContentScript(): Promise<void> {
+async function loadContentScript(initialStorage: Record<string, unknown> = {}): Promise<void> {
   vi.resetModules();
-  installChromeMock();
+  installChromeMock(initialStorage);
   await import("../src/extension/content");
   expect(listener).toBeDefined();
 }
@@ -71,15 +112,37 @@ function sendAsync(msg: unknown, sender: unknown): Promise<unknown> {
 
 const EXT = { id: "test-extension-id" };
 
+/** Original window.addEventListener, captured before vi.spyOn replaces it. */
+const originalAddEventListener = window.addEventListener.bind(window);
+
 beforeEach(() => {
   delete (window as unknown as Record<string, unknown>).__openCoworkInjected;
   document.body.innerHTML = "";
+  // Spy on window.addEventListener to capture (and later remove) the
+  // console-capture forward listeners content.ts registers on the shared
+  // window. Without this, a forwarding listener from an earlier load survives
+  // `vi.resetModules` and would fire on the next test's dispatch.
+  vi.spyOn(window, "addEventListener").mockImplementation(((
+    type: string,
+    fn: EventListenerOrEventListenerObject | null,
+    options?: boolean | AddEventListenerOptions,
+  ) => {
+    if (type === CONSOLE_CAPTURE_EVENT && typeof fn === "function") {
+      consoleCaptureListeners.push(fn as EventListener);
+    }
+    return originalAddEventListener.call(window, type, fn as EventListenerOrEventListenerObject, options);
+  }) as typeof window.addEventListener);
 });
 
 afterEach(() => {
   vi.doUnmock("@/lib/agent/dom/ax-tree");
   vi.doUnmock("@/lib/agent/tools/executor");
   delete (globalThis as unknown as { chrome?: unknown }).chrome;
+  _setStealthEnabledCacheForTests(null);
+  for (const fn of consoleCaptureListeners.splice(0)) {
+    window.removeEventListener(CONSOLE_CAPTURE_EVENT, fn);
+  }
+  vi.restoreAllMocks();
 });
 
 describe("content.ts message surface", () => {
@@ -404,12 +467,15 @@ describe("content.ts message surface", () => {
   });
 
   test("forwards a well-formed console bridge entry to the SW ring", async () => {
-    await loadContentScript();
-    // Each loadContentScript re-imports content.ts, which registers one more
-    // listener on the shared window event — every accumulated listener hears
-    // the dispatch and forwards through the SAME admission gate. Assert every
-    // forwarded call carries exactly the validated entry (a forged shape would
-    // be rejected by every listener, so a mismatch anywhere fails the test).
+    // Enable the ring (D6) and disable stealth — both are required for a
+    // forward. Each loadContentScript re-imports content.ts, which registers
+    // one more listener on the shared window event — every accumulated
+    // listener hears the dispatch and forwards through the SAME admission
+    // gate. Assert every forwarded call carries exactly the validated entry
+    // (a forged shape would be rejected by every listener, so a mismatch
+    // anywhere fails the test).
+    _setStealthEnabledCacheForTests(false);
+    await loadContentScript({ [CONSOLE_LOG_ENABLED_KEY]: true, stealthEnabled: false });
     const mock = chrome.runtime.sendMessage as ReturnType<typeof vi.fn>;
     const entry = { type: "log" as const, message: "hello from the page", timestamp: 1234 };
     window.dispatchEvent(new CustomEvent(CONSOLE_CAPTURE_EVENT, { detail: { entry } }));
@@ -419,6 +485,49 @@ describe("content.ts message surface", () => {
     for (const call of mock.mock.calls) {
       expect(call[0]).toEqual({ type: "CONSOLE_LOG_ENTRY", entry });
     }
+  });
+
+  test("console forward gate: disabled flag → no forward", async () => {
+    _setStealthEnabledCacheForTests(false);
+    // No CONSOLE_LOG_ENABLED_KEY in storage → defaults OFF (fail closed).
+    await loadContentScript({ stealthEnabled: false });
+    const mock = chrome.runtime.sendMessage as ReturnType<typeof vi.fn>;
+    window.dispatchEvent(new CustomEvent(CONSOLE_CAPTURE_EVENT, {
+      detail: { entry: { type: "log", message: "hello", timestamp: 1 } },
+    }));
+    await Promise.resolve();
+    expect(mock).not.toHaveBeenCalled();
+  });
+
+  test("console forward gate: enabled + stealth → no forward", async () => {
+    _setStealthEnabledCacheForTests(true);
+    await loadContentScript({ [CONSOLE_LOG_ENABLED_KEY]: true, stealthEnabled: true });
+    const mock = chrome.runtime.sendMessage as ReturnType<typeof vi.fn>;
+    window.dispatchEvent(new CustomEvent(CONSOLE_CAPTURE_EVENT, {
+      detail: { entry: { type: "log", message: "hello", timestamp: 1 } },
+    }));
+    await Promise.resolve();
+    expect(mock).not.toHaveBeenCalled();
+  });
+
+  test("console forward gate: storage change flips the cached flag", async () => {
+    _setStealthEnabledCacheForTests(false);
+    await loadContentScript({ [CONSOLE_LOG_ENABLED_KEY]: false, stealthEnabled: false });
+    const mock = chrome.runtime.sendMessage as ReturnType<typeof vi.fn>;
+    const entry = { type: "log" as const, message: "hello", timestamp: 1 };
+
+    // OFF → no forward.
+    window.dispatchEvent(new CustomEvent(CONSOLE_CAPTURE_EVENT, { detail: { entry } }));
+    await Promise.resolve();
+    expect(mock).not.toHaveBeenCalled();
+
+    // SW-side enable_console_log persists the flag → onChanged flips the cache.
+    await chrome.storage.local.set({ [CONSOLE_LOG_ENABLED_KEY]: true });
+    await Promise.resolve();
+    window.dispatchEvent(new CustomEvent(CONSOLE_CAPTURE_EVENT, { detail: { entry } }));
+    await Promise.resolve();
+    expect(mock.mock.calls.length).toBeGreaterThanOrEqual(1);
+    for (const call of mock.mock.calls) expect(call[0]).toEqual({ type: "CONSOLE_LOG_ENTRY", entry });
   });
 });
 

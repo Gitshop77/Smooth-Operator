@@ -276,23 +276,53 @@ describe("handleTabAction — storage", () => {
     installChrome();
   });
 
-  test("get_storage reads chrome.storage.local by default", async () => {
-    const res = await handleTabAction({ type: "get_storage" } as never, runState);
+  test("get_storage reads a single key from chrome.storage.local by default", async () => {
+    const res = await handleTabAction({ type: "get_storage", key: "persisted" } as never, runState);
     expect(res.success).toBe(true);
     const data = res.data as { items: Record<string, unknown>; type: string };
     expect(data.type).toBe("local");
-    expect(data.items.persisted).toEqual({ a: 1 });
+    expect(data.items.persisted).toBe(JSON.stringify({ a: 1 }));
   });
 
-  test("get_storage with storage_type=session reads the session area", async () => {
+  test("get_storage with storage_type=session reads a single key from the session area", async () => {
     sessionStore.set("ephemeral", 42);
     const res = await handleTabAction(
-      { type: "get_storage", storage_type: "session" } as never,
+      { type: "get_storage", storage_type: "session", key: "ephemeral" } as never,
       runState,
     );
     const data = res.data as { items: Record<string, unknown>; type: string };
     expect(data.type).toBe("session");
-    expect(data.items.ephemeral).toBe(42);
+    expect(data.items.ephemeral).toBe("42");
+  });
+
+  test("get_storage without a key is BLOCKED — a whole-storage dump is impossible", async () => {
+    const res = await handleTabAction({ type: "get_storage" } as never, runState);
+    expect(res.success).toBe(false);
+    expect(res.message).toMatch(/BLOCKED: get_storage requires a key/);
+    // The stored data is never enumerated/returned.
+    expect(localStore.get("persisted")).toEqual({ a: 1 });
+  });
+
+  test("get_storage redacts a registered secret from the returned value", async () => {
+    localStore.set("db", { password: "hunter2secret", host: "db.internal" });
+    sessionStore.set("open_cowork_secrets", [
+      { name: "db_password", value: "hunter2secret", createdAt: 0 },
+    ]);
+    const res = await handleTabAction({ type: "get_storage", key: "db" } as never, runState);
+    expect(res.success).toBe(true);
+    const returned = (res.data as { items: Record<string, string> }).items.db;
+    expect(returned).not.toContain("hunter2secret");
+    expect(returned).toContain("[REDACTED");
+    expect(returned).toContain("db.internal");
+  });
+
+  test("get_storage masks key-shaped tokens in the returned value", async () => {
+    localStore.set("config", { token: "sk-abc123def456ghi789jkl012" });
+    const res = await handleTabAction({ type: "get_storage", key: "config" } as never, runState);
+    expect(res.success).toBe(true);
+    const returned = (res.data as { items: Record<string, string> }).items.config;
+    expect(returned).not.toContain("sk-abc123def456ghi789jkl012");
+    expect(returned).toContain("[redacted]");
   });
 
   test("set_storage round-trips the value through JSON (nested structures survive)", async () => {

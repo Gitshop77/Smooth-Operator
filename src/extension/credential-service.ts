@@ -124,6 +124,14 @@ export async function saveEnteredCredential(
   const reference = await vault().write(handle, providerId, plaintext, expectedRevision);
   if (await vault().read(reference) !== plaintext) throw new Error("Credential vault verification mismatch");
 
+  // After the NEW provider's record is written AND read-verified, delete the
+  // previous provider's blob so encrypted credentials don't orphan across
+  // provider switches. Order matters: the delete runs only once the new record
+  // is verified, so a failed write/verify never destroys the working credential.
+  if (current && !sameProvider) {
+    await vault().delete(current);
+  }
+
   const manifest: CredentialManifestV1 = { ...reference, kind: "provider-api-key" };
   await chrome.storage.local.set({
     [STORAGE_KEYS.credentialManifest]: manifest,

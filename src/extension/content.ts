@@ -14,8 +14,8 @@
 import { initElementMap } from "@/lib/agent/dom/ax-tree";
 import { installMutationSignal } from "@/lib/agent/dom/mutation-signal";
 import { installPopupHandler } from "@/lib/agent/dom/popup-handler";
-import { refreshStealthEnabledCache } from "@/lib/agent/anti-detection-utils";
-import { CONSOLE_CAPTURE_EVENT } from "@/lib/agent/dom/console-capture";
+import { refreshStealthEnabledCache, isStealthEnabledSync } from "@/lib/agent/anti-detection-utils";
+import { CONSOLE_CAPTURE_EVENT, CONSOLE_LOG_ENABLED_KEY } from "@/lib/agent/dom/console-capture";
 import {
   log,
   isValidConsoleBridgeEntry,
@@ -27,6 +27,37 @@ import {
   handleExtractHtml,
   handleGetDomFingerprint,
 } from "./content-utils";
+
+/**
+ * Console-forwarding gate cache (default OFF — fail closed). The MAIN-world
+ * console capture (`content-main.ts`) installs unconditionally because it runs
+ * in the page's real console world; the ISOLATED-world forward to the SW ring
+ * (below) is the gate point. Without a gate, every page `console.log` would
+ * wake the service worker via `chrome.runtime.sendMessage`, even for pages the
+ * agent never asked to capture. The flag is primed from
+ * `CONSOLE_LOG_ENABLED_KEY` (persisted by `enableConsoleLog`/
+ * `disableConsoleLog` in the SW) and kept fresh via `chrome.storage.onChanged`.
+ * `null` (not yet primed) fails closed to OFF.
+ */
+let consoleForwardingEnabled: boolean | null = null;
+
+/** Read the persisted flag and refresh the local cache. Fire-and-forget. */
+function refreshConsoleForwardingEnabled(): void {
+  try {
+    void chrome.storage.local.get(CONSOLE_LOG_ENABLED_KEY).then((res) => {
+      consoleForwardingEnabled = res[CONSOLE_LOG_ENABLED_KEY] === true;
+    }).catch(() => {
+      consoleForwardingEnabled = false;
+    });
+  } catch {
+    consoleForwardingEnabled = false;
+  }
+}
+
+/** Test hook — set/clear the cached flag without touching chrome.storage. */
+function _setConsoleForwardingEnabledForTests(value: boolean | null): void {
+  consoleForwardingEnabled = value;
+}
 
 /** Entry point. Idempotent — re-injection is a no-op. */
 (() => {
@@ -58,17 +89,37 @@ import {
   // message listener; the gate fails closed until the cache is populated.
   void refreshStealthEnabledCache().catch(() => {});
 
+  // Prime the console-forwarding gate (default OFF) and keep it fresh across
+  // SW-side enable_console_log/disable_console_log toggles. Same pattern as
+  // the stealth cache: fire-and-forget, fails closed until primed.
+  refreshConsoleForwardingEnabled();
+  try {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      const change = changes[CONSOLE_LOG_ENABLED_KEY];
+      if (area === "local" && change) {
+        consoleForwardingEnabled = change.newValue === true;
+      }
+    });
+  } catch {
+    /* no storage — stay fail-closed OFF */
+  }
+
   // Relay MAIN-world console captures to the SW console-log ring. The
   // CustomEvent crosses from the MAIN world (where console-capture overrides
   // the page's console) into this isolated world. The event namespace is
   // SHARED with the page: any page script can dispatch a forged event with a
   // fabricated entry, so every payload is admitted through
   // `isValidConsoleBridgeEntry` (exact shape + byte bound) before it is
-  // forwarded. Best-effort — a sleeping SW or a rejected sendMessage must
-  // never throw here.
+  // forwarded. The forward is additionally gated on the persisted console-log
+  // flag (OFF by default) AND stealth (console capture is a page-visible
+  // artifact, so it is suppressed under the default-on stealth posture) —
+  // otherwise a page the agent never asked to capture would wake the SW on
+  // every console call. Best-effort — a sleeping SW or a rejected sendMessage
+  // must never throw here.
   window.addEventListener(CONSOLE_CAPTURE_EVENT, (e) => {
     const entry = (e as CustomEvent<{ entry?: unknown }>).detail?.entry;
     if (!isValidConsoleBridgeEntry(entry)) return;
+    if (consoleForwardingEnabled !== true || isStealthEnabledSync()) return;
     try {
       // `.catch` swallows async rejections (e.g. the SW sleeping between
       // wakes) — the try/catch alone only covers synchronous throws.

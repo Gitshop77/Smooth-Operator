@@ -3,7 +3,7 @@ import type { AgentAction, LogEvent } from "@/lib/agent/types";
 import { ActionSchema } from "@/lib/agent/tools/schema";
 import {
   consumeDownloadConsentForMode,
-  markDownloadConsentConsumed,
+  registerPendingDownload,
   releaseDownloadConsentReservation,
 } from "./agent-bridge";
 import type { ActionEffectAuthorizationMessage, CdpClickMessage, CdpPressAndHoldMessage, SaveAsPdfMessage, ScreenshotMessage, DetectVisualMessage, TabActionMessage, ClearVisionCacheMessage, PrivilegedDispatchToken } from "./message-types";
@@ -264,8 +264,13 @@ async function captureAndDownload(opts: {
   const requireSaveAs = consumeDownloadConsentForMode(opts.mode);
   try {
     opts.assertAuthorized();
-    await chrome.downloads.download({ url: dataUrl, filename, saveAs: requireSaveAs });
-    markDownloadConsentConsumed();
+    // chrome.downloads.download() resolves at INITIATION, not success — so
+    // consent is registered as PENDING and consumed only when the terminal
+    // onChanged delta reports "complete" (message-routing.ts listener). An
+    // interrupted download releases the reservation instead, so a download
+    // that never finished can't mark the one-time consent as used.
+    const downloadId = await chrome.downloads.download({ url: dataUrl, filename, saveAs: requireSaveAs });
+    registerPendingDownload(downloadId);
     opts.sendResponse({ ok: true, filename });
   } catch (e) {
     releaseDownloadConsentReservation();
@@ -314,7 +319,10 @@ export function handleCdpClick(
       let cx: number, cy: number;
       if (msg.visionIndex) {
         const { getVisionElementRect, isVisionCacheFresh } = await import("./agent-bridge");
-        if (!(await isVisionCacheFresh(tabId))) {
+        // Thread the run controller's signal so a user STOP aborts this
+        // fingerprint round trip instead of blocking the click up to the 20s
+        // content-script timeout.
+        if (!(await isVisionCacheFresh(tabId, { signal: authorization.signal }))) {
           sendResponse({ ok: false, error: "vision cache stale, re-detect" });
           return;
         }

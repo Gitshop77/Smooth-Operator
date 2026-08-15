@@ -68,14 +68,24 @@ export function isRunStartCancellationRequested(): boolean {
 }
 
 // ─── Per-run download consent (full_agentic) ──────────────────────────────
+//
+// `chrome.downloads.download()` resolves at INITIATION, not success. Consent is
+// RESERVED when a download starts and consumed only when the download actually
+// COMPLETES (the `chrome.downloads.onChanged` delta reports state
+// "complete"); an interrupted download RELEASES the reservation so the next
+// download re-prompts. Fail-closed: a stuck pending download keeps its
+// reservation (the next download re-prompts), which is the safe default for a
+// paused/never-finishing download.
 
 let fullAgenticDownloadConsent = false;
 let fullAgenticDownloadReserved = false;
+const pendingDownloadIds = new Set<number>();
 
 /** Reset the per-run download-consent flag (called at the start of every run). */
 export function resetDownloadConsent(): void {
   fullAgenticDownloadConsent = false;
   fullAgenticDownloadReserved = false;
+  pendingDownloadIds.clear();
 }
 
 /**
@@ -86,6 +96,36 @@ export function consumeDownloadConsentForMode(mode: string | undefined): boolean
   const requireSaveAs = mode === "full_agentic" && !fullAgenticDownloadConsent && !fullAgenticDownloadReserved;
   if (requireSaveAs) fullAgenticDownloadReserved = true;
   return requireSaveAs;
+}
+
+/**
+ * Register a download that just started so its terminal `onChanged` delta
+ * resolves the one-time consent. Call with the id returned by
+ * `chrome.downloads.download()`. No id (stub/non-standard runtime) → ignored.
+ */
+export function registerPendingDownload(downloadId: number | undefined): void {
+  if (typeof downloadId === "number") pendingDownloadIds.add(downloadId);
+}
+
+/**
+ * Resolve a `chrome.downloads.onChanged` delta against the pending set:
+ * state "complete" → the download succeeded, consume the one-time consent;
+ * state "interrupted" → the download never finished, release the reservation
+ * so a subsequent download re-prompts. Other transitions (in_progress, etc.)
+ * are ignored.
+ */
+export function onDownloadConsentDelta(delta: chrome.downloads.DownloadDelta): void {
+  if (!pendingDownloadIds.has(delta.id)) return;
+  const state = delta.state?.current;
+  if (state === "complete") {
+    pendingDownloadIds.delete(delta.id);
+    markDownloadConsentConsumed();
+    return;
+  }
+  if (state === "interrupted") {
+    pendingDownloadIds.delete(delta.id);
+    releaseDownloadConsentReservation();
+  }
 }
 
 /**

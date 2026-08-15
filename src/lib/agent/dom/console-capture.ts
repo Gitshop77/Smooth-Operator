@@ -47,6 +47,13 @@ export interface ConsoleLogEntry {
 /** CustomEvent name the MAIN-world capture uses to hand entries to the content script. */
 export const CONSOLE_CAPTURE_EVENT = "open-cowork-console-log";
 
+/** `chrome.storage.local` key holding whether the SW console-log ring is
+ *  capturing. The content script's forward gate reads this (fail-closed: OFF
+ *  unless explicitly `true`) and `enableConsoleLog`/`disableConsoleLog`
+ *  (rate-limit-tracker.ts) persist it, so a page that never asked for the
+ *  console log can't wake the service worker on every console call. */
+export const CONSOLE_LOG_ENABLED_KEY = "open_cowork_console_log_enabled";
+
 /** Max chars stored per entry message. The LLM's inline view of an action's
  *  extractedContent is truncated at 2000 chars (loop/messages-utils), so a
  *  longer message is never visible to the agent — storing it would only let a

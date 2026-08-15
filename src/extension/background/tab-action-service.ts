@@ -1,6 +1,8 @@
 import { checkUrlAllowedWithDomainConfig } from "@/lib/agent/tools/helpers/domain-config";
 import { SEARCH_ENGINE_URLS, getSearchEngineUrl, tryExpandSearchMacro } from "@/lib/agent/tools/constants";
 import type { AgentAction, LogEvent, TabInfo } from "@/lib/agent/types";
+import { redactSecrets } from "@/lib/agent/secrets";
+import { redactKeyShapes } from "@/lib/agent/key-shape-redact";
 import { runResearch, ResearchError } from "./lightpanda/research-service";
 import type { RunState } from "./state-store";
 import type { RunDispatchToken } from "./run-controller";
@@ -385,9 +387,22 @@ export function createTabActionService(
         const storageType = (action as { storage_type?: string }).storage_type === "session" ? "session" : "local";
         const area = storageType === "session" ? chrome.storage.session : chrome.storage.local;
         if (action.type === "get_storage") {
-          const items = await area.get(null);
+          const key = (action as { key?: unknown }).key;
+          if (typeof key !== "string" || key.length === 0) {
+            return { handled: true, pageChanged: false, success: false, message: "BLOCKED: get_storage requires a key" };
+          }
+          const raw = await area.get([key]);
           assertAuthorized();
-          return { handled: true, pageChanged: false, success: true, message: `read storage (${storageType})`, data: { items, type: storageType } };
+          const rawValue = raw[key];
+          // Serialize + redact before the value can reach the model transcript —
+          // mirror the READ_ACTION_TYPES patch (tab-manager.ts): exact stored
+          // secrets are masked by value (redactSecrets) and key-shaped tokens by
+          // shape (redactKeyShapes). Serializing first keeps nested structures
+          // safe regardless of their shape.
+          const redactedValue = rawValue === undefined
+            ? undefined
+            : redactKeyShapes(await redactSecrets(JSON.stringify(rawValue)));
+          return { handled: true, pageChanged: false, success: true, message: `read storage ${key} (${storageType})`, data: { items: { [key]: redactedValue }, type: storageType } };
         }
         if (action.type === "set_storage") {
           const key = (action as { key?: unknown }).key;

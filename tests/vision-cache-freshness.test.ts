@@ -30,6 +30,7 @@ const localStore: Record<string, unknown> = {};
 (globalThis as Record<string, unknown>).chrome = {
   tabs: {
     get: vi.fn(async () => ({ id: 1, url: "https://example.com" })),
+    sendMessage: vi.fn(async () => ({})),
   },
   storage: {
     local: {
@@ -189,6 +190,13 @@ function setVisionSettings(settings: {
     enableScreenshots: settings.enableScreenshots ?? true,
     visionMode: settings.visionMode ?? undefined,
   });
+}
+
+/** Some earlier tests leave `chrome.tabs.get` pointed at a hash-route URL;
+ *  restore the default so signal-forwarding tests are order-independent. */
+function resetTabsGetUrl(): void {
+  (globalThis as unknown as { chrome: { tabs: { get: ReturnType<typeof vi.fn> } } })
+    .chrome.tabs.get.mockResolvedValue({ id: 1, url: "https://example.com" });
 }
 
 describe("vision cache freshness — adaptive warm reuse + always-on reuse", () => {
@@ -383,5 +391,85 @@ describe("vision cache freshness — adaptive warm reuse + always-on reuse", () 
       .chrome.tabs.get;
     tabsGet.mockResolvedValue({ id: 1, url: "https://example.com/app#/billing" });
     await expect(isVisionCacheFresh(1)).resolves.toBe(false);
+  });
+
+  test("isVisionCacheFresh forwards the run abort signal to getPageSnapshot", async () => {
+    resetTabsGetUrl();
+    setVisionCacheUrl("https://example.com");
+    setVisionCacheFingerprint("FP-OLD");
+    setVisionCacheViewport(MOCK_VIEWPORT);
+    const controller = new AbortController();
+    getPageSnapshotMock.mockResolvedValue({ fingerprint: "FP-OLD", viewport: MOCK_VIEWPORT });
+
+    const fresh = await isVisionCacheFresh(1, { signal: controller.signal });
+
+    expect(fresh).toBe(true);
+    expect(getPageSnapshotMock).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ signal: controller.signal }),
+    );
+  });
+
+  test("extractStateForRun threads its abort signal into the freshness snapshot check", async () => {
+    resetTabsGetUrl();
+    visionElementsCache.set("v1", { x: 10, y: 10, width: 100, height: 50, label: "login" });
+    setVisionCacheUrl("https://example.com");
+    setVisionCacheFingerprint("FP-OLD");
+    setVisionCacheViewport(MOCK_VIEWPORT);
+    const controller = new AbortController();
+    getPageSnapshotMock.mockResolvedValue({ fingerprint: "FP-OLD", viewport: MOCK_VIEWPORT });
+    extractStateFromTabMock.mockResolvedValue(makeDomState({ fingerprint: "FP-OLD", viewport: MOCK_VIEWPORT }));
+
+    await extractStateForRun(1, MOCK_TABS, controller.signal);
+
+    expect(getPageSnapshotMock).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ signal: controller.signal }),
+    );
+  });
+
+  test("freshness results are unchanged when a signal is supplied", async () => {
+    resetTabsGetUrl();
+    setVisionCacheUrl("https://example.com");
+    setVisionCacheFingerprint("FP-OLD");
+    setVisionCacheViewport(MOCK_VIEWPORT);
+    getPageSnapshotMock.mockResolvedValue({ fingerprint: "FP-OLD", viewport: MOCK_VIEWPORT });
+    const controller = new AbortController();
+    await expect(isVisionCacheFresh(1, { signal: controller.signal })).resolves.toBe(true);
+
+    setVisionCacheFingerprint("FP-OLD");
+    setVisionCacheViewport("0:0:800:600");
+    getPageSnapshotMock.mockResolvedValue({ fingerprint: "FP-OLD", viewport: "0:480:800:600" });
+    await expect(isVisionCacheFresh(1, { signal: controller.signal })).resolves.toBe(false);
+  });
+
+  test("real getPageSnapshot aborts a pending fingerprint round trip promptly (signal threaded)", async () => {
+    // PING resolves so ensureContent returns fast; GET_DOM_FINGERPRINT never
+    // settles — the 20s default timeout would otherwise hang the step. With
+    // the run signal threaded through getPageSnapshot → sendMessageWithTimeout,
+    // an abort mid-call resolves immediately (fail-safe empty snapshot) instead
+    // of waiting out the content-script timeout.
+    const tabsMock = (globalThis as unknown as { chrome: { tabs: { sendMessage: ReturnType<typeof vi.fn> } } })
+      .chrome.tabs.sendMessage;
+    tabsMock.mockImplementation((_tabId: number, msg: { type?: string }) => {
+      if (msg?.type === "PING") return Promise.resolve({ ok: true });
+      return new Promise<never>(() => {});
+    });
+    const { getPageSnapshot: realGetPageSnapshot } = await import("@/extension/background/tab-manager-utils");
+
+    const controller = new AbortController();
+    const pending = realGetPageSnapshot(1, { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort(new DOMException("Stop requested", "AbortError"));
+
+    // Resolves promptly (well under the 20s timeout) to the fail-safe empty
+    // snapshot; the caller (isVisionCacheFresh) then treats the cache as stale.
+    await expect(Promise.race([
+      pending.then(() => "resolved"),
+      new Promise<"timeout">((resolve) => { setTimeout(() => resolve("timeout"), 2_000); }),
+    ])).resolves.toBe("resolved");
+    await expect(pending).resolves.toEqual({ fingerprint: "", viewport: "" });
+
+    tabsMock.mockReset();
   });
 });

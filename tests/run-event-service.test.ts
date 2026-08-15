@@ -8,6 +8,81 @@ vi.mock("../src/extension/background/run-session-state", () => ({
   runSessionState: { patch: vi.fn(async () => {}) },
 }));
 
+// Dependencies needed to load the REAL run-helpers module for the cleanupRun
+// terminal-event contract test (mirrors tests/vision-cache-freshness.test.ts).
+vi.mock("@/lib/agent/llm/catalog", () => ({
+  modelSupportsVision: vi.fn().mockResolvedValue(false),
+}));
+
+vi.mock("@/extension/provider-config-map", () => ({
+  CATALOG_PROVIDER_ID_MAP: {},
+}));
+
+vi.mock("@/extension/background/tab-manager", () => ({
+  extractStateFromTab: vi.fn().mockResolvedValue({
+    url: "https://example.com", title: "Test", tabs: [], elements: [], elementsText: "",
+    pageInfo: "", newElementCount: 0, scrollTop: 0, scrollHeight: 1000,
+    viewportHeight: 800, selectorMap: {}, devicePixelRatio: 1,
+  }),
+  listTabs: vi.fn().mockResolvedValue([]),
+  ensureContent: vi.fn().mockResolvedValue(undefined),
+  executeActionsInTab: vi.fn().mockResolvedValue([]),
+  waitForTabLoad: vi.fn().mockResolvedValue(undefined),
+  handleTabAction: vi.fn().mockResolvedValue(undefined),
+  getPageFingerprint: vi.fn().mockResolvedValue(""),
+  getPageSnapshot: vi.fn().mockResolvedValue({ fingerprint: "", viewport: "" }),
+  sendMessageWithTimeout: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("@/extension/background/screenshots", () => ({
+  captureTabScreenshot: vi.fn().mockResolvedValue("data:image/png;base64,abc"),
+}));
+
+vi.mock("@/extension/llm-direct", () => ({
+  navigatorCallDirect: vi.fn(),
+  plannerCallDirect: vi.fn(),
+  summarizeCallDirect: vi.fn(),
+}));
+
+vi.mock("@/extension/background/state-store", () => ({
+  getRunState: vi.fn().mockResolvedValue({ currentTabId: 1, step: 0 }),
+  saveRunState: vi.fn(),
+  clearRunState: vi.fn(),
+  RUN_STATE_KEY: "open_cowork_run_state",
+  startKeepalive: vi.fn(),
+  stopKeepalive: vi.fn(),
+  maybeReleaseKeepAwake: vi.fn(),
+  safeLog: vi.fn(),
+}));
+
+vi.mock("@/extension/provider-config", () => ({
+  resolveModel: vi.fn(() => "mock-model"),
+}));
+
+vi.mock("@/extension/background/antibot", () => ({
+  makeAntiBotHooks: vi.fn().mockReturnValue({}),
+}));
+
+vi.mock("@/extension/vision-assistant", () => ({
+  VisionAssistant: vi.fn().mockImplementation(() => ({
+    isReady: false,
+    init: vi.fn().mockResolvedValue(undefined),
+    detect: vi.fn().mockResolvedValue([]),
+    cleanup: vi.fn().mockResolvedValue(undefined),
+  })),
+  mergeDetections: vi.fn().mockReturnValue([]),
+  renderMergedElementsText: vi.fn().mockReturnValue(""),
+}));
+
+vi.mock("@/lib/agent/run-history", () => ({
+  RunBuilder: vi.fn(),
+  saveRun: vi.fn(),
+}));
+
+vi.mock("@/lib/agent/modes", () => ({
+  checkActionAllowed: vi.fn().mockReturnValue({ allowed: true }),
+}));
+
 import { RunEventService } from "../src/extension/background/run-event-service";
 import { beginRunController, resetRunControllerForTests } from "../src/extension/background/run-controller";
 import { persistRunSnapshot } from "../src/extension/background/run-snapshot-store";
@@ -49,6 +124,15 @@ beforeEach(async () => {
   resetRunControllerForTests();
   (globalThis as Record<string, unknown>).chrome = {
     runtime: { sendMessage: vi.fn(async () => {}) },
+    action: { setBadgeText: vi.fn() },
+    storage: {
+      local: { get: vi.fn(async () => ({})) },
+      session: {
+        get: vi.fn(async () => ({})),
+        remove: vi.fn(async () => {}),
+      },
+      onChanged: { removeListener: vi.fn(), addListener: vi.fn() },
+    },
   };
   await primeLiveSecretRedaction();
 });
@@ -156,5 +240,40 @@ describe("RunEventService", () => {
     ]);
     expect(envelopes.map((message) => message.event.type)).toEqual(["info", "done"]);
     expect(addEvent).not.toHaveBeenCalled();
+  });
+});
+
+describe("cleanupRun terminal-event contract", () => {
+  test("cleanupRun never broadcasts the dead terminal 'Run finished.' info event", async () => {
+    vi.resetModules();
+    const { cleanupRun } = await import("../src/extension/background/run-helpers");
+    const sendEvent = vi.fn();
+    const runBuilder = {
+      finish: vi.fn(() => ({ result: { success: false, text: "done", terminalReason: "cancelled" } })),
+    } as unknown as RunBuilder;
+
+    await cleanupRun({
+      runBuilder,
+      task: "task",
+      isScheduledTaskRun: false,
+      onStorageChanged: vi.fn(),
+      sendEvent,
+      runSucceeded: false,
+      releaseRunGuard: vi.fn(),
+      teardownScheduledVision: vi.fn(async () => {}),
+      abortSignal: new AbortController().signal,
+      terminalSnapshot: {
+        runId: "run-finished",
+        status: "cancelled",
+        terminalReason: "cancelled",
+        resultText: "Stop requested by user.",
+        terminalMessage: "Stop requested by user.",
+      } as never,
+    });
+
+    // The terminal 'Run finished.' info event is dead code: RunEventService
+    // drops every emit after the run is terminal, so the panel only ever sees
+    // done/error/cancelled. It must never be sent.
+    expect(sendEvent).not.toHaveBeenCalledWith({ type: "info", message: "Run finished." });
   });
 });

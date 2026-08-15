@@ -212,12 +212,17 @@ export async function sendMessageWithTimeout<R = unknown>(
   }
 }
 
-export async function getPageSnapshot(tabId: number): Promise<{ fingerprint: string; viewport: string }> {
+export async function getPageSnapshot(
+  tabId: number,
+  opts?: { signal?: AbortSignal; timeoutMs?: number },
+): Promise<{ fingerprint: string; viewport: string }> {
   try {
-    await ensureContent(tabId);
+    await ensureContent(tabId, opts?.signal);
     const res = await sendMessageWithTimeout<{ ok: boolean; fingerprint?: string; viewport?: string }>(
       tabId,
       { type: "GET_DOM_FINGERPRINT" },
+      opts?.timeoutMs,
+      opts?.signal,
     );
     return {
       fingerprint: res?.ok ? res.fingerprint ?? "" : "",

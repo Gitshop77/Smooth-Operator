@@ -53,7 +53,10 @@ export function getVisionElementRect(
   return visionElementsCache.get(visionId);
 }
 
-export async function isVisionCacheFresh(tabId: number): Promise<boolean> {
+export async function isVisionCacheFresh(
+  tabId: number,
+  opts?: { signal?: AbortSignal; timeoutMs?: number },
+): Promise<boolean> {
   if (!_visionCacheUrl) return false;
   let url: string | undefined;
   try {
@@ -71,7 +74,7 @@ export async function isVisionCacheFresh(tabId: number): Promise<boolean> {
       // does NOT move on scroll by design, but every cached [vN] rect is
       // scroll-relative — serving a pre-scroll detection set after the page
       // scrolled would mislocalize every vision-guided click).
-      const snap = await getPageSnapshot(tabId);
+      const snap = await getPageSnapshot(tabId, opts);
       if (!snap.fingerprint || snap.fingerprint !== _visionCacheFingerprint) return false;
       if (!snap.viewport || snap.viewport !== _visionCacheViewport) return false;
     } catch {

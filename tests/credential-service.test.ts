@@ -12,7 +12,7 @@ import {
 } from "../src/extension/credential-service";
 
 class ControlledVault implements CredentialVault {
-  records = new Map<CredentialHandleV1, { value: string; revision: number }>();
+  records = new Map<CredentialHandleV1, { value: string; revision: number; providerId: string }>();
   failWrite = false;
   mismatchRead = false;
   failDelete = false;
@@ -22,7 +22,7 @@ class ControlledVault implements CredentialVault {
     const current = this.records.get(handle)?.revision ?? 0;
     if (current !== expectedRevision) throw new Error("stale");
     const revision = current + 1;
-    this.records.set(handle, { value, revision });
+    this.records.set(handle, { value, revision, providerId });
     return { version: 1, handle, providerId, revision };
   }
 
@@ -122,7 +122,7 @@ describe("credential service V1", () => {
     local.set("open_cowork_credential_migration_v1", {
       version: 1, kind: "legacy-api-key", handle, providerId: "openai", sourceRevision: 0, stage: "copying",
     });
-    vault.records.set(handle, { value: "sk-legacy", revision: 1 });
+    vault.records.set(handle, { value: "sk-legacy", revision: 1, providerId: "openai" });
     const reference = await migrateRememberedCredential();
     expect(reference?.revision).toBe(1);
     expect(vault.records.get(handle)?.revision).toBe(1);
@@ -180,5 +180,38 @@ describe("credential service V1", () => {
     await expect(forgetRememberedCredential(reference.revision)).rejects.toThrow("delete failed");
     expect(local.get("rememberApiKey")).toBe(true);
     expect(local.has("open_cowork_credential_manifest_v1")).toBe(true);
+  });
+
+  test("switching providers deletes the previous provider's vault blob", async () => {
+    const first = (await saveEnteredCredential("sk-openai", "openai", true))!;
+    expect(vault.records.size).toBe(1);
+    const second = (await saveEnteredCredential("sk-anthropic", "anthropic", true))!;
+    // A different provider gets a fresh handle, and the previous provider's
+    // encrypted blob must not orphan in the vault.
+    expect(second.handle).not.toBe(first.handle);
+    expect(vault.records.size).toBe(1);
+    expect(vault.records.has(first.handle)).toBe(false);
+    expect(vault.records.get(second.handle)?.providerId).toBe("anthropic");
+    expect(await resolveCredential(second)).toBe("sk-anthropic");
+  });
+
+  test("switching provider twice leaves exactly the current provider's blob", async () => {
+    await saveEnteredCredential("sk-openai", "openai", true);
+    await saveEnteredCredential("sk-anthropic", "anthropic", true);
+    const final = (await saveEnteredCredential("sk-google", "google", true))!;
+    expect(vault.records.size).toBe(1);
+    expect(vault.records.get(final.handle)?.providerId).toBe("google");
+    expect(await resolveCredential(final)).toBe("sk-google");
+  });
+
+  test("a failed new-provider write keeps the old provider's blob intact", async () => {
+    await saveEnteredCredential("sk-openai", "openai", true);
+    const before = [...vault.records.keys()];
+    vault.failWrite = true;
+    await expect(saveEnteredCredential("sk-anthropic", "anthropic", true)).rejects.toThrow("write failed");
+    // The working credential is never destroyed by a failed switch.
+    expect(vault.records.size).toBe(1);
+    expect([...vault.records.keys()]).toEqual(before);
+    expect(vault.records.get(before[0])?.providerId).toBe("openai");
   });
 });

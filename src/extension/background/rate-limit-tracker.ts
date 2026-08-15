@@ -29,6 +29,7 @@ import type { ConsoleLogEntry, NetworkLogEntry, PrivilegedDispatchToken } from "
 import { authorizeRunScopedDispatch } from "./run-dispatch-authorization";
 import { consumeEffectCapability } from "./privileged-action-policy";
 import { redactUrlTokens } from "@/lib/agent/dom/extraction/element-info-utils";
+import { CONSOLE_LOG_ENABLED_KEY } from "@/lib/agent/dom/console-capture";
 
 /**
  * Sanitize a captured request/response URL BEFORE it enters the agent-facing
@@ -140,14 +141,21 @@ export function isConsoleLogEnabled(): boolean {
   return consoleLogEnabled;
 }
 
-/** Start capturing console calls. Existing entries are retained. */
+/**
+ * Start capturing console calls. Existing entries are retained. Also persists
+ * the flag to `chrome.storage.local` so the content script's forward gate
+ * (`content.ts`, CONSOLE_LOG_ENABLED_KEY) learns the ring is on without
+ * re-reading storage on every console call — best-effort / fire-and-forget.
+ */
 export function enableConsoleLog(): void {
   consoleLogEnabled = true;
+  void persistConsoleLogEnabled(true);
 }
 
 /** Stop capturing console calls. Existing entries are retained. */
 export function disableConsoleLog(): void {
   consoleLogEnabled = false;
+  void persistConsoleLogEnabled(false);
 }
 
 /** Snapshot the captured entries + the enabled flag (does NOT clear). */
@@ -171,6 +179,20 @@ export function getclearConsoleLog(): { enabled: boolean; entries: ConsoleLogEnt
 function pushConsoleLogEntry(entry: ConsoleLogEntry): void {
   if (consoleLogEntries.length >= CONSOLE_LOG_CAP) consoleLogEntries.shift();
   consoleLogEntries.push(entry);
+}
+
+/**
+ * Persist the console-log enabled flag to `chrome.storage.local` so the
+ * content script's forward gate learns the ring state without a storage read
+ * on every page console call. Best-effort / fire-and-forget: a rejected write
+ * or a missing `chrome.storage` (tests, restricted contexts) must never throw.
+ */
+async function persistConsoleLogEnabled(enabled: boolean): Promise<void> {
+  try {
+    await chrome.storage.local.set({ [CONSOLE_LOG_ENABLED_KEY]: enabled });
+  } catch {
+    /* best-effort — the in-memory ring still works for this wake */
+  }
 }
 
 /**

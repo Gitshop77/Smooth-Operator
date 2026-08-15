@@ -8,6 +8,70 @@
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 
+// ── Module mocks (hoisted) — needed so `startRun` (agent-bridge) can run its
+// run-start reset seam in-process: the loop, run-history, run-helpers and
+// state-store are stubbed; the download ring + its run-lifecycle reset are the
+// real code under test. Mirrors agent-bridge-startrun.test.ts.
+vi.mock("@/lib/agent/loop/orchestrator", () => ({
+  runAgentLoop: vi.fn(async () => {}),
+}));
+
+vi.mock("@/lib/agent/run-history", () => ({
+  RunBuilder: class {
+    private readonly events: unknown[] = [];
+    get id(): string { return `test-run-${Math.random().toString(36).slice(2)}`; }
+    get startedAt(): number { return 1; }
+    addEvent(event: unknown): void { this.events.push(event); }
+    finish(fallback: { success: boolean; text: string }) {
+      const done = [...this.events].reverse().find((event): event is { type: "done"; success: boolean; text: string } =>
+        typeof event === "object" && event !== null && (event as { type?: unknown }).type === "done",
+      );
+      return { result: done ? { success: done.success, text: done.text } : fallback };
+    }
+  },
+}));
+
+vi.mock("@/lib/agent/callbacks/metrics", () => ({
+  AgentMetricsCallback: class {
+    getMetrics() {
+      return {
+        totalSteps: 1, totalActions: 2, totalTokensIn: 3, totalTokensOut: 4,
+        totalCostUsd: 0.5, errors: { total: 0 }, loopWarnings: 0, compactions: 0,
+      };
+    }
+    reset(): void {}
+  },
+}));
+
+vi.mock("../src/extension/background/run-helpers", () => ({
+  buildLoopDeps: vi.fn((ctx: unknown) => ctx),
+  cleanupRun: vi.fn(async () => {}),
+  initRunState: vi.fn(async () => {}),
+  resetVisionInitFlagForNewRun: vi.fn(),
+  clearVisionElementsCacheForNewRun: vi.fn(),
+  teardownScheduledVision: vi.fn(),
+  wireAbortController: vi.fn(() => ({
+    controller: { signal: { aborted: false } },
+    onStorageChanged: vi.fn(),
+  })),
+  getVisionElementRect: vi.fn(),
+  isVisionCacheFresh: vi.fn(),
+}));
+
+vi.mock("../src/extension/background/state-store", () => ({
+  saveRunState: vi.fn(async () => {}),
+  saveRunStateForRun: vi.fn(async () => {}),
+  initializeRunStateForRun: vi.fn(async () => {}),
+  getRunState: vi.fn(async () => undefined),
+  clearRunState: vi.fn(async () => {}),
+  clearRunStateForRun: vi.fn(async () => {}),
+  loadAndSetDomainConfig: vi.fn(async () => {}),
+  safeLog: vi.fn(async () => {}),
+  stopKeepalive: vi.fn(async () => {}),
+}));
+
+import { makeChromeStorageMock } from "./helpers/chrome-storage-mock";
+
 type OnMessage = (msg: unknown, sender: unknown, sendResponse: (r?: unknown) => void) => boolean | undefined;
 type OnDownloadsChanged = (delta: unknown) => void;
 
@@ -15,13 +79,22 @@ let onMessage: OnMessage | undefined;
 let onDownloadsChanged: OnDownloadsChanged | undefined;
 
 function installChromeStub() {
+  onMessage = undefined;
+  onDownloadsChanged = undefined;
+  const base = makeChromeStorageMock(new Map(), new Map());
   const chrome = {
+    ...base,
     runtime: {
+      ...base.runtime,
       id: "extid",
       onMessage: { addListener: (cb: OnMessage) => { onMessage = cb; } },
+      sendMessage: vi.fn(async () => {}),
     },
     downloads: {
       onChanged: { addListener: (cb: OnDownloadsChanged) => { onDownloadsChanged = cb; } },
+    },
+    tabs: {
+      query: vi.fn(async () => [{ id: 1, url: "https://example.com" }]),
     },
   };
   (globalThis as Record<string, unknown>).chrome = chrome;
@@ -294,5 +367,111 @@ describe("list_downloads TAB_ACTION", () => {
     await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith(
       expect.objectContaining({ ok: false, error: expect.stringMatching(/stale/i) }),
     ));
+  });
+});
+
+describe("download ring run-lifecycle reset", () => {
+  // D1 finding 11: the capture ring is module state that previously survived
+  // across runs — a prior run's downloads leaked into the next run's
+  // list_downloads. startRun must clear the ring at the run-start seam.
+  test("startRun clears the capture ring so list_downloads sees an empty ring", async () => {
+    const controllerModule = await import("../src/extension/background/run-controller");
+    controllerModule.resetRunControllerForTests();
+    const { startRun } = await import("../src/extension/background/agent-bridge");
+    const { recordDownload, clearCapturedDownloads, getCapturedDownloads } =
+      await import("../src/extension/background/message-routing");
+    clearCapturedDownloads();
+
+    // Seed the ring with "previous session" downloads.
+    recordDownload(completeDelta() as never);
+    recordDownload(completeDelta({ id: 2, filename: { current: "old-report.bin" } }) as never);
+    expect(getCapturedDownloads()).toHaveLength(2);
+
+    await startRun({ task: "read", maxSteps: 5, mode: "standard" });
+
+    expect(getCapturedDownloads()).toHaveLength(0);
+    controllerModule.resetRunControllerForTests();
+  });
+
+  test("a second run does not see the first run's records (cross-run leak)", async () => {
+    const controllerModule = await import("../src/extension/background/run-controller");
+    controllerModule.resetRunControllerForTests();
+    const { startRun } = await import("../src/extension/background/agent-bridge");
+    const { recordDownload, clearCapturedDownloads, getCapturedDownloads } =
+      await import("../src/extension/background/message-routing");
+    clearCapturedDownloads();
+
+    // Run 1 captures a download mid-run (in-run captures stay in scope).
+    await startRun({ task: "run one", maxSteps: 5, mode: "standard" });
+    recordDownload(completeDelta({ id: 11, filename: { current: "run1.pdf" } }) as never);
+    expect(getCapturedDownloads()).toHaveLength(1);
+
+    // Run 2 starts fresh: run 1's record must not leak into the new run.
+    await startRun({ task: "run two", maxSteps: 5, mode: "standard" });
+    expect(getCapturedDownloads()).toHaveLength(0);
+    controllerModule.resetRunControllerForTests();
+  });
+});
+
+describe("download consent lifecycle (D5 finding 15)", () => {
+  // D5: `chrome.downloads.download()` resolves at INITIATION, not success, so
+  // the one-time full-agentic consent must be consumed only on a terminal
+  // "complete" delta — not when the download starts. Pending ids are tracked
+  // in agent-bridge-utils; the message-routing onDownloadsChanged listener
+  // resolves them (complete → consume, interrupted → release). A stuck
+  // pending download keeps the reservation (fail-closed: next download
+  // re-prompts).
+
+  beforeEach(async () => {
+    const { resetDownloadConsent } = await import("../src/extension/background/agent-bridge-utils");
+    resetDownloadConsent();
+  });
+
+  test("initiate reserves consent; onChanged complete consumes it (no re-prompt)", async () => {
+    const utils = await import("../src/extension/background/agent-bridge-utils");
+    // First full-agentic download → saveAs required (consent reserved).
+    expect(utils.consumeDownloadConsentForMode("full_agentic")).toBe(true);
+    utils.registerPendingDownload(42);
+
+    // A second concurrent initiate must NOT prompt while the first is pending.
+    expect(utils.consumeDownloadConsentForMode("full_agentic")).toBe(false);
+
+    // Terminal complete delta → consent consumed. Observable via the mode
+    // gate: a consumed consent never re-prompts.
+    onDownloadsChanged?.(completeDelta({ id: 42, state: { current: "complete", previous: "in_progress" } }) as never);
+    expect(utils.consumeDownloadConsentForMode("full_agentic")).toBe(false);
+  });
+
+  test("onChanged interrupted releases the reservation so the next download re-prompts", async () => {
+    const utils = await import("../src/extension/background/agent-bridge-utils");
+    expect(utils.consumeDownloadConsentForMode("full_agentic")).toBe(true);
+    utils.registerPendingDownload(7);
+
+    onDownloadsChanged?.(completeDelta({ id: 7, state: { current: "interrupted", previous: "in_progress" } }) as never);
+    // Reservation released → a retry prompts again (fail-open to re-prompt).
+    expect(utils.consumeDownloadConsentForMode("full_agentic")).toBe(true);
+  });
+
+  test("a failed download() (rejected initiate) releases the reservation", async () => {
+    const utils = await import("../src/extension/background/agent-bridge-utils");
+    expect(utils.consumeDownloadConsentForMode("full_agentic")).toBe(true);
+    utils.releaseDownloadConsentReservation();
+    expect(utils.consumeDownloadConsentForMode("full_agentic")).toBe(true);
+  });
+
+  test("a delta for an unregistered id does not touch the reservation", async () => {
+    const utils = await import("../src/extension/background/agent-bridge-utils");
+    expect(utils.consumeDownloadConsentForMode("full_agentic")).toBe(true);
+    // Delta for a download we never registered — must be ignored entirely.
+    onDownloadsChanged?.(completeDelta({ id: 999, state: { current: "complete", previous: "in_progress" } }) as never);
+    // Reservation still held → a second download does NOT re-prompt.
+    expect(utils.consumeDownloadConsentForMode("full_agentic")).toBe(false);
+  });
+
+  test("non-full-agentic modes never consume or reserve consent", async () => {
+    const utils = await import("../src/extension/background/agent-bridge-utils");
+    expect(utils.consumeDownloadConsentForMode("standard")).toBe(false);
+    expect(utils.consumeDownloadConsentForMode(undefined)).toBe(false);
+    expect(utils.consumeDownloadConsentForMode("full_agentic")).toBe(true);
   });
 });

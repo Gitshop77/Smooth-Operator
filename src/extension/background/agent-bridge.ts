@@ -64,6 +64,8 @@ import {
   consumeDownloadConsentForMode,
   markDownloadConsentConsumed,
   releaseDownloadConsentReservation,
+  registerPendingDownload,
+  onDownloadConsentDelta,
 } from "./agent-bridge-utils";
 import {
   beginRunController,
@@ -90,6 +92,8 @@ export {
   consumeDownloadConsentForMode,
   markDownloadConsentConsumed,
   releaseDownloadConsentReservation,
+  registerPendingDownload,
+  onDownloadConsentDelta,
   resetDownloadConsent,
   runDeadlineForProvider,
   LOCAL_RUN_DEADLINE_MS,
@@ -598,6 +602,21 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
   // the worker was asleep (no onChanged fired). Idempotent and cheap —
   // clearing empty maps is a no-op on SW wake.
     clearRedactionMemo();
+
+  // Reset the download capture ring at run START (run-lifecycle): the ring is
+  // module state in the MV3 service worker and previously survived across
+  // runs, so a prior run's downloads leaked into the next run's list_downloads
+  // (the executor's "no downloads captured in this session" message was
+  // untruthful). Anything captured AFTER this point belongs to the current
+  // run. The ring lives in a dedicated leaf module (download-capture.ts), so
+  // importing it here does NOT create a runtime cycle through message-routing
+  // (→ handlers → agent-bridge).
+    try {
+      const { clearCapturedDownloads } = await import("./download-capture");
+      clearCapturedDownloads();
+    } catch {
+      /* download-capture unavailable in a bare harness — best-effort reset */
+    }
 
     try {
       const { AgentMetricsCallback } = await import("@/lib/agent/callbacks/metrics");
