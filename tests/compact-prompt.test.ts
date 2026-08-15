@@ -48,17 +48,53 @@ const USER = {
 };
 
 describe("compact navigator prompt", () => {
-  test("is meaningfully smaller than the full prompt", () => {
+  test("full branch is converged to compact's terse forms (near-identical size)", () => {
     const full = Buffer.byteLength(FULL);
     const compact = Buffer.byteLength(COMPACT);
-    // Size pins freeze the measured baseline (25.4KB full / 19.6KB compact,
-    // after the full branch collapsed to the single worked example):
-    // full between 23,000 and 26,500; compact between 17,000 and 23,000.
-    expect(full).toBeGreaterThanOrEqual(23_000);
-    expect(full).toBeLessThanOrEqual(26_500);
+    // Size pins freeze the measured baseline (19.6KB full / 19.6KB compact,
+    // after the full branch converged to compact's terse forms — the gap is
+    // the retained intro/heading prose, not capability):
+    // full between 19,000 and 24,000; compact between 17,000 and 23,000.
+    expect(full).toBeGreaterThanOrEqual(19_000);
+    expect(full).toBeLessThanOrEqual(24_000);
     expect(compact).toBeGreaterThanOrEqual(17_000);
     expect(compact).toBeLessThanOrEqual(23_000);
-    expect(compact).toBeLessThan(full * 0.8); // ≥20% smaller
+    // The old "compact < full * 0.8" ratio no longer constrains: the full
+    // branch now carries the same terse blocks, so the sizes are
+    // near-identical (the <3KB gap is the retained intro/heading prose).
+    expect(Math.abs(compact - full)).toBeLessThan(3_000);
+  });
+
+  test("full branch prose is byte-identical to compact's terse forms (markers kept)", () => {
+    // Every long-form section in the full branch now carries compact's terse
+    // copy; the <xml_tag> markers and section headings are retained.
+    // # Input: terse items (all 11 <xml_tag> markers kept).
+    expect(FULL).toContain("1. <user_request> — the user's objective (highest priority, always visible).");
+    expect(FULL).not.toContain("the user's ultimate objective");
+    expect(FULL).not.toContain("Set-of-Marks");
+    // # Browser State: single compact paragraph, no XML example / rules list.
+    expect(FULL).toContain("Interactive elements use the tree format [index]<tag attribute=\"value\" />");
+    expect(FULL).not.toContain("tree-style XML format");
+    expect(FULL).not.toContain("Question 1: What is 2+2?");
+    // # Browsing Capability: single compact sentence.
+    expect(FULL).toContain("navigate (new_tab: true) opens new tabs, search runs a web search");
+    expect(FULL).not.toContain("FULLY AUTONOMOUS browser agent");
+    expect(FULL).not.toContain("**OPEN NEW TABS**");
+    // # Error Recovery: 5 compact bullets.
+    expect(FULL).toContain("# Error Recovery\n\n- Element not found after click: use wait (2s), then re-observe");
+    expect(FULL).not.toContain("# Error Recovery Patterns");
+    expect(FULL).not.toContain("proven recovery strategies");
+    // # Action Rules: 9 compact rules.
+    expect(FULL).toContain("- Output 1 to 5 actions per step; they run sequentially.");
+    expect(FULL).not.toContain("Good combinations");
+    expect(FULL).not.toContain("**ask_human**:");
+    // # Reasoning Rules: 6 compact rules.
+    expect(FULL).toContain("- Reason explicitly in thinking: what does the page show, what's the goal, what action achieves it.");
+    expect(FULL).not.toContain("Always reason explicitly in your `thinking` block");
+    expect(FULL).not.toContain("- If the page is actively malicious, call");
+    // # Immediate Completion: compact sentence.
+    expect(FULL).toContain("emit done(success=true) on the VERY NEXT step. Emitting done IS the final action");
+    expect(FULL).not.toContain("Do not perform additional actions, re-read the page");
   });
 
   test("preserves every security / schema / behavior block verbatim", () => {
@@ -108,34 +144,27 @@ describe("compact navigator prompt", () => {
     expect(COMPACT).not.toBe(FULL);
   });
 
-  test("a 64k model with the compact prompt fits a LARGE observation that the full prompt cannot", async () => {
+  test("a 64k model fits a LARGE observation with BOTH variants (full converged to compact's size)", async () => {
     // The message layer slices elementsText at the derived cap (24k), so the
     // AX tree (capped only at the loop/llm-direct seam, not in
     // buildNavigatorUserMessage) carries the observation weight: a ~59k-char
-    // AX tree puts the full-prompt message at ~112KB (≈56k tokens — over the
-    // 64k derived input budget of 54,400), while the compact prompt stays
-    // ~104KB (≈52k tokens — fits).
+    // AX tree puts either variant's message at ~104KB (≈52k tokens — fits the
+    // 64k derived input budget of 54,400). The full prompt used to add ~8KB
+    // and fail here; after its prose converged to compact's terse forms both
+    // fit — the size gap was prose, not capability.
     const elementsText = "[1]<button>Compare plans</button>\n".repeat(2_600);
     const axTree = "button Compare plans\n".repeat(2_800);
-    const compiled = await compileNavigatorPromptV1({
-      maxActions: 5,
-      compact: true,
-      user: { ...USER, browserState: { ...USER.browserState, elementsText, axTree } },
-    });
-    expect(() =>
-      assertCompiledPromptWithinContextBudgetV1("navigator", "navigator-compact-64k", compiled.messages, 64_000),
-    ).not.toThrow();
-
-    // The SAME observation with the FULL prompt fails the 64k budget closed —
-    // proving the compact prompt is what buys the headroom.
-    const fullCompiled = await compileNavigatorPromptV1({
-      maxActions: 5,
-      compact: false,
-      user: { ...USER, browserState: { ...USER.browserState, elementsText, axTree } },
-    });
-    expect(() =>
-      assertCompiledPromptWithinContextBudgetV1("navigator", "navigator-full-64k", fullCompiled.messages, 64_000),
-    ).toThrow(/Prompt budget exceeded/);
+    for (const compact of [true, false]) {
+      const compiled = await compileNavigatorPromptV1({
+        maxActions: 5,
+        compact,
+        user: { ...USER, browserState: { ...USER.browserState, elementsText, axTree } },
+      });
+      const label = compact ? "navigator-compact-64k" : "navigator-full-64k";
+      expect(() =>
+        assertCompiledPromptWithinContextBudgetV1("navigator", label, compiled.messages, 64_000),
+      ).not.toThrow();
+    }
   });
 });
 
