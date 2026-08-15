@@ -34,6 +34,7 @@ import {
   bumpDomEpoch,
   getDomEpoch,
   installMutationSignal,
+  DIRTY_ROOTS_BUCKET_CAP,
 } from "../src/lib/agent/dom/mutation-signal";
 import {
   installJsdomLayoutMock,
@@ -331,5 +332,38 @@ describe("partial re-walk (dirty-subtree splice)", () => {
     // new-element marker, and must not be re-emitted without its star.
     expect(second.elementsText).toContain("\t*note: keep me");
     expect(second.elementsText).not.toContain("\tnote: keep me");
+  });
+
+  it("a mutation flood collapses the epoch bucket to the document root (bounded bookkeeping)", async () => {
+    // Attribute mutations across many DISTINCT elements in one frame would
+    // otherwise grow the bucket past the cap while recordDirtyTargets'
+    // ancestor/subtree scans turn into an O(n²) storm, and the partial-extract
+    // splice would carry a huge root list. Past the cap the bucket collapses
+    // to the document root: the extractor re-walks the page (O(n), correct)
+    // instead. (A childList flood already collapses to the common parent by
+    // record-target design; the attribute flood is the distinct-target shape
+    // that exercises the cap.)
+    document.body.innerHTML = '<div id="root"></div>';
+    const root = document.getElementById("root")!;
+    for (let i = 0; i < DIRTY_ROOTS_BUCKET_CAP + 50; i++) {
+      const div = document.createElement("div");
+      div.id = `flood-${i}`;
+      root.appendChild(div);
+    }
+    await settleDom();
+
+    // All synchronous → one MutationObserver batch → one epoch bucket.
+    for (let i = 0; i < DIRTY_ROOTS_BUCKET_CAP + 50; i++) {
+      root.children[i].setAttribute("data-x", String(i));
+    }
+    await tick(); // deliver + record the batch
+
+    const epoch = getDomEpoch();
+    const roots = getDirtyRoots(epoch);
+    // Collapsed: exactly the document root — nothing else survives the
+    // topmost dedupe, and no unbounded per-node list is retained.
+    expect(roots.length).toBe(1);
+    expect(roots[0]).toBe(document.documentElement);
+    clearDirtyRoots(epoch);
   });
 });

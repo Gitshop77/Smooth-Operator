@@ -61,10 +61,25 @@ function recordTargetElement(record: MutationRecord): Element | null {
 }
 
 /**
+ * Cap on the number of distinct dirty roots recorded in ONE epoch bucket.
+ * A mutation flood (e.g. an SPA rewriting thousands of nodes in one frame)
+ * would otherwise turn `recordDirtyTargets`' ancestor/subtree scans into an
+ * O(n²) bookkeeping storm and the partial-extract splice into a huge root
+ * list. Past the cap the bucket collapses to the single `documentElement`
+ * root — the extractor falls back to re-walking the page (O(n), correct)
+ * instead of O(n²) dedupe.
+ */
+export const DIRTY_ROOTS_BUCKET_CAP = 128;
+
+/**
  * Append a record batch's targets to the current epoch's bucket, keeping only
  * TOPMOST elements: a target whose ancestor is already in the bucket is
  * dropped (the ancestor's re-walk covers it), and a new target drops any
  * bucket members inside its own subtree (it is the better root for them).
+ * Membership is Set-backed (each record's ancestor scan is O(bucket depth),
+ * not a linear `includes` scan per level). A bucket past
+ * {@link DIRTY_ROOTS_BUCKET_CAP} collapses to the document root — the whole
+ * page is re-walked once instead of tracking an unbounded root list.
  */
 function recordDirtyTargets(records: MutationRecord[]): void {
   const bucketEpoch = epoch;
@@ -73,41 +88,65 @@ function recordDirtyTargets(records: MutationRecord[]): void {
     bucket = [];
     dirtyRootsByEpoch.set(bucketEpoch, bucket);
   }
+  if (bucket.length >= DIRTY_ROOTS_BUCKET_CAP) {
+    // Flood guard: collapse once, then stay collapsed for the epoch.
+    if (bucket[0] !== document.documentElement) {
+      bucket.length = 0;
+      bucket.push(document.documentElement);
+    }
+    return;
+  }
+  const inBucket = new Set(bucket);
   for (const record of records) {
     const el = recordTargetElement(record);
-    if (!el || bucket.includes(el)) continue;
+    if (!el || inBucket.has(el)) continue;
     let covered = false;
     for (let cur = el.parentElement; cur; cur = cur.parentElement) {
-      if (bucket.includes(cur)) {
+      if (inBucket.has(cur)) {
         covered = true;
         break;
       }
     }
     if (covered) continue;
     for (let i = bucket.length - 1; i >= 0; i--) {
-      if (el.contains(bucket[i])) bucket.splice(i, 1);
+      if (el.contains(bucket[i])) {
+        const removed = bucket.splice(i, 1)[0];
+        inBucket.delete(removed);
+      }
     }
     bucket.push(el);
+    inBucket.add(el);
+    if (bucket.length >= DIRTY_ROOTS_BUCKET_CAP) {
+      // Collapse mid-batch (a single flood batch can exceed the cap).
+      bucket.length = 0;
+      bucket.push(document.documentElement);
+      return;
+    }
   }
 }
 
 /** Drop any element whose ancestor is also in the list (cross-bucket dedupe). */
 function dedupeTopmost(roots: Element[]): Element[] {
   const out: Element[] = [];
+  const inOut = new Set<Element>();
   for (const el of roots) {
-    if (out.includes(el)) continue;
+    if (inOut.has(el)) continue;
     let covered = false;
     for (let cur = el.parentElement; cur; cur = cur.parentElement) {
-      if (out.includes(cur)) {
+      if (inOut.has(cur)) {
         covered = true;
         break;
       }
     }
     if (covered) continue;
     for (let i = out.length - 1; i >= 0; i--) {
-      if (el.contains(out[i])) out.splice(i, 1);
+      if (el.contains(out[i])) {
+        const removed = out.splice(i, 1)[0];
+        inOut.delete(removed);
+      }
     }
     out.push(el);
+    inOut.add(el);
   }
   return out;
 }

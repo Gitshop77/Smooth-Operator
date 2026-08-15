@@ -56,8 +56,19 @@ function deriveEnabledActions(state: LoopState, browserState: BrowserState): Rea
     });
     if (decision.allowed) enabled.add(name);
   };
-  for (const item of state.navigatorHistory.slice(-ENABLED_ACTIONS_HISTORY_WINDOW)) {
+  const history = state.navigatorHistory.slice(-ENABLED_ACTIONS_HISTORY_WINDOW);
+  for (const item of history) {
     for (const result of item.results) consider(result.action.type);
+  }
+  if (history.length === 0) {
+    // FIRST step: no executed-action context exists, so the listing would be
+    // empty and step 1 flies blind — the model would commit to a
+    // page-changing action without knowing the page can be probed first.
+    // Seed the read-only first-step essentials (each still mode-gated by
+    // `consider`): challenge detection, page info, tab listing, evaluate.
+    for (const name of ["detect_challenge", "get_page_info", "list_tabs", "evaluate"]) {
+      consider(name);
+    }
   }
   if (browserState.elementsText.includes(PAGE_NEXT_MARKER)) consider("page_next");
   return enabled;

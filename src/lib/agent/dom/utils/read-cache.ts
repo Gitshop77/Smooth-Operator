@@ -25,10 +25,14 @@
  * {@link getSharedReadCache}: on an unchanged DOM (same epoch) the second
  * walk of a step — and the next step's walks — serve every element from the
  * previous walk's reads (0 forced reflows). Any DOM mutation bumps the epoch
- * (see `../mutation-signal`), which rebuilds the shared cache.
+ * (see `../mutation-signal`), which rebuilds the shared cache. A pure scroll
+ * or viewport resize does NOT bump the epoch but DOES invalidate every cached
+ * `getBoundingClientRect` (scroll-relative coordinates), so the cache is keyed
+ * on the viewport signature too (see `../utils/viewport-signature`).
  */
 import { isVisibleFull } from "./visibility";
 import { getDomEpoch, isMutationSignalArmed } from "../mutation-signal";
+import { viewportSignature } from "./viewport-signature";
 
 interface ReadCacheEntry {
   rect: DOMRect | undefined;
@@ -95,23 +99,30 @@ export class ReadCache {
   }
 }
 
-let sharedReadCache: { epoch: number; cache: ReadCache } | null = null;
+let sharedReadCache: { epoch: number; viewport: string; cache: ReadCache } | null = null;
 
 /**
  * The epoch-stamped persistent ReadCache shared by both extraction walks.
  *
- * Rebuilds only when the DOM epoch moved — or when the mutation signal is
- * unarmed (the epoch then can't be trusted to move, so the cache fails closed
- * and a fresh instance is served instead). Otherwise the walkers serve every
- * element's rect/style/visibility from the previous walk's batch reads — on
- * an unchanged page the second walk of a step (and subsequent steps) performs
- * zero forced layout reads. The DOM is never written during a walk, so cached
- * values stay fresh for the whole epoch.
+ * Rebuilds only when the DOM epoch moved, the viewport signature changed
+ * (scroll/resize reflows the rect cache even with an untouched DOM), or when
+ * the mutation signal is unarmed (the epoch then can't be trusted to move, so
+ * the cache fails closed and a fresh instance is served instead). Otherwise
+ * the walkers serve every element's rect/style/visibility from the previous
+ * walk's batch reads — on an unchanged page the second walk of a step (and
+ * subsequent steps) performs zero forced layout reads. The DOM is never
+ * written during a walk, so cached values stay fresh for the whole epoch.
  */
 export function getSharedReadCache(): ReadCache {
   const epoch = getDomEpoch();
-  if (!isMutationSignalArmed() || !sharedReadCache || sharedReadCache.epoch !== epoch) {
-    sharedReadCache = { epoch, cache: new ReadCache() };
+  const viewport = viewportSignature();
+  if (
+    !isMutationSignalArmed() ||
+    !sharedReadCache ||
+    sharedReadCache.epoch !== epoch ||
+    sharedReadCache.viewport !== viewport
+  ) {
+    sharedReadCache = { epoch, viewport, cache: new ReadCache() };
   }
   return sharedReadCache.cache;
 }

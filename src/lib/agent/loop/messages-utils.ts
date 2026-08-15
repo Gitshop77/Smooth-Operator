@@ -47,6 +47,12 @@ const OBSERVATION_RETENTION_WINDOW = 2;
  * metric measures exactly what the model sees. */
 export const NAVIGATOR_HISTORY_LIMIT = 12;
 
+/** Max history items rendered inline in the planner message (mirrors
+ * `PLANNER_HISTORY_LIMIT` in loop/messages.ts — the planner message builder's
+ * rendered window). Kept here so the llm-calls prompt metrics measure the
+ * SAME window the message builder ships. */
+export const PLANNER_HISTORY_LIMIT = 8;
+
 /** Max chars of the action-args placeholder rendered for stale observations. */
 const STALE_ACTION_ARGS_LIMIT = 80;
 

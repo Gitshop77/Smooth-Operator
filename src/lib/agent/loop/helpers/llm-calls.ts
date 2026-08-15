@@ -23,7 +23,7 @@ import type {
 } from "../../callbacks";
 import type { LoopDeps, PlannerCallArgs } from "../types";
 import { MAX_PARSE_RETRIES } from "../constants";
-import { NAVIGATOR_HISTORY_LIMIT } from "../messages-utils";
+import { NAVIGATOR_HISTORY_LIMIT, PLANNER_HISTORY_LIMIT } from "../messages-utils";
 import { sumUsages, accountUsage, reportCostEvent, sanitizeUsageNumber, sleepParseRetryBackoff } from "./llm-calls-utils";
 
 let llmCallSequence = 0;
@@ -38,11 +38,16 @@ function jsonChars(value: unknown): number {
 }
 
 function plannerPromptStats(request: PlannerStepRequest) {
-  const requestChars = request.task.length + jsonChars(request.history) +
+  // The history is measured over the RENDERED window (the last
+  // PLANNER_HISTORY_LIMIT items — exactly what the message builder ships,
+  // see loop/messages.ts), not the full stored array, so the metric
+  // describes the real prompt size.
+  const historyWindow = (request.history ?? []).slice(-PLANNER_HISTORY_LIMIT);
+  const requestChars = request.task.length + jsonChars(historyWindow) +
     (request.plan?.reduce((sum, item) => sum + item.length, 0) ?? 0) +
     request.url.length + jsonChars(request.tabs) + (request.compactedMemory?.length ?? 0);
   return {
-    historyItems: request.history.length,
+    historyItems: historyWindow.length,
     requestChars,
     taskChars: request.task.length,
     planItems: request.plan?.length ?? 0,

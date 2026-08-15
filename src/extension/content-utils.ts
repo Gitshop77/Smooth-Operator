@@ -11,6 +11,7 @@ import {
   validateDomainConfig,
 } from "@/lib/agent/tools/helpers/domain-config";
 import { domFingerprint } from "@/lib/agent/tools/helpers";
+import { viewportSignature } from "@/lib/agent/dom/utils/viewport-signature";
 import type { AgentAction, ActionResult, BrowserState, TabInfo } from "@/lib/agent/types";
 import type { AgentMode } from "@/lib/agent/modes";
 import { MAX_ENTRY_MESSAGE_CHARS, type ConsoleLogEntry } from "@/lib/agent/dom/console-capture";
@@ -99,6 +100,10 @@ interface OkResponse<T = unknown> {
   results?: T;
   html?: string;
   fingerprint?: string;
+  /** Viewport/scroll signature returned with the DOM fingerprint (see
+   * viewport-signature.ts) so the background's vision cache can invalidate
+   * on a pure scroll. */
+  viewport?: string;
 }
 interface ErrorResponse {
   ok: false;
@@ -182,7 +187,14 @@ function blockRemainingActions(
   fromIndex: number,
   reason: string,
 ): ActionResult[] {
-  return actions.slice(fromIndex).map((action) => ({ action, success: false, message: reason }));
+  return actions.slice(fromIndex).map((action) => ({
+    action,
+    success: false,
+    message: reason,
+    // Synthetic queue padding — static message; must never feed the loop
+    // detector's shared outcome buckets (false loop warnings / hard abort).
+    skipLoopRecord: true,
+  }));
 }
 
 async function authorizeActionEffect(token: DispatchToken, action: AgentAction): Promise<string> {
@@ -269,6 +281,10 @@ export function handleExtractState(
         devicePixelRatio,
         axTree: axTree.pageContent,
         fingerprint: domFingerprint(),
+        // Viewport/scroll signature — lets the background's vision cache
+        // invalidate on a pure scroll (rects are scroll-relative; the DOM
+        // fingerprint does NOT move on scroll by design).
+        viewport: viewportSignature(),
       },
     });
   } catch (e) {
@@ -404,6 +420,7 @@ export function handleExecuteActions(
               action: { type: "wait" } as AgentAction,
               success: isExpected,
               message: `${skipped} remaining action(s) skipped after ${result.isDone ? "done" : result.pageChanged ? "page change" : "failure"}`,
+              skipLoopRecord: true,
             });
           }
           break;
@@ -464,7 +481,7 @@ export function handleGetDomFingerprint(
   sendResponse: (r: Response) => void,
 ): void {
   try {
-    sendResponse({ ok: true, fingerprint: domFingerprint() });
+    sendResponse({ ok: true, fingerprint: domFingerprint(), viewport: viewportSignature() });
   } catch (e) {
     sendResponse(errorResponse(e));
   }

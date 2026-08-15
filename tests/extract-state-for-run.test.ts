@@ -105,6 +105,7 @@ vi.mock("@/extension/background/tab-manager", () => ({
   waitForTabLoad: vi.fn().mockResolvedValue(undefined),
   handleTabAction: vi.fn().mockResolvedValue(undefined),
   getPageFingerprint: vi.fn().mockResolvedValue(""),
+  getPageSnapshot: vi.fn().mockResolvedValue({ fingerprint: "", viewport: "" }),
   sendMessageWithTimeout: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -199,7 +200,7 @@ let captureTabScreenshotMock: ReturnType<typeof vi.fn>;
 let modelSupportsVisionMock: ReturnType<typeof vi.fn>;
 let mergeDetectionsMock: ReturnType<typeof vi.fn>;
 let renderMergedElementsTextMock: ReturnType<typeof vi.fn>;
-let getPageFingerprintMock: ReturnType<typeof vi.fn>;
+let getPageSnapshotMock: ReturnType<typeof vi.fn>;
 
 const MOCK_TABS = [{ id: 1, url: "https://example.com", title: "Test" }] as never[];
 
@@ -278,7 +279,7 @@ describe("extractStateForRun — vision-merge branches", () => {
 
     const catMod = await import("@/lib/agent/llm/catalog");
     modelSupportsVisionMock = catMod.modelSupportsVision as unknown as ReturnType<typeof vi.fn>;
-    getPageFingerprintMock = tabMod.getPageFingerprint as unknown as ReturnType<typeof vi.fn>;
+    getPageSnapshotMock = tabMod.getPageSnapshot as unknown as ReturnType<typeof vi.fn>;
 
     const mergerMod = await import("@/extension/vision-assistant/merger");
     mergeDetectionsMock = mergerMod.mergeDetections as unknown as ReturnType<typeof vi.fn>;
@@ -305,7 +306,7 @@ describe("extractStateForRun — vision-merge branches", () => {
     modelSupportsVisionMock.mockResolvedValue(false);
     mergeDetectionsMock.mockReturnValue([]);
     renderMergedElementsTextMock.mockReturnValue("");
-    getPageFingerprintMock.mockResolvedValue("fingerprint");
+    getPageSnapshotMock.mockResolvedValue({ fingerprint: "fingerprint", viewport: "0:0:800:600" });
     (globalThis.chrome.tabs.get as ReturnType<typeof vi.fn>).mockResolvedValue({
       id: 1,
       url: "https://example.com",
@@ -677,7 +678,7 @@ describe("handleDetectVisualRequest abort signal", () => {
     const catMod = await import("@/lib/agent/llm/catalog");
     modelSupportsVisionMock = catMod.modelSupportsVision as unknown as ReturnType<typeof vi.fn>;
     const tabMod = await import("@/extension/background/tab-manager");
-    getPageFingerprintMock = tabMod.getPageFingerprint as unknown as ReturnType<typeof vi.fn>;
+    getPageSnapshotMock = tabMod.getPageSnapshot as unknown as ReturnType<typeof vi.fn>;
 
     for (const k of Object.keys(localStore)) delete localStore[k];
     for (const k of Object.keys(sessionStore)) delete sessionStore[k];
@@ -703,7 +704,7 @@ describe("handleDetectVisualRequest abort signal", () => {
     modelSupportsVisionMock.mockResolvedValue(false);
     mergeDetectionsMock.mockReturnValue([]);
     renderMergedElementsTextMock.mockReturnValue("");
-    getPageFingerprintMock.mockResolvedValue("fingerprint");
+    getPageSnapshotMock.mockResolvedValue({ fingerprint: "fingerprint", viewport: "0:0:800:600" });
     (globalThis.chrome.tabs.get as ReturnType<typeof vi.fn>).mockResolvedValue({
       id: 1,
       url: "https://example.com",
@@ -802,7 +803,7 @@ describe("handleDetectVisualRequest abort signal", () => {
 
     expect(result).toEqual({ ok: false, error: "run cancellation invalidated action dispatch" });
     expect(globalThis.chrome.tabs.get).toHaveBeenCalledOnce();
-    expect(getPageFingerprintMock).not.toHaveBeenCalled();
+    expect(getPageSnapshotMock).not.toHaveBeenCalled();
   });
 
   test("does not swallow stale authority raised after fingerprinting", async () => {
@@ -821,7 +822,7 @@ describe("handleDetectVisualRequest abort signal", () => {
     );
 
     expect(result).toEqual({ ok: false, error: "stale run token" });
-    expect(getPageFingerprintMock).toHaveBeenCalledOnce();
+    expect(getPageSnapshotMock).toHaveBeenCalledOnce();
   });
 
   test("final authority check blocks detection/cache output invalidated after fingerprint", async () => {
@@ -842,7 +843,7 @@ describe("handleDetectVisualRequest abort signal", () => {
     expect(result).toEqual({ ok: false, error: "run state authority expired" });
     expect(visionAssistantState.detect).toHaveBeenCalledOnce();
     expect(globalThis.chrome.tabs.get).toHaveBeenCalledOnce();
-    expect(getPageFingerprintMock).toHaveBeenCalledOnce();
+    expect(getPageSnapshotMock).toHaveBeenCalledOnce();
   });
 });
 

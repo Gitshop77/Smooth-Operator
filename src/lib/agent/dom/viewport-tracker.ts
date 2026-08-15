@@ -25,7 +25,20 @@
  * `window.__…` handle would let a hostile page forge membership). A page can
  * only influence membership through real layout changes it already controls;
  * the rect-math fallback remains the ground truth until the IO reports.
+ *
+ * LIFECYCLE: the tracker is rebuilt whenever the DOM epoch moves
+ * (`getViewportTracker`). Membership is only meaningful for the epoch's DOM —
+ * after a mutation the old memberships describe a different tree — and an
+ * IntersectionObserver holds STRONG references to every observed element, so
+ * a long-lived tracker would leak the elements of every past epoch (the
+ * WeakMap/WeakSet alone cannot release them while the IO keeps them alive).
+ * Disconnecting the previous tracker per epoch releases those references.
+ * On an unchanged page (no mutations) the epoch never moves, so the tracker
+ * and its membership cache persist across steps — the steady-state zero-reflow
+ * win is untouched.
  */
+
+import { getDomEpoch } from "./mutation-signal";
 
 export class ViewportTracker {
   private readonly io: IntersectionObserver | null;
@@ -67,17 +80,25 @@ export class ViewportTracker {
   }
 }
 
-let sharedTracker: ViewportTracker | null = null;
+let sharedTracker: { epoch: number; tracker: ViewportTracker } | null = null;
 
 /**
  * The shared tracker — ONE IntersectionObserver on the document root for the
  * whole content-script instance, lazily created on first use so module
  * import never touches the DOM. Both extraction walks consume it, so their
  * membership caches stay coherent with each other.
+ *
+ * Rebuilt whenever the DOM epoch moves (see the class doc for why): the
+ * previous tracker is disconnected — releasing the IO's strong element
+ * references — and a fresh tracker serves the new epoch. On an unchanged page
+ * the same tracker persists, so its membership cache keeps serving across
+ * steps (zero forced layout reads).
  */
 export function getViewportTracker(): ViewportTracker {
-  if (!sharedTracker) {
-    sharedTracker = new ViewportTracker(document.documentElement);
+  const epoch = getDomEpoch();
+  if (!sharedTracker || sharedTracker.epoch !== epoch) {
+    if (sharedTracker) sharedTracker.tracker.disconnect();
+    sharedTracker = { epoch, tracker: new ViewportTracker(document.documentElement) };
   }
-  return sharedTracker;
+  return sharedTracker.tracker;
 }

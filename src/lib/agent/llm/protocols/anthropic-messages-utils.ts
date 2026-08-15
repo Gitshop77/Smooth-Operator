@@ -39,9 +39,19 @@ export async function fromRequest(request: LLMRequest): Promise<AnthropicBody> {
         }
         return { role: "user", content };
       }
+      // Parts array WITHOUT an image part: the LLMRequest content type is
+      // `Array<string | ImagePartV1>`, so the array can only hold strings.
+      // Normalize them into text blocks — a raw string array is not valid
+      // Messages-API content, and every other role passes through unchanged.
+      if (Array.isArray(m.content)) {
+        const content: Array<{ type: string; text: string }> = [];
+        for (const part of m.content) {
+          if (typeof part === "string" && part) content.push({ type: "text", text: part });
+        }
+        return { role: m.role, content };
+      }
       // Legacy STRING content: extract `<screenshot>` markers as defense-
-      // in-depth for callers that still interpolate them into text. Parts
-      // arrays without an image part pass through unchanged (never scanned).
+      // in-depth for callers that still interpolate them into text.
       if (typeof m.content === "string") {
         const { text: textContent, dataUris } = extractScreenshots(m.content);
         if (dataUris.length > 0) {

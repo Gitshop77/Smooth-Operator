@@ -401,6 +401,90 @@ describe("runAgentLoop — executeActions branch loop-detector integration", () 
     expect(counts).toEqual([5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
   });
 
+  test("synthetic results (skipLoopRecord) never feed the loop detector — no false warnings", async () => {
+  // Regression: the extension's synthetic results — dispatch-expiry blocks,
+  // queue padding ("N remaining action(s) skipped"), content-script failure
+  // placeholders — carry STATIC messages. Recording them into the shared
+  // outcome buckets fabricated loop evidence: one content-script failure
+  // padding a 5-action batch recorded 5 identical "missing result" entries,
+  // and a steady drip of "BLOCKED: content script failed to execute actions"
+  // eventually hit the hard-abort threshold on a healthy run.
+    const events: LogEvent[] = [];
+    const deps = makeDeps({
+      navigatorOutput: navigatorOutputWithRepeatedClicks(5),
+      executeActionsResult: (actions) => actions.map((action) => ({
+        action, success: false, message: "BLOCKED: content script failed to execute actions",
+        skipLoopRecord: true,
+      } as ActionResult)),
+      events,
+    });
+
+    await runAgentLoop(deps);
+
+    const warnings = events.filter(isLoopWarning);
+    expect(warnings).toEqual([]);
+    expect(deps.executeActions).toHaveBeenCalled();
+  });
+
+  test("mixed batch: real results record, synthetic ones are skipped", async () => {
+  // 8 genuine failures + 2 synthetic placeholders per batch, 3 steps
+  // (BASE_CONFIG.maxSteps), no pageChanged → no reset. With the flag honored
+  // the detector sees 8 records/step → last warning count = 24; without it the
+  // synthetic entries leak in (10/step) → last warning count = 30.
+  // Discriminating: the assertion fails (30) without the fix.
+    const events: LogEvent[] = [];
+    const deps = makeDeps({
+      navigatorOutput: navigatorOutputWithRepeatedClicks(10),
+      executeActionsResult: (actions) => actions.map((action, i) => ({
+        action,
+        success: false,
+        message: i < 8 ? "genuine failure: element not found" : "BLOCKED: content script failed to execute actions",
+        skipLoopRecord: i < 8 ? undefined : true,
+      } as ActionResult)),
+      events,
+    });
+
+    await runAgentLoop(deps);
+
+    const warnings = events.filter(isLoopWarning);
+  // The detector's warning window caps at 20, so the count of WARNINGS
+  // discriminates: 24 records → 5..20 (16) + 4 capped = 20 warnings;
+  // 30 records (synthetic leak) → 16 + 10 capped = 26 warnings.
+    expect(warnings.length).toBe(20);
+    expect(warnings[warnings.length - 1].count).toBe(20);
+  });
+
+  test("an empty action list is a LOUD schema failure (retry ladder), never silent step burning", async () => {
+  // AgentOutputSchema requires action: z.array(...).min(1) — a navigator
+  // output with NO actions fails the parse, so the run enters the recoverable
+  // error ladder (visible error events, retries, then exit) instead of
+  // burning steps invisibly. Pins the loud-failure contract; the noop record
+  // in the execution branch remains as defense-in-depth for future paths
+  // where the selection could legitimately filter to zero.
+    const events: LogEvent[] = [];
+    const deps = makeDeps({
+      navigatorOutput: {
+        thinking: "x",
+        evaluation_previous_goal: "y",
+        memory: "z",
+        next_goal: "w",
+        action: [], // schema-invalid shape
+      },
+      executeActionsResult: () => [],
+      events,
+    });
+
+    await runAgentLoop(deps);
+
+    const errors = events.filter((e): e is Extract<LogEvent, { type: "error" }> => e.type === "error");
+    // The parse failures surfaced as recoverable errors through the retry
+    // ladder (the terminal exit error may be non-recoverable).
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors.some((e) => e.recoverable === true)).toBe(true);
+    // The run terminated (via the failure ladder), it did not loop silently.
+    expect(events.some((e) => e.type === "done")).toBe(true);
+  });
+
   test("hard-stops the run (success:false) once the same action repeats past the top loop threshold", async () => {
  // With early-stop enabled, hitting the top repetition threshold (12 identical
  // actions in the rolling window) must ABORT the run, not merely warn. This is

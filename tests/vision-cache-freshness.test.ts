@@ -82,6 +82,7 @@ vi.mock("@/extension/background/tab-manager", () => ({
   waitForTabLoad: vi.fn().mockResolvedValue(undefined),
   handleTabAction: vi.fn().mockResolvedValue(undefined),
   getPageFingerprint: vi.fn().mockResolvedValue(""),
+  getPageSnapshot: vi.fn().mockResolvedValue({ fingerprint: "", viewport: "" }),
   sendMessageWithTimeout: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -144,16 +145,20 @@ vi.mock("@/lib/agent/modes", () => ({
 let extractStateForRun: typeof import("@/extension/background/run-helpers")["extractStateForRun"];
 let isVisionCacheFresh: typeof import("@/extension/background/run-helpers")["isVisionCacheFresh"];
 let extractStateFromTabMock: ReturnType<typeof vi.fn>;
-let getPageFingerprintMock: ReturnType<typeof vi.fn>;
+let getPageSnapshotMock: ReturnType<typeof vi.fn>;
 let visionElementsCache: Map<string, { x: number; y: number; width: number; height: number; label: string }>;
 let setVisionCacheUrl: (u: string) => void;
 let setVisionCacheFingerprint: (fp: string) => void;
+let setVisionCacheViewport: (vp: string) => void;
 
 const MOCK_TABS = [{ id: 1, url: "https://example.com", title: "Test" }] as never[];
 
+/** Shared viewport signature used by the default page snapshot. */
+const MOCK_VIEWPORT = "0:0:800:600";
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function makeDomState(overrides?: { url?: string; elements?: unknown[]; fingerprint?: string }) {
+function makeDomState(overrides?: { url?: string; elements?: unknown[]; fingerprint?: string; viewport?: string }) {
   return {
     url: overrides?.url ?? "https://example.com",
     title: "Test",
@@ -168,6 +173,7 @@ function makeDomState(overrides?: { url?: string; elements?: unknown[]; fingerpr
     selectorMap: {},
     devicePixelRatio: 1,
     ...(overrides?.fingerprint !== undefined ? { fingerprint: overrides.fingerprint } : {}),
+    ...(overrides?.viewport !== undefined ? { viewport: overrides.viewport } : {}),
   };
 }
 
@@ -194,19 +200,20 @@ describe("vision cache freshness — adaptive warm reuse + always-on reuse", () 
 
     const tabMod = await import("@/extension/background/tab-manager");
     extractStateFromTabMock = tabMod.extractStateFromTab as unknown as ReturnType<typeof vi.fn>;
-    getPageFingerprintMock = tabMod.getPageFingerprint as unknown as ReturnType<typeof vi.fn>;
+    getPageSnapshotMock = tabMod.getPageSnapshot as unknown as ReturnType<typeof vi.fn>;
 
     const utilsMod = await import("@/extension/background/run-helpers-utils");
     visionElementsCache = utilsMod.visionElementsCache;
     setVisionCacheUrl = utilsMod.setVisionCacheUrl;
     setVisionCacheFingerprint = utilsMod.setVisionCacheFingerprint;
+    setVisionCacheViewport = utilsMod.setVisionCacheViewport;
 
     for (const k of Object.keys(localStore)) delete localStore[k];
     for (const k of Object.keys(sessionStore)) delete sessionStore[k];
     setVisionSettings({ enableLocalVision: true, visionMode: "adaptive" });
 
-    extractStateFromTabMock.mockResolvedValue(makeDomState());
-    getPageFingerprintMock.mockResolvedValue("FP-NEW");
+    extractStateFromTabMock.mockResolvedValue(makeDomState({ viewport: MOCK_VIEWPORT }));
+    getPageSnapshotMock.mockResolvedValue({ fingerprint: "FP-NEW", viewport: MOCK_VIEWPORT });
   });
 
   afterEach(() => {
@@ -219,12 +226,13 @@ describe("vision cache freshness — adaptive warm reuse + always-on reuse", () 
     visionElementsCache.set("v1", { x: 10, y: 10, width: 100, height: 50, label: "login" });
     setVisionCacheUrl("https://example.com");
     setVisionCacheFingerprint("FP-OLD");
+    setVisionCacheViewport(MOCK_VIEWPORT);
 
     // The page changed since capture (the freshness check AND EXTRACT_STATE
     // both report "FP-NEW") but the URL is unchanged: the adaptive warm
     // branch must NOT reuse the stale rects — it must clear and re-detect.
-    getPageFingerprintMock.mockResolvedValue("FP-NEW");
-    extractStateFromTabMock.mockResolvedValue(makeDomState({ fingerprint: "FP-NEW" }));
+    getPageSnapshotMock.mockResolvedValue({ fingerprint: "FP-NEW", viewport: MOCK_VIEWPORT });
+    extractStateFromTabMock.mockResolvedValue(makeDomState({ fingerprint: "FP-NEW", viewport: MOCK_VIEWPORT }));
     const state = await extractStateForRun(1, MOCK_TABS);
 
     // No cached rect was merged (fresh detect or empty), the cache was
@@ -240,9 +248,10 @@ describe("vision cache freshness — adaptive warm reuse + always-on reuse", () 
     visionElementsCache.set("v1", { x: 10, y: 10, width: 100, height: 50, label: "login" });
     setVisionCacheUrl("https://example.com");
     setVisionCacheFingerprint("FP-OLD");
+    setVisionCacheViewport(MOCK_VIEWPORT);
 
-    getPageFingerprintMock.mockResolvedValue("FP-OLD");
-    extractStateFromTabMock.mockResolvedValue(makeDomState({ fingerprint: "FP-OLD" }));
+    getPageSnapshotMock.mockResolvedValue({ fingerprint: "FP-OLD", viewport: MOCK_VIEWPORT });
+    extractStateFromTabMock.mockResolvedValue(makeDomState({ fingerprint: "FP-OLD", viewport: MOCK_VIEWPORT }));
     await extractStateForRun(1, MOCK_TABS);
 
     expect(await isVisionCacheFresh(1)).toBe(true);
@@ -254,8 +263,9 @@ describe("vision cache freshness — adaptive warm reuse + always-on reuse", () 
     visionElementsCache.set("v1", { x: 10, y: 10, width: 100, height: 50, label: "login" });
     setVisionCacheUrl("https://example.com");
     setVisionCacheFingerprint("FP-OLD");
-    getPageFingerprintMock.mockResolvedValue("FP-OLD");
-    extractStateFromTabMock.mockResolvedValue(makeDomState({ fingerprint: "FP-OLD" }));
+    setVisionCacheViewport(MOCK_VIEWPORT);
+    getPageSnapshotMock.mockResolvedValue({ fingerprint: "FP-OLD", viewport: MOCK_VIEWPORT });
+    extractStateFromTabMock.mockResolvedValue(makeDomState({ fingerprint: "FP-OLD", viewport: MOCK_VIEWPORT }));
     setVisionSettings({ enableLocalVision: true, visionMode: "always", enableScreenshots: true });
 
     const { captureTabScreenshot } = await import("@/extension/background/screenshots");
@@ -298,24 +308,54 @@ describe("vision cache freshness — adaptive warm reuse + always-on reuse", () 
 
   test("isVisionCacheFresh skips the fingerprint check when none was stored", async () => {
     setVisionCacheUrl("https://example.com");
-    // No stored fingerprint → URL match alone is enough; the fingerprint
-    // fetch must not even be consulted.
-    getPageFingerprintMock.mockRejectedValue(new Error("should not be consulted"));
+    // No stored fingerprint → URL match alone is enough; the snapshot fetch
+    // must not even be consulted.
+    getPageSnapshotMock.mockRejectedValue(new Error("should not be consulted"));
     await expect(isVisionCacheFresh(1)).resolves.toBe(true);
-    expect(getPageFingerprintMock).not.toHaveBeenCalled();
+    expect(getPageSnapshotMock).not.toHaveBeenCalled();
   });
 
-  test("isVisionCacheFresh returns false when getPageFingerprint rejects", async () => {
+  test("isVisionCacheFresh returns false when getPageSnapshot rejects", async () => {
     setVisionCacheUrl("https://example.com");
     setVisionCacheFingerprint("FP-OLD");
-    getPageFingerprintMock.mockRejectedValueOnce(new Error("fingerprint failed"));
+    getPageSnapshotMock.mockRejectedValueOnce(new Error("fingerprint failed"));
     await expect(isVisionCacheFresh(1)).resolves.toBe(false);
   });
 
   test("isVisionCacheFresh returns false when the page fingerprint changed since capture", async () => {
     setVisionCacheUrl("https://example.com");
     setVisionCacheFingerprint("FP-OLD");
-    getPageFingerprintMock.mockResolvedValue("FP-NEW");
+    setVisionCacheViewport(MOCK_VIEWPORT);
+    getPageSnapshotMock.mockResolvedValue({ fingerprint: "FP-NEW", viewport: MOCK_VIEWPORT });
+    await expect(isVisionCacheFresh(1)).resolves.toBe(false);
+  });
+
+  test("a pure SCROLL since capture invalidates the cache (viewport signature)", async () => {
+    // Same URL, same DOM fingerprint — but the page scrolled: every cached
+    // [vN] rect is scroll-relative, so the detection set is mislocalized.
+    // The DOM fingerprint does NOT move on scroll by design; the viewport
+    // signature is what catches it.
+    setVisionCacheUrl("https://example.com");
+    setVisionCacheFingerprint("FP-OLD");
+    setVisionCacheViewport("0:0:800:600");
+    getPageSnapshotMock.mockResolvedValue({ fingerprint: "FP-OLD", viewport: "0:480:800:600" });
+    await expect(isVisionCacheFresh(1)).resolves.toBe(false);
+  });
+
+  test("isVisionCacheFresh returns false when no viewport signature was stored", async () => {
+    setVisionCacheUrl("https://example.com");
+    setVisionCacheFingerprint("FP-OLD");
+    // Stored fingerprint matches, but the viewport was never recorded — the
+    // cache cannot prove the rects are current, so it fails closed.
+    getPageSnapshotMock.mockResolvedValue({ fingerprint: "FP-OLD", viewport: MOCK_VIEWPORT });
+    await expect(isVisionCacheFresh(1)).resolves.toBe(false);
+  });
+
+  test("a VIEWPORT RESIZE since capture invalidates the cache (viewport signature)", async () => {
+    setVisionCacheUrl("https://example.com");
+    setVisionCacheFingerprint("FP-OLD");
+    setVisionCacheViewport("0:0:800:600");
+    getPageSnapshotMock.mockResolvedValue({ fingerprint: "FP-OLD", viewport: "0:0:1200:800" });
     await expect(isVisionCacheFresh(1)).resolves.toBe(false);
   });
 

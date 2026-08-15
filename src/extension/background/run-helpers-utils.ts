@@ -1,6 +1,6 @@
 import type { AgentAction } from "@/lib/agent/types";
 import { stripUrlFragment } from "./vision";
-import { getPageFingerprint } from "./tab-manager";
+import { getPageSnapshot } from "./tab-manager";
 
 // ─── Pure helpers ───────────────────────────────────────────────────────────
 
@@ -40,10 +40,12 @@ export const visionElementsCache = new Map<string, VisionElementData>();
 
 let _visionCacheUrl = "";
 let _visionCacheFingerprint = "";
+let _visionCacheViewport = "";
 
 export function getVisionCacheUrl(): string { return _visionCacheUrl; }
 export function setVisionCacheUrl(url: string): void { _visionCacheUrl = url; }
 export function setVisionCacheFingerprint(fp: string): void { _visionCacheFingerprint = fp; }
+export function setVisionCacheViewport(vp: string): void { _visionCacheViewport = vp; }
 
 export function getVisionElementRect(
   visionId: string,
@@ -64,8 +66,14 @@ export async function isVisionCacheFresh(tabId: number): Promise<boolean> {
   if (stripUrlFragment(url) !== stripUrlFragment(_visionCacheUrl)) return false;
   if (_visionCacheFingerprint) {
     try {
-      const fp = await getPageFingerprint(tabId);
-      if (!fp || fp !== _visionCacheFingerprint) return false;
+      // One round trip for both: the fingerprint catches DOM changes; the
+      // viewport signature catches a pure scroll/resize (the DOM fingerprint
+      // does NOT move on scroll by design, but every cached [vN] rect is
+      // scroll-relative — serving a pre-scroll detection set after the page
+      // scrolled would mislocalize every vision-guided click).
+      const snap = await getPageSnapshot(tabId);
+      if (!snap.fingerprint || snap.fingerprint !== _visionCacheFingerprint) return false;
+      if (!snap.viewport || snap.viewport !== _visionCacheViewport) return false;
     } catch {
       return false;
     }
@@ -77,6 +85,7 @@ export function clearVisionCache(): void {
   visionElementsCache.clear();
   _visionCacheUrl = "";
   _visionCacheFingerprint = "";
+  _visionCacheViewport = "";
 }
 
 export const ADAPTIVE_VISION_IDLE_STEPS = 5;

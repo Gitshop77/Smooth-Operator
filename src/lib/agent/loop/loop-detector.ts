@@ -63,7 +63,10 @@ export function resultClassForResult(result: ActionResult | undefined): string |
   // action that produced no successful outcome is a failed action.
   if (!result) return "error:failed";
   if (result.success) return undefined;
-  const message = result.message ?? "";
+  // Coerce: adapters must send strings, but a non-string message must not
+  // throw inside the record loop (that would surface as a spurious
+  // executeActions failure ladder).
+  const message = typeof result.message === "string" ? result.message : String(result.message ?? "");
   const raw = message.startsWith("BLOCKED")
     ? `blocked:${message.replace(/^BLOCKED[: ]*/, "")}`
     : `error:${message}`;

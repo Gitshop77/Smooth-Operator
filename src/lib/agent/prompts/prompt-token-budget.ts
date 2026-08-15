@@ -355,3 +355,26 @@ export function deriveOnDemandScreenshotCapV1(contextTokens: number | undefined)
   if (contextTokens >= 128_000) return deriveNavigatorObservationCapsV1(contextTokens).screenshotChars;
   return Math.min(56_000, Math.max(20_000, contextTokens - 8_000));
 }
+
+/** Below this known context window the navigator cannot run AT ALL: the
+ * compact system prompt (~21KB ≈ 10.6k estimated tokens) plus the minimum
+ * text observation plus the output reserve exceeds the derived input budget,
+ * so every step would throw `PromptBudgetExceededError` and the run fails
+ * immediately. Same cutoff the on-demand screenshot cap uses. Unknown
+ * contexts (undefined) are never rejected — the fixed-profile path still
+ * applies there. */
+export const MIN_NAVIGATOR_CONTEXT_TOKENS = 24_000;
+
+/** Reject a known context window that is too small for the navigator to ever
+ * produce one observation. Called once at run start so the failure is a clear
+ * pre-flight error instead of a per-step budget exception. Unknown contexts
+ * pass through (fixed-profile path). */
+export function assertUsableContextTokens(contextTokens: number | undefined): void {
+  if (contextTokens !== undefined && contextTokens < MIN_NAVIGATOR_CONTEXT_TOKENS) {
+    throw new Error(
+      `Model context window (${contextTokens} tokens) is below the navigator minimum (${MIN_NAVIGATOR_CONTEXT_TOKENS}): ` +
+        "the compact system prompt alone exceeds the usable input budget. " +
+        `Select a model with at least ${MIN_NAVIGATOR_CONTEXT_TOKENS} tokens of context.`,
+    );
+  }
+}

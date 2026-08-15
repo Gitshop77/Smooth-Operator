@@ -36,6 +36,7 @@ export {
   getScreenshotQuality,
   sendMessageWithTimeout,
   getPageFingerprint,
+  getPageSnapshot,
   ensureContent,
 } from "./tab-manager-utils";
 

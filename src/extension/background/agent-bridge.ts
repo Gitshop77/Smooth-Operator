@@ -28,6 +28,7 @@ import {
 } from "@/lib/agent/secrets";
 import { ensureApiKeyInSession } from "@/extension/api-key-storage";
 import { clearPromptMemo } from "@/lib/agent/prompts/prompt-memo";
+import { assertUsableContextTokens } from "@/lib/agent/prompts/prompt-token-budget";
 import { clearRedactionMemo } from "@/lib/agent/redaction-memo";
 import { getEffectiveContextTokens } from "../llm-direct";
 import {
@@ -620,6 +621,13 @@ export async function startRun({ task, maxSteps, mode, isScheduledTaskRun = fals
     } catch (e) {
       void safeLog("warn", "[agent-bridge] context-token resolution failed, using fixed prompt budgets:", e);
     }
+    // Pre-flight usability floor: a KNOWN context below the navigator minimum
+    // can never produce one observation (compact prompt alone exceeds the
+    // derived input budget — every step would throw PromptBudgetExceededError
+    // and the run would fail on step 1). Rejecting here surfaces a clear,
+    // non-recoverable run error instead of a per-step budget exception.
+    // Unknown contexts (undefined) pass — the fixed-profile path still applies.
+    assertUsableContextTokens(contextTokens);
     await runAgentLoop(buildLoopDeps({
       tab,
       sendEvent,

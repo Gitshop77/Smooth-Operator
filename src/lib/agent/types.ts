@@ -176,6 +176,13 @@ export interface ActionResult {
   isDone?: boolean;
   /** Requests one bounded viewport image on the next navigator observation. */
   requestVisualInspection?: boolean;
+  /** Synthetic result (dispatch-expiry blocks, queue padding, content-script
+   * failure placeholders): never recorded in the loop detector. These carry
+   * static messages, so hashing them into the shared outcome buckets would
+   * produce false loop warnings and eventually a hard abort on a healthy run
+   * (e.g. a single content-script failure padding N results with the same
+   * message). */
+  skipLoopRecord?: boolean;
 }
 
 // ─── History ────────────────────────────────────────────────────────────────

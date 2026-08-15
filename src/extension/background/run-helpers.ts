@@ -27,7 +27,7 @@ import {
   executeActionsInTab,
   waitForTabLoad,
   handleTabAction,
-  getPageFingerprint,
+  getPageSnapshot,
   sendMessageWithTimeout,
 } from "./tab-manager";
 import { navigatorCallDirect, plannerCallDirect, summarizeCallDirect } from "../llm-direct";
@@ -44,6 +44,7 @@ import {
   isVisionCacheFresh,
   setVisionCacheUrl,
   setVisionCacheFingerprint,
+  setVisionCacheViewport,
   clearVisionCache,
   ADAPTIVE_VISION_IDLE_STEPS,
   computeVisionWarmHoldMs,
@@ -359,12 +360,14 @@ export async function handleDetectVisualRequest(
       /* tab may have closed */
     }
     try {
-      const fingerprint = await getPageFingerprint(tabId);
+      const snap = await getPageSnapshot(tabId);
       assertAuthorized?.();
-      setVisionCacheFingerprint(fingerprint);
+      setVisionCacheFingerprint(snap.fingerprint);
+      setVisionCacheViewport(snap.viewport);
     } catch (e) {
       rethrowAuthorityCancellation(e);
       setVisionCacheFingerprint("");
+      setVisionCacheViewport("");
     }
     const visionEls = merged.filter((m) => m.source === "vision" && m.visionId && m.pixelRect);
     const descriptions = visionEls.map((m) => {
@@ -605,6 +608,7 @@ export async function extractStateForRun(
     visionElementsCache.clear();
     setVisionCacheUrl(domState.url);
     setVisionCacheFingerprint((domState as { fingerprint?: string }).fingerprint ?? "");
+    setVisionCacheViewport((domState as { viewport?: string }).viewport ?? "");
     for (const m of merged) {
       if (m.source === "vision" && m.pixelRect && m.visionId) {
         visionElementsCache.set(m.visionId, { ...m.pixelRect, label: m.text });
@@ -667,6 +671,7 @@ export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
     action,
     success: false,
     message: "BLOCKED: run dispatch authority expired",
+    skipLoopRecord: true,
   }));
   // Publish the run's abort signal for the on-demand DETECT_VISUAL path.
   setCurrentRunAbortSignal(controller.signal);
@@ -706,11 +711,11 @@ export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
         const action = actions[i];
         if (controller.signal.aborted) {
           aborted = true;
-          results[i] = { action, success: false, message: "BLOCKED: run aborted by user" };
+          results[i] = { action, success: false, message: "BLOCKED: run aborted by user", skipLoopRecord: true };
           continue;
         }
         if (aborted) {
-          results[i] = { action, success: false, message: "BLOCKED: prior action in the queue was blocked or declined" };
+          results[i] = { action, success: false, message: "BLOCKED: prior action in the queue was blocked or declined", skipLoopRecord: true };
           continue;
         }
         const capability = currentCapabilityPolicy.decide({
@@ -788,6 +793,7 @@ export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
             action: f.action,
             success: false,
             message: "BLOCKED: content script failed to execute actions",
+            skipLoopRecord: true,
           };
         });
         return results;
@@ -796,7 +802,7 @@ export function buildLoopDeps(ctx: LoopDepsContext): LoopDeps {
       filtered.forEach((f, k) => { results[f.i] = execResults[k]; });
       for (let i = 0; i < results.length; i++) {
         if (!results[i]) {
-          results[i] = { action: actions[i], success: false, message: "BLOCKED: missing result from content script" };
+          results[i] = { action: actions[i], success: false, message: "BLOCKED: missing result from content script", skipLoopRecord: true };
         }
       }
       return results;

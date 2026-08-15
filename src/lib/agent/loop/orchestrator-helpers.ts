@@ -1277,6 +1277,12 @@ async function runNavigatorActionExecution(
       }
       if (config.enableLoopDetection) {
         for (let i = 0; i < actions.length; i++) {
+          if (results[i]?.skipLoopRecord) {
+            // Synthetic result (dispatch-expiry block, queue padding,
+            // content-script failure placeholder): static message, no
+            // outcome signal — recording it would fabricate loop evidence.
+            continue;
+          }
           // Record the OUTCOME (not the bare signature): the detector
           // aggregates same-cause failures even when the call signature
           // alternates (the stuck-run shape — blocked navigations to
@@ -1295,6 +1301,28 @@ async function runNavigatorActionExecution(
       }
       if (config.enableLoopDetection && results.some((r) => r.pageChanged)) {
         state.loopDetector.reset();
+      }
+      if (config.enableLoopDetection && actions.length === 0) {
+        // The navigator returned NO actions (pure thinking output) and no
+        // done — the step burned silently: no loop entries, no progress
+        // signal. Record a noop outcome so a run that keeps returning empty
+        // action lists escalates through the loop detector instead of
+        // burning steps invisibly. (A `done` action never reaches this
+        // function — the done branch short-circuits before it.)
+        const noop = { type: "noop" } as unknown as AgentAction;
+        state.loopDetector.record(
+          noop,
+          resultClassForResult({ action: noop, success: false, message: "no actions returned" }),
+        );
+        const warnCount = state.loopDetector.shouldWarn();
+        if (warnCount > 0) {
+          onEvent({ type: "loop-warning", step: state.step, count: warnCount });
+          await dispatch(state, "loopWarning", (d) => d.loopWarning(makeCtx(state), warnCount));
+          if (config.enableEarlyStop && warnCount >= LOOP_TOP_THRESHOLD) {
+            const text = `Loop detected: navigator returned no actions ${warnCount} times without progress — aborting run.`;
+            return { kind: "abort", result: await exitWithFinish(state, text) };
+          }
+        }
       }
     } catch (e) {
       // Mirror the built-in queue branch's fail-closed budget stop: a typed

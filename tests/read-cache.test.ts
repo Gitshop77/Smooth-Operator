@@ -110,4 +110,35 @@ describe("extractBrowserState walk read batching", () => {
     expect(secondRectReads).toBe(0);
     expect(secondStyleReads).toBe(0);
   });
+
+  it("a pure scroll between walks invalidates the shared cache (rects are scroll-relative)", () => {
+    // A scroll does NOT bump the DOM epoch (no mutation) and does NOT move
+    // the DOM fingerprint — but every getBoundingClientRect is
+    // scroll-relative, so the shared cache must rebuild or walk 2 would
+    // serve stale coordinates from walk 1.
+    for (let i = 0; i < 80; i++) {
+      const div = document.createElement("div");
+      div.textContent = `item ${i}`;
+      document.body.appendChild(div);
+    }
+    const elementCount = document.body.querySelectorAll("*").length;
+
+    extractBrowserState([]); // walk 1 populates the shared cache
+
+    // Same DOM, same epoch — the page scrolled (scrollY is writable via
+    // the viewport mock installed in beforeEach).
+    window.scrollY = 400;
+
+    const rectSpy2 = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect");
+    const styleSpy2 = vi.spyOn(window, "getComputedStyle");
+    extractBrowserState([]); // walk 2
+    const secondRectReads = rectSpy2.mock.calls.length;
+
+    // Discriminating: WITH the viewport key the cache rebuilds and walk 2
+    // re-reads every rect (elementCount reads). WITHOUT it, walk 2 would
+    // serve the pre-scroll rects and read ZERO rects.
+    expect(secondRectReads).toBe(elementCount);
+    expect(styleSpy2.mock.calls.length).toBeGreaterThan(0);
+    window.scrollY = 0;
+  });
 });

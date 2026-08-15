@@ -9,7 +9,8 @@
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { ViewportTracker } from "../src/lib/agent/dom/viewport-tracker";
+import { ViewportTracker, getViewportTracker } from "../src/lib/agent/dom/viewport-tracker";
+import { bumpDomEpoch } from "../src/lib/agent/dom/mutation-signal";
 
 interface IOStub {
   callback: IntersectionObserverCallback;
@@ -88,5 +89,34 @@ describe("ViewportTracker", () => {
     } finally {
       globalWithIO.IntersectionObserver = saved;
     }
+  });
+
+  it("getViewportTracker rebuilds per DOM epoch — old IO disconnected (element refs released)", () => {
+    const t1 = getViewportTracker();
+    const io1 = lastIO();
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    t1.observe(el);
+    expect(io1?.observed).toContain(el);
+
+    // The DOM epoch moves (any mutation bumps it) → membership for the old
+    // epoch's DOM is meaningless, and the old IO holds STRONG references to
+    // every element it observed — a long-lived tracker would leak them.
+    bumpDomEpoch();
+    const t2 = getViewportTracker();
+
+    expect(t2).not.toBe(t1);
+    const io2 = lastIO();
+    expect(io2).not.toBe(io1);
+    // The previous IO was disconnected: its observed set was cleared,
+    // releasing the strong element references it held.
+    expect(io1?.observed).toHaveLength(0);
+    // The fresh tracker starts cold — unknown membership → rect-math fallback
+    // (byte-identical to the pre-tracker gate) until the walk re-observes.
+    expect(t2.isInViewport(el)).toBeUndefined();
+
+    // Unchanged epoch → the same tracker persists (the steady-state
+    // membership cache that makes cross-step reads free).
+    expect(getViewportTracker()).toBe(t2);
   });
 });

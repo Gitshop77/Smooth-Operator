@@ -35,6 +35,10 @@ export interface ResizeOptions {
   width?: number;
   height?: number;
   whLargest?: number;
+  /** Re-encode even when the target dimensions equal the source (JPEG
+   * quality reduction without a size change). Used by the maxBytes fit loop —
+   * without it the "already at target" fast path makes the loop a no-op. */
+  forceReencode?: boolean;
 }
 
 /**
@@ -115,7 +119,7 @@ export async function resizeScreenshotDataUrlWithDims(
     img = await loadCompatibleImage(dataUrl);
     if (!img.width || !img.height) return { dataUrl, width: 0, height: 0, sourceWidth: 0, sourceHeight: 0 };
     const dims = computeResizeDims(img.width, img.height, opts);
-    if (dims.width === img.width && dims.height === img.height) {
+    if (!opts.forceReencode && dims.width === img.width && dims.height === img.height) {
       // Already at/under the target — the data URL is returned unchanged, so
       // its dimensions ARE the source dimensions (ratio 1 for any re-scale).
       return { dataUrl, width: img.width, height: img.height, sourceWidth: img.width, sourceHeight: img.height };
@@ -163,6 +167,40 @@ export function base64ByteLength(dataUrl: string): number {
   return Math.max(0, Math.floor((b64.length * 3) / 4) - padding);
 }
 
+/** Max re-encode iterations in the maxBytes fit loop — a quality-scale bug or
+ * unshrinkable input must never become an unbounded decode/draw/encode storm
+ * (the canvas JPEG quality API takes 0-1 and clamps out-of-range to 1.0; CDP
+ * screenshot quality is 0-100, so an unscaled value silently re-encodes at
+ * MAXIMUM quality and the loop can spin ~800 times). */
+export const MAX_MAXBYTES_FIT_ITERATIONS = 8;
+
+/** Normalize a CDP-style 0-100 JPEG quality to the canvas 0-1 scale (values
+ * already in 0-1 pass through). */
+export function jpegQuality01(quality: number): number {
+  return quality > 1 ? quality / 100 : quality;
+}
+
+/** Iteratively re-encode `working` at decreasing quality until its decoded
+ * byte size fits `maxBytes` (bounded by {@link MAX_MAXBYTES_FIT_ITERATIONS}
+ * and a 0.3 quality floor). The current quality is tried FIRST, then stepped
+ * down in exact tenths (no float drift: 0.8 - 0.1 must be 0.7). Exported so
+ * the loop is testable without a canvas; production passes a forced re-encode
+ * (`forceReencode: true`) so a same-dimension JPEG re-encode actually runs. */
+export async function fitScreenshotToMaxBytes(
+  working: string,
+  quality01: number,
+  maxBytes: number,
+  reencode: (dataUrl: string, quality: number) => Promise<string>,
+): Promise<string> {
+  let q = quality01;
+  for (let i = 0; i < MAX_MAXBYTES_FIT_ITERATIONS && base64ByteLength(working) > maxBytes && q > 0.3; i++) {
+    working = await reencode(working, q);
+    if (base64ByteLength(working) <= maxBytes) break;
+    q = Math.max(0.3, Math.round((q - 0.1) * 10) / 10);
+  }
+  return working;
+}
+
 /**
  * Normalize a captured screenshot to a size that a vision backend can actually
  * ingest — WITHOUT silently destroying information the way the old
@@ -184,17 +222,30 @@ export async function normalizeScreenshotToViewport(
 ): Promise<string> {
   const maxDimension = opts.maxDimension ?? 0;
   const maxBytes = opts.maxBytes ?? 0;
+  // CDP screenshot quality is 0-100; the canvas re-encode APIs take 0-1 and
+  // clamp out-of-range to 1.0. Normalize ONCE so the fit loop below actually
+  // steps quality down (an unscaled 80 would re-encode at maximum quality
+  // forever and spin the loop to its floor).
+  const quality01 = jpegQuality01(quality);
   let working = dataUrl;
 
   if (maxDimension > 0) {
-    working = await resizeScreenshotDataUrl(working, { whLargest: maxDimension }, quality);
+    working = await resizeScreenshotDataUrl(working, { whLargest: maxDimension }, quality01);
   }
   if (maxBytes > 0) {
-    let q = quality;
-    while (base64ByteLength(working) > maxBytes && q > 0.3) {
-      q = Math.max(0.3, q - 0.1);
-      working = await resizeScreenshotDataUrl(working, maxDimension > 0 ? { whLargest: maxDimension } : {}, q);
-    }
+    // forceReencode: the fit loop must actually re-encode at the same
+    // dimensions (lower JPEG quality shrinks the bytes); without it the
+    // "already at target" fast path returns the input unchanged.
+    working = await fitScreenshotToMaxBytes(
+      working,
+      quality01,
+      maxBytes,
+      (dataUrl, q) => resizeScreenshotDataUrl(
+        dataUrl,
+        { ...(maxDimension > 0 ? { whLargest: maxDimension } : {}), forceReencode: true },
+        q,
+      ),
+    );
   }
   return working;
 }

@@ -28,6 +28,8 @@ import {
   deriveNavigatorObservationCapsV1,
   deriveOnDemandScreenshotCapV1,
   assertCompiledPromptWithinContextBudgetV1,
+  assertUsableContextTokens,
+  MIN_NAVIGATOR_CONTEXT_TOKENS,
 } from "../src/lib/agent/prompts/prompt-token-budget";
 import { prepareNavigatorRequest } from "../src/lib/agent/loop/phases/navigator";
 import { initState } from "../src/lib/agent/loop/orchestrator-helpers";
@@ -211,6 +213,46 @@ describe("prepareNavigatorRequest applies context-derived caps", () => {
     const req = await prepareNavigatorRequest(state, BIG_OBSERVATION);
     expect(req.browserState.elementsText.length).toBe(24_000); // truncated at the economical base cap
   });
+
+  test("the FIRST step seeds read-only probing actions into the listing (mode-gated)", async () => {
+    // Step 1 has no executed-action history, so the derived listing would be
+    // EMPTY — the model flies blind and commits to a page-changing action
+    // without knowing the page can be probed first. The seed must surface
+    // detect_challenge / get_page_info / list_tabs, each still gated by the
+    // run's mode: `evaluate` is hard-blocked in standard mode (canExecuteJs:
+    // false), so it must NOT appear here — the seed is guidance, not a
+    // policy bypass.
+    const { state } = makeStateWithContext(undefined);
+    expect(state.navigatorHistory.length).toBe(0); // precondition: first step
+    const req = await prepareNavigatorRequest(state, BIG_OBSERVATION);
+
+    expect(req.enabledActions?.has("detect_challenge")).toBe(true);
+    expect(req.enabledActions?.has("get_page_info")).toBe(true);
+    expect(req.enabledActions?.has("list_tabs")).toBe(true);
+    // Mode-gated: standard blocks evaluate (fail-closed before any prompt).
+    expect(req.enabledActions?.has("evaluate")).toBe(false);
+  });
+
+  test("after the first step the seed is replaced by the executed-action history", async () => {
+    const { state } = makeStateWithContext(undefined);
+    state.navigatorHistory.push({
+      step: 0,
+      agent: "navigator",
+      evaluation: "ok",
+      memory: "m",
+      goal: "g",
+      results: [{ action: { type: "click", index: 1 } as never, success: true, message: "ok" }],
+    });
+    const req = await prepareNavigatorRequest(state, BIG_OBSERVATION);
+
+    // The executed action is listed…
+    expect(req.enabledActions?.has("click")).toBe(true);
+    // …and the first-step seed is gone (the model now has real context).
+    expect(req.enabledActions?.has("detect_challenge")).toBe(false);
+    expect(req.enabledActions?.has("get_page_info")).toBe(false);
+    expect(req.enabledActions?.has("list_tabs")).toBe(false);
+    expect(req.enabledActions?.has("evaluate")).toBe(false);
+  });
 });
 
 describe("HTML summarizer is DEFAULT-ON for large pages", () => {
@@ -366,5 +408,29 @@ describe("64k-model survival proof (end-to-end)", () => {
     expect(() =>
       assertCompiledPromptWithinContextBudgetV1("navigator", "navigator-64k-raw", compiled.messages, 64_000),
     ).toThrow(/Prompt budget exceeded/);
+  });
+
+  test("a KNOWN context below the navigator floor is rejected at run start (no silent per-step failures)", () => {
+    // The compact system prompt alone is ~21KB ≈ 10.6k estimated tokens; at an
+    // 8k context the derived input budget is ~6.8k tokens, so EVERY step would
+    // throw PromptBudgetExceededError. The pre-flight assert turns that into a
+    // clear run-start error instead of a step-1 failure.
+    expect(() => assertUsableContextTokens(8_000)).toThrow(/below the navigator minimum/);
+    expect(() => assertUsableContextTokens(16_000)).toThrow(/below the navigator minimum/);
+  });
+
+  test("the floor is exactly the on-demand screenshot cutoff (24k) — same usability definition", () => {
+    expect(MIN_NAVIGATOR_CONTEXT_TOKENS).toBe(24_000);
+    // At the floor the navigator MAY run (the compact prompt + minimum
+    // observation still fit the derived input budget), and at the floor the
+    // on-demand screenshot cap becomes affordable (24_000 → 16_000 chars).
+    expect(() => assertUsableContextTokens(24_000)).not.toThrow();
+    expect(deriveOnDemandScreenshotCapV1(24_000)).toBeGreaterThan(0);
+  });
+
+  test("unknown contexts and ≥24k windows pass the usability assert", () => {
+    expect(() => assertUsableContextTokens(undefined)).not.toThrow();
+    expect(() => assertUsableContextTokens(64_000)).not.toThrow();
+    expect(() => assertUsableContextTokens(128_000)).not.toThrow();
   });
 });

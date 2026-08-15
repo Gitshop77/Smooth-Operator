@@ -212,17 +212,26 @@ export async function sendMessageWithTimeout<R = unknown>(
   }
 }
 
-export async function getPageFingerprint(tabId: number): Promise<string> {
+export async function getPageSnapshot(tabId: number): Promise<{ fingerprint: string; viewport: string }> {
   try {
     await ensureContent(tabId);
-    const res = await sendMessageWithTimeout<{ ok: boolean; fingerprint?: string }>(
+    const res = await sendMessageWithTimeout<{ ok: boolean; fingerprint?: string; viewport?: string }>(
       tabId,
       { type: "GET_DOM_FINGERPRINT" },
     );
-    return res?.ok ? res.fingerprint ?? "" : "";
+    return {
+      fingerprint: res?.ok ? res.fingerprint ?? "" : "",
+      // Viewport/scroll signature (see viewport-signature.ts): the vision
+      // cache freshness check needs it to invalidate on a pure scroll.
+      viewport: res?.ok ? res.viewport ?? "" : "",
+    };
   } catch {
-    return "";
+    return { fingerprint: "", viewport: "" };
   }
+}
+
+export async function getPageFingerprint(tabId: number): Promise<string> {
+  return (await getPageSnapshot(tabId)).fingerprint;
 }
 
 export async function ensureContent(tabId: number, signal?: AbortSignal): Promise<void> {
