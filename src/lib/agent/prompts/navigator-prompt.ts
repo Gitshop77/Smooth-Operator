@@ -34,8 +34,11 @@ import {
  * guidance, action set, output format, action steering, evaluate guidance) is
  * preserved VERBATIM; only redundant prose (input descriptions, recovery
  * patterns, reasoning rules, worked examples) is compressed. Measured 20.1KB
- * vs 28.2KB for the full prompt (pinned in tests/compact-prompt.test.ts),
- * freeing ~8KB of a 64k model's input budget for observations.
+*  vs 28.2KB for the full prompt (pinned in tests/compact-prompt.test.ts),
+ *  freeing ~8KB of a 64k model's input budget for observations.
+ * @param enabledActions Optional capability-gated action names — when present
+ *  the action-set block lists ONLY the core actions + this set (the executor's
+ *  schema is unchanged; the listing guides the model). Omitted → full set.
  * @returns The full system prompt string.
  */
 export function buildNavigatorPrompt(
@@ -44,6 +47,7 @@ export function buildNavigatorPrompt(
   visionMode: VisionMode = "disabled",
   mode: string = "standard",
   compact = false,
+  enabledActions?: ReadonlySet<string>,
 ): string {
   const safeMax = sanitizeMaxActions(maxActions);
   // if the user has set a custom navigator prompt override, use it.
@@ -66,7 +70,7 @@ ${visionGuidance(visionMode) || "_(No local vision mode is enabled for this run.
 
 # Action Set (required — auto-synced with the action schemas; do not remove)
 
-${actionListForPrompt(safeMax, visionMode)}
+${actionListForPrompt(safeMax, visionMode, enabledActions)}
 
 ${OUTPUT_FORMAT_BLOCK}
 
@@ -110,7 +114,7 @@ You are NOT limited to the current page. navigate (new_tab: true) opens new tabs
 
 # Action Set (required — auto-synced with the action schemas; do not remove)
 
-${actionListForPrompt(safeMax, visionMode)}
+${actionListForPrompt(safeMax, visionMode, enabledActions)}
 
 # Action Rules
 
@@ -217,7 +221,7 @@ You are NOT limited to the current page. If the task requires visiting another w
 
 # Action Set
 
-${actionListForPrompt(safeMax, visionMode)}
+${actionListForPrompt(safeMax, visionMode, enabledActions)}
 
 # Error Recovery Patterns
 

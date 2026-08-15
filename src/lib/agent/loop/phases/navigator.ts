@@ -22,10 +22,46 @@ import { buildPostObserveNudges, appendPendingLoopWarning } from "../context/inj
 import {
   deriveNavigatorObservationCapsV1,
 } from "../../prompts/prompt-token-budget";
+import { currentCapabilityPolicy } from "../../capability-policy";
 
 /** Identity of the last challenge whose info line was surfaced, so a captcha
  * that persists across steps doesn't spam the panel with one line per step. */
 let lastChallengeKey: string | null = null;
+
+/** History window scanned for already-used actions (mirrors the navigator
+ * prompt's history render window in loop/messages.ts). */
+const ENABLED_ACTIONS_HISTORY_WINDOW = 12;
+
+/** Loop-visible proxy for a NON-EMPTY cached page snapshot: dom/page-state.ts
+ * emits this marker into elementsText exactly when the snapshot is truncated
+ * and paging is relevant — the only deterministic signal of snapshot state at
+ * the loop layer (the snapshot cache itself lives in the content script). */
+const PAGE_NEXT_MARKER = "Call page_next with offset=";
+
+/**
+ * Capability-gated action names for this step's PROMPT LISTING: actions the
+ * run has already executed (last history window) + `page_next` when the page
+ * snapshot is truncated. Every candidate is validated against the run's
+ * capability policy — a mode-blocked action is never advertised. The executor's
+ * Zod schema is unchanged; the listing only guides the model.
+ */
+function deriveEnabledActions(state: LoopState, browserState: BrowserState): ReadonlySet<string> {
+  const mode = state.deps.mode ?? "standard";
+  const enabled = new Set<string>();
+  const consider = (name: string): void => {
+    const decision = currentCapabilityPolicy.decide({
+      actionType: name,
+      mode,
+      enforcementPoint: "loop-action-queue",
+    });
+    if (decision.allowed) enabled.add(name);
+  };
+  for (const item of state.navigatorHistory.slice(-ENABLED_ACTIONS_HISTORY_WINDOW)) {
+    for (const result of item.results) consider(result.action.type);
+  }
+  if (browserState.elementsText.includes(PAGE_NEXT_MARKER)) consider("page_next");
+  return enabled;
+}
 
 /**
  * Per-step observation payloads (interactive-element DOM text, accessibility
@@ -255,6 +291,7 @@ export async function prepareNavigatorRequest(
     maxSteps: state.config.maxSteps,
     loopWarning: state.pendingLoopWarning,
     compactedMemory: state.compactedMemory,
+    enabledActions: deriveEnabledActions(state, browserState),
   };
   // The loop warning is consumed by this request — clear it.
   state.pendingLoopWarning = undefined;

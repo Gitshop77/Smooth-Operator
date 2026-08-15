@@ -28,7 +28,8 @@ const plannerSystemMemo = new Map<string, string>();
 const cacheDescriptorMemo = new Map<string, Promise<PromptCacheDescriptorV1>>();
 
 /** Normalize optional args to their effective defaults so equivalent call
- * shapes share one entry (mirrors buildNavigatorPrompt's parameter defaults). */
+ * shapes share one entry (mirrors buildNavigatorPrompt's parameter defaults).
+ * `enabledActions` is order-insensitive — sorted for a stable key. */
 function navigatorSystemKey(
   maxActions: number,
   customPrompt: string | undefined,
@@ -36,6 +37,7 @@ function navigatorSystemKey(
   mode: string | undefined,
   compact: boolean | undefined,
   systemSuffix: string | undefined,
+  enabledActions: ReadonlySet<string> | undefined,
 ): string {
   return JSON.stringify([
     maxActions,
@@ -44,6 +46,7 @@ function navigatorSystemKey(
     mode ?? "standard",
     compact ?? false,
     systemSuffix ?? null,
+    enabledActions ? [...enabledActions].sort() : null,
   ]);
 }
 
@@ -59,11 +62,12 @@ export function memoizedNavigatorSystem(
   mode?: string,
   compact?: boolean,
   systemSuffix?: string,
+  enabledActions?: ReadonlySet<string>,
 ): string {
-  const key = navigatorSystemKey(maxActions, customPrompt, visionMode, mode, compact, systemSuffix);
+  const key = navigatorSystemKey(maxActions, customPrompt, visionMode, mode, compact, systemSuffix, enabledActions);
   let system = navigatorSystemMemo.get(key);
   if (system === undefined) {
-    system = buildNavigatorPrompt(maxActions, customPrompt, visionMode, mode, compact) + (systemSuffix ?? "");
+    system = buildNavigatorPrompt(maxActions, customPrompt, visionMode, mode, compact, enabledActions) + (systemSuffix ?? "");
     navigatorSystemMemo.set(key, system);
   }
   return system;

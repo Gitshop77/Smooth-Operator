@@ -736,6 +736,10 @@ const enableScreenshots = provider.supportsVision && (await getEnableScreenshots
       effectiveContextTokens,
     ) ? "\n\n" + getFormatInstructions(AgentOutputSchema) : "",
     screenshot: screenshotPart,
+    // Capability-gated action listing (core + used + policy-allowed): shrinks
+    // the action-set block from ~5.1KB to ~25 lines while the executor's
+    // schema stays untouched.
+    enabledActions: req.enabledActions,
   });
   const messages: ChatMessage[] = compiled.messages;
   // Model-context-aware budget guard: when the model's effective context is

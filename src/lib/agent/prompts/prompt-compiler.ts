@@ -102,6 +102,10 @@ export interface CompileNavigatorPromptV1Input {
    * (<128k) models — every security/schema/behavior block is preserved, only
    * prose is compressed (see `buildNavigatorPrompt(..., compact)`). */
   compact?: boolean;
+  /** Capability-gated action names — when present the system prompt's action
+   * listing shows only the core actions + this set (executor schema unchanged;
+   * see `buildNavigatorPrompt(..., enabledActions)`). */
+  enabledActions?: ReadonlySet<string>;
 }
 
 export async function compileNavigatorPromptV1(
@@ -114,6 +118,7 @@ export async function compileNavigatorPromptV1(
     input.mode,
     input.compact,
     input.systemSuffix,
+    input.enabledActions,
   );
   const user = await buildNavigatorUserMessage(input.user) + (input.userSuffix ?? "");
   return compileLegacyPairV1({
