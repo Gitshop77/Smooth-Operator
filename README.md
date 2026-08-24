@@ -6,12 +6,7 @@ Give your AI a real Chrome. SmoothOperator is a tiny MCP server — your harness
 
 Pick your harness. Run one line. Restart harness.
 
-**From a clone (works today, no publish step):**
-~~~sh
-npm install -g github:Gitshop77/Smooth-Operator && smooth-operator install opencode
-~~~
-
-**From npm** (`smooth-operator-mcp`, once published):
+**From npm** (`smooth-operator-mcp`):
 ~~~sh
 npm install -g smooth-operator-mcp && smooth-operator install opencode
 npm install -g smooth-operator-mcp && smooth-operator install claude-code
@@ -27,11 +22,9 @@ npm install -g smooth-operator-mcp && smooth-operator install claude-desktop
 > Note: the plain-npm name `smooth-operator` is an unrelated library on the registry.
 > Do NOT use `npm install -g smooth-operator`.
 
-Or from a manual clone:
+Or straight from GitHub:
 ~~~sh
-git clone https://github.com/Gitshop77/Smooth-Operator.git
-cd Smooth-Operator
-npm install -g . && smooth-operator install opencode
+npm install -g github:Gitshop77/Smooth-Operator && smooth-operator install opencode
 ~~~
 
 Wizard asks 6 questions (managed vs personal Chrome, headless, domains, JS). Run `smooth-operator install` with no harness to pick one interactively (TTY only; piped/CI runs print usage and exit). `--yes` skips every prompt, so give it a target: `smooth-operator install opencode --yes`. Personal Chrome → wizard launches Chrome on `9222` for you.
