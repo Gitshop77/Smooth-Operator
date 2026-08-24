@@ -1,4 +1,9 @@
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import type { ServerConfig } from "@/server/config";
+
+const TEST_DATA_DIR = join(tmpdir(), "smooth-operator-test");
 
 export function testConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
   const base: ServerConfig = {
@@ -26,11 +31,11 @@ export function testConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     security: {
       allowedDomains: [],
       blockedDomains: [],
-      allowedFileRoots: ["/tmp/smooth-operator-test"],
+      allowedFileRoots: [TEST_DATA_DIR],
       allowPrivateNetwork: false,
       allowEval: false,
     },
-    dataDir: "/tmp/smooth-operator-test",
+    dataDir: TEST_DATA_DIR,
     logLevel: "error",
   };
   return {

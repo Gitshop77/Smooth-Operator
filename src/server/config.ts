@@ -183,9 +183,13 @@ function readConfigFile(configPath: string): RawConfig {
     if (uid !== undefined && stats.uid !== uid) {
       throw new AppError("CONFIG_INSECURE", "Configuration files must be owned by the current user.");
     }
-    const mode = stats.mode & 0o777;
-    if ((mode & 0o077) !== 0) {
-      throw new AppError("CONFIG_INSECURE", "Configuration files must use owner-only permissions (for example, chmod 600).");
+    // Windows mode bits are compatibility metadata, not an ACL. Preserve the
+    // symlink/regular-file checks there and enforce owner-only bits on POSIX.
+    if (process.platform !== "win32") {
+      const mode = stats.mode & 0o777;
+      if ((mode & 0o077) !== 0) {
+        throw new AppError("CONFIG_INSECURE", "Configuration files must use owner-only permissions (for example, chmod 600).");
+      }
     }
     const parsed = JSON.parse(readFileSync(descriptor, "utf8")) as unknown;
     const result = RawConfigSchema.safeParse(parsed);

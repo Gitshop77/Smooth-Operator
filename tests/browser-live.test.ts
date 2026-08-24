@@ -128,8 +128,8 @@ describeLive("live browser contract", () => {
     setTimeout(() => abortController.abort(), 100);
     await expect(cancellableWait).rejects.toMatchObject({ code: "CANCELLED" });
     await service.execute({ action: "navigate", url: baseUrl });
-    const firstSlice = await service.execute({ action: "extract", selector: "body", offset: 0, maxChars: 100 }) as { nextOffset: number; revision: number; text: string };
-    const secondSlice = await service.execute({ action: "page_next", offset: firstSlice.nextOffset, revision: firstSlice.revision, maxChars: 100 }) as { offset: number; nextOffset: number; revision: number; text: string };
+    const firstSlice = await service.execute({ action: "extract", selector: "body", offset: 0, maxChars: 40 }) as { nextOffset: number; revision: number; text: string };
+    const secondSlice = await service.execute({ action: "page_next", offset: firstSlice.nextOffset, revision: firstSlice.revision, maxChars: 40 }) as { offset: number; nextOffset: number; revision: number; text: string };
     expect(secondSlice.offset).toBe(firstSlice.nextOffset);
     expect(secondSlice.nextOffset).toBeGreaterThan(secondSlice.offset);
     await service.execute({ action: "click", target: "#action-button" });

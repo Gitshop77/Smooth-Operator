@@ -1,7 +1,8 @@
 import { access, mkdir, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { execFile } from "node:child_process";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -26,9 +27,29 @@ async function discoverChrome() {
     throw new Error(`Configured Chrome executable does not exist or is not executable: ${configured}`);
   }
 
+  const directCandidates = process.platform === "darwin"
+    ? [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        join(homedir(), "Applications", "Google Chrome.app", "Contents", "MacOS", "Google Chrome"),
+        join(homedir(), "Applications", "Brave Browser.app", "Contents", "MacOS", "Brave Browser"),
+      ]
+    : process.platform === "win32"
+      ? [
+          join(process.env.PROGRAMFILES ?? "C:\\Program Files", "Google", "Chrome", "Application", "chrome.exe"),
+          join(process.env.PROGRAMFILES ?? "C:\\Program Files", "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+          join(process.env.LOCALAPPDATA ?? "", "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+        ]
+      : [];
+  for (const candidate of directCandidates) {
+    if (await executable(candidate)) {
+      return candidate;
+    }
+  }
+
   const commands = process.platform === "win32"
-    ? ["chrome.exe", "chromium.exe"]
-    : ["google-chrome", "google-chrome-stable", "google-chrome-beta", "google-chrome-unstable", "chromium", "chromium-browser"];
+    ? ["chrome.exe", "brave.exe", "msedge.exe", "chromium.exe"]
+    : ["google-chrome", "google-chrome-stable", "google-chrome-beta", "google-chrome-unstable", "brave-browser", "brave", "microsoft-edge", "microsoft-edge-stable", "chromium", "chromium-browser"];
   const locator = process.platform === "win32" ? "where.exe" : "which";
   for (const command of commands) {
     try {

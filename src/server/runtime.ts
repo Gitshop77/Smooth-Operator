@@ -377,19 +377,25 @@ async function ensurePrivateDirectory(path: string): Promise<void> {
     await assertPrivateDirectoryComponent(currentPath, path);
   }
 
-  let info = await lstat(target);
+  const info = await lstat(target);
   if (info.isSymbolicLink() || !info.isDirectory()) {
     throw new AppError("CONFIG_INSECURE", `The runtime path '${path}' must be a real directory, not a symbolic link or file.`);
   }
-  let permissions = Number(info.mode) & 0o777;
-  if ((permissions & 0o077) !== 0) {
-    await chmod(target, 0o700);
-    info = await lstat(target);
-    await assertPrivateDirectoryComponent(target, path);
-    permissions = Number(info.mode) & 0o777;
-  }
-  if ((permissions & 0o077) !== 0) {
-    throw new AppError("CONFIG_INSECURE", `The runtime directory '${path}' must not be group/world-readable.`);
+  // Node exposes POSIX mode bits on Windows, but they are not the directory's
+  // effective ACL and commonly look world-readable for every normal folder.
+  // Keep the symlink/type checks on all platforms and enforce owner-only mode
+  // bits where the platform actually exposes them.
+  if (process.platform !== "win32") {
+    let permissions = Number(info.mode) & 0o777;
+    if ((permissions & 0o077) !== 0) {
+      await chmod(target, 0o700);
+      const tightened = await lstat(target);
+      await assertPrivateDirectoryComponent(target, path);
+      permissions = Number(tightened.mode) & 0o777;
+    }
+    if ((permissions & 0o077) !== 0) {
+      throw new AppError("CONFIG_INSECURE", `The runtime directory '${path}' must not be group/world-readable.`);
+    }
   }
 }
 

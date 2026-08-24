@@ -2447,17 +2447,14 @@ export class BrowserService {
   }
 
   private targetGuardForPage(page: Page): TargetGuardSession | undefined {
-    let sessionId: string | undefined;
-    try {
-      const target = page.target() as unknown as { _session?: () => CDPSession | undefined };
-      sessionId = target._session?.()?.id();
-    } catch {
-      sessionId = undefined;
+    const identity = pageTargetIdentity(page);
+    if (identity.sessionId) {
+      return this.targetGuardSessions.get(identity.sessionId);
     }
-    if (!sessionId) {
-      return undefined;
+    if (identity.targetId) {
+      return [...this.targetGuardSessions.values()].find((guard) => guard.targetId === identity.targetId);
     }
-    return this.targetGuardSessions.get(sessionId);
+    return undefined;
   }
 
   private async waitForTargetGuardDrain(page: Page, signal?: AbortSignal): Promise<void> {
@@ -2468,18 +2465,12 @@ export class BrowserService {
   }
 
   private async releaseTargetGuardForPage(page: Page): Promise<void> {
-    let sessionId: string | undefined;
-    try {
-      const target = page.target() as unknown as { _session?: () => CDPSession | undefined };
-      sessionId = target._session?.()?.id();
-    } catch {
-      sessionId = undefined;
+    const identity = pageTargetIdentity(page);
+    const guard = this.targetGuardForPage(page);
+    if (!identity.sessionId && !guard) return;
+    if (identity.sessionId) {
+      this.unguardedTargetSessions.delete(identity.sessionId);
     }
-    if (!sessionId) {
-      return;
-    }
-    this.unguardedTargetSessions.delete(sessionId);
-    const guard = this.targetGuardSessions.get(sessionId);
     if (!guard) {
       return;
     }
@@ -2490,7 +2481,7 @@ export class BrowserService {
     removeCdpListener(guard.session, "Fetch.requestPaused", guard.requestPausedListener);
     removeCdpListener(guard.session, "disconnected", guard.disconnectedListener);
     restoreGuardSend(guard);
-    this.targetGuardSessions.delete(sessionId);
+    this.targetGuardSessions.delete(guard.session.id());
     // Page.setRequestInterception owns Fetch.enable from this point onward;
     // disabling here would race that setup and create an interception gap.
   }
@@ -2526,13 +2517,8 @@ export class BrowserService {
   }
 
   private isUnguardedTargetPage(page: Page): boolean {
-    try {
-      const target = page.target() as unknown as { _session?: () => CDPSession | undefined };
-      const sessionId = target._session?.()?.id();
-      return Boolean(sessionId && this.unguardedTargetSessions.has(sessionId));
-    } catch {
-      return false;
-    }
+    const identity = pageTargetIdentity(page);
+    return Boolean(identity.sessionId && this.unguardedTargetSessions.has(identity.sessionId));
   }
 
   private async newPageState(signal?: AbortSignal): Promise<PageState> {
@@ -4435,6 +4421,25 @@ function isPageClosed(page: Page): boolean {
     return page.isClosed();
   } catch {
     return true;
+  }
+}
+
+function pageTargetIdentity(page: Page): { sessionId?: string; targetId?: string } {
+  try {
+    const target = page.target() as unknown as {
+      _session?: () => CDPSession | undefined;
+      _targetId?: unknown;
+    };
+    let sessionId: string | undefined;
+    try {
+      sessionId = target._session?.()?.id();
+    } catch {
+      sessionId = undefined;
+    }
+    const targetId = typeof target._targetId === "string" ? target._targetId : undefined;
+    return { ...(sessionId ? { sessionId } : {}), ...(targetId ? { targetId } : {}) };
+  } catch {
+    return {};
   }
 }
 

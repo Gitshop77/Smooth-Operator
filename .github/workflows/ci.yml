@@ -67,11 +67,11 @@ jobs:
       - name: Run source live benchmark
         run: |
           mkdir -p artifacts
-          BROWSER="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          BROWSER="$(command -v google-chrome || command -v google-chrome-stable || command -v brave-browser || command -v brave || command -v chromium || command -v chromium-browser || command -v microsoft-edge || command -v microsoft-edge-stable)"
           SMOOTH_OPERATOR_BENCHMARK_BROWSER_EXECUTABLE="$BROWSER" npm run benchmark:mcp:live -- --iterations 3 --output artifacts/benchmark-source-live.json
       - name: Run bundled live benchmark
         run: |
-          BROWSER="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          BROWSER="$(command -v google-chrome || command -v google-chrome-stable || command -v brave-browser || command -v brave || command -v chromium || command -v chromium-browser || command -v microsoft-edge || command -v microsoft-edge-stable)"
           SMOOTH_OPERATOR_BENCHMARK_BROWSER_EXECUTABLE="$BROWSER" npm run benchmark:mcp:live -- --dist --iterations 3 --output artifacts/benchmark-bundle-live.json
       - name: Upload live benchmark and diagnostics
         if: always()

@@ -173,7 +173,11 @@ function canonicalPath(path: string): string | undefined {
   let current = path;
   while (true) {
     try {
-      const canonical = realpathSync(current);
+      // Use the OS-native resolver consistently. On Windows the regular
+      // synchronous and asynchronous helpers can return different short/long
+      // spellings for the same temp path, which makes an otherwise valid root
+      // fail containment checks when compared with a missing child.
+      const canonical = realpathSync.native(current);
       return missingSegments.reduceRight((parent, segment) => join(parent, segment), canonical);
     } catch {
       // A failed realpath is only recoverable for a genuinely missing leaf.
@@ -228,6 +232,10 @@ function isWithinRoot(root: string, candidate: string): boolean {
   const relativePath = relative(root, candidate);
   return relativePath === ""
     || (!relativePath.startsWith(`..${sep}`) && relativePath !== ".." && !isAbsolute(relativePath));
+}
+
+function hasNoSymlinkSegments(path: string): boolean {
+  return !hasSymlinkSegment(path);
 }
 
 export class SecurityPolicy {
@@ -344,9 +352,20 @@ export class SecurityPolicy {
       // Compare the resolved path when it exists (or has an existing parent).
       // This both accepts macOS /var -> /private/var canonicalization and
       // prevents a child symlink from escaping an explicitly allowed root.
+      if (canonicalCandidate !== undefined && isWithinRoot(canonicalRoot, canonicalCandidate)) {
+        return true;
+      }
+      if (canonicalCandidate === undefined && isWithinRoot(lexicalRoot, path)) {
+        return true;
+      }
+      // Windows can return a short/long-name spelling mismatch between two
+      // otherwise identical real paths. A lexical fallback is safe only when
+      // both paths are free of symlink or uninspectable components; symlinked
+      // roots and children must continue through the canonical comparison.
       return canonicalCandidate !== undefined
-        ? isWithinRoot(canonicalRoot, canonicalCandidate)
-        : isWithinRoot(lexicalRoot, path);
+        && hasNoSymlinkSegments(lexicalRoot)
+        && hasNoSymlinkSegments(path)
+        && isWithinRoot(lexicalRoot, path);
     });
     if (!root) {
       throw new AppError("FILE_PATH_BLOCKED", "The file path is outside the configured file roots.");

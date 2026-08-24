@@ -13,7 +13,9 @@ describe("runtime lifecycle", () => {
     const directory = await mkdtemp(join(tmpdir(), "smooth-operator-runtime-"));
     await chmod(directory, 0o755);
     const runtime = await ServerRuntime.create(testConfig({ dataDir: directory }));
-    expect((await stat(directory)).mode & 0o077).toBe(0);
+    if (process.platform !== "win32") {
+      expect((await stat(directory)).mode & 0o077).toBe(0);
+    }
     await runtime.close();
     await rm(directory, { recursive: true, force: true });
   });
@@ -33,7 +35,9 @@ describe("runtime lifecycle", () => {
     }));
     try {
       expect((await stat(profile)).isDirectory()).toBe(true);
-      expect((await stat(profile)).mode & 0o077).toBe(0);
+      if (process.platform !== "win32") {
+        expect((await stat(profile)).mode & 0o077).toBe(0);
+      }
     } finally {
       await runtime.close();
       await rm(directory, { recursive: true, force: true });

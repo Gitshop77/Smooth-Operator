@@ -7,23 +7,31 @@ function fileSystemWith(...paths: string[]): { existsSync(path: string): boolean
   return { existsSync: (path) => available.has(path) };
 }
 
+function searchPath(pattern: RegExp): string {
+  const path = chromeExecutableSearchPaths().find((candidate) => pattern.test(candidate));
+  if (!path) {
+    throw new Error(`No browser candidate matched ${pattern}.`);
+  }
+  return path;
+}
+
 describe("Chrome executable discovery", () => {
   it("prefers the macOS stable channel", () => {
-    const path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+    const path = searchPath(/Google Chrome\.app[\\/]Contents[\\/]MacOS[\\/]Google Chrome$/);
 
     expect(findChromeExecutable(fileSystemWith(path))).toEqual({ path, channel: "stable", label: "Google Chrome" });
   });
 
   it("finds Windows channel installs in their documented order", () => {
-    const beta = "C:\\Program Files\\Google\\Chrome Beta\\Application\\chrome.exe";
-    const canary = "C:\\Users\\example\\AppData\\Local\\Google\\Chrome SxS\\Application\\chrome.exe";
+    const beta = searchPath(/[\\/]Google[\\/]Chrome Beta[\\/]Application[\\/]chrome\.exe$/);
+    const canary = searchPath(/[\\/]Google[\\/]Chrome SxS[\\/]Application[\\/]chrome\.exe$/);
 
     expect(findChromeExecutable(fileSystemWith(beta))).toEqual({ path: beta, channel: "beta", label: "Google Chrome Beta" });
     expect(findChromeExecutable(fileSystemWith(beta, canary))).toEqual({ path: beta, channel: "beta", label: "Google Chrome Beta" });
   });
 
   it("resolves Linux browser names through PATH", () => {
-    const chromium = "/usr/local/bin/chromium";
+    const chromium = searchPath(/[\\/]chromium$/);
 
     expect(findChromeExecutable(fileSystemWith(chromium))).toEqual({ path: chromium, channel: "stable", label: "Chromium" });
   });
@@ -35,15 +43,15 @@ describe("Chrome executable discovery", () => {
 
 describe("Chromium-based browser discovery", () => {
   it("detects Brave on macOS", () => {
-    const brave = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
+    const brave = searchPath(/Brave Browser\.app[\\/]Contents[\\/]MacOS[\\/]Brave Browser$/);
 
     expect(findChromeExecutable(fileSystemWith(brave))).toEqual({ path: brave, channel: "stable", label: "Brave" });
   });
 
   it("lists every installed Chromium-based browser in preference order", () => {
-    const chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-    const brave = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
-    const edge = "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge";
+    const chrome = searchPath(/Google Chrome\.app[\\/]Contents[\\/]MacOS[\\/]Google Chrome$/);
+    const brave = searchPath(/Brave Browser\.app[\\/]Contents[\\/]MacOS[\\/]Brave Browser$/);
+    const edge = searchPath(/Microsoft Edge\.app[\\/]Contents[\\/]MacOS[\\/]Microsoft Edge$/);
 
     expect(findChromeExecutable(fileSystemWith(brave))).toEqual({ path: brave, channel: "stable", label: "Brave" });
     expect(findChromeExecutable(fileSystemWith(brave, edge))?.label).toBe("Brave");

@@ -107,6 +107,7 @@ function linuxCandidates(): ChromeExecutableCandidate[] {
     ["google-chrome-beta", "Google Chrome Beta", "beta"],
     ["google-chrome-unstable", "Google Chrome Dev", "dev"],
     ["brave-browser", "Brave", "stable"],
+    ["brave", "Brave", "stable"],
     ["microsoft-edge", "Microsoft Edge", "stable"],
     ["microsoft-edge-stable", "Microsoft Edge", "stable"],
     ["chromium", "Chromium", "stable"],

@@ -1,6 +1,6 @@
 import { access, chmod, mkdtemp, mkdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -133,6 +133,9 @@ describe("configuration", () => {
   });
 
   it("rejects group-readable JSON configuration", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
     const directory = await mkdtemp(join(tmpdir(), "smooth-operator-config-"));
     const path = join(directory, "config.json");
     await writeFile(path, JSON.stringify({ browser: { mode: "disabled" } }));
@@ -278,8 +281,11 @@ describe("security policy", () => {
 
   it("keeps file paths inside configured roots", () => {
     const policy = new SecurityPolicy(testConfig());
-    expect(policy.assertFilePath("/tmp/smooth-operator-test/file.txt")).toBe("/tmp/smooth-operator-test/file.txt");
-    expect(() => policy.assertFilePath("/tmp/outside/file.txt")).toThrowError(/file roots/);
+    const root = testConfig().dataDir;
+    const inside = join(root, "file.txt");
+    const outside = join(dirname(root), "smooth-operator-outside", "file.txt");
+    expect(policy.assertFilePath(inside)).toBe(inside);
+    expect(() => policy.assertFilePath(outside)).toThrowError(/file roots/);
   });
 
   it("accepts canonical paths for a symlinked root without allowing symlink escapes", async () => {

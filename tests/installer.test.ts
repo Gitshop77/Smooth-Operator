@@ -1,4 +1,5 @@
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -8,7 +9,7 @@ import { installHarness, planHarnessInstall, type HarnessCommand } from "@/serve
 const SOURCE_ENTRY: HarnessCommand = { command: "smooth-operator", args: [] };
 
 async function makeDirectory(prefix: string): Promise<string> {
-  return mkdtemp(join(process.env.TMPDIR ?? "/tmp", prefix));
+  return mkdtemp(join(tmpdir(), prefix));
 }
 
 function configOptions(path: string, serverEntry: HarnessCommand = SOURCE_ENTRY) {
@@ -82,8 +83,10 @@ describe("harness installer", () => {
       const installed = JSON.parse(await readFile(configPath, "utf8")) as { mcpServers: Record<string, { command: string; args: string[] }> };
       expect(installed.mcpServers.existing.args[0]).toBe("https://example.test/a//b");
       expect(installed.mcpServers["SmoothOperator"]).toEqual({ command: "smooth-operator", args: [] });
-      expect((await stat(configPath)).mode & 0o777).toBe(0o600);
-      expect((await stat(`${configPath}.bak`)).mode & 0o777).toBe(0o600);
+      if (process.platform !== "win32") {
+        expect((await stat(configPath)).mode & 0o777).toBe(0o600);
+        expect((await stat(`${configPath}.bak`)).mode & 0o777).toBe(0o600);
+      }
       expect(await readFile(`${configPath}.bak`, "utf8")).toContain("https://example.test/a//b");
     } finally {
       await rm(directory, { recursive: true, force: true });
