@@ -1,13 +1,24 @@
-import { access, lstat, mkdir, readFile, readdir, realpath, rename, stat, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, stat, unlink, type FileHandle } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { platform } from "node:process";
 
-import puppeteer, { type Browser, type CDPSession, type ConsoleMessage, type Dialog, type ElementHandle, type Frame, type HTTPRequest, type HTTPResponse, type KeyInput, type Page, type Target } from "puppeteer-core";
+import type { Browser, CDPSession, ConsoleMessage, Dialog, ElementHandle, Frame, HTTPRequest, HTTPResponse, KeyInput, Page, Target } from "puppeteer-core";
+
+type PuppeteerModule = typeof import("puppeteer-core").default;
+type PuppeteerLaunchOptions = Parameters<PuppeteerModule["launch"]>[0];
+type PuppeteerConnectOptions = Parameters<PuppeteerModule["connect"]>[0];
+let puppeteerModulePromise: Promise<PuppeteerModule> | undefined;
+
+function loadPuppeteer(): Promise<PuppeteerModule> {
+  puppeteerModulePromise ??= import("puppeteer-core").then((module) => module.default);
+  return puppeteerModulePromise;
+}
 
 import type { ServerConfig } from "../config";
 import { AppError, asAppError, requireField } from "../errors";
-import { BrowserActionSchema, isDestructiveBatchAction, type BrowserAction } from "../contracts";
+import { BrowserActionPlanSchema, isDestructiveBatchAction, type BrowserAction } from "../contracts";
 import { Logger, redactValue } from "../logger";
 import { SecurityPolicy } from "../policy";
 import { redactSecretPlaceholders, wrapUntrustedText } from "../security";
@@ -94,6 +105,12 @@ interface ClickDescriptor {
   label: string;
 }
 
+interface ClickMonitorResult {
+  navigated: boolean;
+  urlChanged: boolean;
+  url?: string;
+}
+
 export interface PageSnapshot {
   pageId: string;
   frameId: string;
@@ -119,6 +136,7 @@ interface LogEntry {
   timestamp: string;
   type: string;
   url?: string;
+  untrustedUrl?: string;
   method?: string;
   status?: number;
   text?: string;
@@ -138,6 +156,7 @@ interface PageState {
   disposed: boolean;
   refs: Map<string, RefTarget>;
   snapshotId?: string;
+  snapshotInteractive?: InteractiveElement[];
   domRevision: number;
   networkEnabled: boolean;
   consoleEnabled: boolean;
@@ -168,12 +187,16 @@ interface PageState {
 
 interface TargetGuardSession {
   session: CDPSession;
+  targetId: string;
+  targetType: string;
   requestPausedListener: (event: unknown) => void;
   disconnectedListener: (event: unknown) => void;
   enabled: boolean;
   released: boolean;
   requestIds: Set<string>;
   pendingRequests: Set<Promise<void>>;
+  originalSend?: (method: string, params?: Record<string, unknown>) => Promise<unknown>;
+  wrappedSend?: (method: string, params?: Record<string, unknown>) => Promise<unknown>;
 }
 
 interface TargetGuardConnection {
@@ -184,6 +207,7 @@ interface TargetGuardConnection {
   _session?(sessionId: string): unknown;
   _sessions?: Map<string, unknown>;
   isAutoAttached?(targetId: string): boolean;
+  send?(method: string, params?: Record<string, unknown>): Promise<unknown>;
 }
 
 interface TargetAttachedEvent {
@@ -207,9 +231,17 @@ interface DevToolsVersion {
   webSocketDebuggerUrl?: string;
 }
 
+interface BenchmarkCounters {
+  browserOperations: number;
+  pageLookups: number;
+  pageEnumerations: number;
+  pageEvaluations: number;
+  cdpCommands: number;
+}
+
 export interface BrowserServiceDependencies {
-  launch?: (options: Parameters<typeof puppeteer.launch>[0]) => Promise<Browser>;
-  connect?: (options: Parameters<typeof puppeteer.connect>[0]) => Promise<Browser>;
+  launch?: (options: PuppeteerLaunchOptions) => Promise<Browser>;
+  connect?: (options: PuppeteerConnectOptions) => Promise<Browser>;
   probeEndpoint?: (browserURL: string, timeoutMs: number) => Promise<DevToolsVersion>;
 }
 
@@ -274,6 +306,12 @@ const CHALLENGE_BLOCKED_ACTIONS = new Set<BrowserAction["action"]>([
   "upload_file", "evaluate", "run_script", "hover", "press_and_hold",
   "set_cookie", "delete_cookies", "set_storage", "clear_storage",
 ]);
+const SNAPSHOT_AFTER_ACTIONS = new Set<BrowserAction["action"]>([
+  "navigate", "click", "input", "select_dropdown", "scroll", "send_keys", "go_back", "go_forward", "reload",
+]);
+const DOM_MUTATING_ACTIONS = new Set<BrowserAction["action"]>([
+  "click", "input", "select_dropdown", "scroll", "scroll_to_bottom", "send_keys", "upload_file", "set_storage", "clear_storage",
+]);
 
 export class BrowserService {
   private readonly sessionId = randomUUID();
@@ -288,24 +326,33 @@ export class BrowserService {
   private browserClosePromise: Promise<BrowserShutdownOutcome> | undefined;
   private connectionSettlementPromise: Promise<void> | undefined;
   private interruptedBrowserShutdown: Promise<boolean> | undefined;
+  private failedBrowserShutdown: { browser: Browser; owned: boolean } | undefined;
   private browserShutdownFailure = false;
+  private recoveryRequired = false;
+  private recoveryPromise: Promise<void> | undefined;
   private readonly shutdownController = new AbortController();
   private activeOperationController: AbortController | undefined;
   private currentPageId: string | undefined;
   private sessionGeneration = 0;
   private readonly states = new Map<string, PageState>();
+  private readonly configuredDownloadContexts = new WeakSet<object>();
   private readonly ids = new WeakMap<Page, string>();
   private readonly targetGuardSessions = new Map<string, TargetGuardSession>();
   private readonly unguardedTargetSessions = new Set<string>();
   private readonly pendingTargetGuardSessions = new Map<string, CDPSession>();
+  private readonly pendingTargetGuardInfos = new Map<string, { targetId: string; targetType: string }>();
   private targetGuardUnavailable = false;
   private targetGuardConnection: TargetGuardConnection | undefined;
   private targetGuardConnectionListener: ((value: unknown) => void) | undefined;
   private targetGuardRawConnectionListener: ((value: unknown) => void) | undefined;
+  private targetGuardDetachedListener: ((value: unknown) => void) | undefined;
   private targetGuardOriginalEmit: ((event: string, value: unknown) => boolean) | undefined;
   private targetGuardWrappedEmit: ((event: string, value: unknown) => boolean) | undefined;
   private operationTail = Promise.resolve();
   private queuedOperations = 0;
+  private readonly benchmarkCounters: BenchmarkCounters | undefined = process.env.SMOOTH_OPERATOR_BENCHMARK_COUNTERS === "true"
+    ? { browserOperations: 0, pageLookups: 0, pageEnumerations: 0, pageEvaluations: 0, cdpCommands: 0 }
+    : undefined;
   constructor(
     private readonly config: ServerConfig,
     private readonly policy: SecurityPolicy,
@@ -352,13 +399,21 @@ export class BrowserService {
     return { ...browserResult, succeeded: browserResult.succeeded && connectionSettled && lateConnectionSettled && interruptedSucceeded };
   }
 
-  connectionStatus(): { connected: boolean; owned: boolean; trackedPages: number; queuedOperations: number; currentPageId: string | null } {
-    return { connected: Boolean(this.browser), owned: this.ownsBrowser, trackedPages: this.states.size, queuedOperations: this.queuedOperations, currentPageId: this.currentPageId ?? null };
+  connectionStatus(): { connected: boolean; owned: boolean; trackedPages: number; queuedOperations: number; currentPageId: string | null; recoveryRequired: boolean; benchmarkCounters?: BenchmarkCounters } {
+    return {
+      connected: Boolean(this.browser),
+      owned: this.ownsBrowser,
+      trackedPages: this.states.size,
+      queuedOperations: this.queuedOperations,
+      currentPageId: this.currentPageId ?? null,
+      recoveryRequired: this.recoveryRequired,
+      ...(this.benchmarkCounters ? { benchmarkCounters: { ...this.benchmarkCounters } } : {}),
+    };
   }
 
-  sessionSummary(): { session_id: string; active: boolean; owned: boolean; trackedPages: number; queuedOperations: number; currentPageId: string | null; lastActivityAt: string } {
+  sessionSummary(): { session_id: string; active: boolean; owned: boolean; trackedPages: number; queuedOperations: number; currentPageId: string | null; recoveryRequired: boolean; lastActivityAt: string } {
     const status = this.connectionStatus();
-    return { session_id: this.sessionId, active: status.connected, owned: status.owned, trackedPages: status.trackedPages, queuedOperations: status.queuedOperations, currentPageId: status.currentPageId, lastActivityAt: new Date(this.lastActivityAt).toISOString() };
+    return { session_id: this.sessionId, active: status.connected, owned: status.owned, trackedPages: status.trackedPages, queuedOperations: status.queuedOperations, currentPageId: status.currentPageId, recoveryRequired: this.recoveryRequired, lastActivityAt: new Date(this.lastActivityAt).toISOString() };
   }
 
   async doctor(): Promise<Record<string, unknown>> {
@@ -400,7 +455,26 @@ export class BrowserService {
     // Session close is a control-plane operation. It must be able to cancel a
     // queued/long-running browser action instead of waiting behind it forever.
     this.activeOperationController?.abort();
+    let interruptedCleanupFailed = false;
+    if (this.interruptedBrowserShutdown) {
+      const cleanup = await settleWithTimeout(this.interruptedBrowserShutdown, SHUTDOWN_CONNECTION_SETTLE_TIMEOUT_MS);
+      if (cleanup === undefined) {
+        this.recoveryRequired = true;
+        return { closed: false, session_id: this.sessionId };
+      }
+      if (cleanup === true) {
+        this.interruptedBrowserShutdown = undefined;
+      } else {
+        // The interrupted close has settled but failed.  Keep its browser
+        // handle so closeBrowser() can retry it through the control plane.
+        interruptedCleanupFailed = true;
+      }
+    }
     const result = await this.closeBrowser();
+    if (interruptedCleanupFailed && result.succeeded) {
+      this.interruptedBrowserShutdown = undefined;
+    }
+    this.recoveryRequired = !result.succeeded;
     return { closed: result.closed, session_id: this.sessionId };
   }
 
@@ -438,14 +512,17 @@ export class BrowserService {
     if (this.connectionPromise === pendingConnection) {
       this.connectionPromise = undefined;
     }
-    const browser = this.browser;
-    const owned = this.ownsBrowser;
+    const browser = this.browser ?? this.failedBrowserShutdown?.browser;
+    const owned = this.browser ? this.ownsBrowser : this.failedBrowserShutdown?.owned ?? false;
+    this.failedBrowserShutdown = undefined;
     this.detachTargetGuard();
     this.browser = undefined;
     this.ownsBrowser = false;
     this.retireAllStates();
     if (!browser) {
-      return { closed: false, owned: false, succeeded: !this.browserShutdownFailure };
+      const succeeded = !this.browserShutdownFailure;
+      this.recoveryRequired = !succeeded;
+      return { closed: false, owned: false, succeeded };
     }
     let succeeded = true;
     if (owned) {
@@ -461,8 +538,11 @@ export class BrowserService {
     }
     if (!succeeded) {
       this.browserShutdownFailure = true;
+      this.failedBrowserShutdown = { browser, owned };
+      this.recoveryRequired = true;
     } else {
       this.browserShutdownFailure = false;
+      this.recoveryRequired = false;
     }
     return { closed: true, owned, succeeded };
   }
@@ -477,6 +557,9 @@ export class BrowserService {
     const browser = await this.ensureBrowser(signal);
     let pages: Page[];
     try {
+      if (this.benchmarkCounters) {
+        this.benchmarkCounters.pageEnumerations += 1;
+      }
       pages = await browser.pages();
     } catch (error) {
       if (!this.isCurrentBrowser(browser, generation)) {
@@ -532,6 +615,9 @@ export class BrowserService {
   }
 
   private async snapshotUnlocked(options: { pageId?: string; frameId?: string; includeFrames?: "none" | "metadata"; includeScreenshot?: boolean; fullPage?: boolean; maxDimension?: number; maxChars?: number; signal?: AbortSignal } = {}): Promise<PageSnapshot> {
+    if (this.benchmarkCounters) {
+      this.benchmarkCounters.pageEvaluations += 1;
+    }
     throwIfAborted(options.signal);
     this.assertNoPendingDialog(options.pageId);
     const state = await this.pageState(options.pageId, options.signal);
@@ -653,13 +739,14 @@ export class BrowserService {
     throwIfAborted(options.signal);
     const snapshotId = randomUUID();
     let frameId: string;
-    let screenshot: ScreenshotCapture | undefined;
-    if (options.includeScreenshot) {
-      screenshot = await this.screenshotBase64(state.page, options.fullPage ?? false, this.config.browser.maxScreenshotBytes, "png", 80, options.maxDimension);
-    }
+    const [title, frames, screenshot] = await Promise.all([
+      frame.title().catch(() => ""),
+      options.includeFrames === "metadata" ? this.listFrames(state) : Promise.resolve(undefined),
+      options.includeScreenshot
+        ? this.screenshotBase64(state.page, options.fullPage ?? false, this.config.browser.maxScreenshotBytes, "png", 80, options.maxDimension)
+        : Promise.resolve(undefined),
+    ]);
     throwIfAborted(options.signal);
-    const title = await frame.title().catch(() => "");
-    const frames = options.includeFrames === "metadata" ? await this.listFrames(state) : undefined;
     const pageUrl = safeUrl(state.page.url());
     this.assertStateLive(state);
     if (state.domRevision !== domRevisionAtStart || isFrameDetached(frame)) {
@@ -679,6 +766,11 @@ export class BrowserService {
       frameId,
       index: element.index,
     }]));
+    state.snapshotInteractive = result.interactive.map(({ signature: _signature, ...element }) => ({
+      ...element,
+      text: wrapUntrustedText("interactive_text", redactSecretPlaceholders(element.text), 500),
+      ...(element.ariaLabel ? { ariaLabel: wrapUntrustedText("interactive_label", redactSecretPlaceholders(element.ariaLabel), 500) } : {}),
+    }));
     return {
       pageId: state.id,
       frameId,
@@ -689,11 +781,7 @@ export class BrowserService {
       text: wrapUntrustedText("page_text", redactSecretPlaceholders(result.text), maxChars),
       textTruncated: result.textTruncated,
       headings: result.headings.map((heading) => wrapUntrustedText("page_heading", redactSecretPlaceholders(heading), 500)),
-      interactive: result.interactive.map(({ signature: _signature, ...element }) => ({
-        ...element,
-        text: wrapUntrustedText("interactive_text", redactSecretPlaceholders(element.text), 500),
-        ...(element.ariaLabel ? { ariaLabel: wrapUntrustedText("interactive_label", redactSecretPlaceholders(element.ariaLabel), 500) } : {}),
-      })),
+      interactive: state.snapshotInteractive,
       interactiveTruncated: result.interactiveTruncated,
       viewport: result.viewport,
       document: result.document,
@@ -705,6 +793,12 @@ export class BrowserService {
   }
 
   async execute(action: BrowserAction, signal?: AbortSignal): Promise<unknown> {
+    if (this.benchmarkCounters) {
+      this.benchmarkCounters.browserOperations += 1;
+    }
+    if (this.recoveryRequired && action.action !== "close_browser") {
+      throw new AppError("BROWSER_RECOVERY_REQUIRED", "Browser recovery is required before browser work can continue. Call browser_close_session and retry.", { retryable: true, details: { hint: "Call browser_close_session and retry after cleanup succeeds." } });
+    }
     // A page dialog blocks Puppeteer operations. Let the dialog tool resolve a
     // pending dialog even while the operation that opened it is still waiting.
     if (isDialogAction(action)) {
@@ -722,7 +816,61 @@ export class BrowserService {
     // borderline-slow challenge probe cannot abort it with BROWSER_TIMEOUT
     // before the internal deadline elapses and returns a status object.
     const budgetMs = action.action === "wait_for_human" ? timeoutMs + 5_000 : timeoutMs;
-    return this.withOperationLock(signal, (operationSignal) => this.executeUnlocked(action, operationSignal), budgetMs, budgetMs);
+    return this.withOperationLock(signal, async (operationSignal) => {
+      const result = await this.executeUnlocked(action, operationSignal);
+      if (DOM_MUTATING_ACTIONS.has(action.action)) {
+        this.invalidateActionSnapshot(action, result);
+      }
+      if (!action.includeSnapshot || !SNAPSHOT_AFTER_ACTIONS.has(action.action)) {
+        return result;
+      }
+      return this.attachOptionalSnapshot(action, result, operationSignal);
+    }, budgetMs, budgetMs);
+  }
+
+  private invalidateActionSnapshot(action: BrowserAction, result: unknown): void {
+    const record = result && typeof result === "object" && !Array.isArray(result) ? result as Record<string, unknown> : undefined;
+    const resultPageId = typeof record?.pageId === "string"
+      ? record.pageId
+      : typeof record?.openedPageId === "string"
+        ? record.openedPageId
+        : action.pageId ?? this.currentPageId;
+    const state = resultPageId ? this.states.get(resultPageId) : undefined;
+    if (!state || state.disposed) {
+      return;
+    }
+    state.domRevision += 1;
+    state.refs.clear();
+    state.snapshotId = undefined;
+    state.snapshotInteractive = undefined;
+  }
+
+  private async attachOptionalSnapshot(action: BrowserAction, result: unknown, signal?: AbortSignal): Promise<unknown> {
+    const record: Record<string, unknown> = result && typeof result === "object" && !Array.isArray(result) ? { ...(result as Record<string, unknown>) } : { result };
+    const pageId = typeof record.openedPageId === "string"
+      ? record.openedPageId
+      : typeof record.pageId === "string"
+        ? record.pageId
+        : this.currentPageId;
+    try {
+      record.snapshot = await this.snapshotUnlocked({ pageId, frameId: action.frameId, maxChars: 8_000, signal });
+    } catch (error) {
+      record.snapshot = null;
+      record.snapshotError = boundedSnapshotError(error);
+    }
+    return record;
+  }
+
+  /** Execute already-normalized actions while holding one browser-operation lock. */
+  async executeBatch(actions: BrowserAction[], options: { confirmDestructive?: boolean; includeSnapshot?: boolean } = {}, signal?: AbortSignal): Promise<unknown> {
+    if (this.benchmarkCounters) {
+      this.benchmarkCounters.browserOperations += actions.length;
+    }
+    if (this.recoveryRequired) {
+      throw new AppError("BROWSER_RECOVERY_REQUIRED", "Browser recovery is required before browser work can continue. Call browser_close_session and retry.", { retryable: true, details: { hint: "Call browser_close_session and retry after cleanup succeeds." } });
+    }
+    const actionCount = actions.length;
+    return this.withOperationLock(signal, (operationSignal) => this.executeBatchUnlocked(actions, options, operationSignal), this.config.browser.actionTimeoutMs * Math.max(1, actionCount), this.config.browser.actionTimeoutMs * Math.max(1, actionCount));
   }
 
   private async executeUnlocked(action: BrowserAction, signal?: AbortSignal): Promise<unknown> {
@@ -798,6 +946,7 @@ export class BrowserService {
       case "click": {
         const navigationGeneration = this.beginNavigation(state);
         try {
+        let monitor: ClickMonitorResult = { navigated: false, urlChanged: false };
         const coordinateX = action.coordinateX ?? action.coordinate_x;
         const coordinateY = action.coordinateY ?? action.coordinate_y;
         const clickInNewTab = action.newTab ?? action.new_tab;
@@ -829,7 +978,7 @@ export class BrowserService {
           if (coordinateTarget) {
             this.assertClickTargetSafe(coordinateTarget);
           }
-          await this.runClickAndMonitor(page, () => page.mouse.click(coordinateX, coordinateY, { button: action.button ?? "left", count: action.clickCount ?? 1 }), signal);
+          monitor = await this.runClickAndMonitor(page, () => page.mouse.click(coordinateX, coordinateY, { button: action.button ?? "left", count: action.clickCount ?? 1 }), signal);
         } else {
           const target = targetForAction(action, "target");
           if (clickInNewTab) {
@@ -841,10 +990,10 @@ export class BrowserService {
               return opened;
             }
           }
-          await this.clickTarget(state, target, action.button ?? "left", action.clickCount ?? 1, signal, frame);
+          monitor = await this.clickTarget(state, target, action.button ?? "left", action.clickCount ?? 1, signal, frame);
         }
         await this.throwPendingNavigationError(state, signal, navigationGeneration);
-        return { clicked: true, pageId: state.id };
+        return { clicked: true, pageId: state.id, navigated: monitor.navigated, urlChanged: monitor.urlChanged, ...(monitor.url ? { url: safeUrl(monitor.url) } : {}) };
         } finally {
           if (state.activeNavigationGeneration === navigationGeneration) {
             state.activeNavigationGeneration = undefined;
@@ -1040,15 +1189,8 @@ export class BrowserService {
       case "wait_for_url": {
         const pattern = requireField(action.url ?? action.value, "url");
         const timeoutMs = action.timeoutMs ?? this.config.browser.actionTimeoutMs;
-        const deadline = Date.now() + timeoutMs;
-        while (Date.now() <= deadline) {
-          throwIfAborted(signal);
-          if (globMatches(page.url(), pattern)) {
-            return { url: safeUrl(page.url()) };
-          }
-          await wait(Math.min(100, Math.max(1, deadline - Date.now())), signal);
-        }
-        throw new AppError("WAIT_TIMEOUT", `The URL did not match '${pattern}' within ${timeoutMs}ms.`, { retryable: true });
+        await this.waitForUrlPattern(page, pattern, timeoutMs, signal);
+        return { url: safeUrl(page.url()) };
       }
       case "wait_for_network_idle":
         await page.waitForNetworkIdle({ idleTime: 500, timeout: action.timeoutMs ?? this.config.browser.actionTimeoutMs, signal });
@@ -1060,12 +1202,12 @@ export class BrowserService {
         state.networkEnabled = false;
         return { enabled: false };
       case "get_network_log":
-        return { entries: state.network.slice(-MAX_LOG_ENTRIES) };
+        return { entries: untrustedLogEntries(state.network.slice(-MAX_LOG_ENTRIES)) };
       case "clear_network_log":
         state.network = [];
         return { cleared: true };
       case "getclear_network_log": {
-        const entries = state.network.slice(-MAX_LOG_ENTRIES);
+        const entries = untrustedLogEntries(state.network.slice(-MAX_LOG_ENTRIES));
         state.network = [];
         return { entries, cleared: true };
       }
@@ -1099,6 +1241,11 @@ export class BrowserService {
         return { ...match, text: wrapUntrustedText("found_text", redactSecretPlaceholders(match.text), 1_000) };
       }
       case "extract": {
+        if (this.benchmarkCounters) {
+          this.benchmarkCounters.pageEvaluations += 1;
+        }
+        const offset = Math.max(0, Math.floor(action.offset ?? 0));
+        const revision = state.domRevision;
         let selector = action.selector ?? action.target ?? (action.index !== undefined ? `e${action.index + 1}` : undefined);
         if (!selector && action.query) {
           try {
@@ -1117,71 +1264,72 @@ export class BrowserService {
         }
         const maxChars = Math.min(action.maxChars ?? 40_000, this.config.browser.maxHtmlChars);
         const resolvedSelector = selector ? await this.selectorFor(state, selector, action.frameId) : undefined;
+        const includeLinks = action.includeLinks === true;
         const extracted = resolvedSelector
-          ? await frame.$eval(resolvedSelector, (element, limit) => {
+          ? await frame.$eval(resolvedSelector, (element, options: { start: number; limit: number; includeLinks: boolean }) => {
             const fullText = element.textContent ?? "";
-            return { value: fullText.slice(0, limit), truncated: fullText.length > limit };
-          }, maxChars).catch((error: unknown) => {
+            const value = fullText.slice(options.start, options.start + options.limit);
+            const links = options.includeLinks
+              ? [element, ...Array.from(element.querySelectorAll("a"))].slice(0, 100).map((candidate) => {
+                const rawHref = (candidate as HTMLAnchorElement).href;
+                try {
+                  const url = new URL(rawHref);
+                  if (url.protocol !== "http:" && url.protocol !== "https:") {
+                    return undefined;
+                  }
+                  url.username = "";
+                  url.password = "";
+                  return { text: (candidate.textContent ?? "").trim().slice(0, 500), href: url.toString() };
+                } catch {
+                  return undefined;
+                }
+              }).filter((link): link is { text: string; href: string } => Boolean(link))
+              : undefined;
+            return { value, totalLength: fullText.length, truncated: options.start + value.length < fullText.length, links };
+          }, { start: offset, limit: maxChars, includeLinks }).catch((error: unknown) => {
             if (isMissingElementError(error)) {
               throw new AppError("ELEMENT_NOT_FOUND", `No element matched '${resolvedSelector}'.`, { cause: error });
             }
             throw normalizeBrowserOperationError(error, signal);
           })
-          : await frame.evaluate((limit) => {
+          : await frame.evaluate(({ start, limit, includeLinks }) => {
             const fullText = document.body?.innerText ?? "";
-            return { value: fullText.slice(0, limit), truncated: fullText.length > limit };
-          }, maxChars);
-        const links = action.includeLinks
-          ? resolvedSelector
-            ? await (async (): Promise<Array<{ text: string; href: string }>> => {
-              try {
-                return await frame.$eval(resolvedSelector, (container) => {
-                  const elements = [container, ...Array.from(container.querySelectorAll("a"))].slice(0, 100);
-                  return elements.map((element) => {
-                    const rawHref = (element as HTMLAnchorElement).href;
-                    try {
-                      const url = new URL(rawHref);
-                      if (url.protocol !== "http:" && url.protocol !== "https:") {
-                        return undefined;
-                      }
-                      url.username = "";
-                      url.password = "";
-                      return { text: (element.textContent ?? "").trim().slice(0, 500), href: url.toString() };
-                    } catch {
-                      return undefined;
-                    }
-                  }).filter((link): link is { text: string; href: string } => Boolean(link));
-                });
-              } catch (error) {
-                if (isMissingElementError(error)) {
-                  throw new AppError("ELEMENT_NOT_FOUND", `No element matched '${resolvedSelector}'.`, { cause: error });
-                }
-                throw normalizeBrowserOperationError(error, signal);
-              }
-            })()
-            : await frame.$$eval("a", (elements) => elements.slice(0, 100).map((element) => {
-              const rawHref = (element as HTMLAnchorElement).href;
-              try {
-                const url = new URL(rawHref);
-                if (url.protocol !== "http:" && url.protocol !== "https:") {
+            const value = fullText.slice(start, start + limit);
+            const links = includeLinks
+              ? Array.from(document.querySelectorAll("a")).slice(0, 100).map((candidate) => {
+                const rawHref = (candidate as HTMLAnchorElement).href;
+                try {
+                  const url = new URL(rawHref);
+                  if (url.protocol !== "http:" && url.protocol !== "https:") {
+                    return undefined;
+                  }
+                  url.username = "";
+                  url.password = "";
+                  return { text: (candidate.textContent ?? "").trim().slice(0, 500), href: url.toString() };
+                } catch {
                   return undefined;
                 }
-                url.username = "";
-                url.password = "";
-                return { text: (element.textContent ?? "").trim().slice(0, 500), href: url.toString() };
-              } catch {
-                return undefined;
-              }
-            }).filter((link): link is { text: string; href: string } => Boolean(link)))
-          : undefined;
+              }).filter((link): link is { text: string; href: string } => Boolean(link))
+              : undefined;
+            return { value, totalLength: fullText.length, truncated: start + value.length < fullText.length, links };
+          }, { start: offset, limit: maxChars, includeLinks });
+        if (state.domRevision !== revision) {
+          throw new AppError("STALE_PAGE_SLICE", "The page changed while its text slice was being collected. Retry with a fresh revision.", { retryable: true, details: { hint: "Capture browser_extract again and use its new revision." } });
+        }
+        const nextOffset = offset + extracted.value.length;
         return {
+          offset,
+          nextOffset,
+          hasMore: extracted.truncated,
+          revision,
           text: wrapUntrustedText("extracted_text", redactSecretPlaceholders(extracted.value), maxChars),
           truncated: extracted.truncated,
           textTruncated: extracted.truncated,
-          ...(links ? {
-            links: links.map((link) => ({
+          ...(extracted.links ? {
+            links: extracted.links.map((link) => ({
               text: wrapUntrustedText("extracted_link_text", redactSecretPlaceholders(link.text), 500),
               href: safeUrl(link.href),
+              untrustedUrl: wrapUntrustedText("extracted_link_url", redactSecretPlaceholders(link.href), 4_096),
             })),
           } : {}),
         };
@@ -1252,20 +1400,26 @@ export class BrowserService {
         throwIfAborted(signal);
         const selector = await this.selectorFor(state, targetForAction(action, "selector"), action.frameId);
         throwIfAborted(signal);
-        const filePath = await this.existingFilePath(requireField(action.filePath, "filePath"));
+        const staged = await this.stageUploadFile(requireField(action.filePath, "filePath"), signal);
         throwIfAborted(signal);
-        const input = await frame.$(selector) as ElementHandle<HTMLInputElement> | null;
+        let input: ElementHandle<HTMLInputElement> | null;
+        try {
+          input = await frame.$(selector) as ElementHandle<HTMLInputElement> | null;
+        } catch (error) {
+          await unlinkIfPresent(staged.path);
+          throw error;
+        }
         if (!input) {
+          await unlinkIfPresent(staged.path);
           throw new AppError("ELEMENT_NOT_FOUND", `No element matched '${selector}'.`);
         }
         try {
-          await input.uploadFile(filePath);
+          await input.uploadFile(staged.path);
           throwIfAborted(signal);
-          const fileSize = (await stat(filePath)).size;
-          throwIfAborted(signal);
-          return { uploaded: wrapUntrustedText("uploaded_file_name", redactSecretPlaceholders(basename(filePath)), 512), bytes: Math.min(fileSize, Number.MAX_SAFE_INTEGER) };
+          return { uploaded: wrapUntrustedText("uploaded_file_name", redactSecretPlaceholders(basename(staged.displayName)), 512), bytes: Math.min(staged.size, Number.MAX_SAFE_INTEGER) };
         } finally {
           await input.dispose().catch(() => undefined);
+          await unlinkIfPresent(staged.path);
         }
       }
       case "screenshot": {
@@ -1305,12 +1459,30 @@ export class BrowserService {
         }));
       }
       case "page_next": {
+        if (this.benchmarkCounters) {
+          this.benchmarkCounters.pageEvaluations += 1;
+        }
         const offset = Math.max(0, Math.floor(action.offset ?? action.amount ?? 0));
+        const revision = action.revision;
+        const revisionAtStart = state.domRevision;
+        if (revision !== undefined && revision !== revisionAtStart) {
+          throw new AppError("STALE_PAGE_SLICE", "The requested page slice revision is stale. Extract the page again and retry.", { retryable: true, details: { expectedRevision: revisionAtStart, providedRevision: revision, hint: "Capture browser_extract again and use its new revision." } });
+        }
         const maxChars = Math.min(action.maxChars ?? 40_000, this.config.browser.maxHtmlChars);
-        const text = await frame.evaluate(({ start, limit }) => document.body?.innerText.slice(start, start + limit + 1) ?? "", { start: offset, limit: maxChars });
-        return { offset, text: wrapUntrustedText("page_text", text, maxChars), hasMore: text.length > maxChars };
+        const result = await frame.evaluate(({ start, limit }) => {
+          const fullText = document.body?.innerText ?? "";
+          const text = fullText.slice(start, start + limit);
+          return { text, totalLength: fullText.length, hasMore: start + text.length < fullText.length };
+        }, { start: offset, limit: maxChars });
+        if (state.domRevision !== revisionAtStart) {
+          throw new AppError("STALE_PAGE_SLICE", "The page changed while its text slice was being collected. Retry with a fresh revision.", { retryable: true, details: { hint: "Capture browser_extract again and use its new revision." } });
+        }
+        return { offset, nextOffset: offset + result.text.length, hasMore: result.hasMore, revision: revisionAtStart, text: wrapUntrustedText("page_text", redactSecretPlaceholders(result.text), maxChars) };
       }
       case "search_page": {
+        if (this.benchmarkCounters) {
+          this.benchmarkCounters.pageEvaluations += 1;
+        }
         const query = requireField(action.query ?? action.text, "query");
         const matches = await frame.evaluate((needle) => {
           const text = document.body?.innerText ?? "";
@@ -1318,13 +1490,19 @@ export class BrowserService {
           const target = needle.toLowerCase();
           const output: string[] = [];
           let index = lower.indexOf(target);
+          let totalMatches = 0;
           while (index >= 0 && output.length < 20) {
             output.push(text.slice(Math.max(0, index - 120), Math.min(text.length, index + needle.length + 120)));
+            totalMatches += 1;
             index = lower.indexOf(target, index + target.length);
           }
-          return output;
+          while (index >= 0) {
+            totalMatches += 1;
+            index = lower.indexOf(target, index + target.length);
+          }
+          return { matches: output, totalMatches };
         }, query);
-        return { query, matches: matches.map((match) => wrapUntrustedText("page_match", match, 500)) };
+        return { query, matches: matches.matches.map((match) => wrapUntrustedText("page_match", redactSecretPlaceholders(match), 500)), totalMatches: matches.totalMatches, matchesTruncated: matches.totalMatches > matches.matches.length };
       }
       case "find_elements": {
         const selector = targetForAction(action, "selector");
@@ -1348,8 +1526,12 @@ export class BrowserService {
           omittedAttributes: element.omittedAttributes,
         }));
       }
-      case "list_interactive":
+      case "list_interactive": {
+        if (state.snapshotId && state.snapshotInteractive) {
+          return state.snapshotInteractive;
+        }
         return (await this.snapshotUnlocked({ pageId: state.id, maxChars: 1_000, signal })).interactive;
+      }
       case "list_frames":
         return this.listFrames(state);
       case "accessibility_snapshot":
@@ -1366,7 +1548,7 @@ export class BrowserService {
       case "evaluate": {
         const code = requireField(action.code ?? action.expression, "code");
         const value = await frame.evaluate((source) => (0, eval)(source), code);
-        return redactValue(value);
+        return sanitizeEvaluateResult(value);
       }
       case "hover":
         await frame.hover(await this.selectorFor(state, targetForAction(action, "target"), action.frameId));
@@ -1529,48 +1711,60 @@ export class BrowserService {
     if (!Array.isArray(parsed) || parsed.length === 0 || parsed.length > MAX_ACTION_PLAN_STEPS) {
       throw new AppError("SCRIPT_INVALID", `The script must be a non-empty JSON array of at most ${MAX_ACTION_PLAN_STEPS} actions.`);
     }
+    const validation = BrowserActionPlanSchema.safeParse(parsed);
+    if (!validation.success) {
+      throw new AppError("SCRIPT_INVALID", "A batch item is not a valid browser action.", {
+        details: { issues: validation.error.issues.map((issue) => ({ path: issue.path, message: issue.message })) },
+      });
+    }
+    return this.executeBatchUnlocked(validation.data, { confirmDestructive }, signal);
+  }
+
+  private async executeBatchUnlocked(actions: BrowserAction[], options: { confirmDestructive?: boolean; includeSnapshot?: boolean }, signal?: AbortSignal): Promise<unknown> {
     const results: unknown[] = [];
-    for (const [index, candidate] of parsed.entries()) {
-      const action = this.parseAction(candidate);
+    for (const [index, candidate] of actions.entries()) {
+      const action = candidate;
       if (action.action === "run_script") {
         throw new AppError("SCRIPT_INVALID", "Nested run_script actions are not allowed.");
       }
-      if (action.action === "close_browser" && index !== parsed.length - 1) {
+      if (action.action === "close_browser" && index !== actions.length - 1) {
         throw new AppError("SCRIPT_INVALID", "close_browser must be the final action in a batch.", {
-          details: { batch: { failedIndex: index, completedActions: index, failedAction: action.action } },
+          details: batchFailureDetails(index, action.action, results),
         });
       }
       if (action.action === "screenshot") {
         throw new AppError("SCRIPT_INVALID", "Screenshots must be requested with browser_screenshot so the image is returned as MCP image content.");
       }
-      if (!confirmDestructive && isDestructiveBatchAction(action.action)) {
-        throw new AppError("DESTRUCTIVE_CONFIRMATION_REQUIRED", `Action '${action.action}' must be executed separately or with confirmDestructive=true.`, { retryable: true, details: { batch: { failedIndex: index, completedActions: index, failedAction: action.action } } });
+      if (!options.confirmDestructive && isDestructiveBatchAction(action.action)) {
+        throw new AppError("DESTRUCTIVE_CONFIRMATION_REQUIRED", `Action '${action.action}' must be executed separately or with confirmDestructive=true.`, { retryable: true, details: { hint: "Set confirmDestructive=true or run the action separately.", ...batchFailureDetails(index, action.action, results) } });
       }
       try {
-        results.push(await this.executeUnlocked(action, signal));
+        // A batch owns one trailing snapshot. Suppress per-action snapshots so
+        // the result remains ordered and bounded even when every action opts in.
+        const result = await this.executeUnlocked({ ...action, includeSnapshot: false }, signal);
+        if (DOM_MUTATING_ACTIONS.has(action.action)) {
+          this.invalidateActionSnapshot(action, result);
+        }
+        results.push(result);
       } catch (error) {
         const normalized = asAppError(normalizeBrowserOperationError(error, signal));
         throw new AppError(normalized.code, normalized.message, {
           retryable: normalized.retryable,
-          details: {
-            ...normalized.details,
-            batch: { failedIndex: index, completedActions: index, failedAction: action.action },
-          },
+          details: { ...normalized.details, ...batchFailureDetails(index, action.action, results) },
           cause: error,
         });
       }
     }
-    return { results };
-  }
-
-  private parseAction(value: unknown): BrowserAction {
-    const result = BrowserActionSchema.safeParse(value);
-    if (!result.success) {
-      throw new AppError("SCRIPT_INVALID", "A batch item is not a valid browser action.", {
-        details: { issues: result.error.issues.map((issue) => issue.message) },
-      });
+    const output: Record<string, unknown> = { results };
+    if (options.includeSnapshot) {
+      try {
+        output.snapshot = await this.snapshotUnlocked({ pageId: this.currentPageId, maxChars: 8_000, signal });
+      } catch (error) {
+        output.snapshot = null;
+        output.snapshotError = boundedSnapshotError(error);
+      }
     }
-    return result.data;
+    return output;
   }
 
   private async ensureBrowser(signal?: AbortSignal): Promise<Browser> {
@@ -1579,6 +1773,9 @@ export class BrowserService {
     }
     if (this.config.browser.mode === "disabled") {
       throw new AppError("BROWSER_DISABLED", "Browser control is disabled by configuration.");
+    }
+    if (this.recoveryRequired) {
+      throw new AppError("BROWSER_RECOVERY_REQUIRED", "Browser recovery is required before browser work can continue. Call browser_close_session and retry.", { retryable: true, details: { hint: "Call browser_close_session and retry after cleanup succeeds." } });
     }
     throwIfAborted(signal);
     if (this.browserClosePromise) {
@@ -1750,12 +1947,18 @@ export class BrowserService {
     });
   }
 
-  private launch(options: Parameters<typeof puppeteer.launch>[0]): Promise<Browser> {
-    return (this.dependencies.launch ?? puppeteer.launch)(options);
+  private async launch(options: PuppeteerLaunchOptions): Promise<Browser> {
+    if (this.dependencies.launch) {
+      return this.dependencies.launch(options);
+    }
+    return (await loadPuppeteer()).launch(options);
   }
 
-  private connect(options: Parameters<typeof puppeteer.connect>[0]): Promise<Browser> {
-    return (this.dependencies.connect ?? puppeteer.connect)(options);
+  private async connect(options: PuppeteerConnectOptions): Promise<Browser> {
+    if (this.dependencies.connect) {
+      return this.dependencies.connect(options);
+    }
+    return (await loadPuppeteer()).connect(options);
   }
 
   private async probeManagedEndpoint(): Promise<ManagedEndpointProbe> {
@@ -1794,12 +1997,30 @@ export class BrowserService {
   }
 
   private async pageState(pageId?: string, signal?: AbortSignal): Promise<PageState> {
+    if (this.benchmarkCounters) {
+      this.benchmarkCounters.pageLookups += 1;
+    }
     const generation = this.lifecycleGeneration;
     throwIfAborted(signal);
     const browser = await this.ensureBrowser(signal);
     throwIfAborted(signal);
+    const requestedId = pageId ? this.resolvePageId(pageId) : this.currentPageId;
+    const tracked = requestedId ? this.states.get(requestedId) : undefined;
+    if (tracked && tracked.lifecycleGeneration === generation && !tracked.disposed && !isPageClosed(tracked.page)) {
+      try {
+        await this.configurePage(tracked, signal);
+        this.assertStateLive(tracked);
+        return tracked;
+      } catch (error) {
+        await this.disposeStalePageState(tracked);
+        throw error;
+      }
+    }
     let pages: Page[];
     try {
+      if (this.benchmarkCounters) {
+        this.benchmarkCounters.pageEnumerations += 1;
+      }
       pages = await browser.pages();
     } catch (error) {
       if (!this.isCurrentBrowser(browser, generation)) {
@@ -1953,7 +2174,8 @@ export class BrowserService {
       const session = this.pendingTargetGuardSessions.get(event.sessionId)
         ?? getCdpSession(targetConnection, event.sessionId);
       this.pendingTargetGuardSessions.delete(event.sessionId);
-      if (!isTopLevelPageTarget(event.targetInfo)) {
+      this.pendingTargetGuardInfos.delete(event.sessionId);
+      if (!isGuardableTarget(event.targetInfo)) {
         return;
       }
       const autoAttached = isAutoAttachedTarget(targetConnection, event.targetInfo.targetId);
@@ -1965,6 +2187,9 @@ export class BrowserService {
         // request through.
         if (autoAttached === undefined && event.sessionId) {
           this.unguardedTargetSessions.add(event.sessionId);
+          if (targetConnection.send) {
+            void targetConnection.send("Target.closeTarget", { targetId: event.targetInfo.targetId }).catch(() => undefined);
+          }
           void sendSessionCommand(session, "Page.close").catch(() => undefined);
           this.logger.warn("New browser target guard could not determine attachment ownership");
         }
@@ -1972,15 +2197,33 @@ export class BrowserService {
       }
       if (!session) {
         this.unguardedTargetSessions.add(event.sessionId);
+        if (targetConnection.send) {
+          void targetConnection.send("Target.closeTarget", { targetId: event.targetInfo.targetId }).catch(() => undefined);
+        }
         this.logger.warn("New browser target guard could not find its CDP session");
         return;
       }
-      void this.guardTargetSession(session).catch((error: unknown) => {
+      void this.guardTargetSession(session, event.targetInfo).catch((error: unknown) => {
         this.logger.warn("New browser target guard failed", { error: String(error) });
       });
     };
+    const detachedListener = (value: unknown): void => {
+      if (!isRecordValue(value) || typeof value.sessionId !== "string") {
+        return;
+      }
+      const guard = this.targetGuardSessions.get(value.sessionId);
+      if (guard) {
+        guard.released = true;
+        removeCdpListener(guard.session, "Fetch.requestPaused", guard.requestPausedListener);
+        removeCdpListener(guard.session, "disconnected", guard.disconnectedListener);
+        this.targetGuardSessions.delete(value.sessionId);
+      }
+      this.pendingTargetGuardSessions.delete(value.sessionId);
+      this.pendingTargetGuardInfos.delete(value.sessionId);
+    };
     targetConnection.on("sessionattached", sessionListener);
     targetConnection.on("Target.attachedToTarget", rawListener);
+    targetConnection.on("Target.detachedFromTarget", detachedListener);
     // Connection.emit dispatches Puppeteer's TargetManager listeners in
     // registration order.  Wrapping it lets us issue Fetch.enable before
     // Puppeteer sends Runtime.runIfWaitingForDebugger for the same target;
@@ -2006,17 +2249,28 @@ export class BrowserService {
     this.targetGuardConnection = targetConnection;
     this.targetGuardConnectionListener = sessionListener;
     this.targetGuardRawConnectionListener = rawListener;
+    this.targetGuardDetachedListener = detachedListener;
+    if (targetConnection.send) {
+      void targetConnection.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }).catch((error: unknown) => {
+        this.targetGuardUnavailable = true;
+        this.logger.warn("Browser target auto-attachment could not be enabled", { error: String(error) });
+      });
+    }
   }
 
   private detachTargetGuard(): void {
     const connection = this.targetGuardConnection;
     const listener = this.targetGuardConnectionListener;
     const rawListener = this.targetGuardRawConnectionListener;
+    const detachedListener = this.targetGuardDetachedListener;
     if (connection && listener && connection.off) {
       try {
         connection.off("sessionattached", listener);
         if (rawListener) {
           connection.off("Target.attachedToTarget", rawListener);
+        }
+        if (detachedListener) {
+          connection.off("Target.detachedFromTarget", detachedListener);
         }
       } catch {
         // A disconnected CDP connection may reject listener access.
@@ -2032,27 +2286,32 @@ export class BrowserService {
     this.targetGuardConnection = undefined;
     this.targetGuardConnectionListener = undefined;
     this.targetGuardRawConnectionListener = undefined;
+    this.targetGuardDetachedListener = undefined;
     this.targetGuardOriginalEmit = undefined;
     this.targetGuardWrappedEmit = undefined;
     this.targetGuardUnavailable = false;
     this.pendingTargetGuardSessions.clear();
+    this.pendingTargetGuardInfos.clear();
     for (const guard of this.targetGuardSessions.values()) {
       guard.released = true;
       removeCdpListener(guard.session, "Fetch.requestPaused", guard.requestPausedListener);
       removeCdpListener(guard.session, "disconnected", guard.disconnectedListener);
+      restoreGuardSend(guard);
       void guard.session.send("Fetch.disable").catch(() => undefined);
     }
     this.targetGuardSessions.clear();
     this.unguardedTargetSessions.clear();
   }
 
-  private async guardTargetSession(session: CDPSession): Promise<void> {
+  private async guardTargetSession(session: CDPSession, targetInfo?: TargetAttachedEvent["targetInfo"]): Promise<void> {
     const sessionId = session.id();
     if (this.targetGuardSessions.has(sessionId) || this.shuttingDown) {
       return;
     }
     const guard: TargetGuardSession = {
       session,
+      targetId: targetInfo?.targetId ?? sessionId,
+      targetType: targetInfo?.type ?? "page",
       requestPausedListener: () => undefined,
       disconnectedListener: () => undefined,
       enabled: false,
@@ -2070,31 +2329,74 @@ export class BrowserService {
     guard.disconnectedListener = (): void => {
       removeCdpListener(session, "Fetch.requestPaused", guard.requestPausedListener);
       removeCdpListener(session, "disconnected", guard.disconnectedListener);
+      restoreGuardSend(guard);
       this.targetGuardSessions.delete(sessionId);
       this.unguardedTargetSessions.delete(sessionId);
     };
     this.targetGuardSessions.set(sessionId, guard);
     addCdpListener(session, "Fetch.requestPaused", guard.requestPausedListener);
     addCdpListener(session, "disconnected", guard.disconnectedListener);
+    const sessionWithSend = session as unknown as { send: (method: string, params?: Record<string, unknown>) => Promise<unknown> };
+    const originalSend = sessionWithSend.send.bind(sessionWithSend);
+    const countedSend = async (method: string, params?: Record<string, unknown>): Promise<unknown> => {
+      if (this.benchmarkCounters) {
+        this.benchmarkCounters.cdpCommands += 1;
+      }
+      return originalSend(method, params);
+    };
+    let releaseDebugger!: () => void;
+    let rejectDebugger!: (error: unknown) => void;
+    const debuggerReady = new Promise<void>((resolve, reject) => {
+      releaseDebugger = resolve;
+      rejectDebugger = reject;
+    });
+    void debuggerReady.catch(() => undefined);
+    const wrappedSend = async (method: string, params?: Record<string, unknown>): Promise<unknown> => {
+      if (method === "Runtime.runIfWaitingForDebugger") {
+        await debuggerReady;
+      }
+      return countedSend(method, params);
+    };
+    guard.originalSend = originalSend;
+    guard.wrappedSend = wrappedSend;
+    try {
+      if (this.targetGuardConnection?.send) {
+        sessionWithSend.send = wrappedSend;
+      } else {
+        releaseDebugger();
+      }
+    } catch {
+      // Some CDP session implementations expose a frozen send method. The
+      // target remains guarded, but the connection-level auto-attach support
+      // is treated as unavailable if Puppeteer cannot be gated safely.
+      this.logger.warn("Browser target debugger resume could not be gated");
+    }
     try {
       // Request-stage Fetch interception applies before page scripts and
       // therefore before a popup can issue a redirect/fetch to a private host.
-      await session.send("Fetch.enable", { patterns: [{ urlPattern: "*", requestStage: "Request" }] });
+      await countedSend("Fetch.enable", { patterns: [{ urlPattern: "*", requestStage: "Request" }] });
       guard.enabled = true;
+      releaseDebugger();
     } catch (error) {
+      rejectDebugger(error);
       guard.released = true;
       removeCdpListener(session, "Fetch.requestPaused", guard.requestPausedListener);
       removeCdpListener(session, "disconnected", guard.disconnectedListener);
+      restoreGuardSend(guard);
       this.targetGuardSessions.delete(sessionId);
       this.unguardedTargetSessions.add(sessionId);
-      // Do not claim this session is guarded. Puppeteer will still configure
-      // ordinary page interception when the target becomes visible; until it
-      // does, prepareTarget closes the unguarded target rather than allowing a
-      // navigation to proceed on an unsupported CDP implementation.
-      await session.send("Page.close").catch(() => undefined);
+      await this.closeGuardedTarget(guard);
       this.logger.warn("New browser target could not be guarded", { error: String(error) });
       throw error;
     }
+  }
+
+  private async closeGuardedTarget(guard: TargetGuardSession): Promise<void> {
+    const connection = this.targetGuardConnection;
+    if (connection?.send) {
+      await connection.send("Target.closeTarget", { targetId: guard.targetId }).catch(() => undefined);
+    }
+    await guard.session.send("Page.close").catch(() => undefined);
   }
 
   private async handleTargetGuardRequest(guard: TargetGuardSession, event: unknown): Promise<void> {
@@ -2115,8 +2417,10 @@ export class BrowserService {
     guard.requestIds.add(requestId);
     let allowed = false;
     try {
-      if (requestUrl === "about:blank" || requestUrl.startsWith("data:") || requestUrl.startsWith("blob:")) {
+      if (/^about:blank(?:#.*)?$/i.test(requestUrl)) {
         allowed = true;
+      } else if (requestUrl.startsWith("data:") || requestUrl.startsWith("blob:")) {
+        allowed = guard.targetType === "service_worker" || guard.targetType === "shared_worker";
       } else if (/^wss?:\/\//i.test(requestUrl)) {
         await this.policy.assertNavigationAllowedAsync(requestUrl.replace(/^ws/i, "http"));
         allowed = true;
@@ -2124,10 +2428,7 @@ export class BrowserService {
         await this.policy.assertNavigationAllowedAsync(requestUrl);
         allowed = true;
       } else if (requestUrl) {
-        // Preserve the established non-HTTP browser behavior for schemes
-        // such as chrome-internal setup pages. HTTP(S) and WebSocket requests
-        // are the policy-controlled network boundary here.
-        allowed = true;
+        allowed = false;
       }
     } catch (error) {
       this.logger.warn("New browser target request blocked", { url: safeUrl(requestUrl), code: error instanceof AppError ? error.code : "URL_BLOCKED" });
@@ -2188,6 +2489,7 @@ export class BrowserService {
     guard.released = true;
     removeCdpListener(guard.session, "Fetch.requestPaused", guard.requestPausedListener);
     removeCdpListener(guard.session, "disconnected", guard.disconnectedListener);
+    restoreGuardSend(guard);
     this.targetGuardSessions.delete(sessionId);
     // Page.setRequestInterception owns Fetch.enable from this point onward;
     // disabling here would race that setup and create an interception gap.
@@ -2286,6 +2588,7 @@ export class BrowserService {
     state.disposed = true;
     this.removePageListeners(state);
     state.refs.clear();
+    state.snapshotInteractive = undefined;
     state.snapshotId = undefined;
     state.dialogs.length = 0;
     state.navigationError = undefined;
@@ -2429,7 +2732,10 @@ export class BrowserService {
           if (!context.setDownloadBehavior) {
             throw new AppError("DOWNLOAD_CONFIGURATION_FAILED", "The connected browser does not expose context download behavior.");
           }
-          await context.setDownloadBehavior({ policy: "allow", downloadPath });
+          if (!this.configuredDownloadContexts.has(context)) {
+            await context.setDownloadBehavior({ policy: "allow", downloadPath });
+            this.configuredDownloadContexts.add(context);
+          }
           state.downloadConfigured = true;
         } catch {
           // Older Chromium versions expose only the page-scoped command.
@@ -2491,7 +2797,7 @@ export class BrowserService {
       mainFrameNavigation = isFrameNavigation && requestFrame === state.page.mainFrame();
       navigationGeneration = mainFrameNavigation ? state.activeNavigationGeneration : undefined;
       requestUrl = request.url();
-      if (requestUrl === "about:blank") {
+      if (/^about:blank(?:#.*)?$/i.test(requestUrl)) {
         await request.continue();
         return;
       }
@@ -2503,14 +2809,12 @@ export class BrowserService {
         return;
       }
       if (!/^https?:\/\//i.test(requestUrl)) {
-        if (isFrameNavigation) {
-          throw new AppError("URL_BLOCKED", "Non-HTTP browser navigations are disabled by policy.");
-        }
         if (/^wss?:\/\//i.test(requestUrl)) {
           await this.policy.assertNavigationAllowedAsync(requestUrl.replace(/^ws/i, "http"));
+          await request.continue();
+          return;
         }
-        await request.continue();
-        return;
+        throw new AppError("URL_BLOCKED", "Unsupported browser URL schemes are disabled by policy.");
       }
       // Apply the same domain, credential, blocked-host, and private-network
       // policy to every HTTP(S) request, not only top-level navigations. This
@@ -2628,6 +2932,7 @@ export class BrowserService {
       state.domRevision += 1;
       state.snapshotId = undefined;
       state.refs.clear();
+      state.snapshotInteractive = undefined;
       try {
         const mainFrame = state.page.mainFrame();
         if (frame === mainFrame && mainFrame.url() !== "about:blank") {
@@ -2646,6 +2951,7 @@ export class BrowserService {
       state.domRevision += 1;
       state.snapshotId = undefined;
       state.refs.clear();
+      state.snapshotInteractive = undefined;
     };
     state.frameAttachedListener = frameAttachedListener;
     state.page.on("frameattached", frameAttachedListener);
@@ -2656,6 +2962,7 @@ export class BrowserService {
       state.domRevision += 1;
       state.snapshotId = undefined;
       state.refs.clear();
+      state.snapshotInteractive = undefined;
       FRAME_IDS.delete(frame);
     };
     state.frameDetachedListener = frameDetachedListener;
@@ -2822,6 +3129,7 @@ export class BrowserService {
       const currentSignature = await frame.$eval(stored.selector, (element) => {
         const htmlElement = element as HTMLElement & { type?: string };
         const anchor = element.closest("a") as HTMLAnchorElement | null;
+        const rect = element.getBoundingClientRect();
         return [
           element.tagName.toLowerCase(),
           element.getAttribute("role") ?? "",
@@ -2829,10 +3137,10 @@ export class BrowserService {
           htmlElement.type ?? "",
           (htmlElement.innerText || element.getAttribute("value") || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 500),
           anchor?.href ?? "",
-          Math.round(element.getBoundingClientRect().x),
-          Math.round(element.getBoundingClientRect().y),
-          Math.round(element.getBoundingClientRect().width),
-          Math.round(element.getBoundingClientRect().height),
+          Math.round(rect.x),
+          Math.round(rect.y),
+          Math.round(rect.width),
+          Math.round(rect.height),
         ].join("\u001f");
       }).catch(() => undefined);
       if (!currentSignature || currentSignature !== stored.signature) {
@@ -2851,6 +3159,49 @@ export class BrowserService {
       }
       throw error;
     }
+  }
+
+  private async clickSnapshotRef(state: PageState, target: string, frame: Frame): Promise<{ selector: string; descriptor: ClickDescriptor & { href?: string; rect: { x: number; y: number; width: number; height: number } } }> {
+    const normalized = target.trim();
+    const ref = normalized.startsWith("ref:") ? normalized.slice(4) : normalized;
+    const stored = state.refs.get(ref);
+    if (!/^e\d+$/.test(ref) || !stored || stored.snapshotId !== state.snapshotId) {
+      throw new AppError("STALE_REFERENCE", `Element reference '${ref}' is stale. Capture a fresh browser snapshot before acting.`, { retryable: true });
+    }
+    const effectiveFrameId = framePath(frame);
+    if (effectiveFrameId !== stored.frameId) {
+      throw new AppError("FRAME_MISMATCH", `Reference '${ref}' belongs to frame '${stored.frameId}', not '${effectiveFrameId}'.`, { retryable: true });
+    }
+    const evaluated = await frame.$eval(stored.selector, (element) => {
+      const clickable = element.closest("a,button,input,select,textarea,[role=button]") ?? element;
+      const htmlElement = clickable as HTMLElement & { type?: string; value?: string };
+      const anchor = clickable.closest("a") as HTMLAnchorElement | null;
+      const rect = clickable.getBoundingClientRect();
+      return {
+        signature: [
+          element.tagName.toLowerCase(),
+          element.getAttribute("role") ?? "",
+          element.getAttribute("aria-label") ?? "",
+          htmlElement.type ?? "",
+          (htmlElement.innerText || element.getAttribute("value") || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 500),
+          anchor?.href ?? "",
+          Math.round(rect.x),
+          Math.round(rect.y),
+          Math.round(rect.width),
+          Math.round(rect.height),
+        ].join("\u001f"),
+        tag: clickable.tagName.toLowerCase(),
+        type: htmlElement.type?.toLowerCase() ?? "",
+        role: clickable.getAttribute("role") ?? "",
+        label: [clickable.textContent, clickable.getAttribute("aria-label"), clickable.getAttribute("title"), htmlElement.value].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 200),
+        href: anchor?.href ?? (clickable as HTMLAnchorElement).href ?? clickable.getAttribute("href") ?? undefined,
+        rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      };
+    }).catch(() => undefined);
+    if (!evaluated || evaluated.signature !== stored.signature) {
+      throw new AppError("STALE_REFERENCE", `Element reference '${ref}' no longer identifies the same element. Capture a fresh browser snapshot before acting.`, { retryable: true });
+    }
+    return { selector: stored.selector, descriptor: evaluated };
   }
 
   private async openLinkInNewTab(state: PageState, target: string, signal?: AbortSignal): Promise<unknown | undefined> {
@@ -3049,15 +3400,70 @@ export class BrowserService {
     throwIfAborted(signal);
   }
 
-  private async clickTarget(state: PageState, target: string, button: "left" | "middle" | "right", clickCount: number, signal?: AbortSignal, frame: Frame = state.page.mainFrame()): Promise<void> {
-    let selector: string | undefined;
-    try {
-      selector = await this.selectorFor(state, target, framePath(frame));
-    } catch (error) {
-      if (shouldPropagateTargetError(error)) {
-        throw error;
+  private async waitForUrlPattern(page: Page, pattern: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
+    if (globMatches(page.url(), pattern)) {
+      return;
+    }
+    if (typeof page.on !== "function" || typeof page.off !== "function") {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() <= deadline) {
+        throwIfAborted(signal);
+        if (globMatches(page.url(), pattern)) {
+          return;
+        }
+        await wait(Math.min(100, Math.max(1, deadline - Date.now())), signal);
       }
-      selector = undefined;
+      throw new AppError("WAIT_TIMEOUT", `The URL did not match '${pattern}' within ${timeoutMs}ms.`, { retryable: true });
+    }
+    await new Promise<void>((resolvePromise, reject) => {
+      let settled = false;
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        page.off("framenavigated", onNavigated);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const finish = (callback: () => void): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        callback();
+      };
+      const onNavigated = (): void => {
+        try {
+          if (globMatches(page.url(), pattern)) {
+            finish(resolvePromise);
+          }
+        } catch (error) {
+          finish(() => reject(error));
+        }
+      };
+      const onAbort = (): void => finish(() => reject(new AppError("CANCELLED", "The browser action was cancelled.")));
+      const timer = setTimeout(() => finish(() => reject(new AppError("WAIT_TIMEOUT", `The URL did not match '${pattern}' within ${timeoutMs}ms.`, { retryable: true }))), timeoutMs);
+      page.on("framenavigated", onNavigated);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      onNavigated();
+    });
+  }
+
+  private async clickTarget(state: PageState, target: string, button: "left" | "middle" | "right", clickCount: number, signal?: AbortSignal, frame: Frame = state.page.mainFrame()): Promise<ClickMonitorResult> {
+    let selector: string | undefined;
+    let clickDescriptor: (ClickDescriptor & { href?: string; rect: { x: number; y: number; width: number; height: number } }) | undefined;
+    const normalizedTarget = target.trim();
+    const ref = normalizedTarget.startsWith("ref:") ? normalizedTarget.slice(4) : normalizedTarget;
+    if (/^e\d+$/.test(ref)) {
+      const resolved = await this.clickSnapshotRef(state, normalizedTarget, frame);
+      selector = resolved.selector;
+      clickDescriptor = resolved.descriptor;
+    } else {
+      try {
+        selector = await this.selectorFor(state, target, framePath(frame));
+      } catch (error) {
+        if (shouldPropagateTargetError(error)) {
+          throw error;
+        }
+        selector = undefined;
+      }
     }
     if (selector) {
       // A plain visible label such as "Continue" is also syntactically valid
@@ -3070,35 +3476,30 @@ export class BrowserService {
       }
     }
     if (selector) {
-      await this.assertClickTargetSafe(await frame.$eval(selector, (element) => {
+      clickDescriptor ??= await frame.$eval(selector, (element) => {
         const clickable = element.closest("a,button,input,select,textarea,[role=button]") ?? element;
         const htmlElement = clickable as HTMLElement & { type?: string; value?: string };
+        const anchor = clickable.closest("a") as HTMLAnchorElement | null;
         return {
           tag: clickable.tagName.toLowerCase(),
           type: htmlElement.type?.toLowerCase() ?? "",
           role: clickable.getAttribute("role") ?? "",
           label: [clickable.textContent, clickable.getAttribute("aria-label"), clickable.getAttribute("title"), htmlElement.value].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 200),
+          href: anchor?.href ?? (clickable as HTMLAnchorElement).href ?? clickable.getAttribute("href") ?? undefined,
+          rect: (() => {
+            const rect = clickable.getBoundingClientRect();
+            return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+          })(),
         };
-      }));
-      await this.assertElementNavigationAllowed(state, selector, frame);
-      await this.clickElement(state, frame, selector, button, clickCount, signal);
-      return;
+      });
+      this.assertClickTargetSafe(clickDescriptor);
+      if (clickDescriptor.href) {
+        await this.assertNavigationUrl(frame.url() || state.page.url(), clickDescriptor.href);
+      }
+      return this.clickElement(state, frame, selector, button, clickCount, signal);
     }
     if (button !== "left") {
       throw new AppError("INVALID_ACTION", "Exact visible-text clicks support only the left mouse button; use a selector or coordinates for other buttons.");
-    }
-    const href = await frame.evaluate((needle) => {
-      const candidates = Array.from(document.querySelectorAll("body *"));
-      const element = candidates.find((candidate) => {
-        const htmlElement = candidate as HTMLElement;
-        return (htmlElement.innerText || candidate.textContent || "").trim() === needle;
-      }) as HTMLElement | undefined;
-      const clickable = element?.closest("a,button,input,select,textarea,[role=button],[onclick]") as HTMLElement | null;
-      const anchor = clickable?.closest("a") as HTMLAnchorElement | null;
-      return anchor?.href ?? clickable?.getAttribute("href") ?? null;
-    }, target);
-    if (href) {
-      await this.assertNavigationUrl(state.page.url(), href);
     }
     const targetBox = await frame.evaluate((needle) => {
       const candidates = Array.from(document.querySelectorAll("body *"));
@@ -3112,6 +3513,7 @@ export class BrowserService {
       }
       const rect = clickable.getBoundingClientRect();
       const htmlElement = clickable as HTMLElement & { type?: string; value?: string };
+      const anchor = clickable.closest("a") as HTMLAnchorElement | null;
       return {
         x: rect.x + rect.width / 2,
         y: rect.y + rect.height / 2,
@@ -3121,17 +3523,22 @@ export class BrowserService {
         type: htmlElement.type?.toLowerCase() ?? "",
         role: clickable.getAttribute("role") ?? "",
         label: [clickable.textContent, clickable.getAttribute("aria-label"), clickable.getAttribute("title"), htmlElement.value].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 200),
+        href: anchor?.href ?? clickable.getAttribute("href") ?? undefined,
       };
     }, target);
     if (!targetBox || targetBox.width <= 0 || targetBox.height <= 0) {
       throw new AppError("ELEMENT_NOT_FOUND", `No clickable element matched '${target.slice(0, 200)}'.`);
     }
     this.assertClickTargetSafe(targetBox);
+    if (targetBox.href) {
+      await this.assertNavigationUrl(state.page.url(), targetBox.href);
+    }
     if (frame !== state.page.mainFrame()) {
       throw new AppError("FRAME_ACTION_UNSUPPORTED", "Exact-text clicks in child frames require a selector or snapshot ref.");
     }
-    await this.runClickAndMonitor(state.page, () => state.page.mouse.click(targetBox.x, targetBox.y, { button: "left", count: clickCount }), signal);
+    const monitor = await this.runClickAndMonitor(state.page, () => state.page.mouse.click(targetBox.x, targetBox.y, { button: "left", count: clickCount }), signal);
     await this.throwPendingNavigationError(state, signal);
+    return monitor;
   }
 
   private assertClickTargetSafe(target: ClickDescriptor): void {
@@ -3146,31 +3553,31 @@ export class BrowserService {
     }
   }
 
-  private async clickElement(state: PageState, frame: Frame, selector: string, button: "left" | "middle" | "right", clickCount: number, signal?: AbortSignal): Promise<void> {
+  private async clickElement(state: PageState, frame: Frame, selector: string, button: "left" | "middle" | "right", clickCount: number, signal?: AbortSignal): Promise<ClickMonitorResult> {
     let dialogObserved = false;
     let removeDialogListener: (() => void) | undefined;
-    const dialogOpened = new Promise<void>((resolve) => {
+    const dialogOpened = new Promise<null>((resolve) => {
       const onDialog = (): void => {
         dialogObserved = true;
         removeDialogListener?.();
-        resolve();
+        resolve(null);
       };
       state.page.on("dialog", onDialog);
       removeDialogListener = () => state.page.off("dialog", onDialog);
     });
     const click = this.runClickAndMonitor(state.page, () => frame.click(selector, { button, count: clickCount }), signal).then(
-      () => false,
+      (result) => result,
       (error: unknown) => {
         removeDialogListener?.();
         if (dialogObserved) {
-          return true;
+          return { navigated: false, urlChanged: false };
         }
         throw error;
       },
     );
-    const openedDialog = await Promise.race([click, dialogOpened.then(() => true)]);
+    const openedDialog = await Promise.race([click, dialogOpened]);
     removeDialogListener?.();
-    if (openedDialog) {
+    if (openedDialog === null) {
       // Puppeteer finishes the input command after the dialog is resolved by
       // browser_dialog. Consume that eventual result before surfacing any
       // cancellation so it cannot become an unhandled rejection.
@@ -3181,12 +3588,14 @@ export class BrowserService {
       // wait observes cancellation. Never report a successful click for a
       // request that was already cancelled (especially during shutdown).
       throwIfAborted(signal);
-      return;
+      return { navigated: false, urlChanged: false };
     }
+    return openedDialog;
   }
 
-  private async runClickAndMonitor(page: Page, trigger: () => Promise<void>, signal?: AbortSignal): Promise<void> {
+  private async runClickAndMonitor(page: Page, trigger: () => Promise<void>, signal?: AbortSignal): Promise<ClickMonitorResult> {
     throwIfAborted(signal);
+    const beforeUrl = typeof page.url === "function" ? page.url() : "";
     let navigated = false;
     const onFrameNavigated = (frame: Frame): void => {
       try {
@@ -3201,24 +3610,16 @@ export class BrowserService {
     page.on("framenavigated", onFrameNavigated);
     try {
       await trigger();
-      await wait(150, signal);
+      await wait(50, signal);
       if (navigated) {
         await page.waitForNetworkIdle({ idleTime: 100, timeout: Math.min(this.config.browser.actionTimeoutMs, 1_000), signal }).catch(() => {
           throwIfAborted(signal);
         });
       }
+      const url = typeof page.url === "function" ? page.url() : "";
+      return { navigated, urlChanged: url !== beforeUrl, url };
     } finally {
       page.off("framenavigated", onFrameNavigated);
-    }
-  }
-
-  private async assertElementNavigationAllowed(state: PageState, selector: string, frame: Frame = state.page.mainFrame()): Promise<void> {
-    const href = await frame.$eval(selector, (element) => {
-      const anchor = element.closest("a") as HTMLAnchorElement | null;
-      return anchor?.href ?? (element as HTMLAnchorElement).href ?? element.getAttribute("href");
-    }).catch(() => undefined);
-    if (href) {
-      await this.assertNavigationUrl(frame.url() || state.page.url(), href);
     }
   }
 
@@ -3577,12 +3978,63 @@ export class BrowserService {
       });
   }
 
-  private async existingFilePath(rawPath: string): Promise<string> {
+  private async stageUploadFile(rawPath: string, signal?: AbortSignal): Promise<{ path: string; displayName: string; size: number }> {
     const candidate = this.policy.assertFilePath(rawPath, { mustExist: true });
-    await access(candidate);
-    const resolvedPath = await realpath(candidate);
-    this.policy.assertFilePath(resolvedPath, { mustExist: true });
-    return resolvedPath;
+    const before = await lstat(candidate).catch((error: unknown) => {
+      throw new AppError("FILE_PATH_BLOCKED", "The upload source does not exist or cannot be resolved safely.", { cause: error });
+    });
+    if (before.isSymbolicLink()) {
+      throw new AppError("FILE_PATH_BLOCKED", "The upload source must not be a symbolic link.");
+    }
+    const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+    let sourceHandle: FileHandle | undefined;
+    let stagingPath: string | undefined;
+    try {
+      sourceHandle = await open(candidate, fsConstants.O_RDONLY | noFollow);
+      const opened = await sourceHandle.stat();
+      if (!opened.isFile()) {
+        throw new AppError("FILE_PATH_BLOCKED", "The upload source must be a regular file.");
+      }
+      const after = await lstat(candidate);
+      if (after.isSymbolicLink() || !sameFileIdentity(opened, after)) {
+        throw new AppError("FILE_PATH_BLOCKED", "The upload source changed while it was being opened.", { retryable: true });
+      }
+      throwIfAborted(signal);
+      const stagingDirectory = join(this.config.dataDir, "upload-staging");
+      await mkdir(stagingDirectory, { recursive: true, mode: 0o700 });
+      stagingPath = join(stagingDirectory, `.upload-${randomUUID()}`);
+      const stagingHandle = await open(stagingPath, "wx", 0o600);
+      try {
+        // Copy from the already-open source handle rather than reopening the
+        // path through a convenience copy helper. This keeps the bytes tied
+        // to the identity checked above and makes cancellation observable at
+        // chunk boundaries.
+        for await (const chunk of sourceHandle.createReadStream({ autoClose: false })) {
+          throwIfAborted(signal);
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+          let offset = 0;
+          while (offset < buffer.byteLength) {
+            const written = await stagingHandle.write(buffer, offset, buffer.byteLength - offset, null);
+            if (written.bytesWritten <= 0) {
+              throw new AppError("FILE_PATH_BLOCKED", "The upload source could not be staged safely.");
+            }
+            offset += written.bytesWritten;
+          }
+        }
+        await stagingHandle.sync();
+      } finally {
+        await stagingHandle.close().catch(() => undefined);
+      }
+      throwIfAborted(signal);
+      return { path: stagingPath, displayName: basename(candidate), size: opened.size };
+    } catch (error) {
+      if (stagingPath) {
+        await unlinkIfPresent(stagingPath);
+      }
+      throw error instanceof AppError ? error : new AppError("FILE_PATH_BLOCKED", "The upload source could not be staged safely.", { cause: error });
+    } finally {
+      await sourceHandle?.close().catch(() => undefined);
+    }
   }
 
   private async outputFilePath(rawPath: string): Promise<string> {
@@ -3612,26 +4064,61 @@ export class BrowserService {
   private interruptBrowserOperation(): void {
     this.lifecycleGeneration += 1;
     this.detachTargetGuard();
+    this.interruptedBrowserShutdown = undefined;
     const browser = this.browser;
     const owned = this.ownsBrowser;
     this.browser = undefined;
     this.ownsBrowser = false;
     this.retireAllStates();
     if (browser) {
+      this.failedBrowserShutdown = { browser, owned };
       this.interruptedBrowserShutdown = closeConnectedBrowser(browser, owned, this.logger);
       void this.interruptedBrowserShutdown.then((succeeded) => {
         if (!succeeded) {
           this.browserShutdownFailure = true;
+          this.recoveryRequired = true;
         } else {
           this.browserShutdownFailure = false;
+          if (this.failedBrowserShutdown?.browser === browser) {
+            this.failedBrowserShutdown = undefined;
+          }
         }
       });
     }
   }
 
+  private async recoverAfterAbort(operationPromise: Promise<unknown>): Promise<void> {
+    if (this.recoveryPromise) {
+      return this.recoveryPromise;
+    }
+    const recovery = (async () => {
+      const settled = await promiseSettledWithin(operationPromise, 250);
+      if (settled) {
+        return;
+      }
+      // The operation ignored its abort signal. Retire the entire old
+      // lifecycle before allowing the serialized lane to advance.
+      this.interruptBrowserOperation();
+      const shutdown = this.interruptedBrowserShutdown;
+      const succeeded = shutdown
+        ? await settleWithTimeout(shutdown, SHUTDOWN_CONNECTION_SETTLE_TIMEOUT_MS)
+        : true;
+      if (succeeded !== true) {
+        this.recoveryRequired = true;
+      }
+    })();
+    this.recoveryPromise = recovery;
+    void recovery.finally(() => {
+      if (this.recoveryPromise === recovery) {
+        this.recoveryPromise = undefined;
+      }
+    }).catch(() => undefined);
+    return recovery;
+  }
+
   private async withOperationLock<T>(signal: AbortSignal | undefined, operation: (operationSignal: AbortSignal) => Promise<T>, queueTimeoutMs = this.config.browser.actionTimeoutMs, operationTimeoutMs?: number): Promise<T> {
     if (this.queuedOperations >= MAX_QUEUED_OPERATIONS) {
-      throw new AppError("BROWSER_QUEUE_FULL", "The browser action queue is full; wait for an active operation to finish and retry.", { retryable: true });
+      throw new AppError("BROWSER_QUEUE_FULL", "The browser action queue is full; wait for an active operation to finish and retry.", { retryable: true, details: { hint: "Wait for the active browser operation to finish, then retry." } });
     }
     this.queuedOperations += 1;
     const requestSessionGeneration = this.sessionGeneration;
@@ -3656,18 +4143,22 @@ export class BrowserService {
       this.activeOperationController = operationController;
       const operationSignal = combineSignals(queueSignal, operationController.signal) ?? operationController.signal;
       let operationTimedOut = false;
+      let abortRequested = false;
+      let recoveryAfterAbort: Promise<void> | undefined;
       const operationBudgetMs = operationTimeoutMs === undefined
         ? undefined
         : Math.max(1, Math.floor(operationTimeoutMs) - Math.max(0, Date.now() - requestStartedAt));
-      let operationSettled = false;
       let removeAbortListener: (() => void) | undefined;
       let rejectAbort!: (error: unknown) => void;
       const abortPromise = new Promise<never>((_, reject) => {
         rejectAbort = reject;
         const onAbort = (): void => {
+          if (abortRequested) {
+            return;
+          }
+          abortRequested = true;
           const timedOut = operationTimedOut;
           operationController.abort();
-          this.interruptBrowserOperation();
           reject(timedOut
             ? new AppError("BROWSER_TIMEOUT", `The browser operation exceeded its ${Math.max(1, Math.floor(operationTimeoutMs ?? 0))}ms action deadline.`, { retryable: true, details: { timeoutMs: Math.max(1, Math.floor(operationTimeoutMs ?? 0)) } })
             : new AppError("CANCELLED", "The browser action was cancelled."));
@@ -3682,17 +4173,19 @@ export class BrowserService {
       const deadlineTimer = operationTimeoutMs === undefined ? undefined : setTimeout(() => {
         if (!queueSignal?.aborted) {
           operationTimedOut = true;
-          operationController.abort();
-          this.interruptBrowserOperation();
-          rejectAbort(new AppError("BROWSER_TIMEOUT", `The browser operation exceeded its ${Math.max(1, Math.floor(operationTimeoutMs ?? 0))}ms action deadline.`, { retryable: true, details: { timeoutMs: Math.max(1, Math.floor(operationTimeoutMs ?? 0)) } }));
+          if (!abortRequested) {
+            abortRequested = true;
+            operationController.abort();
+            rejectAbort(new AppError("BROWSER_TIMEOUT", `The browser operation exceeded its ${Math.max(1, Math.floor(operationTimeoutMs ?? 0))}ms action deadline.`, { retryable: true, details: { timeoutMs: Math.max(1, Math.floor(operationTimeoutMs ?? 0)) } }));
+          }
         }
       }, operationBudgetMs);
       this.lastActivityAt = Date.now();
       operationPromise = Promise.resolve().then(() => operation(operationSignal));
-      void operationPromise.then(
-        () => { operationSettled = true; },
-        () => { operationSettled = true; },
-      );
+      void operationPromise.catch(() => undefined);
+      if (abortRequested) {
+        recoveryAfterAbort = this.recoverAfterAbort(operationPromise);
+      }
       try {
         const result = await Promise.race([operationPromise, abortPromise]);
         throwIfAborted(operationSignal);
@@ -3711,10 +4204,12 @@ export class BrowserService {
         if (this.activeOperationController === operationController) {
           this.activeOperationController = undefined;
         }
-        if (!operationSettled && operationPromise) {
-          deferRelease = true;
-          void operationPromise.then(() => release(), () => release());
-        }
+      if (abortRequested && operationPromise) {
+        deferRelease = true;
+        recoveryAfterAbort ??= this.recoverAfterAbort(operationPromise);
+        await recoveryAfterAbort;
+        deferRelease = false;
+      }
       }
     } finally {
       this.queuedOperations -= 1;
@@ -3791,6 +4286,36 @@ async function waitForElementState(
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<void> {
+  if (typeof (frame as unknown as { waitForFunction?: unknown }).waitForFunction === "function") {
+    try {
+      await (frame as unknown as { waitForFunction: (predicate: unknown, options: unknown, selector: string, state: string) => Promise<unknown> }).waitForFunction(
+        (targetSelector: string, desiredState: string) => {
+          const element = document.querySelector(targetSelector) as HTMLElement | null;
+          const visible = Boolean(element && (() => {
+            const style = window.getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            return style.display !== "none" && style.visibility !== "hidden" && Number.parseFloat(style.opacity || "1") > 0 && rect.width > 0 && rect.height > 0;
+          })());
+          return desiredState === "attached"
+            ? Boolean(element)
+            : desiredState === "detached"
+              ? !element
+              : desiredState === "hidden"
+                ? !visible
+                : visible;
+        },
+        { timeout: timeoutMs, signal },
+        selector,
+        state,
+      );
+      return;
+    } catch (error) {
+      if (isPuppeteerTimeoutError(error)) {
+        throw new AppError("WAIT_TIMEOUT", `The selector '${selector.slice(0, 200)}' did not become ${state} within ${timeoutMs}ms.`, { retryable: true, cause: error });
+      }
+      throw error;
+    }
+  }
   const deadline = Date.now() + timeoutMs;
   while (true) {
     throwIfAborted(signal);
@@ -3862,6 +4387,45 @@ function normalizeBrowserOperationError(error: unknown, signal?: AbortSignal): u
   return error;
 }
 
+function batchFailureDetails(failedIndex: number, failedAction: string, completedResults: unknown[]): Record<string, unknown> {
+  const boundedResults: unknown[] = [];
+  let bytes = 2;
+  for (const result of completedResults) {
+    let resultBytes = 0;
+    try {
+      resultBytes = new TextEncoder().encode(JSON.stringify(result)).byteLength;
+    } catch {
+      resultBytes = Number.POSITIVE_INFINITY;
+    }
+    if (bytes + resultBytes + (boundedResults.length ? 1 : 0) > 6_000) {
+      break;
+    }
+    boundedResults.push(result);
+    bytes += resultBytes + (boundedResults.length > 1 ? 1 : 0);
+  }
+  return {
+    failedIndex,
+    failedAction,
+    completedActions: failedIndex,
+    completedResults: boundedResults,
+    ...(boundedResults.length < completedResults.length ? { resultsTruncated: true, omittedResults: completedResults.length - boundedResults.length } : {}),
+    batch: {
+      failedIndex,
+      failedAction,
+      completedActions: failedIndex,
+    },
+  };
+}
+
+function boundedSnapshotError(error: unknown): { code: string; message: string; retryable: boolean } {
+  const normalized = asAppError(error);
+  return {
+    code: normalized.code.slice(0, 200),
+    message: normalized.message.slice(0, 1_000),
+    retryable: normalized.retryable,
+  };
+}
+
 function isPageClosed(page: Page): boolean {
   try {
     return page.isClosed();
@@ -3902,6 +4466,7 @@ function untrustedLogEntries(entries: LogEntry[]): LogEntry[] {
   return entries.map((entry) => ({
     ...entry,
     ...(entry.text ? { text: wrapUntrustedText("browser_log", redactSecretPlaceholders(entry.text), 2_000) } : {}),
+    ...(entry.url ? { untrustedUrl: wrapUntrustedText("browser_log_url", redactSecretPlaceholders(entry.url), 4_096) } : {}),
   }));
 }
 
@@ -3940,6 +4505,20 @@ function sanitizeStorageResult(value: unknown): unknown {
     result.truncated = result.truncated === true || Object.keys(values).length < sourceCount || totalChars >= 100_000;
   }
   return result;
+}
+
+function sanitizeEvaluateResult(value: unknown): unknown {
+  const redacted = redactValue(value);
+  if (typeof value === "string") {
+    return wrapUntrustedText("evaluate_result", redactSecretPlaceholders(String(redacted)), 20_000);
+  }
+  if (redacted && typeof redacted === "object" && !Array.isArray(redacted)) {
+    const record = { ...(redacted as Record<string, unknown>) };
+    const metadataKey = Object.hasOwn(record, "untrustedSource") ? "__untrustedSource" : "untrustedSource";
+    record[metadataKey] = "page";
+    return record;
+  }
+  return { value: redacted, untrustedSource: "page" };
 }
 
 function boundAccessibilityNodes<T>(nodes: T[], maxChars: number): { nodes: T[]; truncated: boolean } {
@@ -4181,6 +4760,12 @@ async function settlesWithinTimeout(promise: Promise<unknown> | undefined, timeo
   return settled;
 }
 
+async function promiseSettledWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  const settledMarker = Symbol("settled");
+  const result = await settleWithTimeout(promise.then(() => settledMarker, () => settledMarker), timeoutMs);
+  return result === settledMarker;
+}
+
 async function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
   if (milliseconds <= 0) {
     return;
@@ -4272,6 +4857,10 @@ function isMissingFile(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT");
 }
 
+function sameFileIdentity(left: { dev: number; ino: number }, right: { dev: number; ino: number }): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
 function boundedScreenshotDimension(value: number): number {
   return Number.isFinite(value) && value > 0 ? Math.min(Math.round(value), 1_000_000) : 0;
 }
@@ -4302,11 +4891,8 @@ function parseTargetAttachedEvent(value: unknown): TargetAttachedEvent | undefin
   };
 }
 
-function isTopLevelPageTarget(targetInfo: TargetAttachedEvent["targetInfo"]): boolean {
-  // `page` is the CDP type for ordinary tabs/popups. Chromium may expose a
-  // tab target while embedding (for example, in a browser context); it is
-  // still a top-level network-capable target and must be guarded too.
-  return targetInfo.type === "page" || targetInfo.type === "tab";
+function isGuardableTarget(targetInfo: TargetAttachedEvent["targetInfo"]): boolean {
+  return targetInfo.type === "page" || targetInfo.type === "tab" || targetInfo.type === "service_worker" || targetInfo.type === "shared_worker";
 }
 
 function isAutoAttachedTarget(connection: TargetGuardConnection, targetId: string): boolean | undefined {
@@ -4347,5 +4933,19 @@ function removeCdpListener(session: CDPSession, event: string, listener: (event:
     emitter.off?.(event, listener);
   } catch {
     // A detached target may reject listener removal.
+  }
+}
+
+function restoreGuardSend(guard: TargetGuardSession): void {
+  if (!guard.originalSend || !guard.wrappedSend) {
+    return;
+  }
+  const session = guard.session as unknown as { send: (method: string, params?: Record<string, unknown>) => Promise<unknown> };
+  if (session.send === guard.wrappedSend) {
+    try {
+      session.send = guard.originalSend;
+    } catch {
+      // A frozen CDP session can retain the wrapper until it disconnects.
+    }
   }
 }

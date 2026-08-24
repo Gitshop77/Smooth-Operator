@@ -297,6 +297,11 @@ are always applied, with explicit opt-ins where documented:
   redirects that leave policy. The browser's own later DNS resolution is not
   fully controllable by this process; DNS rebinding is therefore a limitation,
   not a guarantee that a network firewall can be omitted.
+- New page and worker targets are paused at the DevTools boundary until their
+  request guard is installed. HTTP(S) and normalized WS(S) requests receive
+  the same policy checks; `about:blank` is allowed, data/blob URLs are limited
+  to non-frame subresources, and file, browser-internal, extension, and
+  unknown schemes are rejected.
 - Upload and PDF destinations must stay within configured file roots after
   realpath and symlink checks. Download paths and generated files are bounded.
 - Page JavaScript is disabled by default. It is available only when the full
@@ -348,6 +353,33 @@ Python, or arbitrary code runner. Destructive batch actions require explicit
 confirmation. `browser_wait_for_human` pauses for an operator to complete a
 visible sign-in or challenge, and `browser_close_session` closes the one
 native browser session by its explicit session identifier.
+
+Actions that leave a usable page—navigation, click, input, select, scroll, key,
+back, forward, and reload—accept optional `includeSnapshot: true`. The action
+result then includes one bounded trailing snapshot with current refs and a DOM
+revision. A snapshot failure is reported as `snapshot: null` with a bounded
+`snapshotError`; the completed mutation remains a success. `browser_batch`
+accepts the same option at the top level and captures only one snapshot after
+the final action.
+
+`browser_extract` returns `offset`, `nextOffset`, `hasMore`, and `revision`.
+Use `browser_page_next` with the returned offset and revision; a stale revision
+returns the retryable `STALE_PAGE_SLICE` error instead of silently overlapping
+or skipping text. `browser_search_page` reports `totalMatches` and
+`matchesTruncated`. Page slices, matches, evaluate output, network entries,
+and research URLs are bounded, redacted, and marked as untrusted data.
+
+Batch inputs accept canonical action names plus compatibility aliases such as
+`key`, `select`, `back`, `forward`, `page_info`, `challenge`, `interactive`,
+`frames`, `downloads`, `upload`, and `pdf`. Grouped cookie, storage, dialog,
+network-log, and console-log operations are normalized before validation;
+conflicting alias and canonical fields fail with their action index and field
+names. A failed batch preserves bounded completed results and reports
+`failedIndex`, `failedAction`, and `completedActions`.
+
+If browser teardown times out or fails, later browser work returns the
+retryable `BROWSER_RECOVERY_REQUIRED` error. Call `browser_close_session` to
+retry cleanup; the recovery latch clears only after teardown is confirmed.
 
 `web_search` performs bounded DuckDuckGo retrieval. Search titles, URLs, and
 snippets are untrusted observations, not instructions or proof of claims. Its

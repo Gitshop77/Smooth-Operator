@@ -116,6 +116,11 @@ export class ServerRuntime {
     return this.browser.execute(action, signal);
   }
 
+  async runBatch(actions: BrowserAction[], options: { confirmDestructive?: boolean; includeSnapshot?: boolean } = {}, signal?: AbortSignal): Promise<unknown> {
+    await this.ensureBrowserProfileLease();
+    return this.browser.executeBatch(actions, options, signal);
+  }
+
   async snapshot(options: NonNullable<Parameters<BrowserService["snapshot"]>[0]>, signal?: AbortSignal): Promise<PageSnapshot> {
     await this.ensureBrowserProfileLease();
     return this.browser.snapshot({ ...options, signal });
@@ -160,7 +165,7 @@ export class ServerRuntime {
         configured: managedBrowser || (!browserDisabled
           && (usesExecutable ? Boolean(this.config.browser.executablePath) : Boolean(this.config.browser.wsEndpoint || this.config.browser.url))),
         connection: browserDisabled ? "disabled" : managedBrowser ? "managed" : usesExecutable ? "executable" : this.config.browser.wsEndpoint ? "websocket" : "devtools-http",
-        runtime: browserDisabled ? { connected: false, owned: false, trackedPages: 0, queuedOperations: 0, currentPageId: null } : this.browser.connectionStatus(),
+        runtime: browserDisabled ? { connected: false, owned: false, trackedPages: 0, queuedOperations: 0, currentPageId: null, recoveryRequired: false } : this.browser.connectionStatus(),
         actionTimeoutMs: this.config.browser.actionTimeoutMs,
         connectTimeoutMs: this.config.browser.connectTimeoutMs,
         cdpTimeoutMs: this.config.browser.cdpTimeoutMs,

@@ -27,7 +27,7 @@ Or straight from GitHub:
 npm install -g github:Gitshop77/Smooth-Operator && smooth-operator install opencode
 ~~~
 
-Wizard asks 7 questions (browser — any Chromium-based browser is detected, managed vs personal Chrome, headless, domains, JS). Run `smooth-operator install` with no harness to pick one interactively (TTY only; piped/CI runs print usage and exit). `--yes` skips every prompt, so give it a target: `smooth-operator install opencode --yes`. Personal Chrome → wizard launches Chrome on `9222` for you.
+Wizard asks 7 questions (browser mode, executable, headless, allowed/blocked domains, JavaScript, and data directory). Run `smooth-operator install` with no harness to pick one interactively (TTY only; piped/CI runs print usage and exit). `--yes` skips every prompt, so give it a target: `smooth-operator install opencode --yes`. Personal Chrome → wizard launches Chrome on `9222` and derives `browserUrl` for you.
 
 Requires Node 22.23.2+ and Chrome. Profile at `~/.smooth-operator/browser` — sign in once.
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { BatchRequestSchema, BrowserActionPlanSchema, BrowserActionSchema, ClickRequestSchema, CookieRequestSchema, EvaluateRequestSchema, ExtractRequestSchema, HtmlRequestSchema, InputRequestSchema, NavigateRequestSchema, ResearchRequestSchema, ScreenshotRequestSchema, SnapshotRequestSchema, StorageRequestSchema, TargetRequestSchema } from "@/server/contracts";
+import { BatchRequestSchema, BrowserActionInputSchema, BrowserActionPlanSchema, BrowserActionSchema, ClickRequestSchema, CookieRequestSchema, EvaluateRequestSchema, ExtractRequestSchema, HtmlRequestSchema, InputRequestSchema, NavigateRequestSchema, ResearchRequestSchema, ScreenshotRequestSchema, SnapshotRequestSchema, StorageRequestSchema, TargetRequestSchema } from "@/server/contracts";
 
 describe("MCP contracts", () => {
   it("accepts browser-use indexed and coordinate click forms", () => {
@@ -173,5 +173,34 @@ describe("MCP contracts", () => {
     }
     expect(BatchRequestSchema.safeParse({ actions: [{ action: "save_as_pdf", outputPath: "/tmp/page.pdf" }] }).success).toBe(false);
     expect(BatchRequestSchema.safeParse({ actions: [{ action: "save_as_pdf", outputPath: "/tmp/page.pdf" }], confirmDestructive: true }).success).toBe(true);
+  });
+
+  it("normalizes canonical, standalone, and grouped batch aliases before validation", () => {
+    const aliases = BrowserActionInputSchema.safeParse({ action: "key", key: "Enter", tab_id: "tab-1" });
+    expect(aliases.success).toBe(true);
+    expect(aliases.success && aliases.data).toMatchObject({ action: "send_keys", key: "Enter", pageId: "tab-1" });
+
+    const grouped = BatchRequestSchema.safeParse({ confirmDestructive: true, actions: [
+      { action: "cookie", operation: "set", name: "session", value: "safe", url: "https://example.com" },
+      { action: "storage", operation: "get", area: "session", key: "theme" },
+      { action: "dialog", operation: "get_text" },
+      { action: "network_log", operation: "enable" },
+      { action: "console", operation: "read" },
+    ] });
+    expect(grouped.success).toBe(true);
+    expect(grouped.success && grouped.data.actions.map((action) => action.action)).toEqual([
+      "set_cookie", "get_storage", "alert_get_text", "enable_network_log", "get_console_log",
+    ]);
+    expect(grouped.success && grouped.data.actions[0]).toMatchObject({ cookieName: "session", cookieValue: "safe" });
+    expect(grouped.success && grouped.data.actions[1]).toMatchObject({ storageArea: "session", storageKey: "theme" });
+  });
+
+  it("reports conflicting aliases with the field names before execution", () => {
+    const result = BatchRequestSchema.safeParse({ actions: [{ action: "cookie", operation: "set", name: "session", cookieName: "canonical", value: "safe" }] });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some((issue) => issue.message.includes("cookieName") && issue.message.includes("name"))).toBe(true);
+      expect(result.error.issues.some((issue) => issue.path.includes(0))).toBe(true);
+    }
   });
 });

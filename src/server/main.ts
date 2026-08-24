@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage } from "node:http";
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { realpathSync } from "node:fs";
 import process from "node:process";
 import { Readable } from "node:stream";
@@ -52,6 +52,7 @@ const HTTP_SHUTDOWN_GRACE_MS = 5_000;
 const HTTP_HANDLER_SHUTDOWN_TIMEOUT_MS = 5_000;
 const HTTP_REQUEST_TIMEOUT_MS = 120_000;
 const HTTP_HEADERS_TIMEOUT_MS = 15_000;
+const HTTP_BODY_READ_TIMEOUT_MS = 30_000;
 
 export async function main(args = process.argv.slice(2)): Promise<void> {
   if (args[0] === "install") {
@@ -241,6 +242,10 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
       if (!response.headersSent) {
         const normalized = asAppError(error);
         const status = normalized.status >= 400 && normalized.status <= 599 ? normalized.status : 500;
+        if (status === 408 || status === 413 || status === 499) {
+          response.setHeader("connection", "close");
+          response.once("finish", () => request.destroy());
+        }
         response.writeHead(status, { "content-type": "application/json" });
       }
       if (!response.writableEnded) {
@@ -345,7 +350,7 @@ async function dispatchHttpRequest(
     await nodeHandler(request, response);
     return;
   }
-  const body = await readRequestBody(request, maxBodyBytes);
+  const body = await readRequestBody(request, maxBodyBytes, HTTP_BODY_READ_TIMEOUT_MS);
   if (isSubscriptionRequestBody(body)) {
     promoteToStream?.();
   }
@@ -361,40 +366,56 @@ async function dispatchHttpRequest(
   await nodeHandler(replay, response);
 }
 
-async function readRequestBody(request: IncomingMessage, maxBodyBytes: number): Promise<Buffer> {
+async function readRequestBody(request: IncomingMessage, maxBodyBytes: number, timeoutMs: number): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let total = 0;
-  let tooLarge = false;
-  try {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  let discardChunks = false;
+  let bodyPromise: Promise<Buffer> | undefined;
+  const read = async (): Promise<Buffer> => {
     for await (const chunk of request) {
-      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
-      if (tooLarge) {
-        // Continue draining without retaining additional bytes.  Destroying
-        // the socket at the limit can prevent the caller from receiving the
-        // intended 413 response for chunked requests.
+      if (discardChunks) {
         continue;
       }
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
       const nextTotal = total + buffer.byteLength;
       if (nextTotal > maxBodyBytes) {
-        tooLarge = true;
-        continue;
+        throw new AppError("HTTP_BODY_TOO_LARGE", `HTTP request body exceeds the ${maxBodyBytes}-byte limit.`, { status: 413 });
       }
       total = nextTotal;
       chunks.push(buffer);
     }
+    return Buffer.concat(chunks, total);
+  };
+  try {
+    bodyPromise = read();
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        reject(new AppError("HTTP_BODY_TIMEOUT", "The HTTP request body took too long to arrive.", { status: 408, retryable: true }));
+      }, timeoutMs);
+    });
+    return await Promise.race([bodyPromise, timeout]);
   } catch (error) {
-    if (tooLarge) {
-      throw new AppError("HTTP_BODY_TOO_LARGE", `HTTP request body exceeds the ${maxBodyBytes}-byte limit.`, { status: 413, cause: error });
+    discardChunks = true;
+    bodyPromise?.catch(() => undefined);
+    if (timedOut) {
+      request.pause();
+      throw error;
+    }
+    if (error instanceof AppError && (error.code === "HTTP_BODY_TOO_LARGE" || error.code === "HTTP_BODY_TIMEOUT")) {
+      throw error;
     }
     if (request.aborted) {
       throw new AppError("HTTP_REQUEST_ABORTED", "The HTTP client disconnected before the request completed.", { status: 499, retryable: true, cause: error });
     }
     throw error;
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
   }
-  if (tooLarge) {
-    throw new AppError("HTTP_BODY_TOO_LARGE", `HTTP request body exceeds the ${maxBodyBytes}-byte limit.`, { status: 413 });
-  }
-  return Buffer.concat(chunks, total);
 }
 
 function isPotentialHttpStream(request: IncomingMessage): boolean {
@@ -429,8 +450,9 @@ function authorized(request: IncomingMessage, token: string | undefined): boolea
     return false;
   }
   const presented = Buffer.from(header.slice("Bearer ".length));
-  const expected = Buffer.from(token);
-  return presented.length === expected.length && timingSafeEqual(presented, expected);
+  const expected = createHash("sha256").update(token).digest();
+  const presentedDigest = createHash("sha256").update(presented).digest();
+  return presentedDigest.length === expected.length && timingSafeEqual(presentedDigest, expected);
 }
 
 if (isMainModule()) {

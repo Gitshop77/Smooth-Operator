@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createMcpServer } from "@/server/mcp";
 import { ServerRuntime } from "@/server/runtime";
+import { AppError } from "@/server/errors";
 
 import { testConfig } from "./helpers";
 
@@ -424,6 +425,54 @@ describe("native MCP registry", () => {
       expect(arrayResult.isError).not.toBe(true);
       expect((arrayResult.structuredContent as Record<string, unknown>).truncated).toBe(true);
       expect(new TextEncoder().encode(JSON.stringify(arrayResult)).byteLength).toBeLessThan(65_536);
+    } finally {
+      await client.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+      await runtime.close();
+    }
+  });
+
+  it("preserves small batch results and bounds only the oversized tail", async () => {
+    const runtime = await ServerRuntime.create(testConfig());
+    const runBatch = vi.spyOn(runtime, "runBatch").mockResolvedValue({ results: Array.from({ length: 50 }, (_, index) => ({ index, ok: true })) });
+    const server = createMcpServer(runtime);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "batch-output-test", version: "1.0.0" });
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      const small = await client.callTool({ name: "browser_batch", arguments: { actions: [{ action: "wait", milliseconds: 0 }] } });
+      expect(small.isError).not.toBe(true);
+      expect((small.structuredContent as { results: unknown[] }).results).toHaveLength(50);
+      expect(runBatch.mock.calls[0]?.[0]).toHaveLength(1);
+
+      runBatch.mockResolvedValue({ results: Array.from({ length: 50 }, (_, index) => ({ index, evidence: "x".repeat(2_000) })) });
+      const large = await client.callTool({ name: "browser_batch", arguments: { actions: [{ action: "wait", milliseconds: 0 }] } });
+      expect(large.isError).not.toBe(true);
+      expect(large.structuredContent).toMatchObject({ resultsTruncated: true, mcpOutputTruncated: true, omittedResults: expect.any(Number) });
+      expect(new TextEncoder().encode(JSON.stringify(large)).byteLength).toBeLessThan(65_536);
+
+      runBatch.mockRejectedValue(new AppError("ACTION_FAILED", "The action failed.", {
+        details: { failedIndex: 3, failedAction: "click", completedActions: 3, completedResults: [{ ok: true }] },
+      }));
+      const failed = await client.callTool({ name: "browser_batch", arguments: { actions: [{ action: "wait", milliseconds: 0 }] } });
+      expect(failed.isError).toBe(true);
+      expect(failed.structuredContent).toMatchObject({ ok: false, error: { details: { failedIndex: 3, failedAction: "click", completedActions: 3 } } });
+
+      runBatch.mockRejectedValue(new AppError("ACTION_FAILED", "The action failed.", {
+        details: {
+          failedIndex: 49,
+          failedAction: "click",
+          completedActions: 49,
+          completedResults: Array.from({ length: 49 }, (_, index) => ({ index, evidence: "x".repeat(500) })),
+        },
+      }));
+      const largeFailure = await client.callTool({ name: "browser_batch", arguments: { actions: [{ action: "wait", milliseconds: 0 }] } });
+      expect(largeFailure.isError).toBe(true);
+      expect(largeFailure.structuredContent).toMatchObject({
+        ok: false,
+        error: { details: { failedIndex: 49, failedAction: "click", completedActions: 49, completedResults: expect.any(Array), resultsTruncated: true } },
+      });
+      expect(new TextEncoder().encode(JSON.stringify(largeFailure)).byteLength).toBeLessThan(65_536);
     } finally {
       await client.close().catch(() => undefined);
       await server.close().catch(() => undefined);

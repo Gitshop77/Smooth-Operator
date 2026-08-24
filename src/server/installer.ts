@@ -4,7 +4,7 @@ import type { FileHandle } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir, platform } from "node:os";
-import { basename, dirname, join, parse, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, resolve, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -364,7 +364,7 @@ async function chooseExistingOpenCodePath(plannedPath: string): Promise<string> 
  * so intentional conflicts (different scripts, disabled servers) still fail
  * closed. */
 function isStaleEmbeddedCommand(command: unknown): boolean {
-  if (typeof command !== "string" || !command.includes("/")) {
+  if (typeof command !== "string" || !isAbsoluteEmbeddedPath(command)) {
     return false;
   }
   return !existsSync(command);
@@ -375,7 +375,11 @@ function isStaleEmbeddedCommandArray(command: unknown): boolean {
     return false;
   }
   const interpreter = command[0];
-  return typeof interpreter === "string" && interpreter.includes("/") && !existsSync(interpreter);
+  return typeof interpreter === "string" && isAbsoluteEmbeddedPath(interpreter) && !existsSync(interpreter);
+}
+
+function isAbsoluteEmbeddedPath(value: string): boolean {
+  return isAbsolute(value) || win32.isAbsolute(value);
 }
 
 /** A stored entry whose embedded interpreter path no longer exists (for

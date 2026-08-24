@@ -88,13 +88,15 @@ describeLive("live browser contract", () => {
     const childFrameId = (snapshot.frames?.find((frame) => (frame as { frameId?: string }).frameId !== "main") as { frameId?: string } | undefined)?.frameId;
     expect(childFrameId).toBeTypeOf("string");
     const button = snapshot.interactive.find((element) => element.selector === "#action-button");
-    const input = snapshot.interactive.find((element) => element.selector === "#input");
     expect(button?.ref).toBeTruthy();
-    expect(input?.ref).toBeTruthy();
 
-    await service.execute({ action: "click", target: `ref:${button?.ref}`, snapshotId: snapshot.snapshotId });
+    const clickedWithSnapshot = await service.execute({ action: "click", target: `ref:${button?.ref}`, snapshotId: snapshot.snapshotId, includeSnapshot: true }) as { snapshot?: { snapshotId?: string; interactive?: Array<{ selector?: string; ref?: string }> } };
+    expect(clickedWithSnapshot.snapshot?.snapshotId).toBeTypeOf("string");
+    const projectedInteractive = await service.execute({ action: "list_interactive" }) as Array<{ ref: string }>;
+    expect(projectedInteractive.some((element) => element.ref === clickedWithSnapshot.snapshot?.interactive?.find((item) => item.selector === "#action-button")?.ref)).toBe(true);
     expect((await service.execute({ action: "extract", selector: "#status" }))).toMatchObject({ text: expect.stringContaining("clicked") });
-    const inputResult = await service.execute({ action: "input", target: `ref:${input?.ref}`, snapshotId: snapshot.snapshotId, text: "hello", verify: true });
+    const freshInput = clickedWithSnapshot.snapshot?.interactive?.find((item) => item.selector === "#input");
+    const inputResult = await service.execute({ action: "input", target: `ref:${freshInput?.ref}`, snapshotId: clickedWithSnapshot.snapshot?.snapshotId, text: "hello", verify: true });
     expect(inputResult).toMatchObject({ verified: true });
     expect(await service.execute({ action: "find_elements", selector: "pierce/#shadow-button" })).toEqual(expect.arrayContaining([expect.objectContaining({ tag: "button" })]));
     await service.execute({ action: "click", target: "pierce/#shadow-button" });
@@ -126,6 +128,15 @@ describeLive("live browser contract", () => {
     setTimeout(() => abortController.abort(), 100);
     await expect(cancellableWait).rejects.toMatchObject({ code: "CANCELLED" });
     await service.execute({ action: "navigate", url: baseUrl });
+    const firstSlice = await service.execute({ action: "extract", selector: "body", offset: 0, maxChars: 100 }) as { nextOffset: number; revision: number; text: string };
+    const secondSlice = await service.execute({ action: "page_next", offset: firstSlice.nextOffset, revision: firstSlice.revision, maxChars: 100 }) as { offset: number; nextOffset: number; revision: number; text: string };
+    expect(secondSlice.offset).toBe(firstSlice.nextOffset);
+    expect(secondSlice.nextOffset).toBeGreaterThan(secondSlice.offset);
+    await service.execute({ action: "click", target: "#action-button" });
+    await expect(service.execute({ action: "page_next", offset: secondSlice.nextOffset, revision: secondSlice.revision, maxChars: 100 })).rejects.toMatchObject({ code: "STALE_PAGE_SLICE" });
+    const trailingBatch = await service.executeBatch([{ action: "wait", milliseconds: 0 }, { action: "get_page_info" }], { includeSnapshot: true }) as { results: unknown[]; snapshot?: { snapshotId?: string } };
+    expect(trailingBatch.results).toHaveLength(2);
+    expect(trailingBatch.snapshot?.snapshotId).toBeTypeOf("string");
     await service.execute({ action: "click", target: "#download" });
     const deadline = Date.now() + 5_000;
     let downloads: unknown = [];

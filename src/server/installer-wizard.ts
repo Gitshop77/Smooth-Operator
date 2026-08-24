@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { isAbsolute, join, parse, win32 } from "node:path";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 
@@ -33,7 +33,7 @@ interface WizardRunOptions {
   probe?: ProbeFunction;
   homeDir?: string;
   env?: NodeJS.ProcessEnv;
-  /** Shown in the banner; defaults to "2.3.0" when omitted. */
+  /** Shown in the banner; defaults to "2.4.0" when omitted. */
   version?: string;
 }
 
@@ -67,6 +67,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isMissingPathError(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ENOENT");
+}
+
+function isAbsolutePath(value: string): boolean {
+  return isAbsolute(value) || win32.isAbsolute(value);
+}
+
+function isFilesystemRoot(value: string): boolean {
+  return (isAbsolute(value) && parse(value).root === value) || (win32.isAbsolute(value) && win32.parse(value).root === value);
 }
 
 export function isInteractive(): boolean {
@@ -147,14 +155,14 @@ async function askBrowser(session: WizardSession, ui: ReturnType<typeof createUi
         return detected[numeric - 1].path;
       }
       if (/^\d+$/.test(answer)) continue;
-      if (answer.startsWith("/") && existsSync(answer)) return answer;
+      if (isAbsolutePath(answer) && existsSync(answer)) return answer;
       ui.failure("Enter a listed number or an existing absolute path.");
     }
   }
   while (true) {
     const answer = (await session.question("Browser executable path (Enter = auto-detect): ")).trim();
     if (!answer) return undefined;
-    if (!answer.startsWith("/")) {
+    if (!isAbsolutePath(answer)) {
       ui.failure("Enter an absolute path.");
       continue;
     }
@@ -228,7 +236,7 @@ export async function runWizard(harness: string, opts: WizardRunOptions): Promis
   const session: WizardSession = tolerantQuestion(rl);
 
   try {
-    ui.banner("SmoothOperator Setup", `Give ${harness} a real Chrome it can drive`, opts.version ?? "2.2.0");
+    ui.banner("SmoothOperator Setup", `Give ${harness} a real Chrome it can drive`, opts.version ?? "2.4.0");
     ui.note(`Configuring: ${harness}`);
     ui.note("Answer each question, or press Enter to accept the recommended default.");
     ui.note(`You can re-run \`smooth-operator install ${harness}\` at any time to change these.`);
@@ -333,7 +341,7 @@ export async function runWizard(harness: string, opts: WizardRunOptions): Promis
       while (dataDir === defaults.dataDir) {
         const answer = (await session.question(`Data directory [${defaults.dataDir}]: `)).trim();
         if (!answer) break;
-        if (!answer.startsWith("/") || answer.replace(/\/+$/, "") === "") {
+        if (!isAbsolutePath(answer) || isFilesystemRoot(answer)) {
           ui.failure("Enter an absolute path other than the filesystem root.");
           continue;
         }

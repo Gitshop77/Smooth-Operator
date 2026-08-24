@@ -12,7 +12,7 @@ interface ResearchResult {
   query: string;
   source: "duckduckgo";
   fetchedAt: string;
-  results: Array<{ title: string; url: string; snippet: string }>;
+  results: Array<{ title: string; url: string; untrustedUrl: string; snippet: string }>;
   warning?: string;
 }
 
@@ -93,8 +93,8 @@ export class ResearchService {
   }
 }
 
-function parseResults(html: string, maxResults: number, maxChars: number, baseUrl: string): Array<{ title: string; url: string; snippet: string }> {
-  const results: Array<{ title: string; url: string; snippet: string }> = [];
+function parseResults(html: string, maxResults: number, maxChars: number, baseUrl: string): Array<{ title: string; url: string; untrustedUrl: string; snippet: string }> {
+  const results: Array<{ title: string; url: string; untrustedUrl: string; snippet: string }> = [];
   let textUsed = 0;
   // Do not rely on a particular attribute order.  DuckDuckGo has emitted
   // both `class`-before-`href` and `href`-before-`class` variants over time.
@@ -136,6 +136,7 @@ function parseResults(html: string, maxResults: number, maxChars: number, baseUr
     results.push({
       title: wrapUntrustedText("research_title", boundedTitle, 500),
       url,
+      untrustedUrl: wrapUntrustedText("research_url", redactSecretPlaceholders(url), 4_096),
       snippet: wrapUntrustedText("research_snippet", boundedSnippet, 4_000),
     });
   }

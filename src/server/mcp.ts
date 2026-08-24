@@ -38,6 +38,7 @@ import type { ServerRuntime } from "./runtime";
 import { SERVER_VERSION } from "./version";
 
 const EmptyInputSchema = z.object({}).strict();
+const ActionEmptyInputSchema = z.object({ includeSnapshot: z.boolean().optional() }).strict();
 // Keep each copy below half of the 65,536-byte record budget.
 const MCP_OUTPUT_MAX_BYTES = 28_000;
 const MCP_IMAGE_MAX_BYTES = 8_000_000;
@@ -79,6 +80,7 @@ const PageQuerySchema = z.object({
 }).strict();
 const PageNextSchema = z.object({
   offset: z.number().int().min(0).max(1_000_000).default(0),
+  revision: z.number().int().min(0).max(1_000_000_000).optional(),
   maxChars: z.number().int().min(100).max(MCP_PAGE_TEXT_MAX_CHARS).optional(),
   pageId: z.string().trim().min(1).max(200).optional(),
   frameId: z.string().trim().min(1).max(200).optional(),
@@ -150,6 +152,7 @@ const BrowserUseTypeSchema = z.object({
   pageId: z.string().trim().min(1).max(200).optional(),
   snapshotId: z.string().trim().min(1).max(200).optional(),
   frameId: z.string().trim().min(1).max(200).optional(),
+  includeSnapshot: z.boolean().optional(),
 }).strict();
 const BrowserUseExtractSchema = z.object({
   query: z.string().trim().min(1).max(4_000),
@@ -258,7 +261,7 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
       inputSchema: BrowserUseTypeSchema,
       annotations: BROWSER_MUTATING,
     },
-    async (input, ctx) => callVisualTool(() => runtime.run({ action: "input", index: input.index, text: input.text, pageId: input.pageId, snapshotId: input.snapshotId, frameId: input.frameId }, ctx.mcpReq.signal), runtime),
+    async (input, ctx) => callVisualTool(() => runtime.run({ action: "input", index: input.index, text: input.text, pageId: input.pageId, snapshotId: input.snapshotId, frameId: input.frameId, includeSnapshot: input.includeSnapshot }, ctx.mcpReq.signal), runtime),
   );
   server.registerTool(
     "browser_get_html",
@@ -281,25 +284,25 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
     async (input, ctx) => callTool(() => runtime.run({ action: "extract", query: input.query, includeLinks: input.extract_links, pageId: input.pageId, frameId: input.frameId, maxChars: MCP_PAGE_TEXT_MAX_CHARS }, ctx.mcpReq.signal), runtime),
   );
 
-  registerAction(server, runtime, "browser_navigate", "Navigate the browser", "Open an HTTP(S) URL after domain and private-network policy validation. DNS is checked before navigation but the browser resolver is not pinned.", NavigateRequestSchema, "navigate", (input) => {
+  registerAction(server, runtime, "browser_navigate", "Navigate the browser", "Open an HTTP(S) URL after domain and private-network policy validation. DNS is checked before navigation but the browser resolver is not pinned. Set includeSnapshot=true for one trailing snapshot.", NavigateRequestSchema, "navigate", (input) => {
     const { new_tab, ...fields } = input;
     return { ...fields, newTab: fields.newTab ?? new_tab };
   });
-  registerAction(server, runtime, "browser_click", "Click an element", "Click a current snapshot ref (including browser-use ref:'e5' or 'e5'), CSS selector, exact visible text, or viewport coordinates.", ClickRequestSchema, "click", (input) => {
+  registerAction(server, runtime, "browser_click", "Click an element", "Click a current snapshot ref (including browser-use ref:'e5' or 'e5'), CSS selector, exact visible text, or viewport coordinates. Set includeSnapshot=true for one trailing snapshot.", ClickRequestSchema, "click", (input) => {
     const { coordinate_x, coordinate_y, new_tab, ref, ...fields } = input;
     return { ...fields, target: fields.target ?? ref, coordinateX: fields.coordinateX ?? coordinate_x, coordinateY: fields.coordinateY ?? coordinate_y, newTab: fields.newTab ?? new_tab };
   });
-  registerAction(server, runtime, "browser_input", "Enter text", "Replace the current value and type text into an input or textarea. Accepts a current snapshot ref, CSS selector, or index.", InputRequestSchema, "input");
-  registerAction(server, runtime, "browser_select", "Select an option", "Select an option in a native HTML select element.", SelectRequestSchema, "select_dropdown");
-  registerAction(server, runtime, "browser_scroll", "Scroll the page", "Scroll the current page by a bounded amount.", ScrollRequestSchema, "scroll");
+  registerAction(server, runtime, "browser_input", "Enter text", "Replace the current value and type text into an input or textarea. Accepts a current snapshot ref, CSS selector, or index. Set includeSnapshot=true for one trailing snapshot.", InputRequestSchema, "input");
+  registerAction(server, runtime, "browser_select", "Select an option", "Select an option in a native HTML select element. Set includeSnapshot=true for one trailing snapshot.", SelectRequestSchema, "select_dropdown");
+  registerAction(server, runtime, "browser_scroll", "Scroll the page", "Scroll the current page by a bounded amount. Set includeSnapshot=true for one trailing snapshot.", ScrollRequestSchema, "scroll");
   registerAction(server, runtime, "browser_scroll_to_bottom", "Scroll to the bottom", "Scroll repeatedly to the document bottom, allowing bounded lazy-loaded content to settle.", ScrollToBottomRequestSchema, "scroll_to_bottom");
-  registerAction(server, runtime, "browser_key", "Send keyboard keys", "Send bounded keyboard keys or modifier combinations to the current page.", KeyRequestSchema, "send_keys");
+  registerAction(server, runtime, "browser_key", "Send keyboard keys", "Send bounded keyboard keys or modifier combinations to the current page. Set includeSnapshot=true for one trailing snapshot.", KeyRequestSchema, "send_keys");
   registerAction(server, runtime, "browser_switch_tab", "Switch browser tab", "Make a connected tab the active target.", TabRequestSchema, "switch_tab", (input) => ({ pageId: input.pageId ?? input.tab_id }));
   registerAction(server, runtime, "browser_close_tab", "Close browser tab", "Close a connected browser tab by its stable pageId.", TabRequestSchema, "close_tab", (input) => ({ pageId: input.pageId ?? input.tab_id }));
-  registerAction(server, runtime, "browser_back", "Go back", "Navigate the current tab one history entry backward.", EmptyInputSchema, "go_back");
-  registerAction(server, runtime, "browser_go_back", "Go back", "Browser-use-compatible alias for browser_back.", EmptyInputSchema, "go_back");
-  registerAction(server, runtime, "browser_forward", "Go forward", "Navigate the current tab one history entry forward.", EmptyInputSchema, "go_forward");
-  registerAction(server, runtime, "browser_reload", "Reload the page", "Reload the current tab and re-apply navigation policy to the final URL.", EmptyInputSchema, "reload");
+  registerAction(server, runtime, "browser_back", "Go back", "Navigate the current tab one history entry backward. Optionally return a trailing snapshot.", ActionEmptyInputSchema, "go_back");
+  registerAction(server, runtime, "browser_go_back", "Go back", "Browser-use-compatible alias for browser_back. Optionally return a trailing snapshot.", ActionEmptyInputSchema, "go_back");
+  registerAction(server, runtime, "browser_forward", "Go forward", "Navigate the current tab one history entry forward. Optionally return a trailing snapshot.", ActionEmptyInputSchema, "go_forward");
+  registerAction(server, runtime, "browser_reload", "Reload the page", "Reload the current tab and re-apply navigation policy to the final URL. Optionally return a trailing snapshot.", ActionEmptyInputSchema, "reload");
   registerAction(server, runtime, "browser_close", "Close browser connection", "Close an owned browser or detach from an externally connected browser without closing the user's browser.", EmptyInputSchema, "close_browser", undefined, BROWSER_DESTRUCTIVE);
   registerAction(server, runtime, "browser_close_all", "Close browser connection", "Browser-use-compatible alias for browser_close.", EmptyInputSchema, "close_browser", undefined, BROWSER_DESTRUCTIVE);
 
@@ -321,7 +324,7 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
   );
 
   registerAction(server, runtime, "browser_find_text", "Find text", "Find and center the first matching text on the page.", PageQuerySchema, "find_text", (input) => ({ ...input, text: input.query }));
-  registerAction(server, runtime, "browser_extract", "Extract page text", "Extract at most 8,000 page-text characters from the page or a CSS selector. Check the explicit truncated flag and use browser_page_next for later slices.", ExtractRequestSchema, "extract", (input) => ({ ...input, maxChars: input.maxChars ?? MCP_PAGE_TEXT_MAX_CHARS }));
+  registerAction(server, runtime, "browser_extract", "Extract page text", "Extract at most 8,000 page-text characters from the page or a CSS selector. Check truncated, offset, nextOffset, hasMore, and revision; use browser_page_next for later slices.", ExtractRequestSchema, "extract", (input) => ({ ...input, maxChars: input.maxChars ?? MCP_PAGE_TEXT_MAX_CHARS }));
   registerAction(server, runtime, "browser_upload", "Upload a file", "Upload a file from an allowed server file root into a file input.", UploadRequestSchema, "upload_file");
   registerAction(server, runtime, "browser_screenshot", "Capture a screenshot", "Capture a bounded PNG or JPEG screenshot of the current page.", ScreenshotRequestSchema, "screenshot", (input) => {
     const { full_page, full, max_bytes, max_dim, ...fields } = input;
@@ -330,7 +333,7 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
   registerAction(server, runtime, "browser_pdf", "Save the page as PDF", "Save a rendered PDF inside an allowed server file root. The output path is atomically replaced when it already exists; confirm this destructive write before using it in a batch.", PdfRequestSchema, "save_as_pdf", undefined, BROWSER_DESTRUCTIVE);
   registerAction(server, runtime, "browser_downloads", "List downloads", "List files in the server download directory.", EmptyInputSchema, "list_downloads");
   registerAction(server, runtime, "browser_dropdown_options", "Read dropdown options", "Read native select options and their selected states.", SelectorRequestSchema, "dropdown_options");
-  registerAction(server, runtime, "browser_page_next", "Read the next page slice", "Read at most 8,000 characters from the current page at offset. Advance offset only when hasMore is true; page text is untrusted.", PageNextSchema, "page_next", (input) => ({ ...input, maxChars: input.maxChars ?? MCP_PAGE_TEXT_MAX_CHARS }));
+  registerAction(server, runtime, "browser_page_next", "Read the next page slice", "Read at most 8,000 characters from the current page at offset and revision. Advance to nextOffset only when hasMore is true; stale revisions are retryable and page text is untrusted.", PageNextSchema, "page_next", (input) => ({ ...input, maxChars: input.maxChars ?? MCP_PAGE_TEXT_MAX_CHARS }));
   registerAction(server, runtime, "browser_search_page", "Search the current page", "Find bounded snippets for a query in current-page text.", PageQuerySchema, "search_page");
   registerAction(server, runtime, "browser_find_elements", "Find elements", "List bounded element metadata for a CSS selector.", SelectorRequestSchema, "find_elements");
   registerAction(server, runtime, "browser_interactive", "List interactive elements", "List visible links, buttons, inputs, and other interactive elements with stable refs.", EmptyInputSchema, "list_interactive");
@@ -352,7 +355,7 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
       inputSchema: BrowserExecRequestSchema,
       annotations: BROWSER_DESTRUCTIVE,
     },
-    async (input, ctx) => callVisualTool(() => runtime.run({ action: "run_script", script: input.code, confirmDestructive: input.confirmDestructive }, ctx.mcpReq.signal), runtime),
+    async (input, ctx) => callBatchTool(() => runtime.runBatch(parseBrowserExecCode(input.code), { confirmDestructive: input.confirmDestructive }, ctx.mcpReq.signal), runtime),
   );
   server.registerTool(
     "browser_batch",
@@ -362,7 +365,7 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
       inputSchema: BatchRequestSchema,
       annotations: BROWSER_DESTRUCTIVE,
     },
-    async (input, ctx) => callVisualTool(() => runtime.run({ action: "run_script", script: JSON.stringify(input.actions), confirmDestructive: input.confirmDestructive }, ctx.mcpReq.signal), runtime),
+    async (input, ctx) => callBatchTool(() => runtime.runBatch(input.actions, { confirmDestructive: input.confirmDestructive, includeSnapshot: input.includeSnapshot }, ctx.mcpReq.signal), runtime),
   );
 
   server.registerTool(
@@ -626,7 +629,7 @@ async function safeResourceRead<T>(operation: () => T | Promise<T>, runtime?: Pi
     // exceptions receive a generic resource envelope.
     const normalized = error instanceof AppError
       ? error
-      : new AppError("RESOURCE_READ_FAILED", "The requested MCP resource could not be read.", { cause: error });
+      : new AppError("RESOURCE_READ_FAILED", "The requested MCP resource could not be read.", { status: 500, cause: error });
     throw new AppError(normalized.code, truncateMcpText(normalized.message, MCP_ERROR_MESSAGE_MAX_BYTES).value, {
       retryable: normalized.retryable,
       status: normalized.status,
@@ -649,8 +652,89 @@ function jsonByteLength(value: unknown): number {
   }
 }
 
+function boundErrorDetails(value: unknown): unknown {
+  const safe = redactValue(value);
+  if (jsonByteLength(safe) <= MCP_ERROR_DETAILS_MAX_BYTES) {
+    return safe;
+  }
+  if (!isRecord(safe)) {
+    return { truncated: true, mcpOutputTruncated: true, warning: "Error details were omitted because they exceeded the MCP response budget." };
+  }
+
+  const bounded: Record<string, unknown> = {};
+  const copyScalar = (key: string): void => {
+    const item = safe[key];
+    if (typeof item === "string") {
+      bounded[key] = truncateUtf8(item, 1_000);
+    } else if (typeof item === "number" || typeof item === "boolean" || item === null) {
+      bounded[key] = item;
+    }
+  };
+  for (const key of ["failedIndex", "failedAction", "completedActions", "hint", "resultsTruncated", "omittedResults"]) {
+    copyScalar(key);
+  }
+
+  const sourceResults = Array.isArray(safe.completedResults) ? safe.completedResults : undefined;
+  if (sourceResults) {
+    const retained: unknown[] = [];
+    for (const item of sourceResults) {
+      const boundedItem = typeof item === "string" ? truncateMcpText(item, 1_000).value : boundMcpOutput(item);
+      const candidate = { ...bounded, completedResults: [...retained, boundedItem] };
+      if (jsonByteLength(candidate) > MCP_ERROR_DETAILS_MAX_BYTES - 256) {
+        break;
+      }
+      retained.push(boundedItem);
+    }
+    bounded.completedResults = retained;
+    if (retained.length < sourceResults.length) {
+      bounded.resultsTruncated = true;
+      bounded.omittedResults = sourceResults.length - retained.length;
+    }
+  }
+
+  if (isRecord(safe.batch)) {
+    const batch: Record<string, unknown> = {};
+    for (const key of ["failedIndex", "failedAction", "completedActions"]) {
+      const item = safe.batch[key];
+      if (typeof item === "string" || typeof item === "number" || typeof item === "boolean" || item === null) {
+        batch[key] = typeof item === "string" ? truncateUtf8(item, 1_000) : item;
+      }
+    }
+    bounded.batch = batch;
+  }
+
+  if (jsonByteLength(bounded) <= MCP_ERROR_DETAILS_MAX_BYTES) {
+    return bounded;
+  }
+  delete bounded.batch;
+  while (jsonByteLength(bounded) > MCP_ERROR_DETAILS_MAX_BYTES && Array.isArray(bounded.completedResults) && (bounded.completedResults as unknown[]).length > 0) {
+    bounded.completedResults = (bounded.completedResults as unknown[]).slice(0, -1);
+    bounded.resultsTruncated = true;
+    bounded.omittedResults = sourceResults ? sourceResults.length - (bounded.completedResults as unknown[]).length : undefined;
+  }
+  return jsonByteLength(bounded) <= MCP_ERROR_DETAILS_MAX_BYTES
+    ? bounded
+    : { truncated: true, mcpOutputTruncated: true, warning: "Error details were omitted because they exceeded the MCP response budget." };
+}
+
 function jsonText(value: unknown): string {
   return JSON.stringify(value) ?? "null";
+}
+
+function parseBrowserExecCode(code: string): BrowserAction[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(code);
+  } catch (error) {
+    throw new AppError("SCRIPT_INVALID", "code must be a JSON array of validated browser actions.", { cause: error });
+  }
+  const result = BrowserActionPlanSchema.safeParse(parsed);
+  if (!result.success) {
+    throw new AppError("SCRIPT_INVALID", "code must be a non-empty JSON array of validated browser actions.", {
+      details: { issues: result.error.issues.map((issue) => ({ path: issue.path, message: issue.message })) },
+    });
+  }
+  return result.data;
 }
 
 function truncateUtf8(value: string, maxBytes: number): string {
@@ -727,7 +811,7 @@ function boundMcpArray(value: unknown[]): unknown {
   };
 }
 
-function boundMcpOutput(value: unknown): unknown {
+function boundMcpOutput(value: unknown, options: { preserveBatchResults?: boolean } = {}): unknown {
   if (typeof value === "string") {
     return truncateMcpText(value, MCP_OUTPUT_MAX_BYTES).value;
   }
@@ -738,7 +822,7 @@ function boundMcpOutput(value: unknown): unknown {
     return value;
   }
 
-  const output = { ...value };
+  let output = { ...value };
   const markOutputTruncated = (): void => {
     output.mcpOutputTruncated = true;
   };
@@ -769,7 +853,9 @@ function boundMcpOutput(value: unknown): unknown {
     output.truncated = true;
   }
   capArray("links", MCP_OUTPUT_LINK_LIMIT, "linksTruncated");
-  capArray("results", MCP_OUTPUT_RESULT_LIMIT, "resultsTruncated");
+  if (!options.preserveBatchResults) {
+    capArray("results", MCP_OUTPUT_RESULT_LIMIT, "resultsTruncated");
+  }
   capArray("entries", MCP_OUTPUT_ENTRY_LIMIT, "entriesTruncated");
   capArray("interactive", MCP_OUTPUT_INTERACTIVE_LIMIT, "interactiveTruncated");
   capArray("nodes", MCP_OUTPUT_NODE_LIMIT, "nodesTruncated");
@@ -806,6 +892,29 @@ function boundMcpOutput(value: unknown): unknown {
     return output;
   }
 
+  if (options.preserveBatchResults && Array.isArray(output.results)) {
+    const allResults = output.results;
+    const base = { ...output };
+    delete base.results;
+    const retained: unknown[] = [];
+    for (const item of allResults) {
+      const candidate = { ...base, results: [...retained, item] };
+      if (jsonByteLength(candidate) > MCP_OUTPUT_MAX_BYTES - 256) {
+        break;
+      }
+      retained.push(item);
+    }
+    output = {
+      ...base,
+      results: retained,
+      ...(retained.length < allResults.length ? { resultsTruncated: true, omittedResults: allResults.length - retained.length } : {}),
+      ...(retained.length < allResults.length ? { mcpOutputTruncated: true } : {}),
+    };
+    if (jsonByteLength(output) <= MCP_OUTPUT_MAX_BYTES) {
+      return output;
+    }
+  }
+
   for (const key of ["text", "html"]) {
     while (jsonByteLength(output) > MCP_OUTPUT_MAX_BYTES && typeof output[key] === "string" && UTF8_ENCODER.encode(output[key] as string).byteLength > 4_000) {
       const current = output[key] as string;
@@ -815,7 +924,11 @@ function boundMcpOutput(value: unknown): unknown {
       markOutputTruncated();
     }
   }
-  for (const [key, flag] of [["links", "linksTruncated"], ["results", "resultsTruncated"], ["entries", "entriesTruncated"], ["interactive", "interactiveTruncated"], ["nodes", "nodesTruncated"], ["matches", "matchesTruncated"], ["frames", "framesTruncated"]] as const) {
+  const arrayBounds: Array<readonly [string, string]> = [["links", "linksTruncated"], ["entries", "entriesTruncated"], ["interactive", "interactiveTruncated"], ["nodes", "nodesTruncated"], ["matches", "matchesTruncated"], ["frames", "framesTruncated"]];
+  if (!options.preserveBatchResults) {
+    arrayBounds.push(["results", "resultsTruncated"]);
+  }
+  for (const [key, flag] of arrayBounds) {
     while (jsonByteLength(output) > MCP_OUTPUT_MAX_BYTES && Array.isArray(output[key]) && output[key].length > 1) {
       output[key] = output[key].slice(0, Math.max(1, Math.floor(output[key].length / 2)));
       output[flag] = true;
@@ -827,7 +940,7 @@ function boundMcpOutput(value: unknown): unknown {
   }
 
   const preserved: Record<string, unknown> = {};
-  for (const key of ["pageId", "frameId", "snapshotId", "domRevision", "url", "title", "selector", "query", "offset", "hasMore"]) {
+  for (const key of ["pageId", "frameId", "snapshotId", "domRevision", "url", "untrustedUrl", "title", "selector", "query", "offset", "nextOffset", "revision", "hasMore", "totalMatches", "matchesTruncated", "resultsTruncated", "omittedResults"]) {
     const item = output[key];
     if (typeof item === "string") {
       preserved[key] = truncateUtf8(item, 1_000);
@@ -844,10 +957,10 @@ function boundMcpOutput(value: unknown): unknown {
   };
 }
 
-function sanitizeMcpOutput(value: unknown): unknown {
-  const bounded = boundMcpOutput(value);
+function sanitizeMcpOutput(value: unknown, options: { preserveBatchResults?: boolean } = {}): unknown {
+  const bounded = boundMcpOutput(value, options);
   const redacted = redactValue(bounded);
-  return jsonByteLength(redacted) > MCP_OUTPUT_MAX_BYTES ? boundMcpOutput(redacted) : redacted;
+  return jsonByteLength(redacted) > MCP_OUTPUT_MAX_BYTES ? boundMcpOutput(redacted, options) : redacted;
 }
 
 async function callTool(operation: () => Promise<unknown>, logger?: Pick<ServerRuntime, "logger">): Promise<CallToolResult> {
@@ -855,6 +968,15 @@ async function callTool(operation: () => Promise<unknown>, logger?: Pick<ServerR
     async () => sanitizeMcpOutput(await operation()) ?? null,
     (error) => logger?.logger.warn("MCP tool operation failed", safeErrorDiagnostic(error)),
   ));
+}
+
+async function callBatchTool(operation: () => Promise<unknown>, logger?: Pick<ServerRuntime, "logger">): Promise<CallToolResult> {
+  try {
+    return toolResult(sanitizeMcpOutput(await operation(), { preserveBatchResults: true }) ?? null);
+  } catch (error) {
+    logger?.logger.warn("MCP batch operation failed", safeErrorDiagnostic(error));
+    return boundToolError(toolError(error));
+  }
 }
 
 async function callVisualTool(operation: () => Promise<unknown>, logger?: Pick<ServerRuntime, "logger">): Promise<CallToolResult> {
@@ -910,14 +1032,7 @@ function boundToolError(result: CallToolResult): CallToolResult {
   };
 
   if (rawError.details !== undefined) {
-    const details = sanitizeMcpOutput(rawError.details);
-    error.details = jsonByteLength(details) <= MCP_ERROR_DETAILS_MAX_BYTES
-      ? details
-      : {
-        truncated: true,
-        mcpOutputTruncated: true,
-        warning: "Error details were omitted because they exceeded the MCP response budget.",
-      };
+    error.details = boundErrorDetails(rawError.details);
   }
 
   const payload = { ok: false, error };

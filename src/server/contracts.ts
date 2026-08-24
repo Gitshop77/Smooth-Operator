@@ -17,6 +17,7 @@ const PageInput = {
   pageId: BoundedString(200).optional(),
   snapshotId: BoundedString(200).optional(),
   frameId: BoundedString(200).optional(),
+  includeSnapshot: z.boolean().optional(),
 };
 
 const BrowserActionNames = [
@@ -121,6 +122,7 @@ const BrowserActionFieldsSchema = z.object({
   expression: z.string().trim().min(1).max(40_000).optional(),
   query: BoundedString(4_000).optional(),
   includeLinks: z.boolean().optional(),
+  includeSnapshot: z.boolean().optional(),
   maxChars: z.number().int().min(100).max(MCP_PAGE_TEXT_MAX_CHARS).optional(),
   maxNodes: z.number().int().min(1).max(2_000).optional(),
   interestingOnly: z.boolean().optional(),
@@ -155,6 +157,7 @@ const BrowserActionFieldsSchema = z.object({
   storageAll: z.boolean().optional(),
   includeValues: z.boolean().optional(),
   confirmDestructive: z.boolean().optional(),
+  revision: z.number().int().min(0).max(1_000_000_000).optional(),
 }).strict();
 
 export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: ActionNameSchema }).superRefine((input, context) => {
@@ -312,6 +315,93 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
 });
 export type BrowserAction = z.infer<typeof BrowserActionSchema>;
 
+const ACTION_ALIASES: Readonly<Record<string, string>> = {
+  key: "send_keys",
+  select: "select_dropdown",
+  back: "go_back",
+  forward: "go_forward",
+  page_info: "get_page_info",
+  challenge: "detect_challenge",
+  interactive: "list_interactive",
+  frames: "list_frames",
+  downloads: "list_downloads",
+  upload: "upload_file",
+  pdf: "save_as_pdf",
+};
+
+const GROUPED_ACTION_ALIASES: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  cookie: { get: "get_cookies", set: "set_cookie", delete: "delete_cookies" },
+  cookies: { get: "get_cookies", set: "set_cookie", delete: "delete_cookies" },
+  storage: { get: "get_storage", set: "set_storage", clear: "clear_storage" },
+  dialog: { get_text: "alert_get_text", accept: "alert_accept", dismiss: "alert_dismiss", send_keys: "alert_send_keys" },
+  network: { enable: "enable_network_log", disable: "disable_network_log", read: "get_network_log", clear: "clear_network_log", read_and_clear: "getclear_network_log" },
+  network_log: { enable: "enable_network_log", disable: "disable_network_log", read: "get_network_log", clear: "clear_network_log", read_and_clear: "getclear_network_log" },
+  console: { enable: "enable_console_log", disable: "disable_console_log", read: "get_console_log", clear: "clear_console_log", read_and_clear: "getclear_console_log" },
+  console_log: { enable: "enable_console_log", disable: "disable_console_log", read: "get_console_log", clear: "clear_console_log", read_and_clear: "getclear_console_log" },
+};
+
+type NormalizationIssue = { fields: string[]; message: string };
+
+function moveActionField(output: Record<string, unknown>, canonical: string, alias: string, issues: NormalizationIssue[]): void {
+  const hasCanonical = Object.hasOwn(output, canonical);
+  const hasAlias = Object.hasOwn(output, alias);
+  if (hasCanonical && hasAlias) {
+    issues.push({ fields: [canonical, alias], message: `Conflicting fields '${canonical}' and '${alias}' were provided.` });
+    return;
+  }
+  if (hasAlias) {
+    output[canonical] = output[alias];
+    delete output[alias];
+  }
+}
+
+/** Normalize standalone-style and grouped action inputs before canonical validation. */
+function normalizeBrowserActionInput(value: unknown): { value: unknown; issues: NormalizationIssue[] } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { value, issues: [] };
+  }
+  const output = { ...(value as Record<string, unknown>) };
+  const issues: NormalizationIssue[] = [];
+  const rawAction = typeof output.action === "string" ? output.action : undefined;
+  const grouped = rawAction ? GROUPED_ACTION_ALIASES[rawAction] : undefined;
+  if (grouped) {
+    const operation = typeof output.operation === "string" ? output.operation : "";
+    const mappedAction = grouped[operation];
+    if (mappedAction) {
+      output.action = mappedAction;
+      delete output.operation;
+      if (rawAction === "cookie" || rawAction === "cookies") {
+        moveActionField(output, "cookieName", "name", issues);
+        moveActionField(output, "cookieValue", "value", issues);
+        moveActionField(output, "cookieDomain", "domain", issues);
+        moveActionField(output, "cookiePath", "path", issues);
+        moveActionField(output, "cookieSecure", "secure", issues);
+        moveActionField(output, "cookieHttpOnly", "httpOnly", issues);
+      } else if (rawAction === "storage") {
+        moveActionField(output, "storageArea", "area", issues);
+        moveActionField(output, "storageKey", "key", issues);
+        moveActionField(output, "storageValue", "value", issues);
+        moveActionField(output, "storageAll", "all", issues);
+      }
+    }
+  } else if (rawAction && ACTION_ALIASES[rawAction]) {
+    output.action = ACTION_ALIASES[rawAction];
+  }
+  moveActionField(output, "pageId", "tab_id", issues);
+  return { value: output, issues };
+}
+
+/** Input schema shared by browser_batch and browser_exec. Its output is always canonical. */
+export const BrowserActionInputSchema = z.preprocess((value, context) => {
+  const normalized = normalizeBrowserActionInput(value);
+  for (const issue of normalized.issues) {
+    context.addIssue({ code: "custom", path: issue.fields, message: issue.message });
+  }
+  return normalized.value;
+}, BrowserActionSchema);
+
+export type BrowserActionInput = z.infer<typeof BrowserActionInputSchema>;
+
 export const SnapshotRequestSchema = z.object({
   pageId: BoundedString(200).optional(),
   frameId: BoundedString(200).optional(),
@@ -339,6 +429,7 @@ export const SnapshotRequestSchema = z.object({
 export const NavigateRequestSchema = z.object({
   url: HttpUrl(8_000),
   pageId: BoundedString(200).optional(),
+  includeSnapshot: z.boolean().optional(),
   newTab: z.boolean().optional(),
   new_tab: z.boolean().optional(),
   waitUntil: z.enum(["load", "domcontentloaded", "networkidle0", "networkidle2"]).optional(),
@@ -464,7 +555,7 @@ export const WaitForHumanRequestSchema = z.object({ timeoutMs: z.number().int().
 export const KeyRequestSchema = z.object({ keys: z.array(BoundedString(100)).min(1).max(32), ...PageInput }).strict();
 export const ScrollRequestSchema = z.object({ direction: z.enum(["up", "down", "left", "right"]).default("down"), amount: z.number().finite().min(1).max(100_000).default(600), ...PageInput }).strict();
 export const ScrollToBottomRequestSchema = z.object({ maxScrolls: z.number().int().min(1).max(50).optional(), timeoutMs: z.number().int().min(100).max(120_000).optional(), restoreTop: z.boolean().optional(), ...PageInput }).strict();
-export const ExtractRequestSchema = z.object({ selector: BoundedString(2_000).optional(), query: BoundedString(4_000).optional(), includeLinks: z.boolean().optional(), maxChars: z.number().int().min(100).max(8_000).optional(), ...PageInput }).strict().superRefine((input, context) => {
+export const ExtractRequestSchema = z.object({ selector: BoundedString(2_000).optional(), query: BoundedString(4_000).optional(), includeLinks: z.boolean().optional(), offset: z.number().int().min(0).max(1_000_000).optional(), maxChars: z.number().int().min(100).max(8_000).optional(), ...PageInput }).strict().superRefine((input, context) => {
   if (input.selector !== undefined && input.query !== undefined) {
     context.addIssue({ code: "custom", message: "Provide selector or query, not both." });
   }
@@ -535,8 +626,9 @@ export const StorageRequestSchema = z.object({
   }
 });
 export const BatchRequestSchema = z.object({
-  actions: z.array(BrowserActionSchema).min(1).max(50).superRefine(validateActionPlan),
+  actions: z.array(BrowserActionInputSchema).min(1).max(50).superRefine(validateActionPlan),
   confirmDestructive: z.boolean().optional(),
+  includeSnapshot: z.boolean().optional(),
 }).strict().superRefine((input, context) => {
   if (!input.confirmDestructive && input.actions.some((action) => isDestructiveBatchAction(action.action))) {
     context.addIssue({ code: "custom", message: "This batch contains destructive actions. Set confirmDestructive=true to execute them." });
@@ -563,7 +655,7 @@ function validateActionPlan(actions: Array<z.infer<typeof BrowserActionSchema>>,
   }
 }
 
-export const BrowserActionPlanSchema = z.array(BrowserActionSchema).min(1).max(100).superRefine(validateActionPlan);
+export const BrowserActionPlanSchema = z.array(BrowserActionInputSchema).min(1).max(100).superRefine(validateActionPlan);
 
 const DESTRUCTIVE_BATCH_ACTIONS = new Set<ActionName>([
   "close_tab",

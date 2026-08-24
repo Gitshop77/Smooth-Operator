@@ -145,6 +145,10 @@ async function verifySourceMetadata(packageJson) {
   if (packageJson.engines?.node !== ">=22.23.2" || packageJson.engines?.npm !== ">=10.9.8") {
     throw new Error("package.json engines must declare the Node 22.23.2/npm 10.9.8 baseline.");
   }
+  const lockfile = JSON.parse(await readFile(join(root, "package-lock.json"), "utf8"));
+  if (lockfile.name !== packageJson.name || lockfile.version !== packageJson.version || lockfile.packages?.[""].name !== packageJson.name || lockfile.packages?.[""].version !== packageJson.version) {
+    throw new Error(`Package metadata drift: package.json=${packageJson.name}@${packageJson.version}; package-lock.json=${lockfile.name ?? "missing"}@${lockfile.version ?? "missing"}.`);
+  }
   const versionSource = await readFile(join(root, "src", "server", "version.ts"), "utf8");
   const match = versionSource.match(/SERVER_VERSION\s*=\s*["']([^"']+)["']/);
   if (!match || match[1] !== packageJson.version) {

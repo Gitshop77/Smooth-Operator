@@ -332,6 +332,57 @@ describe("browser service", () => {
     expect(service.connectionStatus()).toMatchObject({ connected: false, owned: false, trackedPages: 0, currentPageId: null });
   });
 
+  it("retries failed browser cleanup through browser_close_session", async () => {
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    let disconnectAttempts = 0;
+    const browser = {
+      disconnect: vi.fn(async () => {
+        disconnectAttempts += 1;
+        if (disconnectAttempts === 1) {
+          throw new Error("disconnect raced browser shutdown");
+        }
+      }),
+    } as unknown as Browser;
+    const internal = service as unknown as { browser: Browser | undefined; ownsBrowser: boolean; closeBrowser(): Promise<{ succeeded: boolean }> };
+    internal.browser = browser;
+    internal.ownsBrowser = false;
+
+    await expect(internal.closeBrowser()).resolves.toMatchObject({ closed: true, succeeded: false });
+    expect(service.connectionStatus()).toMatchObject({ connected: false, recoveryRequired: true });
+    await expect(service.closeSession(service.sessionSummary().session_id)).resolves.toMatchObject({ closed: true });
+    expect(disconnectAttempts).toBe(2);
+    expect(service.connectionStatus()).toMatchObject({ recoveryRequired: false });
+    await service.close();
+  });
+
+  it("retries interrupted browser cleanup through browser_close_session", async () => {
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    let disconnectAttempts = 0;
+    const browser = {
+      disconnect: vi.fn(async () => {
+        disconnectAttempts += 1;
+        if (disconnectAttempts === 1) {
+          throw new Error("interrupted disconnect raced browser shutdown");
+        }
+      }),
+    } as unknown as Browser;
+    const internal = service as unknown as {
+      browser: Browser | undefined;
+      ownsBrowser: boolean;
+      interruptBrowserOperation(): void;
+    };
+    internal.browser = browser;
+    internal.ownsBrowser = false;
+    internal.interruptBrowserOperation();
+
+    await expect(service.closeSession(service.sessionSummary().session_id)).resolves.toMatchObject({ closed: true });
+    expect(disconnectAttempts).toBe(2);
+    expect(service.connectionStatus()).toMatchObject({ connected: false, recoveryRequired: false });
+    await service.close();
+  });
+
   it("waits for an in-flight browser close before reconnecting", async () => {
     const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
     const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
@@ -769,6 +820,48 @@ describe("browser service", () => {
     await service.close();
   });
 
+  it("enforces the explicit page request scheme policy", async () => {
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
+    const policy = { assertNavigationAllowedAsync: vi.fn(async (url: string) => new URL(url)) } as unknown as SecurityPolicy;
+    const service = new BrowserService(config, policy, new Logger("error", {}, () => undefined));
+    const frame = {};
+    const page = new EventEmitter() as EventEmitter & { mainFrame(): object };
+    page.mainFrame = () => frame;
+    const internal = service as unknown as { stateFor(page: unknown): unknown; handleRequest(state: unknown, request: unknown): Promise<void> };
+    const state = internal.stateFor(page);
+    const requestFor = (url: string, navigation = false) => {
+      let continued = false;
+      let aborted = false;
+      const request = {
+        isInterceptResolutionHandled: () => false,
+        isNavigationRequest: () => navigation,
+        frame: () => navigation ? frame : null,
+        url: () => url,
+        continue: async () => { continued = true; },
+        abort: async () => { aborted = true; },
+      };
+      return { request, wasContinued: () => continued, wasAborted: () => aborted };
+    };
+
+    const data = requestFor("data:text/plain,fixture");
+    await internal.handleRequest(state, data.request);
+    expect(data.wasContinued()).toBe(true);
+    const blob = requestFor("blob:https://example.test/fixture");
+    await internal.handleRequest(state, blob.request);
+    expect(blob.wasContinued()).toBe(true);
+    const dataFrame = requestFor("data:text/html,fixture", true);
+    await internal.handleRequest(state, dataFrame.request);
+    expect(dataFrame.wasAborted()).toBe(true);
+    const unsupported = requestFor("file:///etc/passwd");
+    await internal.handleRequest(state, unsupported.request);
+    expect(unsupported.wasAborted()).toBe(true);
+    const unknown = requestFor("custom:fixture");
+    await internal.handleRequest(state, unknown.request);
+    expect(unknown.wasAborted()).toBe(true);
+    expect(policy.assertNavigationAllowedAsync).not.toHaveBeenCalled();
+    await service.close();
+  });
+
   it("contains page event accessor failures during page disposal", async () => {
     const config = testConfig();
     const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
@@ -999,7 +1092,7 @@ describe("browser service", () => {
     const result = await internal.executeOnPage({ action: "extract", selector: "#container", includeLinks: true, maxChars: 100 } as BrowserAction) as { text: string; truncated: boolean; links: Array<{ href: string }> };
     expect(result.truncated).toBe(true);
     expect(result.text).toContain("x".repeat(100));
-    expect(result.links).toEqual([{ text: expect.stringContaining("Child link"), href: "https://example.test/child" }]);
+    expect(result.links).toEqual([{ text: expect.stringContaining("Child link"), href: "https://example.test/child", untrustedUrl: expect.stringContaining("https://example.test/child") }]);
     await service.close();
   });
 
@@ -1097,6 +1190,32 @@ describe("browser service", () => {
     await service.close();
   });
 
+  it.each(["service_worker", "shared_worker"] as const)("keeps %s requests paused until policy checks complete", async (targetType) => {
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
+    const policy = {
+      assertNavigationAllowedAsync: async (url: string) => {
+        if (url.includes("blocked.example")) {
+          throw new AppError("URL_BLOCKED", "blocked");
+        }
+        return new URL(url);
+      },
+    } as unknown as SecurityPolicy;
+    const service = new BrowserService(config, policy, new Logger("error", {}, () => undefined));
+    const session = new EventEmitter() as EventEmitter & { id(): string; send: ReturnType<typeof vi.fn> };
+    session.id = () => `${targetType}-session`;
+    session.send = vi.fn(async () => ({}));
+    const internal = service as unknown as { guardTargetSession(session: unknown, targetInfo: unknown): Promise<void> };
+    await internal.guardTargetSession(session, { targetId: `${targetType}-target`, type: targetType, url: "blob:fixture" });
+    session.emit("Fetch.requestPaused", { requestId: "allowed", request: { url: "https://allowed.example/worker.js" } });
+    session.emit("Fetch.requestPaused", { requestId: "redirect", request: { url: "https://blocked.example/redirect" } });
+    session.emit("Fetch.requestPaused", { requestId: "unsupported", request: { url: "file:///etc/passwd" } });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(session.send).toHaveBeenCalledWith("Fetch.continueRequest", { requestId: "allowed" });
+    expect(session.send).toHaveBeenCalledWith("Fetch.failRequest", { requestId: "redirect", errorReason: "BlockedByClient" });
+    expect(session.send).toHaveBeenCalledWith("Fetch.failRequest", { requestId: "unsupported", errorReason: "BlockedByClient" });
+    await service.close();
+  });
+
   it("guards raw auto-attached top-level targets without guarding manual CDP sessions", async () => {
     const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
     const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
@@ -1128,6 +1247,44 @@ describe("browser service", () => {
     connection.emit("Target.attachedToTarget", { sessionId: "manual-session", targetInfo: { targetId: "manual-target", type: "page", url: "about:blank" } });
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(sessions.get("manual-session")?.send).not.toHaveBeenCalledWith("Fetch.enable", expect.anything());
+    await service.close();
+  });
+
+  it("closes an auto-attached target when Fetch guarding cannot be installed", async () => {
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const connection = new EventEmitter() as EventEmitter & {
+      isAutoAttached(targetId: string): boolean;
+      session(sessionId: string): unknown;
+      send(method: string, params?: unknown): Promise<unknown>;
+    };
+    const sessions = new Map<string, EventEmitter & { id(): string; send(method: string, params?: unknown): Promise<unknown> }>();
+    const closeTarget = vi.fn(async () => undefined);
+    connection.isAutoAttached = () => true;
+    connection.session = (sessionId) => sessions.get(sessionId);
+    connection.send = vi.fn(async (method) => {
+      if (method === "Target.closeTarget") {
+        await closeTarget();
+      }
+      return {};
+    });
+    const browser = { _connection: connection } as unknown as Browser;
+    const internal = service as unknown as { installTargetGuard(browser: Browser): void };
+    internal.installTargetGuard(browser);
+    const session = new EventEmitter() as EventEmitter & { id(): string; send(method: string, params?: unknown): Promise<unknown> };
+    session.id = () => "failed-guard-session";
+    session.send = vi.fn(async (method) => {
+      if (method === "Fetch.enable") {
+        throw new Error("Fetch unavailable");
+      }
+      return {};
+    });
+    sessions.set(session.id(), session);
+    connection.emit("sessionattached", session);
+    connection.emit("Target.attachedToTarget", { sessionId: session.id(), targetInfo: { targetId: "failed-guard-target", type: "service_worker", url: "https://example.test/worker.js" } });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(closeTarget).toHaveBeenCalledTimes(1);
+    expect(connection.send).toHaveBeenCalledWith("Target.closeTarget", { targetId: "failed-guard-target" });
     await service.close();
   });
 

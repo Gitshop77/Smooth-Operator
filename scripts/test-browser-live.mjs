@@ -1,4 +1,4 @@
-import { access } from "node:fs/promises";
+import { access, mkdir, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { execFile } from "node:child_process";
 import { dirname, resolve } from "node:path";
@@ -48,18 +48,34 @@ async function main() {
   const browser = await discoverChrome();
   process.stdout.write(`Running live browser tests with ${browser}\n`);
   const command = process.platform === "win32" ? "npx.cmd" : "npx";
-  const result = await execFileAsync(command, ["vitest", "run", "tests/browser-live.test.ts"], {
+  const run = {
     cwd: root,
     env: { ...process.env, SMOOTH_OPERATOR_TEST_BROWSER_EXECUTABLE: browser },
     maxBuffer: 4_000_000,
     timeout: 180_000,
-  });
-  process.stdout.write(result.stdout);
-  process.stderr.write(result.stderr);
+  };
+  try {
+    const result = await execFileAsync(command, ["vitest", "run", "tests/browser-live.test.ts"], run);
+    await writeDiagnostics(result.stdout, result.stderr, browser, "passed");
+    process.stdout.write(result.stdout);
+    process.stderr.write(result.stderr);
+  } catch (error) {
+    const cause = error && typeof error === "object" ? error : {};
+    await writeDiagnostics(cause.stdout ?? "", cause.stderr ?? "", browser, "failed", cause.message ?? String(error));
+    throw error;
+  }
+}
+
+async function writeDiagnostics(stdout, stderr, browser, status, errorMessage = "") {
+  const destination = process.env.SMOOTH_OPERATOR_LIVE_DIAGNOSTICS_PATH;
+  if (!destination) {
+    return;
+  }
+  await mkdir(dirname(destination), { recursive: true });
+  await writeFile(destination, JSON.stringify({ status, browser, stdout, stderr, ...(errorMessage ? { error: errorMessage } : {}) }, null, 2), { mode: 0o600 });
 }
 
 main().catch((error) => {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 });
-
