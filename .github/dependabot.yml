@@ -1,0 +1,44 @@
+# Dependabot configuration — keeps dependencies up-to-date.
+#
+# The project uses npm as the default package manager. All scripts work with
+# `npm run`. Dependabot updates package.json + package-lock.json (npm lockfile).
+# CI uses `npm ci` (frozen lockfile) — if Dependabot updates package.json but
+# not package-lock.json, CI will fail. Dependabot updates both automatically.
+
+version: 2
+
+updates:
+  # Root package — the native MCP server
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    groups:
+      dev-deps:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+      prod-deps:
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
+      major-deps:
+        update-types:
+          - "major"
+
+  # GitHub Actions — keep action versions current
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "ci"
+      include: "scope"

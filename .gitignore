@@ -1,0 +1,27 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+.env
+.env.*
+!.env.example
+.npmrc
+
+*.log
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+*credentials*.json
+
+.DS_Store
+.vscode/
+.idea/
+.cache/
+.opencode/
+.worktrees/
+
+# Disposable Chromium binaries used only by the opt-in live browser test.
+chrome-headless-shell/
