@@ -54,7 +54,7 @@
     "eslint": "^10.9.0",
     "knip": "^6.32.2",
     "tsx": "^4.23.12",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.11"
   },
   "engines": {
