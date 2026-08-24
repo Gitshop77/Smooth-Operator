@@ -8,7 +8,7 @@
 version: 2
 
 updates:
-  # Root package — the agent library + Chrome extension
+  # Root package — the native MCP server
   - package-ecosystem: "npm"
     directory: "/"
     schedule:

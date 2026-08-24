@@ -1,6 +1,3 @@
-# CI workflow — runs lint, tests, and extension build on every PR.
-#
-# Uses npm as the default package manager. All scripts work with `npm run`.
 name: CI
 
 on:
@@ -9,8 +6,6 @@ on:
   pull_request:
     branches: [main, master]
 
-# Cancel superseded runs on the same ref so rapid pushes don't spawn
-# overlapping full CI (the full-history gitleaks scan is the most expensive step).
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -18,71 +13,42 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0 (full commit SHA pin)
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # actions/setup-node v7.0.0 (full commit SHA pin)
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '22.23.2'
-          cache: 'npm'
-
-      - name: Verify pinned toolchain
-        run: |
+          cache: npm
+      - run: npm install --global npm@10.9.8
+      - run: |
           test "$(node --version)" = "v22.23.2"
           test "$(npm --version)" = "10.9.8"
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - name: Live browser contract
+        run: npm run test:browser:live
+      - run: npm run test:coverage
+      - run: npm run dead-code
+      - run: npm run build
+      - run: npm run package:smoke:install
+      - run: npm run benchmark:mcp:dist
+      - run: npm audit --audit-level=high
+      - run: npm audit signatures
 
-      - name: Verify reproducible baseline
-        # This fail-closed release gate performs a clean root install, lint,
-        # type-check, coverage, package/manifest/license/secret verification,
-        # audit/signature verification, and two independent clean-install
-        # builds whose full artifact inventories must match the root build.
-        run: npm run verify:baseline
-
-      - name: Enforce the full-suite test-duration budget
-        # Gate: the full vitest suite must finish under the budget
-        # (default 180s; measured baseline ~46s on a dev host). Catches
-        # cumulative regressions that per-test timeouts cannot.
-        run: npm run test:budget
-
-      - name: Flake hardening — repeated flake-prone suite runs
-        # Gate: the timer/async/chrome-mock suites run 3 rounds with
-        # vitest --retry=2; a test that fails all three attempts in any round
-        # is a real flake and fails the build.
-        run: npm run test:flake
-
-      - name: Mutation verification — critical controls must be caught
-        # Gate: the adversarial mutation harness weakens each critical
-        # control (cancellation, budget enforcement, credential redaction, SSRF,
-        # stale-element guard, run-store status, settings save summary) and
-        # asserts the suite FAILS; a control whose mutation goes uncaught fails
-        # the build. Wired here so a PR that weakens both a control and its
-        # adversarial test in one change still fails CI.
-        run: npm run test:mutation
-
-  # Secret scanning — fail the build if a real secret is committed.
-  # Runs gitleaks against the full git history on every PR and push.
   secret-scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           fetch-depth: 0
-
-      - name: Run gitleaks secret scan
-        # gitleaks exits non-zero on a detected leak, so the step (and the
-        # build) fails on a committed real secret. The action does NOT accept an
-        # `args` input (that caused the "Unexpected input(s) 'args'" failure);
-        # configuration is supplied via env instead. GITLEAKS_CONFIG points at
-        # our ruleset (built-in rules + a narrow allowlist for the redaction
-        # test fixtures). fail-on-leak is the action's default behavior.
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # gitleaks-action (Node 24 runtime; dependabot PR #35)
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7
         env:
           GITLEAKS_CONFIG: .github/gitleaks.toml

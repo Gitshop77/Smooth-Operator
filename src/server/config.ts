@@ -1,0 +1,362 @@
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
+import { env } from "node:process";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import process from "node:process";
+
+import * as z from "zod/v4";
+
+import { AppError } from "./errors";
+import type { LogLevel } from "./logger";
+
+const TransportSchema = z.enum(["stdio", "http"]);
+const BrowserModeSchema = z.enum(["disabled", "connect", "launch", "managed"]);
+const ConfigPathSchema = z.string().trim().min(1).max(4_096);
+const DomainPatternSchema = z.string().trim().min(1).max(253);
+const HostPatternSchema = z.string().trim().min(1).max(2_048);
+const ConfigList = <T extends z.ZodType>(schema: T) => z.array(schema).max(128);
+
+const RawConfigSchema = z
+  .object({
+    transport: TransportSchema.optional(),
+    http: z
+      .object({
+        host: z.string().trim().min(1).max(255).optional(),
+        port: z.number().int().min(1).max(65_535).optional(),
+        path: z.string().trim().min(1).max(4_096).optional(),
+        token: z.string().min(1).max(4_096).optional(),
+        allowRemote: z.boolean().optional(),
+        allowedHosts: ConfigList(HostPatternSchema).optional(),
+        allowedOrigins: ConfigList(HostPatternSchema).optional(),
+        maxBodyBytes: z.number().int().min(1_024).max(20_000_000).optional(),
+      })
+      .strict()
+      .optional(),
+    browser: z
+      .object({
+        mode: BrowserModeSchema.optional(),
+        wsEndpoint: ConfigPathSchema.optional(),
+        url: ConfigPathSchema.optional(),
+        executablePath: ConfigPathSchema.optional(),
+        headless: z.boolean().optional(),
+        userDataDir: ConfigPathSchema.optional(),
+        autoLaunch: z.boolean().optional(),
+        actionTimeoutMs: z.number().int().min(100).max(120_000).optional(),
+        connectTimeoutMs: z.number().int().min(1_000).max(180_000).optional(),
+        cdpTimeoutMs: z.number().int().min(100).max(120_000).optional(),
+        maxScreenshotBytes: z.number().int().min(100_000).max(20_000_000).optional(),
+        maxHtmlChars: z.number().int().min(1_000).max(500_000).optional(),
+      })
+      .strict()
+      .optional(),
+    security: z
+      .object({
+        allowedDomains: ConfigList(DomainPatternSchema).optional(),
+        blockedDomains: ConfigList(DomainPatternSchema).optional(),
+        allowedFileRoots: ConfigList(ConfigPathSchema).optional(),
+        allowPrivateNetwork: z.boolean().optional(),
+        allowEval: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+    dataDir: ConfigPathSchema.optional(),
+    logLevel: z.enum(["debug", "info", "warn", "error"]).optional(),
+  })
+  .strict();
+
+type RawConfig = z.infer<typeof RawConfigSchema>;
+
+type Transport = z.infer<typeof TransportSchema>;
+
+export interface ServerConfig {
+  transport: Transport;
+  http: {
+    host: string;
+    port: number;
+    path: string;
+    token?: string;
+    allowRemote: boolean;
+    allowedHosts: string[];
+    allowedOrigins: string[];
+    maxBodyBytes: number;
+  };
+  browser: {
+    mode: z.infer<typeof BrowserModeSchema>;
+    wsEndpoint?: string;
+    url?: string;
+    executablePath?: string;
+    headless: boolean;
+    userDataDir?: string;
+    autoLaunch: boolean;
+    actionTimeoutMs: number;
+    connectTimeoutMs: number;
+    cdpTimeoutMs: number;
+    maxScreenshotBytes: number;
+    maxHtmlChars: number;
+  };
+  security: {
+    allowedDomains: string[];
+    blockedDomains: string[];
+    allowedFileRoots: string[];
+    allowPrivateNetwork: boolean;
+    allowEval: boolean;
+  };
+  dataDir: string;
+  logLevel: LogLevel;
+}
+
+function parseBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined) {
+    return fallback;
+  }
+  const normalized = value.toLowerCase();
+  if (value === "1" || normalized === "true" || normalized === "yes") {
+    return true;
+  }
+  if (value === "0" || normalized === "false" || normalized === "no") {
+    return false;
+  }
+  throw new AppError("CONFIG_INVALID", `Invalid boolean value '${value}'.`);
+}
+
+function parseInteger(value: string | undefined, fallback: number): number {
+  if (value === undefined || value === "") {
+    return fallback;
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new AppError("CONFIG_INVALID", `Invalid integer value '${value}'.`);
+  }
+  return parsed;
+}
+
+function parseList(value: string | undefined, fallback: string[] = []): string[] {
+  if (value === undefined || value.trim() === "") {
+    return normalizeList(fallback);
+  }
+  return normalizeList(value.split(","));
+}
+
+function expandPath(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.includes("\0")) {
+    throw new AppError("CONFIG_INVALID", "Configured paths must be non-empty and must not contain null bytes.");
+  }
+  const expanded = trimmed === "~" ? homedir() : trimmed.startsWith("~/") ? join(homedir(), trimmed.slice(2)) : trimmed;
+  return resolve(expanded);
+}
+
+function normalizeList(values: readonly string[]): string[] {
+  return [...new Set(values.map((item) => item.trim()).filter(Boolean))];
+}
+
+function trimOptional(value: string | undefined): string | undefined {
+  return value?.trim();
+}
+
+function expandOptionalPath(value: string | undefined): string | undefined {
+  return value === undefined ? undefined : expandPath(value);
+}
+
+function readConfigFile(configPath: string): RawConfig {
+  let descriptor: number | undefined;
+  try {
+    // Open and inspect the same descriptor that is subsequently read.  On
+    // platforms that expose O_NOFOLLOW this prevents a symlink swap between
+    // an lstat and the read.  The lstat fallback is retained for platforms
+    // without that flag, where Node cannot request no-follow semantics.
+    const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+    const closeOnExecValue = (constants as unknown as Record<string, unknown>).O_CLOEXEC;
+    const closeOnExec = typeof closeOnExecValue === "number" ? closeOnExecValue : 0;
+    if (noFollow === 0) {
+      const beforeOpen = lstatSync(configPath);
+      if (beforeOpen.isSymbolicLink()) {
+        throw new AppError("CONFIG_INSECURE", "Configuration files must not be symbolic links.");
+      }
+    }
+    descriptor = openSync(configPath, constants.O_RDONLY | noFollow | closeOnExec);
+    const stats = fstatSync(descriptor);
+    if (!stats.isFile()) {
+      throw new AppError("CONFIG_INVALID", "The configuration path must point to a regular file.");
+    }
+    const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (uid !== undefined && stats.uid !== uid) {
+      throw new AppError("CONFIG_INSECURE", "Configuration files must be owned by the current user.");
+    }
+    const mode = stats.mode & 0o777;
+    if ((mode & 0o077) !== 0) {
+      throw new AppError("CONFIG_INSECURE", "Configuration files must use owner-only permissions (for example, chmod 600).");
+    }
+    const parsed = JSON.parse(readFileSync(descriptor, "utf8")) as unknown;
+    const result = RawConfigSchema.safeParse(parsed);
+    if (!result.success) {
+      throw new AppError("CONFIG_INVALID", "Configuration file failed schema validation.", {
+        details: { issues: result.error.issues.map((issue) => issue.message) },
+      });
+    }
+    return result.data;
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+    if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ELOOP") {
+      throw new AppError("CONFIG_INSECURE", "Configuration files must not be symbolic links.", { cause: error });
+    }
+    throw new AppError("CONFIG_INVALID", "Unable to inspect or read the configuration file.", { cause: error });
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // The original validation/read error is more useful than a close
+        // failure, and the descriptor is no longer usable after this path.
+      }
+    }
+  }
+}
+
+function validateConfig(config: ServerConfig): ServerConfig {
+  if (!config.http.path.startsWith("/") || /[\u0000-\u0020?#]/.test(config.http.path) || config.http.path.includes("//")) {
+    throw new AppError("CONFIG_INVALID", "HTTP path must be a single absolute path without whitespace, query, or fragment components.");
+  }
+  if (!config.http.host.trim()) {
+    throw new AppError("CONFIG_INVALID", "HTTP host must not be empty.");
+  }
+  if (config.http.token !== undefined && !/^[\x21-\x7e]+$/.test(config.http.token)) {
+    throw new AppError("CONFIG_INVALID", "HTTP tokens must contain printable ASCII characters only.");
+  }
+  if (config.http.allowRemote && (!config.http.token || config.http.token.length < 32)) {
+    throw new AppError("CONFIG_INVALID", "Remote HTTP transport requires a token of at least 32 characters.");
+  }
+  const localHost = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(config.http.host.trim().toLowerCase());
+  if (!localHost && !config.http.allowRemote) {
+    throw new AppError("CONFIG_INVALID", "Remote HTTP binding is disabled by default.");
+  }
+  if (config.browser.mode === "launch" && !config.browser.executablePath) {
+    throw new AppError("CONFIG_INVALID", "Launch mode requires OPEN_COWORK_BROWSER_EXECUTABLE.");
+  }
+  if (config.browser.autoLaunch && config.browser.mode === "connect" && !config.browser.executablePath) {
+    throw new AppError("CONFIG_INVALID", "Automatic browser launch requires OPEN_COWORK_BROWSER_EXECUTABLE.");
+  }
+  if (config.browser.actionTimeoutMs < 100 || config.browser.actionTimeoutMs > 120_000) {
+    throw new AppError("CONFIG_INVALID", "Browser action timeout must be between 100ms and 120000ms.");
+  }
+  if (config.browser.connectTimeoutMs < 1_000 || config.browser.connectTimeoutMs > 180_000) {
+    throw new AppError("CONFIG_INVALID", "Browser connection timeout must be between 1000ms and 180000ms.");
+  }
+  if (config.browser.cdpTimeoutMs < 100 || config.browser.cdpTimeoutMs > 120_000) {
+    throw new AppError("CONFIG_INVALID", "Browser CDP timeout must be between 100ms and 120000ms.");
+  }
+  if (config.browser.maxScreenshotBytes < 100_000 || config.browser.maxScreenshotBytes > 20_000_000) {
+    throw new AppError("CONFIG_INVALID", "Maximum screenshot bytes must be between 100000 and 20000000.");
+  }
+  if (config.browser.maxHtmlChars < 1_000 || config.browser.maxHtmlChars > 500_000) {
+    throw new AppError("CONFIG_INVALID", "Maximum HTML characters must be between 1000 and 500000.");
+  }
+  return config;
+}
+
+export function loadServerConfig(args: string[] = [], environment: NodeJS.ProcessEnv = env): ServerConfig {
+  if (environment.OPEN_COWORK_BROWSER_PROFILE !== undefined || environment.OPEN_COWORK_BROWSER_STEALTH !== undefined) {
+    throw new AppError("CONFIG_INVALID", "Browser profile switches were removed. The native server uses one fixed native profile.");
+  }
+  if (environment.OPEN_COWORK_DEFAULT_MODE !== undefined) {
+    throw new AppError("CONFIG_INVALID", "OPEN_COWORK_DEFAULT_MODE was removed. The native MCP server uses one capability profile.");
+  }
+  if (environment.OPEN_COWORK_BROWSER_USER_AGENT !== undefined) {
+    throw new AppError("CONFIG_INVALID", "Browser user-agent overrides were removed. The native server preserves the browser's real identity.");
+  }
+  const argumentValues = parseArguments(args);
+  const argValue = (name: string): string | undefined => argumentValues.get(name);
+
+  const configPath = argValue("--config") ?? environment.OPEN_COWORK_CONFIG;
+  const fileConfig = configPath ? readConfigFile(expandPath(configPath)) : {};
+  const nestedHttp = fileConfig.http ?? {};
+  const nestedBrowser = fileConfig.browser ?? {};
+  const nestedSecurity = fileConfig.security ?? {};
+
+  const dataDir = expandPath(environment.OPEN_COWORK_DATA_DIR ?? fileConfig.dataDir ?? join(homedir(), ".open-cowork"));
+  const defaultBrowserDataDir = join(dataDir, "browser");
+  const configuredRoots = parseList(environment.OPEN_COWORK_ALLOWED_FILE_ROOTS, nestedSecurity.allowedFileRoots ?? []);
+  // Keep the default file surface private to the server data directory. A
+  // caller may explicitly add a project directory through the allowlist, but
+  // silently granting the current working directory makes uploads and PDF
+  // writes broader than a native MCP server needs to be.
+  const allowedFileRoots = (configuredRoots.length > 0 ? configuredRoots : [join(dataDir, "files"), join(dataDir, "downloads")]).map(expandPath);
+
+  const config: ServerConfig = {
+    transport: (argValue("--transport") ?? environment.OPEN_COWORK_TRANSPORT ?? fileConfig.transport ?? "stdio") as Transport,
+    http: {
+      host: (argValue("--host") ?? environment.OPEN_COWORK_HTTP_HOST ?? nestedHttp.host ?? "127.0.0.1").trim(),
+      port: parseInteger(argValue("--port") ?? environment.OPEN_COWORK_HTTP_PORT, nestedHttp.port ?? 3_344),
+      path: (environment.OPEN_COWORK_HTTP_PATH ?? nestedHttp.path ?? "/mcp").trim(),
+      token: environment.OPEN_COWORK_HTTP_TOKEN ?? nestedHttp.token,
+      allowRemote: parseBoolean(environment.OPEN_COWORK_ALLOW_REMOTE_HTTP, nestedHttp.allowRemote ?? false),
+      allowedHosts: parseList(environment.OPEN_COWORK_ALLOWED_HOSTS, nestedHttp.allowedHosts ?? ["localhost", "127.0.0.1", "[::1]"]),
+      allowedOrigins: parseList(environment.OPEN_COWORK_ALLOWED_ORIGINS, nestedHttp.allowedOrigins ?? ["localhost", "127.0.0.1", "[::1]"]),
+      maxBodyBytes: parseInteger(environment.OPEN_COWORK_HTTP_MAX_BODY_BYTES, nestedHttp.maxBodyBytes ?? 2_000_000),
+    },
+    browser: {
+      mode: (environment.OPEN_COWORK_BROWSER_MODE ?? nestedBrowser.mode ?? "managed") as ServerConfig["browser"]["mode"],
+      wsEndpoint: trimOptional(environment.OPEN_COWORK_BROWSER_WS_ENDPOINT ?? nestedBrowser.wsEndpoint),
+      url: trimOptional(environment.OPEN_COWORK_BROWSER_URL ?? nestedBrowser.url) ?? "http://127.0.0.1:9222",
+      executablePath: expandOptionalPath(environment.OPEN_COWORK_BROWSER_EXECUTABLE ?? nestedBrowser.executablePath),
+      headless: parseBoolean(environment.OPEN_COWORK_BROWSER_HEADLESS, nestedBrowser.headless ?? false),
+      // Managed and launch modes get one private, persistent profile by default. This is
+      // an internal server profile, not a user-selectable capability profile;
+      // an explicit path remains available for isolated harness runs.
+      userDataDir: expandOptionalPath(environment.OPEN_COWORK_BROWSER_USER_DATA_DIR ?? nestedBrowser.userDataDir) ?? defaultBrowserDataDir,
+      autoLaunch: parseBoolean(environment.OPEN_COWORK_BROWSER_AUTO_LAUNCH, nestedBrowser.autoLaunch ?? false),
+      actionTimeoutMs: parseInteger(environment.OPEN_COWORK_BROWSER_TIMEOUT_MS, nestedBrowser.actionTimeoutMs ?? 15_000),
+      connectTimeoutMs: parseInteger(environment.OPEN_COWORK_BROWSER_CONNECT_TIMEOUT_MS, nestedBrowser.connectTimeoutMs ?? 30_000),
+      cdpTimeoutMs: parseInteger(environment.OPEN_COWORK_BROWSER_CDP_TIMEOUT_MS, nestedBrowser.cdpTimeoutMs ?? 30_000),
+      maxScreenshotBytes: parseInteger(environment.OPEN_COWORK_MAX_SCREENSHOT_BYTES, nestedBrowser.maxScreenshotBytes ?? 8_000_000),
+      maxHtmlChars: parseInteger(environment.OPEN_COWORK_MAX_HTML_CHARS, nestedBrowser.maxHtmlChars ?? 200_000),
+    },
+    security: {
+      allowedDomains: parseList(environment.OPEN_COWORK_ALLOWED_DOMAINS, nestedSecurity.allowedDomains ?? []),
+      blockedDomains: parseList(environment.OPEN_COWORK_BLOCKED_DOMAINS, nestedSecurity.blockedDomains ?? []),
+      allowedFileRoots,
+      allowPrivateNetwork: parseBoolean(environment.OPEN_COWORK_ALLOW_PRIVATE_NETWORK, nestedSecurity.allowPrivateNetwork ?? false),
+      allowEval: parseBoolean(environment.OPEN_COWORK_ALLOW_EVAL, nestedSecurity.allowEval ?? false),
+    },
+    dataDir,
+    logLevel: (environment.OPEN_COWORK_LOG_LEVEL ?? fileConfig.logLevel ?? "info") as LogLevel,
+  };
+
+  const parsed = RawConfigSchema.safeParse({
+    transport: config.transport,
+    http: config.http,
+    browser: config.browser,
+    security: config.security,
+    dataDir: config.dataDir,
+    logLevel: config.logLevel,
+  });
+  if (!parsed.success) {
+    throw new AppError("CONFIG_INVALID", "Configuration failed validation.", {
+      details: { issues: parsed.error.issues.map((issue) => issue.message) },
+    });
+  }
+  return validateConfig(config);
+}
+
+function parseArguments(args: readonly string[]): Map<string, string> {
+  const supported = new Set(["--config", "--transport", "--host", "--port"]);
+  const values = new Map<string, string>();
+  for (let index = 0; index < args.length; index += 1) {
+    const name = args[index];
+    if (!supported.has(name)) {
+      throw new AppError("CONFIG_INVALID", `Unknown command-line option '${name}'.`);
+    }
+    if (values.has(name)) {
+      throw new AppError("CONFIG_INVALID", `Command-line option '${name}' was provided more than once.`);
+    }
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new AppError("CONFIG_INVALID", `Command-line option '${name}' requires a value.`);
+    }
+    values.set(name, value);
+    index += 1;
+  }
+  return values;
+}

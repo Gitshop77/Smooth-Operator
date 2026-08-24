@@ -2,7 +2,8 @@
 #
 # Complements Dependabot (`.github/dependabot.yml`): Dependabot proposes updates,
 # this workflow blocks PRs that add a dependency with a moderate-or-higher advisory
-# or a license the org disallows. Runs on every PR that touches a lockfile.
+# or a license the org disallows. Runs on every pull request; the action
+# compares dependency changes in the pull request's lockfiles.
 
 name: Dependency Review
 

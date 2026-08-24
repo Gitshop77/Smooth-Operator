@@ -2,69 +2,57 @@
 
 ## Project
 
-Open Cowork — an agentic Chrome extension (Manifest V3) that reads pages, plans steps, and acts on them via an LLM. Two main code areas:
+Open Cowork is a standalone Node.js MCP server. It exposes secure browser
+automation over the official Model Context Protocol SDK. There is no browser
+extension, service worker, content script, embedded model provider, or local
+agent loop in this repository.
 
-- `src/extension/` — extension code (background worker, side panel, options, vision assistant)
-- `src/lib/agent/` — browser-independent agent engine (LLM routing, loop, tools, security)
+The runtime is organized as:
 
-Build output `chrome-extension/` is gitignored and regenerated on every build.
+- src/server/main.ts — stdio and Streamable HTTP startup, authentication, and shutdown.
+- src/server/mcp.ts — MCP tool, resource, and user-facing prompt registration.
+- src/server/runtime.ts — dependency composition and lifecycle ownership.
+- src/server/browser/service.ts — Puppeteer/CDP browser operations and tab state.
+- src/server/policy.ts — URL, file, capability, and security-mode enforcement.
+- src/server/config.ts — validated environment and JSON configuration.
+- src/server/research.ts — bounded, untrusted DuckDuckGo result retrieval.
+- src/server/errors.ts and logger.ts — safe MCP errors and structured stderr logs.
 
 ## Commands
 
-| Command | What it does |
-|---|---|
-| `npm run build:extension` | Bundle extension into `chrome-extension/` |
-| `npm run build:all` | Same as `build:extension` |
-| `npm run dev` / `npm run dev:ext` | Watch-build for development |
-| `npm run lint` | ESLint |
-| `npm run test` | Vitest suite |
-| `npm run test:coverage` | Vitest with coverage gate (pinned thresholds) |
-| `npm run test:watch` | Vitest watch mode |
-| `npm run setup:lightpanda-host -- --extension-id <id>` | Install the Lightpanda native messaging host (one-time, per browser) |
+| Command | Purpose |
+| --- | --- |
+| npm run dev | Watch the native MCP server |
+| npm start | Start the server over stdio |
+| npm run mcp:http | Start Streamable HTTP |
+| npm run typecheck | Run strict TypeScript checks |
+| npm run lint | Run ESLint |
+| npm test | Run the Vitest suite |
+| npm run test:browser:live | Opt-in live browser contract (requires Chrome) |
+| npm run test:coverage | Run tests with the coverage gate |
+| npm run dead-code | Run the pinned Knip reachability/dependency scan |
+| npm run build | Build dist/open-cowork-mcp.mjs |
 
-**Type-checking** has no npm script — CI runs `npx tsc --noEmit` directly. Running it locally: `npx tsc --noEmit`.
+## Runtime rules
 
-## Load the extension
+- Keep the MCP boundary thin: request validation and transport belong in mcp.ts
+  and main.ts; browser behavior belongs in BrowserService; policy is enforced
+  again at the service boundary.
+- Do not add model-provider SDKs or an internal planning loop. The connected
+  MCP client supplies reasoning and calls explicit tools.
+- Treat every page, search result, DOM attribute, cookie value, and browser log
+  as untrusted data. Keep outputs bounded and redact secrets.
+- HTTP binds to loopback unless remote mode is explicitly enabled with a
+  32-character bearer token.
+- File uploads and PDF writes must pass allowed-root and realpath checks.
+- Page JavaScript evaluation is disabled unless both full security mode and
+  OPEN_COWORK_ALLOW_EVAL=true are configured.
+- Do not commit dist/ or coverage/; both are generated.
 
-Build first, then load `chrome-extension/` as an unpacked extension at `chrome://extensions` (Developer mode → Load unpacked).
+## Verification
 
-## Key architecture notes
-
-- **esbuild** bundles 5 entry points: `background.ts` (ESM, no splitting — MV3 SW can't use native `import()`), `content.ts`/`content-main.ts`/`sidepanel.ts`/`options.ts` (IIFE). `content-main.ts` is the MAIN-world shadow-piercer content script (declared as `world: "MAIN"` in the manifest).
-- **esbuild.config.ts** has two special plugins: a zod-locales stub (strips 50+ locale files → `en` only, saves ~600 KB) and a console debug strip (production builds only, rewrites `console.debug/log` to `void`).
-- `build-utils.ts` extracts testable helpers from the esbuild config so `tests/build-utils.test.ts` doesn't need to bundle the extension.
-- Third-party licenses (`LICENSE-APACHE` for `@huggingface/transformers`, inline `LICENSE-MIT` for `onnxruntime-web`, `NOTICE`) are emitted by the build into `chrome-extension/` — see LIC-1 in `esbuild.config.ts`.
-- **Path alias**: `@/*` → `./src/*` (tsconfig + vitest resolve alias).
-- **`src/extension/manifest.json`** is the source of truth; it's copied to `chrome-extension/` by the build. Don't edit `chrome-extension/manifest.json` directly.
-- The **model catalog** is sourced from the `@opencode-ai/models` SDK's snapshot entrypoint, which contains **173+ providers** with thousands of models. Updated automatically via `npm update`.
-- **Context-adaptive budgets** (`src/lib/agent/prompts/prompt-token-budget.ts`): `deriveNavigatorObservationCapsV1` sizes the per-step observation (elements text / AX tree / screenshot) against the model's effective context. Unknown/≥128k models get the fixed 128k defaults; sub-128k models get a fitting allocation using the COMPACT system prompt overhead. The effective context flows from `getEffectiveContextTokens()` (llm-direct) → `config.contextTokens` (agent-bridge run start) → the loop.
-- **Compact system prompt** (`src/lib/agent/prompts/navigator-prompt.ts`, `buildNavigatorPrompt(..., compact)`): used for <128k models. Every security/schema/behavior block is byte-identical to the full prompt; only prose is compressed. Chosen in `llm-direct.ts`'s navigator compile when the effective context is <128k.
-- **Stealth is DEFAULT-ON** (`src/lib/agent/anti-detection-utils.ts`): `isStealthEnabled()` returns true unless storage explicitly says `false`, and `isStealthEnabledSync()` fails toward stealth. Page-visible artifacts (phantom cursor, click highlight, piercer backdoor) are suppressed in stealth mode and run only when stealth is explicitly disabled.
-- **Manual pause/resume** is wired end-to-end: the sidepanel Pause button writes `open_cowork_paused` to `chrome.storage.session`; the loop's `runPauseCheck` polls it; the Resume button (or any RESUME message) clears it in `message-routing.ts`.
-- **64k survival is a tested invariant** — `tests/agent-loop-64k.test.ts` drives the real loop at 20/50/100 steps with repeated compactions and per-turn input accounting; `tests/compact-prompt.test.ts` and `tests/navigator-observation-caps.test.ts` pin the budget derivation.
-- **Lightpanda research** — the `research` action launches the external `lightpanda` binary via the Node native host (`scripts/lightpanda-native-host.mjs`, spawned through the generated launcher `~/.open-cowork/bin/lightpanda-host`) with the SAME provider config as the main agent (`buildLightpandaLaunch` in `src/lib/agent/lightpanda/`); the answer is bounded/redacted/injection-scanned and wrapped in `<untrusted_research>`; the model must exist in the provider's catalog (Azure deployment names must match; Ollama models must be pulled); known limitations: Lightpanda Beta, text-only (no screenshots), hardcoded 100-turn/4096-token loop, `research` refuses to run while a non-`*` allowed-domains allowlist is active, without Brave/Tavily keys search falls back to DuckDuckGo, restricted mode blocks research, host setup must be re-run after extension re-key.
-
-## Testing
-
-- **Vitest v4** honors the `isolate: true` config option (per-file module + mock reset). `tests/helpers/test-isolation.ts` (loaded via `setupFiles`) additionally resets leaked globals (`globalThis.chrome`, `document.body`, `localStorage`, `fetch`) between test files as defense-in-depth. Don't remove it.
-- Test files live in `tests/` with `.test.ts` suffix.
-- Coverage thresholds are pinned at measured baselines with per-glob overrides for security-critical modules (`ssrf-ipv6.ts`, `ssrf-validate.ts`, `ssrf-dns.ts`, `security-injection.ts`, `auth.ts`, `endpoint.ts`, `anti-bot.ts`, `anti-detection.ts`). The baselines are documented in `vitest.config.ts`.
-
-## CI
-
-`.github/workflows/ci.yml` runs on push/PR to `main`/`master`:
-1. `npm ci` → `npm run lint` → `npx tsc --noEmit` → `npx vitest run --coverage` → `npm run build:extension` → verify build output → `npm audit --audit-level=high` + `npm audit signatures`
-2. `secret-scan` job runs gitleaks against full history using `.github/gitleaks.toml` (allows fake secret fixtures in 5 test files).
-
-`.github/workflows/dependency-review.yml` blocks PRs with moderate+ vulnerability advisories or GPL-3.0/AGPL-3.0 licenses.
-
-## LLM providers
-
-7 dedicated wrappers in `src/lib/agent/llm/providers/`: `anthropic.ts`, `azure.ts`, `google.ts`, `openai.ts`, `openai-compatible.ts`, `openrouter.ts`, `xai.ts`. 13 more OpenAI-compatible services (15 profile-table rows; openrouter + xai also have dedicated wrappers) use a shared profile table (`openai-compatible-profile.ts`). Protocols in `src/lib/agent/llm/protocols/`.
-
-## Gotchas
-
-- `chrome-extension/` is gitignored — never commit build output. It's generated by `npm run build:extension`.
-- The `evaluate` sandbox runs JS via `new Function()` in the page's isolated world. It's a second defense layer, not a hard wall — use Full Agentic mode only on trusted sites.
-- `src/lib/agent/agent/` does NOT exist; the agent code lives directly under `src/lib/agent/` (no `agent/` subdirectory).
-- The `zod-locales-stub.js` file in `src/extension/` is required for the build — the zod-locales plugin redirects imports to it.
+Before handing off a change, run npm run lint, npm run typecheck, npm test,
+npm run test:coverage, npm run dead-code, and npm run build. Scan for stale
+extension/provider/model references with rg and inspect the resulting git diff.
+The hosted CI job additionally runs the explicit live-browser contract with a
+discovered Chrome executable; local environments without Chrome may skip it.

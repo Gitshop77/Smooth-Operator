@@ -1,23 +1,23 @@
 {
   "compilerOptions": {
-    "target": "ES2017",
+    "target": "ES2022",
     "lib": [
-      "dom",
-      "dom.iterable",
-      "esnext"
+      "ES2022",
+      "DOM"
     ],
-    "types": ["chrome"],
-    "allowJs": true,
+    "types": ["node"],
     "skipLibCheck": true,
     "strict": true,
+    "forceConsistentCasingInFileNames": true,
     "noEmit": true,
     "noImplicitAny": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "esModuleInterop": true,
     "module": "esnext",
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "incremental": true,
     "paths": {
       "@/*": [
         "./src/*"
@@ -25,11 +25,13 @@
     }
   },
   "include": [
-    "**/*.ts",
-    "**/*.tsx"
+    "src/**/*.ts",
+    "tests/**/*.ts",
+    "vitest.config.ts"
   ],
   "exclude": [
     "node_modules",
-    "chrome-extension"
+    "dist",
+    "coverage"
   ]
 }
