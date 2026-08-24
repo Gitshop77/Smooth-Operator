@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 
 import { createUi } from "./ui";
@@ -11,6 +12,8 @@ export type WizardChoices = {
   allowEval: boolean;
   dataDir: string;
   browserUrl?: string;
+  /** Absolute path to the Chromium-based browser the server should drive. */
+  browserExecutablePath?: string;
 };
 
 /** Input stream for wizard prompts. Plain (non-TTY) objects are permitted so
@@ -30,7 +33,7 @@ interface WizardRunOptions {
   probe?: ProbeFunction;
   homeDir?: string;
   env?: NodeJS.ProcessEnv;
-  /** Shown in the banner; defaults to "2.2.1" when omitted. */
+  /** Shown in the banner; defaults to "2.3.0" when omitted. */
   version?: string;
 }
 
@@ -120,7 +123,47 @@ function recommendedDefaults(homeDir: string | undefined): WizardChoices {
     blockedDomains: [],
     allowEval: false,
     dataDir: join(homeDir ?? homedir(), ".smooth-operator"),
+    browserExecutablePath: undefined,
   };
+}
+
+const WIZARD_STEP_TOTAL = 7;
+
+/** Ask which installed Chromium-based browser the server should drive. Any
+ * CDP-compatible browser works, so present everything detected and allow a
+ * manual path as the escape hatch. */
+async function askBrowser(session: WizardSession, ui: ReturnType<typeof createUi>): Promise<string | undefined> {
+  const { findChromiumExecutables } = await import("./browser/discovery.js");
+  const detected = findChromiumExecutables();
+  if (detected.length > 0) {
+    detected.forEach((candidate, index) => {
+      ui.option(index + 1, candidate.label, candidate.path, index === 0);
+    });
+    while (true) {
+      const answer = (await session.question(`Browser [1]: `)).trim();
+      if (!answer || answer === "1") return detected[0].path;
+      const numeric = Number.parseInt(answer, 10);
+      if (`${numeric}` === answer && numeric >= 1 && numeric <= detected.length) {
+        return detected[numeric - 1].path;
+      }
+      if (/^\d+$/.test(answer)) continue;
+      if (answer.startsWith("/") && existsSync(answer)) return answer;
+      ui.failure("Enter a listed number or an existing absolute path.");
+    }
+  }
+  while (true) {
+    const answer = (await session.question("Browser executable path (Enter = auto-detect): ")).trim();
+    if (!answer) return undefined;
+    if (!answer.startsWith("/")) {
+      ui.failure("Enter an absolute path.");
+      continue;
+    }
+    if (!existsSync(answer)) {
+      ui.failure("That path does not exist.");
+      continue;
+    }
+    return answer;
+  }
 }
 
 interface WizardSession {
@@ -190,7 +233,7 @@ export async function runWizard(harness: string, opts: WizardRunOptions): Promis
     ui.note("Answer each question, or press Enter to accept the recommended default.");
     ui.note(`You can re-run \`smooth-operator install ${harness}\` at any time to change these.`);
 
-    ui.step(1, 6, "Browser mode");
+    ui.step(1, WIZARD_STEP_TOTAL, "Browser mode");
     ui.explain([
       "Who owns the Chrome window your AI drives?",
       "",
@@ -231,9 +274,18 @@ export async function runWizard(harness: string, opts: WizardRunOptions): Promis
       ui.failure("Enter 1, 2, or 3.");
     }
 
+    let browserExecutablePath: string | undefined;
     let headlessChoice = false;
     if (mode !== "disabled") {
-      ui.step(2, 6, "Headless mode");
+      ui.step(2, WIZARD_STEP_TOTAL, "Browser");
+      ui.explain([
+        "Any Chromium-based browser works: Chrome, Brave, Edge, Chromium,",
+        "Vivaldi, Arc, Opera. The AI gets its own isolated profile inside the",
+        "browser you pick - your everyday profiles are never touched.",
+      ]);
+      browserExecutablePath = await askBrowser(session, ui);
+
+      ui.step(3, WIZARD_STEP_TOTAL, "Headless mode");
       ui.explain([
         "Headless runs Chrome with no visible window - lighter and invisible.",
         "Visible Chrome lets you watch clicks happen and handle CAPTCHAs or",
@@ -241,7 +293,7 @@ export async function runWizard(harness: string, opts: WizardRunOptions): Promis
       ]);
       headlessChoice = await askYesNo(session, "Run Chrome headless (no window)?", false);
 
-      ui.step(3, 6, "Allowed domains");
+      ui.step(4, WIZARD_STEP_TOTAL, "Allowed domains");
       ui.explain([
         "Restrict which sites the AI may open, e.g. docs.example.com, *.wikipedia.org",
         "Leave empty to allow every site. Blocked domains always win over allowed ones.",
@@ -255,7 +307,7 @@ export async function runWizard(harness: string, opts: WizardRunOptions): Promis
         ui.failure("That did not look like a domain list. Example: example.com, *.shop.test");
       }
 
-      ui.step(4, 6, "Blocked domains");
+      ui.step(5, WIZARD_STEP_TOTAL, "Blocked domains");
       ui.explain(["Never open these sites, even when everything else is allowed."]);
       while (true) {
         const parsed = parseDomainList(await session.question("Blocked domains (comma-separated, Enter for none): "));
@@ -266,14 +318,14 @@ export async function runWizard(harness: string, opts: WizardRunOptions): Promis
         ui.failure("That did not look like a domain list. Example: ads.example.com");
       }
 
-      ui.step(5, 6, "JavaScript execution");
+      ui.step(6, WIZARD_STEP_TOTAL, "JavaScript execution");
       ui.explain([
         "browser_evaluate runs arbitrary JavaScript on a page - powerful for scraping",
         "but it can also trigger bot defenses. Most users never need it on.",
       ]);
       allowEval = await askYesNo(session, "Allow the AI to run JavaScript on pages?", false);
 
-      ui.step(6, 6, "Data directory");
+      ui.step(7, WIZARD_STEP_TOTAL, "Data directory");
       ui.explain([
         "Where the private Chrome profile, logs, and downloads live.",
         "Permissions are locked to 0600 so only your user can read them.",
@@ -303,8 +355,8 @@ export async function runWizard(harness: string, opts: WizardRunOptions): Promis
       }
     }
 
-    writeSummary(ui, harness, { mode, headless, allowedDomains, blockedDomains, allowEval, dataDir });
-    return { mode, headless, allowedDomains, blockedDomains, allowEval, dataDir, browserUrl };
+    writeSummary(ui, harness, { mode, headless, allowedDomains, blockedDomains, allowEval, dataDir, browserExecutablePath });
+    return { mode, headless, allowedDomains, blockedDomains, allowEval, dataDir, browserUrl, browserExecutablePath };
   } finally {
     rl.close();
   }
@@ -319,6 +371,7 @@ function writeSummary(ui: ReturnType<typeof createUi>, harness: string, choices:
   ui.banner("Configuration Summary", `Ready to configure ${harness}`, "");
   ui.keyValues([
     ["Browser mode", choices.mode === "connect" ? modeLabel.connect : (modeLabel[choices.mode] ?? choices.mode)],
+    ...(choices.browserExecutablePath ? [["Browser", choices.browserExecutablePath] as const] : []),
     ["Headless", choices.headless ? "yes - no visible window" : "no - you can watch and intervene"],
     ...(choices.mode === "disabled" ? [] : [
       ["Allowed sites", choices.allowedDomains.length ? choices.allowedDomains.join(", ") : "all sites"],
@@ -382,6 +435,9 @@ export async function persistWizardConfig(choices: WizardChoices, homeDir: strin
   };
   if (choices.browserUrl) {
     chosenBrowser.url = choices.browserUrl;
+  }
+  if (choices.browserExecutablePath) {
+    chosenBrowser.executablePath = choices.browserExecutablePath;
   }
   const chosenSecurity: Record<string, unknown> = {
     allowEval: choices.allowEval,

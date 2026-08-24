@@ -136,3 +136,22 @@ describe("persistWizardConfig merges instead of replacing", () => {
     }
   });
 });
+
+describe("persistWizardConfig browser selection", () => {
+  it("persists a chosen Chromium-based executable into the browser section", async () => {
+    const home = await mkdtemp(join(tmpdir(), "smooth-operator-wizard-browser-"));
+    try {
+      await mkdir(join(home, ".smooth-operator"), { recursive: true });
+      await persistWizardConfig(
+        { mode: "managed", headless: false, allowedDomains: [], blockedDomains: [], allowEval: false,
+          dataDir: join(home, ".smooth-operator"),
+          browserExecutablePath: "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" },
+        home,
+      );
+      const merged = JSON.parse(await readFile(join(home, ".smooth-operator", "config.json"), "utf8"));
+      expect(merged.browser.executablePath).toBe("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+});
