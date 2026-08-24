@@ -1,6 +1,8 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
 
+import { createUi } from "./ui";
+
 export type WizardChoices = {
   mode: string;
   headless: boolean;
@@ -28,6 +30,8 @@ interface WizardRunOptions {
   probe?: ProbeFunction;
   homeDir?: string;
   env?: NodeJS.ProcessEnv;
+  /** Shown in the banner; defaults to "2.2.0" when omitted. */
+  version?: string;
 }
 
 interface PersonalChromeOptions {
@@ -42,6 +46,17 @@ interface PersonalChromeOptions {
 
 const PROBE_INTERVAL_MS = 300;
 const DEFAULT_PROBE_ATTEMPTS = 33;
+const HARNESS_MENU = [
+  { id: "opencode", label: "OpenCode", description: "Configures ~/.config/opencode/opencode.json" },
+  { id: "claude-code", label: "Claude Code", description: "Runs `claude mcp add` for your user scope" },
+  { id: "copilot", label: "GitHub Copilot CLI", description: "Runs `copilot mcp add`" },
+  { id: "codex", label: "OpenAI Codex CLI", description: "Runs `codex mcp add`" },
+  { id: "gemini", label: "Gemini CLI", description: "Runs `gemini mcp add` for your user scope" },
+  { id: "vscode", label: "VS Code", description: "Runs `code --add-mcp`" },
+  { id: "cursor", label: "Cursor", description: "Adds SmoothOperator to ~/.cursor/mcp.json" },
+  { id: "windsurf", label: "Windsurf", description: "Adds SmoothOperator to Windsurf's mcp_config.json" },
+  { id: "claude-desktop", label: "Claude Desktop", description: "Updates claude_desktop_config.json" },
+] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -57,27 +72,44 @@ export function isInteractive(): boolean {
 
 export async function promptForHarness(opts: { stdin: WizardStdin; stdout: WizardStdout }): Promise<string> {
   const { createInterface } = await import("node:readline/promises");
-  // The interactive path only runs against real terminal streams; the casts
-  // bridge NodeJS.ReadableStream/WritableStream to readline's stream types.
-  const rl = createInterface({
-    input: opts.stdin as unknown as import("node:stream").Readable,
-    output: opts.stdout as unknown as import("node:stream").Writable,
-  });
+  const ui = createUi(opts.stdout);
+  const input = opts.stdin as unknown as import("node:stream").Readable;
+  const output = opts.stdout as unknown as import("node:stream").Writable;
+  const rl = createInterface({ input, output });
+
   try {
-    const answer = await rl.question(`Harness [opencode/claude-code/copilot/codex/gemini/vscode/cursor/windsurf/claude-desktop] [opencode]: `);
-    const trimmed = answer.trim().toLowerCase();
-    if (!trimmed) return "opencode";
-    const map: Record<string, string> = {
-      "claude": "claude-code",
-      "github-copilot": "copilot",
-      "codex-cli": "codex",
-      "gemini-cli": "gemini",
-      "vs-code": "vscode",
-    };
-    return map[trimmed] ?? trimmed;
+    if (opts.stdout.isTTY) {
+      ui.step(0, HARNESS_MENU.length, "Which harness should get a browser?");
+      ui.explain(["The AI harness you use every day. Pick yours; you can re-run this later for others."]);
+      HARNESS_MENU.forEach((entry, index) => ui.option(index + 1, entry.label, entry.description));
+    }
+    while (true) {
+      const answer = await rl.question(`Choose 1-${HARNESS_MENU.length} or type a name [opencode]: `);
+      const trimmed = answer.trim().toLowerCase();
+      if (!trimmed) return "opencode";
+      const numeric = Number.parseInt(trimmed, 10);
+      if (`${numeric}` === trimmed && numeric >= 1 && numeric <= HARNESS_MENU.length) {
+        return HARNESS_MENU[numeric - 1].id;
+      }
+      if (/^\d+$/.test(trimmed)) {
+        continue;
+      }
+      return normalizeHarnessName(trimmed);
+    }
   } finally {
     rl.close();
   }
+}
+
+function normalizeHarnessName(name: string): string {
+  const aliases: Record<string, string> = {
+    "claude": "claude-code",
+    "github-copilot": "copilot",
+    "codex-cli": "codex",
+    "gemini-cli": "gemini",
+    "vs-code": "vscode",
+  };
+  return aliases[name] ?? name;
 }
 
 function recommendedDefaults(homeDir: string | undefined): WizardChoices {
@@ -91,9 +123,49 @@ function recommendedDefaults(homeDir: string | undefined): WizardChoices {
   };
 }
 
-export async function runWizard(_harness: string, opts: WizardRunOptions): Promise<WizardChoices> {
+interface WizardSession {
+  question(prompt: string): Promise<string>;
+}
+
+/** readline's promise API rejects on EOF/Ctrl-D; treat that as "accept the
+ * default" instead of crashing mid-setup. */
+function tolerantQuestion(rl: { question(prompt: string): Promise<string> }): WizardSession {
+  return {
+    async question(prompt: string): Promise<string> {
+      try {
+        return await rl.question(prompt);
+      } catch (error) {
+        const code = (error as { code?: unknown }).code;
+        const aborted = error instanceof Error && error.name === "AbortError";
+        if (aborted || code === "ABORT_ERR" || code === "ERR_USE_AFTER_CLOSE") {
+          return "";
+        }
+        throw error;
+      }
+    },
+  };
+}
+
+async function askYesNo(session: WizardSession, prompt: string, fallback: boolean): Promise<boolean> {
+  while (true) {
+    const hint = fallback ? "[Y/n]" : "[y/N]";
+    const answer = (await session.question(`${prompt} ${hint}: `)).trim().toLowerCase();
+    if (!answer) return fallback;
+    if (["y", "yes"].includes(answer)) return true;
+    if (["n", "no"].includes(answer)) return false;
+  }
+}
+
+function parseDomainList(raw: string): string[] | undefined {
+  const domains = raw.split(",").map((part) => part.trim().toLowerCase()).filter(Boolean);
+  const invalid = domains.find((domain) => !/^(?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(domain));
+  return invalid === undefined ? domains : undefined;
+}
+
+export async function runWizard(harness: string, opts: WizardRunOptions): Promise<WizardChoices> {
+  const defaults = recommendedDefaults(opts.homeDir);
   if (opts.yes) {
-    return recommendedDefaults(opts.homeDir);
+    return defaults;
   }
   const stdin = opts.stdin ?? process.stdin;
   const stdout = opts.stdout ?? process.stdout;
@@ -101,46 +173,160 @@ export async function runWizard(_harness: string, opts: WizardRunOptions): Promi
   // apply exactly the same recommended defaults as the `--yes` path.
   const interactive = Boolean(stdin.isTTY && stdout.isTTY && !process.env.CI);
   if (!interactive) {
-    return recommendedDefaults(opts.homeDir);
+    return defaults;
   }
+
+  const ui = createUi(stdout);
   const { createInterface } = await import("node:readline/promises");
   const rl = createInterface({
     input: stdin as unknown as import("node:stream").Readable,
     output: stdout as unknown as import("node:stream").Writable,
   });
+  const session: WizardSession = tolerantQuestion(rl);
+
   try {
-    const modeAns = await rl.question("Browser mode: 1) managed private (recommended) 2) personal Chrome (connect) 3) disabled [1]: ");
-    const modeMap: Record<string, string> = { "1": "managed", "2": "connect", "3": "disabled", "": "managed" };
-    let mode = modeMap[modeAns.trim()] ?? "managed";
-    if (!["managed", "connect", "disabled"].includes(mode)) mode = "managed";
+    ui.banner("SmoothOperator Setup", `Give ${harness} a real Chrome it can drive`, opts.version ?? "2.2.0");
+    ui.note(`Configuring: ${harness}`);
+    ui.note("Answer each question, or press Enter to accept the recommended default.");
+    ui.note(`You can re-run \`smooth-operator install ${harness}\` at any time to change these.`);
+
+    ui.step(1, 6, "Browser mode");
+    ui.explain([
+      "Who owns the Chrome window your AI drives?",
+      "",
+      "Managed gives the AI its own private Chrome profile at ~/.smooth-operator/browser.",
+      "Your daily browser stays untouched; logins for the AI live separately.",
+      "",
+      "Connect attaches to your real Chrome instead, so the AI uses everything",
+      "you are already signed into. Only pick this if you need your existing logins.",
+      "",
+      "Disabled keeps the server but turns all browsing tools off.",
+    ]);
+    ui.option(1, "Managed private Chrome", "Isolated profile owned by SmoothOperator. Safest default.", true);
+    ui.option(2, "Personal Chrome (connect)", "Reuse your real browser and its existing sign-ins.");
+    ui.option(3, "Disabled", "No browser. Tools that need a page will report an error.");
+
+    let mode = "managed";
     let browserUrl: string | undefined;
-    if (mode === "connect") {
-      browserUrl = "http://127.0.0.1:9222";
+    let headless = false;
+    let allowedDomains: string[] = [];
+    let blockedDomains: string[] = [];
+    let allowEval = false;
+    let dataDir = defaults.dataDir;
+    while (true) {
+      const answer = (await session.question("Mode [1]: ")).trim();
+      if (!answer || answer === "1") {
+        mode = "managed";
+        break;
+      }
+      if (answer === "2") {
+        mode = "connect";
+        browserUrl = "http://127.0.0.1:9222";
+        break;
+      }
+      if (answer === "3") {
+        mode = "disabled";
+        break;
+      }
+      ui.failure("Enter 1, 2, or 3.");
     }
-    const headlessAns = await rl.question("Headless Chrome? (y/N) [N]: ");
-    const headless = headlessAns.trim().toLowerCase() === "y";
-    const allowedAns = await rl.question("Allowed domains (comma-separated, empty=all) []: ");
-    const allowedDomains = allowedAns.trim() ? allowedAns.split(",").map((s) => s.trim()).filter(Boolean) : [];
-    const blockedAns = await rl.question("Blocked domains (comma-separated) []: ");
-    const blockedDomains = blockedAns.trim() ? blockedAns.split(",").map((s) => s.trim()).filter(Boolean) : [];
-    const evalAns = await rl.question("Allow page JavaScript (browser_evaluate)? (y/N) [N]: ");
-    const allowEval = evalAns.trim().toLowerCase() === "y";
-    const dataDirAns = await rl.question(`Data directory [${join(opts.homeDir ?? homedir(), ".smooth-operator")}]: `);
-    const dataDir = dataDirAns.trim() ? dataDirAns.trim() : join(opts.homeDir ?? homedir(), ".smooth-operator");
-    // If personal Chrome was chosen, launch the helper; fall back to the
-    // default local DevTools URL when the helper cannot start Chrome.
-    if (mode === "connect") {
-      try {
-        const launched = await launchPersonalChrome({ dataDir, spawn: opts.spawn, probe: opts.probe ?? defaultProbe, port: 9222 });
-        browserUrl = launched.url;
-      } catch {
-        // keep default URL if helper fails
+
+    let headlessChoice = false;
+    if (mode !== "disabled") {
+      ui.step(2, 6, "Headless mode");
+      ui.explain([
+        "Headless runs Chrome with no visible window - lighter and invisible.",
+        "Visible Chrome lets you watch clicks happen and handle CAPTCHAs or",
+        "logins yourself when a site pauses for human verification.",
+      ]);
+      headlessChoice = await askYesNo(session, "Run Chrome headless (no window)?", false);
+
+      ui.step(3, 6, "Allowed domains");
+      ui.explain([
+        "Restrict which sites the AI may open, e.g. docs.example.com, *.wikipedia.org",
+        "Leave empty to allow every site. Blocked domains always win over allowed ones.",
+      ]);
+      while (true) {
+        const parsed = parseDomainList(await session.question("Allowed domains (comma-separated, Enter for all): "));
+        if (parsed !== undefined) {
+          allowedDomains = parsed;
+          break;
+        }
+        ui.failure("That did not look like a domain list. Example: example.com, *.shop.test");
+      }
+
+      ui.step(4, 6, "Blocked domains");
+      ui.explain(["Never open these sites, even when everything else is allowed."]);
+      while (true) {
+        const parsed = parseDomainList(await session.question("Blocked domains (comma-separated, Enter for none): "));
+        if (parsed !== undefined) {
+          blockedDomains = parsed;
+          break;
+        }
+        ui.failure("That did not look like a domain list. Example: ads.example.com");
+      }
+
+      ui.step(5, 6, "JavaScript execution");
+      ui.explain([
+        "browser_evaluate runs arbitrary JavaScript on a page - powerful for scraping",
+        "but it can also trigger bot defenses. Most users never need it on.",
+      ]);
+      allowEval = await askYesNo(session, "Allow the AI to run JavaScript on pages?", false);
+
+      ui.step(6, 6, "Data directory");
+      ui.explain([
+        "Where the private Chrome profile, logs, and downloads live.",
+        "Permissions are locked to 0600 so only your user can read them.",
+      ]);
+      while (dataDir === defaults.dataDir) {
+        const answer = (await session.question(`Data directory [${defaults.dataDir}]: `)).trim();
+        if (!answer) break;
+        if (!answer.startsWith("/")) {
+          ui.failure("Enter an absolute path (starting with /).");
+          continue;
+        }
+        dataDir = answer;
+        break;
+      }
+      headless = headlessChoice;
+
+      if (mode === "connect") {
+        ui.note("Starting your personal Chrome with remote debugging on port 9222...");
+        try {
+          const launched = await launchPersonalChrome({ dataDir, spawn: opts.spawn, probe: opts.probe ?? defaultProbe, port: 9222 });
+          browserUrl = launched.url;
+          ui.success(`Connected to your Chrome at ${launched.url}`);
+        } catch {
+          browserUrl = "http://127.0.0.1:9222";
+          ui.note("Could not reach Chrome on port 9222 yet - keeping the default URL.");
+        }
       }
     }
+
+    writeSummary(ui, harness, { mode, headless, allowedDomains, blockedDomains, allowEval, dataDir });
     return { mode, headless, allowedDomains, blockedDomains, allowEval, dataDir, browserUrl };
   } finally {
     rl.close();
   }
+}
+
+function writeSummary(ui: ReturnType<typeof createUi>, harness: string, choices: WizardChoices): void {
+  const modeLabel: Record<string, string> = {
+    managed: "Managed private Chrome (isolated profile)",
+    connect: "Your personal Chrome via debugging port",
+    disabled: "Disabled - no browser tools",
+  };
+  ui.banner("Configuration Summary", `Ready to configure ${harness}`, "");
+  ui.keyValues([
+    ["Browser mode", choices.mode === "connect" ? modeLabel.connect : (modeLabel[choices.mode] ?? choices.mode)],
+    ["Headless", choices.headless ? "yes - no visible window" : "no - you can watch and intervene"],
+    ...(choices.mode === "disabled" ? [] : [
+      ["Allowed sites", choices.allowedDomains.length ? choices.allowedDomains.join(", ") : "all sites"],
+      ["Blocked sites", choices.blockedDomains.length ? choices.blockedDomains.join(", ") : "none"],
+      ["Page JavaScript", choices.allowEval ? "enabled" : "off (recommended)"],
+      ["Data directory", choices.dataDir],
+    ] satisfies ReadonlyArray<readonly [string, string]>),
+  ]);
 }
 
 async function defaultProbe(url: string, timeoutMs: number): Promise<ProbeResult> {

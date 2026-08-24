@@ -80,9 +80,25 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (!harness) {
       throw new AppError("CONFIG_INVALID", "The install command requires a harness target.");
     }
-    const wizardChoices = await runWizard(harness, { yes, stdin: process.stdin, stdout: process.stdout, homeDir: homedir(), env: process.env });
+    const wizardChoices = await runWizard(harness, { yes, stdin: process.stdin, stdout: process.stdout, homeDir: homedir(), env: process.env, version: SERVER_VERSION });
     await persistWizardConfig(wizardChoices, homedir());
-    process.stdout.write(`${await installHarness(harness)}\n`);
+    const installMessage = await installHarness(harness);
+    const { createUi } = await import("./ui");
+    const ui = createUi(process.stdout);
+    if (process.stdout.isTTY) {
+      ui.banner("Installation Complete", `${harness} can now drive a browser`, SERVER_VERSION);
+      ui.keyValues([
+        ["Config file", `${homedir()}/.smooth-operator/config.json`],
+        ["Browser mode", wizardChoices.mode],
+      ]);
+      process.stdout.write("\n");
+      ui.step(0, 2, "Next steps");
+      ui.option(1, "Restart the harness", "Quit and reopen it so it picks up the new MCP server.");
+      ui.option(2, "Verify", "Ask your AI to run server_health and browser_doctor.");
+      ui.success(installMessage);
+    } else {
+      process.stdout.write(`${installMessage}\n`);
+    }
     return;
   }
   if (args.length === 1 && (args[0] === "--version" || args[0] === "-V")) {
