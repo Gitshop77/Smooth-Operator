@@ -128,8 +128,8 @@ async function main() {
 }
 
 async function verifySourceMetadata(packageJson) {
-  if (packageJson.name !== "smooth-operator") {
-    throw new Error("package.json name must remain smooth-operator.");
+  if (packageJson.name !== "smooth-operator-mcp") {
+    throw new Error("package.json name must remain smooth-operator-mcp.");
   }
   const declaredFiles = new Set(Array.isArray(packageJson.files) ? packageJson.files : []);
   const expectedFiles = new Set(["dist", "docs/mcp-server.md", "docs/harnesses.md", "README.md", "LICENSE", ".env.example"]);

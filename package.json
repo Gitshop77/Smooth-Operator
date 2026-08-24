@@ -1,10 +1,14 @@
 {
-  "name": "smooth-operator",
+  "name": "smooth-operator-mcp",
   "version": "2.1.0",
   "type": "module",
   "packageManager": "npm@10.9.8",
   "description": "A lightweight, production-grade MCP server for secure browser automation.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gitshop77/Smooth-Operator.git"
+  },
   "files": [
     "dist",
     "docs/mcp-server.md",
@@ -36,7 +40,8 @@
     "package:smoke": "npm run build && node scripts/verify-package.mjs",
     "package:smoke:install": "npm run build && node scripts/verify-package.mjs --install",
     "release:smoke": "npm run package:smoke:install && npm run benchmark:mcp:dist",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "^2.0.0",

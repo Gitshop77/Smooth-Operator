@@ -18,9 +18,11 @@ Standalone Node.js MCP server. No extension, service worker, or model loop.
 ## Install
 
 ~~~sh
-npm install -g smooth-operator && smooth-operator install opencode
+npm install -g github:Gitshop77/Smooth-Operator && smooth-operator install opencode
 git clone https://github.com/Gitshop77/Smooth-Operator.git && cd Smooth-Operator && npm install -g . && smooth-operator install opencode
 ~~~
+
+The npm registry name is `smooth-operator-mcp` (plain `smooth-operator` is an unrelated library).
 
 Wizard (default): 6 prompts — mode (managed/private vs personal Chrome connect vs disabled), headless, allowed/blocked domains, allowEval, dataDir, browserUrl. Validation via zod. `launchPersonalChrome` spawns `chrome --remote-debugging-port=9222 --user-data-dir=~/.smooth-operator/personal-chrome`, polls `http://127.0.0.1:9222/json/version` (300ms×33). `--yes` uses defaults: managed, headless false, allowEval false, no domains. Persists to `~/.smooth-operator/config.json` (0600, symlink-safe, backup). Bare `smooth-operator install` prompts for the harness on a TTY (piped/CI prints usage); on re-run the wizard's choices are authoritative for mode/headless/domains/allowEval — previously persisted values for those keys are overwritten while unrelated settings merge.
 

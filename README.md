@@ -6,20 +6,28 @@ Give your AI a real Chrome. SmoothOperator is a tiny MCP server — your harness
 
 Pick your harness. Run one line. Restart harness.
 
-**From npm:**
+**From a clone (works today, no publish step):**
 ~~~sh
-npm install -g smooth-operator && smooth-operator install opencode
-npm install -g smooth-operator && smooth-operator install claude-code
-npm install -g smooth-operator && smooth-operator install copilot
-npm install -g smooth-operator && smooth-operator install codex
-npm install -g smooth-operator && smooth-operator install gemini
-npm install -g smooth-operator && smooth-operator install vscode
-npm install -g smooth-operator && smooth-operator install cursor
-npm install -g smooth-operator && smooth-operator install windsurf
-npm install -g smooth-operator && smooth-operator install claude-desktop
+npm install -g github:Gitshop77/Smooth-Operator && smooth-operator install opencode
 ~~~
 
-**From a clone:**
+**From npm** (`smooth-operator-mcp`, once published):
+~~~sh
+npm install -g smooth-operator-mcp && smooth-operator install opencode
+npm install -g smooth-operator-mcp && smooth-operator install claude-code
+npm install -g smooth-operator-mcp && smooth-operator install copilot
+npm install -g smooth-operator-mcp && smooth-operator install codex
+npm install -g smooth-operator-mcp && smooth-operator install gemini
+npm install -g smooth-operator-mcp && smooth-operator install vscode
+npm install -g smooth-operator-mcp && smooth-operator install cursor
+npm install -g smooth-operator-mcp && smooth-operator install windsurf
+npm install -g smooth-operator-mcp && smooth-operator install claude-desktop
+~~~
+
+> Note: the plain-npm name `smooth-operator` is an unrelated library on the registry.
+> Do NOT use `npm install -g smooth-operator`.
+
+Or from a manual clone:
 ~~~sh
 git clone https://github.com/Gitshop77/Smooth-Operator.git
 cd Smooth-Operator

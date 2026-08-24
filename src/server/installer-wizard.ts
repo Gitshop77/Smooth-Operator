@@ -263,7 +263,9 @@ export async function launchPersonalChrome(opts: PersonalChromeOptions): Promise
     try {
       const res = await probe(`http://127.0.0.1:${port}/json/version`, 1000);
       if (res.state === "live") return { url: `http://127.0.0.1:${port}` };
-    } catch {}
+    } catch {
+      // Endpoint not ready yet; keep probing until attempts are exhausted.
+    }
   }
   throw new AppError("BROWSER_CONNECT_TIMEOUT", `Chrome DevTools endpoint on port ${port} did not become ready after ${attempts} probes. Close Chrome or choose another port.`);
 }

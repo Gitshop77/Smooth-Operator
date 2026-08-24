@@ -37,9 +37,11 @@ Use Node.js 22.23.2 and npm 10.9.8 for the reproducible project baseline. A
 published package includes the built executable:
 
 ```sh
-npm install -g smooth-operator
+npm install -g smooth-operator-mcp
 smooth-operator --help
 ```
+
+(The registry package is `smooth-operator-mcp`; plain `smooth-operator` is an unrelated library. You can also install straight from GitHub: `npm install -g github:Gitshop77/Smooth-Operator`.)
 
 From a checkout:
 
@@ -393,7 +395,7 @@ To clean up a local installation:
 
 ```sh
 smooth-operator install claude-desktop   # inspect config before removal
-npm uninstall -g smooth-operator
+npm uninstall -g smooth-operator-mcp
 ```
 
 Remove the corresponding `SmoothOperator` entry from a harness config and delete
