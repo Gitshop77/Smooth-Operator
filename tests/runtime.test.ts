@@ -40,7 +40,7 @@ describe("runtime lifecycle", () => {
     }
   });
 
-  it("leases the native profile and rejects concurrent owners", async () => {
+  it("lets concurrent sessions connect; only simultaneous browsing conflicts", async () => {
     const directory = await mkdtemp(join(tmpdir(), "smooth-operator-runtime-lock-"));
     const profile = join(directory, "browser");
     const base = testConfig();
@@ -54,10 +54,19 @@ describe("runtime lifecycle", () => {
       },
     });
     const first = await ServerRuntime.create(config);
+    let second: ServerRuntime | undefined;
     try {
-      await expect(ServerRuntime.create(config)).rejects.toMatchObject({ code: "BROWSER_PROFILE_IN_USE" });
-    } finally {
+      // A second harness session must stay fully connected while the first
+      // owns the profile lease; only its browser operations conflict.
+      second = await ServerRuntime.create(config);
+      await expect(second.run({ action: "navigate", url: "https://example.test/" } as never)).rejects.toMatchObject({ code: "BROWSER_PROFILE_IN_USE" });
+      // Once the owner releases, the survivor can acquire the lease lazily.
       await first.close();
+      const lease = second as unknown as { ensureBrowserProfileLease(): Promise<void> };
+      await expect(lease.ensureBrowserProfileLease()).resolves.toBeUndefined();
+    } finally {
+      await first.close().catch(() => undefined);
+      await second?.close();
     }
     await expect(access(join(profile, ".smooth-operator-profile.lock"))).rejects.toMatchObject({ code: "ENOENT" });
     await rm(directory, { recursive: true, force: true });
@@ -72,10 +81,15 @@ describe("runtime lifecycle", () => {
       browser: { ...base.browser, mode: "managed", userDataDir: profile },
     });
     const first = await ServerRuntime.create(config);
+    let second: ServerRuntime | undefined;
     try {
-      await expect(ServerRuntime.create(config)).rejects.toMatchObject({ code: "BROWSER_PROFILE_IN_USE" });
+      // Startup stays healthy under contention; the conflict surfaces only
+      // when the second session actually drives the managed browser.
+      second = await ServerRuntime.create(config);
+      await expect(second.snapshot({ url: "https://example.test/" } as never)).rejects.toMatchObject({ code: "BROWSER_PROFILE_IN_USE" });
     } finally {
       await first.close();
+      await second?.close();
       await rm(directory, { recursive: true, force: true });
     }
   });
@@ -115,7 +129,14 @@ describe("runtime lifecycle", () => {
     // PID 0/1 style owners are unreachable to kill() as ESRCH; simulate an
     // owner that exists by using our own PID - kill(pid, 0) then succeeds.
     await writeFile(join(profile, ".smooth-operator-profile.lock"), JSON.stringify({ pid: process.pid, token: "live" }));
-    await expect(ServerRuntime.create(config)).rejects.toMatchObject({ code: "BROWSER_PROFILE_IN_USE" });
+    const runtime = await ServerRuntime.create(config);
+    try {
+      await expect(runtime.run({ action: "navigate", url: "https://example.test/" } as never)).rejects.toMatchObject({ code: "BROWSER_PROFILE_IN_USE" });
+    } finally {
+      await runtime.close();
+      // The live-owner lock must survive our shutdown untouched.
+      await expect(access(join(profile, ".smooth-operator-profile.lock"))).resolves.toBeUndefined();
+    }
     await rm(directory, { recursive: true, force: true });
   });
 

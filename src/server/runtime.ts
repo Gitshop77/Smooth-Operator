@@ -19,11 +19,39 @@ export class ServerRuntime {
   readonly research: ResearchService;
   private closePromise?: Promise<void>;
 
-  private constructor(readonly config: ServerConfig, private readonly browserProfileLease?: BrowserProfileLease) {
+  private constructor(readonly config: ServerConfig, private browserProfileLease?: BrowserProfileLease) {
     this.logger = new Logger(config.logLevel, { component: "smooth-operator" });
     this.policy = new SecurityPolicy(config);
     this.browser = new BrowserService(config, this.policy, this.logger.child({ component: "browser" }));
     this.research = new ResearchService(this.policy, this.logger.child({ component: "research" }));
+  }
+
+  /** True when this session's config implies ownership of the shared managed
+   * browser profile (and therefore of its lease). */
+  private get profileLeaseRequired(): boolean {
+    const ownsBrowserProcess = this.config.browser.mode !== "disabled" && (this.config.browser.mode === "managed" || this.config.browser.mode === "launch"
+      || (this.config.browser.autoLaunch && Boolean(this.config.browser.executablePath)));
+    return Boolean(ownsBrowserProcess && this.config.browser.userDataDir);
+  }
+
+  /** Browser operations must hold the profile lease before touching the
+   * managed browser. Acquisition is lazy so concurrent harness sessions stay
+   * connected while idle; only genuinely simultaneous browsing conflicts,
+   * and that surfaces as a retryable tool error instead of a dead server. */
+  private async ensureBrowserProfileLease(): Promise<void> {
+    if (!this.profileLeaseRequired || this.browserProfileLease || !this.config.browser.userDataDir) {
+      return;
+    }
+    try {
+      await ensurePrivateDirectory(this.config.browser.userDataDir);
+      this.browserProfileLease = await acquireBrowserProfileLease(this.config.browser.userDataDir);
+      this.logger.info("Acquired browser profile lease on demand");
+    } catch (error) {
+      if (error instanceof AppError && (error.code === "BROWSER_PROFILE_IN_USE" || error.code === "BROWSER_PROFILE_LOCK_FAILED")) {
+        throw new AppError("BROWSER_PROFILE_IN_USE", "Another SmoothOperator session currently owns the managed browser profile. Retry when that session closes, or switch one of them to connect mode.", { retryable: true });
+      }
+      throw error;
+    }
   }
 
   static async create(config: ServerConfig): Promise<ServerRuntime> {
@@ -34,9 +62,19 @@ export class ServerRuntime {
       await ensurePrivateDirectory(join(config.dataDir, "files"));
       const ownsBrowserProcess = config.browser.mode !== "disabled" && (config.browser.mode === "managed" || config.browser.mode === "launch"
         || (config.browser.autoLaunch && Boolean(config.browser.executablePath)));
-      if (ownsBrowserProcess && config.browser.userDataDir) {
+      const needsProfileLease = Boolean(ownsBrowserProcess && config.browser.userDataDir);
+      if (needsProfileLease && config.browser.userDataDir) {
         await ensurePrivateDirectory(config.browser.userDataDir);
-        browserProfileLease = await acquireBrowserProfileLease(config.browser.userDataDir);
+        // The lease is optional at startup: a concurrent SmoothOperator
+        // session may own it right now. Killing this MCP connection would
+        // break every tool, so start degraded and let each browser
+        // operation retry the lease lazily (see ensureBrowserProfileLease).
+        browserProfileLease = await acquireBrowserProfileLease(config.browser.userDataDir).catch((error: unknown) => {
+          if (error instanceof AppError && (error.code === "BROWSER_PROFILE_IN_USE" || error.code === "BROWSER_PROFILE_LOCK_FAILED")) {
+            return undefined;
+          }
+          throw error;
+        });
       }
       const canonicalDataDir = await realpath(config.dataDir);
       const runtime = new ServerRuntime({ ...config, dataDir: canonicalDataDir }, browserProfileLease);
@@ -74,14 +112,17 @@ export class ServerRuntime {
   }
 
   async run(action: BrowserAction, signal?: AbortSignal): Promise<unknown> {
+    await this.ensureBrowserProfileLease();
     return this.browser.execute(action, signal);
   }
 
   async snapshot(options: NonNullable<Parameters<BrowserService["snapshot"]>[0]>, signal?: AbortSignal): Promise<PageSnapshot> {
+    await this.ensureBrowserProfileLease();
     return this.browser.snapshot({ ...options, signal });
   }
 
   async listTabs(signal?: AbortSignal): Promise<unknown> {
+    await this.ensureBrowserProfileLease();
     return this.browser.listTabs(signal);
   }
 
@@ -97,6 +138,7 @@ export class ServerRuntime {
     if (signal?.aborted) {
       throw new AppError("CANCELLED", "The browser action was cancelled.");
     }
+    await this.ensureBrowserProfileLease();
     return awaitWithAbort(this.browser.closeSession(sessionId), signal);
   }
 
