@@ -14,7 +14,7 @@ import { AppError, asAppError, safeErrorDiagnostic } from "./errors";
 import { createMcpServer } from "./mcp";
 import { redactValue } from "./logger";
 import { ServerRuntime } from "./runtime";
-import { installHarness, supportedHarnessTargets } from "./installer";
+import { installHarness, planHarnessInstall, supportedHarnessTargets } from "./installer";
 import { SERVER_VERSION } from "./version";
 import { homedir } from "node:os";
 
@@ -80,6 +80,9 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (!harness) {
       throw new AppError("CONFIG_INVALID", "The install command requires a harness target.");
     }
+    // Validate the target before touching any configuration so an unknown
+    // name cannot leave a half-applied install behind.
+    planHarnessInstall(harness, { homeDirectory: homedir(), environment: process.env });
     const wizardChoices = await runWizard(harness, { yes, stdin: process.stdin, stdout: process.stdout, homeDir: homedir(), env: process.env, version: SERVER_VERSION });
     await persistWizardConfig(wizardChoices, homedir());
     const installMessage = await installHarness(harness);

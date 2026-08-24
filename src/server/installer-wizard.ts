@@ -30,7 +30,7 @@ interface WizardRunOptions {
   probe?: ProbeFunction;
   homeDir?: string;
   env?: NodeJS.ProcessEnv;
-  /** Shown in the banner; defaults to "2.2.0" when omitted. */
+  /** Shown in the banner; defaults to "2.2.1" when omitted. */
   version?: string;
 }
 
@@ -281,8 +281,8 @@ export async function runWizard(harness: string, opts: WizardRunOptions): Promis
       while (dataDir === defaults.dataDir) {
         const answer = (await session.question(`Data directory [${defaults.dataDir}]: `)).trim();
         if (!answer) break;
-        if (!answer.startsWith("/")) {
-          ui.failure("Enter an absolute path (starting with /).");
+        if (!answer.startsWith("/") || answer.replace(/\/+$/, "") === "") {
+          ui.failure("Enter an absolute path other than the filesystem root.");
           continue;
         }
         dataDir = answer;
@@ -399,7 +399,8 @@ export async function persistWizardConfig(choices: WizardChoices, homeDir: strin
     config.dataDir = choices.dataDir;
   }
 
-  const tmpPath = `${configPath}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  const { randomUUID } = await import("node:crypto");
+  const tmpPath = `${configPath}.tmp-${process.pid}-${randomUUID()}`;
   await writeFile(tmpPath, JSON.stringify(config, null, 2) + "\n", { mode: 0o600, flag: "wx" });
   await chmod(tmpPath, 0o600);
   // backup if exists

@@ -80,7 +80,7 @@ describe("runtime lifecycle", () => {
     }
   });
 
-  it("fails closed on stale profile locks instead of reclaiming them racy", async () => {
+  it("reclaims a stale profile lock after verifying its owner is gone", async () => {
     const directory = await mkdtemp(join(tmpdir(), "smooth-operator-runtime-stale-lock-"));
     const profile = join(directory, "browser");
     const base = testConfig();
@@ -89,13 +89,33 @@ describe("runtime lifecycle", () => {
       dataDir: directory,
       browser: { ...base.browser, mode: "launch", executablePath: "/usr/bin/chromium", userDataDir: profile },
     });
-    const runtime = await ServerRuntime.create(config);
-    await runtime.close();
-    // The first owner released its lock; create a lock carrying a definitely
-    // dead PID and verify acquisition refuses to unlink it automatically.
+    // A lock carrying a definitely dead PID must not wedge startup: the
+    // runtime reclaims it atomically instead of demanding manual cleanup.
+    await mkdir(profile, { recursive: true });
     await writeFile(join(profile, ".smooth-operator-profile.lock"), JSON.stringify({ pid: 2_147_483_647, token: "stale" }));
-    await expect(ServerRuntime.create(config)).rejects.toMatchObject({ code: "BROWSER_PROFILE_LOCK_FAILED" });
-    await expect(access(join(profile, ".smooth-operator-profile.lock"))).resolves.toBeUndefined();
+    const runtime = await ServerRuntime.create(config);
+    try {
+      await expect(access(join(profile, ".smooth-operator-profile.lock"))).resolves.toBeUndefined();
+    } finally {
+      await runtime.close();
+    }
+    await expect(access(join(profile, ".smooth-operator-profile.lock"))).rejects.toMatchObject({ code: "ENOENT" });
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("still refuses an active-looking lock whose owner rejects the signal", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-runtime-livelock-"));
+    const profile = join(directory, "browser");
+    const base = testConfig();
+    const config = testConfig({
+      dataDir: directory,
+      browser: { ...base.browser, mode: "launch", executablePath: "/usr/bin/chromium", userDataDir: profile },
+    });
+    await mkdir(profile, { recursive: true });
+    // PID 0/1 style owners are unreachable to kill() as ESRCH; simulate an
+    // owner that exists by using our own PID - kill(pid, 0) then succeeds.
+    await writeFile(join(profile, ".smooth-operator-profile.lock"), JSON.stringify({ pid: process.pid, token: "live" }));
+    await expect(ServerRuntime.create(config)).rejects.toMatchObject({ code: "BROWSER_PROFILE_IN_USE" });
     await rm(directory, { recursive: true, force: true });
   });
 

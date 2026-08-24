@@ -31,7 +31,7 @@ describe("harness installer", () => {
       { command: "claude", args: ["mcp", "add", "--scope", "user", "SmoothOperator", "--", "smooth-operator"] },
       { command: "copilot", args: ["mcp", "add", "SmoothOperator", "--", "smooth-operator"] },
       { command: "codex", args: ["mcp", "add", "SmoothOperator", "--", "smooth-operator"] },
-      { command: "gemini", args: ["mcp", "add", "SmoothOperator", "smooth-operator", "--scope", "user"] },
+      { command: "gemini", args: ["mcp", "add", "--scope", "user", "SmoothOperator", "smooth-operator"] },
       { command: "code", args: ["--add-mcp", JSON.stringify({ name: "SmoothOperator", command: entry.command, args: entry.args })] },
     ]);
   });
@@ -280,6 +280,57 @@ describe("harness installer", () => {
       await symlink(outsideDirectory, linkedDirectory);
       await expect(installHarness("claude-desktop", configOptions(configPath))).rejects.toThrow(/symbolic link/);
       expect(await readdir(outsideDirectory)).toEqual([]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("stale interpreter repair", () => {
+  it("repairs an opencode entry whose embedded node path no longer exists", async () => {
+    const directory = await makeDirectory("smooth-operator-installer-repair-opencode-");
+    const configPath = join(directory, "opencode.json");
+    const deadNode = join(directory, "gone", "node");
+    const entry = { command: "/opt/node", args: ["/opt/SmoothOperator/dist/smooth-operator.mjs"] };
+    try {
+      await writeFile(configPath, JSON.stringify({ mcp: { servers: { "SmoothOperator": { type: "local", command: [deadNode, ...entry.args] } } } }));
+      await expect(installHarness("opencode", { configPaths: { opencode: configPath }, serverEntry: entry })).resolves.toMatch(/Installed/);
+      const merged = JSON.parse(await readFile(configPath, "utf8")) as { mcp: { servers: Record<string, { command: string[] }> } };
+      expect(merged.mcp.servers["SmoothOperator"].command).toEqual([entry.command, ...entry.args]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("repairs a stdio entry whose embedded interpreter vanished and keeps other servers untouched", async () => {
+    const directory = await makeDirectory("smooth-operator-installer-repair-json-");
+    const configPath = join(directory, "mcp.json");
+    const deadNode = join(directory, "gone", "node");
+    const entry = { command: process.execPath, args: ["/opt/SmoothOperator/dist/smooth-operator.mjs"] };
+    try {
+      await writeFile(configPath, JSON.stringify({
+        mcpServers: {
+          "Other": { command: "uvx", args: ["other-server"] },
+          "SmoothOperator": { command: deadNode, args: entry.args },
+        },
+      }));
+      await installHarness("cursor", { configPaths: { cursor: configPath }, serverEntry: entry });
+      const merged = JSON.parse(await readFile(configPath, "utf8")) as { mcpServers: Record<string, { command: string; args: string[] }> };
+      expect(merged.mcpServers["SmoothOperator"].command).toBe(entry.command);
+      expect(merged.mcpServers["SmoothOperator"].args).toEqual(entry.args);
+      expect(merged.mcpServers["Other"]).toEqual({ command: "uvx", args: ["other-server"] });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("still refuses a genuinely different live configuration", async () => {
+    const directory = await makeDirectory("smooth-operator-installer-conflict-");
+    const configPath = join(directory, "mcp.json");
+    const entry = { command: process.execPath, args: ["/opt/SmoothOperator/dist/smooth-operator.mjs"] };
+    try {
+      await writeFile(configPath, JSON.stringify({ mcpServers: { "SmoothOperator": { command: "/bin/echo", args: ["something-else"] } } }));
+      await expect(installHarness("cursor", { configPaths: { cursor: configPath }, serverEntry: entry })).rejects.toThrow(/conflicting configuration/);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

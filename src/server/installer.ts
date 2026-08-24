@@ -1,4 +1,4 @@
-import { constants } from "node:fs";
+import { constants, accessSync, existsSync } from "node:fs";
 import { chmod, lstat, mkdir, open, rename, unlink, writeFile } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { execFile } from "node:child_process";
@@ -75,9 +75,10 @@ export function planHarnessInstall(target: string, options: Pick<HarnessInstallO
     return { kind: "cli", target: normalized, command: "codex", args: ["mcp", "add", SERVER_NAME, "--", cliEntry.command, ...cliEntry.args] };
   }
   if (normalized === "gemini") {
-    // Gemini's current yargs command is `add <name> <command> [args...]`.
-    // Keep options after the positional command, matching its official form.
-    return { kind: "cli", target: normalized, command: "gemini", args: ["mcp", "add", SERVER_NAME, cliEntry.command, ...cliEntry.args, "--scope", "user"] };
+    // Gemini's yargs parser accepts options anywhere, but keeping them before
+    // positionals prevents server args that resemble flags from being
+    // swallowed. User scope must be explicit; the CLI default is project.
+    return { kind: "cli", target: normalized, command: "gemini", args: ["mcp", "add", "--scope", "user", SERVER_NAME, cliEntry.command, ...cliEntry.args] };
   }
   if (normalized === "vscode") {
     return {
@@ -134,15 +135,31 @@ function normalizeTarget(target: string): NormalizedTarget {
 }
 
 function resolveServerEntry(): HarnessCommand {
-  // A published npm executable runs this module from dist. Using the absolute
-  // Node path plus absolute bundled entrypoint avoids GUI applications that
-  // start with a different PATH from finding the `smooth-operator` shim. In a
-  // source checkout, retain the portable command used by the local CLIs.
+  // A published npm executable runs this module from dist. GUI applications
+  // start without a shell PATH, so harness configs embed absolute paths.
+  // Node version managers pin execPath under a versioned directory (for
+  // example /opt/homebrew/Cellar/node/<version>/bin/node) that disappears on
+  // upgrade; prefer a stable symlink so the stored argv survives upgrades.
   const modulePath = fileURLToPath(import.meta.url);
   if (basename(modulePath) === "smooth-operator.mjs") {
-    return { command: process.execPath, args: [modulePath] };
+    return { command: resolveStableNodeExecutable(), args: [modulePath] };
   }
   return { command: "smooth-operator", args: [] };
+}
+
+function resolveStableNodeExecutable(): string {
+  const candidates = platform() === "darwin"
+    ? ["/opt/homebrew/bin/node", "/usr/local/bin/node"]
+    : ["/usr/local/bin/node", "/usr/bin/node"];
+  for (const candidate of candidates) {
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Candidate absent or not executable; keep looking.
+    }
+  }
+  return process.execPath;
 }
 
 async function runCliInstall(plan: Extract<HarnessInstallPlan, { kind: "cli" }>, executeCommand?: HarnessInstallOptions["executeCommand"]): Promise<string> {
@@ -340,6 +357,45 @@ async function chooseExistingOpenCodePath(plannedPath: string): Promise<string> 
   return plannedPath;
 }
 
+/** A stored entry whose embedded interpreter path no longer exists (for
+ * example after a Node version upgrade) is repairable: replace it with the
+ * freshly resolved entry instead of failing the install forever. Repair is
+ * limited to entries that are otherwise byte-equivalent to the desired one,
+ * so intentional conflicts (different scripts, disabled servers) still fail
+ * closed. */
+function isStaleEmbeddedCommand(command: unknown): boolean {
+  if (typeof command !== "string" || !command.includes("/")) {
+    return false;
+  }
+  return !existsSync(command);
+}
+
+function isStaleEmbeddedCommandArray(command: unknown): boolean {
+  if (!Array.isArray(command) || command.length === 0) {
+    return false;
+  }
+  const interpreter = command[0];
+  return typeof interpreter === "string" && interpreter.includes("/") && !existsSync(interpreter);
+}
+
+/** A stored entry whose embedded interpreter path no longer exists (for
+ * example after a Node version upgrade) is repairable: replace it with the
+ * freshly resolved entry instead of failing the install forever. Repair is
+ * limited to entries that are otherwise byte-equivalent to the desired one,
+ * so intentional conflicts (different scripts, disabled servers) still fail
+ * closed. */
+function isRepairableStdioEntry(existing: Record<string, unknown>, entry: HarnessCommand): boolean {
+  return isStaleEmbeddedCommand(existing.command)
+    && Array.isArray(existing.args)
+    && existing.args.length === entry.args.length
+    && existing.args.every((arg, index) => arg === entry.args[index]);
+}
+
+function isRepairableOpenCodeEntry(existing: Record<string, unknown>, desired: Record<string, unknown>): boolean {
+  const repaired = { ...existing, command: desired.command };
+  return isStaleEmbeddedCommandArray(existing.command) && sameOpenCodeEntry(repaired, desired);
+}
+
 function mergeMcpServersConfig(config: Record<string, unknown>, entry: HarnessCommand, path: string): { config: Record<string, unknown>; alreadyConfigured: boolean } {
   if (config.mcpServers !== undefined && !isRecord(config.mcpServers)) {
     throw new AppError("INSTALL_CONFIG_INVALID", `The mcpServers value in ${path} must be an object; refusing to replace it.`);
@@ -347,8 +403,16 @@ function mergeMcpServersConfig(config: Record<string, unknown>, entry: HarnessCo
   const servers = isRecord(config.mcpServers) ? { ...config.mcpServers } : {};
   const existing = servers[SERVER_NAME];
   if (existing !== undefined) {
-    if (!isRecord(existing) || !sameStdioEntry(existing, entry)) {
+    if (!isRecord(existing)) {
       throw new AppError("INSTALL_CONFIG_CONFLICT", `The '${SERVER_NAME}' server in ${path} has a conflicting configuration; refusing to overwrite it.`);
+    }
+    if (!sameStdioEntry(existing, entry)) {
+      if (!isRepairableStdioEntry(existing, entry)) {
+        throw new AppError("INSTALL_CONFIG_CONFLICT", `The '${SERVER_NAME}' server in ${path} has a conflicting configuration; refusing to overwrite it.`);
+      }
+      // Repair: the stored interpreter vanished; adopt the current entry.
+      servers[SERVER_NAME] = { command: entry.command, args: [...entry.args] };
+      return { config: { ...config, mcpServers: servers }, alreadyConfigured: false };
     }
     return { config, alreadyConfigured: true };
   }
@@ -377,10 +441,25 @@ function mergeOpenCodeConfig(config: Record<string, unknown>, entry: HarnessComm
     ? { type: "local", command: [entry.command, ...entry.args] }
     : { type: "local", command: [entry.command, ...entry.args], enabled: true };
   if (existing !== undefined) {
-    if (!isRecord(existing) || !sameOpenCodeEntry(existing, desired)) {
+    if (!isRecord(existing)) {
       throw new AppError("INSTALL_CONFIG_CONFLICT", `The '${SERVER_NAME}' server in ${path} has a conflicting configuration; refusing to overwrite it.`);
     }
-    return { config, alreadyConfigured: true };
+    if (!sameOpenCodeEntry(existing, desired)) {
+      if (!isRepairableOpenCodeEntry(existing, desired)) {
+        throw new AppError("INSTALL_CONFIG_CONFLICT", `The '${SERVER_NAME}' server in ${path} has a conflicting configuration; refusing to overwrite it.`);
+      }
+      // Repair: the stored interpreter vanished; adopt the current entry.
+      existing.command = desired.command;
+    } else {
+      return { config, alreadyConfigured: true };
+    }
+    servers[SERVER_NAME] = existing;
+    if (modernSchema) {
+      mcp.servers = servers;
+    } else {
+      Object.assign(mcp, servers);
+    }
+    return { config: { ...config, mcp }, alreadyConfigured: false };
   }
   servers[SERVER_NAME] = desired;
   if (modernSchema) {

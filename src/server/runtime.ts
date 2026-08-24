@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join, resolve } from "node:path";
 import process from "node:process";
@@ -213,17 +213,50 @@ async function acquireBrowserProfileLease(profileDirectory: string): Promise<Bro
         throw new AppError("BROWSER_PROFILE_LOCK_FAILED", "The native browser profile has an unreadable lock. Verify that no SmoothOperator process is using it, then remove the lock file.", { retryable: true });
       }
       if (existing === "stale") {
-        // Never unlink a lock after observing it as stale. Another contender
-        // may have replaced it between the PID check and the unlink, which
-        // would let two launchers acquire the same profile. Reclamation is
-        // intentionally conservative: an operator can remove the file after
-        // verifying that no owner remains.
-        throw new AppError("BROWSER_PROFILE_LOCK_FAILED", "The native browser profile has a stale lock. Verify that no SmoothOperator process is using it, then remove the lock file and retry.", { retryable: true });
+        // A stale lock means its owning process is provably gone (ESRCH).
+        // Reclaim it by atomically moving the entry aside after re-verifying
+        // identity (same inode, same dead pid) so a contender that replaced
+        // the lock between our checks is never stolen from. Blind unlinking
+        // by pathname would remain racy; rename keeps the swap atomic.
+        if (await reclaimStaleLock(lockPath)) {
+          continue;
+        }
+        throw new AppError("BROWSER_PROFILE_LOCK_FAILED", "The native browser profile has a stale lock that could not be reclaimed. Verify that no SmoothOperator process is using it, then remove the lock file and retry.", { retryable: true });
       }
     }
   }
 
   throw new AppError("BROWSER_PROFILE_IN_USE", "The native browser profile became busy while it was being acquired.", { retryable: true });
+}
+
+/** Atomically move a provably-dead owner's lock aside so acquisition can
+ * retry. Re-validates liveness and identity immediately before the rename to
+ * keep the steal window as small as the platform allows. */
+async function reclaimStaleLock(lockPath: string): Promise<boolean> {
+  try {
+    const before = await lstat(lockPath);
+    const raw = await readFile(lockPath, "utf8");
+    const pid = (JSON.parse(raw) as { pid?: unknown }).pid;
+    if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) {
+      return false;
+    }
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch (error) {
+      if (fileSystemErrorCode(error) !== "ESRCH") {
+        return false;
+      }
+    }
+    const after = await lstat(lockPath);
+    if (after.ino !== before.ino || after.dev !== before.dev) {
+      return false;
+    }
+    await rename(lockPath, `${lockPath}.stale-${randomUUID()}`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function readProfileLock(lockPath: string): Promise<"active" | "stale" | "missing" | "unknown"> {
