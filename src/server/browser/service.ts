@@ -2773,6 +2773,10 @@ export class BrowserService {
         throw new AppError("BROWSER_GUARD_FAILED", "The browser navigation policy could not be installed.", { retryable: true, cause: error });
       }
     }
+    // Pages that existed before the browser connection was fully wired do not
+    // receive a targetcreated callback. Release their initial CDP pause only
+    // after page-level request interception is ready, just as for new pages.
+    await this.releaseTargetGuardForPage(state.page);
   }
 
   private async handleRequest(state: PageState, request: HTTPRequest): Promise<void> {

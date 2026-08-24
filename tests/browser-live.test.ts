@@ -161,12 +161,16 @@ describeLive("live browser contract", () => {
       security: { ...testConfig().security, allowedDomains: ["127.0.0.1"], allowedFileRoots: [managedDataDir] },
     });
     const first = await ServerRuntime.create(config);
+    let competing: ServerRuntime | undefined;
     let restarted: ServerRuntime | undefined;
     let firstProcess: { kill(signal: string): void } | null | undefined;
     try {
       await expect(first.listTabs()).resolves.toEqual(expect.any(Array));
       await expect(access(join(profile, "DevToolsActivePort"))).resolves.toBeUndefined();
-      await expect(ServerRuntime.create(config)).rejects.toMatchObject({ code: "BROWSER_PROFILE_IN_USE" });
+      competing = await ServerRuntime.create(config);
+      await expect(competing.listTabs()).rejects.toMatchObject({ code: "BROWSER_PROFILE_IN_USE" });
+      await competing.close();
+      competing = undefined;
 
       const internal = first.browser as unknown as { browser?: { disconnect(): Promise<void>; process(): { kill(signal: string): void } | null } };
       firstProcess = internal.browser?.process() ?? undefined;
@@ -176,6 +180,7 @@ describeLive("live browser contract", () => {
       await expect(restarted.listTabs()).resolves.toEqual(expect.any(Array));
       expect(restarted.browser.connectionStatus()).toMatchObject({ connected: true, owned: true });
     } finally {
+      await competing?.close().catch(() => undefined);
       await restarted?.close().catch(() => undefined);
       await first.close().catch(() => undefined);
       // The disconnected `first` browser is no longer managed by the service,
