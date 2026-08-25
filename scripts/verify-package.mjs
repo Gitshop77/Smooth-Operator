@@ -65,7 +65,8 @@ async function main() {
       timeout: 120_000,
     });
     const metadata = JSON.parse(packed.stdout.trim());
-    const pack = metadata[0];
+    // npm 10/11 return an array here; npm 12 returns an object keyed by name.
+    const pack = Array.isArray(metadata) ? metadata[0] : metadata[packageJson.name];
     if (!pack || pack.name !== packageJson.name || pack.version !== packageJson.version || typeof pack.filename !== "string" || !Array.isArray(pack.files)) {
       throw new Error("npm pack returned incomplete or mismatched package metadata.");
     }

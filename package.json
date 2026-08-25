@@ -1,6 +1,6 @@
 {
   "name": "smooth-operator-mcp",
-  "version": "2.4.5",
+  "version": "2.4.6",
   "type": "module",
   "packageManager": "npm@12.0.2",
   "description": "A lightweight, production-grade MCP server for secure browser automation.",

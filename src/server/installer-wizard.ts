@@ -33,7 +33,7 @@ interface WizardRunOptions {
   probe?: ProbeFunction;
   homeDir?: string;
   env?: NodeJS.ProcessEnv;
-  /** Shown in the banner; defaults to "2.4.5" when omitted. */
+  /** Shown in the banner; defaults to "2.4.6" when omitted. */
   version?: string;
 }
 
@@ -236,7 +236,7 @@ export async function runWizard(harness: string, opts: WizardRunOptions): Promis
   const session: WizardSession = tolerantQuestion(rl);
 
   try {
-    ui.banner("SmoothOperator Setup", `Give ${harness} a real Chrome it can drive`, opts.version ?? "2.4.5");
+    ui.banner("SmoothOperator Setup", `Give ${harness} a real Chrome it can drive`, opts.version ?? "2.4.6");
     ui.note(`Configuring: ${harness}`);
     ui.note("Answer each question, or press Enter to accept the recommended default.");
     ui.note(`You can re-run \`smooth-operator install ${harness}\` at any time to change these.`);
