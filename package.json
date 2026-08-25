@@ -1,8 +1,8 @@
 {
   "name": "smooth-operator-mcp",
-  "version": "2.4.4",
+  "version": "2.4.5",
   "type": "module",
-  "packageManager": "npm@10.9.8",
+  "packageManager": "npm@12.0.2",
   "description": "A lightweight, production-grade MCP server for secure browser automation.",
   "license": "MIT",
   "repository": {
@@ -51,12 +51,12 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.0.0",
-    "@types/node": "^26.2.0",
-    "@typescript-eslint/eslint-plugin": "^8.67.0",
-    "@typescript-eslint/parser": "^8.67.0",
+    "@types/node": "^26.3.0",
+    "@typescript-eslint/eslint-plugin": "^8.68.0",
+    "@typescript-eslint/parser": "^8.68.0",
     "@vitest/coverage-v8": "^4.1.11",
     "esbuild": "^0.28.2",
-    "eslint": "^10.9.0",
+    "eslint": "^10.9.1",
     "knip": "^6.32.2",
     "tsx": "^4.23.12",
     "typescript": "^6.0.3",
@@ -64,6 +64,6 @@
   },
   "engines": {
     "node": ">=22.23.2",
-    "npm": ">=10.9.8"
+    "npm": ">=12.0.2"
   }
 }

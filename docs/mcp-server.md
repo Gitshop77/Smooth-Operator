@@ -33,7 +33,7 @@ are in `src/server/browser/service.ts`; policy and configuration are in
 
 ## Install and start
 
-Use Node.js 22.23.2 and npm 10.9.8 for the reproducible project baseline. A
+Use Node.js 22.23.2 and npm 12.0.2 for the reproducible project baseline. A
 published package includes the built executable:
 
 ```sh

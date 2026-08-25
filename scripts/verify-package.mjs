@@ -139,11 +139,11 @@ async function verifySourceMetadata(packageJson) {
   if (packageJson.bin?.["smooth-operator"] !== DIST_ENTRY) {
     throw new Error(`package.json must expose smooth-operator at ${DIST_ENTRY}.`);
   }
-  if (packageJson.packageManager !== "npm@10.9.8") {
-    throw new Error("package.json must declare npm@10.9.8 as its package manager baseline.");
+  if (packageJson.packageManager !== "npm@12.0.2") {
+    throw new Error("package.json must declare npm@12.0.2 as its package manager baseline.");
   }
-  if (packageJson.engines?.node !== ">=22.23.2" || packageJson.engines?.npm !== ">=10.9.8") {
-    throw new Error("package.json engines must declare the Node 22.23.2/npm 10.9.8 baseline.");
+  if (packageJson.engines?.node !== ">=22.23.2" || packageJson.engines?.npm !== ">=12.0.2") {
+    throw new Error("package.json engines must declare the Node 22.23.2/npm 12.0.2 baseline.");
   }
   const lockfile = JSON.parse(await readFile(join(root, "package-lock.json"), "utf8"));
   if (lockfile.name !== packageJson.name || lockfile.version !== packageJson.version || lockfile.packages?.[""].name !== packageJson.name || lockfile.packages?.[""].version !== packageJson.version) {
