@@ -1,6 +1,6 @@
 {
   "name": "smooth-operator-mcp",
-  "version": "2.4.6",
+  "version": "2.4.7",
   "type": "module",
   "packageManager": "npm@12.0.2",
   "description": "A lightweight, production-grade MCP server for secure browser automation.",
@@ -23,7 +23,7 @@
   "scripts": {
     "start": "tsx src/server/main.ts",
     "dev": "tsx watch src/server/main.ts",
-    "build": "esbuild src/server/main.ts --bundle --platform=node --format=esm --packages=external --banner:js=\"#!/usr/bin/env node\" --outfile=dist/smooth-operator.mjs --sourcemap --sources-content=false",
+    "build": "node scripts/build.mjs",
     "postbuild": "node scripts/set-executable.mjs dist/smooth-operator.mjs",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
@@ -46,7 +46,7 @@
   "dependencies": {
     "@modelcontextprotocol/node": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
-    "puppeteer-core": "^25.8.0",
+    "puppeteer-core": "^25.9.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

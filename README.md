@@ -54,3 +54,5 @@ Talk to your harness normally. It will call `browser_navigate` → `browser_snap
 - Works — stdio default, HTTP optional
 
 Details: [AGENTS.md](AGENTS.md) · [MCP guide](docs/mcp-server.md) · [harnesses](docs/harnesses.md)
+
+ChatGPT developer-mode connections use the private [Secure MCP Tunnel](docs/mcp-server.md#chatgpt-and-openai-connections) route or a separately secured HTTPS deployment.

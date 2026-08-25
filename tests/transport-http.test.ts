@@ -59,6 +59,18 @@ describe("HTTP transport", () => {
 
     expect((await request()).status).toBe(401);
     expect((await request({ Authorization: `Bearer ${token}`, Origin: "https://evil.example" })).status).toBe(403);
+    const preflight = await fetch(endpoint, {
+      method: "OPTIONS",
+      headers: {
+        Origin: "http://localhost",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "authorization, content-type, mcp-protocol-version",
+      },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("access-control-allow-origin")).toBe("http://localhost");
+    expect(preflight.headers.get("access-control-allow-methods")).toContain("POST");
+    expect(preflight.headers.get("access-control-allow-headers")).toContain("mcp-protocol-version");
     expect(await rawPost(port, { Host: "evil.example", Authorization: `Bearer ${token}` }, initializeBody)).toBe(403);
     const wrongPath = await fetch(`http://127.0.0.1:${port}/not-mcp`, {
       method: "POST",
@@ -85,6 +97,11 @@ describe("HTTP transport", () => {
     expect(valid.headers.get("content-type")).toContain("text/event-stream");
     expect(await valid.text()).toContain('"name":"SmoothOperator"');
 
+    const caseInsensitiveAuth = await request({ authorization: `bearer ${token}`, Origin: "http://localhost" });
+    expect(caseInsensitiveAuth.status).toBe(200);
+    expect(caseInsensitiveAuth.headers.get("access-control-allow-origin")).toBe("http://localhost");
+    await caseInsensitiveAuth.body?.cancel();
+
     const transport = new StreamableHTTPClientTransport(new URL(endpoint), {
       requestInit: { headers: { Authorization: `Bearer ${token}` } },
     });
@@ -100,6 +117,20 @@ describe("HTTP transport", () => {
       expect(JSON.stringify(health)).toContain('"status":"ok"');
     } finally {
       await client.close().catch(() => undefined);
+    }
+
+    const legacyTransport = new StreamableHTTPClientTransport(new URL(endpoint), {
+      requestInit: { headers: { Authorization: `Bearer ${token}` } },
+    });
+    const legacyClient = new Client({ name: "http-legacy-test", version: "1.0.0" }, { versionNegotiation: { mode: "legacy" } });
+    try {
+      await legacyClient.connect(legacyTransport);
+      expect(legacyClient.getProtocolEra()).toBe("legacy");
+      const legacyHealth = await legacyClient.callTool({ name: "server_health", arguments: {} });
+      expect(legacyHealth.isError).not.toBe(true);
+      expect(JSON.stringify(legacyHealth)).toContain('"status":"ok"');
+    } finally {
+      await legacyClient.close().catch(() => undefined);
     }
   }, 30_000);
 });

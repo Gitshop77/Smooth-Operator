@@ -132,14 +132,54 @@ SMOOTH_OPERATOR_HTTP_HOST=0.0.0.0 \
 SMOOTH_OPERATOR_ALLOW_REMOTE_HTTP=true \
 SMOOTH_OPERATOR_HTTP_TOKEN="$(openssl rand -hex 32)" \
 SMOOTH_OPERATOR_ALLOWED_HOSTS=example.internal \
-SMOOTH_OPERATOR_ALLOWED_ORIGINS=https://example.internal \
+SMOOTH_OPERATOR_ALLOWED_ORIGINS=example.internal \
 smooth-operator
 ```
 
 Remote mode is rejected unless the token is at least 32 characters. Do not
 use a token from a shell history, checked-in file, or shared log. A reverse
 proxy can add TLS and network access controls, but it does not replace the
-application token, Host/Origin allowlists, or request-size limit.
+application token, Host/Origin allowlists, or request-size limit. Allowed host
+and origin values are hostnames without a scheme; browser preflight requests
+are answered only after the same Host and Origin checks.
+
+### ChatGPT and OpenAI connections
+
+For private developer-mode use, the safest OpenAI-compatible route is Secure
+MCP Tunnel. It keeps this server on the local machine and forwards requests
+over an outbound connection; it can launch this server over stdio, so no public
+HTTP listener or public browser profile is required.
+
+Create a tunnel in OpenAI Platform, install the separately distributed
+`tunnel-client`, and run a profile like this (replace the placeholders with
+your tunnel identity and local executable):
+
+```sh
+export CONTROL_PLANE_API_KEY="sk-..."
+
+tunnel-client init \
+  --sample sample_mcp_stdio_local \
+  --profile smooth-operator \
+  --tunnel-id tunnel_... \
+  --mcp-command "smooth-operator --transport stdio"
+
+tunnel-client doctor --profile smooth-operator --explain
+tunnel-client run --profile smooth-operator
+```
+
+Then enable Developer mode in ChatGPT, create a developer-mode app, choose
+`Tunnel`, and select the associated tunnel. Tunnel and ChatGPT workspace
+permissions are separate; the tunnel must be associated with the target
+workspace. This path is for private testing and use, not public plugin
+submission.
+
+For public distribution, deploy a stable HTTPS `/mcp` endpoint and put an
+OAuth 2.1-compatible identity provider in front of authenticated tools. The
+local bearer token is intended for this server's controlled HTTP mode; it is
+not a substitute for a public OAuth authorization server. See the official
+[OpenAI MCP quickstart](https://developers.openai.com/plugins/build/app-quickstart),
+[authentication guide](https://developers.openai.com/plugins/build/auth), and
+[Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels).
 
 ## Browser lifecycle
 
@@ -230,9 +270,12 @@ browser mode.
 
 ## Configuration and precedence
 
-Configuration can come from a JSON file selected by `--config` or
-`SMOOTH_OPERATOR_CONFIG`, environment variables, and a small set of command-line
-flags. The effective precedence is:
+Configuration can come from the installer-created
+`~/.smooth-operator/config.json`, an explicitly selected JSON file via `--config`
+or `SMOOTH_OPERATOR_CONFIG`, environment variables, and a small set of
+command-line flags. When no explicit config path is supplied, the installer
+file is loaded automatically so its browser, security, and data-directory
+choices apply consistently to every harness. The effective precedence is:
 
 1. command-line values (`--config`, `--transport`, `--host`, `--port`);
 2. environment variables;
@@ -240,9 +283,11 @@ flags. The effective precedence is:
 4. documented defaults.
 
 The file is an object with nested `http`, `browser`, and `security` sections.
-Unknown keys fail validation. Keep the file owner-readable only (`chmod 600`);
-the loader rejects group/world-readable configuration files and rejects
-symlinked data directories.
+Explicit `--config`/`SMOOTH_OPERATOR_CONFIG` files reject unknown root keys;
+the automatically discovered installer file ignores unrelated root sections so
+it can coexist with harness settings. Keep the file owner-readable only
+(`chmod 600`); the loader rejects group/world-readable configuration files and
+rejects symlinked data directories.
 
 Example:
 
@@ -269,6 +314,7 @@ variables include:
 | Setting | Default | Notes |
 | --- | --- | --- |
 | `SMOOTH_OPERATOR_TRANSPORT` | `stdio` | `stdio` or `http` |
+| `SMOOTH_OPERATOR_CONFIG` | auto-discovered | Explicit JSON config path; overrides the installer default |
 | `SMOOTH_OPERATOR_DATA_DIR` | `~/.smooth-operator` | Private data, file, and download roots |
 | `SMOOTH_OPERATOR_BROWSER_MODE` | `managed` | `managed`, `disabled`, `connect`, or `launch` |
 | `SMOOTH_OPERATOR_BROWSER_URL` | `http://127.0.0.1:9222` | DevTools HTTP endpoint |

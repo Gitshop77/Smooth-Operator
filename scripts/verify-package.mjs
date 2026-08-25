@@ -100,6 +100,10 @@ async function main() {
           cwd: installDirectory,
           env: {
             ...process.env,
+            // Keep package verification independent of any developer or CI
+            // user's installer-created default config.
+            HOME: installDirectory,
+            USERPROFILE: installDirectory,
             SMOOTH_OPERATOR_BROWSER_MODE: "disabled",
             SMOOTH_OPERATOR_DATA_DIR: join(installDirectory, "data"),
             SMOOTH_OPERATOR_LOG_LEVEL: "error",

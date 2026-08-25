@@ -201,9 +201,20 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
     if (!validateHost(request, response) || !validateOrigin(request, response)) {
       return;
     }
+    setCorsHeaders(request, response);
     if (!requestPathMatches(request, config.http.path)) {
       response.writeHead(404, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: "not_found" }));
+      return;
+    }
+    if (request.method === "OPTIONS") {
+      response.writeHead(204, {
+        "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
+        "access-control-allow-headers": request.headers["access-control-request-headers"] ?? "authorization, content-type, accept, mcp-protocol-version, mcp-session-id, last-event-id",
+        "access-control-expose-headers": "Mcp-Session-Id, WWW-Authenticate",
+        "access-control-max-age": "600",
+      });
+      response.end();
       return;
     }
     if (!authorized(request, config.http.token)) {
@@ -321,6 +332,18 @@ function requestPathMatches(request: IncomingMessage, expectedPath: string): boo
   } catch {
     return false;
   }
+}
+
+function setCorsHeaders(request: IncomingMessage, response: import("node:http").ServerResponse): void {
+  const origin = request.headers.origin;
+  if (!origin || Array.isArray(origin)) {
+    return;
+  }
+  // Origin has already passed the configured host allowlist. Echoing the
+  // validated value keeps browser-based MCP hosts compatible without ever
+  // widening the allowlist to `*`.
+  response.setHeader("access-control-allow-origin", origin);
+  response.setHeader("vary", "Origin");
 }
 
 async function dispatchHttpRequest(
@@ -446,10 +469,11 @@ function authorized(request: IncomingMessage, token: string | undefined): boolea
     return true;
   }
   const header = request.headers.authorization;
-  if (!header?.startsWith("Bearer ")) {
+  const match = header?.match(/^Bearer[ \t]+(.+)$/i);
+  if (!match) {
     return false;
   }
-  const presented = Buffer.from(header.slice("Bearer ".length));
+  const presented = Buffer.from(match[1]);
   const expected = createHash("sha256").update(token).digest();
   const presentedDigest = createHash("sha256").update(presented).digest();
   return presentedDigest.length === expected.length && timingSafeEqual(presentedDigest, expected);

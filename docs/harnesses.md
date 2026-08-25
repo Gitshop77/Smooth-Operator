@@ -12,6 +12,20 @@ SmoothOperator speaks MCP over stdio. The `smooth-operator install <target>`
 command registers that stdio server with a supported client. It uses
 structured argument arrays and never invokes a shell.
 
+The server also supports Streamable HTTP at `/mcp` for harnesses that cannot
+launch local stdio processes. Its HTTP adapter accepts current MCP sessions and
+the SDK's legacy 2025-compatible handshake, while retaining host, origin,
+authentication, and request-size checks. For a local harness that needs an
+explicit path, use a structured command such as:
+
+```text
+smooth-operator --config /absolute/path/to/config.json
+```
+
+The installer-created `~/.smooth-operator/config.json` is discovered
+automatically, so an explicit `--config` argument is only needed for a separate
+profile or an unusual home/config location.
+
 Build or install the package first:
 
 ```sh

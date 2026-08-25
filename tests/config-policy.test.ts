@@ -14,9 +14,12 @@ import { ServerRuntime } from "@/server/runtime";
 
 import { testConfig } from "./helpers";
 
+const TEST_HOME = join(tmpdir(), "smooth-operator-config-test-home");
+const loadTestConfig = (args: string[] = [], environment: NodeJS.ProcessEnv = {}) => loadServerConfig(args, environment, TEST_HOME);
+
 describe("configuration", () => {
   it("loads a server-only configuration without model or provider settings", () => {
-    const config = loadServerConfig([], {
+    const config = loadTestConfig([], {
       SMOOTH_OPERATOR_BROWSER_MODE: "disabled",
       SMOOTH_OPERATOR_ALLOWED_DOMAINS: "example.com,*.example.org",
       SMOOTH_OPERATOR_DATA_DIR: "/tmp/smooth-operator-config-test",
@@ -27,11 +30,11 @@ describe("configuration", () => {
   });
 
   it("rejects the removed per-server security mode setting", () => {
-    expect(() => loadServerConfig([], { SMOOTH_OPERATOR_DEFAULT_MODE: "restricted" })).toThrowError(/capability profile/);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_DEFAULT_MODE: "restricted" })).toThrowError(/capability profile/);
   });
 
   it("loads one native browser profile and runtime bounds", () => {
-    const config = loadServerConfig([], {
+    const config = loadTestConfig([], {
       SMOOTH_OPERATOR_BROWSER_MODE: "launch",
       SMOOTH_OPERATOR_BROWSER_TIMEOUT_MS: "20000",
       SMOOTH_OPERATOR_BROWSER_CONNECT_TIMEOUT_MS: "45000",
@@ -49,8 +52,8 @@ describe("configuration", () => {
   });
 
   it("uses managed, headed browser control by default while respecting explicit settings", () => {
-    const defaults = loadServerConfig([], {});
-    const explicit = loadServerConfig([], {
+    const defaults = loadTestConfig([], {});
+    const explicit = loadTestConfig([], {
       SMOOTH_OPERATOR_BROWSER_MODE: "connect",
       SMOOTH_OPERATOR_BROWSER_HEADLESS: "true",
     });
@@ -59,14 +62,37 @@ describe("configuration", () => {
     expect(explicit.browser).toMatchObject({ mode: "connect", headless: true });
   });
 
+  it("loads the wizard's default config and ignores unrelated root sections", async () => {
+    const home = await mkdtemp(join(tmpdir(), "smooth-operator-default-config-"));
+    const configDirectory = join(home, ".smooth-operator");
+    const configPath = join(configDirectory, "config.json");
+    try {
+      await mkdir(configDirectory, { recursive: true });
+      await writeFile(configPath, JSON.stringify({
+        browser: { mode: "disabled", headless: true },
+        security: { allowedDomains: ["example.com"], allowEval: false },
+        dataDir: join(home, "runtime"),
+        harness: { name: "unrelated" },
+      }));
+      await chmod(configPath, 0o600);
+
+      const config = loadServerConfig([], {}, home);
+      expect(config.browser).toMatchObject({ mode: "disabled", headless: true });
+      expect(config.security.allowedDomains).toEqual(["example.com"]);
+      expect(config.dataDir).toBe(join(home, "runtime"));
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   it("accepts managed mode without an executable until browser use", () => {
-    expect(loadServerConfig([], { SMOOTH_OPERATOR_BROWSER_MODE: "managed" }).browser.mode).toBe("managed");
-    expect(loadServerConfig([], { SMOOTH_OPERATOR_BROWSER_AUTO_LAUNCH: "true" }).browser.mode).toBe("managed");
+    expect(loadTestConfig([], { SMOOTH_OPERATOR_BROWSER_MODE: "managed" }).browser.mode).toBe("managed");
+    expect(loadTestConfig([], { SMOOTH_OPERATOR_BROWSER_AUTO_LAUNCH: "true" }).browser.mode).toBe("managed");
   });
 
   it("requires an executable for explicit launch and connect auto-launch", () => {
-    expect(() => loadServerConfig([], { SMOOTH_OPERATOR_BROWSER_MODE: "launch" })).toThrowError(/executable/i);
-    expect(() => loadServerConfig([], {
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_BROWSER_MODE: "launch" })).toThrowError(/executable/i);
+    expect(() => loadTestConfig([], {
       SMOOTH_OPERATOR_BROWSER_MODE: "connect",
       SMOOTH_OPERATOR_BROWSER_AUTO_LAUNCH: "true",
     })).toThrowError(/executable/i);
@@ -93,14 +119,14 @@ describe("configuration", () => {
   });
 
   it("rejects unsafe browser deadline values", () => {
-    expect(() => loadServerConfig([], { SMOOTH_OPERATOR_BROWSER_CONNECT_TIMEOUT_MS: "999" })).toThrowError(/failed validation/i);
-    expect(() => loadServerConfig([], { SMOOTH_OPERATOR_BROWSER_CDP_TIMEOUT_MS: "121000" })).toThrowError(/failed validation/i);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_BROWSER_CONNECT_TIMEOUT_MS: "999" })).toThrowError(/failed validation/i);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_BROWSER_CDP_TIMEOUT_MS: "121000" })).toThrowError(/failed validation/i);
   });
 
   it("rejects removed browser profile environment switches", () => {
-    expect(() => loadServerConfig([], { SMOOTH_OPERATOR_BROWSER_MODE: "disabled", SMOOTH_OPERATOR_BROWSER_PROFILE: "stealth" })).toThrowError(/profile switches were removed/);
-    expect(() => loadServerConfig([], { SMOOTH_OPERATOR_BROWSER_MODE: "disabled", SMOOTH_OPERATOR_BROWSER_STEALTH: "true" })).toThrowError(/profile switches were removed/);
-    expect(() => loadServerConfig([], { SMOOTH_OPERATOR_BROWSER_MODE: "disabled", SMOOTH_OPERATOR_BROWSER_USER_AGENT: "fake" })).toThrowError(/user-agent overrides were removed/);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_BROWSER_MODE: "disabled", SMOOTH_OPERATOR_BROWSER_PROFILE: "stealth" })).toThrowError(/profile switches were removed/);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_BROWSER_MODE: "disabled", SMOOTH_OPERATOR_BROWSER_STEALTH: "true" })).toThrowError(/profile switches were removed/);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_BROWSER_MODE: "disabled", SMOOTH_OPERATOR_BROWSER_USER_AGENT: "fake" })).toThrowError(/user-agent overrides were removed/);
   });
 
   it("rejects removed browser profile settings in JSON configuration", async () => {
@@ -108,12 +134,12 @@ describe("configuration", () => {
     const path = join(directory, "config.json");
     await writeFile(path, JSON.stringify({ browser: { mode: "disabled", profile: "stealth" } }));
     await chmod(path, 0o600);
-    expect(() => loadServerConfig(["--config", path], {})).toThrowError(AppError);
+    expect(() => loadTestConfig(["--config", path], {})).toThrowError(AppError);
     await rm(directory, { recursive: true, force: true });
   });
 
   it("requires a strong token for remote HTTP", () => {
-    expect(() => loadServerConfig([], {
+    expect(() => loadTestConfig([], {
       SMOOTH_OPERATOR_HTTP_HOST: "0.0.0.0",
       SMOOTH_OPERATOR_ALLOW_REMOTE_HTTP: "true",
       SMOOTH_OPERATOR_HTTP_TOKEN: "too-short",
@@ -123,10 +149,10 @@ describe("configuration", () => {
   it("rejects malformed command-line options and unsafe HTTP settings", () => {
     expect(() => loadServerConfig(["--port"], {})).toThrowError(/requires a value/);
     expect(() => loadServerConfig(["--unknown", "value"], {})).toThrowError(/Unknown command-line option/);
-    expect(() => loadServerConfig([], {
+    expect(() => loadTestConfig([], {
       SMOOTH_OPERATOR_HTTP_PATH: "/mcp?debug=true",
     })).toThrowError(/single absolute path/);
-    expect(() => loadServerConfig([], {
+    expect(() => loadTestConfig([], {
       SMOOTH_OPERATOR_ALLOW_REMOTE_HTTP: "true",
       SMOOTH_OPERATOR_HTTP_TOKEN: "token-with whitespace-012345678901234567890",
     })).toThrowError(/printable ASCII/);
@@ -140,7 +166,7 @@ describe("configuration", () => {
     const path = join(directory, "config.json");
     await writeFile(path, JSON.stringify({ browser: { mode: "disabled" } }));
     await chmod(path, 0o644);
-    expect(() => loadServerConfig(["--config", path], {})).toThrowError(/chmod 600/);
+    expect(() => loadTestConfig(["--config", path], {})).toThrowError(/chmod 600/);
     await rm(directory, { recursive: true, force: true });
   });
 

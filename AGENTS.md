@@ -63,6 +63,7 @@ Env or `--config` JSON (`chmod 600`, no symlinks).
 | Variable | Default | Purpose |
 |---|---|---|
 | SMOOTH_OPERATOR_TRANSPORT | stdio | stdio/http |
+| SMOOTH_OPERATOR_CONFIG | auto-discovered | explicit JSON config path; overrides the installer default |
 | SMOOTH_OPERATOR_DATA_DIR | ~/.smooth-operator | data root |
 | SMOOTH_OPERATOR_BROWSER_MODE | managed | managed/disabled/connect/launch |
 | SMOOTH_OPERATOR_BROWSER_URL | http://127.0.0.1:9222 | DevTools endpoint |

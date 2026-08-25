@@ -158,7 +158,16 @@ function expandOptionalPath(value: string | undefined): string | undefined {
   return value === undefined ? undefined : expandPath(value);
 }
 
-function readConfigFile(configPath: string): RawConfig {
+function isErrorCode(error: unknown, code: string): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === code);
+}
+
+interface ReadConfigOptions {
+  allowMissing?: boolean;
+  allowUnknownRootKeys?: boolean;
+}
+
+function readConfigFile(configPath: string, options: ReadConfigOptions = {}): RawConfig {
   let descriptor: number | undefined;
   try {
     // Open and inspect the same descriptor that is subsequently read.  On
@@ -192,7 +201,12 @@ function readConfigFile(configPath: string): RawConfig {
       }
     }
     const parsed = JSON.parse(readFileSync(descriptor, "utf8")) as unknown;
-    const result = RawConfigSchema.safeParse(parsed);
+    // The wizard intentionally preserves unrelated root sections so it can
+    // coexist with harness settings. Explicit --config files remain strict;
+    // the auto-discovered wizard file only consumes SmoothOperator's known
+    // sections and ignores unrelated root settings.
+    const schema = options.allowUnknownRootKeys ? RawConfigSchema.strip() : RawConfigSchema;
+    const result = schema.safeParse(parsed);
     if (!result.success) {
       throw new AppError("CONFIG_INVALID", "Configuration file failed schema validation.", {
         details: { issues: result.error.issues.map((issue) => issue.message) },
@@ -202,6 +216,9 @@ function readConfigFile(configPath: string): RawConfig {
   } catch (error) {
     if (error instanceof AppError) {
       throw error;
+    }
+    if (options.allowMissing && isErrorCode(error, "ENOENT")) {
+      return {};
     }
     if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ELOOP") {
       throw new AppError("CONFIG_INSECURE", "Configuration files must not be symbolic links.", { cause: error });
@@ -260,7 +277,7 @@ function validateConfig(config: ServerConfig): ServerConfig {
   return config;
 }
 
-export function loadServerConfig(args: string[] = [], environment: NodeJS.ProcessEnv = env): ServerConfig {
+export function loadServerConfig(args: string[] = [], environment: NodeJS.ProcessEnv = env, homeDirectory = homedir()): ServerConfig {
   if (environment.SMOOTH_OPERATOR_BROWSER_PROFILE !== undefined || environment.SMOOTH_OPERATOR_BROWSER_STEALTH !== undefined) {
     throw new AppError("CONFIG_INVALID", "Browser profile switches were removed. The native server uses one fixed native profile.");
   }
@@ -274,12 +291,15 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
   const argValue = (name: string): string | undefined => argumentValues.get(name);
 
   const configPath = argValue("--config") ?? environment.SMOOTH_OPERATOR_CONFIG;
-  const fileConfig = configPath ? readConfigFile(expandPath(configPath)) : {};
+  const defaultConfigPath = join(homeDirectory, ".smooth-operator", "config.json");
+  const fileConfig = configPath
+    ? readConfigFile(expandPath(configPath))
+    : readConfigFile(defaultConfigPath, { allowMissing: true, allowUnknownRootKeys: true });
   const nestedHttp = fileConfig.http ?? {};
   const nestedBrowser = fileConfig.browser ?? {};
   const nestedSecurity = fileConfig.security ?? {};
 
-  const dataDir = expandPath(environment.SMOOTH_OPERATOR_DATA_DIR ?? fileConfig.dataDir ?? join(homedir(), ".smooth-operator"));
+  const dataDir = expandPath(environment.SMOOTH_OPERATOR_DATA_DIR ?? fileConfig.dataDir ?? join(homeDirectory, ".smooth-operator"));
   const defaultBrowserDataDir = join(dataDir, "browser");
   const configuredRoots = parseList(environment.SMOOTH_OPERATOR_ALLOWED_FILE_ROOTS, nestedSecurity.allowedFileRoots ?? []);
   // Default to private data directory; explicit allowlist required for other roots.

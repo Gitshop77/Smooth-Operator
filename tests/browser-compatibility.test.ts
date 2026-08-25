@@ -12,7 +12,7 @@ describe("native browser compatibility profile", () => {
       SMOOTH_OPERATOR_DATA_DIR: dataDir,
       SMOOTH_OPERATOR_BROWSER_MODE: "launch",
       SMOOTH_OPERATOR_BROWSER_EXECUTABLE: "/usr/bin/chromium",
-    });
+    }, join(tmpdir(), "smooth-operator-compatibility-home"));
 
     expect(config.browser.userDataDir).toBe(join(dataDir, "browser"));
   });
