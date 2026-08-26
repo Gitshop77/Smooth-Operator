@@ -488,7 +488,6 @@ function actionAnnotations(action: BrowserAction["action"]): ToolAnnotations {
     case "list_downloads":
     case "dropdown_options":
     case "page_next":
-    case "find_text":
     case "search_page":
     case "find_elements":
     case "list_interactive":

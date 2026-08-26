@@ -26,7 +26,6 @@ const EXPECTED_READ_ONLY_TOOLS = new Set([
   "browser_dropdown_options",
   "browser_page_next",
   "browser_search_page",
-  "browser_find_text",
   "browser_find_elements",
   "browser_interactive",
   "browser_frames",
@@ -138,8 +137,8 @@ describe("native MCP registry", () => {
     expect(toolByName.get("browser_click")?.description).toContain("ref");
     expect(toolByName.get("browser_extract")?.description).toContain("truncated");
     expect(toolByName.get("browser_page_next")?.description).toContain("hasMore");
-    expect(toolByName.get("browser_find_text")?.annotations?.readOnlyHint).toBe(true);
-    expect(toolByName.get("browser_find_text")?.annotations?.destructiveHint).toBeUndefined();
+    expect(toolByName.get("browser_find_text")?.annotations?.readOnlyHint).toBe(false);
+    expect(toolByName.get("browser_find_text")?.annotations?.destructiveHint).toBe(false);
     expect(toolByName.get("browser_find_text")?.annotations?.openWorldHint).toBe(true);
     expect(toolByName.get("browser_type")?.annotations?.readOnlyHint).not.toBe(true);
     expect(toolByName.get("browser_type")?.annotations?.openWorldHint).toBe(true);
